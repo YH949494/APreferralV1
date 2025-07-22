@@ -1,94 +1,91 @@
-from telegram import Update, ChatInviteLink
-from telegram.ext import (
-    ApplicationBuilder, CommandHandler, ContextTypes, ChatMemberHandler
-)
-import os
+from flask import Flask
+from threading import Thread
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 from pymongo import MongoClient
-from datetime import datetime, timedelta
+import os
+import datetime
 
-# --- Configuration ---
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-MONGO_URI = os.environ.get("MONGO_URI")  # e.g. mongodb+srv://...
-GROUP_ID = -1002723991859  # your target Telegram group ID
+MONGO_URL = os.environ.get("MONGO_URL")
+GROUP_ID = -1002723991859  # Replace with your actual group ID
 
-# --- MongoDB Setup ---
-mongo = MongoClient(MONGO_URI)
-db = mongo["telegram_referrals"]
-referrals = db["referral_links"]
+client = MongoClient(MONGO_URL)
+db = client["referral_bot"]
+users_collection = db["users"]
 
-# --- Command to get your unique invite link ---
-async def get_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+app = Flask(__name__)
+
+@app.route("/")
+def home():
+    return "Bot is alive!"
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+    chat_id = update.effective_chat.id
 
-    # Check if user already has a valid link
-    existing = referrals.find_one({"user_id": user.id})
-    if existing:
-        await update.message.reply_text(
-            f"🔗 Your invite link:\n{existing['invite_link']}\n\n"
-            f"🧲 Referral count: {existing.get('referral_count', 0)}"
-        )
+    # Allow both group and private chats
+    if user is None:
         return
 
-    try:
-        # Create new invite link (24 hours)
-        invite: ChatInviteLink = await context.bot.create_chat_invite_link(
-            chat_id=GROUP_ID,
-            name=f"Invite-{user.id}",
-            expire_date=datetime.utcnow() + timedelta(hours=24),
-            creates_join_request=False,
-            member_limit=0
-        )
+    user_data = users_collection.find_one({"user_id": user.id})
 
-        # Save to DB
-        referrals.insert_one({
+    if not user_data:
+        users_collection.insert_one({
             "user_id": user.id,
             "username": user.username,
-            "invite_link": invite.invite_link,
-            "referral_count": 0,
-            "referred_users": [],
-            "created_at": datetime.utcnow()
+            "referral_count": 0
         })
 
-        await update.message.reply_text(
-            f"✅ Here is your unique invite link (valid for 24h):\n{invite.invite_link}"
+    try:
+        invite_link = await context.bot.create_chat_invite_link(
+            chat_id=GROUP_ID,
+            member_limit=0,
+            creates_join_request=False,
+            expire_date=datetime.datetime.utcnow() + datetime.timedelta(hours=24),
+            name=f"ref-{user.id}"
         )
-
     except Exception as e:
-        print(f"Error generating invite: {e}")
-        await update.message.reply_text("❌ Failed to generate invite link. Please try again later.")
+        await update.message.reply_text("❌ Failed to generate invite link. Make sure the bot is admin.")
+        return
 
-# --- Track who joined using which invite ---
-async def track_join(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_member = update.chat_member
-    user = chat_member.new_chat_member.user
+    keyboard = [
+        [InlineKeyboardButton("👉 Join Group", url=invite_link.invite_link)]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
 
-    # Only process joins
-    if chat_member.old_chat_member.status in ("left", "kicked") and chat_member.new_chat_member.status == "member":
-        invite = chat_member.invite_link
-        if not invite:
-            return
+    await update.message.reply_text(
+        f"👋 Welcome! Here is your referral link:\n\n{invite_link.invite_link}\n\nShare this with your friends. When they join, you’ll earn referral rewards!",
+        reply_markup=reply_markup
+    )
 
-        # Match invite in MongoDB
-        record = referrals.find_one({"invite_link": invite.invite_link})
-        if record:
-            referrals.update_one(
-                {"_id": record["_id"]},
-                {
-                    "$inc": {"referral_count": 1},
-                    "$push": {"referred_users": {
-                        "user_id": user.id,
-                        "username": user.username
-                    }}
-                }
-            )
-            print(f"✅ {user.username} joined via {record['username']}'s link")
+async def join_request_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    invite_link = update.chat_join_request.invite_link
 
-# --- Main App ---
-if __name__ == "__main__":
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    if invite_link and invite_link.name and invite_link.name.startswith("ref-"):
+        referrer_id = int(invite_link.name.split("-")[1])
+        users_collection.update_one(
+            {"user_id": referrer_id},
+            {"$inc": {"referral_count": 1}}
+        )
+        await context.bot.approve_chat_join_request(update.chat_join_request.chat.id, update.chat_join_request.from_user.id)
 
-    app.add_handler(CommandHandler("start", get_link))
-    app.add_handler(ChatMemberHandler(track_join, chat_member_types=["member"]))
 
-    print("Bot is running...")
-    app.run_polling()
+if __name__ == '__main__':
+    app_thread = Thread(target=lambda: app.run(host="0.0.0.0", port=8080))
+    app_thread.start()
+
+    app_bot = ApplicationBuilder().token(BOT_TOKEN).build()
+
+    app_bot.add_handler(CommandHandler("start", start))
+    app_bot.add_handler(CommandHandler("referral", start))
+    app_bot.add_handler(CommandHandler("link", start))
+    app_bot.add_handler(CommandHandler("getlink", start))
+    app_bot.add_handler(CommandHandler("invite", start))
+    app_bot.add_handler(CommandHandler("ref", start))
+
+    app_bot.add_handler(
+        telegram.ext.ChatJoinRequestHandler(join_request_handler)
+    )
+
+    app_bot.run_polling()
