@@ -10,9 +10,6 @@ primary_region = "sin"  # or use "hkg", "nrt", etc. (near Malaysia)
 [experimental]
   auto_rollback = true
 
-[build]
-  image = "python:3.10-slim"
-
 [[services]]
   protocol = "tcp"
   internal_port = 8080
