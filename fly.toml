@@ -27,4 +27,4 @@ primary_region = "sin"  # or use "hkg", "nrt", etc. (near Malaysia)
     handlers = ["tls", "http"]
     
 [processes]
-app = "python main.py"
+app = "python main.py" 
