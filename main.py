@@ -68,7 +68,7 @@ async def send_invite_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await message.reply_text(
         f"👋 Welcome! Here is your personal invite link (valid 24h):\n\n{invite_link.invite_link}\n\n"
-        "Share this with friends. If they join, you’ll earn referral rewards!",
+        "Share this with friends. If they join, you’ll earn bonus XP!",
         reply_markup=reply_markup
     )
 
