@@ -1,19 +1,18 @@
-app = "apreferralv1"  
-primary_region = "sin"  # or use "hkg", "nrt", etc. (near Malaysia)
+app = "apreferralv1"
+primary_region = "sin"
 
 [env]
   PORT = "8080"
 
-[deploy]
-  release_command = ""
+[build]
+  dockerfile = "Dockerfile"
 
 [experimental]
   auto_rollback = true
 
 [[services]]
-  protocol = "tcp"
   internal_port = 8080
-  processes = ["app"]
+  protocol = "tcp"
 
   [[services.ports]]
     port = 80
@@ -22,6 +21,3 @@ primary_region = "sin"  # or use "hkg", "nrt", etc. (near Malaysia)
   [[services.ports]]
     port = 443
     handlers = ["tls", "http"]
-    
-[processes]
-app = "python main.py"
