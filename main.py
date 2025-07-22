@@ -3,20 +3,18 @@ from flask import Flask
 from threading import Thread
 from telegram import Update, ChatMemberUpdated
 from telegram.ext import (
-    ApplicationBuilder, MessageHandler, CommandHandler, ChatMemberHandler,
+    ApplicationBuilder, CommandHandler, ChatMemberHandler,
     ContextTypes, filters
 )
 from pymongo import MongoClient
 
+# Environment variables
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 MONGO_URL = os.environ["MONGO_URL"]
 PORT = int(os.environ.get("PORT", 8080))
 
+# Flask app for UptimeRobot / Fly.io health check
 app = Flask(__name__)
-
-client = MongoClient(MONGO_URL)
-db = client["referral_bot"]
-users = db["users"]
 
 @app.route("/")
 def home():
@@ -25,11 +23,16 @@ def home():
 def run_flask():
     app.run(host="0.0.0.0", port=PORT)
 
+# MongoDB setup
+client = MongoClient(MONGO_URL)
+db = client["referral_bot"]
+users = db["users"]
+
+# Command: /start
 async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     args = context.args
 
-    # Save user if not exists
     if not users.find_one({"user_id": user.id}):
         referred_by = int(args[0]) if args else None
         users.insert_one({
@@ -38,7 +41,7 @@ async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "referrals": 0,
             "referred_by": referred_by
         })
-        # Increment referral count if valid
+
         if referred_by and referred_by != user.id:
             users.update_one(
                 {"user_id": referred_by},
@@ -48,33 +51,33 @@ async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     link = f"https://t.me/{context.bot.username}?start={user.id}"
     await update.message.reply_text(f"Your referral link:\n{link}")
 
+# Command: /stats
 async def handle_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     record = users.find_one({"user_id": user.id})
     count = record.get("referrals", 0) if record else 0
     await update.message.reply_text(f"You have referred {count} users.")
 
+# Optional: monitor join/leave activity
 async def handle_member_update(update: ChatMemberUpdated, context: ContextTypes.DEFAULT_TYPE):
     old_status = update.chat_member.old_chat_member.status
     new_status = update.chat_member.new_chat_member.status
     user = update.chat_member.from_user
 
-    # Kick if they rejoin and leave quickly (optional logic)
     if old_status in ("left", "kicked") and new_status == "member":
         print(f"{user.username or user.id} joined.")
-
     elif old_status == "member" and new_status in ("left", "kicked"):
         print(f"{user.username or user.id} left.")
 
+# Telegram bot setup
 def run_bot():
     app_bot = ApplicationBuilder().token(BOT_TOKEN).build()
-
     app_bot.add_handler(CommandHandler("start", handle_start))
     app_bot.add_handler(CommandHandler("stats", handle_stats))
     app_bot.add_handler(ChatMemberHandler(handle_member_update, ChatMemberHandler.CHAT_MEMBER))
-
     app_bot.run_polling()
 
+# Run Flask and bot together
 if __name__ == "__main__":
     Thread(target=run_flask).start()
-    run_bot()  
+    run_bot()
