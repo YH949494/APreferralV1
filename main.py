@@ -1,76 +1,80 @@
 import os
-import logging
-from pymongo import MongoClient
-from telegram import Update, ChatMember
+from flask import Flask
+from threading import Thread
+from telegram import Update, ChatMemberUpdated
 from telegram.ext import (
-    ApplicationBuilder, CommandHandler, MessageHandler,
-    filters, ContextTypes, ChatMemberHandler
+    ApplicationBuilder, MessageHandler, CommandHandler, ChatMemberHandler,
+    ContextTypes, filters
 )
+from pymongo import MongoClient
 
-# Enable logs
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+BOT_TOKEN = os.environ["BOT_TOKEN"]
+MONGO_URL = os.environ["MONGO_URL"]
+PORT = int(os.environ.get("PORT", 8080))
 
-# MongoDB Setup
-MONGO_URL = os.environ.get("MONGO_URL")
-mongo_client = MongoClient(MONGO_URL)
-db = mongo_client["referral_bot"]
+app = Flask(__name__)
+
+client = MongoClient(MONGO_URL)
+db = client["referral_bot"]
 users = db["users"]
 
-# Your bot token
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
+@app.route("/")
+def home():
+    return "Bot is alive!"
 
-# Get personal referral link
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def run_flask():
+    app.run(host="0.0.0.0", port=PORT)
+
+async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     args = context.args
-    user_id = user.id
 
-    # Check if already in DB
-    existing_user = users.find_one({"user_id": user_id})
-    if not existing_user:
-        referrer = int(args[0]) if args else None
+    # Save user if not exists
+    if not users.find_one({"user_id": user.id}):
+        referred_by = int(args[0]) if args else None
         users.insert_one({
-            "user_id": user_id,
+            "user_id": user.id,
             "username": user.username,
-            "referrer": referrer,
-            "joined": True,
-            "referrals": 0
+            "referrals": 0,
+            "referred_by": referred_by
         })
+        # Increment referral count if valid
+        if referred_by and referred_by != user.id:
+            users.update_one(
+                {"user_id": referred_by},
+                {"$inc": {"referrals": 1}}
+            )
 
-        if referrer:
-            users.update_one({"user_id": referrer}, {"$inc": {"referrals": 1}})
+    link = f"https://t.me/{context.bot.username}?start={user.id}"
+    await update.message.reply_text(f"Your referral link:\n{link}")
 
-    link = f"https://t.me/{context.bot.username}?start={user_id}"
-    await update.message.reply_text(
-        f"Welcome {user.first_name}!\n"
-        f"Here’s your referral link:\n{link}"
-    )
+async def handle_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    record = users.find_one({"user_id": user.id})
+    count = record.get("referrals", 0) if record else 0
+    await update.message.reply_text(f"You have referred {count} users.")
 
-# Track join and leave
-async def track_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    result: ChatMember = update.chat_member
-    status = result.new_chat_member.status
-    user_id = result.from_user.id
+async def handle_member_update(update: ChatMemberUpdated, context: ContextTypes.DEFAULT_TYPE):
+    old_status = update.chat_member.old_chat_member.status
+    new_status = update.chat_member.new_chat_member.status
+    user = update.chat_member.from_user
 
-    if status == "left":
-        users.update_one({"user_id": user_id}, {"$set": {"joined": False}})
-    elif status in ["member", "administrator"]:
-        users.update_one({"user_id": user_id}, {"$set": {"joined": True}})
+    # Kick if they rejoin and leave quickly (optional logic)
+    if old_status in ("left", "kicked") and new_status == "member":
+        print(f"{user.username or user.id} joined.")
 
-# Basic handler to avoid bot deletion
-async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    pass  # can be extended later
+    elif old_status == "member" and new_status in ("left", "kicked"):
+        print(f"{user.username or user.id} left.")
 
-# Run bot
-def main():
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+def run_bot():
+    app_bot = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(ChatMemberHandler(track_member, ChatMemberHandler.CHAT_MEMBER))
-    app.add_handler(MessageHandler(filters.ALL, handle_messages))
+    app_bot.add_handler(CommandHandler("start", handle_start))
+    app_bot.add_handler(CommandHandler("stats", handle_stats))
+    app_bot.add_handler(ChatMemberHandler(handle_member_update, ChatMemberHandler.CHAT_MEMBER))
 
-    app.run_polling()
+    app_bot.run_polling()
 
 if __name__ == "__main__":
-    main() 
+    Thread(target=run_flask).start()
+    run_bot()
