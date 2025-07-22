@@ -1,18 +1,20 @@
 import os
 from flask import Flask
 from threading import Thread
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatMemberUpdated
+from telegram import Update, ChatMemberUpdated
 from telegram.ext import (
-    ApplicationBuilder, CommandHandler, ChatMemberHandler, ContextTypes, filters
+    ApplicationBuilder, CommandHandler, ChatMemberHandler,
+    ContextTypes, filters
 )
 from pymongo import MongoClient
+from datetime import datetime, timedelta
 
-# Environment variables
+# Environment Variables
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 MONGO_URL = os.environ["MONGO_URL"]
 PORT = int(os.environ.get("PORT", 8080))
 
-# Flask setup (for Fly.io health check)
+# Flask setup for Fly.io health check
 app = Flask(__name__)
 
 @app.route("/")
@@ -27,48 +29,66 @@ client = MongoClient(MONGO_URL)
 db = client["referral_bot"]
 users = db["users"]
 
-# Replace with your actual Telegram group link
-TELEGRAM_GROUP_LINK = "https://t.me/advantplayofficial"
+# --- Telegram Handlers ---
 
-# /start command
+# /start handler (referral logic)
 async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     args = context.args
     referred_by = int(args[0]) if args else None
 
-    # Only add user if not already in DB
     if not users.find_one({"user_id": user.id}):
         users.insert_one({
             "user_id": user.id,
             "username": user.username,
             "referrals": 0,
-            "referred_by": referred_by
+            "referred_by": referred_by,
+            "joined_at": datetime.utcnow()
         })
+
         if referred_by and referred_by != user.id:
             users.update_one(
                 {"user_id": referred_by},
                 {"$inc": {"referrals": 1}}
             )
 
-    referral_link = f"https://t.me/{context.bot.username}?start={user.id}"
+    link = f"https://t.me/{context.bot.username}?start={user.id}"
+    await update.message.reply_text(f"Your referral link:\n{link}")
 
-    keyboard = InlineKeyboardMarkup([[
-        InlineKeyboardButton("🔗 Join Our Group", url=TELEGRAM_GROUP_LINK)
-    ]])
-
-    await update.message.reply_text(
-        f"👋 Welcome!\n\nHere is your referral link:\n{referral_link}\n\nShare this link to invite others!\n\nOnce they join and use it, you'll earn referral points.",
-        reply_markup=keyboard
-    )
-
-# /stats command
+# /stats - total referrals
 async def handle_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     record = users.find_one({"user_id": user.id})
     count = record.get("referrals", 0) if record else 0
-    await update.message.reply_text(f"📊 You have referred {count} user(s).")
+    await update.message.reply_text(f"You have referred {count} users.")
 
-# Member join/leave tracking (optional for logging)
+# /weekly - referrals in past 7 days
+async def handle_weekly(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    now = datetime.utcnow()
+    one_week_ago = now - timedelta(days=7)
+
+    count = users.count_documents({
+        "referred_by": user.id,
+        "joined_at": {"$gte": one_week_ago}
+    })
+
+    await update.message.reply_text(f"You referred {count} users in the past 7 days.")
+
+# /monthly - referrals in past 30 days
+async def handle_monthly(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    now = datetime.utcnow()
+    one_month_ago = now - timedelta(days=30)
+
+    count = users.count_documents({
+        "referred_by": user.id,
+        "joined_at": {"$gte": one_month_ago}
+    })
+
+    await update.message.reply_text(f"You referred {count} users in the past 30 days.")
+
+# Group join/leave logging
 async def handle_member_update(update: ChatMemberUpdated, context: ContextTypes.DEFAULT_TYPE):
     old_status = update.chat_member.old_chat_member.status
     new_status = update.chat_member.new_chat_member.status
@@ -79,15 +99,18 @@ async def handle_member_update(update: ChatMemberUpdated, context: ContextTypes.
     elif old_status == "member" and new_status in ("left", "kicked"):
         print(f"{user.username or user.id} left.")
 
-# Bot launcher
+# Start everything
 def run_bot():
     app_bot = ApplicationBuilder().token(BOT_TOKEN).build()
+
     app_bot.add_handler(CommandHandler("start", handle_start))
     app_bot.add_handler(CommandHandler("stats", handle_stats))
+    app_bot.add_handler(CommandHandler("weekly", handle_weekly))
+    app_bot.add_handler(CommandHandler("monthly", handle_monthly))
     app_bot.add_handler(ChatMemberHandler(handle_member_update, ChatMemberHandler.CHAT_MEMBER))
+
     app_bot.run_polling()
 
-# Run Flask + Bot
 if __name__ == "__main__":
     Thread(target=run_flask).start()
     run_bot()
