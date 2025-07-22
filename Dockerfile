@@ -1,14 +1,10 @@
-# Use slim Python image
 FROM python:3.10-slim
 
-# Set working directory
 WORKDIR /app
 
-# Copy all project files
-COPY . .
-
-# Install dependencies
+COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Run the bot
+COPY . .
+
 CMD ["python", "main.py"]
