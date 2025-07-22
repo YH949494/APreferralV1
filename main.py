@@ -1,18 +1,19 @@
 import os
 from flask import Flask
 from threading import Thread
-from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, ChatMemberUpdated
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatInviteLink, ChatMemberUpdated
 from telegram.ext import (
-    ApplicationBuilder, CommandHandler, ChatMemberHandler, ContextTypes
+    ApplicationBuilder, CommandHandler, ChatMemberHandler, ContextTypes, filters
 )
 from pymongo import MongoClient
 
-# Load environment variables
+# === ENV VARS ===
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 MONGO_URL = os.environ["MONGO_URL"]
+GROUP_ID = os.environ.get("GROUP_ID")  # Example: -1001234567890
 PORT = int(os.environ.get("PORT", 8080))
 
-# Flask health check
+# === FLASK FOR HEALTHCHECK ===
 app = Flask(__name__)
 
 @app.route("/")
@@ -22,43 +23,50 @@ def home():
 def run_flask():
     app.run(host="0.0.0.0", port=PORT)
 
-# MongoDB setup
+# === MONGODB ===
 client = MongoClient(MONGO_URL)
 db = client["referral_bot"]
 users = db["users"]
+links = db["invite_links"]
 
-# Telegram handlers
+# === COMMAND HANDLERS ===
 async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    args = context.args
-    referred_by = int(args[0]) if args else None
+    telegram_id = user.id
 
-    if not users.find_one({"user_id": user.id}):
+    if not users.find_one({"user_id": telegram_id}):
         users.insert_one({
-            "user_id": user.id,
+            "user_id": telegram_id,
             "username": user.username,
-            "referrals": 0,
-            "referred_by": referred_by
+            "referrals": 0
         })
-        if referred_by and referred_by != user.id:
-            users.update_one(
-                {"user_id": referred_by},
-                {"$inc": {"referrals": 1}}
-            )
 
-    ref_link = f"https://t.me/{context.bot.username}?start={user.id}"
-    group_link = "https://t.me/advantplayofficial"
+    # Check if already has a link
+    link_data = links.find_one({"owner_id": telegram_id})
+    if not link_data:
+        invite: ChatInviteLink = await context.bot.create_chat_invite_link(
+            chat_id=GROUP_ID,
+            name=f"ref_{telegram_id}",
+            creates_join_request=False
+        )
+        links.insert_one({
+            "owner_id": telegram_id,
+            "link": invite.invite_link
+        })
+        invite_link = invite.invite_link
+    else:
+        invite_link = link_data["link"]
 
     keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔗 Share Your Link", url=ref_link)],
-        [InlineKeyboardButton("📢 Join Our Group", url=group_link)]
+        [InlineKeyboardButton("👉 Join Group", url=invite_link)]
     ])
 
     await update.message.reply_text(
-        f"👋 Welcome, {user.first_name}!\n\n"
-        f"Here’s your referral link:\n{ref_link}\n\n"
-        f"📣 Share this with friends to earn bonus XP!\n\n"
-        f"👉 After inviting, don’t forget to join our group:\n{group_link}",
+        f"👋 Welcome! Here’s your referral link:
+
+🔗 {invite_link}
+
+Share this to invite others and earn rewards!",
         reply_markup=keyboard
     )
 
@@ -68,16 +76,23 @@ async def handle_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     count = record.get("referrals", 0) if record else 0
     await update.message.reply_text(f"📊 You have referred {count} users.")
 
+# === TRACK GROUP JOINS ===
 async def handle_member_update(update: ChatMemberUpdated, context: ContextTypes.DEFAULT_TYPE):
-    old_status = update.chat_member.old_chat_member.status
     new_status = update.chat_member.new_chat_member.status
     user = update.chat_member.from_user
 
-    if old_status in ("left", "kicked") and new_status == "member":
-        print(f"{user.username or user.id} joined.")
-    elif old_status == "member" and new_status in ("left", "kicked"):
-        print(f"{user.username or user.id} left.")
+    if new_status == "member":
+        invite_link_used = update.chat_member.invite_link
+        if invite_link_used:
+            ref_owner = links.find_one({"link": invite_link_used.invite_link})
+            if ref_owner and ref_owner["owner_id"] != user.id:
+                users.update_one(
+                    {"user_id": ref_owner["owner_id"]},
+                    {"$inc": {"referrals": 1}}
+                )
+                print(f"✅ {user.username or user.id} joined via {ref_owner['owner_id']}")
 
+# === RUN ===
 def run_bot():
     app_bot = ApplicationBuilder().token(BOT_TOKEN).build()
     app_bot.add_handler(CommandHandler("start", handle_start))
