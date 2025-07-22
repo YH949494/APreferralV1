@@ -70,7 +70,7 @@ def run_bot():
     app_bot.add_handler(CommandHandler("start", handle_start))
     app_bot.add_handler(CommandHandler("stats", handle_stats))
     app_bot.add_handler(ChatMemberHandler(handle_member_update, ChatMemberHandler.CHAT_MEMBER))
-    app_bot.run_polling()
+    app_bot.run_polling() 
 
 if __name__ == "__main__":
     Thread(target=run_flask).start()
