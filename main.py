@@ -1,83 +1,89 @@
+import os
+from datetime import datetime, timedelta
+from pymongo import MongoClient
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatInviteLink
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 from flask import Flask
 from threading import Thread
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
-import os
-from pymongo import MongoClient
-import datetime
 
+# --- Config ---
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 MONGO_URL = os.environ.get("MONGO_URL")
-GROUP_ID = os.environ.get("GROUP_ID")  # example: -1001234567890
 
+GROUP_ID = -1002723991859  # ← your Telegram group ID
+
+# --- DB Setup ---
+client = MongoClient(MONGO_URL)
+db = client["referral_db"]
+referrals = db["referrals"]
+
+# --- Flask app for uptime monitoring ---
 app = Flask(__name__)
-
-# MongoDB setup
-mongo_client = MongoClient(MONGO_URL)
-db = mongo_client["referral_bot"]
-invite_collection = db["invites"]
-
-# Health check
 @app.route("/")
 def home():
-    return "Bot is alive!"
+    return "Bot is running!"
+def run_flask():
+    app.run(host="0.0.0.0", port=8080)
 
-# /start command
+# --- Telegram Bot Handlers ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("👋 Welcome! Use /getlink to create your referral invite.")
+    user = update.effective_user
+    await update.message.reply_text(
+        f"👋 Welcome {user.first_name}!\n\n"
+        "Send /getlink to receive your unique group invitation link."
+    )
 
-# /getlink command
 async def getlink(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    bot = context.bot
 
     try:
-        # Create a unique link valid for 1 day (86400 seconds)
-        invite_link = await bot.create_chat_invite_link(
+        # Set expiration 24 hours from now
+        expire_time = datetime.utcnow() + timedelta(hours=24)
+
+        # Create invite link (one per user)
+        invite: ChatInviteLink = await context.bot.create_chat_invite_link(
             chat_id=GROUP_ID,
-            member_limit=0,
-            expire_date=datetime.datetime.now() + datetime.timedelta(hours=24),
-            name=f"referral_{user.id}"
+            expire_date=expire_time,
+            member_limit=1,
+            creates_join_request=False,
+            name=f"Invite by {user.username or user.id}"
         )
 
-        # Save to DB
-        invite_collection.insert_one({
+        # Store tracking info in MongoDB
+        referrals.insert_one({
             "user_id": user.id,
             "username": user.username,
-            "invite_link": invite_link.invite_link,
-            "created_at": datetime.datetime.utcnow(),
-            "expires_at": invite_link.expire_date
+            "invite_link": invite.invite_link,
+            "created_at": datetime.utcnow(),
+            "expires_at": expire_time,
+            "group_id": GROUP_ID
         })
 
-        # Send link with button
-        button = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔗 Join Group", url=invite_link.invite_link)]
-        ])
+        keyboard = [
+            [InlineKeyboardButton("✅ Join Group Now", url=invite.invite_link)]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
 
         await update.message.reply_text(
-            f"Here's your personal invite link:\n{invite_link.invite_link}\n\n"
-            f"This link is valid for 24 hours.",
-            reply_markup=button
+            f"🎉 Here's your unique invite link (valid for 24 hours):\n{invite.invite_link}",
+            reply_markup=reply_markup
         )
 
     except Exception as e:
-        print(f"Error creating invite link: {e}")
+        print(f"Error: {e}")
         await update.message.reply_text("❌ Failed to generate invite link. Is the bot an admin in the group?")
 
-# Background thread for Flask
-def run():
-    app.run(host="0.0.0.0", port=8080)
-
-# Start everything
+# --- Start everything ---
 def main():
-    app_thread = Thread(target=run)
-    app_thread.start()
+    app_bot = ApplicationBuilder().token(BOT_TOKEN).build()
+    app_bot.add_handler(CommandHandler("start", start))
+    app_bot.add_handler(CommandHandler("getlink", getlink))
 
-    telegram_app = ApplicationBuilder().token(BOT_TOKEN).build()
-    telegram_app.add_handler(CommandHandler("start", start))
-    telegram_app.add_handler(CommandHandler("getlink", getlink))
+    # Start Flask in a separate thread
+    Thread(target=run_flask).start()
 
-    telegram_app.run_polling()
+    # Run the bot
+    app_bot.run_polling()
 
 if __name__ == "__main__":
     main()
