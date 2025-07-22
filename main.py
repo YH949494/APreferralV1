@@ -1,113 +1,83 @@
-import os
-import time
-import logging
 from flask import Flask
 from threading import Thread
-from pymongo import MongoClient
-from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, ChatInviteLink
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+import os
+from pymongo import MongoClient
+import datetime
 
-# === Config ===
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 MONGO_URL = os.environ.get("MONGO_URL")
-GROUP_ID = -1002119266334  # Replace with your group ID (negative number)
+GROUP_ID = os.environ.get("GROUP_ID")  # example: -1001234567890
 
-# === Logging ===
-logging.basicConfig(level=logging.INFO)
-
-# === Flask App for UptimeRobot ===
 app = Flask(__name__)
 
+# MongoDB setup
+mongo_client = MongoClient(MONGO_URL)
+db = mongo_client["referral_bot"]
+invite_collection = db["invites"]
+
+# Health check
 @app.route("/")
 def home():
-    return "Bot is running."
+    return "Bot is alive!"
 
-# === MongoDB Setup ===
-client = MongoClient(MONGO_URL)
-db = client["referral_bot"]
-users_col = db["users"]
-links_col = db["invite_links"]
-
-# === Bot Handlers ===
+# /start command
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    user_id = user.id
-    username = user.username or f"user{user_id}"
+    await update.message.reply_text("👋 Welcome! Use /getlink to create your referral invite.")
 
-    users_col.update_one(
-        {"user_id": user_id},
-        {"$set": {"username": username}},
-        upsert=True
-    )
-
-    keyboard = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("📣 Join Our Group", url="https://t.me/advantplayofficial")
-        ]
-    ])
-
-    await update.message.reply_text(
-        f"👋 Welcome, {username}!
-Here’s your referral mission:
-
-🎁 Share your referral link and earn rewards!",
-        reply_markup=keyboard
-    )
-
-
+# /getlink command
 async def getlink(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    user_id = user.id
-    username = user.username or f"user{user_id}"
+    bot = context.bot
 
-    record = links_col.find_one({"user_id": user_id})
-    now = int(time.time())
-
-    if record and "expires_at" in record and record["expires_at"] > now:
-        invite_link = record["link"]
-        expires_at = record["expires_at"]
-    else:
-        expires_at = now + 86400  # 24 hours
-        link_obj: ChatInviteLink = await context.bot.create_chat_invite_link(
+    try:
+        # Create a unique link valid for 1 day (86400 seconds)
+        invite_link = await bot.create_chat_invite_link(
             chat_id=GROUP_ID,
-            name=f"ref_{user_id}",
-            expire_date=expires_at,
-            creates_join_request=False
-        )
-        invite_link = link_obj.invite_link
-
-        links_col.update_one(
-            {"user_id": user_id},
-            {"$set": {
-                "username": username,
-                "link": invite_link,
-                "expires_at": expires_at
-            }},
-            upsert=True
+            member_limit=0,
+            expire_date=datetime.datetime.now() + datetime.timedelta(hours=24),
+            name=f"referral_{user.id}"
         )
 
-    expires_at_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(expires_at))
-    await update.message.reply_text(
-        f"🔗 Your 24h personal invite link:\n{invite_link}\n\n"
-        f"This link will expire on:\n🕒 {expires_at_str}"
-    )
+        # Save to DB
+        invite_collection.insert_one({
+            "user_id": user.id,
+            "username": user.username,
+            "invite_link": invite_link.invite_link,
+            "created_at": datetime.datetime.utcnow(),
+            "expires_at": invite_link.expire_date
+        })
 
-# === Flask Thread ===
-def run_flask():
+        # Send link with button
+        button = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔗 Join Group", url=invite_link.invite_link)]
+        ])
+
+        await update.message.reply_text(
+            f"Here's your personal invite link:\n{invite_link.invite_link}\n\n"
+            f"This link is valid for 24 hours.",
+            reply_markup=button
+        )
+
+    except Exception as e:
+        print(f"Error creating invite link: {e}")
+        await update.message.reply_text("❌ Failed to generate invite link. Is the bot an admin in the group?")
+
+# Background thread for Flask
+def run():
     app.run(host="0.0.0.0", port=8080)
 
-# === Main Bot App ===
-async def main():
-    app_bot = ApplicationBuilder().token(BOT_TOKEN).build()
-    app_bot.add_handler(CommandHandler("start", start))
-    app_bot.add_handler(CommandHandler("getlink", getlink))
-    await app_bot.initialize()
-    await app_bot.start()
-    await app_bot.updater.start_polling()
-    await app_bot.updater.idle()
+# Start everything
+def main():
+    app_thread = Thread(target=run)
+    app_thread.start()
 
-if __name__ == '__main__':
-    Thread(target=run_flask).start()
+    telegram_app = ApplicationBuilder().token(BOT_TOKEN).build()
+    telegram_app.add_handler(CommandHandler("start", start))
+    telegram_app.add_handler(CommandHandler("getlink", getlink))
 
-    import asyncio
-    asyncio.run(main())
+    telegram_app.run_polling()
+
+if __name__ == "__main__":
+    main()
