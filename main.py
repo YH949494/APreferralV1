@@ -48,6 +48,8 @@ def api_checkin():
 
 @app.route("/api/referral")
 def api_referral():
+    from referral import get_or_create_referral_link
+
     user_id = request.args.get("user_id", type=int)
     username = request.args.get("username")
 
@@ -63,7 +65,6 @@ def api_referral():
             return jsonify({"referral_link": referral_link})
         else:
             return jsonify({"error": "Failed to create referral link"}), 500
-
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
