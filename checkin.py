@@ -13,6 +13,7 @@ async def checkin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     user_id = user.id
+    username = user.username
     today = datetime.utcnow().date()
 
     user_data = users_collection.find_one({"user_id": user_id})
@@ -27,7 +28,10 @@ async def checkin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         users_collection.update_one(
             {"user_id": user_id},
             {
-                "$set": {"last_checkin": today.strftime("%Y-%m-%d")},
+                "$set": {
+                    "last_checkin": today.strftime("%Y-%m-%d"),
+                    "username": username
+                },
                 "$inc": {
                     "xp": CHECKIN_EXP,
                     "weekly_xp": CHECKIN_EXP
@@ -37,7 +41,7 @@ async def checkin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         users_collection.insert_one({
             "user_id": user_id,
-            "username": user.username,
+            "username": username,
             "xp": CHECKIN_EXP,
             "weekly_xp": CHECKIN_EXP,
             "last_checkin": today.strftime("%Y-%m-%d"),
@@ -47,7 +51,7 @@ async def checkin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"🎉 Check-in successful! You earned {CHECKIN_EXP} XP.")
 
 # For Mini App API usage (non-async)
-def update_checkin_xp(user_id: int) -> str:
+def update_checkin_xp(user_id: int, username: str = None) -> str:
     today = datetime.utcnow().date()
     user_data = users_collection.find_one({"user_id": user_id})
 
@@ -59,7 +63,10 @@ def update_checkin_xp(user_id: int) -> str:
         users_collection.update_one(
             {"user_id": user_id},
             {
-                "$set": {"last_checkin": today.strftime("%Y-%m-%d")},
+                "$set": {
+                    "last_checkin": today.strftime("%Y-%m-%d"),
+                    "username": username
+                },
                 "$inc": {
                     "xp": CHECKIN_EXP,
                     "weekly_xp": CHECKIN_EXP
@@ -69,7 +76,7 @@ def update_checkin_xp(user_id: int) -> str:
     else:
         users_collection.insert_one({
             "user_id": user_id,
-            "username": None,  # Mini App may not have username
+            "username": username,
             "xp": CHECKIN_EXP,
             "weekly_xp": CHECKIN_EXP,
             "last_checkin": today.strftime("%Y-%m-%d"),
