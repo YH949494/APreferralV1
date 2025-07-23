@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Daily Check-In & Referral</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <style>
+    body {
+      font-family: sans-serif;
+      padding: 20px;
+      background-color: #f5f5f5;
+    }
+    button {
+      font-size: 18px;
+      padding: 10px 20px;
+      margin: 10px 0;
+      cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+  <h2>👋 Welcome to Daily Rewards</h2>
+  <p id="status">Loading...</p>
+  <button onclick="checkIn()">✅ Check In</button>
+  <p>💎 Your EXP: <span id="xp">0</span></p>
+  <p>👥 Referrals: <span id="referrals">0</span></p>
+  <p>🔗 Share your referral link:</p>
+  <input type="text" id="refLink" readonly style="width: 100%;">
+  <button onclick="copyLink()">📋 Copy Link</button>
+
+  <script>
+    const tg = window.Telegram.WebApp;
+    tg.expand();
+
+    const userId = tg.initDataUnsafe?.user?.id;
+
+    async function checkIn() {
+      const res = await fetch(`/checkin?user_id=${userId}`);
+      const data = await res.json();
+      document.getElementById("status").innerText = data.message;
+      loadData();
+    }
+
+    async function loadData() {
+      const res = await fetch(`/userdata?user_id=${userId}`);
+      const data = await res.json();
+      document.getElementById("xp").innerText = data.xp;
+      document.getElementById("referrals").innerText = data.referrals;
+      document.getElementById("refLink").value = data.referral_link;
+    }
+
+    async function copyLink() {
+      const input = document.getElementById("refLink");
+      input.select();
+      document.execCommand("copy");
+      alert("Referral link copied!");
+    }
+
+    loadData();
+  </script>
+</body>
+</html>
