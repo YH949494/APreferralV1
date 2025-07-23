@@ -1,27 +1,40 @@
-from database import users_collection
+from telegram import Bot, ChatInviteLink
+from pymongo import MongoClient
+import os
+import datetime
 
-# Use this if you want to give generic bot deep link
-BASE_REFERRAL_LINK = "t.me/APreferralV1_bot"  
+# Mongo setup
+MONGO_URL = os.environ.get("MONGO_URL")
+client = MongoClient(MONGO_URL)
+db = client["referral_bot"]
+users_collection = db["users"]
 
-def get_or_create_referral_link(user_id: int):
-    user = users_collection.find_one({"user_id": user_id})
+# Group ID (centralize for use here)
+GROUP_ID = -1002723991859  # Replace with your actual group ID if needed
 
-    if user:
-        referral_code = str(user_id)
-        referral_count = user.get("referral_count", 0)
-    else:
-        referral_code = str(user_id)
-        users_collection.insert_one({
-            "user_id": user_id,
-            "username": None,
-            "xp": 0,
-            "weekly_xp": 0,
-            "last_checkin": None,
-            "referral_count": 0
-        })
-        referral_count = 0
+async def get_or_create_referral_link(bot: Bot, user_id: int, source: str = "default") -> str:
+    try:
+        # Check if user exists, if not create
+        user = users_collection.find_one({"user_id": user_id})
+        if not user:
+            users_collection.insert_one({
+                "user_id": user_id,
+                "username": None,
+                "xp": 0,
+                "referral_count": 0,
+                "last_checkin": None
+            })
 
-    return {
-        "referral_link": BASE_REFERRAL_LINK + referral_code,
-        "referral_count": referral_count
-    }
+        # Generate a Telegram invite link with a custom name
+        invite_link: ChatInviteLink = await bot.create_chat_invite_link(
+            chat_id=GROUP_ID,
+            member_limit=0,
+            creates_join_request=True,
+            expire_date=datetime.datetime.utcnow() + datetime.timedelta(days=1),
+            name=f"ref-{user_id}"
+        )
+        return invite_link.invite_link
+
+    except Exception as e:
+        print(f"[Referral Error] {e}")
+        return ""
