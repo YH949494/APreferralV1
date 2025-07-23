@@ -138,7 +138,6 @@ if __name__ == '__main__':
 
     # Build and run Telegram Bot
     app_bot = ApplicationBuilder().token(BOT_TOKEN).build()
-    referral_link = asyncio.run(get_or_create_referral_link(app_bot.bot, user_id, request.args.get("username"), "webapp"))
 
     app_bot.add_handler(CommandHandler("start", start))
     app_bot.add_handler(CommandHandler("referral", start))
