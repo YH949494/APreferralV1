@@ -105,13 +105,27 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def join_request_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     invite_link = update.chat_join_request.invite_link
+
     if invite_link and invite_link.name and invite_link.name.startswith("ref-"):
         referrer_id = int(invite_link.name.split("-")[1])
+
+        # Increment referral count
         users_collection.update_one(
             {"user_id": referrer_id},
-            {"$inc": {"referral_count": 1}}
+            {
+                "$inc": {
+                    "referral_count": 1,
+                    "xp": 50  # 👈 Add 50 XP per successful referral
+                }
+            }
         )
-        await context.bot.approve_chat_join_request(update.chat_join_request.chat.id, update.chat_join_request.from_user.id)
+
+        # Approve the join request
+        await context.bot.approve_chat_join_request(
+            update.chat_join_request.chat.id,
+            update.chat_join_request.from_user.id
+        )
+
 
 # ----------------------------
 # Run Telegram Bot & Flask
