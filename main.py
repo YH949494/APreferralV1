@@ -102,14 +102,19 @@ async def join_request_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
         # Increment referral count
         users_collection.update_one(
-            {"user_id": referrer_id},
-            {
-                "$inc": {
-                    "referral_count": 1,
-                    "xp": 50  # 👈 Add 50 XP per successful referral
-                }
-            }
-        )
+    {"user_id": user.id},
+    {
+        "$set": {
+            "username": user.username,
+        },
+        "$setOnInsert": {
+            "xp": 0,
+            "referral_count": 0,
+            "last_checkin": None
+        }
+    },
+    upsert=True
+)
 
         # Approve the join request
         await context.bot.approve_chat_join_request(
