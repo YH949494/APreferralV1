@@ -1,5 +1,6 @@
 from flask import Flask, request, jsonify, send_from_directory
 from threading import Thread
+from referral import get_or_create_referral_link
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, ChatJoinRequestHandler
 from pymongo import MongoClient
