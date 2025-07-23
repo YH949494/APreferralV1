@@ -1,3 +1,16 @@
+<script>
+  const tg = window.Telegram.WebApp;
+  tg.ready();
+  tg.expand();
+
+  const userId = tg.initDataUnsafe?.user?.id;
+  const username = tg.initDataUnsafe?.user?.username;
+
+  if (!userId) {
+    document.body.innerHTML = "<p style='color:red;'>❌ Please open this Mini App inside Telegram.</p>";
+  }
+</script>
+
 <!DOCTYPE html>
 <html>
 <head>
