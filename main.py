@@ -49,17 +49,23 @@ def api_checkin():
 @app.route("/api/referral")
 def api_referral():
     user_id = request.args.get("user_id", type=int)
+    username = request.args.get("username")
+
     if not user_id:
         return jsonify({"error": "Missing user_id"}), 400
 
-    from referral import get_or_create_referral_link
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        referral_link = loop.run_until_complete(get_or_create_referral_link(app_bot.bot, user_id, username, "webapp"))
 
-    if referral_link:
-        return jsonify({"referral_link": referral_link})
-    else:
-        return jsonify({"error": "Failed to create referral link"}), 500
+        if referral_link:
+            return jsonify({"referral_link": referral_link})
+        else:
+            return jsonify({"error": "Failed to create referral link"}), 500
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 # ----------------------------
 # Telegram Bot Logic
