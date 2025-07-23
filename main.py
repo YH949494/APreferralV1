@@ -101,7 +101,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     await update.message.reply_text(
-        f"👋 Welcome! Here is your referral link (valid 24h):\n\n{invite_link.invite_link}\n\n"
+        f"👋 Welcome! Here is your referral link:\n\n{invite_link.invite_link}\n\n"
         f"Share this with your friends. When they join, you’ll earn rewards!\n\n"
         f"👇 You can also check-in daily & get rewards below:",
         reply_markup=reply_markup
