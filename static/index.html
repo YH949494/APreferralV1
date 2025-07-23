@@ -1,62 +1,92 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <title>Daily Check-In & Referral</title>
-  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Daily Check-in</title>
   <style>
     body {
       font-family: sans-serif;
+      background: #f5f5f5;
       padding: 20px;
-      background-color: #f5f5f5;
+      text-align: center;
     }
-    button {
-      font-size: 18px;
+    h1 {
+      color: #333;
+    }
+    .card {
+      background: white;
+      border-radius: 8px;
+      padding: 20px;
+      margin: 20px auto;
+      max-width: 400px;
+      box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+    }
+    .button {
+      display: inline-block;
+      background: #007bff;
+      color: white;
       padding: 10px 20px;
-      margin: 10px 0;
+      border-radius: 5px;
+      margin-top: 10px;
+      text-decoration: none;
       cursor: pointer;
+    }
+    .button:disabled {
+      background: gray;
+    }
+    #message {
+      margin-top: 10px;
+      color: green;
+    }
+    .referral {
+      margin-top: 20px;
+      word-wrap: break-word;
     }
   </style>
 </head>
 <body>
-  <h2>👋 Welcome to Daily Rewards</h2>
-  <p id="status">Loading...</p>
-  <button onclick="checkIn()">✅ Check In</button>
-  <p>💎 Your EXP: <span id="xp">0</span></p>
-  <p>👥 Referrals: <span id="referrals">0</span></p>
-  <p>🔗 Share your referral link:</p>
-  <input type="text" id="refLink" readonly style="width: 100%;">
-  <button onclick="copyLink()">📋 Copy Link</button>
+  <div class="card">
+    <h1>🎁 Daily Check-in</h1>
+    <p>Welcome, <span id="username">User</span>!</p>
+    <p>XP: <span id="xp">0</span></p>
+    <p>Referrals: <span id="referrals">0</span></p>
+    <button class="button" onclick="checkin()">✅ Check In</button>
+    <p id="message"></p>
+    <div class="referral">
+      <p>🔗 Your Referral Link:</p>
+      <input type="text" id="referral_link" readonly style="width: 100%; padding: 5px;" />
+    </div>
+  </div>
 
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <script>
     const tg = window.Telegram.WebApp;
     tg.expand();
 
     const userId = tg.initDataUnsafe?.user?.id;
+    const username = tg.initDataUnsafe?.user?.username || 'Guest';
+    document.getElementById('username').textContent = username;
 
-    async function checkIn() {
-      const res = await fetch(`/checkin?user_id=${userId}`);
-      const data = await res.json();
-      document.getElementById("status").innerText = data.message;
-      loadData();
-    }
-
-    async function loadData() {
+    async function fetchUserData() {
+      if (!userId) return;
       const res = await fetch(`/userdata?user_id=${userId}`);
       const data = await res.json();
-      document.getElementById("xp").innerText = data.xp;
-      document.getElementById("referrals").innerText = data.referrals;
-      document.getElementById("refLink").value = data.referral_link;
+
+      document.getElementById('xp').textContent = data.xp;
+      document.getElementById('referrals').textContent = data.referrals;
+      document.getElementById('referral_link').value = data.referral_link;
     }
 
-    async function copyLink() {
-      const input = document.getElementById("refLink");
-      input.select();
-      document.execCommand("copy");
-      alert("Referral link copied!");
+    async function checkin() {
+      if (!userId) return;
+      const res = await fetch(`/checkin?user_id=${userId}`);
+      const data = await res.json();
+      document.getElementById('message').textContent = data.message;
+      fetchUserData(); // Refresh XP and referral count
     }
 
-    loadData();
+    fetchUserData();
   </script>
 </body>
 </html>
