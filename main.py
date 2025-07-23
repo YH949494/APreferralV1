@@ -51,15 +51,19 @@ def api_checkin():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+import traceback
+
 @app.route("/api/referral")
 def api_referral():
-    from referral import get_or_create_referral_link
-
-    user_id = request.args.get("user_id", type=int)
-    username = request.args.get("username", default="")
-
-    if not user_id:
-        return jsonify({"error": "Missing user_id"}), 400
+    try:
+        user_id = int(request.args.get("user_id"))
+        username = request.args.get("username")
+        referral_link = asyncio.run(get_or_create_referral_link(app_bot.bot, user_id, username))
+        return jsonify({"success": True, "referral_link": referral_link})
+    except Exception as e:
+        print("[API Referral Error]")
+        traceback.print_exc()
+        return jsonify({"success": False, "error": str(e)}), 500
 
     try:
         loop = asyncio.new_event_loop()
