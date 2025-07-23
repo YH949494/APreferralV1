@@ -50,6 +50,32 @@ def userdata_api():
 def serve_mini_app():
     return send_from_directory("static", "index.html")
 
+from flask import request
+
+@app.route("/api/checkin")
+def api_checkin():
+    user_id = request.args.get("user_id")
+    if not user_id:
+        return "Missing user ID"
+
+    from checkin import checkin_via_api
+    return checkin_via_api(int(user_id))
+
+@app.route("/api/referral")
+def api_referral():
+    user_id = request.args.get("user_id")
+    if not user_id:
+        return "Missing user ID"
+
+    from referral import get_or_create_referral_link
+    bot = application.bot  # get the active bot instance
+
+    import asyncio
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    link = loop.run_until_complete(get_or_create_referral_link(bot, int(user_id), "webapp"))
+    return link or "Failed to create link"
+
 # --- Telegram Bot Logic ---
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
