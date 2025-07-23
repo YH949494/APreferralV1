@@ -28,24 +28,32 @@ async def get_or_create_referral_link(bot: Bot, user_id: int, username: str = No
                 "referral_count": 0,
                 "last_checkin": None,
                 "referral_link": None,
-                "referral_created_at": None
+                "referral_created_at": now
             })
             user = users_collection.find_one({"user_id": user_id})
         else:
-            # Update username if it’s available
             if username:
                 users_collection.update_one(
                     {"user_id": user_id},
                     {"$set": {"username": username}}
                 )
 
-        # Reuse existing link if it's less than 24 hours old
-        if user.get("referral_link") and user.get("referral_created_at"):
-            created_at = user["referral_created_at"]
-            if (now - created_at).total_seconds() < 86400:
-                return user["referral_link"]
+        # Reuse existing link if less than 24 hours old
+        referral_link = user.get("referral_link")
+        created_at = user.get("referral_created_at")
 
-        # Generate a new invite link
+        if referral_link and created_at:
+            try:
+                # If datetime already — no need to parse
+                if isinstance(created_at, str):
+                    created_at = datetime.datetime.fromisoformat(created_at)
+
+                if (now - created_at).total_seconds() < 86400:
+                    return referral_link
+            except Exception as e:
+                print(f"[Datetime Error] {e}")
+
+        # Generate new invite link
         invite_link: ChatInviteLink = await bot.create_chat_invite_link(
             chat_id=GROUP_ID,
             member_limit=0,
@@ -54,7 +62,7 @@ async def get_or_create_referral_link(bot: Bot, user_id: int, username: str = No
             name=f"ref-{user_id}"
         )
 
-        # Save new link to DB
+        # Save to DB
         users_collection.update_one(
             {"user_id": user_id},
             {"$set": {
@@ -68,3 +76,4 @@ async def get_or_create_referral_link(bot: Bot, user_id: int, username: str = No
     except Exception as e:
         print(f"[Referral Error] {e}")
         return ""
+
