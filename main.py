@@ -69,6 +69,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user is None:
         return
 
+    # Ensure user exists in database
     user_data = users_collection.find_one({"user_id": user.id})
     if not user_data:
         users_collection.insert_one({
@@ -79,31 +80,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "last_checkin": None
         })
 
-    try:
-        invite_link = await context.bot.create_chat_invite_link(
-            chat_id=GROUP_ID,
-            member_limit=0,
-            creates_join_request=True,
-            expire_date=datetime.datetime.utcnow() + datetime.timedelta(hours=24),
-            name=f"ref-{user.id}"
+    # Send Mini App button (Web App)
+    keyboard = [[
+        InlineKeyboardButton(
+            text="🚀 Open Check-in & Referral",
+            web_app=WebAppInfo(url="https://apreferralv1.fly.dev/miniapp")
         )
-        if not invite_link or not invite_link.invite_link:
-            raise Exception("Empty invite link")
-    except Exception as e:
-        await update.message.reply_text("❌ Failed to generate invite link. Please ensure the bot is admin in the group.")
-        return
-
-    # ✅ Web App Button + Group Join Button
-    keyboard = [
-        [InlineKeyboardButton("👉 Join Group", url=invite_link.invite_link)],
-        [InlineKeyboardButton("🌟 Open Mini App", web_app=WebAppInfo(url=WEBAPP_URL))]
-    ]
+    ]]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     await update.message.reply_text(
-        f"👋 Welcome! Here is your referral link:\n\n{invite_link.invite_link}\n\n"
-        f"Share this with your friends. When they join, you’ll earn rewards!\n\n"
-        f"👇 You can also check-in daily & get rewards below:",
+        "👋 Welcome! Tap the button below to check-in and view your referral link 👇",
         reply_markup=reply_markup
     )
 
