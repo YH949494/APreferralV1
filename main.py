@@ -1,5 +1,6 @@
 from flask import Flask, request, jsonify, send_from_directory
 from threading import Thread
+from checkin import checkin_handler, handle_checkin
 from referral import get_or_create_referral_link
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, ChatJoinRequestHandler
@@ -38,6 +39,7 @@ def serve_mini_app():
 
 @app.route("/api/checkin")
 def api_checkin():
+    return handle_checkin()
     user_id = request.args.get("user_id", type=int)
     username = request.args.get("username", default="")
 
