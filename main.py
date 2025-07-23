@@ -39,19 +39,24 @@ def serve_mini_app():
 @app.route("/api/checkin")
 def api_checkin():
     user_id = request.args.get("user_id", type=int)
+    username = request.args.get("username", default="")
+
     if not user_id:
         return jsonify({"error": "Missing user_id"}), 400
 
-    from checkin import update_checkin_xp
-    message = update_checkin_xp(user_id, request.args.get("username"))
-    return jsonify({"message": message})
+    try:
+        from checkin import update_checkin_xp
+        message = update_checkin_xp(user_id, username)
+        return jsonify({"message": message})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/api/referral")
 def api_referral():
     from referral import get_or_create_referral_link
 
     user_id = request.args.get("user_id", type=int)
-    username = request.args.get("username")
+    username = request.args.get("username", default="")
 
     if not user_id:
         return jsonify({"error": "Missing user_id"}), 400
@@ -59,7 +64,9 @@ def api_referral():
     try:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        referral_link = loop.run_until_complete(get_or_create_referral_link(app_bot.bot, user_id, username, "webapp"))
+        referral_link = loop.run_until_complete(
+            get_or_create_referral_link(app_bot.bot, user_id, username, "webapp")
+        )
 
         if referral_link:
             return jsonify({"referral_link": referral_link})
