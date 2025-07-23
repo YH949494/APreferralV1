@@ -13,6 +13,7 @@ import asyncio
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 MONGO_URL = os.environ.get("MONGO_URL")
 GROUP_ID = -1002723991859  # Replace with your actual group ID
+WEBAPP_URL = "https://apreferralv1.fly.dev/miniapp"  # ✅ Mini App URL
 
 # ----------------------------
 # MongoDB setup
@@ -92,12 +93,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Failed to generate invite link. Please ensure the bot is admin in the group.")
         return
 
-    keyboard = [[InlineKeyboardButton("👉 Join Group", url=invite_link.invite_link)]]
+    # ✅ Web App Button + Group Join Button
+    keyboard = [
+        [InlineKeyboardButton("👉 Join Group", url=invite_link.invite_link)],
+        [InlineKeyboardButton("🌟 Open Mini App", web_app=WebAppInfo(url=WEBAPP_URL))]
+    ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     await update.message.reply_text(
         f"👋 Welcome! Here is your referral link:\n\n{invite_link.invite_link}\n\n"
-        f"Share this with your friends. When they join, you’ll earn rewards!",
+        f"Share this with your friends. When they join, you’ll earn rewards!\n\n"
+        f"👇 You can also check-in daily & get rewards below:",
         reply_markup=reply_markup
     )
 
@@ -123,7 +129,6 @@ async def join_request_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             update.chat_join_request.chat.id,
             update.chat_join_request.from_user.id
         )
-
 
 # ----------------------------
 # Run Telegram Bot & Flask
