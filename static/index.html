@@ -68,7 +68,7 @@
 
   async function checkIn() {
     try {
-      const res = await fetch(`${baseURL}/api/checkin?user_id=${userId}&username=${username}`);
+      const res = await fetch(`/api/referral?user_id=${userId}&username=${username}`);
       const data = await res.json();
       document.getElementById("checkin-result").innerText = data.message || "Check-in failed.";
     } catch (err) {
