@@ -103,7 +103,6 @@ async def join_request_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
 # Import logic from modules
 from checkin import update_checkin_xp
-from database import get_user_data
 from referral import get_or_create_referral_link
 
 # --- Run both Flask and Telegram Bot ---
