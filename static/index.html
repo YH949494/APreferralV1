@@ -76,14 +76,26 @@
     }
 
     async function getReferral() {
-      try {
-        const res = await fetch(`/api/referral?user_id=${userId}`);
-        const data = await res.json();
-        document.getElementById("referral-link").innerText = data.referral_link || "❌ Failed to get link.";
-      } catch (err) {
-        document.getElementById("referral-link").innerText = "❌ Error connecting to server.";
-      }
+  try {
+    const res = await fetch(`/api/referral?user_id=${userId}`);
+    const data = await res.json();
+    const link = data.referral_link;
+
+    const display = document.getElementById("referral-link");
+    if (link) {
+      display.innerText = link;
+
+      // Auto-copy to clipboard
+      await navigator.clipboard.writeText(link);
+
+      display.innerText += "\n📋 Copied to clipboard!";
+    } else {
+      display.innerText = "❌ Failed to get link.";
     }
+  } catch (err) {
+    document.getElementById("referral-link").innerText = "❌ Error connecting to server.";
+  }
+}
   </script>
 </body>
 </html>
