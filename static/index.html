@@ -48,7 +48,7 @@
   </div>
 
   <div class="section">
-    <h3>🔗 Your Referral Link</h3>
+    <h3>🔗 Your Referral Link (valid 24h)</h3>
     <button onclick="getReferral()">Generate Link</button>
     <p id="referral-link">Click the button to get your link</p>
   </div>
@@ -59,7 +59,7 @@
     tg.expand();
 
     // Safe fallback for user_id
-    const userId = tg.initDataUnsafe?.user?.id;
+    const username = tg.initDataUnsafe?.user?.username;
 
     if (!userId) {
       document.body.innerHTML = "<p style='color:red;'>❌ User ID not found. Please open this page inside Telegram.</p>";
