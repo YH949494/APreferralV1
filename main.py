@@ -32,14 +32,18 @@ def checkin_api():
     result = update_checkin_xp(int(user_id))  # from checkin.py
     return jsonify({"message": result})
 
+import asyncio
+
 @app.route("/api/referral")
 def api_referral():
     user_id = request.args.get("user_id", type=int)
+    username = request.args.get("username", default="")  # Optional
+
     if not user_id:
         return jsonify({"error": "Missing user_id"}), 400
 
-    referral_data = get_or_create_referral_link(user_id)
-    return jsonify(referral_data)
+    referral_data = asyncio.run(get_or_create_referral_link(bot, user_id, username))
+    return jsonify({"referral_link": referral_data})
 
 @app.route('/userdata')
 def userdata_api():
