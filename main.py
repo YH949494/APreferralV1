@@ -5,96 +5,63 @@ from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, ChatJ
 from pymongo import MongoClient
 import os
 import datetime
+import asyncio
 
+# ----------------------------
 # Environment Variables
+# ----------------------------
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 MONGO_URL = os.environ.get("MONGO_URL")
 GROUP_ID = -1002723991859  # Replace with your actual group ID
 
+# ----------------------------
 # MongoDB setup
+# ----------------------------
 client = MongoClient(MONGO_URL)
 db = client["referral_bot"]
 users_collection = db["users"]
 
+# ----------------------------
 # Flask App Setup
+# ----------------------------
 app = Flask(__name__, static_folder="static")
 
 @app.route("/")
 def home():
     return "Bot is alive!"
 
-@app.route('/checkin')
-def checkin_api():
-    user_id = request.args.get("user_id")
+@app.route("/miniapp")
+def serve_mini_app():
+    return send_from_directory("static", "index.html")
+
+@app.route("/api/checkin")
+def api_checkin():
+    user_id = request.args.get("user_id", type=int)
     if not user_id:
-        return jsonify({"message": "Missing user_id"}), 400
+        return jsonify({"error": "Missing user_id"}), 400
 
-    result = update_checkin_xp(int(user_id))  # from checkin.py
-    return jsonify({"message": result})
-
-import asyncio
+    from checkin import update_checkin_xp
+    message = update_checkin_xp(user_id)
+    return jsonify({"message": message})
 
 @app.route("/api/referral")
 def api_referral():
     user_id = request.args.get("user_id", type=int)
-    username = request.args.get("username", default="")  # Optional
-
     if not user_id:
         return jsonify({"error": "Missing user_id"}), 400
-
-    referral_data = asyncio.run(get_or_create_referral_link(bot, user_id, username))
-    return jsonify({"referral_link": referral_data})
-
-@app.route('/userdata')
-def userdata_api():
-    user_id = request.args.get("user_id")
-    if not user_id:
-        return jsonify({"error": "Missing user_id"}), 400
-
-    data = get_user_data(int(user_id))        # from database.py
-    referral_link = get_or_create_referral_link(int(user_id))  # from referral.py
-    return jsonify({
-        "xp": data.get("xp", 0),
-        "referrals": data.get("referral_count", 0),
-        "referral_link": referral_link
-    })
-
-@app.route('/miniapp')
-def serve_mini_app():
-    return send_from_directory("static", "index.html")
-
-from flask import request
-
-@app.route("/api/checkin")
-def api_checkin():
-    user_id = request.args.get("user_id")
-    if not user_id:
-        return "Missing user ID"
-
-    from checkin import checkin_via_api
-    return checkin_via_api(int(user_id))
-
-@app.route("/api/referral")
-def api_referral():
-    user_id = request.args.get("user_id")
-    if not user_id:
-        return "Missing user ID"
 
     from referral import get_or_create_referral_link
-    bot = application.bot  # get the active bot instance
+    referral_link = asyncio.run(get_or_create_referral_link(bot, user_id, "webapp"))
+    if referral_link:
+        return jsonify({"referral_link": referral_link})
+    else:
+        return jsonify({"error": "Failed to create referral link"}), 500
 
-    import asyncio
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    link = loop.run_until_complete(get_or_create_referral_link(bot, int(user_id), "webapp"))
-    return link or "Failed to create link"
-
-# --- Telegram Bot Logic ---
-
+# ----------------------------
+# Telegram Bot Logic
+# ----------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    chat_id = update.effective_chat.id
-
     if user is None:
         return
 
@@ -131,7 +98,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def join_request_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     invite_link = update.chat_join_request.invite_link
-
     if invite_link and invite_link.name and invite_link.name.startswith("ref-"):
         referrer_id = int(invite_link.name.split("-")[1])
         users_collection.update_one(
@@ -140,14 +106,17 @@ async def join_request_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         )
         await context.bot.approve_chat_join_request(update.chat_join_request.chat.id, update.chat_join_request.from_user.id)
 
-# Import logic from modules
-from checkin import update_checkin_xp
-from referral import get_or_create_referral_link
-
-# --- Run both Flask and Telegram Bot ---
+# ----------------------------
+# Run Telegram Bot & Flask
+# ----------------------------
 if __name__ == '__main__':
+    from telegram import Bot
+    bot = Bot(BOT_TOKEN)
+
+    # Run Flask in a thread
     Thread(target=lambda: app.run(host="0.0.0.0", port=8080)).start()
 
+    # Run Telegram bot
     app_bot = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app_bot.add_handler(CommandHandler("start", start))
@@ -155,7 +124,6 @@ if __name__ == '__main__':
     app_bot.add_handler(CommandHandler("invite", start))
     app_bot.add_handler(CommandHandler("getlink", start))
     app_bot.add_handler(CommandHandler("link", start))
-
     app_bot.add_handler(ChatJoinRequestHandler(join_request_handler))
 
     app_bot.run_polling()
