@@ -33,7 +33,7 @@
       background-color: #006699;
     }
     #referral-link {
-      word-break: break-all;
+      word-break: break-word;
       margin-top: 10px;
     }
   </style>
@@ -54,24 +54,35 @@
   </div>
 
   <script>
-    let tg = window.Telegram.WebApp;
+    const tg = window.Telegram.WebApp;
+    tg.ready();
     tg.expand();
-    const userId = tg.initDataUnsafe.user?.id;
+
+    // Safe fallback for user_id
+    const userId = tg.initDataUnsafe?.user?.id;
 
     if (!userId) {
-      document.body.innerHTML = "<p style='color:red;'>❌ User ID not found. Please open this from Telegram Mini App.</p>";
+      document.body.innerHTML = "<p style='color:red;'>❌ User ID not found. Please open this page inside Telegram.</p>";
     }
 
     async function checkIn() {
-      const res = await fetch(`/api/checkin?user_id=${userId}`);
-      const data = await res.json();
-      document.getElementById("checkin-result").innerText = data.message || "Check-in failed.";
+      try {
+        const res = await fetch(`/api/checkin?user_id=${userId}`);
+        const data = await res.json();
+        document.getElementById("checkin-result").innerText = data.message || "Check-in failed.";
+      } catch (err) {
+        document.getElementById("checkin-result").innerText = "❌ Error connecting to server.";
+      }
     }
 
     async function getReferral() {
-      const res = await fetch(`/api/referral?user_id=${userId}`);
-      const data = await res.json();
-      document.getElementById("referral-link").innerText = data.referral_link || "Failed to get link.";
+      try {
+        const res = await fetch(`/api/referral?user_id=${userId}`);
+        const data = await res.json();
+        document.getElementById("referral-link").innerText = data.referral_link || "❌ Failed to get link.";
+      } catch (err) {
+        document.getElementById("referral-link").innerText = "❌ Error connecting to server.";
+      }
     }
   </script>
 </body>
