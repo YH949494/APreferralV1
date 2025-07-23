@@ -54,7 +54,6 @@ def api_referral():
     from referral import get_or_create_referral_link
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    referral_link = loop.run_until_complete(get_or_create_referral_link(app_bot.bot, user_id, request.args.get("username"), "webapp"))
 
     if referral_link:
         return jsonify({"referral_link": referral_link})
@@ -131,6 +130,7 @@ if __name__ == '__main__':
 
     # Build and run Telegram Bot
     app_bot = ApplicationBuilder().token(BOT_TOKEN).build()
+    referral_link = asyncio.run(get_or_create_referral_link(app_bot.bot, user_id, request.args.get("username"), "webapp"))
 
     app_bot.add_handler(CommandHandler("start", start))
     app_bot.add_handler(CommandHandler("referral", start))
