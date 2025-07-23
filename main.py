@@ -1,6 +1,6 @@
 from flask import Flask, request, jsonify, send_from_directory
 from threading import Thread
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, ChatJoinRequestHandler
 from pymongo import MongoClient
 import os
@@ -51,7 +51,10 @@ def api_referral():
         return jsonify({"error": "Missing user_id"}), 400
 
     from referral import get_or_create_referral_link
-    referral_link = asyncio.run(get_or_create_referral_link(bot, user_id, "webapp"))
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    referral_link = loop.run_until_complete(get_or_create_referral_link(app_bot.bot, user_id, "webapp"))
+
     if referral_link:
         return jsonify({"referral_link": referral_link})
     else:
@@ -65,6 +68,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user is None:
         return
 
+    # Create user in DB if not exist
     user_data = users_collection.find_one({"user_id": user.id})
     if not user_data:
         users_collection.insert_one({
@@ -87,7 +91,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Failed to generate invite link. Make sure the bot is an admin in the group.")
         return
 
-    keyboard = [[InlineKeyboardButton("👉 Join Group", url=invite_link.invite_link)]]
+    keyboard = [
+        [InlineKeyboardButton("👉 Join Group", url=invite_link.invite_link)],
+        [InlineKeyboardButton("🚀 Open Mini App", web_app=WebAppInfo(url="https://your-fly-app.fly.dev/miniapp"))]
+    ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     await update.message.reply_text(
@@ -110,13 +117,10 @@ async def join_request_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 # Run Telegram Bot & Flask
 # ----------------------------
 if __name__ == '__main__':
-    from telegram import Bot
-    bot = Bot(BOT_TOKEN)
-
     # Run Flask in a thread
     Thread(target=lambda: app.run(host="0.0.0.0", port=8080)).start()
 
-    # Run Telegram bot
+    # Build and run Telegram Bot
     app_bot = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app_bot.add_handler(CommandHandler("start", start))
