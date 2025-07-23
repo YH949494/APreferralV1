@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Check-In & Referral</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <style>
+        body {
+            font-family: sans-serif;
+            padding: 20px;
+            background-color: #fff;
+        }
+        button {
+            padding: 10px 20px;
+            font-size: 18px;
+            border: none;
+            background-color: #0088cc;
+            color: white;
+            border-radius: 5px;
+        }
+        p {
+            margin: 20px 0;
+        }
+    </style>
+</head>
+<body>
+    <h2>🎁 Daily Check-In</h2>
+    <p>Click below to check in and earn XP.</p>
+    <button onclick="checkIn()">✅ Check In</button>
+
+    <h2>📣 Invite Friends</h2>
+    <p>Get your referral link to earn bonus rewards!</p>
+    <button onclick="getReferral()">🔗 Get Referral Link</button>
+
+    <script>
+        const tg = window.Telegram.WebApp;
+        const userId = tg.initDataUnsafe.user.id;
+
+        async function checkIn() {
+            const res = await fetch(`/api/checkin?user_id=${userId}`);
+            const data = await res.text();
+            alert(data);
+        }
+
+        async function getReferral() {
+            const res = await fetch(`/api/referral?user_id=${userId}`);
+            const link = await res.text();
+            navigator.clipboard.writeText(link);
+            alert("Copied referral link:\n" + link);
+        }
+    </script>
+</body>
+</html>
