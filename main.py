@@ -42,7 +42,7 @@ def api_checkin():
         return jsonify({"error": "Missing user_id"}), 400
 
     from checkin import update_checkin_xp
-    message = update_checkin_xp(user_id)
+    message = update_checkin_xp(user_id, request.args.get("username"))
     return jsonify({"message": message})
 
 @app.route("/api/referral")
@@ -54,7 +54,7 @@ def api_referral():
     from referral import get_or_create_referral_link
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    referral_link = loop.run_until_complete(get_or_create_referral_link(app_bot.bot, user_id, "webapp"))
+    referral_link = loop.run_until_complete(get_or_create_referral_link(app_bot.bot, user_id, request.args.get("username"), "webapp"))
 
     if referral_link:
         return jsonify({"referral_link": referral_link})
