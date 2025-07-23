@@ -12,16 +12,18 @@ users_collection = db["users"]
 # Group ID
 GROUP_ID = -1002723991859  # Replace with your actual group ID
 
-async def get_or_create_referral_link(bot: Bot, user_id: int, source: str = "default") -> str:
+async def get_or_create_referral_link(bot: Bot, user_id: int, username: str = None) -> str:
     try:
         now = datetime.datetime.utcnow()
 
-        # Get user data (or create if doesn't exist)
+        # Find user record
         user = users_collection.find_one({"user_id": user_id})
+
+        # Create user if not exists
         if not user:
             users_collection.insert_one({
                 "user_id": user_id,
-                "username": None,
+                "username": username,
                 "xp": 0,
                 "referral_count": 0,
                 "last_checkin": None,
@@ -29,14 +31,21 @@ async def get_or_create_referral_link(bot: Bot, user_id: int, source: str = "def
                 "referral_created_at": None
             })
             user = users_collection.find_one({"user_id": user_id})
+        else:
+            # Update username if it’s available
+            if username:
+                users_collection.update_one(
+                    {"user_id": user_id},
+                    {"$set": {"username": username}}
+                )
 
-        # Check if user already has a link within 24 hours
+        # Reuse existing link if it's less than 24 hours old
         if user.get("referral_link") and user.get("referral_created_at"):
             created_at = user["referral_created_at"]
             if (now - created_at).total_seconds() < 86400:
                 return user["referral_link"]
 
-        # Else, generate new invite link
+        # Generate a new invite link
         invite_link: ChatInviteLink = await bot.create_chat_invite_link(
             chat_id=GROUP_ID,
             member_limit=0,
@@ -45,7 +54,7 @@ async def get_or_create_referral_link(bot: Bot, user_id: int, source: str = "def
             name=f"ref-{user_id}"
         )
 
-        # Save the new link and its creation time
+        # Save new link to DB
         users_collection.update_one(
             {"user_id": user_id},
             {"$set": {
