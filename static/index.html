@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Check-in & Referral</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <style>
+    body {
+      font-family: sans-serif;
+      background: #f4f4f4;
+      margin: 0;
+      padding: 20px;
+    }
+    h2 {
+      color: #444;
+    }
+    button {
+      background-color: #0088cc;
+      color: white;
+      border: none;
+      padding: 12px 20px;
+      margin-top: 10px;
+      font-size: 16px;
+      border-radius: 5px;
+      cursor: pointer;
+      width: 100%;
+    }
+    #message {
+      margin-top: 15px;
+      padding: 10px;
+      background-color: #e6f7ff;
+      border-left: 4px solid #1890ff;
+    }
+    input {
+      width: 100%;
+      padding: 10px;
+      font-size: 14px;
+      margin-top: 8px;
+    }
+  </style>
+</head>
+<body>
+  <h2>🎯 Daily Check-in</h2>
+  <button onclick="checkIn()">✅ Check In</button>
+
+  <h2>📢 My Referral Link</h2>
+  <button onclick="getReferral()">🔗 Get
