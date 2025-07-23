@@ -1,14 +1,16 @@
-from telegram.ext import ApplicationBuilder
-from checkin import register_checkin_handlers
-from referral import register_referral_handlers
-from database import init_db
 from flask import Flask
 from threading import Thread
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    ChatJoinRequestHandler
+)
+from referral import referral_handler, join_request_handler
+from checkin import checkin_handler
 import os
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 
-# Flask app for Fly.io health check / Mini App (optional)
 app = Flask(__name__)
 
 @app.route("/")
@@ -16,19 +18,20 @@ def home():
     return "Bot is alive!"
 
 if __name__ == "__main__":
-    # Step 1: Start Flask in a separate thread
+    # Start Flask on separate thread for uptime monitoring
     flask_thread = Thread(target=lambda: app.run(host="0.0.0.0", port=8080))
     flask_thread.start()
 
-    # Step 2: Initialize MongoDB connection
-    init_db()
-
-    # Step 3: Set up Telegram bot
+    # Start Telegram bot
     app_bot = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    # Step 4: Register handlers
-    register_checkin_handlers(app_bot)
-    register_referral_handlers(app_bot)
+    # Command handlers
+    app_bot.add_handler(CommandHandler("start", referral_handler))  # For referral link
+    app_bot.add_handler(CommandHandler("ref", referral_handler))    # Alias
+    app_bot.add_handler(CommandHandler("checkin", checkin_handler)) # Check-in logic
 
-    # Step 5: Start polling
+    # Chat join approval (for referrals)
+    app_bot.add_handler(ChatJoinRequestHandler(join_request_handler))
+
+    # Run bot
     app_bot.run_polling()
