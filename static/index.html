@@ -1,48 +1,78 @@
 <!DOCTYPE html>
-<html lang="en">
+<html>
 <head>
   <meta charset="UTF-8">
-  <title>Check-in & Referral</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Referral & Check-in</title>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <style>
     body {
-      font-family: sans-serif;
-      background: #f4f4f4;
-      margin: 0;
+      background-color: #f4f4f4;
+      font-family: Arial, sans-serif;
       padding: 20px;
+      color: #333;
     }
     h2 {
-      color: #444;
+      text-align: center;
+    }
+    .section {
+      background: white;
+      padding: 20px;
+      margin: 15px 0;
+      border-radius: 10px;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.1);
     }
     button {
       background-color: #0088cc;
       color: white;
+      padding: 10px 20px;
       border: none;
-      padding: 12px 20px;
-      margin-top: 10px;
-      font-size: 16px;
-      border-radius: 5px;
+      border-radius: 6px;
       cursor: pointer;
-      width: 100%;
     }
-    #message {
-      margin-top: 15px;
-      padding: 10px;
-      background-color: #e6f7ff;
-      border-left: 4px solid #1890ff;
+    button:hover {
+      background-color: #006699;
     }
-    input {
-      width: 100%;
-      padding: 10px;
-      font-size: 14px;
-      margin-top: 8px;
+    #referral-link {
+      word-break: break-all;
+      margin-top: 10px;
     }
   </style>
 </head>
 <body>
-  <h2>🎯 Daily Check-in</h2>
-  <button onclick="checkIn()">✅ Check In</button>
+  <h2>🎯 Referral & Daily Check-in</h2>
 
-  <h2>📢 My Referral Link</h2>
-  <button onclick="getReferral()">🔗 Get
+  <div class="section">
+    <h3>✅ Daily Check-in</h3>
+    <button onclick="checkIn()">Check In</button>
+    <p id="checkin-result"></p>
+  </div>
+
+  <div class="section">
+    <h3>🔗 Your Referral Link</h3>
+    <button onclick="getReferral()">Generate Link</button>
+    <p id="referral-link">Click the button to get your link</p>
+  </div>
+
+  <script>
+    let tg = window.Telegram.WebApp;
+    tg.expand();
+    const userId = tg.initDataUnsafe.user?.id;
+
+    if (!userId) {
+      document.body.innerHTML = "<p style='color:red;'>❌ User ID not found. Please open this from Telegram Mini App.</p>";
+    }
+
+    async function checkIn() {
+      const res = await fetch(`/api/checkin?user_id=${userId}`);
+      const data = await res.json();
+      document.getElementById("checkin-result").innerText = data.message || "Check-in failed.";
+    }
+
+    async function getReferral() {
+      const res = await fetch(`/api/referral?user_id=${userId}`);
+      const data = await res.json();
+      document.getElementById("referral-link").innerText = data.referral_link || "Failed to get link.";
+    }
+  </script>
+</body>
+</html>
