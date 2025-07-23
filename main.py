@@ -79,29 +79,28 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "last_checkin": None
         })
 
-    try:
-        invite_link = await context.bot.create_chat_invite_link(
-            chat_id=GROUP_ID,
-            member_limit=0,
-            creates_join_request=True,
-            expire_date=datetime.datetime.utcnow() + datetime.timedelta(hours=24),
-            name=f"ref-{user.id}"
-        )
-    except Exception as e:
-        await update.message.reply_text("❌ Failed to generate invite link. Make sure the bot is an admin in the group.")
-        return
-
-    keyboard = [
-        [InlineKeyboardButton("👉 Join Group", url=invite_link.invite_link)],
-        [InlineKeyboardButton("🚀 Open Mini App", web_app=WebAppInfo(url="https://your-fly-app.fly.dev/miniapp"))]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
-    await update.message.reply_text(
-        f"👋 Welcome! Here is your referral link:\n\n{invite_link.invite_link}\n\n"
-        f"Share this with your friends. When they join, you’ll earn rewards!",
-        reply_markup=reply_markup
+   try:
+    invite_link = await context.bot.create_chat_invite_link(
+        chat_id=GROUP_ID,
+        member_limit=0,
+        creates_join_request=True,
+        expire_date=datetime.datetime.utcnow() + datetime.timedelta(hours=24),
+        name=f"ref-{user.id}"
     )
+    if not invite_link or not invite_link.invite_link:
+        raise Exception("Empty invite link")
+except Exception as e:
+    await update.message.reply_text("❌ Failed to generate invite link. Please ensure the bot is admin in the group.")
+    return
+
+keyboard = [[InlineKeyboardButton("👉 Join Group", url=invite_link.invite_link)]]
+reply_markup = InlineKeyboardMarkup(keyboard)
+
+await update.message.reply_text(
+    f"👋 Welcome! Here is your referral link:\n\n{invite_link.invite_link}\n\n"
+    f"Share this with your friends. When they join, you’ll earn rewards!",
+    reply_markup=reply_markup
+)
 
 async def join_request_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     invite_link = update.chat_join_request.invite_link
