@@ -42,7 +42,9 @@
   <div class="section">
     <h3>✅ Daily Check-in</h3>
     <button onclick="checkIn()">Check In</button>
-    <p id="checkin-result"></p>
+   <p id="checkin-result"></p>
+   <p id="checkin-timer" style="color: gray; font-size: 14px;"></p>
+
   </div>
 
   <div class="section">
@@ -65,16 +67,21 @@
 
     console.log("userId:", userId, "username:", username);
 
-    async function checkIn() {
-      try {
-        const res = await fetch(`/api/checkin?user_id=${userId}&username=${username}`);
-        const data = await res.json();
-        document.getElementById("checkin-result").innerText = data.message || "Check-in failed.";
-      } catch (err) {
-        document.getElementById("checkin-result").innerText = "❌ Error connecting to server.";
-        console.error(err);
-      }
+   async function checkIn() {
+  try {
+    const res = await fetch(`/api/checkin?user_id=${userId}&username=${username}`);
+    const data = await res.json();
+
+    document.getElementById("checkin-result").innerText = data.message || "Check-in failed.";
+
+    if (data.next_checkin_time) {
+      startCountdown(data.next_checkin_time);
     }
+  } catch (err) {
+    document.getElementById("checkin-result").innerText = "❌ Error connecting to server.";
+    console.error(err);
+  }
+}
 
     async function getReferral() {
       try {
@@ -95,6 +102,30 @@
         console.error(err);
       }
     }
+    function startCountdown(nextCheckinTimeISO) {
+    const countdownEl = document.getElementById("checkin-timer");
+    const endTime = new Date(nextCheckinTimeISO).getTime();
+
+    function updateCountdown() {
+      const now = new Date().getTime();
+      const distance = endTime - now;
+
+      if (distance <= 0) {
+        countdownEl.innerText = "🎉 You can check in again now!";
+        return;
+      }
+
+      const hours = Math.floor((distance % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
+      const minutes = Math.floor((distance % (1000 * 60 * 60)) / (1000 * 60));
+      const seconds = Math.floor((distance % (1000 * 60)) / 1000);
+
+      countdownEl.innerText = `⏳ Next check-in in: ${hours}h ${minutes}m ${seconds}s`;
+
+      setTimeout(updateCountdown, 1000);
+    }
+
+    updateCountdown();
+  }
   </script>
 </body>
 </html>
