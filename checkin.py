@@ -60,16 +60,19 @@ def handle_checkin():
         user_id = int(request.args.get("user_id"))
         username = request.args.get("username")
         now = datetime.utcnow()
+        today = now.date()
 
         user = users_collection.find_one({"user_id": user_id})
 
         if not user:
+            next_checkin_time = now + timedelta(days=1)
+
             users_collection.insert_one({
                 "user_id": user_id,
                 "username": username,
                 "xp": CHECKIN_EXP,
                 "weekly_xp": CHECKIN_EXP,
-                "last_checkin": now.isoformat() + "Z",
+                "last_checkin": today.strftime("%Y-%m-%d"),
                 "referral_count": 0
             })
 
@@ -77,15 +80,16 @@ def handle_checkin():
                 "success": True,
                 "message": f"🎉 Check-in successful! +{CHECKIN_EXP} XP",
                 "can_checkin": False,
-                "next_checkin_time": (now + timedelta(hours=24)).isoformat() + "Z"
+                "next_checkin_time": next_checkin_time.isoformat() + "Z"
             })
 
         last_checkin_str = user.get("last_checkin")
         if last_checkin_str:
-            last_checkin_dt = parser.isoparse(last_checkin_str)
-            next_checkin_time = last_checkin_dt + timedelta(hours=24)
+            last_checkin_date = datetime.strptime(last_checkin_str, "%Y-%m-%d").date()
+            if last_checkin_date == today:
+                # Already checked in today
+                next_checkin_time = datetime.combine(today + timedelta(days=1), datetime.min.time())
 
-            if now < next_checkin_time:
                 return jsonify({
                     "success": False,
                     "message": "✅ You’ve already checked in today!",
@@ -93,12 +97,14 @@ def handle_checkin():
                     "next_checkin_time": next_checkin_time.isoformat() + "Z"
                 })
 
-        # Update user
+        # Successful check-in
+        next_checkin_time = now + timedelta(days=1)
+
         users_collection.update_one(
             {"user_id": user_id},
             {
                 "$set": {
-                    "last_checkin": now.isoformat() + "Z",
+                    "last_checkin": today.strftime("%Y-%m-%d"),
                     "username": username
                 },
                 "$inc": {
@@ -112,7 +118,7 @@ def handle_checkin():
             "success": True,
             "message": f"🎉 Check-in successful! +{CHECKIN_EXP} XP",
             "can_checkin": False,
-            "next_checkin_time": (now + timedelta(hours=24)).isoformat() + "Z"
+            "next_checkin_time": next_checkin_time.isoformat() + "Z"
         })
 
     except Exception as e:
