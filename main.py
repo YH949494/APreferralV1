@@ -41,13 +41,11 @@ def api_checkin():
     return handle_checkin()
 
 @app.route("/api/referral")
-@app.route("/api/referral")
 def api_referral():
     try:
         user_id = int(request.args.get("user_id"))
         username = request.args.get("username") or "unknown"
 
-        # Correct async call from sync Flask route
         loop = asyncio.get_event_loop()
         if loop.is_running():
             future = asyncio.run_coroutine_threadsafe(
@@ -60,6 +58,7 @@ def api_referral():
                 get_or_create_referral_link(app_bot.bot, user_id, username)
             )
 
+        print("[API SUCCESS] Referral Link:", referral_link)  # 👈 ADD THIS LINE
         return jsonify({"success": True, "referral_link": referral_link})
 
     except Exception as e:
