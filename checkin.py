@@ -32,7 +32,7 @@ async def checkin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             {"user_id": user_id},
             {
                 "$set": {
-                    "last_checkin": today.strftime("%Y-%m-%d"),
+                    "last_checkin": now.isoformat() + "Z",
                     "username": username
                 },
                 "$inc": {
@@ -59,7 +59,6 @@ def handle_checkin():
         user_id = int(request.args.get("user_id"))
         username = request.args.get("username")
         now = datetime.utcnow()
-        today = now.date()
 
         user = users_collection.find_one({"user_id": user_id})
 
@@ -69,7 +68,7 @@ def handle_checkin():
                 "username": username,
                 "xp": CHECKIN_EXP,
                 "weekly_xp": CHECKIN_EXP,
-                "last_checkin": today.strftime("%Y-%m-%d"),
+                "last_checkin": now.isoformat() + "Z",
                 "referral_count": 0
             })
 
@@ -82,10 +81,11 @@ def handle_checkin():
 
         last_checkin_str = user.get("last_checkin")
         if last_checkin_str:
-            last_checkin_date = datetime.strptime(last_checkin_str, "%Y-%m-%d").date()
-            if last_checkin_date == today:
-                # Already checked in
-                next_checkin_time = now + timedelta(hours=24)
+            last_checkin_dt = datetime.strptime(last_checkin_str.replace("Z", ""), "%Y-%m-%dT%H:%M:%S.%f")
+            next_checkin_time = last_checkin_dt + timedelta(hours=24)
+
+            if now < next_checkin_time:
+                # Not yet time to check in again
                 return jsonify({
                     "success": False,
                     "message": "✅ You’ve already checked in today!",
@@ -98,7 +98,7 @@ def handle_checkin():
             {"user_id": user_id},
             {
                 "$set": {
-                    "last_checkin": today.strftime("%Y-%m-%d"),
+                    "last_checkin": now.isoformat() + "Z",
                     "username": username
                 },
                 "$inc": {
@@ -118,4 +118,3 @@ def handle_checkin():
     except Exception as e:
         print(f"[Check-in Error] {e}")
         return jsonify({"success": False, "message": "❌ Server error"})
-
