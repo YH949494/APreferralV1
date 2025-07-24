@@ -28,9 +28,6 @@ users_collection = db["users"]
 # ----------------------------
 app = Flask(__name__, static_folder="static")
 
-from flask_cors import CORS
-CORS(app)
-
 @app.route("/")
 def home():
     return "Bot is alive!"
