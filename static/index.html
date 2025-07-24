@@ -89,25 +89,37 @@
   }
 }
 
-    async function getReferral() {
-      try {
-        const res = await fetch(`/api/referral?user_id=${userId}&username=${username}`);
-        const data = await res.json();
-        const link = data.referral_link;
+  async function getReferral() {
+  try {
+    const res = await fetch(`/api/referral?user_id=${userId}&username=${username}`);
+    
+    const text = await res.text(); // get raw text response
+    console.log("Raw referral response:", text);
 
-        const display = document.getElementById("referral-link");
-        if (link) {
-          display.innerText = link;
-          await navigator.clipboard.writeText(link);
-          display.innerText += "\n📋 Copied to clipboard!";
-        } else {
-          display.innerText = "❌ Failed to get link.";
-        }
-      } catch (err) {
-        document.getElementById("referral-link").innerText = "❌ Error connecting to server.";
-        console.error(err);
-      }
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch (parseErr) {
+      document.getElementById("referral-link").innerText = "❌ Invalid server response.";
+      console.error("JSON parse error:", parseErr);
+      return;
     }
+
+    const link = data.referral_link;
+
+    const display = document.getElementById("referral-link");
+    if (link) {
+      display.innerText = link;
+      await navigator.clipboard.writeText(link);
+      display.innerText += "\n📋 Copied to clipboard!";
+    } else {
+      display.innerText = "❌ Failed to get link.";
+    }
+  } catch (err) {
+    document.getElementById("referral-link").innerText = "❌ Error connecting to server.";
+    console.error(err);
+  }
+}
     function startCountdown(nextCheckinTimeISO) {
   const countdownEl = document.getElementById("checkin-timer");
   const endTime = Date.parse(nextCheckinTimeISO); // UTC
