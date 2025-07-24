@@ -1,109 +1,52 @@
 from datetime import datetime, timedelta
 from flask import request, jsonify
-from telegram import Update
-from telegram.ext import ContextTypes
 from database import users_collection
 
 CHECKIN_EXP = 20
+COOLDOWN_HOURS = 24
 
-# For Telegram command usage
-async def checkin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-
-    if user is None:
-        return
-
-    user_id = user.id
-    username = user.username
-    today = datetime.utcnow().date()
-
-    user_data = users_collection.find_one({"user_id": user_id})
-
-    if user_data:
-        last_checkin_str = user_data.get("last_checkin")
-
-        if last_checkin_str:
-            last_checkin_date = datetime.strptime(last_checkin_str, "%Y-%m-%d").date()
-            if last_checkin_date == today:
-                await update.message.reply_text("✅ You’ve already checked in today!")
-                return
-
-        users_collection.update_one(
-            {"user_id": user_id},
-            {
-                "$set": {
-                    "last_checkin": now.isoformat() + "Z",
-                    "username": username
-                },
-                "$inc": {
-                    "xp": CHECKIN_EXP,
-                    "weekly_xp": CHECKIN_EXP
-                }
-            }
-        )
-    else:
-        users_collection.insert_one({
-            "user_id": user_id,
-            "username": username,
-            "xp": CHECKIN_EXP,
-            "weekly_xp": CHECKIN_EXP,
-            "last_checkin": today.strftime("%Y-%m-%d"),
-            "referral_count": 0
-        })
-
-    await update.message.reply_text(f"🎉 Check-in successful! You earned {CHECKIN_EXP} XP.")
-
-# For Mini App API usage
 def handle_checkin():
     try:
         user_id = int(request.args.get("user_id"))
-        username = request.args.get("username")
+        username = request.args.get("username", "")
         now = datetime.utcnow()
-        today = now.date()
 
         user = users_collection.find_one({"user_id": user_id})
 
         if not user:
-            next_checkin_time = now + timedelta(days=1)
-
             users_collection.insert_one({
                 "user_id": user_id,
                 "username": username,
                 "xp": CHECKIN_EXP,
                 "weekly_xp": CHECKIN_EXP,
-                "last_checkin": today.strftime("%Y-%m-%d"),
+                "last_checkin": now.isoformat(),
                 "referral_count": 0
             })
-
             return jsonify({
                 "success": True,
                 "message": f"🎉 Check-in successful! +{CHECKIN_EXP} XP",
                 "can_checkin": False,
-                "next_checkin_time": next_checkin_time.isoformat() + "Z"
+                "next_checkin_time": (now + timedelta(hours=COOLDOWN_HOURS)).isoformat()
             })
 
         last_checkin_str = user.get("last_checkin")
         if last_checkin_str:
-            last_checkin_date = datetime.strptime(last_checkin_str, "%Y-%m-%d").date()
-            if last_checkin_date == today:
-                # Already checked in today
-                next_checkin_time = datetime.combine(today + timedelta(days=1), datetime.min.time())
-
+            last_checkin = datetime.fromisoformat(last_checkin_str)
+            elapsed = (now - last_checkin).total_seconds()
+            if elapsed < COOLDOWN_HOURS * 3600:
+                remaining = last_checkin + timedelta(hours=COOLDOWN_HOURS)
                 return jsonify({
                     "success": False,
-                    "message": "✅ You’ve already checked in today!",
+                    "message": "✅ You’ve already checked in. Come back later!",
                     "can_checkin": False,
-                    "next_checkin_time": next_checkin_time.isoformat() + "Z"
+                    "next_checkin_time": remaining.isoformat()
                 })
-
-        # Successful check-in
-        next_checkin_time = now + timedelta(days=1)
 
         users_collection.update_one(
             {"user_id": user_id},
             {
                 "$set": {
-                    "last_checkin": today.strftime("%Y-%m-%d"),
+                    "last_checkin": now.isoformat(),
                     "username": username
                 },
                 "$inc": {
@@ -112,12 +55,11 @@ def handle_checkin():
                 }
             }
         )
-
         return jsonify({
             "success": True,
             "message": f"🎉 Check-in successful! +{CHECKIN_EXP} XP",
             "can_checkin": False,
-            "next_checkin_time": next_checkin_time.isoformat() + "Z"
+            "next_checkin_time": (now + timedelta(hours=COOLDOWN_HOURS)).isoformat()
         })
 
     except Exception as e:
