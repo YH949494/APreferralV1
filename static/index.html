@@ -59,7 +59,7 @@
     tg.expand();
 
     const userId = tg.initDataUnsafe?.user?.id;
-    const username = tg.initDataUnsafe?.user?.username;
+    const username = tg.initDataUnsafe?.user?.username || "unknown";
 
     if (!userId) {
       document.body.innerHTML = "<p style='color:red;'>❌ User ID not found. Please open this Mini App inside Telegram.</p>";
