@@ -77,7 +77,7 @@ def handle_checkin():
                 "success": True,
                 "message": f"🎉 Check-in successful! +{CHECKIN_EXP} XP",
                 "can_checkin": False,
-                "next_checkin_time": (now + timedelta(days=1)).isoformat()
+                "next_checkin_time = datetime.utcnow() + timedelta(hours=24)
             })
 
         last_checkin_str = user.get("last_checkin")
@@ -90,7 +90,7 @@ def handle_checkin():
                     "success": False,
                     "message": "✅ You’ve already checked in today!",
                     "can_checkin": False,
-                    "next_checkin_time": next_checkin_time.isoformat()
+                    "next_checkin_time": next_checkin_time.isoformat() + "Z"
                 })
 
         # Update check-in data
