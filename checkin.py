@@ -1,5 +1,4 @@
 from datetime import datetime, timedelta
-from dateutil import parser
 from flask import request, jsonify
 from telegram import Update
 from telegram.ext import ContextTypes
