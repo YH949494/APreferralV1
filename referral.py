@@ -1,14 +1,38 @@
 from telegram import Bot
-from database import users_collection
+from telegram.constants import ChatInviteLinkCreateOptions
+from pymongo import MongoClient
+import os
+
+# MongoDB setup
+MONGO_URL = os.environ.get("MONGO_URL")
+client = MongoClient(MONGO_URL)
+db = client["referral_bot"]
+users_collection = db["users"]
+
+GROUP_ID = -1002723991859  # Replace with your actual group ID
 
 async def get_or_create_referral_link(bot: Bot, user_id: int, username: str):
-    invite_name = f"ref-{user_id}"
+    user = users_collection.find_one({"user_id": user_id})
+    
+    if user and user.get("referral_link"):
+        return user["referral_link"]
 
-    # Check if user exists, else insert
+    # Create a new invite link named "ref-{user_id}"
+    invite_link = await bot.create_chat_invite_link(
+        chat_id=GROUP_ID,
+        name=f"ref-{user_id}",
+        creates_join_request=True,
+        member_limit=0
+    )
+
+    # Save it to the database
     users_collection.update_one(
         {"user_id": user_id},
         {
-            "$set": {"username": username},
+            "$set": {
+                "referral_link": invite_link.invite_link,
+                "username": username
+            },
             "$setOnInsert": {
                 "xp": 0,
                 "weekly_xp": 0,
@@ -19,15 +43,4 @@ async def get_or_create_referral_link(bot: Bot, user_id: int, username: str):
         upsert=True
     )
 
-    # Reuse or create a new link
-    links = await bot.get_chat_invite_links(chat_id=-1002723991859)
-    for link in links:
-        if link.name == invite_name:
-            return link.invite_link
-
-    new_link = await bot.create_chat_invite_link(
-        chat_id=-1002723991859,
-        name=invite_name,
-        creates_join_request=True
-    )
-    return new_link.invite_link
+    return invite_link.invite_link
