@@ -2,7 +2,7 @@ from flask import Flask, request, jsonify, send_from_directory
 from threading import Thread
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from telegram.ext import ApplicationBuilder, CommandHandler, ChatJoinRequestHandler, ContextTypes
-from checkin import checkin_handler, handle_checkin
+from checkin import handle_checkin
 from referral import get_or_create_referral_link
 from pymongo import MongoClient
 import os
