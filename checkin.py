@@ -85,7 +85,7 @@ def handle_checkin():
             last_checkin_date = datetime.strptime(last_checkin_str, "%Y-%m-%d").date()
             if last_checkin_date == today:
                 # Already checked in
-                next_checkin_time = datetime.combine(today + timedelta(days=1), datetime.min.time())
+                next_checkin_time = datetime.utcnow() + timedelta(hours=24)
                 return jsonify({
                     "success": False,
                     "message": "✅ You’ve already checked in today!",
