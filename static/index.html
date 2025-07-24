@@ -70,6 +70,11 @@
    async function checkIn() {
   try {
     const res = await fetch(`/api/checkin?user_id=${userId}&username=${username}`);
+    
+    if (!res.ok) {
+      throw new Error(`Server responded with status ${res.status}`);
+    }
+
     const data = await res.json();
 
     document.getElementById("checkin-result").innerText = data.message || "Check-in failed.";
@@ -77,9 +82,10 @@
     if (data.next_checkin_time) {
       startCountdown(data.next_checkin_time);
     }
+
   } catch (err) {
     document.getElementById("checkin-result").innerText = "❌ Error connecting to server.";
-    console.error(err);
+    console.error("Check-in error:", err);
   }
 }
 
