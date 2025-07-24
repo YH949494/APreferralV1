@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+from dateutil import parser
 from flask import request, jsonify
 from telegram import Update
 from telegram.ext import ContextTypes
@@ -81,11 +82,10 @@ def handle_checkin():
 
         last_checkin_str = user.get("last_checkin")
         if last_checkin_str:
-            last_checkin_dt = datetime.strptime(last_checkin_str.replace("Z", ""), "%Y-%m-%dT%H:%M:%S.%f")
+            last_checkin_dt = parser.isoparse(last_checkin_str)
             next_checkin_time = last_checkin_dt + timedelta(hours=24)
 
             if now < next_checkin_time:
-                # Not yet time to check in again
                 return jsonify({
                     "success": False,
                     "message": "✅ You’ve already checked in today!",
@@ -93,7 +93,7 @@ def handle_checkin():
                     "next_checkin_time": next_checkin_time.isoformat() + "Z"
                 })
 
-        # Update check-in data
+        # Update user
         users_collection.update_one(
             {"user_id": user_id},
             {
