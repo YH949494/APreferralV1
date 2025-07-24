@@ -46,9 +46,9 @@ def api_referral():
         user_id = int(request.args.get("user_id"))
         username = request.args.get("username") or "unknown"
         
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        referral_link = loop.run_until_complete(get_or_create_referral_link(app_bot.bot, user_id, username))
+        referral_link = asyncio.run(
+    get_or_create_referral_link(app_bot.bot, user_id, username)
+)
         
         return jsonify({"success": True, "referral_link": referral_link})
     except Exception as e:
