@@ -104,28 +104,32 @@
     }
     function startCountdown(nextCheckinTimeISO) {
     const countdownEl = document.getElementById("checkin-timer");
-    const endTime = new Date(nextCheckinTimeISO).getTime();
+    const endTime = Date.parse(nextCheckinTimeISO); // Keep in UTC
 
-    function updateCountdown() {
-      const now = new Date().getTime();
-      const distance = endTime - now;
+    function startCountdown(nextCheckinTimeISO) {
+  const countdownEl = document.getElementById("checkin-timer");
+  const endTime = Date.parse(nextCheckinTimeISO); // UTC
 
-      if (distance <= 0) {
-        countdownEl.innerText = "🎉 You can check in again now!";
-        return;
-      }
+  function updateCountdown() {
+    const now = new Date().getTime(); // Local
+    const distance = endTime - now;
 
-      const hours = Math.floor((distance % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
-      const minutes = Math.floor((distance % (1000 * 60 * 60)) / (1000 * 60));
-      const seconds = Math.floor((distance % (1000 * 60)) / 1000);
-
-      countdownEl.innerText = `⏳ Next check-in in: ${hours}h ${minutes}m ${seconds}s`;
-
-      setTimeout(updateCountdown, 1000);
+    if (distance <= 0) {
+      countdownEl.innerText = "🎉 You can check in again now!";
+      return;
     }
 
-    updateCountdown();
+    const totalHours = Math.floor(distance / (1000 * 60 * 60));
+    const minutes = Math.floor((distance % (1000 * 60 * 60)) / (1000 * 60));
+    const seconds = Math.floor((distance % (1000 * 60)) / 1000);
+
+    countdownEl.innerText = `⏳ Next check-in in: ${totalHours}h ${minutes}m ${seconds}s`;
+
+    setTimeout(updateCountdown, 1000);
   }
+
+  updateCountdown();
+}
   </script>
 </body>
 </html>
