@@ -1,67 +1,63 @@
-from datetime import datetime, timedelta
 from flask import request, jsonify
-from database import users_collection
+from pymongo import MongoClient
+import os
+from datetime import datetime, timedelta
 
-CHECKIN_EXP = 20
-COOLDOWN_HOURS = 24
+# MongoDB setup
+MONGO_URL = os.environ.get("MONGO_URL")
+client = MongoClient(MONGO_URL)
+db = client["referral_bot"]
+users_collection = db["users"]
 
 def handle_checkin():
-    try:
-        user_id = int(request.args.get("user_id"))
-        username = request.args.get("username", "")
-        now = datetime.utcnow()
+    user_id = request.args.get("user_id", type=int)
+    username = request.args.get("username", default="")
 
-        user = users_collection.find_one({"user_id": user_id})
+    if not user_id:
+        return jsonify({"error": "Missing user_id"}), 400
 
-        if not user:
-            users_collection.insert_one({
-                "user_id": user_id,
-                "username": username,
-                "xp": CHECKIN_EXP,
-                "weekly_xp": CHECKIN_EXP,
-                "last_checkin": now.isoformat(),
-                "referral_count": 0
-            })
+    user = users_collection.find_one({"user_id": user_id})
+    now = datetime.utcnow()
+
+    if not user:
+        user = {
+            "user_id": user_id,
+            "username": username,
+            "xp": 0,
+            "weekly_xp": 0,
+            "referral_count": 0,
+            "last_checkin": None
+        }
+
+    last_checkin = user.get("last_checkin")
+    if last_checkin:
+        elapsed = now - last_checkin
+        if elapsed < timedelta(hours=24):
+            remaining = timedelta(hours=24) - elapsed
+            hours = int(remaining.total_seconds() // 3600)
+            minutes = int((remaining.total_seconds() % 3600) // 60)
             return jsonify({
-                "success": True,
-                "message": f"🎉 Check-in successful! +{CHECKIN_EXP} XP",
-                "can_checkin": False,
-                "next_checkin_time": (now + timedelta(hours=COOLDOWN_HOURS)).isoformat()
+                "success": False,
+                "message": f"⏳ Come back in {hours}h {minutes}m to check in again!"
             })
 
-        last_checkin_str = user.get("last_checkin")
-        if last_checkin_str:
-            last_checkin = datetime.fromisoformat(last_checkin_str)
-            elapsed = (now - last_checkin).total_seconds()
-            if elapsed < COOLDOWN_HOURS * 3600:
-                remaining = last_checkin + timedelta(hours=COOLDOWN_HOURS)
-                return jsonify({
-                    "success": False,
-                    "message": "✅ You’ve already checked in. Come back later!",
-                    "can_checkin": False,
-                    "next_checkin_time": remaining.isoformat()
-                })
-
-        users_collection.update_one(
-            {"user_id": user_id},
-            {
-                "$set": {
-                    "last_checkin": now.isoformat(),
-                    "username": username
-                },
-                "$inc": {
-                    "xp": CHECKIN_EXP,
-                    "weekly_xp": CHECKIN_EXP
-                }
+    # Update XP
+    users_collection.update_one(
+        {"user_id": user_id},
+        {
+            "$set": {
+                "username": username,
+                "last_checkin": now
+            },
+            "$inc": {
+                "xp": 20,
+                "weekly_xp": 20
             }
-        )
-        return jsonify({
-            "success": True,
-            "message": f"🎉 Check-in successful! +{CHECKIN_EXP} XP",
-            "can_checkin": False,
-            "next_checkin_time": (now + timedelta(hours=COOLDOWN_HOURS)).isoformat()
-        })
+        },
+        upsert=True
+    )
 
-    except Exception as e:
-        print(f"[Check-in Error] {e}")
-        return jsonify({"success": False, "message": "❌ Server error"})
+    return jsonify({
+        "success": True,
+        "message": "✅ Check-in successful! +20 XP"
+    })
