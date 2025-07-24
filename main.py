@@ -1,4 +1,5 @@
 from flask import Flask, request, jsonify, send_from_directory
+from flask_cors import CORS
 from threading import Thread
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from telegram.ext import ApplicationBuilder, CommandHandler, ChatJoinRequestHandler, ContextTypes
@@ -27,6 +28,7 @@ users_collection = db["users"]
 # Flask App
 # ----------------------------
 app = Flask(__name__, static_folder="static")
+CORS(app)
 
 @app.route("/")
 def home():
