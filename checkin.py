@@ -77,7 +77,7 @@ def handle_checkin():
                 "success": True,
                 "message": f"🎉 Check-in successful! +{CHECKIN_EXP} XP",
                 "can_checkin": False,
-                "next_checkin_time = datetime.utcnow() + timedelta(hours=24)
+                "next_checkin_time": (now + timedelta(hours=24)).isoformat() + "Z"
             })
 
         last_checkin_str = user.get("last_checkin")
@@ -85,7 +85,7 @@ def handle_checkin():
             last_checkin_date = datetime.strptime(last_checkin_str, "%Y-%m-%d").date()
             if last_checkin_date == today:
                 # Already checked in
-                next_checkin_time = datetime.utcnow() + timedelta(hours=24)
+                next_checkin_time = now + timedelta(hours=24)
                 return jsonify({
                     "success": False,
                     "message": "✅ You’ve already checked in today!",
@@ -112,9 +112,10 @@ def handle_checkin():
             "success": True,
             "message": f"🎉 Check-in successful! +{CHECKIN_EXP} XP",
             "can_checkin": False,
-            "next_checkin_time": (now + timedelta(days=1)).isoformat()
+            "next_checkin_time": (now + timedelta(hours=24)).isoformat() + "Z"
         })
 
     except Exception as e:
         print(f"[Check-in Error] {e}")
         return jsonify({"success": False, "message": "❌ Server error"})
+
