@@ -29,7 +29,7 @@ async def get_or_create_referral_link(bot: Bot, user_id: int, username: str = "u
     
 print("[Referral] New link created:", invite_link.invite_link)
 
-    users_collection.update_one(
+users_collection.update_one(
         {"user_id": user_id},
         {
             "$set": {
@@ -47,7 +47,6 @@ print("[Referral] New link created:", invite_link.invite_link)
     )
 
     return invite_link.invite_link
-
     # Save it to the database
     users_collection.update_one(
         {"user_id": user_id},
