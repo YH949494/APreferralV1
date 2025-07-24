@@ -26,6 +26,27 @@ async def get_or_create_referral_link(bot: Bot, user_id: int, username: str = "u
         creates_join_request=True,
         member_limit=0
     )
+    
+print("[Referral] New link created:", invite_link.invite_link)
+
+    users_collection.update_one(
+        {"user_id": user_id},
+        {
+            "$set": {
+                "referral_link": invite_link.invite_link,
+                "username": username
+            },
+            "$setOnInsert": {
+                "xp": 0,
+                "weekly_xp": 0,
+                "referral_count": 0,
+                "last_checkin": None
+            }
+        },
+        upsert=True
+    )
+
+    return invite_link.invite_link
 
     # Save it to the database
     users_collection.update_one(
