@@ -10,9 +10,12 @@ users_collection = db["users"]
 
 GROUP_ID = -1002723991859  # Replace with your actual group ID
 
-async def get_or_create_referral_link(bot: Bot, user_id: int, username: str):
+async def get_or_create_referral_link(bot: Bot, user_id: int, username: str = "unknown") -> str:
+    # Fallback if username is None or empty
+    username = username or "unknown"
+
     user = users_collection.find_one({"user_id": user_id})
-    
+
     if user and user.get("referral_link"):
         return user["referral_link"]
 
