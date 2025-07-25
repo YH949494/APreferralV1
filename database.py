@@ -6,7 +6,6 @@ MONGO_URL = os.environ.get("MONGO_URL")
 client = MongoClient(MONGO_URL)
 db = client["telegram_bot"]
 leaderboard_collection = db["weekly_leaderboard"]
-weekly_history_collection = db["weekly_history"]
 
 # === USERS COLLECTION ===
 users_collection = db["users"]
