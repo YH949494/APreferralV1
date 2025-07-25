@@ -24,7 +24,7 @@ async def get_or_create_referral_link(bot: Bot, user_id: int, username: str):
     # Delete old invite link if any
     if user and "referral_link" in user:
         try:
-            await bot.revoke_chat_invite_link(chat_id="@YourChannelOrGroupUsername", invite_link=user["referral_link"])
+            await bot.revoke_chat_invite_link(chat_id=GROUP_ID, invite_link=user["referral_link"])
         except:
             pass  # ignore if already revoked or invalid
 
