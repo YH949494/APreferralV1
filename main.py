@@ -112,23 +112,40 @@ async def join_request_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     user = update.chat_join_request.from_user
     invite_link = update.chat_join_request.invite_link
 
-    if invite_link and getattr(invite_link, "name", "").startswith("ref-"):
-        referrer_id = int(invite_link.name.split("-")[1])
+    existing_user = users_collection.find_one({"user_id": user.id})
 
+    # If user has already joined before, prevent XP abuse
+    if existing_user and existing_user.get("joined_once"):
+        print(f"[No XP] {user.username} has already joined before.")
+    else:
+        # First time join — mark and give referral bonus
         users_collection.update_one(
-            {"user_id": referrer_id},
-            {"$inc": {"referral_count": 1}}
+            {"user_id": user.id},
+            {
+                "$set": {
+                    "username": user.username,
+                    "joined_once": True
+                },
+                "$setOnInsert": {
+                    "xp": 0,
+                    "referral_count": 0,
+                    "weekly_xp": 0,
+                    "last_checkin": None
+                }
+            },
+            upsert=True
         )
 
-    users_collection.update_one(
-        {"user_id": user.id},
-        {
-            "$set": {"username": user.username},
-            "$setOnInsert": {"xp": 0, "referral_count": 0, "weekly_xp": 0, "last_checkin": None}
-        },
-        upsert=True
-    )
+        # If the user joined via referral
+        if invite_link and getattr(invite_link, "name", "").startswith("ref-"):
+            referrer_id = int(invite_link.name.split("-")[1])
+            users_collection.update_one(
+                {"user_id": referrer_id},
+                {"$inc": {"referral_count": 1, "xp": 20, "weekly_xp": 20}}
+            )
+            print(f"[Referral] {user.username} joined using {referrer_id}'s link.")
 
+    # Approve the join request
     await context.bot.approve_chat_join_request(update.chat_join_request.chat.id, user.id)
 
 # Prevent re-referral abuse
