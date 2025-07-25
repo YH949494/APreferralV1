@@ -92,7 +92,7 @@ async def join_request_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     user = update.chat_join_request.from_user
     invite_link = update.chat_join_request.invite_link
 
-    if invite_link and invite_link.name and invite_link.name.startswith("ref-"):
+    if invite_link and getattr(invite_link, "name", "").startswith("ref-"):
         referrer_id = int(invite_link.name.split("-")[1])
 
         users_collection.update_one(
