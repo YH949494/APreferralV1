@@ -42,9 +42,8 @@
   <div class="section">
     <h3>✅ Daily Check-in</h3>
     <button onclick="checkIn()">Check In</button>
-   <p id="checkin-result"></p>
-   <p id="checkin-timer" style="color: gray; font-size: 14px;"></p>
-
+    <p id="checkin-result"></p>
+    <p id="checkin-timer" style="color: gray; font-size: 14px;"></p>
   </div>
 
   <div class="section">
@@ -58,92 +57,101 @@
     tg.ready();
     tg.expand();
 
-    const userId = tg.initDataUnsafe?.user?.id;
-    const username = tg.initDataUnsafe?.user?.username || "unknown";
+    const API_BASE = "https://apreferralv1.fly.dev";
+
+    const user = tg.initDataUnsafe?.user || {};
+    const userId = user.id;
+    const username = user.username || "unknown";
 
     if (!userId) {
       document.body.innerHTML = "<p style='color:red;'>❌ User ID not found. Please open this Mini App inside Telegram.</p>";
     }
 
-    console.log("userId:", userId, "username:", username);
+    console.log("User Info:", userId, username);
 
-   async function checkIn() {
-  try {
-    const res = await fetch(`/api/checkin?user_id=${userId}&username=${username}`);
-    
-    if (!res.ok) {
-      throw new Error(`Server responded with status ${res.status}`);
+    async function checkIn() {
+      try {
+        const res = await fetch(`${API_BASE}/api/checkin?user_id=${userId}&username=${username}`);
+
+        if (!res.ok) {
+          throw new Error(`Server responded with status ${res.status}`);
+        }
+
+        const data = await res.json();
+        document.getElementById("checkin-result").innerText = data.message || "Check-in failed.";
+
+        if (data.next_checkin_time) {
+          startCountdown(data.next_checkin_time);
+        }
+
+      } catch (err) {
+        document.getElementById("checkin-result").innerText = "❌ Error connecting to server.";
+        console.error("Check-in error:", err);
+      }
     }
 
-    const data = await res.json();
+    async function getReferral() {
+      const display = document.getElementById("referral-link");
 
-    document.getElementById("checkin-result").innerText = data.message || "Check-in failed.";
+      try {
+        const res = await fetch(`${API_BASE}/api/referral?user_id=${userId}&username=${username}`);
+        const rawText = await res.text();
 
-    if (data.next_checkin_time) {
-      startCountdown(data.next_checkin_time);
+        console.log("Raw referral response:", rawText);
+
+        let data;
+        try {
+          data = JSON.parse(rawText);
+        } catch (parseErr) {
+          display.innerText = "❌ Invalid server response.";
+          console.error("JSON parse error:", parseErr);
+          return;
+        }
+
+        const link = data.referral_link;
+
+        if (link) {
+          display.innerText = link;
+          try {
+            await navigator.clipboard.writeText(link);
+            display.innerText += "\n📋 Copied to clipboard!";
+          } catch (clipboardErr) {
+            console.warn("Clipboard write failed:", clipboardErr);
+          }
+        } else {
+          display.innerText = "❌ Failed to get link.";
+        }
+
+      } catch (err) {
+        display.innerText = "❌ Error connecting to server.";
+        console.error("Referral fetch error:", err);
+      }
     }
 
-  } catch (err) {
-    document.getElementById("checkin-result").innerText = "❌ Error connecting to server.";
-    console.error("Check-in error:", err);
-  }
-}
-
-  async function getReferral() {
-  try {
-    const res = await fetch(`https://apreferralv1.fly.dev/api/referral?user_id=${userId}&username=${username}`);
-    
-    const text = await res.text(); // get raw text response
-    console.log("Raw referral response:", text);
-
-    let data;
-    try {
-      data = JSON.parse(text);
-    } catch (parseErr) {
-      document.getElementById("referral-link").innerText = "❌ Invalid server response.";
-      console.error("JSON parse error:", parseErr);
-      return;
-    }
-
-    const link = data.referral_link;
-
-    const display = document.getElementById("referral-link");
-    if (link) {
-      display.innerText = link;
-      await navigator.clipboard.writeText(link);
-      display.innerText += "\n📋 Copied to clipboard!";
-    } else {
-      display.innerText = "❌ Failed to get link.";
-    }
-  } catch (err) {
-    document.getElementById("referral-link").innerText = "❌ Error connecting to server.";
-    console.error(err);
-  }
-}
     function startCountdown(nextCheckinTimeISO) {
-  const countdownEl = document.getElementById("checkin-timer");
-  const endTime = Date.parse(nextCheckinTimeISO); // UTC
+      const countdownEl = document.getElementById("checkin-timer");
+      const endTime = Date.parse(nextCheckinTimeISO); // UTC
 
-  function updateCountdown() {
-    const now = new Date().getTime(); // Local
-    const distance = endTime - now;
+      function updateCountdown() {
+        const now = new Date().getTime(); // Local
+        const distance = endTime - now;
 
-    if (distance <= 0) {
-      countdownEl.innerText = "🎉 You can check in again now!";
-      return;
+        if (distance <= 0) {
+          countdownEl.innerText = "🎉 You can check in again now!";
+          return;
+        }
+
+        const totalHours = Math.floor(distance / (1000 * 60 * 60));
+        const minutes = Math.floor((distance % (1000 * 60 * 60)) / (1000 * 60));
+        const seconds = Math.floor((distance % (1000 * 60)) / 1000);
+
+        countdownEl.innerText = `⏳ Next check-in in: ${totalHours}h ${minutes}m ${seconds}s`;
+
+        setTimeout(updateCountdown, 1000);
+      }
+
+      updateCountdown();
     }
-
-    const totalHours = Math.floor(distance / (1000 * 60 * 60));
-    const minutes = Math.floor((distance % (1000 * 60 * 60)) / (1000 * 60));
-    const seconds = Math.floor((distance % (1000 * 60)) / 1000);
-
-    countdownEl.innerText = `⏳ Next check-in in: ${totalHours}h ${minutes}m ${seconds}s`;
-
-    setTimeout(updateCountdown, 1000);
-  }
-
-  updateCountdown();
-}
   </script>
 </body>
 </html>
