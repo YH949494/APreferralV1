@@ -1,31 +1,23 @@
 from datetime import datetime
-from database import users_collection, history_collection
+from apscheduler.schedulers.background import BackgroundScheduler
 
-def archive_and_reset_weekly_leaderboard():
+def archive_weekly_leaderboard():
     now = datetime.utcnow()
-    snapshot = []
+    week_key = now.strftime("%Y-%W")
 
-    users = users_collection.find()
-    for user in users:
-        data = {
-            "user_id": user["user_id"],
-            "username": user.get("username", ""),
-            "xp": user.get("XP", 0),
-            "weekly_xp": user.get("PastWeekXP", 0),
-            "weekly_referrals": user.get("weekly_referrals", 0),
-            "timestamp": now
-        }
-        snapshot.append(data)
+    snapshot = {
+        "week": week_key,
+        "checkin": list(users_collection.find({}, {"username": 1, "weekly_xp": 1, "_id": 0})),
+        "referral": list(users_collection.find({}, {"username": 1, "referral_count": 1, "_id": 0})),
+        "timestamp": now
+    }
 
-    if snapshot:
-        history_collection.insert_many(snapshot)
+    leaderboard_collection.insert_one(snapshot)
 
-    # Reset weekly counters
-    users_collection.update_many({}, {
-        "$set": {
-            "PastWeekXP": 0,
-            "weekly_referrals": 0
-        }
-    })
+    # Reset weekly values
+    users_collection.update_many({}, {"$set": {"weekly_xp": 0, "referral_count": 0}})
+    print(f"Leaderboard archived for {week_key}")
 
-    print("✅ Weekly leaderboard archived and reset.")
+scheduler = BackgroundScheduler()
+scheduler.add_job(archive_weekly_leaderboard, 'cron', day_of_week='mon', hour=0)
+scheduler.start()
