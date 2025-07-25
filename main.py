@@ -58,6 +58,26 @@ def api_referral():
         traceback.print_exc()
         return jsonify({"success": False, "error": str(e)}), 500
 
+@app.route("/api/leaderboard")
+def get_leaderboard():
+    try:
+        top_checkins = list(users_collection.find().sort("weekly_xp", -1).limit(10))
+        top_referrals = list(users_collection.find().sort("referral_count", -1).limit(10))
+        
+        leaderboard = {
+            "checkin": [
+                {"username": u.get("username", "unknown"), "xp": u.get("weekly_xp", 0)}
+                for u in top_checkins
+            ],
+            "referral": [
+                {"username": u.get("username", "unknown"), "referrals": u.get("referral_count", 0)}
+                for u in top_referrals
+            ]
+        }
+        return jsonify({"success": True, "leaderboard": leaderboard})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
 # ----------------------------
 # Telegram Bot Handlers
 # ----------------------------
