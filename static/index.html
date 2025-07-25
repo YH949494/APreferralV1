@@ -115,37 +115,45 @@
     }
 
     async function getReferral() {
-      const display = document.getElementById("referral-link");
+  const display = document.getElementById("referral-link");
 
-      try {
-        const res = await fetch(`${API_BASE}/api/referral?user_id=${userId}&username=${username}`);
-        const rawText = await res.text();
+  try {
+    const res = await fetch(`${API_BASE}/api/referral?user_id=${userId}&username=${username}`);
+    const rawText = await res.text();
 
-        let data;
-        try {
-          data = JSON.parse(rawText);
-        } catch (parseErr) {
-          display.innerText = "❌ Invalid server response.";
-          return;
-        }
-
-        const link = data.referral_link;
-        if (link) {
-          display.innerText = link;
-          try {
-            await navigator.clipboard.writeText(link);
-            display.innerText += "\n📋 Copied to clipboard!";
-          } catch (clipboardErr) {
-            console.warn("Clipboard write failed:", clipboardErr);
-          }
-        } else {
-          display.innerText = "❌ Failed to get link.";
-        }
-      } catch (err) {
-        display.innerText = "❌ Error connecting to server.";
-        console.error("Referral fetch error:", err);
-      }
+    let data;
+    try {
+      data = JSON.parse(rawText);
+    } catch (parseErr) {
+      display.innerText = "❌ Invalid server response.";
+      console.error("JSON parse error:", parseErr);
+      return;
     }
+
+    const link = data.referral_link;
+
+    if (link) {
+      display.innerText = link;
+
+      // Delay to ensure DOM update before copying
+      setTimeout(async () => {
+        try {
+          await navigator.clipboard.writeText(link);
+          display.innerText += "\n📋 Copied to clipboard!";
+        } catch (clipboardErr) {
+          console.warn("Clipboard write failed:", clipboardErr);
+          display.innerText += "\n⚠️ Please copy manually.";
+        }
+      }, 200); // slight delay to improve consistency
+    } else {
+      display.innerText = "❌ Failed to get link.";
+    }
+
+  } catch (err) {
+    display.innerText = "❌ Error connecting to server.";
+    console.error("Referral fetch error:", err);
+  }
+}
 
     function startCountdown(nextCheckinTimeISO) {
       const countdownEl = document.getElementById("checkin-timer");
