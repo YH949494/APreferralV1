@@ -52,6 +52,12 @@
     <p id="referral-link">Click the button to get your link</p>
   </div>
 
+  <div class="section">
+  <h3>🏆 Weekly Leaderboard</h3>
+  <button onclick="loadLeaderboard()">View Leaderboard</button>
+  <pre id="leaderboard-output"></pre>
+</div>
+
   <script>
     const tg = window.Telegram.WebApp;
     tg.ready();
@@ -152,6 +158,24 @@
 
       updateCountdown();
     }
+
+    async function loadLeaderboard() {
+  try {
+    const res = await fetch(`https://apreferralv1.fly.dev/api/leaderboard`);
+    const data = await res.json();
+
+    if (!data.success) throw new Error(data.error);
+
+    const output = document.getElementById("leaderboard-output");
+    const checkinList = data.leaderboard.checkin.map((u, i) => `${i + 1}. ${u.username} - ${u.xp} XP`).join("\n");
+    const referralList = data.leaderboard.referral.map((u, i) => `${i + 1}. ${u.username} - ${u.referrals} Ref`).join("\n");
+
+    output.innerText = `🔁 Check-in Leaderboard:\n${checkinList}\n\n🔗 Referral Leaderboard:\n${referralList}`;
+  } catch (err) {
+    console.error(err);
+    document.getElementById("leaderboard-output").innerText = "❌ Error loading leaderboard.";
+  }
+}
   </script>
 </body>
 </html>
