@@ -28,7 +28,7 @@ users_collection = db["users"]
 # Flask App
 # ----------------------------
 app = Flask(__name__, static_folder="static")
-CORS(app)
+CORS(app, resources={r"/*": {"origins": "*"}})
 
 @app.route("/")
 def home():
