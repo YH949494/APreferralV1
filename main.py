@@ -131,6 +131,27 @@ async def join_request_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
     await context.bot.approve_chat_join_request(update.chat_join_request.chat.id, user.id)
 
+# Prevent re-referral abuse
+existing_user = users_collection.find_one({"user_id": user.id})
+
+if existing_user and existing_user.get("joined_once"):
+    print("User re-joined. No referral XP given.")
+else:
+    # Mark user as joined once
+    users_collection.update_one(
+        {"user_id": user.id},
+        {"$set": {"joined_once": True}},
+        upsert=True
+    )
+
+    # Process referral if valid
+    if invite_link and invite_link.name and invite_link.name.startswith("ref-"):
+        referrer_id = int(invite_link.name.split("-")[1])
+        users_collection.update_one(
+            {"user_id": referrer_id},
+            {"$inc": {"referral_count": 1}}
+        )
+
 # ----------------------------
 # Run Bot + Flask
 # ----------------------------
