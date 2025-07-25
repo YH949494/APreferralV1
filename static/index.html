@@ -7,32 +7,60 @@
   <style>
     body {
       background-color: #f4f4f4;
-      font-family: Arial, sans-serif;
+      font-family: 'Arial', sans-serif;
       padding: 20px;
       color: #333;
+      font-size: 16px;
     }
-    h2 { text-align: center; }
+
+    h2, h3 {
+      text-align: center;
+      font-weight: 600;
+    }
+
     .section {
-      background: white;
+      background: #ffffff;
       padding: 20px;
       margin: 15px 0;
       border-radius: 10px;
-      box-shadow: 0 2px 6px rgba(0,0,0,0.1);
+      box-shadow: 0 2px 6px rgba(0, 0, 0, 0.1);
     }
+
     button {
       background-color: #0088cc;
       color: white;
       padding: 10px 20px;
+      font-size: 15px;
       border: none;
       border-radius: 6px;
       cursor: pointer;
+      font-family: inherit;
     }
+
     button:hover {
       background-color: #006699;
     }
+
     #referral-link {
       word-break: break-word;
       margin-top: 10px;
+      font-size: 15px;
+    }
+
+    #checkin-result,
+    #checkin-timer {
+      margin-top: 10px;
+      font-size: 15px;
+    }
+
+    #leaderboard-output {
+      margin-top: 10px;
+      font-family: 'Courier New', monospace;
+      white-space: pre-wrap;
+      background: #f9f9f9;
+      padding: 15px;
+      border-radius: 8px;
+      border: 1px solid #ddd;
     }
   </style>
 </head>
@@ -43,7 +71,7 @@
     <h3>✅ Daily Check-in</h3>
     <button onclick="checkIn()">Check In</button>
     <p id="checkin-result"></p>
-    <p id="checkin-timer" style="color: gray; font-size: 14px;"></p>
+    <p id="checkin-timer" style="color: gray;"></p>
   </div>
 
   <div class="section">
@@ -53,10 +81,10 @@
   </div>
 
   <div class="section">
-  <h3>🏆 Weekly Leaderboard</h3>
-  <button onclick="loadLeaderboard()">View Leaderboard</button>
-  <pre id="leaderboard-output"></pre>
-</div>
+    <h3>🏆 Weekly Leaderboard</h3>
+    <button onclick="loadLeaderboard()">View Leaderboard</button>
+    <div id="leaderboard-output">Click to load latest rankings...</div>
+  </div>
 
   <script>
     const tg = window.Telegram.WebApp;
@@ -73,23 +101,13 @@
       document.body.innerHTML = "<p style='color:red;'>❌ User ID not found. Please open this Mini App inside Telegram.</p>";
     }
 
-    console.log("User Info:", userId, username);
-
     async function checkIn() {
       try {
         const res = await fetch(`${API_BASE}/api/checkin?user_id=${userId}&username=${username}`);
-
-        if (!res.ok) {
-          throw new Error(`Server responded with status ${res.status}`);
-        }
-
         const data = await res.json();
+
         document.getElementById("checkin-result").innerText = data.message || "Check-in failed.";
-
-        if (data.next_checkin_time) {
-          startCountdown(data.next_checkin_time);
-        }
-
+        if (data.next_checkin_time) startCountdown(data.next_checkin_time);
       } catch (err) {
         document.getElementById("checkin-result").innerText = "❌ Error connecting to server.";
         console.error("Check-in error:", err);
@@ -103,19 +121,15 @@
         const res = await fetch(`${API_BASE}/api/referral?user_id=${userId}&username=${username}`);
         const rawText = await res.text();
 
-        console.log("Raw referral response:", rawText);
-
         let data;
         try {
           data = JSON.parse(rawText);
         } catch (parseErr) {
           display.innerText = "❌ Invalid server response.";
-          console.error("JSON parse error:", parseErr);
           return;
         }
 
         const link = data.referral_link;
-
         if (link) {
           display.innerText = link;
           try {
@@ -127,7 +141,6 @@
         } else {
           display.innerText = "❌ Failed to get link.";
         }
-
       } catch (err) {
         display.innerText = "❌ Error connecting to server.";
         console.error("Referral fetch error:", err);
@@ -136,10 +149,10 @@
 
     function startCountdown(nextCheckinTimeISO) {
       const countdownEl = document.getElementById("checkin-timer");
-      const endTime = Date.parse(nextCheckinTimeISO); // UTC
+      const endTime = Date.parse(nextCheckinTimeISO);
 
       function updateCountdown() {
-        const now = new Date().getTime(); // Local
+        const now = new Date().getTime();
         const distance = endTime - now;
 
         if (distance <= 0) {
@@ -147,12 +160,11 @@
           return;
         }
 
-        const totalHours = Math.floor(distance / (1000 * 60 * 60));
-        const minutes = Math.floor((distance % (1000 * 60 * 60)) / (1000 * 60));
-        const seconds = Math.floor((distance % (1000 * 60)) / 1000);
+        const h = Math.floor(distance / (1000 * 60 * 60));
+        const m = Math.floor((distance % (1000 * 60 * 60)) / (1000 * 60));
+        const s = Math.floor((distance % (1000 * 60)) / 1000);
 
-        countdownEl.innerText = `⏳ Next check-in in: ${totalHours}h ${minutes}m ${seconds}s`;
-
+        countdownEl.innerText = `⏳ Next check-in in: ${h}h ${m}m ${s}s`;
         setTimeout(updateCountdown, 1000);
       }
 
@@ -160,22 +172,24 @@
     }
 
     async function loadLeaderboard() {
-  try {
-    const res = await fetch(`https://apreferralv1.fly.dev/api/leaderboard`);
-    const data = await res.json();
+      try {
+        const res = await fetch(`${API_BASE}/api/leaderboard`);
+        const data = await res.json();
+        if (!data.success) throw new Error(data.error);
 
-    if (!data.success) throw new Error(data.error);
+        const output = document.getElementById("leaderboard-output");
 
-    const output = document.getElementById("leaderboard-output");
-    const checkinList = data.leaderboard.checkin.map((u, i) => `${i + 1}. ${u.username} - ${u.xp} XP`).join("\n");
-    const referralList = data.leaderboard.referral.map((u, i) => `${i + 1}. ${u.username} - ${u.referrals} Ref`).join("\n");
+        const checkin = data.leaderboard.checkin.map((u, i) =>
+          `${i + 1}. ${u.username} - ${u.xp} XP`).join("\n");
+        const referral = data.leaderboard.referral.map((u, i) =>
+          `${i + 1}. ${u.username} - ${u.referrals} Ref`).join("\n");
 
-    output.innerText = `🔁 Check-in Leaderboard:\n${checkinList}\n\n🔗 Referral Leaderboard:\n${referralList}`;
-  } catch (err) {
-    console.error(err);
-    document.getElementById("leaderboard-output").innerText = "❌ Error loading leaderboard.";
-  }
-}
+        output.innerText = `🔁 Check-in Leaderboard:\n${checkin}\n\n🔗 Referral Leaderboard:\n${referral}`;
+      } catch (err) {
+        console.error(err);
+        document.getElementById("leaderboard-output").innerText = "❌ Error loading leaderboard.";
+      }
+    }
   </script>
 </body>
 </html>
