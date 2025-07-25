@@ -112,8 +112,6 @@ async def join_request_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     user = update.chat_join_request.from_user
     invite_link = update.chat_join_request.invite_link
 
-    existing_user = users_collection.find_one({"user_id": user.id})
-
     # If user has already joined before, prevent XP abuse
     if existing_user and existing_user.get("joined_once"):
         print(f"[No XP] {user.username} has already joined before.")
