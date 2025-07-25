@@ -31,7 +31,7 @@ async def get_or_create_referral_link(bot: Bot, user_id: int, username: str):
     # Create new link
     link_name = f"ref-{user_id}"
     invite_link = await bot.create_chat_invite_link(
-        chat_id="@YourChannelOrGroupUsername",  # Replace with your actual group/channel
+        chat_id="-1002723991859",
         name=link_name,
         expire_date=int((now + timedelta(hours=24)).timestamp())
     )
