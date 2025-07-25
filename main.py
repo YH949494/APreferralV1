@@ -132,7 +132,7 @@ async def join_request_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     await context.bot.approve_chat_join_request(update.chat_join_request.chat.id, user.id)
 
 # Prevent re-referral abuse
-existing_user = users_collection.find_one({"user_id": user.id})
+existing_user = users_collection.find_one({"user_id": update.effective_user.id})
 
 if existing_user and existing_user.get("joined_once"):
     print("User re-joined. No referral XP given.")
