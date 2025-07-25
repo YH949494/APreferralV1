@@ -91,7 +91,7 @@
 
   async function getReferral() {
   try {
-    const res = await fetch(`/api/referral?user_id=${userId}&username=${username}`);
+    const res = await fetch(`https://apreferralv1.fly.dev/api/referral?user_id=${userId}&username=${username}`);
     
     const text = await res.text(); // get raw text response
     console.log("Raw referral response:", text);
