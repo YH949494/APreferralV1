@@ -198,6 +198,28 @@
         document.getElementById("leaderboard-output").innerText = "❌ Error loading leaderboard.";
       }
     }
+    async function loadPreviousLeaderboard() {
+  try {
+    const res = await fetch(`${API_BASE}/api/leaderboard/history`);
+    const data = await res.json();
+    if (!data.success) throw new Error(data.error);
+
+    const output = document.getElementById("leaderboard-output");
+    const checkin = data.history.checkin_leaderboard.map((u, i) =>
+      `${i + 1}. ${u.username} - ${u.weekly_xp} XP`).join("\n");
+    const referral = data.history.referral_leaderboard.map((u, i) =>
+      `${i + 1}. ${u.username} - ${u.referral_count} Ref`).join("\n");
+
+    const start = data.history.week_start;
+    const end = data.history.week_end;
+
+    output.innerText = `📅 ${start} to ${end} Leaderboard:\n\n🔁 Check-in:\n${checkin}\n\n🔗 Referrals:\n${referral}`;
+  } catch (err) {
+    console.error(err);
+    document.getElementById("leaderboard-output").innerText = "❌ Error loading history.";
+  }
+}
+
   </script>
 </body>
 </html>
