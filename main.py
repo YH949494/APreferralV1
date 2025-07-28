@@ -87,19 +87,6 @@ def get_leaderboard():
 @app.route("/api/leaderboard/history")
 def get_leaderboard_history():
     try:
-        latest_history = history_collection.find().sort("week_end", -1).limit(1)
-        result = list(latest_history)
-        if not result:
-            return jsonify({"success": False, "message": "No history found"}), 404
-
-        return jsonify({"success": True, "history": result[0]})
-    except Exception as e:
-        return jsonify({"success": False, "error": str(e)}), 500
-        
-@app.route("/api/leaderboard/history")
-def get_leaderboard_history():
-    try:
-        # Sort by archived_at DESCENDING to get the latest archived leaderboard
         last_entry = history_collection.find().sort("archived_at", DESCENDING).limit(1)
         last_record = next(last_entry, None)
 
