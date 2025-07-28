@@ -83,6 +83,26 @@ def get_leaderboard():
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 
+@app.route("/api/leaderboard/history")
+def get_leaderboard_history():
+    try:
+        # Sort by archived_at DESCENDING to get the latest archived leaderboard
+        last_entry = history_collection.find().sort("archived_at", DESCENDING).limit(1)
+        last_record = next(last_entry, None)
+
+        if not last_record:
+            return jsonify({"success": False, "message": "No leaderboard history found."}), 404
+
+        return jsonify({
+            "success": True,
+            "week_start": last_record.get("week_start"),
+            "week_end": last_record.get("week_end"),
+            "checkin": last_record.get("checkin_leaderboard", []),
+            "referral": last_record.get("referral_leaderboard", [])
+        })
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
 # ----------------------------
 # Weekly XP Reset Job
 # ----------------------------
