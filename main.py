@@ -212,4 +212,4 @@ if __name__ == "__main__":
     scheduler.start()
 
     print("✅ Bot & Scheduler running...")
-    app_bot.run_polling()
+    app_bot.run_polling() 
