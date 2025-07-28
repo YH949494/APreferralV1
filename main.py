@@ -10,6 +10,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from pytz import timezone
 from datetime import datetime, timedelta
+from bson.json_util import dumps
 import os
 import asyncio
 import traceback
@@ -83,6 +84,18 @@ def get_leaderboard():
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 
+@app.route("/api/leaderboard/history")
+def get_leaderboard_history():
+    try:
+        latest_history = history_collection.find().sort("week_end", -1).limit(1)
+        result = list(latest_history)
+        if not result:
+            return jsonify({"success": False, "message": "No history found"}), 404
+
+        return jsonify({"success": True, "history": result[0]})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+        
 @app.route("/api/leaderboard/history")
 def get_leaderboard_history():
     try:
