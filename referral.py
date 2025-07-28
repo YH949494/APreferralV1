@@ -25,27 +25,23 @@ async def get_or_create_referral_link(bot: Bot, user_id: int, username: str) -> 
         now = datetime.utcnow()
         expire_cutoff = now - timedelta(hours=24)
 
-        # Use existing valid link if still fresh
+        # Reuse if not expired
         if user and "referral_link" in user and "referral_generated_at" in user:
             if user["referral_generated_at"] > expire_cutoff:
-                logger.info("Reusing existing referral link")
+                logger.info("✅ Reusing existing referral link")
                 return user["referral_link"]
 
-        # Revoke old link if exists
-        if user and "referral_link" in user:
-            try:
-                logger.info("Revoking old referral link")
-                await bot.revoke_chat_invite_link(chat_id=GROUP_ID, invite_link=user["referral_link"])
-            except Exception as e:
-                logger.warning(f"Failed to revoke old invite link: {e}")
-
-        # Create new referral link
-        logger.info("Creating new referral link...")
+        # Create new link
+        logger.info("🔄 Creating new referral link...")
         link_name = f"ref-{user_id}"
+        expire_time = now + timedelta(hours=24)
+
         invite_link = await bot.create_chat_invite_link(
             chat_id=GROUP_ID,
             name=link_name,
-            expire_date=int((now + timedelta(hours=24)).timestamp())
+            expire_date=int(expire_time.timestamp()),
+            creates_join_request=True,
+            member_limit=None
         )
 
         # Save to DB
@@ -59,7 +55,7 @@ async def get_or_create_referral_link(bot: Bot, user_id: int, username: str) -> 
             upsert=True
         )
 
-        logger.info(f"Referral link created: {invite_link.invite_link}")
+        logger.info(f"✅ Referral link created: {invite_link.invite_link}")
         return invite_link.invite_link
 
     except Exception as e:
