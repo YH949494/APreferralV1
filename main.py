@@ -176,6 +176,7 @@ async def join_request_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     user = update.chat_join_request.from_user
     invite_link = update.chat_join_request.invite_link
 
+    # Save user
     existing_user = users_collection.find_one({"user_id": user.id})
     if existing_user and existing_user.get("joined_once"):
         print(f"[No XP] {user.username} has already joined before.")
@@ -198,17 +199,33 @@ async def join_request_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         )
 
         try:
+            referrer_id = None
+
+            # First try invite_link.name
             if invite_link and invite_link.name and invite_link.name.startswith("ref-"):
                 referrer_id = int(invite_link.name.split("-")[1])
+
+            # Fallback: try to find in DB by link match
+            elif invite_link and invite_link.invite_link:
+                ref_doc = users_collection.find_one({"referral_link": invite_link.invite_link})
+                if ref_doc:
+                    referrer_id = ref_doc["user_id"]
+
+            # Update referrer XP if found
+            if referrer_id:
                 users_collection.update_one(
                     {"user_id": referrer_id},
                     {"$inc": {"referral_count": 1, "xp": 20, "weekly_xp": 20}}
                 )
                 print(f"[Referral] {user.username} joined using {referrer_id}'s link.")
+            else:
+                print(f"[Referral] Could not determine referrer for {user.username}")
+
         except Exception as e:
             print(f"[Referral Error] {e}")
 
     await context.bot.approve_chat_join_request(update.chat_join_request.chat.id, user.id)
+
 
 # ----------------------------
 # Run Bot + Flask + Scheduler
