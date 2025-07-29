@@ -2,6 +2,7 @@ from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 from threading import Thread
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
+from telegram import ChatMemberAdministrator, ChatMemberOwner
 from telegram.ext import ApplicationBuilder, CommandHandler, ChatJoinRequestHandler, ContextTypes
 from checkin import handle_checkin
 from referral import get_or_create_referral_link
@@ -62,13 +63,41 @@ def api_referral():
         traceback.print_exc()
         return jsonify({"success": False, "error": str(e)}), 500
 
-@app.route("/api/is_admin")
-def api_is_admin():
+@app.route("/api/admin/check")
+def api_admin_check():
     try:
         user_id = int(request.args.get("user_id"))
         admins = asyncio.run(app_bot.bot.get_chat_administrators(chat_id=GROUP_ID))
         is_admin = any(admin.user.id == user_id for admin in admins)
         return jsonify({"success": True, "is_admin": is_admin})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@app.route("/api/admin/xp", methods=["POST"])
+def admin_xp():
+    try:
+        data = request.json
+        admin_id = int(data.get("admin_id"))
+        username = data.get("username")
+        amount = int(data.get("amount"))
+        action = data.get("action")
+
+        # Check if requester is admin
+        admins = asyncio.run(app_bot.bot.get_chat_administrators(chat_id=GROUP_ID))
+        if not any(admin.user.id == admin_id for admin in admins):
+            return jsonify({"success": False, "message": "Unauthorized"}), 403
+
+        user = users_collection.find_one({"username": username})
+        if not user:
+            return jsonify({"success": False, "message": "User not found"}), 404
+
+        change = amount if action == "add" else -amount
+        users_collection.update_one(
+            {"username": username},
+            {"$inc": {"xp": change, "weekly_xp": change}}
+        )
+        return jsonify({"success": True, "message": f"{action.title()}ed {amount} XP to {username}"})
+
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 
@@ -121,9 +150,14 @@ def api_join_requests():
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 
-@app.route("/api/export_csv")
-def export_csv():
+@app.route("/api/admin/export")
+def admin_export_csv():
     try:
+        admin_id = int(request.args.get("admin_id"))
+        admins = asyncio.run(app_bot.bot.get_chat_administrators(chat_id=GROUP_ID))
+        if not any(admin.user.id == admin_id for admin in admins):
+            return jsonify({"success": False, "message": "Unauthorized"}), 403
+
         users = users_collection.find()
         output = io.StringIO()
         writer = csv.writer(output)
@@ -137,7 +171,14 @@ def export_csv():
                 u.get("referral_count", 0),
             ])
         output.seek(0)
-        return send_from_directory(directory="", path=output, download_name="user_data.csv", as_attachment=True)
+        return (
+            output.getvalue(),
+            200,
+            {
+                'Content-Type': 'text/csv',
+                'Content-Disposition': 'attachment; filename="user_data.csv"'
+            }
+        )
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 
