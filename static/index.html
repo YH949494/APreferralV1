@@ -217,7 +217,7 @@
         const referral = data.leaderboard.referral.map((u, i) =>
           `${i + 1}. ${u.username} - ${u.referrals} Ref`).join("\n");
 
-        output.innerText = `🔁 Check-in Leaderboard:\n${checkin}\n\n🔗 Referral Leaderboard:\n${referral}`;
+        output.innerText = `🔁 XP Leaderboard:\n${checkin}\n\n🔗 Referral Leaderboard:\n${referral}`;
       } catch (err) {
         document.getElementById("leaderboard-output").innerText = "❌ Error loading leaderboard.";
       }
