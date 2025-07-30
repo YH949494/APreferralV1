@@ -15,7 +15,7 @@ db = client["referral_bot"]
 users_collection = db["users"]
 
 # Your Telegram group ID (make sure the bot is admin here)
-GROUP_ID = -1002723991859
+GROUP_ID = -1002304653063
 
 async def get_or_create_referral_link(bot: Bot, user_id: int, username: str) -> str:
     try:
