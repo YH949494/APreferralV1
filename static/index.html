@@ -263,18 +263,18 @@
     }
 
     async function checkAdminAccess() {
-      try {
-        const res = await fetch(`${API_BASE}/api/admin/check?user_id=${userId}`);
-        const data = await res.json();
-        if (data.is_admin) {
-          document.getElementById("admin-panel").style.display = "block";
-        }
-      } catch (err) {
-        console.warn("Admin check failed.");
-      }
+  try {
+    const res = await fetch(`${API_BASE}/api/admin/check?user_id=${userId}`);
+    const data = await res.json();
+    if (data.is_admin) {
+      document.getElementById("admin-panel").style.display = "block";
     }
+  } catch (err) {
+    console.warn("Admin check failed.");
+  }
+}
+checkAdminAccess();
 
-    checkAdminAccess();
   </script>
 </body>
 </html>
