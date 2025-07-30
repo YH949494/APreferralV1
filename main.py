@@ -263,28 +263,26 @@ async def join_request_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         else:
             print(f"[Referral] No referrer found for {user.username}")
 
+    # ✅ Approve user
     await context.bot.approve_chat_join_request(update.chat_join_request.chat.id, user.id)
 
-# After approving join request...
-await context.bot.approve_chat_join_request(chat_id=GROUP_ID, user_id=user.id)
-
-# Send private welcome message with channel link
-try:
-    await context.bot.send_message(
-        chat_id=user.id,
-        text=(
-            "✅ Welcome!\n\n"
-            "Follow our official channel 👉 https://t.me/advantplayofficial\n\n"
-            "For:\n"
-            "🎁 Surprise Voucher Drops\n"
-            "📣 Latest Game/Event Updates\n"
-            "🔥 Bonus XP Announcements\n\n"
-            "Stay connected and don’t miss out!"
+    # ✅ Send welcome PM
+    try:
+        await context.bot.send_message(
+            chat_id=user.id,
+            text=(
+                "✅ Welcome!\n\n"
+                "Follow our official channel 👉 https://t.me/advantplayofficial\n\n"
+                "For:\n"
+                "🎁 Surprise Voucher Drops\n"
+                "📣 Latest Game/Event Updates\n"
+                "🔥 Bonus XP Announcements\n\n"
+                "Stay connected and don’t miss out!"
+            )
         )
-    )
-except Exception as e:
-    logger.warning(f"❗ Unable to send PM to user {user.id} ({user.username}): {e}")
-
+    except Exception as e:
+        print(f"⚠️ Unable to send PM to {user.username or user.id}: {e}")
+        
 # ----------------------------
 # Run Bot + Flask + Scheduler
 # ----------------------------
