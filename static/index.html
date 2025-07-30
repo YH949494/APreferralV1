@@ -246,6 +246,7 @@
 
       const data = await res.json();
       status.innerText = data.message || "✅ Done";
+      loadLeaderboard(); 
     }
 
     async function exportCSV() {
