@@ -24,7 +24,7 @@ import io
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 MONGO_URL = os.environ.get("MONGO_URL")
 WEBAPP_URL = "https://apreferralv1.fly.dev/miniapp"
-GROUP_ID = -1002723991859  # Your Telegram group ID
+GROUP_ID = -1002304653063  # Your Telegram group ID
 
 # ----------------------------
 # MongoDB Setup
