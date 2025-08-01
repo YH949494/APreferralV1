@@ -20,7 +20,7 @@ from database import (
     log_join_request,
 )
 
-from telegram_login import WebAppInitData  # Ensure this is included
+from telegram_login import WebAppInitData  # Ensure this file exists
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -32,6 +32,7 @@ CORS(app)
 
 # Telegram bot setup
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
+GROUP_ID = os.environ.get("GROUP_ID")
 bot = Bot(BOT_TOKEN)
 application = ApplicationBuilder().token(BOT_TOKEN).build()
 
@@ -83,8 +84,7 @@ def api_admin_check():
     try:
         parsed = WebAppInitData.parse(init_data, BOT_TOKEN)
         user_id = parsed.user.id
-        group_id = os.environ.get("GROUP_ID")
-        chat = bot.get_chat(group_id)
+        chat = bot.get_chat(GROUP_ID)
         is_admin = any(admin.user.id == user_id for admin in chat.get_administrators())
         return jsonify({"ok": True, "is_admin": is_admin})
     except Exception as e:
@@ -112,20 +112,22 @@ def api_admin_remove_xp():
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Welcome! Use the Mini App to check-in and refer friends.")
 
-# Handle join request for referral
+# Handle join request for referral tracking
 async def join_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.chat_join_request.from_user
     group_id = update.chat_join_request.chat.id
     await log_join_request(user, group_id)
 
-# Register command handlers
+# Register handlers
 application.add_handler(CommandHandler("start", start))
 application.add_handler(CommandHandler("checkin", start))
 application.add_handler(CommandHandler("referral", start))
 application.add_handler(CommandHandler("leaderboard", start))
 application.add_handler(CommandHandler("history", start))
 application.add_handler(CommandHandler("admin", start))
-application.add_handler(CommandHandler("joinrequest", join_request))
+
+# NOTE: join request should use .add_chat_join_request_handler()
+application.add_chat_join_request_handler(join_request)
 
 # Schedule weekly XP reset
 scheduler = BackgroundScheduler()
@@ -135,6 +137,6 @@ scheduler.start()
 # Run Flask + Telegram bot
 if __name__ == '__main__':
     loop = asyncio.get_event_loop()
-    loop.create_task(application.initialize())
-    loop.create_task(application.start())
+    loop.run_until_complete(application.initialize())
+    loop.run_until_complete(application.start())
     app.run(host='0.0.0.0', port=8080)
