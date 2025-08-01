@@ -119,6 +119,9 @@ def get_weekly_leaderboard(limit=20):
         }
         for user in top_users
     ]
+    
+def get_leaderboard_data():
+    return get_leaderboard()  # Wrapper for compatibility
 
 # === HISTORY ===
 def get_weekly_history():
@@ -149,3 +152,4 @@ def log_join_request(user_id, referrer_id):
         {"user_id": referrer_id},
         {"$inc": {"referral_count": 1, "xp": 20}}  # Optional: reward referrer
     )
+
