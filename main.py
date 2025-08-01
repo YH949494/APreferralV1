@@ -8,7 +8,7 @@ from telegram.ext import (
     ApplicationBuilder, CommandHandler, ContextTypes,
 )
 from checkin import handle_checkin
-from referral import handle_referral, generate_referral_link
+from referral import generate_referral_link
 from database import (
     get_user_data, get_leaderboard_data, update_user_xp, get_all_users, save_leaderboard_snapshot
 )
@@ -41,13 +41,6 @@ async def api_checkin():
     user_id = data.get("user_id")
     username = data.get("username")
     return await handle_checkin(user_id, username)
-
-@app.route("/api/referral", methods=["POST"])
-async def api_referral():
-    data = request.json
-    user_id = data.get("user_id")
-    username = data.get("username")
-    return await handle_referral(user_id, username)
 
 @app.route("/api/referral_link", methods=["POST"])
 async def api_generate_link():
