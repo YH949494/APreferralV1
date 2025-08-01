@@ -14,11 +14,13 @@ from database import (
     get_user_data,
     get_leaderboard,
     get_weekly_history,
-    add_xp,
+    update_user_xp,
     remove_xp,
     reset_weekly_xp,
     log_join_request,
 )
+
+from telegram_login import WebAppInitData  # Ensure this is included
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -94,7 +96,7 @@ def api_admin_add_xp():
     data = request.get_json()
     user_id = data.get("user_id")
     amount = data.get("amount")
-    success = add_xp(user_id, amount)
+    success = update_user_xp(user_id, amount)
     return jsonify({"ok": success})
 
 # Admin: Remove XP
