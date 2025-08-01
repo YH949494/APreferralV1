@@ -103,3 +103,14 @@ def get_user_data(user_id):
         "last_checkin": user.get("last_checkin")
     }
 
+# === LEADERBOARD ===
+def get_leaderboard(limit=20):
+    top_users = users_collection.find().sort("xp", -1).limit(limit)
+    return [
+        {
+            "username": user.get("username", ""),
+            "xp": user.get("xp", 0),
+            "referral_count": user.get("referral_count", 0)
+        }
+        for user in top_users
+    ]
