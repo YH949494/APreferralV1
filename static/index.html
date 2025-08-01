@@ -141,6 +141,8 @@
       document.body.innerHTML = "<p style='color:red;'>❌ User ID not found. Please open this Mini App inside Telegram.</p>";
     }
 
+    let latestReferralLink = "";
+
     async function checkIn() {
       try {
         const res = await fetch(`${API_BASE}/api/checkin?user_id=${userId}&username=${username}`);
@@ -158,25 +160,36 @@
         const res = await fetch(`${API_BASE}/api/referral?user_id=${userId}&username=${username}`);
         const rawText = await res.text();
         let data;
-        try { data = JSON.parse(rawText); } catch {
+        try {
+          data = JSON.parse(rawText);
+        } catch {
           display.innerText = "❌ Invalid server response.";
           return;
         }
 
         const link = data.referral_link;
         if (link) {
-          display.innerText = link;
-          try {
-            await navigator.clipboard.writeText(link);
-            display.innerText += "\n📋 Copied to clipboard!";
-          } catch {
-            display.innerText += "\n⚠️ Please copy manually.";
-          }
+          latestReferralLink = link;
+          display.innerText = link + "\n👆 Tap 'Copy to Clipboard' to copy";
         } else {
           display.innerText = "❌ Failed to get link.";
         }
       } catch {
         display.innerText = "❌ Error connecting to server.";
+      }
+    }
+
+    async function copyReferral() {
+      if (!latestReferralLink) {
+        alert("Please generate your referral link first.");
+        return;
+      }
+
+      try {
+        await navigator.clipboard.writeText(latestReferralLink);
+        alert("✅ Referral link copied!");
+      } catch {
+        alert("❌ Copy failed. Please copy manually.");
       }
     }
 
@@ -244,32 +257,30 @@
     }
 
     async function submitXPChange() {
-  const input = document.getElementById("xp-user").value.trim();
-  const amount = parseInt(document.getElementById("xp-amount").value.trim());
+      const input = document.getElementById("xp-user").value.trim();
+      const amount = parseInt(document.getElementById("xp-amount").value.trim());
 
-  if (!input || isNaN(amount)) {
-    alert("Please enter both @username and amount.");
-    return;
-  }
+      if (!input || isNaN(amount)) {
+        alert("Please enter both @username and amount.");
+        return;
+      }
 
-  try {
-    const res = await fetch(`${API_BASE}/api/add_xp`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ user_id: input, xp: amount })
-    });
-    const data = await res.json();
-    alert(data.message || "XP updated.");
-
-    if (data.success) {
-      // ✅ Auto-refresh the leaderboard now
-      loadLeaderboard();
+      try {
+        const res = await fetch(`${API_BASE}/api/add_xp`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ user_id: input, xp: amount })
+        });
+        const data = await res.json();
+        alert(data.message || "XP updated.");
+        if (data.success) {
+          loadLeaderboard();
+        }
+      } catch (err) {
+        alert("❌ Failed to connect to server.");
+        console.error("Add XP error:", err);
+      }
     }
-  } catch (err) {
-    alert("❌ Failed to connect to server.");
-    console.error("Add XP error:", err);
-  }
-}
 
     function viewJoinRequests() {
       alert("Coming soon: View Join Requests.");
