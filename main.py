@@ -8,7 +8,7 @@ from telegram.ext import (
     ApplicationBuilder, CommandHandler, ContextTypes,
 )
 from checkin import handle_checkin
-from referral import generate_referral_link
+from referral import get_or_create_referral_link 
 from database import (
     get_user_data, get_leaderboard_data, update_user_xp, get_all_users, save_leaderboard_snapshot
 )
