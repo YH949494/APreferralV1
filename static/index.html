@@ -12,12 +12,10 @@
       color: #333;
       font-size: 16px;
     }
-
     h2, h3 {
       text-align: center;
       font-weight: 600;
     }
-
     .section {
       background: #ffffff;
       padding: 20px;
@@ -25,7 +23,6 @@
       border-radius: 10px;
       box-shadow: 0 2px 6px rgba(0, 0, 0, 0.1);
     }
-
     button {
       background-color: #0088cc;
       color: white;
@@ -37,33 +34,13 @@
       font-family: inherit;
       margin: 5px 0;
     }
-
     button:hover {
       background-color: #006699;
     }
-
-    input {
-      padding: 8px;
-      font-size: 15px;
-      width: 100%;
-      margin-bottom: 8px;
-      border: 1px solid #ccc;
-      border-radius: 6px;
-      box-sizing: border-box;
-    }
-
-    #referral-link {
-      word-break: break-word;
+    #referral-link, #checkin-result, #checkin-timer {
       margin-top: 10px;
       font-size: 15px;
     }
-
-    #checkin-result,
-    #checkin-timer {
-      margin-top: 10px;
-      font-size: 15px;
-    }
-
     #leaderboard-output {
       margin-top: 10px;
       font-family: 'Courier New', monospace;
@@ -73,15 +50,38 @@
       border-radius: 8px;
       border: 1px solid #ddd;
     }
-
     #admin-panel {
       display: none;
       background: #fff4e6;
       border: 1px solid #ffcc80;
     }
-
     #admin-panel h3 {
       color: #d17c00;
+    }
+    .modal {
+      display: none;
+      position: fixed;
+      z-index: 1000;
+      left: 0; top: 0;
+      width: 100%; height: 100%;
+      background: rgba(0, 0, 0, 0.5);
+      justify-content: center;
+      align-items: center;
+    }
+    .modal-content {
+      background: #fff;
+      padding: 20px;
+      border-radius: 10px;
+      text-align: center;
+      width: 300px;
+    }
+    input[type="text"], input[type="number"] {
+      width: 90%;
+      padding: 10px;
+      margin: 8px 0;
+      border-radius: 6px;
+      border: 1px solid #ccc;
+      font-size: 14px;
     }
   </style>
 </head>
@@ -109,19 +109,20 @@
 
   <div class="section" id="admin-panel">
     <h3>⚙️ Admin Panel</h3>
-    <button onclick="toggleAddXPPanel()">➕➖ Add/Reduce XP</button>
+    <button onclick="openAddXP()">➕ Add/Reduce XP</button>
     <button onclick="viewJoinRequests()">📥 View Join Requests</button>
     <button onclick="loadPreviousLeaderboard()">🏆 View Past Leaderboard</button>
     <button onclick="exportCSV()">📤 Export CSV</button>
+  </div>
 
-    <div id="xp-panel" style="display:none; margin-top:10px; border-top:1px solid #ddd; padding-top:10px;">
-      <input type="text" id="xp-username" placeholder="@username or user ID">
-      <input type="number" id="xp-amount" placeholder="XP amount">
-      <div>
-        <button onclick="adjustXP(true)">➕ Add XP</button>
-        <button onclick="adjustXP(false)">➖ Reduce XP</button>
-      </div>
-      <p id="xp-result" style="margin-top:10px;"></p>
+  <!-- XP Modal -->
+  <div id="xp-modal" class="modal">
+    <div class="modal-content">
+      <h3>Adjust XP</h3>
+      <input id="xp-user" type="text" placeholder="@username">
+      <input id="xp-amount" type="number" placeholder="Amount (+/-)">
+      <button onclick="submitXPChange()">Submit</button>
+      <button onclick="closeXPModal()">Cancel</button>
     </div>
   </div>
 
@@ -155,11 +156,8 @@
       try {
         const res = await fetch(`${API_BASE}/api/referral?user_id=${userId}&username=${username}`);
         const rawText = await res.text();
-
         let data;
-        try {
-          data = JSON.parse(rawText);
-        } catch {
+        try { data = JSON.parse(rawText); } catch {
           display.innerText = "❌ Invalid server response.";
           return;
         }
@@ -167,14 +165,12 @@
         const link = data.referral_link;
         if (link) {
           display.innerText = link;
-          setTimeout(async () => {
-            try {
-              await navigator.clipboard.writeText(link);
-              display.innerText += "\n📋 Copied to clipboard!";
-            } catch {
-              display.innerText += "\n⚠️ Please copy manually.";
-            }
-          }, 200);
+          try {
+            await navigator.clipboard.writeText(link);
+            display.innerText += "\n📋 Copied to clipboard!";
+          } catch {
+            display.innerText += "\n⚠️ Please copy manually.";
+          }
         } else {
           display.innerText = "❌ Failed to get link.";
         }
@@ -184,41 +180,31 @@
     }
 
     function startCountdown(nextCheckinTimeISO) {
-      const countdownEl = document.getElementById("checkin-timer");
-      const endTime = Date.parse(nextCheckinTimeISO);
-
-      function updateCountdown() {
-        const now = new Date().getTime();
-        const distance = endTime - now;
-
-        if (distance <= 0) {
-          countdownEl.innerText = "🎉 You can check in again now!";
+      const el = document.getElementById("checkin-timer");
+      const end = Date.parse(nextCheckinTimeISO);
+      function update() {
+        const now = Date.now();
+        const d = end - now;
+        if (d <= 0) {
+          el.innerText = "🎉 You can check in again now!";
           return;
         }
-
-        const h = Math.floor(distance / (1000 * 60 * 60));
-        const m = Math.floor((distance % (1000 * 60 * 60)) / (1000 * 60));
-        const s = Math.floor((distance % (1000 * 60)) / 1000);
-        countdownEl.innerText = `⏳ Next check-in in: ${h}h ${m}m ${s}s`;
-        setTimeout(updateCountdown, 1000);
+        const h = Math.floor(d / 3600000), m = Math.floor((d % 3600000) / 60000), s = Math.floor((d % 60000) / 1000);
+        el.innerText = `⏳ Next check-in: ${h}h ${m}m ${s}s`;
+        setTimeout(update, 1000);
       }
-
-      updateCountdown();
+      update();
     }
 
     async function loadLeaderboard() {
       try {
-        const res = await fetch(`${API_BASE}/api/leaderboard`);
+        const res = await fetch(`${API_BASE}/api/leaderboard?t=${Date.now()}`);
         const data = await res.json();
+        const out = document.getElementById("leaderboard-output");
         if (!data.success) throw new Error(data.error);
-
-        const output = document.getElementById("leaderboard-output");
-        const checkin = data.leaderboard.checkin.map((u, i) =>
-          `${i + 1}. ${u.username} - ${u.xp} XP`).join("\n");
-        const referral = data.leaderboard.referral.map((u, i) =>
-          `${i + 1}. ${u.username} - ${u.referrals} Ref`).join("\n");
-
-        output.innerText = `🔁 Check-in Leaderboard:\n${checkin}\n\n🔗 Referral Leaderboard:\n${referral}`;
+        const checkin = data.leaderboard.checkin.map((u, i) => `${i + 1}. ${u.username} - ${u.xp} XP`).join("\n");
+        const referral = data.leaderboard.referral.map((u, i) => `${i + 1}. ${u.username} - ${u.referrals} Ref`).join("\n");
+        out.innerText = `🔁 Check-in Leaderboard:\n${checkin}\n\n🔗 Referral Leaderboard:\n${referral}`;
       } catch {
         document.getElementById("leaderboard-output").innerText = "❌ Error loading leaderboard.";
       }
@@ -228,18 +214,11 @@
       try {
         const res = await fetch(`${API_BASE}/api/leaderboard/history`);
         const data = await res.json();
+        const out = document.getElementById("leaderboard-output");
         if (!data.success) throw new Error(data.error);
-
-        const output = document.getElementById("leaderboard-output");
-        const checkin = data.history.checkin_leaderboard.map((u, i) =>
-          `${i + 1}. ${u.username} - ${u.weekly_xp} XP`).join("\n");
-        const referral = data.history.referral_leaderboard.map((u, i) =>
-          `${i + 1}. ${u.username} - ${u.referral_count} Ref`).join("\n");
-
-        const start = data.history.week_start;
-        const end = data.history.week_end;
-
-        output.innerText = `📅 ${start} to ${end} Leaderboard:\n\n🔁 Check-in:\n${checkin}\n\n🔗 Referrals:\n${referral}`;
+        const checkin = data.checkin.map((u, i) => `${i + 1}. ${u.username} - ${u.weekly_xp} XP`).join("\n");
+        const referral = data.referral.map((u, i) => `${i + 1}. ${u.username} - ${u.referral_count} Ref`).join("\n");
+        out.innerText = `📅 ${data.week_start} to ${data.week_end}\n\n🔁 Check-in:\n${checkin}\n\n🔗 Referrals:\n${referral}`;
       } catch {
         document.getElementById("leaderboard-output").innerText = "❌ Error loading history.";
       }
@@ -255,39 +234,36 @@
       } catch {}
     }
 
-    function toggleAddXPPanel() {
-      const panel = document.getElementById("xp-panel");
-      panel.style.display = panel.style.display === "none" ? "block" : "none";
+    function openAddXP() {
+      document.getElementById("xp-modal").style.display = "flex";
     }
 
-    async function adjustXP(isAdd) {
-      const usernameOrId = document.getElementById("xp-username").value.trim();
-      const amount = parseInt(document.getElementById("xp-amount").value);
-      const resultEl = document.getElementById("xp-result");
+    function closeXPModal() {
+      document.getElementById("xp-modal").style.display = "none";
+    }
 
-      if (!usernameOrId || isNaN(amount)) {
-        resultEl.innerText = "⚠️ Please enter valid username and XP amount.";
-        resultEl.style.color = "red";
+    async function submitXPChange() {
+      const input = document.getElementById("xp-user").value.trim();
+      const amount = parseInt(document.getElementById("xp-amount").value.trim());
+
+      if (!input || isNaN(amount)) {
+        alert("Please enter both @username and amount.");
         return;
       }
-
-      const payload = {
-        user_id: usernameOrId,
-        xp: isAdd ? amount : -amount
-      };
 
       try {
         const res = await fetch(`${API_BASE}/api/add_xp`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload)
+          body: JSON.stringify({ user_id: input, xp: amount })
         });
         const data = await res.json();
-        resultEl.innerText = data.message || "XP updated.";
-        resultEl.style.color = data.success ? "green" : "red";
-      } catch {
-        resultEl.innerText = "❌ Error contacting server.";
-        resultEl.style.color = "red";
+        alert(data.message || "XP updated.");
+        closeXPModal();
+
+        if (data.success) loadLeaderboard(); // 🔄 Refresh leaderboard
+      } catch (err) {
+        alert("❌ Failed to connect to server.");
       }
     }
 
