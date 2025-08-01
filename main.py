@@ -8,7 +8,6 @@ from telegram.ext import (
     CommandHandler,
     ContextTypes,
 )
-from checkin import handle_checkin_api
 from referral import generate_referral_link
 from database import (
     ensure_user,
