@@ -28,9 +28,9 @@ def init_user(user_id, username):
   "checkin_streak": 0,
   "last_checkin_date": "2025-07-28",
   "badges": {
-    "streak_7": false,
-    "streak_14": false,
-    "streak_28": false
+    "streak_7": False,
+    "streak_14": False,
+    "streak_28": False,
   }
 }
 # === CHECK-IN LOGIC ===
