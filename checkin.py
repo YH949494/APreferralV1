@@ -1,79 +1,63 @@
-from telegram import Update
-from telegram.ext import ContextTypes
-from datetime import datetime
-from database import users_collection
+from flask import request, jsonify
+from pymongo import MongoClient
+import os
+from datetime import datetime, timedelta
 
-CHECKIN_EXP = 20
+# MongoDB setup
+MONGO_URL = os.environ.get("MONGO_URL")
+client = MongoClient(MONGO_URL)
+db = client["referral_bot"]
+users_collection = db["users"]
 
-# For Telegram command usage
-async def checkin_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
+def handle_checkin():
+    user_id = request.args.get("user_id", type=int)
+    username = request.args.get("username", default="")
 
-    if user is None:
-        return
+    if not user_id:
+        return jsonify({"error": "Missing user_id"}), 400
 
-    user_id = user.id
-    today = datetime.utcnow().date()
+    user = users_collection.find_one({"user_id": user_id})
+    now = datetime.utcnow()
 
-    user_data = users_collection.find_one({"user_id": user_id})
-
-    if user_data:
-        last_checkin = user_data.get("last_checkin")
-
-        if last_checkin and datetime.strptime(last_checkin, "%Y-%m-%d").date() == today:
-            await update.message.reply_text("✅ You’ve already checked in today!")
-            return
-
-        users_collection.update_one(
-            {"user_id": user_id},
-            {
-                "$set": {"last_checkin": today.strftime("%Y-%m-%d")},
-                "$inc": {
-                    "xp": CHECKIN_EXP,
-                    "weekly_xp": CHECKIN_EXP
-                }
-            }
-        )
-    else:
-        users_collection.insert_one({
+    if not user:
+        user = {
             "user_id": user_id,
-            "username": user.username,
-            "xp": CHECKIN_EXP,
-            "weekly_xp": CHECKIN_EXP,
-            "last_checkin": today.strftime("%Y-%m-%d"),
-            "referral_count": 0
-        })
+            "username": username,
+            "xp": 0,
+            "weekly_xp": 0,
+            "referral_count": 0,
+            "last_checkin": None
+        }
 
-    await update.message.reply_text(f"🎉 Check-in successful! You earned {CHECKIN_EXP} XP.")
+    last_checkin = user.get("last_checkin")
+    if last_checkin:
+        elapsed = now - last_checkin
+        if elapsed < timedelta(hours=24):
+            remaining = timedelta(hours=24) - elapsed
+            hours = int(remaining.total_seconds() // 3600)
+            minutes = int((remaining.total_seconds() % 3600) // 60)
+            return jsonify({
+                "success": False,
+                "message": f"⏳ Come back in {hours}h {minutes}m to check in again!"
+            })
 
-# For Mini App API usage (non-async)
-def update_checkin_xp(user_id: int) -> str:
-    today = datetime.utcnow().date()
-    user_data = users_collection.find_one({"user_id": user_id})
-
-    if user_data:
-        last_checkin = user_data.get("last_checkin")
-        if last_checkin and datetime.strptime(last_checkin, "%Y-%m-%d").date() == today:
-            return "✅ You’ve already checked in today!"
-
-        users_collection.update_one(
-            {"user_id": user_id},
-            {
-                "$set": {"last_checkin": today.strftime("%Y-%m-%d")},
-                "$inc": {
-                    "xp": CHECKIN_EXP,
-                    "weekly_xp": CHECKIN_EXP
-                }
+    # Update XP
+    users_collection.update_one(
+        {"user_id": user_id},
+        {
+            "$set": {
+                "username": username,
+                "last_checkin": now
+            },
+            "$inc": {
+                "xp": 20,
+                "weekly_xp": 20
             }
-        )
-    else:
-        users_collection.insert_one({
-            "user_id": user_id,
-            "username": None,  # Mini App may not have username
-            "xp": CHECKIN_EXP,
-            "weekly_xp": CHECKIN_EXP,
-            "last_checkin": today.strftime("%Y-%m-%d"),
-            "referral_count": 0
-        })
+        },
+        upsert=True
+    )
 
-    return f"✅ Check-in successful! You earned {CHECKIN_EXP} XP."
+    return jsonify({
+        "success": True,
+        "message": "✅ Check-in successful! +20 XP"
+    })
