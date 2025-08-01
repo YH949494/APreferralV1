@@ -133,3 +133,19 @@ def get_weekly_history():
 
 def reset_weekly_xp():
     users_collection.update_many({}, {"$set": {"weekly_xp": 0}})
+
+# === LOG JOIN REQUEST ===
+def log_join_request(user_id, referrer_id):
+    users_collection.update_one(
+        {"user_id": user_id},
+        {
+            "$set": {"referred_by": referrer_id},
+            "$inc": {"xp": 20}  # Optional: reward for being referred
+        },
+        upsert=True
+    )
+
+    users_collection.update_one(
+        {"user_id": referrer_id},
+        {"$inc": {"referral_count": 1, "xp": 20}}  # Optional: reward referrer
+    )
