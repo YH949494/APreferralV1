@@ -235,4 +235,4 @@ def run_bot():
 
 if __name__ == "__main__":
     Thread(target=run_flask).start()
-    run_bot()
+    run_bot() 
