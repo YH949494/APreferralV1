@@ -35,24 +35,19 @@
       border-radius: 6px;
       cursor: pointer;
       font-family: inherit;
+      margin: 5px 0;
     }
 
     button:hover {
       background-color: #006699;
     }
 
-    input[type="text"],
-    input[type="number"] {
-      padding: 8px;
-      margin-top: 6px;
-      width: 100%;
-      font-size: 14px;
-      border: 1px solid #ccc;
-      border-radius: 5px;
-      box-sizing: border-box;
+    #referral-link {
+      word-break: break-word;
+      margin-top: 10px;
+      font-size: 15px;
     }
 
-    #referral-link,
     #checkin-result,
     #checkin-timer {
       margin-top: 10px;
@@ -71,10 +66,12 @@
 
     #admin-panel {
       display: none;
+      background: #fff4e6;
+      border: 1px solid #ffcc80;
     }
 
-    .admin-control {
-      margin-top: 10px;
+    #admin-panel h3 {
+      color: #d17c00;
     }
   </style>
 </head>
@@ -100,32 +97,12 @@
     <div id="leaderboard-output">Click to load latest rankings...</div>
   </div>
 
-  <div id="admin-panel" class="section">
+  <div class="section" id="admin-panel">
     <h3>⚙️ Admin Panel</h3>
-
-    <div class="admin-control">
-      <label><strong>👤 Username:</strong></label>
-      <input type="text" id="admin-username" placeholder="username (without @)">
-    </div>
-
-    <div class="admin-control">
-      <label><strong>🔼 Add XP:</strong></label>
-      <input type="number" id="add-xp" placeholder="Amount to Add">
-      <button onclick="modifyXP('add')">Add XP</button>
-    </div>
-
-    <div class="admin-control">
-      <label><strong>🔽 Reduce XP:</strong></label>
-      <input type="number" id="reduce-xp" placeholder="Amount to Subtract">
-      <button onclick="modifyXP('reduce')">Reduce XP</button>
-    </div>
-
-    <div class="admin-control">
-      <label><strong>📤 Export Leaderboard:</strong></label><br>
-      <button onclick="exportCSV()">Download CSV</button>
-    </div>
-
-    <p id="admin-status" style="color: green;"></p>
+    <button onclick="openAddXP()">➕ Add XP</button>
+    <button onclick="viewJoinRequests()">📥 View Join Requests</button>
+    <button onclick="loadPreviousLeaderboard()">🏆 View Past Leaderboard</button>
+    <button onclick="exportCSV()">📤 Export CSV</button>
   </div>
 
   <script>
@@ -159,11 +136,13 @@
       try {
         const res = await fetch(`${API_BASE}/api/referral?user_id=${userId}&username=${username}`);
         const rawText = await res.text();
+
         let data;
         try {
           data = JSON.parse(rawText);
         } catch (parseErr) {
           display.innerText = "❌ Invalid server response.";
+          console.error("JSON parse error:", parseErr);
           return;
         }
 
@@ -174,7 +153,8 @@
             try {
               await navigator.clipboard.writeText(link);
               display.innerText += "\n📋 Copied to clipboard!";
-            } catch {
+            } catch (clipboardErr) {
+              console.warn("Clipboard write failed:", clipboardErr);
               display.innerText += "\n⚠️ Please copy manually.";
             }
           }, 200);
@@ -183,25 +163,30 @@
         }
       } catch (err) {
         display.innerText = "❌ Error connecting to server.";
+        console.error("Referral fetch error:", err);
       }
     }
 
     function startCountdown(nextCheckinTimeISO) {
       const countdownEl = document.getElementById("checkin-timer");
       const endTime = Date.parse(nextCheckinTimeISO);
+
       function updateCountdown() {
         const now = new Date().getTime();
         const distance = endTime - now;
+
         if (distance <= 0) {
           countdownEl.innerText = "🎉 You can check in again now!";
           return;
         }
+
         const h = Math.floor(distance / (1000 * 60 * 60));
         const m = Math.floor((distance % (1000 * 60 * 60)) / (1000 * 60));
         const s = Math.floor((distance % (1000 * 60)) / 1000);
         countdownEl.innerText = `⏳ Next check-in in: ${h}h ${m}m ${s}s`;
         setTimeout(updateCountdown, 1000);
       }
+
       updateCountdown();
     }
 
@@ -219,62 +204,61 @@
 
         output.innerText = `🔁 Check-in Leaderboard:\n${checkin}\n\n🔗 Referral Leaderboard:\n${referral}`;
       } catch (err) {
+        console.error(err);
         document.getElementById("leaderboard-output").innerText = "❌ Error loading leaderboard.";
       }
     }
 
-    async function modifyXP(action) {
-      const targetUsername = document.getElementById("admin-username").value.trim();
-      const xpValue = document.getElementById(action === "add" ? "add-xp" : "reduce-xp").value.trim();
-      const status = document.getElementById("admin-status");
-
-      if (!targetUsername || !xpValue) {
-        status.innerText = "❗ Fill in username and XP value.";
-        return;
-      }
-
-      const res = await fetch(`${API_BASE}/api/admin/xp`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          admin_id: userId,
-          username: targetUsername,
-          amount: Number(xpValue),
-          action: action
-        })
-      });
-
-      const data = await res.json();
-      status.innerText = data.message || "✅ Done";
-    }
-
-    async function exportCSV() {
+    async function loadPreviousLeaderboard() {
       try {
-        const res = await fetch(`${API_BASE}/api/admin/export?admin_id=${userId}`);
-        const blob = await res.blob();
-        const url = window.URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = "leaderboard.csv";
-        a.click();
-      } catch (err) {
-        alert("❌ Failed to download CSV.");
-      }
-    }
-
-    async function checkAdminAccess() {
-      try {
-        const res = await fetch(`${API_BASE}/api/admin/check?user_id=${userId}`);
+        const res = await fetch(`${API_BASE}/api/leaderboard/history`);
         const data = await res.json();
-        if (data.is_admin) {
+        if (!data.success) throw new Error(data.error);
+
+        const output = document.getElementById("leaderboard-output");
+        const checkin = data.history.checkin_leaderboard.map((u, i) =>
+          `${i + 1}. ${u.username} - ${u.weekly_xp} XP`).join("\n");
+        const referral = data.history.referral_leaderboard.map((u, i) =>
+          `${i + 1}. ${u.username} - ${u.referral_count} Ref`).join("\n");
+
+        const start = data.history.week_start;
+        const end = data.history.week_end;
+
+        output.innerText = `📅 ${start} to ${end} Leaderboard:\n\n🔁 Check-in:\n${checkin}\n\n🔗 Referrals:\n${referral}`;
+      } catch (err) {
+        console.error(err);
+        document.getElementById("leaderboard-output").innerText = "❌ Error loading history.";
+      }
+    }
+
+    async function checkIfAdmin() {
+      try {
+        const res = await fetch(`${API_BASE}/api/is_admin?user_id=${userId}`);
+        const data = await res.json();
+        if (data.success && data.is_admin) {
           document.getElementById("admin-panel").style.display = "block";
         }
-      } catch (err) {
-        console.warn("Admin check failed.");
+      } catch (e) {
+        console.error("Admin check failed", e);
       }
     }
 
-    checkAdminAccess();
+    // Admin button handlers
+    function openAddXP() {
+      alert("Coming soon: Add XP feature.");
+    }
+
+    function viewJoinRequests() {
+      alert("Coming soon: View Join Requests.");
+    }
+
+    function exportCSV() {
+      alert("Coming soon: Export CSV.");
+    }
+
+    window.onload = () => {
+      checkIfAdmin();
+    };
   </script>
 </body>
 </html>
