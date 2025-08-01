@@ -1,297 +1,200 @@
+import os
+import logging
+import asyncio
+from datetime import datetime, timedelta
 from flask import Flask, request, jsonify, send_from_directory
-from flask_cors import CORS
-from threading import Thread
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
-from telegram.ext import ApplicationBuilder, CommandHandler, ChatJoinRequestHandler, ContextTypes
+from telegram import Update, Bot, WebAppInitData
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
+from apscheduler.schedulers.background import BackgroundScheduler
+from pymongo import MongoClient
+import csv
+
 from checkin import handle_checkin
 from referral import get_or_create_referral_link
-from pymongo import MongoClient, DESCENDING
-from apscheduler.schedulers.background import BackgroundScheduler
-from apscheduler.triggers.cron import CronTrigger
-from pytz import timezone
-from datetime import datetime, timedelta
-from bson.json_util import dumps
-from telegram.helpers import decode_webapp_init_data
-import os
-import asyncio
-import traceback
-import csv
-import io
 
-# ----------------------------
-# Config
-# ----------------------------
+# === Environment & Setup ===
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 MONGO_URL = os.environ.get("MONGO_URL")
-WEBAPP_URL = "https://apreferralv1.fly.dev/miniapp"
-GROUP_ID = -1002723991859  # Your Telegram group ID
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
 
-# ----------------------------
-# MongoDB Setup
-# ----------------------------
+bot = Bot(BOT_TOKEN)
+app = Flask(__name__, static_folder="static")
+
+# === MongoDB ===
 client = MongoClient(MONGO_URL)
 db = client["referral_bot"]
 users_collection = db["users"]
-history_collection = db["weekly_leaderboard_history"]
+weekly_collection = db["weekly_leaderboards"]
 
-# ----------------------------
-# Flask App
-# ----------------------------
-app = Flask(__name__, static_folder="static")
-CORS(app, resources={r"/*": {"origins": "*"}})
+# === Logging ===
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# === Telegram Bot Handlers ===
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("👋 Welcome! Use the button below to open the app.", reply_markup=None)
+
+async def handle_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.chat_join_request.from_user
+    inviter_id = context.bot_data.get(str(user.id))
+    if inviter_id:
+        existing = users_collection.find_one({"user_id": user.id})
+        if not existing:
+            users_collection.update_one(
+                {"user_id": inviter_id},
+                {"$inc": {"xp": 50, "weekly_xp": 50, "referral_count": 1}}
+            )
+            logger.info(f"User {inviter_id} referred {user.id}")
+    await update.chat_join_request.approve()
+
+def reset_weekly_xp():
+    now = datetime.utcnow()
+    leaderboard = list(users_collection.find({}, {"_id": 0, "user_id": 1, "username": 1, "weekly_xp": 1}))
+    for user in leaderboard:
+        user["week"] = now.strftime("%Y-%m-%d")
+    if leaderboard:
+        weekly_collection.insert_many(leaderboard)
+    users_collection.update_many({}, {"$set": {"weekly_xp": 0}})
+    logger.info("✅ Weekly XP reset complete.")
+
+# === Flask Web Server Routes ===
 
 @app.route("/")
 def home():
-    return "Bot is alive!"
+    return "Bot is running."
 
 @app.route("/miniapp")
-def serve_mini_app():
+def serve_index():
     return send_from_directory("static", "index.html")
 
-@app.route("/api/checkin", methods=["POST"])
-def api_checkin():
+@app.route("/checkin")
+def checkin():
     return handle_checkin()
 
-@app.route("/api/referral", methods=["POST"])
-def api_referral():
-    try:
-        data = request.get_json()
-        init_data = data.get("initData")
-        decoded = decode_webapp_init_data(BOT_TOKEN, init_data)
-        user_id = decoded.user.id
-        username = decoded.user.username or "unknown"
-        referral_link = asyncio.run(get_or_create_referral_link(app_bot.bot, user_id, username))
-        return jsonify({"success": True, "link": referral_link})
-    except Exception as e:
-        traceback.print_exc()
-        return jsonify({"success": False, "error": str(e)}), 500
-
-@app.route("/api/stats", methods=["POST"])
-def api_stats():
-    try:
-        data = request.get_json()
-        init_data = data.get("initData")
-        decoded = decode_webapp_init_data(BOT_TOKEN, init_data)
-        user_id = decoded.user.id
-
-        user = users_collection.find_one({"user_id": user_id}) or {}
-        return jsonify({
-            "xp": user.get("xp", 0),
-            "referrals": user.get("referral_count", 0),
-        })
-    except Exception as e:
-        traceback.print_exc()
-        return jsonify({"success": False, "error": str(e)}), 500
-
-@app.route("/api/admin/check", methods=["POST"])
-def api_is_admin():
-    try:
-        data = request.get_json()
-        init_data = data.get("initData") 
-        decoded = decode_webapp_init_data(BOT_TOKEN, init_data)
-        user_id = decoded.user.id
-
-        admins = asyncio.run(app_bot.bot.get_chat_administrators(chat_id=GROUP_ID))
-        is_admin = any(admin.user.id == user_id for admin in admins)
-        return jsonify({"isAdmin": is_admin})
-    except Exception as e:
-        return jsonify({"success": False, "error": str(e)}), 500
+@app.route("/referral")
+def referral():
+    user_id = request.args.get("user_id", type=int)
+    if not user_id:
+        return jsonify({"error": "Missing user_id"}), 400
+    link = get_or_create_referral_link(user_id)
+    return jsonify({"referral_link": link})
 
 @app.route("/api/leaderboard")
-def get_leaderboard():
-    try:
-        top_checkins = list(users_collection.find().sort("weekly_xp", -1).limit(10))
-        leaderboard = [
-            {"username": u.get("username", "unknown"), "xp": u.get("weekly_xp", 0)}
-            for u in top_checkins
-        ]
-        return jsonify({"success": True, "leaderboard": leaderboard})
-    except Exception as e:
-        return jsonify({"success": False, "error": str(e)}), 500
+def leaderboard():
+    top_users = list(users_collection.find().sort("weekly_xp", -1).limit(10))
+    leaderboard_data = [
+        {
+            "username": user.get("username", "N/A"),
+            "xp": user.get("xp", 0),
+            "weekly_xp": user.get("weekly_xp", 0),
+            "referrals": user.get("referral_count", 0)
+        } for user in top_users
+    ]
+    return jsonify(leaderboard_data)
 
 @app.route("/api/leaderboard/history")
-def get_leaderboard_history():
+def leaderboard_history():
+    records = list(weekly_collection.find({}, {"_id": 0}))
+    return jsonify(records)
+
+@app.route("/api/admin/check", methods=["POST"])
+def is_admin():
+    data = request.json
+    init_data = data.get("initData")
+    if not init_data:
+        return jsonify({"error": "Missing initData"}), 400
+
     try:
-        last_record = history_collection.find().sort("archived_at", DESCENDING).limit(1).next()
-        return jsonify({
-            "success": True,
-            "week_start": last_record.get("week_start"),
-            "week_end": last_record.get("week_end"),
-            "checkin": last_record.get("checkin_leaderboard", []),
-            "referral": last_record.get("referral_leaderboard", [])
-        })
-    except StopIteration:
-        return jsonify({"success": False, "message": "No history found."}), 404
+        decoded = WebAppInitData.parse(init_data, BOT_TOKEN)
+        user_id = decoded.user.id
+        chat_id = decoded.chat.id if decoded.chat else None
+
+        if not chat_id:
+            return jsonify({"is_admin": False}), 200
+
+        member = asyncio.get_event_loop().run_until_complete(
+            bot.get_chat_member(chat_id, user_id)
+        )
+        is_admin = member.status in ("administrator", "creator")
+        return jsonify({"is_admin": is_admin})
     except Exception as e:
-        return jsonify({"success": False, "error": str(e)}), 500
+        logger.error(f"Admin check failed: {e}")
+        return jsonify({"is_admin": False})
 
 @app.route("/api/admin/update_xp", methods=["POST"])
-def api_admin_update_xp():
-    try:
-        data = request.get_json()
-        init_data = data.get("initData")
-        username = data.get("username", "").lstrip('@').strip().lower()
-        amount = int(data.get("amount"))
-        action = data.get("action")
+def update_xp():
+    data = request.json
+    init_data = data.get("initData")
+    target_username = data.get("username")
+    amount = data.get("amount", 0)
+    action = data.get("action")
 
-        decoded = decode_webapp_init_data(BOT_TOKEN, init_data)
+    if not all([init_data, target_username, action]):
+        return jsonify({"error": "Missing parameters"}), 400
+
+    try:
+        decoded = WebAppInitData.parse(init_data, BOT_TOKEN)
         user_id = decoded.user.id
+        chat_id = decoded.chat.id if decoded.chat else None
 
-        admins = asyncio.run(app_bot.bot.get_chat_administrators(chat_id=GROUP_ID))
-        is_admin = any(admin.user.id == user_id for admin in admins)
-        if not is_admin:
-            return jsonify({"success": False, "message": "❌ You are not an admin."})
+        if not chat_id:
+            return jsonify({"error": "Not in group context"}), 403
 
-        if action == "remove":
-            amount *= -1
-
-        target_user = users_collection.find_one({"username": {"$regex": f"^{username}$", "$options": "i"}})
-        if not target_user:
-            return jsonify({"success": False, "message": f"User @{username} not found."})
-
-        new_xp = max(0, target_user.get("xp", 0) + amount)
-        new_weekly_xp = max(0, target_user.get("weekly_xp", 0) + amount)
-
-        users_collection.update_one(
-            {"_id": target_user["_id"]},
-            {"$set": {"xp": new_xp, "weekly_xp": new_weekly_xp}}
+        member = asyncio.get_event_loop().run_until_complete(
+            bot.get_chat_member(chat_id, user_id)
         )
+        if member.status not in ("administrator", "creator"):
+            return jsonify({"error": "Not authorized"}), 403
 
-        verb = "Added" if amount > 0 else "Removed"
-        return jsonify({"success": True, "message": f"{verb} {abs(amount)} XP to @{username}."})
+        user = users_collection.find_one({"username": target_username})
+        if not user:
+            return jsonify({"error": "User not found"}), 404
 
-    except Exception as e:
-        traceback.print_exc()
-        return jsonify({"success": False, "message": str(e)}), 500
-
-@app.route("/api/join_requests")
-def api_join_requests():
-    try:
-        requests = asyncio.run(app_bot.bot.get_chat_join_requests(chat_id=GROUP_ID))
-        result = [{"user_id": req.from_user.id, "username": req.from_user.username} for req in requests]
-        return jsonify({"success": True, "requests": result})
-    except Exception as e:
-        return jsonify({"success": False, "error": str(e)}), 500
-
-@app.route("/api/export_csv")
-def export_csv():
-    try:
-        users = users_collection.find()
-        output = io.StringIO()
-        writer = csv.writer(output)
-        writer.writerow(["user_id", "username", "xp", "weekly_xp", "referral_count"])
-        for u in users:
-            writer.writerow([
-                u.get("user_id"),
-                u.get("username", ""),
-                u.get("xp", 0),
-                u.get("weekly_xp", 0),
-                u.get("referral_count", 0),
-            ])
-        output.seek(0)
-        return output.getvalue(), 200, {
-            'Content-Type': 'text/csv',
-            'Content-Disposition': 'attachment; filename=user_data.csv'
-        }
-    except Exception as e:
-        return jsonify({"success": False, "error": str(e)}), 500
-
-# ----------------------------
-# Weekly XP Reset Job
-# ----------------------------
-tz = timezone("Asia/Kuala_Lumpur")
-
-def reset_weekly_xp():
-    now = datetime.now(tz)
-    top_checkin = list(users_collection.find().sort("weekly_xp", DESCENDING).limit(50))
-    top_referrals = list(users_collection.find().sort("referral_count", DESCENDING).limit(50))
-
-    history_collection.insert_one({
-        "week_start": (now - timedelta(days=7)).strftime('%Y-%m-%d'),
-        "week_end": now.strftime('%Y-%m-%d'),
-        "checkin_leaderboard": [
-            {"user_id": u["user_id"], "username": u.get("username", "unknown"), "weekly_xp": u.get("weekly_xp", 0)}
-            for u in top_checkin
-        ],
-        "referral_leaderboard": [
-            {"user_id": u["user_id"], "username": u.get("username", "unknown"), "referral_count": u.get("referral_count", 0)}
-            for u in top_referrals
-        ],
-        "archived_at": now
-    })
-
-    users_collection.update_many({}, {"$set": {"weekly_xp": 0}})
-    print(f"✅ Weekly XP reset complete at {now}")
-
-# ----------------------------
-# Telegram Bot Handlers
-# ----------------------------
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if user:
-        users_collection.update_one(
-            {"user_id": user.id},
-            {"$setOnInsert": {
-                "username": user.username,
-                "xp": 0,
-                "weekly_xp": 0,
-                "referral_count": 0,
-                "last_checkin": None
-            }},
-            upsert=True
-        )
-        keyboard = [[
-            InlineKeyboardButton("🚀 Open Check-in & Referral", web_app=WebAppInfo(url=WEBAPP_URL))
-        ]]
-        await update.message.reply_text("👋 Welcome! Tap the button below to check-in and get your referral link 👇", reply_markup=InlineKeyboardMarkup(keyboard))
-
-async def join_request_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.chat_join_request.from_user
-    invite_link = update.chat_join_request.invite_link
-
-    existing_user = users_collection.find_one({"user_id": user.id})
-    if existing_user and existing_user.get("joined_once"):
-        print(f"[Skip XP] {user.username} already joined before.")
-    else:
-        users_collection.update_one(
-            {"user_id": user.id},
-            {"$set": {"username": user.username, "joined_once": True},
-             "$setOnInsert": {"xp": 0, "referral_count": 0, "weekly_xp": 0, "last_checkin": None}},
-            upsert=True
-        )
-
-        referrer_id = None
-        if invite_link and invite_link.name and invite_link.name.startswith("ref-"):
-            referrer_id = int(invite_link.name.split("-")[1])
-        elif invite_link and invite_link.invite_link:
-            ref_doc = users_collection.find_one({"referral_link": invite_link.invite_link})
-            if ref_doc:
-                referrer_id = ref_doc["user_id"]
-
-        if referrer_id:
+        if action == "add":
             users_collection.update_one(
-                {"user_id": referrer_id},
-                {"$inc": {"referral_count": 1, "xp": 20, "weekly_xp": 20}}
+                {"username": target_username},
+                {"$inc": {"xp": amount, "weekly_xp": amount}}
             )
-            print(f"[Referral] {user.username} referred by {referrer_id}")
+        elif action == "remove":
+            xp = max(user.get("xp", 0) - amount, 0)
+            weekly_xp = max(user.get("weekly_xp", 0) - amount, 0)
+            users_collection.update_one(
+                {"username": target_username},
+                {"$set": {"xp": xp, "weekly_xp": weekly_xp}}
+            )
         else:
-            print(f"[Referral] No referrer found for {user.username}")
+            return jsonify({"error": "Invalid action"}), 400
 
-    await context.bot.approve_chat_join_request(update.chat_join_request.chat.id, user.id)
+        return jsonify({"success": True})
+    except Exception as e:
+        logger.error(f"Admin XP update failed: {e}")
+        return jsonify({"error": "Server error"}), 500
 
-# ----------------------------
-# Run Bot + Flask + Scheduler
-# ----------------------------
+@app.route("/api/admin/export_csv")
+def export_csv():
+    users = list(users_collection.find({}, {"_id": 0}))
+    csv_path = "/tmp/users.csv"
+    with open(csv_path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=["user_id", "username", "xp", "weekly_xp", "referral_count"])
+        writer.writeheader()
+        writer.writerows(users)
+    return send_from_directory("/tmp", "users.csv", as_attachment=True)
+
+# === App Initialization ===
+
+def start_bot():
+    application = ApplicationBuilder().token(BOT_TOKEN).build()
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(MessageHandler(filters.StatusUpdate.JOIN_REQUEST, handle_join_request))
+    application.run_polling()
+
 if __name__ == "__main__":
-    Thread(target=lambda: app.run(host="0.0.0.0", port=8080)).start()
-
-    app_bot = ApplicationBuilder().token(BOT_TOKEN).build()
-    app_bot.add_handler(CommandHandler("start", start))
-    app_bot.add_handler(ChatJoinRequestHandler(join_request_handler))
-
-    scheduler = BackgroundScheduler(timezone=tz)
-    scheduler.add_job(reset_weekly_xp, trigger=CronTrigger(day_of_week="mon", hour=0, minute=0), name="Weekly XP Reset")
+    scheduler = BackgroundScheduler()
+    scheduler.add_job(reset_weekly_xp, "cron", day_of_week="sun", hour=23, minute=59)
     scheduler.start()
 
-    print("✅ Bot & Scheduler running...")
-    app_bot.run_polling()
+    loop = asyncio.get_event_loop()
+    loop.run_in_executor(None, start_bot)
+
+    app.run(host="0.0.0.0", port=8080)
