@@ -1,193 +1,138 @@
 import os
 import logging
-from flask import Flask, request, jsonify, send_file
-from pymongo import MongoClient, DESCENDING
-from telegram import Bot
-from telegram.ext import Application, CommandHandler
-from telegram.constants import ChatMemberStatus
-from apscheduler.schedulers.background import BackgroundScheduler
-from io import StringIO
-import csv
 import asyncio
-from datetime import datetime
-
+from flask import Flask, send_from_directory, request, jsonify
+from threading import Thread
+from pymongo import MongoClient
+from datetime import datetime, timedelta
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+    filters,
+)
 from checkin import handle_checkin
-from referral import get_or_create_referral_link
+from referral import get_or_create_referral_link, handle_new_join
+from database import (
+    users_collection,
+    ensure_user,
+    add_xp,
+    get_leaderboard,
+    get_streak_badges,
+    reset_weekly_xp,
+)
 
-# Setup logging
+from apscheduler.schedulers.background import BackgroundScheduler
+
 logging.basicConfig(level=logging.INFO)
 
-# Telegram bot and group setup
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-GROUP_ID = int(os.getenv("GROUP_ID"))
-bot = Bot(BOT_TOKEN)
-app_bot = Application.builder().token(BOT_TOKEN).build()
+MONGO_URL = os.getenv("MONGO_URL")
+GROUP_ID = int(os.getenv("GROUP_ID"))  # Make sure this is set in your Fly.io secrets
 
-# Flask app
 app = Flask(__name__)
 
-# MongoDB setup
-MONGO_URL = os.environ.get("MONGO_URL")
-client = MongoClient(MONGO_URL)
-db = client["referral_bot"]
-users_collection = db["users"]
-history_collection = db["weekly_history"]
-pending_referrals = {}
-
-# ========== MINI APP ROUTES ==========
-
+# === Flask Mini App Routes ===
 @app.route("/miniapp")
-def miniapp_home():
-    return app.send_static_file("index.html")
+def miniapp():
+    return send_from_directory("static", "index.html")
 
-@app.route("/api/checkin")
+@app.route("/miniapp/<path:path>")
+def static_files(path):
+    return send_from_directory("static", path)
+
+@app.route("/api/checkin", methods=["GET"])
 def api_checkin():
     return handle_checkin()
 
-@app.route("/api/referral")
-def api_referral():
-    user_id = request.args.get("user_id", type=int)
-    username = request.args.get("username", default="")
-    return get_or_create_referral_link(user_id, username)
-
 @app.route("/api/leaderboard")
-def get_leaderboard():
-    top_checkins = list(users_collection.find().sort("weekly_xp", -1).limit(10))
-    top_referrals = list(users_collection.find().sort("referral_count", -1).limit(10))
-    leaderboard = {
-        "checkin": [{"username": u.get("username", "unknown"), "xp": u.get("weekly_xp", 0)} for u in top_checkins],
-        "referral": [{"username": u.get("username", "unknown"), "referrals": u.get("referral_count", 0)} for u in top_referrals]
-    }
+def api_leaderboard():
+    leaderboard = get_leaderboard()
     return jsonify(leaderboard)
 
-@app.route("/api/weekly-history")
-def get_weekly_history():
-    history = list(history_collection.find().sort("week_start", DESCENDING).limit(5))
-    for entry in history:
-        entry["_id"] = str(entry["_id"])
-    return jsonify(history)
-
-# ========== ADMIN ROUTES ==========
-
-@app.route("/api/admin/check")
-def admin_check():
+@app.route("/api/badges", methods=["GET"])
+def api_badges():
     user_id = request.args.get("user_id", type=int)
-    try:
-        loop = asyncio.get_event_loop()
-        admins = loop.run_until_complete(bot.get_chat_administrators(chat_id=GROUP_ID))
-        is_admin = any(admin.user.id == user_id for admin in admins)
-        return jsonify({"is_admin": is_admin})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+    badges = get_streak_badges(user_id)
+    return jsonify(badges)
+
+@app.route("/api/admin/check", methods=["POST"])
+def check_admin():
+    data = request.get_json()
+    user_id = data.get("user_id")
+    chat_id = data.get("chat_id")
+
+    if not user_id or not chat_id:
+        return jsonify({"error": "Missing user_id or chat_id"}), 400
+
+    async def is_admin():
+        application = app.bot_app
+        chat_administrators = await application.bot.get_chat_administrators(chat_id)
+        return any(admin.user.id == user_id for admin in chat_administrators)
+
+    loop = asyncio.new_event_loop()
+    result = loop.run_until_complete(is_admin())
+    loop.close()
+    return jsonify({"is_admin": result})
 
 @app.route("/api/admin/xp", methods=["POST"])
-def admin_xp():
-    try:
-        data = request.json
-        admin_id = int(data.get("admin_id"))
-        username = data.get("username")
-        amount = int(data.get("amount"))
-        action = data.get("action")
+def api_admin_xp():
+    data = request.get_json()
+    user_id = data.get("user_id")
+    xp = data.get("xp")
 
-        # Validate admin
-        loop = asyncio.get_event_loop()
-        admins = loop.run_until_complete(bot.get_chat_administrators(chat_id=GROUP_ID))
-        if not any(admin.user.id == admin_id for admin in admins):
-            return jsonify({"success": False, "message": "Unauthorized"}), 403
+    if user_id is None or xp is None:
+        return jsonify({"error": "Missing user_id or xp"}), 400
 
-        user = users_collection.find_one({"username": username})
-        if not user:
-            return jsonify({"success": False, "message": "User not found"}), 404
+    user_id = int(user_id)
+    xp = int(xp)
 
-        change = amount if action == "add" else -amount
-        users_collection.update_one(
-            {"username": username},
-            {"$inc": {"xp": change, "weekly_xp": change}}
+    add_xp(user_id, xp)
+    return jsonify({"success": True})
+
+# === Telegram Bot Handlers ===
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    chat = update.effective_chat
+
+    if chat.type == "private":
+        ensure_user(user.id, user.username or "")
+        link = get_or_create_referral_link()
+        welcome_msg = (
+            "👋 Welcome! Here’s your personal referral link:\n\n"
+            f"{link}\n\n"
+            "✅ Invite friends to earn rewards!\n"
+            "🔔 Join our channel for the latest drops:\n"
+            "👉 https://t.me/advantplayofficial"
         )
-        return jsonify({"success": True, "message": f"{action.title()}ed {amount} XP to {username}"})
-    except Exception as e:
-        return jsonify({"success": False, "error": str(e)}), 500
+        await update.message.reply_text(welcome_msg)
 
-@app.route("/api/admin/export")
-def admin_export():
-    admin_id = request.args.get("admin_id", type=int)
-    try:
-        loop = asyncio.get_event_loop()
-        admins = loop.run_until_complete(bot.get_chat_administrators(chat_id=GROUP_ID))
-        if not any(admin.user.id == admin_id for admin in admins):
-            return jsonify({"error": "Unauthorized"}), 403
+async def referral_join_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await handle_new_join(update, context, GROUP_ID)
 
-        users = list(users_collection.find())
-        output = StringIO()
-        writer = csv.writer(output)
-        writer.writerow(["Username", "XP", "Weekly XP", "Referrals"])
-        for u in users:
-            writer.writerow([
-                u.get("username", ""),
-                u.get("xp", 0),
-                u.get("weekly_xp", 0),
-                u.get("referral_count", 0)
-            ])
-        output.seek(0)
-        return send_file(output, mimetype="text/csv", download_name="users_export.csv", as_attachment=True)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-# ========== TELEGRAM EVENT HANDLERS ==========
-
-@app_bot.chat_join_request_handler()
-async def handle_join_request(update, context):
-    user = update.from_user
-    referrer_id = pending_referrals.pop(user.id, None)
-    if referrer_id and referrer_id != user.id:
-        referrer = users_collection.find_one({"user_id": referrer_id})
-        if referrer:
-            already_referred = users_collection.find_one({
-                "user_id": user.id,
-                "referred_by": referrer_id
-            })
-            if not already_referred:
-                users_collection.update_one(
-                    {"user_id": referrer_id},
-                    {"$inc": {"referral_count": 1}}
-                )
-                users_collection.update_one(
-                    {"user_id": user.id},
-                    {"$set": {"referred_by": referrer_id}},
-                    upsert=True
-                )
-    await bot.send_message(
-        chat_id=user.id,
-        text="✅ Welcome! Follow our channel 👉 https://t.me/advantplayofficial for surprise voucher drops & updates!"
-    )
-
-# ========== SCHEDULED TASK ==========
-
-def reset_weekly_xp():
-    week_start = datetime.utcnow()
-    snapshot = list(users_collection.find().sort("weekly_xp", -1).limit(50))
-    for entry in snapshot:
-        entry["_id"] = str(entry["_id"])
-    history_collection.insert_one({
-        "week_start": week_start,
-        "leaderboard": snapshot
-    })
-    users_collection.update_many({}, {"$set": {"weekly_xp": 0}})
-
+# === Weekly Reset with APScheduler ===
 scheduler = BackgroundScheduler()
 scheduler.add_job(reset_weekly_xp, "cron", day_of_week="mon", hour=0, minute=0)
 scheduler.start()
 
-# ========== STARTUP ==========
+# === Launch Telegram Bot ===
+def run_telegram_bot():
+    app.bot_app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-@app.route("/")
-def home():
-    return "Bot is running!"
+    app.bot_app.add_handler(CommandHandler("start", start))
+    app.bot_app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, referral_join_handler))
 
-def run_bot():
-    app_bot.run_polling()
+    # Run the bot inside existing event loop
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(app.bot_app.initialize())
+    loop.run_until_complete(app.bot_app.start())
+    loop.run_forever()
 
+# === Run Flask + Telegram Bot ===
 if __name__ == "__main__":
-    import threading
-    threading.Thread(target=run_bot).start()
-    app.run(host="0.0.0.0", port=8080) 
+    Thread(target=run_telegram_bot).start()
+    app.run(host="0.0.0.0", port=8080)
