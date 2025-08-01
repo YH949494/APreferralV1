@@ -125,3 +125,10 @@ def get_user_stats(user_id):
             "streak_28": False
         })
     }
+
+# === MANUAL XP ADD ===
+def add_xp(user_id, amount):
+    users_collection.update_one(
+        {"user_id": user_id},
+        {"$inc": {"xp": amount}}
+    )
