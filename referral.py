@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta
-from telegram import Bot
+from telegram import Bot, Update
+from telegram.ext import ContextTypes
 from pymongo import MongoClient
 import os
 import logging
@@ -14,9 +15,11 @@ client = MongoClient(MONGO_URL)
 db = client["referral_bot"]
 users_collection = db["users"]
 
-# Your Telegram group ID (make sure the bot is admin here)
-GROUP_ID = -1002304653063
+# Your Telegram group ID
+GROUP_ID = int(os.environ.get("GROUP_ID", "-1002304653063"))  # fallback to your current hardcoded ID
 
+
+### ✅ 1. Generate or reuse referral link
 async def get_or_create_referral_link(bot: Bot, user_id: int, username: str) -> str:
     try:
         logger.info(f"Fetching referral link for user_id={user_id}, username={username}")
@@ -61,3 +64,41 @@ async def get_or_create_referral_link(bot: Bot, user_id: int, username: str) -> 
     except Exception as e:
         logger.error(f"[get_or_create_referral_link] Error for user {user_id}: {e}")
         raise
+
+
+### ✅ 2. Handle new user joins (called by main.py)
+def is_recent_leave(user_id):
+    record = users_collection.find_one({"user_id": user_id})
+    if record and "left_at" in record:
+        left_time = record["left_at"]
+        if datetime.utcnow() - left_time < timedelta(hours=12):
+            return True
+    return False
+
+async def handle_new_join(update: Update, context: ContextTypes.DEFAULT_TYPE, group_id: int):
+    for new_member in update.message.new_chat_members:
+        referred_by = context.user_data.get("referred_by")
+        user_id = new_member.id
+        username = new_member.username or ""
+
+        if referred_by and referred_by != user_id:
+            if is_recent_leave(user_id):
+                logger.info(f"❌ Referral blocked for abuse: user {user_id}")
+            else:
+                users_collection.update_one(
+                    {"user_id": user_id},
+                    {"$set": {
+                        "username": username,
+                        "referred_by": referred_by,
+                        "joined_at": datetime.utcnow()
+                    }},
+                    upsert=True
+                )
+
+                # Bonus XP to the referrer
+                users_collection.update_one(
+                    {"user_id": referred_by},
+                    {"$inc": {"xp": 50}}
+                )
+
+                logger.info(f"🎉 {user_id} joined via referral from {referred_by}")
