@@ -8,7 +8,7 @@ from telegram.ext import (
     CommandHandler,
     ContextTypes,
 )
-from referral import generate_referral_link
+from referral import get_or_create_referral_link
 from database import (
     ensure_user,
     can_checkin,
