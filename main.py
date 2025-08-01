@@ -5,7 +5,7 @@ from flask_cors import CORS
 from telegram import Update, Bot, WebAppInitData
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 from apscheduler.schedulers.background import BackgroundScheduler
-from datetime import datetime, timedelta
+from datetime import datetime
 import asyncio
 
 from checkin import handle_checkin
@@ -33,7 +33,7 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 bot = Bot(BOT_TOKEN)
 application = ApplicationBuilder().token(BOT_TOKEN).build()
 
-# Route: serve the mini app frontend
+# Serve Telegram Mini App
 @app.route('/miniapp')
 def miniapp():
     return send_from_directory('.', 'index.html')
@@ -42,7 +42,7 @@ def miniapp():
 def static_proxy(path):
     return send_from_directory('.', path)
 
-# Route: check-in
+# Check-in API
 @app.route('/api/checkin', methods=['POST'])
 def api_checkin():
     data = request.get_json()
@@ -50,7 +50,7 @@ def api_checkin():
     username = data.get("username")
     return jsonify(handle_checkin(user_id, username))
 
-# Route: referral link
+# Referral API
 @app.route('/api/referral', methods=['POST'])
 def api_referral():
     data = request.get_json()
@@ -58,37 +58,37 @@ def api_referral():
     username = data.get("username")
     return jsonify(get_or_create_referral_link(user_id, username, bot))
 
-# Route: user data (XP, streak, referrals)
+# Get user data (XP, streak, referrals)
 @app.route('/api/user', methods=['GET'])
 def api_user():
     user_id = request.args.get("user_id")
-    data = get_user_data(user_id)
-    return jsonify(data)
+    return jsonify(get_user_data(user_id))
 
-# Route: leaderboard (XP + referrals)
+# Get leaderboard
 @app.route('/api/leaderboard', methods=['GET'])
 def api_leaderboard():
     return jsonify(get_leaderboard())
 
-# Route: leaderboard history
+# Get weekly leaderboard history
 @app.route('/api/leaderboard/history', methods=['GET'])
 def api_leaderboard_history():
     return jsonify(get_weekly_history())
 
-# Route: admin check using initData
+# Admin check via initData
 @app.route('/api/admin/check', methods=['POST'])
 def api_admin_check():
     init_data = request.json.get("initData", "")
     try:
         parsed = WebAppInitData.parse(init_data, BOT_TOKEN)
         user_id = parsed.user.id
-        chat = bot.get_chat(os.environ.get("GROUP_ID"))
+        group_id = os.environ.get("GROUP_ID")
+        chat = bot.get_chat(group_id)
         is_admin = any(admin.user.id == user_id for admin in chat.get_administrators())
         return jsonify({"ok": True, "is_admin": is_admin})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 400
 
-# Route: admin add XP
+# Admin: Add XP
 @app.route('/api/admin/add_xp', methods=['POST'])
 def api_admin_add_xp():
     data = request.get_json()
@@ -97,7 +97,7 @@ def api_admin_add_xp():
     success = add_xp(user_id, amount)
     return jsonify({"ok": success})
 
-# Route: admin remove XP
+# Admin: Remove XP
 @app.route('/api/admin/remove_xp', methods=['POST'])
 def api_admin_remove_xp():
     data = request.get_json()
@@ -106,23 +106,23 @@ def api_admin_remove_xp():
     success = remove_xp(user_id, amount)
     return jsonify({"ok": success})
 
-# Handle Telegram commands
+# Telegram bot command handlers
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Welcome! Use the Mini App to check-in and refer friends.")
 
-# Handle join request for referral tracking
+# Handle join request for referral
 async def join_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.chat_join_request.from_user
     group_id = update.chat_join_request.chat.id
     await log_join_request(user, group_id)
 
+# Register command handlers
 application.add_handler(CommandHandler("start", start))
 application.add_handler(CommandHandler("checkin", start))
 application.add_handler(CommandHandler("referral", start))
 application.add_handler(CommandHandler("leaderboard", start))
 application.add_handler(CommandHandler("history", start))
 application.add_handler(CommandHandler("admin", start))
-
 application.add_handler(CommandHandler("joinrequest", join_request))
 
 # Schedule weekly XP reset
@@ -130,7 +130,7 @@ scheduler = BackgroundScheduler()
 scheduler.add_job(reset_weekly_xp, 'cron', day_of_week='sun', hour=23, minute=59)
 scheduler.start()
 
-# Run both Flask and Telegram app
+# Run Flask + Telegram bot
 if __name__ == '__main__':
     loop = asyncio.get_event_loop()
     loop.create_task(application.initialize())
