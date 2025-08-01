@@ -9,6 +9,7 @@ db = client["telegram_bot"]
 users_collection = db["users"]
 leaderboard_collection = db["weekly_leaderboard"]
 weekly_history_collection = db["weekly_history"]
+leaderboard_snapshots_collection = db["leaderboard_snapshots"]  # ✅ Needed for snapshot
 
 # === USERS ===
 def init_user(user_id, username):
@@ -153,3 +154,13 @@ def log_join_request(user_id, referrer_id):
         {"$inc": {"referral_count": 1, "xp": 20}}  # Optional: reward referrer
     )
 
+# === ADMIN EXPORT & SNAPSHOT ===
+def get_all_users():
+    return list(users_collection.find({}, {"_id": 0}))
+
+def save_leaderboard_snapshot():
+    snapshot = {
+        "timestamp": datetime.datetime.utcnow(),
+        "data": get_leaderboard()
+    }
+    leaderboard_snapshots_collection.insert_one(snapshot)
