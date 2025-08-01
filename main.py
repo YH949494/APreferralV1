@@ -2,14 +2,15 @@ import os
 import asyncio
 from flask import Flask, render_template, request, jsonify
 from threading import Thread
-from telegram import Update, BotCommand
+from telegram import Update, BotCommand, KeyboardButton, ReplyKeyboardMarkup, WebAppInfo
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+
 from referral import get_or_create_referral_link
 from database import (
     ensure_user,
     can_checkin,
     checkin_user,
-    get_user_stats
+    get_user_stats,
 )
 
 # === Flask App Setup ===
@@ -52,7 +53,17 @@ application = ApplicationBuilder().token(BOT_TOKEN).build()
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     ensure_user(user.id, user.username)
-    await update.message.reply_text("✅ You’re all set! Use the Mini App to check-in and get your referral link.")
+
+    webapp_url = "https://apreferralv1.fly.dev/miniapp"
+    keyboard = [
+        [KeyboardButton(text="🚀 Open Mini App", web_app=WebAppInfo(url=webapp_url))]
+    ]
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
+    await update.message.reply_text(
+        "✅ You're all set!\nTap below to open the Check-in & Referral Center 👇",
+        reply_markup=reply_markup
+    )
 
 application.add_handler(CommandHandler("start", start))
 
@@ -66,7 +77,7 @@ def run_telegram():
         await application.initialize()
         await application.start()
         await application.bot.set_my_commands([
-            BotCommand("start", "Start the bot and activate your account")
+            BotCommand("start", "Start the bot and open the Mini App")
         ])
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
