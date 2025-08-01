@@ -4,21 +4,24 @@ import asyncio
 from flask import Flask, request, send_from_directory, jsonify
 from threading import Thread
 from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from telegram.ext import (
+    ApplicationBuilder, CommandHandler, ContextTypes,
+)
 from checkin import handle_checkin
 from referral import get_or_create_referral_link
 from database import (
-    get_user_data, get_leaderboard_data, update_user_xp, get_all_users, save_leaderboard_snapshot
+    get_user_data, get_leaderboard_data, update_user_xp,
+    get_all_users, save_leaderboard_snapshot
 )
 
-# Setup logging
+# Logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Telegram Bot Token
+# ENV
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-# --- Flask App Setup ---
+# Flask App
 app = Flask(__name__, static_folder='frontend')
 
 @app.route("/")
@@ -76,24 +79,30 @@ def api_leaderboard_snapshot():
     save_leaderboard_snapshot()
     return jsonify({"status": "Snapshot saved"})
 
-# --- Telegram Bot Setup ---
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Welcome! Use the Mini App to check in and refer friends.")
-
-async def main():
-    application = ApplicationBuilder().token(BOT_TOKEN).build()
-    application.add_handler(CommandHandler("start", start))
-    await application.run_polling()
-
-# --- Start Flask in background thread ---
+# Flask server runs in a thread
 def run_flask():
     app.run(host="0.0.0.0", port=8080)
 
-# --- Entry Point ---
-if __name__ == "__main__":
-    flask_thread = Thread(target=run_flask)
-    flask_thread.start()
+# Telegram bot logic
+async def telegram_bot():
+    application = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(main())
+    async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await update.message.reply_text("Welcome! Use the Mini App to check in and refer friends.")
+
+    application.add_handler(CommandHandler("start", start))
+
+    await application.initialize()
+    await application.start()
+    await application.updater.start_polling()
+    logger.info("Telegram bot started.")
+
+# Main entry point
+if __name__ == "__main__":
+    # Start Flask in separate thread
+    Thread(target=run_flask).start()
+
+    # Start Telegram bot in current event loop
+    loop = asyncio.get_event_loop()
+    loop.create_task(telegram_bot())
+    loop.run_forever()
