@@ -114,3 +114,14 @@ def get_leaderboard(limit=20):
         }
         for user in top_users
     ]
+    
+# === WEEKLY HISTORY ===
+def get_weekly_history():
+    history = weekly_history_collection.find().sort("week_start", -1).limit(4)
+    return [
+        {
+            "week_start": h.get("week_start"),
+            "leaderboard": h.get("leaderboard", [])
+        }
+        for h in history
+    ]
