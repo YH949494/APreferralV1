@@ -66,3 +66,20 @@ def get_user_stats(user_id):
         "referral_count": user.get("referral_count", 0)
     }
 
+# === ADMIN XP CONTROL ===
+def update_user_xp(username, amount):
+    user = users_collection.find_one({
+        "username": {"$regex": f"^{username}$", "$options": "i"}
+    })
+    if not user:
+        return False, f"User @{username} not found."
+
+    new_xp = max(0, user.get("xp", 0) + amount)
+
+    users_collection.update_one(
+        {"_id": user["_id"]},
+        {"$set": {"xp": new_xp}}
+    )
+
+    action = "Added" if amount > 0 else "Removed"
+    return True, f"{action} {abs(amount)} XP for @{username}."
