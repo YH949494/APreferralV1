@@ -103,14 +103,24 @@ def get_leaderboard_history():
 
 @app.route("/api/add_xp", methods=["POST"])
 def api_add_xp():
-    try:
-        data = request.json
-        user_id = int(data["user_id"])
-        xp = int(data["xp"])
-        users_collection.update_one({"user_id": user_id}, {"$inc": {"xp": xp, "weekly_xp": xp}})
-        return jsonify({"success": True, "message": f"Added {xp} XP to user {user_id}"})
-    except Exception as e:
-        return jsonify({"success": False, "error": str(e)}), 500
+    data = request.json
+    user_input = data.get("user_id")  # Can be @username or user ID
+    amount = int(data.get("xp", 0))
+
+    if not user_input or amount == 0:
+        return jsonify({"success": False, "message": "Missing username or amount."}), 400
+
+    # If it's a string starting with @, treat as username
+    if isinstance(user_input, str) and user_input.startswith("@"):
+        username = user_input[1:]
+    elif isinstance(user_input, str):
+        username = user_input
+    else:
+        # If it's numeric (user ID), just reject it for now (optional: allow user_id lookup)
+        return jsonify({"success": False, "message": "Use @username format."}), 400
+
+    success, message = update_user_xp(username, amount)
+    return jsonify({"success": success, "message": message})
 
 @app.route("/api/join_requests")
 def api_join_requests():
