@@ -23,7 +23,7 @@ import io
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 MONGO_URL = os.environ.get("MONGO_URL")
 WEBAPP_URL = "https://apreferralv1.fly.dev/miniapp"
-GROUP_ID = -1002723991859  # Your Telegram group ID
+GROUP_ID = -1002723991859
 
 # ----------------------------
 # MongoDB Setup
@@ -101,22 +101,22 @@ def get_leaderboard_history():
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 
+# ✅ Add/Reduce XP endpoint
 @app.route("/api/add_xp", methods=["POST"])
 def api_add_xp():
+    from database import update_user_xp  # ✅ import here to avoid circular import
     data = request.json
-    user_input = data.get("user_id")  # Can be @username or user ID
+    user_input = data.get("user_id")
     amount = int(data.get("xp", 0))
 
     if not user_input or amount == 0:
         return jsonify({"success": False, "message": "Missing username or amount."}), 400
 
-    # If it's a string starting with @, treat as username
     if isinstance(user_input, str) and user_input.startswith("@"):
         username = user_input[1:]
     elif isinstance(user_input, str):
         username = user_input
     else:
-        # If it's numeric (user ID), just reject it for now (optional: allow user_id lookup)
         return jsonify({"success": False, "message": "Use @username format."}), 400
 
     success, message = update_user_xp(username, amount)
@@ -147,7 +147,7 @@ def export_csv():
                 u.get("referral_count", 0),
             ])
         output.seek(0)
-        return send_from_directory(directory="", path=output, download_name="user_data.csv", as_attachment=True)
+        return output.getvalue()
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 
