@@ -243,29 +243,32 @@
     }
 
     async function submitXPChange() {
-      const input = document.getElementById("xp-user").value.trim();
-      const amount = parseInt(document.getElementById("xp-amount").value.trim());
+  const input = document.getElementById("xp-user").value.trim();
+  const amount = parseInt(document.getElementById("xp-amount").value.trim());
 
-      if (!input || isNaN(amount)) {
-        alert("Please enter both @username and amount.");
-        return;
-      }
+  if (!input || isNaN(amount)) {
+    alert("Please enter both @username and amount.");
+    return;
+  }
 
-      try {
-        const res = await fetch(`${API_BASE}/api/add_xp`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ user_id: input, xp: amount })
-        });
-        const data = await res.json();
-        alert(data.message || "XP updated.");
-        closeXPModal();
+  try {
+    const res = await fetch(`${API_BASE}/api/add_xp`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ user_id: input, xp: amount })
+    });
+    const data = await res.json();
+    alert(data.message || "XP updated.");
 
-        if (data.success) loadLeaderboard(); // 🔄 Refresh leaderboard
-      } catch (err) {
-        alert("❌ Failed to connect to server.");
-      }
+    if (data.success) {
+      // ✅ Auto-refresh the leaderboard now
+      loadLeaderboard();
     }
+  } catch (err) {
+    alert("❌ Failed to connect to server.");
+    console.error("Add XP error:", err);
+  }
+}
 
     function viewJoinRequests() {
       alert("Coming soon: View Join Requests.");
