@@ -84,15 +84,18 @@ def run_flask():
 
 # === Run Telegram Bot ===
 def run_telegram():
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(application.initialize())
-    loop.run_until_complete(application.start())
-    loop.run_until_complete(application.bot.set_my_commands([
-        BotCommand("start", "Start the bot"),
-        BotCommand("checkin", "Check-in for XP"),
-        BotCommand("referral", "Get your referral link")
-    ]))
-    loop.run_forever()
+    async def runner():
+        await application.initialize()
+        await application.start()
+        await application.bot.set_my_commands([
+            BotCommand("start", "Start the bot"),
+            BotCommand("checkin", "Check-in for XP"),
+            BotCommand("referral", "Get your referral link")
+        ])
+        # Do NOT use loop.run_forever() in a thread
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(runner())
 
 if __name__ == "__main__":
     Thread(target=run_flask).start()
