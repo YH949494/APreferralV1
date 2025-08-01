@@ -87,7 +87,7 @@ def api_stats():
 def api_is_admin():
     try:
         data = request.get_json()
-        init_data = data.get("initData")
+        init_data = data.get("initData") 
         decoded = decode_webapp_init_data(BOT_TOKEN, init_data)
         user_id = decoded.user.id
 
