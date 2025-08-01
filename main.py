@@ -1,27 +1,31 @@
 import os
 import logging
-import asyncio
-from flask import Flask, request, send_from_directory, jsonify
 from threading import Thread
+from flask import Flask, request, jsonify, send_from_directory
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, ContextTypes,
 )
+import asyncio
+from apscheduler.schedulers.background import BackgroundScheduler
 from checkin import handle_checkin
 from referral import get_or_create_referral_link
 from database import (
-    get_user_data, get_leaderboard_data, update_user_xp,
-    get_all_users, save_leaderboard_snapshot
+    get_user_data,
+    get_leaderboard_data,
+    update_user_xp,
+    get_all_users,
+    save_leaderboard_snapshot
 )
 
-# Logging
+# Logging setup
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ENV
+# Load environment variables
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-# Flask App
+# Flask app
 app = Flask(__name__, static_folder='frontend')
 
 @app.route("/")
@@ -44,46 +48,34 @@ async def api_checkin():
     return await handle_checkin(user_id, username)
 
 @app.route("/api/referral_link", methods=["POST"])
-async def api_generate_link():
+async def api_generate_referral_link():
     data = request.json
     user_id = data.get("user_id")
     return await get_or_create_referral_link(user_id)
 
 @app.route("/api/leaderboard", methods=["GET"])
 def api_leaderboard():
-    leaderboard = get_leaderboard_data()
-    return jsonify(leaderboard)
+    return jsonify(get_leaderboard_data())
 
 @app.route("/api/user", methods=["POST"])
-def api_user():
+def api_user_data():
     data = request.json
     user_id = data.get("user_id")
-    user_data = get_user_data(user_id)
-    return jsonify(user_data)
-
-@app.route("/api/admin/xp", methods=["POST"])
-def api_admin_xp():
-    data = request.json
-    user_id = data.get("user_id")
-    xp = data.get("xp")
-    update_user_xp(user_id, xp)
-    return jsonify({"status": "XP updated"})
+    return jsonify(get_user_data(user_id))
 
 @app.route("/api/admin/export", methods=["GET"])
-def api_admin_export():
-    users = get_all_users()
-    return jsonify(users)
+def api_export():
+    return jsonify(get_all_users())
 
 @app.route("/api/admin/leaderboard_snapshot", methods=["POST"])
-def api_leaderboard_snapshot():
+def api_snapshot():
     save_leaderboard_snapshot()
-    return jsonify({"status": "Snapshot saved"})
+    return jsonify({"status": "ok"})
 
-# Flask server runs in a thread
 def run_flask():
     app.run(host="0.0.0.0", port=8080)
 
-# Telegram bot logic
+# Telegram bot
 async def telegram_bot():
     application = ApplicationBuilder().token(BOT_TOKEN).build()
 
@@ -97,12 +89,13 @@ async def telegram_bot():
     await application.updater.start_polling()
     logger.info("Telegram bot started.")
 
-# Main entry point
-if __name__ == "__main__":
-    # Start Flask in separate thread
-    Thread(target=run_flask).start()
+# Start APScheduler for weekly leaderboard reset
+scheduler = BackgroundScheduler()
+scheduler.add_job(save_leaderboard_snapshot, 'cron', day_of_week='sun', hour=23, minute=59)
+scheduler.start()
 
-    # Start Telegram bot in current event loop
+if __name__ == "__main__":
+    Thread(target=run_flask).start()
     loop = asyncio.get_event_loop()
     loop.create_task(telegram_bot())
     loop.run_forever()
