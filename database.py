@@ -5,13 +5,12 @@ import datetime
 MONGO_URL = os.environ.get("MONGO_URL")
 client = MongoClient(MONGO_URL)
 db = client["telegram_bot"]
+
+users_collection = db["users"]
 leaderboard_collection = db["weekly_leaderboard"]
 weekly_history_collection = db["weekly_history"]
 
-# === USERS COLLECTION ===
-users_collection = db["users"]
-
-# Initialize or update user info
+# === USERS ===
 def init_user(user_id, username):
     users_collection.update_one(
         {"user_id": user_id},
@@ -19,26 +18,19 @@ def init_user(user_id, username):
             "user_id": user_id,
             "username": username,
             "xp": 0,
+            "weekly_xp": 0,
             "last_checkin": None,
             "referral_count": 0,
         }},
         upsert=True
     )
 
-# === CHECK-IN LOGIC ===
+# === CHECK-IN ===
 def can_checkin(user_id):
     user = users_collection.find_one({"user_id": user_id})
     now = datetime.datetime.utcnow()
-
-    if not user:
-        return True  # User not found, treat as first time
-
-    last = user.get("last_checkin")
-    if not last:
-        return True
-
-    # Allow once every 24h
-    return (now - last).total_seconds() >= 86400
+    last = user.get("last_checkin") if user else None
+    return not last or (now - last).total_seconds() >= 86400
 
 def checkin_user(user_id):
     now = datetime.datetime.utcnow()
@@ -46,62 +38,63 @@ def checkin_user(user_id):
         {"user_id": user_id},
         {
             "$set": {"last_checkin": now},
-            "$inc": {"xp": 20}
+            "$inc": {"xp": 20, "weekly_xp": 20}
         }
     )
 
-# === REFERRAL LOGIC ===
+# === REFERRALS ===
 def increment_referral(referrer_id):
     users_collection.update_one(
         {"user_id": referrer_id},
-        {"$inc": {"referral_count": 1}}
+        {"$inc": {"referral_count": 1, "xp": 10, "weekly_xp": 10}}
     )
 
-# === RETRIEVE STATS ===
-def get_user_stats(user_id):
-    user = users_collection.find_one({"user_id": user_id})
-    if not user:
-        return {"xp": 0, "referral_count": 0}
-    return {
-        "xp": user.get("xp", 0),
-        "referral_count": user.get("referral_count", 0)
-    }
-
-# === ADMIN XP UPDATE ===
+# === ADMIN XP CONTROL ===
 def update_user_xp(username, amount):
     user = users_collection.find_one({"username": {"$regex": f"^{username}$", "$options": "i"}})
     if not user:
         return False, f"User @{username} not found."
 
     new_xp = max(0, user.get("xp", 0) + amount)
-    new_weekly_xp = max(0, user.get("weekly_xp", 0) + amount)
+    new_weekly = max(0, user.get("weekly_xp", 0) + amount)
 
     users_collection.update_one(
         {"_id": user["_id"]},
         {"$set": {
             "xp": new_xp,
-            "weekly_xp": new_weekly_xp
+            "weekly_xp": new_weekly
         }}
     )
-    return True, f"{'Added' if amount > 0 else 'Removed'} {abs(amount)} XP to @{username}."
+    action = "Added" if amount > 0 else "Removed"
+    return True, f"{action} {abs(amount)} XP for @{username}."
 
-# === GET USER DATA ===
+def remove_xp(username, amount):
+    return update_user_xp(username, -abs(amount))
+
+# === RETRIEVE USER DATA ===
+def get_user_stats(user_id):
+    user = users_collection.find_one({"user_id": user_id})
+    return {
+        "xp": user.get("xp", 0),
+        "referral_count": user.get("referral_count", 0)
+    } if user else {"xp": 0, "referral_count": 0}
+
 def get_user_data(user_id):
     user = users_collection.find_one({"user_id": user_id})
-    if not user:
-        return {
-            "user_id": user_id,
-            "username": "",
-            "xp": 0,
-            "referral_count": 0,
-            "last_checkin": None
-        }
     return {
-        "user_id": user["user_id"],
+        "user_id": user_id,
         "username": user.get("username", ""),
         "xp": user.get("xp", 0),
         "referral_count": user.get("referral_count", 0),
-        "last_checkin": user.get("last_checkin")
+        "last_checkin": user.get("last_checkin"),
+        "weekly_xp": user.get("weekly_xp", 0)
+    } if user else {
+        "user_id": user_id,
+        "username": "",
+        "xp": 0,
+        "referral_count": 0,
+        "last_checkin": None,
+        "weekly_xp": 0
     }
 
 # === LEADERBOARD ===
@@ -115,8 +108,19 @@ def get_leaderboard(limit=20):
         }
         for user in top_users
     ]
-    
-# === WEEKLY HISTORY ===
+
+def get_weekly_leaderboard(limit=20):
+    top_users = users_collection.find().sort("weekly_xp", -1).limit(limit)
+    return [
+        {
+            "username": user.get("username", ""),
+            "weekly_xp": user.get("weekly_xp", 0),
+            "referral_count": user.get("referral_count", 0)
+        }
+        for user in top_users
+    ]
+
+# === HISTORY ===
 def get_weekly_history():
     history = weekly_history_collection.find().sort("week_start", -1).limit(4)
     return [
@@ -126,3 +130,6 @@ def get_weekly_history():
         }
         for h in history
     ]
+
+def reset_weekly_xp():
+    users_collection.update_many({}, {"$set": {"weekly_xp": 0}})
