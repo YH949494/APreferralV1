@@ -68,18 +68,18 @@ def get_user_stats(user_id):
 
 # === ADMIN XP CONTROL ===
 def update_user_xp(username, amount):
-    user = users_collection.find_one({
-        "username": {"$regex": f"^{username}$", "$options": "i"}
-    })
+    user = users_collection.find_one({"username": username})
     if not user:
-        return False, f"User @{username} not found."
-
-    new_xp = max(0, user.get("xp", 0) + amount)
+        return False, "User not found."
 
     users_collection.update_one(
-        {"_id": user["_id"]},
-        {"$set": {"xp": new_xp}}
+        {"username": username},
+        {
+            "$inc": {
+                "xp": amount,
+                "weekly_xp": amount  # <-- ensure this is updated for leaderboard
+            }
+        }
     )
 
-    action = "Added" if amount > 0 else "Removed"
-    return True, f"{action} {abs(amount)} XP for @{username}."
+    return True, f"XP {'added' if amount > 0 else 'reduced'} by {abs(amount)}."
