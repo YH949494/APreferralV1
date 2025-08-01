@@ -4,11 +4,9 @@ import asyncio
 from flask import Flask, request, send_from_directory, jsonify
 from threading import Thread
 from telegram import Update
-from telegram.ext import (
-    ApplicationBuilder, CommandHandler, ContextTypes,
-)
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 from checkin import handle_checkin
-from referral import get_or_create_referral_link 
+from referral import get_or_create_referral_link
 from database import (
     get_user_data, get_leaderboard_data, update_user_xp, get_all_users, save_leaderboard_snapshot
 )
@@ -20,7 +18,7 @@ logger = logging.getLogger(__name__)
 # Telegram Bot Token
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-# Flask app
+# --- Flask App Setup ---
 app = Flask(__name__, static_folder='frontend')
 
 @app.route("/")
@@ -46,7 +44,7 @@ async def api_checkin():
 async def api_generate_link():
     data = request.json
     user_id = data.get("user_id")
-    return await generate_referral_link(user_id)
+    return await get_or_create_referral_link(user_id)
 
 @app.route("/api/leaderboard", methods=["GET"])
 def api_leaderboard():
@@ -78,28 +76,24 @@ def api_leaderboard_snapshot():
     save_leaderboard_snapshot()
     return jsonify({"status": "Snapshot saved"})
 
-# Start Flask app in a separate thread
+# --- Telegram Bot Setup ---
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Welcome! Use the Mini App to check in and refer friends.")
+
+async def main():
+    application = ApplicationBuilder().token(BOT_TOKEN).build()
+    application.add_handler(CommandHandler("start", start))
+    await application.run_polling()
+
+# --- Start Flask in background thread ---
 def run_flask():
     app.run(host="0.0.0.0", port=8080)
 
+# --- Entry Point ---
 if __name__ == "__main__":
-    # Start Flask in another thread
     flask_thread = Thread(target=run_flask)
     flask_thread.start()
 
-    # Start Telegram bot
-    async def main():
-        application = ApplicationBuilder().token(BOT_TOKEN).build()
-
-        async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-            await update.message.reply_text("Welcome! Use the Mini App to check in and refer friends.")
-
-        application.add_handler(CommandHandler("start", start))
-
-        await application.initialize()
-        await application.start()
-        await application.updater.start_polling()
-        await application.updater.idle()
-
-    loop = asyncio.get_event_loop()
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     loop.run_until_complete(main())
