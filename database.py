@@ -83,3 +83,23 @@ def update_user_xp(username, amount):
         }}
     )
     return True, f"{'Added' if amount > 0 else 'Removed'} {abs(amount)} XP to @{username}."
+
+# === GET USER DATA ===
+def get_user_data(user_id):
+    user = users_collection.find_one({"user_id": user_id})
+    if not user:
+        return {
+            "user_id": user_id,
+            "username": "",
+            "xp": 0,
+            "referral_count": 0,
+            "last_checkin": None
+        }
+    return {
+        "user_id": user["user_id"],
+        "username": user.get("username", ""),
+        "xp": user.get("xp", 0),
+        "referral_count": user.get("referral_count", 0),
+        "last_checkin": user.get("last_checkin")
+    }
+
