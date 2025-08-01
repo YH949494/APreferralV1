@@ -4,7 +4,7 @@ import datetime
 
 MONGO_URL = os.environ.get("MONGO_URL")
 client = MongoClient(MONGO_URL)
-db = client["telegram_bot"]
+db = client["referral_bot"]
 leaderboard_collection = db["weekly_leaderboard"]
 
 # === USERS COLLECTION ===
