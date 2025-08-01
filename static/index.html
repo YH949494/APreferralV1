@@ -2,79 +2,38 @@
 <html>
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Referral & Check-in</title>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <style>
     body {
       background-color: #f4f4f4;
-      font-family: 'Arial', sans-serif;
+      font-family: Arial, sans-serif;
       padding: 20px;
       color: #333;
-      font-size: 16px;
     }
-
-    h2, h3 {
-      text-align: left;
-      font-weight: 600;
+    h2 {
+      text-align: center;
     }
-
     .section {
-      background: #ffffff;
+      background: white;
       padding: 20px;
       margin: 15px 0;
       border-radius: 10px;
-      box-shadow: 0 2px 6px rgba(0, 0, 0, 0.1);
+      box-shadow: 0 2px 6px rgba(0,0,0,0.1);
     }
-
     button {
       background-color: #0088cc;
       color: white;
       padding: 10px 20px;
-      font-size: 15px;
       border: none;
       border-radius: 6px;
       cursor: pointer;
-      font-family: inherit;
     }
-
     button:hover {
       background-color: #006699;
     }
-
-    input[type="text"],
-    input[type="number"] {
-      padding: 8px;
-      margin-top: 6px;
-      width: 100%;
-      font-size: 14px;
-      border: 1px solid #ccc;
-      border-radius: 5px;
-      box-sizing: border-box;
-    }
-
-    #referral-link,
-    #checkin-result,
-    #checkin-timer {
-      margin-top: 10px;
-      font-size: 15px;
-    }
-
-    #leaderboard-output {
-      margin-top: 10px;
-      font-family: 'Courier New', monospace;
-      white-space: pre-wrap;
-      background: #f9f9f9;
-      padding: 15px;
-      border-radius: 8px;
-      border: 1px solid #ddd;
-    }
-
-    #admin-panel {
-      display: none;
-    }
-
-    .admin-control {
+    #referral-link {
+      word-break: break-all;
       margin-top: 10px;
     }
   </style>
@@ -86,232 +45,34 @@
     <h3>✅ Daily Check-in</h3>
     <button onclick="checkIn()">Check In</button>
     <p id="checkin-result"></p>
-    <p id="checkin-timer" style="color: gray;"></p>
-  <div id="badge-section">
-  <h3>🏅 Your Streak Badges</h3>
-  <div id="badges">Loading...</div>
-</div>
+  </div>
 
   <div class="section">
-    <h3>🔗 Your Referral Link (valid 24h)</h3>
+    <h3>🔗 Your Referral Link</h3>
     <button onclick="getReferral()">Generate Link</button>
     <p id="referral-link">Click the button to get your link</p>
   </div>
 
-  <div class="section">
-    <h3>🏆 Weekly Leaderboard</h3>
-    <button onclick="loadLeaderboard()">View Leaderboard</button>
-    <div id="leaderboard-output">Click to load latest rankings...</div>
-  </div>
-
-  <div id="admin-panel" class="section">
-    <h3>⚙️ Admin Panel</h3>
-
-    <div class="admin-control">
-      <label><strong>👤 Username:</strong></label>
-      <input type="text" id="admin-username" placeholder="username (without @)">
-    </div>
-
-    <div class="admin-control">
-      <label><strong>🔼 Add XP:</strong></label>
-      <input type="number" id="add-xp" placeholder="Amount to Add">
-      <button onclick="modifyXP('add')">Add XP</button>
-    </div>
-
-    <div class="admin-control">
-      <label><strong>🔽 Reduce XP:</strong></label>
-      <input type="number" id="reduce-xp" placeholder="Amount to Subtract">
-      <button onclick="modifyXP('reduce')">Reduce XP</button>
-    </div>
-
-    <div class="admin-control">
-      <label><strong>📤 Export Leaderboard:</strong></label><br>
-      <button onclick="exportCSV()">Download CSV</button>
-    </div>
-
-    <p id="admin-status" style="color: green;"></p>
-  </div>
-
   <script>
-  const tg = window.Telegram.WebApp;
-  tg.ready();
-  tg.expand();
+    let tg = window.Telegram.WebApp;
+    tg.expand();
+    const userId = tg.initDataUnsafe.user?.id;
 
-  const API_BASE = "https://apreferralv1.fly.dev";
-  const user = tg.initDataUnsafe?.user || {};
-  const userId = user.id;
-  const username = user.username || "unknown";
-
-  if (!userId) {
-    document.body.innerHTML = "<p style='color:red;'>❌ User ID not found. Please open this Mini App inside Telegram.</p>";
-  }
-
-  // ⬇️ New: Render streak badges
-  function renderBadges(streak) {
-    const badgesDiv = document.getElementById("badges");
-    badgesDiv.innerHTML = "";
-
-    if (streak >= 28) {
-      badgesDiv.innerHTML += "🟢 28 Days ";
-    }
-    if (streak >= 14) {
-      badgesDiv.innerHTML += "🟡 14 Days ";
-    }
-    if (streak >= 7) {
-      badgesDiv.innerHTML += "🟠 7 Days ";
+    if (!userId) {
+      document.body.innerHTML = "<p style='color:red;'>❌ User ID not found. Please open this from Telegram Mini App.</p>";
     }
 
-    if (streak < 7) {
-      badgesDiv.innerHTML = "💤 No badges yet. Keep checking in daily!";
-    }
-  }
-
-  async function loadUserData() {
-    try {
-      const res = await fetch(`${API_BASE}/api/user?user_id=${userId}`);
-      const data = await res.json();
-      if (data.streak !== undefined) {
-        renderBadges(data.streak);
-      }
-    } catch (err) {
-      console.error("Failed to load user data:", err);
-    }
-  }
-
-  async function checkIn() {
-    try {
-      const res = await fetch(`${API_BASE}/api/checkin?user_id=${userId}&username=${username}`);
+    async function checkIn() {
+      const res = await fetch(`/api/checkin?user_id=${userId}`);
       const data = await res.json();
       document.getElementById("checkin-result").innerText = data.message || "Check-in failed.";
-      if (data.next_checkin_time) startCountdown(data.next_checkin_time);
-      loadUserData(); // refresh badge
-    } catch (err) {
-      document.getElementById("checkin-result").innerText = "❌ Error connecting to server.";
-      console.error("Check-in error:", err);
     }
-  }
 
-  async function getReferral() {
-    const display = document.getElementById("referral-link");
-    try {
-      const res = await fetch(`${API_BASE}/api/referral?user_id=${userId}&username=${username}`);
-      const rawText = await res.text();
-      let data;
-      try {
-        data = JSON.parse(rawText);
-      } catch (parseErr) {
-        display.innerText = "❌ Invalid server response.";
-        return;
-      }
-
-      const link = data.referral_link;
-      if (link) {
-        display.innerText = link;
-        setTimeout(async () => {
-          try {
-            await navigator.clipboard.writeText(link);
-            display.innerText += "\n📋 Copied to clipboard!";
-          } catch {
-            display.innerText += "\n⚠️ Please copy manually.";
-          }
-        }, 200);
-      } else {
-        display.innerText = "❌ Failed to get link.";
-      }
-    } catch (err) {
-      display.innerText = "❌ Error connecting to server.";
-    }
-  }
-
-  function startCountdown(nextCheckinTimeISO) {
-    const countdownEl = document.getElementById("checkin-timer");
-    const endTime = Date.parse(nextCheckinTimeISO);
-    function updateCountdown() {
-      const now = new Date().getTime();
-      const distance = endTime - now;
-      if (distance <= 0) {
-        countdownEl.innerText = "🎉 You can check in again now!";
-        return;
-      }
-      const h = Math.floor(distance / (1000 * 60 * 60));
-      const m = Math.floor((distance % (1000 * 60 * 60)) / (1000 * 60));
-      const s = Math.floor((distance % (1000 * 60)) / 1000);
-      countdownEl.innerText = `⏳ Next check-in in: ${h}h ${m}m ${s}s`;
-      setTimeout(updateCountdown, 1000);
-    }
-    updateCountdown();
-  }
-
-  async function loadLeaderboard() {
-    try {
-      const res = await fetch(`${API_BASE}/api/leaderboard`);
+    async function getReferral() {
+      const res = await fetch(`/api/referral?user_id=${userId}`);
       const data = await res.json();
-      if (!data.success) throw new Error(data.error);
-
-      const output = document.getElementById("leaderboard-output");
-      const checkin = data.leaderboard.checkin.map((u, i) =>
-        `${i + 1}. ${u.username} - ${u.xp} XP`).join("\n");
-      const referral = data.leaderboard.referral.map((u, i) =>
-        `${i + 1}. ${u.username} - ${u.referrals} Ref`).join("\n");
-
-      output.innerText = `🔁 XP Leaderboard:\n${checkin}\n\n🔗 Referral Leaderboard:\n${referral}`;
-    } catch (err) {
-      document.getElementById("leaderboard-output").innerText = "❌ Error loading leaderboard.";
+      document.getElementById("referral-link").innerText = data.referral_link || "Failed to get link.";
     }
-  }
-
-  async function modifyXP(action) {
-    const targetUsername = document.getElementById("admin-username").value.trim();
-    const xpValue = document.getElementById(action === "add" ? "add-xp" : "reduce-xp").value.trim();
-    const status = document.getElementById("admin-status");
-
-    if (!targetUsername || !xpValue) {
-      status.innerText = "❗ Fill in username and XP value.";
-      return;
-    }
-
-    const res = await fetch(`${API_BASE}/api/admin/xp`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        admin_id: userId,
-        username: targetUsername,
-        amount: Number(xpValue),
-        action: action
-      })
-    });
-
-    const data = await res.json();
-    status.innerText = data.message || "✅ Done";
-    loadLeaderboard(); 
-  }
-
-  async function exportCSV() {
-    try {
-      const res = await fetch(`${API_BASE}/api/admin/export?admin_id=${userId}`);
-      const blob = await res.blob();
-      const url = window.URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = "leaderboard.csv";
-      a.click();
-    } catch (err) {
-      alert("❌ Failed to download CSV.");
-    }
-  }
-
-  async function checkAdminAccess() {
-    try {
-      const res = await fetch(`${API_BASE}/api/admin/check?user_id=${userId}`);
-      const data = await res.json();
-      if (data.is_admin) {
-        document.getElementById("admin-panel").style.display = "block";
-      }
-    } catch (err) {
-      console.warn("Admin check failed.");
-    }
-  }
-
-  checkAdminAccess();
-  loadUserData(); // Load badge on page load
-</script>
+  </script>
+</body>
+</html>
