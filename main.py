@@ -2,7 +2,7 @@ import os
 import logging
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
-from telegram import Update, Bot, WebAppInitData
+from telegram import Update, Bot
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 from apscheduler.schedulers.background import BackgroundScheduler
 from datetime import datetime
