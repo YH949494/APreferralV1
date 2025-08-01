@@ -42,6 +42,16 @@
       background-color: #006699;
     }
 
+    input {
+      padding: 8px;
+      font-size: 15px;
+      width: 100%;
+      margin-bottom: 8px;
+      border: 1px solid #ccc;
+      border-radius: 6px;
+      box-sizing: border-box;
+    }
+
     #referral-link {
       word-break: break-word;
       margin-top: 10px;
@@ -99,10 +109,20 @@
 
   <div class="section" id="admin-panel">
     <h3>⚙️ Admin Panel</h3>
-    <button onclick="openAddXP()">➕ Add XP</button>
+    <button onclick="toggleAddXPPanel()">➕➖ Add/Reduce XP</button>
     <button onclick="viewJoinRequests()">📥 View Join Requests</button>
     <button onclick="loadPreviousLeaderboard()">🏆 View Past Leaderboard</button>
     <button onclick="exportCSV()">📤 Export CSV</button>
+
+    <div id="xp-panel" style="display:none; margin-top:10px; border-top:1px solid #ddd; padding-top:10px;">
+      <input type="text" id="xp-username" placeholder="@username or user ID">
+      <input type="number" id="xp-amount" placeholder="XP amount">
+      <div>
+        <button onclick="adjustXP(true)">➕ Add XP</button>
+        <button onclick="adjustXP(false)">➖ Reduce XP</button>
+      </div>
+      <p id="xp-result" style="margin-top:10px;"></p>
+    </div>
   </div>
 
   <script>
@@ -127,7 +147,6 @@
         if (data.next_checkin_time) startCountdown(data.next_checkin_time);
       } catch (err) {
         document.getElementById("checkin-result").innerText = "❌ Error connecting to server.";
-        console.error("Check-in error:", err);
       }
     }
 
@@ -140,9 +159,8 @@
         let data;
         try {
           data = JSON.parse(rawText);
-        } catch (parseErr) {
+        } catch {
           display.innerText = "❌ Invalid server response.";
-          console.error("JSON parse error:", parseErr);
           return;
         }
 
@@ -153,17 +171,15 @@
             try {
               await navigator.clipboard.writeText(link);
               display.innerText += "\n📋 Copied to clipboard!";
-            } catch (clipboardErr) {
-              console.warn("Clipboard write failed:", clipboardErr);
+            } catch {
               display.innerText += "\n⚠️ Please copy manually.";
             }
           }, 200);
         } else {
           display.innerText = "❌ Failed to get link.";
         }
-      } catch (err) {
+      } catch {
         display.innerText = "❌ Error connecting to server.";
-        console.error("Referral fetch error:", err);
       }
     }
 
@@ -203,8 +219,7 @@
           `${i + 1}. ${u.username} - ${u.referrals} Ref`).join("\n");
 
         output.innerText = `🔁 Check-in Leaderboard:\n${checkin}\n\n🔗 Referral Leaderboard:\n${referral}`;
-      } catch (err) {
-        console.error(err);
+      } catch {
         document.getElementById("leaderboard-output").innerText = "❌ Error loading leaderboard.";
       }
     }
@@ -225,8 +240,7 @@
         const end = data.history.week_end;
 
         output.innerText = `📅 ${start} to ${end} Leaderboard:\n\n🔁 Check-in:\n${checkin}\n\n🔗 Referrals:\n${referral}`;
-      } catch (err) {
-        console.error(err);
+      } catch {
         document.getElementById("leaderboard-output").innerText = "❌ Error loading history.";
       }
     }
@@ -238,14 +252,43 @@
         if (data.success && data.is_admin) {
           document.getElementById("admin-panel").style.display = "block";
         }
-      } catch (e) {
-        console.error("Admin check failed", e);
-      }
+      } catch {}
     }
 
-    // Admin button handlers
-    function openAddXP() {
-      alert("Coming soon: Add XP feature.");
+    function toggleAddXPPanel() {
+      const panel = document.getElementById("xp-panel");
+      panel.style.display = panel.style.display === "none" ? "block" : "none";
+    }
+
+    async function adjustXP(isAdd) {
+      const usernameOrId = document.getElementById("xp-username").value.trim();
+      const amount = parseInt(document.getElementById("xp-amount").value);
+      const resultEl = document.getElementById("xp-result");
+
+      if (!usernameOrId || isNaN(amount)) {
+        resultEl.innerText = "⚠️ Please enter valid username and XP amount.";
+        resultEl.style.color = "red";
+        return;
+      }
+
+      const payload = {
+        user_id: usernameOrId,
+        xp: isAdd ? amount : -amount
+      };
+
+      try {
+        const res = await fetch(`${API_BASE}/api/add_xp`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        });
+        const data = await res.json();
+        resultEl.innerText = data.message || "XP updated.";
+        resultEl.style.color = data.success ? "green" : "red";
+      } catch {
+        resultEl.innerText = "❌ Error contacting server.";
+        resultEl.style.color = "red";
+      }
     }
 
     function viewJoinRequests() {
