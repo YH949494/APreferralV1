@@ -11,6 +11,7 @@ from apscheduler.triggers.cron import CronTrigger
 from pytz import timezone
 from datetime import datetime, timedelta
 from bson.json_util import dumps
+from telegram.helpers import decode_webapp_init_data
 import os
 import asyncio
 import traceback
@@ -47,28 +48,52 @@ def home():
 def serve_mini_app():
     return send_from_directory("static", "index.html")
 
-@app.route("/api/checkin")
+@app.route("/api/checkin", methods=["POST"])
 def api_checkin():
     return handle_checkin()
 
-@app.route("/api/referral")
+@app.route("/api/referral", methods=["POST"])
 def api_referral():
     try:
-        user_id = int(request.args.get("user_id"))
-        username = request.args.get("username") or "unknown"
+        data = request.get_json()
+        init_data = data.get("initData")
+        decoded = decode_webapp_init_data(BOT_TOKEN, init_data)
+        user_id = decoded.user.id
+        username = decoded.user.username or "unknown"
         referral_link = asyncio.run(get_or_create_referral_link(app_bot.bot, user_id, username))
-        return jsonify({"success": True, "referral_link": referral_link})
+        return jsonify({"success": True, "link": referral_link})
     except Exception as e:
         traceback.print_exc()
         return jsonify({"success": False, "error": str(e)}), 500
 
-@app.route("/api/is_admin")
+@app.route("/api/stats", methods=["POST"])
+def api_stats():
+    try:
+        data = request.get_json()
+        init_data = data.get("initData")
+        decoded = decode_webapp_init_data(BOT_TOKEN, init_data)
+        user_id = decoded.user.id
+
+        user = users_collection.find_one({"user_id": user_id}) or {}
+        return jsonify({
+            "xp": user.get("xp", 0),
+            "referrals": user.get("referral_count", 0),
+        })
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@app.route("/api/admin/check", methods=["POST"])
 def api_is_admin():
     try:
-        user_id = int(request.args.get("user_id"))
+        data = request.get_json()
+        init_data = data.get("initData")
+        decoded = decode_webapp_init_data(BOT_TOKEN, init_data)
+        user_id = decoded.user.id
+
         admins = asyncio.run(app_bot.bot.get_chat_administrators(chat_id=GROUP_ID))
         is_admin = any(admin.user.id == user_id for admin in admins)
-        return jsonify({"success": True, "is_admin": is_admin})
+        return jsonify({"isAdmin": is_admin})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 
@@ -76,11 +101,10 @@ def api_is_admin():
 def get_leaderboard():
     try:
         top_checkins = list(users_collection.find().sort("weekly_xp", -1).limit(10))
-        top_referrals = list(users_collection.find().sort("referral_count", -1).limit(10))
-        leaderboard = {
-            "checkin": [{"username": u.get("username", "unknown"), "xp": u.get("weekly_xp", 0)} for u in top_checkins],
-            "referral": [{"username": u.get("username", "unknown"), "referrals": u.get("referral_count", 0)} for u in top_referrals]
-        }
+        leaderboard = [
+            {"username": u.get("username", "unknown"), "xp": u.get("weekly_xp", 0)}
+            for u in top_checkins
+        ]
         return jsonify({"success": True, "leaderboard": leaderboard})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
@@ -101,16 +125,44 @@ def get_leaderboard_history():
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 
-@app.route("/api/add_xp", methods=["POST"])
-def api_add_xp():
+@app.route("/api/admin/update_xp", methods=["POST"])
+def api_admin_update_xp():
     try:
-        data = request.json
-        user_id = int(data["user_id"])
-        xp = int(data["xp"])
-        users_collection.update_one({"user_id": user_id}, {"$inc": {"xp": xp, "weekly_xp": xp}})
-        return jsonify({"success": True, "message": f"Added {xp} XP to user {user_id}"})
+        data = request.get_json()
+        init_data = data.get("initData")
+        username = data.get("username", "").lstrip('@').strip().lower()
+        amount = int(data.get("amount"))
+        action = data.get("action")
+
+        decoded = decode_webapp_init_data(BOT_TOKEN, init_data)
+        user_id = decoded.user.id
+
+        admins = asyncio.run(app_bot.bot.get_chat_administrators(chat_id=GROUP_ID))
+        is_admin = any(admin.user.id == user_id for admin in admins)
+        if not is_admin:
+            return jsonify({"success": False, "message": "❌ You are not an admin."})
+
+        if action == "remove":
+            amount *= -1
+
+        target_user = users_collection.find_one({"username": {"$regex": f"^{username}$", "$options": "i"}})
+        if not target_user:
+            return jsonify({"success": False, "message": f"User @{username} not found."})
+
+        new_xp = max(0, target_user.get("xp", 0) + amount)
+        new_weekly_xp = max(0, target_user.get("weekly_xp", 0) + amount)
+
+        users_collection.update_one(
+            {"_id": target_user["_id"]},
+            {"$set": {"xp": new_xp, "weekly_xp": new_weekly_xp}}
+        )
+
+        verb = "Added" if amount > 0 else "Removed"
+        return jsonify({"success": True, "message": f"{verb} {abs(amount)} XP to @{username}."})
+
     except Exception as e:
-        return jsonify({"success": False, "error": str(e)}), 500
+        traceback.print_exc()
+        return jsonify({"success": False, "message": str(e)}), 500
 
 @app.route("/api/join_requests")
 def api_join_requests():
@@ -137,7 +189,10 @@ def export_csv():
                 u.get("referral_count", 0),
             ])
         output.seek(0)
-        return send_from_directory(directory="", path=output, download_name="user_data.csv", as_attachment=True)
+        return output.getvalue(), 200, {
+            'Content-Type': 'text/csv',
+            'Content-Disposition': 'attachment; filename=user_data.csv'
+        }
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 
