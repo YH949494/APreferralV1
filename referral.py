@@ -40,7 +40,7 @@ async def get_or_create_referral_link(bot: Bot, user_id: int, username: str) -> 
             chat_id=GROUP_ID,
             name=link_name,
             expire_date=int(expire_time.timestamp()),
-            creates_join_request=False,
+            creates_join_request=True,
             member_limit=None
         )
 
