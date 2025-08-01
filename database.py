@@ -10,7 +10,7 @@ users_collection = db["users"]
 leaderboard_collection = db["weekly_leaderboard"]
 
 # === USER INITIALIZATION ===
-def init_user(user_id, username):
+def ensure_user(user_id, username):
     users_collection.update_one(
         {"user_id": user_id},
         {"$setOnInsert": {
