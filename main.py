@@ -1,6 +1,6 @@
 from flask import Flask, request, jsonify, send_from_directory
 from threading import Thread
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, ChatJoinRequestHandler
 from pymongo import MongoClient
 import os
@@ -51,10 +51,7 @@ def api_referral():
         return jsonify({"error": "Missing user_id"}), 400
 
     from referral import get_or_create_referral_link
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    referral_link = loop.run_until_complete(get_or_create_referral_link(app_bot.bot, user_id, "webapp"))
-
+    referral_link = asyncio.run(get_or_create_referral_link(bot, user_id, "webapp"))
     if referral_link:
         return jsonify({"referral_link": referral_link})
     else:
@@ -68,7 +65,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user is None:
         return
 
-    # Create user in DB if not exist
     user_data = users_collection.find_one({"user_id": user.id})
     if not user_data:
         users_collection.insert_one({
@@ -91,10 +87,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Failed to generate invite link. Make sure the bot is an admin in the group.")
         return
 
-    keyboard = [
-        [InlineKeyboardButton("👉 Join Group", url=invite_link.invite_link)],
-        [InlineKeyboardButton("🚀 Open Mini App", web_app=WebAppInfo(url="https://your-fly-app.fly.dev/miniapp"))]
-    ]
+    keyboard = [[InlineKeyboardButton("👉 Join Group", url=invite_link.invite_link)]]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     await update.message.reply_text(
@@ -105,36 +98,25 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def join_request_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     invite_link = update.chat_join_request.invite_link
-
     if invite_link and invite_link.name and invite_link.name.startswith("ref-"):
         referrer_id = int(invite_link.name.split("-")[1])
-
-        # Increment referral count
         users_collection.update_one(
             {"user_id": referrer_id},
-            {
-                "$inc": {
-                    "referral_count": 1,
-                    "xp": 50  # 👈 Add 50 XP per successful referral
-                }
-            }
+            {"$inc": {"referral_count": 1}}
         )
-
-        # Approve the join request
-        await context.bot.approve_chat_join_request(
-            update.chat_join_request.chat.id,
-            update.chat_join_request.from_user.id
-        )
-
+        await context.bot.approve_chat_join_request(update.chat_join_request.chat.id, update.chat_join_request.from_user.id)
 
 # ----------------------------
 # Run Telegram Bot & Flask
 # ----------------------------
 if __name__ == '__main__':
+    from telegram import Bot
+    bot = Bot(BOT_TOKEN)
+
     # Run Flask in a thread
     Thread(target=lambda: app.run(host="0.0.0.0", port=8080)).start()
 
-    # Build and run Telegram Bot
+    # Run Telegram bot
     app_bot = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app_bot.add_handler(CommandHandler("start", start))
