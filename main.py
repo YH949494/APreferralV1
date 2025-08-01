@@ -2,10 +2,13 @@ import os
 import asyncio
 from flask import Flask, render_template, request, jsonify
 from threading import Thread
-from telegram import Update, BotCommand, KeyboardButton, ReplyKeyboardMarkup, WebAppInfo
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
-
-from referral import get_or_create_referral_link
+from telegram import Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    ContextTypes,
+)
+from referral import generate_referral_link
 from database import (
     ensure_user,
     can_checkin,
@@ -28,40 +31,41 @@ def serve_miniapp():
 def api_checkin():
     user_id = int(request.json.get("user_id"))
     username = request.json.get("username", "")
+    ensure_user(user_id, username)
     if not can_checkin(user_id):
         return jsonify({"success": False, "message": "⏳ Come back after 24 hours to check in again."})
     checkin_user(user_id)
     return jsonify({"success": True, "message": "✅ Check-in successful! +20 XP"})
 
-@app.route("/api/user", methods=["GET"])
+@app.route("/api/user_stats")
 def api_user_stats():
     user_id = int(request.args.get("user_id"))
     stats = get_user_stats(user_id)
     return jsonify(stats)
 
-@app.route("/api/referral", methods=["GET"])
+@app.route("/api/referral")
 def api_referral():
     user_id = int(request.args.get("user_id"))
     username = request.args.get("username", "")
-    link = get_or_create_referral_link(user_id, username)
-    return jsonify({"referral_link": link})
+    return jsonify({
+        "link": generate_referral_link(user_id, username)
+    })
 
 # === Telegram Bot Setup ===
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
+WEBAPP_URL = "https://apreferralv1.fly.dev/miniapp"  # <-- your Mini App URL
+
 application = ApplicationBuilder().token(BOT_TOKEN).build()
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     ensure_user(user.id, user.username)
-
-    webapp_url = "https://apreferralv1.fly.dev/miniapp"
     keyboard = [
-        [KeyboardButton(text="🚀 Open Mini App", web_app=WebAppInfo(url=webapp_url))]
+        [InlineKeyboardButton("🌟 Open Leaderboard & Check-in", web_app={"url": WEBAPP_URL})]
     ]
-    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-
+    reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(
-        "✅ You're all set!\nTap below to open the Check-in & Referral Center 👇",
+        "Welcome! Tap below to open the Mini App 👇",
         reply_markup=reply_markup
     )
 
@@ -73,15 +77,13 @@ def run_flask():
 
 # === Run Telegram Bot ===
 def run_telegram():
-    async def runner():
-        await application.initialize()
-        await application.start()
-        await application.bot.set_my_commands([
-            BotCommand("start", "Start the bot and open the Mini App")
-        ])
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(runner())
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(application.initialize())
+    loop.run_until_complete(application.start())
+    loop.run_until_complete(application.bot.set_my_commands([
+        BotCommand("start", "Open Mini App"),
+    ]))
+    loop.run_forever()
 
 if __name__ == "__main__":
     Thread(target=run_flask).start()
