@@ -77,12 +77,20 @@ def get_leaderboard():
     try:
         user_id = int(request.args.get("user_id", 0))
 
+        def format_username(u):
+            if u.get("username"):
+                return f"@{u['username']}"
+            elif u.get("first_name"):
+                return u["first_name"]
+            else:
+                return f"ID:{u.get('user_id', 'N/A')}"
+
         top_checkins = list(users_collection.find().sort("weekly_xp", -1).limit(10))
         top_referrals = list(users_collection.find().sort("referral_count", -1).limit(10))
 
         leaderboard = {
-            "checkin": [{"username": u.get("username", "unknown"), "xp": u.get("weekly_xp", 0)} for u in top_checkins],
-            "referral": [{"username": u.get("username", "unknown"), "referrals": u.get("referral_count", 0)} for u in top_referrals]
+            "checkin": [{"username": format_username(u), "xp": u.get("weekly_xp", 0)} for u in top_checkins],
+            "referral": [{"username": format_username(u), "referrals": u.get("referral_count", 0)} for u in top_referrals]
         }
 
         user = users_collection.find_one({"user_id": user_id})
