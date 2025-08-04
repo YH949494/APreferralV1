@@ -75,16 +75,26 @@ def api_is_admin():
 @app.route("/api/leaderboard")
 def get_leaderboard():
     try:
+        user_id = int(request.args.get("user_id", 0))
+
         top_checkins = list(users_collection.find().sort("weekly_xp", -1).limit(10))
         top_referrals = list(users_collection.find().sort("referral_count", -1).limit(10))
+
         leaderboard = {
             "checkin": [{"username": u.get("username", "unknown"), "xp": u.get("weekly_xp", 0)} for u in top_checkins],
             "referral": [{"username": u.get("username", "unknown"), "referrals": u.get("referral_count", 0)} for u in top_referrals]
         }
-        return jsonify({"success": True, "leaderboard": leaderboard})
+
+        user = users_collection.find_one({"user_id": user_id})
+        user_stats = {
+            "xp": user.get("weekly_xp", 0) if user else 0,
+            "referrals": user.get("referral_count", 0) if user else 0
+        }
+
+        return jsonify({"success": True, "leaderboard": leaderboard, "user": user_stats})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
-
+        
 @app.route("/api/leaderboard/history")
 def get_leaderboard_history():
     try:
