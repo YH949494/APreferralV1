@@ -215,17 +215,27 @@
 
     async function loadLeaderboard() {
       try {
-        const res = await fetch(`${API_BASE}/api/leaderboard?t=${Date.now()}`);
+        const res = await fetch(`${API_BASE}/api/leaderboard?user_id=${userId}&t=${Date.now()}`);
         const data = await res.json();
         const out = document.getElementById("leaderboard-output");
         if (!data.success) throw new Error(data.error);
-        const checkin = data.leaderboard.checkin.map((u, i) => `${i + 1}. ${u.username} - ${u.xp} XP`).join("\n");
-        const referral = data.leaderboard.referral.map((u, i) => `${i + 1}. ${u.username} - ${u.referrals} Ref`).join("\n");
-        out.innerText = `🔁 Check-in Leaderboard:\n${checkin}\n\n🔗 Referral Leaderboard:\n${referral}`;
+
+        const checkin = data.leaderboard.checkin
+          .map((u, i) => `${i + 1}. ${u.username} - ${u.xp} XP`)
+          .join("\n");
+    
+        const referral = data.leaderboard.referral
+          .map((u, i) => `${i + 1}. ${u.username} - ${u.referrals} Ref`)
+          .join("\n");
+
+        const myXP = data.user?.xp ?? 0;
+        const myRef = data.user?.referrals ?? 0;
+
+        out.innerText = `🔁 Check-in Leaderboard:\n${checkin}\n\n🔗 Referral Leaderboard:\n${referral}\n\n👤 Your Stats:\n- XP: ${myXP}\n- Referrals: ${myRef}`;
       } catch {
         document.getElementById("leaderboard-output").innerText = "❌ Error loading leaderboard.";
-      }
-    }
+  }
+}
 
     async function loadPreviousLeaderboard() {
       try {
