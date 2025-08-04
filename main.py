@@ -185,8 +185,8 @@ def reset_weekly_xp():
         "archived_at": now
     })
 
-    users_collection.update_many({}, {"$set": {"weekly_xp": 0}})
-    print(f"✅ Weekly XP reset complete at {now}")
+    users_collection.update_many({}, {"$set": {"weekly_xp": 0, "referral_count": 0}})
+    print(f"✅ Weekly XP and referral reset complete at {now}")
 
 # ----------------------------
 # Telegram Bot Handlers
