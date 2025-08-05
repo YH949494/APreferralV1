@@ -126,6 +126,9 @@ def get_leaderboard():
 def get_leaderboard_history():
     try:
         def format_username(u):
+            username = u.get("username", "").strip()
+            first_name = u.get("first_name", "").strip()
+            
             if u.get("username"):
                 return f"@{u['username']}"
             elif u.get("first_name"):
