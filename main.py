@@ -93,7 +93,7 @@ def get_leaderboard():
         }
 
         top_checkins = users_collection.find(filter_query).sort("weekly_xp", -1).limit(10)
-        top_referrals = users_collection.find(filter_query).sort("referral_count", -1).limit(10)
+        top_referrals = list(users_collection.find().sort("weekly_referral_count", -1).limit(10))
 
         leaderboard = {
             "checkin": [
@@ -101,7 +101,7 @@ def get_leaderboard():
                 for u in top_checkins if format_username(u)
             ],
             "referral": [
-                {"username": format_username(u), "referrals": u.get("referral_count", 0)}
+                {"username": format_username(u), "referrals": u.get("weekly_referral_count", 0)}
                 for u in top_referrals if format_username(u)
             ]
         }
@@ -213,8 +213,12 @@ def reset_weekly_xp():
         "archived_at": now
     })
 
-    users_collection.update_many({}, {"$set": {"weekly_xp": 0, "referral_count": 0}})
-    print(f"✅ Weekly XP and referral reset complete at {now}")
+    users_collection.update_many({}, {
+        "$set": {
+            "weekly_xp": 0,
+            "weekly_referral_count": 0  # ✅ add this for weekly leaderboard
+        }
+    })
 
 # ----------------------------
 # Telegram Bot Handlers
