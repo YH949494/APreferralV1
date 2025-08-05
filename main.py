@@ -82,9 +82,8 @@ def get_leaderboard():
                 return f"@{u['username']}"
             elif u.get("first_name"):
                 return u["first_name"]
-            return None  # Skip user if both missing
+            return None  # Skip if both missing
 
-        # Only fetch users with at least username or first_name
         filter_query = {
             "$or": [
                 {"username": {"$exists": True, "$ne": None, "$ne": ""}},
@@ -92,24 +91,24 @@ def get_leaderboard():
             ]
         }
 
-        top_checkins = users_collection.find(filter_query).sort("weekly_xp", -1).limit(10)
-        top_referrals = list(users_collection.find().sort("weekly_referral_count", -1).limit(10))
+        top_checkins_raw = users_collection.find(filter_query).sort("weekly_xp", -1).limit(20)
+        top_referrals_raw = users_collection.find(filter_query).sort("weekly_referral_count", -1).limit(20)
 
         leaderboard = {
             "checkin": [
                 {"username": format_username(u), "xp": u.get("weekly_xp", 0)}
-                for u in top_checkins if format_username(u)
-            ],
+                for u in top_checkins_raw if format_username(u)
+            ][:10],
             "referral": [
                 {"username": format_username(u), "referrals": u.get("weekly_referral_count", 0)}
-                for u in top_referrals if format_username(u)
-            ]
+                for u in top_referrals_raw if format_username(u)
+            ][:10]
         }
 
         user = users_collection.find_one({"user_id": user_id})
         user_stats = {
             "xp": user.get("weekly_xp", 0) if user else 0,
-            "referrals": user.get("referral_count", 0) if user else 0
+            "referrals": user.get("weekly_referral_count", 0) if user else 0
         }
 
         return jsonify({
