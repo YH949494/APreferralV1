@@ -85,8 +85,23 @@ def get_leaderboard():
             else:
                 return f"ID:{u.get('user_id', 'N/A')}"
 
-        top_checkins = list(users_collection.find().sort("weekly_xp", -1).limit(10))
-        top_referrals = list(users_collection.find().sort("referral_count", -1).limit(10))
+        top_checkins = list(users_collection.find(
+            {
+                "$or": [
+                    {"username": {"$ne": None, "$ne": ""}},
+                    {"first_name": {"$ne": None, "$ne": ""}}
+                ]
+            }
+        ).sort("weekly_xp", -1).limit(10))
+
+      top_referrals = list(users_collection.find(
+            {
+                "$or": [
+                    {"username": {"$ne": None, "$ne": ""}},
+                    {"first_name": {"$ne": None, "$ne": ""}}
+                ]
+        }
+).sort("referral_count", -1).limit(10))
 
         leaderboard = {
             "checkin": [{"username": format_username(u), "xp": u.get("weekly_xp", 0)} for u in top_checkins],
