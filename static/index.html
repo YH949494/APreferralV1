@@ -221,20 +221,21 @@
       if (!data.success) throw new Error(data.error);
 
       const checkin = data.leaderboard.checkin.map((u, i) =>
-        `${i + 1}. ${u.username} - ${u.xp} XP`
+        `${i + 1}. ${u.username || ''} - ${u.xp} XP`
       ).join("\n");
 
       const referral = data.leaderboard.referral.map((u, i) =>
-        `${i + 1}. ${u.username} - ${u.referrals} Ref`
+        `${i + 1}. ${u.username || ''} - ${u.referrals} Ref`
       ).join("\n");
 
       const myCheckin = data.leaderboard.checkin.find(u => u.username === username);
       const myReferral = data.leaderboard.referral.find(u => u.username === username);
       const myXP = myCheckin?.xp || 0;
       const myRef = myReferral?.referrals || 0;
+      const myName = user.username ? `@${user.username}` : (user.first_name || "You");
 
       out.innerText =
-        `📊 Your Weekly Stats:\n👤 @${username} - ${myXP} XP | ${myRef} Referrals\n\n` +
+        `📊 Your Weekly Stats:\n👤 ${myName} - ${myXP} XP | ${myRef} Referrals\n\n` +
         `🔁 Check-in Leaderboard:\n${checkin}\n\n` +
         `🔗 Referral Leaderboard:\n${referral}`;
     } catch {
