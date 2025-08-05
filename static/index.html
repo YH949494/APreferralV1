@@ -8,95 +8,310 @@
     body {
       background-color: #f4f4f4;
       font-family: 'Arial', sans-serif;
-      margin: 0;
       padding: 20px;
+      color: #333;
+      font-size: 16px;
+    }
+    h2, h3 {
+      text-align: left;
+      font-weight: 600;
     }
     .section {
-      background: #fff;
-      padding: 16px;
-      margin-bottom: 20px;
+      background: #ffffff;
+      padding: 20px;
+      margin: 15px 0;
       border-radius: 10px;
-      box-shadow: 0 0 8px rgba(0,0,0,0.05);
+      box-shadow: 0 2px 6px rgba(0, 0, 0, 0.1);
     }
-    h2 {
-      margin-top: 0;
-      font-size: 18px;
-      color: #333;
+    button {
+      background-color: #0088cc;
+      color: white;
+      padding: 10px 20px;
+      font-size: 15px;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      font-family: inherit;
+      margin: 5px 0;
     }
-    pre {
+    button:hover {
+      background-color: #006699;
+    }
+    #referral-link, #checkin-result, #checkin-timer {
+      margin-top: 10px;
+      font-size: 15px;
+    }
+    #leaderboard-output {
+      margin-top: 10px;
+      font-family: 'Courier New', monospace;
       white-space: pre-wrap;
-      word-break: break-word;
-      background-color: #f9f9f9;
-      padding: 10px;
+      background: #f9f9f9;
+      padding: 15px;
       border-radius: 8px;
+      border: 1px solid #ddd;
+      font-size: 13px; /* smaller font size */
+      line-height: 1.4; /* optional for tighter spacing */
+      overflow-x: auto; /* horizontal scroll if needed */
+    }
+    #admin-panel {
+      display: none;
+      background: #fff4e6;
+      border: 1px solid #ffcc80;
+    }
+    #admin-panel h3 {
+      color: #d17c00;
+    }
+    .modal {
+      display: none;
+      position: fixed;
+      z-index: 1000;
+      left: 0; top: 0;
+      width: 100%; height: 100%;
+      background: rgba(0, 0, 0, 0.5);
+      justify-content: center;
+      align-items: center;
+    }
+    .modal-content {
+      background: #fff;
+      padding: 20px;
+      border-radius: 10px;
+      text-align: center;
+      width: 300px;
+    }
+    input[type="text"], input[type="number"] {
+      width: 90%;
+      padding: 10px;
+      margin: 8px 0;
+      border-radius: 6px;
+      border: 1px solid #ccc;
+      font-size: 14px;
     }
   </style>
 </head>
 <body>
+  <h2>🎯 Referral & Daily Check-in</h2>
+
   <div class="section">
-    <h2>Your Stats</h2>
-    <div id="userStats">Loading...</div>
+    <h3>✅ Daily Check-in</h3>
+    <button onclick="checkIn()">Check In</button>
+    <p id="checkin-result"></p>
+    <p id="checkin-timer" style="color: gray;"></p>
   </div>
 
   <div class="section">
-    <h2>Weekly Check-in Leaderboard</h2>
-    <pre id="checkinLeaderboard">Loading...</pre>
+    <h3>🔗 Your Referral Link (valid 24h)</h3>
+    <button onclick="getReferral()">Generate Link</button>
+    <p id="referral-link">Click the button to get your link</p>
+    <button onclick="copyReferral()">📋 Copy to clipboard</button>
   </div>
 
   <div class="section">
-    <h2>Weekly Referral Leaderboard</h2>
-    <pre id="referralLeaderboard">Loading...</pre>
+    <h3>🏆 Weekly Leaderboard</h3>
+    <button onclick="loadLeaderboard()">View Leaderboard</button>
+    <div id="leaderboard-output">Click to load latest rankings...</div>
+  </div>
+
+  <div class="section" id="admin-panel">
+    <h3>⚙️ Admin Panel</h3>
+    <button onclick="openAddXP()">➕ Add/Reduce XP</button>
+    <button onclick="viewJoinRequests()">📥 View Join Requests</button>
+    <button onclick="loadPreviousLeaderboard()">🏆 View Past Leaderboard</button>
+    <button onclick="exportCSV()">📤 Export CSV</button>
+  </div>
+
+  <!-- XP Modal -->
+  <div id="xp-modal" class="modal">
+    <div class="modal-content">
+      <h3>Adjust XP</h3>
+      <input id="xp-user" type="text" placeholder="@username">
+      <input id="xp-amount" type="number" placeholder="Amount (+/-)">
+      <button onclick="submitXPChange()">Submit</button>
+      <button onclick="closeXPModal()">Cancel</button>
+    </div>
   </div>
 
   <script>
     const tg = window.Telegram.WebApp;
+    tg.ready();
     tg.expand();
 
     const API_BASE = "https://apreferralv1.fly.dev";
     const user = tg.initDataUnsafe?.user || {};
     const userId = user.id;
-    const myName = user.username && user.username !== "unknown"
-      ? `@${user.username}`
-      : (user.first_name || "You");
+    const username = user.username || user.first_name || "";
 
-    async function loadLeaderboard() {
+    if (!userId) {
+      document.body.innerHTML = "<p style='color:red;'>❌ User ID not found. Please open this Mini App inside Telegram.</p>";
+    }
+
+    let latestReferralLink = "";
+
+    async function checkIn() {
       try {
-        const res = await fetch(`${API_BASE}/api/leaderboard?user_id=${userId}`);
+        const res = await fetch(`${API_BASE}/api/checkin?user_id=${userId}&username=${username}`);
         const data = await res.json();
-
-        if (!data.success) throw new Error("Failed to load leaderboard");
-
-        // Filter out @unknown or null/empty usernames
-        const filteredCheckin = data.leaderboard.checkin.filter(
-          u => u.username && u.username !== "unknown" && u.username !== "@unknown"
-        );
-        const filteredReferral = data.leaderboard.referral.filter(
-          u => u.username && u.username !== "unknown" && u.username !== "@unknown"
-        );
-
-        const checkin = filteredCheckin.map((u, i) =>
-          `${i + 1}. ${u.username} - ${u.xp} XP`
-        ).join("\n");
-
-        const referral = filteredReferral.map((u, i) =>
-          `${i + 1}. ${u.username} - ${u.referrals} Ref`
-        ).join("\n");
-
-        const myXP = data.user?.xp || 0;
-        const myRef = data.user?.referrals || 0;
-
-        document.getElementById("userStats").innerText = `${myName}\nXP: ${myXP}\nReferrals: ${myRef}`;
-        document.getElementById("checkinLeaderboard").innerText = checkin || "No valid data yet";
-        document.getElementById("referralLeaderboard").innerText = referral || "No valid data yet";
+        document.getElementById("checkin-result").innerText = data.message || "Check-in failed.";
+        if (data.next_checkin_time) startCountdown(data.next_checkin_time);
       } catch (err) {
-        console.error("Leaderboard error:", err);
-        document.getElementById("userStats").innerText = "Error loading stats.";
-        document.getElementById("checkinLeaderboard").innerText = "Error loading leaderboard.";
-        document.getElementById("referralLeaderboard").innerText = "Error loading leaderboard.";
+        document.getElementById("checkin-result").innerText = "❌ Error connecting to server.";
       }
     }
 
-    loadLeaderboard();
+    async function getReferral() {
+      const display = document.getElementById("referral-link");
+      try {
+        const res = await fetch(`${API_BASE}/api/referral?user_id=${userId}&username=${username}`);
+        const rawText = await res.text();
+        let data;
+        try {
+          data = JSON.parse(rawText);
+        } catch {
+          display.innerText = "❌ Invalid server response.";
+          return;
+        }
+
+        const link = data.referral_link;
+        if (link) {
+          latestReferralLink = link;
+          display.innerText = link + "\n👆 Tap 'Copy to Clipboard' to copy";
+        } else {
+          display.innerText = "❌ Failed to get link.";
+        }
+      } catch {
+        display.innerText = "❌ Error connecting to server.";
+      }
+    }
+
+    async function copyReferral() {
+      if (!latestReferralLink) {
+        alert("Please generate your referral link first.");
+        return;
+      }
+
+      try {
+        await navigator.clipboard.writeText(latestReferralLink);
+        alert("✅ Referral link copied!");
+      } catch {
+        alert("❌ Copy failed. Please copy manually.");
+      }
+    }
+
+    function startCountdown(nextCheckinTimeISO) {
+      const el = document.getElementById("checkin-timer");
+      const end = Date.parse(nextCheckinTimeISO);
+      function update() {
+        const now = Date.now();
+        const d = end - now;
+        if (d <= 0) {
+          el.innerText = "🎉 You can check in again now!";
+          return;
+        }
+        const h = Math.floor(d / 3600000), m = Math.floor((d % 3600000) / 60000), s = Math.floor((d % 60000) / 1000);
+        el.innerText = `⏳ Next check-in: ${h}h ${m}m ${s}s`;
+        setTimeout(update, 1000);
+      }
+      update();
+    }
+
+  async function loadLeaderboard() {
+    try {
+      const res = await fetch(`${API_BASE}/api/leaderboard?t=${Date.now()}`);
+      const data = await res.json();
+      const out = document.getElementById("leaderboard-output");
+      if (!data.success) throw new Error(data.error);
+
+      const checkin = data.leaderboard.checkin.map((u, i) =>
+        `${i + 1}. ${u.username || ''} - ${u.xp} XP`
+      ).join("\n");
+
+      const referral = data.leaderboard.referral.map((u, i) =>
+        `${i + 1}. ${u.username || ''} - ${u.referrals} Ref`
+      ).join("\n");
+
+      const myCheckin = data.leaderboard.checkin.find(u => u.username === username);
+      const myReferral = data.leaderboard.referral.find(u => u.username === username);
+      const myXP = myCheckin?.xp || 0;
+      const myRef = myReferral?.referrals || 0;
+      const myName = user.username ? `@${user.username}` : (user.first_name || "You");
+
+      out.innerText =
+        `📊 Your Weekly Stats:\n👤 ${myName} - ${myXP} XP | ${myRef} Referrals\n\n` +
+        `🔁 Check-in Leaderboard:\n${checkin}\n\n` +
+        `🔗 Referral Leaderboard:\n${referral}`;
+    } catch {
+      document.getElementById("leaderboard-output").innerText = "❌ Error loading leaderboard.";
+    }
+  }
+
+    async function loadPreviousLeaderboard() {
+      try {
+        const res = await fetch(`${API_BASE}/api/leaderboard/history`);
+        const data = await res.json();
+        const out = document.getElementById("leaderboard-output");
+        if (!data.success) throw new Error(data.error);
+        const checkin = data.checkin.map((u, i) => `${i + 1}. ${u.username} - ${u.xp} XP`).join("\n");
+        const referral = data.referral.map((u, i) => `${i + 1}. ${u.username} - ${u.referrals} Ref`).join("\n");
+        out.innerText = `📅 ${data.week_start} to ${data.week_end}\n\n🔁 Check-in:\n${checkin}\n\n🔗 Referrals:\n${referral}`;
+      } catch {
+        document.getElementById("leaderboard-output").innerText = "❌ Error loading history.";
+      }
+    }
+
+    async function checkIfAdmin() {
+      try {
+        const res = await fetch(`${API_BASE}/api/is_admin?user_id=${userId}`);
+        const data = await res.json();
+        if (data.success && data.is_admin) {
+          document.getElementById("admin-panel").style.display = "block";
+        }
+      } catch {}
+    }
+
+    function openAddXP() {
+      document.getElementById("xp-modal").style.display = "flex";
+    }
+
+    function closeXPModal() {
+      document.getElementById("xp-modal").style.display = "none";
+    }
+
+    async function submitXPChange() {
+      const input = document.getElementById("xp-user").value.trim();
+      const amount = parseInt(document.getElementById("xp-amount").value.trim());
+
+      if (!input || isNaN(amount)) {
+        alert("Please enter both @username and amount.");
+        return;
+      }
+
+      try {
+        const res = await fetch(`${API_BASE}/api/add_xp`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ user_id: input, xp: amount })
+        });
+        const data = await res.json();
+        alert(data.message || "XP updated.");
+        if (data.success) {
+          loadLeaderboard();
+        }
+      } catch (err) {
+        alert("❌ Failed to connect to server.");
+        console.error("Add XP error:", err);
+      }
+    }
+
+    function viewJoinRequests() {
+      alert("Coming soon: View Join Requests.");
+    }
+
+    function exportCSV() {
+      alert("Coming soon: Export CSV.");
+    }
+
+    window.onload = () => {
+      checkIfAdmin();
+    };
   </script>
 </body>
 </html>
