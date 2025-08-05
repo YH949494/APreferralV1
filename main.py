@@ -197,7 +197,7 @@ tz = timezone("Asia/Kuala_Lumpur")
 def reset_weekly_xp():
     now = datetime.now(tz)
     top_checkin = list(users_collection.find().sort("weekly_xp", DESCENDING).limit(50))
-    top_referrals = list(users_collection.find().sort("referral_count", DESCENDING).limit(50))
+    top_referrals = list(users_collection.find().sort("weekly_referral_count", DESCENDING).limit(50))
 
     history_collection.insert_one({
         "week_start": (now - timedelta(days=7)).strftime('%Y-%m-%d'),
@@ -207,7 +207,7 @@ def reset_weekly_xp():
             for u in top_checkin
         ],
         "referral_leaderboard": [
-            {"user_id": u["user_id"], "username": u.get("username", "unknown"), "referral_count": u.get("referral_count", 0)}
+            {"user_id": u["user_id"], "username": u.get("username", "unknown"), "referral_count": u.get("weekly_referral_count", 0)}
             for u in top_referrals
         ],
         "archived_at": now
@@ -219,6 +219,8 @@ def reset_weekly_xp():
             "weekly_referral_count": 0  # ✅ add this for weekly leaderboard
         }
     })
+
+    print(f"✅ Weekly XP & referrals reset complete at {now}")
 
 # ----------------------------
 # Telegram Bot Handlers
