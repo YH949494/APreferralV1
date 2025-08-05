@@ -83,29 +83,29 @@ def get_leaderboard():
             elif u.get("first_name"):
                 return u["first_name"]
             else:
-                return f"ID:{u.get('user_id', 'N/A')}"
+                return None  # Will be filtered out later
 
-        top_checkins = list(users_collection.find(
-            {
-                "$or": [
-                    {"username": {"$ne": None, "$ne": ""}},
-                    {"first_name": {"$ne": None, "$ne": ""}}
-                ]
-            }
-        ).sort("weekly_xp", -1).limit(10))
-
-      top_referrals = list(users_collection.find(
-            {
-                "$or": [
-                    {"username": {"$ne": None, "$ne": ""}},
-                    {"first_name": {"$ne": None, "$ne": ""}}
-                ]
+        # Filter out users without username or first_name
+        filter_query = {
+            "$or": [
+                {"username": {"$ne": None, "$ne": ""}},
+                {"first_name": {"$ne": None, "$ne": ""}}
+            ]
         }
-).sort("referral_count", -1).limit(10))
 
+        top_checkins = list(users_collection.find(filter_query).sort("weekly_xp", -1).limit(20))
+        top_referrals = list(users_collection.find(filter_query).sort("referral_count", -1).limit(20))
+
+        # Only include users with displayable names
         leaderboard = {
-            "checkin": [{"username": format_username(u), "xp": u.get("weekly_xp", 0)} for u in top_checkins],
-            "referral": [{"username": format_username(u), "referrals": u.get("referral_count", 0)} for u in top_referrals]
+            "checkin": [
+                {"username": format_username(u), "xp": u.get("weekly_xp", 0)}
+                for u in top_checkins if format_username(u)
+            ],
+            "referral": [
+                {"username": format_username(u), "referrals": u.get("referral_count", 0)}
+                for u in top_referrals if format_username(u)
+            ]
         }
 
         user = users_collection.find_one({"user_id": user_id})
@@ -114,8 +114,15 @@ def get_leaderboard():
             "referrals": user.get("referral_count", 0) if user else 0
         }
 
-        return jsonify({"success": True, "leaderboard": leaderboard, "user": user_stats})
+        return jsonify({
+            "success": True,
+            "leaderboard": leaderboard,
+            "user": user_stats
+        })
+
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         return jsonify({"success": False, "error": str(e)}), 500
         
 @app.route("/api/leaderboard/history")
