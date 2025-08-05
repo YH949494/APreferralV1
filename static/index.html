@@ -249,8 +249,8 @@
         const data = await res.json();
         const out = document.getElementById("leaderboard-output");
         if (!data.success) throw new Error(data.error);
-        const checkin = data.checkin.map((u, i) => `${i + 1}. ${u.username} - ${u.weekly_xp} XP`).join("\n");
-        const referral = data.referral.map((u, i) => `${i + 1}. ${u.username} - ${u.referral_count} Ref`).join("\n");
+        const checkin = data.checkin.map((u, i) => `${i + 1}. ${u.username} - ${u.xp} XP`).join("\n");
+        const referral = data.referral.map((u, i) => `${i + 1}. ${u.username} - ${u.referrals} Ref`).join("\n");
         out.innerText = `📅 ${data.week_start} to ${data.week_end}\n\n🔁 Check-in:\n${checkin}\n\n🔗 Referrals:\n${referral}`;
       } catch {
         document.getElementById("leaderboard-output").innerText = "❌ Error loading history.";
