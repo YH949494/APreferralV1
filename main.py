@@ -82,27 +82,28 @@ def get_leaderboard():
                 return f"@{u['username']}"
             elif u.get("first_name"):
                 return u["first_name"]
-            return None  # Skip if both missing
+            return None  # Don't show if both missing
 
-        filter_query = {
+        # Filter users with at least a username or first_name
+        visible_filter = {
             "$or": [
                 {"username": {"$exists": True, "$ne": None, "$ne": ""}},
                 {"first_name": {"$exists": True, "$ne": None, "$ne": ""}}
             ]
         }
 
-        top_checkins_raw = users_collection.find(filter_query).sort("weekly_xp", -1).limit(20)
-        top_referrals_raw = users_collection.find(filter_query).sort("weekly_referral_count", -1).limit(20)
+        top_checkins = users_collection.find(visible_filter).sort("weekly_xp", -1).limit(10)
+        top_referrals = users_collection.find(visible_filter).sort("weekly_referral_count", -1).limit(10)
 
         leaderboard = {
             "checkin": [
                 {"username": format_username(u), "xp": u.get("weekly_xp", 0)}
-                for u in top_checkins_raw if format_username(u)
-            ][:10],
+                for u in top_checkins if format_username(u)
+            ],
             "referral": [
                 {"username": format_username(u), "referrals": u.get("weekly_referral_count", 0)}
-                for u in top_referrals_raw if format_username(u)
-            ][:10]
+                for u in top_referrals if format_username(u)
+            ]
         }
 
         user = users_collection.find_one({"user_id": user_id})
@@ -116,7 +117,6 @@ def get_leaderboard():
             "leaderboard": leaderboard,
             "user": user_stats
         })
-
     except Exception as e:
         import traceback
         traceback.print_exc()
