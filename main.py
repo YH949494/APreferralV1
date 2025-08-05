@@ -268,13 +268,18 @@ async def join_request_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         if referrer_id:
             users_collection.update_one(
                 {"user_id": referrer_id},
-                {"$inc": {"referral_count": 1, "xp": 20, "weekly_xp": 20}}
+                {
+                    "$inc": {
+                        "referral_count": 1,            # ✅ lifetime total
+                        "weekly_referral_count": 1,     # ✅ weekly stat for leaderboard
+                        "xp": 20,
+                        "weekly_xp": 20
+                    }
+                }
             )
             print(f"[Referral] {user.username} referred by {referrer_id}")
         else:
             print(f"[Referral] No referrer found for {user.username}")
-
-    await context.bot.approve_chat_join_request(update.chat_join_request.chat.id, user.id)
 
 # ----------------------------
 # Run Bot + Flask + Scheduler
