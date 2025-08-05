@@ -125,14 +125,47 @@ def get_leaderboard():
 @app.route("/api/leaderboard/history")
 def get_leaderboard_history():
     try:
+        def format_username(u):
+            if u.get("username"):
+                return f"@{u['username']}"
+            elif u.get("first_name"):
+                return u["first_name"]
+            return None
+
         last_record = history_collection.find().sort("archived_at", DESCENDING).limit(1).next()
+
+        filtered_checkin = [
+            {
+                "username": format_username(u),
+                "xp": u.get("weekly_xp", 0)
+            }
+            for u in last_record.get("checkin_leaderboard", [])
+            if format_username(u)
+        ][:10]
+
+        filtered_referral = [
+            {
+                "username": format_username(u),
+                "referrals": u.get("referral_count", 0)
+            }
+            for u in last_record.get("referral_leaderboard", [])
+            if format_username(u)
+        ][:10]
+
         return jsonify({
             "success": True,
             "week_start": last_record.get("week_start"),
             "week_end": last_record.get("week_end"),
-            "checkin": last_record.get("checkin_leaderboard", []),
-            "referral": last_record.get("referral_leaderboard", [])
+            "checkin": filtered_checkin,
+            "referral": filtered_referral
         })
+
+    except StopIteration:
+        return jsonify({"success": False, "message": "No history found."}), 404
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"success": False, "error": str(e)}), 500
     except StopIteration:
         return jsonify({"success": False, "message": "No history found."}), 404
     except Exception as e:
