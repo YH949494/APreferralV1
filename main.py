@@ -82,21 +82,19 @@ def get_leaderboard():
                 return f"@{u['username']}"
             elif u.get("first_name"):
                 return u["first_name"]
-            else:
-                return None  # Will be filtered out later
+            return None  # Skip user if both missing
 
-        # Filter out users without username or first_name
+        # Only fetch users with at least username or first_name
         filter_query = {
             "$or": [
-                {"username": {"$ne": None, "$ne": ""}},
-                {"first_name": {"$ne": None, "$ne": ""}}
+                {"username": {"$exists": True, "$ne": None, "$ne": ""}},
+                {"first_name": {"$exists": True, "$ne": None, "$ne": ""}}
             ]
         }
 
-        top_checkins = list(users_collection.find(filter_query).sort("weekly_xp", -1).limit(10))
-        top_referrals = list(users_collection.find(filter_query).sort("referral_count", -1).limit(10))
+        top_checkins = users_collection.find(filter_query).sort("weekly_xp", -1).limit(20)
+        top_referrals = users_collection.find(filter_query).sort("referral_count", -1).limit(20)
 
-        # Only include users with displayable names
         leaderboard = {
             "checkin": [
                 {"username": format_username(u), "xp": u.get("weekly_xp", 0)}
@@ -124,7 +122,7 @@ def get_leaderboard():
         import traceback
         traceback.print_exc()
         return jsonify({"success": False, "error": str(e)}), 500
-        
+
 @app.route("/api/leaderboard/history")
 def get_leaderboard_history():
     try:
