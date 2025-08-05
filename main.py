@@ -93,8 +93,8 @@ def get_leaderboard():
             ]
         }
 
-        top_checkins = list(users_collection.find(filter_query).sort("weekly_xp", -1).limit(20))
-        top_referrals = list(users_collection.find(filter_query).sort("referral_count", -1).limit(20))
+        top_checkins = list(users_collection.find(filter_query).sort("weekly_xp", -1).limit(10))
+        top_referrals = list(users_collection.find(filter_query).sort("referral_count", -1).limit(10))
 
         # Only include users with displayable names
         leaderboard = {
