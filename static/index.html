@@ -202,7 +202,7 @@
 
     function startCountdown(nextCheckinTimeISO) {
       const el = document.getElementById("checkin-timer");
-      const end = Date.parse(nextCheckinTimeISO);
+      const end = new Date(nextCheckinTimeISO).getTime();
       function update() {
         const now = Date.now();
         const d = end - now;
