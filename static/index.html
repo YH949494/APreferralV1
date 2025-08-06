@@ -237,9 +237,10 @@
       const myXP = myCheckin?.xp || 0;
       const myRef = myReferral?.referrals || 0;
       const myName = user.username ? `@${user.username}` : (user.first_name || "You");
+      const myStreak = data.user?.streak ?? "—";  // fallback to dash if not provided
 
       out.innerText =
-        `📊 Your Weekly Stats:\n👤 ${myName} - ${myXP} XP | ${myRef} Referrals\n\n` +
+        `📊 Your Weekly Stats:\n👤 ${myName} - ${myXP} XP | ${myRef} Referrals\n\n` | 🔥 Streak: ${myStreak} days\n\n` +
         `🔁 Check-in Leaderboard:\n${checkin}\n\n` +
         `🔗 Referral Leaderboard:\n${referral}`;
     } catch {
