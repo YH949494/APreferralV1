@@ -1,6 +1,7 @@
 from flask import request, jsonify
 from pymongo import MongoClient
 import os
+import pytz
 from datetime import datetime, timedelta
 
 # MongoDB setup
@@ -9,6 +10,9 @@ client = MongoClient(MONGO_URL)
 db = client["referral_bot"]
 users_collection = db["users"]
 
+tz = pytz.timezone("Asia/Kuala_Lumpur")
+CHECKIN_XP = 20
+
 def handle_checkin():
     user_id = request.args.get("user_id", type=int)
     username = request.args.get("username", default="")
@@ -16,48 +20,76 @@ def handle_checkin():
     if not user_id:
         return jsonify({"error": "Missing user_id"}), 400
 
+    now = datetime.now(tz)
+    today = now.date()
+
     user = users_collection.find_one({"user_id": user_id})
-    now = datetime.utcnow()
 
     if not user:
-        user = {
+        # First-time user
+        users_collection.insert_one({
             "user_id": user_id,
             "username": username,
-            "xp": 0,
-            "weekly_xp": 0,
+            "xp": CHECKIN_XP,
+            "weekly_xp": CHECKIN_XP,
             "referral_count": 0,
-            "last_checkin": None
-        }
+            "weekly_referral_count": 0,
+            "last_checkin": now,
+            "streak": 1
+        })
+        return jsonify({
+            "success": True,
+            "message": "✅ First check-in! +20 XP"
+        })
 
     last_checkin = user.get("last_checkin")
+    streak = user.get("streak", 0)
+
     if last_checkin:
-        elapsed = now - last_checkin
-        if elapsed < timedelta(hours=24):
-            remaining = timedelta(hours=24) - elapsed
-            hours = int(remaining.total_seconds() // 3600)
-            minutes = int((remaining.total_seconds() % 3600) // 60)
+        last_date = last_checkin.astimezone(tz).date()
+        if last_date == today:
+            next_checkin_time = datetime.combine(today + timedelta(days=1), datetime.min.time(), tz)
             return jsonify({
                 "success": False,
-                "message": f"⏳ Come back in {hours}h {minutes}m to check in again!"
+                "message": "⏳ You’ve already checked in today!",
+                "next_checkin_time": next_checkin_time.isoformat()
             })
 
-    # Update XP
+        if (today - last_date) == timedelta(days=1):
+            streak += 1  # Continue streak
+        else:
+            streak = 1  # Missed a day → reset streak
+    else:
+        streak = 1  # First check-in ever
+
+    bonus_xp = 0
+    if streak == 7:
+        bonus_xp = 50
+    elif streak == 14:
+        bonus_xp = 100
+    elif streak == 28:
+        bonus_xp = 200
+
+    total_xp = CHECKIN_XP + bonus_xp
+
     users_collection.update_one(
         {"user_id": user_id},
         {
             "$set": {
                 "username": username,
-                "last_checkin": now
+                "last_checkin": now,
+                "streak": streak
             },
             "$inc": {
-                "xp": 20,
-                "weekly_xp": 20
+                "xp": total_xp,
+                "weekly_xp": total_xp
             }
-        },
-        upsert=True
+        }
     )
 
+    bonus_text = f" 🎉 Streak Bonus: +{bonus_xp} XP!" if bonus_xp else ""
     return jsonify({
         "success": True,
-        "message": "✅ Check-in successful! +20 XP"
+        "message": f"✅ Check-in successful! +{CHECKIN_XP} XP{bonus_text}",
+        "next_checkin_time": datetime.combine(today + timedelta(days=1), datetime.min.time(), tz).isoformat()
     })
