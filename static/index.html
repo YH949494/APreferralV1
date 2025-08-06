@@ -152,6 +152,10 @@
         const data = await res.json();
         document.getElementById("checkin-result").innerText = data.message || "Check-in failed.";
         if (data.next_checkin_time) startCountdown(data.next_checkin_time);
+        
+        if (data.success) {
+          loadLeaderboard();  // 👈 add this line
+        }
       } catch (err) {
         document.getElementById("checkin-result").innerText = "❌ Error connecting to server.";
       }
