@@ -228,8 +228,8 @@
         `${i + 1}. ${u.username || ''} - ${u.referrals} Ref`
       ).join("\n");
 
-      const myCheckin = data.leaderboard.checkin.find(u => u.username === username);
-      const myReferral = data.leaderboard.referral.find(u => u.username === username);
+      const myCheckin = data.leaderboard.checkin.find(u => u.username === username || u.user_id == userId);
+      const myReferral = data.leaderboard.referral.find(u => u.username === username || u.user_id == userId);
       const myXP = myCheckin?.xp || 0;
       const myRef = myReferral?.referrals || 0;
       const myName = user.username ? `@${user.username}` : (user.first_name || "You");
