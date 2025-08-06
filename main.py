@@ -110,6 +110,7 @@ def get_leaderboard():
         user_stats = {
             "xp": user.get("weekly_xp", 0) if user else 0,
             "referrals": user.get("weekly_referral_count", 0) if user else 0
+            "streak": user.get("streak", 0) if user else 0
         }
 
         return jsonify({
