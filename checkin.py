@@ -10,6 +10,7 @@ client = MongoClient(MONGO_URL)
 db = client["referral_bot"]
 users_collection = db["users"]
 
+# Timezone and XP settings
 tz = pytz.timezone("Asia/Kuala_Lumpur")
 CHECKIN_XP = 20
 
@@ -22,6 +23,7 @@ def handle_checkin():
 
     now = datetime.now(tz)
     today = now.date()
+    next_midnight = datetime.combine(today + timedelta(days=1), datetime.min.time(), tz)
 
     user = users_collection.find_one({"user_id": user_id})
 
@@ -39,7 +41,8 @@ def handle_checkin():
         })
         return jsonify({
             "success": True,
-            "message": "✅ First check-in! +20 XP"
+            "message": f"✅ First check-in! +{CHECKIN_XP} XP",
+            "next_checkin_time": next_midnight.isoformat()
         })
 
     last_checkin = user.get("last_checkin")
@@ -47,12 +50,13 @@ def handle_checkin():
 
     if last_checkin:
         last_date = last_checkin.astimezone(tz).date()
+
         if last_date == today:
-            next_checkin_time = datetime.combine(today + timedelta(days=1), datetime.min.time(), tz)
+            # Already checked in today
             return jsonify({
                 "success": False,
                 "message": "⏳ You’ve already checked in today!",
-                "next_checkin_time": next_checkin_time.isoformat()
+                "next_checkin_time": next_midnight.isoformat()
             })
 
         if (today - last_date) == timedelta(days=1):
@@ -62,6 +66,7 @@ def handle_checkin():
     else:
         streak = 1  # First check-in ever
 
+    # Bonus XP for streaks
     bonus_xp = 0
     if streak == 7:
         bonus_xp = 50
@@ -91,5 +96,5 @@ def handle_checkin():
     return jsonify({
         "success": True,
         "message": f"✅ Check-in successful! +{CHECKIN_XP} XP{bonus_text}",
-        "next_checkin_time": datetime.combine(today + timedelta(days=1), datetime.min.time(), tz).isoformat()
+        "next_checkin_time": next_midnight.isoformat()
     })
