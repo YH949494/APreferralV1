@@ -2,7 +2,7 @@ from flask import request, jsonify
 from pymongo import MongoClient
 import os
 import pytz
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time
 
 # MongoDB setup
 MONGO_URL = os.environ.get("MONGO_URL")
@@ -23,7 +23,7 @@ def handle_checkin():
 
     now = datetime.now(tz)
     today = now.date()
-    next_midnight = datetime.combine(today + timedelta(days=1), datetime.min.time(), tz)
+    next_midnight = tz.localize(datetime.combine(today + timedelta(days=1), time()))
 
     user = users_collection.find_one({"user_id": user_id})
 
