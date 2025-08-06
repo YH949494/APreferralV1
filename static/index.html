@@ -232,7 +232,7 @@
       const myReferral = data.leaderboard.referral.find(u => u.username === username || u.user_id == userId);
       const myXP = myCheckin?.xp || 0;
       const myRef = myReferral?.referrals || 0;
-              const myName = usernameWithAt || (user.first_name || "You");
+      const myName = usernameWithAt || (user.first_name || "You");
 
       out.innerText =
         `📊 Your Weekly Stats:\n👤 ${myName} - ${myXP} XP | ${myRef} Referrals\n\n` +
