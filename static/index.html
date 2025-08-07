@@ -219,7 +219,7 @@
 
   async function loadLeaderboard() {
     try {
-      const res = await fetch(`${API_BASE}/api/leaderboard?t=${Date.now()}`);
+      const res = await fetch(`${API_BASE}/api/leaderboard?user_id=${userId}&t=${Date.now()}`);
       const data = await res.json();
       const out = document.getElementById("leaderboard-output");
       if (!data.success) throw new Error(data.error);
