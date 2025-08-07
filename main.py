@@ -115,7 +115,7 @@ def get_leaderboard():
         return jsonify({
             "success": True,
             "leaderboard": leaderboard,
-            "me": user_stats
+            "user": user_stats
         })
     except Exception as e:
         import traceback
