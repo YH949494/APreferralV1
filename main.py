@@ -16,6 +16,7 @@ import asyncio
 import traceback
 import csv
 import io
+import pytz
 
 # ----------------------------
 # Config
@@ -32,6 +33,7 @@ client = MongoClient(MONGO_URL)
 db = client["referral_bot"]
 users_collection = db["users"]
 history_collection = db["weekly_leaderboard_history"]
+bonus_voucher_collection = db["bonus_voucher"]
 
 # ----------------------------
 # Flask App
@@ -175,6 +177,48 @@ def get_leaderboard_history():
         return jsonify({"success": False, "message": "No history found."}), 404
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
+
+@app.route("/api/admin/set_bonus", methods=["POST"])
+def set_bonus_voucher():
+    data = request.json
+    code = data.get("code")
+    release_time_str = data.get("release_time")  # e.g. "2025-08-10T04:00:00Z"
+
+    try:
+        release_time = datetime.strptime(release_time_str, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=pytz.UTC)
+        end_time = release_time + timedelta(hours=24)
+
+        bonus_voucher_collection.delete_many({})
+        bonus_voucher_collection.insert_one({
+            "code": code,
+            "start_time": release_time,
+            "end_time": end_time
+        })
+
+        return jsonify({"status": "success", "message": "Bonus voucher set successfully."}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 400
+
+@app.route("/api/bonus_voucher", methods=["GET"])
+def get_bonus_voucher():
+    try:
+        user_id = int(request.args.get("user_id"))
+        user = users_collection.find_one({"user_id": user_id})
+
+        if not user or user.get("status") != "VIP1":
+            return jsonify({"code": None})
+
+        voucher = bonus_voucher_collection.find_one()
+        if not voucher:
+            return jsonify({"code": None})
+
+        now = datetime.utcnow().replace(tzinfo=pytz.UTC)
+        if voucher["start_time"] <= now <= voucher["end_time"]:
+            return jsonify({"code": voucher["code"]})
+        else:
+            return jsonify({"code": None})
+    except Exception as e:
+        return jsonify({"code": None, "error": str(e)}), 500
 
 # ✅ Add/Reduce XP endpoint
 @app.route("/api/add_xp", methods=["POST"])
