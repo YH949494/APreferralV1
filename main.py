@@ -208,12 +208,13 @@ def get_bonus_voucher():
         if not user or user.get("status") != "VIP1":
             return jsonify({"code": None})
 
-        voucher = bonus_voucher_collection.find_one()
-        if not voucher:
-            return jsonify({"code": None})
-
         now = datetime.utcnow().replace(tzinfo=pytz.UTC)
-        if voucher["start_time"] <= now <= voucher["end_time"]:
+
+        # Auto-delete expired vouchers
+        bonus_voucher_collection.delete_many({"end_time": {"$lt": now}})
+
+        voucher = bonus_voucher_collection.find_one()
+        if voucher and voucher["start_time"] <= now <= voucher["end_time"]:
             return jsonify({"code": voucher["code"]})
         else:
             return jsonify({"code": None})
