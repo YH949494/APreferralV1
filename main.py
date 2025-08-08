@@ -109,7 +109,7 @@ def get_leaderboard():
         user = users_collection.find_one({"user_id": user_id})
         user_stats = {
             "xp": user.get("weekly_xp", 0) if user else 0,
-            "referrals": user.get("weekly_referral_count", 0) if user else 0
+            "referrals": user.get("weekly_referral_count", 0) if user else 0,
             "status": user.get("status", "Normal") if user else "Normal"
 
         }
