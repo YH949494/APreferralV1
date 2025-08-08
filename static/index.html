@@ -245,6 +245,9 @@
       const voucherRes = await fetch(`${API_BASE}/api/bonus_voucher?user_id=${userId}`);
       const voucherData = await voucherRes.json();
 
+      console.log("isAdmin:", isAdmin);
+      console.log("voucherData:", voucherData);
+      
       if (isAdmin) {
         // Show admin panel
         document.getElementById("admin-panel").style.display = "block";
