@@ -209,6 +209,13 @@ def get_bonus_voucher():
             return jsonify({"code": None})
 
         now = datetime.utcnow().replace(tzinfo=pytz.UTC)
+        start = voucher["start_time"]
+        end = voucher["end_time"]
+
+        if start.tzinfo is None:
+            start = start.replace(tzinfo=pytz.UTC)
+        if end.tzinfo is None:
+            end = end.replace(tzinfo=pytz.UTC)
 
         # Auto-delete expired vouchers
         bonus_voucher_collection.delete_many({"end_time": {"$lt": now}})
