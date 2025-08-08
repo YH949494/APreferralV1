@@ -257,6 +257,28 @@ def reset_weekly_xp():
 
     print(f"✅ Weekly XP & referrals reset complete at {now}")
 
+def update_monthly_vip_status():
+    now = datetime.now(tz)
+    print(f"🔁 Running monthly VIP status update at {now}")
+
+    all_users = users_collection.find()
+
+    for user in all_users:
+        current_xp = user.get("xp", 0)
+        next_status = "VIP1" if current_xp >= 800 else "Normal"
+
+        users_collection.update_one(
+            {"user_id": user["user_id"]},
+            {
+                "$set": {
+                    "status": next_status,
+                    "last_status_update": now
+                }
+            }
+        )
+
+    print("✅ Monthly VIP status update complete.")
+    
 # ----------------------------
 # Telegram Bot Handlers
 # ----------------------------
@@ -330,6 +352,7 @@ if __name__ == "__main__":
 
     scheduler = BackgroundScheduler(timezone=tz)
     scheduler.add_job(reset_weekly_xp, trigger=CronTrigger(day_of_week="mon", hour=0, minute=0), name="Weekly XP Reset")
+    scheduler.add_job(update_monthly_vip_status, trigger=CronTrigger(day=1, hour=0, minute=0), name="Monthly VIP Status Update")
     scheduler.start()
 
     print("✅ Bot & Scheduler running...")
