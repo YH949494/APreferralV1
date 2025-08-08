@@ -35,6 +35,16 @@ users_collection = db["users"]
 history_collection = db["weekly_leaderboard_history"]
 bonus_voucher_collection = db["bonus_voucher"]
 
+app_bot = ApplicationBuilder().token(BOT_TOKEN).build()
+
+def is_user_admin(user_id):
+    try:
+        admins = asyncio.run(app_bot.bot.get_chat_administrators(chat_id=GROUP_ID))
+        return any(admin.user.id == user_id for admin in admins)
+    except Exception as e:
+        print("[Admin Check Error]", e)
+        return False
+        
 # ----------------------------
 # Flask App
 # ----------------------------
