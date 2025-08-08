@@ -204,15 +204,12 @@ def get_bonus_voucher():
     try:
         user_id = int(request.args.get("user_id"))
         user = users_collection.find_one({"user_id": user_id})
-
-        if not user or user.get("status") != "VIP1":
+        if not user:
             return jsonify({"code": None})
 
+        # Load voucher
         now = datetime.utcnow().replace(tzinfo=pytz.UTC)
-        print(f"[VOUCHER] Current server time: {now.isoformat()}")
-
-        # Auto-delete expired vouchers
-        bonus_voucher_collection.delete_many({"end_time": {"$lt": now}})
+        bonus_voucher_collection.delete_many({"end_time": {"$lt": now}})  # auto-delete expired
 
         voucher = bonus_voucher_collection.find_one()
         if not voucher:
@@ -221,23 +218,30 @@ def get_bonus_voucher():
 
         start = voucher["start_time"]
         end = voucher["end_time"]
-
         if start.tzinfo is None:
             start = start.replace(tzinfo=pytz.UTC)
         if end.tzinfo is None:
             end = end.replace(tzinfo=pytz.UTC)
 
-        print(f"[VOUCHER] Voucher start: {start}, end: {end}")
+        print(f"[VOUCHER] Current server time: {now.isoformat()}")
+        print(f"[VOUCHER] Voucher start: {start.isoformat()}, end: {end.isoformat()}")
 
-        if start <= now <= end:
-            print("[VOUCHER] Voucher is active.")
-            return jsonify({"code": voucher["code"]})
-        else:
+        if not (start <= now <= end):
             print("[VOUCHER] Voucher not active.")
             return jsonify({"code": None})
 
+        # Check if user is VIP1 or admin
+        is_admin = user.get("is_admin", False)
+        is_vip = user.get("status") == "VIP1"
+
+        if is_vip or is_admin:
+            print("[VOUCHER] Voucher is active and user is eligible.")
+            return jsonify({"code": voucher["code"]})
+        else:
+            print("[VOUCHER] User not eligible (not VIP1 or admin).")
+            return jsonify({"code": None})
     except Exception as e:
-        print("[VOUCHER] ERROR:", e)
+        print("[VOUCHER] Exception:", e)
         return jsonify({"code": None, "error": str(e)}), 500
 
 # ✅ Add/Reduce XP endpoint
