@@ -237,9 +237,12 @@
       const myXP = data.user?.xp || 0;
       const myRef = data.user?.referrals || 0;
       const myName = user.username ? `@${user.username}` : (user.first_name || "You");
+      const myStatus = data.user?.status || "Normal";
+      let statusLabel = "🧑 Normal";
+      if (myStatus === "VIP1") statusLabel = "👑 VIP1";
 
       out.innerText =
-        `📊 Your Weekly Stats:\n👤 ${myName} - ${myXP} XP | ${myRef} Referrals\n\n` +
+        `📊 Your Weekly Stats:\n👤 ${myName} - ${myXP} XP | ${myRef} Referrals\n\n` | ${statusLabel}\n\n` +
         `🔁 Check-in Leaderboard:\n${checkin}\n\n` +
         `🔗 Referral Leaderboard:\n${referral}`;
     } catch {
