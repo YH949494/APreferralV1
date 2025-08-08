@@ -243,7 +243,7 @@
       if (myStatus === "VIP1") statusLabel = "👑 VIP1";
 
       out.innerText =
-        `📊 Your Weekly Stats:\n👤 ${myName} - ${myXP} XP | ${myRef} Referrals\n\n` | ${statusLabel}\n\n` +
+        `📊 Your Weekly Stats:\n👤 ${myName} - ${myXP} XP | ${myRef} Referrals\n${statusLabel}\n\n` +
         `🔁 Check-in Leaderboard:\n${checkin}\n\n` +
         `🔗 Referral Leaderboard:\n${referral}`;
     } catch {
