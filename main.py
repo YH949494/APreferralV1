@@ -80,6 +80,14 @@ def api_is_admin():
         user_id = int(request.args.get("user_id"))
         admins = asyncio.run(app_bot.bot.get_chat_administrators(chat_id=GROUP_ID))
         is_admin = any(admin.user.id == user_id for admin in admins)
+
+        # ✅ Store admin status in MongoDB for later use
+        users_collection.update_one(
+            {"user_id": user_id},
+            {"$set": {"is_admin": is_admin}},
+            upsert=True
+        )
+
         return jsonify({"success": True, "is_admin": is_admin})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
@@ -219,7 +227,7 @@ def get_bonus_voucher():
             return jsonify({"code": None})
 
         # Check admin status correctly using helper
-        is_admin = is_user_admin(user_id)
+        is_admin = user.get("is_admin", False)
         is_vip = user.get("status") == "VIP1"
 
         # Only allow VIP1 or admin to proceed
