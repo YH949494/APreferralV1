@@ -210,6 +210,15 @@ def get_bonus_voucher():
 
         now = datetime.utcnow().replace(tzinfo=pytz.UTC)
         print(f"[VOUCHER] Current server time: {now.isoformat()}")
+
+        # Auto-delete expired vouchers
+        bonus_voucher_collection.delete_many({"end_time": {"$lt": now}})
+
+        voucher = bonus_voucher_collection.find_one()
+        if not voucher:
+            print("[VOUCHER] No voucher found.")
+            return jsonify({"code": None})
+
         start = voucher["start_time"]
         end = voucher["end_time"]
 
@@ -218,15 +227,17 @@ def get_bonus_voucher():
         if end.tzinfo is None:
             end = end.replace(tzinfo=pytz.UTC)
 
-        # Auto-delete expired vouchers
-        bonus_voucher_collection.delete_many({"end_time": {"$lt": now}})
+        print(f"[VOUCHER] Voucher start: {start}, end: {end}")
 
-        voucher = bonus_voucher_collection.find_one()
-        if voucher and voucher["start_time"] <= now <= voucher["end_time"]:
+        if start <= now <= end:
+            print("[VOUCHER] Voucher is active.")
             return jsonify({"code": voucher["code"]})
         else:
+            print("[VOUCHER] Voucher not active.")
             return jsonify({"code": None})
+
     except Exception as e:
+        print("[VOUCHER] ERROR:", e)
         return jsonify({"code": None, "error": str(e)}), 500
 
 # ✅ Add/Reduce XP endpoint
