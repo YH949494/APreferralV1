@@ -223,28 +223,30 @@
       update();
     }
 
-  async function loadBonusVoucher(userId) {
+  async function handleAdminAndVoucher() {
   try {
-    // Check if user is admin
-    const adminRes = await fetch(`${API_BASE}/api/is_admin?user_id=${userId}`);
-    const adminData = await adminRes.json();
+    const res = await fetch(`${API_BASE}/api/is_admin?user_id=${userId}`);
+    const adminData = await res.json();
     const isAdmin = adminData.success && adminData.is_admin;
 
-    // Try getting voucher
+    if (isAdmin) {
+      document.getElementById("admin-panel").style.display = "block";
+    }
+
     const voucherRes = await fetch(`${API_BASE}/api/bonus_voucher?user_id=${userId}`);
     const voucherData = await voucherRes.json();
 
-    if (voucherData.code) {
-      // Voucher is active and user is eligible (VIP1 or admin)
+    // Only show bonus voucher if NOT admin OR there is a valid voucher
+    if (!isAdmin && voucherData.code) {
       document.getElementById("bonus-voucher").style.display = "block";
       document.getElementById("voucher-code").innerText = voucherData.code;
     } else if (isAdmin) {
-      // Admin sees the box even if no voucher is set or it's not yet active
+      // Admin can still see voucher box even if no code
       document.getElementById("bonus-voucher").style.display = "block";
-      document.getElementById("voucher-code").innerText = "❌ No active voucher currently.";
+      document.getElementById("voucher-code").innerText = voucherData.code || "❌ No active voucher currently.";
     }
   } catch (err) {
-    console.error("Failed to load bonus voucher:", err);
+    console.error("❌ Error checking admin or loading voucher:", err);
   }
 }
     
@@ -296,16 +298,6 @@
       }
     }
 
-    async function checkIfAdmin() {
-      try {
-        const res = await fetch(`${API_BASE}/api/is_admin?user_id=${userId}`);
-        const data = await res.json();
-        if (data.success && data.is_admin) {
-          document.getElementById("admin-panel").style.display = "block";
-        }
-      } catch {}
-    }
-
     function openAddXP() {
       document.getElementById("xp-modal").style.display = "flex";
     }
@@ -355,9 +347,8 @@
         .catch(() => alert("Failed to copy voucher."));
 }
     window.onload = () => {
-      checkIfAdmin();
+      handleAdminAndVoucher();
       loadLeaderboard();  // 👈 This line loads your weekly stats automatically
-      loadBonusVoucher(userId);
     };
   </script>
 </body>
