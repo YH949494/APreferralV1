@@ -204,12 +204,23 @@ def get_bonus_voucher():
     try:
         user_id = int(request.args.get("user_id"))
         user = users_collection.find_one({"user_id": user_id})
+
         if not user:
             return jsonify({"code": None})
 
-        # Load voucher
+        # Check admin status correctly using helper
+        is_admin = is_user_admin(user_id)
+        is_vip = user.get("status") == "VIP1"
+
+        # Only allow VIP1 or admin to proceed
+        if not is_vip and not is_admin:
+            print("[VOUCHER] User not eligible (not VIP1 or admin).")
+            return jsonify({"code": None})
+
         now = datetime.utcnow().replace(tzinfo=pytz.UTC)
-        bonus_voucher_collection.delete_many({"end_time": {"$lt": now}})  # auto-delete expired
+
+        # Auto-delete expired vouchers
+        bonus_voucher_collection.delete_many({"end_time": {"$lt": now}})
 
         voucher = bonus_voucher_collection.find_one()
         if not voucher:
@@ -226,19 +237,11 @@ def get_bonus_voucher():
         print(f"[VOUCHER] Current server time: {now.isoformat()}")
         print(f"[VOUCHER] Voucher start: {start.isoformat()}, end: {end.isoformat()}")
 
-        if not (start <= now <= end):
-            print("[VOUCHER] Voucher not active.")
-            return jsonify({"code": None})
-
-        # Check if user is VIP1 or admin
-        is_admin = user.get("is_admin", False)
-        is_vip = user.get("status") == "VIP1"
-
-        if is_vip or is_admin:
+        if start <= now <= end:
             print("[VOUCHER] Voucher is active and user is eligible.")
             return jsonify({"code": voucher["code"]})
         else:
-            print("[VOUCHER] User not eligible (not VIP1 or admin).")
+            print("[VOUCHER] Voucher not active.")
             return jsonify({"code": None})
     except Exception as e:
         print("[VOUCHER] Exception:", e)
