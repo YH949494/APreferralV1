@@ -209,6 +209,7 @@ def get_bonus_voucher():
             return jsonify({"code": None})
 
         now = datetime.utcnow().replace(tzinfo=pytz.UTC)
+        print(f"[VOUCHER] Current server time: {now.isoformat()}")
         start = voucher["start_time"]
         end = voucher["end_time"]
 
