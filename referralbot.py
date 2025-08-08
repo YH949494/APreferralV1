@@ -3,7 +3,7 @@ from datetime import datetime, timedelta
 from database import users_collection
 
 # Replace with your actual group ID
-GROUP_CHAT_ID = -1002723991859
+GROUP_CHAT_ID = -1002304653063
 
 async def get_or_create_referral_link(bot: Bot, user_id: int, username: str):
     user_data = users_collection.find_one({"user_id": user_id})
