@@ -237,31 +237,31 @@
     }
 
   async function handleAdminAndVoucher() {
-  try {
-    const res = await fetch(`${API_BASE}/api/is_admin?user_id=${userId}`);
-    const adminData = await res.json();
-    const isAdmin = adminData.success && adminData.is_admin;
+    try {
+      const res = await fetch(`${API_BASE}/api/is_admin?user_id=${userId}`);
+      const adminData = await res.json();
+      const isAdmin = adminData.success && adminData.is_admin;
 
-    if (isAdmin) {
-      document.getElementById("admin-panel").style.display = "block";
-    }
+      const voucherRes = await fetch(`${API_BASE}/api/bonus_voucher?user_id=${userId}`);
+      const voucherData = await voucherRes.json();
 
-    const voucherRes = await fetch(`${API_BASE}/api/bonus_voucher?user_id=${userId}`);
-    const voucherData = await voucherRes.json();
+      if (isAdmin) {
+        // Show admin panel
+        document.getElementById("admin-panel").style.display = "block";
 
-    // Only show bonus voucher if NOT admin OR there is a valid voucher
-    if (!isAdmin && voucherData.code) {
-      document.getElementById("bonus-voucher").style.display = "block";
-      document.getElementById("voucher-code").innerText = voucherData.code;
-    } else if (isAdmin) {
-      // Admin can still see voucher box even if no code
-      document.getElementById("bonus-voucher").style.display = "block";
-      document.getElementById("voucher-code").innerText = voucherData.code || "❌ No active voucher currently.";
-    }
-  } catch (err) {
+        // Always show bonus voucher box to admin
+        document.getElementById("bonus-voucher").style.display = "block";
+        document.getElementById("voucher-code").innerText = voucherData.code || "❌ No active voucher currently.";
+      } else if (voucherData.code) {
+        // Normal VIP1 users only see if voucher is active
+        document.getElementById("bonus-voucher").style.display = "block";
+        document.getElementById("voucher-code").innerText = voucherData.code;
+      }
+
+    } catch (err) {
     console.error("❌ Error checking admin or loading voucher:", err);
+    }
   }
-}
     
   async function loadLeaderboard() {
     try {
