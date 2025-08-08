@@ -122,7 +122,9 @@
     <button onclick="openAddXP()">➕ Add/Reduce XP</button>
     <button onclick="viewJoinRequests()">📥 View Join Requests</button>
     <button onclick="loadPreviousLeaderboard()">🏆 View Past Leaderboard</button>
+    <button onclick="openVoucherModal()">🎁 Create Bonus Voucher</button>
     <button onclick="exportCSV()">📤 Export CSV</button>
+    
   </div>
 
   <!-- XP Modal -->
@@ -136,6 +138,17 @@
     </div>
   </div>
 
+  <!-- Voucher Modal -->
+<div id="voucher-modal" class="modal">
+  <div class="modal-content">
+    <h3>Create Bonus Voucher</h3>
+    <input id="voucher-code-input" type="text" placeholder="Voucher Code">
+    <input id="voucher-expiry-input" type="datetime-local" placeholder="Start Time">
+    <button onclick="submitVoucher()">Create</button>
+    <button onclick="closeVoucherModal()">Cancel</button>
+  </div>
+</div>
+  
   <script>
     const tg = window.Telegram.WebApp;
     tg.ready();
@@ -346,6 +359,49 @@
         .then(() => alert("Voucher code copied!"))
         .catch(() => alert("Failed to copy voucher."));
 }
+     function openVoucherModal() {
+  document.getElementById("voucher-modal").style.display = "flex";
+}
+
+function closeVoucherModal() {
+  document.getElementById("voucher-modal").style.display = "none";
+}
+
+async function submitVoucher() {
+  const code = document.getElementById("voucher-code-input").value.trim();
+  const releaseAt = document.getElementById("voucher-expiry-input").value;
+
+  if (!code || !releaseAt) {
+    alert("Please enter both voucher code and release time.");
+    return;
+  }
+
+  try {
+    const payload = {
+      code,
+      release_time: new Date(releaseAt).toISOString().replace(".000Z", "Z")
+    };
+
+    const res = await fetch(`${API_BASE}/api/admin/set_bonus`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+
+    const data = await res.json();
+
+    alert(data.message || "Voucher scheduled.");
+    if (data.status === "success") {
+      closeVoucherModal();
+      handleAdminAndVoucher(); // refresh bonus section
+    }
+  } catch (err) {
+    alert("❌ Failed to schedule voucher.");
+    console.error("Voucher error:", err);
+  }
+}
+   
+    
     window.onload = () => {
       handleAdminAndVoucher();
       loadLeaderboard();  // 👈 This line loads your weekly stats automatically
