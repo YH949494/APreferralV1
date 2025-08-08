@@ -20,8 +20,8 @@ def init_user(user_id, username):
             "xp": 0,
             "last_checkin": None,
             "referral_count": 0,
-            "status": "Normal",          // or "VIP1"
-            "next_status": "VIP1",       // scheduled for next month
+            "status": "Normal",         # or "VIP1"
+            "next_status": "VIP1",      # scheduled for next month
             "last_status_update": "2025-08-01"
         }},
         upsert=True
