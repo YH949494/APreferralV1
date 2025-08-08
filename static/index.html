@@ -225,18 +225,29 @@
 
   async function loadBonusVoucher(userId) {
   try {
-    const res = await fetch(`${API_BASE}/api/bonus_voucher?user_id=${userId}`);
-    const data = await res.json();
+    // Check if user is admin
+    const adminRes = await fetch(`${API_BASE}/api/is_admin?user_id=${userId}`);
+    const adminData = await adminRes.json();
+    const isAdmin = adminData.success && adminData.is_admin;
 
-    if (data.code) {
+    // Try getting voucher
+    const voucherRes = await fetch(`${API_BASE}/api/bonus_voucher?user_id=${userId}`);
+    const voucherData = await voucherRes.json();
+
+    if (voucherData.code) {
+      // Voucher is active and user is eligible (VIP1 or admin)
       document.getElementById("bonus-voucher").style.display = "block";
-      document.getElementById("voucher-code").innerText = data.code;
+      document.getElementById("voucher-code").innerText = voucherData.code;
+    } else if (isAdmin) {
+      // Admin sees the box even if no voucher is set or it's not yet active
+      document.getElementById("bonus-voucher").style.display = "block";
+      document.getElementById("voucher-code").innerText = "❌ No active voucher currently.";
     }
   } catch (err) {
     console.error("Failed to load bonus voucher:", err);
   }
 }
-  
+    
   async function loadLeaderboard() {
     try {
       const res = await fetch(`${API_BASE}/api/leaderboard?user_id=${userId}&t=${Date.now()}`);
