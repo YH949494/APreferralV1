@@ -349,8 +349,47 @@ def reset_weekly_xp():
 
     print(f"✅ Weekly XP & referrals reset complete at {now}")
 
+from pymongo import DESCENDING
+from pytz import timezone
+from datetime import datetime
+
+def fix_user_weekly_xp(user_id):
+    # Implement logic to fix/add weekly XP for this user
+    # For example: check if weekly XP record exists; if missing, create or update it
+    # Return True if fixed, False if no action needed
+    weekly_xp_record = weekly_xp_collection.find_one({"user_id": user_id})
+    if not weekly_xp_record:
+        # Calculate XP (from history or other data)
+        xp = calculate_weekly_xp(user_id)
+        weekly_xp_collection.insert_one({
+            "user_id": user_id,
+            "xp": xp,
+            "week_start": get_current_week_start_date(),
+            "created_at": datetime.now(timezone("Asia/Kuala_Lumpur"))
+        })
+        print(f"Fixed weekly XP for user {user_id} (XP: {xp})")
+        return True
+    return False
+
+def fix_user_monthly_xp(user_id):
+    # Similar to weekly XP fix, but for monthly XP
+    monthly_xp_record = monthly_xp_collection.find_one({"user_id": user_id})
+    if not monthly_xp_record:
+        xp = calculate_monthly_xp(user_id)
+        monthly_xp_collection.insert_one({
+            "user_id": user_id,
+            "xp": xp,
+            "month": datetime.now(timezone("Asia/Kuala_Lumpur")).month,
+            "year": datetime.now(timezone("Asia/Kuala_Lumpur")).year,
+            "created_at": datetime.now(timezone("Asia/Kuala_Lumpur"))
+        })
+        print(f"Fixed monthly XP for user {user_id} (XP: {xp})")
+        return True
+    return False
+
+
 def run_boot_catchup():
-    """Run weekly and monthly catch-up if missed due to downtime."""
+    """Run weekly and monthly catch-up if missed due to downtime and fix missing XP for old users."""
     tz_kl = timezone("Asia/Kuala_Lumpur")
     now = datetime.now(tz_kl)
 
@@ -386,6 +425,19 @@ def run_boot_catchup():
             update_monthly_vip_status()
         else:
             print("✅ No monthly catch-up needed.")
+
+        # --- Auto-fix missing XP for old users ---
+        print("🔄 Starting auto-fix for missing XP on all users...")
+        all_users = users_collection.find({})
+        fixed_weekly_count = 0
+        fixed_monthly_count = 0
+        for user in all_users:
+            user_id = user["_id"]
+            if fix_user_weekly_xp(user_id):
+                fixed_weekly_count += 1
+            if fix_user_monthly_xp(user_id):
+                fixed_monthly_count += 1
+        print(f"✅ Auto-fix completed. Weekly XP fixed for {fixed_weekly_count} users, Monthly XP fixed for {fixed_monthly_count} users.")
 
     except Exception as e:
         print(f"❌ Boot-time catch-up failed: {e}")
