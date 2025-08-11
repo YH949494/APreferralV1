@@ -348,6 +348,40 @@ def reset_weekly_xp():
 
     print(f"✅ Weekly XP & referrals reset complete at {now}")
 
+def run_boot_catchup():
+    """Run weekly XP reset if the bot missed it due to downtime."""
+    tz_kl = timezone("Asia/Kuala_Lumpur")
+    now = datetime.now(tz_kl)
+
+    try:
+        # --- Weekly catch-up ---
+        last_history = history_collection.find_one(sort=[("archived_at", DESCENDING)])
+        if last_history:
+            last_reset = last_history["archived_at"].astimezone(tz_kl)
+            days_since = (now - last_reset).days
+            print(f"📅 Last weekly reset: {last_reset}, {days_since} days ago.")
+        else:
+            days_since = 999
+            print("⚠️ No weekly reset history found.")
+
+        if now.weekday() == 0 and days_since >= 6:
+            print("⚠️ Missed weekly reset. Running now...")
+            reset_weekly_xp()
+        else:
+            print("✅ No weekly catch-up needed.")
+
+        # --- Monthly catch-up ---
+        sample_user = users_collection.find_one(sort=[("last_status_update", DESCENDING)])
+        if not sample_user or sample_user.get("last_status_update") is None \
+           or sample_user["last_status_update"].month != now.month:
+            print("⚠️ Missed monthly VIP update. Running now...")
+            update_monthly_vip_status()
+        else:
+            print("✅ No monthly catch-up needed.")
+
+    except Exception as e:
+        print(f"❌ Boot-time catch-up failed: {e}")
+
 def update_monthly_vip_status():
     now = datetime.now(tz)
     print(f"🔁 Running monthly VIP status update at {now}")
@@ -436,6 +470,9 @@ async def join_request_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 # ----------------------------
 if __name__ == "__main__":
     Thread(target=lambda: app.run(host="0.0.0.0", port=8080)).start()
+    
+    # Boot-time catch-up for missed weekly resets
+    run_boot_catchup()
 
     app_bot = ApplicationBuilder().token(BOT_TOKEN).build()
     app_bot.add_handler(CommandHandler("start", start))
