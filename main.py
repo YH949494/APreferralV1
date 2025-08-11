@@ -372,21 +372,16 @@ def fix_user_weekly_xp(user_id):
     return False
 
 def fix_user_monthly_xp(user_id):
-    # Similar to weekly XP fix, but for monthly XP
-    monthly_xp_record = monthly_xp_collection.find_one({"user_id": user_id})
-    if not monthly_xp_record:
-        xp = calculate_monthly_xp(user_id)
-        monthly_xp_collection.insert_one({
-            "user_id": user_id,
-            "xp": xp,
-            "month": datetime.now(timezone("Asia/Kuala_Lumpur")).month,
-            "year": datetime.now(timezone("Asia/Kuala_Lumpur")).year,
-            "created_at": datetime.now(timezone("Asia/Kuala_Lumpur"))
-        })
-        print(f"Fixed monthly XP for user {user_id} (XP: {xp})")
+    user = users_collection.find_one({"_id": user_id})
+    if user and "monthly_xp" not in user:
+        # calculate XP somehow or set to 0
+        users_collection.update_one(
+            {"_id": user_id},
+            {"$set": {"monthly_xp": 0}}
+        )
+        print(f"Set missing monthly_xp for user {user_id} to 0")
         return True
     return False
-
 
 def run_boot_catchup():
     """Run weekly and monthly catch-up if missed due to downtime and fix missing XP for old users."""
@@ -519,7 +514,8 @@ async def join_request_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                         "referral_count": 1,            # ✅ lifetime total
                         "weekly_referral_count": 1,     # ✅ weekly stat for leaderboard
                         "xp": 20,
-                        "weekly_xp": 20
+                        "weekly_xp": 20,
+                        "monthly_xp": 20
                     }
                 }
             )
