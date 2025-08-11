@@ -372,7 +372,7 @@ def fix_user_weekly_xp(user_id):
     return False
 
 def fix_user_monthly_xp(user_id):
-    user = users_collection.find_one({"_id": user_id})
+    user = users_collection.find_one({"user_id": user_id})
     if user and "monthly_xp" not in user:
         # calculate XP somehow or set to 0
         users_collection.update_one(
