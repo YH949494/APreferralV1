@@ -87,7 +87,8 @@ def handle_checkin():
             },
             "$inc": {
                 "xp": total_xp,
-                "weekly_xp": total_xp
+                "weekly_xp": total_xp,
+                "monthly_xp": total_xp
             }
         }
     )
