@@ -129,6 +129,7 @@ def get_leaderboard():
         user = users_collection.find_one({"user_id": user_id})
         user_stats = {
             "xp": user.get("weekly_xp", 0) if user else 0,
+            "monthly_xp": user.get("monthly_xp", 0) if user else 0,
             "referrals": user.get("weekly_referral_count", 0) if user else 0,
             "status": user.get("status", "Normal") if user else "Normal"
 
@@ -389,7 +390,7 @@ def update_monthly_vip_status():
     all_users = users_collection.find()
 
     for user in all_users:
-        current_xp = user.get("xp", 0)
+        current_monthly_xp = user.get("monthly_xp", 0)  # ✅ Check monthly XP
         next_status = "VIP1" if current_xp >= 800 else "Normal"
 
         users_collection.update_one(
@@ -398,6 +399,7 @@ def update_monthly_vip_status():
                 "$set": {
                     "status": next_status,
                     "last_status_update": now
+                    "monthly_xp": 0  # ✅ Reset monthly XP
                 }
             }
         )
