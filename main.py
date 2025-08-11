@@ -391,7 +391,7 @@ def update_monthly_vip_status():
 
     for user in all_users:
         current_monthly_xp = user.get("monthly_xp", 0)  # ✅ Check monthly XP
-        next_status = "VIP1" if current_xp >= 800 else "Normal"
+        next_status = "VIP1" if current_monthly_xp >= 800 else "Normal"
 
         users_collection.update_one(
             {"user_id": user["user_id"]},
