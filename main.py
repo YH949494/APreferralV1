@@ -398,7 +398,7 @@ def update_monthly_vip_status():
             {
                 "$set": {
                     "status": next_status,
-                    "last_status_update": now
+                    "last_status_update": now,
                     "monthly_xp": 0  # ✅ Reset monthly XP
                 }
             }
