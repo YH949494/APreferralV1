@@ -427,7 +427,9 @@ def run_boot_catchup():
         fixed_weekly_count = 0
         fixed_monthly_count = 0
         for user in all_users:
-            user_id = user["_id"]
+            user_id = user["user_id"]
+            if not user_id:
+                continue  # Skip if no user_id present
             if fix_user_weekly_xp(user_id):
                 fixed_weekly_count += 1
             if fix_user_monthly_xp(user_id):
