@@ -281,9 +281,8 @@
         `${i + 1}. ${u.username || ''} - ${u.referrals} Ref`
       ).join("\n");
 
-      const myCheckin = data.leaderboard.checkin.find(u => u.user_id === userId);
-      const myReferral = data.leaderboard.referral.find(u => u.user_id === userId);
       const myXP = data.user?.xp || 0;
+      const myMonthlyXP = data.user?.monthly_xp || 0;
       const myRef = data.user?.referrals || 0;
       const myName = user.username ? `@${user.username}` : (user.first_name || "You");
       
@@ -292,7 +291,9 @@
       if (myStatus === "VIP1") statusLabel = "👑 VIP1";
 
       out.innerText =
-        `📊 Your Weekly Stats:\n👤 ${myName} - ${myXP} XP | ${myRef} Referrals\n${statusLabel}\n\n` +
+        `📊 Your Weekly Stats:\n👤 ${myName} - ${myXP} XP | ${myRef} Referrals\n` +
+        `📅 Monthly XP: ${myMonthlyXP}\n` +
+        `${statusLabel}\n\n` +
         `🔁 Check-in Leaderboard:\n${checkin}\n\n` +
         `🔗 Referral Leaderboard:\n${referral}`;
     } catch {
