@@ -350,40 +350,42 @@ def reset_weekly_xp():
     print(f"✅ Weekly XP & referrals reset complete at {now}")
 
 def run_boot_catchup():
-    """Run weekly and monthly resets if missed due to downtime."""
+    """Run weekly and monthly catch-up if missed due to downtime."""
     tz_kl = timezone("Asia/Kuala_Lumpur")
     now = datetime.now(tz_kl)
 
     try:
-        # === Weekly Catch-up ===
+        # --- Weekly catch-up ---
         last_history = history_collection.find_one(sort=[("archived_at", DESCENDING)])
-        if not last_history:
-            print("⚠️ No weekly reset history found. Running now...")
-            reset_weekly_xp()
-        else:
+        if last_history:
             last_reset = last_history["archived_at"].astimezone(tz_kl)
             days_since = (now - last_reset).days
             print(f"📅 Last weekly reset: {last_reset}, {days_since} days ago.")
-            if now.weekday() == 0 and days_since >= 6:
-                print("⚠️ Missed weekly reset. Running now...")
-                reset_weekly_xp()
-            else:
-                print("✅ No weekly catch-up needed.")
+        else:
+            days_since = 999
+            print("⚠️ No weekly reset history found.")
 
-        # === Monthly Catch-up ===
-        sample_user = users_collection.find_one(sort=[("last_status_update", DESCENDING)])
-        if not sample_user or not sample_user.get("last_status_update"):
-            print("⚠️ No monthly VIP update history found. Running now...")
+        if now.weekday() == 0 and days_since >= 6:
+            print("⚠️ Missed weekly reset. Running now...")
+            reset_weekly_xp()
+        else:
+            print("✅ No weekly catch-up needed.")
+
+        # --- Monthly catch-up ---
+        sample_user = users_collection.find_one(
+            {"last_status_update": {"$exists": True}},
+            sort=[("last_status_update", DESCENDING)]
+        )
+
+        if (
+            not sample_user
+            or sample_user["last_status_update"].month != now.month
+            or sample_user["last_status_update"].year != now.year
+        ):
+            print("⚠️ Missed monthly VIP update. Running now...")
             update_monthly_vip_status()
         else:
-            last_update = sample_user["last_status_update"].astimezone(tz_kl)
-            days_since = (now - last_update).days
-            print(f"📅 Last monthly update: {last_update}, {days_since} days ago.")
-            if now.day == 1 and days_since >= 28:
-                print("⚠️ Missed monthly VIP update. Running now...")
-                update_monthly_vip_status()
-            else:
-                print("✅ No monthly catch-up needed.")
+            print("✅ No monthly catch-up needed.")
 
     except Exception as e:
         print(f"❌ Boot-time catch-up failed: {e}")
@@ -423,6 +425,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "username": user.username,
                 "xp": 0,
                 "weekly_xp": 0,
+                "monthly_xp": 0, 
                 "referral_count": 0,
                 "last_checkin": None
             }},
