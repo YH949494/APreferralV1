@@ -92,30 +92,29 @@ def api_is_admin():
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 
-@app.route("/api/leaderboard")
+# Helper function, NOT a route
 def mask_username(username):
     if not username:
         return "********"
-    
+
     username = username[:8]  # Limit to max 8 chars
-    
+
     if len(username) <= 2:
         masked = username[0] + "*" * (len(username) - 1)
     else:
         masked = username[:2] + "*" * (len(username) - 2)
-    
+
     return masked.ljust(8, "*")
 
 
+@app.route("/api/leaderboard")
 def get_leaderboard():
     try:
         user_id = int(request.args.get("user_id", 0))
 
-        # Check if this user is admin from MongoDB
-        user_record = users_collection.find_one({"user_id": user_id})
-        is_admin = False
-        if user_record and user_record.get("role", "").lower() == "admin":
-            is_admin = True
+        # Fetch the user making the request
+        user_record = users_collection.find_one({"user_id": user_id}) or {}
+        is_admin = bool(user_record.get("is_admin", False))  # Use stored admin status
 
         def format_username(u):
             name = None
@@ -136,7 +135,7 @@ def get_leaderboard():
             # Admin or own name → show original, truncated to 8 chars
             return name[:8]
 
-        # Filter only users with visible names
+        # Only include users with a name
         visible_filter = {
             "$or": [
                 {"username": {"$exists": True, "$ne": None, "$ne": ""}},
@@ -159,10 +158,10 @@ def get_leaderboard():
         }
 
         user_stats = {
-            "xp": user_record.get("weekly_xp", 0) if user_record else 0,
-            "monthly_xp": user_record.get("monthly_xp", 0) if user_record else 0,
-            "referrals": user_record.get("weekly_referral_count", 0) if user_record else 0,
-            "status": user_record.get("status", "Normal") if user_record else "Normal"
+            "xp": user_record.get("weekly_xp", 0),
+            "monthly_xp": user_record.get("monthly_xp", 0),
+            "referrals": user_record.get("weekly_referral_count", 0),
+            "status": user_record.get("status", "Normal")
         }
 
         return jsonify({
