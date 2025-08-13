@@ -135,8 +135,8 @@ def format_username(u, current_user_id, is_admin):
 @app.route("/api/leaderboard")
 def get_leaderboard():
     try:
-        user_id = int(request.args.get("user_id", 0))
-        user_record = users_collection.find_one({"user_id": user_id}) or {}
+        current_user_id = int(request.args.get("user_id", 0))
+        user_record = users_collection.find_one({"user_id": current_user_id}) or {}
         is_admin = bool(user_record.get("is_admin", False))
 
         visible_filter = {
@@ -146,17 +146,25 @@ def get_leaderboard():
             ]
         }
 
+        def safe_format(u):
+            # Guarantee user_id exists
+            if "user_id" not in u:
+                u["user_id"] = 0
+            return format_username(u, current_user_id, is_admin)
+
         top_checkins = users_collection.find(visible_filter).sort("weekly_xp", -1).limit(15)
         top_referrals = users_collection.find(visible_filter).sort("weekly_referral_count", -1).limit(15)
 
         leaderboard = {
             "checkin": [
-                {"username": format_username(u, user_id, is_admin), "xp": u.get("weekly_xp", 0)}
-                for u in top_checkins if format_username(u, user_id, is_admin)
+                {"username": formatted, "xp": u.get("weekly_xp", 0)}
+                for u in top_checkins
+                if (formatted := safe_format(u))
             ],
             "referral": [
-                {"username": format_username(u, user_id, is_admin), "referrals": u.get("weekly_referral_count", 0)}
-                for u in top_referrals if format_username(u, user_id, is_admin)
+                {"username": formatted, "referrals": u.get("weekly_referral_count", 0)}
+                for u in top_referrals
+                if (formatted := safe_format(u))
             ]
         }
 
