@@ -78,8 +78,8 @@ def api_referral():
 def api_is_admin():
     try:
         user_id = int(request.args.get("user_id"))
-        admins = asyncio.run(app_bot.bot.get_chat_administrators(chat_id=GROUP_ID))
-        is_admin = any(admin.user.id == user_id for admin in admins)
+        user_record = users_collection.find_one({"user_id": user_id}) or {}
+        is_admin = bool(user_record.get("is_admin", False))
 
         # ✅ Store admin status in MongoDB for later use
         users_collection.update_one(
