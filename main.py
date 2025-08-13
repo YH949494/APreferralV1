@@ -92,27 +92,22 @@ def api_is_admin():
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 
-# Helper function, NOT a route
-def format_username(u, current_user_id, is_admin):
-    name = None
-    if u.get("username"):
-        name = f"@{u['username']}"
-    elif u.get("first_name"):
-        name = u["first_name"]
 
-    if not name:
-        return None
+# Helper to mask usernames for non-admin views
+def mask_username(username):
+    if not username:
+        return "********"
 
-    # Mask if not admin & not own account
-    if not is_admin and u.get("user_id") != current_user_id:
-        raw_name = name.lstrip("@")
-        masked = mask_username(raw_name)
-        return f"@{masked}" if name.startswith("@") else masked
+    username = username[:8]  # Limit to max 8 chars
 
-    # Admin or own account → show full name
-    return name
+    if len(username) <= 2:
+        masked = username[0] + "*" * (len(username) - 1)
+    else:
+        masked = username[:2] + "*" * (len(username) - 2)
 
-# ✅ Single safe helper
+    return masked.ljust(8, "*")
+
+# Format usernames depending on admin or own account
 def format_username(u, current_user_id, is_admin):
     name = None
     if u.get("username"):
