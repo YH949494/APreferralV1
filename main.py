@@ -93,19 +93,24 @@ def api_is_admin():
         return jsonify({"success": False, "error": str(e)}), 500
 
 # Helper function, NOT a route
-def mask_username(username):
-    if not username:
-        return "********"
+def format_username(u):
+    name = None
+    if u.get("username"):
+        name = f"@{u['username']}"
+    elif u.get("first_name"):
+        name = u["first_name"]
 
-    username = username[:8]  # Limit to max 8 chars
+    if not name:
+        return None
 
-    if len(username) <= 2:
-        masked = username[0] + "*" * (len(username) - 1)
-    else:
-        masked = username[:2] + "*" * (len(username) - 2)
+    # Mask if not admin & not own account
+    if not is_admin and u.get("user_id") != user_id:
+        raw_name = name.lstrip("@")  # Remove @ before masking
+        masked = mask_username(raw_name)
+        return f"@{masked}" if name.startswith("@") else masked
 
-    return masked.ljust(8, "*")
-
+    # Admin or own name → show original (no truncation)
+    return name
 
 @app.route("/api/leaderboard")
 def get_leaderboard():
