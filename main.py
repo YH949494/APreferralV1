@@ -114,7 +114,7 @@ def get_leaderboard():
 
         # Fetch the user making the request
         user_record = users_collection.find_one({"user_id": user_id}) or {}
-        is_admin = bool(user_record.get("is_admin", False))  # Use stored admin status
+               is_admin = bool(user_record.get("is_admin", False))
 
         def format_username(u):
             name = None
