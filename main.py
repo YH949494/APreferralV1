@@ -93,7 +93,7 @@ def api_is_admin():
         return jsonify({"success": False, "error": str(e)}), 500
 
 # Helper function, NOT a route
-def format_username(u):
+def format_username(u, current_user_id, is_admin):
     name = None
     if u.get("username"):
         name = f"@{u['username']}"
@@ -104,43 +104,41 @@ def format_username(u):
         return None
 
     # Mask if not admin & not own account
-    if not is_admin and u.get("user_id") != user_id:
-        raw_name = name.lstrip("@")  # Remove @ before masking
+    if not is_admin and u.get("user_id") != current_user_id:
+        raw_name = name.lstrip("@")
         masked = mask_username(raw_name)
         return f"@{masked}" if name.startswith("@") else masked
 
-    # Admin or own name → show original (no truncation)
+    # Admin or own account → show full name
+    return name
+
+# ✅ Single safe helper
+def format_username(u, current_user_id, is_admin):
+    name = None
+    if u.get("username"):
+        name = f"@{u['username']}"
+    elif u.get("first_name"):
+        name = u["first_name"]
+
+    if not name:
+        return None
+
+    # Mask if not admin & not own account
+    if not is_admin and u.get("user_id") != current_user_id:
+        raw_name = name.lstrip("@")
+        masked = mask_username(raw_name)
+        return f"@{masked}" if name.startswith("@") else masked
+
+    # Admin or own account → show full name
     return name
 
 @app.route("/api/leaderboard")
 def get_leaderboard():
     try:
         user_id = int(request.args.get("user_id", 0))
-
-        # Fetch the user making the request
         user_record = users_collection.find_one({"user_id": user_id}) or {}
         is_admin = bool(user_record.get("is_admin", False))
 
-        def format_username(u):
-            name = None
-            if u.get("username"):
-                name = f"@{u['username']}"
-            elif u.get("first_name"):
-                name = u["first_name"]
-
-            if not name:
-                return None
-
-            # Mask if not admin & not own account
-            if not is_admin and u.get("user_id") != user_id:
-                raw_name = name.lstrip("@")  # Remove @ before masking
-                masked = mask_username(raw_name)
-                return f"@{masked}" if name.startswith("@") else masked
-
-            # Admin or own name → show original, full length
-            return name
-
-        # Only include users with a name
         visible_filter = {
             "$or": [
                 {"username": {"$exists": True, "$ne": None, "$ne": ""}},
@@ -153,12 +151,12 @@ def get_leaderboard():
 
         leaderboard = {
             "checkin": [
-                {"username": format_username(u), "xp": u.get("weekly_xp", 0)}
-                for u in top_checkins if format_username(u)
+                {"username": format_username(u, user_id, is_admin), "xp": u.get("weekly_xp", 0)}
+                for u in top_checkins if format_username(u, user_id, is_admin)
             ],
             "referral": [
-                {"username": format_username(u), "referrals": u.get("weekly_referral_count", 0)}
-                for u in top_referrals if format_username(u)
+                {"username": format_username(u, user_id, is_admin), "referrals": u.get("weekly_referral_count", 0)}
+                for u in top_referrals if format_username(u, user_id, is_admin)
             ]
         }
 
