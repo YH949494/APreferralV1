@@ -2,7 +2,7 @@
 <html>
 <head>
   <meta charset="UTF-8">
-  <title>Referral & Check-in</title>
+  <title>Referral & Daily Check-in</title>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <style>
     body {
@@ -41,17 +41,40 @@
       margin-top: 10px;
       font-size: 15px;
     }
-    #leaderboard-output {
-      margin-top: 10px;
+    #leaderboard-tabs {
+      display: flex;
+      border-bottom: 2px solid #ddd;
+      margin-bottom: 10px;
+    }
+    .tab {
+      flex: 1;
+      padding: 10px;
+      text-align: center;
+      cursor: pointer;
+      font-weight: 600;
+      background: #f9f9f9;
+      border: 1px solid #ddd;
+      border-bottom: none;
+    }
+    .tab.active {
+      background: #ffffff;
+      border-top-left-radius: 8px;
+      border-top-right-radius: 8px;
+      border-bottom: 2px solid white;
+    }
+    .tab-content {
+      display: none;
       font-family: 'Courier New', monospace;
       white-space: pre-wrap;
       background: #f9f9f9;
       padding: 15px;
-      border-radius: 8px;
+      border-radius: 0 0 8px 8px;
       border: 1px solid #ddd;
-      font-size: 13px; /* smaller font size */
-      line-height: 1.4; /* optional for tighter spacing */
-      overflow-x: auto; /* horizontal scroll if needed */
+      font-size: 13px;
+      line-height: 1.4;
+    }
+    .tab-content.active {
+      display: block;
     }
     #admin-panel {
       display: none;
@@ -110,11 +133,15 @@
     <p id="voucher-code">Coming soon…</p>
     <button onclick="copyVoucherCode()">📋 Copy to clipboard</button>
   </div>
-  
+
   <div class="section">
     <h3>🏆 Weekly Leaderboard</h3>
-    <button onclick="loadLeaderboard()">View Leaderboard</button>
-    <div id="leaderboard-output">Click to load latest rankings...</div>
+    <div id="leaderboard-tabs">
+      <div class="tab active" onclick="switchTab('checkin')">🔁 Check-in</div>
+      <div class="tab" onclick="switchTab('referral')">🔗 Referral</div>
+    </div>
+    <div id="checkin-tab" class="tab-content active">Loading...</div>
+    <div id="referral-tab" class="tab-content">Loading...</div>
   </div>
 
   <div class="section" id="admin-panel">
@@ -124,7 +151,6 @@
     <button onclick="loadPreviousLeaderboard()">🏆 View Past Leaderboard</button>
     <button onclick="openVoucherModal()">🎁 Create Bonus Voucher</button>
     <button onclick="exportCSV()">📤 Export CSV</button>
-    
   </div>
 
   <!-- XP Modal -->
@@ -139,16 +165,16 @@
   </div>
 
   <!-- Voucher Modal -->
-<div id="voucher-modal" class="modal">
-  <div class="modal-content">
-    <h3>Create Bonus Voucher</h3>
-    <input id="voucher-code-input" type="text" placeholder="Voucher Code">
-    <input id="voucher-expiry-input" type="datetime-local" placeholder="Start Time">
-    <button onclick="submitVoucher()">Create</button>
-    <button onclick="closeVoucherModal()">Cancel</button>
+  <div id="voucher-modal" class="modal">
+    <div class="modal-content">
+      <h3>Create Bonus Voucher</h3>
+      <input id="voucher-code-input" type="text" placeholder="Voucher Code">
+      <input id="voucher-expiry-input" type="datetime-local" placeholder="Start Time">
+      <button onclick="submitVoucher()">Create</button>
+      <button onclick="closeVoucherModal()">Cancel</button>
+    </div>
   </div>
-</div>
-  
+
   <script>
     const tg = window.Telegram.WebApp;
     tg.ready();
@@ -165,17 +191,21 @@
 
     let latestReferralLink = "";
 
+    function switchTab(tab) {
+      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+      document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+      document.querySelector(`.tab[onclick*="${tab}"]`).classList.add('active');
+      document.getElementById(`${tab}-tab`).classList.add('active');
+    }
+
     async function checkIn() {
       try {
         const res = await fetch(`${API_BASE}/api/checkin?user_id=${userId}&username=${username}`);
         const data = await res.json();
         document.getElementById("checkin-result").innerText = data.message || "Check-in failed.";
         if (data.next_checkin_time) startCountdown(data.next_checkin_time);
-        
-        if (data.success) {
-          loadLeaderboard();  // 👈 add this line
-        }
-      } catch (err) {
+        if (data.success) loadLeaderboard();
+      } catch {
         document.getElementById("checkin-result").innerText = "❌ Error connecting to server.";
       }
     }
@@ -186,31 +216,20 @@
         const res = await fetch(`${API_BASE}/api/referral?user_id=${userId}&username=${username}`);
         const rawText = await res.text();
         let data;
-        try {
-          data = JSON.parse(rawText);
-        } catch {
-          display.innerText = "❌ Invalid server response.";
-          return;
-        }
-
+        try { data = JSON.parse(rawText); } 
+        catch { display.innerText = "❌ Invalid server response."; return; }
         const link = data.referral_link;
         if (link) {
           latestReferralLink = link;
           display.innerText = link + "\n👆 Tap 'Copy to Clipboard' to copy";
-        } else {
-          display.innerText = "❌ Failed to get link.";
-        }
+        } else display.innerText = "❌ Failed to get link.";
       } catch {
         display.innerText = "❌ Error connecting to server.";
       }
     }
 
     async function copyReferral() {
-      if (!latestReferralLink) {
-        alert("Please generate your referral link first.");
-        return;
-      }
-
+      if (!latestReferralLink) return alert("Please generate your referral link first.");
       try {
         await navigator.clipboard.writeText(latestReferralLink);
         alert("✅ Referral link copied!");
@@ -223,12 +242,8 @@
       const el = document.getElementById("checkin-timer");
       const end = new Date(nextCheckinTimeISO).getTime();
       function update() {
-        const now = Date.now();
-        const d = end - now;
-        if (d <= 0) {
-          el.innerText = "🎉 You can check in again now!";
-          return;
-        }
+        const d = end - Date.now();
+        if (d <= 0) return el.innerText = "🎉 You can check in again now!";
         const h = Math.floor(d / 3600000), m = Math.floor((d % 3600000) / 60000), s = Math.floor((d % 60000) / 1000);
         el.innerText = `⏳ Next check-in: ${h}h ${m}m ${s}s`;
         setTimeout(update, 1000);
@@ -236,179 +251,44 @@
       update();
     }
 
-  async function handleAdminAndVoucher() {
-    try {
-      const res = await fetch(`${API_BASE}/api/is_admin?user_id=${userId}`);
-      const adminData = await res.json();
-      const isAdmin = adminData.success && adminData.is_admin;
-
-      const voucherRes = await fetch(`${API_BASE}/api/bonus_voucher?user_id=${userId}`);
-      const voucherData = await voucherRes.json();
-
-      console.log("isAdmin:", isAdmin);
-      console.log("voucherData:", voucherData);
-      
-      if (isAdmin) {
-        // Show admin panel
-        document.getElementById("admin-panel").style.display = "block";
-
-        // Always show bonus voucher box to admin
-        document.getElementById("bonus-voucher").style.display = "block";
-        document.getElementById("voucher-code").innerText = voucherData.code || "❌ No active voucher currently.";
-      } else if (voucherData.code) {
-        // Normal VIP1 users only see if voucher is active
-        document.getElementById("bonus-voucher").style.display = "block";
-        document.getElementById("voucher-code").innerText = voucherData.code;
-      }
-
-    } catch (err) {
-    console.error("❌ Error checking admin or loading voucher:", err);
-    }
-  }
-    
-  async function loadLeaderboard() {
-    try {
-      const res = await fetch(`${API_BASE}/api/leaderboard?user_id=${userId}&t=${Date.now()}`);
-      const data = await res.json();
-      const out = document.getElementById("leaderboard-output");
-      if (!data.success) throw new Error(data.error);
-
-      const checkin = data.leaderboard.checkin.map((u, i) =>
-        `${i + 1}. ${u.username || ''} - ${u.xp} XP`
-      ).join("\n");
-
-      const referral = data.leaderboard.referral.map((u, i) =>
-        `${i + 1}. ${u.username || ''} - ${u.referrals} Ref`
-      ).join("\n");
-
-      const myXP = data.user?.xp || 0;
-      const myMonthlyXP = data.user?.monthly_xp || 0;
-      const myRef = data.user?.referrals || 0;
-      const myName = user.username ? `@${user.username}` : (user.first_name || "You");
-      
-      const myStatus = (data.user && data.user.status) ? data.user.status : "Normal";
-      let statusLabel = "🧑 Normal";
-      if (myStatus === "VIP1") statusLabel = "👑 VIP1";
-
-      out.innerText =
-        `📊 Your Weekly Stats:\n👤 ${myName} - ${myXP} XP | ${myRef} Referrals\n` +
-        `📅 Monthly XP: ${myMonthlyXP}\n` +
-        `${statusLabel}\n\n` +
-        `🔁 Check-in Leaderboard:\n${checkin}\n\n` +
-        `🔗 Referral Leaderboard:\n${referral}`;
-    } catch {
-      document.getElementById("leaderboard-output").innerText = "❌ Error loading leaderboard.";
-    }
-  }
-
-    async function loadPreviousLeaderboard() {
+    async function handleAdminAndVoucher() {
       try {
-        const res = await fetch(`${API_BASE}/api/leaderboard/history`);
-        const data = await res.json();
-        const out = document.getElementById("leaderboard-output");
-        if (!data.success) throw new Error(data.error);
-        const checkin = data.checkin.map((u, i) => `${i + 1}. ${u.username} - ${u.xp} XP`).join("\n");
-        const referral = data.referral.map((u, i) => `${i + 1}. ${u.username} - ${u.referrals} Ref`).join("\n");
-        out.innerText = `📅 ${data.week_start} to ${data.week_end}\n\n🔁 Check-in:\n${checkin}\n\n🔗 Referrals:\n${referral}`;
-      } catch {
-        document.getElementById("leaderboard-output").innerText = "❌ Error loading history.";
-      }
-    }
-
-    function openAddXP() {
-      document.getElementById("xp-modal").style.display = "flex";
-    }
-
-    function closeXPModal() {
-      document.getElementById("xp-modal").style.display = "none";
-    }
-
-    async function submitXPChange() {
-      const input = document.getElementById("xp-user").value.trim();
-      const amount = parseInt(document.getElementById("xp-amount").value.trim());
-
-      if (!input || isNaN(amount)) {
-        alert("Please enter both @username and amount.");
-        return;
-      }
-
-      try {
-        const res = await fetch(`${API_BASE}/api/add_xp`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ user_id: input, xp: amount })
-        });
-        const data = await res.json();
-        alert(data.message || "XP updated.");
-        if (data.success) {
-          loadLeaderboard();
+        const res = await fetch(`${API_BASE}/api/is_admin?user_id=${userId}`);
+        const adminData = await res.json();
+        const isAdmin = adminData.success && adminData.is_admin;
+        const voucherRes = await fetch(`${API_BASE}/api/bonus_voucher?user_id=${userId}`);
+        const voucherData = await voucherRes.json();
+        if (isAdmin) {
+          document.getElementById("admin-panel").style.display = "block";
+          document.getElementById("bonus-voucher").style.display = "block";
+          document.getElementById("voucher-code").innerText = voucherData.code || "❌ No active voucher currently.";
+        } else if (voucherData.code) {
+          document.getElementById("bonus-voucher").style.display = "block";
+          document.getElementById("voucher-code").innerText = voucherData.code;
         }
       } catch (err) {
-        alert("❌ Failed to connect to server.");
-        console.error("Add XP error:", err);
+        console.error("❌ Error checking admin or loading voucher:", err);
       }
     }
 
-    function viewJoinRequests() {
-      alert("Coming soon: View Join Requests.");
+    async function loadLeaderboard() {
+      try {
+        const res = await fetch(`${API_BASE}/api/leaderboard?user_id=${userId}&t=${Date.now()}`);
+        const data = await res.json();
+        if (!data.success) throw new Error(data.error);
+        const checkin = data.leaderboard.checkin.map((u, i) => `${i+1}. ${u.username || ''} - ${u.xp} XP`).join("\n");
+        const referral = data.leaderboard.referral.map((u, i) => `${i+1}. ${u.username || ''} - ${u.referrals} Ref`).join("\n");
+        document.getElementById("checkin-tab").innerText = checkin;
+        document.getElementById("referral-tab").innerText = referral;
+      } catch {
+        document.getElementById("checkin-tab").innerText = "❌ Error loading leaderboard.";
+        document.getElementById("referral-tab").innerText = "❌ Error loading leaderboard.";
+      }
     }
 
-    function exportCSV() {
-      alert("Coming soon: Export CSV.");
-    }
-
-    function copyVoucherCode() {
-      const code = document.getElementById("voucher-code").innerText;
-      navigator.clipboard.writeText(code)
-        .then(() => alert("Voucher code copied!"))
-        .catch(() => alert("Failed to copy voucher."));
-}
-     function openVoucherModal() {
-  document.getElementById("voucher-modal").style.display = "flex";
-}
-
-function closeVoucherModal() {
-  document.getElementById("voucher-modal").style.display = "none";
-}
-
-async function submitVoucher() {
-  const code = document.getElementById("voucher-code-input").value.trim();
-  const releaseAt = document.getElementById("voucher-expiry-input").value;
-
-  if (!code || !releaseAt) {
-    alert("Please enter both voucher code and release time.");
-    return;
-  }
-
-  try {
-    const payload = {
-      code,
-      release_time: new Date(releaseAt).toISOString().replace(".000Z", "Z")
-    };
-
-    const res = await fetch(`${API_BASE}/api/admin/set_bonus`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload)
-    });
-
-    const data = await res.json();
-
-    alert(data.message || "Voucher scheduled.");
-    if (data.status === "success") {
-      closeVoucherModal();
-      handleAdminAndVoucher(); // refresh bonus section
-    }
-  } catch (err) {
-    alert("❌ Failed to schedule voucher.");
-    console.error("Voucher error:", err);
-  }
-}
-   
-    
     window.onload = () => {
       handleAdminAndVoucher();
-      loadLeaderboard();  // 👈 This line loads your weekly stats automatically
+      loadLeaderboard();
     };
   </script>
 </body>
