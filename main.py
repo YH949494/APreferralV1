@@ -137,8 +137,8 @@ def get_leaderboard():
                 masked = mask_username(raw_name)
                 return f"@{masked}" if name.startswith("@") else masked
 
-            # Admin or own name → show original, truncated to 8 chars
-            return name[:8]
+            # Admin or own name → show original, full length
+            return name
 
         # Only include users with a name
         visible_filter = {
