@@ -1,108 +1,136 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8">
-<title>Leaderboard App</title>
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<style>
-* {margin:0; padding:0; box-sizing:border-box;}
-body {font-family:"Segoe UI", Arial, sans-serif; background:#f8f9fa; color:#333; padding:15px; line-height:1.5;}
-section {background:#fff; border-radius:10px; padding:15px; margin-bottom:12px; box-shadow:0 2px 6px rgba(0,0,0,0.05);}
-section h2 {font-size:1.1rem; margin-bottom:8px; color:#222;}
-button {display:inline-block; background:#0088cc; color:#fff; border:none; padding:8px 14px; font-size:0.95rem; border-radius:8px; cursor:pointer; transition:background 0.2s;}
-button:hover {background:#0077b3;}
-button:disabled {background:#ccc; cursor:not-allowed;}
-#checkin-result, #referral-link, #voucher-code {font-size:0.9rem; margin-top:6px; word-break:break-word;}
-#checkin-timer {margin-top:5px; font-size:0.85rem; color:#666;}
-#leaderboard-output {font-family:monospace; font-size:0.88rem; white-space:pre-line; margin-top:8px;}
-#admin-panel {background:#f3f9ff; border-left:4px solid #0088cc;}
-@media (max-width:500px) {
-  body{padding:10px;}
-  section{padding:12px;}
-  button{padding:7px 12px; font-size:0.88rem;}
-  #leaderboard-output{font-size:0.8rem;}
-}
-</style>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Leaderboard</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      background: #f4f4f4;
+      margin: 0;
+      padding: 0;
+    }
+    .container {
+      max-width: 700px;
+      margin: auto;
+      padding: 15px;
+    }
+    h1 {
+      text-align: center;
+      margin-bottom: 20px;
+    }
+    .leaderboard-section {
+      background: white;
+      padding: 15px;
+      margin-bottom: 20px;
+      border-radius: 10px;
+      box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+    }
+    .leaderboard-section h2 {
+      margin-top: 0;
+    }
+    .leaderboard-list {
+      list-style: none;
+      padding: 0;
+      margin: 0;
+    }
+    .leaderboard-item {
+      display: flex;
+      justify-content: space-between;
+      padding: 8px 0;
+      border-bottom: 1px solid #eee;
+    }
+    .leaderboard-item:last-child {
+      border-bottom: none;
+    }
+    .user-stats {
+      background: #fff3cd;
+      padding: 15px;
+      border-radius: 10px;
+      box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+      margin-bottom: 20px;
+    }
+  </style>
 </head>
 <body>
+  <div class="container">
+    <h1>Leaderboard</h1>
 
-<section>
-  <h2>Daily Check-in</h2>
-  <button id="checkin-btn">Check-in</button>
-  <div id="checkin-result"></div>
-  <div id="checkin-timer"></div>
-</section>
+    <div id="user-stats" class="user-stats">
+      <h3>Your Stats</h3>
+      <p>XP: <span id="xp">0</span></p>
+      <p>Monthly XP: <span id="monthly_xp">0</span></p>
+      <p>Referrals: <span id="referrals">0</span></p>
+      <p>Status: <span id="status">Normal</span></p>
+    </div>
 
-<section>
-  <h2>Referral</h2>
-  <div id="referral-link"></div>
-</section>
+    <div class="leaderboard-section">
+      <h2>Top Check-ins</h2>
+      <ul id="checkin-list" class="leaderboard-list"></ul>
+    </div>
 
-<section>
-  <h2>Leaderboard</h2>
-  <button id="load-leaderboard-btn">Load Leaderboard</button>
-  <div id="leaderboard-output"></div>
-</section>
+    <div class="leaderboard-section">
+      <h2>Top Referrals</h2>
+      <ul id="referral-list" class="leaderboard-list"></ul>
+    </div>
+  </div>
 
-<section id="admin-panel" style="display:none;">
-  <h2>Admin Controls</h2>
-  <div id="voucher-code"></div>
-</section>
+  <script>
+    const API_BASE = "/api";
+    const currentUserId = Number(new URLSearchParams(window.location.search).get("user_id") || 0);
+    let isAdmin = false;
 
-<script>
-const userId = window.Telegram?.WebApp?.initDataUnsafe?.user?.id || 0;
-let isAdmin = false;
+    async function fetchAdminStatus() {
+      const res = await fetch(`${API_BASE}/is_admin?user_id=${currentUserId}`);
+      const data = await res.json();
+      if (data.success) isAdmin = data.is_admin;
+    }
 
-async function checkAdmin() {
-  const res = await fetch(`/api/is_admin?user_id=${userId}`);
-  const data = await res.json();
-  if (data.success && data.is_admin) {
-    isAdmin = true;
-    document.getElementById('admin-panel').style.display = 'block';
-  }
-}
+    function maskUsername(name) {
+      if (!name) return "********";
+      name = name.replace(/^@/, "").slice(0, 8);
+      if (name.length <= 2) {
+        return name[0] + "*".repeat(name.length - 1);
+      }
+      return name.slice(0, 2) + "*".repeat(name.length - 2);
+    }
 
-async function checkIn() {
-  const res = await fetch(`/api/checkin?user_id=${userId}`, {method:"POST"});
-  const data = await res.json();
-  document.getElementById('checkin-result').innerText = data.message || '';
-  if (data.cooldown) startTimer(data.cooldown);
-}
+    function renderList(listId, items, key) {
+      const list = document.getElementById(listId);
+      list.innerHTML = "";
+      items.forEach(u => {
+        let displayName = u.username;
+        if (!isAdmin && u.username && !u.is_self) {
+          displayName = maskUsername(u.username);
+        }
+        const li = document.createElement("li");
+        li.className = "leaderboard-item";
+        li.innerHTML = `<span>${displayName}</span> <span>${u[key]}</span>`;
+        list.appendChild(li);
+      });
+    }
 
-function startTimer(seconds) {
-  const timerEl = document.getElementById('checkin-timer');
-  let remaining = seconds;
-  const interval = setInterval(() => {
-    if (remaining <= 0) {clearInterval(interval); timerEl.textContent = ''; return;}
-    const h = String(Math.floor(remaining/3600)).padStart(2,'0');
-    const m = String(Math.floor((remaining%3600)/60)).padStart(2,'0');
-    const s = String(remaining%60).padStart(2,'0');
-    timerEl.textContent = `Next check-in in ${h}:${m}:${s}`;
-    remaining--;
-  }, 1000);
-}
+    async function fetchLeaderboard() {
+      const res = await fetch(`${API_BASE}/leaderboard?user_id=${currentUserId}`);
+      const data = await res.json();
+      if (!data.success) {
+        alert("Error loading leaderboard");
+        return;
+      }
+      document.getElementById("xp").textContent = data.user.xp;
+      document.getElementById("monthly_xp").textContent = data.user.monthly_xp;
+      document.getElementById("referrals").textContent = data.user.referrals;
+      document.getElementById("status").textContent = data.user.status;
 
-async function loadLeaderboard() {
-  const res = await fetch(`/api/leaderboard?user_id=${userId}`);
-  const data = await res.json();
-  if (!data.success) return alert("Error loading leaderboard");
-  const rows = data.leaderboard.map((u,i) => {
-    const rank = String(i+1).padStart(2,' ');
-    const name = u.name.padEnd(12,' ');
-    return `${rank}. ${name} ${u.xp} XP`;
-  });
-  document.getElementById('leaderboard-output').textContent = rows.join("\n");
-}
+      renderList("checkin-list", data.leaderboard.checkin, "xp");
+      renderList("referral-list", data.leaderboard.referral, "referrals");
+    }
 
-function loadReferral() {
-  document.getElementById('referral-link').textContent = `${location.origin}/?ref=${userId}`;
-}
-
-document.getElementById('checkin-btn').addEventListener('click', checkIn);
-document.getElementById('load-leaderboard-btn').addEventListener('click', loadLeaderboard);
-
-checkAdmin();
-loadReferral();
-</script>
+    (async function init() {
+      await fetchAdminStatus();
+      await fetchLeaderboard();
+    })();
+  </script>
 </body>
 </html>
