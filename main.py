@@ -93,18 +93,50 @@ def api_is_admin():
         return jsonify({"success": False, "error": str(e)}), 500
 
 @app.route("/api/leaderboard")
+def mask_username(username):
+    if not username:
+        return "********"
+    
+    username = username[:8]  # Limit to max 8 chars
+    
+    if len(username) <= 2:
+        masked = username[0] + "*" * (len(username) - 1)
+    else:
+        masked = username[:2] + "*" * (len(username) - 2)
+    
+    return masked.ljust(8, "*")
+
+
 def get_leaderboard():
     try:
         user_id = int(request.args.get("user_id", 0))
 
-        def format_username(u):
-            if u.get("username"):
-                return f"@{u['username']}"
-            elif u.get("first_name"):
-                return u["first_name"]
-            return None  # Don't show if both missing
+        # Check if this user is admin from MongoDB
+        user_record = users_collection.find_one({"user_id": user_id})
+        is_admin = False
+        if user_record and user_record.get("role", "").lower() == "admin":
+            is_admin = True
 
-        # Filter users with at least a username or first_name
+        def format_username(u):
+            name = None
+            if u.get("username"):
+                name = f"@{u['username']}"
+            elif u.get("first_name"):
+                name = u["first_name"]
+
+            if not name:
+                return None
+
+            # Mask if not admin & not own account
+            if not is_admin and u.get("user_id") != user_id:
+                raw_name = name.lstrip("@")  # Remove @ before masking
+                masked = mask_username(raw_name)
+                return f"@{masked}" if name.startswith("@") else masked
+
+            # Admin or own name → show original, truncated to 8 chars
+            return name[:8]
+
+        # Filter only users with visible names
         visible_filter = {
             "$or": [
                 {"username": {"$exists": True, "$ne": None, "$ne": ""}},
@@ -126,13 +158,11 @@ def get_leaderboard():
             ]
         }
 
-        user = users_collection.find_one({"user_id": user_id})
         user_stats = {
-            "xp": user.get("weekly_xp", 0) if user else 0,
-            "monthly_xp": user.get("monthly_xp", 0) if user else 0,
-            "referrals": user.get("weekly_referral_count", 0) if user else 0,
-            "status": user.get("status", "Normal") if user else "Normal"
-
+            "xp": user_record.get("weekly_xp", 0) if user_record else 0,
+            "monthly_xp": user_record.get("monthly_xp", 0) if user_record else 0,
+            "referrals": user_record.get("weekly_referral_count", 0) if user_record else 0,
+            "status": user_record.get("status", "Normal") if user_record else "Normal"
         }
 
         return jsonify({
@@ -140,6 +170,7 @@ def get_leaderboard():
             "leaderboard": leaderboard,
             "user": user_stats
         })
+
     except Exception as e:
         import traceback
         traceback.print_exc()
