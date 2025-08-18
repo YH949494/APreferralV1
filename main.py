@@ -204,7 +204,7 @@ def get_leaderboard_history():
         filtered_checkin = [
             {
                 "username": format_username(u),
-                "xp": u.get("xp", 0)
+                "xp": u.get("weekly_xp", 0)
             }
             for u in checkin_data if format_username(u)
         ][:10]
