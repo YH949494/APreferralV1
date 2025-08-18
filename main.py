@@ -207,7 +207,7 @@ def get_leaderboard_history():
                 "xp": u.get("weekly_xp", 0)
             }
             for u in checkin_data if format_username(u)
-        ][:10]
+        ][:15]
 
         filtered_referral = [
             {
@@ -215,7 +215,7 @@ def get_leaderboard_history():
                 "referrals": u.get("referral_count", 0)
             }
             for u in referral_data if format_username(u)
-        ][:10]
+        ][:15]
 
         return jsonify({
             "success": True,
