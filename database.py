@@ -106,3 +106,15 @@ def update_user_xp(username, amount):
     )
 
     return True, f"XP {'added' if amount > 0 else 'reduced'} by {abs(amount)}."
+
+def save_weekly_snapshot():
+    leaderboard = {
+        "week_start": (datetime.datetime.utcnow() - datetime.timedelta(days=7)).strftime("%Y-%m-%d"),
+        "week_end": datetime.datetime.utcnow().strftime("%Y-%m-%d"),
+        "checkin": list(users_collection.find({}, {"username": 1, "xp": 1}).sort("xp", -1).limit(15)),
+        "referral": list(users_collection.find({}, {"username": 1, "referrals": 1}).sort("referrals", -1).limit(15))
+    }
+    leaderboard["created_at"] = datetime.datetime.utcnow()
+    db.leaderboard_history.insert_one(leaderboard)
+
+
