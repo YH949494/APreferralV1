@@ -111,10 +111,17 @@ def save_weekly_snapshot():
     leaderboard = {
         "week_start": (datetime.datetime.utcnow() - datetime.timedelta(days=7)).strftime("%Y-%m-%d"),
         "week_end": datetime.datetime.utcnow().strftime("%Y-%m-%d"),
-        "checkin": list(users_collection.find({}, {"username": 1, "xp": 1}).sort("xp", -1).limit(15)),
-        "referral": list(users_collection.find({}, {"username": 1, "referrals": 1}).sort("referrals", -1).limit(15))
+        "checkin_leaderboard": list(
+            users_collection.find({}, {"username": 1, "weekly_xp": 1})
+            .sort("weekly_xp", -1).limit(15)
+        ),
+        "referral_leaderboard": list(
+            users_collection.find({}, {"username": 1, "referral_count": 1})
+            .sort("referral_count", -1).limit(15)
+        ),
+        "created_at": datetime.datetime.utcnow()
     }
-    leaderboard["created_at"] = datetime.datetime.utcnow()
     db.leaderboard_history.insert_one(leaderboard)
 
-
+    # ✅ Reset for new week
+    users_collection.update_many({}, {"$set": {"weekly_xp": 0, "referral_count": 0}})
