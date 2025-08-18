@@ -185,8 +185,8 @@ def get_leaderboard():
 def get_leaderboard_history():
     try:
         def format_username(u):
-            username = u.get("username", "").strip()
-            first_name = u.get("first_name", "").strip()
+            username = (u.get("username") or "").strip()
+            first_name = (u.get("first_name") or "").strip()
             
             if u.get("username"):
                 return f"@{u['username']}"
@@ -194,15 +194,19 @@ def get_leaderboard_history():
                 return u["first_name"]
             return None
 
+        # Get last saved snapshot
         last_record = history_collection.find().sort("archived_at", DESCENDING).limit(1).next()
+
+        # Fallback: try both key styles
+        checkin_data = last_record.get("checkin_leaderboard") or last_record.get("checkin") or []
+        referral_data = last_record.get("referral_leaderboard") or last_record.get("referral") or []
 
         filtered_checkin = [
             {
                 "username": format_username(u),
                 "xp": u.get("xp", 0)
             }
-            for u in last_record.get("checkin_leaderboard", [])
-            if format_username(u)
+            for u in checkin_data if format_username(u)
         ][:10]
 
         filtered_referral = [
@@ -210,8 +214,7 @@ def get_leaderboard_history():
                 "username": format_username(u),
                 "referrals": u.get("referral_count", 0)
             }
-            for u in last_record.get("referral_leaderboard", [])
-            if format_username(u)
+            for u in referral_data if format_username(u)
         ][:10]
 
         return jsonify({
@@ -227,10 +230,6 @@ def get_leaderboard_history():
     except Exception as e:
         import traceback
         traceback.print_exc()
-        return jsonify({"success": False, "error": str(e)}), 500
-    except StopIteration:
-        return jsonify({"success": False, "message": "No history found."}), 404
-    except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 
 @app.route("/api/admin/set_bonus", methods=["POST"])
