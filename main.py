@@ -556,6 +556,24 @@ async def join_request_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                     }
                 }
             )
+            # ✅ Fetch updated referral count
+            referrer = users_collection.find_one({"user_id": referrer_id})
+            total_referrals = referrer.get("referral_count", 0)
+
+            # ✅ Bonus every 3 referrals
+            if total_referrals % 3 == 0:
+                users_collection.update_one(
+                    {"user_id": referrer_id},
+                    {"$inc": {"xp": 200, "weekly_xp": 200, "monthly_xp": 200}}
+                )
+                try:
+                    await context.bot.send_message(
+                        referrer_id,
+                        f"🎉 Congrats! You earned +200 XP bonus for reaching {total_referrals} referrals!"
+                    )
+                except Exception as e:
+                    print(f"[Referral Bonus] Failed to send message: {e}")
+
             print(f"[Referral] {user.username} referred by {referrer_id}")
         else:
             print(f"[Referral] No referrer found for {user.username}")
