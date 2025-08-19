@@ -550,9 +550,9 @@ async def join_request_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                     "$inc": {
                         "referral_count": 1,            # ✅ lifetime total
                         "weekly_referral_count": 1,     # ✅ weekly stat for leaderboard
-                        "xp": 20,
-                        "weekly_xp": 20,
-                        "monthly_xp": 20
+                        "xp": 30,
+                        "weekly_xp": 30,
+                        "monthly_xp": 30
                     }
                 }
             )
