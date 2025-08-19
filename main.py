@@ -589,7 +589,7 @@ def starter_pack_keyboard(user_id):
 
 async def send_starter_pack(user, context):
     text = (
-        "🎉 Welcome to [Community Name]!\n\n"
+        "🎉 Welcome to AdvantPlay Chat Room!\n\n"
         "🚦 Rules:\n"
         "1. Be kind & respectful\n"
         "2. No spam\n"
@@ -597,7 +597,6 @@ async def send_starter_pack(user, context):
         "🎮 Earn XP:\n"
         "✅ Check-in: +20 XP\n"
         "👥 Referral: +30 XP\n"
-        "🏆 Weekly Top Player Bonus\n\n"
         "🌟 Community = Voucher drops, Tips, Q&A & Help\n\n"
         "⚡ Start now 👇"
     )
@@ -651,7 +650,7 @@ async def button_handler(update, context):
 
     elif query.data.startswith("referral_"):
         user_id_ref = query.data.split("_")[1]
-        referral_link = f"https://t.me/YOUR_BOT_USERNAME?start={user_id_ref}"
+        referral_link = f"https://t.me/APreferralV1_bot?start={user_id_ref}"
         await query.edit_message_text(f"👥 Your referral link:\n{referral_link}")
         
 # ----------------------------
