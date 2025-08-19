@@ -3,6 +3,7 @@ from flask_cors import CORS
 from threading import Thread
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from telegram.ext import ApplicationBuilder, CommandHandler, ChatJoinRequestHandler, ContextTypes
+from telegram.ext import ChatMemberHandler, CallbackQueryHandler
 from checkin import handle_checkin
 from referral import get_or_create_referral_link
 from pymongo import MongoClient, DESCENDING
@@ -34,8 +35,6 @@ db = client["referral_bot"]
 users_collection = db["users"]
 history_collection = db["weekly_leaderboard_history"]
 bonus_voucher_collection = db["bonus_voucher"]
-
-app_bot = ApplicationBuilder().token(BOT_TOKEN).build()
 
 def is_user_admin(user_id):
     try:
@@ -578,6 +577,83 @@ async def join_request_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         else:
             print(f"[Referral] No referrer found for {user.username}")
 
+# Starter Pack
+# ----------------------------
+def starter_pack_keyboard(user_id):
+    keyboard = [
+        [InlineKeyboardButton("✅ Check-in", callback_data="checkin")],
+        [InlineKeyboardButton("👥 My Referral Link", callback_data=f"referral_{user_id}")],
+        [InlineKeyboardButton("▶️ Start Bot", url=f"https://t.me/YOUR_BOT_USERNAME?start={user_id}")]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+async def send_starter_pack(user, context):
+    text = (
+        "🎉 Welcome to [Community Name]!\n\n"
+        "🚦 Rules:\n"
+        "1. Be kind & respectful\n"
+        "2. No spam\n"
+        "3. Have fun\n\n"
+        "🎮 Earn XP:\n"
+        "✅ Check-in: +20 XP\n"
+        "👥 Referral: +30 XP\n"
+        "🏆 Weekly Top Player Bonus\n\n"
+        "🌟 Community = Voucher drops, Tips, Q&A & Help\n\n"
+        "⚡ Start now 👇"
+    )
+    try:
+        await context.bot.send_message(
+            chat_id=user.id,
+            text=text,
+            reply_markup=starter_pack_keyboard(user.id)
+        )
+        print(f"✅ Starter pack sent to {user.id}")
+    except Exception as e:
+        print(f"❌ Cannot PM {user.id}: {e}")
+
+async def new_member(update, context):
+    for member in update.chat_member.new_chat_members:
+        user_id = member.id
+
+        # check MongoDB if already joined
+        existing = users_collection.find_one({"user_id": user_id})
+        if existing and existing.get("joined_once"):
+            print(f"⏩ Skip starter pack for {user_id}, already joined.")
+            continue
+
+        # send starter pack
+        await send_starter_pack(member, context)
+
+        # mark as joined once
+        users_collection.update_one(
+            {"user_id": user_id},
+            {"$set": {"joined_once": True}},
+            upsert=True
+        )
+
+async def button_handler(update, context):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+
+    if query.data == "checkin":
+        user = users_collection.find_one({"user_id": user_id})
+        if user and user.get("welcome_xp_claimed"):
+            await query.answer("⚠️ You already claimed your welcome XP!", show_alert=True)
+        else:
+            users_collection.update_one(
+                {"user_id": user_id},
+                {"$inc": {"xp": 20, "weekly_xp": 20, "monthly_xp": 20},
+                 "$set": {"welcome_xp_claimed": True}},
+                upsert=True
+            )
+            await query.edit_message_text("✅ You received +20 XP welcome bonus!")
+
+    elif query.data.startswith("referral_"):
+        user_id_ref = query.data.split("_")[1]
+        referral_link = f"https://t.me/YOUR_BOT_USERNAME?start={user_id_ref}"
+        await query.edit_message_text(f"👥 Your referral link:\n{referral_link}")
+        
 # ----------------------------
 # Run Bot + Flask + Scheduler
 # ----------------------------
@@ -590,6 +666,8 @@ if __name__ == "__main__":
     app_bot = ApplicationBuilder().token(BOT_TOKEN).build()
     app_bot.add_handler(CommandHandler("start", start))
     app_bot.add_handler(ChatJoinRequestHandler(join_request_handler))
+    app_bot.add_handler(ChatMemberHandler(new_member, ChatMemberHandler.CHAT_MEMBER))
+    app_bot.add_handler(CallbackQueryHandler(button_handler))
 
     scheduler = BackgroundScheduler(timezone=tz)
     scheduler.add_job(reset_weekly_xp, trigger=CronTrigger(day_of_week="mon", hour=0, minute=0), name="Weekly XP Reset")
