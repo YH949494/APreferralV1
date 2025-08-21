@@ -581,6 +581,7 @@ async def join_request_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 # ----------------------------
 def starter_pack_keyboard(user_id):
     keyboard = [
+        [InlineKeyboardButton("📲 Follow @advantplayofficial", url="https://t.me/advantplayofficial")],
         [InlineKeyboardButton("✅ Check-in", callback_data="checkin")],
         [InlineKeyboardButton("👥 My Referral Link", callback_data=f"referral_{user_id}")],
         [InlineKeyboardButton("▶️ Start Bot", url=f"https://t.me/YOUR_BOT_USERNAME?start={user_id}")]
