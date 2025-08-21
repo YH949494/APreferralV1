@@ -593,6 +593,8 @@ async def join_request_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     else:
         print(f"[Referral] No referrer found for {user.username}")
 
+    await send_starter_pack(user, context)
+
 # Starter Pack
 # ----------------------------
 def starter_pack_keyboard(user_id):
