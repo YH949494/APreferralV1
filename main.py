@@ -526,56 +526,63 @@ async def join_request_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     existing_user = users_collection.find_one({"user_id": user.id})
     if existing_user and existing_user.get("joined_once"):
         print(f"[Skip XP] {user.username} already joined before.")
-    else:
+        return
+
+    # New user, insert/update profile
+    users_collection.update_one(
+        {"user_id": user.id},
+        {
+            "$set": {"username": user.username, "joined_once": True},
+            "$setOnInsert": {
+                "xp": 0,
+                "referral_count": 0,
+                "weekly_xp": 0,
+                "monthly_xp": 0,
+                "last_checkin": None
+            }
+        },
+        upsert=True
+    )
+
+    referrer_id = None
+    if invite_link and invite_link.name and invite_link.name.startswith("ref-"):
+        referrer_id = int(invite_link.name.split("-")[1])
+
+    if referrer_id:
         users_collection.update_one(
-            {"user_id": user.id},
-            {"$set": {"username": user.username, "joined_once": True},
-             "$setOnInsert": {"xp": 0, "referral_count": 0, "weekly_xp": 0, "last_checkin": None}},
-            upsert=True
+            {"user_id": referrer_id},
+            {
+                "$inc": {
+                    "referral_count": 1,        # lifetime total
+                    "weekly_referral_count": 1, # weekly stat
+                    "xp": 30,
+                    "weekly_xp": 30,
+                    "monthly_xp": 30
+                }
+            }
         )
 
-        referrer_id = None
-        if invite_link and invite_link.name and invite_link.name.startswith("ref-"):
-            referrer_id = int(invite_link.name.split("-")[1])
-        elif invite_link and invite_link.invite_link:
-            ref_doc = users_collection.find_one({"referral_link": invite_link.invite_link})
-            if ref_doc:
-                referrer_id = ref_doc["user_id"]
+        # Fetch updated referral count
+        referrer = users_collection.find_one({"user_id": referrer_id})
+        total_referrals = referrer.get("referral_count", 0)
 
-        if referrer_id:
+        # Bonus every 3 referrals
+        if total_referrals % 3 == 0:
             users_collection.update_one(
                 {"user_id": referrer_id},
-                {
-                    "$inc": {
-                        "referral_count": 1,            # ✅ lifetime total
-                        "weekly_referral_count": 1,     # ✅ weekly stat for leaderboard
-                        "xp": 30,
-                        "weekly_xp": 30,
-                        "monthly_xp": 30
-                    }
-                }
+                {"$inc": {"xp": 200, "weekly_xp": 200, "monthly_xp": 200}}
             )
-            # ✅ Fetch updated referral count
-            referrer = users_collection.find_one({"user_id": referrer_id})
-            total_referrals = referrer.get("referral_count", 0)
-
-            # ✅ Bonus every 3 referrals
-            if total_referrals % 3 == 0:
-                users_collection.update_one(
-                    {"user_id": referrer_id},
-                    {"$inc": {"xp": 200, "weekly_xp": 200, "monthly_xp": 200}}
+            try:
+                await context.bot.send_message(
+                    referrer_id,
+                    f"🎉 Congrats! You earned +200 XP bonus for reaching {total_referrals} referrals!"
                 )
-                try:
-                    await context.bot.send_message(
-                        referrer_id,
-                        f"🎉 Congrats! You earned +200 XP bonus for reaching {total_referrals} referrals!"
-                    )
-                except Exception as e:
-                    print(f"[Referral Bonus] Failed to send message: {e}")
+            except Exception as e:
+                print(f"[Referral Bonus] Failed to send message: {e}")
 
-            print(f"[Referral] {user.username} referred by {referrer_id}")
-        else:
-            print(f"[Referral] No referrer found for {user.username}")
+        print(f"[Referral] {user.username} referred by {referrer_id}")
+    else:
+        print(f"[Referral] No referrer found for {user.username}")
 
 # Starter Pack
 # ----------------------------
