@@ -536,6 +536,7 @@ async def join_request_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             "$setOnInsert": {
                 "xp": 0,
                 "referral_count": 0,
+                "weekly_referral_count": 0,   # <-- add this so new users have it
                 "weekly_xp": 0,
                 "monthly_xp": 0,
                 "last_checkin": None
@@ -545,8 +546,16 @@ async def join_request_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     )
 
     referrer_id = None
+
+    # Case 1: custom bot referral link (with name = "ref-<id>")
     if invite_link and invite_link.name and invite_link.name.startswith("ref-"):
         referrer_id = int(invite_link.name.split("-")[1])
+
+    # Case 2: normal Telegram invite link (match by referral_link stored in DB)
+    elif invite_link and invite_link.invite_link:
+        ref_doc = users_collection.find_one({"referral_link": invite_link.invite_link})
+        if ref_doc:
+            referrer_id = ref_doc["user_id"]
 
     if referrer_id:
         users_collection.update_one(
@@ -554,7 +563,7 @@ async def join_request_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             {
                 "$inc": {
                     "referral_count": 1,        # lifetime total
-                    "weekly_referral_count": 1, # weekly stat
+                    "weekly_referral_count": 1, # ✅ now increments properly
                     "xp": 30,
                     "weekly_xp": 30,
                     "monthly_xp": 30
