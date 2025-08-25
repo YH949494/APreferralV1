@@ -301,32 +301,39 @@
     }
   }
 
-  async function loadPreviousLeaderboard() {
+ async function loadPreviousLeaderboard() {
   try {
     // 1. Get all available weeks
     const weeksRes = await fetch(`${API_BASE}/api/leaderboard/history/weeks`);
-    const weeks = await weeksRes.json();
+    const weeksData = await weeksRes.json();
 
-    if (!weeks.success || weeks.weeks.length === 0) {
+    if (!weeksData.success || weeksData.weeks.length === 0) {
       document.getElementById("leaderboard-output").innerText = "❌ No history available.";
       return;
     }
 
-    // For now: just take the most recent past week (last item)
-    const lastWeek = weeks.weeks[weeks.weeks.length - 1];
+    // Pick the most recent past week
+    const lastWeek = weeksData.weeks[0]; // already sorted DESC in backend
 
     // 2. Fetch that week's leaderboard
     const res = await fetch(`${API_BASE}/api/leaderboard/history/week/${lastWeek.week_start}`);
     const data = await res.json();
 
-    if (!data.success) throw new Error(data.error);
+    if (!data.success || !data.history) throw new Error(data.error || "Invalid history data");
+
+    const history = data.history;
 
     // 3. Format output
-    const checkin = data.checkin.map((u, i) => `${i + 1}. ${u.username} - ${u.xp} XP`).join("\n");
-    const referral = data.referral.map((u, i) => `${i + 1}. ${u.username} - ${u.referrals} Ref`).join("\n");
+    const checkin = history.checkin.map((u, i) =>
+      `${i + 1}. ${u.username} - ${u.xp} XP`
+    ).join("\n");
+
+    const referral = history.referral.map((u, i) =>
+      `${i + 1}. ${u.username} - ${u.referrals} Ref`
+    ).join("\n");
 
     document.getElementById("leaderboard-output").innerText =
-      `📅 ${data.week_start} → ${data.week_end}\n\n` +
+      `📅 ${history.week_start} → ${history.week_end}\n\n` +
       `🔁 Check-in:\n${checkin}\n\n` +
       `🔗 Referrals:\n${referral}`;
 
@@ -335,6 +342,7 @@
     document.getElementById("leaderboard-output").innerText = "❌ Error loading history.";
   }
 }
+
     function openAddXP() {
       document.getElementById("xp-modal").style.display = "flex";
     }
