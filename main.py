@@ -180,19 +180,19 @@ def get_leaderboard():
         traceback.print_exc()
         return jsonify({"success": False, "error": str(e)}), 500
 
-@app.route("/history/weeks", methods=["GET"])
+@app.route("/api/leaderboard/history/weeks", methods=["GET"])
 def get_all_weeks():
-    """Return list of archived weeks available."""
-    weeks = history_collection.find({}, {"week_start": 1, "week_end": 1, "_id": 0}).sort("archived_at", DESCENDING)
-    return dumps(list(weeks)), 200
+    weeks = history_collection.find({}, {"week_start": 1, "week_end": 1, "_id": 0}) \
+                              .sort("archived_at", DESCENDING)
+    return jsonify({"success": True, "weeks": list(weeks)}), 200
 
-@app.route("/history/week/<week_start>", methods=["GET"])
+@app.route("/api/leaderboard/history/week/<week_start>", methods=["GET"])
 def get_week_history(week_start):
-    """Return archived leaderboard for a given week_start (format YYYY-MM-DD)."""
     history = history_collection.find_one({"week_start": week_start}, {"_id": 0})
     if not history:
-        return jsonify({"error": "No record found for that week"}), 404
-    return dumps(history), 200
+        return jsonify({"success": False, "message": "No record found for that week"}), 404
+
+    return jsonify({"success": True, "history": history}), 200
 
 @app.route("/api/admin/set_bonus", methods=["POST"])
 def set_bonus_voucher():
