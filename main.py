@@ -463,7 +463,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = [[
             InlineKeyboardButton("🚀 Open Check-in & Referral", web_app=WebAppInfo(url=WEBAPP_URL))
         ]]
-        await update.message.reply_text("👋 Welcome! Tap the button below to check-in and get your referral link 👇", reply_markup=InlineKeyboardMarkup(keyboard))
+        await update.message.reply_text(
+    "👋 Welcome! Tap the button below to check-in and get your referral link 👇",
+    reply_markup=InlineKeyboardMarkup(keyboard)
+)
 
 async def join_request_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.chat_join_request.from_user
