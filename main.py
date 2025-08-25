@@ -186,34 +186,41 @@ def get_all_weeks():
                               .sort("archived_at", DESCENDING)
     return jsonify({"success": True, "weeks": list(weeks)}), 200
 
+@app.route("/api/leaderboard/history/weeks", methods=["GET"])
+def get_all_weeks():
+    """Return list of archived weeks available."""
+    try:
+        weeks = history_collection.find(
+            {}, {"week_start": 1, "week_end": 1, "_id": 0}
+        ).sort("archived_at", DESCENDING)
+
+        return jsonify({
+            "success": True,
+            "weeks": list(weeks)
+        }), 200
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"success": False, "error": str(e)}), 500
+
 @app.route("/api/leaderboard/history/week/<week_start>", methods=["GET"])
 def get_week_history(week_start):
-    history = history_collection.find_one({"week_start": week_start}, {"_id": 0})
-    if not history:
-        return jsonify({"success": False, "message": "No record found for that week"}), 404
-
-    return jsonify({"success": True, "history": history}), 200
-
-@app.route("/api/admin/set_bonus", methods=["POST"])
-def set_bonus_voucher():
-    data = request.json
-    code = data.get("code")
-    release_time_str = data.get("release_time")  # e.g. "2025-08-10T04:00:00Z"
-
+    """Return archived leaderboard for a given week_start (format YYYY-MM-DD)."""
     try:
-        release_time = datetime.strptime(release_time_str, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=pytz.UTC)
-        end_time = release_time + timedelta(hours=24)
+        history = history_collection.find_one(
+            {"week_start": week_start}, {"_id": 0}
+        )
+        if not history:
+            return jsonify({"success": False, "error": "No record found for that week"}), 404
 
-        bonus_voucher_collection.delete_many({})
-        bonus_voucher_collection.insert_one({
-            "code": code,
-            "start_time": release_time,
-            "end_time": end_time
-        })
-
-        return jsonify({"status": "success", "message": "Bonus voucher set successfully."}), 200
+        return jsonify({
+            "success": True,
+            "history": history
+        }), 200
     except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 400
+        import traceback
+        traceback.print_exc()
+        return jsonify({"success": False, "error": str(e)}), 500
 
 @app.route("/api/bonus_voucher", methods=["GET"])
 def get_bonus_voucher():
