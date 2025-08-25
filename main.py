@@ -180,56 +180,19 @@ def get_leaderboard():
         traceback.print_exc()
         return jsonify({"success": False, "error": str(e)}), 500
 
-@app.route("/api/leaderboard/history")
-def get_leaderboard_history():
-    try:
-        def format_username(u):
-            username = (u.get("username") or "").strip()
-            first_name = (u.get("first_name") or "").strip()
-            
-            if u.get("username"):
-                return f"@{u['username']}"
-            elif u.get("first_name"):
-                return u["first_name"]
-            return None
+@app.route("/history/weeks", methods=["GET"])
+def get_all_weeks():
+    """Return list of archived weeks available."""
+    weeks = history_collection.find({}, {"week_start": 1, "week_end": 1, "_id": 0}).sort("archived_at", DESCENDING)
+    return dumps(list(weeks)), 200
 
-        # Get last saved snapshot
-        last_record = history_collection.find().sort("archived_at", DESCENDING).limit(1).next()
-
-        # Fallback: try both key styles
-        checkin_data = last_record.get("checkin_leaderboard") or last_record.get("checkin") or []
-        referral_data = last_record.get("referral_leaderboard") or last_record.get("referral") or []
-
-        filtered_checkin = [
-            {
-                "username": format_username(u),
-                "xp": u.get("weekly_xp", 0)
-            }
-            for u in checkin_data if format_username(u)
-        ][:15]
-
-        filtered_referral = [
-            {
-                "username": format_username(u),
-                "referrals": u.get("referral_count", 0)
-            }
-            for u in referral_data if format_username(u)
-        ][:15]
-
-        return jsonify({
-            "success": True,
-            "week_start": last_record.get("week_start"),
-            "week_end": last_record.get("week_end"),
-            "checkin": filtered_checkin,
-            "referral": filtered_referral
-        })
-
-    except StopIteration:
-        return jsonify({"success": False, "message": "No history found."}), 404
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        return jsonify({"success": False, "error": str(e)}), 500
+@app.route("/history/week/<week_start>", methods=["GET"])
+def get_week_history(week_start):
+    """Return archived leaderboard for a given week_start (format YYYY-MM-DD)."""
+    history = history_collection.find_one({"week_start": week_start}, {"_id": 0})
+    if not history:
+        return jsonify({"error": "No record found for that week"}), 404
+    return dumps(history), 200
 
 @app.route("/api/admin/set_bonus", methods=["POST"])
 def set_bonus_voucher():
@@ -368,7 +331,7 @@ def reset_weekly_xp():
             for u in top_checkin
         ],
         "referral_leaderboard": [
-            {"user_id": u["user_id"], "username": u.get("username", "unknown"), "referral_count": u.get("weekly_referral_count", 0)}
+            {"user_id": u["user_id"], "username": u.get("username", "unknown"), "weekly_referral_count": u.get("weekly_referral_count", 0)}
             for u in top_referrals
         ],
         "archived_at": now
@@ -386,24 +349,6 @@ def reset_weekly_xp():
 from pymongo import DESCENDING
 from pytz import timezone
 from datetime import datetime
-
-def fix_user_weekly_xp(user_id):
-    # Implement logic to fix/add weekly XP for this user
-    # For example: check if weekly XP record exists; if missing, create or update it
-    # Return True if fixed, False if no action needed
-    weekly_xp_record = weekly_xp_collection.find_one({"user_id": user_id})
-    if not weekly_xp_record:
-        # Calculate XP (from history or other data)
-        xp = calculate_weekly_xp(user_id)
-        weekly_xp_collection.insert_one({
-            "user_id": user_id,
-            "xp": xp,
-            "week_start": get_current_week_start_date(),
-            "created_at": datetime.now(timezone("Asia/Kuala_Lumpur"))
-        })
-        print(f"Fixed weekly XP for user {user_id} (XP: {xp})")
-        return True
-    return False
 
 def fix_user_monthly_xp(user_id):
     user = users_collection.find_one({"user_id": user_id})
