@@ -301,20 +301,40 @@
     }
   }
 
-    async function loadPreviousLeaderboard() {
-      try {
-        const res = await fetch(`${API_BASE}/api/leaderboard/history`);
-        const data = await res.json();
-        const out = document.getElementById("leaderboard-output");
-        if (!data.success) throw new Error(data.error);
-        const checkin = data.checkin.map((u, i) => `${i + 1}. ${u.username} - ${u.xp} XP`).join("\n");
-        const referral = data.referral.map((u, i) => `${i + 1}. ${u.username} - ${u.referrals} Ref`).join("\n");
-        out.innerText = `📅 ${data.week_start} to ${data.week_end}\n\n🔁 Check-in:\n${checkin}\n\n🔗 Referrals:\n${referral}`;
-      } catch {
-        document.getElementById("leaderboard-output").innerText = "❌ Error loading history.";
-      }
+  async function loadPreviousLeaderboard() {
+  try {
+    // 1. Get all available weeks
+    const weeksRes = await fetch(`${API_BASE}/api/leaderboard/history/weeks`);
+    const weeks = await weeksRes.json();
+
+    if (!weeks.success || weeks.weeks.length === 0) {
+      document.getElementById("leaderboard-output").innerText = "❌ No history available.";
+      return;
     }
 
+    // For now: just take the most recent past week (last item)
+    const lastWeek = weeks.weeks[weeks.weeks.length - 1];
+
+    // 2. Fetch that week's leaderboard
+    const res = await fetch(`${API_BASE}/api/leaderboard/history/week/${lastWeek.week_start}`);
+    const data = await res.json();
+
+    if (!data.success) throw new Error(data.error);
+
+    // 3. Format output
+    const checkin = data.checkin.map((u, i) => `${i + 1}. ${u.username} - ${u.xp} XP`).join("\n");
+    const referral = data.referral.map((u, i) => `${i + 1}. ${u.username} - ${u.referrals} Ref`).join("\n");
+
+    document.getElementById("leaderboard-output").innerText =
+      `📅 ${data.week_start} → ${data.week_end}\n\n` +
+      `🔁 Check-in:\n${checkin}\n\n` +
+      `🔗 Referrals:\n${referral}`;
+
+  } catch (err) {
+    console.error("History error:", err);
+    document.getElementById("leaderboard-output").innerText = "❌ Error loading history.";
+  }
+}
     function openAddXP() {
       document.getElementById("xp-modal").style.display = "flex";
     }
