@@ -201,15 +201,39 @@ def get_all_weeks():
 def get_week_history(week_start):
     """Return archived leaderboard for a given week_start (format YYYY-MM-DD)."""
     try:
-        history = history_collection.find_one(
-            {"week_start": week_start}, {"_id": 0}
-        )
-        if not history:
+        doc = history_collection.find_one({"week_start": week_start}, {"_id": 0})
+        if not doc:
             return jsonify({"success": False, "error": "No record found for that week"}), 404
+
+        # normalize old vs new formats
+        checkin_data = doc.get("checkin") or doc.get("checkin_leaderboard") or []
+        referral_data = doc.get("referral") or doc.get("referral_leaderboard") or []
+
+        # Map to consistent fields
+        checkin = [
+            {
+                "username": u.get("username") or u.get("first_name") or "Unknown",
+                "xp": u.get("xp") or u.get("weekly_xp") or 0
+            }
+            for u in checkin_data
+        ]
+
+        referral = [
+            {
+                "username": u.get("username") or u.get("first_name") or "Unknown",
+                "referrals": u.get("referrals") or u.get("referral_count") or u.get("weekly_referral_count") or 0
+            }
+            for u in referral_data
+        ]
 
         return jsonify({
             "success": True,
-            "history": history
+            "history": {
+                "week_start": doc.get("week_start"),
+                "week_end": doc.get("week_end"),
+                "checkin": checkin,
+                "referral": referral
+            }
         }), 200
     except Exception as e:
         import traceback
