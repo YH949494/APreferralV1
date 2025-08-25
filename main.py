@@ -182,12 +182,6 @@ def get_leaderboard():
 
 @app.route("/api/leaderboard/history/weeks", methods=["GET"])
 def get_all_weeks():
-    weeks = history_collection.find({}, {"week_start": 1, "week_end": 1, "_id": 0}) \
-                              .sort("archived_at", DESCENDING)
-    return jsonify({"success": True, "weeks": list(weeks)}), 200
-
-@app.route("/api/leaderboard/history/weeks", methods=["GET"])
-def get_all_weeks():
     """Return list of archived weeks available."""
     try:
         weeks = history_collection.find(
