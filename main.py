@@ -52,6 +52,57 @@ def is_user_admin(user_id):
 app = Flask(__name__, static_folder="static")
 CORS(app, resources={r"/*": {"origins": "*"}})
 
+import pytz
+from datetime import datetime, timedelta
+from flask import request, jsonify
+
+# -------------------------------
+# ✅ Daily Check-in Logic
+# -------------------------------
+async def process_checkin(user_id, username, region, update=None):
+    """Daily check-in logic once region is known (reset at 12AM UTC+8)."""
+    tz_utc8 = pytz.timezone("Asia/Kuala_Lumpur")  # or Asia/Singapore
+    now_utc8 = datetime.now(tz_utc8)
+    today_utc8 = now_utc8.date()
+
+    user = users_collection.find_one({"user_id": user_id}) or {}
+    last = user.get("last_checkin")
+
+    if isinstance(last, datetime):
+        # Convert last check-in into UTC+8 for comparison
+        last_utc8 = last.astimezone(tz_utc8).date()
+        if last_utc8 == today_utc8:
+            if update and getattr(update, "message", None):
+                await update.message.reply_text("⚠️ You already checked in today.")
+            return {"success": False, "message": "⚠️ Already checked in today."}
+
+    # ✅ Save last_checkin in UTC (for consistency in DB)
+    now_utc = datetime.now(pytz.UTC)
+
+    users_collection.update_one(
+        {"user_id": user_id},
+        {
+            "$set": {
+                "username": username,
+                "region": region,
+                "last_checkin": now_utc,
+            },
+            "$inc": {"xp": 20, "weekly_xp": 20, "monthly_xp": 20},
+        },
+        upsert=True,
+    )
+
+    if update and getattr(update, "message", None):
+        await update.message.reply_text(
+            f"✅ Check-in successful! (+20 XP)\n📍 Region: {region}"
+        )
+
+    return {"success": True, "message": "✅ Check-in successful! +20 XP"}
+
+
+# -------------------------------
+# ✅ API Route for Frontend
+# -------------------------------
 @app.route("/api/checkin", methods=["POST"])
 def api_checkin():
     """Mini-app triggers this after region is set"""
@@ -67,27 +118,34 @@ def api_checkin():
         if not user or "region" not in user:
             return jsonify({"success": False, "error": "Region not set"}), 400
 
-        # ✅ call your existing checkin logic
-        result = asyncio.run(process_checkin(int(user_id), username, user["region"]))
+        # ✅ Call check-in logic
+        result = asyncio.run(
+            process_checkin(int(user_id), username, user["region"])
+        )
 
+        # ✅ Always calculate next reset time (12AM UTC+8)
+        tz_utc8 = pytz.timezone("Asia/Kuala_Lumpur")  # or Asia/Singapore
+        now_utc8 = datetime.now(tz_utc8)
+        tomorrow_midnight = (now_utc8 + timedelta(days=1)).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+
+        response = {
+            "next_checkin_time": tomorrow_midnight.astimezone(pytz.UTC).isoformat()
+        }
+
+        # Merge success/error message from process_checkin
         if result and result.get("success"):
-            # Calculate next reset time at 12AM UTC+8
-            tz_utc8 = timezone(timedelta(hours=8))
-            now_utc8 = datetime.now(tz=tz_utc8)
-            tomorrow_midnight = (now_utc8 + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-
-            return jsonify({
-                "success": True,
-                "message": "Check-in successful! +20 XP",
-                "next_checkin_time": tomorrow_midnight.astimezone(timezone.utc).isoformat()
-            })
+            response.update(result)
         else:
-            return jsonify({"success": False, "message": "Already checked in today."})
+            response.update({"success": False, "message": "⚠️ Already checked in today."})
+
+        return jsonify(response)
 
     except Exception as e:
         traceback.print_exc()
         return jsonify({"success": False, "error": str(e)}), 500
-
+        
 @app.route("/api/region-status/<int:user_id>", methods=["GET"])
 def api_region_status(user_id):
     """Check if user already has region set"""
@@ -708,29 +766,44 @@ async def button_handler(update, context):
         await query.edit_message_text(f"👥 Your referral link:\n{referral_link}")
 
 async def process_checkin(user_id, username, region, update=None):
-    """Daily check-in logic once region is known."""
-    now = datetime.utcnow()
+    """Daily check-in logic once region is known (reset at 12AM UTC+8)."""
+    tz_utc8 = pytz.timezone("Asia/Kuala_Lumpur")  # or Asia/Singapore
+    now_utc8 = datetime.now(tz_utc8)
+    today_utc8 = now_utc8.date()
 
     user = users_collection.find_one({"user_id": user_id}) or {}
     last = user.get("last_checkin")
 
-    # Prevent multiple check-ins on the same UTC day
-    if isinstance(last, datetime) and last.date() == now.date():
-        if update and getattr(update, "message", None):
-            await update.message.reply_text("⚠️ You already checked in today.")
-        return
+    if isinstance(last, datetime):
+        # Convert last check-in into UTC+8 for comparison
+        last_utc8 = last.astimezone(tz_utc8).date()
+        if last_utc8 == today_utc8:
+            if update and getattr(update, "message", None):
+                await update.message.reply_text("⚠️ You already checked in today.")
+            return {"success": False, "message": "⚠️ Already checked in today."}
+
+    # ✅ Save last_checkin in UTC (for consistency in DB)
+    now_utc = datetime.now(pytz.UTC)
 
     users_collection.update_one(
         {"user_id": user_id},
         {
-            "$set": {"username": username, "region": region, "last_checkin": now},
+            "$set": {
+                "username": username,
+                "region": region,
+                "last_checkin": now_utc,
+            },
             "$inc": {"xp": 20, "weekly_xp": 20, "monthly_xp": 20},
         },
         upsert=True,
     )
 
     if update and getattr(update, "message", None):
-        await update.message.reply_text(f"✅ Check-in successful! (+20 XP)\n📍 Region: {region}")
+        await update.message.reply_text(
+            f"✅ Check-in successful! (+20 XP)\n📍 Region: {region}"
+        )
+
+    return {"success": True, "message": "✅ Check-in successful! +20 XP"}
 
 # ----------------------------
 # Run Bot + Flask + Scheduler
