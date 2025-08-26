@@ -644,6 +644,106 @@ async def button_handler(update, context):
         user_id_ref = query.data.split("_")[1]
         referral_link = f"https://t.me/APreferralV1_bot?start={user_id_ref}"
         await query.edit_message_text(f"👥 Your referral link:\n{referral_link}")
+
+async def process_checkin(user_id, username, region, update=None):
+    """Daily check-in logic once region is known."""
+    now = datetime.utcnow()
+
+    user = users_collection.find_one({"user_id": user_id}) or {}
+    last = user.get("last_checkin")
+
+    # Prevent multiple check-ins on the same UTC day
+    if isinstance(last, datetime) and last.date() == now.date():
+        if update and getattr(update, "message", None):
+            await update.message.reply_text("⚠️ You already checked in today.")
+        return
+
+    users_collection.update_one(
+        {"user_id": user_id},
+        {
+            "$set": {"username": username, "region": region, "last_checkin": now},
+            "$inc": {"xp": 20, "weekly_xp": 20, "monthly_xp": 20},
+        },
+        upsert=True,
+    )
+
+    if update and getattr(update, "message", None):
+        await update.message.reply_text(f"✅ Check-in successful! (+20 XP)\n📍 Region: {region}")
+
+
+async def checkin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /checkin in DM:
+    - If region not set -> ask user to pick (MY/TH/ID/Other)
+    - Else -> do daily check-in
+    """
+    user = update.effective_user
+    if not user or not getattr(update, "message", None):
+        return
+
+    db_user = users_collection.find_one({"user_id": user.id}) or {}
+
+    # Ask region if missing
+    if not db_user.get("region"):
+        keyboard = [
+            [
+                InlineKeyboardButton("🇲🇾 Malaysia", callback_data="region_MY"),
+                InlineKeyboardButton("🇹🇭 Thailand", callback_data="region_TH"),
+            ],
+            [
+                InlineKeyboardButton("🇮🇩 Indonesia", callback_data="region_ID"),
+                InlineKeyboardButton("🌍 Other", callback_data="region_OTHER"),
+            ]
+        ]
+        await update.message.reply_text(
+            "🌍 Please select your region:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return
+
+    # Region exists -> proceed with daily check-in
+    await process_checkin(user.id, user.username, db_user.get("region"), update)
+
+
+async def region_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Handles taps on region buttons, saves region, then performs check-in once.
+    """
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    username = query.from_user.username
+
+    # Extract region code from callback_data (region_MY / region_TH / region_ID / region_OTHER)
+    try:
+        region_code = query.data.split("_", 1)[1]
+    except Exception:
+        region_code = "OTHER"
+
+    region_map = {
+        "MY": "Malaysia",
+        "TH": "Thailand",
+        "ID": "Indonesia",
+        "OTHER": "Other",
+    }
+    region = region_map.get(region_code, "Other")
+
+    # Save region
+    users_collection.update_one(
+        {"user_id": user_id},
+        {"$set": {"region": region}},
+        upsert=True
+    )
+
+    # Confirm & tell user what to expect
+    await query.edit_message_text(
+        f"✅ Region set to *{region}*.\n\nNow completing your check-in…",
+        parse_mode="Markdown"
+    )
+
+    # Immediately do the first check-in after setting region
+    await process_checkin(user_id, username, region)
+
         
 # ----------------------------
 # Run Bot + Flask + Scheduler
@@ -656,8 +756,10 @@ if __name__ == "__main__":
 
     app_bot = ApplicationBuilder().token(BOT_TOKEN).build()
     app_bot.add_handler(CommandHandler("start", start))
+    app_bot.add_handler(CommandHandler("checkin", checkin_command))
     app_bot.add_handler(ChatJoinRequestHandler(join_request_handler))
     app_bot.add_handler(ChatMemberHandler(new_member, ChatMemberHandler.CHAT_MEMBER))
+    app_bot.add_handler(CallbackQueryHandler(region_callback, pattern="^region_"))
     app_bot.add_handler(CallbackQueryHandler(button_handler))
 
     scheduler = BackgroundScheduler(timezone=tz)
