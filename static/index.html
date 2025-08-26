@@ -180,30 +180,40 @@
     let latestReferralLink = "";
 
     async function checkIn() {
-        regionMsg = document.getElementById("region-message").innerText;
-        if (regionMsg.includes("⚠️ Please select")) {
-          alert("❌ Please select and lock your region before check-in.");
-          return;
+      const regionMsg = document.getElementById("region-message").innerText;
+      if (regionMsg.includes("⚠️ Please select")) {
+        alert("❌ Please select and lock your region before check-in.");
+        return;
+      }
+
+      try {
+        const res = await fetch(`${API_BASE}/api/checkin`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ user_id: userId, username })
+        });
+
+        const data = await res.json();
+
+        // ✅ Always show message
+        document.getElementById("checkin-result").innerText = data.message || "❌ Check-in failed.";
+
+        // ✅ Start countdown if server returned next_checkin_time
+        if (data.next_checkin_time) {
+          startCountdown(data.next_checkin_time);
         }
 
-  try {
-    const res = await fetch(`${API_BASE}/api/checkin`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ user_id: userId, username })
-    });
-    const data = await res.json();
-    document.getElementById("checkin-result").innerText = data.message || "Check-in failed.";
-    if (data.next_checkin_time) startCountdown(data.next_checkin_time);
+        // ✅ Refresh leaderboard only if success
+        if (data.success) {
+          loadLeaderboard();
+        }
 
-    if (data.success) {
-      loadLeaderboard();  
+      } catch (err) {
+        console.error("Check-in error:", err);
+        document.getElementById("checkin-result").innerText = "❌ Error connecting to server.";
+      }
     }
-  } catch (err) {
-    document.getElementById("checkin-result").innerText = "❌ Error connecting to server.";
-  }
-}
-    
+
     async function getReferral() {
       const display = document.getElementById("referral-link");
       try {
@@ -243,22 +253,32 @@
       }
     }
 
-    function startCountdown(nextCheckinTimeISO) {
-      const el = document.getElementById("checkin-timer");
-      const end = new Date(nextCheckinTimeISO).getTime();
-      function update() {
-        const now = Date.now();
-        const d = end - now;
-        if (d <= 0) {
-          el.innerText = "🎉 You can check in again now!";
-          return;
-        }
-        const h = Math.floor(d / 3600000), m = Math.floor((d % 3600000) / 60000), s = Math.floor((d % 60000) / 1000);
-        el.innerText = `⏳ Next check-in: ${h}h ${m}m ${s}s`;
-        setTimeout(update, 1000);
-      }
-      update();
+   function startCountdown(nextCheckinTimeISO) {
+  const el = document.getElementById("checkin-timer");
+  const end = new Date(nextCheckinTimeISO).getTime();
+
+  function update() {
+    const now = Date.now();
+    const d = end - now;
+
+    if (d <= 0) {
+      el.innerText = "🎉 You can check in again now!";
+      return;
     }
+
+    const h = Math.floor(d / 3600000);
+    const m = Math.floor((d % 3600000) / 60000);
+    const s = Math.floor((d % 60000) / 1000); // ❌ incorrect
+
+    // ✅ FIX:
+    const sFixed = Math.floor((d % 60000) / 1000); 
+    el.innerText = `⏳ Next check-in: ${h}h ${m}m ${sFixed}s`;
+
+    setTimeout(update, 1000);
+  }
+
+  update();
+}
 
   async function handleAdminAndVoucher() {
     try {
