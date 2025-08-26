@@ -45,31 +45,6 @@ def is_user_admin(user_id):
     except Exception as e:
         print("[Admin Check Error]", e)
         return False
-
-def send_region_prompt(user_id):
-    keyboard = [
-        [
-            InlineKeyboardButton("🇲🇾 Malaysia", callback_data="region_MY"),
-            InlineKeyboardButton("🇹🇭 Thailand", callback_data="region_TH"),
-        ],
-        [
-            InlineKeyboardButton("🇮🇩 Indonesia", callback_data="region_ID"),
-            InlineKeyboardButton("🌍 Other", callback_data="region_OTHER"),
-        ],
-    ]
-    try:
-        asyncio.run(
-            app_bot.bot.send_message(
-                chat_id=user_id,
-                text="🌍 Please select your region before checking in:",
-                reply_markup=InlineKeyboardMarkup(keyboard),
-            )
-        )
-        print(f"[Region Prompt] Sent to {user_id}")
-        return True
-    except Exception as e:
-        print(f"[Region Prompt] Failed to send to {user_id}: {e}")
-        return False
         
 # ----------------------------
 # Flask App
@@ -77,57 +52,57 @@ def send_region_prompt(user_id):
 app = Flask(__name__, static_folder="static")
 CORS(app, resources={r"/*": {"origins": "*"}})
 
-@app.route("/api/checkin", methods=["GET", "POST"])
+@app.route("/api/checkin", methods=["POST"])
 def api_checkin():
-    """
-    Mini-app calls this endpoint to do a check-in.
-    Expectation: the mini app sends user_id (int) either as JSON body or query param.
-    If user has no region -> send region prompt to their bot DM and return a "prompt_sent" response.
-    If region exists -> call existing handle_checkin() (keeps your original logic).
-    """
+    """Mini-app triggers this after region is set"""
     try:
-        # accept JSON or query params
-        data = {}
-        if request.is_json:
-            data = request.get_json(silent=True) or {}
-        else:
-            data = request.args or {}
+        data = request.get_json(silent=True) or {}
+        user_id = data.get("user_id")
+        username = data.get("username", "unknown")
 
-        user_id = data.get("user_id") or data.get("uid")  # flexible keys
-        if user_id is None:
-            # fallback to original implementation if caller doesn't supply user_id
-            # (keeps backward compatibility)
-            return handle_checkin()
+        if not user_id:
+            return jsonify({"success": False, "error": "Missing user_id"}), 400
 
-        try:
-            user_id = int(user_id)
-        except Exception:
-            return jsonify({"success": False, "error": "user_id must be an integer"}), 400
+        user = users_collection.find_one({"user_id": int(user_id)})
+        if not user or "region" not in user:
+            return jsonify({"success": False, "error": "Region not set"}), 400
 
-        # check DB for region
-        user = users_collection.find_one({"user_id": user_id}) or {}
-        if not user.get("region"):
-            # prompt user in DM to pick a region
-            sent = send_region_prompt(user_id)
-            if sent:
-                return jsonify({
-                    "success": True,
-                    "status": "region_prompt_sent",
-                    "message": "Please select your region in the bot's DM to complete check-in."
-                })
-            else:
-                return jsonify({
-                    "success": False,
-                    "status": "failed_to_send_prompt",
-                    "message": "Unable to send region prompt. Ask the user to open the bot and /start first."
-                }), 500
+        # ✅ call your existing checkin logic
+        asyncio.run(process_checkin(int(user_id), username, user["region"]))
 
-        # region exists: call your original checkin logic (keeps current behavior)
-        return handle_checkin()
+        return jsonify({"success": True, "message": "Check-in successful"})
 
     except Exception as e:
         traceback.print_exc()
         return jsonify({"success": False, "error": str(e)}), 500
+
+@app.route("/api/region-status/<int:user_id>", methods=["GET"])
+def api_region_status(user_id):
+    """Check if user already has region set"""
+    user = users_collection.find_one({"user_id": user_id})
+    if user and "region" in user:
+        return jsonify({"region": user["region"], "locked": True})
+    return jsonify({"region": None, "locked": False})
+
+@app.route("/api/set-region/<int:user_id>", methods=["POST"])
+def api_set_region(user_id):
+    """Set region only if not already set"""
+    data = request.json
+    region = data.get("region")
+
+    if not region:
+        return jsonify({"success": False, "error": "Region required"}), 400
+
+    user = users_collection.find_one({"user_id": user_id})
+    if user and "region" in user:
+        return jsonify({"success": False, "error": "Region already set", "locked": True})
+
+    users_collection.update_one(
+        {"user_id": user_id},
+        {"$set": {"region": region}},
+        upsert=True
+    )
+    return jsonify({"success": True, "region": region, "locked": True})
 
 @app.route("/")
 def home():
@@ -745,80 +720,6 @@ async def process_checkin(user_id, username, region, update=None):
     if update and getattr(update, "message", None):
         await update.message.reply_text(f"✅ Check-in successful! (+20 XP)\n📍 Region: {region}")
 
-async def checkin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    /checkin in DM:
-    - If region not set -> ask user to pick (MY/TH/ID/Other)
-    - Else -> do daily check-in
-    """
-    user = update.effective_user
-    if not user or not getattr(update, "message", None):
-        return
-
-    db_user = users_collection.find_one({"user_id": user.id}) or {}
-
-    # Ask region if missing
-    if not db_user.get("region"):
-        keyboard = [
-            [
-                InlineKeyboardButton("🇲🇾 Malaysia", callback_data="region_MY"),
-                InlineKeyboardButton("🇹🇭 Thailand", callback_data="region_TH"),
-            ],
-            [
-                InlineKeyboardButton("🇮🇩 Indonesia", callback_data="region_ID"),
-                InlineKeyboardButton("🌍 Other", callback_data="region_OTHER"),
-            ]
-        ]
-        await update.message.reply_text(
-            "🌍 Please select your region:",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-        )
-        return
-
-    # Region exists -> proceed with daily check-in
-    await process_checkin(user.id, user.username, db_user.get("region"), update)
-
-
-async def region_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Handles taps on region buttons, saves region, then performs check-in once.
-    """
-    query = update.callback_query
-    await query.answer()
-    user_id = query.from_user.id
-    username = query.from_user.username
-
-    # Extract region code from callback_data (region_MY / region_TH / region_ID / region_OTHER)
-    try:
-        region_code = query.data.split("_", 1)[1]
-    except Exception:
-        region_code = "OTHER"
-
-    region_map = {
-        "MY": "Malaysia",
-        "TH": "Thailand",
-        "ID": "Indonesia",
-        "OTHER": "Other",
-    }
-    region = region_map.get(region_code, "Other")
-
-    # Save region
-    users_collection.update_one(
-        {"user_id": user_id},
-        {"$set": {"region": region}},
-        upsert=True
-    )
-
-    # Confirm & tell user what to expect
-    await query.edit_message_text(
-        f"✅ Region set to *{region}*.\n\nNow completing your check-in…",
-        parse_mode="Markdown"
-    )
-
-    # Immediately do the first check-in after setting region
-    await process_checkin(user_id, username, region)
-
-        
 # ----------------------------
 # Run Bot + Flask + Scheduler
 # ----------------------------
@@ -829,10 +730,8 @@ if __name__ == "__main__":
     run_boot_catchup()
 
     app_bot.add_handler(CommandHandler("start", start))
-    app_bot.add_handler(CommandHandler("checkin", checkin_command))
     app_bot.add_handler(ChatJoinRequestHandler(join_request_handler))
     app_bot.add_handler(ChatMemberHandler(new_member, ChatMemberHandler.CHAT_MEMBER))
-    app_bot.add_handler(CallbackQueryHandler(region_callback, pattern="^region_"))
     app_bot.add_handler(CallbackQueryHandler(button_handler))
 
     scheduler = BackgroundScheduler(timezone=tz)
