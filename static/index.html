@@ -491,25 +491,22 @@ async function checkRegionStatus() {
 
 async function setRegion() {
   const region = document.getElementById("region-select").value;
-  if (!region) {
-    alert("Please select a region.");
-    return;
-  }
+  if (!region) { alert("Please select a region."); return; }
 
   try {
     const res = await fetch(`${API_BASE}/api/set-region/${userId}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ region })
+      body: JSON.stringify({ user_id: userId, region }) // <-- add user_id
     });
-
     const data = await res.json();
+
     if (data.success) {
-        document.getElementById("region-section").style.display = "none"; // 👈 hide after saving
-        document.getElementById("region-message").innerText =
-          `✅ Region locked: ${data.region}`;
-        regionMsg = `✅ Region locked: ${data.region}`;
-        alert("Region saved and locked!");
+      document.getElementById("region-section").style.display = "none";
+      document.getElementById("region-message").innerText =
+        `✅ Region locked: ${data.region}`;
+      regionMsg = `✅ Region locked: ${data.region}`;
+      alert("Region saved and locked!");
     } else {
       alert("❌ " + (data.error || "Failed to set region."));
     }
