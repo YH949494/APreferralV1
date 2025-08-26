@@ -36,12 +36,39 @@ users_collection = db["users"]
 history_collection = db["weekly_leaderboard_history"]
 bonus_voucher_collection = db["bonus_voucher"]
 
+app_bot = ApplicationBuilder().token(BOT_TOKEN).build()
+
 def is_user_admin(user_id):
     try:
         admins = asyncio.run(app_bot.bot.get_chat_administrators(chat_id=GROUP_ID))
         return any(admin.user.id == user_id for admin in admins)
     except Exception as e:
         print("[Admin Check Error]", e)
+        return False
+
+def send_region_prompt(user_id):
+    keyboard = [
+        [
+            InlineKeyboardButton("🇲🇾 Malaysia", callback_data="region_MY"),
+            InlineKeyboardButton("🇹🇭 Thailand", callback_data="region_TH"),
+        ],
+        [
+            InlineKeyboardButton("🇮🇩 Indonesia", callback_data="region_ID"),
+            InlineKeyboardButton("🌍 Other", callback_data="region_OTHER"),
+        ],
+    ]
+    try:
+        asyncio.run(
+            app_bot.bot.send_message(
+                chat_id=user_id,
+                text="🌍 Please select your region before checking in:",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+        )
+        print(f"[Region Prompt] Sent to {user_id}")
+        return True
+    except Exception as e:
+        print(f"[Region Prompt] Failed to send to {user_id}: {e}")
         return False
         
 # ----------------------------
@@ -50,6 +77,58 @@ def is_user_admin(user_id):
 app = Flask(__name__, static_folder="static")
 CORS(app, resources={r"/*": {"origins": "*"}})
 
+@app.route("/api/checkin", methods=["GET", "POST"])
+def api_checkin():
+    """
+    Mini-app calls this endpoint to do a check-in.
+    Expectation: the mini app sends user_id (int) either as JSON body or query param.
+    If user has no region -> send region prompt to their bot DM and return a "prompt_sent" response.
+    If region exists -> call existing handle_checkin() (keeps your original logic).
+    """
+    try:
+        # accept JSON or query params
+        data = {}
+        if request.is_json:
+            data = request.get_json(silent=True) or {}
+        else:
+            data = request.args or {}
+
+        user_id = data.get("user_id") or data.get("uid")  # flexible keys
+        if user_id is None:
+            # fallback to original implementation if caller doesn't supply user_id
+            # (keeps backward compatibility)
+            return handle_checkin()
+
+        try:
+            user_id = int(user_id)
+        except Exception:
+            return jsonify({"success": False, "error": "user_id must be an integer"}), 400
+
+        # check DB for region
+        user = users_collection.find_one({"user_id": user_id}) or {}
+        if not user.get("region"):
+            # prompt user in DM to pick a region
+            sent = send_region_prompt(user_id)
+            if sent:
+                return jsonify({
+                    "success": True,
+                    "status": "region_prompt_sent",
+                    "message": "Please select your region in the bot's DM to complete check-in."
+                })
+            else:
+                return jsonify({
+                    "success": False,
+                    "status": "failed_to_send_prompt",
+                    "message": "Unable to send region prompt. Ask the user to open the bot and /start first."
+                }), 500
+
+        # region exists: call your original checkin logic (keeps current behavior)
+        return handle_checkin()
+
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"success": False, "error": str(e)}), 500
+
 @app.route("/")
 def home():
     return "Bot is alive!"
@@ -57,10 +136,6 @@ def home():
 @app.route("/miniapp")
 def serve_mini_app():
     return send_from_directory("static", "index.html")
-
-@app.route("/api/checkin")
-def api_checkin():
-    return handle_checkin()
 
 @app.route("/api/referral")
 def api_referral():
@@ -670,7 +745,6 @@ async def process_checkin(user_id, username, region, update=None):
     if update and getattr(update, "message", None):
         await update.message.reply_text(f"✅ Check-in successful! (+20 XP)\n📍 Region: {region}")
 
-
 async def checkin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     /checkin in DM:
@@ -754,7 +828,6 @@ if __name__ == "__main__":
     # Boot-time catch-up for missed weekly resets
     run_boot_catchup()
 
-    app_bot = ApplicationBuilder().token(BOT_TOKEN).build()
     app_bot.add_handler(CommandHandler("start", start))
     app_bot.add_handler(CommandHandler("checkin", checkin_command))
     app_bot.add_handler(ChatJoinRequestHandler(join_request_handler))
