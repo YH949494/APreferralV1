@@ -68,9 +68,21 @@ def api_checkin():
             return jsonify({"success": False, "error": "Region not set"}), 400
 
         # ✅ call your existing checkin logic
-        asyncio.run(process_checkin(int(user_id), username, user["region"]))
+        result = asyncio.run(process_checkin(int(user_id), username, user["region"]))
 
-        return jsonify({"success": True, "message": "Check-in successful"})
+        if result and result.get("success"):
+            # Calculate next reset time at 12AM UTC+8
+            tz_utc8 = timezone(timedelta(hours=8))
+            now_utc8 = datetime.now(tz=tz_utc8)
+            tomorrow_midnight = (now_utc8 + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+
+            return jsonify({
+                "success": True,
+                "message": "Check-in successful! +20 XP",
+                "next_checkin_time": tomorrow_midnight.astimezone(timezone.utc).isoformat()
+            })
+        else:
+            return jsonify({"success": False, "message": "Already checked in today."})
 
     except Exception as e:
         traceback.print_exc()
