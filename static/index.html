@@ -180,7 +180,6 @@
     let latestReferralLink = "";
 
     async function checkIn() {
-  // 🚨 Prevent check-in if region not set
   regionMsg = document.getElementById("region-message").innerText;
   if (regionMsg.includes("⚠️ Please select")) {
     alert("❌ Please select and lock your region before check-in.");
@@ -188,7 +187,11 @@
   }
 
   try {
-    const res = await fetch(`${API_BASE}/api/checkin?user_id=${userId}&username=${username}`);
+    const res = await fetch(`${API_BASE}/api/checkin`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ user_id: userId, username })
+    });
     const data = await res.json();
     document.getElementById("checkin-result").innerText = data.message || "Check-in failed.";
     if (data.next_checkin_time) startCountdown(data.next_checkin_time);
@@ -200,7 +203,7 @@
     document.getElementById("checkin-result").innerText = "❌ Error connecting to server.";
   }
 }
-
+    
     async function getReferral() {
       const display = document.getElementById("referral-link");
       try {
