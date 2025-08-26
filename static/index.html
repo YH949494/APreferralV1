@@ -180,11 +180,11 @@
     let latestReferralLink = "";
 
     async function checkIn() {
-  regionMsg = document.getElementById("region-message").innerText;
-  if (regionMsg.includes("⚠️ Please select")) {
-    alert("❌ Please select and lock your region before check-in.");
-    return;
-  }
+        regionMsg = document.getElementById("region-message").innerText;
+        if (regionMsg.includes("⚠️ Please select")) {
+          alert("❌ Please select and lock your region before check-in.");
+          return;
+        }
 
   try {
     const res = await fetch(`${API_BASE}/api/checkin`, {
@@ -474,23 +474,24 @@ async function checkRegionStatus() {
     const res = await fetch(`${API_BASE}/api/region-status/${userId}`);
     const data = await res.json();
 
-    if (data.success && data.region) {
+    if (data.locked) {
         // ✅ Already locked
-        document.getElementById("region-section").style.display = "none"; // 👈 hide select box
+        document.getElementById("region-section").style.display = "none";
         document.getElementById("region-message").innerText =
           `✅ Region locked: ${data.region}`;
         regionMsg = `✅ Region locked: ${data.region}`;
-      } else {
+    } else {
         // ❌ No region yet → must choose
         document.getElementById("region-section").style.display = "block";
         document.getElementById("region-message").innerText =
           "⚠️ Please select your region (only once).";
-      }
-      
+    }
+
   } catch (err) {
     console.error("Region check failed:", err);
   }
 }
+
 
 async function setRegion() {
   const region = document.getElementById("region-select").value;
