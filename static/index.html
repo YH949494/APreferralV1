@@ -91,6 +91,19 @@
 <body>
   <h2>🎯 Referral & Daily Check-in</h2>
 
+  <div class="section" id="region-section" style="display: none;">
+  <h3>🌍 Select Your Region</h3>
+  <select id="region-select">
+    <option value="">-- Please choose --</option>
+    <option value="Malaysia">🇲🇾 Malaysia</option>
+    <option value="Thailand">🇹🇭 Thailand</option>
+    <option value="Indonesia">🇮🇩 Indonesia</option>
+    <option value="Other">🌐 Other</option>
+  </select>
+  <button onclick="setRegion()">Save Region</button>
+  <p id="region-message" style="color:gray;"></p>
+</div>
+
   <div class="section">
     <h3>✅ Daily Check-in</h3>
     <button onclick="checkIn()">Check In</button>
@@ -166,19 +179,26 @@
     let latestReferralLink = "";
 
     async function checkIn() {
-      try {
-        const res = await fetch(`${API_BASE}/api/checkin?user_id=${userId}&username=${username}`);
-        const data = await res.json();
-        document.getElementById("checkin-result").innerText = data.message || "Check-in failed.";
-        if (data.next_checkin_time) startCountdown(data.next_checkin_time);
-        
-        if (data.success) {
-          loadLeaderboard();  // 👈 add this line
-        }
-      } catch (err) {
-        document.getElementById("checkin-result").innerText = "❌ Error connecting to server.";
-      }
+  // 🚨 Prevent check-in if region not set
+  const regionMsg = document.getElementById("region-message").innerText;
+  if (regionMsg.includes("⚠️ Please select")) {
+    alert("❌ Please select and lock your region before check-in.");
+    return;
+  }
+
+  try {
+    const res = await fetch(`${API_BASE}/api/checkin?user_id=${userId}&username=${username}`);
+    const data = await res.json();
+    document.getElementById("checkin-result").innerText = data.message || "Check-in failed.";
+    if (data.next_checkin_time) startCountdown(data.next_checkin_time);
+
+    if (data.success) {
+      loadLeaderboard();  
     }
+  } catch (err) {
+    document.getElementById("checkin-result").innerText = "❌ Error connecting to server.";
+  }
+}
 
     async function getReferral() {
       const display = document.getElementById("referral-link");
@@ -445,8 +465,59 @@ async function submitVoucher() {
   }
 }
    
+async function checkRegionStatus() {
+  try {
+    const res = await fetch(`${API_BASE}/api/region-status/${userId}`);
+    const data = await res.json();
+
+    if (data.success && data.region) {
+      // ✅ Already locked
+      document.getElementById("region-section").style.display = "block";
+      document.getElementById("region-select").disabled = true;
+      document.getElementById("region-message").innerText =
+        `✅ Region locked: ${data.region}`;
+    } else {
+      // ❌ No region yet → must choose
+      document.getElementById("region-section").style.display = "block";
+      document.getElementById("region-message").innerText =
+        "⚠️ Please select your region (only once).";
+    }
+  } catch (err) {
+    console.error("Region check failed:", err);
+  }
+}
+
+async function setRegion() {
+  const region = document.getElementById("region-select").value;
+  if (!region) {
+    alert("Please select a region.");
+    return;
+  }
+
+  try {
+    const res = await fetch(`${API_BASE}/api/set-region/${userId}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ region })
+    });
+
+    const data = await res.json();
+    if (data.success) {
+      document.getElementById("region-select").disabled = true;
+      document.getElementById("region-message").innerText =
+        `✅ Region locked: ${data.region}`;
+      alert("Region saved and locked!");
+    } else {
+      alert("❌ " + (data.error || "Failed to set region."));
+    }
+  } catch (err) {
+    alert("❌ Error saving region.");
+    console.error("Set region error:", err);
+  }
+}
     
     window.onload = () => {
+      checkRegionStatus();
       handleAdminAndVoucher();
       loadLeaderboard();  // 👈 This line loads your weekly stats automatically
     };
