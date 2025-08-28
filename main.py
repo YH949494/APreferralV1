@@ -458,6 +458,41 @@ def export_csv():
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 
+@app.route("/api/starterpack", methods=["POST"])
+def api_starterpack():
+    try:
+        data = request.get_json(silent=True) or {}
+        user_id = data.get("user_id")
+        username = data.get("username", "unknown")
+
+        if not user_id:
+            return jsonify({"success": False, "error": "Missing user_id"}), 400
+
+        user = users_collection.find_one({"user_id": int(user_id)}) or {}
+
+        # Check if already claimed
+        if user.get("welcome_xp_claimed"):
+            return jsonify({"success": False, "message": "⚠️ Starter Pack already claimed."})
+
+        # Give reward
+        users_collection.update_one(
+            {"user_id": int(user_id)},
+            {
+                "$set": {"username": username, "welcome_xp_claimed": True},
+                "$inc": {"xp": 20, "weekly_xp": 20, "monthly_xp": 20},
+            },
+            upsert=True,
+        )
+
+        return jsonify({
+            "success": True,
+            "message": "🎁 Starter Pack claimed! +20 XP"
+        })
+
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"success": False, "error": str(e)}), 500
+
 # ----------------------------
 # Weekly XP Reset Job
 # ----------------------------
@@ -688,60 +723,6 @@ async def join_request_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
     await send_starter_pack(user, context)
 
-# Starter Pack
-# ----------------------------
-def starter_pack_keyboard(user_id):
-    keyboard = [
-        [InlineKeyboardButton("📲 Follow @advantplayofficial", url="https://t.me/advantplayofficial")],
-        [InlineKeyboardButton("✅ Check-in", callback_data="checkin")],
-        [InlineKeyboardButton("👥 My Referral Link", callback_data=f"referral_{user_id}")],
-        [InlineKeyboardButton("▶️ Start Bot", url=f"https://t.me/YOUR_BOT_USERNAME?start={user_id}")]
-    ]
-    return InlineKeyboardMarkup(keyboard)
-
-async def send_starter_pack(user, context):
-    text = (
-        "🎉 Welcome to AdvantPlay Chat Room!\n\n"
-        "🚦 Rules:\n"
-        "1. Be kind & respectful\n"
-        "2. No spam\n"
-        "3. Have fun\n\n"
-        "🎮 Earn XP:\n"
-        "✅ Check-in: +20 XP\n"
-        "👥 Referral: +30 XP\n"
-        "🌟 Community = Voucher drops, Tips, Q&A & Help\n\n"
-        "⚡ Start now 👇"
-    )
-    try:
-        await context.bot.send_message(
-            chat_id=user.id,
-            text=text,
-            reply_markup=starter_pack_keyboard(user.id)
-        )
-        print(f"✅ Starter pack sent to {user.id}")
-    except Exception as e:
-        print(f"❌ Cannot PM {user.id}: {e}")
-
-async def new_member(update, context):
-    for member in update.chat_member.new_chat_members:
-        user_id = member.id
-
-        # check MongoDB if already joined
-        existing = users_collection.find_one({"user_id": user_id})
-        if existing and existing.get("joined_once"):
-            print(f"⏩ Skip starter pack for {user_id}, already joined.")
-            continue
-
-        # send starter pack
-        await send_starter_pack(member, context)
-
-        # mark as joined once
-        users_collection.update_one(
-            {"user_id": user_id},
-            {"$set": {"joined_once": True}},
-            upsert=True
-        )
-
 async def button_handler(update, context):
     query = update.callback_query
     await query.answer()
@@ -765,46 +746,6 @@ async def button_handler(update, context):
         referral_link = f"https://t.me/APreferralV1_bot?start={user_id_ref}"
         await query.edit_message_text(f"👥 Your referral link:\n{referral_link}")
 
-async def process_checkin(user_id, username, region, update=None):
-    """Daily check-in logic once region is known (reset at 12AM UTC+8)."""
-    tz_utc8 = pytz.timezone("Asia/Kuala_Lumpur")  # or Asia/Singapore
-    now_utc8 = datetime.now(tz_utc8)
-    today_utc8 = now_utc8.date()
-
-    user = users_collection.find_one({"user_id": user_id}) or {}
-    last = user.get("last_checkin")
-
-    if isinstance(last, datetime):
-        # Convert last check-in into UTC+8 for comparison
-        last_utc8 = last.astimezone(tz_utc8).date()
-        if last_utc8 == today_utc8:
-            if update and getattr(update, "message", None):
-                await update.message.reply_text("⚠️ You already checked in today.")
-            return {"success": False, "message": "⚠️ Already checked in today."}
-
-    # ✅ Save last_checkin in UTC (for consistency in DB)
-    now_utc = datetime.now(pytz.UTC)
-
-    users_collection.update_one(
-        {"user_id": user_id},
-        {
-            "$set": {
-                "username": username,
-                "region": region,
-                "last_checkin": now_utc,
-            },
-            "$inc": {"xp": 20, "weekly_xp": 20, "monthly_xp": 20},
-        },
-        upsert=True,
-    )
-
-    if update and getattr(update, "message", None):
-        await update.message.reply_text(
-            f"✅ Check-in successful! (+20 XP)\n📍 Region: {region}"
-        )
-
-    return {"success": True, "message": "✅ Check-in successful! +20 XP"}
-
 # ----------------------------
 # Run Bot + Flask + Scheduler
 # ----------------------------
@@ -816,7 +757,6 @@ if __name__ == "__main__":
 
     app_bot.add_handler(CommandHandler("start", start))
     app_bot.add_handler(ChatJoinRequestHandler(join_request_handler))
-    app_bot.add_handler(ChatMemberHandler(new_member, ChatMemberHandler.CHAT_MEMBER))
     app_bot.add_handler(CallbackQueryHandler(button_handler))
 
     scheduler = BackgroundScheduler(timezone=tz)
