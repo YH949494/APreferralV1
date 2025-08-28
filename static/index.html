@@ -91,6 +91,54 @@
 <body>
   <h2>🎯 Referral & Daily Check-in</h2>
 
+  <!-- Add this button somewhere under your check-in UI -->
+<div class="event-section" style="margin-top:20px; text-align:center;">
+  <button id="eventBtn" 
+          style="padding:10px 20px; border:none; border-radius:8px; background:#007bff; color:#fff; font-size:16px; cursor:pointer;">
+    📢 Current Event
+  </button>
+</div>
+
+<!-- Modal structure -->
+<div id="eventModal" 
+     style="display:none; position:fixed; z-index:1000; left:0; top:0; width:100%; height:100%; 
+            background-color:rgba(0,0,0,0.5);">
+
+  <div style="background:#fff; margin:10% auto; padding:20px; border-radius:12px; width:90%; max-width:400px; text-align:center;">
+    <h2 style="margin-bottom:15px;">🎮 How to Play</h2>
+    <p>✅ Daily check-in = +20 XP</p>
+    <p>👥 Each referral = +20 XP</p>
+    <p>🏆 Top 3 XP of the week = Bonus Voucher</p>
+    <p>⭐ Reach VIP1 = Unlock more rewards</p>
+
+    <button id="closeEvent" 
+            style="margin-top:20px; padding:8px 16px; border:none; border-radius:8px; background:#dc3545; color:#fff; cursor:pointer;">
+      Close
+    </button>
+  </div>
+</div>
+
+<script>
+  const eventBtn = document.getElementById("eventBtn");
+  const eventModal = document.getElementById("eventModal");
+  const closeEvent = document.getElementById("closeEvent");
+
+  eventBtn.addEventListener("click", () => {
+    eventModal.style.display = "block";
+  });
+
+  closeEvent.addEventListener("click", () => {
+    eventModal.style.display = "none";
+  });
+
+  // Close modal if user clicks outside the box
+  window.addEventListener("click", (e) => {
+    if (e.target === eventModal) {
+      eventModal.style.display = "none";
+    }
+  });
+</script>
+
   <div class="section" id="region-section" style="display: none;">
   <h3>🌍 Select Your Region</h3>
   <select id="region-select">
