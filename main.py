@@ -543,22 +543,15 @@ def fix_user_monthly_xp(user_id):
     return False
 
 def run_boot_catchup():
-    """Run weekly and monthly catch-up if missed due to downtime and fix missing XP for old users."""
     tz_kl = timezone("Asia/Kuala_Lumpur")
     now = datetime.now(tz_kl)
 
     try:
-        # --- Weekly catch-up ---
         last_history = history_collection.find_one(sort=[("archived_at", DESCENDING)])
-        if last_history:
-            last_reset = last_history["archived_at"].astimezone(tz_kl)
-            days_since = (now - last_reset).days
-            print(f"📅 Last weekly reset: {last_reset}, {days_since} days ago.")
-        else:
-            days_since = 999
-            print("⚠️ No weekly reset history found.")
+        last_reset = last_history["archived_at"].astimezone(tz_kl) if last_history else None
 
-        if now.weekday() == 0 and days_since >= 6:
+        # If more than 7 days since last reset → run one now
+        if not last_reset or (now - last_reset).days >= 7:
             print("⚠️ Missed weekly reset. Running now...")
             reset_weekly_xp()
         else:
