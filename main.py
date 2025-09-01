@@ -248,11 +248,6 @@ def format_username(u, current_user_id, is_admin):
 
 @app.route("/api/leaderboard")
 def get_leaderboard():
-    now = datetime.now(pytz.timezone("Asia/Kuala_Lumpur"))
-    last_reset = db.meta.find_one({"key": "last_weekly_reset"})
-    if now.weekday() == 0 and (not last_reset or last_reset["value"].date() != now.date()):
-        reset_weekly_xp()
-        
     try:
         current_user_id = int(request.args.get("user_id", 0))
         user_record = users_collection.find_one({"user_id": current_user_id}) or {}
@@ -547,36 +542,24 @@ def fix_user_monthly_xp(user_id):
         return True
     return False
 
-def fix_user_weekly_xp(user_id):
-    user = users_collection.find_one({"user_id": user_id})
-    if user and "weekly_xp" not in user:
-        users_collection.update_one(
-            {"user_id": user_id},
-            {"$set": {"weekly_xp": 0}}
-        )
-        print(f"Set missing weekly_xp for user {user_id} to 0")
-        return True
-    if user and "weekly_referral_count" not in user:
-        users_collection.update_one(
-            {"user_id": user_id},
-            {"$set": {"weekly_referral_count": 0}}
-        )
-        print(f"Set missing weekly_referral_count for user {user_id} to 0")
-        return True
-    return False
-
 def run_boot_catchup():
+    """Run weekly and monthly catch-up if missed due to downtime and fix missing XP for old users."""
     tz_kl = timezone("Asia/Kuala_Lumpur")
     now = datetime.now(tz_kl)
 
     try:
+        # --- Weekly catch-up ---
         last_history = history_collection.find_one(sort=[("archived_at", DESCENDING)])
-        last_reset = last_history["archived_at"].astimezone(tz_kl) if last_history else None
+        if last_history:
+            last_reset = last_history["archived_at"].astimezone(tz_kl)
+            days_since = (now - last_reset).days
+            print(f"📅 Last weekly reset: {last_reset}, {days_since} days ago.")
+        else:
+            days_since = 999
+            print("⚠️ No weekly reset history found.")
 
-        if not last_reset or (
-            now.weekday() == 0 and (now.date() - last_reset.date()).days >= 7
-        ):
-            print("⚠️ Weekly reset due today but not done yet → running now...")
+        if now.weekday() == 0 and days_since >= 6:
+            print("⚠️ Missed weekly reset. Running now...")
             reset_weekly_xp()
         else:
             print("✅ No weekly catch-up needed.")
@@ -603,31 +586,18 @@ def run_boot_catchup():
         fixed_weekly_count = 0
         fixed_monthly_count = 0
         for user in all_users:
-            user_id = user.get("user_id")
+            user_id = user["user_id"]
             if not user_id:
-                continue
-
-            # Ensure weekly_xp exists
-            if "weekly_xp" not in user:
-                users_collection.update_one(
-                    {"user_id": user_id},
-                    {"$set": {"weekly_xp": 0}}
-                )
+                continue  # Skip if no user_id present
+            if fix_user_weekly_xp(user_id):
                 fixed_weekly_count += 1
-
-            # Ensure monthly_xp exists
-            if "monthly_xp" not in user:
-                users_collection.update_one(
-                    {"user_id": user_id},
-                    {"$set": {"monthly_xp": 0}}
-                )
+            if fix_user_monthly_xp(user_id):
                 fixed_monthly_count += 1
-
         print(f"✅ Auto-fix completed. Weekly XP fixed for {fixed_weekly_count} users, Monthly XP fixed for {fixed_monthly_count} users.")
 
     except Exception as e:
         print(f"❌ Boot-time catch-up failed: {e}")
-
+        
 def update_monthly_vip_status():
     now = datetime.now(tz)
     print(f"🔁 Running monthly VIP status update at {now}")
