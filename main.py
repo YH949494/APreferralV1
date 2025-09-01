@@ -573,10 +573,11 @@ def run_boot_catchup():
         last_history = history_collection.find_one(sort=[("archived_at", DESCENDING)])
         last_reset = last_history["archived_at"].astimezone(tz_kl) if last_history else None
 
-        if not last_reset or (now.weekday() == 0 and last_reset.date() != now.date()):
+        if not last_reset or (
+            now.weekday() == 0 and (now.date() - last_reset.date()).days >= 7
+        ):
             print("⚠️ Weekly reset due today but not done yet → running now...")
             reset_weekly_xp()
-
         else:
             print("✅ No weekly catch-up needed.")
 
@@ -596,7 +597,7 @@ def run_boot_catchup():
         else:
             print("✅ No monthly catch-up needed.")
 
-       # --- Auto-fix missing XP for old users ---
+        # --- Auto-fix missing XP for old users ---
         print("🔄 Starting auto-fix for missing XP on all users...")
         all_users = users_collection.find({})
         fixed_weekly_count = 0
@@ -625,8 +626,8 @@ def run_boot_catchup():
         print(f"✅ Auto-fix completed. Weekly XP fixed for {fixed_weekly_count} users, Monthly XP fixed for {fixed_monthly_count} users.")
 
     except Exception as e:
-            print(f"❌ Boot-time catch-up failed: {e}")
-        
+        print(f"❌ Boot-time catch-up failed: {e}")
+
 def update_monthly_vip_status():
     now = datetime.now(tz)
     print(f"🔁 Running monthly VIP status update at {now}")
