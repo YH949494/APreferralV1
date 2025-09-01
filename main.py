@@ -606,6 +606,8 @@ def run_boot_catchup():
 
         print(f"✅ Auto-fix completed. Weekly XP fixed for {fixed_weekly_count} users, Monthly XP fixed for {fixed_monthly_count} users.")
 
+    except Exception as e:
+            print(f"❌ Boot-time catch-up failed: {e}")
         
 def update_monthly_vip_status():
     now = datetime.now(tz)
