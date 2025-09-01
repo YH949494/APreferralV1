@@ -547,6 +547,24 @@ def fix_user_monthly_xp(user_id):
         return True
     return False
 
+def fix_user_weekly_xp(user_id):
+    user = users_collection.find_one({"user_id": user_id})
+    if user and "weekly_xp" not in user:
+        users_collection.update_one(
+            {"user_id": user_id},
+            {"$set": {"weekly_xp": 0}}
+        )
+        print(f"Set missing weekly_xp for user {user_id} to 0")
+        return True
+    if user and "weekly_referral_count" not in user:
+        users_collection.update_one(
+            {"user_id": user_id},
+            {"$set": {"weekly_referral_count": 0}}
+        )
+        print(f"Set missing weekly_referral_count for user {user_id} to 0")
+        return True
+    return False
+
 def run_boot_catchup():
     tz_kl = timezone("Asia/Kuala_Lumpur")
     now = datetime.now(tz_kl)
