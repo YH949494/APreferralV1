@@ -371,12 +371,12 @@
       ).join("\n");
 
       const referral = data.leaderboard.referral.map((u, i) =>
-        `${i + 1}. ${u.username || ''} - ${u.referrals} Ref`
+        `${i + 1}. ${u.username || ''} - ${u.weekly_referrals || 0} Ref`
       ).join("\n");
-
+      
       const myXP = data.user?.xp || 0;
       const myMonthlyXP = data.user?.monthly_xp || 0;
-      const myRef = data.user?.referrals || 0;
+      const myRef = data.user?.weekly_referrals || 0;
       const myName = user.username ? `@${user.username}` : (user.first_name || "You");
       
       const myStatus = (data.user && data.user.status) ? data.user.status : "Normal";
