@@ -589,8 +589,6 @@ def run_boot_catchup():
             user_id = user["user_id"]
             if not user_id:
                 continue  # Skip if no user_id present
-            if fix_user_weekly_xp(user_id):
-                fixed_weekly_count += 1
             if fix_user_monthly_xp(user_id):
                 fixed_monthly_count += 1
         print(f"✅ Auto-fix completed. Weekly XP fixed for {fixed_weekly_count} users, Monthly XP fixed for {fixed_monthly_count} users.")
