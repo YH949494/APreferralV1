@@ -2,7 +2,7 @@ from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 from threading import Thread
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
-from telegram.ext import ApplicationBuilder, CommandHandler, ChatJoinRequestHandler, ContextTypes
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 from telegram.ext import ChatMemberHandler, CallbackQueryHandler
 from checkin import handle_checkin
 from referral import get_or_create_referral_link
@@ -645,81 +645,80 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_markup=InlineKeyboardMarkup(keyboard)
 )
 
-async def join_request_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.chat_join_request.from_user
-    invite_link = update.chat_join_request.invite_link
+async def member_update_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    member = update.chat_member
+    user = member.new_chat_member.user
 
-    existing_user = users_collection.find_one({"user_id": user.id})
-    if existing_user and existing_user.get("joined_once"):
-        print(f"[Skip XP] {user.username} already joined before.")
-        return
+    # Only run when user just joined (status = "member")
+    if member.old_chat_member.status not in ("member", "administrator", "creator") \
+       and member.new_chat_member.status == "member":
+        
+        invite_link = member.invite_link  # ✅ Works if they joined via your generated referral link
 
-    # New user, insert/update profile
-    users_collection.update_one(
-        {"user_id": user.id},
-        {
-            "$set": {"username": user.username, "joined_once": True},
-            "$setOnInsert": {
-                "xp": 0,
-                "referral_count": 0,
-                "weekly_referral_count": 0,   # <-- add this so new users have it
-                "weekly_xp": 0,
-                "monthly_xp": 0,
-                "last_checkin": None
-            }
-        },
-        upsert=True
-    )
+        existing_user = users_collection.find_one({"user_id": user.id})
+        if existing_user and existing_user.get("joined_once"):
+            print(f"[Skip XP] {user.username} already joined before.")
+            return
 
-    referrer_id = None
-
-    # Case 1: custom bot referral link (with name = "ref-<id>")
-    if invite_link and invite_link.name and invite_link.name.startswith("ref-"):
-        referrer_id = int(invite_link.name.split("-")[1])
-
-    # Case 2: normal Telegram invite link (match by referral_link stored in DB)
-    elif invite_link and invite_link.invite_link:
-        ref_doc = users_collection.find_one({"referral_link": invite_link.invite_link})
-        if ref_doc:
-            referrer_id = ref_doc["user_id"]
-
-    if referrer_id:
+        # Insert / update new user
         users_collection.update_one(
-            {"user_id": referrer_id},
+            {"user_id": user.id},
             {
-                "$inc": {
-                    "referral_count": 1,        # lifetime total
-                    "weekly_referral_count": 1, # ✅ now increments properly
-                    "xp": 30,
-                    "weekly_xp": 30,
-                    "monthly_xp": 30
+                "$set": {"username": user.username, "joined_once": True},
+                "$setOnInsert": {
+                    "xp": 0,
+                    "referral_count": 0,
+                    "weekly_referral_count": 0,
+                    "weekly_xp": 0,
+                    "monthly_xp": 0,
+                    "last_checkin": None
                 }
-            }
+            },
+            upsert=True
         )
 
-        # Fetch updated referral count
-        referrer = users_collection.find_one({"user_id": referrer_id})
-        total_referrals = referrer.get("referral_count", 0)
+        # Detect referrer same as before
+        referrer_id = None
+        if invite_link and invite_link.name and invite_link.name.startswith("ref-"):
+            referrer_id = int(invite_link.name.split("-")[1])
+        elif invite_link and invite_link.invite_link:
+            ref_doc = users_collection.find_one({"referral_link": invite_link.invite_link})
+            if ref_doc:
+                referrer_id = ref_doc["user_id"]
 
-        # Bonus every 3 referrals
-        if total_referrals % 3 == 0:
+        if referrer_id:
             users_collection.update_one(
                 {"user_id": referrer_id},
-                {"$inc": {"xp": 200, "weekly_xp": 200, "monthly_xp": 200}}
+                {
+                    "$inc": {
+                        "referral_count": 1,
+                        "weekly_referral_count": 1,
+                        "xp": 30,
+                        "weekly_xp": 30,
+                        "monthly_xp": 30
+                    }
+                }
             )
-            try:
-                await context.bot.send_message(
-                    referrer_id,
-                    f"🎉 Congrats! You earned +200 XP bonus for reaching {total_referrals} referrals!"
+
+            referrer = users_collection.find_one({"user_id": referrer_id})
+            total_referrals = referrer.get("referral_count", 0)
+
+            if total_referrals % 3 == 0:
+                users_collection.update_one(
+                    {"user_id": referrer_id},
+                    {"$inc": {"xp": 200, "weekly_xp": 200, "monthly_xp": 200}}
                 )
-            except Exception as e:
-                print(f"[Referral Bonus] Failed to send message: {e}")
+                try:
+                    await context.bot.send_message(
+                        referrer_id,
+                        f"🎉 Congrats! You earned +200 XP bonus for reaching {total_referrals} referrals!"
+                    )
+                except Exception as e:
+                    print(f"[Referral Bonus] Failed to send message: {e}")
 
-        print(f"[Referral] {user.username} referred by {referrer_id}")
-    else:
-        print(f"[Referral] No referrer found for {user.username}")
-
-    await send_starter_pack(user, context)
+            print(f"[Referral] {user.username} referred by {referrer_id}")
+        else:
+            print(f"[Referral] No referrer found for {user.username}")
 
 async def button_handler(update, context):
     query = update.callback_query
@@ -733,15 +732,20 @@ async def button_handler(update, context):
         else:
             users_collection.update_one(
                 {"user_id": user_id},
-                {"$inc": {"xp": 20, "weekly_xp": 20, "monthly_xp": 20},
-                 "$set": {"welcome_xp_claimed": True}},
+                {
+                    "$inc": {"xp": 20, "weekly_xp": 20, "monthly_xp": 20},
+                    "$set": {"welcome_xp_claimed": True}
+                },
                 upsert=True
             )
             await query.edit_message_text("✅ You received +20 XP welcome bonus!")
 
-    elif query.data.startswith("referral_"):
-        user_id_ref = query.data.split("_")[1]
-        referral_link = f"https://t.me/APreferralV1_bot?start={user_id_ref}"
+    elif query.data == "referral":
+        referral_link = await get_or_create_referral_link(
+            context.bot,
+            user_id,
+            query.from_user.username or ""
+        )
         await query.edit_message_text(f"👥 Your referral link:\n{referral_link}")
 
 # ----------------------------
@@ -754,7 +758,7 @@ if __name__ == "__main__":
     run_boot_catchup()
 
     app_bot.add_handler(CommandHandler("start", start))
-    app_bot.add_handler(ChatJoinRequestHandler(join_request_handler))
+    app_bot.add_handler(ChatMemberHandler(member_update_handler, ChatMemberHandler.CHAT_MEMBER))
     app_bot.add_handler(CallbackQueryHandler(button_handler))
 
     scheduler = BackgroundScheduler(timezone=tz)
