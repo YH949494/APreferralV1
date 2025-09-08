@@ -36,14 +36,7 @@ users_collection = db["users"]
 history_collection = db["weekly_leaderboard_history"]
 bonus_voucher_collection = db["bonus_voucher"]
 
-aapp_bot = (
-    ApplicationBuilder()
-    .token(BOT_TOKEN)
-    .con_pool_size(50)
-    .read_timeout(30)       # wait longer before giving up
-    .write_timeout(30)
-    .build()
-)
+app_bot = ApplicationBuilder().token(BOT_TOKEN).build()
 
 def is_user_admin(user_id):
     try:
