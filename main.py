@@ -194,23 +194,37 @@ def api_referral():
         return jsonify({"success": False, "error": str(e)}), 500
 
 @app.route("/api/is_admin")
+@app.route("/api/is_admin")
 def api_is_admin():
     try:
         user_id = int(request.args.get("user_id"))
-        user_record = users_collection.find_one({"user_id": user_id}) or {}
-        is_admin = bool(user_record.get("is_admin", False))
+        user_record = users_collection.find_one({"user_id": user_id})
 
-        # ✅ Store admin status in MongoDB for later use
+        # ✅ If cached and fresh (within 10 mins), use it
+        if user_record and "is_admin_checked_at" in user_record:
+            if (datetime.utcnow() - user_record["is_admin_checked_at"]).total_seconds() < 600:
+                return jsonify({"success": True, "is_admin": user_record.get("is_admin", False)})
+
+        # ❌ Otherwise, fetch once from Telegram
+        admins = asyncio.run(app_bot.bot.get_chat_administrators(chat_id=GROUP_ID))
+        is_admin = any(admin.user.id == user_id for admin in admins)
+
+        # ✅ Save to DB
         users_collection.update_one(
             {"user_id": user_id},
-            {"$set": {"is_admin": is_admin}},
+            {"$set": {
+                "is_admin": is_admin,
+                "is_admin_checked_at": datetime.utcnow()
+            }},
             upsert=True
         )
 
         return jsonify({"success": True, "is_admin": is_admin})
-    except Exception as e:
-        return jsonify({"success": False, "error": str(e)}), 500
 
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"success": False, "error": str(e)}), 500
 
 # Helper to mask usernames for non-admin views
 def mask_username(username):
