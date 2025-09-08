@@ -36,7 +36,12 @@ users_collection = db["users"]
 history_collection = db["weekly_leaderboard_history"]
 bonus_voucher_collection = db["bonus_voucher"]
 
-app_bot = ApplicationBuilder().token(BOT_TOKEN).build()
+app_bot = (
+    ApplicationBuilder()
+    .token(BOT_TOKEN)
+    .con_pool_size(50)   # increase pool size
+    .build()
+)
 
 def is_user_admin(user_id):
     try:
