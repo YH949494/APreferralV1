@@ -781,4 +781,7 @@ if __name__ == "__main__":
     scheduler.start()
 
     print("✅ Bot & Scheduler running...")
-    app_bot.run_polling(poll_interval=5)
+    app_bot.run_polling(
+    poll_interval=5,
+    allowed_updates=["message", "callback_query", "chat_member"]
+)
