@@ -18,6 +18,7 @@ import traceback
 import csv
 import io
 import pytz
+tz = pytz.timezone("Asia/Kuala_Lumpur")
 
 # ----------------------------
 # Config
