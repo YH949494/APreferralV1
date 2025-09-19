@@ -38,6 +38,18 @@ bonus_voucher_collection = db["bonus_voucher"]
 
 app_bot = ApplicationBuilder().token(BOT_TOKEN).build()
 
+def require_admin_from_query():
+    caller_id = request.args.get("user_id", type=int)
+    if not caller_id:
+        return False, ("Missing user_id", 400)
+
+    user = users_collection.find_one({"user_id": caller_id}) or {}
+    # Trust the cached is_admin populated by /api/is_admin
+    if not user.get("is_admin", False):
+        return False, ("Admins only", 403)
+
+    return True, None
+    
 def is_user_admin(user_id):
     try:
         admins = asyncio.run(app_bot.bot.get_chat_administrators(chat_id=GROUP_ID))
@@ -193,7 +205,6 @@ def api_referral():
         traceback.print_exc()
         return jsonify({"success": False, "error": str(e)}), 500
 
-@app.route("/api/is_admin")
 @app.route("/api/is_admin")
 def api_is_admin():
     try:
@@ -422,10 +433,15 @@ def get_bonus_voucher():
         print("[VOUCHER] Exception:", e)
         return jsonify({"code": None, "error": str(e)}), 500
 
-# ✅ Add/Reduce XP endpoint
 @app.route("/api/add_xp", methods=["POST"])
 def api_add_xp():
-    from database import update_user_xp  # ✅ import here to avoid circular import
+    # --- Admin gate ---
+    ok, err = require_admin_from_query()
+    if not ok:
+        msg, code = err
+        return jsonify({"success": False, "message": msg}), code
+
+    from database import update_user_xp  # import here to avoid circular import
     data = request.json
     user_input = data.get("user_id")
     amount = int(data.get("xp", 0))
@@ -445,30 +461,16 @@ def api_add_xp():
 
 @app.route("/api/join_requests")
 def api_join_requests():
+    # --- Admin gate ---
+    ok, err = require_admin_from_query()
+    if not ok:
+        msg, code = err
+        return jsonify({"success": False, "message": msg}), code
+
     try:
         requests = asyncio.run(app_bot.bot.get_chat_join_requests(chat_id=GROUP_ID))
         result = [{"user_id": req.from_user.id, "username": req.from_user.username} for req in requests]
         return jsonify({"success": True, "requests": result})
-    except Exception as e:
-        return jsonify({"success": False, "error": str(e)}), 500
-
-@app.route("/api/export_csv")
-def export_csv():
-    try:
-        users = users_collection.find()
-        output = io.StringIO()
-        writer = csv.writer(output)
-        writer.writerow(["user_id", "username", "xp", "weekly_xp", "referral_count"])
-        for u in users:
-            writer.writerow([
-                u.get("user_id"),
-                u.get("username", ""),
-                u.get("xp", 0),
-                u.get("weekly_xp", 0),
-                u.get("referral_count", 0),
-            ])
-        output.seek(0)
-        return output.getvalue()
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 
@@ -505,6 +507,72 @@ def api_starterpack():
 
     except Exception as e:
         traceback.print_exc()
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@app.route("/api/admin/set_bonus", methods=["POST"])
+def api_admin_set_bonus():
+    """
+    Create/replace a single active VIP voucher (admins only).
+    Body JSON: {"code": "ABC123", "release_time": "2025-09-19T07:00:00Z"}
+    Query:     ?user_id=<admin_telegram_id>  (frontend must pass this)
+    """
+    try:
+        # Admin gate
+        ok, err = require_admin_from_query()
+        if not ok:
+            msg, code = err
+            return jsonify({"status": "error", "message": msg}), code
+
+        data = request.get_json(silent=True) or {}
+        code = (data.get("code") or "").strip()
+        release_iso = data.get("release_time")
+
+        if not code or not release_iso:
+            return jsonify({"status": "error", "message": "Missing code or release_time"}), 400
+
+        # Window: start at release_time, end +6h (adjust as needed)
+        start = datetime.fromisoformat(release_iso.replace("Z", "+00:00"))
+        end = start + timedelta(hours=6)
+
+        # Upsert a single voucher doc
+        bonus_voucher_collection.update_one(
+            {},
+            {"$set": {"code": code, "start_time": start, "end_time": end}},
+            upsert=True
+        )
+
+        return jsonify({"status": "success", "message": "Voucher scheduled"})
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.route("/api/export_csv")
+def export_csv():
+    # --- Admin gate ---
+    ok, err = require_admin_from_query()
+    if not ok:
+        msg, code = err
+        return jsonify({"success": False, "message": msg}), code
+
+    try:
+        users = users_collection.find()
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(["user_id", "username", "xp", "weekly_xp", "referral_count", "weekly_referral_count", "monthly_xp", "status"])
+        for u in users:
+            writer.writerow([
+                u.get("user_id"),
+                u.get("username", ""),
+                u.get("xp", 0),
+                u.get("weekly_xp", 0),
+                u.get("referral_count", 0),
+                u.get("weekly_referral_count", 0),
+                u.get("monthly_xp", 0),
+                u.get("status", "Normal"),
+            ])
+        output.seek(0)
+        return output.getvalue()
+    except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 
 # ----------------------------
