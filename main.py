@@ -35,8 +35,45 @@ db = client["referral_bot"]
 users_collection = db["users"]
 history_collection = db["weekly_leaderboard_history"]
 bonus_voucher_collection = db["bonus_voucher"]
+admin_cache_col = db["admin_cache"]
 
 app_bot = ApplicationBuilder().token(BOT_TOKEN).build()
+
+def ensure_indexes():
+    """
+    Ensure TTL index on bonus_voucher.end_time so docs auto-expire exactly at end_time.
+    If an old index exists with different options, drop and recreate.
+    """
+    idx_name = "ttl_end_time"
+    try:
+        bonus_voucher_collection.create_index(
+            [("end_time", 1)],
+            expireAfterSeconds=0,
+            name=idx_name,
+        )
+        print("✅ TTL index ensured on bonus_voucher.end_time")
+    except Exception as e:
+        # If an index exists with different options, fix it
+        msg = str(e)
+        if "already exists with different options" in msg or "ExpireAfterSeconds" in msg or "expireAfterSeconds" in msg:
+            try:
+                bonus_voucher_collection.drop_index(idx_name)
+            except Exception:
+                # fallback: find index by key
+                for ix in bonus_voucher_collection.list_indexes():
+                    if ix.get("key") == {"end_time": 1}:
+                        bonus_voucher_collection.drop_index(ix["name"])
+                        break
+            bonus_voucher_collection.create_index(
+                [("end_time", 1)],
+                expireAfterSeconds=0,
+                name=idx_name,
+            )
+            print("🔁 Recreated TTL index on bonus_voucher.end_time")
+        else:
+            print("⚠️ ensure_indexes error:", e)
+
+ensure_indexes()
 
 def require_admin_from_query():
     caller_id = request.args.get("user_id", type=int)
@@ -57,7 +94,23 @@ def is_user_admin(user_id):
     except Exception as e:
         print("[Admin Check Error]", e)
         return False
-        
+
+def get_admin_ids_cached(ttl_secs=900):
+    doc = admin_cache_col.find_one({"_id": "admins"})
+    now = datetime.utcnow()
+    if doc and (now - doc["refreshed_at"]).total_seconds() < ttl_secs:
+        return set(doc["ids"])
+
+    # refresh from Telegram once
+    admins = asyncio.run(app_bot.bot.get_chat_administrators(chat_id=GROUP_ID))
+    ids = [a.user.id for a in admins]
+    admin_cache_col.update_one(
+        {"_id": "admins"},
+        {"$set": {"ids": ids, "refreshed_at": now}},
+        upsert=True
+    )
+    return set(ids)
+    
 # ----------------------------
 # Flask App
 # ----------------------------
@@ -209,31 +262,16 @@ def api_referral():
 def api_is_admin():
     try:
         user_id = int(request.args.get("user_id"))
-        user_record = users_collection.find_one({"user_id": user_id})
+        is_admin = user_id in get_admin_ids_cached()
 
-        # ✅ If cached and fresh (within 10 mins), use it
-        if user_record and "is_admin_checked_at" in user_record:
-            if (datetime.utcnow() - user_record["is_admin_checked_at"]).total_seconds() < 600:
-                return jsonify({"success": True, "is_admin": user_record.get("is_admin", False)})
-
-        # ❌ Otherwise, fetch once from Telegram
-        admins = asyncio.run(app_bot.bot.get_chat_administrators(chat_id=GROUP_ID))
-        is_admin = any(admin.user.id == user_id for admin in admins)
-
-        # ✅ Save to DB
+        # also cache per-user for UI speed (optional)
         users_collection.update_one(
             {"user_id": user_id},
-            {"$set": {
-                "is_admin": is_admin,
-                "is_admin_checked_at": datetime.utcnow()
-            }},
+            {"$set": {"is_admin": is_admin, "is_admin_checked_at": datetime.utcnow()}},
             upsert=True
         )
-
         return jsonify({"success": True, "is_admin": is_admin})
-
     except Exception as e:
-        import traceback
         traceback.print_exc()
         return jsonify({"success": False, "error": str(e)}), 500
 
@@ -390,47 +428,29 @@ def get_bonus_voucher():
     try:
         user_id = int(request.args.get("user_id"))
         user = users_collection.find_one({"user_id": user_id})
-
         if not user:
             return jsonify({"code": None})
 
-        # Check admin status correctly using helper
         is_admin = user.get("is_admin", False)
         is_vip = user.get("status") == "VIP1"
-
-        # Only allow VIP1 or admin to proceed
         if not is_vip and not is_admin:
-            print("[VOUCHER] User not eligible (not VIP1 or admin).")
             return jsonify({"code": None})
 
         now = datetime.utcnow().replace(tzinfo=pytz.UTC)
 
-        # Auto-delete expired vouchers
-        bonus_voucher_collection.delete_many({"end_time": {"$lt": now}})
-
         voucher = bonus_voucher_collection.find_one()
         if not voucher:
-            print("[VOUCHER] No voucher found.")
             return jsonify({"code": None})
 
         start = voucher["start_time"]
         end = voucher["end_time"]
-        if start.tzinfo is None:
-            start = start.replace(tzinfo=pytz.UTC)
-        if end.tzinfo is None:
-            end = end.replace(tzinfo=pytz.UTC)
-
-        print(f"[VOUCHER] Current server time: {now.isoformat()}")
-        print(f"[VOUCHER] Voucher start: {start.isoformat()}, end: {end.isoformat()}")
+        if start.tzinfo is None: start = start.replace(tzinfo=pytz.UTC)
+        if end.tzinfo is None:   end   = end.replace(tzinfo=pytz.UTC)
 
         if start <= now <= end:
-            print("[VOUCHER] Voucher is active and user is eligible.")
             return jsonify({"code": voucher["code"]})
-        else:
-            print("[VOUCHER] Voucher not active.")
-            return jsonify({"code": None})
+        return jsonify({"code": None})
     except Exception as e:
-        print("[VOUCHER] Exception:", e)
         return jsonify({"code": None, "error": str(e)}), 500
 
 @app.route("/api/add_xp", methods=["POST"])
@@ -607,10 +627,6 @@ def reset_weekly_xp():
     })
 
     print(f"✅ Weekly XP & referrals reset complete at {now}")
-
-from pymongo import DESCENDING
-from pytz import timezone
-from datetime import datetime
 
 def fix_user_monthly_xp(user_id):
     user = users_collection.find_one({"user_id": user_id})
@@ -821,22 +837,50 @@ async def button_handler(update, context):
 # Run Bot + Flask + Scheduler
 # ----------------------------
 if __name__ == "__main__":
-    Thread(target=lambda: app.run(host="0.0.0.0", port=8080)).start()
-    
-    # Boot-time catch-up for missed weekly resets
+    # Serve Flask in a side thread
+    Thread(target=lambda: app.run(host="0.0.0.0", port=8080), daemon=True).start()
+
+    # Catch up if a reset was missed while the app was down
     run_boot_catchup()
 
+    # Telegram handlers
     app_bot.add_handler(CommandHandler("start", start))
     app_bot.add_handler(ChatMemberHandler(member_update_handler, ChatMemberHandler.CHAT_MEMBER))
     app_bot.add_handler(CallbackQueryHandler(button_handler))
 
-    scheduler = BackgroundScheduler(timezone=tz)
-    scheduler.add_job(reset_weekly_xp, trigger=CronTrigger(day_of_week="mon", hour=0, minute=0), name="Weekly XP Reset")
-    scheduler.add_job(update_monthly_vip_status, trigger=CronTrigger(day=1, hour=0, minute=0), name="Monthly VIP Status Update")
+    # Single scheduler with resilience settings
+    scheduler = BackgroundScheduler(
+        timezone=tz,
+        job_defaults={
+            "coalesce": True,           # merge missed runs into one
+            "misfire_grace_time": 3600, # run if missed by <= 1 hour
+            "max_instances": 1
+        }
+    )
+
+    scheduler.add_job(
+        reset_weekly_xp,
+        trigger=CronTrigger(day_of_week="mon", hour=0, minute=0),
+        id="weekly_reset",
+        name="Weekly XP Reset",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        update_monthly_vip_status,
+        trigger=CronTrigger(day=1, hour=0, minute=0),
+        id="monthly_vip",
+        name="Monthly VIP Status Update",
+        replace_existing=True,
+    )
     scheduler.start()
 
     print("✅ Bot & Scheduler running...")
-    app_bot.run_polling(
-    poll_interval=5,
-    allowed_updates=["message", "callback_query", "chat_member"]
-)
+
+    try:
+        app_bot.run_polling(
+            poll_interval=5,
+            allowed_updates=["message", "callback_query", "chat_member"]
+        )
+    finally:
+        scheduler.shutdown(wait=False)
+
