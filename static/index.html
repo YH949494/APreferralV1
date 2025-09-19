@@ -1,98 +1,8 @@
-<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="UTF-8">
-  <title>Referral & Check-in</title>
-  <script src="https://telegram.org/js/telegram-web-app.js"></script>
-  <style>
-    body {
-      background-color: #f4f4f4;
-      font-family: 'Arial', sans-serif;
-      padding: 20px;
-      color: #333;
-      font-size: 16px;
-    }
-    h2, h3 {
-      text-align: left;
-      font-weight: 600;
-    }
-    .section {
-      background: #ffffff;
-      padding: 20px;
-      margin: 15px 0;
-      border-radius: 10px;
-      box-shadow: 0 2px 6px rgba(0, 0, 0, 0.1);
-    }
-    button {
-      background-color: #0088cc;
-      color: white;
-      padding: 10px 20px;
-      font-size: 15px;
-      border: none;
-      border-radius: 6px;
-      cursor: pointer;
-      font-family: inherit;
-      margin: 5px 0;
-    }
-    button:hover {
-      background-color: #006699;
-    }
-    #referral-link, #checkin-result, #checkin-timer {
-      margin-top: 10px;
-      font-size: 15px;
-    }
-    #leaderboard-output {
-      margin-top: 10px;
-      font-family: 'Courier New', monospace;
-      white-space: pre-wrap;
-      background: #f9f9f9;
-      padding: 15px;
-      border-radius: 8px;
-      border: 1px solid #ddd;
-      font-size: 13px; /* smaller font size */
-      line-height: 1.4; /* optional for tighter spacing */
-      overflow-x: auto; /* horizontal scroll if needed */
-    }
-    #admin-panel {
-      display: none;
-      background: #fff4e6;
-      border: 1px solid #ffcc80;
-    }
-    #admin-panel h3 {
-      color: #d17c00;
-    }
-    .modal {
-      display: none;
-      position: fixed;
-      z-index: 1000;
-      left: 0; top: 0;
-      width: 100%; height: 100%;
-      background: rgba(0, 0, 0, 0.5);
-      justify-content: center;
-      align-items: center;
-    }
-    .modal-content {
-      background: #fff;
-      padding: 20px;
-      border-radius: 10px;
-      text-align: center;
-      width: 300px;
-    }
-    input[type="text"], input[type="number"] {
-      width: 90%;
-      padding: 10px;
-      margin: 8px 0;
-      border-radius: 6px;
-      border: 1px solid #ccc;
-      font-size: 14px;
-    }
-  </style>
-</head>
-<body>
+<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Referral & Check-in</title><script src="https://telegram.org/js/telegram-web-app.js"></script><style>body{background-color:#f4f4f4;font-family:'Arial',sans-serif;padding:20px;color:#333;font-size:16px}h2,h3{text-align:left;font-weight:600}.section{background:#fff;padding:20px;margin:15px 0;border-radius:10px;box-shadow:0 2px 6px rgba(0,0,0,.1)}button{background-color:#0088cc;color:#fff;padding:10px 20px;font-size:15px;border:none;border-radius:6px;cursor:pointer;font-family:inherit;margin:5px 0}button:hover{background-color:#006699}#referral-link,#checkin-result,#checkin-timer{margin-top:10px;font-size:15px}#leaderboard-output{margin-top:10px;font-family:'Courier New',monospace;white-space:pre-wrap;background:#f9f9f9;padding:15px;border-radius:8px;border:1px solid #ddd;font-size:13px;line-height:1.4;overflow-x:auto}#admin-panel{display:none;background:#fff4e6;border:1px solid #ffcc80}#admin-panel h3{color:#d17c00}.modal{display:none;position:fixed;z-index:1000;left:0;top:0;width:100%;height:100%;background:rgba(0,0,0,.5);justify-content:center;align-items:center}.modal-content{background:#fff;padding:20px;border-radius:10px;text-align:center;width:300px}input[type=text],input[type=number]{width:90%;padding:10px;margin:8px 0;border-radius:6px;border:1px solid #ccc;font-size:14px}</style></head><body>
   <h2>🎯 Referral & Daily Check-in</h2>
 
   <!-- Add this button somewhere under your check-in UI -->
-<div class="event-section" style="margin-top:20px; text-align:keft;">
+<div class="event-section" style="margin-top:20px; text-align:left;">
   <button id="eventBtn" 
           style="padding:10px 20px; border:none; border-radius:8px; background:#007bff; color:#fff; font-size:16px; cursor:pointer;">
     📢 Current Event
@@ -220,14 +130,33 @@
     const API_BASE = "https://apreferralv1.fly.dev";
     const user = tg.initDataUnsafe?.user || {};
     const userId = user.id;
-    let regionMsg = ""; 
     const username = user.username || user.first_name || "";
-
+    let regionMsg = ""; 
+    let latestReferralLink = "";
+    
     if (!userId) {
       document.body.innerHTML = "<p style='color:red;'>❌ User ID not found. Please open this Mini App inside Telegram.</p>";
     }
 
-    let latestReferralLink = "";
+        // Countdown
+    function startCountdown(nextCheckinTimeISO) {
+      const el = document.getElementById("checkin-timer");
+      const end = new Date(nextCheckinTimeISO).getTime();
+      function update() {
+        const now = Date.now();
+        const d = end - now;
+        if (d <= 0) {
+          el.innerText = "🎉 You can check in again now!";
+          return;
+        }
+        const h = Math.floor(d / 3600000);
+        const m = Math.floor((d % 3600000) / 60000);
+        const sFixed = Math.floor((d % 60000) / 1000);
+        el.innerText = `⏳ Next check-in: ${h}h ${m}m ${sFixed}s`;
+        setTimeout(update, 1000);
+      }
+      update();
+    }
 
     async function checkIn() {
       const regionMsg = document.getElementById("region-message").innerText;
@@ -302,33 +231,6 @@
         alert("❌ Copy failed. Please copy manually.");
       }
     }
-
-   function startCountdown(nextCheckinTimeISO) {
-  const el = document.getElementById("checkin-timer");
-  const end = new Date(nextCheckinTimeISO).getTime();
-
-  function update() {
-    const now = Date.now();
-    const d = end - now;
-
-    if (d <= 0) {
-      el.innerText = "🎉 You can check in again now!";
-      return;
-    }
-
-    const h = Math.floor(d / 3600000);
-    const m = Math.floor((d % 3600000) / 60000);
-    const s = Math.floor((d % 60000) / 1000); // ❌ incorrect
-
-    // ✅ FIX:
-    const sFixed = Math.floor((d % 60000) / 1000); 
-    el.innerText = `⏳ Next check-in: ${h}h ${m}m ${sFixed}s`;
-
-    setTimeout(update, 1000);
-  }
-
-  update();
-}
 
   async function handleAdminAndVoucher() {
     try {
@@ -458,38 +360,30 @@ async function loadPreviousLeaderboard() {
     }
 
     async function submitXPChange() {
-      const input = document.getElementById("xp-user").value.trim();
-      const amount = parseInt(document.getElementById("xp-amount").value.trim());
+  const input = document.getElementById("xp-user").value.trim();
+  const amount = parseInt(document.getElementById("xp-amount").value.trim());
 
-      if (!input || isNaN(amount)) {
-        alert("Please enter both @username and amount.");
-        return;
-      }
+  if (!input || isNaN(amount)) {
+    alert("Please enter both @username and amount.");
+    return;
+  }
 
-      try {
-        const res = await fetch(`${API_BASE}/api/add_xp`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ user_id: input, xp: amount })
-        });
-        const data = await res.json();
-        alert(data.message || "XP updated.");
-        if (data.success) {
-          loadLeaderboard();
-        }
-      } catch (err) {
-        alert("❌ Failed to connect to server.");
-        console.error("Add XP error:", err);
-      }
+  try {
+    const res = await fetch(`${API_BASE}/api/add_xp?user_id=${userId}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ user_id: input, xp: amount })
+    });
+    const data = await res.json();
+    alert(data.message || "XP updated.");
+    if (data.success) {
+      loadLeaderboard();
     }
-
-    function viewJoinRequests() {
-      alert("Coming soon: View Join Requests.");
-    }
-
-    function exportCSV() {
-      alert("Coming soon: Export CSV.");
-    }
+  } catch (err) {
+    alert("❌ Failed to connect to server.");
+    console.error("Add XP error:", err);
+  }
+}
 
     function copyVoucherCode() {
       const code = document.getElementById("voucher-code").innerText;
@@ -505,39 +399,36 @@ function closeVoucherModal() {
   document.getElementById("voucher-modal").style.display = "none";
 }
 
-async function submitVoucher() {
-  const code = document.getElementById("voucher-code-input").value.trim();
-  const releaseAt = document.getElementById("voucher-expiry-input").value;
-
-  if (!code || !releaseAt) {
-    alert("Please enter both voucher code and release time.");
-    return;
-  }
-
-  try {
-    const payload = {
-      code,
-      release_time: new Date(releaseAt).toISOString().replace(".000Z", "Z")
-    };
-
-    const res = await fetch(`${API_BASE}/api/admin/set_bonus`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload)
-    });
-
-    const data = await res.json();
-
-    alert(data.message || "Voucher scheduled.");
-    if (data.status === "success") {
-      closeVoucherModal();
-      handleAdminAndVoucher(); // refresh bonus section
+ async function submitVoucher() {
+      const code = document.getElementById("voucher-code-input").value.trim();
+      const releaseAt = document.getElementById("voucher-expiry-input").value;
+      if (!code || !releaseAt) {
+        alert("Please enter both voucher code and release time.");
+        return;
+      }
+      try {
+        const payload = {
+          code,
+          release_time: new Date(releaseAt).toISOString().replace(".000Z", "Z")
+        };
+        const res = await fetch(`${API_BASE}/api/admin/set_bonus?user_id=${userId}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        });
+        const data = await res.json();
+        if (data.status === "success") {
+          alert("✅ Voucher scheduled.");
+          closeVoucherModal();
+          handleAdminAndVoucher();
+        } else {
+          alert("❌ " + (data.message || "Failed to schedule voucher."));
+        }
+      } catch (err) {
+        alert("❌ Failed to schedule voucher.");
+        console.error("Voucher error:", err);
+      }
     }
-  } catch (err) {
-    alert("❌ Failed to schedule voucher.");
-    console.error("Voucher error:", err);
-  }
-}
    
 async function checkRegionStatus() {
   try {
@@ -561,7 +452,6 @@ async function checkRegionStatus() {
     console.error("Region check failed:", err);
   }
 }
-
 
 async function setRegion() {
   const region = document.getElementById("region-select").value;
@@ -589,7 +479,40 @@ async function setRegion() {
     console.error("Set region error:", err);
   }
 }
-    
+
+    async function viewJoinRequests() {
+  try {
+    const res = await fetch(`${API_BASE}/api/join_requests?user_id=${userId}`);
+    const data = await res.json();
+    if (!data.success) throw new Error(data.error || "Failed to load");
+
+    const list = data.requests.map(r => `• @${r.username || r.user_id}`).join("\n");
+    alert(list || "No pending join requests.");
+  } catch (e) {
+    alert("❌ Error loading join requests.");
+    console.error(e);
+  }
+}
+
+async function exportCSV() {
+  try {
+    const res = await fetch(`${API_BASE}/api/export_csv?user_id=${userId}`);
+    const csv = await res.text();
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `users_${new Date().toISOString().slice(0,10)}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  } catch (e) {
+    alert("❌ Error exporting CSV.");
+    console.error(e);
+  }
+}
+
     window.onload = () => {
       checkRegionStatus();
       handleAdminAndVoucher();
