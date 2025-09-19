@@ -65,12 +65,14 @@ def increment_referral(referrer_id):
         {
             "$inc": {
                 "referral_count": 1,
-                "xp": 20,           # Lifetime XP
-                "weekly_xp": 20,    # Weekly XP ✅
-                "monthly_xp": 20    # Monthly XP ✅
+                "weekly_referral_count": 1,  # ✅ align with live app / weekly board
+                "xp": 20,            # Lifetime XP
+                "weekly_xp": 20,     # Weekly XP
+                "monthly_xp": 20     # Monthly XP
             }
         }
     )
+
 
 # === RETRIEVE STATS ===
 def get_user_stats(user_id):
@@ -108,20 +110,36 @@ def update_user_xp(username, amount):
     return True, f"XP {'added' if amount > 0 else 'reduced'} by {abs(amount)}."
 
 def save_weekly_snapshot():
-    leaderboard = {
-        "week_start": (datetime.datetime.utcnow() - datetime.timedelta(days=7)).strftime("%Y-%m-%d"),
-        "week_end": datetime.datetime.utcnow().strftime("%Y-%m-%d"),
-        "checkin_leaderboard": list(
-            users_collection.find({}, {"username": 1, "weekly_xp": 1})
-            .sort("weekly_xp", -1).limit(15)
-        ),
-        "referral_leaderboard": list(
-            users_collection.find({}, {"username": 1, "referral_count": 1})
-            .sort("referral_count", -1).limit(15)
-        ),
-        "created_at": datetime.datetime.utcnow()
-    }
-    db.leaderboard_history.insert_one(leaderboard)
+    now = datetime.datetime.utcnow()
+    week_start = (now - datetime.timedelta(days=7)).strftime("%Y-%m-%d")
+    week_end = now.strftime("%Y-%m-%d")
 
-    # ✅ Reset for new week
-    users_collection.update_many({}, {"$set": {"weekly_xp": 0, "referral_count": 0}})
+    # Top lists (limit can be adjusted)
+    top_checkins = list(
+        users_collection.find({}, {"user_id": 1, "username": 1, "weekly_xp": 1})
+        .sort("weekly_xp", -1).limit(50)
+    )
+    top_referrals = list(
+        users_collection.find({}, {"user_id": 1, "username": 1, "weekly_referral_count": 1})
+        .sort("weekly_referral_count", -1).limit(50)
+    )
+
+    # ✅ Match main app's collection & fields
+    db["weekly_leaderboard_history"].insert_one({
+        "week_start": week_start,
+        "week_end": week_end,
+        "checkin_leaderboard": [
+            {"user_id": u["user_id"], "username": u.get("username"), "weekly_xp": u.get("weekly_xp", 0)}
+            for u in top_checkins
+        ],
+        "referral_leaderboard": [
+            {"user_id": u["user_id"], "username": u.get("username"), "weekly_referral_count": u.get("weekly_referral_count", 0)}
+            for u in top_referrals
+        ],
+        "archived_at": now
+    })
+
+    # ✅ Reset weekly counters for the new week
+    users_collection.update_many({}, {
+        "$set": {"weekly_xp": 0, "weekly_referral_count": 0}
+    })
