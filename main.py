@@ -88,6 +88,9 @@ def ensure_indexes():
 
 ensure_indexes()
 
+app = Flask(__name__, static_folder="static")
+CORS(app, resources={r"/*": {"origins": "*"}})
+
 def require_admin_from_query():
     caller_id = request.args.get("user_id", type=int)
     if not caller_id:
@@ -138,16 +141,6 @@ async def refresh_admin_ids(context: ContextTypes.DEFAULT_TYPE):
         print(f"👑 Admin cache refreshed: {len(ids)} IDs")
     except Exception as e:
         print(f"⚠️ refresh_admin_ids error: {e}")
-        
-# ----------------------------
-# Flask App
-# ----------------------------
-app = Flask(__name__, static_folder="static")
-CORS(app, resources={r"/*": {"origins": "*"}})
-
-import pytz
-from datetime import datetime, timedelta
-from flask import request, jsonify
 
 # -------------------------------
 # ✅ Daily Check-in Logic
