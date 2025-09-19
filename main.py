@@ -625,7 +625,6 @@ def fix_user_monthly_xp(user_id):
     return False
 
 def run_boot_catchup():
-    """Run weekly and monthly catch-up if missed due to downtime and fix missing XP for old users."""
     tz_kl = timezone("Asia/Kuala_Lumpur")
     now = datetime.now(tz_kl)
 
@@ -640,6 +639,7 @@ def run_boot_catchup():
             days_since = 999
             print("⚠️ No weekly reset history found.")
 
+        # ✅ Only run if it's Monday and last reset was a week+ ago
         if now.weekday() == 0 and days_since >= 6:
             print("⚠️ Missed weekly reset. Running now...")
             reset_weekly_xp()
@@ -652,28 +652,15 @@ def run_boot_catchup():
             sort=[("last_status_update", DESCENDING)]
         )
 
-        if (
-            not sample_user
-            or sample_user["last_status_update"].month != now.month
-            or sample_user["last_status_update"].year != now.year
-        ):
+        last_month = sample_user["last_status_update"].month if sample_user else None
+        last_year = sample_user["last_status_update"].year if sample_user else None
+
+        # ✅ Only run if it's the 1st day of month and last update not this month
+        if now.day == 1 and (not sample_user or last_month != now.month or last_year != now.year):
             print("⚠️ Missed monthly VIP update. Running now...")
             update_monthly_vip_status()
         else:
             print("✅ No monthly catch-up needed.")
-
-        # --- Auto-fix missing XP for old users ---
-        print("🔄 Starting auto-fix for missing XP on all users...")
-        all_users = users_collection.find({})
-        fixed_weekly_count = 0
-        fixed_monthly_count = 0
-        for user in all_users:
-            user_id = user["user_id"]
-            if not user_id:
-                continue  # Skip if no user_id present
-            if fix_user_monthly_xp(user_id):
-                fixed_monthly_count += 1
-        print(f"✅ Auto-fix completed. Weekly XP fixed for {fixed_weekly_count} users, Monthly XP fixed for {fixed_monthly_count} users.")
 
     except Exception as e:
         print(f"❌ Boot-time catch-up failed: {e}")
