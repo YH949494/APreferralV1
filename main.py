@@ -598,16 +598,20 @@ def export_csv():
 # ----------------------------
 # Weekly XP Reset Job
 # ----------------------------
-tz = timezone("Asia/Kuala_Lumpur")
-
 def reset_weekly_xp():
-    now = datetime.now(tz)
-    top_checkin = list(users_collection.find().sort("weekly_xp", DESCENDING).limit(50))
-    top_referrals = list(users_collection.find().sort("weekly_referral_count", DESCENDING).limit(50))
+    now = datetime.now(tz)  # tz = Asia/Kuala_Lumpur
+
+    # Last full week [Mon..Sun], assuming this runs every Monday 00:00 KL
+    week_end_date = (now - timedelta(days=1)).date()      # Sunday
+    week_start_date = week_end_date - timedelta(days=6)   # Monday
+
+    proj = {"user_id": 1, "username": 1, "weekly_xp": 1, "weekly_referral_count": 1}
+    top_checkin   = list(users_collection.find({}, proj).sort("weekly_xp", DESCENDING).limit(50))
+    top_referrals = list(users_collection.find({}, proj).sort("weekly_referral_count", DESCENDING).limit(50))
 
     history_collection.insert_one({
-        "week_start": (now - timedelta(days=7)).strftime('%Y-%m-%d'),
-        "week_end": now.strftime('%Y-%m-%d'),
+        "week_start": week_start_date.isoformat(),
+        "week_end":   week_end_date.isoformat(),
         "checkin_leaderboard": [
             {"user_id": u["user_id"], "username": u.get("username", "unknown"), "weekly_xp": u.get("weekly_xp", 0)}
             for u in top_checkin
@@ -616,67 +620,71 @@ def reset_weekly_xp():
             {"user_id": u["user_id"], "username": u.get("username", "unknown"), "weekly_referral_count": u.get("weekly_referral_count", 0)}
             for u in top_referrals
         ],
-        "archived_at": now
+        # store as UTC so later math is safe
+        "archived_at": datetime.utcnow()
     })
 
     users_collection.update_many({}, {
-        "$set": {
-            "weekly_xp": 0,
-            "weekly_referral_count": 0  # ✅ add this for weekly leaderboard
-        }
+        "$set": {"weekly_xp": 0, "weekly_referral_count": 0}
     })
 
     print(f"✅ Weekly XP & referrals reset complete at {now}")
 
-def fix_user_monthly_xp(user_id):
-    user = users_collection.find_one({"user_id": user_id})
-    if user and "monthly_xp" not in user:
-        # calculate XP somehow or set to 0
-        users_collection.update_one(
-            {"user_id": user_id},
-            {"$set": {"monthly_xp": 0}}
-        )
-        print(f"Set missing monthly_xp for user {user_id} to 0")
-        return True
-    return False
+meta = db["meta"]
+
+def one_time_fix_monthly_xp():
+    # run once ever
+    if meta.find_one({"_id": "fix_monthly_xp_done"}):
+        return
+    res = users_collection.update_many(
+        {"monthly_xp": {"$exists": False}},
+        {"$set": {"monthly_xp": 0}}
+    )
+    meta.update_one(
+        {"_id": "fix_monthly_xp_done"},
+        {"$set": {"done_at": datetime.utcnow(), "modified": res.modified_count}},
+        upsert=True
+    )
+    print(f"🔧 monthly_xp backfilled on first boot. Modified: {res.modified_count}")
 
 def run_boot_catchup():
     tz_kl = timezone("Asia/Kuala_Lumpur")
     now = datetime.now(tz_kl)
 
     try:
-        # --- Weekly catch-up ---
+        # weekly catch-up (only on Monday)
         last_history = history_collection.find_one(sort=[("archived_at", DESCENDING)])
         if last_history:
-            last_reset = last_history["archived_at"].astimezone(tz_kl)
+            last_raw = last_history["archived_at"]
+            if last_raw.tzinfo is None:
+                last_reset = last_raw.replace(tzinfo=pytz.UTC).astimezone(tz_kl)
+            else:
+                last_reset = last_raw.astimezone(tz_kl)
             days_since = (now - last_reset).days
-            print(f"📅 Last weekly reset: {last_reset}, {days_since} days ago.")
         else:
             days_since = 999
-            print("⚠️ No weekly reset history found.")
 
-        # ✅ Only run if it's Monday and last reset was a week+ ago
         if now.weekday() == 0 and days_since >= 6:
             print("⚠️ Missed weekly reset. Running now...")
             reset_weekly_xp()
         else:
             print("✅ No weekly catch-up needed.")
 
-        # --- Monthly catch-up ---
+        # monthly catch-up (only on the 1st)
         sample_user = users_collection.find_one(
             {"last_status_update": {"$exists": True}},
             sort=[("last_status_update", DESCENDING)]
         )
-
         last_month = sample_user["last_status_update"].month if sample_user else None
-        last_year = sample_user["last_status_update"].year if sample_user else None
-
-        # ✅ Only run if it's the 1st day of month and last update not this month
+        last_year  = sample_user["last_status_update"].year  if sample_user else None
         if now.day == 1 and (not sample_user or last_month != now.month or last_year != now.year):
             print("⚠️ Missed monthly VIP update. Running now...")
             update_monthly_vip_status()
         else:
             print("✅ No monthly catch-up needed.")
+
+        # one-time migration instead of scanning every boot
+        one_time_fix_monthly_xp()
 
     except Exception as e:
         print(f"❌ Boot-time catch-up failed: {e}")
