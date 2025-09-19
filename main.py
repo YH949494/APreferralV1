@@ -2,8 +2,13 @@ from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 from threading import Thread
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
-from telegram.ext import ChatMemberHandler, CallbackQueryHandler
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    ChatMemberHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+)
 from checkin import handle_checkin
 from referral import get_or_create_referral_link
 from pymongo import MongoClient, DESCENDING
@@ -40,6 +45,13 @@ admin_cache_col = db["admin_cache"]
 
 app_bot = ApplicationBuilder().token(BOT_TOKEN).build()
 
+def call_bot_in_loop(coro, timeout=15):
+    loop = getattr(app_bot, "_running_loop", None)
+    if loop is None:
+        raise RuntimeError("Bot loop not running yet")
+    fut = asyncio.run_coroutine_threadsafe(coro, loop)
+    return fut.result(timeout=timeout)
+    
 def ensure_indexes():
     """
     Ensure TTL index on bonus_voucher.end_time so docs auto-expire exactly at end_time.
@@ -81,37 +93,52 @@ def require_admin_from_query():
     if not caller_id:
         return False, ("Missing user_id", 400)
 
-    user = users_collection.find_one({"user_id": caller_id}) or {}
-    # Trust the cached is_admin populated by /api/is_admin
-    if not user.get("is_admin", False):
+    doc = admin_cache_col.find_one({"_id": "admins"}) or {}
+    ids = set(doc.get("ids", []))
+    if caller_id not in ids:
         return False, ("Admins only", 403)
 
     return True, None
     
-def is_user_admin(user_id):
+@app.route("/api/is_admin")
+def api_is_admin():
     try:
-        admins = asyncio.run(app_bot.bot.get_chat_administrators(chat_id=GROUP_ID))
-        return any(admin.user.id == user_id for admin in admins)
+        user_id = int(request.args.get("user_id"))
+
+        doc = admin_cache_col.find_one({"_id": "admins"}) or {}
+        ids = set(doc.get("ids", []))
+        is_admin = user_id in ids
+
+        # optional: cache a per-user flag for faster UI checks
+        users_collection.update_one(
+            {"user_id": user_id},
+            {"$set": {"is_admin": is_admin, "is_admin_checked_at": datetime.utcnow()}},
+            upsert=True
+        )
+
+        return jsonify({
+            "success": True,
+            "is_admin": is_admin,
+            "source": "cache",
+            "refreshed_at": doc.get("refreshed_at")
+        })
     except Exception as e:
-        print("[Admin Check Error]", e)
-        return False
+        traceback.print_exc()
+        return jsonify({"success": False, "error": str(e)}), 500
 
-def get_admin_ids_cached(ttl_secs=900):
-    doc = admin_cache_col.find_one({"_id": "admins"})
-    now = datetime.utcnow()
-    if doc and (now - doc["refreshed_at"]).total_seconds() < ttl_secs:
-        return set(doc["ids"])
-
-    # refresh from Telegram once
-    admins = asyncio.run(app_bot.bot.get_chat_administrators(chat_id=GROUP_ID))
-    ids = [a.user.id for a in admins]
-    admin_cache_col.update_one(
-        {"_id": "admins"},
-        {"$set": {"ids": ids, "refreshed_at": now}},
-        upsert=True
-    )
-    return set(ids)
-    
+async def refresh_admin_ids(context: ContextTypes.DEFAULT_TYPE):
+    try:
+        admins = await context.bot.get_chat_administrators(chat_id=GROUP_ID)
+        ids = [a.user.id for a in admins]
+        admin_cache_col.update_one(
+            {"_id": "admins"},
+            {"$set": {"ids": ids, "refreshed_at": datetime.utcnow()}},
+            upsert=True,
+        )
+        print(f"👑 Admin cache refreshed: {len(ids)} IDs")
+    except Exception as e:
+        print(f"⚠️ refresh_admin_ids error: {e}")
+        
 # ----------------------------
 # Flask App
 # ----------------------------
@@ -253,30 +280,14 @@ def api_referral():
     try:
         user_id = int(request.args.get("user_id"))
         username = request.args.get("username") or "unknown"
-        referral_link = asyncio.run(get_or_create_referral_link(app_bot.bot, user_id, username))
+        referral_link = call_bot_in_loop(
+            get_or_create_referral_link(app_bot.bot, user_id, username)
+        )
         return jsonify({"success": True, "referral_link": referral_link})
     except Exception as e:
         traceback.print_exc()
         return jsonify({"success": False, "error": str(e)}), 500
 
-@app.route("/api/is_admin")
-def api_is_admin():
-    try:
-        user_id = int(request.args.get("user_id"))
-        is_admin = user_id in get_admin_ids_cached()
-
-        # also cache per-user for UI speed (optional)
-        users_collection.update_one(
-            {"user_id": user_id},
-            {"$set": {"is_admin": is_admin, "is_admin_checked_at": datetime.utcnow()}},
-            upsert=True
-        )
-        return jsonify({"success": True, "is_admin": is_admin})
-    except Exception as e:
-        traceback.print_exc()
-        return jsonify({"success": False, "error": str(e)}), 500
-
-# Helper to mask usernames for non-admin views
 def mask_username(username):
     if not username:
         return "********"
@@ -482,17 +493,16 @@ def api_add_xp():
 
 @app.route("/api/join_requests")
 def api_join_requests():
-    # --- Admin gate ---
     ok, err = require_admin_from_query()
     if not ok:
         msg, code = err
         return jsonify({"success": False, "message": msg}), code
-
     try:
-        requests = asyncio.run(app_bot.bot.get_chat_join_requests(chat_id=GROUP_ID))
-        result = [{"user_id": req.from_user.id, "username": req.from_user.username} for req in requests]
+        requests = call_bot_in_loop(app_bot.bot.get_chat_join_requests(chat_id=GROUP_ID))
+        result = [{"user_id": r.from_user.id, "username": r.from_user.username} for r in requests]
         return jsonify({"success": True, "requests": result})
     except Exception as e:
+        traceback.print_exc()
         return jsonify({"success": False, "error": str(e)}), 500
 
 @app.route("/api/starterpack", methods=["POST"])
@@ -885,6 +895,16 @@ if __name__ == "__main__":
 
     print("✅ Bot & Scheduler running...")
 
+    app_bot.job_queue.run_once(
+        refresh_admin_ids,
+        when=0  # run immediately as the job queue starts
+    )
+    app_bot.job_queue.run_repeating(
+        refresh_admin_ids,
+        interval=timedelta(minutes=10),
+        first=timedelta(seconds=0),
+    )
+    
     try:
         app_bot.run_polling(
             poll_interval=5,
