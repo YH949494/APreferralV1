@@ -1,6 +1,7 @@
 python-telegram-bot==20.8
 pymongo==4.6.1
-flask==3.0.3
+Flask==3.0.3
 flask-cors==4.0.0
-apscheduler==3.10.4
+APScheduler==3.10.4
 pytz
+requests>=2.32.0
