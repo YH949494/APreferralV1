@@ -10,7 +10,6 @@ from telegram.ext import (
     ContextTypes,
 )
 from checkin import handle_checkin
-from referral import get_or_create_referral_link
 from pymongo import MongoClient, DESCENDING
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -325,8 +324,10 @@ def api_referral():
         link = get_or_create_referral_invite_link_sync(user_id, username)
         return jsonify({"success": True, "referral_link": link})
     except Exception as e:
-        traceback.print_exc()
-        return jsonify({"success": False, "error": str(e)}), 500
+        # optional: include a fallback deeplink if available
+        bot_username = os.environ.get("BOT_USERNAME", "")
+        fallback = f"https://t.me/{bot_username}?start=ref{request.args.get('user_id')}" if bot_username else ""
+        return jsonify({"success": False, "error": str(e), "fallback": fallback}), 500
 
 def mask_username(username):
     if not username:
@@ -826,7 +827,8 @@ async def member_update_handler(update: Update, context: ContextTypes.DEFAULT_TY
         if invite_link and invite_link.name and invite_link.name.startswith("ref-"):
             referrer_id = int(invite_link.name.split("-")[1])
         elif invite_link and invite_link.invite_link:
-            ref_doc = users_collection.find_one({"referral_link": invite_link.invite_link})
+            ref_doc = users_collection.find_one({"referral_invite_link": invite_link.invite_link})
+
             if ref_doc:
                 referrer_id = ref_doc["user_id"]
 
@@ -885,12 +887,12 @@ async def button_handler(update, context):
             await query.edit_message_text("✅ You received +20 XP welcome bonus!")
 
     elif query.data == "referral":
-        referral_link = await get_or_create_referral_link(
-            context.bot,
-            user_id,
-            query.from_user.username or ""
+        from functools import partial
+        loop = asyncio.get_running_loop()
+        link = await loop.run_in_executor(
+            None, partial(get_or_create_referral_invite_link_sync, user_id, query.from_user.username or "")
         )
-        await query.edit_message_text(f"👥 Your referral link:\n{referral_link}")
+        await query.edit_message_text(f"👥 Your referral link:\n{link}")
 
 # ----------------------------
 # Run Bot + Flask + Scheduler
