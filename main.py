@@ -22,6 +22,7 @@ import asyncio
 import traceback
 import csv
 import io
+import requests
 import pytz
 tz = pytz.timezone("Asia/Kuala_Lumpur")
 
@@ -32,6 +33,7 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 MONGO_URL = os.environ.get("MONGO_URL")
 WEBAPP_URL = "https://apreferralv1.fly.dev/miniapp"
 GROUP_ID = -1002304653063
+API_BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 # ----------------------------
 # MongoDB Setup
@@ -87,6 +89,53 @@ def ensure_indexes():
             print("⚠️ ensure_indexes error:", e)
 
 ensure_indexes()
+
+def get_or_create_referral_invite_link_sync(user_id: int, username: str = "") -> str:
+    """
+    Create (or reuse) a unique Telegram chat invite link for this user.
+    Uses Telegram HTTP API (sync), so no asyncio/event loop issues.
+    Caches the link in Mongo to avoid rate limits.
+    """
+    # 1) Reuse if we already created one
+    doc = users_collection.find_one({"user_id": user_id}) or {}
+    if doc.get("referral_invite_link"):
+        return doc["referral_invite_link"]
+
+    # 2) Create a named invite link: name="ref-<user_id>"
+    #    Bot MUST be admin in GROUP_ID with "Invite users via link" permission
+    name = f"ref-{user_id}"
+    payload = {
+        "chat_id": GROUP_ID,
+        "name": name,
+        # optional controls:
+        # "expire_date": int(time.time()) + 30*24*3600,  # 30d expiry
+        # "member_limit": 0,  # 0 = unlimited
+        # "creates_join_request": False
+    }
+    r = requests.post(f"{API_BASE}/createChatInviteLink", json=payload, timeout=10)
+    data = r.json()
+    if not data.get("ok"):
+        # Fallback: if creation fails (permissions, etc.), return deep-link so flow still works
+        bot_username = os.environ.get("BOT_USERNAME", "")
+        deeplink = f"https://t.me/{bot_username}?start=ref{user_id}" if bot_username else ""
+        raise RuntimeError(f"createChatInviteLink failed: {data.get('description','unknown')}\n"
+                           f"Fallback deeplink: {deeplink}")
+
+    invite = data["result"]
+    invite_link = invite["invite_link"]
+
+    # 3) Cache in Mongo
+    users_collection.update_one(
+        {"user_id": user_id},
+        {"$set": {
+            "username": username or doc.get("username"),
+            "referral_invite_link": invite_link,
+            "referral_invite_name": name,
+            "referral_invite_id": invite.get("invite_link")  # not a numeric id, but keep for auditing
+        }},
+        upsert=True
+    )
+    return invite_link
 
 app = Flask(__name__, static_folder="static")
 CORS(app, resources={r"/*": {"origins": "*"}})
@@ -273,10 +322,8 @@ def api_referral():
     try:
         user_id = int(request.args.get("user_id"))
         username = request.args.get("username") or "unknown"
-        referral_link = call_bot_in_loop(
-            get_or_create_referral_link(app_bot.bot, user_id, username)
-        )
-        return jsonify({"success": True, "referral_link": referral_link})
+        link = get_or_create_referral_invite_link_sync(user_id, username)
+        return jsonify({"success": True, "referral_link": link})
     except Exception as e:
         traceback.print_exc()
         return jsonify({"success": False, "error": str(e)}), 500
