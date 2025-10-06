@@ -33,11 +33,26 @@ MONGO_URL = os.environ.get("MONGO_URL")
 WEBAPP_URL = "https://apreferralv1.fly.dev/miniapp"
 GROUP_ID = -1002304653063
 API_BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"
-STREAK_MILESTONES = {
-    7:  50,   # +50 XP
-    14: 150,  # +150 XP
-    28: 300,  # +300 XP
-}
+STREAK_MILESTONES = {7: 50, 14: 150, 28: 300}
+
+def _to_kl_date(dt_any):
+    """Accepts aware/naive datetime or ISO string and returns date in KL."""
+    if dt_any is None:
+        return None
+    if isinstance(dt_any, str):
+        s = dt_any.replace("Z", "+00:00")
+        try:
+            dt = datetime.fromisoformat(s)
+        except Exception:
+            return None
+    elif isinstance(dt_any, datetime):
+        dt = dt_any
+    else:
+        return None
+    if dt.tzinfo is None:
+        dt = pytz.UTC.localize(dt)
+    return dt.astimezone(KL_TZ).date()
+    
 # ----------------------------
 # MongoDB Setup
 # ----------------------------
