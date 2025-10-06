@@ -710,7 +710,7 @@ def export_csv():
 # Weekly XP Reset Job
 # ----------------------------
 def reset_weekly_xp():
-    now = datetime.now(tz)  # tz = Asia/Kuala_Lumpur
+    now = datetime.now(KL_TZ)
 
     # Last full week [Mon..Sun], assuming this runs every Monday 00:00 KL
     week_end_date = (now - timedelta(days=1)).date()      # Sunday
@@ -801,7 +801,7 @@ def run_boot_catchup():
         print(f"❌ Boot-time catch-up failed: {e}")
         
 def update_monthly_vip_status():
-    now = datetime.now(tz)
+    now = datetime.now(KL_TZ)
     print(f"🔁 Running monthly VIP status update at {now}")
 
     all_users = users_collection.find()
@@ -970,7 +970,7 @@ if __name__ == "__main__":
 
     # Single scheduler with resilience settings
     scheduler = BackgroundScheduler(
-        timezone=tz,
+        timezone=KL_TZ,
         job_defaults={
             "coalesce": True,           # merge missed runs into one
             "misfire_grace_time": 3600, # run if missed by <= 1 hour
