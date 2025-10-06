@@ -33,7 +33,11 @@ MONGO_URL = os.environ.get("MONGO_URL")
 WEBAPP_URL = "https://apreferralv1.fly.dev/miniapp"
 GROUP_ID = -1002304653063
 API_BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"
-
+STREAK_MILESTONES = {
+    7:  50,   # +50 XP
+    14: 150,  # +150 XP
+    28: 300,  # +300 XP
+}
 # ----------------------------
 # MongoDB Setup
 # ----------------------------
@@ -193,47 +197,94 @@ async def refresh_admin_ids(context: ContextTypes.DEFAULT_TYPE):
 # -------------------------------
 # ✅ Daily Check-in Logic
 # -------------------------------
+def streak_progress_bar(streak: int) -> str:
+    milestones_sorted = sorted(STREAK_MILESTONES.keys())
+    next_m = next((m for m in milestones_sorted if streak < m), milestones_sorted[-1])
+    filled = min(streak, next_m)
+    boxes = int((filled / next_m) * 10)
+    return f"[{'■'*boxes}{'□'*(10-boxes)}] {filled}/{next_m} days ➜ next: {next_m}d"
+
 async def process_checkin(user_id, username, region, update=None):
-    """Daily check-in logic once region is known (reset at 12AM UTC+8)."""
-    tz_utc8 = pytz.timezone("Asia/Kuala_Lumpur")  # or Asia/Singapore
+    """Daily check-in with repeatable milestones. Day boundary = KL time."""
+    tz_utc8 = KL_TZ
     now_utc8 = datetime.now(tz_utc8)
     today_utc8 = now_utc8.date()
 
     user = users_collection.find_one({"user_id": user_id}) or {}
     last = user.get("last_checkin")
+    streak = int(user.get("streak", 0))
+    longest = int(user.get("longest_streak", 0))
 
+    # Already checked in today?
     if isinstance(last, datetime):
-        # Convert last check-in into UTC+8 for comparison
         last_utc8 = last.astimezone(tz_utc8).date()
         if last_utc8 == today_utc8:
             if update and getattr(update, "message", None):
-                await update.message.reply_text("⚠️ You already checked in today.")
-            return {"success": False, "message": "⚠️ Already checked in today."}
+                await update.message.reply_text(f"⚠️ You already checked in today.\n🔥 Streak: {streak} days.")
+            return {"success": False, "message": f"⚠️ Already checked in today. 🔥 Streak: {streak} days."}
 
-    # ✅ Save last_checkin in UTC (for consistency in DB)
+        # If exactly yesterday → continue streak; otherwise reset
+        if last_utc8 == (today_utc8 - timedelta(days=1)):
+            streak += 1
+        else:
+            streak = 1
+    else:
+        streak = 1
+
+    # Base daily XP
+    base_xp = 20
+
+    # Repeatable milestone bonus
+    bonus_xp = STREAK_MILESTONES.get(streak, 0)
+
+    # Persist
     now_utc = datetime.now(pytz.UTC)
-
-    users_collection.update_one(
-        {"user_id": user_id},
-        {
-            "$set": {
-                "username": username,
-                "region": region,
-                "last_checkin": now_utc,
-            },
-            "$inc": {"xp": 20, "weekly_xp": 20, "monthly_xp": 20},
+    update_doc = {
+        "$set": {
+            "username": username,
+            "region": region,
+            "last_checkin": now_utc,
+            "streak": streak
         },
-        upsert=True,
-    )
+        "$inc": {
+            "xp": base_xp + bonus_xp,
+            "weekly_xp": base_xp + bonus_xp,
+            "monthly_xp": base_xp + bonus_xp
+        },
+        "$max": {"longest_streak": max(longest, streak)}
+    }
+    users_collection.update_one({"user_id": user_id}, update_doc, upsert=True)
 
+    # Compose message
+    lines = [f"✅ Check-in successful! (+{base_xp} XP)",
+             f"🔥 Current streak: {streak} days."]
+    if bonus_xp:
+        if streak == 7:
+            lines.append(f"🎉 7-day streak bonus! +{bonus_xp} XP")
+        elif streak == 14:
+            lines.append(f"🔥 14-day streak bonus! +{bonus_xp} XP")
+        elif streak == 28:
+            lines.append(f"🏆 28-day streak bonus! +{bonus_xp} XP")
+    lines.append(streak_progress_bar(streak))
+
+    msg = "\n".join(lines)
     if update and getattr(update, "message", None):
-        await update.message.reply_text(
-            f"✅ Check-in successful! (+20 XP)\n📍 Region: {region}"
-        )
+        await update.message.reply_text(msg)
 
-    return {"success": True, "message": "✅ Check-in successful! +20 XP"}
+    return {"success": True, "message": msg}
 
-
+@app.route("/api/streak/<int:user_id>")
+def api_streak(user_id):
+    u = users_collection.find_one({"user_id": user_id}) or {}
+    streak = int(u.get("streak", 0))
+    longest = int(u.get("longest_streak", 0))
+    return jsonify({
+        "success": True,
+        "streak": streak,
+        "longest_streak": longest,
+        "bar": streak_progress_bar(streak)
+    })
+    
 # -------------------------------
 # ✅ API Route for Frontend
 # -------------------------------
