@@ -1,145 +1,78 @@
-<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="UTF-8">
-  <title>Referral & Check-in</title>
-  <script src="https://telegram.org/js/telegram-web-app.js"></script>
-  <style>
-    body{background-color:#f4f4f4;font-family:'Arial',sans-serif;padding:20px;color:#333;font-size:16px}
-    h2,h3{text-align:left;font-weight:600}
-    .section{background:#fff;padding:20px;margin:15px 0;border-radius:10px;box-shadow:0 2px 6px rgba(0,0,0,.1)}
-    button{background-color:#0088cc;color:#fff;padding:10px 20px;font-size:15px;border:none;border-radius:6px;cursor:pointer;font-family:inherit;margin:5px 0}
-    button:hover{background-color:#006699}
-    #referral-link,#checkin-result,#checkin-timer{margin-top:10px;font-size:15px}
-    #leaderboard-output{margin-top:10px;font-family:'Courier New',monospace;white-space:pre-wrap;background:#f9f9f9;padding:15px;border-radius:8px;border:1px solid #ddd;font-size:13px;line-height:1.4;overflow-x:auto}
-    #admin-panel{display:none;background:#fff4e6;border:1px solid #ffcc80}
-    #admin-panel h3{color:#d17c00}
-    .modal{display:none;position:fixed;z-index:1000;left:0;top:0;width:100%;height:100%;background:rgba(0,0,0,.5);justify-content:center;align-items:center}
-    .modal-content{background:#fff;padding:20px;border-radius:10px;text-align:center;width:300px}
-    input[type=text],input[type=number]{width:90%;padding:10px;margin:8px 0;border-radius:6px;border:1px solid #ccc;font-size:14px}
-
-    /* Info Hub helpers */
-    .badge{display:inline-block;background:#eef2f7;padding:4px 10px;border-radius:999px;font-size:13px}
-    .badge.vip{background:#ffe9b3}
-    .progress{width:100%;height:10px;background:#eef2f7;border-radius:999px;overflow:hidden}
-    .progress > span{display:block;height:100%;width:0%;background:#28a745}
-    .small{font-size:12px;color:#666}
-    .list-compact p{margin:6px 0}
-  </style>
-</head>
-<body>
-
+<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Referral & Check-in</title><script src="https://telegram.org/js/telegram-web-app.js"></script><style>body{background-color:#f4f4f4;font-family:'Arial',sans-serif;padding:20px;color:#333;font-size:16px}h2,h3{text-align:left;font-weight:600}.section{background:#fff;padding:20px;margin:15px 0;border-radius:10px;box-shadow:0 2px 6px rgba(0,0,0,.1)}button{background-color:#0088cc;color:#fff;padding:10px 20px;font-size:15px;border:none;border-radius:6px;cursor:pointer;font-family:inherit;margin:5px 0}button:hover{background-color:#006699}#referral-link,#checkin-result,#checkin-timer{margin-top:10px;font-size:15px}#leaderboard-output{margin-top:10px;font-family:'Courier New',monospace;white-space:pre-wrap;background:#f9f9f9;padding:15px;border-radius:8px;border:1px solid #ddd;font-size:13px;line-height:1.4;overflow-x:auto}#admin-panel{display:none;background:#fff4e6;border:1px solid #ffcc80}#admin-panel h3{color:#d17c00}.modal{display:none;position:fixed;z-index:1000;left:0;top:0;width:100%;height:100%;background:rgba(0,0,0,.5);justify-content:center;align-items:center}.modal-content{background:#fff;padding:20px;border-radius:10px;text-align:center;width:300px}input[type=text],input[type=number]{width:90%;padding:10px;margin:8px 0;border-radius:6px;border:1px solid #ccc;font-size:14px}</style></head><body>
   <h2>🎯 Referral & Daily Check-in</h2>
 
-  <!-- ===== INFO HUB (clean, 3 blocks) ===== -->
-  <div class="section" id="info-hub">
-    <!-- Status strip -->
-    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px;">
-      <span class="badge" id="status-name">@you</span>
-      <span class="badge" id="status-weekly">0 XP (weekly)</span>
-      <span class="badge" id="status-monthly">0 XP (monthly)</span>
-      <span class="badge" id="status-tier">Normal</span>
-    </div>
+  <!-- Add this button somewhere under your check-in UI -->
+<div class="event-section" style="margin-top:20px; text-align:left;">
+  <button id="eventBtn" 
+          style="padding:10px 20px; border:none; border-radius:8px; background:#007bff; color:#fff; font-size:16px; cursor:pointer;">
+    📢 Current Event
+  </button>
+</div>
 
-    <!-- VIP progress -->
-    <div style="margin:8px 0 14px 0;">
-      <div style="font-weight:600;">👑 VIP Progress (Monthly)</div>
-      <div class="progress" style="margin-top:6px;"><span id="vip-fill"></span></div>
-      <div class="small" id="vip-note">0 / 800 XP</div>
-    </div>
+<!-- Modal structure -->
+<div id="eventModal" 
+     style="display:none; position:fixed; z-index:1000; left:0; top:0; width:100%; height:100%; 
+            background-color:rgba(0,0,0,0.5);">
 
-    <hr style="border:none;border-top:1px solid #eee;margin:14px 0;">
+  <div style="background:#fff; margin:10% auto; padding:20px; border-radius:12px; width:90%; max-width:400px; text-align:left;">
 
-    <!-- 1) Current Event -->
-    <h3>🎉 Current Event</h3>
-    <p>Join the <b>October Lucky Draw</b>! Earn XP via check-in, referrals & #mywin. Winners announced by 7 Nov.</p>
-    <ul style="margin:8px 0 0 20px;">
-      <li>🎁 iPhone 17 Pro · Apple Watch · AirPods · 40× merch</li>
-      <li>📅 Period: 1–31 Oct 2025</li>
-    </ul>
-    <a href="https://telegra.ph/AdvantPlay-Community-Lucky-Draw-09-22" target="_blank"
-       style="display:inline-block;margin-top:8px;padding:8px 12px;background:#28a745;color:#fff;border-radius:6px;text-decoration:none;font-size:14px;">
-      📜 View Terms & Conditions
+    <!-- Community Lucky Draw FIRST -->
+    <h2 style="margin-bottom:15px;">🎉 Community Lucky Draw</h2>
+    <p>🗓 1–31 Oct 2025 | 🌍 MY, TH, ID</p>
+    <p>🎁 Prizes:</p>
+    <p>📱 iPhone 17 Pro</p>
+    <p>⌚ Apple Watch 11</p>
+    <p>🎧 AirPods Pro 3</p>
+    <p>👕 40× Limited Edition Merchandise</p>
+    <p>✅ Check-in via Mini App to qualify</p>
+    <p>🏆 Winners announced by 7 Nov 2025</p>
+
+    <a href="https://telegra.ph/AdvantPlay-Community-Lucky-Draw-09-22" target="_blank" 
+       style="display:inline-block; margin-top:10px; padding:8px 16px; background:#28a745; color:#fff; text-decoration:none; border-radius:8px; font-size:14px;">
+        📜 View Terms & Conditions
     </a>
 
-    <hr style="border:none;border-top:1px solid #eee;margin:14px 0;">
-
-    <!-- 2) How to Earn XP -->
-    <h3>⭐ How to Earn XP</h3>
-    <div class="list-compact">
-      <p>✅ Daily Check-in: <b>+20 XP</b></p>
-      <p>📆 Streak bonuses: <b>7d +100</b> · <b>14d +150</b> · <b>28d +300</b></p>
-      <p>🔗 Referral: <b>+30 XP / friend</b></p>
-      <p>🎯 3 successful referrals (monthly): <b>+200 XP bonus</b></p>
-      <p>🏷️ #mywin submission (each): <b>+20 XP</b></p>
-    </div>
-
-    <!-- Inline streak box -->
-    <div class="section" style="padding:14px;margin:12px 0 0 0;">
-      <div style="font-weight:600;">🔥 Check-in Streak</div>
-      <div id="streak-line" style="font-family:'Courier New',monospace;margin-top:6px;">Loading…</div>
-      <div id="next-checkin-note" class="small" style="margin-top:6px;"></div>
-    </div>
-
-    <hr style="border:none;border-top:1px solid #eee;margin:14px 0;">
-
-    <!-- 3) What XP Gives You -->
-    <h3>🎁 What XP Gives You</h3>
-    <ul style="margin:8px 0 0 20px;">
-      <li>👑 Reach <b>800 Monthly XP</b> → VIP Tier 1 (monthly refresh)</li>
-      <li>💎 VIP unlocks <b>Bonus Voucher</b> tab when available</li>
-      <li>🏆 <b>Weekly Top 3</b> active players → extra voucher bonus</li>
-    </ul>
-  </div>
-  <!-- ===== /INFO HUB ===== -->
-
-  <!-- Quick Event button + modal (kept from your original) -->
-  <div class="event-section" style="margin-top:20px; text-align:left;">
-    <button id="eventBtn"
-            style="padding:10px 20px; border:none; border-radius:8px; background:#007bff; color:#fff; font-size:16px; cursor:pointer;">
-      📢 Current Event
+    <!-- Close Button -->
+    <button id="closeEvent" style="margin-top:20px; padding:10px 20px; background:#007bff; color:#fff; border:none; border-radius:8px; cursor:pointer;">
+        Close
     </button>
   </div>
+</div>
 
-  <!-- Modal structure -->
-  <div id="eventModal"
-       style="display:none; position:fixed; z-index:1000; left:0; top:0; width:100%; height:100%;
-              background-color:rgba(0,0,0,0.5);">
-    <div style="background:#fff; margin:10% auto; padding:20px; border-radius:12px; width:90%; max-width:400px; text-align:left;">
-      <h2 style="margin-bottom:15px;">🎉 Community Lucky Draw</h2>
-      <p>🗓 1–31 Oct 2025 | 🌍 MY, TH, ID</p>
-      <p>🎁 Prizes:</p>
-      <p>📱 iPhone 17 Pro</p>
-      <p>⌚ Apple Watch 11</p>
-      <p>🎧 AirPods Pro 3</p>
-      <p>👕 40× Limited Edition Merchandise</p>
-      <p>✅ Check-in via Mini App to qualify</p>
-      <p>🏆 Winners announced by 7 Nov 2025</p>
-      <a href="https://telegra.ph/AdvantPlay-Community-Lucky-Draw-09-22" target="_blank"
-         style="display:inline-block; margin-top:10px; padding:8px 16px; background:#28a745; color:#fff; text-decoration:none; border-radius:8px; font-size:14px;">
-          📜 View Terms & Conditions
-      </a>
-      <button id="closeEvent" style="margin-top:20px; padding:10px 20px; background:#007bff; color:#fff; border:none; border-radius:8px; cursor:pointer;">
-        Close
-      </button>
-    </div>
-  </div>
+<script>
+  const eventBtn = document.getElementById("eventBtn");
+  const eventModal = document.getElementById("eventModal");
+  const closeEvent = document.getElementById("closeEvent");
 
-  <!-- Region lock -->
+  eventBtn.addEventListener("click", () => {
+    eventModal.style.display = "block";
+  });
+
+  closeEvent.addEventListener("click", () => {
+    eventModal.style.display = "none";
+  });
+
+  // Close modal if user clicks outside the box
+  window.addEventListener("click", (e) => {
+    if (e.target === eventModal) {
+      eventModal.style.display = "none";
+    }
+  });
+</script>
+
   <div class="section" id="region-section" style="display: none;">
-    <h3>🌍 Select Your Region</h3>
-    <select id="region-select">
-      <option value="">-- Please choose --</option>
-      <option value="Malaysia">🇲🇾 Malaysia</option>
-      <option value="Thailand">🇹🇭 Thailand</option>
-      <option value="Indonesia">🇮🇩 Indonesia</option>
-      <option value="Other">🌐 Other</option>
-    </select>
-    <button onclick="setRegion()">Save Region</button>
-    <p id="region-message" style="color:gray;"></p>
-  </div>
+  <h3>🌍 Select Your Region</h3>
+  <select id="region-select">
+    <option value="">-- Please choose --</option>
+    <option value="Malaysia">🇲🇾 Malaysia</option>
+    <option value="Thailand">🇹🇭 Thailand</option>
+    <option value="Indonesia">🇮🇩 Indonesia</option>
+    <option value="Other">🌐 Other</option>
+  </select>
+  <button onclick="setRegion()">Save Region</button>
+  <p id="region-message" style="color:gray;"></p>
+</div>
 
-  <!-- Check-in -->
   <div class="section">
     <h3>✅ Daily Check-in</h3>
     <button onclick="checkIn()">Check In</button>
@@ -147,7 +80,6 @@
     <p id="checkin-timer" style="color: gray;"></p>
   </div>
 
-  <!-- Referral -->
   <div class="section">
     <h3>🔗 Your Referral Link (valid 24h)</h3>
     <button onclick="getReferral()">Generate Link</button>
@@ -155,21 +87,18 @@
     <button onclick="copyReferral()">📋 Copy to clipboard</button>
   </div>
 
-  <!-- VIP Bonus Voucher -->
   <div class="section" id="bonus-voucher" style="display: none;">
     <h3>🎁 VIP Bonus Voucher</h3>
     <p id="voucher-code">Coming soon…</p>
     <button onclick="copyVoucherCode()">📋 Copy to clipboard</button>
   </div>
-
-  <!-- Leaderboard -->
+  
   <div class="section">
     <h3>🏆 Weekly Leaderboard</h3>
     <button onclick="loadLeaderboard()">View Leaderboard</button>
     <div id="leaderboard-output">Click to load latest rankings...</div>
   </div>
 
-  <!-- Admin Panel -->
   <div class="section" id="admin-panel">
     <h3>⚙️ Admin Panel</h3>
     <button onclick="openAddXP()">➕ Add/Reduce XP</button>
@@ -177,6 +106,7 @@
     <button onclick="loadPreviousLeaderboard()">🏆 View Past Leaderboard</button>
     <button onclick="openVoucherModal()">🎁 Create Bonus Voucher</button>
     <button onclick="exportCSV()">📤 Export CSV</button>
+    
   </div>
 
   <!-- XP Modal -->
@@ -191,51 +121,43 @@
   </div>
 
   <!-- Voucher Modal -->
-  <div id="voucher-modal" class="modal">
-    <div class="modal-content">
-      <h3>Create Bonus Voucher</h3>
-      <input id="voucher-code-input" type="text" placeholder="Voucher Code">
-      <input id="voucher-expiry-input" type="datetime-local" placeholder="Start Time">
-      <button onclick="submitVoucher()">Create</button>
-      <button onclick="closeVoucherModal()">Cancel</button>
-    </div>
+<div id="voucher-modal" class="modal">
+  <div class="modal-content">
+    <h3>Create Bonus Voucher</h3>
+    <input id="voucher-code-input" type="text" placeholder="Voucher Code">
+    <input id="voucher-expiry-input" type="datetime-local" placeholder="Start Time">
+    <button onclick="submitVoucher()">Create</button>
+    <button onclick="closeVoucherModal()">Cancel</button>
   </div>
-
+</div>
+  
   <script>
-    // Telegram init
     const tg = window.Telegram.WebApp;
-    tg.ready(); tg.expand();
+    tg.ready();
+    tg.expand();
 
-    // Config
     const API_BASE = "https://apreferralv1.fly.dev";
     const user = tg.initDataUnsafe?.user || {};
     const userId = user.id;
     const username = user.username || user.first_name || "";
-    let regionMsg = "";
+    let regionMsg = ""; 
     let latestReferralLink = "";
-
+    
     if (!userId) {
       document.body.innerHTML = "<p style='color:red;'>❌ User ID not found. Please open this Mini App inside Telegram.</p>";
     }
 
-    // Event modal
-    (function(){
-      const eventBtn = document.getElementById("eventBtn");
-      const eventModal = document.getElementById("eventModal");
-      const closeEvent = document.getElementById("closeEvent");
-      eventBtn.addEventListener("click", () => eventModal.style.display = "block");
-      closeEvent.addEventListener("click", () => eventModal.style.display = "none");
-      window.addEventListener("click", (e) => { if (e.target === eventModal) eventModal.style.display = "none"; });
-    })();
-
-    // Countdown
+        // Countdown
     function startCountdown(nextCheckinTimeISO) {
       const el = document.getElementById("checkin-timer");
       const end = new Date(nextCheckinTimeISO).getTime();
       function update() {
         const now = Date.now();
         const d = end - now;
-        if (d <= 0) { el.innerText = "🎉 You can check in again now!"; return; }
+        if (d <= 0) {
+          el.innerText = "🎉 You can check in again now!";
+          return;
+        }
         const h = Math.floor(d / 3600000);
         const m = Math.floor((d % 3600000) / 60000);
         const sFixed = Math.floor((d % 60000) / 1000);
@@ -245,201 +167,260 @@
       update();
     }
 
-    // Check-in flow
     async function checkIn() {
       const regionMsg = document.getElementById("region-message").innerText;
       if (regionMsg.includes("⚠️ Please select")) {
         alert("❌ Please select and lock your region before check-in.");
         return;
       }
+
       try {
-        const res = await fetch(\`\${API_BASE}/api/checkin\`, {
+        const res = await fetch(`${API_BASE}/api/checkin`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ user_id: userId, username })
         });
+
         const data = await res.json();
+
+        // ✅ Always show message
         document.getElementById("checkin-result").innerText = data.message || "❌ Check-in failed.";
-        if (data.next_checkin_time) startCountdown(data.next_checkin_time);
-        if (data.success) loadLeaderboard(); // will also sync Info Hub
-        // Next check-in note for Info Hub
+
+        // ✅ Start countdown if server returned next_checkin_time
         if (data.next_checkin_time) {
-          const dt = new Date(data.next_checkin_time);
-          document.getElementById('next-checkin-note').innerText =
-            "⏰ Next check-in opens at " + dt.toLocaleString() + " (Asia/Kuala_Lumpur)";
+          startCountdown(data.next_checkin_time);
         }
+
+        // ✅ Refresh leaderboard only if success
+        if (data.success) {
+          loadLeaderboard();
+        }
+
       } catch (err) {
         console.error("Check-in error:", err);
         document.getElementById("checkin-result").innerText = "❌ Error connecting to server.";
       }
     }
 
-    // Referral link
     async function getReferral() {
       const display = document.getElementById("referral-link");
       try {
-        const res = await fetch(\`\${API_BASE}/api/referral?user_id=\${userId}&username=\${username}\`);
+        const res = await fetch(`${API_BASE}/api/referral?user_id=${userId}&username=${username}`);
         const rawText = await res.text();
         let data;
-        try { data = JSON.parse(rawText); }
-        catch { display.innerText = "❌ Invalid server response."; return; }
+        try {
+          data = JSON.parse(rawText);
+        } catch {
+          display.innerText = "❌ Invalid server response.";
+          return;
+        }
+
         const link = data.referral_link;
-        if (link) { latestReferralLink = link; display.innerText = link + "\n👆 Tap 'Copy to Clipboard' to copy"; }
-        else { display.innerText = "❌ Failed to get link."; }
-      } catch { display.innerText = "❌ Error connecting to server."; }
+        if (link) {
+          latestReferralLink = link;
+          display.innerText = link + "\n👆 Tap 'Copy to Clipboard' to copy";
+        } else {
+          display.innerText = "❌ Failed to get link.";
+        }
+      } catch {
+        display.innerText = "❌ Error connecting to server.";
+      }
     }
 
     async function copyReferral() {
-      if (!latestReferralLink) { alert("Please generate your referral link first."); return; }
-      try { await navigator.clipboard.writeText(latestReferralLink); alert("✅ Referral link copied!"); }
-      catch { alert("❌ Copy failed. Please copy manually."); }
-    }
+      if (!latestReferralLink) {
+        alert("Please generate your referral link first.");
+        return;
+      }
 
-    // Admin + bonus voucher visibility
-    async function handleAdminAndVoucher() {
       try {
-        const res = await fetch(\`\${API_BASE}/api/is_admin?user_id=\${userId}\`);
-        const adminData = await res.json();
-        const isAdmin = adminData.success && adminData.is_admin;
-        const voucherRes = await fetch(\`\${API_BASE}/api/bonus_voucher?user_id=\${userId}\`);
-        const voucherData = await voucherRes.json();
-        if (isAdmin) {
-          document.getElementById("admin-panel").style.display = "block";
-          document.getElementById("bonus-voucher").style.display = "block";
-          document.getElementById("voucher-code").innerText = voucherData.code || "❌ No active voucher currently.";
-        } else if (voucherData.code) {
-          document.getElementById("bonus-voucher").style.display = "block";
-          document.getElementById("voucher-code").innerText = voucherData.code;
-        }
-      } catch (err) {
-        console.error("❌ Error checking admin or loading voucher:", err);
+        await navigator.clipboard.writeText(latestReferralLink);
+        alert("✅ Referral link copied!");
+      } catch {
+        alert("❌ Copy failed. Please copy manually.");
       }
     }
 
-    // Leaderboard + user snapshot
-    async function loadLeaderboard() {
-      try {
-        const res = await fetch(\`\${API_BASE}/api/leaderboard?user_id=\${userId}&t=\${Date.now()}\`);
-        const data = await res.json();
-        const out = document.getElementById("leaderboard-output");
-        if (!data.success) throw new Error(data.error);
+  async function handleAdminAndVoucher() {
+    try {
+      const res = await fetch(`${API_BASE}/api/is_admin?user_id=${userId}`);
+      const adminData = await res.json();
+      const isAdmin = adminData.success && adminData.is_admin;
 
-        const checkin = data.leaderboard.checkin.map((u, i) =>
-          \`\${i + 1}. \${u.username || ''} - \${u.xp} XP\`
-        ).join("\n");
+      const voucherRes = await fetch(`${API_BASE}/api/bonus_voucher?user_id=${userId}`);
+      const voucherData = await voucherRes.json();
 
-        const referral = data.leaderboard.referral.map((u, i) =>
-          \`\${i + 1}. \${u.username || ''} - \${u.referrals || 0} Ref\`
-        ).join("\n");
+      console.log("isAdmin:", isAdmin);
+      console.log("voucherData:", voucherData);
+      
+      if (isAdmin) {
+        // Show admin panel
+        document.getElementById("admin-panel").style.display = "block";
 
-        const myXP = data.user?.xp || 0;
-        const myMonthlyXP = data.user?.monthly_xp || 0;
-        const myRef = data.user?.referrals || 0;
-        const myName = user.username ? \`@\${user.username}\` : (user.first_name || "You");
-        const myStatus = (data.user && data.user.status) ? data.user.status : "Normal";
-
-        let statusLabel = "🧑 Normal";
-        if (myStatus === "VIP1") statusLabel = "👑 VIP1";
-
-        out.innerText =
-          \`📊 Your Weekly Stats:\n👤 \${myName} - \${myXP} XP | \${myRef} Referrals\n\` +
-          \`📅 Monthly XP: \${myMonthlyXP}\n\` +
-          \`\${statusLabel}\n\n\` +
-          \`⭐ XP Leaderboard:\n\${checkin}\n\n\` +
-          \`🔗 Referral Leaderboard:\n\${referral}\`;
-
-        // Keep Info Hub in sync (badges, VIP bar, streak)
-        updateStatusAndVIP({
-          name: myName,
-          weeklyXP: myXP,
-          monthlyXP: myMonthlyXP,
-          tier: myStatus
-        });
-        refreshStreak(userId);
-      } catch (e) {
-        console.error(e);
-        document.getElementById("leaderboard-output").innerText = "❌ Error loading leaderboard.";
+        // Always show bonus voucher box to admin
+        document.getElementById("bonus-voucher").style.display = "block";
+        document.getElementById("voucher-code").innerText = voucherData.code || "❌ No active voucher currently.";
+      } else if (voucherData.code) {
+        // Normal VIP1 users only see if voucher is active
+        document.getElementById("bonus-voucher").style.display = "block";
+        document.getElementById("voucher-code").innerText = voucherData.code;
       }
+
+    } catch (err) {
+    console.error("❌ Error checking admin or loading voucher:", err);
+    }
+  }
+    
+  async function loadLeaderboard() {
+    try {
+      const res = await fetch(`${API_BASE}/api/leaderboard?user_id=${userId}&t=${Date.now()}`);
+      const data = await res.json();
+      const out = document.getElementById("leaderboard-output");
+      if (!data.success) throw new Error(data.error);
+
+      const checkin = data.leaderboard.checkin.map((u, i) =>
+        `${i + 1}. ${u.username || ''} - ${u.xp} XP`
+      ).join("\n");
+
+      const referral = data.leaderboard.referral.map((u, i) =>
+        `${i + 1}. ${u.username || ''} - ${u.referrals || 0} Ref`
+      ).join("\n");
+      
+      const myXP = data.user?.xp || 0;
+      const myMonthlyXP = data.user?.monthly_xp || 0;
+      const myRef = data.user?.referrals || 0;
+      const myName = user.username ? `@${user.username}` : (user.first_name || "You");
+      
+      const myStatus = (data.user && data.user.status) ? data.user.status : "Normal";
+      let statusLabel = "🧑 Normal";
+      if (myStatus === "VIP1") statusLabel = "👑 VIP1";
+
+      out.innerText =
+        `📊 Your Weekly Stats:\n👤 ${myName} - ${myXP} XP | ${myRef} Referrals\n` +
+        `📅 Monthly XP: ${myMonthlyXP}\n` +
+        `${statusLabel}\n\n` +
+        `⭐ XP Leaderboard:\n${checkin}\n\n` +
+        `🔗 Referral Leaderboard:\n${referral}`;
+    } catch {
+      document.getElementById("leaderboard-output").innerText = "❌ Error loading leaderboard.";
+    }
+  }
+
+async function loadPreviousLeaderboard() {
+  try {
+    // 1. Get all available weeks
+    const weeksRes = await fetch(`${API_BASE}/api/leaderboard/history/weeks`);
+    const weeksData = await weeksRes.json();
+
+    if (!weeksData.success || weeksData.weeks.length === 0) {
+      document.getElementById("leaderboard-output").innerText =
+        "❌ No history available.";
+      return;
     }
 
-    async function loadPreviousLeaderboard() {
-      try {
-        const weeksRes = await fetch(\`\${API_BASE}/api/leaderboard/history/weeks\`);
-        const weeksData = await weeksRes.json();
-        if (!weeksData.success || weeksData.weeks.length === 0) {
-          document.getElementById("leaderboard-output").innerText = "❌ No history available.";
-          return;
-        }
-        const lastWeek = weeksData.weeks[0]; // DESC from backend
-        const res = await fetch(\`\${API_BASE}/api/leaderboard/history/week/\${lastWeek.week_start}\`);
-        const data = await res.json();
-        if (!data.success || !data.history) throw new Error(data.error || "Invalid history data");
-        const history = data.history;
+    // Pick the most recent past week
+    const lastWeek = weeksData.weeks[0]; // already sorted DESC in backend
 
-        const checkin = (history.checkin || [])
-          .map((u, i) => {
-            const xp = u.xp ?? u.weekly_xp ?? 0;
-            const uname = u.username || u.first_name || "Unknown";
-            return \`\${i + 1}. \${uname} - \${xp} XP\`;
-          }).join("\n");
+    // 2. Fetch that week's leaderboard
+    const res = await fetch(
+      `${API_BASE}/api/leaderboard/history/week/${lastWeek.week_start}`
+    );
+    const data = await res.json();
 
-        const referral = (history.referral || [])
-          .map((u, i) => {
-            const refs = u.referrals ?? u.weekly_referral_count ?? 0;
-            const uname = u.username || u.first_name || "Unknown";
-            return \`\${i + 1}. \${uname} - \${refs} Ref\`;
-          }).join("\n");
+    if (!data.success || !data.history)
+      throw new Error(data.error || "Invalid history data");
 
-        document.getElementById("leaderboard-output").innerText =
-          \`📅 \${history.week_start} → \${history.week_end}\n\n\` +
-          \`🔁 Check-in:\n\${checkin}\n\n\` +
-          \`🔗 Referrals:\n\${referral}\`;
-      } catch (err) {
-        console.error("History error:", err);
-        document.getElementById("leaderboard-output").innerText = "❌ Error loading history.";
-      }
+    const history = data.history;
+
+    // 3. Format output with fallback fields
+    const checkin = (history.checkin || [])
+      .map((u, i) => {
+        const xp = u.xp ?? u.weekly_xp ?? 0;
+        const username = u.username || u.first_name || "Unknown";
+        return `${i + 1}. ${username} - ${xp} XP`;
+      })
+      .join("\n");
+
+    const referral = (history.referral || [])
+      .map((u, i) => {
+        const refs = u.referrals ?? u.weekly_referral_count ?? 0;
+        const username = u.username || u.first_name || "Unknown";
+        return `${i + 1}. ${username} - ${refs} Ref`;
+      })
+      .join("\n");
+
+    document.getElementById("leaderboard-output").innerText =
+      `📅 ${history.week_start} → ${history.week_end}\n\n` +
+      `🔁 Check-in:\n${checkin}\n\n` +
+      `🔗 Referrals:\n${referral}`;
+  } catch (err) {
+    console.error("History error:", err);
+    document.getElementById("leaderboard-output").innerText =
+      "❌ Error loading history.";
+  }
+}
+
+    function openAddXP() {
+      document.getElementById("xp-modal").style.display = "flex";
     }
 
-    // Admin actions
-    function openAddXP() { document.getElementById("xp-modal").style.display = "flex"; }
-    function closeXPModal() { document.getElementById("xp-modal").style.display = "none"; }
+    function closeXPModal() {
+      document.getElementById("xp-modal").style.display = "none";
+    }
 
     async function submitXPChange() {
-      const input = document.getElementById("xp-user").value.trim();
-      const amount = parseInt(document.getElementById("xp-amount").value.trim());
-      if (!input || isNaN(amount)) { alert("Please enter both @username and amount."); return; }
-      try {
-        const res = await fetch(\`\${API_BASE}/api/add_xp?user_id=\${userId}\`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ user_id: input, xp: amount })
-        });
-        const data = await res.json();
-        alert(data.message || "XP updated.");
-        if (data.success) loadLeaderboard();
-      } catch (err) {
-        alert("❌ Failed to connect to server.");
-        console.error("Add XP error:", err);
-      }
+  const input = document.getElementById("xp-user").value.trim();
+  const amount = parseInt(document.getElementById("xp-amount").value.trim());
+
+  if (!input || isNaN(amount)) {
+    alert("Please enter both @username and amount.");
+    return;
+  }
+
+  try {
+    const res = await fetch(`${API_BASE}/api/add_xp?user_id=${userId}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ user_id: input, xp: amount })
+    });
+    const data = await res.json();
+    alert(data.message || "XP updated.");
+    if (data.success) {
+      loadLeaderboard();
     }
+  } catch (err) {
+    alert("❌ Failed to connect to server.");
+    console.error("Add XP error:", err);
+  }
+}
 
     function copyVoucherCode() {
       const code = document.getElementById("voucher-code").innerText;
       navigator.clipboard.writeText(code)
         .then(() => alert("Voucher code copied!"))
         .catch(() => alert("Failed to copy voucher."));
-    }
+}
+     function openVoucherModal() {
+  document.getElementById("voucher-modal").style.display = "flex";
+}
 
-    function openVoucherModal() { document.getElementById("voucher-modal").style.display = "flex"; }
-    function closeVoucherModal() { document.getElementById("voucher-modal").style.display = "none"; }
+function closeVoucherModal() {
+  document.getElementById("voucher-modal").style.display = "none";
+}
 
-    async function submitVoucher() {
+ async function submitVoucher() {
       const code = document.getElementById("voucher-code-input").value.trim();
       const releaseAt = document.getElementById("voucher-expiry-input").value;
-      if (!code || !releaseAt) { alert("Please enter both voucher code and release time."); return; }
+      if (!code || !releaseAt) {
+        alert("Please enter both voucher code and release time.");
+        return;
+      }
       try {
-        const payload = { code, release_time: new Date(releaseAt).toISOString().replace(".000Z","Z") };
-        const res = await fetch(\`\${API_BASE}/api/admin/set_bonus?user_id=\${userId}\`, {
+        const payload = {
+          code,
+          release_time: new Date(releaseAt).toISOString().replace(".000Z", "Z")
+        };
+        const res = await fetch(`${API_BASE}/api/admin/set_bonus?user_id=${userId}`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload)
@@ -457,134 +438,94 @@
         console.error("Voucher error:", err);
       }
     }
+   
+async function checkRegionStatus() {
+  try {
+    const res = await fetch(`${API_BASE}/api/region-status/${userId}`);
+    const data = await res.json();
 
-    // Region lock
-    async function checkRegionStatus() {
-      try {
-        const res = await fetch(\`\${API_BASE}/api/region-status/\${userId}\`);
-        const data = await res.json();
-        if (data.locked) {
-          document.getElementById("region-section").style.display = "none";
-          document.getElementById("region-message").innerText = \`✅ Region locked: \${data.region}\`;
-          regionMsg = \`✅ Region locked: \${data.region}\`;
-        } else {
-          document.getElementById("region-section").style.display = "block";
-          document.getElementById("region-message").innerText = "⚠️ Please select your region (only once).";
-        }
-      } catch (err) { console.error("Region check failed:", err); }
+    if (data.locked) {
+        // ✅ Already locked
+        document.getElementById("region-section").style.display = "none";
+        document.getElementById("region-message").innerText =
+          `✅ Region locked: ${data.region}`;
+        regionMsg = `✅ Region locked: ${data.region}`;
+    } else {
+        // ❌ No region yet → must choose
+        document.getElementById("region-section").style.display = "block";
+        document.getElementById("region-message").innerText =
+          "⚠️ Please select your region (only once).";
     }
 
-    async function setRegion() {
-      const region = document.getElementById("region-select").value;
-      if (!region) { alert("Please select a region."); return; }
-      try {
-        const res = await fetch(\`\${API_BASE}/api/set-region/\${userId}\`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ user_id: userId, region })
-        });
-        const data = await res.json();
-        if (data.success) {
-          document.getElementById("region-section").style.display = "none";
-          document.getElementById("region-message").innerText = \`✅ Region locked: \${data.region}\`;
-          regionMsg = \`✅ Region locked: \${data.region}\`;
-          alert("Region saved and locked!");
-        } else {
-          alert("❌ " + (data.error || "Failed to set region."));
-        }
-      } catch (err) {
-        alert("❌ Error saving region.");
-        console.error("Set region error:", err);
-      }
+  } catch (err) {
+    console.error("Region check failed:", err);
+  }
+}
+
+async function setRegion() {
+  const region = document.getElementById("region-select").value;
+  if (!region) { alert("Please select a region."); return; }
+
+  try {
+    const res = await fetch(`${API_BASE}/api/set-region/${userId}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ user_id: userId, region }) // <-- add user_id
+    });
+    const data = await res.json();
+
+    if (data.success) {
+      document.getElementById("region-section").style.display = "none";
+      document.getElementById("region-message").innerText =
+        `✅ Region locked: ${data.region}`;
+      regionMsg = `✅ Region locked: ${data.region}`;
+      alert("Region saved and locked!");
+    } else {
+      alert("❌ " + (data.error || "Failed to set region."));
     }
+  } catch (err) {
+    alert("❌ Error saving region.");
+    console.error("Set region error:", err);
+  }
+}
 
-    // Info Hub helpers
-    const KL_TZ_LABEL = 'Asia/Kuala_Lumpur';
+    async function viewJoinRequests() {
+  try {
+    const res = await fetch(`${API_BASE}/api/join_requests?user_id=${userId}`);
+    const data = await res.json();
+    if (!data.success) throw new Error(data.error || "Failed to load");
 
-    function tgUser(){
-      try{
-        const u = window.Telegram?.WebApp?.initDataUnsafe?.user;
-        if(!u) return null;
-        return { id: u.id, username: u.username ? '@'+u.username : (u.first_name || 'You') };
-      }catch(e){ return null; }
-    }
+    const list = data.requests.map(r => `• @${r.username || r.user_id}`).join("\n");
+    alert(list || "No pending join requests.");
+  } catch (e) {
+    alert("❌ Error loading join requests.");
+    console.error(e);
+  }
+}
 
-    function updateStatusAndVIP({ name, weeklyXP, monthlyXP, tier }){
-      const byId = id => document.getElementById(id);
-      byId('status-name').textContent = name || '@you';
-      byId('status-weekly').textContent = \`\${weeklyXP||0} XP (weekly)\`;
-      byId('status-monthly').textContent = \`\${monthlyXP||0} XP (monthly)\`;
-      const t = (tier || 'Normal').toString();
-      const tierEl = byId('status-tier');
-      tierEl.textContent = t;
-      tierEl.className = 'badge' + (t.toUpperCase().startsWith('VIP') ? ' vip' : '');
-      const goal = 800;
-      const cur = Math.max(0, Math.min(monthlyXP||0, goal));
-      const pct = Math.round((cur/goal)*100);
-      const fill = byId('vip-fill');
-      if(fill) fill.style.width = pct + '%';
-      byId('vip-note').textContent = \`\${cur} / \${goal} XP\`;
-    }
+async function exportCSV() {
+  try {
+    const res = await fetch(`${API_BASE}/api/export_csv?user_id=${userId}`);
+    const csv = await res.text();
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `users_${new Date().toISOString().slice(0,10)}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  } catch (e) {
+    alert("❌ Error exporting CSV.");
+    console.error(e);
+  }
+}
 
-    async function refreshStreak(userId){
-      try{
-        const r = await fetch(\`\${API_BASE}/api/streak/\${userId}\`);
-        const j = await r.json();
-        if(j && j.success !== false){
-          document.getElementById('streak-line').textContent = j.bar || \`Streak: \${j.streak||0}d\`;
-        }
-      }catch(e){
-        document.getElementById('streak-line').textContent = '—';
-      }
-    }
-
-    async function loadUserSnapshot(){
-      const u = tgUser();
-      const uid = u?.id || '';
-      try{
-        const res = await fetch(\`\${API_BASE}/api/leaderboard?user_id=\${uid}\`);
-        const json = await res.json();
-        const weeklyXP = json?.user?.xp || 0;
-        const monthlyXP = json?.user?.monthly_xp || 0;
-        const tier = json?.user?.status || 'Normal';
-        updateStatusAndVIP({ name: u?.username || 'You', weeklyXP, monthlyXP, tier });
-      }catch(e){
-        updateStatusAndVIP({ name: u?.username || 'You', weeklyXP: 0, monthlyXP: 0, tier: 'Normal' });
-      }
-      if(uid) refreshStreak(uid);
-    }
-
-    // Integration shim: auto-sync after your existing loadLeaderboard()
-    (function(){
-      function safeInit(){
-        const u = tgUser();
-        if (typeof window.loadLeaderboard === 'function') {
-          const __orig = window.loadLeaderboard;
-          window.loadLeaderboard = async function(...args){
-            const ret = await __orig.apply(this, args);
-            try { await loadUserSnapshot(); } catch(e){}
-            try { if(u?.id) await refreshStreak(u.id); } catch(e){}
-            return ret;
-          };
-          try { loadUserSnapshot(); } catch(e){}
-          try { if(u?.id) refreshStreak(u.id); } catch(e){}
-        } else {
-          try { loadUserSnapshot(); } catch(e){}
-          try { if(u?.id) refreshStreak(u.id); } catch(e){}
-        }
-      }
-      if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', safeInit);
-      } else {
-        safeInit();
-      }
-    })();
-
-    // Boot
     window.onload = () => {
       checkRegionStatus();
       handleAdminAndVoucher();
-      loadLeaderboard();  // auto-load weekly stats and sync Info Hub
+      loadLeaderboard();  // 👈 This line loads your weekly stats automatically
     };
   </script>
 </body>
