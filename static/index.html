@@ -1,43 +1,89 @@
 <!DOCTYPE html><html><head><meta charset="UTF-8"><title>Referral & Check-in</title><script src="https://telegram.org/js/telegram-web-app.js"></script><style>body{background-color:#f4f4f4;font-family:'Arial',sans-serif;padding:20px;color:#333;font-size:16px}h2,h3{text-align:left;font-weight:600}.section{background:#fff;padding:20px;margin:15px 0;border-radius:10px;box-shadow:0 2px 6px rgba(0,0,0,.1)}button{background-color:#0088cc;color:#fff;padding:10px 20px;font-size:15px;border:none;border-radius:6px;cursor:pointer;font-family:inherit;margin:5px 0}button:hover{background-color:#006699}#referral-link,#checkin-result,#checkin-timer{margin-top:10px;font-size:15px}#leaderboard-output{margin-top:10px;font-family:'Courier New',monospace;white-space:pre-wrap;background:#f9f9f9;padding:15px;border-radius:8px;border:1px solid #ddd;font-size:13px;line-height:1.4;overflow-x:auto}#admin-panel{display:none;background:#fff4e6;border:1px solid #ffcc80}#admin-panel h3{color:#d17c00}.modal{display:none;position:fixed;z-index:1000;left:0;top:0;width:100%;height:100%;background:rgba(0,0,0,.5);justify-content:center;align-items:center}.modal-content{background:#fff;padding:20px;border-radius:10px;text-align:center;width:300px}input[type=text],input[type=number]{width:90%;padding:10px;margin:8px 0;border-radius:6px;border:1px solid #ccc;font-size:14px}</style></head><body>
   <h2>🎯 Referral & Daily Check-in</h2>
 
-  <!-- Add this button somewhere under your check-in UI -->
-<div class="event-section" style="margin-top:20px; text-align:left;">
-  <button id="eventBtn" 
-          style="padding:10px 20px; border:none; border-radius:8px; background:#007bff; color:#fff; font-size:16px; cursor:pointer;">
-    📢 Current Event
+<!-- INFO HUB BUTTON -->
+<div class="event-section" style="margin-top:20px;text-align:left;">
+  <button id="infoHubBtn"
+          style="padding:10px 20px;border:none;border-radius:8px;
+                 background:#007bff;color:#fff;font-size:16px;cursor:pointer;">
+    📢 Info Hub
   </button>
 </div>
 
-<!-- Modal structure -->
-<div id="eventModal" 
-     style="display:none; position:fixed; z-index:1000; left:0; top:0; width:100%; height:100%; 
+<!-- INFO HUB MODAL -->
+<div id="infoHubModal"
+     style="display:none;position:fixed;z-index:1000;left:0;top:0;width:100%;height:100%;
             background-color:rgba(0,0,0,0.5);">
+  <div style="background:#fff;margin:8% auto;padding:20px;border-radius:12px;width:92%;
+              max-width:400px;text-align:left;">
+    <h2 style="margin-bottom:15px;">ℹ️ Info Hub</h2>
 
-  <div style="background:#fff; margin:10% auto; padding:20px; border-radius:12px; width:90%; max-width:400px; text-align:left;">
+    <!-- TAB BUTTONS -->
+    <div style="display:flex;gap:6px;margin-bottom:10px;">
+      <button class="tab-btn active" data-tab="tab-event"
+              style="flex:1;padding:8px 10px;border:none;border-radius:6px;background:#007bff;color:#fff;cursor:pointer;">
+        🎉 Event
+      </button>
+      <button class="tab-btn" data-tab="tab-xp"
+              style="flex:1;padding:8px 10px;border:none;border-radius:6px;background:#eaf4ff;color:#007bff;cursor:pointer;">
+        ⭐ XP
+      </button>
+      <button class="tab-btn" data-tab="tab-vip"
+              style="flex:1;padding:8px 10px;border:none;border-radius:6px;background:#eaf4ff;color:#007bff;cursor:pointer;">
+        👑 VIP Tier 1
+      </button>
+    </div>
 
-    <!-- Community Lucky Draw FIRST -->
-    <h2 style="margin-bottom:15px;">🎉 Community Lucky Draw</h2>
-    <p>🗓 1–31 Oct 2025 | 🌍 MY, TH, ID</p>
-    <p>🎁 Prizes:</p>
-    <p>📱 iPhone 17 Pro</p>
-    <p>⌚ Apple Watch 11</p>
-    <p>🎧 AirPods Pro 3</p>
-    <p>👕 40× Limited Edition Merchandise</p>
-    <p>✅ Check-in via Mini App to qualify</p>
-    <p>🏆 Winners announced by 7 Nov 2025</p>
+    <!-- TAB PANELS -->
+    <div id="tab-event" class="tab-panel active">
+      <p><b>🎉 October Lucky Draw</b></p>
+      <p>Earn XP via check-in, referrals & #mywin to enter.</p>
+      <ul style="margin-left:20px;">
+        <li>📅 1–31 Oct 2025</li>
+        <li>🎁 iPhone 17 Pro · Apple Watch · AirPods · Merch</li>
+        <li>🏆 Winners announced 7 Nov 2025</li>
+      </ul>
+      <a href="https://telegra.ph/AdvantPlay-Community-Lucky-Draw-09-22"
+         target="_blank"
+         style="display:inline-block;margin-top:8px;padding:8px 12px;background:#28a745;
+                color:#fff;border-radius:6px;text-decoration:none;font-size:14px;">
+        📜 View T&C
+      </a>
+    </div>
 
-    <a href="https://telegra.ph/AdvantPlay-Community-Lucky-Draw-09-22" target="_blank" 
-       style="display:inline-block; margin-top:10px; padding:8px 16px; background:#28a745; color:#fff; text-decoration:none; border-radius:8px; font-size:14px;">
-        📜 View Terms & Conditions
-    </a>
+    <div id="tab-xp" class="tab-panel" style="display:none;">
+      <p><b>⭐ How to Earn XP</b></p>
+      <ul style="margin-left:20px;">
+        <li>✅ Daily Check-in +20 XP</li>
+        <li>📆 Streak bonus 7d +50XP · 14d +150XP · 28d +300XP</li>
+        <li>🔗 Referral +30 XP / friend</li>
+        <li>🎯 3 successful referrals +200 XP bonus</li>
+        <li>🏷️ #mywin submission +20 XP each</li>
+      </ul>
+      <div id="streak-line" style="font-family:'Courier New',monospace;margin-top:8px;">Loading…</div>
+      <div id="next-checkin-note" style="font-size:12px;color:#666;margin-top:4px;"></div>
+    </div>
 
-    <!-- Close Button -->
-    <button id="closeEvent" style="margin-top:20px; padding:10px 20px; background:#007bff; color:#fff; border:none; border-radius:8px; cursor:pointer;">
-        Close
+    <div id="tab-vip" class="tab-panel" style="display:none;">
+      <p><b>👑 VIP Progress (Monthly)</b></p>
+      <div class="progress" style="margin:6px 0;"><span id="vip-fill"></span></div>
+      <div id="vip-note" style="font-size:12px;color:#666;">0 / 800 XP</div>
+      <ul style="margin-left:20px;margin-top:8px;">
+        <li>⬆️ Reach 800 Monthly XP → VIP Tier 1</li>
+        <li>⬇️ Below 800 → Demote to Normal</li>
+        <li>🎁 VIP unlocks Bonus Voucher</li>
+        <li>🏆 Weekly Top 3 = Extra Voucher</li>
+      </ul>
+    </div>
+
+    <button id="closeInfoHub"
+            style="margin-top:20px;padding:10px 20px;background:#007bff;color:#fff;
+                   border:none;border-radius:8px;cursor:pointer;width:100%;">
+      Close
     </button>
   </div>
 </div>
+
 
 <script>
   const eventBtn = document.getElementById("eventBtn");
@@ -527,6 +573,33 @@ async function exportCSV() {
       handleAdminAndVoucher();
       loadLeaderboard();  // 👈 This line loads your weekly stats automatically
     };
+
+// --- Info Hub Modal & Tabs ---
+document.addEventListener('DOMContentLoaded', () => {
+  const infoHubBtn   = document.getElementById("infoHubBtn");
+  const infoHubModal = document.getElementById("infoHubModal");
+  const closeInfoHub = document.getElementById("closeInfoHub");
+
+  if (infoHubBtn && infoHubModal && closeInfoHub) {
+    infoHubBtn.addEventListener("click", () => (infoHubModal.style.display = "block"));
+    closeInfoHub.addEventListener("click", () => (infoHubModal.style.display = "none"));
+    window.addEventListener("click", (e) => {
+      if (e.target === infoHubModal) infoHubModal.style.display = "none";
+    });
+  }
+
+  // Tab switching (safe if tabs exist)
+  document.querySelectorAll(".tab-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      document.querySelectorAll(".tab-btn").forEach((b) => b.classList.remove("active"));
+      document.querySelectorAll(".tab-panel").forEach((p) => (p.style.display = "none"));
+      btn.classList.add("active");
+      const pane = document.getElementById(btn.dataset.tab);
+      if (pane) pane.style.display = "block";
+    });
+  });
+});
+
   </script>
 </body>
 </html>
