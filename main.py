@@ -23,7 +23,7 @@ import csv
 import io
 import requests
 import pytz
-tz = pytz.timezone("Asia/Kuala_Lumpur")
+KL_TZ = pytz.timezone("Asia/Kuala_Lumpur")
 
 # ----------------------------
 # Config
@@ -206,65 +206,58 @@ def streak_progress_bar(streak: int) -> str:
 
 async def process_checkin(user_id, username, region, update=None):
     """Daily check-in with repeatable milestones. Day boundary = KL time."""
-    tz_utc8 = KL_TZ
-    now_utc8 = datetime.now(tz_utc8)
-    today_utc8 = now_utc8.date()
+    now_kl = datetime.now(KL_TZ)
+    today_kl = now_kl.date()
 
     user = users_collection.find_one({"user_id": user_id}) or {}
     last = user.get("last_checkin")
     streak = int(user.get("streak", 0))
-    longest = int(user.get("longest_streak", 0))
 
-    # Already checked in today?
-    if isinstance(last, datetime):
-        last_utc8 = last.astimezone(tz_utc8).date()
-        if last_utc8 == today_utc8:
-            if update and getattr(update, "message", None):
-                await update.message.reply_text(f"⚠️ You already checked in today.\n🔥 Streak: {streak} days.")
-            return {"success": False, "message": f"⚠️ Already checked in today. 🔥 Streak: {streak} days."}
+    last_kl_date = _to_kl_date(last)
 
-        # If exactly yesterday → continue streak; otherwise reset
-        if last_utc8 == (today_utc8 - timedelta(days=1)):
-            streak += 1
-        else:
-            streak = 1
+    # Same-day guard
+    if last_kl_date == today_kl:
+        msg = f"⚠️ Already checked in today. 🔥 Streak: {streak} days."
+        if update and getattr(update, "message", None):
+            await update.message.reply_text(msg)
+        return {"success": False, "message": msg}
+
+    # Advance/reset streak
+    if last_kl_date == (today_kl - timedelta(days=1)):
+        streak += 1
     else:
         streak = 1
 
-    # Base daily XP
     base_xp = 20
-
-    # Repeatable milestone bonus
     bonus_xp = STREAK_MILESTONES.get(streak, 0)
 
-    # Persist
     now_utc = datetime.now(pytz.UTC)
-    update_doc = {
-        "$set": {
-            "username": username,
-            "region": region,
-            "last_checkin": now_utc,
-            "streak": streak
+    users_collection.update_one(
+        {"user_id": user_id},
+        {
+            "$set": {
+                "username": username,
+                "region": region,
+                "last_checkin": now_utc,
+                "streak": streak
+            },
+            "$inc": {
+                "xp": base_xp + bonus_xp,
+                "weekly_xp": base_xp + bonus_xp,
+                "monthly_xp": base_xp + bonus_xp
+            },
+            "$max": {"longest_streak": streak}
         },
-        "$inc": {
-            "xp": base_xp + bonus_xp,
-            "weekly_xp": base_xp + bonus_xp,
-            "monthly_xp": base_xp + bonus_xp
-        },
-        "$max": {"longest_streak": max(longest, streak)}
-    }
-    users_collection.update_one({"user_id": user_id}, update_doc, upsert=True)
+        upsert=True
+    )
 
-    # Compose message
-    lines = [f"✅ Check-in successful! (+{base_xp} XP)",
-             f"🔥 Current streak: {streak} days."]
+    labels = {7: "🎉 7-day streak bonus!", 14: "🔥 14-day streak bonus!", 28: "🏆 28-day streak bonus!"}
+    lines = [
+        f"✅ Check-in successful! (+{base_xp} XP)",
+        f"🔥 Current streak: {streak} days."
+    ]
     if bonus_xp:
-        if streak == 7:
-            lines.append(f"🎉 7-day streak bonus! +{bonus_xp} XP")
-        elif streak == 14:
-            lines.append(f"🔥 14-day streak bonus! +{bonus_xp} XP")
-        elif streak == 28:
-            lines.append(f"🏆 28-day streak bonus! +{bonus_xp} XP")
+        lines.append(f"{labels[streak]} +{bonus_xp} XP")
     lines.append(streak_progress_bar(streak))
 
     msg = "\n".join(lines)
