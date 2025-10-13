@@ -244,6 +244,8 @@
 
   <script>
 const tg = window.Telegram?.WebApp;
+if (tg) { tg.ready(); tg.expand(); }
+   
 const initDataRaw = tg?.initData || new URLSearchParams(location.search).get("init_data") || "";
 const V2 = "/v2"; // your blueprint prefix
 
@@ -295,12 +297,6 @@ async function adm_list() {
 }
 
 async function adm_create() {
-  const res = await fetch(`${V2}/admin/drops?init_data=${encodeURIComponent(initDataRaw)}`, {
-  method: "POST",
-  headers: v2Headers(),
-  body: JSON.stringify(payload)
-});
-
   const type = document.querySelector("#adm_type").value;
   const payload = {
     type,
@@ -310,55 +306,29 @@ async function adm_create() {
   };
 
   if (type === "personalised") {
-    const lines = (document.querySelector("#adm_assign").value || "").split("\n").map(x => x.trim()).filter(Boolean);
+    const lines = (document.querySelector("#adm_assign").value || "")
+      .split("\n").map(x => x.trim()).filter(Boolean);
     payload.assignments = lines.map(line => {
       const [u, c] = line.split(/[, ]+/).map(s => s.trim());
       return { username: u, code: c };
     }).filter(x => x.username && x.code);
   } else {
     payload.whitelistUsernames = splitList(document.querySelector("#adm_wl").value);
-    payload.codes = (document.querySelector("#adm_codes").value || "").split("\n").map(x => x.trim()).filter(Boolean);
+    payload.codes = (document.querySelector("#adm_codes").value || "")
+      .split("\n").map(x => x.trim()).filter(Boolean);
   }
 
-  const res = await fetch(`${V2}/admin/drops`, { method: "POST", headers: v2Headers(), body: JSON.stringify(payload) });
+  const res = await fetch(
+    `${V2}/admin/drops?init_data=${encodeURIComponent(initDataRaw)}`,
+    { method: "POST", headers: v2Headers(), body: JSON.stringify(payload) }
+  );
   const data = await res.json();
-  document.getElementById("adm_msg").textContent = data.status === "ok" ? "Created ✅" : JSON.stringify(data);
+  document.getElementById("adm_msg").textContent =
+    data.status === "ok" ? "Created ✅" : JSON.stringify(data);
   if (data.status === "ok") adm_list();
 }
-document.getElementById("adm_createBtn").addEventListener("click", adm_create);
-document.getElementById("adm_refreshBtn").addEventListener("click", adm_list);
 
-document.addEventListener("click", (e) => {
-  const btn = e.target.closest("button");
-  if (!btn) return;
-  const op = btn.getAttribute("data-op");
-  const id = btn.getAttribute("data-id");
-  if (!op || !id) return;
-
-  (async () => {
-    let url = `${V2}/admin/drops/${id}/actions?init_data=${encodeURIComponent(initDataRaw)}`;
-    let body = { op };
-
-    if (op === "codes") {
-      const raw = prompt("Add codes (one per line):", "");
-      if (!raw) return;
-      url = `${V2}/admin/drops/${id}/codes?init_data=${encodeURIComponent(initDataRaw)}`;
-      body = { codes: raw.split("\n").map(x => x.trim()).filter(Boolean) };
-    } else if (op === "whitelist") {
-      const raw = prompt("Whitelist (@users, comma/space/newline):", "");
-      if (raw == null) return;
-      url = `${V2}/admin/drops/${id}/whitelist?init_data=${encodeURIComponent(initDataRaw)}`;
-      body = { mode: "replace", usernames: splitList(raw) };
-    }
-
-    const res = await fetch(url, { method: "POST", headers: v2Headers(), body: JSON.stringify(body) });
-    const data = await res.json();
-    alert(JSON.stringify(data));
-    adm_list();
-  })();
-});
 </script>
-
   <script>
     const API_BASE = "https://apreferralv1.fly.dev";
     const user = tg.initDataUnsafe?.user || {};
