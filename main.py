@@ -16,6 +16,7 @@ from apscheduler.triggers.cron import CronTrigger
 from pytz import timezone
 from datetime import datetime, timedelta
 from bson.json_util import dumps
+from vouchers import vouchers_bp
 import os
 import asyncio
 import traceback
@@ -957,27 +958,35 @@ async def button_handler(update, context):
 # Run Bot + Flask + Scheduler
 # ----------------------------
 if __name__ == "__main__":
-    # Serve Flask in a side thread
-    Thread(target=lambda: app.run(host="0.0.0.0", port=8080), daemon=True).start()
+    # 0) Ensure earlier in the file you have:
+    # app = Flask(__name__)
+    # CORS(app, resources={r"/v2/*": {"origins": "*"}})  # if your webapp calls /v2
+    # app_bot = ApplicationBuilder().token(os.environ["BOT_TOKEN"]).build()
 
-    # Catch up if a reset was missed while the app was down
-    run_boot_catchup()
+    # 1) Register vouchers blueprint (versioned) BEFORE starting server
+    try:
+        from vouchers import vouchers_bp
+        app.register_blueprint(vouchers_bp, url_prefix="/v2")
+    except Exception as e:
+        print("Failed to register vouchers blueprint:", e)
+        raise
 
-    # Telegram handlers
+    # 2) Catch up maintenance before bot handlers start
+    try:
+        run_boot_catchup()
+    except Exception as e:
+        print("run_boot_catchup error:", e)
+
+    # 3) Telegram handlers
     app_bot.add_handler(CommandHandler("start", start))
     app_bot.add_handler(ChatMemberHandler(member_update_handler, ChatMemberHandler.CHAT_MEMBER))
     app_bot.add_handler(CallbackQueryHandler(button_handler))
 
-    # Single scheduler with resilience settings
+    # 4) Scheduler (KL time for human-facing schedules)
     scheduler = BackgroundScheduler(
         timezone=KL_TZ,
-        job_defaults={
-            "coalesce": True,           # merge missed runs into one
-            "misfire_grace_time": 3600, # run if missed by <= 1 hour
-            "max_instances": 1
-        }
+        job_defaults={"coalesce": True, "misfire_grace_time": 3600, "max_instances": 1}
     )
-
     scheduler.add_job(
         reset_weekly_xp,
         trigger=CronTrigger(day_of_week="mon", hour=0, minute=0),
@@ -994,18 +1003,16 @@ if __name__ == "__main__":
     )
     scheduler.start()
 
-    print("✅ Bot & Scheduler running...")
+    # 5) Background jobs on the bot's job_queue
+    app_bot.job_queue.run_once(refresh_admin_ids, when=0)
+    app_bot.job_queue.run_repeating(refresh_admin_ids, interval=timedelta(minutes=10), first=timedelta(seconds=0))
 
-    app_bot.job_queue.run_once(
-        refresh_admin_ids,
-        when=0  # run immediately as the job queue starts
-    )
-    app_bot.job_queue.run_repeating(
-        refresh_admin_ids,
-        interval=timedelta(minutes=10),
-        first=timedelta(seconds=0),
-    )
-    
+    print("✅ Bot & Scheduler wired. Starting servers...")
+
+    # 6) Start Flask AFTER routes/handlers/scheduler are wired
+    Thread(target=lambda: app.run(host="0.0.0.0", port=8080), daemon=True).start()
+
+    # 7) Start Telegram bot (blocking)
     try:
         app_bot.run_polling(
             poll_interval=5,
@@ -1013,4 +1020,3 @@ if __name__ == "__main__":
         )
     finally:
         scheduler.shutdown(wait=False)
-
