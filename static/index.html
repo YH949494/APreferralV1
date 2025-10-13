@@ -168,17 +168,57 @@
     <button onclick="viewJoinRequests()">📥 View Join Requests</button>
     <button onclick="loadPreviousLeaderboard()">🏆 View Past Leaderboard</button>
     <button onclick="openVoucherModal()">🎁 Create Bonus Voucher</button>
-    <button id="openNewDropModal">🎟️ New Voucher Drop</button>
-<button id="adm_refreshBtn">🔄 Refresh Drops</button>
+    <div id="voucher-admin" style="display:none; margin-top:10px; border:1px solid #eee; border-radius:8px; padding:12px;">
+  <h4 style="margin:0 0 8px;">Voucher Admin</h4>
 
-<h4 style="margin:16px 0 8px;">Drops</h4>
-<table id="adm_table" style="width:100%; border-collapse:collapse;">
-  <thead>
-    <tr><th style="text-align:left">Name</th><th>Type</th><th>Status</th><th>Window</th><th>Stats</th><th>Actions</th></tr>
-  </thead>
-  <tbody></tbody>
-</table>
-<div id="adm_msg" style="font-size:12px; color:#666; margin-top:6px;"></div>
+  <!-- Create Drop -->
+  <label>Type</label>
+  <select id="adm_type">
+    <option value="personalised">Personalised</option>
+    <option value="pooled">Pooled</option>
+  </select>
+
+  <label>Name</label>
+  <input id="adm_name" placeholder="VIP Flash Drop"/>
+
+  <label>Start (KL) — YYYY-MM-DD HH:MM:SS</label>
+  <input id="adm_starts" placeholder="2025-10-13 12:00:00"/>
+
+  <label>Priority</label>
+  <input id="adm_pri" type="number" value="100"/>
+
+  <div id="adm_personalised">
+    <label>Assignments (one per line: @user, CODE)</label>
+    <textarea id="adm_assign" placeholder="@yaohui, VIP-001&#10;@alice, VIP-002"></textarea>
+  </div>
+
+  <div id="adm_pooled" style="display:none">
+    <label>Whitelist (@users, comma/space/newline)</label>
+    <textarea id="adm_wl" placeholder="@u1 @u2 @u3"></textarea>
+    <label>Codes (one per line)</label>
+    <textarea id="adm_codes" placeholder="POOL-1&#10;POOL-2"></textarea>
+  </div>
+
+  <div style="margin-top:8px; display:flex; gap:8px;">
+    <button id="adm_createBtn">Create</button>
+    <button id="adm_refreshBtn">Refresh</button>
+  </div>
+
+  <div id="adm_msg" style="font-size:12px; color:#666; margin-top:6px;"></div>
+
+  <h4 style="margin:16px 0 8px;">Drops</h4>
+  <table id="adm_table" style="width:100%; border-collapse:collapse;">
+    <thead>
+      <tr><th style="text-align:left">Name</th><th>Type</th><th>Status</th><th>Window</th><th>Stats</th><th>Actions</th></tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+</div>
+
+    <button id="toggleVoucherAdmin">🎟️ Voucher Admin</button>
+    <button onclick="exportCSV()">📤 Export CSV</button>
+    
+  </div>
 
   <!-- XP Modal -->
   <div id="xp-modal" class="modal">
@@ -202,48 +242,6 @@
   </div>
 </div>
 
-  <!-- New Drop Modal -->
-<div id="new-drop-modal" class="modal" style="display:none;">
-  <div class="modal-content" style="max-width:360px;text-align:left;">
-    <h3 style="margin-top:0;">🎟️ Create Voucher Drop</h3>
-
-    <label style="display:block;margin-top:8px;">Type</label>
-    <select id="nd_type" style="width:100%;">
-      <option value="personalised">Personalised</option>
-      <option value="pooled">Pooled</option>
-    </select>
-
-    <label style="display:block;margin-top:8px;">Name</label>
-    <input id="nd_name" type="text" placeholder="VIP Flash Drop" style="width:100%;">
-
-    <label style="display:block;margin-top:8px;">Start (KL)</label>
-    <input id="nd_start" type="datetime-local" style="width:100%;">
-
-    <label style="display:block;margin-top:8px;">Priority</label>
-    <input id="nd_priority" type="number" value="100" style="width:100%;">
-
-    <!-- personalised -->
-    <div id="nd_personalised" style="margin-top:8px;">
-      <label>Assignments (one per line: <code>@user, CODE</code>)</label>
-      <textarea id="nd_assign" rows="4" placeholder="@yaohui, VIP-001&#10;@alice, VIP-002" style="width:100%;"></textarea>
-    </div>
-
-    <!-- pooled -->
-    <div id="nd_pooled" style="display:none;margin-top:8px;">
-      <label>Whitelist (@users, comma/space/newline)</label>
-      <textarea id="nd_wl" rows="2" placeholder="@u1 @u2 @u3" style="width:100%;"></textarea>
-      <label style="margin-top:8px;display:block;">Codes (one per line)</label>
-      <textarea id="nd_codes" rows="4" placeholder="POOL-1&#10;POOL-2" style="width:100%;"></textarea>
-    </div>
-
-    <div style="display:flex;gap:8px;margin-top:14px;">
-      <button id="nd_submit">Create</button>
-      <button id="nd_cancel" style="background:#ccc;color:#333;">Cancel</button>
-    </div>
-    <div id="nd_msg" style="font-size:12px;color:#666;margin-top:6px;"></div>
-  </div>
-</div>
-
   <script>
 const tg = window.Telegram?.WebApp;
 if (tg) { tg.ready(); tg.expand(); }
@@ -257,6 +255,17 @@ function v2Headers() {
 function splitList(text) {
   return (text || "").split(/[\n, ]+/).map(x => x.trim()).filter(Boolean);
 }
+
+document.getElementById("toggleVoucherAdmin").addEventListener("click", () => {
+  const el = document.getElementById("voucher-admin");
+  el.style.display = el.style.display === "none" ? "block" : "none";
+  if (el.style.display === "block") adm_list();
+});
+
+document.getElementById("adm_type").addEventListener("change", (e) => {
+  document.getElementById("adm_personalised").style.display = e.target.value === "personalised" ? "block" : "none";
+  document.getElementById("adm_pooled").style.display = e.target.value === "pooled" ? "block" : "none";
+});
 
 async function adm_list() {
  const res = await fetch(`${V2}/admin/drops?init_data=${encodeURIComponent(initDataRaw)}`, {
@@ -801,142 +810,6 @@ document.addEventListener('DOMContentLoaded', () => {
       if (pane) pane.style.display = "block";
     });
   });
-});
-
-    <script>
-
-// Open/close modal
-const newDropModal = document.getElementById("new-drop-modal");
-document.getElementById("openNewDropModal").addEventListener("click", ()=> newDropModal.style.display = "flex");
-document.getElementById("nd_cancel").addEventListener("click", ()=> { newDropModal.style.display = "none"; document.getElementById("nd_msg").textContent=""; });
-window.addEventListener("click", (e)=>{ if(e.target===newDropModal){ newDropModal.style.display="none"; } });
-
-// Type toggle
-document.getElementById("nd_type").addEventListener("change", e=>{
-  const isPers = e.target.value === "personalised";
-  document.getElementById("nd_personalised").style.display = isPers ? "block" : "none";
-  document.getElementById("nd_pooled").style.display = isPers ? "none" : "block";
-});
-
-// Convert <input type="datetime-local"> to "YYYY-MM-DD HH:MM:SS" in KL (UTC+8)
-function toKLStringFromLocalInput(dtLocalValue){
-  if(!dtLocalValue) return "";
-  const dtLocal = new Date(dtLocalValue);
-  const localMs = dtLocal.getTime();
-  const offsetLocalMin = dtLocal.getTimezoneOffset();          // minutes from UTC
-  const msToKL = localMs + (8*60 + offsetLocalMin) * 60000;    // shift to KL wall time
-  const d = new Date(msToKL);
-  const pad = n => String(n).padStart(2,"0");
-  const YYYY = d.getUTCFullYear();
-  const MM = pad(d.getUTCMonth()+1);
-  const DD = pad(d.getUTCDate());
-  const hh = pad(d.getUTCHours());
-  const mm = pad(d.getUTCMinutes());
-  return `${YYYY}-${MM}-${DD} ${hh}:${mm}:00`;
-}
-
-// Create drop
-document.getElementById("nd_submit").addEventListener("click", async ()=>{
-  const type = document.getElementById("nd_type").value;
-  const name = document.getElementById("nd_name").value.trim();
-  const startVal = document.getElementById("nd_start").value;
-  const startsAtLocal = toKLStringFromLocalInput(startVal);
-  const priority = Number(document.getElementById("nd_priority").value || 100);
-  const msg = document.getElementById("nd_msg");
-
-  if(!name || !startVal){ msg.textContent = "Please fill name and start time."; return; }
-
-  const payload = { type, name, startsAtLocal, priority };
-
-  if (type === "personalised"){
-    const lines = (document.getElementById("nd_assign").value||"").split("\n").map(x=>x.trim()).filter(Boolean);
-    payload.assignments = lines.map(line=>{
-      const [u,c] = line.split(/[, ]+/).map(s=>s.trim());
-      return { username:u, code:c };
-    }).filter(x=>x.username && x.code);
-  } else {
-    payload.whitelistUsernames = splitList(document.getElementById("nd_wl").value);
-    payload.codes = (document.getElementById("nd_codes").value||"").split("\n").map(x=>x.trim()).filter(Boolean);
-  }
-
-  try{
-    const res = await fetch(`${V2}/admin/drops`, { method:"POST", headers:v2Headers(), body:JSON.stringify(payload) });
-    const data = await res.json();
-    if(data.status === "ok"){
-      msg.textContent = "Created ✅";
-      newDropModal.style.display = "none";
-      document.getElementById("nd_assign").value = "";
-      document.getElementById("nd_wl").value = "";
-      document.getElementById("nd_codes").value = "";
-      adm_list();
-    }else{
-      msg.textContent = `Error: ${JSON.stringify(data)}`;
-    }
-  }catch(e){
-    msg.textContent = "Network error creating drop.";
-    console.error(e);
-  }
-});
-
-// List + actions (keep your existing claim/list code)
-async function adm_list(){
-  const res = await fetch(`${V2}/admin/drops`, { headers:v2Headers() });
-  const tbody = document.querySelector("#adm_table tbody");
-  tbody.innerHTML = "";
-  if(!res.ok){ tbody.innerHTML = `<tr><td colspan="6" style="padding:6px;">No access or endpoint missing</td></tr>`; return; }
-  const data = await res.json();
-  if(data.status!=="ok"){ tbody.innerHTML = `<tr><td colspan="6" style="padding:6px;">Error: ${JSON.stringify(data)}</td></tr>`; return; }
-
-  data.items.forEach(d=>{
-    const stats = d.type==="pooled" ? `${d.codesFree}/${d.codesTotal} free` : `${d.claimed}/${d.assigned} claimed`;
-    const tr = document.createElement("tr");
-    tr.innerHTML = `
-      <td style="text-align:left; padding:6px;">${d.name} <span style="font-size:12px;color:#666;">[${d.priority}]</span></td>
-      <td>${d.type}</td>
-      <td>${d.status}</td>
-      <td>${d.startsAt} → ${d.endsAt}</td>
-      <td>${stats}</td>
-      <td>
-        <button data-op="start_now" data-id="${d.dropId}">Start</button>
-        <button data-op="pause" data-id="${d.dropId}">Pause</button>
-        <button data-op="end_now" data-id="${d.dropId}">End</button>
-        <button data-op="codes" data-id="${d.dropId}">Add Codes</button>
-        ${d.type==="pooled" ? `<button data-op="whitelist" data-id="${d.dropId}">Edit WL</button>` : ""}
-      </td>`;
-    tbody.appendChild(tr);
-  });
-}
-document.getElementById("adm_refreshBtn").addEventListener("click", adm_list);
-
-// Global table action handler
-document.addEventListener("click", (e) => {
-  const btn = e.target.closest("button");
-  if (!btn) return;
-  const op = btn.getAttribute("data-op");
-  const id = btn.getAttribute("data-id");
-  if (!op || !id) return;
-
-  (async () => {
-    let url = `${V2}/admin/drops/${id}/actions`;
-    let body = { op };
-
-    if (op === "codes") {
-      const raw = prompt("Add codes (one per line):", "");
-      if (!raw) return;
-      url = `${V2}/admin/drops/${id}/codes`;
-      body = { codes: raw.split("\n").map(x => x.trim()).filter(Boolean) };
-    } else if (op === "whitelist") {
-      const raw = prompt("Whitelist (@users, comma/space/newline):", "");
-      if (raw == null) return;
-      url = `${V2}/admin/drops/${id}/whitelist`;
-      body = { mode: "replace", usernames: splitList(raw) };
-    }
-
-    const res = await fetch(url, { method: "POST", headers: v2Headers(), body: JSON.stringify(body) });
-    const data = await res.json();
-    alert(JSON.stringify(data));
-    adm_list();
-  })();
 });
 
   </script>
