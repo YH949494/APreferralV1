@@ -118,27 +118,6 @@
   </div> <!-- END inner modal card -->
 </div>   <!-- END #infoHubModal -->
 
-<script>
-  const eventBtn = document.getElementById("eventBtn");
-  const eventModal = document.getElementById("eventModal");
-  const closeEvent = document.getElementById("closeEvent");
-
-  eventBtn.addEventListener("click", () => {
-    eventModal.style.display = "block";
-  });
-
-  closeEvent.addEventListener("click", () => {
-    eventModal.style.display = "none";
-  });
-
-  // Close modal if user clicks outside the box
-  window.addEventListener("click", (e) => {
-    if (e.target === eventModal) {
-      eventModal.style.display = "none";
-    }
-  });
-</script>
-
   <div class="section" id="region-section" style="display: none;">
   <h3>🌍 Select Your Region</h3>
   <select id="region-select">
@@ -171,6 +150,11 @@
     <p id="voucher-code">Coming soon…</p>
     <button onclick="copyVoucherCode()">📋 Copy to clipboard</button>
   </div>
+
+  <div class="section" id="voucher-section" style="display:none;">
+    <h3>🎟️ Voucher Codes</h3>
+    <div id="voucher-cards"></div>
+  </div>
   
   <div class="section">
     <h3>🏆 Weekly Leaderboard</h3>
@@ -184,6 +168,54 @@
     <button onclick="viewJoinRequests()">📥 View Join Requests</button>
     <button onclick="loadPreviousLeaderboard()">🏆 View Past Leaderboard</button>
     <button onclick="openVoucherModal()">🎁 Create Bonus Voucher</button>
+    <div id="voucher-admin" style="display:none; margin-top:10px; border:1px solid #eee; border-radius:8px; padding:12px;">
+  <h4 style="margin:0 0 8px;">Voucher Admin</h4>
+
+  <!-- Create Drop -->
+  <label>Type</label>
+  <select id="adm_type">
+    <option value="personalised">Personalised</option>
+    <option value="pooled">Pooled</option>
+  </select>
+
+  <label>Name</label>
+  <input id="adm_name" placeholder="VIP Flash Drop"/>
+
+  <label>Start (KL) — YYYY-MM-DD HH:MM:SS</label>
+  <input id="adm_starts" placeholder="2025-10-13 12:00:00"/>
+
+  <label>Priority</label>
+  <input id="adm_pri" type="number" value="100"/>
+
+  <div id="adm_personalised">
+    <label>Assignments (one per line: @user, CODE)</label>
+    <textarea id="adm_assign" placeholder="@yaohui, VIP-001&#10;@alice, VIP-002"></textarea>
+  </div>
+
+  <div id="adm_pooled" style="display:none">
+    <label>Whitelist (@users, comma/space/newline)</label>
+    <textarea id="adm_wl" placeholder="@u1 @u2 @u3"></textarea>
+    <label>Codes (one per line)</label>
+    <textarea id="adm_codes" placeholder="POOL-1&#10;POOL-2"></textarea>
+  </div>
+
+  <div style="margin-top:8px; display:flex; gap:8px;">
+    <button id="adm_createBtn">Create</button>
+    <button id="adm_refreshBtn">Refresh</button>
+  </div>
+
+  <div id="adm_msg" style="font-size:12px; color:#666; margin-top:6px;"></div>
+
+  <h4 style="margin:16px 0 8px;">Drops</h4>
+  <table id="adm_table" style="width:100%; border-collapse:collapse;">
+    <thead>
+      <tr><th style="text-align:left">Name</th><th>Type</th><th>Status</th><th>Window</th><th>Stats</th><th>Actions</th></tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+</div>
+
+    <button id="toggleVoucherAdmin">🎟️ Voucher Admin</button>
     <button onclick="exportCSV()">📤 Export CSV</button>
     
   </div>
@@ -209,12 +241,117 @@
     <button onclick="closeVoucherModal()">Cancel</button>
   </div>
 </div>
-  
-  <script>
-    const tg = window.Telegram.WebApp;
-    tg.ready();
-    tg.expand();
 
+  <script>
+const tg = window.Telegram?.WebApp;
+const initDataRaw = tg?.initData || new URLSearchParams(location.search).get("init_data") || "";
+const V2 = "/v2"; // your blueprint prefix
+
+function v2Headers() {
+  return { "Content-Type": "application/json", "X-Telegram-Init": initDataRaw };
+}
+function splitList(text) {
+  return (text || "").split(/[\n, ]+/).map(x => x.trim()).filter(Boolean);
+}
+
+document.getElementById("toggleVoucherAdmin").addEventListener("click", () => {
+  const el = document.getElementById("voucher-admin");
+  el.style.display = el.style.display === "none" ? "block" : "none";
+  if (el.style.display === "block") adm_list();
+});
+
+document.getElementById("adm_type").addEventListener("change", (e) => {
+  document.getElementById("adm_personalised").style.display = e.target.value === "personalised" ? "block" : "none";
+  document.getElementById("adm_pooled").style.display = e.target.value === "pooled" ? "block" : "none";
+});
+
+async function adm_list() {
+  const res = await fetch(`${V2}/admin/drops`, { headers: v2Headers() });
+  const tbody = document.querySelector("#adm_table tbody");
+  tbody.innerHTML = "";
+  if (!res.ok) { tbody.innerHTML = `<tr><td colspan="6" style="padding:6px;">No access or endpoint missing</td></tr>`; return; }
+  const data = await res.json();
+  if (data.status !== "ok") { tbody.innerHTML = `<tr><td colspan="6" style="padding:6px;">Error: ${JSON.stringify(data)}</td></tr>`; return; }
+  data.items.forEach(d => {
+    const stats = d.type === "pooled" ? `${d.codesFree}/${d.codesTotal} free` : `${d.claimed}/${d.assigned} claimed`;
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td style="text-align:left; padding:6px;">${d.name} <span style="font-size:12px;color:#666;">[${d.priority}]</span></td>
+      <td>${d.type}</td>
+      <td>${d.status}</td>
+      <td>${d.startsAt} → ${d.endsAt}</td>
+      <td>${stats}</td>
+      <td>
+        <button data-op="start_now" data-id="${d.dropId}">Start</button>
+        <button data-op="pause" data-id="${d.dropId}">Pause</button>
+        <button data-op="end_now" data-id="${d.dropId}">End</button>
+        <button data-op="codes" data-id="${d.dropId}">Add Codes</button>
+        ${d.type === "pooled" ? `<button data-op="whitelist" data-id="${d.dropId}">Edit WL</button>` : ""}
+      </td>`;
+    tbody.appendChild(tr);
+  });
+}
+
+async function adm_create() {
+  const type = document.querySelector("#adm_type").value;
+  const payload = {
+    type,
+    name: document.querySelector("#adm_name").value.trim(),
+    startsAtLocal: document.querySelector("#adm_starts").value.trim(),
+    priority: Number(document.querySelector("#adm_pri").value || 100),
+  };
+
+  if (type === "personalised") {
+    const lines = (document.querySelector("#adm_assign").value || "").split("\n").map(x => x.trim()).filter(Boolean);
+    payload.assignments = lines.map(line => {
+      const [u, c] = line.split(/[, ]+/).map(s => s.trim());
+      return { username: u, code: c };
+    }).filter(x => x.username && x.code);
+  } else {
+    payload.whitelistUsernames = splitList(document.querySelector("#adm_wl").value);
+    payload.codes = (document.querySelector("#adm_codes").value || "").split("\n").map(x => x.trim()).filter(Boolean);
+  }
+
+  const res = await fetch(`${V2}/admin/drops`, { method: "POST", headers: v2Headers(), body: JSON.stringify(payload) });
+  const data = await res.json();
+  document.getElementById("adm_msg").textContent = data.status === "ok" ? "Created ✅" : JSON.stringify(data);
+  if (data.status === "ok") adm_list();
+}
+document.getElementById("adm_createBtn").addEventListener("click", adm_create);
+document.getElementById("adm_refreshBtn").addEventListener("click", adm_list);
+
+document.addEventListener("click", (e) => {
+  const btn = e.target.closest("button");
+  if (!btn) return;
+  const op = btn.getAttribute("data-op");
+  const id = btn.getAttribute("data-id");
+  if (!op || !id) return;
+
+  (async () => {
+    let url = `${V2}/admin/drops/${id}/actions`;
+    let body = { op };
+
+    if (op === "codes") {
+      const raw = prompt("Add codes (one per line):", "");
+      if (!raw) return;
+      url = `${V2}/admin/drops/${id}/codes`;
+      body = { codes: raw.split("\n").map(x => x.trim()).filter(Boolean) };
+    } else if (op === "whitelist") {
+      const raw = prompt("Whitelist (@users, comma/space/newline):", "");
+      if (raw == null) return;
+      url = `${V2}/admin/drops/${id}/whitelist`;
+      body = { mode: "replace", usernames: splitList(raw) };
+    }
+
+    const res = await fetch(url, { method: "POST", headers: v2Headers(), body: JSON.stringify(body) });
+    const data = await res.json();
+    alert(JSON.stringify(data));
+    adm_list();
+  })();
+});
+</script>
+
+  <script>
     const API_BASE = "https://apreferralv1.fly.dev";
     const user = tg.initDataUnsafe?.user || {};
     const userId = user.id;
@@ -349,7 +486,70 @@
     console.error("❌ Error checking admin or loading voucher:", err);
     }
   }
-    
+
+async function loadVouchers() {
+  try {
+    const url = `${V2}/miniapp/vouchers/visible?init_data=${encodeURIComponent(initDataRaw)}`;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error("visible failed");
+    const data = await res.json();
+
+    const section = document.getElementById("voucher-section");
+    const wrap = document.getElementById("voucher-cards");
+    wrap.innerHTML = "";
+
+    if (!data.drops || data.drops.length === 0) {
+      section.style.display = "none";
+      return;
+    }
+
+    section.style.display = "block";
+    data.drops.forEach(d => {
+      const card = document.createElement("div");
+      card.style.cssText = "border:1px solid #eee; border-radius:10px; padding:12px; margin:8px 0; background:#fff;";
+      card.innerHTML = `
+        <div><b>${d.name}</b> <span style="font-size:12px;color:#666;">(${d.type})</span></div>
+        <div style="font-size:12px;color:#666;margin-top:4px;">
+          ${new Date(d.startsAt).toLocaleString()} → ${new Date(d.endsAt).toLocaleString()}
+        </div>
+        ${typeof d.remainingApprox !== "undefined"
+           ? `<div style="font-size:12px;color:#666;margin-top:6px;">Estimated left: ${d.remainingApprox}</div>`
+           : ""}
+        <button style="margin-top:8px" data-claim="${d.dropId}">
+          ${d.userClaimed ? "View Code" : "Claim"}
+        </button>
+      `;
+      wrap.appendChild(card);
+    });
+  } catch (e) {
+    console.error("loadVouchers error:", e);
+  }
+}
+
+document.addEventListener("click", async (e) => {
+  const btn = e.target.closest("button[data-claim]");
+  if (!btn) return;
+
+  const dropId = btn.getAttribute("data-claim");
+  try {
+    const res = await fetch(`${V2}/miniapp/vouchers/claim?init_data=${encodeURIComponent(initDataRaw)}`, {
+      method: "POST",
+      headers: v2Headers(),
+      body: JSON.stringify({ dropId })
+    });
+    const data = await res.json();
+    if (data.status === "ok") {
+      alert(`✅ Your code: ${data.code}`);
+      loadVouchers();
+    } else {
+      alert(`❌ ${data.code || "claim_failed"}`);
+    }
+  } catch (err) {
+    console.error("claim error:", err);
+    alert("❌ Claim failed.");
+  }
+});
+
   async function loadLeaderboard() {
     try {
       const res = await fetch(`${API_BASE}/api/leaderboard?user_id=${userId}&t=${Date.now()}`);
@@ -605,6 +805,7 @@ async function exportCSV() {
       checkRegionStatus();
       handleAdminAndVoucher();
       loadLeaderboard();  // 👈 This line loads your weekly stats automatically
+      loadVouchers();
     };
 
 // --- Info Hub Modal & Tabs ---
