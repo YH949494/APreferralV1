@@ -1,43 +1,33 @@
-# vouchers.py
-import hmac
-import hashlib
-import base64
-import urllib.parse
-from datetime import datetime, timedelta, timezone
-from flask import Blueprint, request, jsonify, current_app
+from flask import Blueprint, request, jsonify
 from pymongo import ASCENDING, DESCENDING, ReturnDocument
-from pymongo.errors import DuplicateKeyError
 from bson.objectid import ObjectId
-import os
-import re
+from datetime import datetime, timedelta, timezone
+import hmac, hashlib, urllib.parse, os, json
+
+from database import db
 
 vouchers_bp = Blueprint("vouchers", __name__)
-
-# ---- Mongo helpers ----
-def get_db():
-    # If you already have a global client/db, import and reuse that instead.
-    from pymongo import MongoClient
-    uri = os.environ.get("MONGO_URI", "mongodb://localhost:27017")
-    client = MongoClient(uri)
-    dbname = os.environ.get("MONGO_DB", "apbot")
-    return client[dbname]
-
-DB = get_db()
-
-# ---- Time helpers ----
 KL_TZ = timezone(timedelta(hours=8))
 
 def now_utc():
     return datetime.now(timezone.utc)
 
-def parse_kl_local(dt_str):
-    # Expecting "YYYY-MM-DD HH:MM:SS"
-    # Convert KL local time to UTC ISO
+def ensure_voucher_indexes():
+    db.drops.create_index([("startsAt", ASCENDING)])
+    db.drops.create_index([("endsAt", ASCENDING)])
+    db.drops.create_index([("priority", DESCENDING)])
+    db.drops.create_index([("status", ASCENDING)])
+    db.vouchers.create_index([("code", ASCENDING)], unique=True)
+    db.vouchers.create_index([("dropId", ASCENDING), ("type", ASCENDING), ("status", ASCENDING)])
+    db.vouchers.create_index([("dropId", ASCENDING), ("usernameLower", ASCENDING)])
+    db.vouchers.create_index([("dropId", ASCENDING), ("claimedBy", ASCENDING)])
+
+def parse_kl_local(dt_str: str):
+    # "YYYY-MM-DD HH:MM:SS" in KL → UTC datetime
     dt = datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S")
     dt = dt.replace(tzinfo=KL_TZ)
     return dt.astimezone(timezone.utc)
 
-# ---- Username normaliser ----
 def norm_username(u: str) -> str:
     if not u:
         return ""
@@ -46,65 +36,33 @@ def norm_username(u: str) -> str:
         u = u[1:]
     return u.lower()
 
-# ---- Telegram initData verification ----
 def parse_init_data(raw: str) -> dict:
-    # raw is the exact query string received from Telegram Mini App (initData)
-    # Example: "user=%7B%22id%22%3A123%2C%22username%22%3A%22yaohui%22%7D&auth_date=..."
     pairs = urllib.parse.parse_qsl(raw, keep_blank_values=True)
-    data = {k: v for k, v in pairs}
-    return data
+    return {k: v for k, v in pairs}
 
-def verify_telegram_init_data(init_data_raw: str, bot_token: str) -> dict | None:
-    """
-    Verifies Telegram Mini App initData.
-    Returns the `user` dict on success, else None.
-    """
+def verify_telegram_init_data(init_data_raw: str, bot_token: str):
     if not init_data_raw or not bot_token:
         return None
     data = parse_init_data(init_data_raw)
     if "hash" not in data:
         return None
     recv_hash = data.pop("hash")
-    # Build data_check_string sorted by key
-    data_check_list = []
-    for k in sorted(data.keys()):
-        data_check_list.append(f"{k}={data[k]}")
-    data_check_string = "\n".join(data_check_list)
 
+    data_check_string = "\n".join(f"{k}={data[k]}" for k in sorted(data.keys()))
     secret_key = hashlib.sha256(bot_token.encode()).digest()
     computed_hash = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
-
     if not hmac.compare_digest(computed_hash, recv_hash):
         return None
 
-    # Extract user JSON
     user_json = data.get("user")
     if not user_json:
         return None
     try:
-        import json
         user = json.loads(user_json)
-        # normalize username
         user["usernameLower"] = norm_username(user.get("username", ""))
         return user
     except Exception:
         return None
-
-# ---- Index bootstrap ----
-def ensure_indexes():
-    DB.drops.create_index([("startsAt", ASCENDING)])
-    DB.drops.create_index([("endsAt", ASCENDING)])
-    DB.drops.create_index([("priority", DESCENDING)])
-    DB.drops.create_index([("status", ASCENDING)])
-
-    # vouchers shared collection for both types
-    DB.vouchers.create_index([("code", ASCENDING)], unique=True)
-    DB.vouchers.create_index([("dropId", ASCENDING), ("type", ASCENDING), ("status", ASCENDING)])
-    DB.vouchers.create_index([("dropId", ASCENDING), ("usernameLower", ASCENDING)])
-    # For quick "already claimed by user" in pooled
-    DB.vouchers.create_index([("dropId", ASCENDING), ("claimedBy", ASCENDING)])
-
-ensure_indexes()
 
 # ---- Core visibility logic ----
 def is_drop_active(doc: dict, ref: datetime) -> bool:
@@ -113,7 +71,7 @@ def is_drop_active(doc: dict, ref: datetime) -> bool:
             and doc["startsAt"] <= ref < doc["endsAt"])
 
 def get_active_drops(ref: datetime):
-    return list(DB.drops.find({
+    return list(db.drops.find({
         "status": {"$nin": ["expired"]},
         "startsAt": {"$lte": ref},
         "endsAt": {"$gt": ref}
@@ -142,7 +100,7 @@ def user_visible_drops(user: dict, ref: datetime):
 
         if dtype == "personalised":
             # user must have an unclaimed OR claimed row to show the card (claimed -> show claimed state)
-            row = DB.vouchers.find_one({
+            row = db.vouchers.find_one({
                 "type": "personalised",
                 "dropId": drop_id,
                 "usernameLower": usernameLower
@@ -157,23 +115,23 @@ def user_visible_drops(user: dict, ref: datetime):
             if not eligible:
                 continue
             # Need at least one free code OR user already claimed (so they can see their code state)
-            already = DB.vouchers.find_one({
+            already = db.vouchers.find_one({
                 "type": "pooled",
                 "dropId": drop_id,
                 "claimedBy": usernameLower
             })
             if already:
                 base["userClaimed"] = True
-                base["remainingApprox"] = max(0, DB.vouchers.count_documents({"type": "pooled", "dropId": drop_id, "status": "free"}))
+                base["remainingApprox"] = max(0, db.vouchers.count_documents({"type": "pooled", "dropId": drop_id, "status": "free"}))
                 pooled_cards.append(base)
             else:
-                free_exists = DB.vouchers.find_one({
+                free_exists = db.vouchers.find_one({
                     "type": "pooled",
                     "dropId": drop_id,
                     "status": "free"
                 }, projection={"_id": 1})
                 if free_exists:
-                    base["remainingApprox"] = max(0, DB.vouchers.count_documents({"type": "pooled", "dropId": drop_id, "status": "free"}))
+                    base["remainingApprox"] = max(0, db.vouchers.count_documents({"type": "pooled", "dropId": drop_id, "status": "free"}))
                     pooled_cards.append(base)
 
     # Sort: personalised first; then pooled by priority desc, startsAt asc
@@ -186,7 +144,7 @@ def user_visible_drops(user: dict, ref: datetime):
 # ---- Claim handlers ----
 def claim_personalised(drop_id: str, usernameLower: str, ref: datetime):
     # Return existing if already claimed
-    existing = DB.vouchers.find_one({
+    existing = db.vouchers.find_one({
         "type": "personalised",
         "dropId": drop_id,
         "usernameLower": usernameLower,
@@ -196,7 +154,7 @@ def claim_personalised(drop_id: str, usernameLower: str, ref: datetime):
         return {"ok": True, "code": existing["code"], "claimedAt": existing["claimedAt"].isoformat()}
 
     # Claim the assigned row atomically
-    doc = DB.vouchers.find_one_and_update(
+    doc = db.vouchers.find_one_and_update(
         {
             "type": "personalised",
             "dropId": drop_id,
@@ -214,7 +172,7 @@ def claim_personalised(drop_id: str, usernameLower: str, ref: datetime):
     )
     if not doc:
         # Maybe there is no assignment or it was already claimed; try fetching claimed again to idempotently return
-        already = DB.vouchers.find_one({
+        already = db.vouchers.find_one({
             "type": "personalised",
             "dropId": drop_id,
             "usernameLower": usernameLower
@@ -226,7 +184,7 @@ def claim_personalised(drop_id: str, usernameLower: str, ref: datetime):
 
 def claim_pooled(drop_id: str, usernameLower: str, ref: datetime):
     # Idempotent: if already claimed, return same code
-    existing = DB.vouchers.find_one({
+    existing = db.vouchers.find_one({
         "type": "pooled",
         "dropId": drop_id,
         "claimedBy": usernameLower
@@ -235,7 +193,7 @@ def claim_pooled(drop_id: str, usernameLower: str, ref: datetime):
         return {"ok": True, "code": existing["code"], "claimedAt": existing["claimedAt"].isoformat()}
 
     # Atomically reserve a free code
-    doc = DB.vouchers.find_one_and_update(
+    doc = db.vouchers.find_one_and_update(
         {
             "type": "pooled",
             "dropId": drop_id,
@@ -287,7 +245,7 @@ def api_claim():
         return jsonify({"status": "error", "code": "bad_request"}), 400
 
     # Fetch drop & validate window
-    drop = DB.drops.find_one({"_id": ObjectId(drop_id)}) if ObjectId.is_valid(drop_id) else DB.drops.find_one({"_id": drop_id})
+    drop = db.drops.find_one({"_id": ObjectId(drop_id)}) if ObjectId.is_valid(drop_id) else db.drops.find_one({"_id": drop_id})
     if not drop:
         return jsonify({"status": "error", "code": "not_found"}), 404
 
@@ -362,7 +320,7 @@ def admin_create_drop():
         wl = data.get("whitelistUsernames") or []
         drop_doc["whitelistUsernames"] = wl
 
-    res = DB.drops.insert_one(drop_doc)
+    res = db.drops.insert_one(drop_doc)
     drop_id = res.inserted_id
 
     # Insert vouchers
@@ -384,7 +342,7 @@ def admin_create_drop():
                 "claimedAt": None
             })
         if docs:
-            DB.vouchers.insert_many(docs, ordered=False)
+            db.vouchers.insert_many(docs, ordered=False)
     else:
         codes = data.get("codes") or []
         docs = []
@@ -401,7 +359,7 @@ def admin_create_drop():
                 "claimedAt": None
             })
         if docs:
-            DB.vouchers.insert_many(docs, ordered=False)
+            db.vouchers.insert_many(docs, ordered=False)
 
     return jsonify({"status": "ok", "dropId": str(drop_id)})
 
@@ -409,7 +367,7 @@ def admin_create_drop():
 def admin_add_codes(drop_id):
     data = request.get_json(force=True)
     dtype = data.get("type")  # optional override
-    drop = DB.drops.find_one({"_id": _coerce_id(drop_id)})
+    drop = db.drops.find_one({"_id": _coerce_id(drop_id)})
     if not drop:
         return jsonify({"status": "error", "code": "not_found"}), 404
     dtype = dtype or drop.get("type", "pooled")
@@ -432,7 +390,7 @@ def admin_add_codes(drop_id):
                 "claimedAt": None
             })
         if docs:
-            DB.vouchers.insert_many(docs, ordered=False)
+            db.vouchers.insert_many(docs, ordered=False)
     else:
         codes = data.get("codes") or []
         docs = []
@@ -449,7 +407,7 @@ def admin_add_codes(drop_id):
                 "claimedAt": None
             })
         if docs:
-            DB.vouchers.insert_many(docs, ordered=False)
+            db.vouchers.insert_many(docs, ordered=False)
 
     return jsonify({"status": "ok"})
 
@@ -458,7 +416,7 @@ def admin_update_whitelist(drop_id):
     data = request.get_json(force=True)
     mode = data.get("mode", "replace")
     usernames = data.get("usernames") or []
-    drop = DB.drops.find_one({"_id": _coerce_id(drop_id)})
+    drop = db.drops.find_one({"_id": _coerce_id(drop_id)})
     if not drop:
         return jsonify({"status": "error", "code": "not_found"}), 404
     if drop.get("type") != "pooled":
@@ -469,24 +427,24 @@ def admin_update_whitelist(drop_id):
     else:
         new_list = usernames
 
-    DB.drops.update_one({"_id": drop["_id"]}, {"$set": {"whitelistUsernames": new_list}})
+    db.drops.update_one({"_id": drop["_id"]}, {"$set": {"whitelistUsernames": new_list}})
     return jsonify({"status": "ok"})
 
 @vouchers_bp.route("/admin/drops/<drop_id>/actions", methods=["POST"])
 def admin_drop_actions(drop_id):
     data = request.get_json(force=True)
     op = data.get("op")
-    drop = DB.drops.find_one({"_id": _coerce_id(drop_id)})
+    drop = db.drops.find_one({"_id": _coerce_id(drop_id)})
     if not drop:
         return jsonify({"status": "error", "code": "not_found"}), 404
 
     if op == "start_now":
         now = now_utc()
-        DB.drops.update_one({"_id": drop["_id"]}, {"$set": {"startsAt": now, "endsAt": now + timedelta(hours=24), "status": "active"}})
+        db.drops.update_one({"_id": drop["_id"]}, {"$set": {"startsAt": now, "endsAt": now + timedelta(hours=24), "status": "active"}})
     elif op == "pause":
-        DB.drops.update_one({"_id": drop["_id"]}, {"$set": {"status": "paused"}})
+        db.drops.update_one({"_id": drop["_id"]}, {"$set": {"status": "paused"}})
     elif op == "end_now":
-        DB.drops.update_one({"_id": drop["_id"]}, {"$set": {"endsAt": now_utc(), "status": "expired"}})
+        db.drops.update_one({"_id": drop["_id"]}, {"$set": {"endsAt": now_utc(), "status": "expired"}})
     else:
         return jsonify({"status": "error", "code": "bad_request"}), 400
 
