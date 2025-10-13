@@ -64,6 +64,20 @@ def verify_telegram_init_data(init_data_raw: str, bot_token: str):
     except Exception:
         return None
 
+def _admin_allowed_usernames():
+    raw = os.getenv("ADMIN_USERNAMES", "")
+    return {norm_username(x) for x in raw.split(",") if x.strip()}
+
+def require_admin():
+    bot_token = os.environ.get("BOT_TOKEN", "")
+    init_data = request.args.get("init_data") or request.headers.get("X-Telegram-Init")
+    user = verify_telegram_init_data(init_data, bot_token)
+    if not user:
+        return None, (jsonify({"status": "error", "code": "auth_failed"}), 401)
+    if user.get("usernameLower") not in _admin_allowed_usernames():
+        return None, (jsonify({"status": "error", "code": "forbidden"}), 403)
+    return user, None
+    
 # ---- Core visibility logic ----
 def is_drop_active(doc: dict, ref: datetime) -> bool:
     return (doc.get("status") != "paused" 
@@ -296,6 +310,8 @@ def admin_create_drop():
       "whitelistUsernames":["@a","@b"], "codes":["A","B","C"]
     }
     """
+    user, err = require_admin()
+    if err: return err
     data = request.get_json(force=True)
     name = data.get("name")
     dtype = data.get("type", "pooled")
@@ -365,6 +381,8 @@ def admin_create_drop():
 
 @vouchers_bp.route("/admin/drops/<drop_id>/codes", methods=["POST"])
 def admin_add_codes(drop_id):
+    user, err = require_admin()
+    if err: return err
     data = request.get_json(force=True)
     dtype = data.get("type")  # optional override
     drop = db.drops.find_one({"_id": _coerce_id(drop_id)})
@@ -413,6 +431,8 @@ def admin_add_codes(drop_id):
 
 @vouchers_bp.route("/admin/drops/<drop_id>/whitelist", methods=["POST"])
 def admin_update_whitelist(drop_id):
+    user, err = require_admin()
+    if err: return err
     data = request.get_json(force=True)
     mode = data.get("mode", "replace")
     usernames = data.get("usernames") or []
@@ -432,6 +452,8 @@ def admin_update_whitelist(drop_id):
 
 @vouchers_bp.route("/admin/drops/<drop_id>/actions", methods=["POST"])
 def admin_drop_actions(drop_id):
+    user, err = require_admin()
+    if err: return err
     data = request.get_json(force=True)
     op = data.get("op")
     drop = db.drops.find_one({"_id": _coerce_id(drop_id)})
