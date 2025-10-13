@@ -487,3 +487,35 @@ def admin_drop_actions(drop_id):
         return jsonify({"status": "error", "code": "bad_request"}), 400
 
     return jsonify({"status": "ok"})
+
+@vouchers_bp.route("/admin/drops", methods=["GET"])
+def admin_list_drops():
+    user, err = require_admin()
+    if err: return err
+
+    items = []
+    # personalised stats
+    for d in db.drops.find().sort([("priority", DESCENDING), ("startsAt", ASCENDING)]):
+        drop_id = str(d["_id"])
+        dtype = d.get("type", "pooled")
+        row = {
+            "dropId": drop_id,
+            "name": d.get("name"),
+            "type": dtype,
+            "status": d.get("status", "upcoming"),
+            "priority": d.get("priority", 100),
+            "startsAt": d["startsAt"].isoformat(),
+            "endsAt": d["endsAt"].isoformat(),
+        }
+        if dtype == "personalised":
+            assigned = db.vouchers.count_documents({"type": "personalised", "dropId": drop_id})
+            claimed  = db.vouchers.count_documents({"type": "personalised", "dropId": drop_id, "status": "claimed"})
+            row.update({"assigned": assigned, "claimed": claimed})
+        else:
+            total = db.vouchers.count_documents({"type": "pooled", "dropId": drop_id})
+            free  = db.vouchers.count_documents({"type": "pooled", "dropId": drop_id, "status": "free"})
+            row.update({"codesTotal": total, "codesFree": free})
+        items.append(row)
+
+    return jsonify({"status": "ok", "items": items})
+
