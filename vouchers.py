@@ -40,29 +40,45 @@ def parse_init_data(raw: str) -> dict:
     pairs = urllib.parse.parse_qsl(raw, keep_blank_values=True)
     return {k: v for k, v in pairs}
 
-def verify_telegram_init_data(init_data_raw: str, bot_token: str):
+def verify_telegram_init_data(init_data_raw: str, bot_token: str) -> dict | None:
     if not init_data_raw or not bot_token:
         return None
+
     data = parse_init_data(init_data_raw)
-    if "hash" not in data:
-        return None
-    recv_hash = data.pop("hash")
 
-    data_check_string = "\n".join(f"{k}={data[k]}" for k in sorted(data.keys()))
-    secret_key = hashlib.sha256(bot_token.encode()).digest()
-    computed_hash = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(computed_hash, recv_hash):
+    # Build the data_check_string (exclude 'hash' and 'signature')
+    pairs = {k: v for k, v in data.items() if k not in ("hash", "signature")}
+    data_check_string = "\n".join(f"{k}={pairs[k]}" for k in sorted(pairs.keys()))
+    recv_hash = data.get("hash", "")
+
+    # --- A) WebApp scheme (recommended) ---
+    # secret = HMAC_SHA256("WebAppData", bot_token)
+    secret_webapp = hmac.new(b"WebAppData", bot_token.encode(), hashlib.sha256).digest()
+    webapp_hash = hmac.new(secret_webapp, data_check_string.encode(), hashlib.sha256).hexdigest()
+
+    ok = hmac.compare_digest(webapp_hash, recv_hash)
+
+    # --- B) Legacy scheme (login widget style) — fallback for older clients ---
+    if not ok:
+        secret_legacy = hashlib.sha256(bot_token.encode()).digest()
+        legacy_hash = hmac.new(secret_legacy, data_check_string.encode(), hashlib.sha256).hexdigest()
+        ok = hmac.compare_digest(legacy_hash, recv_hash)
+
+    if not ok:
         return None
 
+    # Parse user
     user_json = data.get("user")
     if not user_json:
         return None
     try:
         user = json.loads(user_json)
-        user["usernameLower"] = norm_username(user.get("username", ""))
-        return user
     except Exception:
         return None
+
+    # Normalize username (may be missing)
+    user["usernameLower"] = norm_username(user.get("username", ""))
+    return user
 
 def _admin_allowed_usernames():
     raw = os.getenv("ADMIN_USERNAMES", "")
