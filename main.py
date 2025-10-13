@@ -16,7 +16,8 @@ from apscheduler.triggers.cron import CronTrigger
 from pytz import timezone
 from datetime import datetime, timedelta
 from bson.json_util import dumps
-from vouchers import vouchers_bp
+from vouchers import vouchers_bp, ensure_voucher_indexes
+
 import os
 import asyncio
 import traceback
@@ -965,10 +966,13 @@ if __name__ == "__main__":
 
     # 1) Register vouchers blueprint (versioned) BEFORE starting server
     try:
-        from vouchers import vouchers_bp
+        from vouchers import vouchers_bp, ensure_voucher_indexes
         app.register_blueprint(vouchers_bp, url_prefix="/v2")
+        # build indexes once app & db are ready
+        ensure_voucher_indexes()
+        print("Voucher indexes ensured.")
     except Exception as e:
-        print("Failed to register vouchers blueprint:", e)
+        print("Failed to register vouchers blueprint / ensure indexes:", e)
         raise
 
     # 2) Catch up maintenance before bot handlers start
