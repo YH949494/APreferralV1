@@ -266,7 +266,9 @@ document.getElementById("adm_type").addEventListener("change", (e) => {
 });
 
 async function adm_list() {
-  const res = await fetch(`${V2}/admin/drops`, { headers: v2Headers() });
+ const res = await fetch(`${V2}/admin/drops?init_data=${encodeURIComponent(initDataRaw)}`, {
+  headers: v2Headers()
+});
   const tbody = document.querySelector("#adm_table tbody");
   tbody.innerHTML = "";
   if (!res.ok) { tbody.innerHTML = `<tr><td colspan="6" style="padding:6px;">No access or endpoint missing</td></tr>`; return; }
@@ -293,6 +295,12 @@ async function adm_list() {
 }
 
 async function adm_create() {
+  const res = await fetch(`${V2}/admin/drops?init_data=${encodeURIComponent(initDataRaw)}`, {
+  method: "POST",
+  headers: v2Headers(),
+  body: JSON.stringify(payload)
+});
+
   const type = document.querySelector("#adm_type").value;
   const payload = {
     type,
@@ -328,18 +336,18 @@ document.addEventListener("click", (e) => {
   if (!op || !id) return;
 
   (async () => {
-    let url = `${V2}/admin/drops/${id}/actions`;
+    let url = `${V2}/admin/drops/${id}/actions?init_data=${encodeURIComponent(initDataRaw)}`;
     let body = { op };
 
     if (op === "codes") {
       const raw = prompt("Add codes (one per line):", "");
       if (!raw) return;
-      url = `${V2}/admin/drops/${id}/codes`;
+      url = `${V2}/admin/drops/${id}/codes?init_data=${encodeURIComponent(initDataRaw)}`;
       body = { codes: raw.split("\n").map(x => x.trim()).filter(Boolean) };
     } else if (op === "whitelist") {
       const raw = prompt("Whitelist (@users, comma/space/newline):", "");
       if (raw == null) return;
-      url = `${V2}/admin/drops/${id}/whitelist`;
+      url = `${V2}/admin/drops/${id}/whitelist?init_data=${encodeURIComponent(initDataRaw)}`;
       body = { mode: "replace", usernames: splitList(raw) };
     }
 
