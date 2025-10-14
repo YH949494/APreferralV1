@@ -719,8 +719,8 @@ def reset_weekly_xp():
     week_start_date = week_end_date - timedelta(days=6)   # Monday
 
     proj = {"user_id": 1, "username": 1, "weekly_xp": 1, "weekly_referral_count": 1}
-    top_checkin   = list(users_collection.find({}, proj).sort("weekly_xp", DESCENDING).limit(50))
-    top_referrals = list(users_collection.find({}, proj).sort("weekly_referral_count", DESCENDING).limit(50))
+    top_checkin   = list(users_collection.find({}, proj).sort("weekly_xp", DESCENDING).limit(100))
+    top_referrals = list(users_collection.find({}, proj).sort("weekly_referral_count", DESCENDING).limit(100))
 
     history_collection.insert_one({
         "week_start": week_start_date.isoformat(),
