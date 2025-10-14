@@ -168,51 +168,61 @@
     <button onclick="viewJoinRequests()">📥 View Join Requests</button>
     <button onclick="loadPreviousLeaderboard()">🏆 View Past Leaderboard</button>
     <button onclick="openVoucherModal()">🎁 Create Bonus Voucher</button>
-    <div id="voucher-admin" style="display:none; margin-top:10px; border:1px solid #eee; border-radius:8px; padding:12px;">
-  <h4 style="margin:0 0 8px;">Voucher Admin</h4>
+    <div id="voucher-admin" style="display:none; margin-top:20px; border:1px solid #e0e0e0; border-radius:12px; background:#fafcff; padding:20px;">
+  <fieldset style="margin-bottom:18px; border:1px solid #eee; border-radius:8px; padding:18px;">
+    <legend style="font-weight:bold; color:#007bff;">Create Drop</legend>
+    <div style="margin-bottom:12px;">
+      <label>Type</label>
+      <select id="adm_type" style="margin-left:10px;">
+        <option value="personalised">Personalised</option>
+        <option value="pooled">Pooled</option>
+      </select>
+    </div>
+    <div style="margin-bottom:12px;">
+      <label>Name</label>
+      <input id="adm_name" placeholder="VIP Flash Drop" style="width:60%;"/>
+    </div>
+    <div style="margin-bottom:12px;">
+      <label>Start (KL) — YYYY-MM-DD HH:MM:SS</label>
+      <input id="adm_starts" placeholder="2025-10-13 12:00:00" style="width:60%;"/>
+    </div>
+    <div style="margin-bottom:12px;">
+      <label>Priority</label>
+      <input id="adm_pri" type="number" value="100" style="width:80px;"/>
+    </div>
+    <div id="adm_personalised" style="margin-bottom:12px;">
+      <label>Assignments (one per line: @user, CODE)</label><br>
+      <textarea id="adm_assign" rows="3" style="width:100%;"></textarea>
+    </div>
+    <div id="adm_pooled" style="display:none; margin-bottom:12px;">
+      <label>Whitelist (@users, comma/space/newline)</label><br>
+      <textarea id="adm_wl" rows="2" style="width:100%;"></textarea>
+      <label>Codes (one per line)</label><br>
+      <textarea id="adm_codes" rows="2" style="width:100%;"></textarea>
+    </div>
+    <div style="margin-top:12px; display:flex; gap:12px;">
+      <button id="adm_createBtn" style="flex:1;">Create</button>
+      <button id="adm_refreshBtn" style="flex:1;">Refresh</button>
+    </div>
+    <div id="adm_msg" style="font-size:12px; color:#666; margin-top:6px;"></div>
+  </fieldset>
 
-  <!-- Create Drop -->
-  <label>Type</label>
-  <select id="adm_type">
-    <option value="personalised">Personalised</option>
-    <option value="pooled">Pooled</option>
-  </select>
-
-  <label>Name</label>
-  <input id="adm_name" placeholder="VIP Flash Drop"/>
-
-  <label>Start (KL) — YYYY-MM-DD HH:MM:SS</label>
-  <input id="adm_starts" placeholder="2025-10-13 12:00:00"/>
-
-  <label>Priority</label>
-  <input id="adm_pri" type="number" value="100"/>
-
-  <div id="adm_personalised">
-    <label>Assignments (one per line: @user, CODE)</label>
-    <textarea id="adm_assign" placeholder="@yaohui, VIP-001&#10;@alice, VIP-002"></textarea>
-  </div>
-
-  <div id="adm_pooled" style="display:none">
-    <label>Whitelist (@users, comma/space/newline)</label>
-    <textarea id="adm_wl" placeholder="@u1 @u2 @u3"></textarea>
-    <label>Codes (one per line)</label>
-    <textarea id="adm_codes" placeholder="POOL-1&#10;POOL-2"></textarea>
-  </div>
-
-  <div style="margin-top:8px; display:flex; gap:8px;">
-    <button id="adm_createBtn">Create</button>
-    <button id="adm_refreshBtn">Refresh</button>
-  </div>
-
-  <div id="adm_msg" style="font-size:12px; color:#666; margin-top:6px;"></div>
-
-  <h4 style="margin:16px 0 8px;">Drops</h4>
-  <table id="adm_table" style="width:100%; border-collapse:collapse;">
-    <thead>
-      <tr><th style="text-align:left">Name</th><th>Type</th><th>Status</th><th>Window</th><th>Stats</th><th>Actions</th></tr>
-    </thead>
-    <tbody></tbody>
-  </table>
+  <fieldset style="border:1px solid #eee; border-radius:8px; padding:18px;">
+    <legend style="font-weight:bold; color:#007bff;">Drops</legend>
+    <table id="adm_table" style="width:100%; border-collapse:collapse; font-size:14px;">
+      <thead>
+        <tr style="background:#f0f8ff;">
+          <th style="text-align:left; padding:8px;">Name</th>
+          <th style="padding:8px;">Type</th>
+          <th style="padding:8px;">Status</th>
+          <th style="padding:8px;">Window</th>
+          <th style="padding:8px;">Stats</th>
+          <th style="padding:8px;">Actions</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </fieldset>
 </div>
 
     <button id="toggleVoucherAdmin">🎟️ Voucher Admin</button>
