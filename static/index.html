@@ -442,7 +442,7 @@ async function adm_create() {
 </script>
   <script>
     const API_BASE = "https://apreferralv1.fly.dev";
-    const user = tg.initDataUnsafe?.user || {};
+    const user = tg?.initDataUnsafe?.user || {};
     const userId = user.id;
     const username = user.username || user.first_name || "";
     let regionMsg = ""; 
@@ -899,7 +899,6 @@ async function exportCSV() {
 
     <!-- Add this code to your <script> section, at the end or after user is loaded -->
 
-<script>
 // Ensure admin panel is hidden for non-admins
 function checkAdminPanel() {
   let CURRENT_USERNAME = window.CURRENT_USERNAME || "";
@@ -931,7 +930,6 @@ function checkAdminPanel() {
 
 // Run after DOM is loaded
 document.addEventListener("DOMContentLoaded", checkAdminPanel);
-</script>
   
 // --- Info Hub Modal & Tabs ---
 document.addEventListener('DOMContentLoaded', () => {
