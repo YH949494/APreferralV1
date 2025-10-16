@@ -47,7 +47,7 @@ def verify_telegram_init_data(init_data_raw):
         data = dict(urllib.parse.parse_qsl(init_data_raw, keep_blank_values=True))
         check_hash = data.pop("hash", None)
         data_check_string = "\n".join([f"{k}={v}" for k, v in sorted(data.items())])
-        secret_key = hashlib.sha256(BOT_TOKEN.encode()).digest()
+        secret_key = hashlib.sha256(bot_token.encode()).digest()
         h = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
         return h == check_hash, data
     except Exception as e:
@@ -219,7 +219,7 @@ def api_visible():
     # Expect Telegram initData either in query param ?init_data=... or header X-Telegram-Init
     bot_token = os.environ.get("BOT_TOKEN", "")
     init_data = request.args.get("init_data") or request.headers.get("X-Telegram-Init")
-    user = verify_telegram_init_data(init_data, bot_token)
+    user = verify_telegram_init_data(init_data)
     if not user:
         return jsonify({"status": "error", "code": "auth_failed"}), 401
 
@@ -235,7 +235,7 @@ def api_visible():
 def api_claim():
     bot_token = os.environ.get("BOT_TOKEN", "")
     init_data = request.args.get("init_data") or request.headers.get("X-Telegram-Init")
-    user = verify_telegram_init_data(init_data, bot_token)
+    user = verify_telegram_init_data(init_data)
     if not user:
         return jsonify({"status": "error", "code": "auth_failed"}), 401
 
