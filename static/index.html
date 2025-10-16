@@ -423,7 +423,11 @@ async function adm_list() {
         <td style="text-align:left; padding:6px;">${d.name} <span style="font-size:12px;color:#666;">[${d.priority}]</span></td>
         <td>${d.type}</td>
         <td>${d.status}</td>
-        <td>${d.startsAt} → ${d.endsAt}</td>
+        <td>${
+        new Date(d.startsAt).toLocaleString("en-MY", { timeZone: "Asia/Kuala_Lumpur" })
+      } → ${
+        new Date(d.endsAt).toLocaleString("en-MY", { timeZone: "Asia/Kuala_Lumpur" })
+      }</td>
         <td>${stats}</td>
         <td>
           <button data-op="start_now" data-id="${d.dropId}">Start</button>
