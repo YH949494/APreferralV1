@@ -151,10 +151,17 @@
     <button onclick="copyVoucherCode()">📋 Copy to clipboard</button>
   </div>
 
-  <div class="section" id="voucher-section" style="display:none;">
-    <h3>🎟️ Voucher Codes</h3>
-    <div id="voucher-cards"></div>
+<div id="vip-whitelist" style="display:none; margin:12px 0; padding:12px; border:1px solid #eee; border-radius:10px;">
+  <div style="font-weight:600; margin-bottom:6px;">🎟️ VIP Whitelist Voucher</div>
+  <div id="vip-wl-exp" style="font-size:14px; opacity:.8; margin-bottom:10px;"></div>
+  <div style="display:flex; gap:8px; align-items:center;">
+    <input id="vip-wl-code" readonly style="flex:1; padding:8px 10px; border:1px solid #ddd; border-radius:8px;" />
+    <button id="vip-wl-redeem" style="padding:8px 12px; border:0; border-radius:8px; cursor:pointer;">
+      Redeem
+    </button>
   </div>
+  <div id="vip-wl-msg" style="margin-top:8px; font-size:13px;"></div>
+</div>
   
   <div class="section">
     <h3>🏆 Weekly Leaderboard</h3>
@@ -251,6 +258,100 @@
     <button onclick="closeVoucherModal()">Cancel</button>
   </div>
 </div>
+
+  <script>
+let CURRENT_USERNAME = window.CURRENT_USERNAME || "";
+try {
+  if (window.Telegram?.WebApp?.initDataUnsafe?.user?.username) {
+    CURRENT_USERNAME = Telegram.WebApp.initDataUnsafe.user.username || CURRENT_USERNAME;
+  }
+} catch (_) {}
+if (!CURRENT_USERNAME) {
+  const qs = new URLSearchParams(location.search);
+  CURRENT_USERNAME = qs.get("username") || "";
+}
+
+async function loadVipWhitelistVoucher() {
+  try {
+    const q = CURRENT_USERNAME ? `?username=${encodeURIComponent(CURRENT_USERNAME)}` : "";
+    const r = await fetch(`/api/vip_voucher${q}`);
+    const data = await r.json();
+    if (!data.has) return; // not eligible / outside window
+
+    // show row
+    document.getElementById("vip-whitelist").style.display = "block";
+    document.getElementById("vip-wl-code").value = data.code;
+    document.getElementById("vip-wl-exp").textContent = `Expires ${data.expires} (MYT)`;
+    document.getElementById("vip-wl-msg").textContent = "";
+
+    // redeem
+    document.getElementById("vip-wl-redeem").onclick = async () => {
+      try {
+        const rr = await fetch("/api/vip_voucher/redeem", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({ username: CURRENT_USERNAME, code: data.code })
+        });
+        const out = await rr.json();
+        if (out.success) {
+          document.getElementById("vip-wl-msg").textContent = "✅ Redeemed successfully.";
+          document.getElementById("vip-whitelist").style.display = "none";
+        } else {
+          document.getElementById("vip-wl-msg").textContent = `⚠️ ${out.error || "Redeem failed."}`;
+        }
+      } catch (e) {
+        document.getElementById("vip-wl-msg").textContent = "⚠️ Network error.";
+      }
+    };
+  } catch (e) {
+    console.log("vip whitelist fetch error:", e);
+  }
+}
+
+// run after your page is ready (add to your existing DOMContentLoaded if you have one)
+document.addEventListener("DOMContentLoaded", loadVipWhitelistVoucher);
+
+async function loadVouchers() {
+  try {
+    const section = document.getElementById("voucher-section");
+    const wrap = document.getElementById("voucher-cards");
+    if (!section || !wrap) return;  // <-- add this guard
+
+    const url = `${V2}/miniapp/vouchers/visible?init_data=${encodeURIComponent(initDataRaw)}`;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error("visible failed");
+    const data = await res.json();
+
+    wrap.innerHTML = "";
+
+    if (!data.drops || data.drops.length === 0) {
+      section.style.display = "none";
+      return;
+    }
+
+    section.style.display = "block";
+    data.drops.forEach(d => {
+      const card = document.createElement("div");
+      card.style.cssText = "border:1px solid #eee; border-radius:10px; padding:12px; margin:8px 0; background:#fff;";
+      card.innerHTML = `
+        <div><b>${d.name}</b> <span style="font-size:12px;color:#666;">(${d.type})</span></div>
+        <div style="font-size:12px;color:#666;margin-top:4px;">
+          ${new Date(d.startsAt).toLocaleString()} → ${new Date(d.endsAt).toLocaleString()}
+        </div>
+        ${typeof d.remainingApprox !== "undefined"
+           ? `<div style="font-size:12px;color:#666;margin-top:6px;">Estimated left: ${d.remainingApprox}</div>`
+           : ""}
+        <button style="margin-top:8px" data-claim="${d.dropId}">
+          ${d.userClaimed ? "View Code" : "Claim"}
+        </button>
+      `;
+      wrap.appendChild(card);
+    });
+  } catch (e) {
+    console.error("loadVouchers error:", e);
+  }
+}
+</script>
 
   <script>
 const tg = window.Telegram?.WebApp;
