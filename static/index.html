@@ -379,9 +379,9 @@ document.getElementById("adm_type").addEventListener("change", (e) => {
 });
 
 async function adm_list() {
- const res = await fetch(`${V2}/admin/drops?init_data=${encodeURIComponent(initDataRaw)}`, {
-  headers: v2Headers()
-});
+  const res = await fetch(`${V2}/admin/drops`, {
+    headers: v2Headers() // this already sets { "X-Telegram-Init": initDataRaw }
+  });
   const tbody = document.querySelector("#adm_table tbody");
   tbody.innerHTML = "";
   if (!res.ok) { tbody.innerHTML = `<tr><td colspan="6" style="padding:6px;">No access or endpoint missing</td></tr>`; return; }
