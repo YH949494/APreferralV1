@@ -18,7 +18,7 @@ voucher_whitelist.create_index([("end_at", ASCENDING)])
 # === USERS COLLECTION ===
 users_collection = db["users"]
 users_collection.create_index([("user_id", ASCENDING)], unique=True)
-users_collection.create_index([("username", ASCENDING)]
+users_collection.create_index([("username", ASCENDING)])
                               
 def init_user(user_id, username):
     """Create user if missing; keep username in sync if it changed."""
@@ -28,18 +28,19 @@ def init_user(user_id, username):
             # keep username updated on subsequent calls
             "$set": {"username": username},
             # only set these on first insert
-        {"$setOnInsert": {
-            "user_id": user_id,
-            "username": username,
-            "xp": 0,                  # Lifetime XP
-            "weekly_xp": 0,           # Weekly XP
-            "monthly_xp": 0,          # Monthly XP ✅
-            "last_checkin": None,
-            "referral_count": 0,
-            "status": "Normal",       # or "VIP1"
-            "next_status": "VIP1",    # scheduled for next month
-            "last_status_update": "2025-08-01"
-        }},
+            "$setOnInsert": {
+                "user_id": user_id,
+                "username": username,
+                "xp": 0,                  # Lifetime XP
+                "weekly_xp": 0,           # Weekly XP
+                "monthly_xp": 0,          # Monthly XP ✅
+                "last_checkin": None,
+                "referral_count": 0,
+                "status": "Normal",       # or "VIP1"
+                "next_status": "VIP1",    # scheduled for next month
+                "last_status_update": "2025-08-01"
+            }
+        },
         upsert=True
     )
 
