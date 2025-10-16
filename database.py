@@ -1,19 +1,33 @@
-from pymongo import MongoClient
+from pymongo import MongoClient, ASCENDING 
 import os
 import datetime
+import pytz  # use pytz (no ZoneInfo here)
+
+KL_TZ = pytz.timezone("Asia/Kuala_Lumpur")
 
 MONGO_URL = os.environ.get("MONGO_URL")
 client = MongoClient(MONGO_URL)
 db = client["referral_bot"]
 leaderboard_collection = db["weekly_leaderboard"]
 
+voucher_whitelist = db["voucher_whitelist"]
+voucher_whitelist.create_index([("code", ASCENDING)], unique=True)
+voucher_whitelist.create_index([("username", ASCENDING), ("start_at", ASCENDING)])
+voucher_whitelist.create_index([("end_at", ASCENDING)])
+
 # === USERS COLLECTION ===
 users_collection = db["users"]
-
-# Initialize or update user info
+users_collection.create_index([("user_id", ASCENDING)], unique=True)
+users_collection.create_index([("username", ASCENDING)]
+                              
 def init_user(user_id, username):
+    """Create user if missing; keep username in sync if it changed."""
     users_collection.update_one(
         {"user_id": user_id},
+        {
+            # keep username updated on subsequent calls
+            "$set": {"username": username},
+            # only set these on first insert
         {"$setOnInsert": {
             "user_id": user_id,
             "username": username,
