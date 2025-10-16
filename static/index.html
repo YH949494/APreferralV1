@@ -193,7 +193,7 @@
     <input id="adm_name" type="text" placeholder="e.g., VIP Comeback Oct" style="width:100%;">
   </label>
   <label style="display:block; margin-top:6px;">Start Time (MYT)
-    <input id="adm_starts" type="datetime-local" style="width:100%;">
+    <input id="adm_starts" type="datetime-local" step="60" style="width:100%;">
   </label>
 
   <!-- Personalised block -->
@@ -393,10 +393,11 @@ function splitList(text) {
   return (text || "").split(/[\n, ,;]+/).map(x => x.trim()).filter(Boolean);
 }
 
-function toKLString(dtLocal) {
-  if (!dtLocal) return "";
-  const [d, t] = dtLocal.split("T");
-  return `${d} ${t}:00`;
+function toKLStringFromNative(value) {
+  // value looks like: "YYYY-MM-DDTHH:MM"
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(value || "")) return "";
+  const [d, t] = value.split("T");
+  return `${d} ${t}:00`; // "YYYY-MM-DD HH:MM:SS" (interpreted as KL local by backend)
 }
 
 document.getElementById("adm_type").addEventListener("change", (e) => {
@@ -447,7 +448,7 @@ async function adm_create() {
   const payload = {
     type,
     name: document.querySelector("#adm_name").value.trim(),
-    startsAtLocal: toKLString(document.querySelector("#adm_starts").value.trim()),
+    startsAtLocal: toKLStringFromNative(document.querySelector("#adm_starts").value.trim()),
     priority: Number(document.querySelector("#adm_pri").value || 100),
   };
 
