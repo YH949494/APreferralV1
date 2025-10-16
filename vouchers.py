@@ -86,7 +86,7 @@ def _admin_allowed_usernames():
 
 def require_admin():
     bot_token = os.environ.get("BOT_TOKEN", "")
-    init_data = request.args.get("init_data") or request.headers.get("X-Telegram-Init")
+    init_data = request.headers.get("X-Telegram-Init") or request.args.get("init_data")
     user = verify_telegram_init_data(init_data, bot_token)
     if not user:
         return None, (jsonify({"status": "error", "code": "auth_failed"}), 401)
