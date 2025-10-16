@@ -233,31 +233,24 @@ def claim_pooled(drop_id: str, usernameLower: str, ref: datetime):
 @vouchers_bp.route("/miniapp/vouchers/visible", methods=["GET"])
 def api_visible():
     init_data = request.args.get("init_data") or request.headers.get("X-Telegram-Init") or ""
-    ok, data = verify_telegram_init_data(init_data)
+    ok, data = verify_telegram_init_data(init_data)   # <-- unpack
+    
     if not ok:
         return jsonify({"status": "error", "code": "auth_failed"}), 401
 
-    # data['user'] is a JSON string from Telegram initData
+    # Build a minimal "user" the rest of the code expects
+    user_json = {}
     try:
-        user_raw = json.loads(data.get("user", "{}"))
+        user_json = json.loads(data.get("user", "{}"))
     except Exception:
-        user_raw = {}
+        pass
 
-    user = {
-        "id": user_raw.get("id"),
-        "username": user_raw.get("username", ""),
-        "usernameLower": norm_username(user_raw.get("username", "")),
-        "first_name": user_raw.get("first_name", "")
-    }
+    username_lower = norm_username(user_json.get("username") or user_json.get("first_name") or "")
+    user = {"usernameLower": username_lower}
 
     ref = now_utc()
     drops = user_visible_drops(user, ref)
-    return jsonify({
-        "visibilityMode": "stacked",
-        "nowUtc": ref.isoformat(),
-        "drops": drops
-    })
-
+    return jsonify({"visibilityMode": "stacked", "nowUtc": ref.isoformat(), "drops": drops})
 
 @vouchers_bp.route("/miniapp/vouchers/claim", methods=["POST"])
 def api_claim():
