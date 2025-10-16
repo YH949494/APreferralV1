@@ -175,67 +175,95 @@
     <button onclick="viewJoinRequests()">📥 View Join Requests</button>
     <button onclick="loadPreviousLeaderboard()">🏆 View Past Leaderboard</button>
     <button onclick="openVoucherModal()">🎁 Create Bonus Voucher</button>
-    <div id="voucher-admin" style="display:none; margin-top:20px; border:1px solid #e0e0e0; border-radius:12px; background:#fafcff; padding:20px;">
-  <fieldset style="margin-bottom:18px; border:1px solid #eee; border-radius:8px; padding:18px;">
-    <legend style="font-weight:bold; color:#007bff;">Create Drop</legend>
-    <div style="margin-bottom:12px;">
-      <label>Type</label>
-      <select id="adm_type" style="margin-left:10px;">
-        <option value="personalised">Personalised</option>
-        <option value="pooled">Pooled</option>
+    <!-- Admin: Create Drop -->
+<div id="adm_create_box" style="margin:12px 0; border:1px solid #eee; border-radius:10px; padding:12px;">
+  <h3 style="margin:0 0 8px;">Create Voucher Drop</h3>
+  <div style="display:grid; gap:8px; grid-template-columns:1fr 1fr;">
+    <label>Type
+      <select id="adm_type">
+        <option value="personalised">Personalised (username↔code)</option>
+        <option value="pooled">Pooled (codes bucket)</option>
       </select>
-    </div>
-    <div style="margin-bottom:12px;">
-      <label>Name</label>
-      <input id="adm_name" placeholder="VIP Flash Drop" style="width:60%;"/>
-    </div>
-    <div style="margin-bottom:12px;">
-      <label>Start (KL) — YYYY-MM-DD HH:MM:SS</label>
-      <input id="adm_starts" placeholder="2025-10-13 12:00:00" style="width:60%;"/>
-    </div>
-    <div style="margin-bottom:12px;">
-      <label>Priority</label>
-      <input id="adm_pri" type="number" value="100" style="width:80px;"/>
-    </div>
-    <div id="adm_personalised" style="margin-bottom:12px;">
-      <label>Assignments (one per line: @user, CODE)</label><br>
-      <textarea id="adm_assign" rows="3" style="width:100%;"></textarea>
-    </div>
-    <div id="adm_pooled" style="display:none; margin-bottom:12px;">
-      <label>Whitelist (@users, comma/space/newline)</label><br>
-      <textarea id="adm_wl" rows="2" style="width:100%;"></textarea>
-      <label>Codes (one per line)</label><br>
-      <textarea id="adm_codes" rows="2" style="width:100%;"></textarea>
-    </div>
-    <div style="margin-top:12px; display:flex; gap:12px;">
-      <button id="adm_createBtn" style="flex:1;">Create</button>
-      <button id="adm_refreshBtn" style="flex:1;">Refresh</button>
-    </div>
-    <div id="adm_msg" style="font-size:12px; color:#666; margin-top:6px;"></div>
-  </fieldset>
+    </label>
+    <label>Priority
+      <input id="adm_pri" type="number" value="100" />
+    </label>
+  </div>
+  <label style="display:block; margin-top:6px;">Name
+    <input id="adm_name" type="text" placeholder="e.g., VIP Comeback Oct" style="width:100%;">
+  </label>
+  <label style="display:block; margin-top:6px;">Start Time (MYT)
+    <input id="adm_starts" type="datetime-local" style="width:100%;">
+  </label>
 
-  <fieldset style="border:1px solid #eee; border-radius:8px; padding:18px;">
-    <legend style="font-weight:bold; color:#007bff;">Drops</legend>
-    <table id="adm_table" style="width:100%; border-collapse:collapse; font-size:14px;">
-      <thead>
-        <tr style="background:#f0f8ff;">
-          <th style="text-align:left; padding:8px;">Name</th>
-          <th style="padding:8px;">Type</th>
-          <th style="padding:8px;">Status</th>
-          <th style="padding:8px;">Window</th>
-          <th style="padding:8px;">Stats</th>
-          <th style="padding:8px;">Actions</th>
-        </tr>
-      </thead>
-      <tbody></tbody>
-    </table>
-  </fieldset>
+  <!-- Personalised block -->
+  <div id="adm_personalised" style="margin-top:10px;">
+    <b>Upload username,code pairs</b>
+    <div style="display:flex; gap:8px; margin:6px 0;">
+      <input id="adm_csv_pairs" type="file" accept=".csv">
+      <button id="adm_parse_pairs_btn" type="button">Parse CSV</button>
+    </div>
+    <textarea id="adm_pairs_text" rows="6" placeholder="@alice,ABC123
+@bob,XYZ999" style="width:100%; font-family:monospace;"></textarea>
+    <div style="font-size:12px; color:#666; margin-top:4px;">
+      • CSV must have columns <code>username</code>,<code>code</code>; or paste lines "<code>@name, CODE</code>".  
+    </div>
+  </div>
+
+  <!-- Pooled block -->
+  <div id="adm_pooled" style="margin-top:10px; display:none;">
+    <b>Codes (one per line)</b>
+    <div style="display:flex; gap:8px; margin:6px 0;">
+      <input id="adm_csv_codes" type="file" accept=".csv">
+      <button id="adm_parse_codes_btn" type="button">Parse CSV</button>
+    </div>
+    <textarea id="adm_codes_text" rows="6" placeholder="ABC123
+XYZ999" style="width:100%; font-family:monospace;"></textarea>
+
+    <b style="display:block; margin-top:10px;">Whitelist (optional, @usernames comma/space/newline)</b>
+    <textarea id="adm_wl_text" rows="3" placeholder="@alice @bob @charlie" style="width:100%; font-family:monospace;"></textarea>
+  </div>
+
+  <div style="margin-top:10px;">
+    <button id="adm_create_btn" type="button">Create Drop</button>
+  </div>
 </div>
 
-    <button id="toggleVoucherAdmin">🎟️ Voucher Admin</button>
-    <button onclick="exportCSV()">📤 Export CSV</button>
-    
+<!-- Admin: Drops Table -->
+<table id="adm_table" style="width:100%; border-collapse:collapse;">
+  <thead>
+    <tr>
+      <th style="text-align:left; padding:6px;">Name</th>
+      <th>Type</th>
+      <th>Status</th>
+      <th>Window</th>
+      <th>Stats</th>
+      <th>Actions</th>
+    </tr>
+  </thead>
+  <tbody><tr><td colspan="6" style="padding:6px;">Loading…</td></tr></tbody>
+</table>
+
+<!-- Admin: Add Codes/Pairs to existing Drop -->
+<div id="adm_add_box" style="margin:12px 0; border:1px solid #eee; border-radius:10px; padding:12px;">
+  <h3 style="margin:0 0 8px;">Add Codes / Assignments to Existing Drop</h3>
+  <label>Drop ID
+    <input id="adm_add_drop_id" type="text" placeholder="e.g., 652f... or demo123" style="width:100%;">
+  </label>
+  <div style="display:flex; gap:8px; margin:6px 0;">
+    <select id="adm_add_kind">
+      <option value="personalised">Personalised (username↔code)</option>
+      <option value="pooled">Pooled (codes)</option>
+    </select>
+    <input id="adm_add_csv" type="file" accept=".csv">
+    <button id="adm_add_parse_btn" type="button">Parse CSV</button>
   </div>
+  <textarea id="adm_add_text" rows="6" placeholder="@alice,ABC123
+@bob,XYZ999  (or for pooled: one CODE per line)" style="width:100%; font-family:monospace;"></textarea>
+  <div style="margin-top:8px;">
+    <button id="adm_add_btn" type="button">Add to Drop</button>
+  </div>
+</div>
 
   <!-- XP Modal -->
   <div id="xp-modal" class="modal">
@@ -356,88 +384,165 @@ async function loadVouchers() {
   <script>
 const tg = window.Telegram?.WebApp;
 if (tg) { tg.ready(); tg.expand(); }
-   
 const initDataRaw = tg?.initData || new URLSearchParams(location.search).get("init_data") || "";
-const V2 = "/v2"; // your blueprint prefix
-
+const V2 = "/v2";
 function v2Headers() {
   return { "Content-Type": "application/json", "X-Telegram-Init": initDataRaw };
 }
 function splitList(text) {
-  return (text || "").split(/[\n, ]+/).map(x => x.trim()).filter(Boolean);
+  return (text || "").split(/[\n, ,;]+/).map(x => x.trim()).filter(Boolean);
 }
 
-document.getElementById("toggleVoucherAdmin").addEventListener("click", () => {
-  const el = document.getElementById("voucher-admin");
-  el.style.display = el.style.display === "none" ? "block" : "none";
-  if (el.style.display === "block") adm_list();
-});
+function toKLString(dtLocal) {
+  if (!dtLocal) return "";
+  const [d, t] = dtLocal.split("T");
+  return `${d} ${t}:00`;
+}
 
 document.getElementById("adm_type").addEventListener("change", (e) => {
-  document.getElementById("adm_personalised").style.display = e.target.value === "personalised" ? "block" : "none";
-  document.getElementById("adm_pooled").style.display = e.target.value === "pooled" ? "block" : "none";
+  document.getElementById("adm_personalised").style.display =
+    e.target.value === "personalised" ? "block" : "none";
+  document.getElementById("adm_pooled").style.display =
+    e.target.value === "pooled" ? "block" : "none";
 });
-
+    
 async function adm_list() {
-  const res = await fetch(`${V2}/admin/drops`, {
-    headers: v2Headers() // this already sets { "X-Telegram-Init": initDataRaw }
-  });
   const tbody = document.querySelector("#adm_table tbody");
-  tbody.innerHTML = "";
-  if (!res.ok) { tbody.innerHTML = `<tr><td colspan="6" style="padding:6px;">No access or endpoint missing</td></tr>`; return; }
-  const data = await res.json();
-  if (data.status !== "ok") { tbody.innerHTML = `<tr><td colspan="6" style="padding:6px;">Error: ${JSON.stringify(data)}</td></tr>`; return; }
-  data.items.forEach(d => {
-    const stats = d.type === "pooled" ? `${d.codesFree}/${d.codesTotal} free` : `${d.claimed}/${d.assigned} claimed`;
-    const tr = document.createElement("tr");
-    tr.innerHTML = `
-      <td style="text-align:left; padding:6px;">${d.name} <span style="font-size:12px;color:#666;">[${d.priority}]</span></td>
-      <td>${d.type}</td>
-      <td>${d.status}</td>
-      <td>${d.startsAt} → ${d.endsAt}</td>
-      <td>${stats}</td>
-      <td>
-        <button data-op="start_now" data-id="${d.dropId}">Start</button>
-        <button data-op="pause" data-id="${d.dropId}">Pause</button>
-        <button data-op="end_now" data-id="${d.dropId}">End</button>
-        <button data-op="codes" data-id="${d.dropId}">Add Codes</button>
-        ${d.type === "pooled" ? `<button data-op="whitelist" data-id="${d.dropId}">Edit WL</button>` : ""}
-      </td>`;
-    tbody.appendChild(tr);
-  });
+  tbody.innerHTML = `<tr><td colspan="6" style="padding:6px;">Loading…</td></tr>`;
+  try {
+    const res = await fetch(`${V2}/admin/drops`, { headers: v2Headers() });
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+    const data = await res.json();
+    if (data.status !== "ok") throw new Error(JSON.stringify(data));
+
+    tbody.innerHTML = "";
+    data.items.forEach(d => {
+      const stats = d.type === "pooled" ? `${d.codesFree}/${d.codesTotal} free` : `${d.claimed}/${d.assigned} claimed`;
+      const tr = document.createElement("tr");
+      tr.innerHTML = `
+        <td style="text-align:left; padding:6px;">${d.name} <span style="font-size:12px;color:#666;">[${d.priority}]</span></td>
+        <td>${d.type}</td>
+        <td>${d.status}</td>
+        <td>${d.startsAt} → ${d.endsAt}</td>
+        <td>${stats}</td>
+        <td>
+          <button data-op="start_now" data-id="${d.dropId}">Start</button>
+          <button data-op="pause" data-id="${d.dropId}">Pause</button>
+          <button data-op="end_now" data-id="${d.dropId}">End</button>
+        </td>`;
+      tbody.appendChild(tr);
+    });
+  } catch (e) {
+    tbody.innerHTML = `<tr><td colspan="6" style="padding:6px;">Voucher endpoint error: ${e.message}</td></tr>`;
+  }
 }
 
+document.getElementById("adm_create_btn").onclick = adm_create;
 async function adm_create() {
   const type = document.querySelector("#adm_type").value;
   const payload = {
     type,
     name: document.querySelector("#adm_name").value.trim(),
-    startsAtLocal: document.querySelector("#adm_starts").value.trim(),
+    startsAtLocal: toKLString(document.querySelector("#adm_starts").value.trim()),
     priority: Number(document.querySelector("#adm_pri").value || 100),
   };
 
-  if (type === "personalised") {
-    const lines = (document.querySelector("#adm_assign").value || "")
-      .split("\n").map(x => x.trim()).filter(Boolean);
-    payload.assignments = lines.map(line => {
-      const [u, c] = line.split(/[, ]+/).map(s => s.trim());
-      return { username: u, code: c };
-    }).filter(x => x.username && x.code);
-  } else {
-    payload.whitelistUsernames = splitList(document.querySelector("#adm_wl").value);
-    payload.codes = (document.querySelector("#adm_codes").value || "")
-      .split("\n").map(x => x.trim()).filter(Boolean);
+  if (!payload.name || !payload.startsAtLocal) {
+    alert("Name and Start Time are required."); return;
   }
 
-  const res = await fetch(
-    `${V2}/admin/drops?init_data=${encodeURIComponent(initDataRaw)}`,
-    { method: "POST", headers: v2Headers(), body: JSON.stringify(payload) }
-  );
-  const data = await res.json();
-  document.getElementById("adm_msg").textContent =
-    data.status === "ok" ? "Created ✅" : JSON.stringify(data);
-  if (data.status === "ok") adm_list();
+  if (type === "personalised") {
+    const lines = (document.querySelector("#adm_pairs_text").value || "")
+      .split(/\r?\n/).map(x => x.trim()).filter(Boolean);
+    const assignments = lines.map(line => {
+      const [u, c] = line.split(/[,\t]/).map(s => s?.trim());
+      return u && c ? { username: u, code: c } : null;
+    }).filter(Boolean);
+    if (!assignments.length) { alert("Please provide username,code pairs."); return; }
+    payload.assignments = assignments;
+  } else {
+    const codes = (document.querySelector("#adm_codes_text").value || "")
+      .split(/\r?\n/).map(x => x.trim()).filter(Boolean);
+    if (!codes.length) { alert("Please provide codes."); return; }
+    payload.codes = codes;
+    const wl = splitList(document.querySelector("#adm_wl_text").value);
+    if (wl.length) payload.whitelistUsernames = wl;
+  }
+
+  try {
+    const res = await fetch(`${V2}/admin/drops`, {
+      method: "POST",
+      headers: v2Headers(),
+      body: JSON.stringify(payload)
+    });
+
+    const data = await res.json();
+    if (!res.ok || data.status !== "ok") throw new Error(JSON.stringify(data));
+    alert(`Created drop: ${data.dropId}`);
+    adm_list();
+  } catch (e) {
+    alert(`Create failed: ${e.message}`);
+  }
 }
+
+document.getElementById("adm_add_parse_btn").onclick = () => {
+  const f = document.getElementById("adm_add_csv").files?.[0];
+  if (!f) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    const lines = (reader.result || "").toString().split(/\r?\n/);
+    const header = (lines[0] || "").toLowerCase();
+    let out = "";
+    if (header.includes("username") && header.includes("code")) {
+      for (let i = 1; i < lines.length; i++) {
+        const [u,c] = (lines[i] || "").split(",").map(s => s?.trim());
+        if (u && c) out += `${u},${c}\n`;
+      }
+    } else {
+      for (let i = 0; i < lines.length; i++) {
+        const c = (lines[i] || "").trim();
+        if (c) out += `${c}\n`;
+      }
+    }
+    document.getElementById("adm_add_text").value = out.trim();
+  };
+  reader.readAsText(f);
+};
+
+document.getElementById("adm_add_btn").onclick = async () => {
+  const dropId = document.getElementById("adm_add_drop_id").value.trim();
+  const kind = document.getElementById("adm_add_kind").value;
+  const raw = document.getElementById("adm_add_text").value.trim();
+  if (!dropId || !raw) { alert("Drop ID and data are required."); return; }
+
+  let payload = {};
+  if (kind === "personalised") {
+    const assignments = raw.split(/\r?\n/).map(line => {
+      const [u, c] = line.split(/[,\t]/).map(x => x?.trim());
+      return u && c ? { username: u, code: c } : null;
+    }).filter(Boolean);
+    if (!assignments.length) { alert("Provide username,code lines."); return; }
+    payload = { type: "personalised", assignments };
+  } else {
+    const codes = raw.split(/\r?\n/).map(x => x.trim()).filter(Boolean);
+    if (!codes.length) { alert("Provide one CODE per line."); return; }
+    payload = { type: "pooled", codes };
+  }
+
+  try {
+    const res = await fetch(`${V2}/admin/drops/${dropId}/codes`, {
+      method: "POST",
+      headers: v2Headers(),
+      body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+    if (!res.ok || data.status !== "ok") throw new Error(JSON.stringify(data));
+    alert("Added successfully.");
+    adm_list();
+  } catch (e) {
+    alert(`Add failed: ${e.message}`);
+  }
+};
 
 </script>
   <script>
@@ -578,8 +683,9 @@ async function adm_create() {
 
 async function loadVouchers() {
   try {
-    const url = `${V2}/miniapp/vouchers/visible?init_data=${encodeURIComponent(initDataRaw)}`;
-    const res = await fetch(url);
+    const res = await fetch(`${V2}/miniapp/vouchers/visible`, {
+      headers: v2Headers()
+    });
     if (!res.ok) throw new Error("visible failed");
     const data = await res.json();
 
@@ -616,26 +722,21 @@ async function loadVouchers() {
 }
 
 document.addEventListener("click", async (e) => {
-  const btn = e.target.closest("button[data-claim]");
+  const btn = e.target.closest("button[data-op][data-id]");
   if (!btn) return;
-
-  const dropId = btn.getAttribute("data-claim");
+  const dropId = btn.getAttribute("data-id");
+  const op = btn.getAttribute("data-op");
   try {
-    const res = await fetch(`${V2}/miniapp/vouchers/claim?init_data=${encodeURIComponent(initDataRaw)}`, {
+    const res = await fetch(`${V2}/admin/drops/${dropId}/actions`, {
       method: "POST",
       headers: v2Headers(),
-      body: JSON.stringify({ dropId })
+      body: JSON.stringify({ op })
     });
     const data = await res.json();
-    if (data.status === "ok") {
-      alert(`✅ Your code: ${data.code}`);
-      loadVouchers();
-    } else {
-      alert(`❌ ${data.code || "claim_failed"}`);
-    }
+    if (!res.ok || data.status !== "ok") throw new Error(JSON.stringify(data));
+    adm_list();
   } catch (err) {
-    console.error("claim error:", err);
-    alert("❌ Claim failed.");
+    alert(`Action failed: ${err.message}`);
   }
 });
 
@@ -897,8 +998,6 @@ async function exportCSV() {
       loadVouchers();
     };
 
-    <!-- Add this code to your <script> section, at the end or after user is loaded -->
-
 // Ensure admin panel is hidden for non-admins
 function checkAdminPanel() {
   let CURRENT_USERNAME = window.CURRENT_USERNAME || "";
@@ -929,7 +1028,7 @@ function checkAdminPanel() {
 }
 
 // Run after DOM is loaded
-document.addEventListener("DOMContentLoaded", checkAdminPanel);
+document.addEventListener("DOMContentLoaded", adm_list);
   
 // --- Info Hub Modal & Tabs ---
 document.addEventListener('DOMContentLoaded', () => {
