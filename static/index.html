@@ -897,6 +897,42 @@ async function exportCSV() {
       loadVouchers();
     };
 
+    <!-- Add this code to your <script> section, at the end or after user is loaded -->
+
+<script>
+// Ensure admin panel is hidden for non-admins
+function checkAdminPanel() {
+  let CURRENT_USERNAME = window.CURRENT_USERNAME || "";
+  try {
+    if (window.Telegram?.WebApp?.initDataUnsafe?.user?.username) {
+      CURRENT_USERNAME = Telegram.WebApp.initDataUnsafe.user.username || CURRENT_USERNAME;
+    }
+  } catch (_) {}
+  if (!CURRENT_USERNAME) {
+    const qs = new URLSearchParams(location.search);
+    CURRENT_USERNAME = qs.get("username") || "";
+  }
+
+  // Call your /api/is_admin endpoint
+  fetch(`/api/is_admin?username=${encodeURIComponent(CURRENT_USERNAME)}`)
+    .then(res => res.json())
+    .then(data => {
+      if (data.is_admin) {
+        document.getElementById('admin-panel').style.display = 'block';
+      } else {
+        document.getElementById('admin-panel').style.display = 'none';
+      }
+    })
+    .catch(() => {
+      // Hide admin panel if check fails
+      document.getElementById('admin-panel').style.display = 'none';
+    });
+}
+
+// Run after DOM is loaded
+document.addEventListener("DOMContentLoaded", checkAdminPanel);
+</script>
+  
 // --- Info Hub Modal & Tabs ---
 document.addEventListener('DOMContentLoaded', () => {
   const infoHubBtn   = document.getElementById("infoHubBtn");
