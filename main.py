@@ -1,31 +1,24 @@
-from flask import Flask, request, jsonify, send_from_directory
+from flask import (
+    Flask, request, jsonify, send_from_directory,
+    render_template, redirect, url_for, flash, g
+)
 from flask_cors import CORS
 from threading import Thread
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    ChatMemberHandler,
-    CallbackQueryHandler,
-    ContextTypes,
+    ApplicationBuilder, CommandHandler, ChatMemberHandler,
+    CallbackQueryHandler, ContextTypes
 )
-from checkin import handle_checkin
-from pymongo import MongoClient, DESCENDING
-from apscheduler.schedulers.background import BackgroundScheduler
-from apscheduler.triggers.cron import CronTrigger
-from pytz import timezone
 from datetime import datetime, timedelta
 from bson.json_util import dumps
-from vouchers import vouchers_bp, ensure_voucher_indexes 
+from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.cron import CronTrigger
 
-import os
-import asyncio
-import traceback
-import csv
-import io
-import requests
-import pytz
-KL_TZ = pytz.timezone("Asia/Kuala_Lumpur")
+from vouchers import vouchers_bp, ensure_voucher_indexes
+from database import voucher_whitelist, KL_TZ  # reuse KL_TZ from database.py
+
+from pymongo import MongoClient, DESCENDING  # keep if used elsewhere
+import os, asyncio, traceback, csv, io, requests
 
 # ----------------------------
 # Config
@@ -54,7 +47,7 @@ def _to_kl_date(dt_any):
     if dt.tzinfo is None:
         dt = pytz.UTC.localize(dt)
     return dt.astimezone(KL_TZ).date()
-    
+
 # ----------------------------
 # MongoDB Setup
 # ----------------------------
@@ -157,9 +150,6 @@ def get_or_create_referral_invite_link_sync(user_id: int, username: str = "") ->
     )
     return invite_link
 
-app = Flask(__name__, static_folder="static")
-CORS(app, resources={r"/*": {"origins": "*"}})
-
 def require_admin_from_query():
     caller_id = request.args.get("user_id", type=int)
     if not caller_id:
@@ -171,7 +161,14 @@ def require_admin_from_query():
         return False, ("Admins only", 403)
 
     return True, None
-    
+
+# Flask app must exist before you define routes
+app = Flask(__name__, static_folder="static")
+CORS(app, resources={r"/*": {"origins": "*"}})
+app.secret_key = os.environ.get("FLASK_SECRET_KEY", "dev-secret")
+
+# Telegram bot
+app_bot = ApplicationBuilder().token(BOT_TOKEN).build()
 @app.route("/api/is_admin")
 def api_is_admin():
     try:
@@ -959,16 +956,8 @@ async def button_handler(update, context):
 # Run Bot + Flask + Scheduler
 # ----------------------------
 if __name__ == "__main__":
-    # 0) Ensure earlier in the file you have:
-    # app = Flask(__name__)
-    # CORS(app, resources={r"/v2/*": {"origins": "*"}})  # if your webapp calls /v2
-    # app_bot = ApplicationBuilder().token(os.environ["BOT_TOKEN"]).build()
-
-    # 1) Register vouchers blueprint (versioned) BEFORE starting server
     try:
-        from vouchers import vouchers_bp, ensure_voucher_indexes
         app.register_blueprint(vouchers_bp, url_prefix="/v2")
-        # build indexes once app & db are ready
         ensure_voucher_indexes()
         print("Voucher indexes ensured.")
     except Exception as e:
@@ -1014,9 +1003,8 @@ if __name__ == "__main__":
     print("✅ Bot & Scheduler wired. Starting servers...")
 
     # 6) Start Flask AFTER routes/handlers/scheduler are wired
-    Thread(target=lambda: app.run(host="0.0.0.0", port=8080), daemon=True).start()
+    Thread(target=lambda: app.run(host="0.0.0.0", port=8080), daemon=True).start()  
 
-    # 7) Start Telegram bot (blocking)
     try:
         app_bot.run_polling(
             poll_interval=5,
