@@ -151,16 +151,10 @@
     <button onclick="copyVoucherCode()">📋 Copy to clipboard</button>
   </div>
 
-<div id="vip-whitelist" style="display:none; margin:12px 0; padding:12px; border:1px solid #eee; border-radius:10px;">
-  <div style="font-weight:600; margin-bottom:6px;">🎟️ VIP Whitelist Voucher</div>
-  <div id="vip-wl-exp" style="font-size:14px; opacity:.8; margin-bottom:10px;"></div>
-  <div style="display:flex; gap:8px; align-items:center;">
-    <input id="vip-wl-code" readonly style="flex:1; padding:8px 10px; border:1px solid #ddd; border-radius:8px;" />
-    <button id="vip-wl-redeem" style="padding:8px 12px; border:0; border-radius:8px; cursor:pointer;">
-      Redeem
-    </button>
-  </div>
-  <div id="vip-wl-msg" style="margin-top:8px; font-size:13px;"></div>
+<!-- Visible voucher drops for the current user -->
+<div id="voucher-section" class="section" style="display:none;">
+  <h3>🎁 Special Voucher</h3>
+  <div id="voucher-cards"></div>
 </div>
   
   <div class="section">
