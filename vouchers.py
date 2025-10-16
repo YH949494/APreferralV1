@@ -54,16 +54,13 @@ def verify_telegram_init_data(init_data_raw):
         print("verify_telegram_init_data error:", e)
         return False, {}
         
-def _admin_allowed_usernames():
-    raw = os.getenv("ADMIN_USERNAMES", "")
-    return {norm_username(x) for x in raw.split(",") if x.strip()}
-
 def require_admin():
     init_data = request.headers.get("X-Telegram-Init") or request.args.get("init_data") or ""
     ok, data = verify_telegram_init_data(init_data)
     if not ok:
         return None, (jsonify({"status": "error", "code": "auth_failed"}), 401)
 
+    # Telegram supplies user JSON as a string in init_data
     try:
         user_raw = json.loads(data.get("user", "{}"))
     except Exception:
@@ -71,11 +68,12 @@ def require_admin():
 
     username_lower = norm_username(user_raw.get("username", ""))
 
-admin_usernames = {"gracy_ap"}
+    # Inline allowlist (lowercase, no '@')
+    admin_usernames = {"gracy_ap", "teohyaohui"}  # <-- put your admins here
     if username_lower not in admin_usernames:
         return None, (jsonify({"status": "error", "code": "forbidden"}), 403)
 
-    # Return a compact user dict for downstream use if needed
+    # Return a compact user dict and no error
     return {
         "id": user_raw.get("id"),
         "username": user_raw.get("username", ""),
