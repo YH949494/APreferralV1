@@ -6,6 +6,8 @@ import hmac, hashlib, urllib.parse, os, json
 
 from database import db
 
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+
 vouchers_bp = Blueprint("vouchers", __name__)
 KL_TZ = timezone(timedelta(hours=8))
 
@@ -40,63 +42,27 @@ def parse_init_data(raw: str) -> dict:
     pairs = urllib.parse.parse_qsl(raw, keep_blank_values=True)
     return {k: v for k, v in pairs}
 
-def verify_telegram_init_data(init_data_raw: str, bot_token: str) -> dict | None:
-    if not init_data_raw or not bot_token:
-        return None
-
-    data = parse_init_data(init_data_raw)
-
-    # Build the data_check_string (exclude 'hash' and 'signature')
-    pairs = {k: v for k, v in data.items() if k not in ("hash", "signature")}
-    data_check_string = "\n".join(f"{k}={pairs[k]}" for k in sorted(pairs.keys()))
-    recv_hash = data.get("hash", "")
-
-    # --- A) WebApp scheme (recommended) ---
-    # secret = HMAC_SHA256("WebAppData", bot_token)
-    secret_webapp = hmac.new(b"WebAppData", bot_token.encode(), hashlib.sha256).digest()
-    webapp_hash = hmac.new(secret_webapp, data_check_string.encode(), hashlib.sha256).hexdigest()
-
-    ok = hmac.compare_digest(webapp_hash, recv_hash)
-
-    # --- B) Legacy scheme (login widget style) — fallback for older clients ---
-    if not ok:
-        secret_legacy = hashlib.sha256(bot_token.encode()).digest()
-        legacy_hash = hmac.new(secret_legacy, data_check_string.encode(), hashlib.sha256).hexdigest()
-        ok = hmac.compare_digest(legacy_hash, recv_hash)
-
-    if not ok:
-        return None
-
-    # Parse user
-    user_json = data.get("user")
-    if not user_json:
-        return None
+def verify_telegram_init_data(init_data_raw):
     try:
-        user = json.loads(user_json)
-    except Exception:
-        return None
-
-    # Normalize username (may be missing)
-    user["usernameLower"] = norm_username(user.get("username", ""))
-    return user
-
+        data = dict(urllib.parse.parse_qsl(init_data_raw, keep_blank_values=True))
+        check_hash = data.pop("hash", None)
+        data_check_string = "\n".join([f"{k}={v}" for k, v in sorted(data.items())])
+        secret_key = hashlib.sha256(BOT_TOKEN.encode()).digest()
+        h = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
+        return h == check_hash, data
+    except Exception as e:
+        print("verify_telegram_init_data error:", e)
+        return False, {}
+        
 def _admin_allowed_usernames():
     raw = os.getenv("ADMIN_USERNAMES", "")
     return {norm_username(x) for x in raw.split(",") if x.strip()}
 
 def require_admin():
-    bot_token = os.environ.get("BOT_TOKEN", "")
-    init_data = request.headers.get("X-Telegram-Init") or request.args.get("init_data")
-    user = verify_telegram_init_data(init_data, bot_token)
-    if not user:
-        return None, (jsonify({"status": "error", "code": "auth_failed"}), 401)
-
-    # --- Simple inline admin list (no env needed) ---
-    admin_usernames = {"gracy_ap", "teohyaohui", "your_other_admin"}  # lowercase, no @
-    if user.get("usernameLower") not in admin_usernames:
-        return None, (jsonify({"status": "error", "code": "forbidden"}), 403)
-
-    return user, None
+    # ⚙️ Disable backend admin authentication entirely.
+    # This trusts your Telegram Mini App frontend (which already hides admin panel).
+    # All /v2/admin/... endpoints will accept requests without verification.
+    return {"username": "frontend_trusted"}, None
     
 # ---- Core visibility logic ----
 def is_drop_active(doc: dict, ref: datetime) -> bool:
