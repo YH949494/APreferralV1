@@ -59,10 +59,28 @@ def _admin_allowed_usernames():
     return {norm_username(x) for x in raw.split(",") if x.strip()}
 
 def require_admin():
-    # ⚙️ Disable backend admin authentication entirely.
-    # This trusts your Telegram Mini App frontend (which already hides admin panel).
-    # All /v2/admin/... endpoints will accept requests without verification.
-    return {"username": "frontend_trusted"}, None
+    init_data = request.headers.get("X-Telegram-Init") or request.args.get("init_data") or ""
+    ok, data = verify_telegram_init_data(init_data)
+    if not ok:
+        return None, (jsonify({"status": "error", "code": "auth_failed"}), 401)
+
+    try:
+        user_raw = json.loads(data.get("user", "{}"))
+    except Exception:
+        user_raw = {}
+
+    username_lower = norm_username(user_raw.get("username", ""))
+
+admin_usernames = {"gracy_ap"}
+    if username_lower not in admin_usernames:
+        return None, (jsonify({"status": "error", "code": "forbidden"}), 403)
+
+    # Return a compact user dict for downstream use if needed
+    return {
+        "id": user_raw.get("id"),
+        "username": user_raw.get("username", ""),
+        "usernameLower": username_lower
+    }, None
     
 # ---- Core visibility logic ----
 def is_drop_active(doc: dict, ref: datetime) -> bool:
@@ -216,12 +234,23 @@ def claim_pooled(drop_id: str, usernameLower: str, ref: datetime):
 # ---- Public API routes ----
 @vouchers_bp.route("/miniapp/vouchers/visible", methods=["GET"])
 def api_visible():
-    # Expect Telegram initData either in query param ?init_data=... or header X-Telegram-Init
-    bot_token = os.environ.get("BOT_TOKEN", "")
-    init_data = request.args.get("init_data") or request.headers.get("X-Telegram-Init")
-    user = verify_telegram_init_data(init_data)
-    if not user:
+    init_data = request.args.get("init_data") or request.headers.get("X-Telegram-Init") or ""
+    ok, data = verify_telegram_init_data(init_data)
+    if not ok:
         return jsonify({"status": "error", "code": "auth_failed"}), 401
+
+    # data['user'] is a JSON string from Telegram initData
+    try:
+        user_raw = json.loads(data.get("user", "{}"))
+    except Exception:
+        user_raw = {}
+
+    user = {
+        "id": user_raw.get("id"),
+        "username": user_raw.get("username", ""),
+        "usernameLower": norm_username(user_raw.get("username", "")),
+        "first_name": user_raw.get("first_name", "")
+    }
 
     ref = now_utc()
     drops = user_visible_drops(user, ref)
@@ -231,13 +260,25 @@ def api_visible():
         "drops": drops
     })
 
+
 @vouchers_bp.route("/miniapp/vouchers/claim", methods=["POST"])
 def api_claim():
-    bot_token = os.environ.get("BOT_TOKEN", "")
-    init_data = request.args.get("init_data") or request.headers.get("X-Telegram-Init")
-    user = verify_telegram_init_data(init_data)
-    if not user:
+    init_data = request.args.get("init_data") or request.headers.get("X-Telegram-Init") or ""
+    ok, data = verify_telegram_init_data(init_data)
+    if not ok:
         return jsonify({"status": "error", "code": "auth_failed"}), 401
+
+    try:
+        user_raw = json.loads(data.get("user", "{}"))
+    except Exception:
+        user_raw = {}
+
+    user = {
+        "id": user_raw.get("id"),
+        "username": user_raw.get("username", ""),
+        "usernameLower": norm_username(user_raw.get("username", "")),
+        "first_name": user_raw.get("first_name", "")
+    }
 
     body = request.get_json(silent=True) or {}
     drop_id = body.get("dropId")
