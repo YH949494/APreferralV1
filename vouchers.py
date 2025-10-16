@@ -90,8 +90,12 @@ def require_admin():
     user = verify_telegram_init_data(init_data, bot_token)
     if not user:
         return None, (jsonify({"status": "error", "code": "auth_failed"}), 401)
-    if user.get("usernameLower") not in _admin_allowed_usernames():
+
+    # --- Simple inline admin list (no env needed) ---
+    admin_usernames = {"gracy_ap", "teohyaohui", "your_other_admin"}  # lowercase, no @
+    if user.get("usernameLower") not in admin_usernames:
         return None, (jsonify({"status": "error", "code": "forbidden"}), 403)
+
     return user, None
     
 # ---- Core visibility logic ----
