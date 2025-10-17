@@ -69,24 +69,24 @@
   <p style="margin-bottom:8px;"><b>How to Earn XP</b></p>
 
   <ul style="margin:0; padding:0; list-style:none; line-height:1.6;">
-    <li>- Daily Check-in +20 XP</li>
+    <li>- Daily Check-in 20 XP</li>
     <li>- Streak bonus<br>
-        <span style="margin-left:18px;">(7d +50 XP · 14d +150 XP · 28d +300 XP)</span>
+        <span style="margin-left:18px;">(7d 50 XP · 14d 150 XP · 28d 300 XP)</span>
     </li>
   </ul>
 
   <div style="height:10px;"></div>
 
   <ul style="margin:0; padding:0; list-style:none; line-height:1.6;">
-    <li>- Referral +30 XP / member</li>
-    <li>- 3 successful referrals +200 XP bonus</li>
+    <li>- Referral 30 XP / member</li>
+    <li>- 3 successful referrals 200 XP bonus</li>
 
   <div style="height:10px;"></div>
     
-    <li>- #mywin submission +20 XP each</li>
+    <li>- #mywin submission 20 XP each</li>
   </ul>
 
-  <a href="https://t.me/+tgGbOPvp1p05NjA9" target="_blank"
+  <a href="https://t.me/tgGbOPvp1p05NjA9" target="_blank"
      style="display:inline-block;margin-top:6px;margin-left:10px;
             background:#007bff;color:#fff;text-decoration:none;
             font-size:12px;padding:3px 8px;border-radius:6px;">
@@ -151,9 +151,43 @@
     <button onclick="copyVoucherCode()">📋 Copy to clipboard</button>
   </div>
 
-   <div class="section" id="voucher-section" style="display: none;">
+
+  <!-- Visible voucher drops (claimed/claimable) -->
+  <div class="section" id="voucher-section" style="display:none;">
     <h3>🎁 Special Voucher</h3>
-      <div id="voucher-cards"></div>
+    <div id="voucher-cards"></div>
+  </div>
+  
+   <div class="section" id="vip-bulk-section" style="display:none; background:#fff8f0; border:1px solid #ffead0; padding:12px; border-radius:8px; margin-top:12px;">
+    <h3>🎯 VIP Bulk — Create pooled drop + whitelist</h3>
+    <label style="display:block; margin-top:6px;">Drop name
+      <input id="vip_bulk_name" type="text" placeholder="e.g. VIP Bulk Oct 2025" style="width:100%;">
+    </label>
+    <label style="display:block; margin-top:6px;">Start Time (MYT)
+      <input id="vip_bulk_start" type="datetime-local" step="60" style="width:100%;">
+     </label>
+   <label style="display:block; margin-top:6px;">Priority
+      <input id="vip_bulk_pri" type="number" value="200" style="width:100px;">
+    </label>
+    <label style="display:block; margin-top:6px;">Whitelist (one @username per line or comma-separated)</label>
+    <textarea id="vip_bulk_whitelist" rows="4" placeholder="@alice
+@bob,@charlie" style="width:100%; font-family:monospace;"></textarea>
+    <label style="display:block; margin-top:6px;">Codes (one code per line)</label>
+    <div style="display:flex; gap:8px; margin:6px 0;">
+      <input id="vip_bulk_csv" type="file" accept=".csv">
+      <button id="vip_bulk_parse_codes" type="button">Parse CSV</button>
+    </div>
+    <textarea id="vip_bulk_codes" rows="6" placeholder="CODE123
+CODE456" style="width:100%; font-family:monospace;"></textarea>
+    <div style="display:flex; gap:8px; margin-top:8px;">
+      <button id="vip_bulk_create" type="button">Create pooled drop (with whitelist)</button>
+      <button id="vip_bulk_add_to_existing" type="button">Add codes to existing Drop ID</button>
+      <input id="vip_existing_dropid" type="text" placeholder="existing dropId (optional)" style="flex:1;">
+    </div>
+    <p id="vip_bulk_msg" style="color:#333; margin-top:8px; font-size:13px;"></p>
+    <div style="font-size:12px; color:#666; margin-top:6px;">
+      • Uses /v2 admin endpoints to create pooled drops  update whitelists & codes.
+    </div>
   </div>
   
   <div class="section">
@@ -263,7 +297,7 @@ XYZ999" style="width:100%; font-family:monospace;"></textarea>
     <div class="modal-content">
       <h3>Adjust XP</h3>
       <input id="xp-user" type="text" placeholder="@username">
-      <input id="xp-amount" type="number" placeholder="Amount (+/-)">
+      <input id="xp-amount" type="number" placeholder="Amount (/-)">
       <button onclick="submitXPChange()">Submit</button>
       <button onclick="closeXPModal()">Cancel</button>
     </div>
@@ -291,103 +325,6 @@ if (!CURRENT_USERNAME) {
   const qs = new URLSearchParams(location.search);
   CURRENT_USERNAME = qs.get("username") || "";
 }
-
-async function loadVipWhitelistVoucher() {
-  try {
-    const q = CURRENT_USERNAME ? `?username=${encodeURIComponent(CURRENT_USERNAME)}` : "";
-    const r = await fetch(`/api/vip_voucher${q}`);
-    const data = await r.json();
-    if (!data.has) return; // not eligible / outside window
-
-    // show row
-    document.getElementById("vip-whitelist").style.display = "block";
-    document.getElementById("vip-wl-code").value = data.code;
-    document.getElementById("vip-wl-exp").textContent = `Expires ${data.expires} (MYT)`;
-    document.getElementById("vip-wl-msg").textContent = "";
-
-    // redeem
-    document.getElementById("vip-wl-redeem").onclick = async () => {
-      try {
-        const rr = await fetch("/api/vip_voucher/redeem", {
-          method: "POST",
-          headers: {"Content-Type": "application/json"},
-          body: JSON.stringify({ username: CURRENT_USERNAME, code: data.code })
-        });
-        const out = await rr.json();
-        if (out.success) {
-          document.getElementById("vip-wl-msg").textContent = "✅ Redeemed successfully.";
-          document.getElementById("vip-whitelist").style.display = "none";
-        } else {
-          document.getElementById("vip-wl-msg").textContent = `⚠️ ${out.error || "Redeem failed."}`;
-        }
-      } catch (e) {
-        document.getElementById("vip-wl-msg").textContent = "⚠️ Network error.";
-      }
-    };
-  } catch (e) {
-    console.log("vip whitelist fetch error:", e);
-  }
-}
-
-// run after your page is ready (add to your existing DOMContentLoaded if you have one)
-document.addEventListener("DOMContentLoaded", loadVipWhitelistVoucher);
-
-async function loadVouchers() {
-  try {
-    const section = document.getElementById("voucher-section");
-    const wrap = document.getElementById("voucher-cards");
-    if (!section || !wrap) return;
-
-    const url = `${V2}/miniapp/vouchers/visible?init_data=${encodeURIComponent(initDataRaw)}`;
-    const res = await fetch(url);
-    if (!res.ok) throw new Error("visible failed");
-    const data = await res.json();
-
-    wrap.innerHTML = "";
-
-    if (!data.drops || data.drops.length === 0) {
-      section.style.display = "none";
-      return;
-    }
-
-    section.style.display = "block";
-    data.drops.forEach(d => {
-      const isPreview = !!d.adminPreview;      // set by backend for admins
-      const isActive  = !!d.isActive;          // true only when claimable now
-
-      const card = document.createElement("div");
-      card.style.cssText = "border:1px solid #eee; border-radius:10px; padding:12px; margin:8px 0; background:#fff;";
-
-      card.innerHTML = `
-        <div>
-          <b>${d.name}</b>
-          <span style="font-size:12px;color:#666;">(${d.type})</span>
-          ${isPreview ? '<span style="margin-left:6px;font-size:12px;color:#b35;">[admin preview]</span>' : ''}
-        </div>
-
-        <div style="font-size:12px;color:#666;margin-top:4px;">
-          ${new Date(d.startsAt).toLocaleString()} → ${new Date(d.endsAt).toLocaleString()}
-          ${!isActive ? ' · <span style="color:#b35;">not active</span>' : ''}
-        </div>
-
-        ${typeof d.remainingApprox !== "undefined"
-          ? `<div style="font-size:12px;color:#666;margin-top:6px;">Estimated left: ${d.remainingApprox}</div>`
-          : ""}
-
-        ${isActive
-          ? `<button style="margin-top:8px" data-claim="${d.dropId}">
-               ${d.userClaimed ? "View Code" : "Claim"}
-             </button>`
-          : ""}
-      `;
-
-      wrap.appendChild(card);
-    });
-  } catch (e) {
-    console.error("loadVouchers error:", e);
-  }
-}
-
 </script>
 
   <script>
@@ -399,18 +336,20 @@ function v2Headers() {
   return { "Content-Type": "application/json", "X-Telegram-Init": initDataRaw };
 }
 function splitList(text) {
-  return (text || "").split(/[\n, ,;]+/).map(x => x.trim()).filter(Boolean);
+  // split by any whitespace, comma, or semicolon (collapse repeats)
+  return (text || "").split(/[\s,;]+/).map(x => x.trim()).filter(Boolean);
 }
 
 function fmtKL(iso) {
-  const t = Date.parse(iso);
-  if (isNaN(t)) return iso;                  // if backend ever returns a non-ISO string
-  const kl = new Date(t + 8 * 60 * 60 * 1000); // add +08:00
-  return kl.toLocaleString("en-MY", {
-    day: "2-digit", month: "2-digit", year: "numeric",
-    hour: "2-digit", minute: "2-digit", second: "2-digit",
-    hour12: true
-  });
+ if (!iso) return "";
+ try {
+   return new Date(iso).toLocaleString("en-MY", {
+     timeZone: "Asia/Kuala_Lumpur",
+     day: "2-digit", month: "2-digit", year: "numeric",
+     hour: "2-digit", minute: "2-digit", second: "2-digit",
+     hour12: true
+   });
+ } catch { return String(iso); }
 }
     
 function toKLStringFromNative(value) {
@@ -520,7 +459,7 @@ document.getElementById("adm_add_parse_btn").onclick = () => {
     let out = "";
     if (header.includes("username") && header.includes("code")) {
       for (let i = 1; i < lines.length; i++) {
-        const [u,c] = (lines[i] || "").split(",").map(s => s?.trim());
+        const [u,c] = (lines[i] || "").split(/,|\t/).map(s => s?.trim());
         if (u && c) out += `${u},${c}\n`;
       }
     } else {
@@ -555,8 +494,8 @@ document.getElementById("adm_add_btn").onclick = async () => {
   }
 
   try {
-    const res = await fetch(`${V2}/admin/drops/${dropId}/codes`, {
-      method: "POST",
+    const path = (kind === "personalised") ? "assignments" : "codes";
+    const res = await fetch(`${V2}/admin/drops/${dropId}/${path}`, {      method: "POST",
       headers: v2Headers(),
       body: JSON.stringify(payload)
     });
@@ -568,6 +507,116 @@ document.getElementById("adm_add_btn").onclick = async () => {
     alert(`Add failed: ${e.message}`);
   }
 };
+
+// Create Drop: CSV → username,code pairs
+document.getElementById("adm_parse_pairs_btn").onclick = () => {
+  const f = document.getElementById("adm_csv_pairs").files?.[0];
+  if (!f) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    const lines = (reader.result || "").toString().split(/\r?\n/);
+    const header = (lines[0] || "").toLowerCase();
+    let out = "";
+    if (header.includes("username") && header.includes("code")) {
+      for (let i = 1; i < lines.length; i++) {
+        const [u, c] = (lines[i] || "").split(/,|\t/).map(s => s?.trim());
+        if (u && c) out += `${u},${c}\n`;
+      }
+    } else {
+      for (let i = 0; i < lines.length; i++) {
+        const [u, c] = (lines[i] || "").split(/,|\t/).map(s => s?.trim());
+        if (u && c) out += `${u},${c}\n`;
+      }
+    }
+    document.getElementById("adm_pairs_text").value = out.trim();
+  };
+  reader.readAsText(f);
+};
+
+// Create Drop: CSV → codes (one per line)
+document.getElementById("adm_parse_codes_btn").onclick = () => {
+  const f = document.getElementById("adm_csv_codes").files?.[0];
+  if (!f) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    const lines = (reader.result || "").toString().split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+    // if header exists, try to find a "code" column
+    if (lines.length && /code/i.test(lines[0])) {
+      const header = lines[0].split(/,|\t/).map(h => h.trim().toLowerCase());
+      const idx = header.findIndex(h => /code/.test(h));
+      if (idx >= 0) {
+        const out = [];
+        for (let i = 1; i < lines.length; i) {
+          const cols = lines[i].split(/,|\t/).map(c => c.trim());
+          if (cols[idx]) out.push(cols[idx]);
+        }
+        document.getElementById("adm_codes_text").value = out.join("\n");
+        return;
+      }
+    }
+    document.getElementById("adm_codes_text").value = lines.join("\n");
+  };
+  reader.readAsText(f);
+};
+    
+    // === VIP BULK WHITELIST ADMIN LOGIC ===
+  document.getElementById("vip_bulk_parse_codes").onclick = () => {
+    const f = document.getElementById("vip_bulk_csv").files?.[0];
+    if (!f) return alert("Choose a CSV first.");
+    const reader = new FileReader();
+    reader.onload = () => {
+      const lines = (reader.result || "").toString().split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+      if (lines.length && /code/i.test(lines[0])) {
+        const header = lines[0].split(/,|\t/).map(h => h.trim().toLowerCase());
+        const idx = header.findIndex(h => /code/.test(h));
+        if (idx >= 0) {
+          const out = [];
+          for (let i = 1; i < lines.length; i) {
+            const cols = lines[i].split(/,|\t/).map(c => c.trim());
+            if (cols[idx]) out.push(cols[idx]);
+          }
+          document.getElementById("vip_bulk_codes").value = out.join("\n"); return;
+        }
+      }
+      document.getElementById("vip_bulk_codes").value = lines.join("\n");
+    };
+    reader.readAsText(f);
+  };
+
+  document.getElementById("vip_bulk_create").onclick = async () => {
+    const name = (document.getElementById("vip_bulk_name").value || "").trim();
+    const startLocal = toKLStringFromNative(document.getElementById("vip_bulk_start").value || "");
+    const priority = Number(document.getElementById("vip_bulk_pri").value || 100);
+    const wlRaw = splitList(document.getElementById("vip_bulk_whitelist").value || "");
+    const codes = (document.getElementById("vip_bulk_codes").value || "").split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+    if (!name || !startLocal || codes.length === 0) return alert("Please set Name, Start Time and provide at least one code.");
+    const payload = { name, type:"pooled", startsAtLocal:startLocal, priority, whitelistUsernames:wlRaw, codes };
+    try {
+      const res = await fetch(`${V2}/admin/drops`, { method:"POST", headers:v2Headers(), body:JSON.stringify(payload) });
+      const data = await res.json();
+      if (!res.ok || data.status!=="ok") throw new Error(JSON.stringify(data));
+      document.getElementById("vip_bulk_msg").textContent = `✅ Created drop ${data.dropId}`;
+      adm_list?.();
+    } catch(e){ document.getElementById("vip_bulk_msg").textContent=`⚠️ Create failed: ${e.message||e}`; }
+  };
+
+  document.getElementById("vip_bulk_add_to_existing").onclick = async () => {
+    const dropId = (document.getElementById("vip_existing_dropid").value || "").trim();
+    const codes = (document.getElementById("vip_bulk_codes").value || "").split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+    const wlRaw = splitList(document.getElementById("vip_bulk_whitelist").value || "");
+    if (!codes.length) return alert("Provide codes to add.");
+    if (!dropId) return alert("Enter dropId or use Create pooled drop.");
+    try {
+      const res1 = await fetch(`${V2}/admin/drops/${encodeURIComponent(dropId)}/codes`, { method:"POST", headers:v2Headers(), body:JSON.stringify({ type:"pooled", codes }) });
+      const out1 = await res1.json(); if (!res1.ok || out1.status!=="ok") throw new Error(JSON.stringify(out1));
+      if (wlRaw.length) {
+        const res2 = await fetch(`${V2}/admin/drops/${encodeURIComponent(dropId)}/whitelist`, { method:"POST", headers:v2Headers(), body:JSON.stringify({ mode:"append", usernames: wlRaw }) });
+        const out2 = await res2.json(); if (!res2.ok || out2.status!=="ok") throw new Error(JSON.stringify(out2));
+      }
+      document.getElementById("vip_bulk_msg").textContent = `✅ Added ${codes.length} codes${wlRaw.length?"  whitelist":""} to ${dropId}`;
+      adm_list?.();
+    } catch(e){ document.getElementById("vip_bulk_msg").textContent=`⚠️ Add failed: ${e.message||e}`; }
+  };
 
 </script>
   <script>
@@ -676,35 +725,30 @@ document.getElementById("adm_add_btn").onclick = async () => {
       }
     }
 
-  async function handleAdminAndVoucher() {
-    try {
-      const res = await fetch(`${API_BASE}/api/is_admin?user_id=${userId}`);
-      const adminData = await res.json();
-      const isAdmin = adminData.success && adminData.is_admin;
+async function handleAdminAndVoucher() {
+  try {
+    const res = await fetch(`${API_BASE}/api/is_admin?user_id=${userId}`);
+    const adminData = await res.json();
+    const isAdmin = adminData.success && adminData.is_admin;
+    const voucherRes = await fetch(`${API_BASE}/api/bonus_voucher?user_id=${userId}`);
+    const voucherData = await voucherRes.json();
 
-      const voucherRes = await fetch(`${API_BASE}/api/bonus_voucher?user_id=${userId}`);
-      const voucherData = await voucherRes.json();
-
-      console.log("isAdmin:", isAdmin);
-      console.log("voucherData:", voucherData);
-      
       if (isAdmin) {
-        // Show admin panel
-        document.getElementById("admin-panel").style.display = "block";
-
-        // Always show bonus voucher box to admin
-        document.getElementById("bonus-voucher").style.display = "block";
-        document.getElementById("voucher-code").innerText = voucherData.code || "❌ No active voucher currently.";
-      } else if (voucherData.code) {
-        // Normal VIP1 users only see if voucher is active
-        document.getElementById("bonus-voucher").style.display = "block";
-        document.getElementById("voucher-code").innerText = voucherData.code;
-      }
-
-    } catch (err) {
-    console.error("❌ Error checking admin or loading voucher:", err);
+      document.getElementById("admin-panel").style.display = "block";
+      document.getElementById("bonus-voucher").style.display = "block";
+      document.getElementById("voucher-code").innerText = voucherData.code || "❌ No active voucher currently.";
+      const bulk = document.getElementById("vip-bulk-section"); if (bulk) bulk.style.display = "block";
+    } else if (voucherData.code) {
+      document.getElementById("bonus-voucher").style.display = "block";
+      document.getElementById("voucher-code").innerText = voucherData.code;
+      const bulk = document.getElementById("vip-bulk-section"); if (bulk) bulk.style.display = "none";
+    } else {
+      const bulk = document.getElementById("vip-bulk-section"); if (bulk) bulk.style.display = "none";
     }
+  } catch (err) {
+    console.error("❌ Error checking admin or loading voucher:", err);
   }
+}
 
 async function loadVouchers() {
   try {
@@ -716,6 +760,7 @@ async function loadVouchers() {
 
     const section = document.getElementById("voucher-section");
     const wrap = document.getElementById("voucher-cards");
+    if (!section || !wrap) return; // safety if section is removed
     wrap.innerHTML = "";
 
     if (!data.drops || data.drops.length === 0) {
@@ -729,9 +774,7 @@ async function loadVouchers() {
       card.style.cssText = "border:1px solid #eee; border-radius:10px; padding:12px; margin:8px 0; background:#fff;";
       card.innerHTML = `
         <div><b>${d.name}</b> <span style="font-size:12px;color:#666;">(${d.type})</span></div>
-        <div style="font-size:12px;color:#666;margin-top:4px;">
-          ${new Date(d.startsAt).toLocaleString()} → ${new Date(d.endsAt).toLocaleString()}
-        </div>
+        <div style="font-size:12px;color:#666;margin-top:4px;">${fmtKL(d.startsAt)} → ${fmtKL(d.endsAt)}</div>
         ${typeof d.remainingApprox !== "undefined"
            ? `<div style="font-size:12px;color:#666;margin-top:6px;">Estimated left: ${d.remainingApprox}</div>`
            : ""}
@@ -745,7 +788,7 @@ async function loadVouchers() {
     console.error("loadVouchers error:", e);
   }
 }
-
+// Admin table actions (start/pause/end)
 document.addEventListener("click", async (e) => {
   const btn = e.target.closest("button[data-op][data-id]");
   if (!btn) return;
@@ -762,6 +805,26 @@ document.addEventListener("click", async (e) => {
     adm_list();
   } catch (err) {
     alert(`Action failed: ${err.message}`);
+  }
+});
+
+// Claim/View code
+document.addEventListener("click", async (e) => {
+  const claimBtn = e.target.closest('button[data-claim]');
+  if (!claimBtn) return;
+  const dropId = claimBtn.getAttribute('data-claim');
+  try {
+    const res = await fetch(`${V2}/miniapp/vouchers/claim`, {
+      method: "POST",
+      headers: v2Headers(),
+      body: JSON.stringify({ dropId })
+    });
+    const out = await res.json();
+    if (!res.ok || out.status !== "ok") throw new Error(out.code || "claim_failed");
+    claimBtn.textContent = "View Code";
+    alert(`🎟️ Your code: ${out.code}\nClaimed at: ${fmtKL(out.claimedAt)}`);
+  } catch (err) {
+    alert(`⚠️ Claim failed: ${err.message}`);
   }
 });
 
@@ -789,12 +852,16 @@ document.addEventListener("click", async (e) => {
       let statusLabel = "🧑 Normal";
       if (myStatus === "VIP1") statusLabel = "👑 VIP1";
 
-      out.innerText =
-        `📊 Your Weekly Stats:\n👤 ${myName} - ${myXP} XP | ${myRef} Referrals\n` +
-        `📅 Monthly XP: ${myMonthlyXP}\n` +
-        `${statusLabel}\n\n` +
-        `⭐ XP Leaderboard:\n${checkin}\n\n` +
-        `🔗 Referral Leaderboard:\n${referral}`;
+      out.innerText = `📊 Your Weekly Stats:
+👤 ${myName} - ${myXP} XP | ${myRef} Referrals
+📅 Monthly XP: ${myMonthlyXP}
+${statusLabel}
+
+⭐ XP Leaderboard:
+${checkin}
+
+🔗 Referral Leaderboard:
+${referral}`;
     } catch {
       document.getElementById("leaderboard-output").innerText = "❌ Error loading leaderboard.";
     }
@@ -843,10 +910,14 @@ async function loadPreviousLeaderboard() {
       })
       .join("\n");
 
-    document.getElementById("leaderboard-output").innerText =
-      `📅 ${history.week_start} → ${history.week_end}\n\n` +
-      `🔁 Check-in:\n${checkin}\n\n` +
-      `🔗 Referrals:\n${referral}`;
+    document.getElementById("leaderboard-output").innerText = `📅 ${history.week_start} → ${history.week_end}
+
+🔁 Check-in:
+${checkin}
+
+🔗 Referrals:
+${referral}`;
+    
   } catch (err) {
     console.error("History error:", err);
     document.getElementById("leaderboard-output").innerText =
@@ -1022,35 +1093,6 @@ async function exportCSV() {
       loadLeaderboard();  // 👈 This line loads your weekly stats automatically
       loadVouchers();
     };
-
-// Ensure admin panel is hidden for non-admins
-function checkAdminPanel() {
-  let CURRENT_USERNAME = window.CURRENT_USERNAME || "";
-  try {
-    if (window.Telegram?.WebApp?.initDataUnsafe?.user?.username) {
-      CURRENT_USERNAME = Telegram.WebApp.initDataUnsafe.user.username || CURRENT_USERNAME;
-    }
-  } catch (_) {}
-  if (!CURRENT_USERNAME) {
-    const qs = new URLSearchParams(location.search);
-    CURRENT_USERNAME = qs.get("username") || "";
-  }
-
-  // Call your /api/is_admin endpoint
-  fetch(`/api/is_admin?username=${encodeURIComponent(CURRENT_USERNAME)}`)
-    .then(res => res.json())
-    .then(data => {
-      if (data.is_admin) {
-        document.getElementById('admin-panel').style.display = 'block';
-      } else {
-        document.getElementById('admin-panel').style.display = 'none';
-      }
-    })
-    .catch(() => {
-      // Hide admin panel if check fails
-      document.getElementById('admin-panel').style.display = 'none';
-    });
-}
 
 // Run after DOM is loaded
 document.addEventListener("DOMContentLoaded", adm_list);
