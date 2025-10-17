@@ -85,6 +85,18 @@ def require_admin():
 
     return {"usernameLower": username_lower, "id": user_json.get("id")}, None
 
+def _is_admin_preview(init_data_raw: str) -> bool:
+    # Safe best-effort: if verify fails, just return False (don’t break visible)
+    ok, data = verify_telegram_init_data(init_data_raw)
+    if not ok:
+        return False
+    try:
+        user_json = json.loads(data.get("user", "{}"))
+    except Exception:
+        user_json = {}
+    username_lower = norm_username(user_json.get("username", ""))
+    admin_usernames = {"gracy_ap", "teohyaohui"}  # keep in sync with require_admin()
+    return username_lower in admin_usernames
     
 # ---- Core visibility logic ----
 def is_drop_active(doc: dict, ref: datetime) -> bool:
@@ -243,11 +255,46 @@ def api_visible():
     ok, data = verify_telegram_init_data(init_data)
     if not ok:
         return jsonify({"status": "error", "code": "auth_failed"}), 401
-    user_json = {}
-    try: user_json = json.loads(data.get("user","{}"))
-    except: pass
-    user = {"usernameLower": norm_username(user_json.get("username",""))}
+
+    # user object (username may be empty for some TG users)
+    try:
+        user_raw = json.loads(data.get("user", "{}"))
+    except Exception:
+        user_raw = {}
+    user = {"usernameLower": norm_username(user_raw.get("username", "")),
+            "id": user_raw.get("id")}
+
     ref = now_utc()
+    admin_preview = _is_admin_preview(init_data)
+
+    if admin_preview:
+        # Return *all* drops, any status, ignoring whitelist; tag them.
+        items = []
+        for d in db.drops.find().sort([("priority", DESCENDING), ("startsAt", ASCENDING)]):
+            drop_id = str(d["_id"])
+            base = {
+                "dropId": drop_id,
+                "name": d.get("name"),
+                "type": d.get("type", "pooled"),
+                "startsAt": d["startsAt"].isoformat(),
+                "endsAt": d["endsAt"].isoformat(),
+                "priority": d.get("priority", 100),
+                "status": d.get("status", "upcoming"),
+                "isActive": is_drop_active(d, ref),
+                "userClaimed": False,
+                "adminPreview": True   # <-- tell the UI
+            }
+            # For pooled, show approx remaining
+            if base["type"] == "pooled":
+                free = db.vouchers.count_documents({"type": "pooled", "dropId": drop_id, "status": "free"})
+                total = db.vouchers.count_documents({"type": "pooled", "dropId": drop_id})
+                base["remainingApprox"] = free
+                base["codesTotal"] = total
+            items.append(base)
+        # Keep the same envelope
+        return jsonify({"visibilityMode": "stacked", "nowUtc": ref.isoformat(), "drops": items})
+
+    # normal user path
     drops = user_visible_drops(user, ref)
     return jsonify({"visibilityMode": "stacked", "nowUtc": ref.isoformat(), "drops": drops})
 
