@@ -10,7 +10,8 @@ from telegram.ext import (
     CallbackQueryHandler, ContextTypes
 )
 from datetime import datetime, timedelta, timezone
-from bson.json_util import dumps
+from config import KL_TZ, STREAK_MILESTONES, XP_BASE_PER_CHECKIN, WEEKLY_XP_BUCKET, WEEKLY_REFERRAL_BUCKETfrom bson.json_util import dumps
+
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger 
 
@@ -29,7 +30,6 @@ MONGO_URL = os.environ.get("MONGO_URL")
 WEBAPP_URL = "https://apreferralv1.fly.dev/miniapp"
 GROUP_ID = -1002304653063
 API_BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"
-STREAK_MILESTONES = {7: 50, 14: 150, 28: 300}
 
 def _to_kl_date(dt_any):
     """Accepts aware/naive datetime or ISO string and returns date in KL."""
@@ -109,8 +109,8 @@ def maybe_shout_milestones(user_id: int):
     weekly_xp  = int(u.get("weekly_xp", 0))
     weekly_ref = int(u.get("weekly_referral_count", 0))
 
-    xp_bucket_now  = weekly_xp // 1000
-    ref_bucket_now = weekly_ref // 10
+    xp_bucket_now  = weekly_xp  // WEEKLY_XP_BUCKET
+    ref_bucket_now = weekly_ref // WEEKLY_REFERRAL_BUCKET
 
     xp_bucket_prev  = int(u.get("xp_weekly_milestone_bucket", 0))
     ref_bucket_prev = int(u.get("ref_weekly_milestone_bucket", 0))
@@ -118,18 +118,24 @@ def maybe_shout_milestones(user_id: int):
     updates = {}
     sent_any = False
 
-    if xp_bucket_now > xp_bucket_prev and xp_bucket_now > 0 and not _too_soon(u):
-        updates["xp_weekly_milestone_bucket"] = xp_bucket_now
-        _send_group_message_sync(_announce_text(u, "weekly_xp", xp_bucket_now * 1000))
-        sent_any = True
+   if not _too_soon(u):
+        if xp_bucket_now > xp_bucket_prev and xp_bucket_now > 0:
+            updates["xp_weekly_milestone_bucket"] = xp_bucket_now
+            _send_group_message_sync(
+                _announce_text(u, "weekly_xp", xp_bucket_now * WEEKLY_XP_BUCKET)
+            )
+            sent_any = True
 
-    if ref_bucket_now > ref_bucket_prev and ref_bucket_now > 0 and not _too_soon(u):
-        updates["ref_weekly_milestone_bucket"] = ref_bucket_now
-        _send_group_message_sync(_announce_text(u, "weekly_ref", ref_bucket_now * 10))
-        sent_any = True
+        if ref_bucket_now > ref_bucket_prev and ref_bucket_now > 0:
+            updates["ref_weekly_milestone_bucket"] = ref_bucket_now
+            _send_group_message_sync(
+                _announce_text(u, "weekly_ref", ref_bucket_now * WEEKLY_REFERRAL_BUCKET)
+            )
+            sent_any = True
 
     if sent_any:
         updates["last_shout_at"] = datetime.utcnow()
+
     if updates:
         users_collection.update_one({"user_id": user_id}, {"$set": updates})
         
@@ -308,7 +314,7 @@ async def process_checkin(user_id, username, region, update=None):
     else:
         streak = 1
 
-    base_xp = 20
+    base_xp = XP_BASE_PER_CHECKIN
     bonus_xp = STREAK_MILESTONES.get(streak, 0)
 
     now_utc = datetime.now(pytz.UTC)
