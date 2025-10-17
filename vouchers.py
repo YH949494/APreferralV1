@@ -7,6 +7,7 @@ import hmac, hashlib, urllib.parse, os, json
 from database import db
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
+BYPASS_ADMIN = True
 
 vouchers_bp = Blueprint("vouchers", __name__)
 KL_TZ = timezone(timedelta(hours=8))
@@ -76,6 +77,10 @@ def verify_telegram_init_data(init_data_raw: str):
         return False, {}
         
 def require_admin():
+     if BYPASS_ADMIN:
+        # allow everything; pretend request is from an admin
+        return {"usernameLower": "bypass_admin"}, None
+         
     init_data = request.headers.get("X-Telegram-Init") or request.args.get("init_data") or ""
     ok, data = verify_telegram_init_data(init_data)
     if not ok:
