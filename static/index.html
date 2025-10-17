@@ -337,7 +337,7 @@ async function loadVouchers() {
   try {
     const section = document.getElementById("voucher-section");
     const wrap = document.getElementById("voucher-cards");
-    if (!section || !wrap) return;  // <-- add this guard
+    if (!section || !wrap) return;
 
     const url = `${V2}/miniapp/vouchers/visible?init_data=${encodeURIComponent(initDataRaw)}`;
     const res = await fetch(url);
@@ -353,26 +353,42 @@ async function loadVouchers() {
 
     section.style.display = "block";
     data.drops.forEach(d => {
+      const isPreview = !!d.adminPreview;      // set by backend for admins
+      const isActive  = !!d.isActive;          // true only when claimable now
+
       const card = document.createElement("div");
       card.style.cssText = "border:1px solid #eee; border-radius:10px; padding:12px; margin:8px 0; background:#fff;";
+
       card.innerHTML = `
-        <div><b>${d.name}</b> <span style="font-size:12px;color:#666;">(${d.type})</span></div>
+        <div>
+          <b>${d.name}</b>
+          <span style="font-size:12px;color:#666;">(${d.type})</span>
+          ${isPreview ? '<span style="margin-left:6px;font-size:12px;color:#b35;">[admin preview]</span>' : ''}
+        </div>
+
         <div style="font-size:12px;color:#666;margin-top:4px;">
           ${new Date(d.startsAt).toLocaleString()} → ${new Date(d.endsAt).toLocaleString()}
+          ${!isActive ? ' · <span style="color:#b35;">not active</span>' : ''}
         </div>
+
         ${typeof d.remainingApprox !== "undefined"
-           ? `<div style="font-size:12px;color:#666;margin-top:6px;">Estimated left: ${d.remainingApprox}</div>`
-           : ""}
-        <button style="margin-top:8px" data-claim="${d.dropId}">
-          ${d.userClaimed ? "View Code" : "Claim"}
-        </button>
+          ? `<div style="font-size:12px;color:#666;margin-top:6px;">Estimated left: ${d.remainingApprox}</div>`
+          : ""}
+
+        ${isActive
+          ? `<button style="margin-top:8px" data-claim="${d.dropId}">
+               ${d.userClaimed ? "View Code" : "Claim"}
+             </button>`
+          : ""}
       `;
+
       wrap.appendChild(card);
     });
   } catch (e) {
     console.error("loadVouchers error:", e);
   }
 }
+
 </script>
 
   <script>
