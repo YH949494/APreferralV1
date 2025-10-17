@@ -1,10 +1,9 @@
-# telegram_login.py
-
-import hashlib
-import hmac
-import time
-import urllib.parse
-from dataclasses import dataclass
++import hashlib
++import hmac
++import time
++import json
++import urllib.parse
++from dataclasses import dataclass
 
 @dataclass
 class TelegramUser:
@@ -30,10 +29,25 @@ class WebAppInitData:
         secret_key = hashlib.sha256(bot_token.encode()).digest()
         calculated_hash = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
 
-        if calculated_hash != received_hash:
+        # Constant-time compare to avoid timing leaks
+        if not hmac.compare_digest(calculated_hash, received_hash):
             raise ValueError("Hash mismatch. Invalid initData.")
 
-        user_data = eval(data["user"]) if isinstance(data["user"], str) else data["user"]
+        # Parse the user payload safely
+        raw_user = data.get("user")
+        if raw_user is None:
+            raise ValueError("Missing 'user' in initData.")
+        if isinstance(raw_user, (bytes, bytearray)):
+            raw_user = raw_user.decode("utf-8", "strict")
+        user_data = json.loads(raw_user) if isinstance(raw_user, str) else raw_user
+        if not isinstance(user_data, dict):
+            raise ValueError("'user' must be a JSON object.")
+
+        # (Optional) freshness check to prevent replay (e.g., 5 minutes)
+        auth_ts = int(data.get("auth_date", 0) or 0)
+        if auth_ts <= 0 or (time.time() - auth_ts) > 300:
+            raise ValueError("initData too old or missing auth_date.")
+
         user = TelegramUser(
             id=int(user_data["id"]),
             first_name=user_data.get("first_name", ""),
@@ -46,6 +60,6 @@ class WebAppInitData:
         return WebAppInitData(
             query_id=data.get("query_id", ""),
             user=user,
-            auth_date=int(data.get("auth_date", 0)),
+            auth_date=auth_ts,
             hash=received_hash,
         )
