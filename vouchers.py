@@ -43,23 +43,33 @@ def parse_init_data(raw: str) -> dict:
     return {k: v for k, v in pairs}
 
 def verify_telegram_init_data(init_data_raw: str):
-    """Return (ok: bool, data: dict). Uses the global BOT_TOKEN."""
     try:
         if not init_data_raw:
+            print("[verify] missing init_data")
             return False, {}
 
+        print("[verify] BOT_TOKEN len:", len(BOT_TOKEN))
         if not BOT_TOKEN:
-            print("[verify] BOT_TOKEN missing/empty")
+            print("[verify] BOT_TOKEN is empty (secret not set?)")
             return False, {}
 
         data = dict(urllib.parse.parse_qsl(init_data_raw, keep_blank_values=True))
         check_hash = data.pop("hash", None)
-
         data_check_string = "\n".join(f"{k}={v}" for k, v in sorted(data.items()))
-        secret_key = hashlib.sha256(BOT_TOKEN.encode()).digest()   # <-- FIXED
-        h = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
-        ok = (h == check_hash)
-        print("[verify] ok:", ok, "init_len:", len(init_data_raw), "has_user:", "user" in data)
+
+        secret_key = hashlib.sha256(BOT_TOKEN.encode()).digest()
+        calc_hash  = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
+
+        ok = (calc_hash == check_hash)
+        # Short, non-sensitive logging:
+        print("[verify]",
+              "ok:", ok,
+              "init_len:", len(init_data_raw),
+              "has_user:", "user" in data,
+              "bot_id:", (BOT_TOKEN.split(":",1)[0] if ":" in BOT_TOKEN else "n/a"),
+              "hash_head:", (check_hash or "")[:10],
+              "calc_head:", calc_hash[:10])
+
         return ok, data
     except Exception as e:
         print("verify_telegram_init_data error:", e)
