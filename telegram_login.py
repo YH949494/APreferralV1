@@ -1,9 +1,9 @@
-+import hashlib
-+import hmac
-+import time
-+import json
-+import urllib.parse
-+from dataclasses import dataclass
+import hashlib
+import hmac
+import time
+import json
+import urllib.parse
+from dataclasses import dataclass
 
 @dataclass
 class TelegramUser:
