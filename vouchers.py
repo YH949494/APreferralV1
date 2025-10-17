@@ -2,6 +2,7 @@ from flask import Blueprint, request, jsonify
 from pymongo import ASCENDING, DESCENDING, ReturnDocument
 from bson.objectid import ObjectId
 from datetime import datetime, timedelta, timezone
+from config import KL_TZ
 import hmac, hashlib, urllib.parse, os, json
 
 from database import db
@@ -9,9 +10,8 @@ from database import db
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 
 vouchers_bp = Blueprint("vouchers", __name__)
-KL_TZ = timezone(timedelta(hours=8))
 
-BYPASS_ADMIN = True
+BYPASS_ADMIN = False
 
 def now_utc():
     return datetime.now(timezone.utc)
@@ -25,12 +25,17 @@ def ensure_voucher_indexes():
     db.vouchers.create_index([("dropId", ASCENDING), ("type", ASCENDING), ("status", ASCENDING)])
     db.vouchers.create_index([("dropId", ASCENDING), ("usernameLower", ASCENDING)])
     db.vouchers.create_index([("dropId", ASCENDING), ("claimedBy", ASCENDING)])
+    # Prevent multiple rows for the same user in a personalised drop
+    db.vouchers.create_index(
+        [("type", ASCENDING), ("dropId", ASCENDING), ("usernameLower", ASCENDING)],
+        unique=True,
+        name="uniq_personalised_assignment"
+    )
 
 def parse_kl_local(dt_str: str):
-    # "YYYY-MM-DD HH:MM:SS" in KL → UTC datetime
-    dt = datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S")
-    dt = dt.replace(tzinfo=KL_TZ)
-    return dt.astimezone(timezone.utc)
+    """Parse 'YYYY-MM-DD HH:MM:SS' in Kuala Lumpur local time to UTC (aware)"""
+    dt_local = datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=KL_TZ)
+    return dt_local.astimezone(timezone.utc)
 
 def norm_username(u: str) -> str:
     if not u:
@@ -54,7 +59,8 @@ def verify_telegram_init_data(init_data_raw: str):
         data_check_string = "\n".join(f"{k}={v}" for k, v in sorted(data.items()))
         secret_key = hashlib.sha256(BOT_TOKEN.encode()).digest()   # <- correct var
         calc_hash  = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
-        return calc_hash == check_hash, data
+        import hmac as _hmac
+        return _hmac.compare_digest(calc_hash, check_hash), data
     except Exception:
         return False, {}
         
