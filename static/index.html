@@ -333,7 +333,12 @@ if (tg) { tg.ready(); tg.expand(); }
 const initDataRaw = tg?.initData || new URLSearchParams(location.search).get("init_data") || "";
 const V2 = "/v2";
 function v2Headers() {
-  return { "Content-Type": "application/json", "X-Telegram-Init": initDataRaw };
+  const h = { "Content-Type": "application/json" };
+  if (initDataRaw) h["X-Telegram-Init-Data"] = initDataRaw; // <-- was X-Telegram-Init
+  // Optional: allow a temporary admin secret for browser tests
+  const adminSecret = localStorage.getItem("X-Admin-Secret");
+  if (adminSecret) h["X-Admin-Secret"] = adminSecret;
+  return h;
 }
 function splitList(text) {
   // split by any whitespace, comma, or semicolon (collapse repeats)
