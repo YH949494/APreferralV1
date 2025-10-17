@@ -1,8 +1,9 @@
 from flask import request, jsonify
 from pymongo import MongoClient
 import os
-import pytz
 from datetime import datetime, timedelta, time
+from config import KL_TZ, XP_BASE_PER_CHECKIN, STREAK_MILESTONES
+
 
 # MongoDB setup
 MONGO_URL = os.environ.get("MONGO_URL")
@@ -10,9 +11,7 @@ client = MongoClient(MONGO_URL)
 db = client["referral_bot"]
 users_collection = db["users"]
 
-# Timezone and XP settings
-tz = pytz.timezone("Asia/Kuala_Lumpur")
-CHECKIN_XP = 20
+# Timezone & XP come from a single source of truth (config.py)
 
 def handle_checkin():
     user_id = request.args.get("user_id", type=int)
@@ -21,9 +20,10 @@ def handle_checkin():
     if not user_id:
         return jsonify({"error": "Missing user_id"}), 400
 
-    now = datetime.now(tz)
+    now = datetime.now(KL_TZ)
     today = now.date()
-    next_midnight = tz.localize(datetime.combine(today + timedelta(days=1), time()))
+    # next local midnight in KL
+    next_midnight = datetime.combine(today + timedelta(days=1), time(0, 0, 0, tzinfo=KL_TZ))
 
     user = users_collection.find_one({"user_id": user_id})
 
@@ -32,8 +32,8 @@ def handle_checkin():
         users_collection.insert_one({
             "user_id": user_id,
             "username": username,
-            "xp": CHECKIN_XP,
-            "weekly_xp": CHECKIN_XP,
+            "xp": XP_BASE_PER_CHECKIN,
+            "weekly_xp": XP_BASE_PER_CHECKIN,
             "referral_count": 0,
             "weekly_referral_count": 0,
             "last_checkin": now,
@@ -41,7 +41,7 @@ def handle_checkin():
         })
         return jsonify({
             "success": True,
-            "message": f"✅ First check-in! +{CHECKIN_XP} XP",
+            "message": f"✅ First check-in! +{XP_BASE_PER_CHECKIN} XP",
             "next_checkin_time": next_midnight.isoformat()
         })
 
@@ -49,7 +49,7 @@ def handle_checkin():
     streak = user.get("streak", 0)
 
     if last_checkin:
-        last_date = last_checkin.astimezone(tz).date()
+        last_date = last_checkin.astimezone(KL_TZ).date()
 
         if last_date == today:
             # Already checked in today
@@ -66,16 +66,10 @@ def handle_checkin():
     else:
         streak = 1  # First check-in ever
 
-    # Bonus XP for streaks
-    bonus_xp = 0
-    if streak == 7:
-        bonus_xp = 50
-    elif streak == 14:
-        bonus_xp = 100
-    elif streak == 28:
-        bonus_xp = 200
+    # Bonus XP from unified milestone table
+   bonus_xp = STREAK_MILESTONES.get(streak, 0)
 
-    total_xp = CHECKIN_XP + bonus_xp
+    total_xp = XP_BASE_PER_CHECKIN + bonus_xp
 
     users_collection.update_one(
         {"user_id": user_id},
@@ -96,6 +90,6 @@ def handle_checkin():
     bonus_text = f" 🎉 Streak Bonus: +{bonus_xp} XP!" if bonus_xp else ""
     return jsonify({
         "success": True,
-        "message": f"✅ Check-in successful! +{CHECKIN_XP} XP{bonus_text}",
+        "message": f"✅ Check-in successful! +{XP_BASE_PER_CHECKIN} XP{bonus_text}",
         "next_checkin_time": next_midnight.isoformat()
     })
