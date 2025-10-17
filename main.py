@@ -9,7 +9,7 @@ from telegram.ext import (
     ApplicationBuilder, CommandHandler, ChatMemberHandler,
     CallbackQueryHandler, ContextTypes
 )
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from bson.json_util import dumps
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger 
@@ -759,8 +759,7 @@ def one_time_fix_monthly_xp():
     print(f"🔧 monthly_xp backfilled on first boot. Modified: {res.modified_count}")
 
 def run_boot_catchup():
-    tz_kl = timezone("Asia/Kuala_Lumpur")
-    now = datetime.now(tz_kl)
+    now = datetime.now(KL_TZ)
 
     try:
         # weekly catch-up (only on Monday)
@@ -768,9 +767,9 @@ def run_boot_catchup():
         if last_history:
             last_raw = last_history["archived_at"]
             if last_raw.tzinfo is None:
-                last_reset = last_raw.replace(tzinfo=pytz.UTC).astimezone(tz_kl)
+                last_reset = last_raw.replace(tzinfo=pytz.UTC).astimezone(KL_TZ)
             else:
-                last_reset = last_raw.astimezone(tz_kl)
+                last_reset = last_raw.astimezone(KL_TZ)
             days_since = (now - last_reset).days
         else:
             days_since = 999
