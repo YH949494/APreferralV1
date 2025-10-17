@@ -126,8 +126,9 @@ def user_visible_drops(user: dict, ref: datetime):
                 personal_cards.append(base)
         else:
             # pooled: if whitelist empty -> public; else usernameLower must be in whitelist
-            wl = d.get("whitelistUsernames") or []
-            eligible = (len(wl) == 0) or (("@" + usernameLower) in [w.lower() if not w.startswith("@") else w.lower() for w in [w.strip() for w in wl]] or usernameLower in [norm_username(w) for w in wl])
+            wl_raw = d.get("whitelistUsernames") or []
+            wl_norm = {norm_username(w) for w in wl_raw}  # strips @ and lowercases
+            eligible = (len(wl_norm) == 0) or (usernameLower in wl_norm)
             if not eligible:
                 continue
             # Need at least one free code OR user already claimed (so they can see their code state)
