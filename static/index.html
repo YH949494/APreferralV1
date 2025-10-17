@@ -330,14 +330,21 @@ if (!CURRENT_USERNAME) {
   <script>
 const tg = window.Telegram?.WebApp;
 if (tg) { tg.ready(); tg.expand(); }
-const initDataRaw = tg?.initData || new URLSearchParams(location.search).get("init_data") || "";
+
 const V2 = "/v2";
+
 function v2Headers() {
   const h = { "Content-Type": "application/json" };
-  if (initDataRaw) h["X-Telegram-Init-Data"] = initDataRaw; // <-- was X-Telegram-Init
-  // Optional: allow a temporary admin secret for browser tests
+
+  // Grab init_data fresh each call (safer than capturing once)
+  const initDataRaw =
+    tg?.initData || new URLSearchParams(location.search).get("init_data") || "";
+  if (initDataRaw) h["X-Telegram-Init-Data"] = initDataRaw;  // ✅ correct header name
+
+  // Optional: admin secret for browser testing
   const adminSecret = localStorage.getItem("X-Admin-Secret");
   if (adminSecret) h["X-Admin-Secret"] = adminSecret;
+
   return h;
 }
 function splitList(text) {
@@ -756,83 +763,137 @@ async function handleAdminAndVoucher() {
 }
 
 async function loadVouchers() {
+  const section = document.getElementById("voucher-section");
+  const wrap = document.getElementById("voucher-cards");
+  if (!section || !wrap) return; // page might not have the section
+
   try {
-    const res = await fetch(`${V2}/miniapp/vouchers/visible`, {
-      headers: v2Headers()
-    });
-    if (!res.ok) throw new Error("visible failed");
-    const data = await res.json();
+    const res = await fetch(`${V2}/miniapp/vouchers/visible`, { headers: v2Headers() });
 
-    const section = document.getElementById("voucher-section");
-    const wrap = document.getElementById("voucher-cards");
-    if (!section || !wrap) return; // safety if section is removed
+    if (res.status === 401) {
+      console.warn("401 on /miniapp/vouchers/visible — likely missing/invalid init_data.");
+      section.style.display = "none";
+      return;
+    }
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+    let data;
+    try { data = await res.json(); } catch { throw new Error("Invalid JSON from /visible"); }
+
     wrap.innerHTML = "";
+    const drops = Array.isArray(data?.drops) ? data.drops : [];
 
-    if (!data.drops || data.drops.length === 0) {
+    if (!drops.length) {
       section.style.display = "none";
       return;
     }
 
     section.style.display = "block";
-    data.drops.forEach(d => {
+
+    for (const d of drops) {
       const card = document.createElement("div");
       card.style.cssText = "border:1px solid #eee; border-radius:10px; padding:12px; margin:8px 0; background:#fff;";
       card.innerHTML = `
         <div><b>${d.name}</b> <span style="font-size:12px;color:#666;">(${d.type})</span></div>
         <div style="font-size:12px;color:#666;margin-top:4px;">${fmtKL(d.startsAt)} → ${fmtKL(d.endsAt)}</div>
         ${typeof d.remainingApprox !== "undefined"
-           ? `<div style="font-size:12px;color:#666;margin-top:6px;">Estimated left: ${d.remainingApprox}</div>`
-           : ""}
-        <button style="margin-top:8px" data-claim="${d.dropId}">
+          ? `<div style="font-size:12px;color:#666;margin-top:6px;">Estimated left: ${d.remainingApprox}</div>`
+          : ""}
+        <button class="claim-btn" style="margin-top:8px" data-dropid="${d.dropId}">
           ${d.userClaimed ? "View Code" : "Claim"}
         </button>
+        ${d.userClaimed && d.code ? `<div class="code" style="margin-top:6px;">${d.code}</div>` : ""}
       `;
       wrap.appendChild(card);
-    });
+    }
   } catch (e) {
     console.error("loadVouchers error:", e);
+    section && (section.style.display = "none");
   }
 }
+
+// =====================================
 // Admin table actions (start/pause/end)
+// =====================================
 document.addEventListener("click", async (e) => {
   const btn = e.target.closest("button[data-op][data-id]");
   if (!btn) return;
+
   const dropId = btn.getAttribute("data-id");
   const op = btn.getAttribute("data-op");
+
   try {
     const res = await fetch(`${V2}/admin/drops/${dropId}/actions`, {
       method: "POST",
       headers: v2Headers(),
       body: JSON.stringify({ op })
     });
-    const data = await res.json();
-    if (!res.ok || data.status !== "ok") throw new Error(JSON.stringify(data));
-    adm_list();
+
+    let payload = null;
+    try { payload = await res.json(); } catch { /* ignore */ }
+
+    if (res.status === 401) {
+      alert("Not authorized for admin action (401). Ensure admin allowlist or admin secret is set.");
+      return;
+    }
+    if (!res.ok || (payload && payload.status !== "ok")) {
+      throw new Error(payload?.error || `HTTP ${res.status}`);
+    }
+
+    adm_list && adm_list(); // refresh admin list if present
   } catch (err) {
     alert(`Action failed: ${err.message}`);
   }
 });
 
-// Claim/View code
+// ====================
+// Claim / View code
+// ====================
 document.addEventListener("click", async (e) => {
-  const claimBtn = e.target.closest('button[data-claim]');
+  const claimBtn = e.target.closest("button[data-dropid],button[data-claim]");
   if (!claimBtn) return;
-  const dropId = claimBtn.getAttribute('data-claim');
+
+  // Support both attribute names (your old/new markup)
+  const dropId = claimBtn.getAttribute("data-dropid") || claimBtn.getAttribute("data-claim");
+  if (!dropId) return;
+
   try {
     const res = await fetch(`${V2}/miniapp/vouchers/claim`, {
       method: "POST",
       headers: v2Headers(),
       body: JSON.stringify({ dropId })
     });
-    const out = await res.json();
-    if (!res.ok || out.status !== "ok") throw new Error(out.code || "claim_failed");
+
+    let out = null;
+    try { out = await res.json(); } catch { /* ignore */ }
+
+    if (res.status === 401) {
+      alert("Not authorized (401). Open inside Telegram WebApp or pass init_data correctly.");
+      return;
+    }
+    // accept either {ok:true} or {status:"ok"}
+    const ok = res.ok && (out?.ok === true || out?.status === "ok");
+    if (!ok) throw new Error(out?.error || out?.code || `HTTP ${res.status}`);
+
+    // Update UI
     claimBtn.textContent = "View Code";
-    alert(`🎟️ Your code: ${out.code}\nClaimed at: ${fmtKL(out.claimedAt)}`);
+    const codeText = out?.code ? String(out.code) : "(no code)";
+    const claimedAt = out?.claimedAt ? fmtKL(out.claimedAt) : "-";
+    alert(`🎟️ Your code: ${codeText}\nClaimed at: ${claimedAt}`);
+
+    // If a code isn’t already shown in DOM, append it
+    if (!claimBtn.nextElementSibling || !claimBtn.nextElementSibling.classList?.contains("code")) {
+      const codeEl = document.createElement("div");
+      codeEl.className = "code";
+      codeEl.style.marginTop = "6px";
+      codeEl.textContent = codeText;
+      claimBtn.insertAdjacentElement("afterend", codeEl);
+    }
   } catch (err) {
     alert(`⚠️ Claim failed: ${err.message}`);
   }
 });
-
+    
   async function loadLeaderboard() {
     try {
       const res = await fetch(`${API_BASE}/api/leaderboard?user_id=${userId}&t=${Date.now()}`);
