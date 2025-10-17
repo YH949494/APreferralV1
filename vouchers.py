@@ -58,27 +58,27 @@ def require_admin():
     init_data = request.headers.get("X-Telegram-Init") or request.args.get("init_data") or ""
     ok, data = verify_telegram_init_data(init_data)
     if not ok:
+        print("[admin] auth_failed; init_len:", len(init_data))
         return None, (jsonify({"status": "error", "code": "auth_failed"}), 401)
 
-    # Telegram supplies user JSON as a string in init_data
+    # parse the Telegram user from init_data
+    user_json = {}
     try:
-        user_raw = json.loads(data.get("user", "{}"))
+        user_json = json.loads(data.get("user", "{}"))
     except Exception:
-        user_raw = {}
+        pass
 
-    username_lower = norm_username(user_raw.get("username", ""))
+    username_lower = norm_username(user_json.get("username", ""))
 
-    # Inline allowlist (lowercase, no '@')
-    admin_usernames = {"gracy_ap", "teohyaohui"}  # <-- put your admins here
+    # your inline admin list (username-only, as you wanted)
+    admin_usernames = {"gracy_ap", "teohyaohui"}  # no '@', all lowercase
+
     if username_lower not in admin_usernames:
+        print("[admin] forbidden for:", username_lower)
         return None, (jsonify({"status": "error", "code": "forbidden"}), 403)
 
-    # Return a compact user dict and no error
-    return {
-        "id": user_raw.get("id"),
-        "username": user_raw.get("username", ""),
-        "usernameLower": username_lower
-    }, None
+    # return a small user dict for downstream use
+    return {"usernameLower": username_lower, "id": user_json.get("id")}, None
     
 # ---- Core visibility logic ----
 def is_drop_active(doc: dict, ref: datetime) -> bool:
