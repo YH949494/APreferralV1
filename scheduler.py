@@ -37,4 +37,4 @@ def archive_weekly_leaderboard():
     }
 
     db.leaderboard_weekly.insert_one(snapshot)
-    db.users.update_many({}, {"$set": {"weekly_xp": 0, "referral_count": 0}})
+    db.users.update_many({}, {"$set": {"weekly_xp": 0, "weekly_referral_count": 0}})
