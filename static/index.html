@@ -331,7 +331,7 @@ if (!CURRENT_USERNAME) {
 const tg = window.Telegram?.WebApp;
 if (tg) { tg.ready(); tg.expand(); }
 const initDataRaw = tg?.initData || new URLSearchParams(location.search).get("init_data") || "";
-const V2 = "/v2";
+const initQuery   = initDataRaw ? `?init_data=${encodeURIComponent(initDataRaw)}` : "";const V2 = "/v2";
 function v2Headers() {
   return { "Content-Type": "application/json", "X-Telegram-Init": initDataRaw };
 }
@@ -370,7 +370,7 @@ async function adm_list() {
   const tbody = document.querySelector("#adm_table tbody");
   tbody.innerHTML = `<tr><td colspan="6" style="padding:6px;">Loading…</td></tr>`;
   try {
-    const res = await fetch(`${V2}/admin/drops`, { headers: v2Headers() });
+    const res = await fetch(`${V2}/admin/drops${initQuery}`, {
     if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
     const data = await res.json();
     if (data.status !== "ok") throw new Error(JSON.stringify(data));
@@ -434,7 +434,7 @@ async function adm_create() {
   }
 
   try {
-    const res = await fetch(`${V2}/admin/drops`, {
+    const res = await fetch(`${V2}/admin/drops${initQuery}`, {
       method: "POST",
       headers: v2Headers(),
       body: JSON.stringify(payload)
@@ -495,7 +495,8 @@ document.getElementById("adm_add_btn").onclick = async () => {
 
   try {
     const path = (kind === "personalised") ? "assignments" : "codes";
-    const res = await fetch(`${V2}/admin/drops/${dropId}/${path}`, {      method: "POST",
+    const res = await fetch(`${V2}/admin/drops/${dropId}/${path}`, {      
+      method: "POST",
       headers: v2Headers(),
       body: JSON.stringify(payload)
     });
@@ -607,10 +608,12 @@ document.getElementById("adm_parse_codes_btn").onclick = () => {
     if (!codes.length) return alert("Provide codes to add.");
     if (!dropId) return alert("Enter dropId or use Create pooled drop.");
     try {
-      const res1 = await fetch(`${V2}/admin/drops/${encodeURIComponent(dropId)}/codes`, { method:"POST", headers:v2Headers(), body:JSON.stringify({ type:"pooled", codes }) });
+      const res1 = await fetch(`${V2}/admin/drops/${encodeURIComponent(dropId)}/codes${initQuery}`, {
+ method:"POST", headers:v2Headers(), body:JSON.stringify({ type:"pooled", codes }) });
       const out1 = await res1.json(); if (!res1.ok || out1.status!=="ok") throw new Error(JSON.stringify(out1));
       if (wlRaw.length) {
-        const res2 = await fetch(`${V2}/admin/drops/${encodeURIComponent(dropId)}/whitelist`, { method:"POST", headers:v2Headers(), body:JSON.stringify({ mode:"append", usernames: wlRaw }) });
+      const res2 = await fetch(`${V2}/admin/drops/${encodeURIComponent(dropId)}/whitelist${initQuery}`, {
+ method:"POST", headers:v2Headers(), body:JSON.stringify({ mode:"append", usernames: wlRaw }) });
         const out2 = await res2.json(); if (!res2.ok || out2.status!=="ok") throw new Error(JSON.stringify(out2));
       }
       document.getElementById("vip_bulk_msg").textContent = `✅ Added ${codes.length} codes${wlRaw.length?"  whitelist":""} to ${dropId}`;
@@ -752,7 +755,7 @@ async function handleAdminAndVoucher() {
 
 async function loadVouchers() {
   try {
-    const res = await fetch(`${V2}/miniapp/vouchers/visible`, {
+  const res = await fetch(`${V2}/miniapp/vouchers/visible${initQuery}`, {
       headers: v2Headers()
     });
     if (!res.ok) throw new Error("visible failed");
@@ -814,7 +817,7 @@ document.addEventListener("click", async (e) => {
   if (!claimBtn) return;
   const dropId = claimBtn.getAttribute('data-claim');
   try {
-    const res = await fetch(`${V2}/miniapp/vouchers/claim`, {
+    const res = await fetch(`${V2}/miniapp/vouchers/claim${initQuery}`, {
       method: "POST",
       headers: v2Headers(),
       body: JSON.stringify({ dropId })
