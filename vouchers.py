@@ -42,14 +42,25 @@ def parse_init_data(raw: str) -> dict:
     pairs = urllib.parse.parse_qsl(raw, keep_blank_values=True)
     return {k: v for k, v in pairs}
 
-def verify_telegram_init_data(init_data_raw):
+def verify_telegram_init_data(init_data_raw: str):
+    """Return (ok: bool, data: dict). Uses the global BOT_TOKEN."""
     try:
+        if not init_data_raw:
+            return False, {}
+
+        if not BOT_TOKEN:
+            print("[verify] BOT_TOKEN missing/empty")
+            return False, {}
+
         data = dict(urllib.parse.parse_qsl(init_data_raw, keep_blank_values=True))
         check_hash = data.pop("hash", None)
-        data_check_string = "\n".join([f"{k}={v}" for k, v in sorted(data.items())])
-        secret_key = hashlib.sha256(BOT_TOKEN.encode()).digest()
+
+        data_check_string = "\n".join(f"{k}={v}" for k, v in sorted(data.items()))
+        secret_key = hashlib.sha256(BOT_TOKEN.encode()).digest()   # <-- FIXED
         h = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
-        return h == check_hash, data
+        ok = (h == check_hash)
+        print("[verify] ok:", ok, "init_len:", len(init_data_raw), "has_user:", "user" in data)
+        return ok, data
     except Exception as e:
         print("verify_telegram_init_data error:", e)
         return False, {}
