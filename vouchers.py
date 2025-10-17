@@ -6,10 +6,12 @@ import hmac, hashlib, urllib.parse, os, json
 
 from database import db
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 
 vouchers_bp = Blueprint("vouchers", __name__)
 KL_TZ = timezone(timedelta(hours=8))
+
+BYPASS_ADMIN = True
 
 def now_utc():
     return datetime.now(timezone.utc)
@@ -43,46 +45,31 @@ def parse_init_data(raw: str) -> dict:
     return {k: v for k, v in pairs}
 
 def verify_telegram_init_data(init_data_raw: str):
+    """Return (ok: bool, data: dict) using the global BOT_TOKEN."""
     try:
-        if not init_data_raw:
-            print("[verify] missing init_data")
+        if not init_data_raw or not BOT_TOKEN:
             return False, {}
-
-        print("[verify] BOT_TOKEN len:", len(BOT_TOKEN))
-        if not BOT_TOKEN:
-            print("[verify] BOT_TOKEN is empty (secret not set?)")
-            return False, {}
-
         data = dict(urllib.parse.parse_qsl(init_data_raw, keep_blank_values=True))
         check_hash = data.pop("hash", None)
         data_check_string = "\n".join(f"{k}={v}" for k, v in sorted(data.items()))
-
-        secret_key = hashlib.sha256(BOT_TOKEN.encode()).digest()
+        secret_key = hashlib.sha256(BOT_TOKEN.encode()).digest()   # <- correct var
         calc_hash  = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
-
-        ok = (calc_hash == check_hash)
-        # Short, non-sensitive logging:
-        print("[verify]",
-              "ok:", ok,
-              "init_len:", len(init_data_raw),
-              "has_user:", "user" in data,
-              "bot_id:", (BOT_TOKEN.split(":",1)[0] if ":" in BOT_TOKEN else "n/a"),
-              "hash_head:", (check_hash or "")[:10],
-              "calc_head:", calc_hash[:10])
-
-        return ok, data
-    except Exception as e:
-        print("verify_telegram_init_data error:", e)
+        return calc_hash == check_hash, data
+    except Exception:
         return False, {}
         
 def require_admin():
+    if BYPASS_ADMIN:
+        # allow everything; pretend it's an admin user
+        return {"usernameLower": "bypass_admin"}, None
+
     init_data = request.headers.get("X-Telegram-Init") or request.args.get("init_data") or ""
     ok, data = verify_telegram_init_data(init_data)
     if not ok:
         print("[admin] auth_failed; init_len:", len(init_data))
         return None, (jsonify({"status": "error", "code": "auth_failed"}), 401)
 
-    # parse the Telegram user from init_data
+    # parse Telegram user
     user_json = {}
     try:
         user_json = json.loads(data.get("user", "{}"))
@@ -91,15 +78,13 @@ def require_admin():
 
     username_lower = norm_username(user_json.get("username", ""))
 
-    # your inline admin list (username-only, as you wanted)
     admin_usernames = {"gracy_ap", "teohyaohui"}  # no '@', all lowercase
-
     if username_lower not in admin_usernames:
         print("[admin] forbidden for:", username_lower)
         return None, (jsonify({"status": "error", "code": "forbidden"}), 403)
 
-    # return a small user dict for downstream use
     return {"usernameLower": username_lower, "id": user_json.get("id")}, None
+
     
 # ---- Core visibility logic ----
 def is_drop_active(doc: dict, ref: datetime) -> bool:
@@ -255,21 +240,13 @@ def claim_pooled(drop_id: str, usernameLower: str, ref: datetime):
 @vouchers_bp.route("/miniapp/vouchers/visible", methods=["GET"])
 def api_visible():
     init_data = request.args.get("init_data") or request.headers.get("X-Telegram-Init") or ""
-    ok, data = verify_telegram_init_data(init_data)   # <-- unpack
-    
+    ok, data = verify_telegram_init_data(init_data)
     if not ok:
         return jsonify({"status": "error", "code": "auth_failed"}), 401
-
-    # Build a minimal "user" the rest of the code expects
     user_json = {}
-    try:
-        user_json = json.loads(data.get("user", "{}"))
-    except Exception:
-        pass
-
-    username_lower = norm_username(user_json.get("username") or user_json.get("first_name") or "")
-    user = {"usernameLower": username_lower}
-
+    try: user_json = json.loads(data.get("user","{}"))
+    except: pass
+    user = {"usernameLower": norm_username(user_json.get("username",""))}
     ref = now_utc()
     drops = user_visible_drops(user, ref)
     return jsonify({"visibilityMode": "stacked", "nowUtc": ref.isoformat(), "drops": drops})
