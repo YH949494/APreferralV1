@@ -108,26 +108,29 @@ def _too_soon(u: dict, gap_minutes=2) -> bool:
 def maybe_shout_milestones(user_id: int):
     """
     Announce:
-      - every +1000 **weekly_xp** (1k, 2k, 3k, …)
-      - every +10  **weekly_referral_count** (10, 20, 30, …)
+      - every +WEEKLY_XP_BUCKET of weekly_xp
+      - every +WEEKLY_REFERRAL_BUCKET of weekly_referral_count
     """
     u = users_collection.find_one({"user_id": user_id})
     if not u:
         return
 
-    weekly_xp  = int(u.get("weekly_xp", 0))
+    weekly_xp = int(u.get("weekly_xp", 0))
     weekly_ref = int(u.get("weekly_referral_count", 0))
 
-    xp_bucket_now  = weekly_xp  // WEEKLY_XP_BUCKET
+    # current buckets
+    xp_bucket_now = weekly_xp // WEEKLY_XP_BUCKET
     ref_bucket_now = weekly_ref // WEEKLY_REFERRAL_BUCKET
 
-    xp_bucket_prev  = int(u.get("xp_weekly_milestone_bucket", 0))
+    # last announced buckets
+    xp_bucket_prev = int(u.get("xp_weekly_milestone_bucket", 0))
     ref_bucket_prev = int(u.get("ref_weekly_milestone_bucket", 0))
 
     updates = {}
     sent_any = False
 
-   if not _too_soon(u):
+    # throttle once for both messages
+    if not _too_soon(u):
         if xp_bucket_now > xp_bucket_prev and xp_bucket_now > 0:
             updates["xp_weekly_milestone_bucket"] = xp_bucket_now
             _send_group_message_sync(
