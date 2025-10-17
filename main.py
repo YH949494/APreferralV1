@@ -67,7 +67,72 @@ def call_bot_in_loop(coro, timeout=15):
         raise RuntimeError("Bot loop not running yet")
     fut = asyncio.run_coroutine_threadsafe(coro, loop)
     return fut.result(timeout=timeout)
-    
+
+def _format_mention(u: dict) -> str:
+    if u.get("username"):
+        return f"@{u['username']}"
+    if u.get("first_name"):
+        return u["first_name"]
+    return "player"
+
+def _announce_text(u: dict, which: str, value: int) -> str:
+    who = _format_mention(u)
+    if which == "weekly_xp":
+        return f"🎉 {who} just hit **{value:,} weekly XP**! Keep it rolling! 💪"
+    else:  # which == "weekly_ref"
+        return f"🚀 {who} reached **{value} weekly referrals**! Absolute legend! 🏆"
+
+def _send_group_message_sync(text: str):
+    try:
+        call_bot_in_loop(app_bot.bot.send_message(chat_id=GROUP_ID, text=text, parse_mode="Markdown"))
+    except Exception as e:
+        print(f"[announce] send failed: {e}")
+
+def _too_soon(u: dict, gap_minutes=2) -> bool:
+    ts = u.get("last_shout_at")
+    if not ts:
+        return False
+    if ts.tzinfo is None:
+        ts = pytz.UTC.localize(ts)
+    return datetime.now(pytz.UTC) - ts < timedelta(minutes=gap_minutes)
+
+def maybe_shout_milestones(user_id: int):
+    """
+    Announce:
+      - every +1000 **weekly_xp** (1k, 2k, 3k, …)
+      - every +10  **weekly_referral_count** (10, 20, 30, …)
+    """
+    u = users_collection.find_one({"user_id": user_id})
+    if not u:
+        return
+
+    weekly_xp  = int(u.get("weekly_xp", 0))
+    weekly_ref = int(u.get("weekly_referral_count", 0))
+
+    xp_bucket_now  = weekly_xp // 1000
+    ref_bucket_now = weekly_ref // 10
+
+    xp_bucket_prev  = int(u.get("xp_weekly_milestone_bucket", 0))
+    ref_bucket_prev = int(u.get("ref_weekly_milestone_bucket", 0))
+
+    updates = {}
+    sent_any = False
+
+    if xp_bucket_now > xp_bucket_prev and xp_bucket_now > 0 and not _too_soon(u):
+        updates["xp_weekly_milestone_bucket"] = xp_bucket_now
+        _send_group_message_sync(_announce_text(u, "weekly_xp", xp_bucket_now * 1000))
+        sent_any = True
+
+    if ref_bucket_now > ref_bucket_prev and ref_bucket_now > 0 and not _too_soon(u):
+        updates["ref_weekly_milestone_bucket"] = ref_bucket_now
+        _send_group_message_sync(_announce_text(u, "weekly_ref", ref_bucket_now * 10))
+        sent_any = True
+
+    if sent_any:
+        updates["last_shout_at"] = datetime.utcnow()
+    if updates:
+        users_collection.update_one({"user_id": user_id}, {"$set": updates})
+        
 def ensure_indexes():
     """
     Ensure TTL index on bonus_voucher.end_time so docs auto-expire exactly at end_time.
@@ -265,6 +330,8 @@ async def process_checkin(user_id, username, region, update=None):
         },
         upsert=True
     )
+    
+    maybe_shout_milestones(int(user_id))
 
     labels = {7: "🎉 7-day streak bonus!", 14: "🔥 14-day streak bonus!", 28: "🏆 28-day streak bonus!"}
     lines = [
@@ -736,7 +803,8 @@ def reset_weekly_xp():
     })
 
     users_collection.update_many({}, {
-        "$set": {"weekly_xp": 0, "weekly_referral_count": 0}
+        "$set": {"weekly_xp": 0, "weekly_referral_count": 0, "xp_weekly_milestone_bucket": 0,
+        "ref_weekly_milestone_bucket": 0,}
     })
 
     print(f"✅ Weekly XP & referrals reset complete at {now}")
@@ -903,8 +971,9 @@ async def member_update_handler(update: Update, context: ContextTypes.DEFAULT_TY
                     }
                 }
             )
-
+            
             referrer = users_collection.find_one({"user_id": referrer_id})
+            
             total_referrals = referrer.get("referral_count", 0)
 
             if total_referrals % 3 == 0:
