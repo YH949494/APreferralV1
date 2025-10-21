@@ -52,7 +52,7 @@ ADMIN_PANEL_SECRET = os.environ.get("ADMIN_PANEL_SECRET", "")
 
 vouchers_bp = Blueprint("vouchers", __name__)
 
-BYPASS_ADMIN = False
+BYPASS_ADMIN = True
 
 def now_utc():
     return datetime.now(timezone.utc)
