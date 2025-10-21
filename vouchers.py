@@ -587,7 +587,7 @@ def admin_list_drops():
     for d in db.drops.find().sort([("priority", DESCENDING), ("startsAt", ASCENDING)]):
         drop_id = str(d["_id"])
         dtype = d.get("type", "pooled")
-            status = d.get("status", "upcoming")
+        status = d.get("status", "upcoming")
         if status not in ("paused", "expired"):
             if d["endsAt"] <= ref:
                 status = "expired"
