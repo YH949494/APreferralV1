@@ -151,6 +151,11 @@
     <button onclick="copyVoucherCode()">📋 Copy to clipboard</button>
   </div>
   
+  <div class="section" id="voucher-section" style="display:none;">
+    <h3>🎟️ Campaign Rewards</h3>
+    <div id="voucher-cards"></div>
+  </div>
+  
   <div class="section">
     <h3>🏆 Weekly Leaderboard</h3>
     <button onclick="loadLeaderboard()">View Leaderboard</button>
@@ -163,7 +168,92 @@
     <button onclick="viewJoinRequests()">📥 View Join Requests</button>
     <button onclick="loadPreviousLeaderboard()">🏆 View Past Leaderboard</button>
     <button onclick="openVoucherModal()">🎁 Create Bonus Voucher</button>
-   
+
+    <div id="adm_drop_container" style="margin-top:18px; text-align:left;">
+      <h4 style="margin-bottom:8px;">🎟️ Voucher Drops</h4>
+      <p style="margin:4px 0 12px 0; color:#666; font-size:13px;">All times are saved in UTC and shown in Kuala Lumpur (UTC+08:00).</p>
+
+      <div style="background:#fff; border:1px solid #ddd; border-radius:8px; padding:12px; margin-bottom:16px;">
+        <h5 style="margin:0 0 10px 0;">➕ Create Drop</h5>
+        <div style="display:flex; flex-wrap:wrap; gap:10px;">
+          <input id="adm_name" type="text" placeholder="Campaign name" style="flex:1 1 220px; padding:8px; border-radius:6px; border:1px solid #ccc;">
+          <input id="adm_pri" type="number" placeholder="Priority (higher = top)" style="flex:1 1 160px; padding:8px; border-radius:6px; border:1px solid #ccc;">
+          <label style="flex:1 1 200px; font-size:12px; color:#555;">Start (KL)
+            <input id="adm_starts" type="datetime-local" style="width:100%; padding:8px; border-radius:6px; border:1px solid #ccc;">
+          </label>
+          <label style="flex:1 1 200px; font-size:12px; color:#555;">End (KL)
+            <input id="adm_ends" type="datetime-local" style="width:100%; padding:8px; border-radius:6px; border:1px solid #ccc;">
+          </label>
+          <label style="flex:1 1 200px; font-size:12px; color:#555;">Type
+            <select id="adm_type" style="width:100%; padding:8px; border-radius:6px; border:1px solid #ccc;">
+              <option value="personalised">Personalised</option>
+              <option value="pooled">Pooled</option>
+            </select>
+          </label>
+        </div>
+
+        <div id="adm_personalised" style="margin-top:12px;">
+          <p style="margin:0 0 6px 0; font-size:13px; color:#555;">Paste <code>@username,code</code> per line or import CSV:</p>
+          <textarea id="adm_pairs_text" rows="6" placeholder="@player1, CODE123" style="width:100%; padding:8px; border-radius:6px; border:1px solid #ccc; font-family:monospace;"></textarea>
+          <div style="display:flex; gap:8px; align-items:center; margin-top:6px;">
+            <input id="adm_csv_pairs" type="file" accept=".csv,.txt" style="flex:1;">
+            <button id="adm_parse_pairs_btn" type="button">Import CSV</button>
+          </div>
+        </div>
+
+        <div id="adm_pooled" style="margin-top:12px; display:none;">
+          <p style="margin:0 0 6px 0; font-size:13px; color:#555;">Paste one voucher code per line or import CSV. Leave whitelist empty for public pool.</p>
+          <textarea id="adm_codes_text" rows="6" placeholder="CODE123" style="width:100%; padding:8px; border-radius:6px; border:1px solid #ccc; font-family:monospace;"></textarea>
+          <div style="display:flex; gap:8px; align-items:center; margin-top:6px;">
+            <input id="adm_csv_codes" type="file" accept=".csv,.txt" style="flex:1;">
+            <button id="adm_parse_codes_btn" type="button">Import CSV</button>
+          </div>
+          <textarea id="adm_wl_text" rows="3" placeholder="Whitelist usernames (optional)" style="width:100%; margin-top:8px; padding:8px; border-radius:6px; border:1px solid #ccc; font-family:monospace;"></textarea>
+        </div>
+
+        <button id="adm_create_btn" type="button" style="margin-top:12px;">Create Drop</button>
+      </div>
+
+      <div style="background:#fff; border:1px solid #ddd; border-radius:8px; padding:12px; margin-bottom:16px;">
+        <h5 style="margin:0 0 10px 0;">📥 Add to Existing Drop</h5>
+        <div style="display:flex; flex-wrap:wrap; gap:10px;">
+          <input id="adm_add_drop_id" type="text" placeholder="Drop ID" style="flex:1 1 200px; padding:8px; border-radius:6px; border:1px solid #ccc;">
+          <label style="flex:1 1 160px; font-size:12px; color:#555;">Data type
+            <select id="adm_add_kind" style="width:100%; padding:8px; border-radius:6px; border:1px solid #ccc;">
+              <option value="personalised">Personalised assignments</option>
+              <option value="pooled">Pooled codes</option>
+            </select>
+          </label>
+        </div>
+        <textarea id="adm_add_text" rows="6" placeholder="Paste data matching the selected type" style="width:100%; margin-top:10px; padding:8px; border-radius:6px; border:1px solid #ccc; font-family:monospace;"></textarea>
+        <div style="display:flex; gap:8px; align-items:center; margin-top:6px;">
+          <input id="adm_add_csv" type="file" accept=".csv,.txt" style="flex:1;">
+          <button id="adm_add_parse_btn" type="button">Import CSV</button>
+        </div>
+        <button id="adm_add_btn" type="button" style="margin-top:12px;">Add Data</button>
+      </div>
+
+      <div style="overflow-x:auto;">
+        <table id="adm_table" style="width:100%; border-collapse:collapse; font-size:13px;">
+          <thead>
+            <tr style="background:#f7f7f7;">
+              <th style="text-align:left; padding:6px;">Name</th>
+              <th style="padding:6px;">Type</th>
+              <th style="padding:6px;">Status</th>
+              <th style="padding:6px;">Window (KL)</th>
+              <th style="padding:6px;">Stats</th>
+              <th style="padding:6px;">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td colspan="6" style="padding:6px;">Loading…</td></tr>
+          </tbody>
+        </table>
+    </div>
+  </div>
+
+  </div> <!-- end admin-panel section -->
+
   <!-- XP Modal -->
   <div id="xp-modal" class="modal">
     <div class="modal-content">
@@ -243,15 +333,20 @@ function toKLStringFromNative(value) {
   return `${d} ${t}:00`; // "YYYY-MM-DD HH:MM:SS" (interpreted as KL local by backend)
 }
 
-document.getElementById("adm_type").addEventListener("change", (e) => {
-  document.getElementById("adm_personalised").style.display =
-    e.target.value === "personalised" ? "block" : "none";
-  document.getElementById("adm_pooled").style.display =
-    e.target.value === "pooled" ? "block" : "none";
-});
+const admTypeEl = document.getElementById("adm_type");
+if (admTypeEl) {
+  admTypeEl.addEventListener("change", (e) => {
+    const mode = e.target.value;
+    const personalised = document.getElementById("adm_personalised");
+    const pooled = document.getElementById("adm_pooled");
+    if (personalised) personalised.style.display = mode === "personalised" ? "block" : "none";
+    if (pooled) pooled.style.display = mode === "pooled" ? "block" : "none";
+  });
+}
     
 async function adm_list() {
   const tbody = document.querySelector("#adm_table tbody");
+  if (!tbody) return;
   tbody.innerHTML = `<tr><td colspan="6" style="padding:6px;">Loading…</td></tr>`;
   try {
     const res = await fetch(`${V2}/admin/drops`, { headers: v2Headers() });
@@ -285,15 +380,25 @@ async function adm_list() {
   }
 }
 
-document.getElementById("adm_create_btn").onclick = adm_create;
+const admCreateBtn = document.getElementById("adm_create_btn");
+if (admCreateBtn) admCreateBtn.onclick = adm_create;
+    
 async function adm_create() {
-  const type = document.querySelector("#adm_type").value;
+  const typeEl = document.querySelector("#adm_type");
+  if (!typeEl) return;
+  const type = typeEl.value;
   const payload = {
     type,
     name: document.querySelector("#adm_name").value.trim(),
     startsAtLocal: toKLStringFromNative(document.querySelector("#adm_starts").value.trim()),
     priority: Number(document.querySelector("#adm_pri").value || 100),
   };
+  
+  const endsValue = (document.querySelector("#adm_ends")?.value || "").trim();
+  const endsAtLocal = toKLStringFromNative(endsValue);
+  if (endsAtLocal) {
+    payload.endsAtLocal = endsAtLocal;
+  }
 
   if (!payload.name || !payload.startsAtLocal) {
     alert("Name and Start Time are required."); return;
@@ -333,8 +438,9 @@ async function adm_create() {
   }
 }
 
-document.getElementById("adm_add_parse_btn").onclick = () => {
-  const f = document.getElementById("adm_add_csv").files?.[0];
+const admAddParseBtn = document.getElementById("adm_add_parse_btn");
+if (admAddParseBtn) admAddParseBtn.onclick = () => {
+  const f = document.getElementById("adm_add_csv")?.files?.[0];
   if (!f) return;
   const reader = new FileReader();
   reader.onload = () => {
@@ -352,15 +458,17 @@ document.getElementById("adm_add_parse_btn").onclick = () => {
         if (c) out += `${c}\n`;
       }
     }
-    document.getElementById("adm_add_text").value = out.trim();
+    const target = document.getElementById("adm_add_text");
+    if (target) target.value = out.trim();
   };
   reader.readAsText(f);
 };
 
-document.getElementById("adm_add_btn").onclick = async () => {
-  const dropId = document.getElementById("adm_add_drop_id").value.trim();
-  const kind = document.getElementById("adm_add_kind").value;
-  const raw = document.getElementById("adm_add_text").value.trim();
+const admAddBtn = document.getElementById("adm_add_btn");
+if (admAddBtn) admAddBtn.onclick = async () => {
+  const dropId = document.getElementById("adm_add_drop_id")?.value.trim();
+  const kind = document.getElementById("adm_add_kind")?.value;
+  const raw = document.getElementById("adm_add_text")?.value.trim();
   if (!dropId || !raw) { alert("Drop ID and data are required."); return; }
 
   let payload = {};
@@ -378,8 +486,8 @@ document.getElementById("adm_add_btn").onclick = async () => {
   }
 
   try {
-    const path = (kind === "personalised") ? "assignments" : "codes";
-    const res = await fetch(`${V2}/admin/drops/${dropId}/${path}`, {      method: "POST",
+    const res = await fetch(`${V2}/admin/drops/${dropId}/codes`, {
+      method: "POST",
       headers: v2Headers(),
       body: JSON.stringify(payload)
     });
@@ -393,8 +501,9 @@ document.getElementById("adm_add_btn").onclick = async () => {
 };
 
 // Create Drop: CSV → username,code pairs
-document.getElementById("adm_parse_pairs_btn").onclick = () => {
-  const f = document.getElementById("adm_csv_pairs").files?.[0];
+const admParsePairsBtn = document.getElementById("adm_parse_pairs_btn");
+if (admParsePairsBtn) admParsePairsBtn.onclick = () => {
+  const f = document.getElementById("adm_csv_pairs")?.files?.[0];
   if (!f) return;
   const reader = new FileReader();
   reader.onload = () => {
@@ -412,14 +521,16 @@ document.getElementById("adm_parse_pairs_btn").onclick = () => {
         if (u && c) out += `${u},${c}\n`;
       }
     }
-    document.getElementById("adm_pairs_text").value = out.trim();
+    const target = document.getElementById("adm_pairs_text");
+    if (target) target.value = out.trim();
   };
   reader.readAsText(f);
 };
 
 // Create Drop: CSV → codes (one per line)
-document.getElementById("adm_parse_codes_btn").onclick = () => {
-  const f = document.getElementById("adm_csv_codes").files?.[0];
+const admParseCodesBtn = document.getElementById("adm_parse_codes_btn");
+if (admParseCodesBtn) admParseCodesBtn.onclick = () => {
+  const f = document.getElementById("adm_csv_codes")?.files?.[0];
   if (!f) return;
   const reader = new FileReader();
   reader.onload = () => {
@@ -434,12 +545,13 @@ document.getElementById("adm_parse_codes_btn").onclick = () => {
           const cols = lines[i].split(/,|\t/).map(c => c.trim());
           if (cols[idx]) out.push(cols[idx]);
         }
-        document.getElementById("adm_codes_text").value = out.join("\n");
+        const target = document.getElementById("adm_codes_text");
+        if (target) target.value = out.join("\n");
         return;
       }
     }
-    document.getElementById("adm_codes_text").value = lines.join("\n");
-  };
+    const target = document.getElementById("adm_codes_text");
+    if (target) target.value = lines.join("\n");  };
   reader.readAsText(f);
 };
     
@@ -604,17 +716,40 @@ async function loadVouchers() {
     for (const d of drops) {
       const card = document.createElement("div");
       card.style.cssText = "border:1px solid #eee; border-radius:10px; padding:12px; margin:8px 0; background:#fff;";
+
+      const buttonAttrs = [
+        'class="claim-btn"',
+        'style="margin-top:8px"',
+        `data-dropid="${d.dropId}"`
+      ];
+      if (!d.isActive && !d.adminPreview) {
+        buttonAttrs.push("disabled");
+      }
+
+      const previewNote = d.adminPreview
+        ? `<div style="font-size:12px;color:#b26d00;margin-top:6px;">Admin preview · status: ${d.status || (d.isActive ? "active" : "inactive")}</div>`
+        : "";
+      const approx = typeof d.remainingApprox !== "undefined"
+        ? `<div style="font-size:12px;color:#666;margin-top:6px;">Estimated left: ${d.remainingApprox}</div>`
+        : "";
+      const codeBlock = d.userClaimed && d.code
+        ? `<div class="code" style="margin-top:6px;">${d.code}</div>`
+        : "";
+      const claimedAt = d.userClaimed && d.claimedAt
+        ? `<div style="font-size:12px;color:#666;margin-top:4px;">Claimed: ${fmtKL(d.claimedAt)}</div>`
+        : "";
+
       card.innerHTML = `
         <div><b>${d.name}</b> <span style="font-size:12px;color:#666;">(${d.type})</span></div>
         <div style="font-size:12px;color:#666;margin-top:4px;">${fmtKL(d.startsAt)} → ${fmtKL(d.endsAt)}</div>
-        ${typeof d.remainingApprox !== "undefined"
-          ? `<div style="font-size:12px;color:#666;margin-top:6px;">Estimated left: ${d.remainingApprox}</div>`
-          : ""}
-        <button class="claim-btn" style="margin-top:8px" data-dropid="${d.dropId}">
+        ${previewNote}
+        ${approx}
+        <button ${buttonAttrs.join(' ')}>
           ${d.userClaimed ? "View Code" : "Claim"}
         </button>
-        ${d.userClaimed && d.code ? `<div class="code" style="margin-top:6px;">${d.code}</div>` : ""}
-      `;
+        ${codeBlock}
+        ${claimedAt}
+        `;
       wrap.appendChild(card);
     }
   } catch (e) {
