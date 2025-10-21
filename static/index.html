@@ -150,45 +150,6 @@
     <p id="voucher-code">Coming soon…</p>
     <button onclick="copyVoucherCode()">📋 Copy to clipboard</button>
   </div>
-
-
-  <!-- Visible voucher drops (claimed/claimable) -->
-  <div class="section" id="voucher-section" style="display:none;">
-    <h3>🎁 Special Voucher</h3>
-    <div id="voucher-cards"></div>
-  </div>
-  
-   <div class="section" id="vip-bulk-section" style="display:none; background:#fff8f0; border:1px solid #ffead0; padding:12px; border-radius:8px; margin-top:12px;">
-    <h3>🎯 VIP Bulk — Create pooled drop + whitelist</h3>
-    <label style="display:block; margin-top:6px;">Drop name
-      <input id="vip_bulk_name" type="text" placeholder="e.g. VIP Bulk Oct 2025" style="width:100%;">
-    </label>
-    <label style="display:block; margin-top:6px;">Start Time (MYT)
-      <input id="vip_bulk_start" type="datetime-local" step="60" style="width:100%;">
-     </label>
-   <label style="display:block; margin-top:6px;">Priority
-      <input id="vip_bulk_pri" type="number" value="200" style="width:100px;">
-    </label>
-    <label style="display:block; margin-top:6px;">Whitelist (one @username per line or comma-separated)</label>
-    <textarea id="vip_bulk_whitelist" rows="4" placeholder="@alice
-@bob,@charlie" style="width:100%; font-family:monospace;"></textarea>
-    <label style="display:block; margin-top:6px;">Codes (one code per line)</label>
-    <div style="display:flex; gap:8px; margin:6px 0;">
-      <input id="vip_bulk_csv" type="file" accept=".csv">
-      <button id="vip_bulk_parse_codes" type="button">Parse CSV</button>
-    </div>
-    <textarea id="vip_bulk_codes" rows="6" placeholder="CODE123
-CODE456" style="width:100%; font-family:monospace;"></textarea>
-    <div style="display:flex; gap:8px; margin-top:8px;">
-      <button id="vip_bulk_create" type="button">Create pooled drop (with whitelist)</button>
-      <button id="vip_bulk_add_to_existing" type="button">Add codes to existing Drop ID</button>
-      <input id="vip_existing_dropid" type="text" placeholder="existing dropId (optional)" style="flex:1;">
-    </div>
-    <p id="vip_bulk_msg" style="color:#333; margin-top:8px; font-size:13px;"></p>
-    <div style="font-size:12px; color:#666; margin-top:6px;">
-      • Uses /v2 admin endpoints to create pooled drops  update whitelists & codes.
-    </div>
-  </div>
   
   <div class="section">
     <h3>🏆 Weekly Leaderboard</h3>
@@ -202,96 +163,7 @@ CODE456" style="width:100%; font-family:monospace;"></textarea>
     <button onclick="viewJoinRequests()">📥 View Join Requests</button>
     <button onclick="loadPreviousLeaderboard()">🏆 View Past Leaderboard</button>
     <button onclick="openVoucherModal()">🎁 Create Bonus Voucher</button>
-    <!-- Admin: Create Drop -->
-<div id="adm_create_box" style="margin:12px 0; border:1px solid #eee; border-radius:10px; padding:12px;">
-  <h3 style="margin:0 0 8px;">Create Voucher Drop</h3>
-  <div style="display:grid; gap:8px; grid-template-columns:1fr 1fr;">
-    <label>Type
-      <select id="adm_type">
-        <option value="personalised">Personalised (username↔code)</option>
-        <option value="pooled">Pooled (codes bucket)</option>
-      </select>
-    </label>
-    <label>Priority
-      <input id="adm_pri" type="number" value="100" />
-    </label>
-  </div>
-  <label style="display:block; margin-top:6px;">Name
-    <input id="adm_name" type="text" placeholder="e.g., VIP Comeback Oct" style="width:100%;">
-  </label>
-  <label style="display:block; margin-top:6px;">Start Time (MYT)
-    <input id="adm_starts" type="datetime-local" step="60" style="width:100%;">
-  </label>
-
-  <!-- Personalised block -->
-  <div id="adm_personalised" style="margin-top:10px;">
-    <b>Upload username,code pairs</b>
-    <div style="display:flex; gap:8px; margin:6px 0;">
-      <input id="adm_csv_pairs" type="file" accept=".csv">
-      <button id="adm_parse_pairs_btn" type="button">Parse CSV</button>
-    </div>
-    <textarea id="adm_pairs_text" rows="6" placeholder="@alice,ABC123
-@bob,XYZ999" style="width:100%; font-family:monospace;"></textarea>
-    <div style="font-size:12px; color:#666; margin-top:4px;">
-      • CSV must have columns <code>username</code>,<code>code</code>; or paste lines "<code>@name, CODE</code>".  
-    </div>
-  </div>
-
-  <!-- Pooled block -->
-  <div id="adm_pooled" style="margin-top:10px; display:none;">
-    <b>Codes (one per line)</b>
-    <div style="display:flex; gap:8px; margin:6px 0;">
-      <input id="adm_csv_codes" type="file" accept=".csv">
-      <button id="adm_parse_codes_btn" type="button">Parse CSV</button>
-    </div>
-    <textarea id="adm_codes_text" rows="6" placeholder="ABC123
-XYZ999" style="width:100%; font-family:monospace;"></textarea>
-
-    <b style="display:block; margin-top:10px;">Whitelist (optional, @usernames comma/space/newline)</b>
-    <textarea id="adm_wl_text" rows="3" placeholder="@alice @bob @charlie" style="width:100%; font-family:monospace;"></textarea>
-  </div>
-
-  <div style="margin-top:10px;">
-    <button id="adm_create_btn" type="button">Create Drop</button>
-  </div>
-</div>
-
-<!-- Admin: Drops Table -->
-<table id="adm_table" style="width:100%; border-collapse:collapse;">
-  <thead>
-    <tr>
-      <th style="text-align:left; padding:6px;">Name</th>
-      <th>Type</th>
-      <th>Status</th>
-      <th>Window</th>
-      <th>Stats</th>
-      <th>Actions</th>
-    </tr>
-  </thead>
-  <tbody><tr><td colspan="6" style="padding:6px;">Loading…</td></tr></tbody>
-</table>
-
-<!-- Admin: Add Codes/Pairs to existing Drop -->
-<div id="adm_add_box" style="margin:12px 0; border:1px solid #eee; border-radius:10px; padding:12px;">
-  <h3 style="margin:0 0 8px;">Add Codes / Assignments to Existing Drop</h3>
-  <label>Drop ID
-    <input id="adm_add_drop_id" type="text" placeholder="e.g., 652f... or demo123" style="width:100%;">
-  </label>
-  <div style="display:flex; gap:8px; margin:6px 0;">
-    <select id="adm_add_kind">
-      <option value="personalised">Personalised (username↔code)</option>
-      <option value="pooled">Pooled (codes)</option>
-    </select>
-    <input id="adm_add_csv" type="file" accept=".csv">
-    <button id="adm_add_parse_btn" type="button">Parse CSV</button>
-  </div>
-  <textarea id="adm_add_text" rows="6" placeholder="@alice,ABC123
-@bob,XYZ999  (or for pooled: one CODE per line)" style="width:100%; font-family:monospace;"></textarea>
-  <div style="margin-top:8px;">
-    <button id="adm_add_btn" type="button">Add to Drop</button>
-  </div>
-</div>
-
+   
   <!-- XP Modal -->
   <div id="xp-modal" class="modal">
     <div class="modal-content">
@@ -571,65 +443,6 @@ document.getElementById("adm_parse_codes_btn").onclick = () => {
   reader.readAsText(f);
 };
     
-    // === VIP BULK WHITELIST ADMIN LOGIC ===
-  document.getElementById("vip_bulk_parse_codes").onclick = () => {
-    const f = document.getElementById("vip_bulk_csv").files?.[0];
-    if (!f) return alert("Choose a CSV first.");
-    const reader = new FileReader();
-    reader.onload = () => {
-      const lines = (reader.result || "").toString().split(/\r?\n/).map(l => l.trim()).filter(Boolean);
-      if (lines.length && /code/i.test(lines[0])) {
-        const header = lines[0].split(/,|\t/).map(h => h.trim().toLowerCase());
-        const idx = header.findIndex(h => /code/.test(h));
-        if (idx >= 0) {
-          const out = [];
-          for (let i = 1; i < lines.length; i) {
-            const cols = lines[i].split(/,|\t/).map(c => c.trim());
-            if (cols[idx]) out.push(cols[idx]);
-          }
-          document.getElementById("vip_bulk_codes").value = out.join("\n"); return;
-        }
-      }
-      document.getElementById("vip_bulk_codes").value = lines.join("\n");
-    };
-    reader.readAsText(f);
-  };
-
-  document.getElementById("vip_bulk_create").onclick = async () => {
-    const name = (document.getElementById("vip_bulk_name").value || "").trim();
-    const startLocal = toKLStringFromNative(document.getElementById("vip_bulk_start").value || "");
-    const priority = Number(document.getElementById("vip_bulk_pri").value || 100);
-    const wlRaw = splitList(document.getElementById("vip_bulk_whitelist").value || "");
-    const codes = (document.getElementById("vip_bulk_codes").value || "").split(/\r?\n/).map(s => s.trim()).filter(Boolean);
-    if (!name || !startLocal || codes.length === 0) return alert("Please set Name, Start Time and provide at least one code.");
-    const payload = { name, type:"pooled", startsAtLocal:startLocal, priority, whitelistUsernames:wlRaw, codes };
-    try {
-      const res = await fetch(`${V2}/admin/drops`, { method:"POST", headers:v2Headers(), body:JSON.stringify(payload) });
-      const data = await res.json();
-      if (!res.ok || data.status!=="ok") throw new Error(JSON.stringify(data));
-      document.getElementById("vip_bulk_msg").textContent = `✅ Created drop ${data.dropId}`;
-      adm_list?.();
-    } catch(e){ document.getElementById("vip_bulk_msg").textContent=`⚠️ Create failed: ${e.message||e}`; }
-  };
-
-  document.getElementById("vip_bulk_add_to_existing").onclick = async () => {
-    const dropId = (document.getElementById("vip_existing_dropid").value || "").trim();
-    const codes = (document.getElementById("vip_bulk_codes").value || "").split(/\r?\n/).map(s => s.trim()).filter(Boolean);
-    const wlRaw = splitList(document.getElementById("vip_bulk_whitelist").value || "");
-    if (!codes.length) return alert("Provide codes to add.");
-    if (!dropId) return alert("Enter dropId or use Create pooled drop.");
-    try {
-      const res1 = await fetch(`${V2}/admin/drops/${encodeURIComponent(dropId)}/codes`, { method:"POST", headers:v2Headers(), body:JSON.stringify({ type:"pooled", codes }) });
-      const out1 = await res1.json(); if (!res1.ok || out1.status!=="ok") throw new Error(JSON.stringify(out1));
-      if (wlRaw.length) {
-        const res2 = await fetch(`${V2}/admin/drops/${encodeURIComponent(dropId)}/whitelist`, { method:"POST", headers:v2Headers(), body:JSON.stringify({ mode:"append", usernames: wlRaw }) });
-        const out2 = await res2.json(); if (!res2.ok || out2.status!=="ok") throw new Error(JSON.stringify(out2));
-      }
-      document.getElementById("vip_bulk_msg").textContent = `✅ Added ${codes.length} codes${wlRaw.length?"  whitelist":""} to ${dropId}`;
-      adm_list?.();
-    } catch(e){ document.getElementById("vip_bulk_msg").textContent=`⚠️ Add failed: ${e.message||e}`; }
-  };
-
 </script>
   <script>
     const API_BASE = "https://apreferralv1.fly.dev";
@@ -749,13 +562,11 @@ async function handleAdminAndVoucher() {
       document.getElementById("admin-panel").style.display = "block";
       document.getElementById("bonus-voucher").style.display = "block";
       document.getElementById("voucher-code").innerText = voucherData.code || "❌ No active voucher currently.";
-      const bulk = document.getElementById("vip-bulk-section"); if (bulk) bulk.style.display = "block";
     } else if (voucherData.code) {
       document.getElementById("bonus-voucher").style.display = "block";
       document.getElementById("voucher-code").innerText = voucherData.code;
-      const bulk = document.getElementById("vip-bulk-section"); if (bulk) bulk.style.display = "none";
     } else {
-      const bulk = document.getElementById("vip-bulk-section"); if (bulk) bulk.style.display = "none";
+      document.getElementById("bonus-voucher").style.display = "none";
     }
   } catch (err) {
     console.error("❌ Error checking admin or loading voucher:", err);
