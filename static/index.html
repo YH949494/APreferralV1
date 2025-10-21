@@ -298,19 +298,42 @@ const V2 = "/v2";
 
 function v2Headers() {
   const h = { "Content-Type": "application/json" };
+  const qs = new URLSearchParams(location.search);
 
   // Grab init_data fresh each call (safer than capturing once)
   const initDataRaw =
-    tg?.initData || new URLSearchParams(location.search).get("init_data") || "";
+    tg?.initData || qs.get("init_data") || "";
   if (initDataRaw) {
     h["X-Telegram-Init"] = initDataRaw;
   }
   
   // Optional: admin secret for browser testing
-  const adminSecret = localStorage.getItem("X-Admin-Secret");
+  const hasAdminSecretParam = qs.has("admin_secret");
+  const adminSecretParam = (qs.get("admin_secret") || "").trim();
+  let adminSecret = "";
+  if (adminSecretParam) {
+    adminSecret = adminSecretParam;
+    try {
+      localStorage.setItem("X-Admin-Secret", adminSecretParam);
+    } catch (err) {
+      console.warn("Failed to persist admin secret", err);
+    }
+  } else {
+    if (hasAdminSecretParam) {
+      try {
+        localStorage.removeItem("X-Admin-Secret");
+      } catch (err) {
+        console.warn("Failed to clear admin secret", err);
+      }
+    }
+    try {
+      adminSecret = localStorage.getItem("X-Admin-Secret") || "";
+    } catch (err) {
+      adminSecret = "";
+    }
+  }
   if (adminSecret) h["X-Admin-Secret"] = adminSecret;
   
-  const qs = new URLSearchParams(location.search);
   const usernameHint =
     CURRENT_USERNAME || tg?.initDataUnsafe?.user?.username || qs.get("username") || "";
   if (usernameHint) {
