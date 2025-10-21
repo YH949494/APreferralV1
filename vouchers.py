@@ -90,6 +90,7 @@ def norm_username(u: str) -> str:
     return u.lower()
 
 
+
 def _has_valid_admin_secret() -> bool:
     if not ADMIN_PANEL_SECRET:
         return False
@@ -123,7 +124,7 @@ def _payload_from_admin_secret() -> dict:
             pass
 
     return payload
-
+    
 def parse_init_data(raw: str) -> dict:
     pairs = urllib.parse.parse_qsl(raw, keep_blank_values=True)
     return {k: v for k, v in pairs}
