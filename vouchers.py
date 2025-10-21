@@ -33,9 +33,12 @@ def ensure_voucher_indexes():
     )
 
 def parse_kl_local(dt_str: str):
-    """Parse 'YYYY-MM-DD HH:MM:SS' in Kuala Lumpur local time to UTC (aware)"""
+    """Parse 'YYYY-MM-DD HH:MM:SS' in Kuala Lumpur local time to UTC (aware)."""
+    if not dt_str:
+        raise ValueError("datetime string required")
     dt_local = datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=KL_TZ)
     return dt_local.astimezone(timezone.utc)
+
 
 def norm_username(u: str) -> str:
     if not u:
@@ -112,7 +115,7 @@ def is_drop_active(doc: dict, ref: datetime) -> bool:
 
 def get_active_drops(ref: datetime):
     return list(db.drops.find({
-        "status": {"$nin": ["expired"]},
+        "status": {"$nin": ["expired", "paused"]},
         "startsAt": {"$lte": ref},
         "endsAt": {"$gt": ref}
     }))
@@ -127,6 +130,8 @@ def user_visible_drops(user: dict, ref: datetime):
     for d in drops:
         drop_id = str(d["_id"])
         dtype = d.get("type", "pooled")
+        is_active = is_drop_active(d, ref)
+
         base = {
             "dropId": drop_id,
             "name": d.get("name"),
@@ -134,7 +139,7 @@ def user_visible_drops(user: dict, ref: datetime):
             "startsAt": d["startsAt"].isoformat(),
             "endsAt": d["endsAt"].isoformat(),
             "priority": d.get("priority", 100),
-            "isActive": is_drop_active(d, ref),
+            "isActive": is_active,
             "userClaimed": False
         }
 
@@ -145,15 +150,20 @@ def user_visible_drops(user: dict, ref: datetime):
                 "dropId": drop_id,
                 "usernameLower": usernameLower
             })
-            if row:
+            if row and is_active:
                 base["userClaimed"] = (row.get("status") == "claimed")
+                if base["userClaimed"]:
+                    base["code"] = row.get("code")
+                    claimed_at = row.get("claimedAt")
+                    if claimed_at:
+                        base["claimedAt"] = claimed_at.isoformat() if hasattr(claimed_at, "isoformat") else str(claimed_at)
                 personal_cards.append(base)
         else:
             # pooled: if whitelist empty -> public; else usernameLower must be in whitelist
             wl_raw = d.get("whitelistUsernames") or []
             wl_norm = {norm_username(w) for w in wl_raw}  # strips @ and lowercases
             eligible = (len(wl_norm) == 0) or (usernameLower in wl_norm)
-            if not eligible:
+            if not eligible or not is_active:
                 continue
             # Need at least one free code OR user already claimed (so they can see their code state)
             already = db.vouchers.find_one({
@@ -163,6 +173,10 @@ def user_visible_drops(user: dict, ref: datetime):
             })
             if already:
                 base["userClaimed"] = True
+                base["code"] = already.get("code")
+                claimed_at = already.get("claimedAt")
+                if claimed_at:
+                    base["claimedAt"] = claimed_at.isoformat() if hasattr(claimed_at, "isoformat") else str(claimed_at)
                 base["remainingApprox"] = max(0, db.vouchers.count_documents({"type": "pooled", "dropId": drop_id, "status": "free"}))
                 pooled_cards.append(base)
             else:
@@ -389,9 +403,27 @@ def admin_create_drop():
     if not (name and startsAtLocal):
         return jsonify({"status": "error", "code": "bad_request"}), 400
 
-    startsAt = parse_kl_local(startsAtLocal)
-    endsAt = startsAt + timedelta(hours=24)
+    try:
+        startsAt = parse_kl_local(startsAtLocal)
+    except ValueError:
+        return jsonify({"status": "error", "code": "bad_start"}), 400
+
+    endsAtLocal = data.get("endsAtLocal")
+    if endsAtLocal:
+        try:
+            endsAt = parse_kl_local(endsAtLocal)
+        except ValueError:
+            return jsonify({"status": "error", "code": "bad_end"}), 400
+    else:
+        endsAt = startsAt + timedelta(hours=24)
+
+    if endsAt <= startsAt:
+        return jsonify({"status": "error", "code": "end_before_start"}), 400
+
     priority = int(data.get("priority", 100))
+    
+    now = now_utc()
+    status = "active" if startsAt <= now < endsAt else "upcoming"
 
     drop_doc = {
         "name": name,
@@ -400,7 +432,7 @@ def admin_create_drop():
         "endsAt": endsAt,
         "priority": priority,
         "visibilityMode": "stacked",
-        "status": "upcoming"
+        "status": status
     }
     if dtype == "pooled":
         wl_raw = data.get("whitelistUsernames") or []
@@ -549,15 +581,25 @@ def admin_list_drops():
     if err: return err
 
     items = []
+    ref = now_utc()
+
     # personalised stats
     for d in db.drops.find().sort([("priority", DESCENDING), ("startsAt", ASCENDING)]):
         drop_id = str(d["_id"])
         dtype = d.get("type", "pooled")
+            status = d.get("status", "upcoming")
+        if status not in ("paused", "expired"):
+            if d["endsAt"] <= ref:
+                status = "expired"
+            elif d["startsAt"] <= ref:
+                status = "active"
+            else:
+                status = "upcoming"
         row = {
             "dropId": drop_id,
             "name": d.get("name"),
             "type": dtype,
-            "status": d.get("status", "upcoming"),
+            "status": status,
             "priority": d.get("priority", 100),
             "startsAt": d["startsAt"].isoformat(),
             "endsAt": d["endsAt"].isoformat(),
