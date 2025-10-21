@@ -7,6 +7,45 @@ import hmac, hashlib, urllib.parse, os, json
 
 from database import db
 
+admin_cache_col = db["admin_cache"]
+
+HARDCODED_ADMIN_USERNAMES = {"gracy_ap"}  # allow manual overrides if cache is empty
+
+def _load_admin_ids() -> set:
+    try:
+        doc = admin_cache_col.find_one({"_id": "admins"}) or {}
+    except Exception as e:
+        print(f"[admin] failed to load cache: {e}")
+        return set()
+
+    ids = set()
+    for raw in doc.get("ids", []):
+        try:
+            ids.add(int(raw))
+        except (TypeError, ValueError):
+            continue
+    return ids
+
+
+def _is_cached_admin(user_json: dict):
+    if not isinstance(user_json, dict):
+        return False, None
+
+    try:
+        user_id = int(user_json.get("id"))
+    except (TypeError, ValueError):
+        user_id = None
+
+    admin_ids = _load_admin_ids()
+    if user_id is not None and user_id in admin_ids:
+        return True, "cache"
+
+    username_lower = norm_username(user_json.get("username", ""))
+    if username_lower in HARDCODED_ADMIN_USERNAMES:
+        return True, "allowlist"
+
+    return False, None
+
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 
 vouchers_bp = Blueprint("vouchers", __name__)
@@ -79,21 +118,35 @@ def require_admin():
         return None, (jsonify({"status": "error", "code": "auth_failed"}), 401)
 
     # parse Telegram user
-    user_json = {}
     try:
         user_json = json.loads(data.get("user", "{}"))
+        if not isinstance(user_json, dict):
+            user_json = {}
     except Exception:
-        pass
+        user_json = {}
 
     username_lower = norm_username(user_json.get("username", ""))
 
-    admin_usernames = {"gracy_ap"}  # no '@', all lowercase
-    if username_lower not in admin_usernames:
-        print("[admin] forbidden for:", username_lower)
+    is_admin, source = _is_cached_admin(user_json)
+    if not is_admin:
+        user_id = user_json.get("id")
+        print(f"[admin] forbidden for: {username_lower} (id={user_id})")
         return None, (jsonify({"status": "error", "code": "forbidden"}), 403)
 
-    return {"usernameLower": username_lower, "id": user_json.get("id")}, None
+    user_id = user_json.get("id")
+    try:
+        user_id = int(user_id)
+    except (TypeError, ValueError):
+        pass
 
+    payload = {"usernameLower": username_lower}
+    if user_id is not None:
+        payload["id"] = user_id
+    if source:
+        payload["adminSource"] = source
+
+    return payload, None
+    
 def _is_admin_preview(init_data_raw: str) -> bool:
     # Safe best-effort: if verify fails, just return False (don’t break visible)
     ok, data = verify_telegram_init_data(init_data_raw)
@@ -101,11 +154,12 @@ def _is_admin_preview(init_data_raw: str) -> bool:
         return False
     try:
         user_json = json.loads(data.get("user", "{}"))
+        if not isinstance(user_json, dict):
+            user_json = {}
     except Exception:
         user_json = {}
-    username_lower = norm_username(user_json.get("username", ""))
-    admin_usernames = {"gracy_ap"}  # keep in sync with require_admin()
-    return username_lower in admin_usernames
+    is_admin, _ = _is_cached_admin(user_json)
+    return is_admin
     
 # ---- Core visibility logic ----
 def is_drop_active(doc: dict, ref: datetime) -> bool:
