@@ -161,7 +161,7 @@ def require_admin():
     try:
         user_json = json.loads(data.get("user", "{}"))
         if not isinstance(user_json, dict):
-            user_json = {
+            user_json = {}
     except Exception:
         user_json = {}
 
