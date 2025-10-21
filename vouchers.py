@@ -403,8 +403,13 @@ def admin_create_drop():
         "status": "upcoming"
     }
     if dtype == "pooled":
-        wl = data.get("whitelistUsernames") or []
-        drop_doc["whitelistUsernames"] = wl
+        wl_raw = data.get("whitelistUsernames") or []
+        wl_clean = []
+        for item in wl_raw:
+            u = norm_username(item)
+            if u and u not in wl_clean:
+                wl_clean.append(u)
+        drop_doc["whitelistUsernames"] = wl_clean
 
     res = db.drops.insert_one(drop_doc)
     drop_id = res.inserted_id
@@ -497,27 +502,23 @@ def admin_add_codes(drop_id):
         if docs:
             db.vouchers.insert_many(docs, ordered=False)
 
-    return jsonify({"status": "ok"})
+        whitelist_updates = data.get("whitelistUsernames") or []
+        whitelist_mode = data.get("whitelistMode", "append")
+        if whitelist_updates or whitelist_mode == "replace":
+            merged = []
+            if whitelist_mode == "replace":
+                source = whitelist_updates
+            else:
+                source = (drop.get("whitelistUsernames") or []) + whitelist_updates
+            for item in source:
+                u = norm_username(item)
+                if u and u not in merged:
+                    merged.append(u)
+            db.drops.update_one(
+                {"_id": drop["_id"]},
+                {"$set": {"whitelistUsernames": merged}}
+            )
 
-@vouchers_bp.route("/admin/drops/<drop_id>/whitelist", methods=["POST"])
-def admin_update_whitelist(drop_id):
-    user, err = require_admin()
-    if err: return err
-    data = request.get_json(force=True)
-    mode = data.get("mode", "replace")
-    usernames = data.get("usernames") or []
-    drop = db.drops.find_one({"_id": _coerce_id(drop_id)})
-    if not drop:
-        return jsonify({"status": "error", "code": "not_found"}), 404
-    if drop.get("type") != "pooled":
-        return jsonify({"status": "error", "code": "invalid_type"}), 400
-
-    if mode == "append":
-        new_list = list(set((drop.get("whitelistUsernames") or []) + usernames))
-    else:
-        new_list = usernames
-
-    db.drops.update_one({"_id": drop["_id"]}, {"$set": {"whitelistUsernames": new_list}})
     return jsonify({"status": "ok"})
 
 @vouchers_bp.route("/admin/drops/<drop_id>/actions", methods=["POST"])
