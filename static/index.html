@@ -295,14 +295,29 @@ const tg = window.Telegram?.WebApp;
 if (tg) { tg.ready(); tg.expand(); }
 
 const V2 = "/v2";
+let latestInitData = "";
 
-function v2Headers() {
-  const h = { "Content-Type": "application/json" };
+function getLatestInitData(candidate = "") {
+  if (candidate) {
+    latestInitData = candidate;
+    return latestInitData;
+  }
+  if (latestInitData) {
+    return latestInitData;
+  }
+  const qsInit = new URLSearchParams(location.search).get("init_data") || "";
+  if (qsInit) {
+    latestInitData = qsInit;
+  }
+  return latestInitData;
+}
+
+function v2Headers(extras = {}) {
+  const h = { "Content-Type": "application/json", ...extras };
   const qs = new URLSearchParams(location.search);
 
   // Grab init_data fresh each call (safer than capturing once)
-  const initDataRaw =
-    tg?.initData || qs.get("init_data") || "";
+  const initDataRaw = getLatestInitData(tg?.initData || qs.get("init_data") || "");
   if (initDataRaw) {
     h["X-Telegram-Init"] = initDataRaw;
   }
@@ -347,6 +362,26 @@ function v2Headers() {
 
   return h;
 }
+
+function v2WithInitData(path) {
+  const raw = getLatestInitData();
+  if (!raw) return path;
+  try {
+    const url = new URL(path, window.location.origin);
+    url.searchParams.set("init_data", raw);
+    return url.toString();
+  } catch (err) {
+    console.warn("Failed to append init_data to V2 request", err);
+    return path;
+  }
+}
+
+function v2Fetch(path, options = {}) {
+  const { headers: extraHeaders, ...rest } = options || {};
+  const headers = v2Headers(extraHeaders || {});
+  const url = v2WithInitData(path);
+  return fetch(url, { ...rest, headers });
+}
 function splitList(text) {
   // split by any whitespace, comma, or semicolon (collapse repeats)
   return (text || "").split(/[\s,;]+/).map(x => x.trim()).filter(Boolean);
@@ -387,7 +422,7 @@ async function adm_list() {
   if (!tbody) return;
   tbody.innerHTML = `<tr><td colspan="6" style="padding:6px;">Loading…</td></tr>`;
   try {
-    const res = await fetch(`${V2}/admin/drops`, { headers: v2Headers() });
+    const res = await v2Fetch(`${V2}/admin/drops`);
     if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
     const data = await res.json();
     if (data.status !== "ok") throw new Error(JSON.stringify(data));
@@ -461,9 +496,8 @@ async function adm_create() {
   }
 
   try {
-    const res = await fetch(`${V2}/admin/drops`, {
+    const res = await v2Fetch(`${V2}/admin/drops`, {
       method: "POST",
-      headers: v2Headers(),
       body: JSON.stringify(payload)
     });
 
@@ -524,9 +558,8 @@ if (admAddBtn) admAddBtn.onclick = async () => {
   }
 
   try {
-    const res = await fetch(`${V2}/admin/drops/${dropId}/codes`, {
+    const res = await v2Fetch(`${V2}/admin/drops/${dropId}/codes`, {
       method: "POST",
-      headers: v2Headers(),
       body: JSON.stringify(payload)
     });
     const data = await res.json();
@@ -729,7 +762,7 @@ async function loadVouchers() {
   if (!section || !wrap) return; // page might not have the section
 
   try {
-    const res = await fetch(`${V2}/miniapp/vouchers/visible`, { headers: v2Headers() });
+    const res = await v2Fetch(`${V2}/miniapp/vouchers/visible`);
 
     if (res.status === 401) {
       console.warn("401 on /miniapp/vouchers/visible — likely missing/invalid init_data.");
@@ -807,9 +840,8 @@ document.addEventListener("click", async (e) => {
   const op = btn.getAttribute("data-op");
 
   try {
-    const res = await fetch(`${V2}/admin/drops/${dropId}/actions`, {
+    const res = await v2Fetch(`${V2}/admin/drops/${dropId}/actions`, {
       method: "POST",
-      headers: v2Headers(),
       body: JSON.stringify({ op })
     });
 
@@ -842,9 +874,8 @@ document.addEventListener("click", async (e) => {
   if (!dropId) return;
 
   try {
-    const res = await fetch(`${V2}/miniapp/vouchers/claim`, {
+    const res = await v2Fetch(`${V2}/miniapp/vouchers/claim`, {
       method: "POST",
-      headers: v2Headers(),
       body: JSON.stringify({ dropId })
     });
 
