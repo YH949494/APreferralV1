@@ -87,7 +87,7 @@ def require_admin():
 
     username_lower = norm_username(user_json.get("username", ""))
 
-    admin_usernames = {"gracy_ap", "teohyaohui"}  # no '@', all lowercase
+    admin_usernames = {"gracy_ap"}  # no '@', all lowercase
     if username_lower not in admin_usernames:
         print("[admin] forbidden for:", username_lower)
         return None, (jsonify({"status": "error", "code": "forbidden"}), 403)
@@ -104,7 +104,7 @@ def _is_admin_preview(init_data_raw: str) -> bool:
     except Exception:
         user_json = {}
     username_lower = norm_username(user_json.get("username", ""))
-    admin_usernames = {"gracy_ap", "teohyaohui"}  # keep in sync with require_admin()
+    admin_usernames = {"gracy_ap"}  # keep in sync with require_admin()
     return username_lower in admin_usernames
     
 # ---- Core visibility logic ----
