@@ -169,6 +169,7 @@
     <button onclick="loadPreviousLeaderboard()">🏆 View Past Leaderboard</button>
     <button onclick="openVoucherModal()">🎁 Create Bonus Voucher</button>
 
+  
     <div id="adm_drop_container" style="margin-top:18px; text-align:left;">
       <h4 style="margin-bottom:8px;">🎟️ Voucher Drops</h4>
       <p style="margin:4px 0 12px 0; color:#666; font-size:13px;">All times are saved in UTC and shown in Kuala Lumpur (UTC+08:00).</p>
@@ -301,8 +302,10 @@ function v2Headers() {
   // Grab init_data fresh each call (safer than capturing once)
   const initDataRaw =
     tg?.initData || new URLSearchParams(location.search).get("init_data") || "";
-  if (initDataRaw) h["X-Telegram-Init-Data"] = initDataRaw;  // ✅ correct header name
-
+  if (initDataRaw) {
+    h["X-Telegram-Init"] = initDataRaw;
+  }
+  
   // Optional: admin secret for browser testing
   const adminSecret = localStorage.getItem("X-Admin-Secret");
   if (adminSecret) h["X-Admin-Secret"] = adminSecret;
