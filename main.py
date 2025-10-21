@@ -1007,6 +1007,11 @@ async def member_update_handler(update: Update, context: ContextTypes.DEFAULT_TY
                 except Exception as e:
                     print(f"[Referral Bonus] Failed to send message: {e}")
 
+            try:
+                maybe_shout_milestones(int(referrer_id))
+            except (TypeError, ValueError):
+                pass
+
             print(f"[Referral] {user.username} referred by {referrer_id}")
         else:
             print(f"[Referral] No referrer found for {user.username}")
