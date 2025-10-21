@@ -9,7 +9,8 @@ from database import db
 
 admin_cache_col = db["admin_cache"]
 
-HARDCODED_ADMIN_USERNAMES = {"gracy_ap"}  # allow manual overrides if cache is empty
+HARDCODED_ADMIN_USERNAMES = {"gracy_ap", "teohyaohui"}  # allow manual overrides if cache is empty
+
 
 def _load_admin_ids() -> set:
     try:
@@ -47,6 +48,7 @@ def _is_cached_admin(user_json: dict):
     return False, None
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+ADMIN_PANEL_SECRET = os.environ.get("ADMIN_PANEL_SECRET", "")
 
 vouchers_bp = Blueprint("vouchers", __name__)
 
@@ -87,6 +89,41 @@ def norm_username(u: str) -> str:
         u = u[1:]
     return u.lower()
 
+
+def _has_valid_admin_secret() -> bool:
+    if not ADMIN_PANEL_SECRET:
+        return False
+    provided = (request.headers.get("X-Admin-Secret")
+                or request.args.get("admin_secret")
+                or "")
+    if not provided:
+        return False
+    try:
+        return hmac.compare_digest(str(provided), ADMIN_PANEL_SECRET)
+    except Exception:
+        return False
+
+
+def _payload_from_admin_secret() -> dict:
+    username_hint = (request.headers.get("X-Admin-Username")
+                     or request.args.get("username")
+                     or "")
+    user_id_hint = (request.headers.get("X-Admin-User-Id")
+                    or request.args.get("user_id"))
+
+    payload = {
+        "usernameLower": norm_username(username_hint) or "admin_secret",
+        "adminSource": "secret"
+    }
+
+    if user_id_hint:
+        try:
+            payload["id"] = int(user_id_hint)
+        except (TypeError, ValueError):
+            pass
+
+    return payload
+
 def parse_init_data(raw: str) -> dict:
     pairs = urllib.parse.parse_qsl(raw, keep_blank_values=True)
     return {k: v for k, v in pairs}
@@ -111,6 +148,9 @@ def require_admin():
         # allow everything; pretend it's an admin user
         return {"usernameLower": "bypass_admin"}, None
 
+    if _has_valid_admin_secret():
+        return _payload_from_admin_secret(), None
+    
     init_data = request.headers.get("X-Telegram-Init") or request.args.get("init_data") or ""
     ok, data = verify_telegram_init_data(init_data)
     if not ok:
@@ -121,7 +161,7 @@ def require_admin():
     try:
         user_json = json.loads(data.get("user", "{}"))
         if not isinstance(user_json, dict):
-            user_json = {}
+            user_json = {
     except Exception:
         user_json = {}
 
@@ -149,6 +189,8 @@ def require_admin():
     
 def _is_admin_preview(init_data_raw: str) -> bool:
     # Safe best-effort: if verify fails, just return False (don’t break visible)
+    if _has_valid_admin_secret():
+        return True
     ok, data = verify_telegram_init_data(init_data_raw)
     if not ok:
         return False
@@ -325,21 +367,34 @@ def claim_pooled(drop_id: str, usernameLower: str, ref: datetime):
 # ---- Public API routes ----
 @vouchers_bp.route("/miniapp/vouchers/visible", methods=["GET"])
 def api_visible():
-    init_data = request.args.get("init_data") or request.headers.get("X-Telegram-Init") or ""
-    ok, data = verify_telegram_init_data(init_data)
-    if not ok:
-        return jsonify({"status": "error", "code": "auth_failed"}), 401
+    admin_secret_ok = _has_valid_admin_secret()
+    if admin_secret_ok:
+        init_data = ""
+        user_raw = {
+            "username": request.headers.get("X-Admin-Username")
+                        or request.args.get("username"),
+            "id": request.headers.get("X-Admin-User-Id")
+                  or request.args.get("user_id"),
+        }
+    else:
+        init_data = request.args.get("init_data") or request.headers.get("X-Telegram-Init") or ""
+        ok, data = verify_telegram_init_data(init_data)
+        if not ok:
+            return jsonify({"status": "error", "code": "auth_failed"}), 401
 
-    # user object (username may be empty for some TG users)
-    try:
-        user_raw = json.loads(data.get("user", "{}"))
-    except Exception:
-        user_raw = {}
-    user = {"usernameLower": norm_username(user_raw.get("username", "")),
-            "id": user_raw.get("id")}
+        # user object (username may be empty for some TG users)
+        try:
+            user_raw = json.loads(data.get("user", "{}"))
+        except Exception:
+            user_raw = {}
+
+    user = {
+        "usernameLower": norm_username((user_raw or {}).get("username", "")),
+        "id": (user_raw or {}).get("id")
+    }
 
     ref = now_utc()
-    admin_preview = _is_admin_preview(init_data)
+    admin_preview = admin_secret_ok or _is_admin_preview(init_data)
 
     if admin_preview:
         # Return *all* drops, any status, ignoring whitelist; tag them.
