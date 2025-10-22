@@ -429,14 +429,14 @@ def api_visible():
         init_data = ""
         user_raw = {
             "username": request.headers.get("X-Admin-Username")
-                        or request.args.get("username"),
+                  or request.args.get("username"),
             "id": request.headers.get("X-Admin-User-Id")
                   or request.args.get("user_id"),
         }
     else:
     init_data = (
         request.args.get("init_data")
-        +        or request.headers.get("X-Telegram-Init")
+        or request.headers.get("X-Telegram-Init")
         or request.headers.get("X-Telegram-Init-Data")
         or ""
     )
