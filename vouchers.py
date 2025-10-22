@@ -176,26 +176,41 @@ def verify_telegram_init_data(init_data_raw: str):
     if not provided_hash:
         return False, {}, "missing_hash"
 
-    # Build data_check_string from all params except 'hash' and 'signature'
+    # Build the data_check_string from all params except 'hash' and 'signature'
     pairs = []
     for k in sorted(parsed.keys()):
-        if k in ("hash", "signature"):   # ← crucial line
+        if k in ("hash", "signature"):
             continue
         v = parsed[k][0]
         pairs.append(f"{k}={v}")
     data_check_string = "\n".join(pairs)
 
-    BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
-    if not BOT_TOKEN:
+    # Try primary token + fallbacks
+    from os import environ
+    candidates = []
+    primary = (environ.get("BOT_TOKEN") or "").strip()
+    if primary:
+        candidates.append(primary)
+    fallbacks_raw = environ.get("BOT_TOKEN_FALLBACKS", "")
+    for t in (x.strip() for x in fallbacks_raw.split(",") if x.strip()):
+        if t not in candidates:
+            candidates.append(t)
+
+    if not candidates:
         return False, {}, "bot_token_missing"
 
-    secret_key = hashlib.sha256(BOT_TOKEN.encode()).digest()
-    calc = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
+    ok = False
+    for tok in candidates:
+        secret_key = hashlib.sha256(tok.encode()).digest()
+        calc = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
+        if hmac.compare_digest(calc, provided_hash):
+            ok = True
+            break
 
-    if calc != provided_hash:
+    if not ok:
         return False, {}, "bad_signature"
 
-    # Optional freshness check
+    # Optional freshness check (24h)
     try:
         auth_date = int(parsed.get("auth_date", ["0"])[0])
         if time.time() - auth_date > 24 * 3600:
