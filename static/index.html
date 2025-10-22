@@ -298,7 +298,7 @@ const V2 = "/v2";
 let latestInitData = "";
 
 function getLatestInitData(candidate = "") {
-  if (candidate) {
+  if (typeof candidate === "string" && candidate.length) {
     latestInitData = candidate;
     return latestInitData;
   }
@@ -312,12 +312,45 @@ function getLatestInitData(candidate = "") {
   return latestInitData;
 }
 
-function v2Headers(extras = {}) {
+async function waitForInitData(timeoutMs = 2000, intervalMs = 50) {
+  const qs = new URLSearchParams(location.search);
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    const candidate =
+      (typeof tg?.initData === "string" && tg.initData.length ? tg.initData : "") ||
+      (typeof window.Telegram?.WebApp?.initData === "string" && window.Telegram.WebApp.initData.length
+        ? window.Telegram.WebApp.initData
+        : "") ||
+      qs.get("init_data") ||
+      "";
+
+    const stored = getLatestInitData(candidate);
+    if (stored) {
+      return stored;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+
+  return getLatestInitData("");
+}
+
+function v2Headers(extras = {}, initDataOverride = "") {
   const h = { "Content-Type": "application/json", ...extras };
   const qs = new URLSearchParams(location.search);
 
   // Grab init_data fresh each call (safer than capturing once)
-  const initDataRaw = getLatestInitData(tg?.initData || qs.get("init_data") || "");
+const candidateInitData =
+    (typeof initDataOverride === "string" && initDataOverride.length ? initDataOverride : "") ||
+    (typeof tg?.initData === "string" && tg.initData.length ? tg.initData : "") ||
+    (typeof window.Telegram?.WebApp?.initData === "string" && window.Telegram.WebApp.initData.length
+      ? window.Telegram.WebApp.initData
+      : "") ||
+    qs.get("init_data") ||
+    "";
+
+  const initDataRaw = getLatestInitData(candidateInitData);
   if (initDataRaw) {
     h["X-Telegram-Init"] = initDataRaw;
   }
@@ -363,8 +396,8 @@ function v2Headers(extras = {}) {
   return h;
 }
 
-function v2WithInitData(path) {
-  const raw = getLatestInitData();
+function v2WithInitData(path, initDataOverride = "") {
+  const raw = getLatestInitData(initDataOverride);
   if (!raw) return path;
   try {
     const url = new URL(path, window.location.origin);
@@ -376,10 +409,11 @@ function v2WithInitData(path) {
   }
 }
 
-function v2Fetch(path, options = {}) {
+async function v2Fetch(path, options = {}) {
   const { headers: extraHeaders, ...rest } = options || {};
-  const headers = v2Headers(extraHeaders || {});
-  const url = v2WithInitData(path);
+  const initDataRaw = await waitForInitData();
+  const headers = v2Headers(extraHeaders || {}, initDataRaw);
+  const url = v2WithInitData(path, initDataRaw);
   return fetch(url, { ...rest, headers });
 }
 function splitList(text) {
