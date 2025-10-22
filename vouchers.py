@@ -195,9 +195,12 @@ def require_admin():
     if _has_valid_admin_secret():
         return _payload_from_admin_secret(), None
 
-    init_data = (request.headers.get("X-Telegram-Init")
-                 or request.args.get("init_data")
-                 or "")
+    init_data = (
+        request.args.get("init_data")
+        or request.headers.get("X-Telegram-Init")
+        or request.headers.get("X-Telegram-Init-Data")
+        or ""
+    )
     ok, data, reason = verify_telegram_init_data(init_data)
     if not ok:
         reason_suffix = f"; reason={reason}" if reason else ""
@@ -431,19 +434,26 @@ def api_visible():
                   or request.args.get("user_id"),
         }
     else:
-        init_data = request.args.get("init_data") or request.headers.get("X-Telegram-Init") or ""
-    ok, data, _ = verify_telegram_init_data(init_data)
+    init_data = (
+        request.args.get("init_data")
+        +        or request.headers.get("X-Telegram-Init")
+        or request.headers.get("X-Telegram-Init-Data")
+        or ""
+    )
+    ok, data, why = verify_telegram_init_data(init_data)
 
-    # Admin preview fallback (mirror admin panel behavior)
+    # Admin preview (for testing from Postman / admin panel)
     admin_secret = request.args.get("admin_secret") or request.headers.get("X-Admin-Secret")
     if not ok and admin_secret and admin_secret == os.environ.get("ADMIN_PANEL_SECRET"):
-        # fabricate a minimal 'user' so UI can render
-        data = {"user": {"id": int(os.environ.get("PREVIEW_USER_ID", "999"))}, "username": "admin_preview"}
+        # fabricate a minimal user (use configured preview id or fallback)
+        data = {"user": json.dumps({
+            "id": int(os.environ.get("PREVIEW_USER_ID", "999")),
+            "username": os.environ.get("PREVIEW_USERNAME", "admin_preview")
+        })}
         ok = True
 
     if not ok:
-        # Optional: return empty OK to avoid scary toast in UI
-        return jsonify({"status": "ok", "items": [], "note": "no_auth"}), 200
+        return jsonify({"status": "error", "code": "auth_failed", "why": why}), 401
         # user object (username may be empty for some TG users)
         try:
             user_raw = json.loads(data.get("user", "{}"))
@@ -491,8 +501,12 @@ def api_visible():
 
 @vouchers_bp.route("/miniapp/vouchers/claim", methods=["POST"])
 def api_claim():
-    init_data = request.args.get("init_data") or request.headers.get("X-Telegram-Init") or ""
-    ok, data, _ = verify_telegram_init_data(init_data)
+    init_data = (
+        request.args.get("init_data")
+        or request.headers.get("X-Telegram-Init")
+        or request.headers.get("X-Telegram-Init-Data")
+        or ""
+    )    ok, data, _ = verify_telegram_init_data(init_data)
     if not ok:
         return jsonify({"status": "error", "code": "auth_failed"}), 401
 
