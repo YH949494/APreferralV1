@@ -149,18 +149,16 @@ def require_admin():
         # allow everything; pretend it's an admin user
         return {"usernameLower": "bypass_admin"}, None
 
-    # 1) Secret path
-    admin_secret = request.headers.get("X-Admin-Secret") or request.args.get("admin_secret")
-    if admin_secret and ADMIN_PANEL_SECRET and admin_secret == ADMIN_PANEL_SECRET:
-        return (True, None, "secret_ok")
+    if _has_valid_admin_secret():
+        return _payload_from_admin_secret(), None
 
-    # 2) Telegram init_data path
-    init_data = request.args.get("init_data") or request.headers.get("X-Telegram-Init") or ""
+    init_data = (request.headers.get("X-Telegram-Init")
+                 or request.args.get("init_data")
+                 or "")
     ok, data = verify_telegram_init_data(init_data)
-    if ok:
-        uid = str(data.get("user", {}).get("id", ""))
-        if uid and (uid in ADMIN_USER_IDS):
-            return (True, uid, "tg_admin_ok")
+    if not ok:
+        print("[admin] auth_failed; init_len:", len(init_data))
+        return None, (jsonify({"status": "error", "code": "auth_failed"}), 401)
 
     return (False, None, "auth_failed")
 
@@ -173,25 +171,31 @@ def require_admin():
         user_json = {}
 
     username_lower = norm_username(user_json.get("username", ""))
+    user_id = user_json.get("id")
+
 
     is_admin, source = _is_cached_admin(user_json)
     if not is_admin:
-        user_id = user_json.get("id")
-        print(f"[admin] forbidden for: {username_lower} (id={user_id})")
+        if user_id is not None and str(user_id) in ADMIN_USER_IDS:
+            is_admin = True
+            admin_source = source or "env"
+
+    if not is_admin:
+        user_id_dbg = user_json.get("id")
+        print(f"[admin] forbidden for: {username_lower} (id={user_id_dbg})")
         return None, (jsonify({"status": "error", "code": "forbidden"}), 403)
 
-    user_id = user_json.get("id")
     try:
-        user_id = int(user_id)
+        user_id_val = int(user_id)
     except (TypeError, ValueError):
-        pass
+        user_id_val = user_id
 
     payload = {"usernameLower": username_lower}
-    if user_id is not None:
-        payload["id"] = user_id
-    if source:
-        payload["adminSource"] = source
-
+    if user_id_val is not None:
+        payload["id"] = user_id_val
+    if admin_source:
+        payload["adminSource"] = admin_source
+        
     return payload, None
     
 def _is_admin_preview(init_data_raw: str) -> bool:
@@ -508,9 +512,6 @@ def _coerce_id(x):
 
 @vouchers_bp.route("/admin/drops", methods=["POST"])
 def admin_create_drop():
-    ok, admin_uid, why = require_admin()
-    if not ok:
-        return jsonify({"status": "error", "code": why}), 401
     """
     Body (personalised):
     { "name":"VIP", "type":"personalised", "startsAtLocal":"2025-10-13 12:00:00", "priority":200,
