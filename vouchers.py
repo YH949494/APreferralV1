@@ -125,8 +125,7 @@ def _payload_from_admin_secret() -> dict:
 
     return payload
     
-def parse_init_data(raw: str) -> dict:
-@@ -104,115 +104,176 @@ def _has_valid_admin_secret() -> bool:
+def _has_valid_admin_secret() -> bool:
     except Exception:
         return False
 
