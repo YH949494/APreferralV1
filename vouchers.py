@@ -97,6 +97,9 @@ def norm_username(u: str) -> str:
 
 
 def _has_valid_admin_secret() -> bool:
+    admin_secret = request.headers.get("X-Admin-Secret") or request.args.get("admin_secret")
+    return bool(admin_secret) and admin_secret == os.environ.get("ADMIN_PANEL_SECRET")
+    
     if not ADMIN_PANEL_SECRET:
         return False
     provided = (request.headers.get("X-Admin-Secret")
@@ -147,46 +150,42 @@ def _candidate_bot_tokens():
     return tokens
 
 def verify_telegram_init_data(init_data_raw: str):
-    """Return (ok: bool, data: dict, reason: str) using configured bot tokens."""
-    init_data_raw = (init_data_raw or "").strip()
-    candidates = _candidate_bot_tokens()
+    import urllib.parse, hmac, hashlib, time, os
 
-    if not init_data_raw:
-        return False, {}, "empty_init_data"
-    if not candidates:
-        return False, {}, "missing_bot_token"
-    try:
-        pairs = urllib.parse.parse_qsl(init_data_raw, keep_blank_values=True)
-
-    except Exception:
-        return False, {}, "parse_error"
-
-    data = {}
-    check_hash = None
-    for key, value in pairs:
-        if key == "hash" and check_hash is None:
-            check_hash = value
-        else:
-            data[key] = value
-
-    if not check_hash:
+    parsed = urllib.parse.parse_qs(init_data_raw or "", keep_blank_values=True)
+    provided_hash = parsed.get("hash", [""])[0]
+    if not provided_hash:
         return False, {}, "missing_hash"
 
-    data_check_string = "\n".join(f"{k}={v}" for k, v in sorted(data.items()))
-
-    for idx, token in enumerate(candidates):
-        try:
-            secret_key = hashlib.sha256(token.encode()).digest()
-            calc_hash = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
-        except Exception:
+    # Build data_check_string from all params except 'hash' and 'signature'
+    pairs = []
+    for k in sorted(parsed.keys()):
+        if k in ("hash", "signature"):   # ← crucial line
             continue
+        v = parsed[k][0]
+        pairs.append(f"{k}={v}")
+    data_check_string = "\n".join(pairs)
 
-        if hmac.compare_digest(calc_hash, check_hash):
-            if idx > 0:
-                data.setdefault("_verified_with_fallback", True)
-            return True, data, ""
+    BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+    if not BOT_TOKEN:
+        return False, {}, "bot_token_missing"
 
-    return False, {}, "hash_mismatch"        
+    secret_key = hashlib.sha256(BOT_TOKEN.encode()).digest()
+    calc = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
+
+    if calc != provided_hash:
+        return False, {}, "bad_signature"
+
+    # Optional freshness check
+    try:
+        auth_date = int(parsed.get("auth_date", ["0"])[0])
+        if time.time() - auth_date > 24 * 3600:
+            return False, {}, "expired_auth_date"
+    except Exception:
+        pass
+
+    return True, {k: v[0] for k, v in parsed.items()}, "ok"
+    
 def require_admin():
     if BYPASS_ADMIN:
         # allow everything; pretend it's an admin user
