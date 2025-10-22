@@ -513,10 +513,9 @@ def api_claim():
 
     ok, data, why = verify_telegram_init_data(init_data)
 
-    # --- Admin preview path (for testing from Postman or your panel) ---
+    # Admin preview (for Postman/admin panel testing)
     admin_secret = request.args.get("admin_secret") or request.headers.get("X-Admin-Secret")
     if (not ok) and admin_secret and (admin_secret == os.environ.get("ADMIN_PANEL_SECRET")):
-        # Fabricate a minimal Telegram user for preview/testing
         data = {
             "user": json.dumps({
                 "id": int(os.environ.get("PREVIEW_USER_ID", "999")),
@@ -539,7 +538,7 @@ def api_claim():
     if not user_id:
         return jsonify({"status": "error", "code": "no_user"}), 400
 
-    # Read body
+    # Body
     body = request.get_json(silent=True) or {}
     drop_id = body.get("dropId") or body.get("drop_id")
     if not drop_id:
@@ -547,18 +546,17 @@ def api_claim():
 
     # --- Your claim logic here ---
     try:
-        # Example: implement/keep your own function
         result = claim_voucher_for_user(user_id=user_id, drop_id=drop_id, username=username)
     except AlreadyClaimed:
         return jsonify({"status": "error", "code": "already_claimed"}), 409
     except NoCodesLeft:
         return jsonify({"status": "error", "code": "sold_out"}), 410
-    except Exception as e:
+    except Exception:
         current_app.logger.exception("claim failed")
         return jsonify({"status": "error", "code": "server_error"}), 500
 
     return jsonify({"status": "ok", "voucher": result}), 200
-
+    
 # ---- Admin endpoints ----
 def _coerce_id(x):
     return ObjectId(x) if ObjectId.is_valid(x) else x
