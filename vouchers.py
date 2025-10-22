@@ -125,31 +125,6 @@ def _payload_from_admin_secret() -> dict:
 
     return payload
     
-def _has_valid_admin_secret() -> bool:
-    except Exception:
-        return False
-
-
-def _payload_from_admin_secret() -> dict:
-    username_hint = (request.headers.get("X-Admin-Username")
-                     or request.args.get("username")
-                     or "")
-    user_id_hint = (request.headers.get("X-Admin-User-Id")
-                    or request.args.get("user_id"))
-
-    payload = {
-        "usernameLower": norm_username(username_hint) or "admin_secret",
-        "adminSource": "secret"
-    }
-
-    if user_id_hint:
-        try:
-            payload["id"] = int(user_id_hint)
-        except (TypeError, ValueError):
-            pass
-
-    return payload
-    
 def parse_init_data(raw: str) -> dict:
     """Best-effort parser that accepts raw, encoded, or tgWebAppData payloads."""
     if not raw:
@@ -226,8 +201,8 @@ def verify_telegram_init_data(init_data_raw: str):
             if _hmac.compare_digest(calc_hash_legacy, check_hash):
                 return True, payload
 
-        return False, {}    except Exception:
         return False, {}
+    except Exception:
         
 def require_admin():
     if BYPASS_ADMIN:
