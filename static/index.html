@@ -297,89 +297,19 @@ if (tg) { tg.ready(); tg.expand(); }
 const V2 = "/v2";
 let latestInitData = "";
 
-function normalizeInitData(rawValue) {
-  if (typeof rawValue !== "string") return "";
-  let value = rawValue.trim();
-  if (!value) return "";
-
-  if (value.startsWith("tgWebAppData=")) {
-    value = value.slice(value.indexOf("=") + 1);
-  }
-
-  const attempts = [];
-  const pushUnique = (candidate) => {
-    if (typeof candidate === "string" && candidate.length && !attempts.includes(candidate)) {
-      attempts.push(candidate);
-    }
-  };
-
-  pushUnique(value);
-
-  let previous = value;
-  for (let i = 0; i < 2; i += 1) {
-    try {
-      const decoded = decodeURIComponent(previous);
-      if (decoded === previous) break;
-      pushUnique(decoded);
-      previous = decoded;
-    } catch (err) {
-      break;
-    }
-  }
-
-  for (const candidate of attempts) {
-    if (candidate.includes("=") && candidate.includes("hash=")) {
-      return candidate;
-    }
-  }
-  for (const candidate of attempts) {
-    if (candidate.includes("=")) {
-      return candidate;
-    }
-  }
-
-  return attempts[0] || "";
-}
-    
 function getLatestInitData(candidate = "") {
-  const normalized = normalizeInitData(candidate);
-  if (normalized) {
-    latestInitData = normalized;
+  if (typeof candidate === "string" && candidate.length) {
+    latestInitData = candidate;
     return latestInitData;
   }
   if (latestInitData) {
     return latestInitData;
   }
-  const qsInitRaw = new URLSearchParams(location.search).get("init_data") || "";
-  const qsInit = normalizeInitData(qsInitRaw);
+  const qsInit = new URLSearchParams(location.search).get("init_data") || "";
   if (qsInit) {
     latestInitData = qsInit;
   }
   return latestInitData;
-}
-
-async function waitForInitData(timeoutMs = 2000, intervalMs = 50) {
-  const qs = new URLSearchParams(location.search);
-  const deadline = Date.now() + timeoutMs;
-
-  while (Date.now() < deadline) {
-    const candidate =
-      (typeof tg?.initData === "string" && tg.initData.length ? tg.initData : "") ||
-      (typeof window.Telegram?.WebApp?.initData === "string" && window.Telegram.WebApp.initData.length
-        ? window.Telegram.WebApp.initData
-        : "") ||
-      qs.get("init_data") ||
-      "";
-
-    const stored = getLatestInitData(candidate);
-    if (stored) {
-      return stored;
-    }
-
-    await new Promise((resolve) => setTimeout(resolve, intervalMs));
-  }
-
-  return getLatestInitData("");
 }
 
 async function waitForInitData(timeoutMs = 2000, intervalMs = 50) {
@@ -420,16 +350,8 @@ const candidateInitData =
     qs.get("init_data") ||
     "";
 
-  const candidateInitData =
-    (typeof initDataOverride === "string" && initDataOverride.length ? initDataOverride : "") ||
-    (typeof tg?.initData === "string" && tg.initData.length ? tg.initData : "") ||
-    (typeof window.Telegram?.WebApp?.initData === "string" && window.Telegram.WebApp.initData.length
-      ? window.Telegram.WebApp.initData
-      : "") ||
-    qs.get("init_data") ||
-    "";
-
-  const initDataRaw = getLatestInitData(candidateInitData);  if (initDataRaw) {
+  const initDataRaw = getLatestInitData(candidateInitData);
+  if (initDataRaw) {
     h["X-Telegram-Init"] = initDataRaw;
   }
   
