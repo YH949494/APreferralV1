@@ -126,83 +126,23 @@ def _payload_from_admin_secret() -> dict:
     return payload
     
 def parse_init_data(raw: str) -> dict:
-    """Best-effort parser that accepts raw, encoded, or tgWebAppData payloads."""
-    if not raw:
-        return {}
-
-    value = raw.strip()
-    if not value:
-        return {}
-
-    if value.startswith("tgWebAppData="):
-        value = value.split("=", 1)[1]
-
-    seen = set()
-    candidates = []
-
-    def _push(candidate: str):
-        if candidate and candidate not in seen:
-            seen.add(candidate)
-            candidates.append(candidate)
-
-    _push(value)
-
-    decoded = value
-    for _ in range(2):
-        try:
-            decoded = urllib.parse.unquote(decoded)
-        except Exception:
-            break
-        _push(decoded)
-
-    for candidate in candidates:
-        try:
-            pairs = urllib.parse.parse_qsl(candidate, keep_blank_values=True)
-        except Exception:
-            continue
-        if pairs:
-            return dict(pairs)
-
-    return {}
+    pairs = urllib.parse.parse_qsl(raw, keep_blank_values=True)
+    return {k: v for k, v in pairs}
 
 def verify_telegram_init_data(init_data_raw: str):
     """Return (ok: bool, data: dict) using the global BOT_TOKEN."""
     try:
         if not init_data_raw or not BOT_TOKEN:
             return False, {}
-
-        parsed_full = parse_init_data(init_data_raw)
-        if not parsed_full:
-            return False, {}
-
-        payload = dict(parsed_full)
-        check_hash = payload.pop("hash", None)
-        if not check_hash:
-            return False, {}
-
-        def _compute_hash(items):
-            data_check_string = "\n".join(f"{k}={v}" for k, v in sorted(items.items()))
-            secret_key = hashlib.sha256(BOT_TOKEN.encode()).digest()
-            return hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
-
+        data = dict(urllib.parse.parse_qsl(init_data_raw, keep_blank_values=True))
+        check_hash = data.pop("hash", None)
+        data_check_string = "\n".join(f"{k}={v}" for k, v in sorted(data.items()))
+        secret_key = hashlib.sha256(BOT_TOKEN.encode()).digest()   # <- correct var
+        calc_hash  = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
         import hmac as _hmac
-
-        calc_hash = _compute_hash(payload)
-        if _hmac.compare_digest(calc_hash, check_hash):
-            return True, payload
-
-        # Some Telegram clients include an extra "signature" field that
-        # is *not* part of the hashable payload. Retry without it so those
-        # sessions can pass verification without weakening security.
-        if "signature" in payload:
-            without_signature = dict(payload)
-            without_signature.pop("signature", None)
-            calc_hash_legacy = _compute_hash(without_signature)
-            if _hmac.compare_digest(calc_hash_legacy, check_hash):
-                return True, payload
-
-        return False, {}
+        return _hmac.compare_digest(calc_hash, check_hash), data
     except Exception:
+        return False, {}
         
 def require_admin():
     if BYPASS_ADMIN:
@@ -235,8 +175,6 @@ def require_admin():
 
 
     is_admin, source = _is_cached_admin(user_json)
-    admin_source = source
-
     if not is_admin:
         if user_id is not None and str(user_id) in ADMIN_USER_IDS:
             is_admin = True
@@ -464,12 +402,8 @@ def api_visible():
         # Optional: return empty OK to avoid scary toast in UI
         return jsonify({"status": "ok", "items": [], "note": "no_auth"}), 200
         # user object (username may be empty for some TG users)
-        
-    if not admin_secret_ok:
         try:
             user_raw = json.loads(data.get("user", "{}"))
-            if not isinstance(user_raw, dict):
-                user_raw = {}
         except Exception:
             user_raw = {}
 
