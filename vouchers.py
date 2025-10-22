@@ -94,21 +94,40 @@ def norm_username(u: str) -> str:
         u = u[1:]
     return u.lower()
 
+def _extract_admin_secret() -> str:
+    """Return the admin secret supplied via headers or query params."""
+
+    header_secret = request.headers.get("X-Admin-Secret")
+    if header_secret:
+        return header_secret.strip()
+
+    auth_header = request.headers.get("Authorization", "")
+    if isinstance(auth_header, str):
+        try:
+            scheme, value = auth_header.strip().split(" ", 1)
+        except ValueError:
+            pass
+        else:
+            if scheme.lower() == "bearer" and value.strip():
+                return value.strip()
+
+    query_secret = request.args.get("admin_secret")
+    if query_secret:
+        return query_secret.strip()
+
+    return ""
 
 
 def _has_valid_admin_secret() -> bool:
-    admin_secret = request.headers.get("X-Admin-Secret") or request.args.get("admin_secret")
-    return bool(admin_secret) and admin_secret == os.environ.get("ADMIN_PANEL_SECRET")
-    
-    if not ADMIN_PANEL_SECRET:
+    expected = (ADMIN_PANEL_SECRET or "").strip()
+    if not expected:
         return False
-    provided = (request.headers.get("X-Admin-Secret")
-                or request.args.get("admin_secret")
-                or "")
+
+    provided = _extract_admin_secret()
     if not provided:
         return False
     try:
-        return hmac.compare_digest(str(provided), ADMIN_PANEL_SECRET)
+        return hmac.compare_digest(str(provided), expected)
     except Exception:
         return False
 
