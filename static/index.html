@@ -353,6 +353,8 @@ const candidateInitData =
   const initDataRaw = getLatestInitData(candidateInitData);
   if (initDataRaw) {
     h["X-Telegram-Init"] = initDataRaw;
+    h["X-Telegram-Init-Data"] = initDataRaw;
+
   }
   
   // Optional: admin secret for browser testing
@@ -380,8 +382,10 @@ const candidateInitData =
       adminSecret = "";
     }
   }
-  if (adminSecret) h["X-Admin-Secret"] = adminSecret;
-  
+  if (adminSecret) {
+    h["X-Admin-Secret"] = adminSecret;
+    h["Authorization"] = `Bearer ${adminSecret}`;
+  }  
   const usernameHint =
     CURRENT_USERNAME || tg?.initDataUnsafe?.user?.username || qs.get("username") || "";
   if (usernameHint) {
