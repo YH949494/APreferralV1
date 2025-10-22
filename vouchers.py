@@ -434,6 +434,8 @@ def api_visible():
                   or request.args.get("user_id"),
         }
     else:
+    pass   # ← add this single line
+
     init_data = (
         request.args.get("init_data")
         or request.headers.get("X-Telegram-Init")
