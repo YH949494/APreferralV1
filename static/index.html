@@ -352,9 +352,7 @@ const candidateInitData =
 
   const initDataRaw = getLatestInitData(candidateInitData);
   if (initDataRaw) {
-    h["X-Telegram-Init"] = initDataRaw;
-    h["X-Telegram-Init-Data"] = initDataRaw;
-
+    h["X-Telegram-Init-Data"] = initDataRaw; // canonical, raw string from Telegram
   }
   
   // Optional: admin secret for browser testing
@@ -400,25 +398,12 @@ const candidateInitData =
   return h;
 }
 
-function v2WithInitData(path, initDataOverride = "") {
-  const raw = getLatestInitData(initDataOverride);
-  if (!raw) return path;
-  try {
-    const url = new URL(path, window.location.origin);
-    url.searchParams.set("init_data", raw);
-    return url.toString();
-  } catch (err) {
-    console.warn("Failed to append init_data to V2 request", err);
-    return path;
-  }
-}
-
 async function v2Fetch(path, options = {}) {
   const { headers: extraHeaders, ...rest } = options || {};
   const initDataRaw = await waitForInitData();
   const headers = v2Headers(extraHeaders || {}, initDataRaw);
-  const url = v2WithInitData(path, initDataRaw);
-  return fetch(url, { ...rest, headers });
+  // 👇 Use headers only; do NOT append init_data to query
+  return fetch(path, { ...rest, headers });
 }
 function splitList(text) {
   // split by any whitespace, comma, or semicolon (collapse repeats)
