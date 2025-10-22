@@ -160,8 +160,6 @@ def require_admin():
         print("[admin] auth_failed; init_len:", len(init_data))
         return None, (jsonify({"status": "error", "code": "auth_failed"}), 401)
 
-    return (False, None, "auth_failed")
-
     # parse Telegram user
     try:
         user_json = json.loads(data.get("user", "{}"))
@@ -175,6 +173,8 @@ def require_admin():
 
 
     is_admin, source = _is_cached_admin(user_json)
+    admin_source = source
+
     if not is_admin:
         if user_id is not None and str(user_id) in ADMIN_USER_IDS:
             is_admin = True
