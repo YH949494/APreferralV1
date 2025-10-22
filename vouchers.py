@@ -126,7 +126,33 @@ def _payload_from_admin_secret() -> dict:
     return payload
     
 def parse_init_data(raw: str) -> dict:
-  """Best-effort parser that accepts raw or encoded Telegram init data."""
+@@ -104,115 +104,176 @@ def _has_valid_admin_secret() -> bool:
+    except Exception:
+        return False
+
+
+def _payload_from_admin_secret() -> dict:
+    username_hint = (request.headers.get("X-Admin-Username")
+                     or request.args.get("username")
+                     or "")
+    user_id_hint = (request.headers.get("X-Admin-User-Id")
+                    or request.args.get("user_id"))
+
+    payload = {
+        "usernameLower": norm_username(username_hint) or "admin_secret",
+        "adminSource": "secret"
+    }
+
+    if user_id_hint:
+        try:
+            payload["id"] = int(user_id_hint)
+        except (TypeError, ValueError):
+            pass
+
+    return payload
+    
+def parse_init_data(raw: str) -> dict:
+    """Best-effort parser that accepts raw, encoded, or tgWebAppData payloads."""
     if not raw:
         return {}
 
@@ -137,27 +163,23 @@ def parse_init_data(raw: str) -> dict:
     if value.startswith("tgWebAppData="):
         value = value.split("=", 1)[1]
 
+    seen = set()
     candidates = []
 
     def _push(candidate: str):
-        if candidate and candidate not in candidates:
+        if candidate and candidate not in seen:
+            seen.add(candidate)
             candidates.append(candidate)
 
     _push(value)
 
-    try:
-        decoded_once = urllib.parse.unquote(value)
-    except Exception:
-        decoded_once = None
-    else:
-        _push(decoded_once)
-
+    decoded = value
+    for _ in range(2):
         try:
-            decoded_twice = urllib.parse.unquote(decoded_once)
+            decoded = urllib.parse.unquote(decoded)
         except Exception:
-            decoded_twice = None
-        else:
-            _push(decoded_twice)
+            break
+        _push(decoded)
 
     for candidate in candidates:
         try:
@@ -165,7 +187,7 @@ def parse_init_data(raw: str) -> dict:
         except Exception:
             continue
         if pairs:
-            return {k: v for k, v in pairs}
+            return dict(pairs)
 
     return {}
 
