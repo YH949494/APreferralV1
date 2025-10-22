@@ -312,6 +312,9 @@ if (!CURRENT_USERNAME) {
 const tg = window.Telegram?.WebApp;
 if (tg) { tg.ready(); tg.expand(); }
 
+ // DEBUG: show if Telegram gave us initData
+ console.log("[miniapp] initData len:", (tg?.initData || "").length);
+    
 const V2 = "/v2";
 let latestInitData = "";
 
@@ -362,7 +365,11 @@ function v2Headers(extras = {}, initDataOverride = "") {
     h["X-Telegram-Init-Data"] = raw;
     h["X-Telegram-Init"] = raw;
   }
-
++ console.log("[miniapp] sending headers:", {
++   hasInitData: !!raw,
++   initLen: (raw || "").length
++ });
+  
   // Grab init_data fresh each call (safer than capturing once)
 const candidateInitData =
     (typeof initDataOverride === "string" && initDataOverride.length ? initDataOverride : "") ||
@@ -426,6 +433,12 @@ async function v2Fetch(path, options = {}) {
   const initDataRaw = await waitForInitData();
   const headers = v2Headers(extraHeaders || {}, initDataRaw);
   // 👇 Use headers only; do NOT append init_data to query
+ 
+  console.log("[miniapp] GET", path, "->", res.status);
+ if (!res.ok) {
+   const txt = await res.text().catch(()=>"(no body)");
+   console.warn("[miniapp] error body:", txt);
+ }
   return fetch(path, { ...rest, headers });
 }
 function splitList(text) {
