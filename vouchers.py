@@ -426,36 +426,35 @@ def claim_pooled(drop_id: str, usernameLower: str, ref: datetime):
 def api_visible():
     admin_secret_ok = _has_valid_admin_secret()
     if admin_secret_ok:
+        # Admin preview path: fabricate a minimal user from headers/params
         init_data = ""
         user_raw = {
-            "username": request.headers.get("X-Admin-Username")
-                  or request.args.get("username"),
-            "id": request.headers.get("X-Admin-User-Id")
-                  or request.args.get("user_id"),
+            "username": request.headers.get("X-Admin-Username") or request.args.get("username"),
+            "id": request.headers.get("X-Admin-User-Id") or request.args.get("user_id"),
         }
     else:
-    pass   # ← add this single line
+        # Normal Telegram mini-app path (verify init_data signature)
+        init_data = (
+            request.args.get("init_data")
+            or request.headers.get("X-Telegram-Init")
+            or request.headers.get("X-Telegram-Init-Data")
+            or ""
+        )
+        ok, data, why = verify_telegram_init_data(init_data)
 
-    init_data = (
-        request.args.get("init_data")
-        or request.headers.get("X-Telegram-Init")
-        or request.headers.get("X-Telegram-Init-Data")
-        or ""
-    )
-    ok, data, why = verify_telegram_init_data(init_data)
+        # Allow admin-secret fallback for testing without Telegram
+        admin_secret = request.args.get("admin_secret") or request.headers.get("X-Admin-Secret")
+        if (not ok) and admin_secret and admin_secret == os.environ.get("ADMIN_PANEL_SECRET"):
+            data = {"user": json.dumps({
+                "id": int(os.environ.get("PREVIEW_USER_ID", "999")),
+                "username": os.environ.get("PREVIEW_USERNAME", "admin_preview")
+            })}
+            ok = True
+            why = "ok"
 
-    # Admin preview (for testing from Postman / admin panel)
-    admin_secret = request.args.get("admin_secret") or request.headers.get("X-Admin-Secret")
-    if not ok and admin_secret and admin_secret == os.environ.get("ADMIN_PANEL_SECRET"):
-        # fabricate a minimal user (use configured preview id or fallback)
-        data = {"user": json.dumps({
-            "id": int(os.environ.get("PREVIEW_USER_ID", "999")),
-            "username": os.environ.get("PREVIEW_USERNAME", "admin_preview")
-        })}
-        ok = True
+        if not ok:
+            return jsonify({"status": "error", "code": "auth_failed", "why": why}), 401
 
-    if not ok:
-        return jsonify({"status": "error", "code": "auth_failed", "why": why}), 401
         # user object (username may be empty for some TG users)
         try:
             user_raw = json.loads(data.get("user", "{}"))
@@ -471,7 +470,7 @@ def api_visible():
     admin_preview = admin_secret_ok or _is_admin_preview(init_data)
 
     if admin_preview:
-        # Return *all* drops, any status, ignoring whitelist; tag them.
+        # Return all drops (ignore whitelist/status), tagged as preview
         items = []
         for d in db.drops.find().sort([("priority", DESCENDING), ("startsAt", ASCENDING)]):
             drop_id = str(d["_id"])
@@ -485,19 +484,17 @@ def api_visible():
                 "status": d.get("status", "upcoming"),
                 "isActive": is_drop_active(d, ref),
                 "userClaimed": False,
-                "adminPreview": True   # <-- tell the UI
+                "adminPreview": True
             }
-            # For pooled, show approx remaining
             if base["type"] == "pooled":
                 free = db.vouchers.count_documents({"type": "pooled", "dropId": drop_id, "status": "free"})
                 total = db.vouchers.count_documents({"type": "pooled", "dropId": drop_id})
                 base["remainingApprox"] = free
                 base["codesTotal"] = total
             items.append(base)
-        # Keep the same envelope
         return jsonify({"visibilityMode": "stacked", "nowUtc": ref.isoformat(), "drops": items})
 
-    # normal user path
+    # Normal user path
     drops = user_visible_drops(user, ref)
     return jsonify({"visibilityMode": "stacked", "nowUtc": ref.isoformat(), "drops": drops})
 
