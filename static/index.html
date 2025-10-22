@@ -302,9 +302,9 @@ try {
     CURRENT_USERNAME = Telegram.WebApp.initDataUnsafe.user.username || CURRENT_USERNAME;
   }
 } catch (_) {}
-if (!CURRENT_USERNAME) {
- const params = new URLSearchParams(location.search);
- CURRENT_USERNAME = params.get("username") || "";
+ if (!CURRENT_USERNAME) {
+   const params = new URLSearchParams(location.search);
+   CURRENT_USERNAME = params.get("username") || "";
 }
 </script>
 
@@ -331,7 +331,7 @@ function getLatestInitData(candidate = "") {
   return latestInitData;
 }
 
-async function waitForInitData(timeoutMs = 2000, intervalMs = 50) {
+ async function waitForInitData(timeoutMs = 2000, intervalMs = 50) {
   const params = new URLSearchParams(location.search);
   const deadline = Date.now() + timeoutMs;
 
@@ -363,7 +363,9 @@ function v2Headers(extras = {}, initDataOverride = "") {
     h["X-Telegram-Init-Data"] = raw;
     h["X-Telegram-Init"] = raw;
   }
-
+  // Use URLSearchParams locally; don't rely on global `qs` shim here
+  const params = new URLSearchParams(location.search);
+  
   // Grab init_data fresh each call (safer than capturing once)
 const candidateInitData =
     (typeof initDataOverride === "string" && initDataOverride.length ? initDataOverride : "") ||
