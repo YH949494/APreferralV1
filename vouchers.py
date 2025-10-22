@@ -473,9 +473,6 @@ def api_visible():
             or request.headers.get("X-Telegram-Init-Data")
             or ""
         )
-       print("[auth] hdr_init_len=",
-             len(request.headers.get("X-Telegram-Init-Data","") or request.headers.get("X-Telegram-Init","") or ""),
-             "args_init_len=", len(request.args.get("init_data","")))
         ok, data, why = verify_telegram_init_data(init_data)
 
         # Allow admin-secret fallback for testing without Telegram
@@ -489,7 +486,6 @@ def api_visible():
             why = "ok"
 
         if not ok:
-            print("[auth] verify failed: why=", why)
             return jsonify({"status": "error", "code": "auth_failed", "why": why}), 401
 
         # user object (username may be empty for some TG users)
