@@ -11,7 +11,6 @@ admin_cache_col = db["admin_cache"]
 
 HARDCODED_ADMIN_USERNAMES = {"gracy_ap", "teohyaohui"}  # allow manual overrides if cache is empty
 
-
 def _load_admin_ids() -> set:
     try:
         doc = admin_cache_col.find_one({"_id": "admins"}) or {}
@@ -49,6 +48,7 @@ def _is_cached_admin(user_json: dict):
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 ADMIN_PANEL_SECRET = os.environ.get("ADMIN_PANEL_SECRET", "")
+ADMIN_USER_IDS = {x.strip() for x in os.environ.get("ADMIN_USER_IDS", "").split(",") if x.strip()}
 
 vouchers_bp = Blueprint("vouchers", __name__)
 
@@ -149,14 +149,20 @@ def require_admin():
         # allow everything; pretend it's an admin user
         return {"usernameLower": "bypass_admin"}, None
 
-    if _has_valid_admin_secret():
-        return _payload_from_admin_secret(), None
-    
-    init_data = request.headers.get("X-Telegram-Init") or request.args.get("init_data") or ""
+    # 1) Secret path
+    admin_secret = request.headers.get("X-Admin-Secret") or request.args.get("admin_secret")
+    if admin_secret and ADMIN_PANEL_SECRET and admin_secret == ADMIN_PANEL_SECRET:
+        return (True, None, "secret_ok")
+
+    # 2) Telegram init_data path
+    init_data = request.args.get("init_data") or request.headers.get("X-Telegram-Init") or ""
     ok, data = verify_telegram_init_data(init_data)
-    if not ok:
-        print("[admin] auth_failed; init_len:", len(init_data))
-        return None, (jsonify({"status": "error", "code": "auth_failed"}), 401)
+    if ok:
+        uid = str(data.get("user", {}).get("id", ""))
+        if uid and (uid in ADMIN_USER_IDS):
+            return (True, uid, "tg_admin_ok")
+
+    return (False, None, "auth_failed")
 
     # parse Telegram user
     try:
@@ -502,6 +508,9 @@ def _coerce_id(x):
 
 @vouchers_bp.route("/admin/drops", methods=["POST"])
 def admin_create_drop():
+    ok, admin_uid, why = require_admin()
+    if not ok:
+        return jsonify({"status": "error", "code": why}), 401
     """
     Body (personalised):
     { "name":"VIP", "type":"personalised", "startsAtLocal":"2025-10-13 12:00:00", "priority":200,
