@@ -302,9 +302,9 @@ try {
     CURRENT_USERNAME = Telegram.WebApp.initDataUnsafe.user.username || CURRENT_USERNAME;
   }
 } catch (_) {}
- if (!CURRENT_USERNAME) {
-   const params = new URLSearchParams(location.search);
-   CURRENT_USERNAME = params.get("username") || "";
+if (!CURRENT_USERNAME) {
+  const qs = new URLSearchParams(location.search);
+  CURRENT_USERNAME = qs.get("username") || "";
 }
 </script>
 
@@ -323,16 +323,15 @@ function getLatestInitData(candidate = "") {
   if (latestInitData) {
     return latestInitData;
   }
-  const params
-    Init = new URLSearchParams(location.search).get("init_data") || "";
+  const qsInit = new URLSearchParams(location.search).get("init_data") || "";
   if (qsInit) {
     latestInitData = qsInit;
   }
   return latestInitData;
 }
 
- async function waitForInitData(timeoutMs = 2000, intervalMs = 50) {
-  const params = new URLSearchParams(location.search);
+async function waitForInitData(timeoutMs = 2000, intervalMs = 50) {
+  const qs = new URLSearchParams(location.search);
   const deadline = Date.now() + timeoutMs;
 
   while (Date.now() < deadline) {
@@ -341,7 +340,7 @@ function getLatestInitData(candidate = "") {
       (typeof window.Telegram?.WebApp?.initData === "string" && window.Telegram.WebApp.initData.length
         ? window.Telegram.WebApp.initData
         : "") ||
-      params.get("init_data") ||
+      qs.get("init_data") ||
       "";
 
     const stored = getLatestInitData(candidate);
@@ -363,9 +362,7 @@ function v2Headers(extras = {}, initDataOverride = "") {
     h["X-Telegram-Init-Data"] = raw;
     h["X-Telegram-Init"] = raw;
   }
-  // Use URLSearchParams locally; don't rely on global `qs` shim here
-  const params = new URLSearchParams(location.search);
-  
+
   // Grab init_data fresh each call (safer than capturing once)
 const candidateInitData =
     (typeof initDataOverride === "string" && initDataOverride.length ? initDataOverride : "") ||
@@ -373,7 +370,7 @@ const candidateInitData =
     (typeof window.Telegram?.WebApp?.initData === "string" && window.Telegram.WebApp.initData.length
       ? window.Telegram.WebApp.initData
       : "") ||
-    params.get("init_data") ||
+    qs.get("init_data") ||
     "";
 
   const initDataRaw = getLatestInitData(candidateInitData);
@@ -382,8 +379,8 @@ const candidateInitData =
   }
   
   // Optional: admin secret for browser testing
-  const hasAdminSecretParam = params.has("admin_secret");
-  const adminSecretParam = (params.get("admin_secret") || "").trim();
+  const hasAdminSecretParam = qs.has("admin_secret");
+  const adminSecretParam = (qs.get("admin_secret") || "").trim();
   let adminSecret = "";
   if (adminSecretParam) {
     adminSecret = adminSecretParam;
@@ -411,12 +408,12 @@ const candidateInitData =
     h["Authorization"] = `Bearer ${adminSecret}`;
   }  
   const usernameHint =
-    CURRENT_USERNAME || tg?.initDataUnsafe?.user?.username || params.get("username") || "";
+    CURRENT_USERNAME || tg?.initDataUnsafe?.user?.username || qs.get("username") || "";
   if (usernameHint) {
     h["X-Admin-Username"] = usernameHint;
   }
 
-  const userIdHint = tg?.initDataUnsafe?.user?.id || params.get("user_id");
+  const userIdHint = tg?.initDataUnsafe?.user?.id || qs.get("user_id");
   if (userIdHint) {
     h["X-Admin-User-Id"] = String(userIdHint);
   }
