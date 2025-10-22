@@ -46,7 +46,12 @@ def _is_cached_admin(user_json: dict):
 
     return False, None
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+def _clean_token_list(raw: str):
+    return [tok.strip() for tok in raw.split(",") if tok.strip()]
+
+
+BOT_TOKEN = (os.environ.get("BOT_TOKEN") or "").strip()
+BOT_TOKEN_FALLBACKS = _clean_token_list(os.environ.get("BOT_TOKEN_FALLBACKS", ""))
 ADMIN_PANEL_SECRET = os.environ.get("ADMIN_PANEL_SECRET", "")
 ADMIN_USER_IDS = {x.strip() for x in os.environ.get("ADMIN_USER_IDS", "").split(",") if x.strip()}
 
@@ -129,21 +134,59 @@ def parse_init_data(raw: str) -> dict:
     pairs = urllib.parse.parse_qsl(raw, keep_blank_values=True)
     return {k: v for k, v in pairs}
 
+def _candidate_bot_tokens():
+    tokens = []
+    seen = set()
+
+    for token in [BOT_TOKEN, *BOT_TOKEN_FALLBACKS]:
+        if not token or token in seen:
+            continue
+        tokens.append(token)
+        seen.add(token)
+
+    return tokens
+
 def verify_telegram_init_data(init_data_raw: str):
-    """Return (ok: bool, data: dict) using the global BOT_TOKEN."""
+    """Return (ok: bool, data: dict, reason: str) using configured bot tokens."""
+    init_data_raw = (init_data_raw or "").strip()
+    candidates = _candidate_bot_tokens()
+
+    if not init_data_raw:
+        return False, {}, "empty_init_data"
+    if not candidates:
+        return False, {}, "missing_bot_token"
     try:
-        if not init_data_raw or not BOT_TOKEN:
-            return False, {}
-        data = dict(urllib.parse.parse_qsl(init_data_raw, keep_blank_values=True))
-        check_hash = data.pop("hash", None)
-        data_check_string = "\n".join(f"{k}={v}" for k, v in sorted(data.items()))
-        secret_key = hashlib.sha256(BOT_TOKEN.encode()).digest()   # <- correct var
-        calc_hash  = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
-        import hmac as _hmac
-        return _hmac.compare_digest(calc_hash, check_hash), data
+        pairs = urllib.parse.parse_qsl(init_data_raw, keep_blank_values=True)
+
     except Exception:
-        return False, {}
-        
+        return False, {}, "parse_error"
+
+    data = {}
+    check_hash = None
+    for key, value in pairs:
+        if key == "hash" and check_hash is None:
+            check_hash = value
+        else:
+            data[key] = value
+
+    if not check_hash:
+        return False, {}, "missing_hash"
+
+    data_check_string = "\n".join(f"{k}={v}" for k, v in sorted(data.items()))
+
+    for idx, token in enumerate(candidates):
+        try:
+            secret_key = hashlib.sha256(token.encode()).digest()
+            calc_hash = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
+        except Exception:
+            continue
+
+        if hmac.compare_digest(calc_hash, check_hash):
+            if idx > 0:
+                data.setdefault("_verified_with_fallback", True)
+            return True, data, ""
+
+    return False, {}, "hash_mismatch"        
 def require_admin():
     if BYPASS_ADMIN:
         # allow everything; pretend it's an admin user
@@ -155,9 +198,10 @@ def require_admin():
     init_data = (request.headers.get("X-Telegram-Init")
                  or request.args.get("init_data")
                  or "")
-    ok, data = verify_telegram_init_data(init_data)
+    ok, data, reason = verify_telegram_init_data(init_data)
     if not ok:
-        print("[admin] auth_failed; init_len:", len(init_data))
+        reason_suffix = f"; reason={reason}" if reason else ""
+        print(f"[admin] auth_failed; init_len: {len(init_data)}{reason_suffix}")
         return None, (jsonify({"status": "error", "code": "auth_failed"}), 401)
 
     # parse Telegram user
@@ -170,7 +214,6 @@ def require_admin():
 
     username_lower = norm_username(user_json.get("username", ""))
     user_id = user_json.get("id")
-
 
     is_admin, source = _is_cached_admin(user_json)
     admin_source = source
@@ -202,7 +245,7 @@ def _is_admin_preview(init_data_raw: str) -> bool:
     # Safe best-effort: if verify fails, just return False (don’t break visible)
     if _has_valid_admin_secret():
         return True
-    ok, data = verify_telegram_init_data(init_data_raw)
+    ok, data, _ = verify_telegram_init_data(init_data_raw)
     if not ok:
         return False
     try:
@@ -389,7 +432,7 @@ def api_visible():
         }
     else:
         init_data = request.args.get("init_data") or request.headers.get("X-Telegram-Init") or ""
-    ok, data = verify_telegram_init_data(init_data)
+    ok, data, _ = verify_telegram_init_data(init_data)
 
     # Admin preview fallback (mirror admin panel behavior)
     admin_secret = request.args.get("admin_secret") or request.headers.get("X-Admin-Secret")
@@ -449,7 +492,7 @@ def api_visible():
 @vouchers_bp.route("/miniapp/vouchers/claim", methods=["POST"])
 def api_claim():
     init_data = request.args.get("init_data") or request.headers.get("X-Telegram-Init") or ""
-    ok, data = verify_telegram_init_data(init_data)
+    ok, data, _ = verify_telegram_init_data(init_data)
     if not ok:
         return jsonify({"status": "error", "code": "auth_failed"}), 401
 
