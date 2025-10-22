@@ -277,6 +277,24 @@
   </div>
 </div>
 
+<script>
+/** Minimal qs replacement (no external lib needed) */
+window.qs = {
+  parse: (search, opts = {}) => {
+    const s = (opts.ignoreQueryPrefix && search.startsWith("?")) ? search.slice(1) : search;
+    const sp = new URLSearchParams(s);
+    return Object.fromEntries(sp.entries());
+  },
+  stringify: (obj = {}) => {
+    const sp = new URLSearchParams();
+    for (const [k, v] of Object.entries(obj)) {
+      if (v !== undefined && v !== null) sp.append(k, String(v));
+    }
+    return sp.toString();
+  }
+};
+</script>
+
   <script>
 let CURRENT_USERNAME = window.CURRENT_USERNAME || "";
 try {
