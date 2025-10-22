@@ -338,7 +338,12 @@ async function waitForInitData(timeoutMs = 2000, intervalMs = 50) {
 
 function v2Headers(extras = {}, initDataOverride = "") {
   const h = { "Content-Type": "application/json", ...extras };
-  const qs = new URLSearchParams(location.search);
+  const raw = initDataOverride || (window?.Telegram?.WebApp?.initData || "");
+  if (raw) {
+    // send both names (some servers read one or the other)
+    h["X-Telegram-Init-Data"] = raw;
+    h["X-Telegram-Init"] = raw;
+  }
 
   // Grab init_data fresh each call (safer than capturing once)
 const candidateInitData =
