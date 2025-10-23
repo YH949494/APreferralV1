@@ -251,6 +251,9 @@ app = Flask(__name__, static_folder="static")
 CORS(app, resources={r"/*": {"origins": "*"}})
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", "dev-secret")
 
+@app.get("/healthz")
+def health(): return "ok", 200
+    
 # Telegram bot
 app_bot = ApplicationBuilder().token(BOT_TOKEN).build()
 @app.route("/api/is_admin")
