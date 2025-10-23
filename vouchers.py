@@ -1,9 +1,11 @@
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, current_app
 from pymongo import ASCENDING, DESCENDING, ReturnDocument
 from bson.objectid import ObjectId 
 from datetime import datetime, timedelta, timezone
 from config import KL_TZ
 import hmac, hashlib, urllib.parse, os, json
+from urllib.parse import parse_qs
+import config as _cfg
 
 from database import db
 
@@ -49,16 +51,90 @@ def _is_cached_admin(user_json: dict):
 def _clean_token_list(raw: str):
     return [tok.strip() for tok in raw.split(",") if tok.strip()]
 
-
-BOT_TOKEN = (os.environ.get("BOT_TOKEN") or "").strip()
-BOT_TOKEN_FALLBACKS = _clean_token_list(os.environ.get("BOT_TOKEN_FALLBACKS", ""))
-ADMIN_PANEL_SECRET = os.environ.get("ADMIN_PANEL_SECRET", "")
-ADMIN_USER_IDS = {x.strip() for x in os.environ.get("ADMIN_USER_IDS", "").split(",") if x.strip()}
+_ADMIN_PANEL_SECRET = getattr(_cfg, "ADMIN_PANEL_SECRET", os.getenv("ADMIN_PANEL_SECRET", ""))
+_BOT_TOKEN = getattr(_cfg, "BOT_TOKEN", os.getenv("BOT_TOKEN", ""))
+_BOT_TOKEN_FALLBACKS = getattr(
+    _cfg, "BOT_TOKEN_FALLBACKS",
+    [t.strip() for t in os.getenv("BOT_TOKEN_FALLBACKS", "").split(",") if t.strip()]
+)
+_ADMIN_USER_IDS = set()
+try:
+    raw_admin_ids = getattr(_cfg, "ADMIN_USER_IDS", os.getenv("ADMIN_USER_IDS", ""))
+    if isinstance(raw_admin_ids, (list, tuple, set)):
+        iter_ids = raw_admin_ids
+    else:
+        iter_ids = [x.strip() for x in str(raw_admin_ids).split(",") if x.strip()]
+    for rid in iter_ids:
+        _ADMIN_USER_IDS.add(str(rid))
+except Exception:
+    pass
 
 vouchers_bp = Blueprint("vouchers", __name__)
 
 BYPASS_ADMIN = False
+def _admin_secret_ok(value: str) -> bool:
+    # If config defines a helper, defer to it
+    if hasattr(_cfg, "admin_secret_ok") and callable(getattr(_cfg, "admin_secret_ok")):
+        return _cfg.admin_secret_ok(value)
+    return bool(value and _ADMIN_PANEL_SECRET and value.strip() == _ADMIN_PANEL_SECRET.strip())
 
+def _get_bearer_secret(req) -> str:
+    auth = req.headers.get("Authorization", "")
+    if auth.lower().startswith("bearer "):
+        return auth.split(" ", 1)[1].strip()
+    return ""
+
+def _get_admin_secret(req) -> str:
+    return (
+        _get_bearer_secret(req)
+        or req.headers.get("X-Admin-Secret", "")
+        or req.args.get("admin_secret", "")
+    )
+
+def _get_init_data(req) -> str:
+    return (
+        req.headers.get("X-Telegram-Init-Data")
+        or req.headers.get("X-Telegram-Init")
+        or req.args.get("init_data", "")
+    )
+
+def _verify_telegram_init_data(init_data: str) -> dict | None:
+    """DOES NOT crash if tokens are missing; simply returns None."""
+    if not init_data:
+        return None
+    try:
+        data_map = {k: v[0] for k, v in parse_qs(init_data, keep_blank_values=True).items()}
+        received_hash = data_map.pop("hash", "")
+        data_check_pairs = [f"{k}={data_map[k]}" for k in sorted(data_map.keys())]
+        data_check_string = "\n".join(data_check_pairs)
+
+        def ok_for_token(token: str) -> bool:
+            if not token:
+                return False
+            secret_key = hashlib.sha256(token.encode()).digest()
+            h = hmac.new(secret_key, msg=data_check_string.encode(), digestmod=hashlib.sha256).hexdigest()
+            return h == received_hash
+
+        tokens = [t for t in [_BOT_TOKEN] + _BOT_TOKEN_FALLBACKS if t]
+        return data_map if any(ok_for_token(t) for t in tokens) else None
+    except Exception:
+        return None
+
+def _user_ctx_or_preview(req):
+    """
+    Returns (ctx: dict, admin_preview: bool) or (None, False) if unauthorized.
+    SAFE: will not throw if env/config is missing.
+    """
+    # Admin preview?
+    secret = _get_admin_secret(req)
+    if _admin_secret_ok(secret):
+        return ({"user_id": 0, "username": "admin-preview"}, True)
+    # Telegram path
+    parsed = _verify_telegram_init_data(_get_init_data(req))
+    if not parsed:
+        return (None, False)
+    return (parsed, False)
+    
 def now_utc():
     return datetime.now(timezone.utc)
 
@@ -119,7 +195,7 @@ def _extract_admin_secret() -> str:
 
 
 def _has_valid_admin_secret() -> bool:
-    expected = (ADMIN_PANEL_SECRET or "").strip()
+    expected = (_ADMIN_PANEL_SECRET or "").strip()
     if not expected:
         return False
 
@@ -160,7 +236,7 @@ def _candidate_bot_tokens():
     tokens = []
     seen = set()
 
-    for token in [BOT_TOKEN, *BOT_TOKEN_FALLBACKS]:
+    for token in [_BOT_TOKEN, *_BOT_TOKEN_FALLBACKS]:
         if not token or token in seen:
             continue
         tokens.append(token)
@@ -255,7 +331,7 @@ def require_admin():
     admin_source = source
 
     if not is_admin:
-        if user_id is not None and str(user_id) in ADMIN_USER_IDS:
+        if user_id is not None and str(user_id) in _ADMIN_USER_IDS:
             is_admin = True
             admin_source = source or "env"
 
