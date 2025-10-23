@@ -10,23 +10,14 @@ primary_region = "sin"
 [experimental]
   auto_rollback = true
 
-[http_service]
-  internal_port = 8080           # must match the port your app listens on
-  force_https = true
-  auto_stop_machines = true
-  auto_start_machines = true
-  min_machines_running = 1
+[[services]]
+  internal_port = 8080
+  protocol = "tcp"
 
-  [[http_service.ports]]
+  [[services.ports]]
     port = 80
     handlers = ["http"]
 
-  [[http_service.ports]]
+  [[services.ports]]
     port = 443
     handlers = ["tls", "http"]
-
-  [[http_service.checks]]
-    interval = "10s"
-    timeout  = "2s"
-    method   = "GET"
-    path     = "/healthz"        # make sure your app returns 200 here
