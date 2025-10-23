@@ -861,7 +861,12 @@ async function loadVouchers() {
   try {
     const s = getAdminSecret();
     const tail = s ? `?admin_secret=${encodeURIComponent(s)}` : "";
-    const res = await v2Fetch(`${V2}/miniapp/vouchers/visible${tail}`);
+    const res = await v2Fetch(`${V2}/miniapp/vouchers/visible${tail}`, {
+      method: "POST",
+      body: JSON.stringify({
+        init_data: getLatestInitData() || (tg?.initData || "")
+      })
+    });
 
     // Show explicit reasons
     if (res.status === 401) {
@@ -991,9 +996,12 @@ document.addEventListener("click", async (e) => {
   try {
     const res = await v2Fetch(`${V2}/miniapp/vouchers/claim`, {
       method: "POST",
-      body: JSON.stringify({ dropId })
+      body: JSON.stringify({
+        dropId,
+        init_data: getLatestInitData() || (tg?.initData || "")
+      })
     });
-
+    
     let out = null;
     try { out = await res.json(); } catch { /* ignore */ }
 
@@ -1287,6 +1295,8 @@ window.onload = async () => {
   if (tg) { tg.ready(); tg.expand(); }
 
   const init = await waitForInitData();
+  console.log("init_data length:", (init || "").length);
+
   const hasInit = !!(init && init.length >= 10);
   const isAdminMode = !!getAdminSecret();
 
