@@ -493,35 +493,40 @@ async function adm_list() {
   const tbody = document.querySelector("#adm_table tbody");
   if (!tbody) return;
   tbody.innerHTML = `<tr><td colspan="6" style="padding:6px;">Loading…</td></tr>`;
+
   try {
-  const s = getAdminSecret();
-  const tail = s ? `?admin_secret=${encodeURIComponent(s)}` : "";
-  const res = await v2Fetch(`${V2}/admin/drops_v2${tail}`);
+    const s = getAdminSecret();
+    const tail = s ? `?admin_secret=${encodeURIComponent(s)}` : "";
+    const res = await v2Fetch(`${V2}/admin/drops_v2${tail}`);
     if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
     const data = await res.json();
     if (data.status !== "ok") throw new Error(JSON.stringify(data));
 
     tbody.innerHTML = "";
-    data.items.forEach(d => {
-      const stats = d.type === "pooled" ? `${d.codesFree}/${d.codesTotal} free` : `${d.claimed}/${d.assigned} claimed`;
+    (data.items || []).forEach((d) => {
+      const id = d.dropId || d.id || d._id; // ✅ fallback
+      const stats = d.type === "pooled"
+        ? `${d.codesFree}/${d.codesTotal} free`
+        : `${d.claimed}/${d.assigned} claimed`;
+
       const tr = document.createElement("tr");
       tr.innerHTML = `
         <td style="text-align:left; padding:6px;">${d.name} <span style="font-size:12px;color:#666;">[${d.priority}]</span></td>
         <td>${d.type}</td>
         <td>${d.status}</td>
-        <td>${
-        fmtKL(d.startsAt)
-      } → ${
-        fmtKL(d.endsAt)
-      }</td>
+        <td>${fmtKL(d.startsAt)} → ${fmtKL(d.endsAt)}</td>
         <td>${stats}</td>
         <td>
-          <button data-op="start_now" data-id="${d.dropId}">Start</button>
-          <button data-op="pause" data-id="${d.dropId}">Pause</button>
-          <button data-op="end_now" data-id="${d.dropId}">End</button>
+          <button data-op="start_now" data-id="${id}">Start</button>
+          <button data-op="pause"     data-id="${id}">Pause</button>
+          <button data-op="end_now"   data-id="${id}">End</button>
         </td>`;
       tbody.appendChild(tr);
     });
+
+    if (!tbody.children.length) {
+      tbody.innerHTML = `<tr><td colspan="6" style="padding:6px;">No drops found.</td></tr>`;
+    }
   } catch (e) {
     tbody.innerHTML = `<tr><td colspan="6" style="padding:6px;">Voucher endpoint error: ${e.message}</td></tr>`;
   }
@@ -917,33 +922,35 @@ document.addEventListener("click", async (e) => {
   if (!btn) return;
 
   const dropId = btn.getAttribute("data-id");
+  if (!dropId) { alert("No dropId on this row."); return; }
+
   const op = btn.getAttribute("data-op");
 
   try {
     const s = getAdminSecret();
     const tail = s ? `?admin_secret=${encodeURIComponent(s)}` : "";
+
     const res = await v2Fetch(`${V2}/admin/drops/${dropId}/actions${tail}`, {
       method: "POST",
       body: JSON.stringify({ op })
     });
 
     let payload = null;
-    try { payload = await res.json(); } catch { /* ignore */ }
+    try { payload = await res.json(); } catch {}
 
     if (res.status === 401) {
-      alert("Not authorized for admin action (401). Ensure admin allowlist or admin secret is set.");
+      alert("Not authorized (401). Check ADMIN_PANEL_SECRET / admin allowlist.");
       return;
     }
     if (!res.ok || (payload && payload.status !== "ok")) {
       throw new Error(payload?.error || `HTTP ${res.status}`);
     }
-
-    adm_list && adm_list(); // refresh admin list if present
+    adm_list && adm_list(); // refresh list
   } catch (err) {
     alert(`Action failed: ${err.message}`);
   }
 });
-
+    
 // ====================
 // Claim / View code
 // ====================
