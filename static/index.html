@@ -848,18 +848,28 @@ async function handleAdminAndVoucher() {
 async function loadVouchers() {
   const section = document.getElementById("voucher-section");
   const wrap = document.getElementById("voucher-cards");
-  if (!section || !wrap) return; // page might not have the section
+  if (!section || !wrap) return;
 
   try {
-  const s = getAdminSecret();
-  const tail = s ? `?admin_secret=${encodeURIComponent(s)}` : "";
-  const res = await v2Fetch(`${V2}/miniapp/vouchers/visible${tail}`);
-   
+    const s = getAdminSecret();
+    const tail = s ? `?admin_secret=${encodeURIComponent(s)}` : "";
+    const res = await v2Fetch(`${V2}/miniapp/vouchers/visible${tail}`);
+
+    // ——— Always show the section; decide content per outcome ———
+    section.style.display = "block";
+
     if (res.status === 401) {
-      console.warn("401 on /miniapp/vouchers/visible — likely missing/invalid init_data.");
-      section.style.display = "none";
+      wrap.innerHTML = `
+        <div style="padding:12px; background:#fff; border:1px solid #eee; border-radius:10px;">
+          <b>Open inside Telegram</b>
+          <div style="font-size:13px; color:#666; margin-top:6px;">
+            We couldn’t verify your Telegram session. Please open this Mini App from the Telegram chat,
+            or refresh the page inside Telegram.
+          </div>
+        </div>`;
       return;
     }
+
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
     let data;
@@ -869,11 +879,16 @@ async function loadVouchers() {
     const drops = Array.isArray(data?.drops) ? data.drops : [];
 
     if (!drops.length) {
-      section.style.display = "none";
+      // ——— Empty-state instead of hiding the whole section ———
+      wrap.innerHTML = `
+        <div style="padding:12px; background:#fff; border:1px solid #eee; border-radius:10px;">
+          <b>No rewards right now</b>
+          <div style="font-size:13px; color:#666; margin-top:6px;">
+            Check back later — new drops appear here automatically.
+          </div>
+        </div>`;
       return;
     }
-
-    section.style.display = "block";
 
     for (const d of drops) {
       const card = document.createElement("div");
@@ -884,19 +899,20 @@ async function loadVouchers() {
         'style="margin-top:8px"',
         `data-dropid="${d.dropId}"`
       ];
-      if (!d.isActive && !d.adminPreview) {
-        buttonAttrs.push("disabled");
-      }
+      if (!d.isActive && !d.adminPreview) buttonAttrs.push("disabled");
 
       const previewNote = d.adminPreview
         ? `<div style="font-size:12px;color:#b26d00;margin-top:6px;">Admin preview · status: ${d.status || (d.isActive ? "active" : "inactive")}</div>`
         : "";
+
       const approx = typeof d.remainingApprox !== "undefined"
         ? `<div style="font-size:12px;color:#666;margin-top:6px;">Estimated left: ${d.remainingApprox}</div>`
         : "";
+
       const codeBlock = d.userClaimed && d.code
         ? `<div class="code" style="margin-top:6px;">${d.code}</div>`
         : "";
+
       const claimedAt = d.userClaimed && d.claimedAt
         ? `<div style="font-size:12px;color:#666;margin-top:4px;">Claimed: ${fmtKL(d.claimedAt)}</div>`
         : "";
@@ -911,12 +927,24 @@ async function loadVouchers() {
         </button>
         ${codeBlock}
         ${claimedAt}
-        `;
+      `;
       wrap.appendChild(card);
     }
   } catch (e) {
+    // ——— Graceful failure instead of hiding section ———
+    const section = document.getElementById("voucher-section");
+    const wrap = document.getElementById("voucher-cards");
+    if (section && wrap) {
+      section.style.display = "block";
+      wrap.innerHTML = `
+        <div style="padding:12px; background:#fff; border:1px solid #eee; border-radius:10px;">
+          <b>Couldn’t load rewards</b>
+          <div style="font-size:13px; color:#666; margin-top:6px;">
+            Please try again in a moment.
+          </div>
+        </div>`;
+    }
     console.error("loadVouchers error:", e);
-    section && (section.style.display = "none");
   }
 }
 
