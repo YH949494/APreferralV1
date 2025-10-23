@@ -298,7 +298,7 @@ window.qs = {
     const s = typeof search === "string" ? search : String(search || "");
     const sp = new URLSearchParams(s.startsWith("?") ? s : `?${s}`);
     return sp.get(key);
-  },
+  }, 
   has: (key, search = location.search) => {
     const s = typeof search === "string" ? search : String(search || "");
     const sp = new URLSearchParams(s.startsWith("?") ? s : `?${s}`);
