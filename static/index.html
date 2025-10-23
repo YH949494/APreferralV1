@@ -162,6 +162,8 @@
     <div id="leaderboard-output">Click to load latest rankings...</div>
   </div>
 
+  <button id="setAdminSecretBtn" style="margin-top:8px">🔐 Set Admin Secret</button>
+  
   <div class="section" id="admin-panel">
     <h3>⚙️ Admin Panel</h3>
     <button onclick="openAddXP()">➕ Add/Reduce XP</button>
@@ -304,7 +306,21 @@ window.qs = {
   }
 };
 </script>
-
+  
+<script>
+(function () {
+  const btn = document.getElementById("setAdminSecretBtn");
+  if (!btn) return;
+  btn.addEventListener("click", () => {
+    const val = prompt("Enter admin secret:");
+    if (!val) return;
+    try { localStorage.setItem("X-Admin-Secret", val.trim()); } catch {}
+    alert("Saved. Reloading…");
+    location.reload();
+  });
+})();
+</script>
+  
   <script>
 function getAdminSecret() {
   const sp = new URLSearchParams(location.search);
