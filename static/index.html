@@ -856,7 +856,7 @@ async function loadVouchers() {
     const res = await v2Fetch(`${V2}/miniapp/vouchers/visible${tail}`);
 
     // ——— Always show the section; decide content per outcome ———
-    section.style.display = "block";
+    section.style.display = "none";
 
     if (res.status === 401) {
       wrap.innerHTML = `
