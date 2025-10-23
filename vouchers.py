@@ -161,7 +161,27 @@ def parse_kl_local(dt_str: str):
     dt_local = datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=KL_TZ)
     return dt_local.astimezone(timezone.utc)
 
-
+def _as_aware_utc(dt):
+    """Return a timezone-aware UTC datetime from dt (datetime or ISO string)."""
+    if dt is None:
+        return None
+    # Already datetime?
+    if isinstance(dt, datetime):
+        if dt.tzinfo is None or dt.tzinfo.utcoffset(dt) is None:
+            # Treat naive as UTC (legacy docs)
+            return dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    # ISO string (best-effort)
+    if isinstance(dt, str):
+        try:
+            parsed = datetime.fromisoformat(dt.replace("Z", "+00:00"))
+        except Exception:
+            return None
+        if parsed.tzinfo is None or parsed.tzinfo.utcoffset(parsed) is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    return None
+ 
 def norm_username(u: str) -> str:
     if not u:
         return ""
@@ -371,9 +391,13 @@ def _is_admin_preview(init_data_raw: str) -> bool:
     
 # ---- Core visibility logic ----
 def is_drop_active(doc: dict, ref: datetime) -> bool:
-    return (doc.get("status") != "paused" 
-            and doc.get("status") != "expired"
-            and doc["startsAt"] <= ref < doc["endsAt"])
+    starts = _as_aware_utc(doc.get("startsAt"))
+    ends   = _as_aware_utc(doc.get("endsAt"))
+    if not starts or not ends:
+        return False
+    if doc.get("status") in ("paused", "expired"):
+        return False
+    return starts <= ref < ends
 
 def get_active_drops(ref: datetime):
     return list(db.drops.find({
@@ -398,8 +422,8 @@ def user_visible_drops(user: dict, ref: datetime):
             "dropId": drop_id,
             "name": d.get("name"),
             "type": dtype,
-            "startsAt": d["startsAt"].isoformat(),
-            "endsAt": d["endsAt"].isoformat(),
+            "startsAt": _as_aware_utc(d.get("startsAt")).isoformat() if d.get("startsAt") else None,
+            "endsAt": _as_aware_utc(d.get("endsAt")).isoformat() if d.get("endsAt") else None,
             "priority": d.get("priority", 100),
             "isActive": is_active,
             "userClaimed": False
@@ -584,17 +608,17 @@ def api_visible():
         for d in db.drops.find().sort([("priority", DESCENDING), ("startsAt", ASCENDING)]):
             drop_id = str(d["_id"])
             base = {
-                "dropId": drop_id,
-                "name": d.get("name"),
-                "type": d.get("type", "pooled"),
-                "startsAt": d["startsAt"].isoformat(),
-                "endsAt": d["endsAt"].isoformat(),
-                "priority": d.get("priority", 100),
-                "status": d.get("status", "upcoming"),
-                "isActive": is_drop_active(d, ref),
-                "userClaimed": False,
-                "adminPreview": True
-            }
+           "dropId": drop_id,
+           "name": d.get("name"),
+           "type": d.get("type", "pooled"),
+           "startsAt": _as_aware_utc(d.get("startsAt")).isoformat() if d.get("startsAt") else None,
+           "endsAt": _as_aware_utc(d.get("endsAt")).isoformat() if d.get("endsAt") else None,
+           "priority": d.get("priority", 100),
+           "status": d.get("status", "upcoming"),
+           "isActive": is_drop_active(d, ref),
+           "userClaimed": False,
+           "adminPreview": True
+       }
             if base["type"] == "pooled":
                 free = db.vouchers.count_documents({"type": "pooled", "dropId": drop_id, "status": "free"})
                 total = db.vouchers.count_documents({"type": "pooled", "dropId": drop_id})
@@ -818,8 +842,9 @@ def _drop_to_json(d: dict) -> dict:
     out = dict(d)
     out["_id"] = str(out["_id"])
     for k in ("startsAt", "endsAt"):
-        if k in out and hasattr(out[k], "isoformat"):
-            out[k] = out[k].isoformat()
+        if k in out:
+            norm = _as_aware_utc(out[k])
+            out[k] = norm.isoformat() if norm else None
     return out
 
 @vouchers_bp.route("/admin/drops_v2", methods=["GET"])
@@ -933,35 +958,37 @@ def admin_list_drops():
     items = []
     ref = now_utc()
 
-    # personalised stats
     for d in db.drops.find().sort([("priority", DESCENDING), ("startsAt", ASCENDING)]):
-        drop_id = str(d["_id"])
-        dtype = d.get("type", "pooled")
+        starts = _as_aware_utc(d.get("startsAt"))
+        ends   = _as_aware_utc(d.get("endsAt"))
+
         status = d.get("status", "upcoming")
         if status not in ("paused", "expired"):
-            if d["endsAt"] <= ref:
+            if ends and ref >= ends:
                 status = "expired"
-            elif d["startsAt"] <= ref:
+            elif starts and starts <= ref < (ends or starts):
                 status = "active"
             else:
                 status = "upcoming"
+
         row = {
-            "dropId": drop_id,
+            "dropId": str(d["_id"]),
             "name": d.get("name"),
-            "type": dtype,
+            "type": d.get("type", "pooled"),
             "status": status,
             "priority": d.get("priority", 100),
-            "startsAt": d["startsAt"].isoformat(),
-            "endsAt": d["endsAt"].isoformat(),
+            "startsAt": starts.isoformat() if starts else None,
+            "endsAt": ends.isoformat() if ends else None,
         }
-        if dtype == "personalised":
-            assigned = db.vouchers.count_documents({"type": "personalised", "dropId": drop_id})
-            claimed  = db.vouchers.count_documents({"type": "personalised", "dropId": drop_id, "status": "claimed"})
+        if row["type"] == "personalised":
+            assigned = db.vouchers.count_documents({"type": "personalised", "dropId": row["dropId"]})
+            claimed  = db.vouchers.count_documents({"type": "personalised", "dropId": row["dropId"], "status": "claimed"})
             row.update({"assigned": assigned, "claimed": claimed})
         else:
-            total = db.vouchers.count_documents({"type": "pooled", "dropId": drop_id})
-            free  = db.vouchers.count_documents({"type": "pooled", "dropId": drop_id, "status": "free"})
+            total = db.vouchers.count_documents({"type": "pooled", "dropId": row["dropId"]})
+            free  = db.vouchers.count_documents({"type": "pooled", "dropId": row["dropId"], "status": "free"})
             row.update({"codesTotal": total, "codesFree": free})
+
         items.append(row)
 
     return jsonify({"status": "ok", "items": items})
