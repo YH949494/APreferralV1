@@ -725,8 +725,12 @@ if (admParseCodesBtn) admParseCodesBtn.onclick = () => {
     let latestReferralLink = "";
     
     if (!userId && !getAdminSecret()) {
-    document.body.innerHTML = "<p style='color:red;'>❌ User ID not found. Please open this Mini App inside Telegram.</p>";
-    }
+        const warn = document.createElement('div');
+        warn.style.cssText = "margin:10px 0;padding:10px;background:#fff3f3;border:1px solid #ffd6d6;border-radius:8px;color:#900;";
+        warn.innerHTML = "<b>Open inside Telegram</b><br/>We couldn’t verify your Telegram session. Please open from the bot and tap <i>Open</i>.";
+        document.body.prepend(warn);
+  // Do NOT return; let loadVouchers() run so the section shows an explanation.
+      }
 
         // Countdown
     function startCountdown(nextCheckinTimeISO) {
@@ -850,49 +854,48 @@ async function loadVouchers() {
   const wrap = document.getElementById("voucher-cards");
   if (!section || !wrap) return;
 
+  // Always show the section (empty state is informative)
+  section.style.display = "block";
+  wrap.innerHTML = `<div style="padding:8px;color:#666;">Loading rewards…</div>`;
+
   try {
     const s = getAdminSecret();
     const tail = s ? `?admin_secret=${encodeURIComponent(s)}` : "";
     const res = await v2Fetch(`${V2}/miniapp/vouchers/visible${tail}`);
 
-    // ——— Always show the section; decide content per outcome ———
-    section.style.display = "none";
-
+    // Show explicit reasons
     if (res.status === 401) {
       wrap.innerHTML = `
-        <div style="padding:12px; background:#fff; border:1px solid #eee; border-radius:10px;">
-          <b>Open inside Telegram</b>
-          <div style="font-size:13px; color:#666; margin-top:6px;">
-            We couldn’t verify your Telegram session. Please open this Mini App from the Telegram chat,
-            or refresh the page inside Telegram.
-          </div>
+        <div style="padding:10px;background:#fff3f3;border:1px solid #ffd6d6;border-radius:8px;">
+          <b>Open inside Telegram</b><br/>
+          We couldn’t verify your Telegram session. Please open from the bot (tap <i>Open</i>).
         </div>`;
       return;
     }
 
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-
     let data;
-    try { data = await res.json(); } catch { throw new Error("Invalid JSON from /visible"); }
+    try { data = await res.json(); } catch {
+      wrap.innerHTML = `<div style="padding:8px;color:#c00;">Invalid JSON from server.</div>`;
+      return;
+    }
 
-    wrap.innerHTML = "";
     const drops = Array.isArray(data?.drops) ? data.drops : [];
 
     if (!drops.length) {
-      // ——— Empty-state instead of hiding the whole section ———
+      // Empty but visible column
       wrap.innerHTML = `
-        <div style="padding:12px; background:#fff; border:1px solid #eee; border-radius:10px;">
-          <b>No rewards right now</b>
-          <div style="font-size:13px; color:#666; margin-top:6px;">
-            Check back later — new drops appear here automatically.
-          </div>
+        <div style="padding:10px;background:#f9f9ff;border:1px solid #e6e6ff;border-radius:8px;">
+          <b>No active rewards for your account right now.</b><br/>
+          If this is a test user, check <i>whitelist / region / start-end time</i> on the drop.
         </div>`;
       return;
     }
 
+    // Render cards
+    wrap.innerHTML = "";
     for (const d of drops) {
       const card = document.createElement("div");
-      card.style.cssText = "border:1px solid #eee; border-radius:10px; padding:12px; margin:8px 0; background:#fff;";
+      card.style.cssText = "border:1px solid #eee;border-radius:10px;padding:12px;margin:8px 0;background:#fff;";
 
       const buttonAttrs = [
         'class="claim-btn"',
@@ -910,7 +913,7 @@ async function loadVouchers() {
         : "";
 
       const codeBlock = d.userClaimed && d.code
-        ? `<div class="code" style="margin-top:6px;">${d.code}</div>`
+        ? `<div class="code" style="margin-top:6px;font-family:monospace;">${d.code}</div>`
         : "";
 
       const claimedAt = d.userClaimed && d.claimedAt
@@ -923,7 +926,7 @@ async function loadVouchers() {
         ${previewNote}
         ${approx}
         <button ${buttonAttrs.join(' ')}>
-          ${d.userClaimed ? "View Code" : "Claim"}
+          ${d.userClaimed ? "View Code" : (d.isActive ? "Claim" : "Not Active")}
         </button>
         ${codeBlock}
         ${claimedAt}
@@ -931,23 +934,12 @@ async function loadVouchers() {
       wrap.appendChild(card);
     }
   } catch (e) {
-    // ——— Graceful failure instead of hiding section ———
-    const section = document.getElementById("voucher-section");
-    const wrap = document.getElementById("voucher-cards");
-    if (section && wrap) {
-      section.style.display = "block";
-      wrap.innerHTML = `
-        <div style="padding:12px; background:#fff; border:1px solid #eee; border-radius:10px;">
-          <b>Couldn’t load rewards</b>
-          <div style="font-size:13px; color:#666; margin-top:6px;">
-            Please try again in a moment.
-          </div>
-        </div>`;
-    }
-    console.error("loadVouchers error:", e);
+    wrap.innerHTML = `
+      <div style="padding:10px;background:#fff3f3;border:1px solid #ffd6d6;border-radius:8px;">
+        Error loading rewards: ${e?.message || e}
+      </div>`;
   }
 }
-
 // =====================================
 // Admin table actions (start/pause/end)
 // =====================================
@@ -1298,35 +1290,25 @@ window.onload = async () => {
   const hasInit = !!(init && init.length >= 10);
   const isAdminMode = !!getAdminSecret();
 
-  if (!hasInit && !isAdminMode) {
-    console.warn("No Telegram initData; skipping /v2 calls.");
-    checkRegionStatus();
-    handleAdminAndVoucher();
-    loadLeaderboard();
-    const vs = document.getElementById("voucher-section");
-    if (vs) vs.style.display = "none";
-    return;
-  }
-
-  // 🔒 Admin-only UI cleanup
-  if (isAdminMode && !hasInit) {
-    for (const id of ["region-section", "bonus-voucher"]) {
-      const el = document.getElementById(id);
-      if (el) el.style.display = "none";
+  if (!hasInit) {
+    // No Telegram context: show Rewards column with guidance
+    loadVouchers();          // shows 401 help or empty state
+    if (isAdminMode) {
+      adm_list();           // allow admin table via admin_secret
     }
-    // optionally hide these user flows too:
-    // document.querySelectorAll('[onclick="checkIn()"],[onclick="getReferral()"]')
-    //   .forEach(b => b.disabled = true);
+    return;                  // ⛔️ do NOT call user endpoints without init
   }
 
-  if (hasInit) {
-    checkRegionStatus();
-    handleAdminAndVoucher();
-    loadLeaderboard();
-  }
+  // ✅ Real Telegram user context
+  checkRegionStatus();
+  handleAdminAndVoucher();
+  loadLeaderboard();
 
+  // v2 features (work both in user & admin mode)
   loadVouchers();
-  adm_list();
+  if (isAdminMode) {
+    adm_list();
+  }
 };
     
 // --- Info Hub Modal & Tabs ---
