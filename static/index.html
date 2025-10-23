@@ -373,7 +373,7 @@ function getLatestInitData(candidate = "") {
   return latestInitData;
 }
 
-async function waitForInitData(timeoutMs = 2000, intervalMs = 50) {
+async function waitForInitData(timeoutMs = 8000, intervalMs = 50) {
   const qs = new URLSearchParams(location.search);
   const deadline = Date.now() + timeoutMs;
 
@@ -449,10 +449,17 @@ function v2Headers(extras = {}, initDataOverride = "") {
 
 async function v2Fetch(path, options = {}) {
   const { headers: extraHeaders, ...rest } = options || {};
-  const initDataRaw = await waitForInitData();
+  let initDataRaw = await waitForInitData();          // ✅ make it let
   const headers = v2Headers(extraHeaders || {}, initDataRaw);
   // 👇 Use headers only; do NOT append init_data to query
-  return fetch(path, { ...rest, headers });
+  let res = await fetch(path, { ...rest, headers });
+  if (res.status === 401) {
+    // init_data may have arrived a split second later on some clients
+    initDataRaw = await waitForInitData(3000);        // ✅ allowed now
+    const headers2 = v2Headers(extraHeaders || {}, initDataRaw);
+    res = await fetch(path, { ...rest, headers: headers2 });
+  }
+  return res;
 }
 function splitList(text) {
   // split by any whitespace, comma, or semicolon (collapse repeats)
@@ -1257,12 +1264,15 @@ async function exportCSV() {
   }
 }
 
-    window.onload = () => {
-      checkRegionStatus();
-      handleAdminAndVoucher();
-      loadLeaderboard();  // 👈 This line loads your weekly stats automatically
-      loadVouchers();
-    };
+window.onload = async () => {
+  if (tg) { tg.ready(); tg.expand(); }
+  const ok = await waitForInitData();   // ✅ now valid
+  if (!ok && !getAdminSecret()) console.warn("Running outside Telegram: visible vouchers will 401.");
+  checkRegionStatus();
+  handleAdminAndVoucher();
+  loadLeaderboard();
+  loadVouchers();
+};
 
 // Run after DOM is loaded
 document.addEventListener("DOMContentLoaded", adm_list);
