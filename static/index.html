@@ -861,12 +861,7 @@ async function loadVouchers() {
   try {
     const s = getAdminSecret();
     const tail = s ? `?admin_secret=${encodeURIComponent(s)}` : "";
-    const res = await v2Fetch(`${V2}/miniapp/vouchers/visible${tail}`, {
-      method: "POST",
-      body: JSON.stringify({
-        init_data: getLatestInitData() || (tg?.initData || "")
-      })
-    });
+    const res = await v2Fetch(`${V2}/miniapp/vouchers/visible${tail}`);
 
     // Show explicit reasons
     if (res.status === 401) {
