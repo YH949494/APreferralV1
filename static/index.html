@@ -353,7 +353,6 @@ if (!CURRENT_USERNAME) {
 
   <script>
 const tg = window.Telegram?.WebApp;
-if (tg) { tg.ready(); tg.expand(); }
 
 const V2 = "/v2";
 let latestInitData = "";
@@ -449,15 +448,15 @@ function v2Headers(extras = {}, initDataOverride = "") {
 
 async function v2Fetch(path, options = {}) {
   const { headers: extraHeaders, ...rest } = options || {};
-  let initDataRaw = await waitForInitData();          // ✅ make it let
-  const headers = v2Headers(extraHeaders || {}, initDataRaw);
-  // 👇 Use headers only; do NOT append init_data to query
+  let initDataRaw = await waitForInitData();
+  let headers = v2Headers(extraHeaders || {}, initDataRaw);
+
   let res = await fetch(path, { ...rest, headers });
   if (res.status === 401) {
-    // init_data may have arrived a split second later on some clients
-    initDataRaw = await waitForInitData(3000);        // ✅ allowed now
-    const headers2 = v2Headers(extraHeaders || {}, initDataRaw);
-    res = await fetch(path, { ...rest, headers: headers2 });
+    // retry once in case initData arrived a moment later
+    initDataRaw = await waitForInitData(3000);
+    headers = v2Headers(extraHeaders || {}, initDataRaw);
+    res = await fetch(path, { ...rest, headers });
   }
   return res;
 }
@@ -725,8 +724,8 @@ if (admParseCodesBtn) admParseCodesBtn.onclick = () => {
     let regionMsg = ""; 
     let latestReferralLink = "";
     
-    if (!userId) {
-      document.body.innerHTML = "<p style='color:red;'>❌ User ID not found. Please open this Mini App inside Telegram.</p>";
+    if (!userId && !getAdminSecret()) {
+    document.body.innerHTML = "<p style='color:red;'>❌ User ID not found. Please open this Mini App inside Telegram.</p>";
     }
 
         // Countdown
@@ -1266,17 +1265,42 @@ async function exportCSV() {
 
 window.onload = async () => {
   if (tg) { tg.ready(); tg.expand(); }
-  const ok = await waitForInitData();   // ✅ now valid
-  if (!ok && !getAdminSecret()) console.warn("Running outside Telegram: visible vouchers will 401.");
-  checkRegionStatus();
-  handleAdminAndVoucher();
-  loadLeaderboard();
-  loadVouchers();
-};
 
-// Run after DOM is loaded
-document.addEventListener("DOMContentLoaded", adm_list);
-  
+  const init = await waitForInitData();
+  const hasInit = !!(init && init.length >= 10);
+  const isAdminMode = !!getAdminSecret();
+
+  if (!hasInit && !isAdminMode) {
+    console.warn("No Telegram initData; skipping /v2 calls.");
+    checkRegionStatus();
+    handleAdminAndVoucher();
+    loadLeaderboard();
+    const vs = document.getElementById("voucher-section");
+    if (vs) vs.style.display = "none";
+    return;
+  }
+
+  // 🔒 Admin-only UI cleanup
+  if (isAdminMode && !hasInit) {
+    for (const id of ["region-section", "bonus-voucher"]) {
+      const el = document.getElementById(id);
+      if (el) el.style.display = "none";
+    }
+    // optionally hide these user flows too:
+    // document.querySelectorAll('[onclick="checkIn()"],[onclick="getReferral()"]')
+    //   .forEach(b => b.disabled = true);
+  }
+
+  if (hasInit) {
+    checkRegionStatus();
+    handleAdminAndVoucher();
+    loadLeaderboard();
+  }
+
+  loadVouchers();
+  adm_list();
+};
+    
 // --- Info Hub Modal & Tabs ---
 document.addEventListener('DOMContentLoaded', () => {
   const infoHubBtn   = document.getElementById("infoHubBtn");
