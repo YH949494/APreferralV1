@@ -424,7 +424,12 @@ function v2Headers(extras = {}, initDataOverride = "") {
     h["X-Admin-Username"] = usernameHint;
   }
 
-    CURRENT_USERNAME || tg?.initDataUnsafe?.user?.username || urlQS.get("username") || "";
+  const tgUserId = tg?.initDataUnsafe?.user?.id;
+  const userIdFromQS = urlQS.get("user_id") || urlQS.get("id");
+  const userIdHint =
+    tgUserId !== undefined && tgUserId !== null && tgUserId !== ""
+      ? tgUserId
+      : userIdFromQS || "";
   if (userIdHint) {
     h["X-Admin-User-Id"] = String(userIdHint);
   }
