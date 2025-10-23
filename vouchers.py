@@ -533,8 +533,8 @@ def claim_pooled(drop_id: str, usernameLower: str, ref: datetime):
 # ---- Public API routes ----
 @vouchers_bp.route("/miniapp/vouchers/visible", methods=["GET"])
 def api_visible():
-    admin_secret_ok = _has_valid_admin_secret()
-    if admin_secret_ok:
+    has_admin_secret = _has_valid_admin_secret()
+    if has_admin_secret:
         # Admin preview path: fabricate a minimal user from headers/params
         init_data = ""
         user_raw = {
@@ -576,7 +576,7 @@ def api_visible():
     }
 
     ref = now_utc()
-    admin_preview = admin_secret_ok or _is_admin_preview(init_data)
+    admin_preview = has_admin_secret or _is_admin_preview(init_data)
 
     if admin_preview:
         # Return all drops (ignore whitelist/status), tagged as preview
@@ -607,6 +607,48 @@ def api_visible():
     drops = user_visible_drops(user, ref)
     return jsonify({"visibilityMode": "stacked", "nowUtc": ref.isoformat(), "drops": drops})
 
+class AlreadyClaimed(Exception):
+    pass
+
+class NoCodesLeft(Exception):
+    pass
+
+class NotEligible(Exception):
+    pass
+
+def claim_voucher_for_user(*, user_id: str, drop_id: str, username: str) -> dict:
+    """
+    Returns {"code": "...", "claimedAt": "..."} on success.
+    Raises:
+      - AlreadyClaimed
+      - NoCodesLeft
+      - NotEligible
+    """
+    drop = db.drops.find_one({"_id": _coerce_id(drop_id)})
+    if not drop:
+        raise NotEligible("drop_not_found")
+
+    dtype = drop.get("type", "pooled")
+    usernameLower = norm_username(username)
+    ref = now_utc()
+
+    if dtype == "personalised":
+        res = claim_personalised(drop_id=drop_id, usernameLower=usernameLower, ref=ref)
+        if res.get("ok"):
+            return {"code": res["code"], "claimedAt": res["claimedAt"]}
+        if res.get("err") == "not_eligible":
+            raise NotEligible("not_eligible")
+        raise AlreadyClaimed("already_claimed")
+
+    # pooled
+    res = claim_pooled(drop_id=drop_id, usernameLower=usernameLower, ref=ref)
+    if res.get("ok"):
+        return {"code": res["code"], "claimedAt": res["claimedAt"]}
+    if res.get("err") == "sold_out":
+        raise NoCodesLeft("sold_out")
+    raise NotEligible("not_eligible")
+
+
 @vouchers_bp.route("/miniapp/vouchers/claim", methods=["POST"])
 def api_claim():
     # Accept both header names + query param
@@ -616,12 +658,11 @@ def api_claim():
         or request.headers.get("X-Telegram-Init-Data")
         or ""
     )
-
     ok, data, why = verify_telegram_init_data(init_data)
 
     # Admin preview (for Postman/admin panel testing)
     admin_secret = request.args.get("admin_secret") or request.headers.get("X-Admin-Secret")
-    if (not ok) and admin_secret and (admin_secret == os.environ.get("ADMIN_PANEL_SECRET")):
+    if (not ok) and _admin_secret_ok(admin_secret):
         data = {
             "user": json.dumps({
                 "id": int(os.environ.get("PREVIEW_USER_ID", "999")),
@@ -650,13 +691,15 @@ def api_claim():
     if not drop_id:
         return jsonify({"status": "error", "code": "missing_drop_id"}), 400
 
-    # --- Your claim logic here ---
+    # Claim
     try:
         result = claim_voucher_for_user(user_id=user_id, drop_id=drop_id, username=username)
     except AlreadyClaimed:
         return jsonify({"status": "error", "code": "already_claimed"}), 409
     except NoCodesLeft:
         return jsonify({"status": "error", "code": "sold_out"}), 410
+    except NotEligible:
+        return jsonify({"status": "error", "code": "not_eligible"}), 403
     except Exception:
         current_app.logger.exception("claim failed")
         return jsonify({"status": "error", "code": "server_error"}), 500
@@ -770,7 +813,29 @@ def admin_create_drop():
             db.vouchers.insert_many(docs, ordered=False)
 
     return jsonify({"status": "ok", "dropId": str(drop_id)})
+    
+def _drop_to_json(d: dict) -> dict:
+    out = dict(d)
+    out["_id"] = str(out["_id"])
+    for k in ("startsAt", "endsAt"):
+        if k in out and hasattr(out[k], "isoformat"):
+            out[k] = out[k].isoformat()
+    return out
 
+@vouchers_bp.route("/admin/drops_v2", methods=["GET"])
+def list_drops_v2():
+    """
+    NEW endpoint for testing admin bearer/X-Admin-Secret without touching the old one.
+    """
+    if not _admin_secret_ok(_get_admin_secret(request)):
+        return jsonify({"error": "unauthorized"}), 401
+
+    items = []
+    cursor = db.drops.find({}).sort([("priority", -1), ("startsAt", -1)])
+    for d in cursor:
+        items.append(_drop_to_json(d))
+    return jsonify({"status": "ok", "items": items}), 200
+    
 @vouchers_bp.route("/admin/drops/<drop_id>/codes", methods=["POST"])
 def admin_add_codes(drop_id):
     user, err = require_admin()
