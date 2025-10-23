@@ -306,6 +306,18 @@ window.qs = {
 </script>
 
   <script>
+function getAdminSecret() {
+  const sp = new URLSearchParams(location.search);
+  const param = (sp.get("admin_secret") || "").trim();
+  if (param) {
+    try { localStorage.setItem("X-Admin-Secret", param); } catch {}
+    return param;
+  }
+  try { return localStorage.getItem("X-Admin-Secret") || ""; } catch { return ""; }
+}
+</script>
+  
+  <script>
 let CURRENT_USERNAME = window.CURRENT_USERNAME || "";
 try {
   if (window.Telegram?.WebApp?.initDataUnsafe?.user?.username) {
@@ -389,31 +401,8 @@ function v2Headers(extras = {}, initDataOverride = "") {
     h["X-Telegram-Init-Data"] = initDataRaw; // canonical, raw string from Telegram
   }
   
-  // Optional: admin secret for browser testing
-  const hasAdminSecretParam = urlQS.has("admin_secret");
-  const adminSecretParam = (urlQS.get("admin_secret") || "").trim();
-  let adminSecret = "";
-  if (adminSecretParam) {
-    adminSecret = adminSecretParam;
-    try {
-      localStorage.setItem("X-Admin-Secret", adminSecretParam);
-    } catch (err) {
-      console.warn("Failed to persist admin secret", err);
-    }
-  } else {
-    if (hasAdminSecretParam) {
-      try {
-        localStorage.removeItem("X-Admin-Secret");
-      } catch (err) {
-        console.warn("Failed to clear admin secret", err);
-      }
-    }
-    try {
-      adminSecret = localStorage.getItem("X-Admin-Secret") || "";
-    } catch (err) {
-      adminSecret = "";
-    }
-  }
+  const adminSecret = getAdminSecret();
+
   if (adminSecret) {
     h["X-Admin-Secret"] = adminSecret;
     h["Authorization"] = `Bearer ${adminSecret}`;
@@ -484,7 +473,9 @@ async function adm_list() {
   if (!tbody) return;
   tbody.innerHTML = `<tr><td colspan="6" style="padding:6px;">Loading…</td></tr>`;
   try {
-  const res = await v2Fetch(`${V2}/admin/drops_v2`);
+  const s = getAdminSecret();
+  const tail = s ? `?admin_secret=${encodeURIComponent(s)}` : "";
+  const res = await v2Fetch(`${V2}/admin/drops_v2${tail}`);
     if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
     const data = await res.json();
     if (data.status !== "ok") throw new Error(JSON.stringify(data));
@@ -558,9 +549,11 @@ async function adm_create() {
   }
 
   try {
-    const res = await v2Fetch(`${V2}/admin/drops`, {
-      method: "POST",
-      body: JSON.stringify(payload)
+  const s = getAdminSecret();
+  const tail = s ? `?admin_secret=${encodeURIComponent(s)}` : "";
+  const res = await v2Fetch(`${V2}/admin/drops${tail}`, {      
+    method: "POST",
+    body: JSON.stringify(payload)
     });
 
     const data = await res.json();
@@ -620,7 +613,9 @@ if (admAddBtn) admAddBtn.onclick = async () => {
   }
 
   try {
-    const res = await v2Fetch(`${V2}/admin/drops/${dropId}/codes`, {
+    const s = getAdminSecret();
+    const tail = s ? `?admin_secret=${encodeURIComponent(s)}` : "";
+    const res = await v2Fetch(`${V2}/admin/drops/${dropId}/codes${tail}`, {
       method: "POST",
       body: JSON.stringify(payload)
     });
@@ -824,8 +819,10 @@ async function loadVouchers() {
   if (!section || !wrap) return; // page might not have the section
 
   try {
-    const res = await v2Fetch(`${V2}/miniapp/vouchers/visible`);
-
+  const s = getAdminSecret();
+  const tail = s ? `?admin_secret=${encodeURIComponent(s)}` : "";
+  const res = await v2Fetch(`${V2}/miniapp/vouchers/visible${tail}`);
+   
     if (res.status === 401) {
       console.warn("401 on /miniapp/vouchers/visible — likely missing/invalid init_data.");
       section.style.display = "none";
@@ -902,7 +899,9 @@ document.addEventListener("click", async (e) => {
   const op = btn.getAttribute("data-op");
 
   try {
-    const res = await v2Fetch(`${V2}/admin/drops/${dropId}/actions`, {
+    const s = getAdminSecret();
+    const tail = s ? `?admin_secret=${encodeURIComponent(s)}` : "";
+    const res = await v2Fetch(`${V2}/admin/drops/${dropId}/actions${tail}`, {
       method: "POST",
       body: JSON.stringify({ op })
     });
