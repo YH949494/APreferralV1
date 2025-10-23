@@ -484,7 +484,7 @@ async function adm_list() {
   if (!tbody) return;
   tbody.innerHTML = `<tr><td colspan="6" style="padding:6px;">Loading…</td></tr>`;
   try {
-    const res = await v2Fetch(`${V2}/admin/drops`);
+  const res = await v2Fetch(`${V2}/admin/drops_v2`);
     if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
     const data = await res.json();
     if (data.status !== "ok") throw new Error(JSON.stringify(data));
