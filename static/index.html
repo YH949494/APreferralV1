@@ -151,7 +151,8 @@
   
   <div class="section" id="voucher-section" style="display:none;">
     <h3>🎟️ Campaign Rewards</h3>
-    <div id="voucher-cards"></div>
+    <p id="campaign-voucher-message">Coming soon…</p>
+    <button id="campaign-voucher-btn" type="button" style="display:none;"></button>
   </div>
   
   <div class="section">
@@ -1002,114 +1003,156 @@ if (admParseCodesBtn) admParseCodesBtn.onclick = () => {
         alert("❌ Copy failed. Please copy manually.");
       }
     }
+ 
+    function copyVoucherCode() {
+      const codeEl = document.getElementById("voucher-code");
+      const code = codeEl ? codeEl.innerText.trim() : "";
+      if (!code || code.toLowerCase().includes("coming soon")) {
+        alert("❌ No voucher code available to copy yet.");
+        return;
+      }
 
+      navigator.clipboard.writeText(code)
+        .then(() => alert("Voucher code copied!"))
+        .catch(() => alert("Failed to copy voucher."));
+    }
+  
 async function handleAdminAndVoucher() {
   try {
-    const res = await fetch(`${API_BASE}/api/is_admin?user_id=${userId}`);
-    const adminData = await res.json();
-    const isAdmin = adminData.success && adminData.is_admin;
-    const voucherRes = await fetch(`${API_BASE}/api/bonus_voucher?user_id=${userId}`);
-    const voucherData = await voucherRes.json();
+    const [adminRes, voucherRes] = await Promise.all([
+      fetch(`${API_BASE}/api/is_admin?user_id=${userId}`),
+      fetch(`${API_BASE}/api/bonus_voucher?user_id=${userId}`)
+    ]);
 
-      if (isAdmin) {
+    let adminData = {};
+    let voucherData = {};
+    try { adminData = await adminRes.json(); } catch (_) {}
+    try { voucherData = await voucherRes.json(); } catch (_) {}
+
+    const isAdmin = adminData.success && adminData.is_admin;
+    if (isAdmin) {
       document.getElementById("admin-panel").style.display = "block";
-      document.getElementById("bonus-voucher").style.display = "block";
-      document.getElementById("voucher-code").innerText = voucherData.code || "❌ No active voucher currently.";
-    } else if (voucherData.code) {
-      document.getElementById("bonus-voucher").style.display = "block";
-      document.getElementById("voucher-code").innerText = voucherData.code;
-    } else {
-      document.getElementById("bonus-voucher").style.display = "none";
+    }
+
+    const bonusSection = document.getElementById("bonus-voucher");
+    const codeEl = document.getElementById("voucher-code");
+    if (bonusSection && codeEl) {
+    
+      if (isAdmin) {
+        bonusSection.style.display = "block";
+        codeEl.innerText = voucherData.code || "❌ No active voucher currently.";
+      } else if (voucherData.code) {
+        bonusSection.style.display = "block";
+        codeEl.innerText = voucherData.code;
+      } else {
+        bonusSection.style.display = "none";
+      }
     }
   } catch (err) {
     console.error("❌ Error checking admin or loading voucher:", err);
   }
 }
 
+function resetVoucherButton() {
+  const primaryBtn = document.getElementById("campaign-voucher-btn");
+  if (!primaryBtn) return;
+  primaryBtn.style.display = "none";
+  primaryBtn.removeAttribute("data-dropid");
+  primaryBtn.removeAttribute("data-claim");
+  primaryBtn.removeAttribute("data-copy-code");
+  primaryBtn.removeAttribute("disabled");
+}
+
+function showVoucherCopy(codeText) {
+  const primaryBtn = document.getElementById("campaign-voucher-btn");
+  if (!primaryBtn) return;
+  primaryBtn.textContent = "📋 Copy to clipboard";
+  primaryBtn.removeAttribute("data-dropid");
+  primaryBtn.removeAttribute("data-claim");
+  primaryBtn.removeAttribute("disabled");
+  primaryBtn.dataset.copyCode = codeText;
+  primaryBtn.style.display = "inline-block";
+}
+
+function showVoucherClaim(dropId, disabled) {
+  const primaryBtn = document.getElementById("campaign-voucher-btn");
+  if (!primaryBtn) return;
+  primaryBtn.textContent = "🎟️ Claim now";
+  primaryBtn.removeAttribute("data-copy-code");
+  if (dropId) {
+    primaryBtn.dataset.dropid = dropId;
+  } else {
+    primaryBtn.removeAttribute("data-dropid");
+  }
+  const shouldDisable = disabled || !dropId;
+  if (shouldDisable) {
+    primaryBtn.setAttribute("disabled", "disabled");
+  } else {
+    primaryBtn.removeAttribute("disabled");
+  }
+  primaryBtn.style.display = "inline-block";
+}
+
 async function loadVouchers() {
   const section = document.getElementById("voucher-section");
-  const wrap = document.getElementById("voucher-cards");
-  if (!section || !wrap) return;
+  const messageEl = document.getElementById("campaign-voucher-message");
+  if (!section || !messageEl) return;
 
-  // Always show the section (empty state is informative)
   section.style.display = "block";
-  wrap.innerHTML = `<div style="padding:8px;color:#666;">Loading rewards…</div>`;
-
+  messageEl.innerText = "Loading reward…";
+  resetVoucherButton();
+  
   try {
     const tail = buildAdminQueryTail();
     const res = await v2Fetch(`${API_V2}/vouchers/visible${tail}`);
 
-    // Show explicit reasons
     if (res.status === 401) {
-      friendlyAuthFail(wrap);
+      messageEl.innerText = "Coming soon…";
       return;
     }
 
     let data;
-    try { data = await res.json(); } catch {
-      wrap.innerHTML = `<div style="padding:8px;color:#c00;">Invalid JSON from server.</div>`;
+    try {
+      data = await res.json();
+    } catch {
+      messageEl.innerText = "❌ Invalid response from server.";
       return;
     }
 
     const drops = Array.isArray(data?.drops) ? data.drops : [];
+    const topDrop = drops[0];
 
-    if (!drops.length) {
-      // Empty but visible column
-      wrap.innerHTML = `
-        <div style="padding:10px;background:#f9f9ff;border:1px solid #e6e6ff;border-radius:8px;">
-          <b>No active rewards for your account right now.</b><br/>
-          If this is a test user, check <i>whitelist / region / start-end time</i> on the drop.
-        </div>`;
+    if (!topDrop) {
+      messageEl.innerText = "No campaign rewards are available for your account right now.";
       return;
     }
 
-    // Render cards
-    wrap.innerHTML = "";
-    for (const d of drops) {
-      const card = document.createElement("div");
-      card.style.cssText = "border:1px solid #eee;border-radius:10px;padding:12px;margin:8px 0;background:#fff;";
+   const dropId = topDrop.dropId || topDrop.id || topDrop._id;
 
-      const buttonAttrs = [
-        'class="claim-btn"',
-        'style="margin-top:8px"',
-        `data-dropid="${d.dropId}"`
-      ];
-      if (!d.isActive && !d.adminPreview) buttonAttrs.push("disabled");
-
-      const previewNote = d.adminPreview
-        ? `<div style="font-size:12px;color:#b26d00;margin-top:6px;">Admin preview · status: ${d.status || (d.isActive ? "active" : "inactive")}</div>`
-        : "";
-
-      const approx = typeof d.remainingApprox !== "undefined"
-        ? `<div style="font-size:12px;color:#666;margin-top:6px;">Estimated left: ${d.remainingApprox}</div>`
-        : "";
-
-      const claimedBlock = d.userClaimed && d.code
-        ? `<div class="code-block" data-code="${escapeHtml(d.code)}"><div class="code-text">${escapeHtml(d.code)}</div><button type="button" class="copy-code-btn" data-copy-code="${escapeHtml(d.code)}">Copy to clipboard</button></div>`
-        : "";
-
-      const claimedAt = d.userClaimed && d.claimedAt
-        ? `<div style="font-size:12px;color:#666;margin-top:6px;">Claimed at: ${fmtKL(d.claimedAt)}</div>`
-        : "";
-      
-      card.innerHTML = `
-        <div><b>${d.name}</b> <span style="font-size:12px;color:#666;">(${d.type})</span></div>
-        <div style="font-size:12px;color:#666;margin-top:4px;">${fmtKL(d.startsAt)} → ${fmtKL(d.endsAt)}</div>
-        ${previewNote}
-        ${approx}
-        <button ${buttonAttrs.join(' ')}>
-          ${d.userClaimed ? "View Code" : (d.isActive ? "Claim" : "Not Active")}
-        </button>
-        ${claimedBlock}
-        ${claimedAt}
-      `;
-      wrap.appendChild(card);
+    if (topDrop.userClaimed) {
+      const codeText = topDrop.code ? String(topDrop.code) : "(no code)";
+      messageEl.innerText = codeText;
+      if (topDrop.code) {
+        showVoucherCopy(codeText);
+      } else {
+        resetVoucherButton();
+      }
+      return;
     }
+
+    const canClaim = !!(topDrop.isActive || topDrop.adminPreview);
+    if (canClaim) {
+      messageEl.innerText = topDrop.adminPreview
+        ? `Previewing: ${topDrop.name || "Campaign reward"}`
+        : "Tap below to claim your reward.";
+      showVoucherClaim(dropId, !topDrop.isActive && !topDrop.adminPreview);
+      return;
+    }
+
+    messageEl.innerText = "A new campaign reward will appear soon. Please check back later!";
   } catch (e) {
-    wrap.innerHTML = `
-      <div style="padding:10px;background:#fff3f3;border:1px solid #ffd6d6;border-radius:8px;">
-        Error loading rewards: ${e?.message || e}
-      </div>`;
+    messageEl.innerText = `⚠️ Error loading vouchers: ${e?.message || e}`;
+
   }
 }
 // =====================================
@@ -1197,8 +1240,20 @@ document.addEventListener("click", async (e) => {
     }
 
     // Update UI
-    claimBtn.textContent = "View Code";
-    ensureCodeBlock(claimBtn, codeText);
+    if (claimBtn.id === "campaign-voucher-btn") {
+      const messageEl = document.getElementById("campaign-voucher-message");
+      if (messageEl) {
+        messageEl.innerText = codeText;
+      }
+      claimBtn.textContent = "📋 Copy to clipboard";
+      claimBtn.removeAttribute("data-dropid");
+      claimBtn.removeAttribute("data-claim");
+      claimBtn.dataset.copyCode = codeText;
+      claimBtn.removeAttribute("disabled");
+    } else {
+      claimBtn.textContent = "View Code";
+      ensureCodeBlock(claimBtn, codeText);
+    }
 
     const copyMsg = copySuccess
       ? "\n\n✅ Code copied to clipboard."
@@ -1373,13 +1428,7 @@ ${referral}`;
   }
 }
 
-    function copyVoucherCode() {
-      const code = document.getElementById("voucher-code").innerText;
-      navigator.clipboard.writeText(code)
-        .then(() => alert("Voucher code copied!"))
-        .catch(() => alert("Failed to copy voucher."));
-}
-     function openVoucherModal() {
+function openVoucherModal() {
   document.getElementById("voucher-modal").style.display = "flex";
 }
 
