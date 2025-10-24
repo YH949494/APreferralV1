@@ -161,6 +161,11 @@
     <button onclick="loadLeaderboard()">View Leaderboard</button>
     <div id="leaderboard-output">Click to load latest rankings...</div>
   </div>
+
+  <button id="setAdminSecretBtn"
+        style="display:none; margin:8px 0; padding:6px 10px; border:1px solid #ddd; background:#fff; border-radius:8px; cursor:pointer;">
+  Enter Password
+</button>
   
   <div class="section" id="admin-panel">
     <h3>⚙️ Admin Panel</h3>
@@ -306,35 +311,70 @@ window.qs = {
 </script>
   
 <script>
-(function () {
+(function adminSecretUI(){
   const btn = document.getElementById("setAdminSecretBtn");
   if (!btn) return;
-  btn.addEventListener("click", () => {
+
+  // Helper: are we inside Telegram WebApp?
+  const inTelegram = !!(window.Telegram?.WebApp?.initData || window.Telegram?.WebApp?.initDataUnsafe);
+  const hasSecret = !!getAdminSecret();
+
+  // Only reveal button when outside Telegram (dev/admin surface) OR when a secret already exists.
+  if (!inTelegram || hasSecret) {
+    btn.style.display = "inline-block";
+  }
+
+  // Triple-tap on the H2 reveals the prompt (stealth)
+  const title = document.querySelector("h2");
+  if (title) {
+    let taps = 0, timer = null;
+    title.addEventListener("click", () => {
+      taps++;
+      clearTimeout(timer);
+      timer = setTimeout(() => { taps = 0; }, 450);
+      if (taps >= 3) {
+        taps = 0;
+        openSecretPrompt();
+      }
+    });
+  }
+
+  btn.addEventListener("click", openSecretPrompt);
+
+  async function openSecretPrompt() {
     const val = prompt("Enter admin secret:");
     if (!val) return;
     try { localStorage.setItem("X-Admin-Secret", val.trim()); } catch {}
-    alert("Saved. Reloading…");
-    location.reload();
-  });
-})();
-</script>
-  
-<script>
-function getAdminSecret() {
-  const sp = new URLSearchParams(location.search);
-  const param = (sp.get("admin_secret") || "").trim();
-  if (param) {
-    try { localStorage.setItem("X-Admin-Secret", param); } catch {}
-    // 🔒 Remove it from the URL immediately
-    try {
-      const url = new URL(location.href);
-      url.searchParams.delete("admin_secret");
-      history.replaceState(null, "", url.toString());
-    } catch {}
-    return param;
+    // Validate immediately before exposing admin UI
+    const ok = await validateSecret();
+    if (ok) {
+      alert("✅ Secret accepted. Enabling admin panel…");
+      // Show panel and refresh table
+      const panel = document.getElementById("admin-panel");
+      if (panel) panel.style.display = "block";
+      try { adm_list && adm_list(); } catch {}
+    } else {
+      try { localStorage.removeItem("X-Admin-Secret"); } catch {}
+      alert("❌ Secret rejected (401). Please try again.");
+    }
   }
-  try { return localStorage.getItem("X-Admin-Secret") || ""; } catch { return ""; }
-}
+
+  async function validateSecret() {
+    try {
+      const res = await v2Fetch("/v2/miniapp/admin/drops_v2", {
+        headers: {
+          // Your v2Fetch already injects X-Admin-Secret if present,
+          // but passing explicitly is harmless and makes validation deterministic.
+          "X-Admin-Secret": getAdminSecret(),
+          "Authorization": "Bearer " + getAdminSecret()
+        }
+      });
+      return res.ok; // 200 => true, 401 => false
+    } catch {
+      return false;
+    }
+  }
+})();
 </script>
 
   
