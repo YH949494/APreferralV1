@@ -7,7 +7,7 @@ import hmac, hashlib, urllib.parse, os, json
 from urllib.parse import parse_qs
 import config as _cfg 
  
-from database import db
+from database import db, users_collection
  
 admin_cache_col = db["admin_cache"]
 
@@ -157,9 +157,79 @@ def _user_ctx_or_preview(req):
   
  # Telegram path
     parsed = _verify_telegram_init_data(_get_init_data(req))
-    if not parsed:
-        return (None, False)
-    return (parsed, False)
+    if parsed:
+        return (parsed, False)
+
+    legacy = _legacy_user_ctx(req)
+    if legacy:
+        return (legacy, False)
+
+    return (None, False)
+
+
+def _legacy_user_ctx(req):
+    """Best-effort fallback for legacy web clients that pass ?user_id=...&username=..."""
+
+    try:
+        user_id = req.args.get("user_id", type=int)
+    except Exception:
+        user_id = None
+
+    username_hint = norm_username(
+        req.args.get("username")
+        or req.args.get("user")
+        or req.headers.get("X-Admin-Username", "")
+    )
+
+    doc = None
+    if user_id:
+        doc = users_collection.find_one({"user_id": user_id})
+
+    if not doc and username_hint:
+        doc = users_collection.find_one({
+            "username": {"$regex": f"^{username_hint}$", "$options": "i"}
+        })
+
+    if not doc:
+        return None
+
+    doc_username = norm_username(doc.get("username"))
+    if username_hint and doc_username and username_hint != doc_username:
+        return None
+
+    username_lower = doc_username or username_hint
+    if not username_lower:
+        return None
+
+    return {
+        "usernameLower": username_lower,
+        "legacyUserId": doc.get("user_id") or user_id or 0,
+        "legacySource": "query"
+    }
+
+
+def _ctx_to_user(ctx: dict) -> dict:
+    if not isinstance(ctx, dict):
+        return {"usernameLower": ""}
+
+    if "usernameLower" in ctx:
+        return {"usernameLower": ctx.get("usernameLower", "")}
+
+    raw_user = ctx.get("user")
+    if isinstance(raw_user, str):
+        try:
+            user_json = json.loads(raw_user)
+        except Exception:
+            user_json = {}
+    elif isinstance(raw_user, dict):
+        user_json = raw_user
+    else:
+        user_json = {}
+
+    if not isinstance(user_json, dict):
+        user_json = {}
+
+    return {"usernameLower": norm_username(user_json.get("username", ""))}
     
 def now_utc():
     return datetime.now(timezone.utc)
@@ -605,13 +675,9 @@ def api_visible():
             return jsonify({"code": "auth_failed", "why": "missing_or_invalid_init_data"}), 401
 
         # Extract usernameLower from Telegram init_data -> user JSON
-        try:
-            user_json = json.loads(ctx.get("user", "{}")) if isinstance(ctx.get("user"), str) else (ctx.get("user") or {})
-            if not isinstance(user_json, dict):
-                user_json = {}
-        except Exception:
-            user_json = {}
-        user = {"usernameLower": norm_username(user_json.get("username", ""))}
+        user = _ctx_to_user(ctx)
+        if not user.get("usernameLower"):
+            return jsonify({"code": "auth_failed", "why": "missing_username_context"}), 401
 
         drops = user_visible_drops(user, ref)
         return jsonify({"visibilityMode": "stacked", "nowUtc": ref.isoformat(), "drops": drops}), 200
