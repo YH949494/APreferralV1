@@ -281,14 +281,14 @@ def verify_telegram_init_data(init_data_raw: str):
         pairs.append(f"{k}={v}")
     data_check_string = "\n".join(pairs)
 
-    # Try primary token + fallbacks
-    from os import environ
-    candidates = []
-    primary = (environ.get("BOT_TOKEN") or "").strip()
-    if primary:
-        candidates.append(primary)
-    fallbacks_raw = environ.get("BOT_TOKEN_FALLBACKS", "")
-    for t in (x.strip() for x in fallbacks_raw.split(",") if x.strip()):
+    candidates = _candidate_bot_tokens()
+
+    primary_env = (os.environ.get("BOT_TOKEN") or "").strip()
+    if primary_env and primary_env not in candidates:
+        candidates.append(primary_env)
+
+    fallbacks_env = os.environ.get("BOT_TOKEN_FALLBACKS", "")
+    for t in (x.strip() for x in fallbacks_env.split(",") if x.strip()):
         if t not in candidates:
             candidates.append(t)
 
