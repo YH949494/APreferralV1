@@ -10,7 +10,7 @@ from telegram.ext import (
     CallbackQueryHandler, ContextTypes
 )
 from datetime import datetime, timedelta, timezone
-from datetime import datetime, timedelta, timezone
+from werkzeug.exceptions import HTTPException
 
 from config import (
     KL_TZ,
@@ -25,7 +25,6 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger 
 
 from vouchers import vouchers_bp, ensure_voucher_indexes
-from database import KL_TZ  # reuse KL_TZ from database.py
 
 from pymongo import MongoClient, DESCENDING  # keep if used elsewhere
 import os, asyncio, traceback, csv, io, requests
@@ -67,8 +66,6 @@ users_collection = db["users"]
 history_collection = db["weekly_leaderboard_history"]
 bonus_voucher_collection = db["bonus_voucher"]
 admin_cache_col = db["admin_cache"]
-
-app_bot = ApplicationBuilder().token(BOT_TOKEN).build()
 
 def call_bot_in_loop(coro, timeout=15):
     loop = getattr(app_bot, "_running_loop", None)
@@ -259,11 +256,26 @@ def require_admin_from_query():
 
     return True, None
 
-# Flask app must exist before you define routes
+# Flask app must exist BEFORE blueprint registration
 app = Flask(__name__, static_folder="static")
 CORS(app, resources={r"/*": {"origins": "*"}})
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", "dev-secret")
+app.register_blueprint(vouchers_bp, url_prefix="/v2/miniapp")
 
+# ---- Always return JSON on errors (prevents "Invalid JSON") ----
+@app.errorhandler(HTTPException)
+def _json_http_exc(e):
+    code = e.code or 500
+    return jsonify({"code": "http_error", "status": code, "message": e.description}), code
+
+@app.errorhandler(Exception)
+def _json_any_exc(e):
+    try:
+        import traceback; traceback.print_exc()
+    except Exception:
+        pass
+    return jsonify({"code": "server_error", "message": str(e)}), 500
+    
 # Telegram bot
 app_bot = ApplicationBuilder().token(BOT_TOKEN).build()
 @app.route("/api/is_admin")
@@ -1062,7 +1074,6 @@ async def button_handler(update, context):
 # ----------------------------
 if __name__ == "__main__":
     try:
-        app.register_blueprint(vouchers_bp, url_prefix="/v2")
         ensure_voucher_indexes()
         print("Voucher indexes ensured.")
     except Exception as e:
