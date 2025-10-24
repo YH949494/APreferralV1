@@ -367,22 +367,26 @@ def _candidate_bot_tokens():
     return tokens
 
 def verify_telegram_init_data(init_data_raw: str):
-    import urllib.parse, hmac, hashlib, time, os
+    import urllib.parse, hmac, hashlib, time, os, base64
 
     parsed = urllib.parse.parse_qs(init_data_raw or "", keep_blank_values=True)
     provided_hash = parsed.get("hash", [""])[0]
-    if not provided_hash:
-        return False, {}, "missing_hash"
+    provided_signature = parsed.get("signature", [""])[0]
 
-    # Build the data_check_string from all params except 'hash' and 'signature'
-    pairs = []
+    if not provided_hash and not provided_signature:
+     return False, {}, "missing_hash"
+
+    # Build the payload strings from all params except the integrity fields
+    ordered_pairs = []
     for k in sorted(parsed.keys()):
         if k in ("hash", "signature"):
             continue
         v = parsed[k][0]
-        pairs.append(f"{k}={v}")
-    data_check_string = "\n".join(pairs)
+        ordered_pairs.append((k, v))
 
+    data_check_string = "\n".join(f"{k}={v}" for k, v in ordered_pairs)
+    ampersand_string = "&".join(f"{k}={v}" for k, v in ordered_pairs)
+ 
     candidates = _candidate_bot_tokens()
 
     primary_env = (os.environ.get("BOT_TOKEN") or "").strip()
@@ -398,15 +402,37 @@ def verify_telegram_init_data(init_data_raw: str):
         return False, {}, "bot_token_missing"
 
     ok = False
-    for tok in candidates:
-        secret_key = hashlib.sha256(tok.encode()).digest()
-        calc = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
-        if hmac.compare_digest(calc, provided_hash):
-            ok = True
-            break
+  reason = "bad_signature"
+
+    if provided_hash:
+        for tok in candidates:
+            secret_key = hashlib.sha256(tok.encode()).digest()
+            calc = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
+            if hmac.compare_digest(calc, provided_hash):
+                ok = True
+                reason = "ok"
+                break
+
+    if not ok and provided_signature:
+        try:
+            padded = provided_signature + "=" * (-len(provided_signature) % 4)
+            decoded = base64.urlsafe_b64decode(padded.encode("ascii"))
+            provided_sig_hex = decoded.decode("ascii")
+        except Exception:
+            provided_sig_hex = ""
+
+        if provided_sig_hex:
+            for tok in candidates:
+                secret_key = hashlib.sha256(tok.encode()).digest()
+                webapp_secret = hmac.new(b"WebAppData", secret_key, hashlib.sha256).digest()
+                calc = hmac.new(webapp_secret, ampersand_string.encode(), hashlib.sha256).hexdigest()
+                if hmac.compare_digest(calc, provided_sig_hex):
+                    ok = True
+                    reason = "ok_signature"
+                    break
 
     if not ok:
-        return False, {}, "bad_signature"
+        return False, {}, reason
 
     # Optional freshness check (24h)
     try:
@@ -416,7 +442,7 @@ def verify_telegram_init_data(init_data_raw: str):
     except Exception:
         pass
 
-    return True, {k: v[0] for k, v in parsed.items()}, "ok"
+    return True, {k: v[0] for k, v in parsed.items()}, reason
     
 def _require_admin_via_query():
     payload = _payload_for_admin_query(request)
