@@ -121,12 +121,31 @@ def _get_init_data(req) -> str:
     )
 
 def _verify_telegram_init_data(init_data: str) -> dict | None:
-    """Backwards-compatible helper that reuses the strict verifier."""
+    """DOES NOT crash if tokens are missing; simply returns None."""
     if not init_data:
         return None
+    try:
+        data_map = {k: v[0] for k, v in parse_qs(init_data, keep_blank_values=True).items()}
+        received_hash = data_map.pop("hash", "")
+        # Telegram may append an additional `signature` field that should be
+        # excluded from the HMAC verification payload (similar to the newer
+        # verify_telegram_init_data implementation below). Keeping it in the
+        # payload breaks verification even when the hash is correct.
+        data_map.pop("signature", None)
+        data_check_pairs = [f"{k}={data_map[k]}" for k in sorted(data_map.keys())]
+        data_check_string = "\n".join(data_check_pairs)
 
-    ok, data, _ = verify_telegram_init_data(init_data)
-    return data if ok else None
+        def ok_for_token(token: str) -> bool:
+            if not token:
+                return False
+            secret_key = hashlib.sha256(token.encode()).digest()
+            h = hmac.new(secret_key, msg=data_check_string.encode(), digestmod=hashlib.sha256).hexdigest()
+            return h == received_hash
+
+        tokens = [t for t in [_BOT_TOKEN] + _BOT_TOKEN_FALLBACKS if t]
+        return data_map if any(ok_for_token(t) for t in tokens) else None
+    except Exception:
+        return None
 
 def _user_ctx_or_preview(req):
     """
@@ -348,14 +367,12 @@ def _candidate_bot_tokens():
     return tokens
 
 def verify_telegram_init_data(init_data_raw: str):
-    import urllib.parse, hmac, hashlib, time, os, base64
+    import urllib.parse, hmac, hashlib, time, os
 
     parsed = urllib.parse.parse_qs(init_data_raw or "", keep_blank_values=True)
     provided_hash = parsed.get("hash", [""])[0]
-    provided_signature = parsed.get("signature", [""])[0]
-
-    if not provided_hash and not provided_signature:
-     return False, {}, "missing_hash"
+    if not provided_hash:
+        return False, {}, "missing_hash"
 
     # Build the data_check_string from all params except 'hash' and 'signature'
     pairs = []
@@ -381,24 +398,12 @@ def verify_telegram_init_data(init_data_raw: str):
         return False, {}, "bot_token_missing"
 
     ok = False
-    signature_input = "&".join(pairs)
-
     for tok in candidates:
         secret_key = hashlib.sha256(tok.encode()).digest()
-
-        if provided_hash:
-            calc_hash = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
-            if hmac.compare_digest(calc_hash, provided_hash):
-                ok = True
-                break
-
-        if provided_signature and not ok:
-            derived = hmac.new(b"WebAppData", secret_key, hashlib.sha256).digest()
-            signature_hex = hmac.new(derived, signature_input.encode(), hashlib.sha256).hexdigest()
-            signature_ascii = base64.urlsafe_b64encode(signature_hex.encode()).decode().rstrip("=")
-            if hmac.compare_digest(signature_ascii, provided_signature):
-                ok = True
-                break
+        calc = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
+        if hmac.compare_digest(calc, provided_hash):
+            ok = True
+            break
 
     if not ok:
         return False, {}, "bad_signature"
