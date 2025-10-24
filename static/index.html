@@ -325,6 +325,36 @@ function getAdminSecret() {
   }
   try { return localStorage.getItem("X-Admin-Secret") || ""; } catch { return ""; }
 }
+
+function getAdminUserId() {
+  const tgApp = window.Telegram?.WebApp;
+  const tgId = tgApp?.initDataUnsafe?.user?.id ?? null;
+  if (tgId !== undefined && tgId !== null && tgId !== "") {
+    return String(tgId);
+  }
+  const qs = new URLSearchParams(location.search);
+  return qs.get("user_id") || qs.get("id") || "";
+}
+
+function buildAdminQueryTail(extra = {}) {
+  const params = new URLSearchParams();
+  const userId = getAdminUserId();
+  if (userId) {
+    params.set("user_id", String(userId));
+  }
+  const adminSecret = getAdminSecret();
+  if (adminSecret) {
+    params.set("admin_secret", adminSecret);
+  }
+  if (extra && typeof extra === "object") {
+    Object.entries(extra).forEach(([key, value]) => {
+      if (value === undefined || value === null || value === "") return;
+      params.set(key, value);
+    });
+  }
+  const qs = params.toString();
+  return qs ? `?${qs}` : "";
+}
 </script>
   
 <script>
@@ -589,8 +619,12 @@ async function adm_list() {
   tbody.innerHTML = `<tr><td colspan="6" style="padding:6px;">Loading…</td></tr>`;
 
   try {
-    const s = getAdminSecret();
-    const tail = s ? `?admin_secret=${encodeURIComponent(s)}` : "";
+    const userId = getAdminUserId();
+    if (!userId) {
+      tbody.innerHTML = `<tr><td colspan="6" style="padding:6px;">Admin user ID required. Open via Telegram to manage drops.</td></tr>`;
+      return;
+    }
+    const tail = buildAdminQueryTail();
     const res = await v2Fetch(`${API_V2}/admin/drops_v2${tail}`);
     if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
     const data = await res.json();
@@ -669,11 +703,12 @@ async function adm_create() {
   }
 
   try {
-  const s = getAdminSecret();
-  const tail = s ? `?admin_secret=${encodeURIComponent(s)}` : "";
-  const res = await v2Fetch(`${API_V2}/admin/drops${tail}`, {
-    method: "POST",
-    body: JSON.stringify(payload)
+    const userId = getAdminUserId();
+    if (!userId) { alert("Missing admin user id. Open via Telegram to continue."); return; }
+    const tail = buildAdminQueryTail();
+    const res = await v2Fetch(`${API_V2}/admin/drops${tail}`, {
+      method: "POST",
+      body: JSON.stringify(payload)
     });
 
     const data = await res.json();
@@ -733,8 +768,9 @@ if (admAddBtn) admAddBtn.onclick = async () => {
   }
 
   try {
-    const s = getAdminSecret();
-    const tail = s ? `?admin_secret=${encodeURIComponent(s)}` : "";
+    const userId = getAdminUserId();
+    if (!userId) { alert("Missing admin user id. Open via Telegram to continue."); return; }
+    const tail = buildAdminQueryTail();
     const res = await v2Fetch(`${API_V2}/admin/drops/${dropId}/codes${tail}`, {
       method: "POST",
       body: JSON.stringify(payload)
@@ -1037,10 +1073,11 @@ document.addEventListener("click", async (e) => {
   const op = btn.getAttribute("data-op");
 
   try {
-    const s = getAdminSecret();
-    const tail = s ? `?admin_secret=${encodeURIComponent(s)}` : "";
+    const userId = getAdminUserId();
+    if (!userId) { alert("Missing admin user id. Open via Telegram to continue."); return; }
+    const tail = buildAdminQueryTail();
 
-  const res = await v2Fetch(`${API_V2}/admin/drops/${dropId}/actions${tail}`, {
+    const res = await v2Fetch(`${API_V2}/admin/drops/${dropId}/actions${tail}`, {
       method: "POST",
       body: JSON.stringify({ op })
     });
