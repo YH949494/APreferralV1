@@ -126,30 +126,43 @@ def maybe_shout_milestones(user_id: int):
     xp_bucket_prev = int(u.get("xp_weekly_milestone_bucket", 0))
     ref_bucket_prev = int(u.get("ref_weekly_milestone_bucket", 0))
 
+    # Determine if new buckets were crossed
+    xp_hit  = xp_bucket_now  > xp_bucket_prev and xp_bucket_now  > 0
+    ref_hit = ref_bucket_now > ref_bucket_prev and ref_bucket_now > 0
+
+    # Always persist bucket progress immediately (so we never "lose" a milestone)
     updates = {}
-    sent_any = False
-
-    # throttle once for both messages
-    if not _too_soon(u):
-        if xp_bucket_now > xp_bucket_prev and xp_bucket_now > 0:
-            updates["xp_weekly_milestone_bucket"] = xp_bucket_now
-            _send_group_message_sync(
-                _announce_text(u, "weekly_xp", xp_bucket_now * WEEKLY_XP_BUCKET)
-            )
-            sent_any = True
-
-        if ref_bucket_now > ref_bucket_prev and ref_bucket_now > 0:
-            updates["ref_weekly_milestone_bucket"] = ref_bucket_now
-            _send_group_message_sync(
-                _announce_text(u, "weekly_ref", ref_bucket_now * WEEKLY_REFERRAL_BUCKET)
-            )
-            sent_any = True
-
-    if sent_any:
-        updates["last_shout_at"] = datetime.utcnow()
-
+    if xp_hit:
+        updates["xp_weekly_milestone_bucket"] = xp_bucket_now
+    if ref_hit:
+        updates["ref_weekly_milestone_bucket"] = ref_bucket_now
     if updates:
         users_collection.update_one({"user_id": user_id}, {"$set": updates})
+
+    # Throttle only the sending to the group (not the state update above)
+    sent_any = False
+    if xp_hit or ref_hit:
+        if not _too_soon(u):
+            if xp_hit:
+                _send_group_message_sync(
+                    _announce_text(u, "weekly_xp", xp_bucket_now * WEEKLY_XP_BUCKET)
+                )
+                sent_any = True
+            if ref_hit:
+                _send_group_message_sync(
+                    _announce_text(u, "weekly_ref", ref_bucket_now * WEEKLY_REFERRAL_BUCKET)
+                )
+                sent_any = True
+            if sent_any:
+                users_collection.update_one(
+                    {"user_id": user_id},
+                    {"$set": {"last_shout_at": datetime.utcnow()}}
+                )
+        else:
+            # Optional: keep a lightweight log to spot suppressed sends in logs
+            print(f"[Milestone] Suppressed (throttle) user_id={user_id} "
+                  f"xp_hit={xp_hit} ref_hit={ref_hit}")
+ 
         
 def ensure_indexes():
     """
