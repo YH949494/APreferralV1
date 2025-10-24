@@ -533,8 +533,9 @@ async function adm_list() {
   try {
     const s = getAdminSecret();
     const tail = s ? `?admin_secret=${encodeURIComponent(s)}` : "";
-    const res = await v2Fetch(`${API_V2}/admin/drops_v2`);
-    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+    const s = getAdminSecret();
+    const tail = s ? `?admin_secret=${encodeURIComponent(s)}` : "";
+    const res = await v2Fetch(`${API_V2}/admin/drops_v2${tail}`);    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
     const data = await res.json();
     if (data.status !== "ok") throw new Error(JSON.stringify(data));
 
@@ -613,7 +614,9 @@ async function adm_create() {
   try {
   const s = getAdminSecret();
   const tail = s ? `?admin_secret=${encodeURIComponent(s)}` : "";
-  const res = await v2Fetch(`${API_V2}/admin/drops`, {
+  const s = getAdminSecret();
+  const tail = s ? `?admin_secret=${encodeURIComponent(s)}` : "";
+  const res = await v2Fetch(`${API_V2}/admin/drops${tail}`, {
     method: "POST",
     body: JSON.stringify(payload)
     });
@@ -677,8 +680,9 @@ if (admAddBtn) admAddBtn.onclick = async () => {
   try {
     const s = getAdminSecret();
     const tail = s ? `?admin_secret=${encodeURIComponent(s)}` : "";
-    const res = await v2Fetch(`${API_V2}/admin/drops/${dropId}/codes`, {
-      method: "POST",
+    const s = getAdminSecret();
+    const tail = s ? `?admin_secret=${encodeURIComponent(s)}` : "";
+    const res = await v2Fetch(`${API_V2}/admin/drops/${dropId}/codes${tail}`, {      method: "POST",
       body: JSON.stringify(payload)
     });
     const data = await res.json();
@@ -982,7 +986,9 @@ document.addEventListener("click", async (e) => {
     const s = getAdminSecret();
     const tail = s ? `?admin_secret=${encodeURIComponent(s)}` : "";
 
-  const res = await v2Fetch(`${API_V2}/admin/drops/${dropId}/actions`, {
+    const s = getAdminSecret();
+    const tail = s ? `?admin_secret=${encodeURIComponent(s)}` : "";
+    const res = await v2Fetch(`${API_V2}/admin/drops/${dropId}/actions${tail}`, {
       method: "POST",
       body: JSON.stringify({ op })
     });
