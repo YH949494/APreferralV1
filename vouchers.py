@@ -11,6 +11,7 @@ from database import db
  
 admin_cache_col = db["admin_cache"]
 
+BYPASS_ADMIN = os.getenv("BYPASS_ADMIN", "0").lower() in ("1", "true", "yes", "on")
 HARDCODED_ADMIN_USERNAMES = {"gracy_ap", "teohyaohui"}  # allow manual overrides if cache is empty
 
 def _load_admin_ids() -> set:
@@ -318,7 +319,7 @@ def verify_telegram_init_data(init_data_raw: str):
     
 def require_admin():
     if BYPASS_ADMIN:
-        # allow everything; pretend it's an admin user
+        print("[admin] BYPASS_ADMIN=1 — skipping admin auth")
         return {"usernameLower": "bypass_admin"}, None
 
     if _has_valid_admin_secret():
@@ -842,10 +843,8 @@ def _drop_to_json(d: dict) -> dict:
 
 @vouchers_bp.route("/admin/drops_v2", methods=["GET"])
 def list_drops_v2():
-    """
-    NEW endpoint for testing admin bearer/X-Admin-Secret without touching the old one.
-    """
-    if not _admin_secret_ok(_get_admin_secret(request)):
+    # allow bypass during dev
+    if not BYPASS_ADMIN and not _admin_secret_ok(_get_admin_secret(request)):
         return jsonify({"error": "unauthorized"}), 401
 
     items = []
