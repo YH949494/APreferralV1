@@ -49,6 +49,26 @@ def _is_cached_admin(user_json: dict):
 
     return False, None
 
+def _payload_for_admin_query(req) -> dict | None:
+    try:
+        caller_id = req.args.get("user_id", type=int)
+    except Exception:
+        caller_id = None
+
+    if not caller_id:
+        return None
+
+    admin_ids = _load_admin_ids()
+    if caller_id not in admin_ids:
+        return None
+
+    payload = {"id": caller_id, "adminSource": "cache"}
+    username_hint = norm_username(req.args.get("username") or req.args.get("admin_username") or "")
+    if username_hint:
+        payload["usernameLower"] = username_hint
+
+    return payload
+
 def _clean_token_list(raw: str):
     return [tok.strip() for tok in raw.split(",") if tok.strip()]
 
@@ -130,7 +150,12 @@ def _user_ctx_or_preview(req):
     secret = _get_admin_secret(req)
     if _admin_secret_ok(secret):
         return ({"user_id": 0, "username": "admin-preview"}, True)
-    # Telegram path
+
+    payload = _payload_for_admin_query(req)
+    if payload:
+        return (payload, True)
+  
+ # Telegram path
     parsed = _verify_telegram_init_data(_get_init_data(req))
     if not parsed:
         return (None, False)
@@ -318,30 +343,23 @@ def verify_telegram_init_data(init_data_raw: str):
     return True, {k: v[0] for k, v in parsed.items()}, "ok"
     
 def _require_admin_via_query():
+    payload = _payload_for_admin_query(request)
+    if payload:
+        return payload, None
     try:
         caller_id = request.args.get("user_id", type=int)
     except Exception:
         caller_id = None
-
+     
     if not caller_id:
         return None, (jsonify({"status": "error", "code": "missing_user_id"}), 400)
-
-    admin_ids = _load_admin_ids()
-    if caller_id not in admin_ids:
         return None, (jsonify({"status": "error", "code": "forbidden"}), 403)
-     
-    payload = {"id": caller_id, "adminSource": "cache"}
-    username_hint = norm_username(request.args.get("username") or "")
-    if username_hint:
-        payload["usernameLower"] = username_hint
-
-    return payload, None
 
 def require_admin():
     if BYPASS_ADMIN:
         print("[admin] BYPASS_ADMIN=1 — skipping admin auth")
         return {"usernameLower": "bypass_admin"}, None
-
+     
     payload, err = _require_admin_via_query()
     if err:
         return None, err
@@ -350,7 +368,7 @@ def require_admin():
 
     # Fallback: treat as missing credentials
     return None, (jsonify({"status": "error", "code": "auth_failed"}), 401)
-    
+ 
 def _is_admin_preview(init_data_raw: str) -> bool:
     # Safe best-effort: if verify fails, just return False (don’t break visible)
     if _has_valid_admin_secret():
