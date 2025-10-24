@@ -250,8 +250,12 @@ def require_admin_from_query():
         return False, ("Missing user_id", 400)
 
     doc = admin_cache_col.find_one({"_id": "admins"}) or {}
-    ids = set(doc.get("ids", []))
-    if caller_id not in ids:
+    ids = set()
+    for raw in doc.get("ids", []):
+        try:
+            ids.add(int(raw))
+        except (TypeError, ValueError):
+            continue    if caller_id not in ids:
         return False, ("Admins only", 403)
 
     return True, None
