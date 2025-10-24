@@ -533,9 +533,8 @@ async function adm_list() {
   try {
     const s = getAdminSecret();
     const tail = s ? `?admin_secret=${encodeURIComponent(s)}` : "";
-    const s = getAdminSecret();
-    const tail = s ? `?admin_secret=${encodeURIComponent(s)}` : "";
-    const res = await v2Fetch(`${API_V2}/admin/drops_v2${tail}`);    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+    const res = await v2Fetch(`${API_V2}/admin/drops_v2`);
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
     const data = await res.json();
     if (data.status !== "ok") throw new Error(JSON.stringify(data));
 
@@ -614,9 +613,7 @@ async function adm_create() {
   try {
   const s = getAdminSecret();
   const tail = s ? `?admin_secret=${encodeURIComponent(s)}` : "";
-  const s = getAdminSecret();
-  const tail = s ? `?admin_secret=${encodeURIComponent(s)}` : "";
-  const res = await v2Fetch(`${API_V2}/admin/drops${tail}`, {
+  const res = await v2Fetch(`${API_V2}/admin/drops`, {
     method: "POST",
     body: JSON.stringify(payload)
     });
@@ -680,9 +677,8 @@ if (admAddBtn) admAddBtn.onclick = async () => {
   try {
     const s = getAdminSecret();
     const tail = s ? `?admin_secret=${encodeURIComponent(s)}` : "";
-    const s = getAdminSecret();
-    const tail = s ? `?admin_secret=${encodeURIComponent(s)}` : "";
-    const res = await v2Fetch(`${API_V2}/admin/drops/${dropId}/codes${tail}`, {      method: "POST",
+    const res = await v2Fetch(`${API_V2}/admin/drops/${dropId}/codes`, {
+      method: "POST",
       body: JSON.stringify(payload)
     });
     const data = await res.json();
@@ -986,9 +982,7 @@ document.addEventListener("click", async (e) => {
     const s = getAdminSecret();
     const tail = s ? `?admin_secret=${encodeURIComponent(s)}` : "";
 
-    const s = getAdminSecret();
-    const tail = s ? `?admin_secret=${encodeURIComponent(s)}` : "";
-    const res = await v2Fetch(`${API_V2}/admin/drops/${dropId}/actions${tail}`, {
+  const res = await v2Fetch(`${API_V2}/admin/drops/${dropId}/actions`, {
       method: "POST",
       body: JSON.stringify({ op })
     });
