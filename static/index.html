@@ -1,5 +1,4 @@
-<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Referral & Check-in</title><script src="https://telegram.org/js/telegram-web-app.js"></script><style>body{background-color:#f4f4f4;font-family:'Arial',sans-serif;padding:20px;color:#333;font-size:16px}h2,h3{text-align:left;font-weight:600}.section{background:#fff;padding:20px;margin:15px 0;border-radius:10px;box-shadow:0 2px 6px rgba(0,0,0,.1)}button{background-color:#0088cc;color:#fff;padding:10px 20px;font-size:15px;border:none;border-radius:6px;cursor:pointer;font-family:inherit;margin:5px 0}button:hover{background-color:#006699}#referral-link,#checkin-result,#checkin-timer{margin-top:10px;font-size:15px}#leaderboard-output{margin-top:10px;font-family:'Courier New',monospace;white-space:pre-wrap;background:#f9f9f9;padding:15px;border-radius:8px;border:1px solid #ddd;font-size:13px;line-height:1.4;overflow-x:auto}#admin-panel{display:none;background:#fff4e6;border:1px solid #ffcc80}#admin-panel h3{color:#d17c00}.modal{display:none;position:fixed;z-index:1000;left:0;top:0;width:100%;height:100%;background:rgba(0,0,0,.5);justify-content:center;align-items:center}.modal-content{background:#fff;padding:20px;border-radius:10px;text-align:center;width:300px}input[type=text],input[type=number]{width:90%;padding:10px;margin:8px 0;border-radius:6px;border:1px solid #ccc;font-size:14px}</style></head><body>
-  <h2>🎯 Referral & Daily Check-in</h2>
+<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Referral & Check-in</title><script src="https://telegram.org/js/telegram-web-app.js"></script><style>body{background-color:#f4f4f4;font-family:'Arial',sans-serif;padding:20px;color:#333;font-size:16px}h2,h3{text-align:left;font-weight:600}.section{background:#fff;padding:20px;margin:15px 0;border-radius:10px;box-shadow:0 2px 6px rgba(0,0,0,.1)}button{background-color:#0088cc;color:#fff;padding:10px 20px;font-size:15px;border:none;border-radius:6px;cursor:pointer;font-family:inherit;margin:5px 0}button:hover{background-color:#006699}button.copy-code-btn{padding:6px 12px;font-size:13px}button.copy-code-btn:hover{background-color:#005fa3}#referral-link,#checkin-result,#checkin-timer{margin-top:10px;font-size:15px}#leaderboard-output{margin-top:10px;font-family:'Courier New',monospace;white-space:pre-wrap;background:#f9f9f9;padding:15px;border-radius:8px;border:1px solid #ddd;font-size:13px;line-height:1.4;overflow-x:auto}#admin-panel{display:none;background:#fff4e6;border:1px solid #ffcc80}#admin-panel h3{color:#d17c00}.modal{display:none;position:fixed;z-index:1000;left:0;top:0;width:100%;height:100%;background:rgba(0,0,0,.5);justify-content:center;align-items:center}.modal-content{background:#fff;padding:20px;border-radius:10px;text-align:center;width:300px}input[type=text],input[type=number]{width:90%;padding:10px;margin:8px 0;border-radius:6px;border:1px solid #ccc;font-size:14px}.code-block{margin-top:8px;padding:10px;border:1px solid #d9e6ff;background:#f4f7ff;border-radius:8px;display:flex;align-items:center;gap:10px}.code-block .code-text{font-family:'Courier New',monospace;font-size:14px;word-break:break-all;flex:1}</style></head><body>  <h2>🎯 Referral & Daily Check-in</h2>
 
 <!-- COMMUNITY BUTTONS -->
 <div style="display:flex; justify-content:space-between; align-items:center; margin-top:20px; gap:10px;">
@@ -604,6 +603,40 @@ function splitList(text) {
   return (text || "").split(/[\s,;]+/).map(x => x.trim()).filter(Boolean);
 }
 
+function escapeHtml(str = "") {
+  return String(str)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function ensureCodeBlock(claimBtn, codeText) {
+  if (!claimBtn) return;
+  let container = claimBtn.nextElementSibling;
+  if (container && container.classList && container.classList.contains("code") && !container.classList.contains("code-block")) {
+    container.remove();
+    container = claimBtn.nextElementSibling;
+  }
+  if (!container || !container.classList?.contains("code-block")) {
+    container = document.createElement("div");
+    container.className = "code-block";
+    container.innerHTML = `<div class="code-text"></div><button type="button" class="copy-code-btn">Copy</button>`;
+    claimBtn.insertAdjacentElement("afterend", container);
+  }
+
+  container.dataset.code = codeText;
+  const textEl = container.querySelector(".code-text");
+  if (textEl) textEl.textContent = codeText;
+
+  const copyBtn = container.querySelector(".copy-code-btn");
+  if (copyBtn) {
+    copyBtn.dataset.copyCode = codeText;
+    copyBtn.textContent = "Copy";
+  }
+}
+
 function fmtKL(iso) {
  if (!iso) return "";
  try {
@@ -1057,8 +1090,7 @@ async function loadVouchers() {
         : "";
 
       const claimedAt = d.userClaimed && d.claimedAt
-        ? `<div style="font-size:12px;color:#666;margin-top:4px;">Claimed: ${fmtKL(d.claimedAt)}</div>`
-        : "";
+        ? `<div class="code-block" data-code="${escapeHtml(d.code)}"><div class="code-text">${escapeHtml(d.code)}</div><button type="button" class="copy-code-btn" data-copy-code="${escapeHtml(d.code)}">Copy</button></div>`        : "";
 
       card.innerHTML = `
         <div><b>${d.name}</b> <span style="font-size:12px;color:#666;">(${d.type})</span></div>
@@ -1145,28 +1177,68 @@ document.addEventListener("click", async (e) => {
       alert("Not authorized (401). Open inside Telegram WebApp or pass init_data correctly.");
       return;
     }
-   // accept either {ok:true} or {status:"ok"}
-const ok = res.ok && (out?.ok === true || out?.status === "ok");
-if (!ok) throw new Error(out?.error || out?.code || `HTTP ${res.status}`);
+    // accept either {ok:true} or {status:"ok"}
+    const ok = res.ok && (out?.ok === true || out?.status === "ok");
+    if (!ok) throw new Error(out?.error || out?.code || `HTTP ${res.status}`);
 
-// new API shape: { status:"ok", voucher:{ code, claimedAt } }
-const codeText = out?.voucher?.code ? String(out.voucher.code) : "(no code)";
-const claimedAt = out?.voucher?.claimedAt ? fmtKL(out.voucher.claimedAt) : "-";
+    // new API shape: { status:"ok", voucher:{ code, claimedAt } }
+    const codeText = out?.voucher?.code ? String(out.voucher.code) : "(no code)";
+    const claimedAt = out?.voucher?.claimedAt ? fmtKL(out.voucher.claimedAt) : "-";
 
-// Update UI
-claimBtn.textContent = "View Code";
-alert(`🎟️ Your code: ${codeText}\nClaimed at: ${claimedAt}`);
+    // Try auto-copying the code for convenience when we have a real value
+    let copySuccess = false;
+    if (codeText && codeText !== "(no code)" && navigator?.clipboard?.writeText) {
+      try {
+        await navigator.clipboard.writeText(codeText);
+        copySuccess = true;
+      } catch (errCopy) {
+        console.warn("Auto-copy failed", errCopy);
+      }
+    }
 
-// If a code isn’t already shown in DOM, append it
-if (!claimBtn.nextElementSibling || !claimBtn.nextElementSibling.classList?.contains("code")) {
-  const codeEl = document.createElement("div");
-  codeEl.className = "code";
-  codeEl.style.marginTop = "6px";
-  codeEl.textContent = codeText;
-  claimBtn.insertAdjacentElement("afterend", codeEl);
-}
+    // Update UI
+    claimBtn.textContent = "View Code";
+    ensureCodeBlock(claimBtn, codeText);
+
+    const copyMsg = copySuccess
+      ? "\n\n✅ Code copied to clipboard."
+      : "\n\n📋 Tap the copy button below if clipboard access is blocked.";
+    alert(`🎟️ Your code: ${codeText}\nClaimed at: ${claimedAt}${copyMsg}`);
+
   } catch (err) {
     alert(`⚠️ Claim failed: ${err.message}`);
+  }
+});
+
+
+// Manual copy handler (for retries / browsers without auto-copy)
+document.addEventListener("click", async (e) => {
+  const copyBtn = e.target.closest("button[data-copy-code]");
+  if (!copyBtn) return;
+
+  const code = copyBtn.getAttribute("data-copy-code")
+    || copyBtn.parentElement?.dataset?.code
+    || "";
+
+  if (!code || code === "(no code)") {
+    alert("No code available to copy yet. Please claim first.");
+    return;
+  }
+
+  const originalText = copyBtn.textContent;
+  try {
+    if (!navigator?.clipboard?.writeText) {
+      throw new Error("Clipboard API unavailable");
+    }
+    await navigator.clipboard.writeText(code);
+    copyBtn.textContent = "Copied!";
+    tg?.HapticFeedback?.notificationOccurred?.("success");
+    setTimeout(() => {
+      copyBtn.textContent = originalText;
+    }, 2000);
+  } catch (copyErr) {
+    console.warn("Manual copy failed", copyErr);
+    alert("Unable to copy automatically. Please copy the code manually: " + code);
   }
 });
     
