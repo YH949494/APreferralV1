@@ -4,7 +4,7 @@ from flask import (
 )
 from flask_cors import CORS
 from threading import Thread
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo 
 from telegram.ext import ( 
     ApplicationBuilder, CommandHandler, ChatMemberHandler,
     CallbackQueryHandler, ContextTypes
