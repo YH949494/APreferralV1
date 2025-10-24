@@ -1,14 +1,13 @@
-import os
-import time
-import json
-import hmac
-import hashlib
 import base64
+import hashlib
+import hmac
 import importlib
+import json
+import os
 import sys
+import time
 import types
 import unittest
-
 
 def _build_signature_hex(token: str, init_data: str) -> str:
     secret_key = hashlib.sha256(token.encode()).digest()
@@ -135,7 +134,7 @@ class VerifyInitDataTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual(reason, "bot_token_missing")
 
- def test_verify_accepts_signature_only(self):
+    def test_verify_accepts_signature_only(self):
         token = "123:ABC"
         self.vouchers._BOT_TOKEN = token
         self.vouchers._BOT_TOKEN_FALLBACKS = []
