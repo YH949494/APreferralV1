@@ -354,7 +354,7 @@ if (!CURRENT_USERNAME) {
   <script>
 const tg = window.Telegram?.WebApp;
 
-const V2 = "/v2";
+const API_V2 = "/v2/miniapp";
 let latestInitData = "";
 
 function getLatestInitData(candidate = "") {
@@ -533,7 +533,7 @@ async function adm_list() {
   try {
     const s = getAdminSecret();
     const tail = s ? `?admin_secret=${encodeURIComponent(s)}` : "";
-    const res = await v2Fetch(`${V2}/admin/drops_v2${tail}`);
+    const res = await v2Fetch(`${API_V2}/admin/drops_v2`);
     if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
     const data = await res.json();
     if (data.status !== "ok") throw new Error(JSON.stringify(data));
@@ -613,7 +613,7 @@ async function adm_create() {
   try {
   const s = getAdminSecret();
   const tail = s ? `?admin_secret=${encodeURIComponent(s)}` : "";
-  const res = await v2Fetch(`${V2}/admin/drops${tail}`, {      
+  const res = await v2Fetch(`${API_V2}/admin/drops`, {
     method: "POST",
     body: JSON.stringify(payload)
     });
@@ -677,7 +677,7 @@ if (admAddBtn) admAddBtn.onclick = async () => {
   try {
     const s = getAdminSecret();
     const tail = s ? `?admin_secret=${encodeURIComponent(s)}` : "";
-    const res = await v2Fetch(`${V2}/admin/drops/${dropId}/codes${tail}`, {
+    const res = await v2Fetch(`${API_V2}/admin/drops/${dropId}/codes`, {
       method: "POST",
       body: JSON.stringify(payload)
     });
@@ -891,7 +891,7 @@ async function loadVouchers() {
   try {
     const s = getAdminSecret();
     const tail = s ? `?admin_secret=${encodeURIComponent(s)}` : "";
-    const res = await v2Fetch(`${V2}/miniapp/vouchers/visible${tail}`);
+    const res = await v2Fetch(`${API_V2}/vouchers/visible`);
 
     // Show explicit reasons
     if (res.status === 401) {
@@ -982,7 +982,7 @@ document.addEventListener("click", async (e) => {
     const s = getAdminSecret();
     const tail = s ? `?admin_secret=${encodeURIComponent(s)}` : "";
 
-    const res = await v2Fetch(`${V2}/admin/drops/${dropId}/actions${tail}`, {
+  const res = await v2Fetch(`${API_V2}/admin/drops/${dropId}/actions`, {
       method: "POST",
       body: JSON.stringify({ op })
     });
@@ -1015,7 +1015,7 @@ document.addEventListener("click", async (e) => {
   if (!dropId) return;
 
   try {
-    const res = await v2Fetch(`${V2}/miniapp/vouchers/claim`, {
+    const res = await v2Fetch(`${API_V2}/vouchers/claim`, {
       method: "POST",
       body: JSON.stringify({
         dropId,
@@ -1030,24 +1030,26 @@ document.addEventListener("click", async (e) => {
       alert("Not authorized (401). Open inside Telegram WebApp or pass init_data correctly.");
       return;
     }
-    // accept either {ok:true} or {status:"ok"}
-    const ok = res.ok && (out?.ok === true || out?.status === "ok");
-    if (!ok) throw new Error(out?.error || out?.code || `HTTP ${res.status}`);
+   // accept either {ok:true} or {status:"ok"}
+const ok = res.ok && (out?.ok === true || out?.status === "ok");
+if (!ok) throw new Error(out?.error || out?.code || `HTTP ${res.status}`);
 
-    // Update UI
-    claimBtn.textContent = "View Code";
-    const codeText = out?.code ? String(out.code) : "(no code)";
-    const claimedAt = out?.claimedAt ? fmtKL(out.claimedAt) : "-";
-    alert(`🎟️ Your code: ${codeText}\nClaimed at: ${claimedAt}`);
+// new API shape: { status:"ok", voucher:{ code, claimedAt } }
+const codeText = out?.voucher?.code ? String(out.voucher.code) : "(no code)";
+const claimedAt = out?.voucher?.claimedAt ? fmtKL(out.voucher.claimedAt) : "-";
 
-    // If a code isn’t already shown in DOM, append it
-    if (!claimBtn.nextElementSibling || !claimBtn.nextElementSibling.classList?.contains("code")) {
-      const codeEl = document.createElement("div");
-      codeEl.className = "code";
-      codeEl.style.marginTop = "6px";
-      codeEl.textContent = codeText;
-      claimBtn.insertAdjacentElement("afterend", codeEl);
-    }
+// Update UI
+claimBtn.textContent = "View Code";
+alert(`🎟️ Your code: ${codeText}\nClaimed at: ${claimedAt}`);
+
+// If a code isn’t already shown in DOM, append it
+if (!claimBtn.nextElementSibling || !claimBtn.nextElementSibling.classList?.contains("code")) {
+  const codeEl = document.createElement("div");
+  codeEl.className = "code";
+  codeEl.style.marginTop = "6px";
+  codeEl.textContent = codeText;
+  claimBtn.insertAdjacentElement("afterend", codeEl);
+}
   } catch (err) {
     alert(`⚠️ Claim failed: ${err.message}`);
   }
