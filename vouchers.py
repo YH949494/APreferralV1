@@ -555,19 +555,21 @@ def claim_pooled(drop_id: str, usernameLower: str, ref: datetime):
     return {"ok": True, "code": doc["code"], "claimedAt": doc["claimedAt"].isoformat()}
 
 # ---- Public API routes ----
-@vouchers_bp.route("/miniapp/vouchers/visible", methods=["GET"])
+@vouchers_bp.route("/vouchers/visible", methods=["GET"])
 def api_visible():
     """
     GET /v2/miniapp/vouchers/visible
-    - Normal users: only active drops they are eligible to see
     - Admin preview (Authorization: Bearer / X-Admin-Secret): active-only by default; pass ?all=1 for history
-    Always returns JSON (401/200/500) — never HTML.
+    - Normal users: only ACTIVE drops they’re eligible to see
+    Always returns JSON (401/200/500).
     """
     ref = now_utc()
-    admin = _is_admin_preview(request)
     try:
+        # Use the safe universal helper you already have
+        ctx, admin_preview = _user_ctx_or_preview(request)
+
         # ---------- Admin preview ----------
-        if admin:
+        if admin_preview:
             show_all = request.args.get("all") in ("1", "true", "yes")
             q = {}
             if not show_all:
@@ -576,6 +578,7 @@ def api_visible():
                     "startsAt": {"$lte": ref},
                     "endsAt": {"$gt": ref},
                 }
+
             items = []
             for d in db.drops.find(q).sort([("priority", DESCENDING), ("startsAt", ASCENDING)]):
                 drop_id = str(d["_id"])
@@ -597,64 +600,29 @@ def api_visible():
                     base["remainingApprox"] = free
                     base["codesTotal"] = total
                 items.append(base)
-            return jsonify({"visibilityMode": "stacked", "nowUtc": ref.isoformat(), "drops": items})
 
-        # ---------- Normal users ----------
+            return jsonify({"visibilityMode": "stacked", "nowUtc": ref.isoformat(), "drops": items}), 200
+
+        # ---------- Normal user flow ----------
+        if not ctx:
+            # No admin and no valid Telegram init_data
+            return jsonify({"code": "auth_failed", "why": "missing_or_invalid_init_data"}), 401
+
+        # Extract usernameLower from Telegram init_data -> user JSON
         try:
-            user_ctx = _require_user_from_telegram(request)  # should raise on bad/missing init_data
-        except AuthError as e:
-            # Ensure 401 JSON instead of 500
-            return jsonify({"code": "auth_failed", "why": str(e)}), 401
-        except Exception as e:
-            # Some verifiers raise plain Exception — treat as auth error
-            print("[visible] auth exception:", repr(e))
-            return jsonify({"code": "auth_failed", "why": "invalid_or_missing_init_data"}), 401
+            user_json = json.loads(ctx.get("user", "{}")) if isinstance(ctx.get("user"), str) else (ctx.get("user") or {})
+            if not isinstance(user_json, dict):
+                user_json = {}
+        except Exception:
+            user_json = {}
+        user = {"usernameLower": norm_username(user_json.get("username", ""))}
 
-        user_id = user_ctx.get("user_id")
-        q = {
-            "status": {"$nin": ["expired", "paused"]},
-            "startsAt": {"$lte": ref},
-            "endsAt": {"$gt": ref},
-        }
-        items = []
-        for d in db.drops.find(q).sort([("priority", DESCENDING), ("startsAt", ASCENDING)]):
-            try:
-                if not _is_drop_visible_to_user(d, user_ctx):
-                    continue
-            except Exception as vis_err:
-                # Never 500 because of a bad drop doc; just hide it and log
-                print("[visible] visibility check error:", repr(vis_err), "drop_id=", str(d.get("_id")))
-                continue
-
-            drop_id = str(d["_id"])
-            base = {
-                "dropId": drop_id,
-                "name": d.get("name"),
-                "type": d.get("type", "pooled"),
-                "startsAt": _as_aware_utc(d.get("startsAt")).isoformat() if d.get("startsAt") else None,
-                "endsAt": _as_aware_utc(d.get("endsAt")).isoformat() if d.get("endsAt") else None,
-                "priority": d.get("priority", 100),
-                "status": d.get("status", "upcoming"),
-                "isActive": is_drop_active(d, ref),
-                "userClaimed": _user_claimed_drop(user_id, drop_id),
-            }
-            if base["type"] == "pooled":
-                free = db.vouchers.count_documents({"type": "pooled", "dropId": drop_id, "status": "free"})
-                total = db.vouchers.count_documents({"type": "pooled", "dropId": drop_id})
-                base["remainingApprox"] = free
-                base["codesTotal"] = total
-            items.append(base)
-
-        return jsonify({"visibilityMode": "stacked", "nowUtc": ref.isoformat(), "drops": items})
+        drops = user_visible_drops(user, ref)
+        return jsonify({"visibilityMode": "stacked", "nowUtc": ref.isoformat(), "drops": drops}), 200
 
     except Exception as e:
-        # Final safety net for any unexpected path — never crash the mini-app
         print("[visible] unhandled:", repr(e))
         return jsonify({"code": "server_error", "message": str(e)}), 500
-
-    # Normal user path
-    drops = user_visible_drops(user, ref)
-    return jsonify({"visibilityMode": "stacked", "nowUtc": ref.isoformat(), "drops": drops})
 
 class AlreadyClaimed(Exception):
     pass
@@ -664,7 +632,7 @@ class NoCodesLeft(Exception):
 
 class NotEligible(Exception):
     pass
-
+ 
 def claim_voucher_for_user(*, user_id: str, drop_id: str, username: str) -> dict:
     """
     Returns {"code": "...", "claimedAt": "..."} on success.
@@ -698,7 +666,7 @@ def claim_voucher_for_user(*, user_id: str, drop_id: str, username: str) -> dict
     raise NotEligible("not_eligible")
 
 
-@vouchers_bp.route("/miniapp/vouchers/claim", methods=["POST"])
+@vouchers_bp.route("/vouchers/claim", methods=["POST"])
 def api_claim():
     # Accept both header names + query param
     init_data = (
