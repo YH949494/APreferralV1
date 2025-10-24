@@ -402,7 +402,7 @@ def verify_telegram_init_data(init_data_raw: str):
         return False, {}, "bot_token_missing"
 
     ok = False
-  reason = "bad_signature"
+    reason = "bad_signature"
 
     if provided_hash:
         for tok in candidates:
@@ -430,7 +430,6 @@ def verify_telegram_init_data(init_data_raw: str):
                     ok = True
                     reason = "ok_signature"
                     break
-
     if not ok:
         return False, {}, reason
 
