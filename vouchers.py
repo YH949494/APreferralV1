@@ -114,7 +114,8 @@ def _get_admin_secret(req) -> str:
 
 def _get_init_data(req) -> str:
     return (
-        req.headers.get("X-Telegram-Init-Data")
+        req.headers.get("X-Telegram-Web-App-Data")
+        or req.headers.get("X-Telegram-Init-Data")
         or req.headers.get("X-Telegram-Init")
         or req.args.get("init_data", "")
     )
@@ -733,6 +734,7 @@ def api_claim():
     # Accept both header names + query param
     init_data = (
         request.args.get("init_data")
+        or request.headers.get("X-Telegram-Web-App-Data")
         or request.headers.get("X-Telegram-Init")
         or request.headers.get("X-Telegram-Init-Data")
         or ""
