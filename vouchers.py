@@ -732,17 +732,26 @@ def claim_voucher_for_user(*, user_id: str, drop_id: str, username: str) -> dict
 @vouchers_bp.route("/vouchers/claim", methods=["POST"])
 def api_claim():
     # Accept both header names + query param
+    body = request.get_json(silent=True) or {}
+
+    # Accept both header names + query param + JSON field fallback (for mobile fetch quirks)
     init_data = (
         request.args.get("init_data")
         or request.headers.get("X-Telegram-Web-App-Data")
         or request.headers.get("X-Telegram-Init")
         or request.headers.get("X-Telegram-Init-Data")
+        or body.get("init_data")
+        or body.get("initData")
         or ""
     )
     ok, data, why = verify_telegram_init_data(init_data)
 
     # Admin preview (for Postman/admin panel testing)
-    admin_secret = request.args.get("admin_secret") or request.headers.get("X-Admin-Secret")
+    admin_secret = (
+        request.args.get("admin_secret")
+        or request.headers.get("X-Admin-Secret")
+        or body.get("admin_secret")
+    )
     if (not ok) and _admin_secret_ok(admin_secret):
         data = {
             "user": json.dumps({
@@ -766,8 +775,6 @@ def api_claim():
     if not user_id:
         return jsonify({"status": "error", "code": "no_user"}), 400
 
-    # Body
-    body = request.get_json(silent=True) or {}
     drop_id = body.get("dropId") or body.get("drop_id")
     if not drop_id:
         return jsonify({"status": "error", "code": "missing_drop_id"}), 400
