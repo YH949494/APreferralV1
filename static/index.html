@@ -373,6 +373,8 @@ function getLatestInitData(candidate = "") {
 }
 
 async function waitForInitData(timeoutMs = 8000, intervalMs = 50) {
+    if (getAdminSecret()) return getLatestInitData("");
+  
   const qs = new URLSearchParams(location.search);
   const deadline = Date.now() + timeoutMs;
 
@@ -1318,18 +1320,18 @@ window.onload = async () => {
   if (tg) { tg.ready(); tg.expand(); }
 
   const init = await waitForInitData();
-  console.log("init_data length:", (init || "").length);
-
   const hasInit = !!(init && init.length >= 10);
   const isAdminMode = !!getAdminSecret();
 
   if (!hasInit) {
-    // No Telegram context: show Rewards column with guidance
-    loadVouchers();          // shows 401 help or empty state
+    // No Telegram context
+    loadVouchers();           // fine to keep (shows “Coming Soon” if 401)
     if (isAdminMode) {
-      adm_list();           // allow admin table via admin_secret
+      // 👇 force show admin panel in admin mode
+      document.getElementById("admin-panel").style.display = "block";
+      adm_list();
     }
-    return;                  // ⛔️ do NOT call user endpoints without init
+    return;
   }
 
   // ✅ Real Telegram user context
@@ -1337,9 +1339,10 @@ window.onload = async () => {
   handleAdminAndVoucher();
   loadLeaderboard();
 
-  // v2 features (work both in user & admin mode)
   loadVouchers();
   if (isAdminMode) {
+    // 👇 also show when Telegram context exists
+    document.getElementById("admin-panel").style.display = "block";
     adm_list();
   }
 };
