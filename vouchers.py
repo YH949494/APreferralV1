@@ -557,79 +557,80 @@ def claim_pooled(drop_id: str, usernameLower: str, ref: datetime):
 # ---- Public API routes ----
 @vouchers_bp.route("/miniapp/vouchers/visible", methods=["GET"])
 def api_visible():
-    has_admin_secret = _has_valid_admin_secret()
-    if has_admin_secret:
-        # Admin preview path: fabricate a minimal user from headers/params
-        init_data = ""
-        user_raw = {
-            "username": request.headers.get("X-Admin-Username") or request.args.get("username"),
-            "id": request.headers.get("X-Admin-User-Id") or request.args.get("user_id"),
-        }
-    else:
-        # Normal Telegram mini-app path (verify init_data signature)
-        init_data = (
-            request.args.get("init_data")
-            or request.headers.get("X-Telegram-Init")
-            or request.headers.get("X-Telegram-Init-Data")
-            or ""
-        )
-        ok, data, why = verify_telegram_init_data(init_data)
-
-        # Allow admin-secret fallback for testing without Telegram
-        admin_secret = request.args.get("admin_secret") or request.headers.get("X-Admin-Secret")
-        if (not ok) and admin_secret and admin_secret == os.environ.get("ADMIN_PANEL_SECRET"):
-            data = {"user": json.dumps({
-                "id": int(os.environ.get("PREVIEW_USER_ID", "999")),
-                "username": os.environ.get("PREVIEW_USERNAME", "admin_preview")
-            })}
-            ok = True
-            why = "ok"
-
-        if not ok:
-            return jsonify({"status": "error", "code": "auth_failed", "why": why}), 401
-
-        # user object (username may be empty for some TG users)
-        try:
-            user_raw = json.loads(data.get("user", "{}"))
-        except Exception:
-            user_raw = {}
-
-    user = {
-        "usernameLower": norm_username((user_raw or {}).get("username", "")),
-        "id": (user_raw or {}).get("id")
-    }
-
-    ref = now_utc()
-    admin_preview = has_admin_secret or _is_admin_preview(init_data)
-
- if admin_preview:
-        # Admin preview:
-        #   - By default, show only ACTIVE drops (reduce “history clutter”)
-        #   - Pass ?all=1 to show everything.
+    """
+    GET /v2/miniapp/vouchers/visible
+    - Normal users: only active drops
+    - Admin preview (ADMIN_PANEL_SECRET / X-Admin-Secret): active-only by default; pass ?all=1 to include history
+    """
+    try:
         ref = now_utc()
-        show_all = request.args.get("all") in ("1", "true", "yes")
-        q = {}
-        if not show_all:
-            q = {
-                "status": {"$nin": ["expired", "paused"]},
-                "startsAt": {"$lte": ref},
-                "endsAt": {"$gt": ref},
-            }
+        admin_preview = _is_admin_preview(request)
+
+        # ---------- Admin preview ----------
+        if admin_preview:
+            show_all = request.args.get("all") in ("1", "true", "yes")
+            q = {}
+            if not show_all:
+                q = {
+                    "status": {"$nin": ["expired", "paused"]},
+                    "startsAt": {"$lte": ref},
+                    "endsAt": {"$gt": ref},
+                }
+
+            items = []
+            cursor = db.drops.find(q).sort([("priority", DESCENDING), ("startsAt", ASCENDING)])
+            for d in cursor:
+                drop_id = str(d["_id"])
+                starts_at = _as_aware_utc(d.get("startsAt")).isoformat() if d.get("startsAt") else None
+                ends_at = _as_aware_utc(d.get("endsAt")).isoformat() if d.get("endsAt") else None
+                base = {
+                    "dropId": drop_id,
+                    "name": d.get("name"),
+                    "type": d.get("type", "pooled"),
+                    "startsAt": starts_at,
+                    "endsAt": ends_at,
+                    "priority": d.get("priority", 100),
+                    "status": d.get("status", "upcoming"),
+                    "isActive": is_drop_active(d, ref),
+                    "userClaimed": False,
+                    "adminPreview": True,
+                }
+                if base["type"] == "pooled":
+                    free = db.vouchers.count_documents({"type": "pooled", "dropId": drop_id, "status": "free"})
+                    total = db.vouchers.count_documents({"type": "pooled", "dropId": drop_id})
+                    base["remainingApprox"] = free
+                    base["codesTotal"] = total
+                items.append(base)
+            return jsonify({"visibilityMode": "stacked", "nowUtc": ref.isoformat(), "drops": items})
+
+        # ---------- Normal users ----------
+        user_ctx = _require_user_from_telegram(request)  # raises on 401
+        user_id = user_ctx["user_id"]
+
+        # Only include active drops, whitelisted for user if applicable
+        q = {
+            "status": {"$nin": ["expired", "paused"]},
+            "startsAt": {"$lte": ref},
+            "endsAt": {"$gt": ref},
+        }
         items = []
         cursor = db.drops.find(q).sort([("priority", DESCENDING), ("startsAt", ASCENDING)])
         for d in cursor:
+            if not _is_drop_visible_to_user(d, user_ctx):
+                continue
             drop_id = str(d["_id"])
+            starts_at = _as_aware_utc(d.get("startsAt")).isoformat() if d.get("startsAt") else None
+            ends_at = _as_aware_utc(d.get("endsAt")).isoformat() if d.get("endsAt") else None
             base = {
                 "dropId": drop_id,
                 "name": d.get("name"),
                 "type": d.get("type", "pooled"),
-                "startsAt": _as_aware_utc(d.get("startsAt")).isoformat() if d.get("startsAt") else None,
-                "endsAt": _as_aware_utc(d.get("endsAt")).isoformat() if d.get("endsAt") else None,
+                "startsAt": starts_at,
+                "endsAt": ends_at,
                 "priority": d.get("priority", 100),
                 "status": d.get("status", "upcoming"),
                 "isActive": is_drop_active(d, ref),
-                "userClaimed": False,
-                "adminPreview": True,
+                "userClaimed": _user_claimed_drop(user_id, drop_id),
             }
             if base["type"] == "pooled":
                 free = db.vouchers.count_documents({"type": "pooled", "dropId": drop_id, "status": "free"})
@@ -639,6 +640,13 @@ def api_visible():
             items.append(base)
         return jsonify({"visibilityMode": "stacked", "nowUtc": ref.isoformat(), "drops": items})
 
+    except AuthError as e:
+        return jsonify({"code": "auth_failed", "why": str(e)}), 401
+    except Exception as e:
+        # keep existing error style if you already have one
+        print("[visible] unhandled:", repr(e))
+        return jsonify({"code": "server_error"}), 500
+ 
     # Normal user path
     drops = user_visible_drops(user, ref)
     return jsonify({"visibilityMode": "stacked", "nowUtc": ref.isoformat(), "drops": drops})
