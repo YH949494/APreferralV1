@@ -4,7 +4,8 @@ from flask import (
 )
 from flask_cors import CORS
 from threading import Thread
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo 
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
+from html import escape as html_escape
 from telegram.ext import ( 
     ApplicationBuilder, CommandHandler, ChatMemberHandler,
     CallbackQueryHandler, ContextTypes
@@ -75,22 +76,30 @@ def call_bot_in_loop(coro, timeout=15):
     return fut.result(timeout=timeout)
 
 def _format_mention(u: dict) -> str:
+    """Return a HTML-safe mention for announcements."""
+    user_id = u.get("user_id")
     if u.get("username"):
-        return f"@{u['username']}"
-    if u.get("first_name"):
-        return u["first_name"]
-    return "player"
+        label = f"@{u['username']}"
+    elif u.get("first_name"):
+        label = u["first_name"]
+    else:
+        label = "player"
+
+    safe_label = html_escape(label)
+    if user_id:
+        return f'<a href="tg://user?id={int(user_id)}">{safe_label}</a>'
+    return safe_label
 
 def _announce_text(u: dict, which: str, value: int) -> str:
     who = _format_mention(u)
     if which == "weekly_xp":
-        return f"🎉 {who} just hit **{value:,} weekly XP**! Keep it rolling! 💪"
+        return f"🎉 {who} just hit <b>{value:,} weekly XP</b>! Keep it rolling! 💪"
     else:  # which == "weekly_ref"
-        return f"🚀 {who} reached **{value} weekly referrals**! Absolute legend! 🏆"
+        return f"🚀 {who} reached <b>{value} weekly referrals</b>! Absolute legend! 🏆"
 
 def _send_group_message_sync(text: str):
     try:
-        call_bot_in_loop(app_bot.bot.send_message(chat_id=GROUP_ID, text=text, parse_mode="Markdown"))
+        call_bot_in_loop(app_bot.bot.send_message(chat_id=GROUP_ID, text=text, parse_mode="HTML"))
     except Exception as e:
         print(f"[announce] send failed: {e}")
 
