@@ -255,7 +255,8 @@ def require_admin_from_query():
         try:
             ids.add(int(raw))
         except (TypeError, ValueError):
-            continue    if caller_id not in ids:
+            continue
+    if caller_id not in ids:
         return False, ("Admins only", 403)
 
     return True, None
