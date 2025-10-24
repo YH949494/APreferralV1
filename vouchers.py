@@ -602,34 +602,35 @@ def api_visible():
     ref = now_utc()
     admin_preview = has_admin_secret or _is_admin_preview(init_data)
 
-  if admin_preview:
+ if admin_preview:
         # Admin preview:
-        # By default show only ACTIVE (reduce "history clutter");
-        # pass ?all=1 to show everything.
-        show_all = (request.args.get("all") in ("1", "true", "yes"))
+        #   - By default, show only ACTIVE drops (reduce “history clutter”)
+        #   - Pass ?all=1 to show everything.
+        ref = now_utc()
+        show_all = request.args.get("all") in ("1", "true", "yes")
         q = {}
         if not show_all:
-            ref = now_utc()
             q = {
                 "status": {"$nin": ["expired", "paused"]},
                 "startsAt": {"$lte": ref},
-                "endsAt": {"$gt": ref}
+                "endsAt": {"$gt": ref},
             }
         items = []
-        for d in db.drops.find(q).sort([("priority", DESCENDING), ("startsAt", ASCENDING)]):
+        cursor = db.drops.find(q).sort([("priority", DESCENDING), ("startsAt", ASCENDING)])
+        for d in cursor:
             drop_id = str(d["_id"])
             base = {
-           "dropId": drop_id,
-           "name": d.get("name"),
-           "type": d.get("type", "pooled"),
-           "startsAt": _as_aware_utc(d.get("startsAt")).isoformat() if d.get("startsAt") else None,
-           "endsAt": _as_aware_utc(d.get("endsAt")).isoformat() if d.get("endsAt") else None,
-           "priority": d.get("priority", 100),
-           "status": d.get("status", "upcoming"),
-           "isActive": is_drop_active(d, ref),
-           "userClaimed": False,
-           "adminPreview": True
-       }
+                "dropId": drop_id,
+                "name": d.get("name"),
+                "type": d.get("type", "pooled"),
+                "startsAt": _as_aware_utc(d.get("startsAt")).isoformat() if d.get("startsAt") else None,
+                "endsAt": _as_aware_utc(d.get("endsAt")).isoformat() if d.get("endsAt") else None,
+                "priority": d.get("priority", 100),
+                "status": d.get("status", "upcoming"),
+                "isActive": is_drop_active(d, ref),
+                "userClaimed": False,
+                "adminPreview": True,
+            }
             if base["type"] == "pooled":
                 free = db.vouchers.count_documents({"type": "pooled", "dropId": drop_id, "status": "free"})
                 total = db.vouchers.count_documents({"type": "pooled", "dropId": drop_id})
