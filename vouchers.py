@@ -602,10 +602,21 @@ def api_visible():
     ref = now_utc()
     admin_preview = has_admin_secret or _is_admin_preview(init_data)
 
-    if admin_preview:
-        # Return all drops (ignore whitelist/status), tagged as preview
+  if admin_preview:
+        # Admin preview:
+        # By default show only ACTIVE (reduce "history clutter");
+        # pass ?all=1 to show everything.
+        show_all = (request.args.get("all") in ("1", "true", "yes"))
+        q = {}
+        if not show_all:
+            ref = now_utc()
+            q = {
+                "status": {"$nin": ["expired", "paused"]},
+                "startsAt": {"$lte": ref},
+                "endsAt": {"$gt": ref}
+            }
         items = []
-        for d in db.drops.find().sort([("priority", DESCENDING), ("startsAt", ASCENDING)]):
+        for d in db.drops.find(q).sort([("priority", DESCENDING), ("startsAt", ASCENDING)]):
             drop_id = str(d["_id"])
             base = {
            "dropId": drop_id,
