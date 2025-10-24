@@ -398,15 +398,8 @@ async function waitForInitData(timeoutMs = 8000, intervalMs = 50) {
 
 function v2Headers(extras = {}, initDataOverride = "") {
   const h = { "Content-Type": "application/json", ...extras };
-  const raw = initDataOverride || (window?.Telegram?.WebApp?.initData || "");
   const urlQS = new URLSearchParams(location.search);
-  if (raw) {
-    // send both names (some servers read one or the other)
-    h["X-Telegram-Init-Data"] = raw;
-    h["X-Telegram-Init"] = raw;
-  }
 
-  // Grab init_data fresh each call (safer than capturing once)
   const candidateInitData =
     (typeof initDataOverride === "string" && initDataOverride.length ? initDataOverride : "") ||
     (typeof tg?.initData === "string" && tg.initData.length ? tg.initData : "") ||
@@ -418,7 +411,8 @@ function v2Headers(extras = {}, initDataOverride = "") {
 
   const initDataRaw = getLatestInitData(candidateInitData);
   if (initDataRaw) {
-    h["X-Telegram-Init-Data"] = initDataRaw; // canonical, raw string from Telegram
+    h["X-Telegram-Init-Data"] = initDataRaw;
+    h["X-Telegram-Init"] = initDataRaw;
   }
   
   const adminSecret = getAdminSecret();
