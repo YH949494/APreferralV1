@@ -983,9 +983,8 @@ async function loadVouchers() {
   wrap.innerHTML = `<div style="padding:8px;color:#666;">Loading rewards…</div>`;
 
   try {
-    const s = getAdminSecret();
-    const tail = s ? `?admin_secret=${encodeURIComponent(s)}` : "";
-    const res = await v2Fetch(`${API_V2}/vouchers/visible`);
+    const tail = buildAdminQueryTail();
+    const res = await v2Fetch(`${API_V2}/vouchers/visible${tail}`);
 
     // Show explicit reasons
     if (res.status === 401) {
