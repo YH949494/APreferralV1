@@ -834,7 +834,7 @@ def api_claim():
         }
         ok, why = True, "ok"
   
- if not ok:
+    if not ok:
         fallback_username = _guess_username(request, body)
         if fallback_username:
             fallback_user_id = _guess_user_id(request, body) or fallback_username
