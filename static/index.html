@@ -309,6 +309,23 @@ window.qs = {
   }
 };
 </script>
+
+  <script>
+function getAdminSecret() {
+  const sp = new URLSearchParams(location.search);
+  const param = (sp.get("admin_secret") || "").trim();
+  if (param) {
+    try { localStorage.setItem("X-Admin-Secret", param); } catch {}
+    try {
+      const url = new URL(location.href);
+      url.searchParams.delete("admin_secret");
+      history.replaceState(null, "", url.toString());
+    } catch {}
+    return param;
+  }
+  try { return localStorage.getItem("X-Admin-Secret") || ""; } catch { return ""; }
+}
+</script>
   
 <script>
 (function adminSecretUI(){
@@ -376,7 +393,6 @@ window.qs = {
   }
 })();
 </script>
-
   
   <script>
 let CURRENT_USERNAME = window.CURRENT_USERNAME || "";
