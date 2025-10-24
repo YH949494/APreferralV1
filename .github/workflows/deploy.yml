@@ -2,8 +2,12 @@ name: Deploy to Fly.io
 
 on:
   push:
-    branches:
-      - main  # Change to your default branch if needed
+    branches: [ main ]   # change if your default branch is different
+  workflow_dispatch:
+
+concurrency:
+  group: fly-deploy-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   deploy:
@@ -12,17 +16,46 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v4
+      - name: Set up Python (compile sanity check)
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: '3.11'
+
+      - name: Compile all Python (fail fast on syntax errors)
+        run: python -m compileall -q .
 
       - name: Install Fly.io CLI
         uses: superfly/flyctl-actions/setup-flyctl@master
 
-      - name: Deploy to Fly.io
-        run: flyctl deploy --remote-only
+      # (Optional) Import/update Fly secrets from GitHub repo secrets
+      # Only runs if at least one of these secrets is set in GitHub.
+      - name: Import Fly secrets
+        if: ${{ secrets.BOT_TOKEN != '' || secrets.BOT_TOKEN_FALLBACKS != '' || secrets.ADMIN_PANEL_SECRET != '' }}
+        env:
+          FLY_API_TOKEN:        ${{ secrets.FLY_API_TOKEN }}
+          FLY_APP_NAME:         ${{ secrets.FLY_APP_NAME }}
+          BOT_TOKEN:            ${{ secrets.BOT_TOKEN }}
+          BOT_TOKEN_FALLBACKS:  ${{ secrets.BOT_TOKEN_FALLBACKS }}
+          ADMIN_PANEL_SECRET:   ${{ secrets.ADMIN_PANEL_SECRET }}
+        run: |
+          set -e
+          echo "Importing Fly secrets for $FLY_APP_NAME"
+          SECRETS_FILE=$(mktemp)
+          [ -n "$BOT_TOKEN" ] && echo "BOT_TOKEN=$BOT_TOKEN" >> "$SECRETS_FILE"
+          [ -n "$BOT_TOKEN_FALLBACKS" ] && echo "BOT_TOKEN_FALLBACKS=$BOT_TOKEN_FALLBACKS" >> "$SECRETS_FILE"
+          [ -n "$ADMIN_PANEL_SECRET" ] && echo "ADMIN_PANEL_SECRET=$ADMIN_PANEL_SECRET" >> "$SECRETS_FILE"
+          if [ -s "$SECRETS_FILE" ]; then
+            flyctl secrets import --app "$FLY_APP_NAME" < "$SECRETS_FILE" --detach
+          else
+            echo "No secrets provided; skipping import."
+          fi
+
+      - name: Deploy to Fly.io (immediate)
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          FLY_APP_NAME:  ${{ secrets.FLY_APP_NAME }}
+        run: |
+          # build on Fly (no local Docker) + avoid rolling flaps
+          flyctl deploy --app "$FLY_APP_NAME" --strategy immediate --remote-only
