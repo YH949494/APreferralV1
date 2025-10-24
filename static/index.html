@@ -443,6 +443,39 @@ function v2Headers(extras = {}, initDataOverride = "") {
   return h;
 }
 
+// --- Admin helper UI: clear admin mode quickly to hide history ---
+(function addAdminClearButton(){
+  try {
+    const bar = document.createElement("div");
+    bar.style.cssText = "margin:8px 0; display:flex; gap:8px; align-items:center;";
+    const btn = document.createElement("button");
+    btn.textContent = "Clear Admin Mode";
+    btn.style.cssText = "padding:6px 10px; border:1px solid #ddd; background:#fff; border-radius:8px; cursor:pointer;";
+    btn.onclick = () => {
+      try { localStorage.removeItem('X-Admin-Secret'); } catch {}
+      alert("Admin mode cleared. Reloading…");
+      location.reload();
+    };
+    // Only render if currently in admin mode
+    const hasAdmin = !!getAdminSecret();
+    if (hasAdmin) {
+      bar.appendChild(btn);
+      const target = document.querySelector("h2") || document.body;
+      target.parentNode.insertBefore(bar, target.nextSibling);
+    }
+  } catch {}
+})();
+
+// If the server rejects init_data (token rotated), show a gentle tip
+function friendlyAuthFail(el) {
+  if (!el) return;
+  el.innerHTML = `
+    <div style="padding:10px;background:#fff3f3;border:1px solid #ffd6d6;border-radius:8px;">
+      <b>Coming Soon</b><br/>If you’re testing, make sure the bot token used to open this mini app
+      matches the server’s configured BOT_TOKEN or BOT_TOKEN_FALLBACKS.
+    </div>`;
+}
+
 async function v2Fetch(path, options = {}) {
   const { headers: extraHeaders, ...rest } = options || {};
   let initDataRaw = await waitForInitData();
@@ -454,6 +487,7 @@ async function v2Fetch(path, options = {}) {
     initDataRaw = await waitForInitData(3000);
     headers = v2Headers(extraHeaders || {}, initDataRaw);
     res = await fetch(path, { ...rest, headers });
+    // No success? leave to caller to render a friendly hint
   }
   return res;
 }
@@ -862,10 +896,7 @@ async function loadVouchers() {
 
     // Show explicit reasons
     if (res.status === 401) {
-      wrap.innerHTML = `
-        <div style="padding:10px;background:#fff3f3;border:1px solid #ffd6d6;border-radius:8px;">
-          <b>Coming Soon</b>
-        </div>`;
+      friendlyAuthFail(wrap);
       return;
     }
 
