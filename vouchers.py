@@ -317,62 +317,39 @@ def verify_telegram_init_data(init_data_raw: str):
 
     return True, {k: v[0] for k, v in parsed.items()}, "ok"
     
+def _require_admin_via_query():
+    try:
+        caller_id = request.args.get("user_id", type=int)
+    except Exception:
+        caller_id = None
+
+    if not caller_id:
+        return None, (jsonify({"status": "error", "code": "missing_user_id"}), 400)
+
+    admin_ids = _load_admin_ids()
+    if caller_id not in admin_ids:
+        return None, (jsonify({"status": "error", "code": "forbidden"}), 403)
+     
+    payload = {"id": caller_id, "adminSource": "cache"}
+    username_hint = norm_username(request.args.get("username") or "")
+    if username_hint:
+        payload["usernameLower"] = username_hint
+
+    return payload, None
+
 def require_admin():
     if BYPASS_ADMIN:
         print("[admin] BYPASS_ADMIN=1 — skipping admin auth")
         return {"usernameLower": "bypass_admin"}, None
 
-    if _has_valid_admin_secret():
-        return _payload_from_admin_secret(), None
+    payload, err = _require_admin_via_query()
+    if err:
+        return None, err
+    if payload:
+        return payload, None
 
-    init_data = (
-        request.args.get("init_data")
-        or request.headers.get("X-Telegram-Init")
-        or request.headers.get("X-Telegram-Init-Data")
-        or ""
-    )
-    ok, data, reason = verify_telegram_init_data(init_data)
-    if not ok:
-        reason_suffix = f"; reason={reason}" if reason else ""
-        print(f"[admin] auth_failed; init_len: {len(init_data)}{reason_suffix}")
-        return None, (jsonify({"status": "error", "code": "auth_failed"}), 401)
-
-    # parse Telegram user
-    try:
-        user_json = json.loads(data.get("user", "{}"))
-        if not isinstance(user_json, dict):
-            user_json = {}
-    except Exception:
-        user_json = {}
-
-    username_lower = norm_username(user_json.get("username", ""))
-    user_id = user_json.get("id")
-
-    is_admin, source = _is_cached_admin(user_json)
-    admin_source = source
-
-    if not is_admin:
-        if user_id is not None and str(user_id) in _ADMIN_USER_IDS:
-            is_admin = True
-            admin_source = source or "env"
-
-    if not is_admin:
-        user_id_dbg = user_json.get("id")
-        print(f"[admin] forbidden for: {username_lower} (id={user_id_dbg})")
-        return None, (jsonify({"status": "error", "code": "forbidden"}), 403)
-
-    try:
-        user_id_val = int(user_id)
-    except (TypeError, ValueError):
-        user_id_val = user_id
-
-    payload = {"usernameLower": username_lower}
-    if user_id_val is not None:
-        payload["id"] = user_id_val
-    if admin_source:
-        payload["adminSource"] = admin_source
-        
-    return payload, None
+    # Fallback: treat as missing credentials
+    return None, (jsonify({"status": "error", "code": "auth_failed"}), 401)
     
 def _is_admin_preview(init_data_raw: str) -> bool:
     # Safe best-effort: if verify fails, just return False (don’t break visible)
@@ -843,9 +820,12 @@ def _drop_to_json(d: dict) -> dict:
 
 @vouchers_bp.route("/admin/drops_v2", methods=["GET"])
 def list_drops_v2():
-    # allow bypass during dev
-    if not BYPASS_ADMIN and not _admin_secret_ok(_get_admin_secret(request)):
-        return jsonify({"error": "unauthorized"}), 401
+    if BYPASS_ADMIN:
+        pass
+    else:
+        _, err = require_admin()
+        if err:
+            return err
 
     items = []
     cursor = db.drops.find({}).sort([("priority", -1), ("startsAt", -1)])
