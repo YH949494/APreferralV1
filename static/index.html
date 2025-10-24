@@ -563,17 +563,38 @@ function friendlyAuthFail(el) {
     </div>`;
 }
 
+    function withInitDataInQuery(path, initDataRaw) {
+  if (!initDataRaw) return path;
+
+  try {
+    const url = new URL(path, window.location.origin);
+    if (!url.searchParams.has("init_data")) {
+      url.searchParams.set("init_data", initDataRaw);
+    }
+
+    // Preserve relative URLs (Telegram webview can be sensitive to origins)
+    if (path.startsWith("http://") || path.startsWith("https://")) {
+      return url.toString();
+    }
+    return `${url.pathname}${url.search}${url.hash}`;
+  } catch (_) {
+    return path;
+  }
+}
+
 async function v2Fetch(path, options = {}) {
   const { headers: extraHeaders, ...rest } = options || {};
   let initDataRaw = await waitForInitData();
   let headers = v2Headers(extraHeaders || {}, initDataRaw);
+  let target = withInitDataInQuery(path, initDataRaw);
 
-  let res = await fetch(path, { ...rest, headers });
+  let res = await fetch(target, { ...rest, headers });
   if (res.status === 401) {
     // retry once in case initData arrived a moment later
     initDataRaw = await waitForInitData(3000);
     headers = v2Headers(extraHeaders || {}, initDataRaw);
-    res = await fetch(path, { ...rest, headers });
+    target = withInitDataInQuery(path, initDataRaw);
+    res = await fetch(target, { ...rest, headers });
     // No success? leave to caller to render a friendly hint
   }
   return res;
