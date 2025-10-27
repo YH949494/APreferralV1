@@ -1140,6 +1140,10 @@ def admin_list_drops():
                 status = "active"
             else:
                 status = "upcoming"
+       
+     # Admin panel should no longer show drops that have already expired.
+        if status == "expired":
+            continue
 
         row = {
             "dropId": str(d["_id"]),
