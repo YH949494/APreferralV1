@@ -1007,14 +1007,50 @@ def admin_create_drop():
 
     return jsonify({"status": "ok", "dropId": str(drop_id)})
     
-def _drop_to_json(d: dict) -> dict:
-    out = dict(d)
-    out["_id"] = str(out["_id"])
-    for k in ("startsAt", "endsAt"):
-        if k in out:
-            norm = _as_aware_utc(out[k])
-            out[k] = norm.isoformat() if norm else None
-    return out
+def _admin_drop_summary(doc: dict, *, ref=None, skip_expired=False):
+    """Return a normalised representation of a drop for admin surfaces."""
+    ref = ref or now_utc()
+
+    starts = _as_aware_utc(doc.get("startsAt"))
+    ends = _as_aware_utc(doc.get("endsAt"))
+
+    status = doc.get("status", "upcoming")
+    if status not in ("paused", "expired"):
+        if ends and ref >= ends:
+            status = "expired"
+        elif starts and starts <= ref < (ends or starts):
+            status = "active"
+        else:
+            status = "upcoming"
+
+    if skip_expired and status == "expired":
+        return None
+
+    drop_id = str(doc["_id"])
+    summary = {
+        "dropId": drop_id,
+        "name": doc.get("name"),
+        "type": doc.get("type", "pooled"),
+        "status": status,
+        "priority": doc.get("priority", 100),
+        "startsAt": starts.isoformat() if starts else None,
+        "endsAt": ends.isoformat() if ends else None,
+    }
+
+    if summary["type"] == "personalised":
+        assigned = db.vouchers.count_documents({"type": "personalised", "dropId": drop_id})
+        claimed = db.vouchers.count_documents({"type": "personalised", "dropId": drop_id, "status": "claimed"})
+        summary.update({"assigned": assigned, "claimed": claimed})
+    else:
+        total = db.vouchers.count_documents({"type": "pooled", "dropId": drop_id})
+        free = db.vouchers.count_documents({"type": "pooled", "dropId": drop_id, "status": "free"})
+        summary.update({"codesTotal": total, "codesFree": free})
+
+    for key in ("whitelistUsernames", "visibilityMode"):
+        if key in doc:
+            summary[key] = doc[key]
+
+    return summary
 
 @vouchers_bp.route("/admin/drops_v2", methods=["GET"])
 def list_drops_v2():
@@ -1026,9 +1062,12 @@ def list_drops_v2():
             return err
 
     items = []
+    ref = now_utc()
     cursor = db.drops.find({}).sort([("priority", -1), ("startsAt", -1)])
     for d in cursor:
-        items.append(_drop_to_json(d))
+        row = _admin_drop_summary(d, ref=ref, skip_expired=True)
+        if row:
+            items.append(row)
     return jsonify({"status": "ok", "items": items}), 200
     
 @vouchers_bp.route("/admin/drops/<drop_id>/codes", methods=["POST"])
@@ -1129,41 +1168,9 @@ def admin_list_drops():
     ref = now_utc()
 
     for d in db.drops.find().sort([("priority", DESCENDING), ("startsAt", ASCENDING)]):
-        starts = _as_aware_utc(d.get("startsAt"))
-        ends   = _as_aware_utc(d.get("endsAt"))
-
-        status = d.get("status", "upcoming")
-        if status not in ("paused", "expired"):
-            if ends and ref >= ends:
-                status = "expired"
-            elif starts and starts <= ref < (ends or starts):
-                status = "active"
-            else:
-                status = "upcoming"
-       
-     # Admin panel should no longer show drops that have already expired.
-        if status == "expired":
-            continue
-
-        row = {
-            "dropId": str(d["_id"]),
-            "name": d.get("name"),
-            "type": d.get("type", "pooled"),
-            "status": status,
-            "priority": d.get("priority", 100),
-            "startsAt": starts.isoformat() if starts else None,
-            "endsAt": ends.isoformat() if ends else None,
-        }
-        if row["type"] == "personalised":
-            assigned = db.vouchers.count_documents({"type": "personalised", "dropId": row["dropId"]})
-            claimed  = db.vouchers.count_documents({"type": "personalised", "dropId": row["dropId"], "status": "claimed"})
-            row.update({"assigned": assigned, "claimed": claimed})
-        else:
-            total = db.vouchers.count_documents({"type": "pooled", "dropId": row["dropId"]})
-            free  = db.vouchers.count_documents({"type": "pooled", "dropId": row["dropId"], "status": "free"})
-            row.update({"codesTotal": total, "codesFree": free})
-
-        items.append(row)
+        row = _admin_drop_summary(d, ref=ref)
+        if row:
+            items.append(row)
 
     return jsonify({"status": "ok", "items": items})
 
