@@ -289,6 +289,13 @@ def _as_aware_utc(dt):
             return parsed.replace(tzinfo=timezone.utc)
         return parsed.astimezone(timezone.utc)
     return None
+
+def _isoformat_kl(dt):
+    """Return an ISO string in Kuala Lumpur time for the given datetime/ISO value."""
+    aware = _as_aware_utc(dt)
+    if not aware:
+        return None
+    return aware.astimezone(KL_TZ).isoformat()
  
 def norm_username(u: str) -> str:
     if not u:
@@ -585,9 +592,9 @@ def user_visible_drops(user: dict, ref: datetime):
                 base["userClaimed"] = (row.get("status") == "claimed")
                 if base["userClaimed"]:
                     base["code"] = row.get("code")
-                    claimed_at = row.get("claimedAt")
+                    claimed_at = _isoformat_kl(row.get("claimedAt"))
                     if claimed_at:
-                        base["claimedAt"] = claimed_at.isoformat() if hasattr(claimed_at, "isoformat") else str(claimed_at)
+                        base["claimedAt"] = claimed_at
                 personal_cards.append(base)
         else:
             # pooled: if whitelist empty -> public; else usernameLower must be in whitelist
@@ -605,9 +612,9 @@ def user_visible_drops(user: dict, ref: datetime):
             if already:
                 base["userClaimed"] = True
                 base["code"] = already.get("code")
-                claimed_at = already.get("claimedAt")
+                claimed_at = _isoformat_kl(already.get("claimedAt"))
                 if claimed_at:
-                    base["claimedAt"] = claimed_at.isoformat() if hasattr(claimed_at, "isoformat") else str(claimed_at)
+                    base["claimedAt"] = claimed_at
                 base["remainingApprox"] = max(0, db.vouchers.count_documents({"type": "pooled", "dropId": drop_id, "status": "free"}))
                 pooled_cards.append(base)
             else:
@@ -637,7 +644,7 @@ def claim_personalised(drop_id: str, usernameLower: str, ref: datetime):
         "status": "claimed"
     })
     if existing:
-        return {"ok": True, "code": existing["code"], "claimedAt": existing["claimedAt"].isoformat()}
+        return {"ok": True, "code": existing["code"], "claimedAt": _isoformat_kl(existing.get("claimedAt"))}
 
     # Claim the assigned row atomically
     doc = db.vouchers.find_one_and_update(
@@ -664,9 +671,9 @@ def claim_personalised(drop_id: str, usernameLower: str, ref: datetime):
             "usernameLower": usernameLower
         })
         if already and already.get("status") == "claimed":
-            return {"ok": True, "code": already["code"], "claimedAt": already["claimedAt"].isoformat()}
+            return {"ok": True, "code": already["code"], "claimedAt": _isoformat_kl(already.get("claimedAt"))}
         return {"ok": False, "err": "not_eligible"}
-    return {"ok": True, "code": doc["code"], "claimedAt": doc["claimedAt"].isoformat()}
+    return {"ok": True, "code": doc["code"], "claimedAt": _isoformat_kl(doc.get("claimedAt"))}
 
 def claim_pooled(drop_id: str, usernameLower: str, ref: datetime):
     # Idempotent: if already claimed, return same code
@@ -676,7 +683,7 @@ def claim_pooled(drop_id: str, usernameLower: str, ref: datetime):
         "claimedBy": usernameLower
     })
     if existing:
-        return {"ok": True, "code": existing["code"], "claimedAt": existing["claimedAt"].isoformat()}
+        return {"ok": True, "code": existing["code"], "claimedAt": _isoformat_kl(existing.get("claimedAt"))}
 
     # Atomically reserve a free code
     doc = db.vouchers.find_one_and_update(
@@ -697,7 +704,7 @@ def claim_pooled(drop_id: str, usernameLower: str, ref: datetime):
     )
     if not doc:
         return {"ok": False, "err": "sold_out"}
-    return {"ok": True, "code": doc["code"], "claimedAt": doc["claimedAt"].isoformat()}
+    return {"ok": True, "code": doc["code"], "claimedAt": _isoformat_kl(doc.get("claimedAt"))}
 
 # ---- Public API routes ----
 @vouchers_bp.route("/vouchers/visible", methods=["GET"])
