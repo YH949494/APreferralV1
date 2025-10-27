@@ -1015,20 +1015,9 @@ def list_drops_v2():
         if err:
             return err
 
-    ref = now_utc()
     items = []
-    cursor = db.drops.find({
-        "$and": [
-            {"status": {"$nin": ["expired", "paused"]}},
-            {
-                "$or": [
-                    {"endsAt": {"$gt": ref}},
-                    {"endsAt": {"$exists": False}},
-                    {"endsAt": None},
-                ]
-            },
-        ]
-    }).sort([("priority", -1), ("startsAt", -1)])    for d in cursor:
+    cursor = db.drops.find({}).sort([("priority", -1), ("startsAt", -1)])
+    for d in cursor:
         items.append(_drop_to_json(d))
     return jsonify({"status": "ok", "items": items}), 200
     
