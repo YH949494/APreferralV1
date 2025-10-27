@@ -216,11 +216,15 @@ def _legacy_user_ctx(req):
 
 def _ctx_to_user(ctx: dict) -> dict:
     if not isinstance(ctx, dict):
-        return {"usernameLower": ""}
+        return {"usernameLower": "", "source": ""}
 
+    result = {"usernameLower": "", "source": ""}
+ 
     if "usernameLower" in ctx:
-        return {"usernameLower": ctx.get("usernameLower", "")}
-
+        result["usernameLower"] = ctx.get("usernameLower", "") or ""
+        result["source"] = ctx.get("legacySource") or ctx.get("adminSource") or ctx.get("source") or ""
+        return result
+     
     raw_user = ctx.get("user")
     if isinstance(raw_user, str):
         try:
@@ -235,8 +239,10 @@ def _ctx_to_user(ctx: dict) -> dict:
     if not isinstance(user_json, dict):
         user_json = {}
 
-    return {"usernameLower": norm_username(user_json.get("username", ""))}
-    
+    result["usernameLower"] = norm_username(user_json.get("username", ""))
+    result["source"] = "telegram"
+    return result
+ 
 def now_utc():
     return datetime.now(timezone.utc)
 
@@ -748,10 +754,14 @@ def api_visible():
             user = _ctx_to_user(ctx)
 
         if not user.get("usernameLower"):
+           source = user.get("source")
+            if source == "telegram":
+                return jsonify({"code": "auth_failed", "why": "missing_or_invalid_init_data"}), 401
+
             username = _guess_username(request)
             if not username:
                 return jsonify({"code": "auth_failed", "why": "missing_or_invalid_init_data"}), 401
-            user = {"usernameLower": username}
+            user = {"usernameLower": username, "source": "fallback"}
          
         drops = user_visible_drops(user, ref)
         return jsonify({"visibilityMode": "stacked", "nowUtc": ref.isoformat(), "drops": drops}), 200
