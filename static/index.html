@@ -1176,9 +1176,7 @@ function createCampaignCard(drop) {
       card.appendChild(claimedMeta);
     }
   } else {
-    if (drop?.adminPreview) {
-      message.textContent = `Previewing: ${drop?.name || "Campaign reward"}`;
-    } else if (canClaim) {
+    if (canClaim) {
       message.textContent = "Tap below to claim your reward.";
     } else {
       message.textContent = "This campaign will open soon. Please check back later!";
@@ -1271,23 +1269,14 @@ async function loadVouchers() {
       if (hasExtras) {
         messageText += "\n\nOther campaign rewards are listed below.";
       }
-      if (topDrop.code) {
-        showVoucherCopy(codeText);
-      } else {
-        resetVoucherButton();
-      }
     } else {
-      const canClaim = !!(topDrop?.isActive || topDrop?.adminPreview);
-      if (canClaim && dropId) {
-        messageText = topDrop?.adminPreview
-          ? `Previewing: ${topDrop?.name || "Campaign reward"}`
-          : "Tap below to claim your reward.";
-        showVoucherClaim(dropId, !topDrop?.isActive && !topDrop?.adminPreview);
+      const canClaim = !!topDrop?.isActive;
+      const isPreview = !!topDrop?.adminPreview;
+
+      if ((canClaim || isPreview) && dropId) {
+        messageText = "Tap below to claim your reward.";
       } else {
-        messageText = topDrop?.adminPreview
-          ? `Previewing: ${topDrop?.name || "Campaign reward"}`
-          : "A new campaign reward will appear soon. Please check back later!";
-        resetVoucherButton();
+        messageText = "A new campaign reward will appear soon. Please check back later!";
       }
 
       if (hasExtras) {
