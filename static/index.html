@@ -38,6 +38,11 @@
               style="flex:1;padding:8px 10px;border:none;border-radius:6px;background:#eaf4ff;color:#007bff;cursor:pointer;">
         ⭐ XP
       </button>
+      <!-- NEW: Rewards & Distribution (minimal highlight only) -->
+      <button class="tab-btn" data-tab="tab-rewards"
+              style="flex:1;padding:8px 10px;border:none;border-radius:6px;background:#eaf4ff;color:#007bff;cursor:pointer;">
+        🎟️ Rewards
+      </button>
       <button class="tab-btn" data-tab="tab-vip"
               style="flex:1;padding:8px 10px;border:none;border-radius:6px;background:#eaf4ff;color:#007bff;cursor:pointer;">
         👑 VIP Tier 1
@@ -61,6 +66,17 @@
             border-radius:6px; text-decoration:none; font-size:14px;">
     📜 View T&C
   </a>
+
+  <!-- NEW: simple distribution lines and #ComebackIsReal -->
+  <hr style="border:none;border-top:1px solid #ddd;margin:12px 0;">
+  <p style="margin:0 0 6px 0;"><b>🔥 #ComebackIsReal (Weekly)</b></p>
+  <ul style="margin:0 0 10px 0; padding:0; list-style:none; line-height:1.6;">
+    <li>Winners’ vouchers distributed <b>Every Thursday</b>.</li>
+  </ul>
+  <p style="margin:0 0 6px 0;"><b>🏆 Top 10 Weekly Active</b></p>
+  <ul style="margin:0; padding:0; list-style:none; line-height:1.6;">
+    <li>Vouchers distributed <b>Every Monday</b>.</li>
+  </ul>
 </div>
 
     <div id="tab-xp" class="tab-panel" style="display:none; text-align:left;">
@@ -95,6 +111,15 @@
 
   <ul style="margin:0; padding:0; list-style:none; line-height:1.6;">
     <li>- Weekly Top 10 = Extra Voucher</li>
+  </ul>
+</div>
+
+<!-- NEW: Rewards & Distribution (minimal) -->
+<div id="tab-rewards" class="tab-panel" style="display:none; text-align:left;">
+  <p style="margin-bottom:8px;"><b>🎟️ Rewards & Distribution</b></p>
+  <ul style="margin:0; padding:0; list-style:none; line-height:1.6;">
+    <li>🎁 <b>This week:</b> Free Spin</li>
+    <li>🔜 <b>Next week:</b> Free Bonus</li>
   </ul>
 </div>
 
@@ -208,7 +233,7 @@
 
         <div id="adm_pooled" style="margin-top:12px; display:none;">
           <p style="margin:0 0 6px 0; font-size:13px; color:#555;">Paste one voucher code per line or import CSV. Leave whitelist empty for public pool.</p>
-          <textarea id="adm_codes_text" rows="6" placeholder="CODE123" style="width:100%; padding:8px; border-radius:6px; border:1px solid #ccc; font-family:monospace;"></textarea>
+          <textarea id="adm_codes_text" rows="6" placeholder="CODE123" style="width:100%; padding:8px; border-radius:6px; border:1px solid:#ccc; font-family:monospace;"></textarea>
           <div style="display:flex; gap:8px; align-items:center; margin-top:6px;">
             <input id="adm_csv_codes" type="file" accept=".csv,.txt" style="flex:1;">
             <button id="adm_parse_codes_btn" type="button">Import CSV</button>
@@ -879,7 +904,7 @@ if (admParseCodesBtn) admParseCodesBtn.onclick = () => {
       const idx = header.findIndex(h => /code/.test(h));
       if (idx >= 0) {
         const out = [];
-        for (let i = 1; i < lines.length; i) {
+        for (let i = 1; i < lines.length; i++) {
           const cols = lines[i].split(/,|\t/).map(c => c.trim());
           if (cols[idx]) out.push(cols[idx]);
         }
