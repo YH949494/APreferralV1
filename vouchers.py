@@ -754,7 +754,7 @@ def api_visible():
             user = _ctx_to_user(ctx)
 
         if not user.get("usernameLower"):
-           source = user.get("source")
+            source = user.get("source")
             if source == "telegram":
                 return jsonify({"code": "auth_failed", "why": "missing_or_invalid_init_data"}), 401
 
