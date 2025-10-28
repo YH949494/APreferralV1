@@ -93,7 +93,7 @@ def _format_mention(u: dict) -> str:
 def _announce_text(u: dict, which: str, value: int) -> str:
     who = _format_mention(u)
     if which == "weekly_xp":
-        return f"🎉 {who} just hit <b>{value:,} weekly XP</b>! Keep it rolling! 💪"
+        return f"🎉 {who} just hit <b>{value:,} weekly XP</b>! On a streak! ⚡"
     else:  # which == "weekly_ref"
         return f"🚀 {who} reached <b>{value} weekly referrals</b>! Absolute legend! 🏆"
 
