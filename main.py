@@ -99,10 +99,25 @@ def _announce_text(u: dict, which: str, value: int) -> str:
 
 def _send_group_message_sync(text: str):
     try:
-        call_bot_in_loop(app_bot.bot.send_message(chat_id=GROUP_ID, text=text, parse_mode="HTML"))
+        call_bot_in_loop(
+            app_bot.bot.send_message(chat_id=GROUP_ID, text=text, parse_mode="HTML")
+        )
+        return
     except Exception as e:
-        print(f"[announce] send failed: {e}")
+        print(f"[announce] primary send failed: {e}; falling back to HTTP API")
 
+    try:
+        resp = requests.post(
+            f"{API_BASE}/sendMessage",
+            json={"chat_id": GROUP_ID, "text": text, "parse_mode": "HTML"},
+            timeout=10,
+        )
+        data = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
+        if not resp.ok or not data.get("ok"):
+            raise RuntimeError(data.get("description") or resp.text)
+    except Exception as http_err:
+        print(f"[announce] fallback send failed: {http_err}")
+        
 def _too_soon(u: dict, gap_minutes=2) -> bool:
     ts = u.get("last_shout_at")
     if not ts:
