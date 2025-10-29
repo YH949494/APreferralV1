@@ -208,13 +208,16 @@ def _legacy_user_ctx(req):
 
 def _ctx_to_user(ctx: dict) -> dict:
     if not isinstance(ctx, dict):
-        return {"usernameLower": "", "source": ""}
+        return {"usernameLower": "", "source": "", "userId": ""}
 
-    result = {"usernameLower": "", "source": ""}
- 
+    result = {"usernameLower": "", "source": "", "userId": ""}
+  
     if "usernameLower" in ctx:
         result["usernameLower"] = ctx.get("usernameLower", "") or ""
         result["source"] = ctx.get("legacySource") or ctx.get("adminSource") or ctx.get("source") or ""
+        user_id = ctx.get("userId") or ctx.get("user_id") or ctx.get("legacyUserId")
+        if user_id is not None:
+            result["userId"] = str(user_id).strip()
         return result
      
     raw_user = ctx.get("user")
@@ -231,8 +234,14 @@ def _ctx_to_user(ctx: dict) -> dict:
     if not isinstance(user_json, dict):
         user_json = {}
 
-    result["usernameLower"] = norm_username(user_json.get("username", ""))
+    user_id = str(user_json.get("id") or "").strip()
+    username_lower = norm_username(user_json.get("username", ""))
+    if not username_lower and user_id:
+        username_lower = user_id
+
+    result["usernameLower"] = username_lower
     result["source"] = "telegram"
+    result["userId"] = user_id
     return result
  
 def now_utc():
@@ -772,12 +781,16 @@ def api_visible():
         if not user.get("usernameLower"):
             source = user.get("source")
             if source == "telegram":
-                return jsonify({"code": "auth_failed", "why": "missing_or_invalid_init_data"}), 401
-
-            username = _guess_username(request)
-            if not username:
-                return jsonify({"code": "auth_failed", "why": "missing_or_invalid_init_data"}), 401
-            user = {"usernameLower": username, "source": "fallback"}
+                user_id = user.get("userId") or ""
+                if user_id:
+                    user["usernameLower"] = str(user_id)
+                else:
+                    return jsonify({"code": "auth_failed", "why": "missing_or_invalid_init_data"}), 401
+            else:
+                username = _guess_username(request)
+                if not username:
+                    return jsonify({"code": "auth_failed", "why": "missing_or_invalid_init_data"}), 401
+                user = {"usernameLower": username, "source": "fallback"}
          
         drops = user_visible_drops(user, ref)
         return jsonify({"visibilityMode": "stacked", "nowUtc": ref.isoformat(), "drops": drops}), 200
