@@ -1,10 +1,9 @@
 from flask import Blueprint, request, jsonify, current_app
 from pymongo import ASCENDING, DESCENDING, ReturnDocument
-from bson.objectid import ObjectId  
+from bson.objectid import ObjectId
 from datetime import datetime, timedelta, timezone
 from config import KL_TZ
-import hmac, hashlib, urllib.parse, os, json 
-from urllib.parse import parse_qs
+import hmac, hashlib, urllib.parse, os, json
 import config as _cfg 
  
 from database import db, users_collection
@@ -121,31 +120,23 @@ def _get_init_data(req) -> str:
     )
 
 def _verify_telegram_init_data(init_data: str) -> dict | None:
-    """DOES NOT crash if tokens are missing; simply returns None."""
+    """Legacy helper used by the voucher blueprint for Telegram auth."""
     if not init_data:
         return None
+     
     try:
-        data_map = {k: v[0] for k, v in parse_qs(init_data, keep_blank_values=True).items()}
-        received_hash = data_map.pop("hash", "")
-        # Telegram may append an additional `signature` field that should be
-        # excluded from the HMAC verification payload (similar to the newer
-        # verify_telegram_init_data implementation below). Keeping it in the
-        # payload breaks verification even when the hash is correct.
-        data_map.pop("signature", None)
-        data_check_pairs = [f"{k}={data_map[k]}" for k in sorted(data_map.keys())]
-        data_check_string = "\n".join(data_check_pairs)
+        ok, parsed, _ = verify_telegram_init_data(init_data)
 
-        def ok_for_token(token: str) -> bool:
-            if not token:
-                return False
-            secret_key = hashlib.sha256(token.encode()).digest()
-            h = hmac.new(secret_key, msg=data_check_string.encode(), digestmod=hashlib.sha256).hexdigest()
-            return h == received_hash
-
-        tokens = [t for t in [_BOT_TOKEN] + _BOT_TOKEN_FALLBACKS if t]
-        return data_map if any(ok_for_token(t) for t in tokens) else None
     except Exception:
         return None
+
+   if not ok:
+           return None
+
+       cleaned = dict(parsed)
+       cleaned.pop("hash", None)
+       cleaned.pop("signature", None)
+       return cleaned
 
 def _user_ctx_or_preview(req):
     """
@@ -429,7 +420,7 @@ def verify_telegram_init_data(init_data_raw: str):
     provided_signature = parsed.get("signature", [""])[0]
 
     if not provided_hash and not provided_signature:
-     return False, {}, "missing_hash"
+        return False, {}, "missing_hash"
 
     # Build the payload strings from all params except the integrity fields
     ordered_pairs = []
@@ -469,19 +460,36 @@ def verify_telegram_init_data(init_data_raw: str):
                 break
 
     if not ok and provided_signature:
+        provided_sig_bytes = b""
+     
         try:
-            padded = provided_signature + "=" * (-len(provided_signature) % 4)
-            decoded = base64.urlsafe_b64decode(padded.encode("ascii"))
+            provided_sig_bytes = base64.urlsafe_b64decode(padded.encode("ascii"))
             provided_sig_hex = decoded.decode("ascii")
         except Exception:
-            provided_sig_hex = ""
+            provided_sig_bytes = b""
 
-        if provided_sig_hex:
+        # Some legacy clients may base64-encode the hexadecimal string rather than
+        # the raw digest. If the decoded payload looks like ASCII hex (even length
+        # and all characters in 0-9a-f), treat it accordingly so old builds keep
+        # working, but prefer the raw-bytes comparison defined by Telegram.
+        provided_sig_hex = b""
+        if provided_sig_bytes and all(ch in b"0123456789abcdef" for ch in provided_sig_bytes.lower()) and len(provided_sig_bytes) % 2 == 0:
+            provided_sig_hex = provided_sig_bytes
+         
+        if provided_sig_bytes:
             for tok in candidates:
                 secret_key = hashlib.sha256(tok.encode()).digest()
                 webapp_secret = hmac.new(b"WebAppData", secret_key, hashlib.sha256).digest()
-                calc = hmac.new(webapp_secret, ampersand_string.encode(), hashlib.sha256).hexdigest()
-                if hmac.compare_digest(calc, provided_sig_hex):
+                calc_digest = hmac.new(webapp_secret, ampersand_string.encode(), hashlib.sha256).digest()
+
+                if provided_sig_hex:
+                    calc_hex = calc_digest.hex().encode("ascii")
+                    if hmac.compare_digest(calc_hex, provided_sig_hex):
+                        ok = True
+                        reason = "ok_signature_legacy"
+                        break
+
+                if hmac.compare_digest(calc_digest, provided_sig_bytes):
                     ok = True
                     reason = "ok_signature"
                     break
