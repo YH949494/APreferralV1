@@ -129,15 +129,15 @@ def _verify_telegram_init_data(init_data: str) -> dict | None:
 
     except Exception:
         return None
- 
+     
     if not ok:
-           return None
+        return None
 
-       cleaned = dict(parsed)
-       cleaned.pop("hash", None)
-       cleaned.pop("signature", None)
-       return cleaned
-
+    cleaned = dict(parsed)
+    cleaned.pop("hash", None)
+    cleaned.pop("signature", None)
+    return cleaned
+     
 
 def _user_ctx_or_preview(req):
     """
