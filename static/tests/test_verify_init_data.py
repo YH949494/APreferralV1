@@ -9,10 +9,10 @@ import time
 import types
 import unittest
 
-def _build_signature_hex(token: str, init_data: str) -> str:
+def _build_signature_bytes(token: str, init_data: str) -> bytes:
     secret_key = hashlib.sha256(token.encode()).digest()
     webapp_secret = hmac.new(b"WebAppData", secret_key, hashlib.sha256).digest()
-    return hmac.new(webapp_secret, init_data.encode(), hashlib.sha256).hexdigest()
+    return hmac.new(webapp_secret, init_data.encode(), hashlib.sha256).digest()
 
 
 def build_init_data(token: str, payload: dict, *, include_signature: bool = False) -> str:
@@ -26,8 +26,8 @@ def build_init_data(token: str, payload: dict, *, include_signature: bool = Fals
     query = payload.copy()
     query["hash"] = signature
     if include_signature:
-        signature_hex = _build_signature_hex(token, "&".join(pairs))
-        query["signature"] = base64.urlsafe_b64encode(signature_hex.encode()).decode().rstrip("=")
+        signature_bytes = _build_signature_bytes(token, "&".join(pairs))
+        query["signature"] = base64.urlsafe_b64encode(signature_bytes).decode().rstrip("=")
     return "&".join(f"{k}={query[k]}" for k in query)
 
 
