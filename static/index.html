@@ -1330,7 +1330,7 @@ document.addEventListener("click", async (e) => {
     try { payload = await res.json(); } catch {}
 
     if (res.status === 401) {
-      alert("Not authorized (401). Check ADMIN_PANEL_SECRET / admin allowlist.");
+      alert("Not authorized (401). Please set your Telegram username");
       return;
     }
     if (!res.ok || (payload && payload.status !== "ok")) {
