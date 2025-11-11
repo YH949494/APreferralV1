@@ -300,7 +300,6 @@ CORS(app, resources={r"/*": {"origins": "*"}})
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", "dev-secret")
 app.register_blueprint(vouchers_bp, url_prefix="/v2/miniapp")
 admin_bp = Blueprint("admin", __name__)
-app.register_blueprint(admin_bp)
 
 
 @admin_bp.get("/api/admin/joins/daily")
@@ -364,6 +363,9 @@ def joins_export():
         },
     )
     return jsonify(list(cur))
+
+
+app.register_blueprint(admin_bp)
     
 # ---- Always return JSON on errors (prevents "Invalid JSON") ----
 @app.errorhandler(HTTPException)
