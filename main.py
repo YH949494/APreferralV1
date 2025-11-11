@@ -1,6 +1,6 @@
 from flask import (
     Flask, request, jsonify, send_from_directory,
-    render_template, redirect, url_for, flash, g 
+    render_template, redirect, url_for, flash, g, Blueprint
 )
 from flask_cors import CORS
 from threading import Thread
@@ -219,6 +219,15 @@ def ensure_indexes():
         else:
             print("⚠️ ensure_indexes error:", e)
 
+    # --- joins tracking ---
+    db.joins.create_index([("user_id", 1), ("chat_id", 1), ("joined_at", -1)])
+    db.joins.create_index([("chat_id", 1), ("joined_at", -1)])
+    db.joins.create_index([("via_invite", 1)])
+
+    # --- optional welcome eligibility ---
+    db.welcome_eligibility.create_index([("user_id", 1)], unique=True)
+    db.welcome_eligibility.create_index([("expires_at", 1)], expireAfterSeconds=0)
+
 ensure_indexes()
 
 def get_or_create_referral_invite_link_sync(user_id: int, username: str = "") -> str:
@@ -290,7 +299,72 @@ app = Flask(__name__, static_folder="static")
 CORS(app, resources={r"/*": {"origins": "*"}})
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", "dev-secret")
 app.register_blueprint(vouchers_bp, url_prefix="/v2/miniapp")
+admin_bp = Blueprint("admin", __name__)
+app.register_blueprint(admin_bp)
 
+
+@admin_bp.get("/api/admin/joins/daily")
+def joins_daily():
+    ok, err = require_admin_from_query()
+    if not ok:
+        msg, code = err
+        return jsonify({"success": False, "message": msg}), code
+
+    chat_id = request.args.get("chat_id", type=int)
+    if chat_id is None:
+        return jsonify({"success": False, "message": "Missing chat_id"}), 400
+
+    days = request.args.get("days", default=14, type=int)
+    if days is None or days <= 0:
+        return jsonify({"success": False, "message": "days must be positive"}), 400
+
+    since = datetime.utcnow() - timedelta(days=days)
+    pipeline = [
+        {"$match": {"chat_id": chat_id, "event": "join", "joined_at": {"$gte": since}}},
+        {"$group": {"_id": {"$dateToString": {"format": "%Y-%m-%d", "date": "$joined_at"}}, "count": {"$sum": 1}}},
+        {"$sort": {"_id": 1}},
+    ]
+    rows = list(db.joins.aggregate(pipeline))
+    return jsonify({"chat_id": chat_id, "days": days, "data": rows})
+
+
+@admin_bp.get("/api/admin/joins/export")
+def joins_export():
+    ok, err = require_admin_from_query()
+    if not ok:
+        msg, code = err
+        return jsonify({"success": False, "message": msg}), code
+
+    chat_id = request.args.get("chat_id", type=int)
+    if chat_id is None:
+        return jsonify({"success": False, "message": "Missing chat_id"}), 400
+
+    date_from_raw = request.args.get("from")
+    date_to_raw = request.args.get("to")
+    if not date_from_raw or not date_to_raw:
+        return jsonify({"success": False, "message": "from/to required"}), 400
+
+    try:
+        date_from = datetime.fromisoformat(date_from_raw)
+        date_to = datetime.fromisoformat(date_to_raw)
+    except ValueError:
+        return jsonify({"success": False, "message": "Invalid date format"}), 400
+
+    cur = db.joins.find(
+        {"chat_id": chat_id, "joined_at": {"$gte": date_from, "$lt": date_to}, "event": "join"},
+        {
+            "_id": 0,
+            "user_id": 1,
+            "username": 1,
+            "first_name": 1,
+            "last_name": 1,
+            "joined_at": 1,
+            "via_invite": 1,
+            "invite_name": 1,
+        },
+    )
+    return jsonify(list(cur))
+    
 # ---- Always return JSON on errors (prevents "Invalid JSON") ----
 @app.errorhandler(HTTPException)
 def _json_http_exc(e):
