@@ -4,12 +4,43 @@ import os, time, json, sys, urllib.request, urllib.parse
 # ==== EDIT THESE ====
 IDS = [
     # Put your winners' Telegram user IDs here (one per line)
+    7757631741,
+    5054476478,
+    8185287772,
+    1162479573,
+    7151326844,
+    1910732976,
+    5239365353,
+    8088364292,
+    6777455736,
+    7658522740,
+    8145449580,
+    8083943145,
+    680802219,
+    748369969,
+    8129804262,
+    6414654745,
+    6826492614,
+    8055897142,
+    1642304620,
+    7926467781,
+    5995527993,
+    1576130217,
+    7655852815,
+    7037301349,
+    6894758863,
+    7935745386,
+    7328411807,
+    900607419,
+    8435549851,
+    1646401772,
+    6546099607，
     1329748443,
 ]
 
 MESSAGE = (
-    "Congrats! 🎉 You’re among our October winners.\n"
-    "Please submit your details so we can arrange your prize:\n"
+    "Congrats! 🎉 You’re among our AdvantPlay Community October Lucky Draw winners.\n"
+    "Please submit your details within 48hours so we can arrange your prize:\n"
     "https://forms.gle/ssz7JAwWTKzo16Cs5"
 )
 
