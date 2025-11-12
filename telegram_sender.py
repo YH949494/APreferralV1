@@ -23,6 +23,7 @@ from typing import List, Optional, Sequence
 
 import requests 
 
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
 API_BASE = "https://api.telegram.org/bot{token}/sendMessage"
 BUTTON_URL = "https://forms.gle/ssz7JAwWTKzo16Cs5"
 MESSAGE_TEMPLATE = (
