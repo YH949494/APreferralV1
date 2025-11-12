@@ -24,3 +24,4 @@ primary_region = "sin"
 
 [deploy]
   release_command = "python /app/app.py"
+ 
