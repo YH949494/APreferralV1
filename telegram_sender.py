@@ -21,9 +21,8 @@ import time
 from dataclasses import dataclass
 from typing import List, Optional, Sequence
 
-import requests 
+import requests
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
 API_BASE = "https://api.telegram.org/bot{token}/sendMessage"
 BUTTON_URL = "https://forms.gle/ssz7JAwWTKzo16Cs5"
 MESSAGE_TEMPLATE = (
@@ -153,6 +152,10 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         action="store_true",
         help="Parse inputs and show summary without sending messages",
     )
+        parser.add_argument(
+        "--token",
+        help="Telegram bot token. Defaults to BOT_TOKEN environment variable if omitted.",
+    )
     return parser.parse_args(argv)
 
 
@@ -220,7 +223,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(json.dumps({"sent": 0, "failed": 0, "total": total}))
         return 0
 
-    token = os.environ.get("BOT_TOKEN")
+    token = args.token or os.environ.get("BOT_TOKEN")
     try:
         sender = Sender(token=token)
     except ValueError as exc:
