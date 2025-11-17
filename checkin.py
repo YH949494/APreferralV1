@@ -2,7 +2,7 @@ from flask import request, jsonify
 from pymongo import MongoClient
 import os
 from datetime import datetime, timedelta, time
-from config import KL_TZ, XP_BASE_PER_CHECKIN, STREAK_MILESTONES
+from config import KL_TZ, XP_BASE_PER_CHECKIN, STREAK_MILESTONES, FIRST_CHECKIN_BONUS
 
 
 # MongoDB setup
@@ -29,11 +29,14 @@ def handle_checkin():
 
     if not user:
         # First-time user
+        total_xp = XP_BASE_PER_CHECKIN + FIRST_CHECKIN_BONUS
+
         users_collection.insert_one({
             "user_id": user_id,
             "username": username,
-            "xp": XP_BASE_PER_CHECKIN,
-            "weekly_xp": XP_BASE_PER_CHECKIN,
+            "xp": total_xp,
+            "weekly_xp": total_xp,
+            "monthly_xp": total_xp,
             "referral_count": 0,
             "weekly_referral_count": 0,
             "last_checkin": now,
@@ -41,7 +44,10 @@ def handle_checkin():
         })
         return jsonify({
             "success": True,
-            "message": f"✅ First check-in! +{XP_BASE_PER_CHECKIN} XP",
+            "message": (
+                f"✅ First check-in! +{XP_BASE_PER_CHECKIN} XP "
+                f"🎁 First-time bonus: +{FIRST_CHECKIN_BONUS} XP"
+            ),
             "next_checkin_time": next_midnight.isoformat()
         })
 
@@ -67,7 +73,7 @@ def handle_checkin():
         streak = 1  # First check-in ever
 
     # Bonus XP from unified milestone table
-   bonus_xp = STREAK_MILESTONES.get(streak, 0)
+    bonus_xp = STREAK_MILESTONES.get(streak, 0)
 
     total_xp = XP_BASE_PER_CHECKIN + bonus_xp
 
