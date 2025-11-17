@@ -23,13 +23,15 @@ from config import (
 from bson.json_util import dumps
 
 from apscheduler.schedulers.background import BackgroundScheduler
-from apscheduler.triggers.cron import CronTrigger 
+from apscheduler.triggers.cron import CronTrigger
 
 from vouchers import vouchers_bp, ensure_voucher_indexes
 
 from pymongo import MongoClient, DESCENDING  # keep if used elsewhere
 import os, asyncio, traceback, csv, io, requests
 import pytz
+
+FIRST_CHECKIN_BONUS_XP = int(os.getenv("FIRST_CHECKIN_BONUS_XP", "200"))
 
 # ----------------------------
 # Config
@@ -67,6 +69,7 @@ users_collection = db["users"]
 history_collection = db["weekly_leaderboard_history"]
 bonus_voucher_collection = db["bonus_voucher"]
 admin_cache_col = db["admin_cache"]
+xp_events_collection = db["xp_events"]
 
 def call_bot_in_loop(coro, timeout=15):
     loop = getattr(app_bot, "_running_loop", None)
@@ -183,7 +186,31 @@ def maybe_shout_milestones(user_id: int):
             # Optional: keep a lightweight log to spot suppressed sends in logs
             print(f"[Milestone] Suppressed (throttle) user_id={user_id} "
                   f"xp_hit={xp_hit} ref_hit={ref_hit}")
- 
+
+
+def add_xp(user_id: int, amount: int, reason: str):
+    now_utc = datetime.now(pytz.UTC)
+    users_collection.update_one(
+        {"user_id": user_id},
+        {
+            "$inc": {"xp": amount, "weekly_xp": amount, "monthly_xp": amount},
+            "$setOnInsert": {"user_id": user_id},
+        },
+        upsert=True,
+    )
+    xp_events_collection.insert_one(
+        {"user_id": user_id, "amount": amount, "reason": reason, "ts": now_utc}
+    )
+
+
+def maybe_give_first_checkin_bonus(user_id: int):
+    already = xp_events_collection.find_one(
+        {"user_id": user_id, "reason": "first_checkin_bonus"}
+    )
+    if already:
+        return
+
+    add_xp(user_id, FIRST_CHECKIN_BONUS_XP, reason="first_checkin_bonus")
         
 def ensure_indexes():
     """
@@ -227,6 +254,8 @@ def ensure_indexes():
     # --- optional welcome eligibility ---
     db.welcome_eligibility.create_index([("user_id", 1)], unique=True)
     db.welcome_eligibility.create_index([("expires_at", 1)], expireAfterSeconds=0)
+
+    xp_events_collection.create_index([("user_id", 1), ("reason", 1)])
 
 ensure_indexes()
 
@@ -455,6 +484,9 @@ async def process_checkin(user_id, username, region, update=None):
         streak += 1
     else:
         streak = 1
+
+        maybe_give_first_checkin_bonus(int(user_id))
+
 
     base_xp = XP_BASE_PER_CHECKIN
     bonus_xp = STREAK_MILESTONES.get(streak, 0)
