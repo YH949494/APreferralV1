@@ -1024,8 +1024,16 @@ if (admParseCodesBtn) admParseCodesBtn.onclick = () => {
       }
 
       try {
-        await navigator.clipboard.writeText(latestReferralLink);
-        alert("✅ Referral link copied!");
+        const caption = `🔥 Join AdvantPlay Community — Don’t Miss Out!
+✔ Weekly bonus voucher drops
+✔ Member-only events & challenges
+✔ Tips that help you play smarter
+
+Tap to join now 👇
+👉 ${latestReferralLink}`;
+
+        await navigator.clipboard.writeText(caption);
+        alert("Copy successful");
       } catch {
         alert("❌ Copy failed. Please copy manually.");
       }
