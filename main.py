@@ -722,6 +722,41 @@ def get_leaderboard():
         traceback.print_exc()
         return jsonify({"success": False, "error": str(e)}), 500
 
+
+@app.route("/api/checkin-status/<int:user_id>", methods=["GET"])
+def api_checkin_status(user_id):
+    """Return whether the user can check in now and the next reset time."""
+    tz_utc8 = pytz.timezone("Asia/Kuala_Lumpur")
+    now_utc8 = datetime.now(tz_utc8)
+    tomorrow_midnight = (now_utc8 + timedelta(days=1)).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    next_reset_iso = tomorrow_midnight.astimezone(pytz.UTC).isoformat()
+
+    user = users_collection.find_one({"user_id": int(user_id)}) or {}
+    last = user.get("last_checkin")
+    streak = int(user.get("streak", 0))
+
+    today_kl = datetime.now(KL_TZ).date()
+    last_kl_date = _to_kl_date(last)
+
+    if last_kl_date == today_kl:
+        # Already checked in today → show countdown to next midnight
+        return jsonify({
+            "success": True,
+            "can_check_in": False,
+            "message": f"⚠️ Already checked in today. 🔥 Streak: {streak} days.",
+            "next_checkin_time": next_reset_iso,
+        })
+
+    # Not checked in yet today
+    return jsonify({
+        "success": True,
+        "can_check_in": True,
+        "message": "🎉 You can check in now!",
+        "next_checkin_time": None,
+    })
+
 @app.route("/api/leaderboard/history/weeks", methods=["GET"])
 def get_all_weeks():
     """Return list of archived weeks available."""
