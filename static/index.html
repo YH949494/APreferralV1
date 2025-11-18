@@ -992,6 +992,30 @@ if (admParseCodesBtn) admParseCodesBtn.onclick = () => {
       }
     }
 
+    async function loadCheckinStatus() {
+      if (!userId) return;
+
+      const timerEl = document.getElementById("checkin-timer");
+      const resultEl = document.getElementById("checkin-result");
+
+      try {
+        const res = await fetch(`${API_BASE}/api/checkin-status/${userId}`);
+        const data = await res.json();
+
+        if (data.message && resultEl) {
+          resultEl.innerText = data.message;
+        }
+
+        if (data.next_checkin_time) {
+          startCountdown(data.next_checkin_time);
+        } else if (timerEl) {
+          timerEl.innerText = "🎉 You can check in now!";
+        }
+      } catch (err) {
+        console.error("Failed to load check-in status:", err);
+      }
+    }
+    
     async function getReferral() {
       const display = document.getElementById("referral-link");
       try {
@@ -1729,6 +1753,8 @@ window.onload = async () => {
   checkRegionStatus();
   handleAdminAndVoucher();
   loadLeaderboard();
+  loadCheckinStatus();
+
 
   loadVouchers();
   if (isAdminMode) {
