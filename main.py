@@ -1103,11 +1103,11 @@ def update_monthly_vip_status():
     all_users = users_collection.find()
   
     processed = 0
-    for user in all_users:
-        current_monthly_xp = user.get("monthly_xp", 0)  # ✅ Check monthly XP
+    for user in users_collection.find():
+        current_monthly_xp = user.get("monthly_xp", 0)
         next_status = "VIP1" if current_monthly_xp >= 800 else "Normal"
 
-         monthly_xp_history_collection.update_one(
+        monthly_xp_history_collection.update_one(
             {"user_id": user["user_id"], "month": snapshot_month},
             {
                 "$set": {
@@ -1123,6 +1123,7 @@ def update_monthly_vip_status():
             },
             upsert=True,
         )
+
        
         users_collection.update_one(
             {"user_id": user["user_id"]},
@@ -1130,13 +1131,16 @@ def update_monthly_vip_status():
                 "$set": {
                     "status": next_status,
                     "last_status_update": now_kl,
-                    "monthly_xp": 0  # ✅ Reset monthly XP
+                    "monthly_xp": 0,
                 }
-            }
+            },
         )
         processed += 1
 
-    print(f"✅ Monthly VIP status update complete. Processed {processed} users and stored history for {snapshot_month}.")
+    print(
+        "✅ Monthly VIP status update complete. "
+        f"Processed {processed} users and stored history for {snapshot_month}."
+    )
     
 # ----------------------------
 # Telegram Bot Handlers
