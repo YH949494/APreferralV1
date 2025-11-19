@@ -27,7 +27,7 @@ from apscheduler.triggers.cron import CronTrigger
 
 from vouchers import vouchers_bp, ensure_voucher_indexes
 
-from pymongo import MongoClient, DESCENDING  # keep if used elsewhere
+from pymongo import MongoClient, DESCENDING, ASCENDING  # keep if used elsewhere
 import os, asyncio, traceback, csv, io, requests
 import pytz
 
@@ -70,6 +70,9 @@ history_collection = db["weekly_leaderboard_history"]
 bonus_voucher_collection = db["bonus_voucher"]
 admin_cache_col = db["admin_cache"]
 xp_events_collection = db["xp_events"]
+monthly_xp_history_collection = db["monthly_xp_history"]
+monthly_xp_history_collection.create_index([("month", ASCENDING)])
+monthly_xp_history_collection.create_index([("user_id", ASCENDING), ("month", ASCENDING)], unique=True)
 
 def call_bot_in_loop(coro, timeout=15):
     loop = getattr(app_bot, "_running_loop", None)
@@ -1081,29 +1084,59 @@ def run_boot_catchup():
 
     except Exception as e:
         print(f"❌ Boot-time catch-up failed: {e}")
-        
+
+def _previous_month_key(dt):
+    """Return YYYY-MM string for the month that just ended."""
+    year = dt.year
+    month = dt.month - 1
+    if month == 0:
+        month = 12
+        year -= 1
+    return f"{year:04d}-{month:02d}"
+    
 def update_monthly_vip_status():
-    now = datetime.now(KL_TZ)
-    print(f"🔁 Running monthly VIP status update at {now}")
+    now_kl = datetime.now(KL_TZ)
+    now_utc = datetime.now(timezone.utc)
+    print(f"🔁 Running monthly VIP status update at {now_kl}")
 
+    snapshot_month = _previous_month_key(now_kl)    
     all_users = users_collection.find()
-
+  
+    processed = 0
     for user in all_users:
         current_monthly_xp = user.get("monthly_xp", 0)  # ✅ Check monthly XP
         next_status = "VIP1" if current_monthly_xp >= 800 else "Normal"
 
+         monthly_xp_history_collection.update_one(
+            {"user_id": user["user_id"], "month": snapshot_month},
+            {
+                "$set": {
+                    "user_id": user["user_id"],
+                    "username": user.get("username"),
+                    "month": snapshot_month,
+                    "monthly_xp": current_monthly_xp,
+                    "status_before_reset": user.get("status", "Normal"),
+                    "status_after_reset": next_status,
+                    "captured_at_utc": now_utc,
+                    "captured_at_kl": now_kl.isoformat(),
+                }
+            },
+            upsert=True,
+        )
+       
         users_collection.update_one(
             {"user_id": user["user_id"]},
             {
                 "$set": {
                     "status": next_status,
-                    "last_status_update": now,
+                    "last_status_update": now_kl,
                     "monthly_xp": 0  # ✅ Reset monthly XP
                 }
             }
         )
+        processed += 1
 
-    print("✅ Monthly VIP status update complete.")
+    print(f"✅ Monthly VIP status update complete. Processed {processed} users and stored history for {snapshot_month}.")
     
 # ----------------------------
 # Telegram Bot Handlers
