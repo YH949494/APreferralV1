@@ -5,6 +5,7 @@ from flask import (
 from flask_cors import CORS
 from threading import Thread
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
+from telegram.constants import ParseMode
 from html import escape as html_escape
 from telegram.ext import ( 
     ApplicationBuilder, CommandHandler, ChatMemberHandler,
@@ -41,6 +42,12 @@ MONGO_URL = os.environ.get("MONGO_URL")
 WEBAPP_URL = "https://apreferralv1.fly.dev/miniapp"
 GROUP_ID = -1002304653063
 API_BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"
+
+# ----------------------------
+# Xmas Gift Delight placeholders (easy to adjust)
+# ----------------------------
+CHANNEL_USERNAME = "@advantplayofficial"
+CHANNEL_ID = -1002396761021
 
 def _to_kl_date(dt_any):
     """Accepts aware/naive datetime or ISO string and returns date in KL."""
@@ -1145,8 +1152,54 @@ def update_monthly_vip_status():
 # ----------------------------
 # Telegram Bot Handlers
 # ----------------------------
+
+# Xmas Gift Delight helpers -----------------
+def _xmas_keyboard() -> InlineKeyboardMarkup:
+    """Inline keyboard for the Xmas Gift Delight flow."""
+    channel_url = f"https://t.me/{CHANNEL_USERNAME.lstrip('@')}"
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🔗 Join Channel", url=channel_url),
+            InlineKeyboardButton("✅ Check-in Now", callback_data="xmas_checkin"),
+        ]
+    ])
+
+
+async def _send_xmas_flow(update: Update, context: ContextTypes.DEFAULT_TYPE, user) -> None:
+    """Send the Xmas Gift Delight entry message and log campaign source."""
+    users_collection.update_one(
+        {"user_id": user.id},
+        {
+            "$set": {
+                "xmas_entry_source": "popup",
+                "updated_at": datetime.utcnow(),
+            },
+            "$setOnInsert": {"user_id": user.id},
+        },
+        upsert=True,
+    )
+
+    message = (
+        "🎄 Xmas Gift Delight\n"
+        "Join our official community & do one check-in to enter this week’s Christmas Gift Draw 🎁"
+    )
+
+    keyboard = _xmas_keyboard()
+    target_message = update.effective_message
+    if target_message:
+        await target_message.reply_text(message, reply_markup=keyboard)
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+    message = update.effective_message
+
+    # Handle deep links for the Xmas Gift Delight campaign
+    if context.args and len(context.args) > 0 and context.args[0].lower() == "xmasgift":
+        if user:
+            await _send_xmas_flow(update, context, user)
+        return
+
     if user:
         users_collection.update_one(
             {"user_id": user.id},
@@ -1154,7 +1207,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "username": user.username,
                 "xp": 0,
                 "weekly_xp": 0,
-                "monthly_xp": 0, 
+                "monthly_xp": 0,
                 "referral_count": 0,
                 "last_checkin": None
             }},
@@ -1163,11 +1216,67 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = [[
             InlineKeyboardButton("🚀 Open Check-in & Referral", web_app=WebAppInfo(url=WEBAPP_URL))
         ]]
-        await update.message.reply_text(
-    "👋 Welcome! Tap the button below to check-in and get your referral link 👇",
-    reply_markup=InlineKeyboardMarkup(keyboard)
-)
+        if message:
+            await message.reply_text(
+                "👋 Welcome! Tap the button below to check-in and get your referral link 👇",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
 
+async def handle_xmas_checkin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Xmas Gift Delight check-in flow triggered via inline keyboard."""
+    query = update.callback_query
+    user = query.from_user
+
+    await query.answer()
+
+    try:
+        member = await context.bot.get_chat_member(CHANNEL_ID, user.id)
+        status = member.status
+    except Exception as e:
+        status = None
+        print(f"[xmas_checkin] get_chat_member error: {e}")
+
+    allowed_statuses = {"member", "administrator", "creator"}
+    if status not in allowed_statuses:
+        warning_text = (
+            "👋 You haven’t joined our channel yet.\n"
+            "Please tap Join Channel first, then press Check-in Now again to enter this week’s Xmas Gift Draw 🎁"
+        )
+        await query.edit_message_text(
+            warning_text,
+            reply_markup=_xmas_keyboard(),
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    now = datetime.utcnow()
+    iso_calendar = now.isocalendar()
+    updates = {
+        "xmas_checked_in": True,
+        "xmas_year": iso_calendar.year,
+        "xmas_week": iso_calendar.week,
+        "xmas_checkin_at": now,
+        "updated_at": now,
+    }
+    if now.month == 12:
+        updates["is_new_in_dec"] = True
+
+    users_collection.update_one(
+        {"user_id": user.id},
+        {
+            "$set": updates,
+            "$setOnInsert": {"user_id": user.id},
+        },
+        upsert=True,
+    )
+
+    success_text = (
+        "✅ Check-in successful!\n\n"
+        "You’ve entered this week’s Xmas Gift Delight draw 🎄\n"
+        "20 new players will be selected and contacted by this bot. Good luck! 🍀"
+    )
+    await query.edit_message_text(success_text)
+    
 async def member_update_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     member = update.chat_member
     user = member.new_chat_member.user
@@ -1298,6 +1407,7 @@ if __name__ == "__main__":
     # 3) Telegram handlers
     app_bot.add_handler(CommandHandler("start", start))
     app_bot.add_handler(ChatMemberHandler(member_update_handler, ChatMemberHandler.CHAT_MEMBER))
+    app_bot.add_handler(CallbackQueryHandler(handle_xmas_checkin, pattern="^xmas_checkin$"))
     app_bot.add_handler(CallbackQueryHandler(button_handler))
 
     # 4) Scheduler (KL time for human-facing schedules)
