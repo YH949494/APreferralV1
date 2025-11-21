@@ -1287,7 +1287,7 @@ async def handle_xmas_checkin(update: Update, context: ContextTypes.DEFAULT_TYPE
     success_text = (
         "✅ Check-in successful!\n\n"
         "You’ve entered this week’s Xmas Gift Delight draw 🎄\n"
-        "20 new players will be selected and contacted by this bot. Good luck! 🍀"
+        "60-75 new players will be selected and contacted by this bot. Good luck! 🍀"
     )
     await query.edit_message_text(success_text)
     
