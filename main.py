@@ -49,6 +49,9 @@ API_BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"
 CHANNEL_USERNAME = "@advantplayofficial"
 CHANNEL_ID = -1002396761021
 
+XMAS_CAMPAIGN_START = datetime(2025, 12, 1)
+XMAS_CAMPAIGN_END = datetime(2025, 12, 31, 23, 59, 59)
+
 def _to_kl_date(dt_any):
     """Accepts aware/naive datetime or ISO string and returns date in KL."""
     if dt_any is None:
@@ -1167,14 +1170,30 @@ def _xmas_keyboard() -> InlineKeyboardMarkup:
 
 async def _send_xmas_flow(update: Update, context: ContextTypes.DEFAULT_TYPE, user) -> None:
     """Send the Xmas Gift Delight entry message and log campaign source."""
+    now = datetime.utcnow()
+    existing_user = users_collection.find_one({"user_id": user.id})
+
+    if not existing_user:
+        is_new_joiner = True
+    else:
+        first_seen_at = existing_user.get("first_seen_at")
+        if first_seen_at and first_seen_at < XMAS_CAMPAIGN_START:
+            is_new_joiner = False
+        else:
+            is_new_joiner = True
+
     users_collection.update_one(
         {"user_id": user.id},
         {
+            "$setOnInsert": {
+                "user_id": user.id,
+                "first_seen_at": now,
+            },
             "$set": {
                 "xmas_entry_source": "popup",
-                "updated_at": datetime.utcnow(),
+                "xmas_is_new_joiner": is_new_joiner,
+                "updated_at": now,
             },
-            "$setOnInsert": {"user_id": user.id},
         },
         upsert=True,
     )
@@ -1251,23 +1270,18 @@ async def handle_xmas_checkin(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     now = datetime.utcnow()
     iso_calendar = now.isocalendar()
-    updates = {
-        "xmas_checked_in": True,
-        "xmas_year": iso_calendar.year,
-        "xmas_week": iso_calendar.week,
-        "xmas_checkin_at": now,
-        "updated_at": now,
-    }
-    if now.month == 12:
-        updates["is_new_in_dec"] = True
 
     users_collection.update_one(
         {"user_id": user.id},
         {
-            "$set": updates,
-            "$setOnInsert": {"user_id": user.id},
+            "$set": {
+                "xmas_checked_in": True,
+                "xmas_year": iso_calendar.year,
+                "xmas_week": iso_calendar.week,
+                "xmas_checkin_at": now,
+                "updated_at": now,
+            }
         },
-        upsert=True,
     )
 
     success_text = (
