@@ -26,7 +26,7 @@ def archive_weekly_leaderboard():
     week_key = now_kl.strftime("%Y-%W")  # e.g., "2025-42"
 
     checkin_list = list(db.users.find({}, {"_id": 0, "username": 1, "weekly_xp": 1}))
-    referral_list = list(db.users.find({}, {"_id": 0, "username": 1, "referral_count": 1}))
+    referral_list = list(db.users.find({}, {"_id": 0, "username": 1, "weekly_referral_count": 1}))
 
     snapshot = {
         "week": week_key,
