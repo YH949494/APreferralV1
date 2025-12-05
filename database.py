@@ -38,6 +38,7 @@ def init_user(user_id, username):
                 "xp": 0,                  # Lifetime XP
                 "weekly_xp": 0,           # Weekly XP
                 "monthly_xp": 0,          # Monthly XP ✅
+                "weekly_referral_count": 0,                
                 "last_checkin": None,
                 "referral_count": 0,
                 "status": "Normal",       # or "VIP1"
