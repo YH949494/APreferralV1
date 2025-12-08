@@ -33,6 +33,7 @@ import os, asyncio, traceback, csv, io, requests
 import pytz
 
 FIRST_CHECKIN_BONUS_XP = int(os.getenv("FIRST_CHECKIN_BONUS_XP", "200"))
+REFERRAL_REWARD_XP = int(os.getenv("REFERRAL_REWARD_XP", "30"))
 
 # ----------------------------
 # Config
@@ -80,6 +81,7 @@ history_collection = db["weekly_leaderboard_history"]
 bonus_voucher_collection = db["bonus_voucher"]
 admin_cache_col = db["admin_cache"]
 xp_events_collection = db["xp_events"]
+referrals_collection = db["referrals"]
 monthly_xp_history_collection = db["monthly_xp_history"]
 monthly_xp_history_collection.create_index([("month", ASCENDING)])
 monthly_xp_history_collection.create_index([("user_id", ASCENDING), ("month", ASCENDING)], unique=True)
@@ -201,8 +203,9 @@ def maybe_shout_milestones(user_id: int):
                   f"xp_hit={xp_hit} ref_hit={ref_hit}")
 
 
-def add_xp(user_id: int, amount: int, reason: str):
+def add_xp(user_id: int, amount: int, reason: str, extra_fields: dict | None = None):
     now_utc = datetime.now(pytz.UTC)
+    extras = extra_fields or {}
     users_collection.update_one(
         {"user_id": user_id},
         {
@@ -212,7 +215,13 @@ def add_xp(user_id: int, amount: int, reason: str):
         upsert=True,
     )
     xp_events_collection.insert_one(
-        {"user_id": user_id, "amount": amount, "reason": reason, "ts": now_utc}
+        {
+            "user_id": user_id,
+            "amount": amount,
+            "reason": reason,
+            "ts": now_utc,
+            **extras,
+        }
     )
 
 
@@ -224,6 +233,90 @@ def maybe_give_first_checkin_bonus(user_id: int):
         return
 
     add_xp(user_id, FIRST_CHECKIN_BONUS_XP, reason="first_checkin_bonus")
+
+
+
+def record_pending_referral(referrer_id: int | None, referred_user_id: int):
+    if not referrer_id or referrer_id == referred_user_id:
+        return
+
+    now = datetime.utcnow()
+    referrals_collection.update_one(
+        {"referred_user_id": referred_user_id},
+        {
+            "$setOnInsert": {
+                "referrer_id": referrer_id,
+                "referred_user_id": referred_user_id,
+                "status": "pending",
+                "created_at": now,
+            }
+        },
+        upsert=True,
+    )
+
+
+def grant_referral_rewards(referrer_id: int | None, referred_user_id: int):
+    if not referrer_id or referrer_id == referred_user_id:
+        return
+
+    unique_key = f"ref_reward:{referrer_id}:{referred_user_id}"
+    already = xp_events_collection.find_one(
+        {"user_id": referrer_id, "unique_key": unique_key}
+    )
+    if already:
+        return
+
+    users_collection.update_one(
+        {"user_id": referrer_id},
+        {
+            "$inc": {"referral_count": 1, "weekly_referral_count": 1},
+            "$setOnInsert": {"user_id": referrer_id},
+        },
+        upsert=True,
+    )
+
+    add_xp(
+        referrer_id,
+        REFERRAL_REWARD_XP,
+        reason="referral_valid",
+        extra_fields={
+            "referred_user_id": referred_user_id,
+            "unique_key": unique_key,
+        },
+    )
+
+    referrer = users_collection.find_one({"user_id": referrer_id}) or {}
+    total_referrals = referrer.get("referral_count", 0)
+
+    if total_referrals % 3 == 0:
+        add_xp(referrer_id, 200, reason="referral_bonus")
+        try:
+            call_bot_in_loop(
+                app_bot.bot.send_message(
+                    referrer_id,
+                    f"🎉 Congrats! You earned +200 XP bonus for reaching {total_referrals} referrals!",
+                )
+            )
+        except Exception as e:  # pragma: no cover - best effort notification
+            print(f"[Referral Bonus] Failed to send message: {e}")
+
+    try:
+        maybe_shout_milestones(int(referrer_id))
+    except (TypeError, ValueError):
+        pass
+
+
+def try_validate_referral_on_checkin(user_id: int):
+    ref_doc = referrals_collection.find_one({"referred_user_id": user_id})
+    if not ref_doc or ref_doc.get("status") == "valid":
+        return
+
+    updated = referrals_collection.update_one(
+        {"referred_user_id": user_id, "status": "pending"},
+        {"$set": {"status": "valid", "validated_at": datetime.utcnow()}},
+    )
+    if updated.modified_count == 1:
+        grant_referral_rewards(ref_doc.get("referrer_id"), user_id)
         
 def ensure_indexes():
     """
@@ -269,7 +362,16 @@ def ensure_indexes():
     db.welcome_eligibility.create_index([("expires_at", 1)], expireAfterSeconds=0)
 
     xp_events_collection.create_index([("user_id", 1), ("reason", 1)])
+    xp_events_collection.create_index(
+        [("user_id", 1), ("unique_key", 1)], unique=True, sparse=True
+    )
 
+    referrals_collection.create_index([("referred_user_id", 1)], unique=True)
+    referrals_collection.create_index([("status", 1), ("created_at", -1)])
+    referrals_collection.update_many(
+        {"status": {"$exists": False}}, {"$set": {"status": "pending"}}
+    )
+    
 ensure_indexes()
 
 def get_or_create_referral_invite_link_sync(user_id: int, username: str = "") -> str:
@@ -524,6 +626,7 @@ async def process_checkin(user_id, username, region, update=None):
         upsert=True
     )
     
+    try_validate_referral_on_checkin(int(user_id))
     maybe_shout_milestones(int(user_id))
 
     labels = {7: "🎉 7-day streak bonus!", 14: "🔥 14-day streak bonus!", 28: "🏆 28-day streak bonus!"}
@@ -1213,6 +1316,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     message = update.effective_message
 
+    referrer_id = None
+    if context.args:
+        for arg in context.args:
+            if arg.lower().startswith("ref="):
+                try:
+                    referrer_id = int(arg.split("=", 1)[1])
+                except (TypeError, ValueError):
+                    referrer_id = None
+                break
+    
     # Handle deep links for the Xmas Gift Delight campaign
     if context.args and len(context.args) > 0 and context.args[0].lower() == "xmasgift":
         if user:
@@ -1220,6 +1333,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if user:
+        record_pending_referral(referrer_id, user.id)        
         users_collection.update_one(
             {"user_id": user.id},
             {"$setOnInsert": {
@@ -1329,47 +1443,12 @@ async def member_update_handler(update: Update, context: ContextTypes.DEFAULT_TY
             referrer_id = int(invite_link.name.split("-")[1])
         elif invite_link and invite_link.invite_link:
             ref_doc = users_collection.find_one({"referral_invite_link": invite_link.invite_link})
-
             if ref_doc:
                 referrer_id = ref_doc["user_id"]
 
         if referrer_id:
-            users_collection.update_one(
-                {"user_id": referrer_id},
-                {
-                    "$inc": {
-                        "referral_count": 1,
-                        "weekly_referral_count": 1,
-                        "xp": 30,
-                        "weekly_xp": 30,
-                        "monthly_xp": 30
-                    }
-                }
-            )
-            
-            referrer = users_collection.find_one({"user_id": referrer_id})
-            
-            total_referrals = referrer.get("referral_count", 0)
-
-            if total_referrals % 3 == 0:
-                users_collection.update_one(
-                    {"user_id": referrer_id},
-                    {"$inc": {"xp": 200, "weekly_xp": 200, "monthly_xp": 200}}
-                )
-                try:
-                    await context.bot.send_message(
-                        referrer_id,
-                        f"🎉 Congrats! You earned +200 XP bonus for reaching {total_referrals} referrals!"
-                    )
-                except Exception as e:
-                    print(f"[Referral Bonus] Failed to send message: {e}")
-
-            try:
-                maybe_shout_milestones(int(referrer_id))
-            except (TypeError, ValueError):
-                pass
-
-            print(f"[Referral] {user.username} referred by {referrer_id}")
+            record_pending_referral(referrer_id, user.id)
+            print(f"[Referral] {user.username} referred by {referrer_id} (pending validation)")
         else:
             print(f"[Referral] No referrer found for {user.username}")
 
