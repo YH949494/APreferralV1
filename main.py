@@ -412,7 +412,8 @@ def ensure_indexes():
                 print("⚠️ xp_events unique_key index create failed after dedupe:", e2)
         else:
             print("⚠️ xp_events unique_key index create failed:", e)
-
+            
+    referrals_collection.create_index([("referrer_id", 1), ("status", 1)])
     referrals_collection.create_index([("referred_user_id", 1)], unique=True)
     referrals_collection.create_index([("status", 1), ("created_at", -1)])
     referrals_collection.update_many(
@@ -852,25 +853,66 @@ def get_leaderboard():
             return format_username(u, current_user_id, is_admin)
 
         top_checkins = users_collection.find(visible_filter).sort("weekly_xp", -1).limit(15)
-        top_referrals = users_collection.find(visible_filter).sort("weekly_referral_count", -1).limit(15)
 
+        # --- Referral leaderboard (validated only) ---
+        referral_limit = 15
+        valid_rows = list(referrals_collection.aggregate([
+            {"$match": {"status": "valid", "referrer_id": {"$exists": True}}},
+            {"$group": {"_id": "$referrer_id", "total_valid": {"$sum": 1}}},
+            {"$sort": {"total_valid": -1}},
+            {"$limit": referral_limit}
+        ]))
+
+        user_ids = [r["_id"] for r in valid_rows]
+        user_docs = users_collection.find({"user_id": {"$in": user_ids}})
+        user_map = {u["user_id"]: u for u in user_docs}
+
+        valid_map = {r["_id"]: r["total_valid"] for r in valid_rows}
+
+        total_all_map: dict[int, int] = {}
+        if is_admin:
+            total_all_rows = referrals_collection.aggregate([
+                {"$group": {"_id": "$referrer_id", "total_all": {"$sum": 1}}}
+            ])
+            total_all_map = {r["_id"]: r.get("total_all", 0) for r in total_all_rows}
+
+        referral_board = []
+        for ref_id, total_valid in valid_map.items():
+            user_doc = user_map.get(ref_id, {"user_id": ref_id})
+            formatted = safe_format(user_doc)
+            if not formatted:
+                continue
+
+            entry = {
+                "username": formatted,
+                "total_valid": total_valid,
+                "referrals": total_valid,  # backward-compatible alias
+            }
+
+            if is_admin:
+                entry["total_all"] = total_all_map.get(ref_id, total_valid)
+
+            referral_board.append(entry)
+            
         leaderboard = {
             "checkin": [
                 {"username": formatted, "xp": u.get("weekly_xp", 0)}
                 for u in top_checkins
                 if (formatted := safe_format(u))
             ],
-            "referral": [
-                {"username": formatted, "referrals": u.get("weekly_referral_count", 0)}
-                for u in top_referrals
-                if (formatted := safe_format(u))
-            ]
+            "referral": referral_board,
         }
+        
+        user_valid_referrals = referrals_collection.count_documents({
+            "referrer_id": current_user_id,
+            "status": "valid",
+        }) if current_user_id else 0
 
         user_stats = {
             "xp": user_record.get("weekly_xp", 0),
             "monthly_xp": user_record.get("monthly_xp", 0),
-            "referrals": user_record.get("weekly_referral_count", 0),
+            "referrals": user_valid_referrals,
+            "total_valid": user_valid_referrals,
             "status": user_record.get("status", "Normal")
         }
 
