@@ -234,8 +234,6 @@ def maybe_give_first_checkin_bonus(user_id: int):
 
     add_xp(user_id, FIRST_CHECKIN_BONUS_XP, reason="first_checkin_bonus")
 
-
-
 def record_pending_referral(referrer_id: int | None, referred_user_id: int):
     if not referrer_id or referrer_id == referred_user_id:
         return
@@ -323,6 +321,37 @@ def ensure_indexes():
     Ensure TTL index on bonus_voucher.end_time so docs auto-expire exactly at end_time.
     If an old index exists with different options, drop and recreate.
     """
+    def _dedupe_xp_events_unique_keys():
+        dup_groups = xp_events_collection.aggregate(
+            [
+                {"$match": {"unique_key": {"$exists": True}}},
+                {
+                    "$group": {
+                        "_id": {"user_id": "$user_id", "unique_key": "$unique_key"},
+                        "count": {"$sum": 1},
+                    }
+                },
+                {"$match": {"count": {"$gt": 1}}},
+            ]
+        )
+
+        removed = 0
+        for group in dup_groups:
+            crit = {
+                "user_id": group["_id"].get("user_id"),
+                "unique_key": group["_id"].get("unique_key"),
+            }
+            dup_docs = list(
+                xp_events_collection.find(crit).sort([("ts", 1), ("_id", 1)])
+            )
+            to_delete = [d["_id"] for d in dup_docs[1:]]
+            if to_delete:
+                xp_events_collection.delete_many({"_id": {"$in": to_delete}})
+                removed += len(to_delete)
+
+        if removed:
+            print(f"🔧 Removed {removed} duplicate xp_events with duplicate unique_key")
+
     idx_name = "ttl_end_time"
     try:
         bonus_voucher_collection.create_index(
@@ -362,9 +391,27 @@ def ensure_indexes():
     db.welcome_eligibility.create_index([("expires_at", 1)], expireAfterSeconds=0)
 
     xp_events_collection.create_index([("user_id", 1), ("reason", 1)])
-    xp_events_collection.create_index(
-        [("user_id", 1), ("unique_key", 1)], unique=True, sparse=True
-    )
+    try:
+        xp_events_collection.create_index(
+            [("user_id", 1), ("unique_key", 1)], unique=True, sparse=True
+        )
+    except Exception as e:
+        msg = str(e)
+        if "duplicate key error" in msg or "already exists with different options" in msg:
+            _dedupe_xp_events_unique_keys()
+            try:
+                xp_events_collection.drop_index("user_id_1_unique_key_1")
+            except Exception:
+                pass
+            try:
+                xp_events_collection.create_index(
+                    [("user_id", 1), ("unique_key", 1)], unique=True, sparse=True
+                )
+                print("✅ Recreated unique index on xp_events.unique_key after dedupe")
+            except Exception as e2:
+                print("⚠️ xp_events unique_key index create failed after dedupe:", e2)
+        else:
+            print("⚠️ xp_events unique_key index create failed:", e)
 
     referrals_collection.create_index([("referred_user_id", 1)], unique=True)
     referrals_collection.create_index([("status", 1), ("created_at", -1)])
