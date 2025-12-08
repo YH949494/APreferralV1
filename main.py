@@ -1440,9 +1440,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]]
         if message:
             await message.reply_text(
-                "👋 Welcome! Tap the button below to check-in and get your referral link 👇",
-                reply_markup=InlineKeyboardMarkup(keyboard)
-            )
+            "👋 Welcome to AdvantPlay Community!\n\n"
+            "Tap below to enter the Mini-App and:\n"
+            "• Check-in daily to earn XP\n"
+            "• Unlock your referral link\n"
+            "• Climb the weekly leaderboards\n\n"
+            "Start your journey here 👇",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+    )
 
 async def handle_xmas_checkin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Xmas Gift Delight check-in flow triggered via inline keyboard."""
