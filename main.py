@@ -49,6 +49,7 @@ API_BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"
 # ----------------------------
 CHANNEL_USERNAME = "@advantplayofficial"
 CHANNEL_ID = -1002396761021
+ALLOWED_CHANNEL_STATUSES = {"member", "administrator", "creator"}
 
 XMAS_CAMPAIGN_START = datetime(2025, 12, 1)
 XMAS_CAMPAIGN_END = datetime(2025, 12, 31, 23, 59, 59)
@@ -92,6 +93,22 @@ def call_bot_in_loop(coro, timeout=15):
         raise RuntimeError("Bot loop not running yet")
     fut = asyncio.run_coroutine_threadsafe(coro, loop)
     return fut.result(timeout=timeout)
+
+def is_user_in_channel(bot, user_id: int) -> bool:
+    try:
+        member = call_bot_in_loop(bot.get_chat_member(CHANNEL_ID, user_id))
+        return member.status in ALLOWED_CHANNEL_STATUSES
+    except Exception as e:  # pragma: no cover - best effort check
+        print(f"[Referral] Failed to check channel membership for {user_id}: {e}")
+        return False
+
+async def is_user_in_channel_async(bot, user_id: int) -> bool:
+    try:
+        member = await bot.get_chat_member(CHANNEL_ID, user_id)
+        return member.status in ALLOWED_CHANNEL_STATUSES
+    except Exception as e:  # pragma: no cover - best effort check
+        print(f"[Referral] Failed to check channel membership for {user_id}: {e}")
+        return False
 
 def _format_mention(u: dict) -> str:
     """Return a HTML-safe mention for announcements."""
@@ -303,15 +320,38 @@ def grant_referral_rewards(referrer_id: int | None, referred_user_id: int):
     except (TypeError, ValueError):
         pass
 
+def try_validate_referral_by_channel(user_id: int):
+    ref_doc = referrals_collection.find_one(
+        {"referred_user_id": user_id, "status": "pending"}
+    )
+    if not ref_doc:
+        return
 
-def try_validate_referral_on_checkin(user_id: int):
-    ref_doc = referrals_collection.find_one({"referred_user_id": user_id})
-    if not ref_doc or ref_doc.get("status") == "valid":
+    if not is_user_in_channel(app_bot.bot, user_id):
         return
 
     updated = referrals_collection.update_one(
-        {"referred_user_id": user_id, "status": "pending"},
-        {"$set": {"status": "valid", "validated_at": datetime.utcnow()}},
+        {"_id": ref_doc.get("_id")},
+        {"$set": {"status": "success", "validated_at": datetime.utcnow()}},
+    )
+    if updated.modified_count == 1:
+        grant_referral_rewards(ref_doc.get("referrer_id"), user_id)
+
+
+async def try_validate_referral_by_channel_async(user_id: int, bot):
+    ref_doc = referrals_collection.find_one(
+        {"referred_user_id": user_id, "status": "pending"}
+    )
+    if not ref_doc:
+        return
+
+    in_channel = await is_user_in_channel_async(bot, user_id)
+    if not in_channel:
+        return
+
+    updated = referrals_collection.update_one(
+        {"_id": ref_doc.get("_id")},
+        {"$set": {"status": "success", "validated_at": datetime.utcnow()}},
     )
     if updated.modified_count == 1:
         grant_referral_rewards(ref_doc.get("referrer_id"), user_id)
@@ -674,7 +714,7 @@ async def process_checkin(user_id, username, region, update=None):
         upsert=True
     )
     
-    try_validate_referral_on_checkin(int(user_id))
+    await try_validate_referral_by_channel_async(int(user_id), app_bot.bot)
     maybe_shout_milestones(int(user_id))
 
     labels = {7: "🎉 7-day streak bonus!", 14: "🔥 14-day streak bonus!", 28: "🏆 28-day streak bonus!"}
@@ -717,6 +757,8 @@ def api_checkin():
 
         if not user_id:
             return jsonify({"success": False, "error": "Missing user_id"}), 400
+ 
+        try_validate_referral_by_channel(int(user_id))
 
         user = users_collection.find_one({"user_id": int(user_id)})
         if not user or "region" not in user:
@@ -857,7 +899,7 @@ def get_leaderboard():
         # --- Referral leaderboard (validated only) ---
         referral_limit = 15
         valid_rows = list(referrals_collection.aggregate([
-            {"$match": {"status": "valid", "referrer_id": {"$exists": True}}},
+            {"$match": {"status": {"$in": ["success", "valid"]}, "referrer_id": {"$exists": True}}},
             {"$group": {"_id": "$referrer_id", "total_valid": {"$sum": 1}}},
             {"$sort": {"total_valid": -1}},
             {"$limit": referral_limit}
@@ -905,7 +947,7 @@ def get_leaderboard():
         
         user_valid_referrals = referrals_collection.count_documents({
             "referrer_id": current_user_id,
-            "status": "valid",
+            "status": {"$in": ["success", "valid"]},
         }) if current_user_id else 0
 
         user_stats = {
@@ -1422,7 +1464,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if user:
-        record_pending_referral(referrer_id, user.id)        
+        record_pending_referral(referrer_id, user.id)
+        await try_validate_referral_by_channel_async(user.id, context.bot)
         users_collection.update_one(
             {"user_id": user.id},
             {"$setOnInsert": {
