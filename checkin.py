@@ -5,7 +5,7 @@ from flask import jsonify, request
 from pymongo import MongoClient
 
 from config import KL_TZ, XP_BASE_PER_CHECKIN, STREAK_MILESTONES, FIRST_CHECKIN_BONUS
-
+from xp import grant_xp
 
 # MongoDB setup
 MONGO_URL = os.environ.get("MONGO_URL")
@@ -28,33 +28,10 @@ def handle_checkin():
     next_midnight = datetime.combine(today + timedelta(days=1), time(0, 0, 0, tzinfo=KL_TZ))
 
     user = users_collection.find_one({"user_id": user_id})
+    first_checkin = not user
 
-    if not user:
-        # First-time user
-        total_xp = XP_BASE_PER_CHECKIN + FIRST_CHECKIN_BONUS
-
-        users_collection.insert_one({
-            "user_id": user_id,
-            "username": username,
-            "xp": total_xp,
-            "weekly_xp": total_xp,
-            "monthly_xp": total_xp,
-            "referral_count": 0,
-            "weekly_referral_count": 0,
-            "last_checkin": now,
-            "streak": 1
-        })
-        return jsonify({
-            "success": True,
-            "message": (
-                f"✅ First check-in! +{XP_BASE_PER_CHECKIN} XP "
-                f"🎁 First-time bonus: +{FIRST_CHECKIN_BONUS} XP"
-            ),
-            "next_checkin_time": next_midnight.isoformat()
-        })
-
-    last_checkin = user.get("last_checkin")
-    streak = user.get("streak", 0)
+    last_checkin = user.get("last_checkin") if user else None
+    streak = user.get("streak", 0) if user else 0
 
     if last_checkin:
         last_date = last_checkin.astimezone(KL_TZ).date()
@@ -77,8 +54,6 @@ def handle_checkin():
     # Bonus XP from unified milestone table
     bonus_xp = STREAK_MILESTONES.get(streak, 0)
 
-    total_xp = XP_BASE_PER_CHECKIN + bonus_xp
-
     users_collection.update_one(
         {"user_id": user_id},
         {
@@ -87,17 +62,33 @@ def handle_checkin():
                 "last_checkin": now,
                 "streak": streak
             },
-            "$inc": {
-                "xp": total_xp,
-                "weekly_xp": total_xp,
-                "monthly_xp": total_xp
+            "$setOnInsert": {
+                "referral_count": 0,
+                "weekly_referral_count": 0,
+                "weekly_xp": 0,
+                "monthly_xp": 0,
+                "xp": 0,
             }
-        }
+        },
+        upsert=True,
     )
 
+    checkin_key = f"checkin:{today.strftime('%Y%m%d')}"
+    total_xp = XP_BASE_PER_CHECKIN + bonus_xp
+    grant_xp(db, user_id, "checkin", checkin_key, total_xp)
+
+    if first_checkin:
+        grant_xp(db, user_id, "first_checkin", "first_checkin", FIRST_CHECKIN_BONUS)
+    
     bonus_text = f" 🎉 Streak Bonus: +{bonus_xp} XP!" if bonus_xp else ""
+        first_bonus_text = (
+        f" 🎁 First-time bonus: +{FIRST_CHECKIN_BONUS} XP" if first_checkin else ""
+    )
     return jsonify({
         "success": True,
-        "message": f"✅ Check-in successful! +{XP_BASE_PER_CHECKIN} XP{bonus_text}",
+        "message": (
+            f"✅ Check-in successful! +{XP_BASE_PER_CHECKIN} XP"
+            f"{bonus_text}{first_bonus_text}"
+        ),
         "next_checkin_time": next_midnight.isoformat()
     })
