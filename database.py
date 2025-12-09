@@ -2,6 +2,7 @@ from pymongo import MongoClient, ASCENDING
 import os
 import datetime
 import pytz  # use pytz (no ZoneInfo here)
+from xp import grant_xp
 
 KL_TZ = pytz.timezone("Asia/Kuala_Lumpur")
 
@@ -70,29 +71,27 @@ def checkin_user(user_id):
         {"user_id": user_id},
         {
             "$set": {"last_checkin": now},
-            "$inc": {
-                "xp": 20,           # Lifetime XP
-                "weekly_xp": 20,    # Weekly XP ✅
-                "monthly_xp": 20    # Monthly XP ✅
-            }
-        }
+            "$setOnInsert": {"xp": 0, "weekly_xp": 0, "monthly_xp": 0},
+        },
+        upsert=True,
     )
-
+    grant_xp(db, user_id, "checkin", f"checkin:{now.strftime('%Y%m%d')}", 20)
+    
 # === REFERRAL LOGIC ===
-def increment_referral(referrer_id):
+def increment_referral(referrer_id, referred_user_id=None):
     users_collection.update_one(
         {"user_id": referrer_id},
         {
             "$inc": {
                 "referral_count": 1,
                 "weekly_referral_count": 1,  # ✅ align with live app / weekly board
-                "xp": 20,            # Lifetime XP
-                "weekly_xp": 20,     # Weekly XP
-                "monthly_xp": 20     # Monthly XP
             }
         }
     )
-
+    ref_key = (
+        f"ref_success:{referred_user_id}" if referred_user_id else f"ref_success:{referrer_id}"
+    )
+    grant_xp(db, referrer_id, "ref_success", ref_key, 20)
 
 # === RETRIEVE STATS ===
 def get_user_stats(user_id):
@@ -107,7 +106,7 @@ def get_user_stats(user_id):
     }
 
 # === ADMIN XP CONTROL ===
-def update_user_xp(username, amount):
+def update_user_xp(username, amount, unique_key: str | None = None):
     # Match username case-insensitively
     user = users_collection.find_one({
         "username": { "$regex": f"^{username}$", "$options": "i" }
@@ -115,18 +114,12 @@ def update_user_xp(username, amount):
 
     if not user:
         return False, "User not found."
-
-    users_collection.update_one(
-        { "username": { "$regex": f"^{username}$", "$options": "i" } },
-        {
-            "$inc": {
-                "xp": amount,          # Lifetime XP
-                "weekly_xp": amount,   # Weekly XP ✅
-                "monthly_xp": amount   # Monthly XP ✅
-            }
-        }
-    )
-
+    key = unique_key or f"admin:{user['user_id']}:{username.lower()}:{amount}"
+    
+    granted = grant_xp(db, user["user_id"], "admin_adjust", key, amount)
+    if not granted:
+        return False, "Duplicate admin XP grant ignored."
+        
     return True, f"XP {'added' if amount > 0 else 'reduced'} by {abs(amount)}."
 
 def save_weekly_snapshot():
