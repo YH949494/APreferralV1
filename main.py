@@ -254,7 +254,7 @@ def grant_referral_rewards(referrer_id: int | None, referred_user_id: int):
         "ref_success",
         unique_key,
         REFERRAL_REWARD_XP,
-        
+    )        
     if not granted:
         return
 
