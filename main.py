@@ -22,6 +22,7 @@ from config import (
     WEEKLY_REFERRAL_BUCKET,
 )
 from bson.json_util import dumps
+from xp import ensure_xp_indexes, grant_xp, now_utc
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -34,6 +35,7 @@ import pytz
 
 FIRST_CHECKIN_BONUS_XP = int(os.getenv("FIRST_CHECKIN_BONUS_XP", "200"))
 REFERRAL_REWARD_XP = int(os.getenv("REFERRAL_REWARD_XP", "30"))
+WELCOME_BONUS_XP = int(os.getenv("WELCOME_BONUS_XP", "20"))
 
 # ----------------------------
 # Config
@@ -219,37 +221,8 @@ def maybe_shout_milestones(user_id: int):
             print(f"[Milestone] Suppressed (throttle) user_id={user_id} "
                   f"xp_hit={xp_hit} ref_hit={ref_hit}")
 
-
-def add_xp(user_id: int, amount: int, reason: str, extra_fields: dict | None = None):
-    now_utc = datetime.now(pytz.UTC)
-    extras = extra_fields or {}
-    users_collection.update_one(
-        {"user_id": user_id},
-        {
-            "$inc": {"xp": amount, "weekly_xp": amount, "monthly_xp": amount},
-            "$setOnInsert": {"user_id": user_id},
-        },
-        upsert=True,
-    )
-    xp_events_collection.insert_one(
-        {
-            "user_id": user_id,
-            "amount": amount,
-            "reason": reason,
-            "ts": now_utc,
-            **extras,
-        }
-    )
-
-
 def maybe_give_first_checkin_bonus(user_id: int):
-    already = xp_events_collection.find_one(
-        {"user_id": user_id, "reason": "first_checkin_bonus"}
-    )
-    if already:
-        return
-
-    add_xp(user_id, FIRST_CHECKIN_BONUS_XP, reason="first_checkin_bonus")
+    grant_xp(db, user_id, "first_checkin", "first_checkin", FIRST_CHECKIN_BONUS_XP)
 
 def record_pending_referral(referrer_id: int | None, referred_user_id: int):
     if not referrer_id or referrer_id == referred_user_id:
@@ -274,11 +247,15 @@ def grant_referral_rewards(referrer_id: int | None, referred_user_id: int):
     if not referrer_id or referrer_id == referred_user_id:
         return
 
-    unique_key = f"ref_reward:{referrer_id}:{referred_user_id}"
-    already = xp_events_collection.find_one(
-        {"user_id": referrer_id, "unique_key": unique_key}
-    )
-    if already:
+    unique_key = f"ref_success:{referred_user_id}"
+    granted = grant_xp(
+        db,
+        referrer_id,
+        "ref_success",
+        unique_key,
+        REFERRAL_REWARD_XP,
+        
+    if not granted:
         return
 
     users_collection.update_one(
@@ -290,21 +267,17 @@ def grant_referral_rewards(referrer_id: int | None, referred_user_id: int):
         upsert=True,
     )
 
-    add_xp(
-        referrer_id,
-        REFERRAL_REWARD_XP,
-        reason="referral_valid",
-        extra_fields={
-            "referred_user_id": referred_user_id,
-            "unique_key": unique_key,
-        },
-    )
-
     referrer = users_collection.find_one({"user_id": referrer_id}) or {}
     total_referrals = referrer.get("referral_count", 0)
 
     if total_referrals % 3 == 0:
-        add_xp(referrer_id, 200, reason="referral_bonus")
+        grant_xp(
+            db,
+            referrer_id,
+            "ref_bonus",
+            f"ref_bonus:{total_referrals}",
+            200,
+        )
         try:
             call_bot_in_loop(
                 app_bot.bot.send_message(
@@ -431,27 +404,7 @@ def ensure_indexes():
     db.welcome_eligibility.create_index([("expires_at", 1)], expireAfterSeconds=0)
 
     xp_events_collection.create_index([("user_id", 1), ("reason", 1)])
-    try:
-        xp_events_collection.create_index(
-            [("user_id", 1), ("unique_key", 1)], unique=True, sparse=True
-        )
-    except Exception as e:
-        msg = str(e)
-        if "duplicate key error" in msg or "already exists with different options" in msg:
-            _dedupe_xp_events_unique_keys()
-            try:
-                xp_events_collection.drop_index("user_id_1_unique_key_1")
-            except Exception:
-                pass
-            try:
-                xp_events_collection.create_index(
-                    [("user_id", 1), ("unique_key", 1)], unique=True, sparse=True
-                )
-                print("✅ Recreated unique index on xp_events.unique_key after dedupe")
-            except Exception as e2:
-                print("⚠️ xp_events unique_key index create failed after dedupe:", e2)
-        else:
-            print("⚠️ xp_events unique_key index create failed:", e)
+    ensure_xp_indexes(db)
             
     referrals_collection.create_index([("referrer_id", 1), ("status", 1)])
     referrals_collection.create_index([("referred_user_id", 1)], unique=True)
@@ -694,25 +647,28 @@ async def process_checkin(user_id, username, region, update=None):
     base_xp = XP_BASE_PER_CHECKIN
     bonus_xp = STREAK_MILESTONES.get(streak, 0)
 
-    now_utc = datetime.now(pytz.UTC)
+    now_utc_ts = now_utc()
     users_collection.update_one(
         {"user_id": user_id},
         {
             "$set": {
                 "username": username,
                 "region": region,
-                "last_checkin": now_utc,
+                "last_checkin": now_utc_ts,
                 "streak": streak
             },
-            "$inc": {
-                "xp": base_xp + bonus_xp,
-                "weekly_xp": base_xp + bonus_xp,
-                "monthly_xp": base_xp + bonus_xp
+            "$max": {"longest_streak": streak},
+            "$setOnInsert": {
+                "weekly_xp": 0,
+                "monthly_xp": 0,
+                "xp": 0,
             },
-            "$max": {"longest_streak": streak}
         },
         upsert=True
     )
+
+    checkin_key = f"checkin:{today_kl.strftime('%Y%m%d')}"
+    grant_xp(db, user_id, "checkin", checkin_key, base_xp + bonus_xp)
     
     await try_validate_referral_by_channel_async(int(user_id), app_bot.bot)
     maybe_shout_milestones(int(user_id))
@@ -1117,7 +1073,8 @@ def api_add_xp():
     else:
         return jsonify({"success": False, "message": "Use @username format."}), 400
 
-    success, message = update_user_xp(username, amount)
+    idempotency_key = data.get("idempotency_key") or data.get("unique_key")
+    success, message = update_user_xp(username, amount, idempotency_key)
     return jsonify({"success": success, "message": message})
 
 @app.route("/api/join_requests")
@@ -1150,19 +1107,28 @@ def api_starterpack():
         if user.get("welcome_xp_claimed"):
             return jsonify({"success": False, "message": "⚠️ Starter Pack already claimed."})
 
-        # Give reward
         users_collection.update_one(
             {"user_id": int(user_id)},
             {
                 "$set": {"username": username, "welcome_xp_claimed": True},
-                "$inc": {"xp": 20, "weekly_xp": 20, "monthly_xp": 20},
+                "$setOnInsert": {"xp": 0, "weekly_xp": 0, "monthly_xp": 0},
             },
             upsert=True,
         )
 
+         granted = grant_xp(
+            db,
+            int(user_id),
+            "welcome_bonus",
+            "welcome_bonus",
+            WELCOME_BONUS_XP,
+        )
+        if not granted:
+            return jsonify({"success": False, "message": "⚠️ Starter Pack already claimed."})
+       
         return jsonify({
             "success": True,
-            "message": "🎁 Starter Pack claimed! +20 XP"
+            "message": f"🎁 Starter Pack claimed! +{WELCOME_BONUS_XP} XP"
         })
 
     except Exception as e:
@@ -1602,13 +1568,23 @@ async def button_handler(update, context):
             users_collection.update_one(
                 {"user_id": user_id},
                 {
-                    "$inc": {"xp": 20, "weekly_xp": 20, "monthly_xp": 20},
-                    "$set": {"welcome_xp_claimed": True}
+                    "$set": {"welcome_xp_claimed": True},
+                    "$setOnInsert": {"xp": 0, "weekly_xp": 0, "monthly_xp": 0},
                 },
                 upsert=True
             )
-            await query.edit_message_text("✅ You received +20 XP welcome bonus!")
-
+            granted = grant_xp(
+                db, user_id, "welcome_bonus", "welcome_bonus", WELCOME_BONUS_XP
+            )
+            if granted:
+                await query.edit_message_text(
+                    f"✅ You received +{WELCOME_BONUS_XP} XP welcome bonus!"
+                )
+            else:
+                await query.answer(
+                    "⚠️ You already claimed your welcome XP!", show_alert=True
+                )
+                
     elif query.data == "referral":
         from functools import partial
         loop = asyncio.get_running_loop()
