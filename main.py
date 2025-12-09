@@ -1116,7 +1116,7 @@ def api_starterpack():
             upsert=True,
         )
 
-         granted = grant_xp(
+        granted = grant_xp(
             db,
             int(user_id),
             "welcome_bonus",
