@@ -576,13 +576,22 @@ def get_active_drops(ref: datetime):
         "endsAt": {"$gt": ref}
     }))
 
-def user_visible_drops(user: dict, ref: datetime):
+def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None):
     usernameLower = user.get("usernameLower", "")
     drops = get_active_drops(ref)
 
     personal_cards = []
     pooled_cards = []
 
+    uname = ""
+    uid = None
+    if isinstance(tg_user, dict):
+        uname = (tg_user.get("username") or "").strip().lower()
+        try:
+            uid = int(tg_user["id"])
+        except Exception:
+            uid = None
+ 
     for d in drops:
         drop_id = str(d["_id"])
         dtype = d.get("type", "pooled")
@@ -599,10 +608,24 @@ def user_visible_drops(user: dict, ref: datetime):
             "userClaimed": False
         }
 
-        if dtype == "personalised":
-            # user must have an unclaimed OR claimed row to show the card (claimed -> show claimed state)
+        if dtype in ("personalised", "personalized"):
+            if dtype == "personalized":
+                v_uid   = d.get("assigned_to_user_id")
+                v_uname = (d.get("assigned_to_username") or "").lower()
+
+                if v_uid is not None:
+                    eligible = (uid is not None and uid == int(v_uid))
+                elif v_uname:
+                    eligible = bool(uname) and (uname == v_uname)
+                else:
+                    eligible = False
+
+                if not eligible:
+                    continue
+
+         # user must have an unclaimed OR claimed row to show the card (claimed -> show claimed state)
             row = db.vouchers.find_one({
-                "type": "personalised",
+                "type": {"$in": ["personalised", "personalized"]},
                 "dropId": drop_id,
                 "usernameLower": usernameLower
             })
@@ -775,9 +798,20 @@ def api_visible():
 
         # ---------- Normal user flow ----------
         user = {}
+        tg_user = {}
+     
         if ctx:
             user = _ctx_to_user(ctx)
 
+            raw_user = ctx.get("user") if isinstance(ctx, dict) else None
+            if isinstance(raw_user, str):
+                try:
+                    tg_user = json.loads(raw_user)
+                except Exception:
+                    tg_user = {}
+            elif isinstance(raw_user, dict):
+                tg_user = raw_user
+     
         if not user.get("usernameLower"):
             source = user.get("source")
             if source == "telegram":
@@ -792,7 +826,7 @@ def api_visible():
                     return jsonify({"code": "auth_failed", "why": "missing_or_invalid_init_data"}), 401
                 user = {"usernameLower": username, "source": "fallback"}
          
-        drops = user_visible_drops(user, ref)
+        drops = user_visible_drops(user, ref, tg_user=tg_user)
         return jsonify({"visibilityMode": "stacked", "nowUtc": ref.isoformat(), "drops": drops}), 200
 
     except Exception as e:
@@ -824,7 +858,7 @@ def claim_voucher_for_user(*, user_id: str, drop_id: str, username: str) -> dict
     usernameLower = norm_username(username)
     ref = now_utc()
 
-    if dtype == "personalised":
+    if dtype in ("personalised", "personalized"):
         res = claim_personalised(drop_id=drop_id, usernameLower=usernameLower, ref=ref)
         if res.get("ok"):
             return {"code": res["code"], "claimedAt": res["claimedAt"]}
@@ -896,10 +930,40 @@ def api_claim():
 
     user_id = str(user_raw.get("id") or "").strip()
     username = user_raw.get("username") or ""
-
+    uname = (user_raw.get("username") or "").strip().lower()
+ 
     fallback_username = _guess_username(request, body)
     fallback_user_id = _guess_user_id(request, body)
 
+    drop_id = body.get("dropId") or body.get("drop_id")
+    if not drop_id:
+        return jsonify({"status": "error", "code": "missing_drop_id"}), 400
+
+    voucher = db.drops.find_one({"_id": _coerce_id(drop_id)}) or {}
+
+    uid = None
+    try:
+        uid = int(user_raw.get("id"))
+    except Exception:
+        uid = None
+
+    v_uid   = voucher.get("assigned_to_user_id")
+    v_uname = (voucher.get("assigned_to_username") or "").lower()
+
+    allowed = True
+    if voucher.get("type") in ("personalised", "personalized"):
+        allowed = False
+        if v_uid is not None:
+            try:
+                allowed = (uid is not None and uid == int(v_uid))
+            except Exception:
+                allowed = False
+        elif v_uname:
+            allowed = bool(uname) and (uname == v_uname)
+
+    if not allowed:
+        return jsonify({"ok": False, "error": "unauthorized"}), 401
+ 
     if not username:
         username = fallback_username or ""
    
@@ -908,10 +972,6 @@ def api_claim():
 
     if not username:
         return jsonify({"status": "error", "code": "missing_username"}), 400
-     
-    drop_id = body.get("dropId") or body.get("drop_id")
-    if not drop_id:
-        return jsonify({"status": "error", "code": "missing_drop_id"}), 400
 
     # Claim
     try:
