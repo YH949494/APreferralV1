@@ -68,10 +68,19 @@ def grant_xp(
 def ensure_xp_indexes(db) -> None:
     """Ensure indexes used by XP bookkeeping are present."""
 
-    try:
-        db.xp_events.drop_index("user_id_1_unique_key_1")
-    except Exception:
-        pass
+    # Backward compatibility: clean up any existing indexes on
+    # (user_id, unique_key) so we can recreate the partial unique index with the
+    # correct name and options. Older deployments might have had the default
+    # index name or a different definition, which would cause create_index to
+    # raise OperationFailure on startup.
+    target_key = {"user_id": 1, "unique_key": 1}
+    for ix in db.xp_events.list_indexes():
+        if ix.get("key") == target_key:
+            try:
+                db.xp_events.drop_index(ix["name"])
+                logger.info("[XP] Dropped legacy index %s", ix["name"])
+            except Exception:
+                logger.exception("[XP] Failed dropping legacy xp_events index")
 
     db.xp_events.create_index(
         [("user_id", 1), ("unique_key", 1)],
