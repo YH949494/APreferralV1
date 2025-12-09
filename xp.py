@@ -86,7 +86,10 @@ def ensure_xp_indexes(db) -> None:
         [("user_id", 1), ("unique_key", 1)],
         name="uq_user_uniqueKey",
         unique=True,
-        partialFilterExpression={"unique_key": {"$ne": None}},
+        # Use $type to exclude null values from the unique constraint without
+        # relying on $ne (which can be unsupported for partial indexes on some
+        # MongoDB deployments).
+        partialFilterExpression={"unique_key": {"$type": "string"}},
     )
     db.xp_events.create_index(
         [("user_id", 1), ("created_at", -1)], name="user_createdAt"
