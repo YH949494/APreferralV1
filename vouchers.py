@@ -936,7 +936,7 @@ def api_claim():
     except Exception:
         user_raw = {}
 
-     tg_user = user_raw
+    tg_user = user_raw
 
     user_id = str(user_raw.get("id") or "").strip()
     username = user_raw.get("username") or ""
@@ -969,7 +969,7 @@ def api_claim():
             elif v_uname:
                 allowed = (uname != "" and uname == v_uname)
             else:
-             allowed = False
+                allowed = False
 
     if not allowed:
         print(f"[claim401] uid={uid} uname={uname} v_uid={v_uid} v_uname={v_uname}")
