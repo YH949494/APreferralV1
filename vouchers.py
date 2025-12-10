@@ -305,7 +305,15 @@ def norm_username(u: str) -> str:
     if u.startswith("@"):
         u = u[1:]
     return u.lower()
- 
+
+def norm_uname(s):
+    if not s:
+        return ""
+    s = s.strip()
+    if s.startswith("@"):
+        s = s[1:]
+    return s.lower()
+
 def _guess_username(req, body=None) -> str:
     body = body or {}
 
@@ -586,11 +594,11 @@ def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None
     uname = ""
     uid = None
     if isinstance(tg_user, dict):
-        uname = (tg_user.get("username") or "").strip().lower()
         try:
             uid = int(tg_user["id"])
         except Exception:
             uid = None
+        uname = norm_uname(tg_user.get("username"))
  
     for d in drops:
         drop_id = str(d["_id"])
@@ -611,12 +619,12 @@ def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None
         if dtype in ("personalised", "personalized"):
             if dtype == "personalized":
                 v_uid   = d.get("assigned_to_user_id")
-                v_uname = (d.get("assigned_to_username") or "").lower()
-
+                v_uname = norm_uname(d.get("assigned_to_username"))
+             
                 if v_uid is not None:
                     eligible = (uid is not None and uid == int(v_uid))
                 elif v_uname:
-                    eligible = bool(uname) and (uname == v_uname)
+                    eligible = (uname != "" and uname == v_uname)
                 else:
                     eligible = False
 
@@ -928,10 +936,16 @@ def api_claim():
     except Exception:
         user_raw = {}
 
+     tg_user = user_raw
+
     user_id = str(user_raw.get("id") or "").strip()
     username = user_raw.get("username") or ""
-    uname = (user_raw.get("username") or "").strip().lower()
- 
+    try:
+        uid = int(tg_user["id"])
+    except Exception:
+        uid = None
+    uname = norm_uname(tg_user.get("username"))
+
     fallback_username = _guess_username(request, body)
     fallback_user_id = _guess_user_id(request, body)
 
@@ -941,27 +955,24 @@ def api_claim():
 
     voucher = db.drops.find_one({"_id": _coerce_id(drop_id)}) or {}
 
-    uid = None
-    try:
-        uid = int(user_raw.get("id"))
-    except Exception:
-        uid = None
-
     v_uid   = voucher.get("assigned_to_user_id")
-    v_uname = (voucher.get("assigned_to_username") or "").lower()
+    v_uname = norm_uname(voucher.get("assigned_to_username"))
+
+    drop_type = voucher.get("type")
 
     allowed = True
-    if voucher.get("type") in ("personalised", "personalized"):
-        allowed = False
-        if v_uid is not None:
-            try:
+    if drop_type in ("personalised", "personalized"):
+        if drop_type == "personalized":
+            allowed = False
+            if v_uid is not None:
                 allowed = (uid is not None and uid == int(v_uid))
-            except Exception:
-                allowed = False
-        elif v_uname:
-            allowed = bool(uname) and (uname == v_uname)
+            elif v_uname:
+                allowed = (uname != "" and uname == v_uname)
+            else:
+             allowed = False
 
     if not allowed:
+        print(f"[claim401] uid={uid} uname={uname} v_uid={v_uid} v_uname={v_uname}")
         return jsonify({"ok": False, "error": "unauthorized"}), 401
  
     if not username:
