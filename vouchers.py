@@ -1,5 +1,6 @@
 from flask import Blueprint, request, jsonify, current_app
 from pymongo import ASCENDING, DESCENDING, ReturnDocument
+from pymongo.errors import OperationFailure
 from bson.objectid import ObjectId
 from datetime import datetime, timedelta, timezone
 from config import KL_TZ
@@ -257,10 +258,16 @@ def ensure_voucher_indexes():
     db.vouchers.create_index([("dropId", ASCENDING), ("usernameLower", ASCENDING)])
     db.vouchers.create_index([("dropId", ASCENDING), ("claimedBy", ASCENDING)])
     # Prevent multiple rows for the same user in a personalised drop
+    try:
+        db.vouchers.drop_index("uniq_personalised_assignment")
+    except OperationFailure:
+        pass
+     
     db.vouchers.create_index(
         [("type", ASCENDING), ("dropId", ASCENDING), ("usernameLower", ASCENDING)],
         unique=True,
-        name="uniq_personalised_assignment"
+        name="uniq_personalised_assignment",
+        partialFilterExpression={"type": "personalised"}
     )
 
 def parse_kl_local(dt_str: str):
@@ -378,6 +385,22 @@ def _extract_admin_secret() -> str:
         return query_secret.strip()
 
     return ""
+
+
+def _normalize_codes(codes):
+    """Strip whitespace/punctuation and drop duplicates while preserving order."""
+
+    cleaned = []
+    seen = set()
+
+    for raw in codes or []:
+        code = str(raw or "").strip().strip(",")
+        if not code or code in seen:
+            continue
+        seen.add(code)
+        cleaned.append(code)
+
+    return cleaned
 
 
 def _has_valid_admin_secret() -> bool:
@@ -1091,12 +1114,9 @@ def admin_create_drop():
         if docs:
             db.vouchers.insert_many(docs, ordered=False)
     else:
-        codes = data.get("codes") or []
+        codes = _normalize_codes(data.get("codes"))
         docs = []
         for c in codes:
-            c = (str(c) or "").strip()
-            if not c:
-                continue
             docs.append({
                 "type": "pooled",
                 "dropId": str(drop_id),
@@ -1204,12 +1224,9 @@ def admin_add_codes(drop_id):
         if docs:
             db.vouchers.insert_many(docs, ordered=False)
     else:
-        codes = data.get("codes") or []
+        codes = _normalize_codes(data.get("codes"))
         docs = []
         for c in codes:
-            c = (str(c) or "").strip()
-            if not c:
-                continue
             docs.append({
                 "type": "pooled",
                 "dropId": str(drop["_id"]),
