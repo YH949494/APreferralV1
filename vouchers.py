@@ -887,7 +887,6 @@ def claim_voucher_for_user(*, user_id: str, drop_id: str, username: str) -> dict
 
 
 @vouchers_bp.route("/vouchers/claim", methods=["POST"])
-@vouchers_bp.route("/vouchers/claim", methods=["POST"])
 def api_claim():
     # Accept both header names + query param
     body = request.get_json(silent=True) or {}
@@ -902,18 +901,15 @@ def api_claim():
         or body.get("initData")
         or ""
     )
-    
-    # 1. VERIFY TELEGRAM DATA (Strict Check)
     ok, data, why = verify_telegram_init_data(init_data)
 
-    # 2. ADMIN PREVIEW BYPASS (Only for testing with valid admin secret)
+    # Admin preview (for Postman/admin panel testing)
     admin_secret = (
         request.args.get("admin_secret")
         or request.headers.get("X-Admin-Secret")
         or body.get("admin_secret")
     )
     if (not ok) and _admin_secret_ok(admin_secret):
-        # Allow admin preview to simulate a user
         data = {
             "user": json.dumps({
                 "id": int(os.environ.get("PREVIEW_USER_ID", "999")),
@@ -922,34 +918,39 @@ def api_claim():
         }
         ok, why = True, "ok"
   
-    # 3. ❌ REMOVED FALLBACK LOGIC HERE
-    # The previous code that guessed the username is GONE.
-    
     if not ok:
-        # If init_data is invalid or expired, REJECT immediately.
+        fallback_username = _guess_username(request, body)
+        if fallback_username:
+            fallback_user_id = _guess_user_id(request, body) or fallback_username
+            data = {
+                "user": json.dumps({
+                    "id": fallback_user_id,
+                    "username": fallback_username,
+                })
+            }
+            ok, why = True, "fallback_username"
+
+    if not ok:
         return jsonify({"status": "error", "code": "auth_failed", "why": str(why)}), 401
 
-    # ---- From here on, we trust the user because 'ok' is True ----
-
-    # Parse Telegram user from the verified data
+    # Parse Telegram user
     try:
         user_raw = json.loads(data.get("user", "{}"))
     except Exception:
         user_raw = {}
 
     tg_user = user_raw
+
     user_id = str(user_raw.get("id") or "").strip()
     username = user_raw.get("username") or ""
-    
     try:
-        uid = int(tg_user.get("id", 0))
+        uid = int(tg_user["id"])
     except Exception:
         uid = None
     uname = norm_uname(tg_user.get("username"))
 
-    # We do NOT look at fallback params anymore
-    # fallback_username = _guess_username(request, body)
-    # fallback_user_id = _guess_user_id(request, body)
+    fallback_username = _guess_username(request, body)
+    fallback_user_id = _guess_user_id(request, body)
 
     drop_id = body.get("dropId") or body.get("drop_id")
     if not drop_id:
@@ -962,15 +963,12 @@ def api_claim():
 
     drop_type = voucher.get("type")
 
-    # Check Eligibility
     allowed = True
     if drop_type in ("personalised", "personalized"):
         if drop_type == "personalized":
             allowed = False
-            # Check ID match first (stronger)
             if v_uid is not None:
                 allowed = (uid is not None and uid == int(v_uid))
-            # Check Username match second
             elif v_uname:
                 allowed = (uname != "" and uname == v_uname)
             else:
@@ -980,6 +978,12 @@ def api_claim():
         print(f"[claim401] uid={uid} uname={uname} v_uid={v_uid} v_uname={v_uname}")
         return jsonify({"ok": False, "error": "unauthorized"}), 401
  
+    if not username:
+        username = fallback_username or ""
+   
+    if not user_id:
+        user_id = fallback_user_id or username or ""
+
     if not username:
         return jsonify({"status": "error", "code": "missing_username"}), 400
 
