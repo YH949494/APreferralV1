@@ -21,6 +21,17 @@ from config import (
     WEEKLY_XP_BUCKET,
     WEEKLY_REFERRAL_BUCKET,
 )
+
+from referral_rules import (
+    BASE_REFERRAL_XP,
+    REFERRAL_BONUS_INTERVAL,
+    REFERRAL_BONUS_XP,
+    ensure_referral_indexes,
+    grant_referral_rewards,
+    record_pending_referral,
+    validate_referral_if_eligible,
+)
+
 from bson.json_util import dumps
 from xp import ensure_xp_indexes, grant_xp, now_utc
 
@@ -34,7 +45,6 @@ import os, asyncio, traceback, csv, io, requests
 import pytz
 
 FIRST_CHECKIN_BONUS_XP = int(os.getenv("FIRST_CHECKIN_BONUS_XP", "200"))
-REFERRAL_REWARD_XP = int(os.getenv("REFERRAL_REWARD_XP", "30"))
 WELCOME_BONUS_XP = int(os.getenv("WELCOME_BONUS_XP", "20"))
 
 # ----------------------------
@@ -224,75 +234,6 @@ def maybe_shout_milestones(user_id: int):
 def maybe_give_first_checkin_bonus(user_id: int):
     grant_xp(db, user_id, "first_checkin", "first_checkin", FIRST_CHECKIN_BONUS_XP)
 
-def record_pending_referral(referrer_id: int | None, referred_user_id: int):
-    if not referrer_id or referrer_id == referred_user_id:
-        return
-
-    now = datetime.utcnow()
-    referrals_collection.update_one(
-        {"referred_user_id": referred_user_id},
-        {
-            "$setOnInsert": {
-                "referrer_id": referrer_id,
-                "referred_user_id": referred_user_id,
-                "status": "pending",
-                "created_at": now,
-            }
-        },
-        upsert=True,
-    )
-
-
-def grant_referral_rewards(referrer_id: int | None, referred_user_id: int):
-    if not referrer_id or referrer_id == referred_user_id:
-        return
-
-    unique_key = f"ref_success:{referred_user_id}"
-    granted = grant_xp(
-        db,
-        referrer_id,
-        "ref_success",
-        unique_key,
-        REFERRAL_REWARD_XP,
-    )        
-    if not granted:
-        return
-
-    users_collection.update_one(
-        {"user_id": referrer_id},
-        {
-            "$inc": {"referral_count": 1, "weekly_referral_count": 1},
-            "$setOnInsert": {"user_id": referrer_id},
-        },
-        upsert=True,
-    )
-
-    referrer = users_collection.find_one({"user_id": referrer_id}) or {}
-    total_referrals = referrer.get("referral_count", 0)
-
-    if total_referrals % 3 == 0:
-        grant_xp(
-            db,
-            referrer_id,
-            "ref_bonus",
-            f"ref_bonus:{total_referrals}",
-            200,
-        )
-        try:
-            call_bot_in_loop(
-                app_bot.bot.send_message(
-                    referrer_id,
-                    f"🎉 Congrats! You earned +200 XP bonus for reaching {total_referrals} referrals!",
-                )
-            )
-        except Exception as e:  # pragma: no cover - best effort notification
-            print(f"[Referral Bonus] Failed to send message: {e}")
-
-    try:
-        maybe_shout_milestones(int(referrer_id))
-    except (TypeError, ValueError):
-        pass
-
 def try_validate_referral_by_channel(user_id: int):
     ref_doc = referrals_collection.find_one(
         {"referred_user_id": user_id, "status": "pending"}
@@ -300,15 +241,18 @@ def try_validate_referral_by_channel(user_id: int):
     if not ref_doc:
         return
 
-    if not is_user_in_channel(app_bot.bot, user_id):
-        return
+    def _membership_check(_: int) -> bool:
+        return is_user_in_channel(app_bot.bot, user_id)
 
-    updated = referrals_collection.update_one(
-        {"_id": ref_doc.get("_id")},
-        {"$set": {"status": "success", "validated_at": datetime.utcnow()}},
+    granted = validate_referral_if_eligible(
+        db, referrals_collection, users_collection, user_id, _membership_check
     )
-    if updated.modified_count == 1:
-        grant_referral_rewards(ref_doc.get("referrer_id"), user_id)
+
+    if granted:
+        try:
+            maybe_shout_milestones(int(ref_doc.get("referrer_id")))
+        except Exception:
+            pass
 
 
 async def try_validate_referral_by_channel_async(user_id: int, bot):
@@ -322,13 +266,16 @@ async def try_validate_referral_by_channel_async(user_id: int, bot):
     if not in_channel:
         return
 
-    updated = referrals_collection.update_one(
-        {"_id": ref_doc.get("_id")},
-        {"$set": {"status": "success", "validated_at": datetime.utcnow()}},
+    granted = validate_referral_if_eligible(
+        db, referrals_collection, users_collection, user_id, lambda _: in_channel
     )
-    if updated.modified_count == 1:
-        grant_referral_rewards(ref_doc.get("referrer_id"), user_id)
-        
+
+    if granted:
+        try:
+            maybe_shout_milestones(int(ref_doc.get("referrer_id")))
+        except Exception:
+            pass
+
 def ensure_indexes():
     """
     Ensure TTL index on bonus_voucher.end_time so docs auto-expire exactly at end_time.
@@ -406,9 +353,7 @@ def ensure_indexes():
     xp_events_collection.create_index([("user_id", 1), ("reason", 1)])
     ensure_xp_indexes(db)
             
-    referrals_collection.create_index([("referrer_id", 1), ("status", 1)])
-    referrals_collection.create_index([("referred_user_id", 1)], unique=True)
-    referrals_collection.create_index([("status", 1), ("created_at", -1)])
+    ensure_referral_indexes(referrals_collection)
     referrals_collection.update_many(
         {"status": {"$exists": False}}, {"$set": {"status": "pending"}}
     )
