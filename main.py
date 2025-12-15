@@ -7,10 +7,11 @@ from threading import Thread
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from telegram.constants import ParseMode
 from html import escape as html_escape
-from telegram.ext import ( 
+from telegram.ext import (
     ApplicationBuilder, CommandHandler, ChatMemberHandler,
     CallbackQueryHandler, ContextTypes
 )
+from telegram.error import BadRequest
 from datetime import datetime, timedelta, timezone
 from werkzeug.exceptions import HTTPException
 
@@ -1410,6 +1411,14 @@ async def handle_xmas_checkin(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     await query.answer()
 
+    async def _safe_edit_message(text: str, **kwargs):
+        try:
+            await query.edit_message_text(text, **kwargs)
+        except BadRequest as e:
+            # Ignore Telegram's "message is not modified" error when users tap repeatedly
+            if "message is not modified" not in str(e).lower():
+                raise
+    
     try:
         member = await context.bot.get_chat_member(CHANNEL_ID, user.id)
         status = member.status
@@ -1423,7 +1432,7 @@ async def handle_xmas_checkin(update: Update, context: ContextTypes.DEFAULT_TYPE
             "👋 You haven’t joined our channel yet.\n"
             "Please tap Join Channel first, then press Check-in Now again to enter this week’s Xmas Gift Draw 🎁"
         )
-        await query.edit_message_text(
+        await _safe_edit_message(
             warning_text,
             reply_markup=_xmas_keyboard(),
             parse_mode=ParseMode.MARKDOWN,
@@ -1451,7 +1460,7 @@ async def handle_xmas_checkin(update: Update, context: ContextTypes.DEFAULT_TYPE
         "You’ve entered this week’s Xmas Gift Delight draw 🎄\n"
         "60-75 new players will be selected and contacted by this bot. Good luck! 🍀"
     )
-    await query.edit_message_text(success_text)
+    await _safe_edit_message(success_text)
     
 async def member_update_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     member = update.chat_member
