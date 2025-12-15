@@ -479,10 +479,13 @@ def verify_telegram_init_data(init_data_raw: str):
 
     if not ok and provided_signature:
         provided_sig_bytes = b""
+        decoded = b""
      
         try:
-            provided_sig_bytes = base64.urlsafe_b64decode(padded.encode("ascii"))
-            provided_sig_hex = decoded.decode("ascii")
+            padding = "=" * ((4 - len(provided_signature) % 4) % 4)
+            padded = provided_signature + padding
+            decoded = base64.urlsafe_b64decode(padded.encode("ascii"))
+            provided_sig_bytes = decoded
         except Exception:
             provided_sig_bytes = b""
 
