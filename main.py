@@ -1376,7 +1376,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if user:
-        record_pending_referral(referrer_id, user.id)
+        record_pending_referral(referrals_collection, referrer_id, user.id)
         await try_validate_referral_by_channel_async(user.id, context.bot)
         users_collection.update_one(
             {"user_id": user.id},
@@ -1504,7 +1504,7 @@ async def member_update_handler(update: Update, context: ContextTypes.DEFAULT_TY
                 referrer_id = ref_doc["user_id"]
 
         if referrer_id:
-            record_pending_referral(referrer_id, user.id)
+            record_pending_referral(referrals_collection, referrer_id, user.id)
             print(f"[Referral] {user.username} referred by {referrer_id} (pending validation)")
         else:
             print(f"[Referral] No referrer found for {user.username}")
