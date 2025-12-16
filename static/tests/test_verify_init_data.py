@@ -1,4 +1,3 @@
-import base64
 import hashlib
 import hmac
 import importlib
@@ -9,25 +8,16 @@ import time
 import types
 import unittest
 
-def _build_signature_bytes(token: str, init_data: str) -> bytes:
-    secret_key = hashlib.sha256(token.encode()).digest()
-    webapp_secret = hmac.new(b"WebAppData", secret_key, hashlib.sha256).digest()
-    return hmac.new(webapp_secret, init_data.encode(), hashlib.sha256).digest()
-
-
-def build_init_data(token: str, payload: dict, *, include_signature: bool = False) -> str:
+def build_init_data(token: str, payload: dict) -> str:
     pairs = []
     for key in sorted(payload.keys()):
         pairs.append(f"{key}={payload[key]}")
     check_string = "\n".join(pairs)
-    secret_key = hashlib.sha256(token.encode()).digest()
+    secret_key = hmac.new(token.encode(), b"WebAppData", hashlib.sha256).digest()
     signature = hmac.new(secret_key, check_string.encode(), hashlib.sha256).hexdigest()
 
     query = payload.copy()
     query["hash"] = signature
-    if include_signature:
-        signature_bytes = _build_signature_bytes(token, "&".join(pairs))
-        query["signature"] = base64.urlsafe_b64encode(signature_bytes).decode().rstrip("=")
     return "&".join(f"{k}={query[k]}" for k in query)
 
 
@@ -133,28 +123,6 @@ class VerifyInitDataTests(unittest.TestCase):
 
         self.assertFalse(ok)
         self.assertEqual(reason, "bot_token_missing")
-
-    def test_verify_accepts_signature_only(self):
-        token = "123:ABC"
-        self.vouchers._BOT_TOKEN = token
-        self.vouchers._BOT_TOKEN_FALLBACKS = []
-        os.environ.pop("BOT_TOKEN", None)
-        os.environ.pop("BOT_TOKEN_FALLBACKS", None)
-
-        payload = {
-            "auth_date": str(int(time.time())),
-            "query_id": "some-query",
-            "user": json.dumps({"id": 99, "username": "SignatureUser"}),
-        }
-        init_data = build_init_data(token, payload, include_signature=True)
-
-        # Strip the hash to ensure we rely solely on the signature branch
-        init_data = "&".join(part for part in init_data.split("&") if not part.startswith("hash="))
-
-        ok, data, reason = self.vouchers.verify_telegram_init_data(init_data)
-
-        self.assertTrue(ok, reason)
-        self.assertEqual(json.loads(data["user"])["username"], "SignatureUser")
 
 if __name__ == "__main__":
     unittest.main()
