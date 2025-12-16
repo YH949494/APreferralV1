@@ -634,6 +634,7 @@ def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None
  
     for d in drops:
         drop_id = str(d["_id"])
+        drop_id_variants = _drop_id_variants(d.get("_id"))    
         dtype = d.get("type", "pooled")
         is_active = is_drop_active(d, ref)
 
@@ -671,7 +672,7 @@ def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None
             # user must have an unclaimed OR claimed row to show the card (claimed -> show claimed state)
             row = db.vouchers.find_one({
                 "type": {"$in": ["personalised", "personalized"]},
-                "dropId": drop_id,
+                "dropId": {"$in": drop_id_variants},
                 "usernameLower": usernameLower
             })
             if row and is_active:
@@ -692,7 +693,7 @@ def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None
             # Need at least one free code OR user already claimed (so they can see their code state)
             already = db.vouchers.find_one({
                 "type": "pooled",
-                "dropId": drop_id,
+                "dropId": {"$in": drop_id_variants},
                 "claimedBy": usernameLower
             })
             if already:
@@ -701,16 +702,16 @@ def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None
                 claimed_at = _isoformat_kl(already.get("claimedAt"))
                 if claimed_at:
                     base["claimedAt"] = claimed_at
-                base["remainingApprox"] = max(0, db.vouchers.count_documents({"type": "pooled", "dropId": drop_id, "status": "free"}))
+                base["remainingApprox"] = max(0, db.vouchers.count_documents({"type": "pooled", "dropId": {"$in": drop_id_variants}, "status": "free"}))
                 pooled_cards.append(base)
             else:
                 free_exists = db.vouchers.find_one({
                     "type": "pooled",
-                    "dropId": drop_id,
+                    "dropId": {"$in": drop_id_variants},
                     "status": "free"
                 }, projection={"_id": 1})
                 if free_exists:
-                    base["remainingApprox"] = max(0, db.vouchers.count_documents({"type": "pooled", "dropId": drop_id, "status": "free"}))
+                    base["remainingApprox"] = max(0, db.vouchers.count_documents({"type": "pooled", "dropId": {"$in": drop_id_variants}, "status": "free"}))
                     pooled_cards.append(base)
 
     # Sort: personalised first; then pooled by priority desc, startsAt asc
@@ -722,10 +723,12 @@ def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None
 
 # ---- Claim handlers ----
 def claim_personalised(drop_id: str, usernameLower: str, ref: datetime):
+    drop_id_variants = _drop_id_variants(drop_id)
+ 
     # Return existing if already claimed
     existing = db.vouchers.find_one({
         "type": "personalised",
-        "dropId": drop_id,
+        "dropId": {"$in": drop_id_variants},
         "usernameLower": usernameLower,
         "status": "claimed"
     })
@@ -736,7 +739,7 @@ def claim_personalised(drop_id: str, usernameLower: str, ref: datetime):
     doc = db.vouchers.find_one_and_update(
         {
             "type": "personalised",
-            "dropId": drop_id,
+            "dropId": {"$in": drop_id_variants},
             "usernameLower": usernameLower,
             "status": "unclaimed"
         },
@@ -753,7 +756,7 @@ def claim_personalised(drop_id: str, usernameLower: str, ref: datetime):
         # Maybe there is no assignment or it was already claimed; try fetching claimed again to idempotently return
         already = db.vouchers.find_one({
             "type": "personalised",
-            "dropId": drop_id,
+            "dropId": {"$in": drop_id_variants},
             "usernameLower": usernameLower
         })
         if already and already.get("status") == "claimed":
@@ -762,10 +765,12 @@ def claim_personalised(drop_id: str, usernameLower: str, ref: datetime):
     return {"ok": True, "code": doc["code"], "claimedAt": _isoformat_kl(doc.get("claimedAt"))}
 
 def claim_pooled(drop_id: str, usernameLower: str, ref: datetime):
+    drop_id_variants = _drop_id_variants(drop_id)
+ 
     # Idempotent: if already claimed, return same code
     existing = db.vouchers.find_one({
         "type": "pooled",
-        "dropId": drop_id,
+        "dropId": {"$in": drop_id_variants},
         "claimedBy": usernameLower
     })
     if existing:
@@ -775,7 +780,7 @@ def claim_pooled(drop_id: str, usernameLower: str, ref: datetime):
     doc = db.vouchers.find_one_and_update(
         {
             "type": "pooled",
-            "dropId": drop_id,
+            "dropId": {"$in": drop_id_variants},
             "status": "free"
         },
         {
@@ -1055,7 +1060,35 @@ def api_claim():
     
 # ---- Admin endpoints ----
 def _coerce_id(x):
-    return ObjectId(x) if ObjectId.is_valid(x) else x
+    if isinstance(x, ObjectId):
+        return x
+    try:
+        return ObjectId(x) if ObjectId.is_valid(x) else x
+    except Exception:
+        return x
+
+
+def _drop_id_variants(drop_id):
+    variants = []
+    if drop_id is None:
+        return [None]
+
+    variants.append(drop_id)
+    if isinstance(drop_id, ObjectId):
+        variants.append(str(drop_id))
+
+    coerced = _coerce_id(drop_id)
+    if coerced != drop_id:
+        variants.append(coerced)
+
+    seen = set()
+    unique = []
+    for v in variants:
+        if v in seen:
+            continue
+        seen.add(v)
+        unique.append(v)
+    return unique
 
 @vouchers_bp.route("/admin/drops", methods=["POST"])
 def admin_create_drop():
@@ -1178,6 +1211,7 @@ def _admin_drop_summary(doc: dict, *, ref=None, skip_expired=False):
         return None
 
     drop_id = str(doc["_id"])
+    drop_id_variants = _drop_id_variants(doc.get("_id"))
     summary = {
         "dropId": drop_id,
         "name": doc.get("name"),
@@ -1189,12 +1223,12 @@ def _admin_drop_summary(doc: dict, *, ref=None, skip_expired=False):
     }
 
     if summary["type"] == "personalised":
-        assigned = db.vouchers.count_documents({"type": "personalised", "dropId": drop_id})
-        claimed = db.vouchers.count_documents({"type": "personalised", "dropId": drop_id, "status": "claimed"})
+        assigned = db.vouchers.count_documents({"type": "personalised", "dropId": {"$in": drop_id_variants}})
+        claimed = db.vouchers.count_documents({"type": "personalised", "dropId": {"$in": drop_id_variants}, "status": "claimed"})
         summary.update({"assigned": assigned, "claimed": claimed})
     else:
-        total = db.vouchers.count_documents({"type": "pooled", "dropId": drop_id})
-        free = db.vouchers.count_documents({"type": "pooled", "dropId": drop_id, "status": "free"})
+        total = db.vouchers.count_documents({"type": "pooled", "dropId": {"$in": drop_id_variants}})
+        free = db.vouchers.count_documents({"type": "pooled", "dropId": {"$in": drop_id_variants}, "status": "free"})
         summary.update({"codesTotal": total, "codesFree": free})
 
     for key in ("whitelistUsernames", "visibilityMode"):
