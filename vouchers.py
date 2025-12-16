@@ -112,13 +112,34 @@ def _get_admin_secret(req) -> str:
         or req.args.get("admin_secret", "")
     )
 
-def _get_init_data(req) -> str:
-    return (
-        req.headers.get("X-Telegram-Web-App-Data")
-        or req.headers.get("X-Telegram-Init-Data")
-        or req.headers.get("X-Telegram-Init")
-        or req.args.get("init_data", "")
-    )
+def _extract_init_data(req, *, body: dict | None = None) -> str:
+    body = body or {}
+
+    for candidate in (
+        req.headers.get("X-Telegram-Web-App-Data"),
+        req.headers.get("X-Telegram-Init-Data"),
+        req.headers.get("X-Telegram-Init"),
+    ):
+        if candidate:
+            return str(candidate)
+
+    # Extract raw query parameter without pre-decoding to avoid double unquoting
+    raw_qs = (req.query_string or b"").decode("utf-8", "ignore")
+    if raw_qs:
+        for part in raw_qs.split("&"):
+            if part.startswith("init_data="):
+                return part.split("=", 1)[1]
+            if part.startswith("initData="):
+                return part.split("=", 1)[1]
+
+    for key in ("init_data", "initData"):
+        if key in body:
+            try:
+                return str(body.get(key) or "")
+            except Exception:
+                return ""
+
+    return ""
 
 def _verify_telegram_init_data(init_data: str) -> dict | None:
     """Legacy helper used by the voucher blueprint for Telegram auth."""
@@ -154,8 +175,8 @@ def _user_ctx_or_preview(req):
     if payload:
         return (payload, True)
   
- # Telegram path
-    parsed = _verify_telegram_init_data(_get_init_data(req))
+# Telegram path
+    parsed = _verify_telegram_init_data(_extract_init_data(req))
     if parsed:
         return (parsed, False)
 
@@ -454,10 +475,19 @@ def _candidate_bot_tokens():
 def verify_telegram_init_data(init_data_raw: str):
     import urllib.parse, hmac, hashlib, time, os, base64
 
-    parsed = urllib.parse.parse_qs(init_data_raw or "", keep_blank_values=True)
+    raw_init_data = init_data_raw or ""
+    decoded_init_data = urllib.parse.unquote_plus(raw_init_data)
+
+    parsed = urllib.parse.parse_qs(decoded_init_data, keep_blank_values=True)
     provided_hash = parsed.get("hash", [""])[0]
     provided_signature = parsed.get("signature", [""])[0]
 
+    print(
+        f"[initdata] raw_len={len(raw_init_data)} decoded_len={len(decoded_init_data)} "
+        f"has_user={'user' in parsed} has_auth_date={'auth_date' in parsed} "
+        f"has_hash={'hash' in parsed} has_sig={'signature' in parsed}"
+    )
+ 
     if not provided_hash and not provided_signature:
         return False, {}, "missing_hash"
 
@@ -491,7 +521,7 @@ def verify_telegram_init_data(init_data_raw: str):
 
     if provided_hash:
         for tok in candidates:
-            secret_key = hashlib.sha256(tok.encode()).digest()
+            secret_key = hmac.new(b"WebAppData", tok.encode(), hashlib.sha256).digest()
             calc = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
             if hmac.compare_digest(calc, provided_hash):
                 ok = True
@@ -520,10 +550,9 @@ def verify_telegram_init_data(init_data_raw: str):
          
         if provided_sig_bytes:
             for tok in candidates:
-                secret_key = hashlib.sha256(tok.encode()).digest()
-                webapp_secret = hmac.new(b"WebAppData", secret_key, hashlib.sha256).digest()
-                calc_digest = hmac.new(webapp_secret, ampersand_string.encode(), hashlib.sha256).digest()
-
+                secret_key = hmac.new(b"WebAppData", tok.encode(), hashlib.sha256).digest()
+                calc_digest = hmac.new(secret_key, ampersand_string.encode(), hashlib.sha256).digest()
+             
                 if provided_sig_hex:
                     calc_hex = calc_digest.hex().encode("ascii")
                     if hmac.compare_digest(calc_hex, provided_sig_hex):
@@ -536,18 +565,41 @@ def verify_telegram_init_data(init_data_raw: str):
                     reason = "ok_signature"
                     break
     if not ok:
+        print("[initdata] hash_mismatch")   
         return False, {}, reason
 
     # Optional freshness check (24h)
     try:
         auth_date = int(parsed.get("auth_date", ["0"])[0])
         if time.time() - auth_date > 24 * 3600:
+            print("[initdata] auth_date_expired")         
             return False, {}, "expired_auth_date"
     except Exception:
         pass
 
-    return True, {k: v[0] for k, v in parsed.items()}, reason
-    
+    # Parse Telegram user JSON after integrity validation
+    user_raw = parsed.get("user", ["{}"])[0]
+    try:
+        user_json = json.loads(user_raw)
+    except Exception:
+        try:
+            user_json = json.loads(urllib.parse.unquote_plus(user_raw))
+        except Exception:
+            user_json = {}
+
+    if not isinstance(user_json, dict):
+        user_json = {}
+
+    user_id = str(user_json.get("id") or "").strip()
+    if not user_id:
+        print("[initdata] missing_user_id")
+        return False, {}, "missing_user_id"
+
+    parsed_flat = {k: v[0] for k, v in parsed.items()}
+    parsed_flat["user"] = json.dumps(user_json)
+
+    return True, parsed_flat, reason
+ 
 def _require_admin_via_query():
     payload = _payload_for_admin_query(request)
     if payload:
@@ -951,16 +1003,7 @@ def api_claim():
     # Accept both header names + query param
     body = request.get_json(silent=True) or {}
 
-    # Accept both header names + query param + JSON field fallback (for mobile fetch quirks)
-    init_data = (
-        request.args.get("init_data")
-        or request.headers.get("X-Telegram-Web-App-Data")
-        or request.headers.get("X-Telegram-Init")
-        or request.headers.get("X-Telegram-Init-Data")
-        or body.get("init_data")
-        or body.get("initData")
-        or ""
-    )
+    init_data = _extract_init_data(request, body=body)
     ok, data, why = verify_telegram_init_data(init_data)
 
     # Admin preview (for Postman/admin panel testing)
