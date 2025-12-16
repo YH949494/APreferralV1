@@ -124,5 +124,24 @@ class VerifyInitDataTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual(reason, "bot_token_missing")
 
+    def test_verify_accepts_signature_field(self):
+        token = "987:XYZ"
+        self.vouchers._BOT_TOKEN = token
+        self.vouchers._BOT_TOKEN_FALLBACKS = []
+        os.environ.pop("BOT_TOKEN", None)
+        os.environ.pop("BOT_TOKEN_FALLBACKS", None)
+
+        payload = {
+            "auth_date": str(int(time.time())),
+            "user": json.dumps({"id": 7, "username": "SigUser"}),
+        }
+
+        init_data = build_init_data(token, payload).replace("hash=", "signature=")
+
+        ok, data, reason = self.vouchers.verify_telegram_init_data(init_data)
+
+        self.assertTrue(ok, reason)
+        self.assertEqual(json.loads(data["user"])["id"], 7)
+
 if __name__ == "__main__":
     unittest.main()
