@@ -276,6 +276,11 @@ def ensure_voucher_indexes():
     db.vouchers.create_index([("dropId", ASCENDING), ("type", ASCENDING), ("status", ASCENDING)])
     db.vouchers.create_index([("dropId", ASCENDING), ("usernameLower", ASCENDING)])
     db.vouchers.create_index([("dropId", ASCENDING), ("claimedBy", ASCENDING)])
+    db.vouchers.create_index(
+        [("dropId", ASCENDING), ("claimedByKey", ASCENDING)],
+        name="claimed_by_key_per_drop",
+        partialFilterExpression={"status": "claimed", "claimedByKey": {"$exists": True}},
+    ) 
     # Prevent multiple rows for the same user in a personalised drop
     try:
         db.vouchers.drop_index("uniq_personalised_assignment")
@@ -630,7 +635,8 @@ def get_active_drops(ref: datetime):
 def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None):
     usernameLower = norm_username(user.get("usernameLower", ""))
     user_id = str(user.get("userId") or "").strip() if isinstance(user, dict) else ""
-    claim_key = usernameLower or user_id 
+    claim_key = usernameLower or user_id
+    pooled_claim_key = f"uid:{user_id}" if user_id else ""
     drops = get_active_drops(ref)
 
     personal_cards = []
@@ -650,7 +656,10 @@ def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None
             usernameLower = uname
             claim_key = claim_key or usernameLower
 
-        # Only hide personalised vouchers when the caller truly has no username
+        if not pooled_claim_key and uid is not None:
+            pooled_claim_key = f"uid:{uid}"
+ 
+    # Only hide personalised vouchers when the caller truly has no username
     allow_personalised = bool(usernameLower)
     claim_key = usernameLower or user_id
  
@@ -708,17 +717,16 @@ def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None
                         base["claimedAt"] = claimed_at
                 personal_cards.append(base)
         else:
-            # pooled: if whitelist empty -> public; else usernameLower must be in whitelist
-            wl_raw = d.get("whitelistUsernames") or []
-            wl_norm = {norm_username(w) for w in wl_raw}  # strips @ and lowercases
-            eligible = (len(wl_norm) == 0) or (usernameLower in wl_norm)
-            if not eligible or not is_active:
+            if not is_active:
                 continue
             # Need at least one free code OR user already claimed (so they can see their code state)
             already = db.vouchers.find_one({
                 "type": "pooled",
                 "dropId": {"$in": drop_id_variants},
-                "claimedBy": claim_key
+                "$or": [
+                    {"claimedByKey": pooled_claim_key},
+                    {"claimedBy": pooled_claim_key},
+                ]
             })
             if already:
                 base["userClaimed"] = True
@@ -788,14 +796,17 @@ def claim_personalised(drop_id: str, usernameLower: str, ref: datetime):
         return {"ok": False, "err": "not_eligible"}
     return {"ok": True, "code": doc["code"], "claimedAt": _isoformat_kl(doc.get("claimedAt"))}
 
-def claim_pooled(drop_id: str, usernameLower: str, ref: datetime):
+def claim_pooled(drop_id: str, claim_key: str, ref: datetime):
     drop_id_variants = _drop_id_variants(drop_id)
  
     # Idempotent: if already claimed, return same code
     existing = db.vouchers.find_one({
         "type": "pooled",
         "dropId": {"$in": drop_id_variants},
-        "claimedBy": usernameLower
+        "$or": [
+            {"claimedByKey": claim_key},
+            {"claimedBy": claim_key},
+        ]
     })
     if existing:
         return {"ok": True, "code": existing["code"], "claimedAt": _isoformat_kl(existing.get("claimedAt"))}
@@ -810,7 +821,8 @@ def claim_pooled(drop_id: str, usernameLower: str, ref: datetime):
         {
             "$set": {
                 "status": "claimed",
-                "claimedBy": usernameLower,
+                "claimedBy": claim_key,
+                "claimedByKey": claim_key,
                 "claimedAt": ref
             }
         },
@@ -943,7 +955,7 @@ def claim_voucher_for_user(*, user_id: str, drop_id: str, username: str) -> dict
 
     dtype = drop.get("type", "pooled")
     usernameLower = norm_username(username)
-    claim_key = usernameLower or user_id_str 
+    claim_key = f"uid:{user_id_str}"
     ref = now_utc()
 
     if dtype in ("personalised", "personalized"):
@@ -957,7 +969,7 @@ def claim_voucher_for_user(*, user_id: str, drop_id: str, username: str) -> dict
         raise AlreadyClaimed("already_claimed")
 
     # pooled
-    res = claim_pooled(drop_id=drop_id, usernameLower=claim_key, ref=ref)
+    res = claim_pooled(drop_id=drop_id, claim_key=claim_key, ref=ref)
     if res.get("ok"):
         return {"code": res["code"], "claimedAt": res["claimedAt"]}
     if res.get("err") == "sold_out":
