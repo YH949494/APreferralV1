@@ -68,6 +68,7 @@ def handle_checkin():
                 "weekly_xp": 0,
                 "monthly_xp": 0,
                 "xp": 0,
+                "status": "Normal",               
             }
         },
         upsert=True,
