@@ -31,6 +31,10 @@ def grant_xp(
     Returns ``True`` only when the XP was newly granted. Duplicate attempts are
     ignored and logged.
     """
+    
+    user = db.users.find_one({"user_id": uid}, {"restrictions": 1})
+    if user and user.get("restrictions", {}).get("no_xp"):
+        return False
 
     res = db.xp_events.update_one(
         {"user_id": uid, "unique_key": unique_key},
