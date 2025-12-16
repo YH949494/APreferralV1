@@ -908,9 +908,24 @@ def get_leaderboard():
             if "user_id" not in u:
                 u["user_id"] = 0
             return format_username(u, current_user_id, is_admin)
-
-        xp_rows = recompute_xp_totals(week_start_utc, week_end_utc, limit=15)
-        xp_map = {row["_id"]: int(row.get("xp", 0)) for row in xp_rows}
+            
+        xp_query = {"user_id": {"$ne": None}}
+        logger.info(
+            "[lb_query] users.find filter=%s sort=weekly_xp:-1 limit=%s",
+            xp_query,
+            15,
+        )
+        xp_rows = list(
+            users_collection
+            .find(xp_query, {"user_id": 1, "username": 1, "weekly_xp": 1})
+            .sort("weekly_xp", DESCENDING)
+            .limit(15)
+        )
+        xp_map = {
+            row.get("user_id"): int(row.get("weekly_xp", 0))
+            for row in xp_rows
+            if row.get("user_id") is not None
+        }
         
         referral_rows = recompute_referral_counts(week_start_utc, week_end_utc, limit=15)
         referral_map = {row["_id"]: int(row.get("total_valid", 0)) for row in referral_rows}
@@ -924,11 +939,12 @@ def get_leaderboard():
 
         top_checkins = []
         for row in xp_rows:
-            user_doc = user_map.get(row["_id"], {"user_id": row["_id"]})
+            uid = row.get("user_id")
+            user_doc = user_map.get(uid, {"user_id": uid})
             formatted = safe_format(user_doc)
             if not formatted:
                 continue
-            top_checkins.append({"username": formatted, "xp": row.get("xp", 0)})
+            top_checkins.append({"username": formatted, "xp": int(row.get("weekly_xp", 0))})
 
         referral_board = []
         total_all_map: dict[int, int] = {}
@@ -961,11 +977,7 @@ def get_leaderboard():
             "referral": referral_board,
         }
         
-        user_weekly_xp = xp_map.get(current_user_id, 0)
-        if current_user_id and current_user_id not in xp_map:
-            own_row = recompute_xp_totals(week_start_utc, week_end_utc, user_id=current_user_id)
-            if own_row:
-                user_weekly_xp = int(own_row[0].get("xp", 0))
+        user_weekly_xp = xp_map.get(current_user_id, int(user_record.get("weekly_xp", 0)))
 
         user_weekly_referrals = referral_map.get(current_user_id, 0)
         if current_user_id and current_user_id not in referral_map:
@@ -985,7 +997,7 @@ def get_leaderboard():
         if user_record:
             stored_weekly = int(user_record.get("weekly_xp", 0))
             if stored_weekly != user_weekly_xp:
-                logger.info("[lb_mismatch] uid=%s weekly_xp stored=%s computed=%s week_start=%s", current_user_id, stored_weekly, user_weekly_xp, week_start_local.isoformat())
+                logger.info("[lb_mismatch] uid=%s weekly_xp stored=%s leaderboard=%s week_start=%s", current_user_id, stored_weekly, user_weekly_xp, week_start_local.isoformat())
             stored_refs = int(user_record.get("weekly_referral_count", 0))
             if stored_refs != user_weekly_referrals:
                 logger.info(
