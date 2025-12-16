@@ -237,8 +237,6 @@ def _ctx_to_user(ctx: dict) -> dict:
 
     user_id = str(user_json.get("id") or "").strip()
     username_lower = norm_username(user_json.get("username", ""))
-    if not username_lower and user_id:
-        username_lower = user_id
 
     result["usernameLower"] = username_lower
     result["source"] = "telegram"
@@ -612,6 +610,8 @@ def get_active_drops(ref: datetime):
 
 def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None):
     usernameLower = norm_username(user.get("usernameLower", ""))
+    user_id = str(user.get("userId") or "").strip() if isinstance(user, dict) else ""
+    claim_key = usernameLower or user_id 
     drops = get_active_drops(ref)
 
     personal_cards = []
@@ -619,7 +619,6 @@ def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None
 
     uname = ""
     uid = None
-    allow_personalised = bool(usernameLower)
     if isinstance(tg_user, dict):
         try:
             uid = int(tg_user["id"])
@@ -630,11 +629,12 @@ def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None
      
         if uname and not usernameLower:
             usernameLower = uname
+            claim_key = claim_key or usernameLower
 
         # Only hide personalised vouchers when the caller truly has no username
-        if not allow_personalised:
-            allow_personalised = bool(uname)
-
+    allow_personalised = bool(usernameLower)
+    claim_key = usernameLower or user_id
+ 
     logged_hidden = False
  
     for d in drops:
@@ -699,7 +699,7 @@ def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None
             already = db.vouchers.find_one({
                 "type": "pooled",
                 "dropId": {"$in": drop_id_variants},
-                "claimedBy": usernameLower
+                "claimedBy": claim_key
             })
             if already:
                 base["userClaimed"] = True
@@ -815,6 +815,9 @@ def api_visible():
     try:
         # Use the safe universal helper you already have
         ctx, admin_preview = _user_ctx_or_preview(request)
+     
+        if not admin_preview and not ctx:
+            return jsonify({"code": "auth_failed", "why": "missing_or_invalid_init_data"}), 401
 
         # ---------- Admin preview ----------
         if admin_preview:
@@ -867,19 +870,15 @@ def api_visible():
             elif isinstance(raw_user, dict):
                 tg_user = raw_user
      
-        if not user.get("usernameLower"):
-            source = user.get("source")
-            if source == "telegram":
-                user_id = user.get("userId") or ""
-                if user_id:
-                    user["usernameLower"] = str(user_id)
-                else:
-                    return jsonify({"code": "auth_failed", "why": "missing_or_invalid_init_data"}), 401
-            else:
-                username = _guess_username(request)
-                if not username:
-                    return jsonify({"code": "auth_failed", "why": "missing_or_invalid_init_data"}), 401
-                user = {"usernameLower": username, "source": "fallback"}
+        if user.get("source") == "telegram":
+            user_id = (user.get("userId") or "").strip()
+            if not user_id:
+                return jsonify({"code": "auth_failed", "why": "missing_or_invalid_init_data"}), 401
+        elif not user.get("usernameLower"):
+            username = _guess_username(request)
+            if not username:
+                return jsonify({"code": "auth_failed", "why": "missing_or_invalid_init_data"}), 401
+            user = {"usernameLower": username, "source": "fallback"}
          
         drops = user_visible_drops(user, ref, tg_user=tg_user)
         return jsonify({"visibilityMode": "stacked", "nowUtc": ref.isoformat(), "drops": drops}), 200
@@ -906,8 +905,10 @@ def claim_voucher_for_user(*, user_id: str, drop_id: str, username: str) -> dict
       - NotEligible
     """
     user_doc = None
+    user_id_str = str(user_id or "").strip()
+ 
     try:
-        uid_int = int(user_id)
+        uid_int = int(user_id_str)
     except (TypeError, ValueError):
         uid_int = None
 
@@ -923,9 +924,12 @@ def claim_voucher_for_user(*, user_id: str, drop_id: str, username: str) -> dict
 
     dtype = drop.get("type", "pooled")
     usernameLower = norm_username(username)
+    claim_key = usernameLower or user_id_str 
     ref = now_utc()
 
     if dtype in ("personalised", "personalized"):
+        if not usernameLower:
+            raise NotEligible("not_eligible")     
         res = claim_personalised(drop_id=drop_id, usernameLower=usernameLower, ref=ref)
         if res.get("ok"):
             return {"code": res["code"], "claimedAt": res["claimedAt"]}
@@ -934,7 +938,7 @@ def claim_voucher_for_user(*, user_id: str, drop_id: str, username: str) -> dict
         raise AlreadyClaimed("already_claimed")
 
     # pooled
-    res = claim_pooled(drop_id=drop_id, usernameLower=usernameLower, ref=ref)
+    res = claim_pooled(drop_id=drop_id, usernameLower=claim_key, ref=ref)
     if res.get("ok"):
         return {"code": res["code"], "claimedAt": res["claimedAt"]}
     if res.get("err") == "sold_out":
@@ -973,18 +977,6 @@ def api_claim():
             })
         }
         ok, why = True, "ok"
-  
-    if not ok:
-        fallback_username = _guess_username(request, body)
-        if fallback_username:
-            fallback_user_id = _guess_user_id(request, body) or fallback_username
-            data = {
-                "user": json.dumps({
-                    "id": fallback_user_id,
-                    "username": fallback_username,
-                })
-            }
-            ok, why = True, "fallback_username"
 
     if not ok:
         return jsonify({"status": "error", "code": "auth_failed", "why": str(why)}), 401
@@ -999,6 +991,10 @@ def api_claim():
 
     user_id = str(user_raw.get("id") or "").strip()
     username = user_raw.get("username") or ""
+ 
+    if not user_id:
+        return jsonify({"status": "error", "code": "auth_failed", "why": "missing_user_id"}), 401
+     
     try:
         uid = int(tg_user["id"])
     except Exception:
@@ -1021,8 +1017,7 @@ def api_claim():
  
     username_missing = not (username and username.strip())
     if drop_type in ("personalised", "personalized") and username_missing:
-        print(f"[personalised] claim_no_username uid={uid}")
-        return jsonify({"ok": False, "error": "unauthorized"}), 401
+        return jsonify({"status": "error", "code": "not_eligible"}), 403
 
     allowed = True
     if drop_type in ("personalised", "personalized"):
@@ -1037,16 +1032,13 @@ def api_claim():
 
     if not allowed:
         print(f"[claim401] uid={uid} uname={uname} v_uid={v_uid} v_uname={v_uname}")
-        return jsonify({"ok": False, "error": "unauthorized"}), 401
+        return jsonify({"status": "error", "code": "not_eligible"}), 403
  
     if not username:
         username = fallback_username or ""
    
     if not user_id:
         user_id = fallback_user_id or username or ""
-
-    if not username:
-        return jsonify({"status": "error", "code": "missing_username"}), 400
 
     # Claim
     try:
