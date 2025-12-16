@@ -619,12 +619,18 @@ def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None
 
     uname = ""
     uid = None
+    allow_personalised = True
     if isinstance(tg_user, dict):
         try:
             uid = int(tg_user["id"])
         except Exception:
             uid = None
-        uname = norm_uname(tg_user.get("username"))
+        raw_username = tg_user.get("username") or ""
+        if not raw_username.strip():
+            allow_personalised = False
+        uname = norm_uname(raw_username)
+
+    logged_hidden = False
  
     for d in drops:
         drop_id = str(d["_id"])
@@ -643,6 +649,11 @@ def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None
         }
 
         if dtype in ("personalised", "personalized"):
+            if not allow_personalised:
+                if not logged_hidden:
+                    print(f"[personalised] hidden_no_username uid={uid}")
+                    logged_hidden = True
+                continue
             if dtype == "personalized":
                 v_uid   = d.get("assigned_to_user_id")
                 v_uname = norm_uname(d.get("assigned_to_username"))
@@ -657,7 +668,7 @@ def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None
                 if not eligible:
                     continue
 
-         # user must have an unclaimed OR claimed row to show the card (claimed -> show claimed state)
+            # user must have an unclaimed OR claimed row to show the card (claimed -> show claimed state)
             row = db.vouchers.find_one({
                 "type": {"$in": ["personalised", "personalized"]},
                 "dropId": drop_id,
@@ -985,6 +996,11 @@ def api_claim():
     v_uname = norm_uname(voucher.get("assigned_to_username"))
 
     drop_type = voucher.get("type")
+ 
+    username_missing = not (username and username.strip())
+    if drop_type in ("personalised", "personalized") and username_missing:
+        print(f"[personalised] claim_no_username uid={uid}")
+        return jsonify({"ok": False, "error": "unauthorized"}), 401
 
     allowed = True
     if drop_type in ("personalised", "personalized"):
