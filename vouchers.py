@@ -895,6 +895,18 @@ def claim_voucher_for_user(*, user_id: str, drop_id: str, username: str) -> dict
       - NoCodesLeft
       - NotEligible
     """
+    user_doc = None
+    try:
+        uid_int = int(user_id)
+    except (TypeError, ValueError):
+        uid_int = None
+
+    if uid_int is not None:
+        user_doc = users_collection.find_one({"user_id": uid_int}, {"restrictions": 1})
+
+    if user_doc and user_doc.get("restrictions", {}).get("no_campaign"):
+        raise NotEligible("not_eligible")
+ 
     drop = db.drops.find_one({"_id": _coerce_id(drop_id)})
     if not drop:
         raise NotEligible("drop_not_found")
