@@ -1,4 +1,4 @@
-from flask import ( 
+from flask import (
     Flask, request, jsonify, send_from_directory,
     render_template, redirect, url_for, flash, g, Blueprint
 )
@@ -42,11 +42,14 @@ from apscheduler.triggers.cron import CronTrigger
 from vouchers import vouchers_bp, ensure_voucher_indexes
 
 from pymongo import MongoClient, DESCENDING, ASCENDING  # keep if used elsewhere
-import os, asyncio, traceback, csv, io, requests
+import os, asyncio, traceback, csv, io, requests, logging
 import pytz
 
 FIRST_CHECKIN_BONUS_XP = int(os.getenv("FIRST_CHECKIN_BONUS_XP", "200"))
 WELCOME_BONUS_XP = int(os.getenv("WELCOME_BONUS_XP", "20"))
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # ----------------------------
 # Config
@@ -85,6 +88,118 @@ def _to_kl_date(dt_any):
         dt = pytz.UTC.localize(dt)
     return dt.astimezone(KL_TZ).date()
 
+
+def _week_window_utc(reference: datetime | None = None):
+    """Return (start_utc, end_utc, start_local) for the current week (Mon 00:00)."""
+
+    ref_local = reference.astimezone(KL_TZ) if reference else datetime.now(KL_TZ)
+    start_local = (ref_local - timedelta(days=ref_local.weekday())).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    end_local = start_local + timedelta(days=7)
+    return start_local.astimezone(timezone.utc), end_local.astimezone(timezone.utc), start_local
+
+
+def _month_window_utc(reference: datetime | None = None):
+    """Return (start_utc, end_utc, start_local) for the month containing ``reference``."""
+
+    ref_local = reference.astimezone(KL_TZ) if reference else datetime.now(KL_TZ)
+    start_local = ref_local.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    if start_local.month == 12:
+        end_local = start_local.replace(year=start_local.year + 1, month=1)
+    else:
+        end_local = start_local.replace(month=start_local.month + 1)
+    return start_local.astimezone(timezone.utc), end_local.astimezone(timezone.utc), start_local
+
+
+def _previous_month_window_utc(reference: datetime | None = None):
+    """Return (start_utc, end_utc, start_local) for the month that just ended."""
+
+    ref_local = reference.astimezone(KL_TZ) if reference else datetime.now(KL_TZ)
+    this_month_start = ref_local.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    prev_month_end = this_month_start
+    prev_month_start = (this_month_start - timedelta(days=1)).replace(day=1)
+    return (
+        prev_month_start.astimezone(timezone.utc),
+        prev_month_end.astimezone(timezone.utc),
+        prev_month_start,
+    )
+
+
+def _event_time_expr():
+    return {"$ifNull": ["$created_at", "$ts"]}
+
+
+def _referral_time_expr():
+    return {"$ifNull": ["$validated_at", "$created_at"]}
+
+
+def recompute_xp_totals(start_utc, end_utc, limit: int | None = None, user_id: int | None = None):
+    """Aggregate XP from xp_events between the given UTC boundaries."""
+
+    time_expr = {
+        "$and": [
+            {"$gte": [_event_time_expr(), start_utc]},
+            {"$lt": [_event_time_expr(), end_utc]},
+        ]
+    }
+    match_filters = [{"$expr": time_expr}, {"user_id": {"$ne": None}}]
+    if user_id is not None:
+        match_filters.append({"user_id": user_id})
+
+    pipeline = [
+        {"$match": {"$and": match_filters}},
+        {"$group": {"_id": "$user_id", "xp": {"$sum": "$xp"}}},
+        {"$sort": {"xp": -1}},
+    ]
+    if limit:
+        pipeline.append({"$limit": limit})
+
+    logger.info(
+        "[xp_recompute] start=%s end=%s limit=%s user=%s",
+        start_utc.isoformat(),
+        end_utc.isoformat(),
+        limit,
+        user_id,
+    )
+    return list(xp_events_collection.aggregate(pipeline))
+
+
+def recompute_referral_counts(start_utc, end_utc, limit: int | None = None, user_id: int | None = None):
+    """Aggregate successful referrals within the window."""
+
+    time_expr = {
+        "$and": [
+            {"$gte": [_referral_time_expr(), start_utc]},
+            {"$lt": [_referral_time_expr(), end_utc]},
+        ]
+    }
+    base_match = [
+        {"$expr": time_expr},
+        {"status": "success"},
+        {"referrer_id": {"$exists": True}},
+        {"referrer_id": {"$ne": None}},
+    ]
+    if user_id is not None:
+        base_match.append({"referrer_id": user_id})
+
+    pipeline = [
+        {"$match": {"$and": base_match}},
+        {"$group": {"_id": "$referrer_id", "total_valid": {"$sum": 1}}},
+        {"$sort": {"total_valid": -1}},
+    ]
+    if limit:
+        pipeline.append({"$limit": limit})
+
+    logger.info(
+        "[xp_recompute] referrals start=%s end=%s limit=%s user=%s",
+        start_utc.isoformat(),
+        end_utc.isoformat(),
+        limit,
+        user_id,
+    )
+    return list(referrals_collection.aggregate(pipeline))
+
 # ----------------------------
 # MongoDB Setup
 # ----------------------------
@@ -99,6 +214,7 @@ referrals_collection = db["referrals"]
 monthly_xp_history_collection = db["monthly_xp_history"]
 monthly_xp_history_collection.create_index([("month", ASCENDING)])
 monthly_xp_history_collection.create_index([("user_id", ASCENDING), ("month", ASCENDING)], unique=True)
+audit_events_collection = db["audit_events"]
 
 def call_bot_in_loop(coro, timeout=15):
     loop = getattr(app_bot, "_running_loop", None)
@@ -608,6 +724,7 @@ async def process_checkin(user_id, username, region, update=None):
                 "weekly_xp": 0,
                 "monthly_xp": 0,
                 "xp": 0,
+                "status": "Normal",                
             },
         },
         upsert=True
@@ -783,12 +900,8 @@ def get_leaderboard():
         user_record = users_collection.find_one({"user_id": current_user_id}) or {}
         is_admin = bool(user_record.get("is_admin", False))
 
-        visible_filter = {
-            "$or": [
-                {"username": {"$exists": True, "$ne": None, "$ne": ""}},
-                {"first_name": {"$exists": True, "$ne": None, "$ne": ""}}
-            ]
-        }
+        week_start_utc, week_end_utc, week_start_local = _week_window_utc()
+        month_start_utc, month_end_utc, _ = _month_window_utc()
 
         def safe_format(u):
             # Guarantee user_id exists
@@ -796,68 +909,105 @@ def get_leaderboard():
                 u["user_id"] = 0
             return format_username(u, current_user_id, is_admin)
 
-        top_checkins = users_collection.find(visible_filter).sort("weekly_xp", -1).limit(15)
+        xp_rows = recompute_xp_totals(week_start_utc, week_end_utc, limit=15)
+        xp_map = {row["_id"]: int(row.get("xp", 0)) for row in xp_rows}
+        
+        referral_rows = recompute_referral_counts(week_start_utc, week_end_utc, limit=15)
+        referral_map = {row["_id"]: int(row.get("total_valid", 0)) for row in referral_rows}
+        
+        leaderboard_user_ids = set(xp_map.keys()) | set(referral_map.keys())
+        if current_user_id:
+            leaderboard_user_ids.add(current_user_id)
 
-        # --- Referral leaderboard (validated only) ---
-        referral_limit = 15
-        valid_rows = list(referrals_collection.aggregate([
-            {"$match": {"status": {"$in": ["success", "valid"]}, "referrer_id": {"$exists": True}}},
-            {"$group": {"_id": "$referrer_id", "total_valid": {"$sum": 1}}},
-            {"$sort": {"total_valid": -1}},
-            {"$limit": referral_limit}
-        ]))
+        extra_user_docs = users_collection.find({"user_id": {"$in": list(leaderboard_user_ids)}})
+        user_map = {u.get("user_id"): u for u in extra_user_docs}
 
-        user_ids = [r["_id"] for r in valid_rows]
-        user_docs = users_collection.find({"user_id": {"$in": user_ids}})
-        user_map = {u["user_id"]: u for u in user_docs}
-
-        valid_map = {r["_id"]: r["total_valid"] for r in valid_rows}
-
-        total_all_map: dict[int, int] = {}
-        if is_admin:
-            total_all_rows = referrals_collection.aggregate([
-                {"$group": {"_id": "$referrer_id", "total_all": {"$sum": 1}}}
-            ])
-            total_all_map = {r["_id"]: r.get("total_all", 0) for r in total_all_rows}
-
-        referral_board = []
-        for ref_id, total_valid in valid_map.items():
-            user_doc = user_map.get(ref_id, {"user_id": ref_id})
+        top_checkins = []
+        for row in xp_rows:
+            user_doc = user_map.get(row["_id"], {"user_id": row["_id"]})
             formatted = safe_format(user_doc)
             if not formatted:
                 continue
+            top_checkins.append({"username": formatted, "xp": row.get("xp", 0)})
 
+        referral_board = []
+        total_all_map: dict[int, int] = {}
+        if is_admin:
+            total_all_rows = referrals_collection.aggregate(
+                [
+                    {"$match": {"status": "success"}},
+                    {"$group": {"_id": "$referrer_id", "total_all": {"$sum": 1}}},
+                ]
+            )
+            total_all_map = {r["_id"]: r.get("total_all", 0) for r in total_all_rows}
+
+        for row in referral_rows:
+            user_doc = user_map.get(row["_id"], {"user_id": row["_id"]})
+            formatted = safe_format(user_doc)
+            if not formatted:
+                continue
             entry = {
                 "username": formatted,
-                "total_valid": total_valid,
-                "referrals": total_valid,  # backward-compatible alias
+                "total_valid": row.get("total_valid", 0),
+                "referrals": row.get("total_valid", 0),
             }
-
             if is_admin:
-                entry["total_all"] = total_all_map.get(ref_id, total_valid)
+                entry["total_all"] = total_all_map.get(row["_id"], row.get("total_valid", 0))
 
             referral_board.append(entry)
             
         leaderboard = {
-            "checkin": [
-                {"username": formatted, "xp": u.get("weekly_xp", 0)}
-                for u in top_checkins
-                if (formatted := safe_format(u))
-            ],
+            "checkin": top_checkins,
             "referral": referral_board,
         }
         
-        user_valid_referrals = referrals_collection.count_documents({
-            "referrer_id": current_user_id,
-            "status": {"$in": ["success", "valid"]},
-        }) if current_user_id else 0
+        user_weekly_xp = xp_map.get(current_user_id, 0)
+        if current_user_id and current_user_id not in xp_map:
+            own_row = recompute_xp_totals(week_start_utc, week_end_utc, user_id=current_user_id)
+            if own_row:
+                user_weekly_xp = int(own_row[0].get("xp", 0))
 
+        user_weekly_referrals = referral_map.get(current_user_id, 0)
+        if current_user_id and current_user_id not in referral_map:
+            own_refs = recompute_referral_counts(week_start_utc, week_end_utc, user_id=current_user_id)
+            if own_refs:
+                user_weekly_referrals = int(own_refs[0].get("total_valid", 0))
+
+        user_monthly_row = []
+        if current_user_id:
+            user_monthly_row = recompute_xp_totals(month_start_utc, month_end_utc, user_id=current_user_id)
+        monthly_xp_value = int(user_monthly_row[0].get("xp", 0)) if user_monthly_row else 0
+
+        lifetime_valid_refs = referrals_collection.count_documents(
+            {"referrer_id": current_user_id, "status": "success"}
+        ) if current_user_id else 0
+
+        if user_record:
+            stored_weekly = int(user_record.get("weekly_xp", 0))
+            if stored_weekly != user_weekly_xp:
+                logger.info("[lb_mismatch] uid=%s weekly_xp stored=%s computed=%s week_start=%s", current_user_id, stored_weekly, user_weekly_xp, week_start_local.isoformat())
+            stored_refs = int(user_record.get("weekly_referral_count", 0))
+            if stored_refs != user_weekly_referrals:
+                logger.info(
+                    "[lb_mismatch] uid=%s weekly_referrals stored=%s computed=%s week_start=%s",
+                    current_user_id,
+                    stored_refs,
+                    user_weekly_referrals,
+                    week_start_local.isoformat(),
+                )
+            stored_total_refs = int(user_record.get("referral_count", 0))
+            if stored_total_refs != lifetime_valid_refs:
+                logger.info(
+                    "[lb_mismatch] uid=%s total_referrals stored=%s computed=%s", current_user_id, stored_total_refs, lifetime_valid_refs
+                )
+                
         user_stats = {
-            "xp": user_record.get("weekly_xp", 0),
-            "monthly_xp": user_record.get("monthly_xp", 0),
-            "referrals": user_valid_referrals,
-            "total_valid": user_valid_referrals,
-            "status": user_record.get("status", "Normal")
+            "xp": user_weekly_xp,
+            "monthly_xp": monthly_xp_value,
+            "referrals": user_weekly_referrals,
+            "total_valid": user_weekly_referrals,
+            "status": user_record.get("status", "Normal"),
+            "lifetime_valid": lifetime_valid_refs,
         }
 
         return jsonify({
@@ -1057,7 +1207,12 @@ def api_starterpack():
             {"user_id": int(user_id)},
             {
                 "$set": {"username": username, "welcome_xp_claimed": True},
-                "$setOnInsert": {"xp": 0, "weekly_xp": 0, "monthly_xp": 0},
+                "$setOnInsert": {
+                    "xp": 0,
+                    "weekly_xp": 0,
+                    "monthly_xp": 0,
+                    "status": "Normal",
+                },
             },
             upsert=True,
         )
@@ -1147,6 +1302,17 @@ def export_csv():
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 
+@app.route("/api/admin/backfill-status", methods=["POST"])
+def api_admin_backfill_status():
+    ok, err = require_admin_from_query()
+    if not ok:
+        msg, code = err
+        return jsonify({"success": False, "message": msg}), code
+
+    modified = backfill_missing_statuses()
+    return jsonify({"success": True, "modified": modified})
+
+
 # ----------------------------
 # Weekly XP Reset Job
 # ----------------------------
@@ -1184,6 +1350,13 @@ def reset_weekly_xp():
     print(f"✅ Weekly XP & referrals reset complete at {now}")
 
 meta = db["meta"]
+
+def backfill_missing_statuses():
+    res = users_collection.update_many(
+        {"status": {"$exists": False}}, {"$set": {"status": "Normal"}}
+    )
+    logger.info("[xp_recompute] backfill_status modified=%s", getattr(res, "modified_count", 0))
+    return getattr(res, "modified_count", 0)
 
 def one_time_fix_monthly_xp():
     # run once ever
@@ -1237,66 +1410,100 @@ def run_boot_catchup():
 
         # one-time migration instead of scanning every boot
         one_time_fix_monthly_xp()
+        
+        if os.getenv("BACKFILL_STATUS_ON_BOOT", "false").lower() == "true":
+            backfill_missing_statuses()
 
     except Exception as e:
         print(f"❌ Boot-time catch-up failed: {e}")
 
-def _previous_month_key(dt):
-    """Return YYYY-MM string for the month that just ended."""
-    year = dt.year
-    month = dt.month - 1
-    if month == 0:
-        month = 12
-        year -= 1
-    return f"{year:04d}-{month:02d}"
-    
-def update_monthly_vip_status():
-    now_kl = datetime.now(KL_TZ)
+def apply_monthly_tier_update(run_time: datetime | None = None):
+    run_at_local = run_time.astimezone(KL_TZ) if run_time else datetime.now(KL_TZ)
+    start_utc, end_utc, start_local = _previous_month_window_utc(run_at_local)
+    end_local = end_utc.astimezone(KL_TZ)
+    month_key = start_local.strftime("%Y-%m")
     now_utc = datetime.now(timezone.utc)
-    print(f"🔁 Running monthly VIP status update at {now_kl}")
+   
+    xp_rows = recompute_xp_totals(start_utc, end_utc)
+    xp_map = {row["_id"]: int(row.get("xp", 0)) for row in xp_rows}
 
-    snapshot_month = _previous_month_key(now_kl)    
-    all_users = users_collection.find()
-  
+    promoted: list[int] = []
+    demoted: list[int] = []   
     processed = 0
+    
     for user in users_collection.find():
-        current_monthly_xp = user.get("monthly_xp", 0)
-        next_status = "VIP1" if current_monthly_xp >= 800 else "Normal"
+        uid = user.get("user_id")
+        if uid is None:
+            continue
+        previous_month_xp = xp_map.get(uid, 0)
+        next_status = "VIP1" if previous_month_xp >= 800 else "Normal"
+        current_status = user.get("status", "Normal")
+
+        if next_status != current_status:
+            (promoted if next_status == "VIP1" else demoted).append(uid)
 
         monthly_xp_history_collection.update_one(
-            {"user_id": user["user_id"], "month": snapshot_month},
+            {"user_id": uid, "month": month_key},
             {
                 "$set": {
-                    "user_id": user["user_id"],
+                    "user_id": uid,
                     "username": user.get("username"),
-                    "month": snapshot_month,
-                    "monthly_xp": current_monthly_xp,
-                    "status_before_reset": user.get("status", "Normal"),
+                    "month": month_key,
+                    "monthly_xp": previous_month_xp,
+                    "status_before_reset": current_status,
                     "status_after_reset": next_status,
                     "captured_at_utc": now_utc,
-                    "captured_at_kl": now_kl.isoformat(),
+                    "captured_at_kl": run_at_local.isoformat(),
                 }
             },
             upsert=True,
         )
 
-       
         users_collection.update_one(
-            {"user_id": user["user_id"]},
+            {"user_id": uid},
             {
                 "$set": {
                     "status": next_status,
-                    "last_status_update": now_kl,
+                    "last_status_update": end_local,
                     "monthly_xp": 0,
                 }
             },
         )
         processed += 1
 
-    print(
-        "✅ Monthly VIP status update complete. "
-        f"Processed {processed} users and stored history for {snapshot_month}."
+    audit_doc = {
+        "type": "monthly_tier_update",
+        "month": month_key,
+        "run_at_utc": now_utc,
+        "run_at_tz": run_at_local.isoformat(),
+        "promoted_count": len(promoted),
+        "demoted_count": len(demoted),
+        "promoted_sample": promoted[:5],
+        "demoted_sample": demoted[:5],
+        "total_processed": processed,
+    }
+
+    audit_events_collection.update_one(
+        {"type": "monthly_tier_update", "month": month_key},
+        {"$set": audit_doc},
+        upsert=True,
     )
+    audit_events_collection.update_one(
+        {"_id": "monthly_job:last_run"},
+        {"$set": {"run_at_utc": now_utc, "run_at_tz": run_at_local.isoformat(), "month": month_key}},
+        upsert=True,
+    )
+
+    logger.info(
+        "[monthly_job] ran_at=%s tz=GMT+8 month=%s promoted=%s demoted=%s",
+        run_at_local.isoformat(),
+        month_key,
+        len(promoted),
+        len(demoted),
+    )
+
+def update_monthly_vip_status():
+    return apply_monthly_tier_update()
     
 # ----------------------------
 # Telegram Bot Handlers
@@ -1334,6 +1541,7 @@ async def _send_xmas_flow(update: Update, context: ContextTypes.DEFAULT_TYPE, us
             "$setOnInsert": {
                 "user_id": user.id,
                 "first_seen_at": now,
+                 "status": "Normal",              
             },
             "$set": {
                 "xmas_entry_source": "popup",
@@ -1386,7 +1594,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "weekly_xp": 0,
                 "monthly_xp": 0,
                 "referral_count": 0,
-                "last_checkin": None
+                "last_checkin": None,
+                "status": "Normal",
             }},
             upsert=True
         )
@@ -1488,7 +1697,8 @@ async def member_update_handler(update: Update, context: ContextTypes.DEFAULT_TY
                     "weekly_referral_count": 0,
                     "weekly_xp": 0,
                     "monthly_xp": 0,
-                    "last_checkin": None
+                    "last_checkin": None,
+                    "status": "Normal",
                 }
             },
             upsert=True
@@ -1523,7 +1733,12 @@ async def button_handler(update, context):
                 {"user_id": user_id},
                 {
                     "$set": {"welcome_xp_claimed": True},
-                    "$setOnInsert": {"xp": 0, "weekly_xp": 0, "monthly_xp": 0},
+                    "$setOnInsert": {
+                        "xp": 0,
+                        "weekly_xp": 0,
+                        "monthly_xp": 0,
+                        "status": "Normal",
+                    },
                 },
                 upsert=True
             )
@@ -1577,14 +1792,14 @@ if __name__ == "__main__":
     )
     scheduler.add_job(
         reset_weekly_xp,
-        trigger=CronTrigger(day_of_week="mon", hour=0, minute=0),
+        trigger=CronTrigger(day_of_week="mon", hour=0, minute=0, timezone=KL_TZ),
         id="weekly_reset",
         name="Weekly XP Reset",
         replace_existing=True,
     )
     scheduler.add_job(
-        update_monthly_vip_status,
-        trigger=CronTrigger(day=1, hour=0, minute=0),
+        apply_monthly_tier_update,
+        trigger=CronTrigger(day=1, hour=0, minute=0, timezone=KL_TZ),
         id="monthly_vip",
         name="Monthly VIP Status Update",
         replace_existing=True,
