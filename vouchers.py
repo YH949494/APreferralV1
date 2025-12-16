@@ -611,7 +611,7 @@ def get_active_drops(ref: datetime):
     }))
 
 def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None):
-    usernameLower = user.get("usernameLower", "")
+    usernameLower = norm_username(user.get("usernameLower", ""))
     drops = get_active_drops(ref)
 
     personal_cards = []
@@ -619,16 +619,21 @@ def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None
 
     uname = ""
     uid = None
-    allow_personalised = True
+    allow_personalised = bool(usernameLower)
     if isinstance(tg_user, dict):
         try:
             uid = int(tg_user["id"])
         except Exception:
             uid = None
         raw_username = tg_user.get("username") or ""
-        if not raw_username.strip():
-            allow_personalised = False
         uname = norm_uname(raw_username)
+     
+        if uname and not usernameLower:
+            usernameLower = uname
+
+        # Only hide personalised vouchers when the caller truly has no username
+        if not allow_personalised:
+            allow_personalised = bool(uname)
 
     logged_hidden = False
  
