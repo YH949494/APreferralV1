@@ -985,8 +985,15 @@ def api_claim():
     try:
         user_raw = json.loads(data.get("user", "{}"))
     except Exception:
-        user_raw = {}
-
+        # Some clients double-encode init_data, so the `user` field may still
+        # contain percent-escape sequences (e.g. "%7B...%7D"). Try to decode
+        # once more before giving up so we don't reject otherwise valid users.
+        try:
+            decoded_user = urllib.parse.unquote_plus(data.get("user", "{}"))
+            user_raw = json.loads(decoded_user)
+        except Exception:
+            user_raw = {}
+         
     tg_user = user_raw
 
     user_id = str(user_raw.get("id") or "").strip()
