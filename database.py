@@ -72,7 +72,7 @@ def checkin_user(user_id):
         {"user_id": user_id},
         {
             "$set": {"last_checkin": now},
-            "$setOnInsert": {"xp": 0, "weekly_xp": 0, "monthly_xp": 0},
+            "$setOnInsert": {"xp": 0, "weekly_xp": 0, "monthly_xp": 0, "status": "Normal"},
         },
         upsert=True,
     )
