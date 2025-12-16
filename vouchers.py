@@ -12,6 +12,7 @@ from database import db, users_collection
 admin_cache_col = db["admin_cache"]
 
 BYPASS_ADMIN = os.getenv("BYPASS_ADMIN", "0").lower() in ("1", "true", "yes", "on")
+BYPASS_POOLED_INITDATA = os.getenv("BYPASS_POOLED_INITDATA", "0").lower() in ("1", "true", "yes", "on")
 HARDCODED_ADMIN_USERNAMES = {"gracy_ap", "teohyaohui"}  # allow manual overrides if cache is empty
 
 def _load_admin_ids() -> set:
@@ -969,6 +970,7 @@ def claim_voucher_for_user(*, user_id: str, drop_id: str, username: str) -> dict
         raise AlreadyClaimed("already_claimed")
 
     # pooled
+    claim_key = f"uid:{user_id_str}" 
     res = claim_pooled(drop_id=drop_id, claim_key=claim_key, ref=ref)
     if res.get("ok"):
         return {"code": res["code"], "claimedAt": res["claimedAt"]}
@@ -981,6 +983,10 @@ def claim_voucher_for_user(*, user_id: str, drop_id: str, username: str) -> dict
 def api_claim():
     # Accept both header names + query param
     body = request.get_json(silent=True) or {}
+ 
+    drop_id = body.get("dropId") or body.get("drop_id")
+    drop = db.drops.find_one({"_id": _coerce_id(drop_id)}) if drop_id else {}
+    drop_type = drop.get("type", "pooled")
 
     init_data = _extract_init_data(request, body=body)
     ok, data, why = verify_telegram_init_data(init_data)
@@ -1001,8 +1007,26 @@ def api_claim():
         ok, why = True, "ok"
 
     if not ok:
-        return jsonify({"status": "error", "code": "auth_failed", "why": str(why)}), 401
-
+        if BYPASS_POOLED_INITDATA and drop_type == "pooled":
+            decoded = urllib.parse.unquote_plus(init_data or "")
+            parsed = urllib.parse.parse_qs(decoded, keep_blank_values=True)
+            user_raw = parsed.get("user", ["{}"])[0]
+            try:
+                user = json.loads(user_raw)
+            except Exception:
+                user = {}
+            if not isinstance(user, dict):
+                user = {}
+            user_id = str(user.get("id") or "").strip()
+            username = user.get("username", "") or ""
+            if not user_id:
+                return jsonify({"status": "error", "code": "missing_user_id"}), 400
+            data = {"user": json.dumps(user)}
+            ok, why = True, "bypass_pooled"
+            print(f"[claim] BYPASS pooled drop_id={drop_id} uid={user_id}")
+        else:
+            return jsonify({"status": "error", "code": "auth_failed", "why": str(why)}), 401
+         
     # Parse Telegram user
     try:
         user_raw = json.loads(data.get("user", "{}"))
@@ -1033,16 +1057,15 @@ def api_claim():
     fallback_username = _guess_username(request, body)
     fallback_user_id = _guess_user_id(request, body)
 
-    drop_id = body.get("dropId") or body.get("drop_id")
     if not drop_id:
         return jsonify({"status": "error", "code": "missing_drop_id"}), 400
 
-    voucher = db.drops.find_one({"_id": _coerce_id(drop_id)}) or {}
+    voucher = drop or {}
 
     v_uid   = voucher.get("assigned_to_user_id")
     v_uname = norm_uname(voucher.get("assigned_to_username"))
 
-    drop_type = voucher.get("type")
+    drop_type = voucher.get("type", drop_type)
  
     username_missing = not (username and username.strip())
     if drop_type in ("personalised", "personalized") and username_missing:
