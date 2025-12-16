@@ -473,14 +473,13 @@ def _candidate_bot_tokens():
     return tokens
 
 def verify_telegram_init_data(init_data_raw: str):
-    import urllib.parse, hmac, hashlib, time, os, base64
+    import urllib.parse, hmac, hashlib, time, os
 
     raw_init_data = init_data_raw or ""
     decoded_init_data = urllib.parse.unquote_plus(raw_init_data)
 
     parsed = urllib.parse.parse_qs(decoded_init_data, keep_blank_values=True)
     provided_hash = parsed.get("hash", [""])[0]
-    provided_signature = parsed.get("signature", [""])[0]
 
     print(
         f"[initdata] raw_len={len(raw_init_data)} decoded_len={len(decoded_init_data)} "
@@ -488,7 +487,7 @@ def verify_telegram_init_data(init_data_raw: str):
         f"has_hash={'hash' in parsed} has_sig={'signature' in parsed}"
     )
  
-    if not provided_hash and not provided_signature:
+    if not provided_hash:
         return False, {}, "missing_hash"
 
     # Build the payload strings from all params except the integrity fields
@@ -500,7 +499,6 @@ def verify_telegram_init_data(init_data_raw: str):
         ordered_pairs.append((k, v))
 
     data_check_string = "\n".join(f"{k}={v}" for k, v in ordered_pairs)
-    ampersand_string = "&".join(f"{k}={v}" for k, v in ordered_pairs)
  
     candidates = _candidate_bot_tokens()
 
@@ -521,49 +519,13 @@ def verify_telegram_init_data(init_data_raw: str):
 
     if provided_hash:
         for tok in candidates:
-            secret_key = hmac.new(b"WebAppData", tok.encode(), hashlib.sha256).digest()
+            secret_key = hmac.new(tok.encode(), b"WebAppData", hashlib.sha256).digest()
             calc = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
             if hmac.compare_digest(calc, provided_hash):
                 ok = True
                 reason = "ok"
                 break
 
-    if not ok and provided_signature:
-        provided_sig_bytes = b""
-        decoded = b""
-     
-        try:
-            padding = "=" * ((4 - len(provided_signature) % 4) % 4)
-            padded = provided_signature + padding
-            decoded = base64.urlsafe_b64decode(padded.encode("ascii"))
-            provided_sig_bytes = decoded
-        except Exception:
-            provided_sig_bytes = b""
-
-        # Some legacy clients may base64-encode the hexadecimal string rather than
-        # the raw digest. If the decoded payload looks like ASCII hex (even length
-        # and all characters in 0-9a-f), treat it accordingly so old builds keep
-        # working, but prefer the raw-bytes comparison defined by Telegram.
-        provided_sig_hex = b""
-        if provided_sig_bytes and all(ch in b"0123456789abcdef" for ch in provided_sig_bytes.lower()) and len(provided_sig_bytes) % 2 == 0:
-            provided_sig_hex = provided_sig_bytes
-         
-        if provided_sig_bytes:
-            for tok in candidates:
-                secret_key = hmac.new(b"WebAppData", tok.encode(), hashlib.sha256).digest()
-                calc_digest = hmac.new(secret_key, ampersand_string.encode(), hashlib.sha256).digest()
-             
-                if provided_sig_hex:
-                    calc_hex = calc_digest.hex().encode("ascii")
-                    if hmac.compare_digest(calc_hex, provided_sig_hex):
-                        ok = True
-                        reason = "ok_signature_legacy"
-                        break
-
-                if hmac.compare_digest(calc_digest, provided_sig_bytes):
-                    ok = True
-                    reason = "ok_signature"
-                    break
     if not ok:
         print("[initdata] hash_mismatch")   
         return False, {}, reason
