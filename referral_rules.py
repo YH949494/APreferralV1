@@ -17,6 +17,7 @@ from typing import Callable, Dict, Iterable, List
 from datetime import datetime, timedelta, timezone
 from xp import grant_xp
 
+KL_TZ = timezone(timedelta(hours=8))
 
 logger = logging.getLogger(__name__)
 
