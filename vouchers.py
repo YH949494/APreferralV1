@@ -424,9 +424,14 @@ def verify_telegram_init_data(init_data_raw: str):
 
     print("[initdata] verifier=canonical_parse_qsl")
 
+    raw = init_data_raw or ""
+    decoded = urllib.parse.unquote_plus(raw)
+    print(f"[initdata] raw_prefix={raw[:40]}")
+    print(f"[initdata] decoded_prefix={decoded[:40]}")
+ 
     # 1. Parse & decode ONCE (Telegram spec compliant)
     pairs = urllib.parse.parse_qsl(
-        init_data_raw,
+        decoded,
         keep_blank_values=True,
         strict_parsing=False,
     )
@@ -435,8 +440,7 @@ def verify_telegram_init_data(init_data_raw: str):
     provided_hash = data.get("hash", "").lower()
          
     print(
-        f"[initdata] raw_len={len(init_data_raw)} "
-        f"has_user={'user' in data} "
+        f"[initdata] has_user={'user' in data} "
         f"has_auth_date={'auth_date' in data} "
         f"has_hash={'hash' in data}"
     )
