@@ -515,7 +515,7 @@ def verify_telegram_init_data(init_data_raw: str):
         _log("missing_hash")
         return False, {}, "missing_hash"
 
-     def _prefix(val: str) -> str:
+    def _prefix(val: str) -> str:
         return val[:8] if val else ""
 
     _log(
