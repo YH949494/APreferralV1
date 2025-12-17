@@ -704,7 +704,7 @@ def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None
         if not pooled_claim_key and uid is not None:
             pooled_claim_key = f"uid:{uid}"
 
-     ctx_uid = uid
+    ctx_uid = uid
     if ctx_uid is None:
         try:
             ctx_uid = int(user_id)
