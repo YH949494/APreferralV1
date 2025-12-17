@@ -24,9 +24,24 @@ class FakeCollection:
         self._id = 1
 
     def _match(self, doc, filt):
-        return all(doc.get(k) == v for k, v in filt.items())
+        if not filt:
+            return True
 
-    def find_one(self, filt):
+        for k, v in filt.items():
+            if k == "$or":
+                return any(self._match(doc, cond) for cond in v)
+            if k == "$and":
+                return all(self._match(doc, cond) for cond in v)
+            if isinstance(v, dict) and "$in" in v:
+                if doc.get(k) not in v.get("$in", []):
+                    return False
+                continue
+            if doc.get(k) != v:
+                return False
+        return True
+
+    def find_one(self, filt, projection=None):  # noqa: ARG002
+        
         for doc in self.docs:
             if self._match(doc, filt):
                 return dict(doc)
@@ -40,6 +55,7 @@ class FakeCollection:
         sets = update.get("$set", {})
         set_on_insert = update.get("$setOnInsert", {})
         incs = update.get("$inc", {})
+        unsets = update.get("$unset", {})        
         max_ops = update.get("$max", {})
 
         for doc in self.docs:
@@ -50,6 +66,9 @@ class FakeCollection:
                     doc[k] = doc.get(k, 0) + v
                 for k, v in max_ops.items():
                     doc[k] = max(doc.get(k, float("-inf")), v)
+                for k in unsets.keys():
+                    if k in doc:
+                        del doc[k]                    
                 return FakeResult(modified_count=1)
 
         if not upsert:
@@ -60,6 +79,8 @@ class FakeCollection:
             doc[k] = v
         for k, v in incs.items():
             doc[k] = doc.get(k, 0) + v
+        for k in unsets.keys():
+            doc.pop(k, None)            
         doc.setdefault("_id", self._id)
         self._id += 1
         self.docs.append(doc)
@@ -112,7 +133,7 @@ class ReferralTests(unittest.TestCase):
         db = FakeDB()
         db.referrals.update_one(
             {"referred_user_id": 1},
-            {"$set": {"referrer_id": 2, "status": "pending"}},
+            {"$set": {"referrer_id": 2, "referrer_user_id": 2, "invitee_user_id": 1, "status": "pending"}},
             upsert=True,
         )
 
@@ -126,15 +147,15 @@ class ReferralTests(unittest.TestCase):
             db, db.referrals, db.users, 1, lambda _: True
         )
         self.assertTrue(result)
-        self.assertEqual(db.referrals.find_one({"referred_user_id": 1}).get("status"), "success")
+        self.assertEqual(db.referrals.find_one({"referred_user_id": 1}).get("status"), "confirmed")
         total_xp = sum(ev["xp"] for ev in db.xp_events.docs)
         self.assertEqual(total_xp, BASE_REFERRAL_XP)
 
     def test_reconciliation_no_mismatches(self):
         refs = [
-            {"referrer_id": 1, "referred_user_id": 10, "status": "success"},
-            {"referrer_id": 1, "referred_user_id": 11, "status": "success"},
-            {"referrer_id": 1, "referred_user_id": 12, "status": "success"},
+            {"referrer_id": 1, "referrer_user_id": 1, "referred_user_id": 10, "invitee_user_id": 10, "status": "confirmed"},
+            {"referrer_id": 1, "referrer_user_id": 1, "referred_user_id": 11, "invitee_user_id": 11, "status": "confirmed"},
+            {"referrer_id": 1, "referrer_user_id": 1, "referred_user_id": 12, "invitee_user_id": 12, "status": "confirmed"},
         ]
         xp_events = [
             {"user_id": 1, "type": REFERRAL_SUCCESS_EVENT, "unique_key": "ref_success:10", "xp": BASE_REFERRAL_XP},
