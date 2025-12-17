@@ -422,39 +422,38 @@ def parse_init_data(raw: str) -> dict:
 def verify_telegram_init_data(init_data_raw: str):
     import os, hmac, hashlib, time, json, urllib.parse
 
-    print("[initdata] verifier=canonical_strict")
+    print("[initdata] verifier=canonical_parse_qsl")
 
-    # 1. Parse raw key=value pairs (NO decoding)
-    items = []
-    for part in init_data_raw.split("&"):
-        if "=" not in part:
-            continue
-        k, v = part.split("=", 1)
-        items.append((k, v))
+    # 1. Parse & decode ONCE (Telegram spec compliant)
+    pairs = urllib.parse.parse_qsl(
+        init_data_raw,
+        keep_blank_values=True,
+        strict_parsing=False,
+    )
 
-    parsed = dict(items)
-    provided_hash = parsed.get("hash", "").lower()
+    data = dict(pairs)
+    provided_hash = data.get("hash", "").lower()
          
     print(
         f"[initdata] raw_len={len(init_data_raw)} "
-        f"has_user={'user' in parsed} "
-        f"has_auth_date={'auth_date' in parsed} "
-        f"has_hash={'hash' in parsed}"
+        f"has_user={'user' in data} "
+        f"has_auth_date={'auth_date' in data} "
+        f"has_hash={'hash' in data}"
     )
  
     if not provided_hash or len(provided_hash) != 64:
         return False, {}, "invalid_hash"
 
-    # 2. Build data_check_string
+    # 2. Build data_check_string (sorted, hash excluded)
     data_check_string = "\n".join(
         f"{k}={v}"
-        for k, v in sorted(parsed.items())
+        for k, v in sorted(pairs)
         if k != "hash"
     )
  
     dcs_sha = hashlib.sha256(data_check_string.encode()).hexdigest()[:8]
  
-    # 3. Compute HMAC using BOT_TOKEN
+    # 3. Compute HMAC
     token = os.environ.get("BOT_TOKEN", "")
     secret = hmac.new(
         b"WebAppData",
@@ -481,23 +480,23 @@ def verify_telegram_init_data(init_data_raw: str):
 
     # 4. Freshness check (24h)
     try:
-        auth_date = int(parsed.get("auth_date", "0"))
+        auth_date = int(data.get("auth_date", "0"))
         if time.time() - auth_date > 86400:
             return False, {}, "auth_date_expired"
     except Exception:
         pass
      
-    # 5. Parse user JSON (decode ONCE)
+    # 5. Parse Telegram user JSON (already decoded)
     try:
-        user = json.loads(urllib.parse.unquote(parsed.get("user", "{}")))
+        user = json.loads(data.get("user", "{}"))
     except Exception:
         return False, {}, "user_parse_error"
      
     if not user.get("id"):
         return False, {}, "missing_user_id"
 
-    parsed["user"] = json.dumps(user)
-    return True, parsed, "ok"
+    data["user"] = json.dumps(user)
+    return True, data, "ok"
  
 def _require_admin_via_query():
     payload = _payload_for_admin_query(request)
