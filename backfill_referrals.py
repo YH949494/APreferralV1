@@ -27,20 +27,22 @@ from xp import grant_xp
 def _collect_referral_counts(referrals):
     ref_counts = defaultdict(list)
     for ref in referrals:
-        if ref.get("status") != "success":
+        if ref.get("status") not in {"confirmed", "success"}:
             continue
-        ref_counts[ref.get("referrer_id")].append(ref.get("referred_user_id"))
+        referrer_id = ref.get("referrer_user_id") or ref.get("referrer_id")
+        invitee_id = ref.get("invitee_user_id") or ref.get("referred_user_id")
+        ref_counts[referrer_id].append(invitee_id)
     return {uid: len(set(referred)) for uid, referred in ref_counts.items()}
 
 
 def backfill(db, dry_run: bool = True):
-    referrals = list(db.referrals.find({"status": "success"}))
+    referrals = list(db.referrals.find({"status": {"$in": ["confirmed", "success"]}}))
     ref_counts = _collect_referral_counts(referrals)
 
     missing_base = []
     for ref in referrals:
-        referrer_id = ref.get("referrer_id")
-        referred_user_id = ref.get("referred_user_id")
+        referrer_id = ref.get("referrer_user_id") or ref.get("referrer_id")
+        referred_user_id = ref.get("invitee_user_id") or ref.get("referred_user_id")
         if not referrer_id or not referred_user_id:
             continue
         key = f"{REFERRAL_SUCCESS_EVENT}:{referred_user_id}"
