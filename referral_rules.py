@@ -232,7 +232,8 @@ def validate_referral_if_eligible(
         referrer,
         invitee_user_id,
     )
-        if outcome.get("base_granted"):
+    
+    if outcome.get("base_granted"):
         total_confirmed = referrals_collection.count_documents(
             {
                 "status": {"$in": ["confirmed", "success"]},
