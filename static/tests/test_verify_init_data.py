@@ -13,7 +13,7 @@ def build_init_data(token: str, payload: dict) -> str:
     for key in sorted(payload.keys()):
         pairs.append(f"{key}={payload[key]}")
     check_string = "\n".join(pairs)
-    secret_key = hmac.new(token.encode(), b"WebAppData", hashlib.sha256).digest()
+    secret_key = hmac.new(b"WebAppData", token.encode(), hashlib.sha256).digest()
     signature = hmac.new(secret_key, check_string.encode(), hashlib.sha256).hexdigest()
 
     query = payload.copy()
@@ -124,7 +124,7 @@ class VerifyInitDataTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual(reason, "bot_token_missing")
 
-    def test_verify_accepts_signature_field(self):
+    def test_verify_requires_hash_field(self):
         token = "987:XYZ"
         self.vouchers._BOT_TOKEN = token
         self.vouchers._BOT_TOKEN_FALLBACKS = []
@@ -138,10 +138,10 @@ class VerifyInitDataTests(unittest.TestCase):
 
         init_data = build_init_data(token, payload).replace("hash=", "signature=")
 
-        ok, data, reason = self.vouchers.verify_telegram_init_data(init_data)
-
-        self.assertTrue(ok, reason)
-        self.assertEqual(json.loads(data["user"])["id"], 7)
-
+        ok, _, reason = self.vouchers.verify_telegram_init_data(init_data)
+        
+        self.assertFalse(ok)
+        self.assertEqual(reason, "missing_hash")
+        
 if __name__ == "__main__":
     unittest.main()
