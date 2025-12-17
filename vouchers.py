@@ -480,11 +480,20 @@ def _candidate_bot_tokens():
 
 def verify_telegram_init_data(init_data_raw: str):
     import urllib.parse, hmac, hashlib, time, os
+ 
+    def _log(reason: str, extra: str = ""):
+        suffix = f" {extra}".rstrip()
+        print(f"[initdata] {reason}{suffix}")
 
     raw_init_data = init_data_raw or ""
     decoded_init_data = urllib.parse.unquote_plus(raw_init_data)
 
-    parsed = urllib.parse.parse_qs(decoded_init_data, keep_blank_values=True)
+    try:
+        parsed = urllib.parse.parse_qs(decoded_init_data, keep_blank_values=True)
+    except Exception as e:
+        _log("parse_error", f"exc={type(e).__name__}")
+        return False, {}, "parse_error"
+     
     provided_hash = parsed.get("hash", [""])[0]
      
     print(
@@ -494,6 +503,7 @@ def verify_telegram_init_data(init_data_raw: str):
     )
  
     if not provided_hash:
+        _log("missing_hash")    
         return False, {}, "missing_hash"
 
     # Build the payload strings from all params except the integrity fields
@@ -518,6 +528,7 @@ def verify_telegram_init_data(init_data_raw: str):
             candidates.append(t)
 
     if not candidates:
+        _log("bot_token_missing")     
         return False, {}, "bot_token_missing"
 
     ok = False
@@ -532,20 +543,20 @@ def verify_telegram_init_data(init_data_raw: str):
                 reason = "ok"
                 break
             else:
-                print(
-                    f"[initdata] hash_mismatch idx={idx} "
-                    f"calc={calc[:8]} provided={provided_hash[:8]}"
+                _log(
+                    "hash_mismatch",
+                    f"idx={idx} calc={calc[:8]} provided={provided_hash[:8]}",
                 )
              
     if not ok:
-        print("[initdata] hash_mismatch")
+        _log("hash_mismatch_final")
         return False, {}, reason
 
     # Optional freshness check (24h)
     try:
         auth_date = int(parsed.get("auth_date", ["0"])[0])
         if time.time() - auth_date > 24 * 3600:
-            print("[initdata] auth_date_expired")         
+            _log("auth_date_expired")
             return False, {}, "expired_auth_date"
     except Exception:
         pass
@@ -558,6 +569,7 @@ def verify_telegram_init_data(init_data_raw: str):
         try:
             user_json = json.loads(urllib.parse.unquote_plus(user_raw))
         except Exception:
+            _log("user_parse_error")         
             user_json = {}
 
     if not isinstance(user_json, dict):
@@ -565,7 +577,7 @@ def verify_telegram_init_data(init_data_raw: str):
 
     user_id = str(user_json.get("id") or "").strip()
     if not user_id:
-        print("[initdata] missing_user_id")
+        _log("missing_user_id")
         return False, {}, "missing_user_id"
 
     parsed_flat = {k: v[0] for k, v in parsed.items()}
