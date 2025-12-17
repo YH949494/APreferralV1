@@ -73,11 +73,6 @@ def _clean_token_list(raw: str):
     return [tok.strip() for tok in raw.split(",") if tok.strip()]
 
 _ADMIN_PANEL_SECRET = getattr(_cfg, "ADMIN_PANEL_SECRET", os.getenv("ADMIN_PANEL_SECRET", ""))
-_BOT_TOKEN = getattr(_cfg, "BOT_TOKEN", os.getenv("BOT_TOKEN", ""))
-_BOT_TOKEN_FALLBACKS = getattr(
-    _cfg, "BOT_TOKEN_FALLBACKS",
-    [t.strip() for t in os.getenv("BOT_TOKEN_FALLBACKS", "").split(",") if t.strip()]
-)
 _ADMIN_USER_IDS = set()
 try:
     raw_admin_ids = getattr(_cfg, "ADMIN_USER_IDS", os.getenv("ADMIN_USER_IDS", ""))
@@ -112,72 +107,20 @@ def _get_admin_secret(req) -> str:
         or req.args.get("admin_secret", "")
     )
 
-def _extract_init_data(req, *, body: dict | None = None) -> str:
-    body = body or {}
-
-    for candidate in (
-        req.headers.get("X-Telegram-Web-App-Data"),
-        req.headers.get("X-Telegram-Init-Data"),
-        req.headers.get("X-Telegram-Init"),
-    ):
-        if candidate:
-            return str(candidate)
-
-    # Extract raw query parameter without pre-decoding to avoid double unquoting
-    raw_qs = (req.query_string or b"").decode("utf-8", "ignore")
-    if raw_qs:
-        for part in raw_qs.split("&"):
-            if part.startswith("init_data="):
-                return part.split("=", 1)[1]
-            if part.startswith("initData="):
-                return part.split("=", 1)[1]
-
-    for key in ("init_data", "initData"):
-        if key in body:
-            try:
-                return str(body.get(key) or "")
-            except Exception:
-                return ""
-
-    return ""
- 
-def _extract_init_data_raw_from_query(request):
-    qs = request.query_string or b""
-    for key in (b"init_data=", b"initData="):
-        i = qs.find(key)
-        if i == -1:
-            continue
-        i += len(key)
-        break
-    else:
+def extract_raw_init_data_from_query(request):
+    qs = request.query_string  # bytes, raw
+    if not qs:
         return ""
-    j = qs.find(b"&", i)
-    val = qs[i:] if j == -1 else qs[i:j]
-    try:
-        return val.decode("utf-8", errors="strict")
-    except Exception:
-        return val.decode("utf-8", errors="ignore")
-
-def _verify_telegram_init_data(init_data: str) -> dict | None:
-    """Legacy helper used by the voucher blueprint for Telegram auth."""
-    if not init_data:
-        return None
-     
-    try:
-        ok, parsed, _ = verify_telegram_init_data(init_data)
-
-    except Exception:
-        return None
-     
-    if not ok:
-        return None
-
-    cleaned = dict(parsed)
-    cleaned.pop("hash", None)
-    cleaned.pop("signature", None)
-    return cleaned
-
-def _user_ctx_or_preview(req):
+    key = b"init_data="
+    idx = qs.find(key)
+    if idx == -1:
+        return ""
+    start = idx + len(key)
+    end = qs.find(b"&", start)
+    raw = qs[start:] if end == -1 else qs[start:end]
+    return raw.decode("utf-8", errors="strict")
+ 
+def _user_ctx_or_preview(req, *, init_data_raw: str, verification: tuple | None = None):
     """
     Returns (ctx: dict, admin_preview: bool) or (None, False) if unauthorized.
     SAFE: will not throw if env/config is missing.
@@ -191,14 +134,9 @@ def _user_ctx_or_preview(req):
     if payload:
         return (payload, True)
   
-# Telegram path
-    parsed = _verify_telegram_init_data(_extract_init_data(req))
-    if parsed:
+    ok, parsed, _ = verification if verification is not None else verify_telegram_init_data(init_data_raw)
+    if ok:
         return (parsed, False)
-
-    legacy = _legacy_user_ctx(req)
-    if legacy:
-        return (legacy, False)
 
     return (None, False)
 
@@ -481,146 +419,85 @@ def parse_init_data(raw: str) -> dict:
     pairs = urllib.parse.parse_qsl(raw, keep_blank_values=True)
     return {k: v for k, v in pairs}
 
-def _candidate_bot_tokens():
-    tokens = []
-    seen = set()
-
-    for token in [_BOT_TOKEN, *_BOT_TOKEN_FALLBACKS]:
-        if not token or token in seen:
-            continue
-        tokens.append(token)
-        seen.add(token)
-
-    return tokens
-
 def verify_telegram_init_data(init_data_raw: str):
-    import urllib.parse, hmac, hashlib, time, os
- 
-    print("[initdata] verifier_v=spec_qsl")
- 
-    def _log(reason: str, extra: str = ""):
-        suffix = f" {extra}".rstrip()
-        print(f"[initdata] {reason}{suffix}")
+    import os, hmac, hashlib, time, json, urllib.parse
 
-    raw_init_data = init_data_raw or ""
+    print("[initdata] verifier=canonical_strict")
 
-    parsed_pairs = urllib.parse.parse_qsl(
-        raw_init_data,
-        keep_blank_values=True,
-        strict_parsing=False,
-    )
- 
-    parsed = {}
-    provided_hash = ""
-    for k, v in parsed_pairs:       
-        parsed.setdefault(k, []).append(v)
-        if not provided_hash and k == "hash":
-            provided_hash = v
+    # 1. Parse raw key=value pairs (NO decoding)
+    items = []
+    for part in init_data_raw.split("&"):
+        if "=" not in part:
+            continue
+        k, v = part.split("=", 1)
+        items.append((k, v))
+
+    parsed = dict(items)
+    provided_hash = parsed.get("hash", "").lower()
          
     print(
-        f"[initdata] raw_len={len(raw_init_data)} has_user={'user' in parsed} "
-        f"has_auth_date={'auth_date' in parsed} has_hash={'hash' in parsed} "
-        f"has_sig={'signature' in parsed}"
+        f"[initdata] raw_len={len(init_data_raw)} "
+        f"has_user={'user' in parsed} "
+        f"has_auth_date={'auth_date' in parsed} "
+        f"has_hash={'hash' in parsed}"
     )
  
-    if not provided_hash:
-        _log("missing_hash")
-        return False, {}, "missing_hash"
+    if not provided_hash or len(provided_hash) != 64:
+        return False, {}, "invalid_hash"
 
-    provided_hash = provided_hash.strip()
-    try:
-        if len(provided_hash) != 64:
-            raise ValueError("bad_len")
-        int(provided_hash, 16)
-    except Exception:
-        _log("invalid_hash_format")
-        return False, {}, "invalid_hash_format"
-
-    provided_hash = provided_hash.lower()
-
-    filtered_pairs = [
-        (k, v) for k, v in parsed_pairs if k not in ("hash", "signature")
-    ]
-    filtered_pairs.sort(key=lambda kv: kv[0])
-    data_check_string = "\n".join(f"{k}={v}" for k, v in filtered_pairs)
-
-    sorted_keys = sorted({k for k, _ in filtered_pairs})
-    print(f"[initdata] keys={sorted_keys}")
-    print(f"[initdata] dcs_len={len(data_check_string)}")
-    print(f"[initdata] dcs_preview={data_check_string[:120]}")
+    # 2. Build data_check_string
+    data_check_string = "\n".join(
+        f"{k}={v}"
+        for k, v in sorted(parsed.items())
+        if k != "hash"
+    )
  
-    candidates = _candidate_bot_tokens()
-
-    primary_env = (os.environ.get("BOT_TOKEN") or "").strip()
-    if primary_env and primary_env not in candidates:
-        candidates.append(primary_env)
-
-    fallbacks_env = os.environ.get("BOT_TOKEN_FALLBACKS", "")
-    for t in (x.strip() for x in fallbacks_env.split(",") if x.strip()):
-        if t not in candidates:
-            candidates.append(t)
-
-    if not candidates:
-        _log("bot_token_missing")
-        return False, {}, "bot_token_missing"
-
-    ok = False
-    reason = "hash_mismatch_final"
-    computed_hash = ""
-
-    data_bytes = data_check_string.encode()
-    for idx, tok in enumerate(candidates):
-        secret_key = hmac.new(b"WebAppData", tok.encode(), hashlib.sha256).digest()
-        computed_hash = hmac.new(secret_key, data_bytes, hashlib.sha256).hexdigest()
-        print(
-            "[initdata] hash_check",
-            f"provided_hash_prefix={provided_hash[:8]}",
-            f"calc_prefix={computed_hash[:8]}",
-        )
-        if hmac.compare_digest(computed_hash, provided_hash):
-            ok = True
-            reason = "ok"
-            print(f"[initdata] using_bot_tail={tok[-4:]}")
-            break
-             
-    if not ok:
-        _log("hash_mismatch_final")
-        return False, {}, reason
-
-    print("[initdata] verification=OK")
+    dcs_sha = hashlib.sha256(data_check_string.encode()).hexdigest()[:8]
  
-    # Optional freshness check (24h)
+    # 3. Compute HMAC using BOT_TOKEN
+    token = os.environ.get("BOT_TOKEN", "")
+    secret = hmac.new(
+        b"WebAppData",
+        token.encode(),
+        hashlib.sha256
+    ).digest()
+ 
+    computed = hmac.new(
+        secret,
+        data_check_string.encode(),
+        hashlib.sha256
+    ).hexdigest()
+ 
+    print(
+        f"[initdata] hash_check "
+        f"bot_tail={token[-4:]} "
+        f"dcs_sha={dcs_sha} "
+        f"provided={provided_hash[:8]} "
+        f"computed={computed[:8]}"
+    )
+ 
+    if not hmac.compare_digest(computed, provided_hash):
+        return False, {}, "hash_mismatch"
+
+    # 4. Freshness check (24h)
     try:
-        auth_date = int(parsed.get("auth_date", ["0"])[0])
-        if time.time() - auth_date > 24 * 3600:
-            _log("auth_date_expired")
-            return False, {}, "expired_auth_date"
+        auth_date = int(parsed.get("auth_date", "0"))
+        if time.time() - auth_date > 86400:
+            return False, {}, "auth_date_expired"
     except Exception:
         pass
-
-    # Parse Telegram user JSON after integrity validation
-    user_raw = parsed.get("user", ["{}"])[0]
+     
+    # 5. Parse user JSON (decode ONCE)
     try:
-        user_json = json.loads(user_raw)
+        user = json.loads(urllib.parse.unquote(parsed.get("user", "{}")))
     except Exception:
-        try:
-            user_json = json.loads(urllib.parse.unquote_plus(user_raw))
-        except Exception:
-            _log("user_parse_error")         
-            user_json = {}
-
-    if not isinstance(user_json, dict):
-        user_json = {}
-
-    user_id = str(user_json.get("id") or "").strip()
-    if not user_id:
-        _log("missing_user_id")
+        return False, {}, "user_parse_error"
+     
+    if not user.get("id"):
         return False, {}, "missing_user_id"
 
-    parsed_flat = {k: v[0] for k, v in parsed.items()}
-    parsed_flat["user"] = json.dumps(user_json)
-
-    return True, parsed_flat, reason
+    parsed["user"] = json.dumps(user)
+    return True, parsed, "ok"
  
 def _require_admin_via_query():
     payload = _payload_for_admin_query(request)
@@ -894,8 +771,23 @@ def api_visible():
     """
     ref = now_utc()
     try:
-        # Use the safe universal helper you already have
-        ctx, admin_preview = _user_ctx_or_preview(request)
+        init_data = extract_raw_init_data_from_query(request)
+
+        print(
+            "[initdata] source=query_string_raw "
+            f"len={len(init_data)} prefix={init_data[:20]}"
+        )
+
+        if not init_data:
+            return jsonify({"status": "error", "code": "missing_init_data"}), 400
+
+        ok, parsed, reason = verify_telegram_init_data(init_data)
+        ctx, admin_preview = _user_ctx_or_preview(
+            request, init_data_raw=init_data, verification=(ok, parsed, reason)
+        )
+
+        if not ok and not admin_preview:
+            return jsonify({"code": "auth_failed", "why": str(reason)}), 401
      
         if not admin_preview and not ctx:
             return jsonify({"code": "auth_failed", "why": "missing_or_invalid_init_data"}), 401
@@ -1037,13 +929,11 @@ def api_claim():
     drop = db.drops.find_one({"_id": _coerce_id(drop_id)}) if drop_id else {}
     drop_type = drop.get("type", "pooled")
 
-    raw_init = _extract_init_data_raw_from_query(request)
-    init_data = raw_init
+    init_data = extract_raw_init_data_from_query(request)
 
     print(
-        f"[initdata] claim_source=query_string_raw "
-        f"raw_len={len(init_data) if init_data else 0} "
-        f"prefix={(init_data[:20] if init_data else '')}"
+        "[initdata] source=query_string_raw "
+        f"len={len(init_data)} prefix={init_data[:20]}"
     )
 
     if not init_data:
@@ -1073,14 +963,7 @@ def api_claim():
     try:
         user_raw = json.loads(data.get("user", "{}"))
     except Exception:
-        # Some clients double-encode init_data, so the `user` field may still
-        # contain percent-escape sequences (e.g. "%7B...%7D"). Try to decode
-        # once more before giving up so we don't reject otherwise valid users.
-        try:
-            decoded_user = urllib.parse.unquote_plus(data.get("user", "{}"))
-            user_raw = json.loads(decoded_user)
-        except Exception:
-            user_raw = {}
+        user_raw = {}
          
     tg_user = user_raw
 
