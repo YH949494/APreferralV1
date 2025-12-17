@@ -341,6 +341,120 @@ def _guess_user_id(req, body=None) -> str:
 
     return ""
 
+
+def load_user_context(*, uid=None, username: str | None = None, username_lower: str | None = None) -> dict:
+    """
+    Load user context from MongoDB using either user_id or usernameLower.
+    Returns a dict with safe default values when no record is found.
+    """
+
+    try:
+        uid_int = int(uid) if uid is not None else None
+    except (TypeError, ValueError):
+        uid_int = None
+
+    username_lower = norm_username(username_lower or username or "")
+
+    doc = None
+    if uid_int is not None:
+        doc = users_collection.find_one({"user_id": uid_int})
+
+    if not doc and username_lower:
+        doc = users_collection.find_one({"usernameLower": username_lower})
+        if not doc:
+            doc = users_collection.find_one({"username": {"$regex": f"^{username_lower}$", "$options": "i"}})
+
+    ctx = {
+        "user_id": uid_int,
+        "usernameLower": username_lower,
+        "status": "",
+        "region": "",
+        "monthly_xp": 0,
+        "weekly_xp": 0,
+        "xp": 0,
+    }
+
+    if doc:
+        ctx.update({
+            "user_id": doc.get("user_id", ctx["user_id"]),
+            "usernameLower": norm_username(doc.get("usernameLower") or doc.get("username") or ctx["usernameLower"]),
+            "status": doc.get("status", ctx["status"]),
+            "region": doc.get("region", ctx["region"]),
+            "monthly_xp": doc.get("monthly_xp", ctx["monthly_xp"]),
+            "weekly_xp": doc.get("weekly_xp", ctx["weekly_xp"]),
+            "xp": doc.get("xp", ctx["xp"]),
+        })
+
+    return ctx
+
+
+def is_drop_allowed(drop: dict, tg_uid, tg_uname_lower: str, user_ctx: dict | None) -> bool:
+    audience = drop.get("audience") or {}
+    if not audience:
+        return True
+
+    user_ctx = user_ctx or {}
+    drop_id = str(drop.get("_id") or drop.get("dropId") or "")
+
+    uid = tg_uid
+    if uid is None:
+        try:
+            uid = int(user_ctx.get("user_id"))
+        except Exception:
+            uid = None
+
+    denylist = set()
+    for raw in audience.get("denylist_user_ids", []) or []:
+        try:
+            denylist.add(int(raw))
+        except (TypeError, ValueError):
+            continue
+
+    if uid is not None and uid in denylist:
+        print(f"[audience] blocked drop_id={drop_id} uid={uid} reason=denylist_user_ids")
+        return False
+
+    allowlist = set()
+    for raw in audience.get("allowlist_user_ids", []) or []:
+        try:
+            allowlist.add(int(raw))
+        except (TypeError, ValueError):
+            continue
+
+    if uid is not None and uid in allowlist:
+        return True
+
+    statuses = audience.get("statuses") or []
+    user_status = user_ctx.get("status") or ""
+    if statuses and user_status not in statuses:
+        print(f"[audience] blocked drop_id={drop_id} uid={uid} reason=statuses")
+        return False
+
+    regions = audience.get("regions") or []
+    user_region = user_ctx.get("region") or ""
+    if regions and user_region not in regions:
+        print(f"[audience] blocked drop_id={drop_id} uid={uid} reason=regions")
+        return False
+
+    min_monthly_xp = audience.get("min_monthly_xp")
+    try:
+        min_monthly_xp_int = int(min_monthly_xp) if min_monthly_xp is not None else None
+    except (TypeError, ValueError):
+        min_monthly_xp_int = None
+
+    if min_monthly_xp_int is not None:
+        monthly_xp = user_ctx.get("monthly_xp") or 0
+        try:
+            monthly_xp = int(monthly_xp)
+        except (TypeError, ValueError):
+            monthly_xp = 0
+
+        if monthly_xp < min_monthly_xp_int:
+            print(f"[audience] blocked drop_id={drop_id} uid={uid} reason=min_monthly_xp")
+            return False
+
+    return True
+
 def _extract_admin_secret() -> str:
     """Return the admin secret supplied via headers or query params."""
 
@@ -572,6 +686,7 @@ def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None
     personal_cards = []
     pooled_cards = []
 
+    raw_username = "" 
     uname = ""
     uid = None
     if isinstance(tg_user, dict):
@@ -588,7 +703,16 @@ def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None
 
         if not pooled_claim_key and uid is not None:
             pooled_claim_key = f"uid:{uid}"
- 
+
+     ctx_uid = uid
+    if ctx_uid is None:
+        try:
+            ctx_uid = int(user_id)
+        except (TypeError, ValueError):
+            ctx_uid = None
+
+    user_ctx = load_user_context(uid=ctx_uid, username=raw_username if tg_user else usernameLower, username_lower=usernameLower or uname)
+
     # Only hide personalised vouchers when the caller truly has no username
     allow_personalised = bool(usernameLower)
     claim_key = usernameLower or user_id
@@ -597,10 +721,13 @@ def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None
  
     for d in drops:
         drop_id = str(d["_id"])
-        drop_id_variants = _drop_id_variants(d.get("_id"))    
+        drop_id_variants = _drop_id_variants(d.get("_id"))
         dtype = d.get("type", "pooled")
         is_active = is_drop_active(d, ref)
 
+        if not is_drop_allowed(d, ctx_uid, usernameLower or uname, user_ctx):
+            continue
+         
         base = {
             "dropId": drop_id,
             "name": d.get("name"),
@@ -1013,7 +1140,12 @@ def api_claim():
     if not allowed:
         print(f"[claim401] uid={uid} uname={uname} v_uid={v_uid} v_uname={v_uname}")
         return jsonify({"status": "error", "code": "not_eligible"}), 403
- 
+
+    user_ctx = load_user_context(uid=uid, username=username, username_lower=uname or username)
+
+    if not is_drop_allowed(voucher, uid, uname, user_ctx):
+        return jsonify({"status": "error", "code": "not_eligible"}), 403
+
     if not username:
         username = fallback_username or ""
    
