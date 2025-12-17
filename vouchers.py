@@ -12,7 +12,6 @@ from database import db, users_collection
 admin_cache_col = db["admin_cache"]
 
 BYPASS_ADMIN = os.getenv("BYPASS_ADMIN", "0").lower() in ("1", "true", "yes", "on")
-BYPASS_POOLED_INITDATA = os.getenv("BYPASS_POOLED_INITDATA", "0").lower() in ("1", "true", "yes", "on")
 HARDCODED_ADMIN_USERNAMES = {"gracy_ap", "teohyaohui"}  # allow manual overrides if cache is empty
 
 def _load_admin_ids() -> set:
@@ -144,11 +143,14 @@ def _extract_init_data(req, *, body: dict | None = None) -> str:
  
 def _extract_init_data_raw_from_query(request):
     qs = request.query_string or b""
-    key = b"init_data="
-    i = qs.find(key)
-    if i == -1:
+    for key in (b"init_data=", b"initData="):
+        i = qs.find(key)
+        if i == -1:
+            continue
+        i += len(key)
+        break
+    else:
         return ""
-    i += len(key)
     j = qs.find(b"&", i)
     val = qs[i:] if j == -1 else qs[i:j]
     try:
@@ -494,7 +496,7 @@ def _candidate_bot_tokens():
 def verify_telegram_init_data(init_data_raw: str):
     import urllib.parse, hmac, hashlib, time, os
  
-    print("[initdata] verifier_v=rawpairs_strict")
+    print("[initdata] verifier_v=spec_qsl")
  
     def _log(reason: str, extra: str = ""):
         suffix = f" {extra}".rstrip()
@@ -502,24 +504,18 @@ def verify_telegram_init_data(init_data_raw: str):
 
     raw_init_data = init_data_raw or ""
 
-    pairs = [] 
+    parsed_pairs = urllib.parse.parse_qsl(
+        raw_init_data,
+        keep_blank_values=True,
+        strict_parsing=False,
+    )
+ 
     parsed = {}
     provided_hash = ""
-    provided_sig = ""
-    for part in raw_init_data.split("&"):
-        if part == "":
-            continue
-        if "=" in part:
-            k, v = part.split("=", 1)
-        else:
-            k, v = part, ""
-        pairs.append((k, v))         
+    for k, v in parsed_pairs:       
         parsed.setdefault(k, []).append(v)
         if not provided_hash and k == "hash":
             provided_hash = v
-         
-        if not provided_sig and k == "signature":
-            provided_sig = v     
          
     print(
         f"[initdata] raw_len={len(raw_init_data)} has_user={'user' in parsed} "
@@ -542,9 +538,16 @@ def verify_telegram_init_data(init_data_raw: str):
 
     provided_hash = provided_hash.lower()
 
-    filtered_pairs = [(k, v) for k, v in pairs if k not in ("hash", "signature")]
+    filtered_pairs = [
+        (k, v) for k, v in parsed_pairs if k not in ("hash", "signature")
+    ]
     filtered_pairs.sort(key=lambda kv: kv[0])
     data_check_string = "\n".join(f"{k}={v}" for k, v in filtered_pairs)
+
+    sorted_keys = sorted({k for k, _ in filtered_pairs})
+    print(f"[initdata] keys={sorted_keys}")
+    print(f"[initdata] dcs_len={len(data_check_string)}")
+    print(f"[initdata] dcs_preview={data_check_string[:120]}")
  
     candidates = _candidate_bot_tokens()
 
@@ -577,13 +580,15 @@ def verify_telegram_init_data(init_data_raw: str):
         if hmac.compare_digest(computed_hash, provided_hash):
             ok = True
             reason = "ok"
-            print(f"[initdata] ok idx={idx} token_tail={tok[-4:]}")
+            print(f"[initdata] using_bot_tail={tok[-4:]}")
             break
              
     if not ok:
         _log("hash_mismatch_final")
         return False, {}, reason
 
+    print("[initdata] verification=OK")
+ 
     # Optional freshness check (24h)
     try:
         auth_date = int(parsed.get("auth_date", ["0"])[0])
@@ -1062,25 +1067,7 @@ def api_claim():
         ok, why = True, "ok"
 
     if not ok:
-        if BYPASS_POOLED_INITDATA and drop_type == "pooled":
-            decoded = urllib.parse.unquote_plus(init_data or "")
-            parsed = urllib.parse.parse_qs(decoded, keep_blank_values=True)
-            user_raw = parsed.get("user", ["{}"])[0]
-            try:
-                user = json.loads(user_raw)
-            except Exception:
-                user = {}
-            if not isinstance(user, dict):
-                user = {}
-            user_id = str(user.get("id") or "").strip()
-            username = user.get("username", "") or ""
-            if not user_id:
-                return jsonify({"status": "error", "code": "missing_user_id"}), 400
-            data = {"user": json.dumps(user)}
-            ok, why = True, "bypass_pooled"
-            print(f"[claim] BYPASS pooled drop_id={drop_id} uid={user_id}")
-        else:
-            return jsonify({"status": "error", "code": "auth_failed", "why": str(why)}), 401
+        return jsonify({"status": "error", "code": "auth_failed", "why": str(why)}), 401
          
     # Parse Telegram user
     try:
