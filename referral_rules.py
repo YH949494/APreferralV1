@@ -11,13 +11,16 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Callable, Dict, Iterable, List
 
+from datetime import datetime, timedelta, timezone
 from xp import grant_xp
 
 
 logger = logging.getLogger(__name__)
+
+CHANNEL_USERNAME = os.getenv("CHANNEL_USERNAME", "@advantplayofficial")
 
 # Base referral reward per successful referred user.
 BASE_REFERRAL_XP = int(os.getenv("REFERRAL_REWARD_XP", "30"))
@@ -74,21 +77,47 @@ def record_pending_referral(referrals_collection, referrer_id: int | None, refer
 
     now = datetime.utcnow()
     referrals_collection.update_one(
-        {"referred_user_id": referred_user_id},
+        {
+            "$or": [
+                {"invitee_user_id": referred_user_id},
+                {"referred_user_id": referred_user_id},
+            ]
+        },
         {
             "$setOnInsert": {
+                "referrer_user_id": referrer_id,                
                 "referrer_id": referrer_id,
+                "invitee_user_id": referred_user_id,                
                 "referred_user_id": referred_user_id,
+                "channel_id": CHANNEL_USERNAME,
                 "status": "pending",
                 "created_at": now,
-            }
+            },
+            "$set": {
+                "referrer_user_id": referrer_id,
+                "referrer_id": referrer_id,
+                "invitee_user_id": referred_user_id,
+                "channel_id": CHANNEL_USERNAME,
+            },
         },
         upsert=True,
     )
 
+    pending_count = referrals_collection.count_documents(
+        {
+            "status": "pending",
+            "$or": [
+                {"referrer_user_id": referrer_id},
+                {"referrer_id": referrer_id},
+            ],
+        }
+    )
+    logger.info(
+        "[referral] pending uid=%s count=%s", referrer_id, pending_count
+    )
 
 def grant_referral_rewards(
-    db, users_collection, referrer_id: int | None, referred_user_id: int
+    db, users_collection, referrer_id: int | None, invitee_user_id: int
 ) -> Dict[str, int]:
     """Grant base and bonus XP for a successful referral.
 
@@ -100,10 +129,10 @@ def grant_referral_rewards(
 
     result = {"base_granted": 0, "bonuses_awarded": 0}
 
-    if not referrer_id or referrer_id == referred_user_id:
+    if not referrer_id or referrer_id == invitee_user_id:
         return result
 
-    unique_key = f"{REFERRAL_SUCCESS_EVENT}:{referred_user_id}"
+    unique_key = f"{REFERRAL_SUCCESS_EVENT}:{invitee_user_id}"
     granted = grant_xp(
         db,
         referrer_id,
@@ -115,7 +144,7 @@ def grant_referral_rewards(
         logger.info(
             "[Referral] Duplicate base grant ignored referrer=%s referred=%s key=%s",
             referrer_id,
-            referred_user_id,
+            invitee_user_id,
             unique_key,
         )
         return result
@@ -157,7 +186,7 @@ def validate_referral_if_eligible(
     db,
     referrals_collection,
     users_collection,
-    referred_user_id: int,
+    invitee_user_id: int,
     membership_check: Callable[[int], bool],
 ):
     """Transition a pending referral to success if gates pass.
@@ -168,25 +197,58 @@ def validate_referral_if_eligible(
     """
 
     ref_doc = referrals_collection.find_one(
-        {"referred_user_id": referred_user_id, "status": "pending"}
+        {"invitee_user_id": invitee_user_id, "status": "pending"}
+    ) or referrals_collection.find_one(
+        {"referred_user_id": invitee_user_id, "status": "pending"}
     )
     if not ref_doc:
         return False
 
-    if not membership_check(referred_user_id):
+    if not membership_check(invitee_user_id):
         return False
 
     updated = referrals_collection.update_one(
         {"_id": ref_doc.get("_id"), "status": "pending"},
-        {"$set": {"status": "success", "validated_at": datetime.utcnow()}},
+        {
+            "$set": {
+                "status": "confirmed",
+                "confirmed_at": datetime.utcnow(),
+                "invitee_user_id": invitee_user_id,
+                "referrer_user_id": ref_doc.get("referrer_user_id")
+                or ref_doc.get("referrer_id"),
+                "channel_id": ref_doc.get("channel_id") or CHANNEL_USERNAME,
+            },
+            "$unset": {"validated_at": ""},
+        },
     )
 
     if getattr(updated, "modified_count", 0) != 1:
         return False
-
+        
+    referrer = ref_doc.get("referrer_user_id") or ref_doc.get("referrer_id")
     outcome = grant_referral_rewards(
-        db, users_collection, ref_doc.get("referrer_id"), referred_user_id
+        db,
+        users_collection,
+        referrer,
+        invitee_user_id,
     )
+        if outcome.get("base_granted"):
+        total_confirmed = referrals_collection.count_documents(
+            {
+                "status": {"$in": ["confirmed", "success"]},
+                "$or": [
+                    {"referrer_user_id": referrer},
+                    {"referrer_id": referrer},
+                ],
+            }
+        )
+        logger.info(
+            "[referral] confirmed uid=%s count=%s", referrer, total_confirmed
+        )
+        logger.info(
+            "[referral_confirmed] referrer=%s invitee=%s", referrer, invitee_user_id
+        )
+
     return bool(outcome.get("base_granted"))
 
 
@@ -196,16 +258,17 @@ def reconcile_referrals(
 ) -> List[Dict]:
     """Compute referral XP mismatches for the provided datasets.
 
-    ``referrals`` must contain documents with ``referrer_id`` and ``referred_user_id``
-    fields and ``status == 'success'``. ``xp_events`` are xp_events documents.
+    ``referrals`` must contain documents with ``referrer_user_id`` (or legacy
+    ``referrer_id``) and ``invitee_user_id`` (or legacy ``referred_user_id``)
+    fields and ``status`` of either ``confirmed`` or legacy ``success``.
     """
 
     referral_counts: Dict[int, List[int]] = {}
     for ref in referrals:
-        if ref.get("status") != "success":
+        if ref.get("status") not in {"confirmed", "success"}:
             continue
-        referrer_id = ref.get("referrer_id")
-        referred_user_id = ref.get("referred_user_id")
+        referrer_id = ref.get("referrer_user_id") or ref.get("referrer_id")
+        referred_user_id = ref.get("invitee_user_id") or ref.get("referred_user_id")
         if referrer_id is None or referred_user_id is None:
             continue
         referral_counts.setdefault(referrer_id, []).append(referred_user_id)
@@ -248,16 +311,101 @@ def reconcile_referrals(
 def ensure_referral_indexes(referrals_collection):
     """Create indexes used for referral workflows."""
 
+    referrals_collection.create_index([("referrer_user_id", 1), ("status", 1)])
     referrals_collection.create_index([("referrer_id", 1), ("status", 1)])
+    referrals_collection.create_index([("invitee_user_id", 1)], unique=True)
     referrals_collection.create_index([("referred_user_id", 1)], unique=True)
     referrals_collection.create_index([("status", 1), ("created_at", -1)])
+    referrals_collection.create_index([("status", 1), ("confirmed_at", -1)])
 
     try:
         referrals_collection.create_index(
-            [("referrer_id", 1), ("referred_user_id", 1)],
-            name="uq_ref_success",
+            [("referrer_user_id", 1), ("invitee_user_id", 1)],
+            name="uq_ref_confirmed",
             unique=True,
-            partialFilterExpression={"status": "success"},
+            partialFilterExpression={"status": "confirmed"},
         )
     except Exception:
-        logger.exception("[Referral] Failed to ensure partial unique index for successes")
+        logger.exception("[Referral] Failed to ensure partial unique index for confirmations")
+
+
+def _referral_time_expr():
+    return {"$ifNull": ["$confirmed_at", {"$ifNull": ["$validated_at", "$created_at"]}]}
+
+
+def _week_window_utc(reference: datetime | None = None):
+    ref_local = (reference or datetime.now(timezone.utc)).astimezone(KL_TZ)
+    start_local = (ref_local - timedelta(days=ref_local.weekday())).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    end_local = start_local + timedelta(days=7)
+    return start_local.astimezone(timezone.utc), end_local.astimezone(timezone.utc)
+
+
+def _month_window_utc(reference: datetime | None = None):
+    ref_local = (reference or datetime.now(timezone.utc)).astimezone(KL_TZ)
+    start_local = ref_local.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    if start_local.month == 12:
+        end_local = start_local.replace(year=start_local.year + 1, month=1)
+    else:
+        end_local = start_local.replace(month=start_local.month + 1)
+    return start_local.astimezone(timezone.utc), end_local.astimezone(timezone.utc)
+
+
+def compute_referral_stats(referrals_collection, user_id: int, window=None):
+    """Return confirmed referral counts for a user.
+
+    ``window`` optionally overrides the time range used for both weekly and monthly
+    calculations. Only referrals with ``status`` in {"confirmed", "success"}
+    are counted.
+    """
+
+    base_match = {
+        "status": {"$in": ["confirmed", "success"]},
+        "$or": [
+            {"referrer_user_id": user_id},
+            {"referrer_id": user_id},
+        ],
+    }
+
+    def _count_between(start, end):
+        return referrals_collection.count_documents(
+            {
+                "$and": [
+                    base_match,
+                    {
+                        "$expr": {
+                            "$and": [
+                                {"$gte": [_referral_time_expr(), start]},
+                                {"$lt": [_referral_time_expr(), end]},
+                            ]
+                        }
+                    },
+                ]
+            }
+        )
+
+    try:
+        total = referrals_collection.count_documents(base_match)
+        if window:
+            start_utc, end_utc = window
+            weekly = _count_between(start_utc, end_utc)
+            monthly = weekly
+        else:
+            week_start, week_end = _week_window_utc()
+            month_start, month_end = _month_window_utc()
+            weekly = _count_between(week_start, week_end)
+            monthly = _count_between(month_start, month_end)
+
+        return {
+            "total_referrals": total,
+            "weekly_referrals": weekly,
+            "monthly_referrals": monthly,
+        }
+    except Exception:
+        logger.exception("[referral_stats] failed uid=%s", user_id)
+        return {
+            "total_referrals": 0,
+            "weekly_referrals": 0,
+            "monthly_referrals": 0,
+        }
