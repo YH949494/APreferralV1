@@ -85,17 +85,14 @@ def record_pending_referral(referrals_collection, referrer_id: int | None, refer
         },
         {
             "$setOnInsert": {
-                "referrer_user_id": referrer_id,                
-                "referrer_id": referrer_id,
-                "invitee_user_id": referred_user_id,                
-                "referred_user_id": referred_user_id,
+                "referrer_user_id": referrer_id,
+                "invitee_user_id": referred_user_id,
                 "channel_id": CHANNEL_USERNAME,
                 "status": "pending",
                 "created_at": now,
             },
             "$set": {
                 "referrer_user_id": referrer_id,
-                "referrer_id": referrer_id,
                 "invitee_user_id": referred_user_id,
                 "channel_id": CHANNEL_USERNAME,
             },
@@ -311,10 +308,41 @@ def reconcile_referrals(
 def ensure_referral_indexes(referrals_collection):
     """Create indexes used for referral workflows."""
 
+    invitee_migration = referrals_collection.update_many(
+        {
+            "$or": [
+                {"invitee_user_id": {"$exists": False}},
+                {"invitee_user_id": None},
+            ],
+            "referred_user_id": {"$exists": True, "$ne": None},
+        },
+        [{"$set": {"invitee_user_id": "$referred_user_id"}}],
+    )
+    referrer_migration = referrals_collection.update_many(
+        {
+            "$or": [
+                {"referrer_user_id": {"$exists": False}},
+                {"referrer_user_id": None},
+            ],
+            "referrer_id": {"$exists": True, "$ne": None},
+        },
+        [{"$set": {"referrer_user_id": "$referrer_id"}}],
+    )
+
+    logger.info(
+        "[Referral] migrated invitee_user_id on %s docs (matched=%s)",
+        getattr(invitee_migration, "modified_count", 0),
+        getattr(invitee_migration, "matched_count", 0),
+    )
+    logger.info(
+        "[Referral] migrated referrer_user_id on %s docs (matched=%s)",
+        getattr(referrer_migration, "modified_count", 0),
+        getattr(referrer_migration, "matched_count", 0),
+    )
+    
     referrals_collection.create_index([("referrer_user_id", 1), ("status", 1)])
-    referrals_collection.create_index([("referrer_id", 1), ("status", 1)])
+    referrals_collection.create_index([("referrer_user_id", 1)])
     referrals_collection.create_index([("invitee_user_id", 1)], unique=True)
-    referrals_collection.create_index([("referred_user_id", 1)], unique=True)
     referrals_collection.create_index([("status", 1), ("created_at", -1)])
     referrals_collection.create_index([("status", 1), ("confirmed_at", -1)])
 
