@@ -487,7 +487,7 @@ def verify_telegram_init_data(init_data_raw: str):
         print(f"[initdata] {reason}{suffix}")
 
     raw_init_data = init_data_raw or ""
-    decoded_init_data = urllib.parse.unquote(raw_init_data)
+    decoded_init_data = raw_init_data.replace("%26", "&").replace("%3D", "=").replace("%3d", "=")
 
     parsed = {}
     provided_hash = ""
