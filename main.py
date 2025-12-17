@@ -27,6 +27,7 @@ from referral_rules import (
     BASE_REFERRAL_XP,
     REFERRAL_BONUS_INTERVAL,
     REFERRAL_BONUS_XP,
+    compute_referral_stats,
     ensure_referral_indexes,
     grant_referral_rewards,
     record_pending_referral,
@@ -131,7 +132,7 @@ def _event_time_expr():
 
 
 def _referral_time_expr():
-    return {"$ifNull": ["$validated_at", "$created_at"]}
+    return {"$ifNull": ["$confirmed_at", {"$ifNull": ["$validated_at", "$created_at"]}]}
 
 
 def recompute_xp_totals(start_utc, end_utc, limit: int | None = None, user_id: int | None = None):
@@ -176,16 +177,30 @@ def recompute_referral_counts(start_utc, end_utc, limit: int | None = None, user
     }
     base_match = [
         {"$expr": time_expr},
-        {"status": "success"},
-        {"referrer_id": {"$exists": True}},
-        {"referrer_id": {"$ne": None}},
+        {"status": {"$in": ["confirmed", "success"]}},
+        {"$or": [
+            {"referrer_user_id": {"$exists": True}},
+            {"referrer_id": {"$exists": True}},
+        ]},
+        {"$or": [
+            {"referrer_user_id": {"$ne": None}},
+            {"referrer_id": {"$ne": None}},
+        ]},
     ]
     if user_id is not None:
-        base_match.append({"referrer_id": user_id})
-
+        base_match.append({"$or": [
+            {"referrer_user_id": user_id},
+            {"referrer_id": user_id},
+        ]})
+        
     pipeline = [
         {"$match": {"$and": base_match}},
-        {"$group": {"_id": "$referrer_id", "total_valid": {"$sum": 1}}},
+        {
+            "$group": {
+                "_id": {"$ifNull": ["$referrer_user_id", "$referrer_id"]},
+                "total_valid": {"$sum": 1},
+            }
+        },
         {"$sort": {"total_valid": -1}},
     ]
     if limit:
@@ -353,6 +368,8 @@ def maybe_give_first_checkin_bonus(user_id: int):
 
 def try_validate_referral_by_channel(user_id: int):
     ref_doc = referrals_collection.find_one(
+        {"invitee_user_id": user_id, "status": "pending"}
+    ) or referrals_collection.find_one(
         {"referred_user_id": user_id, "status": "pending"}
     )
     if not ref_doc:
@@ -367,13 +384,15 @@ def try_validate_referral_by_channel(user_id: int):
 
     if granted:
         try:
-            maybe_shout_milestones(int(ref_doc.get("referrer_id")))
+            maybe_shout_milestones(int(ref_doc.get("referrer_user_id") or ref_doc.get("referrer_id")))
         except Exception:
             pass
 
 
 async def try_validate_referral_by_channel_async(user_id: int, bot):
     ref_doc = referrals_collection.find_one(
+        {"invitee_user_id": user_id, "status": "pending"}
+    ) or referrals_collection.find_one(        
         {"referred_user_id": user_id, "status": "pending"}
     )
     if not ref_doc:
@@ -389,7 +408,7 @@ async def try_validate_referral_by_channel_async(user_id: int, bot):
 
     if granted:
         try:
-            maybe_shout_milestones(int(ref_doc.get("referrer_id")))
+            maybe_shout_milestones(int(ref_doc.get("referrer_user_id") or ref_doc.get("referrer_id")))
         except Exception:
             pass
 
@@ -849,16 +868,34 @@ def serve_mini_app():
 
 @app.route("/api/referral")
 def api_referral():
+    user_id_raw = request.args.get("user_id")
     try:
-        user_id = int(request.args.get("user_id"))
-        username = request.args.get("username") or "unknown"
+        user_id = int(user_id_raw)
+    except (TypeError, ValueError):
+        return jsonify({"success": False, "error": "user_id is required"}), 400
+
+    username = request.args.get("username") or "unknown"
+    stats = compute_referral_stats(referrals_collection, user_id)
+
+    success = True
+    link = None
+    error = None
+    
+    try:
         link = get_or_create_referral_invite_link_sync(user_id, username)
-        return jsonify({"success": True, "referral_link": link})
     except Exception as e:
-        # optional: include a fallback deeplink if available
+        success = False
+        error = str(e)
         bot_username = os.environ.get("BOT_USERNAME", "")
-        fallback = f"https://t.me/{bot_username}?start=ref{request.args.get('user_id')}" if bot_username else ""
-        return jsonify({"success": False, "error": str(e), "fallback": fallback}), 500
+        link = f"https://t.me/{bot_username}?start=ref{user_id}" if bot_username else None
+
+    payload = {"success": success, "referral_link": link, **stats}
+    if error:
+        payload["error"] = error
+    if not link:
+        payload["referral_link"] = None
+
+    return jsonify(payload), 200
 
 def mask_username(username):
     if not username:
@@ -951,8 +988,13 @@ def get_leaderboard():
         if is_admin:
             total_all_rows = referrals_collection.aggregate(
                 [
-                    {"$match": {"status": "success"}},
-                    {"$group": {"_id": "$referrer_id", "total_all": {"$sum": 1}}},
+                    {"$match": {"status": {"$in": ["confirmed", "success"]}}},
+                    {
+                        "$group": {
+                            "_id": {"$ifNull": ["$referrer_user_id", "$referrer_id"]},
+                            "total_all": {"$sum": 1},
+                        }
+                    },
                 ]
             )
             total_all_map = {r["_id"]: r.get("total_all", 0) for r in total_all_rows}
@@ -979,20 +1021,18 @@ def get_leaderboard():
         
         user_weekly_xp = xp_map.get(current_user_id, int(user_record.get("weekly_xp", 0)))
 
-        user_weekly_referrals = referral_map.get(current_user_id, 0)
-        if current_user_id and current_user_id not in referral_map:
-            own_refs = recompute_referral_counts(week_start_utc, week_end_utc, user_id=current_user_id)
-            if own_refs:
-                user_weekly_referrals = int(own_refs[0].get("total_valid", 0))
+        user_referral_stats = {"weekly_referrals": 0, "monthly_referrals": 0, "total_referrals": 0}
+        if current_user_id:
+            user_referral_stats = compute_referral_stats(referrals_collection, current_user_id)
 
+        user_weekly_referrals = user_referral_stats.get("weekly_referrals", 0)
+        
         user_monthly_row = []
         if current_user_id:
             user_monthly_row = recompute_xp_totals(month_start_utc, month_end_utc, user_id=current_user_id)
         monthly_xp_value = int(user_monthly_row[0].get("xp", 0)) if user_monthly_row else 0
 
-        lifetime_valid_refs = referrals_collection.count_documents(
-            {"referrer_id": current_user_id, "status": "success"}
-        ) if current_user_id else 0
+        lifetime_valid_refs = user_referral_stats.get("total_referrals", 0)
 
         if user_record:
             stored_weekly = int(user_record.get("weekly_xp", 0))
@@ -1022,6 +1062,13 @@ def get_leaderboard():
             "lifetime_valid": lifetime_valid_refs,
         }
 
+        logger.info(
+            "[lb_debug] uid=%s weekly_xp=%s confirmed_referrals=%s",
+            current_user_id,
+            user_weekly_xp,
+            user_weekly_referrals,
+        )
+        
         return jsonify({
             "success": True,
             "leaderboard": leaderboard,
