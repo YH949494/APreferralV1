@@ -486,15 +486,20 @@ def verify_telegram_init_data(init_data_raw: str):
         print(f"[initdata] {reason}{suffix}")
 
     raw_init_data = init_data_raw or ""
-    decoded_init_data = urllib.parse.unquote_plus(raw_init_data)
+    decoded_init_data = urllib.parse.unquote(raw_init_data)
 
-    try:
-        parsed = urllib.parse.parse_qs(decoded_init_data, keep_blank_values=True)
-    except Exception as e:
-        _log("parse_error", f"exc={type(e).__name__}")
-        return False, {}, "parse_error"
-     
-    provided_hash = parsed.get("hash", [""])[0]
+    parsed = {}
+    provided_hash = ""
+    for part in decoded_init_data.split("&"):
+        if part == "":
+            continue
+        if "=" in part:
+            k, v = part.split("=", 1)
+        else:
+            k, v = part, ""
+        parsed.setdefault(k, []).append(v)
+        if not provided_hash and k in ("hash", "signature"):
+            provided_hash = v
      
     print(
         f"[initdata] raw_len={len(raw_init_data)} decoded_len={len(decoded_init_data)} "
@@ -511,7 +516,7 @@ def verify_telegram_init_data(init_data_raw: str):
     for k in sorted(parsed.keys()):
         if k in ("hash", "signature"):
             continue
-        v = parsed[k][0]
+        v = parsed[k][0] if parsed[k] else ""
         ordered_pairs.append((k, v))
 
     data_check_string = "\n".join(f"{k}={v}" for k, v in ordered_pairs)
@@ -535,18 +540,26 @@ def verify_telegram_init_data(init_data_raw: str):
     reason = "bad_signature"
 
     if provided_hash:
+        data_bytes = data_check_string.encode()     
         for idx, tok in enumerate(candidates):
             secret_key = hmac.new(b"WebAppData", tok.encode(), hashlib.sha256).digest()
-            calc = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
+            calc = hmac.new(secret_key, data_bytes, hashlib.sha256).hexdigest()
             if hmac.compare_digest(calc, provided_hash):
                 ok = True
                 reason = "ok"
                 break
-            else:
-                _log(
-                    "hash_mismatch",
-                    f"idx={idx} calc={calc[:8]} provided={provided_hash[:8]}",
-                )
+
+            alt_secret = hmac.new(tok.encode(), b"WebAppData", hashlib.sha256).digest()
+            alt_calc = hmac.new(alt_secret, data_bytes, hashlib.sha256).hexdigest()
+            if hmac.compare_digest(alt_calc, provided_hash):
+                ok = True
+                reason = "ok"
+                break
+
+            _log(
+                "hash_mismatch",
+                f"idx={idx} calc={calc[:8]} alt={alt_calc[:8]} provided={provided_hash[:8]}",
+            )
              
     if not ok:
         _log("hash_mismatch_final")
