@@ -480,6 +480,8 @@ def _candidate_bot_tokens():
 def verify_telegram_init_data(init_data_raw: str):
     import urllib.parse, hmac, hashlib, time, os
  
+    print("[initdata] verifier_v=rawpairs_unquote")
+ 
     def _log(reason: str, extra: str = ""):
         suffix = f" {extra}".rstrip()
         print(f"[initdata] {reason}{suffix}")
@@ -510,7 +512,6 @@ def verify_telegram_init_data(init_data_raw: str):
         _log("missing_hash")    
         return False, {}, "missing_hash"
 
-    # Build the payload strings from all params except the integrity fields
     ordered_pairs = []
     for k in sorted(parsed.keys()):
         if k in ("hash", "signature"):
@@ -537,28 +538,19 @@ def verify_telegram_init_data(init_data_raw: str):
 
     ok = False
     reason = "bad_signature"
+    computed_hash = ""
 
     if provided_hash:
-        data_bytes = data_check_string.encode()     
+        data_bytes = data_check_string.encode()
         for idx, tok in enumerate(candidates):
             secret_key = hmac.new(b"WebAppData", tok.encode(), hashlib.sha256).digest()
-            calc = hmac.new(secret_key, data_bytes, hashlib.sha256).hexdigest()
-            if hmac.compare_digest(calc, provided_hash):
+            computed_hash = hmac.new(secret_key, data_bytes, hashlib.sha256).hexdigest()
+            if hmac.compare_digest(computed_hash, provided_hash):
                 ok = True
                 reason = "ok"
                 break
 
-            alt_secret = hmac.new(tok.encode(), b"WebAppData", hashlib.sha256).digest()
-            alt_calc = hmac.new(alt_secret, data_bytes, hashlib.sha256).hexdigest()
-            if hmac.compare_digest(alt_calc, provided_hash):
-                ok = True
-                reason = "ok"
-                break
-
-            _log(
-                "hash_mismatch",
-                f"idx={idx} calc={calc[:8]} alt={alt_calc[:8]} provided={provided_hash[:8]}",
-            )
+            _log("hash_mismatch", f"calc={computed_hash[:8]} provided={provided_hash[:8]}")
              
     if not ok:
         _log("hash_mismatch_final")
