@@ -491,6 +491,7 @@ def verify_telegram_init_data(init_data_raw: str):
 
     parsed = {}
     provided_hash = ""
+    provided_sig = "" 
     for part in decoded_init_data.split("&"):
         if part == "":
             continue
@@ -499,9 +500,11 @@ def verify_telegram_init_data(init_data_raw: str):
         else:
             k, v = part, ""
         parsed.setdefault(k, []).append(v)
-        if not provided_hash and k in ("hash", "signature"):
+        if not provided_hash and k == "hash":
             provided_hash = v
-     
+         
+        if not provided_sig and k == "signature":
+            provided_sig = v     
     print(
         f"[initdata] raw_len={len(raw_init_data)} decoded_len={len(decoded_init_data)} "
         f"has_user={'user' in parsed} has_auth_date={'auth_date' in parsed} "
@@ -509,8 +512,27 @@ def verify_telegram_init_data(init_data_raw: str):
     )
  
     if not provided_hash:
-        _log("missing_hash")    
+        _log("missing_hash")
         return False, {}, "missing_hash"
+
+     def _prefix(val: str) -> str:
+        return val[:8] if val else ""
+
+    _log(
+        "hash_check",
+        f"provided_hash_prefix={_prefix(provided_hash)} provided_sig_prefix={_prefix(provided_sig)}",
+    )
+
+    provided_hash = provided_hash.strip()
+    try:
+        if len(provided_hash) != 64:
+            raise ValueError("bad_len")
+        int(provided_hash, 16)
+    except Exception:
+        _log("invalid_hash_format")
+        return False, {}, "invalid_hash_format"
+
+    provided_hash = provided_hash.lower()
 
     ordered_pairs = []
     for k in sorted(parsed.keys()):
@@ -539,6 +561,7 @@ def verify_telegram_init_data(init_data_raw: str):
     ok = False
     reason = "bad_signature"
     computed_hash = ""
+    alt_hash = ""
 
     if provided_hash:
         data_bytes = data_check_string.encode()
@@ -550,7 +573,10 @@ def verify_telegram_init_data(init_data_raw: str):
                 reason = "ok"
                 break
 
-            _log("hash_mismatch", f"calc={computed_hash[:8]} provided={provided_hash[:8]}")
+            _log(
+                "hash_mismatch",
+                f"calc_prefix={_prefix(computed_hash)} alt_prefix={_prefix(alt_hash)} provided_hash_prefix={_prefix(provided_hash)}",
+            )
              
     if not ok:
         _log("hash_mismatch_final")
