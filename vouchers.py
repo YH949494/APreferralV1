@@ -1033,10 +1033,19 @@ def api_claim():
     drop_type = drop.get("type", "pooled")
 
     raw_init = _extract_init_data_raw_from_query(request)
-    init_data = raw_init or _extract_init_data(request, body=body)
-    print(f"[initdata] source={'query_string_raw' if raw_init else 'fallback'} raw_len={len(init_data)}")
-    ok, data, why = verify_telegram_init_data(init_data)
+    init_data = raw_init
 
+    print(
+        f"[initdata] claim_source=query_string_raw "
+        f"raw_len={len(init_data) if init_data else 0} "
+        f"prefix={(init_data[:20] if init_data else '')}"
+    )
+
+    if not init_data:
+        return jsonify({"status": "error", "code": "missing_init_data"}), 400
+
+    ok, data, why = verify_telegram_init_data(init_data)
+ 
     # Admin preview (for Postman/admin panel testing)
     admin_secret = (
         request.args.get("admin_secret")
