@@ -141,6 +141,20 @@ def _extract_init_data(req, *, body: dict | None = None) -> str:
                 return ""
 
     return ""
+ 
+def _extract_init_data_raw_from_query(request):
+    qs = request.query_string or b""
+    key = b"init_data="
+    i = qs.find(key)
+    if i == -1:
+        return ""
+    i += len(key)
+    j = qs.find(b"&", i)
+    val = qs[i:] if j == -1 else qs[i:j]
+    try:
+        return val.decode("utf-8", errors="strict")
+    except Exception:
+        return val.decode("utf-8", errors="ignore")
 
 def _verify_telegram_init_data(init_data: str) -> dict | None:
     """Legacy helper used by the voucher blueprint for Telegram auth."""
@@ -480,53 +494,42 @@ def _candidate_bot_tokens():
 def verify_telegram_init_data(init_data_raw: str):
     import urllib.parse, hmac, hashlib, time, os
  
-    print("[initdata] verifier_v=rawpairs_unquote")
+    print("[initdata] verifier_v=rawpairs_strict")
  
     def _log(reason: str, extra: str = ""):
         suffix = f" {extra}".rstrip()
         print(f"[initdata] {reason}{suffix}")
 
     raw_init_data = init_data_raw or ""
-    decoded_init_data = (
-    raw_init_data
-    .replace("%26", "&")
-    .replace("%3D", "=")
-    .replace("%3d", "=")
-)
- 
+
+    pairs = [] 
     parsed = {}
     provided_hash = ""
-    provided_sig = "" 
-    for part in decoded_init_data.split("&"):
+    provided_sig = ""
+    for part in raw_init_data.split("&"):
         if part == "":
             continue
         if "=" in part:
             k, v = part.split("=", 1)
         else:
             k, v = part, ""
+        pairs.append((k, v))         
         parsed.setdefault(k, []).append(v)
         if not provided_hash and k == "hash":
             provided_hash = v
          
         if not provided_sig and k == "signature":
             provided_sig = v     
+         
     print(
-        f"[initdata] raw_len={len(raw_init_data)} decoded_len={len(decoded_init_data)} "
-        f"has_user={'user' in parsed} has_auth_date={'auth_date' in parsed} "
-        f"has_hash={'hash' in parsed} has_sig={'signature' in parsed}"
+        f"[initdata] raw_len={len(raw_init_data)} has_user={'user' in parsed} "
+        f"has_auth_date={'auth_date' in parsed} has_hash={'hash' in parsed} "
+        f"has_sig={'signature' in parsed}"
     )
  
     if not provided_hash:
         _log("missing_hash")
         return False, {}, "missing_hash"
-
-    def _prefix(val: str) -> str:
-        return val[:8] if val else ""
-
-    _log(
-        "hash_check",
-        f"provided_hash_prefix={_prefix(provided_hash)} provided_sig_prefix={_prefix(provided_sig)}",
-    )
 
     provided_hash = provided_hash.strip()
     try:
@@ -539,14 +542,9 @@ def verify_telegram_init_data(init_data_raw: str):
 
     provided_hash = provided_hash.lower()
 
-    ordered_pairs = []
-    for k in sorted(parsed.keys()):
-        if k in ("hash", "signature"):
-            continue
-        v = parsed[k][0] if parsed[k] else ""
-        ordered_pairs.append((k, v))
-
-    data_check_string = "\n".join(f"{k}={v}" for k, v in ordered_pairs)
+    filtered_pairs = [(k, v) for k, v in pairs if k not in ("hash", "signature")]
+    filtered_pairs.sort(key=lambda kv: kv[0])
+    data_check_string = "\n".join(f"{k}={v}" for k, v in filtered_pairs)
  
     candidates = _candidate_bot_tokens()
 
@@ -560,28 +558,27 @@ def verify_telegram_init_data(init_data_raw: str):
             candidates.append(t)
 
     if not candidates:
-        _log("bot_token_missing")     
+        _log("bot_token_missing")
         return False, {}, "bot_token_missing"
 
     ok = False
-    reason = "bad_signature"
+    reason = "hash_mismatch_final"
     computed_hash = ""
-    alt_hash = ""
 
-    if provided_hash:
-        data_bytes = data_check_string.encode()
-        for idx, tok in enumerate(candidates):
-            secret_key = hmac.new(b"WebAppData", tok.encode(), hashlib.sha256).digest()
-            computed_hash = hmac.new(secret_key, data_bytes, hashlib.sha256).hexdigest()
-            if hmac.compare_digest(computed_hash, provided_hash):
-                ok = True
-                reason = "ok"
-                break
-
-            _log(
-                "hash_mismatch",
-                f"calc_prefix={_prefix(computed_hash)} alt_prefix={_prefix(alt_hash)} provided_hash_prefix={_prefix(provided_hash)}",
-            )
+    data_bytes = data_check_string.encode()
+    for idx, tok in enumerate(candidates):
+        secret_key = hmac.new(b"WebAppData", tok.encode(), hashlib.sha256).digest()
+        computed_hash = hmac.new(secret_key, data_bytes, hashlib.sha256).hexdigest()
+        print(
+            "[initdata] hash_check",
+            f"provided_hash_prefix={provided_hash[:8]}",
+            f"calc_prefix={computed_hash[:8]}",
+        )
+        if hmac.compare_digest(computed_hash, provided_hash):
+            ok = True
+            reason = "ok"
+            print(f"[initdata] ok idx={idx} token_tail={tok[-4:]}")
+            break
              
     if not ok:
         _log("hash_mismatch_final")
@@ -1035,7 +1032,9 @@ def api_claim():
     drop = db.drops.find_one({"_id": _coerce_id(drop_id)}) if drop_id else {}
     drop_type = drop.get("type", "pooled")
 
-    init_data = _extract_init_data(request, body=body)
+    raw_init = _extract_init_data_raw_from_query(request)
+    init_data = raw_init or _extract_init_data(request, body=body)
+    print(f"[initdata] source={'query_string_raw' if raw_init else 'fallback'} raw_len={len(init_data)}")
     ok, data, why = verify_telegram_init_data(init_data)
 
     # Admin preview (for Postman/admin panel testing)
