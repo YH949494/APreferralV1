@@ -161,6 +161,7 @@ def _verify_telegram_init_data(init_data: str) -> dict | None:
     cleaned.pop("signature", None)
     return cleaned
      
+print("[initdata] DCS >>>", data_check_string)
 
 def _user_ctx_or_preview(req):
     """
