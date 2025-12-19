@@ -36,6 +36,40 @@ def grant_xp(
     if user and user.get("restrictions", {}).get("no_xp"):
         return False
 
+    # Hard gate on existing xp_events to avoid re-incrementing counters when
+    # historical entries already exist but the ledger was missing.
+    if db.xp_events.find_one({"user_id": uid, "unique_key": unique_key}):
+        logger.info(
+            "[XP] Duplicate grant ignored (existing event) uid=%s key=%s type=%s",
+            uid,
+            unique_key,
+            event_type,
+        )
+        return False
+
+    ledger_res = db.xp_ledger.update_one(
+        {"user_id": uid, "source": event_type, "source_id": unique_key},
+        {
+            "$setOnInsert": {
+                "user_id": uid,
+                "source": event_type,
+                "source_id": unique_key,
+                "amount": amount,
+                "created_at": now_utc(),
+            }
+        },
+        upsert=True,
+    )
+
+    if not getattr(ledger_res, "upserted_id", None):
+        logger.info(
+            "[XP] Duplicate ledger insert ignored uid=%s key=%s type=%s",
+            uid,
+            unique_key,
+            event_type,
+        )
+        return False
+    
     res = db.xp_events.update_one(
         {"user_id": uid, "unique_key": unique_key},
         {
@@ -51,12 +85,13 @@ def grant_xp(
     )
 
     if not getattr(res, "upserted_id", None):
-        logger.info(
-            "[XP] Duplicate grant ignored uid=%s key=%s type=%s",
+        logger.warning(
+            "[XP] Ledger inserted but xp_event already existed uid=%s key=%s type=%s; rolling back ledger",
             uid,
             unique_key,
             event_type,
         )
+        db.xp_ledger.delete_one({"user_id": uid, "source": event_type, "source_id": unique_key})       
         return False
 
     inc = {"xp": amount}
@@ -72,6 +107,31 @@ def grant_xp(
 def ensure_xp_indexes(db) -> None:
     """Ensure indexes used by XP bookkeeping are present."""
 
+    def _dedupe_xp_events():
+        dup_groups = db.xp_events.aggregate(
+            [
+                {"$match": {"unique_key": {"$exists": True}}},
+                {
+                    "$group": {
+                        "_id": {"user_id": "$user_id", "unique_key": "$unique_key"},
+                        "ids": {"$push": "$_id"},
+                        "count": {"$sum": 1},
+                    }
+                },
+                {"$match": {"count": {"$gt": 1}}},
+            ]
+        )
+
+        removed = 0
+        for group in dup_groups:
+            to_delete = group["ids"][1:]
+            if to_delete:
+                db.xp_events.delete_many({"_id": {"$in": to_delete}})
+                removed += len(to_delete)
+
+        if removed:
+            logger.warning("[XP] Removed %s duplicate xp_events", removed)
+    
     # Backward compatibility: clean up any existing indexes on
     # (user_id, unique_key) so we can recreate the partial unique index with the
     # correct name and options. Older deployments might have had the default
@@ -86,6 +146,8 @@ def ensure_xp_indexes(db) -> None:
             except Exception:
                 logger.exception("[XP] Failed dropping legacy xp_events index")
 
+    _dedupe_xp_events()
+    
     db.xp_events.create_index(
         [("user_id", 1), ("unique_key", 1)],
         name="uq_user_uniqueKey",
@@ -98,3 +160,10 @@ def ensure_xp_indexes(db) -> None:
     db.xp_events.create_index(
         [("user_id", 1), ("created_at", -1)], name="user_createdAt"
     )
+
+    db.xp_ledger.create_index(
+        [("user_id", 1), ("source", 1), ("source_id", 1)],
+        name="uq_ledger_event",
+        unique=True,
+    )
+    db.xp_ledger.create_index([("created_at", -1)], name="ledger_createdAt")
