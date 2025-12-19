@@ -225,6 +225,30 @@
           </label>
         </div>
 
+        <div style="margin-top:10px; display:flex; flex-wrap:wrap; gap:10px;">
+          <label style="flex:1 1 200px; font-size:12px; color:#555;">Eligibility Mode
+            <select id="adm_elig_mode" style="width:100%; padding:8px; border-radius:6px; border:1px solid #ccc;">
+              <option value="public">Public</option>
+              <option value="tier">VIP Tier</option>
+              <option value="user_id">User IDs</option>
+              <option value="admin_only">Admin preview only</option>
+            </select>
+          </label>
+          <div id="adm_elig_values_wrap" style="flex:1 1 260px; display:none;">
+            <p style="margin:0 0 4px 0; font-size:12px; color:#555;">Eligibility Values (comma/newline separated)</p>
+            <textarea id="adm_elig_values" rows="2" placeholder="VIP1, VIP2" style="width:100%; padding:8px; border-radius:6px; border:1px solid #ccc; font-family:monospace;"></textarea>
+          </div>
+          <label style="flex:1 1 200px; font-size:12px; color:#555;">Allowed Regions (optional)
+            <select id="adm_regions" multiple style="width:100%; padding:8px; border-radius:6px; border:1px solid #ccc; min-height:80px;">
+              <option value="Malaysia">🇲🇾 Malaysia</option>
+              <option value="Thailand">🇹🇭 Thailand</option>
+              <option value="Indonesia">🇮🇩 Indonesia</option>
+              <option value="Other">🌐 Other</option>
+            </select>
+            <span style="font-size:11px; color:#777;">Leave empty for all regions.</span>
+          </label>
+        </div>
+
         <div id="adm_personalised" style="margin-top:12px;">
           <p style="margin:0 0 6px 0; font-size:13px; color:#555;">Paste <code>@username,code</code> per line or import CSV:</p>
           <textarea id="adm_pairs_text" rows="6" placeholder="@player1, CODE123" style="width:100%; padding:8px; border-radius:6px; border:1px solid #ccc; font-family:monospace;"></textarea>
@@ -744,6 +768,29 @@ async function adm_list() {
 
 const admCreateBtn = document.getElementById("adm_create_btn");
 if (admCreateBtn) admCreateBtn.onclick = adm_create;
+
+
+const admEligMode = document.getElementById("adm_elig_mode");
+if (admEligMode) {
+  admEligMode.onchange = toggleAdmEligValues;
+  toggleAdmEligValues();
+}
+
+function toggleAdmEligValues() {
+  const mode = document.getElementById("adm_elig_mode")?.value || "public";
+  const wrap = document.getElementById("adm_elig_values_wrap");
+  const textarea = document.getElementById("adm_elig_values");
+  if (!wrap || !textarea) return;
+  if (mode === "tier") {
+    wrap.style.display = "block";
+    textarea.placeholder = "VIP1, VIP2";
+  } else if (mode === "user_id") {
+    wrap.style.display = "block";
+    textarea.placeholder = "12345, 67890";
+  } else {
+    wrap.style.display = "none";
+  }
+}
     
 async function adm_create() {
   const typeEl = document.querySelector("#adm_type");
@@ -755,6 +802,34 @@ async function adm_create() {
     startsAtLocal: toKLStringFromNative(document.querySelector("#adm_starts").value.trim()),
     priority: Number(document.querySelector("#adm_pri").value || 100),
   };
+
+  const eligMode = document.querySelector("#adm_elig_mode")?.value || "public";
+  const eligValues = document.querySelector("#adm_elig_values")?.value || "";
+  const eligibility = { mode: eligMode };
+
+  if (eligMode === "tier" || eligMode === "user_id") {
+    const parts = eligValues.split(/[\n,]/).map(x => x.trim()).filter(Boolean);
+    if (!parts.length) {
+      alert("Please provide eligibility values."); return;
+    }
+    if (eligMode === "tier") {
+      eligibility.allow = parts;
+    } else {
+      const ids = parts.map(Number).filter(n => Number.isFinite(n));
+      if (!ids.length) { alert("Please provide numeric user IDs."); return; }
+      eligibility.allow = ids;
+    }
+  }
+
+  if (eligibility.mode !== "public" || eligibility.allow?.length) {
+    payload.eligibility = eligibility;
+  }
+
+  const regionSel = document.getElementById("adm_regions");
+  const regions = regionSel ? Array.from(regionSel.selectedOptions).map(o => o.value).filter(Boolean) : [];
+  if (regions.length) {
+    payload.audience = { regions };
+  }
   
   const endsValue = (document.querySelector("#adm_ends")?.value || "").trim();
   const endsAtLocal = toKLStringFromNative(endsValue);
