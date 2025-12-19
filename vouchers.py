@@ -81,8 +81,11 @@ try:
     else:
         iter_ids = [x.strip() for x in str(raw_admin_ids).split(",") if x.strip()]
     for rid in iter_ids:
-        _ADMIN_USER_IDS.add(str(rid))
-except Exception:
+        try:
+            _ADMIN_USER_IDS.add(int(rid))
+        except (TypeError, ValueError):
+            continue
+        except Exception:
     pass
 
 vouchers_bp = Blueprint("vouchers", __name__)
@@ -455,6 +458,75 @@ def is_drop_allowed(drop: dict, tg_uid, tg_uname_lower: str, user_ctx: dict | No
 
     return True
 
+# Eligibility examples for quick testing:
+#   {"eligibility": {"mode": "public"}}
+#   {"eligibility": {"mode": "tier", "allow": ["VIP1", "VIP2"]}, "audience": {"regions": ["Thailand"]}}
+#   {"eligibility": {"mode": "user_id", "allow": [12345]}}
+#   {"eligibility": {"mode": "admin_only"}}
+def is_user_eligible_for_drop(user_doc: dict, tg_user: dict, drop: dict) -> bool:
+    tg_user = tg_user or {}
+    drop = drop or {}
+
+    try:
+        uid = int(tg_user.get("id"))
+    except Exception:
+        uid = None
+
+    drop_id = str(drop.get("_id") or drop.get("dropId") or "")
+
+    audience = drop.get("audience") or {}
+    eligibility = drop.get("eligibility") or {"mode": "public"}
+    mode = eligibility.get("mode") or "public"
+    allow = eligibility.get("allow") or []
+
+    user_region = (user_doc or {}).get("region")
+    user_status = (user_doc or {}).get("status") or ""
+
+    def _log(result: bool, reason: str):
+        print(
+            f"[elig] drop={drop_id} mode={mode} uid={uid} "
+            f"region={user_region} status={user_status} => "
+            f"{'allow' if result else 'deny'} reason={reason}"
+        )
+
+    # Admin-only preview drops
+    if mode == "admin_only":
+        if uid is None or uid not in _ADMIN_USER_IDS:
+            _log(False, "admin_only")
+            return False
+
+    # Region filter (applies to all modes when specified)
+    regions = audience.get("regions") or []
+    if regions:
+        if not user_region:
+            _log(False, "region_missing")
+            return False
+        if user_region not in regions:
+            _log(False, "region_mismatch")
+            return False
+
+    if mode == "tier":
+        if not allow or user_status not in allow:
+            _log(False, "tier_mismatch")
+            return False
+    elif mode == "user_id":
+        allowed_ids = set()
+        for raw in allow:
+            try:
+                allowed_ids.add(int(raw))
+            except (TypeError, ValueError):
+                continue
+        if not allowed_ids or uid not in allowed_ids:
+            _log(False, "user_not_whitelisted")
+            return False
+    elif mode == "admin_only":
+        pass  # already checked admin set
+    else:
+        mode = "public"
+
+    _log(True, "ok")
+    return True
+
 def _extract_admin_secret() -> str:
     """Return the admin secret supplied via headers or query params."""
 
@@ -713,6 +785,12 @@ def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None
 
     user_ctx = load_user_context(uid=ctx_uid, username=raw_username if tg_user else usernameLower, username_lower=usernameLower or uname)
 
+    user_doc = None
+    if ctx_uid is not None:
+        user_doc = users_collection.find_one({"user_id": ctx_uid})
+    if not user_doc and usernameLower:
+        user_doc = users_collection.find_one({"usernameLower": usernameLower})
+ 
     # Only hide personalised vouchers when the caller truly has no username
     allow_personalised = bool(usernameLower)
     claim_key = usernameLower or user_id
@@ -727,6 +805,9 @@ def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None
 
         if not is_drop_allowed(d, ctx_uid, usernameLower or uname, user_ctx):
             continue
+
+        if not is_user_eligible_for_drop(user_doc, tg_user or {}, d):
+            continue    
          
         base = {
             "dropId": drop_id,
@@ -1109,6 +1190,12 @@ def api_claim():
         uid = None
     uname = norm_uname(tg_user.get("username"))
 
+    user_doc = None
+    if uid is not None:
+        user_doc = users_collection.find_one({"user_id": uid})
+    if not user_doc and uname:
+        user_doc = users_collection.find_one({"usernameLower": uname})
+ 
     fallback_username = _guess_username(request, body)
     fallback_user_id = _guess_user_id(request, body)
 
@@ -1146,6 +1233,9 @@ def api_claim():
     if not is_drop_allowed(voucher, uid, uname, user_ctx):
         return jsonify({"status": "error", "code": "not_eligible"}), 403
 
+    if not is_user_eligible_for_drop(user_doc, tg_user, voucher):
+        return jsonify({"status": "error", "code": "not_eligible"}), 403
+ 
     if not username:
         username = fallback_username or ""
    
@@ -1242,6 +1332,44 @@ def admin_create_drop():
     now = now_utc()
     status = "active" if startsAt <= now < endsAt else "upcoming"
 
+    eligibility_raw = data.get("eligibility") or {}
+    audience_raw = data.get("audience") or {}
+
+    elig_mode = eligibility_raw.get("mode") or "public"
+    elig_allow_raw = eligibility_raw.get("allow") or []
+    clean_eligibility = {"mode": elig_mode}
+
+    if elig_mode == "tier":
+        allow = []
+        for item in elig_allow_raw:
+            val = (item or "").strip() if isinstance(item, str) else str(item).strip()
+            if val:
+                allow.append(val)
+        if allow:
+            clean_eligibility["allow"] = allow
+    elif elig_mode == "user_id":
+        allow = []
+        for item in elig_allow_raw:
+            try:
+                allow.append(int(item))
+            except (TypeError, ValueError):
+                continue
+        if allow:
+            clean_eligibility["allow"] = allow
+    elif elig_mode == "admin_only":
+        clean_eligibility = {"mode": "admin_only"}
+    else:
+        clean_eligibility = {"mode": "public"}
+
+    audience_clean = {}
+    regions_raw = audience_raw.get("regions") if isinstance(audience_raw, dict) else None
+    if regions_raw is not None:
+        regions = []
+        for r in regions_raw or []:
+            if r:
+                regions.append(str(r))
+        audience_clean["regions"] = 
+     
     drop_doc = {
         "name": name,
         "type": dtype,
@@ -1251,6 +1379,12 @@ def admin_create_drop():
         "visibilityMode": "stacked",
         "status": status
     }
+ 
+    if data.get("eligibility") is not None or clean_eligibility.get("mode") != "public" or clean_eligibility.get("allow"):
+        drop_doc["eligibility"] = clean_eligibility
+
+    if audience_clean:
+        drop_doc["audience"] = audience_clean     
     if dtype == "pooled":
         wl_raw = data.get("whitelistUsernames") or []
         wl_clean = []
