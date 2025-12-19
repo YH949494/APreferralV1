@@ -85,9 +85,9 @@ try:
             _ADMIN_USER_IDS.add(int(rid))
         except (TypeError, ValueError):
             continue
-        except Exception:
-            pass
-
+except Exception:
+    pass
+ 
 vouchers_bp = Blueprint("vouchers", __name__)
 
 BYPASS_ADMIN = False
