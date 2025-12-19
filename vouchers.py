@@ -1368,7 +1368,7 @@ def admin_create_drop():
         for r in regions_raw or []:
             if r:
                 regions.append(str(r))
-        audience_clean["regions"] = 
+        audience_clean["regions"] = regions
      
     drop_doc = {
         "name": name,
