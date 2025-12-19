@@ -13,6 +13,9 @@ class FakeXPEvents:
         self.store = {}
         self.counter = 0
 
+    def find_one(self, filt, projection=None):  # noqa: ARG002 - projection unused
+        return self.store.get((filt.get("user_id"), filt.get("unique_key")))
+    
     def update_one(self, filt, update, upsert=False):  # noqa: ARG002 - upsert unused
         key = (filt.get("user_id"), filt.get("unique_key"))
         if key in self.store:
@@ -28,6 +31,9 @@ class FakeUsers:
     def __init__(self):
         self.store = {}
 
+    def find_one(self, filt, projection=None):  # noqa: ARG002 - projection unused
+        return self.store.get(filt.get("user_id"))
+
     def update_one(self, filt, update):  # noqa: ARG002 - filt unused in stub
         uid = filt.get("user_id")
         doc = self.store.setdefault(uid, {"xp": 0, "weekly_xp": 0, "monthly_xp": 0})
@@ -35,12 +41,29 @@ class FakeUsers:
         for field, delta in inc.items():
             doc[field] = doc.get(field, 0) + delta
 
+class FakeLedger:
+    def __init__(self):
+        self.store = {}
+        self.counter = 0
+
+    def update_one(self, filt, update, upsert=False):  # noqa: ARG002 - upsert unused
+        key = (filt.get("user_id"), filt.get("source"), filt.get("source_id"))
+        if key in self.store:
+            return FakeResult(None)
+        self.counter += 1
+        doc = {**filt, **update.get("$setOnInsert", {}), "_id": self.counter}
+        self.store[key] = doc
+        return FakeResult(self.counter)
+
+    def delete_one(self, filt):  # noqa: ARG002 - filt unused in stub
+        key = (filt.get("user_id"), filt.get("source"), filt.get("source_id"))
+        self.store.pop(key, None)
 
 class FakeDB:
     def __init__(self):
         self.xp_events = FakeXPEvents()
         self.users = FakeUsers()
-
+        self.xp_ledger = FakeLedger()
 
 class GrantXPTests(unittest.TestCase):
     def test_idempotent_grant(self):
