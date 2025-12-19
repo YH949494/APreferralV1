@@ -86,7 +86,7 @@ try:
         except (TypeError, ValueError):
             continue
         except Exception:
-    pass
+            pass
 
 vouchers_bp = Blueprint("vouchers", __name__)
 
