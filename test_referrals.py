@@ -91,6 +91,15 @@ class FakeCollection:
 
 
 class FakeXPEvents(FakeCollection):
+    def find_one(self, filt, projection=None):  # noqa: ARG002 - projection unused
+        for doc in self.docs:
+            if (doc.get("user_id"), doc.get("unique_key")) == (
+                filt.get("user_id"),
+                filt.get("unique_key"),
+            ):
+                return dict(doc)
+        return None
+    
     def update_one(self, filt, update, upsert=False):  # noqa: ARG002
         key = (filt.get("user_id"), filt.get("unique_key"))
         for doc in self.docs:
@@ -100,13 +109,28 @@ class FakeXPEvents(FakeCollection):
         self.docs.append(doc)
         return FakeResult(upserted_id=doc["_id"])
 
+class FakeLedger(FakeCollection):
+    def update_one(self, filt, update, upsert=False):  # noqa: ARG002
+        key = (filt.get("user_id"), filt.get("source"), filt.get("source_id"))
+        for doc in self.docs:
+            if (doc.get("user_id"), doc.get("source"), doc.get("source_id")) == key:
+                return FakeResult()
+        doc = {**filt, **update.get("$setOnInsert", {}), "_id": len(self.docs) + 1}
+        self.docs.append(doc)
+        return FakeResult(upserted_id=doc["_id"])
+
+    def delete_one(self, filt):  # noqa: ARG002
+        key = (filt.get("user_id"), filt.get("source"), filt.get("source_id"))
+        self.docs = [
+            doc for doc in self.docs if (doc.get("user_id"), doc.get("source"), doc.get("source_id")) != key
+        ]
 
 class FakeDB:
     def __init__(self):
         self.users = FakeCollection()
         self.referrals = FakeCollection()
         self.xp_events = FakeXPEvents()
-
+        self.xp_ledger = FakeLedger()    
 
 class ReferralTests(unittest.TestCase):
     def test_award_exact_counts_and_bonus(self):
