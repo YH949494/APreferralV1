@@ -1,8 +1,9 @@
 from flask import Blueprint, request, jsonify, current_app
 from pymongo import ASCENDING, DESCENDING, ReturnDocument
-from pymongo.errors import OperationFailure
+from pymongo.errors import OperationFailure, DuplicateKeyError
 from bson.objectid import ObjectId
 from datetime import datetime, timedelta, timezone
+import requests
 from config import KL_TZ
 import hmac, hashlib, urllib.parse, os, json
 import config as _cfg 
@@ -10,6 +11,9 @@ import config as _cfg
 from database import db, users_collection
  
 admin_cache_col = db["admin_cache"]
+new_joiner_claims_col = db["new_joiner_claims"]
+claim_rate_limits_col = db["claim_rate_limits"]
+profile_photo_cache_col = db["profile_photo_cache"]
 
 BYPASS_ADMIN = os.getenv("BYPASS_ADMIN", "0").lower() in ("1", "true", "yes", "on")
 HARDCODED_ADMIN_USERNAMES = {"gracy_ap", "teohyaohui"}  # allow manual overrides if cache is empty
@@ -250,7 +254,13 @@ def ensure_voucher_indexes():
         name="uniq_personalised_assignment",
         partialFilterExpression={"type": "personalised"}
     )
-
+    new_joiner_claims_col.create_index([("uid", ASCENDING)], unique=True)
+    claim_rate_limits_col.create_index([("key", ASCENDING)], unique=True)
+    claim_rate_limits_col.create_index([("expiresAt", ASCENDING)], expireAfterSeconds=0)
+    claim_rate_limits_col.create_index([("scope", ASCENDING), ("ip", ASCENDING), ("day", ASCENDING)])
+    profile_photo_cache_col.create_index([("uid", ASCENDING)], unique=True)
+    profile_photo_cache_col.create_index([("expiresAt", ASCENDING)], expireAfterSeconds=0)
+ 
 def parse_kl_local(dt_str: str):
     """Parse 'YYYY-MM-DD HH:MM:SS' in Kuala Lumpur local time to UTC (aware)."""
     if not dt_str:
@@ -301,6 +311,15 @@ def norm_uname(s):
     if s.startswith("@"):
         s = s[1:]
     return s.lower()
+
+def _get_client_ip(req=None) -> str:
+    req = req or request
+    if not req:
+        return ""
+    forwarded = req.headers.get("X-Forwarded-For")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return req.remote_addr or ""
 
 def _guess_username(req, body=None) -> str:
     body = body or {}
@@ -389,6 +408,167 @@ def load_user_context(*, uid=None, username: str | None = None, username_lower: 
         })
 
     return ctx
+
+def _drop_audience_type(drop: dict) -> str:
+    """Return drop audience type: public|vip1|new_joiner (case-insensitive)."""
+    if not isinstance(drop, dict):
+        return "public"
+
+    audience = drop.get("audience")
+    if isinstance(audience, str):
+        atype = audience.strip().lower()
+        if atype:
+            return atype
+    elif isinstance(audience, dict):
+        atype = (audience.get("type") or audience.get("audience") or "").strip().lower()
+        if atype:
+            return atype
+
+    wl = drop.get("whitelistUsernames") or []
+    for item in wl:
+        if isinstance(item, str) and item.strip().lower() in ("new_joiner", "new joiner", "newjoiner"):
+            return "new_joiner"
+
+    return "public"
+
+
+def _rate_limit_key(prefix: str, *parts):
+    return ":".join([prefix] + [str(p) for p in parts if p is not None])
+
+
+def _check_new_joiner_rate_limits(*, uid: int, ip: str, now: datetime | None = None):
+    """
+    Enforce:
+      - per-UID: max 3 attempts per minute
+      - per-IP distinct UIDs: max 10 per day
+      (per-IP successful claims handled post-success)
+    """
+    now = now or now_utc()
+    minute_key = now.strftime("%Y%m%d%H%M")
+    day_key = now.strftime("%Y%m%d")
+
+    # per-UID attempts per minute
+    key_uid_min = _rate_limit_key("uid", uid, "min", minute_key)
+    doc = claim_rate_limits_col.find_one_and_update(
+        {"key": key_uid_min},
+        {
+            "$setOnInsert": {
+                "scope": "uid_min",
+                "uid": uid,
+                "minute": minute_key,
+                "expiresAt": now + timedelta(hours=2),
+            },
+            "$inc": {"count": 1},
+        },
+        upsert=True,
+        return_document=ReturnDocument.AFTER,
+    )
+    if (doc or {}).get("count", 0) > 3:
+        current_app.logger.info("[rate_limit] block uid_min uid=%s minute=%s count=%s", uid, minute_key, doc.get("count"))
+        return False, "uid_attempts_per_minute"
+
+    # per-IP distinct UIDs per day
+    ip = ip or "unknown"
+    key_ip_uid = _rate_limit_key("ip_uid", ip, uid, "day", day_key)
+    claim_rate_limits_col.find_one_and_update(
+        {"key": key_ip_uid},
+        {
+            "$setOnInsert": {
+                "scope": "ip_uid",
+                "ip": ip,
+                "uid": uid,
+                "day": day_key,
+                "expiresAt": now + timedelta(days=2),
+            },
+            "$inc": {"count": 1},
+        },
+        upsert=True,
+        return_document=ReturnDocument.AFTER,
+    )
+    distinct = claim_rate_limits_col.count_documents({"scope": "ip_uid", "ip": ip, "day": day_key})
+    if distinct > 10:
+        current_app.logger.info("[rate_limit] block ip_uid ip=%s day=%s distinct=%s", ip, day_key, distinct)
+        return False, "ip_uidset_per_day"
+
+    return True, None
+
+
+def _increment_ip_claim_success(*, ip: str, now: datetime | None = None):
+    now = now or now_utc()
+    day_key = now.strftime("%Y%m%d")
+    ip = ip or "unknown"
+    key_ip_day = _rate_limit_key("ip", ip, "day", day_key)
+    doc = claim_rate_limits_col.find_one_and_update(
+        {"key": key_ip_day},
+        {
+            "$setOnInsert": {
+                "scope": "ip_claim",
+                "ip": ip,
+                "day": day_key,
+                "expiresAt": now + timedelta(days=2),
+            },
+            "$inc": {"count": 1},
+        },
+        upsert=True,
+        return_document=ReturnDocument.AFTER,
+    )
+    return (doc or {}).get("count", 0)
+
+
+def _has_profile_photo(uid: int, *, force_refresh: bool = False):
+    if uid is None:
+        return False
+
+    now = now_utc()
+    if not force_refresh:
+        cached = profile_photo_cache_col.find_one({"uid": uid})
+        if cached and cached.get("expiresAt") and cached["expiresAt"] > now:
+            return bool(cached.get("hasPhoto"))
+
+    token = os.environ.get("BOT_TOKEN", "")
+    if not token:
+        current_app.logger.warning("[tg] missing BOT_TOKEN for profile photo check")
+        return None
+
+    try:
+        resp = requests.get(
+            f"https://api.telegram.org/bot{token}/getUserProfilePhotos",
+            params={"user_id": uid, "limit": 1},
+            timeout=5,
+        )
+    except requests.RequestException as e:
+        current_app.logger.warning("[tg] getUserProfilePhotos network error uid=%s err=%s", uid, e)
+        return None
+
+    if resp.status_code != 200:
+        current_app.logger.warning("[tg] getUserProfilePhotos http status=%s uid=%s", resp.status_code, uid)
+        return None
+
+    try:
+        data = resp.json()
+    except ValueError:
+        current_app.logger.warning("[tg] getUserProfilePhotos bad json uid=%s", uid)
+        return None
+
+    if not data.get("ok"):
+        current_app.logger.warning("[tg] getUserProfilePhotos not ok uid=%s err=%s", uid, data)
+        return None
+
+    total = data.get("result", {}).get("total_count", 0)
+    has_photo = bool(total and total > 0)
+    profile_photo_cache_col.update_one(
+        {"uid": uid},
+        {
+            "$set": {
+                "hasPhoto": has_photo,
+                "checkedAt": now,
+                "expiresAt": now + timedelta(hours=24),
+            },
+            "$setOnInsert": {"uid": uid},
+        },
+        upsert=True,
+    )
+    return has_photo
 
 
 def is_drop_allowed(drop: dict, tg_uid, tg_uname_lower: str, user_ctx: dict | None) -> bool:
@@ -790,7 +970,14 @@ def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None
         user_doc = users_collection.find_one({"user_id": ctx_uid})
     if not user_doc and usernameLower:
         user_doc = users_collection.find_one({"usernameLower": usernameLower})
- 
+
+    has_username = bool(usernameLower or uname)
+    already_known_user = bool(user_doc)
+    uid_for_new_joiner = ctx_uid if ctx_uid is not None else None
+    already_new_joiner_claim = False
+    if uid_for_new_joiner is not None:
+        already_new_joiner_claim = bool(new_joiner_claims_col.find_one({"uid": uid_for_new_joiner}))
+     
     # Only hide personalised vouchers when the caller truly has no username
     allow_personalised = bool(usernameLower)
     claim_key = usernameLower or user_id
@@ -802,13 +989,22 @@ def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None
         drop_id_variants = _drop_id_variants(d.get("_id"))
         dtype = d.get("type", "pooled")
         is_active = is_drop_active(d, ref)
+        audience_type = _drop_audience_type(d)
 
         if not is_drop_allowed(d, ctx_uid, usernameLower or uname, user_ctx):
             continue
 
         if not is_user_eligible_for_drop(user_doc, tg_user or {}, d):
             continue    
-         
+
+        if audience_type == "new_joiner":
+            if not has_username:
+                continue
+            if already_known_user:
+                continue
+            if already_new_joiner_claim:
+                continue
+             
         base = {
             "dropId": drop_id,
             "name": d.get("name"),
@@ -1242,6 +1438,47 @@ def api_claim():
     if not user_id:
         user_id = fallback_user_id or username or ""
 
+    audience_type = _drop_audience_type(voucher)
+    client_ip = _get_client_ip(request)
+
+    if audience_type == "new_joiner":
+        current_app.logger.info(
+            "[claim] entry drop=%s audience=new_joiner uid=%s ip=%s", drop_id, uid, client_ip
+        )
+        if drop_type != "pooled":
+            current_app.logger.info("[claim] deny drop=%s uid=%s reason=bad_drop_type type=%s", drop_id, uid, drop_type)
+            return jsonify({"status": "error", "code": "not_eligible", "reason": "not_supported_for_audience"}), 403
+        if not username:
+            current_app.logger.info("[claim] deny drop=%s uid=%s reason=missing_username", drop_id, uid)
+            return jsonify({"status": "error", "code": "not_eligible", "reason": "missing_username"}), 403
+        if uid is None:
+            current_app.logger.info("[claim] deny drop=%s reason=missing_uid", drop_id)
+            return jsonify({"status": "error", "code": "not_eligible", "reason": "missing_uid"}), 403
+        if user_doc:
+            current_app.logger.info("[claim] deny drop=%s uid=%s reason=not_new_joiner", drop_id, uid)
+            return jsonify({"status": "error", "code": "not_eligible", "reason": "not_new_joiner"}), 403
+        if new_joiner_claims_col.find_one({"uid": uid}):
+            current_app.logger.info("[claim] deny drop=%s uid=%s reason=already_claimed_lifetime", drop_id, uid)
+            return jsonify({"status": "error", "code": "not_eligible", "reason": "already_claimed_lifetime"}), 403
+
+        ok_rl, rl_reason = _check_new_joiner_rate_limits(uid=uid, ip=client_ip)
+        if not ok_rl:
+            return jsonify({"status": "error", "code": "rate_limited", "reason": rl_reason}), 429
+
+        # per-IP successful claims per day pre-check
+        day_key = now_utc().strftime("%Y%m%d")
+        ip_claim_doc = claim_rate_limits_col.find_one({"scope": "ip_claim", "ip": client_ip or "unknown", "day": day_key})
+        if ip_claim_doc and (ip_claim_doc.get("count", 0) or 0) >= 3:
+            current_app.logger.info("[claim] deny drop=%s uid=%s reason=ip_claims_per_day ip=%s", drop_id, uid, client_ip)
+            return jsonify({"status": "error", "code": "rate_limited", "reason": "ip_claims_per_day"}), 429
+
+        has_photo = _has_profile_photo(uid)
+        if has_photo is None:
+            return jsonify({"status": "error", "code": "telegram_unavailable"}), 503
+        if not has_photo:
+            current_app.logger.info("[claim] deny drop=%s uid=%s reason=missing_profile_photo", drop_id, uid)
+            return jsonify({"status": "error", "code": "not_eligible", "reason": "missing_profile_photo"}), 403
+ 
     # Claim
     try:
         result = claim_voucher_for_user(user_id=user_id, drop_id=drop_id, username=username)
@@ -1255,6 +1492,30 @@ def api_claim():
         current_app.logger.exception("claim failed")
         return jsonify({"status": "error", "code": "server_error"}), 500
 
+    if audience_type == "new_joiner":
+        try:
+            new_joiner_claims_col.update_one(
+                {"uid": uid},
+                {
+                    "$setOnInsert": {
+                        "uid": uid,
+                        "drop_id": _coerce_id(drop_id),
+                        "claimed_at": now_utc(),
+                        "code": result.get("code"),
+                    }
+                },
+                upsert=True,
+            )
+        except DuplicateKeyError:
+            return jsonify({"status": "error", "code": "not_eligible", "reason": "already_claimed_lifetime"}), 403
+
+        ip_claim_count = _increment_ip_claim_success(ip=client_ip)
+        if ip_claim_count > 3:
+            current_app.logger.info("[claim] deny post-claim drop=%s uid=%s reason=ip_claims_per_day ip=%s", drop_id, uid, client_ip)
+            return jsonify({"status": "error", "code": "rate_limited", "reason": "ip_claims_per_day"}), 429
+
+        current_app.logger.info("[claim] success drop=%s audience=new_joiner uid=%s ip=%s", drop_id, uid, client_ip)
+ 
     return jsonify({"status": "ok", "voucher": result}), 200
     
 # ---- Admin endpoints ----
@@ -1362,6 +1623,11 @@ def admin_create_drop():
         clean_eligibility = {"mode": "public"}
 
     audience_clean = {}
+    audience_type = None
+    if isinstance(audience_raw, dict):
+        audience_type_raw = (audience_raw.get("type") or audience_raw.get("audience") or "").strip().lower()
+        if audience_type_raw:
+            audience_type = audience_type_raw
     regions_raw = audience_raw.get("regions") if isinstance(audience_raw, dict) else None
     if regions_raw is not None:
         regions = []
@@ -1369,7 +1635,9 @@ def admin_create_drop():
             if r:
                 regions.append(str(r))
         audience_clean["regions"] = regions
-     
+    if audience_type:
+        audience_clean["type"] = audience_type     
+      
     drop_doc = {
         "name": name,
         "type": dtype,
@@ -1383,17 +1651,24 @@ def admin_create_drop():
     if data.get("eligibility") is not None or clean_eligibility.get("mode") != "public" or clean_eligibility.get("allow"):
         drop_doc["eligibility"] = clean_eligibility
 
-    if audience_clean:
-        drop_doc["audience"] = audience_clean     
     if dtype == "pooled":
         wl_raw = data.get("whitelistUsernames") or []
         wl_clean = []
+        marker_new_joiner = False     
         for item in wl_raw:
             u = norm_username(item)
+            if u == "new_joiner":
+                marker_new_joiner = True
+                continue         
             if u and u not in wl_clean:
                 wl_clean.append(u)
+        if marker_new_joiner and not audience_type:
+            audience_clean["type"] = "new_joiner"             
         drop_doc["whitelistUsernames"] = wl_clean
 
+    if audience_clean:
+        drop_doc["audience"] = audience_clean     
+     
     res = db.drops.insert_one(drop_doc)
     drop_id = res.inserted_id
 
@@ -1465,6 +1740,12 @@ def _admin_drop_summary(doc: dict, *, ref=None, skip_expired=False):
         "endsAt": ends.isoformat() if ends else None,
     }
 
+    audience_type = _drop_audience_type(doc)
+    if audience_type and audience_type != "public":
+        summary["audienceType"] = audience_type
+    if doc.get("audience"):
+        summary["audience"] = doc.get("audience")
+     
     if summary["type"] == "personalised":
         assigned = db.vouchers.count_documents({"type": "personalised", "dropId": {"$in": drop_id_variants}})
         claimed = db.vouchers.count_documents({"type": "personalised", "dropId": {"$in": drop_id_variants}, "status": "claimed"})
@@ -1598,4 +1879,3 @@ def admin_list_drops():
             items.append(row)
 
     return jsonify({"status": "ok", "items": items})
-
