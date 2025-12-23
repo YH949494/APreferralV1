@@ -14,9 +14,20 @@ admin_cache_col = db["admin_cache"]
 new_joiner_claims_col = db["new_joiner_claims"]
 claim_rate_limits_col = db["claim_rate_limits"]
 profile_photo_cache_col = db["profile_photo_cache"]
+welcome_tickets_col = db["welcome_tickets"]
 
 BYPASS_ADMIN = os.getenv("BYPASS_ADMIN", "0").lower() in ("1", "true", "yes", "on")
 HARDCODED_ADMIN_USERNAMES = {"gracy_ap", "teohyaohui"}  # allow manual overrides if cache is empty
+WELCOME_WINDOW_HOURS = int(getattr(_cfg, "WELCOME_WINDOW_HOURS", os.getenv("WELCOME_WINDOW_HOURS", "48")))
+
+_RAW_OFFICIAL_CHANNEL_ID = getattr(_cfg, "OFFICIAL_CHANNEL_ID", os.getenv("OFFICIAL_CHANNEL_ID"))
+try:
+    OFFICIAL_CHANNEL_ID = int(str(_RAW_OFFICIAL_CHANNEL_ID).strip()) if _RAW_OFFICIAL_CHANNEL_ID not in (None, "") else None
+except (TypeError, ValueError):
+    OFFICIAL_CHANNEL_ID = None
+
+_RAW_OFFICIAL_CHANNEL_USERNAME = getattr(_cfg, "OFFICIAL_CHANNEL_USERNAME", os.getenv("OFFICIAL_CHANNEL_USERNAME"))
+OFFICIAL_CHANNEL_USERNAME = (str(_RAW_OFFICIAL_CHANNEL_USERNAME).strip() or "") if _RAW_OFFICIAL_CHANNEL_USERNAME is not None else ""
 
 def _load_admin_ids() -> set:
     try:
@@ -260,6 +271,8 @@ def ensure_voucher_indexes():
     claim_rate_limits_col.create_index([("scope", ASCENDING), ("ip", ASCENDING), ("day", ASCENDING)])
     profile_photo_cache_col.create_index([("uid", ASCENDING)], unique=True)
     profile_photo_cache_col.create_index([("expiresAt", ASCENDING)], expireAfterSeconds=0)
+    welcome_tickets_col.create_index([("uid", ASCENDING)], unique=True)
+    welcome_tickets_col.create_index([("cleanup_at", ASCENDING)], expireAfterSeconds=0)
  
 def parse_kl_local(dt_str: str):
     """Parse 'YYYY-MM-DD HH:MM:SS' in Kuala Lumpur local time to UTC (aware)."""
@@ -410,7 +423,7 @@ def load_user_context(*, uid=None, username: str | None = None, username_lower: 
     return ctx
 
 def _drop_audience_type(drop: dict) -> str:
-    """Return drop audience type: public|vip1|new_joiner (case-insensitive)."""
+    """Return drop audience type: public|vip1|new_joiner|new_joiner_48h (case-insensitive)."""
     if not isinstance(drop, dict):
         return "public"
 
@@ -426,10 +439,17 @@ def _drop_audience_type(drop: dict) -> str:
 
     wl = drop.get("whitelistUsernames") or []
     for item in wl:
-        if isinstance(item, str) and item.strip().lower() in ("new_joiner", "new joiner", "newjoiner"):
-            return "new_joiner"
+        if isinstance(item, str):
+            lowered = item.strip().lower()
+            if lowered in ("new_joiner_48h", "new joiner 48h", "newjoiner48h"):
+                return "new_joiner_48h"
+            if lowered in ("new_joiner", "new joiner", "newjoiner"):
+                return "new_joiner"
 
     return "public"
+
+def _is_new_joiner_audience(audience_type: str) -> bool:
+    return audience_type in ("new_joiner", "new_joiner_48h")
 
 
 def _rate_limit_key(prefix: str, *parts):
@@ -570,6 +590,119 @@ def _has_profile_photo(uid: int, *, force_refresh: bool = False):
     )
     return has_photo
 
+ALLOWED_CHANNEL_STATUSES = {"member", "administrator", "creator"}
+
+
+def is_existing_user(uid: int) -> bool:
+    if uid is None:
+        return False
+    return bool(db.users.find_one({"user_id": uid}, {"_id": 1}))
+
+
+def _official_channel_identifier():
+    if OFFICIAL_CHANNEL_ID is not None:
+        return OFFICIAL_CHANNEL_ID
+    if OFFICIAL_CHANNEL_USERNAME:
+        return OFFICIAL_CHANNEL_USERNAME
+    return None
+
+
+def check_channel_subscribed(uid: int) -> bool:
+    if uid is None:
+        return False
+
+    chat_id = _official_channel_identifier()
+    token = os.environ.get("BOT_TOKEN", "")
+    if not chat_id or not token:
+        current_app.logger.info("[welcome] gate_fail uid=%s reason=channel_unset", uid)
+        return False
+
+    try:
+        resp = requests.get(
+            f"https://api.telegram.org/bot{token}/getChatMember",
+            params={"chat_id": chat_id, "user_id": uid},
+            timeout=5,
+        )
+    except requests.RequestException as e:
+        current_app.logger.warning("[welcome] gate_fail uid=%s reason=channel_check_error err=%s", uid, e)
+        return False
+
+    if resp.status_code != 200:
+        current_app.logger.info("[welcome] gate_fail uid=%s reason=channel_http_%s", uid, resp.status_code)
+        return False
+
+    try:
+        data = resp.json()
+    except ValueError:
+        current_app.logger.info("[welcome] gate_fail uid=%s reason=channel_bad_json", uid)
+        return False
+
+    if not data.get("ok"):
+        current_app.logger.info("[welcome] gate_fail uid=%s reason=channel_not_ok err=%s", uid, data)
+        return False
+
+    status = (data.get("result") or {}).get("status")
+    return status in ALLOWED_CHANNEL_STATUSES
+
+
+def check_has_profile_photo(uid: int) -> bool | None:
+    return _has_profile_photo(uid)
+
+
+def check_username_present(tg_user: dict) -> bool:
+    if not isinstance(tg_user, dict):
+        return False
+    return bool(norm_uname(tg_user.get("username")))
+
+
+def get_or_issue_welcome_ticket(uid: int):
+    if uid is None:
+        return None
+
+    if is_existing_user(uid):
+        current_app.logger.info("[welcome] existing_user uid=%s deny", uid)
+        return None
+
+    now = now_utc()
+    expires_at = now + timedelta(hours=WELCOME_WINDOW_HOURS)
+    cleanup_at = expires_at + timedelta(days=30)
+    ticket = welcome_tickets_col.find_one_and_update(
+        {"uid": uid},
+        {
+            "$set": {
+                "cleanup_at": cleanup_at,
+            },
+            "$setOnInsert": {
+                "uid": uid,
+                "issued_at": now,
+                "expires_at": expires_at,
+                "status": "active",
+                "cleanup_at": cleanup_at,
+            }
+        },
+        upsert=True,
+        return_document=ReturnDocument.AFTER,
+    )
+
+    issued_at = _as_aware_utc(ticket.get("issued_at"))
+    just_created = False
+    if issued_at:
+        try:
+            just_created = abs((issued_at - now).total_seconds()) < 2
+        except Exception:
+            just_created = False
+
+    ticket_expires_at = _as_aware_utc(ticket.get("expires_at")) or expires_at
+    if ticket_expires_at and now > ticket_expires_at and ticket.get("status") not in ("expired", "claimed"):
+        welcome_tickets_col.update_one({"uid": uid}, {"$set": {"status": "expired", "reason_last_fail": "expired"}})
+        ticket["status"] = "expired"
+        ticket["expires_at"] = ticket_expires_at
+
+    if just_created:
+        current_app.logger.info("[welcome] ticket_issued uid=%s expires_at=%s", uid, expires_at.isoformat())
+    else:
+        current_app.logger.info("[welcome] ticket_exists uid=%s status=%s", uid, ticket.get("status"))
+    return ticket
 
 def is_drop_allowed(drop: dict, tg_uid, tg_uname_lower: str, user_ctx: dict | None) -> bool:
     audience = drop.get("audience") or {}
@@ -990,6 +1123,7 @@ def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None
         dtype = d.get("type", "pooled")
         is_active = is_drop_active(d, ref)
         audience_type = _drop_audience_type(d)
+        is_welcome_drop = _is_new_joiner_audience(audience_type)
 
         if not is_drop_allowed(d, ctx_uid, usernameLower or uname, user_ctx):
             continue
@@ -997,14 +1131,27 @@ def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None
         if not is_user_eligible_for_drop(user_doc, tg_user or {}, d):
             continue    
 
-        if audience_type == "new_joiner":
-            if not has_username:
+        welcome_ticket = None
+        if is_welcome_drop:
+            if uid is None:
                 continue
-            if already_known_user:
+            if already_known_user or is_existing_user(uid):
                 continue
             if already_new_joiner_claim:
                 continue
-             
+            welcome_ticket = get_or_issue_welcome_ticket(uid)
+            if not welcome_ticket:
+                continue
+            expires_at = _as_aware_utc(welcome_ticket.get("expires_at"))
+            if expires_at and ref > expires_at:
+                welcome_tickets_col.update_one(
+                    {"uid": uid},
+                    {"$set": {"status": "expired", "expires_at": expires_at}},
+                )
+                continue
+            if not has_username:
+                continue
+     
         base = {
             "dropId": drop_id,
             "name": d.get("name"),
@@ -1068,6 +1215,11 @@ def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None
                 claimed_at = _isoformat_kl(already.get("claimedAt"))
                 if claimed_at:
                     base["claimedAt"] = claimed_at
+                if welcome_ticket:
+                    expires_at = _as_aware_utc(welcome_ticket.get("expires_at"))
+                    if expires_at:
+                        remaining = int((expires_at - ref).total_seconds())
+                        base["welcomeRemainingSeconds"] = max(0, remaining)                 
                 base["remainingApprox"] = max(0, db.vouchers.count_documents({"type": "pooled", "dropId": {"$in": drop_id_variants}, "status": "free"}))
                 pooled_cards.append(base)
             else:
@@ -1078,6 +1230,11 @@ def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None
                 }, projection={"_id": 1})
                 if free_exists:
                     base["remainingApprox"] = max(0, db.vouchers.count_documents({"type": "pooled", "dropId": {"$in": drop_id_variants}, "status": "free"}))
+                    if welcome_ticket:
+                        expires_at = _as_aware_utc(welcome_ticket.get("expires_at"))
+                        if expires_at:
+                            remaining = int((expires_at - ref).total_seconds())
+                            base["welcomeRemainingSeconds"] = max(0, remaining)                 
                     pooled_cards.append(base)
 
     # Sort: personalised first; then pooled by priority desc, startsAt asc
@@ -1441,22 +1598,19 @@ def api_claim():
     audience_type = _drop_audience_type(voucher)
     client_ip = _get_client_ip(request)
 
-    if audience_type == "new_joiner":
+    if _is_new_joiner_audience(audience_type):
         current_app.logger.info(
-            "[claim] entry drop=%s audience=new_joiner uid=%s ip=%s", drop_id, uid, client_ip
+            "[claim] entry drop=%s audience=%s uid=%s ip=%s", drop_id, audience_type, uid, client_ip
         )
         if drop_type != "pooled":
             current_app.logger.info("[claim] deny drop=%s uid=%s reason=bad_drop_type type=%s", drop_id, uid, drop_type)
             return jsonify({"status": "error", "code": "not_eligible", "reason": "not_supported_for_audience"}), 403
-        if not username:
-            current_app.logger.info("[claim] deny drop=%s uid=%s reason=missing_username", drop_id, uid)
-            return jsonify({"status": "error", "code": "not_eligible", "reason": "missing_username"}), 403
         if uid is None:
             current_app.logger.info("[claim] deny drop=%s reason=missing_uid", drop_id)
             return jsonify({"status": "error", "code": "not_eligible", "reason": "missing_uid"}), 403
-        if user_doc:
-            current_app.logger.info("[claim] deny drop=%s uid=%s reason=not_new_joiner", drop_id, uid)
-            return jsonify({"status": "error", "code": "not_eligible", "reason": "not_new_joiner"}), 403
+        if is_existing_user(uid):
+            current_app.logger.info("[welcome] existing_user uid=%s deny", uid)
+            return jsonify({"status": "error", "code": "not_eligible", "reason": "existing_user"}), 403
         if new_joiner_claims_col.find_one({"uid": uid}):
             current_app.logger.info("[claim] deny drop=%s uid=%s reason=already_claimed_lifetime", drop_id, uid)
             return jsonify({"status": "error", "code": "not_eligible", "reason": "already_claimed_lifetime"}), 403
@@ -1472,13 +1626,36 @@ def api_claim():
             current_app.logger.info("[claim] deny drop=%s uid=%s reason=ip_claims_per_day ip=%s", drop_id, uid, client_ip)
             return jsonify({"status": "error", "code": "rate_limited", "reason": "ip_claims_per_day"}), 429
 
-        has_photo = _has_profile_photo(uid)
+        ticket = get_or_issue_welcome_ticket(uid)
+        if not ticket:
+            return jsonify({"status": "error", "code": "not_eligible", "reason": "not_eligible"}), 403
+
+        now_ts = now_utc()
+        expires_at = _as_aware_utc(ticket.get("expires_at"))
+        if expires_at and now_ts > expires_at:
+            welcome_tickets_col.update_one({"uid": uid}, {"$set": {"status": "expired", "reason_last_fail": "expired"}})
+            current_app.logger.info("[welcome] gate_fail uid=%s reason=expired", uid)
+            return jsonify({"status": "error", "code": "not_eligible", "reason": "expired"}), 403
+
+        if not check_username_present(tg_user):
+            welcome_tickets_col.update_one({"uid": uid}, {"$set": {"reason_last_fail": "no_username"}})
+            current_app.logger.info("[welcome] gate_fail uid=%s reason=no_username", uid)
+            return jsonify({"status": "error", "code": "not_eligible", "reason": "missing_username"}), 403
+
+        has_photo = check_has_profile_photo(uid)
+     
         if has_photo is None:
             return jsonify({"status": "error", "code": "telegram_unavailable"}), 503
         if not has_photo:
-            current_app.logger.info("[claim] deny drop=%s uid=%s reason=missing_profile_photo", drop_id, uid)
-            return jsonify({"status": "error", "code": "not_eligible", "reason": "missing_profile_photo"}), 403
- 
+            welcome_tickets_col.update_one({"uid": uid}, {"$set": {"reason_last_fail": "no_photo"}})
+            current_app.logger.info("[welcome] gate_fail uid=%s reason=no_photo", uid)
+         return jsonify({"status": "error", "code": "not_eligible", "reason": "missing_profile_photo"}), 403
+
+        if not check_channel_subscribed(uid):
+            welcome_tickets_col.update_one({"uid": uid}, {"$set": {"reason_last_fail": "not_subscribed"}})
+            current_app.logger.info("[welcome] gate_fail uid=%s reason=not_subscribed", uid)
+            return jsonify({"status": "error", "code": "not_eligible", "reason": "not_subscribed"}), 403 
+         
     # Claim
     try:
         result = claim_voucher_for_user(user_id=user_id, drop_id=drop_id, username=username)
@@ -1492,7 +1669,7 @@ def api_claim():
         current_app.logger.exception("claim failed")
         return jsonify({"status": "error", "code": "server_error"}), 500
 
-    if audience_type == "new_joiner":
+    if _is_new_joiner_audience(audience_type):
         try:
             new_joiner_claims_col.update_one(
                 {"uid": uid},
@@ -1514,8 +1691,13 @@ def api_claim():
             current_app.logger.info("[claim] deny post-claim drop=%s uid=%s reason=ip_claims_per_day ip=%s", drop_id, uid, client_ip)
             return jsonify({"status": "error", "code": "rate_limited", "reason": "ip_claims_per_day"}), 429
 
-        current_app.logger.info("[claim] success drop=%s audience=new_joiner uid=%s ip=%s", drop_id, uid, client_ip)
- 
+        welcome_tickets_col.update_one(
+            {"uid": uid},
+            {"$set": {"status": "claimed", "claimed_at": now_utc(), "reason_last_fail": None}},
+        )
+        current_app.logger.info("[welcome] gate_pass uid=%s", uid)
+        current_app.logger.info("[claim] success drop=%s audience=%s uid=%s ip=%s", drop_id, audience_type, uid, client_ip)
+     
     return jsonify({"status": "ok", "voucher": result}), 200
     
 # ---- Admin endpoints ----
@@ -1654,15 +1836,21 @@ def admin_create_drop():
     if dtype == "pooled":
         wl_raw = data.get("whitelistUsernames") or []
         wl_clean = []
-        marker_new_joiner = False     
+        marker_new_joiner = False
+        marker_new_joiner_48h = False 
         for item in wl_raw:
             u = norm_username(item)
+            if u == "new_joiner_48h":
+                marker_new_joiner_48h = True
+                continue
             if u == "new_joiner":
                 marker_new_joiner = True
                 continue         
             if u and u not in wl_clean:
                 wl_clean.append(u)
-        if marker_new_joiner and not audience_type:
+        if marker_new_joiner_48h and not audience_type:
+            audience_clean["type"] = "new_joiner_48h"
+        elif marker_new_joiner and not audience_type:
             audience_clean["type"] = "new_joiner"             
         drop_doc["whitelistUsernames"] = wl_clean
 
