@@ -1649,7 +1649,7 @@ def api_claim():
         if not has_photo:
             welcome_tickets_col.update_one({"uid": uid}, {"$set": {"reason_last_fail": "no_photo"}})
             current_app.logger.info("[welcome] gate_fail uid=%s reason=no_photo", uid)
-         return jsonify({"status": "error", "code": "not_eligible", "reason": "missing_profile_photo"}), 403
+            return jsonify({"status": "error", "code": "not_eligible", "reason": "missing_profile_photo"}), 403
 
         if not check_channel_subscribed(uid):
             welcome_tickets_col.update_one({"uid": uid}, {"$set": {"reason_last_fail": "not_subscribed"}})
