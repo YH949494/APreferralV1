@@ -485,7 +485,9 @@ def ensure_indexes():
     # --- optional welcome eligibility ---
     db.welcome_eligibility.create_index([("user_id", 1)], unique=True)
     db.welcome_eligibility.create_index([("expires_at", 1)], expireAfterSeconds=0)
-
+    db.welcome_tickets.create_index([("uid", 1)], unique=True)
+    db.welcome_tickets.create_index([("cleanup_at", 1)], expireAfterSeconds=0)
+    
     xp_events_collection.create_index([("user_id", 1), ("reason", 1)])
     ensure_xp_indexes(db)
             
