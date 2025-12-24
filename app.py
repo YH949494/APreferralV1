@@ -8,12 +8,12 @@ IDS = [
 ]
 
 MESSAGE = (
-    "Congrats! 🎉 You’re among our AdvantPlay Community November Voucher Rain winners.\n"
-    "Please redeem your code via the mini-app\n"
+    "Congrats! 🎉 You've won AdvantPlay Limited Edition Merch for Xmas Gift Delight.\n"
+    "Please fill in the details before 02/01/2026.\n"
 )
 
-BUTTON_TEXT = "Open Mini-App"     # <-- added
-BUTTON_URL  = "https://t.me/APreferralV1_bot?start=start"   # <-- add your URL or leave ""
+BUTTON_TEXT = "Fill in the details now"     # <-- added
+BUTTON_URL  = "https://forms.gle/Zj4uojVmSo5K3KWY7"   # <-- add your URL or leave ""
 
 THROTTLE_SECONDS = 0.12
 MAX_RETRIES_429  = 3
