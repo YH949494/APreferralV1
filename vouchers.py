@@ -451,6 +451,16 @@ def _drop_audience_type(drop: dict) -> str:
 def _is_new_joiner_audience(audience_type: str) -> bool:
     return audience_type in ("new_joiner", "new_joiner_48h")
 
+def _is_pool_drop(drop: dict, audience_type: str | None = None) -> bool:
+    if not isinstance(drop, dict):
+        return False
+    atype = (audience_type or _drop_audience_type(drop) or "").strip().lower()
+    if atype == "public_pool":
+        return True
+    category = drop.get("category")
+    if isinstance(category, str) and category.strip().lower() == "pool":
+        return True
+    return bool(drop.get("is_pool") is True)
 
 def _rate_limit_key(prefix: str, *parts):
     return ":".join([prefix] + [str(p) for p in parts if p is not None])
@@ -1596,8 +1606,22 @@ def api_claim():
         user_id = fallback_user_id or username or ""
 
     audience_type = _drop_audience_type(voucher)
+    check_only = bool(body.get("check_only") or body.get("checkOnly")) 
     client_ip = _get_client_ip(request)
+    is_pool_drop = _is_pool_drop(voucher, audience_type)
 
+    if is_pool_drop:
+        if not check_channel_subscribed(uid):
+            current_app.logger.info("[claim] deny drop=%s uid=%s reason=not_subscribed", drop_id, uid)
+            return jsonify({
+                "status": "error",
+                "code": "not_subscribed",
+                "message": "Please subscribe to @advantplayofficial to claim this voucher."
+            }), 403
+
+    if check_only:
+        return jsonify({"status": "ok", "check_only": True, "subscribed": True}), 200
+ 
     if _is_new_joiner_audience(audience_type):
         current_app.logger.info(
             "[claim] entry drop=%s audience=%s uid=%s ip=%s", drop_id, audience_type, uid, client_ip
