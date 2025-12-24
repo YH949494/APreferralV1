@@ -1231,6 +1231,46 @@ function showVoucherClaim(dropId, disabled) {
   primaryBtn.style.display = "inline-block";
 }
 
+const CHANNEL_SUBSCRIBE_PROMPT = "Subscribe to @advantplayofficial to unlock";
+
+function showChannelGate(messageEl, buttonEl) {
+  if (messageEl) messageEl.textContent = CHANNEL_SUBSCRIBE_PROMPT;
+  if (buttonEl) buttonEl.style.display = "none";
+}
+
+async function checkChannelSubscription(dropId) {
+  if (!dropId) return { subscribed: true };
+  const res = await v2Fetch(`${API_V2}/vouchers/claim`, {
+    method: "POST",
+    body: JSON.stringify({
+      dropId,
+      check_only: true,
+      init_data: getLatestInitData() || (tg?.initData || "")
+    })
+  });
+  let data = null;
+  try { data = await res.json(); } catch { /* ignore */ }
+  if (res.status === 403 && data?.code === "not_subscribed") {
+    return { subscribed: false, message: data?.message };
+  }
+  if (!res.ok) {
+    throw new Error(data?.error || data?.code || `HTTP ${res.status}`);
+  }
+  return { subscribed: true, message: data?.message };
+}
+
+function applyChannelGate(dropId, messageEl, buttonEl) {
+  checkChannelSubscription(dropId)
+    .then((state) => {
+      if (!state.subscribed) {
+        showChannelGate(messageEl, buttonEl);
+      }
+    })
+    .catch((err) => {
+      console.warn("Channel gate check failed", err);
+    });
+}
+    
 function campaignWindowText(drop) {
   const start = drop?.startsAt ? fmtKL(drop.startsAt) : "";
   const end = drop?.endsAt ? fmtKL(drop.endsAt) : "";
@@ -1272,6 +1312,7 @@ function createCampaignCard(drop) {
   }
 
   const message = document.createElement("p");
+  message.className = "campaign-message";  
   const dropId = drop?.dropId || drop?.id || drop?._id || "";
   const hasClaimed = !!drop?.userClaimed;
   const canClaim = !!(drop?.isActive || drop?.adminPreview);
@@ -1313,7 +1354,10 @@ function createCampaignCard(drop) {
 
   card.appendChild(message);
   card.appendChild(btn);
-
+  if (!hasClaimed && canClaim) {
+    applyChannelGate(dropId, message, btn);
+  }
+  
   return card;
 }
 
@@ -1473,6 +1517,20 @@ document.addEventListener("click", async (e) => {
     let out = null;
     try { out = await res.json(); } catch { /* ignore */ }
 
+    if (res.status === 403 && out?.code === "not_subscribed") {
+      const message = out?.message || "Please subscribe to @advantplayofficial to claim this voucher.";
+      if (claimBtn.id === "campaign-voucher-btn") {
+        const messageEl = document.getElementById("campaign-voucher-message");
+        showChannelGate(messageEl, claimBtn);
+      } else {
+        const card = claimBtn.closest(".campaign-card");
+        const messageEl = card?.querySelector(".campaign-message");
+        showChannelGate(messageEl, claimBtn);
+      }
+      alert(message);
+      return;
+    }
+    
     if (res.status === 401) {
       alert("Not authorized (401). Open inside Telegram WebApp or pass init_data correctly.");
       return;
