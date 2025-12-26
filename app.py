@@ -3,7 +3,6 @@ import os, time, json, sys, urllib.request, urllib.parse
 
 # ==== EDIT THESE ====
 IDS = [
-    1329748443,
     8239720056,
     6760825915,
     8584235099,
