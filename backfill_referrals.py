@@ -27,7 +27,7 @@ from xp import grant_xp
 def _collect_referral_counts(referrals):
     ref_counts = defaultdict(list)
     for ref in referrals:
-        if ref.get("status") not in {"confirmed", "success"}:
+        if ref.get("status") in {"pending", "inactive"}:
             continue
         referrer_id = ref.get("referrer_user_id") or ref.get("referrer_id")
         invitee_id = ref.get("invitee_user_id") or ref.get("referred_user_id")
@@ -36,7 +36,11 @@ def _collect_referral_counts(referrals):
 
 
 def backfill(db, dry_run: bool = True):
-    referrals = list(db.referrals.find({"status": {"$in": ["confirmed", "success"]}}))
+    referrals = list(
+        db.referrals.find(
+            {"$or": [{"status": {"$exists": False}}, {"status": {"$nin": ["pending", "inactive"]}}]}
+        )
+    )
     ref_counts = _collect_referral_counts(referrals)
 
     missing_base = []
