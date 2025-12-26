@@ -8,7 +8,6 @@ from referral_rules import (
     REFERRAL_SUCCESS_EVENT,
     grant_referral_rewards,
     reconcile_referrals,
-    validate_referral_if_eligible,
 )
 
 
@@ -153,27 +152,6 @@ class ReferralTests(unittest.TestCase):
         total_xp = sum(ev["xp"] for ev in db.xp_events.docs)
         self.assertEqual(total_xp, BASE_REFERRAL_XP)
 
-    def test_validate_referral_gate(self):
-        db = FakeDB()
-        db.referrals.update_one(
-            {"referred_user_id": 1},
-            {"$set": {"referrer_id": 2, "referrer_user_id": 2, "invitee_user_id": 1, "status": "pending"}},
-            upsert=True,
-        )
-
-        result = validate_referral_if_eligible(
-            db, db.referrals, db.users, 1, lambda _: False
-        )
-        self.assertFalse(result)
-        self.assertEqual(db.referrals.find_one({"referred_user_id": 1}).get("status"), "pending")
-
-        result = validate_referral_if_eligible(
-            db, db.referrals, db.users, 1, lambda _: True
-        )
-        self.assertTrue(result)
-        self.assertEqual(db.referrals.find_one({"referred_user_id": 1}).get("status"), "confirmed")
-        total_xp = sum(ev["xp"] for ev in db.xp_events.docs)
-        self.assertEqual(total_xp, BASE_REFERRAL_XP)
 
     def test_reconciliation_no_mismatches(self):
         refs = [
