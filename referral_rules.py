@@ -12,9 +12,7 @@ from __future__ import annotations
 import logging
 import os
 from datetime import datetime, timedelta, timezone
-from typing import Callable, Dict, Iterable, List
-
-from datetime import datetime, timedelta, timezone
+from typing import Dict, Iterable, List
 from xp import grant_xp
 
 KL_TZ = timezone(timedelta(hours=8))
@@ -68,51 +66,6 @@ def _apply_update(update):
     set_on_insert = update.get("$setOnInsert", {})
     incs = update.get("$inc", {})
     return sets, set_on_insert, incs
-
-
-def record_pending_referral(referrals_collection, referrer_id: int | None, referred_user_id: int):
-    """Upsert a pending referral record."""
-
-    if not referrer_id or referrer_id == referred_user_id:
-        return
-
-    now = datetime.utcnow()
-    referrals_collection.update_one(
-        {
-            "$or": [
-                {"invitee_user_id": referred_user_id},
-                {"referred_user_id": referred_user_id},
-            ]
-        },
-        {
-            "$setOnInsert": {
-                "referrer_user_id": referrer_id,
-                "invitee_user_id": referred_user_id,
-                "channel_id": CHANNEL_USERNAME,
-                "status": "pending",
-                "created_at": now,
-            },
-            "$set": {
-                "referrer_user_id": referrer_id,
-                "invitee_user_id": referred_user_id,
-                "channel_id": CHANNEL_USERNAME,
-            },
-        },
-        upsert=True,
-    )
-
-    pending_count = referrals_collection.count_documents(
-        {
-            "status": "pending",
-            "$or": [
-                {"referrer_user_id": referrer_id},
-                {"referrer_id": referrer_id},
-            ],
-        }
-    )
-    logger.info(
-        "[referral] pending uid=%s count=%s", referrer_id, pending_count
-    )
 
 def grant_referral_rewards(
     db, users_collection, referrer_id: int | None, invitee_user_id: int
@@ -179,77 +132,6 @@ def grant_referral_rewards(
 
     return result
 
-
-def validate_referral_if_eligible(
-    db,
-    referrals_collection,
-    users_collection,
-    invitee_user_id: int,
-    membership_check: Callable[[int], bool],
-):
-    """Transition a pending referral to success if gates pass.
-
-    ``membership_check`` must be a callable that returns ``True`` when the user
-    satisfies the production gate (e.g., channel membership). The gate is reused
-    for both the referral status update and XP grant to avoid drift.
-    """
-
-    ref_doc = referrals_collection.find_one(
-        {"invitee_user_id": invitee_user_id, "status": "pending"}
-    ) or referrals_collection.find_one(
-        {"referred_user_id": invitee_user_id, "status": "pending"}
-    )
-    if not ref_doc:
-        return False
-
-    if not membership_check(invitee_user_id):
-        return False
-
-    updated = referrals_collection.update_one(
-        {"_id": ref_doc.get("_id"), "status": "pending"},
-        {
-            "$set": {
-                "status": "confirmed",
-                "confirmed_at": datetime.utcnow(),
-                "invitee_user_id": invitee_user_id,
-                "referrer_user_id": ref_doc.get("referrer_user_id")
-                or ref_doc.get("referrer_id"),
-                "channel_id": ref_doc.get("channel_id") or CHANNEL_USERNAME,
-            },
-            "$unset": {"validated_at": ""},
-        },
-    )
-
-    if getattr(updated, "modified_count", 0) != 1:
-        return False
-        
-    referrer = ref_doc.get("referrer_user_id") or ref_doc.get("referrer_id")
-    outcome = grant_referral_rewards(
-        db,
-        users_collection,
-        referrer,
-        invitee_user_id,
-    )
-    if outcome.get("base_granted"):
-        total_confirmed = referrals_collection.count_documents(
-            {
-                "status": {"$in": ["confirmed", "success"]},
-                "$or": [
-                    {"referrer_user_id": referrer},
-                    {"referrer_id": referrer},
-                ],
-            }
-        )
-        logger.info(
-            "[referral] confirmed uid=%s count=%s", referrer, total_confirmed
-        )
-        logger.info(
-            "[referral_confirmed] referrer=%s invitee=%s", referrer, invitee_user_id
-        )
-
-    return bool(outcome.get("base_granted"))
-
-
 def reconcile_referrals(
     referrals: Iterable[Dict],
     xp_events: Iterable[Dict],
@@ -258,12 +140,12 @@ def reconcile_referrals(
 
     ``referrals`` must contain documents with ``referrer_user_id`` (or legacy
     ``referrer_id``) and ``invitee_user_id`` (or legacy ``referred_user_id``)
-    fields and ``status`` of either ``confirmed`` or legacy ``success``.
+    fields. Any entries explicitly marked as pending/inactive are excluded.
     """
 
     referral_counts: Dict[int, List[int]] = {}
     for ref in referrals:
-        if ref.get("status") not in {"confirmed", "success"}:
+        if ref.get("status") in {"pending", "inactive"}:
             continue
         referrer_id = ref.get("referrer_user_id") or ref.get("referrer_id")
         referred_user_id = ref.get("invitee_user_id") or ref.get("referred_user_id")
@@ -341,21 +223,10 @@ def ensure_referral_indexes(referrals_collection):
         getattr(referrer_migration, "matched_count", 0),
     )
     
-    referrals_collection.create_index([("referrer_user_id", 1), ("status", 1)])
     referrals_collection.create_index([("referrer_user_id", 1)])
     referrals_collection.create_index([("invitee_user_id", 1)], unique=True)
+    referrals_collection.create_index([("created_at", -1)])    
     referrals_collection.create_index([("status", 1), ("created_at", -1)])
-    referrals_collection.create_index([("status", 1), ("confirmed_at", -1)])
-
-    try:
-        referrals_collection.create_index(
-            [("referrer_user_id", 1), ("invitee_user_id", 1)],
-            name="uq_ref_confirmed",
-            unique=True,
-            partialFilterExpression={"status": "confirmed"},
-        )
-    except Exception:
-        logger.exception("[Referral] Failed to ensure partial unique index for confirmations")
 
 
 def _referral_time_expr():
@@ -382,19 +253,19 @@ def _month_window_utc(reference: datetime | None = None):
 
 
 def compute_referral_stats(referrals_collection, user_id: int, window=None):
-    """Return confirmed referral counts for a user.
-
-    ``window`` optionally overrides the time range used for both weekly and monthly
-    calculations. Only referrals with ``status`` in {"confirmed", "success"}
-    are counted.
-    """
+    """Return awarded referral counts for a user."""
 
     base_match = {
-        "status": {"$in": ["confirmed", "success"]},
-        "$or": [
-            {"referrer_user_id": user_id},
-            {"referrer_id": user_id},
-        ],
+        "$and": [
+            {"$or": [
+                {"status": {"$exists": False}},
+                {"status": {"$nin": ["pending", "inactive"]}},
+            ]},
+            {"$or": [
+                {"referrer_user_id": user_id},
+                {"referrer_id": user_id},
+            ]},
+        ]
     }
 
     def _count_between(start, end):
