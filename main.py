@@ -372,7 +372,8 @@ def _has_joined_group(invitee_user_id: int) -> bool:
 def resolve_legacy_pending_referrals():
     pending_refs = list(referrals_collection.find({"status": "pending"}))
     if not pending_refs:
-
+        return
+        
     now = datetime.utcnow()
     for ref in pending_refs:
         invitee_id = ref.get("invitee_user_id") or ref.get("referred_user_id")
