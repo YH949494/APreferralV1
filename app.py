@@ -212,7 +212,7 @@ MESSAGE = (
 )
 
 BUTTON_TEXT = "Fill in the details now"     # <-- added
-BUTTON_URL  = "https://forms.gle/Zj4uojVmSo5K3KWY7"   # <-- add your URL or leave ""
+BUTTON_URL  = "https://forms.gle/9416ftWWXR7uSqcJ7"   # <-- add your URL or leave ""
 
 THROTTLE_SECONDS = 0.12
 MAX_RETRIES_429  = 3
