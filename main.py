@@ -138,7 +138,11 @@ def recompute_xp_totals(start_utc, end_utc, limit: int | None = None, user_id: i
             {"$lt": [_event_time_expr(), end_utc]},
         ]
     }
-    match_filters = [{"$expr": time_expr}, {"user_id": {"$ne": None}}]
+    match_filters = [
+        {"$expr": time_expr},
+        {"user_id": {"$ne": None}},
+        {"$or": [{"invalidated": {"$exists": False}}, {"invalidated": False}]},
+    ]
     if user_id is not None:
         match_filters.append({"user_id": user_id})
 
