@@ -22,11 +22,11 @@ logger = logging.getLogger(__name__)
 CHANNEL_USERNAME = os.getenv("CHANNEL_USERNAME", "@advantplayofficial")
 
 # Base referral reward per successful referred user.
-BASE_REFERRAL_XP = int(os.getenv("REFERRAL_REWARD_XP", "50"))
+BASE_REFERRAL_XP = int(os.getenv("REFERRAL_REWARD_XP", "30"))
 
 # Bonus is awarded every ``REFERRAL_BONUS_INTERVAL`` successful referrals.
 REFERRAL_BONUS_INTERVAL = int(os.getenv("REFERRAL_BONUS_INTERVAL", "3"))
-REFERRAL_BONUS_XP = int(os.getenv("REFERRAL_BONUS_XP", "300"))
+REFERRAL_BONUS_XP = int(os.getenv("REFERRAL_BONUS_XP", "200"))
 
 # Event types used across the app and reconciliation scripts.
 REFERRAL_SUCCESS_EVENT = "ref_success"
