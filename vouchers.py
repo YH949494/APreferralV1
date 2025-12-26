@@ -462,6 +462,29 @@ def _is_pool_drop(drop: dict, audience_type: str | None = None) -> bool:
         return True
     return bool(drop.get("is_pool") is True)
 
+WELCOME_BONUS_RETENTION_MESSAGE = (
+    "🎉 Welcome Bonus unlocked!\n"
+    "More exclusive vouchers and surprise drops are released in our channel.\n"
+    "Stay subscribed so you won’t miss the next one."
+)
+
+POOL_VOUCHER_RETENTION_MESSAGE = (
+    "🎁 Voucher claimed successfully!\n"
+    "More voucher drops are coming soon — channel subscribers only.\n"
+    "Stay subscribed to catch the next drop."
+)
+
+def _append_retention_message(payload: dict, retention_message: str) -> None:
+    if not retention_message:
+        return
+    existing = (payload.get("message") or "").strip()
+    if retention_message in existing:
+        return
+    if existing:
+        payload["message"] = f"{existing}\n{retention_message}"
+    else:
+        payload["message"] = retention_message
+
 def _rate_limit_key(prefix: str, *parts):
     return ":".join([prefix] + [str(p) for p in parts if p is not None])
 
@@ -1722,8 +1745,13 @@ def api_claim():
         current_app.logger.info("[welcome] gate_pass uid=%s", uid)
         current_app.logger.info("[claim] success drop=%s audience=%s uid=%s ip=%s", drop_id, audience_type, uid, client_ip)
      
-    return jsonify({"status": "ok", "voucher": result}), 200
-    
+    response_payload = {"status": "ok", "voucher": result}
+    if _is_new_joiner_audience(audience_type):
+        _append_retention_message(response_payload, WELCOME_BONUS_RETENTION_MESSAGE)
+    elif is_pool_drop:
+        _append_retention_message(response_payload, POOL_VOUCHER_RETENTION_MESSAGE)
+    return jsonify(response_payload), 200
+ 
 # ---- Admin endpoints ----
 def _coerce_id(x):
     if isinstance(x, ObjectId):
