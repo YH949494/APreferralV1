@@ -28,7 +28,11 @@ from referral_rules import (
 
 
 def _load_collections(db):
-    referrals = list(db.referrals.find({"status": {"$in": ["confirmed", "success"]}}))
+    referrals = list(
+        db.referrals.find(
+            {"$or": [{"status": {"$exists": False}}, {"status": {"$nin": ["pending", "inactive"]}}]}
+        )
+    )
     xp_events = list(
         db.xp_events.find(
             {"type": {"$in": [REFERRAL_SUCCESS_EVENT, REFERRAL_BONUS_EVENT, "ref_bonus"]}}
