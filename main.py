@@ -24,14 +24,9 @@ from config import (
 )
 
 from referral_rules import (
-    BASE_REFERRAL_XP,
-    REFERRAL_BONUS_INTERVAL,
-    REFERRAL_BONUS_XP,
     compute_referral_stats,
     ensure_referral_indexes,
     grant_referral_rewards,
-    record_pending_referral,
-    validate_referral_if_eligible,
 )
 
 from bson.json_util import dumps
@@ -66,7 +61,6 @@ API_BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"
 # ----------------------------
 CHANNEL_USERNAME = "@advantplayofficial"
 CHANNEL_ID = -1002396761021
-ALLOWED_CHANNEL_STATUSES = {"member", "administrator", "creator"}
 
 XMAS_CAMPAIGN_START = datetime(2025, 12, 1)
 XMAS_CAMPAIGN_END = datetime(2025, 12, 31, 23, 59, 59)
@@ -177,7 +171,10 @@ def recompute_referral_counts(start_utc, end_utc, limit: int | None = None, user
     }
     base_match = [
         {"$expr": time_expr},
-        {"status": {"$in": ["confirmed", "success"]}},
+        {"$or": [
+            {"status": {"$exists": False}},
+            {"status": {"$nin": ["pending", "inactive"]}},
+        ]},
         {"$or": [
             {"referrer_user_id": {"$exists": True}},
             {"referrer_id": {"$exists": True}},
@@ -237,22 +234,6 @@ def call_bot_in_loop(coro, timeout=15):
         raise RuntimeError("Bot loop not running yet")
     fut = asyncio.run_coroutine_threadsafe(coro, loop)
     return fut.result(timeout=timeout)
-
-def is_user_in_channel(bot, user_id: int) -> bool:
-    try:
-        member = call_bot_in_loop(bot.get_chat_member(CHANNEL_ID, user_id))
-        return member.status in ALLOWED_CHANNEL_STATUSES
-    except Exception as e:  # pragma: no cover - best effort check
-        print(f"[Referral] Failed to check channel membership for {user_id}: {e}")
-        return False
-
-async def is_user_in_channel_async(bot, user_id: int) -> bool:
-    try:
-        member = await bot.get_chat_member(CHANNEL_ID, user_id)
-        return member.status in ALLOWED_CHANNEL_STATUSES
-    except Exception as e:  # pragma: no cover - best effort check
-        print(f"[Referral] Failed to check channel membership for {user_id}: {e}")
-        return False
 
 def _format_mention(u: dict) -> str:
     """Return a HTML-safe mention for announcements."""
@@ -366,51 +347,65 @@ def maybe_shout_milestones(user_id: int):
 def maybe_give_first_checkin_bonus(user_id: int):
     grant_xp(db, user_id, "first_checkin", "first_checkin", FIRST_CHECKIN_BONUS_XP)
 
-def try_validate_referral_by_channel(user_id: int):
-    ref_doc = referrals_collection.find_one(
-        {"invitee_user_id": user_id, "status": "pending"}
+def _find_referral_record(invitee_user_id: int):
+    return referrals_collection.find_one(
+        {"invitee_user_id": invitee_user_id}
     ) or referrals_collection.find_one(
-        {"referred_user_id": user_id, "status": "pending"}
-    )
-    if not ref_doc:
-        return
-
-    def _membership_check(_: int) -> bool:
-        return is_user_in_channel(app_bot.bot, user_id)
-
-    granted = validate_referral_if_eligible(
-        db, referrals_collection, users_collection, user_id, _membership_check
+        {"referred_user_id": invitee_user_id}
     )
 
-    if granted:
-        try:
-            maybe_shout_milestones(int(ref_doc.get("referrer_user_id") or ref_doc.get("referrer_id")))
-        except Exception:
-            pass
-
-
-async def try_validate_referral_by_channel_async(user_id: int, bot):
-    ref_doc = referrals_collection.find_one(
-        {"invitee_user_id": user_id, "status": "pending"}
-    ) or referrals_collection.find_one(        
-        {"referred_user_id": user_id, "status": "pending"}
-    )
-    if not ref_doc:
-        return
-
-    in_channel = await is_user_in_channel_async(bot, user_id)
-    if not in_channel:
-        return
-
-    granted = validate_referral_if_eligible(
-        db, referrals_collection, users_collection, user_id, lambda _: in_channel
+def _has_joined_group(invitee_user_id: int) -> bool:
+    user_doc = users_collection.find_one(
+        {"user_id": invitee_user_id, "joined_once": True},
+        {"_id": 1},
     )
 
-    if granted:
-        try:
-            maybe_shout_milestones(int(ref_doc.get("referrer_user_id") or ref_doc.get("referrer_id")))
-        except Exception:
-            pass
+    if user_doc:
+        return True
+    return bool(
+        db.joins.find_one(
+            {"user_id": invitee_user_id, "event": "join", "chat_id": GROUP_ID},
+            {"_id": 1},
+        )
+    )
+
+def resolve_legacy_pending_referrals():
+    pending_refs = list(referrals_collection.find({"status": "pending"}))
+    if not pending_refs:
+
+    now = datetime.utcnow()
+    for ref in pending_refs:
+        invitee_id = ref.get("invitee_user_id") or ref.get("referred_user_id")
+        referrer_id = ref.get("referrer_user_id") or ref.get("referrer_id")
+
+        if not invitee_id or not referrer_id:
+            referrals_collection.update_one(
+                {"_id": ref.get("_id")},
+                {"$set": {"status": "inactive", "inactive_at": now}},
+            )
+            continue
+            
+        if _has_joined_group(invitee_id):
+            referrals_collection.update_one(
+                {"_id": ref.get("_id")},
+                {"$set": {
+                    "status": "success",
+                    "confirmed_at": now,
+                    "invitee_user_id": invitee_id,
+                    "referrer_user_id": referrer_id,
+                }},
+            )
+            grant_referral_rewards(
+                db,
+                users_collection,
+                referrer_id,
+                invitee_id,
+            )
+        else:
+            referrals_collection.update_one(
+                {"_id": ref.get("_id")},
+                {"$set": {"status": "inactive", "inactive_at": now}},
+            )
 
 def ensure_indexes():
     """
@@ -492,9 +487,7 @@ def ensure_indexes():
     ensure_xp_indexes(db)
             
     ensure_referral_indexes(referrals_collection)
-    referrals_collection.update_many(
-        {"status": {"$exists": False}}, {"$set": {"status": "pending"}}
-    )
+    resolve_legacy_pending_referrals()
     
 ensure_indexes()
 
@@ -754,7 +747,6 @@ async def process_checkin(user_id, username, region, update=None):
     checkin_key = f"checkin:{today_kl.strftime('%Y%m%d')}"
     grant_xp(db, user_id, "checkin", checkin_key, base_xp + bonus_xp)
     
-    await try_validate_referral_by_channel_async(int(user_id), app_bot.bot)
     maybe_shout_milestones(int(user_id))
 
     labels = {7: "🎉 7-day streak bonus!", 14: "🔥 14-day streak bonus!", 28: "🏆 28-day streak bonus!"}
@@ -798,8 +790,6 @@ def api_checkin():
         if not user_id:
             return jsonify({"success": False, "error": "Missing user_id"}), 400
  
-        try_validate_referral_by_channel(int(user_id))
-
         user = users_collection.find_one({"user_id": int(user_id)})
         if not user or "region" not in user:
             return jsonify({"success": False, "error": "Region not set"}), 400
@@ -990,7 +980,10 @@ def get_leaderboard():
         if is_admin:
             total_all_rows = referrals_collection.aggregate(
                 [
-                    {"$match": {"status": {"$in": ["confirmed", "success"]}}},
+                    {"$match": {"$or": [
+                        {"status": {"$exists": False}},
+                        {"status": {"$nin": ["pending", "inactive"]}},
+                    ]}},
                     {
                         "$group": {
                             "_id": {"$ifNull": ["$referrer_user_id", "$referrer_id"]},
@@ -1065,7 +1058,7 @@ def get_leaderboard():
         }
 
         logger.info(
-            "[lb_debug] uid=%s weekly_xp=%s confirmed_referrals=%s",
+            "[lb_debug] uid=%s weekly_xp=%s awarded_referrals=%s",
             current_user_id,
             user_weekly_xp,
             user_weekly_referrals,
@@ -1627,16 +1620,6 @@ async def _send_xmas_flow(update: Update, context: ContextTypes.DEFAULT_TYPE, us
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     message = update.effective_message
-
-    referrer_id = None
-    if context.args:
-        for arg in context.args:
-            if arg.lower().startswith("ref="):
-                try:
-                    referrer_id = int(arg.split("=", 1)[1])
-                except (TypeError, ValueError):
-                    referrer_id = None
-                break
     
     # Handle deep links for the Xmas Gift Delight campaign
     if context.args and len(context.args) > 0 and context.args[0].lower() == "xmasgift":
@@ -1645,8 +1628,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if user:
-        record_pending_referral(referrals_collection, referrer_id, user.id)
-        await try_validate_referral_by_channel_async(user.id, context.bot)
         users_collection.update_one(
             {"user_id": user.id},
             {"$setOnInsert": {
@@ -1774,9 +1755,50 @@ async def member_update_handler(update: Update, context: ContextTypes.DEFAULT_TY
             if ref_doc:
                 referrer_id = ref_doc["user_id"]
 
-        if referrer_id:
-            record_pending_referral(referrals_collection, referrer_id, user.id)
-            print(f"[Referral] {user.username} referred by {referrer_id} (pending validation)")
+        existing_referral = _find_referral_record(user.id)
+        stored_referrer_id = None
+        if existing_referral:
+            stored_referrer_id = existing_referral.get("referrer_user_id") or existing_referral.get("referrer_id")
+
+        final_referrer_id = referrer_id or stored_referrer_id
+
+        if final_referrer_id:
+            now = datetime.utcnow()
+            if existing_referral:
+                referrals_collection.update_one(
+                    {"_id": existing_referral.get("_id")},
+                    {"$set": {
+                        "status": "success",
+                        "confirmed_at": now,
+                        "invitee_user_id": user.id,
+                        "referrer_user_id": final_referrer_id,
+                    }},
+                )
+            else:
+                referrals_collection.update_one(
+                    {"invitee_user_id": user.id},
+                    {"$setOnInsert": {
+                        "referrer_user_id": final_referrer_id,
+                        "invitee_user_id": user.id,
+                        "status": "success",
+                        "created_at": now,
+                    }},
+                    upsert=True,
+                )
+
+            outcome = grant_referral_rewards(
+                db,
+                users_collection,
+                final_referrer_id,
+                user.id,
+            )
+            if outcome.get("base_granted"):
+                try:
+                    maybe_shout_milestones(int(final_referrer_id))
+                except Exception:
+                    pass
+            print(f"[Referral] {user.username} referred by {final_referrer_id} (awarded)")
+            
         else:
             print(f"[Referral] No referrer found for {user.username}")
 
