@@ -15,6 +15,7 @@ new_joiner_claims_col = db["new_joiner_claims"]
 claim_rate_limits_col = db["claim_rate_limits"]
 profile_photo_cache_col = db["profile_photo_cache"]
 welcome_tickets_col = db["welcome_tickets"]
+channel_subscription_cache_col = db["channel_subscription_cache"]
 
 BYPASS_ADMIN = os.getenv("BYPASS_ADMIN", "0").lower() in ("1", "true", "yes", "on")
 HARDCODED_ADMIN_USERNAMES = {"gracy_ap", "teohyaohui"}  # allow manual overrides if cache is empty
@@ -624,7 +625,7 @@ def _has_profile_photo(uid: int, *, force_refresh: bool = False):
     return has_photo
 
 ALLOWED_CHANNEL_STATUSES = {"member", "administrator", "creator"}
-
+CHANNEL_SUBSCRIPTION_CACHE_TTL_SECONDS = 120
 
 def is_existing_user(uid: int) -> bool:
     if uid is None:
@@ -644,6 +645,14 @@ def check_channel_subscribed(uid: int) -> bool:
     if uid is None:
         return False
 
+    try:
+        cached = channel_subscription_cache_col.find_one({"user_id": uid}, {"_id": 1})
+    except Exception:
+        cached = None
+
+    if cached:
+        return True
+ 
     chat_id = _official_channel_identifier()
     token = os.environ.get("BOT_TOKEN", "")
     if not chat_id or not token:
@@ -675,7 +684,32 @@ def check_channel_subscribed(uid: int) -> bool:
         return False
 
     status = (data.get("result") or {}).get("status")
-    return status in ALLOWED_CHANNEL_STATUSES
+    is_subscribed = status in ALLOWED_CHANNEL_STATUSES
+    if is_subscribed:
+        now = now_utc()
+        expires_at = now + timedelta(seconds=CHANNEL_SUBSCRIPTION_CACHE_TTL_SECONDS)
+        try:
+            channel_subscription_cache_col.update_one(
+                {"user_id": uid},
+                {
+                    "$set": {
+                        "user_id": uid,
+                        "subscribed": True,
+                        "cached_at": now,
+                        "expires_at": expires_at,
+                    }
+                },
+                upsert=True,
+            )
+        except Exception:
+            pass
+        return True
+
+    try:
+        channel_subscription_cache_col.delete_one({"user_id": uid})
+    except Exception:
+        pass
+    return False
 
 
 def check_has_profile_photo(uid: int) -> bool | None:
