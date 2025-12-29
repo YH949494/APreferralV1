@@ -26,6 +26,10 @@ monthly_xp_history_collection = db["monthly_xp_history"]
 monthly_xp_history_collection.create_index([("user_id", ASCENDING), ("month", ASCENDING)], unique=True)
 monthly_xp_history_collection.create_index([("month", ASCENDING)])                              
 
+channel_subscription_cache = db["channel_subscription_cache"]
+channel_subscription_cache.create_index([("user_id", ASCENDING)], unique=True)
+channel_subscription_cache.create_index([("expires_at", ASCENDING)], expireAfterSeconds=0)
+
 def init_user(user_id, username):
     """Create user if missing; keep username in sync if it changed."""
     users_collection.update_one(
