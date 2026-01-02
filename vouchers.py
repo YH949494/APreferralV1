@@ -1816,13 +1816,13 @@ def api_claim():
             )
             return jsonify({"status": "error", "code": "not_eligible", "reason": reason}), 403
         if new_joiner_claims_col.find_one({"uid": uid}):
-             current_app.logger.info(
+            current_app.logger.info(
                 "[claim] uid=%s drop_id=%s dtype=%s audience=%s decision=blocked reason=already_claimed_lifetime",
                 uid,
                 drop_id,
                 drop_type,
                 audience_type,
-            )        
+            )  
             current_app.logger.info("[claim] deny drop=%s uid=%s reason=already_claimed_lifetime", drop_id, uid)
             return jsonify({"status": "error", "code": "not_eligible", "reason": "already_claimed_lifetime"}), 403
 
