@@ -68,9 +68,10 @@ def _apply_update(update):
     return sets, set_on_insert, incs
 
 
-def record_referral_success(
+def upsert_referral_success(
     referrals_collection,
     invitee_user_id: int | None,
+    success_at: datetime | None = None,
     referrer_user_id: int | None,
     referrer_username: str | None = None,
     context: Dict | None = None,
@@ -88,14 +89,18 @@ def record_referral_success(
         )
         return {"matched": 0, "modified": 0, "upserted": None}
 
-    now = now_utc()
+    now = success_at or now_utc()
     proof_fields = {}
     if context:
         for key in ("joined_chat_at", "subscribed_official_at"):
             value = context.get(key)
             if value is not None:
                 proof_fields[key] = value
-
+                
+    kl_local = now.astimezone(KL_TZ)
+    week_key = kl_local.strftime("%Y-%W")
+    month_key = kl_local.strftime("%Y-%m")
+    
     update = {
         "$setOnInsert": {
             "invitee_user_id": invitee_user_id,
@@ -105,7 +110,10 @@ def record_referral_success(
         },
         "$set": {
             "status": "success",
+            "success_at": now,            
             "confirmed_at": now,
+            "week_key": week_key,
+            "month_key": month_key,           
             **proof_fields,
         },
     }
@@ -128,6 +136,24 @@ def record_referral_success(
         upserted,
     )
     return {"matched": matched, "modified": modified, "upserted": upserted}
+
+def record_referral_success(
+    referrals_collection,
+    invitee_user_id: int | None,
+    referrer_user_id: int | None,
+    referrer_username: str | None = None,
+    context: Dict | None = None,
+) -> Dict[str, int | None]:
+    """Idempotently mark a referral as successful for an invitee."""
+
+    return upsert_referral_success(
+        referrals_collection,
+        referrer_user_id=referrer_user_id,
+        invitee_user_id=invitee_user_id,
+        success_at=now_utc(),
+        referrer_username=referrer_username,
+        context=context,
+    )
 
 def grant_referral_rewards(
     db, users_collection, referrer_id: int | None, invitee_user_id: int
@@ -307,15 +333,13 @@ def ensure_referral_indexes(referrals_collection):
             [("invitee_user_id", 1)],
             unique=True,
             name="uq_invitee_user_id_not_null",
-            partialFilterExpression={"invitee_user_id": {"$exists": True, "$ne": None}},
+            partialFilterExpression={"invitee_user_id": {"$type": "number"}},
         )
     except DuplicateKeyError:
-        logger.warning(
-            "[Referral] Skipping unique invitee_user_id index due to legacy duplicates"
-        )
+        logger.warning("[index] duplicate_detected invitee_user_id null/dup")
     except Exception:
-        logger.exception("[Referral] Failed to ensure invitee_user_id index")
-    referrals_collection.create_index([("created_at", -1)])  
+        logger.exception("[index] duplicate_detected invitee_user_id null/dup")
+        referrals_collection.create_index([("created_at", -1)])  
     referrals_collection.create_index([("status", 1), ("created_at", -1)])
 
 
