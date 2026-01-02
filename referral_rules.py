@@ -13,9 +13,9 @@ import logging
 import os
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Iterable, List
-from xp import grant_xp
-
-KL_TZ = timezone(timedelta(hours=8))
+from pymongo.errors import DuplicateKeyError
+from config import KL_TZ
+from xp import grant_xp, now_utc
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +67,68 @@ def _apply_update(update):
     incs = update.get("$inc", {})
     return sets, set_on_insert, incs
 
+
+def record_referral_success(
+    referrals_collection,
+    invitee_user_id: int | None,
+    referrer_user_id: int | None,
+    referrer_username: str | None = None,
+    context: Dict | None = None,
+) -> Dict[str, int | None]:
+    """Idempotently mark a referral as successful for an invitee."""
+
+    if not invitee_user_id:
+        logger.info("[referral_drop] missing invitee_user_id referrer=%s", referrer_user_id)
+        return {"matched": 0, "modified": 0, "upserted": None}
+    if not referrer_user_id or referrer_user_id == invitee_user_id:
+        logger.info(
+            "[referral_drop] invalid referrer invitee=%s referrer=%s",
+            invitee_user_id,
+            referrer_user_id,
+        )
+        return {"matched": 0, "modified": 0, "upserted": None}
+
+    now = now_utc()
+    proof_fields = {}
+    if context:
+        for key in ("joined_chat_at", "subscribed_official_at"):
+            value = context.get(key)
+            if value is not None:
+                proof_fields[key] = value
+
+    update = {
+        "$setOnInsert": {
+            "invitee_user_id": invitee_user_id,
+            "referrer_user_id": referrer_user_id,
+            "referrer_username": referrer_username,
+            "created_at": now,
+        },
+        "$set": {
+            "status": "success",
+            "confirmed_at": now,
+            **proof_fields,
+        },
+    }
+
+    result = referrals_collection.update_one(
+        {"invitee_user_id": invitee_user_id},
+        update,
+        upsert=True,
+    )
+
+    matched = int(getattr(result, "matched_count", 0))
+    modified = int(getattr(result, "modified_count", 0))
+    upserted = getattr(result, "upserted_id", None)
+    logger.info(
+        "[referral_success] invitee=%s referrer=%s matched=%s modified=%s upserted=%s",
+        invitee_user_id,
+        referrer_user_id,
+        matched,
+        modified,
+        upserted,
+    )
+    return {"matched": matched, "modified": modified, "upserted": upserted}
+
 def grant_referral_rewards(
     db, users_collection, referrer_id: int | None, invitee_user_id: int
 ) -> Dict[str, int]:
@@ -81,6 +143,11 @@ def grant_referral_rewards(
     result = {"base_granted": 0, "bonuses_awarded": 0}
 
     if not referrer_id or referrer_id == invitee_user_id:
+        logger.info(
+            "[Referral] Invalid referrer for invitee=%s referrer=%s",
+            invitee_user_id,
+            referrer_id,
+        )        
         return result
 
     unique_key = f"{REFERRAL_SUCCESS_EVENT}:{invitee_user_id}"
@@ -130,6 +197,17 @@ def grant_referral_rewards(
             REFERRAL_BONUS_XP,
         )
 
+    xp_delta = result["base_granted"] * BASE_REFERRAL_XP + result["bonuses_awarded"] * REFERRAL_BONUS_XP
+    logger.info(
+        "[Referral] XP awarded invitee=%s referrer=%s base=%s bonuses=%s xp_delta=%s total_referrals=%s",
+        invitee_user_id,
+        referrer_id,
+        result["base_granted"],
+        result["bonuses_awarded"],
+        xp_delta,
+        total_referrals,
+    )
+    
     return result
 
 def reconcile_referrals(
@@ -224,8 +302,20 @@ def ensure_referral_indexes(referrals_collection):
     )
     
     referrals_collection.create_index([("referrer_user_id", 1)])
-    referrals_collection.create_index([("invitee_user_id", 1)], unique=True)
-    referrals_collection.create_index([("created_at", -1)])    
+    try:
+        referrals_collection.create_index(
+            [("invitee_user_id", 1)],
+            unique=True,
+            name="uq_invitee_user_id_not_null",
+            partialFilterExpression={"invitee_user_id": {"$exists": True, "$ne": None}},
+        )
+    except DuplicateKeyError:
+        logger.warning(
+            "[Referral] Skipping unique invitee_user_id index due to legacy duplicates"
+        )
+    except Exception:
+        logger.exception("[Referral] Failed to ensure invitee_user_id index")
+    referrals_collection.create_index([("created_at", -1)])  
     referrals_collection.create_index([("status", 1), ("created_at", -1)])
 
 
@@ -239,8 +329,16 @@ def _week_window_utc(reference: datetime | None = None):
         hour=0, minute=0, second=0, microsecond=0
     )
     end_local = start_local + timedelta(days=7)
-    return start_local.astimezone(timezone.utc), end_local.astimezone(timezone.utc)
-
+    start_utc = start_local.astimezone(timezone.utc)
+    end_utc = end_local.astimezone(timezone.utc)
+    logger.info(
+        "[week_window] local_start=%s local_end=%s utc_start=%s utc_end=%s",
+        start_local.isoformat(),
+        end_local.isoformat(),
+        start_utc.isoformat(),
+        end_utc.isoformat(),
+    )
+    return start_utc, end_utc
 
 def _month_window_utc(reference: datetime | None = None):
     ref_local = (reference or datetime.now(timezone.utc)).astimezone(KL_TZ)
@@ -265,6 +363,10 @@ def compute_referral_stats(referrals_collection, user_id: int, window=None):
                 {"referrer_user_id": user_id},
                 {"referrer_id": user_id},
             ]},
+            {"$or": [
+                {"invitee_user_id": {"$exists": True, "$ne": None}},
+                {"referred_user_id": {"$exists": True, "$ne": None}},
+            ]},            
         ]
     }
 
@@ -297,11 +399,20 @@ def compute_referral_stats(referrals_collection, user_id: int, window=None):
             weekly = _count_between(week_start, week_end)
             monthly = _count_between(month_start, month_end)
 
-        return {
+        stats = {
             "total_referrals": total,
             "weekly_referrals": weekly,
             "monthly_referrals": monthly,
         }
+        logger.info(
+            "[referral_stats] uid=%s total=%s weekly=%s monthly=%s",
+            user_id,
+            total,
+            weekly,
+            monthly,
+        )
+        return stats
+        
     except Exception:
         logger.exception("[referral_stats] failed uid=%s", user_id)
         return {
