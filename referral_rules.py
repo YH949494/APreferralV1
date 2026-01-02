@@ -70,9 +70,9 @@ def _apply_update(update):
 
 def upsert_referral_success(
     referrals_collection,
+    referrer_user_id: int | None,
     invitee_user_id: int | None,
     success_at: datetime | None = None,
-    referrer_user_id: int | None,
     referrer_username: str | None = None,
     context: Dict | None = None,
 ) -> Dict[str, int | None]:
