@@ -27,6 +27,7 @@ from referral_rules import (
     compute_referral_stats,
     ensure_referral_indexes,
     grant_referral_rewards,
+    record_referral_success,
 )
 
 from bson.json_util import dumps
@@ -187,6 +188,10 @@ def recompute_referral_counts(start_utc, end_utc, limit: int | None = None, user
             {"referrer_user_id": {"$ne": None}},
             {"referrer_id": {"$ne": None}},
         ]},
+        {"$or": [
+            {"invitee_user_id": {"$exists": True, "$ne": None}},
+            {"referred_user_id": {"$exists": True, "$ne": None}},
+        ]},        
     ]
     if user_id is not None:
         base_match.append({"$or": [
@@ -872,20 +877,28 @@ def api_referral():
         return jsonify({"success": False, "error": "user_id is required"}), 400
 
     username = request.args.get("username") or "unknown"
-    stats = compute_referral_stats(referrals_collection, user_id)
-
+    logger.info("[api_referral] uid=%s username=%s", user_id, username)
+    
     success = True
     link = None
     error = None
+    stats = {"total_referrals": 0, "weekly_referrals": 0, "monthly_referrals": 0}
     
     try:
         link = get_or_create_referral_invite_link_sync(user_id, username)
+        logger.info("[api_referral] link_generated uid=%s", user_id)        
     except Exception as e:
         success = False
         error = str(e)
         bot_username = os.environ.get("BOT_USERNAME", "")
         link = f"https://t.me/{bot_username}?start=ref{user_id}" if bot_username else None
+        logger.warning("[api_referral] link_generation_failed uid=%s error=%s", user_id, e)
 
+    try:
+        stats = compute_referral_stats(referrals_collection, user_id)
+    except Exception:
+        logger.exception("[api_referral] stats_failed uid=%s", user_id)
+    
     payload = {"success": success, "referral_link": link, **stats}
     if error:
         payload["error"] = error
@@ -1769,28 +1782,14 @@ async def member_update_handler(update: Update, context: ContextTypes.DEFAULT_TY
 
         if final_referrer_id:
             now = datetime.utcnow()
-            if existing_referral:
-                referrals_collection.update_one(
-                    {"_id": existing_referral.get("_id")},
-                    {"$set": {
-                        "status": "success",
-                        "confirmed_at": now,
-                        "invitee_user_id": user.id,
-                        "referrer_user_id": final_referrer_id,
-                    }},
-                )
-            else:
-                referrals_collection.update_one(
-                    {"invitee_user_id": user.id},
-                    {"$setOnInsert": {
-                        "referrer_user_id": final_referrer_id,
-                        "invitee_user_id": user.id,
-                        "status": "success",
-                        "created_at": now,
-                    }},
-                    upsert=True,
-                )
-
+            record_referral_success(
+                referrals_collection,
+                invitee_user_id=user.id,
+                referrer_user_id=final_referrer_id,
+                referrer_username=None,
+                context={"joined_chat_at": now},
+            )
+            
             outcome = grant_referral_rewards(
                 db,
                 users_collection,
@@ -1802,11 +1801,17 @@ async def member_update_handler(update: Update, context: ContextTypes.DEFAULT_TY
                     maybe_shout_milestones(int(final_referrer_id))
                 except Exception:
                     pass
-            print(f"[Referral] {user.username} referred by {final_referrer_id} (awarded)")
+            logger.info(
+                "[Referral] success invitee=%s referrer=%s base=%s bonuses=%s",
+                user.id,
+                final_referrer_id,
+                outcome.get("base_granted"),
+                outcome.get("bonuses_awarded"),
+            )
             
         else:
-            print(f"[Referral] No referrer found for {user.username}")
-
+            logger.info("[Referral] No referrer found invitee=%s", user.id)
+            
 async def button_handler(update, context):
     query = update.callback_query
     await query.answer()
