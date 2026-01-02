@@ -16,6 +16,7 @@ claim_rate_limits_col = db["claim_rate_limits"]
 profile_photo_cache_col = db["profile_photo_cache"]
 welcome_tickets_col = db["welcome_tickets"]
 channel_subscription_cache_col = db["channel_subscription_cache"]
+welcome_eligibility_col = db["welcome_eligibility"]
 
 BYPASS_ADMIN = os.getenv("BYPASS_ADMIN", "0").lower() in ("1", "true", "yes", "on")
 HARDCODED_ADMIN_USERNAMES = {"gracy_ap", "teohyaohui"}  # allow manual overrides if cache is empty
@@ -274,6 +275,7 @@ def ensure_voucher_indexes():
     profile_photo_cache_col.create_index([("expiresAt", ASCENDING)], expireAfterSeconds=0)
     welcome_tickets_col.create_index([("uid", ASCENDING)], unique=True)
     welcome_tickets_col.create_index([("cleanup_at", ASCENDING)], expireAfterSeconds=0)
+    welcome_eligibility_col.create_index([("uid", ASCENDING)], unique=True)
  
 def parse_kl_local(dt_str: str):
     """Parse 'YYYY-MM-DD HH:MM:SS' in Kuala Lumpur local time to UTC (aware)."""
@@ -632,6 +634,45 @@ def is_existing_user(uid: int) -> bool:
         return False
     return bool(db.users.find_one({"user_id": uid}, {"_id": 1}))
 
+def _get_welcome_eligibility(uid: int) -> dict | None:
+    if uid is None:
+        return None
+    return welcome_eligibility_col.find_one({"uid": uid})
+
+def ensure_welcome_eligibility(uid: int, *, users_exists: bool | None = None) -> dict | None:
+    if uid is None:
+        return None
+    if users_exists is None:
+        users_exists = bool(users_collection.find_one({"user_id": uid}, {"_id": 1}))
+    if users_exists:
+        return None
+    now = now_utc()
+    eligible_until = now + timedelta(hours=WELCOME_WINDOW_HOURS)
+    welcome_eligibility_col.update_one(
+        {"uid": uid},
+        {
+            "$setOnInsert": {
+                "uid": uid,
+                "first_seen_at": now,
+                "eligible_until": eligible_until,
+                "claimed": False,
+                "claimed_at": None,
+            }
+        },
+        upsert=True,
+    )
+    return welcome_eligibility_col.find_one({"uid": uid})
+
+def _welcome_eligible_now(doc: dict | None, *, ref: datetime | None = None) -> bool:
+    if not doc:
+        return False
+    if doc.get("claimed"):
+        return False
+    eligible_until = _as_aware_utc(doc.get("eligible_until"))
+    if eligible_until is None:
+        return False
+    ref = ref or now_utc()
+    return ref <= eligible_until
 
 def _official_channel_identifier():
     if OFFICIAL_CHANNEL_ID is not None:
@@ -726,12 +767,22 @@ def get_or_issue_welcome_ticket(uid: int):
     if uid is None:
         return None
 
-    if is_existing_user(uid):
-        current_app.logger.info("[welcome] existing_user uid=%s deny", uid)
+    eligibility = _get_welcome_eligibility(uid)
+    if not eligibility:
+        current_app.logger.info("[welcome] eligibility_missing uid=%s deny", uid)
         return None
 
     now = now_utc()
-    expires_at = now + timedelta(hours=WELCOME_WINDOW_HOURS)
+    expires_at = _as_aware_utc(eligibility.get("eligible_until"))
+    if not expires_at:
+        current_app.logger.info("[welcome] eligibility_invalid uid=%s deny", uid)
+        return None
+    if eligibility.get("claimed"):
+        current_app.logger.info("[welcome] eligibility_claimed uid=%s deny", uid)
+        return None
+    if now > expires_at:
+        current_app.logger.info("[welcome] eligibility_expired uid=%s deny", uid)
+        return None
     cleanup_at = expires_at + timedelta(days=30)
     ticket = welcome_tickets_col.find_one_and_update(
         {"uid": uid},
@@ -1177,7 +1228,8 @@ def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None
     already_new_joiner_claim = False
     if uid_for_new_joiner is not None:
         already_new_joiner_claim = bool(new_joiner_claims_col.find_one({"uid": uid_for_new_joiner}))
-     
+    welcome_eligibility = _get_welcome_eligibility(uid_for_new_joiner) if uid_for_new_joiner is not None else None
+ 
     # Only hide personalised vouchers when the caller truly has no username
     allow_personalised = bool(usernameLower)
     claim_key = usernameLower or user_id
@@ -1202,7 +1254,7 @@ def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None
         if is_welcome_drop:
             if uid is None:
                 continue
-            if already_known_user or is_existing_user(uid):
+            if already_known_user or not _welcome_eligible_now(welcome_eligibility, ref=ref):
                 continue
             if already_new_joiner_claim:
                 continue
@@ -1483,7 +1535,41 @@ def api_visible():
             if not username:
                 return jsonify({"code": "auth_failed", "why": "missing_or_invalid_init_data"}), 401
             user = {"usernameLower": username, "source": "fallback"}
-         
+
+        uid = None
+        if isinstance(tg_user, dict):
+            try:
+                uid = int(tg_user.get("id"))
+            except Exception:
+                uid = None
+        users_exists = bool(users_collection.find_one({"user_id": uid}, {"_id": 1})) if uid is not None else False
+        welcome_doc = None
+        created = False
+        if uid is not None and not users_exists:
+            existing = welcome_eligibility_col.find_one({"uid": uid})
+            welcome_doc = ensure_welcome_eligibility(uid, users_exists=users_exists)
+            created = bool(not existing and welcome_doc)
+            eligible_until = _as_aware_utc((welcome_doc or {}).get("eligible_until"))
+            current_app.logger.info(
+                "[welcome] uid=%s created=%s eligible_until=%s users_exists=%s",
+                uid,
+                str(created).lower(),
+                eligible_until.isoformat() if eligible_until else None,
+                str(users_exists).lower(),
+            )
+        elif uid is not None:
+            welcome_doc = welcome_eligibility_col.find_one({"uid": uid})
+
+        welcome_eligible = _welcome_eligible_now(welcome_doc, ref=ref)
+        current_app.logger.info(
+            "[visible] uid=%s ok_init=%s welcome_eligible=%s claimed=%s until=%s",
+            uid,
+            str(ok).lower(),
+            str(welcome_eligible).lower(),
+            str(bool((welcome_doc or {}).get("claimed"))).lower() if welcome_doc else "false",
+            _as_aware_utc((welcome_doc or {}).get("eligible_until")).isoformat() if welcome_doc else None,
+        )
+     
         drops = user_visible_drops(user, ref, tg_user=tg_user)
         return jsonify({"visibilityMode": "stacked", "nowUtc": ref.isoformat(), "drops": drops}), 200
 
@@ -1670,6 +1756,13 @@ def api_claim():
     if is_pool_drop:
         if not check_channel_subscribed(uid):
             current_app.logger.info("[claim] deny drop=%s uid=%s reason=not_subscribed", drop_id, uid)
+            current_app.logger.info(
+                "[claim] uid=%s drop_id=%s dtype=%s audience=%s decision=blocked reason=not_subscribed",
+                uid,
+                drop_id,
+                drop_type,
+                audience_type,
+            )         
             return jsonify({
                 "status": "error",
                 "code": "not_subscribed",
@@ -1684,57 +1777,150 @@ def api_claim():
             "[claim] entry drop=%s audience=%s uid=%s ip=%s", drop_id, audience_type, uid, client_ip
         )
         if drop_type != "pooled":
+            current_app.logger.info(
+                "[claim] uid=%s drop_id=%s dtype=%s audience=%s decision=blocked reason=bad_drop_type",
+                uid,
+                drop_id,
+                drop_type,
+                audience_type,
+            )         
             current_app.logger.info("[claim] deny drop=%s uid=%s reason=bad_drop_type type=%s", drop_id, uid, drop_type)
             return jsonify({"status": "error", "code": "not_eligible", "reason": "not_supported_for_audience"}), 403
         if uid is None:
+            current_app.logger.info(
+                "[claim] uid=%s drop_id=%s dtype=%s audience=%s decision=blocked reason=missing_uid",
+                uid,
+                drop_id,
+                drop_type,
+                audience_type,
+            )         
             current_app.logger.info("[claim] deny drop=%s reason=missing_uid", drop_id)
             return jsonify({"status": "error", "code": "not_eligible", "reason": "missing_uid"}), 403
-        if is_existing_user(uid):
-            current_app.logger.info("[welcome] existing_user uid=%s deny", uid)
-            return jsonify({"status": "error", "code": "not_eligible", "reason": "existing_user"}), 403
+        eligibility = _get_welcome_eligibility(uid)
+        now_ts = now_utc()
+        if not _welcome_eligible_now(eligibility, ref=now_ts):
+            reason = "missing_eligibility"
+            if eligibility:
+                eligible_until = _as_aware_utc(eligibility.get("eligible_until"))
+                if eligibility.get("claimed"):
+                    reason = "already_claimed"
+                elif eligible_until and now_ts > eligible_until:
+                    reason = "expired"
+            current_app.logger.info(
+                "[claim] uid=%s drop_id=%s dtype=%s audience=%s decision=blocked reason=%s",
+                uid,
+                drop_id,
+                drop_type,
+                audience_type,
+                reason,
+            )
+            return jsonify({"status": "error", "code": "not_eligible", "reason": reason}), 403
         if new_joiner_claims_col.find_one({"uid": uid}):
+             current_app.logger.info(
+                "[claim] uid=%s drop_id=%s dtype=%s audience=%s decision=blocked reason=already_claimed_lifetime",
+                uid,
+                drop_id,
+                drop_type,
+                audience_type,
+            )        
             current_app.logger.info("[claim] deny drop=%s uid=%s reason=already_claimed_lifetime", drop_id, uid)
             return jsonify({"status": "error", "code": "not_eligible", "reason": "already_claimed_lifetime"}), 403
 
         ok_rl, rl_reason = _check_new_joiner_rate_limits(uid=uid, ip=client_ip)
         if not ok_rl:
+            current_app.logger.info(
+                "[claim] uid=%s drop_id=%s dtype=%s audience=%s decision=blocked reason=%s",
+                uid,
+                drop_id,
+                drop_type,
+                audience_type,
+                rl_reason,
+            )         
             return jsonify({"status": "error", "code": "rate_limited", "reason": rl_reason}), 429
 
         # per-IP successful claims per day pre-check
         day_key = now_utc().strftime("%Y%m%d")
         ip_claim_doc = claim_rate_limits_col.find_one({"scope": "ip_claim", "ip": client_ip or "unknown", "day": day_key})
         if ip_claim_doc and (ip_claim_doc.get("count", 0) or 0) >= 3:
+             current_app.logger.info(
+                "[claim] uid=%s drop_id=%s dtype=%s audience=%s decision=blocked reason=ip_claims_per_day",
+                uid,
+                drop_id,
+                drop_type,
+                audience_type,
+            )        
             current_app.logger.info("[claim] deny drop=%s uid=%s reason=ip_claims_per_day ip=%s", drop_id, uid, client_ip)
             return jsonify({"status": "error", "code": "rate_limited", "reason": "ip_claims_per_day"}), 429
 
         ticket = get_or_issue_welcome_ticket(uid)
         if not ticket:
+            current_app.logger.info(
+                "[claim] uid=%s drop_id=%s dtype=%s audience=%s decision=blocked reason=not_eligible",
+                uid,
+                drop_id,
+                drop_type,
+                audience_type,
+            )         
             return jsonify({"status": "error", "code": "not_eligible", "reason": "not_eligible"}), 403
 
-        now_ts = now_utc()
         expires_at = _as_aware_utc(ticket.get("expires_at"))
         if expires_at and now_ts > expires_at:
             welcome_tickets_col.update_one({"uid": uid}, {"$set": {"status": "expired", "reason_last_fail": "expired"}})
             current_app.logger.info("[welcome] gate_fail uid=%s reason=expired", uid)
+            current_app.logger.info(
+                "[claim] uid=%s drop_id=%s dtype=%s audience=%s decision=blocked reason=expired",
+                uid,
+                drop_id,
+                drop_type,
+                audience_type,
+            )         
             return jsonify({"status": "error", "code": "not_eligible", "reason": "expired"}), 403
 
         if not check_username_present(tg_user):
             welcome_tickets_col.update_one({"uid": uid}, {"$set": {"reason_last_fail": "no_username"}})
             current_app.logger.info("[welcome] gate_fail uid=%s reason=no_username", uid)
+            current_app.logger.info(
+                "[claim] uid=%s drop_id=%s dtype=%s audience=%s decision=blocked reason=missing_username",
+                uid,
+                drop_id,
+                drop_type,
+                audience_type,
+            )         
             return jsonify({"status": "error", "code": "not_eligible", "reason": "missing_username"}), 403
 
         has_photo = check_has_profile_photo(uid)
      
         if has_photo is None:
+            current_app.logger.info(
+                "[claim] uid=%s drop_id=%s dtype=%s audience=%s decision=blocked reason=telegram_unavailable",
+                uid,
+                drop_id,
+                drop_type,
+                audience_type,
+            )         
             return jsonify({"status": "error", "code": "telegram_unavailable"}), 503
         if not has_photo:
             welcome_tickets_col.update_one({"uid": uid}, {"$set": {"reason_last_fail": "no_photo"}})
             current_app.logger.info("[welcome] gate_fail uid=%s reason=no_photo", uid)
+            current_app.logger.info(
+                "[claim] uid=%s drop_id=%s dtype=%s audience=%s decision=blocked reason=missing_profile_photo",
+                uid,
+                drop_id,
+                drop_type,
+                audience_type,
+            )         
             return jsonify({"status": "error", "code": "not_eligible", "reason": "missing_profile_photo"}), 403
 
         if not check_channel_subscribed(uid):
             welcome_tickets_col.update_one({"uid": uid}, {"$set": {"reason_last_fail": "not_subscribed"}})
             current_app.logger.info("[welcome] gate_fail uid=%s reason=not_subscribed", uid)
+            current_app.logger.info(
+                "[claim] uid=%s drop_id=%s dtype=%s audience=%s decision=blocked reason=not_subscribed",
+                uid,
+                drop_id,
+                drop_type,
+                audience_type,
+            )         
             return jsonify({"status": "error", "code": "not_eligible", "reason": "not_subscribed"}), 403 
          
     # Claim
@@ -1776,14 +1962,33 @@ def api_claim():
             {"uid": uid},
             {"$set": {"status": "claimed", "claimed_at": now_utc(), "reason_last_fail": None}},
         )
+        welcome_eligibility_col.update_one(
+            {"uid": uid},
+            {"$set": {"claimed": True, "claimed_at": now_utc()}},
+        )     
         current_app.logger.info("[welcome] gate_pass uid=%s", uid)
         current_app.logger.info("[claim] success drop=%s audience=%s uid=%s ip=%s", drop_id, audience_type, uid, client_ip)
+        current_app.logger.info(
+            "[claim] uid=%s drop_id=%s dtype=%s audience=%s decision=allowed reason=success",
+            uid,
+            drop_id,
+            drop_type,
+            audience_type,
+        )
      
     response_payload = {"status": "ok", "voucher": result}
     if _is_new_joiner_audience(audience_type):
         _append_retention_message(response_payload, WELCOME_BONUS_RETENTION_MESSAGE)
     elif is_pool_drop:
         _append_retention_message(response_payload, POOL_VOUCHER_RETENTION_MESSAGE)
+    if not _is_new_joiner_audience(audience_type):
+        current_app.logger.info(
+            "[claim] uid=%s drop_id=%s dtype=%s audience=%s decision=allowed reason=success",
+            uid,
+            drop_id,
+            drop_type,
+            audience_type,
+        )     
     return jsonify(response_payload), 200
  
 # ---- Admin endpoints ----
