@@ -9,7 +9,7 @@ from telegram.constants import ParseMode
 from html import escape as html_escape
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, ChatMemberHandler,
-    CallbackQueryHandler, ContextTypes
+    CallbackQueryHandler, ContextTypes, MessageHandler, filters
 )
 from telegram.error import BadRequest
 from datetime import datetime, timedelta, timezone
@@ -27,7 +27,7 @@ from referral_rules import (
     compute_referral_stats,
     ensure_referral_indexes,
     grant_referral_rewards,
-    record_referral_success,
+    upsert_referral_success,
 )
 
 from bson.json_util import dumps
@@ -44,6 +44,7 @@ import pytz
 
 FIRST_CHECKIN_BONUS_XP = int(os.getenv("FIRST_CHECKIN_BONUS_XP", "200"))
 WELCOME_BONUS_XP = int(os.getenv("WELCOME_BONUS_XP", "20"))
+WELCOME_WINDOW_HOURS = int(os.getenv("WELCOME_WINDOW_HOURS", "48"))
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -62,6 +63,11 @@ API_BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"
 # ----------------------------
 CHANNEL_USERNAME = "@advantplayofficial"
 CHANNEL_ID = -1002396761021
+_RAW_OFFICIAL_CHANNEL_ID = os.getenv("OFFICIAL_CHANNEL_ID")
+try:
+    OFFICIAL_CHANNEL_ID = int(_RAW_OFFICIAL_CHANNEL_ID) if _RAW_OFFICIAL_CHANNEL_ID not in (None, "") else CHANNEL_ID
+except (TypeError, ValueError):
+    OFFICIAL_CHANNEL_ID = CHANNEL_ID
 
 XMAS_CAMPAIGN_START = datetime(2025, 12, 1)
 XMAS_CAMPAIGN_END = datetime(2025, 12, 31, 23, 59, 59)
@@ -232,6 +238,7 @@ bonus_voucher_collection = db["bonus_voucher"]
 admin_cache_col = db["admin_cache"]
 xp_events_collection = db["xp_events"]
 referrals_collection = db["referrals"]
+welcome_eligibility_collection = db["welcome_eligibility"]
 monthly_xp_history_collection = db["monthly_xp_history"]
 monthly_xp_history_collection.create_index([("month", ASCENDING)])
 monthly_xp_history_collection.create_index([("user_id", ASCENDING), ("month", ASCENDING)], unique=True)
@@ -361,6 +368,217 @@ def _find_referral_record(invitee_user_id: int):
         {"invitee_user_id": invitee_user_id}
     ) or referrals_collection.find_one(
         {"referred_user_id": invitee_user_id}
+    )
+
+def _ensure_welcome_eligibility(uid: int) -> dict | None:
+    if not uid:
+        return None
+    if users_collection.find_one({"user_id": uid}, {"_id": 1}):
+        return None
+    now = now_utc()
+    eligible_until = now + timedelta(hours=WELCOME_WINDOW_HOURS)
+    welcome_eligibility_collection.update_one(
+        {"uid": uid},
+        {
+            "$setOnInsert": {
+                "uid": uid,
+                "first_seen_at": now,
+                "eligible_until": eligible_until,
+                "claimed": False,
+                "claimed_at": None,
+            }
+        },
+        upsert=True,
+    )
+    return welcome_eligibility_collection.find_one({"uid": uid})
+
+async def _check_official_channel_subscribed(bot, uid: int) -> tuple[bool, str]:
+    if not uid:
+        return False, "missing_uid"
+    if OFFICIAL_CHANNEL_ID is None:
+        return False, "channel_unset"
+    try:
+        member = await bot.get_chat_member(chat_id=OFFICIAL_CHANNEL_ID, user_id=uid)
+    except BadRequest as e:
+        return False, str(e)
+    except Exception as e:
+        return False, str(e)
+    status = getattr(member, "status", None)
+    return status in ("member", "administrator", "creator"), ""
+
+def _check_official_channel_subscribed_sync(uid: int) -> tuple[bool, str]:
+    if not uid:
+        return False, "missing_uid"
+    if OFFICIAL_CHANNEL_ID is None:
+        return False, "channel_unset"
+    token = os.environ.get("BOT_TOKEN", "")
+    if not token:
+        return False, "missing_token"
+    try:
+        resp = requests.get(
+            f"https://api.telegram.org/bot{token}/getChatMember",
+            params={"chat_id": OFFICIAL_CHANNEL_ID, "user_id": uid},
+            timeout=5,
+        )
+    except requests.RequestException as e:
+        return False, str(e)
+    if resp.status_code != 200:
+        return False, f"http_{resp.status_code}"
+    try:
+        data = resp.json()
+    except ValueError:
+        return False, "bad_json"
+    if not data.get("ok"):
+        return False, "not_ok"
+    status = (data.get("result") or {}).get("status")
+    return status in ("member", "administrator", "creator"), ""
+
+def _upsert_pending_referral(invitee_user_id: int, referrer_user_id: int, joined_at: datetime):
+    referrals_collection.update_one(
+        {"invitee_user_id": invitee_user_id},
+        {
+            "$setOnInsert": {
+                "invitee_user_id": invitee_user_id,
+                "referrer_user_id": referrer_user_id,
+                "created_at": joined_at,
+            },
+            "$set": {
+                "status": "pending",
+                "updated_at": joined_at,
+                "joined_chat_at": joined_at,
+            },
+        },
+        upsert=True,
+    )
+
+async def handle_user_join(
+    uid: int,
+    username: str | None,
+    chat_id: int | None,
+    *,
+    source: str,
+    invite_link=None,
+    old_status: str | None = None,
+    new_status: str | None = None,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    logger.info(
+        "[join] source=%s chat_id=%s uid=%s uname=%s old=%s new=%s",
+        source,
+        chat_id,
+        uid,
+        username or "",
+        old_status or "",
+        new_status or "",
+    )
+
+    if chat_id != GROUP_ID:
+        return
+    if not uid:
+        return
+
+    existing_user = users_collection.find_one({"user_id": uid})
+    if existing_user and existing_user.get("joined_once"):
+        return
+
+    _ensure_welcome_eligibility(uid)
+
+    users_collection.update_one(
+        {"user_id": uid},
+        {
+            "$set": {"username": username, "joined_once": True},
+            "$setOnInsert": {
+                "xp": 0,
+                "referral_count": 0,
+                "weekly_referral_count": 0,
+                "weekly_xp": 0,
+                "monthly_xp": 0,
+                "last_checkin": None,
+                "status": "Normal",
+            },
+        },
+        upsert=True,
+    )
+
+    referrer_id = None
+    if invite_link and getattr(invite_link, "name", None) and invite_link.name.startswith("ref-"):
+        referrer_id = int(invite_link.name.split("-")[1])
+    elif invite_link and getattr(invite_link, "invite_link", None):
+        ref_doc = users_collection.find_one({"referral_invite_link": invite_link.invite_link})
+        if ref_doc:
+            referrer_id = ref_doc["user_id"]
+
+    existing_referral = _find_referral_record(uid)
+    stored_referrer_id = None
+    if existing_referral:
+        stored_referrer_id = existing_referral.get("referrer_user_id") or existing_referral.get("referrer_id")
+
+    final_referrer_id = referrer_id or stored_referrer_id
+    if not final_referrer_id:
+        logger.info("[ref] uid=%s resolved_referrer=None reason=no_referrer", uid)
+        return
+
+    is_member, err = await _check_official_channel_subscribed(context.bot, uid)
+    logger.info(
+        "[sub] uid=%s channel=%s is_member=%s err=%s",
+        uid,
+        OFFICIAL_CHANNEL_ID,
+        str(is_member).lower(),
+        err or "",
+    )
+
+    joined_at = datetime.utcnow()
+    if not is_member:
+        _upsert_pending_referral(uid, final_referrer_id, joined_at)
+        logger.info(
+            "[ref] uid=%s resolved_referrer=%s reason=not_subscribed",
+            uid,
+            final_referrer_id,
+        )
+        return
+
+    result = upsert_referral_success(
+        referrals_collection,
+        referrer_user_id=final_referrer_id,
+        invitee_user_id=uid,
+        success_at=joined_at,
+        referrer_username=None,
+        context={"joined_chat_at": joined_at},
+    )
+    if result.get("upserted") or result.get("modified"):
+        outcome = grant_referral_rewards(
+            db,
+            users_collection,
+            final_referrer_id,
+            uid,
+        )
+        if outcome.get("base_granted"):
+            try:
+                maybe_shout_milestones(int(final_referrer_id))
+            except Exception:
+                pass
+        referrer_doc = users_collection.find_one({"user_id": final_referrer_id}) or {}
+        total_referrals = int(referrer_doc.get("referral_count", 0))
+        logger.info(
+            "[xp] uid=%s add=%s bonus=%s total_referrals=%s upsert=%s",
+            final_referrer_id,
+            outcome.get("base_granted"),
+            outcome.get("bonuses_awarded"),
+            total_referrals,
+            "inserted" if result.get("upserted") else "updated",
+        )
+    else:
+        referrer_doc = users_collection.find_one({"user_id": final_referrer_id}) or {}
+        total_referrals = int(referrer_doc.get("referral_count", 0))
+        logger.info(
+            "[xp] uid=%s add=0 bonus=0 total_referrals=%s upsert=noop",
+            final_referrer_id,
+            total_referrals,
+        )
+    logger.info(
+        "[ref] uid=%s resolved_referrer=%s reason=success",
+        uid,
+        final_referrer_id,
     )
 
 def _has_joined_group(invitee_user_id: int) -> bool:
@@ -898,7 +1116,52 @@ def api_referral():
         stats = compute_referral_stats(referrals_collection, user_id)
     except Exception:
         logger.exception("[api_referral] stats_failed uid=%s", user_id)
+
     
+    pending_ref = referrals_collection.find_one({"invitee_user_id": user_id, "status": "pending"})
+    if pending_ref:
+        referrer_id = pending_ref.get("referrer_user_id") or pending_ref.get("referrer_id")
+        is_member, err = _check_official_channel_subscribed_sync(user_id)
+        logger.info(
+            "[sub] uid=%s channel=%s is_member=%s err=%s",
+            user_id,
+            OFFICIAL_CHANNEL_ID,
+            str(is_member).lower(),
+            err or "",
+        )
+        if is_member and referrer_id:
+            now = datetime.utcnow()
+            result = upsert_referral_success(
+                referrals_collection,
+                referrer_user_id=referrer_id,
+                invitee_user_id=user_id,
+                success_at=now,
+                referrer_username=None,
+                context={"subscribed_official_at": now},
+            )
+            if result.get("upserted") or result.get("modified"):
+                outcome = grant_referral_rewards(
+                    db,
+                    users_collection,
+                    referrer_id,
+                    user_id,
+                )
+                referrer_doc = users_collection.find_one({"user_id": referrer_id}) or {}
+                total_referrals = int(referrer_doc.get("referral_count", 0))
+                logger.info(
+                    "[xp] uid=%s add=%s bonus=%s total_referrals=%s upsert=%s",
+                    referrer_id,
+                    outcome.get("base_granted"),
+                    outcome.get("bonuses_awarded"),
+                    total_referrals,
+                    "inserted" if result.get("upserted") else "updated",
+                )
+                logger.info(
+                    "[ref] uid=%s resolved_referrer=%s reason=subscription_recheck",
+                    user_id,
+                    referrer_id,
+                )
+                
     payload = {"success": success, "referral_link": link, **stats}
     if error:
         payload["error"] = error
@@ -1732,85 +1995,44 @@ async def handle_xmas_checkin(update: Update, context: ContextTypes.DEFAULT_TYPE
     await _safe_edit_message(success_text)
     
 async def member_update_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    member = update.chat_member
-    user = member.new_chat_member.user
+    member = update.chat_member or update.my_chat_member
+    if not member:
+        return
 
-    # Only run when user just joined (status = "member")
-    if member.old_chat_member.status not in ("member", "administrator", "creator") \
-       and member.new_chat_member.status == "member":
-        
-        invite_link = member.invite_link  # ✅ Works if they joined via your generated referral link
+    old_status = getattr(member.old_chat_member, "status", None)
+    new_status = getattr(member.new_chat_member, "status", None)
 
-        existing_user = users_collection.find_one({"user_id": user.id})
-        if existing_user and existing_user.get("joined_once"):
-            print(f"[Skip XP] {user.username} already joined before.")
+    if old_status in ("left", "kicked", "restricted") and new_status in ("member", "administrator", "creator"):
+        user = member.new_chat_member.user
+        if user.is_bot:
             return
 
-        # Insert / update new user
-        users_collection.update_one(
-            {"user_id": user.id},
-            {
-                "$set": {"username": user.username, "joined_once": True},
-                "$setOnInsert": {
-                    "xp": 0,
-                    "referral_count": 0,
-                    "weekly_referral_count": 0,
-                    "weekly_xp": 0,
-                    "monthly_xp": 0,
-                    "last_checkin": None,
-                    "status": "Normal",
-                }
-            },
-            upsert=True
+        await handle_user_join(
+            user.id,
+            user.username,
+            member.chat.id,
+            source="chat_member",
+            invite_link=member.invite_link,
+            old_status=old_status,
+            new_status=new_status,
+            context=context,
         )
 
-        # Detect referrer same as before
-        referrer_id = None
-        if invite_link and invite_link.name and invite_link.name.startswith("ref-"):
-            referrer_id = int(invite_link.name.split("-")[1])
-        elif invite_link and invite_link.invite_link:
-            ref_doc = users_collection.find_one({"referral_invite_link": invite_link.invite_link})
-            if ref_doc:
-                referrer_id = ref_doc["user_id"]
-
-        existing_referral = _find_referral_record(user.id)
-        stored_referrer_id = None
-        if existing_referral:
-            stored_referrer_id = existing_referral.get("referrer_user_id") or existing_referral.get("referrer_id")
-
-        final_referrer_id = referrer_id or stored_referrer_id
-
-        if final_referrer_id:
-            now = datetime.utcnow()
-            record_referral_success(
-                referrals_collection,
-                invitee_user_id=user.id,
-                referrer_user_id=final_referrer_id,
-                referrer_username=None,
-                context={"joined_chat_at": now},
-            )
-            
-            outcome = grant_referral_rewards(
-                db,
-                users_collection,
-                final_referrer_id,
-                user.id,
-            )
-            if outcome.get("base_granted"):
-                try:
-                    maybe_shout_milestones(int(final_referrer_id))
-                except Exception:
-                    pass
-            logger.info(
-                "[Referral] success invitee=%s referrer=%s base=%s bonuses=%s",
-                user.id,
-                final_referrer_id,
-                outcome.get("base_granted"),
-                outcome.get("bonuses_awarded"),
-            )
-            
-        else:
-            logger.info("[Referral] No referrer found invitee=%s", user.id)
+async def new_chat_members_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.effective_message
+    if not message or not message.new_chat_members:
+        return
+    for user in message.new_chat_members:
+        if user.is_bot:
+            continue
+        await handle_user_join(
+            user.id,
+            user.username,
+            message.chat.id,
+            source="new_chat_members",
+            invite_link=getattr(message, "invite_link", None),
+            context=context,
+        )
             
 async def button_handler(update, context):
     query = update.callback_query
@@ -1875,6 +2097,8 @@ if __name__ == "__main__":
     # 3) Telegram handlers
     app_bot.add_handler(CommandHandler("start", start))
     app_bot.add_handler(ChatMemberHandler(member_update_handler, ChatMemberHandler.CHAT_MEMBER))
+    app_bot.add_handler(ChatMemberHandler(member_update_handler, ChatMemberHandler.MY_CHAT_MEMBER))
+    app_bot.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, new_chat_members_handler))    
     app_bot.add_handler(CallbackQueryHandler(handle_xmas_checkin, pattern="^xmas_checkin$"))
     app_bot.add_handler(CallbackQueryHandler(button_handler))
 
@@ -1911,7 +2135,7 @@ if __name__ == "__main__":
     try:
         app_bot.run_polling(
             poll_interval=5,
-            allowed_updates=["message", "callback_query", "chat_member"]
+            allowed_updates=["message", "callback_query", "chat_member", "my_chat_member"]
         )
     finally:
         scheduler.shutdown(wait=False)
