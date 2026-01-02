@@ -1842,13 +1842,13 @@ def api_claim():
         day_key = now_utc().strftime("%Y%m%d")
         ip_claim_doc = claim_rate_limits_col.find_one({"scope": "ip_claim", "ip": client_ip or "unknown", "day": day_key})
         if ip_claim_doc and (ip_claim_doc.get("count", 0) or 0) >= 3:
-             current_app.logger.info(
+            current_app.logger.info(
                 "[claim] uid=%s drop_id=%s dtype=%s audience=%s decision=blocked reason=ip_claims_per_day",
                 uid,
                 drop_id,
                 drop_type,
                 audience_type,
-            )        
+            )    
             current_app.logger.info("[claim] deny drop=%s uid=%s reason=ip_claims_per_day ip=%s", drop_id, uid, client_ip)
             return jsonify({"status": "error", "code": "rate_limited", "reason": "ip_claims_per_day"}), 429
 
@@ -1860,7 +1860,7 @@ def api_claim():
                 drop_id,
                 drop_type,
                 audience_type,
-            )         
+            )       
             return jsonify({"status": "error", "code": "not_eligible", "reason": "not_eligible"}), 403
 
         expires_at = _as_aware_utc(ticket.get("expires_at"))
