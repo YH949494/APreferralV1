@@ -1313,7 +1313,7 @@ def get_leaderboard():
 
         if user_record:
             stored_weekly = int(user_record.get("weekly_xp", 0))
-                stored_refs = int(user_record.get("weekly_referral_count", 0))            
+            stored_refs = int(user_record.get("weekly_referral_count", 0))            
             if stored_weekly != user_weekly_xp:
                 logger.debug("[lb_mismatch] uid=%s weekly_xp stored=%s leaderboard=%s week_start=%s", current_user_id, stored_weekly, user_weekly_xp, week_start_local.isoformat())
             if stored_refs != user_weekly_referrals:
