@@ -137,6 +137,94 @@ def upsert_referral_success(
     )
     return {"matched": matched, "modified": modified, "upserted": upserted}
 
+def upsert_referral_and_update_user_count(
+    referrals_collection,
+    users_collection,
+    referrer_user_id: int | None,
+    invitee_user_id: int | None,
+    success_at: datetime | None = None,
+    referrer_username: str | None = None,
+    context: Dict | None = None,
+) -> Dict[str, int | None]:
+    """Upsert a successful referral and increment user counts once."""
+
+    existing = None
+    if invitee_user_id:
+        existing = referrals_collection.find_one(
+            {"invitee_user_id": invitee_user_id},
+            {"status": 1, "valid_counted": 1, "referrer_user_id": 1, "referrer_id": 1},
+        )
+
+    result = upsert_referral_success(
+        referrals_collection,
+        referrer_user_id=referrer_user_id,
+        invitee_user_id=invitee_user_id,
+        success_at=success_at,
+        referrer_username=referrer_username,
+        context=context,
+    )
+    counted = 0
+
+    if not invitee_user_id or not referrer_user_id or referrer_user_id == invitee_user_id:
+        return {**result, "counted": counted}
+
+    should_count = False
+    if existing is None:
+        should_count = True
+    else:
+        prior_status = existing.get("status")
+        prior_counted = existing.get("valid_counted")
+        prior_referrer = existing.get("referrer_user_id") or existing.get("referrer_id")
+        if prior_referrer and prior_referrer != referrer_user_id:
+            should_count = False
+        elif prior_status in {None, "pending", "inactive"}:
+            should_count = True
+        elif prior_counted is False:
+            should_count = True
+
+    if not should_count:
+        return {**result, "counted": counted}
+
+    count_update = referrals_collection.update_one(
+        {
+            "$and": [
+                {
+                    "$or": [
+                        {"invitee_user_id": invitee_user_id},
+                        {"referred_user_id": invitee_user_id},
+                    ]
+                },
+                {
+                    "$or": [
+                        {"referrer_user_id": referrer_user_id},
+                        {"referrer_id": referrer_user_id},
+                    ]
+                },
+                {"status": "success"},
+                {
+                    "$or": [
+                        {"valid_counted": {"$exists": False}},
+                        {"valid_counted": False},
+                    ]
+                },
+            ]
+        },
+        {"$set": {"valid_counted": True, "counted_at": now_utc()}},
+    )
+
+    if int(getattr(count_update, "modified_count", 0)):
+        users_collection.update_one(
+            {"user_id": referrer_user_id},
+            {
+                "$inc": {"referral_count": 1, "weekly_referral_count": 1},
+                "$setOnInsert": {"user_id": referrer_user_id},
+            },
+            upsert=True,
+        )
+        counted = 1
+
+    return {**result, "counted": counted}
+
 def record_referral_success(
     referrals_collection,
     invitee_user_id: int | None,
@@ -194,15 +282,6 @@ def grant_referral_rewards(
         return result
 
     result["base_granted"] = 1
-
-    users_collection.update_one(
-        {"user_id": referrer_id},
-        {
-            "$inc": {"referral_count": 1, "weekly_referral_count": 1},
-            "$setOnInsert": {"user_id": referrer_id},
-        },
-        upsert=True,
-    )
 
     referrer = users_collection.find_one({"user_id": referrer_id}) or {}
     total_referrals = int(referrer.get("referral_count", 0))
@@ -328,6 +407,7 @@ def ensure_referral_indexes(referrals_collection):
     )
     
     referrals_collection.create_index([("referrer_user_id", 1)])
+    invitee_index_ok = False    
     try:
         referrals_collection.create_index(
             [("invitee_user_id", 1)],
@@ -335,11 +415,15 @@ def ensure_referral_indexes(referrals_collection):
             name="uq_invitee_user_id_not_null",
             partialFilterExpression={"invitee_user_id": {"$type": "number"}},
         )
+        invitee_index_ok = True        
     except DuplicateKeyError:
         logger.warning("[index] duplicate_detected invitee_user_id null/dup")
     except Exception:
         logger.exception("[index] duplicate_detected invitee_user_id null/dup")
-        referrals_collection.create_index([("created_at", -1)])  
+    if not invitee_index_ok:
+        referrals_collection.create_index([("invitee_user_id", 1)])
+    referrals_collection.create_index([("created_at", -1)])
+    referrals_collection.create_index([("status", 1)])
     referrals_collection.create_index([("status", 1), ("created_at", -1)])
 
 
