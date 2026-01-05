@@ -8,6 +8,7 @@ from referral_rules import (
     REFERRAL_SUCCESS_EVENT,
     grant_referral_rewards,
     reconcile_referrals,
+    upsert_referral_and_update_user_count,
 )
 
 
@@ -31,10 +32,20 @@ class FakeCollection:
                 return any(self._match(doc, cond) for cond in v)
             if k == "$and":
                 return all(self._match(doc, cond) for cond in v)
-            if isinstance(v, dict) and "$in" in v:
-                if doc.get(k) not in v.get("$in", []):
-                    return False
-                continue
+            if isinstance(v, dict):
+                if "$in" in v:
+                    if doc.get(k) not in v.get("$in", []):
+                        return False
+                    continue
+                if "$exists" in v:
+                    exists = k in doc
+                    if bool(v["$exists"]) != exists:
+                        return False
+                    continue
+                if "$ne" in v:
+                    if doc.get(k) == v["$ne"]:
+                        return False
+                    continue
             if doc.get(k) != v:
                 return False
         return True
@@ -136,8 +147,15 @@ class ReferralTests(unittest.TestCase):
         db = FakeDB()
         uid = 10
         for i in range(3):
-            grant_referral_rewards(db, db.users, uid, 100 + i)
-
+            result = upsert_referral_and_update_user_count(
+                db.referrals,
+                db.users,
+                uid,
+                100 + i,
+            )
+            if result.get("counted"):
+                grant_referral_rewards(db, db.users, uid, 100 + i)
+                
         user_doc = db.users.find_one({"user_id": uid})
         self.assertEqual(user_doc.get("referral_count"), 3)
         total_xp = sum(ev["xp"] for ev in db.xp_events.docs)
@@ -147,8 +165,22 @@ class ReferralTests(unittest.TestCase):
     def test_duplicate_referral_does_not_double_grant(self):
         db = FakeDB()
         uid = 22
-        grant_referral_rewards(db, db.users, uid, 500)
-        grant_referral_rewards(db, db.users, uid, 500)
+        result = upsert_referral_and_update_user_count(
+            db.referrals,
+            db.users,
+            uid,
+            500,
+        )
+        if result.get("counted"):
+            grant_referral_rewards(db, db.users, uid, 500)
+        result = upsert_referral_and_update_user_count(
+            db.referrals,
+            db.users,
+            uid,
+            500,
+        )
+        if result.get("counted"):
+            grant_referral_rewards(db, db.users, uid, 500)
         total_xp = sum(ev["xp"] for ev in db.xp_events.docs)
         self.assertEqual(total_xp, BASE_REFERRAL_XP)
 
