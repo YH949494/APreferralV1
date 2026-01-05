@@ -27,7 +27,7 @@ from referral_rules import (
     compute_referral_stats,
     ensure_referral_indexes,
     grant_referral_rewards,
-    upsert_referral_success,
+    upsert_referral_and_update_user_count,
 )
 
 from bson.json_util import dumps
@@ -537,15 +537,16 @@ async def handle_user_join(
         )
         return
 
-    result = upsert_referral_success(
+    result = upsert_referral_and_update_user_count(
         referrals_collection,
+        users_collection,        
         referrer_user_id=final_referrer_id,
         invitee_user_id=uid,
         success_at=joined_at,
         referrer_username=None,
         context={"joined_chat_at": joined_at},
     )
-    if result.get("upserted") or result.get("modified"):
+    if result.get("counted"):
         outcome = grant_referral_rewards(
             db,
             users_collection,
@@ -614,21 +615,20 @@ def resolve_legacy_pending_referrals():
             continue
             
         if _has_joined_group(invitee_id):
-            referrals_collection.update_one(
-                {"_id": ref.get("_id")},
-                {"$set": {
-                    "status": "success",
-                    "confirmed_at": now,
-                    "invitee_user_id": invitee_id,
-                    "referrer_user_id": referrer_id,
-                }},
-            )
-            grant_referral_rewards(
-                db,
+            result = upsert_referral_and_update_user_count(
+                referrals_collection,
                 users_collection,
                 referrer_id,
                 invitee_id,
+                success_at=now,                
             )
+            if result.get("counted"):
+                grant_referral_rewards(
+                    db,
+                    users_collection,
+                    referrer_id,
+                    invitee_id,
+                )            
         else:
             referrals_collection.update_one(
                 {"_id": ref.get("_id")},
@@ -1131,15 +1131,16 @@ def api_referral():
         )
         if is_member and referrer_id:
             now = datetime.utcnow()
-            result = upsert_referral_success(
+            result = upsert_referral_and_update_user_count(
                 referrals_collection,
+                users_collection,                
                 referrer_user_id=referrer_id,
                 invitee_user_id=user_id,
                 success_at=now,
                 referrer_username=None,
                 context={"subscribed_official_at": now},
             )
-            if result.get("upserted") or result.get("modified"):
+            if result.get("counted"):
                 outcome = grant_referral_rewards(
                     db,
                     users_collection,
@@ -1313,10 +1314,10 @@ def get_leaderboard():
         if user_record:
             stored_weekly = int(user_record.get("weekly_xp", 0))
             if stored_weekly != user_weekly_xp:
-                logger.info("[lb_mismatch] uid=%s weekly_xp stored=%s leaderboard=%s week_start=%s", current_user_id, stored_weekly, user_weekly_xp, week_start_local.isoformat())
-            stored_refs = int(user_record.get("weekly_referral_count", 0))
+                logger.debug("[lb_mismatch] uid=%s weekly_xp stored=%s leaderboard=%s week_start=%s", current_user_id, stored_weekly, user_weekly_xp, week_start_local.isoformat())
+                stored_refs = int(user_record.get("weekly_referral_count", 0))
             if stored_refs != user_weekly_referrals:
-                logger.info(
+                logger.debug(
                     "[lb_mismatch] uid=%s weekly_referrals stored=%s computed=%s week_start=%s",
                     current_user_id,
                     stored_refs,
@@ -1325,7 +1326,7 @@ def get_leaderboard():
                 )
             stored_total_refs = int(user_record.get("referral_count", 0))
             if stored_total_refs != lifetime_valid_refs:
-                logger.info(
+                logger.debug(
                     "[lb_mismatch] uid=%s total_referrals stored=%s computed=%s", current_user_id, stored_total_refs, lifetime_valid_refs
                 )
                 
