@@ -2,7 +2,7 @@ from pymongo import MongoClient, ASCENDING
 import os
 import datetime
 import pytz  # use pytz (no ZoneInfo here)
-from referral_rules import grant_referral_rewards
+from referral_rules import grant_referral_rewards, upsert_referral_and_update_user_count
 from xp import grant_xp
 
 KL_TZ = pytz.timezone("Asia/Kuala_Lumpur")
@@ -84,8 +84,15 @@ def checkin_user(user_id):
     
 # === REFERRAL LOGIC ===
 def increment_referral(referrer_id, referred_user_id=None):
-    grant_referral_rewards(db, users_collection, referrer_id, referred_user_id)
-
+    result = upsert_referral_and_update_user_count(
+        db.referrals,
+        users_collection,
+        referrer_id,
+        referred_user_id,
+    )
+    if result.get("counted"):
+        grant_referral_rewards(db, users_collection, referrer_id, referred_user_id)
+        
 # === RETRIEVE STATS ===
 def get_user_stats(user_id):
     user = users_collection.find_one({"user_id": user_id})
