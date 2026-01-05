@@ -8,7 +8,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppI
 from telegram.constants import ParseMode
 from html import escape as html_escape
 from telegram.ext import (
-    ApplicationBuilder, CommandHandler, ChatMemberHandler,
+    ApplicationBuilder, CommandHandler, ChatJoinRequestHandler, ChatMemberHandler,
     CallbackQueryHandler, ContextTypes, MessageHandler, filters
 )
 from telegram.error import BadRequest
@@ -370,6 +370,22 @@ def _find_referral_record(invitee_user_id: int):
         {"referred_user_id": invitee_user_id}
     )
 
+def _resolve_referrer_id_from_invite_link(invite_link) -> int | None:
+    if not invite_link:
+        return None
+    invite_name = getattr(invite_link, "name", None)
+    if invite_name and invite_name.startswith("ref-"):
+        try:
+            return int(invite_name.split("ref-")[1])
+        except (IndexError, ValueError):
+            return None
+    invite_url = getattr(invite_link, "invite_link", None)
+    if invite_url:
+        ref_doc = users_collection.find_one({"referral_invite_link": invite_url})
+        if ref_doc:
+            return ref_doc.get("user_id")
+    return None
+
 def _ensure_welcome_eligibility(uid: int) -> dict | None:
     if not uid:
         return None
@@ -500,13 +516,7 @@ async def handle_user_join(
         upsert=True,
     )
 
-    referrer_id = None
-    if invite_link and getattr(invite_link, "name", None) and invite_link.name.startswith("ref-"):
-        referrer_id = int(invite_link.name.split("-")[1])
-    elif invite_link and getattr(invite_link, "invite_link", None):
-        ref_doc = users_collection.find_one({"referral_invite_link": invite_link.invite_link})
-        if ref_doc:
-            referrer_id = ref_doc["user_id"]
+    referrer_id = _resolve_referrer_id_from_invite_link(invite_link)
 
     existing_referral = _find_referral_record(uid)
     stored_referrer_id = None
@@ -546,6 +556,8 @@ async def handle_user_join(
         referrer_username=None,
         context={"joined_chat_at": joined_at},
     )
+    invite_link_url = getattr(invite_link, "invite_link", None)
+    outcome = {}    
     if result.get("counted"):
         outcome = grant_referral_rewards(
             db,
@@ -576,6 +588,15 @@ async def handle_user_join(
             final_referrer_id,
             total_referrals,
         )
+    logger.info(
+        "[referral_award] invitee=%s referrer=%s counted=%s base_granted=%s bonuses_awarded=%s invite_link=%s",
+        uid,
+        final_referrer_id,
+        result.get("counted"),
+        outcome.get("base_granted", 0),
+        outcome.get("bonuses_awarded", 0),
+        invite_link_url,
+    )        
     logger.info(
         "[ref] uid=%s resolved_referrer=%s reason=success",
         uid,
@@ -2007,17 +2028,20 @@ async def member_update_handler(update: Update, context: ContextTypes.DEFAULT_TY
         user = member.new_chat_member.user
         if user.is_bot:
             return
-
-        await handle_user_join(
-            user.id,
-            user.username,
-            member.chat.id,
-            source="chat_member",
-            invite_link=member.invite_link,
-            old_status=old_status,
-            new_status=new_status,
-            context=context,
-        )
+            
+        try:
+            await handle_user_join(
+                user.id,
+                user.username,
+                member.chat.id,
+                source="chat_member",
+                invite_link=member.invite_link,
+                old_status=old_status,
+                new_status=new_status,
+                context=context,
+            )
+        except Exception:
+            logger.exception("[join] chat_member error uid=%s", user.id)
 
 async def new_chat_members_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.effective_message
@@ -2026,15 +2050,51 @@ async def new_chat_members_handler(update: Update, context: ContextTypes.DEFAULT
     for user in message.new_chat_members:
         if user.is_bot:
             continue
-        await handle_user_join(
+        try:
+            await handle_user_join(
+                user.id,
+                user.username,
+                message.chat.id,
+                source="new_chat_members",
+                invite_link=getattr(message, "invite_link", None),
+                context=context,
+            )
+        except Exception:
+            logger.exception("[join] new_chat_members error uid=%s", user.id)
+
+async def join_request_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    join_request = update.chat_join_request
+    if not join_request:
+        return
+
+    try:
+        if join_request.chat.id != GROUP_ID:
+            return
+
+        user = getattr(join_request, "from_user", None) or getattr(join_request, "user", None)
+        if not user or user.is_bot:
+            return
+
+        invite_link = getattr(join_request, "invite_link", None)
+        referrer_id = _resolve_referrer_id_from_invite_link(invite_link)
+        if not referrer_id:
+            logger.info(
+                "[join_request] uid=%s resolved_referrer=None reason=no_referrer",
+                user.id,
+            )
+            return
+
+        joined_at = datetime.utcnow()
+        _upsert_pending_referral(user.id, referrer_id, joined_at)
+        logger.info(
+            "[join_request] uid=%s referrer=%s invite_link=%s status=pending",
             user.id,
-            user.username,
-            message.chat.id,
-            source="new_chat_members",
-            invite_link=getattr(message, "invite_link", None),
-            context=context,
+            referrer_id,
+            getattr(invite_link, "invite_link", None),
         )
-            
+    except Exception:
+        logger.exception("[join_request] error uid=%s", getattr(join_request.from_user, "id", None))
+        
 async def button_handler(update, context):
     query = update.callback_query
     await query.answer()
@@ -2097,6 +2157,7 @@ if __name__ == "__main__":
 
     # 3) Telegram handlers
     app_bot.add_handler(CommandHandler("start", start))
+    app_bot.add_handler(ChatJoinRequestHandler(join_request_handler))    
     app_bot.add_handler(ChatMemberHandler(member_update_handler, ChatMemberHandler.CHAT_MEMBER))
     app_bot.add_handler(ChatMemberHandler(member_update_handler, ChatMemberHandler.MY_CHAT_MEMBER))
     app_bot.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, new_chat_members_handler))    
@@ -2136,7 +2197,14 @@ if __name__ == "__main__":
     try:
         app_bot.run_polling(
             poll_interval=5,
-            allowed_updates=["message", "callback_query", "chat_member", "my_chat_member"]
+            allowed_updates=["message", "callback_query", "chat_member", "my_chat_member", "chat_join_request"]
         )
     finally:
         scheduler.shutdown(wait=False)
+
+# Test plan (internal):
+# 1) Generate referral link for user A.
+# 2) User B joins via that link (join request flow) and is approved.
+# 3) Verify users.referral_count/weekly_referral_count increment and xp_events include ref_success:<B> and bonus at 3.
+# 4) Ensure rejoin does not double count or double XP.
+        
