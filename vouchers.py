@@ -1949,7 +1949,7 @@ def api_claim():
             return jsonify({"status": "error", "code": "rate_limited", "reason": rl_reason}), 429
 
         # per-IP successful claims per day pre-check
-        day_key = now_ts.strftime("%Y%m%d"
+        day_key = now_ts.strftime("%Y%m%d")
         ip_claim_doc = claim_rate_limits_col.find_one({"scope": "ip_claim", "ip": client_ip or "unknown", "day": day_key})
         if ip_claim_doc and (ip_claim_doc.get("count", 0) or 0) >= 3:
             current_app.logger.info(
