@@ -390,10 +390,15 @@ def _resolve_referrer_id_from_invite_link(invite_link) -> int | None:
 def _ensure_welcome_eligibility(uid: int) -> dict | None:
     if not uid:
         return None
+    now = datetime.now(KL_TZ)        
     user_doc = users_collection.find_one({"user_id": uid}, {"joined_main_at": 1})
     joined_main_at = user_doc.get("joined_main_at") if user_doc else None
     if not joined_main_at:
-        now = datetime.now(KL_TZ)
+        logger.info(
+            "[WELCOME] eligibility_skip uid=%s reason=missing_joined_main_at",
+            uid,
+        )
+        return None
     joined_main_kl = joined_main_at.astimezone(KL_TZ) if joined_main_at.tzinfo else joined_main_at.replace(tzinfo=KL_TZ)
     if joined_main_kl < (now - timedelta(days=WELCOME_WINDOW_DAYS)):
         logger.info(
@@ -417,56 +422,6 @@ def _ensure_welcome_eligibility(uid: int) -> dict | None:
         upsert=True,
     )
     return welcome_eligibility_collection.find_one({"uid": uid})
-
-async def _backfill_joined_main_at(
-    uid: int,
-    *,
-    context: ContextTypes.DEFAULT_TYPE,
-    source: str,
-) -> bool:
-    if not uid:
-        return False
-    existing = users_collection.find_one({"user_id": uid}, {"joined_main_at": 1})
-    if existing and existing.get("joined_main_at"):
-        return False
-    try:
-        member = await context.bot.get_chat_member(chat_id=GROUP_ID, user_id=uid)
-    except Exception as exc:
-        logger.warning(
-            "[WELCOME][JOIN_BACKFILL] uid=%s source=%s status=error err=%s",
-            uid,
-            source,
-            exc,
-        )
-        return False
-    status = getattr(member, "status", None)
-    if status not in ("member", "administrator", "creator", "restricted"):
-        logger.info(
-            "[WELCOME][JOIN_BACKFILL] uid=%s source=%s status=skip reason=not_member member_status=%s",
-            uid,
-            source,
-            status,
-        )
-        return False
-    now = datetime.now(KL_TZ)
-    users_collection.update_one(
-        {"user_id": uid, "joined_main_at": {"$exists": False}},
-        {
-            "$set": {
-                "joined_main_at": now,
-                "joined_at_source": source,
-            },
-            "$setOnInsert": {"user_id": uid},
-        },
-        upsert=True,
-    )
-    logger.info(
-        "[WELCOME][JOIN_BACKFILL] uid=%s source=%s status=ok joined_main_at=%s",
-        uid,
-        source,
-        now.isoformat(),
-    )
-    return True
 
 async def _check_official_channel_subscribed(bot, uid: int) -> tuple[bool, str]:
     if not uid:
@@ -2024,7 +1979,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             }},
             upsert=True
         )
-        await _backfill_joined_main_at(user.id, context=context, source="backfill_on_start")        
+        user_doc = users_collection.find_one({"user_id": user.id}, {"joined_main_at": 1})
+        if not (user_doc or {}).get("joined_main_at"):
+            logger.info(
+                "[WELCOME][JOIN_BACKFILL_DISABLED] uid=%s joined_main_at_missing",
+                user.id,
+            ) 
         keyboard = [[
             InlineKeyboardButton("🚀 Open Check-in & Referral", web_app=WebAppInfo(url=WEBAPP_URL))
         ]]
