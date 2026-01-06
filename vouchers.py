@@ -21,6 +21,7 @@ welcome_eligibility_col = db["welcome_eligibility"]
 BYPASS_ADMIN = os.getenv("BYPASS_ADMIN", "0").lower() in ("1", "true", "yes", "on")
 HARDCODED_ADMIN_USERNAMES = {"gracy_ap", "teohyaohui"}  # allow manual overrides if cache is empty
 WELCOME_WINDOW_HOURS = int(getattr(_cfg, "WELCOME_WINDOW_HOURS", os.getenv("WELCOME_WINDOW_HOURS", "48")))
+WELCOME_WINDOW_DAYS = 7
 
 _RAW_OFFICIAL_CHANNEL_ID = getattr(_cfg, "OFFICIAL_CHANNEL_ID", os.getenv("OFFICIAL_CHANNEL_ID"))
 try:
@@ -30,7 +31,12 @@ except (TypeError, ValueError):
 
 _RAW_OFFICIAL_CHANNEL_USERNAME = getattr(_cfg, "OFFICIAL_CHANNEL_USERNAME", os.getenv("OFFICIAL_CHANNEL_USERNAME"))
 OFFICIAL_CHANNEL_USERNAME = (str(_RAW_OFFICIAL_CHANNEL_USERNAME).strip() or "") if _RAW_OFFICIAL_CHANNEL_USERNAME is not None else ""
-
+_RAW_MAIN_GROUP_ID = getattr(_cfg, "MAIN_GROUP_ID", os.getenv("MAIN_GROUP_ID", "-1002304653063"))
+try:
+    MAIN_GROUP_ID = int(str(_RAW_MAIN_GROUP_ID).strip()) if _RAW_MAIN_GROUP_ID not in (None, "") else None
+except (TypeError, ValueError):
+    MAIN_GROUP_ID = None
+ 
 def _load_admin_ids() -> set:
     try:
         doc = admin_cache_col.find_one({"_id": "admins"}) or {}
@@ -241,6 +247,9 @@ def _ctx_to_user(ctx: dict) -> dict:
 def now_utc():
     return datetime.now(timezone.utc)
 
+def now_kl():
+    return datetime.now(KL_TZ)
+
 def ensure_voucher_indexes():
     db.drops.create_index([("startsAt", ASCENDING)])
     db.drops.create_index([("endsAt", ASCENDING)])
@@ -305,6 +314,13 @@ def _as_aware_utc(dt):
         return parsed.astimezone(timezone.utc)
     return None
 
+def _as_aware_kl(dt):
+    """Return a timezone-aware Kuala Lumpur datetime from dt (datetime or ISO string)."""
+    aware = _as_aware_utc(dt)
+    if not aware:
+        return None
+    return aware.astimezone(KL_TZ)
+
 def _isoformat_kl(dt):
     """Return an ISO string in Kuala Lumpur time for the given datetime/ISO value."""
     aware = _as_aware_utc(dt)
@@ -327,6 +343,100 @@ def norm_uname(s):
     if s.startswith("@"):
         s = s[1:]
     return s.lower()
+
+ef _welcome_window_for_user(uid: int | None, *, ref: datetime | None = None, user_doc: dict | None = None):
+    if uid is None:
+        return None
+    user_doc = user_doc or users_collection.find_one({"user_id": uid}, {"joined_main_at": 1})
+    joined_main_at = (user_doc or {}).get("joined_main_at")
+    if not joined_main_at:
+        return None
+    joined_main_kl = _as_aware_kl(joined_main_at)
+    if not joined_main_kl:
+        return None
+    ref_kl = (ref or now_kl()).astimezone(KL_TZ)
+    if joined_main_kl < (ref_kl - timedelta(days=WELCOME_WINDOW_DAYS)):
+        return None
+    return {
+        "joined_main_at": joined_main_kl,
+        "eligible_until": joined_main_kl + timedelta(days=WELCOME_WINDOW_DAYS),
+    }
+
+def _backfill_joined_main_at(uid: int | None, *, source: str) -> bool:
+    if uid is None or MAIN_GROUP_ID is None:
+        return False
+    existing = users_collection.find_one({"user_id": uid}, {"joined_main_at": 1})
+    if existing and existing.get("joined_main_at"):
+        return False
+    token = os.environ.get("BOT_TOKEN", "")
+    if not token:
+        current_app.logger.info(
+            "[WELCOME][JOIN_BACKFILL] uid=%s source=%s status=skip reason=missing_token",
+            uid,
+            source,
+        )
+        return False
+    try:
+        resp = requests.get(
+            f"https://api.telegram.org/bot{token}/getChatMember",
+            params={"chat_id": MAIN_GROUP_ID, "user_id": uid},
+            timeout=5,
+        )
+    except requests.RequestException as exc:
+        current_app.logger.warning(
+            "[WELCOME][JOIN_BACKFILL] uid=%s source=%s status=error err=%s",
+            uid,
+            source,
+            exc,
+        )
+        return False
+    if resp.status_code != 200:
+        current_app.logger.info(
+            "[WELCOME][JOIN_BACKFILL] uid=%s source=%s status=skip reason=http_%s",
+            uid,
+            source,
+            resp.status_code,
+        )
+        return False
+    try:
+        data = resp.json()
+    except ValueError:
+        current_app.logger.info(
+            "[WELCOME][JOIN_BACKFILL] uid=%s source=%s status=skip reason=bad_json",
+            uid,
+            source,
+        )
+        return False
+    if not data.get("ok"):
+        current_app.logger.info(
+            "[WELCOME][JOIN_BACKFILL] uid=%s source=%s status=skip reason=not_ok err=%s",
+            uid,
+            source,
+            data,
+        )
+        return False
+    status = (data.get("result") or {}).get("status")
+    if status not in ("member", "administrator", "creator", "restricted"):
+        current_app.logger.info(
+            "[WELCOME][JOIN_BACKFILL] uid=%s source=%s status=skip reason=not_member member_status=%s",
+            uid,
+            source,
+            status,
+        )
+        return False
+    now = now_kl()
+    users_collection.update_one(
+        {"user_id": uid, "joined_main_at": {"$exists": False}},
+        {"$set": {"joined_main_at": now, "joined_at_source": source}, "$setOnInsert": {"user_id": uid}},
+        upsert=True,
+    )
+    current_app.logger.info(
+        "[WELCOME][JOIN_BACKFILL] uid=%s source=%s status=ok joined_main_at=%s",
+        uid,
+        source,
+        now.isoformat(),
+    )
+    return True
 
 def _get_client_ip(req=None) -> str:
     req = req or request
@@ -499,7 +609,7 @@ def _check_new_joiner_rate_limits(*, uid: int, ip: str, now: datetime | None = N
       - per-IP distinct UIDs: max 10 per day
       (per-IP successful claims handled post-success)
     """
-    now = now or now_utc()
+    now = now or now_kl()
     minute_key = now.strftime("%Y%m%d%H%M")
     day_key = now.strftime("%Y%m%d")
 
@@ -642,12 +752,11 @@ def _get_welcome_eligibility(uid: int) -> dict | None:
 def ensure_welcome_eligibility(uid: int, *, users_exists: bool | None = None) -> dict | None:
     if uid is None:
         return None
-    if users_exists is None:
-        users_exists = bool(users_collection.find_one({"user_id": uid}, {"_id": 1}))
-    if users_exists:
+    window = _welcome_window_for_user(uid)
+    if not window:
         return None
-    now = now_utc()
-    eligible_until = now + timedelta(hours=WELCOME_WINDOW_HOURS)
+    now = now_kl()
+    eligible_until = window["eligible_until"]
     welcome_eligibility_col.update_one(
         {"uid": uid},
         {
@@ -657,22 +766,23 @@ def ensure_welcome_eligibility(uid: int, *, users_exists: bool | None = None) ->
                 "eligible_until": eligible_until,
                 "claimed": False,
                 "claimed_at": None,
-            }
+            },
+            "$set": {"eligible_until": eligible_until},
         },
         upsert=True,
     )
     return welcome_eligibility_col.find_one({"uid": uid})
 
-def _welcome_eligible_now(doc: dict | None, *, ref: datetime | None = None) -> bool:
-    if not doc:
+def _welcome_eligible_now(uid: int | None, doc: dict | None, *, ref: datetime | None = None, user_doc: dict | None = None) -> bool:
+    if uid is None or not doc:
         return False
     if doc.get("claimed"):
         return False
-    eligible_until = _as_aware_utc(doc.get("eligible_until"))
-    if eligible_until is None:
+    window = _welcome_window_for_user(uid, ref=ref, user_doc=user_doc)
+    if not window:
         return False
-    ref = ref or now_utc()
-    return ref <= eligible_until
+    ref_kl = (ref or now_kl()).astimezone(KL_TZ)
+    return ref_kl <= window["eligible_until"]
 
 def _official_channel_identifier():
     if OFFICIAL_CHANNEL_ID is not None:
@@ -767,13 +877,13 @@ def get_or_issue_welcome_ticket(uid: int):
     if uid is None:
         return None
 
-    eligibility = _get_welcome_eligibility(uid)
+    eligibility = ensure_welcome_eligibility(uid)
     if not eligibility:
         current_app.logger.info("[welcome] eligibility_missing uid=%s deny", uid)
         return None
 
-    now = now_utc()
-    expires_at = _as_aware_utc(eligibility.get("eligible_until"))
+    now = now_kl()
+    expires_at = _as_aware_kl(eligibility.get("eligible_until"))
     if not expires_at:
         current_app.logger.info("[welcome] eligibility_invalid uid=%s deny", uid)
         return None
@@ -810,7 +920,7 @@ def get_or_issue_welcome_ticket(uid: int):
         except Exception:
             just_created = False
 
-    ticket_expires_at = _as_aware_utc(ticket.get("expires_at")) or expires_at
+    ticket_expires_at = _as_aware_kl(ticket.get("expires_at")) or expires_at
     if ticket_expires_at and now > ticket_expires_at and ticket.get("status") not in ("expired", "claimed"):
         welcome_tickets_col.update_one({"uid": uid}, {"$set": {"status": "expired", "reason_last_fail": "expired"}})
         ticket["status"] = "expired"
@@ -1186,6 +1296,7 @@ def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None
     pooled_claim_key = f"uid:{user_id}" if user_id else ""
     drops = get_active_drops(ref)
 
+    ref_kl = ref.astimezone(KL_TZ) if ref.tzinfo else ref.replace(tzinfo=timezone.utc).astimezone(KL_TZ) 
     personal_cards = []
     pooled_cards = []
 
@@ -1222,13 +1333,11 @@ def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None
     if not user_doc and usernameLower:
         user_doc = users_collection.find_one({"usernameLower": usernameLower})
 
-    has_username = bool(usernameLower or uname)
-    already_known_user = bool(user_doc)
     uid_for_new_joiner = ctx_uid if ctx_uid is not None else None
     already_new_joiner_claim = False
     if uid_for_new_joiner is not None:
         already_new_joiner_claim = bool(new_joiner_claims_col.find_one({"uid": uid_for_new_joiner}))
-    welcome_eligibility = _get_welcome_eligibility(uid_for_new_joiner) if uid_for_new_joiner is not None else None
+    welcome_eligibility = ensure_welcome_eligibility(uid_for_new_joiner) if uid_for_new_joiner is not None else None
  
     # Only hide personalised vouchers when the caller truly has no username
     allow_personalised = bool(usernameLower)
@@ -1254,21 +1363,19 @@ def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None
         if is_welcome_drop:
             if uid is None:
                 continue
-            if already_known_user or not _welcome_eligible_now(welcome_eligibility, ref=ref):
+            if not _welcome_eligible_now(uid, welcome_eligibility, ref=ref, user_doc=user_doc):
                 continue
             if already_new_joiner_claim:
                 continue
             welcome_ticket = get_or_issue_welcome_ticket(uid)
             if not welcome_ticket:
                 continue
-            expires_at = _as_aware_utc(welcome_ticket.get("expires_at"))
-            if expires_at and ref > expires_at:
+            expires_at = _as_aware_kl(welcome_ticket.get("expires_at"))
+            if expires_at and ref_kl > expires_at:
                 welcome_tickets_col.update_one(
                     {"uid": uid},
                     {"$set": {"status": "expired", "expires_at": expires_at}},
                 )
-                continue
-            if not has_username:
                 continue
      
         base = {
@@ -1335,9 +1442,9 @@ def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None
                 if claimed_at:
                     base["claimedAt"] = claimed_at
                 if welcome_ticket:
-                    expires_at = _as_aware_utc(welcome_ticket.get("expires_at"))
+                    expires_at = _as_aware_kl(welcome_ticket.get("expires_at"))
                     if expires_at:
-                        remaining = int((expires_at - ref).total_seconds())
+                        remaining = int((expires_at - ref_kl).total_seconds())
                         base["welcomeRemainingSeconds"] = max(0, remaining)                 
                 base["remainingApprox"] = max(0, db.vouchers.count_documents({"type": "pooled", "dropId": {"$in": drop_id_variants}, "status": "free"}))
                 pooled_cards.append(base)
@@ -1350,9 +1457,9 @@ def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None
                 if free_exists:
                     base["remainingApprox"] = max(0, db.vouchers.count_documents({"type": "pooled", "dropId": {"$in": drop_id_variants}, "status": "free"}))
                     if welcome_ticket:
-                        expires_at = _as_aware_utc(welcome_ticket.get("expires_at"))
+                        expires_at = _as_aware_kl(welcome_ticket.get("expires_at"))
                         if expires_at:
-                            remaining = int((expires_at - ref).total_seconds())
+                            remaining = int((expires_at - ref_kl).total_seconds())
                             base["welcomeRemainingSeconds"] = max(0, remaining)                 
                     pooled_cards.append(base)
 
@@ -1544,30 +1651,31 @@ def api_visible():
                 uid = None
         users_exists = bool(users_collection.find_one({"user_id": uid}, {"_id": 1})) if uid is not None else False
         welcome_doc = None
+        user_doc = None     
         created = False
-        if uid is not None and not users_exists:
+        if uid is not None:
+            _backfill_joined_main_at(uid, source="backfill_on_visible")
+            user_doc = users_collection.find_one({"user_id": uid}, {"joined_main_at": 1})
             existing = welcome_eligibility_col.find_one({"uid": uid})
-            welcome_doc = ensure_welcome_eligibility(uid, users_exists=users_exists)
+            welcome_doc = ensure_welcome_eligibility(uid)
             created = bool(not existing and welcome_doc)
             eligible_until = _as_aware_utc((welcome_doc or {}).get("eligible_until"))
             current_app.logger.info(
-                "[welcome] uid=%s created=%s eligible_until=%s users_exists=%s",
+                "[WELCOME] uid=%s created=%s eligible_until=%s",
                 uid,
                 str(created).lower(),
                 eligible_until.isoformat() if eligible_until else None,
-                str(users_exists).lower(),
             )
-        elif uid is not None:
-            welcome_doc = welcome_eligibility_col.find_one({"uid": uid})
 
-        welcome_eligible = _welcome_eligible_now(welcome_doc, ref=ref)
+        welcome_eligible = _welcome_eligible_now(uid, welcome_doc, ref=ref, user_doc=user_doc)
         current_app.logger.info(
-            "[visible] uid=%s ok_init=%s welcome_eligible=%s claimed=%s until=%s",
+            "[WELCOME] visible uid=%s ok_init=%s welcome_eligible=%s claimed=%s until=%s joined_main_at=%s",
             uid,
             str(ok).lower(),
             str(welcome_eligible).lower(),
             str(bool((welcome_doc or {}).get("claimed"))).lower() if welcome_doc else "false",
             _as_aware_utc((welcome_doc or {}).get("eligible_until")).isoformat() if welcome_doc else None,
+            _isoformat_kl((user_doc or {}).get("joined_main_at")),         
         )
      
         drops = user_visible_drops(user, ref, tg_user=tg_user)
@@ -1753,7 +1861,7 @@ def api_claim():
     client_ip = _get_client_ip(request)
     is_pool_drop = _is_pool_drop(voucher, audience_type)
 
-    if is_pool_drop:
+    if is_pool_drop and not _is_new_joiner_audience(audience_type):
         if not check_channel_subscribed(uid):
             current_app.logger.info("[claim] deny drop=%s uid=%s reason=not_subscribed", drop_id, uid)
             current_app.logger.info(
@@ -1796,16 +1904,18 @@ def api_claim():
             )         
             current_app.logger.info("[claim] deny drop=%s reason=missing_uid", drop_id)
             return jsonify({"status": "error", "code": "not_eligible", "reason": "missing_uid"}), 403
-        eligibility = _get_welcome_eligibility(uid)
-        now_ts = now_utc()
-        if not _welcome_eligible_now(eligibility, ref=now_ts):
-            reason = "missing_eligibility"
-            if eligibility:
-                eligible_until = _as_aware_utc(eligibility.get("eligible_until"))
-                if eligibility.get("claimed"):
-                    reason = "already_claimed"
-                elif eligible_until and now_ts > eligible_until:
-                    reason = "expired"
+        current_app.logger.info("[WELCOME] claim_attempt uid=%s drop_id=%s", uid, drop_id)
+        eligibility = ensure_welcome_eligibility(uid)
+        now_ts = now_kl()
+        if not _welcome_eligible_now(uid, eligibility, ref=now_ts, user_doc=user_doc):
+            reason = "missing_joined_main_at"
+            if eligibility and eligibility.get("claimed"):
+                reason = "already_claimed"
+            else:
+                joined_main_at = (user_doc or users_collection.find_one({"user_id": uid}, {"joined_main_at": 1}) or {}).get("joined_main_at")
+                window = _welcome_window_for_user(uid, ref=now_ts, user_doc=user_doc)
+                if joined_main_at and window is None:
+                    reason = "not_new_user"
             current_app.logger.info(
                 "[claim] uid=%s drop_id=%s dtype=%s audience=%s decision=blocked reason=%s",
                 uid,
@@ -1826,7 +1936,7 @@ def api_claim():
             current_app.logger.info("[claim] deny drop=%s uid=%s reason=already_claimed_lifetime", drop_id, uid)
             return jsonify({"status": "error", "code": "not_eligible", "reason": "already_claimed_lifetime"}), 403
 
-        ok_rl, rl_reason = _check_new_joiner_rate_limits(uid=uid, ip=client_ip)
+        ok_rl, rl_reason = _check_new_joiner_rate_limits(uid=uid, ip=client_ip, now=now_ts)
         if not ok_rl:
             current_app.logger.info(
                 "[claim] uid=%s drop_id=%s dtype=%s audience=%s decision=blocked reason=%s",
@@ -1839,7 +1949,7 @@ def api_claim():
             return jsonify({"status": "error", "code": "rate_limited", "reason": rl_reason}), 429
 
         # per-IP successful claims per day pre-check
-        day_key = now_utc().strftime("%Y%m%d")
+        day_key = now_ts.strftime("%Y%m%d"
         ip_claim_doc = claim_rate_limits_col.find_one({"scope": "ip_claim", "ip": client_ip or "unknown", "day": day_key})
         if ip_claim_doc and (ip_claim_doc.get("count", 0) or 0) >= 3:
             current_app.logger.info(
@@ -1863,7 +1973,7 @@ def api_claim():
             )       
             return jsonify({"status": "error", "code": "not_eligible", "reason": "not_eligible"}), 403
 
-        expires_at = _as_aware_utc(ticket.get("expires_at"))
+        expires_at = _as_aware_kl(ticket.get("expires_at"))
         if expires_at and now_ts > expires_at:
             welcome_tickets_col.update_one({"uid": uid}, {"$set": {"status": "expired", "reason_last_fail": "expired"}})
             current_app.logger.info("[welcome] gate_fail uid=%s reason=expired", uid)
@@ -1875,18 +1985,6 @@ def api_claim():
                 audience_type,
             )         
             return jsonify({"status": "error", "code": "not_eligible", "reason": "expired"}), 403
-
-        if not check_username_present(tg_user):
-            welcome_tickets_col.update_one({"uid": uid}, {"$set": {"reason_last_fail": "no_username"}})
-            current_app.logger.info("[welcome] gate_fail uid=%s reason=no_username", uid)
-            current_app.logger.info(
-                "[claim] uid=%s drop_id=%s dtype=%s audience=%s decision=blocked reason=missing_username",
-                uid,
-                drop_id,
-                drop_type,
-                audience_type,
-            )         
-            return jsonify({"status": "error", "code": "not_eligible", "reason": "missing_username"}), 403
 
         has_photo = check_has_profile_photo(uid)
      
@@ -1910,18 +2008,6 @@ def api_claim():
                 audience_type,
             )         
             return jsonify({"status": "error", "code": "not_eligible", "reason": "missing_profile_photo"}), 403
-
-        if not check_channel_subscribed(uid):
-            welcome_tickets_col.update_one({"uid": uid}, {"$set": {"reason_last_fail": "not_subscribed"}})
-            current_app.logger.info("[welcome] gate_fail uid=%s reason=not_subscribed", uid)
-            current_app.logger.info(
-                "[claim] uid=%s drop_id=%s dtype=%s audience=%s decision=blocked reason=not_subscribed",
-                uid,
-                drop_id,
-                drop_type,
-                audience_type,
-            )         
-            return jsonify({"status": "error", "code": "not_eligible", "reason": "not_subscribed"}), 403 
          
     # Claim
     try:
@@ -1944,7 +2030,7 @@ def api_claim():
                     "$setOnInsert": {
                         "uid": uid,
                         "drop_id": _coerce_id(drop_id),
-                        "claimed_at": now_utc(),
+                        "claimed_at": now_kl(),
                         "code": result.get("code"),
                     }
                 },
@@ -1960,13 +2046,14 @@ def api_claim():
 
         welcome_tickets_col.update_one(
             {"uid": uid},
-            {"$set": {"status": "claimed", "claimed_at": now_utc(), "reason_last_fail": None}},
+            {"$set": {"status": "claimed", "claimed_at": now_kl(), "reason_last_fail": None}},
         )
         welcome_eligibility_col.update_one(
             {"uid": uid},
-            {"$set": {"claimed": True, "claimed_at": now_utc()}},
+            {"$set": {"claimed": True, "claimed_at": now_kl()}},
         )     
-        current_app.logger.info("[welcome] gate_pass uid=%s", uid)
+        current_app.logger.info("[WELCOME] gate_pass uid=%s", uid)
+        current_app.logger.info("[WELCOME] claim_success uid=%s drop_id=%s", uid, drop_id)
         current_app.logger.info("[claim] success drop=%s audience=%s uid=%s ip=%s", drop_id, audience_type, uid, client_ip)
         current_app.logger.info(
             "[claim] uid=%s drop_id=%s dtype=%s audience=%s decision=allowed reason=success",
