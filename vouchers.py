@@ -751,6 +751,7 @@ def _get_welcome_eligibility(uid: int) -> dict | None:
 
 def ensure_welcome_eligibility(uid: int, *, users_exists: bool | None = None) -> dict | None:
     if not uid:
+        current_app.logger.warning("[welcome] eligibility_skip reason=missing_uid uid=%s", uid)     
         return None
     window = _welcome_window_for_user(uid)
     if not window:
@@ -1559,6 +1560,7 @@ def api_visible():
     Always returns JSON (401/200/500).
     """
     ref = now_utc()
+    user_id = None 
     try:
         init_data = extract_raw_init_data_from_query(request)
 
@@ -1680,9 +1682,11 @@ def api_visible():
         drops = user_visible_drops(user, ref, tg_user=tg_user)
         return jsonify({"visibilityMode": "stacked", "nowUtc": ref.isoformat(), "drops": drops}), 200
 
-    except Exception as e:
-        print("[visible] unhandled:", repr(e))
-        return jsonify({"code": "server_error", "message": str(e)}), 500
+    except Exception:
+        current_app.logger.exception("[visible] unhandled", extra={"user_id": user_id})
+        if current_app.debug or current_app.config.get("ENV") == "development":
+            raise
+        return jsonify({"code": "server_error", "message": "internal_error"}), 500
 
 class AlreadyClaimed(Exception):
     pass
