@@ -362,82 +362,6 @@ def _welcome_window_for_user(uid: int | None, *, ref: datetime | None = None, us
         "eligible_until": joined_main_kl + timedelta(days=WELCOME_WINDOW_DAYS),
     }
 
-def _backfill_joined_main_at(uid: int | None, *, source: str) -> bool:
-    if uid is None or MAIN_GROUP_ID is None:
-        return False
-    existing = users_collection.find_one({"user_id": uid}, {"joined_main_at": 1})
-    if existing and existing.get("joined_main_at"):
-        return False
-    token = os.environ.get("BOT_TOKEN", "")
-    if not token:
-        current_app.logger.info(
-            "[WELCOME][JOIN_BACKFILL] uid=%s source=%s status=skip reason=missing_token",
-            uid,
-            source,
-        )
-        return False
-    try:
-        resp = requests.get(
-            f"https://api.telegram.org/bot{token}/getChatMember",
-            params={"chat_id": MAIN_GROUP_ID, "user_id": uid},
-            timeout=5,
-        )
-    except requests.RequestException as exc:
-        current_app.logger.warning(
-            "[WELCOME][JOIN_BACKFILL] uid=%s source=%s status=error err=%s",
-            uid,
-            source,
-            exc,
-        )
-        return False
-    if resp.status_code != 200:
-        current_app.logger.info(
-            "[WELCOME][JOIN_BACKFILL] uid=%s source=%s status=skip reason=http_%s",
-            uid,
-            source,
-            resp.status_code,
-        )
-        return False
-    try:
-        data = resp.json()
-    except ValueError:
-        current_app.logger.info(
-            "[WELCOME][JOIN_BACKFILL] uid=%s source=%s status=skip reason=bad_json",
-            uid,
-            source,
-        )
-        return False
-    if not data.get("ok"):
-        current_app.logger.info(
-            "[WELCOME][JOIN_BACKFILL] uid=%s source=%s status=skip reason=not_ok err=%s",
-            uid,
-            source,
-            data,
-        )
-        return False
-    status = (data.get("result") or {}).get("status")
-    if status not in ("member", "administrator", "creator", "restricted"):
-        current_app.logger.info(
-            "[WELCOME][JOIN_BACKFILL] uid=%s source=%s status=skip reason=not_member member_status=%s",
-            uid,
-            source,
-            status,
-        )
-        return False
-    now = now_kl()
-    users_collection.update_one(
-        {"user_id": uid, "joined_main_at": {"$exists": False}},
-        {"$set": {"joined_main_at": now, "joined_at_source": source}, "$setOnInsert": {"user_id": uid}},
-        upsert=True,
-    )
-    current_app.logger.info(
-        "[WELCOME][JOIN_BACKFILL] uid=%s source=%s status=ok joined_main_at=%s",
-        uid,
-        source,
-        now.isoformat(),
-    )
-    return True
-
 def _get_client_ip(req=None) -> str:
     req = req or request
     if not req:
@@ -1667,8 +1591,12 @@ def api_visible():
         user_doc = None  
         created = False
         if user_id and uid is not None:
-            _backfill_joined_main_at(uid, source="backfill_on_visible")
             user_doc = users_collection.find_one({"user_id": uid}, {"joined_main_at": 1})
+            if not (user_doc or {}).get("joined_main_at"):
+                current_app.logger.info(
+                    "[WELCOME][JOIN_BACKFILL_DISABLED] uid=%s joined_main_at_missing",
+                    uid,
+                )         
             existing = welcome_eligibility_col.find_one({"uid": uid})
             welcome_doc = ensure_welcome_eligibility(uid)
             created = bool(not existing and welcome_doc)
