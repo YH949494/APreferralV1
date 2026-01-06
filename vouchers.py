@@ -1645,16 +1645,16 @@ def api_visible():
             user = {"usernameLower": username, "source": "fallback"}
 
         uid = None
-        if isinstance(tg_user, dict):
+        if user_id and isinstance(tg_user, dict):
             try:
                 uid = int(tg_user.get("id"))
             except Exception:
                 uid = None
         users_exists = bool(users_collection.find_one({"user_id": uid}, {"_id": 1})) if uid is not None else False
         welcome_doc = None
-        user_doc = None     
+        user_doc = None  
         created = False
-        if uid is not None:
+        if user_id and uid is not None:
             _backfill_joined_main_at(uid, source="backfill_on_visible")
             user_doc = users_collection.find_one({"user_id": uid}, {"joined_main_at": 1})
             existing = welcome_eligibility_col.find_one({"uid": uid})
@@ -1684,9 +1684,7 @@ def api_visible():
 
     except Exception:
         current_app.logger.exception("[visible] unhandled", extra={"user_id": user_id})
-        if current_app.debug or current_app.config.get("ENV") == "development":
-            raise
-        return jsonify({"code": "server_error", "message": "internal_error"}), 500
+        raise
 
 class AlreadyClaimed(Exception):
     pass
