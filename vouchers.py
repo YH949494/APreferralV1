@@ -898,24 +898,27 @@ def get_or_issue_welcome_ticket(uid: int):
     if now > expires_at:
         current_app.logger.info("[welcome] eligibility_expired uid=%s deny", uid)
         return None
+
     cleanup_at = expires_at + timedelta(days=30)
-    ticket = welcome_tickets_col.find_one_and_update(
-        {"uid": uid},
-        {
-            "$set": {
-                "cleanup_at": cleanup_at,
+
+    try:
+        ticket = welcome_tickets_col.find_one_and_update(
+            {"uid": uid},
+            {
+                "$set": {"cleanup_at": cleanup_at},
+                "$setOnInsert": {
+                    "uid": uid,
+                    "issued_at": now,
+                    "expires_at": expires_at,
+                    "status": "active",
+                },
             },
-            "$setOnInsert": {
-                "uid": uid,
-                "issued_at": now,
-                "expires_at": expires_at,
-                "status": "active",
-                "cleanup_at": cleanup_at,
-            }
-        },
-        upsert=True,
-        return_document=ReturnDocument.AFTER,
-    )
+            upsert=True,
+            return_document=ReturnDocument.AFTER,
+        )
+    except Exception:
+        current_app.logger.exception("[visible][WELCOME_TICKET] write failed", extra={"uid": uid})
+        return None
 
     issued_at = _as_aware_utc(ticket.get("issued_at"))
     just_created = False
@@ -927,7 +930,10 @@ def get_or_issue_welcome_ticket(uid: int):
 
     ticket_expires_at = _as_aware_kl(ticket.get("expires_at")) or expires_at
     if ticket_expires_at and now > ticket_expires_at and ticket.get("status") not in ("expired", "claimed"):
-        welcome_tickets_col.update_one({"uid": uid}, {"$set": {"status": "expired", "reason_last_fail": "expired"}})
+        welcome_tickets_col.update_one(
+            {"uid": uid},
+            {"$set": {"status": "expired", "reason_last_fail": "expired"}},
+        )
         ticket["status"] = "expired"
         ticket["expires_at"] = ticket_expires_at
 
@@ -936,6 +942,7 @@ def get_or_issue_welcome_ticket(uid: int):
     else:
         current_app.logger.info("[welcome] ticket_exists uid=%s status=%s", uid, ticket.get("status"))
     return ticket
+
 
 def is_drop_allowed(drop: dict, tg_uid, tg_uname_lower: str, user_ctx: dict | None) -> bool:
     audience = drop.get("audience") or {}
