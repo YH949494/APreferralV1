@@ -344,7 +344,7 @@ def norm_uname(s):
         s = s[1:]
     return s.lower()
 
-ef _welcome_window_for_user(uid: int | None, *, ref: datetime | None = None, user_doc: dict | None = None):
+def _welcome_window_for_user(uid: int | None, *, ref: datetime | None = None, user_doc: dict | None = None):
     if uid is None:
         return None
     user_doc = user_doc or users_collection.find_one({"user_id": uid}, {"joined_main_at": 1})
