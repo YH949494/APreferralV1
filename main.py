@@ -1986,7 +1986,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 user.id,
             ) 
         keyboard = [[
-            InlineKeyboardButton("🚀 Open Check-in & Referral", web_app=WebAppInfo(url=WEBAPP_URL))
+            InlineKeyboardButton("🚀 Open AdvantPlay Mini-App", web_app=WebAppInfo(url=WEBAPP_URL))
         ]]
         if message:
             await message.reply_text(
@@ -1994,7 +1994,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Tap below to enter the Mini-App and:\n"
             "• Check-in daily to earn XP\n"
             "• Unlock your referral link\n"
-            "• Climb the weekly leaderboards\n\n"
+            "• Claim voucher code\n\n"
             "Start your journey here 👇",
             reply_markup=InlineKeyboardMarkup(keyboard)
     )
