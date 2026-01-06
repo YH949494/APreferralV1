@@ -45,6 +45,7 @@ import pytz
 FIRST_CHECKIN_BONUS_XP = int(os.getenv("FIRST_CHECKIN_BONUS_XP", "200"))
 WELCOME_BONUS_XP = int(os.getenv("WELCOME_BONUS_XP", "20"))
 WELCOME_WINDOW_HOURS = int(os.getenv("WELCOME_WINDOW_HOURS", "48"))
+WELCOME_WINDOW_DAYS = 7
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -389,10 +390,19 @@ def _resolve_referrer_id_from_invite_link(invite_link) -> int | None:
 def _ensure_welcome_eligibility(uid: int) -> dict | None:
     if not uid:
         return None
-    if users_collection.find_one({"user_id": uid}, {"_id": 1}):
+    user_doc = users_collection.find_one({"user_id": uid}, {"joined_main_at": 1})
+    joined_main_at = user_doc.get("joined_main_at") if user_doc else None
+    if not joined_main_at:
+    now = datetime.now(KL_TZ)
+    joined_main_kl = joined_main_at.astimezone(KL_TZ) if joined_main_at.tzinfo else joined_main_at.replace(tzinfo=KL_TZ)
+    if joined_main_kl < (now - timedelta(days=WELCOME_WINDOW_DAYS)):
+        logger.info(
+            "[WELCOME] eligibility_skip uid=%s reason=not_new_user joined_main_at=%s",
+            uid,
+            joined_main_kl.isoformat(),
+        )
         return None
-    now = now_utc()
-    eligible_until = now + timedelta(hours=WELCOME_WINDOW_HOURS)
+    eligible_until = joined_main_kl + timedelta(days=WELCOME_WINDOW_DAYS)
     welcome_eligibility_collection.update_one(
         {"uid": uid},
         {
@@ -402,11 +412,62 @@ def _ensure_welcome_eligibility(uid: int) -> dict | None:
                 "eligible_until": eligible_until,
                 "claimed": False,
                 "claimed_at": None,
-            }
+            },
+            "$set": {"eligible_until": eligible_until},
         },
         upsert=True,
     )
     return welcome_eligibility_collection.find_one({"uid": uid})
+
+async def _backfill_joined_main_at(
+    uid: int,
+    *,
+    context: ContextTypes.DEFAULT_TYPE,
+    source: str,
+) -> bool:
+    if not uid:
+        return False
+    existing = users_collection.find_one({"user_id": uid}, {"joined_main_at": 1})
+    if existing and existing.get("joined_main_at"):
+        return False
+    try:
+        member = await context.bot.get_chat_member(chat_id=GROUP_ID, user_id=uid)
+    except Exception as exc:
+        logger.warning(
+            "[WELCOME][JOIN_BACKFILL] uid=%s source=%s status=error err=%s",
+            uid,
+            source,
+            exc,
+        )
+        return False
+    status = getattr(member, "status", None)
+    if status not in ("member", "administrator", "creator", "restricted"):
+        logger.info(
+            "[WELCOME][JOIN_BACKFILL] uid=%s source=%s status=skip reason=not_member member_status=%s",
+            uid,
+            source,
+            status,
+        )
+        return False
+    now = datetime.now(KL_TZ)
+    users_collection.update_one(
+        {"user_id": uid, "joined_main_at": {"$exists": False}},
+        {
+            "$set": {
+                "joined_main_at": now,
+                "joined_at_source": source,
+            },
+            "$setOnInsert": {"user_id": uid},
+        },
+        upsert=True,
+    )
+    logger.info(
+        "[WELCOME][JOIN_BACKFILL] uid=%s source=%s status=ok joined_main_at=%s",
+        uid,
+        source,
+        now.isoformat(),
+    )
+    return True
 
 async def _check_official_channel_subscribed(bot, uid: int) -> tuple[bool, str]:
     if not uid:
@@ -494,10 +555,8 @@ async def handle_user_join(
         return
 
     existing_user = users_collection.find_one({"user_id": uid})
-    if existing_user and existing_user.get("joined_once"):
+    if existing_user and existing_user.get("joined_once") and existing_user.get("joined_main_at"):
         return
-
-    _ensure_welcome_eligibility(uid)
 
     users_collection.update_one(
         {"user_id": uid},
@@ -515,7 +574,18 @@ async def handle_user_join(
         },
         upsert=True,
     )
-
+    joined_at = datetime.now(KL_TZ)
+    users_collection.update_one(
+        {"user_id": uid, "joined_main_at": {"$exists": False}},
+        {"$set": {"joined_main_at": joined_at, "joined_at_source": "join_event"}},
+    )
+    _ensure_welcome_eligibility(uid)
+    logger.info(
+        "[WELCOME] join_recorded uid=%s joined_main_at=%s",
+        uid,
+        joined_at.isoformat(),
+    )
+    
     referrer_id = _resolve_referrer_id_from_invite_link(invite_link)
 
     existing_referral = _find_referral_record(uid)
@@ -528,24 +598,7 @@ async def handle_user_join(
         logger.info("[ref] uid=%s resolved_referrer=None reason=no_referrer", uid)
         return
 
-    is_member, err = await _check_official_channel_subscribed(context.bot, uid)
-    logger.info(
-        "[sub] uid=%s channel=%s is_member=%s err=%s",
-        uid,
-        OFFICIAL_CHANNEL_ID,
-        str(is_member).lower(),
-        err or "",
-    )
-
-    joined_at = datetime.utcnow()
-    if not is_member:
-        _upsert_pending_referral(uid, final_referrer_id, joined_at)
-        logger.info(
-            "[ref] uid=%s resolved_referrer=%s reason=not_subscribed",
-            uid,
-            final_referrer_id,
-        )
-        return
+    joined_at = datetime.now(KL_TZ)
 
     result = upsert_referral_and_update_user_count(
         referrals_collection,
@@ -556,6 +609,15 @@ async def handle_user_join(
         referrer_username=None,
         context={"joined_chat_at": joined_at},
     )
+    logger.info(
+        "[REFERRAL] record uid=%s referrer=%s matched=%s modified=%s upserted=%s counted=%s",
+        uid,
+        final_referrer_id,
+        result.get("matched"),
+        result.get("modified"),
+        result.get("upserted"),
+        result.get("counted"),
+    )    
     invite_link_url = getattr(invite_link, "invite_link", None)
     outcome = {}    
     if result.get("counted"):
@@ -570,8 +632,21 @@ async def handle_user_join(
                 maybe_shout_milestones(int(final_referrer_id))
             except Exception:
                 pass
+        logger.info(
+            "[REFERRAL] xp_award uid=%s referrer=%s base=%s bonuses=%s",
+            uid,
+            final_referrer_id,
+            outcome.get("base_granted"),
+            outcome.get("bonuses_awarded"),
+        )                
         referrer_doc = users_collection.find_one({"user_id": final_referrer_id}) or {}
         total_referrals = int(referrer_doc.get("referral_count", 0))
+        logger.info(
+            "[REFERRAL] success uid=%s referrer=%s counted=%s",
+            uid,
+            final_referrer_id,
+            result.get("counted"),
+        )        
         logger.info(
             "[xp] uid=%s add=%s bonus=%s total_referrals=%s upsert=%s",
             final_referrer_id,
@@ -583,6 +658,12 @@ async def handle_user_join(
     else:
         referrer_doc = users_collection.find_one({"user_id": final_referrer_id}) or {}
         total_referrals = int(referrer_doc.get("referral_count", 0))
+        logger.info(
+            "[REFERRAL] success uid=%s referrer=%s counted=%s",
+            uid,
+            final_referrer_id,
+            result.get("counted"),
+        )        
         logger.info(
             "[xp] uid=%s add=0 bonus=0 total_referrals=%s upsert=noop",
             final_referrer_id,
@@ -1944,6 +2025,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             }},
             upsert=True
         )
+        await _backfill_joined_main_at(user.id, context=context, source="backfill_on_start")        
         keyboard = [[
             InlineKeyboardButton("🚀 Open Check-in & Referral", web_app=WebAppInfo(url=WEBAPP_URL))
         ]]
@@ -2084,7 +2166,7 @@ async def join_request_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             )
             return
 
-        joined_at = datetime.utcnow()
+        joined_at = datetime.now(KL_TZ)
         _upsert_pending_referral(user.id, referrer_id, joined_at)
         logger.info(
             "[join_request] uid=%s referrer=%s invite_link=%s status=pending",
