@@ -747,31 +747,36 @@ def is_existing_user(uid: int) -> bool:
 def _get_welcome_eligibility(uid: int) -> dict | None:
     if uid is None:
         return None
-    return welcome_eligibility_col.find_one({"uid": uid})
+    return welcome_eligibility_col.find_one({"user_id": uid})
 
 def ensure_welcome_eligibility(uid: int, *, users_exists: bool | None = None) -> dict | None:
     if not uid:
-        current_app.logger.warning("[welcome] eligibility_skip reason=missing_uid uid=%s", uid)     
+        current_app.logger.warning("[WELCOME][ELIGIBILITY] skip upsert: missing uid")
         return None
     window = _welcome_window_for_user(uid)
     if not window:
         return None
     now = now_kl()
     eligible_until = window["eligible_until"]
-    welcome_eligibility_col.update_one(
-        {"uid": uid},
-        {
-            "$setOnInsert": {
-                "uid": uid,
-                "first_seen_at": now,
-                "claimed": False,
-                "claimed_at": None,
+    try:
+        welcome_eligibility_col.update_one(
+            {"user_id": uid},
+            {
+                "$setOnInsert": {
+                    "user_id": uid,
+                    "uid": uid,
+                    "first_seen_at": now,
+                    "claimed": False,
+                    "claimed_at": None,
+                },
+                "$set": {"eligible_until": eligible_until},
             },
-            "$set": {"eligible_until": eligible_until},
-        },
-        upsert=True,
-    )
-    return welcome_eligibility_col.find_one({"uid": uid})
+            upsert=True,
+        )
+    except Exception:
+        current_app.logger.exception("[visible][WELCOME_ELIGIBILITY] write failed", extra={"uid": uid})
+        return None
+    return welcome_eligibility_col.find_one({"user_id": uid})
 
 def _welcome_eligible_now(uid: int | None, doc: dict | None, *, ref: datetime | None = None, user_doc: dict | None = None) -> bool:
     if uid is None or not doc:
