@@ -36,6 +36,8 @@ def save_join(cm: ChatMemberUpdated):
     db.joins.insert_one(doc)
 
     if WELCOME_DROP_ID:
+        if not user.id:
+            return        
         now = datetime.utcnow()
         db.welcome_eligibility.update_one(
             {"user_id": user.id, "dropId": WELCOME_DROP_ID},
