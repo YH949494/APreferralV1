@@ -750,7 +750,7 @@ def _get_welcome_eligibility(uid: int) -> dict | None:
     return welcome_eligibility_col.find_one({"uid": uid})
 
 def ensure_welcome_eligibility(uid: int, *, users_exists: bool | None = None) -> dict | None:
-    if uid is None:
+    if not uid:
         return None
     window = _welcome_window_for_user(uid)
     if not window:
@@ -2047,6 +2047,8 @@ def api_claim():
             {"uid": uid},
             {"$set": {"status": "claimed", "claimed_at": now_kl(), "reason_last_fail": None}},
         )
+        if not uid:
+            return jsonify({"status": "error", "code": "not_eligible", "reason": "missing_uid"}), 403     
         welcome_eligibility_col.update_one(
             {"uid": uid},
             {"$set": {"claimed": True, "claimed_at": now_kl()}},
