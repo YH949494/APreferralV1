@@ -409,7 +409,6 @@ def _ensure_welcome_eligibility(uid: int) -> dict | None:
             "$setOnInsert": {
                 "uid": uid,
                 "first_seen_at": now,
-                "eligible_until": eligible_until,
                 "claimed": False,
                 "claimed_at": None,
             },
