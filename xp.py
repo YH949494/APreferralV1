@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-
+from config import KL_TZ
 
 logger = logging.getLogger(__name__)
 
@@ -16,6 +16,8 @@ logger = logging.getLogger(__name__)
 def now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
+def now_kl() -> datetime:
+    return datetime.now(KL_TZ)
 
 def grant_xp(
     db,
@@ -55,7 +57,7 @@ def grant_xp(
                 "source": event_type,
                 "source_id": unique_key,
                 "amount": amount,
-                "created_at": now_utc(),
+                "created_at": now_kl(),
             }
         },
         upsert=True,
@@ -78,7 +80,7 @@ def grant_xp(
                 "unique_key": unique_key,
                 "type": event_type,
                 "xp": amount,
-                "created_at": now_utc(),
+                "created_at": now_kl(),
             }
         },
         upsert=True,
