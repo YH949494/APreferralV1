@@ -393,7 +393,7 @@ def _ensure_welcome_eligibility(uid: int) -> dict | None:
     user_doc = users_collection.find_one({"user_id": uid}, {"joined_main_at": 1})
     joined_main_at = user_doc.get("joined_main_at") if user_doc else None
     if not joined_main_at:
-    now = datetime.now(KL_TZ)
+        now = datetime.now(KL_TZ)
     joined_main_kl = joined_main_at.astimezone(KL_TZ) if joined_main_at.tzinfo else joined_main_at.replace(tzinfo=KL_TZ)
     if joined_main_kl < (now - timedelta(days=WELCOME_WINDOW_DAYS)):
         logger.info(
