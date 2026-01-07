@@ -1955,8 +1955,10 @@ def api_claim():
             )         
             return jsonify({
                "status": "error",
+               "ok": False,                       
                "code": "not_eligible",
                "reason": "missing_profile_photo",
+               "error_code": "NO_PROFILE_PIC",             
                "message": "Please set a Telegram profile picture to claim the Welcome Bonus."
             }), 403
 
