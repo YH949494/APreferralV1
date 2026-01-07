@@ -1,9 +1,10 @@
 from telegram import Bot
 from datetime import datetime, timedelta
-from database import users_collection
+from database import db, users_collection
 
 # Replace with your actual group ID
 GROUP_CHAT_ID = -1002304653063
+invite_link_map_collection = db["invite_link_map"]
 
 async def get_or_create_referral_link(bot: Bot, user_id: int, username: str):
     user_data = users_collection.find_one({"user_id": user_id})
@@ -34,7 +35,21 @@ async def get_or_create_referral_link(bot: Bot, user_id: int, username: str):
             },
             upsert=True
         )
-
+        invite_link_map_collection.update_one(
+            {"invite_link": referral_link, "chat_id": GROUP_CHAT_ID},
+            {
+                "$set": {
+                    "inviter_id": user_id,
+                    "inviter_uid": user_id,
+                    "chat_id": GROUP_CHAT_ID,
+                    "invite_link": referral_link,
+                    "is_active": True,
+                },
+                "$setOnInsert": {"created_at": datetime.utcnow()},
+            },
+            upsert=True,
+        )
+        
         return referral_link
 
     except Exception as e:
