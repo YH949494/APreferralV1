@@ -9,6 +9,7 @@ provide the collections they already use (``users``, ``referrals``,
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from datetime import datetime, timedelta, timezone
@@ -32,6 +33,88 @@ REFERRAL_BONUS_XP = int(os.getenv("REFERRAL_BONUS_XP", "200"))
 REFERRAL_SUCCESS_EVENT = "ref_success"
 REFERRAL_BONUS_EVENT = "ref_bonus_triplet"
 REFERRAL_NEW_USER_EVENT = "ref_newuser"
+
+def _get_db():
+    try:
+        from database import db as database_db
+    except Exception:
+        logger.exception("[referral][validate_channel] db_unavailable")
+        return None
+    return database_db
+
+
+def try_validate_referral_by_channel(uid: int, is_member: bool) -> Dict[str, int]:
+    """Validate pending referrals based on channel membership."""
+
+    result = {"validated": 0, "counted": 0, "base_granted": 0, "bonuses_awarded": 0}
+    if not uid:
+        logger.info("[referral][validate_channel] skip reason=missing_uid")
+        return result
+    if not is_member:
+        logger.info("[referral][validate_channel] skip uid=%s reason=not_member", uid)
+        return result
+
+    db = _get_db()
+    if db is None:
+        return result
+
+    referrals_collection = db["referrals"]
+    users_collection = db["users"]
+
+    pending_ref = referrals_collection.find_one({"invitee_user_id": uid, "status": "pending"})
+    if not pending_ref:
+        return result
+
+    referrer_id = pending_ref.get("referrer_user_id") or pending_ref.get("referrer_id")
+    if not referrer_id:
+        logger.info("[referral][validate_channel] skip uid=%s reason=no_referrer", uid)
+        return result
+
+    now = now_utc()
+    update_result = upsert_referral_and_update_user_count(
+        referrals_collection,
+        users_collection,
+        referrer_user_id=referrer_id,
+        invitee_user_id=uid,
+        success_at=now,
+        referrer_username=None,
+        context={"subscribed_official_at": now},
+    )
+    result["validated"] = 1
+    result["counted"] = int(update_result.get("counted") or 0)
+    if update_result.get("counted"):
+        outcome = grant_referral_rewards(
+            db,
+            users_collection,
+            referrer_id,
+            uid,
+        )
+        result["base_granted"] = int(outcome.get("base_granted", 0))
+        result["bonuses_awarded"] = int(outcome.get("bonuses_awarded", 0))
+        referrer_doc = users_collection.find_one({"user_id": referrer_id}) or {}
+        total_referrals = int(referrer_doc.get("referral_count", 0))
+        logger.info(
+            "[xp] uid=%s add=%s bonus=%s total_referrals=%s upsert=%s",
+            referrer_id,
+            outcome.get("base_granted"),
+            outcome.get("bonuses_awarded"),
+            total_referrals,
+            "inserted" if update_result.get("upserted") else "updated",
+        )
+        logger.info(
+            "[ref] uid=%s resolved_referrer=%s reason=channel_join",
+            uid,
+            referrer_id,
+        )
+
+    return result
+
+
+async def try_validate_referral_by_channel_async(uid: int, is_member: bool) -> Dict[str, int]:
+    """Executor wrapper for channel-based referral validation."""
+
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, try_validate_referral_by_channel, uid, is_member)
 
 
 def expected_referral_xp(referral_count: int) -> int:
