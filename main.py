@@ -600,7 +600,7 @@ def _confirm_referral_on_main_join(
     if not referrer_id and existing_success:
         referrer_id = existing_success.get("referrer_user_id") or existing_success.get("referrer_id")
 
-      logger.info(
+    logger.info(
         "[REFERRAL][MAIN_JOIN] invitee=%s old=%s new=%s inviter=%s",
         invitee_user_id,
         old_status or "",
