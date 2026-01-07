@@ -609,11 +609,16 @@ def _has_profile_photo(uid: int, *, force_refresh: bool = False):
     if uid is None:
         return False
 
-    now = now_utc()
+    now = now_kl()
     if not force_refresh:
-        cached = profile_photo_cache_col.find_one({"uid": uid})
-        if cached and cached.get("expiresAt") and cached["expiresAt"] > now:
-            return bool(cached.get("hasPhoto"))
+        try:
+            cached = profile_photo_cache_col.find_one({"uid": uid})
+            exp = (cached or {}).get("expiresAt")
+            exp_aware = _as_aware_kl(exp) or _as_aware_utc(exp)
+            if exp_aware and exp_aware > now:
+                return bool(cached.get("hasPhoto"))
+        except Exception as e:
+            current_app.logger.warning("[tg] profile photo cache read/compare failed uid=%s err=%s", uid, e)
 
     token = os.environ.get("BOT_TOKEN", "")
     if not token:
