@@ -559,7 +559,13 @@ async def handle_user_join(
     joined_at = datetime.now(KL_TZ)
     users_collection.update_one(
         {"user_id": uid, "joined_main_at": {"$exists": False}},
-        {"$set": {"joined_main_at": joined_at, "joined_at_source": "join_event"}},
+        {
+            "$set": {
+                "joined_main_at": joined_at,
+                "joined_at_source": "join_event",
+                "first_join_at": joined_at,
+            }
+        },
     )
     _ensure_welcome_eligibility(uid)
     logger.info(
@@ -588,9 +594,19 @@ def _confirm_referral_on_main_join(
     old_status: str | None,
     new_status: str | None,
     invite_link=None,
-    chat_id: int | None = None,    
+    chat_id: int | None = None,
+    is_first_join: bool = True,
 ):
-    invite_link_url = getattr(invite_link, "invite_link", None) if invite_link else None
+    if not is_first_join:
+        logger.info(
+            "[REFERRAL][SKIP] reason=rejoin invitee=%s inviter=none",
+            invitee_user_id,
+        )
+        return
+    if isinstance(invite_link, str):
+        invite_link_url = invite_link
+    else:
+        invite_link_url = getattr(invite_link, "invite_link", None) if invite_link else None
     logger.info(
         "[REFERRAL][MAIN_JOIN] invitee=%s old=%s new=%s invite_link=%s",
         invitee_user_id,
@@ -601,7 +617,7 @@ def _confirm_referral_on_main_join(
 
     if not invite_link_url:
         logger.info(
-            "[REFERRAL][DENY] reason=no_invite_link invitee=%s inviter=none",
+            "[REFERRAL][SKIP] reason=no_invite_link invitee=%s inviter=none",
             invitee_user_id,
         )
         return
@@ -613,8 +629,12 @@ def _confirm_referral_on_main_join(
             invite_link_url[:25],
         )        
         mapping = invite_link_map_collection.find_one(
-            {"invite_link": invite_link_url, "chat_id": GROUP_ID},
-            {"inviter_uid": 1},
+            {
+                "invite_link": invite_link_url,
+                "chat_id": chat_id or GROUP_ID,
+                "is_active": {"$ne": False},
+            },
+            {"inviter_id": 1, "inviter_uid": 1},
         )
     except Exception:
         logger.exception(
@@ -623,7 +643,7 @@ def _confirm_referral_on_main_join(
             _short_invite_link(invite_link_url),
         )
         return
-    referrer_id = mapping.get("inviter_uid") if mapping else None
+    referrer_id = (mapping or {}).get("inviter_id") or (mapping or {}).get("inviter_uid")
     logger.info(
         "[REFERRAL][MAP_LOOKUP] invitee=%s mapping_found=%s inviter_uid=%s",
         invitee_user_id,
@@ -632,9 +652,16 @@ def _confirm_referral_on_main_join(
     )    
     if not referrer_id:
         logger.info(
-            "[REFERRAL][DENY] reason=mapping_missing invitee=%s invite_link=%s inviter=none",
+            "[REFERRAL][SKIP] reason=mapping_missing invitee=%s invite_link=%s inviter=none",
             invitee_user_id,
             _short_invite_link(invite_link_url),
+        )
+        return
+    if referrer_id == invitee_user_id:
+        logger.info(
+            "[REFERRAL][SKIP] reason=self_invite invitee=%s inviter=%s",
+            invitee_user_id,
+            referrer_id,
         )
         return
     
@@ -870,7 +897,13 @@ def get_or_create_referral_invite_link_sync(user_id: int, username: str = "") ->
         invite_link_map_collection.update_one(
             {"invite_link": invite_link, "chat_id": GROUP_ID},
             {
-                "$set": {"inviter_uid": user_id},
+                "$set": {
+                    "inviter_id": user_id,
+                    "inviter_uid": user_id,
+                    "chat_id": GROUP_ID,
+                    "invite_link": invite_link,
+                    "is_active": True,
+                },
                 "$setOnInsert": {"created_at": datetime.now(KL_TZ)},
             },
             upsert=True,
@@ -2121,6 +2154,15 @@ async def member_update_handler(update: Update, context: ContextTypes.DEFAULT_TY
     if not user or user.is_bot:
         return
 
+    is_first_join = True
+    if chat_id == GROUP_ID:
+        user_doc = users_collection.find_one(
+            {"user_id": user.id},
+            {"joined_main_at": 1, "first_join_at": 1},
+        )
+        first_join_at = (user_doc or {}).get("first_join_at") or (user_doc or {}).get("joined_main_at")
+        is_first_join = not bool(first_join_at)
+    
     if chat_id == GROUP_ID:
         logger.info(
             "[REFERRAL][MAIN_JOIN] chat_id=%s invitee=%s old=%s new=%s",
@@ -2161,7 +2203,8 @@ async def member_update_handler(update: Update, context: ContextTypes.DEFAULT_TY
                 old_status=old_status,
                 new_status=new_status,
                 invite_link=getattr(member, "invite_link", None),
-                chat_id=member.chat.id,                
+                chat_id=member.chat.id,
+                is_first_join=is_first_join,                
             )
         except Exception:
             logger.exception("[REFERRAL][MAIN_JOIN] failed invitee=%s", user.id)
