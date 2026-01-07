@@ -428,8 +428,12 @@ def ensure_referral_indexes(referrals_collection):
 
 
 def _referral_time_expr():
-    return {"$ifNull": ["$confirmed_at", {"$ifNull": ["$validated_at", "$created_at"]}]}
-
+    return {
+        "$ifNull": [
+            "$success_at",
+            {"$ifNull": ["$confirmed_at", {"$ifNull": ["$validated_at", "$created_at"]}]},
+        ]
+    }
 
 def _week_window_utc(reference: datetime | None = None):
     ref_local = (reference or datetime.now(timezone.utc)).astimezone(KL_TZ)
@@ -463,10 +467,7 @@ def compute_referral_stats(referrals_collection, user_id: int, window=None):
 
     base_match = {
         "$and": [
-            {"$or": [
-                {"status": {"$exists": False}},
-                {"status": {"$nin": ["pending", "inactive"]}},
-            ]},
+            {"status": "success"},
             {"$or": [
                 {"referrer_user_id": user_id},
                 {"referrer_id": user_id},
