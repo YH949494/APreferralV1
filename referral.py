@@ -13,6 +13,7 @@ MONGO_URL = os.environ.get("MONGO_URL")
 client = MongoClient(MONGO_URL)
 db = client["referral_bot"]
 users_collection = db["users"]
+invite_link_map_collection = db["invite_link_map"]
 
 # Your Telegram group ID (make sure the bot is admin here)
 GROUP_ID = -1002304653063
@@ -54,7 +55,21 @@ async def get_or_create_referral_link(bot: Bot, user_id: int, username: str) -> 
             }},
             upsert=True
         )
-
+        invite_link_map_collection.update_one(
+            {"invite_link": invite_link.invite_link, "chat_id": GROUP_ID},
+            {
+                "$set": {
+                    "inviter_id": user_id,
+                    "inviter_uid": user_id,
+                    "chat_id": GROUP_ID,
+                    "invite_link": invite_link.invite_link,
+                    "is_active": True,
+                },
+                "$setOnInsert": {"created_at": now},
+            },
+            upsert=True,
+        )
+        
         logger.info(f"✅ Referral link created: {invite_link.invite_link}")
         return invite_link.invite_link
 
