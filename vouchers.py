@@ -1953,7 +1953,13 @@ def api_claim():
                 drop_type,
                 audience_type,
             )         
-            return jsonify({"status": "error", "code": "not_eligible", "reason": "missing_profile_photo"}), 403
+            return jsonify({
+               "status": "error",
+               "code": "not_eligible",
+               "reason": "missing_profile_photo",
+               "message": "Please set a Telegram profile picture to claim the Welcome Bonus."
+            }), 403
+
          
     # Claim
     try:
