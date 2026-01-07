@@ -134,7 +134,12 @@ def _event_time_expr():
 
 
 def _referral_time_expr():
-    return {"$ifNull": ["$confirmed_at", {"$ifNull": ["$validated_at", "$created_at"]}]}
+    return {
+        "$ifNull": [
+            "$success_at",
+            {"$ifNull": ["$confirmed_at", {"$ifNull": ["$validated_at", "$created_at"]}]},
+        ]
+    }
 
 
 def recompute_xp_totals(start_utc, end_utc, limit: int | None = None, user_id: int | None = None):
@@ -183,10 +188,7 @@ def recompute_referral_counts(start_utc, end_utc, limit: int | None = None, user
     }
     base_match = [
         {"$expr": time_expr},
-        {"$or": [
-            {"status": {"$exists": False}},
-            {"status": {"$nin": ["pending", "inactive"]}},
-        ]},
+        {"status": "success"},
         {"$or": [
             {"referrer_user_id": {"$exists": True}},
             {"referrer_id": {"$exists": True}},
@@ -214,11 +216,24 @@ def recompute_referral_counts(start_utc, end_utc, limit: int | None = None, user
                 "total_valid": {"$sum": 1},
             }
         },
-        {"$sort": {"total_valid": -1}},
+        {"$sort": {"total_valid": -1, "_id": 1}},
     ]
     if limit:
         pipeline.append({"$limit": limit})
-
+    pipeline.extend(
+        [
+            {
+                "$lookup": {
+                    "from": "users",
+                    "localField": "_id",
+                    "foreignField": "user_id",
+                    "as": "user",
+                }
+            },
+            {"$unwind": {"path": "$user", "preserveNullAndEmptyArrays": True}},
+        ]
+    )
+    
     logger.info(
         "[xp_recompute] referrals start=%s end=%s limit=%s user=%s",
         start_utc.isoformat(),
@@ -1268,6 +1283,13 @@ def get_leaderboard():
         is_admin = bool(user_record.get("is_admin", False))
 
         week_start_utc, week_end_utc, week_start_local = _week_window_utc()
+        week_end_local = week_start_local + timedelta(days=7)
+        logger.info(
+            "[LEADERBOARD] week_window local_start=%s local_end=%s",
+            week_start_local.isoformat(),
+            week_end_local.isoformat(),
+        )
+        logger.info("[LEADERBOARD] pipeline_source=referrals")        
         month_start_utc, month_end_utc, _ = _month_window_utc()
 
         def safe_format(u):
@@ -1296,7 +1318,17 @@ def get_leaderboard():
         
         referral_rows = recompute_referral_counts(week_start_utc, week_end_utc, limit=15)
         referral_map = {row["_id"]: int(row.get("total_valid", 0)) for row in referral_rows}
-        
+        if referral_rows:
+            top_row = referral_rows[0]
+            logger.info(
+                "[LEADERBOARD] result_count=%s top1=(%s,%s)",
+                len(referral_rows),
+                top_row.get("_id"),
+                int(top_row.get("total_valid", 0)),
+            )
+        else:
+            logger.info("[LEADERBOARD] result_count=0 top1=(none)")
+            
         leaderboard_user_ids = set(xp_map.keys()) | set(referral_map.keys())
         if current_user_id:
             leaderboard_user_ids.add(current_user_id)
@@ -1333,7 +1365,7 @@ def get_leaderboard():
             total_all_map = {r["_id"]: r.get("total_all", 0) for r in total_all_rows}
 
         for row in referral_rows:
-            user_doc = user_map.get(row["_id"], {"user_id": row["_id"]})
+            user_doc = row.get("user") or user_map.get(row["_id"], {"user_id": row["_id"]})
             formatted = safe_format(user_doc)
             if not formatted:
                 continue
@@ -1408,10 +1440,15 @@ def get_leaderboard():
             "user": user_stats
         })
 
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        return jsonify({"success": False, "error": str(e)}), 500
+    except Exception:
+        logger.exception("[LEADERBOARD] failed")
+        return jsonify(
+            {
+                "success": True,
+                "leaderboard": {"checkin": [], "referral": []},
+                "user": {},
+            }
+        ), 200
 
 
 @app.route("/api/checkin-status/<int:user_id>", methods=["GET"])
