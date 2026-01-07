@@ -39,6 +39,7 @@ from apscheduler.triggers.cron import CronTrigger
 from vouchers import vouchers_bp, ensure_voucher_indexes
 
 from pymongo import MongoClient, DESCENDING, ASCENDING  # keep if used elsewhere
+from pymongo.errors import DuplicateKeyError
 import os, asyncio, traceback, csv, io, requests, logging
 import pytz
 
@@ -411,7 +412,7 @@ def _resolve_referrer_id_from_invite_link(invite_link) -> int | None:
     return None
 
 def _ensure_welcome_eligibility(uid: int) -> dict | None:
-    if not uid:
+    if uid is None:
         return None
     now = datetime.now(KL_TZ)        
     user_doc = users_collection.find_one({"user_id": uid}, {"joined_main_at": 1})
@@ -431,20 +432,24 @@ def _ensure_welcome_eligibility(uid: int) -> dict | None:
         )
         return None
     eligible_until = joined_main_kl + timedelta(days=WELCOME_WINDOW_DAYS)
-    welcome_eligibility_collection.update_one(
-        {"uid": uid},
-        {
-            "$setOnInsert": {
-                "uid": uid,
-                "first_seen_at": now,
-                "claimed": False,
-                "claimed_at": None,
+    try:
+        welcome_eligibility_collection.update_one(
+            {"user_id": uid},
+            {
+                "$setOnInsert": {
+                    "user_id": uid,
+                    "first_seen_at": now,
+                    "claimed": False,
+                    "claimed_at": None,
+                },
+                "$set": {"eligible_until": eligible_until},
             },
-            "$set": {"eligible_until": eligible_until},
-        },
-        upsert=True,
-    )
-    return welcome_eligibility_collection.find_one({"uid": uid})
+            upsert=True,
+        )
+    except DuplicateKeyError:
+        logger.exception("[WELCOME][ELIGIBILITY] write failed uid=%s", uid)
+        return None
+    return welcome_eligibility_collection.find_one({"user_id": uid})
 
 async def _check_official_channel_subscribed(bot, uid: int) -> tuple[bool, str]:
     if not uid:
