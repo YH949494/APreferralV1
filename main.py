@@ -2099,27 +2099,42 @@ async def member_update_handler(update: Update, context: ContextTypes.DEFAULT_TY
     if not member:
         return
 
+    chat_id = member.chat.id
     old_status = getattr(member.old_chat_member, "status", None)
     new_status = getattr(member.new_chat_member, "status", None)
 
-    if old_status in ("left", "kicked", "restricted") and new_status in ("member", "administrator", "creator"):
-        user = member.new_chat_member.user
-        if user.is_bot:
-            return
-            
+    # 只处理 “变成成员” 的事件
+    became_member = (new_status in ("member", "administrator", "creator")) and (
+        old_status not in ("member", "administrator", "creator")
+    )
+    if not became_member:
+        return
+
+    user = member.new_chat_member.user
+    if not user or user.is_bot:
+        return
+
+    # 1) 先记录 join（保持你原本逻辑：哪个 chat 触发就记录哪个 chat）
+    try:
+        await handle_user_join(
+            user.id,
+            user.username,
+            chat_id,
+            source="chat_member",
+            invite_link=getattr(member, "invite_link", None),
+            old_status=old_status,
+            new_status=new_status,
+            context=context,
+        )
+    except Exception:
+        logger.exception("[join] chat_member error uid=%s chat_id=%s", user.id, chat_id)
+
+    # 2) 只在官方频道：触发 referral validate（补缺失闭环）
+    if chat_id == OFFICIAL_CHANNEL_ID:
         try:
-            await handle_user_join(
-                user.id,
-                user.username,
-                member.chat.id,
-                source="chat_member",
-                invite_link=member.invite_link,
-                old_status=old_status,
-                new_status=new_status,
-                context=context,
-            )
+            await try_validate_referral_by_channel_async(user.id, context.bot)
         except Exception:
-            logger.exception("[join] chat_member error uid=%s", user.id)
+            logger.exception("[REFERRAL][VALIDATE_ON_CHANNEL_JOIN] failed uid=%s", user.id)
 
 async def new_chat_members_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.effective_message
