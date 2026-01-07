@@ -24,10 +24,11 @@ from config import (
 )
 
 from referral_rules import (
+    BASE_REFERRAL_XP,
+    REFERRAL_BONUS_XP,
     compute_referral_stats,
     ensure_referral_indexes,
     grant_referral_rewards,
-    try_validate_referral_by_channel_async,
     upsert_referral_and_update_user_count,
 )
 
@@ -556,102 +557,110 @@ async def handle_user_join(
         joined_at.isoformat(),
     )
     
-    referrer_id = _resolve_referrer_id_from_invite_link(invite_link)
+def _get_pending_referral(invitee_user_id: int) -> dict | None:
+    return referrals_collection.find_one(
+        {"invitee_user_id": invitee_user_id, "status": "pending"}
+    ) or referrals_collection.find_one(
+        {"referred_user_id": invitee_user_id, "status": "pending"}
+    )
 
-    existing_referral = _find_referral_record(uid)
-    stored_referrer_id = None
-    if existing_referral:
-        stored_referrer_id = existing_referral.get("referrer_user_id") or existing_referral.get("referrer_id")
+def _mark_pending_inactive(referral_id, reason: str, at_time: datetime):
+    if not referral_id:
+        return
+    referrals_collection.update_one(
+        {"_id": referral_id},
+        {"$set": {"status": "inactive", "inactive_at": at_time, "inactive_reason": reason}},
+    )
+def _confirm_referral_on_main_join(
+    invitee_user_id: int,
+    *,
+    old_status: str | None,
+    new_status: str | None,
+    invite_link=None,
+):
+    existing_success = referrals_collection.find_one(
+        {
+            "$and": [
+                {
+                    "$or": [
+                        {"invitee_user_id": invitee_user_id},
+                        {"referred_user_id": invitee_user_id},
+                    ]
+                },
+                {"status": "success"},
+            ]
+        },
+        {"_id": 1, "referrer_user_id": 1, "referrer_id": 1},
+    )
 
-    final_referrer_id = referrer_id or stored_referrer_id
-    if not final_referrer_id:
-        logger.info("[ref] uid=%s resolved_referrer=None reason=no_referrer", uid)
+    pending_ref = _get_pending_referral(invitee_user_id)
+    referrer_id = None
+    if pending_ref:
+        referrer_id = pending_ref.get("referrer_user_id") or pending_ref.get("referrer_id")
+    if not referrer_id and existing_success:
+        referrer_id = existing_success.get("referrer_user_id") or existing_success.get("referrer_id")
+
+      logger.info(
+        "[REFERRAL][MAIN_JOIN] invitee=%s old=%s new=%s inviter=%s",
+        invitee_user_id,
+        old_status or "",
+        new_status or "",
+        referrer_id or "none",
+    )
+
+    if existing_success:
+        logger.info(
+            "[REFERRAL][DENY] reason=invitee_already_succeeded invitee=%s inviter=%s",
+            invitee_user_id,
+            referrer_id,
+        )
+        if pending_ref:
+            _mark_pending_inactive(pending_ref.get("_id"), "invitee_already_succeeded", now_utc())
         return
 
-    joined_at = datetime.now(KL_TZ)
+    if not pending_ref or not referrer_id:
+        logger.info(
+            "[REFERRAL][DENY] reason=no_pending invitee=%s",
+            invitee_user_id,
+        )
+        return
 
+    joined_at = datetime.now(KL_TZ)  
     result = upsert_referral_and_update_user_count(
         referrals_collection,
-        users_collection,        
-        referrer_user_id=final_referrer_id,
-        invitee_user_id=uid,
+        users_collection,
+        referrer_user_id=referrer_id,
+        invitee_user_id=invitee_user_id,
         success_at=joined_at,
         referrer_username=None,
         context={"joined_chat_at": joined_at},
-    )
-    logger.info(
-        "[REFERRAL] record uid=%s referrer=%s matched=%s modified=%s upserted=%s counted=%s",
-        uid,
-        final_referrer_id,
-        result.get("matched"),
-        result.get("modified"),
-        result.get("upserted"),
-        result.get("counted"),
-    )    
-    invite_link_url = getattr(invite_link, "invite_link", None)
-    outcome = {}    
+    ) 
     if result.get("counted"):
         outcome = grant_referral_rewards(
             db,
             users_collection,
-            final_referrer_id,
-            uid,
+            referrer_id,
+            invitee_user_id,
         )
         if outcome.get("base_granted"):
             try:
-                maybe_shout_milestones(int(final_referrer_id))
+                maybe_shout_milestones(int(referrer_id))
             except Exception:
                 pass
-        logger.info(
-            "[REFERRAL] xp_award uid=%s referrer=%s base=%s bonuses=%s",
-            uid,
-            final_referrer_id,
-            outcome.get("base_granted"),
-            outcome.get("bonuses_awarded"),
-        )                
-        referrer_doc = users_collection.find_one({"user_id": final_referrer_id}) or {}
-        total_referrals = int(referrer_doc.get("referral_count", 0))
-        logger.info(
-            "[REFERRAL] success uid=%s referrer=%s counted=%s",
-            uid,
-            final_referrer_id,
-            result.get("counted"),
-        )        
-        logger.info(
-            "[xp] uid=%s add=%s bonus=%s total_referrals=%s upsert=%s",
-            final_referrer_id,
-            outcome.get("base_granted"),
-            outcome.get("bonuses_awarded"),
-            total_referrals,
-            "inserted" if result.get("upserted") else "updated",
+        xp_granted = (
+            int(outcome.get("base_granted", 0)) * BASE_REFERRAL_XP
+            + int(outcome.get("bonuses_awarded", 0)) * REFERRAL_BONUS_XP
         )
-    else:
-        referrer_doc = users_collection.find_one({"user_id": final_referrer_id}) or {}
-        total_referrals = int(referrer_doc.get("referral_count", 0))
-        logger.info(
-            "[REFERRAL] success uid=%s referrer=%s counted=%s",
-            uid,
-            final_referrer_id,
-            result.get("counted"),
-        )        
-        logger.info(
-            "[xp] uid=%s add=0 bonus=0 total_referrals=%s upsert=noop",
-            final_referrer_id,
-            total_referrals,
+            "[REFERRAL][SUCCESS] inviter=%s invitee=%s granted_xp=%s",
+            referrer_id,
+            invitee_user_id,
+            xp_granted,
         )
+        return
     logger.info(
-        "[referral_award] invitee=%s referrer=%s counted=%s base_granted=%s bonuses_awarded=%s invite_link=%s",
-        uid,
-        final_referrer_id,
-        result.get("counted"),
-        outcome.get("base_granted", 0),
-        outcome.get("bonuses_awarded", 0),
-        invite_link_url,
-    )        
-    logger.info(
-        "[ref] uid=%s resolved_referrer=%s reason=success",
-        uid,
-        final_referrer_id,
+        "[REFERRAL][DENY] reason=not_counted invitee=%s inviter=%s",
+        invitee_user_id,
+        referrer_id,
     )
 
 def _has_joined_group(invitee_user_id: int) -> bool:
@@ -687,20 +696,10 @@ def resolve_legacy_pending_referrals():
             continue
             
         if _has_joined_group(invitee_id):
-            result = upsert_referral_and_update_user_count(
-                referrals_collection,
-                users_collection,
-                referrer_id,
-                invitee_id,
-                success_at=now,                
-            )
-            if result.get("counted"):
-                grant_referral_rewards(
-                    db,
-                    users_collection,
-                    referrer_id,
-                    invitee_id,
-                )            
+            referrals_collection.update_one(
+                {"_id": ref.get("_id")},
+                {"$set": {"status": "inactive", "inactive_at": now}},             
+            )         
         else:
             referrals_collection.update_one(
                 {"_id": ref.get("_id")},
@@ -787,7 +786,6 @@ def ensure_indexes():
     ensure_xp_indexes(db)
             
     ensure_referral_indexes(referrals_collection)
-    resolve_legacy_pending_referrals()
     
 ensure_indexes()
 
@@ -1188,52 +1186,6 @@ def api_referral():
         stats = compute_referral_stats(referrals_collection, user_id)
     except Exception:
         logger.exception("[api_referral] stats_failed uid=%s", user_id)
-
-    
-    pending_ref = referrals_collection.find_one({"invitee_user_id": user_id, "status": "pending"})
-    if pending_ref:
-        referrer_id = pending_ref.get("referrer_user_id") or pending_ref.get("referrer_id")
-        is_member, err = _check_official_channel_subscribed_sync(user_id)
-        logger.info(
-            "[sub] uid=%s channel=%s is_member=%s err=%s",
-            user_id,
-            OFFICIAL_CHANNEL_ID,
-            str(is_member).lower(),
-            err or "",
-        )
-        if is_member and referrer_id:
-            now = datetime.utcnow()
-            result = upsert_referral_and_update_user_count(
-                referrals_collection,
-                users_collection,                
-                referrer_user_id=referrer_id,
-                invitee_user_id=user_id,
-                success_at=now,
-                referrer_username=None,
-                context={"subscribed_official_at": now},
-            )
-            if result.get("counted"):
-                outcome = grant_referral_rewards(
-                    db,
-                    users_collection,
-                    referrer_id,
-                    user_id,
-                )
-                referrer_doc = users_collection.find_one({"user_id": referrer_id}) or {}
-                total_referrals = int(referrer_doc.get("referral_count", 0))
-                logger.info(
-                    "[xp] uid=%s add=%s bonus=%s total_referrals=%s upsert=%s",
-                    referrer_id,
-                    outcome.get("base_granted"),
-                    outcome.get("bonuses_awarded"),
-                    total_referrals,
-                    "inserted" if result.get("upserted") else "updated",
-                )
-                logger.info(
-                    "[ref] uid=%s resolved_referrer=%s reason=subscription_recheck",
-                    user_id,
-                    referrer_id,
-                )
                 
     payload = {"success": success, "referral_link": link, **stats}
     if error:
@@ -2130,21 +2082,16 @@ async def member_update_handler(update: Update, context: ContextTypes.DEFAULT_TY
     except Exception:
         logger.exception("[join] chat_member error uid=%s chat_id=%s", user.id, chat_id)
 
-    # 2) 只在官方频道：触发 referral validate（补缺失闭环）
-    if chat_id == OFFICIAL_CHANNEL_ID:
+    if chat_id == GROUP_ID:
         try:
-            is_member, err = await _check_official_channel_subscribed(context.bot, user.id)
-            if err:
-                logger.info(
-                    "[sub] uid=%s channel=%s is_member=%s err=%s",
-                    user.id,
-                    OFFICIAL_CHANNEL_ID,
-                    str(is_member).lower(),
-                    err,
-                )
-            await try_validate_referral_by_channel_async(user.id, is_member=is_member)
+            _confirm_referral_on_main_join(
+                user.id,
+                old_status=old_status,
+                new_status=new_status,
+                invite_link=getattr(member, "invite_link", None),
+            )
         except Exception:
-            logger.exception("[REFERRAL][VALIDATE_ON_CHANNEL_JOIN] failed uid=%s", user.id)
+            logger.exception("[REFERRAL][MAIN_JOIN] failed invitee=%s", user.id)
 
 async def new_chat_members_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.effective_message
