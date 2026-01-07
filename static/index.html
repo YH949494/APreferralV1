@@ -1532,6 +1532,10 @@ document.addEventListener("click", async (e) => {
       alert(message);
       return;
     }
+    if (out?.error_code === "NO_PROFILE_PIC") {
+      alert("Please set your Telegram profile picture and try again.");
+      return;
+    }
     
     if (res.status === 401) {
       alert("Not authorized (401). Open inside Telegram WebApp or pass init_data correctly.");
