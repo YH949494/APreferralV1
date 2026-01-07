@@ -24,8 +24,6 @@ from config import (
 )
 
 from referral_rules import (
-    BASE_REFERRAL_XP,
-    REFERRAL_BONUS_XP,
     compute_referral_stats,
     ensure_referral_indexes,
     grant_referral_rewards,
@@ -261,6 +259,7 @@ monthly_xp_history_collection = db["monthly_xp_history"]
 monthly_xp_history_collection.create_index([("month", ASCENDING)])
 monthly_xp_history_collection.create_index([("user_id", ASCENDING), ("month", ASCENDING)], unique=True)
 audit_events_collection = db["audit_events"]
+invite_link_map_collection = db["invite_link_map"]
 
 def call_bot_in_loop(coro, timeout=15):
     loop = getattr(app_bot, "_running_loop", None)
@@ -319,6 +318,13 @@ def _too_soon(u: dict, gap_minutes=2) -> bool:
     if ts.tzinfo is None:
         ts = pytz.UTC.localize(ts)
     return datetime.now(pytz.UTC) - ts < timedelta(minutes=gap_minutes)
+
+def _short_invite_link(invite_link: str | None) -> str:
+    if not invite_link:
+        return ""
+    if len(invite_link) <= 36:
+        return invite_link
+    return f"{invite_link[:20]}...{invite_link[-8:]}"
 
 def maybe_shout_milestones(user_id: int):
     """
@@ -578,6 +584,43 @@ def _confirm_referral_on_main_join(
     new_status: str | None,
     invite_link=None,
 ):
+    invite_link_url = getattr(invite_link, "invite_link", None) if invite_link else None
+    logger.info(
+        "[REFERRAL][MAIN_JOIN] invitee=%s old=%s new=%s invite_link=%s",
+        invitee_user_id,
+        old_status or "",
+        new_status or "",
+        "present" if invite_link_url else "none",
+    )
+
+    if not invite_link_url:
+        logger.info(
+            "[REFERRAL][DENY] reason=no_invite_link invitee=%s inviter=none",
+            invitee_user_id,
+        )
+        return
+
+    try:
+        mapping = invite_link_map_collection.find_one(
+            {"invite_link": invite_link_url, "chat_id": GROUP_ID},
+            {"inviter_uid": 1},
+        )
+    except Exception:
+        logger.exception(
+            "[REFERRAL][DENY] reason=mapping_lookup_failed invitee=%s invite_link=%s inviter=none",
+            invitee_user_id,
+            _short_invite_link(invite_link_url),
+        )
+        return
+    referrer_id = mapping.get("inviter_uid") if mapping else None
+    if not referrer_id:
+        logger.info(
+            "[REFERRAL][DENY] reason=mapping_missing invitee=%s invite_link=%s inviter=none",
+            invitee_user_id,
+            _short_invite_link(invite_link_url),
+        )
+        return
+    
     existing_success = referrals_collection.find_one(
         {
             "$and": [
@@ -590,38 +633,13 @@ def _confirm_referral_on_main_join(
                 {"status": "success"},
             ]
         },
-        {"_id": 1, "referrer_user_id": 1, "referrer_id": 1},
+        {"_id": 1},
     )
-
-    pending_ref = _get_pending_referral(invitee_user_id)
-    referrer_id = None
-    if pending_ref:
-        referrer_id = pending_ref.get("referrer_user_id") or pending_ref.get("referrer_id")
-    if not referrer_id and existing_success:
-        referrer_id = existing_success.get("referrer_user_id") or existing_success.get("referrer_id")
-
-    logger.info(
-        "[REFERRAL][MAIN_JOIN] invitee=%s old=%s new=%s inviter=%s",
-        invitee_user_id,
-        old_status or "",
-        new_status or "",
-        referrer_id or "none",
-    )
-
     if existing_success:
         logger.info(
             "[REFERRAL][DENY] reason=invitee_already_succeeded invitee=%s inviter=%s",
             invitee_user_id,
             referrer_id,
-        )
-        if pending_ref:
-            _mark_pending_inactive(pending_ref.get("_id"), "invitee_already_succeeded", now_utc())
-        return
-
-    if not pending_ref or not referrer_id:
-        logger.info(
-            "[REFERRAL][DENY] reason=no_pending invitee=%s",
-            invitee_user_id,
         )
         return
 
@@ -647,15 +665,10 @@ def _confirm_referral_on_main_join(
                 maybe_shout_milestones(int(referrer_id))
             except Exception:
                 pass
-        xp_granted = (
-            int(outcome.get("base_granted", 0)) * BASE_REFERRAL_XP
-            + int(outcome.get("bonuses_awarded", 0)) * REFERRAL_BONUS_XP
-        )
         logger.info(        
-            "[REFERRAL][SUCCESS] inviter=%s invitee=%s granted_xp=%s",
+            "[REFERRAL][SUCCESS] inviter=%s invitee=%s source=invite_link",
             referrer_id,
             invitee_user_id,
-            xp_granted,
         )
         return
     logger.info(
@@ -776,7 +789,8 @@ def ensure_indexes():
     db.joins.create_index([("user_id", 1), ("chat_id", 1), ("joined_at", -1)])
     db.joins.create_index([("chat_id", 1), ("joined_at", -1)])
     db.joins.create_index([("via_invite", 1)])
-
+    invite_link_map_collection.create_index([("invite_link", 1), ("chat_id", 1)])
+    
     # --- optional welcome eligibility ---
     db.welcome_eligibility.create_index([("user_id", 1)], unique=True)
     db.welcome_eligibility.create_index([("expires_at", 1)], expireAfterSeconds=0)
@@ -835,6 +849,28 @@ def get_or_create_referral_invite_link_sync(user_id: int, username: str = "") ->
         }},
         upsert=True
     )
+    try:
+        invite_link_map_collection.update_one(
+            {"invite_link": invite_link, "chat_id": GROUP_ID},
+            {
+                "$set": {"inviter_uid": user_id},
+                "$setOnInsert": {"created_at": datetime.now(KL_TZ)},
+            },
+            upsert=True,
+        )
+        logger.info(
+            "[REFERRAL][LINK_CREATE] inviter=%s chat_id=%s invite_link=%s",
+            user_id,
+            GROUP_ID,
+            _short_invite_link(invite_link),
+        )
+    except Exception:
+        logger.exception(
+            "[REFERRAL][LINK_CREATE] failed inviter=%s chat_id=%s invite_link=%s",
+            user_id,
+            GROUP_ID,
+            _short_invite_link(invite_link),
+        )    
     return invite_link
 
 def require_admin_from_query():
