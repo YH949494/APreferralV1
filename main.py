@@ -583,6 +583,7 @@ def _confirm_referral_on_main_join(
     old_status: str | None,
     new_status: str | None,
     invite_link=None,
+    chat_id: int | None = None,    
 ):
     invite_link_url = getattr(invite_link, "invite_link", None) if invite_link else None
     logger.info(
@@ -601,6 +602,11 @@ def _confirm_referral_on_main_join(
         return
 
     try:
+        logger.info(
+            "[REFERRAL][MAP_LOOKUP] chat_id=%s invite_link_prefix=%s",
+            chat_id or GROUP_ID,
+            invite_link_url[:25],
+        )        
         mapping = invite_link_map_collection.find_one(
             {"invite_link": invite_link_url, "chat_id": GROUP_ID},
             {"inviter_uid": 1},
@@ -613,6 +619,12 @@ def _confirm_referral_on_main_join(
         )
         return
     referrer_id = mapping.get("inviter_uid") if mapping else None
+    logger.info(
+        "[REFERRAL][MAP_LOOKUP] invitee=%s mapping_found=%s inviter_uid=%s",
+        invitee_user_id,
+        bool(mapping),
+        referrer_id,
+    )    
     if not referrer_id:
         logger.info(
             "[REFERRAL][DENY] reason=mapping_missing invitee=%s invite_link=%s inviter=none",
@@ -2104,6 +2116,24 @@ async def member_update_handler(update: Update, context: ContextTypes.DEFAULT_TY
     if not user or user.is_bot:
         return
 
+    if chat_id == GROUP_ID:
+        logger.info(
+            "[REFERRAL][MAIN_JOIN] chat_id=%s invitee=%s old=%s new=%s",
+            member.chat.id,
+            user.id,
+            old_status,
+            new_status,
+        )
+        inv = getattr(member, "invite_link", None)
+        inv_url = None
+        if inv:
+            inv_url = getattr(inv, "invite_link", None) or getattr(inv, "invite_link", None)
+        logger.info(
+            "[REFERRAL][MAIN_JOIN] invitee=%s invite_link=%s",
+            user.id,
+            "present" if inv_url else "none",
+        )
+
     # 1) 先记录 join（保持你原本逻辑：哪个 chat 触发就记录哪个 chat）
     try:
         await handle_user_join(
@@ -2126,6 +2156,7 @@ async def member_update_handler(update: Update, context: ContextTypes.DEFAULT_TY
                 old_status=old_status,
                 new_status=new_status,
                 invite_link=getattr(member, "invite_link", None),
+                chat_id=member.chat.id,                
             )
         except Exception:
             logger.exception("[REFERRAL][MAIN_JOIN] failed invitee=%s", user.id)
