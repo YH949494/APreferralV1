@@ -27,6 +27,7 @@ from referral_rules import (
     compute_referral_stats,
     ensure_referral_indexes,
     grant_referral_rewards,
+    try_validate_referral_by_channel_async,
     upsert_referral_and_update_user_count,
 )
 
@@ -2132,7 +2133,16 @@ async def member_update_handler(update: Update, context: ContextTypes.DEFAULT_TY
     # 2) 只在官方频道：触发 referral validate（补缺失闭环）
     if chat_id == OFFICIAL_CHANNEL_ID:
         try:
-            await try_validate_referral_by_channel_async(user.id, context.bot)
+            is_member, err = await _check_official_channel_subscribed(context.bot, user.id)
+            if err:
+                logger.info(
+                    "[sub] uid=%s channel=%s is_member=%s err=%s",
+                    user.id,
+                    OFFICIAL_CHANNEL_ID,
+                    str(is_member).lower(),
+                    err,
+                )
+            await try_validate_referral_by_channel_async(user.id, is_member=is_member)
         except Exception:
             logger.exception("[REFERRAL][VALIDATE_ON_CHANNEL_JOIN] failed uid=%s", user.id)
 
