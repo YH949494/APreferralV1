@@ -651,6 +651,7 @@ def _confirm_referral_on_main_join(
             int(outcome.get("base_granted", 0)) * BASE_REFERRAL_XP
             + int(outcome.get("bonuses_awarded", 0)) * REFERRAL_BONUS_XP
         )
+        logger.info(        
             "[REFERRAL][SUCCESS] inviter=%s invitee=%s granted_xp=%s",
             referrer_id,
             invitee_user_id,
