@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta
 from telegram import Bot
 from pymongo import MongoClient
+from pymongo.errors import DuplicateKeyError
 import os
 import logging
 
@@ -55,20 +56,38 @@ async def get_or_create_referral_link(bot: Bot, user_id: int, username: str) -> 
             }},
             upsert=True
         )
-        invite_link_map_collection.update_one(
-            {"invite_link": invite_link.invite_link, "chat_id": GROUP_ID},
-            {
-                "$set": {
+        try:
+            invite_link_map_collection.insert_one(
+                {
                     "inviter_id": user_id,
                     "inviter_uid": user_id,
                     "chat_id": GROUP_ID,
                     "invite_link": invite_link.invite_link,
                     "is_active": True,
-                },
-                "$setOnInsert": {"created_at": now},
-            },
-            upsert=True,
-        )
+                    "created_at": now,
+                }
+            )
+            logger.info(
+                "[REFERRAL][LINK_CREATE_OK] inviter=%s chat_id=%s invite_link=%s db=ok",
+                user_id,
+                GROUP_ID,
+                invite_link.invite_link,
+            )
+        except DuplicateKeyError:
+            logger.info(
+                "[REFERRAL][LINK_CREATE_OK] inviter=%s chat_id=%s invite_link=%s db=duplicate",
+                user_id,
+                GROUP_ID,
+                invite_link.invite_link,
+            )
+        except Exception as e:
+            logger.exception(
+                "[REFERRAL][LINK_CREATE_DB_FAIL] inviter=%s chat_id=%s invite_link=%s err=%s",
+                user_id,
+                GROUP_ID,
+                invite_link.invite_link,
+                e,
+            )
         
         logger.info(f"✅ Referral link created: {invite_link.invite_link}")
         return invite_link.invite_link
