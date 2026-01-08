@@ -327,6 +327,13 @@ def _short_invite_link(invite_link: str | None) -> str:
         return invite_link
     return f"{invite_link[:20]}...{invite_link[-8:]}"
 
+def _truncate_invite_link(invite_link: str | None) -> str | None:
+    if not invite_link:
+        return None
+    if len(invite_link) <= 40:
+        return invite_link
+    return f"{invite_link[:40]}..."
+
 def maybe_shout_milestones(user_id: int):
     """
     Announce:
@@ -599,7 +606,7 @@ def _confirm_referral_on_main_join(
 ):
     if not is_first_join:
         logger.info(
-            "[REFERRAL][SKIP] reason=rejoin invitee=%s inviter=none",
+            "[REFERRAL][SKIP] reason=rejoin invitee=%s",
             invitee_user_id,
         )
         return
@@ -607,27 +614,24 @@ def _confirm_referral_on_main_join(
         invite_link_url = invite_link
     else:
         invite_link_url = getattr(invite_link, "invite_link", None) if invite_link else None
+    invite_link_present = bool(invite_link_url)
+    invite_link_log = _truncate_invite_link(invite_link_url)        
     logger.info(
         "[REFERRAL][MAIN_JOIN] invitee=%s old=%s new=%s invite_link=%s",
         invitee_user_id,
         old_status or "",
         new_status or "",
-        "present" if invite_link_url else "none",
+        invite_link_log,
     )
 
-    if not invite_link_url:
+    if not invite_link_present:
         logger.info(
-            "[REFERRAL][SKIP] reason=no_invite_link invitee=%s inviter=none",
+            "[REFERRAL][SKIP] reason=no_invite_link invitee=%s",
             invitee_user_id,
         )
         return
 
-    try:
-        logger.info(
-            "[REFERRAL][MAP_LOOKUP] chat_id=%s invite_link_prefix=%s",
-            chat_id or GROUP_ID,
-            invite_link_url[:25],
-        )        
+    try:      
         mapping = invite_link_map_collection.find_one(
             {
                 "invite_link": invite_link_url,
@@ -638,30 +642,31 @@ def _confirm_referral_on_main_join(
         )
     except Exception:
         logger.exception(
-            "[REFERRAL][DENY] reason=mapping_lookup_failed invitee=%s invite_link=%s inviter=none",
+            "[REFERRAL][SKIP] reason=unknown_invite_link invitee=%s invite_link=%s",
             invitee_user_id,
-            _short_invite_link(invite_link_url),
+            invite_link_log,
         )
         return
     referrer_id = (mapping or {}).get("inviter_id") or (mapping or {}).get("inviter_uid")
-    logger.info(
-        "[REFERRAL][MAP_LOOKUP] invitee=%s mapping_found=%s inviter_uid=%s",
-        invitee_user_id,
-        bool(mapping),
-        referrer_id,
-    )    
     if not referrer_id:
         logger.info(
-            "[REFERRAL][SKIP] reason=mapping_missing invitee=%s invite_link=%s inviter=none",
+            "[REFERRAL][SKIP] reason=unknown_invite_link invitee=%s invite_link=%s",
             invitee_user_id,
-            _short_invite_link(invite_link_url),
+            invite_link_log,
         )
         return
+    logger.info(
+        "[REFERRAL][MATCH] inviter=%s invitee=%s invite_link=%s",
+        referrer_id,
+        invitee_user_id,
+        invite_link_log,
+    )        
     if referrer_id == invitee_user_id:
         logger.info(
-            "[REFERRAL][SKIP] reason=self_invite invitee=%s inviter=%s",
+            "[REFERRAL][SKIP] reason=self_invite inviter=%s invitee=%s",
             invitee_user_id,
             referrer_id,
+            invitee_user_id,            
         )
         return
     
@@ -681,9 +686,8 @@ def _confirm_referral_on_main_join(
     )
     if existing_success:
         logger.info(
-            "[REFERRAL][DENY] reason=invitee_already_succeeded invitee=%s inviter=%s",
+            "[REFERRAL][SKIP] reason=already_awarded invitee=%s",
             invitee_user_id,
-            referrer_id,
         )
         return
 
@@ -709,17 +713,7 @@ def _confirm_referral_on_main_join(
                 maybe_shout_milestones(int(referrer_id))
             except Exception:
                 pass
-        logger.info(        
-            "[REFERRAL][SUCCESS] inviter=%s invitee=%s source=invite_link",
-            referrer_id,
-            invitee_user_id,
-        )
         return
-    logger.info(
-        "[REFERRAL][DENY] reason=not_counted invitee=%s inviter=%s",
-        invitee_user_id,
-        referrer_id,
-    )
 
 def _has_joined_group(invitee_user_id: int) -> bool:
     user_doc = users_collection.find_one(
@@ -2163,24 +2157,6 @@ async def member_update_handler(update: Update, context: ContextTypes.DEFAULT_TY
         first_join_at = (user_doc or {}).get("first_join_at") or (user_doc or {}).get("joined_main_at")
         is_first_join = not bool(first_join_at)
     
-    if chat_id == GROUP_ID:
-        logger.info(
-            "[REFERRAL][MAIN_JOIN] chat_id=%s invitee=%s old=%s new=%s",
-            member.chat.id,
-            user.id,
-            old_status,
-            new_status,
-        )
-        inv = getattr(member, "invite_link", None)
-        inv_url = None
-        if inv:
-            inv_url = getattr(inv, "invite_link", None) or getattr(inv, "invite_link", None)
-        logger.info(
-            "[REFERRAL][MAIN_JOIN] invitee=%s invite_link=%s",
-            user.id,
-            "present" if inv_url else "none",
-        )
-
     # 1) 先记录 join（保持你原本逻辑：哪个 chat 触发就记录哪个 chat）
     try:
         await handle_user_join(
