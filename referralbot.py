@@ -1,6 +1,7 @@
 from telegram import Bot
 from datetime import datetime, timedelta
 from database import db, users_collection
+from pymongo.errors import DuplicateKeyError
 
 # Replace with your actual group ID
 GROUP_CHAT_ID = -1002304653063
@@ -35,20 +36,31 @@ async def get_or_create_referral_link(bot: Bot, user_id: int, username: str):
             },
             upsert=True
         )
-        invite_link_map_collection.update_one(
-            {"invite_link": referral_link, "chat_id": GROUP_CHAT_ID},
-            {
-                "$set": {
+        try:
+            invite_link_map_collection.insert_one(
+                {
                     "inviter_id": user_id,
                     "inviter_uid": user_id,
                     "chat_id": GROUP_CHAT_ID,
                     "invite_link": referral_link,
                     "is_active": True,
-                },
-                "$setOnInsert": {"created_at": datetime.utcnow()},
-            },
-            upsert=True,
-        )
+                    "created_at": datetime.utcnow(),
+                }
+            )
+            print(
+                "[REFERRAL][LINK_CREATE_OK] inviter=%s chat_id=%s invite_link=%s db=ok"
+                % (user_id, GROUP_CHAT_ID, referral_link)
+            )
+        except DuplicateKeyError:
+            print(
+                "[REFERRAL][LINK_CREATE_OK] inviter=%s chat_id=%s invite_link=%s db=duplicate"
+                % (user_id, GROUP_CHAT_ID, referral_link)
+            )
+        except Exception as e:
+            print(
+                "[REFERRAL][LINK_CREATE_DB_FAIL] inviter=%s chat_id=%s invite_link=%s err=%s"
+                % (user_id, GROUP_CHAT_ID, referral_link, e)
+            )
         
         return referral_link
 
