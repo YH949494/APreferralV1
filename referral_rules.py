@@ -296,13 +296,19 @@ def upsert_referral_and_update_user_count(
     )
 
     if int(getattr(count_update, "modified_count", 0)):
+        for user_id in (referrer_user_id, invitee_user_id):
+            if not user_id:
+                continue
+            users_collection.update_one(
+                {"user_id": user_id},
+                {"$setOnInsert": {"user_id": user_id}},
+                upsert=True,
+            )        
         users_collection.update_one(
             {"user_id": referrer_user_id},
             {
                 "$inc": {"referral_count": 1, "weekly_referral_count": 1},
-                "$setOnInsert": {"user_id": referrer_user_id},
             },
-            upsert=True,
         )
         counted = 1
 
