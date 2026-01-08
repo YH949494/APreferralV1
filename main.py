@@ -896,13 +896,24 @@ def get_or_create_referral_invite_link_sync(user_id: int, username: str = "") ->
     Uses Telegram HTTP API (sync), so no asyncio/event loop issues.
     Caches the link in Mongo to avoid rate limits.
     """
-    # 1) Reuse if we already created one
-    doc = users_collection.find_one({"user_id": user_id}) or {}
-    if doc.get("referral_invite_link"):
-        return doc["referral_invite_link"]
+    # 1) Reuse latest active invite link from DB if available
+    latest_link_doc = invite_link_map_collection.find_one(
+        {"chat_id": GROUP_ID, "inviter_id": user_id, "is_active": True},
+        sort=[("created_at", -1)],
+    )
+    if latest_link_doc and latest_link_doc.get("invite_link"):
+        invite_link = latest_link_doc["invite_link"]
+        logger.info(
+            "[REFERRAL][LINK_REUSE] inviter=%s chat_id=%s invite_link=%s db=hit",
+            user_id,
+            GROUP_ID,
+            _short_invite_link(invite_link),
+        )
+        return invite_link
 
     # 2) Create a named invite link: name="ref-<user_id>"
     #    Bot MUST be admin in GROUP_ID with "Invite users via link" permission
+    doc = users_collection.find_one({"user_id": user_id}) or {}    
     name = f"ref-{user_id}"
     payload = {
         "chat_id": GROUP_ID,
