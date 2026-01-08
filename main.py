@@ -261,6 +261,7 @@ monthly_xp_history_collection.create_index([("month", ASCENDING)])
 monthly_xp_history_collection.create_index([("user_id", ASCENDING), ("month", ASCENDING)], unique=True)
 audit_events_collection = db["audit_events"]
 invite_link_map_collection = db["invite_link_map"]
+unknown_invite_links_collection = db["unknown_invite_links"]
 
 def call_bot_in_loop(coro, timeout=15):
     loop = getattr(app_bot, "_running_loop", None)
@@ -654,6 +655,26 @@ def _confirm_referral_on_main_join(
             invitee_user_id,
             invite_link_log,
         )
+        try:
+            unknown_invite_links_collection.insert_one(
+                {
+                    "chat_id": chat_id or GROUP_ID,
+                    "invite_link": invite_link_url,
+                    "invitee_id": invitee_user_id,
+                    "observed_at": datetime.now(KL_TZ),
+                    "old_status": old_status or "",
+                    "new_status": new_status or "",
+                }
+            )
+        except DuplicateKeyError:
+            pass
+        except Exception as e:
+            logger.exception(
+                "[REFERRAL][UNKNOWN_AUDIT_FAIL] invitee=%s invite_link=%s err=%s",
+                invitee_user_id,
+                invite_link_log,
+                e,
+            )        
         return
     logger.info(
         "[REFERRAL][MATCH] inviter=%s invitee=%s invite_link=%s",
@@ -827,7 +848,34 @@ def ensure_indexes():
     db.joins.create_index([("user_id", 1), ("chat_id", 1), ("joined_at", -1)])
     db.joins.create_index([("chat_id", 1), ("joined_at", -1)])
     db.joins.create_index([("via_invite", 1)])
-    invite_link_map_collection.create_index([("invite_link", 1), ("chat_id", 1)])
+    try:
+        invite_link_map_collection.create_index(
+            [("chat_id", 1), ("invite_link", 1)],
+            unique=True,
+            name="uniq_chat_invite_link",
+        )
+    except Exception as e:
+        msg = str(e)
+        if "already exists with different options" in msg:
+            try:
+                invite_link_map_collection.drop_index("uniq_chat_invite_link")
+            except Exception:
+                for ix in invite_link_map_collection.list_indexes():
+                    if ix.get("key") == {"chat_id": 1, "invite_link": 1}:
+                        invite_link_map_collection.drop_index(ix["name"])
+                        break
+            invite_link_map_collection.create_index(
+                [("chat_id", 1), ("invite_link", 1)],
+                unique=True,
+                name="uniq_chat_invite_link",
+            )
+        else:
+            print("⚠️ ensure_indexes error:", e)
+    unknown_invite_links_collection.create_index(
+        [("chat_id", 1), ("invite_link", 1), ("invitee_id", 1)],
+        unique=True,
+        name="uniq_unknown_invite",
+    )
     
     # --- optional welcome eligibility ---
     db.welcome_eligibility.create_index([("user_id", 1)], unique=True)
@@ -888,33 +936,37 @@ def get_or_create_referral_invite_link_sync(user_id: int, username: str = "") ->
         upsert=True
     )
     try:
-        invite_link_map_collection.update_one(
-            {"invite_link": invite_link, "chat_id": GROUP_ID},
+        invite_link_map_collection.insert_one(
             {
-                "$set": {
-                    "inviter_id": user_id,
-                    "inviter_uid": user_id,
-                    "chat_id": GROUP_ID,
-                    "invite_link": invite_link,
-                    "is_active": True,
-                },
-                "$setOnInsert": {"created_at": datetime.now(KL_TZ)},
-            },
-            upsert=True,
+                "inviter_id": user_id,
+                "inviter_uid": user_id,
+                "chat_id": GROUP_ID,
+                "invite_link": invite_link,
+                "is_active": True,
+                "created_at": datetime.now(KL_TZ),
+            }
         )
         logger.info(
-            "[REFERRAL][LINK_CREATE] inviter=%s chat_id=%s invite_link=%s",
+            "[REFERRAL][LINK_CREATE_OK] inviter=%s chat_id=%s invite_link=%s db=ok",
             user_id,
             GROUP_ID,
             _short_invite_link(invite_link),
         )
-    except Exception:
-        logger.exception(
-            "[REFERRAL][LINK_CREATE] failed inviter=%s chat_id=%s invite_link=%s",
+    except DuplicateKeyError:
+        logger.info(
+            "[REFERRAL][LINK_CREATE_OK] inviter=%s chat_id=%s invite_link=%s db=duplicate",
             user_id,
             GROUP_ID,
             _short_invite_link(invite_link),
-        )    
+        )
+    except Exception as e:
+        logger.exception(
+            "[REFERRAL][LINK_CREATE_DB_FAIL] inviter=%s chat_id=%s invite_link=%s err=%s",
+            user_id,
+            GROUP_ID,
+            _short_invite_link(invite_link),
+            e,
+        )
     return invite_link
 
 def require_admin_from_query():
