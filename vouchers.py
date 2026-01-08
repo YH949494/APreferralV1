@@ -15,7 +15,7 @@ new_joiner_claims_col = db["new_joiner_claims"]
 claim_rate_limits_col = db["claim_rate_limits"]
 profile_photo_cache_col = db["profile_photo_cache"]
 welcome_tickets_col = db["welcome_tickets"]
-channel_subscription_cache_col = db["channel_subscription_cache"]
+subscription_cache_col = db["subscription_cache"]
 welcome_eligibility_col = db["welcome_eligibility"]
 
 BYPASS_ADMIN = os.getenv("BYPASS_ADMIN", "0").lower() in ("1", "true", "yes", "on")
@@ -286,6 +286,7 @@ def ensure_voucher_indexes():
     welcome_tickets_col.create_index([("uid", ASCENDING)], unique=True)
     welcome_tickets_col.create_index([("cleanup_at", ASCENDING)], expireAfterSeconds=0)
     welcome_eligibility_col.create_index([("uid", ASCENDING)], unique=True)
+    subscription_cache_col.create_index([("expireAt", ASCENDING)], expireAfterSeconds=0)
  
 def parse_kl_local(dt_str: str):
     """Parse 'YYYY-MM-DD HH:MM:SS' in Kuala Lumpur local time to UTC (aware)."""
@@ -699,7 +700,7 @@ def _has_profile_photo(uid: int, *, force_refresh: bool = False):
     return has_photo
 
 ALLOWED_CHANNEL_STATUSES = {"member", "administrator", "creator"}
-CHANNEL_SUBSCRIPTION_CACHE_TTL_SECONDS = 120
+SUB_CHECK_TTL_SECONDS = int(os.getenv("SUB_CHECK_TTL_SECONDS", "120"))
 
 def is_existing_user(uid: int) -> bool:
     if uid is None:
@@ -759,17 +760,60 @@ def _official_channel_identifier():
     return None
 
 
+def _subscription_cache_key(uid: int) -> str:
+    return f"sub:{uid}"
+
+
+def get_cached_subscription(uid: int) -> bool | None:
+    if uid is None:
+        return None
+    try:
+        doc = subscription_cache_col.find_one(
+            {"_id": _subscription_cache_key(uid)},
+            {"subscribed": 1, "expireAt": 1},
+        )
+    except Exception:
+        return None
+    if not doc or not doc.get("subscribed"):
+        return None
+    expire_at = _as_aware_utc(doc.get("expireAt"))
+    if not expire_at:
+        return None
+    if now_utc() >= expire_at:
+        return None
+    return True
+
+ def set_cached_subscription_true(uid: int, ttl_seconds: int) -> None:
+    if uid is None:
+        return
+    now = now_utc()
+    expire_at = now + timedelta(seconds=ttl_seconds)
+  
+    try:
+        subscription_cache_col.update_one(
+            {"_id": _subscription_cache_key(uid)},
+            {
+                "$set": {
+                    "user_id": uid,
+                    "subscribed": True,
+                    "expireAt": expire_at,
+                    "updated_at": now,
+                }
+            },
+            upsert=True,
+        )
+    except Exception:
+        pass
+
 def check_channel_subscribed(uid: int) -> bool:
     if uid is None:
         return False
 
-    try:
-        cached = channel_subscription_cache_col.find_one({"user_id": uid}, {"_id": 1})
-    except Exception:
-        cached = None
-
+    cached = get_cached_subscription(uid)
     if cached:
+        current_app.logger.info("[SUB_CACHE][HIT] uid=%s", uid)     
         return True
+    current_app.logger.info("[SUB_CACHE][MISS] uid=%s", uid)
  
     chat_id = _official_channel_identifier()
     token = os.environ.get("BOT_TOKEN", "")
@@ -804,29 +848,10 @@ def check_channel_subscribed(uid: int) -> bool:
     status = (data.get("result") or {}).get("status")
     is_subscribed = status in ALLOWED_CHANNEL_STATUSES
     if is_subscribed:
-        now = now_utc()
-        expires_at = now + timedelta(seconds=CHANNEL_SUBSCRIPTION_CACHE_TTL_SECONDS)
-        try:
-            channel_subscription_cache_col.update_one(
-                {"user_id": uid},
-                {
-                    "$set": {
-                        "user_id": uid,
-                        "subscribed": True,
-                        "cached_at": now,
-                        "expires_at": expires_at,
-                    }
-                },
-                upsert=True,
-            )
-        except Exception:
-            pass
+        set_cached_subscription_true(uid, SUB_CHECK_TTL_SECONDS)
+        current_app.logger.info("[SUB_CACHE][SET] uid=%s ttl=%s", uid, SUB_CHECK_TTL_SECONDS)
         return True
 
-    try:
-        channel_subscription_cache_col.delete_one({"user_id": uid})
-    except Exception:
-        pass
     return False
 
 
