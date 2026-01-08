@@ -759,10 +759,8 @@ def _official_channel_identifier():
         return OFFICIAL_CHANNEL_USERNAME
     return None
 
-
 def _subscription_cache_key(uid: int) -> str:
     return f"sub:{uid}"
-
 
 def get_cached_subscription(uid: int) -> bool | None:
     if uid is None:
@@ -783,7 +781,8 @@ def get_cached_subscription(uid: int) -> bool | None:
         return None
     return True
 
- def set_cached_subscription_true(uid: int, ttl_seconds: int) -> None:
+
+def set_cached_subscription_true(uid: int, ttl_seconds: int) -> None:
     if uid is None:
         return
     now = now_utc()
