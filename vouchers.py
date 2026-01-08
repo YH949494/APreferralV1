@@ -22,6 +22,7 @@ BYPASS_ADMIN = os.getenv("BYPASS_ADMIN", "0").lower() in ("1", "true", "yes", "o
 HARDCODED_ADMIN_USERNAMES = {"gracy_ap", "teohyaohui"}  # allow manual overrides if cache is empty
 WELCOME_WINDOW_HOURS = int(getattr(_cfg, "WELCOME_WINDOW_HOURS", os.getenv("WELCOME_WINDOW_HOURS", "48")))
 WELCOME_WINDOW_DAYS = 7
+PROFILE_PHOTO_CACHE_TTL_SECONDS = 60
 
 _RAW_OFFICIAL_CHANNEL_ID = getattr(_cfg, "OFFICIAL_CHANNEL_ID", os.getenv("OFFICIAL_CHANNEL_ID"))
 try:
@@ -616,14 +617,25 @@ def _has_profile_photo(uid: int, *, force_refresh: bool = False):
             exp = (cached or {}).get("expiresAt")
             exp_aware = _as_aware_kl(exp) or _as_aware_utc(exp)
             if exp_aware and exp_aware > now:
-                return bool(cached.get("hasPhoto"))
+                has_photo = bool(cached.get("hasPhoto"))
+                current_app.logger.info(
+                    "[WELCOME][PROFILE_PIC_CHECK] uid=%s has_photo=%s source=cache",
+                    uid,
+                    str(has_photo).lower(),
+                )
+                return has_photo
+             
         except Exception as e:
             current_app.logger.warning("[tg] profile photo cache read/compare failed uid=%s err=%s", uid, e)
 
     token = os.environ.get("BOT_TOKEN", "")
     if not token:
         current_app.logger.warning("[tg] missing BOT_TOKEN for profile photo check")
-        return None
+        current_app.logger.info(
+            "[WELCOME][PROFILE_PIC_CHECK] uid=%s has_photo=false source=telegram",
+            uid,
+        )
+        return False
 
     try:
         resp = requests.get(
@@ -633,21 +645,37 @@ def _has_profile_photo(uid: int, *, force_refresh: bool = False):
         )
     except requests.RequestException as e:
         current_app.logger.warning("[tg] getUserProfilePhotos network error uid=%s err=%s", uid, e)
-        return None
+        current_app.logger.info(
+            "[WELCOME][PROFILE_PIC_CHECK] uid=%s has_photo=false source=telegram",
+            uid,
+        )
+        return False
 
     if resp.status_code != 200:
         current_app.logger.warning("[tg] getUserProfilePhotos http status=%s uid=%s", resp.status_code, uid)
-        return None
+        current_app.logger.info(
+            "[WELCOME][PROFILE_PIC_CHECK] uid=%s has_photo=false source=telegram",
+            uid,
+        )
+        return False
 
     try:
         data = resp.json()
     except ValueError:
         current_app.logger.warning("[tg] getUserProfilePhotos bad json uid=%s", uid)
-        return None
+        current_app.logger.info(
+            "[WELCOME][PROFILE_PIC_CHECK] uid=%s has_photo=false source=telegram",
+            uid,
+        )
+        return False
 
     if not data.get("ok"):
         current_app.logger.warning("[tg] getUserProfilePhotos not ok uid=%s err=%s", uid, data)
-        return None
+        current_app.logger.info(
+            "[WELCOME][PROFILE_PIC_CHECK] uid=%s has_photo=false source=telegram",
+            uid,
+        )
+        return False
 
     total = data.get("result", {}).get("total_count", 0)
     has_photo = bool(total and total > 0)
@@ -657,12 +685,17 @@ def _has_profile_photo(uid: int, *, force_refresh: bool = False):
             "$set": {
                 "hasPhoto": has_photo,
                 "checkedAt": now,
-                "expiresAt": now + timedelta(hours=24),
+                "expiresAt": now + timedelta(seconds=PROFILE_PHOTO_CACHE_TTL_SECONDS),
             },
             "$setOnInsert": {"uid": uid},
         },
         upsert=True,
     )
+    current_app.logger.info(
+        "[WELCOME][PROFILE_PIC_CHECK] uid=%s has_photo=%s source=telegram",
+        uid,
+        str(has_photo).lower(),
+    ) 
     return has_photo
 
 ALLOWED_CHANNEL_STATUSES = {"member", "administrator", "creator"}
@@ -797,7 +830,7 @@ def check_channel_subscribed(uid: int) -> bool:
     return False
 
 
-def check_has_profile_photo(uid: int) -> bool | None:
+def check_has_profile_photo(uid: int) -> bool:
     return _has_profile_photo(uid)
 
 
@@ -1933,16 +1966,6 @@ def api_claim():
             return jsonify({"status": "error", "code": "not_eligible", "reason": "expired"}), 403
 
         has_photo = check_has_profile_photo(uid)
-     
-        if has_photo is None:
-            current_app.logger.info(
-                "[claim] uid=%s drop_id=%s dtype=%s audience=%s decision=blocked reason=telegram_unavailable",
-                uid,
-                drop_id,
-                drop_type,
-                audience_type,
-            )         
-            return jsonify({"status": "error", "code": "telegram_unavailable"}), 503
         if not has_photo:
             welcome_tickets_col.update_one({"uid": uid}, {"$set": {"reason_last_fail": "no_photo"}})
             current_app.logger.info("[welcome] gate_fail uid=%s reason=no_photo", uid)
