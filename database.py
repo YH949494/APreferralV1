@@ -1,11 +1,12 @@
 from pymongo import MongoClient, ASCENDING 
 import os
 import datetime
+import logging
 import pytz  # use pytz (no ZoneInfo here)
-from referral_rules import grant_referral_rewards, upsert_referral_and_update_user_count
 from xp import grant_xp
 
 KL_TZ = pytz.timezone("Asia/Kuala_Lumpur")
+logger = logging.getLogger(__name__)
 
 MONGO_URL = os.environ.get("MONGO_URL")
 client = MongoClient(MONGO_URL)
@@ -84,14 +85,9 @@ def checkin_user(user_id):
     
 # === REFERRAL LOGIC ===
 def increment_referral(referrer_id, referred_user_id=None):
-    result = upsert_referral_and_update_user_count(
-        db.referrals,
-        users_collection,
-        referrer_id,
-        referred_user_id,
+    raise RuntimeError(
+        "Legacy referral function removed: use users-based referral flow in main.py"
     )
-    if result.get("counted"):
-        grant_referral_rewards(db, users_collection, referrer_id, referred_user_id)
         
 # === RETRIEVE STATS ===
 def get_user_stats(user_id):
