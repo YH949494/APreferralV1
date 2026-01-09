@@ -26,10 +26,6 @@ from config import (
 from referral_rules import (
     compute_referral_stats,
     ensure_referral_indexes,
-    BASE_REFERRAL_XP,
-    REFERRAL_BONUS_XP,
-    grant_referral_rewards,
-    upsert_referral_and_update_user_count,
 )
 
 from bson.json_util import dumps
@@ -40,7 +36,7 @@ from apscheduler.triggers.cron import CronTrigger
 
 from vouchers import vouchers_bp, ensure_voucher_indexes
 
-from pymongo import MongoClient, DESCENDING, ASCENDING  # keep if used elsewhere
+from pymongo import MongoClient, DESCENDING, ASCENDING, ReturnDocument  # keep if used elsewhere
 from pymongo.errors import DuplicateKeyError
 import os, asyncio, traceback, csv, io, requests, logging
 import pytz
@@ -599,86 +595,19 @@ def _mark_pending_inactive(referral_id, reason: str, at_time: datetime):
         {"_id": referral_id},
         {"$set": {"status": "inactive", "inactive_at": at_time, "inactive_reason": reason}},
     )
-
-def _is_duplicate_key_error(exc: Exception) -> bool:
-    if isinstance(exc, DuplicateKeyError):
-        return True
-    code = getattr(exc, "code", None)
-    if code == 11000:
-        return True
-    details = getattr(exc, "details", None)
-    if isinstance(details, dict) and details.get("code") == 11000:
-        return True
-    return False
-
-def _log_main_join_error(
-    step: str,
-    exc: Exception,
-    *,
-    inviter_id: int | None,
-    invitee_id: int,
-    invite_link: str | None,
-):
-    logger.exception(
-        "[REFERRAL][MAIN_JOIN] failed step=%s inviter=%s invitee=%s invite_link=%s err=%s",
-        step,
-        inviter_id or "",
-        invitee_id,
-        invite_link or "",
-        exc,
-    )
-
-def _log_referral_already_awarded(inviter_id: int | None, invitee_id: int):
-    logger.info(
-        "[REFERRAL][SKIP] reason=already_awarded invitee=%s inviter=%s source=db",
-        invitee_id,
-        inviter_id or "",
-    )
-
-
-def _log_referral_award_error(
-    step: str,
-    exc: Exception,
-    *,
-    inviter_id: int | None,
-    invitee_id: int,
-):
-    logger.exception(
-        "[REFERRAL][ERROR] step=%s inviter=%s invitee=%s err=%s",
-        step,
-        inviter_id or "",
-        invitee_id,
-        exc,
-    )
     
 def _confirm_referral_on_main_join(
     invitee_user_id: int,
     *,
-    old_status: str | None,
-    new_status: str | None,
     invite_link=None,
     chat_id: int | None = None,
-    is_first_join: bool = True,
 ):
-    if not is_first_join:
-        logger.info(
-            "[REFERRAL][SKIP] reason=rejoin invitee=%s",
-            invitee_user_id,
-        )
-        return
     if isinstance(invite_link, str):
         invite_link_url = invite_link
     else:
         invite_link_url = getattr(invite_link, "invite_link", None) if invite_link else None
     invite_link_present = bool(invite_link_url)
-    invite_link_log = _truncate_invite_link(invite_link_url)        
-    logger.info(
-        "[REFERRAL][MAIN_JOIN] invitee=%s old=%s new=%s invite_link=%s",
-        invitee_user_id,
-        old_status or "",
-        new_status or "",
-        invite_link_log,
-    )
+    invite_link_log = _truncate_invite_link(invite_link_url)
 
     if not invite_link_present:
         logger.info(
@@ -687,173 +616,75 @@ def _confirm_referral_on_main_join(
         )
         return
 
-    try:      
-        mapping = invite_link_map_collection.find_one(
-            {
-                "invite_link": invite_link_url,
-                "chat_id": chat_id or GROUP_ID,
-                "is_active": {"$ne": False},
-            },
-            {"inviter_id": 1, "inviter_uid": 1},
-        )
-    except Exception as exc:
-        _log_main_join_error(
-            "mapping_lookup",
-            exc,
-            inviter_id=None,
-            invitee_id=invitee_user_id,
-            invite_link=invite_link_log,
-        )
-        return
-    referrer_id = (mapping or {}).get("inviter_id") or (mapping or {}).get("inviter_uid")
+    mapping = invite_link_map_collection.find_one(
+        {
+            "invite_link": invite_link_url,
+            "chat_id": chat_id or GROUP_ID,
+            "is_active": {"$ne": False},
+        },
+        {"inviter_id": 1},
+    )
+    referrer_id = (mapping or {}).get("inviter_id")
     if not referrer_id:
         logger.info(
             "[REFERRAL][SKIP] reason=unknown_invite_link invitee=%s invite_link=%s",
             invitee_user_id,
             invite_link_log,
         )
-        try:
-            unknown_invite_links_collection.insert_one(
-                {
-                    "chat_id": chat_id or GROUP_ID,
-                    "invite_link": invite_link_url,
-                    "invitee_id": invitee_user_id,
-                    "observed_at": datetime.now(KL_TZ),
-                    "old_status": old_status or "",
-                    "new_status": new_status or "",
-                }
-            )
-        except DuplicateKeyError:
-            pass
-        except Exception as e:
-            logger.exception(
-                "[REFERRAL][UNKNOWN_AUDIT_FAIL] invitee=%s invite_link=%s err=%s",
-                invitee_user_id,
-                invite_link_log,
-                e,
-            )        
         return
-    logger.info(
-        "[REFERRAL][MATCH] inviter=%s invitee=%s invite_link=%s",
-        referrer_id,
-        invitee_user_id,
-        invite_link_log,
-    )        
+
     if referrer_id == invitee_user_id:
         logger.info(
             "[REFERRAL][SKIP] reason=self_invite inviter=%s invitee=%s",
-            invitee_user_id,
             referrer_id,
-            invitee_user_id,            
+            invitee_user_id,
         )
         return
-    
-    joined_at = datetime.now(KL_TZ)
-    award_record_id = None
-    award_key = {"chat_id": chat_id or GROUP_ID, "invitee_id": invitee_user_id}
-    try:
-        award_doc = {
-            **award_key,
-            "inviter_id": referrer_id,
-            "status": "pending",
-            "created_at": joined_at,
-        }
-        insert_result = referral_awards_collection.insert_one(award_doc)
-        award_record_id = insert_result.inserted_id
-    except Exception as exc:
-        if _is_duplicate_key_error(exc):
-            _log_referral_already_awarded(referrer_id, invitee_user_id)
-            return
-        _log_referral_award_error(
-            "award_lock",
-            exc,
-            inviter_id=referrer_id,
-            invitee_id=invitee_user_id,
+    existing_user = users_collection.find_one({"user_id": invitee_user_id}, {"_id": 1})
+    if existing_user:
+        logger.info(
+            "[REFERRAL][SKIP] reason=existing_user invitee=%s",
+            invitee_user_id,
         )
         return
 
+    now = datetime.now(KL_TZ)    
     try:
-        for user_id in (referrer_id, invitee_user_id):
-            users_collection.update_one(
-                {"user_id": user_id},
-                {"$setOnInsert": {"user_id": user_id}},
-                upsert=True,
-            )
-    except Exception as exc:
-        referral_awards_collection.update_one(
-            {"_id": award_record_id},
-            {"$set": {"status": "failed", "failed_at": datetime.now(KL_TZ), "error": str(exc)}},
+        users_collection.insert_one(
+            {
+                "user_id": invitee_user_id,
+                "xp_total": 0,
+                "ref_count_total": 0,
+                "created_at": now,
+            }
         )
-        _log_referral_award_error(
-            "user_upsert",
-            exc,
-            inviter_id=referrer_id,
-            invitee_id=invitee_user_id,
+    except DuplicateKeyError:
+        logger.info(
+            "[REFERRAL][SKIP] reason=existing_user invitee=%s",
+            invitee_user_id,
         )
         return
 
-    try:
-        result = upsert_referral_and_update_user_count(
-            referrals_collection,
-            users_collection,
-            referrer_user_id=referrer_id,
-            invitee_user_id=invitee_user_id,
-            success_at=joined_at,
-            referrer_username=None,
-            context={"joined_chat_at": joined_at},
-            chat_id=chat_id or GROUP_ID,
-            invite_link=invite_link_url,            
-        )
-    except Exception as exc:
-        referral_awards_collection.update_one(
-            {"_id": award_record_id},
-            {"$set": {"status": "failed", "failed_at": datetime.now(KL_TZ), "error": str(exc)}},
-        )
-        _log_referral_award_error(
-            "referral_upsert",
-            exc,
-            inviter_id=referrer_id,
-            invitee_id=invitee_user_id,
-        )
-        return
-    if result.get("counted"):
-        try:
-            outcome = grant_referral_rewards(
-                db,
-                users_collection,
-                referrer_id,
-                invitee_user_id,
-            )
-        except Exception as exc:
-            referral_awards_collection.update_one(
-                {"_id": award_record_id},
-                {"$set": {"status": "failed", "failed_at": datetime.now(KL_TZ), "error": str(exc)}},
-            )
-            _log_referral_award_error(
-                "event_insert",
-                exc,
-                inviter_id=referrer_id,
-                invitee_id=invitee_user_id,
-            )
-            return  
-        if outcome.get("base_granted"):
-            xp_delta = outcome.get("base_granted", 0) * BASE_REFERRAL_XP + outcome.get(
-                "bonuses_awarded", 0
-            ) * REFERRAL_BONUS_XP
-            logger.info(
-                "[REFERRAL][AWARD] inviter=%s invitee=%s ref_inc=%s xp=%s",
-                referrer_id,
-                invitee_user_id,
-                result.get("counted", 0),
-                xp_delta,
-            )       
-            try:
-                maybe_shout_milestones(int(referrer_id))
-            except Exception:
-                pass
-    referral_awards_collection.update_one(
-        {"_id": award_record_id},
-        {"$set": {"status": "done", "done_at": datetime.now(KL_TZ)}},
+    inviter_doc = users_collection.find_one_and_update(
+        {"user_id": referrer_id},
+        {
+            "$inc": {"ref_count_total": 1, "xp_total": 30},
+            "$setOnInsert": {"user_id": referrer_id, "created_at": now},
+        },
+        upsert=True,
+        return_document=ReturnDocument.AFTER,
+    )
+    ref_count = int((inviter_doc or {}).get("ref_count_total", 1))
+    xp_added = 30
+    if ref_count % 3 == 0:
+        users_collection.update_one({"user_id": referrer_id}, {"$inc": {"xp_total": 200}})
+        xp_added = 230
+    logger.info(
+        "[REFERRAL][AWARD] inviter=%s invitee=%s ref_count=%s xp_added=%s",
+        referrer_id,
+        invitee_user_id,
+        ref_count,
+        xp_added,
     )
     return
 
@@ -1039,7 +870,6 @@ def get_or_create_referral_invite_link_sync(user_id: int, username: str = "") ->
 
     # 2) Create a named invite link: name="ref-<user_id>"
     #    Bot MUST be admin in GROUP_ID with "Invite users via link" permission
-    doc = users_collection.find_one({"user_id": user_id}) or {}    
     name = f"ref-{user_id}"
     payload = {
         "chat_id": GROUP_ID,
@@ -1061,22 +891,10 @@ def get_or_create_referral_invite_link_sync(user_id: int, username: str = "") ->
     invite = data["result"]
     invite_link = invite["invite_link"]
 
-    # 3) Cache in Mongo
-    users_collection.update_one(
-        {"user_id": user_id},
-        {"$set": {
-            "username": username or doc.get("username"),
-            "referral_invite_link": invite_link,
-            "referral_invite_name": name,
-            "referral_invite_id": invite.get("invite_link")  # not a numeric id, but keep for auditing
-        }},
-        upsert=True
-    )
     try:
         invite_link_map_collection.insert_one(
             {
                 "inviter_id": user_id,
-                "inviter_uid": user_id,
                 "chat_id": GROUP_ID,
                 "invite_link": invite_link,
                 "is_active": True,
@@ -1091,7 +909,7 @@ def get_or_create_referral_invite_link_sync(user_id: int, username: str = "") ->
         )
     except DuplicateKeyError:
         logger.info(
-            "[REFERRAL][LINK_CREATE_OK] inviter=%s chat_id=%s invite_link=%s db=duplicate",
+            "[REFERRAL][LINK_REUSE] inviter=%s chat_id=%s invite_link=%s db=duplicate",
             user_id,
             GROUP_ID,
             _short_invite_link(invite_link),
@@ -2336,15 +2154,6 @@ async def member_update_handler(update: Update, context: ContextTypes.DEFAULT_TY
     user = member.new_chat_member.user
     if not user or user.is_bot:
         return
-
-    is_first_join = True
-    if chat_id == GROUP_ID:
-        user_doc = users_collection.find_one(
-            {"user_id": user.id},
-            {"joined_main_at": 1, "first_join_at": 1},
-        )
-        first_join_at = (user_doc or {}).get("first_join_at") or (user_doc or {}).get("joined_main_at")
-        is_first_join = not bool(first_join_at)
     
     # 1) 先记录 join（保持你原本逻辑：哪个 chat 触发就记录哪个 chat）
     try:
@@ -2362,24 +2171,11 @@ async def member_update_handler(update: Update, context: ContextTypes.DEFAULT_TY
         logger.exception("[join] chat_member error uid=%s chat_id=%s", user.id, chat_id)
 
     if chat_id == GROUP_ID:
-        try:
-            _confirm_referral_on_main_join(
-                user.id,
-                old_status=old_status,
-                new_status=new_status,
-                invite_link=getattr(member, "invite_link", None),
-                chat_id=member.chat.id,
-                is_first_join=is_first_join,                
-            )
-        except Exception as exc:
-            invite_link_log = _truncate_invite_link(getattr(member, "invite_link", None))
-            _log_main_join_error(
-                "handler",
-                exc,
-                inviter_id=None,
-                invitee_id=user.id,
-                invite_link=invite_link_log,
-            )
+        _confirm_referral_on_main_join(
+            user.id,
+            invite_link=getattr(member, "invite_link", None),
+            chat_id=member.chat.id,
+        )
 
 async def new_chat_members_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.effective_message
