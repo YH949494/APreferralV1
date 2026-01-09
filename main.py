@@ -430,7 +430,8 @@ def _resolve_referrer_id_from_invite_link(invite_link) -> int | None:
     return None
 
 def _ensure_welcome_eligibility(uid: int) -> dict | None:
-    if uid is None:
+    if not isinstance(uid, int):
+        logger.error("[WELCOME][ELIGIBILITY] skip uid_missing uid=%s", uid)
         return None
     now = datetime.now(KL_TZ)        
     user_doc = users_collection.find_one({"user_id": uid}, {"joined_main_at": 1})
@@ -449,25 +450,25 @@ def _ensure_welcome_eligibility(uid: int) -> dict | None:
             joined_main_kl.isoformat(),
         )
         return None
-    eligible_until = joined_main_kl + timedelta(days=WELCOME_WINDOW_DAYS)
     try:
         welcome_eligibility_collection.update_one(
-            {"user_id": uid},
+            {"uid": uid},
             {
                 "$setOnInsert": {
-                    "user_id": uid,
-                    "first_seen_at": now,
-                    "claimed": False,
-                    "claimed_at": None,
+                    "created_at": now,
+                    "joined_main_at": joined_main_at or now,
+                    "source": "main_join",
                 },
-                "$set": {"eligible_until": eligible_until},
             },
             upsert=True,
         )
     except DuplicateKeyError:
-        logger.exception("[WELCOME][ELIGIBILITY] write failed uid=%s", uid)
+        logger.info("[WELCOME][ELIGIBILITY] dup uid=%s (already inserted)", uid)
         return None
-    return welcome_eligibility_collection.find_one({"user_id": uid})
+    except Exception:
+        logger.exception("[WELCOME][ELIGIBILITY] write_failed uid=%s", uid)
+        return None
+    return welcome_eligibility_collection.find_one({"uid": uid})
 
 async def _check_official_channel_subscribed(bot, uid: int) -> tuple[bool, str]:
     if not uid:
@@ -857,6 +858,20 @@ def ensure_indexes():
     ensure_xp_indexes(db)
                 
 ensure_indexes()
+
+def _cleanup_welcome_null_uid():
+    if os.getenv("WELCOME_CLEANUP_NULL_UID") != "1":
+        return
+    try:
+        result = welcome_eligibility_collection.delete_many({"uid": None})
+        logger.info(
+            "[WELCOME][ELIGIBILITY] cleanup_null_uid deleted=%s",
+            result.deleted_count,
+        )
+    except Exception:
+        logger.exception("[WELCOME][ELIGIBILITY] cleanup_null_uid_failed")
+
+_cleanup_welcome_null_uid()
 
 def get_or_create_referral_invite_link_sync(user_id: int, username: str = "") -> str:
     """
