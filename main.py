@@ -110,7 +110,7 @@ def _month_window_utc(reference: datetime | None = None):
         end_local = start_local.replace(month=start_local.month + 1)
     return start_local.astimezone(timezone.utc), end_local.astimezone(timezone.utc), start_local
 
-def compute_referral_stats(_referrals_collection, user_id: int, window=None):
+def compute_referral_stats(user_id: int, window=None):
     """Return referral stats using users collection counters."""
 
     if not user_id:
@@ -141,16 +141,6 @@ def _previous_month_window_utc(reference: datetime | None = None):
 
 def _event_time_expr():
     return {"$ifNull": ["$created_at", "$ts"]}
-
-
-def _referral_time_expr():
-    return {
-        "$ifNull": [
-            "$success_at",
-            {"$ifNull": ["$confirmed_at", {"$ifNull": ["$validated_at", "$created_at"]}]},
-        ]
-    }
-
 
 def recompute_xp_totals(start_utc, end_utc, limit: int | None = None, user_id: int | None = None):
     """Aggregate XP from xp_events between the given UTC boundaries."""
@@ -186,73 +176,6 @@ def recompute_xp_totals(start_utc, end_utc, limit: int | None = None, user_id: i
     )
     return list(xp_events_collection.aggregate(pipeline))
 
-
-def recompute_referral_counts(start_utc, end_utc, limit: int | None = None, user_id: int | None = None):
-    """Aggregate successful referrals within the window."""
-
-    time_expr = {
-        "$and": [
-            {"$gte": [_referral_time_expr(), start_utc]},
-            {"$lt": [_referral_time_expr(), end_utc]},
-        ]
-    }
-    base_match = [
-        {"$expr": time_expr},
-        {"status": "success"},
-        {"$or": [
-            {"referrer_user_id": {"$exists": True}},
-            {"referrer_id": {"$exists": True}},
-        ]},
-        {"$or": [
-            {"referrer_user_id": {"$ne": None}},
-            {"referrer_id": {"$ne": None}},
-        ]},
-        {"$or": [
-            {"invitee_user_id": {"$exists": True, "$ne": None}},
-            {"referred_user_id": {"$exists": True, "$ne": None}},
-        ]},        
-    ]
-    if user_id is not None:
-        base_match.append({"$or": [
-            {"referrer_user_id": user_id},
-            {"referrer_id": user_id},
-        ]})
-        
-    pipeline = [
-        {"$match": {"$and": base_match}},
-        {
-            "$group": {
-                "_id": {"$ifNull": ["$referrer_user_id", "$referrer_id"]},
-                "total_valid": {"$sum": 1},
-            }
-        },
-        {"$sort": {"total_valid": -1, "_id": 1}},
-    ]
-    if limit:
-        pipeline.append({"$limit": limit})
-    pipeline.extend(
-        [
-            {
-                "$lookup": {
-                    "from": "users",
-                    "localField": "_id",
-                    "foreignField": "user_id",
-                    "as": "user",
-                }
-            },
-            {"$unwind": {"path": "$user", "preserveNullAndEmptyArrays": True}},
-        ]
-    )
-    
-    logger.info(
-        "[xp_recompute] referrals start=%s end=%s limit=%s user=%s",
-        start_utc.isoformat(),
-        end_utc.isoformat(),
-        limit,
-        user_id,
-    )
-    return list(referrals_collection.aggregate(pipeline))
-
 # ----------------------------
 # MongoDB Setup
 # ----------------------------
@@ -263,7 +186,6 @@ history_collection = db["weekly_leaderboard_history"]
 bonus_voucher_collection = db["bonus_voucher"]
 admin_cache_col = db["admin_cache"]
 xp_events_collection = db["xp_events"]
-referrals_collection = db["referrals"]
 referral_awards_collection = db["referral_events"]
 welcome_eligibility_collection = db["welcome_eligibility"]
 monthly_xp_history_collection = db["monthly_xp_history"]
@@ -406,13 +328,6 @@ def maybe_shout_milestones(user_id: int):
 def maybe_give_first_checkin_bonus(user_id: int):
     grant_xp(db, user_id, "first_checkin", "first_checkin", FIRST_CHECKIN_BONUS_XP)
 
-def _find_referral_record(invitee_user_id: int):
-    return referrals_collection.find_one(
-        {"invitee_user_id": invitee_user_id}
-    ) or referrals_collection.find_one(
-        {"referred_user_id": invitee_user_id}
-    )
-
 def _resolve_referrer_id_from_invite_link(invite_link) -> int | None:
     if not invite_link:
         return None
@@ -511,23 +426,6 @@ def _check_official_channel_subscribed_sync(uid: int) -> tuple[bool, str]:
     status = (data.get("result") or {}).get("status")
     return status in ("member", "administrator", "creator"), ""
 
-def _upsert_pending_referral(invitee_user_id: int, referrer_user_id: int, joined_at: datetime):
-    referrals_collection.update_one(
-        {"invitee_user_id": invitee_user_id},
-        {
-            "$setOnInsert": {
-                "invitee_user_id": invitee_user_id,
-                "referrer_user_id": referrer_user_id,
-                "created_at": joined_at,
-            },
-            "$set": {
-                "status": "pending",
-                "updated_at": joined_at,
-                "joined_chat_at": joined_at,
-            },
-        },
-        upsert=True,
-    )
 
 async def handle_user_join(
     uid: int,
@@ -593,21 +491,6 @@ async def handle_user_join(
         joined_at.isoformat(),
     )
     
-def _get_pending_referral(invitee_user_id: int) -> dict | None:
-    return referrals_collection.find_one(
-        {"invitee_user_id": invitee_user_id, "status": "pending"}
-    ) or referrals_collection.find_one(
-        {"referred_user_id": invitee_user_id, "status": "pending"}
-    )
-
-def _mark_pending_inactive(referral_id, reason: str, at_time: datetime):
-    if not referral_id:
-        return
-    referrals_collection.update_one(
-        {"_id": referral_id},
-        {"$set": {"status": "inactive", "inactive_at": at_time, "inactive_reason": reason}},
-    )
-    
 def _confirm_referral_on_main_join(
     invitee_user_id: int,
     *,
@@ -618,10 +501,9 @@ def _confirm_referral_on_main_join(
         invite_link_url = invite_link
     else:
         invite_link_url = getattr(invite_link, "invite_link", None) if invite_link else None
-    invite_link_present = bool(invite_link_url)
     invite_link_log = _truncate_invite_link(invite_link_url)
 
-    if not invite_link_present:
+    if not invite_link_url:
         logger.info(
             "[REFERRAL][SKIP] reason=no_invite_link invitee=%s",
             invitee_user_id,
@@ -639,7 +521,7 @@ def _confirm_referral_on_main_join(
     referrer_id = (mapping or {}).get("inviter_id")
     if not referrer_id:
         logger.info(
-            "[REFERRAL][SKIP] reason=unknown_invite_link invitee=%s invite_link=%s",
+            "[REFERRAL][SKIP] reason=unmapped_link invitee=%s invite_link=%s",
             invitee_user_id,
             invite_link_log,
         )
@@ -652,102 +534,75 @@ def _confirm_referral_on_main_join(
             invitee_user_id,
         )
         return
-    existing_user = users_collection.find_one({"user_id": invitee_user_id}, {"_id": 1})
-    if existing_user:
-        logger.info(
-            "[REFERRAL][SKIP] reason=existing_user invitee=%s",
-            invitee_user_id,
-        )
-        return
 
-    now = datetime.now(KL_TZ)    
+    now = datetime.now(KL_TZ)
+    step = "insert_invitee" 
     try:
-        users_collection.insert_one(
+        result = users_collection.update_one(
+            {"user_id": invitee_user_id},
             {
-                "user_id": invitee_user_id,
-                "xp_total": 0,
-                "ref_count_total": 0,
-                "created_at": now,
-            }
-        )
-    except DuplicateKeyError:
-        logger.info(
-            "[REFERRAL][SKIP] reason=existing_user invitee=%s",
-            invitee_user_id,
-        )
-        return
-
-    inviter_doc = users_collection.find_one_and_update(
-        {"user_id": referrer_id},
-        {
-            "$inc": {
-                "ref_count_total": 1,
-                "weekly_referral_count": 1,
-                "monthly_referral_count": 1,
+                "$setOnInsert": {
+                    "user_id": invitee_user_id,
+                    "xp_total": 0,
+                    "ref_count_total": 0,
+                    "weekly_referral_count": 0,
+                    "monthly_referral_count": 0,
+                    "weekly_xp": 0,
+                    "monthly_xp": 0,
+                    "created_at": now,
+                }
             },
-            "$setOnInsert": {"user_id": referrer_id, "created_at": now},
-        },
-        upsert=True,
-        return_document=ReturnDocument.AFTER,
-    )
-    ref_count = int((inviter_doc or {}).get("ref_count_total", 1))
-    xp_added, bonus_added = calc_referral_award(ref_count)
-    users_collection.update_one(
-        {"user_id": referrer_id},
-        {"$inc": {"xp_total": xp_added}},
-    )
-    logger.info(
-        "[REFERRAL][AWARD] inviter=%s invitee=%s ref_count=%s xp_added=%s bonus_added=%s",
-        referrer_id,
-        invitee_user_id,
-        ref_count,
-        xp_added,
-        bonus_added,        
-    )
-    return
-
-def _has_joined_group(invitee_user_id: int) -> bool:
-    user_doc = users_collection.find_one(
-        {"user_id": invitee_user_id, "joined_once": True},
-        {"_id": 1},
-    )
-
-    if user_doc:
-        return True
-    return bool(
-        db.joins.find_one(
-            {"user_id": invitee_user_id, "event": "join", "chat_id": GROUP_ID},
-            {"_id": 1},
+            upsert=True,
         )
-    )
-
-def resolve_legacy_pending_referrals():
-    pending_refs = list(referrals_collection.find({"status": "pending"}))
-    if not pending_refs:
-        return
-        
-    now = datetime.utcnow()
-    for ref in pending_refs:
-        invitee_id = ref.get("invitee_user_id") or ref.get("referred_user_id")
-        referrer_id = ref.get("referrer_user_id") or ref.get("referrer_id")
-
-        if not invitee_id or not referrer_id:
-            referrals_collection.update_one(
-                {"_id": ref.get("_id")},
-                {"$set": {"status": "inactive", "inactive_at": now}},
+        if not result.upserted_id:
+            logger.info(
+                "[REFERRAL][SKIP] reason=already_in_db inviter=%s invitee=%s",
+                referrer_id,
+                invitee_user_id,
             )
-            continue
-            
-        if _has_joined_group(invitee_id):
-            referrals_collection.update_one(
-                {"_id": ref.get("_id")},
-                {"$set": {"status": "inactive", "inactive_at": now}},             
-            )         
-        else:
-            referrals_collection.update_one(
-                {"_id": ref.get("_id")},
-                {"$set": {"status": "inactive", "inactive_at": now}},
-            )
+            return
+
+        step = "increment_inviter_counts"
+        inviter_doc = users_collection.find_one_and_update(
+            {"user_id": referrer_id},
+            {
+                "$inc": {
+                    "ref_count_total": 1,
+                    "weekly_referral_count": 1,
+                    "monthly_referral_count": 1,
+                },
+                "$setOnInsert": {"user_id": referrer_id, "created_at": now},
+            },
+            upsert=True,
+            return_document=ReturnDocument.AFTER,
+        )
+        ref_total = int((inviter_doc or {}).get("ref_count_total", 1))
+        weekly_ref = int((inviter_doc or {}).get("weekly_referral_count", 1))
+
+        step = "increment_inviter_xp"
+        xp_added, bonus_added = calc_referral_award(ref_total)
+        users_collection.update_one(
+            {"user_id": referrer_id},
+            {"$inc": {"xp_total": xp_added, "weekly_xp": xp_added, "monthly_xp": xp_added}},
+        )
+        logger.info(
+            "[REFERRAL][AWARD] inviter=%s invitee=%s ref_total=%s weekly_ref=%s xp_added=%s bonus_added=%s",
+            referrer_id,
+            invitee_user_id,
+            ref_total,
+            weekly_ref,
+            xp_added,
+            bonus_added,
+        )
+    except Exception as e:
+        logger.exception(
+            "[REFERRAL][ERROR] step=%s inviter=%s invitee=%s err=%s",
+            step,
+            referrer_id,
+            invitee_user_id,
+            e,
+        )
+    return
 
 def ensure_indexes():
     """
@@ -1301,7 +1156,7 @@ def api_referral():
         logger.warning("[api_referral] link_generation_failed uid=%s error=%s", user_id, e)
 
     try:
-        stats = compute_referral_stats(referrals_collection, user_id)
+        stats = compute_referral_stats(user_id)
     except Exception:
         logger.exception("[api_referral] stats_failed uid=%s", user_id)
                 
@@ -2240,10 +2095,8 @@ async def join_request_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             )
             return
 
-        joined_at = datetime.now(KL_TZ)
-        _upsert_pending_referral(user.id, referrer_id, joined_at)
         logger.info(
-            "[join_request] uid=%s referrer=%s invite_link=%s status=pending",
+            "[join_request] uid=%s referrer=%s invite_link=%s status=ignored",
             user.id,
             referrer_id,
             getattr(invite_link, "invite_link", None),
