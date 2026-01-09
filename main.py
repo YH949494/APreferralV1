@@ -801,6 +801,8 @@ def _confirm_referral_on_main_join(
             success_at=joined_at,
             referrer_username=None,
             context={"joined_chat_at": joined_at},
+            chat_id=chat_id or GROUP_ID,
+            invite_link=invite_link_url,            
         )
     except Exception as exc:
         referral_awards_collection.update_one(
@@ -1010,7 +1012,7 @@ def ensure_indexes():
     xp_events_collection.create_index([("user_id", 1), ("reason", 1)])
     ensure_xp_indexes(db)
             
-    ensure_referral_indexes(referrals_collection)
+    ensure_referral_indexes(referrals_collection, chat_id=GROUP_ID)
     
 ensure_indexes()
 
