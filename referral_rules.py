@@ -594,7 +594,7 @@ def ensure_referral_indexes(referrals_collection, *, chat_id: int | None = None)
                 )
                 
     referrals_collection.create_index([("referrer_user_id", 1)])
-     try:
+    try:
         referrals_collection.create_index(
             [("chat_id", 1), ("referred_user_id", 1)],
             unique=True,
@@ -607,7 +607,7 @@ def ensure_referral_indexes(referrals_collection, *, chat_id: int | None = None)
     except DuplicateKeyError:
         logger.warning("[Referral][index] duplicate_detected chat_id/referred_user_id")
     except Exception:
-        logger.exception("[Referral][index] failed chat_id/referred_user_id index")   
+        logger.exception("[Referral][index] failed chat_id/referred_user_id index") 
     invitee_index_ok = False    
     try:
         referrals_collection.create_index(
