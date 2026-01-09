@@ -680,7 +680,11 @@ def _confirm_referral_on_main_join(
     inviter_doc = users_collection.find_one_and_update(
         {"user_id": referrer_id},
         {
-            "$inc": {"ref_count_total": 1},
+            "$inc": {
+                "ref_count_total": 1,
+                "weekly_referral_count": 1,
+                "monthly_referral_count": 1,
+            },
             "$setOnInsert": {"user_id": referrer_id, "created_at": now},
         },
         upsert=True,
