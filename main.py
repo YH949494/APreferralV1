@@ -23,10 +23,7 @@ from config import (
     WEEKLY_REFERRAL_BUCKET,
 )
 
-from referral_rules import (
-    compute_referral_stats,
-    ensure_referral_indexes,
-)
+from referral_rules import calc_referral_award
 
 from bson.json_util import dumps
 from xp import ensure_xp_indexes, grant_xp, now_utc
@@ -112,6 +109,20 @@ def _month_window_utc(reference: datetime | None = None):
     else:
         end_local = start_local.replace(month=start_local.month + 1)
     return start_local.astimezone(timezone.utc), end_local.astimezone(timezone.utc), start_local
+
+def compute_referral_stats(_referrals_collection, user_id: int, window=None):
+    """Return referral stats using users collection counters."""
+
+    if not user_id:
+        return {"total_referrals": 0, "weekly_referrals": 0, "monthly_referrals": 0}
+
+    user_doc = users_collection.find_one(
+        {"user_id": user_id},
+        {"ref_count_total": 1, "weekly_referral_count": 1},
+    ) or {}
+    total = int(user_doc.get("ref_count_total", 0))
+    weekly = int(user_doc.get("weekly_referral_count", 0))
+    return {"total_referrals": total, "weekly_referrals": weekly, "monthly_referrals": 0}
 
 
 def _previous_month_window_utc(reference: datetime | None = None):
@@ -668,23 +679,25 @@ def _confirm_referral_on_main_join(
     inviter_doc = users_collection.find_one_and_update(
         {"user_id": referrer_id},
         {
-            "$inc": {"ref_count_total": 1, "xp_total": 30},
+            "$inc": {"ref_count_total": 1},
             "$setOnInsert": {"user_id": referrer_id, "created_at": now},
         },
         upsert=True,
         return_document=ReturnDocument.AFTER,
     )
     ref_count = int((inviter_doc or {}).get("ref_count_total", 1))
-    xp_added = 30
-    if ref_count % 3 == 0:
-        users_collection.update_one({"user_id": referrer_id}, {"$inc": {"xp_total": 200}})
-        xp_added = 230
+    xp_added, bonus_added = calc_referral_award(ref_count)
+    users_collection.update_one(
+        {"user_id": referrer_id},
+        {"$inc": {"xp_total": xp_added}},
+    )
     logger.info(
-        "[REFERRAL][AWARD] inviter=%s invitee=%s ref_count=%s xp_added=%s",
+        "[REFERRAL][AWARD] inviter=%s invitee=%s ref_count=%s xp_added=%s bonus_added=%s",
         referrer_id,
         invitee_user_id,
         ref_count,
         xp_added,
+        bonus_added,        
     )
     return
 
@@ -842,9 +855,7 @@ def ensure_indexes():
     
     xp_events_collection.create_index([("user_id", 1), ("reason", 1)])
     ensure_xp_indexes(db)
-            
-    ensure_referral_indexes(referrals_collection, chat_id=GROUP_ID)
-    
+                
 ensure_indexes()
 
 def get_or_create_referral_invite_link_sync(user_id: int, username: str = "") -> str:
@@ -1330,7 +1341,7 @@ def get_leaderboard():
             week_start_local.isoformat(),
             week_end_local.isoformat(),
         )
-        logger.info("[LEADERBOARD] pipeline_source=referrals")        
+        logger.info("[LEADERBOARD] pipeline_source=users")
         month_start_utc, month_end_utc, _ = _month_window_utc()
 
         def safe_format(u):
@@ -1357,15 +1368,22 @@ def get_leaderboard():
             if row.get("user_id") is not None
         }
         
-        referral_rows = recompute_referral_counts(week_start_utc, week_end_utc, limit=15)
-        referral_map = {row["_id"]: int(row.get("total_valid", 0)) for row in referral_rows}
+        referral_rows = list(
+            users_collection.find(
+                {"user_id": {"$ne": None}},
+                {"user_id": 1, "username": 1, "ref_count_total": 1},
+            )
+            .sort("ref_count_total", DESCENDING)
+            .limit(15)
+        )
+        referral_map = {row["user_id"]: int(row.get("ref_count_total", 0)) for row in referral_rows}
         if referral_rows:
             top_row = referral_rows[0]
             logger.info(
                 "[LEADERBOARD] result_count=%s top1=(%s,%s)",
                 len(referral_rows),
-                top_row.get("_id"),
-                int(top_row.get("total_valid", 0)),
+                top_row.get("user_id"),
+                int(top_row.get("ref_count_total", 0)),
             )
         else:
             logger.info("[LEADERBOARD] result_count=0 top1=(none)")
@@ -1389,34 +1407,23 @@ def get_leaderboard():
         referral_board = []
         total_all_map: dict[int, int] = {}
         if is_admin:
-            total_all_rows = referrals_collection.aggregate(
-                [
-                    {"$match": {"$or": [
-                        {"status": {"$exists": False}},
-                        {"status": {"$nin": ["pending", "inactive"]}},
-                    ]}},
-                    {
-                        "$group": {
-                            "_id": {"$ifNull": ["$referrer_user_id", "$referrer_id"]},
-                            "total_all": {"$sum": 1},
-                        }
-                    },
-                ]
-            )
-            total_all_map = {r["_id"]: r.get("total_all", 0) for r in total_all_rows}
+            total_all_map = {
+                row.get("user_id"): int(row.get("ref_count_total", 0))
+                for row in referral_rows
+            }
 
         for row in referral_rows:
-            user_doc = row.get("user") or user_map.get(row["_id"], {"user_id": row["_id"]})
+            user_doc = row.get("user") or user_map.get(row["user_id"], {"user_id": row["user_id"]})
             formatted = safe_format(user_doc)
             if not formatted:
                 continue
             entry = {
                 "username": formatted,
-                "total_valid": row.get("total_valid", 0),
-                "referrals": row.get("total_valid", 0),
+                "total_valid": row.get("ref_count_total", 0),
+                "referrals": row.get("ref_count_total", 0),
             }
             if is_admin:
-                entry["total_all"] = total_all_map.get(row["_id"], row.get("total_valid", 0))
+                entry["total_all"] = total_all_map.get(row["user_id"], row.get("ref_count_total", 0))
 
             referral_board.append(entry)
             
@@ -1427,18 +1434,14 @@ def get_leaderboard():
         
         user_weekly_xp = xp_map.get(current_user_id, int(user_record.get("weekly_xp", 0)))
 
-        user_referral_stats = {"weekly_referrals": 0, "monthly_referrals": 0, "total_referrals": 0}
-        if current_user_id:
-            user_referral_stats = compute_referral_stats(referrals_collection, current_user_id)
-
-        user_weekly_referrals = user_referral_stats.get("weekly_referrals", 0)
+        user_weekly_referrals = int(user_record.get("weekly_referral_count", 0))
         
         user_monthly_row = []
         if current_user_id:
             user_monthly_row = recompute_xp_totals(month_start_utc, month_end_utc, user_id=current_user_id)
         monthly_xp_value = int(user_monthly_row[0].get("xp", 0)) if user_monthly_row else 0
 
-        lifetime_valid_refs = user_referral_stats.get("total_referrals", 0)
+        lifetime_valid_refs = int(user_record.get("ref_count_total", 0))
 
         if user_record:
             stored_weekly = int(user_record.get("weekly_xp", 0))
