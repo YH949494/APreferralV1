@@ -257,6 +257,7 @@ bonus_voucher_collection = db["bonus_voucher"]
 admin_cache_col = db["admin_cache"]
 xp_events_collection = db["xp_events"]
 referrals_collection = db["referrals"]
+referral_awards_collection = db["referral_events"]
 welcome_eligibility_collection = db["welcome_eligibility"]
 monthly_xp_history_collection = db["monthly_xp_history"]
 monthly_xp_history_collection.create_index([("month", ASCENDING)])
@@ -629,9 +630,25 @@ def _log_main_join_error(
 
 def _log_referral_already_awarded(inviter_id: int | None, invitee_id: int):
     logger.info(
-        "[REFERRAL][SKIP] reason=already_awarded invitee=%s inviter=%s",
+        "[REFERRAL][SKIP] reason=already_awarded invitee=%s inviter=%s source=db",
         invitee_id,
         inviter_id or "",
+    )
+
+
+def _log_referral_award_error(
+    step: str,
+    exc: Exception,
+    *,
+    inviter_id: int | None,
+    invitee_id: int,
+):
+    logger.exception(
+        "[REFERRAL][ERROR] step=%s inviter=%s invitee=%s err=%s",
+        step,
+        inviter_id or "",
+        invitee_id,
+        exc,
     )
     
 def _confirm_referral_on_main_join(
@@ -731,28 +748,30 @@ def _confirm_referral_on_main_join(
         )
         return
     
-    existing_success = referrals_collection.find_one(
-        {
-            "$and": [
-                {
-                    "$or": [
-                        {"invitee_user_id": invitee_user_id},
-                        {"referred_user_id": invitee_user_id},
-                    ]
-                },
-                {"status": "success"},
-            ]
-        },
-        {"_id": 1},
-    )
-    if existing_success:
-        logger.info(
-            "[REFERRAL][SKIP] reason=already_awarded invitee=%s",
-            invitee_user_id,
+    joined_at = datetime.now(KL_TZ)
+    award_record_id = None
+    award_key = {"chat_id": chat_id or GROUP_ID, "invitee_id": invitee_user_id}
+    try:
+        award_doc = {
+            **award_key,
+            "inviter_id": referrer_id,
+            "status": "pending",
+            "created_at": joined_at,
+        }
+        insert_result = referral_awards_collection.insert_one(award_doc)
+        award_record_id = insert_result.inserted_id
+    except Exception as exc:
+        if _is_duplicate_key_error(exc):
+            _log_referral_already_awarded(referrer_id, invitee_user_id)
+            return
+        _log_referral_award_error(
+            "award_lock",
+            exc,
+            inviter_id=referrer_id,
+            invitee_id=invitee_user_id,
         )
         return
 
-    joined_at = datetime.now(KL_TZ)  
     try:
         for user_id in (referrer_id, invitee_user_id):
             users_collection.update_one(
@@ -761,15 +780,15 @@ def _confirm_referral_on_main_join(
                 upsert=True,
             )
     except Exception as exc:
-        if _is_duplicate_key_error(exc):
-            _log_referral_already_awarded(referrer_id, invitee_user_id)
-            return
-        _log_main_join_error(
+        referral_awards_collection.update_one(
+            {"_id": award_record_id},
+            {"$set": {"status": "failed", "failed_at": datetime.now(KL_TZ), "error": str(exc)}},
+        )
+        _log_referral_award_error(
             "user_upsert",
             exc,
             inviter_id=referrer_id,
             invitee_id=invitee_user_id,
-            invite_link=invite_link_log,
         )
         return
 
@@ -784,15 +803,15 @@ def _confirm_referral_on_main_join(
             context={"joined_chat_at": joined_at},
         )
     except Exception as exc:
-        if _is_duplicate_key_error(exc):
-            _log_referral_already_awarded(referrer_id, invitee_user_id)
-            return
-        _log_main_join_error(
+        referral_awards_collection.update_one(
+            {"_id": award_record_id},
+            {"$set": {"status": "failed", "failed_at": datetime.now(KL_TZ), "error": str(exc)}},
+        )
+        _log_referral_award_error(
             "referral_upsert",
             exc,
             inviter_id=referrer_id,
             invitee_id=invitee_user_id,
-            invite_link=invite_link_log,
         )
         return
     if result.get("counted"):
@@ -804,33 +823,37 @@ def _confirm_referral_on_main_join(
                 invitee_user_id,
             )
         except Exception as exc:
-            if _is_duplicate_key_error(exc):
-                _log_referral_already_awarded(referrer_id, invitee_user_id)
-                return
-            _log_main_join_error(
+            referral_awards_collection.update_one(
+                {"_id": award_record_id},
+                {"$set": {"status": "failed", "failed_at": datetime.now(KL_TZ), "error": str(exc)}},
+            )
+            _log_referral_award_error(
                 "event_insert",
                 exc,
                 inviter_id=referrer_id,
                 invitee_id=invitee_user_id,
-                invite_link=invite_link_log,
             )
-            return        
+            return  
         if outcome.get("base_granted"):
             xp_delta = outcome.get("base_granted", 0) * BASE_REFERRAL_XP + outcome.get(
                 "bonuses_awarded", 0
             ) * REFERRAL_BONUS_XP
             logger.info(
-                "[REFERRAL][AWARD] inviter=%s invitee=%s xp=%s ref_inc=%s",
+                "[REFERRAL][AWARD] inviter=%s invitee=%s ref_inc=%s xp=%s",
                 referrer_id,
                 invitee_user_id,
-                xp_delta,
                 result.get("counted", 0),
-            )            
+                xp_delta,
+            )       
             try:
                 maybe_shout_milestones(int(referrer_id))
             except Exception:
                 pass
-        return
+    referral_awards_collection.update_one(
+        {"_id": award_record_id},
+        {"$set": {"status": "done", "done_at": datetime.now(KL_TZ)}},
+    )
+    return
 
 def _has_joined_group(invitee_user_id: int) -> bool:
     user_doc = users_collection.find_one(
@@ -972,7 +995,12 @@ def ensure_indexes():
         unique=True,
         name="uniq_unknown_invite",
     )
-    
+        referral_awards_collection.create_index(
+        [("chat_id", 1), ("invitee_id", 1)],
+        unique=True,
+        name="uniq_referral_award",
+    )
+
     # --- optional welcome eligibility ---
     db.welcome_eligibility.create_index([("user_id", 1)], unique=True)
     db.welcome_eligibility.create_index([("expires_at", 1)], expireAfterSeconds=0)
