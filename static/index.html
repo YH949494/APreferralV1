@@ -1630,12 +1630,12 @@ document.addEventListener("click", async (e) => {
       ).join("\n");
 
       const referral = data.leaderboard.referral.map((u, i) =>
-        `${i + 1}. ${u.username || ''} - ${u.total_valid ?? u.referrals ?? 0} Ref`
+        `${i + 1}. ${u.username || ''} - ${u.weekly_referral_count ?? u.total_valid ?? u.referrals ?? 0} Ref`
       ).join("\n");
       
       const myXP = data.user?.xp || 0;
       const myMonthlyXP = data.user?.monthly_xp || 0;
-      const myRef = data.user?.total_valid ?? data.user?.referrals ?? 0;
+      const myRef = data.user?.weekly_referral_count ?? data.user?.total_valid ?? data.user?.referrals ?? 0;
       const myName = user.username ? `@${user.username}` : (user.first_name || "You");
       
       const myStatus = (data.user && data.user.status) ? data.user.status : "Normal";
