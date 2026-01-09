@@ -158,6 +158,9 @@ def upsert_referral_success(
     success_at: datetime | None = None,
     referrer_username: str | None = None,
     context: Dict | None = None,
+    *,
+    chat_id: int | None = None,
+    invite_link: str | None = None,    
 ) -> Dict[str, int | None]:
     """Idempotently mark a referral as successful for an invitee."""
 
@@ -183,6 +186,21 @@ def upsert_referral_success(
     kl_local = now.astimezone(KL_TZ)
     week_key = kl_local.strftime("%Y-%W")
     month_key = kl_local.strftime("%Y-%m")
+
+    set_fields = {
+        "status": "success",
+        "success_at": now,
+        "confirmed_at": now,
+        "week_key": week_key,
+        "month_key": month_key,
+        "referred_user_id": invitee_user_id,
+        "inviter_id": referrer_user_id,
+        "invite_link": invite_link,
+        "ts": now,
+        **proof_fields,
+    }
+    if chat_id is not None:
+        set_fields["chat_id"] = chat_id
     
     update = {
         "$setOnInsert": {
@@ -191,18 +209,20 @@ def upsert_referral_success(
             "referrer_username": referrer_username,
             "created_at": now,
         },
-        "$set": {
-            "status": "success",
-            "success_at": now,            
-            "confirmed_at": now,
-            "week_key": week_key,
-            "month_key": month_key,           
-            **proof_fields,
-        },
+        "$set": set_fields,
     }
+    if chat_id is not None:
+        update["$setOnInsert"]["chat_id"] = chat_id
+    if invitee_user_id is not None:
+        update["$setOnInsert"]["referred_user_id"] = invitee_user_id
 
+    if chat_id is not None:
+        upsert_filter = {"chat_id": chat_id, "referred_user_id": invitee_user_id}
+    else:
+        upsert_filter = {"referred_user_id": invitee_user_id}
+        
     result = referrals_collection.update_one(
-        {"invitee_user_id": invitee_user_id},
+        upsert_filter,
         update,
         upsert=True,
     )
@@ -228,13 +248,21 @@ def upsert_referral_and_update_user_count(
     success_at: datetime | None = None,
     referrer_username: str | None = None,
     context: Dict | None = None,
+    *,
+    chat_id: int | None = None,
+    invite_link: str | None = None,    
 ) -> Dict[str, int | None]:
     """Upsert a successful referral and increment user counts once."""
 
     existing = None
     if invitee_user_id:
         existing = referrals_collection.find_one(
-            {"invitee_user_id": invitee_user_id},
+            {
+                "$or": [
+                    {"invitee_user_id": invitee_user_id},
+                    {"referred_user_id": invitee_user_id},
+                ]
+            },
             {"status": 1, "valid_counted": 1, "referrer_user_id": 1, "referrer_id": 1},
         )
 
@@ -245,6 +273,8 @@ def upsert_referral_and_update_user_count(
         success_at=success_at,
         referrer_username=referrer_username,
         context=context,
+        chat_id=chat_id,
+        invite_link=invite_link,        
     )
     counted = 0
 
@@ -268,30 +298,34 @@ def upsert_referral_and_update_user_count(
     if not should_count:
         return {**result, "counted": counted}
 
+    count_filter = {
+        "$and": [
+            {
+                "$or": [
+                    {"invitee_user_id": invitee_user_id},
+                    {"referred_user_id": invitee_user_id},
+                ]
+            },
+            {
+                "$or": [
+                    {"referrer_user_id": referrer_user_id},
+                    {"referrer_id": referrer_user_id},
+                ]
+            },
+            {"status": "success"},
+            {
+                "$or": [
+                    {"valid_counted": {"$exists": False}},
+                    {"valid_counted": False},
+                ]
+            },
+        ]
+    }
+    if chat_id is not None:
+        count_filter["$and"].append({"chat_id": chat_id})
+    
     count_update = referrals_collection.update_one(
-        {
-            "$and": [
-                {
-                    "$or": [
-                        {"invitee_user_id": invitee_user_id},
-                        {"referred_user_id": invitee_user_id},
-                    ]
-                },
-                {
-                    "$or": [
-                        {"referrer_user_id": referrer_user_id},
-                        {"referrer_id": referrer_user_id},
-                    ]
-                },
-                {"status": "success"},
-                {
-                    "$or": [
-                        {"valid_counted": {"$exists": False}},
-                        {"valid_counted": False},
-                    ]
-                },
-            ]
-        },
+        count_filter,
         {"$set": {"valid_counted": True, "counted_at": now_utc()}},
     )
 
@@ -460,7 +494,25 @@ def reconcile_referrals(
     return mismatches
 
 
-def ensure_referral_indexes(referrals_collection):
+def cleanup_null_referred_user_ids(
+    referrals_collection,
+    *,
+    delete: bool = False,
+) -> int:
+    query = {"referred_user_id": {"$type": "null"}}
+    count = referrals_collection.count_documents(query)
+    if not count:
+        return 0
+    if delete:
+        result = referrals_collection.delete_many(query)
+        deleted = int(getattr(result, "deleted_count", 0))
+        logger.warning("[Referral][cleanup] deleted referrals with null referred_user_id=%s", deleted)
+        return deleted
+    logger.warning("[Referral][warn] found referrals with null referred_user_id=%s", count)
+    return count
+
+
+def ensure_referral_indexes(referrals_collection, *, chat_id: int | None = None):
     """Create indexes used for referral workflows."""
 
     invitee_migration = referrals_collection.update_many(
@@ -494,8 +546,68 @@ def ensure_referral_indexes(referrals_collection):
         getattr(referrer_migration, "modified_count", 0),
         getattr(referrer_migration, "matched_count", 0),
     )
-    
+
+
+    referred_migration = referrals_collection.update_many(
+        {
+            "$or": [
+                {"referred_user_id": {"$exists": False}},
+                {"referred_user_id": None},
+            ],
+            "invitee_user_id": {"$exists": True, "$ne": None},
+        },
+        [{"$set": {"referred_user_id": "$invitee_user_id"}}],
+    )
+    logger.info(
+        "[Referral] migrated referred_user_id on %s docs (matched=%s)",
+        getattr(referred_migration, "modified_count", 0),
+        getattr(referred_migration, "matched_count", 0),
+    )
+
+    if chat_id is not None:
+        chat_migration = referrals_collection.update_many(
+            {
+                "$or": [
+                    {"chat_id": {"$exists": False}},
+                    {"chat_id": None},
+                ]
+            },
+            {"$set": {"chat_id": chat_id}},
+        )
+        logger.info(
+            "[Referral] migrated chat_id on %s docs (matched=%s)",
+            getattr(chat_migration, "modified_count", 0),
+            getattr(chat_migration, "matched_count", 0),
+        )
+
+    cleanup_null_referred_user_ids(referrals_collection, delete=False)
+
+    for ix in referrals_collection.list_indexes():
+        if ix.get("key") == {"referred_user_id": 1} and ix.get("unique"):
+            try:
+                referrals_collection.drop_index(ix["name"])
+                logger.info("[Referral][index] dropped legacy referred_user_id index=%s", ix["name"])
+            except Exception:
+                logger.exception(
+                    "[Referral][index] failed dropping legacy referred_user_id index=%s",
+                    ix.get("name"),
+                )
+                
     referrals_collection.create_index([("referrer_user_id", 1)])
+     try:
+        referrals_collection.create_index(
+            [("chat_id", 1), ("referred_user_id", 1)],
+            unique=True,
+            name="uq_chat_referred_user_id",
+            partialFilterExpression={
+                "chat_id": {"$type": "number"},
+                "referred_user_id": {"$type": "number"},
+            },
+        )
+    except DuplicateKeyError:
+        logger.warning("[Referral][index] duplicate_detected chat_id/referred_user_id")
+    except Exception:
+        logger.exception("[Referral][index] failed chat_id/referred_user_id index")   
     invitee_index_ok = False    
     try:
         referrals_collection.create_index(
