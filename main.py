@@ -995,7 +995,7 @@ def ensure_indexes():
         unique=True,
         name="uniq_unknown_invite",
     )
-        referral_awards_collection.create_index(
+    referral_awards_collection.create_index(
         [("chat_id", 1), ("invitee_id", 1)],
         unique=True,
         name="uniq_referral_award",
