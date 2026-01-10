@@ -408,6 +408,7 @@ def _ensure_welcome_eligibility(uid: int) -> dict | None:
             {"uid": uid},
             {
                 "$setOnInsert": {
+                    "uid": uid,                    
                     "created_at": now,
                     "joined_main_at": joined_main_at or now,
                     "source": "main_join",
@@ -658,6 +659,7 @@ def _confirm_referral_on_main_join(
                 "$inc": {
                     "ref_count_total": 1,
                     "weekly_referral_count": 1,
+                    "monthly_referral_count": 1,                    
                 },
                 "$setOnInsert": {"user_id": referrer_id, "created_at": now},
             },
@@ -791,7 +793,7 @@ def ensure_indexes():
             [("user_id", 1)],
             unique=True,
             name="uniq_user_id",
-            partialFilterExpression={"user_id": {"$ne": None}},
+            sparse=True,
         )
     except Exception as e:
         msg = str(e)
@@ -807,7 +809,7 @@ def ensure_indexes():
                 [("user_id", 1)],
                 unique=True,
                 name="uniq_user_id",
-                partialFilterExpression={"user_id": {"$ne": None}},
+                sparse=True,
             )
         else:
             print("⚠️ ensure_indexes error:", e)    
@@ -850,7 +852,7 @@ def ensure_indexes():
     )
 
     # --- optional welcome eligibility ---
-    db.welcome_eligibility.create_index([("user_id", 1)], unique=True)
+    db.welcome_eligibility.create_index([("uid", 1)], unique=True)
     db.welcome_eligibility.create_index([("expires_at", 1)], expireAfterSeconds=0)
     db.welcome_tickets.create_index([("uid", 1)], unique=True)
     db.welcome_tickets.create_index([("cleanup_at", 1)], expireAfterSeconds=0)
@@ -861,16 +863,18 @@ def ensure_indexes():
 ensure_indexes()
 
 def _cleanup_welcome_null_uid():
-    if os.getenv("WELCOME_CLEANUP_NULL_UID") != "1":
+    if os.getenv("WELCOME_CLEANUP_BAD_UID") != "1":
         return
     try:
-        result = welcome_eligibility_collection.delete_many({"uid": None})
+        result = welcome_eligibility_collection.delete_many(
+            {"$or": [{"uid": None}, {"uid": {"$exists": False}}]}
+        )
         logger.info(
-            "[WELCOME][ELIGIBILITY] cleanup_null_uid deleted=%s",
+            "[WELCOME][ELIGIBILITY] cleanup_bad_uid deleted=%s",
             result.deleted_count,
         )
     except Exception:
-        logger.exception("[WELCOME][ELIGIBILITY] cleanup_null_uid_failed")
+        logger.exception("[WELCOME][ELIGIBILITY] cleanup_bad_uid_failed")
 
 _cleanup_welcome_null_uid()
 
@@ -1391,19 +1395,19 @@ def get_leaderboard():
         referral_rows = list(
             users_collection.find(
                 {"user_id": {"$ne": None}},
-                {"user_id": 1, "username": 1, "ref_count_total": 1},
+                {"user_id": 1, "username": 1, "weekly_referral_count": 1, "ref_count_total": 1},
             )
-            .sort("ref_count_total", DESCENDING)
+            .sort("weekly_referral_count", DESCENDING)
             .limit(15)
         )
-        referral_map = {row["user_id"]: int(row.get("ref_count_total", 0)) for row in referral_rows}
+        referral_map = {row["user_id"]: int(row.get("weekly_referral_count", 0)) for row in referral_rows}
         if referral_rows:
             top_row = referral_rows[0]
             logger.info(
                 "[LEADERBOARD] result_count=%s top1=(%s,%s)",
                 len(referral_rows),
                 top_row.get("user_id"),
-                int(top_row.get("ref_count_total", 0)),
+                int(top_row.get("weekly_referral_count", 0)),
             )
         else:
             logger.info("[LEADERBOARD] result_count=0 top1=(none)")
@@ -1439,8 +1443,8 @@ def get_leaderboard():
                 continue
             entry = {
                 "username": formatted,
-                "total_valid": row.get("ref_count_total", 0),
-                "referrals": row.get("ref_count_total", 0),
+                "total_valid": row.get("weekly_referral_count", 0),
+                "referrals": row.get("weekly_referral_count", 0),
             }
             if is_admin:
                 entry["total_all"] = total_all_map.get(row["user_id"], row.get("ref_count_total", 0))
@@ -2205,6 +2209,8 @@ async def new_chat_members_handler(update: Update, context: ContextTypes.DEFAULT
     message = update.effective_message
     if not message or not message.new_chat_members:
         return
+    if message.chat.id == GROUP_ID:
+        return        
     for user in message.new_chat_members:
         if user.is_bot:
             continue
