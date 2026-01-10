@@ -48,3 +48,11 @@ def archive_weekly_leaderboard():
     )    
     db.users.update_many({}, {"$set": {"weekly_xp": 0, "weekly_referral_count": 0}})
     logger.info("[RESET][WEEKLY] weekly_xp_ref_reset ok")
+
+
+def reset_monthly_referrals():
+    """
+    Reset monthly referral counters (run on the first day of the month 00:00 KL).
+    """
+    result = db.users.update_many({}, {"$set": {"monthly_referral_count": 0}})
+    logger.info("[RESET][MONTHLY] monthly_referral_reset modified=%s", result.modified_count)
