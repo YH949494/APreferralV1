@@ -32,6 +32,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from vouchers import vouchers_bp, ensure_voucher_indexes
+from scheduler import reset_monthly_referrals
 
 from pymongo import MongoClient, DESCENDING, ASCENDING, ReturnDocument  # keep if used elsewhere
 from pymongo.errors import DuplicateKeyError
@@ -194,6 +195,8 @@ monthly_xp_history_collection.create_index([("user_id", ASCENDING), ("month", AS
 audit_events_collection = db["audit_events"]
 invite_link_map_collection = db["invite_link_map"]
 unknown_invite_links_collection = db["unknown_invite_links"]
+referral_audit_collection = db["referral_audit"]
+unknown_invite_audit_collection = db["unknown_invite_audit"]
 
 def call_bot_in_loop(coro, timeout=15):
     loop = getattr(app_bot, "_running_loop", None)
@@ -266,6 +269,41 @@ def _truncate_invite_link(invite_link: str | None) -> str | None:
     if len(invite_link) <= 40:
         return invite_link
     return f"{invite_link[:40]}..."
+
+def _write_referral_audit(
+    *,
+    status: str,
+    reason: str,
+    chat_id: int | None,
+    invitee_user_id: int | None,
+    invitee_username: str | None,
+    invite_link: str | None,
+    inviter_user_id: int | None = None,
+    error: str | None = None,
+    extra: dict | None = None,
+):
+    payload = {
+        "ts_utc": datetime.utcnow(),
+        "chat_id": chat_id,
+        "invitee_user_id": invitee_user_id,
+        "invitee_username": invitee_username,
+        "invite_link": invite_link,
+        "status": status,
+        "reason": reason,
+        "inviter_user_id": inviter_user_id,
+        "error": error,
+    }
+    if extra:
+        payload.update(extra)
+    try:
+        referral_audit_collection.insert_one(payload)
+    except Exception:
+        logger.exception(
+            "[REFERRAL][ERROR] audit_write_failed invitee=%s inviter=%s reason=%s",
+            invitee_user_id,
+            inviter_user_id,
+            reason,
+        )
 
 def maybe_shout_milestones(user_id: int):
     """
@@ -494,6 +532,7 @@ async def handle_user_join(
 def _confirm_referral_on_main_join(
     invitee_user_id: int,
     *,
+    invitee_username: str | None = None,    
     invite_link=None,
     chat_id: int | None = None,
 ):
@@ -504,9 +543,18 @@ def _confirm_referral_on_main_join(
     invite_link_log = _truncate_invite_link(invite_link_url)
 
     if not invite_link_url:
+        _write_referral_audit(
+            status="skipped",
+            reason="no_invite_link",
+            chat_id=chat_id or GROUP_ID,
+            invitee_user_id=invitee_user_id,
+            invitee_username=invitee_username,
+            invite_link=None,
+        )        
         logger.info(
-            "[REFERRAL][SKIP] reason=no_invite_link invitee=%s",
+            "[REFERRAL][SKIP] reason=no_invite_link invitee=%s chat_id=%s",
             invitee_user_id,
+            chat_id or GROUP_ID,            
         )
         return
 
@@ -520,14 +568,49 @@ def _confirm_referral_on_main_join(
     )
     referrer_id = (mapping or {}).get("inviter_id")
     if not referrer_id:
+        _write_referral_audit(
+            status="skipped",
+            reason="unknown_invite_link",
+            chat_id=chat_id or GROUP_ID,
+            invitee_user_id=invitee_user_id,
+            invitee_username=invitee_username,
+            invite_link=invite_link_url,
+        )
+        try:
+            unknown_invite_audit_collection.insert_one(
+                {
+                    "ts_utc": datetime.utcnow(),
+                    "chat_id": chat_id or GROUP_ID,
+                    "invitee_user_id": invitee_user_id,
+                    "invitee_username": invitee_username,
+                    "invite_link": invite_link_url,
+                    "status": "skipped",
+                    "reason": "unknown_invite_link",
+                }
+            )
+        except Exception:
+            logger.exception(
+                "[REFERRAL][ERROR] unknown_link_audit_failed invitee=%s invite_link=%s",
+                invitee_user_id,
+                invite_link_log,
+            )        
         logger.info(
-            "[REFERRAL][SKIP] reason=unmapped_link invitee=%s invite_link=%s",
+            "[REFERRAL][UNKNOWN_LINK] reason=unknown_invite_link invitee=%s invite_link=%s",
             invitee_user_id,
             invite_link_log,
         )
         return
 
     if referrer_id == invitee_user_id:
+        _write_referral_audit(
+            status="skipped",
+            reason="self_invite",
+            chat_id=chat_id or GROUP_ID,
+            invitee_user_id=invitee_user_id,
+            invitee_username=invitee_username,
+            invite_link=invite_link_url,
+            inviter_user_id=referrer_id,
+        )        
         logger.info(
             "[REFERRAL][SKIP] reason=self_invite inviter=%s invitee=%s",
             referrer_id,
@@ -538,23 +621,29 @@ def _confirm_referral_on_main_join(
     now = datetime.now(KL_TZ)
     step = "insert_invitee" 
     try:
-        result = users_collection.update_one(
+        existing_invitee = users_collection.find_one_and_update(
             {"user_id": invitee_user_id},
             {
                 "$setOnInsert": {
                     "user_id": invitee_user_id,
-                    "xp_total": 0,
-                    "ref_count_total": 0,
-                    "weekly_referral_count": 0,
-                    "monthly_referral_count": 0,
-                    "weekly_xp": 0,
-                    "monthly_xp": 0,
+                    "username": invitee_username,
                     "created_at": now,
+                    "joined_main_at": now,                    
                 }
             },
             upsert=True,
+            return_document=ReturnDocument.BEFORE,            
         )
-        if not result.upserted_id:
+        if existing_invitee:
+            _write_referral_audit(
+                status="skipped",
+                reason="already_in_db",
+                chat_id=chat_id or GROUP_ID,
+                invitee_user_id=invitee_user_id,
+                invitee_username=invitee_username,
+                invite_link=invite_link_url,
+                inviter_user_id=referrer_id,
+            )
             logger.info(
                 "[REFERRAL][SKIP] reason=already_in_db inviter=%s invitee=%s",
                 referrer_id,
@@ -569,7 +658,6 @@ def _confirm_referral_on_main_join(
                 "$inc": {
                     "ref_count_total": 1,
                     "weekly_referral_count": 1,
-                    "monthly_referral_count": 1,
                 },
                 "$setOnInsert": {"user_id": referrer_id, "created_at": now},
             },
@@ -585,6 +673,21 @@ def _confirm_referral_on_main_join(
             {"user_id": referrer_id},
             {"$inc": {"xp_total": xp_added, "weekly_xp": xp_added, "monthly_xp": xp_added}},
         )
+        _write_referral_audit(
+            status="awarded",
+            reason="awarded",
+            chat_id=chat_id or GROUP_ID,
+            invitee_user_id=invitee_user_id,
+            invitee_username=invitee_username,
+            invite_link=invite_link_url,
+            inviter_user_id=referrer_id,
+            extra={
+                "xp_added": xp_added,
+                "bonus_added": bonus_added,
+                "new_ref_count_total": ref_total,
+                "weekly_referral_count": weekly_ref,
+            },
+        )        
         logger.info(
             "[REFERRAL][AWARD] inviter=%s invitee=%s ref_total=%s weekly_ref=%s xp_added=%s bonus_added=%s",
             referrer_id,
@@ -595,6 +698,16 @@ def _confirm_referral_on_main_join(
             bonus_added,
         )
     except Exception as e:
+        _write_referral_audit(
+            status="failed",
+            reason="error",
+            chat_id=chat_id or GROUP_ID,
+            invitee_user_id=invitee_user_id,
+            invitee_username=invitee_username,
+            invite_link=invite_link_url,
+            inviter_user_id=referrer_id,
+            error=str(e),
+        )        
         logger.exception(
             "[REFERRAL][ERROR] step=%s inviter=%s invitee=%s err=%s",
             step,
@@ -674,6 +787,31 @@ def ensure_indexes():
     db.joins.create_index([("chat_id", 1), ("joined_at", -1)])
     db.joins.create_index([("via_invite", 1)])
     try:
+        users_collection.create_index(
+            [("user_id", 1)],
+            unique=True,
+            name="uniq_user_id",
+            partialFilterExpression={"user_id": {"$ne": None}},
+        )
+    except Exception as e:
+        msg = str(e)
+        if "already exists with different options" in msg:
+            try:
+                users_collection.drop_index("uniq_user_id")
+            except Exception:
+                for ix in users_collection.list_indexes():
+                    if ix.get("key") == {"user_id": 1}:
+                        users_collection.drop_index(ix["name"])
+                        break
+            users_collection.create_index(
+                [("user_id", 1)],
+                unique=True,
+                name="uniq_user_id",
+                partialFilterExpression={"user_id": {"$ne": None}},
+            )
+        else:
+            print("⚠️ ensure_indexes error:", e)    
+    try:
         invite_link_map_collection.create_index(
             [("chat_id", 1), ("invite_link", 1)],
             unique=True,
@@ -696,6 +834,10 @@ def ensure_indexes():
             )
         else:
             print("⚠️ ensure_indexes error:", e)
+    invite_link_map_collection.create_index(
+        [("invite_link", 1)],
+        name="idx_invite_link",
+    )            
     unknown_invite_links_collection.create_index(
         [("chat_id", 1), ("invite_link", 1), ("invitee_id", 1)],
         unique=True,
@@ -1204,7 +1346,11 @@ def format_username(u, current_user_id, is_admin):
 @app.route("/api/leaderboard")
 def get_leaderboard():
     try:
-        current_user_id = int(request.args.get("user_id", 0))
+        raw_user_id = request.args.get("user_id")
+        try:
+            current_user_id = int(raw_user_id) if raw_user_id not in (None, "", "undefined") else 0
+        except (TypeError, ValueError):
+            current_user_id = 0
         user_record = users_collection.find_one({"user_id": current_user_id}) or {}
         is_admin = bool(user_record.get("is_admin", False))
 
@@ -2031,6 +2177,14 @@ async def member_update_handler(update: Update, context: ContextTypes.DEFAULT_TY
     user = member.new_chat_member.user
     if not user or user.is_bot:
         return
+
+    if chat_id == GROUP_ID:
+        _confirm_referral_on_main_join(
+            user.id,
+            invitee_username=user.username,
+            invite_link=getattr(member, "invite_link", None),
+            chat_id=member.chat.id,
+        )
     
     # 1) 先记录 join（保持你原本逻辑：哪个 chat 触发就记录哪个 chat）
     try:
@@ -2046,13 +2200,6 @@ async def member_update_handler(update: Update, context: ContextTypes.DEFAULT_TY
         )
     except Exception:
         logger.exception("[join] chat_member error uid=%s chat_id=%s", user.id, chat_id)
-
-    if chat_id == GROUP_ID:
-        _confirm_referral_on_main_join(
-            user.id,
-            invite_link=getattr(member, "invite_link", None),
-            chat_id=member.chat.id,
-        )
 
 async def new_chat_members_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.effective_message
@@ -2192,6 +2339,13 @@ if __name__ == "__main__":
         name="Monthly VIP Status Update",
         replace_existing=True,
     )
+    scheduler.add_job(
+        reset_monthly_referrals,
+        trigger=CronTrigger(day=1, hour=0, minute=0, timezone=KL_TZ),
+        id="monthly_referral_reset",
+        name="Monthly Referral Reset",
+        replace_existing=True,
+    )    
     scheduler.start()
 
     # 5) Background jobs on the bot's job_queue
