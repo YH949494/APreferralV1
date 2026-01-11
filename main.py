@@ -23,8 +23,6 @@ from config import (
     WEEKLY_REFERRAL_BUCKET,
 )
 
-from referral_rules import calc_referral_award
-
 from bson.json_util import dumps
 from xp import ensure_xp_indexes, grant_xp, now_utc
 
@@ -32,7 +30,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from vouchers import vouchers_bp, ensure_voucher_indexes
-from scheduler import reset_monthly_referrals
+from scheduler import reset_monthly_referrals, settle_pending_referrals
 
 from pymongo import MongoClient, DESCENDING, ASCENDING, ReturnDocument  # keep if used elsewhere
 from pymongo.errors import DuplicateKeyError
@@ -197,6 +195,9 @@ invite_link_map_collection = db["invite_link_map"]
 unknown_invite_links_collection = db["unknown_invite_links"]
 referral_audit_collection = db["referral_audit"]
 unknown_invite_audit_collection = db["unknown_invite_audit"]
+pending_referrals_collection = db["pending_referrals"]
+
+REFERRAL_HOLD_HOURS = 12
 
 def call_bot_in_loop(coro, timeout=15):
     loop = getattr(app_bot, "_running_loop", None)
@@ -508,6 +509,7 @@ async def handle_user_join(
                 "monthly_xp": 0,
                 "last_checkin": None,
                 "status": "Normal",
+                "created_at": datetime.now(KL_TZ),                
             },
         },
         upsert=True,
@@ -537,6 +539,14 @@ def _confirm_referral_on_main_join(
     invite_link=None,
     chat_id: int | None = None,
 ):
+    if not isinstance(invitee_user_id, int):
+        logger.info(
+            "[REFERRAL][SKIP] reason=invalid_uid invitee=%s chat_id=%s",
+            invitee_user_id,
+            chat_id or GROUP_ID,
+        )
+        return
+    
     if isinstance(invite_link, str):
         invite_link_url = invite_link
     else:
@@ -619,86 +629,40 @@ def _confirm_referral_on_main_join(
         )
         return
 
-    now = datetime.now(KL_TZ)
-    step = "insert_invitee" 
+
     try:
-        existing_invitee = users_collection.find_one_and_update(
-            {"user_id": invitee_user_id},
+        created_at_utc = now_utc()
+        created_at_kl = created_at_utc.astimezone(KL_TZ).isoformat()
+        result = pending_referrals_collection.update_one(
+            {"group_id": chat_id or GROUP_ID, "invitee_user_id": invitee_user_id},
             {
                 "$setOnInsert": {
-                    "user_id": invitee_user_id,
-                    "username": invitee_username,
-                    "created_at": now,
-                    "joined_main_at": now,                    
+                    "group_id": chat_id or GROUP_ID,
+                    "invitee_user_id": invitee_user_id,
+                    "inviter_user_id": referrer_id,
+                    "invite_link": invite_link_url,
+                    "created_at_utc": created_at_utc,
+                    "created_at_kl": created_at_kl,
+                    "status": "pending",               
                 }
             },
             upsert=True,
-            return_document=ReturnDocument.BEFORE,            
         )
-        if existing_invitee:
-            _write_referral_audit(
-                status="skipped",
-                reason="already_in_db",
-                chat_id=chat_id or GROUP_ID,
-                invitee_user_id=invitee_user_id,
-                invitee_username=invitee_username,
-                invite_link=invite_link_url,
-                inviter_user_id=referrer_id,
-            )
+        if getattr(result, "upserted_id", None):
             logger.info(
-                "[REFERRAL][SKIP] reason=already_in_db inviter=%s invitee=%s",
+                "[REFERRAL][PENDING] inviter=%s invitee=%s invite_link=%s hold_hours=%s",
+                referrer_id,
+                invitee_user_id,
+                invite_link_log,
+                REFERRAL_HOLD_HOURS,
+            )
+        else:            
+            logger.info(
+                "[REFERRAL][PENDING_SKIP] reason=exists inviter=%s invitee=%s",
                 referrer_id,
                 invitee_user_id,
             )
-            return
 
-        step = "increment_inviter_counts"
-        inviter_doc = users_collection.find_one_and_update(
-            {"user_id": referrer_id},
-            {
-                "$inc": {
-                    "ref_count_total": 1,
-                    "weekly_referral_count": 1,
-                    "monthly_referral_count": 1,                    
-                },
-                "$setOnInsert": {"user_id": referrer_id, "created_at": now},
-            },
-            upsert=True,
-            return_document=ReturnDocument.AFTER,
-        )
-        ref_total = int((inviter_doc or {}).get("ref_count_total", 1))
-        weekly_ref = int((inviter_doc or {}).get("weekly_referral_count", 1))
-
-        step = "increment_inviter_xp"
-        xp_added, bonus_added = calc_referral_award(ref_total)
-        users_collection.update_one(
-            {"user_id": referrer_id},
-            {"$inc": {"xp_total": xp_added, "weekly_xp": xp_added, "monthly_xp": xp_added}},
-        )
-        _write_referral_audit(
-            status="awarded",
-            reason="awarded",
-            chat_id=chat_id or GROUP_ID,
-            invitee_user_id=invitee_user_id,
-            invitee_username=invitee_username,
-            invite_link=invite_link_url,
-            inviter_user_id=referrer_id,
-            extra={
-                "xp_added": xp_added,
-                "bonus_added": bonus_added,
-                "new_ref_count_total": ref_total,
-                "weekly_referral_count": weekly_ref,
-            },
-        )        
-        logger.info(
-            "[REFERRAL][AWARD] inviter=%s invitee=%s ref_total=%s weekly_ref=%s xp_added=%s bonus_added=%s",
-            referrer_id,
-            invitee_user_id,
-            ref_total,
-            weekly_ref,
-            xp_added,
-            bonus_added,
-        )
     except Exception as e:
         _write_referral_audit(
             status="failed",
@@ -711,7 +675,7 @@ def _confirm_referral_on_main_join(
             error=str(e),
         )        
         logger.exception(
-            "[REFERRAL][ERROR] step=%s inviter=%s invitee=%s err=%s",
+            "[REFERRAL][ERROR] step=create_pending inviter=%s invitee=%s err=%s",
             step,
             referrer_id,
             invitee_user_id,
@@ -850,6 +814,19 @@ def ensure_indexes():
         unique=True,
         name="uniq_referral_award",
     )
+    pending_referrals_collection.create_index(
+        [("group_id", 1), ("invitee_user_id", 1)],
+        unique=True,
+        name="uniq_pending_invitee",
+    )
+    pending_referrals_collection.create_index(
+        [("status", 1), ("created_at_utc", 1)],
+        name="pending_by_time",
+    )
+    pending_referrals_collection.create_index(
+        [("inviter_user_id", 1), ("status", 1)],
+        name="pending_by_inviter",
+    )    
 
     # --- optional welcome eligibility ---
     db.welcome_eligibility.create_index([("uid", 1)], unique=True)
@@ -2170,18 +2147,44 @@ async def member_update_handler(update: Update, context: ContextTypes.DEFAULT_TY
     chat_id = member.chat.id
     old_status = getattr(member.old_chat_member, "status", None)
     new_status = getattr(member.new_chat_member, "status", None)
-
+    allowed_statuses = {"member", "administrator", "creator"}
+    left_group = old_status in allowed_statuses and new_status in ("left", "kicked")
+    
     # 只处理 “变成成员” 的事件
-    became_member = (new_status in ("member", "administrator", "creator")) and (
-        old_status not in ("member", "administrator", "creator")
+    became_member = (new_status in allowed_statuses) and (
+        old_status not in allowed_statuses
     )
-    if not became_member:
-        return
 
     user = member.new_chat_member.user
     if not user or user.is_bot:
         return
-
+    if left_group and chat_id == GROUP_ID and isinstance(user.id, int):
+        now = now_utc()
+        pending_doc = pending_referrals_collection.find_one_and_update(
+            {
+                "group_id": GROUP_ID,
+                "invitee_user_id": user.id,
+                "status": "pending",
+            },
+            {
+                "$set": {
+                    "status": "revoked",
+                    "revoked_reason": "left_before_hold",
+                    "revoked_at": now,
+                }
+            },
+            return_document=ReturnDocument.BEFORE,
+        )
+        if pending_doc:
+            logger.info(
+                "[REFERRAL][REVOKE] reason=left_before_hold invitee=%s inviter=%s",
+                user.id,
+                pending_doc.get("inviter_user_id"),
+            )
+        return
+    if not became_member:
+        return
+        
     if chat_id == GROUP_ID:
         _confirm_referral_on_main_join(
             user.id,
@@ -2350,6 +2353,13 @@ if __name__ == "__main__":
         trigger=CronTrigger(day=1, hour=0, minute=0, timezone=KL_TZ),
         id="monthly_referral_reset",
         name="Monthly Referral Reset",
+        replace_existing=True,
+    )    
+    scheduler.add_job(
+        settle_pending_referrals,
+        trigger=CronTrigger(minute="*/5", timezone=KL_TZ),
+        id="settle_pending_referrals",
+        name="Settle Pending Referrals",
         replace_existing=True,
     )    
     scheduler.start()
