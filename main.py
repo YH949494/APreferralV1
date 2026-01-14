@@ -45,7 +45,7 @@ from vouchers import (
     _isoformat_kl,
     _admin_secret_ok,
 )
-from scheduler import reset_monthly_referrals, settle_pending_referrals, process_tg_verification_queue
+from scheduler import reset_monthly_referrals, settle_pending_referrals, process_tg_verification_queue, sweep_peak_mode
 
 from pymongo import MongoClient, DESCENDING, ASCENDING, ReturnDocument  # keep if used elsewhere
 from pymongo.errors import DuplicateKeyError
@@ -164,6 +164,22 @@ def _coerce_checked_at(value: datetime | str | None) -> datetime | None:
     except ValueError:
         return None
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+def _coerce_utc_dt(value: datetime | str | None) -> datetime | None:
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+def _format_kl(dt_value: datetime | None) -> str | None:
+    if not dt_value:
+        return None
+    return dt_value.astimezone(KL_TZ).isoformat()
 
 def is_fresh(checked_at: datetime | None, ttl_minutes: int) -> bool:
     if not checked_at:
@@ -402,6 +418,7 @@ subscription_cache_col = db["subscription_cache"]
 profile_photo_cache_col = db["profile_photo_cache"]
 tg_verification_queue_col = db["tg_verification_queue"]
 voucher_claims_col = db["voucher_claims"]
+system_flags_col = db["system_flags"]
 REFERRAL_HOLD_HOURS = 12
 
 def call_bot_in_loop(coro, timeout=15):
@@ -1640,6 +1657,26 @@ def get_leaderboard():
             current_user_id = int(raw_user_id) if raw_user_id not in (None, "", "undefined") else 0
         except (TypeError, ValueError):
             current_user_id = 0
+        now_utc_ts = now_utc()
+        peak_doc = system_flags_col.find_one({"_id": "peak_mode"}) or {}
+        peak_until = _coerce_utc_dt(peak_doc.get("untilUtc"))
+        peak_enabled = bool(peak_doc.get("enabled")) and peak_until and peak_until > now_utc_ts
+        if peak_enabled:
+            uid_for_log = current_user_id or None
+            logger.info(
+                "[PEAK_MODE][LEADERBOARD] short_circuit enabled=1 until=%s reason=%s uid=%s",
+                _format_kl(peak_until),
+                peak_doc.get("reason"),
+                uid_for_log,
+            )
+            return jsonify(
+                {
+                    "peak_mode": True,
+                    "message": "Leaderboard updating after drop",
+                    "result": [],
+                    "tsUtc": now_utc_ts.isoformat(),
+                }
+            )            
         user_record = users_collection.find_one({"user_id": current_user_id}) or {}
         is_admin = bool(user_record.get("is_admin", False))
 
@@ -2681,6 +2718,13 @@ if __name__ == "__main__":
         trigger=CronTrigger(minute="*/1", timezone=KL_TZ),
         id="tg_verification_queue",
         name="Process Telegram verification queue",
+        replace_existing=True,
+    )    
+    scheduler.add_job(
+        sweep_peak_mode,
+        trigger=CronTrigger(minute="*/1", timezone=KL_TZ),
+        id="sweep_peak_mode",
+        name="Sweep Peak Mode",
         replace_existing=True,
     )    
     scheduler.start()
