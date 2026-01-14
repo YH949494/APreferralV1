@@ -1841,7 +1841,8 @@ def api_claim():
         uid = None
     uname = norm_uname(tg_user.get("username"))
 
-    if uid is not None and not _check_claim_rate_limit(uid):
+    check_only = bool(body.get("check_only") or body.get("checkOnly"))
+    if not check_only and uid is not None and not _check_claim_rate_limit(uid):
         current_app.logger.info("[CLAIM][RL] uid=%s", uid)
         return jsonify({"status": "error", "code": "rate_limited", "reason": "rate_limited"}), 429
 
