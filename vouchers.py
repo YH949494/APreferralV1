@@ -5,6 +5,7 @@ from bson.objectid import ObjectId
 from datetime import datetime, timedelta, timezone
 import requests
 from config import KL_TZ
+import time
 import hmac, hashlib, urllib.parse, os, json
 import config as _cfg 
  
@@ -23,6 +24,8 @@ HARDCODED_ADMIN_USERNAMES = {"gracy_ap", "teohyaohui"}  # allow manual overrides
 WELCOME_WINDOW_HOURS = int(getattr(_cfg, "WELCOME_WINDOW_HOURS", os.getenv("WELCOME_WINDOW_HOURS", "48")))
 WELCOME_WINDOW_DAYS = 7
 PROFILE_PHOTO_CACHE_TTL_SECONDS = 60
+CLAIM_RATE_LIMIT_SECONDS = 5
+_claim_rate_limit_cache = {}
 
 _RAW_OFFICIAL_CHANNEL_ID = getattr(_cfg, "OFFICIAL_CHANNEL_ID", os.getenv("OFFICIAL_CHANNEL_ID"))
 try:
@@ -523,6 +526,20 @@ def _append_retention_message(payload: dict, retention_message: str) -> None:
         payload["message"] = f"{existing}\n{retention_message}"
     else:
         payload["message"] = retention_message
+
+def _check_claim_rate_limit(uid: int) -> bool:
+    if uid is None:
+        return True
+    now = time.monotonic()
+    expires_at = _claim_rate_limit_cache.get(uid)
+    if expires_at and expires_at > now:
+        return False
+    _claim_rate_limit_cache[uid] = now + CLAIM_RATE_LIMIT_SECONDS
+    if len(_claim_rate_limit_cache) > 5000:
+        for key, exp in list(_claim_rate_limit_cache.items()):
+            if exp <= now:
+                _claim_rate_limit_cache.pop(key, None)
+    return True
 
 def _rate_limit_key(prefix: str, *parts):
     return ":".join([prefix] + [str(p) for p in parts if p is not None])
@@ -1514,37 +1531,54 @@ def claim_personalised(drop_id: str, usernameLower: str, ref: datetime):
 def claim_pooled(drop_id: str, claim_key: str, ref: datetime):
     drop_id_variants = _drop_id_variants(drop_id)
  
-    # Idempotent: if already claimed, return same code
-    existing = db.vouchers.find_one({
-        "type": "pooled",
-        "dropId": {"$in": drop_id_variants},
-        "$or": [
-            {"claimedByKey": claim_key},
-            {"claimedBy": claim_key},
-        ]
-    })
-    if existing:
-        return {"ok": True, "code": existing["code"], "claimedAt": _isoformat_kl(existing.get("claimedAt"))}
 
     # Atomically reserve a free code
-    doc = db.vouchers.find_one_and_update(
-        {
+    try:
+        doc = db.vouchers.find_one_and_update(
+            {
+                "type": "pooled",
+                "dropId": {"$in": drop_id_variants},
+                "status": "free"
+            },
+            {
+                "$set": {
+                    "status": "claimed",
+                    "claimedBy": claim_key,
+                    "claimedByKey": claim_key,
+                    "claimedAt": ref
+                }
+            },
+            sort=[("_id", ASCENDING)],
+            return_document=ReturnDocument.AFTER
+        )
+    except DuplicateKeyError:
+        current_app.logger.info(
+            "[CLAIM][ATOMIC] drop=%s claim_key=%s outcome=duplicate_key",
+            drop_id,
+            claim_key,
+        )
+        existing = db.vouchers.find_one({
             "type": "pooled",
             "dropId": {"$in": drop_id_variants},
-            "status": "free"
-        },
-        {
-            "$set": {
-                "status": "claimed",
-                "claimedBy": claim_key,
-                "claimedByKey": claim_key,
-                "claimedAt": ref
-            }
-        },
-        sort=[("_id", ASCENDING)],
-        return_document=ReturnDocument.AFTER
-    )
+            "$or": [
+                {"claimedByKey": claim_key},
+                {"claimedBy": claim_key},
+            ]
+        })
+        if existing and existing.get("status") == "claimed":
+            return {"ok": True, "code": existing["code"], "claimedAt": _isoformat_kl(existing.get("claimedAt"))}
+        return {"ok": False, "err": "already_claimed"}
     if not doc:
+        existing = db.vouchers.find_one({
+            "type": "pooled",
+            "dropId": {"$in": drop_id_variants},
+            "$or": [
+                {"claimedByKey": claim_key},
+                {"claimedBy": claim_key},
+            ]
+        })
+        if existing and existing.get("status") == "claimed":
+            return {"ok": True, "code": existing["code"], "claimedAt": _isoformat_kl(existing.get("claimedAt"))}     
         return {"ok": False, "err": "sold_out"}
     return {"ok": True, "code": doc["code"], "claimedAt": _isoformat_kl(doc.get("claimedAt"))}
 
@@ -1743,6 +1777,8 @@ def claim_voucher_for_user(*, user_id: str, drop_id: str, username: str) -> dict
     res = claim_pooled(drop_id=drop_id, claim_key=claim_key, ref=ref)
     if res.get("ok"):
         return {"code": res["code"], "claimedAt": res["claimedAt"]}
+    if res.get("err") == "already_claimed":
+        raise AlreadyClaimed("already_claimed")     
     if res.get("err") == "sold_out":
         raise NoCodesLeft("sold_out")
     raise NotEligible("not_eligible")
@@ -1754,8 +1790,6 @@ def api_claim():
     body = request.get_json(silent=True) or {}
  
     drop_id = body.get("dropId") or body.get("drop_id")
-    drop = db.drops.find_one({"_id": _coerce_id(drop_id)}) if drop_id else {}
-    drop_type = drop.get("type", "pooled")
 
     init_data = extract_raw_init_data_from_query(request)
 
@@ -1807,6 +1841,13 @@ def api_claim():
         uid = None
     uname = norm_uname(tg_user.get("username"))
 
+    if uid is not None and not _check_claim_rate_limit(uid):
+        current_app.logger.info("[CLAIM][RL] uid=%s", uid)
+        return jsonify({"status": "error", "code": "rate_limited", "reason": "rate_limited"}), 429
+
+    drop = db.drops.find_one({"_id": _coerce_id(drop_id)}) if drop_id else {}
+    drop_type = drop.get("type", "pooled")
+ 
     user_doc = None
     if uid is not None:
         user_doc = users_collection.find_one({"user_id": uid})
@@ -1865,6 +1906,10 @@ def api_claim():
     is_pool_drop = _is_pool_drop(voucher, audience_type)
 
     if is_pool_drop and not _is_new_joiner_audience(audience_type):
+         current_app.logger.warning(
+            "[CLAIM][TODO] uid=%s missing cache refresh for subscription gate",
+            uid,
+        )    
         if not check_channel_subscribed(uid):
             current_app.logger.info("[claim] deny drop=%s uid=%s reason=not_subscribed", drop_id, uid)
             current_app.logger.info(
@@ -1989,6 +2034,10 @@ def api_claim():
             )         
             return jsonify({"status": "error", "code": "not_eligible", "reason": "expired"}), 403
 
+        current_app.logger.warning(
+            "[CLAIM][TODO] uid=%s missing cache refresh for profile photo gate",
+            uid,
+        )     
         has_photo = check_has_profile_photo(uid)
         if not has_photo:
             welcome_tickets_col.update_one({"uid": uid}, {"$set": {"reason_last_fail": "no_photo"}})
@@ -2013,13 +2062,18 @@ def api_claim():
     # Claim
     try:
         result = claim_voucher_for_user(user_id=user_id, drop_id=drop_id, username=username)
+        current_app.logger.info("[CLAIM][ATOMIC] uid=%s drop=%s outcome=success", uid, drop_id)     
     except AlreadyClaimed:
+        current_app.logger.info("[CLAIM][ATOMIC] uid=%s drop=%s outcome=already_claimed", uid, drop_id)     
         return jsonify({"status": "error", "code": "already_claimed"}), 409
     except NoCodesLeft:
+        current_app.logger.info("[CLAIM][ATOMIC] uid=%s drop=%s outcome=sold_out", uid, drop_id)     
         return jsonify({"status": "error", "code": "sold_out"}), 410
     except NotEligible:
+        current_app.logger.info("[CLAIM][ATOMIC] uid=%s drop=%s outcome=not_eligible", uid, drop_id)     
         return jsonify({"status": "error", "code": "not_eligible"}), 403
     except Exception:
+        current_app.logger.exception("[CLAIM][ERROR] step=claim_voucher uid=%s drop=%s", uid, drop_id)     
         current_app.logger.exception("claim failed")
         return jsonify({"status": "error", "code": "server_error"}), 500
 
