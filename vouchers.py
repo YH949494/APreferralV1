@@ -1906,10 +1906,10 @@ def api_claim():
     is_pool_drop = _is_pool_drop(voucher, audience_type)
 
     if is_pool_drop and not _is_new_joiner_audience(audience_type):
-         current_app.logger.warning(
+        current_app.logger.warning(
             "[CLAIM][TODO] uid=%s missing cache refresh for subscription gate",
             uid,
-        )    
+        )
         if not check_channel_subscribed(uid):
             current_app.logger.info("[claim] deny drop=%s uid=%s reason=not_subscribed", drop_id, uid)
             current_app.logger.info(
