@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 subscription_cache_col = db["subscription_cache"]
 profile_photo_cache_col = db["profile_photo_cache"]
 tg_verification_queue_col = db["tg_verification_queue"]
+system_flags_col = db["system_flags"]
 
 ALLOWED_CHANNEL_STATUSES = {"member", "administrator", "creator"}
 
@@ -99,6 +100,105 @@ def _coerce_utc(dt_value) -> datetime | None:
             return parsed.astimezone(timezone.utc)
         return parsed.replace(tzinfo=timezone.utc)
     return None
+
+def _format_kl(dt_value: datetime | None) -> str | None:
+    if not dt_value:
+        return None
+    return dt_value.astimezone(KL_TZ).isoformat()
+
+def set_peak_mode(*, enabled: bool, duration_minutes: int = 15, reason: str = "drop_active") -> None:
+    now_utc = datetime.now(timezone.utc)
+    flag_doc = system_flags_col.find_one({"_id": "peak_mode"}) or {}
+    prev_until = _coerce_utc(flag_doc.get("untilUtc"))
+    if enabled:
+        candidate_until = now_utc + timedelta(minutes=duration_minutes)
+        until_utc = max(prev_until, candidate_until) if prev_until else candidate_until
+        system_flags_col.update_one(
+            {"_id": "peak_mode"},
+            {
+                "$set": {
+                    "enabled": True,
+                    "untilUtc": until_utc,
+                    "reason": reason,
+                    "updatedAtUtc": now_utc,
+                }
+            },
+            upsert=True,
+        )
+        logger.info(
+            "[PEAK_MODE][ENABLE] reason=%s until=%s prev_until=%s",
+            reason,
+            _format_kl(until_utc),
+            _format_kl(prev_until),
+        )
+        return
+    system_flags_col.update_one(
+        {"_id": "peak_mode"},
+        {"$set": {"enabled": False, "reason": reason, "updatedAtUtc": now_utc}},
+        upsert=True,
+    )
+    logger.info(
+        "[PEAK_MODE][DISABLE] reason=%s until=%s now=%s",
+        reason,
+        _format_kl(prev_until),
+        _format_kl(now_utc),
+    )
+
+def sweep_peak_mode() -> None:
+    now_utc = datetime.now(timezone.utc)
+    flag_doc = system_flags_col.find_one({"_id": "peak_mode"}) or {}
+    enabled = bool(flag_doc.get("enabled"))
+    until_utc = _coerce_utc(flag_doc.get("untilUtc"))
+    if enabled and until_utc and until_utc <= now_utc:
+        system_flags_col.update_one(
+            {"_id": "peak_mode", "enabled": True},
+            {"$set": {"enabled": False, "reason": "auto_expired", "updatedAtUtc": now_utc}},
+        )
+        logger.info(
+            "[PEAK_MODE][DISABLE] reason=auto_expired until=%s now=%s",
+            _format_kl(until_utc),
+            _format_kl(now_utc),
+        )
+        enabled = False
+    elif enabled and not until_utc:
+        system_flags_col.update_one(
+            {"_id": "peak_mode"},
+            {"$set": {"enabled": False, "reason": "auto_expired", "updatedAtUtc": now_utc}},
+        )
+        logger.info(
+            "[PEAK_MODE][DISABLE] reason=auto_expired until=%s now=%s",
+            _format_kl(until_utc),
+            _format_kl(now_utc),
+        )
+        enabled = False
+
+    recent_window_start = now_utc - timedelta(minutes=5)
+    active_drop = db.drops.find_one(
+        {
+            "status": {"$nin": ["paused", "expired"]},
+            "startsAt": {"$lte": now_utc, "$gte": recent_window_start},
+            "endsAt": {"$gt": now_utc},
+        },
+        {"_id": 1, "startsAt": 1, "endsAt": 1},
+    )
+    if active_drop:
+        drop_id = str(active_drop.get("_id") or "")
+        set_peak_mode(enabled=True, duration_minutes=15, reason=f"drop:{drop_id}" if drop_id else "drop_active")
+        return
+    if not enabled:
+        stale_drop = db.drops.find_one(
+            {
+                "status": {"$nin": ["paused", "expired"]},
+                "startsAt": {"$lte": now_utc},
+                "endsAt": {"$gt": now_utc},
+            },
+            {"_id": 1},
+        )
+        if stale_drop:
+            logger.info(
+                "[PEAK_MODE][TODO] active drop detected after enable window; consider wiring activation path drop=%s",
+                str(stale_drop.get("_id")),
+            )
 
 
 def process_tg_verification_queue(batch_limit: int = 50) -> None:
