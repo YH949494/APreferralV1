@@ -11,11 +11,63 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 GROUP_ID = int(os.environ.get("GROUP_ID", "-1002304653063"))
 API_BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"
 REFERRAL_HOLD_HOURS = 12
+TG_VERIFY_TTL_MINUTES = int(os.environ.get("TG_VERIFY_TTL_MINUTES", "30"))
+
+_RAW_OFFICIAL_CHANNEL_ID = os.getenv("OFFICIAL_CHANNEL_ID")
+try:
+    OFFICIAL_CHANNEL_ID = int(_RAW_OFFICIAL_CHANNEL_ID) if _RAW_OFFICIAL_CHANNEL_ID not in (None, "") else None
+except (TypeError, ValueError):
+    OFFICIAL_CHANNEL_ID = None
+OFFICIAL_CHANNEL_USERNAME = os.getenv("OFFICIAL_CHANNEL_USERNAME", "").strip()
 
 KL_TZ = pytz.timezone("Asia/Kuala_Lumpur")
 
 logger = logging.getLogger(__name__)
+subscription_cache_col = db["subscription_cache"]
+profile_photo_cache_col = db["profile_photo_cache"]
+tg_verification_queue_col = db["tg_verification_queue"]
 
+ALLOWED_CHANNEL_STATUSES = {"member", "administrator", "creator"}
+
+def _official_channel_identifier():
+    if OFFICIAL_CHANNEL_ID is not None:
+        return OFFICIAL_CHANNEL_ID
+    if OFFICIAL_CHANNEL_USERNAME:
+        return OFFICIAL_CHANNEL_USERNAME
+    return None
+
+def _fetch_chat_member(uid: int) -> bool:
+    if not BOT_TOKEN:
+        raise RuntimeError("missing_bot_token")
+    chat_id = _official_channel_identifier()
+    if not chat_id:
+        raise RuntimeError("missing_channel_id")
+    resp = requests.get(
+        f"{API_BASE}/getChatMember",
+        params={"chat_id": chat_id, "user_id": uid},
+        timeout=10,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    if not data.get("ok"):
+        raise RuntimeError(f"getChatMember_not_ok:{data.get('description')}")
+    status = (data.get("result") or {}).get("status")
+    return status in ALLOWED_CHANNEL_STATUSES
+
+def _fetch_profile_photo(uid: int) -> bool:
+    if not BOT_TOKEN:
+        raise RuntimeError("missing_bot_token")
+    resp = requests.get(
+        f"{API_BASE}/getUserProfilePhotos",
+        params={"user_id": uid, "limit": 1},
+        timeout=10,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    if not data.get("ok"):
+        raise RuntimeError(f"getUserProfilePhotos_not_ok:{data.get('description')}")
+    total = data.get("result", {}).get("total_count", 0)
+    return bool(total and total > 0)
 
 def _get_chat_member_status(user_id: int) -> str | None:
     if not BOT_TOKEN:
@@ -47,7 +99,118 @@ def _coerce_utc(dt_value) -> datetime | None:
             return parsed.astimezone(timezone.utc)
         return parsed.replace(tzinfo=timezone.utc)
     return None
-    
+
+
+def process_tg_verification_queue(batch_limit: int = 50) -> None:
+    now_utc = datetime.now(timezone.utc)
+    pending = list(
+        tg_verification_queue_col.find(
+            {
+                "status": "pending",
+                "next_run_at": {"$lte": now_utc},
+                "$or": [{"locked_at": {"$exists": False}}, {"locked_at": None}],
+            }
+        )
+        .sort("next_run_at", 1)
+        .limit(batch_limit)
+    )
+
+    done = 0
+    retry = 0
+    errors = 0
+    for doc in pending:
+        locked = tg_verification_queue_col.find_one_and_update(
+            {"_id": doc["_id"], "status": "pending", "locked_at": None},
+            {"$set": {"locked_at": now_utc, "status": "processing"}},
+            return_document=ReturnDocument.AFTER,
+        )
+        if not locked:
+            continue
+        uid = locked.get("user_id")
+        types = locked.get("types") or []
+        results = {}
+        try:
+            if "sub" in types:
+                subscribed = _fetch_chat_member(uid)
+                subscription_cache_col.update_one(
+                    {"_id": f"sub:{uid}"},
+                    {
+                        "$set": {
+                            "user_id": uid,
+                            "subscribed": subscribed,
+                            "checked_at": now_utc,
+                            "updated_at": now_utc,
+                            "expireAt": now_utc + timedelta(minutes=TG_VERIFY_TTL_MINUTES),
+                        }
+                    },
+                    upsert=True,
+                )
+                results["sub"] = subscribed
+            if "pic" in types:
+                has_pic = _fetch_profile_photo(uid)
+                profile_photo_cache_col.update_one(
+                    {"uid": uid},
+                    {
+                        "$set": {
+                            "user_id": uid,
+                            "has_profile_pic": has_pic,
+                            "hasPhoto": has_pic,
+                            "checked_at": now_utc,
+                            "updated_at": now_utc,
+                            "expiresAt": now_utc + timedelta(minutes=TG_VERIFY_TTL_MINUTES),
+                        }
+                    },
+                    upsert=True,
+                )
+                results["pic"] = has_pic
+            tg_verification_queue_col.update_one(
+                {"_id": locked["_id"]},
+                {
+                    "$set": {
+                        "status": "done",
+                        "done_at": now_utc,
+                        "locked_at": None,
+                        "results": results,
+                    }
+                },
+            )
+            done += 1
+            logger.info("[TG_VERIFY][UPDATE] uid=%s types=%s results=%s", uid, types, results)
+        except Exception as exc:
+            attempts = int(locked.get("attempts", 0) or 0) + 1
+            backoff_minutes = min(2 ** attempts, 30)
+            tg_verification_queue_col.update_one(
+                {"_id": locked["_id"]},
+                {
+                    "$set": {
+                        "status": "pending",
+                        "locked_at": None,
+                        "attempts": attempts,
+                        "last_error": str(exc),
+                        "next_run_at": now_utc + timedelta(minutes=backoff_minutes),
+                        "updated_at": now_utc,
+                    }
+                },
+            )
+            retry += 1
+            errors += 1
+            logger.warning(
+                "[TG_VERIFY][ERROR] uid=%s types=%s attempts=%s err=%s",
+                uid,
+                types,
+                attempts,
+                exc,
+            )
+
+    if pending:
+        logger.info(
+            "[TG_VERIFY][RUN] picked=%s done=%s retry=%s errors=%s",
+            len(pending),
+            done,
+            retry,
+            errors,
+        )
+        
 def sweep_expired_drops():
     """
     Marks voucher drops as expired once their endsAt passes.
