@@ -1219,7 +1219,8 @@ def _guard_voucher_claim():
     if uid is None:
         return jsonify({"ok": False, "reason": "invalid_uid"}), 400
 
-    if _claim_rate_limited(uid):
+    check_only = bool(body.get("check_only") or body.get("checkOnly"))
+    if not check_only and _claim_rate_limited(uid):
         logger.info("[CLAIM][RL] uid=%s ttl=%s", uid, CLAIM_RL_TTL_SECONDS)
         return jsonify({
             "ok": False,
