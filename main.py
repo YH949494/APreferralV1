@@ -4,7 +4,6 @@ from flask import (
 )
 from flask_cors import CORS
 from threading import Thread
-import time
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from telegram.constants import ParseMode
 from html import escape as html_escape
@@ -30,25 +29,12 @@ from xp import ensure_xp_indexes, grant_xp, now_utc
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-import vouchers as vouchers_module
-from vouchers import (
-    vouchers_bp,
-    ensure_voucher_indexes,
-    extract_raw_init_data_from_query,
-    verify_telegram_init_data,
-    _drop_audience_type,
-    _is_new_joiner_audience,
-    _is_pool_drop,
-    _coerce_id,
-    _drop_id_variants,
-    _isoformat_kl,
-    _admin_secret_ok,
-)
-from scheduler import reset_monthly_referrals, settle_pending_referrals, process_tg_verification_queue, sweep_peak_mode
+from vouchers import vouchers_bp, ensure_voucher_indexes
+from scheduler import reset_monthly_referrals, settle_pending_referrals
 
 from pymongo import MongoClient, DESCENDING, ASCENDING, ReturnDocument  # keep if used elsewhere
 from pymongo.errors import DuplicateKeyError
-import os, asyncio, traceback, csv, io, requests, logging, json
+import os, asyncio, traceback, csv, io, requests, logging
 import pytz
 
 FIRST_CHECKIN_BONUS_XP = int(os.getenv("FIRST_CHECKIN_BONUS_XP", "200"))
@@ -122,179 +108,6 @@ def _month_window_utc(reference: datetime | None = None):
     else:
         end_local = start_local.replace(month=start_local.month + 1)
     return start_local.astimezone(timezone.utc), end_local.astimezone(timezone.utc), start_local
-
-def _coerce_checked_at(value: datetime | str | None) -> datetime | None:
-    if not value:
-        return None
-    if isinstance(value, datetime):
-        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
-    try:
-        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
-
-def _coerce_utc_dt(value: datetime | str | None) -> datetime | None:
-    if not value:
-        return None
-    if isinstance(value, datetime):
-        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
-    try:
-        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
-
-def _format_kl(dt_value: datetime | None) -> str | None:
-    if not dt_value:
-        return None
-    return dt_value.astimezone(KL_TZ).isoformat()
-
-def is_fresh(checked_at: datetime | None, ttl_minutes: int) -> bool:
-    if not checked_at:
-        return False
-    now = datetime.now(timezone.utc)
-    return (now - checked_at) <= timedelta(minutes=ttl_minutes)
-
-def cached_channel_subscribed(uid: int, ttl_minutes: int = 30) -> tuple[bool | None, bool]:
-    if uid is None:
-        return None, False
-    doc = subscription_cache_col.find_one(
-        {"$or": [{"_id": f"sub:{uid}"}, {"user_id": uid}]},
-        {"subscribed": 1, "checked_at": 1, "updated_at": 1},
-    )
-    if not doc:
-        return None, False
-    checked_at = _coerce_checked_at(doc.get("checked_at") or doc.get("updated_at"))
-    return bool(doc.get("subscribed")), is_fresh(checked_at, ttl_minutes)
-
-def cached_has_profile_photo(uid: int, ttl_minutes: int = 30) -> tuple[bool | None, bool]:
-    if uid is None:
-        return None, False
-    doc = profile_photo_cache_col.find_one(
-        {"uid": uid},
-        {"has_profile_pic": 1, "hasPhoto": 1, "checked_at": 1, "updated_at": 1},
-    )
-    if not doc:
-        return None, False
-    checked_at = _coerce_checked_at(doc.get("checked_at") or doc.get("updated_at"))
-    state = doc.get("has_profile_pic")
-    if state is None:
-        state = doc.get("hasPhoto")
-    return bool(state), is_fresh(checked_at, ttl_minutes)
-
-def enqueue_verification(uid: int, types: list[str]) -> None:
-    if uid is None:
-        return
-    now = now_utc()
-    types_list = list(dict.fromkeys([entry for entry in types if isinstance(entry, str)]))
-    result = tg_verification_queue_col.update_one(
-        {"user_id": uid},
-        {
-            "$addToSet": {"types": {"$each": types_list}},
-            "$set": {
-                "status": "pending",
-                "updated_at": now,
-                "next_run_at": now,
-                "locked_at": None,
-            },
-            "$setOnInsert": {
-                "user_id": uid,
-                "attempts": 0,
-                "enqueued_at": now,
-            },
-        },
-        upsert=True,
-    )
-    logger.info(
-        "[TG_VERIFY][ENQUEUE] uid=%s types=%s upserted/modified=%s/%s",
-        uid,
-        types_list,
-        int(result.upserted_id is not None),
-        result.modified_count,
-    )
-    
-def _channel_url() -> str | None:
-    if isinstance(CHANNEL_USERNAME, str) and CHANNEL_USERNAME.startswith("@"):
-        return f"https://t.me/{CHANNEL_USERNAME[1:]}"
-    if isinstance(CHANNEL_USERNAME, str) and CHANNEL_USERNAME:
-        return f"https://t.me/{CHANNEL_USERNAME}"
-    return None
-
-def claim_pooled_atomic(drop_id: str, claim_key: str, ref: datetime):
-    drop_id_variants = _drop_id_variants(drop_id)
-    drop_id_value = _coerce_id(drop_id)
-    user_id = claim_key
-    if isinstance(claim_key, str) and claim_key.startswith("uid:"):
-        user_id = claim_key.split(":", 1)[1] or claim_key
-
-    try:
-        voucher_claims_col.insert_one(
-            {
-                "drop_id": drop_id_value,
-                "user_id": user_id,
-                "status": "pending",
-                "created_at": ref,
-            }
-        )
-    except DuplicateKeyError:
-        existing = voucher_claims_col.find_one({"drop_id": drop_id_value, "user_id": user_id})
-        if existing and existing.get("status") == "success":
-            return {"ok": True, "code": existing.get("code"), "claimedAt": _isoformat_kl(existing.get("awarded_at"))}
-        logger.info("[CLAIM][ATOMIC] uid=%s drop=%s outcome=already_claimed", user_id, drop_id)
-        return {"ok": False, "err": "already_claimed"}
-
-    drop_doc = vouchers_module.db.drops.find_one_and_update(
-        {"_id": drop_id_value, "status": "active", "stock": {"$gt": 0}},
-        {"$inc": {"stock": -1}},
-        return_document=ReturnDocument.AFTER,
-    )
-    if not drop_doc:
-        voucher_claims_col.update_one(
-            {"drop_id": drop_id_value, "user_id": user_id},
-            {"$set": {"status": "failed", "fail_reason": "soldout", "failed_at": ref}},
-        )
-        logger.info("[CLAIM][ATOMIC] uid=%s drop=%s outcome=sold_out", user_id, drop_id)
-        return {"ok": False, "err": "sold_out"}
-
-    code_doc = vouchers_module.db.vouchers.find_one_and_update(
-        {
-            "type": "pooled",
-            "dropId": {"$in": drop_id_variants},
-            "status": "free",
-        },
-        {
-            "$set": {
-                "status": "claimed",
-                "claimedBy": claim_key,
-                "claimedByKey": claim_key,
-                "claimedAt": ref,
-            }
-        },
-        sort=[("_id", ASCENDING)],
-        return_document=ReturnDocument.AFTER,
-    )
-    if not code_doc:
-        vouchers_module.db.drops.update_one({"_id": drop_id_value}, {"$inc": {"stock": 1}})
-        voucher_claims_col.update_one(
-            {"drop_id": drop_id_value, "user_id": user_id},
-            {"$set": {"status": "failed", "fail_reason": "no_code", "failed_at": ref}},
-        )
-        logger.info("[CLAIM][ATOMIC] uid=%s drop=%s outcome=no_code", user_id, drop_id)
-        return {"ok": False, "err": "sold_out"}
-
-    voucher_claims_col.update_one(
-        {"drop_id": drop_id_value, "user_id": user_id},
-        {"$set": {"status": "success", "code": code_doc.get("code"), "awarded_at": ref}},
-    )
-    logger.info("[CLAIM][ATOMIC] uid=%s drop=%s outcome=success", user_id, drop_id)
-    return {
-        "ok": True,
-        "code": code_doc.get("code"),
-        "claimedAt": _isoformat_kl(code_doc.get("claimedAt")),
-    }
-
-vouchers_module.claim_pooled = claim_pooled_atomic
 
 def compute_referral_stats(user_id: int, window=None):
     """Return referral stats using users collection counters."""
@@ -383,11 +196,7 @@ unknown_invite_links_collection = db["unknown_invite_links"]
 referral_audit_collection = db["referral_audit"]
 unknown_invite_audit_collection = db["unknown_invite_audit"]
 pending_referrals_collection = db["pending_referrals"]
-subscription_cache_col = db["subscription_cache"]
-profile_photo_cache_col = db["profile_photo_cache"]
-tg_verification_queue_col = db["tg_verification_queue"]
-voucher_claims_col = db["voucher_claims"]
-system_flags_col = db["system_flags"]
+
 REFERRAL_HOLD_HOURS = 12
 
 def call_bot_in_loop(coro, timeout=15):
@@ -1147,101 +956,6 @@ app.secret_key = os.environ.get("FLASK_SECRET_KEY", "dev-secret")
 app.register_blueprint(vouchers_bp, url_prefix="/v2/miniapp")
 admin_bp = Blueprint("admin", __name__)
 
-@app.before_request
-def _guard_voucher_claim():
-    if request.path != "/v2/miniapp/vouchers/claim" or request.method != "POST":
-        return None
-
-    init_data = extract_raw_init_data_from_query(request)
-    if not init_data:
-        return None
-
-    ok, data, _ = verify_telegram_init_data(init_data)
-    body = request.get_json(silent=True) or {}
-    if not ok:
-        admin_secret = (
-            request.args.get("admin_secret")
-            or request.headers.get("X-Admin-Secret")
-            or body.get("admin_secret")
-        )
-        if _admin_secret_ok(admin_secret):
-            data = {
-                "user": json.dumps({
-                    "id": int(os.environ.get("PREVIEW_USER_ID", "999")),
-                    "username": os.environ.get("PREVIEW_USERNAME", "admin_preview"),
-                })
-            }
-            ok = True
-    if not ok:
-        return None
-
-    try:
-        user_raw = json.loads((data or {}).get("user", "{}"))
-    except Exception:
-        user_raw = {}
-
-    try:
-        uid = int(user_raw.get("id"))
-    except (TypeError, ValueError):
-        uid = None
-
-    if uid is None:
-        return jsonify({"ok": False, "reason": "invalid_uid"}), 400
-
-    drop_id = body.get("dropId") or body.get("drop_id")
-    if not drop_id:
-        return None
-
-    drop = db.drops.find_one({"_id": _coerce_id(drop_id)}) if drop_id else None
-    if not drop:
-        return None
-
-    audience_type = _drop_audience_type(drop)
-    is_pool_drop = _is_pool_drop(drop, audience_type)
-
-    if is_pool_drop and not _is_new_joiner_audience(audience_type):
-        state, fresh = cached_channel_subscribed(uid)
-        if state is True and fresh:
-            return None
-        if state is False and fresh:
-            payload = {
-                "ok": False,
-                "reason": "need_subscribe",
-                "message": "Please subscribe to our channel and try again.",
-            }
-            channel_url = _channel_url()
-            if channel_url:
-                payload["channel_url"] = channel_url
-            logger.info("[CLAIM][GATE] uid=%s reason=need_subscribe cache=fresh", uid)
-            return jsonify(payload), 403
-        enqueue_verification(uid, ["sub"])
-        logger.info("[CLAIM][VERIFY_ENQUEUE] uid=%s type=sub cache=miss_or_stale", uid)
-        return jsonify({
-            "ok": False,
-            "reason": "verifying_subscription",
-            "message": "Verifying your subscription. Please try again shortly.",
-        }), 202
-
-    if _is_new_joiner_audience(audience_type):
-        state, fresh = cached_has_profile_photo(uid)
-        if state is True and fresh:
-            return None
-        if state is False and fresh:
-            logger.info("[CLAIM][GATE] uid=%s reason=need_profile_pic cache=fresh", uid)
-            return jsonify({
-                "ok": False,
-                "reason": "need_profile_pic",
-                "message": "Please set your profile picture and try again.",
-            }), 403
-        enqueue_verification(uid, ["pic"])
-        logger.info("[CLAIM][VERIFY_ENQUEUE] uid=%s type=pic cache=miss_or_stale", uid)
-        return jsonify({
-            "ok": False,
-            "reason": "verifying_profile",
-            "message": "Verifying your profile. Please try again shortly.",
-        }), 202
-
-    return None
 
 @admin_bp.get("/api/admin/joins/daily")
 def joins_daily():
@@ -1618,26 +1332,6 @@ def get_leaderboard():
             current_user_id = int(raw_user_id) if raw_user_id not in (None, "", "undefined") else 0
         except (TypeError, ValueError):
             current_user_id = 0
-        now_utc_ts = now_utc()
-        peak_doc = system_flags_col.find_one({"_id": "peak_mode"}) or {}
-        peak_until = _coerce_utc_dt(peak_doc.get("untilUtc"))
-        peak_enabled = bool(peak_doc.get("enabled")) and peak_until and peak_until > now_utc_ts
-        if peak_enabled:
-            uid_for_log = current_user_id or None
-            logger.info(
-                "[PEAK_MODE][LEADERBOARD] short_circuit enabled=1 until=%s reason=%s uid=%s",
-                _format_kl(peak_until),
-                peak_doc.get("reason"),
-                uid_for_log,
-            )
-            return jsonify(
-                {
-                    "peak_mode": True,
-                    "message": "Leaderboard updating after drop",
-                    "result": [],
-                    "tsUtc": now_utc_ts.isoformat(),
-                }
-            )            
         user_record = users_collection.find_one({"user_id": current_user_id}) or {}
         is_admin = bool(user_record.get("is_admin", False))
 
@@ -2619,13 +2313,7 @@ if __name__ == "__main__":
     except Exception as e:
         print("Failed to register vouchers blueprint / ensure indexes:", e)
         raise
-    try:
-        voucher_claims_col.create_index([("drop_id", ASCENDING), ("user_id", ASCENDING)], unique=True)
-        tg_verification_queue_col.create_index([("user_id", ASCENDING)], unique=True)
-        tg_verification_queue_col.create_index([("status", ASCENDING), ("next_run_at", ASCENDING)])
-    except Exception as e:
-        print("Failed to ensure claim/verification indexes:", e)
-        
+
     # 2) Catch up maintenance before bot handlers start
     try:
         run_boot_catchup()
@@ -2672,20 +2360,6 @@ if __name__ == "__main__":
         trigger=CronTrigger(minute="*/5", timezone=KL_TZ),
         id="settle_pending_referrals",
         name="Settle Pending Referrals",
-        replace_existing=True,
-    )    
-    scheduler.add_job(
-        process_tg_verification_queue,
-        trigger=CronTrigger(minute="*/1", timezone=KL_TZ),
-        id="tg_verification_queue",
-        name="Process Telegram verification queue",
-        replace_existing=True,
-    )    
-    scheduler.add_job(
-        sweep_peak_mode,
-        trigger=CronTrigger(minute="*/1", timezone=KL_TZ),
-        id="sweep_peak_mode",
-        name="Sweep Peak Mode",
         replace_existing=True,
     )    
     scheduler.start()
