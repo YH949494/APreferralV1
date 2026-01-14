@@ -4,7 +4,6 @@ from flask import (
 )
 from flask_cors import CORS
 from threading import Thread
-import importlib.util
 import time
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from telegram.constants import ParseMode
@@ -83,17 +82,6 @@ except (TypeError, ValueError):
 XMAS_CAMPAIGN_START = datetime(2025, 12, 1)
 XMAS_CAMPAIGN_END = datetime(2025, 12, 31, 23, 59, 59)
 
-CLAIM_RL_TTL_SECONDS = 5
-CLAIM_RL_MAXSIZE = 100000
-_cachetools_spec = importlib.util.find_spec("cachetools")
-if _cachetools_spec:
-    from cachetools import TTLCache
-    _claim_rl_cache = TTLCache(maxsize=CLAIM_RL_MAXSIZE, ttl=CLAIM_RL_TTL_SECONDS)
-    _claim_rl_cachetools = True
-else:
-    _claim_rl_cache = {}
-    _claim_rl_cachetools = False
-
 def _to_kl_date(dt_any):
     """Accepts aware/naive datetime or ISO string and returns date in KL."""
     if dt_any is None:
@@ -134,25 +122,6 @@ def _month_window_utc(reference: datetime | None = None):
     else:
         end_local = start_local.replace(month=start_local.month + 1)
     return start_local.astimezone(timezone.utc), end_local.astimezone(timezone.utc), start_local
-
-def _claim_rate_limited(uid: int) -> bool:
-    if uid is None:
-        return False
-    if _claim_rl_cachetools:
-        if uid in _claim_rl_cache:
-            return True
-        _claim_rl_cache[uid] = True
-        return False
-    now = time.monotonic()
-    exp = _claim_rl_cache.get(uid)
-    if exp and exp > now:
-        return True
-    _claim_rl_cache[uid] = now + CLAIM_RL_TTL_SECONDS
-    if len(_claim_rl_cache) > CLAIM_RL_MAXSIZE:
-        for key, expiry in list(_claim_rl_cache.items()):
-            if expiry <= now:
-                _claim_rl_cache.pop(key, None)
-    return False
 
 def _coerce_checked_at(value: datetime | str | None) -> datetime | None:
     if not value:
