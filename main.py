@@ -202,10 +202,11 @@ def enqueue_verification(uid: int, types: list[str]) -> None:
     if uid is None:
         return
     now = now_utc()
-    tg_verification_queue_col.update_one(
+    types_list = list(dict.fromkeys([entry for entry in types if isinstance(entry, str)]))
+    result = tg_verification_queue_col.update_one(
         {"user_id": uid},
         {
-            "$addToSet": {"types": {"$each": types}},
+            "$addToSet": {"types": {"$each": types_list}},
             "$set": {
                 "status": "pending",
                 "updated_at": now,
@@ -214,14 +215,20 @@ def enqueue_verification(uid: int, types: list[str]) -> None:
             },
             "$setOnInsert": {
                 "user_id": uid,
-                "types": types,
                 "attempts": 0,
                 "enqueued_at": now,
             },
         },
         upsert=True,
     )
-
+    logger.info(
+        "[TG_VERIFY][ENQUEUE] uid=%s types=%s upserted/modified=%s/%s",
+        uid,
+        types_list,
+        int(result.upserted_id is not None),
+        result.modified_count,
+    )
+    
 def _channel_url() -> str | None:
     if isinstance(CHANNEL_USERNAME, str) and CHANNEL_USERNAME.startswith("@"):
         return f"https://t.me/{CHANNEL_USERNAME[1:]}"
