@@ -1730,7 +1730,37 @@ class NoCodesLeft(Exception):
 
 class NotEligible(Exception):
     pass
- 
+
+def _find_existing_claim(*, drop_id: str, drop_type: str, user_id: str, username: str) -> dict | None:
+    drop_id_variants = _drop_id_variants(drop_id)
+    if drop_type in ("personalised", "personalized"):
+        username_lower = norm_username(username)
+        if not username_lower:
+            return None
+        existing = db.vouchers.find_one({
+            "type": "personalised",
+            "dropId": {"$in": drop_id_variants},
+            "usernameLower": username_lower,
+            "status": "claimed",
+        })
+    else:
+        claim_key = f"uid:{str(user_id or '').strip()}"
+        existing = db.vouchers.find_one({
+            "type": "pooled",
+            "dropId": {"$in": drop_id_variants},
+            "status": "claimed",
+            "$or": [
+                {"claimedByKey": claim_key},
+                {"claimedBy": claim_key},
+            ],
+        })
+    if not existing:
+        return None
+    return {
+        "code": existing.get("code"),
+        "claimedAt": _isoformat_kl(existing.get("claimedAt")),
+    }
+
 def claim_voucher_for_user(*, user_id: str, drop_id: str, username: str) -> dict:
     """
     Returns {"code": "...", "claimedAt": "..."} on success.
@@ -1899,7 +1929,6 @@ def api_claim():
         user_id = fallback_user_id or username or ""
 
     audience_type = _drop_audience_type(voucher)
-    check_only = bool(body.get("check_only") or body.get("checkOnly")) 
     client_ip = _get_client_ip(request)
     is_pool_drop = _is_pool_drop(voucher, audience_type)
 
@@ -2062,8 +2091,21 @@ def api_claim():
         result = claim_voucher_for_user(user_id=user_id, drop_id=drop_id, username=username)
         current_app.logger.info("[CLAIM][ATOMIC] uid=%s drop=%s outcome=success", uid, drop_id)     
     except AlreadyClaimed:
-        current_app.logger.info("[CLAIM][ATOMIC] uid=%s drop=%s outcome=already_claimed", uid, drop_id)     
-        return jsonify({"status": "error", "code": "already_claimed"}), 409
+        current_app.logger.info("[CLAIM][ATOMIC] uid=%s drop=%s outcome=already_claimed", uid, drop_id)
+        existing_claim = _find_existing_claim(
+            drop_id=drop_id,
+            drop_type=drop_type,
+            user_id=user_id,
+            username=username,
+        )
+        if existing_claim:
+            response_payload = {"status": "ok", "voucher": existing_claim, "alreadyClaimed": True}
+            if _is_new_joiner_audience(audience_type):
+                _append_retention_message(response_payload, WELCOME_BONUS_RETENTION_MESSAGE)
+            elif is_pool_drop:
+                _append_retention_message(response_payload, POOL_VOUCHER_RETENTION_MESSAGE)
+            return jsonify(response_payload), 200
+        return jsonify({"status": "ok", "voucher": {"code": None, "claimedAt": None}, "alreadyClaimed": True}), 200
     except NoCodesLeft:
         current_app.logger.info("[CLAIM][ATOMIC] uid=%s drop=%s outcome=sold_out", uid, drop_id)     
         return jsonify({"status": "error", "code": "sold_out"}), 410
