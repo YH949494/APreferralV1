@@ -1842,9 +1842,6 @@ def api_claim():
     uname = norm_uname(tg_user.get("username"))
 
     check_only = bool(body.get("check_only") or body.get("checkOnly"))
-    if not check_only and uid is not None and not _check_claim_rate_limit(uid):
-        current_app.logger.info("[CLAIM][RL] uid=%s", uid)
-        return jsonify({"status": "error", "code": "rate_limited", "reason": "rate_limited"}), 429
 
     drop = db.drops.find_one({"_id": _coerce_id(drop_id)}) if drop_id else {}
     drop_type = drop.get("type", "pooled")
