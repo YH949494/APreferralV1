@@ -2287,7 +2287,7 @@ def api_claim():
     # Claim
     try:
         result = claim_voucher_for_user(user_id=user_id, drop_id=drop_id, username=username)
-     except AlreadyClaimed as exc:
+    except AlreadyClaimed as exc:
         voucher_claims_col.update_one(
             {"_id": claim_doc_id},
             {"$set": {"status": "failed", "error": str(exc), "updated_at": now_utc()}},
