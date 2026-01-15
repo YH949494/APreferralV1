@@ -439,9 +439,10 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
             _release_for_retry(pending_id, now_utc_ts, backoff, f"exception:{step}")
 
     logger.info(
-        "[SCHED][REFERRAL] settle scanned=%s awarded=%s revoked=%s",
+        "[SCHED][REFERRAL] settle scanned=%s awarded=%s revoked=%s batch_limit=%s",
         scanned,
         scanned,
         awarded,
         revoked,
+        batch_limit,        
     )
