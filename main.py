@@ -824,10 +824,10 @@ def ensure_indexes():
         [("status", 1), ("created_at_utc", 1)],
         name="pending_by_time",
     )
-     pending_referrals_collection.create_index(
+    pending_referrals_collection.create_index(
         [("status", 1), ("next_retry_at_utc", 1)],
         name="pending_by_retry",
-    )   
+    )
     pending_referrals_collection.create_index(
         [("inviter_user_id", 1), ("status", 1)],
         name="pending_by_inviter",
