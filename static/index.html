@@ -187,8 +187,14 @@
   
   <div class="section">
     <h3>🏆 Weekly Leaderboard</h3>
-    <button onclick="loadLeaderboard()">View Leaderboard</button>
+    <button onclick="loadLeaderboard({ forceRefresh: true })">View Leaderboard</button>
+    <div style="display:flex;gap:8px;align-items:center;font-size:12px;color:#666;margin-top:6px;">
+      <span id="leaderboard-last-updated">Last updated: --</span>
+      <span id="leaderboard-cache-tag" style="display:none;padding:2px 6px;border-radius:10px;background:#f0f0f0;color:#666;font-size:11px;">cached</span>
+      <span id="leaderboard-loading" style="display:none;">Refreshing…</span>
+    </div>
     <div id="leaderboard-output">Click to load latest rankings...</div>
+    <button id="leaderboard-retry" type="button" style="display:none;margin-top:8px;">Retry</button>    
   </div>
 
   <button id="setAdminSecretBtn"
@@ -1001,6 +1007,8 @@ if (admParseCodesBtn) admParseCodesBtn.onclick = () => {
 </script>
   <script>
     const API_BASE = "https://apreferralv1.fly.dev";
+    const REWARDS_CACHE_KEY = "rewards_summary_cache_v1";
+    const REWARDS_CACHE_TTL_MS = 60 * 1000;    
     const user = tg?.initDataUnsafe?.user || {};
     const userId = user.id;
     const username = user.username || user.first_name || "";
@@ -1618,42 +1626,240 @@ document.addEventListener("click", async (e) => {
   }
 });
     
-  async function loadLeaderboard() {
+  let leaderboardInitOnce = false;
+  let leaderboardFetchInProgress = false;
+  let leaderboardFetchAttempted = false;
+  let leaderboardHasValidCache = false;
+  let leaderboardSkeletonRendered = false;
+  let leaderboardCacheAgeMs = null;
+
+  function renderLeaderboardSkeleton() {
+    const out = document.getElementById("leaderboard-output");
+    if (!out) return;
+    if (leaderboardSkeletonRendered) return;
+    leaderboardSkeletonRendered = true;
+    out.innerText = `📊 Your Weekly Stats:
+⏳ Loading weekly stats...
+
+⭐ XP Leaderboard:
+• Loading...
+• Loading...
+• Loading...
+
+🔗 Referral Leaderboard:
+• Loading...
+• Loading...
+• Loading...`;
+  }
+
+  function formatLastUpdated(ts) {
+    if (!ts) return "Last updated: --";
     try {
-      const res = await fetch(`${API_BASE}/api/leaderboard?user_id=${userId}&t=${Date.now()}`);
-      const data = await res.json();
-      const out = document.getElementById("leaderboard-output");
-      if (!data.success) throw new Error(data.error);
+      return `Last updated: ${new Date(ts).toLocaleString()}`;
+    } catch {
+      return "Last updated: --";
+    }
+  }
 
-      const checkin = data.leaderboard.checkin.map((u, i) =>
-        `${i + 1}. ${u.username || ''} - ${u.xp} XP`
-      ).join("\n");
+  function setLeaderboardMeta(ts, { isStale = false } = {}) {
+    const lastUpdated = document.getElementById("leaderboard-last-updated");
+    const cacheTag = document.getElementById("leaderboard-cache-tag");
+    if (lastUpdated) lastUpdated.textContent = formatLastUpdated(ts);
+    if (cacheTag) cacheTag.style.display = isStale ? "inline-flex" : "none";
+  }
 
-      const referral = data.leaderboard.referral.map((u, i) =>
-        `${i + 1}. ${u.username || ''} - ${u.weekly_referral_count ?? u.total_valid ?? u.referrals ?? 0} Ref`
-      ).join("\n");
-      
-      const myXP = data.user?.xp || 0;
-      const myMonthlyXP = data.user?.monthly_xp || 0;
-      const myRef = data.user?.weekly_referral_count ?? data.user?.total_valid ?? data.user?.referrals ?? 0;
-      const myName = user.username ? `@${user.username}` : (user.first_name || "You");
-      
-      const myStatus = (data.user && data.user.status) ? data.user.status : "Normal";
-      let statusLabel = "🧑 Normal";
-      if (myStatus === "VIP1") statusLabel = "👑 VIP1";
+  function setLeaderboardLoading(isLoading) {
+    const loading = document.getElementById("leaderboard-loading");
+    if (loading) loading.style.display = isLoading ? "inline-flex" : "none";
+  }
 
-      out.innerText = `📊 Your Weekly Stats:
+  function setLeaderboardRetryVisible(visible) {
+    const retry = document.getElementById("leaderboard-retry");
+    if (retry) retry.style.display = visible ? "inline-flex" : "none";
+  }
+
+  function setLeaderboardRetryDisabled(disabled) {
+    const retry = document.getElementById("leaderboard-retry");
+    if (retry) retry.disabled = disabled;
+  }
+
+  function renderLeaderboardUnavailable(message) {
+    const out = document.getElementById("leaderboard-output");
+    if (out) out.innerText = message;
+  }
+
+  function renderLeaderboardData(data) {
+    const out = document.getElementById("leaderboard-output");
+    if (!out) return;
+    const leaderboard = data?.leaderboard || {};
+    const checkinRows = Array.isArray(leaderboard.checkin) ? leaderboard.checkin : [];
+    const referralRows = Array.isArray(leaderboard.referral) ? leaderboard.referral : [];
+
+    const checkin = checkinRows.map((u, i) =>
+      `${i + 1}. ${u.username || ''} - ${u.xp} XP`
+    ).join("\n");
+
+    const referral = referralRows.map((u, i) =>
+      `${i + 1}. ${u.username || ''} - ${u.weekly_referral_count ?? u.total_valid ?? u.referrals ?? 0} Ref`
+    ).join("\n");
+    
+    const myXP = data?.user?.xp || 0;
+    const myMonthlyXP = data?.user?.monthly_xp || 0;
+    const myRef = data?.user?.weekly_referral_count ?? data?.user?.total_valid ?? data?.user?.referrals ?? 0;
+    const myName = user.username ? `@${user.username}` : (user.first_name || "You");
+    
+    const myStatus = (data?.user && data.user.status) ? data.user.status : "Normal";
+    let statusLabel = "🧑 Normal";
+    if (myStatus === "VIP1") statusLabel = "👑 VIP1";
+
+    out.innerText = `📊 Your Weekly Stats:
 👤 ${myName} - ${myXP} XP | ${myRef} Referrals
 📅 Monthly XP: ${myMonthlyXP}
 ${statusLabel}
 
 ⭐ XP Leaderboard:
-${checkin}
+${checkin || "No data yet."}
 
 🔗 Referral Leaderboard:
-${referral}`;
-    } catch {
-      document.getElementById("leaderboard-output").innerText = "❌ Error loading leaderboard.";
+${referral || "No data yet."}`;
+  }
+
+  function isValidLeaderboardRow(row) {
+    if (!row || typeof row !== "object") return false;
+    const hasIdentity = row.username || row.user_id || row.id;
+    const hasScore = Number.isFinite(row.xp)
+      || Number.isFinite(row.weekly_referral_count)
+      || Number.isFinite(row.total_valid)
+      || Number.isFinite(row.referrals);
+    return Boolean(hasIdentity && hasScore);
+  }
+
+  function isValidLeaderboardPayload(data) {
+    if (!data || typeof data !== "object") return false;
+    if (data.success === false) return false;
+    const leaderboard = data.leaderboard;
+    if (!leaderboard || typeof leaderboard !== "object") return false;
+    const checkinRows = Array.isArray(leaderboard.checkin) ? leaderboard.checkin : null;
+    const referralRows = Array.isArray(leaderboard.referral) ? leaderboard.referral : null;
+    if (!checkinRows && !referralRows) return false;
+    if (checkinRows && !checkinRows.every(isValidLeaderboardRow)) return false;
+    if (referralRows && !referralRows.every(isValidLeaderboardRow)) return false;
+    return true;
+  }
+
+  function readLeaderboardCache() {
+    try {
+      const raw = localStorage.getItem(REWARDS_CACHE_KEY);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed !== "object") {
+        localStorage.removeItem(REWARDS_CACHE_KEY);
+        return null;
+      }
+      const updatedAt = parsed.updatedAt || parsed.ts;
+      if (!updatedAt || !parsed.data) {
+        localStorage.removeItem(REWARDS_CACHE_KEY);
+        return null;
+      }
+      if (!isValidLeaderboardPayload(parsed.data)) {
+        localStorage.removeItem(REWARDS_CACHE_KEY);
+        return null;
+      }
+      return { updatedAt, data: parsed.data };
+    } catch (err) {
+      localStorage.removeItem(REWARDS_CACHE_KEY);
+      return null;
+    }
+  }
+
+  function writeLeaderboardCache(data) {
+    try {
+      localStorage.setItem(REWARDS_CACHE_KEY, JSON.stringify({
+        updatedAt: Date.now(),
+        data,
+      }));
+    } catch (err) {
+      console.warn("[LB][CACHE_WRITE_FAIL]", err);
+    }
+  }
+
+  function initLeaderboardCache() {
+    if (leaderboardInitOnce) return;
+    leaderboardInitOnce = true;
+    const retryBtn = document.getElementById("leaderboard-retry");
+    if (retryBtn && !retryBtn.dataset.bound) {
+      retryBtn.dataset.bound = "true";
+      retryBtn.addEventListener("click", () => loadLeaderboard({ forceRefresh: true }));
+    }
+
+    renderLeaderboardSkeleton();
+    const cached = readLeaderboardCache();
+    if (cached) {
+      leaderboardHasValidCache = true;
+      leaderboardCacheAgeMs = Date.now() - cached.updatedAt;
+      renderLeaderboardData(cached.data);
+      setLeaderboardMeta(cached.updatedAt, { isStale: leaderboardCacheAgeMs > REWARDS_CACHE_TTL_MS });
+      console.info("[LB][CACHE_HIT]");
+      console.info("[LB][RENDER_CACHE]");
+    } else {
+      setLeaderboardMeta(null, { isStale: false });
+      console.info("[LB][CACHE_MISS]");
+    }
+    if (!cached || leaderboardCacheAgeMs >= REWARDS_CACHE_TTL_MS) {
+      setTimeout(() => loadLeaderboard(), 0);
+    }
+  }
+    
+  async function loadLeaderboard(options = {}) {
+    const { forceRefresh = false } = options;
+    if (leaderboardFetchInProgress) return;
+    const out = document.getElementById("leaderboard-output");
+    const missingUser = !userId && !getAdminSecret?.();
+    if (forceRefresh && out) {
+      leaderboardSkeletonRendered = false;
+      renderLeaderboardSkeleton();
+    }
+    setLeaderboardRetryVisible(false);
+    setLeaderboardRetryDisabled(true);
+    setLeaderboardLoading(true);
+    leaderboardFetchInProgress = true;
+    leaderboardFetchAttempted = true;
+    console.info("[LB][FETCH_START]");
+
+    const url = new URL(`${API_BASE}/api/leaderboard`);
+    if (userId) url.searchParams.set("user_id", userId);
+    url.searchParams.set("t", Date.now());
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 2500);
+
+    try {
+      const res = await fetch(url.toString(), { signal: controller.signal });
+      const data = await res.json();
+      if (!isValidLeaderboardPayload(data)) throw new Error("Invalid payload");
+      renderLeaderboardData(data);
+      writeLeaderboardCache(data);
+      leaderboardHasValidCache = true;
+      leaderboardCacheAgeMs = 0;
+      setLeaderboardMeta(Date.now(), { isStale: false });
+      console.info("[LB][FETCH_OK]");
+      console.info("[LB][RENDER_FRESH]");
+    } catch (err) {
+      console.warn("[LB][FETCH_FAIL]", err);
+      if (!leaderboardHasValidCache) {
+        renderLeaderboardUnavailable(missingUser
+          ? "Please reopen the mini app to load the leaderboard."
+          : "Temporarily unavailable. Please try again.");
+        setLeaderboardRetryVisible(true);
+      }
+    } finally {
+      clearTimeout(timeoutId);
+      setLeaderboardLoading(false);
+      leaderboardFetchInProgress = false;
+      setLeaderboardRetryDisabled(false);
+      if (!leaderboardHasValidCache && leaderboardFetchAttempted) {
+        setLeaderboardRetryVisible(true);
+      }
     }
   }
 
@@ -1892,7 +2098,6 @@ window.onload = async () => {
   // ✅ Real Telegram user context
   checkRegionStatus();
   handleAdminAndVoucher();
-  loadLeaderboard();
   loadCheckinStatus();
 
 
@@ -1906,6 +2111,7 @@ window.onload = async () => {
     
 // --- Info Hub Modal & Tabs ---
 document.addEventListener('DOMContentLoaded', () => {
+  initLeaderboardCache();  
   const infoHubBtn   = document.getElementById("infoHubBtn");
   const infoHubModal = document.getElementById("infoHubModal");
   const closeInfoHub = document.getElementById("closeInfoHub");
