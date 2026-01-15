@@ -1280,7 +1280,26 @@ function applyChannelGate(dropId, messageEl, buttonEl) {
       console.warn("Channel gate check failed", err);
     });
 }
-    
+
+
+const CLAIM_REASON_TITLE = {
+  not_joined_main: "🚪 Join Group Now",
+  pic: "🖼️ Profile Picture Required",
+  verify_pending: "⏳ Verification in Progress",
+  not_new_user: "ℹ️ New Users Only",
+  already_claimed: "✅ Already Claimed",
+  expired: "⌛ Welcome Bonus Expired",
+  ip_rate_limit: "🌐 Too Many Requests",
+  new_joiner_rate_limit: "🚦 High Traffic",
+  out_of_stock: "🎁 All Claimed",
+  missing_profile_photo: "🖼️ Profile Picture Required",
+  already_claimed_lifetime: "✅ Already Claimed",
+  ip_claims_per_day: "🌐 Too Many Requests",
+  uid_attempts_per_minute: "🚦 High Traffic",
+  ip_uidset_per_day: "🚦 High Traffic"
+};
+
+const DEFAULT_TITLE = "⚠️ Unable to Claim";    
 function campaignWindowText(drop) {
   const start = drop?.startsAt ? fmtKL(drop.startsAt) : "";
   const end = drop?.endsAt ? fmtKL(drop.endsAt) : "";
@@ -1527,31 +1546,25 @@ document.addEventListener("click", async (e) => {
     let out = null;
     try { out = await res.json(); } catch { /* ignore */ }
 
-    if (res.status === 403 && out?.code === "not_subscribed") {
-      const message = out?.message || "Please subscribe to @advantplayofficial to claim this voucher.";
-      if (claimBtn.id === "campaign-voucher-btn") {
-        const messageEl = document.getElementById("campaign-voucher-message");
-        showChannelGate(messageEl, claimBtn);
-      } else {
-        const card = claimBtn.closest(".campaign-card");
-        const messageEl = card?.querySelector(".campaign-message");
-        showChannelGate(messageEl, claimBtn);
-      }
-      alert(message);
-      return;
-    }
-    if (out?.error_code === "NO_PROFILE_PIC") {
-      alert("Please set your Telegram profile picture and try again.");
-      return;
-    }
-    
-    if (res.status === 401) {
-      alert("Not authorized (401). Open inside Telegram WebApp or pass init_data correctly.");
-      return;
-    }
     // accept either {ok:true} or {status:"ok"}
     const ok = res.ok && (out?.ok === true || out?.status === "ok");
-    if (!ok) throw new Error(out?.error || out?.code || `HTTP ${res.status}`);
+    if (!ok) {
+      const key = out?.reason || out?.checks_key || "unknown";
+      const title = CLAIM_REASON_TITLE[key] || DEFAULT_TITLE;
+      if (key === "not_joined_main") {
+        const joinBtn = document.getElementById("join-group-btn");
+        if (joinBtn) joinBtn.style.display = "inline-block";
+      }
+      if (res.status === 403 && out?.code === "not_subscribed") {
+        if (claimBtn.id === "campaign-voucher-btn") {
+          showChannelGate(null, claimBtn);
+        } else {
+          showChannelGate(null, claimBtn);
+        }
+      }
+      alert(title);
+      return;
+    }
 
     // new API shape: { status:"ok", voucher:{ code, claimedAt } }
     const codeText = out?.voucher?.code ? String(out.voucher.code) : "(no code)";
@@ -1590,7 +1603,7 @@ document.addEventListener("click", async (e) => {
     alert(`🎟️ Your code: ${codeText}\nClaimed at: ${claimedAt}${copyMsg}`);
 
   } catch (err) {
-    alert(`⚠️ Claim failed: ${err.message}`);
+    alert(DEFAULT_TITLE);
   }
 });
 
