@@ -45,6 +45,13 @@ WELCOME_WINDOW_DAYS = 7
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+def _running_under_gunicorn():
+    return "gunicorn" in os.environ.get("SERVER_SOFTWARE", "").lower() or os.environ.get("GUNICORN_CMD_ARGS") is not None
+
+RUNNER_MODE = os.getenv("RUNNER_MODE")
+if not RUNNER_MODE:
+    RUNNER_MODE = "web" if _running_under_gunicorn() else "worker"
+
 # ----------------------------
 # Config
 # ----------------------------
@@ -2351,7 +2358,7 @@ async def button_handler(update, context):
 # ----------------------------
 # Run Bot + Flask + Scheduler
 # ----------------------------
-if __name__ == "__main__":
+def run_worker():
     try:
         ensure_voucher_indexes()
         print("Voucher indexes ensured.")
@@ -2415,9 +2422,6 @@ if __name__ == "__main__":
 
     print("✅ Bot & Scheduler wired. Starting servers...")
 
-    # 6) Start Flask AFTER routes/handlers/scheduler are wired
-    Thread(target=lambda: app.run(host="0.0.0.0", port=8080), daemon=True).start()  
-
     try:
         app_bot.run_polling(
             poll_interval=5,
@@ -2426,6 +2430,25 @@ if __name__ == "__main__":
     finally:
         scheduler.shutdown(wait=False)
 
+
+def run_web():
+    try:
+        ensure_voucher_indexes()
+        print("Voucher indexes ensured.")
+    except Exception as e:
+        print("Failed to register vouchers blueprint / ensure indexes:", e)
+        raise
+    print("[BOOT] web mode: Flask app ready")
+
+
+if __name__ == "__main__":
+    if RUNNER_MODE == "worker":
+        run_worker()
+    else:
+        run_web()
+        if not _running_under_gunicorn():
+            app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8080")))
+            
 # Test plan (internal):
 # 1) Generate referral link for user A.
 # 2) User B joins via that link (join request flow) and is approved.
