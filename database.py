@@ -23,6 +23,9 @@ users_collection = db["users"]
 users_collection.create_index([("user_id", ASCENDING)], unique=True)
 users_collection.create_index([("username", ASCENDING)])
 
+user_snapshots_col = db["user_snapshots"]
+user_snapshots_col.create_index([("user_id", ASCENDING)], unique=Tru
+                                
 monthly_xp_history_collection = db["monthly_xp_history"]
 monthly_xp_history_collection.create_index([("user_id", ASCENDING), ("month", ASCENDING)], unique=True)
 monthly_xp_history_collection.create_index([("month", ASCENDING)])                              
