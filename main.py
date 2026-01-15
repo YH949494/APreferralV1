@@ -134,17 +134,20 @@ def compute_referral_stats(user_id: int, window=None):
     return {"total_referrals": total, "weekly_referrals": weekly, "monthly_referrals": 0}
 
 
-def _previous_month_window_utc(reference: datetime | None = None):
-    """Return (start_utc, end_utc, start_local) for the month that just ended."""
+def _current_month_window_utc(reference: datetime | None = None):
+    """Return (start_utc, end_utc, start_local, end_local) for the current month."""
 
     ref_local = reference.astimezone(KL_TZ) if reference else datetime.now(KL_TZ)
-    this_month_start = ref_local.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    prev_month_end = this_month_start
-    prev_month_start = (this_month_start - timedelta(days=1)).replace(day=1)
+    month_start = ref_local.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    if month_start.month == 12:
+        next_month_start = month_start.replace(year=month_start.year + 1, month=1)
+    else:
+        next_month_start = month_start.replace(month=month_start.month + 1)
     return (
-        prev_month_start.astimezone(timezone.utc),
-        prev_month_end.astimezone(timezone.utc),
-        prev_month_start,
+        month_start.astimezone(timezone.utc),
+        next_month_start.astimezone(timezone.utc),
+        month_start,
+        next_month_start,
     )
 
 
@@ -1967,7 +1970,7 @@ def run_boot_catchup():
 
 def apply_monthly_tier_update(run_time: datetime | None = None):
     run_at_local = run_time.astimezone(KL_TZ) if run_time else datetime.now(KL_TZ)
-    start_utc, end_utc, start_local = _previous_month_window_utc(run_at_local)
+    start_utc, end_utc, start_local, end_local = _current_month_window_utc(run_at_local)
     end_local = end_utc.astimezone(KL_TZ)
     month_key = start_local.strftime("%Y-%m")
     now_utc = datetime.now(timezone.utc)
@@ -1978,17 +1981,73 @@ def apply_monthly_tier_update(run_time: datetime | None = None):
     promoted: list[int] = []
     demoted: list[int] = []   
     processed = 0
-    
+
+
+    total_users = users_collection.count_documents({})
+    logger.info(
+        "[VIP][MONTHLY] window=%s..%s users=%s",
+        start_local.isoformat(),
+        end_local.isoformat(),
+        total_users,
+    )
+
+    tier_rank = {"Normal": 0, "VIP1": 1}
+
+    def _tier_from_monthly_xp(monthly_total: int) -> str:
+        return "VIP1" if monthly_total >= 800 else "Normal"
+
+    def _tier_rank(value) -> int:
+        if isinstance(value, (int, float)):
+            return int(value)
+        if isinstance(value, str):
+            return tier_rank.get(value, 0)
+        return 0    
     for user in users_collection.find():
         uid = user.get("user_id")
         if uid is None:
             continue
-        previous_month_xp = xp_map.get(uid, 0)
-        next_status = "VIP1" if previous_month_xp >= 800 else "Normal"
+        monthly_total = xp_map.get(uid, 0)
+        # monthly_xp derived from xp ledger
+        computed_tier = _tier_from_monthly_xp(monthly_total)
         current_status = user.get("status", "Normal")
+        existing = users_collection.find_one(
+            {"user_id": uid},
+            {"vip_month": 1, "vip_tier": 1},
+        ) or {}
+        existing_month = existing.get("vip_month")
+        existing_tier = existing.get("vip_tier")
+        existing_rank = _tier_rank(existing_tier) if existing_tier is not None else -1
+        computed_rank = _tier_rank(computed_tier)
 
-        if next_status != current_status:
-            (promoted if next_status == "VIP1" else demoted).append(uid)
+        if existing_month == month_key:
+            # VIP should not downgrade within a month
+            if existing_rank > computed_rank:
+                final_tier = existing_tier
+                logger.info(
+                    "[VIP][MONTHLY] keep_tier uid=%s month=%s existing=%s computed=%s",
+                    uid,
+                    month_key,
+                    existing_tier,
+                    computed_tier,
+                )
+            else:
+                final_tier = computed_tier
+                if computed_rank > existing_rank:
+                    logger.info(
+                        "[VIP][MONTHLY] upgrade uid=%s month=%s from=%s to=%s",
+                        uid,
+                        month_key,
+                        existing_tier,
+                        computed_tier,
+                    )
+        else:
+            final_tier = computed_tier
+            
+        if final_tier != current_status:
+            if _tier_rank(final_tier) > _tier_rank(current_status):
+                promoted.append(uid)
+            else:
+                demoted.append(uid)
 
         monthly_xp_history_collection.update_one(
             {"user_id": uid, "month": month_key},
@@ -1997,9 +2056,9 @@ def apply_monthly_tier_update(run_time: datetime | None = None):
                     "user_id": uid,
                     "username": user.get("username"),
                     "month": month_key,
-                    "monthly_xp": previous_month_xp,
+                    "monthly_xp": monthly_total,
                     "status_before_reset": current_status,
-                    "status_after_reset": next_status,
+                    "status_after_reset": final_tier,
                     "captured_at_utc": now_utc,
                     "captured_at_kl": run_at_local.isoformat(),
                 }
@@ -2011,9 +2070,12 @@ def apply_monthly_tier_update(run_time: datetime | None = None):
             {"user_id": uid},
             {
                 "$set": {
-                    "status": next_status,
-                    "last_status_update": end_local,
-                    "monthly_xp": 0,
+                    "status": final_tier,
+                    "last_status_update": run_at_local,
+                    "monthly_xp": monthly_total,
+                    "vip_month": month_key,
+                    "vip_tier": final_tier,
+                    "vip_updated_at": now_utc,
                 }
             },
         )
