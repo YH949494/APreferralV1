@@ -1941,7 +1941,14 @@ def api_claim():
  
     username_missing = not (username and username.strip())
     if drop_type in ("personalised", "personalized") and username_missing:
-        return jsonify({"status": "error", "code": "not_eligible"}), 403
+        return jsonify({
+            "status": "error",
+            "code": "not_eligible",
+            "ok": False,
+            "eligible": False,
+            "reason": "missing_username",
+            "checks_key": None,
+        }), 403
 
     allowed = True
     if drop_type in ("personalised", "personalized"):
@@ -1956,16 +1963,37 @@ def api_claim():
 
     if not allowed:
         print(f"[claim401] uid={uid} uname={uname} v_uid={v_uid} v_uname={v_uname}")
-        return jsonify({"status": "error", "code": "not_eligible"}), 403
+        return jsonify({
+            "status": "error",
+            "code": "not_eligible",
+            "ok": False,
+            "eligible": False,
+            "reason": "not_eligible",
+            "checks_key": None,
+        }), 403
 
     user_ctx = load_user_context(uid=uid, username=username, username_lower=uname or username)
 
     if not is_drop_allowed(voucher, uid, uname, user_ctx):
-        return jsonify({"status": "error", "code": "not_eligible"}), 403
+        return jsonify({
+            "status": "error",
+            "code": "not_eligible",
+            "ok": False,
+            "eligible": False,
+            "reason": "not_eligible",
+            "checks_key": None,
+        }), 403
 
     if not is_user_eligible_for_drop(user_doc, tg_user, voucher):
-        return jsonify({"status": "error", "code": "not_eligible"}), 403
- 
+        return jsonify({
+            "status": "error",
+            "code": "not_eligible",
+            "ok": False,
+            "eligible": False,
+            "reason": "not_eligible",
+            "checks_key": None,
+        }), 403
+     
     if not username:
         username = fallback_username or ""
    
@@ -1990,6 +2018,10 @@ def api_claim():
             return jsonify({
                 "status": "error",
                 "code": "not_subscribed",
+                "ok": False,
+                "eligible": False,
+                "reason": "not_subscribed",
+                "checks_key": None,             
                 "message": "Please subscribe to @advantplayofficial to claim this voucher."
             }), 403
 
@@ -2009,7 +2041,14 @@ def api_claim():
                 audience_type,
             )         
             current_app.logger.info("[claim] deny drop=%s uid=%s reason=bad_drop_type type=%s", drop_id, uid, drop_type)
-            return jsonify({"status": "error", "code": "not_eligible", "reason": "not_supported_for_audience"}), 403
+            return jsonify({
+                "status": "error",
+                "code": "not_eligible",
+                "reason": "not_supported_for_audience",
+                "ok": False,
+                "eligible": False,
+                "checks_key": None,
+            }), 403
         if uid is None:
             current_app.logger.info(
                 "[claim] uid=%s drop_id=%s dtype=%s audience=%s decision=blocked reason=missing_uid",
@@ -2019,11 +2058,25 @@ def api_claim():
                 audience_type,
             )         
             current_app.logger.info("[claim] deny drop=%s reason=missing_uid", drop_id)
-            return jsonify({"status": "error", "code": "not_eligible", "reason": "missing_uid"}), 403
+            return jsonify({
+                "status": "error",
+                "code": "not_eligible",
+                "reason": "missing_uid",
+                "ok": False,
+                "eligible": False,
+                "checks_key": None,
+            }), 403
         joined_doc = users_collection.find_one({"user_id": uid}, {"joined_main_at": 1})
         if not (joined_doc or {}).get("joined_main_at"):
             current_app.logger.info("[WELCOME_CLAIM][DENY] uid=%s reason=not_joined_main", uid)
-            return jsonify({"status": "error", "code": "not_eligible", "reason": "missing_joined_main_at"}), 403
+            return jsonify({
+                "status": "error",
+                "code": "not_eligible",
+                "reason": "not_joined_main",
+                "ok": False,
+                "eligible": False,
+                "checks_key": None,
+            }), 403
         cache_has_photo, cache_stale = _profile_photo_cache_status(uid)
         if cache_stale:
             enqueue_verification(uid, ["pic"])
@@ -2032,7 +2085,9 @@ def api_claim():
                 "status": "error",
                 "ok": False,
                 "code": "not_eligible",
-                "reason": "missing_profile_photo",
+                "eligible": False,
+                "reason": "verify_pending",
+                "checks_key": "pic",
                 "error_code": "NO_PROFILE_PIC",
                 "message": "Please set a Telegram profile picture to claim the Welcome Bonus."
             }), 202
@@ -2048,7 +2103,9 @@ def api_claim():
                "status": "error",
                "ok": False,
                "code": "not_eligible",
+               "eligible": False,             
                "reason": "missing_profile_photo",
+               "checks_key": "pic",             
                "error_code": "NO_PROFILE_PIC",
                "message": "Please set a Telegram profile picture to claim the Welcome Bonus."
             }), 403         
@@ -2072,7 +2129,14 @@ def api_claim():
                 audience_type,
                 reason,
             )
-            return jsonify({"status": "error", "code": "not_eligible", "reason": reason}), 403
+            return jsonify({
+                "status": "error",
+                "code": "not_eligible",
+                "reason": reason,
+                "ok": False,
+                "eligible": False,
+                "checks_key": None,
+            }), 403
         if new_joiner_claims_col.find_one({"uid": uid}):
             current_app.logger.info(
                 "[claim] uid=%s drop_id=%s dtype=%s audience=%s decision=blocked reason=already_claimed_lifetime",
@@ -2082,7 +2146,14 @@ def api_claim():
                 audience_type,
             )  
             current_app.logger.info("[claim] deny drop=%s uid=%s reason=already_claimed_lifetime", drop_id, uid)
-            return jsonify({"status": "error", "code": "not_eligible", "reason": "already_claimed_lifetime"}), 403
+            return jsonify({
+                "status": "error",
+                "code": "not_eligible",
+                "reason": "already_claimed_lifetime",
+                "ok": False,
+                "eligible": False,
+                "checks_key": None,
+            }), 403
 
         ok_rl, rl_reason = _check_new_joiner_rate_limits(uid=uid, ip=client_ip, now=now_ts)
         if not ok_rl:
@@ -2094,7 +2165,14 @@ def api_claim():
                 audience_type,
                 rl_reason,
             )         
-            return jsonify({"status": "error", "code": "rate_limited", "reason": rl_reason}), 429
+            return jsonify({
+                "status": "error",
+                "code": "rate_limited",
+                "reason": rl_reason,
+                "ok": False,
+                "eligible": False,
+                "checks_key": None,
+            }), 429
 
         # per-IP successful claims per day pre-check
         day_key = now_ts.strftime("%Y%m%d")
@@ -2108,7 +2186,14 @@ def api_claim():
                 audience_type,
             )    
             current_app.logger.info("[claim] deny drop=%s uid=%s reason=ip_claims_per_day ip=%s", drop_id, uid, client_ip)
-            return jsonify({"status": "error", "code": "rate_limited", "reason": "ip_claims_per_day"}), 429
+            return jsonify({
+                "status": "error",
+                "code": "rate_limited",
+                "reason": "ip_claims_per_day",
+                "ok": False,
+                "eligible": False,
+                "checks_key": None,
+            }), 429
 
         ticket = get_or_issue_welcome_ticket(uid)
         if not ticket:
@@ -2119,7 +2204,14 @@ def api_claim():
                 drop_type,
                 audience_type,
             )       
-            return jsonify({"status": "error", "code": "not_eligible", "reason": "not_eligible"}), 403
+            return jsonify({
+                "status": "error",
+                "code": "not_eligible",
+                "reason": "not_eligible",
+                "ok": False,
+                "eligible": False,
+                "checks_key": None,
+            }), 403
 
         expires_at = _as_aware_kl(ticket.get("expires_at"))
         if expires_at and now_ts > expires_at:
@@ -2132,7 +2224,14 @@ def api_claim():
                 drop_type,
                 audience_type,
             )         
-            return jsonify({"status": "error", "code": "not_eligible", "reason": "expired"}), 403
+            return jsonify({
+                "status": "error",
+                "code": "not_eligible",
+                "reason": "expired",
+                "ok": False,
+                "eligible": False,
+                "checks_key": None,
+            }), 403
 
     # Claim
     try:
@@ -2142,7 +2241,14 @@ def api_claim():
     except NoCodesLeft:
         return jsonify({"status": "error", "code": "sold_out"}), 410
     except NotEligible:
-        return jsonify({"status": "error", "code": "not_eligible"}), 403
+        return jsonify({
+            "status": "error",
+            "code": "not_eligible",
+            "ok": False,
+            "eligible": False,
+            "reason": "not_eligible",
+            "checks_key": None,
+        }), 403
     except Exception:
         current_app.logger.exception("claim failed")
         return jsonify({"status": "error", "code": "server_error"}), 500
@@ -2162,19 +2268,40 @@ def api_claim():
                 upsert=True,
             )
         except DuplicateKeyError:
-            return jsonify({"status": "error", "code": "not_eligible", "reason": "already_claimed_lifetime"}), 403
+            return jsonify({
+                "status": "error",
+                "code": "not_eligible",
+                "reason": "already_claimed_lifetime",
+                "ok": False,
+                "eligible": False,
+                "checks_key": None,
+            }), 403
 
         ip_claim_count = _increment_ip_claim_success(ip=client_ip)
         if ip_claim_count > 3:
             current_app.logger.info("[claim] deny post-claim drop=%s uid=%s reason=ip_claims_per_day ip=%s", drop_id, uid, client_ip)
-            return jsonify({"status": "error", "code": "rate_limited", "reason": "ip_claims_per_day"}), 429
+            return jsonify({
+                "status": "error",
+                "code": "rate_limited",
+                "reason": "ip_claims_per_day",
+                "ok": False,
+                "eligible": False,
+                "checks_key": None,
+            }), 429
 
         welcome_tickets_col.update_one(
             {"uid": uid},
             {"$set": {"status": "claimed", "claimed_at": now_kl(), "reason_last_fail": None}},
         )
         if not uid:
-            return jsonify({"status": "error", "code": "not_eligible", "reason": "missing_uid"}), 403     
+            return jsonify({
+                "status": "error",
+                "code": "not_eligible",
+                "reason": "missing_uid",
+                "ok": False,
+                "eligible": False,
+                "checks_key": None,
+            }), 403     
         welcome_eligibility_col.update_one(
             {"uid": uid},
             {"$set": {"claimed": True, "claimed_at": now_kl()}},
