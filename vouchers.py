@@ -18,6 +18,7 @@ welcome_tickets_col = db["welcome_tickets"]
 subscription_cache_col = db["subscription_cache"]
 welcome_eligibility_col = db["welcome_eligibility"]
 tg_verification_queue_col = db["tg_verification_queue"]
+voucher_claims_col = db["voucher_claims"]
 
 BYPASS_ADMIN = os.getenv("BYPASS_ADMIN", "0").lower() in ("1", "true", "yes", "on")
 HARDCODED_ADMIN_USERNAMES = {"gracy_ap", "teohyaohui"}  # allow manual overrides if cache is empty
@@ -278,6 +279,14 @@ def ensure_voucher_indexes():
         name="uniq_personalised_assignment",
         partialFilterExpression={"type": "personalised"}
     )
+     try:
+        voucher_claims_col.create_index(
+            [("drop_id", ASCENDING), ("user_id", ASCENDING)],
+            unique=True,
+            name="uq_claim_drop_user",
+        )
+    except OperationFailure:
+        pass
     new_joiner_claims_col.create_index([("uid", ASCENDING)], unique=True)
     claim_rate_limits_col.create_index([("key", ASCENDING)], unique=True)
     claim_rate_limits_col.create_index([("expiresAt", ASCENDING)], expireAfterSeconds=0)
@@ -2233,14 +2242,68 @@ def api_claim():
                 "checks_key": None,
             }), 403
 
+    # Claim lock (idempotent per drop+user) before issuing code
+    claim_drop_id = _coerce_id(drop_id)
+    claim_user_id = uid if uid is not None else user_id
+    claim_now = now_utc()
+    user_agent = request.headers.get("User-Agent", "")
+    claim_doc_id = None
+    try:
+        claim_doc = {
+            "drop_id": claim_drop_id,
+            "user_id": claim_user_id,
+            "status": "claimed_pending_code",
+            "created_at": claim_now,
+            "ip": client_ip,
+            "ua": user_agent,
+        }
+        insert_res = voucher_claims_col.insert_one(claim_doc)
+        claim_doc_id = insert_res.inserted_id
+    except DuplicateKeyError:
+        existing_claim = voucher_claims_col.find_one({"drop_id": claim_drop_id, "user_id": claim_user_id})
+        if existing_claim and existing_claim.get("status") == "failed":
+            retry_claim = voucher_claims_col.find_one_and_update(
+                {"_id": existing_claim["_id"], "status": "failed"},
+                {"$set": {"status": "claimed_pending_code", "updated_at": claim_now, "error": None}},
+                return_document=ReturnDocument.AFTER,
+            )
+            if retry_claim:
+                claim_doc_id = retry_claim["_id"]
+        if claim_doc_id is None:
+            existing_code = (existing_claim or {}).get("voucher_code")
+            if existing_code:
+                current_app.logger.info("[claim][IDEMPOTENT_RETURN] drop=%s uid=%s code=%s", drop_id, uid, existing_code)
+                claimed_at = (existing_claim or {}).get("claimed_at")
+                return jsonify({
+                    "status": "ok",
+                    "voucher": {
+                        "code": existing_code,
+                        "claimedAt": _isoformat_kl(claimed_at) if claimed_at else None,
+                    }
+                }), 200
+            current_app.logger.info("[claim][DEDUP] drop=%s uid=%s", drop_id, uid)
+            return jsonify({"status": "error", "code": "already_claimed"}), 409
+
     # Claim
     try:
         result = claim_voucher_for_user(user_id=user_id, drop_id=drop_id, username=username)
-    except AlreadyClaimed:
+     except AlreadyClaimed as exc:
+        voucher_claims_col.update_one(
+            {"_id": claim_doc_id},
+            {"$set": {"status": "failed", "error": str(exc), "updated_at": now_utc()}},
+        )
         return jsonify({"status": "error", "code": "already_claimed"}), 409
-    except NoCodesLeft:
+    except NoCodesLeft as exc:
+        voucher_claims_col.update_one(
+            {"_id": claim_doc_id},
+            {"$set": {"status": "failed", "error": str(exc), "updated_at": now_utc()}},
+        )
         return jsonify({"status": "error", "code": "sold_out"}), 410
-    except NotEligible:
+    except NotEligible as exc:
+        voucher_claims_col.update_one(
+            {"_id": claim_doc_id},
+            {"$set": {"status": "failed", "error": str(exc), "updated_at": now_utc()}},
+        )
         return jsonify({
             "status": "error",
             "code": "not_eligible",
@@ -2249,10 +2312,27 @@ def api_claim():
             "reason": "not_eligible",
             "checks_key": None,
         }), 403
-    except Exception:
+    except Exception as exc:
+        voucher_claims_col.update_one(
+            {"_id": claim_doc_id},
+            {"$set": {"status": "failed", "error": str(exc), "updated_at": now_utc()}},
+        )
         current_app.logger.exception("claim failed")
         return jsonify({"status": "error", "code": "server_error"}), 500
 
+    else:
+        voucher_claims_col.update_one(
+            {"_id": claim_doc_id},
+            {
+                "$set": {
+                    "status": "claimed",
+                    "voucher_code": result.get("code"),
+                    "claimed_at": now_utc(),
+                    "updated_at": now_utc(),
+                }
+            },
+        )
+        current_app.logger.info("[claim][OK] drop=%s uid=%s code=%s", drop_id, uid, result.get("code"))
     if _is_new_joiner_audience(audience_type):
         try:
             new_joiner_claims_col.update_one(
