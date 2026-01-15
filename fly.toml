@@ -14,9 +14,9 @@ primary_region = "sin"
 # Process Groups
 # =========================
 [processes]
-  web = "gunicorn main:app --bind 0.0.0.0:${PORT} --workers 2 --worker-class gthread --threads 4 --timeout 30 --graceful-timeout 30 --keep-alive 5 --max-requests 1000 --max-requests-jitter 100 --access-logfile - --error-logfile -"
+  web = "gunicorn main:app --bind 0.0.0.0:8080 --workers 2 --worker-class gthread --threads 4 --timeout 30 --graceful-timeout 30 --keep-alive 5 --max-requests 1000 --max-requests-jitter 100 --access-logfile - --error-logfile -"
   worker = "env RUNNER_MODE=worker python main.py"
-
+  
 # =========================
 # Web Service (ONLY web)
 # =========================
