@@ -301,7 +301,51 @@ def ensure_voucher_indexes():
             )
         except Exception:
             print("[WELCOME_CLAIM][VERIFY_ENQUEUE] failed to ensure uniq_user_checks index")
-         
+
+    try:
+        existing = None
+        for ix in tg_verification_queue_col.list_indexes():
+            if ix.get("key") == {"user_id": 1}:
+                existing = ix
+                if ix.get("unique") and ix.get("sparse"):
+                    break
+                try:
+                    tg_verification_queue_col.drop_index(ix["name"])
+                    existing = None
+                except Exception:
+                    pass
+                break
+        if not existing or not (existing.get("unique") and existing.get("sparse")):
+            tg_verification_queue_col.create_index(
+                [("user_id", ASCENDING)],
+                unique=True,
+                name="uniq_tg_verify_user_id",
+                sparse=True,
+            )
+    except Exception:
+        try:
+            current_app.logger.exception(
+                "[VERIFY_QUEUE] failed to ensure uniq_tg_verify_user_id index"
+            )
+        except Exception:
+            print("[VERIFY_QUEUE] failed to ensure uniq_tg_verify_user_id index")
+
+    if os.getenv("VERIFY_QUEUE_CLEANUP") == "1":
+        try:
+            result = tg_verification_queue_col.delete_many(
+                {"$or": [{"user_id": None}, {"user_id": {"$exists": False}}]}
+            )
+            msg = f"[VERIFY_QUEUE] cleanup_bad_docs deleted={result.deleted_count}"
+            try:
+                current_app.logger.info(msg)
+            except Exception:
+                print(msg)
+        except Exception:
+            try:
+                current_app.logger.exception("[VERIFY_QUEUE] cleanup_bad_docs_failed")
+            except Exception:
+                print("[VERIFY_QUEUE] cleanup_bad_docs_failed")
+             
 def parse_kl_local(dt_str: str):
     """Parse 'YYYY-MM-DD HH:MM:SS' in Kuala Lumpur local time to UTC (aware)."""
     if not dt_str:
@@ -729,7 +773,13 @@ def _profile_photo_cache_status(uid: int) -> tuple[bool | None, bool]:
     return bool(cached.get("hasPhoto")), False
 
 def enqueue_verification(uid: int, checks: list[str]) -> None:
-    if uid is None:
+    try:
+        uid = int(uid)
+    except (TypeError, ValueError):
+        try:
+            current_app.logger.warning("[VERIFY_QUEUE] skip_enqueue invalid_uid=%s", uid)
+        except Exception:
+            print(f"[VERIFY_QUEUE] skip_enqueue invalid_uid={uid}")
         return
     checks = checks or []
     checks_key = "|".join(sorted([str(x).strip() for x in checks if x]))
@@ -738,29 +788,33 @@ def enqueue_verification(uid: int, checks: list[str]) -> None:
     now = now_kl()
     try:
         tg_verification_queue_col.update_one(
-            {"user_id": uid, "checks_key": checks_key},
+            {"user_id": uid},
             {
-               "$set": {"updated_at": now, "checks": checks},
+               "$set": {
+                   "user_id": uid,
+                   "uid": uid,
+                   "checks": checks,
+                   "checks_key": checks_key,
+                   "status": "queued",
+                   "updated_at": now,
+               },
                 "$setOnInsert": {
-                    "user_id": uid,                 
-                    "uid": uid,
-                    "checks_key": checks_key,
-                    "status": "pending",
+                    "created_at": now,
                     "requested_at": now,
                 },
             },
             upsert=True,
         )
         current_app.logger.info(
-            "[WELCOME_CLAIM][VERIFY_ENQUEUE] enqueued uid=%s checks_key=%s", uid, checks_key
+            "[VERIFY_QUEUE] enqueued uid=%s checks_key=%s", uid, checks_key
         )
     except DuplicateKeyError:
         current_app.logger.info(
-            "[WELCOME_CLAIM][VERIFY_ENQUEUE] duplicate uid=%s checks_key=%s", uid, checks_key
+            "[VERIFY_QUEUE] duplicate uid=%s checks_key=%s", uid, checks_key
         )     
     except Exception:
         current_app.logger.exception(
-            "[WELCOME_CLAIM][VERIFY_ENQUEUE] failed uid=%s checks_key=%s", uid, checks_key
+            "[VERIFY_QUEUE] failed uid=%s checks_key=%s", uid, checks_key
         )
      
 ALLOWED_CHANNEL_STATUSES = {"member", "administrator", "creator"}
