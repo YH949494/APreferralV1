@@ -279,7 +279,7 @@ def ensure_voucher_indexes():
         name="uniq_personalised_assignment",
         partialFilterExpression={"type": "personalised"}
     )
-     try:
+    try:
         voucher_claims_col.create_index(
             [("drop_id", ASCENDING), ("user_id", ASCENDING)],
             unique=True,
