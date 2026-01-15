@@ -17,6 +17,7 @@ profile_photo_cache_col = db["profile_photo_cache"]
 welcome_tickets_col = db["welcome_tickets"]
 subscription_cache_col = db["subscription_cache"]
 welcome_eligibility_col = db["welcome_eligibility"]
+tg_verification_queue_col = db["tg_verification_queue"]
 
 BYPASS_ADMIN = os.getenv("BYPASS_ADMIN", "0").lower() in ("1", "true", "yes", "on")
 HARDCODED_ADMIN_USERNAMES = {"gracy_ap", "teohyaohui"}  # allow manual overrides if cache is empty
@@ -699,6 +700,42 @@ def _has_profile_photo(uid: int, *, force_refresh: bool = False):
     ) 
     return has_photo
 
+def _profile_photo_cache_status(uid: int) -> tuple[bool | None, bool]:
+    if uid is None:
+        return None, True
+    try:
+        cached = profile_photo_cache_col.find_one({"uid": uid})
+    except Exception:
+        return None, True
+    if not cached:
+        return None, True
+    exp = (cached or {}).get("expiresAt")
+    exp_aware = _as_aware_kl(exp) or _as_aware_utc(exp)
+    if not exp_aware or exp_aware <= now_kl():
+        return None, True
+    return bool(cached.get("hasPhoto")), False
+
+def enqueue_verification(uid: int, checks: list[str]) -> None:
+    if uid is None:
+        return
+    now = now_kl()
+    try:
+        tg_verification_queue_col.update_one(
+            {"uid": uid, "checks": {"$all": checks}},
+            {
+                "$set": {"updated_at": now},
+                "$setOnInsert": {
+                    "uid": uid,
+                    "checks": checks,
+                    "status": "pending",
+                    "requested_at": now,
+                },
+            },
+            upsert=True,
+        )
+    except Exception:
+        current_app.logger.exception("[WELCOME_CLAIM][VERIFY_ENQUEUE] failed uid=%s", uid)
+     
 ALLOWED_CHANNEL_STATUSES = {"member", "administrator", "creator"}
 SUB_CHECK_TTL_SECONDS = int(os.getenv("SUB_CHECK_TTL_SECONDS", "120"))
 
@@ -1294,7 +1331,6 @@ def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None
     pooled_claim_key = f"uid:{user_id}" if user_id else ""
     drops = get_active_drops(ref)
 
-    ref_kl = ref.astimezone(KL_TZ) if ref.tzinfo else ref.replace(tzinfo=timezone.utc).astimezone(KL_TZ) 
     personal_cards = []
     pooled_cards = []
 
@@ -1331,12 +1367,6 @@ def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None
     if not user_doc and usernameLower:
         user_doc = users_collection.find_one({"usernameLower": usernameLower})
 
-    uid_for_new_joiner = ctx_uid if ctx_uid is not None else None
-    already_new_joiner_claim = False
-    if uid_for_new_joiner is not None:
-        already_new_joiner_claim = bool(new_joiner_claims_col.find_one({"uid": uid_for_new_joiner}))
-    welcome_eligibility = ensure_welcome_eligibility(uid_for_new_joiner) if uid_for_new_joiner is not None else None
- 
     # Only hide personalised vouchers when the caller truly has no username
     allow_personalised = bool(usernameLower)
     claim_key = usernameLower or user_id
@@ -1349,32 +1379,12 @@ def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None
         dtype = d.get("type", "pooled")
         is_active = is_drop_active(d, ref)
         audience_type = _drop_audience_type(d)
-        is_welcome_drop = _is_new_joiner_audience(audience_type)
 
         if not is_drop_allowed(d, ctx_uid, usernameLower or uname, user_ctx):
             continue
 
         if not is_user_eligible_for_drop(user_doc, tg_user or {}, d):
             continue    
-
-        welcome_ticket = None
-        if is_welcome_drop:
-            if uid is None:
-                continue
-            if not _welcome_eligible_now(uid, welcome_eligibility, ref=ref, user_doc=user_doc):
-                continue
-            if already_new_joiner_claim:
-                continue
-            welcome_ticket = get_or_issue_welcome_ticket(uid)
-            if not welcome_ticket:
-                continue
-            expires_at = _as_aware_kl(welcome_ticket.get("expires_at"))
-            if expires_at and ref_kl > expires_at:
-                welcome_tickets_col.update_one(
-                    {"uid": uid},
-                    {"$set": {"status": "expired", "expires_at": expires_at}},
-                )
-                continue
      
         base = {
             "dropId": drop_id,
@@ -1438,12 +1448,7 @@ def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None
                 base["code"] = already.get("code")
                 claimed_at = _isoformat_kl(already.get("claimedAt"))
                 if claimed_at:
-                    base["claimedAt"] = claimed_at
-                if welcome_ticket:
-                    expires_at = _as_aware_kl(welcome_ticket.get("expires_at"))
-                    if expires_at:
-                        remaining = int((expires_at - ref_kl).total_seconds())
-                        base["welcomeRemainingSeconds"] = max(0, remaining)                 
+                    base["claimedAt"] = claimed_at       
                 base["remainingApprox"] = max(0, db.vouchers.count_documents({"type": "pooled", "dropId": {"$in": drop_id_variants}, "status": "free"}))
                 pooled_cards.append(base)
             else:
@@ -1453,12 +1458,7 @@ def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None
                     "status": "free"
                 }, projection={"_id": 1})
                 if free_exists:
-                    base["remainingApprox"] = max(0, db.vouchers.count_documents({"type": "pooled", "dropId": {"$in": drop_id_variants}, "status": "free"}))
-                    if welcome_ticket:
-                        expires_at = _as_aware_kl(welcome_ticket.get("expires_at"))
-                        if expires_at:
-                            remaining = int((expires_at - ref_kl).total_seconds())
-                            base["welcomeRemainingSeconds"] = max(0, remaining)                 
+                    base["remainingApprox"] = max(0, db.vouchers.count_documents({"type": "pooled", "dropId": {"$in": drop_id_variants}, "status": "free"}))        
                     pooled_cards.append(base)
 
     # Sort: personalised first; then pooled by priority desc, startsAt asc
@@ -1648,38 +1648,6 @@ def api_visible():
                 uid = int(tg_user.get("id"))
             except Exception:
                 uid = None
-        users_exists = bool(users_collection.find_one({"user_id": uid}, {"_id": 1})) if uid is not None else False
-        welcome_doc = None
-        user_doc = None  
-        created = False
-        if user_id and uid is not None:
-            user_doc = users_collection.find_one({"user_id": uid}, {"joined_main_at": 1})
-            if not (user_doc or {}).get("joined_main_at"):
-                current_app.logger.info(
-                    "[WELCOME][JOIN_BACKFILL_DISABLED] uid=%s joined_main_at_missing",
-                    uid,
-                )         
-            existing = welcome_eligibility_col.find_one({"uid": uid})
-            welcome_doc = ensure_welcome_eligibility(uid)
-            created = bool(not existing and welcome_doc)
-            eligible_until = _as_aware_utc((welcome_doc or {}).get("eligible_until"))
-            current_app.logger.info(
-                "[WELCOME] uid=%s created=%s eligible_until=%s",
-                uid,
-                str(created).lower(),
-                eligible_until.isoformat() if eligible_until else None,
-            )
-
-        welcome_eligible = _welcome_eligible_now(uid, welcome_doc, ref=ref, user_doc=user_doc)
-        current_app.logger.info(
-            "[WELCOME] visible uid=%s ok_init=%s welcome_eligible=%s claimed=%s until=%s joined_main_at=%s",
-            uid,
-            str(ok).lower(),
-            str(welcome_eligible).lower(),
-            str(bool((welcome_doc or {}).get("claimed"))).lower() if welcome_doc else "false",
-            _as_aware_utc((welcome_doc or {}).get("eligible_until")).isoformat() if welcome_doc else None,
-            _isoformat_kl((user_doc or {}).get("joined_main_at")),         
-        )
      
         drops = user_visible_drops(user, ref, tg_user=tg_user)
         return jsonify({"visibilityMode": "stacked", "nowUtc": ref.isoformat(), "drops": drops}), 200
@@ -1907,6 +1875,38 @@ def api_claim():
             )         
             current_app.logger.info("[claim] deny drop=%s reason=missing_uid", drop_id)
             return jsonify({"status": "error", "code": "not_eligible", "reason": "missing_uid"}), 403
+        joined_doc = users_collection.find_one({"user_id": uid}, {"joined_main_at": 1})
+        if not (joined_doc or {}).get("joined_main_at"):
+            current_app.logger.info("[WELCOME_CLAIM][DENY] uid=%s reason=not_joined_main", uid)
+            return jsonify({"status": "error", "code": "not_eligible", "reason": "missing_joined_main_at"}), 403
+        cache_has_photo, cache_stale = _profile_photo_cache_status(uid)
+        if cache_stale:
+            enqueue_verification(uid, ["pic"])
+            current_app.logger.info("[WELCOME_CLAIM][VERIFY_ENQUEUE] uid=%s type=pic", uid)
+            return jsonify({
+                "status": "error",
+                "ok": False,
+                "code": "not_eligible",
+                "reason": "missing_profile_photo",
+                "error_code": "NO_PROFILE_PIC",
+                "message": "Please set a Telegram profile picture to claim the Welcome Bonus."
+            }), 202
+        if not cache_has_photo:
+            current_app.logger.info(
+                "[claim] uid=%s drop_id=%s dtype=%s audience=%s decision=blocked reason=missing_profile_photo",
+                uid,
+                drop_id,
+                drop_type,
+                audience_type,
+            )
+            return jsonify({
+               "status": "error",
+               "ok": False,
+               "code": "not_eligible",
+               "reason": "missing_profile_photo",
+               "error_code": "NO_PROFILE_PIC",
+               "message": "Please set a Telegram profile picture to claim the Welcome Bonus."
+            }), 403         
         current_app.logger.info("[WELCOME] claim_attempt uid=%s drop_id=%s", uid, drop_id)
         eligibility = ensure_welcome_eligibility(uid)
         now_ts = now_kl()
@@ -1989,27 +1989,6 @@ def api_claim():
             )         
             return jsonify({"status": "error", "code": "not_eligible", "reason": "expired"}), 403
 
-        has_photo = check_has_profile_photo(uid)
-        if not has_photo:
-            welcome_tickets_col.update_one({"uid": uid}, {"$set": {"reason_last_fail": "no_photo"}})
-            current_app.logger.info("[welcome] gate_fail uid=%s reason=no_photo", uid)
-            current_app.logger.info(
-                "[claim] uid=%s drop_id=%s dtype=%s audience=%s decision=blocked reason=missing_profile_photo",
-                uid,
-                drop_id,
-                drop_type,
-                audience_type,
-            )         
-            return jsonify({
-               "status": "error",
-               "ok": False,                       
-               "code": "not_eligible",
-               "reason": "missing_profile_photo",
-               "error_code": "NO_PROFILE_PIC",             
-               "message": "Please set a Telegram profile picture to claim the Welcome Bonus."
-            }), 403
-
-         
     # Claim
     try:
         result = claim_voucher_for_user(user_id=user_id, drop_id=drop_id, username=username)
