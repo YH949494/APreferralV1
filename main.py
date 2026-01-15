@@ -1397,7 +1397,7 @@ def get_leaderboard():
         week_end_local = week_start_local + timedelta(days=7)
         leaderboard_limit = 15
         region = request.args.get("region", "global")
-        cache_key = f"{region}|{week_start_local.isoformat()}|{leaderboard_limit}|{current_user_id}"
+        cache_key = f"{region}|{week_start_local.isoformat()}|{leaderboard_limit}"
         cached_entry = LEADERBOARD_CACHE.get(cache_key)
         now_ts = time.time()
         if cached_entry and (now_ts - cached_entry["ts"]) < CACHE_TTL_SECONDS:
