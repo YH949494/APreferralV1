@@ -284,7 +284,7 @@ def ensure_voucher_indexes():
     claim_rate_limits_col.create_index([("scope", ASCENDING), ("ip", ASCENDING), ("day", ASCENDING)])
     profile_photo_cache_col.create_index([("uid", ASCENDING)], unique=True)
     profile_photo_cache_col.create_index([("expiresAt", ASCENDING)], expireAfterSeconds=0)
-    welcome_tickets_col.create_index([("uid", ASCENDING)], unique=True)
+    welcome_tickets_col.create_index([("user_id", ASCENDING)], unique=True)
     welcome_tickets_col.create_index([("cleanup_at", ASCENDING)], expireAfterSeconds=0)
     welcome_eligibility_col.create_index([("uid", ASCENDING)], unique=True)
     subscription_cache_col.create_index([("expireAt", ASCENDING)], expireAfterSeconds=0)
@@ -405,7 +405,7 @@ def norm_uname(s):
     return s.lower()
 
 def is_new_player(uid: int) -> bool:
-    if uid is None:
+    if not uid:
         return False
     return users_collection.find_one({"user_id": uid}, {"_id": 1}) is None
 
@@ -990,33 +990,40 @@ def check_username_present(tg_user: dict) -> bool:
 def get_or_issue_welcome_ticket(uid: int):
     if uid is None:
         return None
-
-    eligibility = ensure_welcome_eligibility(uid)
-    if not eligibility:
-        current_app.logger.info("[welcome] eligibility_missing uid=%s deny", uid)
+     
+    if not is_new_player(uid):
         return None
 
-    now = now_kl()
-    expires_at = _as_aware_kl(eligibility.get("eligible_until"))
-    if not expires_at:
-        current_app.logger.info("[welcome] eligibility_invalid uid=%s deny", uid)
-        return None
-    if eligibility.get("claimed"):
-        current_app.logger.info("[welcome] eligibility_claimed uid=%s deny", uid)
-        return None
-    if now > expires_at:
-        current_app.logger.info("[welcome] eligibility_expired uid=%s deny", uid)
-        return None
+    ticket = welcome_tickets_col.find_one({"user_id": uid})
+    if not ticket:
+        ticket = welcome_tickets_col.find_one({"uid": uid})
+        if ticket:
+            try:
+                welcome_tickets_col.update_one(
+                    {"_id": ticket.get("_id")},
+                    {"$set": {"user_id": uid}},
+                )
+                ticket["user_id"] = uid
+            except Exception:
+                current_app.logger.exception("[welcome] ticket_migrate_failed uid=%s", uid)
 
+     if ticket:
+        if ticket.get("status") in ("claimed", "expired"):
+            return ticket
+        if ticket.get("status") == "active":
+            return ticket
+
+    now = now_utc()
+    expires_at = now + timedelta(days=7)
     cleanup_at = expires_at + timedelta(days=30)
 
     try:
         ticket = welcome_tickets_col.find_one_and_update(
-            {"uid": uid},
+            {"user_id": uid},
             {
                 "$set": {"cleanup_at": cleanup_at},
                 "$setOnInsert": {
-                    "uid": uid,
+                    "user_id": uid,
                     "issued_at": now,
                     "expires_at": expires_at,
                     "status": "active",
@@ -1025,31 +1032,16 @@ def get_or_issue_welcome_ticket(uid: int):
             upsert=True,
             return_document=ReturnDocument.AFTER,
         )
+    except DuplicateKeyError:
+        ticket = welcome_tickets_col.find_one({"user_id": uid})     
     except Exception:
         current_app.logger.exception("[visible][WELCOME_TICKET] write failed", extra={"uid": uid})
         return None
 
-    issued_at = _as_aware_utc(ticket.get("issued_at"))
-    just_created = False
-    if issued_at:
-        try:
-            just_created = abs((issued_at - now).total_seconds()) < 2
-        except Exception:
-            just_created = False
-
-    ticket_expires_at = _as_aware_kl(ticket.get("expires_at")) or expires_at
-    if ticket_expires_at and now > ticket_expires_at and ticket.get("status") not in ("expired", "claimed"):
-        welcome_tickets_col.update_one(
-            {"uid": uid},
-            {"$set": {"status": "expired", "reason_last_fail": "expired"}},
+    if ticket:
+        current_app.logger.info(
+            "[welcome] ticket_exists uid=%s status=%s", uid, ticket.get("status")
         )
-        ticket["status"] = "expired"
-        ticket["expires_at"] = ticket_expires_at
-
-    if just_created:
-        current_app.logger.info("[welcome] ticket_issued uid=%s expires_at=%s", uid, expires_at.isoformat())
-    else:
-        current_app.logger.info("[welcome] ticket_exists uid=%s status=%s", uid, ticket.get("status"))
     return ticket
 
 
@@ -1182,10 +1174,10 @@ def is_user_eligible_for_drop(user_doc: dict, tg_user: dict, drop: dict) -> bool
         if ticket_status in ("claimed", "expired"):
             _log(False, f"welcome_ticket_{ticket_status}")
             return False
-        expires_at = _as_aware_kl(ticket.get("expires_at"))
-        if expires_at and now_kl() > expires_at:
+        expires_at = _as_aware_utc(ticket.get("expires_at"))
+        if expires_at and now_utc() > expires_at:
             welcome_tickets_col.update_one(
-                {"uid": uid},
+                {"user_id": uid},
                 {"$set": {"status": "expired", "reason_last_fail": "expired"}},
             )
             _log(False, "welcome_ticket_expired")
@@ -1509,20 +1501,17 @@ def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None
                     ticket_status,
                 )
                 continue
-            ticket_expires_at = _as_aware_kl(ticket.get("expires_at"))
-            ref_kl = _as_aware_kl(ref) or now_kl()
-            if ticket_expires_at and ref_kl > ticket_expires_at:
+            ticket_expires_at = _as_aware_utc(ticket.get("expires_at"))
+            ref_utc = _as_aware_utc(ref) or now_utc()
+            if ticket_expires_at and ref_utc > ticket_expires_at:
                 welcome_tickets_col.update_one(
-                    {"uid": ctx_uid},
+                    {"user_id": ctx_uid},
                     {"$set": {"status": "expired", "reason_last_fail": "expired"}},
                 )
                 current_app.logger.info(
-                    "[visible][WELCOME] hide_ticket_status uid=%s status=expired",
+                    "[visible][WELCOME] hide_ticket_expired uid=%s",
                     ctx_uid,
                 )
-                continue
-            window = _welcome_window_for_user(ctx_uid, ref=ref, user_doc=None)
-            if window is None:
                 continue
     
         if not is_drop_allowed(d, ctx_uid, usernameLower or uname, user_ctx):
@@ -2066,6 +2055,56 @@ def api_claim():
                 "eligible": False,
                 "checks_key": None,
             }), 403
+        if not is_new_player(uid):
+            current_app.logger.info("[WELCOME_CLAIM][DENY] uid=%s reason=old_user", uid)
+            return jsonify({
+                "status": "error",
+                "code": "not_eligible",
+                "reason": "old_user",
+                "ok": False,
+                "eligible": False,
+                "checks_key": None,
+            }), 403
+        ticket = get_or_issue_welcome_ticket(uid)
+        if not ticket:
+            current_app.logger.info("[WELCOME_CLAIM][DENY] uid=%s reason=no_ticket", uid)
+            return jsonify({
+                "status": "error",
+                "code": "not_eligible",
+                "reason": "no_ticket",
+                "ok": False,
+                "eligible": False,
+                "checks_key": None,
+            }), 403
+        ticket_status = ticket.get("status")
+        if ticket_status in ("claimed", "expired"):
+            current_app.logger.info(
+                "[WELCOME_CLAIM][DENY] uid=%s reason=ticket_%s", uid, ticket_status
+            )
+            return jsonify({
+                "status": "error",
+                "code": "not_eligible",
+                "reason": f"ticket_{ticket_status}",
+                "ok": False,
+                "eligible": False,
+                "checks_key": None,
+            }), 403
+        now_ticket = now_utc()
+        expires_at = _as_aware_utc(ticket.get("expires_at"))
+        if expires_at and now_ticket > expires_at:
+            welcome_tickets_col.update_one(
+                {"user_id": uid},
+                {"$set": {"status": "expired", "reason_last_fail": "expired"}},
+            )
+            current_app.logger.info("[WELCOME_CLAIM][DENY] uid=%s reason=ticket_expired", uid)
+            return jsonify({
+                "status": "error",
+                "code": "not_eligible",
+                "reason": "ticket_expired",
+                "ok": False,
+                "eligible": False,
+                "checks_key": None,
+            }), 403         
         joined_doc = users_collection.find_one({"user_id": uid}, {"joined_main_at": 1})
         if not (joined_doc or {}).get("joined_main_at"):
             current_app.logger.info("[WELCOME_CLAIM][DENY] uid=%s reason=not_joined_main", uid)
@@ -2110,50 +2149,7 @@ def api_claim():
                "message": "Please set a Telegram profile picture to claim the Welcome Bonus."
             }), 403         
         current_app.logger.info("[WELCOME] claim_attempt uid=%s drop_id=%s", uid, drop_id)
-        eligibility = ensure_welcome_eligibility(uid)
         now_ts = now_kl()
-        if not _welcome_eligible_now(uid, eligibility, ref=now_ts, user_doc=user_doc):
-            reason = "missing_joined_main_at"
-            if eligibility and eligibility.get("claimed"):
-                reason = "already_claimed"
-            else:
-                joined_main_at = (user_doc or users_collection.find_one({"user_id": uid}, {"joined_main_at": 1}) or {}).get("joined_main_at")
-                window = _welcome_window_for_user(uid, ref=now_ts, user_doc=user_doc)
-                if joined_main_at and window is None:
-                    reason = "not_new_user"
-            current_app.logger.info(
-                "[claim] uid=%s drop_id=%s dtype=%s audience=%s decision=blocked reason=%s",
-                uid,
-                drop_id,
-                drop_type,
-                audience_type,
-                reason,
-            )
-            return jsonify({
-                "status": "error",
-                "code": "not_eligible",
-                "reason": reason,
-                "ok": False,
-                "eligible": False,
-                "checks_key": None,
-            }), 403
-        if new_joiner_claims_col.find_one({"uid": uid}):
-            current_app.logger.info(
-                "[claim] uid=%s drop_id=%s dtype=%s audience=%s decision=blocked reason=already_claimed_lifetime",
-                uid,
-                drop_id,
-                drop_type,
-                audience_type,
-            )  
-            current_app.logger.info("[claim] deny drop=%s uid=%s reason=already_claimed_lifetime", drop_id, uid)
-            return jsonify({
-                "status": "error",
-                "code": "not_eligible",
-                "reason": "already_claimed_lifetime",
-                "ok": False,
-                "eligible": False,
-                "checks_key": None,
-            }), 403
 
         ok_rl, rl_reason = _check_new_joiner_rate_limits(uid=uid, ip=client_ip, now=now_ts)
         if not ok_rl:
@@ -2194,44 +2190,6 @@ def api_claim():
                 "eligible": False,
                 "checks_key": None,
             }), 429
-
-        ticket = get_or_issue_welcome_ticket(uid)
-        if not ticket:
-            current_app.logger.info(
-                "[claim] uid=%s drop_id=%s dtype=%s audience=%s decision=blocked reason=not_eligible",
-                uid,
-                drop_id,
-                drop_type,
-                audience_type,
-            )       
-            return jsonify({
-                "status": "error",
-                "code": "not_eligible",
-                "reason": "not_eligible",
-                "ok": False,
-                "eligible": False,
-                "checks_key": None,
-            }), 403
-
-        expires_at = _as_aware_kl(ticket.get("expires_at"))
-        if expires_at and now_ts > expires_at:
-            welcome_tickets_col.update_one({"uid": uid}, {"$set": {"status": "expired", "reason_last_fail": "expired"}})
-            current_app.logger.info("[welcome] gate_fail uid=%s reason=expired", uid)
-            current_app.logger.info(
-                "[claim] uid=%s drop_id=%s dtype=%s audience=%s decision=blocked reason=expired",
-                uid,
-                drop_id,
-                drop_type,
-                audience_type,
-            )         
-            return jsonify({
-                "status": "error",
-                "code": "not_eligible",
-                "reason": "expired",
-                "ok": False,
-                "eligible": False,
-                "checks_key": None,
-            }), 403
 
     # Claim
     try:
@@ -2301,12 +2259,8 @@ def api_claim():
                 "ok": False,
                 "eligible": False,
                 "checks_key": None,
-            }), 403     
-        welcome_eligibility_col.update_one(
-            {"uid": uid},
-            {"$set": {"claimed": True, "claimed_at": now_kl()}},
-        )     
-        current_app.logger.info("[WELCOME] gate_pass uid=%s", uid)
+            }), 403
+        current_app.logger.info("[WELCOME_CLAIM][OK] uid=%s drop=%s", uid, drop_id)
         current_app.logger.info("[WELCOME] claim_success uid=%s drop_id=%s", uid, drop_id)
         current_app.logger.info("[claim] success drop=%s audience=%s uid=%s ip=%s", drop_id, audience_type, uid, client_ip)
         current_app.logger.info(
