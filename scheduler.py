@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 INSTANCE_ID = os.getenv("FLY_ALLOC_ID") or f"{socket.gethostname()}:{os.getpid()}"
 PROCESSING_TIMEOUT = timedelta(minutes=10)
 RETRY_RELEASE_DELAY = timedelta(minutes=2)
-
+user_snapshots_col = db["user_snapshots"]
 
 class ReferralRetryableError(RuntimeError):
     def __init__(self, message: str, retry_after: int | None = None):
@@ -93,7 +93,18 @@ def _release_for_retry(pending_id, now_utc_ts: datetime, retry_after_seconds: in
         },
     )
 
-
+def _build_user_snapshot(user_id: int, user_doc: dict, *, updated_at: datetime, source: str) -> dict:
+    return {
+        "user_id": user_id,
+        "referral_count": int(user_doc.get("ref_count_total", 0)),
+        "weekly_referral_count": int(user_doc.get("weekly_referral_count", 0)),
+        "weekly_xp": int(user_doc.get("weekly_xp", 0)),
+        "monthly_xp": int(user_doc.get("monthly_xp", 0)),
+        "vip_tier": user_doc.get("status"),
+        "updated_at": updated_at,
+        "source": source,
+    }
+    
 def _recover_stale_processing(now_utc_ts: datetime) -> int:
     cutoff = now_utc_ts - PROCESSING_TIMEOUT
     result = db.pending_referrals.update_many(
@@ -172,7 +183,8 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
     scanned = 0
     awarded = 0
     revoked = 0
-
+    affected_inviter_ids: set[int] = set()
+    
     while scanned < batch_limit:
         pending = db.pending_referrals.find_one_and_update(
             {
@@ -199,6 +211,8 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
         pending_id = pending.get("_id")
         invitee_user_id = pending.get("invitee_user_id")
         inviter_user_id = pending.get("inviter_user_id")
+        if inviter_user_id:
+            affected_inviter_ids.add(inviter_user_id)        
         step = "validate"
         retry_count = pending.get("retry_count", 0) or 0
         try:
@@ -446,3 +460,30 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
         revoked,
         batch_limit,        
     )
+
+    if affected_inviter_ids:
+        snapshot_now = now_utc()
+        for inviter_id in affected_inviter_ids:
+            inviter_doc = db.users.find_one(
+                {"user_id": inviter_id},
+                {
+                    "ref_count_total": 1,
+                    "weekly_referral_count": 1,
+                    "weekly_xp": 1,
+                    "monthly_xp": 1,
+                    "status": 1,
+                },
+            )
+            if not inviter_doc:
+                continue
+            snapshot = _build_user_snapshot(
+                inviter_id,
+                inviter_doc,
+                updated_at=snapshot_now,
+                source="settle_5min",
+            )
+            user_snapshots_col.update_one(
+                {"user_id": inviter_id},
+                {"$set": snapshot},
+                upsert=True,
+            )
