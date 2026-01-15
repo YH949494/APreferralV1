@@ -288,7 +288,20 @@ def ensure_voucher_indexes():
     welcome_tickets_col.create_index([("cleanup_at", ASCENDING)], expireAfterSeconds=0)
     welcome_eligibility_col.create_index([("uid", ASCENDING)], unique=True)
     subscription_cache_col.create_index([("expireAt", ASCENDING)], expireAfterSeconds=0)
- 
+    try:
+        tg_verification_queue_col.create_index(
+            [("user_id", ASCENDING), ("checks_key", ASCENDING)],
+            unique=True,
+            name="uniq_user_checks",
+        )
+    except OperationFailure:
+        try:
+            current_app.logger.exception(
+                "[WELCOME_CLAIM][VERIFY_ENQUEUE] failed to ensure uniq_user_checks index"
+            )
+        except Exception:
+            print("[WELCOME_CLAIM][VERIFY_ENQUEUE] failed to ensure uniq_user_checks index")
+         
 def parse_kl_local(dt_str: str):
     """Parse 'YYYY-MM-DD HH:MM:SS' in Kuala Lumpur local time to UTC (aware)."""
     if not dt_str:
@@ -718,23 +731,37 @@ def _profile_photo_cache_status(uid: int) -> tuple[bool | None, bool]:
 def enqueue_verification(uid: int, checks: list[str]) -> None:
     if uid is None:
         return
+    checks = checks or []
+    checks_key = "|".join(sorted([str(x).strip() for x in checks if x]))
+    if checks_key == "":
+        return     
     now = now_kl()
     try:
         tg_verification_queue_col.update_one(
-            {"uid": uid, "checks": {"$all": checks}},
+            {"user_id": uid, "checks_key": checks_key},
             {
-                "$set": {"updated_at": now},
+               "$set": {"updated_at": now, "checks": checks},
                 "$setOnInsert": {
+                    "user_id": uid,                 
                     "uid": uid,
-                    "checks": checks,
+                    "checks_key": checks_key,
                     "status": "pending",
                     "requested_at": now,
                 },
             },
             upsert=True,
         )
+        current_app.logger.info(
+            "[WELCOME_CLAIM][VERIFY_ENQUEUE] enqueued uid=%s checks_key=%s", uid, checks_key
+        )
+    except DuplicateKeyError:
+        current_app.logger.info(
+            "[WELCOME_CLAIM][VERIFY_ENQUEUE] duplicate uid=%s checks_key=%s", uid, checks_key
+        )     
     except Exception:
-        current_app.logger.exception("[WELCOME_CLAIM][VERIFY_ENQUEUE] failed uid=%s", uid)
+        current_app.logger.exception(
+            "[WELCOME_CLAIM][VERIFY_ENQUEUE] failed uid=%s checks_key=%s", uid, checks_key
+        )
      
 ALLOWED_CHANNEL_STATUSES = {"member", "administrator", "creator"}
 SUB_CHECK_TTL_SECONDS = int(os.getenv("SUB_CHECK_TTL_SECONDS", "120"))
