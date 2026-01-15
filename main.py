@@ -1365,7 +1365,7 @@ def mask_username(username):
     return masked.ljust(8, "*")
 
 # Format usernames depending on admin or own account
-def format_username(u, current_user_id, is_admin_viewer):
+def format_username(u, current_user_id, is_admin):
     name = None
     if u.get("username"):
         name = f"@{u['username']}"
@@ -1375,21 +1375,21 @@ def format_username(u, current_user_id, is_admin_viewer):
     if not name:
         return None
 
-    # Mask if not admin and not the viewer's own account
-    if not is_admin_viewer and u.get("user_id") != current_user_id:
+    # Mask if not admin & not own account
+    if not is_admin and u.get("user_id") != current_user_id:
         raw_name = name.lstrip("@")
         masked = mask_username(raw_name)
         return f"@{masked}" if name.startswith("@") else masked
 
-    # Admin viewer or own account → show full name
+    # Admin or own account → show full name
     return name
 
 @app.route("/api/leaderboard")
 def get_leaderboard():
     try:
-        viewer_uid = request.args.get("user_id")
+        raw_user_id = request.args.get("user_id")
         try:
-            current_user_id = int(viewer_uid) if viewer_uid not in (None, "", "undefined") else 0
+            current_user_id = int(raw_user_id) if raw_user_id not in (None, "", "undefined") else 0
         except (TypeError, ValueError):
             current_user_id = 0
 
@@ -1478,7 +1478,7 @@ def get_leaderboard():
 
         referral_board = []
         total_all_map: dict[int, int] = {}
-        if is_admin_viewer:
+        if is_admin:
             total_all_map = {
                 row.get("user_id"): int(row.get("ref_count_total", 0))
                 for row in referral_rows
@@ -1494,7 +1494,7 @@ def get_leaderboard():
                 "total_valid": row.get("weekly_referral_count", 0),
                 "referrals": row.get("weekly_referral_count", 0),
             }
-            if is_admin_viewer:
+            if is_admin:
                 entry["total_all"] = total_all_map.get(row["user_id"], row.get("ref_count_total", 0))
 
             referral_board.append(entry)
