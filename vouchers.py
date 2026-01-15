@@ -404,6 +404,11 @@ def norm_uname(s):
         s = s[1:]
     return s.lower()
 
+def is_new_player(uid: int) -> bool:
+    if uid is None:
+        return False
+    return users_collection.find_one({"user_id": uid}, {"_id": 1}) is None
+
 def _welcome_window_for_user(uid: int | None, *, ref: datetime | None = None, user_doc: dict | None = None):
     if uid is None:
         return None
@@ -1162,7 +1167,30 @@ def is_user_eligible_for_drop(user_doc: dict, tg_user: dict, drop: dict) -> bool
             _log(False, "region_mismatch")
             return False
 
-    if mode == "tier":
+    if mode == "welcome_new_user_7d":
+        if uid is None:
+            _log(False, "welcome_missing_uid")
+            return False
+        if not is_new_player(uid):
+            _log(False, "welcome_old_user")
+            return False
+        ticket = get_or_issue_welcome_ticket(uid)
+        if not ticket:
+            _log(False, "welcome_no_ticket")
+            return False
+        ticket_status = ticket.get("status")
+        if ticket_status in ("claimed", "expired"):
+            _log(False, f"welcome_ticket_{ticket_status}")
+            return False
+        expires_at = _as_aware_kl(ticket.get("expires_at"))
+        if expires_at and now_kl() > expires_at:
+            welcome_tickets_col.update_one(
+                {"uid": uid},
+                {"$set": {"status": "expired", "reason_last_fail": "expired"}},
+            )
+            _log(False, "welcome_ticket_expired")
+            return False
+    elif mode == "tier":
         if not allow or user_status not in allow:
             _log(False, "tier_mismatch")
             return False
@@ -1461,6 +1489,42 @@ def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None
         is_active = is_drop_active(d, ref)
         audience_type = _drop_audience_type(d)
 
+        # Sanity checks:
+        # - users_collection has uid -> welcome drop not returned
+        # - no record -> welcome drop returned until ticket expires/claimed
+        if _is_new_joiner_audience(audience_type):
+            if ctx_uid is None:
+                continue
+            if not is_new_player(ctx_uid):
+                current_app.logger.info("[visible][WELCOME] hide_old_user uid=%s", ctx_uid)
+                continue
+            ticket = get_or_issue_welcome_ticket(ctx_uid)
+            if not ticket:
+                continue
+            ticket_status = ticket.get("status")
+            if ticket_status in ("claimed", "expired"):
+                current_app.logger.info(
+                    "[visible][WELCOME] hide_ticket_status uid=%s status=%s",
+                    ctx_uid,
+                    ticket_status,
+                )
+                continue
+            ticket_expires_at = _as_aware_kl(ticket.get("expires_at"))
+            ref_kl = _as_aware_kl(ref) or now_kl()
+            if ticket_expires_at and ref_kl > ticket_expires_at:
+                welcome_tickets_col.update_one(
+                    {"uid": ctx_uid},
+                    {"$set": {"status": "expired", "reason_last_fail": "expired"}},
+                )
+                current_app.logger.info(
+                    "[visible][WELCOME] hide_ticket_status uid=%s status=expired",
+                    ctx_uid,
+                )
+                continue
+            window = _welcome_window_for_user(ctx_uid, ref=ref, user_doc=None)
+            if window is None:
+                continue
+    
         if not is_drop_allowed(d, ctx_uid, usernameLower or uname, user_ctx):
             continue
 
