@@ -7,6 +7,7 @@ This module centralizes XP grants so they are logged idempotently in
 from __future__ import annotations
 
 import logging
+import pymongo
 from datetime import datetime, timezone
 from config import KL_TZ
 
@@ -140,13 +141,21 @@ def ensure_xp_indexes(db) -> None:
     # index name or a different definition, which would cause create_index to
     # raise OperationFailure on startup.
     target_key = {"user_id": 1, "unique_key": 1}
+    existing = db.xp_events.index_information()    
     for ix in db.xp_events.list_indexes():
         if ix.get("key") == target_key:
+            name = ix.get("name")
+            if name not in existing:
+                logger.info("[xp_indexes] skip_drop_missing name=%s", name)
+                continue
+            logger.info("[xp_indexes] drop name=%s", name)            
             try:
-                db.xp_events.drop_index(ix["name"])
-                logger.info("[XP] Dropped legacy index %s", ix["name"])
-            except Exception:
-                logger.exception("[XP] Failed dropping legacy xp_events index")
+                db.xp_events.drop_index(name)
+            except pymongo.errors.OperationFailure as exc:
+                if "IndexNotFound" in str(exc) or getattr(exc, "code", None) == 27:
+                    logger.info("[xp_indexes] skip_drop_missing name=%s", name)
+                    continue
+                raise
 
     _dedupe_xp_events()
     
