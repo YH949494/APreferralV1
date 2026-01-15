@@ -133,6 +133,64 @@ def compute_referral_stats(user_id: int, window=None):
     weekly = int(user_doc.get("weekly_referral_count", 0))
     return {"total_referrals": total, "weekly_referrals": weekly, "monthly_referrals": 0}
 
+def _normalize_snapshot_updated_at(updated_at: datetime | None) -> datetime | None:
+    if not updated_at:
+        return None
+    if updated_at.tzinfo is None:
+        return updated_at.replace(tzinfo=timezone.utc)
+    return updated_at.astimezone(timezone.utc)
+
+def _snapshot_meta(updated_at: datetime | None, now_utc_ts: datetime) -> tuple[str | None, int | None]:
+    normalized = _normalize_snapshot_updated_at(updated_at)
+    if not normalized:
+        return None, None
+    age_sec = int((now_utc_ts - normalized).total_seconds())
+    snapshot_ts = normalized.astimezone(KL_TZ).isoformat()
+    return snapshot_ts, age_sec
+
+def _build_user_snapshot_payload(user_id: int, user_doc: dict, *, updated_at: datetime, source: str) -> dict:
+    return {
+        "user_id": user_id,
+        "referral_count": int(user_doc.get("ref_count_total", user_doc.get("referral_count", 0))),
+        "weekly_referral_count": int(user_doc.get("weekly_referral_count", 0)),
+        "weekly_xp": int(user_doc.get("weekly_xp", 0)),
+        "monthly_xp": int(user_doc.get("monthly_xp", 0)),
+        "vip_tier": user_doc.get("status"),
+        "updated_at": updated_at,
+        "source": source,
+    }
+
+def _write_user_snapshot_from_doc(user_id: int, user_doc: dict, *, source: str, now_utc_ts: datetime) -> dict:
+    snapshot = _build_user_snapshot_payload(
+        user_id,
+        user_doc,
+        updated_at=now_utc_ts,
+        source=source,
+    )
+    user_snapshots_col.update_one({"user_id": user_id}, {"$set": snapshot}, upsert=True)
+    return snapshot
+
+def _get_user_snapshot(user_id: int) -> tuple[dict | None, str | None, int | None]:
+    if not user_id:
+        return None, None, None
+    now_utc_ts = now_utc()
+    snapshot = user_snapshots_col.find_one({"user_id": user_id})
+    if snapshot:
+        snapshot_ts, snapshot_age_sec = _snapshot_meta(snapshot.get("updated_at"), now_utc_ts)
+        logger.info("[SNAPSHOT][HIT] uid=%s age=%ss", user_id, snapshot_age_sec)
+        return snapshot, snapshot_ts, snapshot_age_sec
+    user_doc = users_collection.find_one({"user_id": user_id}) or {}
+    logger.info("[SNAPSHOT][MISS] uid=%s using_users_doc", user_id)
+    if not user_doc:
+        return None, None, None
+    snapshot = _write_user_snapshot_from_doc(
+        user_id,
+        user_doc,
+        source="read_fallback",
+        now_utc_ts=now_utc_ts,
+    )
+    snapshot_ts, snapshot_age_sec = _snapshot_meta(snapshot.get("updated_at"), now_utc_ts)
+    return snapshot, snapshot_ts, snapshot_age_sec
 
 def _current_month_window_utc(reference: datetime | None = None):
     """Return (start_utc, end_utc, start_local, end_local) for the current month."""
@@ -199,6 +257,8 @@ def settle_pending_referrals_with_cache_clear():
 client = MongoClient(MONGO_URL)
 db = client["referral_bot"]
 users_collection = db["users"]
+user_snapshots_col = db["user_snapshots"]
+user_snapshots_col.create_index([("user_id", ASCENDING)], unique=True)
 history_collection = db["weekly_leaderboard_history"]
 bonus_voucher_collection = db["bonus_voucher"]
 admin_cache_col = db["admin_cache"]
@@ -1341,12 +1401,20 @@ def api_referral():
         link = f"https://t.me/{bot_username}?start=ref{user_id}" if bot_username else None
         logger.warning("[api_referral] link_generation_failed uid=%s error=%s", user_id, e)
 
-    try:
-        stats = compute_referral_stats(user_id)
-    except Exception:
-        logger.exception("[api_referral] stats_failed uid=%s", user_id)
-                
-    payload = {"success": success, "referral_link": link, **stats}
+    snapshot, snapshot_ts, snapshot_age_sec = _get_user_snapshot(user_id)
+    if snapshot:
+        stats = {
+            "total_referrals": int(snapshot.get("referral_count", 0)),
+            "weekly_referrals": int(snapshot.get("weekly_referral_count", 0)),
+            "monthly_referrals": 0,
+        }
+    payload = {
+        "success": success,
+        "referral_link": link,
+        "snapshot_ts": snapshot_ts,
+        "snapshot_age_sec": snapshot_age_sec,
+        **stats,
+    }
     if error:
         payload["error"] = error
     if not link:
@@ -1417,7 +1485,6 @@ def get_leaderboard():
             week_end_local.isoformat(),
         )
         logger.info("[LEADERBOARD] pipeline_source=users")
-        month_start_utc, month_end_utc, _ = _month_window_utc()
 
         def safe_format(u):
             # Guarantee user_id exists
@@ -1507,16 +1574,19 @@ def get_leaderboard():
             "referral": referral_board,
         }
         
-        user_weekly_xp = xp_map.get(current_user_id, int(user_record.get("weekly_xp", 0)))
-
-        user_weekly_referrals = int(user_record.get("weekly_referral_count", 0))
-        
-        user_monthly_row = []
-        if current_user_id:
-            user_monthly_row = recompute_xp_totals(month_start_utc, month_end_utc, user_id=current_user_id)
-        monthly_xp_value = int(user_monthly_row[0].get("xp", 0)) if user_monthly_row else 0
-
-        lifetime_valid_refs = int(user_record.get("ref_count_total", 0))
+        snapshot, snapshot_ts, snapshot_age_sec = _get_user_snapshot(current_user_id)
+        if snapshot:
+            user_weekly_xp = int(snapshot.get("weekly_xp", 0))
+            user_weekly_referrals = int(snapshot.get("weekly_referral_count", 0))
+            monthly_xp_value = int(snapshot.get("monthly_xp", 0))
+            lifetime_valid_refs = int(snapshot.get("referral_count", 0))
+            user_status = snapshot.get("vip_tier") or user_record.get("status", "Normal")
+        else:
+            user_weekly_xp = xp_map.get(current_user_id, int(user_record.get("weekly_xp", 0)))
+            user_weekly_referrals = int(user_record.get("weekly_referral_count", 0))
+            monthly_xp_value = int(user_record.get("monthly_xp", 0))
+            lifetime_valid_refs = int(user_record.get("ref_count_total", 0))
+            user_status = user_record.get("status", "Normal")
 
         if user_record:
             stored_weekly = int(user_record.get("weekly_xp", 0))
@@ -1542,7 +1612,7 @@ def get_leaderboard():
             "monthly_xp": monthly_xp_value,
             "referrals": user_weekly_referrals,
             "total_valid": user_weekly_referrals,
-            "status": user_record.get("status", "Normal"),
+            "status": user_status,
             "lifetime_valid": lifetime_valid_refs,
         }
 
@@ -1556,7 +1626,9 @@ def get_leaderboard():
         payload = {
             "success": True,
             "leaderboard": leaderboard,
-            "user": user_stats
+            "user": user_stats,
+            "snapshot_ts": snapshot_ts,
+            "snapshot_age_sec": snapshot_age_sec,
         }
         LEADERBOARD_CACHE[cache_key] = {"ts": time.time(), "payload": payload}
         logger.info("[LEADERBOARD][CACHE_SET] key=%s ttl=%s", cache_key, CACHE_TTL_SECONDS)
