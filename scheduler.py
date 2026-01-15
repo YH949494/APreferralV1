@@ -213,7 +213,6 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
                             "revoked_at": now_utc_ts,
                         },
                         "$unset": {"processing_by": "", "processing_at_utc": "", "processing_at": ""},
-                        }
                     },
                 )
                 revoked += 1
