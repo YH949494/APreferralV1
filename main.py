@@ -185,7 +185,7 @@ history_collection = db["weekly_leaderboard_history"]
 bonus_voucher_collection = db["bonus_voucher"]
 admin_cache_col = db["admin_cache"]
 xp_events_collection = db["xp_events"]
-referral_awards_collection = db["referral_events"]
+referral_award_events_collection = db["referral_award_events"]
 welcome_eligibility_collection = db["welcome_eligibility"]
 monthly_xp_history_collection = db["monthly_xp_history"]
 monthly_xp_history_collection.create_index([("month", ASCENDING)])
@@ -196,6 +196,7 @@ unknown_invite_links_collection = db["unknown_invite_links"]
 referral_audit_collection = db["referral_audit"]
 unknown_invite_audit_collection = db["unknown_invite_audit"]
 pending_referrals_collection = db["pending_referrals"]
+tg_verification_queue_collection = db["tg_verification_queue"]
 
 REFERRAL_HOLD_HOURS = 12
 
@@ -809,10 +810,10 @@ def ensure_indexes():
         unique=True,
         name="uniq_unknown_invite",
     )
-    referral_awards_collection.create_index(
-        [("chat_id", 1), ("invitee_id", 1)],
+    referral_award_events_collection.create_index(
+        [("award_key", 1)],
         unique=True,
-        name="uniq_referral_award",
+        name="uniq_referral_award_key",
     )
     pending_referrals_collection.create_index(
         [("group_id", 1), ("invitee_user_id", 1)],
@@ -823,6 +824,10 @@ def ensure_indexes():
         [("status", 1), ("created_at_utc", 1)],
         name="pending_by_time",
     )
+     pending_referrals_collection.create_index(
+        [("status", 1), ("next_retry_at_utc", 1)],
+        name="pending_by_retry",
+    )   
     pending_referrals_collection.create_index(
         [("inviter_user_id", 1), ("status", 1)],
         name="pending_by_inviter",
@@ -836,8 +841,48 @@ def ensure_indexes():
     
     xp_events_collection.create_index([("user_id", 1), ("reason", 1)])
     ensure_xp_indexes(db)
-                
+
+
+    try:
+        existing = None
+        for ix in tg_verification_queue_collection.list_indexes():
+            if ix.get("key") == {"user_id": 1}:
+                existing = ix
+                if ix.get("unique") and ix.get("sparse"):
+                    break
+                try:
+                    tg_verification_queue_collection.drop_index(ix["name"])
+                    existing = None
+                except Exception:
+                    pass
+                break
+        if not existing or not (existing.get("unique") and existing.get("sparse")):
+            tg_verification_queue_collection.create_index(
+                [("user_id", 1)],
+                unique=True,
+                name="uniq_tg_verify_user_id",
+                sparse=True,
+            )
+    except Exception as e:
+        print("⚠️ ensure_indexes error:", e)
+        
 ensure_indexes()
+
+def _cleanup_tg_verification_queue_bad_docs():
+    if os.getenv("VERIFY_QUEUE_CLEANUP") != "1":
+        return
+    try:
+        result = tg_verification_queue_collection.delete_many(
+            {"$or": [{"user_id": None}, {"user_id": {"$exists": False}}]}
+        )
+        logger.info(
+            "[VERIFY_QUEUE] cleanup_bad_docs deleted=%s",
+            result.deleted_count,
+        )
+    except Exception:
+        logger.exception("[VERIFY_QUEUE] cleanup_bad_docs_failed")
+
+_cleanup_tg_verification_queue_bad_docs()
 
 def _cleanup_welcome_null_uid():
     if os.getenv("WELCOME_CLEANUP_BAD_UID") != "1":
