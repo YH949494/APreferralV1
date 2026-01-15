@@ -1007,7 +1007,7 @@ def get_or_issue_welcome_ticket(uid: int):
             except Exception:
                 current_app.logger.exception("[welcome] ticket_migrate_failed uid=%s", uid)
 
-     if ticket:
+    if ticket:
         if ticket.get("status") in ("claimed", "expired"):
             return ticket
         if ticket.get("status") == "active":
