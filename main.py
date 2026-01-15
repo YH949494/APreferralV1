@@ -34,7 +34,7 @@ from scheduler import reset_monthly_referrals, settle_pending_referrals
 
 from pymongo import MongoClient, DESCENDING, ASCENDING, ReturnDocument  # keep if used elsewhere
 from pymongo.errors import DuplicateKeyError
-import os, asyncio, traceback, csv, io, requests, logging
+import os, asyncio, traceback, csv, io, requests, logging, time
 import pytz
 
 FIRST_CHECKIN_BONUS_XP = int(os.getenv("FIRST_CHECKIN_BONUS_XP", "200"))
@@ -44,6 +44,9 @@ WELCOME_WINDOW_DAYS = 7
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+LEADERBOARD_CACHE = {}  # key -> {"ts": epoch_seconds, "payload": dict}
+CACHE_TTL_SECONDS = 300
 
 def _running_under_gunicorn():
     return "gunicorn" in os.environ.get("SERVER_SOFTWARE", "").lower() or os.environ.get("GUNICORN_CMD_ARGS") is not None
@@ -181,6 +184,11 @@ def recompute_xp_totals(start_utc, end_utc, limit: int | None = None, user_id: i
         user_id,
     )
     return list(xp_events_collection.aggregate(pipeline))
+
+def settle_pending_referrals_with_cache_clear():
+    settle_pending_referrals()
+    LEADERBOARD_CACHE.clear()
+    logger.info("[LEADERBOARD][CACHE_CLEAR] reason=scheduled_5min")
 
 # ----------------------------
 # MongoDB Setup
@@ -1384,11 +1392,22 @@ def get_leaderboard():
             current_user_id = int(raw_user_id) if raw_user_id not in (None, "", "undefined") else 0
         except (TypeError, ValueError):
             current_user_id = 0
-        user_record = users_collection.find_one({"user_id": current_user_id}) or {}
-        is_admin = bool(user_record.get("is_admin", False))
 
         week_start_utc, week_end_utc, week_start_local = _week_window_utc()
         week_end_local = week_start_local + timedelta(days=7)
+        leaderboard_limit = 15
+        region = request.args.get("region", "global")
+        cache_key = f"{region}|{week_start_local.isoformat()}|{leaderboard_limit}|{current_user_id}"
+        cached_entry = LEADERBOARD_CACHE.get(cache_key)
+        now_ts = time.time()
+        if cached_entry and (now_ts - cached_entry["ts"]) < CACHE_TTL_SECONDS:
+            age = int(now_ts - cached_entry["ts"])
+            logger.info("[LEADERBOARD][CACHE_HIT] key=%s age=%ss", cache_key, age)
+            # Leaderboard updates every 5 minutes; repeated calls within TTL return cached data.
+            return jsonify(cached_entry["payload"])
+
+        user_record = users_collection.find_one({"user_id": current_user_id}) or {}
+        is_admin = bool(user_record.get("is_admin", False))        
         logger.info(
             "[LEADERBOARD] week_window local_start=%s local_end=%s",
             week_start_local.isoformat(),
@@ -1407,13 +1426,13 @@ def get_leaderboard():
         logger.info(
             "[lb_query] users.find filter=%s sort=weekly_xp:-1 limit=%s",
             xp_query,
-            15,
+            leaderboard_limit,
         )
         xp_rows = list(
             users_collection
             .find(xp_query, {"user_id": 1, "username": 1, "weekly_xp": 1})
             .sort("weekly_xp", DESCENDING)
-            .limit(15)
+            .limit(leaderboard_limit)
         )
         xp_map = {
             row.get("user_id"): int(row.get("weekly_xp", 0))
@@ -1427,7 +1446,7 @@ def get_leaderboard():
                 {"user_id": 1, "username": 1, "weekly_referral_count": 1, "ref_count_total": 1},
             )
             .sort("weekly_referral_count", DESCENDING)
-            .limit(15)
+            .limit(leaderboard_limit)
         )
         referral_map = {row["user_id"]: int(row.get("weekly_referral_count", 0)) for row in referral_rows}
         if referral_rows:
@@ -1531,11 +1550,14 @@ def get_leaderboard():
             user_weekly_referrals,
         )
         
-        return jsonify({
+        payload = {
             "success": True,
             "leaderboard": leaderboard,
             "user": user_stats
-        })
+        }
+        LEADERBOARD_CACHE[cache_key] = {"ts": time.time(), "payload": payload}
+        logger.info("[LEADERBOARD][CACHE_SET] key=%s ttl=%s", cache_key, CACHE_TTL_SECONDS)
+        return jsonify(payload)
 
     except Exception:
         logger.exception("[LEADERBOARD] failed")
@@ -2408,12 +2430,12 @@ def run_worker():
         replace_existing=True,
     )    
     scheduler.add_job(
-        settle_pending_referrals,
+        settle_pending_referrals_with_cache_clear,
         trigger=CronTrigger(minute="*/5", timezone=KL_TZ),
         id="settle_pending_referrals",
         name="Settle Pending Referrals",
         replace_existing=True,
-    )    
+    ) 
     scheduler.start()
 
     # 5) Background jobs on the bot's job_queue
