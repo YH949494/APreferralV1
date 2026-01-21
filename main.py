@@ -268,13 +268,13 @@ def settle_pending_referrals_with_cache_clear():
 def settle_xp_snapshots_with_cache_clear():
     settle_xp_snapshots()
     LEADERBOARD_CACHE.clear()
-    logger.info("[LEADERBOARD][CACHE_CLEAR] source=snapshot_rebuild")
+    logger.info("[LEADERBOARD][CACHE_CLEAR] source=snapshot_publish")
 
 
 def settle_referral_snapshots_with_cache_clear():
     settle_referral_snapshots()
     LEADERBOARD_CACHE.clear()
-    logger.info("[LEADERBOARD][CACHE_CLEAR] source=snapshot_rebuild")
+    logger.info("[LEADERBOARD][CACHE_CLEAR] source=snapshot_publish")
 
 # ----------------------------
 # MongoDB Setup
