@@ -131,6 +131,10 @@ def update_user_xp(username, amount, unique_key: str | None = None):
     return True, f"XP {'added' if amount > 0 else 'reduced'} by {abs(amount)}."
 
 def save_weekly_snapshot():
+    # DEPRECATED - do not use (rolling UTC window, replaced by KL windows + ledger snapshots)
+    if os.environ.get("ENABLE_LEGACY_WEEKLY_SNAPSHOT") != "1":
+        logger.warning("[SNAPSHOT][DEPRECATED] save_weekly_snapshot disabled")
+        return  
     now = datetime.datetime.utcnow()
     week_start = (now - datetime.timedelta(days=7)).strftime("%Y-%m-%d")
     week_end = now.strftime("%Y-%m-%d")
