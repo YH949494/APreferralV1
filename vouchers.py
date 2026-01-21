@@ -876,35 +876,58 @@ def process_verification_queue(batch_limit: int = 50) -> None:
     for item in pending:
         scanned += 1
         now = now_utc()
-        claimed_doc = tg_verification_queue_col.find_one_and_update(
-            {"_id": item["_id"], "status": {"$in": ["pending", "queued"]}},
-            {
-                "$set": {
-                    "status": "in_progress",
-                    "started_at": now,
-                    "updated_at": now,
+        try:
+            claimed_doc = tg_verification_queue_col.find_one_and_update(
+                {"_id": item["_id"], "status": {"$in": ["pending", "queued"]}},
+                {
+                    "$set": {
+                        "status": "in_progress",
+                        "started_at": now,
+                        "updated_at": now,
+                    },
+                    "$inc": {"attempts": 1},
                 },
-                "$inc": {"attempts": 1},
-            },
-            return_document=ReturnDocument.AFTER,
-        )
+                return_document=ReturnDocument.AFTER,
+            )
+        except Exception:
+            try:
+                current_app.logger.exception(
+                    "[WELCOME_VERIFY][DB_ERROR] op=claim _id=%s",
+                    item.get("_id"),
+                )
+            except Exception:
+                print(f"[WELCOME_VERIFY][DB_ERROR] op=claim _id={item.get('_id')}")
+            raise
+         
         if not claimed_doc:
             continue
         claimed += 1
         uid = claimed_doc.get("user_id")
         if uid is None:
             now = now_utc()
-            tg_verification_queue_col.update_one(
-                {"_id": claimed_doc["_id"]},
-                {
-                    "$set": {
-                        "status": "denied",
-                        "denied_at": now,
-                        "updated_at": now,
-                        "reason": "missing_uid",
-                    }
-                },
-            )
+            try:
+                tg_verification_queue_col.update_one(
+                    {"_id": claimed_doc["_id"]},
+                    {
+                        "$set": {
+                            "status": "denied",
+                            "denied_at": now,
+                            "updated_at": now,
+                            "reason": "missing_uid",
+                        }
+                    },
+                )
+            except Exception:
+                try:
+                    current_app.logger.exception(
+                        "[WELCOME_VERIFY][DB_ERROR] op=deny_missing_uid _id=%s",
+                        claimed_doc.get("_id"),
+                    )
+                except Exception:
+                    print(
+                        f"[WELCOME_VERIFY][DB_ERROR] op=deny_missing_uid _id={claimed_doc.get('_id')}"
+                    )
+                raise
             denied += 1
             try:
                 current_app.logger.info("[WELCOME_VERIFY][DENY] uid=None reason=missing_uid")
@@ -918,17 +941,31 @@ def process_verification_queue(batch_limit: int = 50) -> None:
                 has_photo = _has_profile_photo(uid, force_refresh=True)
                 if not has_photo:
                     now = now_utc()
-                    tg_verification_queue_col.update_one(
-                        {"_id": claimed_doc["_id"]},
-                        {
-                            "$set": {
-                                "status": "denied",
-                                "denied_at": now,
-                                "updated_at": now,
-                                "reason": "missing_profile_pic",
-                            }
-                        },
-                    )
+                    try:
+                        tg_verification_queue_col.update_one(
+                            {"_id": claimed_doc["_id"]},
+                            {
+                                "$set": {
+                                    "status": "denied",
+                                    "denied_at": now,
+                                    "updated_at": now,
+                                    "reason": "missing_profile_pic",
+                                }
+                            },
+                        )
+                    except Exception:
+                        try:
+                            current_app.logger.exception(
+                                "[WELCOME_VERIFY][DB_ERROR] op=deny_missing_pic uid=%s _id=%s",
+                                uid,
+                                claimed_doc.get("_id"),
+                            )
+                        except Exception:
+                            print(
+                                "[WELCOME_VERIFY][DB_ERROR] op=deny_missing_pic "
+                                f"uid={uid} _id={claimed_doc.get('_id')}"
+                            )
+                        raise
                     denied += 1
                     try:
                         current_app.logger.info(
@@ -939,17 +976,30 @@ def process_verification_queue(batch_limit: int = 50) -> None:
                     continue
 
             now = now_utc()
-            tg_verification_queue_col.update_one(
-                {"_id": claimed_doc["_id"]},
-                {
-                    "$set": {
-                        "status": "approved",
-                        "approved_at": now,
-                        "updated_at": now,
-                        "reason": "ok",
-                    }
-                },
-            )
+            try:
+                tg_verification_queue_col.update_one(
+                    {"_id": claimed_doc["_id"]},
+                    {
+                        "$set": {
+                            "status": "approved",
+                            "approved_at": now,
+                            "updated_at": now,
+                            "reason": "ok",
+                        }
+                    },
+                )
+            except Exception:
+                try:
+                    current_app.logger.exception(
+                        "[WELCOME_VERIFY][DB_ERROR] op=approve uid=%s _id=%s",
+                        uid,
+                        claimed_doc.get("_id"),
+                    )
+                except Exception:
+                    print(
+                        f"[WELCOME_VERIFY][DB_ERROR] op=approve uid={uid} _id={claimed_doc.get('_id')}"
+                    )
+                raise
             approved += 1
             try:
                 current_app.logger.info(
@@ -960,16 +1010,29 @@ def process_verification_queue(batch_limit: int = 50) -> None:
         except Exception as exc:
             now = now_utc()
             errors += 1
-            tg_verification_queue_col.update_one(
-                {"_id": claimed_doc["_id"]},
-                {
-                    "$set": {
-                        "status": "pending",
-                        "updated_at": now,
-                        "last_error": str(exc),
-                    }
-                },
-            )
+            try:
+                tg_verification_queue_col.update_one(
+                    {"_id": claimed_doc["_id"]},
+                    {
+                        "$set": {
+                            "status": "pending",
+                            "updated_at": now,
+                            "last_error": str(exc),
+                        }
+                    },
+                )
+            except Exception:
+                try:
+                    current_app.logger.exception(
+                        "[WELCOME_VERIFY][DB_ERROR] op=reset_pending uid=%s _id=%s",
+                        uid,
+                        claimed_doc.get("_id"),
+                    )
+                except Exception:
+                    print(
+                        f"[WELCOME_VERIFY][DB_ERROR] op=reset_pending uid={uid} _id={claimed_doc.get('_id')}"
+                    )
+                raise
             try:
                 current_app.logger.exception(
                     "[WELCOME_VERIFY][ERROR] uid=%s err=%s", uid, exc
