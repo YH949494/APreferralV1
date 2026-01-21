@@ -281,6 +281,7 @@ def settle_xp_snapshots_scheduled():
     else:
         settle_xp_snapshots()
         _clear_leaderboard_cache("snapshot_publish")
+    _check_snapshot_freshness()        
     logger.info("[SNAPSHOT][XP] done")
 
 
@@ -328,6 +329,30 @@ REFERRAL_INCREMENT_GUARD_FIELDS = {
     "monthly_referral_count",
     "referral_count",
 }
+
+def _check_snapshot_freshness() -> None:
+    if RUNNER_MODE != "worker":
+        return
+    now_utc_ts = now_utc()
+    cutoff = now_utc_ts - timedelta(minutes=15)
+    heartbeat_doc = admin_cache_col.find_one({"_id": "snapshot_heartbeat"}, {"ts_utc": 1})
+    heartbeat_ts = _normalize_snapshot_updated_at((heartbeat_doc or {}).get("ts_utc"))
+    if heartbeat_ts is None:
+        logger.error("[SNAPSHOT][STALE] age_sec=missing action=investigate")
+    else:
+        heartbeat_age_sec = int((now_utc_ts - heartbeat_ts).total_seconds())
+        if heartbeat_age_sec > 900:
+            logger.error("[SNAPSHOT][STALE] age_sec=%s action=investigate", heartbeat_age_sec)
+    stale_user = users_collection.find_one(
+        {"snapshot_updated_at": {"$lt": cutoff}},
+        {"snapshot_updated_at": 1},
+    )
+    if stale_user:
+        _, snapshot_age_sec = _snapshot_meta(stale_user.get("snapshot_updated_at"), now_utc_ts)
+        if snapshot_age_sec is None:
+            logger.error("[SNAPSHOT][STALE] age_sec=missing action=investigate")
+        elif snapshot_age_sec > 900:
+            logger.error("[SNAPSHOT][STALE] age_sec=%s action=investigate", snapshot_age_sec)
 
 def _log_referral_increment_attempt(update_doc: dict | None, context: str) -> None:
     if RUNNER_MODE != "web" or not update_doc:
