@@ -63,7 +63,6 @@ def handle_checkin():
                 "streak": streak
             },
             "$setOnInsert": {
-                "referral_count": 0,
                 "status": "Normal",               
             }
         },
