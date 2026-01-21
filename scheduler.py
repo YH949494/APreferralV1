@@ -4,7 +4,7 @@ import os
 import pytz
 import requests
 import socket
-from pymongo import ReturnDocument
+from pymongo import ReturnDocument, UpdateOne
 from pymongo.errors import DuplicateKeyError
 from requests import RequestException
 from database import db
@@ -96,34 +96,35 @@ def _release_for_retry(pending_id, now_utc_ts: datetime, retry_after_seconds: in
         },
     )
 
-def _week_window_utc(reference: datetime | None = None) -> tuple[datetime, datetime]:
-    ref_local = reference.astimezone(KL_TZ) if reference else datetime.now(KL_TZ)
-    start_local = (ref_local - timedelta(days=ref_local.weekday())).replace(
-        hour=0, minute=0, second=0, microsecond=0
-    )
-    end_local = start_local + timedelta(days=7)
-    return start_local.astimezone(timezone.utc), end_local.astimezone(timezone.utc)
-
-
-def _month_window_utc(reference: datetime | None = None) -> tuple[datetime, datetime]:
-    ref_local = reference.astimezone(KL_TZ) if reference else datetime.now(KL_TZ)
-    start_local = ref_local.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    if start_local.month == 12:
-        end_local = start_local.replace(year=start_local.year + 1, month=1)
-    else:
-        end_local = start_local.replace(month=start_local.month + 1)
-    return start_local.astimezone(timezone.utc), end_local.astimezone(timezone.utc)
-
 def _week_start_kl(reference: datetime | None = None) -> datetime:
     ref_local = reference.astimezone(KL_TZ) if reference else datetime.now(KL_TZ)
     return (ref_local - timedelta(days=ref_local.weekday())).replace(
         hour=0, minute=0, second=0, microsecond=0
     )
 
+def _week_end_kl(reference: datetime | None = None) -> datetime:
+    return _week_start_kl(reference) + timedelta(days=7)
+
 def _month_start_kl(reference: datetime | None = None) -> datetime:
     ref_local = reference.astimezone(KL_TZ) if reference else datetime.now(KL_TZ)
     return ref_local.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 
+def _month_end_kl(reference: datetime | None = None) -> datetime:
+    start_local = _month_start_kl(reference)
+    if start_local.month == 12:
+        return start_local.replace(year=start_local.year + 1, month=1)
+    return start_local.replace(month=start_local.month + 1)
+
+def _week_window_utc(reference: datetime | None = None) -> tuple[datetime, datetime]:
+    start_local = _week_start_kl(reference)
+    end_local = _week_end_kl(reference)
+    return start_local.astimezone(timezone.utc), end_local.astimezone(timezone.utc)
+
+def _month_window_utc(reference: datetime | None = None) -> tuple[datetime, datetime]:
+    start_local = _month_start_kl(reference)
+    end_local = _month_end_kl(reference)
+    return start_local.astimezone(timezone.utc), end_local.astimezone(timezone.utc)
+    
 def _referral_event_doc(inviter_id: int, invitee_id: int, event: str, occurred_at: datetime) -> dict:
     week_key = _week_start_kl(occurred_at).date().isoformat()
     month_key = _month_start_kl(occurred_at).date().isoformat()
@@ -164,7 +165,12 @@ def settle_xp_snapshots() -> None:
     now_utc_ts = now_utc()
     week_start_utc, week_end_utc = _week_window_utc(now_utc_ts)
     month_start_utc, month_end_utc = _month_window_utc(now_utc_ts)
-
+    logger.info(
+        "[SNAPSHOT] rebuild_start kind=xp week_start=%s month_start=%s",
+        week_start_utc.isoformat(),
+        month_start_utc.isoformat(),
+    )
+    
     week_cond = {
         "$and": [
             {"$gte": [_xp_time_expr(), week_start_utc]},
@@ -183,11 +189,9 @@ def settle_xp_snapshots() -> None:
         {},
         {
             "$set": {
-                "weekly_xp": 0,
-                "monthly_xp": 0,
-                "total_xp": 0,
-                "xp": 0,
-                "snapshot_updated_at": now_utc_ts,
+                "weekly_xp_next": 0,
+                "monthly_xp_next": 0,
+                "total_xp_next": 0,
             }
         },
     )
@@ -209,30 +213,59 @@ def settle_xp_snapshots() -> None:
         },
     ]
     results = list(db.xp_events.aggregate(pipeline))
+    if results:
+        updates = []
+        for row in results:
+            uid = row.get("_id")
+            if uid is None:
+                continue
+            total_xp = int(row.get("total_xp", 0))
+            weekly_xp = int(row.get("weekly_xp", 0))
+            monthly_xp = int(row.get("monthly_xp", 0))
+            updates.append(
+                UpdateOne(
+                    {"user_id": uid},
+                    {
+                        "$set": {
+                            "total_xp_next": total_xp,
+                            "weekly_xp_next": weekly_xp,
+                            "monthly_xp_next": monthly_xp,
+                        }
+                    },
+                    upsert=True,
+                )
+            )
+        if updates:
+            db.users.bulk_write(updates, ordered=False)
+
+    publish_result = db.users.update_many(
+        {},
+        [
+            {
+                "$set": {
+                    "total_xp": "$total_xp_next",
+                    "weekly_xp": "$weekly_xp_next",
+                    "monthly_xp": "$monthly_xp_next",
+                    "xp": "$total_xp_next",
+                    "snapshot_published_at": now_utc_ts,
+                }
+            }
+        ],
+    )
+    db.users.update_many({}, {"$inc": {"snapshot_version": 1}})
+    logger.info(
+        "[SNAPSHOT] publish_done users=%s version_inc=1",
+        publish_result.modified_count,
+    )    
     for row in results:
         uid = row.get("_id")
         if uid is None:
             continue
-        total_xp = int(row.get("total_xp", 0))
-        weekly_xp = int(row.get("weekly_xp", 0))
-        monthly_xp = int(row.get("monthly_xp", 0))
-        db.users.update_one(
-            {"user_id": uid},
-            {
-                "$set": {
-                    "total_xp": total_xp,
-                    "weekly_xp": weekly_xp,
-                    "monthly_xp": monthly_xp,
-                    "xp": total_xp,
-                    "snapshot_updated_at": now_utc_ts,
-                }
-            },
-            upsert=True,
-        )
+
         logger.info(
             "[SCHED][SNAPSHOT_WRITE] uid=%s weekly_xp=%s",
             uid,
-            weekly_xp,
+            int(row.get("weekly_xp", 0)),
         )
 
 def _referral_sign_expr():
@@ -254,7 +287,12 @@ def settle_referral_snapshots() -> None:
     now_utc_ts = now_utc()
     week_start_utc, week_end_utc = _week_window_utc(now_utc_ts)
     month_start_utc, month_end_utc = _month_window_utc(now_utc_ts)
-
+    logger.info(
+        "[SNAPSHOT] rebuild_start kind=referral week_start=%s month_start=%s",
+        week_start_utc.isoformat(),
+        month_start_utc.isoformat(),
+    )
+    
     week_cond = {
         "$and": [
             {"$gte": ["$occurred_at", week_start_utc]},
@@ -272,10 +310,9 @@ def settle_referral_snapshots() -> None:
         {},
         {
             "$set": {
-                "weekly_referrals": 0,
-                "monthly_referrals": 0,
-                "total_referrals": 0,
-                "snapshot_updated_at": now_utc_ts,
+                "weekly_referrals_next": 0,
+                "monthly_referrals_next": 0,
+                "total_referrals_next": 0,
             }
         },
     )
@@ -297,31 +334,60 @@ def settle_referral_snapshots() -> None:
         },
     ]
     results = list(db.referral_events.aggregate(pipeline))
+    if results:
+        updates = []
+        for row in results:
+            uid = row.get("_id")
+            if uid is None:
+                continue
+            total_referrals = int(row.get("total_referrals", 0))
+            weekly_referrals = int(row.get("weekly_referrals", 0))
+            monthly_referrals = int(row.get("monthly_referrals", 0))
+            updates.append(
+                UpdateOne(
+                    {"user_id": uid},
+                    {
+                        "$set": {
+                            "weekly_referrals_next": weekly_referrals,
+                            "monthly_referrals_next": monthly_referrals,
+                            "total_referrals_next": total_referrals,
+                        }
+                    },
+                    upsert=True,
+                )
+            )
+        if updates:
+            db.users.bulk_write(updates, ordered=False)
+
+    publish_result = db.users.update_many(
+        {},
+        [
+            {
+                "$set": {
+                    "weekly_referrals": "$weekly_referrals_next",
+                    "monthly_referrals": "$monthly_referrals_next",
+                    "total_referrals": "$total_referrals_next",
+                    "snapshot_published_at": now_utc_ts,
+                }
+            }
+        ],
+    )
+    db.users.update_many({}, {"$inc": {"snapshot_version": 1}})
+    logger.info(
+        "[SNAPSHOT] publish_done users=%s version_inc=1",
+        publish_result.modified_count,
+    )    
     for row in results:
         uid = row.get("_id")
         if uid is None:
             continue
-        total_referrals = int(row.get("total_referrals", 0))
-        weekly_referrals = int(row.get("weekly_referrals", 0))
-        monthly_referrals = int(row.get("monthly_referrals", 0))
-        db.users.update_one(
-            {"user_id": uid},
-            {
-                "$set": {
-                    "weekly_referrals": weekly_referrals,
-                    "monthly_referrals": monthly_referrals,
-                    "total_referrals": total_referrals,
-                    "snapshot_updated_at": now_utc_ts,
-                }
-            },
-            upsert=True,
-        )
+
         logger.info(
             "[SCHED][REFERRAL_SNAPSHOT] uid=%s weekly=%s monthly=%s total=%s",
             uid,
-            weekly_referrals,
-            monthly_referrals,
-            total_referrals,
+            int(row.get("weekly_referrals", 0)),
+            int(row.get("monthly_referrals", 0)),
+            int(row.get("total_referrals", 0)),
         )
 
 def _recover_stale_processing(now_utc_ts: datetime) -> int:
