@@ -791,28 +791,37 @@ def enqueue_verification(doc: dict) -> bool:
     Enqueue verification task safely.
     Returns True if inserted successfully, False otherwise.
     """
-    assert "uid" in doc and "type" in doc and "created_at" in doc
+    assert "user_id" in doc and "type" in doc and "created_at" in doc
+    user_id = doc.get("user_id")
+    verify_type = doc.get("type")
     try:
         tg_verification_queue_col.insert_one(doc)
         current_app.logger.info(
             "[VERIFY_QUEUE] enqueued uid=%s type=%s",
-            doc.get("uid"),
-            doc.get("type"),
+            user_id,
+            verify_type,
         )
         return True
+    except DuplicateKeyError:
+        current_app.logger.info(
+            "[VERIFY_QUEUE] skip duplicate enqueue uid=%s type=%s",
+            user_id,
+            verify_type,
+        )
+        return False     
     except OperationFailure as e:
         current_app.logger.exception(
             "[VERIFY_QUEUE] insert failed (OperationFailure) uid=%s type=%s err=%s",
-            doc.get("uid"),
-            doc.get("type"),
+            user_id,
+            verify_type,
             e,
         )
         return False
     except PyMongoError as e:
         current_app.logger.exception(
             "[VERIFY_QUEUE] insert failed (PyMongoError) uid=%s type=%s err=%s",
-            doc.get("uid"),
-            doc.get("type"),
+            user_id,
+            verify_type,
             e,
         )
         return False
