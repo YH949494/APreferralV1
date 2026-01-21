@@ -24,7 +24,9 @@ users_collection.create_index([("user_id", ASCENDING)], unique=True)
 users_collection.create_index([("username", ASCENDING)])
 
 # SNAPSHOT FIELDS — ONLY WRITTEN BY WORKER
-# weekly_xp, monthly_xp, total_xp, weekly_referral_count, total_referral_count, vip_tier, vip_month
+# weekly_xp, monthly_xp, total_xp, weekly_referrals, monthly_referrals, total_referrals, vip_tier, vip_month
+# DEPRECATED — DO NOT USE (ledger-based referrals only)
+# weekly_referral_count, total_referral_count, ref_count_total, monthly_referral_count
 
 user_snapshots_col = db["user_snapshots"]
 user_snapshots_col.create_index([("user_id", ASCENDING)], unique=True)
@@ -48,9 +50,6 @@ def init_user(user_id, username):
             "$setOnInsert": {
                 "user_id": user_id,
                 "username": username,
-                "ref_count_total": 0,
-                "monthly_referral_count": 0,
-                "referral_count": 0,
                 "last_checkin": None,                
                 "status": "Normal",       # or "VIP1"
                 "next_status": "VIP1",    # scheduled for next month
@@ -97,12 +96,21 @@ def increment_referral(referrer_id, referred_user_id=None):
 def get_user_stats(user_id):
     user = users_collection.find_one({"user_id": user_id})
     if not user:
-        return {"xp": 0, "weekly_xp": 0, "monthly_xp": 0, "referral_count": 0}
+        return {
+            "xp": 0,
+            "weekly_xp": 0,
+            "monthly_xp": 0,
+            "weekly_referrals": 0,
+            "monthly_referrals": 0,
+            "total_referrals": 0,
+        }
     return {
         "xp": user.get("xp", 0),                     # Lifetime XP
         "weekly_xp": user.get("weekly_xp", 0),       # Weekly XP
         "monthly_xp": user.get("monthly_xp", 0),     # Monthly XP ✅
-        "referral_count": user.get("referral_count", 0)
+        "weekly_referrals": user.get("weekly_referrals", 0),
+        "monthly_referrals": user.get("monthly_referrals", 0),
+        "total_referrals": user.get("total_referrals", 0),
     }
 
 # === ADMIN XP CONTROL ===
@@ -133,8 +141,8 @@ def save_weekly_snapshot():
         .sort("weekly_xp", -1).limit(50)
     )
     top_referrals = list(
-        users_collection.find({}, {"user_id": 1, "username": 1, "weekly_referral_count": 1})
-        .sort("weekly_referral_count", -1).limit(50)
+        users_collection.find({}, {"user_id": 1, "username": 1, "weekly_referrals": 1})
+        .sort("weekly_referrals", -1).limit(50)
     )
 
     # ✅ Match main app's collection & fields
@@ -146,7 +154,7 @@ def save_weekly_snapshot():
             for u in top_checkins
         ],
         "referral_leaderboard": [
-            {"user_id": u["user_id"], "username": u.get("username"), "weekly_referral_count": u.get("weekly_referral_count", 0)}
+            {"user_id": u["user_id"], "username": u.get("username"), "weekly_referrals": u.get("weekly_referrals", 0)}
             for u in top_referrals
         ],
         "archived_at": now
@@ -154,5 +162,5 @@ def save_weekly_snapshot():
 
     # ✅ Reset weekly counters for the new week
     users_collection.update_many({}, {
-        "$set": {"weekly_xp": 0, "weekly_referral_count": 0}
+        "$set": {"weekly_xp": 0, "weekly_referrals": 0}
     })
