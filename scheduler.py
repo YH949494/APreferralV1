@@ -22,7 +22,8 @@ logger = logging.getLogger(__name__)
 INSTANCE_ID = os.getenv("FLY_ALLOC_ID") or f"{socket.gethostname()}:{os.getpid()}"
 PROCESSING_TIMEOUT = timedelta(minutes=10)
 RETRY_RELEASE_DELAY = timedelta(minutes=2)
-user_snapshots_col = db["user_snapshots"]
+# SNAPSHOT FIELDS — ONLY WRITTEN BY WORKER
+# weekly_xp, monthly_xp, total_xp, weekly_referral_count, total_referral_count, vip_tier, vip_month
 
 class ReferralRetryableError(RuntimeError):
     def __init__(self, message: str, retry_after: int | None = None):
@@ -93,18 +94,107 @@ def _release_for_retry(pending_id, now_utc_ts: datetime, retry_after_seconds: in
         },
     )
 
-def _build_user_snapshot(user_id: int, user_doc: dict, *, updated_at: datetime, source: str) -> dict:
-    return {
-        "user_id": user_id,
-        "referral_count": int(user_doc.get("ref_count_total", 0)),
-        "weekly_referral_count": int(user_doc.get("weekly_referral_count", 0)),
-        "weekly_xp": int(user_doc.get("weekly_xp", 0)),
-        "monthly_xp": int(user_doc.get("monthly_xp", 0)),
-        "vip_tier": user_doc.get("status"),
-        "updated_at": updated_at,
-        "source": source,
+def _week_window_utc(reference: datetime | None = None) -> tuple[datetime, datetime]:
+    ref_local = reference.astimezone(KL_TZ) if reference else datetime.now(KL_TZ)
+    start_local = (ref_local - timedelta(days=ref_local.weekday())).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    end_local = start_local + timedelta(days=7)
+    return start_local.astimezone(timezone.utc), end_local.astimezone(timezone.utc)
+
+
+def _month_window_utc(reference: datetime | None = None) -> tuple[datetime, datetime]:
+    ref_local = reference.astimezone(KL_TZ) if reference else datetime.now(KL_TZ)
+    start_local = ref_local.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    if start_local.month == 12:
+        end_local = start_local.replace(year=start_local.year + 1, month=1)
+    else:
+        end_local = start_local.replace(month=start_local.month + 1)
+    return start_local.astimezone(timezone.utc), end_local.astimezone(timezone.utc)
+
+
+def _xp_time_expr():
+    return {"$ifNull": ["$created_at", "$ts"]}
+
+
+def settle_xp_snapshots() -> None:
+    now_utc_ts = now_utc()
+    week_start_utc, week_end_utc = _week_window_utc(now_utc_ts)
+    month_start_utc, month_end_utc = _month_window_utc(now_utc_ts)
+
+    week_cond = {
+        "$and": [
+            {"$gte": [_xp_time_expr(), week_start_utc]},
+            {"$lt": [_xp_time_expr(), week_end_utc]},
+        ]
     }
-    
+
+    month_cond = {
+        "$and": [
+            {"$gte": [_xp_time_expr(), month_start_utc]},
+            {"$lt": [_xp_time_expr(), month_end_utc]},
+        ]
+    }
+
+    db.users.update_many(
+        {},
+        {
+            "$set": {
+                "weekly_xp": 0,
+                "monthly_xp": 0,
+                "total_xp": 0,
+                "xp": 0,
+                "snapshot_updated_at": now_utc_ts,
+            }
+        },
+    )
+
+    pipeline = [
+        {
+            "$match": {
+                "user_id": {"$ne": None},
+                "$or": [{"invalidated": {"$exists": False}}, {"invalidated": False}],
+            }
+        },
+        {
+            "$group": {
+                "_id": "$user_id",
+                "total_xp": {"$sum": "$xp"},
+                "weekly_xp": {"$sum": {"$cond": [week_cond, "$xp", 0]}},
+                "monthly_xp": {"$sum": {"$cond": [month_cond, "$xp", 0]}},
+            }
+        },
+    ]
+    results = list(db.xp_events.aggregate(pipeline))
+    for row in results:
+        uid = row.get("_id")
+        if uid is None:
+            continue
+        total_xp = int(row.get("total_xp", 0))
+        weekly_xp = int(row.get("weekly_xp", 0))
+        monthly_xp = int(row.get("monthly_xp", 0))
+        user_doc = db.users.find_one({"user_id": uid}, {"weekly_referral_count": 1}) or {}
+        weekly_ref = int(user_doc.get("weekly_referral_count", 0))
+        db.users.update_one(
+            {"user_id": uid},
+            {
+                "$set": {
+                    "total_xp": total_xp,
+                    "weekly_xp": weekly_xp,
+                    "monthly_xp": monthly_xp,
+                    "xp": total_xp,
+                    "snapshot_updated_at": now_utc_ts,
+                }
+            },
+            upsert=True,
+        )
+        logger.info(
+            "[SCHED][SNAPSHOT_WRITE] uid=%s weekly_xp=%s weekly_ref=%s",
+            uid,
+            weekly_xp,
+            weekly_ref,
+        )
+
 def _recover_stale_processing(now_utc_ts: datetime) -> int:
     cutoff = now_utc_ts - PROCESSING_TIMEOUT
     result = db.pending_referrals.update_many(
@@ -183,7 +273,6 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
     scanned = 0
     awarded = 0
     revoked = 0
-    affected_inviter_ids: set[int] = set()
     
     while scanned < batch_limit:
         pending = db.pending_referrals.find_one_and_update(
@@ -210,9 +299,7 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
         scanned += 1
         pending_id = pending.get("_id")
         invitee_user_id = pending.get("invitee_user_id")
-        inviter_user_id = pending.get("inviter_user_id")
-        if inviter_user_id:
-            affected_inviter_ids.add(inviter_user_id)        
+        inviter_user_id = pending.get("inviter_user_id")   
         step = "validate"
         retry_count = pending.get("retry_count", 0) or 0
         try:
@@ -401,7 +488,9 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
                             "weekly_referral_count": 1,
                             "monthly_referral_count": 1,
                             "referral_count": 1,
+                            "total_referral_count": 1,                            
                         },
+                        "$set": {"snapshot_updated_at": now_utc_ts},                        
                         "$setOnInsert": {
                             "user_id": inviter_user_id,
                             "created_at": now_utc_ts.astimezone(KL_TZ),
@@ -414,7 +503,13 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
                 weekly_ref = int((inviter_doc or {}).get("weekly_referral_count", 1))
                 actual_xp_added = xp_added
                 actual_bonus_added = bonus_added
-
+                logger.info(
+                    "[SCHED][SNAPSHOT_WRITE] uid=%s weekly_xp=%s weekly_ref=%s",
+                    inviter_user_id,
+                    int((inviter_doc or {}).get("weekly_xp", 0)),
+                    weekly_ref,
+                )
+                
             db.pending_referrals.update_one(
                 {"_id": pending_id},
                 {
@@ -455,35 +550,23 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
     logger.info(
         "[SCHED][REFERRAL] settle scanned=%s awarded=%s revoked=%s batch_limit=%s",
         scanned,
-        scanned,
         awarded,
         revoked,
         batch_limit,        
     )
 
-    if affected_inviter_ids:
-        snapshot_now = now_utc()
-        for inviter_id in affected_inviter_ids:
-            inviter_doc = db.users.find_one(
-                {"user_id": inviter_id},
-                {
-                    "ref_count_total": 1,
-                    "weekly_referral_count": 1,
-                    "weekly_xp": 1,
-                    "monthly_xp": 1,
-                    "status": 1,
-                },
-            )
-            if not inviter_doc:
-                continue
-            snapshot = _build_user_snapshot(
-                inviter_id,
-                inviter_doc,
-                updated_at=snapshot_now,
-                source="settle_5min",
-            )
-            user_snapshots_col.update_one(
-                {"user_id": inviter_id},
-                {"$set": snapshot},
-                upsert=True,
-            )
+    db.users.update_many(
+        {"weekly_referral_count": {"$exists": False}},
+        {"$set": {"weekly_referral_count": 0, "snapshot_updated_at": now_utc_ts}},
+    )
+    db.users.update_many(
+        {"total_referral_count": {"$exists": False}},
+        [
+            {
+                "$set": {
+                    "total_referral_count": {"$ifNull": ["$ref_count_total", 0]},
+                    "snapshot_updated_at": now_utc_ts,
+                }
+            }
+        ],
+    )
