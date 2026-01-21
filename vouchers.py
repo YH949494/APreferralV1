@@ -413,10 +413,6 @@ def norm_uname(s):
         s = s[1:]
     return s.lower()
 
-def is_new_player(uid: int) -> bool:
-    if uid is None:
-        return False
-    return users_collection.find_one({"user_id": uid}, {"_id": 1}) is None
 
 def _welcome_window_for_user(uid: int | None, *, ref: datetime | None = None, user_doc: dict | None = None):
     if uid is None:
@@ -834,10 +830,6 @@ def enqueue_verification(uid: int, checks: list[str]) -> None:
 ALLOWED_CHANNEL_STATUSES = {"member", "administrator", "creator"}
 SUB_CHECK_TTL_SECONDS = int(os.getenv("SUB_CHECK_TTL_SECONDS", "120"))
 
-def is_existing_user(uid: int) -> bool:
-    if uid is None:
-        return False
-    return bool(db.users.find_one({"user_id": uid}, {"_id": 1}))
 
 def _get_welcome_eligibility(uid: int) -> dict | None:
     if uid is None:
@@ -873,16 +865,47 @@ def ensure_welcome_eligibility(uid: int, *, users_exists: bool | None = None) ->
         return None
     return welcome_eligibility_col.find_one({"user_id": uid})
 
-def _welcome_eligible_now(uid: int | None, doc: dict | None, *, ref: datetime | None = None, user_doc: dict | None = None) -> bool:
-    if uid is None or not doc:
-        return False
-    if doc.get("claimed"):
-        return False
-    window = _welcome_window_for_user(uid, ref=ref, user_doc=user_doc)
-    if not window:
-        return False
-    ref_kl = (ref or now_kl()).astimezone(KL_TZ)
-    return ref_kl <= window["eligible_until"]
+def welcome_eligibility(uid: int | None, *, ref: datetime | None = None) -> tuple[bool, str, dict | None]:
+    # Welcome eligibility relies on joined_main_at being within 7 days and an active ticket.
+    # users_collection may already contain a doc while the user is still eligible.
+    # Missing/old joined_main_at or claimed/expired tickets permanently hides the welcome drop.
+    if uid is None:
+        reason = "no_uid"
+        current_app.logger.info("[WELCOME][ELIG] deny uid=%s reason=%s", uid, reason)
+        return (False, reason, None)
+
+    window = _welcome_window_for_user(uid, ref=ref)
+    if window is None:
+        reason = "not_in_welcome_window"
+        current_app.logger.info("[WELCOME][ELIG] deny uid=%s reason=%s", uid, reason)
+        return (False, reason, None)
+
+    ticket = get_or_issue_welcome_ticket(uid)
+    if not ticket:
+        reason = "no_ticket"
+        current_app.logger.info("[WELCOME][ELIG] deny uid=%s reason=%s", uid, reason)
+        return (False, reason, None)
+
+    status = ticket.get("status")
+    if status in ("claimed", "expired"):
+        reason = f"ticket_{status}"
+        current_app.logger.info("[WELCOME][ELIG] deny uid=%s reason=%s", uid, reason)
+        return (False, reason, ticket)
+
+    now_ref = (ref or now_kl()).astimezone(KL_TZ)
+    expires_at = _as_aware_kl(ticket.get("expires_at"))
+    if expires_at and now_ref > expires_at:
+        welcome_tickets_col.update_one(
+            {"uid": uid},
+            {"$set": {"status": "expired", "reason_last_fail": "expired"}},
+        )
+        ticket["status"] = "expired"
+        reason = "ticket_expired"
+        current_app.logger.info("[WELCOME][ELIG] deny uid=%s reason=%s", uid, reason)
+        return (False, reason, ticket)
+
+    current_app.logger.info("[WELCOME][ELIG] ok uid=%s exp=%s", uid, ticket.get("expires_at"))
+    return (True, "ok", ticket)
 
 def _official_channel_identifier():
     if OFFICIAL_CHANNEL_ID is not None:
@@ -1177,27 +1200,9 @@ def is_user_eligible_for_drop(user_doc: dict, tg_user: dict, drop: dict) -> bool
             return False
 
     if mode == "welcome_new_user_7d":
-        if uid is None:
-            _log(False, "welcome_missing_uid")
-            return False
-        if not is_new_player(uid):
-            _log(False, "welcome_old_user")
-            return False
-        ticket = get_or_issue_welcome_ticket(uid)
-        if not ticket:
-            _log(False, "welcome_no_ticket")
-            return False
-        ticket_status = ticket.get("status")
-        if ticket_status in ("claimed", "expired"):
-            _log(False, f"welcome_ticket_{ticket_status}")
-            return False
-        expires_at = _as_aware_kl(ticket.get("expires_at"))
-        if expires_at and now_kl() > expires_at:
-            welcome_tickets_col.update_one(
-                {"uid": uid},
-                {"$set": {"status": "expired", "reason_last_fail": "expired"}},
-            )
-            _log(False, "welcome_ticket_expired")
+        allowed, reason, _ticket = welcome_eligibility(uid)
+        if not allowed:
+            _log(False, f"welcome_{reason}")
             return False
     elif mode == "tier":
         if not allow or user_status not in allow:
@@ -1498,40 +1503,10 @@ def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None
         is_active = is_drop_active(d, ref)
         audience_type = _drop_audience_type(d)
 
-        # Sanity checks:
-        # - users_collection has uid -> welcome drop not returned
-        # - no record -> welcome drop returned until ticket expires/claimed
         if _is_new_joiner_audience(audience_type):
-            if ctx_uid is None:
-                continue
-            if not is_new_player(ctx_uid):
-                current_app.logger.info("[visible][WELCOME] hide_old_user uid=%s", ctx_uid)
-                continue
-            ticket = get_or_issue_welcome_ticket(ctx_uid)
-            if not ticket:
-                continue
-            ticket_status = ticket.get("status")
-            if ticket_status in ("claimed", "expired"):
-                current_app.logger.info(
-                    "[visible][WELCOME] hide_ticket_status uid=%s status=%s",
-                    ctx_uid,
-                    ticket_status,
-                )
-                continue
-            ticket_expires_at = _as_aware_kl(ticket.get("expires_at"))
-            ref_kl = _as_aware_kl(ref) or now_kl()
-            if ticket_expires_at and ref_kl > ticket_expires_at:
-                welcome_tickets_col.update_one(
-                    {"uid": ctx_uid},
-                    {"$set": {"status": "expired", "reason_last_fail": "expired"}},
-                )
-                current_app.logger.info(
-                    "[visible][WELCOME] hide_ticket_status uid=%s status=expired",
-                    ctx_uid,
-                )
-                continue
-            window = _welcome_window_for_user(ctx_uid, ref=ref, user_doc=None)
-            if window is None:
+            allowed, reason, _ticket = welcome_eligibility(ctx_uid, ref=ref)
+            if not allowed:
+                current_app.logger.info("[visible][WELCOME] hide uid=%s reason=%s", ctx_uid, reason)
                 continue
     
         if not is_drop_allowed(d, ctx_uid, usernameLower or uname, user_ctx):
@@ -2075,13 +2050,14 @@ def api_claim():
                 "eligible": False,
                 "checks_key": None,
             }), 403
-        joined_doc = users_collection.find_one({"user_id": uid}, {"joined_main_at": 1})
-        if not (joined_doc or {}).get("joined_main_at"):
-            current_app.logger.info("[WELCOME_CLAIM][DENY] uid=%s reason=not_joined_main", uid)
+        now_ts = now_kl()
+        allowed, reason, _ticket = welcome_eligibility(uid, ref=now_ts)
+        if not allowed:
+            current_app.logger.info("[claim] deny drop=%s uid=%s reason=%s", drop_id, uid, reason)
             return jsonify({
                 "status": "error",
                 "code": "not_eligible",
-                "reason": "not_joined_main",
+                "reason": reason,
                 "ok": False,
                 "eligible": False,
                 "checks_key": None,
@@ -2119,33 +2095,7 @@ def api_claim():
                "message": "Please set a Telegram profile picture to claim the Welcome Bonus."
             }), 403         
         current_app.logger.info("[WELCOME] claim_attempt uid=%s drop_id=%s", uid, drop_id)
-        eligibility = ensure_welcome_eligibility(uid)
-        now_ts = now_kl()
-        if not _welcome_eligible_now(uid, eligibility, ref=now_ts, user_doc=user_doc):
-            reason = "missing_joined_main_at"
-            if eligibility and eligibility.get("claimed"):
-                reason = "already_claimed"
-            else:
-                joined_main_at = (user_doc or users_collection.find_one({"user_id": uid}, {"joined_main_at": 1}) or {}).get("joined_main_at")
-                window = _welcome_window_for_user(uid, ref=now_ts, user_doc=user_doc)
-                if joined_main_at and window is None:
-                    reason = "not_new_user"
-            current_app.logger.info(
-                "[claim] uid=%s drop_id=%s dtype=%s audience=%s decision=blocked reason=%s",
-                uid,
-                drop_id,
-                drop_type,
-                audience_type,
-                reason,
-            )
-            return jsonify({
-                "status": "error",
-                "code": "not_eligible",
-                "reason": reason,
-                "ok": False,
-                "eligible": False,
-                "checks_key": None,
-            }), 403
+
         if new_joiner_claims_col.find_one({"uid": uid}):
             current_app.logger.info(
                 "[claim] uid=%s drop_id=%s dtype=%s audience=%s decision=blocked reason=already_claimed_lifetime",
