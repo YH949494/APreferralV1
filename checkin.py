@@ -64,10 +64,6 @@ def handle_checkin():
             },
             "$setOnInsert": {
                 "referral_count": 0,
-                "weekly_referral_count": 0,
-                "weekly_xp": 0,
-                "monthly_xp": 0,
-                "xp": 0,
                 "status": "Normal",               
             }
         },
