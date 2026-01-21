@@ -79,11 +79,6 @@ def backfill(db, dry_run: bool = True):
                 REFERRAL_BONUS_XP,
             )
 
-    for uid, count in ref_counts.items():
-        if dry_run:
-            continue
-        db.users.update_one({"user_id": uid}, {"$max": {"referral_count": count}}, upsert=True)
-
     return {
         "missing_base": len(missing_base),
         "missing_bonus": sum(missing_bonus.values()),
