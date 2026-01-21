@@ -157,7 +157,7 @@ class ReferralTests(unittest.TestCase):
                 grant_referral_rewards(db, db.users, uid, 100 + i)
                 
         user_doc = db.users.find_one({"user_id": uid})
-        self.assertEqual(user_doc.get("referral_count"), 3)
+        self.assertEqual(user_doc.get("total_referrals"), 3)
         total_xp = sum(ev["xp"] for ev in db.xp_events.docs)
         expected = 3 * BASE_REFERRAL_XP + REFERRAL_BONUS_XP
         self.assertEqual(total_xp, expected)
