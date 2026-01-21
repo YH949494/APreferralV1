@@ -7,7 +7,6 @@ This module centralizes XP grants so they are logged idempotently in
 from __future__ import annotations
 
 import logging
-import pymongo
 from datetime import datetime, timezone
 from config import KL_TZ
 
@@ -128,31 +127,9 @@ def ensure_xp_indexes(db) -> None:
         if removed:
             logger.warning("[XP] Removed %s duplicate xp_events", removed)
     
-    # Backward compatibility: clean up any existing indexes on
-    # (user_id, unique_key) so we can recreate the partial unique index with the
-    # correct name and options. Older deployments might have had the default
-    # index name or a different definition, which would cause create_index to
-    # raise OperationFailure on startup.
-    target_key = {"user_id": 1, "unique_key": 1}
-    existing = db.xp_events.index_information()    
-    for ix in db.xp_events.list_indexes():
-        if ix.get("key") == target_key:
-            name = ix.get("name")
-            if name not in existing:
-                logger.info("[xp_indexes] skip_drop_missing name=%s", name)
-                continue
-            logger.info("[xp_indexes] drop name=%s", name)            
-            try:
-                db.xp_events.drop_index(name)
-            except pymongo.errors.OperationFailure as exc:
-                if "IndexNotFound" in str(exc) or getattr(exc, "code", None) == 27:
-                    logger.info("[xp_indexes] skip_drop_missing name=%s", name)
-                    continue
-                raise
-
     _dedupe_xp_events()
     
-    db.xp_events.create_index(
+    index_name = db.xp_events.create_index(
         [("user_id", 1), ("unique_key", 1)],
         name="uq_user_uniqueKey",
         unique=True,
@@ -161,13 +138,19 @@ def ensure_xp_indexes(db) -> None:
         # MongoDB deployments).
         partialFilterExpression={"unique_key": {"$type": "string"}},
     )
-    db.xp_events.create_index(
+    logger.info("[xp_indexes] ensure ok name=%s", index_name)
+    index_name = db.xp_events.create_index(
         [("user_id", 1), ("created_at", -1)], name="user_createdAt"
     )
-
-    db.xp_ledger.create_index(
+    logger.info("[xp_indexes] ensure ok name=%s", index_name)
+    
+    index_name = db.xp_ledger.create_index(
         [("user_id", 1), ("source", 1), ("source_id", 1)],
         name="uq_ledger_event",
         unique=True,
     )
-    db.xp_ledger.create_index([("created_at", -1)], name="ledger_createdAt")
+    logger.info("[xp_indexes] ensure ok name=%s", index_name)
+    index_name = db.xp_ledger.create_index(
+        [("created_at", -1)], name="ledger_createdAt"
+    )
+    logger.info("[xp_indexes] ensure ok name=%s", index_name)
