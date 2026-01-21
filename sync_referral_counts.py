@@ -1,4 +1,4 @@
-"""Repair users.referral_count based on valid referrals.
+"""Audit users.total_referrals based on referral_events ledger.
 
 Manual-run only. Safe to execute multiple times thanks to idempotent updates.
 """
@@ -7,12 +7,10 @@ from __future__ import annotations
 
 import argparse
 import os
+from datetime import datetime, timezone
 from heapq import nlargest
 
 from pymongo import MongoClient, UpdateOne
-
-from referral_rules import compute_referral_stats, ensure_referral_indexes
-
 
 def _flush_bulk(users_collection, ops, dry_run: bool) -> int:
     if dry_run or not ops:
@@ -23,8 +21,7 @@ def _flush_bulk(users_collection, ops, dry_run: bool) -> int:
 
 def sync_referral_counts(db, batch_size: int, dry_run: bool) -> dict:
     users_collection = db.users
-    referrals_collection = db.referrals
-    ensure_referral_indexes(referrals_collection)
+    referral_events_collection = db.referral_events
 
     total_scanned = 0
     mismatched = 0
@@ -37,7 +34,7 @@ def sync_referral_counts(db, batch_size: int, dry_run: bool) -> dict:
         batch = list(
             users_collection.find(
                 query,
-                {"_id": 1, "user_id": 1, "referral_count": 1},
+                {"_id": 1, "user_id": 1, "total_referrals": 1},
             )
             .sort("_id", 1)
             .limit(batch_size)
@@ -46,14 +43,39 @@ def sync_referral_counts(db, batch_size: int, dry_run: bool) -> dict:
             break
 
         ops = []
+        user_ids = [user.get("user_id") for user in batch if user.get("user_id") is not None]
+        ledger_totals = {}
+        if user_ids:
+            pipeline = [
+                {
+                    "$match": {
+                        "inviter_id": {"$in": user_ids},
+                        "event": {"$in": ["referral_settled", "referral_revoked"]},
+                    }
+                },
+                {
+                    "$group": {
+                        "_id": "$inviter_id",
+                        "total": {
+                            "$sum": {
+                                "$cond": [
+                                    {"$eq": ["$event", "referral_settled"]},
+                                    1,
+                                    -1,
+                                ]
+                            }
+                        },
+                    }
+                },
+            ]
+            ledger_totals = {row["_id"]: int(row.get("total", 0)) for row in referral_events_collection.aggregate(pipeline)}        
         for user in batch:
             total_scanned += 1
             uid = user.get("user_id")
             if uid is None:
                 continue
-            stats = compute_referral_stats(referrals_collection, uid)
-            computed_total = int(stats.get("total_referrals", 0))
-            stored_total = int(user.get("referral_count", 0))
+            computed_total = int(ledger_totals.get(uid, 0))
+            stored_total = int(user.get("total_referrals", 0))
             if computed_total != stored_total:
                 mismatched += 1
                 delta = computed_total - stored_total
@@ -69,7 +91,12 @@ def sync_referral_counts(db, batch_size: int, dry_run: bool) -> dict:
                     ops.append(
                         UpdateOne(
                             {"_id": user["_id"]},
-                            {"$set": {"referral_count": computed_total}},
+                            {
+                                "$set": {
+                                    "total_referrals": computed_total,
+                                    "snapshot_updated_at": datetime.now(timezone.utc),
+                                }
+                            },
                         )
                     )
 
@@ -88,7 +115,7 @@ def sync_referral_counts(db, batch_size: int, dry_run: bool) -> dict:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Sync users.referral_count from referrals collection")
+    parser = argparse.ArgumentParser(description="Sync users.total_referrals from referral_events ledger")
     parser.add_argument("--mongo-url", default=os.getenv("MONGO_URL"), help="Mongo connection URI")
     parser.add_argument("--mongo-db", default=os.getenv("MONGO_DB", "referral_bot"), help="Mongo database name")
     parser.add_argument("--batch-size", type=int, default=300, help="Batch size for user scans")
