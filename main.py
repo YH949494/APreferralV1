@@ -29,7 +29,7 @@ from xp import ensure_xp_indexes, grant_xp, now_utc
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from vouchers import vouchers_bp, ensure_voucher_indexes
+from vouchers import vouchers_bp, ensure_voucher_indexes, process_verification_queue
 from scheduler import settle_pending_referrals, settle_referral_snapshots, settle_xp_snapshots
 
 from pymongo import MongoClient, DESCENDING, ASCENDING, ReturnDocument  # keep if used elsewhere
@@ -2642,7 +2642,15 @@ def run_worker():
         id="settle_referral_snapshots",
         name="Settle Referral Snapshots",
         replace_existing=True,
-    )       
+    )  
+    scheduler.add_job(
+        process_verification_queue,
+        trigger=CronTrigger(minute="*/1", timezone=KL_TZ),
+        id="process_verification_queue",
+        name="Process Verification Queue",
+        replace_existing=True,
+        kwargs={"batch_limit": 50},
+    )    
     scheduler.start()
 
     # 5) Background jobs on the bot's job_queue
