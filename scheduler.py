@@ -23,7 +23,9 @@ INSTANCE_ID = os.getenv("FLY_ALLOC_ID") or f"{socket.gethostname()}:{os.getpid()
 PROCESSING_TIMEOUT = timedelta(minutes=10)
 RETRY_RELEASE_DELAY = timedelta(minutes=2)
 # SNAPSHOT FIELDS — ONLY WRITTEN BY WORKER
-# weekly_xp, monthly_xp, total_xp, weekly_referral_count, total_referral_count, vip_tier, vip_month
+# weekly_xp, monthly_xp, total_xp, weekly_referrals, monthly_referrals, total_referrals, vip_tier, vip_month
+# DEPRECATED — DO NOT USE (ledger-based referrals only)
+# weekly_referral_count, total_referral_count, ref_count_total, monthly_referral_count
 
 class ReferralRetryableError(RuntimeError):
     def __init__(self, message: str, retry_after: int | None = None):
@@ -112,7 +114,48 @@ def _month_window_utc(reference: datetime | None = None) -> tuple[datetime, date
         end_local = start_local.replace(month=start_local.month + 1)
     return start_local.astimezone(timezone.utc), end_local.astimezone(timezone.utc)
 
+def _week_start_kl(reference: datetime | None = None) -> datetime:
+    ref_local = reference.astimezone(KL_TZ) if reference else datetime.now(KL_TZ)
+    return (ref_local - timedelta(days=ref_local.weekday())).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
 
+def _month_start_kl(reference: datetime | None = None) -> datetime:
+    ref_local = reference.astimezone(KL_TZ) if reference else datetime.now(KL_TZ)
+    return ref_local.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+def _referral_event_doc(inviter_id: int, invitee_id: int, event: str, occurred_at: datetime) -> dict:
+    week_key = _week_start_kl(occurred_at).date().isoformat()
+    month_key = _month_start_kl(occurred_at).date().isoformat()
+    return {
+        "inviter_id": inviter_id,
+        "invitee_id": invitee_id,
+        "event": event,
+        "occurred_at": occurred_at,
+        "week_key": week_key,
+        "month_key": month_key,
+    }
+
+def _record_referral_event(inviter_id: int, invitee_id: int, event: str, occurred_at: datetime) -> None:
+    if inviter_id is None or invitee_id is None:
+        return
+    try:
+        db.referral_events.insert_one(_referral_event_doc(inviter_id, invitee_id, event, occurred_at))
+    except DuplicateKeyError:
+        logger.info(
+            "[SCHED][REFERRAL_LEDGER] duplicate inviter=%s invitee=%s action=%s",
+            inviter_id,
+            invitee_id,
+            event,
+        )
+        return
+    logger.info(
+        "[SCHED][REFERRAL_LEDGER] inviter=%s invitee=%s action=%s",
+        inviter_id,
+        invitee_id,
+        "settled" if event == "referral_settled" else "revoked",
+    )
+    
 def _xp_time_expr():
     return {"$ifNull": ["$created_at", "$ts"]}
 
@@ -173,8 +216,6 @@ def settle_xp_snapshots() -> None:
         total_xp = int(row.get("total_xp", 0))
         weekly_xp = int(row.get("weekly_xp", 0))
         monthly_xp = int(row.get("monthly_xp", 0))
-        user_doc = db.users.find_one({"user_id": uid}, {"weekly_referral_count": 1}) or {}
-        weekly_ref = int(user_doc.get("weekly_referral_count", 0))
         db.users.update_one(
             {"user_id": uid},
             {
@@ -189,10 +230,98 @@ def settle_xp_snapshots() -> None:
             upsert=True,
         )
         logger.info(
-            "[SCHED][SNAPSHOT_WRITE] uid=%s weekly_xp=%s weekly_ref=%s",
+            "[SCHED][SNAPSHOT_WRITE] uid=%s weekly_xp=%s",
             uid,
             weekly_xp,
-            weekly_ref,
+        )
+
+def _referral_sign_expr():
+    return {
+        "$cond": [
+            {"$eq": ["$event", "referral_settled"]},
+            1,
+            {
+                "$cond": [
+                    {"$eq": ["$event", "referral_revoked"]},
+                    -1,
+                    0,
+                ]
+            },
+        ]
+    }
+
+def settle_referral_snapshots() -> None:
+    now_utc_ts = now_utc()
+    week_start_utc, week_end_utc = _week_window_utc(now_utc_ts)
+    month_start_utc, month_end_utc = _month_window_utc(now_utc_ts)
+
+    week_cond = {
+        "$and": [
+            {"$gte": ["$occurred_at", week_start_utc]},
+            {"$lt": ["$occurred_at", week_end_utc]},
+        ]
+    }
+    month_cond = {
+        "$and": [
+            {"$gte": ["$occurred_at", month_start_utc]},
+            {"$lt": ["$occurred_at", month_end_utc]},
+        ]
+    }
+
+    db.users.update_many(
+        {},
+        {
+            "$set": {
+                "weekly_referrals": 0,
+                "monthly_referrals": 0,
+                "total_referrals": 0,
+                "snapshot_updated_at": now_utc_ts,
+            }
+        },
+    )
+
+    pipeline = [
+        {
+            "$match": {
+                "inviter_id": {"$ne": None},
+                "event": {"$in": ["referral_settled", "referral_revoked"]},
+            }
+        },
+        {
+            "$group": {
+                "_id": "$inviter_id",
+                "total_referrals": {"$sum": _referral_sign_expr()},
+                "weekly_referrals": {"$sum": {"$cond": [week_cond, _referral_sign_expr(), 0]}},
+                "monthly_referrals": {"$sum": {"$cond": [month_cond, _referral_sign_expr(), 0]}},
+            }
+        },
+    ]
+    results = list(db.referral_events.aggregate(pipeline))
+    for row in results:
+        uid = row.get("_id")
+        if uid is None:
+            continue
+        total_referrals = int(row.get("total_referrals", 0))
+        weekly_referrals = int(row.get("weekly_referrals", 0))
+        monthly_referrals = int(row.get("monthly_referrals", 0))
+        db.users.update_one(
+            {"user_id": uid},
+            {
+                "$set": {
+                    "weekly_referrals": weekly_referrals,
+                    "monthly_referrals": monthly_referrals,
+                    "total_referrals": total_referrals,
+                    "snapshot_updated_at": now_utc_ts,
+                }
+            },
+            upsert=True,
+        )
+        logger.info(
+            "[SCHED][REFERRAL_SNAPSHOT] uid=%s weekly=%s monthly=%s total=%s",
+            uid,
+            weekly_referrals,
+            monthly_referrals,
+            total_referrals,
         )
 
 def _recover_stale_processing(now_utc_ts: datetime) -> int:
@@ -234,7 +363,7 @@ def archive_weekly_leaderboard():
     week_key = now_kl.strftime("%Y-%W")  # e.g., "2025-42"
 
     checkin_list = list(db.users.find({}, {"_id": 0, "username": 1, "weekly_xp": 1}))
-    referral_list = list(db.users.find({}, {"_id": 0, "username": 1, "weekly_referral_count": 1}))
+    referral_list = list(db.users.find({}, {"_id": 0, "username": 1, "weekly_referrals": 1}))
 
     snapshot = {
         "week": week_key,
@@ -251,17 +380,8 @@ def archive_weekly_leaderboard():
         len(checkin_list),
         len(referral_list),
     )    
-    db.users.update_many({}, {"$set": {"weekly_xp": 0, "weekly_referral_count": 0}})
+    db.users.update_many({}, {"$set": {"weekly_xp": 0, "weekly_referrals": 0}})
     logger.info("[RESET][WEEKLY] weekly_xp_ref_reset ok")
-
-
-def reset_monthly_referrals():
-    """
-    Reset monthly referral counters (run on the first day of the month 00:00 KL).
-    """
-    result = db.users.update_many({}, {"$set": {"monthly_referral_count": 0}})
-    logger.info("[RESET][MONTHLY] monthly_referral_reset modified=%s", result.modified_count)
-
 
 def settle_pending_referrals(batch_limit: int = 200) -> None:
     now_utc_ts = now_utc()
@@ -316,6 +436,7 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
                         "$unset": {"processing_by": "", "processing_at_utc": "", "processing_at": ""},
                     },
                 )
+                _record_referral_event(inviter_user_id, invitee_user_id, "referral_revoked", now_utc_ts)                
                 revoked += 1
                 continue
             if invitee_user_id == inviter_user_id:
@@ -331,6 +452,7 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
                         "$unset": {"processing_by": "", "processing_at_utc": "", "processing_at": ""},
                     },
                 )
+                _record_referral_event(inviter_user_id, invitee_user_id, "referral_revoked", now_utc_ts)                
                 revoked += 1
                 continue
 
@@ -374,6 +496,7 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
                         "$unset": {"processing_by": "", "processing_at_utc": "", "processing_at": ""},
                     },
                 )
+                _record_referral_event(inviter_user_id, invitee_user_id, "referral_revoked", now_utc_ts)                
                 revoked += 1
                 continue
 
@@ -394,6 +517,7 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
                         "$unset": {"processing_by": "", "processing_at_utc": "", "processing_at": ""},
                     },
                 )
+                _record_referral_event(inviter_user_id, invitee_user_id, "referral_revoked", now_utc_ts)                
                 revoked += 1
                 continue
             join_seen = pending.get("created_at_utc")
@@ -413,6 +537,7 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
                         "$unset": {"processing_by": "", "processing_at_utc": "", "processing_at": ""},
                     },
                 )
+                _record_referral_event(inviter_user_id, invitee_user_id, "referral_revoked", now_utc_ts)                
                 revoked += 1
                 continue
             if reference_time < (join_seen_utc - timedelta(minutes=10)):
@@ -427,6 +552,7 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
                         "$unset": {"processing_by": "", "processing_at_utc": "", "processing_at": ""},
                     },
                 )
+                _record_referral_event(inviter_user_id, invitee_user_id, "referral_revoked", now_utc_ts)                
                 revoked += 1
                 continue
 
@@ -466,49 +592,29 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
                 )
                 continue
 
-            inviter_doc = db.users.find_one(
-                {"user_id": inviter_user_id},
-                {"ref_count_total": 1, "weekly_referral_count": 1, "monthly_referral_count": 1},
-            ) or {}
-            current_ref_total = int(inviter_doc.get("ref_count_total", 0))
+            total_pipeline = [
+                {
+                    "$match": {
+                        "inviter_id": inviter_user_id,
+                        "event": {"$in": ["referral_settled", "referral_revoked"]},
+                    }
+                },
+                {"$group": {"_id": None, "total": {"$sum": _referral_sign_expr()}}},
+            ]
+            total_rows = list(db.referral_events.aggregate(total_pipeline))
+            current_ref_total = int((total_rows[0]["total"] if total_rows else 0) or 0)
             new_ref_total = current_ref_total + 1
             xp_added, bonus_added = calc_referral_award(new_ref_total)
             xp_granted = grant_xp(db, inviter_user_id, "referral_award", award_key, xp_added)
-            weekly_ref = int(inviter_doc.get("weekly_referral_count", 0))
             ref_total = current_ref_total
             actual_xp_added = 0
             actual_bonus_added = 0
 
             if xp_granted:
-                inviter_doc = db.users.find_one_and_update(
-                    {"user_id": inviter_user_id},
-                    {
-                        "$inc": {
-                            "ref_count_total": 1,
-                            "weekly_referral_count": 1,
-                            "monthly_referral_count": 1,
-                            "referral_count": 1,
-                            "total_referral_count": 1,                            
-                        },
-                        "$set": {"snapshot_updated_at": now_utc_ts},                        
-                        "$setOnInsert": {
-                            "user_id": inviter_user_id,
-                            "created_at": now_utc_ts.astimezone(KL_TZ),
-                        },
-                    },
-                    upsert=True,
-                    return_document=ReturnDocument.AFTER,
-                )
-                ref_total = int((inviter_doc or {}).get("ref_count_total", new_ref_total))
-                weekly_ref = int((inviter_doc or {}).get("weekly_referral_count", 1))
                 actual_xp_added = xp_added
                 actual_bonus_added = bonus_added
-                logger.info(
-                    "[SCHED][SNAPSHOT_WRITE] uid=%s weekly_xp=%s weekly_ref=%s",
-                    inviter_user_id,
-                    int((inviter_doc or {}).get("weekly_xp", 0)),
-                    weekly_ref,
-                )
+            _record_referral_event(inviter_user_id, invitee_user_id, "referral_settled", now_utc_ts)
+            ref_total = new_ref_total
                 
             db.pending_referrals.update_one(
                 {"_id": pending_id},
@@ -519,7 +625,7 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
                         "awarded_at_kl": now_kl().isoformat(),
                         "xp_added": actual_xp_added,
                         "bonus_added": actual_bonus_added,
-                        "ref_count_total_after": ref_total,
+                        "total_referrals_after": ref_total,
                         "award_key": award_key,
                     },
                     "$unset": {"processing_by": "", "processing_at_utc": "", "processing_at": ""},
@@ -527,11 +633,10 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
             )
             awarded += 1
             logger.info(
-                "[SCHED][REFERRAL] award_ok inviter=%s invitee=%s ref_total=%s weekly_ref=%s xp_added=%s bonus_added=%s hold_hours=%s",
+                "[SCHED][REFERRAL] award_ok inviter=%s invitee=%s ref_total=%s xp_added=%s bonus_added=%s hold_hours=%s",
                 inviter_user_id,
                 invitee_user_id,
                 ref_total,
-                weekly_ref,
                 actual_xp_added,
                 actual_bonus_added,
                 REFERRAL_HOLD_HOURS,
@@ -553,20 +658,4 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
         awarded,
         revoked,
         batch_limit,        
-    )
-
-    db.users.update_many(
-        {"weekly_referral_count": {"$exists": False}},
-        {"$set": {"weekly_referral_count": 0, "snapshot_updated_at": now_utc_ts}},
-    )
-    db.users.update_many(
-        {"total_referral_count": {"$exists": False}},
-        [
-            {
-                "$set": {
-                    "total_referral_count": {"$ifNull": ["$ref_count_total", 0]},
-                    "snapshot_updated_at": now_utc_ts,
-                }
-            }
-        ],
     )
