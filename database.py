@@ -23,6 +23,9 @@ users_collection = db["users"]
 users_collection.create_index([("user_id", ASCENDING)], unique=True)
 users_collection.create_index([("username", ASCENDING)])
 
+# SNAPSHOT FIELDS — ONLY WRITTEN BY WORKER
+# weekly_xp, monthly_xp, total_xp, weekly_referral_count, total_referral_count, vip_tier, vip_month
+
 user_snapshots_col = db["user_snapshots"]
 user_snapshots_col.create_index([("user_id", ASCENDING)], unique=True)
                                 
@@ -45,11 +48,7 @@ def init_user(user_id, username):
             "$setOnInsert": {
                 "user_id": user_id,
                 "username": username,
-                "xp": 0,                  # Lifetime XP
-                "weekly_xp": 0,           # Weekly XP
-                "monthly_xp": 0,          # Monthly XP ✅
                 "ref_count_total": 0,
-                "weekly_referral_count": 0,
                 "monthly_referral_count": 0,
                 "referral_count": 0,
                 "last_checkin": None,                
@@ -82,7 +81,7 @@ def checkin_user(user_id):
         {"user_id": user_id},
         {
             "$set": {"last_checkin": now},
-            "$setOnInsert": {"xp": 0, "weekly_xp": 0, "monthly_xp": 0, "status": "Normal"},
+            "$setOnInsert": {"status": "Normal"},
         },
         upsert=True,
     )
