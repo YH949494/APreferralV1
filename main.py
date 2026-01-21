@@ -30,8 +30,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from vouchers import vouchers_bp, ensure_voucher_indexes
-from scheduler import reset_monthly_referrals, settle_pending_referrals
-from scheduler import reset_monthly_referrals, settle_pending_referrals, settle_xp_snapshots
+from scheduler import settle_pending_referrals, settle_referral_snapshots, settle_xp_snapshots
 
 from pymongo import MongoClient, DESCENDING, ASCENDING, ReturnDocument  # keep if used elsewhere
 from pymongo.errors import DuplicateKeyError
@@ -120,19 +119,36 @@ def _month_window_utc(reference: datetime | None = None):
         end_local = start_local.replace(month=start_local.month + 1)
     return start_local.astimezone(timezone.utc), end_local.astimezone(timezone.utc), start_local
 
+DEPRECATED_REFERRAL_FIELDS = {
+    "weekly_referral_count",
+    "total_referral_count",
+    "ref_count_total",
+    "monthly_referral_count",
+    "referral_count",
+}
+
+def _warn_if_deprecated_referral_fields(user_doc: dict | None, context: str) -> None:
+    if not user_doc:
+        return
+    seen = [field for field in DEPRECATED_REFERRAL_FIELDS if field in user_doc]
+    if seen:
+        logger.warning("[REFERRAL][DEPRECATED_READ] context=%s fields=%s", context, ",".join(seen))
+
 def compute_referral_stats(user_id: int, window=None):
-    """Return referral stats using users collection counters."""
+    """Return referral stats using users snapshot fields."""
 
     if not user_id:
         return {"total_referrals": 0, "weekly_referrals": 0, "monthly_referrals": 0}
 
     user_doc = users_collection.find_one(
         {"user_id": user_id},
-        {"ref_count_total": 1, "weekly_referral_count": 1},
+        {"total_referrals": 1, "weekly_referrals": 1, "monthly_referrals": 1},
     ) or {}
-    total = int(user_doc.get("ref_count_total", 0))
-    weekly = int(user_doc.get("weekly_referral_count", 0))
-    return {"total_referrals": total, "weekly_referrals": weekly, "monthly_referrals": 0}
+    _warn_if_deprecated_referral_fields(user_doc, "compute_referral_stats")
+    total = int(user_doc.get("total_referrals", 0))
+    weekly = int(user_doc.get("weekly_referrals", 0))
+    monthly = int(user_doc.get("monthly_referrals", 0))
+    return {"total_referrals": total, "weekly_referrals": weekly, "monthly_referrals": monthly}
 
 def _normalize_snapshot_updated_at(updated_at: datetime | None) -> datetime | None:
     if not updated_at:
@@ -161,9 +177,9 @@ def _get_user_snapshot(user_id: int) -> tuple[dict | None, str | None, int | Non
             "monthly_xp": 1,
             "total_xp": 1,
             "xp": 1,
-            "weekly_referral_count": 1,
-            "total_referral_count": 1,
-            "ref_count_total": 1,
+            "weekly_referrals": 1,
+            "monthly_referrals": 1,
+            "total_referrals": 1,
             "vip_tier": 1,
             "vip_month": 1,
             "status": 1,
@@ -172,14 +188,16 @@ def _get_user_snapshot(user_id: int) -> tuple[dict | None, str | None, int | Non
     )
     if not user_doc:
         return None, None, None
+    _warn_if_deprecated_referral_fields(user_doc, "_get_user_snapshot")        
     snapshot_ts, snapshot_age_sec = _snapshot_meta(user_doc.get("snapshot_updated_at"), now_utc_ts)
     snapshot = {
         "user_id": user_id,
         "weekly_xp": int(user_doc.get("weekly_xp", 0)),
         "monthly_xp": int(user_doc.get("monthly_xp", 0)),
         "total_xp": int(user_doc.get("total_xp", user_doc.get("xp", 0))),
-        "weekly_referral_count": int(user_doc.get("weekly_referral_count", 0)),
-        "total_referral_count": int(user_doc.get("total_referral_count", user_doc.get("ref_count_total", 0))),
+        "weekly_referrals": int(user_doc.get("weekly_referrals", 0)),
+        "monthly_referrals": int(user_doc.get("monthly_referrals", 0)),
+        "total_referrals": int(user_doc.get("total_referrals", 0)),
         "vip_tier": user_doc.get("vip_tier") or user_doc.get("status"),
         "vip_month": user_doc.get("vip_month"),
     }
@@ -245,14 +263,18 @@ def recompute_xp_totals(start_utc, end_utc, limit: int | None = None, user_id: i
 
 def settle_pending_referrals_with_cache_clear():
     settle_pending_referrals()
-    LEADERBOARD_CACHE.clear()
-    logger.info("[LEADERBOARD][CACHE_CLEAR] source=worker")
 
 
 def settle_xp_snapshots_with_cache_clear():
     settle_xp_snapshots()
     LEADERBOARD_CACHE.clear()
-    logger.info("[LEADERBOARD][CACHE_CLEAR] source=worker")
+    logger.info("[LEADERBOARD][CACHE_CLEAR] source=snapshot_rebuild")
+
+
+def settle_referral_snapshots_with_cache_clear():
+    settle_referral_snapshots()
+    LEADERBOARD_CACHE.clear()
+    logger.info("[LEADERBOARD][CACHE_CLEAR] source=snapshot_rebuild")
 
 # ----------------------------
 # MongoDB Setup
@@ -261,12 +283,15 @@ client = MongoClient(MONGO_URL)
 db = client["referral_bot"]
 users_collection = db["users"]
 # SNAPSHOT FIELDS — ONLY WRITTEN BY WORKER
-# weekly_xp, monthly_xp, total_xp, weekly_referral_count, total_referral_count, vip_tier, vip_month
+# weekly_xp, monthly_xp, total_xp, weekly_referrals, monthly_referrals, total_referrals, vip_tier, vip_month
+# DEPRECATED — DO NOT USE (ledger-based referrals only)
+# weekly_referral_count, total_referral_count, ref_count_total, monthly_referral_count
 history_collection = db["weekly_leaderboard_history"]
 bonus_voucher_collection = db["bonus_voucher"]
 admin_cache_col = db["admin_cache"]
 xp_events_collection = db["xp_events"]
 referral_award_events_collection = db["referral_award_events"]
+referral_events_collection = db["referral_events"]
 welcome_eligibility_collection = db["welcome_eligibility"]
 monthly_xp_history_collection = db["monthly_xp_history"]
 monthly_xp_history_collection.create_index([("month", ASCENDING)])
@@ -280,6 +305,35 @@ pending_referrals_collection = db["pending_referrals"]
 tg_verification_queue_collection = db["tg_verification_queue"]
 
 REFERRAL_HOLD_HOURS = 12
+
+REFERRAL_INCREMENT_GUARD_FIELDS = {
+    "weekly_referrals",
+    "monthly_referrals",
+    "total_referrals",
+    "weekly_referral_count",
+    "total_referral_count",
+    "ref_count_total",
+    "monthly_referral_count",
+    "referral_count",
+}
+
+def _log_referral_increment_attempt(update_doc: dict | None, context: str) -> None:
+    if RUNNER_MODE != "web" or not update_doc:
+        return
+    inc_doc = update_doc.get("$inc") or {}
+    if not isinstance(inc_doc, dict):
+        return
+    fields = [field for field in inc_doc.keys() if field in REFERRAL_INCREMENT_GUARD_FIELDS]
+    if fields:
+        logger.error("[REFERRAL][ERROR] increment_attempt context=%s fields=%s", context, ",".join(fields))
+
+def _users_update_one(filter_doc: dict, update_doc: dict, *, context: str, **kwargs):
+    _log_referral_increment_attempt(update_doc, context)
+    return users_collection.update_one(filter_doc, update_doc, **kwargs)
+
+def _users_update_many(filter_doc: dict, update_doc: dict, *, context: str, **kwargs):
+    _log_referral_increment_attempt(update_doc, context)
+    return users_collection.update_many(filter_doc, update_doc, **kwargs)
 
 def call_bot_in_loop(coro, timeout=15):
     loop = getattr(app_bot, "_running_loop", None)
@@ -392,14 +446,14 @@ def maybe_shout_milestones(user_id: int):
     """
     Announce:
       - every +WEEKLY_XP_BUCKET of weekly_xp
-      - every +WEEKLY_REFERRAL_BUCKET of weekly_referral_count
+      - every +WEEKLY_REFERRAL_BUCKET of weekly_referrals
     """
     u = users_collection.find_one({"user_id": user_id})
     if not u:
         return
 
     weekly_xp = int(u.get("weekly_xp", 0))
-    weekly_ref = int(u.get("weekly_referral_count", 0))
+    weekly_ref = int(u.get("weekly_referrals", 0))
 
     # current buckets
     xp_bucket_now = weekly_xp // WEEKLY_XP_BUCKET
@@ -420,7 +474,7 @@ def maybe_shout_milestones(user_id: int):
     if ref_hit:
         updates["ref_weekly_milestone_bucket"] = ref_bucket_now
     if updates:
-        users_collection.update_one({"user_id": user_id}, {"$set": updates})
+        _users_update_one({"user_id": user_id}, {"$set": updates}, context="milestones_update")
 
     # Throttle only the sending to the group (not the state update above)
     sent_any = False
@@ -437,9 +491,10 @@ def maybe_shout_milestones(user_id: int):
                 )
                 sent_any = True
             if sent_any:
-                users_collection.update_one(
+                _users_update_one(
                     {"user_id": user_id},
-                    {"$set": {"last_shout_at": datetime.utcnow()}}
+                    {"$set": {"last_shout_at": datetime.utcnow()}},
+                    context="milestones_last_shout",
                 )
         else:
             # Optional: keep a lightweight log to spot suppressed sends in logs
@@ -579,21 +634,21 @@ async def handle_user_join(
     if existing_user and existing_user.get("joined_once") and existing_user.get("joined_main_at"):
         return
 
-    users_collection.update_one(
+    _users_update_one(
         {"user_id": uid},
         {
             "$set": {"username": username, "joined_once": True},
             "$setOnInsert": {
-                "referral_count": 0,
                 "last_checkin": None,
                 "status": "Normal",
                 "created_at": datetime.now(KL_TZ),                
             },
         },
         upsert=True,
+        context="handle_user_join",        
     )
     joined_at = datetime.now(KL_TZ)
-    users_collection.update_one(
+    _users_update_one(
         {"user_id": uid, "joined_main_at": {"$exists": False}},
         {
             "$set": {
@@ -602,6 +657,7 @@ async def handle_user_join(
                 "first_join_at": joined_at,
             }
         },
+        context="join_main_at",        
     )
     _ensure_welcome_eligibility(uid)
     logger.info(
@@ -892,6 +948,15 @@ def ensure_indexes():
         unique=True,
         name="uniq_referral_award_key",
     )
+    referral_events_collection.create_index(
+        [("event", 1), ("inviter_id", 1), ("invitee_id", 1)],
+        unique=True,
+        name="uniq_referral_event",
+    )
+    referral_events_collection.create_index(
+        [("inviter_id", 1), ("occurred_at", 1)],
+        name="referral_events_by_inviter_time",
+    )    
     pending_referrals_collection.create_index(
         [("group_id", 1), ("invitee_user_id", 1)],
         unique=True,
@@ -1170,10 +1235,11 @@ def api_is_admin():
         is_admin = user_id in ids
 
         # optional: cache a per-user flag for faster UI checks
-        users_collection.update_one(
+        _users_update_one(
             {"user_id": user_id},
             {"$set": {"is_admin": is_admin, "is_admin_checked_at": datetime.utcnow()}},
-            upsert=True
+            upsert=True,
+            context="admin_flag",
         )
 
         return jsonify({
@@ -1240,7 +1306,7 @@ async def process_checkin(user_id, username, region, update=None):
     bonus_xp = STREAK_MILESTONES.get(streak, 0)
 
     now_utc_ts = now_utc()
-    users_collection.update_one(
+    _users_update_one(
         {"user_id": user_id},
         {
             "$set": {
@@ -1254,7 +1320,8 @@ async def process_checkin(user_id, username, region, update=None):
                 "status": "Normal",                
             },
         },
-        upsert=True
+        upsert=True,
+        context="checkin_update",
     )
 
     checkin_key = f"checkin:{today_kl.strftime('%Y%m%d')}"
@@ -1356,10 +1423,11 @@ def api_set_region(user_id):
     if user and "region" in user:
         return jsonify({"success": False, "error": "Region already set", "locked": True})
 
-    users_collection.update_one(
+    _users_update_one(
         {"user_id": user_id},
         {"$set": {"region": region}},
-        upsert=True
+        upsert=True,
+        context="set_region",
     )
     return jsonify({"success": True, "region": region, "locked": True})
 
@@ -1400,9 +1468,9 @@ def api_referral():
     snapshot, snapshot_ts, snapshot_age_sec = _get_user_snapshot(user_id)
     if snapshot:
         stats = {
-            "total_referrals": int(snapshot.get("total_referral_count", 0)),
-            "weekly_referrals": int(snapshot.get("weekly_referral_count", 0)),
-            "monthly_referrals": 0,
+            "total_referrals": int(snapshot.get("total_referrals", 0)),
+            "weekly_referrals": int(snapshot.get("weekly_referrals", 0)),
+            "monthly_referrals": int(snapshot.get("monthly_referrals", 0)),
         }
     payload = {
         "success": success,
@@ -1500,12 +1568,11 @@ def get_leaderboard():
                     {
                         "user_id": 1,
                         "username": 1,
-                        "weekly_referral_count": 1,
-                        "total_referral_count": 1,
-                        "ref_count_total": 1,
+                        "weekly_referrals": 1,
+                        "total_referrals": 1,
                     },
                 )
-                .sort("weekly_referral_count", DESCENDING)
+                .sort("weekly_referrals", DESCENDING)
                 .limit(leaderboard_limit)
             )
             if referral_rows:
@@ -1514,7 +1581,7 @@ def get_leaderboard():
                     "[LEADERBOARD] result_count=%s top1=(%s,%s)",
                     len(referral_rows),
                     top_row.get("user_id"),
-                    int(top_row.get("weekly_referral_count", 0)),
+                    int(top_row.get("weekly_referrals", 0)),
                 )
             else:
                 logger.info("[LEADERBOARD] result_count=0 top1=(none)")
@@ -1532,10 +1599,8 @@ def get_leaderboard():
                     {
                         "user_id": row.get("user_id"),
                         "username": row.get("username"),
-                        "weekly_referral_count": int(row.get("weekly_referral_count", 0)),
-                        "total_referral_count": int(
-                            row.get("total_referral_count", row.get("ref_count_total", 0))
-                        ),
+                        "weekly_referrals": int(row.get("weekly_referrals", 0)),
+                        "total_referrals": int(row.get("total_referrals", 0)),
                     }
                     for row in referral_rows
                 ],
@@ -1562,11 +1627,11 @@ def get_leaderboard():
                 continue
             entry = {
                 "username": formatted,
-                "total_valid": int(row.get("weekly_referral_count", 0)),
-                "referrals": int(row.get("weekly_referral_count", 0)),
+                "total_valid": int(row.get("weekly_referrals", 0)),
+                "referrals": int(row.get("weekly_referrals", 0)),
             }
             if is_admin:
-                entry["total_all"] = int(row.get("total_referral_count", 0))
+                entry["total_all"] = int(row.get("total_referrals", 0))
 
             referral_board.append(entry)
             
@@ -1578,15 +1643,17 @@ def get_leaderboard():
         snapshot, snapshot_ts, snapshot_age_sec = _get_user_snapshot(current_user_id)
         if snapshot:
             user_weekly_xp = int(snapshot.get("weekly_xp", 0))
-            user_weekly_referrals = int(snapshot.get("weekly_referral_count", 0))
+            user_weekly_referrals = int(snapshot.get("weekly_referrals", 0))
             monthly_xp_value = int(snapshot.get("monthly_xp", 0))
-            lifetime_valid_refs = int(snapshot.get("total_referral_count", 0))
+            lifetime_valid_refs = int(snapshot.get("total_referrals", 0))
+            monthly_referrals_value = int(snapshot.get("monthly_referrals", 0))
             user_status = snapshot.get("vip_tier") or "Normal"
         else:
             user_weekly_xp = 0
             user_weekly_referrals = 0
             monthly_xp_value = 0
             lifetime_valid_refs = 0
+            monthly_referrals_value = 0            
             user_status = "Normal"
                 
         user_stats = {
@@ -1594,6 +1661,9 @@ def get_leaderboard():
             "monthly_xp": monthly_xp_value,
             "referrals": user_weekly_referrals,
             "total_valid": user_weekly_referrals,
+            "weekly_referrals": user_weekly_referrals,
+            "monthly_referrals": monthly_referrals_value,
+            "total_referrals": lifetime_valid_refs,            
             "status": user_status,
             "lifetime_valid": lifetime_valid_refs,
         }
@@ -1700,7 +1770,7 @@ def get_week_history(week_start):
         referral = [
             {
                 "username": u.get("username") or u.get("first_name") or "Unknown",
-                "referrals": u.get("referrals") or u.get("referral_count") or u.get("weekly_referral_count") or 0
+                "referrals": u.get("weekly_referrals") or u.get("referrals") or 0
             }
             for u in referral_data
         ]
@@ -1806,7 +1876,7 @@ def api_starterpack():
         if user.get("welcome_xp_claimed"):
             return jsonify({"success": False, "message": "⚠️ Starter Pack already claimed."})
 
-        users_collection.update_one(
+        _users_update_one(
             {"user_id": int(user_id)},
             {
                 "$set": {"username": username, "welcome_xp_claimed": True},
@@ -1815,6 +1885,7 @@ def api_starterpack():
                 },
             },
             upsert=True,
+            context="starterpack",            
         )
 
         granted = grant_xp(
@@ -1890,8 +1961,9 @@ def export_csv():
             "username",
             "total_xp",
             "weekly_xp",
-            "total_referral_count",
-            "weekly_referral_count",
+            "total_referrals",
+            "weekly_referrals",
+            "monthly_referrals",
             "monthly_xp",
             "vip_tier",
         ])
@@ -1901,8 +1973,9 @@ def export_csv():
                 u.get("username", ""),
                 u.get("total_xp", u.get("xp", 0)),
                 u.get("weekly_xp", 0),
-                u.get("total_referral_count", u.get("ref_count_total", 0)),
-                u.get("weekly_referral_count", 0),
+                u.get("total_referrals", 0),
+                u.get("weekly_referrals", 0),
+                u.get("monthly_referrals", 0),
                 u.get("monthly_xp", 0),
                 u.get("vip_tier", u.get("status", "Normal")),
             ])
@@ -1932,9 +2005,9 @@ def reset_weekly_xp():
     week_end_date = (now - timedelta(days=1)).date()      # Sunday
     week_start_date = week_end_date - timedelta(days=6)   # Monday
 
-    proj = {"user_id": 1, "username": 1, "weekly_xp": 1, "weekly_referral_count": 1}
+    proj = {"user_id": 1, "username": 1, "weekly_xp": 1, "weekly_referrals": 1}
     top_checkin   = list(users_collection.find({}, proj).sort("weekly_xp", DESCENDING).limit(100))
-    top_referrals = list(users_collection.find({}, proj).sort("weekly_referral_count", DESCENDING).limit(100))
+    top_referrals = list(users_collection.find({}, proj).sort("weekly_referrals", DESCENDING).limit(100))
 
     history_collection.insert_one({
         "week_start": week_start_date.isoformat(),
@@ -1944,25 +2017,35 @@ def reset_weekly_xp():
             for u in top_checkin
         ],
         "referral_leaderboard": [
-            {"user_id": u["user_id"], "username": u.get("username", "unknown"), "weekly_referral_count": u.get("weekly_referral_count", 0)}
+            {"user_id": u["user_id"], "username": u.get("username", "unknown"), "weekly_referrals": u.get("weekly_referrals", 0)}
             for u in top_referrals
         ],
         # store as UTC so later math is safe
         "archived_at": datetime.utcnow()
     })
 
-    users_collection.update_many({}, {
-        "$set": {"weekly_xp": 0, "weekly_referral_count": 0, "xp_weekly_milestone_bucket": 0,
-        "ref_weekly_milestone_bucket": 0,}
-    })
+    _users_update_many(
+        {},
+        {
+            "$set": {
+                "weekly_xp": 0,
+                "weekly_referrals": 0,
+                "xp_weekly_milestone_bucket": 0,
+                "ref_weekly_milestone_bucket": 0,
+            }
+        },
+        context="weekly_reset",
+    )
 
     print(f"✅ Weekly XP & referrals reset complete at {now}")
 
 meta = db["meta"]
 
 def backfill_missing_statuses():
-    res = users_collection.update_many(
-        {"status": {"$exists": False}}, {"$set": {"status": "Normal"}}
+    res = _users_update_many(
+        {"status": {"$exists": False}},
+        {"$set": {"status": "Normal"}},
+        context="backfill_status",
     )
     logger.info("[xp_recompute] backfill_status modified=%s", getattr(res, "modified_count", 0))
     return getattr(res, "modified_count", 0)
@@ -1971,9 +2054,10 @@ def one_time_fix_monthly_xp():
     # run once ever
     if meta.find_one({"_id": "fix_monthly_xp_done"}):
         return
-    res = users_collection.update_many(
+    res = _users_update_many(
         {"monthly_xp": {"$exists": False}},
-        {"$set": {"monthly_xp": 0}}
+        {"$set": {"monthly_xp": 0}},
+        context="backfill_monthly_xp",
     )
     meta.update_one(
         {"_id": "fix_monthly_xp_done"},
@@ -2121,7 +2205,7 @@ def apply_monthly_tier_update(run_time: datetime | None = None):
             upsert=True,
         )
 
-        users_collection.update_one(
+        _users_update_one(
             {"user_id": uid},
             {
                 "$set": {
@@ -2134,6 +2218,7 @@ def apply_monthly_tier_update(run_time: datetime | None = None):
                     "snapshot_updated_at": now_utc,                    
                 }
             },
+            context="monthly_tier_update",            
         )
         processed += 1
 
@@ -2201,7 +2286,7 @@ async def _send_xmas_flow(update: Update, context: ContextTypes.DEFAULT_TYPE, us
         else:
             is_new_joiner = True
 
-    users_collection.update_one(
+    _users_update_one(
         {"user_id": user.id},
         {
             "$setOnInsert": {
@@ -2216,6 +2301,7 @@ async def _send_xmas_flow(update: Update, context: ContextTypes.DEFAULT_TYPE, us
             },
         },
         upsert=True,
+        context="xmas_flow",        
     )
 
     message = (
@@ -2240,15 +2326,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if user:
-        users_collection.update_one(
+        _users_update_one(
             {"user_id": user.id},
             {"$setOnInsert": {
                 "username": user.username,
-                "referral_count": 0,
                 "last_checkin": None,
                 "status": "Normal",
             }},
-            upsert=True
+            upsert=True,
+            context="start_user_insert",
         )
         user_doc = users_collection.find_one({"user_id": user.id}, {"joined_main_at": 1})
         if not (user_doc or {}).get("joined_main_at"):
@@ -2308,7 +2394,7 @@ async def handle_xmas_checkin(update: Update, context: ContextTypes.DEFAULT_TYPE
     now = datetime.utcnow()
     iso_calendar = now.isocalendar()
 
-    users_collection.update_one(
+    _users_update_one(
         {"user_id": user.id},
         {
             "$set": {
@@ -2319,6 +2405,7 @@ async def handle_xmas_checkin(update: Update, context: ContextTypes.DEFAULT_TYPE
                 "updated_at": now,
             }
         },
+        context="xmas_checkin",        
     )
 
     success_text = (
@@ -2459,7 +2546,7 @@ async def button_handler(update, context):
         if user and user.get("welcome_xp_claimed"):
             await query.answer("⚠️ You already claimed your welcome XP!", show_alert=True)
         else:
-            users_collection.update_one(
+            _users_update_one(
                 {"user_id": user_id},
                 {
                     "$set": {"welcome_xp_claimed": True},
@@ -2467,7 +2554,8 @@ async def button_handler(update, context):
                         "status": "Normal",
                     },
                 },
-                upsert=True
+                upsert=True,
+                context="welcome_bonus_button",
             )
             granted = grant_xp(
                 db, user_id, "welcome_bonus", "welcome_bonus", WELCOME_BONUS_XP
@@ -2535,13 +2623,6 @@ def run_worker():
         replace_existing=True,
     )
     scheduler.add_job(
-        reset_monthly_referrals,
-        trigger=CronTrigger(day=1, hour=0, minute=0, timezone=KL_TZ),
-        id="monthly_referral_reset",
-        name="Monthly Referral Reset",
-        replace_existing=True,
-    )    
-    scheduler.add_job(
         settle_pending_referrals_with_cache_clear,
         trigger=CronTrigger(minute="*/5", timezone=KL_TZ),
         id="settle_pending_referrals",
@@ -2555,6 +2636,13 @@ def run_worker():
         name="Settle XP Snapshots",
         replace_existing=True,
     )    
+    scheduler.add_job(
+        settle_referral_snapshots_with_cache_clear,
+        trigger=CronTrigger(minute="*/5", timezone=KL_TZ),
+        id="settle_referral_snapshots",
+        name="Settle Referral Snapshots",
+        replace_existing=True,
+    )       
     scheduler.start()
 
     # 5) Background jobs on the bot's job_queue
@@ -2593,6 +2681,6 @@ if __name__ == "__main__":
 # Test plan (internal):
 # 1) Generate referral link for user A.
 # 2) User B joins via that link (join request flow) and is approved.
-# 3) Verify users.referral_count/weekly_referral_count increment and xp_events include ref_success:<B> and bonus at 3.
+# 3) Verify users.weekly_referrals/total_referrals snapshot updates and xp_events include ref_success:<B> and bonus at 3.
 # 4) Ensure rejoin does not double count or double XP.
         
