@@ -1,6 +1,6 @@
 from flask import Blueprint, request, jsonify, current_app
 from pymongo import ASCENDING, DESCENDING, ReturnDocument
-from pymongo.errors import OperationFailure, DuplicateKeyError
+from pymongo.errors import OperationFailure, PyMongoError, DuplicateKeyError
 from bson.objectid import ObjectId
 from datetime import datetime, timedelta, timezone
 import requests
@@ -785,78 +785,37 @@ def _profile_photo_cache_status(uid: int) -> tuple[bool | None, bool]:
     if not exp_aware or exp_aware <= now_kl():
         return None, True
     return bool(cached.get("hasPhoto")), False
-
-def enqueue_verification(uid: int, vtype: str) -> dict:
-    if uid is None:
-        try:
-            current_app.logger.warning("[VERIFY_QUEUE] skip_enqueue missing_uid")
-        except Exception:
-            print("[VERIFY_QUEUE] skip_enqueue missing_uid")
-        return {"ok": False, "reason": "no_uid"}
+ 
+def enqueue_verification(doc: dict) -> bool:
+    """
+    Enqueue verification task safely.
+    Returns True if inserted successfully, False otherwise.
+    """
+    assert "uid" in doc and "type" in doc and "created_at" in doc
     try:
-        uid = int(uid)
-    except (TypeError, ValueError):
-        try:
-            current_app.logger.warning("[VERIFY_QUEUE] skip_enqueue invalid_uid=%s", uid)
-        except Exception:
-            print(f"[VERIFY_QUEUE] skip_enqueue invalid_uid={uid}")
-        return {"ok": False, "reason": "invalid_uid"}
-    if not vtype:
-        return {"ok": False, "reason": "missing_type"}
-    vtype = str(vtype).strip()
-
-    existing = tg_verification_queue_col.find_one({"user_id": uid})
-    if existing:
-        status = (existing.get("status") or "").strip().lower()
-        if status in ("pending", "in_progress", "queued"):
-            try:
-                current_app.logger.info(
-                    "[WELCOME_CLAIM][VERIFY_ENQUEUE] dup_pending uid=%s status=%s",
-                    uid,
-                    status,
-                )
-            except Exception:
-                print(f"[WELCOME_CLAIM][VERIFY_ENQUEUE] dup_pending uid={uid} status={status}")
-            return {"ok": True, "queued": True, "status": status, "dup": True, "reason": "already_pending"}
-        if status in ("approved", "denied"):
-            return {"ok": False, "reason": f"already_{status}"}
-
-    now = now_utc()
-    try:
-        tg_verification_queue_col.insert_one(
-            {"user_id": uid},
-            {
-                "user_id": uid,
-                "uid": uid,
-                "type": vtype,
-                "status": "pending",
-                "created_at": now,
-                "updated_at": now,
-                "attempts": 0,
-                "last_error": None,
-            }
-        )
+        tg_verification_queue_col.insert_one(doc)
         current_app.logger.info(
-            "[WELCOME_CLAIM][VERIFY_ENQUEUE] uid=%s type=%s status=pending", uid, vtype
+            "[VERIFY_QUEUE] enqueued uid=%s type=%s",
+            doc.get("uid"),
+            doc.get("type"),
         )
-        return {"ok": True, "queued": True, "status": "pending", "dup": False}     
-    except DuplicateKeyError:
-        try:
-            current_app.logger.info(
-                "[WELCOME_CLAIM][VERIFY_ENQUEUE] dup_pending uid=%s status=pending", uid
-            )
-        except Exception:
-            print(f"[WELCOME_CLAIM][VERIFY_ENQUEUE] dup_pending uid={uid} status=pending")
-        return {"ok": True, "queued": True, "status": "pending", "dup": True, "reason": "already_pending"}
-    except Exception as exc:
-        try:
-            current_app.logger.exception(
-                "[VERIFY_QUEUE] failed uid=%s type=%s", uid, vtype
-            )
-        except Exception:
-            print(f"[VERIFY_QUEUE] failed uid={uid} type={vtype} err={exc}")
-        return {"ok": False, "reason": "enqueue_failed"}
-
+        return True
+    except OperationFailure as e:
+        current_app.logger.exception(
+            "[VERIFY_QUEUE] insert failed (OperationFailure) uid=%s type=%s err=%s",
+            doc.get("uid"),
+            doc.get("type"),
+            e,
+        )
+        return False
+    except PyMongoError as e:
+        current_app.logger.exception(
+            "[VERIFY_QUEUE] insert failed (PyMongoError) uid=%s type=%s err=%s",
+            doc.get("uid"),
+            doc.get("type"),
+            e,
+        )
+        return False
 
 def process_verification_queue(batch_limit: int = 50) -> None:
     scanned = claimed = approved = denied = errors = 0
@@ -2291,8 +2250,24 @@ def api_claim():
             }), 403
         cache_has_photo, cache_stale = _profile_photo_cache_status(uid)
         if cache_stale:
-            enqueue_verification(uid, "pic")
-            current_app.logger.info("[WELCOME_CLAIM][VERIFY_ENQUEUE] uid=%s type=pic", uid)
+            now = now_utc()
+            verification_doc = {
+                "user_id": uid,
+                "uid": uid,
+                "type": "pic",
+                "status": "pending",
+                "created_at": now,
+                "updated_at": now,
+                "attempts": 0,
+                "last_error": None,
+            }
+            ok = enqueue_verification(verification_doc)
+            if not ok:
+                return jsonify({
+                    "ok": False,
+                    "error": "verification_queue_unavailable",
+                    "message": "Verification system busy. Please try again later.",
+                }), 503
             return jsonify({
                 "ok": True,
                 "status": "verification_in_progress",
