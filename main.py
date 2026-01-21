@@ -31,6 +31,7 @@ from apscheduler.triggers.cron import CronTrigger
 
 from vouchers import vouchers_bp, ensure_voucher_indexes
 from scheduler import reset_monthly_referrals, settle_pending_referrals
+from scheduler import reset_monthly_referrals, settle_pending_referrals, settle_xp_snapshots
 
 from pymongo import MongoClient, DESCENDING, ASCENDING, ReturnDocument  # keep if used elsewhere
 from pymongo.errors import DuplicateKeyError
@@ -148,48 +149,41 @@ def _snapshot_meta(updated_at: datetime | None, now_utc_ts: datetime) -> tuple[s
     snapshot_ts = normalized.astimezone(KL_TZ).isoformat()
     return snapshot_ts, age_sec
 
-def _build_user_snapshot_payload(user_id: int, user_doc: dict, *, updated_at: datetime, source: str) -> dict:
-    return {
-        "user_id": user_id,
-        "referral_count": int(user_doc.get("ref_count_total", user_doc.get("referral_count", 0))),
-        "weekly_referral_count": int(user_doc.get("weekly_referral_count", 0)),
-        "weekly_xp": int(user_doc.get("weekly_xp", 0)),
-        "monthly_xp": int(user_doc.get("monthly_xp", 0)),
-        "vip_tier": user_doc.get("status"),
-        "updated_at": updated_at,
-        "source": source,
-    }
-
-def _write_user_snapshot_from_doc(user_id: int, user_doc: dict, *, source: str, now_utc_ts: datetime) -> dict:
-    snapshot = _build_user_snapshot_payload(
-        user_id,
-        user_doc,
-        updated_at=now_utc_ts,
-        source=source,
-    )
-    user_snapshots_col.update_one({"user_id": user_id}, {"$set": snapshot}, upsert=True)
-    return snapshot
 
 def _get_user_snapshot(user_id: int) -> tuple[dict | None, str | None, int | None]:
     if not user_id:
         return None, None, None
     now_utc_ts = now_utc()
-    snapshot = user_snapshots_col.find_one({"user_id": user_id})
-    if snapshot:
-        snapshot_ts, snapshot_age_sec = _snapshot_meta(snapshot.get("updated_at"), now_utc_ts)
-        logger.info("[SNAPSHOT][HIT] uid=%s age=%ss", user_id, snapshot_age_sec)
-        return snapshot, snapshot_ts, snapshot_age_sec
-    user_doc = users_collection.find_one({"user_id": user_id}) or {}
-    logger.info("[SNAPSHOT][MISS] uid=%s using_users_doc", user_id)
+    user_doc = users_collection.find_one(
+        {"user_id": user_id},
+        {
+            "weekly_xp": 1,
+            "monthly_xp": 1,
+            "total_xp": 1,
+            "xp": 1,
+            "weekly_referral_count": 1,
+            "total_referral_count": 1,
+            "ref_count_total": 1,
+            "vip_tier": 1,
+            "vip_month": 1,
+            "status": 1,
+            "snapshot_updated_at": 1,
+        },
+    )
     if not user_doc:
         return None, None, None
-    snapshot = _write_user_snapshot_from_doc(
-        user_id,
-        user_doc,
-        source="read_fallback",
-        now_utc_ts=now_utc_ts,
-    )
-    snapshot_ts, snapshot_age_sec = _snapshot_meta(snapshot.get("updated_at"), now_utc_ts)
+    snapshot_ts, snapshot_age_sec = _snapshot_meta(user_doc.get("snapshot_updated_at"), now_utc_ts)
+    snapshot = {
+        "user_id": user_id,
+        "weekly_xp": int(user_doc.get("weekly_xp", 0)),
+        "monthly_xp": int(user_doc.get("monthly_xp", 0)),
+        "total_xp": int(user_doc.get("total_xp", user_doc.get("xp", 0))),
+        "weekly_referral_count": int(user_doc.get("weekly_referral_count", 0)),
+        "total_referral_count": int(user_doc.get("total_referral_count", user_doc.get("ref_count_total", 0))),
+        "vip_tier": user_doc.get("vip_tier") or user_doc.get("status"),
+        "vip_month": user_doc.get("vip_month"),
+    }
+    logger.info("[SNAPSHOT][READ] uid=%s age=%ss", user_id, snapshot_age_sec)
     return snapshot, snapshot_ts, snapshot_age_sec
 
 def _current_month_window_utc(reference: datetime | None = None):
@@ -214,7 +208,10 @@ def _event_time_expr():
 
 def recompute_xp_totals(start_utc, end_utc, limit: int | None = None, user_id: int | None = None):
     """Aggregate XP from xp_events between the given UTC boundaries."""
-
+    if RUNNER_MODE == "web":
+        logger.error("[GUARD][WEB] recompute_xp_totals blocked uid=%s", user_id)
+        return []
+        
     time_expr = {
         "$and": [
             {"$gte": [_event_time_expr(), start_utc]},
@@ -249,7 +246,13 @@ def recompute_xp_totals(start_utc, end_utc, limit: int | None = None, user_id: i
 def settle_pending_referrals_with_cache_clear():
     settle_pending_referrals()
     LEADERBOARD_CACHE.clear()
-    logger.info("[LEADERBOARD][CACHE_CLEAR] reason=scheduled_5min")
+    logger.info("[LEADERBOARD][CACHE_CLEAR] source=worker")
+
+
+def settle_xp_snapshots_with_cache_clear():
+    settle_xp_snapshots()
+    LEADERBOARD_CACHE.clear()
+    logger.info("[LEADERBOARD][CACHE_CLEAR] source=worker")
 
 # ----------------------------
 # MongoDB Setup
@@ -257,8 +260,8 @@ def settle_pending_referrals_with_cache_clear():
 client = MongoClient(MONGO_URL)
 db = client["referral_bot"]
 users_collection = db["users"]
-user_snapshots_col = db["user_snapshots"]
-user_snapshots_col.create_index([("user_id", ASCENDING)], unique=True)
+# SNAPSHOT FIELDS — ONLY WRITTEN BY WORKER
+# weekly_xp, monthly_xp, total_xp, weekly_referral_count, total_referral_count, vip_tier, vip_month
 history_collection = db["weekly_leaderboard_history"]
 bonus_voucher_collection = db["bonus_voucher"]
 admin_cache_col = db["admin_cache"]
@@ -581,11 +584,7 @@ async def handle_user_join(
         {
             "$set": {"username": username, "joined_once": True},
             "$setOnInsert": {
-                "xp": 0,
                 "referral_count": 0,
-                "weekly_referral_count": 0,
-                "weekly_xp": 0,
-                "monthly_xp": 0,
                 "last_checkin": None,
                 "status": "Normal",
                 "created_at": datetime.now(KL_TZ),                
@@ -1252,9 +1251,6 @@ async def process_checkin(user_id, username, region, update=None):
             },
             "$max": {"longest_streak": streak},
             "$setOnInsert": {
-                "weekly_xp": 0,
-                "monthly_xp": 0,
-                "xp": 0,
                 "status": "Normal",                
             },
         },
@@ -1404,7 +1400,7 @@ def api_referral():
     snapshot, snapshot_ts, snapshot_age_sec = _get_user_snapshot(user_id)
     if snapshot:
         stats = {
-            "total_referrals": int(snapshot.get("referral_count", 0)),
+            "total_referrals": int(snapshot.get("total_referral_count", 0)),
             "weekly_referrals": int(snapshot.get("weekly_referral_count", 0)),
             "monthly_referrals": 0,
         }
@@ -1467,18 +1463,12 @@ def get_leaderboard():
         week_start_utc, week_end_utc, week_start_local = _week_window_utc()
         week_end_local = week_start_local + timedelta(days=7)
         leaderboard_limit = 15
-        region = request.args.get("region", "global")
-        cache_key = f"{region}|{week_start_local.isoformat()}|{leaderboard_limit}"
+        cache_key = f"leaderboard|{week_start_local.date().isoformat()}|{leaderboard_limit}"
         cached_entry = LEADERBOARD_CACHE.get(cache_key)
         now_ts = time.time()
-        if cached_entry and (now_ts - cached_entry["ts"]) < CACHE_TTL_SECONDS:
-            age = int(now_ts - cached_entry["ts"])
-            logger.info("[LEADERBOARD][CACHE_HIT] key=%s age=%ss", cache_key, age)
-            # Leaderboard updates every 5 minutes; repeated calls within TTL return cached data.
-            return jsonify(cached_entry["payload"])
 
-        user_record = users_collection.find_one({"user_id": current_user_id}) or {}
-        is_admin = bool(user_record.get("is_admin", False))        
+        user_record = users_collection.find_one({"user_id": current_user_id}, {"is_admin": 1}) or {}
+        is_admin = bool(user_record.get("is_admin", False))
         logger.info(
             "[LEADERBOARD] week_window local_start=%s local_end=%s",
             week_start_local.isoformat(),
@@ -1486,86 +1476,97 @@ def get_leaderboard():
         )
         logger.info("[LEADERBOARD] pipeline_source=users")
 
+        if cached_entry and (now_ts - cached_entry["ts"]) < CACHE_TTL_SECONDS:
+            age = int(now_ts - cached_entry["ts"])
+            logger.info("[LEADERBOARD][CACHE_HIT] key=%s age=%ss", cache_key, age)
+            cached_payload = cached_entry["payload"]
+        else:
+            xp_query = {"user_id": {"$ne": None}}
+            logger.info(
+                "[lb_query] users.find filter=%s sort=weekly_xp:-1 limit=%s",
+                xp_query,
+                leaderboard_limit,
+            )
+            xp_rows = list(
+                users_collection
+                .find(xp_query, {"user_id": 1, "username": 1, "weekly_xp": 1})
+                .sort("weekly_xp", DESCENDING)
+                .limit(leaderboard_limit)
+            )
+
+            referral_rows = list(
+                users_collection.find(
+                    {"user_id": {"$ne": None}},
+                    {
+                        "user_id": 1,
+                        "username": 1,
+                        "weekly_referral_count": 1,
+                        "total_referral_count": 1,
+                        "ref_count_total": 1,
+                    },
+                )
+                .sort("weekly_referral_count", DESCENDING)
+                .limit(leaderboard_limit)
+            )
+            if referral_rows:
+                top_row = referral_rows[0]
+                logger.info(
+                    "[LEADERBOARD] result_count=%s top1=(%s,%s)",
+                    len(referral_rows),
+                    top_row.get("user_id"),
+                    int(top_row.get("weekly_referral_count", 0)),
+                )
+            else:
+                logger.info("[LEADERBOARD] result_count=0 top1=(none)")
+
+            cached_payload = {
+                "checkin": [
+                    {
+                        "user_id": row.get("user_id"),
+                        "username": row.get("username"),
+                        "weekly_xp": int(row.get("weekly_xp", 0)),
+                    }
+                    for row in xp_rows
+                ],
+                "referral": [
+                    {
+                        "user_id": row.get("user_id"),
+                        "username": row.get("username"),
+                        "weekly_referral_count": int(row.get("weekly_referral_count", 0)),
+                        "total_referral_count": int(
+                            row.get("total_referral_count", row.get("ref_count_total", 0))
+                        ),
+                    }
+                    for row in referral_rows
+                ],
+            }
+            LEADERBOARD_CACHE[cache_key] = {"ts": time.time(), "payload": cached_payload}
+            logger.info("[LEADERBOARD][CACHE_SET] key=%s ttl=%s", cache_key, CACHE_TTL_SECONDS)
+        
         def safe_format(u):
-            # Guarantee user_id exists
             if "user_id" not in u:
                 u["user_id"] = 0
             return format_username(u, current_user_id, is_admin)
             
-        xp_query = {"user_id": {"$ne": None}}
-        logger.info(
-            "[lb_query] users.find filter=%s sort=weekly_xp:-1 limit=%s",
-            xp_query,
-            leaderboard_limit,
-        )
-        xp_rows = list(
-            users_collection
-            .find(xp_query, {"user_id": 1, "username": 1, "weekly_xp": 1})
-            .sort("weekly_xp", DESCENDING)
-            .limit(leaderboard_limit)
-        )
-        xp_map = {
-            row.get("user_id"): int(row.get("weekly_xp", 0))
-            for row in xp_rows
-            if row.get("user_id") is not None
-        }
-        
-        referral_rows = list(
-            users_collection.find(
-                {"user_id": {"$ne": None}},
-                {"user_id": 1, "username": 1, "weekly_referral_count": 1, "ref_count_total": 1},
-            )
-            .sort("weekly_referral_count", DESCENDING)
-            .limit(leaderboard_limit)
-        )
-        referral_map = {row["user_id"]: int(row.get("weekly_referral_count", 0)) for row in referral_rows}
-        if referral_rows:
-            top_row = referral_rows[0]
-            logger.info(
-                "[LEADERBOARD] result_count=%s top1=(%s,%s)",
-                len(referral_rows),
-                top_row.get("user_id"),
-                int(top_row.get("weekly_referral_count", 0)),
-            )
-        else:
-            logger.info("[LEADERBOARD] result_count=0 top1=(none)")
-            
-        leaderboard_user_ids = set(xp_map.keys()) | set(referral_map.keys())
-        if current_user_id:
-            leaderboard_user_ids.add(current_user_id)
-
-        extra_user_docs = users_collection.find({"user_id": {"$in": list(leaderboard_user_ids)}})
-        user_map = {u.get("user_id"): u for u in extra_user_docs}
-
         top_checkins = []
-        for row in xp_rows:
-            uid = row.get("user_id")
-            user_doc = user_map.get(uid, {"user_id": uid})
-            formatted = safe_format(user_doc)
+        for row in cached_payload.get("checkin", []):
+            formatted = safe_format({"user_id": row.get("user_id"), "username": row.get("username")})
             if not formatted:
                 continue
             top_checkins.append({"username": formatted, "xp": int(row.get("weekly_xp", 0))})
 
         referral_board = []
-        total_all_map: dict[int, int] = {}
-        if is_admin:
-            total_all_map = {
-                row.get("user_id"): int(row.get("ref_count_total", 0))
-                for row in referral_rows
-            }
-
-        for row in referral_rows:
-            user_doc = row.get("user") or user_map.get(row["user_id"], {"user_id": row["user_id"]})
-            formatted = safe_format(user_doc)
+        for row in cached_payload.get("referral", []):
+            formatted = safe_format({"user_id": row.get("user_id"), "username": row.get("username")})
             if not formatted:
                 continue
             entry = {
                 "username": formatted,
-                "total_valid": row.get("weekly_referral_count", 0),
-                "referrals": row.get("weekly_referral_count", 0),
+                "total_valid": int(row.get("weekly_referral_count", 0)),
+                "referrals": int(row.get("weekly_referral_count", 0)),
             }
             if is_admin:
-                entry["total_all"] = total_all_map.get(row["user_id"], row.get("ref_count_total", 0))
+                entry["total_all"] = int(row.get("total_referral_count", 0))
 
             referral_board.append(entry)
             
@@ -1579,33 +1580,14 @@ def get_leaderboard():
             user_weekly_xp = int(snapshot.get("weekly_xp", 0))
             user_weekly_referrals = int(snapshot.get("weekly_referral_count", 0))
             monthly_xp_value = int(snapshot.get("monthly_xp", 0))
-            lifetime_valid_refs = int(snapshot.get("referral_count", 0))
-            user_status = snapshot.get("vip_tier") or user_record.get("status", "Normal")
+            lifetime_valid_refs = int(snapshot.get("total_referral_count", 0))
+            user_status = snapshot.get("vip_tier") or "Normal"
         else:
-            user_weekly_xp = xp_map.get(current_user_id, int(user_record.get("weekly_xp", 0)))
-            user_weekly_referrals = int(user_record.get("weekly_referral_count", 0))
-            monthly_xp_value = int(user_record.get("monthly_xp", 0))
-            lifetime_valid_refs = int(user_record.get("ref_count_total", 0))
-            user_status = user_record.get("status", "Normal")
-
-        if user_record:
-            stored_weekly = int(user_record.get("weekly_xp", 0))
-            stored_refs = int(user_record.get("weekly_referral_count", 0))            
-            if stored_weekly != user_weekly_xp:
-                logger.debug("[lb_mismatch] uid=%s weekly_xp stored=%s leaderboard=%s week_start=%s", current_user_id, stored_weekly, user_weekly_xp, week_start_local.isoformat())
-            if stored_refs != user_weekly_referrals:
-                logger.debug(
-                    "[lb_mismatch] uid=%s weekly_referrals stored=%s computed=%s week_start=%s",
-                    current_user_id,
-                    stored_refs,
-                    user_weekly_referrals,
-                    week_start_local.isoformat(),
-                )
-            stored_total_refs = int(user_record.get("referral_count", 0))
-            if stored_total_refs != lifetime_valid_refs:
-                logger.debug(
-                    "[lb_mismatch] uid=%s total_referrals stored=%s computed=%s", current_user_id, stored_total_refs, lifetime_valid_refs
-                )
+            user_weekly_xp = 0
+            user_weekly_referrals = 0
+            monthly_xp_value = 0
+            lifetime_valid_refs = 0
+            user_status = "Normal"
                 
         user_stats = {
             "xp": user_weekly_xp,
@@ -1630,8 +1612,6 @@ def get_leaderboard():
             "snapshot_ts": snapshot_ts,
             "snapshot_age_sec": snapshot_age_sec,
         }
-        LEADERBOARD_CACHE[cache_key] = {"ts": time.time(), "payload": payload}
-        logger.info("[LEADERBOARD][CACHE_SET] key=%s ttl=%s", cache_key, CACHE_TTL_SECONDS)
         return jsonify(payload)
 
     except Exception:
@@ -1748,7 +1728,7 @@ def get_bonus_voucher():
             return jsonify({"code": None})
 
         is_admin = user.get("is_admin", False)
-        is_vip = user.get("status") == "VIP1"
+        is_vip = (user.get("vip_tier") or user.get("status")) == "VIP1"
         if not is_vip and not is_admin:
             return jsonify({"code": None})
 
@@ -1831,9 +1811,6 @@ def api_starterpack():
             {
                 "$set": {"username": username, "welcome_xp_claimed": True},
                 "$setOnInsert": {
-                    "xp": 0,
-                    "weekly_xp": 0,
-                    "monthly_xp": 0,
                     "status": "Normal",
                 },
             },
@@ -1908,17 +1885,26 @@ def export_csv():
         users = users_collection.find()
         output = io.StringIO()
         writer = csv.writer(output)
-        writer.writerow(["user_id", "username", "xp", "weekly_xp", "referral_count", "weekly_referral_count", "monthly_xp", "status"])
+        writer.writerow([
+            "user_id",
+            "username",
+            "total_xp",
+            "weekly_xp",
+            "total_referral_count",
+            "weekly_referral_count",
+            "monthly_xp",
+            "vip_tier",
+        ])
         for u in users:
             writer.writerow([
                 u.get("user_id"),
                 u.get("username", ""),
-                u.get("xp", 0),
+                u.get("total_xp", u.get("xp", 0)),
                 u.get("weekly_xp", 0),
-                u.get("referral_count", 0),
+                u.get("total_referral_count", u.get("ref_count_total", 0)),
                 u.get("weekly_referral_count", 0),
                 u.get("monthly_xp", 0),
-                u.get("status", "Normal"),
+                u.get("vip_tier", u.get("status", "Normal")),
             ])
         output.seek(0)
         return output.getvalue()
@@ -2046,9 +2032,6 @@ def apply_monthly_tier_update(run_time: datetime | None = None):
     end_local = end_utc.astimezone(KL_TZ)
     month_key = start_local.strftime("%Y-%m")
     now_utc = datetime.now(timezone.utc)
-   
-    xp_rows = recompute_xp_totals(start_utc, end_utc)
-    xp_map = {row["_id"]: int(row.get("xp", 0)) for row in xp_rows}
 
     promoted: list[int] = []
     demoted: list[int] = []   
@@ -2078,8 +2061,8 @@ def apply_monthly_tier_update(run_time: datetime | None = None):
         uid = user.get("user_id")
         if uid is None:
             continue
-        monthly_total = xp_map.get(uid, 0)
-        # monthly_xp derived from xp ledger
+        monthly_total = int(user.get("monthly_xp", 0))
+        # monthly_xp derived from snapshot ledger settles
         computed_tier = _tier_from_monthly_xp(monthly_total)
         current_status = user.get("status", "Normal")
         existing = users_collection.find_one(
@@ -2148,6 +2131,7 @@ def apply_monthly_tier_update(run_time: datetime | None = None):
                     "vip_month": month_key,
                     "vip_tier": final_tier,
                     "vip_updated_at": now_utc,
+                    "snapshot_updated_at": now_utc,                    
                 }
             },
         )
@@ -2260,9 +2244,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             {"user_id": user.id},
             {"$setOnInsert": {
                 "username": user.username,
-                "xp": 0,
-                "weekly_xp": 0,
-                "monthly_xp": 0,
                 "referral_count": 0,
                 "last_checkin": None,
                 "status": "Normal",
@@ -2483,9 +2464,6 @@ async def button_handler(update, context):
                 {
                     "$set": {"welcome_xp_claimed": True},
                     "$setOnInsert": {
-                        "xp": 0,
-                        "weekly_xp": 0,
-                        "monthly_xp": 0,
                         "status": "Normal",
                     },
                 },
@@ -2570,6 +2548,13 @@ def run_worker():
         name="Settle Pending Referrals",
         replace_existing=True,
     ) 
+    scheduler.add_job(
+        settle_xp_snapshots_with_cache_clear,
+        trigger=CronTrigger(minute="*/5", timezone=KL_TZ),
+        id="settle_xp_snapshots",
+        name="Settle XP Snapshots",
+        replace_existing=True,
+    )    
     scheduler.start()
 
     # 5) Background jobs on the bot's job_queue
