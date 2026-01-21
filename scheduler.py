@@ -160,7 +160,27 @@ def _record_referral_event(inviter_id: int, invitee_id: int, event: str, occurre
 def _xp_time_expr():
     return {"$ifNull": ["$created_at", "$ts"]}
 
-
+def _write_snapshot_heartbeat(source: str, now_utc_ts: datetime) -> None:
+    try:
+        db.admin_cache.update_one(
+            {"_id": "snapshot_heartbeat"},
+            {
+                "$set": {
+                    "ts_utc": now_utc_ts,
+                    "ts_kl": now_utc_ts.astimezone(KL_TZ),
+                    "source": source,
+                }
+            },
+            upsert=True,
+        )
+        logger.info(
+            "[SNAPSHOT][HEARTBEAT] type=%s ts=%s",
+            source,
+            now_utc_ts.isoformat(),
+        )
+    except Exception:
+        logger.exception("[SNAPSHOT][HEARTBEAT] failed type=%s", source)
+        
 def settle_xp_snapshots() -> None:
     now_utc_ts = now_utc()
     week_start_utc, week_end_utc = _week_window_utc(now_utc_ts)
@@ -248,6 +268,7 @@ def settle_xp_snapshots() -> None:
                     "monthly_xp": "$monthly_xp_next",
                     "xp": "$total_xp_next",
                     "snapshot_published_at": now_utc_ts,
+                    "snapshot_updated_at": now_utc_ts,                    
                 }
             }
         ],
@@ -257,6 +278,7 @@ def settle_xp_snapshots() -> None:
         "[SNAPSHOT] publish_done users=%s version_inc=1",
         publish_result.modified_count,
     )    
+    _write_snapshot_heartbeat("xp", now_utc_ts)    
     for row in results:
         uid = row.get("_id")
         if uid is None:
@@ -368,6 +390,7 @@ def settle_referral_snapshots() -> None:
                     "monthly_referrals": "$monthly_referrals_next",
                     "total_referrals": "$total_referrals_next",
                     "snapshot_published_at": now_utc_ts,
+                    "snapshot_updated_at": now_utc_ts,                    
                 }
             }
         ],
@@ -377,6 +400,7 @@ def settle_referral_snapshots() -> None:
         "[SNAPSHOT] publish_done users=%s version_inc=1",
         publish_result.modified_count,
     )    
+    _write_snapshot_heartbeat("referral", now_utc_ts)    
     for row in results:
         uid = row.get("_id")
         if uid is None:
