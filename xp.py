@@ -1,7 +1,7 @@
 """Shared XP helpers.
 
 This module centralizes XP grants so they are logged idempotently in
-``xp_events`` while updating user counters atomically.
+``xp_events``. Snapshot counters are updated by the scheduler worker.
 """
 
 from __future__ import annotations
@@ -97,13 +97,6 @@ def grant_xp(
         db.xp_ledger.delete_one({"user_id": uid, "source": event_type, "source_id": unique_key})       
         return False
 
-    inc = {"xp": amount}
-    if inc_weekly:
-        inc["weekly_xp"] = amount
-    if inc_monthly:
-        inc["monthly_xp"] = amount
-
-    db.users.update_one({"user_id": uid}, {"$inc": inc})
     return True
 
 
