@@ -264,17 +264,29 @@ def recompute_xp_totals(start_utc, end_utc, limit: int | None = None, user_id: i
 def settle_pending_referrals_with_cache_clear():
     settle_pending_referrals()
 
+def _clear_leaderboard_cache(source: str) -> None:
+    LEADERBOARD_CACHE.clear()
+    logger.info("[LEADERBOARD][CACHE_CLEAR] source=%s", source)
 
 def settle_xp_snapshots_with_cache_clear():
     settle_xp_snapshots()
-    LEADERBOARD_CACHE.clear()
-    logger.info("[LEADERBOARD][CACHE_CLEAR] source=snapshot_publish")
+    _clear_leaderboard_cache("snapshot_publish")
+
+
+def settle_xp_snapshots_scheduled():
+    logger.info("[SNAPSHOT][XP] start reason=scheduled_5min")
+    settle_with_cache_clear = globals().get("settle_xp_snapshots_with_cache_clear")
+    if callable(settle_with_cache_clear):
+        settle_with_cache_clear()
+    else:
+        settle_xp_snapshots()
+        _clear_leaderboard_cache("snapshot_publish")
+    logger.info("[SNAPSHOT][XP] done")
 
 
 def settle_referral_snapshots_with_cache_clear():
     settle_referral_snapshots()
-    LEADERBOARD_CACHE.clear()
-    logger.info("[LEADERBOARD][CACHE_CLEAR] source=snapshot_publish")
+    _clear_leaderboard_cache("snapshot_publish")
 
 # ----------------------------
 # MongoDB Setup
@@ -2630,7 +2642,7 @@ def run_worker():
         replace_existing=True,
     ) 
     scheduler.add_job(
-        settle_xp_snapshots_with_cache_clear,
+        settle_xp_snapshots_scheduled,
         trigger=CronTrigger(minute="*/5", timezone=KL_TZ),
         id="settle_xp_snapshots",
         name="Settle XP Snapshots",
