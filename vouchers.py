@@ -253,6 +253,21 @@ def now_utc():
 def now_kl():
     return datetime.now(KL_TZ)
 
+
+def _safe_log(level: str, message: str, *args) -> None:
+    try:
+        logger = current_app.logger
+    except Exception:
+        logger = None
+    if logger:
+        getattr(logger, level)(message, *args)
+    else:
+        try:
+            formatted = message % args if args else message
+        except Exception:
+            formatted = message
+        print(formatted)
+
 def ensure_voucher_indexes():
     db.drops.create_index([("startsAt", ASCENDING)])
     db.drops.create_index([("endsAt", ASCENDING)])
@@ -298,46 +313,28 @@ def ensure_voucher_indexes():
     welcome_eligibility_col.create_index([("uid", ASCENDING)], unique=True)
     subscription_cache_col.create_index([("expireAt", ASCENDING)], expireAfterSeconds=0)
     try:
+        for legacy_name in ("uniq_user_checks", "uniq_tg_verify_user_id"):
+            try:
+                tg_verification_queue_col.drop_index(legacy_name)
+            except OperationFailure:
+                pass     
         tg_verification_queue_col.create_index(
-            [("user_id", ASCENDING), ("checks_key", ASCENDING)],
+            [("user_id", ASCENDING)],
             unique=True,
-            name="uniq_user_checks",
+            name="uq_tg_verif_user_id_nonnull",
+            partialFilterExpression={"user_id": {"$exists": True, "$ne": None}},
+        )
+        tg_verification_queue_col.create_index(
+            [("status", ASCENDING), ("created_at", ASCENDING)],
+            name="ix_verif_status_created",
         )
     except OperationFailure:
         try:
             current_app.logger.exception(
-                "[WELCOME_CLAIM][VERIFY_ENQUEUE] failed to ensure uniq_user_checks index"
+                "[VERIFY_QUEUE] failed to ensure verification queue indexes"
             )
         except Exception:
-            print("[WELCOME_CLAIM][VERIFY_ENQUEUE] failed to ensure uniq_user_checks index")
-
-    try:
-        existing = None
-        for ix in tg_verification_queue_col.list_indexes():
-            if ix.get("key") == {"user_id": 1}:
-                existing = ix
-                if ix.get("unique") and ix.get("sparse"):
-                    break
-                try:
-                    tg_verification_queue_col.drop_index(ix["name"])
-                    existing = None
-                except Exception:
-                    pass
-                break
-        if not existing or not (existing.get("unique") and existing.get("sparse")):
-            tg_verification_queue_col.create_index(
-                [("user_id", ASCENDING)],
-                unique=True,
-                name="uniq_tg_verify_user_id",
-                sparse=True,
-            )
-    except Exception:
-        try:
-            current_app.logger.exception(
-                "[VERIFY_QUEUE] failed to ensure uniq_tg_verify_user_id index"
-            )
-        except Exception:
-            print("[VERIFY_QUEUE] failed to ensure uniq_tg_verify_user_id index")
+            print("[VERIFY_QUEUE] failed to ensure verification queue indexes")
 
     if os.getenv("VERIFY_QUEUE_CLEANUP") == "1":
         try:
@@ -687,7 +684,8 @@ def _has_profile_photo(uid: int, *, force_refresh: bool = False):
             exp_aware = _as_aware_kl(exp) or _as_aware_utc(exp)
             if exp_aware and exp_aware > now:
                 has_photo = bool(cached.get("hasPhoto"))
-                current_app.logger.info(
+                _safe_log(
+                    "info",
                     "[WELCOME][PROFILE_PIC_CHECK] uid=%s has_photo=%s source=cache",
                     uid,
                     str(has_photo).lower(),
@@ -695,12 +693,13 @@ def _has_profile_photo(uid: int, *, force_refresh: bool = False):
                 return has_photo
              
         except Exception as e:
-            current_app.logger.warning("[tg] profile photo cache read/compare failed uid=%s err=%s", uid, e)
+            _safe_log("warning", "[tg] profile photo cache read/compare failed uid=%s err=%s", uid, e)
 
     token = os.environ.get("BOT_TOKEN", "")
     if not token:
-        current_app.logger.warning("[tg] missing BOT_TOKEN for profile photo check")
-        current_app.logger.info(
+        _safe_log("warning", "[tg] missing BOT_TOKEN for profile photo check")
+        _safe_log(
+            "info",
             "[WELCOME][PROFILE_PIC_CHECK] uid=%s has_photo=false source=telegram",
             uid,
         )
@@ -713,16 +712,18 @@ def _has_profile_photo(uid: int, *, force_refresh: bool = False):
             timeout=5,
         )
     except requests.RequestException as e:
-        current_app.logger.warning("[tg] getUserProfilePhotos network error uid=%s err=%s", uid, e)
-        current_app.logger.info(
+        _safe_log("warning", "[tg] getUserProfilePhotos network error uid=%s err=%s", uid, e)
+        _safe_log(
+            "info",
             "[WELCOME][PROFILE_PIC_CHECK] uid=%s has_photo=false source=telegram",
             uid,
         )
         return False
 
     if resp.status_code != 200:
-        current_app.logger.warning("[tg] getUserProfilePhotos http status=%s uid=%s", resp.status_code, uid)
-        current_app.logger.info(
+        _safe_log("warning", "[tg] getUserProfilePhotos http status=%s uid=%s", resp.status_code, uid)
+        _safe_log(
+            "info",
             "[WELCOME][PROFILE_PIC_CHECK] uid=%s has_photo=false source=telegram",
             uid,
         )
@@ -731,16 +732,18 @@ def _has_profile_photo(uid: int, *, force_refresh: bool = False):
     try:
         data = resp.json()
     except ValueError:
-        current_app.logger.warning("[tg] getUserProfilePhotos bad json uid=%s", uid)
-        current_app.logger.info(
+        _safe_log("warning", "[tg] getUserProfilePhotos bad json uid=%s", uid)
+        _safe_log(
+            "info",
             "[WELCOME][PROFILE_PIC_CHECK] uid=%s has_photo=false source=telegram",
             uid,
         )
         return False
 
     if not data.get("ok"):
-        current_app.logger.warning("[tg] getUserProfilePhotos not ok uid=%s err=%s", uid, data)
-        current_app.logger.info(
+        _safe_log("warning", "[tg] getUserProfilePhotos not ok uid=%s err=%s", uid, data)
+        _safe_log(
+            "info",
             "[WELCOME][PROFILE_PIC_CHECK] uid=%s has_photo=false source=telegram",
             uid,
         )
@@ -760,11 +763,12 @@ def _has_profile_photo(uid: int, *, force_refresh: bool = False):
         },
         upsert=True,
     )
-    current_app.logger.info(
+    _safe_log(
+        "info",
         "[WELCOME][PROFILE_PIC_CHECK] uid=%s has_photo=%s source=telegram",
         uid,
         str(has_photo).lower(),
-    ) 
+    )
     return has_photo
 
 def _profile_photo_cache_status(uid: int) -> tuple[bool | None, bool]:
@@ -782,7 +786,13 @@ def _profile_photo_cache_status(uid: int) -> tuple[bool | None, bool]:
         return None, True
     return bool(cached.get("hasPhoto")), False
 
-def enqueue_verification(uid: int, checks: list[str]) -> None:
+def enqueue_verification(uid: int, vtype: str) -> dict:
+    if uid is None:
+        try:
+            current_app.logger.warning("[VERIFY_QUEUE] skip_enqueue missing_uid")
+        except Exception:
+            print("[VERIFY_QUEUE] skip_enqueue missing_uid")
+        return {"ok": False, "reason": "no_uid"}
     try:
         uid = int(uid)
     except (TypeError, ValueError):
@@ -790,41 +800,195 @@ def enqueue_verification(uid: int, checks: list[str]) -> None:
             current_app.logger.warning("[VERIFY_QUEUE] skip_enqueue invalid_uid=%s", uid)
         except Exception:
             print(f"[VERIFY_QUEUE] skip_enqueue invalid_uid={uid}")
-        return
-    checks = checks or []
-    checks_key = "|".join(sorted([str(x).strip() for x in checks if x]))
-    if checks_key == "":
-        return     
-    now = now_kl()
+        return {"ok": False, "reason": "invalid_uid"}
+    if not vtype:
+        return {"ok": False, "reason": "missing_type"}
+    vtype = str(vtype).strip()
+
+    existing = tg_verification_queue_col.find_one({"user_id": uid})
+    if existing:
+        status = (existing.get("status") or "").strip().lower()
+        if status in ("pending", "in_progress", "queued"):
+            try:
+                current_app.logger.info(
+                    "[WELCOME_CLAIM][VERIFY_ENQUEUE] dup_pending uid=%s status=%s",
+                    uid,
+                    status,
+                )
+            except Exception:
+                print(f"[WELCOME_CLAIM][VERIFY_ENQUEUE] dup_pending uid={uid} status={status}")
+            return {"ok": True, "queued": True, "status": status, "dup": True, "reason": "already_pending"}
+        if status in ("approved", "denied"):
+            return {"ok": False, "reason": f"already_{status}"}
+
+    now = now_utc()
     try:
-        tg_verification_queue_col.update_one(
+        tg_verification_queue_col.insert_one(
             {"user_id": uid},
             {
-               "$set": {
-                   "user_id": uid,
-                   "uid": uid,
-                   "checks": checks,
-                   "checks_key": checks_key,
-                   "status": "queued",
-                   "updated_at": now,
-               },
-                "$setOnInsert": {
-                    "created_at": now,
-                    "requested_at": now,
-                },
-            },
-            upsert=True,
+                "user_id": uid,
+                "uid": uid,
+                "type": vtype,
+                "status": "pending",
+                "created_at": now,
+                "updated_at": now,
+                "attempts": 0,
+                "last_error": None,
+            }
         )
         current_app.logger.info(
-            "[VERIFY_QUEUE] enqueued uid=%s checks_key=%s", uid, checks_key
+            "[WELCOME_CLAIM][VERIFY_ENQUEUE] uid=%s type=%s status=pending", uid, vtype
         )
+        return {"ok": True, "queued": True, "status": "pending", "dup": False}     
     except DuplicateKeyError:
+        try:
+            current_app.logger.info(
+                "[WELCOME_CLAIM][VERIFY_ENQUEUE] dup_pending uid=%s status=pending", uid
+            )
+        except Exception:
+            print(f"[WELCOME_CLAIM][VERIFY_ENQUEUE] dup_pending uid={uid} status=pending")
+        return {"ok": True, "queued": True, "status": "pending", "dup": True, "reason": "already_pending"}
+    except Exception as exc:
+        try:
+            current_app.logger.exception(
+                "[VERIFY_QUEUE] failed uid=%s type=%s", uid, vtype
+            )
+        except Exception:
+            print(f"[VERIFY_QUEUE] failed uid={uid} type={vtype} err={exc}")
+        return {"ok": False, "reason": "enqueue_failed"}
+
+
+def process_verification_queue(batch_limit: int = 50) -> None:
+    scanned = claimed = approved = denied = errors = 0
+    try:
+        pending = list(
+            tg_verification_queue_col.find({"status": {"$in": ["pending", "queued"]}})
+            .sort([("created_at", ASCENDING)])
+            .limit(batch_limit)
+        )
+    except Exception as exc:
+        try:
+            current_app.logger.exception("[WELCOME_VERIFY] scan_failed err=%s", exc)
+        except Exception:
+            print(f"[WELCOME_VERIFY] scan_failed err={exc}")
+        return
+
+    for item in pending:
+        scanned += 1
+        now = now_utc()
+        claimed_doc = tg_verification_queue_col.find_one_and_update(
+            {"_id": item["_id"], "status": {"$in": ["pending", "queued"]}},
+            {
+                "$set": {
+                    "status": "in_progress",
+                    "started_at": now,
+                    "updated_at": now,
+                },
+                "$inc": {"attempts": 1},
+            },
+            return_document=ReturnDocument.AFTER,
+        )
+        if not claimed_doc:
+            continue
+        claimed += 1
+        uid = claimed_doc.get("user_id")
+        if uid is None:
+            now = now_utc()
+            tg_verification_queue_col.update_one(
+                {"_id": claimed_doc["_id"]},
+                {
+                    "$set": {
+                        "status": "denied",
+                        "denied_at": now,
+                        "updated_at": now,
+                        "reason": "missing_uid",
+                    }
+                },
+            )
+            denied += 1
+            try:
+                current_app.logger.info("[WELCOME_VERIFY][DENY] uid=None reason=missing_uid")
+            except Exception:
+                print("[WELCOME_VERIFY][DENY] uid=None reason=missing_uid")
+            continue
+
+        vtype = (claimed_doc.get("type") or "").strip().lower()
+        try:
+            if vtype == "pic":
+                has_photo = _has_profile_photo(uid, force_refresh=True)
+                if not has_photo:
+                    now = now_utc()
+                    tg_verification_queue_col.update_one(
+                        {"_id": claimed_doc["_id"]},
+                        {
+                            "$set": {
+                                "status": "denied",
+                                "denied_at": now,
+                                "updated_at": now,
+                                "reason": "missing_profile_pic",
+                            }
+                        },
+                    )
+                    denied += 1
+                    try:
+                        current_app.logger.info(
+                            "[WELCOME_VERIFY][DENY] uid=%s reason=missing_profile_pic", uid
+                        )
+                    except Exception:
+                        print(f"[WELCOME_VERIFY][DENY] uid={uid} reason=missing_profile_pic")
+                    continue
+
+            now = now_utc()
+            tg_verification_queue_col.update_one(
+                {"_id": claimed_doc["_id"]},
+                {
+                    "$set": {
+                        "status": "approved",
+                        "approved_at": now,
+                        "updated_at": now,
+                        "reason": "ok",
+                    }
+                },
+            )
+            approved += 1
+            try:
+                current_app.logger.info(
+                    "[WELCOME_VERIFY][APPROVE] uid=%s type=%s", uid, vtype or "unknown"
+                )
+            except Exception:
+                print(f"[WELCOME_VERIFY][APPROVE] uid={uid} type={vtype or 'unknown'}")
+        except Exception as exc:
+            now = now_utc()
+            errors += 1
+            tg_verification_queue_col.update_one(
+                {"_id": claimed_doc["_id"]},
+                {
+                    "$set": {
+                        "status": "pending",
+                        "updated_at": now,
+                        "last_error": str(exc),
+                    }
+                },
+            )
+            try:
+                current_app.logger.exception(
+                    "[WELCOME_VERIFY][ERROR] uid=%s err=%s", uid, exc
+                )
+            except Exception:
+                print(f"[WELCOME_VERIFY][ERROR] uid={uid} err={exc}")
+
+    try:     
         current_app.logger.info(
-            "[VERIFY_QUEUE] duplicate uid=%s checks_key=%s", uid, checks_key
-        )     
+            "[WELCOME_VERIFY] scanned=%s claimed=%s approved=%s denied=%s errors=%s",
+            scanned,
+            claimed,
+            approved,
+            denied,
+            errors,
+        )  
     except Exception:
-        current_app.logger.exception(
-            "[VERIFY_QUEUE] failed uid=%s checks_key=%s", uid, checks_key
+        print(
+            f"[WELCOME_VERIFY] scanned={scanned} claimed={claimed} approved={approved} denied={denied} errors={errors}"
         )
      
 ALLOWED_CHANNEL_STATUSES = {"member", "administrator", "creator"}
@@ -2064,17 +2228,12 @@ def api_claim():
             }), 403
         cache_has_photo, cache_stale = _profile_photo_cache_status(uid)
         if cache_stale:
-            enqueue_verification(uid, ["pic"])
+            enqueue_verification(uid, "pic")
             current_app.logger.info("[WELCOME_CLAIM][VERIFY_ENQUEUE] uid=%s type=pic", uid)
             return jsonify({
-                "status": "error",
-                "ok": False,
-                "code": "not_eligible",
-                "eligible": False,
-                "reason": "verify_pending",
-                "checks_key": "pic",
-                "error_code": "NO_PROFILE_PIC",
-                "message": "Please set a Telegram profile picture to claim the Welcome Bonus."
+                "ok": True,
+                "status": "verification_in_progress",
+                "reason": "verify_pic",
             }), 202
         if not cache_has_photo:
             current_app.logger.info(
