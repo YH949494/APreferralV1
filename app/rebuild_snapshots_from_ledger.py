@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 import pytz
 from pymongo import MongoClient, UpdateOne
 
-KL_TZ = pytz.timezone("Asia/Kuala_Lumpur")
+KL_TZ = pytz.timezone("Asia/Kuala_Lumpur") 
 DEFAULT_DRY_RUN = "1"
 
 logger = logging.getLogger("rebuild_snapshots")
