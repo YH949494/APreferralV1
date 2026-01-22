@@ -960,12 +960,12 @@ def process_verification_queue(batch_limit: int = 50) -> None:
         dequeued += 1
         uid = claimed_doc.get("user_id")
         vtype = (claimed_doc.get("type") or "").strip().lower()
-        try:
-            current_app.logger.info(
-                "[VERIFY_QUEUE] dequeue_ok user_id=%s type=%s",
-                uid,
-                vtype or "unknown",
-            )
+        _safe_log(
+            "info",
+            "[VERIFY_QUEUE] dequeue_ok user_id=%s type=%s",
+            uid,
+            vtype or "unknown",
+        )
 
         if uid is None:
             now = now_utc()
@@ -1065,7 +1065,6 @@ def process_verification_queue(batch_limit: int = 50) -> None:
                 except Exception:
                     print(f"[VERIFY_QUEUE] process_fail user_id={uid} err={exc}")
                 raise
-            failed += 1     
             failed += 1
             _safe_log(
                 "exception",
