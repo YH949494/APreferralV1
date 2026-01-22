@@ -1026,6 +1026,7 @@ def process_verification_queue(batch_limit: int = 50) -> None:
                 )
             except Exception:
                 print(f"[VERIFY_QUEUE] process_ok user_id={uid} result={result}")
+             
         except Exception as exc:
             now = now_utc()
             errors += 1
