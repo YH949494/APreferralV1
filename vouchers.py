@@ -920,7 +920,6 @@ def enqueue_verification(*, user_id: int, verify_type: str, payload: dict | None
         )
     return False, "db_error"
 
-
 def _verification_backoff_seconds(attempts: int) -> int:
     if attempts <= 0:
         return VERIFY_QUEUE_BACKOFF_BASE_SECONDS
@@ -967,9 +966,7 @@ def process_verification_queue(batch_limit: int = 50) -> None:
                 uid,
                 vtype or "unknown",
             )
-        except Exception:
-            print(f"[VERIFY_QUEUE] dequeue_ok user_id={uid} type={vtype or 'unknown'}")
-     
+
         if uid is None:
             now = now_utc()
             last_error = "missing_user_id"         
@@ -1000,10 +997,15 @@ def process_verification_queue(batch_limit: int = 50) -> None:
                     "[VERIFY_QUEUE] process_fail user_id=None err=%s",
                     last_error,
                 )
-            except Exception:
-                print(f"[VERIFY_QUEUE] process_fail user_id=None err={last_error}")
-            continue
+            continue     
+        try:
+            result = "ok"
+            if vtype == "pic":
+                has_photo = _has_profile_photo(uid, force_refresh=True)
+                if not has_photo:
+                    result = "missing_profile_photo"
 
+            now = now_utc()
             update_doc = {
                 "status": "done",
                 "updated_at": now,
@@ -1018,15 +1020,12 @@ def process_verification_queue(batch_limit: int = 50) -> None:
                 {"$set": update_doc, "$unset": {"next_attempt_at": ""}},
             )
             processed += 1
-            try:
-                current_app.logger.info(
-                    "[VERIFY_QUEUE] process_ok user_id=%s result=%s",
-                    uid,
-                    result,
-                )
-            except Exception:
-                print(f"[VERIFY_QUEUE] process_ok user_id={uid} result={result}")
-             
+            _safe_log(
+                "info",
+                "[VERIFY_QUEUE] process_ok user_id=%s result=%s",
+                uid,
+                result,
+            )
         except Exception as exc:
             now = now_utc()
             errors += 1
