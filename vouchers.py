@@ -992,7 +992,6 @@ def process_verification_queue(batch_limit: int = 50) -> None:
                         last_error,
                     )
                 except Exception:
-                    print(
                     print(f"[VERIFY_QUEUE] process_fail user_id=None err={last_error}")
                 raise
             failed += 1
