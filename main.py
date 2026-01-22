@@ -1023,25 +1023,21 @@ def ensure_indexes():
 
 
     try:
-        existing = None
-        for ix in tg_verification_queue_collection.list_indexes():
-            if ix.get("key") == {"user_id": 1}:
-                existing = ix
-                if ix.get("unique") and ix.get("sparse"):
-                    break
-                try:
-                    tg_verification_queue_collection.drop_index(ix["name"])
-                    existing = None
-                except Exception:
-                    pass
-                break
-        if not existing or not (existing.get("unique") and existing.get("sparse")):
-            tg_verification_queue_collection.create_index(
-                [("user_id", 1)],
-                unique=True,
-                name="uniq_tg_verify_user_id",
-                sparse=True,
-            )
+        for legacy_name in ("uniq_tg_verify_user_id", "uniq_user_checks"):
+            try:
+                tg_verification_queue_collection.drop_index(legacy_name)
+            except Exception:
+                pass
+        tg_verification_queue_collection.create_index(
+            [("user_id", 1)],
+            unique=True,
+            name="uq_tg_verif_user_id_nonnull",
+            partialFilterExpression={"user_id": {"$exists": True, "$ne": None}},
+        )
+        tg_verification_queue_collection.create_index(
+            [("status", 1), ("created_at", 1)],
+            name="ix_verif_status_created",
+        )
     except Exception as e:
         print("⚠️ ensure_indexes error:", e)
         
