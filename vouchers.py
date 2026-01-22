@@ -992,11 +992,11 @@ def process_verification_queue(batch_limit: int = 50) -> None:
                     print(f"[VERIFY_QUEUE] process_fail user_id=None err={last_error}")
                 raise
             failed += 1
-            try:
-                current_app.logger.info(
-                    "[VERIFY_QUEUE] process_fail user_id=None err=%s",
-                    last_error,
-                )
+            _safe_log(
+                "info",
+                "[VERIFY_QUEUE] process_fail user_id=None err=%s",
+                last_error,
+            )
             continue     
         try:
             result = "ok"
