@@ -984,7 +984,6 @@ def process_verification_queue(batch_limit: int = 50) -> None:
                         },
                         "$unset": {"next_attempt_at": ""},
                         }
-                    },
                 )
             except Exception:
                 try:
