@@ -1,5 +1,4 @@
-<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Referral & Check-in</title><script src="https://telegram.org/js/telegram-web-app.js"></script><style>body{background-color:#f4f4f4;font-family:'Arial',sans-serif;padding:20px;color:#333;font-size:16px}h2,h3{text-align:left;font-weight:600}.section{background:#fff;padding:20px;margin:15px 0;border-radius:10px;box-shadow:0 2px 6px rgba(0,0,0,.1)}button{background-color:#0088cc;color:#fff;padding:10px 20px;font-size:15px;border:none;border-radius:6px;cursor:pointer;font-family:inherit;margin:5px 0}button:hover{background-color:#006699}button.copy-code-btn{padding:6px 12px;font-size:13px}button.copy-code-btn:hover{background-color:#005fa3}#referral-link,#checkin-result,#checkin-timer{margin-top:10px;font-size:15px}#leaderboard-output{margin-top:10px;font-family:'Courier New',monospace;white-space:pre-wrap;background:#f9f9f9;padding:15px;border-radius:8px;border:1px solid #ddd;font-size:13px;line-height:1.4;overflow-x:auto}#admin-panel{display:none;background:#fff4e6;border:1px solid #ffcc80}#admin-panel h3{color:#d17c00}#campaign-voucher-list{display:none;margin-top:14px;gap:12px;grid-template-columns:repeat(auto-fit,minmax(220px,1fr))}#campaign-voucher-list .campaign-card{border:1px solid #d9e6ff;background:#f4f7ff;border-radius:10px;padding:12px;text-align:left;display:flex;flex-direction:column;gap:10px}#campaign-voucher-list .campaign-card h4{margin:0 0 6px 0;font-size:15px;color:#005fa3}#campaign-voucher-list .campaign-card p{margin:4px 0;color:#333;font-size:14px}#campaign-voucher-list .campaign-card .campaign-meta{font-size:12px;color:#666;margin-top:6px}#campaign-voucher-list .campaign-card button{margin-top:auto}.modal{display:none;position:fixed;z-index:1000;left:0;top:0;width:100%;height:100%;background:rgba(0,0,0,.5);justify-content:center;align-items:center}.modal-content{background:#fff;padding:20px;border-radius:10px;text-align:center;width:300px}input[type=text],input[type=number]{width:90%;padding:10px;margin:8px 0;border-radius:6px;border:1px solid #ccc;font-size:14px}.code-block{margin-top:8px;padding:10px;border:1px solid #d9e6ff;background:#f4f7ff;border-radius:8px;display:flex;flex-direction:column;align-items:stretch;gap:8px;text-align:left}.code-block .code-text{font-family:'Courier New',monospace;font-size:14px;word-break:break-all;flex:1}.code-block .copy-code-btn{align-self:flex-start}</style></head><body>  <h2>🎯 Referral & Daily Check-in</h2>
-  <!-- COMMUNITY BUTTONS -->
+<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Referral & Check-in</title><script src="https://telegram.org/js/telegram-web-app.js"></script><style>body{background-color:#f4f4f4;font-family:'Arial',sans-serif;padding:20px;color:#333;font-size:16px}h2,h3{text-align:left;font-weight:600}.section{background:#fff;padding:20px;margin:15px 0;border-radius:10px;box-shadow:0 2px 6px rgba(0,0,0,.1)}button{background-color:#0088cc;color:#fff;padding:10px 20px;font-size:15px;border:none;border-radius:6px;cursor:pointer;font-family:inherit;margin:5px 0}button:hover{background-color:#006699}button.copy-code-btn{padding:6px 12px;font-size:13px}button.copy-code-btn:hover{background-color:#005fa3}#referral-link,#checkin-result,#checkin-timer{margin-top:10px;font-size:15px}#leaderboard-output{margin-top:10px;font-family:'Courier New',monospace;white-space:pre-wrap;background:#f9f9f9;padding:15px;border-radius:8px;border:1px solid #ddd;font-size:13px;line-height:1.4;overflow-x:auto}#admin-panel{display:none;background:#fff4e6;border:1px solid #ffcc80}#admin-panel h3{color:#d17c00}#campaign-voucher-list{display:none;margin-top:14px;gap:12px;grid-template-columns:repeat(auto-fit,minmax(220px,1fr))}#campaign-voucher-list .campaign-card{border:1px solid #d9e6ff;background:#f4f7ff;border-radius:10px;padding:12px;text-align:left;display:flex;flex-direction:column;gap:10px}#campaign-voucher-list .campaign-card h4{margin:0 0 6px 0;font-size:15px;color:#005fa3}#campaign-voucher-list .campaign-card p{margin:4px 0;color:#333;font-size:14px}#campaign-voucher-list .campaign-card .campaign-meta{font-size:12px;color:#666;margin-top:6px}#campaign-voucher-list .campaign-card button{margin-top:auto}.modal{display:none;position:fixed;z-index:1000;left:0;top:0;width:100%;height:100%;background:rgba(0,0,0,.5);justify-content:center;align-items:center}.modal-content{background:#fff;padding:20px;border-radius:10px;text-align:center;width:300px}input[type=text],input[type=number]{width:90%;padding:10px;margin:8px 0;border-radius:6px;border:1px solid #ccc;font-size:14px}.code-block{margin-top:8px;padding:10px;border:1px solid #d9e6ff;background:#f4f7ff;border-radius:8px;display:flex;flex-direction:column;align-items:stretch;gap:8px;text-align:left}.code-block .code-text{font-family:'Courier New',monospace;font-size:14px;word-break:break-all;flex:1}.code-block .copy-code-btn{align-self:flex-start}#infoHubBtn{pointer-events:auto;cursor:pointer;position:relative;z-index:2}#infoHubModal{z-index:9999}</style></head><body>  <h2>🎯 Referral & Daily Check-in</h2>  <!-- COMMUNITY BUTTONS -->
 <div style="display:flex; justify-content:space-between; align-items:center; margin-top:20px; gap:10px;">
 
   <!-- Left: Official Channel -->
@@ -2091,7 +2090,51 @@ async function exportCSV() {
   }
 }
 
-window.onload = async () => {
+function initInfoHub() {
+  const infoHubBtn = document.getElementById("infoHubBtn");
+  const infoHubModal = document.getElementById("infoHubModal");
+  const closeInfoHub = document.getElementById("closeInfoHub");
+
+  if (!infoHubBtn || !infoHubModal || !closeInfoHub) {
+    return;
+  }
+
+  console.log("[infohub] init ok");
+
+  const closeModal = () => {
+    infoHubModal.style.display = "none";
+    console.log("[infohub] close");
+  };
+
+  infoHubBtn.addEventListener("click", () => {
+    infoHubModal.style.display = "block";
+    console.log("[infohub] open");
+  });
+
+  closeInfoHub.addEventListener("click", closeModal);
+
+  infoHubModal.addEventListener("click", (e) => {
+    if (e.target === infoHubModal) {
+      closeModal();
+    }
+  });
+
+  // Tab switching (safe if tabs exist)
+  document.querySelectorAll(".tab-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      document.querySelectorAll(".tab-btn").forEach((b) => b.classList.remove("active"));
+      document.querySelectorAll(".tab-panel").forEach((p) => (p.style.display = "none"));
+      btn.classList.add("active");
+      const pane = document.getElementById(btn.dataset.tab);
+      if (pane) pane.style.display = "block";
+    });
+  });
+}
+
+window.addEventListener("load", async () => {
+  initLeaderboardCache();
+  initInfoHub();
+  
   if (tg) { tg.ready(); tg.expand(); }
 
   const init = await waitForInitData();
@@ -2121,33 +2164,6 @@ window.onload = async () => {
     document.getElementById("admin-panel").style.display = "block";
     adm_list();
   }
-};
-    
-// --- Info Hub Modal & Tabs ---
-document.addEventListener('DOMContentLoaded', () => {
-  initLeaderboardCache();  
-  const infoHubBtn   = document.getElementById("infoHubBtn");
-  const infoHubModal = document.getElementById("infoHubModal");
-  const closeInfoHub = document.getElementById("closeInfoHub");
-
-  if (infoHubBtn && infoHubModal && closeInfoHub) {
-    infoHubBtn.addEventListener("click", () => (infoHubModal.style.display = "block"));
-    closeInfoHub.addEventListener("click", () => (infoHubModal.style.display = "none"));
-    window.addEventListener("click", (e) => {
-      if (e.target === infoHubModal) infoHubModal.style.display = "none";
-    });
-  }
-
-  // Tab switching (safe if tabs exist)
-  document.querySelectorAll(".tab-btn").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      document.querySelectorAll(".tab-btn").forEach((b) => b.classList.remove("active"));
-      document.querySelectorAll(".tab-panel").forEach((p) => (p.style.display = "none"));
-      btn.classList.add("active");
-      const pane = document.getElementById(btn.dataset.tab);
-      if (pane) pane.style.display = "block";
-    });
-  });
 });
 
   </script>
