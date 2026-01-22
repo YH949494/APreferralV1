@@ -25,6 +25,10 @@ HARDCODED_ADMIN_USERNAMES = {"gracy_ap", "teohyaohui"}  # allow manual overrides
 WELCOME_WINDOW_HOURS = int(getattr(_cfg, "WELCOME_WINDOW_HOURS", os.getenv("WELCOME_WINDOW_HOURS", "48")))
 WELCOME_WINDOW_DAYS = 7
 PROFILE_PHOTO_CACHE_TTL_SECONDS = 60
+VERIFY_QUEUE_MAX_ATTEMPTS = int(os.getenv("VERIFY_QUEUE_MAX_ATTEMPTS", "3"))
+VERIFY_QUEUE_BACKOFF_BASE_SECONDS = int(os.getenv("VERIFY_QUEUE_BACKOFF_BASE_SECONDS", "30"))
+VERIFY_QUEUE_BACKOFF_MAX_SECONDS = int(os.getenv("VERIFY_QUEUE_BACKOFF_MAX_SECONDS", "300"))
+_BYPASS_WARNING_LOGGED = False
 
 _RAW_OFFICIAL_CHANNEL_ID = getattr(_cfg, "OFFICIAL_CHANNEL_ID", os.getenv("OFFICIAL_CHANNEL_ID"))
 try:
@@ -268,7 +272,56 @@ def _safe_log(level: str, message: str, *args) -> None:
             formatted = message
         print(formatted)
 
+def _warn_bypass_disabled_once():
+    global _BYPASS_WARNING_LOGGED
+    if _BYPASS_WARNING_LOGGED:
+        return
+    msg = "[VERIFY_QUEUE] bypass_document_validation disabled; using schema-compliant writes"
+    try:
+        current_app.logger.warning(msg)
+    except Exception:
+        print(msg)
+    _BYPASS_WARNING_LOGGED = True
+
+
+def _maybe_migrate_verification_queue_uid():
+    if os.getenv("VERIFY_QUEUE_MIGRATE") != "1":
+        return
+    matched = modified = skipped = 0
+    try:
+        cursor = tg_verification_queue_col.find(
+            {"user_id": {"$exists": False}, "uid": {"$exists": True}},
+            {"uid": 1},
+        )
+        for doc in cursor:
+            matched += 1
+            raw_uid = doc.get("uid")
+            try:
+                user_id = int(raw_uid)
+            except (TypeError, ValueError):
+                skipped += 1
+                continue
+            res = tg_verification_queue_col.update_one(
+                {"_id": doc["_id"], "user_id": {"$exists": False}},
+                {"$set": {"user_id": user_id}},
+            )
+            modified += res.modified_count
+        msg = (
+            "[VERIFY_QUEUE] migrate_uid_to_user_id "
+            f"matched={matched} modified={modified} skipped={skipped}"
+        )
+        try:
+            current_app.logger.info(msg)
+        except Exception:
+            print(msg)
+    except Exception:
+        try:
+            current_app.logger.exception("[VERIFY_QUEUE] migrate_uid_to_user_id_failed")
+        except Exception:
+            print("[VERIFY_QUEUE] migrate_uid_to_user_id_failed")
+         
 def ensure_voucher_indexes():
+    _warn_bypass_disabled_once() 
     db.drops.create_index([("startsAt", ASCENDING)])
     db.drops.create_index([("endsAt", ASCENDING)])
     db.drops.create_index([("priority", DESCENDING)])
@@ -335,6 +388,8 @@ def ensure_voucher_indexes():
             )
         except Exception:
             print("[VERIFY_QUEUE] failed to ensure verification queue indexes")
+
+     _maybe_migrate_verification_queue_uid()
 
     if os.getenv("VERIFY_QUEUE_CLEANUP") == "1":
         try:
@@ -786,240 +841,254 @@ def _profile_photo_cache_status(uid: int) -> tuple[bool | None, bool]:
         return None, True
     return bool(cached.get("hasPhoto")), False
  
-def enqueue_verification(doc: dict) -> bool:
+def enqueue_verification(*, user_id: int, verify_type: str, payload: dict | None = None) -> tuple[bool, str | None]:
     """
     Enqueue verification task safely.
-    Returns True if inserted successfully, False otherwise.
+    Returns (ok, error_reason).
     """
-    assert "user_id" in doc and "type" in doc and "created_at" in doc
-    user_id = doc.get("user_id")
-    verify_type = doc.get("type")
+    if user_id is None or not verify_type:
+        current_app.logger.warning(
+            "[VERIFY_QUEUE] enqueue skipped: missing user_id/type user_id=%s type=%s",
+            user_id,
+            verify_type,
+        )
+        return False, "missing_fields"
     try:
-        tg_verification_queue_col.insert_one(doc)
-        current_app.logger.info(
-            "[VERIFY_QUEUE] enqueued uid=%s type=%s",
+        user_id = int(user_id)
+    except (TypeError, ValueError):
+        current_app.logger.warning(
+            "[VERIFY_QUEUE] enqueue skipped: invalid user_id=%s type=%s",
             user_id,
             verify_type,
         )
-        return True
-    except DuplicateKeyError:
+        return False, "invalid_user_id"
+
+    now = now_utc()
+    verify_type = str(verify_type).strip().lower()
+    update_doc = {
+        "user_id": user_id,
+        "type": verify_type,
+        "status": "queued",
+        "created_at": now,
+        "updated_at": now,
+        "attempts": 0,
+        "last_error": None,
+    }
+    if payload is not None:
+        update_doc["payload"] = payload
+    try:
+        existing = tg_verification_queue_col.find_one(
+            {"user_id": user_id, "type": verify_type, "status": {"$in": ["queued", "processing"]}},
+            {"_id": 1},
+        )
+        if existing:
+            current_app.logger.info(
+                "[VERIFY_QUEUE] skip duplicate enqueue user_id=%s type=%s",
+                user_id,
+                verify_type,
+            )
+            return True, "already_queued"
+
+        tg_verification_queue_col.update_one(
+            {"user_id": user_id, "type": verify_type},
+            {"$set": update_doc},
+            upsert=True,
+        )
         current_app.logger.info(
-            "[VERIFY_QUEUE] skip duplicate enqueue uid=%s type=%s",
+            "[VERIFY_QUEUE] enqueued user_id=%s type=%s",
             user_id,
             verify_type,
         )
-        return False     
+        return True, None
     except OperationFailure as e:
         current_app.logger.exception(
-            "[VERIFY_QUEUE] insert failed (OperationFailure) uid=%s type=%s err=%s",
+            "[VERIFY_QUEUE] enqueue failed user_id=%s type=%s err_class=%s collection=%s err=%s",
             user_id,
             verify_type,
+            e.__class__.__name__,
+            tg_verification_queue_col.name,         
             e,
         )
-        return False
     except PyMongoError as e:
         current_app.logger.exception(
-            "[VERIFY_QUEUE] insert failed (PyMongoError) uid=%s type=%s err=%s",
+            "[VERIFY_QUEUE] enqueue failed user_id=%s type=%s err_class=%s collection=%s err=%s",
             user_id,
             verify_type,
+            e.__class__.__name__,
+            tg_verification_queue_col.name,         
             e,
         )
-        return False
+    return False, "db_error"
+
+
+def _verification_backoff_seconds(attempts: int) -> int:
+    if attempts <= 0:
+        return VERIFY_QUEUE_BACKOFF_BASE_SECONDS
+    backoff = VERIFY_QUEUE_BACKOFF_BASE_SECONDS * (2 ** (attempts - 1))
+    return min(backoff, VERIFY_QUEUE_BACKOFF_MAX_SECONDS)
 
 def process_verification_queue(batch_limit: int = 50) -> None:
-    scanned = claimed = approved = denied = errors = 0
-    try:
-        pending = list(
-            tg_verification_queue_col.find({"status": {"$in": ["pending", "queued"]}})
-            .sort([("created_at", ASCENDING)])
-            .limit(batch_limit)
-        )
-    except Exception as exc:
-        try:
-            current_app.logger.exception("[WELCOME_VERIFY] scan_failed err=%s", exc)
-        except Exception:
-            print(f"[WELCOME_VERIFY] scan_failed err={exc}")
-        return
+    scanned = dequeued = processed = failed = errors = 0
+    now = now_utc()
 
-    for item in pending:
-        scanned += 1
-        now = now_utc()
+    for _ in range(batch_limit):
         try:
             claimed_doc = tg_verification_queue_col.find_one_and_update(
-                {"_id": item["_id"], "status": {"$in": ["pending", "queued"]}},
                 {
-                    "$set": {
-                        "status": "in_progress",
-                        "started_at": now,
-                        "updated_at": now,
-                    },
+                    "status": "queued",
+                    "$or": [
+                        {"next_attempt_at": {"$exists": False}},
+                        {"next_attempt_at": {"$lte": now}},
+                    ],
+                },
+                {
+                    "$set": {"status": "processing", "updated_at": now},
                     "$inc": {"attempts": 1},
                 },
+                sort=[("created_at", ASCENDING)],            
                 return_document=ReturnDocument.AFTER,
             )
-        except Exception:
+        except Exception as exc:
             try:
-                current_app.logger.exception(
-                    "[WELCOME_VERIFY][DB_ERROR] op=claim _id=%s",
-                    item.get("_id"),
+                current_app.logger.exception("[VERIFY_QUEUE] scan_failed err=%s", exc)
                 )
             except Exception:
-                print(f"[WELCOME_VERIFY][DB_ERROR] op=claim _id={item.get('_id')}")
-            raise
+                print(f"[VERIFY_QUEUE] scan_failed err={exc}")
+            break
          
         if not claimed_doc:
-            continue
-        claimed += 1
+            break
+        scanned += 1
+        dequeued += 1
         uid = claimed_doc.get("user_id")
-        if uid is None:
-            now = now_utc()
-            try:
-                tg_verification_queue_col.update_one(
-                    {"_id": claimed_doc["_id"]},
-                    {
-                        "$set": {
-                            "status": "denied",
-                            "denied_at": now,
-                            "updated_at": now,
-                            "reason": "missing_uid",
-                        }
-                    },
-                )
-            except Exception:
-                try:
-                    current_app.logger.exception(
-                        "[WELCOME_VERIFY][DB_ERROR] op=deny_missing_uid _id=%s",
-                        claimed_doc.get("_id"),
-                    )
-                except Exception:
-                    print(
-                        f"[WELCOME_VERIFY][DB_ERROR] op=deny_missing_uid _id={claimed_doc.get('_id')}"
-                    )
-                raise
-            denied += 1
-            try:
-                current_app.logger.info("[WELCOME_VERIFY][DENY] uid=None reason=missing_uid")
-            except Exception:
-                print("[WELCOME_VERIFY][DENY] uid=None reason=missing_uid")
-            continue
-
         vtype = (claimed_doc.get("type") or "").strip().lower()
         try:
-            if vtype == "pic":
-                has_photo = _has_profile_photo(uid, force_refresh=True)
-                if not has_photo:
-                    now = now_utc()
-                    try:
-                        tg_verification_queue_col.update_one(
-                            {"_id": claimed_doc["_id"]},
-                            {
-                                "$set": {
-                                    "status": "denied",
-                                    "denied_at": now,
-                                    "updated_at": now,
-                                    "reason": "missing_profile_pic",
-                                }
-                            },
-                        )
-                    except Exception:
-                        try:
-                            current_app.logger.exception(
-                                "[WELCOME_VERIFY][DB_ERROR] op=deny_missing_pic uid=%s _id=%s",
-                                uid,
-                                claimed_doc.get("_id"),
-                            )
-                        except Exception:
-                            print(
-                                "[WELCOME_VERIFY][DB_ERROR] op=deny_missing_pic "
-                                f"uid={uid} _id={claimed_doc.get('_id')}"
-                            )
-                        raise
-                    denied += 1
-                    try:
-                        current_app.logger.info(
-                            "[WELCOME_VERIFY][DENY] uid=%s reason=missing_profile_pic", uid
-                        )
-                    except Exception:
-                        print(f"[WELCOME_VERIFY][DENY] uid={uid} reason=missing_profile_pic")
-                    continue
-
+            current_app.logger.info(
+                "[VERIFY_QUEUE] dequeue_ok user_id=%s type=%s",
+                uid,
+                vtype or "unknown",
+            )
+        except Exception:
+            print(f"[VERIFY_QUEUE] dequeue_ok user_id={uid} type={vtype or 'unknown'}")
+     
+        if uid is None:
             now = now_utc()
+            last_error = "missing_user_id"         
             try:
                 tg_verification_queue_col.update_one(
                     {"_id": claimed_doc["_id"]},
                     {
                         "$set": {
-                            "status": "approved",
-                            "approved_at": now,
+                            "status": "failed",
                             "updated_at": now,
-                            "reason": "ok",
+                            "last_error": last_error,
+                        },
+                        "$unset": {"next_attempt_at": ""},
                         }
                     },
                 )
             except Exception:
                 try:
                     current_app.logger.exception(
-                        "[WELCOME_VERIFY][DB_ERROR] op=approve uid=%s _id=%s",
-                        uid,
-                        claimed_doc.get("_id"),
+                        "[VERIFY_QUEUE] process_fail user_id=None err=%s",
+                        last_error,
                     )
                 except Exception:
                     print(
-                        f"[WELCOME_VERIFY][DB_ERROR] op=approve uid={uid} _id={claimed_doc.get('_id')}"
-                    )
+                    print(f"[VERIFY_QUEUE] process_fail user_id=None err={last_error}")
                 raise
-            approved += 1
+            failed += 1
             try:
                 current_app.logger.info(
-                    "[WELCOME_VERIFY][APPROVE] uid=%s type=%s", uid, vtype or "unknown"
+                    "[VERIFY_QUEUE] process_fail user_id=None err=%s",
+                    last_error,
                 )
             except Exception:
-                print(f"[WELCOME_VERIFY][APPROVE] uid={uid} type={vtype or 'unknown'}")
+                print(f"[VERIFY_QUEUE] process_fail user_id=None err={last_error}")
+            continue
+
+            update_doc = {
+                "status": "done",
+                "updated_at": now,
+                "last_error": None,
+                "payload": {
+                    "result": result,
+                    "verified_at": now,
+                },
+            }
+            tg_verification_queue_col.update_one(
+                {"_id": claimed_doc["_id"]},
+                {"$set": update_doc, "$unset": {"next_attempt_at": ""}},
+            )
+            processed += 1
+            try:
+                current_app.logger.info(
+                    "[VERIFY_QUEUE] process_ok user_id=%s result=%s",
+                    uid,
+                    result,
+                )
+            except Exception:
+                print(f"[VERIFY_QUEUE] process_ok user_id={uid} result={result}")
         except Exception as exc:
             now = now_utc()
             errors += 1
+            attempts = int(claimed_doc.get("attempts", 1))
+            if attempts >= VERIFY_QUEUE_MAX_ATTEMPTS:
+                update = {
+                    "$set": {
+                        "status": "failed",
+                        "updated_at": now,
+                        "last_error": str(exc),
+                    },
+                    "$unset": {"next_attempt_at": ""},
+                }
+            else:
+                backoff_seconds = _verification_backoff_seconds(attempts)
+                next_attempt = now + timedelta(seconds=backoff_seconds)
+                update = {
+                    "$set": {
+                        "status": "queued",
+                        "updated_at": now,
+                        "last_error": str(exc),
+                        "next_attempt_at": next_attempt,
+                    }
+                }
             try:
                 tg_verification_queue_col.update_one(
                     {"_id": claimed_doc["_id"]},
-                    {
-                        "$set": {
-                            "status": "pending",
-                            "updated_at": now,
-                            "last_error": str(exc),
-                        }
-                    },
+                    update,
                 )
             except Exception:
                 try:
                     current_app.logger.exception(
-                        "[WELCOME_VERIFY][DB_ERROR] op=reset_pending uid=%s _id=%s",
+                        "[VERIFY_QUEUE] process_fail user_id=%s err=%s",
                         uid,
-                        claimed_doc.get("_id"),
+                        exc,
                     )
                 except Exception:
-                    print(
-                        f"[WELCOME_VERIFY][DB_ERROR] op=reset_pending uid={uid} _id={claimed_doc.get('_id')}"
-                    )
+                    print(f"[VERIFY_QUEUE] process_fail user_id={uid} err={exc}")
                 raise
+            failed += 1     
             try:
                 current_app.logger.exception(
-                    "[WELCOME_VERIFY][ERROR] uid=%s err=%s", uid, exc
+                    "[VERIFY_QUEUE] process_fail user_id=%s err=%s", uid, exc
                 )
             except Exception:
-                print(f"[WELCOME_VERIFY][ERROR] uid={uid} err={exc}")
+                print(f"[VERIFY_QUEUE] process_fail user_id={uid} err={exc}")
 
-    try:     
+    try:
         current_app.logger.info(
-            "[WELCOME_VERIFY] scanned=%s claimed=%s approved=%s denied=%s errors=%s",
+            "[VERIFY_QUEUE] scanned=%s dequeued=%s processed=%s failed=%s errors=%s",
             scanned,
-            claimed,
-            approved,
-            denied,
+            dequeued,
+            processed,
+            failed,
             errors,
         )  
     except Exception:
         print(
-            f"[WELCOME_VERIFY] scanned={scanned} claimed={claimed} approved={approved} denied={denied} errors={errors}"
+            f"[VERIFY_QUEUE] scanned={scanned} dequeued={dequeued} processed={processed} "
+            f"failed={failed} errors={errors}"
         )
      
 ALLOWED_CHANNEL_STATUSES = {"member", "administrator", "creator"}
@@ -1869,6 +1938,28 @@ def claim_pooled(drop_id: str, claim_key: str, ref: datetime):
         return_document=ReturnDocument.AFTER
     )
     if not doc:
+        criteria = {"type": "pooled", "dropId": {"$in": drop_id_variants}, "status": "free"}
+        try:
+            remaining = db.vouchers.count_documents(criteria)
+            total = db.vouchers.count_documents(
+                {"type": "pooled", "dropId": {"$in": drop_id_variants}}
+            )
+            current_app.logger.info(
+                "[claim][sold_out] drop_id=%s remaining=%s total=%s criteria=%s",
+                drop_id,
+                remaining,
+                total,
+                criteria,
+            )
+        except Exception as exc:
+            try:
+                current_app.logger.exception(
+                    "[claim][sold_out] drop_id=%s log_failed err=%s",
+                    drop_id,
+                    exc,
+                )
+            except Exception:
+                print(f"[claim][sold_out] drop_id={drop_id} log_failed err={exc}")     
         return {"ok": False, "err": "sold_out"}
     return {"ok": True, "code": doc["code"], "claimedAt": _isoformat_kl(doc.get("claimedAt"))}
 
@@ -2259,23 +2350,16 @@ def api_claim():
             }), 403
         cache_has_photo, cache_stale = _profile_photo_cache_status(uid)
         if cache_stale:
-            now = now_utc()
-            verification_doc = {
-                "user_id": uid,
-                "uid": uid,
-                "type": "pic",
-                "status": "pending",
-                "created_at": now,
-                "updated_at": now,
-                "attempts": 0,
-                "last_error": None,
-            }
-            ok = enqueue_verification(verification_doc)
+            ok, _err = enqueue_verification(
+                user_id=uid,
+                verify_type="pic",
+                payload={"source": "welcome_claim"},
+            )
             if not ok:
                 return jsonify({
                     "ok": False,
-                    "error": "verification_queue_unavailable",
-                    "message": "Verification system busy. Please try again later.",
+                    "reason": "verify_enqueue_failed",
+                    "message": "Verification temporarily unavailable. Please try again later.",
                 }), 503
             return jsonify({
                 "ok": True,
