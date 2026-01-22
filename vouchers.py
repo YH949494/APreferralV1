@@ -389,7 +389,7 @@ def ensure_voucher_indexes():
         except Exception:
             print("[VERIFY_QUEUE] failed to ensure verification queue indexes")
 
-     _maybe_migrate_verification_queue_uid()
+    _maybe_migrate_verification_queue_uid()
 
     if os.getenv("VERIFY_QUEUE_CLEANUP") == "1":
         try:
