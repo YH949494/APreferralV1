@@ -951,7 +951,6 @@ def process_verification_queue(batch_limit: int = 50) -> None:
         except Exception as exc:
             try:
                 current_app.logger.exception("[VERIFY_QUEUE] scan_failed err=%s", exc)
-                )
             except Exception:
                 print(f"[VERIFY_QUEUE] scan_failed err={exc}")
             break
