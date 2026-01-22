@@ -1066,27 +1066,22 @@ def process_verification_queue(batch_limit: int = 50) -> None:
                     print(f"[VERIFY_QUEUE] process_fail user_id={uid} err={exc}")
                 raise
             failed += 1     
-            try:
-                current_app.logger.exception(
-                    "[VERIFY_QUEUE] process_fail user_id=%s err=%s", uid, exc
-                )
-            except Exception:
-                print(f"[VERIFY_QUEUE] process_fail user_id={uid} err={exc}")
-
-    try:
-        current_app.logger.info(
-            "[VERIFY_QUEUE] scanned=%s dequeued=%s processed=%s failed=%s errors=%s",
-            scanned,
-            dequeued,
-            processed,
-            failed,
-            errors,
-        )  
-    except Exception:
-        print(
-            f"[VERIFY_QUEUE] scanned={scanned} dequeued={dequeued} processed={processed} "
-            f"failed={failed} errors={errors}"
-        )
+            failed += 1
+            _safe_log(
+                "exception",
+                "[VERIFY_QUEUE] process_fail user_id=%s err=%s",
+                uid,
+                exc,
+            )
+    _safe_log(
+        "info",
+        "[VERIFY_QUEUE] scanned=%s dequeued=%s processed=%s failed=%s errors=%s",
+        scanned,
+        dequeued,
+        processed,
+        failed,
+        errors,
+    )
      
 ALLOWED_CHANNEL_STATUSES = {"member", "administrator", "creator"}
 SUB_CHECK_TTL_SECONDS = int(os.getenv("SUB_CHECK_TTL_SECONDS", "120"))
@@ -1956,7 +1951,7 @@ def claim_pooled(drop_id: str, claim_key: str, ref: datetime):
                     exc,
                 )
             except Exception:
-                print(f"[claim][sold_out] drop_id={drop_id} log_failed err={exc}")     
+                print(f"[claim][sold_out] drop_id={drop_id} log_failed err={exc}")
         return {"ok": False, "err": "sold_out"}
     return {"ok": True, "code": doc["code"], "claimedAt": _isoformat_kl(doc.get("claimedAt"))}
 
