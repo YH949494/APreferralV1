@@ -1678,7 +1678,7 @@ document.addEventListener("click", async (e) => {
     const lastUpdated = document.getElementById("leaderboard-last-updated");
     const cacheTag = document.getElementById("leaderboard-cache-tag");
     if (lastUpdated) lastUpdated.textContent = formatLastUpdated(ts);
-    if (cacheTag) cacheTag.style.display = isStale ? "inline-flex" : "none";
+    if (cacheTag) cacheTag.style.display = "none";
     if (cadence) cadence.textContent = "🔄 Updates every 5 minutes";   
   }
 
