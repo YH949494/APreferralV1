@@ -11,7 +11,7 @@
   </a>
 
   <!-- Right: Info Hub -->
-  <button id="infoHubBtn"
+  <button id="infoHubBtn" type="button"
           style="flex:1; padding:10px 0; border:none; border-radius:8px;
                  background:#007bff; color:#fff; font-size:15px; cursor:pointer;
                  font-weight:500;">
@@ -2124,56 +2124,54 @@ window.onload = async () => {
 };
     
 // --- Info Hub Modal & Tabs ---
-document.addEventListener('DOMContentLoaded', () => {
-  initLeaderboardCache();  
-  const infoHubBtn   = document.getElementById("infoHubBtn");
-  const infoHubModal = document.getElementById("infoHubModal");
-  const closeInfoHub = document.getElementById("closeInfoHub");
+(function () {
+  let _infoHubBound = false;
 
-  if (infoHubBtn && infoHubModal && closeInfoHub) {
-    // Open (stop propagation so other global click handlers don't cancel it)
+  function initInfoHub() {
+    if (_infoHubBound) return;
+
+    try {
+      if (typeof initLeaderboardCache === "function") initLeaderboardCache();
+    } catch (_) {}
+
+    const infoHubBtn = document.getElementById("infoHubBtn");
+    const infoHubModal = document.getElementById("infoHubModal");
+    const closeInfoHub = document.getElementById("closeInfoHub");
+
+    if (!infoHubBtn || !infoHubModal || !closeInfoHub) return;
+
+    _infoHubBound = true;
+
     infoHubBtn.addEventListener("click", (e) => {
       e.preventDefault();
-      e.stopPropagation();
       infoHubModal.style.display = "block";
     });
 
-    // Close button
     closeInfoHub.addEventListener("click", (e) => {
       e.preventDefault();
-      e.stopPropagation();
       infoHubModal.style.display = "none";
     });
 
-    // Clicking backdrop closes (bind to modal itself, not window)
-    infoHubModal.addEventListener("click", (e) => {
-      if (e.target === infoHubModal) {
-        e.preventDefault();
-        e.stopPropagation();
-        infoHubModal.style.display = "none";
-      }
+    window.addEventListener("click", (e) => {
+      if (e.target === infoHubModal) infoHubModal.style.display = "none";
     });
 
-    // Prevent clicks inside the white panel from bubbling up and triggering backdrop/window handlers
-    const panel = infoHubModal.querySelector("div");
-    if (panel) {
-      panel.addEventListener("click", (e) => {
-        e.stopPropagation();
+    document.querySelectorAll(".tab-btn").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        e.preventDefault();
+        document.querySelectorAll(".tab-btn").forEach((b) => b.classList.remove("active"));
+        document.querySelectorAll(".tab-panel").forEach((p) => (p.style.display = "none"));
+
+        btn.classList.add("active");
+        const pane = document.getElementById(btn.dataset.tab);
+        if (pane) pane.style.display = "block";
       });
-    }
+    });
   }
 
-  // Tab switching (safe if tabs exist)
-  document.querySelectorAll(".tab-btn").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      document.querySelectorAll(".tab-btn").forEach((b) => b.classList.remove("active"));
-      document.querySelectorAll(".tab-panel").forEach((p) => (p.style.display = "none"));
-      btn.classList.add("active");
-      const pane = document.getElementById(btn.dataset.tab);
-      if (pane) pane.style.display = "block";
-    });
-  });
-});
+  document.addEventListener("DOMContentLoaded", initInfoHub);
+  window.addEventListener("load", initInfoHub);
+})();
 
   </script>
 </body>
