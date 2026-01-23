@@ -762,6 +762,7 @@ async function adm_list() {
           <button data-op="start_now" data-id="${id}">Start</button>
           <button data-op="pause"     data-id="${id}">Pause</button>
           <button data-op="end_now"   data-id="${id}">End</button>
+          <button class="copy-drop-id-btn" data-dropid="${id}">📋 Copy ID</button>
         </td>`;
       tbody.appendChild(tr);
     });
@@ -1564,6 +1565,22 @@ document.addEventListener("click", async (e) => {
     adm_list && adm_list(); // refresh list
   } catch (err) {
     alert(`Action failed: ${err.message}`);
+  }
+});
+
+document.addEventListener("click", async (e) => {
+  const btn = e.target.closest(".copy-drop-id-btn");
+  if (!btn) return;
+
+  const dropId = btn.dataset.dropid;
+  if (!dropId) return;
+
+  try {
+    await navigator.clipboard.writeText(dropId);
+    btn.textContent = "✅ Copied";
+    setTimeout(() => (btn.textContent = "📋 Copy ID"), 1200);
+  } catch {
+    alert("Copy failed. Drop ID:\n" + dropId);
   }
 });
     
