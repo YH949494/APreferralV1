@@ -1567,22 +1567,6 @@ document.addEventListener("click", async (e) => {
     alert(`Action failed: ${err.message}`);
   }
 });
-
-document.addEventListener("click", async (e) => {
-  const btn = e.target.closest(".copy-drop-id-btn");
-  if (!btn) return;
-
-  const dropId = btn.dataset.dropid;
-  if (!dropId) return;
-
-  try {
-    await navigator.clipboard.writeText(dropId);
-    btn.textContent = "✅ Copied";
-    setTimeout(() => (btn.textContent = "📋 Copy ID"), 1200);
-  } catch {
-    alert("Copy failed. Drop ID:\n" + dropId);
-  }
-});
     
 // ====================
 // Claim / View code
@@ -1638,6 +1622,32 @@ document.addEventListener("click", async (e) => {
       return;
     }
 
+document.addEventListener("click", async (e) => {
+  const btn = e.target.closest(".copy-drop-id-btn");
+  if (!btn) return;
+
+  e.preventDefault();
+  e.stopPropagation();
+
+  const dropId = (btn.dataset.dropid || "").trim();
+  if (!dropId) return alert("No dropId found.");
+
+  try {
+    await navigator.clipboard.writeText(dropId);
+    btn.textContent = "✅ Copied";
+    setTimeout(() => (btn.textContent = "📋 Copy ID"), 1200);
+  } catch {
+    const ta = document.createElement("textarea");
+    ta.value = dropId;
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand("copy");
+    document.body.removeChild(ta);
+    btn.textContent = "✅ Copied";
+    setTimeout(() => (btn.textContent = "📋 Copy ID"), 1200);
+  }
+});
+    
     // new API shape: { status:"ok", voucher:{ code, claimedAt } }
     const codeText = out?.voucher?.code ? String(out.voucher.code) : "(no code)";
     const claimedAt = out?.voucher?.claimedAt ? fmtKL(out.voucher.claimedAt) : "-";
