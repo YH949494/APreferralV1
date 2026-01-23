@@ -1241,6 +1241,21 @@ function showVoucherClaim(dropId, disabled) {
   primaryBtn.style.display = "inline-block";
 }
 
+function showVoucherSoldOut(messageText) {
+  const primaryBtn = document.getElementById("campaign-voucher-btn");
+  if (!primaryBtn) return;
+  primaryBtn.textContent = "All vouchers redeemed";
+  primaryBtn.removeAttribute("data-copy-code");
+  primaryBtn.removeAttribute("data-dropid");
+  primaryBtn.removeAttribute("data-claim");
+  primaryBtn.setAttribute("disabled", "disabled");
+  primaryBtn.style.display = "inline-block";
+  if (messageText) {
+    const messageEl = document.getElementById("campaign-voucher-message");
+    if (messageEl) messageEl.innerText = messageText;
+  }
+}
+    
 const CHANNEL_SUBSCRIBE_PROMPT = "Subscribe to @advantplayofficial to unlock";
 
 function showChannelGate(messageEl, buttonEl) {
@@ -1300,6 +1315,20 @@ const CLAIM_REASON_TITLE = {
 };
 
 const DEFAULT_TITLE = "⚠️ Unable to Claim";    
+function isMyRegion(region) {
+  if (!region) return false;
+  const normalized = String(region).trim().toLowerCase();
+  return normalized === "my" || normalized === "malaysia";
+}
+
+function isPublicSoldOut(drop, userRegion) {
+  if (isMyRegion(userRegion)) return false;
+  const remaining = drop?.publicRemainingApprox ?? drop?.remainingApprox;
+  if (remaining === undefined || remaining === null) return false;
+  const remainingValue = Number(remaining);
+  if (Number.isNaN(remainingValue)) return false;
+  return remainingValue <= 0;
+}    
 function campaignWindowText(drop) {
   const start = drop?.startsAt ? fmtKL(drop.startsAt) : "";
   const end = drop?.endsAt ? fmtKL(drop.endsAt) : "";
@@ -1308,7 +1337,7 @@ function campaignWindowText(drop) {
   return start ? `Starts: ${start}` : `Ends: ${end}`;
 }
 
-function createCampaignCard(drop) {
+function createCampaignCard(drop, userRegion) {
   const card = document.createElement("div");
   card.className = "campaign-card";
 
@@ -1345,7 +1374,8 @@ function createCampaignCard(drop) {
   const dropId = drop?.dropId || drop?.id || drop?._id || "";
   const hasClaimed = !!drop?.userClaimed;
   const canClaim = !!(drop?.isActive || drop?.adminPreview);
-
+  const publicSoldOut = isPublicSoldOut(drop, userRegion);
+  
   const btn = document.createElement("button");
   btn.type = "button";
 
@@ -1372,25 +1402,32 @@ function createCampaignCard(drop) {
       message.textContent = "This campaign will open soon. Please check back later!";
     }
 
-    btn.textContent = "🎟️ Claim now";
-    if (dropId) {
-      btn.dataset.dropid = dropId;
-    }
-    if (!canClaim) {
+    if (publicSoldOut) {
+      message.textContent = "All vouchers have been fully redeemed.";
+      btn.textContent = "All vouchers redeemed";
+      btn.removeAttribute("data-dropid");
       btn.setAttribute("disabled", "disabled");
+    } else {
+      btn.textContent = "🎟️ Claim now";
+      if (dropId) {
+        btn.dataset.dropid = dropId;
+      }
+      if (!canClaim) {
+        btn.setAttribute("disabled", "disabled");
+      }      
     }
   }
 
   card.appendChild(message);
   card.appendChild(btn);
-  if (!hasClaimed && canClaim) {
+  if (!hasClaimed && canClaim && !publicSoldOut) {
     applyChannelGate(dropId, message, btn);
   }
   
   return card;
 }
 
-function renderCampaignDrops(primaryDrop, extraDrops = []) {
+function renderCampaignDrops(primaryDrop, extraDrops = [], userRegion) {
   const container = document.getElementById("campaign-voucher-list");
   if (!container) return;
   container.innerHTML = "";
@@ -1408,7 +1445,7 @@ function renderCampaignDrops(primaryDrop, extraDrops = []) {
 
   container.style.display = "grid";
   drops.forEach((drop, index) => {
-    const card = createCampaignCard(drop);
+    const card = createCampaignCard(drop, userRegion);
     if (index === 0 && primaryDrop) {
       card.dataset.primary = "true";
     }
@@ -1424,7 +1461,7 @@ async function loadVouchers() {
   section.style.display = "block";
   messageEl.innerText = "Loading reward…";
   resetVoucherButton();
-  renderCampaignDrops(null, []);
+  renderCampaignDrops(null, [], null);
  
   try {
     const tail = buildAdminQueryTail();
@@ -1444,10 +1481,11 @@ async function loadVouchers() {
     }
 
     const drops = Array.isArray(data?.drops) ? data.drops : [];
+    const userRegion = data?.userRegion || null;    
     if (!drops.length) {
       messageEl.innerText = "No campaign rewards are available for your account right now.";
       resetVoucherButton();
-      renderCampaignDrops(null, []);
+      renderCampaignDrops(null, [], userRegion);
       return;
     }
 
@@ -1465,11 +1503,17 @@ async function loadVouchers() {
     } else {
       const canClaim = !!topDrop?.isActive;
       const isPreview = !!topDrop?.adminPreview;
-
-      if ((canClaim || isPreview) && dropId) {
-        messageText = "Tap below to claim your reward.";
+      const publicSoldOut = isPublicSoldOut(topDrop, userRegion);
+      
+      if (publicSoldOut) {
+        messageText = "All vouchers have been fully redeemed.";
+        showVoucherSoldOut(messageText);
       } else {
-        messageText = "A new campaign reward will appear soon. Please check back later!";
+        if ((canClaim || isPreview) && dropId) {
+          messageText = "Tap below to claim your reward.";
+        } else {
+          messageText = "A new campaign reward will appear soon. Please check back later!";
+        }
       }
 
       if (hasExtras) {
@@ -1478,10 +1522,10 @@ async function loadVouchers() {
     }
 
     messageEl.innerText = messageText;
-    renderCampaignDrops(drops[0] || null, drops.slice(1));
+    renderCampaignDrops(drops[0] || null, drops.slice(1), userRegion);
   } catch (e) {
     messageEl.innerText = `⚠️ Error loading vouchers: ${e?.message || e}`;
-    renderCampaignDrops(null, []);
+    renderCampaignDrops(null, [], null);
 
   }
 }
@@ -1549,6 +1593,17 @@ document.addEventListener("click", async (e) => {
     // accept either {ok:true} or {status:"ok"}
     const ok = res.ok && (out?.ok === true || out?.status === "ok");
     if (!ok) {
+      if (res.status === 410 && out?.code === "sold_out") {
+        const soldOutMessage = out?.message || "All vouchers have been fully redeemed.";
+        if (claimBtn.id === "campaign-voucher-btn") {
+          const messageEl = document.getElementById("campaign-voucher-message");
+          if (messageEl) messageEl.innerText = soldOutMessage;
+        }
+        claimBtn.textContent = "All vouchers redeemed";
+        claimBtn.setAttribute("disabled", "disabled");
+        alert(soldOutMessage);
+        return;
+      }      
       const key = out?.reason || out?.checks_key || "unknown";
       const title = CLAIM_REASON_TITLE[key] || DEFAULT_TITLE;
       if (key === "not_joined_main") {
