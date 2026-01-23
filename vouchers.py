@@ -1845,13 +1845,13 @@ def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None
                     {"claimedBy": pooled_claim_key},
                 ]
             })
-             public_free_criteria = {
+            public_free_criteria = {
                 "type": "pooled",
                 "dropId": {"$in": drop_id_variants},
                 "status": "free",
                 "$or": [{"pool": "public"}, {"pool": {"$exists": False}}],
             }
-            public_remaining = max(0, db.vouchers.count_documents(public_free_criteria))        
+            public_remaining = max(0, db.vouchers.count_documents(public_free_criteria))
             if already:
                 base["userClaimed"] = True
                 base["code"] = already.get("code")
