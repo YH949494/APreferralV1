@@ -290,6 +290,80 @@ def settle_referral_snapshots_with_cache_clear():
     _clear_leaderboard_cache("snapshot_publish")
 
 # ----------------------------
+# Scheduler Locking + Ticks
+# ----------------------------
+def acquire_scheduler_lock(name: str, ttl_seconds: int) -> bool:
+    now = datetime.now(timezone.utc)
+    expires_at = now + timedelta(seconds=ttl_seconds)
+    try:
+        doc = scheduler_locks_collection.find_one_and_update(
+            {
+                "_id": name,
+                "$or": [
+                    {"expireAt": {"$lte": now}},
+                    {"expireAt": {"$exists": False}},
+                ],
+            },
+            {
+                "$set": {"expireAt": expires_at},
+                "$setOnInsert": {"createdAt": now},
+            },
+            upsert=True,
+            return_document=ReturnDocument.AFTER,
+        )
+    except DuplicateKeyError:
+        return False
+    return doc is not None
+
+
+def tick_5min() -> None:
+    if not acquire_scheduler_lock("tick_5min", ttl_seconds=900):
+        logger.info("[SCHEDULER][5MIN] lock_not_acquired")
+        return
+    logger.info("[SCHEDULER][5MIN] start")
+
+    step_start = time.time()
+    logger.info("[SCHEDULER][5MIN] step=start name=settle_pending_referrals")
+    settle_pending_referrals_with_cache_clear()
+    logger.info(
+        "[SCHEDULER][5MIN] step=done name=settle_pending_referrals elapsed=%.2fs",
+        time.time() - step_start,
+    )
+
+    step_start = time.time()
+    logger.info("[SCHEDULER][5MIN] step=start name=settle_xp_snapshots")
+    settle_xp_snapshots()
+    _check_snapshot_freshness()
+    logger.info(
+        "[SCHEDULER][5MIN] step=done name=settle_xp_snapshots elapsed=%.2fs",
+        time.time() - step_start,
+    )
+
+    step_start = time.time()
+    logger.info("[SCHEDULER][5MIN] step=start name=settle_referral_snapshots")
+    settle_referral_snapshots_with_cache_clear()
+    logger.info(
+        "[SCHEDULER][5MIN] step=done name=settle_referral_snapshots elapsed=%.2fs",
+        time.time() - step_start,
+    )
+
+    _clear_leaderboard_cache("tick_5min")
+    logger.info("[SCHEDULER][5MIN] done")
+
+
+def process_verification_queue_scheduled(batch_limit: int = 50) -> None:
+    if not acquire_scheduler_lock("verification_queue", ttl_seconds=300):
+        logger.info("[SCHEDULER][VERIFY] lock_not_acquired")
+        return
+    logger.info("[SCHEDULER][VERIFY] start batch_limit=%s", batch_limit)
+    start_time = time.time()
+    process_verification_queue(batch_limit=batch_limit)
+    logger.info(
+        "[SCHEDULER][VERIFY] done elapsed=%.2fs",
+        time.time() - start_time,
+    )
+
+# ----------------------------
 # MongoDB Setup
 # ----------------------------
 client = MongoClient(MONGO_URL)
@@ -316,7 +390,12 @@ referral_audit_collection = db["referral_audit"]
 unknown_invite_audit_collection = db["unknown_invite_audit"]
 pending_referrals_collection = db["pending_referrals"]
 tg_verification_queue_collection = db["tg_verification_queue"]
-
+scheduler_locks_collection = db["scheduler_locks"]
+try:
+    scheduler_locks_collection.create_index([("expireAt", ASCENDING)], expireAfterSeconds=0)
+except Exception:
+    logger.warning("[SCHEDULER][LOCK] failed to create TTL index", exc_info=True)
+    
 REFERRAL_HOLD_HOURS = 12
 
 REFERRAL_INCREMENT_GUARD_FIELDS = {
@@ -2656,29 +2735,15 @@ def run_worker():
         replace_existing=True,
     )
     scheduler.add_job(
-        settle_pending_referrals_with_cache_clear,
+        tick_5min,
         trigger=CronTrigger(minute="*/5", timezone=KL_TZ),
-        id="settle_pending_referrals",
-        name="Settle Pending Referrals",
+        id="tick_5min",
+        name="Tick 5min (Settlement)",
         replace_existing=True,
-    ) 
+    )
     scheduler.add_job(
-        settle_xp_snapshots_scheduled,
-        trigger=CronTrigger(minute="*/5", timezone=KL_TZ),
-        id="settle_xp_snapshots",
-        name="Settle XP Snapshots",
-        replace_existing=True,
-    )    
-    scheduler.add_job(
-        settle_referral_snapshots_with_cache_clear,
-        trigger=CronTrigger(minute="*/5", timezone=KL_TZ),
-        id="settle_referral_snapshots",
-        name="Settle Referral Snapshots",
-        replace_existing=True,
-    )  
-    scheduler.add_job(
-        process_verification_queue,
-        trigger=CronTrigger(minute="*/1", timezone=KL_TZ),
+        process_verification_queue_scheduled,
+        trigger=CronTrigger(minute="*/2", timezone=KL_TZ),
         id="process_verification_queue",
         name="Process Verification Queue",
         replace_existing=True,
