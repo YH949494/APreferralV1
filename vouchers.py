@@ -1,6 +1,6 @@
 from flask import Blueprint, request, jsonify, current_app
 from pymongo import ASCENDING, DESCENDING, ReturnDocument
-from pymongo.errors import OperationFailure, PyMongoError, DuplicateKeyError
+from pymongo.errors import OperationFailure, PyMongoError, DuplicateKeyError, BulkWriteError
 from bson.objectid import ObjectId
 from datetime import datetime, timedelta, timezone
 import requests
@@ -328,13 +328,23 @@ def ensure_voucher_indexes():
     db.drops.create_index([("status", ASCENDING)])
     db.vouchers.create_index([("code", ASCENDING)], unique=True)
     db.vouchers.create_index([("dropId", ASCENDING), ("type", ASCENDING), ("status", ASCENDING)])
+    db.vouchers.create_index(
+        [("dropId", ASCENDING), ("type", ASCENDING), ("status", ASCENDING), ("pool", ASCENDING)],
+        name="ix_drop_type_status_pool",
+    ) 
     db.vouchers.create_index([("dropId", ASCENDING), ("usernameLower", ASCENDING)])
     db.vouchers.create_index([("dropId", ASCENDING), ("claimedBy", ASCENDING)])
-    db.vouchers.create_index(
-        [("dropId", ASCENDING), ("claimedByKey", ASCENDING)],
-        name="claimed_by_key_per_drop",
-        partialFilterExpression={"status": "claimed", "claimedByKey": {"$exists": True}},
-    ) 
+    try:
+        db.vouchers.create_index(
+            [("dropId", ASCENDING), ("claimedByKey", ASCENDING)],
+            name="claimed_by_key_per_drop",
+            partialFilterExpression={"status": "claimed", "claimedByKey": {"$exists": True}},
+        )
+    except (OperationFailure, PyMongoError):
+        try:
+            current_app.logger.exception("[indexes] failed to ensure claimed_by_key_per_drop")
+        except Exception:
+            print("[indexes] failed to ensure claimed_by_key_per_drop")
     # Prevent multiple rows for the same user in a personalised drop
     try:
         db.vouchers.drop_index("uniq_personalised_assignment")
@@ -375,7 +385,7 @@ def ensure_voucher_indexes():
             [("user_id", ASCENDING)],
             unique=True,
             name="uq_tg_verif_user_id_nonnull",
-            partialFilterExpression={"user_id": {"$exists": True, "$ne": None}},
+            partialFilterExpression={"user_id": {"$type": ["int", "long"]}},
         )
         tg_verification_queue_col.create_index(
             [("status", ASCENDING), ("created_at", ASCENDING)],
@@ -1684,7 +1694,13 @@ def _is_admin_preview(init_data_raw: str) -> bool:
         user_json = {}
     is_admin, _ = _is_cached_admin(user_json)
     return is_admin
-    
+
+def _is_my_region(region: str | None) -> bool:
+    if not region:
+        return False
+    r = str(region).strip().lower()
+    return r in ("my", "malaysia")
+ 
 # ---- Core visibility logic ----
 def is_drop_active(doc: dict, ref: datetime) -> bool:
     starts = _as_aware_utc(doc.get("startsAt"))
@@ -1744,7 +1760,9 @@ def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None
         user_doc = users_collection.find_one({"user_id": ctx_uid})
     if not user_doc and usernameLower:
         user_doc = users_collection.find_one({"usernameLower": usernameLower})
-
+    user_region = user_doc.get("region") if user_doc else None
+    is_my_user = _is_my_region(user_region)
+ 
     # Only hide personalised vouchers when the caller truly has no username
     allow_personalised = bool(usernameLower)
     claim_key = usernameLower or user_id
@@ -1827,22 +1845,34 @@ def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None
                     {"claimedBy": pooled_claim_key},
                 ]
             })
+             public_free_criteria = {
+                "type": "pooled",
+                "dropId": {"$in": drop_id_variants},
+                "status": "free",
+                "$or": [{"pool": "public"}, {"pool": {"$exists": False}}],
+            }
+            public_remaining = max(0, db.vouchers.count_documents(public_free_criteria))        
             if already:
                 base["userClaimed"] = True
                 base["code"] = already.get("code")
                 claimed_at = _isoformat_kl(already.get("claimedAt"))
                 if claimed_at:
                     base["claimedAt"] = claimed_at       
-                base["remainingApprox"] = max(0, db.vouchers.count_documents({"type": "pooled", "dropId": {"$in": drop_id_variants}, "status": "free"}))
+                base["remainingApprox"] = public_remaining
+                base["publicRemainingApprox"] = public_remaining
                 pooled_cards.append(base)
             else:
-                free_exists = db.vouchers.find_one({
-                    "type": "pooled",
-                    "dropId": {"$in": drop_id_variants},
-                    "status": "free"
-                }, projection={"_id": 1})
-                if free_exists:
-                    base["remainingApprox"] = max(0, db.vouchers.count_documents({"type": "pooled", "dropId": {"$in": drop_id_variants}, "status": "free"}))        
+                my_free_exists = None
+                if is_my_user:
+                    my_free_exists = db.vouchers.find_one({
+                        "type": "pooled",
+                        "dropId": {"$in": drop_id_variants},
+                        "status": "free",
+                        "pool": "my",
+                    }, projection={"_id": 1})
+                if public_remaining > 0 or (is_my_user and my_free_exists) or (not is_my_user and public_remaining == 0):
+                    base["remainingApprox"] = public_remaining
+                    base["publicRemainingApprox"] = public_remaining   
                     pooled_cards.append(base)
 
     # Sort: personalised first; then pooled by priority desc, startsAt asc
@@ -1850,7 +1880,7 @@ def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None
     pooled_cards.sort(key=lambda x: (-x["priority"], x["startsAt"]))
 
     # Stacked: return all (cap optional)
-    return personal_cards + pooled_cards
+    return personal_cards + pooled_cards, user_region
 
 # ---- Claim handlers ----
 def claim_personalised(drop_id: str, usernameLower: str, ref: datetime):
@@ -1895,7 +1925,7 @@ def claim_personalised(drop_id: str, usernameLower: str, ref: datetime):
         return {"ok": False, "err": "not_eligible"}
     return {"ok": True, "code": doc["code"], "claimedAt": _isoformat_kl(doc.get("claimedAt"))}
 
-def claim_pooled(drop_id: str, claim_key: str, ref: datetime):
+def claim_pooled(drop_id: str, claim_key: str, ref: datetime, *, pools: list[str] | None = None):
     drop_id_variants = _drop_id_variants(drop_id)
  
     # Idempotent: if already claimed, return same code
@@ -1910,26 +1940,46 @@ def claim_pooled(drop_id: str, claim_key: str, ref: datetime):
     if existing:
         return {"ok": True, "code": existing["code"], "claimedAt": _isoformat_kl(existing.get("claimedAt"))}
 
-    # Atomically reserve a free code
-    doc = db.vouchers.find_one_and_update(
-        {
-            "type": "pooled",
-            "dropId": {"$in": drop_id_variants},
-            "status": "free"
-        },
-        {
-            "$set": {
-                "status": "claimed",
-                "claimedBy": claim_key,
-                "claimedByKey": claim_key,
-                "claimedAt": ref
+    pool_order = pools or ["public"]
+    doc = None
+    last_criteria = None
+    for pool in pool_order:
+        if pool == "my":
+            criteria = {
+                "type": "pooled",
+                "dropId": {"$in": drop_id_variants},
+                "status": "free",
+                "pool": "my",
             }
-        },
-        sort=[("_id", ASCENDING)],
-        return_document=ReturnDocument.AFTER
-    )
+        elif pool == "public":
+            criteria = {
+                "type": "pooled",
+                "dropId": {"$in": drop_id_variants},
+                "status": "free",
+                "$or": [{"pool": "public"}, {"pool": {"$exists": False}}],
+            }
+        else:
+            continue
+
+        last_criteria = criteria
+        doc = db.vouchers.find_one_and_update(
+            criteria,
+            {
+                "$set": {
+                    "status": "claimed",
+                    "claimedBy": claim_key,
+                    "claimedByKey": claim_key,
+                    "claimedAt": ref
+                }
+            },
+            sort=[("_id", ASCENDING)],
+            return_document=ReturnDocument.AFTER
+        )
+        if doc:
+            break
+
     if not doc:
-        criteria = {"type": "pooled", "dropId": {"$in": drop_id_variants}, "status": "free"}
+        criteria = last_criteria or {"type": "pooled", "dropId": {"$in": drop_id_variants}, "status": "free"}
         try:
             remaining = db.vouchers.count_documents(criteria)
             total = db.vouchers.count_documents(
@@ -2055,9 +2105,14 @@ def api_visible():
             except Exception:
                 uid = None
      
-        drops = user_visible_drops(user, ref, tg_user=tg_user)
-        return jsonify({"visibilityMode": "stacked", "nowUtc": ref.isoformat(), "drops": drops}), 200
-
+        drops, user_region = user_visible_drops(user, ref, tg_user=tg_user)
+        return jsonify({
+            "visibilityMode": "stacked",
+            "nowUtc": ref.isoformat(),
+            "userRegion": user_region,
+            "drops": drops,
+        }), 200
+     
     except Exception:
         current_app.logger.exception("[visible] unhandled", extra={"user_id": user_id})
         raise
@@ -2088,7 +2143,11 @@ def claim_voucher_for_user(*, user_id: str, drop_id: str, username: str) -> dict
         uid_int = None
 
     if uid_int is not None:
-        user_doc = users_collection.find_one({"user_id": uid_int}, {"restrictions": 1})
+        user_doc = users_collection.find_one({"user_id": uid_int}, {"restrictions": 1, "region": 1})
+    if not user_doc:
+        uname = norm_username(username)
+        if uname:
+            user_doc = users_collection.find_one({"usernameLower": uname}, {"restrictions": 1, "region": 1})
 
     if user_doc and user_doc.get("restrictions", {}).get("no_campaign"):
         raise NotEligible("not_eligible")
@@ -2113,8 +2172,10 @@ def claim_voucher_for_user(*, user_id: str, drop_id: str, username: str) -> dict
         raise AlreadyClaimed("already_claimed")
 
     # pooled
-    claim_key = f"uid:{user_id_str}" 
-    res = claim_pooled(drop_id=drop_id, claim_key=claim_key, ref=ref)
+    claim_key = f"uid:{user_id_str}"
+    user_region = user_doc.get("region") if user_doc else None
+    pools = ["my", "public"] if _is_my_region(user_region) else ["public"]
+    res = claim_pooled(drop_id=drop_id, claim_key=claim_key, ref=ref, pools=pools)
     if res.get("ok"):
         return {"code": res["code"], "claimedAt": res["claimedAt"]}
     if res.get("err") == "sold_out":
@@ -2186,6 +2247,8 @@ def api_claim():
         user_doc = users_collection.find_one({"user_id": uid})
     if not user_doc and uname:
         user_doc = users_collection.find_one({"usernameLower": uname})
+    user_region = user_doc.get("region") if user_doc else None
+    is_my_user = _is_my_region(user_region)
  
     fallback_username = _guess_username(request, body)
     fallback_user_id = _guess_user_id(request, body)
@@ -2529,7 +2592,10 @@ def api_claim():
             {"_id": claim_doc_id},
             {"$set": {"status": "failed", "error": str(exc), "updated_at": now_utc()}},
         )
-        return jsonify({"status": "error", "code": "sold_out"}), 410
+        payload = {"status": "error", "code": "sold_out"}
+        if not is_my_user:
+            payload["message"] = "All vouchers have been fully redeemed."
+        return jsonify(payload), 410
     except NotEligible as exc:
         voucher_claims_col.update_one(
             {"_id": claim_doc_id},
@@ -2824,7 +2890,12 @@ def admin_create_drop():
         if docs:
             db.vouchers.insert_many(docs, ordered=False)
     else:
+        pool_value = data.get("pool") or data.get("voucherPool") or "public"
+        if pool_value not in ("public", "my"):
+            return jsonify({"status": "error", "code": "bad_request", "reason": "bad_pool"}), 400     
         codes = _normalize_codes(data.get("codes"))
+        if not codes:
+            return jsonify({"status": "error", "code": "bad_request", "reason": "empty_codes"}), 400     
         docs = []
         for c in codes:
             docs.append({
@@ -2833,10 +2904,32 @@ def admin_create_drop():
                 "code": c,
                 "status": "free",
                 "claimedBy": None,
-                "claimedAt": None
+                "claimedAt": None,
+                "pool": pool_value,
             })
         if docs:
-            db.vouchers.insert_many(docs, ordered=False)
+            try:
+                db.vouchers.insert_many(docs, ordered=False)
+            except DuplicateKeyError:
+                return jsonify({"status": "error", "code": "duplicate_code"}), 409
+            except BulkWriteError as exc:
+                # ordered=False may throw BulkWriteError on duplicates; normalize to 409
+                details = exc.details or {}
+                write_errors = details.get("writeErrors") or []
+                dup_count = sum(1 for err in write_errors if err.get("code") == 11000)
+                if dup_count:
+                    inserted = details.get("nInserted") or 0
+                    return jsonify({
+                        "status": "error",
+                        "code": "duplicate_code",
+                        "inserted": inserted,
+                        "duplicates": dup_count,
+                    }), 409
+                try:
+                    current_app.logger.exception("[admin][drops] insert_many_failed")
+                except Exception:
+                    print("[admin][drops] insert_many_failed")
+                return jsonify({"status": "error", "code": "server_error"}), 500
 
     return jsonify({"status": "ok", "dropId": str(drop_id)})
     
@@ -2884,7 +2977,36 @@ def _admin_drop_summary(doc: dict, *, ref=None, skip_expired=False):
     else:
         total = db.vouchers.count_documents({"type": "pooled", "dropId": {"$in": drop_id_variants}})
         free = db.vouchers.count_documents({"type": "pooled", "dropId": {"$in": drop_id_variants}, "status": "free"})
-        summary.update({"codesTotal": total, "codesFree": free})
+        total_public = db.vouchers.count_documents({
+            "type": "pooled",
+            "dropId": {"$in": drop_id_variants},
+            "$or": [{"pool": "public"}, {"pool": {"$exists": False}}],
+        })
+        total_my = db.vouchers.count_documents({
+            "type": "pooled",
+            "dropId": {"$in": drop_id_variants},
+            "pool": "my",
+        })
+        free_public = db.vouchers.count_documents({
+            "type": "pooled",
+            "dropId": {"$in": drop_id_variants},
+            "status": "free",
+            "$or": [{"pool": "public"}, {"pool": {"$exists": False}}],
+        })
+        free_my = db.vouchers.count_documents({
+            "type": "pooled",
+            "dropId": {"$in": drop_id_variants},
+            "status": "free",
+            "pool": "my",
+        })
+        summary.update({
+            "codesTotal": total,
+            "codesFree": free,
+            "codesTotalPublic": total_public,
+            "codesTotalMy": total_my,
+            "codesFreePublic": free_public,
+            "codesFreeMy": free_my,
+        })
 
     for key in ("whitelistUsernames", "visibilityMode"):
         if key in doc:
@@ -2915,64 +3037,55 @@ def admin_add_codes(drop_id):
     user, err = require_admin()
     if err: return err
     data = request.get_json(force=True)
-    dtype = data.get("type")  # optional override
     drop = db.drops.find_one({"_id": _coerce_id(drop_id)})
     if not drop:
         return jsonify({"status": "error", "code": "not_found"}), 404
-    dtype = dtype or drop.get("type", "pooled")
+    dtype = drop.get("type", "pooled")
+    if dtype != "pooled":
+        return jsonify({"status": "error", "code": "bad_request", "reason": "bad_type"}), 400
+    pool_value = data.get("pool") or data.get("voucherPool") or "public"
+    if pool_value not in ("public", "my"):
+        return jsonify({"status": "error", "code": "bad_request", "reason": "bad_pool"}), 400
 
-    if dtype == "personalised":
-        assignments = data.get("assignments") or []
-        docs = []
-        for item in assignments:
-            u = norm_username(item.get("username", ""))
-            c = (item.get("code") or "").strip()
-            if not u or not c:
-                continue
-            docs.append({
-                "type": "personalised",
-                "dropId": str(drop["_id"]),
-                "usernameLower": u,
-                "code": c,
-                "status": "unclaimed",
-                "claimedBy": None,
-                "claimedAt": None
-            })
-        if docs:
-            db.vouchers.insert_many(docs, ordered=False)
-    else:
-        codes = _normalize_codes(data.get("codes"))
-        docs = []
-        for c in codes:
-            docs.append({
-                "type": "pooled",
-                "dropId": str(drop["_id"]),
-                "code": c,
-                "status": "free",
-                "claimedBy": None,
-                "claimedAt": None
-            })
-        if docs:
-            db.vouchers.insert_many(docs, ordered=False)
+    codes = _normalize_codes(data.get("codes"))
+    if not codes:
+        return jsonify({"status": "error", "code": "bad_request", "reason": "empty_codes"}), 400
 
-        whitelist_updates = data.get("whitelistUsernames") or []
-        whitelist_mode = data.get("whitelistMode", "append")
-        if whitelist_updates or whitelist_mode == "replace":
-            merged = []
-            if whitelist_mode == "replace":
-                source = whitelist_updates
-            else:
-                source = (drop.get("whitelistUsernames") or []) + whitelist_updates
-            for item in source:
-                u = norm_username(item)
-                if u and u not in merged:
-                    merged.append(u)
-            db.drops.update_one(
-                {"_id": drop["_id"]},
-                {"$set": {"whitelistUsernames": merged}}
-            )
+    docs = []
+    for c in codes:
+        docs.append({
+            "type": "pooled",
+            "dropId": str(drop["_id"]),
+            "code": c,
+            "status": "free",
+            "claimedBy": None,
+            "claimedAt": None,
+            "pool": pool_value,
+        })
+    try:
+        result = db.vouchers.insert_many(docs, ordered=False)
+    except DuplicateKeyError:
+        return jsonify({"status": "error", "code": "duplicate_code"}), 409
+    except BulkWriteError as exc:
+        # ordered=False may throw BulkWriteError on duplicates; normalize to 409
+        details = exc.details or {}
+        write_errors = details.get("writeErrors") or []
+        dup_count = sum(1 for err in write_errors if err.get("code") == 11000)
+        if dup_count:
+            inserted = details.get("nInserted") or 0
+            return jsonify({
+                "status": "error",
+                "code": "duplicate_code",
+                "inserted": inserted,
+                "duplicates": dup_count,
+            }), 409
+        try:
+            current_app.logger.exception("[admin][drops] append_codes_failed")
+        except Exception:
+            print("[admin][drops] append_codes_failed")
+        return jsonify({"status": "error", "code": "server_error"}), 500
 
-    return jsonify({"status": "ok"})
+    return jsonify({"status": "ok", "dropId": str(drop["_id"]), "inserted": len(result.inserted_ids)}) 
 
 @vouchers_bp.route("/admin/drops/<drop_id>/actions", methods=["POST"])
 def admin_drop_actions(drop_id):
@@ -3010,3 +3123,10 @@ def admin_list_drops():
             items.append(row)
 
     return jsonify({"status": "ok", "items": items})
+
+
+# Manual test checklist:
+# 1) Create pooled drop with pool="my" and 2 codes => 200
+# 2) Append pool="public" codes => inserted count returned
+# 3) Append with a duplicate code => get 409 duplicate_code (not 500)
+# 4) Admin drop summary shows codesTotalPublic includes legacy pool-missing rows
