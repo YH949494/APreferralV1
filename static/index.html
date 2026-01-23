@@ -2131,11 +2131,36 @@ document.addEventListener('DOMContentLoaded', () => {
   const closeInfoHub = document.getElementById("closeInfoHub");
 
   if (infoHubBtn && infoHubModal && closeInfoHub) {
-    infoHubBtn.addEventListener("click", () => (infoHubModal.style.display = "block"));
-    closeInfoHub.addEventListener("click", () => (infoHubModal.style.display = "none"));
-    window.addEventListener("click", (e) => {
-      if (e.target === infoHubModal) infoHubModal.style.display = "none";
+    // Open (stop propagation so other global click handlers don't cancel it)
+    infoHubBtn.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      infoHubModal.style.display = "block";
     });
+
+    // Close button
+    closeInfoHub.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      infoHubModal.style.display = "none";
+    });
+
+    // Clicking backdrop closes (bind to modal itself, not window)
+    infoHubModal.addEventListener("click", (e) => {
+      if (e.target === infoHubModal) {
+        e.preventDefault();
+        e.stopPropagation();
+        infoHubModal.style.display = "none";
+      }
+    });
+
+    // Prevent clicks inside the white panel from bubbling up and triggering backdrop/window handlers
+    const panel = infoHubModal.querySelector("div");
+    if (panel) {
+      panel.addEventListener("click", (e) => {
+        e.stopPropagation();
+      });
+    }
   }
 
   // Tab switching (safe if tabs exist)
