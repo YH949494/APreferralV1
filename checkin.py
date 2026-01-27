@@ -1,17 +1,12 @@
-import os
 from datetime import datetime, timedelta, time
 
 from flask import jsonify, request
-from pymongo import MongoClient
 
 from config import KL_TZ, XP_BASE_PER_CHECKIN, STREAK_MILESTONES, FIRST_CHECKIN_BONUS
+from database import db, get_collection, init_db
 from xp import grant_xp
 
-# MongoDB setup
-MONGO_URL = os.environ.get("MONGO_URL")
-client = MongoClient(MONGO_URL)
-db = client["referral_bot"]
-users_collection = db["users"]
+users_collection = get_collection("users")
 
 # Timezone & XP come from a single source of truth (config.py)
 
@@ -77,7 +72,7 @@ def handle_checkin():
         grant_xp(db, user_id, "first_checkin", "first_checkin", FIRST_CHECKIN_BONUS)
     
     bonus_text = f" 🎉 Streak Bonus: +{bonus_xp} XP!" if bonus_xp else ""
-        first_bonus_text = (
+    first_bonus_text = (
         f" 🎁 First-time bonus: +{FIRST_CHECKIN_BONUS} XP" if first_checkin else ""
     )
     return jsonify({
@@ -88,3 +83,11 @@ def handle_checkin():
         ),
         "next_checkin_time": next_midnight.isoformat()
     })
+
+
+def main():
+    init_db()
+
+
+if __name__ == "__main__":
+    main()
