@@ -1,6 +1,8 @@
 from pymongo import MongoClient, ASCENDING 
+from pymongo.errors import DuplicateKeyError
 import os
 import datetime
+from datetime import timezone, timedelta
 import logging
 import pytz  # use pytz (no ZoneInfo here)
 from xp import grant_xp
@@ -80,6 +82,14 @@ def ensure_indexes() -> None:
     db_ref["channel_subscription_cache"].create_index([("user_id", ASCENDING)], unique=True)
     db_ref["channel_subscription_cache"].create_index([("expires_at", ASCENDING)], expireAfterSeconds=0)
 
+    try:
+        db_ref["admin_xp_cooldowns"].create_index([("expireAt", ASCENDING)], expireAfterSeconds=0)
+    except Exception:
+        logger.warning(
+            "[ADMIN_XP] Failed to create TTL index for admin_xp_cooldowns",
+            exc_info=True,
+        )
+    
     _indexes_initialized = True
 
 
@@ -100,6 +110,7 @@ user_snapshots_col = get_collection("user_snapshots")
 monthly_xp_history_collection = get_collection("monthly_xp_history")                          
 
 channel_subscription_cache = get_collection("channel_subscription_cache")
+admin_xp_cooldowns = get_collection("admin_xp_cooldowns")
 
 def init_user(user_id, username):
     """Create user if missing; keep username in sync if it changed."""
@@ -176,6 +187,22 @@ def get_user_stats(user_id):
     }
 
 # === ADMIN XP CONTROL ===
+def _acquire_admin_xp_cooldown_lock(uid: int, amount: int, *, cooldown_seconds: int) -> bool:
+    now = datetime.datetime.now(timezone.utc)
+    expire_at = now + timedelta(seconds=cooldown_seconds)
+    lock_id = f"admin_xp:{uid}:{amount}"
+    try:
+        admin_xp_cooldowns.insert_one({
+            "_id": lock_id,
+            "uid": uid,
+            "amount": amount,
+            "createdAt": now,
+            "expireAt": expire_at,
+        })
+        return True
+    except DuplicateKeyError:
+        return False
+    
 def update_user_xp(username, amount, unique_key: str | None = None):
     # Match username case-insensitively
     user = users_collection.find_one({
@@ -184,10 +211,30 @@ def update_user_xp(username, amount, unique_key: str | None = None):
 
     if not user:
         return False, "User not found."
+
+    
+    cooldown_seconds = int(os.getenv("ADMIN_XP_COOLDOWN_SECONDS", "60"))
+    if unique_key is None and cooldown_seconds > 0:
+        amount_int = int(amount)
+        ok = _acquire_admin_xp_cooldown_lock(
+            user["user_id"],
+            amount_int,
+            cooldown_seconds=cooldown_seconds,
+        )
+        if not ok:
+            logger.info("[ADMIN_XP] cooldown_hit uid=%s amount=%s", user["user_id"], amount)
+            return {
+                "ok": False,
+                "code": "cooldown",
+                "message": f"Please wait {cooldown_seconds} seconds before granting again.",
+            }
+        lock_id = f"admin_xp:{user['user_id']}:{amount_int}"
     key = unique_key or f"admin:{user['user_id']}:{username.lower()}:{amount}"
     
     granted = grant_xp(db, user["user_id"], "admin_adjust", key, amount)
     if not granted:
+        if unique_key is None and cooldown_seconds > 0:
+            admin_xp_cooldowns.delete_one({"_id": lock_id})        
         return False, "Duplicate admin XP grant ignored."
         
     return True, f"XP {'added' if amount > 0 else 'reduced'} by {abs(amount)}."
