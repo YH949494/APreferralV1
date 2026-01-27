@@ -2034,7 +2034,15 @@ def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None
         user_doc = users_collection.find_one({"usernameLower": usernameLower})
     user_region = user_doc.get("region") if user_doc else None
     is_my_user = _is_my_region(user_region)
- 
+    claim_user_id = None
+    if ctx_uid is not None:
+        claim_user_id = ctx_uid
+    elif user_id:
+        try:
+            claim_user_id = int(user_id)
+        except (TypeError, ValueError):
+            claim_user_id = None
+         
     # Only hide personalised vouchers when the caller truly has no username
     allow_personalised = bool(usernameLower)
     claim_key = usernameLower or user_id
@@ -2109,40 +2117,23 @@ def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None
             if not is_active:
                 continue
             # Need at least one free code OR user already claimed (so they can see their code state)
-            already = db.vouchers.find_one({
-                "type": "pooled",
-                "dropId": {"$in": drop_id_variants},
-                "$or": [
-                    {"claimedByKey": pooled_claim_key},
-                    {"claimedBy": pooled_claim_key},
-                ]
-            })
-            public_free_criteria = {
-                "type": "pooled",
-                "dropId": {"$in": drop_id_variants},
-                "status": "free",
-                "$or": [{"pool": "public"}, {"pool": {"$exists": False}}],
-            }
-            public_remaining = max(0, db.vouchers.count_documents(public_free_criteria))
+            public_remaining = max(0, int(d.get("public_remaining") or 0))
+            already = None
+            if claim_user_id is not None:
+                already = voucher_claims_col.find_one(
+                    {"drop_id": _coerce_id(d.get("_id")), "user_id": claim_user_id, "status": "claimed"}
+                )
             if already:
                 base["userClaimed"] = True
-                base["code"] = already.get("code")
-                claimed_at = _isoformat_kl(already.get("claimedAt"))
+                base["code"] = already.get("voucher_code")
+                claimed_at = _isoformat_kl(already.get("claimed_at"))
                 if claimed_at:
                     base["claimedAt"] = claimed_at       
                 base["remainingApprox"] = public_remaining
                 base["publicRemainingApprox"] = public_remaining
                 pooled_cards.append(base)
             else:
-                my_free_exists = None
-                if is_my_user:
-                    my_free_exists = db.vouchers.find_one({
-                        "type": "pooled",
-                        "dropId": {"$in": drop_id_variants},
-                        "status": "free",
-                        "pool": "my",
-                    }, projection={"_id": 1})
-                if public_remaining > 0 or (is_my_user and my_free_exists) or (not is_my_user and public_remaining == 0):
+                if is_my_user or public_remaining > 0:
                     base["remainingApprox"] = public_remaining
                     base["publicRemainingApprox"] = public_remaining   
                     pooled_cards.append(base)
@@ -2199,6 +2190,7 @@ def claim_personalised(drop_id: str, usernameLower: str, ref: datetime):
 
 def claim_pooled(drop_id: str, claim_key: str, ref: datetime, *, pools: list[str] | None = None):
     drop_id_variants = _drop_id_variants(drop_id)
+    drop_obj_id = _coerce_id(drop_id)
  
     # Idempotent: if already claimed, return same code
     existing = db.vouchers.find_one({
@@ -2214,9 +2206,9 @@ def claim_pooled(drop_id: str, claim_key: str, ref: datetime, *, pools: list[str
 
     pool_order = pools or ["public"]
     doc = None
-    last_criteria = None
     for pool in pool_order:
         if pool == "my":
+            remaining_field = "my_remaining"         
             criteria = {
                 "type": "pooled",
                 "dropId": {"$in": drop_id_variants},
@@ -2224,6 +2216,7 @@ def claim_pooled(drop_id: str, claim_key: str, ref: datetime, *, pools: list[str
                 "pool": "my",
             }
         elif pool == "public":
+            remaining_field = "public_remaining"         
             criteria = {
                 "type": "pooled",
                 "dropId": {"$in": drop_id_variants},
@@ -2233,7 +2226,14 @@ def claim_pooled(drop_id: str, claim_key: str, ref: datetime, *, pools: list[str
         else:
             continue
 
-        last_criteria = criteria
+        remaining_doc = db.drops.find_one_and_update(
+            {"_id": drop_obj_id, remaining_field: {"$gt": 0}},
+            {"$inc": {remaining_field: -1}},
+            return_document=ReturnDocument.AFTER,
+        )
+        if not remaining_doc:
+            continue
+
         doc = db.vouchers.find_one_and_update(
             criteria,
             {
@@ -2249,30 +2249,9 @@ def claim_pooled(drop_id: str, claim_key: str, ref: datetime, *, pools: list[str
         )
         if doc:
             break
-
+        db.drops.update_one({"_id": drop_obj_id}, {"$inc": {remaining_field: 1}})
+     
     if not doc:
-        criteria = last_criteria or {"type": "pooled", "dropId": {"$in": drop_id_variants}, "status": "free"}
-        try:
-            remaining = db.vouchers.count_documents(criteria)
-            total = db.vouchers.count_documents(
-                {"type": "pooled", "dropId": {"$in": drop_id_variants}}
-            )
-            current_app.logger.info(
-                "[claim][sold_out] drop_id=%s remaining=%s total=%s criteria=%s",
-                drop_id,
-                remaining,
-                total,
-                criteria,
-            )
-        except Exception as exc:
-            try:
-                current_app.logger.exception(
-                    "[claim][sold_out] drop_id=%s log_failed err=%s",
-                    drop_id,
-                    exc,
-                )
-            except Exception:
-                print(f"[claim][sold_out] drop_id={drop_id} log_failed err={exc}")
         return {"ok": False, "err": "sold_out"}
     return {"ok": True, "code": doc["code"], "claimedAt": _isoformat_kl(doc.get("claimedAt"))}
 
@@ -2336,10 +2315,8 @@ def api_visible():
                     "adminPreview": True,
                 }
                 if base["type"] == "pooled":
-                    free = db.vouchers.count_documents({"type": "pooled", "dropId": drop_id, "status": "free"})
-                    total = db.vouchers.count_documents({"type": "pooled", "dropId": drop_id})
-                    base["remainingApprox"] = free
-                    base["codesTotal"] = total
+                    public_remaining = max(0, int(d.get("public_remaining") or 0))
+                    base["remainingApprox"] = public_remaining
                 items.append(base)
 
             return jsonify({"visibilityMode": "stacked", "nowUtc": ref.isoformat(), "drops": items}), 200
@@ -2625,6 +2602,10 @@ def api_claim():
     if check_only:
         return jsonify({"status": "ok", "check_only": True, "subscribed": True}), 200
 
+    if is_pool_drop and not is_my_user:
+        public_remaining = max(0, int(voucher.get("public_remaining") or 0))
+        if public_remaining <= 0:
+            return jsonify({"status": "error", "code": "sold_out"}), 410     
 
     claim_drop_id = _coerce_id(drop_id)
     claim_user_id = uid if uid is not None else user_id
@@ -3139,6 +3120,8 @@ def admin_create_drop():
         drop_doc["eligibility"] = clean_eligibility
 
     if dtype == "pooled":
+        drop_doc["public_remaining"] = 0
+        drop_doc["my_remaining"] = 0     
         wl_raw = data.get("whitelistUsernames") or []
         wl_clean = []
         marker_new_joiner = False
@@ -3205,7 +3188,7 @@ def admin_create_drop():
             })
         if docs:
             try:
-                db.vouchers.insert_many(docs, ordered=False)
+                result = db.vouchers.insert_many(docs, ordered=False)
             except DuplicateKeyError:
                 return jsonify({"status": "error", "code": "duplicate_code"}), 409
             except BulkWriteError as exc:
@@ -3215,6 +3198,9 @@ def admin_create_drop():
                 dup_count = sum(1 for err in write_errors if err.get("code") == 11000)
                 if dup_count:
                     inserted = details.get("nInserted") or 0
+                    if inserted:
+                        remaining_field = "public_remaining" if pool_value == "public" else "my_remaining"
+                        db.drops.update_one({"_id": drop_id}, {"$inc": {remaining_field: inserted}})                 
                     return jsonify({
                         "status": "error",
                         "code": "duplicate_code",
@@ -3226,6 +3212,11 @@ def admin_create_drop():
                 except Exception:
                     print("[admin][drops] insert_many_failed")
                 return jsonify({"status": "error", "code": "server_error"}), 500
+            else:
+                inserted = len(result.inserted_ids)
+                if inserted:
+                    remaining_field = "public_remaining" if pool_value == "public" else "my_remaining"
+                    db.drops.update_one({"_id": drop_id}, {"$inc": {remaining_field: inserted}})
 
     return jsonify({"status": "ok", "dropId": str(drop_id)})
     
@@ -3369,6 +3360,9 @@ def admin_add_codes(drop_id):
         dup_count = sum(1 for err in write_errors if err.get("code") == 11000)
         if dup_count:
             inserted = details.get("nInserted") or 0
+            if inserted:
+                remaining_field = "public_remaining" if pool_value == "public" else "my_remaining"
+                db.drops.update_one({"_id": drop["_id"]}, {"$inc": {remaining_field: inserted}})         
             return jsonify({
                 "status": "error",
                 "code": "duplicate_code",
@@ -3381,6 +3375,10 @@ def admin_add_codes(drop_id):
             print("[admin][drops] append_codes_failed")
         return jsonify({"status": "error", "code": "server_error"}), 500
 
+    inserted = len(result.inserted_ids)
+    if inserted:
+        remaining_field = "public_remaining" if pool_value == "public" else "my_remaining"
+        db.drops.update_one({"_id": drop["_id"]}, {"$inc": {remaining_field: inserted}})
     return jsonify({"status": "ok", "dropId": str(drop["_id"]), "inserted": len(result.inserted_ids)}) 
 
 @vouchers_bp.route("/admin/drops/<drop_id>/actions", methods=["POST"])
