@@ -8,36 +8,98 @@ from xp import grant_xp
 KL_TZ = pytz.timezone("Asia/Kuala_Lumpur")
 logger = logging.getLogger(__name__)
 
-MONGO_URL = os.environ.get("MONGO_URL")
-client = MongoClient(MONGO_URL)
-db = client["referral_bot"]
-leaderboard_collection = db["weekly_leaderboard"]
+_client = None
+_db = None
+_indexes_initialized = False
 
-voucher_whitelist = db["voucher_whitelist"]
-voucher_whitelist.create_index([("code", ASCENDING)], unique=True)
-voucher_whitelist.create_index([("username", ASCENDING), ("start_at", ASCENDING)])
-voucher_whitelist.create_index([("end_at", ASCENDING)])
+
+class CollectionProxy:
+    def __init__(self, name: str):
+        self._name = name
+
+    def _collection(self):
+        return get_db()[self._name]
+
+    def __getattr__(self, item):
+        return getattr(self._collection(), item)
+
+    def __repr__(self) -> str:
+        return f"<CollectionProxy name={self._name}>"
+
+
+class DatabaseProxy:
+    def __getitem__(self, name: str):
+        return CollectionProxy(name)
+
+    def __getattr__(self, item):
+        return getattr(get_db(), item)
+
+    def __repr__(self) -> str:
+        return "<DatabaseProxy>"
+
+
+def init_db(mongo_url: str | None = None, db_name: str = "referral_bot") -> None:
+    global _client, _db
+    if _db is not None:
+        return
+    mongo_url = mongo_url or os.environ.get("MONGO_URL")
+    if not mongo_url:
+        raise RuntimeError("MONGO_URL is not configured")
+    _client = MongoClient(mongo_url)
+    _db = _client[db_name]
+    ensure_indexes()
+
+
+def get_db():
+    if _db is None:
+        raise RuntimeError("Database not initialized. Call init_db() first.")
+    return _db
+
+
+def get_collection(name: str) -> CollectionProxy:
+    return CollectionProxy(name)
+
+
+def ensure_indexes() -> None:
+    global _indexes_initialized
+    if _indexes_initialized:
+        return
+    db_ref = get_db()
+    db_ref["voucher_whitelist"].create_index([("code", ASCENDING)], unique=True)
+    db_ref["voucher_whitelist"].create_index([("username", ASCENDING), ("start_at", ASCENDING)])
+    db_ref["voucher_whitelist"].create_index([("end_at", ASCENDING)])
+
+    db_ref["users"].create_index([("user_id", ASCENDING)], unique=True)
+    db_ref["users"].create_index([("username", ASCENDING)])
+
+    db_ref["user_snapshots"].create_index([("user_id", ASCENDING)], unique=True)
+
+    db_ref["monthly_xp_history"].create_index([("user_id", ASCENDING), ("month", ASCENDING)], unique=True)
+    db_ref["monthly_xp_history"].create_index([("month", ASCENDING)])
+
+    db_ref["channel_subscription_cache"].create_index([("user_id", ASCENDING)], unique=True)
+    db_ref["channel_subscription_cache"].create_index([("expires_at", ASCENDING)], expireAfterSeconds=0)
+
+    _indexes_initialized = True
+
+
+db = DatabaseProxy()
+leaderboard_collection = get_collection("weekly_leaderboard")
+voucher_whitelist = get_collection("voucher_whitelist")
 
 # === USERS COLLECTION ===
-users_collection = db["users"]
-users_collection.create_index([("user_id", ASCENDING)], unique=True)
-users_collection.create_index([("username", ASCENDING)])
+users_collection = get_collection("users")
 
 # SNAPSHOT FIELDS — ONLY WRITTEN BY WORKER
 # weekly_xp, monthly_xp, total_xp, weekly_referrals, monthly_referrals, total_referrals, vip_tier, vip_month
 # DEPRECATED — DO NOT USE (ledger-based referrals only)
 # weekly_referral_count, total_referral_count, ref_count_total, monthly_referral_count
 
-user_snapshots_col = db["user_snapshots"]
-user_snapshots_col.create_index([("user_id", ASCENDING)], unique=True)
+user_snapshots_col = get_collection("user_snapshots")
                                 
-monthly_xp_history_collection = db["monthly_xp_history"]
-monthly_xp_history_collection.create_index([("user_id", ASCENDING), ("month", ASCENDING)], unique=True)
-monthly_xp_history_collection.create_index([("month", ASCENDING)])                              
+monthly_xp_history_collection = get_collection("monthly_xp_history")                          
 
-channel_subscription_cache = db["channel_subscription_cache"]
-channel_subscription_cache.create_index([("user_id", ASCENDING)], unique=True)
-channel_subscription_cache.create_index([("expires_at", ASCENDING)], expireAfterSeconds=0)
+channel_subscription_cache = get_collection("channel_subscription_cache")
 
 def init_user(user_id, username):
     """Create user if missing; keep username in sync if it changed."""
