@@ -212,7 +212,6 @@ def update_user_xp(username, amount, unique_key: str | None = None):
     if not user:
         return False, "User not found."
 
-    
     cooldown_seconds = int(os.getenv("ADMIN_XP_COOLDOWN_SECONDS", "60"))
     if unique_key is None and cooldown_seconds > 0:
         amount_int = int(amount)
@@ -229,12 +228,15 @@ def update_user_xp(username, amount, unique_key: str | None = None):
                 "message": f"Please wait {cooldown_seconds} seconds before granting again.",
             }
         lock_id = f"admin_xp:{user['user_id']}:{amount_int}"
-    key = unique_key or f"admin:{user['user_id']}:{username.lower()}:{amount}"
+    if unique_key is None and cooldown_seconds > 0:
+        key = f"admin:{user['user_id']}:{username.lower()}:{amount}:{int(time.time())}"
+    else:
+        key = unique_key or f"admin:{user['user_id']}:{username.lower()}:{amount}"
     
     granted = grant_xp(db, user["user_id"], "admin_adjust", key, amount)
     if not granted:
         if unique_key is None and cooldown_seconds > 0:
-            admin_xp_cooldowns.delete_one({"_id": lock_id})        
+            admin_xp_cooldowns.delete_one({"_id": lock_id})  
         return False, "Duplicate admin XP grant ignored."
         
     return True, f"XP {'added' if amount > 0 else 'reduced'} by {abs(amount)}."
