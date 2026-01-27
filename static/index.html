@@ -281,7 +281,7 @@
 
       <div style="background:#fff; border:1px solid #ddd; border-radius:8px; padding:12px; margin-bottom:16px;">
         <h5 style="margin:0 0 10px 0;">📥 Add to Existing Drop</h5>
-        <div style="display:flex; flex-wrap:wrap; gap:10px;">
+        <div style="display:flex; flex-wrap:wrap; gap:10px; align-items:flex-end;">
           <input id="adm_add_drop_id" type="text" placeholder="Drop ID" style="flex:1 1 200px; padding:8px; border-radius:6px; border:1px solid #ccc;">
           <label style="flex:1 1 160px; font-size:12px; color:#555;">Data type
             <select id="adm_add_kind" style="width:100%; padding:8px; border-radius:6px; border:1px solid #ccc;">
@@ -289,6 +289,12 @@
               <option value="pooled">Pooled codes</option>
             </select>
           </label>
+          <label id="adm_add_pool_label" style="display:none; font-size:12px; color:#555; margin-left:12px;">Pool
+            <select id="adminPool" style="padding:8px 10px; border:1px solid #ccc; border-radius:8px;">
+              <option value="public">Public</option>
+              <option value="my">MY Reserve</option>
+            </select>
+          </label>          
         </div>
         <textarea id="adm_add_text" rows="6" placeholder="Paste data matching the selected type" style="width:100%; margin-top:10px; padding:8px; border-radius:6px; border:1px solid #ccc; font-family:monospace;"></textarea>
         <div style="display:flex; gap:8px; align-items:center; margin-top:6px;">
@@ -912,6 +918,18 @@ if (admAddParseBtn) admAddParseBtn.onclick = () => {
   reader.readAsText(f);
 };
 
+const admAddKind = document.getElementById("adm_add_kind");
+const admAddPoolLabel = document.getElementById("adm_add_pool_label");
+const updateAdmAddPoolVisibility = () => {
+  if (!admAddPoolLabel) return;
+  const kind = admAddKind?.value;
+  admAddPoolLabel.style.display = kind === "pooled" ? "flex" : "none";
+};
+if (admAddKind) {
+  admAddKind.addEventListener("change", updateAdmAddPoolVisibility);
+  updateAdmAddPoolVisibility();
+}
+    
 const admAddBtn = document.getElementById("adm_add_btn");
 if (admAddBtn) admAddBtn.onclick = async () => {
   const dropId = document.getElementById("adm_add_drop_id")?.value.trim();
@@ -930,7 +948,8 @@ if (admAddBtn) admAddBtn.onclick = async () => {
   } else {
     const codes = raw.split(/\r?\n/).map(x => x.trim()).filter(Boolean);
     if (!codes.length) { alert("Provide one CODE per line."); return; }
-    payload = { type: "pooled", codes };
+    const pool = document.getElementById("adminPool")?.value || "public";
+    payload = { type: "pooled", pool, codes };
   }
 
   try {
