@@ -1955,7 +1955,13 @@ def api_add_xp():
         return jsonify({"success": False, "message": "Use @username format."}), 400
 
     idempotency_key = data.get("idempotency_key") or data.get("unique_key")
-    success, message = update_user_xp(username, amount, idempotency_key)
+    result = update_user_xp(username, amount, idempotency_key)
+    if isinstance(result, dict):
+        return (
+            jsonify({"success": False, "message": result["message"], "code": result["code"]}),
+            429,
+        )
+    success, message = result
     return jsonify({"success": success, "message": message})
 
 @app.route("/api/join_requests")
