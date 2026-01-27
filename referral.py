@@ -1,19 +1,16 @@
 from datetime import datetime, timedelta
-from telegram import Bot
-from pymongo import MongoClient
-from pymongo.errors import DuplicateKeyError
-import os
 import logging
+
+from telegram import Bot
+from pymongo.errors import DuplicateKeyError
+
+from database import db, get_collection
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# MongoDB setup
-MONGO_URL = os.environ.get("MONGO_URL")
-client = MongoClient(MONGO_URL)
-db = client["referral_bot"]
-users_collection = db["users"]
+users_collection = get_collection("users")
 invite_link_map_collection = db["invite_link_map"]
 
 # Your Telegram group ID (make sure the bot is admin here)
