@@ -28,6 +28,11 @@ PROFILE_PHOTO_CACHE_TTL_SECONDS = 60
 VERIFY_QUEUE_MAX_ATTEMPTS = int(os.getenv("VERIFY_QUEUE_MAX_ATTEMPTS", "3"))
 VERIFY_QUEUE_BACKOFF_BASE_SECONDS = int(os.getenv("VERIFY_QUEUE_BACKOFF_BASE_SECONDS", "30"))
 VERIFY_QUEUE_BACKOFF_MAX_SECONDS = int(os.getenv("VERIFY_QUEUE_BACKOFF_MAX_SECONDS", "300"))
+IP_KILL_WINDOW_SECONDS = int(os.getenv("IP_KILL_WINDOW_SECONDS", "600"))
+IP_KILL_MAX_SUCCESSES = int(os.getenv("IP_KILL_MAX_SUCCESSES", "2"))
+SUBNET_KILL_MAX_SUCCESSES = int(os.getenv("SUBNET_KILL_MAX_SUCCESSES", "4"))
+KILL_BLOCK_SECONDS = int(os.getenv("KILL_BLOCK_SECONDS", "86400"))
+CLAIM_COOLDOWN_SECONDS = int(os.getenv("CLAIM_COOLDOWN_SECONDS", "180"))
 _BYPASS_WARNING_LOGGED = False
 
 _RAW_OFFICIAL_CHANNEL_ID = getattr(_cfg, "OFFICIAL_CHANNEL_ID", os.getenv("OFFICIAL_CHANNEL_ID"))
@@ -657,6 +662,273 @@ def _append_retention_message(payload: dict, retention_message: str) -> None:
 def _rate_limit_key(prefix: str, *parts):
     return ":".join([prefix] + [str(p) for p in parts if p is not None])
 
+
+def _compute_subnet_key(ip: str) -> str:
+    if not ip:
+        return "unknown"
+    parts = ip.split(".")
+    if len(parts) != 4:
+        return "unknown"
+    try:
+        octets = [int(p) for p in parts]
+    except ValueError:
+        return "unknown"
+    if any(o < 0 or o > 255 for o in octets):
+        return "unknown"
+    return f"{octets[0]}.{octets[1]}.{octets[2]}.0/24"
+
+def _seconds_until(target: datetime | None, now: datetime) -> int:
+    if not target:
+        return 0
+    delta = (target - now).total_seconds()
+    return max(0, int(delta))
+
+def _check_kill_switch(
+    *,
+    ip: str,
+    subnet: str,
+    now: datetime | None = None,
+    rate_limits_col=claim_rate_limits_col,
+):
+    now = now or now_utc()
+    ip_key = _rate_limit_key("kill", "ip", ip or "unknown")
+    ip_doc = rate_limits_col.find_one({"key": ip_key})
+    blocked_until = _as_aware_utc((ip_doc or {}).get("blockedUntil"))
+    if blocked_until and blocked_until > now:
+        retry_seconds = _seconds_until(blocked_until, now)
+        _safe_log(
+            "info",
+            "[kill] action=deny scope=ip ip=%s until=%s",
+            ip or "unknown",
+            blocked_until,
+        )
+        return False, "ip_killed", retry_seconds
+
+    subnet_key = _rate_limit_key("kill", "subnet", subnet or "unknown")
+    subnet_doc = rate_limits_col.find_one({"key": subnet_key})
+    blocked_until = _as_aware_utc((subnet_doc or {}).get("blockedUntil"))
+    if blocked_until and blocked_until > now:
+        retry_seconds = _seconds_until(blocked_until, now)
+        _safe_log(
+            "info",
+            "[kill] action=deny scope=subnet subnet=%s until=%s",
+            subnet or "unknown",
+            blocked_until,
+        )
+        return False, "subnet_killed", retry_seconds
+
+    return True, None, 0
+
+def _apply_kill_counter(
+    *,
+    scope: str,
+    key: str,
+    identifier: str,
+    threshold: int,
+    window_seconds: int,
+    block_seconds: int,
+    now: datetime,
+    rate_limits_col=claim_rate_limits_col,
+):
+    doc = rate_limits_col.find_one({"key": key}) or {}
+    first_at = _as_aware_utc(doc.get("firstAt"))
+    if not first_at or (now - first_at).total_seconds() > window_seconds:
+        first_at = now
+        count = 1
+    else:
+        count = int(doc.get("count", 0) or 0) + 1
+
+    blocked_until = None
+    if count >= threshold:
+        blocked_until = now + timedelta(seconds=block_seconds)
+        _safe_log(
+            "info",
+            "[kill] action=block scope=%s %s=%s count=%s window=%s until=%s",
+            scope,
+            "ip" if scope == "kill_ip" else "subnet",
+            identifier,
+            count,
+            window_seconds,
+            blocked_until,
+        )
+
+    expires_at = now + timedelta(seconds=block_seconds if blocked_until else window_seconds)
+    update_doc = {
+        "key": key,
+        "scope": scope,
+        "count": count,
+        "firstAt": first_at,
+        "expiresAt": expires_at,
+    }
+    if scope == "kill_ip":
+        update_doc["ip"] = identifier
+    else:
+        update_doc["subnet"] = identifier
+
+    update = {"$set": update_doc}
+    if blocked_until:
+        update["$set"]["blockedUntil"] = blocked_until
+    else:
+        update["$unset"] = {"blockedUntil": ""}
+
+    rate_limits_col.update_one({"key": key}, update, upsert=True)
+
+def _apply_kill_success(
+    *,
+    ip: str,
+    subnet: str,
+    now: datetime | None = None,
+    rate_limits_col=claim_rate_limits_col,
+    ip_threshold: int = IP_KILL_MAX_SUCCESSES,
+    subnet_threshold: int = SUBNET_KILL_MAX_SUCCESSES,
+    window_seconds: int = IP_KILL_WINDOW_SECONDS,
+    block_seconds: int = KILL_BLOCK_SECONDS,
+):
+    now = now or now_utc()
+    ip_value = ip or "unknown"
+    subnet_value = subnet or "unknown"
+    _apply_kill_counter(
+        scope="kill_ip",
+        key=_rate_limit_key("kill", "ip", ip_value),
+        identifier=ip_value,
+        threshold=ip_threshold,
+        window_seconds=window_seconds,
+        block_seconds=block_seconds,
+        now=now,
+        rate_limits_col=rate_limits_col,
+    )
+    _apply_kill_counter(
+        scope="kill_subnet",
+        key=_rate_limit_key("kill", "subnet", subnet_value),
+        identifier=subnet_value,
+        threshold=subnet_threshold,
+        window_seconds=window_seconds,
+        block_seconds=block_seconds,
+        now=now,
+        rate_limits_col=rate_limits_col,
+    )
+
+def _check_cooldown(
+    *,
+    ip: str,
+    subnet: str,
+    now: datetime | None = None,
+    rate_limits_col=claim_rate_limits_col,
+):
+    now = now or now_utc()
+    ip_key = _rate_limit_key("cooldown", "ip", ip or "unknown")
+    ip_doc = rate_limits_col.find_one({"key": ip_key})
+    ip_expires = _as_aware_utc((ip_doc or {}).get("expiresAt"))
+    if ip_expires and ip_expires > now:
+        retry_seconds = _seconds_until(ip_expires, now)
+        _safe_log(
+            "info",
+            "[cooldown] action=deny scope=ip ip=%s until=%s",
+            ip or "unknown",
+            ip_expires,
+        )
+        return False, "cooldown", retry_seconds
+
+    subnet_key = _rate_limit_key("cooldown", "subnet", subnet or "unknown")
+    subnet_doc = rate_limits_col.find_one({"key": subnet_key})
+    subnet_expires = _as_aware_utc((subnet_doc or {}).get("expiresAt"))
+    if subnet_expires and subnet_expires > now:
+        retry_seconds = _seconds_until(subnet_expires, now)
+        _safe_log(
+            "info",
+            "[cooldown] action=deny scope=subnet subnet=%s until=%s",
+            subnet or "unknown",
+            subnet_expires,
+        )
+        return False, "cooldown", retry_seconds
+
+    return True, None, 0
+
+def _set_cooldown(
+    *,
+    ip: str,
+    subnet: str,
+    now: datetime | None = None,
+    rate_limits_col=claim_rate_limits_col,
+    cooldown_seconds: int = CLAIM_COOLDOWN_SECONDS,
+):
+    now = now or now_utc()
+    ip_value = ip or "unknown"
+    subnet_value = subnet or "unknown"
+    expires_at = now + timedelta(seconds=cooldown_seconds)
+    rate_limits_col.update_one(
+        {"key": _rate_limit_key("cooldown", "ip", ip_value)},
+        {
+            "$set": {
+                "key": _rate_limit_key("cooldown", "ip", ip_value),
+                "scope": "cooldown_ip",
+                "ip": ip_value,
+                "expiresAt": expires_at,
+            }
+        },
+        upsert=True,
+    )
+    rate_limits_col.update_one(
+        {"key": _rate_limit_key("cooldown", "subnet", subnet_value)},
+        {
+            "$set": {
+                "key": _rate_limit_key("cooldown", "subnet", subnet_value),
+                "scope": "cooldown_subnet",
+                "subnet": subnet_value,
+                "expiresAt": expires_at,
+            }
+        },
+        upsert=True,
+    )
+
+def _build_idempotent_claim_response(existing_claim: dict | None):
+    existing_code = (existing_claim or {}).get("voucher_code")
+    if not existing_code:
+        return None
+    claimed_at = (existing_claim or {}).get("claimed_at")
+    return {
+        "status": "ok",
+        "voucher": {
+            "code": existing_code,
+            "claimedAt": _isoformat_kl(claimed_at) if claimed_at else None,
+        },
+    }
+
+def _acquire_claim_lock(
+    *,
+    drop_id,
+    user_id,
+    client_ip: str,
+    user_agent: str,
+    now: datetime | None = None,
+    claims_col=voucher_claims_col,
+):
+    now = now or now_utc()
+    claim_doc_id = None
+    existing_claim = None
+    claim_doc = {
+        "drop_id": drop_id,
+        "user_id": user_id,
+        "status": "claimed_pending_code",
+        "created_at": now,
+        "updated_at": now,
+        "ip": client_ip,
+        "ua": user_agent,
+    }
+    try:
+        insert_res = claims_col.insert_one(claim_doc)
+        claim_doc_id = insert_res.inserted_id
+    except DuplicateKeyError:
+        existing_claim = claims_col.find_one({"drop_id": drop_id, "user_id": user_id})
+        if existing_claim and existing_claim.get("status") == "failed":
+            retry_claim = claims_col.find_one_and_update(
+                {"_id": existing_claim["_id"], "status": "failed"},
+                {"$set": {"status": "claimed_pending_code", "updated_at": now, "error": None}},
+                return_document=ReturnDocument.AFTER,
+            )
+            if retry_claim:
+                claim_doc_id = retry_claim["_id"]
+    return claim_doc_id, existing_claim
 
 def _check_new_joiner_rate_limits(*, uid: int, ip: str, now: datetime | None = None):
     """
@@ -2327,6 +2599,7 @@ def api_claim():
     audience_type = _drop_audience_type(voucher)
     check_only = bool(body.get("check_only") or body.get("checkOnly")) 
     client_ip = _get_client_ip(request)
+    client_subnet = _compute_subnet_key(client_ip) 
     is_pool_drop = _is_pool_drop(voucher, audience_type)
 
     if is_pool_drop and not _is_new_joiner_audience(audience_type):
@@ -2351,7 +2624,47 @@ def api_claim():
 
     if check_only:
         return jsonify({"status": "ok", "check_only": True, "subscribed": True}), 200
- 
+
+
+    claim_drop_id = _coerce_id(drop_id)
+    claim_user_id = uid if uid is not None else user_id
+    existing_claim = voucher_claims_col.find_one({"drop_id": claim_drop_id, "user_id": claim_user_id})
+    idempotent_payload = _build_idempotent_claim_response(existing_claim)
+    if idempotent_payload:
+        current_app.logger.info(
+            "[claim][IDEMPOTENT_RETURN] drop=%s uid=%s code=%s",
+            drop_id,
+            uid,
+            (existing_claim or {}).get("voucher_code"),
+        )
+        return jsonify(idempotent_payload), 200
+
+    kill_ok, kill_reason, kill_retry = _check_kill_switch(
+        ip=client_ip,
+        subnet=client_subnet,
+        now=now_utc(),
+    )
+    if not kill_ok:
+        return jsonify({
+            "status": "error",
+            "code": "rate_limited",
+            "reason": kill_reason,
+            "message": f"Please try again in {kill_retry} seconds.",
+        }), 429
+
+    cooldown_ok, cooldown_reason, cooldown_retry = _check_cooldown(
+        ip=client_ip,
+        subnet=client_subnet,
+        now=now_utc(),
+    )
+    if not cooldown_ok:
+        return jsonify({
+            "status": "error",
+            "code": "rate_limited",
+            "reason": cooldown_reason,
+            "message": f"Please try again in {cooldown_retry} seconds.",
+        }), 429
+  
     if _is_new_joiner_audience(audience_type):
         current_app.logger.info(
             "[claim] entry drop=%s audience=%s uid=%s ip=%s", drop_id, audience_type, uid, client_ip
@@ -2537,46 +2850,27 @@ def api_claim():
             }), 403
 
     # Claim lock (idempotent per drop+user) before issuing code
-    claim_drop_id = _coerce_id(drop_id)
-    claim_user_id = uid if uid is not None else user_id
     claim_now = now_utc()
     user_agent = request.headers.get("User-Agent", "")
-    claim_doc_id = None
-    try:
-        claim_doc = {
-            "drop_id": claim_drop_id,
-            "user_id": claim_user_id,
-            "status": "claimed_pending_code",
-            "created_at": claim_now,
-            "ip": client_ip,
-            "ua": user_agent,
-        }
-        insert_res = voucher_claims_col.insert_one(claim_doc)
-        claim_doc_id = insert_res.inserted_id
-    except DuplicateKeyError:
-        existing_claim = voucher_claims_col.find_one({"drop_id": claim_drop_id, "user_id": claim_user_id})
-        if existing_claim and existing_claim.get("status") == "failed":
-            retry_claim = voucher_claims_col.find_one_and_update(
-                {"_id": existing_claim["_id"], "status": "failed"},
-                {"$set": {"status": "claimed_pending_code", "updated_at": claim_now, "error": None}},
-                return_document=ReturnDocument.AFTER,
+    claim_doc_id, existing_claim = _acquire_claim_lock(
+        drop_id=claim_drop_id,
+        user_id=claim_user_id,
+        client_ip=client_ip,
+        user_agent=user_agent,
+        now=claim_now,
+    )
+    if claim_doc_id is None:
+        idempotent_payload = _build_idempotent_claim_response(existing_claim)
+        if idempotent_payload:
+            current_app.logger.info(
+                "[claim][IDEMPOTENT_RETURN] drop=%s uid=%s code=%s",
+                drop_id,
+                uid,
+                (existing_claim or {}).get("voucher_code"),
             )
-            if retry_claim:
-                claim_doc_id = retry_claim["_id"]
-        if claim_doc_id is None:
-            existing_code = (existing_claim or {}).get("voucher_code")
-            if existing_code:
-                current_app.logger.info("[claim][IDEMPOTENT_RETURN] drop=%s uid=%s code=%s", drop_id, uid, existing_code)
-                claimed_at = (existing_claim or {}).get("claimed_at")
-                return jsonify({
-                    "status": "ok",
-                    "voucher": {
-                        "code": existing_code,
-                        "claimedAt": _isoformat_kl(claimed_at) if claimed_at else None,
-                    }
-                }), 200
-            current_app.logger.info("[claim][DEDUP] drop=%s uid=%s", drop_id, uid)
-            return jsonify({"status": "error", "code": "already_claimed"}), 409
+            return jsonify(idempotent_payload), 200
+        current_app.logger.info("[claim][DEDUP] drop=%s uid=%s", drop_id, uid)
+        return jsonify({"status": "error", "code": "already_claimed"}), 409
 
     # Claim
     try:
@@ -2630,6 +2924,8 @@ def api_claim():
             },
         )
         current_app.logger.info("[claim][OK] drop=%s uid=%s code=%s", drop_id, uid, result.get("code"))
+        _apply_kill_success(ip=client_ip, subnet=client_subnet, now=now_utc())
+        _set_cooldown(ip=client_ip, subnet=client_subnet, now=now_utc())     
     if _is_new_joiner_audience(audience_type):
         try:
             new_joiner_claims_col.update_one(
