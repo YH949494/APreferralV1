@@ -1,20 +1,14 @@
 import os
 from datetime import datetime, timedelta
 
-from pymongo import MongoClient
 from telegram.ext import ApplicationBuilder, ChatMemberHandler
 from telegram import ChatMemberUpdated
 
-BOT_TOKEN = os.environ["BOT_TOKEN"]
-MONGO_URL = os.environ["MONGO_URL"]
-MONGO_DB = os.environ.get("MONGO_DB", "referral_bot")
+from database import db, init_db
 
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 WELCOME_DROP_ID = os.environ.get("WELCOME_DROP_ID")
 ELIGIBILITY_TTL_HOURS = int(os.environ.get("WELCOME_ELIG_TTL_HOURS", "72"))
-
-mongo = MongoClient(MONGO_URL)
-db = mongo[MONGO_DB]
-
 
 def save_join(cm: ChatMemberUpdated):
     user = cm.new_chat_member.user
@@ -76,6 +70,14 @@ async def on_member(update: ChatMemberUpdated, _):
         save_leave(update)
 
 
-app = ApplicationBuilder().token(BOT_TOKEN).build()
-app.add_handler(ChatMemberHandler(on_member, ChatMemberHandler.CHAT_MEMBER))
-app.run_polling()
+def main():
+    if not BOT_TOKEN:
+        raise SystemExit("BOT_TOKEN is required")
+    init_db()
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    app.add_handler(ChatMemberHandler(on_member, ChatMemberHandler.CHAT_MEMBER))
+    app.run_polling()
+
+
+if __name__ == "__main__":
+    main()
