@@ -32,10 +32,11 @@ from apscheduler.triggers.cron import CronTrigger
 from vouchers import vouchers_bp, ensure_voucher_indexes, process_verification_queue
 from scheduler import settle_pending_referrals, settle_referral_snapshots, settle_xp_snapshots
 
-from pymongo import MongoClient, DESCENDING, ASCENDING, ReturnDocument  # keep if used elsewhere
+from pymongo import DESCENDING, ASCENDING, ReturnDocument  # keep if used elsewhere
 from pymongo.errors import DuplicateKeyError
 import os, asyncio, traceback, csv, io, requests, logging, time
 import pytz
+from database import init_db, db
 
 FIRST_CHECKIN_BONUS_XP = int(os.getenv("FIRST_CHECKIN_BONUS_XP", "200"))
 WELCOME_BONUS_XP = int(os.getenv("WELCOME_BONUS_XP", "20"))
@@ -366,8 +367,7 @@ def process_verification_queue_scheduled(batch_limit: int = 50) -> None:
 # ----------------------------
 # MongoDB Setup
 # ----------------------------
-client = MongoClient(MONGO_URL)
-db = client["referral_bot"]
+init_db(MONGO_URL)
 users_collection = db["users"]
 # SNAPSHOT FIELDS — ONLY WRITTEN BY WORKER
 # weekly_xp, monthly_xp, total_xp, weekly_referrals, monthly_referrals, total_referrals, vip_tier, vip_month
