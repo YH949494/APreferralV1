@@ -503,10 +503,51 @@ def _get_client_ip(req=None) -> str:
     req = req or request
     if not req:
         return ""
+    def _parse_ipv4(value: str) -> list[int] | None:
+        parts = value.split(".")
+        if len(parts) != 4:
+            return None
+        try:
+            octets = [int(p) for p in parts]
+        except ValueError:
+            return None
+        if any(o < 0 or o > 255 for o in octets):
+            return None
+        return octets
+
+    def _is_private_ipv4(value: str) -> bool:
+        octets = _parse_ipv4(value)
+        if not octets:
+            return False
+        first, second = octets[0], octets[1]
+        if first == 10:
+            return True
+        if first == 127:
+            return True
+        if first == 192 and second == 168:
+            return True
+        if first == 172 and 16 <= second <= 31:
+            return True
+        return False
+
+    candidates = []
+    fly_client_ip = req.headers.get("Fly-Client-IP")
+    if fly_client_ip:
+        candidates.append(fly_client_ip)     
     forwarded = req.headers.get("X-Forwarded-For")
     if forwarded:
-        return forwarded.split(",")[0].strip()
-    return req.remote_addr or ""
+        candidates.append(forwarded.split(",")[0])
+    real_ip = req.headers.get("X-Real-IP")
+    if real_ip:
+        candidates.append(real_ip)
+    if req.remote_addr:
+        candidates.append(req.remote_addr)
+
+    cleaned = [value.strip() for value in candidates if value and value.strip()]
+    for value in cleaned:
+        if not _is_private_ipv4(value):
+            return value
+    return cleaned[0] if cleaned else ""
 
 def _guess_username(req, body=None) -> str:
     body = body or {}
@@ -704,18 +745,19 @@ def _check_kill_switch(
         )
         return False, "ip_killed", retry_seconds
 
-    subnet_key = _rate_limit_key("kill", "subnet", subnet or "unknown")
-    subnet_doc = rate_limits_col.find_one({"key": subnet_key})
-    blocked_until = _as_aware_utc((subnet_doc or {}).get("blockedUntil"))
-    if blocked_until and blocked_until > now:
-        retry_seconds = _seconds_until(blocked_until, now)
-        _safe_log(
-            "info",
-            "[kill] action=deny scope=subnet subnet=%s until=%s",
-            subnet or "unknown",
-            blocked_until,
-        )
-        return False, "subnet_killed", retry_seconds
+    if subnet and subnet != "unknown":
+        subnet_key = _rate_limit_key("kill", "subnet", subnet)
+        subnet_doc = rate_limits_col.find_one({"key": subnet_key})
+        blocked_until = _as_aware_utc((subnet_doc or {}).get("blockedUntil"))
+        if blocked_until and blocked_until > now:
+            retry_seconds = _seconds_until(blocked_until, now)
+            _safe_log(
+                "info",
+                "[kill] action=deny scope=subnet subnet=%s until=%s",
+                subnet,
+                blocked_until,
+            )
+            return False, "subnet_killed", retry_seconds
 
     return True, None, 0
 
@@ -797,16 +839,17 @@ def _apply_kill_success(
         now=now,
         rate_limits_col=rate_limits_col,
     )
-    _apply_kill_counter(
-        scope="kill_subnet",
-        key=_rate_limit_key("kill", "subnet", subnet_value),
-        identifier=subnet_value,
-        threshold=subnet_threshold,
-        window_seconds=window_seconds,
-        block_seconds=block_seconds,
-        now=now,
-        rate_limits_col=rate_limits_col,
-    )
+    if subnet_value != "unknown":
+        _apply_kill_counter(
+            scope="kill_subnet",
+            key=_rate_limit_key("kill", "subnet", subnet_value),
+            identifier=subnet_value,
+            threshold=subnet_threshold,
+            window_seconds=window_seconds,
+            block_seconds=block_seconds,
+            now=now,
+            rate_limits_col=rate_limits_col,
+        )
 
 def _check_cooldown(
     *,
@@ -2578,7 +2621,16 @@ def api_claim():
     client_ip = _get_client_ip(request)
     client_subnet = _compute_subnet_key(client_ip) 
     is_pool_drop = _is_pool_drop(voucher, audience_type)
-
+    current_app.logger.info(
+        "[claim][client_ip] remote_addr=%s fly_client_ip=%s x_forwarded_for=%s x_real_ip=%s chosen_ip=%s subnet=%s",
+        request.remote_addr,
+        request.headers.get("Fly-Client-IP"),
+        request.headers.get("X-Forwarded-For"),
+        request.headers.get("X-Real-IP"),
+        client_ip,
+        client_subnet,
+    )
+ 
     if is_pool_drop and not _is_new_joiner_audience(audience_type):
         if not check_channel_subscribed(uid):
             current_app.logger.info("[claim] deny drop=%s uid=%s reason=not_subscribed", drop_id, uid)
