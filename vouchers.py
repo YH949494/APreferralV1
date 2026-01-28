@@ -2234,7 +2234,7 @@ def claim_personalised(drop_id: str, usernameLower: str, ref: datetime):
 def claim_pooled(drop_id: str, claim_key: str, ref: datetime, *, pools: list[str] | None = None):
     drop_id_variants = _drop_id_variants(drop_id)
     drop_obj_id = _coerce_id(drop_id)
- 
+
     # Idempotent: if already claimed, return same code
     existing = db.vouchers.find_one({
         "type": "pooled",
@@ -2248,10 +2248,10 @@ def claim_pooled(drop_id: str, claim_key: str, ref: datetime, *, pools: list[str
         return {"ok": True, "code": existing["code"], "claimedAt": _isoformat_kl(existing.get("claimedAt"))}
 
     pool_order = pools or ["public"]
-    doc = None
+
     for pool in pool_order:
         if pool == "my":
-            remaining_field = "my_remaining"         
+            remaining_field = "my_remaining"
             criteria = {
                 "type": "pooled",
                 "dropId": {"$in": drop_id_variants},
@@ -2259,24 +2259,27 @@ def claim_pooled(drop_id: str, claim_key: str, ref: datetime, *, pools: list[str
                 "pool": "my",
             }
         elif pool == "public":
-            remaining_field = "public_remaining"         
+            remaining_field = "public_remaining"
             criteria = {
                 "type": "pooled",
                 "dropId": {"$in": drop_id_variants},
                 "status": "free",
+                # legacy vouchers missing "pool" are treated as public
                 "$or": [{"pool": "public"}, {"pool": {"$exists": False}}],
             }
         else:
             continue
 
-        remaining_doc = db.drops.find_one_and_update(
-            {"_id": drop_obj_id, remaining_field: {"$gt": 0}},
-            {"$inc": {remaining_field: -1}},
-            return_document=ReturnDocument.AFTER,
-        )
-        if not remaining_doc:
+        # 1) Fast pre-check: if remaining counter already 0, skip querying vouchers.
+        #    (Avoids pointless voucher query work during peak)
+        try:
+            rem = int(db.drops.find_one({"_id": drop_obj_id}, projection={remaining_field: 1}).get(remaining_field, 0))
+        except Exception:
+            rem = 0
+        if rem <= 0:
             continue
 
+        # 2) Try to claim a voucher FIRST (real scarce resource).
         doc = db.vouchers.find_one_and_update(
             criteria,
             {
@@ -2290,14 +2293,40 @@ def claim_pooled(drop_id: str, claim_key: str, ref: datetime, *, pools: list[str
             sort=[("_id", ASCENDING)],
             return_document=ReturnDocument.AFTER
         )
-        if doc:
-            break
-        db.drops.update_one({"_id": drop_obj_id}, {"$inc": {remaining_field: 1}})
-     
-    if not doc:
-        return {"ok": False, "err": "sold_out"}
-    return {"ok": True, "code": doc["code"], "claimedAt": _isoformat_kl(doc.get("claimedAt"))}
+        if not doc:
+            # No free voucher in this pool, try next pool
+            continue
 
+        # 3) Now decrement drop-level remaining counter.
+        #    If we can't decrement (counter is stale/0), rollback voucher to free.
+        updated = db.drops.update_one(
+            {"_id": drop_obj_id, remaining_field: {"$gt": 0}},
+            {"$inc": {remaining_field: -1}}
+        )
+
+        if updated.modified_count != 1:
+            # Rollback voucher claim to avoid counter/voucher mismatch
+            try:
+                db.vouchers.update_one(
+                    {"_id": doc["_id"], "status": "claimed", "claimedByKey": claim_key},
+                    {
+                        "$set": {"status": "free"},
+                        "$unset": {"claimedBy": "", "claimedByKey": "", "claimedAt": ""}
+                    }
+                )
+            except Exception:
+                # If rollback fails, log it; better to surface sold_out than hand out inconsistent state
+                try:
+                    current_app.logger.exception("[claim][rollback_failed] drop=%s pool=%s", drop_id, pool)
+                except Exception:
+                    print(f"[claim][rollback_failed] drop={drop_id} pool={pool}")
+            # Try next pool (or end)
+            continue
+
+        return {"ok": True, "code": doc["code"], "claimedAt": _isoformat_kl(doc.get("claimedAt"))}
+
+    return {"ok": False, "err": "sold_out"}
+ 
 # ---- Public API routes ----
 @vouchers_bp.route("/vouchers/visible", methods=["GET"])
 def api_visible():
