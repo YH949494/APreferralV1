@@ -10,6 +10,7 @@ from vouchers import (
     _check_cooldown,
     _check_kill_switch,
     _compute_subnet_key,
+    _get_client_ip,
     _set_cooldown,
 )
 
@@ -113,8 +114,24 @@ class FakeRateLimitCollection:
             self._id += 1
             self.docs.append(new_doc)
 
+class FakeRequest:
+    def __init__(self, headers=None, remote_addr=None):
+        self.headers = headers or {}
+        self.remote_addr = remote_addr
 
 class VoucherAntiHunterTests(unittest.TestCase):
+    def test_get_client_ip_prefers_fly_header_over_private_remote_addr(self):
+        req = FakeRequest(
+            headers={
+                "Fly-Client-IP": "203.0.113.10",
+                "X-Forwarded-For": "198.51.100.20",
+                "X-Real-IP": "192.0.2.30",
+            },
+            remote_addr="172.16.0.5",
+        )
+        client_ip = _get_client_ip(req)
+        self.assertEqual(client_ip, "203.0.113.10")
+    
     def test_claim_lock_idempotent_duplicate(self):
         claims = FakeClaimsCollection()
         now = datetime.now(timezone.utc)
@@ -218,6 +235,46 @@ class VoucherAntiHunterTests(unittest.TestCase):
         self.assertEqual(reason, "ip_killed")
         self.assertGreater(retry, 0)
 
+    def test_kill_switch_does_not_block_on_unknown_subnet(self):
+        rate_limits = FakeRateLimitCollection()
+        now = datetime.now(timezone.utc)
+        rate_limits.docs.append(
+            {
+                "_id": 1,
+                "key": "kill:subnet:unknown",
+                "blockedUntil": now + timedelta(seconds=300),
+            }
+        )
+        allowed, reason, retry = _check_kill_switch(
+            ip="8.8.8.8",
+            subnet="unknown",
+            now=now,
+            rate_limits_col=rate_limits,
+        )
+        self.assertTrue(allowed)
+        self.assertIsNone(reason)
+        self.assertEqual(retry, 0)
+
+    def test_kill_switch_blocks_when_ip_blocked(self):
+        rate_limits = FakeRateLimitCollection()
+        now = datetime.now(timezone.utc)
+        rate_limits.docs.append(
+            {
+                "_id": 1,
+                "key": "kill:ip:1.2.3.4",
+                "blockedUntil": now + timedelta(seconds=120),
+            }
+        )
+        allowed, reason, retry = _check_kill_switch(
+            ip="1.2.3.4",
+            subnet=_compute_subnet_key("1.2.3.4"),
+            now=now,
+            rate_limits_col=rate_limits,
+        )
+        self.assertFalse(allowed)
+        self.assertEqual(reason, "ip_killed")
+        self.assertGreater(retry, 0)
+    
     def test_cooldown_blocks_subsequent_attempts(self):
         rate_limits = FakeRateLimitCollection()
         now = datetime.now(timezone.utc)
