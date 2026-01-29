@@ -2241,7 +2241,7 @@ Tap to join now 👇
     }
 
     function getLeaderboardName(row) {
-      const name = row?.username ? `@${row.username}` : (row?.first_name || row?.user_id || "Anonymous");
+      const name = row?.username ? row.username.replace(/^@+/, "") : (row?.first_name || row?.user_id || "Anonymous");
       return escapeHtml(name)
     }
     function createPodiumCard(row, rank, metricLabel, championLabel) {
