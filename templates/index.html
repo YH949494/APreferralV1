@@ -2246,9 +2246,13 @@ Tap to join now 👇
     }
 
     function getLeaderboardName(row) {
-      const name = row?.username ? `@${row.username}` : (row?.first_name || row?.user_id || "Anonymous");
+      const raw = (row?.username || row?.first_name || row?.user_id || "Anonymous")
+        .toString()
+        .replace(/^@+/, "");
+      const name = raw.length > 6 ? `${raw.slice(0, 4)}****${raw.slice(-2)}` : raw;
       return escapeHtml(name);
     }
+
 
     function createPodiumCard(row, rank, metricLabel, championLabel) {
       const card = document.createElement("div");
