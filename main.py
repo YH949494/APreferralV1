@@ -1613,18 +1613,27 @@ def mask_username(username):
 def format_username(u, current_user_id, is_admin):
     name = None
     if u.get("username"):
-        name = f"@{u['username']}"
+        name = str(u["username"]).lstrip("@")   # keep pure username
     elif u.get("first_name"):
-        name = u["first_name"]
+        name = str(u["first_name"])
 
     if not name:
         return None
 
+    uid = u.get("user_id")
+    try:
+        uid = int(uid) if uid is not None else None
+    except Exception:
+        uid = None
+
+    try:
+        cur = int(current_user_id) if current_user_id is not None else None
+    except Exception:
+        cur = None
+
     # Mask if not admin & not own account
-    if not is_admin and u.get("user_id") != current_user_id:
-        raw_name = name.lstrip("@")
-        masked = mask_username(raw_name)
-        return f"@{masked}" if name.startswith("@") else masked
+    if (not is_admin) and (uid != cur):
+        return mask_username(name)
 
     # Admin or own account → show full name
     return name
