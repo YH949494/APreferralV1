@@ -497,8 +497,7 @@
     <h3>🏆 Weekly Leaderboard</h3>
     <button class="btn btn-ghost" onclick="loadLeaderboard({ forceRefresh: true })">View Leaderboard</button>
     <div style="display:flex;gap:8px;align-items:center;font-size:12px;color:#666;margin-top:6px;flex-wrap:wrap;">
-      <span id="leaderboard-last-updated">Last updated: --</span>
-      <span style="opacity:0.7;">• 🔄 Refresh every 5 minutes</span>
+      <span id="leaderboard-cadence" style="opacity:0.7;">• 🔄 Refresh every 5 minutes</span>
       <span id="leaderboard-loading" style="display:none;">Refreshing…</span>
     </div>
     <div id="leaderboard-output">Click to load latest rankings...</div>
@@ -2211,13 +2210,15 @@ Tap to join now 👇
       }
     }
 
-    function setLeaderboardMeta(ts, { isStale = false } = {}) {
-      const lastUpdated = document.getElementById("leaderboard-last-updated");
-      const cacheTag = document.getElementById("leaderboard-cache-tag");
-      if (lastUpdated) lastUpdated.textContent = formatLastUpdated(ts);
-      if (cacheTag) cacheTag.style.display = isStale ? "inline-flex" : "none";
-      if (cadence) cadence.textContent = "🔄 Updates every 5 minutes";
-    }
+function setLeaderboardMeta(ts, { isStale = false } = {}) {
+  const lastUpdated = document.getElementById("leaderboard-last-updated");
+  const cacheTag = document.getElementById("leaderboard-cache-tag");
+  const cadence = document.getElementById("leaderboard-cadence");
+  if (lastUpdated) lastUpdated.textContent = formatLastUpdated(ts);
+  if (cacheTag) cacheTag.style.display = isStale ? "inline-flex" : "none";
+  if (cadence) cadence.textContent = "🔄 Updates every 5 minutes";
+}
+
 
     function setLeaderboardLoading(isLoading) {
       const loading = document.getElementById("leaderboard-loading");
