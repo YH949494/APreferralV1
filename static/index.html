@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+  <!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -2240,10 +2240,9 @@ Tap to join now 👇
     }
 
     function getLeaderboardName(row) {
-      const raw = (row?.username || row?.first_name || row?.user_id || "Anonymous")
+      return (row?.username || row?.first_name || row?.user_id || "Anonymous")
         .toString()
         .replace(/^@+/, "");
-      return escapeHtml(name);
     }
 
     function createPodiumCard(row, rank, metricLabel, championLabel) {
