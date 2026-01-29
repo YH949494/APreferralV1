@@ -1,54 +1,2860 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <title>Check-In & Referral</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <script src="https://telegram.org/js/telegram-web-app.js"></script>
-    <style>
-        body {
-            font-family: sans-serif;
-            padding: 20px;
-            background-color: #fff;
-        }
-        button {
-            padding: 10px 20px;
-            font-size: 18px;
-            border: none;
-            background-color: #0088cc;
-            color: white;
-            border-radius: 5px;
-        }
-        p {
-            margin: 20px 0;
-        }
-    </style>
+  <meta charset="UTF-8">
+  <title>Referral & Check-in</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <style>
+    :root {
+      --ap-orange: #FF5E00;
+      --bg-page: #f4f4f4;
+      --bg-card: #ffffff;
+      --text-main: #1f2933;
+      --text-muted: #62717f;
+      --border-light: #e3e7ee;
+      --shadow-soft: 0 6px 14px rgba(15, 23, 42, 0.08);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background-color: var(--bg-page);
+      font-family: "Arial", sans-serif;
+      padding: 20px;
+      color: var(--text-main);
+      font-size: 16px;
+    }
+
+    h2,
+    h3 {
+      text-align: left;
+      font-weight: 600;
+      margin: 0 0 12px;
+    }
+
+    h4 {
+      margin: 0 0 8px;
+      font-weight: 600;
+    }
+
+    .section {
+      background: var(--bg-card);
+      padding: 20px;
+      margin: 15px 0;
+      border-radius: 12px;
+      box-shadow: var(--shadow-soft);
+    }
+
+    .section-header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-bottom: 8px;
+    }
+
+    .section-subtext {
+      margin: 0 0 12px;
+      color: var(--text-muted);
+      font-size: 14px;
+    }
+
+    .badge {
+      background: rgba(255, 94, 0, 0.15);
+      color: var(--ap-orange);
+      font-size: 11px;
+      font-weight: 700;
+      padding: 4px 8px;
+      border-radius: 999px;
+      text-transform: uppercase;
+      letter-spacing: 0.4px;
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      padding: 10px 16px;
+      font-size: 15px;
+      border-radius: 8px;
+      border: 1px solid transparent;
+      cursor: pointer;
+      font-family: inherit;
+      transition: transform 0.08s ease, box-shadow 0.2s ease, background 0.2s ease;
+      text-decoration: none;
+      color: inherit;
+    }
+
+    .btn:hover {
+      transform: translateY(-1px);
+    }
+
+    .btn-primary {
+      background: var(--ap-orange);
+      color: #fff;
+      box-shadow: 0 6px 14px rgba(255, 94, 0, 0.25);
+    }
+
+    .btn-primary:disabled {
+      background: #f3b693;
+      color: #fff;
+      cursor: not-allowed;
+      box-shadow: none;
+    }
+
+    .btn-ghost {
+      background: #f4f7ff;
+      color: #0b5aa5;
+      border: 1px solid #d9e6ff;
+    }
+
+    button {
+      background-color: #0088cc;
+      color: #fff;
+      padding: 10px 20px;
+      font-size: 15px;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      font-family: inherit;
+      margin: 5px 0;
+    }
+
+    button:hover {
+      background-color: #006699;
+    }
+
+    button.copy-code-btn {
+      padding: 6px 12px;
+      font-size: 13px;
+    }
+
+    button.copy-code-btn:hover {
+      background-color: #005fa3;
+    }
+
+    select,
+    input[type="text"],
+    input[type="number"] {
+      width: 100%;
+      padding: 10px;
+      margin: 8px 0;
+      border-radius: 6px;
+      border: 1px solid #ccc;
+      font-size: 14px;
+      font-family: inherit;
+    }
+
+    #referral-link,
+    #checkin-result,
+    #checkin-timer {
+      margin-top: 10px;
+      font-size: 15px;
+    }
+
+    #leaderboard-output {
+      margin-top: 14px;
+      font-size: 14px;
+      line-height: 1.5;
+    }
+
+    .leaderboard-summary {
+      background: #fff7f1;
+      border: 1px solid #ffd8bf;
+      border-radius: 12px;
+      padding: 12px 14px;
+      margin-bottom: 16px;
+      display: grid;
+      gap: 6px;
+      font-size: 14px;
+    }
+
+    .leaderboard-summary .summary-title {
+      font-weight: 600;
+      font-size: 14px;
+    }
+
+    .leaderboard-summary .summary-row {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      gap: 6px;
+    }
+
+    .leaderboard-block {
+      margin-bottom: 18px;
+    }
+
+    .leaderboard-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 10px;
+    }
+
+    .podium {
+      display: flex;
+      gap: 10px;
+      justify-content: center;
+      align-items: flex-end;
+      flex-wrap: wrap;
+      margin-bottom: 10px;
+    }
+
+    .podium-card {
+      background: #fff;
+      border: 1px solid var(--border-light);
+      border-radius: 12px;
+      padding: 12px;
+      min-width: 100px;
+      text-align: center;
+      box-shadow: var(--shadow-soft);
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .podium-card .podium-rank {
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--text-muted);
+    }
+
+    .podium-card .podium-name {
+      font-weight: 600;
+      font-size: 14px;
+      word-break: break-word;
+    }
+
+    .podium-card .podium-score {
+      font-weight: 700;
+      font-size: 15px;
+    }
+
+    .podium-card .podium-label {
+      font-size: 11px;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .podium-1 {
+      border: 2px solid var(--ap-orange);
+      transform: scale(1.08);
+      background: #fff7f1;
+    }
+
+    .podium-1 .podium-score,
+    .podium-1 .podium-name {
+      color: var(--ap-orange);
+    }
+
+    .podium-2 {
+      border: 1.5px solid #c4cbd4;
+      background: #f6f7f9;
+    }
+
+    .podium-3 {
+      border: 1.5px solid #d8b08c;
+      background: #fff6ec;
+    }
+
+    .podium-nudge {
+      margin: 6px 0 12px;
+      color: var(--text-muted);
+      font-size: 13px;
+      text-align: center;
+    }
+
+    .leaderboard-list {
+      display: grid;
+      gap: 8px;
+    }
+
+    .leaderboard-row {
+      background: #f9fafc;
+      border: 1px solid var(--border-light);
+      border-radius: 10px;
+      padding: 8px 12px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+      font-size: 13px;
+    }
+
+    .leaderboard-row .leaderboard-rank {
+      font-weight: 700;
+      color: var(--text-muted);
+      min-width: 30px;
+    }
+
+    .leaderboard-row .leaderboard-name {
+      flex: 1;
+      font-weight: 600;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .leaderboard-row .leaderboard-value {
+      font-weight: 700;
+    }
+
+    .leaderboard-empty {
+      text-align: center;
+      color: var(--text-muted);
+      font-size: 13px;
+      padding: 10px 0;
+    }
+
+    #admin-panel {
+      display: none;
+      background: #fff4e6;
+      border: 1px solid #ffcc80;
+    }
+
+    #admin-panel h3 {
+      color: #d17c00;
+    }
+
+    #campaign-voucher-list {
+      display: none;
+      margin-top: 14px;
+      gap: 12px;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    }
+
+    #campaign-voucher-list .campaign-card {
+      border: 1px solid #d9e6ff;
+      background: #f4f7ff;
+      border-radius: 10px;
+      padding: 12px;
+      text-align: left;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    #campaign-voucher-list .campaign-card h4 {
+      margin: 0 0 6px 0;
+      font-size: 15px;
+      color: #005fa3;
+    }
+
+    #campaign-voucher-list .campaign-card p {
+      margin: 4px 0;
+      color: #333;
+      font-size: 14px;
+    }
+
+    #campaign-voucher-list .campaign-card .campaign-meta {
+      font-size: 12px;
+      color: #666;
+      margin-top: 6px;
+    }
+
+    #campaign-voucher-list .campaign-card button {
+      margin-top: auto;
+    }
+
+    .modal {
+      display: none;
+      position: fixed;
+      z-index: 1000;
+      left: 0;
+      top: 0;
+      width: 100%;
+      height: 100%;
+      background: rgba(0, 0, 0, 0.5);
+      justify-content: center;
+      align-items: center;
+    }
+
+    .modal-content {
+      background: #fff;
+      padding: 20px;
+      border-radius: 10px;
+      text-align: center;
+      width: 300px;
+    }
+
+    .code-block {
+      margin-top: 8px;
+      padding: 10px;
+      border: 1px solid #d9e6ff;
+      background: #f4f7ff;
+      border-radius: 8px;
+      display: flex;
+      flex-direction: column;
+      align-items: stretch;
+      gap: 8px;
+      text-align: left;
+    }
+
+    .code-block .code-text {
+      font-family: "Courier New", monospace;
+      font-size: 14px;
+      word-break: break-all;
+      flex: 1;
+    }
+
+    .code-block .copy-code-btn {
+      align-self: flex-start;
+    }
+
+    .more-grid {
+      display: grid;
+      gap: 10px;
+    }
+
+    .more-actions {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+      gap: 10px;
+    }
+
+    .region-hint {
+      font-size: 13px;
+      color: var(--text-muted);
+      margin-top: 6px;
+    }
+
+    @media (max-width: 520px) {
+      .podium {
+        gap: 8px;
+      }
+
+      .podium-card {
+        min-width: 90px;
+      }
+
+      .podium-1 {
+        transform: scale(1.02);
+      }
+
+      .leaderboard-row {
+        font-size: 12px;
+      }
+    }
+  </style>
 </head>
 <body>
-    <h2>🎁 Daily Check-In</h2>
-    <p>Click below to check in and earn XP.</p>
-    <button onclick="checkIn()">✅ Check In</button>
+  <h2>🎯 Referral & Daily Check-in</h2>
 
-    <h2>📣 Invite Friends</h2>
-    <p>Get your referral link to earn bonus rewards!</p>
-    <button onclick="getReferral()">🔗 Get Referral Link</button>
+  <div class="section" id="region-section" style="display: none;">
+    <div class="section-header">
+      <h3>🌍 Select Your Region</h3>
+    </div>
+    <p class="section-subtext">Select your region to continue.</p>
+    <select id="region-select">
+      <option value="">-- Please choose --</option>
+      <option value="Malaysia">🇲🇾 Malaysia</option>
+      <option value="Thailand">🇹🇭 Thailand</option>
+      <option value="Indonesia">🇮🇩 Indonesia</option>
+      <option value="Other">🌐 Other</option>
+    </select>
+    <button class="btn btn-primary" onclick="setRegion()">Save Region</button>
+    <p id="region-message" class="region-hint"></p>
+  </div>
 
-    <script>
-        const tg = window.Telegram.WebApp;
-        const userId = tg.initDataUnsafe.user.id;
+  <div class="section" id="voucher-section" style="display: none;">
+    <div class="section-header">
+      <h3>🎟️ Campaign Rewards</h3>
+      <span class="badge">HOT</span>
+    </div>
+    <p class="section-subtext">Claim what’s live now. Limited slots.</p>
+    <p id="campaign-voucher-message">Coming soon…</p>
+    <button id="campaign-voucher-btn" type="button" class="btn btn-primary" style="display: none;"></button>
+    <div id="campaign-voucher-list"></div>
 
-        async function checkIn() {
-            const res = await fetch(`/api/checkin?user_id=${userId}`);
-            const data = await res.text();
-            alert(data);
+    <div id="bonus-voucher" style="display: none; margin-top: 16px;">
+      <h4>🎁 VIP Bonus Voucher</h4>
+      <p id="voucher-code">Coming soon…</p>
+      <button class="btn btn-ghost" onclick="copyVoucherCode()">📋 Copy to clipboard</button>
+    </div>
+  </div>
+
+  <div class="section" id="checkin-section">
+    <h3>✅ Daily Check-in</h3>
+    <button class="btn btn-primary" onclick="checkIn()">Check In</button>
+    <p id="checkin-result"></p>
+    <p id="checkin-timer" style="color: gray;"></p>
+  </div>
+
+  <div class="section" id="referral-section">
+    <h3>🔗 Your Referral Link (valid 24h)</h3>
+    <button class="btn btn-primary" onclick="getReferral()">Generate Link</button>
+    <p id="referral-link">Click the button to get your link</p>
+    <button class="btn btn-ghost" onclick="copyReferral()">📋 Copy to clipboard</button>
+  </div>
+
+  <div class="section" id="leaderboard-section">
+    <h3>🏆 Weekly Leaderboard</h3>
+    <button class="btn btn-ghost" onclick="loadLeaderboard({ forceRefresh: true })">View Leaderboard</button>
+    <div style="display:flex;gap:8px;align-items:center;font-size:12px;color:#666;margin-top:6px;flex-wrap:wrap;">
+      <span id="leaderboard-last-updated">Last updated: --</span>
+      <span style="opacity:0.7;">• 🔄 Refresh every 5 minutes</span>
+      <span id="leaderboard-loading" style="display:none;">Refreshing…</span>
+    </div>
+    <div id="leaderboard-output">Click to load latest rankings...</div>
+    <button id="leaderboard-retry" type="button" class="btn btn-ghost" style="display:none;margin-top:8px;">Retry</button>
+  </div>
+
+  <div class="section" id="more-section">
+    <div class="section-header">
+      <h3>➕ More</h3>
+    </div>
+    <div class="more-grid">
+      <div class="more-actions">
+        <a href="https://t.me/advantplayofficial" target="_blank" class="btn btn-ghost">📣 Official Channel</a>
+        <button id="infoHubBtn" type="button" class="btn btn-ghost">ℹ️ Info Hub</button>
+      </div>
+
+      <button id="setAdminSecretBtn" class="btn btn-ghost" style="display:none;">Enter Password</button>
+
+      <div class="section" id="admin-panel">
+        <h3>⚙️ Admin Panel</h3>
+        <button onclick="openAddXP()">➕ Add/Reduce XP</button>
+        <button onclick="viewJoinRequests()">📥 View Join Requests</button>
+        <button onclick="loadPreviousLeaderboard()">🏆 View Past Leaderboard</button>
+        <button onclick="openVoucherModal()">🎁 Create Bonus Voucher</button>
+
+        <div id="adm_drop_container" style="margin-top:18px; text-align:left;">
+          <h4 style="margin-bottom:8px;">🎟️ Voucher Drops</h4>
+          <p style="margin:4px 0 12px 0; color:#666; font-size:13px;">All times are saved in UTC and shown in Kuala Lumpur (UTC+08:00).</p>
+
+          <div style="background:#fff; border:1px solid #ddd; border-radius:8px; padding:12px; margin-bottom:16px;">
+            <h5 style="margin:0 0 10px 0;">➕ Create Drop</h5>
+            <div style="display:flex; flex-wrap:wrap; gap:10px;">
+              <input id="adm_name" type="text" placeholder="Campaign name" style="flex:1 1 220px; padding:8px; border-radius:6px; border:1px solid #ccc;">
+              <input id="adm_pri" type="number" placeholder="Priority (higher = top)" style="flex:1 1 160px; padding:8px; border-radius:6px; border:1px solid #ccc;">
+              <label style="flex:1 1 200px; font-size:12px; color:#555;">Start (KL)
+                <input id="adm_starts" type="datetime-local" style="width:100%; padding:8px; border-radius:6px; border:1px solid #ccc;">
+              </label>
+              <label style="flex:1 1 200px; font-size:12px; color:#555;">End (KL)
+                <input id="adm_ends" type="datetime-local" style="width:100%; padding:8px; border-radius:6px; border:1px solid #ccc;">
+              </label>
+              <label style="flex:1 1 200px; font-size:12px; color:#555;">Type
+                <select id="adm_type" style="width:100%; padding:8px; border-radius:6px; border:1px solid #ccc;">
+                  <option value="personalised">Personalised</option>
+                  <option value="pooled">Pooled</option>
+                </select>
+              </label>
+            </div>
+
+            <div style="margin-top:10px; display:flex; flex-wrap:wrap; gap:10px;">
+              <label style="flex:1 1 200px; font-size:12px; color:#555;">Eligibility Mode
+                <select id="adm_elig_mode" style="width:100%; padding:8px; border-radius:6px; border:1px solid #ccc;">
+                  <option value="public">Public</option>
+                  <option value="tier">VIP Tier</option>
+                  <option value="user_id">User IDs</option>
+                  <option value="admin_only">Admin preview only</option>
+                </select>
+              </label>
+              <div id="adm_elig_values_wrap" style="flex:1 1 260px; display:none;">
+                <p style="margin:0 0 4px 0; font-size:12px; color:#555;">Eligibility Values (comma/newline separated)</p>
+                <textarea id="adm_elig_values" rows="2" placeholder="VIP1, VIP2" style="width:100%; padding:8px; border-radius:6px; border:1px solid #ccc; font-family:monospace;"></textarea>
+              </div>
+              <label style="flex:1 1 200px; font-size:12px; color:#555;">Allowed Regions (optional)
+                <select id="adm_regions" multiple style="width:100%; padding:8px; border-radius:6px; border:1px solid #ccc; min-height:80px;">
+                  <option value="Malaysia">🇲🇾 Malaysia</option>
+                  <option value="Thailand">🇹🇭 Thailand</option>
+                  <option value="Indonesia">🇮🇩 Indonesia</option>
+                  <option value="Other">🌐 Other</option>
+                </select>
+                <span style="font-size:11px; color:#777;">Leave empty for all regions.</span>
+              </label>
+            </div>
+
+            <div id="adm_personalised" style="margin-top:12px;">
+              <p style="margin:0 0 6px 0; font-size:13px; color:#555;">Paste <code>@username,code</code> per line or import CSV:</p>
+              <textarea id="adm_pairs_text" rows="6" placeholder="@player1, CODE123" style="width:100%; padding:8px; border-radius:6px; border:1px solid #ccc; font-family:monospace;"></textarea>
+              <div style="display:flex; gap:8px; align-items:center; margin-top:6px;">
+                <input id="adm_csv_pairs" type="file" accept=".csv,.txt" style="flex:1;">
+                <button id="adm_parse_pairs_btn" type="button">Import CSV</button>
+              </div>
+            </div>
+
+            <div id="adm_pooled" style="margin-top:12px; display:none;">
+              <p style="margin:0 0 6px 0; font-size:13px; color:#555;">Paste one voucher code per line or import CSV. Leave whitelist empty for public pool.</p>
+              <textarea id="adm_codes_text" rows="6" placeholder="CODE123" style="width:100%; padding:8px; border-radius:6px; border:1px solid:#ccc; font-family:monospace;"></textarea>
+              <div style="display:flex; gap:8px; align-items:center; margin-top:6px;">
+                <input id="adm_csv_codes" type="file" accept=".csv,.txt" style="flex:1;">
+                <button id="adm_parse_codes_btn" type="button">Import CSV</button>
+              </div>
+              <textarea id="adm_wl_text" rows="3" placeholder="Whitelist usernames (optional)" style="width:100%; margin-top:8px; padding:8px; border-radius:6px; border:1px solid #ccc; font-family:monospace;"></textarea>
+            </div>
+
+            <button id="adm_create_btn" type="button" style="margin-top:12px;">Create Drop</button>
+          </div>
+
+          <div style="background:#fff; border:1px solid #ddd; border-radius:8px; padding:12px; margin-bottom:16px;">
+            <h5 style="margin:0 0 10px 0;">📥 Add to Existing Drop</h5>
+            <div style="display:flex; flex-wrap:wrap; gap:10px; align-items:flex-end;">
+              <input id="adm_add_drop_id" type="text" placeholder="Drop ID" style="flex:1 1 200px; padding:8px; border-radius:6px; border:1px solid #ccc;">
+              <label style="flex:1 1 160px; font-size:12px; color:#555;">Data type
+                <select id="adm_add_kind" style="width:100%; padding:8px; border-radius:6px; border:1px solid #ccc;">
+                  <option value="personalised">Personalised assignments</option>
+                  <option value="pooled">Pooled codes</option>
+                </select>
+              </label>
+              <label id="adm_add_pool_label" style="display:none; font-size:12px; color:#555; margin-left:12px;">Pool
+                <select id="adminPool" style="padding:8px 10px; border:1px solid #ccc; border-radius:8px;">
+                  <option value="public">Public</option>
+                  <option value="my">MY Reserve</option>
+                </select>
+              </label>
+            </div>
+            <textarea id="adm_add_text" rows="6" placeholder="Paste data matching the selected type" style="width:100%; margin-top:10px; padding:8px; border-radius:6px; border:1px solid #ccc; font-family:monospace;"></textarea>
+            <div style="display:flex; gap:8px; align-items:center; margin-top:6px;">
+              <input id="adm_add_csv" type="file" accept=".csv,.txt" style="flex:1;">
+              <button id="adm_add_parse_btn" type="button">Import CSV</button>
+            </div>
+            <button id="adm_add_btn" type="button" style="margin-top:12px;">Add Data</button>
+          </div>
+
+          <div style="overflow-x:auto;">
+            <table id="adm_table" style="width:100%; border-collapse:collapse; font-size:13px;">
+              <thead>
+                <tr style="background:#f7f7f7;">
+                  <th style="text-align:left; padding:6px;">Name</th>
+                  <th style="padding:6px;">Type</th>
+                  <th style="padding:6px;">Status</th>
+                  <th style="padding:6px;">Window (KL)</th>
+                  <th style="padding:6px;">Stats</th>
+                  <th style="padding:6px;">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr><td colspan="6" style="padding:6px;">Loading…</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- INFO HUB MODAL -->
+  <div id="infoHubModal" style="display:none;position:fixed;z-index:1000;left:0;top:0;width:100%;height:100%;background-color:rgba(0,0,0,0.5);">
+    <div style="background:#fff;margin:8% auto;padding:20px;border-radius:12px;width:92%;max-width:400px;text-align:left;">
+      <h2 style="margin-bottom:15px;">ℹ️ Info Hub</h2>
+
+      <div style="display:flex;gap:6px;margin-bottom:10px;">
+        <button class="tab-btn active" data-tab="tab-event" style="flex:1;padding:8px 10px;border:none;border-radius:6px;background:#007bff;color:#fff;cursor:pointer;">
+          🎉 Event
+        </button>
+        <button class="tab-btn" data-tab="tab-xp" style="flex:1;padding:8px 10px;border:none;border-radius:6px;background:#eaf4ff;color:#007bff;cursor:pointer;">
+          ⭐ XP
+        </button>
+        <button class="tab-btn" data-tab="tab-vip" style="flex:1;padding:8px 10px;border:none;border-radius:6px;background:#eaf4ff;color:#007bff;cursor:pointer;">
+          👑 VIP Tier 1
+        </button>
+      </div>
+
+      <div id="tab-event" class="tab-panel active" style="text-align:left;">
+        <div id="campaign-xmas" style="display:none;">
+          <p style="margin-bottom:8px;"><b>🎉 AdvantPlay Xmas Gift Delight</b></p>
+
+          <ul style="margin:0 0 10px 0; padding:0; list-style:none; line-height:1.6;">
+            <li>📅 1–28 Dec 2025</li>
+            <li>🎁 Win voucher, Limited Edition Merch</li>
+            <li>🏆 Weekly Lucky Draw</li>
+          </ul>
+
+          <a href="https://telegra.ph/AdvantPlay-Community--Xmas-Gift-Delight-11-21" target="_blank" style="display:block; margin-top:8px; width:fit-content;padding:8px 12px; background:#28a745; color:#fff;border-radius:6px; text-decoration:none; font-size:14px;">
+            📜 View T&C
+          </a>
+        </div>
+
+        <hr style="border:none; border-top:1px solid #ddd; margin:12px 0;">
+        <p style="margin:0 0 6px 0;"><b>🎟 Surprise Voucher Drops</b></p>
+        <ul style="margin:0; padding:0; list-style:none; line-height:1.6;">
+          <li>⚡ Can happen <b>anytime</b> — stay alert!</li>
+        </ul>
+
+        <hr style="border:none; border-top:1px solid #eee; margin:8px 0;">
+
+        <p style="margin:0 0 6px 0;"><b>🏆 Top 10 Active Players</b></p>
+        <ul style="margin:0 0 10px 0; padding:0; list-style:none; line-height:1.6;">
+          <li>💸 Bonus vouchers distributed <b>Every Monday</b>.</li>
+        </ul>
+
+        <hr style="border:none; border-top:1px solid #eee; margin:8px 0;">
+
+        <p style="margin:0 0 6px 0;"><b>🔥 #ComebackIsReal (Weekly)</b></p>
+        <ul style="margin:0 0 10px 0; padding:0; list-style:none; line-height:1.6;">
+          <li>🎁 Winners’ vouchers drop <b>Every Thursday</b>.</li>
+        </ul>
+      </div>
+
+      <div id="tab-xp" class="tab-panel" style="display:none; text-align:left;">
+        <p style="margin:0 0 6px 0;"><b>Weekly Top 10 XP = Extra Voucher Code</b></p>
+        <hr style="border:none;border-top:1px solid #ddd;margin:10px 0;">
+
+        <p style="margin:0 0 8px 0;"><b>How to Earn XP</b></p>
+
+        <p style="margin:0 0 4px 0;"><b>✅ Check-in</b></p>
+        <ul style="margin:0 0 8px 0; padding:0; list-style:none; line-height:1.6;">
+          <li>- Daily Check-in: <b>+20 XP</b></li>
+          <li>- Streak bonus:
+            <span style="white-space:nowrap;">
+              (7d <b>+50 XP</b> · 14d <b>+150 XP</b> · 28d <b>+300 XP</b>)
+            </span>
+          </li>
+        </ul>
+
+        <p style="margin:8px 0 4px 0;"><b>🔗 Referral</b></p>
+        <ul style="margin:0 0 8px 0; padding:0; list-style:none; line-height:1.6;">
+          <li>- Referral: <b>+30 XP</b> per member</li>
+          <li>- 3 successful referrals: <b>+200 XP</b> bonus</li>
+        </ul>
+
+        <p style="margin:8px 0 4px 0;"><b>📸 #mywin</b></p>
+        <ul style="margin:0; padding:0; list-style:none; line-height:1.6;">
+          <li>- #mywin submission: <b>+20 XP</b> each</li>
+        </ul>
+
+        <a href="https://t.me/+tgGbOPvp1p05NjA9" target="_blank" style="display:inline-block;margin-top:10px;margin-left:10px;background:#007bff;color:#fff;text-decoration:none;font-size:12px;padding:3px 8px;border-radius:6px;">
+          📸 Submit Now
+        </a>
+      </div>
+
+      <div id="tab-vip" class="tab-panel" style="display:none; text-align:left;">
+        <p style="margin-bottom:8px;"><b>VIP Tier 1 (Monthly)</b></p>
+        <ul style="margin:0; padding:0; list-style:none; line-height:1.6;">
+          <li>- Reach 800 Monthly XP → VIP Tier 1</li>
+          <li>- Below 800 at refresh → Back to Normal</li>
+          <li>- VIP unlocks Bonus Voucher</li>
+          <li>- VIP vouchers: limited, first come first served</li>
+        </ul>
+      </div>
+
+      <button id="closeInfoHub" style="margin-top:20px;padding:10px 20px;background:#007bff;color:#fff;border:none;border-radius:8px;cursor:pointer;width:100%;">
+        Close
+      </button>
+    </div>
+  </div>
+
+  <!-- XP Modal -->
+  <div id="xp-modal" class="modal">
+    <div class="modal-content">
+      <h3>Adjust XP</h3>
+      <input id="xp-user" type="text" placeholder="@username">
+      <input id="xp-amount" type="number" placeholder="Amount (/-)">
+      <button onclick="submitXPChange()">Submit</button>
+      <button onclick="closeXPModal()">Cancel</button>
+    </div>
+  </div>
+
+  <!-- Voucher Modal -->
+  <div id="voucher-modal" class="modal">
+    <div class="modal-content">
+      <h3>Create Bonus Voucher</h3>
+      <input id="voucher-code-input" type="text" placeholder="Voucher Code">
+      <input id="voucher-expiry-input" type="datetime-local" placeholder="Start Time">
+      <button onclick="submitVoucher()">Create</button>
+      <button onclick="closeVoucherModal()">Cancel</button>
+    </div>
+  </div>
+
+  <script>
+    /** Minimal qs replacement (no external lib needed) */
+    window.qs = {
+      parse: (search, opts = {}) => {
+        const s = (opts.ignoreQueryPrefix && search.startsWith("?")) ? search.slice(1) : search;
+        const sp = new URLSearchParams(s);
+        return Object.fromEntries(sp.entries());
+      },
+      stringify: (obj = {}) => {
+        const sp = new URLSearchParams();
+        for (const [k, v] of Object.entries(obj)) {
+          if (v !== undefined && v !== null) sp.append(k, String(v));
+        }
+        return sp.toString();
+      },
+      get: (key, search = location.search) => {
+        const s = typeof search === "string" ? search : String(search || "");
+        const sp = new URLSearchParams(s.startsWith("?") ? s : `?${s}`);
+        return sp.get(key);
+      },
+      has: (key, search = location.search) => {
+        const s = typeof search === "string" ? search : String(search || "");
+        const sp = new URLSearchParams(s.startsWith("?") ? s : `?${s}`);
+        return sp.has(key);
+      }
+    };
+  </script>
+
+  <script>
+    function getAdminSecret() {
+      const sp = new URLSearchParams(location.search);
+      const param = (sp.get("admin_secret") || "").trim();
+      if (param) {
+        try { localStorage.setItem("X-Admin-Secret", param); } catch {}
+        try {
+          const url = new URL(location.href);
+          url.searchParams.delete("admin_secret");
+          history.replaceState(null, "", url.toString());
+        } catch {}
+        return param;
+      }
+      try { return localStorage.getItem("X-Admin-Secret") || ""; } catch { return ""; }
+    }
+
+    function getAdminUserId() {
+      const tgApp = window.Telegram?.WebApp;
+      const tgId = tgApp?.initDataUnsafe?.user?.id ?? null;
+      if (tgId !== undefined && tgId !== null && tgId !== "") {
+        return String(tgId);
+      }
+      const qs = new URLSearchParams(location.search);
+      return qs.get("user_id") || qs.get("id") || "";
+    }
+
+    function buildAdminQueryTail(extra = {}) {
+      const params = new URLSearchParams();
+      const userId = getAdminUserId();
+      if (userId) {
+        params.set("user_id", String(userId));
+      }
+      const adminSecret = getAdminSecret();
+      if (adminSecret) {
+        params.set("admin_secret", adminSecret);
+      }
+      if (extra && typeof extra === "object") {
+        Object.entries(extra).forEach(([key, value]) => {
+          if (value === undefined || value === null || value === "") return;
+          params.set(key, value);
+        });
+      }
+      const qs = params.toString();
+      return qs ? `?${qs}` : "";
+    }
+  </script>
+
+  <script>
+    (function adminSecretUI() {
+      const btn = document.getElementById("setAdminSecretBtn");
+      if (!btn) return;
+        
+      const inTelegram = !!(window.Telegram?.WebApp?.initData || window.Telegram?.WebApp?.initDataUnsafe);
+      const hasSecret = !!getAdminSecret();
+
+      if (!inTelegram || hasSecret) {
+        btn.style.display = "inline-block";
+      }
+
+      const title = document.querySelector("h2");
+      if (title) {
+        let taps = 0, timer = null;
+        title.addEventListener("click", () => {
+          taps++;
+          clearTimeout(timer);
+          timer = setTimeout(() => { taps = 0; }, 450);
+          if (taps >= 3) {
+            taps = 0;
+            openSecretPrompt();
+          }
+        });
+      }
+
+      btn.addEventListener("click", openSecretPrompt);
+
+      async function openSecretPrompt() {
+        const val = prompt("Enter admin secret:");
+        if (!val) return;
+        try { localStorage.setItem("X-Admin-Secret", val.trim()); } catch {}
+        const ok = await validateSecret();
+        if (ok) {
+          alert("✅ Secret accepted. Enabling admin panel…");
+          const panel = document.getElementById("admin-panel");
+          if (panel) panel.style.display = "block";
+          try { adm_list && adm_list(); } catch {}
+        } else {
+          try { localStorage.removeItem("X-Admin-Secret"); } catch {}
+          alert("❌ Secret rejected (401). Please try again.");
+        }
+      }
+
+      async function validateSecret() {
+        try {
+          const res = await v2Fetch("/v2/miniapp/admin/drops_v2", {
+            headers: {
+              "X-Admin-Secret": getAdminSecret(),
+              "Authorization": "Bearer " + getAdminSecret()
+            }
+          });
+          return res.ok;
+        } catch {
+          return false;
+        }
+      }
+    })();
+  </script>
+
+  <script>
+    let CURRENT_USERNAME = window.CURRENT_USERNAME || "";
+    try {
+      if (window.Telegram?.WebApp?.initDataUnsafe?.user?.username) {
+        CURRENT_USERNAME = Telegram.WebApp.initDataUnsafe.user.username || CURRENT_USERNAME;
+      }
+    } catch (_) {}
+    if (!CURRENT_USERNAME) {
+      const qs = new URLSearchParams(location.search);
+      CURRENT_USERNAME = qs.get("username") || "";
+    }
+  </script>
+
+  <script>
+    const tg = window.Telegram?.WebApp;
+
+    const API_V2 = "/v2/miniapp";
+    let latestInitData = "";
+
+    function getLatestInitData(candidate = "") {
+      if (typeof candidate === "string" && candidate.length) {
+        latestInitData = candidate;
+        return latestInitData;
+      }
+      if (latestInitData) {
+        return latestInitData;
+      }
+      const qsInit = new URLSearchParams(location.search).get("init_data") || "";
+      if (qsInit) {
+        latestInitData = qsInit;
+      }
+      return latestInitData;
+    }
+
+    async function waitForInitData(timeoutMs = 8000, intervalMs = 50) {
+      if (getAdminSecret()) return getLatestInitData("");
+
+      const qs = new URLSearchParams(location.search);
+      const deadline = Date.now() + timeoutMs;
+
+      while (Date.now() < deadline) {
+        const candidate =
+          (typeof tg?.initData === "string" && tg.initData.length ? tg.initData : "") ||
+          (typeof window.Telegram?.WebApp?.initData === "string" && window.Telegram.WebApp.initData.length
+            ? window.Telegram.WebApp.initData
+            : "") ||
+          qs.get("init_data") ||
+          "";
+
+        const stored = getLatestInitData(candidate);
+        if (stored) {
+          return stored;
         }
 
-        async function getReferral() {
-            const res = await fetch(`/api/referral?user_id=${userId}`);
-            const link = await res.text();
-            navigator.clipboard.writeText(link);
-            alert("Copied referral link:\n" + link);
+        await new Promise((resolve) => setTimeout(resolve, intervalMs));
+      }
+
+      return getLatestInitData("");
+    }
+
+    function v2Headers(extras = {}, initDataOverride = "") {
+      const h = { "Content-Type": "application/json", ...extras };
+      const urlQS = new URLSearchParams(location.search);
+
+      const candidateInitData =
+        (typeof initDataOverride === "string" && initDataOverride.length ? initDataOverride : "") ||
+        (typeof tg?.initData === "string" && tg.initData.length ? tg.initData : "") ||
+        (typeof window.Telegram?.WebApp?.initData === "string" && window.Telegram.WebApp.initData.length
+          ? window.Telegram.WebApp.initData
+          : "") ||
+        urlQS.get("init_data") ||
+        "";
+
+      const initDataRaw = getLatestInitData(candidateInitData);
+
+      if (initDataRaw) {
+        h["X-Telegram-Init-Data"] = initDataRaw;
+        h["X-Telegram-Init"] = initDataRaw;
+      }
+
+      const adminSecret = getAdminSecret();
+
+      if (adminSecret) {
+        h["X-Admin-Secret"] = adminSecret;
+        h["Authorization"] = `Bearer ${adminSecret}`;
+      }
+      const usernameHint =
+        CURRENT_USERNAME || tg?.initDataUnsafe?.user?.username || urlQS.get("username") || "";
+      if (usernameHint) {
+        h["X-Admin-Username"] = usernameHint;
+      }
+
+      const tgUserId = tg?.initDataUnsafe?.user?.id;
+      const userIdFromQS = urlQS.get("user_id") || urlQS.get("id");
+      const userIdHint =
+        tgUserId !== undefined && tgUserId !== null && tgUserId !== ""
+          ? tgUserId
+          : userIdFromQS || "";
+      if (userIdHint) {
+        h["X-Admin-User-Id"] = String(userIdHint);
+      }
+
+      return h;
+    }
+
+    (function addAdminClearButton() {
+      try {
+        const bar = document.createElement("div");
+        bar.style.cssText = "margin:8px 0; display:flex; gap:8px; align-items:center;";
+        const btn = document.createElement("button");
+        btn.textContent = "Clear Admin Mode";
+        btn.style.cssText = "padding:6px 10px; border:1px solid #ddd; background:#fff; border-radius:8px; cursor:pointer;";
+        btn.onclick = () => {
+          try { localStorage.removeItem('X-Admin-Secret'); } catch {}
+          alert("Admin mode cleared. Reloading…");
+          location.reload();
+        };
+        const hasAdmin = !!getAdminSecret();
+        if (hasAdmin) {
+          bar.appendChild(btn);
+          const target = document.querySelector("h2") || document.body;
+          target.parentNode.insertBefore(bar, target.nextSibling);
         }
-    </script>
+      } catch {}
+    })();
+
+    function friendlyAuthFail(el) {
+      if (!el) return;
+      el.innerHTML = `
+        <div style="padding:10px;background:#fff3f3;border:1px solid #ffd6d6;border-radius:8px;">
+          <b>Coming Soon</b>
+        </div>`;
+    }
+
+    function withInitDataInQuery(path, initDataRaw) {
+      if (!initDataRaw) return path;
+
+      try {
+        const url = new URL(path, window.location.origin);
+        if (!url.searchParams.has("init_data")) {
+          url.searchParams.set("init_data", initDataRaw);
+        }
+
+        if (path.startsWith("http://") || path.startsWith("https://")) {
+          return url.toString();
+        }
+        return `${url.pathname}${url.search}${url.hash}`;
+      } catch (_) {
+        return path;
+      }
+    }
+
+    async function v2Fetch(path, options = {}) {
+      const { headers: extraHeaders, ...rest } = options || {};
+      let initDataRaw = await waitForInitData();
+      let headers = v2Headers(extraHeaders || {}, initDataRaw);
+      let target = withInitDataInQuery(path, initDataRaw);
+
+      let res = await fetch(target, { ...rest, headers });
+      if (res.status === 401) {
+        initDataRaw = await waitForInitData(3000);
+        headers = v2Headers(extraHeaders || {}, initDataRaw);
+        target = withInitDataInQuery(path, initDataRaw);
+        res = await fetch(target, { ...rest, headers });
+      }
+      return res;
+    }
+
+    function splitList(text) {
+      return (text || "").split(/[\s,;]+/).map(x => x.trim()).filter(Boolean);
+    }
+
+    function escapeHtml(str = "") {
+      return String(str)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/\"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+    }
+
+    function ensureCodeBlock(claimBtn, codeText) {
+      if (!claimBtn) return;
+      let container = claimBtn.nextElementSibling;
+      if (container && container.classList && container.classList.contains("code") && !container.classList.contains("code-block")) {
+        container.remove();
+        container = claimBtn.nextElementSibling;
+      }
+      if (!container || !container.classList?.contains("code-block")) {
+        container = document.createElement("div");
+        container.className = "code-block";
+        container.innerHTML = `<div class="code-text"></div><button type=\"button\" class=\"copy-code-btn\">Copy to clipboard</button>`;
+        claimBtn.insertAdjacentElement("afterend", container);
+      }
+
+      container.dataset.code = codeText;
+      const textEl = container.querySelector(".code-text");
+      if (textEl) textEl.textContent = codeText;
+
+      const copyBtn = container.querySelector(".copy-code-btn");
+      if (copyBtn) {
+        copyBtn.dataset.copyCode = codeText;
+        copyBtn.textContent = "Copy to clipboard";
+      }
+    }
+
+    function fmtKL(iso) {
+      if (!iso) return "";
+      try {
+        return new Date(iso).toLocaleString("en-MY", {
+          timeZone: "Asia/Kuala_Lumpur",
+          day: "2-digit", month: "2-digit", year: "numeric",
+          hour: "2-digit", minute: "2-digit", second: "2-digit",
+          hour12: true
+        });
+      } catch { return String(iso); }
+    }
+
+    function toKLStringFromNative(value) {
+      if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(value || "")) return "";
+      const [d, t] = value.split("T");
+      return `${d} ${t}:00`;
+    }
+
+    const admTypeEl = document.getElementById("adm_type");
+    if (admTypeEl) {
+      admTypeEl.addEventListener("change", (e) => {
+        const mode = e.target.value;
+        const personalised = document.getElementById("adm_personalised");
+        const pooled = document.getElementById("adm_pooled");
+        if (personalised) personalised.style.display = mode === "personalised" ? "block" : "none";
+        if (pooled) pooled.style.display = mode === "pooled" ? "block" : "none";
+      });
+    }
+
+    async function adm_list() {
+      const tbody = document.querySelector("#adm_table tbody");
+      if (!tbody) return;
+      tbody.innerHTML = `<tr><td colspan="6" style="padding:6px;">Loading…</td></tr>`;
+
+      try {
+        const userId = getAdminUserId();
+        if (!userId) {
+          tbody.innerHTML = `<tr><td colspan="6" style="padding:6px;">Admin user ID required. Open via Telegram to manage drops.</td></tr>`;
+          return;
+        }
+        const tail = buildAdminQueryTail();
+        const res = await v2Fetch(`${API_V2}/admin/drops_v2${tail}`);
+        if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+        const data = await res.json();
+        if (data.status !== "ok") throw new Error(JSON.stringify(data));
+
+        tbody.innerHTML = "";
+        (data.items || []).forEach((d) => {
+          const id = d.dropId || d.id || d._id;
+          const stats = d.type === "pooled"
+            ? `${d.codesFree}/${d.codesTotal} free`
+            : `${d.claimed}/${d.assigned} claimed`;
+
+          const tr = document.createElement("tr");
+          tr.innerHTML = `
+            <td style="text-align:left; padding:6px;">${d.name} <span style="font-size:12px;color:#666;">[${d.priority}]</span></td>
+            <td>${d.type}</td>
+            <td>${d.status}</td>
+            <td>${fmtKL(d.startsAt)} → ${fmtKL(d.endsAt)}</td>
+            <td>${stats}</td>
+            <td>
+              <button data-op="start_now" data-id="${id}">Start</button>
+              <button data-op="pause"     data-id="${id}">Pause</button>
+              <button data-op="end_now"   data-id="${id}">End</button>
+              <button class="copy-drop-id-btn" data-dropid="${id}">📋 Copy ID</button>
+            </td>`;
+          tbody.appendChild(tr);
+        });
+
+        if (!tbody.children.length) {
+          tbody.innerHTML = `<tr><td colspan="6" style="padding:6px;">No drops found.</td></tr>`;
+        }
+      } catch (e) {
+        tbody.innerHTML = `<tr><td colspan="6" style="padding:6px;">Voucher endpoint error: ${e.message}</td></tr>`;
+      }
+    }
+
+    const admCreateBtn = document.getElementById("adm_create_btn");
+    if (admCreateBtn) admCreateBtn.onclick = adm_create;
+
+    const admEligMode = document.getElementById("adm_elig_mode");
+    if (admEligMode) {
+      admEligMode.onchange = toggleAdmEligValues;
+      toggleAdmEligValues();
+    }
+
+    function toggleAdmEligValues() {
+      const mode = document.getElementById("adm_elig_mode")?.value || "public";
+      const wrap = document.getElementById("adm_elig_values_wrap");
+      const textarea = document.getElementById("adm_elig_values");
+      if (!wrap || !textarea) return;
+      if (mode === "tier") {
+        wrap.style.display = "block";
+        textarea.placeholder = "VIP1, VIP2";
+      } else if (mode === "user_id") {
+        wrap.style.display = "block";
+        textarea.placeholder = "12345, 67890";
+      } else {
+        wrap.style.display = "none";
+      }
+    }
+
+    async function adm_create() {
+      const typeEl = document.querySelector("#adm_type");
+      if (!typeEl) return;
+      const type = typeEl.value;
+      const payload = {
+        type,
+        name: document.querySelector("#adm_name").value.trim(),
+        startsAtLocal: toKLStringFromNative(document.querySelector("#adm_starts").value.trim()),
+        priority: Number(document.querySelector("#adm_pri").value || 100),
+      };
+
+      const eligMode = document.querySelector("#adm_elig_mode")?.value || "public";
+      const eligValues = document.querySelector("#adm_elig_values")?.value || "";
+      const eligibility = { mode: eligMode };
+
+      if (eligMode === "tier" || eligMode === "user_id") {
+        const parts = eligValues.split(/[\n,]/).map(x => x.trim()).filter(Boolean);
+        if (!parts.length) {
+          alert("Please provide eligibility values."); return;
+        }
+        if (eligMode === "tier") {
+          eligibility.allow = parts;
+        } else {
+          const ids = parts.map(Number).filter(n => Number.isFinite(n));
+          if (!ids.length) { alert("Please provide numeric user IDs."); return; }
+          eligibility.allow = ids;
+        }
+      }
+
+      if (eligibility.mode !== "public" || eligibility.allow?.length) {
+        payload.eligibility = eligibility;
+      }
+
+      const regionSel = document.getElementById("adm_regions");
+      const regions = regionSel ? Array.from(regionSel.selectedOptions).map(o => o.value).filter(Boolean) : [];
+      if (regions.length) {
+        payload.audience = { regions };
+      }
+
+      const endsValue = (document.querySelector("#adm_ends")?.value || "").trim();
+      const endsAtLocal = toKLStringFromNative(endsValue);
+      if (endsAtLocal) {
+        payload.endsAtLocal = endsAtLocal;
+      }
+
+      if (!payload.name || !payload.startsAtLocal) {
+        alert("Name and Start Time are required."); return;
+      }
+
+      if (type === "personalised") {
+        const lines = (document.querySelector("#adm_pairs_text").value || "")
+          .split(/\r?\n/).map(x => x.trim()).filter(Boolean);
+        const assignments = lines.map(line => {
+          const [u, c] = line.split(/[,\t]/).map(s => s?.trim());
+          return u && c ? { username: u, code: c } : null;
+        }).filter(Boolean);
+        if (!assignments.length) { alert("Please provide username,code pairs."); return; }
+        payload.assignments = assignments;
+      } else {
+        const codes = (document.querySelector("#adm_codes_text").value || "")
+          .split(/\r?\n/).map(x => x.trim()).filter(Boolean);
+        if (!codes.length) { alert("Please provide codes."); return; }
+        payload.codes = codes;
+        const wl = splitList(document.querySelector("#adm_wl_text").value);
+        if (wl.length) payload.whitelistUsernames = wl;
+      }
+
+      try {
+        const userId = getAdminUserId();
+        if (!userId) { alert("Missing admin user id. Open via Telegram to continue."); return; }
+        const tail = buildAdminQueryTail();
+        const res = await v2Fetch(`${API_V2}/admin/drops${tail}`, {
+          method: "POST",
+          body: JSON.stringify(payload)
+        });
+
+        const data = await res.json();
+        if (!res.ok || data.status !== "ok") throw new Error(JSON.stringify(data));
+        alert(`Created drop: ${data.dropId}`);
+        adm_list();
+      } catch (e) {
+        alert(`Create failed: ${e.message}`);
+      }
+    }
+
+    const admAddParseBtn = document.getElementById("adm_add_parse_btn");
+    if (admAddParseBtn) admAddParseBtn.onclick = () => {
+      const f = document.getElementById("adm_add_csv")?.files?.[0];
+      if (!f) return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        const lines = (reader.result || "").toString().split(/\r?\n/);
+        const header = (lines[0] || "").toLowerCase();
+        let out = "";
+        if (header.includes("username") && header.includes("code")) {
+          for (let i = 1; i < lines.length; i++) {
+            const [u, c] = (lines[i] || "").split(/,|\t/).map(s => s?.trim());
+            if (u && c) out += `${u},${c}\n`;
+          }
+        } else {
+          for (let i = 0; i < lines.length; i++) {
+            const c = (lines[i] || "").trim();
+            if (c) out += `${c}\n`;
+          }
+        }
+        const target = document.getElementById("adm_add_text");
+        if (target) target.value = out.trim();
+      };
+      reader.readAsText(f);
+    };
+
+    const admAddKind = document.getElementById("adm_add_kind");
+    const admAddPoolLabel = document.getElementById("adm_add_pool_label");
+    const updateAdmAddPoolVisibility = () => {
+      if (!admAddPoolLabel) return;
+      const kind = admAddKind?.value;
+      admAddPoolLabel.style.display = kind === "pooled" ? "flex" : "none";
+    };
+    if (admAddKind) {
+      admAddKind.addEventListener("change", updateAdmAddPoolVisibility);
+      updateAdmAddPoolVisibility();
+    }
+
+    const admAddBtn = document.getElementById("adm_add_btn");
+    if (admAddBtn) admAddBtn.onclick = async () => {
+      const dropId = document.getElementById("adm_add_drop_id")?.value.trim();
+      const kind = document.getElementById("adm_add_kind")?.value;
+      const raw = document.getElementById("adm_add_text")?.value.trim();
+      if (!dropId || !raw) { alert("Drop ID and data are required."); return; }
+
+      let payload = {};
+      if (kind === "personalised") {
+        const assignments = raw.split(/\r?\n/).map(line => {
+          const [u, c] = line.split(/[,\t]/).map(x => x?.trim());
+          return u && c ? { username: u, code: c } : null;
+        }).filter(Boolean);
+        if (!assignments.length) { alert("Provide username,code lines."); return; }
+        payload = { type: "personalised", assignments };
+      } else {
+        const codes = raw.split(/\r?\n/).map(x => x.trim()).filter(Boolean);
+        if (!codes.length) { alert("Provide one CODE per line."); return; }
+        const pool = document.getElementById("adminPool")?.value || "public";
+        payload = { type: "pooled", pool, codes };
+      }
+
+      try {
+        const userId = getAdminUserId();
+        if (!userId) { alert("Missing admin user id. Open via Telegram to continue."); return; }
+        const tail = buildAdminQueryTail();
+        const res = await v2Fetch(`${API_V2}/admin/drops/${dropId}/codes${tail}`, {
+          method: "POST",
+          body: JSON.stringify(payload)
+        });
+        const data = await res.json();
+        if (!res.ok || data.status !== "ok") throw new Error(JSON.stringify(data));
+        alert("Added successfully.");
+        adm_list();
+      } catch (e) {
+        alert(`Add failed: ${e.message}`);
+      }
+    };
+
+    const admParsePairsBtn = document.getElementById("adm_parse_pairs_btn");
+    if (admParsePairsBtn) admParsePairsBtn.onclick = () => {
+      const f = document.getElementById("adm_csv_pairs")?.files?.[0];
+      if (!f) return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        const lines = (reader.result || "").toString().split(/\r?\n/);
+        const header = (lines[0] || "").toLowerCase();
+        let out = "";
+        if (header.includes("username") && header.includes("code")) {
+          for (let i = 1; i < lines.length; i++) {
+            const [u, c] = (lines[i] || "").split(/,|\t/).map(s => s?.trim());
+            if (u && c) out += `${u},${c}\n`;
+          }
+        } else {
+          for (let i = 0; i < lines.length; i++) {
+            const [u, c] = (lines[i] || "").split(/,|\t/).map(s => s?.trim());
+            if (u && c) out += `${u},${c}\n`;
+          }
+        }
+        const target = document.getElementById("adm_pairs_text");
+        if (target) target.value = out.trim();
+      };
+      reader.readAsText(f);
+    };
+
+    const admParseCodesBtn = document.getElementById("adm_parse_codes_btn");
+    if (admParseCodesBtn) admParseCodesBtn.onclick = () => {
+      const f = document.getElementById("adm_csv_codes")?.files?.[0];
+      if (!f) return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        const lines = (reader.result || "").toString().split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+        if (lines.length && /code/i.test(lines[0])) {
+          const header = lines[0].split(/,|\t/).map(h => h.trim().toLowerCase());
+          const idx = header.findIndex(h => /code/.test(h));
+          if (idx >= 0) {
+            const out = [];
+            for (let i = 1; i < lines.length; i++) {
+              const cols = lines[i].split(/,|\t/).map(c => c.trim());
+              if (cols[idx]) out.push(cols[idx]);
+            }
+            const target = document.getElementById("adm_codes_text");
+            if (target) target.value = out.join("\n");
+            return;
+          }
+        }
+        const target = document.getElementById("adm_codes_text");
+        if (target) target.value = lines.join("\n");
+      };
+      reader.readAsText(f);
+    };
+  </script>
+
+  <script>
+    const API_BASE = "https://apreferralv1.fly.dev";
+    const REWARDS_CACHE_KEY = "rewards_summary_cache_v1";
+    const REWARDS_CACHE_TTL_MS = 60 * 1000;
+    const REGION_STORAGE_KEY = "region";
+    const user = tg?.initDataUnsafe?.user || {};
+    const userId = user.id;
+    const username = user.username || user.first_name || "";
+    let regionMsg = "";
+    let latestReferralLink = "";
+
+    if (!userId && !getAdminSecret()) {
+      const warn = document.createElement('div');
+      warn.style.cssText = "margin:10px 0;padding:10px;background:#fff3f3;border:1px solid #ffd6d6;border-radius:8px;color:#900;";
+      warn.innerHTML = "<b>Coming Soon</b><br/>";
+      document.body.prepend(warn);
+    }
+
+    function getStoredRegion() {
+      try { return localStorage.getItem(REGION_STORAGE_KEY) || ""; } catch { return ""; }
+    }
+
+    function setStoredRegion(region) {
+      try {
+        if (region) {
+          localStorage.setItem(REGION_STORAGE_KEY, region);
+        } else {
+          localStorage.removeItem(REGION_STORAGE_KEY);
+        }
+      } catch {}
+    }
+
+    function hasRegionSelected() {
+      return !!(getStoredRegion() || "").trim();
+    }
+
+    function applyRegionGate(regionValue = null) {
+      const region = regionValue !== null ? regionValue : getStoredRegion();
+      const hasRegion = !!(region && String(region).trim());
+      const regionSection = document.getElementById("region-section");
+      const regionMessage = document.getElementById("region-message");
+      const gatedSections = [
+        document.getElementById("voucher-section"),
+        document.getElementById("checkin-section"),
+        document.getElementById("referral-section"),
+        document.getElementById("leaderboard-section"),
+        document.getElementById("more-section")
+      ];
+
+      if (hasRegion) {
+        if (regionSection) regionSection.style.display = "none";
+        gatedSections.forEach(section => {
+          if (section) section.style.display = "block";
+        });
+      } else {
+        if (regionSection) regionSection.style.display = "block";
+        if (regionMessage) regionMessage.textContent = "Select your region to continue.";
+        gatedSections.forEach(section => {
+          if (section) section.style.display = "none";
+        });
+      }
+    }
+
+    function startCountdown(nextCheckinTimeISO) {
+      const el = document.getElementById("checkin-timer");
+      const end = new Date(nextCheckinTimeISO).getTime();
+      function update() {
+        const now = Date.now();
+        const d = end - now;
+        if (d <= 0) {
+          el.innerText = "🎉 You can check in again now!";
+          return;
+        }
+        const h = Math.floor(d / 3600000);
+        const m = Math.floor((d % 3600000) / 60000);
+        const sFixed = Math.floor((d % 60000) / 1000);
+        el.innerText = `⏳ Next check-in: ${h}h ${m}m ${sFixed}s`;
+        setTimeout(update, 1000);
+      }
+      update();
+    }
+
+    async function checkIn() {
+      if (!hasRegionSelected()) {
+        alert("❌ Please select and lock your region before check-in.");
+        return;
+      }
+
+      try {
+        const res = await fetch(`${API_BASE}/api/checkin`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ user_id: userId, username })
+        });
+
+        const data = await res.json();
+
+        document.getElementById("checkin-result").innerText = data.message || "❌ Check-in failed.";
+
+        if (data.next_checkin_time) {
+          startCountdown(data.next_checkin_time);
+        }
+
+        if (data.success) {
+          loadLeaderboard();
+        }
+
+      } catch (err) {
+        console.error("Check-in error:", err);
+        document.getElementById("checkin-result").innerText = "❌ Error connecting to server.";
+      }
+    }
+
+    async function loadCheckinStatus() {
+      if (!userId) return;
+
+      const timerEl = document.getElementById("checkin-timer");
+      const resultEl = document.getElementById("checkin-result");
+
+      try {
+        const res = await fetch(`${API_BASE}/api/checkin-status/${userId}`);
+        const data = await res.json();
+
+        if (data.message && resultEl) {
+          resultEl.innerText = data.message;
+        }
+
+        if (data.next_checkin_time) {
+          startCountdown(data.next_checkin_time);
+        } else if (timerEl) {
+          timerEl.innerText = "🎉 You can check in now!";
+        }
+      } catch (err) {
+        console.error("Failed to load check-in status:", err);
+      }
+    }
+
+    async function getReferral() {
+      if (!hasRegionSelected()) {
+        alert("❌ Please select and lock your region before generating a referral link.");
+        return;
+      }
+
+      const display = document.getElementById("referral-link");
+      try {
+        const res = await fetch(`${API_BASE}/api/referral?user_id=${userId}&username=${username}`);
+        const rawText = await res.text();
+        let data;
+        try {
+          data = JSON.parse(rawText);
+        } catch {
+          display.innerText = "❌ Invalid server response.";
+          return;
+        }
+
+        const link = data.referral_link;
+        if (link) {
+          latestReferralLink = link;
+          display.innerText = link + "\n👆 Tap 'Copy to Clipboard' to copy";
+        } else {
+          display.innerText = "❌ Failed to get link.";
+        }
+      } catch {
+        display.innerText = "❌ Error connecting to server.";
+      }
+    }
+
+    async function copyReferral() {
+      if (!latestReferralLink) {
+        alert("Please generate your referral link first.");
+        return;
+      }
+
+      try {
+        const caption = `🔥 Join AdvantPlay Community — Don’t Miss Out!
+✔ Weekly bonus voucher drops
+✔ Member-only events & challenges
+✔ Tips that help you play smarter
+
+Tap to join now 👇
+👉 ${latestReferralLink}`;
+
+        await navigator.clipboard.writeText(caption);
+        alert("Copy successful");
+      } catch {
+        alert("❌ Copy failed. Please copy manually.");
+      }
+    }
+
+    function copyVoucherCode() {
+      const codeEl = document.getElementById("voucher-code");
+      const code = codeEl ? codeEl.innerText.trim() : "";
+      if (!code || code.toLowerCase().includes("coming soon")) {
+        alert("❌ No voucher code available to copy yet.");
+        return;
+      }
+
+      navigator.clipboard.writeText(code)
+        .then(() => alert("Voucher code copied!"))
+        .catch(() => alert("Failed to copy voucher."));
+    }
+
+    async function handleAdminAndVoucher() {
+      try {
+        const [adminRes, voucherRes] = await Promise.all([
+          fetch(`${API_BASE}/api/is_admin?user_id=${userId}`),
+          fetch(`${API_BASE}/api/bonus_voucher?user_id=${userId}`)
+        ]);
+
+        let adminData = {};
+        let voucherData = {};
+        try { adminData = await adminRes.json(); } catch (_) {}
+        try { voucherData = await voucherRes.json(); } catch (_) {}
+
+        const isAdmin = adminData.success && adminData.is_admin;
+        if (isAdmin) {
+          document.getElementById("admin-panel").style.display = "block";
+          if (typeof adm_list === "function") {
+            adm_list();
+          }
+        }
+
+        const bonusSection = document.getElementById("bonus-voucher");
+        const codeEl = document.getElementById("voucher-code");
+        if (bonusSection && codeEl) {
+          if (isAdmin) {
+            bonusSection.style.display = "block";
+            codeEl.innerText = voucherData.code || "❌ No active voucher currently.";
+          } else if (voucherData.code) {
+            bonusSection.style.display = "block";
+            codeEl.innerText = voucherData.code;
+          } else {
+            bonusSection.style.display = "none";
+          }
+        }
+      } catch (err) {
+        console.error("❌ Error checking admin or loading voucher:", err);
+      }
+    }
+
+    function resetVoucherButton() {
+      const primaryBtn = document.getElementById("campaign-voucher-btn");
+      if (!primaryBtn) return;
+      primaryBtn.style.display = "none";
+      primaryBtn.removeAttribute("data-dropid");
+      primaryBtn.removeAttribute("data-claim");
+      primaryBtn.removeAttribute("data-copy-code");
+      primaryBtn.removeAttribute("disabled");
+    }
+
+    function showVoucherCopy(codeText) {
+      const primaryBtn = document.getElementById("campaign-voucher-btn");
+      if (!primaryBtn) return;
+      primaryBtn.textContent = "📋 Copy to clipboard";
+      primaryBtn.removeAttribute("data-dropid");
+      primaryBtn.removeAttribute("data-claim");
+      primaryBtn.removeAttribute("disabled");
+      primaryBtn.dataset.copyCode = codeText;
+      primaryBtn.style.display = "inline-block";
+    }
+
+    function showVoucherClaim(dropId, disabled) {
+      const primaryBtn = document.getElementById("campaign-voucher-btn");
+      if (!primaryBtn) return;
+      primaryBtn.textContent = "🎟️ Claim now";
+      primaryBtn.removeAttribute("data-copy-code");
+      if (dropId) {
+        primaryBtn.dataset.dropid = dropId;
+      } else {
+        primaryBtn.removeAttribute("data-dropid");
+      }
+      const shouldDisable = disabled || !dropId;
+      if (shouldDisable) {
+        primaryBtn.setAttribute("disabled", "disabled");
+      } else {
+        primaryBtn.removeAttribute("disabled");
+      }
+      primaryBtn.style.display = "inline-block";
+    }
+
+    function showVoucherSoldOut(messageText) {
+      const primaryBtn = document.getElementById("campaign-voucher-btn");
+      if (!primaryBtn) return;
+      primaryBtn.textContent = "All vouchers redeemed";
+      primaryBtn.removeAttribute("data-copy-code");
+      primaryBtn.removeAttribute("data-dropid");
+      primaryBtn.removeAttribute("data-claim");
+      primaryBtn.setAttribute("disabled", "disabled");
+      primaryBtn.style.display = "inline-block";
+      if (messageText) {
+        const messageEl = document.getElementById("campaign-voucher-message");
+        if (messageEl) messageEl.innerText = messageText;
+      }
+    }
+
+    const CHANNEL_SUBSCRIBE_PROMPT = "Subscribe to @advantplayofficial to unlock";
+
+    function showChannelGate(messageEl, buttonEl) {
+      if (messageEl) messageEl.textContent = CHANNEL_SUBSCRIBE_PROMPT;
+      if (buttonEl) buttonEl.style.display = "none";
+    }
+
+    async function checkChannelSubscription(dropId) {
+      if (!dropId) return { subscribed: true };
+      const res = await v2Fetch(`${API_V2}/vouchers/claim`, {
+        method: "POST",
+        body: JSON.stringify({
+          dropId,
+          check_only: true,
+          init_data: getLatestInitData() || (tg?.initData || "")
+        })
+      });
+      let data = null;
+      try { data = await res.json(); } catch { /* ignore */ }
+      if (res.status === 403 && data?.code === "not_subscribed") {
+        return { subscribed: false, message: data?.message };
+      }
+      if (!res.ok) {
+        throw new Error(data?.error || data?.code || `HTTP ${res.status}`);
+      }
+      return { subscribed: true, message: data?.message };
+    }
+
+    function applyChannelGate(dropId, messageEl, buttonEl) {
+      checkChannelSubscription(dropId)
+        .then((state) => {
+          if (!state.subscribed) {
+            showChannelGate(messageEl, buttonEl);
+          }
+        })
+        .catch((err) => {
+          console.warn("Channel gate check failed", err);
+        });
+    }
+
+    const CLAIM_REASON_TITLE = {
+      not_joined_main: "🚪 Join Group Now",
+      pic: "🖼️ Profile Picture Required",
+      verify_pending: "⏳ Verification in Progress",
+      not_new_user: "ℹ️ New Users Only",
+      already_claimed: "✅ Already Claimed",
+      expired: "⌛ Welcome Bonus Expired",
+      ip_rate_limit: "🌐 Too Many Requests",
+      new_joiner_rate_limit: "🚦 High Traffic",
+      out_of_stock: "🎁 All Claimed",
+      missing_profile_photo: "🖼️ Profile Picture Required",
+      already_claimed_lifetime: "✅ Already Claimed",
+      ip_claims_per_day: "🌐 Too Many Requests",
+      uid_attempts_per_minute: "🚦 High Traffic",
+      ip_uidset_per_day: "🚦 High Traffic"
+    };
+
+    const DEFAULT_TITLE = "⚠️ Unable to Claim";
+    function isMyRegion(region) {
+      if (!region) return false;
+      const normalized = String(region).trim().toLowerCase();
+      return normalized === "my" || normalized === "malaysia";
+    }
+
+    function isPublicSoldOut(drop, userRegion) {
+      if (isMyRegion(userRegion)) return false;
+      const remaining = drop?.publicRemainingApprox ?? drop?.remainingApprox;
+      if (remaining === undefined || remaining === null) return false;
+      const remainingValue = Number(remaining);
+      if (Number.isNaN(remainingValue)) return false;
+      return remainingValue <= 0;
+    }
+
+    function campaignWindowText(drop) {
+      const start = drop?.startsAt ? fmtKL(drop.startsAt) : "";
+      const end = drop?.endsAt ? fmtKL(drop.endsAt) : "";
+      if (!start && !end) return "";
+      if (start && end) return `${start} → ${end}`;
+      return start ? `Starts: ${start}` : `Ends: ${end}`;
+    }
+
+    function createCampaignCard(drop, userRegion) {
+      const card = document.createElement("div");
+      card.className = "campaign-card";
+
+      const title = document.createElement("h4");
+      title.textContent = drop?.name || "Campaign reward";
+      card.appendChild(title);
+
+      const windowText = campaignWindowText(drop);
+      if (windowText) {
+        const meta = document.createElement("p");
+        meta.className = "campaign-meta";
+        meta.textContent = windowText;
+        card.appendChild(meta);
+      }
+
+      if (drop && drop.remainingApprox !== undefined && drop.remainingApprox !== null) {
+        const remainMeta = document.createElement("p");
+        remainMeta.className = "campaign-meta";
+        const value = Number(drop.remainingApprox);
+        const label = Number.isNaN(value) ? String(drop.remainingApprox) : value;
+        remainMeta.textContent = `Remaining: ${label}`;
+        card.appendChild(remainMeta);
+      } else if (drop && drop.codesTotal !== undefined && drop.codesTotal !== null) {
+        const totalMeta = document.createElement("p");
+        totalMeta.className = "campaign-meta";
+        const value = Number(drop.codesTotal);
+        const label = Number.isNaN(value) ? String(drop.codesTotal) : value;
+        totalMeta.textContent = `Total codes: ${label}`;
+        card.appendChild(totalMeta);
+      }
+
+      const message = document.createElement("p");
+      message.className = "campaign-message";
+      const dropId = drop?.dropId || drop?.id || drop?._id || "";
+      const hasClaimed = !!drop?.userClaimed;
+      const canClaim = !!(drop?.isActive || drop?.adminPreview);
+      const publicSoldOut = isPublicSoldOut(drop, userRegion);
+
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "btn btn-primary";
+
+      if (hasClaimed) {
+        const codeText = drop?.code ? String(drop.code) : "(no code)";
+        message.textContent = drop?.code ? `Voucher code: ${codeText}` : "Reward already claimed.";
+        if (drop?.code) {
+          btn.textContent = "📋 Copy to clipboard";
+          btn.dataset.copyCode = codeText;
+          btn.className = "btn btn-ghost";
+        } else {
+          btn.textContent = "No code available";
+          btn.setAttribute("disabled", "disabled");
+          btn.className = "btn btn-ghost";
+        }
+        if (drop?.claimedAt) {
+          const claimedMeta = document.createElement("p");
+          claimedMeta.className = "campaign-meta";
+          claimedMeta.textContent = `Claimed: ${fmtKL(drop.claimedAt)}`;
+          card.appendChild(claimedMeta);
+        }
+      } else {
+        if (canClaim) {
+          message.textContent = "Tap below to claim your reward.";
+        } else {
+          message.textContent = "This campaign will open soon. Please check back later!";
+        }
+
+        if (publicSoldOut) {
+          message.textContent = "All vouchers have been fully redeemed.";
+          btn.textContent = "All vouchers redeemed";
+          btn.removeAttribute("data-dropid");
+          btn.setAttribute("disabled", "disabled");
+          btn.className = "btn btn-ghost";
+        } else {
+          btn.textContent = "🎟️ Claim now";
+          if (dropId) {
+            btn.dataset.dropid = dropId;
+          }
+          if (!canClaim) {
+            btn.setAttribute("disabled", "disabled");
+          }
+        }
+      }
+
+      card.appendChild(message);
+      card.appendChild(btn);
+      if (!hasClaimed && canClaim && !publicSoldOut) {
+        applyChannelGate(dropId, message, btn);
+      }
+
+      return card;
+    }
+
+    function renderCampaignDrops(primaryDrop, extraDrops = [], userRegion) {
+      const container = document.getElementById("campaign-voucher-list");
+      if (!container) return;
+      container.innerHTML = "";
+
+      const drops = [];
+      if (primaryDrop) drops.push(primaryDrop);
+      if (Array.isArray(extraDrops) && extraDrops.length) {
+        drops.push(...extraDrops);
+      }
+
+      if (!drops.length) {
+        container.style.display = "none";
+        return;
+      }
+
+      container.style.display = "grid";
+      drops.forEach((drop, index) => {
+        const card = createCampaignCard(drop, userRegion);
+        if (index === 0 && primaryDrop) {
+          card.dataset.primary = "true";
+        }
+        container.appendChild(card);
+      });
+    }
+
+    async function loadVouchers() {
+      const section = document.getElementById("voucher-section");
+      const messageEl = document.getElementById("campaign-voucher-message");
+      if (!section || !messageEl) return;
+      if (!hasRegionSelected()) {
+        section.style.display = "none";
+        return;
+      }
+
+      section.style.display = "block";
+      messageEl.innerText = "Loading reward…";
+      resetVoucherButton();
+      renderCampaignDrops(null, [], null);
+
+      try {
+        const tail = buildAdminQueryTail();
+        const res = await v2Fetch(`${API_V2}/vouchers/visible${tail}`);
+
+        if (res.status === 401) {
+          messageEl.innerText = "Coming soon…";
+          return;
+        }
+
+        let data;
+        try {
+          data = await res.json();
+        } catch {
+          messageEl.innerText = "❌ Invalid response from server.";
+          return;
+        }
+
+        const drops = Array.isArray(data?.drops) ? data.drops : [];
+        const userRegion = data?.userRegion || null;
+        if (!drops.length) {
+          messageEl.innerText = "No campaign rewards are available for your account right now.";
+          resetVoucherButton();
+          renderCampaignDrops(null, [], userRegion);
+          return;
+        }
+
+        const topDrop = drops[0] || {};
+        const dropId = topDrop?.dropId || topDrop?.id || topDrop?._id || "";
+        const hasExtras = drops.length > 1;
+        let messageText = "";
+
+        if (topDrop?.userClaimed) {
+          const codeText = topDrop.code ? String(topDrop.code) : "(no code)";
+          messageText = codeText;
+          if (hasExtras) {
+            messageText += "\n\nOther campaign rewards are listed below.";
+          }
+        } else {
+          const canClaim = !!topDrop?.isActive;
+          const isPreview = !!topDrop?.adminPreview;
+          const publicSoldOut = isPublicSoldOut(topDrop, userRegion);
+
+          if (publicSoldOut) {
+            messageText = "All vouchers have been fully redeemed.";
+            showVoucherSoldOut(messageText);
+          } else {
+            if ((canClaim || isPreview) && dropId) {
+              messageText = "Tap below to claim your reward.";
+            } else {
+              messageText = "A new campaign reward will appear soon. Please check back later!";
+            }
+          }
+
+          if (hasExtras) {
+            messageText = `Multiple campaign rewards are available.\n${messageText}`;
+          }
+        }
+
+        messageEl.innerText = messageText;
+        renderCampaignDrops(drops[0] || null, drops.slice(1), userRegion);
+      } catch (e) {
+        messageEl.innerText = `⚠️ Error loading vouchers: ${e?.message || e}`;
+        renderCampaignDrops(null, [], null);
+
+      }
+    }
+
+    document.addEventListener("click", async (e) => {
+      const btn = e.target.closest("button[data-op][data-id]");
+      if (!btn) return;
+
+      const dropId = btn.getAttribute("data-id");
+      if (!dropId) { alert("No dropId on this row."); return; }
+
+      const op = btn.getAttribute("data-op");
+
+      try {
+        const userId = getAdminUserId();
+        if (!userId) { alert("Missing admin user id. Open via Telegram to continue."); return; }
+        const tail = buildAdminQueryTail();
+
+        const res = await v2Fetch(`${API_V2}/admin/drops/${dropId}/actions${tail}`, {
+          method: "POST",
+          body: JSON.stringify({ op })
+        });
+
+        let payload = null;
+        try { payload = await res.json(); } catch {}
+
+        if (res.status === 401) {
+          alert("Not authorized (401). Please set your Telegram username");
+          return;
+        }
+        if (!res.ok || (payload && payload.status !== "ok")) {
+          throw new Error(payload?.error || `HTTP ${res.status}`);
+        }
+        adm_list && adm_list();
+      } catch (err) {
+        alert(`Action failed: ${err.message}`);
+      }
+    });
+
+    document.addEventListener("click", async (e) => {
+      const claimBtn = e.target.closest("button[data-dropid],button[data-claim]");
+      if (!claimBtn) return;
+
+      if (!hasRegionSelected()) {
+        alert("❌ Please select and lock your region before claiming rewards.");
+        return;
+      }
+
+      const dropId = claimBtn.getAttribute("data-dropid") || claimBtn.getAttribute("data-claim");
+      if (!dropId) return;
+
+      try {
+        const res = await v2Fetch(`${API_V2}/vouchers/claim`, {
+          method: "POST",
+          body: JSON.stringify({
+            dropId,
+            init_data: getLatestInitData() || (tg?.initData || "")
+          })
+        });
+
+        let out = null;
+        try { out = await res.json(); } catch { /* ignore */ }
+
+        const ok = res.ok && (out?.ok === true || out?.status === "ok");
+        if (!ok) {
+          if (res.status === 410 && out?.code === "sold_out") {
+            const soldOutMessage = out?.message || "All vouchers have been fully redeemed.";
+            if (claimBtn.id === "campaign-voucher-btn") {
+              const messageEl = document.getElementById("campaign-voucher-message");
+              if (messageEl) messageEl.innerText = soldOutMessage;
+            }
+            claimBtn.textContent = "All vouchers redeemed";
+            claimBtn.setAttribute("disabled", "disabled");
+            alert(soldOutMessage);
+            return;
+          }
+          const key = out?.reason || out?.checks_key || "unknown";
+          const title = CLAIM_REASON_TITLE[key] || DEFAULT_TITLE;
+          if (key === "not_joined_main") {
+            const joinBtn = document.getElementById("join-group-btn");
+            if (joinBtn) joinBtn.style.display = "inline-block";
+          }
+          if (res.status === 403 && out?.code === "not_subscribed") {
+            if (claimBtn.id === "campaign-voucher-btn") {
+              showChannelGate(null, claimBtn);
+            } else {
+              showChannelGate(null, claimBtn);
+            }
+          }
+          alert(title);
+          return;
+        }
+
+        const codeText = out?.voucher?.code ? String(out.voucher.code) : "(no code)";
+        const claimedAt = out?.voucher?.claimedAt ? fmtKL(out.voucher.claimedAt) : "-";
+
+        let copySuccess = false;
+        if (codeText && codeText !== "(no code)" && navigator?.clipboard?.writeText) {
+          try {
+            await navigator.clipboard.writeText(codeText);
+            copySuccess = true;
+          } catch (errCopy) {
+            console.warn("Auto-copy failed", errCopy);
+          }
+        }
+
+        if (claimBtn.id === "campaign-voucher-btn") {
+          const messageEl = document.getElementById("campaign-voucher-message");
+          if (messageEl) {
+            messageEl.innerText = codeText;
+          }
+          claimBtn.textContent = "📋 Copy to clipboard";
+          claimBtn.removeAttribute("data-dropid");
+          claimBtn.removeAttribute("data-claim");
+          claimBtn.dataset.copyCode = codeText;
+          claimBtn.removeAttribute("disabled");
+        } else {
+          claimBtn.textContent = "View Code";
+          ensureCodeBlock(claimBtn, codeText);
+        }
+
+        const copyMsg = copySuccess
+          ? "\n\n✅ Code copied to clipboard."
+          : "\n\n📋 Tap the copy button below if clipboard access is blocked.";
+        alert(`🎟️ Your code: ${codeText}\nClaimed at: ${claimedAt}${copyMsg}`);
+
+      } catch (err) {
+        alert(DEFAULT_TITLE);
+      }
+    });
+
+    document.addEventListener("click", async (e) => {
+      const btn = e.target.closest(".copy-drop-id-btn");
+      if (!btn) return;
+
+      e.preventDefault();
+      e.stopPropagation();
+
+      const dropId = (btn.dataset.dropid || "").trim();
+      if (!dropId) return alert("No dropId found.");
+
+      try {
+        await navigator.clipboard.writeText(dropId);
+        btn.textContent = "✅ Copied";
+        setTimeout(() => (btn.textContent = "📋 Copy ID"), 1200);
+      } catch {
+        const ta = document.createElement("textarea");
+        ta.value = dropId;
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand("copy");
+        document.body.removeChild(ta);
+        btn.textContent = "✅ Copied";
+        setTimeout(() => (btn.textContent = "📋 Copy ID"), 1200);
+      }
+    });
+
+    document.addEventListener("click", async (e) => {
+      const copyBtn = e.target.closest("button[data-copy-code]");
+      if (!copyBtn) return;
+
+      const code = copyBtn.getAttribute("data-copy-code")
+        || copyBtn.parentElement?.dataset?.code
+        || "";
+
+      if (!code || code === "(no code)") {
+        alert("No code available to copy yet. Please claim first.");
+        return;
+      }
+
+      const originalText = copyBtn.textContent;
+      try {
+        if (!navigator?.clipboard?.writeText) {
+          throw new Error("Clipboard API unavailable");
+        }
+        await navigator.clipboard.writeText(code);
+        copyBtn.textContent = "Copied!";
+        tg?.HapticFeedback?.notificationOccurred?.("success");
+        setTimeout(() => {
+          copyBtn.textContent = originalText;
+        }, 2000);
+      } catch (copyErr) {
+        console.warn("Manual copy failed", copyErr);
+        alert("Unable to copy automatically. Please copy the code manually: " + code);
+      }
+    });
+
+    let leaderboardInitOnce = false;
+    let leaderboardFetchInProgress = false;
+    let leaderboardFetchAttempted = false;
+    let leaderboardHasValidCache = false;
+    let leaderboardSkeletonRendered = false;
+    let leaderboardCacheAgeMs = null;
+
+    function renderLeaderboardSkeleton() {
+      const out = document.getElementById("leaderboard-output");
+      if (!out) return;
+      if (leaderboardSkeletonRendered) return;
+      leaderboardSkeletonRendered = true;
+      out.innerHTML = `
+        <div class="leaderboard-summary">⏳ Loading weekly stats…</div>
+        <div class="leaderboard-block">
+          <div class="leaderboard-header"><h4>⭐ XP Leaderboard</h4></div>
+          <div class="leaderboard-empty">Loading...</div>
+        </div>
+        <div class="leaderboard-block">
+          <div class="leaderboard-header"><h4>🔗 Referral Leaderboard</h4></div>
+          <div class="leaderboard-empty">Loading...</div>
+        </div>
+      `;
+    }
+
+    function formatLastUpdated(ts) {
+      if (!ts) return "Last updated: --";
+      try {
+        return `Last updated: ${new Date(ts).toLocaleString()}`;
+      } catch {
+        return "Last updated: --";
+      }
+    }
+
+    function setLeaderboardMeta(ts, { isStale = false } = {}) {
+      const lastUpdated = document.getElementById("leaderboard-last-updated");
+      const cacheTag = document.getElementById("leaderboard-cache-tag");
+      if (lastUpdated) lastUpdated.textContent = formatLastUpdated(ts);
+      if (cacheTag) cacheTag.style.display = isStale ? "inline-flex" : "none";
+      if (cadence) cadence.textContent = "🔄 Updates every 5 minutes";
+    }
+
+    function setLeaderboardLoading(isLoading) {
+      const loading = document.getElementById("leaderboard-loading");
+      if (loading) loading.style.display = isLoading ? "inline-flex" : "none";
+    }
+
+    function setLeaderboardRetryVisible(visible) {
+      const retry = document.getElementById("leaderboard-retry");
+      if (retry) retry.style.display = visible ? "inline-flex" : "none";
+    }
+
+    function setLeaderboardRetryDisabled(disabled) {
+      const retry = document.getElementById("leaderboard-retry");
+      if (retry) retry.disabled = disabled;
+    }
+
+    function renderLeaderboardUnavailable(message) {
+      const out = document.getElementById("leaderboard-output");
+      if (out) out.textContent = message;
+    }
+
+    function getLeaderboardName(row) {
+      const name = row?.username ? `@${row.username}` : (row?.first_name || row?.user_id || "Anonymous");
+      return escapeHtml(name);
+    }
+
+    function createPodiumCard(row, rank, metricLabel, championLabel) {
+      const card = document.createElement("div");
+      card.className = `podium-card podium-${rank}`;
+      const rankEl = document.createElement("div");
+      rankEl.className = "podium-rank";
+      rankEl.textContent = `#${rank}`;
+
+      const nameEl = document.createElement("div");
+      nameEl.className = "podium-name";
+      nameEl.innerHTML = rank === 1 ? `👑 ${getLeaderboardName(row)}` : getLeaderboardName(row);
+
+      const scoreEl = document.createElement("div");
+      scoreEl.className = "podium-score";
+      scoreEl.textContent = `${row.value} ${metricLabel}`;
+
+      const labelEl = document.createElement("div");
+      labelEl.className = "podium-label";
+      labelEl.textContent = rank === 1 ? championLabel : "Elite";
+
+      card.appendChild(rankEl);
+      card.appendChild(nameEl);
+      card.appendChild(scoreEl);
+      card.appendChild(labelEl);
+      return card;
+    }
+
+    function buildLeaderboardBlock({
+      title,
+      rows,
+      metricLabel,
+      championLabel,
+      nudgeText
+    }) {
+      const block = document.createElement("div");
+      block.className = "leaderboard-block";
+
+      const header = document.createElement("div");
+      header.className = "leaderboard-header";
+      const heading = document.createElement("h4");
+      heading.textContent = title;
+      header.appendChild(heading);
+      block.appendChild(header);
+
+      if (!rows.length) {
+        const empty = document.createElement("div");
+        empty.className = "leaderboard-empty";
+        empty.textContent = "No data yet.";
+        block.appendChild(empty);
+        return block;
+      }
+
+      const podium = document.createElement("div");
+      podium.className = "podium";
+      const topThree = rows.slice(0, 3);
+      const order = [1, 0, 2];
+      order.forEach((idx) => {
+        const row = topThree[idx];
+        if (!row) return;
+        const rank = idx + 1;
+        const card = createPodiumCard(row, rank, metricLabel, championLabel);
+        podium.appendChild(card);
+      });
+      block.appendChild(podium);
+
+      const nudge = document.createElement("div");
+      nudge.className = "podium-nudge";
+      nudge.textContent = nudgeText;
+      block.appendChild(nudge);
+
+      const list = document.createElement("div");
+      list.className = "leaderboard-list";
+      const rest = rows.slice(3);
+      if (!rest.length) {
+        const empty = document.createElement("div");
+        empty.className = "leaderboard-empty";
+        empty.textContent = "No additional ranks yet.";
+        list.appendChild(empty);
+      } else {
+        rest.forEach((row, idx) => {
+          const rankNumber = idx + 4;
+          const rowEl = document.createElement("div");
+          rowEl.className = "leaderboard-row";
+
+          const rankEl = document.createElement("div");
+          rankEl.className = "leaderboard-rank";
+          rankEl.textContent = `#${rankNumber}`;
+
+          const nameEl = document.createElement("div");
+          nameEl.className = "leaderboard-name";
+          nameEl.innerHTML = getLeaderboardName(row);
+
+          const valueEl = document.createElement("div");
+          valueEl.className = "leaderboard-value";
+          valueEl.textContent = `${row.value} ${metricLabel}`;
+
+          rowEl.appendChild(rankEl);
+          rowEl.appendChild(nameEl);
+          rowEl.appendChild(valueEl);
+          list.appendChild(rowEl);
+        });
+      }
+      block.appendChild(list);
+
+      return block;
+    }
+
+    function renderLeaderboardData(data) {
+      const out = document.getElementById("leaderboard-output");
+      if (!out) return;
+      const leaderboard = data?.leaderboard || {};
+      const checkinRows = Array.isArray(leaderboard.checkin) ? leaderboard.checkin : [];
+      const referralRows = Array.isArray(leaderboard.referral) ? leaderboard.referral : [];
+
+      const xpRows = checkinRows.map((u) => ({
+        name: u.username || u.first_name || u.user_id || "Anonymous",
+        value: u.xp ?? u.weekly_xp ?? 0,
+        username: u.username,
+        first_name: u.first_name,
+        user_id: u.user_id
+      }));
+
+      const refRows = referralRows.map((u) => ({
+        name: u.username || u.first_name || u.user_id || "Anonymous",
+        value: u.weekly_referrals ?? u.total_valid ?? u.referrals ?? 0,
+        username: u.username,
+        first_name: u.first_name,
+        user_id: u.user_id
+      }));
+
+      const myXP = data?.user?.xp || 0;
+      const myMonthlyXP = data?.user?.monthly_xp || 0;
+      const myRef = data?.user?.weekly_referrals ?? data?.user?.total_valid ?? data?.user?.referrals ?? 0;
+      const myName = user.username ? `@${user.username}` : (user.first_name || "You");
+
+      const myStatus = (data?.user && data.user.status) ? data.user.status : "Normal";
+      let statusLabel = "🧑 Normal";
+      if (myStatus === "VIP1") statusLabel = "👑 VIP1";
+
+      out.innerHTML = "";
+
+      const summary = document.createElement("div");
+      summary.className = "leaderboard-summary";
+      summary.innerHTML = `
+        <div class="summary-title">📊 Your Weekly Stats</div>
+        <div class="summary-row">
+          <span>${escapeHtml(myName)}</span>
+          <span>${myXP} XP • ${myRef} Referrals</span>
+        </div>
+        <div class="summary-row">
+          <span>📅 Monthly XP: ${myMonthlyXP}</span>
+          <span>${statusLabel}</span>
+        </div>
+      `;
+      out.appendChild(summary);
+
+      const xpBlock = buildLeaderboardBlock({
+        title: "⭐ XP Leaderboard",
+        rows: xpRows,
+        metricLabel: "XP",
+        championLabel: "XP Champion",
+        nudgeText: "Earn XP via daily check-in and community actions."
+      });
+
+      const refBlock = buildLeaderboardBlock({
+        title: "🔗 Referral Leaderboard",
+        rows: refRows,
+        metricLabel: "Ref",
+        championLabel: "Referral Champion",
+        nudgeText: "Invite friends to climb the referral ranks."
+      });
+
+      out.appendChild(xpBlock);
+      out.appendChild(refBlock);
+    }
+
+    function isValidLeaderboardRow(row) {
+      if (!row || typeof row !== "object") return false;
+      const hasIdentity = row.username || row.user_id || row.id;
+      const hasScore = Number.isFinite(row.xp)
+        || Number.isFinite(row.weekly_referrals)
+        || Number.isFinite(row.total_valid)
+        || Number.isFinite(row.referrals);
+      return Boolean(hasIdentity && hasScore);
+    }
+
+    function isValidLeaderboardPayload(data) {
+      if (!data || typeof data !== "object") return false;
+      if (data.success === false) return false;
+      const leaderboard = data.leaderboard;
+      if (!leaderboard || typeof leaderboard !== "object") return false;
+      const checkinRows = Array.isArray(leaderboard.checkin) ? leaderboard.checkin : null;
+      const referralRows = Array.isArray(leaderboard.referral) ? leaderboard.referral : null;
+      if (!checkinRows && !referralRows) return false;
+      if (checkinRows && !checkinRows.every(isValidLeaderboardRow)) return false;
+      if (referralRows && !referralRows.every(isValidLeaderboardRow)) return false;
+      return true;
+    }
+
+    function readLeaderboardCache() {
+      try {
+        const raw = localStorage.getItem(REWARDS_CACHE_KEY);
+        if (!raw) return null;
+        const parsed = JSON.parse(raw);
+        if (!parsed || typeof parsed !== "object") {
+          localStorage.removeItem(REWARDS_CACHE_KEY);
+          return null;
+        }
+        const updatedAt = parsed.updatedAt || parsed.ts;
+        if (!updatedAt || !parsed.data) {
+          localStorage.removeItem(REWARDS_CACHE_KEY);
+          return null;
+        }
+        if (!isValidLeaderboardPayload(parsed.data)) {
+          localStorage.removeItem(REWARDS_CACHE_KEY);
+          return null;
+        }
+        return { updatedAt, data: parsed.data };
+      } catch (err) {
+        localStorage.removeItem(REWARDS_CACHE_KEY);
+        return null;
+      }
+    }
+
+    function writeLeaderboardCache(data) {
+      try {
+        localStorage.setItem(REWARDS_CACHE_KEY, JSON.stringify({
+          updatedAt: Date.now(),
+          data,
+        }));
+      } catch (err) {
+        console.warn("[LB][CACHE_WRITE_FAIL]", err);
+      }
+    }
+
+    function initLeaderboardCache() {
+      if (leaderboardInitOnce) return;
+      leaderboardInitOnce = true;
+      const retryBtn = document.getElementById("leaderboard-retry");
+      if (retryBtn && !retryBtn.dataset.bound) {
+        retryBtn.dataset.bound = "true";
+        retryBtn.addEventListener("click", () => loadLeaderboard({ forceRefresh: true }));
+      }
+
+      renderLeaderboardSkeleton();
+      const cached = readLeaderboardCache();
+      if (cached) {
+        leaderboardHasValidCache = true;
+        leaderboardCacheAgeMs = Date.now() - cached.updatedAt;
+        renderLeaderboardData(cached.data);
+        setLeaderboardMeta(cached.updatedAt, { isStale: leaderboardCacheAgeMs > REWARDS_CACHE_TTL_MS });
+        console.info("[LB][CACHE_HIT]");
+        console.info("[LB][RENDER_CACHE]");
+      } else {
+        setLeaderboardMeta(null, { isStale: false });
+        console.info("[LB][CACHE_MISS]");
+      }
+      if (!cached || leaderboardCacheAgeMs >= REWARDS_CACHE_TTL_MS) {
+        setTimeout(() => loadLeaderboard(), 0);
+      }
+    }
+
+    async function loadLeaderboard(options = {}) {
+      const { forceRefresh = false } = options;
+      if (leaderboardFetchInProgress) return;
+      const out = document.getElementById("leaderboard-output");
+      const missingUser = !userId && !getAdminSecret?.();
+      if (forceRefresh && out) {
+        leaderboardSkeletonRendered = false;
+        renderLeaderboardSkeleton();
+      }
+      setLeaderboardRetryVisible(false);
+      setLeaderboardRetryDisabled(true);
+      setLeaderboardLoading(true);
+      leaderboardFetchInProgress = true;
+      leaderboardFetchAttempted = true;
+      console.info("[LB][FETCH_START]");
+
+      const url = new URL(`${API_BASE}/api/leaderboard`);
+      if (userId) url.searchParams.set("user_id", userId);
+      url.searchParams.set("t", Date.now());
+
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 2500);
+
+      try {
+        const res = await fetch(url.toString(), { signal: controller.signal });
+        const data = await res.json();
+        if (!isValidLeaderboardPayload(data)) throw new Error("Invalid payload");
+        renderLeaderboardData(data);
+        writeLeaderboardCache(data);
+        leaderboardHasValidCache = true;
+        leaderboardCacheAgeMs = 0;
+        setLeaderboardMeta(Date.now(), { isStale: false });
+        console.info("[LB][FETCH_OK]");
+        console.info("[LB][RENDER_FRESH]");
+      } catch (err) {
+        console.warn("[LB][FETCH_FAIL]", err);
+        if (!leaderboardHasValidCache) {
+          renderLeaderboardUnavailable(missingUser
+            ? "Please reopen the mini app to load the leaderboard."
+            : "Temporarily unavailable. Please try again.");
+          setLeaderboardRetryVisible(true);
+        }
+      } finally {
+        clearTimeout(timeoutId);
+        setLeaderboardLoading(false);
+        leaderboardFetchInProgress = false;
+        setLeaderboardRetryDisabled(false);
+        if (!leaderboardHasValidCache && leaderboardFetchAttempted) {
+          setLeaderboardRetryVisible(true);
+        }
+      }
+    }
+
+    async function loadPreviousLeaderboard() {
+      try {
+        const weeksRes = await fetch(`${API_BASE}/api/leaderboard/history/weeks`);
+        const weeksData = await weeksRes.json();
+
+        if (!weeksData.success || weeksData.weeks.length === 0) {
+          document.getElementById("leaderboard-output").innerText =
+            "❌ No history available.";
+          return;
+        }
+
+        const lastWeek = weeksData.weeks[0];
+
+        const res = await fetch(
+          `${API_BASE}/api/leaderboard/history/week/${lastWeek.week_start}`
+        );
+        const data = await res.json();
+
+        if (!data.success || !data.history)
+          throw new Error(data.error || "Invalid history data");
+
+        const history = data.history;
+
+        const checkin = (history.checkin || [])
+          .map((u, i) => {
+            const xp = u.xp ?? u.weekly_xp ?? 0;
+            const username = u.username || u.first_name || "Unknown";
+            return `${i + 1}. ${username} - ${xp} XP`;
+          })
+          .join("\n");
+
+        const referral = (history.referral || [])
+          .map((u, i) => {
+            const refs = u.total_valid ?? u.weekly_referrals ?? u.referrals ?? 0;
+            const username = u.username || u.first_name || "Unknown";
+            return `${i + 1}. ${username} - ${refs} Ref`;
+          })
+          .join("\n");
+
+        document.getElementById("leaderboard-output").innerText = `📅 ${history.week_start} → ${history.week_end}
+
+🔁 Check-in:
+${checkin}
+
+🔗 Referrals:
+${referral}`;
+
+      } catch (err) {
+        console.error("History error:", err);
+        document.getElementById("leaderboard-output").innerText =
+          "❌ Error loading history.";
+      }
+    }
+
+    function openAddXP() {
+      document.getElementById("xp-modal").style.display = "flex";
+    }
+
+    function closeXPModal() {
+      document.getElementById("xp-modal").style.display = "none";
+    }
+
+    async function submitXPChange() {
+      const input = document.getElementById("xp-user").value.trim();
+      const amount = parseInt(document.getElementById("xp-amount").value.trim());
+
+      if (!input || isNaN(amount)) {
+        alert("Please enter both @username and amount.");
+        return;
+      }
+
+      try {
+        const res = await fetch(`${API_BASE}/api/add_xp?user_id=${userId}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ user_id: input, xp: amount })
+        });
+        const data = await res.json();
+        alert(data.message || "XP updated.");
+        if (data.success) {
+          loadLeaderboard();
+        }
+      } catch (err) {
+        alert("❌ Failed to connect to server.");
+        console.error("Add XP error:", err);
+      }
+    }
+
+    function openVoucherModal() {
+      document.getElementById("voucher-modal").style.display = "flex";
+    }
+
+    function closeVoucherModal() {
+      document.getElementById("voucher-modal").style.display = "none";
+    }
+
+    async function submitVoucher() {
+      const code = document.getElementById("voucher-code-input").value.trim();
+      const releaseAt = document.getElementById("voucher-expiry-input").value;
+      if (!code || !releaseAt) {
+        alert("Please enter both voucher code and release time.");
+        return;
+      }
+      try {
+        const payload = {
+          code,
+          release_time: new Date(releaseAt).toISOString().replace(".000Z", "Z")
+        };
+        const res = await fetch(`${API_BASE}/api/admin/set_bonus?user_id=${userId}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        });
+        const data = await res.json();
+        if (data.status === "success") {
+          alert("✅ Voucher scheduled.");
+          closeVoucherModal();
+          handleAdminAndVoucher();
+        } else {
+          alert("❌ " + (data.message || "Failed to schedule voucher."));
+        }
+      } catch (err) {
+        alert("❌ Failed to schedule voucher.");
+        console.error("Voucher error:", err);
+      }
+    }
+
+    async function checkRegionStatus() {
+      try {
+        const res = await fetch(`${API_BASE}/api/region-status/${userId}`);
+        const data = await res.json();
+
+        if (data.locked) {
+          document.getElementById("region-section").style.display = "none";
+          document.getElementById("region-message").innerText =
+            `✅ Region locked: ${data.region}`;
+          regionMsg = `✅ Region locked: ${data.region}`;
+          setStoredRegion(data.region || "");
+          applyRegionGate(data.region || "");
+        } else {
+          document.getElementById("region-section").style.display = "block";
+          document.getElementById("region-message").innerText =
+            "⚠️ Please select your region (only once).";
+          setStoredRegion("");
+          applyRegionGate("");
+        }
+
+      } catch (err) {
+        console.error("Region check failed:", err);
+      }
+    }
+
+    async function setRegion() {
+      const region = document.getElementById("region-select").value;
+      if (!region) { alert("Please select a region."); return; }
+
+      try {
+        const res = await fetch(`${API_BASE}/api/set-region/${userId}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ user_id: userId, region })
+        });
+        const data = await res.json();
+
+        if (data.success) {
+          document.getElementById("region-section").style.display = "none";
+          document.getElementById("region-message").innerText =
+            `✅ Region locked: ${data.region}`;
+          regionMsg = `✅ Region locked: ${data.region}`;
+          setStoredRegion(data.region || region);
+          applyRegionGate(data.region || region);
+          loadVouchers();
+          alert("Region saved and locked!");
+        } else {
+          alert("❌ " + (data.error || "Failed to set region."));
+        }
+      } catch (err) {
+        alert("❌ Error saving region.");
+        console.error("Set region error:", err);
+      }
+    }
+
+    async function viewJoinRequests() {
+      try {
+        const res = await fetch(`${API_BASE}/api/join_requests?user_id=${userId}`);
+        const data = await res.json();
+        if (!data.success) throw new Error(data.error || "Failed to load");
+
+        const list = data.requests.map(r => `• @${r.username || r.user_id}`).join("\n");
+        alert(list || "No pending join requests.");
+      } catch (e) {
+        alert("❌ Error loading join requests.");
+        console.error(e);
+      }
+    }
+
+    async function exportCSV() {
+      try {
+        const res = await fetch(`${API_BASE}/api/export_csv?user_id=${userId}`);
+        const csv = await res.text();
+        const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `users_${new Date().toISOString().slice(0,10)}.csv`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+      } catch (e) {
+        alert("❌ Error exporting CSV.");
+        console.error(e);
+      }
+    }
+
+    window.onload = async () => {
+      if (tg) { tg.ready(); tg.expand(); }
+
+      const init = await waitForInitData();
+      const hasInit = !!(init && init.length >= 10);
+      const isAdminMode = !!getAdminSecret();
+
+      applyRegionGate(getStoredRegion());
+
+      if (!hasInit) {
+        if (isAdminMode) {
+          document.getElementById("admin-panel").style.display = "block";
+          adm_list();
+        }
+        return;
+      }
+
+      checkRegionStatus();
+      handleAdminAndVoucher();
+      loadCheckinStatus();
+
+      loadVouchers();
+      if (isAdminMode) {
+        document.getElementById("admin-panel").style.display = "block";
+        adm_list();
+      }
+    };
+
+    (function () {
+      let _infoHubBound = false;
+
+      function initInfoHub() {
+        if (_infoHubBound) return;
+
+        try {
+          if (typeof initLeaderboardCache === "function") initLeaderboardCache();
+        } catch (_) {}
+
+        const infoHubBtn = document.getElementById("infoHubBtn");
+        const infoHubModal = document.getElementById("infoHubModal");
+        const closeInfoHub = document.getElementById("closeInfoHub");
+
+        if (!infoHubBtn || !infoHubModal || !closeInfoHub) return;
+
+        _infoHubBound = true;
+
+        infoHubBtn.addEventListener("click", (e) => {
+          e.preventDefault();
+          infoHubModal.style.display = "block";
+        });
+
+        closeInfoHub.addEventListener("click", (e) => {
+          e.preventDefault();
+          infoHubModal.style.display = "none";
+        });
+
+        window.addEventListener("click", (e) => {
+          if (e.target === infoHubModal) infoHubModal.style.display = "none";
+        });
+
+        document.querySelectorAll(".tab-btn").forEach((btn) => {
+          btn.addEventListener("click", (e) => {
+            e.preventDefault();
+            document.querySelectorAll(".tab-btn").forEach((b) => b.classList.remove("active"));
+            document.querySelectorAll(".tab-panel").forEach((p) => (p.style.display = "none"));
+
+            btn.classList.add("active");
+            const pane = document.getElementById(btn.dataset.tab);
+            if (pane) pane.style.display = "block";
+          });
+        });
+      }
+
+      document.addEventListener("DOMContentLoaded", initInfoHub);
+      window.addEventListener("load", initInfoHub);
+    })();
+  </script>
 </body>
 </html>
