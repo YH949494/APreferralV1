@@ -1598,34 +1598,37 @@ def api_referral():
 
     return jsonify(payload), 200
 
-def mask_username(username):
+def mask_username(username: str) -> str:
     if not username:
         return "********"
+    u = str(username).lstrip("@")
 
-    u = str(username)
+    # too short: keep as-is or minimal mask
     if len(u) <= 2:
         return u[0] + "*" * (len(u) - 1)
     if len(u) <= 6:
-        return u[:2] + "*" * (len(u) - 3) + u[-1]
-    return u[:4] + "****" + u[-2:]
+        # keep a bit readable without leaking full
+        return u[:2] + "***"
+    # main rule: front4 + *** + last2
+    return f"{u[:4]}***{u[-2:]}"
+
 
 # Format usernames depending on admin or own account
 def format_username(u, current_user_id, is_admin):
     name = None
     if u.get("username"):
-        name = str(u["username"]).lstrip("@")   # keep pure username
+        name = str(u["username"]).lstrip("@")   # pure username
     elif u.get("first_name"):
         name = str(u["first_name"])
 
     if not name:
         return None
 
-    uid = u.get("user_id")
+    # normalize ids to avoid "self masked" due to str/int mismatch
     try:
-        uid = int(uid) if uid is not None else None
+        uid = int(u.get("user_id")) if u.get("user_id") is not None else None
     except Exception:
         uid = None
-
     try:
         cur = int(current_user_id) if current_user_id is not None else None
     except Exception:
