@@ -228,17 +228,25 @@ def update_user_xp(username, amount, unique_key: str | None = None):
                 "message": f"Please wait {cooldown_seconds} seconds before granting again.",
             }
         lock_id = f"admin_xp:{user['user_id']}:{amount_int}"
-    if unique_key is None and cooldown_seconds > 0:
-        key = f"admin:{user['user_id']}:{username.lower()}:{amount}:{int(time.time())}"
+    if unique_key:
+        key = unique_key
     else:
-        key = unique_key or f"admin:{user['user_id']}:{username.lower()}:{amount}"
+        timestamp = int(datetime.datetime.now(timezone.utc).timestamp())
+        key = f"admin:{user['user_id']}:{username.lower()}:{amount}:{timestamp}"
     
     granted = grant_xp(db, user["user_id"], "admin_adjust", key, amount)
     if not granted:
+        logger.info("[ADMIN_XP][DUPLICATE] uid=%s key=%s", user["user_id"], key)        
         if unique_key is None and cooldown_seconds > 0:
             admin_xp_cooldowns.delete_one({"_id": lock_id})  
         return False, "Duplicate admin XP grant ignored."
-        
+
+    logger.info(
+        "[ADMIN_XP][GRANTED] uid=%s amount=%s key=%s",
+        user["user_id"],
+        amount,
+        key,
+    )        
     return True, f"XP {'added' if amount > 0 else 'reduced'} by {abs(amount)}."
 
 def save_weekly_snapshot():
