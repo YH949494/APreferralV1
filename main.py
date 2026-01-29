@@ -1602,14 +1602,12 @@ def mask_username(username):
     if not username:
         return "********"
 
-    username = username[:8]  # Limit to max 8 chars
-
-    if len(username) <= 2:
-        masked = username[0] + "*" * (len(username) - 1)
-    else:
-        masked = username[:2] + "*" * (len(username) - 2)
-
-    return masked.ljust(8, "*")
+    u = str(username)
+    if len(u) <= 2:
+        return u[0] + "*" * (len(u) - 1)
+    if len(u) <= 6:
+        return u[:2] + "*" * (len(u) - 3) + u[-1]
+    return u[:4] + "****" + u[-2:]
 
 # Format usernames depending on admin or own account
 def format_username(u, current_user_id, is_admin):
