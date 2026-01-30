@@ -2,6 +2,7 @@ import os
 from datetime import datetime, timedelta
 
 from telegram.ext import ApplicationBuilder, ChatMemberHandler
+from telegram.request import HTTPXRequest
 from telegram import ChatMemberUpdated
 
 from database import db, init_db
@@ -74,7 +75,14 @@ def main():
     if not BOT_TOKEN:
         raise SystemExit("BOT_TOKEN is required")
     init_db()
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    httpx_request = HTTPXRequest(
+        connect_timeout=10,
+        read_timeout=20,
+        write_timeout=20,
+        pool_timeout=10,
+        connection_pool_size=8,
+    )
+    app = ApplicationBuilder().token(BOT_TOKEN).request(httpx_request).build()
     app.add_handler(ChatMemberHandler(on_member, ChatMemberHandler.CHAT_MEMBER))
     app.run_polling()
 
