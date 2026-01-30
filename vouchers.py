@@ -505,32 +505,6 @@ def _get_client_ip(req=None) -> str:
     req = req or request
     if not req:
         return ""
-    def _parse_ipv4(value: str) -> list[int] | None:
-        parts = value.split(".")
-        if len(parts) != 4:
-            return None
-        try:
-            octets = [int(p) for p in parts]
-        except ValueError:
-            return None
-        if any(o < 0 or o > 255 for o in octets):
-            return None
-        return octets
-
-    def _is_private_ipv4(value: str) -> bool:
-        octets = _parse_ipv4(value)
-        if not octets:
-            return False
-        first, second = octets[0], octets[1]
-        if first == 10:
-            return True
-        if first == 127:
-            return True
-        if first == 192 and second == 168:
-            return True
-        if first == 172 and 16 <= second <= 31:
-            return True
-        return False
 
     candidates = []
     fly_client_ip = req.headers.get("Fly-Client-IP")
@@ -706,17 +680,48 @@ def _rate_limit_key(prefix: str, *parts):
     return ":".join([prefix] + [str(p) for p in parts if p is not None])
 
 
-def _compute_subnet_key(ip: str) -> str:
-    if not ip:
-        return "unknown"
-    parts = ip.split(".")
+def _parse_ipv4(value: str) -> list[int] | None:
+    parts = value.split(".")
     if len(parts) != 4:
-        return "unknown"
+        return None
     try:
         octets = [int(p) for p in parts]
     except ValueError:
-        return "unknown"
+        return None
     if any(o < 0 or o > 255 for o in octets):
+        return None
+    return octets
+
+
+def _is_private_ipv4(value: str) -> bool:
+    octets = _parse_ipv4(value)
+    if not octets:
+        return False
+    first, second = octets[0], octets[1]
+    if first == 10:
+        return True
+    if first == 127:
+        return True
+    if first == 192 and second == 168:
+        return True
+    if first == 172 and 16 <= second <= 31:
+        return True
+    return False
+
+
+def _is_public_ipv4(value: str) -> bool:
+    if not value:
+        return False
+    return _parse_ipv4(value) is not None and not _is_private_ipv4(value)
+
+
+def _is_unknown_subnet(subnet: str | None) -> bool:
+    return not subnet or subnet == "unknown"
+
+
+def _compute_subnet_key(ip: str) -> str:
+    octets = _parse_ipv4(ip or "")
+    if not octets:     
         return "unknown"
     return f"{octets[0]}.{octets[1]}.{octets[2]}.0/24"
 
@@ -747,7 +752,7 @@ def _check_kill_switch(
         )
         return False, "ip_killed", retry_seconds
 
-    if subnet and subnet != "unknown":
+    if not _is_unknown_subnet(subnet):
         subnet_key = _rate_limit_key("kill", "subnet", subnet)
         subnet_doc = rate_limits_col.find_one({"key": subnet_key})
         blocked_until = _as_aware_utc((subnet_doc or {}).get("blockedUntil"))
@@ -841,7 +846,7 @@ def _apply_kill_success(
         now=now,
         rate_limits_col=rate_limits_col,
     )
-    if subnet_value != "unknown":
+    if not _is_unknown_subnet(subnet_value):
         _apply_kill_counter(
             scope="kill_subnet",
             key=_rate_limit_key("kill", "subnet", subnet_value),
@@ -857,10 +862,46 @@ def _check_cooldown(
     *,
     ip: str,
     subnet: str,
+    uid: str | int | None = None, 
     now: datetime | None = None,
     rate_limits_col=claim_rate_limits_col,
 ):
     now = now or now_utc()
+    uid_value = str(uid).strip() if uid is not None else ""
+    if uid_value:
+        uid_key = _rate_limit_key("cooldown", "uid", uid_value)
+        uid_doc = rate_limits_col.find_one({"key": uid_key})
+        uid_expires = _as_aware_utc((uid_doc or {}).get("expiresAt"))
+        if uid_expires and uid_expires > now:
+            retry_seconds = _seconds_until(uid_expires, now)
+            _safe_log(
+                "info",
+                "[cooldown] action=deny scope=uid uid=%s until=%s",
+                uid_value,
+                uid_expires,
+            )
+            return False, "cooldown", retry_seconds
+
+    if _is_unknown_subnet(subnet):
+        _safe_log(
+            "info",
+            "[cooldown] scope=subnet subnet=unknown => bypass_unknown_subnet=true",
+        )
+        if _is_public_ipv4(ip):
+            ip_key = _rate_limit_key("cooldown", "ip", ip)
+            ip_doc = rate_limits_col.find_one({"key": ip_key})
+            ip_expires = _as_aware_utc((ip_doc or {}).get("expiresAt"))
+            if ip_expires and ip_expires > now:
+                retry_seconds = _seconds_until(ip_expires, now)
+                _safe_log(
+                    "info",
+                    "[cooldown] action=deny scope=ip ip=%s until=%s",
+                    ip,
+                    ip_expires,
+                )
+                return False, "cooldown", retry_seconds
+        return True, None, 0
+ 
     ip_key = _rate_limit_key("cooldown", "ip", ip or "unknown")
     ip_doc = rate_limits_col.find_one({"key": ip_key})
     ip_expires = _as_aware_utc((ip_doc or {}).get("expiresAt"))
@@ -874,7 +915,7 @@ def _check_cooldown(
         )
         return False, "cooldown", retry_seconds
 
-    subnet_key = _rate_limit_key("cooldown", "subnet", subnet or "unknown")
+    subnet_key = _rate_limit_key("cooldown", "subnet", subnet)
     subnet_doc = rate_limits_col.find_one({"key": subnet_key})
     subnet_expires = _as_aware_utc((subnet_doc or {}).get("expiresAt"))
     if subnet_expires and subnet_expires > now:
@@ -882,7 +923,7 @@ def _check_cooldown(
         _safe_log(
             "info",
             "[cooldown] action=deny scope=subnet subnet=%s until=%s",
-            subnet or "unknown",
+            subnet,
             subnet_expires,
         )
         return False, "cooldown", retry_seconds
@@ -893,6 +934,7 @@ def _set_cooldown(
     *,
     ip: str,
     subnet: str,
+    uid: str | int | None = None,
     now: datetime | None = None,
     rate_limits_col=claim_rate_limits_col,
     cooldown_seconds: int = CLAIM_COOLDOWN_SECONDS,
@@ -901,6 +943,36 @@ def _set_cooldown(
     ip_value = ip or "unknown"
     subnet_value = subnet or "unknown"
     expires_at = now + timedelta(seconds=cooldown_seconds)
+    uid_value = str(uid).strip() if uid is not None else ""
+    if _is_unknown_subnet(subnet_value):
+        if uid_value:
+            rate_limits_col.update_one(
+                {"key": _rate_limit_key("cooldown", "uid", uid_value)},
+                {
+                    "$set": {
+                        "key": _rate_limit_key("cooldown", "uid", uid_value),
+                        "scope": "cooldown_uid",
+                        "uid": uid_value,
+                        "expiresAt": expires_at,
+                    }
+                },
+                upsert=True,
+            )
+            _safe_log("info", "[cooldown] scope=uid uid=%s => applied", uid_value)
+        if _is_public_ipv4(ip):
+            rate_limits_col.update_one(
+                {"key": _rate_limit_key("cooldown", "ip", ip)},
+                {
+                    "$set": {
+                        "key": _rate_limit_key("cooldown", "ip", ip),
+                        "scope": "cooldown_ip",
+                        "ip": ip,
+                        "expiresAt": expires_at,
+                    }
+                },
+                upsert=True,
+            )
+        return 
     rate_limits_col.update_one(
         {"key": _rate_limit_key("cooldown", "ip", ip_value)},
         {
@@ -2728,6 +2800,7 @@ def api_claim():
     cooldown_ok, cooldown_reason, cooldown_retry = _check_cooldown(
         ip=client_ip,
         subnet=client_subnet,
+        uid=claim_user_id,     
         now=now_utc(),
     )
     if not cooldown_ok:
@@ -2998,7 +3071,7 @@ def api_claim():
         )
         current_app.logger.info("[claim][OK] drop=%s uid=%s code=%s", drop_id, uid, result.get("code"))
         _apply_kill_success(ip=client_ip, subnet=client_subnet, now=now_utc())
-        _set_cooldown(ip=client_ip, subnet=client_subnet, now=now_utc())     
+        _set_cooldown(ip=client_ip, subnet=client_subnet, uid=claim_user_id, now=now_utc())      
     if _is_new_joiner_audience(audience_type):
         try:
             new_joiner_claims_col.update_one(
