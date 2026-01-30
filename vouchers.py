@@ -10,7 +10,8 @@ import hmac, hashlib, urllib.parse, os, json
 import config as _cfg 
  
 from database import db, users_collection
- 
+from onboarding import record_onboarding_start
+
 admin_cache_col = db["admin_cache"]
 new_joiner_claims_col = db["new_joiner_claims"]
 claim_rate_limits_col = db["claim_rate_limits"]
@@ -2426,6 +2427,8 @@ def api_visible():
                 uid = int(tg_user.get("id"))
             except Exception:
                 uid = None
+        if uid is not None:
+            record_onboarding_start(uid)
      
         drops, user_region = user_visible_drops(user, ref, tg_user=tg_user)
         return jsonify({
