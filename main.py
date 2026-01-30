@@ -12,6 +12,7 @@ from telegram.ext import (
     CallbackQueryHandler, ContextTypes, MessageHandler, filters
 )
 from telegram.error import BadRequest
+from telegram.request import HTTPXRequest
 from datetime import datetime, timedelta, timezone
 from werkzeug.exceptions import HTTPException
 from urllib.parse import urlencode
@@ -35,6 +36,7 @@ from app_context import set_app_bot, set_bot, set_scheduler
 from onboarding import MYWIN_CHAT_ID, record_first_mywin
 from vouchers import vouchers_bp, ensure_voucher_indexes, process_verification_queue
 from scheduler import settle_pending_referrals, settle_referral_snapshots, settle_xp_snapshots
+from telegram_utils import safe_reply_text
 
 from pymongo import DESCENDING, ASCENDING, ReturnDocument  # keep if used elsewhere
 from pymongo.errors import DuplicateKeyError
@@ -1341,7 +1343,14 @@ def _json_any_exc(e):
     return jsonify({"code": "server_error", "message": str(e)}), 500
     
 # Telegram bot
-app_bot = ApplicationBuilder().token(BOT_TOKEN).build()
+httpx_request = HTTPXRequest(
+    connect_timeout=10,
+    read_timeout=20,
+    write_timeout=20,
+    pool_timeout=10,
+    connection_pool_size=8,
+)
+app_bot = ApplicationBuilder().token(BOT_TOKEN).request(httpx_request).build()
 @app.route("/api/is_admin")
 def api_is_admin():
     try:
@@ -2463,7 +2472,14 @@ async def _send_xmas_flow(update: Update, context: ContextTypes.DEFAULT_TYPE, us
     keyboard = _xmas_keyboard()
     target_message = update.effective_message
     if target_message:
-        await target_message.reply_text(message, reply_markup=keyboard)
+        await safe_reply_text(
+            target_message,
+            message,
+            reply_markup=keyboard,
+            uid=user.id,
+            send_type="xmas_entry",
+            raise_on_non_transient=False,
+        )
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2497,16 +2513,20 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton("🚀 Open AdvantPlay Mini-App", web_app=WebAppInfo(url=WEBAPP_URL))
         ]]
         if message:
-            await message.reply_text(
-            "👋 Welcome to AdvantPlay Community!\n\n"
-            "Tap below to enter the Mini-App and:\n"
-            "• Check-in daily to earn XP\n"
-            "• Unlock your referral link\n"
-            "• Claim voucher code\n\n"
-            "Start your journey here 👇",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
+            await safe_reply_text(
+                message,
+                "👋 Welcome to AdvantPlay Community!\n\n"
+                "Tap below to enter the Mini-App and:\n"
+                "• Check-in daily to earn XP\n"
+                "• Unlock your referral link\n"
+                "• Claim voucher code\n\n"
+                "Start your journey here 👇",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                uid=user.id,
+                send_type="start",
+                raise_on_non_transient=False,
+            )
+            
 async def handle_xmas_checkin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Xmas Gift Delight check-in flow triggered via inline keyboard."""
     query = update.callback_query
