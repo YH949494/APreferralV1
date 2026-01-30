@@ -2547,8 +2547,18 @@ function setLeaderboardMeta(ts, { isStale = false } = {}) {
         throw new Error(`Non-JSON response: ${text.slice(0, 120)}`);
       }
 
-      if (!isValidLeaderboardPayload(data)) throw new Error("Invalid payload");
+    if (!isValidLeaderboardPayload(data)) {
+      console.warn("[LB][INVALID_PAYLOAD]", data);
+      throw new Error("Invalid payload");
+    }
+
+    try {
       renderLeaderboardData(data);
+    } catch (e) {
+      console.error("[LB][RENDER_CRASH]", e, data);
+      throw e;
+    }
+
       writeLeaderboardCache(data);
       leaderboardHasValidCache = true;
       leaderboardCacheAgeMs = 0;
@@ -2557,24 +2567,24 @@ function setLeaderboardMeta(ts, { isStale = false } = {}) {
       console.info("[LB][RENDER_FRESH]");
     } catch (err) {
       console.warn("[LB][FETCH_FAIL]", err);
-    if (!leaderboardHasValidCache) {
-        renderLeaderboardUnavailable(missingUser
-          ? "Please reopen the mini app to load the leaderboard."
-          : "Temporarily unavailable. Please try again.");
-        setLeaderboardRetryVisible(true);
-      }
-    } finally {
-      if (timeoutId) clearTimeout(timeoutId);
-      setLeaderboardLoading(false);
-      leaderboardFetchInProgress = false;
-      setLeaderboardRetryDisabled(false);
-      if (!leaderboardHasValidCache && leaderboardFetchAttempted) {
-        setLeaderboardRetryVisible(true);
-      }
-    }
 
-    }
+      // 🔥 show real reason on screen (debug)
+      try {
+        const msg = (err && (err.stack || err.message)) ? (err.stack || err.message) : String(err);
+        renderLeaderboardUnavailable(
+          (missingUser ? "Please reopen the mini app. " : "") +
+          "LB error: " + msg.slice(0, 180)
+        );
+      } catch (e) {
+        // if render also fails, at least dump something
+        const out2 = document.getElementById("leaderboard-output");
+        if (out2) out2.textContent = "LB error: " + String(err).slice(0, 180);
+      }
 
+      setLeaderboardRetryVisible(true);
+    }
+    }
+  
     async function loadPreviousLeaderboard() {
       try {
         const weeksRes = await fetch(`${API_BASE}/api/leaderboard/history/weeks`);
