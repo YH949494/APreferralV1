@@ -8,6 +8,7 @@ from apscheduler.triggers.date import DateTrigger
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from app_context import get_bot, get_scheduler, run_bot_coroutine
+from telegram_utils import safe_send_message
 from database import users_collection
 
 logger = logging.getLogger(__name__)
@@ -102,12 +103,25 @@ def send_pm1_if_needed(uid: int) -> None:
     if not bot:
         logger.info("[PM1][SKIP] uid=%s reason=missing_bot", uid)
         return
-    run_bot_coroutine(bot.send_message(chat_id=uid, text=PM1_TEXT))
-    users_collection.update_one(
-        {"user_id": uid},
-        {"$set": {"pm_sent.pm_checkin_tip": now_utc()}},
+    ok = run_bot_coroutine(
+        safe_send_message(
+            bot,
+            chat_id=uid,
+            text=PM1_TEXT,
+            uid=uid,
+            send_type="pm1",
+            raise_on_non_transient=False,
+        ),
+        timeout=70,
     )
-    logger.info("[PM1][SENT] uid=%s", uid)
+    if ok:
+        users_collection.update_one(
+            {"user_id": uid},
+            {"$set": {"pm_sent.pm_checkin_tip": now_utc()}},
+        )
+        logger.info("[PM1][SENT] uid=%s", uid)
+    else:
+        logger.warning("[PM1][SEND_FAILED] uid=%s", uid)
 
 
 def send_pm2_if_needed(uid: int) -> None:
@@ -134,12 +148,26 @@ def send_pm2_if_needed(uid: int) -> None:
     keyboard = InlineKeyboardMarkup(
         [[InlineKeyboardButton("Open #mywin", url=MYWIN_INVITE_LINK)]]
     )
-    run_bot_coroutine(bot.send_message(chat_id=uid, text=PM2_TEXT, reply_markup=keyboard))
-    users_collection.update_one(
-        {"user_id": uid},
-        {"$set": {"pm_sent.pm_mywin_tip": now_utc()}},
+    ok = run_bot_coroutine(
+        safe_send_message(
+            bot,
+            chat_id=uid,
+            text=PM2_TEXT,
+            reply_markup=keyboard,
+            uid=uid,
+            send_type="pm2",
+            raise_on_non_transient=False,
+        ),
+        timeout=70,
     )
-    logger.info("[PM2][SENT] uid=%s", uid)
+    if ok:
+        users_collection.update_one(
+            {"user_id": uid},
+            {"$set": {"pm_sent.pm_mywin_tip": now_utc()}},
+        )
+        logger.info("[PM2][SENT] uid=%s", uid)
+    else:
+        logger.warning("[PM2][SEND_FAILED] uid=%s", uid)
 
 
 def send_pm3_if_needed(uid: int) -> None:
@@ -169,12 +197,25 @@ def send_pm3_if_needed(uid: int) -> None:
     if not bot:
         logger.info("[PM3][SKIP] uid=%s reason=missing_bot", uid)
         return
-    run_bot_coroutine(bot.send_message(chat_id=uid, text=PM3_TEXT))
-    users_collection.update_one(
-        {"user_id": uid},
-        {"$set": {"pm_sent.pm_referral_tip": now_utc()}},
+    ok = run_bot_coroutine(
+        safe_send_message(
+            bot,
+            chat_id=uid,
+            text=PM3_TEXT,
+            uid=uid,
+            send_type="pm3",
+            raise_on_non_transient=False,
+        ),
+        timeout=70,
     )
-    logger.info("[PM3][SENT] uid=%s", uid)
+    if ok:
+        users_collection.update_one(
+            {"user_id": uid},
+            {"$set": {"pm_sent.pm_referral_tip": now_utc()}},
+        )
+        logger.info("[PM3][SENT] uid=%s", uid)
+    else:
+        logger.warning("[PM3][SEND_FAILED] uid=%s", uid)
 
 
 def send_pm4_if_needed(uid: int) -> None:
@@ -192,14 +233,27 @@ def send_pm4_if_needed(uid: int) -> None:
     if not bot:
         logger.info("[PM4][SKIP] uid=%s reason=missing_bot", uid)
         return
-    run_bot_coroutine(bot.send_message(chat_id=uid, text=PM4_TEXT))
-    users_collection.update_one(
-        {"user_id": uid},
-        {"$set": {"pm_sent.pm_vip_unlocked": now_utc()}},
+    ok = run_bot_coroutine(
+        safe_send_message(
+            bot,
+            chat_id=uid,
+            text=PM4_TEXT,
+            uid=uid,
+            send_type="pm4",
+            raise_on_non_transient=False,
+        ),
+        timeout=70,
     )
-    for job_id in (f"pm1:{uid}", f"pm2:{uid}", f"pm3:{uid}"):
-        _remove_job(job_id)
-    logger.info("[PM4][SENT] uid=%s", uid)
+    if ok:
+        users_collection.update_one(
+            {"user_id": uid},
+            {"$set": {"pm_sent.pm_vip_unlocked": now_utc()}},
+        )
+        for job_id in (f"pm1:{uid}", f"pm2:{uid}", f"pm3:{uid}"):
+            _remove_job(job_id)
+        logger.info("[PM4][SENT] uid=%s", uid)
+    else:
+        logger.warning("[PM4][SEND_FAILED] uid=%s", uid)
 
 
 def schedule_pm1(uid: int, ref: datetime | None = None) -> datetime:
