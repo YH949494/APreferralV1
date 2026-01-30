@@ -2421,11 +2421,20 @@ function setLeaderboardMeta(ts, { isStale = false } = {}) {
 
     function isValidLeaderboardRow(row) {
       if (!row || typeof row !== "object") return false;
+
       const hasIdentity = row.username || row.user_id || row.id;
-      const hasScore = Number.isFinite(row.xp)
-        || Number.isFinite(row.weekly_referrals)
-        || Number.isFinite(row.total_valid)
-        || Number.isFinite(row.referrals);
+
+      const xp = Number(row.xp);
+      const weeklyRef = Number(row.weekly_referrals);
+      const totalValid = Number(row.total_valid);
+      const referrals = Number(row.referrals);
+
+      const hasScore =
+        Number.isFinite(xp) ||
+        Number.isFinite(weeklyRef) ||
+        Number.isFinite(totalValid) ||
+        Number.isFinite(referrals);
+
       return Boolean(hasIdentity && hasScore);
     }
 
