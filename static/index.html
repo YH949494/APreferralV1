@@ -2524,37 +2524,55 @@ function setLeaderboardMeta(ts, { isStale = false } = {}) {
       if (userId) url.searchParams.set("user_id", userId);
       url.searchParams.set("t", Date.now());
 
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 2500);
+    let controller = null;
+    let timeoutId = null;
 
-      try {
-        const res = await fetch(url.toString(), { signal: controller.signal });
-        const data = await res.json();
-        if (!isValidLeaderboardPayload(data)) throw new Error("Invalid payload");
-        renderLeaderboardData(data);
-        writeLeaderboardCache(data);
-        leaderboardHasValidCache = true;
-        leaderboardCacheAgeMs = 0;
-        setLeaderboardMeta(Date.now(), { isStale: false });
-        console.info("[LB][FETCH_OK]");
-        console.info("[LB][RENDER_FRESH]");
-      } catch (err) {
-        console.warn("[LB][FETCH_FAIL]", err);
-        if (!leaderboardHasValidCache) {
-          renderLeaderboardUnavailable(missingUser
-            ? "Please reopen the mini app to load the leaderboard."
-            : "Temporarily unavailable. Please try again.");
-          setLeaderboardRetryVisible(true);
-        }
-      } finally {
-        clearTimeout(timeoutId);
-        setLeaderboardLoading(false);
-        leaderboardFetchInProgress = false;
-        setLeaderboardRetryDisabled(false);
-        if (!leaderboardHasValidCache && leaderboardFetchAttempted) {
-          setLeaderboardRetryVisible(true);
-        }
+    try {
+      // Desktop Telegram can be slower; 2.5s is too aggressive.
+      if (typeof AbortController !== "undefined") {
+        controller = new AbortController();
+        timeoutId = setTimeout(() => controller.abort(), 12000); // 12s
       }
+
+      const res = await fetch(url.toString(), controller ? { signal: controller.signal } : {});
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+      let data = null;
+      const ct = (res.headers.get("content-type") || "").toLowerCase();
+      if (ct.includes("application/json")) {
+        data = await res.json();
+      } else {
+        // Guard: some proxies return HTML even with 200/502 pages
+        const text = await res.text();
+        throw new Error(`Non-JSON response: ${text.slice(0, 120)}`);
+      }
+
+      if (!isValidLeaderboardPayload(data)) throw new Error("Invalid payload");
+      renderLeaderboardData(data);
+      writeLeaderboardCache(data);
+      leaderboardHasValidCache = true;
+      leaderboardCacheAgeMs = 0;
+      setLeaderboardMeta(Date.now(), { isStale: false });
+      console.info("[LB][FETCH_OK]");
+      console.info("[LB][RENDER_FRESH]");
+    } catch (err) {
+      console.warn("[LB][FETCH_FAIL]", err);
+    if (!leaderboardHasValidCache) {
+        renderLeaderboardUnavailable(missingUser
+          ? "Please reopen the mini app to load the leaderboard."
+          : "Temporarily unavailable. Please try again.");
+        setLeaderboardRetryVisible(true);
+      }
+    } finally {
+      if (timeoutId) clearTimeout(timeoutId);
+      setLeaderboardLoading(false);
+      leaderboardFetchInProgress = false;
+      setLeaderboardRetryDisabled(false);
+      if (!leaderboardHasValidCache && leaderboardFetchAttempted) {
+        setLeaderboardRetryVisible(true);
+      }
+    }
+
     }
 
     async function loadPreviousLeaderboard() {
