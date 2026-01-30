@@ -1,4 +1,6 @@
+import logging
 import os
+from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 # Timezone
@@ -18,4 +20,31 @@ WEEKLY_XP_BUCKET = 1000
 WEEKLY_REFERRAL_BUCKET = 10
 
 # Bump MINIAPP_VERSION each deploy to bust Telegram Desktop cache.
-MINIAPP_VERSION = os.getenv("MINIAPP_VERSION", "dev")
+BOOT_ID = uuid4().hex[:12]
+_override = os.getenv("MINIAPP_VERSION")
+_fly_image_ref = os.getenv("FLY_IMAGE_REF")
+_fly_machine_version = os.getenv("FLY_MACHINE_VERSION")
+_derived = None
+if _fly_image_ref:
+    _derived = _fly_image_ref.split("@")[-1].replace("sha256:", "")
+elif _fly_machine_version:
+    _derived = _fly_machine_version
+if _derived:
+    _derived = _derived[:12]
+
+_source = "boot"
+if _override:
+    MINIAPP_VERSION = _override
+    _source = "override"
+elif _derived:
+    MINIAPP_VERSION = _derived
+    _source = "derived"
+elif os.getenv("FLASK_ENV") == "development":
+    MINIAPP_VERSION = "dev"
+    _source = "dev"
+else:
+    MINIAPP_VERSION = BOOT_ID
+
+logging.getLogger(__name__).info(
+    "[MINIAPP_VERSION] resolved=%s source=%s", MINIAPP_VERSION, _source
+)
