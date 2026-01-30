@@ -1,5 +1,5 @@
 from flask import (
-    Flask, request, jsonify, send_from_directory,
+    Flask, request, jsonify, send_from_directory, make_response,
     render_template, redirect, url_for, flash, g, Blueprint
 )
 from flask_cors import CORS
@@ -1549,7 +1549,12 @@ def home():
 
 @app.route("/miniapp")
 def serve_mini_app():
-    return send_from_directory("static", "index.html")
+    response = make_response(send_from_directory("static", "index.html"))
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
+    logger.info("[MINIAPP] served static/index.html no-store")
+    return response
 
 @app.route("/api/referral")
 def api_referral():
