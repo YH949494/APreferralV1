@@ -31,6 +31,8 @@ from xp import ensure_xp_indexes, grant_xp, now_utc
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
+from app_context import set_app_bot, set_bot, set_scheduler
+from onboarding import MYWIN_CHAT_ID, record_first_mywin
 from vouchers import vouchers_bp, ensure_voucher_indexes, process_verification_queue
 from scheduler import settle_pending_referrals, settle_referral_snapshots, settle_xp_snapshots
 
@@ -2633,6 +2635,30 @@ async def member_update_handler(update: Update, context: ContextTypes.DEFAULT_TY
     except Exception:
         logger.exception("[join] chat_member error uid=%s chat_id=%s", user.id, chat_id)
 
+def _is_mywin_message(message) -> bool:
+    if not message:
+        return False
+    text = message.text or message.caption or ""
+    if "#mywin" not in text.lower():
+        return False
+    if message.photo:
+        return True
+    if message.document:
+        return True
+    return False
+
+async def mywin_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.effective_message
+    chat = update.effective_chat
+    user = update.effective_user
+    if not message or not chat or not user:
+        return
+    if chat.id != MYWIN_CHAT_ID:
+        return
+    if not _is_mywin_message(message):
+        return
+    record_first_mywin(user.id, chat.id, message.message_id)
+
 async def new_chat_members_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.effective_message
     if not message or not message.new_chat_members:
@@ -2736,7 +2762,9 @@ def run_worker():
     except Exception as e:
         print("Failed to register vouchers blueprint / ensure indexes:", e)
         raise
-
+    set_app_bot(app_bot)
+    set_bot(app_bot.bot)
+    
     # 2) Catch up maintenance before bot handlers start
     try:
         run_boot_catchup()
@@ -2748,7 +2776,8 @@ def run_worker():
     app_bot.add_handler(ChatJoinRequestHandler(join_request_handler))    
     app_bot.add_handler(ChatMemberHandler(member_update_handler, ChatMemberHandler.CHAT_MEMBER))
     app_bot.add_handler(ChatMemberHandler(member_update_handler, ChatMemberHandler.MY_CHAT_MEMBER))
-    app_bot.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, new_chat_members_handler))    
+    app_bot.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, new_chat_members_handler))   
+    app_bot.add_handler(MessageHandler(filters.Chat(MYWIN_CHAT_ID), mywin_message_handler))    
     app_bot.add_handler(CallbackQueryHandler(handle_xmas_checkin, pattern="^xmas_checkin$"))
     app_bot.add_handler(CallbackQueryHandler(button_handler))
 
@@ -2757,6 +2786,7 @@ def run_worker():
         timezone=KL_TZ,
         job_defaults={"coalesce": True, "misfire_grace_time": 3600, "max_instances": 1}
     )
+    set_scheduler(scheduler)    
     scheduler.add_job(
         reset_weekly_xp,
         trigger=CronTrigger(day_of_week="mon", hour=0, minute=0, timezone=KL_TZ),
