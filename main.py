@@ -21,6 +21,7 @@ from config import (
     XP_BASE_PER_CHECKIN,
     WEEKLY_XP_BUCKET,
     WEEKLY_REFERRAL_BUCKET,
+    MINIAPP_VERSION,
 )
 
 from bson.json_util import dumps
@@ -61,7 +62,8 @@ if not RUNNER_MODE:
 # ----------------------------
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 MONGO_URL = os.environ.get("MONGO_URL")
-WEBAPP_URL = "https://apreferralv1.fly.dev/miniapp"
+BASE_WEBAPP_URL = "https://apreferralv1.fly.dev/miniapp"
+WEBAPP_URL = f"{BASE_WEBAPP_URL}?v={MINIAPP_VERSION}"
 GROUP_ID = -1002304653063
 API_BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
@@ -1547,13 +1549,17 @@ def api_set_region(user_id):
 def home():
     return "Bot is alive!"
 
-@app.route("/miniapp")
-def serve_mini_app():
-    response = make_response(send_from_directory("static", "index.html"))
+def _apply_no_store_headers(response):
     response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
     response.headers["Pragma"] = "no-cache"
     response.headers["Expires"] = "0"
-    logger.info("[MINIAPP] served static/index.html no-store")
+    return response
+
+@app.route("/miniapp")
+def serve_mini_app():
+    response = make_response(send_from_directory("static", "index.html"))
+    _apply_no_store_headers(response)
+    logger.info("[MINIAPP] served static/index.html v=%s", MINIAPP_VERSION)
     return response
 
 @app.route("/api/referral")
