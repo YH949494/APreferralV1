@@ -1,3 +1,4 @@
+import os
 from zoneinfo import ZoneInfo
 
 # Timezone
@@ -15,3 +16,6 @@ STREAK_MILESTONES = {
 # Announcement milestone buckets
 WEEKLY_XP_BUCKET = 1000
 WEEKLY_REFERRAL_BUCKET = 10
+
+# Bump MINIAPP_VERSION each deploy to bust Telegram Desktop cache.
+MINIAPP_VERSION = os.getenv("MINIAPP_VERSION", "dev")
