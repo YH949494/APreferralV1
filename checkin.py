@@ -4,6 +4,7 @@ from flask import jsonify, request
 
 from config import KL_TZ, XP_BASE_PER_CHECKIN, STREAK_MILESTONES, FIRST_CHECKIN_BONUS
 from database import db, get_collection, init_db
+from onboarding import record_first_checkin
 from xp import grant_xp
 
 users_collection = get_collection("users")
@@ -70,6 +71,8 @@ def handle_checkin():
 
     if first_checkin:
         grant_xp(db, user_id, "first_checkin", "first_checkin", FIRST_CHECKIN_BONUS)
+
+    record_first_checkin(user_id)
     
     bonus_text = f" 🎉 Streak Bonus: +{bonus_xp} XP!" if bonus_xp else ""
     first_bonus_text = (
