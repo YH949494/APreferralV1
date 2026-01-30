@@ -156,7 +156,20 @@ def _record_referral_event(inviter_id: int, invitee_id: int, event: str, occurre
         invitee_id,
         "settled" if event == "referral_settled" else "revoked",
     )
-    
+
+
+def maybe_handle_first_referral(uid: int, old_total: int, new_total: int, now_utc_ts: datetime) -> None:
+    if old_total != 0 or new_total < 1:
+        return
+    try:
+        from onboarding import record_first_referral, maybe_unlock_vip1
+    except Exception:
+        logger.exception("[FIRST_REFERRAL] import_failed uid=%s", uid)
+        return
+    created = record_first_referral(uid, ref=now_utc_ts)
+    if created:
+        maybe_unlock_vip1(uid)
+        
 def _xp_time_expr():
     return {"$ifNull": ["$created_at", "$ts"]}
 
@@ -289,6 +302,13 @@ def settle_xp_snapshots() -> None:
             uid,
             int(row.get("weekly_xp", 0)),
         )
+        if int(row.get("monthly_xp", 0)) >= 800:
+            try:
+                from onboarding import maybe_unlock_vip1
+            except Exception:
+                logger.exception("[VIP][CHECK] import_failed uid=%s", uid)
+            else:
+                maybe_unlock_vip1(uid)        
 
 def _referral_sign_expr():
     return {
@@ -705,7 +725,8 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
                 actual_bonus_added = bonus_added
             _record_referral_event(inviter_user_id, invitee_user_id, "referral_settled", now_utc_ts)
             ref_total = new_ref_total
-                
+            maybe_handle_first_referral(inviter_user_id, current_ref_total, new_ref_total, now_utc_ts)
+            
             db.pending_referrals.update_one(
                 {"_id": pending_id},
                 {
