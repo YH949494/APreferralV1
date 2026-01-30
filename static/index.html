@@ -367,6 +367,50 @@
       margin-top: auto;
     }
 
+    #claim-error {
+      display: none;
+      margin-top: 12px;
+    }
+
+    .claim-error-card {
+      border: 1px solid #f3c0c0;
+      background: #fff5f5;
+      border-radius: 12px;
+      padding: 12px 14px;
+      display: grid;
+      gap: 8px;
+      box-shadow: var(--shadow-soft);
+    }
+
+    .claim-error-card.claim-error-info {
+      border-color: #ffd8bf;
+      background: #fff7f1;
+    }
+
+    .claim-error-title {
+      font-weight: 600;
+      font-size: 15px;
+    }
+
+    .claim-error-message {
+      margin: 0;
+      color: #4a4a4a;
+      font-size: 14px;
+      line-height: 1.4;
+    }
+
+    .claim-error-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .claim-error-countdown {
+      font-size: 13px;
+      color: var(--text-muted);
+    }
+    
     .modal {
       display: none;
       position: fixed;
@@ -474,6 +518,7 @@
     <p class="section-subtext">Claim what’s live now. Limited slots.</p>
     <p id="campaign-voucher-message">Coming soon…</p>
     <button id="campaign-voucher-btn" type="button" class="btn btn-primary" style="display: none;"></button>
+    <div id="claim-error" role="status" aria-live="polite"></div>    
     <div id="campaign-voucher-list"></div>
     
     <div id="bonus-voucher" style="display: none; margin-top: 16px;">
@@ -1758,24 +1803,10 @@ Tap to join now 👇
         });
     }
 
-    const CLAIM_REASON_TITLE = {
-      not_joined_main: "🚪 Join Group Now",
-      pic: "🖼️ Profile Picture Required",
-      verify_pending: "⏳ Verification in Progress",
-      not_new_user: "ℹ️ New Users Only",
-      already_claimed: "✅ Already Claimed",
-      expired: "⌛ Welcome Bonus Expired",
-      ip_rate_limit: "🌐 Too Many Requests",
-      new_joiner_rate_limit: "🚦 High Traffic",
-      out_of_stock: "🎁 All Claimed",
-      missing_profile_photo: "🖼️ Profile Picture Required",
-      already_claimed_lifetime: "✅ Already Claimed",
-      ip_claims_per_day: "🌐 Too Many Requests",
-      uid_attempts_per_minute: "🚦 High Traffic",
-      ip_uidset_per_day: "🚦 High Traffic"
-    };
-
-    const DEFAULT_TITLE = "⚠️ Unable to Claim";
+    const OFFICIAL_CHANNEL_LINK = "https://t.me/advantplayofficial";
+    const PROFILE_PHOTO_SETTINGS_LINK = "tg://settings";
+    let claimErrorCountdownTimer = null;
+    
     function isMyRegion(region) {
       if (!region) return false;
       const normalized = String(region).trim().toLowerCase();
@@ -1919,6 +1950,183 @@ Tap to join now 👇
       });
     }
 
+    function clearClaimError() {
+      const container = document.getElementById("claim-error");
+      if (!container) return;
+      container.innerHTML = "";
+      container.style.display = "none";
+      if (claimErrorCountdownTimer) {
+        clearInterval(claimErrorCountdownTimer);
+        claimErrorCountdownTimer = null;
+      }
+    }
+
+    function normalizeRetryAfterSec(value) {
+      const num = Number(value);
+      if (!Number.isFinite(num) || num <= 0) return null;
+      return Math.ceil(num);
+    }
+
+    function claimErrorToUi(payload = {}, status) {
+      const code = payload?.code || "";
+      const reason = payload?.reason || payload?.checks_key || "";
+      const retryAfterSec = normalizeRetryAfterSec(payload?.retry_after_sec);
+
+      if (code === "sold_out") {
+        return {
+          title: "All claimed",
+          message: "This drop is fully claimed.",
+          severity: "info",
+          hideRetry: true
+        };
+      }
+
+      if (code === "rate_limited") {
+        if (reason === "ip_killed" || reason === "subnet_killed") {
+          return {
+            title: "Temporarily blocked",
+            message: "Please try later.",
+            severity: "warn"
+          };
+        }
+        return {
+          title: "Too fast",
+          message: retryAfterSec
+            ? `Please wait ${retryAfterSec}s and try again.`
+            : "Please wait a moment and try again.",
+          retryAfterSec,
+          severity: "warn"
+        };
+      }
+
+      if (code === "blocked" && reason === "missing_profile_photo") {
+        return {
+          title: "Profile photo required",
+          message: "Set a Telegram profile photo, then retry.",
+          ctaText: "Set profile photo",
+          ctaAction: "profile_photo",
+          severity: "warn"
+        };
+      }
+
+      if (code === "not_subscribed") {
+        return {
+          title: "Subscribe required",
+          message: "Join the official channel to claim this pool drop.",
+          ctaText: "Join official channel",
+          ctaAction: "join_channel",
+          severity: "warn"
+        };
+      }
+
+      if (
+        code === "subscription_check_unavailable" ||
+        reason === "subscription_check_unavailable" ||
+        status === 503
+      ) {
+        return {
+          title: "Verification busy",
+          message: "Can’t verify subscription now. Try again shortly.",
+          severity: "warn"
+        };
+      }
+
+      return {
+        title: "Temporarily unavailable",
+        message: "Please try again.",
+        severity: "warn"
+      };
+    }
+
+    function renderClaimError(uiModel, options = {}) {
+      const container = document.getElementById("claim-error");
+      if (!container || !uiModel) return;
+
+      if (claimErrorCountdownTimer) {
+        clearInterval(claimErrorCountdownTimer);
+        claimErrorCountdownTimer = null;
+      }
+
+      container.innerHTML = "";
+      container.style.display = "block";
+
+      const card = document.createElement("div");
+      card.className = `claim-error-card claim-error-${uiModel.severity || "warn"}`;
+
+      const title = document.createElement("div");
+      title.className = "claim-error-title";
+      title.textContent = uiModel.title || "Unable to claim";
+      card.appendChild(title);
+
+      const message = document.createElement("p");
+      message.className = "claim-error-message";
+      message.textContent = uiModel.message || "Please try again.";
+      card.appendChild(message);
+
+      const actions = document.createElement("div");
+      actions.className = "claim-error-actions";
+
+      if (uiModel.ctaText) {
+        const ctaBtn = document.createElement("button");
+        ctaBtn.type = "button";
+        ctaBtn.className = "btn btn-ghost";
+        ctaBtn.textContent = uiModel.ctaText;
+        ctaBtn.addEventListener("click", () => {
+          if (uiModel.ctaAction === "join_channel") {
+            if (tg?.openTelegramLink) {
+              tg.openTelegramLink(OFFICIAL_CHANNEL_LINK);
+            } else {
+              window.open(OFFICIAL_CHANNEL_LINK, "_blank");
+            }
+          } else if (uiModel.ctaAction === "profile_photo") {
+            if (tg?.openTelegramLink) {
+              tg.openTelegramLink(PROFILE_PHOTO_SETTINGS_LINK);
+            } else {
+              window.open(PROFILE_PHOTO_SETTINGS_LINK, "_blank");
+            }
+          }
+        });
+        actions.appendChild(ctaBtn);
+      }
+
+      if (!uiModel.hideRetry) {
+        const retryBtn = document.createElement("button");
+        retryBtn.type = "button";
+        retryBtn.className = "btn btn-primary";
+        retryBtn.textContent = "Retry";
+        retryBtn.addEventListener("click", () => {
+          if (typeof options.retryHandler === "function") {
+            options.retryHandler();
+          }
+        });
+        actions.appendChild(retryBtn);
+
+        const countdown = document.createElement("span");
+        countdown.className = "claim-error-countdown";
+        actions.appendChild(countdown);
+
+        if (uiModel.retryAfterSec) {
+          let remaining = uiModel.retryAfterSec;
+          retryBtn.setAttribute("disabled", "disabled");
+          countdown.textContent = `Retry available in ${remaining}s`;
+          claimErrorCountdownTimer = setInterval(() => {
+            remaining -= 1;
+            if (remaining <= 0) {
+              clearInterval(claimErrorCountdownTimer);
+              claimErrorCountdownTimer = null;
+              retryBtn.removeAttribute("disabled");
+              countdown.textContent = "You can retry now.";
+              return;
+            }
+            countdown.textContent = `Retry available in ${remaining}s`;
+          }, 1000);
+        }
+      }
+
+      card.appendChild(actions);
+      container.appendChild(card);
+    }
+    
     async function loadVouchers() {
       const section = document.getElementById("voucher-section");
       const messageEl = document.getElementById("campaign-voucher-message");
@@ -2039,6 +2247,8 @@ Tap to join now 👇
       const claimBtn = e.target.closest("button[data-dropid],button[data-claim]");
       if (!claimBtn) return;
 
+      clearClaimError();
+      
       if (!hasRegionSelected()) {
         alert("❌ Please select and lock your region before claiming rewards.");
         return;
@@ -2061,34 +2271,37 @@ Tap to join now 👇
 
         const ok = res.ok && (out?.ok === true || out?.status === "ok");
         if (!ok) {
-          if (res.status === 410 && out?.code === "sold_out") {
-            const soldOutMessage = out?.message || "All vouchers have been fully redeemed.";
+          const payload = { ...(out || {}) };
+          if (res.status === 410 && !payload.code) {
+            payload.code = "sold_out";
+          }
+          console.warn("Claim failed", {
+            status: res.status,
+            code: payload?.code,
+            reason: payload?.reason,
+            retry_after_sec: payload?.retry_after_sec
+          });
+          const uiModel = claimErrorToUi(payload, res.status);
+          if (payload?.code === "sold_out") {
+            const soldOutMessage = payload?.message || "All vouchers have been fully redeemed.";
             if (claimBtn.id === "campaign-voucher-btn") {
               const messageEl = document.getElementById("campaign-voucher-message");
               if (messageEl) messageEl.innerText = soldOutMessage;
             }
             claimBtn.textContent = "All vouchers redeemed";
             claimBtn.setAttribute("disabled", "disabled");
-            alert(soldOutMessage);
-            return;
           }
-          const key = out?.reason || out?.checks_key || "unknown";
-          const title = CLAIM_REASON_TITLE[key] || DEFAULT_TITLE;
-          if (key === "not_joined_main") {
-            const joinBtn = document.getElementById("join-group-btn");
-            if (joinBtn) joinBtn.style.display = "inline-block";
-          }
-          if (res.status === 403 && out?.code === "not_subscribed") {
-            if (claimBtn.id === "campaign-voucher-btn") {
-              showChannelGate(null, claimBtn);
-            } else {
-              showChannelGate(null, claimBtn);
+          renderClaimError(uiModel, {
+            retryHandler: () => {
+              if (document.body.contains(claimBtn)) {
+                claimBtn.click();
+              }
             }
-          }
-          alert(title);
+          });
           return;
         }
 
+        clearClaimError();        
         const codeText = out?.voucher?.code ? String(out.voucher.code) : "(no code)";
         const claimedAt = out?.voucher?.claimedAt ? fmtKL(out.voucher.claimedAt) : "-";
 
@@ -2123,7 +2336,14 @@ Tap to join now 👇
         alert(`🎟️ Your code: ${codeText}\nClaimed at: ${claimedAt}${copyMsg}`);
         
       } catch (err) {
-        alert(DEFAULT_TITLE);
+        console.error("Claim request failed", err);
+        renderClaimError(claimErrorToUi({}, null), {
+          retryHandler: () => {
+            if (document.body.contains(claimBtn)) {
+              claimBtn.click();
+            }
+          }
+        });
       }
     });
 
