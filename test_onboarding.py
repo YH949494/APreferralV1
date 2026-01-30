@@ -13,7 +13,7 @@ import scheduler
 import vouchers
 from app_context import set_scheduler
 from onboarding import record_first_checkin, record_first_mywin
-
+from pymongo.errors import DuplicateKeyError
 
 class FakeUpdateResult:
     def __init__(self, modified_count=0, upserted_id=None):
@@ -36,10 +36,21 @@ class FakeUsersCollection:
                 return False
         return True
 
-    def find_one(self, filt, projection=None):  # noqa: ARG002
+    def find_one(self, filt, projection=None):
         for doc in self.docs.values():
             if self._match(doc, filt):
-                return dict(doc)
+                if projection is None:
+                    return dict(doc)
+                projected = {}
+                include_id = projection.get("_id", 1)
+                for key, flag in projection.items():
+                    if not flag or key == "_id":
+                        continue
+                    if key in doc:
+                        projected[key] = doc[key]
+                if include_id and "_id" in doc:
+                    projected["_id"] = doc["_id"]
+                return projected
         return None
 
     def update_one(self, filt, update, upsert=False):
@@ -47,18 +58,20 @@ class FakeUsersCollection:
             if self._match(doc, filt):
                 for key, value in update.get("$set", {}).items():
                     self._apply_set(doc, key, value)
+                for key, value in update.get("$setOnInsert", {}).items():
+                    if key not in doc:
+                        self._apply_set(doc, key, value)                    
                 return FakeUpdateResult(modified_count=1)
         if not upsert:
             return FakeUpdateResult(modified_count=0)
-        uid = filt.get("user_id")
-        if uid in self.docs:
-            return FakeUpdateResult(modified_count=0)
-        new_doc = {"user_id": uid}
+        new_doc = {"user_id": filt.get("user_id")}
         for key, value in update.get("$set", {}).items():
             self._apply_set(new_doc, key, value)
+        for key, value in update.get("$setOnInsert", {}).items():
+            self._apply_set(new_doc, key, value)            
         new_doc["_id"] = self._next_id
         self._next_id += 1
-        self.docs[uid] = new_doc
+        self.docs[new_doc["_id"]] = new_doc
         return FakeUpdateResult(modified_count=1, upserted_id=new_doc["_id"])
 
     def _apply_set(self, doc, key, value):
@@ -71,6 +84,19 @@ class FakeUsersCollection:
             cursor = cursor.setdefault(part, {})
         cursor[parts[-1]] = value
 
+    def insert_one(self, doc):
+        user_id = doc.get("user_id")
+        if user_id is not None:
+            for existing in self.docs.values():
+                if existing.get("user_id") == user_id:
+                    raise DuplicateKeyError("duplicate user_id")
+        new_doc = dict(doc)
+        new_doc.setdefault("_id", self._next_id)
+        if new_doc["_id"] in self.docs:
+            raise DuplicateKeyError("duplicate _id")
+        self._next_id = max(self._next_id + 1, new_doc["_id"] + 1)
+        self.docs[new_doc["_id"]] = new_doc
+        return new_doc
 
 class FakeScheduler:
     def __init__(self):
@@ -95,12 +121,25 @@ class FakeBot:
         self.sent.append({"chat_id": chat_id, "text": text, "reply_markup": reply_markup})
         return True
 
+class FakeEventsCollection:
+    def __init__(self):
+        self.docs = {}
+
+    def insert_one(self, doc):
+        doc_id = doc.get("_id")
+        if doc_id in self.docs:
+            raise DuplicateKeyError("duplicate _id")
+        self.docs[doc_id] = dict(doc)
+        return doc
+
 
 class OnboardingTests(unittest.TestCase):
     def setUp(self):
         self.users = FakeUsersCollection()
         self.scheduler = FakeScheduler()
+        self.events = FakeEventsCollection()        
         onboarding.users_collection = self.users
+        onboarding.onboarding_events = self.events        
         set_scheduler(self.scheduler)
 
     def test_e0_idempotent_api_visible(self):
@@ -119,22 +158,90 @@ class OnboardingTests(unittest.TestCase):
             with app.test_request_context("/vouchers/visible?init_data=abc"):
                 vouchers.api_visible()
 
-        self.assertIn(uid, self.users.docs)
-        self.assertIn("onboarding_started_at", self.users.docs[uid])
+        user_doc = self.users.find_one({"user_id": uid})
+        self.assertIsNotNone(user_doc)
+        self.assertIn("onboarding_started_at", user_doc)
         self.assertEqual(self.scheduler.add_calls.count(f"pm1:{uid}"), 1)
         trigger = self.scheduler.jobs[f"pm1:{uid}"]["trigger"]
         self.assertEqual(trigger.run_date, fixed_now + timedelta(hours=2))
 
+    def test_record_onboarding_existing_user_id_with_different_id(self):
+        uid = 555
+        fixed_now = datetime(2024, 1, 4, tzinfo=timezone.utc)
+        self.users.insert_one({"_id": 999, "user_id": uid, "status": "Normal"})
+        with patch.object(onboarding, "now_utc", return_value=fixed_now):
+            created = onboarding.record_onboarding_start(uid, source="visible")
+        user_doc = self.users.find_one({"user_id": uid})
+        self.assertTrue(created)
+        self.assertEqual(user_doc.get("onboarding_started_at"), fixed_now)
+        self.assertEqual(self.scheduler.add_calls.count(f"pm1:{uid}"), 1)
+        self.assertIn(f"E0:{uid}", self.events.docs)
+
+    def test_record_onboarding_idempotent(self):
+        uid = 554
+        fixed_now = datetime(2024, 1, 4, tzinfo=timezone.utc)
+        self.users.insert_one({"_id": 500, "user_id": uid, "status": "Normal"})
+        with patch.object(onboarding, "now_utc", return_value=fixed_now):
+            created = onboarding.record_onboarding_start(uid, source="visible")
+            created_again = onboarding.record_onboarding_start(uid, source="visible")
+        self.assertTrue(created)
+        self.assertFalse(created_again)
+
+    def test_record_onboarding_race_duplicate_insert(self):
+        uid = 777
+        fixed_now = datetime(2024, 1, 5, tzinfo=timezone.utc)
+
+        class RaceUsersCollection(FakeUsersCollection):
+            def __init__(self, skip_uid):
+                super().__init__()
+                self._skip_uid_once = skip_uid
+
+            def find_one(self, filt, projection=None):
+                if filt.get("user_id") == self._skip_uid_once:
+                    self._skip_uid_once = None
+                    return None
+                return super().find_one(filt, projection)
+
+        race_users = RaceUsersCollection(uid)
+        race_users.insert_one({"user_id": uid, "status": "Normal"})
+        onboarding.users_collection = race_users
+        with patch.object(onboarding, "now_utc", return_value=fixed_now):
+            created = onboarding.record_onboarding_start(uid, source="visible")
+        user_doc = race_users.find_one({"user_id": uid})
+        self.assertTrue(created)
+        self.assertEqual(user_doc.get("onboarding_started_at"), fixed_now)
+        self.assertEqual(self.scheduler.add_calls.count(f"pm1:{uid}"), 1)
+
+    def test_record_onboarding_event_idempotent(self):
+        uid = 778
+        fixed_now = datetime(2024, 1, 6, tzinfo=timezone.utc)
+        self.users.insert_one({"user_id": uid, "status": "Normal"})
+        self.events.docs[f"E0:{uid}"] = {"_id": f"E0:{uid}", "uid": uid}
+        with patch.object(onboarding, "now_utc", return_value=fixed_now):
+            created = onboarding.record_onboarding_start(uid, source="visible")
+        self.assertTrue(created)
+        self.assertIn(f"E0:{uid}", self.events.docs)
+
+    def test_visible_ping_throttled(self):
+        uid = 888
+        fixed_now = datetime(2024, 1, 7, tzinfo=timezone.utc)
+        created = onboarding.record_visible_ping(uid, ref=fixed_now)
+        throttled = onboarding.record_visible_ping(uid, ref=fixed_now + timedelta(seconds=30))
+        user_doc = self.users.find_one({"user_id": uid})
+        self.assertEqual(created["action"], "created_minimal")
+        self.assertEqual(throttled["action"], "throttled")
+        self.assertEqual(user_doc.get("last_visible_at"), fixed_now)
+    
     def test_e2_idempotent_first_checkin(self):
         uid = 456
-        self.users.docs[uid] = {"user_id": uid}
+        self.users.insert_one({"user_id": uid})
         fixed_now = datetime(2024, 1, 2, tzinfo=timezone.utc)
         with patch("onboarding.random.uniform", return_value=8.5), patch.object(
             onboarding, "now_utc", return_value=fixed_now
         ):
             record_first_checkin(uid)
             record_first_checkin(uid)
-        self.assertIn("first_checkin_at", self.users.docs[uid])
+        self.assertIn("first_checkin_at", self.users.find_one({"user_id": uid}))
         self.assertEqual(self.scheduler.remove_calls.count(f"pm1:{uid}"), 1)
         self.assertEqual(self.scheduler.add_calls.count(f"pm2:{uid}"), 1)
         trigger = self.scheduler.jobs[f"pm2:{uid}"]["trigger"]
@@ -142,12 +249,12 @@ class OnboardingTests(unittest.TestCase):
 
     def test_e3_record_first_mywin(self):
         uid = 789
-        self.users.docs[uid] = {"user_id": uid}
+        self.users.insert_one({"user_id": uid})
         fixed_now = datetime(2024, 1, 3, tzinfo=timezone.utc)
         with patch.object(onboarding, "now_utc", return_value=fixed_now):
             record_first_mywin(uid, -1002743212540, 111)
             record_first_mywin(uid, -1002743212540, 111)
-        self.assertIn("first_mywin_at", self.users.docs[uid])
+        self.assertIn("first_mywin_at", self.users.find_one({"user_id": uid}))
         self.assertEqual(self.scheduler.remove_calls.count(f"pm2:{uid}"), 1)
         self.assertEqual(self.scheduler.add_calls.count(f"pm3:{uid}"), 1)
         trigger = self.scheduler.jobs[f"pm3:{uid}"]["trigger"]
@@ -226,7 +333,7 @@ class OnboardingTests(unittest.TestCase):
 
     def test_vip_unlock_sends_pm4_once(self):
         uid = 2020
-        self.users.docs[uid] = {
+        self.users.insert_one({
             "user_id": uid,
             "onboarding_started_at": datetime.now(timezone.utc) - timedelta(days=1),
             "first_checkin_at": datetime.now(timezone.utc) - timedelta(days=1),
@@ -234,16 +341,26 @@ class OnboardingTests(unittest.TestCase):
             "first_referral_at": datetime.now(timezone.utc) - timedelta(days=1),
             "monthly_xp": 900,
             "status": "Normal",
-        }
+        })
         bot = FakeBot()
-        with patch("onboarding.get_bot", return_value=bot), patch(
-            "onboarding.run_bot_coroutine", side_effect=lambda coro: coro
+        async def _fake_safe_send_message(bot, chat_id=None, text=None, **kwargs):  # noqa: ARG001
+            bot.send_message(chat_id=chat_id, text=text)
+            return True
+
+        def _run(coro, **kwargs):  # noqa: ARG001
+            return asyncio.run(coro)
+
+        with (
+            patch("onboarding.get_bot", return_value=bot),
+            patch("onboarding.safe_send_message", side_effect=_fake_safe_send_message),
+            patch("onboarding.run_bot_coroutine", side_effect=_run),
         ):
             onboarding.maybe_unlock_vip1(uid)
             onboarding.maybe_unlock_vip1(uid)
         self.assertEqual(len(bot.sent), 1)
-        self.assertEqual(self.users.docs[uid]["status"], "VIP1")
-        self.assertIn("pm_vip_unlocked", self.users.docs[uid].get("pm_sent", {}))
+        user_doc = self.users.find_one({"user_id": uid})
+        self.assertEqual(user_doc["status"], "VIP1")
+        self.assertIn("pm_vip_unlocked", user_doc.get("pm_sent", {}))
 
 
 if __name__ == "__main__":
