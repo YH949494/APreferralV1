@@ -35,6 +35,7 @@ IP_KILL_MAX_SUCCESSES = int(os.getenv("IP_KILL_MAX_SUCCESSES", "2"))
 SUBNET_KILL_MAX_SUCCESSES = int(os.getenv("SUBNET_KILL_MAX_SUCCESSES", "4"))
 KILL_BLOCK_SECONDS = int(os.getenv("KILL_BLOCK_SECONDS", "86400"))
 CLAIM_COOLDOWN_SECONDS = int(os.getenv("CLAIM_COOLDOWN_SECONDS", "180"))
+SESSION_COOLDOWN_SEC = int(os.getenv("SESSION_COOLDOWN_SEC", "30"))
 _BYPASS_WARNING_LOGGED = False
 
 _RAW_OFFICIAL_CHANNEL_ID = getattr(_cfg, "OFFICIAL_CHANNEL_ID", os.getenv("OFFICIAL_CHANNEL_ID"))
@@ -679,6 +680,103 @@ def _append_retention_message(payload: dict, retention_message: str) -> None:
 def _rate_limit_key(prefix: str, *parts):
     return ":".join([prefix] + [str(p) for p in parts if p is not None])
 
+def _session_key_prefix(session_key: str, length: int = 8) -> str:
+    if not session_key:
+        return "unknown"
+    return session_key[:length]
+
+
+def _derive_session_key(
+    *,
+    init_data_raw: str | None,
+    uid: int | None,
+    auth_date: str | None,
+    query_id: str | None,
+) -> str:
+    if init_data_raw:
+        return hashlib.sha256(init_data_raw.encode("utf-8")).hexdigest()[:32]
+    salt = (
+        os.environ.get("BOT_TOKEN")
+        or os.environ.get("SECRET_KEY")
+        or getattr(_cfg, "SECRET_KEY", "")
+    )
+    seed = f"{uid or ''}:{auth_date or ''}:{query_id or ''}:{salt}"
+    return hashlib.sha256(seed.encode("utf-8")).hexdigest()[:32]
+
+
+def _should_enforce_session_cooldown(subnet: str | None, ip: str | None) -> bool:
+    if _is_unknown_subnet(subnet):
+        return True
+    if not ip or not _is_public_ipv4(ip):
+        return True
+    return False
+
+
+def _check_session_cooldown(
+    *,
+    session_key: str,
+    now: datetime | None = None,
+    rate_limits_col=claim_rate_limits_col,
+):
+    if not session_key:
+        return True, None, 0
+    now = now or now_utc()
+    key = _rate_limit_key("cooldown", "session", session_key)
+    doc = rate_limits_col.find_one({"key": key})
+    expires_at = _as_aware_utc((doc or {}).get("expiresAt"))
+    if expires_at and expires_at > now:
+        retry_seconds = _seconds_until(expires_at, now)
+        _safe_log(
+            "info",
+            "[cooldown] scope=session action=deny session=%s until=%s",
+            _session_key_prefix(session_key),
+            expires_at,
+        )
+        return False, "session_cooldown", retry_seconds
+    return True, None, 0
+
+
+def _set_session_cooldown(
+    *,
+    session_key: str,
+    now: datetime | None = None,
+    rate_limits_col=claim_rate_limits_col,
+    cooldown_seconds: int = SESSION_COOLDOWN_SEC,
+):
+    if not session_key:
+        return
+    now = now or now_utc()
+    expires_at = now + timedelta(seconds=cooldown_seconds)
+    key = _rate_limit_key("cooldown", "session", session_key)
+    rate_limits_col.update_one(
+        {"key": key},
+        {
+            "$set": {
+                "key": key,
+                "scope": "cooldown_session",
+                "session": session_key,
+                "expiresAt": expires_at,
+            }
+        },
+        upsert=True,
+    )
+    _safe_log(
+        "info",
+        "[cooldown] scope=session action=set session=%s exp=%s",
+        _session_key_prefix(session_key),
+        expires_at,
+    )
+
+
+def _session_cooldown_payload(retry_seconds: int) -> dict:
+    return {
+        "ok": False,
+        "code": "rate_limited",
+        "reason": "session_cooldown",
+        "retry_after_sec": int(retry_seconds),
+        "message": f"Please try again in {int(retry_seconds)} seconds.",
+    }
+ 
 
 def _parse_ipv4(value: str) -> list[int] | None:
     parts = value.split(".")
@@ -1965,8 +2063,10 @@ def verify_telegram_init_data(init_data_raw: str):
 
     raw = init_data_raw or ""
     decoded = urllib.parse.unquote_plus(raw)
-    print(f"[initdata] raw_prefix={raw[:40]}")
-    print(f"[initdata] decoded_prefix={decoded[:40]}")
+    raw_hash = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:8] if raw else "none"
+    decoded_hash = hashlib.sha256(decoded.encode("utf-8")).hexdigest()[:8] if decoded else "none"
+    print(f"[initdata] raw_len={len(raw)} raw_sha={raw_hash}")
+    print(f"[initdata] decoded_len={len(decoded)} decoded_sha={decoded_hash}")
  
     # 1. Parse & decode ONCE (Telegram spec compliant)
     pairs = urllib.parse.parse_qsl(
@@ -2415,9 +2515,10 @@ def api_visible():
     try:
         init_data = extract_raw_init_data_from_query(request)
 
+        init_hash = hashlib.sha256(init_data.encode("utf-8")).hexdigest()[:8] if init_data else "none"     
         print(
             "[initdata] source=query_string_raw "
-            f"len={len(init_data)} prefix={init_data[:20]}"
+            f"len={len(init_data)} sha={init_hash}"
         )
 
         if not init_data:
@@ -2598,11 +2699,6 @@ def api_claim():
 
     init_data = extract_raw_init_data_from_query(request)
 
-    print(
-        "[initdata] source=query_string_raw "
-        f"len={len(init_data)} prefix={init_data[:20]}"
-    )
-
     if not init_data:
         return jsonify({"status": "error", "code": "missing_init_data"}), 400
 
@@ -2645,7 +2741,13 @@ def api_claim():
     except Exception:
         uid = None
     uname = norm_uname(tg_user.get("username"))
-
+    session_key = _derive_session_key(
+        init_data_raw=init_data,
+        uid=uid,
+        auth_date=(data or {}).get("auth_date"),
+        query_id=(data or {}).get("query_id"),
+    )
+ 
     user_doc = None
     if uid is not None:
         user_doc = users_collection.find_one({"user_id": uid})
@@ -2771,6 +2873,16 @@ def api_claim():
         if public_remaining <= 0:
             return jsonify({"status": "error", "code": "sold_out"}), 410     
 
+    if _should_enforce_session_cooldown(client_subnet, client_ip):
+        session_now = now_utc()
+        session_ok, _, session_retry = _check_session_cooldown(
+            session_key=session_key,
+            now=session_now,
+        )
+        if not session_ok:
+            return jsonify(_session_cooldown_payload(session_retry)), 429
+        _set_session_cooldown(session_key=session_key, now=session_now)
+ 
     claim_drop_id = _coerce_id(drop_id)
     claim_user_id = uid if uid is not None else user_id
     existing_claim = voucher_claims_col.find_one({"drop_id": claim_drop_id, "user_id": claim_user_id})
