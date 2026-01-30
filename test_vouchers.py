@@ -8,10 +8,15 @@ from vouchers import (
     _apply_kill_success,
     _build_idempotent_claim_response,
     _check_cooldown,
+    _check_session_cooldown,
     _check_kill_switch,
     _compute_subnet_key,
+    _derive_session_key,
     _get_client_ip,
     _set_cooldown,
+    _set_session_cooldown,
+    _session_cooldown_payload,
+    _should_enforce_session_cooldown,
 )
 
 
@@ -383,6 +388,70 @@ class VoucherAntiHunterTests(unittest.TestCase):
         self.assertTrue(allowed_other)
         self.assertIsNone(reason_other)
         self.assertEqual(retry_other, 0)
+
+
+    def test_session_cooldown_blocks_on_unknown_subnet(self):
+        rate_limits = FakeRateLimitCollection()
+        now = datetime.now(timezone.utc)
+        init_data = "user=%7B%22id%22%3A1%7D&auth_date=1700000000"
+        session_key = _derive_session_key(
+            init_data_raw=init_data,
+            uid=1,
+            auth_date="1700000000",
+            query_id="query-1",
+        )
+        self.assertTrue(_should_enforce_session_cooldown("unknown", ""))
+
+        _set_session_cooldown(
+            session_key=session_key,
+            now=now,
+            rate_limits_col=rate_limits,
+            cooldown_seconds=30,
+        )
+        allowed, reason, retry = _check_session_cooldown(
+            session_key=session_key,
+            now=now + timedelta(seconds=5),
+            rate_limits_col=rate_limits,
+        )
+        self.assertFalse(allowed)
+        self.assertEqual(reason, "session_cooldown")
+        self.assertGreater(retry, 0)
+
+    def test_session_cooldown_skips_known_subnet(self):
+        subnet = _compute_subnet_key("203.0.113.10")
+        self.assertFalse(_should_enforce_session_cooldown(subnet, "203.0.113.10"))
+
+    def test_session_key_stability(self):
+        init_data = "user=%7B%22id%22%3A1%7D&auth_date=1700000000"
+        init_data_other = "user=%7B%22id%22%3A2%7D&auth_date=1700000000"
+        key_a = _derive_session_key(
+            init_data_raw=init_data,
+            uid=1,
+            auth_date="1700000000",
+            query_id="query-1",
+        )
+        key_b = _derive_session_key(
+            init_data_raw=init_data,
+            uid=1,
+            auth_date="1700000000",
+            query_id="query-1",
+        )
+        key_c = _derive_session_key(
+            init_data_raw=init_data_other,
+            uid=2,
+            auth_date="1700000000",
+            query_id="query-2",
+        )
+        self.assertEqual(key_a, key_b)
+        self.assertNotEqual(key_a, key_c)
+
+    def test_session_cooldown_payload_shape(self):
+        payload = _session_cooldown_payload(12)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["code"], "rate_limited")
+        self.assertEqual(payload["reason"], "session_cooldown")
+        self.assertEqual(payload["retry_after_sec"], 12)
+        self.assertIn("Please try again in", payload["message"])
         
 if __name__ == "__main__":
     unittest.main()
