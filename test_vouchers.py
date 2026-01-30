@@ -284,6 +284,7 @@ class VoucherAntiHunterTests(unittest.TestCase):
         _set_cooldown(
             ip=ip,
             subnet=subnet,
+            uid="user-9",            
             now=now,
             rate_limits_col=rate_limits,
             cooldown_seconds=180,
@@ -292,6 +293,7 @@ class VoucherAntiHunterTests(unittest.TestCase):
         allowed, reason, retry = _check_cooldown(
             ip=ip,
             subnet=subnet,
+            uid="user-9",            
             now=now + timedelta(seconds=10),
             rate_limits_col=rate_limits,
         )
@@ -304,6 +306,83 @@ class VoucherAntiHunterTests(unittest.TestCase):
         )
         self.assertEqual(payload["voucher"]["code"], "CODE999")
 
+    def test_cooldown_ignores_unknown_subnet_bucket(self):
+        rate_limits = FakeRateLimitCollection()
+        now = datetime.now(timezone.utc)
+        rate_limits.docs.append(
+            {
+                "_id": 1,
+                "key": "cooldown:subnet:unknown",
+                "expiresAt": now + timedelta(seconds=300),
+            }
+        )
+        allowed, reason, retry = _check_cooldown(
+            ip="1.2.3.4",
+            subnet="unknown",
+            uid="user-1",
+            now=now,
+            rate_limits_col=rate_limits,
+        )
+        self.assertTrue(allowed)
+        self.assertIsNone(reason)
+        self.assertEqual(retry, 0)
 
+    def test_cooldown_known_subnet_still_denies(self):
+        rate_limits = FakeRateLimitCollection()
+        now = datetime.now(timezone.utc)
+        ip = "4.5.6.7"
+        subnet = _compute_subnet_key(ip)
+        rate_limits.docs.append(
+            {
+                "_id": 1,
+                "key": f"cooldown:subnet:{subnet}",
+                "expiresAt": now + timedelta(seconds=300),
+            }
+        )
+        allowed, reason, retry = _check_cooldown(
+            ip=ip,
+            subnet=subnet,
+            uid="user-2",
+            now=now,
+            rate_limits_col=rate_limits,
+        )
+        self.assertFalse(allowed)
+        self.assertEqual(reason, "cooldown")
+        self.assertGreater(retry, 0)
+
+    def test_cooldown_unknown_subnet_falls_back_to_uid(self):
+        rate_limits = FakeRateLimitCollection()
+        now = datetime.now(timezone.utc)
+        _set_cooldown(
+            ip="",
+            subnet="unknown",
+            uid="user-3",
+            now=now,
+            rate_limits_col=rate_limits,
+            cooldown_seconds=180,
+        )
+
+        allowed, reason, retry = _check_cooldown(
+            ip="",
+            subnet="unknown",
+            uid="user-3",
+            now=now + timedelta(seconds=5),
+            rate_limits_col=rate_limits,
+        )
+        self.assertFalse(allowed)
+        self.assertEqual(reason, "cooldown")
+        self.assertGreater(retry, 0)
+
+        allowed_other, reason_other, retry_other = _check_cooldown(
+            ip="",
+            subnet="unknown",
+            uid="user-4",
+            now=now + timedelta(seconds=5),
+            rate_limits_col=rate_limits,
+        )
+        self.assertTrue(allowed_other)
+        self.assertIsNone(reason_other)
+        self.assertEqual(retry_other, 0)
+        
 if __name__ == "__main__":
     unittest.main()
