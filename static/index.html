@@ -6,7 +6,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <script>
-    console.info("UI_VERSION", new URLSearchParams(window.location.search).get("v"));
+    window.UI_VERSION = new URLSearchParams(window.location.search).get("v") || "unknown";
+    console.info("UI_VERSION", window.UI_VERSION);
   </script>  
   <style>
     :root {
@@ -1423,7 +1424,8 @@
 
   <script>
     const API_BASE = "https://apreferralv1.fly.dev";
-    const REWARDS_CACHE_KEY = "rewards_summary_cache_v2";
+    const UI_VERSION = window.UI_VERSION || "unknown";
+    const REWARDS_CACHE_KEY = "rewards_summary_cache_v3";
     const REWARDS_CACHE_TTL_MS = 60 * 1000;
     const REGION_STORAGE_KEY = "region";
     const user = tg?.initDataUnsafe?.user || {};
@@ -2486,11 +2488,27 @@ function setLeaderboardMeta(ts, { isStale = false } = {}) {
           JSON.stringify({ updatedAt: Date.now(), data })
         );
       } catch (err) {
-        // localStorage can fail (quota / privacy mode). Ignore silently.
+        console.warn("[LB][CACHE_WRITE_FAIL]", err);
         try { localStorage.removeItem(REWARDS_CACHE_KEY); } catch (_) {}
       }
     }
-    
+
+    function isLeaderboardDebugMode() {
+      if (window.qs?.get("debug") === "1") return true;
+      try {
+        return localStorage.getItem("miniapp_debug") === "1";
+      } catch {
+        return false;
+      }
+    }
+
+    function getLeaderboardTimeoutMs() {
+      const ua = (navigator.userAgent || "").toLowerCase();
+      const platform = String(tg?.platform || "").toLowerCase();
+      if (!platform && !ua) return 12000;
+      if (platform.includes("desktop") || ua.includes("windows")) return 12000;
+      return 6000;
+    }    
     function initLeaderboardCache() {
       if (leaderboardInitOnce) return;
       leaderboardInitOnce = true;
@@ -2537,65 +2555,67 @@ function setLeaderboardMeta(ts, { isStale = false } = {}) {
       if (userId) url.searchParams.set("user_id", userId);
       url.searchParams.set("t", Date.now());
 
-    let controller = null;
-    let timeoutId = null;
+      let controller = null;
+      let timeoutId = null;
+      const timeoutMs = getLeaderboardTimeoutMs();
 
-    try {
-      // Desktop Telegram can be slower; 2.5s is too aggressive.
-      if (typeof AbortController !== "undefined") {
-        controller = new AbortController();
-        timeoutId = setTimeout(() => controller.abort(), 12000); // 12s
-      }
-
-      const res = await fetch(url.toString(), controller ? { signal: controller.signal } : {});
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-
-      let data = null;
-      const ct = (res.headers.get("content-type") || "").toLowerCase();
-      if (ct.includes("application/json")) {
-        data = await res.json();
-      } else {
-        // Guard: some proxies return HTML even with 200/502 pages
-        const text = await res.text();
-        throw new Error(`Non-JSON response: ${text.slice(0, 120)}`);
-      }
-
-    if (!isValidLeaderboardPayload(data)) {
-      console.warn("[LB][INVALID_PAYLOAD]", data);
-      throw new Error("Invalid payload");
-    }
-
-    try {
-      renderLeaderboardData(data);
-    } catch (e) {
-      console.error("[LB][RENDER_CRASH]", e, data);
-      throw e;
-    }
-
-      writeLeaderboardCache(data);
-      leaderboardHasValidCache = true;
-      leaderboardCacheAgeMs = 0;
-      setLeaderboardMeta(Date.now(), { isStale: false });
-      console.info("[LB][FETCH_OK]");
-      console.info("[LB][RENDER_FRESH]");
-    } catch (err) {
-      console.warn("[LB][FETCH_FAIL]", err);
-
-      // 🔥 show real reason on screen (debug)
       try {
-        const msg = (err && (err.stack || err.message)) ? (err.stack || err.message) : String(err);
-        renderLeaderboardUnavailable(
-          (missingUser ? "Please reopen the mini app. " : "") +
-          "LB error: " + msg.slice(0, 180)
-        );
-      } catch (e) {
-        // if render also fails, at least dump something
-        const out2 = document.getElementById("leaderboard-output");
-        if (out2) out2.textContent = "LB error: " + String(err).slice(0, 180);
-      }
+        console.info("[LB][FETCH_TIMEOUT_MS]", timeoutMs, "v", UI_VERSION);
+        if (typeof AbortController !== "undefined") {
+          controller = new AbortController();
+          timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+        }
 
-      setLeaderboardRetryVisible(true);
-    }
+        const res = await fetch(url.toString(), controller ? { signal: controller.signal } : {});
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+        let data = null;
+        const ct = (res.headers.get("content-type") || "").toLowerCase();
+        if (ct.includes("application/json")) {
+          data = await res.json();
+        } else {
+          const text = await res.text();
+          throw new Error(`Non-JSON response: ${text.slice(0, 120)}`);
+        }
+
+        if (!isValidLeaderboardPayload(data)) {
+          console.warn("[LB][INVALID_PAYLOAD]", data);
+          throw new Error("Invalid payload");
+        }
+        try {
+          renderLeaderboardData(data);
+        } catch (e) {
+          console.error("[LB][RENDER_CRASH]", e, data);
+          throw e;
+        }
+
+        writeLeaderboardCache(data);
+        leaderboardHasValidCache = true;
+        leaderboardCacheAgeMs = 0;
+        setLeaderboardMeta(Date.now(), { isStale: false });
+        console.info("[LB][FETCH_OK]");
+        console.info("[LB][RENDER_FRESH]");
+      } catch (err) {
+        console.warn("[LB][FETCH_FAIL]", err);
+        const baseMessage = missingUser
+          ? "Please reopen the mini app to load your leaderboard."
+          : "Temporarily unavailable. Please try again.";
+        const debugMessage = isLeaderboardDebugMode()
+          ? ` (${(err && (err.message || err.stack)) ? String(err.message || err.stack).slice(0, 160) : String(err).slice(0, 160)})`
+          : "";
+        try {
+          renderLeaderboardUnavailable(`${baseMessage}${debugMessage}`);
+        } catch (e) {
+          const out2 = document.getElementById("leaderboard-output");
+          if (out2) out2.textContent = `${baseMessage}${debugMessage}`;
+        }
+        setLeaderboardRetryVisible(true);
+      } finally {
+        if (timeoutId) clearTimeout(timeoutId);
+        leaderboardFetchInProgress = false;
+        setLeaderboardLoading(false);
+        setLeaderboardRetryDisabled(false);
+      }
     }
   
     async function loadPreviousLeaderboard() {
