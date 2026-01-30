@@ -1423,7 +1423,7 @@
 
   <script>
     const API_BASE = "https://apreferralv1.fly.dev";
-    const REWARDS_CACHE_KEY = "rewards_summary_cache_v1";
+    const REWARDS_CACHE_KEY = "rewards_summary_cache_v2";
     const REWARDS_CACHE_TTL_MS = 60 * 1000;
     const REGION_STORAGE_KEY = "region";
     const user = tg?.initDataUnsafe?.user || {};
@@ -2478,6 +2478,19 @@ function setLeaderboardMeta(ts, { isStale = false } = {}) {
         return null;        
       }
     }
+    function writeLeaderboardCache(data) {
+      try {
+        if (!isValidLeaderboardPayload(data)) return;
+        localStorage.setItem(
+          REWARDS_CACHE_KEY,
+          JSON.stringify({ updatedAt: Date.now(), data })
+        );
+      } catch (err) {
+        // localStorage can fail (quota / privacy mode). Ignore silently.
+        try { localStorage.removeItem(REWARDS_CACHE_KEY); } catch (_) {}
+      }
+    }
+    
     function initLeaderboardCache() {
       if (leaderboardInitOnce) return;
       leaderboardInitOnce = true;
