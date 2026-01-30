@@ -9,9 +9,11 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from app_context import get_bot, get_scheduler, run_bot_coroutine
 from telegram_utils import safe_send_message
-from database import users_collection
+from database import get_collection, users_collection
+from pymongo.errors import DuplicateKeyError
 
 logger = logging.getLogger(__name__)
+onboarding_events = get_collection("onboarding_events")
 
 MYWIN_CHAT_ID = -1002743212540
 MYWIN_INVITE_LINK = "https://t.me/+tgGbOPvp1p05NjA9"
@@ -278,20 +280,174 @@ def schedule_pm3(uid: int, ref: datetime | None = None) -> datetime:
     return run_at
 
 
-def record_onboarding_start(uid: int, *, ref: datetime | None = None) -> bool:
+def record_visible_ping(
+    uid: int | None, *, ref: datetime | None = None, interval_seconds: int = 60
+) -> dict:
+    if not uid:
+        logger.warning("[E0][VISIBLE_PING][WARN] uid missing")
+        return {"ok": False, "action": "missing_uid"}
     now = ref or now_utc()
-    res = users_collection.update_one(
-        {"user_id": uid, "onboarding_started_at": {"$exists": False}},
-        {"$set": {"onboarding_started_at": now, "onboarding_source": "tg_initdata"}},
-        upsert=True,
-    )
-    created = bool(getattr(res, "modified_count", 0)) or bool(
-        getattr(res, "upserted_id", None)
-    )
-    logger.info("[ONBOARDING_START] uid=%s created=%s", uid, 1 if created else 0)
-    if created:
-        schedule_pm1(uid, now)
-    return created
+    threshold = now - timedelta(seconds=interval_seconds)
+    try:
+        existing = users_collection.find_one(
+            {"user_id": uid}, {"_id": 1, "last_visible_at": 1}
+        )
+        if existing:
+            last_visible = existing.get("last_visible_at")
+            if last_visible and last_visible >= threshold:
+                logger.info("[E0][VISIBLE_PING][THROTTLED] uid=%s", uid)
+                return {"ok": True, "action": "throttled"}
+            users_collection.update_one(
+                {"_id": existing["_id"]},
+                {"$set": {"last_visible_at": now}},
+                upsert=False,
+            )
+            logger.info("[E0][VISIBLE_PING][UPDATED] uid=%s", uid)
+            return {"ok": True, "action": "updated"}
+        try:
+            users_collection.insert_one(
+                {"user_id": uid, "created_at": now, "last_visible_at": now}
+            )
+            logger.info("[E0][VISIBLE_PING][CREATED_MINIMAL] uid=%s", uid)
+            return {"ok": True, "action": "created_minimal"}
+        except DuplicateKeyError:
+            existing = users_collection.find_one(
+                {"user_id": uid}, {"_id": 1, "last_visible_at": 1}
+            )
+            if not existing:
+                logger.warning(
+                    "[E0][VISIBLE_PING][WARN] uid=%s err=duplicate_without_doc",
+                    uid,
+                )
+                return {"ok": False, "action": "warn"}
+            users_collection.update_one(
+                {"_id": existing["_id"]},
+                {"$set": {"last_visible_at": now}},
+                upsert=False,
+            )
+            logger.info("[E0][VISIBLE_PING][RACE_RECOVERED] uid=%s", uid)
+            return {"ok": True, "action": "race_recovered"}
+    except Exception as exc:
+        logger.warning("[E0][VISIBLE_PING][WARN] uid=%s err=%s", uid, exc)
+        return {"ok": False, "action": "warn"}
+
+
+def _write_onboarding_event(uid: int, *, source: str, ts: datetime) -> None:
+    try:
+        onboarding_events.insert_one(
+            {
+                "_id": f"E0:{uid}",
+                "uid": uid,
+                "type": "E0_onboarding_start",
+                "source": source,
+                "ts": ts,
+            }
+        )
+        logger.info("[E0][EVENT_WRITE][OK] uid=%s", uid)
+    except DuplicateKeyError:
+        logger.info("[E0][EVENT_WRITE][OK] uid=%s", uid)
+    except Exception as exc:
+        logger.warning("[E0][EVENT_WRITE][WARN] uid=%s err=%s", uid, exc)
+
+
+def record_onboarding_start(
+    uid: int | None, *, source: str = "visible", ref: datetime | None = None
+) -> bool:
+    if not uid:
+        logger.warning("[E0][ONBOARDING_START][WARN] uid missing source=%s", source)
+        return False
+    now = ref or now_utc()
+    fields = {"onboarding_started_at": now, "onboarding_source": source}
+    try:
+        existing = users_collection.find_one(
+            {"user_id": uid}, {"_id": 1, "onboarding_started_at": 1}
+        )
+        if existing:
+            if existing.get("onboarding_started_at"):
+                logger.info(
+                    "[E0][ONBOARDING_START][EXISTING] uid=%s source=%s",
+                    uid,
+                    source,
+                )
+                return False
+            res = users_collection.update_one(
+                {"_id": existing["_id"]},
+                {"$set": fields},
+                upsert=False,
+            )
+            created = bool(getattr(res, "modified_count", 0))
+            if created:
+                logger.info(
+                    "[E0][ONBOARDING_START][CREATED] uid=%s source=%s",
+                    uid,
+                    source,
+                )
+                schedule_pm1(uid, now)
+                _write_onboarding_event(uid, source=source, ts=now)
+                return True
+            logger.info(
+                "[E0][ONBOARDING_START][EXISTING] uid=%s source=%s",
+                uid,
+                source,
+            )
+            return False
+        try:
+            users_collection.insert_one({"user_id": uid, **fields})
+            logger.info(
+                "[E0][ONBOARDING_START][CREATED] uid=%s source=%s",
+                uid,
+                source,
+            )
+            schedule_pm1(uid, now)
+            _write_onboarding_event(uid, source=source, ts=now)
+            return True
+        except DuplicateKeyError:
+            existing = users_collection.find_one(
+                {"user_id": uid}, {"_id": 1, "onboarding_started_at": 1}
+            )
+            if not existing:
+                logger.warning(
+                    "[E0][ONBOARDING_START][WARN] uid=%s err=duplicate_without_doc source=%s",
+                    uid,
+                    source,
+                )
+                return False
+            if existing.get("onboarding_started_at"):
+                logger.info(
+                    "[E0][ONBOARDING_START][EXISTING] uid=%s source=%s",
+                    uid,
+                    source,
+                )
+                return False
+            res = users_collection.update_one(
+                {"_id": existing["_id"]},
+                {"$set": fields},
+                upsert=False,
+            )
+            created = bool(getattr(res, "modified_count", 0))
+            if created:
+                logger.info(
+                    "[E0][ONBOARDING_START][CREATED] uid=%s source=%s",
+                    uid,
+                    source,
+                )
+                schedule_pm1(uid, now)
+                _write_onboarding_event(uid, source=source, ts=now)
+                return True
+            logger.info(
+                "[E0][ONBOARDING_START][EXISTING] uid=%s source=%s",
+                uid,
+                source,
+            )
+            return False
+    except Exception as exc:
+        logger.warning(
+            "[E0][ONBOARDING_START][WARN] uid=%s source=%s err=%s",
+            uid,
+            source,
+            exc,
+        )
+        return False
 
 
 def record_first_checkin(uid: int, *, ref: datetime | None = None) -> bool:
