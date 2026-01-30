@@ -14,6 +14,7 @@ from telegram.ext import (
 from telegram.error import BadRequest
 from datetime import datetime, timedelta, timezone
 from werkzeug.exceptions import HTTPException
+from urllib.parse import urlencode
 
 from config import (
     KL_TZ,
@@ -1557,6 +1558,15 @@ def _apply_no_store_headers(response):
 
 @app.route("/miniapp")
 def serve_mini_app():
+    req_v = request.args.get("v")
+    if req_v != MINIAPP_VERSION:
+        query_params = request.args.to_dict(flat=False)
+        query_params["v"] = MINIAPP_VERSION
+        query_string = urlencode(query_params, doseq=True)
+        redirect_response = make_response(redirect(f"{request.path}?{query_string}", code=302))
+        _apply_no_store_headers(redirect_response)
+        logger.info("[MINIAPP][REDIRECT] from_v=%s to_v=%s", req_v, MINIAPP_VERSION)
+        return redirect_response    
     response = make_response(send_from_directory("static", "index.html"))
     _apply_no_store_headers(response)
     logger.info("[MINIAPP] served static/index.html v=%s", MINIAPP_VERSION)
