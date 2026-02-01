@@ -2392,7 +2392,7 @@ def run_boot_catchup():
         logger.warning(
             "[BOOT][CATCHUP] missed_monthly expected=%s last_run=%s",
             month_start.isoformat(),
-            sample_user["last_status_update"].isoformat() if sample_user else None,)]
+            sample_user["last_status_update"].isoformat() if sample_user else None,
         )
         logger.info("[BOOT][CATCHUP] running job=monthly run_id=%s", run_id)
         try:
@@ -2413,7 +2413,7 @@ def run_boot_catchup():
     else:
         reason = "not_first_day" if now.day != 1 else "already_ran"
         logger.info("[BOOT][CATCHUP] skipped job=monthly reason=%s run_id=%s", reason, run_id)
-
+        
     # one-time migration instead of scanning every boot
     one_time_fix_monthly_xp()
 
