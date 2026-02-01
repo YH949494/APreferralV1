@@ -31,6 +31,7 @@ from xp import ensure_xp_indexes, grant_xp, now_utc
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_MISSED
 
 from app_context import set_app_bot, set_bot, set_scheduler
 from onboarding import MYWIN_CHAT_ID, record_first_mywin
@@ -40,7 +41,7 @@ from telegram_utils import safe_reply_text
 
 from pymongo import DESCENDING, ASCENDING, ReturnDocument  # keep if used elsewhere
 from pymongo.errors import DuplicateKeyError, CursorNotFound
-import os, asyncio, traceback, csv, io, requests, logging, time
+import os, asyncio, traceback, csv, io, requests, logging, time, uuid, socket
 import pytz
 from database import init_db, db
 
@@ -51,12 +52,35 @@ WELCOME_WINDOW_DAYS = 7
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+INSTANCE_ID = (os.getenv("FLY_MACHINE_ID") or os.getenv("FLY_ALLOC_ID") or f"{socket.gethostname()}:{os.getpid()}")
 
 LEADERBOARD_CACHE = {}  # key -> {"ts": epoch_seconds, "payload": dict}
 CACHE_TTL_SECONDS = 300
 
 def _running_under_gunicorn():
     return "gunicorn" in os.environ.get("SERVER_SOFTWARE", "").lower() or os.environ.get("GUNICORN_CMD_ARGS") is not None
+
+def _new_run_id() -> str:
+    return uuid.uuid4().hex[:8]
+
+class JobTimer:
+    def __enter__(self):
+        self._start = time.monotonic()
+        self.elapsed_s = 0.0
+        return self
+
+    def __exit__(self, exc_type, exc, exc_tb):
+        self.elapsed_s = time.monotonic() - self._start
+        return False
+
+def _job_prefix(job_id: str) -> str:
+    if job_id == "tick_5min":
+        return "[JOB][5MIN]"
+    if job_id == "weekly_reset":
+        return "[JOB][WEEKLY]"
+    if job_id == "monthly_vip":
+        return "[JOB][MONTHLY]"
+    return "[JOB][SCHED]"
 
 RUNNER_MODE = os.getenv("RUNNER_MODE")
 if not RUNNER_MODE:
@@ -300,7 +324,7 @@ def settle_referral_snapshots_with_cache_clear():
 # ----------------------------
 # Scheduler Locking + Ticks
 # ----------------------------
-def acquire_scheduler_lock(name: str, ttl_seconds: int) -> bool:
+def acquire_scheduler_lock(name: str, ttl_seconds: int) -> tuple[bool, dict | None]:
     now = datetime.now(timezone.utc)
     expires_at = now + timedelta(seconds=ttl_seconds)
     try:
@@ -313,54 +337,111 @@ def acquire_scheduler_lock(name: str, ttl_seconds: int) -> bool:
                 ],
             },
             {
-                "$set": {"expireAt": expires_at},
+                "$set": {"expireAt": expires_at, "owner": INSTANCE_ID, "updatedAt": now},
                 "$setOnInsert": {"createdAt": now},
             },
             upsert=True,
             return_document=ReturnDocument.AFTER,
         )
     except DuplicateKeyError:
-        return False
+        doc = scheduler_locks_collection.find_one({"_id": name})
+        return False, doc
+    return doc is not None, doc
     return doc is not None
 
 
 def tick_5min() -> None:
-    if not acquire_scheduler_lock("tick_5min", ttl_seconds=900):
-        logger.info("[SCHEDULER][5MIN] lock_not_acquired")
+    run_id = _new_run_id()
+    now_local = datetime.now(KL_TZ)
+    acquired, lock_doc = acquire_scheduler_lock("tick_5min", ttl_seconds=900)
+    if not acquired:
+        expires_in_s = None
+        if lock_doc and lock_doc.get("expireAt"):
+            expires_in_s = max(
+                0,
+                (lock_doc["expireAt"] - datetime.now(timezone.utc)).total_seconds(),
+            )
+        logger.info(
+            "[JOB][5MIN] lock_not_acquired owner=%s expires_in_s=%s run_id=%s instance=%s",
+            (lock_doc or {}).get("owner"),
+            expires_in_s,
+            run_id,
+            INSTANCE_ID,
+        )
         return
-    logger.info("[SCHEDULER][5MIN] start")
-
-    step_start = time.time()
-    logger.info("[SCHEDULER][5MIN] step=start name=settle_pending_referrals")
-    settle_pending_referrals_with_cache_clear()
     logger.info(
-        "[SCHEDULER][5MIN] step=done name=settle_pending_referrals elapsed=%.2fs",
-        time.time() - step_start,
+        "[JOB][5MIN] lock_acquired owner=%s ttl_s=%s run_id=%s instance=%s",
+        INSTANCE_ID,
+        900,
+        run_id,
+        INSTANCE_ID,
     )
-
-    step_start = time.time()
-    logger.info("[SCHEDULER][5MIN] step=start name=settle_xp_snapshots")
-    settle_xp_snapshots()
-    _check_snapshot_freshness()
     logger.info(
-        "[SCHEDULER][5MIN] step=done name=settle_xp_snapshots elapsed=%.2fs",
-        time.time() - step_start,
+        "[JOB][5MIN] start window=5min run_id=%s instance=%s tz=%s ts=%s",
+        run_id,
+        INSTANCE_ID,
+        KL_TZ.zone,
+        now_local.isoformat(),
     )
+    try:
+        with JobTimer() as total_timer:
+            with JobTimer() as step_timer:
+                logger.info(
+                    "[JOB][5MIN] progress step=settle_pending_referrals run_id=%s",
+                    run_id,
+                )
+                settle_pending_referrals_with_cache_clear()
+            logger.info(
+                "[JOB][5MIN] step_done name=settle_pending_referrals elapsed_s=%.2f run_id=%s",
+                step_timer.elapsed_s,
+                run_id,
+            )
 
-    step_start = time.time()
-    logger.info("[SCHEDULER][5MIN] step=start name=settle_referral_snapshots")
-    settle_referral_snapshots_with_cache_clear()
-    logger.info(
-        "[SCHEDULER][5MIN] step=done name=settle_referral_snapshots elapsed=%.2fs",
-        time.time() - step_start,
-    )
+            with JobTimer() as step_timer:
+                logger.info(
+                    "[JOB][5MIN] progress step=settle_xp_snapshots run_id=%s",
+                    run_id,
+                )
+                settle_xp_snapshots()
+                _check_snapshot_freshness()
+            logger.info(
+                "[JOB][5MIN] step_done name=settle_xp_snapshots elapsed_s=%.2f run_id=%s",
+                step_timer.elapsed_s,
+                run_id,
+            )
 
-    _clear_leaderboard_cache("tick_5min")
-    logger.info("[SCHEDULER][5MIN] done")
+            with JobTimer() as step_timer:
+                logger.info(
+                    "[JOB][5MIN] progress step=settle_referral_snapshots run_id=%s",
+                    run_id,
+                )
+                settle_referral_snapshots_with_cache_clear()
+            logger.info(
+                "[JOB][5MIN] step_done name=settle_referral_snapshots elapsed_s=%.2f run_id=%s",
+                step_timer.elapsed_s,
+                run_id,
+            )
+
+            _clear_leaderboard_cache("tick_5min")
+            logger.info(
+                "[JOB][5MIN] done elapsed_s=%.2f run_id=%s",
+                total_timer.elapsed_s,
+                run_id,
+            )
+    except Exception as exc:
+        logger.error(
+            "[JOB][5MIN] failed run_id=%s instance=%s err=%s msg=%s",
+            run_id,
+            INSTANCE_ID,
+            exc.__class__.__name__,
+            str(exc),
+        )
+        raise
 
 
 def process_verification_queue_scheduled(batch_limit: int = 50) -> None:
-    if not acquire_scheduler_lock("verification_queue", ttl_seconds=300):
+    acquired, _lock_doc = acquire_scheduler_lock("verification_queue", ttl_seconds=300)
+    if not acquired:
         logger.info("[SCHEDULER][VERIFY] lock_not_acquired")
         return
     logger.info("[SCHEDULER][VERIFY] start batch_limit=%s", batch_limit)
@@ -2158,46 +2239,70 @@ def api_admin_backfill_status():
 # ----------------------------
 # Weekly XP Reset Job
 # ----------------------------
-def reset_weekly_xp():
+def reset_weekly_xp(run_id: str | None = None):
+    run_id = run_id or _new_run_id()
     now = datetime.now(KL_TZ)
 
     # Last full week [Mon..Sun], assuming this runs every Monday 00:00 KL
     week_end_date = (now - timedelta(days=1)).date()      # Sunday
     week_start_date = week_end_date - timedelta(days=6)   # Monday
-
-    proj = {"user_id": 1, "username": 1, "weekly_xp": 1, "weekly_referrals": 1}
-    top_checkin   = list(users_collection.find({}, proj).sort("weekly_xp", DESCENDING).limit(100))
-    top_referrals = list(users_collection.find({}, proj).sort("weekly_referrals", DESCENDING).limit(100))
-
-    history_collection.insert_one({
-        "week_start": week_start_date.isoformat(),
-        "week_end":   week_end_date.isoformat(),
-        "checkin_leaderboard": [
-            {"user_id": u["user_id"], "username": u.get("username", "unknown"), "weekly_xp": u.get("weekly_xp", 0)}
-            for u in top_checkin
-        ],
-        "referral_leaderboard": [
-            {"user_id": u["user_id"], "username": u.get("username", "unknown"), "weekly_referrals": u.get("weekly_referrals", 0)}
-            for u in top_referrals
-        ],
-        # store as UTC so later math is safe
-        "archived_at": datetime.utcnow()
-    })
-
-    _users_update_many(
-        {},
-        {
-            "$set": {
-                "weekly_xp": 0,
-                "weekly_referrals": 0,
-                "xp_weekly_milestone_bucket": 0,
-                "ref_weekly_milestone_bucket": 0,
-            }
-        },
-        context="weekly_reset",
+    logger.info(
+        "[JOB][WEEKLY] start week_start=%s week_end=%s run_id=%s instance=%s tz=%s",
+        week_start_date.isoformat(),
+        week_end_date.isoformat(),
+        run_id,
+        INSTANCE_ID,
+        KL_TZ.zone,
     )
+    try:
+        with JobTimer() as timer:
+            proj = {"user_id": 1, "username": 1, "weekly_xp": 1, "weekly_referrals": 1}
+            top_checkin = list(users_collection.find({}, proj).sort("weekly_xp", DESCENDING).limit(100))
+            top_referrals = list(users_collection.find({}, proj).sort("weekly_referrals", DESCENDING).limit(100))
 
-    print(f"✅ Weekly XP & referrals reset complete at {now}")
+            history_collection.insert_one({
+                "week_start": week_start_date.isoformat(),
+                "week_end":   week_end_date.isoformat(),
+                "checkin_leaderboard": [
+                    {"user_id": u["user_id"], "username": u.get("username", "unknown"), "weekly_xp": u.get("weekly_xp", 0)}
+                    for u in top_checkin
+                ],
+                "referral_leaderboard": [
+                    {"user_id": u["user_id"], "username": u.get("username", "unknown"), "weekly_referrals": u.get("weekly_referrals", 0)}
+                    for u in top_referrals
+                ],
+                # store as UTC so later math is safe
+                "archived_at": datetime.utcnow()
+            })
+
+            _users_update_many(
+                {},
+                {
+                    "$set": {
+                        "weekly_xp": 0,
+                        "weekly_referrals": 0,
+                        "xp_weekly_milestone_bucket": 0,
+                        "ref_weekly_milestone_bucket": 0,
+                    }
+                },
+                context="weekly_reset",
+            )
+
+        logger.info(
+            "[JOB][WEEKLY] done processed=%s elapsed_s=%.2f run_id=%s",
+            len(top_checkin),
+            timer.elapsed_s,
+            run_id,
+        )
+    except Exception as exc:
+        logger.error(
+            "[JOB][WEEKLY] failed run_id=%s instance=%s err=%s msg=%s",
+            run_id,
+            INSTANCE_ID,
+            exc.__class__.__name__,
+            str(exc),
+        )
+        raise
 
 meta = db["meta"]
 
@@ -2228,49 +2333,95 @@ def one_time_fix_monthly_xp():
 
 def run_boot_catchup():
     now = datetime.now(KL_TZ)
-
-    try:
-        # weekly catch-up (only on Monday)
-        last_history = history_collection.find_one(sort=[("archived_at", DESCENDING)])
-        if last_history:
-            last_raw = last_history["archived_at"]
-            if last_raw.tzinfo is None:
-                last_reset = last_raw.replace(tzinfo=pytz.UTC).astimezone(KL_TZ)
-            else:
-                last_reset = last_raw.astimezone(KL_TZ)
-            days_since = (now - last_reset).days
+    run_id = _new_run_id()
+    logger.info(
+        "[BOOT][CATCHUP] start run_id=%s instance=%s tz=%s",
+        run_id,
+        INSTANCE_ID,
+        KL_TZ.zone,
+    )
+    # weekly catch-up (only on Monday)
+    last_history = history_collection.find_one(sort=[("archived_at", DESCENDING)])
+    if last_history:
+        last_raw = last_history["archived_at"]
+        if last_raw.tzinfo is None:
+            last_reset = last_raw.replace(tzinfo=pytz.UTC).astimezone(KL_TZ)
         else:
-            days_since = 999
+            last_reset = last_raw.astimezone(KL_TZ)
+        days_since = (now - last_reset).days
+    else:
+        last_reset = None
+        days_since = 999
 
-        if now.weekday() == 0 and days_since >= 6:
-            print("⚠️ Missed weekly reset. Running now...")
-            reset_weekly_xp()
-        else:
-            print("✅ No weekly catch-up needed.")
-
-        # monthly catch-up (only on the 1st)
-        sample_user = users_collection.find_one(
-            {"last_status_update": {"$exists": True}},
-            sort=[("last_status_update", DESCENDING)]
+    week_start = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+    if now.weekday() == 0 and days_since >= 6:
+        logger.warning(
+            "[BOOT][CATCHUP] missed_weekly expected=%s last_run=%s",
+            week_start.isoformat(),
+            last_reset.isoformat() if last_reset else None,
         )
-        last_month = sample_user["last_status_update"].month if sample_user else None
-        last_year  = sample_user["last_status_update"].year  if sample_user else None
-        if now.day == 1 and (not sample_user or last_month != now.month or last_year != now.year):
-            print("⚠️ Missed monthly VIP update. Running now...")
-            update_monthly_vip_status()
-        else:
-            print("✅ No monthly catch-up needed.")
+        logger.info("[BOOT][CATCHUP] running job=weekly run_id=%s", run_id)
+        try:
+            with JobTimer() as timer:
+                reset_weekly_xp(run_id=run_id)
+            logger.info(
+                "[BOOT][CATCHUP] done job=weekly result=ok elapsed_s=%.2f run_id=%s",
+                timer.elapsed_s,
+                run_id,
+            )
+        except Exception as exc:
+            logger.error(
+                "[BOOT][CATCHUP] failed job=weekly err=%s msg=%s run_id=%s",
+                exc.__class__.__name__,
+                str(exc),
+                run_id,
+            )
+    else:
+        reason = "not_monday" if now.weekday() != 0 else "already_ran"
+        logger.info("[BOOT][CATCHUP] skipped job=weekly reason=%s run_id=%s", reason, run_id)
 
-        # one-time migration instead of scanning every boot
-        one_time_fix_monthly_xp()
-        
-        if os.getenv("BACKFILL_STATUS_ON_BOOT", "false").lower() == "true":
-            backfill_missing_statuses()
+    # monthly catch-up (only on the 1st)
+    sample_user = users_collection.find_one(
+        {"last_status_update": {"$exists": True}},
+        sort=[("last_status_update", DESCENDING)]
+    )
+    last_month = sample_user["last_status_update"].month if sample_user else None
+    last_year = sample_user["last_status_update"].year if sample_user else None
+    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    if now.day == 1 and (not sample_user or last_month != now.month or last_year != now.year):
+        logger.warning(
+            "[BOOT][CATCHUP] missed_monthly expected=%s last_run=%s",
+            month_start.isoformat(),
+            sample_user["last_status_update"].isoformat() if sample_user else None,)]
+        )
+        logger.info("[BOOT][CATCHUP] running job=monthly run_id=%s", run_id)
+        try:
+            with JobTimer() as timer:
+                update_monthly_vip_status(run_id=run_id)
+            logger.info(
+                "[BOOT][CATCHUP] done job=monthly result=ok elapsed_s=%.2f run_id=%s",
+                timer.elapsed_s,
+                run_id,
+            )
+        except Exception as exc:
+            logger.error(
+                "[BOOT][CATCHUP] failed job=monthly err=%s msg=%s run_id=%s",
+                exc.__class__.__name__,
+                str(exc),
+                run_id,
+            )
+    else:
+        reason = "not_first_day" if now.day != 1 else "already_ran"
+        logger.info("[BOOT][CATCHUP] skipped job=monthly reason=%s run_id=%s", reason, run_id)
 
-    except Exception as e:
-        print(f"❌ Boot-time catch-up failed: {e}")
+    # one-time migration instead of scanning every boot
+    one_time_fix_monthly_xp()
 
-def apply_monthly_tier_update(run_time: datetime | None = None):
+    if os.getenv("BACKFILL_STATUS_ON_BOOT", "false").lower() == "true":
+        backfill_missing_statuses()
+
+def apply_monthly_tier_update(run_time: datetime | None = None, run_id: str | None = None):
+    run_id = run_id or _new_run_id()
     run_at_local = run_time.astimezone(KL_TZ) if run_time else datetime.now(KL_TZ)
     start_utc, end_utc, start_local, end_local = _current_month_window_utc(run_at_local)
     end_local = end_utc.astimezone(KL_TZ)
@@ -2278,11 +2429,22 @@ def apply_monthly_tier_update(run_time: datetime | None = None):
     now_utc = datetime.now(timezone.utc)
 
     promoted: list[int] = []
-    demoted: list[int] = []   
+    demoted: list[int] = []
     processed = 0
-
+    updated = 0
+    skipped = 0
 
     total_users = users_collection.count_documents({})
+    logger.info(
+        "[JOB][MONTHLY] start month=%s run_id=%s instance=%s tz=%s window=%s..%s users=%s",
+        month_key,
+        run_id,
+        INSTANCE_ID,
+        KL_TZ.zone,
+        start_local.isoformat(),
+        end_local.isoformat(),
+        total_users,
+    )    
     logger.info(
         "[VIP][MONTHLY] window=%s..%s users=%s",
         start_local.isoformat(),
@@ -2331,128 +2493,165 @@ def apply_monthly_tier_update(run_time: datetime | None = None):
     retries = 0
     batch_processed = 0
 
-    while retries < 3:
-        try:
-            for user in iter_users_paged(projection, batch_size=batch_size, start_after=last_id):
-                uid = user.get("user_id")
-                if uid is None:
-                    continue
-                last_id = user.get("_id")
-                monthly_total = int(user.get("monthly_xp", 0))
-                # monthly_xp derived from snapshot ledger settles
-                computed_tier = _tier_from_monthly_xp(monthly_total)
-                current_status = user.get("status", "Normal")
-                existing_month = user.get("vip_month")
-                existing_tier = user.get("vip_tier")
-                existing_rank = _tier_rank(existing_tier) if existing_tier is not None else -1
-                computed_rank = _tier_rank(computed_tier)
+    success = False
+    try:
+        with JobTimer() as total_timer:
+            while retries < 3:
+                try:
+                    for user in iter_users_paged(projection, batch_size=batch_size, start_after=last_id):
+                        uid = user.get("user_id")
+                        if uid is None:
+                            continue
+                        last_id = user.get("_id")
+                        monthly_total = int(user.get("monthly_xp", 0))
+                        # monthly_xp derived from snapshot ledger settles
+                        computed_tier = _tier_from_monthly_xp(monthly_total)
+                        current_status = user.get("status", "Normal")
+                        existing_month = user.get("vip_month")
+                        existing_tier = user.get("vip_tier")
+                        existing_rank = _tier_rank(existing_tier) if existing_tier is not None else -1
+                        computed_rank = _tier_rank(computed_tier)
 
-                if existing_month == month_key:
-                    # VIP should not downgrade within a month
-                    if existing_rank > computed_rank:
-                        final_tier = existing_tier
-                        logger.info(
-                            "[VIP][MONTHLY] keep_tier uid=%s month=%s existing=%s computed=%s",
-                            uid,
-                            month_key,
-                            existing_tier,
-                            computed_tier,
+                        if existing_month == month_key:
+                            # VIP should not downgrade within a month
+                            if existing_rank > computed_rank:
+                                final_tier = existing_tier
+                                logger.info(
+                                    "[VIP][MONTHLY] keep_tier uid=%s month=%s existing=%s computed=%s",
+                                    uid,
+                                    month_key,
+                                    existing_tier,
+                                    computed_tier,
+                                )
+                            else:
+                                final_tier = computed_tier
+                                if computed_rank > existing_rank:
+                                    logger.info(
+                                        "[VIP][MONTHLY] upgrade uid=%s month=%s from=%s to=%s",
+                                        uid,
+                                        month_key,
+                                        existing_tier,
+                                        computed_tier,
+                                    )
+                        else:
+                            final_tier = computed_tier
+
+                        if final_tier != current_status:
+                            updated += 1
+                            if _tier_rank(final_tier) > _tier_rank(current_status):
+                                promoted.append(uid)
+                            else:
+                                demoted.append(uid)
+                        else:
+                            skipped += 1
+
+                        monthly_xp_history_collection.update_one(
+                            {"user_id": uid, "month": month_key},
+                            {
+                                "$set": {
+                                    "user_id": uid,
+                                    "username": user.get("username"),
+                                    "month": month_key,
+                                    "monthly_xp": monthly_total,
+                                    "status_before_reset": current_status,
+                                    "status_after_reset": final_tier,
+                                    "captured_at_utc": now_utc,
+                                    "captured_at_kl": run_at_local.isoformat(),
+                                }
+                            },
+                            upsert=True,
                         )
-                    else:
-                        final_tier = computed_tier
-                        if computed_rank > existing_rank:
+
+                        _users_update_one(
+                            {"user_id": uid},
+                            {
+                                "$set": {
+                                    "status": final_tier,
+                                    "last_status_update": run_at_local,
+                                    "monthly_xp": monthly_total,
+                                    "vip_month": month_key,
+                                    "vip_tier": final_tier,
+                                    "vip_updated_at": now_utc,
+                                    "snapshot_updated_at": now_utc,
+                                }
+                            },
+                            context="monthly_tier_update",
+                        )
+                        processed += 1
+                        batch_processed += 1
+                        
+                        if batch_processed >= batch_size:
                             logger.info(
-                                "[VIP][MONTHLY] upgrade uid=%s month=%s from=%s to=%s",
-                                uid,
-                                month_key,
-                                existing_tier,
-                                computed_tier,
+                                "[JOB][MONTHLY] progress processed=%s last_id=%s updated=%s skipped=%s run_id=%s",
+                                processed,
+                                last_id,
+                                updated,
+                                skipped,
+                                run_id,
                             )
-                else:
-                    final_tier = computed_tier
-
-                if final_tier != current_status:
-                    if _tier_rank(final_tier) > _tier_rank(current_status):
-                        promoted.append(uid)
-                    else:
-                        demoted.append(uid)
-
-                monthly_xp_history_collection.update_one(
-                    {"user_id": uid, "month": month_key},
-                    {
-                        "$set": {
-                            "user_id": uid,
-                            "username": user.get("username"),
-                            "month": month_key,
-                            "monthly_xp": monthly_total,
-                            "status_before_reset": current_status,
-                            "status_after_reset": final_tier,
-                            "captured_at_utc": now_utc,
-                            "captured_at_kl": run_at_local.isoformat(),
-                        }
-                    },
-                    upsert=True,
-                )
-
-                _users_update_one(
-                    {"user_id": uid},
-                    {
-                        "$set": {
-                            "status": final_tier,
-                            "last_status_update": run_at_local,
-                            "monthly_xp": monthly_total,
-                            "vip_month": month_key,
-                            "vip_tier": final_tier,
-                            "vip_updated_at": now_utc,
-                            "snapshot_updated_at": now_utc,
-                        }
-                    },
-                    context="monthly_tier_update",
-                )
-                processed += 1
-                batch_processed += 1
-
-                if batch_processed >= batch_size:
-                    logger.info(
-                        "[VIP][MONTHLY] processed=%s last_id=%s",
-                        processed,
+                            logger.info(
+                                "[VIP][MONTHLY] processed=%s last_id=%s",
+                                processed,
+                                last_id,
+                            )
+                            admin_cache_col.update_one(
+                                {"_id": cache_key},
+                                {"$set": {"last_id": last_id, "updated_at": now_utc}},
+                                upsert=True,
+                            )
+                            batch_processed = 0
+                    if batch_processed:
+                        logger.info(
+                            "[JOB][MONTHLY] progress processed=%s last_id=%s updated=%s skipped=%s run_id=%s",
+                            processed,
+                            last_id,
+                            updated,
+                            skipped,
+                            run_id,
+                        )
+                        logger.info(
+                            "[VIP][MONTHLY] processed=%s last_id=%s",
+                            processed,
+                            last_id,
+                        )
+                        admin_cache_col.update_one(
+                            {"_id": cache_key},
+                            {"$set": {"last_id": last_id, "updated_at": now_utc}},
+                            upsert=True,
+                        )
+                    admin_cache_col.delete_one({"_id": cache_key})
+                    success = True
+                    break
+                except CursorNotFound as exc:
+                    retries += 1
+                    logger.warning(
+                        "[VIP][MONTHLY] cursor_not_found retry=%s last_id=%s",
+                        retries,
                         last_id,
+                        exc_info=True,                        
                     )
-                    admin_cache_col.update_one(
-                        {"_id": cache_key},
-                        {"$set": {"last_id": last_id, "updated_at": now_utc}},
-                        upsert=True,
+                    logger.error(
+                        "[JOB][MONTHLY] failed err=%s msg=%s run_id=%s",
+                        exc.__class__.__name__,
+                        str(exc),
+                        run_id,
                     )
-                    batch_processed = 0
-            if batch_processed:
-                logger.info(
-                    "[VIP][MONTHLY] processed=%s last_id=%s",
-                    processed,
-                    last_id,
-                )
-                admin_cache_col.update_one(
-                    {"_id": cache_key},
-                    {"$set": {"last_id": last_id, "updated_at": now_utc}},
-                    upsert=True,
-                )
-            admin_cache_col.delete_one({"_id": cache_key})
-            break
-        except CursorNotFound:
-            retries += 1
-            logger.warning(
-                "[VIP][MONTHLY] cursor_not_found retry=%s last_id=%s",
-                retries,
-                last_id,
-                exc_info=True,
-            )
-            if last_id is not None:
-                admin_cache_col.update_one(
-                    {"_id": cache_key},
-                    {"$set": {"last_id": last_id, "updated_at": now_utc}},
-                    upsert=True,
-                )
-            if retries >= 3:
-                raise
+                    if last_id is not None:
+                        admin_cache_col.update_one(
+                            {"_id": cache_key},
+                            {"$set": {"last_id": last_id, "updated_at": now_utc}},
+                            upsert=True,
+                        )
+                    if retries >= 3:
+                        raise
+    except Exception as exc:
+        logger.error(
+            "[JOB][MONTHLY] failed err=%s msg=%s run_id=%s",
+            exc.__class__.__name__,
+            str(exc),
+            run_id,
+        )
+        raise
 
     audit_doc = {
         "type": "monthly_tier_update",
@@ -2484,9 +2683,16 @@ def apply_monthly_tier_update(run_time: datetime | None = None):
         len(promoted),
         len(demoted),
     )
-
-def update_monthly_vip_status():
-    return apply_monthly_tier_update()
+    if success:
+        logger.info(
+            "[JOB][MONTHLY] done processed=%s updated=%s elapsed_s=%.2f run_id=%s",
+            processed,
+            updated,
+            total_timer.elapsed_s,
+            run_id,
+        )
+def update_monthly_vip_status(run_id: str | None = None):
+    return apply_monthly_tier_update(run_id=run_id)
     
 # ----------------------------
 # Telegram Bot Handlers
@@ -2878,7 +3084,26 @@ def run_worker():
         timezone=KL_TZ,
         job_defaults={"coalesce": True, "misfire_grace_time": 3600, "max_instances": 1}
     )
-    set_scheduler(scheduler)    
+    set_scheduler(scheduler)
+    def _log_scheduler_event(event) -> None:
+        prefix = _job_prefix(event.job_id)
+        if event.code == EVENT_JOB_MISSED:
+            logger.warning(
+                "%s misfire job_id=%s scheduled=%s",
+                prefix,
+                event.job_id,
+                getattr(event, "scheduled_run_time", None),
+            )
+        elif event.code == EVENT_JOB_ERROR:
+            exc = event.exception
+            logger.error(
+                "%s failed job_id=%s err=%s msg=%s",
+                prefix,
+                event.job_id,
+                exc.__class__.__name__ if exc else None,
+                str(exc) if exc else None,
+            )
+    scheduler.add_listener(_log_scheduler_event, EVENT_JOB_MISSED | EVENT_JOB_ERROR)    
     scheduler.add_job(
         reset_weekly_xp,
         trigger=CronTrigger(day_of_week="mon", hour=0, minute=0, timezone=KL_TZ),
