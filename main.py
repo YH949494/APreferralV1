@@ -3,7 +3,7 @@ from flask import (
     render_template, redirect, url_for, flash, g, Blueprint
 )
 from flask_cors import CORS
-from threading import Thread
+from threading import Thread 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from telegram.constants import ParseMode
 from html import escape as html_escape
