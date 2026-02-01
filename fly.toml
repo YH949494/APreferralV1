@@ -33,6 +33,6 @@ primary_region = "sin"
     port = 443
     handlers = ["tls", "http"]
 
-#[deploy]
-#  release_command = "python /app/app.py"
+[deploy]
+  release_command = "python /app/patch_monthly_xp.py"
  
