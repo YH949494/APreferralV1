@@ -39,7 +39,7 @@ from scheduler import settle_pending_referrals, settle_referral_snapshots, settl
 from telegram_utils import safe_reply_text
 
 from pymongo import DESCENDING, ASCENDING, ReturnDocument  # keep if used elsewhere
-from pymongo.errors import DuplicateKeyError
+from pymongo.errors import DuplicateKeyError, CursorNotFound
 import os, asyncio, traceback, csv, io, requests, logging, time
 import pytz
 from database import init_db, db
@@ -2301,86 +2301,158 @@ def apply_monthly_tier_update(run_time: datetime | None = None):
         if isinstance(value, str):
             return tier_rank.get(value, 0)
         return 0    
-    for user in users_collection.find():
-        uid = user.get("user_id")
-        if uid is None:
-            continue
-        monthly_total = int(user.get("monthly_xp", 0))
-        # monthly_xp derived from snapshot ledger settles
-        computed_tier = _tier_from_monthly_xp(monthly_total)
-        current_status = user.get("status", "Normal")
-        existing = users_collection.find_one(
-            {"user_id": uid},
-            {"vip_month": 1, "vip_tier": 1},
-        ) or {}
-        existing_month = existing.get("vip_month")
-        existing_tier = existing.get("vip_tier")
-        existing_rank = _tier_rank(existing_tier) if existing_tier is not None else -1
-        computed_rank = _tier_rank(computed_tier)
+    def iter_users_paged(projection: dict, batch_size: int = 500, start_after=None):
+        last_id = start_after
+        while True:
+            query = {"_id": {"$gt": last_id}} if last_id else {}
+            batch = list(
+                users_collection.find(query, projection=projection)
+                .sort("_id", ASCENDING)
+                .limit(batch_size)
+            )
+            if not batch:
+                break
+            for doc in batch:
+                yield doc
+            last_id = batch[-1].get("_id")
 
-        if existing_month == month_key:
-            # VIP should not downgrade within a month
-            if existing_rank > computed_rank:
-                final_tier = existing_tier
-                logger.info(
-                    "[VIP][MONTHLY] keep_tier uid=%s month=%s existing=%s computed=%s",
-                    uid,
-                    month_key,
-                    existing_tier,
-                    computed_tier,
+    projection = {
+        "user_id": 1,
+        "monthly_xp": 1,
+        "status": 1,
+        "vip_month": 1,
+        "vip_tier": 1,
+        "username": 1,
+    }
+    batch_size = 500
+    cache_key = "vip_monthly:last_id"
+    cached_state = admin_cache_col.find_one({"_id": cache_key}, {"last_id": 1}) or {}
+    last_id = cached_state.get("last_id")
+    retries = 0
+    batch_processed = 0
+
+    while retries < 3:
+        try:
+            for user in iter_users_paged(projection, batch_size=batch_size, start_after=last_id):
+                uid = user.get("user_id")
+                if uid is None:
+                    continue
+                last_id = user.get("_id")
+                monthly_total = int(user.get("monthly_xp", 0))
+                # monthly_xp derived from snapshot ledger settles
+                computed_tier = _tier_from_monthly_xp(monthly_total)
+                current_status = user.get("status", "Normal")
+                existing_month = user.get("vip_month")
+                existing_tier = user.get("vip_tier")
+                existing_rank = _tier_rank(existing_tier) if existing_tier is not None else -1
+                computed_rank = _tier_rank(computed_tier)
+
+                if existing_month == month_key:
+                    # VIP should not downgrade within a month
+                    if existing_rank > computed_rank:
+                        final_tier = existing_tier
+                        logger.info(
+                            "[VIP][MONTHLY] keep_tier uid=%s month=%s existing=%s computed=%s",
+                            uid,
+                            month_key,
+                            existing_tier,
+                            computed_tier,
+                        )
+                    else:
+                        final_tier = computed_tier
+                        if computed_rank > existing_rank:
+                            logger.info(
+                                "[VIP][MONTHLY] upgrade uid=%s month=%s from=%s to=%s",
+                                uid,
+                                month_key,
+                                existing_tier,
+                                computed_tier,
+                            )
+                else:
+                    final_tier = computed_tier
+
+                if final_tier != current_status:
+                    if _tier_rank(final_tier) > _tier_rank(current_status):
+                        promoted.append(uid)
+                    else:
+                        demoted.append(uid)
+
+                monthly_xp_history_collection.update_one(
+                    {"user_id": uid, "month": month_key},
+                    {
+                        "$set": {
+                            "user_id": uid,
+                            "username": user.get("username"),
+                            "month": month_key,
+                            "monthly_xp": monthly_total,
+                            "status_before_reset": current_status,
+                            "status_after_reset": final_tier,
+                            "captured_at_utc": now_utc,
+                            "captured_at_kl": run_at_local.isoformat(),
+                        }
+                    },
+                    upsert=True,
                 )
-            else:
-                final_tier = computed_tier
-                if computed_rank > existing_rank:
+
+                _users_update_one(
+                    {"user_id": uid},
+                    {
+                        "$set": {
+                            "status": final_tier,
+                            "last_status_update": run_at_local,
+                            "monthly_xp": monthly_total,
+                            "vip_month": month_key,
+                            "vip_tier": final_tier,
+                            "vip_updated_at": now_utc,
+                            "snapshot_updated_at": now_utc,
+                        }
+                    },
+                    context="monthly_tier_update",
+                )
+                processed += 1
+                batch_processed += 1
+
+                if batch_processed >= batch_size:
                     logger.info(
-                        "[VIP][MONTHLY] upgrade uid=%s month=%s from=%s to=%s",
-                        uid,
-                        month_key,
-                        existing_tier,
-                        computed_tier,
+                        "[VIP][MONTHLY] processed=%s last_id=%s",
+                        processed,
+                        last_id,
                     )
-        else:
-            final_tier = computed_tier
-            
-        if final_tier != current_status:
-            if _tier_rank(final_tier) > _tier_rank(current_status):
-                promoted.append(uid)
-            else:
-                demoted.append(uid)
-
-        monthly_xp_history_collection.update_one(
-            {"user_id": uid, "month": month_key},
-            {
-                "$set": {
-                    "user_id": uid,
-                    "username": user.get("username"),
-                    "month": month_key,
-                    "monthly_xp": monthly_total,
-                    "status_before_reset": current_status,
-                    "status_after_reset": final_tier,
-                    "captured_at_utc": now_utc,
-                    "captured_at_kl": run_at_local.isoformat(),
-                }
-            },
-            upsert=True,
-        )
-
-        _users_update_one(
-            {"user_id": uid},
-            {
-                "$set": {
-                    "status": final_tier,
-                    "last_status_update": run_at_local,
-                    "monthly_xp": monthly_total,
-                    "vip_month": month_key,
-                    "vip_tier": final_tier,
-                    "vip_updated_at": now_utc,
-                    "snapshot_updated_at": now_utc,                    
-                }
-            },
-            context="monthly_tier_update",            
-        )
-        processed += 1
+                    admin_cache_col.update_one(
+                        {"_id": cache_key},
+                        {"$set": {"last_id": last_id, "updated_at": now_utc}},
+                        upsert=True,
+                    )
+                    batch_processed = 0
+            if batch_processed:
+                logger.info(
+                    "[VIP][MONTHLY] processed=%s last_id=%s",
+                    processed,
+                    last_id,
+                )
+                admin_cache_col.update_one(
+                    {"_id": cache_key},
+                    {"$set": {"last_id": last_id, "updated_at": now_utc}},
+                    upsert=True,
+                )
+            admin_cache_col.delete_one({"_id": cache_key})
+            break
+        except CursorNotFound:
+            retries += 1
+            logger.warning(
+                "[VIP][MONTHLY] cursor_not_found retry=%s last_id=%s",
+                retries,
+                last_id,
+                exc_info=True,
+            )
+            if last_id is not None:
+                admin_cache_col.update_one(
+                    {"_id": cache_key},
+                    {"$set": {"last_id": last_id, "updated_at": now_utc}},
+                    upsert=True,
+                )
+            if retries >= 3:
+                raise
 
     audit_doc = {
         "type": "monthly_tier_update",
