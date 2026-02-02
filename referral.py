@@ -1,10 +1,11 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import logging
 
 from telegram import Bot
 from pymongo.errors import DuplicateKeyError
 
 from database import db, get_collection
+from time_utils import as_aware_utc
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -21,12 +22,13 @@ async def get_or_create_referral_link(bot: Bot, user_id: int, username: str) -> 
         logger.info(f"Fetching referral link for user_id={user_id}, username={username}")
         user = users_collection.find_one({"user_id": user_id})
 
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         expire_cutoff = now - timedelta(hours=24)
 
         # Reuse if not expired
         if user and "referral_link" in user and "referral_generated_at" in user:
-            if user["referral_generated_at"] > expire_cutoff:
+            generated_at = as_aware_utc(user.get("referral_generated_at"))
+            if generated_at and generated_at > expire_cutoff:
                 logger.info("✅ Reusing existing referral link")
                 return user["referral_link"]
 
