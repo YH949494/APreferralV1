@@ -1,5 +1,5 @@
 from telegram import Bot
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from database import db, users_collection
 from pymongo.errors import DuplicateKeyError
 
@@ -19,7 +19,7 @@ async def get_or_create_referral_link(bot: Bot, user_id: int, username: str):
         invite_link_obj = await bot.create_chat_invite_link(
             chat_id=GROUP_CHAT_ID,
             member_limit=0,
-            expire_date=datetime.utcnow() + timedelta(days=1),
+            expire_date=datetime.now(timezone.utc) + timedelta(days=1),
             creates_join_request=False,
             name=f"Referral from {username or user_id}"
         )
@@ -44,7 +44,7 @@ async def get_or_create_referral_link(bot: Bot, user_id: int, username: str):
                     "chat_id": GROUP_CHAT_ID,
                     "invite_link": referral_link,
                     "is_active": True,
-                    "created_at": datetime.utcnow(),
+                    "created_at": datetime.now(timezone.utc),
                 }
             )
             print(
