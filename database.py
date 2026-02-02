@@ -6,6 +6,7 @@ from datetime import timezone, timedelta
 import logging
 import pytz  # use pytz (no ZoneInfo here)
 from xp import grant_xp
+from time_utils import as_aware_utc
 
 KL_TZ = pytz.timezone("Asia/Kuala_Lumpur")
 logger = logging.getLogger(__name__)
@@ -135,7 +136,7 @@ def init_user(user_id, username):
 # === CHECK-IN LOGIC ===
 def can_checkin(user_id):
     user = users_collection.find_one({"user_id": user_id})
-    now = datetime.datetime.utcnow()
+    now = datetime.datetime.now(timezone.utc)
 
     if not user:
         return True  # User not found, treat as first time
@@ -145,10 +146,13 @@ def can_checkin(user_id):
         return True
 
     # Allow once every 24h
-    return (now - last).total_seconds() >= 86400
+    last_utc = as_aware_utc(last)
+    if not last_utc:
+        return True
+    return (now - last_utc).total_seconds() >= 86400
 
 def checkin_user(user_id):
-    now = datetime.datetime.utcnow()
+    now = datetime.datetime.now(timezone.utc)
     users_collection.update_one(
         {"user_id": user_id},
         {
@@ -254,7 +258,7 @@ def save_weekly_snapshot():
     if os.environ.get("ENABLE_LEGACY_WEEKLY_SNAPSHOT") != "1":
         logger.warning("[SNAPSHOT][DEPRECATED] save_weekly_snapshot disabled")
         return  
-    now = datetime.datetime.utcnow()
+    now = datetime.datetime.now(timezone.utc)
     week_start = (now - datetime.timedelta(days=7)).strftime("%Y-%m-%d")
     week_end = now.strftime("%Y-%m-%d")
 
