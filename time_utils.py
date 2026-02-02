@@ -16,9 +16,14 @@ def tz_name(tz: Any) -> str:
     return str(tz)
 
 
-def as_aware_utc(dt: datetime | None) -> datetime | None:
+def as_aware_utc(dt: datetime | str | None) -> datetime | None:
     if dt is None:
         return None
+    if isinstance(dt, str):
+        dt = dt.strip()
+        if dt.endswith("Z"):
+            dt = dt[:-1] + "+00:00"
+        dt = datetime.fromisoformat(dt)        
     if dt.tzinfo is None or dt.tzinfo.utcoffset(dt) is None:
         return dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc)
