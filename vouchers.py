@@ -2189,6 +2189,73 @@ def _is_my_region(region: str | None) -> bool:
         return False
     r = str(region).strip().lower()
     return r in ("my", "malaysia")
+
+def _normalize_region(region: str | None) -> str:
+    if not region:
+        return ""
+    return str(region).strip().lower()
+
+def _region_matches_pool(user_region: str | None, pool: str) -> bool:
+    if pool == "public":
+        return True
+    if not user_region:
+        return False
+    user_norm = _normalize_region(user_region)
+    pool_norm = _normalize_region(pool)
+    if _is_my_region(user_region):
+        return pool_norm in ("my", "malaysia")
+    return user_norm == pool_norm
+
+def _drop_pool_remaining_fields(drop: dict) -> dict[str, str]:
+    fields = {"public": "public_remaining"}
+    if not isinstance(drop, dict):
+        return fields
+    for key in drop.keys():
+        if not isinstance(key, str):
+            continue
+        if key.endswith("_remaining") and key != "public_remaining":
+            pool = key[: -len("_remaining")]
+            if pool:
+                fields[pool.lower()] = key
+    return fields
+
+def _pool_remaining(drop: dict, pool: str) -> int:
+    field = _drop_pool_remaining_fields(drop).get(pool, "")
+    if not field:
+        return 0
+    return max(0, int((drop or {}).get(field) or 0))
+
+def get_claimable_pools(user_region: str | None, drop: dict) -> list[str]:
+    fields = _drop_pool_remaining_fields(drop)
+    reserved = [pool for pool in fields.keys() if pool != "public" and _region_matches_pool(user_region, pool)]
+    return reserved + ["public"]
+
+def get_visible_pools(user_region: str | None, drop: dict, *, uid: int | None = None) -> list[str]:
+    fields = _drop_pool_remaining_fields(drop)
+    visible = ["public"]
+    for pool in fields.keys():
+        if pool == "public":
+            continue
+        if _region_matches_pool(user_region, pool):
+            visible.append(pool)
+            continue
+        remaining = _pool_remaining(drop, pool)
+        if remaining > 0:
+            try:
+                current_app.logger.info(
+                    "[VISIBILITY] exclude pool=%s reason=region_mismatch uid=%s",
+                    pool.upper(),
+                    uid,
+                )
+            except Exception:
+                print(f"[VISIBILITY] exclude pool={pool.upper()} reason=region_mismatch uid={uid}")
+    return visible
+
+def _compute_visible_remaining(user_region: str | None, drop: dict, *, uid: int | None = None) -> int:
+    return sum(_pool_remaining(drop, pool) for pool in get_visible_pools(user_region, drop, uid=uid))
+
+def _compute_claimable_remaining(user_region: str | None, drop: dict) -> int:
+    return sum(_pool_remaining(drop, pool) for pool in get_claimable_pools(user_region, drop))
  
 # ---- Core visibility logic ----
 def is_drop_active(doc: dict, ref: datetime) -> bool:
@@ -2335,6 +2402,23 @@ def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None
                 continue
             # Need at least one free code OR user already claimed (so they can see their code state)
             public_remaining = max(0, int(d.get("public_remaining") or 0))
+            visible_remaining = _compute_visible_remaining(user_region, d, uid=ctx_uid)
+            claimable_remaining = _compute_claimable_remaining(user_region, d)
+            if not is_my_user and visible_remaining > public_remaining:
+                try:
+                    current_app.logger.error(
+                        "[VISIBILITY][GUARD] drop=%s uid=%s visible=%s public=%s",
+                        drop_id,
+                        ctx_uid,
+                        visible_remaining,
+                        public_remaining,
+                    )
+                except Exception:
+                    print(
+                        f"[VISIBILITY][GUARD] drop={drop_id} uid={ctx_uid} "
+                        f"visible={visible_remaining} public={public_remaining}"
+                    )
+                visible_remaining = public_remaining         
             already = None
             if claim_user_id is not None:
                 already = voucher_claims_col.find_one(
@@ -2346,12 +2430,16 @@ def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None
                 claimed_at = _isoformat_kl(already.get("claimed_at"))
                 if claimed_at:
                     base["claimedAt"] = claimed_at       
-                base["remainingApprox"] = public_remaining
+                base["visible_remaining"] = visible_remaining
+                base["claimable_remaining"] = claimable_remaining
+                base["remainingApprox"] = visible_remaining
                 base["publicRemainingApprox"] = public_remaining
                 pooled_cards.append(base)
             else:
                 if is_my_user or public_remaining > 0:
-                    base["remainingApprox"] = public_remaining
+                    base["visible_remaining"] = visible_remaining
+                    base["claimable_remaining"] = claimable_remaining
+                    base["remainingApprox"] = visible_remaining
                     base["publicRemainingApprox"] = public_remaining   
                     pooled_cards.append(base)
 
@@ -2679,7 +2767,7 @@ def claim_voucher_for_user(*, user_id: str, drop_id: str, username: str) -> dict
     # pooled
     claim_key = f"uid:{user_id_str}"
     user_region = user_doc.get("region") if user_doc else None
-    pools = ["my", "public"] if _is_my_region(user_region) else ["public"]
+    pools = get_claimable_pools(user_region, drop)
     res = claim_pooled(drop_id=drop_id, claim_key=claim_key, ref=ref, pools=pools)
     if res.get("ok"):
         return {"code": res["code"], "claimedAt": res["claimedAt"]}
