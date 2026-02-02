@@ -231,7 +231,26 @@ class OnboardingTests(unittest.TestCase):
         self.assertEqual(created["action"], "created_minimal")
         self.assertEqual(throttled["action"], "throttled")
         self.assertEqual(user_doc.get("last_visible_at"), fixed_now)
-    
+
+
+    def test_visible_ping_handles_naive_last_visible_at(self):
+        uid = 889
+        naive_last_visible = datetime(2024, 1, 7, 0, 0, 0)
+        self.users.insert_one({"user_id": uid, "last_visible_at": naive_last_visible})
+        fixed_now = datetime(2024, 1, 7, 0, 0, 30, tzinfo=timezone.utc)
+        result = onboarding.record_visible_ping(uid, ref=fixed_now)
+        self.assertEqual(result["action"], "throttled")
+
+    def test_visible_ping_handles_aware_last_visible_at(self):
+        uid = 890
+        aware_last_visible = datetime(2024, 1, 7, 0, 0, 0, tzinfo=timezone.utc)
+        self.users.insert_one({"user_id": uid, "last_visible_at": aware_last_visible})
+        fixed_now = datetime(2024, 1, 7, 0, 2, 0, tzinfo=timezone.utc)
+        result = onboarding.record_visible_ping(uid, ref=fixed_now)
+        user_doc = self.users.find_one({"user_id": uid})
+        self.assertEqual(result["action"], "updated")
+        self.assertEqual(user_doc.get("last_visible_at"), fixed_now)
+        
     def test_e2_idempotent_first_checkin(self):
         uid = 456
         self.users.insert_one({"user_id": uid})
