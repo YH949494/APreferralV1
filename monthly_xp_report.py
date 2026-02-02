@@ -1,13 +1,13 @@
 import argparse
 import csv
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 from pymongo import MongoClient
 
 
 def _previous_month_key(base: Optional[datetime] = None) -> str:
-    dt = base or datetime.utcnow()
+    dt = base or datetime.now(timezone.utc)
     year = dt.year
     month = dt.month - 1
     if month == 0:
