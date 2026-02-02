@@ -10,6 +10,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from app_context import get_bot, get_scheduler, run_bot_coroutine
 from telegram_utils import safe_send_message
 from database import get_collection, users_collection
+from time_utils import as_aware_utc
 from pymongo.errors import DuplicateKeyError
 
 logger = logging.getLogger(__name__)
@@ -286,14 +287,14 @@ def record_visible_ping(
     if not uid:
         logger.warning("[E0][VISIBLE_PING][WARN] uid missing")
         return {"ok": False, "action": "missing_uid"}
-    now = ref or now_utc()
+    now = as_aware_utc(ref) or now_utc()
     threshold = now - timedelta(seconds=interval_seconds)
     try:
         existing = users_collection.find_one(
             {"user_id": uid}, {"_id": 1, "last_visible_at": 1}
         )
         if existing:
-            last_visible = existing.get("last_visible_at")
+            last_visible = as_aware_utc(existing.get("last_visible_at"))
             if last_visible and last_visible >= threshold:
                 logger.info("[E0][VISIBLE_PING][THROTTLED] uid=%s", uid)
                 return {"ok": True, "action": "throttled"}
