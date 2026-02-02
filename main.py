@@ -25,6 +25,7 @@ from config import (
     WEEKLY_REFERRAL_BUCKET,
     MINIAPP_VERSION,
 )
+from time_utils import expires_in_seconds, tz_name
 
 from bson.json_util import dumps
 from xp import ensure_xp_indexes, grant_xp, now_utc
@@ -355,12 +356,7 @@ def tick_5min() -> None:
     now_local = datetime.now(KL_TZ)
     acquired, lock_doc = acquire_scheduler_lock("tick_5min", ttl_seconds=900)
     if not acquired:
-        expires_in_s = None
-        if lock_doc and lock_doc.get("expireAt"):
-            expires_in_s = max(
-                0,
-                (lock_doc["expireAt"] - datetime.now(timezone.utc)).total_seconds(),
-            )
+        expires_in_s = expires_in_seconds((lock_doc or {}).get("expireAt"))
         logger.info(
             "[JOB][5MIN] lock_not_acquired owner=%s expires_in_s=%s run_id=%s instance=%s",
             (lock_doc or {}).get("owner"),
@@ -380,7 +376,7 @@ def tick_5min() -> None:
         "[JOB][5MIN] start window=5min run_id=%s instance=%s tz=%s ts=%s",
         run_id,
         INSTANCE_ID,
-        KL_TZ.zone,
+        tz_name(KL_TZ),
         now_local.isoformat(),
     )
     try:
@@ -624,7 +620,7 @@ def _write_referral_audit(
     extra: dict | None = None,
 ):
     payload = {
-        "ts_utc": datetime.utcnow(),
+        "ts_utc": datetime.now(timezone.utc),
         "chat_id": chat_id,
         "invitee_user_id": invitee_user_id,
         "invitee_username": invitee_username,
@@ -697,7 +693,7 @@ def maybe_shout_milestones(user_id: int):
             if sent_any:
                 _users_update_one(
                     {"user_id": user_id},
-                    {"$set": {"last_shout_at": datetime.utcnow()}},
+                    {"$set": {"last_shout_at": datetime.now(timezone.utc)}},
                     context="milestones_last_shout",
                 )
         else:
@@ -928,7 +924,7 @@ def _confirm_referral_on_main_join(
         try:
             unknown_invite_audit_collection.insert_one(
                 {
-                    "ts_utc": datetime.utcnow(),
+                    "ts_utc": datetime.now(timezone.utc),
                     "chat_id": chat_id or GROUP_ID,
                     "invitee_user_id": invitee_user_id,
                     "invitee_username": invitee_username,
@@ -1359,7 +1355,7 @@ def joins_daily():
     if days is None or days <= 0:
         return jsonify({"success": False, "message": "days must be positive"}), 400
 
-    since = datetime.utcnow() - timedelta(days=days)
+    since = datetime.now(timezone.utc) - timedelta(days=days)
     pipeline = [
         {"$match": {"chat_id": chat_id, "event": "join", "joined_at": {"$gte": since}}},
         {"$group": {"_id": {"$dateToString": {"format": "%Y-%m-%d", "date": "$joined_at"}}, "count": {"$sum": 1}}},
@@ -1444,7 +1440,7 @@ def api_is_admin():
         # optional: cache a per-user flag for faster UI checks
         _users_update_one(
             {"user_id": user_id},
-            {"$set": {"is_admin": is_admin, "is_admin_checked_at": datetime.utcnow()}},
+            {"$set": {"is_admin": is_admin, "is_admin_checked_at": datetime.now(timezone.utc)}},
             upsert=True,
             context="admin_flag",
         )
@@ -1465,7 +1461,7 @@ async def refresh_admin_ids(context: ContextTypes.DEFAULT_TYPE):
         ids = [a.user.id for a in admins]
         admin_cache_col.update_one(
             {"_id": "admins"},
-            {"$set": {"ids": ids, "refreshed_at": datetime.utcnow()}},
+            {"$set": {"ids": ids, "refreshed_at": datetime.now(timezone.utc)}},
             upsert=True,
         )
         print(f"👑 Admin cache refreshed: {len(ids)} IDs")
@@ -2037,7 +2033,7 @@ def get_bonus_voucher():
         if not is_vip and not is_admin:
             return jsonify({"code": None})
 
-        now = datetime.utcnow().replace(tzinfo=pytz.UTC)
+        now = datetime.now(timezone.utc)
 
         voucher = bonus_voucher_collection.find_one()
         if not voucher:
@@ -2252,7 +2248,7 @@ def reset_weekly_xp(run_id: str | None = None):
         week_end_date.isoformat(),
         run_id,
         INSTANCE_ID,
-        KL_TZ.zone,
+        tz_name(KL_TZ),
     )
     try:
         with JobTimer() as timer:
@@ -2272,7 +2268,7 @@ def reset_weekly_xp(run_id: str | None = None):
                     for u in top_referrals
                 ],
                 # store as UTC so later math is safe
-                "archived_at": datetime.utcnow()
+                "archived_at": datetime.now(timezone.utc)
             })
 
             _users_update_many(
@@ -2326,7 +2322,7 @@ def one_time_fix_monthly_xp():
     )
     meta.update_one(
         {"_id": "fix_monthly_xp_done"},
-        {"$set": {"done_at": datetime.utcnow(), "modified": res.modified_count}},
+        {"$set": {"done_at": datetime.now(timezone.utc), "modified": res.modified_count}},
         upsert=True
     )
     print(f"🔧 monthly_xp backfilled on first boot. Modified: {res.modified_count}")
@@ -2338,7 +2334,7 @@ def run_boot_catchup():
         "[BOOT][CATCHUP] start run_id=%s instance=%s tz=%s",
         run_id,
         INSTANCE_ID,
-        KL_TZ.zone,
+        tz_name(KL_TZ),
     )
     # weekly catch-up (only on Monday)
     last_history = history_collection.find_one(sort=[("archived_at", DESCENDING)])
@@ -2440,7 +2436,7 @@ def apply_monthly_tier_update(run_time: datetime | None = None, run_id: str | No
         month_key,
         run_id,
         INSTANCE_ID,
-        KL_TZ.zone,
+        tz_name(KL_TZ),
         start_local.isoformat(),
         end_local.isoformat(),
         total_users,
@@ -2712,7 +2708,7 @@ def _xmas_keyboard() -> InlineKeyboardMarkup:
 
 async def _send_xmas_flow(update: Update, context: ContextTypes.DEFAULT_TYPE, user) -> None:
     """Send the Xmas Gift Delight entry message and log campaign source."""
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     existing_user = users_collection.find_one({"user_id": user.id})
 
     if not existing_user:
@@ -2840,7 +2836,7 @@ async def handle_xmas_checkin(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         return
 
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     iso_calendar = now.isocalendar()
 
     _users_update_one(
