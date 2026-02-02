@@ -1,5 +1,5 @@
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from telegram.ext import ApplicationBuilder, ChatMemberHandler
 from telegram.request import HTTPXRequest
@@ -24,7 +24,7 @@ def save_join(cm: ChatMemberUpdated):
         "is_bot": user.is_bot,
         "chat_id": chat.id,
         "chat_title": getattr(chat, "title", None),
-        "joined_at": datetime.utcnow(),
+        "joined_at": datetime.now(timezone.utc),
         "via_invite": invite.invite_link if invite else None,
         "invite_name": invite.name if invite else None,
     }
@@ -33,7 +33,7 @@ def save_join(cm: ChatMemberUpdated):
     if WELCOME_DROP_ID:
         if not user.id:
             return        
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         db.welcome_eligibility.update_one(
             {"user_id": user.id, "dropId": WELCOME_DROP_ID},
             {
@@ -57,7 +57,7 @@ def save_leave(cm: ChatMemberUpdated):
             "event": "leave",
             "user_id": user.id,
             "chat_id": chat.id,
-            "at": datetime.utcnow(),
+            "at": datetime.now(timezone.utc),
         }
     )
 
