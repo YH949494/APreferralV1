@@ -11,12 +11,16 @@ from vouchers import (
     _check_session_cooldown,
     _check_kill_switch,
     _compute_subnet_key,
+    _compute_claimable_remaining,
+    _compute_visible_remaining,
     _derive_session_key,
     _get_client_ip,
     _set_cooldown,
     _set_session_cooldown,
     _session_cooldown_payload,
     _should_enforce_session_cooldown,
+    get_claimable_pools,
+    get_visible_pools,
 )
 
 
@@ -203,6 +207,25 @@ class VoucherAntiHunterTests(unittest.TestCase):
         payload = _build_idempotent_claim_response(existing_no_code_2)
         self.assertIsNone(payload)
 
+    def test_visible_remaining_excludes_reserved_pool_for_non_my_user(self):
+        drop = {"public_remaining": 10, "my_remaining": 20}
+        visible_pools = get_visible_pools("th", drop, uid=123)
+        self.assertEqual(visible_pools, ["public"])
+        self.assertEqual(_compute_visible_remaining("th", drop, uid=123), 10)
+        self.assertEqual(_compute_claimable_remaining("th", drop), 10)
+
+    def test_visible_remaining_includes_my_pool_for_my_user(self):
+        drop = {"public_remaining": 10, "my_remaining": 20}
+        visible_pools = get_visible_pools("MY", drop, uid=456)
+        self.assertEqual(visible_pools, ["public", "my"])
+        self.assertEqual(_compute_visible_remaining("MY", drop, uid=456), 30)
+        self.assertEqual(_compute_claimable_remaining("MY", drop), 30)
+
+    def test_claimable_pools_exclude_my_for_non_my_user(self):
+        drop = {"public_remaining": 10, "my_remaining": 20}
+        self.assertEqual(get_claimable_pools("th", drop), ["public"])
+        self.assertEqual(get_claimable_pools("malaysia", drop), ["my", "public"])
+        
     def test_kill_switch_blocks_after_threshold(self):
         rate_limits = FakeRateLimitCollection()
         now = datetime.now(timezone.utc)
