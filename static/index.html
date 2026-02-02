@@ -1815,7 +1815,7 @@ Tap to join now 👇
 
     function isPublicSoldOut(drop, userRegion) {
       if (isMyRegion(userRegion)) return false;
-      const remaining = drop?.publicRemainingApprox ?? drop?.remainingApprox;
+      const remaining = drop?.visible_remaining ?? drop?.publicRemainingApprox ?? drop?.remainingApprox;
       if (remaining === undefined || remaining === null) return false;
       const remainingValue = Number(remaining);
       if (Number.isNaN(remainingValue)) return false;
@@ -1846,7 +1846,14 @@ Tap to join now 👇
         card.appendChild(meta);
       }
 
-      if (drop && drop.remainingApprox !== undefined && drop.remainingApprox !== null) {
+      if (drop && drop.visible_remaining !== undefined && drop.visible_remaining !== null) {
+        const remainMeta = document.createElement("p");
+        remainMeta.className = "campaign-meta";
+        const value = Number(drop.visible_remaining);
+        const label = Number.isNaN(value) ? String(drop.visible_remaining) : value;
+        remainMeta.textContent = `Remaining: ${label}`;
+        card.appendChild(remainMeta);
+      } else if (drop && drop.remainingApprox !== undefined && drop.remainingApprox !== null) {
         const remainMeta = document.createElement("p");
         remainMeta.className = "campaign-meta";
         const value = Number(drop.remainingApprox);
