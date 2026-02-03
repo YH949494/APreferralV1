@@ -2475,6 +2475,35 @@ def claim_personalised(drop_id: str, usernameLower: str, ref: datetime):
         return {"ok": False, "err": "not_eligible"}
     return {"ok": True, "code": doc["code"], "claimedAt": _isoformat_kl(doc.get("claimedAt"))}
 
+def reconcile_pooled_remaining(drop_id: str) -> dict:
+    drop_id_variants = _drop_id_variants(drop_id)
+    actual_free_public = db.vouchers.count_documents({
+        "type": "pooled",
+        "dropId": {"$in": drop_id_variants},
+        "status": "free",
+        "$or": [{"pool": "public"}, {"pool": {"$exists": False}}],
+    })
+    actual_free_my = db.vouchers.count_documents({
+        "type": "pooled",
+        "dropId": {"$in": drop_id_variants},
+        "status": "free",
+        "pool": "my",
+    })
+    db.drops.update_one(
+        {"_id": _coerce_id(drop_id)},
+        {"$set": {"public_remaining": actual_free_public, "my_remaining": actual_free_my}},
+    )
+    try:
+        current_app.logger.info(
+            "[pool_reconcile] drop=%s public=%s my=%s",
+            drop_id,
+            actual_free_public,
+            actual_free_my,
+        )
+    except Exception:
+        print(f"[pool_reconcile] drop={drop_id} public={actual_free_public} my={actual_free_my}")
+    return {"actual_free_public": actual_free_public, "actual_free_my": actual_free_my}
+
 def claim_pooled(drop_id: str, claim_key: str, ref: datetime, *, pools: list[str] | None = None):
     drop_id_variants = _drop_id_variants(drop_id)
     drop_obj_id = _coerce_id(drop_id)
@@ -2492,7 +2521,8 @@ def claim_pooled(drop_id: str, claim_key: str, ref: datetime, *, pools: list[str
         return {"ok": True, "code": existing["code"], "claimedAt": _isoformat_kl(existing.get("claimedAt"))}
 
     pool_order = pools or ["public"]
-
+    reconciled = False
+ 
     for pool in pool_order:
         if pool == "my":
             remaining_field = "my_remaining"
@@ -2537,6 +2567,28 @@ def claim_pooled(drop_id: str, claim_key: str, ref: datetime, *, pools: list[str
             sort=[("_id", ASCENDING)],
             return_document=ReturnDocument.AFTER
         )
+        if not doc and not reconciled:
+            reconciliation = reconcile_pooled_remaining(drop_id)
+            reconciled = True
+            actual_remaining = (
+                reconciliation["actual_free_my"]
+                if pool == "my"
+                else reconciliation["actual_free_public"]
+            )
+            if actual_remaining > 0:
+                doc = db.vouchers.find_one_and_update(
+                    criteria,
+                    {
+                        "$set": {
+                            "status": "claimed",
+                            "claimedBy": claim_key,
+                            "claimedByKey": claim_key,
+                            "claimedAt": ref
+                        }
+                    },
+                    sort=[("_id", ASCENDING)],
+                    return_document=ReturnDocument.AFTER
+                )     
         if not doc:
             # No free voucher in this pool, try next pool
             continue
@@ -3215,7 +3267,9 @@ def api_claim():
             {"$set": {"status": "failed", "error": str(exc), "updated_at": now_utc()}},
         )
         payload = {"status": "error", "code": "sold_out"}
-        if not is_my_user:
+        if is_my_user:
+            payload["message"] = "This voucher pool is fully redeemed. Please refresh."
+        else:
             payload["message"] = "All vouchers have been fully redeemed."
         return jsonify(payload), 410
     except NotEligible as exc:
