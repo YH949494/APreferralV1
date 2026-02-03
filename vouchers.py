@@ -2351,16 +2351,16 @@ def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None
 
         if not is_user_eligible_for_drop(user_doc, tg_user or {}, d):
             continue    
-     
+
+        priority = d.get("priority", 100)     
         base = {
             "dropId": drop_id,
             "name": d.get("name"),
-            "type": dtype,
             "startsAt": _as_aware_utc(d.get("startsAt")).isoformat() if d.get("startsAt") else None,
             "endsAt": _as_aware_utc(d.get("endsAt")).isoformat() if d.get("endsAt") else None,
-            "priority": d.get("priority", 100),
             "isActive": is_active,
-            "userClaimed": False
+            "userClaimed": False,
+            "_priority": priority,
         }
 
         if dtype in ("personalised", "personalized"):
@@ -2402,23 +2402,8 @@ def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None
                 continue
             # Need at least one free code OR user already claimed (so they can see their code state)
             public_remaining = max(0, int(d.get("public_remaining") or 0))
-            visible_remaining = _compute_visible_remaining(user_region, d, uid=ctx_uid)
-            claimable_remaining = _compute_claimable_remaining(user_region, d)
-            if not is_my_user and visible_remaining > public_remaining:
-                try:
-                    current_app.logger.error(
-                        "[VISIBILITY][GUARD] drop=%s uid=%s visible=%s public=%s",
-                        drop_id,
-                        ctx_uid,
-                        visible_remaining,
-                        public_remaining,
-                    )
-                except Exception:
-                    print(
-                        f"[VISIBILITY][GUARD] drop={drop_id} uid={ctx_uid} "
-                        f"visible={visible_remaining} public={public_remaining}"
-                    )
-                visible_remaining = public_remaining         
+            my_remaining = max(0, int(d.get("my_remaining") or 0))
+            visible_remaining = public_remaining + my_remaining if is_my_user else public_remaining
             already = None
             if claim_user_id is not None:
                 already = voucher_claims_col.find_one(
@@ -2431,21 +2416,18 @@ def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None
                 if claimed_at:
                     base["claimedAt"] = claimed_at       
                 base["visible_remaining"] = visible_remaining
-                base["claimable_remaining"] = claimable_remaining
-                base["remainingApprox"] = visible_remaining
-                base["publicRemainingApprox"] = public_remaining
                 pooled_cards.append(base)
             else:
                 if is_my_user or public_remaining > 0:
                     base["visible_remaining"] = visible_remaining
-                    base["claimable_remaining"] = claimable_remaining
-                    base["remainingApprox"] = visible_remaining
-                    base["publicRemainingApprox"] = public_remaining   
                     pooled_cards.append(base)
 
     # Sort: personalised first; then pooled by priority desc, startsAt asc
-    personal_cards.sort(key=lambda x: (-x["priority"], x["startsAt"]))
-    pooled_cards.sort(key=lambda x: (-x["priority"], x["startsAt"]))
+    personal_cards.sort(key=lambda x: (-x["_priority"], x["startsAt"]))
+    pooled_cards.sort(key=lambda x: (-x["_priority"], x["startsAt"]))
+
+    for card in personal_cards + pooled_cards:
+        card.pop("_priority", None)
 
     # Stacked: return all (cap optional)
     return personal_cards + pooled_cards, user_region
@@ -2956,9 +2938,9 @@ def api_claim():
     if check_only:
         return jsonify({"status": "ok", "check_only": True, "subscribed": True}), 200
 
-    if is_pool_drop and not is_my_user:
-        public_remaining = max(0, int(voucher.get("public_remaining") or 0))
-        if public_remaining <= 0:
+    if is_pool_drop:
+        claimable_remaining = _compute_claimable_remaining(user_region, voucher)
+        if claimable_remaining <= 0:
             return jsonify({"status": "error", "code": "sold_out"}), 410     
 
     if _should_enforce_session_cooldown(client_subnet, client_ip):
