@@ -115,6 +115,25 @@ def _month_end_kl(reference: datetime | None = None) -> datetime:
         return start_local.replace(year=start_local.year + 1, month=1)
     return start_local.replace(month=start_local.month + 1)
 
+def _maybe_send_near_miss_dm_web(inviter_user_id: int, total_referrals_after: int) -> None:
+    if os.getenv("RUNNER_MODE") != "web":
+        return
+    try:
+        from main import _maybe_send_near_miss_dm
+    except Exception:
+        logger.exception(
+            "[SCHED][REFERRAL] near_miss_import_failed inviter=%s",
+            inviter_user_id,
+        )
+        return
+    try:
+        _maybe_send_near_miss_dm(inviter_user_id, total_referrals_after)
+    except Exception:
+        logger.exception(
+            "[SCHED][REFERRAL] near_miss_failed inviter=%s",
+            inviter_user_id,
+        )
+        
 def _week_window_utc(reference: datetime | None = None) -> tuple[datetime, datetime]:
     start_local = _week_start_kl(reference)
     end_local = _week_end_kl(reference)
@@ -726,6 +745,7 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
             _record_referral_event(inviter_user_id, invitee_user_id, "referral_settled", now_utc_ts)
             ref_total = new_ref_total
             maybe_handle_first_referral(inviter_user_id, current_ref_total, new_ref_total, now_utc_ts)
+            _maybe_send_near_miss_dm_web(inviter_user_id, ref_total)
             
             db.pending_referrals.update_one(
                 {"_id": pending_id},
