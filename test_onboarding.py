@@ -20,6 +20,21 @@ class FakeUpdateResult:
         self.modified_count = modified_count
         self.upserted_id = upserted_id
 
+class FakeCursor:
+    def __init__(self, docs):
+        self._docs = list(docs)
+
+    def sort(self, key, direction):  # noqa: ARG002
+        self._docs.sort(key=lambda doc: doc.get(key))
+        return self
+
+    def limit(self, count):
+        self._docs = self._docs[:count]
+        return self
+
+    def __iter__(self):
+        return iter(self._docs)
+
 
 class FakeUsersCollection:
     def __init__(self):
@@ -32,6 +47,12 @@ class FakeUsersCollection:
                 exists = key in doc
                 if value["$exists"] != exists:
                     return False
+            elif isinstance(value, dict) and "$lte" in value:
+                if key not in doc or doc.get(key) > value["$lte"]:
+                    return False
+            elif isinstance(value, dict) and "$ne" in value:
+                if doc.get(key) == value["$ne"]:
+                    return False                    
             elif doc.get(key) != value:
                 return False
         return True
@@ -53,6 +74,28 @@ class FakeUsersCollection:
                 return projected
         return None
 
+    def find(self, filt, projection=None):
+        matches = []
+        for doc in self.docs.values():
+            if self._match(doc, filt):
+                if projection is None:
+                    matches.append(dict(doc))
+                    continue
+                projected = {}
+                include_id = projection.get("_id", 1)
+                for key, flag in projection.items():
+                    if not flag or key == "_id":
+                        continue
+                    if key in doc:
+                        projected[key] = doc[key]
+                if include_id and "_id" in doc:
+                    projected["_id"] = doc["_id"]
+                matches.append(projected)
+        return FakeCursor(matches)
+
+    def count_documents(self, filt):
+        return sum(1 for doc in self.docs.values() if self._match(doc, filt))
+    
     def update_one(self, filt, update, upsert=False):
         for doc in self.docs.values():
             if self._match(doc, filt):
@@ -61,6 +104,8 @@ class FakeUsersCollection:
                 for key, value in update.get("$setOnInsert", {}).items():
                     if key not in doc:
                         self._apply_set(doc, key, value)                    
+                for key in update.get("$unset", {}).keys():
+                    self._apply_unset(doc, key)                        
                 return FakeUpdateResult(modified_count=1)
         if not upsert:
             return FakeUpdateResult(modified_count=0)
@@ -69,6 +114,8 @@ class FakeUsersCollection:
             self._apply_set(new_doc, key, value)
         for key, value in update.get("$setOnInsert", {}).items():
             self._apply_set(new_doc, key, value)            
+        for key in update.get("$unset", {}).keys():
+            self._apply_unset(new_doc, key)            
         new_doc["_id"] = self._next_id
         self._next_id += 1
         self.docs[new_doc["_id"]] = new_doc
@@ -84,6 +131,17 @@ class FakeUsersCollection:
             cursor = cursor.setdefault(part, {})
         cursor[parts[-1]] = value
 
+    def _apply_unset(self, doc, key):
+        if "." not in key:
+            doc.pop(key, None)
+            return
+        parts = key.split(".")
+        cursor = doc
+        for part in parts[:-1]:
+            cursor = cursor.get(part, {})
+        if isinstance(cursor, dict):
+            cursor.pop(parts[-1], None)
+    
     def insert_one(self, doc):
         user_id = doc.get("user_id")
         if user_id is not None:
@@ -279,6 +337,37 @@ class OnboardingTests(unittest.TestCase):
         trigger = self.scheduler.jobs[f"pm3:{uid}"]["trigger"]
         self.assertEqual(trigger.run_date, fixed_now + timedelta(hours=24))
 
+    def test_schedule_pm1_due_at_idempotent(self):
+        uid = 111
+        fixed_now = datetime(2024, 2, 1, tzinfo=timezone.utc)
+        self.users.insert_one({"user_id": uid})
+        with patch.object(onboarding, "now_utc", return_value=fixed_now):
+            onboarding.schedule_pm1(uid)
+            onboarding.schedule_pm1(uid)
+        user_doc = self.users.find_one({"user_id": uid})
+        self.assertEqual(user_doc.get("pm1_due_at_utc"), fixed_now + timedelta(hours=2))
+
+    def test_onboarding_due_tick_marks_sent(self):
+        uid = 222
+        fixed_now = datetime(2024, 2, 2, tzinfo=timezone.utc)
+        self.users.insert_one(
+            {
+                "user_id": uid,
+                "pm1_due_at_utc": fixed_now - timedelta(minutes=1),
+                "pm1_last_error": "old_error",
+                "pm1_last_error_at_utc": fixed_now - timedelta(minutes=2),
+            }
+        )
+        with (
+            patch.object(onboarding, "now_utc", return_value=fixed_now),
+            patch.object(onboarding, "_acquire_onboarding_lock", return_value=(True, None)),
+            patch.object(onboarding, "send_pm1_if_needed", return_value=(True, None, None)),
+        ):
+            onboarding.onboarding_due_tick()
+        user_doc = self.users.find_one({"user_id": uid})
+        self.assertEqual(user_doc.get("pm1_sent_at_utc"), fixed_now)
+        self.assertNotIn("pm1_last_error", user_doc)
+    
     def test_e3_handler_filters(self):
         called = []
 
