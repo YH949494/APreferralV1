@@ -2,9 +2,12 @@ import logging
 import os
 from uuid import uuid4
 from zoneinfo import ZoneInfo
+from config import MYWIN_CHAT_ID
 
 # Timezone
 KL_TZ = ZoneInfo("Asia/Kuala_Lumpur")
+
+MYWIN_CHAT_ID = int(os.getenv("MYWIN_CHAT_ID", "0"))  # 0 means "not configured"
 
 # Check-in XP settings (single source of truth)
 XP_BASE_PER_CHECKIN = 20
@@ -48,3 +51,7 @@ else:
 logging.getLogger(__name__).info(
     "[MINIAPP_VERSION] resolved=%s source=%s", MINIAPP_VERSION, _source
 )
+logging.getLogger(__name__).info("[CHAT_IDS] MYWIN_CHAT_ID=%s", MYWIN_CHAT_ID)
+if MYWIN_CHAT_ID == 0:
+    logging.getLogger(__name__).warning("[CHAT_IDS] MYWIN_CHAT_ID is not set; #mywin posting disabled")
+
