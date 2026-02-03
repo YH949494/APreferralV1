@@ -10,7 +10,7 @@ from apscheduler.triggers.date import DateTrigger
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from app_context import get_bot, get_scheduler, run_bot_coroutine
-from telegram_utils import safe_send_message
+from telegram_utils import safe_send_message, send_telegram_http_message
 from database import get_collection, users_collection
 from time_utils import as_aware_utc
 from pymongo.errors import DuplicateKeyError
@@ -109,21 +109,30 @@ def send_pm1_if_needed(
         logger.info("[PM1][SKIP] uid=%s reason=already_vip", uid)
         return (True, None, "already_vip") if return_error else False
     bot = get_bot()
-    if not bot:
-        logger.info("[PM1][SKIP] uid=%s reason=missing_bot", uid)
-        return (True, None, "missing_bot") if return_error else False
-    ok, err = run_bot_coroutine(
-        safe_send_message(
-            bot,
-            chat_id=uid,
-            text=PM1_TEXT,
-            uid=uid,
-            send_type="pm1",
-            raise_on_non_transient=False,
-            return_error=True,            
-        ),
-        timeout=70,
-    )
+    if bot:
+        try:
+            ok, err = run_bot_coroutine(
+                safe_send_message(
+                    bot,
+                    chat_id=uid,
+                    text=PM1_TEXT,
+                    uid=uid,
+                    send_type="pm1",
+                    raise_on_non_transient=False,
+                    return_error=True,
+                ),
+                timeout=70,
+            )
+        except RuntimeError as exc:
+            if "Bot loop not running yet" not in str(exc):
+                raise
+            ok, err, blocked = send_telegram_http_message(uid, PM1_TEXT)
+            if blocked:
+                err = "bot_blocked"
+    else:
+        ok, err, blocked = send_telegram_http_message(uid, PM1_TEXT)
+        if blocked:
+            err = "bot_blocked"
     if ok:
         users_collection.update_one(
             {"user_id": uid},
@@ -157,26 +166,35 @@ def send_pm2_if_needed(
     if _is_vip1(user):
         logger.info("[PM2][SKIP] uid=%s reason=already_vip", uid)
         return (True, None, "already_vip") if return_error else False
-    bot = get_bot()
-    if not bot:
-        logger.info("[PM2][SKIP] uid=%s reason=missing_bot", uid)
-        return (True, None, "missing_bot") if return_error else False
     keyboard = InlineKeyboardMarkup(
         [[InlineKeyboardButton("Open #mywin", url=MYWIN_INVITE_LINK)]]
     )
-    ok, err = run_bot_coroutine(
-        safe_send_message(
-            bot,
-            chat_id=uid,
-            text=PM2_TEXT,
-            reply_markup=keyboard,
-            uid=uid,
-            send_type="pm2",
-            raise_on_non_transient=False,
-            return_error=True,            
-        ),
-        timeout=70,
-    )
+    bot = get_bot()
+    if bot:
+        try:
+            ok, err = run_bot_coroutine(
+                safe_send_message(
+                    bot,
+                    chat_id=uid,
+                    text=PM2_TEXT,
+                    reply_markup=keyboard,
+                    uid=uid,
+                    send_type="pm2",
+                    raise_on_non_transient=False,
+                    return_error=True,
+                ),
+                timeout=70,
+            )
+        except RuntimeError as exc:
+            if "Bot loop not running yet" not in str(exc):
+                raise
+            ok, err, blocked = send_telegram_http_message(uid, PM2_TEXT)
+            if blocked:
+                err = "bot_blocked"
+    else:
+        ok, err, blocked = send_telegram_http_message(uid, PM2_TEXT)
+        if blocked:
+            err = "bot_blocked"
     if ok:
         users_collection.update_one(
             {"user_id": uid},
@@ -216,21 +234,30 @@ def send_pm3_if_needed(
         logger.info("[PM3][SKIP] uid=%s reason=already_vip", uid)
         return (True, None, "already_vip") if return_error else False
     bot = get_bot()
-    if not bot:
-        logger.info("[PM3][SKIP] uid=%s reason=missing_bot", uid)
-        return (True, None, "missing_bot") if return_error else False
-    ok, err = run_bot_coroutine(
-        safe_send_message(
-            bot,
-            chat_id=uid,
-            text=PM3_TEXT,
-            uid=uid,
-            send_type="pm3",
-            raise_on_non_transient=False,
-            return_error=True,            
-        ),
-        timeout=70,
-    )
+    if bot:
+        try:
+            ok, err = run_bot_coroutine(
+                safe_send_message(
+                    bot,
+                    chat_id=uid,
+                    text=PM3_TEXT,
+                    uid=uid,
+                    send_type="pm3",
+                    raise_on_non_transient=False,
+                    return_error=True,
+                ),
+                timeout=70,
+            )
+        except RuntimeError as exc:
+            if "Bot loop not running yet" not in str(exc):
+                raise
+            ok, err, blocked = send_telegram_http_message(uid, PM3_TEXT)
+            if blocked:
+                err = "bot_blocked"
+    else:
+        ok, err, blocked = send_telegram_http_message(uid, PM3_TEXT)
+        if blocked:
+            err = "bot_blocked"
     if ok:
         users_collection.update_one(
             {"user_id": uid},
