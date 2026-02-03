@@ -190,6 +190,38 @@
       gap: 6px;
     }
 
+    .referral-progress-card {
+      margin-top: 14px;
+      padding: 14px;
+      border: 1px solid var(--border-light);
+      border-radius: 12px;
+      background: #fff7f1;
+      display: grid;
+      gap: 8px;
+    }
+
+    .referral-progress-bar {
+      width: 100%;
+      height: 10px;
+      background: #ffe4d4;
+      border-radius: 999px;
+      overflow: hidden;
+    }
+
+    .referral-progress-fill {
+      height: 100%;
+      width: 0%;
+      background: var(--ap-orange);
+      transition: width 0.25s ease;
+    }
+
+    .referral-progress-meta {
+      font-size: 14px;
+      color: var(--text-muted);
+      display: grid;
+      gap: 4px;
+    }
+    
     .leaderboard-block {
       margin-bottom: 18px;
     }
@@ -540,6 +572,17 @@
     <button class="btn btn-primary" onclick="getReferral()">Generate Link</button>
     <p id="referral-link">Click the button to get your link</p>
     <button class="btn btn-ghost" onclick="copyReferral()">📋 Copy to clipboard</button>
+    <div class="referral-progress-card" aria-live="polite">
+      <h4>🔗 Referral Progress</h4>
+      <div class="referral-progress-bar">
+        <div class="referral-progress-fill" id="referral-progress-fill"></div>
+      </div>
+      <div class="referral-progress-meta">
+        <div id="referral-progress-count">0 / 3</div>
+        <div id="referral-progress-remaining">3 more referrals to unlock +200 XP</div>
+        <div id="referral-progress-expiry">⏳ This link expires in 24h</div>
+      </div>
+    </div>    
   </div>
 
   <div class="section" id="leaderboard-section">
@@ -1605,6 +1648,64 @@
       }
     }
 
+    function formatExpiryTimer(seconds) {
+      if (!Number.isFinite(seconds)) return "";
+      const safe = Math.max(0, Math.floor(seconds));
+      const hours = Math.floor(safe / 3600);
+      const minutes = Math.floor((safe % 3600) / 60);
+      return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}`;
+    }
+
+    function renderReferralProgress(data = {}) {
+      const fillEl = document.getElementById("referral-progress-fill");
+      const countEl = document.getElementById("referral-progress-count");
+      const remainingEl = document.getElementById("referral-progress-remaining");
+      const expiryEl = document.getElementById("referral-progress-expiry");
+
+      if (!fillEl || !countEl || !remainingEl || !expiryEl) return;
+
+      const rawPct = Number(data?.progress_pct);
+      const safePct = Number.isFinite(rawPct) ? Math.min(Math.max(rawPct, 0), 100) : 0;
+      fillEl.style.width = `${safePct}%`;
+
+      const progressCount = Number(
+        data?.progress_count ?? data?.current_referrals ?? data?.referrals ?? 0
+      );
+      const safeCount = Number.isFinite(progressCount) ? Math.max(0, progressCount) : 0;
+      countEl.textContent = `${safeCount} / 3`;
+
+      const remainingRaw = Number(
+        data?.remaining_referrals ?? data?.remaining ?? Math.max(0, 3 - safeCount)
+      );
+      const remaining = Number.isFinite(remainingRaw) ? Math.max(0, remainingRaw) : 0;
+      if (data?.near_miss) {
+        remainingEl.textContent = "⚡ 1 more referral to unlock +200 XP";
+      } else {
+        remainingEl.textContent = `${remaining} more referrals to unlock +200 XP`;
+      }
+
+      if (data?.link_expires_in_seconds !== undefined && data?.link_expires_in_seconds !== null) {
+        const formatted = formatExpiryTimer(Number(data.link_expires_in_seconds));
+        expiryEl.textContent = formatted
+          ? `⏳ Link expires in ${formatted}`
+          : "⏳ This link expires in 24h";
+      } else {
+        expiryEl.textContent = "⏳ This link expires in 24h";
+      }
+    }
+
+    async function loadReferralProgress() {
+      try {
+        const res = await v2Fetch(`${API_V2}/referral/progress`);
+        if (res.status === 401 || res.status === 403) return;
+        if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+        const data = await res.json();
+        renderReferralProgress(data || {});
+      } catch (err) {
+        console.warn("Referral progress load failed:", err);
+      }
+    }
+    
     async function getReferral() {
       if (!hasRegionSelected()) {
         alert("❌ Please select and lock your region before generating a referral link.");
@@ -1626,7 +1727,8 @@
         const link = data.referral_link;
         if (link) {
           latestReferralLink = link;
-          display.innerText = link + "\n👆 Tap 'Copy to Clipboard' to copy";
+          display.innerText = link + "\n👆 Tap 'Copy to Clipboard' to copy";3
+          loadReferralProgress();          
         } else {
           display.innerText = "❌ Failed to get link.";
         }
@@ -3081,7 +3183,8 @@ ${referral}`;
       checkRegionStatus();
       handleAdminAndVoucher();
       loadCheckinStatus();
-
+      loadReferralProgress();
+      
       loadVouchers();
       if (isAdminMode) {
         document.getElementById("admin-panel").style.display = "block";
