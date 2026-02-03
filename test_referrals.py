@@ -6,6 +6,7 @@ from referral_rules import (
     REFERRAL_BONUS_INTERVAL,
     REFERRAL_BONUS_XP,
     REFERRAL_SUCCESS_EVENT,
+    calc_referral_progress,
     grant_referral_rewards,
     reconcile_referrals,
     upsert_referral_and_update_user_count,
@@ -143,6 +144,17 @@ class FakeDB:
         self.xp_ledger = FakeLedger()    
 
 class ReferralTests(unittest.TestCase):
+    def test_calc_referral_progress(self):
+        for total in range(6):
+            details = calc_referral_progress(total, milestone_size=3)
+            progress = total % 3
+            remaining = 3 if progress == 0 else 3 - progress
+            self.assertEqual(details["progress"], progress)
+            self.assertEqual(details["remaining"], remaining)
+            self.assertEqual(details["near_miss"], progress == 2)
+            expected_pct = 0 if progress == 0 else (progress / 3) * 100
+            self.assertAlmostEqual(details["progress_pct"], expected_pct, places=2)
+    
     def test_award_exact_counts_and_bonus(self):
         db = FakeDB()
         uid = 10
