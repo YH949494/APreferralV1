@@ -11,7 +11,7 @@ from telegram.ext import (
     ApplicationBuilder, CommandHandler, ChatJoinRequestHandler, ChatMemberHandler,
     CallbackQueryHandler, ContextTypes, MessageHandler, filters
 )
-from telegram.error import BadRequest
+from telegram.error import BadRequest, Forbidden
 from telegram.request import HTTPXRequest
 from datetime import datetime, timedelta, timezone
 from werkzeug.exceptions import HTTPException
@@ -641,6 +641,59 @@ def _write_referral_audit(
             inviter_user_id,
             reason,
         )
+
+def _maybe_send_near_miss_dm(inviter_user_id: int, total_referrals_after: int) -> None:
+    if RUNNER_MODE != "web":
+        return
+    if not inviter_user_id:
+        return
+    progress = total_referrals_after % 3
+    if progress != 2:
+        return
+    user_doc = users_collection.find_one(
+        {"user_id": inviter_user_id},
+        {"last_near_miss_dm_at": 1},
+    )
+    last_sent_at = user_doc.get("last_near_miss_dm_at") if user_doc else None
+    if isinstance(last_sent_at, str):
+        try:
+            last_sent_at = datetime.fromisoformat(last_sent_at.replace("Z", "+00:00"))
+        except ValueError:
+            last_sent_at = None
+    if isinstance(last_sent_at, datetime):
+        if last_sent_at.tzinfo is None:
+            last_sent_at = last_sent_at.replace(tzinfo=timezone.utc)
+        else:
+            last_sent_at = last_sent_at.astimezone(timezone.utc)
+    else:
+        last_sent_at = None
+    now_ts = now_utc()
+    if last_sent_at and now_ts - last_sent_at < timedelta(hours=24):
+        return
+    text = (
+        "⚡ Almost there!\n"
+        "You’re 1 referral away from unlocking +200 XP.\n"
+        "⏳ Complete within 24 hours."
+    )
+    try:
+        call_bot_in_loop(app_bot.bot.send_message(chat_id=inviter_user_id, text=text))
+    except (Forbidden, BadRequest) as exc:
+        logger.warning(
+            "[REFERRAL][NEAR_MISS_DM] send_failed inviter=%s err=%s",
+            inviter_user_id,
+            exc,
+        )
+        return
+    except Exception:
+        logger.exception(
+            "[REFERRAL][NEAR_MISS_DM] send_error inviter=%s",
+            inviter_user_id,
+        )
+        return
+    users_collection.update_one(
+        {"user_id": inviter_user_id},
+        {"$set": {"last_near_miss_dm_at": now_ts}},
+    )
 
 def maybe_shout_milestones(user_id: int):
     """
