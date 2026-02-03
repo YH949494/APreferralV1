@@ -429,37 +429,42 @@ def onboarding_due_tick() -> None:
                 err,
             )
 
-    _process_due(
-        "pm1",
-        "pm1_due_at_utc",
-        "pm1_sent_at_utc",
-        "pm1_last_error",
-        "pm1_last_error_at_utc",
-        "pm1_disabled",
-        send_pm1_if_needed,
-        pm1_filter,
-    )
-    _process_due(
-        "pm2",
-        "pm2_due_at_utc",
-        "pm2_sent_at_utc",
-        "pm2_last_error",
-        "pm2_last_error_at_utc",
-        "pm2_disabled",
-        send_pm2_if_needed,
-        pm2_filter,
-    )
-    _process_due(
-        "pm3",
-        "pm3_due_at_utc",
-        "pm3_sent_at_utc",
-        "pm3_last_error",
-        "pm3_last_error_at_utc",
-        "pm3_disabled",
-        send_pm3_if_needed,
-        pm3_filter,
-    )
-
+    try:
+        _process_due(
+            "pm1",
+            "pm1_due_at_utc",
+            "pm1_sent_at_utc",
+            "pm1_last_error",
+            "pm1_last_error_at_utc",
+            "pm1_disabled",
+            send_pm1_if_needed,
+            pm1_filter,
+        )
+        _process_due(
+            "pm2",
+            "pm2_due_at_utc",
+            "pm2_sent_at_utc",
+            "pm2_last_error",
+            "pm2_last_error_at_utc",
+            "pm2_disabled",
+            send_pm2_if_needed,
+            pm2_filter,
+        )
+        _process_due(
+            "pm3",
+            "pm3_due_at_utc",
+            "pm3_sent_at_utc",
+            "pm3_last_error",
+            "pm3_last_error_at_utc",
+            "pm3_disabled",
+            send_pm3_if_needed,
+            pm3_filter,
+        )
+    except RuntimeError as exc:
+        if "Bot loop not running yet" in str(exc):
+            logger.info("[ONBOARD][TICK] skipped_reason=bot_loop_not_ready")
+            return
+        raise
 
 def record_visible_ping(
     uid: int | None, *, ref: datetime | None = None, interval_seconds: int = 60
