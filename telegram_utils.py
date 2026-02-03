@@ -4,9 +4,11 @@ import asyncio
 import logging
 import random
 import time
+import os
 from typing import Any
 
 import httpx
+import requests
 from telegram.error import BadRequest, Forbidden, NetworkError
 
 logger = logging.getLogger(__name__)
@@ -20,6 +22,42 @@ TRANSIENT_EXCEPTIONS = (
     TimeoutError,
 )
 
+def send_telegram_http_message(
+    chat_id: int,
+    text: str,
+    *,
+    parse_mode: str | None = None,
+    token: str | None = None,
+    timeout: int = 10,
+    log: logging.Logger = logger,
+) -> tuple[bool, str | None, bool]:
+    bot_token = token or os.environ.get("BOT_TOKEN", "")
+    if not bot_token:
+        return False, "missing_bot_token", False
+    payload = {"chat_id": chat_id, "text": text}
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    try:
+        resp = requests.post(url, json=payload, timeout=timeout)
+    except requests.RequestException as exc:
+        log.warning("[E2][PM_SEND_HTTP][FAIL] chat_id=%s err=%s", chat_id, exc)
+        return False, f"{exc.__class__.__name__}: {exc}", False
+    data = None
+    try:
+        data = resp.json()
+    except ValueError:
+        data = None
+    if resp.status_code == 200 and isinstance(data, dict) and data.get("ok"):
+        return True, None, False
+    error_code = data.get("error_code") if isinstance(data, dict) else None
+    description = data.get("description") if isinstance(data, dict) else None
+    if resp.status_code == 403 or error_code == 403:
+        return False, "bot_blocked", True
+    if resp.status_code == 429 or error_code == 429:
+        return False, "rate_limited", False
+    err = description or f"telegram_http_{resp.status_code}"
+    return False, err, False
 
 def _resolve_chat_id(message: Any, chat_id: int | None) -> int | None:
     if chat_id is not None:
