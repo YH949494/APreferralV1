@@ -21,7 +21,8 @@ from vouchers import (
     _should_enforce_session_cooldown,
     claim_pooled,
     get_claimable_pools,
-    get_visible_pools,
+    get_visible_pools,.
+    reconcile_pooled_remaining,
 )
 
 
@@ -185,6 +186,8 @@ class FakeVouchersCollection:
                     doc.pop(key, None)
                 return
 
+    def count_documents(self, filt):
+        return sum(1 for doc in self.docs if self._match(doc, filt))
 
 class FakeDropsCollection:
     def __init__(self, docs=None):
@@ -208,6 +211,8 @@ class FakeDropsCollection:
             if isinstance(value, dict) and "$gt" in value:
                 if not doc.get(key, 0) > value["$gt"]:
                     return FakeUpdateResult(0)
+        for key, value in update.get("$set", {}).items():
+            doc[key] = value                    
         for key, value in update.get("$inc", {}).items():
             doc[key] = doc.get(key, 0) + value
         return FakeUpdateResult(1)
@@ -388,6 +393,79 @@ class VoucherAntiHunterTests(unittest.TestCase):
             self.assertEqual(res["code"], "PUBCODE2")
             self.assertEqual(fake_db.drops.docs["drop-2"]["public_remaining"], 0)
             self.assertEqual(fake_db.drops.docs["drop-2"]["my_remaining"], 1)
+        finally:
+            vouchers_module.db = original_db
+
+
+    def test_claim_pooled_reconciles_stale_my_remaining(self):
+        import vouchers as vouchers_module
+
+        now = datetime.now(timezone.utc)
+        fake_db = FakeDb(
+            drops=[{"_id": "drop-3", "my_remaining": 10, "public_remaining": 0}],
+            vouchers=[],
+        )
+        original_db = vouchers_module.db
+        vouchers_module.db = fake_db
+        try:
+            res = claim_pooled(drop_id="drop-3", claim_key="uid:11", ref=now, pools=["my", "public"])
+            self.assertFalse(res["ok"])
+            self.assertEqual(res["err"], "sold_out")
+            self.assertEqual(fake_db.drops.docs["drop-3"]["my_remaining"], 0)
+        finally:
+            vouchers_module.db = original_db
+
+    def test_claim_pooled_my_pool_decrements_when_available(self):
+        import vouchers as vouchers_module
+
+        now = datetime.now(timezone.utc)
+        fake_db = FakeDb(
+            drops=[{"_id": "drop-4", "my_remaining": 10, "public_remaining": 0}],
+            vouchers=[
+                {
+                    "type": "pooled",
+                    "dropId": "drop-4",
+                    "code": "MYONLY",
+                    "status": "free",
+                    "pool": "my",
+                }
+            ],
+        )
+        original_db = vouchers_module.db
+        vouchers_module.db = fake_db
+        try:
+            res = claim_pooled(drop_id="drop-4", claim_key="uid:22", ref=now, pools=["my", "public"])
+            self.assertTrue(res["ok"])
+            self.assertEqual(res["code"], "MYONLY")
+            self.assertEqual(fake_db.drops.docs["drop-4"]["my_remaining"], 9)
+        finally:
+            vouchers_module.db = original_db
+
+    def test_legacy_public_pool_counts_missing_pool_field(self):
+        import vouchers as vouchers_module
+
+        now = datetime.now(timezone.utc)
+        fake_db = FakeDb(
+            drops=[{"_id": "drop-5", "my_remaining": 0, "public_remaining": 1}],
+            vouchers=[
+                {
+                    "type": "pooled",
+                    "dropId": "drop-5",
+                    "code": "LEGACY",
+                    "status": "free",
+                }
+            ],
+        )
+        original_db = vouchers_module.db
+        vouchers_module.db = fake_db
+        try:
+            reconcile = reconcile_pooled_remaining("drop-5")
+            self.assertEqual(reconcile["actual_free_public"], 1)
+            self.assertEqual(fake_db.drops.docs["drop-5"]["public_remaining"], 1)
+
+            res = claim_pooled(drop_id="drop-5", claim_key="uid:33", ref=now, pools=["public"])
+            self.assertTrue(res["ok"])
+            self.assertEqual(res["code"], "LEGACY")
         finally:
             vouchers_module.db = original_db
             
