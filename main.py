@@ -35,7 +35,7 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_MISSED
 
 from app_context import set_app_bot, set_bot, set_scheduler
-from onboarding import MYWIN_CHAT_ID, record_first_mywin
+from onboarding import MYWIN_CHAT_ID, onboarding_due_tick, record_first_mywin
 from vouchers import vouchers_bp, ensure_voucher_indexes, process_verification_queue
 from scheduler import settle_pending_referrals, settle_referral_snapshots, settle_xp_snapshots
 from telegram_utils import safe_reply_text
@@ -3181,6 +3181,13 @@ def run_worker():
         name="Process Verification Queue",
         replace_existing=True,
         kwargs={"batch_limit": 50},
+    )    
+    scheduler.add_job(
+        onboarding_due_tick,
+        trigger=CronTrigger(minute="*/1", timezone=KL_TZ),
+        id="onboarding_due_tick",
+        name="Onboarding Due Tick",
+        replace_existing=True,
     )    
     scheduler.start()
 
