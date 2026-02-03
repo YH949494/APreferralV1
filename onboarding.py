@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import logging
+import os
 import random
+import time
 from datetime import datetime, timedelta, timezone
 
 from apscheduler.triggers.date import DateTrigger
@@ -85,28 +87,32 @@ def _is_vip1(doc: dict | None) -> bool:
     return (_vip_field(doc) or "").upper() == "VIP1"
 
 
-def send_pm1_if_needed(uid: int) -> None:
+def send_pm1_if_needed(
+    uid: int,
+    *,
+    return_error: bool = False,
+) -> bool | tuple[bool, str | None, str | None]:
     user = users_collection.find_one(
         {"user_id": uid},
         {"first_checkin_at": 1, "pm_sent.pm_checkin_tip": 1, "vip_tier": 1, "status": 1},
     )
     if not user:
         logger.info("[PM1][SKIP] uid=%s reason=missing_user", uid)
-        return
+        return (True, None, "missing_user") if return_error else False
     if user.get("first_checkin_at"):
         logger.info("[PM1][SKIP] uid=%s reason=already_checkin", uid)
-        return
+        return (True, None, "already_checkin") if return_error else False
     if (user.get("pm_sent") or {}).get("pm_checkin_tip"):
         logger.info("[PM1][SKIP] uid=%s reason=already_sent", uid)
-        return
+        return (True, None, "already_sent") if return_error else False
     if _is_vip1(user):
         logger.info("[PM1][SKIP] uid=%s reason=already_vip", uid)
-        return
+        return (True, None, "already_vip") if return_error else False
     bot = get_bot()
     if not bot:
         logger.info("[PM1][SKIP] uid=%s reason=missing_bot", uid)
-        return
-    ok = run_bot_coroutine(
+        return (True, None, "missing_bot") if return_error else False
+    ok, err = run_bot_coroutine(
         safe_send_message(
             bot,
             chat_id=uid,
@@ -114,6 +120,7 @@ def send_pm1_if_needed(uid: int) -> None:
             uid=uid,
             send_type="pm1",
             raise_on_non_transient=False,
+            return_error=True,            
         ),
         timeout=70,
     )
@@ -123,35 +130,41 @@ def send_pm1_if_needed(uid: int) -> None:
             {"$set": {"pm_sent.pm_checkin_tip": now_utc()}},
         )
         logger.info("[PM1][SENT] uid=%s", uid)
+        return (True, None, None) if return_error else True        
     else:
         logger.warning("[PM1][SEND_FAILED] uid=%s", uid)
+        return (False, err, None) if return_error else False        
 
 
-def send_pm2_if_needed(uid: int) -> None:
+def send_pm2_if_needed(
+    uid: int,
+    *,
+    return_error: bool = False,
+) -> bool | tuple[bool, str | None, str | None]:
     user = users_collection.find_one(
         {"user_id": uid},
         {"first_mywin_at": 1, "pm_sent.pm_mywin_tip": 1, "vip_tier": 1, "status": 1},
     )
     if not user:
         logger.info("[PM2][SKIP] uid=%s reason=missing_user", uid)
-        return
+        return (True, None, "missing_user") if return_error else False
     if user.get("first_mywin_at"):
         logger.info("[PM2][SKIP] uid=%s reason=already_mywin", uid)
-        return
+        return (True, None, "already_mywin") if return_error else False
     if (user.get("pm_sent") or {}).get("pm_mywin_tip"):
         logger.info("[PM2][SKIP] uid=%s reason=already_sent", uid)
-        return
+        return (True, None, "already_sent") if return_error else False
     if _is_vip1(user):
         logger.info("[PM2][SKIP] uid=%s reason=already_vip", uid)
-        return
+        return (True, None, "already_vip") if return_error else False
     bot = get_bot()
     if not bot:
         logger.info("[PM2][SKIP] uid=%s reason=missing_bot", uid)
-        return
+        return (True, None, "missing_bot") if return_error else False
     keyboard = InlineKeyboardMarkup(
         [[InlineKeyboardButton("Open #mywin", url=MYWIN_INVITE_LINK)]]
     )
-    ok = run_bot_coroutine(
+    ok, err = run_bot_coroutine(
         safe_send_message(
             bot,
             chat_id=uid,
@@ -160,6 +173,7 @@ def send_pm2_if_needed(uid: int) -> None:
             uid=uid,
             send_type="pm2",
             raise_on_non_transient=False,
+            return_error=True,            
         ),
         timeout=70,
     )
@@ -169,11 +183,16 @@ def send_pm2_if_needed(uid: int) -> None:
             {"$set": {"pm_sent.pm_mywin_tip": now_utc()}},
         )
         logger.info("[PM2][SENT] uid=%s", uid)
+        return (True, None, None) if return_error else True        
     else:
         logger.warning("[PM2][SEND_FAILED] uid=%s", uid)
+        return (False, err, None) if return_error else False
 
-
-def send_pm3_if_needed(uid: int) -> None:
+def send_pm3_if_needed(
+    uid: int,
+    *,
+    return_error: bool = False,
+) -> bool | tuple[bool, str | None, str | None]:
     user = users_collection.find_one(
         {"user_id": uid},
         {
@@ -186,21 +205,21 @@ def send_pm3_if_needed(uid: int) -> None:
     )
     if not user:
         logger.info("[PM3][SKIP] uid=%s reason=missing_user", uid)
-        return
+        return (True, None, "missing_user") if return_error else False
     if user.get("first_referral_at") or int(user.get("total_referrals", 0)) >= 1:
         logger.info("[PM3][SKIP] uid=%s reason=already_referral", uid)
-        return
+        return (True, None, "already_referral") if return_error else False
     if (user.get("pm_sent") or {}).get("pm_referral_tip"):
         logger.info("[PM3][SKIP] uid=%s reason=already_sent", uid)
-        return
+        return (True, None, "already_sent") if return_error else False
     if _is_vip1(user):
         logger.info("[PM3][SKIP] uid=%s reason=already_vip", uid)
-        return
+        return (True, None, "already_vip") if return_error else False
     bot = get_bot()
     if not bot:
         logger.info("[PM3][SKIP] uid=%s reason=missing_bot", uid)
-        return
-    ok = run_bot_coroutine(
+        return (True, None, "missing_bot") if return_error else False
+    ok, err = run_bot_coroutine(
         safe_send_message(
             bot,
             chat_id=uid,
@@ -208,6 +227,7 @@ def send_pm3_if_needed(uid: int) -> None:
             uid=uid,
             send_type="pm3",
             raise_on_non_transient=False,
+            return_error=True,            
         ),
         timeout=70,
     )
@@ -217,9 +237,10 @@ def send_pm3_if_needed(uid: int) -> None:
             {"$set": {"pm_sent.pm_referral_tip": now_utc()}},
         )
         logger.info("[PM3][SENT] uid=%s", uid)
+        return (True, None, None) if return_error else True        
     else:
         logger.warning("[PM3][SEND_FAILED] uid=%s", uid)
-
+        return (False, err, None) if return_error else False
 
 def send_pm4_if_needed(uid: int) -> None:
     user = users_collection.find_one(
@@ -258,27 +279,186 @@ def send_pm4_if_needed(uid: int) -> None:
     else:
         logger.warning("[PM4][SEND_FAILED] uid=%s", uid)
 
+def _onboarding_test_mode() -> bool:
+    return os.getenv("ONBOARDING_TEST_MODE", "").lower() in {"1", "true", "yes"}
+
+
+def _schedule_due_at(uid: int, due_field: str, sent_field: str, run_at: datetime) -> datetime | None:
+    res = users_collection.update_one(
+        {
+            "user_id": uid,
+            due_field: {"$exists": False},
+            sent_field: {"$exists": False},
+        },
+        {"$set": {due_field: run_at}},
+    )
+    if getattr(res, "modified_count", 0):
+        return run_at
+    existing = users_collection.find_one({"user_id": uid}, {due_field: 1, sent_field: 1})
+    if existing and existing.get(sent_field):
+        return None
+    return existing.get(due_field) if existing else None
+
 
 def schedule_pm1(uid: int, ref: datetime | None = None) -> datetime:
-    run_at = (ref or now_utc()) + timedelta(hours=2)
-    _schedule_job(f"pm1:{uid}", run_at, send_pm1_if_needed, uid)
-    logger.info("[PM1][SCHEDULED] uid=%s run_at=%s", uid, run_at.isoformat())
+    base = ref or now_utc()
+    delay = timedelta(minutes=2) if _onboarding_test_mode() else timedelta(hours=2)
+    run_at = base + delay
+    stored = _schedule_due_at(uid, "pm1_due_at_utc", "pm1_sent_at_utc", run_at)
+    if stored:
+        _schedule_job(f"pm1:{uid}", stored, send_pm1_if_needed, uid)
+        logger.info("[PM1][SCHEDULED] uid=%s run_at=%s", uid, stored.isoformat())
+        return stored
+    logger.info("[PM1][SCHEDULED] uid=%s run_at=existing", uid)
     return run_at
 
 
 def schedule_pm2(uid: int, ref: datetime | None = None) -> datetime:
-    delay_hours = random.uniform(8, 12)
-    run_at = (ref or now_utc()) + timedelta(hours=delay_hours)
-    _schedule_job(f"pm2:{uid}", run_at, send_pm2_if_needed, uid)
-    logger.info("[PM2][SCHEDULED] uid=%s run_at=%s", uid, run_at.isoformat())
+    base = ref or now_utc()
+    if _onboarding_test_mode():
+        run_at = base + timedelta(minutes=3)
+    else:
+        delay_hours = random.uniform(8, 12)
+        run_at = base + timedelta(hours=delay_hours)
+    stored = _schedule_due_at(uid, "pm2_due_at_utc", "pm2_sent_at_utc", run_at)
+    if stored:
+        _schedule_job(f"pm2:{uid}", stored, send_pm2_if_needed, uid)
+        logger.info("[PM2][SCHEDULED] uid=%s run_at=%s", uid, stored.isoformat())
+        return stored
+    logger.info("[PM2][SCHEDULED] uid=%s run_at=existing", uid)
     return run_at
 
 
 def schedule_pm3(uid: int, ref: datetime | None = None) -> datetime:
-    run_at = (ref or now_utc()) + timedelta(hours=24)
-    _schedule_job(f"pm3:{uid}", run_at, send_pm3_if_needed, uid)
-    logger.info("[PM3][SCHEDULED] uid=%s run_at=%s", uid, run_at.isoformat())
+    base = ref or now_utc()
+    delay = timedelta(minutes=4) if _onboarding_test_mode() else timedelta(hours=24)
+    run_at = base + delay
+    stored = _schedule_due_at(uid, "pm3_due_at_utc", "pm3_sent_at_utc", run_at)
+    if stored:
+        _schedule_job(f"pm3:{uid}", stored, send_pm3_if_needed, uid)
+        logger.info("[PM3][SCHEDULED] uid=%s run_at=%s", uid, stored.isoformat())
+        return stored
+    logger.info("[PM3][SCHEDULED] uid=%s run_at=existing", uid)
     return run_at
+
+def _acquire_onboarding_lock(ttl_seconds: int = 90) -> tuple[bool, dict | None]:
+    from main import acquire_scheduler_lock
+
+    return acquire_scheduler_lock("onboarding_due_tick", ttl_seconds=ttl_seconds)
+
+
+def onboarding_due_tick() -> None:
+    now = now_utc()
+    acquired, _lock_doc = _acquire_onboarding_lock(ttl_seconds=90)
+    if not acquired:
+        logger.info("[ONBOARD][TICK] lock_not_acquired")
+        return
+
+    def _due_filter(due_field: str, sent_field: str, disabled_field: str) -> dict:
+        return {
+            due_field: {"$lte": now},
+            sent_field: {"$exists": False},
+            disabled_field: {"$ne": True},
+            "onboarding_pm_blocked": {"$ne": True},
+        }
+
+    pm1_filter = _due_filter("pm1_due_at_utc", "pm1_sent_at_utc", "pm1_disabled")
+    pm2_filter = _due_filter("pm2_due_at_utc", "pm2_sent_at_utc", "pm2_disabled")
+    pm3_filter = _due_filter("pm3_due_at_utc", "pm3_sent_at_utc", "pm3_disabled")
+
+    pm1_due_total = users_collection.count_documents(pm1_filter)
+    pm2_due_total = users_collection.count_documents(pm2_filter)
+    pm3_due_total = users_collection.count_documents(pm3_filter)
+    due_total = pm1_due_total + pm2_due_total + pm3_due_total
+    logger.info(
+        "[ONBOARD][TICK] due_total=%s pm1=%s pm2=%s pm3=%s",
+        due_total,
+        pm1_due_total,
+        pm2_due_total,
+        pm3_due_total,
+    )
+
+    def _process_due(
+        pm_name: str,
+        due_field: str,
+        sent_field: str,
+        err_field: str,
+        err_ts_field: str,
+        disabled_field: str,
+        send_func,
+        filt: dict,
+    ) -> None:
+        docs = list(
+            users_collection.find(filt, {"user_id": 1, due_field: 1})
+            .sort(due_field, 1)
+            .limit(50)
+        )
+        for doc in docs:
+            uid = doc.get("user_id")
+            if not uid:
+                continue
+            started = time.perf_counter()
+            ok, err, skipped_reason = send_func(uid, return_error=True)
+            elapsed_ms = int((time.perf_counter() - started) * 1000)
+            if ok:
+                users_collection.update_one(
+                    {"user_id": uid},
+                    {
+                        "$set": {sent_field: now},
+                        "$unset": {err_field: "", err_ts_field: ""},
+                    },
+                )
+                logger.info(
+                    "[ONBOARD][SEND] pm=%s uid=%s ok=1 elapsed_ms=%s%s",
+                    pm_name,
+                    uid,
+                    elapsed_ms,
+                    f" skipped={skipped_reason}" if skipped_reason else "",
+                )
+                continue
+            update = {"$set": {err_field: err or "unknown_error", err_ts_field: now}}
+            if err == "bot_blocked":
+                update["$set"]["onboarding_pm_blocked"] = True
+                update["$set"][disabled_field] = True
+            users_collection.update_one({"user_id": uid}, update)
+            logger.info(
+                "[ONBOARD][SEND] pm=%s uid=%s ok=0 elapsed_ms=%s err=%s",
+                pm_name,
+                uid,
+                elapsed_ms,
+                err,
+            )
+
+    _process_due(
+        "pm1",
+        "pm1_due_at_utc",
+        "pm1_sent_at_utc",
+        "pm1_last_error",
+        "pm1_last_error_at_utc",
+        "pm1_disabled",
+        send_pm1_if_needed,
+        pm1_filter,
+    )
+    _process_due(
+        "pm2",
+        "pm2_due_at_utc",
+        "pm2_sent_at_utc",
+        "pm2_last_error",
+        "pm2_last_error_at_utc",
+        "pm2_disabled",
+        send_pm2_if_needed,
+        pm2_filter,
+    )
+    _process_due(
+        "pm3",
+        "pm3_due_at_utc",
+        "pm3_sent_at_utc",
+        "pm3_last_error",
+        "pm3_last_error_at_utc",
+        "pm3_disabled",
+        send_pm3_if_needed,
+        pm3_filter,
+    )
 
 
 def record_visible_ping(
