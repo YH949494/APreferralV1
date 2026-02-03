@@ -10,6 +10,7 @@ import hmac, hashlib, urllib.parse, os, json
 import config as _cfg 
  
 from database import db, users_collection
+from time_utils import as_aware_utc
 from onboarding import record_onboarding_start, record_visible_ping
 
 admin_cache_col = db["admin_cache"]
@@ -21,6 +22,7 @@ subscription_cache_col = db["subscription_cache"]
 welcome_eligibility_col = db["welcome_eligibility"]
 tg_verification_queue_col = db["tg_verification_queue"]
 voucher_claims_col = db["voucher_claims"]
+invite_link_map_collection = db["invite_link_map"]
 
 BYPASS_ADMIN = os.getenv("BYPASS_ADMIN", "0").lower() in ("1", "true", "yes", "on")
 HARDCODED_ADMIN_USERNAMES = {"gracy_ap", "teohyaohui"}  # allow manual overrides if cache is empty
@@ -2743,6 +2745,106 @@ def api_visible():
     except Exception:
         current_app.logger.exception("[visible] unhandled", extra={"user_id": user_id})
         raise
+
+
+@vouchers_bp.route("/v2/miniapp/referral/progress", methods=["GET"])
+def api_referral_progress():
+    init_data = extract_raw_init_data_from_query(request)
+    if not init_data:
+        return jsonify({"status": "error", "code": "missing_init_data"}), 400
+
+    ok, parsed, reason = verify_telegram_init_data(init_data)
+    ctx, admin_preview = _user_ctx_or_preview(
+        request, init_data_raw=init_data, verification=(ok, parsed, reason)
+    )
+
+    if not ok and not admin_preview:
+        return jsonify({"code": "auth_failed", "why": str(reason)}), 401
+    if not admin_preview and not ctx:
+        return jsonify({"code": "auth_failed", "why": "missing_or_invalid_init_data"}), 401
+
+    user = _ctx_to_user(ctx or {})
+    raw_user = ctx.get("user") if isinstance(ctx, dict) else None
+    if isinstance(raw_user, str):
+        try:
+            raw_user = json.loads(raw_user)
+        except Exception:
+            raw_user = {}
+    elif not isinstance(raw_user, dict):
+        raw_user = {}
+
+    uid = None
+    username_lower = user.get("usernameLower") or ""
+    if user.get("source") == "telegram":
+        user_id = (user.get("userId") or "").strip()
+        if not user_id:
+            return jsonify({"code": "auth_failed", "why": "missing_or_invalid_init_data"}), 401
+        try:
+            uid = int(raw_user.get("id") or user_id)
+        except Exception:
+            uid = None
+
+    if not uid and not username_lower:
+        return jsonify({"code": "auth_failed", "why": "missing_or_invalid_init_data"}), 401
+
+    user_doc = None
+    if uid is not None:
+        user_doc = users_collection.find_one(
+            {"user_id": uid},
+            {"total_referrals": 1, "referral_generated_at": 1, "user_id": 1},
+        )
+    if not user_doc and username_lower:
+        user_doc = users_collection.find_one(
+            {"usernameLower": username_lower},
+            {"total_referrals": 1, "referral_generated_at": 1, "user_id": 1},
+        )
+    if not user_doc and username_lower:
+        user_doc = users_collection.find_one(
+            {"username": {"$regex": f"^{username_lower}$", "$options": "i"}},
+            {"total_referrals": 1, "referral_generated_at": 1, "user_id": 1},
+        )
+
+    total_referrals = int((user_doc or {}).get("total_referrals", 0))
+    milestone_size = 3
+    progress = total_referrals % milestone_size
+    remaining = milestone_size if progress == 0 else milestone_size - progress
+    near_miss = progress == milestone_size - 1
+    progress_pct = (progress / milestone_size) * 100
+
+    inviter_id = uid if uid is not None else (user_doc or {}).get("user_id")
+    link_expires_in_seconds = None
+    latest_link_doc = None
+    if inviter_id is not None:
+        latest_link_doc = invite_link_map_collection.find_one(
+            {"inviter_id": inviter_id},
+            sort=[("created_at", -1)],
+        )
+
+    created_at = None
+    if latest_link_doc and latest_link_doc.get("created_at"):
+        created_at = latest_link_doc.get("created_at")
+    elif user_doc and user_doc.get("referral_generated_at"):
+        created_at = user_doc.get("referral_generated_at")
+
+    if created_at:
+        created_at_utc = as_aware_utc(created_at)
+        now_utc_value = as_aware_utc(now_utc())
+        if created_at_utc and now_utc_value:
+            elapsed = (now_utc_value - created_at_utc).total_seconds()
+            remaining_seconds = max(0.0, 86400 - elapsed)
+            link_expires_in_seconds = min(86400.0, remaining_seconds)  # cap at 24h
+
+    return jsonify(
+        {
+            "total_referrals": total_referrals,
+            "milestone_size": milestone_size,
+            "progress": progress,
+            "remaining": remaining,
+            "near_miss": near_miss,
+            "progress_pct": progress_pct,
+            "link_expires_in_seconds": link_expires_in_seconds,
+        }
+    ), 200
 
 class AlreadyClaimed(Exception):
     pass
