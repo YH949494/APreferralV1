@@ -19,6 +19,7 @@ from vouchers import (
     _set_session_cooldown,
     _session_cooldown_payload,
     _should_enforce_session_cooldown,
+    claim_pooled,
     get_claimable_pools,
     get_visible_pools,
 )
@@ -128,6 +129,95 @@ class FakeRequest:
         self.headers = headers or {}
         self.remote_addr = remote_addr
 
+
+class FakeUpdateResult:
+    def __init__(self, modified_count):
+        self.modified_count = modified_count
+
+
+class FakeVouchersCollection:
+    def __init__(self, docs=None):
+        self.docs = []
+        for idx, doc in enumerate(docs or [], start=1):
+            item = dict(doc)
+            item.setdefault("_id", idx)
+            self.docs.append(item)
+
+    def _match(self, doc, filt):
+        for key, value in filt.items():
+            if key == "$or":
+                if not any(self._match(doc, sub) for sub in value):
+                    return False
+                continue
+            if isinstance(value, dict) and "$in" in value:
+                if doc.get(key) not in value["$in"]:
+                    return False
+                continue
+            if isinstance(value, dict) and "$exists" in value:
+                exists = key in doc
+                if value["$exists"] != exists:
+                    return False
+                continue
+            if doc.get(key) != value:
+                return False
+        return True
+
+    def find_one(self, filt):
+        for doc in self.docs:
+            if self._match(doc, filt):
+                return dict(doc)
+        return None
+
+    def find_one_and_update(self, filt, update, sort=None, return_document=None):  # noqa: ARG002
+        for doc in self.docs:
+            if self._match(doc, filt):
+                for key, value in update.get("$set", {}).items():
+                    doc[key] = value
+                return dict(doc)
+        return None
+
+    def update_one(self, filt, update):
+        for doc in self.docs:
+            if self._match(doc, filt):
+                for key, value in update.get("$set", {}).items():
+                    doc[key] = value
+                for key in update.get("$unset", {}).keys():
+                    doc.pop(key, None)
+                return
+
+
+class FakeDropsCollection:
+    def __init__(self, docs=None):
+        self.docs = {doc["_id"]: dict(doc) for doc in (docs or [])}
+
+    def find_one(self, filt, projection=None):
+        doc = self.docs.get(filt.get("_id"))
+        if not doc:
+            return {}
+        if projection:
+            return {key: doc.get(key) for key in projection.keys()}
+        return dict(doc)
+
+    def update_one(self, filt, update):
+        doc = self.docs.get(filt.get("_id"))
+        if not doc:
+            return FakeUpdateResult(0)
+        for key, value in filt.items():
+            if key == "_id":
+                continue
+            if isinstance(value, dict) and "$gt" in value:
+                if not doc.get(key, 0) > value["$gt"]:
+                    return FakeUpdateResult(0)
+        for key, value in update.get("$inc", {}).items():
+            doc[key] = doc.get(key, 0) + value
+        return FakeUpdateResult(1)
+
+
+class FakeDb:
+    def __init__(self, drops, vouchers):
+        self.drops = FakeDropsCollection(drops)
+        self.vouchers = FakeVouchersCollection(vouchers)
+        
 class VoucherAntiHunterTests(unittest.TestCase):
     def test_get_client_ip_prefers_fly_header_over_private_remote_addr(self):
         req = FakeRequest(
@@ -225,7 +315,82 @@ class VoucherAntiHunterTests(unittest.TestCase):
         drop = {"public_remaining": 10, "my_remaining": 20}
         self.assertEqual(get_claimable_pools("th", drop), ["public"])
         self.assertEqual(get_claimable_pools("malaysia", drop), ["my", "public"])
-        
+
+
+    def test_claimable_remaining_blocks_non_my_when_public_empty(self):
+        drop = {"public_remaining": 0, "my_remaining": 2}
+        self.assertEqual(_compute_claimable_remaining("th", drop), 0)
+        self.assertEqual(_compute_claimable_remaining("MY", drop), 2)
+
+    def test_claim_pooled_prefers_my_pool_then_public(self):
+        import vouchers as vouchers_module
+
+        now = datetime.now(timezone.utc)
+        fake_db = FakeDb(
+            drops=[{"_id": "drop-1", "my_remaining": 1, "public_remaining": 1}],
+            vouchers=[
+                {
+                    "type": "pooled",
+                    "dropId": "drop-1",
+                    "code": "MYCODE",
+                    "status": "free",
+                    "pool": "my",
+                },
+                {
+                    "type": "pooled",
+                    "dropId": "drop-1",
+                    "code": "PUBCODE",
+                    "status": "free",
+                    "pool": "public",
+                },
+            ],
+        )
+        original_db = vouchers_module.db
+        vouchers_module.db = fake_db
+        try:
+            first = claim_pooled(drop_id="drop-1", claim_key="uid:1", ref=now, pools=["my", "public"])
+            self.assertEqual(first["code"], "MYCODE")
+            self.assertEqual(fake_db.drops.docs["drop-1"]["my_remaining"], 0)
+
+            second = claim_pooled(drop_id="drop-1", claim_key="uid:2", ref=now, pools=["my", "public"])
+            self.assertEqual(second["code"], "PUBCODE")
+            self.assertEqual(fake_db.drops.docs["drop-1"]["public_remaining"], 0)
+        finally:
+            vouchers_module.db = original_db
+
+    def test_claim_pooled_non_my_uses_public_only(self):
+        import vouchers as vouchers_module
+
+        now = datetime.now(timezone.utc)
+        fake_db = FakeDb(
+            drops=[{"_id": "drop-2", "my_remaining": 1, "public_remaining": 1}],
+            vouchers=[
+                {
+                    "type": "pooled",
+                    "dropId": "drop-2",
+                    "code": "MYCODE2",
+                    "status": "free",
+                    "pool": "my",
+                },
+                {
+                    "type": "pooled",
+                    "dropId": "drop-2",
+                    "code": "PUBCODE2",
+                    "status": "free",
+                    "pool": "public",
+                },
+            ],
+        )
+        original_db = vouchers_module.db
+        vouchers_module.db = fake_db
+        try:
+            res = claim_pooled(drop_id="drop-2", claim_key="uid:9", ref=now, pools=["public"])
+            self.assertEqual(res["code"], "PUBCODE2")
+            self.assertEqual(fake_db.drops.docs["drop-2"]["public_remaining"], 0)
+            self.assertEqual(fake_db.drops.docs["drop-2"]["my_remaining"], 1)
+        finally:
+            vouchers_module.db = original_db
+            
     def test_kill_switch_blocks_after_threshold(self):
         rate_limits = FakeRateLimitCollection()
         now = datetime.now(timezone.utc)
