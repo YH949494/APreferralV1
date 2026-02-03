@@ -7,7 +7,7 @@ import time
 from typing import Any
 
 import httpx
-from telegram.error import BadRequest, NetworkError
+from telegram.error import BadRequest, Forbidden, NetworkError
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +46,7 @@ async def safe_reply_text(message, text: str, **kwargs) -> bool:
     backoffs = tuple(kwargs.pop("backoffs", (0.5, 1.0, 2.0)))
     jitter = float(kwargs.pop("jitter", 0.1))
     raise_on_non_transient = bool(kwargs.pop("raise_on_non_transient", False))
+    return_error = bool(kwargs.pop("return_error", False))    
     fallback_on_bad_request = bool(kwargs.pop("fallback_on_bad_request", True))
     log = kwargs.pop("logger", logger)
 
@@ -69,7 +70,7 @@ async def safe_reply_text(message, text: str, **kwargs) -> bool:
                 send_type,
                 elapsed_ms,
             )
-            return True
+            return (True, None) if return_error else True
         except BadRequest as exc:
             if fallback_on_bad_request and "reply_markup" in kwargs:
                 log.warning(
@@ -94,6 +95,9 @@ async def safe_reply_text(message, text: str, **kwargs) -> bool:
             )
             if raise_on_non_transient:
                 raise
+            if return_error:
+                err = "bot_blocked" if _is_bot_blocked_error(exc) else f"{exc.__class__.__name__}: {exc}"
+                return False, err                
             return False
         except TRANSIENT_EXCEPTIONS as exc:
             if attempt >= attempts:
@@ -105,6 +109,8 @@ async def safe_reply_text(message, text: str, **kwargs) -> bool:
                     attempt,
                     exc,
                 )
+                if return_error:
+                    return False, f"{exc.__class__.__name__}: {exc}"                
                 return False
             next_attempt = attempt + 1
             log.warning(
@@ -130,11 +136,22 @@ async def safe_reply_text(message, text: str, **kwargs) -> bool:
             )
             if raise_on_non_transient:
                 raise
+            if return_error:
+                return False, f"{exc.__class__.__name__}: {exc}"                
             return False
     return False
 
 
-async def safe_send_message(bot, chat_id: int, text: str, **kwargs) -> bool:
+def _is_bot_blocked_error(exc: Exception) -> bool:
+    if isinstance(exc, Forbidden):
+        return True
+    message = str(exc).lower()
+    return "bot was blocked" in message or "forbidden" in message
+
+
+async def safe_send_message(
+    bot, chat_id: int, text: str, **kwargs
+) -> bool | tuple[bool, str | None]:
     """Safely send a message with retries for transient Telegram/httpx errors."""
     uid = kwargs.pop("uid", None) or chat_id
     send_type = kwargs.pop("send_type", "unknown")
@@ -142,6 +159,7 @@ async def safe_send_message(bot, chat_id: int, text: str, **kwargs) -> bool:
     backoffs = tuple(kwargs.pop("backoffs", (0.5, 1.0, 2.0)))
     jitter = float(kwargs.pop("jitter", 0.1))
     raise_on_non_transient = bool(kwargs.pop("raise_on_non_transient", False))
+    return_error = bool(kwargs.pop("return_error", False))    
     fallback_on_bad_request = bool(kwargs.pop("fallback_on_bad_request", True))
     log = kwargs.pop("logger", logger)
 
@@ -165,7 +183,7 @@ async def safe_send_message(bot, chat_id: int, text: str, **kwargs) -> bool:
                 send_type,
                 elapsed_ms,
             )
-            return True
+            return (True, None) if return_error else True
         except BadRequest as exc:
             if fallback_on_bad_request and "reply_markup" in kwargs:
                 log.warning(
@@ -190,6 +208,9 @@ async def safe_send_message(bot, chat_id: int, text: str, **kwargs) -> bool:
             )
             if raise_on_non_transient:
                 raise
+            if return_error:
+                err = "bot_blocked" if _is_bot_blocked_error(exc) else f"{exc.__class__.__name__}: {exc}"
+                return False, err                
             return False
         except TRANSIENT_EXCEPTIONS as exc:
             if attempt >= attempts:
@@ -201,6 +222,8 @@ async def safe_send_message(bot, chat_id: int, text: str, **kwargs) -> bool:
                     attempt,
                     exc,
                 )
+                if return_error:
+                    return False, f"{exc.__class__.__name__}: {exc}"                
                 return False
             next_attempt = attempt + 1
             log.warning(
@@ -226,5 +249,10 @@ async def safe_send_message(bot, chat_id: int, text: str, **kwargs) -> bool:
             )
             if raise_on_non_transient:
                 raise
+            if return_error:
+                err = "bot_blocked" if _is_bot_blocked_error(exc) else f"{exc.__class__.__name__}: {exc}"
+                return False, err
+            if return_error:
+                return False, f"{exc.__class__.__name__}: {exc}"                
             return False
-    return False
+    return (False, "unknown_failure") if return_error else False
