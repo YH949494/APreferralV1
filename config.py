@@ -15,6 +15,9 @@ STREAK_MILESTONES = {
     7: 50,
     14: 150,
     28: 300,
+    56: 600,
+    84: 900,
+    112: 1200,    
 }
 
 # Announcement milestone buckets
