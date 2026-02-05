@@ -1237,6 +1237,31 @@
       }
     }
 
+    function ensureDropIdBlock(copyBtn, dropId) {
+      if (!copyBtn) return;
+      let container = copyBtn.nextElementSibling;
+      if (container && container.classList && container.classList.contains("code") && !container.classList.contains("code-block")) {
+        container.remove();
+        container = copyBtn.nextElementSibling;
+      }
+      if (!container || !container.classList?.contains("code-block")) {
+        container = document.createElement("div");
+        container.className = "code-block";
+        container.innerHTML = `<div class="code-text"></div><button type="button" class="copy-code-btn">Copy Drop ID</button>`;
+        copyBtn.insertAdjacentElement("afterend", container);
+      }
+
+      container.dataset.code = dropId;
+      const textEl = container.querySelector(".code-text");
+      if (textEl) textEl.textContent = dropId;
+
+      const inlineCopyBtn = container.querySelector(".copy-code-btn");
+      if (inlineCopyBtn) {
+        inlineCopyBtn.dataset.copyCode = dropId;
+        inlineCopyBtn.textContent = "Copy Drop ID";
+      }
+    }
+    
     function fmtKL(iso) {
       if (!iso) return "";
       try {
@@ -2516,19 +2541,35 @@ Some people get lucky.👇
       const dropId = (btn.dataset.dropid || "").trim();
       if (!dropId) return alert("No dropId found.");
 
+      const originalText = btn.textContent;      
       try {
+        if (!navigator?.clipboard?.writeText) {
+          throw new Error("Clipboard API unavailable");
+        }        
         await navigator.clipboard.writeText(dropId);
         btn.textContent = "✅ Copied";
-        setTimeout(() => (btn.textContent = "📋 Copy ID"), 1200);
-      } catch {
-        const ta = document.createElement("textarea");
-        ta.value = dropId;
-        document.body.appendChild(ta);
-        ta.select();
-        document.execCommand("copy");
-        document.body.removeChild(ta);
-        btn.textContent = "✅ Copied";
-        setTimeout(() => (btn.textContent = "📋 Copy ID"), 1200);
+        setTimeout(() => (btn.textContent = originalText), 1200);
+        return;
+      } catch (err) {
+        let execSuccess = false;
+        try {
+          const ta = document.createElement("textarea");
+          ta.value = dropId;
+          document.body.appendChild(ta);
+          ta.select();
+          execSuccess = document.execCommand("copy");
+          document.body.removeChild(ta);
+        } catch (execErr) {
+          execSuccess = false;
+        }
+
+        if (execSuccess) {
+          btn.textContent = "✅ Copied";
+          setTimeout(() => (btn.textContent = originalText), 1200);
+          return;
+        }
+
+        ensureDropIdBlock(btn, dropId);
       }
     });
 
