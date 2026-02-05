@@ -1212,7 +1212,7 @@
         .replace(/'/g, "&#39;");
     }
 
-    function ensureCodeBlock(claimBtn, codeText) {
+    function ensureCodeBlock(claimBtn, codeText, copyLabel) {
       if (!claimBtn) return;
       let container = claimBtn.nextElementSibling;
       if (container && container.classList && container.classList.contains("code") && !container.classList.contains("code-block")) {
@@ -1233,7 +1233,7 @@
       const copyBtn = container.querySelector(".copy-code-btn");
       if (copyBtn) {
         copyBtn.dataset.copyCode = codeText;
-        copyBtn.textContent = "Copy to clipboard";
+        copyBtn.textContent = copyLabel || "Copy to clipboard";
       }
     }
 
@@ -2569,7 +2569,7 @@ Some people get lucky.👇
           return;
         }
 
-        ensureDropIdBlock(btn, dropId);
+        ensureCodeBlock(btn, dropId, "Copy Drop ID");
       }
     });
 
