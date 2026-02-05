@@ -2521,15 +2521,26 @@ Some people get lucky.👇
         btn.textContent = "✅ Copied";
         setTimeout(() => (btn.textContent = "📋 Copy ID"), 1200);
       } catch {
-        const ta = document.createElement("textarea");
-        ta.value = dropId;
-        document.body.appendChild(ta);
-        ta.select();
-        document.execCommand("copy");
-        document.body.removeChild(ta);
-        btn.textContent = "✅ Copied";
-        setTimeout(() => (btn.textContent = "📋 Copy ID"), 1200);
-      }
+     // Clipboard may be blocked (e.g., Telegram WebView). Try execCommand, then show inline block.
+     try {
+       const ta = document.createElement("textarea");
+       ta.value = dropId;
+       document.body.appendChild(ta);
+       ta.select();
+       document.execCommand("copy");
+       document.body.removeChild(ta);
+       btn.textContent = "✅ Copied";
+       setTimeout(() => (btn.textContent = "📋 Copy ID"), 1200);
+     } catch {
+       // Last resort: show a copy block with the dropId for manual copy.
+       ensureCodeBlock(btn, dropId);
+       const container = btn.nextElementSibling;
+       const copyBtn = container?.querySelector?.(".copy-code-btn");
+       if (copyBtn) {
+         copyBtn.dataset.copyCode = dropId;
+         copyBtn.textContent = "Copy Drop ID";
+       }
+     }
     });
 
     document.addEventListener("click", async (e) => {
