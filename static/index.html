@@ -522,6 +522,39 @@
         font-size: 12px;
       }
     }
+
+    @media (max-width: 520px) {
+      .podium {
+        flex-wrap: nowrap;
+        gap: 6px;
+      }
+
+      .podium-card {
+        flex: 1;
+        min-width: 0;
+        padding: 8px 6px;
+      }
+
+      .podium-card .podium-rank {
+        font-size: 11px;
+      }
+
+      .podium-card .podium-name {
+        font-size: 13px;
+      }
+
+      .podium-card .podium-score {
+        font-size: 13px;
+      }
+
+      .podium-card .podium-label {
+        font-size: 10px;
+      }
+
+      .podium-1 {
+        transform: scale(1.01);
+      }
+    }    
   </style>
 </head>
 <body>
