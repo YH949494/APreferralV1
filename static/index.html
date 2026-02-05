@@ -636,6 +636,12 @@
                   <option value="pooled">Pooled</option>
                 </select>
               </label>
+              <label id="adm_create_pool_label" style="flex:1 1 160px; font-size:12px; color:#555; display:none;">Pool
+                <select id="adm_create_pool" style="width:100%; padding:8px; border-radius:6px; border:1px solid #ccc;">
+                  <option value="public">Public</option>
+                  <option value="my">MY Reserve</option>
+                </select>
+              </label>              
             </div>
 
             <div style="margin-top:10px; display:flex; flex-wrap:wrap; gap:10px;">
@@ -1218,13 +1224,19 @@
 
     const admTypeEl = document.getElementById("adm_type");
     if (admTypeEl) {
+      const updateAdmCreatePoolVisibility = (mode) => {
+        const poolLabel = document.getElementById("adm_create_pool_label");
+        if (poolLabel) poolLabel.style.display = mode === "pooled" ? "flex" : "none";
+      };      
       admTypeEl.addEventListener("change", (e) => {
         const mode = e.target.value;
         const personalised = document.getElementById("adm_personalised");
         const pooled = document.getElementById("adm_pooled");
         if (personalised) personalised.style.display = mode === "personalised" ? "block" : "none";
         if (pooled) pooled.style.display = mode === "pooled" ? "block" : "none";
+        updateAdmCreatePoolVisibility(mode);        
       });
+      updateAdmCreatePoolVisibility(admTypeEl.value);      
     }
 
     async function adm_list() {
@@ -1363,6 +1375,7 @@
           .split(/\r?\n/).map(x => x.trim()).filter(Boolean);
         if (!codes.length) { alert("Please provide codes."); return; }
         payload.codes = codes;
+        payload.pool = document.querySelector("#adm_create_pool")?.value || "public";        
         const wl = splitList(document.querySelector("#adm_wl_text").value);
         if (wl.length) payload.whitelistUsernames = wl;
       }
