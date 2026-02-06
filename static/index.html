@@ -1332,7 +1332,7 @@
               <button data-op="start_now" data-id="${id}">Start</button>
               <button data-op="pause"     data-id="${id}">Pause</button>
               <button data-op="end_now"   data-id="${id}">End</button>
-              <button class="copy-drop-id-btn" data-dropid="${id}">📋 Copy ID</button>
+              <button type="button" class="btn btn-secondary copy-drop-id-btn" data-dropid="${id}">📋 Copy ID</button>
             </td>`;
           tbody.appendChild(tr);
         });
@@ -2536,7 +2536,7 @@ Some people get lucky.👇
       if (!btn) return;
 
       e.preventDefault();
-      e.stopPropagation();
+      e.stopImmediatePropagation();
 
       const dropId = (btn.dataset.dropid || "").trim();
       if (!dropId) return alert("No dropId found.");
@@ -2576,7 +2576,8 @@ Some people get lucky.👇
     document.addEventListener("click", async (e) => {
       const copyBtn = e.target.closest("button[data-copy-code]");
       if (!copyBtn) return;
-
+      if (copyBtn.classList.contains("copy-drop-id-btn")) return;
+      
       const code = copyBtn.getAttribute("data-copy-code")
         || copyBtn.parentElement?.dataset?.code
         || "";
