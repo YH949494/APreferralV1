@@ -8,6 +8,7 @@
   <script>
     window.UI_VERSION = new URLSearchParams(window.location.search).get("v") || "unknown";
     console.info("UI_VERSION", window.UI_VERSION);
+    console.info("[MINIAPP] loaded static/index.html v=" + (new URLSearchParams(location.search).get("v")||""));    
   </script>  
   <style>
     :root {
@@ -1332,7 +1333,7 @@
               <button data-op="start_now" data-id="${id}">Start</button>
               <button data-op="pause"     data-id="${id}">Pause</button>
               <button data-op="end_now"   data-id="${id}">End</button>
-              <button type="button" class="btn btn-secondary copy-drop-id-btn" data-dropid="${id}">📋 Copy ID</button>
+              <button type="button" class="btn btn-secondary copy-drop-id-btn" data-copy-dropid="${id}">📋 Copy ID</button>
             </td>`;
           tbody.appendChild(tr);
         });
@@ -2428,6 +2429,7 @@ Some people get lucky.👇
     });
 
     document.addEventListener("click", async (e) => {
+      if (e.target.closest(".copy-drop-id-btn")) return;      
       const claimBtn = e.target.closest("button[data-dropid],button[data-claim]");
       if (!claimBtn) return;
 
@@ -2538,7 +2540,7 @@ Some people get lucky.👇
       e.preventDefault();
       e.stopImmediatePropagation();
 
-      const dropId = (btn.dataset.dropid || "").trim();
+      const dropId = (btn.dataset.copyDropid || btn.getAttribute("data-copy-dropid") || btn.dataset.dropid || "").trim();
       if (!dropId) return alert("No dropId found.");
 
       const originalText = btn.textContent;      
