@@ -2574,12 +2574,12 @@ Some people get lucky.👇
     });
 
     document.addEventListener("click", async (e) => {
+      if (e.target.closest(".copy-drop-id-btn")) return;      
       const copyBtn = e.target.closest("button[data-copy-code]");
       if (!copyBtn) return;
       if (copyBtn.classList.contains("copy-drop-id-btn")) return;
       
       const code = copyBtn.getAttribute("data-copy-code")
-        || copyBtn.parentElement?.dataset?.code
         || "";
 
       if (!code || code === "(no code)") {
