@@ -48,7 +48,7 @@ from scheduler import (
 from telegram_utils import safe_reply_text
 
 from pymongo import DESCENDING, ASCENDING, ReturnDocument  # keep if used elsewhere
-from pymongo.errors import DuplicateKeyError, CursorNotFound
+from pymongo.errors import DuplicateKeyError, CursorNotFound, OperationFailure
 import os, asyncio, traceback, csv, io, requests, logging, time, uuid, socket
 import pytz
 from database import init_db, db, normalize_affiliate_status, normalize_affiliate_role
@@ -1259,58 +1259,66 @@ def ensure_indexes():
 
 
     try:
-        for legacy_name in ("uniq_tg_verify_user_id", "uniq_user_checks"):
-            try:
-                tg_verification_queue_collection.drop_index(legacy_name)
-            except Exception:
-                pass
-        # Dedupe before creating unique index to avoid startup failures on existing data.
-        tg_verification_queue_collection.update_many(
-            {"user_id": None},
-            {"$unset": {"user_id": ""}},
-        )
-        dup_groups = tg_verification_queue_collection.aggregate(
-            [
-                {"$match": {"user_id": {"$exists": True}}},
-                {
-                    "$group": {
-                        "_id": "$user_id",
-                        "ids": {"$push": "$_id"},
-                        "n": {"$sum": 1},
-                    }
-                },
-                {"$match": {"n": {"$gt": 1}}},
-            ]
-        )
-        removed = 0
-        for group in dup_groups:
-            ids = group.get("ids", [])
-            if not ids:
-                continue
-            docs = list(
-                tg_verification_queue_collection.find(
-                    {"_id": {"$in": ids}},
-                    {"_id": 1, "created_at": 1},
-                )
+        try:
+            for legacy_name in ("uniq_tg_verify_user_id", "uniq_user_checks"):
+                try:
+                    tg_verification_queue_collection.drop_index(legacy_name)
+                except Exception:
+                    pass
+            # Dedupe before creating unique index to avoid startup failures on existing data.
+            tg_verification_queue_collection.update_many(
+                {"user_id": None},
+                {"$unset": {"user_id": ""}},
             )
-            keep_id = None
-            if any(doc.get("created_at") is not None for doc in docs):
-                keep_id = max(
-                    docs,
-                    key=lambda doc: (doc.get("created_at"), doc.get("_id")),
-                )["_id"]
-            else:
-                keep_id = ids[-1]
-            ids_to_delete = [doc_id for doc_id in ids if doc_id != keep_id]
-            if ids_to_delete:
-                tg_verification_queue_collection.delete_many(
-                    {"_id": {"$in": ids_to_delete}}
+            dup_groups = tg_verification_queue_collection.aggregate(
+                [
+                    {"$match": {"user_id": {"$exists": True}}},
+                    {
+                        "$group": {
+                            "_id": "$user_id",
+                            "ids": {"$push": "$_id"},
+                            "n": {"$sum": 1},
+                        }
+                    },
+                    {"$match": {"n": {"$gt": 1}}},
+                ]
+            )
+            removed = 0
+            for group in dup_groups:
+                user_id = group.get("_id")
+                if user_id is None:
+                    continue
+                docs = list(
+                    tg_verification_queue_collection.find(
+                        {"user_id": user_id},
+                        {"_id": 1, "created_at": 1},
+                    )
                 )
-                removed += len(ids_to_delete)
-        if removed:
-            logger.info(
-                "[VERIFY_QUEUE] deduped %s duplicate tg_verification_queue docs",
-                removed,
+                if not docs:
+                    continue
+                def sort_key(doc):
+                    ca = doc.get("created_at")
+                    if ca is None:
+                        return (0, doc["_id"])
+                    return (1, ca)
+                keep_doc = max(docs, key=sort_key)
+                keep_id = keep_doc["_id"]
+                ids_to_delete = [doc["_id"] for doc in docs if doc["_id"] != keep_id]
+                if ids_to_delete:
+                    tg_verification_queue_collection.delete_many(
+                        {"_id": {"$in": ids_to_delete}}
+                    )
+                    removed += len(ids_to_delete)
+            if removed:
+                logger.info(
+                    "[VERIFY_QUEUE] deduped %s duplicate tg_verification_queue docs",
+                    removed,
+                )
+        except Exception as e:
+            logger.warning(
+                "[VERIFY_QUEUE] dedupe skipped due to error: %s",
+                e,
+                exc_info=True,
             )
         try:
             tg_verification_queue_collection.drop_index("uq_tg_verif_user_id_nonnull")
