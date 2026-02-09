@@ -15,6 +15,20 @@ _client = None
 _db = None
 _indexes_initialized = False
 
+AFFILIATE_STATUS_VALUES = {"none", "pending", "active", "suspended"}
+AFFILIATE_ROLE_VALUES = {"member", "affiliate"}
+
+
+def normalize_affiliate_status(value: str | None) -> str:
+    if value in AFFILIATE_STATUS_VALUES:
+        return value
+    return "none"
+
+
+def normalize_affiliate_role(value: str | None) -> str:
+    if value in AFFILIATE_ROLE_VALUES:
+        return value
+    return "member"
 
 class CollectionProxy:
     def __init__(self, name: str):
@@ -83,6 +97,8 @@ def ensure_indexes() -> None:
     db_ref["channel_subscription_cache"].create_index([("user_id", ASCENDING)], unique=True)
     db_ref["channel_subscription_cache"].create_index([("expires_at", ASCENDING)], expireAfterSeconds=0)
 
+    db_ref["events"].create_index([("uid", ASCENDING), ("type", ASCENDING), ("ts", ASCENDING)])
+    
     try:
         db_ref["admin_xp_cooldowns"].create_index([("expireAt", ASCENDING)], expireAfterSeconds=0)
     except Exception:
@@ -127,7 +143,15 @@ def init_user(user_id, username):
                 "last_checkin": None,                
                 "status": "Normal",       # or "VIP1"
                 "next_status": "VIP1",    # scheduled for next month
-                "last_status_update": "2025-08-01"
+                "last_status_update": "2025-08-01",
+                "role": "member",
+                "affiliate_status": "none",
+                "affiliate_since": None,
+                "kpi_l2_30d": 0,
+                "kpi_l3_30d": 0,
+                "flags": [],
+                "level": 1,
+                "level3_granted": False,
             }
         },
         upsert=True
