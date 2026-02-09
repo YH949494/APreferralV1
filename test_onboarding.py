@@ -324,6 +324,18 @@ class OnboardingTests(unittest.TestCase):
         trigger = self.scheduler.jobs[f"pm2:{uid}"]["trigger"]
         self.assertEqual(trigger.run_date, fixed_now + timedelta(hours=8.5))
 
+    def test_first_checkin_sets_mywin_due_at_in_test_mode(self):
+        uid = 457
+        self.users.insert_one({"user_id": uid})
+        fixed_now = datetime(2024, 1, 2, tzinfo=timezone.utc)
+        with patch.dict(os.environ, {"ONBOARDING_TEST_MODE": "1"}), patch.object(
+            onboarding, "now_utc", return_value=fixed_now
+        ):
+            record_first_checkin(uid)
+        user_doc = self.users.find_one({"user_id": uid})
+        self.assertEqual(user_doc.get("mywin7_due_at_utc"), fixed_now + timedelta(minutes=7))
+        self.assertEqual(user_doc.get("mywin14_due_at_utc"), fixed_now + timedelta(minutes=14))
+        
     def test_e3_record_first_mywin(self):
         uid = 789
         self.users.insert_one({"user_id": uid})
@@ -367,7 +379,35 @@ class OnboardingTests(unittest.TestCase):
         user_doc = self.users.find_one({"user_id": uid})
         self.assertEqual(user_doc.get("pm1_sent_at_utc"), fixed_now)
         self.assertNotIn("pm1_last_error", user_doc)
-    
+
+
+    def test_onboarding_due_tick_marks_mywin7_sent(self):
+        uid = 223
+        fixed_now = datetime(2024, 2, 2, tzinfo=timezone.utc)
+        self.users.insert_one(
+            {
+                "user_id": uid,
+                "mywin7_due_at_utc": fixed_now - timedelta(minutes=1),
+            }
+        )
+        with (
+            patch.object(onboarding, "now_utc", return_value=fixed_now),
+            patch.object(onboarding, "_acquire_onboarding_lock", return_value=(True, None)),
+            patch.object(onboarding, "send_mywin7_if_needed", return_value=(True, None, None)),
+        ):
+            onboarding.onboarding_due_tick()
+        user_doc = self.users.find_one({"user_id": uid})
+        self.assertEqual(user_doc.get("mywin7_sent_at_utc"), fixed_now)
+
+    def test_send_mywin7_skips_if_already_mywin(self):
+        uid = 224
+        fixed_now = datetime(2024, 2, 2, tzinfo=timezone.utc)
+        self.users.insert_one({"user_id": uid, "first_mywin_at": fixed_now})
+        ok, err, skipped = onboarding.send_mywin7_if_needed(uid, return_error=True)
+        self.assertTrue(ok)
+        self.assertIsNone(err)
+        self.assertEqual(skipped, "already_mywin")
+        
     def test_e3_handler_filters(self):
         called = []
 
