@@ -44,7 +44,10 @@ PM4_TEXT = (
     "You’re now part of our core members.\n"
     "This is where better access and opportunities begin."
 )
-
+MYWIN_REMINDER_TEXT = (
+    "Post your first #mywin to keep moving forward.\n\n"
+    "A screenshot in #mywin is enough."
+)
 
 def now_utc() -> datetime:
     return datetime.now(timezone.utc)
@@ -269,6 +272,144 @@ def send_pm3_if_needed(
         logger.warning("[PM3][SEND_FAILED] uid=%s", uid)
         return (False, err, None) if return_error else False
 
+def send_mywin7_if_needed(
+    uid: int,
+    *,
+    return_error: bool = False,
+) -> bool | tuple[bool, str | None, str | None]:
+    user = users_collection.find_one(
+        {"user_id": uid},
+        {
+            "first_mywin_at": 1,
+            "mywin7_sent_at_utc": 1,
+            "mywin7_disabled": 1,
+            "vip_tier": 1,
+            "status": 1,
+            "onboarding_pm_blocked": 1,
+        },
+    )
+    if not user:
+        logger.info("[MYWIN7][SKIP] uid=%s reason=missing_user", uid)
+        return (True, None, "missing_user") if return_error else False
+    if user.get("first_mywin_at"):
+        logger.info("[MYWIN7][SKIP] uid=%s reason=already_mywin", uid)
+        return (True, None, "already_mywin") if return_error else False
+    if user.get("mywin7_sent_at_utc"):
+        logger.info("[MYWIN7][SKIP] uid=%s reason=already_sent", uid)
+        return (True, None, "already_sent") if return_error else False
+    if user.get("mywin7_disabled"):
+        logger.info("[MYWIN7][SKIP] uid=%s reason=disabled", uid)
+        return (True, None, "disabled") if return_error else False
+    if user.get("onboarding_pm_blocked"):
+        logger.info("[MYWIN7][SKIP] uid=%s reason=blocked", uid)
+        return (True, None, "blocked") if return_error else False
+    if _is_vip1(user):
+        logger.info("[MYWIN7][SKIP] uid=%s reason=already_vip", uid)
+        return (True, None, "already_vip") if return_error else False
+    keyboard = InlineKeyboardMarkup(
+        [[InlineKeyboardButton("Open #mywin", url=MYWIN_INVITE_LINK)]]
+    )
+    bot = get_bot()
+    if bot:
+        try:
+            ok, err = run_bot_coroutine(
+                safe_send_message(
+                    bot,
+                    chat_id=uid,
+                    text=MYWIN_REMINDER_TEXT,
+                    reply_markup=keyboard,
+                    uid=uid,
+                    send_type="mywin7",
+                    raise_on_non_transient=False,
+                    return_error=True,
+                ),
+                timeout=70,
+            )
+        except RuntimeError as exc:
+            if "Bot loop not running yet" not in str(exc):
+                raise
+            ok, err, blocked = send_telegram_http_message(uid, MYWIN_REMINDER_TEXT)
+            if blocked:
+                err = "bot_blocked"
+    else:
+        ok, err, blocked = send_telegram_http_message(uid, MYWIN_REMINDER_TEXT)
+        if blocked:
+            err = "bot_blocked"
+    if ok:
+        logger.info("[MYWIN7][SENT] uid=%s", uid)
+        return (True, None, None) if return_error else True
+    logger.warning("[MYWIN7][SEND_FAILED] uid=%s", uid)
+    return (False, err, None) if return_error else False
+
+def send_mywin14_if_needed(
+    uid: int,
+    *,
+    return_error: bool = False,
+) -> bool | tuple[bool, str | None, str | None]:
+    user = users_collection.find_one(
+        {"user_id": uid},
+        {
+            "first_mywin_at": 1,
+            "mywin14_sent_at_utc": 1,
+            "mywin14_disabled": 1,
+            "vip_tier": 1,
+            "status": 1,
+            "onboarding_pm_blocked": 1,
+        },
+    )
+    if not user:
+        logger.info("[MYWIN14][SKIP] uid=%s reason=missing_user", uid)
+        return (True, None, "missing_user") if return_error else False
+    if user.get("first_mywin_at"):
+        logger.info("[MYWIN14][SKIP] uid=%s reason=already_mywin", uid)
+        return (True, None, "already_mywin") if return_error else False
+    if user.get("mywin14_sent_at_utc"):
+        logger.info("[MYWIN14][SKIP] uid=%s reason=already_sent", uid)
+        return (True, None, "already_sent") if return_error else False
+    if user.get("mywin14_disabled"):
+        logger.info("[MYWIN14][SKIP] uid=%s reason=disabled", uid)
+        return (True, None, "disabled") if return_error else False
+    if user.get("onboarding_pm_blocked"):
+        logger.info("[MYWIN14][SKIP] uid=%s reason=blocked", uid)
+        return (True, None, "blocked") if return_error else False
+    if _is_vip1(user):
+        logger.info("[MYWIN14][SKIP] uid=%s reason=already_vip", uid)
+        return (True, None, "already_vip") if return_error else False
+    keyboard = InlineKeyboardMarkup(
+        [[InlineKeyboardButton("Open #mywin", url=MYWIN_INVITE_LINK)]]
+    )
+    bot = get_bot()
+    if bot:
+        try:
+            ok, err = run_bot_coroutine(
+                safe_send_message(
+                    bot,
+                    chat_id=uid,
+                    text=MYWIN_REMINDER_TEXT,
+                    reply_markup=keyboard,
+                    uid=uid,
+                    send_type="mywin14",
+                    raise_on_non_transient=False,
+                    return_error=True,
+                ),
+                timeout=70,
+            )
+        except RuntimeError as exc:
+            if "Bot loop not running yet" not in str(exc):
+                raise
+            ok, err, blocked = send_telegram_http_message(uid, MYWIN_REMINDER_TEXT)
+            if blocked:
+                err = "bot_blocked"
+    else:
+        ok, err, blocked = send_telegram_http_message(uid, MYWIN_REMINDER_TEXT)
+        if blocked:
+            err = "bot_blocked"
+    if ok:
+        logger.info("[MYWIN14][SENT] uid=%s", uid)
+        return (True, None, None) if return_error else True
+    logger.warning("[MYWIN14][SEND_FAILED] uid=%s", uid)
+    return (False, err, None) if return_error else False
+
 def send_pm4_if_needed(uid: int) -> None:
     user = users_collection.find_one(
         {"user_id": uid},
@@ -392,17 +533,23 @@ def onboarding_due_tick() -> None:
     pm1_filter = _due_filter("pm1_due_at_utc", "pm1_sent_at_utc", "pm1_disabled")
     pm2_filter = _due_filter("pm2_due_at_utc", "pm2_sent_at_utc", "pm2_disabled")
     pm3_filter = _due_filter("pm3_due_at_utc", "pm3_sent_at_utc", "pm3_disabled")
-
+    mywin7_filter = _due_filter("mywin7_due_at_utc", "mywin7_sent_at_utc", "mywin7_disabled")
+    mywin14_filter = _due_filter("mywin14_due_at_utc", "mywin14_sent_at_utc", "mywin14_disabled")
+    
     pm1_due_total = users_collection.count_documents(pm1_filter)
     pm2_due_total = users_collection.count_documents(pm2_filter)
     pm3_due_total = users_collection.count_documents(pm3_filter)
-    due_total = pm1_due_total + pm2_due_total + pm3_due_total
+    mywin7_due_total = users_collection.count_documents(mywin7_filter)
+    mywin14_due_total = users_collection.count_documents(mywin14_filter)
+    due_total = pm1_due_total + pm2_due_total + pm3_due_total + mywin7_due_total + mywin14_due_total
     logger.info(
-        "[ONBOARD][TICK] due_total=%s pm1=%s pm2=%s pm3=%s",
+        "[ONBOARD][TICK] due_total=%s pm1=%s pm2=%s pm3=%s mywin7=%s mywin14=%s",
         due_total,
         pm1_due_total,
         pm2_due_total,
         pm3_due_total,
+        mywin7_due_total,
+        mywin14_due_total,        
     )
 
     def _process_due(
@@ -447,6 +594,9 @@ def onboarding_due_tick() -> None:
             if err == "bot_blocked":
                 update["$set"]["onboarding_pm_blocked"] = True
                 update["$set"][disabled_field] = True
+                if pm_name in {"mywin7", "mywin14"}:
+                    update["$set"]["mywin7_disabled"] = True
+                    update["$set"]["mywin14_disabled"] = True                
             users_collection.update_one({"user_id": uid}, update)
             logger.info(
                 "[ONBOARD][SEND] pm=%s uid=%s ok=0 elapsed_ms=%s err=%s",
@@ -487,6 +637,26 @@ def onboarding_due_tick() -> None:
             send_pm3_if_needed,
             pm3_filter,
         )
+        _process_due(
+            "mywin7",
+            "mywin7_due_at_utc",
+            "mywin7_sent_at_utc",
+            "mywin7_last_error",
+            "mywin7_last_error_at_utc",
+            "mywin7_disabled",
+            send_mywin7_if_needed,
+            mywin7_filter,
+        )
+        _process_due(
+            "mywin14",
+            "mywin14_due_at_utc",
+            "mywin14_sent_at_utc",
+            "mywin14_last_error",
+            "mywin14_last_error_at_utc",
+            "mywin14_disabled",
+            send_mywin14_if_needed,
+            mywin14_filter,
+        )        
     except RuntimeError as exc:
         if "Bot loop not running yet" in str(exc):
             logger.info("[ONBOARD][TICK] skipped_reason=bot_loop_not_ready")
@@ -672,6 +842,31 @@ def record_first_checkin(uid: int, *, ref: datetime | None = None) -> bool:
     created = bool(getattr(res, "modified_count", 0))
     logger.info("[FIRST_CHECKIN] uid=%s created=%s", uid, 1 if created else 0)
     if created:
+        base = now
+        if _onboarding_test_mode():
+            mywin7_due = base + timedelta(minutes=7)
+            mywin14_due = base + timedelta(minutes=14)
+        else:
+            mywin7_due = base + timedelta(days=7)
+            mywin14_due = base + timedelta(days=14)
+        users_collection.update_one(
+            {
+                "user_id": uid,
+                "mywin7_due_at_utc": {"$exists": False},
+                "mywin7_sent_at_utc": {"$exists": False},
+                "mywin7_disabled": {"$ne": True},
+            },
+            {"$set": {"mywin7_due_at_utc": mywin7_due}},
+        )
+        users_collection.update_one(
+            {
+                "user_id": uid,
+                "mywin14_due_at_utc": {"$exists": False},
+                "mywin14_sent_at_utc": {"$exists": False},
+                "mywin14_disabled": {"$ne": True},
+            },
+            {"$set": {"mywin14_due_at_utc": mywin14_due}},
+        )        
         _remove_job(f"pm1:{uid}")
         logger.info("[PM1][CANCEL] uid=%s", uid)
         schedule_pm2(uid, now)
@@ -698,6 +893,10 @@ def record_first_mywin(uid: int, chat_id: int, message_id: int, *, ref: datetime
         chat_id,
     )
     if created:
+        users_collection.update_one(
+            {"user_id": uid},
+            {"$set": {"mywin7_disabled": True, "mywin14_disabled": True}},
+        )        
         _remove_job(f"pm2:{uid}")
         logger.info("[PM2][CANCEL] uid=%s", uid)
         schedule_pm3(uid, now)
@@ -748,7 +947,15 @@ def maybe_unlock_vip1(uid: int) -> bool:
     now = now_utc()
     users_collection.update_one(
         {"user_id": uid},
-        {"$set": {"status": "VIP1", "vip_tier": "VIP1", "vip_unlocked_at": now}},
+        {
+            "$set": {
+                "status": "VIP1",
+                "vip_tier": "VIP1",
+                "vip_unlocked_at": now,
+                "mywin7_disabled": True,
+                "mywin14_disabled": True,
+            }
+        },
     )
     logger.info("[VIP][UNLOCKED] uid=%s", uid)
     send_pm4_if_needed(uid)
