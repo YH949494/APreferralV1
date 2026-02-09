@@ -28,6 +28,7 @@ from config import (
 from time_utils import expires_in_seconds, tz_name
 
 from bson.json_util import dumps
+from bson.objectid import ObjectId
 from xp import ensure_xp_indexes, grant_xp, now_utc
 
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -37,7 +38,13 @@ from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_MISSED
 from app_context import set_app_bot, set_bot, set_scheduler
 from onboarding import MYWIN_CHAT_ID, onboarding_due_tick, record_first_mywin
 from vouchers import vouchers_bp, ensure_voucher_indexes, process_verification_queue
-from scheduler import settle_pending_referrals, settle_referral_snapshots, settle_xp_snapshots, recompute_affiliate_kpis
+from scheduler import (
+    settle_pending_referrals,
+    settle_referral_snapshots,
+    settle_xp_snapshots,
+    recompute_affiliate_kpis,
+    issue_voucher_ledger_entry,
+)
 from telegram_utils import safe_reply_text
 
 from pymongo import DESCENDING, ASCENDING, ReturnDocument  # keep if used elsewhere
@@ -1516,6 +1523,90 @@ def admin_update_affiliate():
     users_collection.update_one({"user_id": target_user_id}, update_doc, upsert=True)
     return jsonify({"success": True, "user_id": target_user_id})
 
+
+@admin_bp.get("/api/admin/voucher-ledger")
+def admin_voucher_ledger_list():
+    ok, err = require_admin_from_query()
+    if not ok:
+        msg, code = err
+        return jsonify({"success": False, "message": msg}), code
+    status = (request.args.get("status") or "PENDING").upper()
+    period = request.args.get("period")
+    query = {"status": status}
+    if period:
+        query["period"] = period
+    docs = list(db.voucher_ledger.find(query).sort("created_at", -1).limit(200))
+
+    def _iso(dt_value):
+        if not dt_value:
+            return None
+        if isinstance(dt_value, str):
+            return dt_value
+        return dt_value.isoformat()
+
+    payload = []
+    for doc in docs:
+        payload.append(
+            {
+                "id": str(doc.get("_id")),
+                "beneficiary_uid": doc.get("beneficiary_uid"),
+                "affiliate_uid": doc.get("affiliate_uid"),
+                "reward_type": doc.get("reward_type"),
+                "source_uid": doc.get("source_uid"),
+                "period": doc.get("period"),
+                "status": doc.get("status"),
+                "created_at": _iso(doc.get("created_at")),
+                "approved_at": _iso(doc.get("approved_at")),
+                "issued_at": _iso(doc.get("issued_at")),
+                "issued_voucher_code": doc.get("issued_voucher_code"),
+                "meta": doc.get("meta") or {},
+            }
+        )
+    return jsonify({"success": True, "entries": payload}), 200
+
+
+@admin_bp.post("/api/admin/voucher-ledger/<ledger_id>/approve")
+def admin_voucher_ledger_approve(ledger_id):
+    ok, err = require_admin_from_query()
+    if not ok:
+        msg, code = err
+        return jsonify({"success": False, "message": msg}), code
+    if not ObjectId.is_valid(ledger_id):
+        return jsonify({"success": False, "message": "Invalid ledger id"}), 400
+    oid = ObjectId(ledger_id)
+    entry = db.voucher_ledger.find_one({"_id": oid})
+    if not entry:
+        return jsonify({"success": False, "message": "Ledger entry not found"}), 404
+    if entry.get("status") != "PENDING":
+        return jsonify({"success": False, "message": "Ledger entry not pending"}), 400
+    now_ts = now_utc()
+    result = db.voucher_ledger.update_one(
+        {"_id": oid, "status": "PENDING"},
+        {"$set": {"status": "APPROVED", "approved_at": now_ts}},
+    )
+    if result.modified_count:
+        logger.info("ledger_admin_approved=1 id=%s", ledger_id)
+    return jsonify({"success": True}), 200
+
+
+@admin_bp.post("/api/admin/voucher-ledger/<ledger_id>/issue")
+def admin_voucher_ledger_issue(ledger_id):
+    ok, err = require_admin_from_query()
+    if not ok:
+        msg, code = err
+        return jsonify({"success": False, "message": msg}), code
+    if not ObjectId.is_valid(ledger_id):
+        return jsonify({"success": False, "message": "Invalid ledger id"}), 400
+    oid = ObjectId(ledger_id)
+    entry = db.voucher_ledger.find_one({"_id": oid})
+    if not entry:
+        return jsonify({"success": False, "message": "Ledger entry not found"}), 404
+    if entry.get("status") != "APPROVED":
+        return jsonify({"success": False, "message": "Ledger entry not approved"}), 400
+    code = issue_voucher_ledger_entry(entry, now_utc_ts=now_utc(), log_label="ledger_admin_issued")
+    if not code:
+        return jsonify({"success": False, "message": "Voucher issuance failed"}), 500
+    return jsonify({"success": True, "code": code}), 200
 
 
 app.register_blueprint(admin_bp)
