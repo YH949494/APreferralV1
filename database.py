@@ -1,5 +1,5 @@
 from pymongo import MongoClient, ASCENDING 
-from pymongo.errors import DuplicateKeyError
+from pymongo.errors import DuplicateKeyError, OperationFailure
 import os
 import datetime
 from datetime import timezone, timedelta
@@ -99,11 +99,37 @@ def ensure_indexes() -> None:
 
     db_ref["events"].create_index([("uid", ASCENDING), ("type", ASCENDING), ("ts", ASCENDING)])
 
-    db_ref["voucher_ledger"].create_index(
-        [("affiliate_uid", ASCENDING), ("reward_type", ASCENDING), ("source_uid", ASCENDING)],
-        unique=True,
-        partialFilterExpression={"source_uid": {"$exists": True, "$ne": None}},
-    )
+    voucher_ledger_collection = db_ref["voucher_ledger"]
+    try:
+        # Remove nulls so missing source_uid values don't collide under unique index rules.
+        voucher_ledger_collection.update_many({"source_uid": None}, {"$unset": {"source_uid": ""}})
+        index_name = "affiliate_uid_1_reward_type_1_source_uid_1"
+        if index_name in voucher_ledger_collection.index_information():
+            voucher_ledger_collection.drop_index(index_name)
+        try:
+            # Avoid $ne: null in partialFilterExpression for DocumentDB compatibility.
+            voucher_ledger_collection.create_index(
+                [("affiliate_uid", ASCENDING), ("reward_type", ASCENDING), ("source_uid", ASCENDING)],
+                unique=True,
+                name=index_name,
+                partialFilterExpression={"source_uid": {"$exists": True}},
+            )
+        except OperationFailure:
+            logger.warning(
+                "Failed to create partial unique index for voucher_ledger; falling back to sparse index",
+                exc_info=True,
+            )
+            voucher_ledger_collection.create_index(
+                [("affiliate_uid", ASCENDING), ("reward_type", ASCENDING), ("source_uid", ASCENDING)],
+                unique=True,
+                sparse=True,
+                name=index_name,
+            )
+    except Exception:
+        logger.warning(
+            "Failed to ensure voucher_ledger source_uid unique index",
+            exc_info=True,
+        )
     db_ref["voucher_ledger"].create_index(
         [("affiliate_uid", ASCENDING), ("period", ASCENDING)],
         unique=True,
