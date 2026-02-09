@@ -855,6 +855,40 @@
             </table>
           </div>
         </div>
+
+        <div id="adm_affiliate_ledger" style="margin-top:18px; text-align:left;">
+          <h4 style="margin-bottom:8px;">💸 Affiliate Voucher Ledger</h4>
+          <div style="background:#fff; border:1px solid #ddd; border-radius:8px; padding:12px; margin-bottom:16px;">
+            <div style="display:flex; flex-wrap:wrap; gap:10px; align-items:center;">
+              <label style="font-size:12px; color:#555;">Period (YYYY-MM)
+                <input id="ledger-period" type="text" placeholder="2025-01" style="padding:8px; border-radius:6px; border:1px solid #ccc; width:120px;">
+              </label>
+              <label style="font-size:12px; color:#555;">Status
+                <select id="ledger-status" style="padding:8px; border-radius:6px; border:1px solid #ccc;">
+                  <option value="PENDING">PENDING</option>
+                  <option value="APPROVED">APPROVED</option>
+                </select>
+              </label>
+              <button id="ledger-load-btn" type="button" onclick="loadVoucherLedger()">Load Ledger</button>
+            </div>
+            <div style="overflow-x:auto; margin-top:12px;">
+              <table id="ledger-table" style="width:100%; border-collapse:collapse; font-size:13px;">
+                <thead>
+                  <tr style="background:#f7f7f7;">
+                    <th style="text-align:left; padding:6px;">Affiliate UID</th>
+                    <th style="padding:6px;">Reward</th>
+                    <th style="padding:6px;">Period</th>
+                    <th style="padding:6px;">Status</th>
+                    <th style="padding:6px;">Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr><td colspan="5" style="padding:6px;">No data loaded.</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>        
       </div>
     </div>
   </div>
@@ -1998,6 +2032,7 @@ Some people get lucky.👇
         const isAdmin = adminData.success && adminData.is_admin;
         if (isAdmin) {
           document.getElementById("admin-panel").style.display = "block";
+          initVoucherLedgerDefaults();          
           if (typeof adm_list === "function") {
             adm_list();
           }
@@ -3457,6 +3492,103 @@ ${referral}`;
       }
     }
 
+    function _defaultLedgerPeriod() {
+      const d = new Date();
+      const year = d.getUTCFullYear();
+      const month = d.getUTCMonth();
+      const lastMonth = new Date(Date.UTC(year, month - 1, 1));
+      const ym = `${lastMonth.getUTCFullYear()}-${String(lastMonth.getUTCMonth() + 1).padStart(2, "0")}`;
+      return ym;
+    }
+
+    function initVoucherLedgerDefaults() {
+      const periodInput = document.getElementById("ledger-period");
+      if (periodInput && !periodInput.value) {
+        periodInput.value = _defaultLedgerPeriod();
+      }
+    }
+
+    function renderVoucherLedger(entries) {
+      const body = document.querySelector("#ledger-table tbody");
+      if (!body) return;
+      if (!entries || !entries.length) {
+        body.innerHTML = `<tr><td colspan="5" style="padding:6px;">No entries found.</td></tr>`;
+        return;
+      }
+      body.innerHTML = entries.map((entry) => {
+        const status = entry.status || "-";
+        const actions = [];
+        if (status === "PENDING") {
+          actions.push(`<button type="button" onclick="approveVoucherLedger('${entry.id}')">Approve</button>`);
+        }
+        if (status === "APPROVED") {
+          actions.push(`<button type="button" onclick="issueVoucherLedger('${entry.id}')">Issue</button>`);
+        }
+        return `
+          <tr>
+            <td style="padding:6px; text-align:left;">${entry.affiliate_uid || "-"}</td>
+            <td style="padding:6px; text-align:center;">${entry.reward_type || "-"}</td>
+            <td style="padding:6px; text-align:center;">${entry.period || "-"}</td>
+            <td style="padding:6px; text-align:center;">${status}</td>
+            <td style="padding:6px; text-align:center;">${actions.join(" ") || "-"}</td>
+          </tr>
+        `;
+      }).join("");
+    }
+
+    async function loadVoucherLedger() {
+      try {
+        if (!userId) { alert("Missing admin user id. Open via Telegram to continue."); return; }
+        const status = document.getElementById("ledger-status")?.value || "PENDING";
+        const period = document.getElementById("ledger-period")?.value?.trim();
+        const params = new URLSearchParams({ status, user_id: String(userId) });
+        if (period) { params.set("period", period); }
+        const res = await fetch(`${API_BASE}/api/admin/voucher-ledger?${params.toString()}`);
+        const data = await res.json();
+        if (!data.success) {
+          throw new Error(data.message || "Failed to load ledger");
+        }
+        renderVoucherLedger(data.entries || []);
+      } catch (err) {
+        console.error("Ledger load error:", err);
+        alert("❌ Failed to load voucher ledger.");
+      }
+    }
+
+    async function approveVoucherLedger(id) {
+      try {
+        if (!userId) { alert("Missing admin user id. Open via Telegram to continue."); return; }
+        const res = await fetch(`${API_BASE}/api/admin/voucher-ledger/${id}/approve?user_id=${userId}`, {
+          method: "POST"
+        });
+        const data = await res.json();
+        if (!data.success) {
+          throw new Error(data.message || "Approval failed");
+        }
+        await loadVoucherLedger();
+      } catch (err) {
+        console.error("Ledger approve error:", err);
+        alert("❌ Failed to approve ledger entry.");
+      }
+    }
+
+    async function issueVoucherLedger(id) {
+      try {
+        if (!userId) { alert("Missing admin user id. Open via Telegram to continue."); return; }
+        const res = await fetch(`${API_BASE}/api/admin/voucher-ledger/${id}/issue?user_id=${userId}`, {
+          method: "POST"
+        });
+        const data = await res.json();
+        if (!data.success) {
+          throw new Error(data.message || "Issue failed");
+        }
+        await loadVoucherLedger();
+      } catch (err) {
+        console.error("Ledger issue error:", err);
+        alert("❌ Failed to issue voucher.");
+      }
+    }
+    
     async function checkRegionStatus() {
       try {
         const res = await fetch(`${API_BASE}/api/region-status/${userId}`);
@@ -3557,6 +3689,7 @@ ${referral}`;
       if (!hasInit) {
         if (isAdminMode) {
           document.getElementById("admin-panel").style.display = "block";
+          initVoucherLedgerDefaults();          
           adm_list();
         }
         return;
@@ -3571,6 +3704,7 @@ ${referral}`;
       loadVouchers();
       if (isAdminMode) {
         document.getElementById("admin-panel").style.display = "block";
+        initVoucherLedgerDefaults();        
         adm_list();
       }
     };
