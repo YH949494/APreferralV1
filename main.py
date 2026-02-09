@@ -1261,8 +1261,9 @@ def ensure_indexes():
             [("user_id", 1)],
             unique=True,
             name="uq_tg_verif_user_id_nonnull",
-            partialFilterExpression={"user_id": {"$exists": True, "$ne": None}},
+            partialFilterExpression={"user_id": {"$type": ["int", "long"]}},
         )
+
         tg_verification_queue_collection.create_index(
             [("status", 1), ("created_at", 1)],
             name="ix_verif_status_created",
