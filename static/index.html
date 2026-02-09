@@ -3042,6 +3042,28 @@ function setLeaderboardMeta(ts, { isStale = false } = {}) {
       out.appendChild(list);
     }
 
+    // Added initAffiliateTabVisibility to hide affiliate tab/panel when no active affiliates exist.
+    // Reason: users should only see the Affiliate tab when an active affiliate is returned.
+    async function initAffiliateTabVisibility() {
+      const tabBtn = document.getElementById("leaderboard-tab-affiliate");
+      const panel = document.getElementById("affiliate-leaderboard-output");
+      if (!tabBtn || !panel) return;
+      try {
+        const res = await fetch(`${API_BASE}/api/leaderboard/affiliate`, { credentials: "include" });
+        const data = await res.json();
+        const items = data?.items ?? [];
+        if (items.length === 0) {
+          tabBtn.style.display = "none";
+          panel.style.display = "none";
+        }
+      } catch (err) {
+        tabBtn.style.display = "none";
+        panel.style.display = "none";
+      }
+    }
+
+    document.addEventListener("DOMContentLoaded", initAffiliateTabVisibility);
+    
     function setLeaderboardTab(tab) {
       currentLeaderboardTab = tab;
       const xpTab = document.getElementById("leaderboard-tab-xp");
