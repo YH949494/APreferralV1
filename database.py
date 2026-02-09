@@ -98,6 +98,17 @@ def ensure_indexes() -> None:
     db_ref["channel_subscription_cache"].create_index([("expires_at", ASCENDING)], expireAfterSeconds=0)
 
     db_ref["events"].create_index([("uid", ASCENDING), ("type", ASCENDING), ("ts", ASCENDING)])
+
+    db_ref["voucher_ledger"].create_index(
+        [("affiliate_uid", ASCENDING), ("reward_type", ASCENDING), ("source_uid", ASCENDING)],
+        unique=True,
+        partialFilterExpression={"source_uid": {"$exists": True, "$ne": None}},
+    )
+    db_ref["voucher_ledger"].create_index(
+        [("affiliate_uid", ASCENDING), ("period", ASCENDING)],
+        unique=True,
+        partialFilterExpression={"period": {"$exists": True, "$ne": None}},
+    )    
     
     try:
         db_ref["admin_xp_cooldowns"].create_index([("expireAt", ASCENDING)], expireAfterSeconds=0)
@@ -152,6 +163,8 @@ def init_user(user_id, username):
                 "flags": [],
                 "level": 1,
                 "level3_granted": False,
+                "level2_confirmed_at": None,
+                "level3_confirmed_at": None,                
             }
         },
         upsert=True
