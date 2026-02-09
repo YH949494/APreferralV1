@@ -453,6 +453,104 @@ def settle_referral_snapshots() -> None:
             int(row.get("total_referrals", 0)),
         )
 
+def recompute_affiliate_kpis(now_utc_ts: datetime | None = None) -> None:
+    now_utc_ts = now_utc_ts or now_utc()
+    start_7d = now_utc_ts - timedelta(days=7)
+    start_30d = now_utc_ts - timedelta(days=30)
+
+    db.users.update_many({"role": {"$exists": False}}, {"$set": {"role": "member"}})
+    db.users.update_many({"affiliate_status": {"$exists": False}}, {"$set": {"affiliate_status": "none"}})
+    db.users.update_many({"affiliate_since": {"$exists": False}}, {"$set": {"affiliate_since": None}})
+    db.users.update_many({"kpi_l2_30d": {"$exists": False}}, {"$set": {"kpi_l2_30d": 0}})
+    db.users.update_many({"kpi_l3_30d": {"$exists": False}}, {"$set": {"kpi_l3_30d": 0}})
+    db.users.update_many({"flags": {"$exists": False}}, {"$set": {"flags": []}})
+    db.users.update_many({"level": {"$exists": False}}, {"$set": {"level": 1}})
+    db.users.update_many({"level3_granted": {"$exists": False}}, {"$set": {"level3_granted": False}})
+
+    mywin_pipeline = [
+        {"$match": {"type": "MYWIN_VALID", "ts": {"$gte": start_7d}}},
+        {"$group": {"_id": "$uid", "count": {"$sum": 1}}},
+    ]
+    mywin_rows = list(db.events.aggregate(mywin_pipeline))
+    level2_uids = [row.get("_id") for row in mywin_rows if int(row.get("count", 0)) >= 3 and row.get("_id")]
+
+    db.users.update_many({}, {"$set": {"level": 1}})
+    if level2_uids:
+        db.users.update_many({"user_id": {"$in": level2_uids}}, {"$set": {"level": 2}})
+        db.users.update_many(
+            {"user_id": {"$in": level2_uids}, "$or": [{"level2_at": {"$exists": False}}, {"level2_at": None}]},
+            {"$set": {"level2_at": now_utc_ts}},
+        )
+
+    db.users.update_many(
+        {"level3_granted": True, "$or": [{"level3_at": {"$exists": False}}, {"level3_at": None}]},
+        {"$set": {"level3_at": now_utc_ts}},
+    )
+    db.users.update_many({"level3_granted": True}, {"$set": {"level": 3}})
+
+    db.users.update_many({"affiliate_status": "active"}, {"$set": {"level": 4, "role": "affiliate"}})
+
+    level2_recent = set(
+        row.get("user_id")
+        for row in db.users.find({"level2_at": {"$gte": start_30d}}, {"user_id": 1})
+        if row.get("user_id") is not None
+    )
+    level3_recent = set(
+        row.get("user_id")
+        for row in db.users.find({"level3_at": {"$gte": start_30d}}, {"user_id": 1})
+        if row.get("user_id") is not None
+    )
+
+    referral_pipeline = [
+        {
+            "$match": {
+                "event": "referral_settled",
+                "inviter_id": {"$ne": None},
+                "invitee_id": {"$ne": None},
+            }
+        },
+        {"$sort": {"occurred_at": 1}},
+        {"$group": {"_id": "$invitee_id", "inviter_id": {"$first": "$inviter_id"}}},
+    ]
+    referral_rows = list(db.referral_events.aggregate(referral_pipeline))
+
+    kpi_l2 = {}
+    kpi_l3 = {}
+    for row in referral_rows:
+        invitee_id = row.get("_id")
+        inviter_id = row.get("inviter_id")
+        if invitee_id is None or inviter_id is None:
+            continue
+        if invitee_id in level2_recent:
+            kpi_l2[inviter_id] = kpi_l2.get(inviter_id, 0) + 1
+        if invitee_id in level3_recent:
+            kpi_l3[inviter_id] = kpi_l3.get(inviter_id, 0) + 1
+
+    db.users.update_many({}, {"$set": {"kpi_l2_30d": 0, "kpi_l3_30d": 0}})
+    updates = []
+    for inviter_id in set(kpi_l2.keys()) | set(kpi_l3.keys()):
+        updates.append(
+            UpdateOne(
+                {"user_id": inviter_id},
+                {
+                    "$set": {
+                        "kpi_l2_30d": int(kpi_l2.get(inviter_id, 0)),
+                        "kpi_l3_30d": int(kpi_l3.get(inviter_id, 0)),
+                    }
+                },
+                upsert=True,
+            )
+        )
+    if updates:
+        db.users.bulk_write(updates, ordered=False)
+
+    logger.info(
+        "[AFFILIATE][RECOMPUTE] level2=%s level3=%s inviters=%s",
+        len(level2_recent),
+        len(level3_recent),
+        len(updates),
+    )
+
 def _recover_stale_processing(now_utc_ts: datetime) -> int:
     cutoff = now_utc_ts - PROCESSING_TIMEOUT
     result = db.pending_referrals.update_many(
