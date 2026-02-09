@@ -1264,17 +1264,83 @@ def ensure_indexes():
                 tg_verification_queue_collection.drop_index(legacy_name)
             except Exception:
                 pass
-        tg_verification_queue_collection.create_index(
-            [("user_id", 1)],
-            unique=True,
-            name="uq_tg_verif_user_id_nonnull",
-            partialFilterExpression={"user_id": {"$type": ["int", "long"]}},
+        # Dedupe before creating unique index to avoid startup failures on existing data.
+        tg_verification_queue_collection.update_many(
+            {"user_id": None},
+            {"$unset": {"user_id": ""}},
         )
-
+        dup_groups = tg_verification_queue_collection.aggregate(
+            [
+                {"$match": {"user_id": {"$exists": True}}},
+                {
+                    "$group": {
+                        "_id": "$user_id",
+                        "ids": {"$push": "$_id"},
+                        "n": {"$sum": 1},
+                    }
+                },
+                {"$match": {"n": {"$gt": 1}}},
+            ]
+        )
+        removed = 0
+        for group in dup_groups:
+            ids = group.get("ids", [])
+            if not ids:
+                continue
+            docs = list(
+                tg_verification_queue_collection.find(
+                    {"_id": {"$in": ids}},
+                    {"_id": 1, "created_at": 1},
+                )
+            )
+            keep_id = None
+            if any(doc.get("created_at") is not None for doc in docs):
+                keep_id = max(
+                    docs,
+                    key=lambda doc: (doc.get("created_at"), doc.get("_id")),
+                )["_id"]
+            else:
+                keep_id = ids[-1]
+            ids_to_delete = [doc_id for doc_id in ids if doc_id != keep_id]
+            if ids_to_delete:
+                tg_verification_queue_collection.delete_many(
+                    {"_id": {"$in": ids_to_delete}}
+                )
+                removed += len(ids_to_delete)
+        if removed:
+            logger.info(
+                "[VERIFY_QUEUE] deduped %s duplicate tg_verification_queue docs",
+                removed,
+            )
+        try:
+            tg_verification_queue_collection.drop_index("uq_tg_verif_user_id_nonnull")
+        except Exception:
+            pass
+        try:
+            tg_verification_queue_collection.create_index(
+                [("user_id", 1)],
+                unique=True,
+                name="uq_tg_verif_user_id_nonnull",
+                partialFilterExpression={"user_id": {"$exists": True}},
+            )
+        except OperationFailure:
+            logger.warning(
+                "[VERIFY_QUEUE] partial unique index failed; falling back to sparse",
+                exc_info=True,
+            )
+            tg_verification_queue_collection.create_index(
+                [("user_id", 1)],
+                unique=True,
+                sparse=True,
+                name="uq_tg_verif_user_id_nonnull",
+            )
+        
         tg_verification_queue_collection.create_index(
             [("status", 1), ("created_at", 1)],
             name="ix_verif_status_created",
         )
+    except OperationFailure:
+        logger.warning("[VERIFY_QUEUE] ensure_indexes error", exc_info=True)        
     except Exception as e:
         print("⚠️ ensure_indexes error:", e)
         
