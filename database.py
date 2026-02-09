@@ -82,6 +82,43 @@ def ensure_indexes() -> None:
     if _indexes_initialized:
         return
     db_ref = get_db()
+
+
+    def safe_unique_index(coll, keys, name, field_for_partial=None):
+        if field_for_partial:
+            try:
+                # Provider limitation: avoid partial filters that rely on $ne/$not.
+                # Unset explicit nulls so they don't get indexed as duplicates.
+                coll.update_many({field_for_partial: None}, {"$unset": {field_for_partial: ""}})
+                try:
+                    if name in coll.index_information():
+                        coll.drop_index(name)
+                except Exception:
+                    logger.warning("Failed to drop index %s", name, exc_info=True)
+                try:
+                    # Use $exists-only partial filter to avoid $not translations.
+                    coll.create_index(
+                        keys,
+                        unique=True,
+                        name=name,
+                        partialFilterExpression={field_for_partial: {"$exists": True}},
+                    )
+                except OperationFailure:
+                    # Fallback to sparse unique index if partials are unsupported.
+                    logger.warning(
+                        "Failed to create partial unique index %s; falling back to sparse index",
+                        name,
+                        exc_info=True,
+                    )
+                    coll.create_index(keys, unique=True, sparse=True, name=name)
+            except Exception:
+                logger.warning("Failed to ensure %s unique index", name, exc_info=True)
+            return
+        try:
+            coll.create_index(keys, unique=True, name=name)
+        except Exception:
+            logger.warning("Failed to ensure %s unique index", name, exc_info=True)
+            
     db_ref["voucher_whitelist"].create_index([("code", ASCENDING)], unique=True)
     db_ref["voucher_whitelist"].create_index([("username", ASCENDING), ("start_at", ASCENDING)])
     db_ref["voucher_whitelist"].create_index([("end_at", ASCENDING)])
@@ -100,41 +137,18 @@ def ensure_indexes() -> None:
     db_ref["events"].create_index([("uid", ASCENDING), ("type", ASCENDING), ("ts", ASCENDING)])
 
     voucher_ledger_collection = db_ref["voucher_ledger"]
-    try:
-        # Remove nulls so missing source_uid values don't collide under unique index rules.
-        voucher_ledger_collection.update_many({"source_uid": None}, {"$unset": {"source_uid": ""}})
-        index_name = "affiliate_uid_1_reward_type_1_source_uid_1"
-        if index_name in voucher_ledger_collection.index_information():
-            voucher_ledger_collection.drop_index(index_name)
-        try:
-            # Avoid $ne: null in partialFilterExpression for DocumentDB compatibility.
-            voucher_ledger_collection.create_index(
-                [("affiliate_uid", ASCENDING), ("reward_type", ASCENDING), ("source_uid", ASCENDING)],
-                unique=True,
-                name=index_name,
-                partialFilterExpression={"source_uid": {"$exists": True}},
-            )
-        except OperationFailure:
-            logger.warning(
-                "Failed to create partial unique index for voucher_ledger; falling back to sparse index",
-                exc_info=True,
-            )
-            voucher_ledger_collection.create_index(
-                [("affiliate_uid", ASCENDING), ("reward_type", ASCENDING), ("source_uid", ASCENDING)],
-                unique=True,
-                sparse=True,
-                name=index_name,
-            )
-    except Exception:
-        logger.warning(
-            "Failed to ensure voucher_ledger source_uid unique index",
-            exc_info=True,
-        )
-    db_ref["voucher_ledger"].create_index(
+    safe_unique_index(
+        voucher_ledger_collection,
+        [("affiliate_uid", ASCENDING), ("reward_type", ASCENDING), ("source_uid", ASCENDING)],
+        "affiliate_uid_1_reward_type_1_source_uid_1",
+        field_for_partial="source_uid",
+    )
+    safe_unique_index(
+        voucher_ledger_collection,
         [("affiliate_uid", ASCENDING), ("period", ASCENDING)],
-        unique=True,
-        partialFilterExpression={"period": {"$exists": True, "$ne": None}},
-    )    
+        "affiliate_uid_1_period_1",
+        field_for_partial="period",
+    )
     
     try:
         db_ref["admin_xp_cooldowns"].create_index([("expireAt", ASCENDING)], expireAfterSeconds=0)
