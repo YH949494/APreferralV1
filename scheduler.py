@@ -9,21 +9,12 @@ from pymongo.errors import DuplicateKeyError
 from requests import RequestException
 from database import db
 from referral_rules import calc_referral_award
-from ugc_growth_referral import apply_growth_credit, is_expansion_qualified, should_allow_viewer_reward
-from vouchers import claim_voucher_for_user
 from xp import grant_xp, now_utc, now_kl
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 GROUP_ID = int(os.environ.get("GROUP_ID", "-1002304653063"))
 API_BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"
 REFERRAL_HOLD_HOURS = 12
-UGC_T1_SMALL_DROP_ID = (os.environ.get("UGC_T1_SMALL_DROP_ID") or "").strip()
-UGC_T2_MID_DROP_ID = (os.environ.get("UGC_T2_MID_DROP_ID") or "").strip()
-
-referral_claims_col = db["referral_claims"]
-growth_credit_col = db["growth_credit"]
-voucher_ledger_col = db["voucher_ledger"]
-users_col = db["users"]
 
 KL_TZ = pytz.timezone("Asia/Kuala_Lumpur")
 
@@ -62,19 +53,6 @@ def _get_chat_member_status(user_id: int) -> str | None:
     if not data.get("ok"):
         raise RuntimeError(f"getChatMember_not_ok:{data.get('description')}")
     return (data.get("result") or {}).get("status")
-
-def _send_dm(user_id: int, text: str) -> None:
-    if not BOT_TOKEN:
-        return
-    try:
-        requests.post(
-            f"{API_BASE}/sendMessage",
-            json={"chat_id": user_id, "text": text},
-            timeout=10,
-        )
-    except Exception:
-        logger.exception("[SCHED][UGC_REFERRAL] dm_failed uid=%s", user_id)
-
 
 def _coerce_utc(dt_value) -> datetime | None:
     if not dt_value:
@@ -366,23 +344,6 @@ def _referral_sign_expr():
         ]
     }
 
-
-
-def _should_pass_growth_throttle(last_credit_at: datetime | None, now_utc_ts: datetime) -> bool:
-    return last_credit_at is None or last_credit_at <= (now_utc_ts - timedelta(hours=24))
-
-
-def _eligible_referrer_tiers(credited_count: int, tier_awarded: dict | None) -> list[str]:
-    tier_awarded = tier_awarded or {}
-    out = []
-    if credited_count >= 3 and not tier_awarded.get("s2"):
-        out.append("S2")
-    if credited_count >= 7 and not tier_awarded.get("s3"):
-        out.append("S3")
-    if credited_count >= 15 and not tier_awarded.get("s4"):
-        out.append("S4")
-    return out
-    
 def settle_referral_snapshots() -> None:
     now_utc_ts = now_utc()
     week_start_utc, week_end_utc = _week_window_utc(now_utc_ts)
@@ -479,133 +440,19 @@ def settle_referral_snapshots() -> None:
         publish_result.modified_count,
     )    
     _write_snapshot_heartbeat("referral", now_utc_ts)    
+    for row in results:
+        uid = row.get("_id")
+        if uid is None:
+            continue
 
-
-def settle_ugc_referral_claims(batch_limit: int = 100) -> None:
-    now_utc_ts = now_utc()
-    processed = 0
-    while processed < batch_limit:
-        claim = referral_claims_col.find_one_and_update(
-            {"status": "pending", "due_at": {"$lte": now_utc_ts}},
-            {"$set": {"status": "processing", "processing_at": now_utc_ts}},
-            sort=[("due_at", 1)],
-            return_document=ReturnDocument.AFTER,
+        logger.info(
+            "[SCHED][REFERRAL_SNAPSHOT] uid=%s weekly=%s monthly=%s total=%s",
+            uid,
+            int(row.get("weekly_referrals", 0)),
+            int(row.get("monthly_referrals", 0)),
+            int(row.get("total_referrals", 0)),
         )
-        if not claim:
-            break
-        processed += 1
-        viewer_uid = claim.get("viewer_uid")
-        source_uid = claim.get("source_uid")
-        claim_id = claim.get("_id")
-        try:
-            status = _get_chat_member_status(int(viewer_uid))
-            if status not in {"member", "administrator", "creator"}:
-                referral_claims_col.update_one(
-                    {"viewer_uid": viewer_uid},
-                    {"$set": {"status": "rejected", "credit_reason": "left_before_48h", "updated_at": now_utc_ts}},
-                )
-                continue
 
-            reward_allowed = should_allow_viewer_reward(referral_claims_col, claim)
-            if not reward_allowed:
-                referral_claims_col.update_one(
-                    {"viewer_uid": viewer_uid},
-                    {"$set": {"status": "rejected", "credit_reason": "abuse_gate", "updated_at": now_utc_ts}},
-                )
-                continue
-
-            drop_id = UGC_T1_SMALL_DROP_ID
-            existing_reward = voucher_ledger_col.find_one({"kind": "ugc_viewer_reward", "claim_id": str(claim_id)})
-            if existing_reward and existing_reward.get("voucher_code"):
-                issued = {"code": existing_reward.get("voucher_code")}
-            else:
-                username_doc = users_col.find_one({"user_id": viewer_uid}, {"usernameLower": 1, "username": 1}) or {}
-                username = username_doc.get("usernameLower") or username_doc.get("username") or ""
-                issued = claim_voucher_for_user(user_id=str(viewer_uid), drop_id=drop_id, username=username)
-                try:
-                    voucher_ledger_col.insert_one(
-                        {
-                            "kind": "ugc_viewer_reward",
-                            "claim_id": str(claim_id),
-                            "viewer_uid": viewer_uid,
-                            "source_uid": source_uid,
-                            "drop_id": drop_id,
-                            "voucher_code": issued.get("code"),
-                            "created_at": now_utc_ts,
-                        }
-                    )
-                except DuplicateKeyError:
-                    pass
-            _send_dm(int(viewer_uid), f"Your voucher is ready: {issued.get('code', '')}")
-            referral_claims_col.update_one(
-                {"viewer_uid": viewer_uid},
-                {
-                    "$set": {
-                        "status": "validated",
-                        "validated_at": now_utc_ts,
-                        "viewer_reward_issued": True,
-                        "viewer_reward_drop_id": drop_id,
-                        "credit_reason": "not_expansion_or_throttle",
-                        "updated_at": now_utc_ts,
-                    }
-                },
-            )
-
-            if source_uid:
-                recent_claims = list(
-                    referral_claims_col.find(
-                        {
-                            "source_uid": source_uid,
-                            "status": "validated",
-                            "viewer_uid": {"$ne": viewer_uid},
-                            "validated_at": {"$gte": now_utc_ts - timedelta(days=7)},
-                        }
-                    ).limit(20)
-                )
-                expansion_qualified = is_expansion_qualified(int(viewer_uid), int(source_uid), claim, recent_claims)
-                if expansion_qualified:
-                    credited, _reason, gc = apply_growth_credit(growth_credit_col, int(source_uid), now_utc_ts)
-                else:
-                    credited, _reason, gc = (False, "not_expansion", growth_credit_col.find_one({"_id": int(source_uid)}) or {})
-                if credited:
-                    referral_claims_col.update_one(
-                        {"viewer_uid": viewer_uid},
-                        {"$set": {"credited": True, "credit_reason": "credited", "updated_at": now_utc_ts}},
-                    )
-
-                    tier_awarded = (gc or {}).get("tier_awarded") or {}
-                    credited_count = int((gc or {}).get("credited_count", 0))
-                    for tier in _eligible_referrer_tiers(credited_count, tier_awarded):
-                        if tier == "S2":
-                            
-                            try:
-                                voucher_ledger_col.insert_one({"kind": "ugc_referrer_reward", "tier": "S2", "source_uid": source_uid, "drop_id": UGC_T1_SMALL_DROP_ID, "created_at": now_utc_ts, "status": "issued"})
-                            except DuplicateKeyError:
-                                pass
-                            growth_credit_col.update_one({"_id": int(source_uid)}, {"$set": {"tier_awarded.s2": True}})
-                        elif tier == "S3":
-                            
-                            try:
-                                voucher_ledger_col.insert_one({"kind": "ugc_referrer_reward", "tier": "S3", "source_uid": source_uid, "drop_id": UGC_T2_MID_DROP_ID, "created_at": now_utc_ts, "status": "issued"})
-                            except DuplicateKeyError:
-                                pass
-                            growth_credit_col.update_one({"_id": int(source_uid)}, {"$set": {"tier_awarded.s3": True}})
-                        elif tier == "S4":
-                            try:
-                                voucher_ledger_col.insert_one({"kind": "ugc_referrer_reward", "tier": "S4", "source_uid": source_uid, "drop_id": None, "created_at": now_utc_ts, "status": "pending_admin"})
-                            except DuplicateKeyError:
-                                pass
-                            growth_credit_col.update_one({"_id": int(source_uid)}, {"$set": {"tier_awarded.s4": True}})
-                            _send_dm(int(source_uid), "You unlocked a large reward pending admin approval.")
-                else:
-                    referral_claims_col.update_one(
-                        {"viewer_uid": viewer_uid},
-                        {"$set": {"credit_reason": "not_expansion_or_throttle", "updated_at": now_utc_ts}},
-                    )
-        except Exception as exc:
-            logger.exception("[SCHED][UGC_REFERRAL] process_failed viewer_uid=%s err=%s", viewer_uid, exc)
-            referral_claims_col.update_one({"viewer_uid": viewer_uid}, {"$set": {"status": "pending", "updated_at": now_utc_ts}})
-            
 def _recover_stale_processing(now_utc_ts: datetime) -> int:
     cutoff = now_utc_ts - PROCESSING_TIMEOUT
     result = db.pending_referrals.update_many(
