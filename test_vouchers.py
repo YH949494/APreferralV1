@@ -23,6 +23,8 @@ from vouchers import (
     get_claimable_pools,
     get_visible_pools,
     reconcile_pooled_remaining,
+    user_visible_drops,
+    get_active_drops,
 )
 
 
@@ -468,7 +470,97 @@ class VoucherAntiHunterTests(unittest.TestCase):
             self.assertEqual(res["code"], "LEGACY")
         finally:
             vouchers_module.db = original_db
-            
+
+
+    def test_internal_drop_not_in_visible_list(self):
+        import vouchers as m
+
+        class FakeFindResult:
+            def __init__(self, docs):
+                self.docs = docs
+
+            def __iter__(self):
+                return iter(self.docs)
+
+        class FakeDropsForVisible:
+            def __init__(self):
+                self.last_query = None
+
+            def find(self, query):
+                self.last_query = query
+                return FakeFindResult([])
+
+        class FakeDbForVisible:
+            def __init__(self):
+                self.drops = FakeDropsForVisible()
+
+        now = datetime.now(timezone.utc)
+        orig_db = m.db
+        fake_db = FakeDbForVisible()
+        try:
+            m.db = fake_db
+            get_active_drops(now)
+            self.assertEqual(fake_db.drops.last_query.get("internal_only"), {"$ne": True})
+        finally:
+            m.db = orig_db
+
+    def test_claim_internal_drop_without_ledger_rejected(self):
+        import vouchers as m
+        from flask import Flask
+
+        app = Flask(__name__)
+        now = datetime.now(timezone.utc)
+        drop_id = "drop-internal-claim"
+        drop = {
+            "_id": drop_id,
+            "name": "Internal",
+            "type": "pooled",
+            "status": "active",
+            "startsAt": now - timedelta(minutes=5),
+            "endsAt": now + timedelta(minutes=5),
+            "public_remaining": 1,
+            "my_remaining": 0,
+            "internal_only": True,
+        }
+
+        orig_extract = m.extract_raw_init_data_from_query
+        orig_verify = m.verify_telegram_init_data
+        orig_db = m.db
+        orig_users = m.users_collection
+        orig_claims = m.voucher_claims_col
+        orig_load_user_context = m.load_user_context
+        orig_is_drop_allowed = m.is_drop_allowed
+        orig_is_user_eligible = m.is_user_eligible_for_drop
+        orig_ledger = m.ugc_reward_ledger_col
+        try:
+            m.extract_raw_init_data_from_query = lambda req: "ok"
+            m.verify_telegram_init_data = lambda init_data: (True, {"user": '{"id": 42, "username": "u42"}'}, "ok")
+            m.db = FakeDb([drop], [])
+            m.users_collection = FakeSimpleCollection([{"user_id": 42, "usernameLower": "u42", "region": "th"}])
+            m.load_user_context = lambda **kwargs: {}
+            m.is_drop_allowed = lambda *args, **kwargs: True
+            m.is_user_eligible_for_drop = lambda *args, **kwargs: True
+            m.ugc_reward_ledger_col = FakeSimpleCollection([])
+
+            with app.test_request_context(
+                "/vouchers/claim?init_data=ok",
+                method="POST",
+                json={"dropId": drop_id},
+            ):
+                resp, status = m.api_claim()
+                self.assertEqual(status, 403)
+                self.assertEqual(resp.get_json().get("code"), "not_eligible")
+        finally:
+            m.extract_raw_init_data_from_query = orig_extract
+            m.verify_telegram_init_data = orig_verify
+            m.db = orig_db
+            m.users_collection = orig_users
+            m.voucher_claims_col = orig_claims
+            m.load_user_context = orig_load_user_context
+            m.is_drop_allowed = orig_is_drop_allowed
+            m.is_user_eligible_for_drop = orig_is_user_eligible
+            m.ugc_reward_ledger_col = orig_ledger
+    
     def test_kill_switch_blocks_after_threshold(self):
         rate_limits = FakeRateLimitCollection()
         now = datetime.now(timezone.utc)
