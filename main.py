@@ -1125,139 +1125,120 @@ def ensure_indexes():
         if removed:
             print(f"🔧 Removed {removed} duplicate xp_events with duplicate unique_key")
 
-    idx_name = "ttl_end_time"
-    try:
-        bonus_voucher_collection.create_index(
-            [("end_time", 1)],
-            expireAfterSeconds=0,
-            name=idx_name,
-        )
-        print("✅ TTL index ensured on bonus_voucher.end_time")
-    except Exception as e:
-        # If an index exists with different options, fix it
-        msg = str(e)
-        if "already exists with different options" in msg or "ExpireAfterSeconds" in msg or "expireAfterSeconds" in msg:
-            try:
-                bonus_voucher_collection.drop_index(idx_name)
-            except Exception:
-                # fallback: find index by key
-                for ix in bonus_voucher_collection.list_indexes():
-                    if ix.get("key") == {"end_time": 1}:
-                        bonus_voucher_collection.drop_index(ix["name"])
-                        break
-            bonus_voucher_collection.create_index(
-                [("end_time", 1)],
-                expireAfterSeconds=0,
-                name=idx_name,
-            )
-            print("🔁 Recreated TTL index on bonus_voucher.end_time")
-        else:
+    def _safe_create_index(collection, keys, **kwargs):
+        index_name = kwargs.get("name")
+        try:
+            collection.create_index(keys, **kwargs)
+            return
+        except Exception as e:
+            msg = str(e)
+            if "already exists with different options" in msg or "ExpireAfterSeconds" in msg or "expireAfterSeconds" in msg:
+                try:
+                    if index_name:
+                        collection.drop_index(index_name)
+                    else:
+                        raise RuntimeError("missing index name")
+                except Exception:
+                    expected_key = dict(keys)
+                    for ix in collection.list_indexes():
+                        if ix.get("key") == expected_key:
+                            collection.drop_index(ix["name"])
+                            break
+                try:
+                    collection.create_index(keys, **kwargs)
+                    return
+                except Exception as recreate_error:
+                    print("⚠️ ensure_indexes error:", recreate_error)
+                    return
             print("⚠️ ensure_indexes error:", e)
 
+    idx_name = "ttl_end_time"
+    _safe_create_index(
+        bonus_voucher_collection,
+        [("end_time", 1)],
+        expireAfterSeconds=0,
+        name=idx_name,
+    )
+    
     # --- joins tracking ---
-    db.joins.create_index([("user_id", 1), ("chat_id", 1), ("joined_at", -1)])
-    db.joins.create_index([("chat_id", 1), ("joined_at", -1)])
-    db.joins.create_index([("via_invite", 1)])
-    try:
-        users_collection.create_index(
-            [("user_id", 1)],
-            unique=True,
-            name="uniq_user_id",
-            sparse=True,
-        )
-    except Exception as e:
-        msg = str(e)
-        if "already exists with different options" in msg:
-            try:
-                users_collection.drop_index("uniq_user_id")
-            except Exception:
-                for ix in users_collection.list_indexes():
-                    if ix.get("key") == {"user_id": 1}:
-                        users_collection.drop_index(ix["name"])
-                        break
-            users_collection.create_index(
-                [("user_id", 1)],
-                unique=True,
-                name="uniq_user_id",
-                sparse=True,
-            )
-        else:
-            print("⚠️ ensure_indexes error:", e)    
-    try:
-        invite_link_map_collection.create_index(
-            [("chat_id", 1), ("invite_link", 1)],
-            unique=True,
-            name="uniq_chat_invite_link",
-        )
-    except Exception as e:
-        msg = str(e)
-        if "already exists with different options" in msg:
-            try:
-                invite_link_map_collection.drop_index("uniq_chat_invite_link")
-            except Exception:
-                for ix in invite_link_map_collection.list_indexes():
-                    if ix.get("key") == {"chat_id": 1, "invite_link": 1}:
-                        invite_link_map_collection.drop_index(ix["name"])
-                        break
-            invite_link_map_collection.create_index(
-                [("chat_id", 1), ("invite_link", 1)],
-                unique=True,
-                name="uniq_chat_invite_link",
-            )
-        else:
-            print("⚠️ ensure_indexes error:", e)
-    invite_link_map_collection.create_index(
+    _safe_create_index(db.joins, [("user_id", 1), ("chat_id", 1), ("joined_at", -1)])
+    _safe_create_index(db.joins, [("chat_id", 1), ("joined_at", -1)])
+    _safe_create_index(db.joins, [("via_invite", 1)])
+    _safe_create_index(
+        users_collection,
+        [("user_id", 1)],
+        unique=True,
+        name="uniq_user_id",
+        sparse=True,
+    )
+    _safe_create_index(
+        invite_link_map_collection,
+        [("chat_id", 1), ("invite_link", 1)],
+        unique=True,
+        name="uniq_chat_invite_link",
+    )
+    _safe_create_index(
+        invite_link_map_collection,
         [("invite_link", 1)],
         name="idx_invite_link",
-    )            
-    unknown_invite_links_collection.create_index(
+    )
+    _safe_create_index(
+        unknown_invite_links_collection,
         [("chat_id", 1), ("invite_link", 1), ("invitee_id", 1)],
         unique=True,
         name="uniq_unknown_invite",
     )
-    referral_award_events_collection.create_index(
+    _safe_create_index(
+        referral_award_events_collection,
         [("award_key", 1)],
         unique=True,
         name="uniq_referral_award_key",
     )
-    referral_events_collection.create_index(
+    _safe_create_index(
+        referral_events_collection,
         [("event", 1), ("inviter_id", 1), ("invitee_id", 1)],
         unique=True,
         name="uniq_referral_event",
     )
-    referral_events_collection.create_index(
+    _safe_create_index(
+        referral_events_collection,
         [("inviter_id", 1), ("occurred_at", 1)],
         name="referral_events_by_inviter_time",
-    )    
-    pending_referrals_collection.create_index(
+    )
+    _safe_create_index(
+        pending_referrals_collection,
         [("group_id", 1), ("invitee_user_id", 1)],
         unique=True,
         name="uniq_pending_invitee",
     )
-    pending_referrals_collection.create_index(
+    _safe_create_index(
+        pending_referrals_collection,
         [("status", 1), ("created_at_utc", 1)],
         name="pending_by_time",
     )
-    pending_referrals_collection.create_index(
+    _safe_create_index(
+        pending_referrals_collection,
         [("status", 1), ("next_retry_at_utc", 1)],
         name="pending_by_retry",
     )
-    pending_referrals_collection.create_index(
+    _safe_create_index(
+        pending_referrals_collection,
         [("inviter_user_id", 1), ("status", 1)],
         name="pending_by_inviter",
     )
-    referral_tokens_collection.create_index([("owner_uid", 1), ("created_at", -1)], name="referral_tokens_by_owner_created")
-    referral_claims_collection.create_index([("viewer_uid", 1)], unique=True, name="uniq_referral_claim_viewer")
-    referral_claims_collection.create_index([("status", 1), ("due_at", 1)], name="referral_claims_by_status_due")
-    referral_claims_collection.create_index([("source_uid", 1), ("validated_at", -1)], name="referral_claims_by_source_validated")
-    growth_credit_collection.create_index([("_id", 1)], unique=True, name="uniq_growth_credit_source")
-    voucher_ledger_collection.create_index(
+    _safe_create_index(referral_tokens_collection, [("owner_uid", 1), ("created_at", -1)], name="referral_tokens_by_owner_created")
+    _safe_create_index(referral_claims_collection, [("viewer_uid", 1)], unique=True, name="uniq_referral_claim_viewer")
+    _safe_create_index(referral_claims_collection, [("status", 1), ("due_at", 1)], name="referral_claims_by_status_due")
+    _safe_create_index(referral_claims_collection, [("source_uid", 1), ("validated_at", -1)], name="referral_claims_by_source_validated")
+    _safe_create_index(
+        voucher_ledger_collection,
         [("kind", 1), ("claim_id", 1)],
         unique=True,
         partialFilterExpression={"kind": "ugc_viewer_reward"},
         name="uniq_ugc_viewer_reward_claim",
     )
-    voucher_ledger_collection.create_index(
+    _safe_create_index(
+        voucher_ledger_collection,
         [("kind", 1), ("source_uid", 1), ("tier", 1)],
         unique=True,
         partialFilterExpression={"kind": "ugc_referrer_reward"},
@@ -1265,12 +1246,12 @@ def ensure_indexes():
     )
 
     # --- optional welcome eligibility ---
-    db.welcome_eligibility.create_index([("uid", 1)], unique=True)
-    db.welcome_eligibility.create_index([("expires_at", 1)], expireAfterSeconds=0)
-    db.welcome_tickets.create_index([("uid", 1)], unique=True)
-    db.welcome_tickets.create_index([("cleanup_at", 1)], expireAfterSeconds=0)
+    _safe_create_index(db.welcome_eligibility, [("uid", 1)], unique=True)
+    _safe_create_index(db.welcome_eligibility, [("expires_at", 1)], expireAfterSeconds=0)
+    _safe_create_index(db.welcome_tickets, [("uid", 1)], unique=True)
+    _safe_create_index(db.welcome_tickets, [("cleanup_at", 1)], expireAfterSeconds=0)
     
-    xp_events_collection.create_index([("user_id", 1), ("reason", 1)])
+    _safe_create_index(xp_events_collection, [("user_id", 1), ("reason", 1)])
     ensure_xp_indexes(db)
 
 
@@ -1286,13 +1267,15 @@ def ensure_indexes():
         if "uq_tg_verif_user_id_nonnull" in verif_indexes_by_name:
             logger.info("[VERIFY_QUEUE] index exists, skip")
         else:
-            tg_verification_queue_collection.create_index(
+            _safe_create_index(
+                tg_verification_queue_collection,
                 [("user_id", 1)],
                 unique=True,
                 name="uq_tg_verif_user_id_nonnull",
                 partialFilterExpression={"user_id": {"$type": "number"}},
             )
-        tg_verification_queue_collection.create_index(
+        _safe_create_index(
+            tg_verification_queue_collection,
             [("status", 1), ("created_at", 1)],
             name="ix_verif_status_created",
         )
