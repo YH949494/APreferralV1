@@ -21,7 +21,7 @@ from vouchers import (
     _should_enforce_session_cooldown,
     claim_pooled,
     get_claimable_pools,
-    get_visible_pools,.
+    get_visible_pools,
     reconcile_pooled_remaining,
 )
 
@@ -721,3 +721,160 @@ class VoucherAntiHunterTests(unittest.TestCase):
         
 if __name__ == "__main__":
     unittest.main()
+
+
+class FakeSimpleCollection:
+    def __init__(self, docs=None):
+        self.docs = []
+        self._id = 1
+        for doc in docs or []:
+            d = dict(doc)
+            d.setdefault("_id", self._id)
+            self._id += 1
+            self.docs.append(d)
+
+    def _match(self, doc, filt):
+        for k, v in filt.items():
+            if isinstance(v, dict) and "$gte" in v:
+                if doc.get(k) < v["$gte"]:
+                    return False
+                continue
+            if isinstance(v, dict) and "$lte" in v:
+                if doc.get(k) > v["$lte"]:
+                    return False
+                continue
+            if isinstance(v, dict) and "$in" in v:
+                if doc.get(k) not in v["$in"]:
+                    return False
+                continue
+            if doc.get(k) != v:
+                return False
+        return True
+
+    def find_one(self, filt):
+        for d in self.docs:
+            if self._match(d, filt):
+                return dict(d)
+        return None
+
+    def insert_one(self, doc):
+        d = dict(doc)
+        d.setdefault("_id", self._id)
+        self._id += 1
+        self.docs.append(d)
+        class R:
+            inserted_id = d["_id"]
+        return R()
+
+    def update_one(self, filt, update, upsert=False):
+        for d in self.docs:
+            if self._match(d, filt):
+                for k, v in update.get("$set", {}).items():
+                    d[k] = v
+                for k, v in update.get("$inc", {}).items():
+                    d[k] = d.get(k, 0) + v
+                for k, v in update.get("$unset", {}).items():
+                    d.pop(k, None)
+                return
+        if upsert:
+            nd = dict(filt)
+            for k, v in update.get("$set", {}).items():
+                nd[k] = v
+            for k, v in update.get("$setOnInsert", {}).items():
+                nd.setdefault(k, v)
+            nd["_id"] = self._id
+            self._id += 1
+            self.docs.append(nd)
+
+    def find_one_and_update(self, filt, update, return_document=None, upsert=False):
+        found = None
+        for d in self.docs:
+            if self._match(d, filt):
+                found = d
+                break
+        if not found and upsert:
+            found = dict(filt)
+            found["_id"] = self._id
+            self._id += 1
+            self.docs.append(found)
+        if not found:
+            return None
+        for k, v in update.get("$setOnInsert", {}).items():
+            found.setdefault(k, v)
+        for k, v in update.get("$set", {}).items():
+            found[k] = v
+        return dict(found)
+
+    def count_documents(self, filt):
+        return sum(1 for d in self.docs if self._match(d, filt))
+
+
+class UGCRewardTests(unittest.TestCase):
+    def test_dedupe_submission_hash(self):
+        import vouchers as m
+        h1 = m._post_hash("https://instagram.com/p/abc")
+        h2 = m._post_hash("https://instagram.com/p/abc")
+        self.assertEqual(h1, h2)
+
+    def test_t1_auto_issue_path_writes_ledger(self):
+        import vouchers as m
+        orig_ledger = m.ugc_reward_ledger_col
+        orig_sub = m.ugc_submissions_col
+        orig_claim = m.claim_voucher_for_user
+        orig_t1 = m.UGC_T1_DROP_ID
+        m.ugc_reward_ledger_col = FakeSimpleCollection()
+        m.ugc_submissions_col = FakeSimpleCollection([{"_id": "s1", "reward": {}}])
+        m.UGC_T1_DROP_ID = "drop-t1"
+        m.claim_voucher_for_user = lambda **kwargs: {"code": "C1", "claimedAt": datetime.now(timezone.utc).isoformat()}
+        try:
+            out = m._issue_small_reward({"_id": "s1", "user_id": 1, "usernameLower": "u", "tier_claimed": "T1"})
+            self.assertTrue(out["ok"])
+            self.assertEqual(m.ugc_reward_ledger_col.docs[0]["status"], "issued")
+        finally:
+            m.ugc_reward_ledger_col = orig_ledger
+            m.ugc_submissions_col = orig_sub
+            m.claim_voucher_for_user = orig_claim
+            m.UGC_T1_DROP_ID = orig_t1
+
+    def test_no_codes_left_keeps_approved_not_issued(self):
+        import vouchers as m
+        orig_ledger = m.ugc_reward_ledger_col
+        orig_sub = m.ugc_submissions_col
+        orig_claim = m.claim_voucher_for_user
+        orig_t1 = m.UGC_T1_DROP_ID
+        m.ugc_reward_ledger_col = FakeSimpleCollection()
+        m.ugc_submissions_col = FakeSimpleCollection([{"_id": "s2", "reward": {}}])
+        m.UGC_T1_DROP_ID = "drop-t1"
+        def _raise(**kwargs):
+            raise m.NoCodesLeft("sold_out")
+        m.claim_voucher_for_user = _raise
+        try:
+            out = m._issue_small_reward({"_id": "s2", "user_id": 1, "usernameLower": "u", "tier_claimed": "T1"})
+            self.assertFalse(out["ok"])
+            self.assertEqual(m.ugc_reward_ledger_col.docs[0]["status"], "approved_not_issued")
+        finally:
+            m.ugc_reward_ledger_col = orig_ledger
+            m.ugc_submissions_col = orig_sub
+            m.claim_voucher_for_user = orig_claim
+            m.UGC_T1_DROP_ID = orig_t1
+
+    def test_t4_gate_calculation(self):
+        import vouchers as m
+        now = datetime.now(timezone.utc)
+        orig_sub = m.ugc_submissions_col
+        orig_kpi = m.ugc_user_kpis_col
+        docs = []
+        for _ in range(15):
+            docs.append({"user_id": 9, "status": "validated", "tier_claimed": "T2", "updated_at": now - timedelta(days=1)})
+        for _ in range(25):
+            docs.append({"user_id": 9, "status": "validated", "tier_claimed": "T1", "updated_at": now - timedelta(days=10)})
+        m.ugc_submissions_col = FakeSimpleCollection(docs)
+        m.ugc_user_kpis_col = FakeSimpleCollection()
+        try:
+            kpi = m._compute_user_kpis(9)
+            self.assertEqual(kpi["count_validated_t2_last_30d"], 15)
+            self.assertEqual(kpi["count_validated_all_last_60d"], 40)
+            self.assertTrue(kpi["t4_candidate"])
+        finally:
+            m.ugc_submissions_col = orig_sub
+            m.ugc_user_kpis_col = orig_kpi
