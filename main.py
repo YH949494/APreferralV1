@@ -4,7 +4,7 @@ from flask import (
 )
 from flask_cors import CORS
 from threading import Thread 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 from html import escape as html_escape
 from telegram.ext import (
@@ -96,6 +96,7 @@ MONGO_URL = os.environ.get("MONGO_URL")
 BOT_USERNAME = (os.environ.get("BOT_USERNAME") or "").strip()
 BASE_WEBAPP_URL = "https://apreferralv1.fly.dev/miniapp"
 WEBAPP_URL = f"{BASE_WEBAPP_URL}?v={MINIAPP_VERSION}"
+MINI_APP_URL = (os.environ.get("MINI_APP_URL") or "").strip()
 GROUP_ID = -1002304653063
 API_BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
@@ -161,6 +162,8 @@ DEPRECATED_REFERRAL_FIELDS = {
     "monthly_referral_count",
     "referral_count",
 }
+
+START_MINI_APP_URL_MISSING_LOGGED = False
 
 def _warn_if_deprecated_referral_fields(user_doc: dict | None, context: str) -> None:
     if not user_doc:
@@ -2852,15 +2855,21 @@ def _referral_request_hashes(context: ContextTypes.DEFAULT_TYPE, uid: int) -> tu
         
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global START_MINI_APP_URL_MISSING_LOGGED    
     user = update.effective_user
     message = update.effective_message
     
-    # Handle deep links for the Xmas Gift Delight campaign
-    if context.args and len(context.args) > 0 and context.args[0].lower() == "xmasgift":
-        if user:
-            await _send_xmas_flow(update, context, user)
-        return
+    chat = update.effective_chat
+    payload = context.args[0] if context.args and len(context.args) > 0 else None
 
+    logger.info(
+        "[start] uid=%s username=%s chat_id=%s payload=%s",
+        getattr(user, "id", None),
+        getattr(user, "username", None),
+        getattr(chat, "id", None),
+        payload,
+    )
+        
     if user and context.args and len(context.args) > 0 and str(context.args[0]).startswith("r_"):
         token = str(context.args[0])[2:]
         now_utc_ts = now_utc()
@@ -2895,23 +2904,28 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "[WELCOME][JOIN_BACKFILL_DISABLED] uid=%s joined_main_at_missing",
                 user.id,
             ) 
-        keyboard = [[
-            InlineKeyboardButton("🚀 Open AdvantPlay Mini-App", web_app=WebAppInfo(url=WEBAPP_URL))
-        ]]
         if message:
-            await safe_reply_text(
-                message,
-                "👋 Welcome to AdvantPlay Community!\n\n"
-                "Tap below to enter the Mini-App and:\n"
-                "• Check-in daily to earn XP\n"
-                "• Unlock your referral link\n"
-                "• Claim voucher code\n\n"
-                "Start your journey here 👇",
-                reply_markup=InlineKeyboardMarkup(keyboard),
-                uid=user.id,
-                send_type="start",
-                raise_on_non_transient=False,
-            )
+            if MINI_APP_URL:
+                keyboard = [[InlineKeyboardButton("🚀 Open AdvantPlay Mini-App", url=MINI_APP_URL)]]
+                await safe_reply_text(
+                    message,
+                    "Welcome to AdvantPlay Community!\nTap below to open the Mini-App.",
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                    uid=user.id,
+                    send_type="start",
+                    raise_on_non_transient=False,
+                )
+            else:
+                if not START_MINI_APP_URL_MISSING_LOGGED:
+                    logger.error("[start] MINI_APP_URL missing")
+                    START_MINI_APP_URL_MISSING_LOGGED = True
+                await safe_reply_text(
+                    message,
+                    "Mini-App is temporarily unavailable.",
+                    uid=user.id,
+                    send_type="start",
+                    raise_on_non_transient=False,
+                )
             
 async def handle_xmas_checkin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Xmas Gift Delight check-in flow triggered via inline keyboard."""
