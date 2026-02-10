@@ -1246,7 +1246,6 @@ def ensure_indexes():
         [("inviter_user_id", 1), ("status", 1)],
         name="pending_by_inviter",
     )
-    referral_tokens_collection.create_index([("_id", 1)], unique=True, name="uniq_referral_token")
     referral_tokens_collection.create_index([("owner_uid", 1), ("created_at", -1)], name="referral_tokens_by_owner_created")
     referral_claims_collection.create_index([("viewer_uid", 1)], unique=True, name="uniq_referral_claim_viewer")
     referral_claims_collection.create_index([("status", 1), ("due_at", 1)], name="referral_claims_by_status_due")
