@@ -28,7 +28,6 @@ from config import (
 from time_utils import expires_in_seconds, tz_name
 
 from bson.json_util import dumps
-from bson.objectid import ObjectId
 from xp import ensure_xp_indexes, grant_xp, now_utc
 
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -38,20 +37,14 @@ from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_MISSED
 from app_context import set_app_bot, set_bot, set_scheduler
 from onboarding import MYWIN_CHAT_ID, onboarding_due_tick, record_first_mywin
 from vouchers import vouchers_bp, ensure_voucher_indexes, process_verification_queue
-from scheduler import (
-    settle_pending_referrals,
-    settle_referral_snapshots,
-    settle_xp_snapshots,
-    recompute_affiliate_kpis,
-    issue_voucher_ledger_entry,
-)
+from scheduler import settle_pending_referrals, settle_referral_snapshots, settle_xp_snapshots
 from telegram_utils import safe_reply_text
 
 from pymongo import DESCENDING, ASCENDING, ReturnDocument  # keep if used elsewhere
-from pymongo.errors import DuplicateKeyError, CursorNotFound, OperationFailure
+from pymongo.errors import DuplicateKeyError, CursorNotFound
 import os, asyncio, traceback, csv, io, requests, logging, time, uuid, socket
 import pytz
-from database import init_db, db, normalize_affiliate_status, normalize_affiliate_role
+from database import init_db, db
 
 FIRST_CHECKIN_BONUS_XP = int(os.getenv("FIRST_CHECKIN_BONUS_XP", "200"))
 WELCOME_BONUS_XP = int(os.getenv("WELCOME_BONUS_XP", "20"))
@@ -452,19 +445,6 @@ def process_verification_queue_scheduled(batch_limit: int = 50) -> None:
     process_verification_queue(batch_limit=batch_limit)
     logger.info(
         "[SCHEDULER][VERIFY] done elapsed=%.2fs",
-        time.time() - start_time,
-    )
-
-def recompute_affiliate_kpis_scheduled() -> None:
-    acquired, _lock_doc = acquire_scheduler_lock("affiliate_kpis", ttl_seconds=7200)
-    if not acquired:
-        logger.info("[SCHEDULER][AFFILIATE] lock_not_acquired")
-        return
-    logger.info("[SCHEDULER][AFFILIATE] start")
-    start_time = time.time()
-    recompute_affiliate_kpis()
-    logger.info(
-        "[SCHEDULER][AFFILIATE] done elapsed=%.2fs",
         time.time() - start_time,
     )
 
@@ -1259,96 +1239,21 @@ def ensure_indexes():
 
 
     try:
-        try:
-            for legacy_name in ("uniq_tg_verify_user_id", "uniq_user_checks"):
-                try:
-                    tg_verification_queue_collection.drop_index(legacy_name)
-                except Exception:
-                    pass
-            # Dedupe before creating unique index to avoid startup failures on existing data.
-            tg_verification_queue_collection.update_many(
-                {"user_id": None},
-                {"$unset": {"user_id": ""}},
-            )
-            dup_groups = tg_verification_queue_collection.aggregate(
-                [
-                    {"$match": {"user_id": {"$exists": True}}},
-                    {
-                        "$group": {
-                            "_id": "$user_id",
-                            "ids": {"$push": "$_id"},
-                            "n": {"$sum": 1},
-                        }
-                    },
-                    {"$match": {"n": {"$gt": 1}}},
-                ]
-            )
-            removed = 0
-            for group in dup_groups:
-                user_id = group.get("_id")
-                if user_id is None:
-                    continue
-                docs = list(
-                    tg_verification_queue_collection.find(
-                        {"user_id": user_id},
-                        {"_id": 1, "created_at": 1},
-                    )
-                )
-                if not docs:
-                    continue
-                def sort_key(doc):
-                    ca = doc.get("created_at")
-                    if ca is None:
-                        return (0, doc["_id"])
-                    return (1, ca)
-                keep_doc = max(docs, key=sort_key)
-                keep_id = keep_doc["_id"]
-                ids_to_delete = [doc["_id"] for doc in docs if doc["_id"] != keep_id]
-                if ids_to_delete:
-                    tg_verification_queue_collection.delete_many(
-                        {"_id": {"$in": ids_to_delete}}
-                    )
-                    removed += len(ids_to_delete)
-            if removed:
-                logger.info(
-                    "[VERIFY_QUEUE] deduped %s duplicate tg_verification_queue docs",
-                    removed,
-                )
-        except Exception as e:
-            logger.warning(
-                "[VERIFY_QUEUE] dedupe skipped due to error: %s",
-                e,
-                exc_info=True,
-            )
-        try:
-            tg_verification_queue_collection.drop_index("uq_tg_verif_user_id_nonnull")
-        except Exception:
-            pass
-        try:
-            tg_verification_queue_collection.create_index(
-                [("user_id", 1)],
-                unique=True,
-                name="uq_tg_verif_user_id_nonnull",
-                partialFilterExpression={"user_id": {"$exists": True}},
-            )
-        except OperationFailure:
-            logger.warning(
-                "[VERIFY_QUEUE] partial unique index failed; falling back to sparse",
-                exc_info=True,
-            )
-            tg_verification_queue_collection.create_index(
-                [("user_id", 1)],
-                unique=True,
-                sparse=True,
-                name="uq_tg_verif_user_id_nonnull",
-            )
-        
+        for legacy_name in ("uniq_tg_verify_user_id", "uniq_user_checks"):
+            try:
+                tg_verification_queue_collection.drop_index(legacy_name)
+            except Exception:
+                pass
+        tg_verification_queue_collection.create_index(
+            [("user_id", 1)],
+            unique=True,
+            name="uq_tg_verif_user_id_nonnull",
+            partialFilterExpression={"user_id": {"$exists": True, "$ne": None}},
+        )
         tg_verification_queue_collection.create_index(
             [("status", 1), ("created_at", 1)],
             name="ix_verif_status_created",
         )
-    except OperationFailure:
-        logger.warning("[VERIFY_QUEUE] ensure_indexes error", exc_info=True)        
     except Exception as e:
         print("⚠️ ensure_indexes error:", e)
         
@@ -1549,138 +1454,6 @@ def joins_export():
         },
     )
     return jsonify(list(cur))
-
-@admin_bp.post("/api/admin/affiliate")
-def admin_update_affiliate():
-    ok, err = require_admin_from_query()
-    if not ok:
-        msg, code = err
-        return jsonify({"success": False, "message": msg}), code
-
-    payload = request.get_json(silent=True) or {}
-    target_user_id = payload.get("target_user_id")
-    if not target_user_id:
-        return jsonify({"success": False, "message": "Missing target_user_id"}), 400
-    try:
-        target_user_id = int(target_user_id)
-    except (TypeError, ValueError):
-        return jsonify({"success": False, "message": "Invalid target_user_id"}), 400
-
-    affiliate_status = payload.get("affiliate_status")
-    role = payload.get("role")
-    level3_granted = payload.get("level3_granted")
-
-    update_doc = {"$set": {}, "$unset": {}}
-    if affiliate_status is not None:
-        normalized_status = normalize_affiliate_status(str(affiliate_status))
-        if normalized_status != affiliate_status and affiliate_status not in ("none", "pending", "active", "suspended"):
-            return jsonify({"success": False, "message": "Invalid affiliate_status"}), 400
-        update_doc["$set"]["affiliate_status"] = normalized_status
-        if normalized_status == "active":
-            update_doc["$set"]["affiliate_since"] = datetime.now(timezone.utc)
-            update_doc["$set"]["role"] = "affiliate"
-    if role is not None:
-        normalized_role = normalize_affiliate_role(str(role))
-        if normalized_role != role and role not in ("member", "affiliate"):
-            return jsonify({"success": False, "message": "Invalid role"}), 400
-        update_doc["$set"]["role"] = normalized_role
-    if level3_granted is not None:
-        update_doc["$set"]["level3_granted"] = bool(level3_granted)
-
-    if not update_doc["$set"]:
-        update_doc.pop("$set")
-    if not update_doc["$unset"]:
-        update_doc.pop("$unset")
-    if not update_doc:
-        return jsonify({"success": False, "message": "No updates provided"}), 400
-
-    users_collection.update_one({"user_id": target_user_id}, update_doc, upsert=True)
-    return jsonify({"success": True, "user_id": target_user_id})
-
-
-@admin_bp.get("/api/admin/voucher-ledger")
-def admin_voucher_ledger_list():
-    ok, err = require_admin_from_query()
-    if not ok:
-        msg, code = err
-        return jsonify({"success": False, "message": msg}), code
-    status = (request.args.get("status") or "PENDING").upper()
-    period = request.args.get("period")
-    query = {"status": status}
-    if period:
-        query["period"] = period
-    docs = list(db.voucher_ledger.find(query).sort("created_at", -1).limit(200))
-
-    def _iso(dt_value):
-        if not dt_value:
-            return None
-        if isinstance(dt_value, str):
-            return dt_value
-        return dt_value.isoformat()
-
-    payload = []
-    for doc in docs:
-        payload.append(
-            {
-                "id": str(doc.get("_id")),
-                "beneficiary_uid": doc.get("beneficiary_uid"),
-                "affiliate_uid": doc.get("affiliate_uid"),
-                "reward_type": doc.get("reward_type"),
-                "source_uid": doc.get("source_uid"),
-                "period": doc.get("period"),
-                "status": doc.get("status"),
-                "created_at": _iso(doc.get("created_at")),
-                "approved_at": _iso(doc.get("approved_at")),
-                "issued_at": _iso(doc.get("issued_at")),
-                "issued_voucher_code": doc.get("issued_voucher_code"),
-                "meta": doc.get("meta") or {},
-            }
-        )
-    return jsonify({"success": True, "entries": payload}), 200
-
-
-@admin_bp.post("/api/admin/voucher-ledger/<ledger_id>/approve")
-def admin_voucher_ledger_approve(ledger_id):
-    ok, err = require_admin_from_query()
-    if not ok:
-        msg, code = err
-        return jsonify({"success": False, "message": msg}), code
-    if not ObjectId.is_valid(ledger_id):
-        return jsonify({"success": False, "message": "Invalid ledger id"}), 400
-    oid = ObjectId(ledger_id)
-    entry = db.voucher_ledger.find_one({"_id": oid})
-    if not entry:
-        return jsonify({"success": False, "message": "Ledger entry not found"}), 404
-    if entry.get("status") != "PENDING":
-        return jsonify({"success": False, "message": "Ledger entry not pending"}), 400
-    now_ts = now_utc()
-    result = db.voucher_ledger.update_one(
-        {"_id": oid, "status": "PENDING"},
-        {"$set": {"status": "APPROVED", "approved_at": now_ts}},
-    )
-    if result.modified_count:
-        logger.info("ledger_admin_approved=1 id=%s", ledger_id)
-    return jsonify({"success": True}), 200
-
-
-@admin_bp.post("/api/admin/voucher-ledger/<ledger_id>/issue")
-def admin_voucher_ledger_issue(ledger_id):
-    ok, err = require_admin_from_query()
-    if not ok:
-        msg, code = err
-        return jsonify({"success": False, "message": msg}), code
-    if not ObjectId.is_valid(ledger_id):
-        return jsonify({"success": False, "message": "Invalid ledger id"}), 400
-    oid = ObjectId(ledger_id)
-    entry = db.voucher_ledger.find_one({"_id": oid})
-    if not entry:
-        return jsonify({"success": False, "message": "Ledger entry not found"}), 404
-    if entry.get("status") != "APPROVED":
-        return jsonify({"success": False, "message": "Ledger entry not approved"}), 400
-    code = issue_voucher_ledger_entry(entry, now_utc_ts=now_utc(), log_label="ledger_admin_issued")
-    if not code:
-        return jsonify({"success": False, "message": "Voucher issuance failed"}), 500
-    return jsonify({"success": True, "code": code}), 200
 
 
 app.register_blueprint(admin_bp)
@@ -2030,49 +1803,6 @@ def format_username(u, current_user_id, is_admin):
     # Admin or own account → show full name
     return name
 
-def _affiliate_payload(user_doc: dict | None) -> dict:
-    doc = user_doc or {}
-    status = normalize_affiliate_status(doc.get("affiliate_status"))
-    role = normalize_affiliate_role(doc.get("role"))
-    return {
-        "role": role,
-        "affiliate_status": status,
-        "affiliate_since": doc.get("affiliate_since"),
-        "kpi_l2_30d": int(doc.get("kpi_l2_30d", 0)),
-        "kpi_l3_30d": int(doc.get("kpi_l3_30d", 0)),
-    }
-
-@app.route("/api/me")
-def api_me():
-    try:
-        user_id = request.args.get("user_id", type=int)
-        if not user_id:
-            return jsonify({"success": False, "message": "Missing user_id"}), 400
-        doc = users_collection.find_one(
-            {"user_id": user_id},
-            {
-                "user_id": 1,
-                "level": 1,
-                "role": 1,
-                "affiliate_status": 1,
-                "affiliate_since": 1,
-                "kpi_l2_30d": 1,
-                "kpi_l3_30d": 1,
-            },
-        ) or {}
-        payload = {
-            "success": True,
-            "user": {
-                "user_id": user_id,
-                "level": int(doc.get("level", 1)),
-                **_affiliate_payload(doc),
-            },
-        }
-        return jsonify(payload), 200
-    except Exception:
-        logger.exception("[API][ME] failed")
-        return jsonify({"success": False, "message": "Failed to load"}), 500
-
 @app.route("/api/leaderboard")
 def get_leaderboard():
     try:
@@ -2111,7 +1841,7 @@ def get_leaderboard():
             )
             xp_rows = list(
                 users_collection
-                .find(xp_query, {"user_id": 1, "username": 1, "weekly_xp": 1, "affiliate_status": 1})
+                .find(xp_query, {"user_id": 1, "username": 1, "weekly_xp": 1})
                 .sort("weekly_xp", DESCENDING)
                 .limit(leaderboard_limit)
             )
@@ -2146,7 +1876,6 @@ def get_leaderboard():
                         "user_id": row.get("user_id"),
                         "username": row.get("username"),
                         "weekly_xp": int(row.get("weekly_xp", 0)),
-                        "affiliate_status": normalize_affiliate_status(row.get("affiliate_status")),                        
                     }
                     for row in xp_rows
                 ],
@@ -2173,13 +1902,7 @@ def get_leaderboard():
             formatted = safe_format({"user_id": row.get("user_id"), "username": row.get("username")})
             if not formatted:
                 continue
-            top_checkins.append(
-                {
-                    "username": formatted,
-                    "xp": int(row.get("weekly_xp", 0)),
-                    "affiliate_status": normalize_affiliate_status(row.get("affiliate_status")),
-                }
-            )
+            top_checkins.append({"username": formatted, "xp": int(row.get("weekly_xp", 0))})
 
         referral_board = []
         for row in cached_payload.get("referral", []):
@@ -2255,94 +1978,6 @@ def get_leaderboard():
             }
         ), 200
 
-@app.route("/api/leaderboard/xp")
-def get_leaderboard_xp():
-    try:
-        raw_user_id = request.args.get("user_id")
-        try:
-            current_user_id = int(raw_user_id) if raw_user_id not in (None, "", "undefined") else 0
-        except (TypeError, ValueError):
-            current_user_id = 0
-
-        leaderboard_limit = 15
-        user_record = users_collection.find_one({"user_id": current_user_id}, {"is_admin": 1}) or {}
-        is_admin = bool(user_record.get("is_admin", False))
-        xp_rows = list(
-            users_collection
-            .find({"user_id": {"$ne": None}}, {"user_id": 1, "username": 1, "weekly_xp": 1, "affiliate_status": 1})
-            .sort("weekly_xp", DESCENDING)
-            .limit(leaderboard_limit)
-        )
-
-        def safe_format(u):
-            if "user_id" not in u:
-                u["user_id"] = 0
-            return format_username(u, current_user_id, is_admin)
-
-        payload_rows = []
-        for row in xp_rows:
-            formatted = safe_format({"user_id": row.get("user_id"), "username": row.get("username")})
-            if not formatted:
-                continue
-            payload_rows.append(
-                {
-                    "username": formatted,
-                    "xp": int(row.get("weekly_xp", 0)),
-                    "affiliate_status": normalize_affiliate_status(row.get("affiliate_status")),
-                }
-            )
-
-        return jsonify({"success": True, "leaderboard": {"checkin": payload_rows}}), 200
-    except Exception:
-        logger.exception("[LEADERBOARD_XP] failed")
-        return jsonify({"success": True, "leaderboard": {"checkin": []}}), 200
-
-
-@app.route("/api/leaderboard/affiliate")
-def get_leaderboard_affiliate():
-    try:
-        raw_user_id = request.args.get("user_id")
-        try:
-            current_user_id = int(raw_user_id) if raw_user_id not in (None, "", "undefined") else 0
-        except (TypeError, ValueError):
-            current_user_id = 0
-
-        leaderboard_limit = 50
-        user_record = users_collection.find_one({"user_id": current_user_id}, {"is_admin": 1}) or {}
-        is_admin = bool(user_record.get("is_admin", False))
-
-        affiliate_rows = list(
-            users_collection.find(
-                {"affiliate_status": "active"},
-                {"user_id": 1, "username": 1, "kpi_l2_30d": 1, "kpi_l3_30d": 1, "xp": 1},
-            )
-            .sort([("kpi_l3_30d", DESCENDING), ("kpi_l2_30d", DESCENDING), ("xp", DESCENDING)])
-            .limit(leaderboard_limit)
-        )
-
-        def safe_format(u):
-            if "user_id" not in u:
-                u["user_id"] = 0
-            return format_username(u, current_user_id, is_admin)
-
-        leaderboard = []
-        for row in affiliate_rows:
-            formatted = safe_format({"user_id": row.get("user_id"), "username": row.get("username")})
-            if not formatted:
-                continue
-            leaderboard.append(
-                {
-                    "username": formatted,
-                    "kpi_l3_30d": int(row.get("kpi_l3_30d", 0)),
-                    "kpi_l2_30d": int(row.get("kpi_l2_30d", 0)),
-                    "xp": int(row.get("xp", 0)),
-                }
-            )
-
-        return jsonify({"success": True, "leaderboard": leaderboard}), 200
-    except Exception:
-        logger.exception("[LEADERBOARD_AFFILIATE] failed")
-        return jsonify({"success": True, "leaderboard": []}), 200
 
 @app.route("/api/checkin-status/<int:user_id>", methods=["GET"])
 def api_checkin_status(user_id):
@@ -3539,13 +3174,6 @@ def run_worker():
         name="Tick 5min (Settlement)",
         replace_existing=True,
     )
-    scheduler.add_job(
-        recompute_affiliate_kpis_scheduled,
-        trigger=CronTrigger(hour="*/2", minute=15, timezone=KL_TZ),
-        id="affiliate_kpis",
-        name="Affiliate KPI Recompute",
-        replace_existing=True,
-    )    
     scheduler.add_job(
         process_verification_queue_scheduled,
         trigger=CronTrigger(minute="*/2", timezone=KL_TZ),
