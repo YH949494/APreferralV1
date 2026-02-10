@@ -27,6 +27,7 @@ ugc_submissions_col = db["ugc_submissions"]
 ugc_user_kpis_col = db["ugc_user_kpis"]
 ugc_reward_ledger_col = db["ugc_reward_ledger"]
 ugc_admin_queue_col = db["ugc_admin_queue"]
+voucher_ledger_col = db["voucher_ledger"]
 
 BYPASS_ADMIN = os.getenv("BYPASS_ADMIN", "0").lower() in ("1", "true", "yes", "on")
 HARDCODED_ADMIN_USERNAMES = {"gracy_ap", "teohyaohui"}  # allow manual overrides if cache is empty
@@ -4521,3 +4522,49 @@ def admin_ugc_ledger_issue(ledger_id):
         {"$set": {"status": "issued", "voucher_code": issued["code"], "issued_at": now_utc(), "updated_at": now_utc()}},
     )
     return jsonify({"ok": True, "status": "issued", "code": issued["code"]}), 200
+
+
+
+@vouchers_bp.route("/admin/ugc-growth/pending-large", methods=["GET"])
+def admin_ugc_growth_pending_large():
+    _, err = require_admin()
+    if err:
+        return err
+    items = []
+    for doc in voucher_ledger_col.find({"kind": "ugc_referrer_reward", "tier": "S4", "status": "pending_admin"}).sort([("created_at", DESCENDING)]).limit(200):
+        doc["_id"] = str(doc["_id"])
+        items.append(doc)
+    return jsonify({"ok": True, "items": items}), 200
+
+
+@vouchers_bp.route("/admin/ugc-growth/ledger/<ledger_id>/approve-large", methods=["POST"])
+def admin_ugc_growth_approve_large(ledger_id):
+    _, err = require_admin()
+    if err:
+        return err
+    ledger = voucher_ledger_col.find_one({"_id": _coerce_id(ledger_id), "kind": "ugc_referrer_reward", "tier": "S4", "status": "pending_admin"})
+    if not ledger:
+        return jsonify({"ok": False, "code": "not_found_or_not_pending"}), 404
+    if not UGC_BIG_POOL_DROP_ID:
+        return jsonify({"ok": False, "code": "missing_drop_id"}), 400
+    user_doc = users_collection.find_one({"user_id": ledger.get("source_uid")}, {"usernameLower": 1, "username": 1}) or {}
+    username = user_doc.get("usernameLower") or user_doc.get("username") or ""
+    try:
+        issued = claim_voucher_for_user(user_id=str(ledger.get("source_uid")), drop_id=UGC_BIG_POOL_DROP_ID, username=username)
+    except NoCodesLeft:
+        return jsonify({"ok": False, "code": "sold_out"}), 409
+    voucher_ledger_col.update_one(
+        {"_id": ledger["_id"]},
+        {"$set": {"status": "issued", "drop_id": UGC_BIG_POOL_DROP_ID, "voucher_code": issued.get("code"), "issued_at": now_utc(), "updated_at": now_utc()}},
+    )
+    bot_token = os.getenv("BOT_TOKEN", "")
+    if bot_token and ledger.get("source_uid"):
+        try:
+            requests.post(
+                f"https://api.telegram.org/bot{bot_token}/sendMessage",
+                json={"chat_id": int(ledger.get("source_uid")), "text": f"Your large reward voucher is ready: {issued.get('code', '')}"},
+                timeout=10,
+            )
+        except Exception:
+            current_app.logger.exception("[ugc_growth] approve_large_dm_failed source_uid=%s", ledger.get("source_uid"))
+    return jsonify({"ok": True, "status": "issued", "code": issued.get("code")}), 200
