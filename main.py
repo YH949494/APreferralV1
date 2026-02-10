@@ -37,8 +37,9 @@ from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_MISSED
 from app_context import set_app_bot, set_bot, set_scheduler
 from onboarding import MYWIN_CHAT_ID, onboarding_due_tick, record_first_mywin
 from vouchers import vouchers_bp, ensure_voucher_indexes, process_verification_queue
-from scheduler import settle_pending_referrals, settle_referral_snapshots, settle_xp_snapshots
+from scheduler import settle_pending_referrals, settle_referral_snapshots, settle_ugc_referral_claims, settle_xp_snapshots
 from telegram_utils import safe_reply_text
+from ugc_growth_referral import create_referral_token, first_touch_claim, hash_value, require_env, resolve_token
 
 from pymongo import DESCENDING, ASCENDING, ReturnDocument  # keep if used elsewhere
 from pymongo.errors import DuplicateKeyError, CursorNotFound
@@ -92,6 +93,7 @@ if not RUNNER_MODE:
 # ----------------------------
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 MONGO_URL = os.environ.get("MONGO_URL")
+BOT_USERNAME = (os.environ.get("BOT_USERNAME") or "").strip()
 BASE_WEBAPP_URL = "https://apreferralv1.fly.dev/miniapp"
 WEBAPP_URL = f"{BASE_WEBAPP_URL}?v={MINIAPP_VERSION}"
 GROUP_ID = -1002304653063
@@ -395,6 +397,18 @@ def tick_5min() -> None:
 
             with JobTimer() as step_timer:
                 logger.info(
+                    "[JOB][5MIN] progress step=settle_ugc_referral_claims run_id=%s",
+                    run_id,
+                )
+                settle_ugc_referral_claims()
+            logger.info(
+                "[JOB][5MIN] step_done name=settle_ugc_referral_claims elapsed_s=%.2f run_id=%s",
+                step_timer.elapsed_s,
+                run_id,
+            )
+            
+            with JobTimer() as step_timer:
+                logger.info(
                     "[JOB][5MIN] progress step=settle_xp_snapshots run_id=%s",
                     run_id,
                 )
@@ -452,6 +466,7 @@ def process_verification_queue_scheduled(batch_limit: int = 50) -> None:
 # MongoDB Setup
 # ----------------------------
 init_db(MONGO_URL)
+UGC_GROWTH_ENV = require_env()
 users_collection = db["users"]
 # SNAPSHOT FIELDS — ONLY WRITTEN BY WORKER
 # weekly_xp, monthly_xp, total_xp, weekly_referrals, monthly_referrals, total_referrals, vip_tier, vip_month
@@ -473,6 +488,10 @@ unknown_invite_links_collection = db["unknown_invite_links"]
 referral_audit_collection = db["referral_audit"]
 unknown_invite_audit_collection = db["unknown_invite_audit"]
 pending_referrals_collection = db["pending_referrals"]
+referral_tokens_collection = db["referral_tokens"]
+referral_claims_collection = db["referral_claims"]
+growth_credit_collection = db["growth_credit"]
+voucher_ledger_collection = db["voucher_ledger"]
 tg_verification_queue_collection = db["tg_verification_queue"]
 scheduler_locks_collection = db["scheduler_locks"]
 try:
@@ -1226,7 +1245,25 @@ def ensure_indexes():
     pending_referrals_collection.create_index(
         [("inviter_user_id", 1), ("status", 1)],
         name="pending_by_inviter",
-    )    
+    )
+    referral_tokens_collection.create_index([("_id", 1)], unique=True, name="uniq_referral_token")
+    referral_tokens_collection.create_index([("owner_uid", 1), ("created_at", -1)], name="referral_tokens_by_owner_created")
+    referral_claims_collection.create_index([("viewer_uid", 1)], unique=True, name="uniq_referral_claim_viewer")
+    referral_claims_collection.create_index([("status", 1), ("due_at", 1)], name="referral_claims_by_status_due")
+    referral_claims_collection.create_index([("source_uid", 1), ("validated_at", -1)], name="referral_claims_by_source_validated")
+    growth_credit_collection.create_index([("_id", 1)], unique=True, name="uniq_growth_credit_source")
+    voucher_ledger_collection.create_index(
+        [("kind", 1), ("claim_id", 1)],
+        unique=True,
+        partialFilterExpression={"kind": "ugc_viewer_reward"},
+        name="uniq_ugc_viewer_reward_claim",
+    )
+    voucher_ledger_collection.create_index(
+        [("kind", 1), ("source_uid", 1), ("tier", 1)],
+        unique=True,
+        partialFilterExpression={"kind": "ugc_referrer_reward"},
+        name="uniq_ugc_referrer_tier",
+    )
 
     # --- optional welcome eligibility ---
     db.welcome_eligibility.create_index([("uid", 1)], unique=True)
@@ -1373,6 +1410,15 @@ def get_or_create_referral_invite_link_sync(user_id: int, username: str = "") ->
             e,
         )
     return invite_link
+
+
+
+def get_or_create_ugc_referral_deeplink_sync(user_id: int) -> str:
+    if not BOT_USERNAME:
+        raise RuntimeError("BOT_USERNAME is required for referral deep links")
+    now = datetime.now(timezone.utc)
+    token, _ = create_referral_token(referral_tokens_collection, owner_uid=user_id, now=now)
+    return f"https://t.me/{BOT_USERNAME}?start=r_{token}"
 
 def require_admin_from_query():
     caller_id = request.args.get("user_id", type=int)
@@ -1736,7 +1782,7 @@ def api_referral():
     stats = {"total_referrals": 0, "weekly_referrals": 0, "monthly_referrals": 0}
     
     try:
-        link = get_or_create_referral_invite_link_sync(user_id, username)
+        link = get_or_create_ugc_referral_deeplink_sync(user_id)
         logger.info("[api_referral] link_generated uid=%s", user_id)        
     except Exception as e:
         success = False
@@ -2814,6 +2860,14 @@ async def _send_xmas_flow(update: Update, context: ContextTypes.DEFAULT_TYPE, us
             raise_on_non_transient=False,
         )
 
+def _referral_request_hashes(context: ContextTypes.DEFAULT_TYPE, uid: int) -> tuple[str | None, str | None, str | None]:
+    req_ctx = (getattr(context, "bot_data", {}) or {}).get("last_request_ctx", {})
+    ip = req_ctx.get("ip")
+    subnet = req_ctx.get("subnet")
+    device = req_ctx.get("device")
+    return hash_value(ip), hash_value(subnet), hash_value(device or f"uid:{uid}")
+
+        
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -2825,6 +2879,23 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await _send_xmas_flow(update, context, user)
         return
 
+    if user and context.args and len(context.args) > 0 and str(context.args[0]).startswith("r_"):
+        token = str(context.args[0])[2:]
+        now_utc_ts = now_utc()
+        owner_uid = resolve_token(referral_tokens_collection, token, now=now_utc_ts)
+        if owner_uid:
+            ip_hash, subnet_hash, device_hash = _referral_request_hashes(context, user.id)
+            first_touch_claim(
+                referral_claims_collection,
+                viewer_uid=user.id,
+                owner_uid=owner_uid,
+                token=token,
+                ip_hash=ip_hash,
+                subnet_hash=subnet_hash,
+                device_hash=device_hash,
+                now=now_utc_ts,
+            )
+    
     if user:
         _users_update_one(
             {"user_id": user.id},
@@ -3101,7 +3172,7 @@ async def button_handler(update, context):
         from functools import partial
         loop = asyncio.get_running_loop()
         link = await loop.run_in_executor(
-            None, partial(get_or_create_referral_invite_link_sync, user_id, query.from_user.username or "")
+            None, partial(get_or_create_ugc_referral_deeplink_sync, user_id)
         )
         await query.edit_message_text(f"👥 Your referral link:\n{link}")
 
