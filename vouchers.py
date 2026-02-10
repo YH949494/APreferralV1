@@ -402,12 +402,21 @@ def ensure_voucher_indexes():
                 tg_verification_queue_col.drop_index(legacy_name)
             except OperationFailure:
                 pass     
-        tg_verification_queue_col.create_index(
-            [("user_id", ASCENDING)],
-            unique=True,
-            name="uq_tg_verif_user_id_nonnull",
-            partialFilterExpression={"user_id": {"$type": ["int", "long"]}},
-        )
+        verif_indexes_by_name = {
+            ix.get("name"): ix for ix in tg_verification_queue_col.list_indexes()
+        }
+        if "uq_tg_verif_user_id_nonnull" in verif_indexes_by_name:
+            try:
+                current_app.logger.info("[VERIFY_QUEUE] index exists, skip")
+            except Exception:
+                print("[VERIFY_QUEUE] index exists, skip")
+        else:
+            tg_verification_queue_col.create_index(
+                [("user_id", ASCENDING)],
+                unique=True,
+                name="uq_tg_verif_user_id_nonnull",
+                partialFilterExpression={"user_id": {"$type": "number"}},
+            )
         tg_verification_queue_col.create_index(
             [("status", ASCENDING), ("created_at", ASCENDING)],
             name="ix_verif_status_created",
