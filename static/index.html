@@ -222,69 +222,11 @@
       display: grid;
       gap: 4px;
     }
-
-    .affiliate-card {
-      margin-top: 14px;
-      padding: 14px;
-      border: 1px solid var(--border-light);
-      border-radius: 12px;
-      background: #f8fafc;
-      display: grid;
-      gap: 10px;
-    }
-
-    .affiliate-card-header {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 8px;
-    }
-
-    .affiliate-kpi-grid {
-      display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 8px;
-    }
-
-    .affiliate-kpi {
-      border: 1px solid var(--border-light);
-      border-radius: 10px;
-      padding: 8px 10px;
-      background: #ffffff;
-      font-size: 13px;
-      display: grid;
-      gap: 4px;
-    }
-
-    .affiliate-kpi .kpi-label {
-      font-size: 11px;
-      color: var(--text-muted);
-      text-transform: uppercase;
-      letter-spacing: 0.4px;
-    }
-
-    .affiliate-status-note {
-      font-size: 13px;
-      color: var(--text-muted);
-    }    
     
     .leaderboard-block {
       margin-bottom: 18px;
     }
 
-    .leaderboard-tabs {
-      display: flex;
-      gap: 8px;
-      flex-wrap: wrap;
-      margin: 10px 0 6px;
-    }
-
-    .leaderboard-tab.active {
-      background: var(--ap-orange);
-      color: #fff;
-      border-color: var(--ap-orange);
-    }
-    
     .leaderboard-header {
       display: flex;
       align-items: center;
@@ -675,46 +617,16 @@
         <div id="referral-progress-expiry">⏳ This link expires in 24h</div>
       </div>
     </div>    
-    <div class="affiliate-card" id="affiliate-card" style="display:none;">
-      <div class="affiliate-card-header">
-        <h4>Affiliate</h4>
-        <span class="badge" id="affiliate-status-badge">Status</span>
-      </div>
-      <div class="affiliate-kpi-grid" id="affiliate-kpis">
-        <div class="affiliate-kpi">
-          <div class="kpi-label">L3 (30d)</div>
-          <div id="affiliate-kpi-l3">0</div>
-        </div>
-        <div class="affiliate-kpi">
-          <div class="kpi-label">L2 (30d)</div>
-          <div id="affiliate-kpi-l2">0</div>
-        </div>
-        <div class="affiliate-kpi">
-          <div class="kpi-label">Monthly Progress</div>
-          <div id="affiliate-kpi-progress">0 / 3</div>
-        </div>
-        <div class="affiliate-kpi">
-          <div class="kpi-label">Level</div>
-          <div id="affiliate-kpi-level">1</div>
-        </div>
-      </div>
-      <div class="affiliate-status-note" id="affiliate-status-note"></div>
-    </div>    
   </div>
 
   <div class="section" id="leaderboard-section">
     <h3>🏆 Weekly Leaderboard</h3>
-    <div class="leaderboard-tabs">
-      <button class="btn btn-ghost leaderboard-tab active" id="leaderboard-tab-xp" type="button">XP & Referrals</button>
-      <button class="btn btn-ghost leaderboard-tab" id="leaderboard-tab-affiliate" type="button">Affiliate</button>
-    </div>
-    <button class="btn btn-ghost" onclick="handleLeaderboardRefresh()">View Leaderboard</button>
+    <button class="btn btn-ghost" onclick="loadLeaderboard({ forceRefresh: true })">View Leaderboard</button>
     <div style="display:flex;gap:8px;align-items:center;font-size:12px;color:#666;margin-top:6px;flex-wrap:wrap;">
       <span id="leaderboard-cadence" style="opacity:0.7;">• 🔄 Refresh every 5 minutes</span>
       <span id="leaderboard-loading" style="display:none;">Refreshing…</span>
     </div>
     <div id="leaderboard-output">Click to load latest rankings...</div>
-    <div id="affiliate-leaderboard-output" style="display:none;">Click to load affiliate rankings...</div>    
     <button id="leaderboard-retry" type="button" class="btn btn-ghost" style="display:none;margin-top:8px;">Retry</button>
   </div>
 
@@ -855,40 +767,6 @@
             </table>
           </div>
         </div>
-
-        <div id="adm_affiliate_ledger" style="margin-top:18px; text-align:left;">
-          <h4 style="margin-bottom:8px;">💸 Affiliate Voucher Ledger</h4>
-          <div style="background:#fff; border:1px solid #ddd; border-radius:8px; padding:12px; margin-bottom:16px;">
-            <div style="display:flex; flex-wrap:wrap; gap:10px; align-items:center;">
-              <label style="font-size:12px; color:#555;">Period (YYYY-MM)
-                <input id="ledger-period" type="text" placeholder="2025-01" style="padding:8px; border-radius:6px; border:1px solid #ccc; width:120px;">
-              </label>
-              <label style="font-size:12px; color:#555;">Status
-                <select id="ledger-status" style="padding:8px; border-radius:6px; border:1px solid #ccc;">
-                  <option value="PENDING">PENDING</option>
-                  <option value="APPROVED">APPROVED</option>
-                </select>
-              </label>
-              <button id="ledger-load-btn" type="button" onclick="loadVoucherLedger()">Load Ledger</button>
-            </div>
-            <div style="overflow-x:auto; margin-top:12px;">
-              <table id="ledger-table" style="width:100%; border-collapse:collapse; font-size:13px;">
-                <thead>
-                  <tr style="background:#f7f7f7;">
-                    <th style="text-align:left; padding:6px;">Affiliate UID</th>
-                    <th style="padding:6px;">Reward</th>
-                    <th style="padding:6px;">Period</th>
-                    <th style="padding:6px;">Status</th>
-                    <th style="padding:6px;">Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr><td colspan="5" style="padding:6px;">No data loaded.</td></tr>
-                </tbody>
-              </table>
-            </div>
-          </div>
-        </div>        
       </div>
     </div>
   </div>
@@ -1905,53 +1783,6 @@
         console.warn("Referral progress load failed:", err);
       }
     }
-
-
-    function renderAffiliateCard(data = {}) {
-      const card = document.getElementById("affiliate-card");
-      if (!card) return;
-      const status = (data?.affiliate_status || "none").toString();
-      if (status === "none") {
-        card.style.display = "none";
-        return;
-      }
-      card.style.display = "grid";
-      const badge = document.getElementById("affiliate-status-badge");
-      if (badge) badge.textContent = status.toUpperCase();
-      const kpiWrap = document.getElementById("affiliate-kpis");
-      const note = document.getElementById("affiliate-status-note");
-      const kpiL2 = Number(data?.kpi_l2_30d ?? 0);
-      const kpiL3 = Number(data?.kpi_l3_30d ?? 0);
-      const level = Number(data?.level ?? 1);
-      if (status === "active") {
-        if (kpiWrap) kpiWrap.style.display = "grid";
-        if (note) note.textContent = "";
-        const l2El = document.getElementById("affiliate-kpi-l2");
-        const l3El = document.getElementById("affiliate-kpi-l3");
-        const progressEl = document.getElementById("affiliate-kpi-progress");
-        const levelEl = document.getElementById("affiliate-kpi-level");
-        if (l2El) l2El.textContent = `${Number.isFinite(kpiL2) ? kpiL2 : 0}`;
-        if (l3El) l3El.textContent = `${Number.isFinite(kpiL3) ? kpiL3 : 0}`;
-        if (progressEl) progressEl.textContent = `${Number.isFinite(kpiL3) ? kpiL3 : 0} / 3`;
-        if (levelEl) levelEl.textContent = `${Number.isFinite(level) ? level : 1}`;
-      } else {
-        if (kpiWrap) kpiWrap.style.display = "none";
-        if (note) note.textContent = `Status: ${status}`;
-      }
-    }
-
-    async function loadMe() {
-      if (!userId) return;
-      try {
-        const res = await fetch(`${API_BASE}/api/me?user_id=${userId}`);
-        const data = await res.json();
-        if (data?.success && data?.user) {
-          renderAffiliateCard(data.user);
-        }
-      } catch (err) {
-        console.warn("[ME] load failed", err);
-      }
-    }
     
     async function getReferral() {
       if (!hasRegionSelected()) {
@@ -2032,7 +1863,6 @@ Some people get lucky.👇
         const isAdmin = adminData.success && adminData.is_admin;
         if (isAdmin) {
           document.getElementById("admin-panel").style.display = "block";
-          initVoucherLedgerDefaults();          
           if (typeof adm_list === "function") {
             adm_list();
           }
@@ -2780,10 +2610,7 @@ Some people get lucky.👇
     let leaderboardHasValidCache = false;
     let leaderboardSkeletonRendered = false;
     let leaderboardCacheAgeMs = null;
-    let affiliateLeaderboardFetchInProgress = false;
-    let affiliateLeaderboardFetchAttempted = false;
-    let currentLeaderboardTab = "xp";
-    
+
     function renderLeaderboardSkeleton() {
       const out = document.getElementById("leaderboard-output");
       if (!out) return;
@@ -2842,7 +2669,6 @@ function setLeaderboardMeta(ts, { isStale = false } = {}) {
     }
 
     function getLeaderboardName(row) {
-      if (row?.display_name) return row.display_name.toString();      
       return (row?.username || row?.first_name || row?.user_id || "Anonymous")
         .toString()
         .replace(/^@+/, "");
@@ -2953,11 +2779,6 @@ function setLeaderboardMeta(ts, { isStale = false } = {}) {
       return block;      
     }
 
-    function formatAffiliateName(name, status) {
-      if (status === "active") return `${name} · AFF`;
-      return name;
-    }
-    
     function renderLeaderboardData(data) {
       const out = document.getElementById("leaderboard-output");
       if (!out) return;
@@ -2965,18 +2786,13 @@ function setLeaderboardMeta(ts, { isStale = false } = {}) {
       const checkinRows = Array.isArray(leaderboard.checkin) ? leaderboard.checkin : [];
       const referralRows = Array.isArray(leaderboard.referral) ? leaderboard.referral : [];
 
-      const xpRows = checkinRows.map((u) => {
-        const name = u.username || u.first_name || u.user_id || "Anonymous";
-        return {
-          name,
-          value: u.xp ?? u.weekly_xp ?? 0,
-          username: u.username,
-          first_name: u.first_name,
-          user_id: u.user_id,
-          affiliate_status: u.affiliate_status,
-          display_name: formatAffiliateName(name, u.affiliate_status)
-        };
-      });
+      const xpRows = checkinRows.map((u) => ({
+        name: u.username || u.first_name || u.user_id || "Anonymous",
+        value: u.xp ?? u.weekly_xp ?? 0,
+        username: u.username,
+        first_name: u.first_name,
+        user_id: u.user_id
+      }));
       
       const refRows = referralRows.map((u) => ({
         name: u.username || u.first_name || u.user_id || "Anonymous",
@@ -3031,99 +2847,6 @@ function setLeaderboardMeta(ts, { isStale = false } = {}) {
       out.appendChild(refBlock);
     }
 
-    function renderAffiliateLeaderboardSkeleton() {
-      const out = document.getElementById("affiliate-leaderboard-output");
-      if (!out) return;
-      out.innerHTML = `<div class="leaderboard-summary">⏳ Loading affiliate stats…</div>`;
-    }
-
-    function renderAffiliateLeaderboardUnavailable(message) {
-      const out = document.getElementById("affiliate-leaderboard-output");
-      if (out) out.textContent = message;
-    }
-
-    function renderAffiliateLeaderboardData(data) {
-      const out = document.getElementById("affiliate-leaderboard-output");
-      if (!out) return;
-      const rows = Array.isArray(data?.leaderboard) ? data.leaderboard : [];
-      out.innerHTML = "";
-      if (!rows.length) {
-        out.textContent = "No active affiliates yet.";
-        return;
-      }
-      const list = document.createElement("div");
-      list.className = "leaderboard-list";
-      rows.forEach((row, idx) => {
-        const rowEl = document.createElement("div");
-        rowEl.className = "leaderboard-row";
-
-        const rankEl = document.createElement("div");
-        rankEl.className = "leaderboard-rank";
-        rankEl.textContent = `#${idx + 1}`;
-
-        const nameEl = document.createElement("div");
-        nameEl.className = "leaderboard-name";
-        nameEl.textContent = getLeaderboardName(row);
-
-        const valueEl = document.createElement("div");
-        valueEl.className = "leaderboard-value";
-        valueEl.textContent = `L3(30d): ${row.kpi_l3_30d || 0} • L2(30d): ${row.kpi_l2_30d || 0}`;
-
-        rowEl.appendChild(rankEl);
-        rowEl.appendChild(nameEl);
-        rowEl.appendChild(valueEl);
-        list.appendChild(rowEl);
-      });
-      out.appendChild(list);
-    }
-
-    // Added initAffiliateTabVisibility to hide affiliate tab/panel when no active affiliates exist.
-    // Reason: users should only see the Affiliate tab when an active affiliate is returned.
-    async function initAffiliateTabVisibility() {
-      const tabBtn = document.getElementById("leaderboard-tab-affiliate");
-      const panel = document.getElementById("affiliate-leaderboard-output");
-      if (!tabBtn || !panel) return;
-      try {
-        const res = await fetch(`${API_BASE}/api/leaderboard/affiliate`, { credentials: "include" });
-        const data = await res.json();
-        const items = data?.items ?? [];
-        if (items.length === 0) {
-          tabBtn.style.display = "none";
-          panel.style.display = "none";
-        }
-      } catch (err) {
-        tabBtn.style.display = "none";
-        panel.style.display = "none";
-      }
-    }
-
-    document.addEventListener("DOMContentLoaded", initAffiliateTabVisibility);
-    
-    function setLeaderboardTab(tab) {
-      currentLeaderboardTab = tab;
-      const xpTab = document.getElementById("leaderboard-tab-xp");
-      const affTab = document.getElementById("leaderboard-tab-affiliate");
-      const xpOut = document.getElementById("leaderboard-output");
-      const affOut = document.getElementById("affiliate-leaderboard-output");
-      const retryBtn = document.getElementById("leaderboard-retry");
-      if (xpTab) xpTab.classList.toggle("active", tab === "xp");
-      if (affTab) affTab.classList.toggle("active", tab === "affiliate");
-      if (xpOut) xpOut.style.display = tab === "xp" ? "block" : "none";
-      if (affOut) affOut.style.display = tab === "affiliate" ? "block" : "none";
-      if (retryBtn && tab === "affiliate") retryBtn.style.display = "none";
-      if (tab === "affiliate" && !affiliateLeaderboardFetchAttempted) {
-        loadAffiliateLeaderboard();
-      }
-    }
-
-    function handleLeaderboardRefresh() {
-      if (currentLeaderboardTab === "affiliate") {
-        loadAffiliateLeaderboard({ forceRefresh: true });
-      } else {
-        loadLeaderboard({ forceRefresh: true });
-      }
-    }
-    
     function isValidLeaderboardRow(row) {
       if (!row || typeof row !== "object") return false;
 
@@ -3213,23 +2936,12 @@ function setLeaderboardMeta(ts, { isStale = false } = {}) {
       if (leaderboardInitOnce) return;
       leaderboardInitOnce = true;
       const retryBtn = document.getElementById("leaderboard-retry");
-      const xpTab = document.getElementById("leaderboard-tab-xp");
-      const affTab = document.getElementById("leaderboard-tab-affiliate");      
       if (retryBtn && !retryBtn.dataset.bound) {
         retryBtn.dataset.bound = "true";
         retryBtn.addEventListener("click", () => loadLeaderboard({ forceRefresh: true }));
       }
-      if (xpTab && !xpTab.dataset.bound) {
-        xpTab.dataset.bound = "true";
-        xpTab.addEventListener("click", () => setLeaderboardTab("xp"));
-      }
-      if (affTab && !affTab.dataset.bound) {
-        affTab.dataset.bound = "true";
-        affTab.addEventListener("click", () => setLeaderboardTab("affiliate"));
-      }
-      
+
       renderLeaderboardSkeleton();
-      setLeaderboardTab("xp");      
       const cached = readLeaderboardCache();
       if (cached) {
         leaderboardHasValidCache = true;
@@ -3328,42 +3040,7 @@ function setLeaderboardMeta(ts, { isStale = false } = {}) {
         setLeaderboardRetryDisabled(false);
       }
     }
-
-
-    async function loadAffiliateLeaderboard(options = {}) {
-      const { forceRefresh = false } = options;
-      if (affiliateLeaderboardFetchInProgress) return;
-      affiliateLeaderboardFetchInProgress = true;
-      affiliateLeaderboardFetchAttempted = true;
-      renderAffiliateLeaderboardSkeleton();
-
-      const url = new URL(`${API_BASE}/api/leaderboard/affiliate`);
-      if (userId) url.searchParams.set("user_id", userId);
-      url.searchParams.set("t", Date.now());
-
-      let controller = null;
-      let timeoutId = null;
-      const timeoutMs = getLeaderboardTimeoutMs();
-
-      try {
-        if (typeof AbortController !== "undefined") {
-          controller = new AbortController();
-          timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-        }
-        const res = await fetch(url.toString(), controller ? { signal: controller.signal } : {});
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = await res.json();
-        if (!data || data.success === false) throw new Error("Invalid payload");
-        renderAffiliateLeaderboardData(data);
-      } catch (err) {
-        console.warn("[LB][AFFILIATE_FETCH_FAIL]", err);
-        renderAffiliateLeaderboardUnavailable("Affiliate leaderboard is temporarily unavailable.");
-      } finally {
-        if (timeoutId) clearTimeout(timeoutId);
-        affiliateLeaderboardFetchInProgress = false;
-      }
-    }
-    
+  
     async function loadPreviousLeaderboard() {
       try {
         const weeksRes = await fetch(`${API_BASE}/api/leaderboard/history/weeks`);
@@ -3492,103 +3169,6 @@ ${referral}`;
       }
     }
 
-    function _defaultLedgerPeriod() {
-      const d = new Date();
-      const year = d.getUTCFullYear();
-      const month = d.getUTCMonth();
-      const lastMonth = new Date(Date.UTC(year, month - 1, 1));
-      const ym = `${lastMonth.getUTCFullYear()}-${String(lastMonth.getUTCMonth() + 1).padStart(2, "0")}`;
-      return ym;
-    }
-
-    function initVoucherLedgerDefaults() {
-      const periodInput = document.getElementById("ledger-period");
-      if (periodInput && !periodInput.value) {
-        periodInput.value = _defaultLedgerPeriod();
-      }
-    }
-
-    function renderVoucherLedger(entries) {
-      const body = document.querySelector("#ledger-table tbody");
-      if (!body) return;
-      if (!entries || !entries.length) {
-        body.innerHTML = `<tr><td colspan="5" style="padding:6px;">No entries found.</td></tr>`;
-        return;
-      }
-      body.innerHTML = entries.map((entry) => {
-        const status = entry.status || "-";
-        const actions = [];
-        if (status === "PENDING") {
-          actions.push(`<button type="button" onclick="approveVoucherLedger('${entry.id}')">Approve</button>`);
-        }
-        if (status === "APPROVED") {
-          actions.push(`<button type="button" onclick="issueVoucherLedger('${entry.id}')">Issue</button>`);
-        }
-        return `
-          <tr>
-            <td style="padding:6px; text-align:left;">${entry.affiliate_uid || "-"}</td>
-            <td style="padding:6px; text-align:center;">${entry.reward_type || "-"}</td>
-            <td style="padding:6px; text-align:center;">${entry.period || "-"}</td>
-            <td style="padding:6px; text-align:center;">${status}</td>
-            <td style="padding:6px; text-align:center;">${actions.join(" ") || "-"}</td>
-          </tr>
-        `;
-      }).join("");
-    }
-
-    async function loadVoucherLedger() {
-      try {
-        if (!userId) { alert("Missing admin user id. Open via Telegram to continue."); return; }
-        const status = document.getElementById("ledger-status")?.value || "PENDING";
-        const period = document.getElementById("ledger-period")?.value?.trim();
-        const params = new URLSearchParams({ status, user_id: String(userId) });
-        if (period) { params.set("period", period); }
-        const res = await fetch(`${API_BASE}/api/admin/voucher-ledger?${params.toString()}`);
-        const data = await res.json();
-        if (!data.success) {
-          throw new Error(data.message || "Failed to load ledger");
-        }
-        renderVoucherLedger(data.entries || []);
-      } catch (err) {
-        console.error("Ledger load error:", err);
-        alert("❌ Failed to load voucher ledger.");
-      }
-    }
-
-    async function approveVoucherLedger(id) {
-      try {
-        if (!userId) { alert("Missing admin user id. Open via Telegram to continue."); return; }
-        const res = await fetch(`${API_BASE}/api/admin/voucher-ledger/${id}/approve?user_id=${userId}`, {
-          method: "POST"
-        });
-        const data = await res.json();
-        if (!data.success) {
-          throw new Error(data.message || "Approval failed");
-        }
-        await loadVoucherLedger();
-      } catch (err) {
-        console.error("Ledger approve error:", err);
-        alert("❌ Failed to approve ledger entry.");
-      }
-    }
-
-    async function issueVoucherLedger(id) {
-      try {
-        if (!userId) { alert("Missing admin user id. Open via Telegram to continue."); return; }
-        const res = await fetch(`${API_BASE}/api/admin/voucher-ledger/${id}/issue?user_id=${userId}`, {
-          method: "POST"
-        });
-        const data = await res.json();
-        if (!data.success) {
-          throw new Error(data.message || "Issue failed");
-        }
-        await loadVoucherLedger();
-      } catch (err) {
-        console.error("Ledger issue error:", err);
-        alert("❌ Failed to issue voucher.");
-      }
-    }
-    
     async function checkRegionStatus() {
       try {
         const res = await fetch(`${API_BASE}/api/region-status/${userId}`);
@@ -3689,7 +3269,6 @@ ${referral}`;
       if (!hasInit) {
         if (isAdminMode) {
           document.getElementById("admin-panel").style.display = "block";
-          initVoucherLedgerDefaults();          
           adm_list();
         }
         return;
@@ -3699,12 +3278,10 @@ ${referral}`;
       handleAdminAndVoucher();
       loadCheckinStatus();
       loadReferralProgress();
-      loadMe();
       
       loadVouchers();
       if (isAdminMode) {
         document.getElementById("admin-panel").style.display = "block";
-        initVoucherLedgerDefaults();        
         adm_list();
       }
     };
