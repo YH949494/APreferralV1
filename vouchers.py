@@ -2315,10 +2315,27 @@ def is_drop_active(doc: dict, ref: datetime) -> bool:
 def get_active_drops(ref: datetime):
     return list(db.drops.find({
         "status": {"$nin": ["expired", "paused"]},
+        "internal_only": {"$ne": True},     
         "startsAt": {"$lte": ref},
         "endsAt": {"$gt": ref}
     }))
 
+
+def _has_pending_internal_claim(*, user_id, drop_id, ref: datetime) -> bool:
+    if user_id is None:
+        return False
+    drop_id_variants = _drop_id_variants(drop_id)
+    return bool(
+        ugc_reward_ledger_col.find_one(
+            {
+                "user_id": user_id,
+                "drop_id": {"$in": drop_id_variants},
+                "status": "pending_claim",
+                "claimable_after": {"$lte": ref},
+            }
+        )
+    )
+ 
 def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None):
     usernameLower = norm_username(user.get("usernameLower", ""))
     user_id = str(user.get("userId") or "").strip() if isinstance(user, dict) else ""
@@ -3098,7 +3115,19 @@ def api_claim():
             "reason": "not_eligible",
             "checks_key": None,
         }), 403
-     
+
+
+    if voucher.get("internal_only") is True:
+        if not _has_pending_internal_claim(user_id=uid, drop_id=drop_id, ref=now_utc()):
+            return jsonify({
+                "status": "error",
+                "code": "not_eligible",
+                "ok": False,
+                "eligible": False,
+                "reason": "not_eligible",
+                "checks_key": None,
+            }), 403
+         
     if not username:
         username = fallback_username or ""
    
@@ -3667,7 +3696,8 @@ def admin_create_drop():
         "endsAt": endsAt,
         "priority": priority,
         "visibilityMode": "stacked",
-        "status": status
+        "status": status,
+        "internal_only": bool(data.get("internal_only") is True),
     }
  
     if data.get("eligibility") is not None or clean_eligibility.get("mode") != "public" or clean_eligibility.get("allow"):
