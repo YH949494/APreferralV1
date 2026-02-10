@@ -4,7 +4,7 @@ from flask import (
 )
 from flask_cors import CORS
 from threading import Thread 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from telegram.constants import ParseMode
 from html import escape as html_escape
 from telegram.ext import (
@@ -37,9 +37,8 @@ from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_MISSED
 from app_context import set_app_bot, set_bot, set_scheduler
 from onboarding import MYWIN_CHAT_ID, onboarding_due_tick, record_first_mywin
 from vouchers import vouchers_bp, ensure_voucher_indexes, process_verification_queue
-from scheduler import settle_pending_referrals, settle_referral_snapshots, settle_ugc_referral_claims, settle_xp_snapshots
+from scheduler import settle_pending_referrals, settle_referral_snapshots, settle_xp_snapshots
 from telegram_utils import safe_reply_text
-from ugc_growth_referral import create_referral_token, first_touch_claim, hash_value, require_env, resolve_token
 
 from pymongo import DESCENDING, ASCENDING, ReturnDocument  # keep if used elsewhere
 from pymongo.errors import DuplicateKeyError, CursorNotFound
@@ -93,10 +92,8 @@ if not RUNNER_MODE:
 # ----------------------------
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 MONGO_URL = os.environ.get("MONGO_URL")
-BOT_USERNAME = (os.environ.get("BOT_USERNAME") or "").strip()
 BASE_WEBAPP_URL = "https://apreferralv1.fly.dev/miniapp"
 WEBAPP_URL = f"{BASE_WEBAPP_URL}?v={MINIAPP_VERSION}"
-MINI_APP_URL = (os.environ.get("MINI_APP_URL") or "").strip()
 GROUP_ID = -1002304653063
 API_BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
@@ -162,8 +159,6 @@ DEPRECATED_REFERRAL_FIELDS = {
     "monthly_referral_count",
     "referral_count",
 }
-
-START_MINI_APP_URL_MISSING_LOGGED = False
 
 def _warn_if_deprecated_referral_fields(user_doc: dict | None, context: str) -> None:
     if not user_doc:
@@ -400,18 +395,6 @@ def tick_5min() -> None:
 
             with JobTimer() as step_timer:
                 logger.info(
-                    "[JOB][5MIN] progress step=settle_ugc_referral_claims run_id=%s",
-                    run_id,
-                )
-                settle_ugc_referral_claims()
-            logger.info(
-                "[JOB][5MIN] step_done name=settle_ugc_referral_claims elapsed_s=%.2f run_id=%s",
-                step_timer.elapsed_s,
-                run_id,
-            )
-            
-            with JobTimer() as step_timer:
-                logger.info(
                     "[JOB][5MIN] progress step=settle_xp_snapshots run_id=%s",
                     run_id,
                 )
@@ -469,7 +452,6 @@ def process_verification_queue_scheduled(batch_limit: int = 50) -> None:
 # MongoDB Setup
 # ----------------------------
 init_db(MONGO_URL)
-UGC_GROWTH_ENV = require_env()
 users_collection = db["users"]
 # SNAPSHOT FIELDS — ONLY WRITTEN BY WORKER
 # weekly_xp, monthly_xp, total_xp, weekly_referrals, monthly_referrals, total_referrals, vip_tier, vip_month
@@ -491,10 +473,6 @@ unknown_invite_links_collection = db["unknown_invite_links"]
 referral_audit_collection = db["referral_audit"]
 unknown_invite_audit_collection = db["unknown_invite_audit"]
 pending_referrals_collection = db["pending_referrals"]
-referral_tokens_collection = db["referral_tokens"]
-referral_claims_collection = db["referral_claims"]
-growth_credit_collection = db["growth_credit"]
-voucher_ledger_collection = db["voucher_ledger"]
 tg_verification_queue_collection = db["tg_verification_queue"]
 scheduler_locks_collection = db["scheduler_locks"]
 try:
@@ -1128,133 +1106,135 @@ def ensure_indexes():
         if removed:
             print(f"🔧 Removed {removed} duplicate xp_events with duplicate unique_key")
 
-    def _safe_create_index(collection, keys, **kwargs):
-        index_name = kwargs.get("name")
-        try:
-            collection.create_index(keys, **kwargs)
-            return
-        except Exception as e:
-            msg = str(e)
-            if "already exists with different options" in msg or "ExpireAfterSeconds" in msg or "expireAfterSeconds" in msg:
-                try:
-                    if index_name:
-                        collection.drop_index(index_name)
-                    else:
-                        raise RuntimeError("missing index name")
-                except Exception:
-                    expected_key = dict(keys)
-                    for ix in collection.list_indexes():
-                        if ix.get("key") == expected_key:
-                            collection.drop_index(ix["name"])
-                            break
-                try:
-                    collection.create_index(keys, **kwargs)
-                    return
-                except Exception as recreate_error:
-                    print("⚠️ ensure_indexes error:", recreate_error)
-                    return
+    idx_name = "ttl_end_time"
+    try:
+        bonus_voucher_collection.create_index(
+            [("end_time", 1)],
+            expireAfterSeconds=0,
+            name=idx_name,
+        )
+        print("✅ TTL index ensured on bonus_voucher.end_time")
+    except Exception as e:
+        # If an index exists with different options, fix it
+        msg = str(e)
+        if "already exists with different options" in msg or "ExpireAfterSeconds" in msg or "expireAfterSeconds" in msg:
+            try:
+                bonus_voucher_collection.drop_index(idx_name)
+            except Exception:
+                # fallback: find index by key
+                for ix in bonus_voucher_collection.list_indexes():
+                    if ix.get("key") == {"end_time": 1}:
+                        bonus_voucher_collection.drop_index(ix["name"])
+                        break
+            bonus_voucher_collection.create_index(
+                [("end_time", 1)],
+                expireAfterSeconds=0,
+                name=idx_name,
+            )
+            print("🔁 Recreated TTL index on bonus_voucher.end_time")
+        else:
             print("⚠️ ensure_indexes error:", e)
 
-    idx_name = "ttl_end_time"
-    _safe_create_index(
-        bonus_voucher_collection,
-        [("end_time", 1)],
-        expireAfterSeconds=0,
-        name=idx_name,
-    )
-    
     # --- joins tracking ---
-    _safe_create_index(db.joins, [("user_id", 1), ("chat_id", 1), ("joined_at", -1)])
-    _safe_create_index(db.joins, [("chat_id", 1), ("joined_at", -1)])
-    _safe_create_index(db.joins, [("via_invite", 1)])
-    _safe_create_index(
-        users_collection,
-        [("user_id", 1)],
-        unique=True,
-        name="uniq_user_id",
-        sparse=True,
-    )
-    _safe_create_index(
-        invite_link_map_collection,
-        [("chat_id", 1), ("invite_link", 1)],
-        unique=True,
-        name="uniq_chat_invite_link",
-    )
-    _safe_create_index(
-        invite_link_map_collection,
+    db.joins.create_index([("user_id", 1), ("chat_id", 1), ("joined_at", -1)])
+    db.joins.create_index([("chat_id", 1), ("joined_at", -1)])
+    db.joins.create_index([("via_invite", 1)])
+    try:
+        users_collection.create_index(
+            [("user_id", 1)],
+            unique=True,
+            name="uniq_user_id",
+            sparse=True,
+        )
+    except Exception as e:
+        msg = str(e)
+        if "already exists with different options" in msg:
+            try:
+                users_collection.drop_index("uniq_user_id")
+            except Exception:
+                for ix in users_collection.list_indexes():
+                    if ix.get("key") == {"user_id": 1}:
+                        users_collection.drop_index(ix["name"])
+                        break
+            users_collection.create_index(
+                [("user_id", 1)],
+                unique=True,
+                name="uniq_user_id",
+                sparse=True,
+            )
+        else:
+            print("⚠️ ensure_indexes error:", e)    
+    try:
+        invite_link_map_collection.create_index(
+            [("chat_id", 1), ("invite_link", 1)],
+            unique=True,
+            name="uniq_chat_invite_link",
+        )
+    except Exception as e:
+        msg = str(e)
+        if "already exists with different options" in msg:
+            try:
+                invite_link_map_collection.drop_index("uniq_chat_invite_link")
+            except Exception:
+                for ix in invite_link_map_collection.list_indexes():
+                    if ix.get("key") == {"chat_id": 1, "invite_link": 1}:
+                        invite_link_map_collection.drop_index(ix["name"])
+                        break
+            invite_link_map_collection.create_index(
+                [("chat_id", 1), ("invite_link", 1)],
+                unique=True,
+                name="uniq_chat_invite_link",
+            )
+        else:
+            print("⚠️ ensure_indexes error:", e)
+    invite_link_map_collection.create_index(
         [("invite_link", 1)],
         name="idx_invite_link",
-    )
-    _safe_create_index(
-        unknown_invite_links_collection,
+    )            
+    unknown_invite_links_collection.create_index(
         [("chat_id", 1), ("invite_link", 1), ("invitee_id", 1)],
         unique=True,
         name="uniq_unknown_invite",
     )
-    _safe_create_index(
-        referral_award_events_collection,
+    referral_award_events_collection.create_index(
         [("award_key", 1)],
         unique=True,
         name="uniq_referral_award_key",
     )
-    _safe_create_index(
-        referral_events_collection,
+    referral_events_collection.create_index(
         [("event", 1), ("inviter_id", 1), ("invitee_id", 1)],
         unique=True,
         name="uniq_referral_event",
     )
-    _safe_create_index(
-        referral_events_collection,
+    referral_events_collection.create_index(
         [("inviter_id", 1), ("occurred_at", 1)],
         name="referral_events_by_inviter_time",
-    )
-    _safe_create_index(
-        pending_referrals_collection,
+    )    
+    pending_referrals_collection.create_index(
         [("group_id", 1), ("invitee_user_id", 1)],
         unique=True,
         name="uniq_pending_invitee",
     )
-    _safe_create_index(
-        pending_referrals_collection,
+    pending_referrals_collection.create_index(
         [("status", 1), ("created_at_utc", 1)],
         name="pending_by_time",
     )
-    _safe_create_index(
-        pending_referrals_collection,
+    pending_referrals_collection.create_index(
         [("status", 1), ("next_retry_at_utc", 1)],
         name="pending_by_retry",
     )
-    _safe_create_index(
-        pending_referrals_collection,
+    pending_referrals_collection.create_index(
         [("inviter_user_id", 1), ("status", 1)],
         name="pending_by_inviter",
-    )
-    _safe_create_index(referral_tokens_collection, [("owner_uid", 1), ("created_at", -1)], name="referral_tokens_by_owner_created")
-    _safe_create_index(referral_claims_collection, [("viewer_uid", 1)], unique=True, name="uniq_referral_claim_viewer")
-    _safe_create_index(referral_claims_collection, [("status", 1), ("due_at", 1)], name="referral_claims_by_status_due")
-    _safe_create_index(referral_claims_collection, [("source_uid", 1), ("validated_at", -1)], name="referral_claims_by_source_validated")
-    _safe_create_index(
-        voucher_ledger_collection,
-        [("kind", 1), ("claim_id", 1)],
-        unique=True,
-        partialFilterExpression={"kind": "ugc_viewer_reward"},
-        name="uniq_ugc_viewer_reward_claim",
-    )
-    _safe_create_index(
-        voucher_ledger_collection,
-        [("kind", 1), ("source_uid", 1), ("tier", 1)],
-        unique=True,
-        partialFilterExpression={"kind": "ugc_referrer_reward"},
-        name="uniq_ugc_referrer_tier",
-    )
+    )    
 
     # --- optional welcome eligibility ---
-    _safe_create_index(db.welcome_eligibility, [("uid", 1)], unique=True)
-    _safe_create_index(db.welcome_eligibility, [("expires_at", 1)], expireAfterSeconds=0)
-    _safe_create_index(db.welcome_tickets, [("uid", 1)], unique=True)
-    _safe_create_index(db.welcome_tickets, [("cleanup_at", 1)], expireAfterSeconds=0)
+    db.welcome_eligibility.create_index([("uid", 1)], unique=True)
+    db.welcome_eligibility.create_index([("expires_at", 1)], expireAfterSeconds=0)
+    db.welcome_tickets.create_index([("uid", 1)], unique=True)
+    db.welcome_tickets.create_index([("cleanup_at", 1)], expireAfterSeconds=0)
     
-    _safe_create_index(xp_events_collection, [("user_id", 1), ("reason", 1)])
+    xp_events_collection.create_index([("user_id", 1), ("reason", 1)])
     ensure_xp_indexes(db)
 
 
@@ -1264,21 +1244,13 @@ def ensure_indexes():
                 tg_verification_queue_collection.drop_index(legacy_name)
             except Exception:
                 pass
-        verif_indexes_by_name = {
-            ix.get("name"): ix for ix in tg_verification_queue_collection.list_indexes()
-        }
-        if "uq_tg_verif_user_id_nonnull" in verif_indexes_by_name:
-            logger.info("[VERIFY_QUEUE] index exists, skip")
-        else:
-            _safe_create_index(
-                tg_verification_queue_collection,
-                [("user_id", 1)],
-                unique=True,
-                name="uq_tg_verif_user_id_nonnull",
-                partialFilterExpression={"user_id": {"$type": "number"}},
-            )
-        _safe_create_index(
-            tg_verification_queue_collection,
+        tg_verification_queue_collection.create_index(
+            [("user_id", 1)],
+            unique=True,
+            name="uq_tg_verif_user_id_nonnull",
+            partialFilterExpression={"user_id": {"$exists": True, "$ne": None}},
+        )
+        tg_verification_queue_collection.create_index(
             [("status", 1), ("created_at", 1)],
             name="ix_verif_status_created",
         )
@@ -1395,15 +1367,6 @@ def get_or_create_referral_invite_link_sync(user_id: int, username: str = "") ->
             e,
         )
     return invite_link
-
-
-
-def get_or_create_ugc_referral_deeplink_sync(user_id: int) -> str:
-    if not BOT_USERNAME:
-        raise RuntimeError("BOT_USERNAME is required for referral deep links")
-    now = datetime.now(timezone.utc)
-    token, _ = create_referral_token(referral_tokens_collection, owner_uid=user_id, now=now)
-    return f"https://t.me/{BOT_USERNAME}?start=r_{token}"
 
 def require_admin_from_query():
     caller_id = request.args.get("user_id", type=int)
@@ -1767,7 +1730,7 @@ def api_referral():
     stats = {"total_referrals": 0, "weekly_referrals": 0, "monthly_referrals": 0}
     
     try:
-        link = get_or_create_ugc_referral_deeplink_sync(user_id)
+        link = get_or_create_referral_invite_link_sync(user_id, username)
         logger.info("[api_referral] link_generated uid=%s", user_id)        
     except Exception as e:
         success = False
@@ -2845,48 +2808,17 @@ async def _send_xmas_flow(update: Update, context: ContextTypes.DEFAULT_TYPE, us
             raise_on_non_transient=False,
         )
 
-def _referral_request_hashes(context: ContextTypes.DEFAULT_TYPE, uid: int) -> tuple[str | None, str | None, str | None]:
-    req_ctx = (getattr(context, "bot_data", {}) or {}).get("last_request_ctx", {})
-    ip = req_ctx.get("ip")
-    subnet = req_ctx.get("subnet")
-    device = req_ctx.get("device")
-    return hash_value(ip), hash_value(subnet), hash_value(device or f"uid:{uid}")
-
-        
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global START_MINI_APP_URL_MISSING_LOGGED    
     user = update.effective_user
     message = update.effective_message
     
-    chat = update.effective_chat
-    payload = context.args[0] if context.args and len(context.args) > 0 else None
+    # Handle deep links for the Xmas Gift Delight campaign
+    if context.args and len(context.args) > 0 and context.args[0].lower() == "xmasgift":
+        if user:
+            await _send_xmas_flow(update, context, user)
+        return
 
-    logger.info(
-        "[start] uid=%s username=%s chat_id=%s payload=%s",
-        getattr(user, "id", None),
-        getattr(user, "username", None),
-        getattr(chat, "id", None),
-        payload,
-    )
-        
-    if user and context.args and len(context.args) > 0 and str(context.args[0]).startswith("r_"):
-        token = str(context.args[0])[2:]
-        now_utc_ts = now_utc()
-        owner_uid = resolve_token(referral_tokens_collection, token, now=now_utc_ts)
-        if owner_uid:
-            ip_hash, subnet_hash, device_hash = _referral_request_hashes(context, user.id)
-            first_touch_claim(
-                referral_claims_collection,
-                viewer_uid=user.id,
-                owner_uid=owner_uid,
-                token=token,
-                ip_hash=ip_hash,
-                subnet_hash=subnet_hash,
-                device_hash=device_hash,
-                now=now_utc_ts,
-            )
-    
     if user:
         _users_update_one(
             {"user_id": user.id},
@@ -2904,28 +2836,23 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "[WELCOME][JOIN_BACKFILL_DISABLED] uid=%s joined_main_at_missing",
                 user.id,
             ) 
+        keyboard = [[
+            InlineKeyboardButton("🚀 Open AdvantPlay Mini-App", web_app=WebAppInfo(url=WEBAPP_URL))
+        ]]
         if message:
-            if MINI_APP_URL:
-                keyboard = [[InlineKeyboardButton("🚀 Open AdvantPlay Mini-App", url=MINI_APP_URL)]]
-                await safe_reply_text(
-                    message,
-                    "Welcome to AdvantPlay Community!\nTap below to open the Mini-App.",
-                    reply_markup=InlineKeyboardMarkup(keyboard),
-                    uid=user.id,
-                    send_type="start",
-                    raise_on_non_transient=False,
-                )
-            else:
-                if not START_MINI_APP_URL_MISSING_LOGGED:
-                    logger.error("[start] MINI_APP_URL missing")
-                    START_MINI_APP_URL_MISSING_LOGGED = True
-                await safe_reply_text(
-                    message,
-                    "Mini-App is temporarily unavailable.",
-                    uid=user.id,
-                    send_type="start",
-                    raise_on_non_transient=False,
-                )
+            await safe_reply_text(
+                message,
+                "👋 Welcome to AdvantPlay Community!\n\n"
+                "Tap below to enter the Mini-App and:\n"
+                "• Check-in daily to earn XP\n"
+                "• Unlock your referral link\n"
+                "• Claim voucher code\n\n"
+                "Start your journey here 👇",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                uid=user.id,
+                send_type="start",
+                raise_on_non_transient=False,
+            )
             
 async def handle_xmas_checkin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Xmas Gift Delight check-in flow triggered via inline keyboard."""
@@ -3168,7 +3095,7 @@ async def button_handler(update, context):
         from functools import partial
         loop = asyncio.get_running_loop()
         link = await loop.run_in_executor(
-            None, partial(get_or_create_ugc_referral_deeplink_sync, user_id)
+            None, partial(get_or_create_referral_invite_link_sync, user_id, query.from_user.username or "")
         )
         await query.edit_message_text(f"👥 Your referral link:\n{link}")
 
