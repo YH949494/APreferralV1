@@ -1,5 +1,5 @@
 from pymongo import MongoClient, ASCENDING 
-from pymongo.errors import DuplicateKeyError, OperationFailure
+from pymongo.errors import DuplicateKeyError
 import os
 import datetime
 from datetime import timezone, timedelta
@@ -15,20 +15,6 @@ _client = None
 _db = None
 _indexes_initialized = False
 
-AFFILIATE_STATUS_VALUES = {"none", "pending", "active", "suspended"}
-AFFILIATE_ROLE_VALUES = {"member", "affiliate"}
-
-
-def normalize_affiliate_status(value: str | None) -> str:
-    if value in AFFILIATE_STATUS_VALUES:
-        return value
-    return "none"
-
-
-def normalize_affiliate_role(value: str | None) -> str:
-    if value in AFFILIATE_ROLE_VALUES:
-        return value
-    return "member"
 
 class CollectionProxy:
     def __init__(self, name: str):
@@ -82,43 +68,6 @@ def ensure_indexes() -> None:
     if _indexes_initialized:
         return
     db_ref = get_db()
-
-
-    def safe_unique_index(coll, keys, name, field_for_partial=None):
-        if field_for_partial:
-            try:
-                # Provider limitation: avoid partial filters that rely on $ne/$not.
-                # Unset explicit nulls so they don't get indexed as duplicates.
-                coll.update_many({field_for_partial: None}, {"$unset": {field_for_partial: ""}})
-                try:
-                    if name in coll.index_information():
-                        coll.drop_index(name)
-                except Exception:
-                    logger.warning("Failed to drop index %s", name, exc_info=True)
-                try:
-                    # Use $exists-only partial filter to avoid $not translations.
-                    coll.create_index(
-                        keys,
-                        unique=True,
-                        name=name,
-                        partialFilterExpression={field_for_partial: {"$exists": True}},
-                    )
-                except OperationFailure:
-                    # Fallback to sparse unique index if partials are unsupported.
-                    logger.warning(
-                        "Failed to create partial unique index %s; falling back to sparse index",
-                        name,
-                        exc_info=True,
-                    )
-                    coll.create_index(keys, unique=True, sparse=True, name=name)
-            except Exception:
-                logger.warning("Failed to ensure %s unique index", name, exc_info=True)
-            return
-        try:
-            coll.create_index(keys, unique=True, name=name)
-        except Exception:
-            logger.warning("Failed to ensure %s unique index", name, exc_info=True)
-            
     db_ref["voucher_whitelist"].create_index([("code", ASCENDING)], unique=True)
     db_ref["voucher_whitelist"].create_index([("username", ASCENDING), ("start_at", ASCENDING)])
     db_ref["voucher_whitelist"].create_index([("end_at", ASCENDING)])
@@ -134,22 +83,6 @@ def ensure_indexes() -> None:
     db_ref["channel_subscription_cache"].create_index([("user_id", ASCENDING)], unique=True)
     db_ref["channel_subscription_cache"].create_index([("expires_at", ASCENDING)], expireAfterSeconds=0)
 
-    db_ref["events"].create_index([("uid", ASCENDING), ("type", ASCENDING), ("ts", ASCENDING)])
-
-    voucher_ledger_collection = db_ref["voucher_ledger"]
-    safe_unique_index(
-        voucher_ledger_collection,
-        [("affiliate_uid", ASCENDING), ("reward_type", ASCENDING), ("source_uid", ASCENDING)],
-        "affiliate_uid_1_reward_type_1_source_uid_1",
-        field_for_partial="source_uid",
-    )
-    safe_unique_index(
-        voucher_ledger_collection,
-        [("affiliate_uid", ASCENDING), ("period", ASCENDING)],
-        "affiliate_uid_1_period_1",
-        field_for_partial="period",
-    )
-    
     try:
         db_ref["admin_xp_cooldowns"].create_index([("expireAt", ASCENDING)], expireAfterSeconds=0)
     except Exception:
@@ -194,17 +127,7 @@ def init_user(user_id, username):
                 "last_checkin": None,                
                 "status": "Normal",       # or "VIP1"
                 "next_status": "VIP1",    # scheduled for next month
-                "last_status_update": "2025-08-01",
-                "role": "member",
-                "affiliate_status": "none",
-                "affiliate_since": None,
-                "kpi_l2_30d": 0,
-                "kpi_l3_30d": 0,
-                "flags": [],
-                "level": 1,
-                "level3_granted": False,
-                "level2_confirmed_at": None,
-                "level3_confirmed_at": None,                
+                "last_status_update": "2025-08-01"
             }
         },
         upsert=True
