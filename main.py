@@ -1244,43 +1244,18 @@ def ensure_indexes():
                 tg_verification_queue_collection.drop_index(legacy_name)
             except Exception:
                 pass
-
-        verif_unique_index_created = False
-        for partial_type in (["int", "long"], "number"):
-            try:
-                tg_verification_queue_collection.create_index(
-                    [("user_id", 1)],
-                    unique=True,
-                    name="uq_tg_verif_user_id_nonnull",
-                    partialFilterExpression={"user_id": {"$type": partial_type}},
-                )
-                verif_unique_index_created = True
-                break
-            except Exception as e:
-                logger.warning(
-                    "[VERIFY_QUEUE] create index uq_tg_verif_user_id_nonnull failed for $type=%s; retrying with fallback. error=%s",
-                    partial_type,
-                    e,
-                )
-                try:
-                    tg_verification_queue_collection.drop_index("uq_tg_verif_user_id_nonnull")
-                except Exception:
-                    pass
-
-        if not verif_unique_index_created:
-            try:
-                tg_verification_queue_collection.create_index(
-                    [("user_id", 1)],
-                    unique=True,
-                    sparse=True,
-                    name="uq_tg_verif_user_id_sparse",
-                )
-            except Exception as e:
-                logger.warning(
-                    "[VERIFY_QUEUE] sparse fallback index create failed for uq_tg_verif_user_id_sparse; continuing startup. error=%s",
-                    e,
-                )
-
+        verif_indexes_by_name = {
+            ix.get("name"): ix for ix in tg_verification_queue_collection.list_indexes()
+        }
+        if "uq_tg_verif_user_id_nonnull" in verif_indexes_by_name:
+            logger.info("[VERIFY_QUEUE] index exists, skip")
+        else:
+            tg_verification_queue_collection.create_index(
+                [("user_id", 1)],
+                unique=True,
+                name="uq_tg_verif_user_id_nonnull",
+                partialFilterExpression={"user_id": {"$type": "number"}},
+            )
         tg_verification_queue_collection.create_index(
             [("status", 1), ("created_at", 1)],
             name="ix_verif_status_created",
