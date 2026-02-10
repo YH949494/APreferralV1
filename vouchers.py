@@ -23,11 +23,6 @@ welcome_eligibility_col = db["welcome_eligibility"]
 tg_verification_queue_col = db["tg_verification_queue"]
 voucher_claims_col = db["voucher_claims"]
 invite_link_map_collection = db["invite_link_map"]
-ugc_submissions_col = db["ugc_submissions"]
-ugc_user_kpis_col = db["ugc_user_kpis"]
-ugc_reward_ledger_col = db["ugc_reward_ledger"]
-ugc_admin_queue_col = db["ugc_admin_queue"]
-voucher_ledger_col = db["voucher_ledger"]
 
 BYPASS_ADMIN = os.getenv("BYPASS_ADMIN", "0").lower() in ("1", "true", "yes", "on")
 HARDCODED_ADMIN_USERNAMES = {"gracy_ap", "teohyaohui"}  # allow manual overrides if cache is empty
@@ -43,13 +38,6 @@ SUBNET_KILL_MAX_SUCCESSES = int(os.getenv("SUBNET_KILL_MAX_SUCCESSES", "4"))
 KILL_BLOCK_SECONDS = int(os.getenv("KILL_BLOCK_SECONDS", "86400"))
 CLAIM_COOLDOWN_SECONDS = int(os.getenv("CLAIM_COOLDOWN_SECONDS", "180"))
 SESSION_COOLDOWN_SEC = int(os.getenv("SESSION_COOLDOWN_SEC", "30"))
-UGC_INVALIDATION_THRESHOLD_30D = int(os.getenv("UGC_INVALIDATION_THRESHOLD_30D", "2"))
-UGC_PENALTY_DAYS = int(os.getenv("UGC_PENALTY_DAYS", "14"))
-UGC_AUDIT_RESPONSE_HOURS = int(os.getenv("UGC_AUDIT_RESPONSE_HOURS", "48"))
-UGC_T1_DROP_ID = os.getenv("UGC_T1_DROP_ID", "")
-UGC_T2_DROP_ID = os.getenv("UGC_T2_DROP_ID", "")
-UGC_T3_DROP_ID = os.getenv("UGC_T3_DROP_ID", "")
-UGC_BIG_POOL_DROP_ID = os.getenv("UGC_BIG_POOL_DROP_ID", "")
 _BYPASS_WARNING_LOGGED = False
 
 _RAW_OFFICIAL_CHANNEL_ID = getattr(_cfg, "OFFICIAL_CHANNEL_ID", os.getenv("OFFICIAL_CHANNEL_ID"))
@@ -403,21 +391,12 @@ def ensure_voucher_indexes():
                 tg_verification_queue_col.drop_index(legacy_name)
             except OperationFailure:
                 pass     
-        verif_indexes_by_name = {
-            ix.get("name"): ix for ix in tg_verification_queue_col.list_indexes()
-        }
-        if "uq_tg_verif_user_id_nonnull" in verif_indexes_by_name:
-            try:
-                current_app.logger.info("[VERIFY_QUEUE] index exists, skip")
-            except Exception:
-                print("[VERIFY_QUEUE] index exists, skip")
-        else:
-            tg_verification_queue_col.create_index(
-                [("user_id", ASCENDING)],
-                unique=True,
-                name="uq_tg_verif_user_id_nonnull",
-                partialFilterExpression={"user_id": {"$type": "number"}},
-            )
+        tg_verification_queue_col.create_index(
+            [("user_id", ASCENDING)],
+            unique=True,
+            name="uq_tg_verif_user_id_nonnull",
+            partialFilterExpression={"user_id": {"$type": ["int", "long"]}},
+        )
         tg_verification_queue_col.create_index(
             [("status", ASCENDING), ("created_at", ASCENDING)],
             name="ix_verif_status_created",
@@ -432,29 +411,6 @@ def ensure_voucher_indexes():
 
     _maybe_migrate_verification_queue_uid()
 
-    ugc_submissions_col.create_index(
-        [("platform", ASCENDING), ("post_hash", ASCENDING)],
-        unique=True,
-        name="uq_ugc_platform_post_hash",
-    )
-    ugc_submissions_col.create_index(
-        [("user_id", ASCENDING), ("created_at", DESCENDING)],
-        name="ix_ugc_user_created",
-    )
-    ugc_submissions_col.create_index([("status", ASCENDING)], name="ix_ugc_status")
-    ugc_submissions_col.create_index([("tier_claimed", ASCENDING)], name="ix_ugc_tier")
-    ugc_submissions_col.create_index([("audit.next_audit_at", ASCENDING)], name="ix_ugc_next_audit")
-    ugc_reward_ledger_col.create_index(
-        [("user_id", ASCENDING), ("submission_id", ASCENDING), ("reward_type", ASCENDING)],
-        unique=True,
-        name="uq_ugc_ledger_user_submission_reward",
-    )
-    ugc_reward_ledger_col.create_index(
-        [("status", ASCENDING), ("created_at", ASCENDING)],
-        name="ix_ugc_ledger_status_created",
-    )
-    ugc_reward_ledger_col.create_index([("approved_at", ASCENDING)], name="ix_ugc_ledger_approved_at")
- 
     if os.getenv("VERIFY_QUEUE_CLEANUP") == "1":
         try:
             result = tg_verification_queue_col.delete_many(
@@ -2316,27 +2272,10 @@ def is_drop_active(doc: dict, ref: datetime) -> bool:
 def get_active_drops(ref: datetime):
     return list(db.drops.find({
         "status": {"$nin": ["expired", "paused"]},
-        "internal_only": {"$ne": True},     
         "startsAt": {"$lte": ref},
         "endsAt": {"$gt": ref}
     }))
 
-
-def _has_pending_internal_claim(*, user_id, drop_id, ref: datetime) -> bool:
-    if user_id is None:
-        return False
-    drop_id_variants = _drop_id_variants(drop_id)
-    return bool(
-        ugc_reward_ledger_col.find_one(
-            {
-                "user_id": user_id,
-                "drop_id": {"$in": drop_id_variants},
-                "status": "pending_claim",
-                "claimable_after": {"$lte": ref},
-            }
-        )
-    )
- 
 def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None):
     usernameLower = norm_username(user.get("usernameLower", ""))
     user_id = str(user.get("userId") or "").strip() if isinstance(user, dict) else ""
@@ -2940,15 +2879,7 @@ def claim_voucher_for_user(*, user_id: str, drop_id: str, username: str) -> dict
             user_doc = users_collection.find_one({"usernameLower": uname}, {"restrictions": 1, "region": 1})
 
     if user_doc and user_doc.get("restrictions", {}).get("no_campaign"):
-        restrictions = user_doc.get("restrictions", {}) or {}
-        block_until = _as_aware_utc(restrictions.get("ugc_no_campaign_until"))
-        if block_until and block_until <= now_utc():
-            users_collection.update_one(
-                {"_id": user_doc.get("_id")},
-                {"$set": {"restrictions.no_campaign": False}, "$unset": {"restrictions.ugc_no_campaign_until": ""}},
-            )
-        else:
-            raise NotEligible("not_eligible")
+        raise NotEligible("not_eligible")
  
     drop = db.drops.find_one({"_id": _coerce_id(drop_id)})
     if not drop:
@@ -3116,19 +3047,7 @@ def api_claim():
             "reason": "not_eligible",
             "checks_key": None,
         }), 403
-
-
-    if voucher.get("internal_only") is True:
-        if not _has_pending_internal_claim(user_id=uid, drop_id=drop_id, ref=now_utc()):
-            return jsonify({
-                "status": "error",
-                "code": "not_eligible",
-                "ok": False,
-                "eligible": False,
-                "reason": "not_eligible",
-                "checks_key": None,
-            }), 403
-         
+     
     if not username:
         username = fallback_username or ""
    
@@ -3697,8 +3616,7 @@ def admin_create_drop():
         "endsAt": endsAt,
         "priority": priority,
         "visibilityMode": "stacked",
-        "status": status,
-        "internal_only": bool(data.get("internal_only") is True),
+        "status": status
     }
  
     if data.get("eligibility") is not None or clean_eligibility.get("mode") != "public" or clean_eligibility.get("allow"):
@@ -4009,562 +3927,3 @@ def admin_list_drops():
 # 2) Append pool="public" codes => inserted count returned
 # 3) Append with a duplicate code => get 409 duplicate_code (not 500)
 # 4) Admin drop summary shows codesTotalPublic includes legacy pool-missing rows
-
-
-_PLATFORM_PATTERNS = {
-    "fb": ("facebook.com", "fb.watch"),
-    "ig": ("instagram.com",),
-    "tt": ("tiktok.com",),
-}
-
-
-def _extract_ugc_user(req):
-    init_data_raw = extract_raw_init_data_from_query(req)
-    if not init_data_raw:
-        return None, (jsonify({"status": "error", "code": "missing_init_data"}), 400)
-    ok, parsed, reason = verify_telegram_init_data(init_data_raw)
-    if not ok:
-        return None, (jsonify({"status": "error", "code": "bad_init_data", "reason": reason}), 403)
-    try:
-        user_json = json.loads(parsed.get("user", "{}"))
-    except Exception:
-        user_json = {}
-    user_id = user_json.get("id")
-    if not user_id:
-        return None, (jsonify({"status": "error", "code": "missing_user_id"}), 400)
-    return {
-        "user_id": int(user_id),
-        "usernameLower": norm_username(user_json.get("username", "")),
-    }, None
-
-
-def _normalize_post_url(url: str) -> str:
-    return (url or "").strip()
-
-
-def _post_hash(url: str) -> str:
-    return hashlib.sha256(_normalize_post_url(url).encode("utf-8")).hexdigest()
-
-
-def _proof_hash(proof: dict) -> str:
-    if not isinstance(proof, dict):
-        return ""
-    raw = proof.get("sha256")
-    if isinstance(raw, str) and raw.strip():
-        return raw.strip().lower()
-    file_id = str(proof.get("file_id") or "")
-    meta = {
-        "file_id": file_id,
-        "size": proof.get("size"),
-        "mime": proof.get("mime"),
-        "type": proof.get("type"),
-    }
-    return hashlib.sha256(json.dumps(meta, sort_keys=True).encode("utf-8")).hexdigest()
-
-
-def _normalize_proofs(proofs):
-    items = []
-    for p in (proofs or []):
-        if not isinstance(p, dict):
-            continue
-        items.append({
-            "type": p.get("type") if p.get("type") in ("screenshot", "video") else "screenshot",
-            "sha256": _proof_hash(p),
-            "size": int(p.get("size") or 0),
-            "mime": str(p.get("mime") or ""),
-            "created_at": now_utc(),
-        })
-    return items
-
-
-def _valid_platform_url(platform: str, post_url: str) -> bool:
-    domains = _PLATFORM_PATTERNS.get(platform, ())
-    lowered = (post_url or "").lower()
-    return any(d in lowered for d in domains)
-
-
-def _compute_user_kpis(user_id: int) -> dict:
-    now = now_utc()
-    t2_30_start = now - timedelta(days=30)
-    all_60_start = now - timedelta(days=60)
-    t2_last_30 = ugc_submissions_col.count_documents({
-        "user_id": user_id,
-        "status": "validated",
-        "tier_claimed": "T2",
-        "updated_at": {"$gte": t2_30_start},
-    })
-    all_last_60 = ugc_submissions_col.count_documents({
-        "user_id": user_id,
-        "status": "validated",
-        "updated_at": {"$gte": all_60_start},
-    })
-    kpi = {
-        "user_id": user_id,
-        "count_validated_t2_last_30d": t2_last_30,
-        "count_validated_all_last_60d": all_last_60,
-        "t4_candidate": t2_last_30 >= 15,
-        "updated_at": now,
-    }
-    ugc_user_kpis_col.update_one({"user_id": user_id}, {"$set": kpi}, upsert=True)
-    return kpi
-
-
-def _reward_drop_for_tier(tier: str) -> str:
-    return {"T1": UGC_T1_DROP_ID, "T2": UGC_T2_DROP_ID, "T3": UGC_T3_DROP_ID}.get(tier, "")
-
-
-def _issue_small_reward(submission: dict):
-    tier = submission.get("tier_claimed")
-    if tier not in ("T1", "T2", "T3"):
-        return {"ok": False, "reason": "unsupported_tier"}
-
-    ledger = ugc_reward_ledger_col.find_one_and_update(
-        {
-            "user_id": submission["user_id"],
-            "submission_id": str(submission["_id"]),
-            "reward_type": tier,
-        },
-        {
-            "$setOnInsert": {
-                "user_id": submission["user_id"],
-                "submission_id": str(submission["_id"]),
-                "reward_type": tier,
-                "status": "approved",
-                "created_at": now_utc(),
-                "approved_at": now_utc(),
-            }
-        },
-        upsert=True,
-        return_document=ReturnDocument.AFTER,
-    )
-    if ledger.get("status") == "issued" and ledger.get("voucher_code"):
-        return {"ok": True, "code": ledger.get("voucher_code"), "claimedAt": ledger.get("issued_at")}
-
-    drop_id = _reward_drop_for_tier(tier)
-    if not drop_id:
-        ugc_reward_ledger_col.update_one({"_id": ledger["_id"]}, {"$set": {"status": "failed", "reason": "missing_drop_id"}})
-        return {"ok": False, "reason": "missing_drop_id"}
-
-    try:
-        issued = claim_voucher_for_user(
-            user_id=str(submission["user_id"]),
-            drop_id=drop_id,
-            username=submission.get("usernameLower", ""),
-        )
-    except NoCodesLeft:
-        ugc_reward_ledger_col.update_one(
-            {"_id": ledger["_id"]},
-            {"$set": {"status": "approved_not_issued", "reason": "sold_out", "updated_at": now_utc()}},
-        )
-        return {"ok": False, "reason": "sold_out"}
-    except Exception as exc:
-        ugc_reward_ledger_col.update_one(
-            {"_id": ledger["_id"]},
-            {"$set": {"status": "failed", "reason": str(exc), "updated_at": now_utc()}},
-        )
-        return {"ok": False, "reason": "issue_failed"}
-
-    ugc_reward_ledger_col.update_one(
-        {"_id": ledger["_id"]},
-        {"$set": {"status": "issued", "voucher_code": issued["code"], "issued_at": now_utc(), "updated_at": now_utc()}},
-    )
-    ugc_submissions_col.update_one(
-        {"_id": submission["_id"]},
-        {
-            "$set": {
-                "reward.small_reward_issued": True,
-                "reward.small_reward_drop_id": drop_id,
-                "reward.small_reward_code": issued["code"],
-                "updated_at": now_utc(),
-            }
-        },
-    )
-    return {"ok": True, "code": issued["code"], "claimedAt": issued["claimedAt"]}
-
-
-def _apply_ugc_penalty_if_needed(user_id: int):
-    cutoff = now_utc() - timedelta(days=30)
-    invalidated_count = ugc_submissions_col.count_documents(
-        {"user_id": user_id, "status": "invalidated", "updated_at": {"$gte": cutoff}}
-    )
-    if invalidated_count < UGC_INVALIDATION_THRESHOLD_30D:
-        return
-    block_until = now_utc() + timedelta(days=UGC_PENALTY_DAYS)
-    users_collection.update_one(
-        {"user_id": user_id},
-        {
-            "$set": {
-                "restrictions.no_campaign": True,
-                "restrictions.ugc_no_campaign_until": block_until,
-                "updatedAt": now_utc(),
-            }
-        },
-    )
-
-
-def _validate_submission_payload(platform: str, post_url: str, tier_claimed: str, caption: str, proofs: list, metrics_claimed: dict | None):
-    if platform not in ("fb", "ig", "tt"):
-        return False, "bad_platform", "rejected"
-    if not _valid_platform_url(platform, post_url):
-        return False, "bad_post_url_domain", "rejected"
-    if tier_claimed in ("T2", "T3") and not (caption or "").strip():
-        return False, "caption_required", "rejected"
-    if tier_claimed == "T1" and not proofs:
-        return False, "proof_required", "needs_more_proof"
-    if tier_claimed in ("T2", "T3") and not (metrics_claimed and isinstance(metrics_claimed, dict)):
-        return False, "metrics_proof_required", "needs_more_proof"
-    if tier_claimed in ("T2", "T3") and not proofs:
-        return False, "proof_required", "needs_more_proof"
-    return True, "", "submitted"
-
-
-def ugc_audit_tick():
-    now = now_utc()
-    due = ugc_submissions_col.find({"status": "validated", "audit.next_audit_at": {"$lte": now}})
-    for sub in due:
-        ugc_submissions_col.update_one(
-            {"_id": sub["_id"], "status": "validated"},
-            {
-                "$set": {
-                    "status": "audit_required",
-                    "reason": "audit_proof_required",
-                    "audit.audit_status": "pending",
-                    "audit.audit_required_at": now,
-                    "audit.audit_due_at": now + timedelta(hours=UGC_AUDIT_RESPONSE_HOURS),
-                    "updated_at": now,
-                }
-            },
-        )
-        _safe_log("info", "[ugc][audit] proof requested submission=%s user_id=%s", sub.get("_id"), sub.get("user_id"))
-
-    overdue = ugc_submissions_col.find(
-        {"status": "audit_required", "audit.audit_due_at": {"$lte": now}}
-    )
-    for sub in overdue:
-        updated = ugc_submissions_col.find_one_and_update(
-            {"_id": sub["_id"], "status": "audit_required"},
-            {
-                "$set": {
-                    "status": "invalidated",
-                    "reason": "audit_timeout",
-                    "audit.audit_status": "failed",
-                    "audit.last_audit_at": now,
-                    "updated_at": now,
-                }
-            },
-            return_document=ReturnDocument.AFTER,
-        )
-        if updated:
-            _apply_ugc_penalty_if_needed(updated.get("user_id"))
-
-
-def ugc_t4_daily_tick():
-    now = now_utc()
-    start_60 = now - timedelta(days=60)
-    pipeline = [
-        {"$match": {"status": "validated", "updated_at": {"$gte": start_60}}},
-        {"$group": {"_id": "$user_id", "count": {"$sum": 1}}},
-        {"$match": {"count": {"$gte": 40}}},
-    ]
-    for row in ugc_submissions_col.aggregate(pipeline):
-        uid = row["_id"]
-        ugc_reward_ledger_col.update_one(
-            {"user_id": uid, "submission_id": "monthly_60d", "reward_type": "T4_MONTHLY_100"},
-            {
-                "$setOnInsert": {
-                    "user_id": uid,
-                    "submission_id": "monthly_60d",
-                    "reward_type": "T4_MONTHLY_100",
-                    "status": "pending_admin",
-                    "created_at": now,
-                }
-            },
-            upsert=True,
-        )
-
-
-@vouchers_bp.route("/ugc/submit", methods=["POST"])
-def ugc_submit():
-    user, err = _extract_ugc_user(request)
-    if err:
-        return err
-    body = request.get_json(silent=True) or {}
-    platform = (body.get("platform") or "").strip().lower()
-    post_url = _normalize_post_url(body.get("post_url") or "")
-    caption = (body.get("caption") or "").strip()
-    tier_claimed = (body.get("tier_claimed") or "").strip()
-    if tier_claimed not in ("T1", "T2", "T3", "T4candidate"):
-        return jsonify({"ok": False, "code": "bad_tier"}), 400
-
-    proofs = _normalize_proofs(body.get("proofs") or [])
-    metrics_claimed = body.get("metrics_claimed") if isinstance(body.get("metrics_claimed"), dict) else None
-    ok, reason, status = _validate_submission_payload(platform, post_url, tier_claimed, caption, proofs, metrics_claimed)
-    post_hash = _post_hash(post_url)
-
-    existing = ugc_submissions_col.find_one({"platform": platform, "post_hash": post_hash})
-    if existing:
-        return jsonify({"ok": True, "submissionId": str(existing["_id"]), "status": existing.get("status", "submitted")}), 200
-
-    now = now_utc()
-    doc = {
-        "user_id": user["user_id"],
-        "usernameLower": user.get("usernameLower", ""),
-        "platform": platform,
-        "post_url": post_url,
-        "post_hash": post_hash,
-        "caption": caption,
-        "tier_claimed": tier_claimed,
-        "proof_assets": proofs,
-        "metrics_claimed": metrics_claimed,
-        "status": "submitted" if ok else status,
-        "reason": "" if ok else reason,
-        "created_at": now,
-        "updated_at": now,
-        "audit": {
-            "d7_at": now + timedelta(days=7),
-            "d30_at": now + timedelta(days=30),
-            "next_audit_at": now + timedelta(days=7),
-            "audit_status": "pending",
-            "last_audit_at": None,
-        },
-        "reward": {
-            "small_reward_issued": False,
-            "small_reward_drop_id": None,
-            "small_reward_code": None,
-        },
-    }
-    if ok and tier_claimed == "T1":
-        doc["status"] = "validated"
-
-    try:
-        res = ugc_submissions_col.insert_one(doc)
-    except DuplicateKeyError:
-        existing = ugc_submissions_col.find_one({"platform": platform, "post_hash": post_hash})
-        return jsonify({"ok": True, "submissionId": str(existing["_id"]), "status": existing.get("status", "submitted")}), 200
-
-    if doc["status"] == "validated" and tier_claimed in ("T1", "T2", "T3"):
-        issue_result = _issue_small_reward({**doc, "_id": res.inserted_id})
-        if not issue_result.get("ok"):
-            _safe_log("warning", "[ugc] small reward issue failed submission=%s reason=%s", res.inserted_id, issue_result.get("reason"))
-        _compute_user_kpis(user["user_id"])
-
-    return jsonify({"ok": True, "submissionId": str(res.inserted_id), "status": doc["status"]}), 200
-
-
-@vouchers_bp.route("/ugc/my", methods=["GET"])
-def ugc_my():
-    user, err = _extract_ugc_user(request)
-    if err:
-        return err
-    rows = list(ugc_submissions_col.find({"user_id": user["user_id"]}).sort([("created_at", DESCENDING)]).limit(100))
-    for row in rows:
-        row["_id"] = str(row["_id"])
-    kpi = _compute_user_kpis(user["user_id"])
-    return jsonify({"ok": True, "items": rows, "kpi": kpi, "tier_eligibility": {"t4_candidate": bool(kpi.get("t4_candidate"))}}), 200
-
-
-@vouchers_bp.route("/ugc/proof/add", methods=["POST"])
-def ugc_proof_add():
-    user, err = _extract_ugc_user(request)
-    if err:
-        return err
-    body = request.get_json(silent=True) or {}
-    submission_id = body.get("submissionId") or body.get("submission_id")
-    if not submission_id:
-        return jsonify({"ok": False, "code": "missing_submission_id"}), 400
-    proofs = _normalize_proofs(body.get("proofs") or [])
-    if not proofs:
-        return jsonify({"ok": False, "code": "empty_proofs"}), 400
-    updated = ugc_submissions_col.find_one_and_update(
-        {
-            "_id": _coerce_id(submission_id),
-            "user_id": user["user_id"],
-            "status": {"$in": ["needs_more_proof", "audit_required"]},
-        },
-        {
-            "$push": {"proof_assets": {"$each": proofs}},
-            "$set": {
-                "status": "submitted",
-                "reason": "",
-                "updated_at": now_utc(),
-                "audit.audit_status": "passed" if body.get("audit_response") else "pending",
-                "audit.last_audit_at": now_utc() if body.get("audit_response") else None,
-                "audit.next_audit_at": None if body.get("audit_response") else None,
-            },
-        },
-        return_document=ReturnDocument.AFTER,
-    )
-    if not updated:
-        return jsonify({"ok": False, "code": "not_found_or_not_allowed"}), 404
-    return jsonify({"ok": True, "submissionId": str(updated["_id"]), "status": updated.get("status")}), 200
-
-
-@vouchers_bp.route("/admin/ugc/submissions", methods=["GET"])
-def admin_ugc_submissions():
-    _, err = require_admin()
-    if err:
-        return err
-    status = request.args.get("status")
-    query = {}
-    if status:
-        query["status"] = status
-    items = []
-    for doc in ugc_submissions_col.find(query).sort([("created_at", DESCENDING)]).limit(200):
-        doc["_id"] = str(doc["_id"])
-        items.append(doc)
-    return jsonify({"ok": True, "items": items}), 200
-
-
-@vouchers_bp.route("/admin/ugc/submissions/<submission_id>/decision", methods=["POST"])
-def admin_ugc_decision(submission_id):
-    _, err = require_admin()
-    if err:
-        return err
-    body = request.get_json(silent=True) or {}
-    op = body.get("op")
-    note = body.get("note") or ""
-    now = now_utc()
-    submission = ugc_submissions_col.find_one({"_id": _coerce_id(submission_id)})
-    if not submission:
-        return jsonify({"ok": False, "code": "not_found"}), 404
-
-    if op in ("approve_t1", "approve_t2", "approve_t3"):
-        tier = op.split("_")[1].upper()
-        updated = ugc_submissions_col.find_one_and_update(
-            {"_id": submission["_id"]},
-            {"$set": {"status": "validated", "tier_claimed": tier, "reason": note, "updated_at": now}},
-            return_document=ReturnDocument.AFTER,
-        )
-        _issue_small_reward(updated)
-        _compute_user_kpis(updated["user_id"])
-        return jsonify({"ok": True, "status": updated.get("status")}), 200
-    if op == "reject":
-        updated = ugc_submissions_col.find_one_and_update(
-            {"_id": submission["_id"]},
-            {"$set": {"status": "rejected", "reason": note, "updated_at": now}},
-            return_document=ReturnDocument.AFTER,
-        )
-        return jsonify({"ok": True, "status": updated.get("status")}), 200
-    if op == "request_more_proof":
-        updated = ugc_submissions_col.find_one_and_update(
-            {"_id": submission["_id"]},
-            {"$set": {"status": "needs_more_proof", "reason": note, "updated_at": now}},
-            return_document=ReturnDocument.AFTER,
-        )
-        return jsonify({"ok": True, "status": updated.get("status")}), 200
-
-    return jsonify({"ok": False, "code": "bad_op"}), 400
-
-
-@vouchers_bp.route("/admin/ugc/ledger", methods=["GET"])
-def admin_ugc_ledger():
-    _, err = require_admin()
-    if err:
-        return err
-    status = request.args.get("status")
-    query = {}
-    if status:
-        query["status"] = status
-    items = []
-    for doc in ugc_reward_ledger_col.find(query).sort([("created_at", DESCENDING)]).limit(200):
-        doc["_id"] = str(doc["_id"])
-        items.append(doc)
-    return jsonify({"ok": True, "items": items}), 200
-
-
-@vouchers_bp.route("/admin/ugc/ledger/<ledger_id>/approve", methods=["POST"])
-def admin_ugc_ledger_approve(ledger_id):
-    _, err = require_admin()
-    if err:
-        return err
-    updated = ugc_reward_ledger_col.find_one_and_update(
-        {"_id": _coerce_id(ledger_id), "status": {"$in": ["pending_admin", "pending"]}},
-        {"$set": {"status": "approved", "approved_at": now_utc(), "updated_at": now_utc()}},
-        return_document=ReturnDocument.AFTER,
-    )
-    if not updated:
-        return jsonify({"ok": False, "code": "not_found_or_not_pending"}), 404
-    return jsonify({"ok": True, "status": updated.get("status")}), 200
-
-
-@vouchers_bp.route("/admin/ugc/ledger/<ledger_id>/issue", methods=["POST"])
-def admin_ugc_ledger_issue(ledger_id):
-    _, err = require_admin()
-    if err:
-        return err
-    ledger = ugc_reward_ledger_col.find_one({"_id": _coerce_id(ledger_id)})
-    if not ledger:
-        return jsonify({"ok": False, "code": "not_found"}), 404
-    if ledger.get("status") == "issued":
-        return jsonify({"ok": True, "status": "issued", "code": ledger.get("voucher_code")}), 200
-    if ledger.get("status") != "approved":
-        return jsonify({"ok": False, "code": "not_approved"}), 400
-    if ledger.get("reward_type") != "T4_MONTHLY_100":
-        return jsonify({"ok": False, "code": "bad_reward_type"}), 400
-    if not UGC_BIG_POOL_DROP_ID:
-        return jsonify({"ok": False, "code": "missing_drop_id"}), 400
-
-    user_doc = users_collection.find_one({"user_id": ledger.get("user_id")}, {"usernameLower": 1, "username": 1}) or {}
-    username = user_doc.get("usernameLower") or user_doc.get("username") or ""
-
-    try:
-        issued = claim_voucher_for_user(
-            user_id=str(ledger.get("user_id")),
-            drop_id=UGC_BIG_POOL_DROP_ID,
-            username=username,
-        )
-    except NoCodesLeft:
-        ugc_reward_ledger_col.update_one({"_id": ledger["_id"]}, {"$set": {"status": "approved_not_issued", "reason": "sold_out", "updated_at": now_utc()}})
-        return jsonify({"ok": False, "code": "sold_out"}), 409
-
-    ugc_reward_ledger_col.update_one(
-        {"_id": ledger["_id"]},
-        {"$set": {"status": "issued", "voucher_code": issued["code"], "issued_at": now_utc(), "updated_at": now_utc()}},
-    )
-    return jsonify({"ok": True, "status": "issued", "code": issued["code"]}), 200
-
-
-
-@vouchers_bp.route("/admin/ugc-growth/pending-large", methods=["GET"])
-def admin_ugc_growth_pending_large():
-    _, err = require_admin()
-    if err:
-        return err
-    items = []
-    for doc in voucher_ledger_col.find({"kind": "ugc_referrer_reward", "tier": "S4", "status": "pending_admin"}).sort([("created_at", DESCENDING)]).limit(200):
-        doc["_id"] = str(doc["_id"])
-        items.append(doc)
-    return jsonify({"ok": True, "items": items}), 200
-
-
-@vouchers_bp.route("/admin/ugc-growth/ledger/<ledger_id>/approve-large", methods=["POST"])
-def admin_ugc_growth_approve_large(ledger_id):
-    _, err = require_admin()
-    if err:
-        return err
-    ledger = voucher_ledger_col.find_one({"_id": _coerce_id(ledger_id), "kind": "ugc_referrer_reward", "tier": "S4", "status": "pending_admin"})
-    if not ledger:
-        return jsonify({"ok": False, "code": "not_found_or_not_pending"}), 404
-    if not UGC_BIG_POOL_DROP_ID:
-        return jsonify({"ok": False, "code": "missing_drop_id"}), 400
-    user_doc = users_collection.find_one({"user_id": ledger.get("source_uid")}, {"usernameLower": 1, "username": 1}) or {}
-    username = user_doc.get("usernameLower") or user_doc.get("username") or ""
-    try:
-        issued = claim_voucher_for_user(user_id=str(ledger.get("source_uid")), drop_id=UGC_BIG_POOL_DROP_ID, username=username)
-    except NoCodesLeft:
-        return jsonify({"ok": False, "code": "sold_out"}), 409
-    voucher_ledger_col.update_one(
-        {"_id": ledger["_id"]},
-        {"$set": {"status": "issued", "drop_id": UGC_BIG_POOL_DROP_ID, "voucher_code": issued.get("code"), "issued_at": now_utc(), "updated_at": now_utc()}},
-    )
-    bot_token = os.getenv("BOT_TOKEN", "")
-    if bot_token and ledger.get("source_uid"):
-        try:
-            requests.post(
-                f"https://api.telegram.org/bot{bot_token}/sendMessage",
-                json={"chat_id": int(ledger.get("source_uid")), "text": f"Your large reward voucher is ready: {issued.get('code', '')}"},
-                timeout=10,
-            )
-        except Exception:
-            current_app.logger.exception("[ugc_growth] approve_large_dm_failed source_uid=%s", ledger.get("source_uid"))
-    return jsonify({"ok": True, "status": "issued", "code": issued.get("code")}), 200
