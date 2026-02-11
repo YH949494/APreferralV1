@@ -24,6 +24,7 @@ from config import (
     WEEKLY_XP_BUCKET,
     WEEKLY_REFERRAL_BUCKET,
     MINIAPP_VERSION,
+    ADMIN_UIDS,
 )
 from time_utils import expires_in_seconds, tz_name
 
@@ -37,7 +38,7 @@ from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_MISSED
 
 from app_context import set_app_bot, set_bot, set_scheduler
 from onboarding import MYWIN_CHAT_ID, onboarding_due_tick, record_first_mywin, record_first_checkin
-from vouchers import vouchers_bp, ensure_voucher_indexes, process_verification_queue
+from vouchers import vouchers_bp, ensure_voucher_indexes, process_verification_queue, verify_telegram_init_data
 from scheduler import settle_pending_referrals, settle_referral_snapshots, settle_xp_snapshots
 from affiliate_rewards import (
     ensure_affiliate_indexes,
@@ -1632,6 +1633,37 @@ def api_is_admin():
     except Exception as e:
         traceback.print_exc()
         return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/me", methods=["GET"])
+def api_me():
+    init_data_raw = (request.headers.get("X-Tg-InitData") or "").strip()
+    if not init_data_raw:
+        return jsonify({"ok": True, "user_id": None, "is_admin": False})
+
+    try:
+        ok, parsed, _ = verify_telegram_init_data(init_data_raw)
+        if not ok:
+            return jsonify({"ok": True, "user_id": None, "is_admin": False})
+
+        user_payload = parsed.get("user")
+        if isinstance(user_payload, str):
+            user_payload = json.loads(user_payload)
+        if not isinstance(user_payload, dict):
+            user_payload = {}
+
+        try:
+            user_id = int(user_payload.get("id"))
+        except (TypeError, ValueError):
+            user_id = None
+
+        return jsonify({
+            "ok": True,
+            "user_id": user_id,
+            "is_admin": bool(user_id is not None and user_id in set(ADMIN_UIDS)),
+        })
+    except Exception:
+        return jsonify({"ok": True, "user_id": None, "is_admin": False})
 
 async def refresh_admin_ids(context: ContextTypes.DEFAULT_TYPE):
     try:
