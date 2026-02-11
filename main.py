@@ -46,7 +46,7 @@ from affiliate_rewards import (
 from telegram_utils import safe_reply_text
 
 from pymongo import DESCENDING, ASCENDING, ReturnDocument  # keep if used elsewhere
-from pymongo.errors import DuplicateKeyError, CursorNotFound
+from pymongo.errors import DuplicateKeyError, CursorNotFound, OperationFailure, PyMongoError
 import os, asyncio, traceback, csv, io, requests, logging, time, uuid, socket
 import pytz
 from database import init_db, db
@@ -87,6 +87,26 @@ def _job_prefix(job_id: str) -> str:
     if job_id == "monthly_vip":
         return "[JOB][MONTHLY]"
     return "[JOB][SCHED]"
+
+
+
+def _ensure_index_if_missing(col, name, keys, **kwargs):
+    """Create index only when missing by name; safe for concurrent startup calls."""
+    try:
+        for idx in col.list_indexes():
+            if idx.get("name") == name:
+                return name
+    except PyMongoError:
+        raise
+
+    try:
+        return col.create_index(keys, name=name, **kwargs)
+    except OperationFailure as exc:
+        # MongoDB may raise index conflict/exists codes during concurrent startup:
+        # 68=IndexAlreadyExists, 85=IndexOptionsConflict, 86=IndexKeySpecsConflict.
+        if exc.code in (68, 85, 86) or "already exists" in str(exc).lower():
+            return name
+        raise
 
 RUNNER_MODE = os.getenv("RUNNER_MODE")
 if not RUNNER_MODE:
@@ -1247,51 +1267,23 @@ def ensure_indexes():
 
 
     try:
-        for legacy_name in ("uniq_tg_verify_user_id", "uniq_user_checks"):
+        for legacy_name in ("uniq_tg_verify_user_id", "uniq_user_checks", "uq_tg_verif_user_id_sparse"):
             try:
                 tg_verification_queue_collection.drop_index(legacy_name)
             except Exception:
                 pass
 
-        verif_unique_index_created = False
-        for partial_type in (["int", "long"], "number"):
-            try:
-                tg_verification_queue_collection.create_index(
-                    [("user_id", 1)],
-                    unique=True,
-                    name="uq_tg_verif_user_id_nonnull",
-                    partialFilterExpression={"user_id": {"$type": partial_type}},
-                )
-                verif_unique_index_created = True
-                break
-            except Exception as e:
-                logger.warning(
-                    "[VERIFY_QUEUE] create index uq_tg_verif_user_id_nonnull failed for $type=%s; retrying with fallback. error=%s",
-                    partial_type,
-                    e,
-                )
-                try:
-                    tg_verification_queue_collection.drop_index("uq_tg_verif_user_id_nonnull")
-                except Exception:
-                    pass
-
-        if not verif_unique_index_created:
-            try:
-                tg_verification_queue_collection.create_index(
-                    [("user_id", 1)],
-                    unique=True,
-                    sparse=True,
-                    name="uq_tg_verif_user_id_sparse",
-                )
-            except Exception as e:
-                logger.warning(
-                    "[VERIFY_QUEUE] sparse fallback index create failed for uq_tg_verif_user_id_sparse; continuing startup. error=%s",
-                    e,
-                )
-
-        tg_verification_queue_collection.create_index(
+        _ensure_index_if_missing(
+            tg_verification_queue_collection,
+            "uq_tg_verif_user_id_nonnull",
+            [("user_id", 1)],
+            unique=True,
+            partialFilterExpression={"user_id": {"$type": "number"}},
+        )
+        _ensure_index_if_missing(
+            tg_verification_queue_collection,
+            "ix_verif_status_created",
             [("status", 1), ("created_at", 1)],
-            name="ix_verif_status_created",
         )
     except Exception as e:
         print("⚠️ ensure_indexes error:", e)
