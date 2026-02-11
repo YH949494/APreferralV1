@@ -3289,7 +3289,7 @@ ${referral}`;
         value_hint: document.getElementById("aff_value_hint").value || null,
         currency: document.getElementById("aff_currency").value || null,
       };
-      const res = await v2Fetch(`${API_V2}/admin/pools/upload`, {
+      const res = await v2Fetch(`${API_V2}/admin/pools/upload${buildAdminQueryTail()}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
@@ -3300,13 +3300,13 @@ ${referral}`;
     }
 
     async function affLoadPoolSummary() {
-      const res = await v2Fetch(`${API_V2}/admin/pools/summary`);
+      const res = await v2Fetch(`${API_V2}/admin/pools/summary${buildAdminQueryTail()}`);
       const data = await res.json();
       document.getElementById("aff_pool_summary").textContent = JSON.stringify(data, null, 2);
     }
 
     async function affLoadPending(status) {
-      const res = await v2Fetch(`${API_V2}/admin/affiliate/pending?status=${encodeURIComponent(status)}`);
+      const res = await v2Fetch(`${API_V2}/admin/affiliate/pending${buildAdminQueryTail({ status })}`);
       const data = await res.json();
       document.getElementById("aff_pending").textContent = JSON.stringify(data, null, 2);
     }

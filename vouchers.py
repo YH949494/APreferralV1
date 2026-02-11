@@ -2155,7 +2155,8 @@ def _require_admin_via_query():
      
     if not caller_id:
         return None, (jsonify({"status": "error", "code": "missing_user_id"}), 400)
-        return None, (jsonify({"status": "error", "code": "forbidden"}), 403)
+
+    return None, (jsonify({"status": "error", "code": "forbidden"}), 403)
 
 def require_admin():
     if BYPASS_ADMIN:
@@ -3809,8 +3810,9 @@ def _admin_drop_summary(doc: dict, *, ref=None, skip_expired=False):
 
 @vouchers_bp.route("/admin/pools/upload", methods=["POST"])
 def admin_pools_upload_v2():
-    if not _has_valid_admin_secret():
-        return jsonify({"code": "auth_failed"}), 401
+    _, err = require_admin()
+    if err:
+        return err
 
     data = request.get_json(silent=True) or {}
     pool_id = str(data.get("pool_id") or "").strip().upper()
@@ -3849,8 +3851,9 @@ def admin_pools_upload_v2():
 
 @vouchers_bp.route("/admin/pools/summary", methods=["GET"])
 def admin_pools_summary_v2():
-    if not _has_valid_admin_secret():
-        return jsonify({"code": "auth_failed"}), 401
+    _, err = require_admin()
+    if err:
+        return err
 
     out = []
     for pool_id in ("WELCOME", "T1", "T2", "T3", "T4"):
@@ -3872,8 +3875,9 @@ def admin_pools_summary_v2():
 
 @vouchers_bp.route("/admin/affiliate/pending", methods=["GET"])
 def admin_affiliate_pending_v2():
-    if not _has_valid_admin_secret():
-        return jsonify({"code": "auth_failed"}), 401
+    _, err = require_admin()
+    if err:
+        return err
 
     status = str(request.args.get("status") or "PENDING_REVIEW").strip().upper()
     if status not in {"PENDING_REVIEW", "PENDING_MANUAL"}:
@@ -3899,8 +3903,9 @@ def admin_affiliate_pending_v2():
 
 @vouchers_bp.route("/admin/affiliate/<ledger_id>/approve", methods=["POST"])
 def admin_affiliate_approve_v2(ledger_id):
-    if not _has_valid_admin_secret():
-        return jsonify({"code": "auth_failed"}), 401
+    _, err = require_admin()
+    if err:
+        return err
 
     try:
         oid = ObjectId(ledger_id)
@@ -3915,8 +3920,9 @@ def admin_affiliate_approve_v2(ledger_id):
 
 @vouchers_bp.route("/admin/affiliate/<ledger_id>/reject", methods=["POST"])
 def admin_affiliate_reject_v2(ledger_id):
-    if not _has_valid_admin_secret():
-        return jsonify({"code": "auth_failed"}), 401
+    _, err = require_admin()
+    if err:
+        return err
 
     try:
         oid = ObjectId(ledger_id)
