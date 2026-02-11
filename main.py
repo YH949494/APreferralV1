@@ -28,6 +28,7 @@ from config import (
 from time_utils import expires_in_seconds, tz_name
 
 from bson.json_util import dumps
+from bson.objectid import ObjectId
 from xp import ensure_xp_indexes, grant_xp, now_utc
 
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -35,9 +36,16 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_MISSED
 
 from app_context import set_app_bot, set_bot, set_scheduler
-from onboarding import MYWIN_CHAT_ID, onboarding_due_tick, record_first_mywin
+from onboarding import MYWIN_CHAT_ID, onboarding_due_tick, record_first_mywin, record_first_checkin
 from vouchers import vouchers_bp, ensure_voucher_indexes, process_verification_queue
 from scheduler import settle_pending_referrals, settle_referral_snapshots, settle_xp_snapshots
+from affiliate_rewards import (
+    ensure_affiliate_indexes,
+    issue_welcome_bonus_if_eligible,
+    record_user_last_seen,
+    approve_affiliate_ledger,
+    reject_affiliate_ledger,
+)
 from telegram_utils import safe_reply_text
 
 from pymongo import DESCENDING, ASCENDING, ReturnDocument  # keep if used elsewhere
@@ -473,6 +481,9 @@ unknown_invite_links_collection = db["unknown_invite_links"]
 referral_audit_collection = db["referral_audit"]
 unknown_invite_audit_collection = db["unknown_invite_audit"]
 pending_referrals_collection = db["pending_referrals"]
+qualified_events_collection = db["qualified_events"]
+affiliate_ledger_collection = db["affiliate_ledger"]
+voucher_pools_collection = db["voucher_pools"]
 tg_verification_queue_collection = db["tg_verification_queue"]
 scheduler_locks_collection = db["scheduler_locks"]
 try:
@@ -1256,6 +1267,8 @@ def ensure_indexes():
         )
     except Exception as e:
         print("⚠️ ensure_indexes error:", e)
+
+    ensure_affiliate_indexes(db)
         
 ensure_indexes()
 
@@ -1481,6 +1494,118 @@ httpx_request = HTTPXRequest(
     connection_pool_size=8,
 )
 app_bot = ApplicationBuilder().token(BOT_TOKEN).request(httpx_request).build()
+
+
+def _admin_secret_ok() -> bool:
+    configured = (os.getenv("ADMIN_PANEL_SECRET") or "").strip()
+    if not configured:
+        return True
+    sent = (request.headers.get("X-Admin-Secret") or request.args.get("admin_secret") or "").strip()
+    return bool(sent and sent == configured)
+
+
+@app.route("/admin/pools/upload", methods=["POST"])
+def admin_pools_upload():
+    if not _admin_secret_ok():
+        return jsonify({"status": "error", "reason": "unauthorized"}), 403
+    data = request.get_json(silent=True) or {}
+    pool_id = str(data.get("pool_id") or "").strip().upper()
+    if pool_id not in {"WELCOME", "T1", "T2", "T3", "T4"}:
+        return jsonify({"status": "error", "reason": "bad_pool_id"}), 400
+    codes_text = str(data.get("codes_text") or "")
+    rows = [line.strip() for line in codes_text.replace("\r", "\n").split("\n") if line.strip()]
+    if not rows:
+        return jsonify({"status": "error", "reason": "empty_codes"}), 400
+    now_ts = now_utc()
+    inserted = 0
+    for code in rows:
+        try:
+            voucher_pools_collection.insert_one({
+                "pool_id": pool_id,
+                "code": code,
+                "status": "available",
+                "issued_to": None,
+                "issued_at": None,
+                "ledger_id": None,
+                "display_label": data.get("display_label"),
+                "value_hint": data.get("value_hint"),
+                "currency": data.get("currency"),
+                "created_at": now_ts,
+            })
+            inserted += 1
+        except DuplicateKeyError:
+            continue
+    return jsonify({"status": "ok", "inserted": inserted, "received": len(rows), "pool_id": pool_id})
+
+
+@app.route("/admin/pools/summary", methods=["GET"])
+def admin_pools_summary():
+    if not _admin_secret_ok():
+        return jsonify({"status": "error", "reason": "unauthorized"}), 403
+    out = []
+    for pool_id in ("WELCOME", "T1", "T2", "T3", "T4"):
+        available = voucher_pools_collection.count_documents({"pool_id": pool_id, "status": "available"})
+        issued = voucher_pools_collection.count_documents({"pool_id": pool_id, "status": "issued"})
+        sample = voucher_pools_collection.find_one({"pool_id": pool_id}, {"display_label": 1, "value_hint": 1, "currency": 1}) or {}
+        out.append({
+            "pool_id": pool_id,
+            "available": int(available),
+            "issued": int(issued),
+            "display_label": sample.get("display_label"),
+            "value_hint": sample.get("value_hint"),
+            "currency": sample.get("currency"),
+        })
+    return jsonify({"status": "ok", "items": out})
+
+
+@app.route("/admin/affiliate/pending", methods=["GET"])
+def admin_affiliate_pending():
+    if not _admin_secret_ok():
+        return jsonify({"status": "error", "reason": "unauthorized"}), 403
+    status = str(request.args.get("status") or "PENDING_REVIEW").strip().upper()
+    if status not in {"PENDING_REVIEW", "PENDING_MANUAL"}:
+        return jsonify({"status": "error", "reason": "bad_status"}), 400
+    rows = list(affiliate_ledger_collection.find({"status": status}).sort("created_at", 1).limit(200))
+    items = []
+    for row in rows:
+        items.append({
+            "ledger_id": str(row.get("_id")),
+            "user_id": row.get("user_id"),
+            "year_month": row.get("year_month"),
+            "tier": row.get("tier"),
+            "pool_id": row.get("pool_id"),
+            "status": row.get("status"),
+            "risk_flags": row.get("risk_flags") or [],
+            "created_at": row.get("created_at").isoformat() if row.get("created_at") else None,
+        })
+    return jsonify({"status": "ok", "items": items})
+
+
+@app.route("/admin/affiliate/<ledger_id>/approve", methods=["POST"])
+def admin_affiliate_approve(ledger_id):
+    if not _admin_secret_ok():
+        return jsonify({"status": "error", "reason": "unauthorized"}), 403
+    try:
+        oid = ObjectId(ledger_id)
+    except Exception:
+        return jsonify({"status": "error", "reason": "bad_ledger_id"}), 400
+    ledger = approve_affiliate_ledger(db, ledger_id=oid, now_utc=now_utc())
+    if not ledger:
+        return jsonify({"status": "error", "reason": "not_found"}), 404
+    return jsonify({"status": "ok", "ledger_status": ledger.get("status"), "voucher_code": ledger.get("voucher_code")})
+
+
+@app.route("/admin/affiliate/<ledger_id>/reject", methods=["POST"])
+def admin_affiliate_reject(ledger_id):
+    if not _admin_secret_ok():
+        return jsonify({"status": "error", "reason": "unauthorized"}), 403
+    try:
+        oid = ObjectId(ledger_id)
+    except Exception:
+        return jsonify({"status": "error", "reason": "bad_ledger_id"}), 400
+    data = request.get_json(silent=True) or {}
+    reject_affiliate_ledger(db, ledger_id=oid, reason=data.get("reason"), now_utc=now_utc())
+    return jsonify({"status": "ok"})
 @app.route("/api/is_admin")
 def api_is_admin():
     try:
@@ -1537,6 +1662,7 @@ async def process_checkin(user_id, username, region, update=None):
     today_kl = now_kl.date()
 
     user = users_collection.find_one({"user_id": user_id}) or {}
+    is_new_user = not bool(user)
     last = user.get("last_checkin")
     streak = int(user.get("streak", 0))
 
@@ -1582,6 +1708,15 @@ async def process_checkin(user_id, username, region, update=None):
 
     checkin_key = f"checkin:{today_kl.strftime('%Y%m%d')}"
     grant_xp(db, user_id, "checkin", checkin_key, base_xp + bonus_xp)
+    record_first_checkin(int(user_id), ref=now_utc_ts)
+
+    welcome_issue = issue_welcome_bonus_if_eligible(
+        db,
+        user_id=int(user_id),
+        is_new_user=is_new_user,
+        blocked=bool(user.get("blocked")),
+        now_utc=now_utc_ts,
+    )
     
     maybe_shout_milestones(int(user_id))
 
@@ -1592,6 +1727,8 @@ async def process_checkin(user_id, username, region, update=None):
     ]
     if bonus_xp:
         lines.append(f"{labels[streak]} +{bonus_xp} XP")
+    if welcome_issue.get("status") == "ISSUED" and welcome_issue.get("voucher_code"):
+        lines.append(f"🎁 Welcome voucher: `{welcome_issue['voucher_code']}`")
     lines.append(streak_progress_bar(streak))
 
     msg = "\n".join(lines)
@@ -1629,6 +1766,14 @@ def api_checkin():
         user = users_collection.find_one({"user_id": int(user_id)})
         if not user or "region" not in user:
             return jsonify({"success": False, "error": "Region not set"}), 400
+
+        record_user_last_seen(
+            db,
+            user_id=int(user_id),
+            ip=request.headers.get("Fly-Client-IP") or request.remote_addr,
+            subnet=request.headers.get("X-Forwarded-For"),
+            session=request.headers.get("X-Session-Id") or request.cookies.get("session") or request.headers.get("User-Agent"),
+        )
 
         # ✅ Call check-in logic
         result = asyncio.run(
