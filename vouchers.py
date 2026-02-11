@@ -25,6 +25,25 @@ tg_verification_queue_col = db["tg_verification_queue"]
 voucher_claims_col = db["voucher_claims"]
 invite_link_map_collection = db["invite_link_map"]
 
+
+def _ensure_index_if_missing(col, name, keys, **kwargs):
+    """Create index only when missing by name; safe for concurrent startup calls."""
+    try:
+        for idx in col.list_indexes():
+            if idx.get("name") == name:
+                return name
+    except PyMongoError:
+        raise
+
+    try:
+        return col.create_index(keys, name=name, **kwargs)
+    except OperationFailure as exc:
+        # MongoDB may raise index conflict/exists codes during concurrent startup:
+        # 68=IndexAlreadyExists, 85=IndexOptionsConflict, 86=IndexKeySpecsConflict.
+        if exc.code in (68, 85, 86) or "already exists" in str(exc).lower():
+            return name
+        raise
+
 BYPASS_ADMIN = os.getenv("BYPASS_ADMIN", "0").lower() in ("1", "true", "yes", "on")
 HARDCODED_ADMIN_USERNAMES = {"gracy_ap", "teohyaohui"}  # allow manual overrides if cache is empty
 WELCOME_WINDOW_HOURS = int(getattr(_cfg, "WELCOME_WINDOW_HOURS", os.getenv("WELCOME_WINDOW_HOURS", "48")))
@@ -387,20 +406,22 @@ def ensure_voucher_indexes():
     welcome_eligibility_col.create_index([("uid", ASCENDING)], unique=True)
     subscription_cache_col.create_index([("expireAt", ASCENDING)], expireAfterSeconds=0)
     try:
-        for legacy_name in ("uniq_user_checks", "uniq_tg_verify_user_id"):
+        for legacy_name in ("uniq_user_checks", "uniq_tg_verify_user_id", "uq_tg_verif_user_id_sparse"):
             try:
                 tg_verification_queue_col.drop_index(legacy_name)
             except OperationFailure:
                 pass     
-        tg_verification_queue_col.create_index(
+        _ensure_index_if_missing(
+            tg_verification_queue_col,
+            "uq_tg_verif_user_id_nonnull",
             [("user_id", ASCENDING)],
             unique=True,
-            name="uq_tg_verif_user_id_nonnull",
-            partialFilterExpression={"user_id": {"$type": ["int", "long"]}},
+            partialFilterExpression={"user_id": {"$type": "number"}},
         )
-        tg_verification_queue_col.create_index(
+        _ensure_index_if_missing(
+            tg_verification_queue_col,
+            "ix_verif_status_created",
             [("status", ASCENDING), ("created_at", ASCENDING)],
-            name="ix_verif_status_created",
         )
     except OperationFailure:
         try:
