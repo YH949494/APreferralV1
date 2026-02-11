@@ -1225,7 +1225,12 @@
           tbody.innerHTML = `<tr><td colspan="6" style="padding:6px;">No drops found.</td></tr>`;
         }
       } catch (e) {
-        tbody.innerHTML = `<tr><td colspan="6" style="padding:6px;">Voucher endpoint error: ${e.message}</td></tr>`;
+        const status = Number((String(e?.message || "").match(/\b(\d{3})\b/) || [])[1]);
+        if (Number.isFinite(status)) {
+          tbody.innerHTML = `<tr><td colspan="6" style="padding:6px;">HTTP Error ${status}</td></tr>`;
+        } else {
+          tbody.innerHTML = `<tr><td colspan="6" style="padding:6px;">${e?.message || "Request failed"}</td></tr>`;
+        }
       }
     }
 
@@ -2076,6 +2081,7 @@ Some people get lucky.👇
       const code = payload?.code || "";
       const reason = payload?.reason || payload?.checks_key || "";
       const retryAfterSec = normalizeRetryAfterSec(payload?.retry_after_sec);
+      const businessMessage = payload?.message || (reason ? String(reason).replace(/_/g, " ") : "");
 
       if (code === "sold_out") {
         return {
@@ -2138,7 +2144,7 @@ Some people get lucky.👇
 
       return {
         title: "Temporarily unavailable",
-        message: "Please try again.",
+        message: businessMessage || "Please try again.",
         severity: "warn"
       };
     }
@@ -2372,8 +2378,31 @@ Some people get lucky.👇
         let out = null;
         try { out = await res.json(); } catch { /* ignore */ }
 
-        const ok = res.ok && (out?.ok === true || out?.status === "ok");
-        if (!ok) {
+        const httpOk = res.ok;
+        const apiOk = out?.ok === true || out?.status === "ok";
+
+        if (!httpOk) {
+          console.warn("Claim failed", {
+            status: res.status,
+            code: out?.code,
+            reason: out?.reason,
+            retry_after_sec: out?.retry_after_sec
+          });
+          renderClaimError({
+            title: "HTTP Error",
+            message: `HTTP Error ${res.status}`,
+            severity: "warn"
+          }, {
+            retryHandler: () => {
+              if (document.body.contains(claimBtn)) {
+                claimBtn.click();
+              }
+            }
+          });
+          return;
+        }
+
+        if (!apiOk || out?.status === "error" || out?.ok === false) {
           const payload = { ...(out || {}) };
           if (res.status === 410 && !payload.code) {
             payload.code = "sold_out";
@@ -2401,6 +2430,14 @@ Some people get lucky.👇
               }
             }
           });
+          return;
+        }
+
+        if (out?.check_only === true) {
+          if (claimBtn.id === "campaign-voucher-btn" && out?.subscribed === true) {
+            const messageEl = document.getElementById("campaign-voucher-message");
+            if (messageEl && !messageEl.innerText) messageEl.innerText = "Eligible";
+          }
           return;
         }
 
