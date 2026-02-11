@@ -2403,8 +2403,8 @@ def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None
             if not is_active:
                 continue
             # Need at least one free code OR user already claimed (so they can see their code state)
-            public_remaining = max(0, int(d.get("public_remaining") or 0))
-            my_remaining = max(0, int(d.get("my_remaining") or 0))
+            public_remaining = _get_pool_remaining(_coerce_id(d.get("_id")), drop_id_variants, "public")
+            my_remaining = _get_pool_remaining(_coerce_id(d.get("_id")), drop_id_variants, "my") if is_my_user else 0
             visible_remaining = public_remaining + my_remaining if is_my_user else public_remaining
             already = None
             if claim_user_id is not None:
@@ -2506,6 +2506,40 @@ def reconcile_pooled_remaining(drop_id: str) -> dict:
         print(f"[pool_reconcile] drop={drop_id} public={actual_free_public} my={actual_free_my}")
     return {"actual_free_public": actual_free_public, "actual_free_my": actual_free_my}
 
+
+def _get_pool_remaining(drop_obj_id, drop_id_variants, pool: str) -> int:
+    remaining_field = "my_remaining" if pool == "my" else "public_remaining"
+    doc = db.drops.find_one({"_id": drop_obj_id}, projection={remaining_field: 1}) or {}
+    if remaining_field in doc:
+        try:
+            return max(0, int(doc.get(remaining_field) or 0))
+        except Exception:
+            return 0
+
+    criteria = {
+        "type": "pooled",
+        "dropId": {"$in": drop_id_variants},
+        "status": "free",
+    }
+    if pool == "my":
+        criteria["pool"] = "my"
+    else:
+        criteria["$or"] = [{"pool": "public"}, {"pool": {"$exists": False}}]
+
+    cnt = int(db.vouchers.count_documents(criteria))
+    db.drops.update_one({"_id": drop_obj_id}, {"$set": {remaining_field: cnt}})
+    try:
+        current_app.logger.info(
+            "[pool_remaining_backfill] drop=%s pool=%s field=%s count=%s",
+            str(drop_obj_id),
+            pool,
+            remaining_field,
+            cnt,
+        )
+    except Exception:
+        pass
+    return cnt
+
 def claim_pooled(drop_id: str, claim_key: str, ref: datetime, *, pools: list[str] | None = None):
     drop_id_variants = _drop_id_variants(drop_id)
     drop_obj_id = _coerce_id(drop_id)
@@ -2548,10 +2582,7 @@ def claim_pooled(drop_id: str, claim_key: str, ref: datetime, *, pools: list[str
 
         # 1) Fast pre-check: if remaining counter already 0, skip querying vouchers.
         #    (Avoids pointless voucher query work during peak)
-        try:
-            rem = int(db.drops.find_one({"_id": drop_obj_id}, projection={remaining_field: 1}).get(remaining_field, 0))
-        except Exception:
-            rem = 0
+        rem = _get_pool_remaining(drop_obj_id, drop_id_variants, pool)
         if rem <= 0:
             continue
 
@@ -2747,24 +2778,17 @@ def api_visible():
         raise
 
 
-@vouchers_bp.route("/v2/miniapp/referral/progress", methods=["GET"])
+@vouchers_bp.route("/referral/progress", methods=["GET"])
 def api_referral_progress():
     init_data = extract_raw_init_data_from_query(request)
     if not init_data:
         return jsonify({"status": "error", "code": "missing_init_data"}), 400
 
     ok, parsed, reason = verify_telegram_init_data(init_data)
-    ctx, admin_preview = _user_ctx_or_preview(
-        request, init_data_raw=init_data, verification=(ok, parsed, reason)
-    )
-
-    if not ok and not admin_preview:
+    if not ok:
         return jsonify({"code": "auth_failed", "why": str(reason)}), 401
-    if not admin_preview and not ctx:
-        return jsonify({"code": "auth_failed", "why": "missing_or_invalid_init_data"}), 401
 
-    user = _ctx_to_user(ctx or {})
-    raw_user = ctx.get("user") if isinstance(ctx, dict) else None
+    raw_user = (parsed or {}).get("user")
     if isinstance(raw_user, str):
         try:
             raw_user = json.loads(raw_user)
@@ -2773,75 +2797,54 @@ def api_referral_progress():
     elif not isinstance(raw_user, dict):
         raw_user = {}
 
-    uid = None
-    username_lower = user.get("usernameLower") or ""
-    if user.get("source") == "telegram":
-        user_id = (user.get("userId") or "").strip()
-        if not user_id:
-            return jsonify({"code": "auth_failed", "why": "missing_or_invalid_init_data"}), 401
-        try:
-            uid = int(raw_user.get("id") or user_id)
-        except Exception:
-            uid = None
+    try:
+        uid = int(raw_user.get("id"))
+    except Exception:
+        uid = None
 
-    if not uid and not username_lower:
+    if uid is None:
         return jsonify({"code": "auth_failed", "why": "missing_or_invalid_init_data"}), 401
 
-    user_doc = None
-    if uid is not None:
-        user_doc = users_collection.find_one(
-            {"user_id": uid},
-            {"total_referrals": 1, "referral_generated_at": 1, "user_id": 1},
-        )
-    if not user_doc and username_lower:
-        user_doc = users_collection.find_one(
-            {"usernameLower": username_lower},
-            {"total_referrals": 1, "referral_generated_at": 1, "user_id": 1},
-        )
-    if not user_doc and username_lower:
-        user_doc = users_collection.find_one(
-            {"username": {"$regex": f"^{username_lower}$", "$options": "i"}},
-            {"total_referrals": 1, "referral_generated_at": 1, "user_id": 1},
-        )
+    user_doc = users_collection.find_one(
+        {"user_id": uid},
+        {
+            "total_referrals": 1,
+            "referral_generated_at": 1,
+            "referral_link_created_at": 1,
+            "referral_link_generated_at": 1,
+        },
+    ) or {}
 
-    total_referrals = int((user_doc or {}).get("total_referrals", 0))
-    milestone_size = 3
-    progress = total_referrals % milestone_size
-    remaining = milestone_size if progress == 0 else milestone_size - progress
-    near_miss = progress == milestone_size - 1
-    progress_pct = (progress / milestone_size) * 100
+    try:
+        total_referrals = int(user_doc.get("total_referrals", 0) or 0)
+    except Exception:
+        total_referrals = 0
+    progress_count = total_referrals % 3
+    remaining_referrals = (3 - progress_count) % 3
+    near_miss = remaining_referrals == 1
+    progress_pct = (progress_count / 3) * 100
 
-    inviter_id = uid if uid is not None else (user_doc or {}).get("user_id")
     link_expires_in_seconds = None
-    latest_link_doc = None
-    if inviter_id is not None:
-        latest_link_doc = invite_link_map_collection.find_one(
-            {"inviter_id": inviter_id},
-            sort=[("created_at", -1)],
-        )
-
-    created_at = None
-    if latest_link_doc and latest_link_doc.get("created_at"):
-        created_at = latest_link_doc.get("created_at")
-    elif user_doc and user_doc.get("referral_generated_at"):
-        created_at = user_doc.get("referral_generated_at")
+    created_at = (
+        user_doc.get("referral_generated_at")
+        or user_doc.get("referral_link_created_at")
+        or user_doc.get("referral_link_generated_at")
+    )
 
     if created_at:
         created_at_utc = as_aware_utc(created_at)
         now_utc_value = as_aware_utc(now_utc())
         if created_at_utc and now_utc_value:
             elapsed = (now_utc_value - created_at_utc).total_seconds()
-            remaining_seconds = max(0.0, 86400 - elapsed)
-            link_expires_in_seconds = min(86400.0, remaining_seconds)  # cap at 24h
+            remaining_seconds = max(0, int(86400 - elapsed))
+            link_expires_in_seconds = remaining_seconds
 
     return jsonify(
         {
-            "total_referrals": total_referrals,
-            "milestone_size": milestone_size,
-            "progress": progress,
-            "remaining": remaining,
-            "near_miss": near_miss,
             "progress_pct": progress_pct,
+            "progress_count": progress_count,
+            "remaining_referrals": remaining_referrals,
+            "near_miss": near_miss,
             "link_expires_in_seconds": link_expires_in_seconds,
         }
     ), 200
@@ -3093,7 +3096,14 @@ def api_claim():
         return jsonify({"status": "ok", "check_only": True, "subscribed": True}), 200
 
     if is_pool_drop:
-        claimable_remaining = _compute_claimable_remaining(user_region, voucher)
+        if is_my_user:
+            claimable_remaining = _compute_claimable_remaining(user_region, voucher)
+        else:
+            claimable_remaining = _get_pool_remaining(
+                _coerce_id(drop_id),
+                _drop_id_variants(drop_id),
+                "public",
+            )
         if claimable_remaining <= 0:
             return jsonify({"status": "error", "code": "sold_out"}), 410     
 
