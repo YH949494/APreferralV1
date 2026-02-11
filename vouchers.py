@@ -12,6 +12,7 @@ import config as _cfg
 from database import db, users_collection
 from time_utils import as_aware_utc
 from onboarding import record_onboarding_start, record_visible_ping
+from affiliate_rewards import approve_affiliate_ledger, reject_affiliate_ledger
 
 admin_cache_col = db["admin_cache"]
 new_joiner_claims_col = db["new_joiner_claims"]
@@ -3803,6 +3804,128 @@ def _admin_drop_summary(doc: dict, *, ref=None, skip_expired=False):
             summary[key] = doc[key]
 
     return summary
+
+
+
+@vouchers_bp.route("/admin/pools/upload", methods=["POST"])
+def admin_pools_upload_v2():
+    if not _has_valid_admin_secret():
+        return jsonify({"code": "auth_failed"}), 401
+
+    data = request.get_json(silent=True) or {}
+    pool_id = str(data.get("pool_id") or "").strip().upper()
+    if pool_id not in {"WELCOME", "T1", "T2", "T3", "T4"}:
+        return jsonify({"status": "error", "reason": "bad_pool_id"}), 400
+
+    codes_text = str(data.get("codes_text") or "")
+    rows = [line.strip() for line in codes_text.replace("\r", "\n").split("\n") if line.strip()]
+    if not rows:
+        return jsonify({"status": "error", "reason": "empty_codes"}), 400
+
+    now_ts = datetime.now(timezone.utc)
+    inserted = 0
+    for code in rows:
+        try:
+            db.voucher_pools.insert_one(
+                {
+                    "pool_id": pool_id,
+                    "code": code,
+                    "status": "available",
+                    "issued_to": None,
+                    "issued_at": None,
+                    "ledger_id": None,
+                    "display_label": data.get("display_label"),
+                    "value_hint": data.get("value_hint"),
+                    "currency": data.get("currency"),
+                    "created_at": now_ts,
+                }
+            )
+            inserted += 1
+        except DuplicateKeyError:
+            continue
+
+    return jsonify({"status": "ok", "inserted": inserted, "received": len(rows), "pool_id": pool_id})
+
+
+@vouchers_bp.route("/admin/pools/summary", methods=["GET"])
+def admin_pools_summary_v2():
+    if not _has_valid_admin_secret():
+        return jsonify({"code": "auth_failed"}), 401
+
+    out = []
+    for pool_id in ("WELCOME", "T1", "T2", "T3", "T4"):
+        available = db.voucher_pools.count_documents({"pool_id": pool_id, "status": "available"})
+        issued = db.voucher_pools.count_documents({"pool_id": pool_id, "status": "issued"})
+        sample = db.voucher_pools.find_one({"pool_id": pool_id}, {"display_label": 1, "value_hint": 1, "currency": 1}) or {}
+        out.append(
+            {
+                "pool_id": pool_id,
+                "available": int(available),
+                "issued": int(issued),
+                "display_label": sample.get("display_label"),
+                "value_hint": sample.get("value_hint"),
+                "currency": sample.get("currency"),
+            }
+        )
+    return jsonify({"status": "ok", "items": out})
+
+
+@vouchers_bp.route("/admin/affiliate/pending", methods=["GET"])
+def admin_affiliate_pending_v2():
+    if not _has_valid_admin_secret():
+        return jsonify({"code": "auth_failed"}), 401
+
+    status = str(request.args.get("status") or "PENDING_REVIEW").strip().upper()
+    if status not in {"PENDING_REVIEW", "PENDING_MANUAL"}:
+        return jsonify({"status": "error", "reason": "bad_status"}), 400
+
+    rows = list(db.affiliate_ledger.find({"status": status}).sort("created_at", 1).limit(200))
+    items = []
+    for row in rows:
+        items.append(
+            {
+                "ledger_id": str(row.get("_id")),
+                "user_id": row.get("user_id"),
+                "year_month": row.get("year_month"),
+                "tier": row.get("tier"),
+                "pool_id": row.get("pool_id"),
+                "status": row.get("status"),
+                "risk_flags": row.get("risk_flags") or [],
+                "created_at": row.get("created_at").isoformat() if row.get("created_at") else None,
+            }
+        )
+    return jsonify({"status": "ok", "items": items})
+
+
+@vouchers_bp.route("/admin/affiliate/<ledger_id>/approve", methods=["POST"])
+def admin_affiliate_approve_v2(ledger_id):
+    if not _has_valid_admin_secret():
+        return jsonify({"code": "auth_failed"}), 401
+
+    try:
+        oid = ObjectId(ledger_id)
+    except Exception:
+        return jsonify({"status": "error", "reason": "bad_ledger_id"}), 400
+
+    ledger = approve_affiliate_ledger(db, ledger_id=oid, now_utc=datetime.now(timezone.utc))
+    if not ledger:
+        return jsonify({"status": "error", "reason": "not_found"}), 404
+    return jsonify({"status": "ok", "ledger_status": ledger.get("status"), "voucher_code": ledger.get("voucher_code")})
+
+
+@vouchers_bp.route("/admin/affiliate/<ledger_id>/reject", methods=["POST"])
+def admin_affiliate_reject_v2(ledger_id):
+    if not _has_valid_admin_secret():
+        return jsonify({"code": "auth_failed"}), 401
+
+    try:
+        oid = ObjectId(ledger_id)
+    except Exception:
+        return jsonify({"status": "error", "reason": "bad_ledger_id"}), 400
+
+    data = request.get_json(silent=True) or {}
+    reject_affiliate_ledger(db, ledger_id=oid, reason=data.get("reason"), now_utc=datetime.now(timezone.utc))
+    return jsonify({"status": "ok"})
 
 @vouchers_bp.route("/admin/drops_v2", methods=["GET"])
 def list_drops_v2():

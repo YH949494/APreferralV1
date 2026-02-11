@@ -35,9 +35,14 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_MISSED
 
 from app_context import set_app_bot, set_bot, set_scheduler
-from onboarding import MYWIN_CHAT_ID, onboarding_due_tick, record_first_mywin
+from onboarding import MYWIN_CHAT_ID, onboarding_due_tick, record_first_mywin, record_first_checkin
 from vouchers import vouchers_bp, ensure_voucher_indexes, process_verification_queue
 from scheduler import settle_pending_referrals, settle_referral_snapshots, settle_xp_snapshots
+from affiliate_rewards import (
+    ensure_affiliate_indexes,
+    issue_welcome_bonus_if_eligible,
+    record_user_last_seen,
+)
 from telegram_utils import safe_reply_text
 
 from pymongo import DESCENDING, ASCENDING, ReturnDocument  # keep if used elsewhere
@@ -473,6 +478,9 @@ unknown_invite_links_collection = db["unknown_invite_links"]
 referral_audit_collection = db["referral_audit"]
 unknown_invite_audit_collection = db["unknown_invite_audit"]
 pending_referrals_collection = db["pending_referrals"]
+qualified_events_collection = db["qualified_events"]
+affiliate_ledger_collection = db["affiliate_ledger"]
+voucher_pools_collection = db["voucher_pools"]
 tg_verification_queue_collection = db["tg_verification_queue"]
 scheduler_locks_collection = db["scheduler_locks"]
 try:
@@ -1287,6 +1295,8 @@ def ensure_indexes():
         )
     except Exception as e:
         print("⚠️ ensure_indexes error:", e)
+
+    ensure_affiliate_indexes(db)
         
 ensure_indexes()
 
@@ -1512,6 +1522,8 @@ httpx_request = HTTPXRequest(
     connection_pool_size=8,
 )
 app_bot = ApplicationBuilder().token(BOT_TOKEN).request(httpx_request).build()
+
+
 @app.route("/api/is_admin")
 def api_is_admin():
     try:
@@ -1568,6 +1580,7 @@ async def process_checkin(user_id, username, region, update=None):
     today_kl = now_kl.date()
 
     user = users_collection.find_one({"user_id": user_id}) or {}
+    is_new_user = not bool(user)
     last = user.get("last_checkin")
     streak = int(user.get("streak", 0))
 
@@ -1613,6 +1626,15 @@ async def process_checkin(user_id, username, region, update=None):
 
     checkin_key = f"checkin:{today_kl.strftime('%Y%m%d')}"
     grant_xp(db, user_id, "checkin", checkin_key, base_xp + bonus_xp)
+    record_first_checkin(int(user_id), ref=now_utc_ts)
+
+    welcome_issue = issue_welcome_bonus_if_eligible(
+        db,
+        user_id=int(user_id),
+        is_new_user=is_new_user,
+        blocked=bool(user.get("blocked")),
+        now_utc=now_utc_ts,
+    )
     
     maybe_shout_milestones(int(user_id))
 
@@ -1623,6 +1645,8 @@ async def process_checkin(user_id, username, region, update=None):
     ]
     if bonus_xp:
         lines.append(f"{labels[streak]} +{bonus_xp} XP")
+    if welcome_issue.get("status") == "ISSUED" and welcome_issue.get("voucher_code"):
+        lines.append(f"🎁 Welcome voucher: `{welcome_issue['voucher_code']}`")
     lines.append(streak_progress_bar(streak))
 
     msg = "\n".join(lines)
@@ -1660,6 +1684,14 @@ def api_checkin():
         user = users_collection.find_one({"user_id": int(user_id)})
         if not user or "region" not in user:
             return jsonify({"success": False, "error": "Region not set"}), 400
+
+        record_user_last_seen(
+            db,
+            user_id=int(user_id),
+            ip=request.headers.get("Fly-Client-IP") or request.remote_addr,
+            subnet=request.headers.get("X-Forwarded-For"),
+            session=request.headers.get("X-Session-Id") or request.cookies.get("session") or request.headers.get("User-Agent"),
+        )
 
         # ✅ Call check-in logic
         result = asyncio.run(
