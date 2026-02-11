@@ -3901,7 +3901,7 @@ def admin_affiliate_pending_v2():
         return err
 
     status = str(request.args.get("status") or "PENDING_REVIEW").strip().upper()
-    if status not in {"PENDING_REVIEW", "PENDING_MANUAL"}:
+    if status not in {"PENDING_REVIEW", "PENDING_MANUAL", "SIMULATED_PENDING"}:
         return jsonify({"status": "error", "reason": "bad_status"}), 400
 
     rows = list(db.affiliate_ledger.find({"status": status}).sort("created_at", 1).limit(200))
@@ -3916,6 +3916,14 @@ def admin_affiliate_pending_v2():
                 "pool_id": row.get("pool_id"),
                 "status": row.get("status"),
                 "risk_flags": row.get("risk_flags") or [],
+                "simulate": bool(row.get("simulate")),
+                "would_issue_pool": row.get("would_issue_pool"),
+                "gate_day": row.get("gate_day"),
+                "still_in_group": row.get("still_in_group"),
+                "xp_total": row.get("xp_total"),
+                "monthly_xp": row.get("monthly_xp"),
+                "abuse_flags": row.get("abuse_flags") or [],
+                "evaluated_at_utc": row.get("evaluated_at_utc").isoformat() if row.get("evaluated_at_utc") else None,
                 "created_at": row.get("created_at").isoformat() if row.get("created_at") else None,
             }
         )
