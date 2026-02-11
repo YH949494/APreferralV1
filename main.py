@@ -24,7 +24,6 @@ from config import (
     WEEKLY_XP_BUCKET,
     WEEKLY_REFERRAL_BUCKET,
     MINIAPP_VERSION,
-    ADMIN_UIDS,
 )
 from time_utils import expires_in_seconds, tz_name
 
@@ -52,6 +51,7 @@ from telegram_utils import safe_reply_text
 from pymongo import DESCENDING, ASCENDING, ReturnDocument  # keep if used elsewhere
 from pymongo.errors import DuplicateKeyError, CursorNotFound
 import os, asyncio, traceback, csv, io, requests, logging, time, uuid, socket
+import json
 import pytz
 from database import init_db, db
 
@@ -1382,21 +1382,60 @@ def get_or_create_referral_invite_link_sync(user_id: int, username: str = "") ->
         )
     return invite_link
 
-def require_admin_from_query():
-    caller_id = request.args.get("user_id", type=int)
-    if not caller_id:
-        return False, ("Missing user_id", 400)
-
-    doc = admin_cache_col.find_one({"_id": "admins"}) or {}
-    ids = set()
-    for raw in doc.get("ids", []):
+def _admin_allowlist_ids() -> set[int]:
+    raw = os.getenv("ADMIN_UIDS")
+    if raw is None:
+        raw = os.getenv("ADMIN_USER_IDS")
+    text = str(raw or "").strip()
+    if not text:
+        return set()
+    out = set()
+    for part in [p.strip() for p in text.split(",") if p.strip()]:
         try:
-            ids.add(int(raw))
+            out.add(int(part))
         except (TypeError, ValueError):
-            continue
-    if caller_id not in ids:
-        return False, ("Admins only", 403)
+            return set()
+    return out
 
+
+def get_verified_tg_user(req):
+    try:
+        init_data_raw = (req.headers.get("X-Tg-InitData") or "").strip()
+        if not init_data_raw:
+            init_data_raw = (req.args.get("init_data") or "").strip()
+        if not init_data_raw:
+            return None
+
+        ok, parsed, _ = verify_telegram_init_data(init_data_raw)
+        if not ok:
+            return None
+
+        user_payload = parsed.get("user")
+        if isinstance(user_payload, str):
+            user_payload = json.loads(user_payload)
+        if not isinstance(user_payload, dict):
+            return None
+
+        try:
+            user_payload["id"] = int(user_payload.get("id"))
+        except (TypeError, ValueError):
+            return None
+        return user_payload
+    except Exception:
+        return None
+
+
+def require_admin(req):
+    user = get_verified_tg_user(req)
+    if not user or user.get("id") not in _admin_allowlist_ids():
+        return False, (jsonify({"status": "error", "reason": "unauthorized"}), 403)
+    return True, None
+
+
+def require_admin_from_query():
+    ok, err = require_admin(request)
+    if not ok:
+        return False, ("Admins only", 403)
     return True, None
 
 # Flask app must exist BEFORE blueprint registration
@@ -1497,18 +1536,11 @@ httpx_request = HTTPXRequest(
 app_bot = ApplicationBuilder().token(BOT_TOKEN).request(httpx_request).build()
 
 
-def _admin_secret_ok() -> bool:
-    configured = (os.getenv("ADMIN_PANEL_SECRET") or "").strip()
-    if not configured:
-        return True
-    sent = (request.headers.get("X-Admin-Secret") or request.args.get("admin_secret") or "").strip()
-    return bool(sent and sent == configured)
-
-
 @app.route("/admin/pools/upload", methods=["POST"])
 def admin_pools_upload():
-    if not _admin_secret_ok():
-        return jsonify({"status": "error", "reason": "unauthorized"}), 403
+    ok, err = require_admin(request)
+    if not ok:
+        return err
     data = request.get_json(silent=True) or {}
     pool_id = str(data.get("pool_id") or "").strip().upper()
     if pool_id not in {"WELCOME", "T1", "T2", "T3", "T4"}:
@@ -1541,8 +1573,9 @@ def admin_pools_upload():
 
 @app.route("/admin/pools/summary", methods=["GET"])
 def admin_pools_summary():
-    if not _admin_secret_ok():
-        return jsonify({"status": "error", "reason": "unauthorized"}), 403
+    ok, err = require_admin(request)
+    if not ok:
+        return err
     out = []
     for pool_id in ("WELCOME", "T1", "T2", "T3", "T4"):
         available = voucher_pools_collection.count_documents({"pool_id": pool_id, "status": "available"})
@@ -1561,8 +1594,9 @@ def admin_pools_summary():
 
 @app.route("/admin/affiliate/pending", methods=["GET"])
 def admin_affiliate_pending():
-    if not _admin_secret_ok():
-        return jsonify({"status": "error", "reason": "unauthorized"}), 403
+    ok, err = require_admin(request)
+    if not ok:
+        return err
     status = str(request.args.get("status") or "PENDING_REVIEW").strip().upper()
     if status not in {"PENDING_REVIEW", "PENDING_MANUAL"}:
         return jsonify({"status": "error", "reason": "bad_status"}), 400
@@ -1584,8 +1618,9 @@ def admin_affiliate_pending():
 
 @app.route("/admin/affiliate/<ledger_id>/approve", methods=["POST"])
 def admin_affiliate_approve(ledger_id):
-    if not _admin_secret_ok():
-        return jsonify({"status": "error", "reason": "unauthorized"}), 403
+    ok, err = require_admin(request)
+    if not ok:
+        return err
     try:
         oid = ObjectId(ledger_id)
     except Exception:
@@ -1598,8 +1633,9 @@ def admin_affiliate_approve(ledger_id):
 
 @app.route("/admin/affiliate/<ledger_id>/reject", methods=["POST"])
 def admin_affiliate_reject(ledger_id):
-    if not _admin_secret_ok():
-        return jsonify({"status": "error", "reason": "unauthorized"}), 403
+    ok, err = require_admin(request)
+    if not ok:
+        return err
     try:
         oid = ObjectId(ledger_id)
     except Exception:
@@ -1637,33 +1673,13 @@ def api_is_admin():
 
 @app.route("/me", methods=["GET"])
 def api_me():
-    init_data_raw = (request.headers.get("X-Tg-InitData") or "").strip()
-    if not init_data_raw:
-        return jsonify({"ok": True, "user_id": None, "is_admin": False})
-
-    try:
-        ok, parsed, _ = verify_telegram_init_data(init_data_raw)
-        if not ok:
-            return jsonify({"ok": True, "user_id": None, "is_admin": False})
-
-        user_payload = parsed.get("user")
-        if isinstance(user_payload, str):
-            user_payload = json.loads(user_payload)
-        if not isinstance(user_payload, dict):
-            user_payload = {}
-
-        try:
-            user_id = int(user_payload.get("id"))
-        except (TypeError, ValueError):
-            user_id = None
-
-        return jsonify({
-            "ok": True,
-            "user_id": user_id,
-            "is_admin": bool(user_id is not None and user_id in set(ADMIN_UIDS)),
-        })
-    except Exception:
-        return jsonify({"ok": True, "user_id": None, "is_admin": False})
+    user = get_verified_tg_user(request)
+    user_id = user.get("id") if user else None
+    return jsonify({
+        "ok": True,
+        "user_id": user_id,
+        "is_admin": bool(user_id is not None and user_id in _admin_allowlist_ids()),
+    })
 
 async def refresh_admin_ids(context: ContextTypes.DEFAULT_TYPE):
     try:
