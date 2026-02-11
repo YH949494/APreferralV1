@@ -640,7 +640,9 @@
         <button id="infoHubBtn" type="button" class="btn btn-ghost">ℹ️ Info Hub</button>
       </div>
       
-      <div class="section" id="admin-panel" style="display:none;">
+      <button id="setAdminSecretBtn" class="btn btn-ghost" style="display:none;">Enter Password</button>
+
+      <div class="section" id="admin-panel">
         <h3>⚙️ Admin Panel</h3>
         <button onclick="openAddXP()">➕ Add/Reduce XP</button>
         <button onclick="viewJoinRequests()">📥 View Join Requests</button>
@@ -764,29 +766,6 @@
               </tbody>
             </table>
           </div>
-        </div>
-      </div>
-        <div data-admin-only="1" style="display:none; background:#fff; border:1px solid #ddd; border-radius:8px; padding:12px; margin-top:14px;">
-          <h5 style="margin:0 0 8px 0;">Affiliate Voucher Pools</h5>
-          <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:flex-end;">
-            <label style="font-size:12px; color:#555; min-width:120px;">Pool
-              <select id="aff_pool_id" style="width:100%; padding:8px; border-radius:6px; border:1px solid #ccc;">
-                <option>WELCOME</option><option>T1</option><option>T2</option><option>T3</option><option>T4</option>
-              </select>
-            </label>
-            <input id="aff_display_label" type="text" placeholder="Display label (optional)" style="flex:1 1 170px; padding:8px; border-radius:6px; border:1px solid #ccc;">
-            <input id="aff_value_hint" type="text" placeholder="Value hint (optional)" style="flex:1 1 130px; padding:8px; border-radius:6px; border:1px solid #ccc;">
-            <input id="aff_currency" type="text" placeholder="Currency" style="width:90px; padding:8px; border-radius:6px; border:1px solid #ccc;">
-          </div>
-          <textarea id="aff_codes_text" rows="4" placeholder="One voucher code per line" style="width:100%; margin-top:8px; padding:8px; border-radius:6px; border:1px solid #ccc; font-family:monospace;"></textarea>
-          <div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:8px;">
-            <button type="button" onclick="affUploadPool()">Upload Pool Codes</button>
-            <button type="button" onclick="affLoadPoolSummary()">Refresh Pool Summary</button>
-            <button type="button" onclick="affLoadPending('PENDING_REVIEW')">Pending Review</button>
-            <button type="button" onclick="affLoadPending('PENDING_MANUAL')">Pending Manual</button>
-          </div>
-          <pre id="aff_pool_summary" style="margin-top:10px; background:#f8f8f8; border:1px solid #eee; padding:8px; border-radius:6px; white-space:pre-wrap;">No data.</pre>
-          <pre id="aff_pending" style="margin-top:8px; background:#f8f8f8; border:1px solid #eee; padding:8px; border-radius:6px; white-space:pre-wrap;">No pending ledger loaded.</pre>
         </div>
       </div>
     </div>
@@ -949,6 +928,21 @@
   </script>
 
   <script>
+    function getAdminSecret() {
+      const sp = new URLSearchParams(location.search);
+      const param = (sp.get("admin_secret") || "").trim();
+      if (param) {
+        try { localStorage.setItem("X-Admin-Secret", param); } catch {}
+        try {
+          const url = new URL(location.href);
+          url.searchParams.delete("admin_secret");
+          history.replaceState(null, "", url.toString());
+        } catch {}
+        return param;
+      }
+      try { return localStorage.getItem("X-Admin-Secret") || ""; } catch { return ""; }
+    }
+
     function getAdminUserId() {
       const tgApp = window.Telegram?.WebApp;
       const tgId = tgApp?.initDataUnsafe?.user?.id ?? null;
@@ -958,6 +952,84 @@
       const qs = new URLSearchParams(location.search);
       return qs.get("user_id") || qs.get("id") || "";
     }
+    function buildAdminQueryTail(extra = {}) {
+      const params = new URLSearchParams();
+      const userId = getAdminUserId();
+      if (userId) {
+        params.set("user_id", String(userId));
+      }
+      const adminSecret = getAdminSecret();
+      if (adminSecret) {
+        params.set("admin_secret", adminSecret);
+      }
+      if (extra && typeof extra === "object") {
+        Object.entries(extra).forEach(([key, value]) => {
+          if (value === undefined || value === null || value === "") return;
+          params.set(key, value);
+        });
+      }
+      const qs = params.toString();
+      return qs ? `?${qs}` : "";      
+    }
+  </script>
+  <script>
+    (function adminSecretUI() {
+      const btn = document.getElementById("setAdminSecretBtn");
+      if (!btn) return;
+
+      const inTelegram = !!(window.Telegram?.WebApp?.initData || window.Telegram?.WebApp?.initDataUnsafe);
+      const hasSecret = !!getAdminSecret();
+
+      if (!inTelegram || hasSecret) {
+        btn.style.display = "inline-block";
+      }
+
+      const title = document.querySelector("h2");
+      if (title) {
+        let taps = 0, timer = null;
+        title.addEventListener("click", () => {
+          taps++;
+          clearTimeout(timer);
+          timer = setTimeout(() => { taps = 0; }, 450);
+          if (taps >= 3) {
+            taps = 0;
+            openSecretPrompt();
+          }
+        });
+      }
+
+      btn.addEventListener("click", openSecretPrompt);
+
+      async function openSecretPrompt() {
+        const val = prompt("Enter admin secret:");
+        if (!val) return;
+        try { localStorage.setItem("X-Admin-Secret", val.trim()); } catch {}
+        const ok = await validateSecret();
+        if (ok) {
+          alert("✅ Secret accepted. Enabling admin panel…");
+          const panel = document.getElementById("admin-panel");
+          if (panel) panel.style.display = "block";
+          try { adm_list && adm_list(); } catch {}
+        } else {
+          try { localStorage.removeItem("X-Admin-Secret"); } catch {}
+          alert("❌ Secret rejected (401). Please try again.");
+        }
+      }
+
+      async function validateSecret() {
+        try {
+          const res = await v2Fetch("/v2/miniapp/admin/drops_v2", {
+            headers: {
+              "X-Admin-Secret": getAdminSecret(),
+              "Authorization": "Bearer " + getAdminSecret()
+            }
+          });
+          return res.ok;
+        } catch {
+          return false;
+        }
+      }
+    })();
   </script>
 
   <script>
@@ -975,18 +1047,9 @@
   
   <script>
     const tg = window.Telegram?.WebApp;
-    const BOT_USERNAME = "advantplaybot";
 
-    const API_BASE = "https://apreferralv1.fly.dev";
     const API_V2 = "/v2/miniapp";
     let latestInitData = "";
-    let gateRendered = false;
-
-    function apiUrl(path) {
-      const base = API_BASE.replace(/\/+$/, "");
-      const normalizedPath = String(path || "").replace(/^\/+/, "");
-      return `${base}/${normalizedPath}`;
-    }
 
     function getLatestInitData(candidate = "") {
       if (typeof candidate === "string" && candidate.length) {
@@ -1003,79 +1066,30 @@
       return latestInitData;
     } 
     
-    function isTelegramWebApp() {
-      return !!(window.Telegram && window.Telegram.WebApp);
-    }
+    async function waitForInitData(timeoutMs = 8000, intervalMs = 50) {
+      if (getAdminSecret()) return getLatestInitData("");
 
-    async function getInitDataStrict({ timeoutMs = 1500 } = {}) {
-      if (!isTelegramWebApp()) {
-        return "";
-      }
-
+      const qs = new URLSearchParams(location.search);
       const deadline = Date.now() + timeoutMs;
+
       while (Date.now() < deadline) {
-        const app = window.Telegram?.WebApp;
-        if (app) {
-          try { app.ready(); } catch (_) {}
-          const initDataRaw = typeof app.initData === "string" ? app.initData : "";
-          if (initDataRaw) {
-            return getLatestInitData(initDataRaw);
-          }
+        const candidate =
+          (typeof tg?.initData === "string" && tg.initData.length ? tg.initData : "") ||
+          (typeof window.Telegram?.WebApp?.initData === "string" && window.Telegram.WebApp.initData.length
+            ? window.Telegram.WebApp.initData
+            : "") ||
+          qs.get("init_data") ||
+          "";
+
+        const stored = getLatestInitData(candidate);
+        if (stored) {
+          return stored;
         }
-        await new Promise((resolve) => setTimeout(resolve, 50));
+
+        await new Promise((resolve) => setTimeout(resolve, intervalMs));
       }
 
-      return "";
-    }
-
-    function renderOpenInTelegramGate(reasonText) {
-      if (gateRendered) return;
-      gateRendered = true;
-
-      const mainGate = document.createElement("div");
-      mainGate.id = "telegram-open-gate";
-      mainGate.style.cssText = "margin:12px 0;padding:14px;border:1px solid #ffd166;background:#1d2430;border-radius:10px;color:#fff;";
-      mainGate.innerHTML = `
-        <div style="font-size:18px;font-weight:700;margin-bottom:8px;">Open inside Telegram to continue</div>
-        <div style="font-size:14px;opacity:0.9;margin-bottom:10px;">${escapeHtml(reasonText || "Telegram init data is required.")}</div>
-        <div style="display:flex;gap:8px;flex-wrap:wrap;">
-          <button id="open-bot-btn" type="button" class="btn btn-primary">Open Bot</button>
-          <button id="reload-miniapp-btn" type="button" class="btn btn-ghost">Reload</button>
-        </div>
-      `;
-
-      const anchor = document.querySelector(".container") || document.body;
-      if (anchor.firstChild) {
-        anchor.insertBefore(mainGate, anchor.firstChild);
-      } else {
-        anchor.appendChild(mainGate);
-      }
-
-      const sectionIdsToHide = ["voucher-section", "campaign-voucher-list", "referral-section"];
-      sectionIdsToHide.forEach((id) => {
-        const node = document.getElementById(id);
-        if (node) node.style.display = "none";
-      });
-
-      document.querySelectorAll("button[data-dropid],button[data-claim],#campaign-voucher-btn").forEach((btn) => {
-        btn.setAttribute("disabled", "disabled");
-        btn.style.display = "none";
-      });
-
-      const openBotBtn = document.getElementById("open-bot-btn");
-      if (openBotBtn) {
-        openBotBtn.addEventListener("click", () => {
-          const deepLink = `https://t.me/${BOT_USERNAME}`;
-          if (window.Telegram?.WebApp?.openTelegramLink) {
-            window.Telegram.WebApp.openTelegramLink(deepLink);
-            return;
-          }
-          window.location.href = deepLink;
-        });
-      }
-
-      const reloadBtn = document.getElementById("reload-miniapp-btn");
-      if (reloadBtn) reloadBtn.addEventListener("click", () => window.location.reload());
+      return getLatestInitData("");
     }
 
     function v2Headers(extras = {}, initDataOverride = "") {
@@ -1094,13 +1108,55 @@
       const initDataRaw = getLatestInitData(candidateInitData);
 
       if (initDataRaw) {
-        h["X-Tg-InitData"] = initDataRaw;
+        h["X-Telegram-Init-Data"] = initDataRaw;
+        h["X-Telegram-Init"] = initDataRaw;
       }
 
+      const adminSecret = getAdminSecret();
+
+      if (adminSecret) {
+        h["X-Admin-Secret"] = adminSecret;
+        h["Authorization"] = `Bearer ${adminSecret}`;
+      }
+      const usernameHint =
+        CURRENT_USERNAME || tg?.initDataUnsafe?.user?.username || urlQS.get("username") || "";
+      if (usernameHint) {
+        h["X-Admin-Username"] = usernameHint;
+      }
+
+      const tgUserId = tg?.initDataUnsafe?.user?.id;
+      const userIdFromQS = urlQS.get("user_id") || urlQS.get("id");
+      const userIdHint =
+        tgUserId !== undefined && tgUserId !== null && tgUserId !== ""
+          ? tgUserId
+          : userIdFromQS || "";
+      if (userIdHint) {
+        h["X-Admin-User-Id"] = String(userIdHint);
+      }
 
       return h;
     }
 
+    (function addAdminClearButton() {
+      try {
+        const bar = document.createElement("div");
+        bar.style.cssText = "margin:8px 0; display:flex; gap:8px; align-items:center;";
+        const btn = document.createElement("button");
+        btn.textContent = "Clear Admin Mode";
+        btn.style.cssText = "padding:6px 10px; border:1px solid #ddd; background:#fff; border-radius:8px; cursor:pointer;";
+        btn.onclick = () => {
+          try { localStorage.removeItem('X-Admin-Secret'); } catch {}
+          alert("Admin mode cleared. Reloading…");
+          location.reload();
+        };
+        const hasAdmin = !!getAdminSecret();
+        if (hasAdmin) {
+          bar.appendChild(btn);
+          const target = document.querySelector("h2") || document.body;
+          target.parentNode.insertBefore(bar, target.nextSibling);
+        }
+      } catch {}
+    })();
 
     function friendlyAuthFail(el) {
       if (!el) return;
@@ -1130,30 +1186,15 @@
 
     async function v2Fetch(path, options = {}) {
       const { headers: extraHeaders, ...rest } = options || {};
-      let initDataRaw = await getInitDataStrict();
-      console.info("[tg] isTelegramWebApp=", isTelegramWebApp(), "initDataLen=", initDataRaw.length);
-      if (!initDataRaw) {
-        console.warn("[tg] missing initData; gating UI");
-        renderOpenInTelegramGate("Telegram init data not available. Please reopen from the bot button.");
-        throw new Error("missing_init_data_client");
-      }
+      let initDataRaw = await waitForInitData();
       let headers = v2Headers(extraHeaders || {}, initDataRaw);
-      headers["X-Requested-With"] = "TelegramWebApp";
-      headers["Cache-Control"] = "no-store";
-      let target = withInitDataInQuery(apiUrl(path), initDataRaw);
+      let target = withInitDataInQuery(path, initDataRaw);
 
       let res = await fetch(target, { ...rest, headers });
       if (res.status === 401) {
-        initDataRaw = await getInitDataStrict({ timeoutMs: 3000 });
-        if (!initDataRaw) {
-          console.warn("[tg] missing initData; gating UI");
-          renderOpenInTelegramGate("Telegram init data not available. Please reopen from the bot button.");
-          throw new Error("missing_init_data_client");
-        }
+        initDataRaw = await waitForInitData(3000);
         headers = v2Headers(extraHeaders || {}, initDataRaw);
-        headers["X-Requested-With"] = "TelegramWebApp";
-        headers["Cache-Control"] = "no-store";
-        target = withInitDataInQuery(apiUrl(path), initDataRaw);
+        target = withInitDataInQuery(path, initDataRaw);
         res = await fetch(target, { ...rest, headers });
       }
       return res;
@@ -1268,7 +1309,8 @@
           tbody.innerHTML = `<tr><td colspan="6" style="padding:6px;">Admin user ID required. Open via Telegram to manage drops.</td></tr>`;
           return;
         }
-        const res = await v2Fetch(`${API_V2}/admin/drops_v2`);
+        const tail = buildAdminQueryTail();
+        const res = await v2Fetch(`${API_V2}/admin/drops_v2${tail}`);
         if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
         const data = await res.json();
         if (data.status !== "ok") throw new Error(JSON.stringify(data));
@@ -1300,12 +1342,7 @@
           tbody.innerHTML = `<tr><td colspan="6" style="padding:6px;">No drops found.</td></tr>`;
         }
       } catch (e) {
-        const status = Number((String(e?.message || "").match(/\b(\d{3})\b/) || [])[1]);
-        if (Number.isFinite(status)) {
-          tbody.innerHTML = `<tr><td colspan="6" style="padding:6px;">HTTP Error ${status}</td></tr>`;
-        } else {
-          tbody.innerHTML = `<tr><td colspan="6" style="padding:6px;">${e?.message || "Request failed"}</td></tr>`;
-        }
+        tbody.innerHTML = `<tr><td colspan="6" style="padding:6px;">Voucher endpoint error: ${e.message}</td></tr>`;
       }
     }
 
@@ -1405,7 +1442,8 @@
       try {
         const userId = getAdminUserId();
         if (!userId) { alert("Missing admin user id. Open via Telegram to continue."); return; }
-        const res = await v2Fetch(`${API_V2}/admin/drops`, {
+        const tail = buildAdminQueryTail();
+        const res = await v2Fetch(`${API_V2}/admin/drops${tail}`, {
           method: "POST",
           body: JSON.stringify(payload)
         });
@@ -1482,7 +1520,8 @@
       try {
         const userId = getAdminUserId();
         if (!userId) { alert("Missing admin user id. Open via Telegram to continue."); return; }
-        const res = await v2Fetch(`${API_V2}/admin/drops/${dropId}/codes`, {
+        const tail = buildAdminQueryTail();
+        const res = await v2Fetch(`${API_V2}/admin/drops/${dropId}/codes${tail}`, {
           method: "POST",
           body: JSON.stringify(payload)
         });
@@ -1550,6 +1589,7 @@
   </script>
 
   <script>
+    const API_BASE = "https://apreferralv1.fly.dev";
     const UI_VERSION = window.UI_VERSION || "unknown";
     const REWARDS_CACHE_KEY = "rewards_summary_cache_v3";
     const REWARDS_CACHE_TTL_MS = 60 * 1000;
@@ -1560,7 +1600,7 @@
     let regionMsg = "";
     let latestReferralLink = "";
 
-    if (!userId) {
+    if (!userId && !getAdminSecret()) {
       const warn = document.createElement('div');
       warn.style.cssText = "margin:10px 0;padding:10px;background:#fff3f3;border:1px solid #ffd6d6;border-radius:8px;color:#900;";
       warn.innerHTML = "<b>Coming Soon</b><br/>";
@@ -1638,7 +1678,7 @@
       }
 
       try {
-        const res = await fetch(apiUrl("/api/checkin"), {
+        const res = await fetch(`${API_BASE}/api/checkin`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ user_id: userId, username })
@@ -1669,7 +1709,7 @@
       const resultEl = document.getElementById("checkin-result");
 
       try {
-        const res = await fetch(apiUrl(`/api/checkin-status/${userId}`));
+        const res = await fetch(`${API_BASE}/api/checkin-status/${userId}`);
         const data = await res.json();
 
         if (data.message && resultEl) {
@@ -1752,7 +1792,7 @@
 
       const display = document.getElementById("referral-link");
       try {
-        const res = await fetch(apiUrl(`/api/referral?user_id=${userId}&username=${username}`));
+        const res = await fetch(`${API_BASE}/api/referral?user_id=${userId}&username=${username}`);
         const rawText = await res.text();
         let data;
         try {
@@ -1808,16 +1848,21 @@ Some people get lucky.👇
         .catch(() => alert("Failed to copy voucher."));
     }
 
-    async function handleAdminAndVoucher(isAdmin) {
+    async function handleAdminAndVoucher() {
       try {
-        const voucherRes = await fetch(apiUrl(`/api/bonus_voucher?user_id=${userId}`));
+        const [adminRes, voucherRes] = await Promise.all([
+          fetch(`${API_BASE}/api/is_admin?user_id=${userId}`),
+          fetch(`${API_BASE}/api/bonus_voucher?user_id=${userId}`)
+        ]);
 
+        let adminData = {};
         let voucherData = {};
+        try { adminData = await adminRes.json(); } catch (_) {}
         try { voucherData = await voucherRes.json(); } catch (_) {}
 
+        const isAdmin = adminData.success && adminData.is_admin;
         if (isAdmin) {
-          const adminPanel = document.getElementById("admin-panel");
-          if (adminPanel) adminPanel.style.display = "block";
+          document.getElementById("admin-panel").style.display = "block";
           if (typeof adm_list === "function") {
             adm_list();
           }
@@ -1839,50 +1884,6 @@ Some people get lucky.👇
       } catch (err) {
         console.error("❌ Error checking admin or loading voucher:", err);
       }
-    }
-
-    async function fetchMeRole() {
-      const initDataRaw = getLatestInitData() || "";
-      if (!initDataRaw) return { ok: true, user_id: null, is_admin: false };
-
-      try {
-        const res = await fetch(apiUrl("/me"), {
-          method: "GET",
-          cache: "no-store",
-          headers: {
-            "X-Tg-InitData": initDataRaw,
-          },
-        });
-        if (!res.ok) return { ok: true, user_id: null, is_admin: false };
-        const me = await res.json();
-        return {
-          ok: true,
-          user_id: me?.user_id ?? null,
-          is_admin: me?.is_admin === true,
-        };
-      } catch (_) {
-        return { ok: true, user_id: null, is_admin: false };
-      }
-    }
-
-    function applyAdminUIAccess(isAdmin) {
-      const adminPanel = document.getElementById("admin-panel");
-      const adminOnlyNodes = document.querySelectorAll("[data-admin-only='1']");
-
-      if (!isAdmin) {
-        if (adminPanel) adminPanel.remove();
-        adminOnlyNodes.forEach((node) => node.remove());
-        return;
-      }
-
-      if (adminPanel) {
-        adminPanel.style.display = "block";
-      }
-      adminOnlyNodes.forEach((node) => {
-        if (node && node.style) {
-          node.style.display = "block";
-        }
-      });
     }
 
     function resetVoucherButton() {
@@ -2155,7 +2156,6 @@ Some people get lucky.👇
       const code = payload?.code || "";
       const reason = payload?.reason || payload?.checks_key || "";
       const retryAfterSec = normalizeRetryAfterSec(payload?.retry_after_sec);
-      const businessMessage = payload?.message || (reason ? String(reason).replace(/_/g, " ") : "");
 
       if (code === "sold_out") {
         return {
@@ -2218,7 +2218,7 @@ Some people get lucky.👇
 
       return {
         title: "Temporarily unavailable",
-        message: businessMessage || "Please try again.",
+        message: "Please try again.",
         severity: "warn"
       };
     }
@@ -2327,7 +2327,8 @@ Some people get lucky.👇
       renderCampaignDrops(null, [], null);
 
       try {
-        const res = await v2Fetch(`${API_V2}/vouchers/visible`);
+        const tail = buildAdminQueryTail();
+        const res = await v2Fetch(`${API_V2}/vouchers/visible${tail}`);
 
         if (res.status === 401) {
           messageEl.innerText = "Coming soon…";
@@ -2404,7 +2405,9 @@ Some people get lucky.👇
       try {
         const userId = getAdminUserId();
         if (!userId) { alert("Missing admin user id. Open via Telegram to continue."); return; }
-        const res = await v2Fetch(`${API_V2}/admin/drops/${dropId}/actions`, {
+        const tail = buildAdminQueryTail();
+
+        const res = await v2Fetch(`${API_V2}/admin/drops/${dropId}/actions${tail}`, {
           method: "POST",
           body: JSON.stringify({ op })
         });
@@ -2452,31 +2455,8 @@ Some people get lucky.👇
         let out = null;
         try { out = await res.json(); } catch { /* ignore */ }
 
-        const httpOk = res.ok;
-        const apiOk = out?.ok === true || out?.status === "ok";
-
-        if (!httpOk) {
-          console.warn("Claim failed", {
-            status: res.status,
-            code: out?.code,
-            reason: out?.reason,
-            retry_after_sec: out?.retry_after_sec
-          });
-          renderClaimError({
-            title: "HTTP Error",
-            message: `HTTP Error ${res.status}`,
-            severity: "warn"
-          }, {
-            retryHandler: () => {
-              if (document.body.contains(claimBtn)) {
-                claimBtn.click();
-              }
-            }
-          });
-          return;
-        }
-
-        if (!apiOk || out?.status === "error" || out?.ok === false) {
+        const ok = res.ok && (out?.ok === true || out?.status === "ok");
+        if (!ok) {
           const payload = { ...(out || {}) };
           if (res.status === 410 && !payload.code) {
             payload.code = "sold_out";
@@ -2504,14 +2484,6 @@ Some people get lucky.👇
               }
             }
           });
-          return;
-        }
-
-        if (out?.check_only === true) {
-          if (claimBtn.id === "campaign-voucher-btn" && out?.subscribed === true) {
-            const messageEl = document.getElementById("campaign-voucher-message");
-            if (messageEl && !messageEl.innerText) messageEl.innerText = "Eligible";
-          }
           return;
         }
 
@@ -2990,7 +2962,7 @@ function setLeaderboardMeta(ts, { isStale = false } = {}) {
       const { forceRefresh = false } = options;
       if (leaderboardFetchInProgress) return;
       const out = document.getElementById("leaderboard-output");
-      const missingUser = !userId;
+      const missingUser = !userId && !getAdminSecret?.();
       if (forceRefresh && out) {
         leaderboardSkeletonRendered = false;
         renderLeaderboardSkeleton();
@@ -3002,7 +2974,7 @@ function setLeaderboardMeta(ts, { isStale = false } = {}) {
       leaderboardFetchAttempted = true;
       console.info("[LB][FETCH_START]");
 
-      const url = new URL(apiUrl("/api/leaderboard"));
+      const url = new URL(`${API_BASE}/api/leaderboard`);
       if (userId) url.searchParams.set("user_id", userId);
       url.searchParams.set("t", Date.now());
 
@@ -3071,7 +3043,7 @@ function setLeaderboardMeta(ts, { isStale = false } = {}) {
   
     async function loadPreviousLeaderboard() {
       try {
-        const weeksRes = await fetch(apiUrl("/api/leaderboard/history/weeks"));
+        const weeksRes = await fetch(`${API_BASE}/api/leaderboard/history/weeks`);
         const weeksData = await weeksRes.json();
 
         if (!weeksData.success || weeksData.weeks.length === 0) {
@@ -3083,7 +3055,7 @@ function setLeaderboardMeta(ts, { isStale = false } = {}) {
         const lastWeek = weeksData.weeks[0];
 
         const res = await fetch(
-          apiUrl(`/api/leaderboard/history/week/${lastWeek.week_start}`)
+          `${API_BASE}/api/leaderboard/history/week/${lastWeek.week_start}`
         );
         const data = await res.json();
 
@@ -3142,9 +3114,9 @@ ${referral}`;
 
       try {
         const idempotencyKey = `adminui:${userId}:${input}:${amount}:${Date.now()}`;        
-        const res = await fetch(apiUrl("/api/add_xp"), {
+        const res = await fetch(`${API_BASE}/api/add_xp?user_id=${userId}`, {
           method: "POST",
-          headers: { "Content-Type": "application/json", "X-Tg-InitData": getLatestInitData() || "" },
+          headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ user_id: input, xp: amount, idempotency_key: idempotencyKey })
         });
         const data = await res.json();
@@ -3178,16 +3150,16 @@ ${referral}`;
           code,
           release_time: new Date(releaseAt).toISOString().replace(".000Z", "Z")
         };
-        const res = await fetch(apiUrl("/api/admin/set_bonus"), {
+        const res = await fetch(`${API_BASE}/api/admin/set_bonus?user_id=${userId}`, {
           method: "POST",
-          headers: { "Content-Type": "application/json", "X-Tg-InitData": getLatestInitData() || "" },
+          headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload)
         });
         const data = await res.json();
         if (data.status === "success") {
           alert("✅ Voucher scheduled.");
           closeVoucherModal();
-          handleAdminAndVoucher(true);
+          handleAdminAndVoucher();
         } else {
           alert("❌ " + (data.message || "Failed to schedule voucher."));
         }
@@ -3199,7 +3171,7 @@ ${referral}`;
 
     async function checkRegionStatus() {
       try {
-        const res = await fetch(apiUrl(`/api/region-status/${userId}`));
+        const res = await fetch(`${API_BASE}/api/region-status/${userId}`);
         const data = await res.json();
 
         if (data.locked) {
@@ -3227,7 +3199,7 @@ ${referral}`;
       if (!region) { alert("Please select a region."); return; }
 
       try {
-        const res = await fetch(apiUrl(`/api/set-region/${userId}`), {
+        const res = await fetch(`${API_BASE}/api/set-region/${userId}`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ user_id: userId, region })
@@ -3255,7 +3227,7 @@ ${referral}`;
 
     async function viewJoinRequests() {
       try {
-        const res = await fetch(apiUrl("/api/join_requests"), { headers: { "X-Tg-InitData": getLatestInitData() || "" } });
+        const res = await fetch(`${API_BASE}/api/join_requests?user_id=${userId}`);
         const data = await res.json();
         if (!data.success) throw new Error(data.error || "Failed to load");
         const list = data.requests.map(r => `• @${r.username || r.user_id}`).join("\n");
@@ -3268,7 +3240,7 @@ ${referral}`;
 
     async function exportCSV() {
       try {
-        const res = await fetch(apiUrl("/api/export_csv"), { headers: { "X-Tg-InitData": getLatestInitData() || "" } });
+        const res = await fetch(`${API_BASE}/api/export_csv?user_id=${userId}`);
         const csv = await res.text();
         const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
         const url = URL.createObjectURL(blob);
@@ -3285,62 +3257,33 @@ ${referral}`;
       }
     }
 
-
-    async function affUploadPool() {
-      const body = {
-        pool_id: document.getElementById("aff_pool_id").value,
-        codes_text: document.getElementById("aff_codes_text").value,
-        display_label: document.getElementById("aff_display_label").value || null,
-        value_hint: document.getElementById("aff_value_hint").value || null,
-        currency: document.getElementById("aff_currency").value || null,
-      };
-      const res = await fetch(apiUrl("/admin/pools/upload"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "X-Tg-InitData": getLatestInitData() || "" },
-        body: JSON.stringify(body),
-      });
-      const data = await res.json();
-      alert(data.status === "ok" ? `Uploaded ${data.inserted}/${data.received}` : `Upload failed: ${data.reason || 'error'}`);
-      affLoadPoolSummary();
-    }
-
-    async function affLoadPoolSummary() {
-      const res = await fetch(apiUrl("/admin/pools/summary"), { headers: { "X-Tg-InitData": getLatestInitData() || "" } });
-      const data = await res.json();
-      document.getElementById("aff_pool_summary").textContent = JSON.stringify(data, null, 2);
-    }
-
-    async function affLoadPending(status) {
-      const res = await fetch(apiUrl(`/admin/affiliate/pending?status=${encodeURIComponent(status)}`), { headers: { "X-Tg-InitData": getLatestInitData() || "" } });
-      const data = await res.json();
-      document.getElementById("aff_pending").textContent = JSON.stringify(data, null, 2);
-    }
-
     window.onload = async () => {
       if (tg) { tg.ready(); tg.expand(); }
 
-      const init = await getInitDataStrict();
+      const init = await waitForInitData();
       const hasInit = !!(init && init.length >= 10);
-      console.info("[tg] isTelegramWebApp=", isTelegramWebApp(), "initDataLen=", init.length);
-
-      if (!hasInit) {
-        console.warn("[tg] missing initData; gating UI");
-        renderOpenInTelegramGate("Telegram init data not available. Please open this page from the bot WebApp button.");
-        return;
-      }
-
-      const me = await fetchMeRole();
-      const isAdmin = me?.is_admin === true;
-      applyAdminUIAccess(isAdmin);
+      const isAdminMode = !!getAdminSecret();
 
       applyRegionGate(getStoredRegion());
 
+      if (!hasInit) {
+        if (isAdminMode) {
+          document.getElementById("admin-panel").style.display = "block";
+          adm_list();
+        }
+        return;
+      }
+
       checkRegionStatus();
-      handleAdminAndVoucher(isAdmin);
+      handleAdminAndVoucher();
       loadCheckinStatus();
       loadReferralProgress();
       
       loadVouchers();
+      if (isAdminMode) {
+        document.getElementById("admin-panel").style.display = "block";
+        adm_list();
+      }
     };
 
     (function () {
