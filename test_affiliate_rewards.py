@@ -1,3 +1,4 @@
+import os
 import unittest
 from datetime import datetime, timedelta, timezone
 
@@ -199,6 +200,39 @@ class AffiliateRewardTests(unittest.TestCase):
         row_b = evaluate_monthly_affiliate_reward(db, referrer_id=12, now_utc=now)
         issued = [r for r in (row_a, row_b) if r.get("status") == "ISSUED"]
         self.assertEqual(len(issued), 1)
+
+    def test_simulate_mode_creates_ledger_without_pool_consumption(self):
+        db = FakeDb()
+        db.users.insert_one({"user_id": 31, "blocked": False})
+        now = datetime(2026, 1, 15, tzinfo=timezone.utc)
+        for i in range(1, 4):
+            db.qualified_events.insert_one({"invitee_id": i, "referrer_id": 31, "qualified_at": now})
+        db.voucher_pools.insert_one({"pool_id": "T1", "code": "SIMT1", "status": "available"})
+
+        os.environ["AFFILIATE_SIMULATE"] = "1"
+        try:
+            row = evaluate_monthly_affiliate_reward(db, referrer_id=31, now_utc=now)
+        finally:
+            os.environ.pop("AFFILIATE_SIMULATE", None)
+
+        self.assertEqual(row["status"], "SIMULATED_PENDING")
+        self.assertEqual(db.voucher_pools.count_documents({"pool_id": "T1", "status": "available"}), 1)
+
+    def test_simulate_mode_dedup_safe_on_duplicate_evaluation(self):
+        db = FakeDb()
+        db.users.insert_one({"user_id": 41, "blocked": False})
+        now = datetime(2026, 1, 15, tzinfo=timezone.utc)
+        for i in range(1, 4):
+            db.qualified_events.insert_one({"invitee_id": i, "referrer_id": 41, "qualified_at": now})
+
+        os.environ["AFFILIATE_SIMULATE"] = "1"
+        try:
+            evaluate_monthly_affiliate_reward(db, referrer_id=41, now_utc=now)
+            evaluate_monthly_affiliate_reward(db, referrer_id=41, now_utc=now)
+        finally:
+            os.environ.pop("AFFILIATE_SIMULATE", None)
+
+        self.assertEqual(db.affiliate_ledger.count_documents({"dedup_key": "AFF:41:202601:T1"}), 1)
 
 
 if __name__ == "__main__":

@@ -37,7 +37,7 @@ from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_MISSED
 from app_context import set_app_bot, set_bot, set_scheduler
 from onboarding import MYWIN_CHAT_ID, onboarding_due_tick, record_first_mywin, record_first_checkin
 from vouchers import vouchers_bp, ensure_voucher_indexes, process_verification_queue
-from scheduler import settle_pending_referrals, settle_referral_snapshots, settle_xp_snapshots
+from scheduler import settle_pending_referrals, settle_referral_snapshots, settle_xp_snapshots, evaluate_affiliate_simulated_ledgers
 from affiliate_rewards import (
     ensure_affiliate_indexes,
     issue_welcome_bonus_if_eligible,
@@ -3243,7 +3243,15 @@ def run_worker():
         id="onboarding_due_tick",
         name="Onboarding Due Tick",
         replace_existing=True,
-    )    
+    )
+    scheduler.add_job(
+        evaluate_affiliate_simulated_ledgers,
+        trigger=CronTrigger(hour=1, minute=15, timezone=KL_TZ),
+        id="affiliate_simulate_daily",
+        name="Affiliate Simulation Daily",
+        replace_existing=True,
+        kwargs={"batch_limit": 1000},
+    )
     scheduler.start()
 
     # 5) Background jobs on the bot's job_queue

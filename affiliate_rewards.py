@@ -71,6 +71,10 @@ def _claim_voucher_from_pool(db, *, pool_id: str, ledger_id, user_id: int, now_u
     )
 
 
+def _affiliate_simulate_enabled() -> bool:
+    return str(os.getenv("AFFILIATE_SIMULATE", "0")).strip() == "1"
+
+
 def record_user_last_seen(db, *, user_id: int, ip: str | None = None, subnet: str | None = None, session: str | None = None, seen_at: datetime | None = None):
     now_utc = seen_at or datetime.now(timezone.utc)
     db.user_last_seen.update_one(
@@ -116,6 +120,20 @@ def issue_welcome_bonus_if_eligible(db, *, user_id: int, is_new_user: bool, bloc
     ledger = db.affiliate_ledger.find_one({"dedup_key": dedup_key})
     if not ledger:
         return {"created": False, "status": "ERROR"}
+    if _affiliate_simulate_enabled():
+        db.affiliate_ledger.update_one(
+            {"_id": ledger["_id"]},
+            {
+                "$set": {
+                    "status": "SIMULATED_PENDING",
+                    "simulate": True,
+                    "would_issue_pool": "WELCOME",
+                    "evaluated_at_utc": now_utc,
+                    "updated_at": now_utc,
+                }
+            },
+        )
+        return {"created": True, "status": "SIMULATED_PENDING"}
     if ledger.get("status") in {"ISSUED", "OUT_OF_STOCK"}:
         return {"created": False, "status": ledger.get("status"), "voucher_code": ledger.get("voucher_code")}
 
@@ -201,6 +219,20 @@ def evaluate_monthly_affiliate_reward(db, *, referrer_id: int, now_utc: datetime
     ledger = db.affiliate_ledger.find_one({"dedup_key": dedup_key})
     if not ledger:
         return None
+    if _affiliate_simulate_enabled():
+        db.affiliate_ledger.update_one(
+            {"_id": ledger["_id"]},
+            {
+                "$set": {
+                    "status": "SIMULATED_PENDING",
+                    "simulate": True,
+                    "would_issue_pool": tier,
+                    "evaluated_at_utc": now_utc,
+                    "updated_at": now_utc,
+                }
+            },
+        )
+        return db.affiliate_ledger.find_one({"_id": ledger["_id"]})
     if ledger.get("status") in {"ISSUED", "OUT_OF_STOCK", "PENDING_REVIEW", "PENDING_MANUAL", "REJECTED", "APPROVED"} and ledger.get("voucher_code"):
         return ledger
 

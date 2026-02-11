@@ -532,6 +532,121 @@ def _resolve_referrer_id(invitee_user_id: int) -> int | None:
     return int(inviter) if inviter is not None else None
 
 
+def _simulate_pool_for_gate_day(gate_day: int) -> str:
+    if gate_day == 3:
+        return "T1"
+    if gate_day == 7:
+        return "T2"
+    if gate_day == 15:
+        return "T3"
+    return "T4"
+
+
+def _derive_abuse_flags_for_invitee(invitee_user_id: int, now_utc_ts: datetime) -> list[str]:
+    flags = []
+    try:
+        deny_count = db.referral_audit.count_documents(
+            {
+                "invitee_user_id": int(invitee_user_id),
+                "created_at": {"$gte": now_utc_ts - timedelta(days=7), "$lt": now_utc_ts},
+                "reason": {"$in": ["deny", "deny_severe", "blocked", "abuse"]},
+            }
+        )
+        if int(deny_count or 0) > 0:
+            flags.append("referral_audit_deny_7d")
+    except Exception:
+        pass
+
+    try:
+        cooldown_key = f"cooldown:uid:{int(invitee_user_id)}"
+        if db.claim_rate_limits.find_one({"key": cooldown_key}, {"_id": 1}):
+            flags.append("cooldown_uid")
+    except Exception:
+        pass
+
+    try:
+        kill_key = f"kill:uid:{int(invitee_user_id)}"
+        if db.claim_rate_limits.find_one({"key": kill_key}, {"_id": 1}):
+            flags.append("kill_uid")
+    except Exception:
+        pass
+
+    return flags
+
+
+def evaluate_affiliate_simulated_ledgers(batch_limit: int = 500) -> int:
+    if str(os.getenv("AFFILIATE_SIMULATE", "0")).strip() != "1":
+        return 0
+
+    now_utc_ts = now_utc()
+    now_kl_date = now_utc_ts.astimezone(KL_TZ).date()
+    created_or_updated = 0
+
+    rows = db.pending_referrals.find(
+        {"status": "awarded", "invitee_user_id": {"$exists": True}, "inviter_user_id": {"$exists": True}},
+        {"invitee_user_id": 1, "inviter_user_id": 1},
+    ).limit(batch_limit)
+
+    for row in rows:
+        invitee_user_id = row.get("invitee_user_id")
+        inviter_user_id = row.get("inviter_user_id")
+        if not isinstance(invitee_user_id, int) or not isinstance(inviter_user_id, int):
+            continue
+
+        user_doc = db.users.find_one({"user_id": invitee_user_id}, {"joined_main_at": 1, "total_xp": 1, "monthly_xp": 1}) or {}
+        joined_main_at = _coerce_utc(user_doc.get("joined_main_at"))
+        if not joined_main_at:
+            continue
+        age_days = (now_kl_date - joined_main_at.astimezone(KL_TZ).date()).days
+        for gate_day in (3, 7, 15, 30):
+            if age_days < gate_day:
+                continue
+
+            try:
+                status = _get_chat_member_status(invitee_user_id)
+                still_in_group = status in {"member", "administrator", "creator"}
+            except Exception:
+                still_in_group = False
+
+            dedup_key = f"SIM:{inviter_user_id}:{invitee_user_id}:{gate_day}"
+            db.affiliate_ledger.update_one(
+                {"dedup_key": dedup_key},
+                {
+                    "$setOnInsert": {
+                        "ledger_type": "AFFILIATE_SIMULATION",
+                        "user_id": int(inviter_user_id),
+                        "invitee_user_id": int(invitee_user_id),
+                        "year_month": None,
+                        "tier": _simulate_pool_for_gate_day(gate_day),
+                        "pool_id": _simulate_pool_for_gate_day(gate_day),
+                        "status": "SIMULATED_PENDING",
+                        "dedup_key": dedup_key,
+                        "voucher_code": None,
+                        "risk_flags": [],
+                        "created_at": now_utc_ts,
+                    },
+                    "$set": {
+                        "status": "SIMULATED_PENDING",
+                        "simulate": True,
+                        "would_issue_pool": _simulate_pool_for_gate_day(gate_day),
+                        "gate_day": int(gate_day),
+                        "evaluated_at_utc": now_utc_ts,
+                        "still_in_group": bool(still_in_group),
+                        "xp_total": user_doc.get("total_xp"),
+                        "monthly_xp": user_doc.get("monthly_xp"),
+                        "abuse_flags": _derive_abuse_flags_for_invitee(invitee_user_id, now_utc_ts),
+                        "updated_at": now_utc_ts,
+                    },
+                },
+                upsert=True,
+            )
+            created_or_updated += 1
+
+    if created_or_updated:
+        logger.info("[SCHED][AFF_SIM] entries=%s", created_or_updated)
+    return created_or_updated
+
+
 def confirm_qualified_invitees(batch_limit: int = 200) -> int:
     now_utc_ts = now_utc()
     cutoff = now_utc_ts - timedelta(hours=48)
