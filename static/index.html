@@ -768,6 +768,29 @@
           </div>
         </div>
       </div>
+        <div style="background:#fff; border:1px solid #ddd; border-radius:8px; padding:12px; margin-top:14px;">
+          <h5 style="margin:0 0 8px 0;">Affiliate Voucher Pools</h5>
+          <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:flex-end;">
+            <label style="font-size:12px; color:#555; min-width:120px;">Pool
+              <select id="aff_pool_id" style="width:100%; padding:8px; border-radius:6px; border:1px solid #ccc;">
+                <option>WELCOME</option><option>T1</option><option>T2</option><option>T3</option><option>T4</option>
+              </select>
+            </label>
+            <input id="aff_display_label" type="text" placeholder="Display label (optional)" style="flex:1 1 170px; padding:8px; border-radius:6px; border:1px solid #ccc;">
+            <input id="aff_value_hint" type="text" placeholder="Value hint (optional)" style="flex:1 1 130px; padding:8px; border-radius:6px; border:1px solid #ccc;">
+            <input id="aff_currency" type="text" placeholder="Currency" style="width:90px; padding:8px; border-radius:6px; border:1px solid #ccc;">
+          </div>
+          <textarea id="aff_codes_text" rows="4" placeholder="One voucher code per line" style="width:100%; margin-top:8px; padding:8px; border-radius:6px; border:1px solid #ccc; font-family:monospace;"></textarea>
+          <div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:8px;">
+            <button type="button" onclick="affUploadPool()">Upload Pool Codes</button>
+            <button type="button" onclick="affLoadPoolSummary()">Refresh Pool Summary</button>
+            <button type="button" onclick="affLoadPending('PENDING_REVIEW')">Pending Review</button>
+            <button type="button" onclick="affLoadPending('PENDING_MANUAL')">Pending Manual</button>
+          </div>
+          <pre id="aff_pool_summary" style="margin-top:10px; background:#f8f8f8; border:1px solid #eee; padding:8px; border-radius:6px; white-space:pre-wrap;">No data.</pre>
+          <pre id="aff_pending" style="margin-top:8px; background:#f8f8f8; border:1px solid #eee; padding:8px; border-radius:6px; white-space:pre-wrap;">No pending ledger loaded.</pre>
+        </div>
+      </div>
     </div>
   </div>
   <!-- INFO HUB MODAL -->
@@ -3255,6 +3278,37 @@ ${referral}`;
         alert("❌ Error exporting CSV.");
         console.error(e);
       }
+    }
+
+
+    async function affUploadPool() {
+      const body = {
+        pool_id: document.getElementById("aff_pool_id").value,
+        codes_text: document.getElementById("aff_codes_text").value,
+        display_label: document.getElementById("aff_display_label").value || null,
+        value_hint: document.getElementById("aff_value_hint").value || null,
+        currency: document.getElementById("aff_currency").value || null,
+      };
+      const res = await v2Fetch(`${API_V2}/admin/pools/upload`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json();
+      alert(data.status === "ok" ? `Uploaded ${data.inserted}/${data.received}` : `Upload failed: ${data.reason || 'error'}`);
+      affLoadPoolSummary();
+    }
+
+    async function affLoadPoolSummary() {
+      const res = await v2Fetch(`${API_V2}/admin/pools/summary`);
+      const data = await res.json();
+      document.getElementById("aff_pool_summary").textContent = JSON.stringify(data, null, 2);
+    }
+
+    async function affLoadPending(status) {
+      const res = await v2Fetch(`${API_V2}/admin/affiliate/pending?status=${encodeURIComponent(status)}`);
+      const data = await res.json();
+      document.getElementById("aff_pending").textContent = JSON.stringify(data, null, 2);
     }
 
     window.onload = async () => {
