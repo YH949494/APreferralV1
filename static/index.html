@@ -976,8 +976,15 @@
   <script>
     const tg = window.Telegram?.WebApp;
 
+    const API_BASE = "https://apreferralv1.fly.dev";
     const API_V2 = "/v2/miniapp";
     let latestInitData = "";
+
+    function apiUrl(path) {
+      const base = API_BASE.replace(/\/+$/, "");
+      const normalizedPath = String(path || "").replace(/^\/+/, "");
+      return `${base}/${normalizedPath}`;
+    }
 
     function getLatestInitData(candidate = "") {
       if (typeof candidate === "string" && candidate.length) {
@@ -1072,13 +1079,13 @@
       const { headers: extraHeaders, ...rest } = options || {};
       let initDataRaw = await waitForInitData();
       let headers = v2Headers(extraHeaders || {}, initDataRaw);
-      let target = withInitDataInQuery(path, initDataRaw);
+      let target = withInitDataInQuery(apiUrl(path), initDataRaw);
 
       let res = await fetch(target, { ...rest, headers });
       if (res.status === 401) {
         initDataRaw = await waitForInitData(3000);
         headers = v2Headers(extraHeaders || {}, initDataRaw);
-        target = withInitDataInQuery(path, initDataRaw);
+        target = withInitDataInQuery(apiUrl(path), initDataRaw);
         res = await fetch(target, { ...rest, headers });
       }
       return res;
@@ -1475,7 +1482,6 @@
   </script>
 
   <script>
-    const API_BASE = "https://apreferralv1.fly.dev";
     const UI_VERSION = window.UI_VERSION || "unknown";
     const REWARDS_CACHE_KEY = "rewards_summary_cache_v3";
     const REWARDS_CACHE_TTL_MS = 60 * 1000;
@@ -1564,7 +1570,7 @@
       }
 
       try {
-        const res = await fetch(`${API_BASE}/api/checkin`, {
+        const res = await fetch(apiUrl("/api/checkin"), {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ user_id: userId, username })
@@ -1595,7 +1601,7 @@
       const resultEl = document.getElementById("checkin-result");
 
       try {
-        const res = await fetch(`${API_BASE}/api/checkin-status/${userId}`);
+        const res = await fetch(apiUrl(`/api/checkin-status/${userId}`));
         const data = await res.json();
 
         if (data.message && resultEl) {
@@ -1678,7 +1684,7 @@
 
       const display = document.getElementById("referral-link");
       try {
-        const res = await fetch(`${API_BASE}/api/referral?user_id=${userId}&username=${username}`);
+        const res = await fetch(apiUrl(`/api/referral?user_id=${userId}&username=${username}`));
         const rawText = await res.text();
         let data;
         try {
@@ -1736,7 +1742,7 @@ Some people get lucky.👇
 
     async function handleAdminAndVoucher(isAdmin) {
       try {
-        const voucherRes = await fetch(`${API_BASE}/api/bonus_voucher?user_id=${userId}`);
+        const voucherRes = await fetch(apiUrl(`/api/bonus_voucher?user_id=${userId}`));
 
         let voucherData = {};
         try { voucherData = await voucherRes.json(); } catch (_) {}
@@ -1772,7 +1778,7 @@ Some people get lucky.👇
       if (!initDataRaw) return { ok: true, user_id: null, is_admin: false };
 
       try {
-        const res = await fetch(`${API_BASE}/me`, {
+        const res = await fetch(apiUrl("/me"), {
           method: "GET",
           cache: "no-store",
           headers: {
@@ -2928,7 +2934,7 @@ function setLeaderboardMeta(ts, { isStale = false } = {}) {
       leaderboardFetchAttempted = true;
       console.info("[LB][FETCH_START]");
 
-      const url = new URL(`${API_BASE}/api/leaderboard`);
+      const url = new URL(apiUrl("/api/leaderboard"));
       if (userId) url.searchParams.set("user_id", userId);
       url.searchParams.set("t", Date.now());
 
@@ -2997,7 +3003,7 @@ function setLeaderboardMeta(ts, { isStale = false } = {}) {
   
     async function loadPreviousLeaderboard() {
       try {
-        const weeksRes = await fetch(`${API_BASE}/api/leaderboard/history/weeks`);
+        const weeksRes = await fetch(apiUrl("/api/leaderboard/history/weeks"));
         const weeksData = await weeksRes.json();
 
         if (!weeksData.success || weeksData.weeks.length === 0) {
@@ -3009,7 +3015,7 @@ function setLeaderboardMeta(ts, { isStale = false } = {}) {
         const lastWeek = weeksData.weeks[0];
 
         const res = await fetch(
-          `${API_BASE}/api/leaderboard/history/week/${lastWeek.week_start}`
+          apiUrl(`/api/leaderboard/history/week/${lastWeek.week_start}`)
         );
         const data = await res.json();
 
@@ -3068,7 +3074,7 @@ ${referral}`;
 
       try {
         const idempotencyKey = `adminui:${userId}:${input}:${amount}:${Date.now()}`;        
-        const res = await fetch(`${API_BASE}/api/add_xp`, {
+        const res = await fetch(apiUrl("/api/add_xp"), {
           method: "POST",
           headers: { "Content-Type": "application/json", "X-Tg-InitData": getLatestInitData() || "" },
           body: JSON.stringify({ user_id: input, xp: amount, idempotency_key: idempotencyKey })
@@ -3104,7 +3110,7 @@ ${referral}`;
           code,
           release_time: new Date(releaseAt).toISOString().replace(".000Z", "Z")
         };
-        const res = await fetch(`${API_BASE}/api/admin/set_bonus`, {
+        const res = await fetch(apiUrl("/api/admin/set_bonus"), {
           method: "POST",
           headers: { "Content-Type": "application/json", "X-Tg-InitData": getLatestInitData() || "" },
           body: JSON.stringify(payload)
@@ -3125,7 +3131,7 @@ ${referral}`;
 
     async function checkRegionStatus() {
       try {
-        const res = await fetch(`${API_BASE}/api/region-status/${userId}`);
+        const res = await fetch(apiUrl(`/api/region-status/${userId}`));
         const data = await res.json();
 
         if (data.locked) {
@@ -3153,7 +3159,7 @@ ${referral}`;
       if (!region) { alert("Please select a region."); return; }
 
       try {
-        const res = await fetch(`${API_BASE}/api/set-region/${userId}`, {
+        const res = await fetch(apiUrl(`/api/set-region/${userId}`), {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ user_id: userId, region })
@@ -3181,7 +3187,7 @@ ${referral}`;
 
     async function viewJoinRequests() {
       try {
-        const res = await fetch(`${API_BASE}/api/join_requests`, { headers: { "X-Tg-InitData": getLatestInitData() || "" } });
+        const res = await fetch(apiUrl("/api/join_requests"), { headers: { "X-Tg-InitData": getLatestInitData() || "" } });
         const data = await res.json();
         if (!data.success) throw new Error(data.error || "Failed to load");
         const list = data.requests.map(r => `• @${r.username || r.user_id}`).join("\n");
@@ -3194,7 +3200,7 @@ ${referral}`;
 
     async function exportCSV() {
       try {
-        const res = await fetch(`${API_BASE}/api/export_csv`, { headers: { "X-Tg-InitData": getLatestInitData() || "" } });
+        const res = await fetch(apiUrl("/api/export_csv"), { headers: { "X-Tg-InitData": getLatestInitData() || "" } });
         const csv = await res.text();
         const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
         const url = URL.createObjectURL(blob);
@@ -3220,7 +3226,7 @@ ${referral}`;
         value_hint: document.getElementById("aff_value_hint").value || null,
         currency: document.getElementById("aff_currency").value || null,
       };
-      const res = await fetch(`${API_BASE}/admin/pools/upload`, {
+      const res = await fetch(apiUrl("/admin/pools/upload"), {
         method: "POST",
         headers: { "Content-Type": "application/json", "X-Tg-InitData": getLatestInitData() || "" },
         body: JSON.stringify(body),
@@ -3231,13 +3237,13 @@ ${referral}`;
     }
 
     async function affLoadPoolSummary() {
-      const res = await fetch(`${API_BASE}/admin/pools/summary`, { headers: { "X-Tg-InitData": getLatestInitData() || "" } });
+      const res = await fetch(apiUrl("/admin/pools/summary"), { headers: { "X-Tg-InitData": getLatestInitData() || "" } });
       const data = await res.json();
       document.getElementById("aff_pool_summary").textContent = JSON.stringify(data, null, 2);
     }
 
     async function affLoadPending(status) {
-      const res = await fetch(`${API_BASE}/admin/affiliate/pending?status=${encodeURIComponent(status)}`, { headers: { "X-Tg-InitData": getLatestInitData() || "" } });
+      const res = await fetch(apiUrl(`/admin/affiliate/pending?status=${encodeURIComponent(status)}`), { headers: { "X-Tg-InitData": getLatestInitData() || "" } });
       const data = await res.json();
       document.getElementById("aff_pending").textContent = JSON.stringify(data, null, 2);
     }
