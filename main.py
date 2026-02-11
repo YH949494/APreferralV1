@@ -1498,11 +1498,30 @@ app_bot = ApplicationBuilder().token(BOT_TOKEN).request(httpx_request).build()
 
 
 def _admin_secret_ok() -> bool:
-    configured = (os.getenv("ADMIN_PANEL_SECRET") or "").strip()
-    if not configured:
+    admin_panel_key = (os.getenv("ADMIN_PANEL_KEY") or "").strip()
+    sent_key = (request.headers.get("X-Admin-Key") or "").strip()
+    if admin_panel_key and sent_key and sent_key == admin_panel_key:
         return True
-    sent = (request.headers.get("X-Admin-Secret") or request.args.get("admin_secret") or "").strip()
-    return bool(sent and sent == configured)
+
+    init_data_raw = (request.headers.get("X-Tg-InitData") or "").strip()
+    if not init_data_raw:
+        return False
+
+    try:
+        ok, parsed, _ = verify_telegram_init_data(init_data_raw)
+        if not ok:
+            return False
+
+        user_payload = parsed.get("user")
+        if isinstance(user_payload, str):
+            user_payload = json.loads(user_payload)
+        if not isinstance(user_payload, dict):
+            return False
+
+        user_id = int(user_payload.get("id"))
+        return user_id in set(ADMIN_UIDS)
+    except Exception:
+        return False
 
 
 @app.route("/admin/pools/upload", methods=["POST"])
@@ -1638,31 +1657,37 @@ def api_is_admin():
 @app.route("/me", methods=["GET"])
 def api_me():
     init_data_raw = (request.headers.get("X-Tg-InitData") or "").strip()
-    if not init_data_raw:
-        return jsonify({"ok": True, "user_id": None, "is_admin": False})
+    admin_panel_key = (os.getenv("ADMIN_PANEL_KEY") or "").strip()
+    sent_key = (request.headers.get("X-Admin-Key") or "").strip()
 
     try:
-        ok, parsed, _ = verify_telegram_init_data(init_data_raw)
-        if not ok:
-            return jsonify({"ok": True, "user_id": None, "is_admin": False})
+        if init_data_raw:
+            ok, parsed, _ = verify_telegram_init_data(init_data_raw)
+            if ok:
+                user_payload = parsed.get("user")
+                if isinstance(user_payload, str):
+                    user_payload = json.loads(user_payload)
+                if not isinstance(user_payload, dict):
+                    user_payload = {}
 
-        user_payload = parsed.get("user")
-        if isinstance(user_payload, str):
-            user_payload = json.loads(user_payload)
-        if not isinstance(user_payload, dict):
-            user_payload = {}
+                try:
+                    user_id = int(user_payload.get("id"))
+                except (TypeError, ValueError):
+                    user_id = None
 
-        try:
-            user_id = int(user_payload.get("id"))
-        except (TypeError, ValueError):
-            user_id = None
+                return jsonify({
+                    "ok": True,
+                    "user_id": user_id,
+                    "is_admin": bool(user_id is not None and user_id in set(ADMIN_UIDS)),
+                })
 
-        return jsonify({
-            "ok": True,
-            "user_id": user_id,
-            "is_admin": bool(user_id is not None and user_id in set(ADMIN_UIDS)),
-        })
+        if admin_panel_key and sent_key and sent_key == admin_panel_key:
+            return jsonify({"ok": True, "user_id": None, "is_admin": True})
+
+        return jsonify({"ok": True, "user_id": None, "is_admin": False})
     except Exception:
+        if admin_panel_key and sent_key and sent_key == admin_panel_key:
+            return jsonify({"ok": True, "user_id": None, "is_admin": True})
         return jsonify({"ok": True, "user_id": None, "is_admin": False})
 
 async def refresh_admin_ids(context: ContextTypes.DEFAULT_TYPE):
