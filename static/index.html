@@ -768,7 +768,7 @@
           </div>
         </div>
       </div>
-        <div style="background:#fff; border:1px solid #ddd; border-radius:8px; padding:12px; margin-top:14px;">
+        <div data-admin-only="1" style="display:none; background:#fff; border:1px solid #ddd; border-radius:8px; padding:12px; margin-top:14px;">
           <h5 style="margin:0 0 8px 0;">Affiliate Voucher Pools</h5>
           <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:flex-end;">
             <label style="font-size:12px; color:#555; min-width:120px;">Pool
@@ -1871,21 +1871,16 @@ Some people get lucky.👇
         .catch(() => alert("Failed to copy voucher."));
     }
 
-    async function handleAdminAndVoucher() {
+    async function handleAdminAndVoucher(isAdmin) {
       try {
-        const [adminRes, voucherRes] = await Promise.all([
-          fetch(`${API_BASE}/api/is_admin?user_id=${userId}`),
-          fetch(`${API_BASE}/api/bonus_voucher?user_id=${userId}`)
-        ]);
+        const voucherRes = await fetch(`${API_BASE}/api/bonus_voucher?user_id=${userId}`);
 
-        let adminData = {};
         let voucherData = {};
-        try { adminData = await adminRes.json(); } catch (_) {}
         try { voucherData = await voucherRes.json(); } catch (_) {}
 
-        const isAdmin = adminData.success && adminData.is_admin;
         if (isAdmin) {
-          document.getElementById("admin-panel").style.display = "block";
+          const adminPanel = document.getElementById("admin-panel");
+          if (adminPanel) adminPanel.style.display = "block";
           if (typeof adm_list === "function") {
             adm_list();
           }
@@ -1907,6 +1902,50 @@ Some people get lucky.👇
       } catch (err) {
         console.error("❌ Error checking admin or loading voucher:", err);
       }
+    }
+
+    async function fetchMeRole() {
+      const initDataRaw = getLatestInitData() || "";
+      if (!initDataRaw) return { ok: true, user_id: null, is_admin: false };
+
+      try {
+        const res = await fetch(`${API_BASE}/me`, {
+          method: "GET",
+          cache: "no-store",
+          headers: {
+            "X-Tg-InitData": initDataRaw,
+          },
+        });
+        if (!res.ok) return { ok: true, user_id: null, is_admin: false };
+        const me = await res.json();
+        return {
+          ok: true,
+          user_id: me?.user_id ?? null,
+          is_admin: me?.is_admin === true,
+        };
+      } catch (_) {
+        return { ok: true, user_id: null, is_admin: false };
+      }
+    }
+
+    function applyAdminUIAccess(isAdmin) {
+      const adminPanel = document.getElementById("admin-panel");
+      const adminOnlyNodes = document.querySelectorAll("[data-admin-only='1']");
+
+      if (!isAdmin) {
+        if (adminPanel) adminPanel.remove();
+        adminOnlyNodes.forEach((node) => node.remove());
+        return;
+      }
+
+      if (adminPanel) {
+        adminPanel.style.display = "block";
+      }
+      adminOnlyNodes.forEach((node) => {
+        if (node && node.style) {
+          node.style.display = "block";
+        }
+      });
     }
 
     function resetVoucherButton() {
@@ -3182,7 +3221,7 @@ ${referral}`;
         if (data.status === "success") {
           alert("✅ Voucher scheduled.");
           closeVoucherModal();
-          handleAdminAndVoucher();
+          handleAdminAndVoucher(true);
         } else {
           alert("❌ " + (data.message || "Failed to schedule voucher."));
         }
@@ -3316,28 +3355,22 @@ ${referral}`;
 
       const init = await waitForInitData();
       const hasInit = !!(init && init.length >= 10);
-      const isAdminMode = !!getAdminSecret();
+      const me = await fetchMeRole();
+      const isAdmin = me?.is_admin === true;
+      applyAdminUIAccess(isAdmin);
 
       applyRegionGate(getStoredRegion());
 
       if (!hasInit) {
-        if (isAdminMode) {
-          document.getElementById("admin-panel").style.display = "block";
-          adm_list();
-        }
         return;
       }
 
       checkRegionStatus();
-      handleAdminAndVoucher();
+      handleAdminAndVoucher(isAdmin);
       loadCheckinStatus();
       loadReferralProgress();
       
       loadVouchers();
-      if (isAdminMode) {
-        document.getElementById("admin-panel").style.display = "block";
-        adm_list();
-      }
     };
 
     (function () {
