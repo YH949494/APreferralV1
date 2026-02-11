@@ -10,7 +10,6 @@ from requests import RequestException
 from database import db
 from referral_rules import calc_referral_award
 from xp import grant_xp, now_utc, now_kl
-from affiliate_rewards import mark_invitee_qualified
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 GROUP_ID = int(os.environ.get("GROUP_ID", "-1002304653063"))
@@ -513,62 +512,6 @@ def archive_weekly_leaderboard():
     db.users.update_many({}, {"$set": {"weekly_xp": 0, "weekly_referrals": 0}})
     logger.info("[RESET][WEEKLY] weekly_xp_ref_reset ok")
 
-
-
-def _has_severe_deny(invitee_user_id: int) -> bool:
-    reason = db.pending_referrals.find_one(
-        {"invitee_user_id": int(invitee_user_id), "revoked_reason": {"$in": ["blocked", "abuse", "deny_severe"]}},
-        {"_id": 1},
-    )
-    return bool(reason)
-
-
-def _resolve_referrer_id(invitee_user_id: int) -> int | None:
-    row = db.pending_referrals.find_one(
-        {"invitee_user_id": int(invitee_user_id), "status": "awarded"},
-        {"inviter_user_id": 1},
-    )
-    inviter = (row or {}).get("inviter_user_id")
-    return int(inviter) if inviter is not None else None
-
-
-def confirm_qualified_invitees(batch_limit: int = 200) -> int:
-    now_utc_ts = now_utc()
-    cutoff = now_utc_ts - timedelta(hours=48)
-    rows = db.users.find(
-        {
-            "first_checkin_at": {"$exists": True},
-            "joined_main_at": {"$lte": cutoff},
-            "blocked": {"$ne": True},
-        },
-        {"user_id": 1},
-    ).limit(batch_limit)
-
-    created = 0
-    for row in rows:
-        invitee_user_id = row.get("user_id")
-        if not isinstance(invitee_user_id, int):
-            continue
-        if db.qualified_events.find_one({"invitee_id": invitee_user_id}, {"_id": 1}):
-            continue
-        if _has_severe_deny(invitee_user_id):
-            continue
-
-        try:
-            status = _get_chat_member_status(invitee_user_id)
-        except Exception:
-            continue
-        if status not in {"member", "administrator", "creator"}:
-            continue
-
-        referrer_id = _resolve_referrer_id(invitee_user_id)
-        if mark_invitee_qualified(db, invitee_id=invitee_user_id, referrer_id=referrer_id, now_utc=now_utc_ts):
-            created += 1
-
-    if created:
-        logger.info("[SCHED][QUALIFIED] created=%s", created)
-    return created
-
 def settle_pending_referrals(batch_limit: int = 200) -> None:
     now_utc_ts = now_utc()
     cutoff = now_utc_ts - timedelta(hours=REFERRAL_HOLD_HOURS)
@@ -840,7 +783,6 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
             backoff = _compute_backoff_seconds(retry_count, base=30, cap=120)
             _release_for_retry(pending_id, now_utc_ts, backoff, f"exception:{step}")
 
-    confirm_qualified_invitees()
     logger.info(
         "[SCHED][REFERRAL] settle scanned=%s awarded=%s revoked=%s batch_limit=%s",
         scanned,
