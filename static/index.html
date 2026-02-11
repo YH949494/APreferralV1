@@ -640,9 +640,7 @@
         <button id="infoHubBtn" type="button" class="btn btn-ghost">ℹ️ Info Hub</button>
       </div>
       
-      <button id="setAdminSecretBtn" class="btn btn-ghost" style="display:none;">Enter Password</button>
-
-      <div class="section" id="admin-panel">
+      <div class="section" id="admin-panel" style="display:none;">
         <h3>⚙️ Admin Panel</h3>
         <button onclick="openAddXP()">➕ Add/Reduce XP</button>
         <button onclick="viewJoinRequests()">📥 View Join Requests</button>
@@ -951,21 +949,6 @@
   </script>
 
   <script>
-    function getAdminSecret() {
-      const sp = new URLSearchParams(location.search);
-      const param = (sp.get("admin_secret") || "").trim();
-      if (param) {
-        try { localStorage.setItem("X-Admin-Secret", param); } catch {}
-        try {
-          const url = new URL(location.href);
-          url.searchParams.delete("admin_secret");
-          history.replaceState(null, "", url.toString());
-        } catch {}
-        return param;
-      }
-      try { return localStorage.getItem("X-Admin-Secret") || ""; } catch { return ""; }
-    }
-
     function getAdminUserId() {
       const tgApp = window.Telegram?.WebApp;
       const tgId = tgApp?.initDataUnsafe?.user?.id ?? null;
@@ -975,84 +958,6 @@
       const qs = new URLSearchParams(location.search);
       return qs.get("user_id") || qs.get("id") || "";
     }
-    function buildAdminQueryTail(extra = {}) {
-      const params = new URLSearchParams();
-      const userId = getAdminUserId();
-      if (userId) {
-        params.set("user_id", String(userId));
-      }
-      const adminSecret = getAdminSecret();
-      if (adminSecret) {
-        params.set("admin_secret", adminSecret);
-      }
-      if (extra && typeof extra === "object") {
-        Object.entries(extra).forEach(([key, value]) => {
-          if (value === undefined || value === null || value === "") return;
-          params.set(key, value);
-        });
-      }
-      const qs = params.toString();
-      return qs ? `?${qs}` : "";      
-    }
-  </script>
-  <script>
-    (function adminSecretUI() {
-      const btn = document.getElementById("setAdminSecretBtn");
-      if (!btn) return;
-
-      const inTelegram = !!(window.Telegram?.WebApp?.initData || window.Telegram?.WebApp?.initDataUnsafe);
-      const hasSecret = !!getAdminSecret();
-
-      if (!inTelegram || hasSecret) {
-        btn.style.display = "inline-block";
-      }
-
-      const title = document.querySelector("h2");
-      if (title) {
-        let taps = 0, timer = null;
-        title.addEventListener("click", () => {
-          taps++;
-          clearTimeout(timer);
-          timer = setTimeout(() => { taps = 0; }, 450);
-          if (taps >= 3) {
-            taps = 0;
-            openSecretPrompt();
-          }
-        });
-      }
-
-      btn.addEventListener("click", openSecretPrompt);
-
-      async function openSecretPrompt() {
-        const val = prompt("Enter admin secret:");
-        if (!val) return;
-        try { localStorage.setItem("X-Admin-Secret", val.trim()); } catch {}
-        const ok = await validateSecret();
-        if (ok) {
-          alert("✅ Secret accepted. Enabling admin panel…");
-          const panel = document.getElementById("admin-panel");
-          if (panel) panel.style.display = "block";
-          try { adm_list && adm_list(); } catch {}
-        } else {
-          try { localStorage.removeItem("X-Admin-Secret"); } catch {}
-          alert("❌ Secret rejected (401). Please try again.");
-        }
-      }
-
-      async function validateSecret() {
-        try {
-          const res = await v2Fetch("/v2/miniapp/admin/drops_v2", {
-            headers: {
-              "X-Admin-Secret": getAdminSecret(),
-              "Authorization": "Bearer " + getAdminSecret()
-            }
-          });
-          return res.ok;
-        } catch {
-          return false;
-        }
-      }
-    })();
   </script>
 
   <script>
@@ -1090,8 +995,6 @@
     } 
     
     async function waitForInitData(timeoutMs = 8000, intervalMs = 50) {
-      if (getAdminSecret()) return getLatestInitData("");
-
       const qs = new URLSearchParams(location.search);
       const deadline = Date.now() + timeoutMs;
 
@@ -1131,55 +1034,13 @@
       const initDataRaw = getLatestInitData(candidateInitData);
 
       if (initDataRaw) {
-        h["X-Telegram-Init-Data"] = initDataRaw;
-        h["X-Telegram-Init"] = initDataRaw;
+        h["X-Tg-InitData"] = initDataRaw;
       }
 
-      const adminSecret = getAdminSecret();
-
-      if (adminSecret) {
-        h["X-Admin-Secret"] = adminSecret;
-        h["Authorization"] = `Bearer ${adminSecret}`;
-      }
-      const usernameHint =
-        CURRENT_USERNAME || tg?.initDataUnsafe?.user?.username || urlQS.get("username") || "";
-      if (usernameHint) {
-        h["X-Admin-Username"] = usernameHint;
-      }
-
-      const tgUserId = tg?.initDataUnsafe?.user?.id;
-      const userIdFromQS = urlQS.get("user_id") || urlQS.get("id");
-      const userIdHint =
-        tgUserId !== undefined && tgUserId !== null && tgUserId !== ""
-          ? tgUserId
-          : userIdFromQS || "";
-      if (userIdHint) {
-        h["X-Admin-User-Id"] = String(userIdHint);
-      }
 
       return h;
     }
 
-    (function addAdminClearButton() {
-      try {
-        const bar = document.createElement("div");
-        bar.style.cssText = "margin:8px 0; display:flex; gap:8px; align-items:center;";
-        const btn = document.createElement("button");
-        btn.textContent = "Clear Admin Mode";
-        btn.style.cssText = "padding:6px 10px; border:1px solid #ddd; background:#fff; border-radius:8px; cursor:pointer;";
-        btn.onclick = () => {
-          try { localStorage.removeItem('X-Admin-Secret'); } catch {}
-          alert("Admin mode cleared. Reloading…");
-          location.reload();
-        };
-        const hasAdmin = !!getAdminSecret();
-        if (hasAdmin) {
-          bar.appendChild(btn);
-          const target = document.querySelector("h2") || document.body;
-          target.parentNode.insertBefore(bar, target.nextSibling);
-        }
-      } catch {}
-    })();
 
     function friendlyAuthFail(el) {
       if (!el) return;
@@ -1332,8 +1193,7 @@
           tbody.innerHTML = `<tr><td colspan="6" style="padding:6px;">Admin user ID required. Open via Telegram to manage drops.</td></tr>`;
           return;
         }
-        const tail = buildAdminQueryTail();
-        const res = await v2Fetch(`${API_V2}/admin/drops_v2${tail}`);
+        const res = await v2Fetch(`${API_V2}/admin/drops_v2`);
         if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
         const data = await res.json();
         if (data.status !== "ok") throw new Error(JSON.stringify(data));
@@ -1465,8 +1325,7 @@
       try {
         const userId = getAdminUserId();
         if (!userId) { alert("Missing admin user id. Open via Telegram to continue."); return; }
-        const tail = buildAdminQueryTail();
-        const res = await v2Fetch(`${API_V2}/admin/drops${tail}`, {
+        const res = await v2Fetch(`${API_V2}/admin/drops`, {
           method: "POST",
           body: JSON.stringify(payload)
         });
@@ -1543,8 +1402,7 @@
       try {
         const userId = getAdminUserId();
         if (!userId) { alert("Missing admin user id. Open via Telegram to continue."); return; }
-        const tail = buildAdminQueryTail();
-        const res = await v2Fetch(`${API_V2}/admin/drops/${dropId}/codes${tail}`, {
+        const res = await v2Fetch(`${API_V2}/admin/drops/${dropId}/codes`, {
           method: "POST",
           body: JSON.stringify(payload)
         });
@@ -1623,7 +1481,7 @@
     let regionMsg = "";
     let latestReferralLink = "";
 
-    if (!userId && !getAdminSecret()) {
+    if (!userId) {
       const warn = document.createElement('div');
       warn.style.cssText = "margin:10px 0;padding:10px;background:#fff3f3;border:1px solid #ffd6d6;border-radius:8px;color:#900;";
       warn.innerHTML = "<b>Coming Soon</b><br/>";
@@ -2389,8 +2247,7 @@ Some people get lucky.👇
       renderCampaignDrops(null, [], null);
 
       try {
-        const tail = buildAdminQueryTail();
-        const res = await v2Fetch(`${API_V2}/vouchers/visible${tail}`);
+        const res = await v2Fetch(`${API_V2}/vouchers/visible`);
 
         if (res.status === 401) {
           messageEl.innerText = "Coming soon…";
@@ -2467,9 +2324,7 @@ Some people get lucky.👇
       try {
         const userId = getAdminUserId();
         if (!userId) { alert("Missing admin user id. Open via Telegram to continue."); return; }
-        const tail = buildAdminQueryTail();
-
-        const res = await v2Fetch(`${API_V2}/admin/drops/${dropId}/actions${tail}`, {
+        const res = await v2Fetch(`${API_V2}/admin/drops/${dropId}/actions`, {
           method: "POST",
           body: JSON.stringify({ op })
         });
@@ -3024,7 +2879,7 @@ function setLeaderboardMeta(ts, { isStale = false } = {}) {
       const { forceRefresh = false } = options;
       if (leaderboardFetchInProgress) return;
       const out = document.getElementById("leaderboard-output");
-      const missingUser = !userId && !getAdminSecret?.();
+      const missingUser = !userId;
       if (forceRefresh && out) {
         leaderboardSkeletonRendered = false;
         renderLeaderboardSkeleton();
@@ -3176,9 +3031,9 @@ ${referral}`;
 
       try {
         const idempotencyKey = `adminui:${userId}:${input}:${amount}:${Date.now()}`;        
-        const res = await fetch(`${API_BASE}/api/add_xp?user_id=${userId}`, {
+        const res = await fetch(`${API_BASE}/api/add_xp`, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", "X-Tg-InitData": getLatestInitData() || "" },
           body: JSON.stringify({ user_id: input, xp: amount, idempotency_key: idempotencyKey })
         });
         const data = await res.json();
@@ -3212,9 +3067,9 @@ ${referral}`;
           code,
           release_time: new Date(releaseAt).toISOString().replace(".000Z", "Z")
         };
-        const res = await fetch(`${API_BASE}/api/admin/set_bonus?user_id=${userId}`, {
+        const res = await fetch(`${API_BASE}/api/admin/set_bonus`, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", "X-Tg-InitData": getLatestInitData() || "" },
           body: JSON.stringify(payload)
         });
         const data = await res.json();
@@ -3289,7 +3144,7 @@ ${referral}`;
 
     async function viewJoinRequests() {
       try {
-        const res = await fetch(`${API_BASE}/api/join_requests?user_id=${userId}`);
+        const res = await fetch(`${API_BASE}/api/join_requests`, { headers: { "X-Tg-InitData": getLatestInitData() || "" } });
         const data = await res.json();
         if (!data.success) throw new Error(data.error || "Failed to load");
         const list = data.requests.map(r => `• @${r.username || r.user_id}`).join("\n");
@@ -3302,7 +3157,7 @@ ${referral}`;
 
     async function exportCSV() {
       try {
-        const res = await fetch(`${API_BASE}/api/export_csv?user_id=${userId}`);
+        const res = await fetch(`${API_BASE}/api/export_csv`, { headers: { "X-Tg-InitData": getLatestInitData() || "" } });
         const csv = await res.text();
         const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
         const url = URL.createObjectURL(blob);
@@ -3330,7 +3185,7 @@ ${referral}`;
       };
       const res = await fetch(`${API_BASE}/admin/pools/upload`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", "X-Admin-Secret": getAdminSecret() || "" },
+        headers: { "Content-Type": "application/json", "X-Tg-InitData": getLatestInitData() || "" },
         body: JSON.stringify(body),
       });
       const data = await res.json();
@@ -3339,13 +3194,13 @@ ${referral}`;
     }
 
     async function affLoadPoolSummary() {
-      const res = await fetch(`${API_BASE}/admin/pools/summary`, { headers: { "X-Admin-Secret": getAdminSecret() || "" } });
+      const res = await fetch(`${API_BASE}/admin/pools/summary`, { headers: { "X-Tg-InitData": getLatestInitData() || "" } });
       const data = await res.json();
       document.getElementById("aff_pool_summary").textContent = JSON.stringify(data, null, 2);
     }
 
     async function affLoadPending(status) {
-      const res = await fetch(`${API_BASE}/admin/affiliate/pending?status=${encodeURIComponent(status)}`, { headers: { "X-Admin-Secret": getAdminSecret() || "" } });
+      const res = await fetch(`${API_BASE}/admin/affiliate/pending?status=${encodeURIComponent(status)}`, { headers: { "X-Tg-InitData": getLatestInitData() || "" } });
       const data = await res.json();
       document.getElementById("aff_pending").textContent = JSON.stringify(data, null, 2);
     }
