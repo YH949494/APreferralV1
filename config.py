@@ -53,23 +53,3 @@ else:
 logging.getLogger(__name__).info(
     "[MINIAPP_VERSION] resolved=%s source=%s", MINIAPP_VERSION, _source
 )
-
-
-def _parse_admin_uids(raw_value):
-    if isinstance(raw_value, (list, tuple, set)):
-        values = raw_value
-    else:
-        values = str(raw_value or "").split(",")
-
-    out = []
-    for value in values:
-        try:
-            out.append(int(str(value).strip()))
-        except (TypeError, ValueError):
-            continue
-    return out
-
-
-ADMIN_UIDS = _parse_admin_uids(
-    os.getenv("ADMIN_UIDS") or os.getenv("ADMIN_USER_IDS") or ""
-)
