@@ -975,10 +975,12 @@
   
   <script>
     const tg = window.Telegram?.WebApp;
+    const BOT_USERNAME = "advantplaybot";
 
     const API_BASE = "https://apreferralv1.fly.dev";
     const API_V2 = "/v2/miniapp";
     let latestInitData = "";
+    let gateRendered = false;
 
     function apiUrl(path) {
       const base = API_BASE.replace(/\/+$/, "");
@@ -1001,28 +1003,79 @@
       return latestInitData;
     } 
     
-    async function waitForInitData(timeoutMs = 8000, intervalMs = 50) {
-      const qs = new URLSearchParams(location.search);
-      const deadline = Date.now() + timeoutMs;
+    function isTelegramWebApp() {
+      return !!(window.Telegram && window.Telegram.WebApp);
+    }
 
-      while (Date.now() < deadline) {
-        const candidate =
-          (typeof tg?.initData === "string" && tg.initData.length ? tg.initData : "") ||
-          (typeof window.Telegram?.WebApp?.initData === "string" && window.Telegram.WebApp.initData.length
-            ? window.Telegram.WebApp.initData
-            : "") ||
-          qs.get("init_data") ||
-          "";
-
-        const stored = getLatestInitData(candidate);
-        if (stored) {
-          return stored;
-        }
-
-        await new Promise((resolve) => setTimeout(resolve, intervalMs));
+    async function getInitDataStrict({ timeoutMs = 1500 } = {}) {
+      if (!isTelegramWebApp()) {
+        return "";
       }
 
-      return getLatestInitData("");
+      const deadline = Date.now() + timeoutMs;
+      while (Date.now() < deadline) {
+        const app = window.Telegram?.WebApp;
+        if (app) {
+          try { app.ready(); } catch (_) {}
+          const initDataRaw = typeof app.initData === "string" ? app.initData : "";
+          if (initDataRaw) {
+            return getLatestInitData(initDataRaw);
+          }
+        }
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+
+      return "";
+    }
+
+    function renderOpenInTelegramGate(reasonText) {
+      if (gateRendered) return;
+      gateRendered = true;
+
+      const mainGate = document.createElement("div");
+      mainGate.id = "telegram-open-gate";
+      mainGate.style.cssText = "margin:12px 0;padding:14px;border:1px solid #ffd166;background:#1d2430;border-radius:10px;color:#fff;";
+      mainGate.innerHTML = `
+        <div style="font-size:18px;font-weight:700;margin-bottom:8px;">Open inside Telegram to continue</div>
+        <div style="font-size:14px;opacity:0.9;margin-bottom:10px;">${escapeHtml(reasonText || "Telegram init data is required.")}</div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;">
+          <button id="open-bot-btn" type="button" class="btn btn-primary">Open Bot</button>
+          <button id="reload-miniapp-btn" type="button" class="btn btn-ghost">Reload</button>
+        </div>
+      `;
+
+      const anchor = document.querySelector(".container") || document.body;
+      if (anchor.firstChild) {
+        anchor.insertBefore(mainGate, anchor.firstChild);
+      } else {
+        anchor.appendChild(mainGate);
+      }
+
+      const sectionIdsToHide = ["voucher-section", "campaign-voucher-list", "referral-section"];
+      sectionIdsToHide.forEach((id) => {
+        const node = document.getElementById(id);
+        if (node) node.style.display = "none";
+      });
+
+      document.querySelectorAll("button[data-dropid],button[data-claim],#campaign-voucher-btn").forEach((btn) => {
+        btn.setAttribute("disabled", "disabled");
+        btn.style.display = "none";
+      });
+
+      const openBotBtn = document.getElementById("open-bot-btn");
+      if (openBotBtn) {
+        openBotBtn.addEventListener("click", () => {
+          const deepLink = `https://t.me/${BOT_USERNAME}`;
+          if (window.Telegram?.WebApp?.openTelegramLink) {
+            window.Telegram.WebApp.openTelegramLink(deepLink);
+            return;
+          }
+          window.location.href = deepLink;
+        });
+      }
+
+      const reloadBtn = document.getElementById("reload-miniapp-btn");
+      if (reloadBtn) reloadBtn.addEventListener("click", () => window.location.reload());
     }
 
     function v2Headers(extras = {}, initDataOverride = "") {
@@ -1077,14 +1130,29 @@
 
     async function v2Fetch(path, options = {}) {
       const { headers: extraHeaders, ...rest } = options || {};
-      let initDataRaw = await waitForInitData();
+      let initDataRaw = await getInitDataStrict();
+      console.info("[tg] isTelegramWebApp=", isTelegramWebApp(), "initDataLen=", initDataRaw.length);
+      if (!initDataRaw) {
+        console.warn("[tg] missing initData; gating UI");
+        renderOpenInTelegramGate("Telegram init data not available. Please reopen from the bot button.");
+        throw new Error("missing_init_data_client");
+      }
       let headers = v2Headers(extraHeaders || {}, initDataRaw);
+      headers["X-Requested-With"] = "TelegramWebApp";
+      headers["Cache-Control"] = "no-store";
       let target = withInitDataInQuery(apiUrl(path), initDataRaw);
 
       let res = await fetch(target, { ...rest, headers });
       if (res.status === 401) {
-        initDataRaw = await waitForInitData(3000);
+        initDataRaw = await getInitDataStrict({ timeoutMs: 3000 });
+        if (!initDataRaw) {
+          console.warn("[tg] missing initData; gating UI");
+          renderOpenInTelegramGate("Telegram init data not available. Please reopen from the bot button.");
+          throw new Error("missing_init_data_client");
+        }
         headers = v2Headers(extraHeaders || {}, initDataRaw);
+        headers["X-Requested-With"] = "TelegramWebApp";
+        headers["Cache-Control"] = "no-store";
         target = withInitDataInQuery(apiUrl(path), initDataRaw);
         res = await fetch(target, { ...rest, headers });
       }
@@ -3251,17 +3319,21 @@ ${referral}`;
     window.onload = async () => {
       if (tg) { tg.ready(); tg.expand(); }
 
-      const init = await waitForInitData();
+      const init = await getInitDataStrict();
       const hasInit = !!(init && init.length >= 10);
+      console.info("[tg] isTelegramWebApp=", isTelegramWebApp(), "initDataLen=", init.length);
+
+      if (!hasInit) {
+        console.warn("[tg] missing initData; gating UI");
+        renderOpenInTelegramGate("Telegram init data not available. Please open this page from the bot WebApp button.");
+        return;
+      }
+
       const me = await fetchMeRole();
       const isAdmin = me?.is_admin === true;
       applyAdminUIAccess(isAdmin);
 
       applyRegionGate(getStoredRegion());
-
-      if (!hasInit) {
-        return;
-      }
 
       checkRegionStatus();
       handleAdminAndVoucher(isAdmin);

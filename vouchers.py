@@ -130,6 +130,12 @@ except Exception:
  
 vouchers_bp = Blueprint("vouchers", __name__)
 
+@vouchers_bp.after_request
+def _v2_no_store_headers(response):
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
+    return response
+
 BYPASS_ADMIN = False
 def _admin_secret_ok(value: str) -> bool:
     # If config defines a helper, defer to it
@@ -2781,12 +2787,27 @@ def api_visible():
 @vouchers_bp.route("/referral/progress", methods=["GET"])
 def api_referral_progress():
     init_data = extract_raw_init_data_from_query(request)
+    parsed = None
     if not init_data:
-        return jsonify({"status": "error", "code": "missing_init_data"}), 400
-
-    ok, parsed, reason = verify_telegram_init_data(init_data)
-    if not ok:
-        return jsonify({"code": "auth_failed", "why": str(reason)}), 401
+        legacy_auth_enabled = os.getenv("ALLOW_LEGACY_DEV_AUTH") == "1"
+        current_app.logger.warning(
+            "[v2][missing_init_data] endpoint=%s ua=%s allow_legacy_dev_auth=%s",
+            request.path,
+            request.headers.get("User-Agent", ""),
+            legacy_auth_enabled,
+        )
+        if legacy_auth_enabled:
+            legacy_ctx = _legacy_user_ctx(request)
+            if legacy_ctx:
+                parsed = {"user": json.dumps({"id": legacy_ctx.get("legacyUserId") or 0, "username": legacy_ctx.get("usernameLower") or ""})}
+            else:
+                return jsonify({"status": "error", "code": "missing_init_data"}), 400
+        else:
+            return jsonify({"status": "error", "code": "missing_init_data"}), 400
+    else:
+        ok, parsed, reason = verify_telegram_init_data(init_data)
+        if not ok:
+            return jsonify({"code": "auth_failed", "why": str(reason)}), 401
 
     raw_user = (parsed or {}).get("user")
     if isinstance(raw_user, str):
@@ -2804,6 +2825,8 @@ def api_referral_progress():
 
     if uid is None:
         return jsonify({"code": "auth_failed", "why": "missing_or_invalid_init_data"}), 401
+
+    current_app.logger.info("[v2][verified] endpoint=%s uid=%s", request.path, uid)
 
     user_doc = users_collection.find_one(
         {"user_id": uid},
@@ -2927,9 +2950,25 @@ def api_claim():
     init_data = extract_raw_init_data_from_query(request)
 
     if not init_data:
-        return jsonify({"status": "error", "code": "missing_init_data"}), 400
-
-    ok, data, why = verify_telegram_init_data(init_data)
+        legacy_auth_enabled = os.getenv("ALLOW_LEGACY_DEV_AUTH") == "1"
+        current_app.logger.warning(
+            "[v2][missing_init_data] endpoint=%s ua=%s allow_legacy_dev_auth=%s",
+            request.path,
+            request.headers.get("User-Agent", ""),
+            legacy_auth_enabled,
+        )
+        if legacy_auth_enabled:
+            legacy_ctx = _legacy_user_ctx(request)
+            if legacy_ctx:
+                data = {"user": json.dumps({"id": legacy_ctx.get("legacyUserId") or 0, "username": legacy_ctx.get("usernameLower") or ""})}
+                ok, why = True, "ok"
+                init_data = "legacy_dev_auth"
+            else:
+                return jsonify({"status": "error", "code": "missing_init_data"}), 400
+        else:
+            return jsonify({"status": "error", "code": "missing_init_data"}), 400
+    else:
+        ok, data, why = verify_telegram_init_data(init_data)
  
     # Admin preview (for Postman/admin panel testing)
     admin_secret = (
@@ -2962,6 +3001,8 @@ def api_claim():
  
     if not user_id:
         return jsonify({"status": "error", "code": "auth_failed", "why": "missing_user_id"}), 401
+
+    current_app.logger.info("[v2][verified] endpoint=%s uid=%s", request.path, user_id)
      
     try:
         uid = int(tg_user["id"])
