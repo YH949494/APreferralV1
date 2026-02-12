@@ -2796,7 +2796,7 @@ def api_visible():
         current_app.logger.exception("[visible] unhandled", extra={"user_id": user_id})
         raise
 
-
+@vouchers_bp.route("/referral/progress", methods=["GET"])
 @vouchers_bp.route("/v2/miniapp/referral/progress", methods=["GET"])
 def api_referral_progress():
     init_data = extract_raw_init_data_from_query(request)
