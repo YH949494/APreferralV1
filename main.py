@@ -1263,7 +1263,6 @@ def ensure_indexes():
     db.welcome_tickets.create_index([("cleanup_at", 1)], expireAfterSeconds=0)
     db.miniapp_sessions_daily.create_index([("date_utc", 1), ("user_id", 1)], unique=True)
     db.voucher_ledger.create_index([("status", 1), ("created_at", 1)])
-    db.affiliate_ledger.create_index([("status", 1), ("created_at", 1)])
     db.qualified_events.create_index([("created_at", 1)])
     users_collection.create_index([("first_checkin_at", 1)])
     
