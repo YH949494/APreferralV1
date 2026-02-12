@@ -19,7 +19,11 @@ logger = logging.getLogger(__name__)
 onboarding_events = get_collection("onboarding_events")
 
 MYWIN_CHAT_ID = -1002743212540
-MYWIN_INVITE_LINK = "https://t.me/+tgGbOPvp1p05NjA9"
+MYWIN_INVITE_LINK = "https://t.me/+HBNmk5aV_M0xMzVl"
+
+def _mywin_link_line() -> str:
+    # HTML anchor so "#mywin" is clickable inside PM text
+    return f'\n\n🔗 Submit here:\n<a href="{MYWIN_INVITE_LINK}">#mywin</a>'
 
 PM1_TEXT = (
     "Quick tip 👋\n\n"
@@ -169,9 +173,7 @@ def send_pm2_if_needed(
     if _is_vip1(user):
         logger.info("[PM2][SKIP] uid=%s reason=already_vip", uid)
         return (True, None, "already_vip") if return_error else False
-    keyboard = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("Open #mywin", url=MYWIN_INVITE_LINK)]]
-    )
+    text = PM2_TEXT + _mywin_link_line()
     bot = get_bot()
     if bot:
         try:
@@ -179,8 +181,8 @@ def send_pm2_if_needed(
                 safe_send_message(
                     bot,
                     chat_id=uid,
-                    text=PM2_TEXT,
-                    reply_markup=keyboard,
+                    text=text,
+                    parse_mode="HTML",
                     uid=uid,
                     send_type="pm2",
                     raise_on_non_transient=False,
@@ -191,11 +193,11 @@ def send_pm2_if_needed(
         except RuntimeError as exc:
             if "Bot loop not running yet" not in str(exc):
                 raise
-            ok, err, blocked = send_telegram_http_message(uid, PM2_TEXT)
+            ok, err, blocked = send_telegram_http_message(uid, text, parse_mode="HTML")
             if blocked:
                 err = "bot_blocked"
     else:
-        ok, err, blocked = send_telegram_http_message(uid, PM2_TEXT)
+        ok, err, blocked = send_telegram_http_message(uid, text, parse_mode="HTML")
         if blocked:
             err = "bot_blocked"
     if ok:
@@ -306,9 +308,7 @@ def send_mywin7_if_needed(
     if _is_vip1(user):
         logger.info("[MYWIN7][SKIP] uid=%s reason=already_vip", uid)
         return (True, None, "already_vip") if return_error else False
-    keyboard = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("Open #mywin", url=MYWIN_INVITE_LINK)]]
-    )
+    text = MYWIN_REMINDER_TEXT + _mywin_link_line()
     bot = get_bot()
     if bot:
         try:
@@ -316,8 +316,8 @@ def send_mywin7_if_needed(
                 safe_send_message(
                     bot,
                     chat_id=uid,
-                    text=MYWIN_REMINDER_TEXT,
-                    reply_markup=keyboard,
+                    text=text,
+                    parse_mode="HTML",
                     uid=uid,
                     send_type="mywin7",
                     raise_on_non_transient=False,
@@ -328,11 +328,11 @@ def send_mywin7_if_needed(
         except RuntimeError as exc:
             if "Bot loop not running yet" not in str(exc):
                 raise
-            ok, err, blocked = send_telegram_http_message(uid, MYWIN_REMINDER_TEXT)
+            ok, err, blocked = send_telegram_http_message(uid, text, parse_mode="HTML")
             if blocked:
                 err = "bot_blocked"
     else:
-        ok, err, blocked = send_telegram_http_message(uid, MYWIN_REMINDER_TEXT)
+        ok, err, blocked = send_telegram_http_message(uid, text, parse_mode="HTML")
         if blocked:
             err = "bot_blocked"
     if ok:
@@ -375,9 +375,8 @@ def send_mywin14_if_needed(
     if _is_vip1(user):
         logger.info("[MYWIN14][SKIP] uid=%s reason=already_vip", uid)
         return (True, None, "already_vip") if return_error else False
-    keyboard = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("Open #mywin", url=MYWIN_INVITE_LINK)]]
-    )
+    text = MYWIN_REMINDER_TEXT + _mywin_link_line()
+
     bot = get_bot()
     if bot:
         try:
@@ -385,8 +384,8 @@ def send_mywin14_if_needed(
                 safe_send_message(
                     bot,
                     chat_id=uid,
-                    text=MYWIN_REMINDER_TEXT,
-                    reply_markup=keyboard,
+                    text=text,
+                    parse_mode="HTML",
                     uid=uid,
                     send_type="mywin14",
                     raise_on_non_transient=False,
@@ -397,11 +396,11 @@ def send_mywin14_if_needed(
         except RuntimeError as exc:
             if "Bot loop not running yet" not in str(exc):
                 raise
-            ok, err, blocked = send_telegram_http_message(uid, MYWIN_REMINDER_TEXT)
+            ok, err, blocked = send_telegram_http_message(uid, text, parse_mode="HTML")
             if blocked:
                 err = "bot_blocked"
     else:
-        ok, err, blocked = send_telegram_http_message(uid, MYWIN_REMINDER_TEXT)
+        ok, err, blocked = send_telegram_http_message(uid, text, parse_mode="HTML")
         if blocked:
             err = "bot_blocked"
     if ok:
