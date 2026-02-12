@@ -5,7 +5,7 @@ from flask import (
 from flask_cors import CORS
 from threading import Thread 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
-from telegram.constants import ParseMode
+from telegram.constants import ChatType, ParseMode
 from html import escape as html_escape
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, ChatJoinRequestHandler, ChatMemberHandler,
@@ -88,6 +88,9 @@ def _job_prefix(job_id: str) -> str:
         return "[JOB][MONTHLY]"
     return "[JOB][SCHED]"
 
+def _is_private_chat(update):
+    chat = getattr(update, "effective_chat", None)
+    return bool(chat and chat.type == ChatType.PRIVATE)
 
 
 def _ensure_index_if_missing(col, name, keys, **kwargs):
@@ -2865,6 +2868,16 @@ async def _send_xmas_flow(update: Update, context: ContextTypes.DEFAULT_TYPE, us
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_private_chat(update):
+        logger.info(
+            "[GUARD] ignore_non_private cmd=%s chat_type=%s chat_id=%s uid=%s",
+            update.message.text if update.message else "",
+            update.effective_chat.type if update.effective_chat else "",
+            update.effective_chat.id if update.effective_chat else "",
+            update.effective_user.id if update.effective_user else "",
+        )
+        return
+    
     user = update.effective_user
     message = update.effective_message
     
