@@ -790,6 +790,12 @@
           </div>
           <pre id="aff_pool_summary" style="margin-top:10px; background:#f8f8f8; border:1px solid #eee; padding:8px; border-radius:6px; white-space:pre-wrap;">No data.</pre>
           <pre id="aff_pending" style="margin-top:8px; background:#f8f8f8; border:1px solid #eee; padding:8px; border-radius:6px; white-space:pre-wrap;">No pending ledger loaded.</pre>
+
+          <div style="margin-top:12px; border-top:1px solid #eee; padding-top:12px;">
+            <h5 style="margin:0 0 8px 0;">Affiliate KPI (Daily)</h5>
+            <button type="button" onclick="affLoadDailyKpis()">Load last 14 days</button>
+            <div id="aff_kpis_wrap" style="margin-top:8px; overflow:auto;"></div>
+          </div>
         </div>
       </div>
     </div>
@@ -3363,6 +3369,61 @@ ${referral}`;
       const res = await v2Fetch(`${API_V2}/admin/affiliate/pending${buildAdminQueryTail({ status })}`);
       const data = await res.json();
       document.getElementById("aff_pending").textContent = JSON.stringify(data, null, 2);
+    }
+
+    function _affPct(value) {
+      const n = Number(value || 0);
+      return `${(n * 100).toFixed(1)}%`;
+    }
+
+    function _affKpiTd(value) {
+      return `<td style="padding:6px; border-bottom:1px solid #eee; white-space:nowrap;">${value ?? ""}</td>`;
+    }
+
+    function renderAffDailyKpis(rows) {
+      const wrap = document.getElementById("aff_kpis_wrap");
+      if (!rows || !rows.length) {
+        wrap.innerHTML = `<div style="color:#666; font-size:13px;">No KPI snapshots yet.</div>`;
+        return;
+      }
+      const htmlRows = rows.map((row) => {
+        return `<tr>`
+          + _affKpiTd(row.day_utc || "")
+          + _affKpiTd(Number(row.new_referrals || 0))
+          + _affKpiTd(Number(row.qualified || 0))
+          + _affKpiTd(_affPct(row.checkin_72h_rate))
+          + _affKpiTd(_affPct(row.claim_proxy_72h_rate))
+          + _affKpiTd(Number(row.qualified_7d || 0))
+          + _affKpiTd(_affPct(row.quality_rate_7d))
+          + _affKpiTd(Number(row.active_referrers_7d || 0))
+          + `</tr>`;
+      }).join("");
+
+      wrap.innerHTML = `
+        <table style="width:100%; border-collapse:collapse; font-size:12px;">
+          <thead>
+            <tr style="background:#fafafa;">
+              <th style="padding:6px; text-align:left; border-bottom:1px solid #ddd;">day_utc</th>
+              <th style="padding:6px; text-align:left; border-bottom:1px solid #ddd;">new_referrals</th>
+              <th style="padding:6px; text-align:left; border-bottom:1px solid #ddd;">qualified</th>
+              <th style="padding:6px; text-align:left; border-bottom:1px solid #ddd;">checkin_72h_rate</th>
+              <th style="padding:6px; text-align:left; border-bottom:1px solid #ddd;">claim_proxy_72h_rate</th>
+              <th style="padding:6px; text-align:left; border-bottom:1px solid #ddd;">qualified_7d</th>
+              <th style="padding:6px; text-align:left; border-bottom:1px solid #ddd;">quality_rate_7d</th>
+              <th style="padding:6px; text-align:left; border-bottom:1px solid #ddd;">active_referrers_7d</th>
+            </tr>
+          </thead>
+          <tbody>${htmlRows}</tbody>
+        </table>
+      `;
+    }
+
+    async function affLoadDailyKpis(days = 14) {
+      const wrap = document.getElementById("aff_kpis_wrap");
+      if (wrap) wrap.innerHTML = `<div style="color:#666; font-size:13px;">Loading…</div>`;
+      const res = await v2Fetch(`${API_V2}/admin/affiliate/kpis${buildAdminQueryTail({ days })}`);
+      const data = await res.json();
+      renderAffDailyKpis(data.rows || []);
     }
 
     window.onload = async () => {

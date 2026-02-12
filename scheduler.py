@@ -73,6 +73,134 @@ def _coerce_utc(dt_value) -> datetime | None:
     return None
 
 
+def _round_rate(value: float) -> float:
+    return round(float(value), 4)
+
+
+def _utc_day_bounds(day_utc: str) -> tuple[datetime, datetime]:
+    day_start = datetime.strptime(day_utc, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    return day_start, day_start + timedelta(days=1)
+
+
+def _safe_rate(numerator: int, denominator: int) -> float:
+    if denominator <= 0:
+        return 0.0
+    return _round_rate(float(numerator) / float(denominator))
+
+
+def ensure_affiliate_daily_kpi_indexes(db_ref=None) -> None:
+    db_ref = db_ref or db
+    db_ref.affiliate_daily_kpis.create_index([("day_utc", 1)], unique=True, name="uniq_affiliate_daily_kpi_day")
+
+
+def compute_affiliate_daily_kpi(day_utc: str, *, db_ref=None, now_utc_ts: datetime | None = None) -> dict:
+    db_ref = db_ref or db
+    now_utc_ts = now_utc_ts or now_utc()
+    day_start, day_end = _utc_day_bounds(day_utc)
+
+    referrals = list(
+        db_ref.pending_referrals.find(
+            {"created_at_utc": {"$gte": day_start, "$lt": day_end}},
+            {"invitee_user_id": 1, "created_at_utc": 1},
+        )
+    )
+    new_referrals = int(len(referrals))
+    qualified = int(
+        db_ref.qualified_events.count_documents(
+            {"qualified_at": {"$gte": day_start, "$lt": day_end}}
+        )
+    )
+
+    checkin_hits = 0
+    claim_hits = 0
+    for row in referrals:
+        invitee_user_id = row.get("invitee_user_id")
+        created_at_utc = _coerce_utc(row.get("created_at_utc"))
+        if invitee_user_id is None or not created_at_utc:
+            continue
+        cutoff = created_at_utc + timedelta(hours=72)
+
+        user_doc = db_ref.users.find_one({"user_id": invitee_user_id}, {"first_checkin_at": 1}) or {}
+        first_checkin_at = _coerce_utc(user_doc.get("first_checkin_at"))
+        if first_checkin_at and first_checkin_at <= cutoff:
+            checkin_hits += 1
+
+        claim_doc = db_ref.new_joiner_claims.find_one({"uid": invitee_user_id}, {"claimed_at": 1}) or {}
+        claimed_at = _coerce_utc(claim_doc.get("claimed_at"))
+        if claimed_at and claimed_at <= cutoff:
+            claim_hits += 1
+
+    checkin_72h_rate = _safe_rate(checkin_hits, new_referrals)
+    claim_proxy_72h_rate = _safe_rate(claim_hits, new_referrals)
+
+    window_7d_start = day_start - timedelta(days=6)
+    window_filter = {"day_utc": {"$gte": window_7d_start.date().isoformat(), "$lte": day_utc}}
+    snapshot_rows = list(
+        db_ref.affiliate_daily_kpis.find(
+            window_filter,
+            {"new_referrals": 1, "qualified": 1},
+        )
+    )
+    if len(snapshot_rows) == 7:
+        new_referrals_7d = int(sum(int(r.get("new_referrals", 0) or 0) for r in snapshot_rows))
+        qualified_7d = int(sum(int(r.get("qualified", 0) or 0) for r in snapshot_rows))
+    else:
+        new_referrals_7d = int(
+            db_ref.pending_referrals.count_documents(
+                {"created_at_utc": {"$gte": window_7d_start, "$lt": day_end}}
+            )
+        )
+        qualified_7d = int(
+            db_ref.qualified_events.count_documents(
+                {"qualified_at": {"$gte": window_7d_start, "$lt": day_end}}
+            )
+        )
+
+    quality_rate_7d = _safe_rate(qualified_7d, new_referrals_7d)
+    active_referrers_7d = int(
+        len(
+            db_ref.qualified_events.distinct(
+                "referrer_id",
+                {
+                    "qualified_at": {"$gte": window_7d_start, "$lt": day_end},
+                    "referrer_id": {"$ne": None},
+                },
+            )
+        )
+    )
+
+    payload = {
+        "day_utc": day_utc,
+        "new_referrals": new_referrals,
+        "qualified": qualified,
+        "checkin_72h_rate": checkin_72h_rate,
+        "claim_proxy_72h_rate": claim_proxy_72h_rate,
+        "new_referrals_7d": new_referrals_7d,
+        "qualified_7d": qualified_7d,
+        "quality_rate_7d": quality_rate_7d,
+        "active_referrers_7d": active_referrers_7d,
+        "computed_at_utc": now_utc_ts,
+    }
+    db_ref.affiliate_daily_kpis.update_one({"day_utc": day_utc}, {"$set": payload}, upsert=True)
+    logger.info(
+        "[AFF_KPI] day=%s new=%s qualified=%s checkin72=%s claim72=%s q7=%s qr7=%s",
+        day_utc,
+        new_referrals,
+        qualified,
+        checkin_72h_rate,
+        claim_proxy_72h_rate,
+        qualified_7d,
+        quality_rate_7d,
+    )
+    return payload
+
+
+def compute_affiliate_daily_kpi_yesterday() -> dict:
+    ensure_affiliate_daily_kpi_indexes()
+    target_day = (now_utc() - timedelta(days=1)).date().isoformat()
+    return compute_affiliate_daily_kpi(target_day)
+
+
 
 def _compute_backoff_seconds(retry_count: int, *, base: int, cap: int) -> int:
     try:

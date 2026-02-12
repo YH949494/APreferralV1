@@ -37,7 +37,7 @@ from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_MISSED
 from app_context import set_app_bot, set_bot, set_scheduler
 from onboarding import MYWIN_CHAT_ID, onboarding_due_tick, record_first_mywin, record_first_checkin
 from vouchers import vouchers_bp, ensure_voucher_indexes, process_verification_queue
-from scheduler import settle_pending_referrals, settle_referral_snapshots, settle_xp_snapshots, evaluate_affiliate_simulated_ledgers
+from scheduler import settle_pending_referrals, settle_referral_snapshots, settle_xp_snapshots, evaluate_affiliate_simulated_ledgers, compute_affiliate_daily_kpi_yesterday
 from affiliate_rewards import (
     ensure_affiliate_indexes,
     issue_welcome_bonus_if_eligible,
@@ -3133,6 +3133,13 @@ def run_worker():
         name="Affiliate Simulation Daily",
         replace_existing=True,
         kwargs={"batch_limit": 1000},
+    )
+    scheduler.add_job(
+        compute_affiliate_daily_kpi_yesterday,
+        trigger=CronTrigger(hour=0, minute=20, timezone=timezone.utc),
+        id="affiliate_daily_kpi",
+        name="Affiliate Daily KPI Snapshot",
+        replace_existing=True,
     )
     scheduler.start()
 
