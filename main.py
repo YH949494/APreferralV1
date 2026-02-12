@@ -126,7 +126,7 @@ GROUP_ID = -1002304653063
 API_BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 # ----------------------------
-# Xmas Gift Delight placeholders (easy to adjust)
+# Channel config
 # ----------------------------
 CHANNEL_USERNAME = "@advantplayofficial"
 CHANNEL_ID = -1002396761021
@@ -135,9 +135,6 @@ try:
     OFFICIAL_CHANNEL_ID = int(_RAW_OFFICIAL_CHANNEL_ID) if _RAW_OFFICIAL_CHANNEL_ID not in (None, "") else CHANNEL_ID
 except (TypeError, ValueError):
     OFFICIAL_CHANNEL_ID = CHANNEL_ID
-
-XMAS_CAMPAIGN_START = datetime(2025, 12, 1)
-XMAS_CAMPAIGN_END = datetime(2025, 12, 31, 23, 59, 59)
 
 def _to_kl_date(dt_any):
     """Accepts aware/naive datetime or ISO string and returns date in KL."""
@@ -2805,68 +2802,6 @@ def update_monthly_vip_status(run_id: str | None = None):
 # Telegram Bot Handlers
 # ----------------------------
 
-# Xmas Gift Delight helpers -----------------
-def _xmas_keyboard() -> InlineKeyboardMarkup:
-    """Inline keyboard for the Xmas Gift Delight flow."""
-    channel_url = f"https://t.me/{CHANNEL_USERNAME.lstrip('@')}"
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("🔗 Join Channel", url=channel_url),
-            InlineKeyboardButton("✅ Check-in Now", callback_data="xmas_checkin"),
-        ]
-    ])
-
-
-async def _send_xmas_flow(update: Update, context: ContextTypes.DEFAULT_TYPE, user) -> None:
-    """Send the Xmas Gift Delight entry message and log campaign source."""
-    now = datetime.now(timezone.utc)
-    existing_user = users_collection.find_one({"user_id": user.id})
-
-    if not existing_user:
-        is_new_joiner = True
-    else:
-        first_seen_at = existing_user.get("first_seen_at")
-        if first_seen_at and first_seen_at < XMAS_CAMPAIGN_START:
-            is_new_joiner = False
-        else:
-            is_new_joiner = True
-
-    _users_update_one(
-        {"user_id": user.id},
-        {
-            "$setOnInsert": {
-                "user_id": user.id,
-                "first_seen_at": now,
-                 "status": "Normal",              
-            },
-            "$set": {
-                "xmas_entry_source": "popup",
-                "xmas_is_new_joiner": is_new_joiner,
-                "updated_at": now,
-            },
-        },
-        upsert=True,
-        context="xmas_flow",        
-    )
-
-    message = (
-        "🎄 Xmas Gift Delight\n"
-        "Join our official community & do one check-in to enter this week’s Christmas Gift Draw 🎁"
-    )
-
-    keyboard = _xmas_keyboard()
-    target_message = update.effective_message
-    if target_message:
-        await safe_reply_text(
-            target_message,
-            message,
-            reply_markup=keyboard,
-            uid=user.id,
-            send_type="xmas_entry",
-            raise_on_non_transient=False,
-        )
-
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_private_chat(update):
         logger.info(
@@ -2881,12 +2816,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     message = update.effective_message
     
-    # Handle deep links for the Xmas Gift Delight campaign
-    if context.args and len(context.args) > 0 and context.args[0].lower() == "xmasgift":
-        if user:
-            await _send_xmas_flow(update, context, user)
-        return
-
     if user:
         _users_update_one(
             {"user_id": user.id},
@@ -2922,65 +2851,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 raise_on_non_transient=False,
             )
             
-async def handle_xmas_checkin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Xmas Gift Delight check-in flow triggered via inline keyboard."""
-    query = update.callback_query
-    user = query.from_user
-
-    await query.answer()
-
-    async def _safe_edit_message(text: str, **kwargs):
-        try:
-            await query.edit_message_text(text, **kwargs)
-        except BadRequest as e:
-            # Ignore Telegram's "message is not modified" error when users tap repeatedly
-            if "message is not modified" not in str(e).lower():
-                raise
-    
-    try:
-        member = await context.bot.get_chat_member(CHANNEL_ID, user.id)
-        status = member.status
-    except Exception as e:
-        status = None
-        print(f"[xmas_checkin] get_chat_member error: {e}")
-
-    allowed_statuses = {"member", "administrator", "creator"}
-    if status not in allowed_statuses:
-        warning_text = (
-            "👋 You haven’t joined our channel yet.\n"
-            "Please tap Join Channel first, then press Check-in Now again to enter this week’s Xmas Gift Draw 🎁"
-        )
-        await _safe_edit_message(
-            warning_text,
-            reply_markup=_xmas_keyboard(),
-            parse_mode=ParseMode.MARKDOWN,
-        )
-        return
-
-    now = datetime.now(timezone.utc)
-    iso_calendar = now.isocalendar()
-
-    _users_update_one(
-        {"user_id": user.id},
-        {
-            "$set": {
-                "xmas_checked_in": True,
-                "xmas_year": iso_calendar.year,
-                "xmas_week": iso_calendar.week,
-                "xmas_checkin_at": now,
-                "updated_at": now,
-            }
-        },
-        context="xmas_checkin",        
-    )
-
-    success_text = (
-        "✅ Check-in successful!\n\n"
-        "You’ve entered this week’s Xmas Gift Delight draw 🎄\n"
-        "60-75 new players will be selected and contacted by this bot. Good luck! 🍀"
-    )
-    await _safe_edit_message(success_text)
-    
 async def member_update_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     member = update.chat_member or update.my_chat_member
     if not member:
@@ -3193,7 +3063,6 @@ def run_worker():
     app_bot.add_handler(ChatMemberHandler(member_update_handler, ChatMemberHandler.MY_CHAT_MEMBER))
     app_bot.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, new_chat_members_handler))   
     app_bot.add_handler(MessageHandler(filters.Chat(MYWIN_CHAT_ID), mywin_message_handler))    
-    app_bot.add_handler(CallbackQueryHandler(handle_xmas_checkin, pattern="^xmas_checkin$"))
     app_bot.add_handler(CallbackQueryHandler(button_handler))
 
     # 4) Scheduler (KL time for human-facing schedules)
