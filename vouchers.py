@@ -2897,6 +2897,7 @@ def api_referral_progress():
     ), 200
 
 
+@vouchers_bp.route("/drop_mode", methods=["GET"])
 @vouchers_bp.route("/v2/miniapp/drop_mode", methods=["GET"])
 def api_drop_mode():
     init_data = extract_raw_init_data_from_query(request)
@@ -2913,6 +2914,8 @@ def api_drop_mode():
     if not admin_preview and not ctx:
         return _miniapp_no_store_json({"code": "auth_failed", "why": "missing_or_invalid_init_data"}, 401)
 
+    uid_for_log = _ctx_to_user(ctx or {}).get("userId") or "unknown"
+
     now = now_utc()
     with _DROP_MODE_CACHE_LOCK:
         expires_at = _DROP_MODE_CACHE.get("expires_at")
@@ -2920,6 +2923,12 @@ def api_drop_mode():
         if payload and expires_at and now < expires_at:
             cached = dict(payload)
             cached["server_time_utc"] = now.isoformat()
+            current_app.logger.info(
+                "[DROP_MODE] hit uid=%s status=%s reason=%s",
+                uid_for_log,
+                "enabled" if cached.get("drop_mode") else "disabled",
+                cached.get("reason") or "",
+            )
             return _miniapp_no_store_json(cached, 200)
 
     active_drop = db.drops.find_one(
@@ -2981,6 +2990,13 @@ def api_drop_mode():
         current_app.logger.info("[DROP_MODE] ON drop_id=%s until=%s", active_drop_id, until_iso)
     elif not drop_mode:
         _DROP_MODE_LAST_LOGGED_UNTIL = None
+
+    current_app.logger.info(
+        "[DROP_MODE] hit uid=%s status=%s reason=%s",
+        uid_for_log,
+        "enabled" if payload.get("drop_mode") else "disabled",
+        payload.get("reason") or "",
+    )
 
     return _miniapp_no_store_json(payload, 200)
 
