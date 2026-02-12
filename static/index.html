@@ -616,7 +616,7 @@
         <div id="referral-progress-remaining">3 more referrals to unlock +200 XP</div>
         <div id="referral-progress-expiry">⏳ This link expires in 24h</div>
       </div>
-    </div>    
+    </div>
   </div>
 
   <div class="section" id="leaderboard-section">
@@ -1076,6 +1076,11 @@
 
     const API_V2 = "/v2/miniapp";
     let latestInitData = "";
+    let dropModeEnabled = false;
+    let dropModeLifted = false;
+    let dropModeMonitorTimer = null;
+    let referralProgressAutoLoaded = false;
+    let leaderboardAutoLoaded = false;
 
     function getLatestInitData(candidate = "") {
       if (typeof candidate === "string" && candidate.length) {
@@ -1224,6 +1229,63 @@
         res = await fetch(target, { ...rest, headers });
       }
       return res;
+    }
+
+    async function checkDropModeOnce() {
+      if (window.__dropModePromise) return window.__dropModePromise;
+      window.__dropModePromise = (async () => {
+        const res = await v2Fetch(`${API_V2}/drop_mode`);
+        if (!res.ok) throw new Error(`drop_mode ${res.status}`);
+        const data = await res.json();
+        return data || {};
+      })().catch((err) => {
+        window.__dropModePromise = null;
+        throw err;
+      });
+      return window.__dropModePromise;
+    }
+
+    function ensureDropModeNotice(targetId, message) {
+      const target = document.getElementById(targetId);
+      if (!target) return;
+      let note = target.querySelector(".drop-mode-note");
+      if (!note) {
+        note = document.createElement("div");
+        note.className = "drop-mode-note";
+        note.style.cssText = "margin-top:8px;font-size:12px;color:#8a6d3b;";
+        target.appendChild(note);
+      }
+      note.textContent = message;
+    }
+
+    function removeDropModeNotices() {
+      document.querySelectorAll(".drop-mode-note").forEach((el) => el.remove());
+    }
+
+    function triggerDeferredHeavyLoads() {
+      if (!leaderboardAutoLoaded) {
+        leaderboardAutoLoaded = true;
+        try { initLeaderboardCache(); } catch (_) {}
+      }
+      if (!referralProgressAutoLoaded) {
+        referralProgressAutoLoaded = true;
+        try { loadReferralProgress(); } catch (_) {}
+      }
+    }
+
+    function startDropModeMonitor() {
+      if (dropModeMonitorTimer) clearInterval(dropModeMonitorTimer);
+      dropModeMonitorTimer = setInterval(() => {
+        if (!window.__DROP_MODE_UNTIL) return;
+        const untilMs = Date.parse(window.__DROP_MODE_UNTIL);
+        if (!Number.isFinite(untilMs)) return;
+        if (Date.now() < untilMs) return;
+        if (dropModeLifted) return;
+        dropModeLifted = true;
+        dropModeEnabled = false;
+        removeDropModeNotices();
+        triggerDeferredHeavyLoads();
+      }, 5000);
     }
 
     function splitList(text) {
@@ -1799,6 +1861,7 @@
     }
 
     async function loadReferralProgress() {
+      referralProgressAutoLoaded = true;
       try {
         const res = await v2Fetch(`${API_V2}/referral/progress`);
         if (res.status === 401 || res.status === 403) return;
@@ -2986,6 +3049,7 @@ function setLeaderboardMeta(ts, { isStale = false } = {}) {
       }
     }
     async function loadLeaderboard(options = {}) {
+      leaderboardAutoLoaded = true;
       const { forceRefresh = false } = options;
       if (leaderboardFetchInProgress) return;
       const out = document.getElementById("leaderboard-output");
@@ -3336,9 +3400,27 @@ ${referral}`;
       checkRegionStatus();
       handleAdminAndVoucher();
       loadCheckinStatus();
-      loadReferralProgress();
-      
       loadVouchers();
+
+      let isDropMode = false;
+      try {
+        const dropModeData = await checkDropModeOnce();
+        isDropMode = !!dropModeData?.drop_mode;
+        if (isDropMode && dropModeData?.until_utc) {
+          window.__DROP_MODE_UNTIL = dropModeData.until_utc;
+          dropModeEnabled = true;
+          ensureDropModeNotice("leaderboard-section", "Drop ongoing — available after 10 minutes.");
+          ensureDropModeNotice("referral-section", "Drop ongoing — available after 10 minutes.");
+          startDropModeMonitor();
+        }
+      } catch (err) {
+        console.warn("Drop mode check failed, continuing normal mode:", err);
+      }
+
+      if (!isDropMode) {
+        triggerDeferredHeavyLoads();
+      }
+
       if (isAdminMode) {
         document.getElementById("admin-panel").style.display = "block";
         document.getElementById("admin-affiliate-pools").style.display = "block";
@@ -3353,7 +3435,10 @@ ${referral}`;
         if (_infoHubBound) return;
 
         try {
-          if (typeof initLeaderboardCache === "function") initLeaderboardCache();
+          if (!dropModeEnabled && typeof initLeaderboardCache === "function") {
+            leaderboardAutoLoaded = true;
+            initLeaderboardCache();
+          }
         } catch (_) {}
 
         const infoHubBtn = document.getElementById("infoHubBtn");

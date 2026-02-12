@@ -3,6 +3,7 @@ from pymongo import ASCENDING, DESCENDING, ReturnDocument
 from pymongo.errors import OperationFailure, PyMongoError, DuplicateKeyError, BulkWriteError
 from bson.objectid import ObjectId
 from datetime import datetime, timedelta, timezone
+import threading
 import requests
 import time
 from config import KL_TZ
@@ -59,6 +60,10 @@ KILL_BLOCK_SECONDS = int(os.getenv("KILL_BLOCK_SECONDS", "86400"))
 CLAIM_COOLDOWN_SECONDS = int(os.getenv("CLAIM_COOLDOWN_SECONDS", "180"))
 SESSION_COOLDOWN_SEC = int(os.getenv("SESSION_COOLDOWN_SEC", "30"))
 _BYPASS_WARNING_LOGGED = False
+DROP_MODE_CACHE_TTL_SECONDS = 2
+_DROP_MODE_CACHE = {"payload": None, "expires_at": None}
+_DROP_MODE_CACHE_LOCK = threading.Lock()
+_DROP_MODE_LAST_LOGGED_UNTIL = None
 
 _RAW_OFFICIAL_CHANNEL_ID = getattr(_cfg, "OFFICIAL_CHANNEL_ID", os.getenv("OFFICIAL_CHANNEL_ID"))
 try:
@@ -280,6 +285,15 @@ def _ctx_to_user(ctx: dict) -> dict:
     result["source"] = "telegram"
     result["userId"] = user_id
     return result
+
+
+def _miniapp_no_store_json(payload: dict, status_code: int = 200):
+    resp = jsonify(payload)
+    resp.status_code = status_code
+    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    resp.headers["Pragma"] = "no-cache"
+    resp.headers["Expires"] = "0"
+    return resp
  
 def now_utc():
     return datetime.now(timezone.utc)
@@ -2868,6 +2882,94 @@ def api_referral_progress():
             "link_expires_in_seconds": link_expires_in_seconds,
         }
     ), 200
+
+
+@vouchers_bp.route("/v2/miniapp/drop_mode", methods=["GET"])
+def api_drop_mode():
+    init_data = extract_raw_init_data_from_query(request)
+    if not init_data:
+        return _miniapp_no_store_json({"status": "error", "code": "missing_init_data"}, 400)
+
+    ok, parsed, reason = verify_telegram_init_data(init_data)
+    ctx, admin_preview = _user_ctx_or_preview(
+        request, init_data_raw=init_data, verification=(ok, parsed, reason)
+    )
+
+    if not ok and not admin_preview:
+        return _miniapp_no_store_json({"code": "auth_failed", "why": str(reason)}, 401)
+    if not admin_preview and not ctx:
+        return _miniapp_no_store_json({"code": "auth_failed", "why": "missing_or_invalid_init_data"}, 401)
+
+    now = now_utc()
+    with _DROP_MODE_CACHE_LOCK:
+        expires_at = _DROP_MODE_CACHE.get("expires_at")
+        payload = _DROP_MODE_CACHE.get("payload")
+        if payload and expires_at and now < expires_at:
+            cached = dict(payload)
+            cached["server_time_utc"] = now.isoformat()
+            return _miniapp_no_store_json(cached, 200)
+
+    active_drop = db.drops.find_one(
+        {
+            "startsAt": {"$lte": now},
+            "endsAt": {"$gt": now},
+        },
+        sort=[("priority", DESCENDING), ("startsAt", DESCENDING)],
+    )
+
+    drop_mode = False
+    reason_value = ""
+    active_drop_id = None
+    until_iso = None
+
+    if active_drop:
+        drop_type = str(active_drop.get("type") or "pooled").strip().lower()
+        if drop_type == "pooled":
+            public_remaining = max(0, int(active_drop.get("public_remaining") or 0))
+            my_remaining = max(0, int(active_drop.get("my_remaining") or 0))
+            total_remaining = max(0, int(active_drop.get("remaining") or 0))
+            if (public_remaining + my_remaining + total_remaining) <= 0:
+                active_drop = None
+
+    if active_drop:
+        starts_at = _as_aware_utc(active_drop.get("startsAt"))
+        ends_at = _as_aware_utc(active_drop.get("endsAt"))
+        if starts_at and ends_at:
+            drop_mode_until = min(starts_at + timedelta(minutes=10), ends_at)
+            if now < drop_mode_until:
+                drop_mode = True
+                reason_value = "active_drop_first_10m"
+                active_drop_id = str(active_drop.get("_id"))
+                until_iso = drop_mode_until.isoformat()
+
+    payload = {
+        "status": "ok",
+        "drop_mode": drop_mode,
+        "reason": reason_value,
+        "active_drop_id": active_drop_id,
+        "until_utc": until_iso,
+        "server_time_utc": now.isoformat(),
+    }
+
+    with _DROP_MODE_CACHE_LOCK:
+        _DROP_MODE_CACHE["payload"] = {
+            "status": payload["status"],
+            "drop_mode": payload["drop_mode"],
+            "reason": payload["reason"],
+            "active_drop_id": payload["active_drop_id"],
+            "until_utc": payload["until_utc"],
+            "server_time_utc": payload["server_time_utc"],
+        }
+        _DROP_MODE_CACHE["expires_at"] = now + timedelta(seconds=DROP_MODE_CACHE_TTL_SECONDS)
+
+    global _DROP_MODE_LAST_LOGGED_UNTIL
+    if drop_mode and until_iso and _DROP_MODE_LAST_LOGGED_UNTIL != until_iso:
+        _DROP_MODE_LAST_LOGGED_UNTIL = until_iso
+        current_app.logger.info("[DROP_MODE] ON drop_id=%s until=%s", active_drop_id, until_iso)
+    elif not drop_mode:
+        _DROP_MODE_LAST_LOGGED_UNTIL = None
+
+    return _miniapp_no_store_json(payload, 200)
 
 class AlreadyClaimed(Exception):
     pass
