@@ -410,6 +410,7 @@ def ensure_voucher_indexes():
     except OperationFailure:
         pass
     new_joiner_claims_col.create_index([("uid", ASCENDING)], unique=True)
+    db.affiliate_daily_kpis.create_index([("day_utc", ASCENDING)], unique=True, name="uniq_affiliate_daily_kpi_day")
     claim_rate_limits_col.create_index([("key", ASCENDING)], unique=True)
     claim_rate_limits_col.create_index([("expiresAt", ASCENDING)], expireAfterSeconds=0)
     claim_rate_limits_col.create_index([("scope", ASCENDING), ("ip", ASCENDING), ("day", ASCENDING)])
@@ -3994,6 +3995,28 @@ def admin_pools_summary_v2():
             }
         )
     return jsonify({"status": "ok", "items": out})
+
+
+@vouchers_bp.route("/admin/affiliate/kpis", methods=["GET"])
+def admin_affiliate_kpis_v2():
+    _, err = require_admin()
+    if err:
+        return err
+
+    days = request.args.get("days", default=14, type=int)
+    if days is None:
+        days = 14
+    days = max(1, min(int(days), 60))
+
+    rows = list(db.affiliate_daily_kpis.find({}, {"_id": 0}).sort("day_utc", -1).limit(days))
+    out_rows = []
+    for row in rows:
+        item = dict(row)
+        computed_at = item.get("computed_at_utc")
+        if isinstance(computed_at, datetime):
+            item["computed_at_utc"] = computed_at.isoformat()
+        out_rows.append(item)
+    return jsonify({"days": days, "rows": out_rows})
 
 
 @vouchers_bp.route("/admin/affiliate/pending", methods=["GET"])
