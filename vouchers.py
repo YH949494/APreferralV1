@@ -25,6 +25,7 @@ welcome_eligibility_col = db["welcome_eligibility"]
 tg_verification_queue_col = db["tg_verification_queue"]
 voucher_claims_col = db["voucher_claims"]
 invite_link_map_collection = db["invite_link_map"]
+miniapp_sessions_daily_col = db["miniapp_sessions_daily"]
 
 
 def _ensure_index_if_missing(col, name, keys, **kwargs):
@@ -2177,6 +2178,17 @@ def verify_telegram_init_data(init_data_raw: str):
     if not user.get("id"):
         return False, {}, "missing_user_id"
 
+    try:
+        user_id = int(user.get("id"))
+        date_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        miniapp_sessions_daily_col.update_one(
+            {"date_utc": date_utc, "user_id": user_id},
+            {"$setOnInsert": {"date_utc": date_utc, "user_id": user_id}},
+            upsert=True,
+        )
+    except Exception:
+        pass
+
     data["user"] = json.dumps(user)
     return True, data, "ok"
  
@@ -4017,6 +4029,56 @@ def admin_affiliate_kpis_v2():
             item["computed_at_utc"] = computed_at.isoformat()
         out_rows.append(item)
     return jsonify({"days": days, "rows": out_rows})
+
+
+@vouchers_bp.route("/admin/metrics/daily", methods=["GET"])
+def admin_metrics_daily_v2():
+    admin_user, err = require_admin()
+    if err:
+        return err
+
+    days = request.args.get("days", default=14, type=int)
+    if days is None:
+        days = 14
+    days = max(1, min(int(days), 60))
+
+    now_utc = datetime.now(timezone.utc)
+    start_day = datetime(now_utc.year, now_utc.month, now_utc.day, tzinfo=timezone.utc) - timedelta(days=days - 1)
+
+    rows = []
+    for offset in range(days):
+        day_start = start_day + timedelta(days=offset)
+        day_end = day_start + timedelta(days=1)
+        date_utc = day_start.strftime("%Y-%m-%d")
+        rows.append(
+            {
+                "date": date_utc,
+                "miniapp_unique_users": int(miniapp_sessions_daily_col.count_documents({"date_utc": date_utc})),
+                "voucher_claims_issued": int(
+                    db.voucher_ledger.count_documents(
+                        {"status": "issued", "created_at": {"$gte": day_start, "$lt": day_end}}
+                    )
+                ),
+                "first_checkins": int(
+                    users_collection.count_documents(
+                        {"first_checkin_at": {"$gte": day_start, "$lt": day_end}}
+                    )
+                ),
+                "qualified_events": int(
+                    db.qualified_events.count_documents(
+                        {"created_at": {"$gte": day_start, "$lt": day_end}}
+                    )
+                ),
+                "affiliate_rewards_issued": int(
+                    db.affiliate_ledger.count_documents(
+                        {"status": "issued", "created_at": {"$gte": day_start, "$lt": day_end}}
+                    )
+                ),
+            }
+        )
+
+    print(f"[ADMIN_METRICS] days={days} by_uid={admin_user.get('id')} rows={len(rows)}")
+    return jsonify({"days": days, "tz": "UTC", "rows": rows})
 
 
 @vouchers_bp.route("/admin/affiliate/pending", methods=["GET"])
