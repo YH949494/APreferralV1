@@ -1997,7 +1997,13 @@ def is_user_eligible_for_drop(user_doc: dict, tg_user: dict, drop: dict) -> bool
             _log(False, f"welcome_{reason}")
             return False
     elif mode == "tier":
-        if not allow or user_status not in allow:
+        # Normalize both stored tiers and user status so matching is case/spacing safe.
+        normalized_allow = []
+        for item in allow:
+            norm = _normalize_tier_value(item)
+            if norm:
+                normalized_allow.append(norm)
+        if not normalized_allow or _normalize_tier_value(user_status) not in normalized_allow:
             _log(False, "tier_mismatch")
             return False
     elif mode == "user_id":
@@ -2040,6 +2046,10 @@ def _extract_admin_secret() -> str:
         return query_secret.strip()
 
     return ""
+
+def _normalize_tier_value(value) -> str:
+    # Tier normalization is intentionally strict and minimal: trim + uppercase only.
+    return (str(value) if value is not None else "").strip().upper()
 
 
 def _normalize_codes(codes):
@@ -3728,7 +3738,8 @@ def admin_create_drop():
     if elig_mode == "tier":
         allow = []
         for item in elig_allow_raw:
-            val = (item or "").strip() if isinstance(item, str) else str(item).strip()
+            # Persist normalized tiers so future checks are consistent.
+            val = _normalize_tier_value(item)
             if val:
                 allow.append(val)
         if allow:
