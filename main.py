@@ -3005,6 +3005,35 @@ async def button_handler(update, context):
     await query.answer()
     user_id = query.from_user.id
 
+    if query.data == "pm1_subscribed":
+        try:
+            is_subscribed, _reason = await _check_official_channel_subscribed(context.bot, user_id)
+        except Exception:
+            logger.exception("[PM1][SUB_VERIFY] uid=%s err=get_chat_member_failed", user_id)
+            await query.answer("Try again in 10s.", show_alert=True)
+            return
+
+        if not is_subscribed:
+            await query.answer("Subscribe first", show_alert=True)
+            return
+
+        success_text = (
+            "✅ Subscription verified!\n\n"
+            "You’re now eligible for the latest news + reward updates.\n"
+            "Tap below to open the Mini-App 👇"
+        )
+        keyboard = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("🚀 Open AdvantPlay Mini-App", web_app=WebAppInfo(url=WEBAPP_URL))]]
+        )
+        try:
+            await query.edit_message_text(success_text, reply_markup=keyboard)
+        except Exception:
+            try:
+                await context.bot.send_message(chat_id=user_id, text=success_text, reply_markup=keyboard)
+            except Exception:
+                logger.exception("[PM1][SUB_VERIFY] uid=%s err=send_failed", user_id)
+        return
+
     if query.data == "checkin":
         user = users_collection.find_one({"user_id": user_id})
         if user and user.get("welcome_xp_claimed"):
