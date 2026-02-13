@@ -709,6 +709,7 @@ def evaluate_affiliate_simulated_ledgers(batch_limit: int = 500) -> int:
     now_utc_ts = now_utc()
     now_kl_date = now_utc_ts.astimezone(KL_TZ).date()
     created_or_updated = 0
+    final_statuses = {"ISSUED", "OUT_OF_STOCK", "REJECTED"}
 
     rows = db.pending_referrals.find(
         {"status": "awarded", "invitee_user_id": {"$exists": True}, "inviter_user_id": {"$exists": True}},
@@ -753,6 +754,25 @@ def evaluate_affiliate_simulated_ledgers(batch_limit: int = 500) -> int:
                         "risk_flags": [],
                         "created_at": now_utc_ts,
                     },
+                },
+                upsert=True,
+            )
+
+            ledger_doc = db.affiliate_ledger.find_one({"dedup_key": dedup_key}, {"status": 1}) or {}
+            if ledger_doc.get("status") in final_statuses:
+                logger.info(
+                    "[SCHED][AFF_SIM] action=skip_final_status dedup_key=%s status=%s",
+                    dedup_key,
+                    ledger_doc.get("status"),
+                )
+                continue
+
+            db.affiliate_ledger.update_one(
+                {
+                    "dedup_key": dedup_key,
+                    "status": {"$in": [None, "SIMULATED_PENDING", "PENDING_MANUAL", "PENDING_REVIEW", "APPROVED"]},
+                },
+                {
                     "$set": {
                         "status": "SIMULATED_PENDING",
                         "simulate": True,
@@ -766,12 +786,11 @@ def evaluate_affiliate_simulated_ledgers(batch_limit: int = 500) -> int:
                         "updated_at": now_utc_ts,
                     },
                 },
-                upsert=True,
             )
             created_or_updated += 1
 
     if created_or_updated:
-        logger.info("[SCHED][AFF_SIM] entries=%s", created_or_updated)
+        logger.info("[SCHED][AFF_SIM] action=processed_ledgers count=%s", created_or_updated)
     return created_or_updated
 
 
