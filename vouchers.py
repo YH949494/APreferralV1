@@ -26,6 +26,51 @@ tg_verification_queue_col = db["tg_verification_queue"]
 voucher_claims_col = db["voucher_claims"]
 invite_link_map_collection = db["invite_link_map"]
 miniapp_sessions_daily_col = db["miniapp_sessions_daily"]
+REFERRAL_SNAPSHOT_STALE_SEC = 21600
+
+
+def _week_key_kl(reference: datetime) -> str:
+    local_ref = as_aware_utc(reference).astimezone(KL_TZ)
+    week_start = (local_ref - timedelta(days=local_ref.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+    return week_start.date().isoformat()
+
+
+def _month_key_kl(reference: datetime) -> str:
+    local_ref = as_aware_utc(reference).astimezone(KL_TZ)
+    month_start = local_ref.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    return month_start.date().isoformat()
+
+
+def _ledger_referral_counts(referral_events_col, inviter_id: int, now_ref: datetime) -> dict:
+    week_key = _week_key_kl(now_ref)
+    month_key = _month_key_kl(now_ref)
+    settled_total = int(referral_events_col.count_documents({"inviter_id": inviter_id, "event": "referral_settled"}))
+    revoked_total = int(referral_events_col.count_documents({"inviter_id": inviter_id, "event": "referral_revoked"}))
+    settled_week = int(
+        referral_events_col.count_documents(
+            {"inviter_id": inviter_id, "event": "referral_settled", "week_key": week_key}
+        )
+    )
+    revoked_week = int(
+        referral_events_col.count_documents(
+            {"inviter_id": inviter_id, "event": "referral_revoked", "week_key": week_key}
+        )
+    )
+    settled_month = int(
+        referral_events_col.count_documents(
+            {"inviter_id": inviter_id, "event": "referral_settled", "month_key": month_key}
+        )
+    )
+    revoked_month = int(
+        referral_events_col.count_documents(
+            {"inviter_id": inviter_id, "event": "referral_revoked", "month_key": month_key}
+        )
+    )
+    return {
+        "total_referrals": max(0, settled_total - revoked_total),
+        "weekly_referrals": max(0, settled_week - revoked_week),
+        "monthly_referrals": max(0, settled_month - revoked_month),
+    }
 
 
 def _ensure_index_if_missing(col, name, keys, **kwargs):
@@ -2373,6 +2418,7 @@ def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None
 
     user_ctx = load_user_context(uid=ctx_uid, username=raw_username if tg_user else usernameLower, username_lower=usernameLower or uname)
 
+    referral_events_col = db["referral_events"]
     user_doc = None
     if ctx_uid is not None:
         user_doc = users_collection.find_one({"user_id": ctx_uid})
@@ -2847,31 +2893,106 @@ def api_referral_progress():
     if not uid and not username_lower:
         return jsonify({"code": "auth_failed", "why": "missing_or_invalid_init_data"}), 401
 
+    referral_events_col = db["referral_events"]
     user_doc = None
     if uid is not None:
         user_doc = users_collection.find_one(
             {"user_id": uid},
-            {"total_referrals": 1, "referral_generated_at": 1, "user_id": 1},
+            {
+                "total_referrals": 1,
+                "weekly_referrals": 1,
+                "monthly_referrals": 1,
+                "snapshot_updated_at": 1,
+                "referral_generated_at": 1,
+                "user_id": 1,
+            },
         )
     if not user_doc and username_lower:
         user_doc = users_collection.find_one(
             {"usernameLower": username_lower},
-            {"total_referrals": 1, "referral_generated_at": 1, "user_id": 1},
+            {
+                "total_referrals": 1,
+                "weekly_referrals": 1,
+                "monthly_referrals": 1,
+                "snapshot_updated_at": 1,
+                "referral_generated_at": 1,
+                "user_id": 1,
+            },
         )
     if not user_doc and username_lower:
         user_doc = users_collection.find_one(
             {"username": {"$regex": f"^{username_lower}$", "$options": "i"}},
-            {"total_referrals": 1, "referral_generated_at": 1, "user_id": 1},
+            {
+                "total_referrals": 1,
+                "weekly_referrals": 1,
+                "monthly_referrals": 1,
+                "snapshot_updated_at": 1,
+                "referral_generated_at": 1,
+                "user_id": 1,
+            },
         )
 
-    total_referrals = int((user_doc or {}).get("total_referrals", 0))
+    now_ref = as_aware_utc(datetime.now(timezone.utc))
+    inviter_id = uid if uid is not None else (user_doc or {}).get("user_id")
+    snapshot_total = int((user_doc or {}).get("total_referrals", 0) or 0)
+    snapshot_weekly = int((user_doc or {}).get("weekly_referrals", 0) or 0)
+    snapshot_monthly = int((user_doc or {}).get("monthly_referrals", 0) or 0)
+    snapshot_ts = as_aware_utc((user_doc or {}).get("snapshot_updated_at"))
+    snapshot_age_sec = None if not snapshot_ts else max(0, int((now_ref - snapshot_ts).total_seconds()))
+
+    source = "snapshot"
+    fallback_reason = None
+    if inviter_id is not None:
+        if not user_doc:
+            source = "ledger"
+            fallback_reason = "snapshot_missing"
+        elif snapshot_total <= 0:
+            settled_exists = referral_events_col.count_documents(
+                {"inviter_id": inviter_id, "event": "referral_settled"},
+                limit=1,
+            )
+            if int(settled_exists) > 0:
+                source = "ledger"
+                fallback_reason = "mismatch_detected"
+        elif snapshot_ts is not None and snapshot_age_sec is not None and snapshot_age_sec > REFERRAL_SNAPSHOT_STALE_SEC:
+            ledger_total = max(
+                0,
+                int(referral_events_col.count_documents({"inviter_id": inviter_id, "event": "referral_settled"}))
+                - int(referral_events_col.count_documents({"inviter_id": inviter_id, "event": "referral_revoked"})),
+            )
+            if ledger_total != snapshot_total:
+                source = "ledger"
+                fallback_reason = "snapshot_stale"
+
+    if source == "ledger" and inviter_id is not None:
+        stats = _ledger_referral_counts(referral_events_col, int(inviter_id), now_ref)
+    else:
+        stats = {
+            "total_referrals": max(0, snapshot_total),
+            "weekly_referrals": max(0, snapshot_weekly),
+            "monthly_referrals": max(0, snapshot_monthly),
+        }
+
+    total_referrals = int(stats.get("total_referrals", 0))
+    weekly_referrals = int(stats.get("weekly_referrals", 0))
+    monthly_referrals = int(stats.get("monthly_referrals", 0))
+    current_app.logger.info(
+        "[REF_PROGRESS] uid=%s source=%s reason=%s total=%s weekly=%s monthly=%s snapshot_age_sec=%s",
+        inviter_id,
+        source,
+        fallback_reason or "",
+        total_referrals,
+        weekly_referrals,
+        monthly_referrals,
+        snapshot_age_sec,
+    )
+
     milestone_size = 3
     progress = total_referrals % milestone_size
     remaining = milestone_size if progress == 0 else milestone_size - progress
     near_miss = progress == milestone_size - 1
     progress_pct = (progress / milestone_size) * 100
 
-    inviter_id = uid if uid is not None else (user_doc or {}).get("user_id")
     link_expires_in_seconds = None
     latest_link_doc = None
     if inviter_id is not None:
@@ -2897,6 +3018,8 @@ def api_referral_progress():
     return jsonify(
         {
             "total_referrals": total_referrals,
+            "weekly_referrals": weekly_referrals,
+            "monthly_referrals": monthly_referrals,
             "milestone_size": milestone_size,
             "progress": progress,
             "remaining": remaining,

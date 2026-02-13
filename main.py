@@ -1237,7 +1237,19 @@ def ensure_indexes():
     referral_events_collection.create_index(
         [("inviter_id", 1), ("occurred_at", 1)],
         name="referral_events_by_inviter_time",
-    )    
+    )
+    referral_events_collection.create_index(
+        [("inviter_id", 1), ("event", 1)],
+        name="referral_events_by_inviter_event",
+    )
+    referral_events_collection.create_index(
+        [("inviter_id", 1), ("week_key", 1)],
+        name="referral_events_by_inviter_week",
+    )
+    referral_events_collection.create_index(
+        [("inviter_id", 1), ("month_key", 1)],
+        name="referral_events_by_inviter_month",
+    )
     pending_referrals_collection.create_index(
         [("group_id", 1), ("invitee_user_id", 1)],
         unique=True,

@@ -1,5 +1,6 @@
 import unittest
 from datetime import datetime, timedelta, timezone
+from flask import Flask
 
 from pymongo.errors import DuplicateKeyError
 
@@ -970,3 +971,125 @@ class UGCRewardTests(unittest.TestCase):
         finally:
             m.ugc_submissions_col = orig_sub
             m.ugc_user_kpis_col = orig_kpi
+
+
+class FakeUserCollection:
+    def __init__(self, docs=None):
+        self.docs = docs or []
+
+    def _match(self, doc, filt):
+        for key, value in filt.items():
+            if key == "username" and isinstance(value, dict) and "$regex" in value:
+                import re
+
+                if not re.match(value["$regex"], str(doc.get("username", "")), re.IGNORECASE):
+                    return False
+                continue
+            if doc.get(key) != value:
+                return False
+        return True
+
+    def find_one(self, filt, projection=None, sort=None):  # noqa: ARG002
+        for doc in self.docs:
+            if self._match(doc, filt):
+                return dict(doc)
+        return None
+
+
+class FakeReferralEventsCollection:
+    def __init__(self, docs=None):
+        self.docs = docs or []
+
+    def count_documents(self, filt, limit=0):
+        count = 0
+        for doc in self.docs:
+            ok = True
+            for key, value in filt.items():
+                if doc.get(key) != value:
+                    ok = False
+                    break
+            if ok:
+                count += 1
+                if limit and count >= limit:
+                    return count
+        return count
+
+
+class FakeDbForReferralProgress:
+    def __init__(self, referral_events_col):
+        self._referral_events_col = referral_events_col
+
+    def __getitem__(self, name):
+        if name == "referral_events":
+            return self._referral_events_col
+        raise KeyError(name)
+
+
+class ReferralProgressTests(unittest.TestCase):
+    def setUp(self):
+        import vouchers as m
+
+        self.m = m
+        self.orig_users = m.users_collection
+        self.orig_db = m.db
+        self.orig_extract = m.extract_raw_init_data_from_query
+        self.orig_verify = m.verify_telegram_init_data
+        self.orig_ctx = m._user_ctx_or_preview
+        self.orig_invite_link_map = m.invite_link_map_collection
+        self.app = Flask(__name__)
+
+        m.extract_raw_init_data_from_query = lambda req: "init"
+        m.verify_telegram_init_data = lambda raw: (True, {}, None)
+        m._user_ctx_or_preview = lambda req, init_data_raw, verification: (
+            {"user": {"id": 123, "username": "alice"}},
+            False,
+        )
+        m.invite_link_map_collection = FakeUserCollection([])
+
+    def tearDown(self):
+        self.m.users_collection = self.orig_users
+        self.m.db = self.orig_db
+        self.m.extract_raw_init_data_from_query = self.orig_extract
+        self.m.verify_telegram_init_data = self.orig_verify
+        self.m._user_ctx_or_preview = self.orig_ctx
+        self.m.invite_link_map_collection = self.orig_invite_link_map
+
+    def test_referral_progress_uses_ledger_when_snapshot_zero(self):
+        self.m.users_collection = FakeUserCollection(
+            [{"user_id": 123, "total_referrals": 0, "weekly_referrals": 0, "monthly_referrals": 0}]
+        )
+        now = datetime.now(timezone.utc)
+        week_key = self.m._week_key_kl(now)
+        month_key = self.m._month_key_kl(now)
+        self.m.db = FakeDbForReferralProgress(
+            FakeReferralEventsCollection(
+            [
+                {"inviter_id": 123, "event": "referral_settled", "week_key": week_key, "month_key": month_key},
+                {"inviter_id": 123, "event": "referral_settled", "week_key": week_key, "month_key": month_key},
+            ]
+            )
+        )
+        with self.app.test_request_context("/v2/miniapp/referral/progress"):
+            resp, status = self.m.api_referral_progress()
+        self.assertEqual(status, 200)
+        body = resp.get_json()
+        self.assertEqual(body["total_referrals"], 2)
+
+    def test_referral_progress_prefers_snapshot_when_present(self):
+        self.m.users_collection = FakeUserCollection(
+            [
+                {
+                    "user_id": 123,
+                    "total_referrals": 4,
+                    "weekly_referrals": 2,
+                    "monthly_referrals": 3,
+                    "snapshot_updated_at": datetime.now(timezone.utc),
+                }
+            ]
+        )
+        self.m.db = FakeDbForReferralProgress(FakeReferralEventsCollection([]))
+        with self.app.test_request_context("/v2/miniapp/referral/progress"):
+            resp, status = self.m.api_referral_progress()
+        self.assertEqual(status, 200)
+        body = resp.get_json()
+        self.assertEqual(body["total_referrals"], 4)
