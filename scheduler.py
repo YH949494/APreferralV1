@@ -285,11 +285,12 @@ def _referral_event_doc(inviter_id: int, invitee_id: int, event: str, occurred_a
         "month_key": month_key,
     }
 
-def _record_referral_event(inviter_id: int, invitee_id: int, event: str, occurred_at: datetime) -> None:
+def _record_referral_event(inviter_id: int, invitee_id: int, event: str, occurred_at: datetime) -> bool:
     if inviter_id is None or invitee_id is None:
-        return
+        return False
     try:
-        db.referral_events.insert_one(_referral_event_doc(inviter_id, invitee_id, event, occurred_at))
+        event_doc = _referral_event_doc(inviter_id, invitee_id, event, occurred_at)
+        db.referral_events.insert_one(event_doc)
     except DuplicateKeyError:
         logger.info(
             "[SCHED][REFERRAL_LEDGER] duplicate inviter=%s invitee=%s action=%s",
@@ -297,13 +298,35 @@ def _record_referral_event(inviter_id: int, invitee_id: int, event: str, occurre
             invitee_id,
             event,
         )
-        return
+        return False
+
+    inc_total = 1 if event == "referral_settled" else -1
+    inc_week = 1 if event == "referral_settled" else -1
+    inc_month = 1 if event == "referral_settled" else -1
+    db.users.update_one(
+        {"user_id": inviter_id},
+        {
+            "$inc": {
+                "total_referrals": inc_total,
+                "weekly_referrals": inc_week,
+                "monthly_referrals": inc_month,
+            },
+            "$max": {
+                "total_referrals": 0,
+                "weekly_referrals": 0,
+                "monthly_referrals": 0,
+            },
+            "$set": {"snapshot_updated_at": occurred_at},
+        },
+    )
+
     logger.info(
         "[SCHED][REFERRAL_LEDGER] inviter=%s invitee=%s action=%s",
         inviter_id,
         invitee_id,
         "settled" if event == "referral_settled" else "revoked",
     )
+    return True
 
 
 def maybe_handle_first_referral(uid: int, old_total: int, new_total: int, now_utc_ts: datetime) -> None:

@@ -1842,14 +1842,7 @@
         remainingEl.textContent = `${remaining} more referrals to unlock +200 XP`;
       }
 
-      if (data?.link_expires_in_seconds !== undefined && data?.link_expires_in_seconds !== null) {
-        const formatted = formatExpiryTimer(Number(data.link_expires_in_seconds));
-        expiryEl.textContent = formatted
-          ? `⏳ Link expires in ${formatted}`
-          : "⏳ This link expires in 24h";
-      } else {
-        expiryEl.textContent = "⏳ This link expires in 24h";
-      }
+      expiryEl.textContent = "⏳ This link expires in 24h";
     }
 
     async function loadReferralProgress() {
