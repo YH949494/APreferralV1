@@ -300,26 +300,6 @@ def _record_referral_event(inviter_id: int, invitee_id: int, event: str, occurre
         )
         return False
 
-    inc_total = 1 if event == "referral_settled" else -1
-    inc_week = 1 if event == "referral_settled" else -1
-    inc_month = 1 if event == "referral_settled" else -1
-    db.users.update_one(
-        {"user_id": inviter_id},
-        {
-            "$inc": {
-                "total_referrals": inc_total,
-                "weekly_referrals": inc_week,
-                "monthly_referrals": inc_month,
-            },
-            "$max": {
-                "total_referrals": 0,
-                "weekly_referrals": 0,
-                "monthly_referrals": 0,
-            },
-            "$set": {"snapshot_updated_at": occurred_at},
-        },
-    )
-
     logger.info(
         "[SCHED][REFERRAL_LEDGER] inviter=%s invitee=%s action=%s",
         inviter_id,
@@ -1106,13 +1086,14 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
             )
             awarded += 1
             logger.info(
-                "[SCHED][REFERRAL] award_ok inviter=%s invitee=%s ref_total=%s xp_added=%s bonus_added=%s hold_hours=%s",
+                "[SCHED][REFERRAL] award_ok inviter=%s invitee=%s ref_total=%s xp_added=%s bonus_added=%s hold_hours=%s users_counter_update_attempted=%s",
                 inviter_user_id,
                 invitee_user_id,
                 ref_total,
                 actual_xp_added,
                 actual_bonus_added,
                 REFERRAL_HOLD_HOURS,
+                False,
             )
         except Exception as exc:
             logger.exception(
