@@ -191,7 +191,10 @@ def send_pm2_if_needed(
     if _is_vip1(user):
         logger.info("[PM2][SKIP] uid=%s reason=already_vip", uid)
         return (True, None, "already_vip") if return_error else False
-    text = PM2_TEXT + _mywin_link_line()
+    text = PM2_TEXT
+    reply_markup = InlineKeyboardMarkup(
+        [[InlineKeyboardButton("🚀 Submit #mywin", url="https://t.me/yourchannel?start=mywin")]]
+    )
     bot = get_bot()
     if bot:
         try:
@@ -200,7 +203,7 @@ def send_pm2_if_needed(
                     bot,
                     chat_id=uid,
                     text=text,
-                    parse_mode="HTML",
+                    reply_markup=reply_markup,
                     uid=uid,
                     send_type="pm2",
                     raise_on_non_transient=False,
@@ -211,11 +214,11 @@ def send_pm2_if_needed(
         except RuntimeError as exc:
             if "Bot loop not running yet" not in str(exc):
                 raise
-            ok, err, blocked = send_telegram_http_message(uid, text, parse_mode="HTML")
+            ok, err, blocked = send_telegram_http_message(uid, text)
             if blocked:
                 err = "bot_blocked"
     else:
-        ok, err, blocked = send_telegram_http_message(uid, text, parse_mode="HTML")
+        ok, err, blocked = send_telegram_http_message(uid, text)
         if blocked:
             err = "bot_blocked"
     if ok:
