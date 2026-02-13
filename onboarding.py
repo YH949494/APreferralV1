@@ -21,16 +21,32 @@ onboarding_events = get_collection("onboarding_events")
 MYWIN_CHAT_ID = -1002743212540
 MYWIN_INVITE_LINK = "https://t.me/+HBNmk5aV_M0xMzVl"
 
+# Official channel username for deep link button (username format without @)
+_RAW_OFFICIAL_CHANNEL_USERNAME = os.getenv("OFFICIAL_CHANNEL_USERNAME", "advantplayofficial")
+OFFICIAL_CHANNEL_USERNAME = (str(_RAW_OFFICIAL_CHANNEL_USERNAME).strip().lstrip("@") or "advantplayofficial")
+OFFICIAL_CHANNEL_URL = f"https://t.me/{OFFICIAL_CHANNEL_USERNAME}"
+
 def _mywin_link_line() -> str:
     # HTML anchor so "#mywin" is clickable inside PM text
     return f'\n\n🔗 Submit here:\n<a href="{MYWIN_INVITE_LINK}">#mywin</a>'
 
 PM1_TEXT = (
-    "Quick tip 👋\n\n"
-    "You’ve already started your New Member Path.\n"
-    "A daily check-in is the easiest way to make progress.\n\n"
-    "Most members do this once a day."
+    "✅ Step 1: Subscribe our Official Channel (required)\n\n"
+    "Why subscribe?\n"
+    "• Get latest news + reward drops first\n"
+    "• See big win screenshots & weekly highlights\n"
+    "• Faster updates for voucher events / VIP opportunities\n\n"
+    "After subscribed, tap “I’ve subscribed” to continue."
 )
+
+
+def _pm1_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("📢 Join Official Channel", url=OFFICIAL_CHANNEL_URL)],
+            [InlineKeyboardButton("✅ I’ve subscribed", callback_data="pm1_subscribed")],
+        ]
+    )
 PM2_TEXT = (
     "You’re making progress 👍\n\n"
     "Sharing your first win gives a solid boost\n"
@@ -123,6 +139,7 @@ def send_pm1_if_needed(
                     bot,
                     chat_id=uid,
                     text=PM1_TEXT,
+                    reply_markup=_pm1_keyboard(),
                     uid=uid,
                     send_type="pm1",
                     raise_on_non_transient=False,
@@ -133,6 +150,7 @@ def send_pm1_if_needed(
         except RuntimeError as exc:
             if "Bot loop not running yet" not in str(exc):
                 raise
+            # HTTP fallback can't send reply_markup; still send text
             ok, err, blocked = send_telegram_http_message(uid, PM1_TEXT)
             if blocked:
                 err = "bot_blocked"
