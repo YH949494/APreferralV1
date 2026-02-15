@@ -2892,7 +2892,7 @@ async def member_update_handler(update: Update, context: ContextTypes.DEFAULT_TY
             {
                 "group_id": GROUP_ID,
                 "invitee_user_id": user.id,
-                "status": "pending",
+                "status": {"$in": ["pending", "pending_channel"]},
             },
             {
                 "$set": {
