@@ -1,8 +1,8 @@
 """Pure referral reward rules."""
 
-REFERRAL_XP_PER_SUCCESS = 30
+REFERRAL_XP_PER_SUCCESS = 60
 REFERRAL_BONUS_INTERVAL = 3
-REFERRAL_BONUS_XP = 200
+REFERRAL_BONUS_XP = 400
 
 def calc_referral_progress(total_referrals: int, milestone_size: int = 3) -> dict[str, float | int | bool]:
     """
