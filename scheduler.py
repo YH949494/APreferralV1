@@ -4,6 +4,7 @@ import os
 import pytz
 import requests
 import socket
+import time
 from pymongo import ReturnDocument, UpdateOne
 from pymongo.errors import DuplicateKeyError
 from requests import RequestException
@@ -13,9 +14,20 @@ from xp import grant_xp, now_utc, now_kl
 from affiliate_rewards import mark_invitee_qualified
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
-GROUP_ID = int(os.environ.get("GROUP_ID", "-1002304653063"))
+_RAW_GROUP_ID = os.environ.get("MAIN_GROUP_ID") or os.environ.get("GROUP_ID") or "-1002304653063"
+try:
+    GROUP_ID = int(_RAW_GROUP_ID)
+except (TypeError, ValueError):
+    GROUP_ID = -1002304653063
+_RAW_OFFICIAL_CHANNEL_ID = os.environ.get("OFFICIAL_CHANNEL_ID")
+try:
+    OFFICIAL_CHANNEL_ID = int(_RAW_OFFICIAL_CHANNEL_ID) if _RAW_OFFICIAL_CHANNEL_ID not in (None, "") else None
+except (TypeError, ValueError):
+    OFFICIAL_CHANNEL_ID = None
 API_BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"
 REFERRAL_HOLD_HOURS = 12
+REFERRAL_CHANNEL_RETRY_HOURS = 12
+REFERRAL_CHANNEL_EXPIRE_DAYS = 7
 
 KL_TZ = pytz.timezone("Asia/Kuala_Lumpur")
 
@@ -54,6 +66,60 @@ def _get_chat_member_status(user_id: int) -> str | None:
     if not data.get("ok"):
         raise RuntimeError(f"getChatMember_not_ok:{data.get('description')}")
     return (data.get("result") or {}).get("status")
+
+
+def _check_official_channel_subscribed_sync(uid: int) -> tuple[bool, str]:
+    if not uid:
+        return False, "missing_uid"
+    if OFFICIAL_CHANNEL_ID is None:
+        return False, "channel_unset"
+    if not BOT_TOKEN:
+        return False, "missing_token"
+
+    def _fetch_once():
+        try:
+            resp = requests.get(
+                f"{API_BASE}/getChatMember",
+                params={"chat_id": OFFICIAL_CHANNEL_ID, "user_id": uid},
+                timeout=10,
+            )
+        except requests.RequestException as exc:
+            return None, None, str(exc)
+        try:
+            payload = resp.json()
+        except ValueError:
+            return resp.status_code, None, "bad_json"
+        return resp.status_code, payload, None
+
+    status_code, payload, err = _fetch_once()
+    if err:
+        return False, err
+
+    for attempt in range(2):
+        error_code = (payload or {}).get("error_code")
+        if status_code == 429 or ((payload or {}).get("ok") is False and error_code == 429):
+            if attempt == 1:
+                return False, "rate_limited"
+            retry_after = ((payload or {}).get("parameters") or {}).get("retry_after", 1)
+            try:
+                retry_after = int(retry_after)
+            except (TypeError, ValueError):
+                retry_after = 1
+            time.sleep(max(0, min(retry_after, 5)))
+            status_code, payload, err = _fetch_once()
+            if err:
+                return False, err
+            continue
+        break
+
+    if not isinstance(payload, dict):
+        return False, "bad_json"
+    if not payload.get("ok"):
+        return False, f"tg_not_ok:{payload.get('description', 'unknown')}"
+    status = (payload.get("result") or {}).get("status")
+    if status in {"member", "administrator", "creator"}:
+        return True, f"status:{status}"
+    return False, f"status:{status}"
 
 def _coerce_utc(dt_value) -> datetime | None:
     if not dt_value:
@@ -848,11 +914,22 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
     while scanned < batch_limit:
         pending = db.pending_referrals.find_one_and_update(
             {
-                "status": "pending",
-                "created_at_utc": {"$lte": cutoff},
                 "$or": [
-                    {"next_retry_at_utc": {"$exists": False}},
-                    {"next_retry_at_utc": {"$lte": now_utc_ts}},
+                    {
+                        "status": "pending",
+                        "created_at_utc": {"$lte": cutoff},
+                        "$or": [
+                            {"next_retry_at_utc": {"$exists": False}},
+                            {"next_retry_at_utc": {"$lte": now_utc_ts}},
+                        ],
+                    },
+                    {
+                        "status": "pending_channel",
+                        "$or": [
+                            {"next_retry_at_utc": {"$exists": False}},
+                            {"next_retry_at_utc": {"$lte": now_utc_ts}},
+                        ],
+                    },
                 ],
             },
             {
@@ -863,14 +940,15 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
                 }
             },
             sort=[("created_at_utc", 1)],
-            return_document=ReturnDocument.AFTER,
+            return_document=ReturnDocument.BEFORE,
         )
         if not pending:
             break
         scanned += 1
         pending_id = pending.get("_id")
         invitee_user_id = pending.get("invitee_user_id")
-        inviter_user_id = pending.get("inviter_user_id")   
+        inviter_user_id = pending.get("inviter_user_id")
+        pending_status = pending.get("status")
         step = "validate"
         retry_count = pending.get("retry_count", 0) or 0
         try:
@@ -1007,6 +1085,54 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
                 revoked += 1
                 continue
 
+            step = "check_channel"
+            is_subscribed, channel_reason = _check_official_channel_subscribed_sync(invitee_user_id)
+            if not is_subscribed:
+                if pending_status == "pending_channel":
+                    pending_channel_since = _coerce_utc(pending.get("pending_channel_since_utc"))
+                    if pending_channel_since and now_utc_ts > pending_channel_since + timedelta(days=REFERRAL_CHANNEL_EXPIRE_DAYS):
+                        db.pending_referrals.update_one(
+                            {"_id": pending_id},
+                            {
+                                "$set": {
+                                    "status": "revoked",
+                                    "revoked_reason": "channel_not_subscribed_expired",
+                                    "revoked_at": now_utc_ts,
+                                },
+                                "$unset": {"processing_by": "", "processing_at_utc": "", "processing_at": ""},
+                            },
+                        )
+                        _record_referral_event(inviter_user_id, invitee_user_id, "referral_revoked", now_utc_ts)
+                        revoked += 1
+                        logger.info(
+                            "[SCHED][REFERRAL] revoked inviter=%s invitee=%s reason=channel_not_subscribed_expired",
+                            inviter_user_id,
+                            invitee_user_id,
+                        )
+                        continue
+
+                db.pending_referrals.update_one(
+                    {"_id": pending_id},
+                    {
+                        "$set": {
+                            "status": "pending_channel",
+                            "pending_channel_since_utc": _coerce_utc(pending.get("pending_channel_since_utc")) or now_utc_ts,
+                            "next_retry_at_utc": now_utc_ts + timedelta(hours=REFERRAL_CHANNEL_RETRY_HOURS),
+                            "last_fail_reason": "channel_not_subscribed",
+                            "last_channel_check_reason": channel_reason,
+                        },
+                        "$unset": {"processing_by": "", "processing_at_utc": "", "processing_at": ""},
+                        "$inc": {"retry_count": 1},
+                    },
+                )
+                logger.info(
+                    "[SCHED][REFERRAL] pending_channel inviter=%s invitee=%s retry_in_h=%s",
+                    inviter_user_id,
+                    invitee_user_id,
+                    REFERRAL_CHANNEL_RETRY_HOURS,
+                )
+                continue
+
             step = "award"
             group_id = pending.get("group_id") or GROUP_ID
             award_key = f"ref:{group_id}:{invitee_user_id}"
@@ -1067,7 +1193,6 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
             _record_referral_event(inviter_user_id, invitee_user_id, "referral_settled", now_utc_ts)
             ref_total = new_ref_total
             maybe_handle_first_referral(inviter_user_id, current_ref_total, new_ref_total, now_utc_ts)
-            _maybe_send_near_miss_dm_web(inviter_user_id, ref_total)
             
             db.pending_referrals.update_one(
                 {"_id": pending_id},
@@ -1085,6 +1210,11 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
                 },
             )
             awarded += 1
+            logger.info(
+                "[SCHED][REFERRAL] awarded inviter=%s invitee=%s",
+                inviter_user_id,
+                invitee_user_id,
+            )
             logger.info(
                 "[SCHED][REFERRAL] award_ok inviter=%s invitee=%s ref_total=%s xp_added=%s bonus_added=%s hold_hours=%s users_counter_update_attempted=%s",
                 inviter_user_id,
