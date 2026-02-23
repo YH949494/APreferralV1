@@ -740,9 +740,8 @@ def _is_pool_drop(drop: dict, audience_type: str | None = None) -> bool:
     return bool(drop.get("is_pool") is True)
 
 WELCOME_BONUS_RETENTION_MESSAGE = (
-    "🎉 Welcome Bonus unlocked!\n"
-    "More exclusive vouchers and surprise drops are released in our channel.\n"
-    "Stay subscribed so you won’t miss the next one."
+    "🔓 Next reward: Welcome Bonus #2\n"
+    "Subscribe + 1 check-in + stay 48h → claim your higher-value voucher."
 )
 
 POOL_VOUCHER_RETENTION_MESSAGE = (
@@ -1309,6 +1308,19 @@ def _increment_ip_claim_success(*, ip: str, now: datetime | None = None):
     return (doc or {}).get("count", 0)
 
 
+def _check_ip_success_limit_for_welcome1(ip: str, *, now: datetime | None = None, limit: int = 1) -> tuple[bool, str, str]:
+    now = now or now_utc()
+    day_key = now.strftime("%Y%m%d")
+    ip = ip or "unknown"
+    key_ip_day = _rate_limit_key("ip", ip, "day", day_key)
+    doc = claim_rate_limits_col.find_one({"key": key_ip_day}) or {}
+    count = int(doc.get("count", 0) or 0)
+    if count >= limit:
+        current_app.logger.info("[welcome1_ip] deny ip=%s day=%s count=%s", ip, day_key, count)
+        return False, "ip_success_limited", "Too many Welcome Bonus claims from this network today. Please try again tomorrow."
+    return True, "ok", "ok"
+
+
 def _has_profile_photo(uid: int, *, force_refresh: bool = False):
     if uid is None:
         return False
@@ -1845,6 +1857,31 @@ def check_channel_subscribed(uid: int) -> bool:
         return True
 
     return False
+
+
+def _welcome48h_gate(uid: int, user_doc: dict | None) -> tuple[bool, str, str]:
+    if uid is None:
+        return False, "missing_uid", "Please join the community first, then try again later."
+
+    if not check_channel_subscribed(uid):
+        return False, "not_subscribed", "Subscribe our main channel first to unlock Welcome Bonus #2."
+
+    user_doc = user_doc or {}
+    if not user_doc.get("last_checkin"):
+        return False, "no_checkin", "Do 1 check-in first to unlock Welcome Bonus #2."
+
+    joined_main_at = user_doc.get("joined_main_at")
+    if not joined_main_at:
+        return False, "missing_join_time", "Please join the community first, then try again later."
+
+    joined_main_utc = _as_aware_utc(joined_main_at)
+    if not joined_main_utc:
+        return False, "missing_join_time", "Please join the community first, then try again later."
+
+    if now_utc() < (joined_main_utc + timedelta(hours=48)):
+        return False, "stay_48h", "Stay in the community for 48h after joining to unlock Welcome Bonus #2."
+
+    return True, "ok", "ok"
 
 
 def check_has_profile_photo(uid: int) -> bool:
@@ -3473,6 +3510,29 @@ def api_claim():
                 "eligible": False,
                 "checks_key": None,
             }), 403
+        if audience_type == "new_joiner":
+            allowed_ip, code_ip, msg_ip = _check_ip_success_limit_for_welcome1(client_ip)
+            if not allowed_ip:
+                return jsonify({
+                    "status": "error",
+                    "code": code_ip,
+                    "ok": False,
+                    "eligible": False,
+                    "reason": code_ip,
+                    "message": msg_ip,
+                }), 403
+        if audience_type == "new_joiner_48h":
+            gate_allowed, gate_code, gate_message = _welcome48h_gate(uid, user_doc)
+            if not gate_allowed:
+                current_app.logger.info("[welcome48h] deny uid=%s reason=%s", uid, gate_code)
+                return jsonify({
+                    "status": "error",
+                    "code": gate_code,
+                    "ok": False,
+                    "eligible": False,
+                    "reason": gate_code,
+                    "message": gate_message,
+                }), 403
         now_ts = now_kl()
         allowed, reason, _ticket = welcome_eligibility(uid, ref=now_ts)
         if not allowed:
@@ -3722,17 +3782,9 @@ def api_claim():
                 "checks_key": None,
             }), 403
 
-        ip_claim_count = _increment_ip_claim_success(ip=client_ip)
-        if ip_claim_count > 3:
-            current_app.logger.info("[claim] deny post-claim drop=%s uid=%s reason=ip_claims_per_day ip=%s", drop_id, uid, client_ip)
-            return jsonify({
-                "status": "error",
-                "code": "rate_limited",
-                "reason": "ip_claims_per_day",
-                "ok": False,
-                "eligible": False,
-                "checks_key": None,
-            }), 429
+        if audience_type == "new_joiner":
+            ip_claim_count = _increment_ip_claim_success(ip=client_ip)
+            current_app.logger.info("[welcome1_ip] success ip=%s count=%s", client_ip or "unknown", ip_claim_count)
 
         welcome_tickets_col.update_one(
             {"uid": uid},
