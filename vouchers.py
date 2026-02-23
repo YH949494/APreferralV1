@@ -1789,7 +1789,8 @@ def set_cached_subscription_true(uid: int, ttl_seconds: int) -> None:
                     "subscribed": True,
                     "expireAt": expire_at,
                     "updated_at": now,
-                }
+                },
+                "$setOnInsert": {"first_subscribed_at_utc": now},
             },
             upsert=True,
         )
@@ -4171,13 +4172,47 @@ def admin_affiliate_kpis_v2():
     days = max(1, min(int(days), 60))
 
     rows = list(db.affiliate_daily_kpis.find({}, {"_id": 0}).sort("day_utc", -1).limit(days))
+
+    with_sub_cache = 0
+    row_days = sorted({str(r.get("day_utc")) for r in rows if r.get("day_utc")})
+
+    if row_days:
+        min_day = datetime.fromisoformat(row_days[-1]).replace(tzinfo=timezone.utc)
+        max_day = datetime.fromisoformat(row_days[0]).replace(tzinfo=timezone.utc) + timedelta(days=1)
+
+        invitee_ids = set()
+        try:
+            cursor = db.pending_referrals.find(
+                {
+                    "created_at_utc": {"$gte": min_day, "$lt": max_day}
+                },
+                {"invitee_user_id": 1},
+            )
+            for ref in cursor:
+                iid = ref.get("invitee_user_id")
+                if iid is not None:
+                    invitee_ids.add(iid)
+
+            if invitee_ids:
+                with_sub_cache = subscription_cache_col.count_documents(
+                    {"user_id": {"$in": list(invitee_ids)}}
+                )
+        except Exception:
+            with_sub_cache = 0
+
     out_rows = []
     for row in rows:
         item = dict(row)
         computed_at = item.get("computed_at_utc")
         if isinstance(computed_at, datetime):
             item["computed_at_utc"] = computed_at.isoformat()
+        raw_sub_rate = item.get("invitee_channel_sub_72h_rate", 0.0)
+        try:
+            item["invitee_channel_sub_72h_rate"] = f"{(float(raw_sub_rate or 0.0) * 100.0):.1f}%"
+        except (TypeError, ValueError):
+            item["invitee_channel_sub_72h_rate"] = "0.0%"
         out_rows.append(item)
+    current_app.logger.info("[ADMIN_AFF_KPIS] days=%s rows=%s with_sub_cache=%s", days, len(out_rows), with_sub_cache)
     return jsonify({"days": days, "rows": out_rows})
 
 
