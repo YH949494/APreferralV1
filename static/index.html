@@ -3386,6 +3386,7 @@ ${referral}`;
           + _affKpiTd(Number(row.qualified || 0))
           + _affKpiTd(_affPct(row.checkin_72h_rate))
           + _affKpiTd(_affPct(row.claim_proxy_72h_rate))
+          + _affKpiTd(row.invitee_channel_sub_72h_rate || "0.0%")
           + _affKpiTd(Number(row.qualified_7d || 0))
           + _affKpiTd(_affPct(row.quality_rate_7d))
           + _affKpiTd(Number(row.active_referrers_7d || 0))
@@ -3401,6 +3402,7 @@ ${referral}`;
               <th style="padding:6px; text-align:left; border-bottom:1px solid #ddd;">qualified</th>
               <th style="padding:6px; text-align:left; border-bottom:1px solid #ddd;">checkin_72h_rate</th>
               <th style="padding:6px; text-align:left; border-bottom:1px solid #ddd;">claim_proxy_72h_rate</th>
+              <th style="padding:6px; text-align:left; border-bottom:1px solid #ddd;">invitee_channel_sub_72h_rate</th>
               <th style="padding:6px; text-align:left; border-bottom:1px solid #ddd;">qualified_7d</th>
               <th style="padding:6px; text-align:left; border-bottom:1px solid #ddd;">quality_rate_7d</th>
               <th style="padding:6px; text-align:left; border-bottom:1px solid #ddd;">active_referrers_7d</th>

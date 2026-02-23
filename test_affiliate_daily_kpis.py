@@ -22,6 +22,8 @@ class FakeCollection:
                     return False
                 if op == "$ne" and value == expected:
                     return False
+                if op == "$in" and value not in (expected or []):
+                    return False
             return True
         return value == cond
 
@@ -74,6 +76,7 @@ class FakeDb:
         self.qualified_events = FakeCollection()
         self.users = FakeCollection()
         self.new_joiner_claims = FakeCollection()
+        self.subscription_cache = FakeCollection()
         self.affiliate_daily_kpis = FakeCollection()
 
 
@@ -122,6 +125,61 @@ class AffiliateDailyKpiTests(unittest.TestCase):
         self.assertEqual(out["qualified_7d"], 1)
         self.assertEqual(out["quality_rate_7d"], 1.0)
         self.assertEqual(out["active_referrers_7d"], 1)
+
+    def test_invitee_channel_sub_72h_rate(self):
+        db = FakeDb()
+        day_start = datetime(2026, 1, 10, tzinfo=timezone.utc)
+        day_utc = day_start.date().isoformat()
+
+        for uid in range(1000, 1010):
+            db.pending_referrals.docs.append(
+                {
+                    "invitee_user_id": uid,
+                    "inviter_user_id": 123,
+                    "status": "pending",
+                    "created_at_utc": day_start,
+                }
+            )
+
+        for uid in (1000, 1001, 1002):
+            db.subscription_cache.docs.append(
+                {
+                    "_id": f"sub:{uid}",
+                    "user_id": uid,
+                    "subscribed": True,
+                    "first_subscribed_at_utc": day_start + timedelta(hours=24),
+                }
+            )
+
+        db.subscription_cache.docs.append(
+            {
+                "_id": "sub:1003",
+                "user_id": 1003,
+                "subscribed": True,
+                "first_subscribed_at_utc": day_start + timedelta(hours=73),
+            }
+        )
+
+        out = compute_affiliate_daily_kpi(day_utc, db_ref=db, now_utc_ts=day_start + timedelta(days=1))
+        self.assertEqual(f"{(out['invitee_channel_sub_72h_rate'] * 100):.1f}%", "30.0%")
+
+    def test_invitee_channel_sub_72h_rate_missing_cache_is_zero(self):
+        db = FakeDb()
+        day_start = datetime(2026, 1, 10, tzinfo=timezone.utc)
+        day_utc = day_start.date().isoformat()
+
+        for uid in range(1, 4):
+            db.pending_referrals.docs.append(
+                {
+                    "invitee_user_id": uid,
+                    "inviter_user_id": 99,
+                    "status": "pending",
+                    "created_at_utc": day_start,
+                }
+            )
+
+        out = compute_affiliate_daily_kpi(day_utc, db_ref=db, now_utc_ts=day_start + timedelta(days=1))
+        self.assertEqual(f"{(out['invitee_channel_sub_72h_rate'] * 100):.1f}%", "0.0%")
 
 
 if __name__ == "__main__":

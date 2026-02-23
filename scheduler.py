@@ -179,11 +179,15 @@ def compute_affiliate_daily_kpi(day_utc: str, *, db_ref=None, now_utc_ts: dateti
 
     checkin_hits = 0
     claim_hits = 0
+    invitee_first_referral_at: dict[int, datetime] = {}
     for row in referrals:
         invitee_user_id = row.get("invitee_user_id")
         created_at_utc = _coerce_utc(row.get("created_at_utc"))
         if invitee_user_id is None or not created_at_utc:
             continue
+        prev_created_at = invitee_first_referral_at.get(invitee_user_id)
+        if prev_created_at is None or created_at_utc < prev_created_at:
+            invitee_first_referral_at[invitee_user_id] = created_at_utc
         cutoff = created_at_utc + timedelta(hours=72)
 
         user_doc = db_ref.users.find_one({"user_id": invitee_user_id}, {"first_checkin_at": 1}) or {}
@@ -198,6 +202,42 @@ def compute_affiliate_daily_kpi(day_utc: str, *, db_ref=None, now_utc_ts: dateti
 
     checkin_72h_rate = _safe_rate(checkin_hits, new_referrals)
     claim_proxy_72h_rate = _safe_rate(claim_hits, new_referrals)
+
+    subscribed_72h_hits = 0
+    invitee_ids = list(invitee_first_referral_at.keys())
+    subscription_by_uid: dict[int, datetime | None] = {}
+
+    if invitee_ids:
+        try:
+            cursor = db_ref.subscription_cache.find(
+                {
+                    "user_id": {"$in": invitee_ids},
+                    "subscribed": {"$ne": False},
+                },
+                {
+                    "user_id": 1,
+                    "first_subscribed_at_utc": 1,
+                    "checked_at": 1,
+                    "updated_at": 1,
+                },
+            )
+            for doc in cursor:
+                uid = doc.get("user_id")
+                if uid is None:
+                    continue
+                first_seen = _coerce_utc(doc.get("first_subscribed_at_utc"))
+                if not first_seen:
+                    first_seen = _coerce_utc(doc.get("checked_at"))
+                subscription_by_uid[int(uid)] = first_seen
+        except Exception:
+            subscription_by_uid = {}
+
+    for uid, referral_created_at in invitee_first_referral_at.items():
+        first_seen = subscription_by_uid.get(uid)
+        if first_seen and first_seen <= (referral_created_at + timedelta(hours=72)):
+            subscribed_72h_hits += 1
+
+    invitee_channel_sub_72h_rate = _safe_rate(subscribed_72h_hits, max(new_referrals, 1))
 
     window_7d_start = day_start - timedelta(days=6)
     window_filter = {"day_utc": {"$gte": window_7d_start.date().isoformat(), "$lte": day_utc}}
@@ -241,6 +281,7 @@ def compute_affiliate_daily_kpi(day_utc: str, *, db_ref=None, now_utc_ts: dateti
         "qualified": qualified,
         "checkin_72h_rate": checkin_72h_rate,
         "claim_proxy_72h_rate": claim_proxy_72h_rate,
+        "invitee_channel_sub_72h_rate": invitee_channel_sub_72h_rate,
         "new_referrals_7d": new_referrals_7d,
         "qualified_7d": qualified_7d,
         "quality_rate_7d": quality_rate_7d,
