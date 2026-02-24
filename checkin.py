@@ -6,7 +6,7 @@ from config import KL_TZ, XP_BASE_PER_CHECKIN, STREAK_MILESTONES, FIRST_CHECKIN_
 from database import db, get_collection, init_db
 from onboarding import record_first_checkin
 from xp import grant_xp
-from affiliate_rewards import issue_welcome_bonus_if_eligible, record_user_last_seen
+from affiliate_rewards import record_user_last_seen
 
 users_collection = get_collection("users")
 
@@ -26,8 +26,6 @@ def handle_checkin():
 
     user = users_collection.find_one({"user_id": user_id})
     first_checkin = not user
-    is_blocked = bool((user or {}).get("blocked"))
-
     last_checkin = user.get("last_checkin") if user else None
     streak = user.get("streak", 0) if user else 0
 
@@ -79,13 +77,6 @@ def handle_checkin():
         session=request.headers.get("X-Session-Id") or request.cookies.get("session") or request.headers.get("User-Agent"),
     )
 
-    welcome_issue = issue_welcome_bonus_if_eligible(
-        db,
-        user_id=int(user_id),
-        is_new_user=first_checkin,
-        blocked=is_blocked,
-    )
-
     if first_checkin:
         grant_xp(db, user_id, "first_checkin", "first_checkin", FIRST_CHECKIN_BONUS)
 
@@ -103,8 +94,6 @@ def handle_checkin():
         ),
         "next_checkin_time": next_midnight.isoformat()
     }
-    if welcome_issue.get("status") == "ISSUED" and welcome_issue.get("voucher_code"):
-        payload["welcome_voucher"] = welcome_issue.get("voucher_code")
     return jsonify(payload)
 
 

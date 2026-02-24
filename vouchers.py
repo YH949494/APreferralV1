@@ -3439,6 +3439,24 @@ def api_claim():
         current_app.logger.info(
             "[claim] entry drop=%s audience=%s uid=%s ip=%s", drop_id, audience_type, uid, client_ip
         )
+        if not check_channel_subscribed(uid):
+            current_app.logger.info("[claim] deny drop=%s uid=%s reason=not_subscribed", drop_id, uid)
+            current_app.logger.info(
+                "[claim] uid=%s drop_id=%s dtype=%s audience=%s decision=blocked reason=not_subscribed",
+                uid,
+                drop_id,
+                drop_type,
+                audience_type,
+            )
+            return jsonify({
+                "status": "error",
+                "code": "not_subscribed",
+                "ok": False,
+                "eligible": False,
+                "reason": "not_subscribed",
+                "checks_key": None,
+                "message": "Please subscribe to @advantplayofficial to claim this voucher."
+            }), 403
         if drop_type != "pooled":
             current_app.logger.info(
                 "[claim] uid=%s drop_id=%s dtype=%s audience=%s decision=blocked reason=bad_drop_type",

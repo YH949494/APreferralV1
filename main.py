@@ -40,7 +40,6 @@ from vouchers import vouchers_bp, ensure_voucher_indexes, process_verification_q
 from scheduler import settle_pending_referrals, settle_referral_snapshots, settle_xp_snapshots, evaluate_affiliate_simulated_ledgers, compute_affiliate_daily_kpi_yesterday
 from affiliate_rewards import (
     ensure_affiliate_indexes,
-    issue_welcome_bonus_if_eligible,
     record_user_last_seen,
     settle_previous_month_affiliate_rewards,
 )
@@ -1637,14 +1636,6 @@ async def process_checkin(user_id, username, region, update=None):
     grant_xp(db, user_id, "checkin", checkin_key, base_xp + bonus_xp)
     record_first_checkin(int(user_id), ref=now_utc_ts)
 
-    welcome_issue = issue_welcome_bonus_if_eligible(
-        db,
-        user_id=int(user_id),
-        is_new_user=is_new_user,
-        blocked=bool(user.get("blocked")),
-        now_utc=now_utc_ts,
-    )
-    
     maybe_shout_milestones(int(user_id))
 
     labels = {7: "🎉 7-day streak bonus!", 14: "🔥 14-day streak bonus!", 28: "🏆 28-day streak bonus!"}
@@ -1654,8 +1645,6 @@ async def process_checkin(user_id, username, region, update=None):
     ]
     if bonus_xp:
         lines.append(f"{labels[streak]} +{bonus_xp} XP")
-    if welcome_issue.get("status") == "ISSUED" and welcome_issue.get("voucher_code"):
-        lines.append(f"🎁 Welcome voucher: `{welcome_issue['voucher_code']}`")
     lines.append(streak_progress_bar(streak))
 
     msg = "\n".join(lines)
