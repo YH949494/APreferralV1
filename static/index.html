@@ -556,6 +556,19 @@
         transform: scale(1.01);
       }
     }    
+
+    #tab-how::-webkit-scrollbar {
+      width: 6px;
+    }
+
+    #tab-how::-webkit-scrollbar-thumb {
+      background: rgba(0,0,0,0.25);
+      border-radius: 4px;
+    }
+
+    #tab-how::-webkit-scrollbar-track {
+      background: transparent;
+    }
   </style>
 </head>
 <body>
@@ -900,7 +913,16 @@
         </ul>
       </div>
 
-      <div id="tab-how" class="tab-panel" style="display:none; text-align:left;">
+      <div id="tab-how"
+           class="tab-panel"
+           style="
+             display:none;
+             text-align:left;
+             max-height:300px;
+             overflow-y:auto;
+             padding-right:6px;
+             -webkit-overflow-scrolling:touch;
+           ">
         <p><b>🎯 How It Works</b></p>
         <hr style="border:none;border-top:1px solid #ddd;margin:10px 0;">
 
