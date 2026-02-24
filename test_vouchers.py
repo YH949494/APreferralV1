@@ -562,6 +562,150 @@ class VoucherAntiHunterTests(unittest.TestCase):
             m.is_user_eligible_for_drop = orig_is_user_eligible
             m.ugc_reward_ledger_col = orig_ledger
     
+    def test_claim_new_joiner_drop_requires_subscription(self):
+        import vouchers as m
+        from flask import Flask
+
+        app = Flask(__name__)
+        now = datetime.now(timezone.utc)
+        drop_id = "drop-new-joiner-not-sub"
+        drop = {
+            "_id": drop_id,
+            "name": "Welcome",
+            "type": "pooled",
+            "audience": "new_joiner",
+            "status": "active",
+            "startsAt": now - timedelta(minutes=5),
+            "endsAt": now + timedelta(minutes=5),
+            "public_remaining": 1,
+            "my_remaining": 0,
+        }
+
+        orig_extract = m.extract_raw_init_data_from_query
+        orig_verify = m.verify_telegram_init_data
+        orig_db = m.db
+        orig_users = m.users_collection
+        orig_claims = m.voucher_claims_col
+        orig_load_user_context = m.load_user_context
+        orig_is_drop_allowed = m.is_drop_allowed
+        orig_is_user_eligible = m.is_user_eligible_for_drop
+        orig_subscribed = m.check_channel_subscribed
+        orig_should_enforce = m._should_enforce_session_cooldown
+        orig_kill = m._check_kill_switch
+        orig_cooldown = m._check_cooldown
+        try:
+            m.extract_raw_init_data_from_query = lambda req: "ok"
+            m.verify_telegram_init_data = lambda init_data: (True, {"user": '{"id": 42, "username": "u42"}'}, "ok")
+            m.db = FakeDb([drop], [])
+            m.users_collection = FakeSimpleCollection([{"user_id": 42, "usernameLower": "u42", "region": "th"}])
+            m.voucher_claims_col = FakeSimpleCollection([])
+            m.load_user_context = lambda **kwargs: {}
+            m.is_drop_allowed = lambda *args, **kwargs: True
+            m.is_user_eligible_for_drop = lambda *args, **kwargs: True
+            m.check_channel_subscribed = lambda uid: False
+            m._should_enforce_session_cooldown = lambda *_args, **_kwargs: False
+            m._check_kill_switch = lambda **kwargs: (True, None, 0)
+            m._check_cooldown = lambda **kwargs: (True, None, 0)
+
+            with app.test_request_context(
+                "/vouchers/claim?init_data=ok",
+                method="POST",
+                json={"dropId": drop_id},
+            ):
+                resp, status = m.api_claim()
+                self.assertEqual(status, 403)
+                self.assertEqual(resp.get_json().get("code"), "not_subscribed")
+        finally:
+            m.extract_raw_init_data_from_query = orig_extract
+            m.verify_telegram_init_data = orig_verify
+            m.db = orig_db
+            m.users_collection = orig_users
+            m.voucher_claims_col = orig_claims
+            m.load_user_context = orig_load_user_context
+            m.is_drop_allowed = orig_is_drop_allowed
+            m.is_user_eligible_for_drop = orig_is_user_eligible
+            m.check_channel_subscribed = orig_subscribed
+            m._should_enforce_session_cooldown = orig_should_enforce
+            m._check_kill_switch = orig_kill
+            m._check_cooldown = orig_cooldown
+
+    def test_claim_new_joiner_drop_subscribed_reaches_welcome_eligibility(self):
+        import vouchers as m
+        from flask import Flask
+
+        app = Flask(__name__)
+        now = datetime.now(timezone.utc)
+        drop_id = "drop-new-joiner-sub"
+        drop = {
+            "_id": drop_id,
+            "name": "Welcome",
+            "type": "pooled",
+            "audience": "new_joiner",
+            "status": "active",
+            "startsAt": now - timedelta(minutes=5),
+            "endsAt": now + timedelta(minutes=5),
+            "public_remaining": 1,
+            "my_remaining": 0,
+        }
+
+        orig_extract = m.extract_raw_init_data_from_query
+        orig_verify = m.verify_telegram_init_data
+        orig_db = m.db
+        orig_users = m.users_collection
+        orig_claims = m.voucher_claims_col
+        orig_load_user_context = m.load_user_context
+        orig_is_drop_allowed = m.is_drop_allowed
+        orig_is_user_eligible = m.is_user_eligible_for_drop
+        orig_subscribed = m.check_channel_subscribed
+        orig_should_enforce = m._should_enforce_session_cooldown
+        orig_kill = m._check_kill_switch
+        orig_cooldown = m._check_cooldown
+        orig_welcome_eligibility = m.welcome_eligibility
+
+        class _Marker(Exception):
+            pass
+
+        try:
+            m.extract_raw_init_data_from_query = lambda req: "ok"
+            m.verify_telegram_init_data = lambda init_data: (True, {"user": '{"id": 42, "username": "u42"}'}, "ok")
+            m.db = FakeDb([drop], [])
+            m.users_collection = FakeSimpleCollection([{"user_id": 42, "usernameLower": "u42", "region": "th"}])
+            m.voucher_claims_col = FakeSimpleCollection([])
+            m.load_user_context = lambda **kwargs: {}
+            m.is_drop_allowed = lambda *args, **kwargs: True
+            m.is_user_eligible_for_drop = lambda *args, **kwargs: True
+            m.check_channel_subscribed = lambda uid: True
+            m._should_enforce_session_cooldown = lambda *_args, **_kwargs: False
+            m._check_kill_switch = lambda **kwargs: (True, None, 0)
+            m._check_cooldown = lambda **kwargs: (True, None, 0)
+
+            def _raise_marker(*args, **kwargs):
+                raise _Marker()
+
+            m.welcome_eligibility = _raise_marker
+
+            with app.test_request_context(
+                "/vouchers/claim?init_data=ok",
+                method="POST",
+                json={"dropId": drop_id},
+            ):
+                with self.assertRaises(_Marker):
+                    m.api_claim()
+        finally:
+            m.extract_raw_init_data_from_query = orig_extract
+            m.verify_telegram_init_data = orig_verify
+            m.db = orig_db
+            m.users_collection = orig_users
+            m.voucher_claims_col = orig_claims
+            m.load_user_context = orig_load_user_context
+            m.is_drop_allowed = orig_is_drop_allowed
+            m.is_user_eligible_for_drop = orig_is_user_eligible
+            m.check_channel_subscribed = orig_subscribed
+            m._should_enforce_session_cooldown = orig_should_enforce
+            m._check_kill_switch = orig_kill
+            m._check_cooldown = orig_cooldown
+            m.welcome_eligibility = orig_welcome_eligibility
+
     def test_kill_switch_blocks_after_threshold(self):
         rate_limits = FakeRateLimitCollection()
         now = datetime.now(timezone.utc)
