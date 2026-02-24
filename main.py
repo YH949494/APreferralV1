@@ -2849,17 +2849,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "[WELCOME][JOIN_BACKFILL_DISABLED] uid=%s joined_main_at_missing",
                 user.id,
             ) 
-        keyboard = [[
-            InlineKeyboardButton("🚀 Open AdvantPlay Mini-App", web_app=WebAppInfo(url=WEBAPP_URL))
-        ]]
+        keyboard = [
+            [InlineKeyboardButton("📣 Join Channel", url="https://t.me/+Zy3UGGkE17kyNDA9")],
+            [InlineKeyboardButton("🚀 Open AdvantPlay Mini-App", web_app=WebAppInfo(url=WEBAPP_URL))],
+        ]
         if message:
             await safe_reply_text(
                 message,
                 "👋 Welcome to AdvantPlay Community!\n\n"
-                "Tap below to enter the Mini-App and:\n"
-                "• Check-in daily to earn XP\n"
-                "• Unlock your referral link\n"
-                "• Claim voucher code\n\n"
+                "Earn rewards in 3 easy steps:\n\n"
+                "• ✅ Check-in daily  \n"
+                "• 🔗 Invite friends  \n"
+                "• 🎁 Claim voucher  \n\n"
                 "Start your journey here 👇",
                 reply_markup=InlineKeyboardMarkup(keyboard),
                 uid=user.id,
