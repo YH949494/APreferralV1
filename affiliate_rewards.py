@@ -1,3 +1,4 @@
+import logging
 import os
 from datetime import datetime, timedelta, timezone
 
@@ -9,12 +10,15 @@ KL_TZ = pytz.timezone("Asia/Kuala_Lumpur")
 
 TIERS = ("T1", "T2", "T3", "T4")
 POOL_IDS = ("WELCOME",) + TIERS
+FINAL_STATUSES = {"ISSUED", "OUT_OF_STOCK", "REJECTED"}
+SETTLING_STATUS = "SETTLING"
+PROTECTED_STATUSES = {"PENDING_REVIEW", "PENDING_MANUAL", "APPROVED"}
 
 T1_THRESHOLD = int(os.getenv("AFF_T1_THRESHOLD", "3"))
 T2_THRESHOLD = int(os.getenv("AFF_T2_THRESHOLD", "7"))
 T3_THRESHOLD = int(os.getenv("AFF_T3_THRESHOLD", "15"))
 T4_THRESHOLD = int(os.getenv("AFF_T4_THRESHOLD", "30"))
-
+logger = logging.getLogger(__name__)
 
 def ensure_affiliate_indexes(db):
     db.qualified_events.create_index([("invitee_id", ASCENDING)], unique=True, name="uniq_invitee_id")
@@ -196,7 +200,8 @@ def evaluate_monthly_affiliate_reward(db, *, referrer_id: int, now_utc: datetime
     if not tier:
         return None
 
-    dedup_key = f"AFF:{int(referrer_id)}:{yyyymm}:{tier}"
+    # One ledger per user per month (highest tier only)
+    dedup_key = f"AFF:{int(referrer_id)}:{yyyymm}"
     db.affiliate_ledger.update_one(
         {"dedup_key": dedup_key},
         {
@@ -204,9 +209,10 @@ def evaluate_monthly_affiliate_reward(db, *, referrer_id: int, now_utc: datetime
                 "ledger_type": "AFFILIATE_MONTHLY",
                 "user_id": int(referrer_id),
                 "year_month": yyyymm,
-                "tier": tier,
-                "pool_id": tier,
-                "status": "PENDING_MANUAL",
+                "tier": None,
+                "pool_id": None,
+                "qualified_count": 0,
+                "status": "PENDING_EOM",
                 "dedup_key": dedup_key,
                 "voucher_code": None,
                 "risk_flags": [],
@@ -219,45 +225,126 @@ def evaluate_monthly_affiliate_reward(db, *, referrer_id: int, now_utc: datetime
     ledger = db.affiliate_ledger.find_one({"dedup_key": dedup_key})
     if not ledger:
         return None
+    cur_tier = ledger.get("tier")
+    tier_rank = {"T1": 1, "T2": 2, "T3": 3, "T4": 4}
+    should_upgrade = (cur_tier is None) or (tier_rank.get(tier, 0) > tier_rank.get(cur_tier, 0))
+    base_update = {
+        "qualified_count": int(qualified_count),
+        "updated_at": now_utc,
+    }
+    if should_upgrade:
+        base_update.update({"tier": tier, "pool_id": tier})
+
     if _affiliate_simulate_enabled():
-        db.affiliate_ledger.update_one(
-            {"_id": ledger["_id"]},
+        simulate_update = dict(base_update)
+        simulate_update.update(
             {
-                "$set": {
-                    "status": "SIMULATED_PENDING",
-                    "simulate": True,
-                    "would_issue_pool": tier,
-                    "evaluated_at_utc": now_utc,
-                    "updated_at": now_utc,
-                }
-            },
+                "status": "SIMULATED_PENDING",
+                "simulate": True,
+                "would_issue_pool": tier,
+                "evaluated_at_utc": now_utc,
+            }
         )
+        db.affiliate_ledger.update_one({"_id": ledger["_id"]}, {"$set": simulate_update})
         return db.affiliate_ledger.find_one({"_id": ledger["_id"]})
-    if ledger.get("status") in {"ISSUED", "OUT_OF_STOCK", "PENDING_REVIEW", "PENDING_MANUAL", "REJECTED", "APPROVED"} and ledger.get("voucher_code"):
+
+    status = ledger.get("status")
+    if status in FINAL_STATUSES or status == SETTLING_STATUS:
         return ledger
 
-    if tier == "T4":
-        db.affiliate_ledger.update_one({"_id": ledger["_id"]}, {"$set": {"status": "PENDING_MANUAL", "updated_at": now_utc}})
+    if status in PROTECTED_STATUSES:
+        db.affiliate_ledger.update_one({"_id": ledger["_id"]}, {"$set": base_update})
         return db.affiliate_ledger.find_one({"_id": ledger["_id"]})
 
-    if tier in {"T2", "T3"}:
+    next_status = "PENDING_EOM"
+    next_flags = []
+    if tier == "T4":
+        next_status = "PENDING_MANUAL"
+    elif tier in {"T2", "T3"}:
         flags = _risk_flags_for_referrer_month(db, referrer_id=int(referrer_id), start_utc=start_utc, end_utc=end_utc)
         if flags:
+            next_status = "PENDING_REVIEW"
+            next_flags = flags
+    update_fields = dict(base_update)
+    update_fields["status"] = next_status
+    update_fields["risk_flags"] = next_flags
+
+    db.affiliate_ledger.update_one({"_id": ledger["_id"]}, {"$set": update_fields})
+    return db.affiliate_ledger.find_one({"_id": ledger["_id"]})
+
+
+def settle_previous_month_affiliate_rewards(db, *, now_utc: datetime | None = None, batch_limit: int = 500):
+    now_utc = now_utc or datetime.now(timezone.utc)
+    start_utc, _, _ = _month_window_utc(now_utc)
+    prev_ref = start_utc - timedelta(seconds=1)
+    _, _, prev_yyyymm = _month_window_utc(prev_ref)
+
+    logger.info("affiliate_monthly_settle start prev_yyyymm=%s batch_limit=%s", prev_yyyymm, int(batch_limit))
+
+    stale_cutoff = now_utc - timedelta(minutes=15)
+    processed = 0
+    settled = 0
+    while processed < int(batch_limit):
+        ledger = db.affiliate_ledger.find_one_and_update(
+            {
+                "ledger_type": "AFFILIATE_MONTHLY",
+                "year_month": prev_yyyymm,
+                "$or": [
+                    {"status": "PENDING_EOM"},
+                    {"status": SETTLING_STATUS, "updated_at": {"$lt": stale_cutoff}},
+                ],
+            },
+            {"$set": {"status": SETTLING_STATUS, "updated_at": now_utc}},
+            sort=[("created_at", 1)],
+            return_document=ReturnDocument.AFTER,
+        )
+        if not ledger:
+            break
+
+        processed += 1
+        tier = ledger.get("tier")
+        uid = int(ledger.get("user_id"))
+        if not tier:
             db.affiliate_ledger.update_one(
                 {"_id": ledger["_id"]},
-                {"$set": {"status": "PENDING_REVIEW", "risk_flags": flags, "updated_at": now_utc}},
+                {"$set": {"status": "REJECTED", "review_reason": "no_tier", "updated_at": now_utc}},
             )
-            return db.affiliate_ledger.find_one({"_id": ledger["_id"]})
+            logger.info("affiliate_monthly_settle uid=%s tier=%s status=%s", uid, tier, "REJECTED")
+            continue
+        if tier == "T4":
+            db.affiliate_ledger.update_one(
+                {"_id": ledger["_id"]},
+                {"$set": {"status": "PENDING_MANUAL", "updated_at": now_utc, "risk_flags": []}},
+            )
+            logger.info("affiliate_monthly_settle uid=%s tier=%s status=%s", uid, tier, "PENDING_MANUAL")
+            continue
 
-    voucher = _claim_voucher_from_pool(db, pool_id=tier, ledger_id=ledger.get("_id"), user_id=int(referrer_id), now_utc=now_utc)
-    if voucher:
-        db.affiliate_ledger.update_one(
-            {"_id": ledger["_id"]},
-            {"$set": {"status": "ISSUED", "voucher_code": voucher.get("code"), "updated_at": now_utc}},
-        )
-    else:
-        db.affiliate_ledger.update_one({"_id": ledger["_id"]}, {"$set": {"status": "OUT_OF_STOCK", "updated_at": now_utc}})
-    return db.affiliate_ledger.find_one({"_id": ledger["_id"]})
+        kl_dt = KL_TZ.localize(datetime(int(prev_yyyymm[:4]), int(prev_yyyymm[4:6]), 15, 12, 0, 0))
+        m_start_utc, m_end_utc, _ = _month_window_utc(kl_dt.astimezone(timezone.utc))
+        if tier in {"T2", "T3"}:
+            flags = _risk_flags_for_referrer_month(db, referrer_id=uid, start_utc=m_start_utc, end_utc=m_end_utc)
+            if flags:
+                db.affiliate_ledger.update_one(
+                    {"_id": ledger["_id"]},
+                    {"$set": {"status": "PENDING_REVIEW", "risk_flags": flags, "updated_at": now_utc}},
+                )
+                logger.info("affiliate_monthly_settle uid=%s tier=%s status=%s", uid, tier, "PENDING_REVIEW")
+                continue
+
+        voucher = _claim_voucher_from_pool(db, pool_id=tier, ledger_id=ledger.get("_id"), user_id=uid, now_utc=now_utc)
+        if voucher:
+            db.affiliate_ledger.update_one(
+                {"_id": ledger["_id"]},
+                {"$set": {"status": "ISSUED", "voucher_code": voucher.get("code"), "updated_at": now_utc}},
+            )
+            logger.info("affiliate_monthly_settle uid=%s tier=%s status=%s", uid, tier, "ISSUED")
+        else:
+            db.affiliate_ledger.update_one({"_id": ledger["_id"]}, {"$set": {"status": "OUT_OF_STOCK", "updated_at": now_utc}})
+            logger.info("affiliate_monthly_settle uid=%s tier=%s status=%s", uid, tier, "OUT_OF_STOCK")
+        settled += 1
+
+    logger.info("affiliate_monthly_settle end prev_yyyymm=%s processed=%s settled=%s", prev_yyyymm, processed, settled)
+    return {"prev_yyyymm": prev_yyyymm, "processed": processed, "settled": settled}
 
 
 def mark_invitee_qualified(db, *, invitee_id: int, referrer_id: int | None, now_utc: datetime | None = None):

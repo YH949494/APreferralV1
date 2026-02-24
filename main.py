@@ -42,6 +42,7 @@ from affiliate_rewards import (
     ensure_affiliate_indexes,
     issue_welcome_bonus_if_eligible,
     record_user_last_seen,
+    settle_previous_month_affiliate_rewards,
 )
 from telegram_utils import safe_reply_text
 
@@ -3148,6 +3149,13 @@ def run_worker():
         trigger=CronTrigger(day=1, hour=0, minute=0, timezone=KL_TZ),
         id="monthly_vip",
         name="Monthly VIP Status Update",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        lambda: settle_previous_month_affiliate_rewards(db, now_utc=datetime.now(timezone.utc), batch_limit=1000),
+        trigger=CronTrigger(day=1, hour=0, minute=10, timezone=KL_TZ),
+        id="affiliate_monthly_settle",
+        name="Affiliate Monthly Settle (Prev Month)",
         replace_existing=True,
     )
     scheduler.add_job(
