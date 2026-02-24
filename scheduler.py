@@ -780,6 +780,10 @@ def _simulate_pool_for_gate_day(gate_day: int) -> str:
     return "T4"
 
 
+def _simulated_ledger_dedup_key(*, inviter_user_id: int, invitee_user_id: int, gate_day: int, tier: str) -> str:
+    return f"SIM_GATE:{int(inviter_user_id)}:{int(invitee_user_id)}:{int(gate_day)}:{tier}"
+
+
 def _derive_abuse_flags_for_invitee(invitee_user_id: int, now_utc_ts: datetime) -> list[str]:
     flags = []
     try:
@@ -841,13 +845,20 @@ def evaluate_affiliate_simulated_ledgers(batch_limit: int = 500) -> int:
             if age_days < gate_day:
                 continue
 
+            tier = _simulate_pool_for_gate_day(gate_day)
+
             try:
                 status = _get_chat_member_status(invitee_user_id)
                 still_in_group = status in {"member", "administrator", "creator"}
             except Exception:
                 still_in_group = False
 
-            dedup_key = f"SIM:{inviter_user_id}:{invitee_user_id}:{gate_day}"
+            dedup_key = _simulated_ledger_dedup_key(
+                inviter_user_id=inviter_user_id,
+                invitee_user_id=invitee_user_id,
+                gate_day=gate_day,
+                tier=tier,
+            )
             db.affiliate_ledger.update_one(
                 {"dedup_key": dedup_key},
                 {
@@ -856,8 +867,8 @@ def evaluate_affiliate_simulated_ledgers(batch_limit: int = 500) -> int:
                         "user_id": int(inviter_user_id),
                         "invitee_user_id": int(invitee_user_id),
                         "year_month": None,
-                        "tier": _simulate_pool_for_gate_day(gate_day),
-                        "pool_id": _simulate_pool_for_gate_day(gate_day),
+                        "tier": tier,
+                        "pool_id": tier,
                         "status": "SIMULATED_PENDING",
                         "dedup_key": dedup_key,
                         "voucher_code": None,
@@ -886,7 +897,7 @@ def evaluate_affiliate_simulated_ledgers(batch_limit: int = 500) -> int:
                     "$set": {
                         "status": "SIMULATED_PENDING",
                         "simulate": True,
-                        "would_issue_pool": _simulate_pool_for_gate_day(gate_day),
+                        "would_issue_pool": tier,
                         "gate_day": int(gate_day),
                         "evaluated_at_utc": now_utc_ts,
                         "still_in_group": bool(still_in_group),
