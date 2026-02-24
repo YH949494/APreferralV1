@@ -815,6 +815,19 @@
         <button class="tab-btn" data-tab="tab-vip" style="flex:1;padding:8px 10px;border:none;border-radius:6px;background:#eaf4ff;color:#007bff;cursor:pointer;">
           👑 VIP Tier 1
         </button>
+        <button class="tab-btn"
+                data-tab="tab-how"
+                id="tab-btn-how"
+                style="flex:1;padding:8px 10px;border:none;border-radius:6px;background:#eaf4ff;color:#007bff;cursor:pointer;display:none;">
+          🎯 How It Works
+        </button>
+
+        <button class="tab-btn"
+                data-tab="tab-affiliate"
+                id="tab-btn-affiliate"
+                style="flex:1;padding:8px 10px;border:none;border-radius:6px;background:#eaf4ff;color:#007bff;cursor:pointer;display:none;">
+          👑 Affiliate
+        </button>
       </div>
 
       <div id="tab-event" class="tab-panel active" style="text-align:left;">
@@ -887,6 +900,59 @@
         </ul>
       </div>
 
+      <div id="tab-how" class="tab-panel" style="display:none; text-align:left;">
+        <p><b>🎯 How It Works</b></p>
+        <hr style="border:none;border-top:1px solid #ddd;margin:10px 0;">
+
+        <p><b>1️⃣ Check-in Daily</b></p>
+        <ul style="list-style:none;padding-left:0;line-height:1.6;">
+          <li>+20 XP per day</li>
+          <li>Streak bonuses unlock bigger XP</li>
+        </ul>
+
+        <p><b>2️⃣ Invite Friends</b></p>
+        <ul style="list-style:none;padding-left:0;line-height:1.6;">
+          <li>Earn XP per qualified referral</li>
+          <li>Bonus XP after 3 successful referrals</li>
+        </ul>
+
+        <p><b>3️⃣ Reach 800 Monthly XP</b></p>
+        <ul style="list-style:none;padding-left:0;line-height:1.6;">
+          <li>Unlock VIP Tier 1</li>
+          <li>Access exclusive voucher pool</li>
+        </ul>
+
+        <p><b>4️⃣ Stay Active</b></p>
+        <ul style="list-style:none;padding-left:0;line-height:1.6;">
+          <li>Top 10 weekly XP earn extra voucher</li>
+          <li>#ComebackIsReal weekly reward chance</li>
+        </ul>
+      </div>
+
+      <div id="tab-affiliate" class="tab-panel" style="display:none; text-align:left;">
+        <p><b>👑 Affiliate Program</b></p>
+        <hr style="border:none;border-top:1px solid #ddd;margin:10px 0;">
+
+        <p><b>Build Your Tier (Monthly)</b></p>
+        <ul style="list-style:none;padding-left:0;line-height:1.6;">
+          <li>T1 — 3 qualified referrals</li>
+          <li>T2 — 8 qualified referrals</li>
+          <li>T3 — 15 qualified referrals</li>
+          <li>T4 — 25 qualified referrals</li>
+        </ul>
+
+        <p><b>What Counts As Qualified?</b></p>
+        <ul style="list-style:none;padding-left:0;line-height:1.6;">
+          <li>Joined via your referral link</li>
+          <li>Stayed minimum 7 days</li>
+          <li>Active check-in</li>
+        </ul>
+
+        <p style="font-size:12px;color:#666;">
+          Tiers refresh monthly.
+        </p>
+      </div>
+
       <button id="closeInfoHub" style="margin-top:20px;padding:10px 20px;background:#007bff;color:#fff;border:none;border-radius:8px;cursor:pointer;width:100%;">
         Close
       </button>
@@ -944,6 +1010,11 @@
   </script>
 
   <script>
+    window.FEATURE_FLAGS = {
+      SHOW_INFO_HOW_IT_WORKS: true,
+      SHOW_INFO_AFFILIATE: false
+    };
+
     function getAdminSecret() {
       const sp = new URLSearchParams(location.search);
       const param = (sp.get("admin_secret") || "").trim();
@@ -3520,7 +3591,19 @@ ${referral}`;
         });
       }
 
-      document.addEventListener("DOMContentLoaded", initInfoHub);
+      document.addEventListener("DOMContentLoaded", function() {
+        if (window.FEATURE_FLAGS.SHOW_INFO_HOW_IT_WORKS) {
+          const btn = document.getElementById("tab-btn-how");
+          if (btn) btn.style.display = "block";
+        }
+
+        if (window.FEATURE_FLAGS.SHOW_INFO_AFFILIATE) {
+          const btn = document.getElementById("tab-btn-affiliate");
+          if (btn) btn.style.display = "block";
+        }
+
+        initInfoHub();
+      });
       window.addEventListener("load", initInfoHub);
     })();      
   </script>
