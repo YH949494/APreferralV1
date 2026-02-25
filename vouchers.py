@@ -4,6 +4,7 @@ from pymongo.errors import OperationFailure, PyMongoError, DuplicateKeyError, Bu
 from bson.objectid import ObjectId
 from datetime import datetime, timedelta, timezone
 import threading
+import random
 import requests
 import time
 from config import KL_TZ
@@ -26,6 +27,7 @@ tg_verification_queue_col = db["tg_verification_queue"]
 voucher_claims_col = db["voucher_claims"]
 invite_link_map_collection = db["invite_link_map"]
 miniapp_sessions_daily_col = db["miniapp_sessions_daily"]
+request_dedup_col = db["request_dedup"]
 REFERRAL_SNAPSHOT_STALE_SEC = 21600
 
 
@@ -460,6 +462,7 @@ def ensure_voucher_indexes():
     claim_rate_limits_col.create_index([("key", ASCENDING)], unique=True)
     claim_rate_limits_col.create_index([("expiresAt", ASCENDING)], expireAfterSeconds=0)
     claim_rate_limits_col.create_index([("scope", ASCENDING), ("ip", ASCENDING), ("day", ASCENDING)])
+    _ensure_request_dedup_ttl_index()
     profile_photo_cache_col.create_index([("uid", ASCENDING)], unique=True)
     profile_photo_cache_col.create_index([("expiresAt", ASCENDING)], expireAfterSeconds=0)
     welcome_tickets_col.create_index([("uid", ASCENDING)], unique=True)
@@ -853,6 +856,10 @@ def _set_session_cooldown(
     )
 
 
+_REQUEST_DEDUP_TTL_READY = False
+_REQUEST_DEDUP_TTL_LOCK = threading.Lock()
+
+
 def _session_cooldown_payload(retry_seconds: int) -> dict:
     return {
         "ok": False,
@@ -862,6 +869,47 @@ def _session_cooldown_payload(retry_seconds: int) -> dict:
         "message": f"Please try again in {int(retry_seconds)} seconds.",
     }
  
+
+def _ensure_request_dedup_ttl_index() -> None:
+    global _REQUEST_DEDUP_TTL_READY
+    if _REQUEST_DEDUP_TTL_READY:
+        return
+    try:
+        with _REQUEST_DEDUP_TTL_LOCK:
+            if _REQUEST_DEDUP_TTL_READY:
+                return
+            _ensure_index_if_missing(
+                request_dedup_col,
+                "ttl_request_dedup_expiresAt",
+                [("expiresAt", ASCENDING)],
+                expireAfterSeconds=0,
+            )
+            _REQUEST_DEDUP_TTL_READY = True
+    except Exception:
+        # Best-effort: dedup still works even if TTL creation races/fails temporarily.
+        pass
+
+
+def _acquire_request_dedup_lock(*, drop_id: str, uid: int | None, ttl_seconds: int = 2) -> bool:
+    _ensure_request_dedup_ttl_index()
+    now = now_utc()
+    dedup_key = f"dedup:drop:{drop_id}:uid:{uid or 'anon'}"
+    existing = request_dedup_col.find_one_and_update(
+        {"_id": dedup_key},
+        {
+            "$setOnInsert": {
+                "_id": dedup_key,
+                "drop_id": str(drop_id),
+                "uid": uid if uid is not None else "anon",
+                "createdAt": now,
+                "expiresAt": now + timedelta(seconds=ttl_seconds),
+            }
+        },
+        upsert=True,
+        return_document=ReturnDocument.BEFORE,
+    )
+    return existing is None
+
 
 def _parse_ipv4(value: str) -> list[int] | None:
     parts = value.split(".")
@@ -3247,7 +3295,10 @@ def api_claim():
  
     if not user_id:
         return jsonify({"status": "error", "code": "auth_failed", "why": "missing_user_id"}), 401
-     
+
+    if not drop_id:
+        return jsonify({"status": "error", "code": "missing_drop_id"}), 400
+
     try:
         uid = int(tg_user["id"])
     except Exception:
@@ -3259,6 +3310,15 @@ def api_claim():
         auth_date=(data or {}).get("auth_date"),
         query_id=(data or {}).get("query_id"),
     )
+
+    # Short-lived dedup lock collapses duplicate clicks during lag before heavy checks run.
+    if not _acquire_request_dedup_lock(drop_id=str(drop_id), uid=uid, ttl_seconds=5):
+        return jsonify({
+            "status": "error",
+            "code": "busy",
+            "message": "High traffic — retry in 2–3 seconds.",
+            "retry_after_sec": 2,
+        }), 429
  
     user_doc = None
     if uid is not None:
@@ -3270,9 +3330,6 @@ def api_claim():
  
     fallback_username = _guess_username(request, body)
     fallback_user_id = _guess_user_id(request, body)
-
-    if not drop_id:
-        return jsonify({"status": "error", "code": "missing_drop_id"}), 400
 
     voucher = drop or {}
 
@@ -3347,15 +3404,17 @@ def api_claim():
     client_ip = _get_client_ip(request)
     client_subnet = _compute_subnet_key(client_ip) 
     is_pool_drop = _is_pool_drop(voucher, audience_type)
-    current_app.logger.info(
-        "[claim][client_ip] remote_addr=%s fly_client_ip=%s x_forwarded_for=%s x_real_ip=%s chosen_ip=%s subnet=%s",
-        request.remote_addr,
-        request.headers.get("Fly-Client-IP"),
-        request.headers.get("X-Forwarded-For"),
-        request.headers.get("X-Real-IP"),
-        client_ip,
-        client_subnet,
-    )
+    # Sample claim IP logs during bursts to reduce log amplification while preserving visibility.
+    if random.random() < 0.01:
+        current_app.logger.debug(
+            "[claim][client_ip] remote_addr=%s fly_client_ip=%s x_forwarded_for=%s x_real_ip=%s chosen_ip=%s subnet=%s",
+            request.remote_addr,
+            request.headers.get("Fly-Client-IP"),
+            request.headers.get("X-Forwarded-For"),
+            request.headers.get("X-Real-IP"),
+            client_ip,
+            client_subnet,
+        )
  
     if is_pool_drop and not _is_new_joiner_audience(audience_type):
         if not check_channel_subscribed(uid):

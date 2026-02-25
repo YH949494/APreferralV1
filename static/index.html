@@ -1145,6 +1145,7 @@
     const tg = window.Telegram?.WebApp;
 
     const API_V2 = "/v2/miniapp";
+    window.__claimInFlight = false;
     let latestInitData = "";
     let dropModeEnabled = false;
     let dropModeLifted = false;
@@ -2735,6 +2736,24 @@ Active players win more.
       const dropId = claimBtn.getAttribute("data-dropid") || claimBtn.getAttribute("data-claim");
       if (!dropId) return;
 
+      if (window.__claimInFlight) return;
+      window.__claimInFlight = true;
+
+      const originalText = claimBtn.textContent;
+      const wasDisabled = claimBtn.disabled;
+      let claimSafetyTimer = setTimeout(() => {
+        window.__claimInFlight = false;
+        if (document.body.contains(claimBtn)) {
+          claimBtn.disabled = wasDisabled;
+          if (claimBtn.textContent === "Claiming…") {
+            claimBtn.textContent = originalText;
+          }
+        }
+      }, 10000);
+
+      claimBtn.setAttribute("disabled", "disabled");
+      claimBtn.textContent = "Claiming…";
+
       try {
         const res = await v2Fetch(`${API_V2}/vouchers/claim`, {
           method: "POST",
@@ -2760,7 +2779,37 @@ Active players win more.
             retry_after_sec: payload?.retry_after_sec
           });
           const uiModel = claimErrorToUi(payload, res.status);
-          if (payload?.code === "sold_out") {
+          let isBusy = false;
+          let scheduledBusyRetry = false;
+          isBusy = (res.status === 429 && payload?.code === "busy");
+          if (isBusy) {
+            const retryKey = String(dropId);
+            if (claimBtn.dataset.busyRetryKey && claimBtn.dataset.busyRetryKey !== retryKey) {
+              delete claimBtn.dataset.busyRetried;
+              delete claimBtn.dataset.busyRetryKey;
+            }
+            const alreadyRetried = claimBtn.dataset.busyRetried === "1" && claimBtn.dataset.busyRetryKey === retryKey;
+            renderClaimError(uiModel, {
+              retryHandler: () => {
+                if (document.body.contains(claimBtn)) {
+                  claimBtn.click();
+                }
+              }
+            });
+            if (!alreadyRetried) {
+              claimBtn.dataset.busyRetried = "1";
+              claimBtn.dataset.busyRetryKey = retryKey;
+              const retryAfterSec = Number(payload?.retry_after_sec) || 2;
+              const delayMs = (retryAfterSec * 1000) + Math.floor(Math.random() * 501);
+              setTimeout(() => {
+                if (document.body.contains(claimBtn)) {
+                  claimBtn.click();
+                }
+              }, delayMs);
+              scheduledBusyRetry = true;
+            }
+          }
+          if (!isBusy && payload?.code === "sold_out") {
             const soldOutMessage = payload?.message || "Today’s vouchers are fully claimed.";
             if (claimBtn.id === "campaign-voucher-btn") {
               showVoucherSoldOut(soldOutMessage);
@@ -2769,49 +2818,54 @@ Active players win more.
               claimBtn.setAttribute("disabled", "disabled");
             }
           }
-          renderClaimError(uiModel, {
-            retryHandler: () => {
-              if (document.body.contains(claimBtn)) {
-                claimBtn.click();
+          if (!isBusy && !scheduledBusyRetry) {
+            renderClaimError(uiModel, {
+              retryHandler: () => {
+                if (document.body.contains(claimBtn)) {
+                  claimBtn.click();
+                }
               }
+            });
+          }
+        }
+
+        if (ok) {
+          clearClaimError();
+          delete claimBtn.dataset.busyRetried;
+          delete claimBtn.dataset.busyRetryKey;
+          const codeText = out?.voucher?.code ? String(out.voucher.code) : "(no code)";
+          const claimedAt = out?.voucher?.claimedAt ? fmtKL(out.voucher.claimedAt) : "-";
+
+          let copySuccess = false;
+          if (codeText && codeText !== "(no code)" && navigator?.clipboard?.writeText) {
+            try {
+              await navigator.clipboard.writeText(codeText);
+              copySuccess = true;
+            } catch (errCopy) {
+              console.warn("Auto-copy failed", errCopy);
             }
-          });
-          return;
-        }
-
-        clearClaimError();        
-        const codeText = out?.voucher?.code ? String(out.voucher.code) : "(no code)";
-        const claimedAt = out?.voucher?.claimedAt ? fmtKL(out.voucher.claimedAt) : "-";
-
-        let copySuccess = false;
-        if (codeText && codeText !== "(no code)" && navigator?.clipboard?.writeText) {
-          try {
-            await navigator.clipboard.writeText(codeText);
-            copySuccess = true;
-          } catch (errCopy) {
-            console.warn("Auto-copy failed", errCopy);
           }
-        }
 
-        if (claimBtn.id === "campaign-voucher-btn") {
-          const messageEl = document.getElementById("campaign-voucher-message");
-          if (messageEl) {
-            messageEl.innerText = codeText;
+          if (claimBtn.id === "campaign-voucher-btn") {
+            const messageEl = document.getElementById("campaign-voucher-message");
+            if (messageEl) {
+              messageEl.innerText = codeText;
+            }
+            claimBtn.textContent = "📋 Copy to clipboard";
+            claimBtn.removeAttribute("data-dropid");
+            claimBtn.removeAttribute("data-claim");
+            claimBtn.dataset.copyCode = codeText;
+            claimBtn.removeAttribute("disabled");
+          } else {
+            claimBtn.textContent = "View Code";
+            ensureCodeBlock(claimBtn, codeText);
           }
-          claimBtn.textContent = "📋 Copy to clipboard";
-          claimBtn.removeAttribute("data-dropid");
-          claimBtn.removeAttribute("data-claim");
-          claimBtn.dataset.copyCode = codeText;
-          claimBtn.removeAttribute("disabled");
-        } else {
-          claimBtn.textContent = "View Code";
-          ensureCodeBlock(claimBtn, codeText);
-        }
 
-        const copyMsg = copySuccess
-          ? "\n\n✅ Code copied to clipboard."
-          : "\n\n📋 Tap the copy button below if clipboard access is blocked.";
-        alert(`🎟️ Your code: ${codeText}\nClaimed at: ${claimedAt}${copyMsg}`);
+          const copyMsg = copySuccess
+            ? "\n\n✅ Code copied to clipboard."
+            : "\n\n📋 Tap the copy button below if clipboard access is blocked.";
+          alert(`🎟️ Your code: ${codeText}\nClaimed at: ${claimedAt}${copyMsg}`);
+        }
         
       } catch (err) {
         console.error("Claim request failed", err);
@@ -2822,6 +2876,15 @@ Active players win more.
             }
           }
         });
+      } finally {
+        clearTimeout(claimSafetyTimer);
+        window.__claimInFlight = false;
+        if (document.body.contains(claimBtn)) {
+          claimBtn.disabled = wasDisabled;
+          if (claimBtn.textContent === "Claiming…") {
+            claimBtn.textContent = originalText;
+          }
+        }
       }
     });
 
