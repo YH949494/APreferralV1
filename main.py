@@ -2848,7 +2848,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await safe_reply_text(
                 message,
                 "👋 Welcome to AdvantPlay Community!\n\n"
-                "Earn rewards in 3 easy steps:\n\n"
+                "Before you start 👇:\n\n"      
+                "📣 Channel subscribers get:\n" 
+                "• ⚡ Voucher drops\n"
+                "• 🎁 Extra bonus campaigns\n"
+                "• 👑 VIP-only announcements\n\n"                
+                "Then earn rewards in 3 easy steps:\n\n"
                 "• ✅ Check-in daily  \n"
                 "• 🔗 Invite friends  \n"
                 "• 🎁 Claim voucher  \n\n"
