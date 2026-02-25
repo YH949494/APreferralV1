@@ -569,6 +569,14 @@
     #tab-how::-webkit-scrollbar-track {
       background: transparent;
     }
+
+    /* Info Hub: scroll only XP tab */
+    .infohub-scroll {
+      max-height: 46vh;
+      overflow: auto;
+      padding-right: 6px;
+      -webkit-overflow-scrolling: touch;
+    }
   </style>
 </head>
 <body>
@@ -860,37 +868,39 @@
         </p>
       </div>
 
-      <div id="tab-xp" class="tab-panel" style="text-align:left;display:none;">
-        <p style="margin:0 0 6px 0;"><b>Weekly Top 10 XP = Extra Voucher Code</b></p>
-        <hr style="border:none;border-top:1px solid #ddd;margin:10px 0;">
+      <div id="tab-xp" class="tab-panel" style="display:none; text-align:left;">
+        <div class="infohub-scroll">
+          <p style="margin:0 0 6px 0;"><b>Weekly Top 10 XP = Extra Voucher Code</b></p>
+          <hr style="border:none;border-top:1px solid #ddd;margin:10px 0;">
 
-        <p><b>How to Earn XP</b></p>
+          <p><b>How to Earn XP</b></p>
 
-        <p><b>✅ Daily Check-in</b></p>
-        <ul style="list-style:none;padding:0;line-height:1.6;">
-          <li>+20 XP daily</li>
-        </ul>
+          <p><b>✅ Daily Check-in</b></p>
+          <ul style="list-style:none;padding:0;line-height:1.6;">
+            <li>+20 XP daily</li>
+          </ul>
 
-        <p><b>🔥 Streak Bonus</b></p>
-        <ul style="list-style:none;padding:0;line-height:1.6;">
-          <li>7d +50 XP</li>
-          <li>14d +150 XP</li>
-          <li>28d +300 XP</li>
-          <li>56d +600 XP</li>
-          <li>84d +900 XP</li>
-          <li>112d +1200 XP</li>
-        </ul>
+          <p><b>🔥 Streak Bonus</b></p>
+          <ul style="list-style:none;padding:0;line-height:1.6;">
+            <li>7d +50 XP</li>
+            <li>14d +150 XP</li>
+            <li>28d +300 XP</li>
+            <li>56d +600 XP</li>
+            <li>84d +900 XP</li>
+            <li>112d +1200 XP</li>
+          </ul>
 
-        <p><b>🔗 Referral</b></p>
-        <ul style="list-style:none;padding:0;line-height:1.6;">
-          <li>+30 XP per referral</li>
-          <li>3 referrals → +200 XP bonus</li>
-        </ul>
+          <p><b>🔗 Referral</b></p>
+          <ul style="list-style:none;padding:0;line-height:1.6;">
+            <li>+30 XP per referral</li>
+            <li>3 referrals → +200 XP bonus</li>
+          </ul>
 
-        <p><b>📸 #mywin</b></p>
-        <ul style="list-style:none;padding:0;line-height:1.6;">
-          <li>+20 XP per valid submission</li>
-        </ul>
+          <p><b>📸 #mywin</b></p>
+          <ul style="list-style:none;padding:0;line-height:1.6;">
+            <li>+20 XP per valid submission</li>
+          </ul>
+        </div>
       </div>
 
       <div id="tab-vip" class="tab-panel" style="text-align:left;display:none;">
@@ -949,6 +959,8 @@
             targetPanel.classList.add("active");
             targetPanel.style.display = "block";
           }
+          const xpScroll = document.querySelector("#tab-xp .infohub-scroll");
+          if (xpScroll) xpScroll.scrollTop = 0;
         });
       });
     })();
