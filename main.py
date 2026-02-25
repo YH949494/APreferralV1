@@ -37,7 +37,7 @@ from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_MISSED
 from app_context import set_app_bot, set_bot, set_scheduler
 from onboarding import MYWIN_CHAT_ID, onboarding_due_tick, record_first_mywin, record_first_checkin
 from vouchers import vouchers_bp, ensure_voucher_indexes, process_verification_queue
-from scheduler import settle_pending_referrals, settle_referral_snapshots, settle_xp_snapshots, evaluate_affiliate_simulated_ledgers, compute_affiliate_daily_kpi_yesterday
+from scheduler import settle_pending_referrals, settle_referral_snapshots, settle_xp_snapshots, evaluate_affiliate_simulated_ledgers, compute_affiliate_daily_kpi_yesterday, run_invitee_subscription_audit
 from affiliate_rewards import (
     ensure_affiliate_indexes,
     record_user_last_seen,
@@ -55,6 +55,7 @@ FIRST_CHECKIN_BONUS_XP = int(os.getenv("FIRST_CHECKIN_BONUS_XP", "200"))
 WELCOME_BONUS_XP = int(os.getenv("WELCOME_BONUS_XP", "20"))
 WELCOME_WINDOW_HOURS = int(os.getenv("WELCOME_WINDOW_HOURS", "48"))
 WELCOME_WINDOW_DAYS = 7
+INVITEE_SUB_AUDIT_HOURS = int(os.getenv("INVITEE_SUB_AUDIT_HOURS", "1"))
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -3182,6 +3183,14 @@ def run_worker():
         trigger=CronTrigger(hour=0, minute=20, timezone=timezone.utc),
         id="affiliate_daily_kpi",
         name="Affiliate Daily KPI Snapshot",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        run_invitee_subscription_audit,
+        trigger="interval",
+        hours=max(1, INVITEE_SUB_AUDIT_HOURS),
+        id="invitee_subscription_audit",
+        name="Invitee Subscription Audit",
         replace_existing=True,
     )
     scheduler.start()
