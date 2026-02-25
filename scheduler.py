@@ -28,6 +28,12 @@ API_BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"
 REFERRAL_HOLD_HOURS = 12
 REFERRAL_CHANNEL_RETRY_HOURS = 12
 REFERRAL_CHANNEL_EXPIRE_DAYS = 7
+INVITEE_SUB_AUDIT_ENABLED = os.getenv("INVITEE_SUB_AUDIT_ENABLED", "1") == "1"
+MAX_INVITEE_SUB_CHECKS_PER_RUN = int(os.getenv("MAX_INVITEE_SUB_CHECKS_PER_RUN", "800"))
+SUB_CACHE_TTL_DAYS = int(os.getenv("SUB_CACHE_TTL_DAYS", "14"))
+RECENT_CHECK_SKIP_HOURS = int(os.getenv("RECENT_CHECK_SKIP_HOURS", "6"))
+TG_GETCHATMEMBER_TIMEOUT_SEC = int(os.getenv("TG_GETCHATMEMBER_TIMEOUT_SEC", "5"))
+TG_REQUEST_SLEEP_MS = int(os.getenv("TG_REQUEST_SLEEP_MS", "80"))
 
 KL_TZ = pytz.timezone("Asia/Kuala_Lumpur")
 
@@ -306,6 +312,112 @@ def compute_affiliate_daily_kpi_yesterday() -> dict:
     ensure_affiliate_daily_kpi_indexes()
     target_day = (now_utc() - timedelta(days=1)).date().isoformat()
     return compute_affiliate_daily_kpi(target_day)
+
+
+def run_invitee_subscription_audit(now_utc_ts=None, db_ref=None) -> dict:
+    db_ref = db_ref or db
+    now_utc_ts = now_utc_ts or now_utc()
+    started = time.monotonic()
+    if not INVITEE_SUB_AUDIT_ENABLED:
+        logger.info("[SUB_AUDIT] disabled")
+        return {"disabled": True}
+    if OFFICIAL_CHANNEL_ID is None:
+        logger.warning("[SUB_AUDIT] skip reason=channel_unset")
+        return {"skipped": "channel_unset"}
+    if not BOT_TOKEN:
+        logger.warning("[SUB_AUDIT] skip reason=missing_token")
+        return {"skipped": "missing_token"}
+
+    scan_start = now_utc_ts - timedelta(days=3)
+    logger.info("[SUB_AUDIT] start scan_start=%s limit=%s", scan_start.isoformat(), MAX_INVITEE_SUB_CHECKS_PER_RUN)
+
+    scanned = checked = subscribed_true = subscribed_false = skipped_recent = errors = 0
+    recent_cutoff = now_utc_ts - timedelta(hours=RECENT_CHECK_SKIP_HOURS)
+    ttl_expire_at = now_utc_ts + timedelta(days=SUB_CACHE_TTL_DAYS)
+    cursor = db_ref.pending_referrals.find(
+        {"created_at_utc": {"$gte": scan_start}},
+        {"invitee_user_id": 1, "created_at_utc": 1},
+    ).sort("created_at_utc", -1).limit(MAX_INVITEE_SUB_CHECKS_PER_RUN)
+
+    for row in cursor:
+        scanned += 1
+        uid = row.get("invitee_user_id")
+        if uid is None or not isinstance(uid, int):
+            continue
+
+        cache_doc = db_ref.subscription_cache.find_one(
+            {"user_id": uid},
+            {"checked_at": 1, "first_subscribed_at_utc": 1},
+        ) or {}
+        checked_at = _coerce_utc(cache_doc.get("checked_at"))
+        if checked_at and checked_at >= recent_cutoff:
+            skipped_recent += 1
+            continue
+
+        checked += 1
+        subscribed = False
+        try:
+            resp = requests.get(
+                f"{API_BASE}/getChatMember",
+                params={"chat_id": OFFICIAL_CHANNEL_ID, "user_id": uid},
+                timeout=TG_GETCHATMEMBER_TIMEOUT_SEC,
+            )
+            if resp.status_code != 200:
+                errors += 1
+                continue
+            payload = resp.json()
+            if not payload.get("ok"):
+                errors += 1
+                continue
+            status = ((payload.get("result") or {}).get("status") or "").lower()
+            subscribed = status in {"member", "administrator", "creator"}
+        except (RequestException, ValueError):
+            errors += 1
+            continue
+
+        if subscribed:
+            subscribed_true += 1
+        else:
+            subscribed_false += 1
+
+        update_doc = {
+            "$set": {
+                "user_id": uid,
+                "subscribed": subscribed,
+                "checked_at": now_utc_ts,
+                "updated_at": now_utc_ts,
+                "expireAt": ttl_expire_at,
+            }
+        }
+        if subscribed:
+            update_doc["$setOnInsert"] = {"first_subscribed_at_utc": now_utc_ts}
+            if not _coerce_utc(cache_doc.get("first_subscribed_at_utc")):
+                update_doc["$set"]["first_subscribed_at_utc"] = now_utc_ts
+
+        cache_id = f"sub:{uid}"
+        db_ref.subscription_cache.update_one({"_id": cache_id}, update_doc, upsert=True)
+        time.sleep(max(TG_REQUEST_SLEEP_MS, 0) / 1000.0)
+
+    duration_ms = int((time.monotonic() - started) * 1000)
+    logger.info(
+        "[SUB_AUDIT] done scanned=%s checked=%s subscribed_true=%s subscribed_false=%s skipped_recent=%s errors=%s duration_ms=%s",
+        scanned,
+        checked,
+        subscribed_true,
+        subscribed_false,
+        skipped_recent,
+        errors,
+        duration_ms,
+    )
+    return {
+        "scanned": scanned,
+        "checked": checked,
+        "subscribed_true": subscribed_true,
+        "subscribed_false": subscribed_false,
+        "skipped_recent": skipped_recent,
+        "errors": errors,
+        "duration_ms": duration_ms,
+    }
 
 
 
