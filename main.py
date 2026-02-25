@@ -2922,10 +2922,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "• ⚡ Voucher drops\n"
                 "• 🎁 Extra bonus campaigns\n"
                 "• 👑 VIP-only announcements\n\n"                
-                "Then earn rewards in 3 easy steps:\n\n"
-                "• ✅ Check-in daily  \n"
-                "• 🔗 Invite friends  \n"
-                "• 🎁 Claim voucher  \n\n"
+
                 "Start your journey here 👇",
                 reply_markup=InlineKeyboardMarkup(keyboard),
                 uid=user.id,
