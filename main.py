@@ -63,6 +63,8 @@ INSTANCE_ID = (os.getenv("FLY_MACHINE_ID") or os.getenv("FLY_ALLOC_ID") or f"{so
 
 LEADERBOARD_CACHE = {}  # key -> {"ts": epoch_seconds, "payload": dict}
 CACHE_TTL_SECONDS = 300
+REGION_IP_CACHE = {}  # ip -> {"ts": epoch_seconds, "region": str|None, "source": str}
+REGION_IP_CACHE_TTL_SECONDS = 3600
 
 def _running_under_gunicorn():
     return "gunicorn" in os.environ.get("SERVER_SOFTWARE", "").lower() or os.environ.get("GUNICORN_CMD_ARGS") is not None
@@ -88,6 +90,62 @@ def _job_prefix(job_id: str) -> str:
     if job_id == "monthly_vip":
         return "[JOB][MONTHLY]"
     return "[JOB][SCHED]"
+
+
+def _extract_client_ip(req):
+    fly_ip = (req.headers.get("Fly-Client-IP") or "").strip()
+    if fly_ip:
+        return fly_ip, "fly-client-ip"
+
+    xff = (req.headers.get("X-Forwarded-For") or "").strip()
+    if xff:
+        first_ip = xff.split(",", 1)[0].strip()
+        if first_ip:
+            return first_ip, "x-forwarded-for"
+
+    remote_ip = (req.remote_addr or "").strip()
+    if remote_ip:
+        return remote_ip, "remote-addr"
+
+    return None, "unknown"
+
+
+def _map_country_to_region(country_code):
+    code = (country_code or "").strip().upper()
+    if code == "MY":
+        return "Malaysia"
+    if code == "TH":
+        return "Thailand"
+    if code == "ID":
+        return "Indonesia"
+    if code:
+        return "Other"
+    return None
+
+
+def _get_region_from_ip(ip):
+    if not ip:
+        return None, "no-ip"
+
+    now_ts = time.time()
+    cached = REGION_IP_CACHE.get(ip)
+    if cached and (now_ts - cached.get("ts", 0) < REGION_IP_CACHE_TTL_SECONDS):
+        return cached.get("region"), f"cache:{cached.get('source', 'ipapi')}"
+
+    region = None
+    source = "ipapi"
+    try:
+        res = requests.get(f"https://ipapi.co/{ip}/json/", timeout=1.5)
+        if res.ok:
+            payload = res.json() or {}
+            region = _map_country_to_region(payload.get("country_code"))
+        else:
+            source = f"ipapi-http-{res.status_code}"
+    except Exception:
+        source = "ipapi-error"
+
+    REGION_IP_CACHE[ip] = {"ts": now_ts, "region": region, "source": source}
+    return region, source
 
 def _is_private_chat(update):
     chat = getattr(update, "effective_chat", None)
@@ -1727,6 +1785,17 @@ def api_region_status(user_id):
     if user and "region" in user:
         return jsonify({"region": user["region"], "locked": True})
     return jsonify({"region": None, "locked": False})
+
+
+@app.route("/api/region-by-ip", methods=["GET"])
+def api_region_by_ip():
+    ip, ip_source = _extract_client_ip(request)
+    region, geo_source = _get_region_from_ip(ip)
+    return jsonify({
+        "success": True,
+        "region": region,
+        "source": f"{ip_source}:{geo_source}",
+    })
 
 @app.route("/api/set-region/<int:user_id>", methods=["POST"])
 def api_set_region(user_id):

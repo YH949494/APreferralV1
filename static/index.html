@@ -573,23 +573,7 @@
 </head>
 <body>
 
-  <div class="section" id="region-section" style="display: none;">
-    <div class="section-header">
-      <h3>🌍 Select Your Region</h3>
-    </div>
-    <p class="section-subtext">Select your region to continue.</p>
-    <select id="region-select">
-      <option value="">-- Please choose --</option>
-      <option value="Malaysia">🇲🇾 Malaysia</option>
-      <option value="Thailand">🇹🇭 Thailand</option>
-      <option value="Indonesia">🇮🇩 Indonesia</option>
-      <option value="Other">🌐 Other</option>
-    </select>
-    <button class="btn btn-primary" onclick="setRegion()">Save Region</button>
-    <p id="region-message" class="region-hint"></p>
-  </div>
-
-  <div class="section" id="voucher-section" style="display: none;">
+  <div class="section" id="voucher-section" style="display: block;">
     <div class="section-header">
       <h3>🎟️ Campaign Rewards</h3>
       <span class="badge">HOT</span>
@@ -605,6 +589,32 @@
       <p id="voucher-code">Coming soon…</p>
       <button class="btn btn-ghost" onclick="copyVoucherCode()">📋 Copy to clipboard</button>
     </div>
+  </div>
+
+
+  <div class="section" id="progress-section" style="display: block;">
+    <div class="section-header">
+      <h3>🧭 Your Rewards Journey</h3>
+    </div>
+    <div id="progress-step-1">1) ✅ Check-in</div>
+    <div id="progress-step-2" style="opacity:0.6;">2) 🔗 Invite friends</div>
+    <div id="progress-step-3" style="opacity:0.6;">3) 🎁 Claim rewards</div>
+  </div>
+
+  <div class="section" id="region-section" style="display: none;">
+    <div class="section-header">
+      <h3>🌍 Select Your Region</h3>
+    </div>
+    <p class="section-subtext">Select your region to continue.</p>
+    <select id="region-select">
+      <option value="">-- Please choose --</option>
+      <option value="Malaysia">🇲🇾 Malaysia</option>
+      <option value="Thailand">🇹🇭 Thailand</option>
+      <option value="Indonesia">🇮🇩 Indonesia</option>
+      <option value="Other">🌐 Other</option>
+    </select>
+    <button class="btn btn-primary" onclick="setRegion()">Save Region</button>
+    <p id="region-message" class="region-hint"></p>
   </div>
 
   <div class="section" id="checkin-section">
@@ -650,6 +660,7 @@
     <div class="more-grid">
       <div class="more-actions">
         <a href="https://t.me/advantplayofficial" target="_blank" class="btn btn-ghost">📣 Official Channel</a>
+        <button type="button" class="btn btn-ghost" onclick="toggleLeaderboardSection()">🏆 Weekly Leaderboard</button>
         <button id="infoHubBtn" type="button" class="btn btn-ghost">ℹ️ Info Hub</button>
       </div>
       
@@ -816,166 +827,14 @@
   <!-- INFO HUB MODAL -->
   <div id="infoHubModal" style="display:none;position:fixed;z-index:1000;left:0;top:0;width:100%;height:100%;background-color:rgba(0,0,0,0.5);">
     <div style="background:#fff;margin:8% auto;padding:20px;border-radius:12px;width:92%;max-width:400px;text-align:left;">
-      <h2 style="margin-bottom:15px;">ℹ️ Info Hub</h2>
-
-      <div style="display:flex;gap:6px;margin-bottom:10px;">
-        <button class="tab-btn active" data-tab="tab-event" style="flex:1;padding:8px 10px;border:none;border-radius:6px;background:#007bff;color:#fff;cursor:pointer;">
-          🎉 Event
-        </button>
-        <button class="tab-btn" data-tab="tab-xp" style="flex:1;padding:8px 10px;border:none;border-radius:6px;background:#eaf4ff;color:#007bff;cursor:pointer;">
-          ⭐ XP
-        </button>
-        <button class="tab-btn" data-tab="tab-vip" style="flex:1;padding:8px 10px;border:none;border-radius:6px;background:#eaf4ff;color:#007bff;cursor:pointer;">
-          👑 VIP Tier 1
-        </button>
-        <button class="tab-btn"
-                data-tab="tab-how"
-                id="tab-btn-how"
-                style="flex:1;padding:8px 10px;border:none;border-radius:6px;background:#eaf4ff;color:#007bff;cursor:pointer;display:none;">
-          🎯 How It Works
-        </button>
-
-        <button class="tab-btn"
-                data-tab="tab-affiliate"
-                id="tab-btn-affiliate"
-                style="flex:1;padding:8px 10px;border:none;border-radius:6px;background:#eaf4ff;color:#007bff;cursor:pointer;display:none;">
-          👑 Affiliate
-        </button>
-      </div>
-
-      <div id="tab-event" class="tab-panel active" style="text-align:left;">
-        <hr style="border:none; border-top:1px solid #ddd; margin:12px 0;">
-        <p style="margin:0 0 6px 0;"><b>🎟 Surprise Voucher Drops</b></p>
-        <ul style="margin:0; padding:0; list-style:none; line-height:1.6;">
-          <li>⚡ Can happen <b>anytime</b> — stay alert!</li>
-        </ul>
-
-        <hr style="border:none; border-top:1px solid #eee; margin:8px 0;">
-
-        <p style="margin:0 0 6px 0;"><b>🏆 Top 10 Active Players</b></p>
-        <ul style="margin:0 0 10px 0; padding:0; list-style:none; line-height:1.6;">
-          <li>💸 Bonus vouchers distributed <b>Every Monday</b>.</li>
-        </ul>
-
-        <hr style="border:none; border-top:1px solid #eee; margin:8px 0;">
-
-        <p style="margin:0 0 6px 0;"><b>🔥 #ComebackIsReal (Weekly)</b></p>
-        <ul style="margin:0 0 10px 0; padding:0; list-style:none; line-height:1.6;">
-          <li>🎁 Winners’ vouchers drop <b>Every Thursday</b>.</li>
-        </ul>
-      </div>
-
-      <div id="tab-xp" class="tab-panel" style="display:none; text-align:left;">
-        <p style="margin:0 0 6px 0;"><b>Weekly Top 10 XP = Extra Voucher Code</b></p>
-        <hr style="border:none;border-top:1px solid #ddd;margin:10px 0;">
-
-        <p style="margin:0 0 8px 0;"><b>How to Earn XP</b></p>
-
-        <p style="margin:0 0 4px 0;"><b>✅ Check-in</b></p>
-        <ul style="margin:0 0 8px 0; padding:0; list-style:none; line-height:1.6;">
-          <li>- Daily Check-in: <b>+20 XP</b></li>
-        <li>- Streak bonus:</li>
-        <li style="margin-left:12px;">
-          7d <b>+50 XP</b> ·
-          14d <b>+150 XP</b> ·
-          28d <b>+300 XP</b>
-        </li>
-        <li style="margin-left:12px;">
-          56d <b>+600 XP</b> ·
-          84d <b>+900 XP</b> ·
-          112d <b>+1200 XP</b>
-        </li>
-        </ul>
-
-        <p style="margin:8px 0 4px 0;"><b>🔗 Referral</b></p>
-        <ul style="margin:0 0 8px 0; padding:0; list-style:none; line-height:1.6;">
-          <li>- Referral: <b>+60 XP</b> per member</li>
-          <li>- 3 successful referrals: <b>+400 XP</b> bonus</li>
-        </ul>
-
-        <p style="margin:8px 0 4px 0;"><b>📸 #mywin</b></p>
-        <ul style="margin:0; padding:0; list-style:none; line-height:1.6;">
-          <li>- #mywin submission: <b>+20 XP</b> each</li>
-        </ul>
-
-        <a href="https://t.me/+tgGbOPvp1p05NjA9" target="_blank" style="display:inline-block;margin-top:10px;margin-left:10px;background:#007bff;color:#fff;text-decoration:none;font-size:12px;padding:3px 8px;border-radius:6px;">
-          📸 Submit Now
-        </a>
-      </div>
-
-      <div id="tab-vip" class="tab-panel" style="display:none; text-align:left;">
-        <p style="margin-bottom:8px;"><b>VIP Tier 1 (Monthly)</b></p>
-        <ul style="margin:0; padding:0; list-style:none; line-height:1.6;">
-          <li>- Reach 800 Monthly XP → VIP Tier 1</li>
-          <li>- Below 800 at refresh → Back to Normal</li>
-          <li>- VIP unlocks Bonus Voucher</li>
-          <li>- VIP vouchers: limited, first come first served</li>
-        </ul>
-      </div>
-
-      <div id="tab-how"
-           class="tab-panel"
-           style="
-             display:none;
-             text-align:left;
-             max-height:300px;
-             overflow-y:auto;
-             padding-right:6px;
-             -webkit-overflow-scrolling:touch;
-           ">
-        <p><b>🎯 How It Works</b></p>
-        <hr style="border:none;border-top:1px solid #ddd;margin:10px 0;">
-
-        <p><b>1️⃣ Check-in Daily</b></p>
-        <ul style="list-style:none;padding-left:0;line-height:1.6;">
-          <li>+20 XP per day</li>
-          <li>Streak bonuses unlock bigger XP</li>
-        </ul>
-
-        <p><b>2️⃣ Invite Friends</b></p>
-        <ul style="list-style:none;padding-left:0;line-height:1.6;">
-          <li>Earn XP per qualified referral</li>
-          <li>Bonus XP after 3 successful referrals</li>
-        </ul>
-
-        <p><b>3️⃣ Reach 800 Monthly XP</b></p>
-        <ul style="list-style:none;padding-left:0;line-height:1.6;">
-          <li>Unlock VIP Tier 1</li>
-          <li>Access exclusive voucher pool</li>
-        </ul>
-
-        <p><b>4️⃣ Stay Active</b></p>
-        <ul style="list-style:none;padding-left:0;line-height:1.6;">
-          <li>Top 10 weekly XP earn extra voucher</li>
-          <li>#ComebackIsReal weekly reward chance</li>
-        </ul>
-      </div>
-
-      <div id="tab-affiliate" class="tab-panel" style="display:none; text-align:left;">
-        <p><b>👑 Affiliate Program</b></p>
-        <hr style="border:none;border-top:1px solid #ddd;margin:10px 0;">
-
-        <p><b>Build Your Tier (Monthly)</b></p>
-        <ul style="list-style:none;padding-left:0;line-height:1.6;">
-          <li>T1 — 3 qualified referrals</li>
-          <li>T2 — 8 qualified referrals</li>
-          <li>T3 — 15 qualified referrals</li>
-          <li>T4 — 25 qualified referrals</li>
-        </ul>
-
-        <p><b>What Counts As Qualified?</b></p>
-        <ul style="list-style:none;padding-left:0;line-height:1.6;">
-          <li>Joined via your referral link</li>
-          <li>Stayed minimum 7 days</li>
-          <li>Active check-in</li>
-        </ul>
-
-        <p style="font-size:12px;color:#666;">
-          Tiers refresh monthly.
-        </p>
-      </div>
-
-      <button id="closeInfoHub" style="margin-top:20px;padding:10px 20px;background:#007bff;color:#fff;border:none;border-radius:8px;cursor:pointer;width:100%;">
+      <h2 style="margin-bottom:10px;">ℹ️ How it works</h2>
+      <ol style="margin:0 0 10px 18px;padding:0;line-height:1.7;">
+        <li>Check-in daily</li>
+        <li>Invite friends</li>
+        <li>Claim rewards when available</li>
+      </ol>
+      <a href="https://telegra.ph/Advanced-Guide-Placeholder-01-01" target="_blank" class="btn btn-ghost" style="display:inline-block;text-decoration:none;">Advanced Guide</a>
+      <button id="closeInfoHub" style="margin-top:14px;padding:10px 20px;background:#007bff;color:#fff;border:none;border-radius:8px;cursor:pointer;width:100%;">
         Close
       </button>
     </div>
@@ -1767,6 +1626,9 @@
     const REWARDS_CACHE_KEY = "rewards_summary_cache_v3";
     const REWARDS_CACHE_TTL_MS = 60 * 1000;
     const REGION_STORAGE_KEY = "region";
+    const AUTO_REGION_ATTEMPTED_KEY = "auto_region_attempted_v1";
+    const OFFICIAL_CHANNEL_LINK = "https://t.me/advantplayofficial";
+    window.__didCheckinThisSession = false;
     const user = tg?.initDataUnsafe?.user || {};
     const userId = user.id;
     const username = user.username || user.first_name || "";
@@ -1798,30 +1660,71 @@
       return !!(getStoredRegion() || "").trim();
     }
 
+    function ssGet(key) {
+      try { return sessionStorage.getItem(key); } catch { return null; }
+    }
+
+    function ssSet(key, val) {
+      try { sessionStorage.setItem(key, val); } catch {}
+    }
+
+    function updateProgressJourney() {
+      const step1 = document.getElementById("progress-step-1");
+      const step2 = document.getElementById("progress-step-2");
+      const step3 = document.getElementById("progress-step-3");
+      if (!step1 || !step2 || !step3) return;
+      if (window.__didCheckinThisSession) {
+        step1.style.opacity = "0.8";
+        step2.style.opacity = "1";
+        step3.style.opacity = "0.6";
+      } else {
+        step1.style.opacity = "1";
+        step2.style.opacity = "0.6";
+        step3.style.opacity = "0.6";
+      }
+    }
+
     function applyRegionGate(regionValue = null) {
       const region = regionValue !== null ? regionValue : getStoredRegion();
       const hasRegion = !!(region && String(region).trim());
       const regionSection = document.getElementById("region-section");
       const regionMessage = document.getElementById("region-message");
-      const gatedSections = [
-        document.getElementById("voucher-section"),
-        document.getElementById("checkin-section"),
-        document.getElementById("referral-section"),
-        document.getElementById("leaderboard-section"),
-        document.getElementById("more-section")
-      ];
+      const voucherSection = document.getElementById("voucher-section");
+      const progressSection = document.getElementById("progress-section");
+      const checkinSection = document.getElementById("checkin-section");
+      const referralSection = document.getElementById("referral-section");
+      const leaderboardSection = document.getElementById("leaderboard-section");
+      const moreSection = document.getElementById("more-section");
+
+      if (voucherSection) voucherSection.style.display = "block";
+      if (progressSection) progressSection.style.display = "block";
 
       if (hasRegion) {
         if (regionSection) regionSection.style.display = "none";
-        gatedSections.forEach(section => {
-          if (section) section.style.display = "block";
-        });
+        if (checkinSection) checkinSection.style.display = "block";
+        if (referralSection) referralSection.style.display = window.__didCheckinThisSession ? "block" : "none";
+        if (leaderboardSection) leaderboardSection.style.display = "none";
+        if (moreSection) moreSection.style.display = "block";
       } else {
         if (regionSection) regionSection.style.display = "block";
         if (regionMessage) regionMessage.textContent = "Select your region to continue.";
-        gatedSections.forEach(section => {
-          if (section) section.style.display = "none";
-        });
+        if (checkinSection) checkinSection.style.display = "none";
+        if (referralSection) referralSection.style.display = "none";
+        if (leaderboardSection) leaderboardSection.style.display = "none";
+        if (moreSection) moreSection.style.display = "none";
+      }
+
+      updateProgressJourney();
+    }
+
+    function toggleLeaderboardSection() {
+      const leaderboardSection = document.getElementById("leaderboard-section");
+      if (!leaderboardSection) return;
+      const shouldShow = leaderboardSection.style.display === "none" || !leaderboardSection.style.display;
+      leaderboardSection.style.display = shouldShow ? "block" : "none";
+      if (shouldShow) {
+        loadLeaderboard({ forceRefresh: true });
+        leaderboardSection.scrollIntoView({ behavior: "smooth", block: "start" });
       }
     }
 
@@ -1866,6 +1769,13 @@
         }
 
         if (data.success) {
+          window.__didCheckinThisSession = true;
+          applyRegionGate(getStoredRegion());
+          const referralSection = document.getElementById("referral-section");
+          if (referralSection) {
+            referralSection.style.display = "block";
+            referralSection.scrollIntoView({ behavior: "smooth", block: "start" });
+          }
           loadLeaderboard();
         }
 
@@ -2060,15 +1970,21 @@ Active players only 👇
       const primaryBtn = document.getElementById("campaign-voucher-btn");
       if (!primaryBtn) return;
       primaryBtn.style.display = "none";
+      primaryBtn.onclick = null;
       primaryBtn.removeAttribute("data-dropid");
       primaryBtn.removeAttribute("data-claim");
       primaryBtn.removeAttribute("data-copy-code");
       primaryBtn.removeAttribute("disabled");
+      const secondaryBtn = document.getElementById("campaign-voucher-channel-btn");
+      if (secondaryBtn) secondaryBtn.style.display = "none";
     }
 
     function showVoucherCopy(codeText) {
       const primaryBtn = document.getElementById("campaign-voucher-btn");
       if (!primaryBtn) return;
+      primaryBtn.onclick = null;
+      const secondaryBtn = document.getElementById("campaign-voucher-channel-btn");
+      if (secondaryBtn) secondaryBtn.style.display = "none";
       primaryBtn.textContent = "📋 Copy to clipboard";
       primaryBtn.removeAttribute("data-dropid");
       primaryBtn.removeAttribute("data-claim");
@@ -2080,6 +1996,9 @@ Active players only 👇
     function showVoucherClaim(dropId, disabled) {
       const primaryBtn = document.getElementById("campaign-voucher-btn");
       if (!primaryBtn) return;
+      primaryBtn.onclick = null;
+      const secondaryBtn = document.getElementById("campaign-voucher-channel-btn");
+      if (secondaryBtn) secondaryBtn.style.display = "none";
       primaryBtn.textContent = "🎟️ Claim now";
       primaryBtn.removeAttribute("data-copy-code");
       if (dropId) {
@@ -2099,16 +2018,36 @@ Active players only 👇
     function showVoucherSoldOut(messageText) {
       const primaryBtn = document.getElementById("campaign-voucher-btn");
       if (!primaryBtn) return;
-      primaryBtn.textContent = "All vouchers redeemed";
+      primaryBtn.textContent = "✅ Check-in now";
+      primaryBtn.removeAttribute("disabled");
       primaryBtn.removeAttribute("data-copy-code");
       primaryBtn.removeAttribute("data-dropid");
       primaryBtn.removeAttribute("data-claim");
-      primaryBtn.setAttribute("disabled", "disabled");
+      primaryBtn.onclick = () => checkIn();
       primaryBtn.style.display = "inline-block";
-      if (messageText) {
-        const messageEl = document.getElementById("campaign-voucher-message");
-        if (messageEl) messageEl.innerText = messageText;
+
+      const secondaryBtnId = "campaign-voucher-channel-btn";
+      let secondaryBtn = document.getElementById(secondaryBtnId);
+      if (!secondaryBtn) {
+        secondaryBtn = document.createElement("button");
+        secondaryBtn.id = secondaryBtnId;
+        secondaryBtn.type = "button";
+        secondaryBtn.className = "btn btn-ghost";
+        secondaryBtn.style.marginLeft = "8px";
+        primaryBtn.insertAdjacentElement("afterend", secondaryBtn);
       }
+      secondaryBtn.textContent = "📣 Join Channel";
+      secondaryBtn.onclick = () => {
+        if (tg?.openTelegramLink) {
+          tg.openTelegramLink(OFFICIAL_CHANNEL_LINK);
+        } else {
+          window.open(OFFICIAL_CHANNEL_LINK, "_blank");
+        }
+      };
+      secondaryBtn.style.display = "inline-block";
+
+      const messageEl = document.getElementById("campaign-voucher-message");
+      if (messageEl) messageEl.innerText = messageText || "Today’s vouchers are fully claimed.";
     }
 
     const CHANNEL_SUBSCRIBE_PROMPT = "Subscribe to @advantplayofficial to unlock";
@@ -2151,7 +2090,6 @@ Active players only 👇
         });
     }
 
-    const OFFICIAL_CHANNEL_LINK = "https://t.me/advantplayofficial";
     const PROFILE_PHOTO_SETTINGS_LINK = "tg://settings";
     let claimErrorCountdownTimer = null;
     
@@ -2254,8 +2192,8 @@ Active players only 👇
         }
 
         if (publicSoldOut) {
-          message.textContent = "All vouchers claimed.Stay active to catch the next one.";
-          btn.textContent = "All vouchers redeemed";
+          message.textContent = "Today’s vouchers are fully claimed.";
+          btn.textContent = "Sold out";
           btn.removeAttribute("data-dropid");
           btn.setAttribute("disabled", "disabled");
           btn.className = "btn btn-ghost";
@@ -2295,14 +2233,57 @@ Active players only 👇
         return;
       }
 
+      const liveDrops = [];
+      const pastDrops = [];
+      drops.forEach((drop) => {
+        const remaining = Number(drop?.visible_remaining ?? drop?.publicRemainingApprox ?? drop?.remainingApprox ?? 1);
+        const isEnded = drop?.isActive === false || (!Number.isNaN(remaining) && remaining <= 0);
+        if (isEnded && !drop?.userClaimed) {
+          pastDrops.push(drop);
+        } else {
+          liveDrops.push(drop);
+        }
+      });
+
       container.style.display = "grid";
-      drops.forEach((drop, index) => {
+      if (!liveDrops.length) {
+        const note = document.createElement("p");
+        note.className = "campaign-meta";
+        note.textContent = "None live now.";
+        container.appendChild(note);
+      }
+
+      liveDrops.forEach((drop, index) => {
         const card = createCampaignCard(drop, userRegion);
         if (index === 0 && primaryDrop) {
           card.dataset.primary = "true";
         }
         container.appendChild(card);
       });
+
+      if (pastDrops.length) {
+        const toggleBtn = document.createElement("button");
+        toggleBtn.type = "button";
+        toggleBtn.className = "btn btn-ghost";
+        toggleBtn.textContent = "View past drops";
+
+        const pastWrap = document.createElement("div");
+        pastWrap.style.display = "none";
+        pastWrap.style.marginTop = "8px";
+
+        pastDrops.forEach((drop) => {
+          pastWrap.appendChild(createCampaignCard(drop, userRegion));
+        });
+
+        toggleBtn.addEventListener("click", () => {
+          const isHidden = pastWrap.style.display === "none";
+          pastWrap.style.display = isHidden ? "grid" : "none";
+          toggleBtn.textContent = isHidden ? "Hide past drops" : "View past drops";
+        });
+
+        container.appendChild(toggleBtn);
+        container.appendChild(pastWrap);
+      }
     }
 
     function clearClaimError() {
@@ -2487,7 +2468,10 @@ Active players only 👇
       const messageEl = document.getElementById("campaign-voucher-message");
       if (!section || !messageEl) return;
       if (!hasRegionSelected()) {
-        section.style.display = "none";
+        section.style.display = "block";
+        messageEl.innerText = "Select region to view/claim rewards.";
+        resetVoucherButton();
+        renderCampaignDrops(null, [], null);
         return;
       }
 
@@ -2516,8 +2500,8 @@ Active players only 👇
         const drops = Array.isArray(data?.drops) ? data.drops : [];
         const userRegion = data?.userRegion || null;
         if (!drops.length) {
-          messageEl.innerText = "No campaign rewards are available for your account right now.";
-          resetVoucherButton();
+          messageEl.innerText = "Today’s vouchers are fully claimed.";
+          showVoucherSoldOut();
           renderCampaignDrops(null, [], userRegion);
           return;
         }
@@ -2539,7 +2523,7 @@ Active players only 👇
           const publicSoldOut = isPublicSoldOut(topDrop, userRegion);
 
           if (publicSoldOut) {
-            messageText = "All vouchers have been fully redeemed.";
+            messageText = "Today’s vouchers are fully claimed.";
             showVoucherSoldOut(messageText);
           } else {
             if ((canClaim || isPreview) && dropId) {
@@ -2639,13 +2623,13 @@ Active players only 👇
           });
           const uiModel = claimErrorToUi(payload, res.status);
           if (payload?.code === "sold_out") {
-            const soldOutMessage = payload?.message || "All vouchers have been fully redeemed.";
+            const soldOutMessage = payload?.message || "Today’s vouchers are fully claimed.";
             if (claimBtn.id === "campaign-voucher-btn") {
-              const messageEl = document.getElementById("campaign-voucher-message");
-              if (messageEl) messageEl.innerText = soldOutMessage;
+              showVoucherSoldOut(soldOutMessage);
+            } else {
+              claimBtn.textContent = "Sold out";
+              claimBtn.setAttribute("disabled", "disabled");
             }
-            claimBtn.textContent = "All vouchers redeemed";
-            claimBtn.setAttribute("disabled", "disabled");
           }
           renderClaimError(uiModel, {
             retryHandler: () => {
@@ -3352,12 +3336,40 @@ ${referral}`;
           regionMsg = `✅ Region locked: ${data.region}`;
           setStoredRegion(data.region || "");
           applyRegionGate(data.region || "");
+          loadVouchers();
         } else {
+          setStoredRegion("");
+          const alreadyAttempted = ssGet(AUTO_REGION_ATTEMPTED_KEY) === "1";
+          if (!alreadyAttempted) {
+            ssSet(AUTO_REGION_ATTEMPTED_KEY, "1");
+            try {
+              const guessRes = await fetch(`${API_BASE}/api/region-by-ip`);
+              const guessData = await guessRes.json();
+              const guessedRegion = guessData?.region || "";
+              if (guessedRegion) {
+                const lockRes = await fetch(`${API_BASE}/api/set-region/${userId}`, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ user_id: userId, region: guessedRegion })
+                });
+                const lockData = await lockRes.json();
+                if (lockData?.success) {
+                  setStoredRegion(lockData.region || guessedRegion);
+                  applyRegionGate(lockData.region || guessedRegion);
+                  loadVouchers();
+                  return;
+                }
+              }
+            } catch (geoErr) {
+              console.warn("Auto region detection failed", geoErr);
+            }
+          }
+
           document.getElementById("region-section").style.display = "block";
           document.getElementById("region-message").innerText =
             "⚠️ Please select your region (only once).";
-          setStoredRegion("");
           applyRegionGate("");
+          loadVouchers();
         }
 
       } catch (err) {
@@ -3600,30 +3612,9 @@ ${referral}`;
           if (e.target === infoHubModal) infoHubModal.style.display = "none";
         });
 
-        document.querySelectorAll(".tab-btn").forEach((btn) => {
-          btn.addEventListener("click", (e) => {
-            e.preventDefault();
-            document.querySelectorAll(".tab-btn").forEach((b) => b.classList.remove("active"));
-            document.querySelectorAll(".tab-panel").forEach((p) => (p.style.display = "none"));
-
-            btn.classList.add("active");
-            const pane = document.getElementById(btn.dataset.tab);
-            if (pane) pane.style.display = "block";
-          });
-        });
       }
 
       document.addEventListener("DOMContentLoaded", function() {
-        if (window.FEATURE_FLAGS.SHOW_INFO_HOW_IT_WORKS) {
-          const btn = document.getElementById("tab-btn-how");
-          if (btn) btn.style.display = "block";
-        }
-
-        if (window.FEATURE_FLAGS.SHOW_INFO_AFFILIATE) {
-          const btn = document.getElementById("tab-btn-affiliate");
-          if (btn) btn.style.display = "block";
-        }
-
         initInfoHub();
       });
       window.addEventListener("load", initInfoHub);
