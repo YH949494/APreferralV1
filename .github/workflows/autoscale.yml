@@ -1,4 +1,4 @@
-name: Autoscale Fly Web for Voucher Drops
+name: Autoscale Fly Web for Voucher Drops 
 
 concurrency:
   group: autoscale-fly-web
