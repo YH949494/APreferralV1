@@ -1,4 +1,4 @@
-import os, subprocess
+import os, shutil, subprocess
 from datetime import datetime, timezone, timedelta
 from pymongo import MongoClient, ASCENDING
 
@@ -13,9 +13,16 @@ BASE_WEB_COUNT = int(os.getenv("BASE_WEB_COUNT", "1"))
 def now_utc():
     return datetime.now(timezone.utc)
 
+def _ensure_flyctl_available():
+    if shutil.which("flyctl") is None:
+        raise RuntimeError("flyctl not found in PATH. Ensure Fly CLI is installed in CI.")
+    if not os.getenv("FLY_API_TOKEN"):
+        raise RuntimeError("FLY_API_TOKEN is not set.")
+
 def fly_scale_web(count: int):
+    _ensure_flyctl_available()
     subprocess.check_call([
-        "fly", "scale", "count", str(count),
+        "flyctl", "scale", "count", str(count),
         "--process-group", "web",
         "--app", APP_NAME
     ])

@@ -27,6 +27,9 @@ jobs:
       - name: Install flyctl
         uses: superfly/flyctl-actions/setup-flyctl@master
 
+      - name: Verify flyctl
+        run: flyctl version
+
       - name: Run autoscaler
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
