@@ -76,15 +76,19 @@ def main():
         raise SystemExit("BOT_TOKEN is required")
     init_db()
     httpx_request = HTTPXRequest(
-        connect_timeout=10,
-        read_timeout=20,
-        write_timeout=20,
-        pool_timeout=10,
-        connection_pool_size=8,
+        connect_timeout=15,
+        read_timeout=65,
+        write_timeout=30,
+        pool_timeout=20,
+        connection_pool_size=16,
     )
     app = ApplicationBuilder().token(BOT_TOKEN).request(httpx_request).build()
     app.add_handler(ChatMemberHandler(on_member, ChatMemberHandler.CHAT_MEMBER))
-    app.run_polling()
+    app.run_polling(
+        drop_pending_updates=True,
+        timeout=30,        # long poll duration
+        poll_interval=1.0,
+    )
 
 
 if __name__ == "__main__":

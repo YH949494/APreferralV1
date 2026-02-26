@@ -1582,11 +1582,11 @@ def _json_any_exc(e):
     
 # Telegram bot
 httpx_request = HTTPXRequest(
-    connect_timeout=10,
-    read_timeout=20,
-    write_timeout=20,
-    pool_timeout=10,
-    connection_pool_size=8,
+    connect_timeout=15,
+    read_timeout=65,          # must be > polling timeout
+    write_timeout=30,
+    pool_timeout=20,
+    connection_pool_size=16,  # increase pool stability
 )
 app_bot = ApplicationBuilder().token(BOT_TOKEN).request(httpx_request).build()
 
