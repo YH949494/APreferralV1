@@ -36,7 +36,7 @@ from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_MISSED
 
 from app_context import set_app_bot, set_bot, set_scheduler
 from onboarding import MYWIN_CHAT_ID, onboarding_due_tick, record_first_mywin, record_first_checkin
-from vouchers import vouchers_bp, ensure_voucher_indexes, process_verification_queue
+from vouchers import vouchers_bp, ensure_voucher_indexes, process_verification_queue, check_channel_subscribed
 from scheduler import settle_pending_referrals, settle_referral_snapshots, settle_xp_snapshots, evaluate_affiliate_simulated_ledgers, compute_affiliate_daily_kpi_yesterday, run_invitee_subscription_audit
 from affiliate_rewards import (
     ensure_affiliate_indexes,
@@ -1695,6 +1695,11 @@ async def process_checkin(user_id, username, region, update=None):
     grant_xp(db, user_id, "checkin", checkin_key, base_xp + bonus_xp)
     record_first_checkin(int(user_id), ref=now_utc_ts)
 
+    try:
+        check_channel_subscribed(int(user_id))
+    except Exception:
+        pass
+
     maybe_shout_milestones(int(user_id))
 
     labels = {7: "🎉 7-day streak bonus!", 14: "🔥 14-day streak bonus!", 28: "🏆 28-day streak bonus!"}
@@ -3256,14 +3261,7 @@ def run_worker():
         name="Affiliate Daily KPI Snapshot",
         replace_existing=True,
     )
-    scheduler.add_job(
-        run_invitee_subscription_audit,
-        trigger="interval",
-        hours=max(1, INVITEE_SUB_AUDIT_HOURS),
-        id="invitee_subscription_audit",
-        name="Invitee Subscription Audit",
-        replace_existing=True,
-    )
+    # subscription audit disabled — subscription_cache refreshed via claim + check-in events
     scheduler.start()
 
     # 5) Background jobs on the bot's job_queue

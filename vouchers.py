@@ -1887,8 +1887,28 @@ def check_channel_subscribed(uid: int) -> bool:
 
     status = (data.get("result") or {}).get("status")
     is_subscribed = status in ALLOWED_CHANNEL_STATUSES
+    now = now_utc()
+    update_doc = {
+        "$set": {
+            "user_id": uid,
+            "subscribed": is_subscribed,
+            "checked_at": now,
+            "updated_at": now,
+        }
+    }
     if is_subscribed:
-        set_cached_subscription_true(uid, SUB_CHECK_TTL_SECONDS)
+        update_doc["$set"]["expireAt"] = now + timedelta(seconds=SUB_CHECK_TTL_SECONDS)
+        update_doc["$setOnInsert"] = {"first_subscribed_at_utc": now}
+    try:
+        subscription_cache_col.update_one(
+            {"_id": _subscription_cache_key(uid)},
+            update_doc,
+            upsert=True,
+        )
+    except Exception:
+        pass
+
+    if is_subscribed:
         current_app.logger.info("[SUB_CACHE][SET] uid=%s ttl=%s", uid, SUB_CHECK_TTL_SECONDS)
         return True
 
