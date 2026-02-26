@@ -371,7 +371,7 @@ def run_invitee_subscription_audit(now_utc_ts=None, db_ref=None) -> dict:
         subscribed = False
         tg_member_status = None
         tg_is_member = None
-        tg_error = ""
+        tg_error = None
         try:
             resp = requests.get(
                 f"{API_BASE}/getChatMember",
