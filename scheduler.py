@@ -314,6 +314,18 @@ def compute_affiliate_daily_kpi_yesterday() -> dict:
     return compute_affiliate_daily_kpi(target_day)
 
 
+def _channel_subscribe_verdict(result_dict) -> tuple[bool, str | None, bool | None]:
+    status = (result_dict.get("status") or "").lower() or None
+    is_member = result_dict.get("is_member")
+    subscribed = (
+        status in ("member", "administrator", "creator")
+        or (status == "restricted" and is_member is True)
+    )
+    if status in ("left", "kicked"):
+        subscribed = False
+    return subscribed, status, is_member
+
+
 def run_invitee_subscription_audit(now_utc_ts=None, db_ref=None) -> dict:
     db_ref = db_ref or db
     now_utc_ts = now_utc_ts or now_utc()
@@ -345,8 +357,9 @@ def run_invitee_subscription_audit(now_utc_ts=None, db_ref=None) -> dict:
         if uid is None or not isinstance(uid, int):
             continue
 
+        cache_id = f"sub:{uid}"
         cache_doc = db_ref.subscription_cache.find_one(
-            {"user_id": uid},
+            {"_id": cache_id},
             {"checked_at": 1, "first_subscribed_at_utc": 1},
         ) or {}
         checked_at = _coerce_utc(cache_doc.get("checked_at"))
@@ -356,6 +369,9 @@ def run_invitee_subscription_audit(now_utc_ts=None, db_ref=None) -> dict:
 
         checked += 1
         subscribed = False
+        tg_member_status = None
+        tg_is_member = None
+        tg_error = ""
         try:
             resp = requests.get(
                 f"{API_BASE}/getChatMember",
@@ -363,17 +379,24 @@ def run_invitee_subscription_audit(now_utc_ts=None, db_ref=None) -> dict:
                 timeout=TG_GETCHATMEMBER_TIMEOUT_SEC,
             )
             if resp.status_code != 200:
-                errors += 1
-                continue
-            payload = resp.json()
-            if not payload.get("ok"):
-                errors += 1
-                continue
-            status = ((payload.get("result") or {}).get("status") or "").lower()
-            subscribed = status in {"member", "administrator", "creator"}
-        except (RequestException, ValueError):
+                tg_error = f"http_{resp.status_code}"
+            else:
+                try:
+                    payload = resp.json()
+                except ValueError:
+                    tg_error = "bad_json"
+                else:
+                    if not payload.get("ok"):
+                        desc = payload.get("description")
+                        tg_error = f"not_ok:{desc}" if desc else "not_ok"
+                    else:
+                        subscribed, tg_member_status, tg_is_member = _channel_subscribe_verdict(payload.get("result") or {})
+        except RequestException as exc:
+            tg_error = str(exc) or exc.__class__.__name__
+
+        if tg_error:
             errors += 1
-            continue
+            subscribed = False
 
         if subscribed:
             subscribed_true += 1
@@ -384,6 +407,9 @@ def run_invitee_subscription_audit(now_utc_ts=None, db_ref=None) -> dict:
             "$set": {
                 "user_id": uid,
                 "subscribed": subscribed,
+                "tg_member_status": tg_member_status,
+                "tg_is_member": tg_is_member,
+                "tg_error": tg_error,
                 "checked_at": now_utc_ts,
                 "updated_at": now_utc_ts,
                 "expireAt": ttl_expire_at,
@@ -394,7 +420,6 @@ def run_invitee_subscription_audit(now_utc_ts=None, db_ref=None) -> dict:
             if not _coerce_utc(cache_doc.get("first_subscribed_at_utc")):
                 update_doc["$set"]["first_subscribed_at_utc"] = now_utc_ts
 
-        cache_id = f"sub:{uid}"
         db_ref.subscription_cache.update_one({"_id": cache_id}, update_doc, upsert=True)
         time.sleep(max(TG_REQUEST_SLEEP_MS, 0) / 1000.0)
 
