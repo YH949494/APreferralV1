@@ -1714,6 +1714,7 @@ def process_verification_queue(batch_limit: int = 50) -> None:
      
 ALLOWED_CHANNEL_STATUSES = {"member", "administrator", "creator"}
 SUB_CHECK_TTL_SECONDS = int(os.getenv("SUB_CHECK_TTL_SECONDS", "120"))
+SUB_CACHE_TTL_DAYS = int(os.getenv("SUB_CACHE_TTL_DAYS", "3"))
 
 
 def _get_welcome_eligibility(uid: int) -> dict | None:
@@ -1897,7 +1898,8 @@ def check_channel_subscribed(uid: int) -> bool:
         }
     }
     if is_subscribed:
-        update_doc["$set"]["expireAt"] = now + timedelta(seconds=SUB_CHECK_TTL_SECONDS)
+        expire_at = now + timedelta(days=SUB_CACHE_TTL_DAYS)
+        update_doc["$set"]["expireAt"] = expire_at
         update_doc["$setOnInsert"] = {"first_subscribed_at_utc": now}
     try:
         subscription_cache_col.update_one(
@@ -1909,7 +1911,7 @@ def check_channel_subscribed(uid: int) -> bool:
         pass
 
     if is_subscribed:
-        current_app.logger.info("[SUB_CACHE][SET] uid=%s ttl=%s", uid, SUB_CHECK_TTL_SECONDS)
+        current_app.logger.info("[SUB_CACHE][SET] uid=%s ttl_days=%s", uid, SUB_CACHE_TTL_DAYS)
         return True
 
     return False
