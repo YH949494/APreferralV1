@@ -1,5 +1,9 @@
 name: Autoscale Fly Web for Voucher Drops
 
+concurrency:
+  group: autoscale-fly-web
+  cancel-in-progress: true
+  
 on:
   schedule:
     - cron: "*/1 * * * *"
