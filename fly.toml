@@ -3,6 +3,12 @@ primary_region = "sin"
 
 [env]
   PORT = "8080"
+  AUTOSCALE_LEAD_MINUTES = "2"
+  AUTOSCALE_DURATION_MINUTES = "10"
+  AUTOSCALE_PEAK_WEB = "5"
+  AUTOSCALE_BASE_WEB = "1"
+  AUTOSCALE_ENABLED = "1"
+  AUTOSCALE_INTERVAL_SECONDS = "30"
 
 [build]
   dockerfile = "Dockerfile"

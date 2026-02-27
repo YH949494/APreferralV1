@@ -47,7 +47,7 @@ from telegram_utils import safe_reply_text
 
 from pymongo import DESCENDING, ASCENDING, ReturnDocument  # keep if used elsewhere
 from pymongo.errors import DuplicateKeyError, CursorNotFound, OperationFailure, PyMongoError
-import os, asyncio, traceback, csv, io, requests, logging, time, uuid, socket
+import os, asyncio, traceback, csv, io, requests, logging, time, uuid, socket, subprocess
 import pytz
 from database import init_db, db
 
@@ -3263,6 +3263,80 @@ def run_worker():
     )
     # subscription audit disabled — subscription_cache refreshed via claim + check-in events
     scheduler.start()
+
+    autoscale_state = {"last_target": None}
+
+    def autoscale_web_for_drop() -> None:
+        try:
+            autoscale_enabled = os.getenv("AUTOSCALE_ENABLED", "1")
+            autoscale_lead_minutes = int(os.getenv("AUTOSCALE_LEAD_MINUTES", "2"))
+            autoscale_duration_minutes = int(os.getenv("AUTOSCALE_DURATION_MINUTES", "10"))
+            autoscale_peak_web = int(os.getenv("AUTOSCALE_PEAK_WEB", "5"))
+            autoscale_base_web = int(os.getenv("AUTOSCALE_BASE_WEB", "1"))
+            fly_app_name = os.getenv("FLY_APP_NAME", "apreferralv1")
+            if autoscale_enabled != "1":
+                return
+
+            now = datetime.now(timezone.utc)
+            drop = db.drops.find_one(
+                {"startsAt": {"$gte": now}},
+                sort=[("startsAt", ASCENDING)],
+                projection={"startsAt": 1, "name": 1},
+            )
+
+            starts_at = None
+            if not drop or not drop.get("startsAt"):
+                target = autoscale_base_web
+                reason = "NO_UPCOMING_DROP"
+                window_start = None
+                window_end = None
+            else:
+                starts_at = drop["startsAt"]
+                if starts_at.tzinfo is None:
+                    starts_at = starts_at.replace(tzinfo=timezone.utc)
+                else:
+                    starts_at = starts_at.astimezone(timezone.utc)
+
+                window_start = starts_at - timedelta(minutes=autoscale_lead_minutes)
+                window_end = starts_at + timedelta(minutes=autoscale_duration_minutes)
+
+                if window_start <= now <= window_end:
+                    target = autoscale_peak_web
+                    reason = "PEAK_WINDOW"
+                else:
+                    target = autoscale_base_web
+                    reason = "OUTSIDE_WINDOW"
+
+            if target != autoscale_state["last_target"]:
+                subprocess.check_call([
+                    "flyctl", "scale", "count", str(target),
+                    "--process-group", "web",
+                    "--app", fly_app_name,
+                ])
+                autoscale_state["last_target"] = target
+                logger.info(
+                    "[AUTOSCALE] web=>%s reason=%s now=%s startsAt=%s window=%s..%s",
+                    target,
+                    reason,
+                    now.isoformat(),
+                    starts_at.isoformat() if starts_at else None,
+                    window_start.isoformat() if window_start else None,
+                    window_end.isoformat() if window_end else None,
+                )
+        except Exception:
+            logger.exception("[AUTOSCALE] autoscale_web_for_drop failed")
+
+    autoscale_interval_seconds = int(os.getenv("AUTOSCALE_INTERVAL_SECONDS", "30"))
+    if os.getenv("AUTOSCALE_ENABLED", "1") == "1":
+        scheduler.add_job(
+            autoscale_web_for_drop,
+            trigger="interval",
+            seconds=autoscale_interval_seconds,
+            id="autoscale_web_for_drop",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+        )
 
     # 5) Background jobs on the bot's job_queue
     app_bot.job_queue.run_once(refresh_admin_ids, when=0)
