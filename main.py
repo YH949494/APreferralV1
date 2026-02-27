@@ -3278,9 +3278,11 @@ def run_worker():
                 return
 
             now = datetime.now(timezone.utc)
+            lead_td = timedelta(minutes=autoscale_lead_minutes)
+            dur_td = timedelta(minutes=autoscale_duration_minutes)            
             drop = db.drops.find_one(
-                {"startsAt": {"$gte": now}},
-                sort=[("startsAt", ASCENDING)],
+                {"startsAt": {"$gte": now - dur_td, "$lte": now + lead_td}},
+                sort=[("startsAt", DESCENDING)],
                 projection={"startsAt": 1, "name": 1},
             )
 
