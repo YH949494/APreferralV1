@@ -3312,6 +3312,7 @@ def run_worker():
                     "flyctl", "scale", "count", str(target),
                     "--process-group", "web",
                     "--app", fly_app_name,
+                    "--yes",                    
                 ])
                 autoscale_state["last_target"] = target
                 logger.info(
