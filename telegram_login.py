@@ -45,7 +45,7 @@ class WebAppInitData:
 
         # (Optional) freshness check to prevent replay (e.g., 5 minutes)
         auth_ts = int(data.get("auth_date", 0) or 0)
-        if auth_ts <= 0 or (time.time() - auth_ts) > 900:
+        if auth_ts <= 0 or (time.time() - auth_ts) > 1800:
             raise ValueError("initData too old or missing auth_date.")
 
         user = TelegramUser(
