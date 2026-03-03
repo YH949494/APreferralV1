@@ -30,6 +30,9 @@ class _FakeCollection:
                 elif op == "$in":
                     if value not in expected:
                         return False
+                elif op == "$nin":
+                    if value in expected:
+                        return False
             return True
         return value == cond
 
@@ -65,14 +68,19 @@ class _FakeCollection:
 
         for d in self.docs:
             if self._match(d, filt):
+                before = dict(d)
                 d.update(update.get("$set", {}))
-                return
+                modified = 1 if d != before else 0
+                return type("_UpdateResult", (), {"upserted_id": None, "modified_count": modified})()
 
         if upsert:
             row = dict(filt)
             row.update(update.get("$setOnInsert", {}))
             row.update(update.get("$set", {}))
             self.docs.append(row)
+            return type("_UpdateResult", (), {"upserted_id": "fake_upsert", "modified_count": 0})()
+
+        return type("_UpdateResult", (), {"upserted_id": None, "modified_count": 0})()
 
 
 class _FakeDb:
@@ -119,6 +127,67 @@ class EvaluateAffiliateSimulatedLedgersTests(TestCase):
         self.assertEqual(len(fake_db.affiliate_ledger.docs), 4)
         for doc in fake_db.affiliate_ledger.docs:
             self.assertEqual(doc.get("status"), "SIMULATED_PENDING")
+
+    def test_second_run_updates_existing_simulated_ledger_without_inserting_duplicate(self):
+        now_ts = datetime(2026, 1, 20, tzinfo=timezone.utc)
+        fake_db = _FakeDb(now_ts)
+
+        with patch.object(scheduler, "db", fake_db), patch.object(scheduler, "now_utc", return_value=now_ts), patch.object(
+            scheduler, "_get_chat_member_status", return_value="member"
+        ):
+            os.environ["AFFILIATE_SIMULATE"] = "1"
+            try:
+                scheduler.evaluate_affiliate_simulated_ledgers()
+                first_count = len(fake_db.affiliate_ledger.docs)
+                fake_db.users.docs[0]["total_xp"] = 999
+                scheduler.evaluate_affiliate_simulated_ledgers()
+            finally:
+                os.environ.pop("AFFILIATE_SIMULATE", None)
+
+        self.assertEqual(first_count, 4)
+        self.assertEqual(len(fake_db.affiliate_ledger.docs), 4)
+        self.assertEqual(
+            len(
+                {
+                    (doc.get("user_id"), doc.get("invitee_user_id"), doc.get("gate_day"), doc.get("tier"), doc.get("created_at"))
+                    for doc in fake_db.affiliate_ledger.docs
+                }
+            ),
+            4,
+        )
+        self.assertEqual(max(doc.get("xp_total") for doc in fake_db.affiliate_ledger.docs), 999)
+
+    def test_does_not_overwrite_non_simulated_final_ledger(self):
+        now_ts = datetime(2026, 1, 20, tzinfo=timezone.utc)
+        fake_db = _FakeDb(now_ts)
+        joined_main_at = fake_db.users.docs[0]["joined_main_at"]
+        fake_db.affiliate_ledger.docs.append(
+            {
+                "user_id": 202,
+                "invitee_user_id": 101,
+                "gate_day": 3,
+                "tier": "T1",
+                "created_at": joined_main_at,
+                "simulate": False,
+                "ledger_type": "AFFILIATE_MONTHLY",
+                "status": "ISSUED",
+            }
+        )
+
+        with patch.object(scheduler, "db", fake_db), patch.object(scheduler, "now_utc", return_value=now_ts), patch.object(
+            scheduler, "_get_chat_member_status", return_value="member"
+        ):
+            os.environ["AFFILIATE_SIMULATE"] = "1"
+            try:
+                scheduler.evaluate_affiliate_simulated_ledgers()
+            finally:
+                os.environ.pop("AFFILIATE_SIMULATE", None)
+
+        non_sim = [d for d in fake_db.affiliate_ledger.docs if d.get("simulate") is False and d.get("status") == "ISSUED"]
+        self.assertEqual(len(non_sim), 1)
+        self.assertEqual(non_sim[0].get("ledger_type"), "AFFILIATE_MONTHLY")
+        simulated = [d for d in fake_db.affiliate_ledger.docs if d.get("simulate") is True and d.get("status") == "SIMULATED_PENDING"]
+        self.assertEqual(len(simulated), 4)
 
 
 if __name__ == "__main__":

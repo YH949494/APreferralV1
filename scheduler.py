@@ -921,6 +921,20 @@ def _simulated_ledger_dedup_key(*, inviter_user_id: int, invitee_user_id: int, g
     return f"SIM_GATE:{int(inviter_user_id)}:{int(invitee_user_id)}:{int(gate_day)}:{tier}"
 
 
+def _simulated_ledger_natural_key(
+    *, inviter_user_id: int, invitee_user_id: int, gate_day: int, tier: str, cohort_start_utc: datetime
+) -> dict:
+    return {
+        "simulate": True,
+        "ledger_type": "AFFILIATE_SIMULATION",
+        "user_id": int(inviter_user_id),
+        "invitee_user_id": int(invitee_user_id),
+        "gate_day": int(gate_day),
+        "tier": tier,
+        "created_at": cohort_start_utc,
+    }
+
+
 def _derive_abuse_flags_for_invitee(invitee_user_id: int, now_utc_ts: datetime) -> list[str]:
     flags = []
     try:
@@ -996,56 +1010,47 @@ def evaluate_affiliate_simulated_ledgers(batch_limit: int = 500) -> int:
                 gate_day=gate_day,
                 tier=tier,
             )
-            db.affiliate_ledger.update_one(
-                {"dedup_key": dedup_key},
+            natural_key = _simulated_ledger_natural_key(
+                inviter_user_id=inviter_user_id,
+                invitee_user_id=invitee_user_id,
+                gate_day=gate_day,
+                tier=tier,
+                cohort_start_utc=joined_main_at,
+            )
+
+            res = db.affiliate_ledger.update_one(
+                {**natural_key, "status": {"$nin": list(final_statuses)}},
                 {
+                    "$set": {
+                        "evaluated_at_utc": now_utc_ts,
+                        "xp_total": user_doc.get("total_xp"),
+                        "monthly_xp": user_doc.get("monthly_xp"),
+                        "still_in_group": bool(still_in_group),
+                        "risk_flags": [],
+                        "abuse_flags": _derive_abuse_flags_for_invitee(invitee_user_id, now_utc_ts),
+                        "would_issue_pool": tier,
+                        "year_month": None,
+                        "updated_at": now_utc_ts,
+                        "status": "SIMULATED_PENDING",
+                        "simulate": True,
+                    },
                     "$setOnInsert": {
-                        "ledger_type": "AFFILIATE_SIMULATION",
+                        "created_at": joined_main_at,
+                        "pool_id": tier,
+                        "tier": tier,
                         "user_id": int(inviter_user_id),
                         "invitee_user_id": int(invitee_user_id),
-                        "year_month": None,
-                        "tier": tier,
-                        "pool_id": tier,
-                        "status": "SIMULATED_PENDING",
+                        "gate_day": int(gate_day),
+                        "ledger_type": "AFFILIATE_SIMULATION",
                         "dedup_key": dedup_key,
                         "voucher_code": None,
-                        "risk_flags": [],
-                        "created_at": now_utc_ts,
+                        "first_seen_at": now_utc_ts,
                     },
                 },
                 upsert=True,
             )
-
-            ledger_doc = db.affiliate_ledger.find_one({"dedup_key": dedup_key}, {"status": 1}) or {}
-            if ledger_doc.get("status") in final_statuses:
-                logger.info(
-                    "[SCHED][AFF_SIM] action=skip_final_status dedup_key=%s status=%s",
-                    dedup_key,
-                    ledger_doc.get("status"),
-                )
-                continue
-
-            db.affiliate_ledger.update_one(
-                {
-                    "dedup_key": dedup_key,
-                    "status": {"$in": [None, "SIMULATED_PENDING", "PENDING_MANUAL", "PENDING_REVIEW", "APPROVED"]},
-                },
-                {
-                    "$set": {
-                        "status": "SIMULATED_PENDING",
-                        "simulate": True,
-                        "would_issue_pool": tier,
-                        "gate_day": int(gate_day),
-                        "evaluated_at_utc": now_utc_ts,
-                        "still_in_group": bool(still_in_group),
-                        "xp_total": user_doc.get("total_xp"),
-                        "monthly_xp": user_doc.get("monthly_xp"),
-                        "abuse_flags": _derive_abuse_flags_for_invitee(invitee_user_id, now_utc_ts),
-                        "updated_at": now_utc_ts,
-                    },
-                },
-            )
-            created_or_updated += 1
+            if res.upserted_id is not None or int(res.modified_count or 0) > 0:
+                created_or_updated += 1
 
     if created_or_updated:
         logger.info("[SCHED][AFF_SIM] action=processed_ledgers count=%s", created_or_updated)
