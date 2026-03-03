@@ -30,6 +30,12 @@ def ensure_affiliate_indexes(db):
     db.affiliate_ledger.create_index([("dedup_key", ASCENDING)], unique=True, name="uniq_affiliate_dedup")
     db.affiliate_ledger.create_index([("status", ASCENDING), ("created_at", ASCENDING)], name="affiliate_status_created")
     db.affiliate_ledger.create_index([("user_id", ASCENDING), ("year_month", ASCENDING)], name="affiliate_user_month")
+    db.affiliate_ledger.create_index(
+        [("user_id", ASCENDING), ("invitee_user_id", ASCENDING), ("gate_day", ASCENDING), ("tier", ASCENDING), ("created_at", ASCENDING)],
+        unique=True,
+        name="uniq_affiliate_simulated_natural",
+        partialFilterExpression={"simulate": True, "ledger_type": "AFFILIATE_SIMULATION"},
+    )
 
     db.user_last_seen.create_index([("user_id", ASCENDING)], unique=True, name="uniq_user_last_seen")
 
