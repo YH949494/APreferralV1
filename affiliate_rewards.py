@@ -65,6 +65,12 @@ def _tier_for_count(count: int) -> str | None:
     return None
 
 
+def _tier_rank(tier: str | None) -> int:
+    ranks = {"T1": 1, "T2": 2, "T3": 3, "T4": 4}
+    key = (tier or "").strip().upper()  # Normalize legacy/case-variant tier values before ranking.
+    return ranks.get(key, 0)
+
+
 def _claim_voucher_from_pool(db, *, pool_id: str, ledger_id, user_id: int, now_utc: datetime):
     return db.voucher_pools.find_one_and_update(
         {"pool_id": pool_id, "status": "available"},
@@ -206,12 +212,12 @@ def evaluate_monthly_affiliate_reward(db, *, referrer_id: int, now_utc: datetime
     if not tier:
         return None
 
-    # One ledger per user per month (highest tier only)
+    # One monthly AFF ledger per user per month (tier-agnostic dedup key).
+    # Why: including tier in dedup key allows duplicate monthly rewards as users move up tiers.
     dedup_key = f"AFF:{int(referrer_id)}:{yyyymm}"
-    db.affiliate_ledger.update_one(
-        {"dedup_key": dedup_key},
-        {
-            "$setOnInsert": {
+    try:
+        db.affiliate_ledger.insert_one(
+            {
                 "ledger_type": "AFFILIATE_MONTHLY",
                 "user_id": int(referrer_id),
                 "year_month": yyyymm,
@@ -225,21 +231,27 @@ def evaluate_monthly_affiliate_reward(db, *, referrer_id: int, now_utc: datetime
                 "created_at": now_utc,
                 "updated_at": now_utc,
             }
-        },
-        upsert=True,
-    )
+        )
+    except DuplicateKeyError:
+        # Concurrent workers may race on first insert for the same month; reuse existing row.
+        pass
     ledger = db.affiliate_ledger.find_one({"dedup_key": dedup_key})
     if not ledger:
         return None
+
+    # Option A: once finalized, do not upgrade/replace later in the same month.
+    status = ledger.get("status")
+    if status in FINAL_STATUSES:
+        return ledger
+
     cur_tier = ledger.get("tier")
-    tier_rank = {"T1": 1, "T2": 2, "T3": 3, "T4": 4}
-    should_upgrade = (cur_tier is None) or (tier_rank.get(tier, 0) > tier_rank.get(cur_tier, 0))
+    should_upgrade = (cur_tier is None) or (_tier_rank(tier) > _tier_rank(cur_tier))
     base_update = {
         "qualified_count": int(qualified_count),
         "updated_at": now_utc,
     }
     if should_upgrade:
-        base_update.update({"tier": tier, "pool_id": tier})
+        base_update.update({"tier": tier, "pool_id": tier, "reason": "monthly_highest_tier_upgrade"})
 
     if _affiliate_simulate_enabled():
         simulate_update = dict(base_update)
@@ -254,8 +266,7 @@ def evaluate_monthly_affiliate_reward(db, *, referrer_id: int, now_utc: datetime
         db.affiliate_ledger.update_one({"_id": ledger["_id"]}, {"$set": simulate_update})
         return db.affiliate_ledger.find_one({"_id": ledger["_id"]})
 
-    status = ledger.get("status")
-    if status in FINAL_STATUSES or status == SETTLING_STATUS:
+    if status == SETTLING_STATUS:
         return ledger
 
     if status in PROTECTED_STATUSES:
