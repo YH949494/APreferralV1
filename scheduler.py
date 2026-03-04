@@ -268,6 +268,75 @@ def compute_affiliate_daily_kpi(day_utc: str, *, db_ref=None, now_utc_ts: dateti
             )
         )
 
+    # Keep this 7-day window aligned with qualified_7d/active_referrers_7d: [window_7d_start, day_end) in UTC.
+    joins_7d_rows = list(
+        db_ref.pending_referrals.aggregate(
+            [
+                {
+                    "$match": {
+                        "created_at_utc": {"$gte": window_7d_start, "$lt": day_end},
+                        "inviter_user_id": {"$ne": None},
+                    }
+                },
+                {"$group": {"_id": "$inviter_user_id", "joins_7d": {"$sum": 1}}},
+            ]
+        )
+    )
+    qualified_7d_rows = list(
+        db_ref.qualified_events.aggregate(
+            [
+                {
+                    "$match": {
+                        "qualified_at": {"$gte": window_7d_start, "$lt": day_end},
+                        "referrer_id": {"$ne": None},
+                    }
+                },
+                {"$group": {"_id": "$referrer_id", "qualified_7d": {"$sum": 1}}},
+            ]
+        )
+    )
+
+    top_referrers_map: dict[str, dict] = {}
+    for row in joins_7d_rows:
+        referrer_id_raw = row.get("_id")
+        if referrer_id_raw is None:
+            continue
+        referrer_key = str(referrer_id_raw)
+        top_referrers_map[referrer_key] = {
+            "referrer_id": referrer_key,
+            "joins_7d": int(row.get("joins_7d", 0) or 0),
+            "qualified_7d": 0,
+        }
+    for row in qualified_7d_rows:
+        referrer_id_raw = row.get("_id")
+        if referrer_id_raw is None:
+            continue
+        referrer_key = str(referrer_id_raw)
+        if referrer_key not in top_referrers_map:
+            top_referrers_map[referrer_key] = {
+                "referrer_id": referrer_key,
+                "joins_7d": 0,
+                "qualified_7d": 0,
+            }
+        top_referrers_map[referrer_key]["qualified_7d"] = int(row.get("qualified_7d", 0) or 0)
+
+    top_referrers_7d = []
+    for item in top_referrers_map.values():
+        joins_count = int(item.get("joins_7d", 0) or 0)
+        qualified_count = int(item.get("qualified_7d", 0) or 0)
+        # conversion_7d = qualified_7d / joins_7d; safe division returns 0 when joins_7d is 0.
+        conversion_7d = float(qualified_count / joins_count) if joins_count > 0 else 0.0
+        top_referrers_7d.append(
+            {
+                "referrer_id": item["referrer_id"],
+                "joins_7d": joins_count,
+                "qualified_7d": qualified_count,
+                "conversion_7d": conversion_7d,
+            }
+        )
+    top_referrers_7d.sort(key=lambda r: (-int(r["qualified_7d"]), -int(r["joins_7d"])))
+    top_referrers_7d = top_referrers_7d[:20]
+
     quality_rate_7d = _safe_rate(qualified_7d, new_referrals_7d)
     active_referrers_7d = int(
         len(
@@ -292,6 +361,7 @@ def compute_affiliate_daily_kpi(day_utc: str, *, db_ref=None, now_utc_ts: dateti
         "qualified_7d": qualified_7d,
         "quality_rate_7d": quality_rate_7d,
         "active_referrers_7d": active_referrers_7d,
+        "top_referrers_7d": top_referrers_7d,
         "computed_at_utc": now_utc_ts,
     }
     db_ref.affiliate_daily_kpis.update_one({"day_utc": day_utc}, {"$set": payload}, upsert=True)

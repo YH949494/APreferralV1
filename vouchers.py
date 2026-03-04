@@ -4305,6 +4305,28 @@ def admin_affiliate_kpis_v2():
         computed_at = item.get("computed_at_utc")
         if isinstance(computed_at, datetime):
             item["computed_at_utc"] = computed_at.isoformat()
+        top_referrers = item.get("top_referrers_7d")
+        if not isinstance(top_referrers, list):
+            top_referrers = []
+        normalized_top_referrers = []
+        for ref_row in top_referrers:
+            if not isinstance(ref_row, dict):
+                continue
+            joins_7d = int(ref_row.get("joins_7d", 0) or 0)
+            qualified_7d = int(ref_row.get("qualified_7d", 0) or 0)
+            try:
+                conversion_7d = float(ref_row.get("conversion_7d", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                conversion_7d = 0.0
+            normalized_top_referrers.append(
+                {
+                    "referrer_id": str(ref_row.get("referrer_id", "")),
+                    "joins_7d": joins_7d,
+                    "qualified_7d": qualified_7d,
+                    "conversion_7d": conversion_7d,
+                }
+            )
+        item["top_referrers_7d"] = normalized_top_referrers
         raw_sub_rate = item.get("invitee_channel_sub_72h_rate", 0.0)
         try:
             item["invitee_channel_sub_72h_rate"] = f"{(float(raw_sub_rate or 0.0) * 100.0):.1f}%"
