@@ -661,6 +661,7 @@
       <span id="leaderboard-cadence" style="opacity:0.7;">• 🔄 Refresh every 5 minutes</span>
       <span id="leaderboard-loading" style="display:none;">Refreshing…</span>
     </div>
+    <div id="leaderboard-summary-card"></div>
     <div id="leaderboard-output">Click to load latest rankings...</div>
     <button id="leaderboard-retry" type="button" class="btn btn-ghost" style="display:none;margin-top:8px;">Retry</button>
   </div>
@@ -911,9 +912,11 @@
         <p style="margin-bottom:8px;"><b>VIP System (Monthly Reset)</b></p>
 
         <ul style="list-style:none;padding:0;line-height:1.7;">
-          <li>👑 VIP Tier 1 → 800 Monthly XP</li>
-          <li>🎁 Unlock VIP Bonus Voucher access</li>
-          <li>⚠ Below 800 at monthly refresh → Status resets</li>
+          <li>👑 Crown = VIP1</li>
+          <li>800 Monthly XP → VIP1</li>
+          <li>Below 800 at refresh → Normal</li>
+          <li>VIP1 unlocks Bonus Voucher</li>
+          <li>VIP vouchers limited • first come first served</li>
         </ul>
 
         <hr style="border:none;border-top:1px solid #eee;margin:12px 0;">
@@ -2973,11 +2976,14 @@ Active players win more.
 
     function renderLeaderboardSkeleton() {
       const out = document.getElementById("leaderboard-output");
+      const summaryCard = document.getElementById("leaderboard-summary-card");
       if (!out) return;
       if (leaderboardSkeletonRendered) return;
       leaderboardSkeletonRendered = true;
+      if (summaryCard) {
+        summaryCard.innerHTML = '<div class="leaderboard-summary">⏳ Loading weekly stats…</div>';
+      }
       out.innerHTML = `
-        <div class="leaderboard-summary">⏳ Loading weekly stats…</div>
         <div class="leaderboard-block">
           <div class="leaderboard-header"><h4>⭐ XP Leaderboard</h4></div>
           <div class="leaderboard-empty">Loading...</div>
@@ -3025,13 +3031,17 @@ function setLeaderboardMeta(ts, { isStale = false } = {}) {
 
     function renderLeaderboardUnavailable(message) {
       const out = document.getElementById("leaderboard-output");
+      const summaryCard = document.getElementById("leaderboard-summary-card");
+      if (summaryCard) summaryCard.innerHTML = "";
       if (out) out.textContent = message;
     }
 
-    function getLeaderboardName(row) {
-      return (row?.username || row?.first_name || row?.user_id || "Anonymous")
+    function getLeaderboardName(row, { withCrown = true } = {}) {
+      const baseName = (row?.username || row?.first_name || row?.user_id || "Anonymous")
         .toString()
         .replace(/^@+/, "");
+      if (!withCrown) return baseName;
+      return row?.is_vip1 === true ? `${baseName} 👑` : baseName;
     }
 
     function createPodiumCard(row, rank, metricLabel, championLabel) {
@@ -3043,7 +3053,7 @@ function setLeaderboardMeta(ts, { isStale = false } = {}) {
 
       const nameEl = document.createElement("div");
       nameEl.className = "podium-name";
-      nameEl.innerHTML = rank === 1 ? `👑 ${getLeaderboardName(row)}` : getLeaderboardName(row);
+      nameEl.textContent = getLeaderboardName(row, { withCrown: false });
 
       const scoreEl = document.createElement("div");
       scoreEl.className = "podium-score";
@@ -3122,7 +3132,7 @@ function setLeaderboardMeta(ts, { isStale = false } = {}) {
 
           const nameEl = document.createElement("div");
           nameEl.className = "leaderboard-name";
-          nameEl.innerHTML = getLeaderboardName(row);
+          nameEl.textContent = getLeaderboardName(row, { withCrown: true });
 
           const valueEl = document.createElement("div");
           valueEl.className = "leaderboard-value";
@@ -3141,6 +3151,7 @@ function setLeaderboardMeta(ts, { isStale = false } = {}) {
 
     function renderLeaderboardData(data) {
       const out = document.getElementById("leaderboard-output");
+      const summaryCard = document.getElementById("leaderboard-summary-card");
       if (!out) return;
       const leaderboard = data?.leaderboard || {};
       const checkinRows = Array.isArray(leaderboard.checkin) ? leaderboard.checkin : [];
@@ -3151,7 +3162,8 @@ function setLeaderboardMeta(ts, { isStale = false } = {}) {
         value: u.xp ?? u.weekly_xp ?? 0,
         username: u.username,
         first_name: u.first_name,
-        user_id: u.user_id
+        user_id: u.user_id,
+        is_vip1: Boolean(u?.is_vip1)
       }));
       
       const refRows = referralRows.map((u) => ({
@@ -3159,34 +3171,39 @@ function setLeaderboardMeta(ts, { isStale = false } = {}) {
         value: u.weekly_referrals ?? u.total_valid ?? u.referrals ?? 0,
         username: u.username,
         first_name: u.first_name,
-        user_id: u.user_id
+        user_id: u.user_id,
+        is_vip1: Boolean(u?.is_vip1)
       }));
 
-      const myXP = data?.user?.xp || 0;
-      const myMonthlyXP = data?.user?.monthly_xp || 0;
-      const myRef = data?.user?.weekly_referrals ?? data?.user?.total_valid ?? data?.user?.referrals ?? 0;
-      const myName = user.username ? `@${user.username}` : (user.first_name || "You");
-
-      const myStatus = (data?.user && data.user.status) ? data.user.status : "Normal";
-      let statusLabel = "🧑 Normal";
-      if (myStatus === "VIP1") statusLabel = "👑 VIP1";
-      
       out.innerHTML = "";
+      if (summaryCard) {
+        const userStats = data?.user;
+        if (!userStats || typeof userStats !== "object") {
+          summaryCard.innerHTML = '<div class="leaderboard-summary">Login to see your progress.</div>';
+        } else {
+          const userMonthlyXp = Number(data.user?.monthly_xp || 0);
+          const userWeeklyXp = Number(data.user?.xp || 0);
+          const vipLine = userMonthlyXp < 800
+            ? `👑 VIP1: ${userMonthlyXp}/800 • Need ${800 - userMonthlyXp} XP`
+            : `👑 You are VIP1 • Monthly XP ${userMonthlyXp}`;
 
-      const summary = document.createElement("div");
-      summary.className = "leaderboard-summary";
-      summary.innerHTML = `
-        <div class="summary-title">📊 Your Weekly Stats</div>
-        <div class="summary-row">
-          <span>${escapeHtml(myName)}</span>
-          <span>${myXP} XP • ${myRef} Referrals</span>
-        </div>
-        <div class="summary-row">
-          <span>📅 Monthly XP: ${myMonthlyXP}</span>
-          <span>${statusLabel}</span>
-        </div>
-      `;
-      out.appendChild(summary);
+          let top10Line = "";
+          if (checkinRows.length >= 10) {
+            const cutoffXp = Number(checkinRows[9]?.xp || checkinRows[9]?.weekly_xp || 0);
+            if (userWeeklyXp < cutoffXp) {
+              const need = cutoffXp - userWeeklyXp + 1;
+              top10Line = `🏆 Top10: Need ${need} XP (No.10 = ${cutoffXp})`;
+            }
+          }
+
+          summaryCard.innerHTML = `
+            <div class="leaderboard-summary">
+              <div class="summary-row"><span>${vipLine}</span></div>
+              ${top10Line ? `<div class="summary-row"><span>${top10Line}</span></div>` : ""}
+            </div>
+          `;
+        }
+      }
 
       const xpBlock = buildLeaderboardBlock({
         title: "⭐ XP Leaderboard",
