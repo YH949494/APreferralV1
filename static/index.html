@@ -3686,13 +3686,48 @@ ${referral}`;
       return `<td style="padding:6px; border-bottom:1px solid #eee; white-space:nowrap;">${value ?? ""}</td>`;
     }
 
+    function _affTopRefSummary(topReferrers) {
+      if (!Array.isArray(topReferrers) || !topReferrers.length) return "-";
+      const first = topReferrers[0] || {};
+      const q = Number(first.qualified_7d || 0);
+      const j = Number(first.joins_7d || 0);
+      const c = Number(first.conversion_7d || 0);
+      return `Top: ${first.referrer_id ?? ""} (Q${q}/J${j}=${(c * 100).toFixed(0)}%)`;
+    }
+
     function renderAffDailyKpis(rows) {
       const wrap = document.getElementById("aff_kpis_wrap");
       if (!rows || !rows.length) {
         wrap.innerHTML = `<div style="color:#666; font-size:13px;">No KPI snapshots yet.</div>`;
         return;
       }
-      const htmlRows = rows.map((row) => {
+      const htmlRows = rows.map((row, idx) => {
+        const topReferrers = Array.isArray(row.top_referrers_7d) ? row.top_referrers_7d : [];
+        const detailId = `aff_ref7d_${idx}`;
+        const top5Rows = topReferrers.slice(0, 5).map((r) => {
+          const joins7d = Number(r.joins_7d || 0);
+          const qualified7d = Number(r.qualified_7d || 0);
+          const conversionPct = (Number(r.conversion_7d || 0) * 100).toFixed(1);
+          return `<tr>`
+            + `<td style="padding:4px 6px; border-bottom:1px solid #eee;">${r.referrer_id ?? ""}</td>`
+            + `<td style="padding:4px 6px; border-bottom:1px solid #eee;">${joins7d}</td>`
+            + `<td style="padding:4px 6px; border-bottom:1px solid #eee;">${qualified7d}</td>`
+            + `<td style="padding:4px 6px; border-bottom:1px solid #eee;">${conversionPct}%</td>`
+            + `</tr>`;
+        }).join("");
+        const detailsHtml = topReferrers.length ? `
+          <table style="margin-top:6px; width:100%; border-collapse:collapse; font-size:11px;">
+            <thead>
+              <tr style="background:#fcfcfc;">
+                <th style="padding:4px 6px; text-align:left; border-bottom:1px solid #ddd;">referrer_id</th>
+                <th style="padding:4px 6px; text-align:left; border-bottom:1px solid #ddd;">joins_7d</th>
+                <th style="padding:4px 6px; text-align:left; border-bottom:1px solid #ddd;">qualified_7d</th>
+                <th style="padding:4px 6px; text-align:left; border-bottom:1px solid #ddd;">conversion_7d (%)</th>
+              </tr>
+            </thead>
+            <tbody>${top5Rows}</tbody>
+          </table>` : `<div style="color:#666; font-size:11px; margin-top:6px;">No referrer rows for this day.</div>`;
+
         return `<tr>`
           + _affKpiTd(row.day_utc || "")
           + _affKpiTd(Number(row.new_referrals || 0))
@@ -3703,7 +3738,9 @@ ${referral}`;
           + _affKpiTd(Number(row.qualified_7d || 0))
           + _affKpiTd(_affPct(row.quality_rate_7d))
           + _affKpiTd(Number(row.active_referrers_7d || 0))
-          + `</tr>`;
+          + _affKpiTd(`${_affTopRefSummary(topReferrers)} <button type="button" onclick="const el=document.getElementById('${detailId}'); if (el) { el.style.display = el.style.display === 'none' ? 'block' : 'none'; }">View</button>`)
+          + `</tr>`
+          + `<tr><td colspan="10" style="padding:0 6px 8px 6px; border-bottom:1px solid #eee;"><div id="${detailId}" style="display:none;">${detailsHtml}</div></td></tr>`;
       }).join("");
 
       wrap.innerHTML = `
@@ -3719,6 +3756,7 @@ ${referral}`;
               <th style="padding:6px; text-align:left; border-bottom:1px solid #ddd;">qualified_7d</th>
               <th style="padding:6px; text-align:left; border-bottom:1px solid #ddd;">quality_rate_7d</th>
               <th style="padding:6px; text-align:left; border-bottom:1px solid #ddd;">active_referrers_7d</th>
+              <th style="padding:6px; text-align:left; border-bottom:1px solid #ddd;">top_referrers_7d</th>
             </tr>
           </thead>
           <tbody>${htmlRows}</tbody>
