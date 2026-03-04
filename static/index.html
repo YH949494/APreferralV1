@@ -3182,24 +3182,13 @@ function setLeaderboardMeta(ts, { isStale = false } = {}) {
           summaryCard.innerHTML = '<div class="leaderboard-summary">Login to see your progress.</div>';
         } else {
           const userMonthlyXp = Number(data.user?.monthly_xp || 0);
-          const userWeeklyXp = Number(data.user?.xp || 0);
           const vipLine = userMonthlyXp < 800
             ? `👑 VIP1: ${userMonthlyXp}/800 • Need ${800 - userMonthlyXp} XP`
             : `👑 You are VIP1 • Monthly XP ${userMonthlyXp}`;
 
-          let top10Line = "";
-          if (checkinRows.length >= 10) {
-            const cutoffXp = Number(checkinRows[9]?.xp || checkinRows[9]?.weekly_xp || 0);
-            if (userWeeklyXp < cutoffXp) {
-              const need = cutoffXp - userWeeklyXp + 1;
-              top10Line = `🏆 Top10: Need ${need} XP (No.10 = ${cutoffXp})`;
-            }
-          }
-
           summaryCard.innerHTML = `
             <div class="leaderboard-summary">
               <div class="summary-row"><span>${vipLine}</span></div>
-              ${top10Line ? `<div class="summary-row"><span>${top10Line}</span></div>` : ""}
             </div>
           `;
         }
