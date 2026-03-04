@@ -1977,7 +1977,7 @@ def get_leaderboard():
             )
             xp_rows = list(
                 users_collection
-                .find(xp_query, {"user_id": 1, "username": 1, "weekly_xp": 1})
+                .find(xp_query, {"user_id": 1, "username": 1, "weekly_xp": 1, "vip_tier": 1, "status": 1})
                 .sort("weekly_xp", DESCENDING)
                 .limit(leaderboard_limit)
             )
@@ -1990,6 +1990,8 @@ def get_leaderboard():
                         "username": 1,
                         "weekly_referrals": 1,
                         "total_referrals": 1,
+                        "vip_tier": 1,
+                        "status": 1,
                     },
                 )
                 .sort("weekly_referrals", DESCENDING)
@@ -2012,6 +2014,7 @@ def get_leaderboard():
                         "user_id": row.get("user_id"),
                         "username": row.get("username"),
                         "weekly_xp": int(row.get("weekly_xp", 0)),
+                        "is_vip1": (row.get("vip_tier") == "VIP1" or row.get("status") == "VIP1"),
                     }
                     for row in xp_rows
                 ],
@@ -2021,6 +2024,7 @@ def get_leaderboard():
                         "username": row.get("username"),
                         "weekly_referrals": int(row.get("weekly_referrals", 0)),
                         "total_referrals": int(row.get("total_referrals", 0)),
+                        "is_vip1": (row.get("vip_tier") == "VIP1" or row.get("status") == "VIP1"),
                     }
                     for row in referral_rows
                 ],
@@ -2038,7 +2042,11 @@ def get_leaderboard():
             formatted = safe_format({"user_id": row.get("user_id"), "username": row.get("username")})
             if not formatted:
                 continue
-            top_checkins.append({"username": formatted, "xp": int(row.get("weekly_xp", 0))})
+            top_checkins.append({
+                "username": formatted,
+                "xp": int(row.get("weekly_xp", 0)),
+                "is_vip1": bool(row.get("is_vip1", False)),
+            })
 
         referral_board = []
         for row in cached_payload.get("referral", []):
@@ -2049,6 +2057,7 @@ def get_leaderboard():
                 "username": formatted,
                 "total_valid": int(row.get("weekly_referrals", 0)),
                 "referrals": int(row.get("weekly_referrals", 0)),
+                "is_vip1": bool(row.get("is_vip1", False)),
             }
             if is_admin:
                 entry["total_all"] = int(row.get("total_referrals", 0))
