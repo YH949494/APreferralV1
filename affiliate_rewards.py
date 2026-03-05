@@ -379,6 +379,19 @@ def mark_invitee_qualified(db, *, invitee_id: int, referrer_id: int | None, now_
         db.qualified_events.insert_one(doc)
     except DuplicateKeyError:
         return False
+    try:
+        from affiliate_leaderboard import emit_referral_flow_event
+        emit_referral_flow_event(
+            db,
+            event="affiliate_qualified",
+            referrer_id=int(referrer_id) if referrer_id is not None else None,
+            invitee_id=int(invitee_id),
+            ts_utc=now_utc,
+            meta={},
+            idempotency_key=f"rf|affiliate_qualified|{int(referrer_id) if referrer_id is not None else None}|{int(invitee_id)}|{now_utc.isoformat()}",
+        )
+    except Exception:
+        logger.exception("affiliate_qualified_event_emit_failed invitee=%s referrer=%s", invitee_id, referrer_id)
     if referrer_id is not None:
         evaluate_monthly_affiliate_reward(db, referrer_id=int(referrer_id), now_utc=now_utc)
     return True

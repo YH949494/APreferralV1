@@ -38,6 +38,13 @@ from app_context import set_app_bot, set_bot, set_scheduler
 from onboarding import MYWIN_CHAT_ID, onboarding_due_tick, record_first_mywin, record_first_checkin
 from vouchers import vouchers_bp, ensure_voucher_indexes, process_verification_queue, check_channel_subscribed
 from scheduler import settle_pending_referrals, settle_referral_snapshots, settle_xp_snapshots, evaluate_affiliate_simulated_ledgers, compute_affiliate_daily_kpi_yesterday, run_invitee_subscription_audit
+from affiliate_leaderboard import (
+    should_count_referral_join,
+    ensure_affiliate_leaderboard_indexes,
+    compute_affiliate_weekly_kpis_live,
+    compute_affiliate_weekly_kpis_final,
+    week_window_utc,
+)
 from affiliate_rewards import (
     ensure_affiliate_indexes,
     record_user_last_seen,
@@ -1123,6 +1130,42 @@ def _confirm_referral_on_main_join(
             upsert=True,
         )
         if getattr(result, "upserted_id", None):
+            try:
+                from affiliate_leaderboard import emit_referral_flow_event
+                emit_referral_flow_event(
+                    db,
+                    event="join",
+                    referrer_id=int(referrer_id),
+                    invitee_id=int(invitee_user_id),
+                    ts_utc=created_at_utc,
+                    meta={"chat_id": chat_id or GROUP_ID},
+                    idempotency_key=f"rf|join|{int(referrer_id)}|{int(invitee_user_id)}|{created_at_utc.strftime('%Y-%m-%d')}",
+                )
+                counted, reason = should_count_referral_join(db, int(referrer_id), created_at_utc)
+                if counted:
+                    emit_referral_flow_event(
+                        db,
+                        event="join_counted",
+                        referrer_id=int(referrer_id),
+                        invitee_id=int(invitee_user_id),
+                        ts_utc=created_at_utc,
+                        meta={"chat_id": chat_id or GROUP_ID},
+                        idempotency_key=f"rf|join_counted|{int(referrer_id)}|{int(invitee_user_id)}|{created_at_utc.strftime('%Y-%m-%d')}",
+                    )
+                    logger.info("[AFFILIATE][JOIN_COUNT] inviter=%s invitee=%s counted=1", referrer_id, invitee_user_id)
+                else:
+                    emit_referral_flow_event(
+                        db,
+                        event="join_ignored",
+                        referrer_id=int(referrer_id),
+                        invitee_id=int(invitee_user_id),
+                        ts_utc=created_at_utc,
+                        meta={"chat_id": chat_id or GROUP_ID, "reason": reason or "cooldown"},
+                        idempotency_key=f"rf|join_ignored|{int(referrer_id)}|{int(invitee_user_id)}|{created_at_utc.strftime('%Y-%m-%d')}",
+                    )
+                    logger.info("[AFFILIATE][JOIN_COUNT] inviter=%s invitee=%s counted=0 reason=%s", referrer_id, invitee_user_id, reason or "cooldown")
+            except Exception:
+                logger.exception("[AFFILIATE][JOIN_COUNT] audit_failed inviter=%s invitee=%s", referrer_id, invitee_user_id)
             logger.info(
                 "[REFERRAL][PENDING] inviter=%s invitee=%s invite_link=%s hold_hours=%s",
                 referrer_id,
@@ -1325,7 +1368,8 @@ def ensure_indexes():
     pending_referrals_collection.create_index(
         [("inviter_user_id", 1), ("status", 1)],
         name="pending_by_inviter",
-    )    
+    )
+    ensure_affiliate_leaderboard_indexes(db)
 
     # --- optional welcome eligibility ---
     db.welcome_eligibility.create_index([("uid", 1)], unique=True)
@@ -2122,6 +2166,120 @@ def get_leaderboard():
                 "user": {},
             }
         ), 200
+
+
+@app.route("/api/affiliate/leaderboard", methods=["GET"])
+def get_affiliate_leaderboard_week():
+    window = (request.args.get("window") or "week").strip().lower()
+    if window != "week":
+        return jsonify({"success": False, "error": "unsupported_window"}), 400
+
+    snapshot = compute_affiliate_weekly_kpis_live(db)
+    rows = list(snapshot.get("affiliate_leaderboard_week") or [])
+
+    raw_user_id = request.args.get("user_id")
+    try:
+        current_user_id = int(raw_user_id) if raw_user_id not in (None, "", "undefined") else 0
+    except (TypeError, ValueError):
+        current_user_id = 0
+    user_record = users_collection.find_one({"user_id": current_user_id}, {"is_admin": 1}) or {}
+    is_admin = bool(user_record.get("is_admin", False))
+
+    ids = []
+    for item in rows:
+        try:
+            ids.append(int(item.get("referrer_id")))
+        except Exception:
+            continue
+
+    users_by_id = {}
+    if ids:
+        for u in users_collection.find({"user_id": {"$in": ids}}, {"user_id": 1, "username": 1, "first_name": 1}):
+            users_by_id[int(u.get("user_id"))] = u
+
+    leaderboard = []
+    my_stats = None
+    for item in rows:
+        row = dict(item)
+        referrer_id = row.get("referrer_id")
+        try:
+            referrer_id_int = int(referrer_id)
+        except Exception:
+            referrer_id_int = None
+        if referrer_id_int is not None and referrer_id_int in users_by_id:
+            display = format_username(users_by_id[referrer_id_int], current_user_id, is_admin)
+            if display:
+                row["display_name"] = display
+        leaderboard.append(row)
+        if current_user_id and str(referrer_id) == str(current_user_id):
+            my_stats = {
+                "joins_week_raw": int(row.get("joins_week_raw", 0) or 0),
+                "joins_week_counted": int(row.get("joins_week_counted", 0) or 0),
+                "qualified_week": int(row.get("qualified_week", 0) or 0),
+                "conversion_week": float(row.get("conversion_week", 0.0) or 0.0),
+                "quality_flag": row.get("quality_flag") or "new",
+            }
+
+    if current_user_id and my_stats is None:
+        snapshot_by_referrer = snapshot.get("affiliate_weekly_by_referrer") or {}
+        if isinstance(snapshot_by_referrer, dict):
+            cached_stats = snapshot_by_referrer.get(str(current_user_id))
+            if isinstance(cached_stats, dict):
+                my_stats = {
+                    "joins_week_raw": int(cached_stats.get("joins_week_raw", 0) or 0),
+                    "joins_week_counted": int(cached_stats.get("joins_week_counted", 0) or 0),
+                    "qualified_week": int(cached_stats.get("qualified_week", 0) or 0),
+                    "conversion_week": float(cached_stats.get("conversion_week", 0.0) or 0.0),
+                    "quality_flag": cached_stats.get("quality_flag") or "new",
+                }
+
+    if current_user_id and my_stats is None:
+        week_start_utc, week_end_utc = week_window_utc()
+        joins_week_raw = int(
+            pending_referrals_collection.count_documents(
+                {
+                    "inviter_user_id": current_user_id,
+                    "created_at_utc": {"$gte": week_start_utc, "$lt": week_end_utc},
+                }
+            )
+        )
+        joins_week_counted = int(
+            db.referral_flow_events.count_documents(
+                {
+                    "event": "join_counted",
+                    "referrer_id": current_user_id,
+                    "ts_utc": {"$gte": week_start_utc, "$lt": week_end_utc},
+                }
+            )
+        )
+        qualified_week = int(
+            db.qualified_events.count_documents(
+                {
+                    "referrer_id": current_user_id,
+                    "qualified_at": {"$gte": week_start_utc, "$lt": week_end_utc},
+                }
+            )
+        )
+        conversion_week = float(qualified_week / joins_week_raw) if joins_week_raw > 0 else 0.0
+        quality_flag = "new" if joins_week_raw < 10 else ("low_quality" if conversion_week < 0.20 else "ok")
+        my_stats = {
+            "joins_week_raw": joins_week_raw,
+            "joins_week_counted": joins_week_counted,
+            "qualified_week": qualified_week,
+            "conversion_week": round(conversion_week, 4),
+            "quality_flag": quality_flag,
+        }
+
+    return jsonify(
+        {
+            "generated_at": (snapshot.get("generated_at") or datetime.now(timezone.utc)).isoformat(),
+            "week_start_utc": snapshot.get("week_start_utc").isoformat() if snapshot.get("week_start_utc") else None,
+            "week_end_utc": snapshot.get("week_end_utc").isoformat() if snapshot.get("week_end_utc") else None,
+            "rules": snapshot.get("rules") or {},
+            "leaderboard": leaderboard,
+            "my_stats": my_stats,
+        }
+    ), 200
 
 
 @app.route("/api/checkin-status/<int:user_id>", methods=["GET"])
@@ -3268,6 +3426,13 @@ def run_worker():
         trigger=CronTrigger(hour=0, minute=20, timezone=timezone.utc),
         id="affiliate_daily_kpi",
         name="Affiliate Daily KPI Snapshot",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        lambda: compute_affiliate_weekly_kpis_final(db, reference_utc=datetime.now(timezone.utc) - timedelta(seconds=1)),
+        trigger=CronTrigger(day_of_week="mon", hour=0, minute=5, timezone=timezone.utc),
+        id="affiliate_weekly_kpi",
+        name="Affiliate Weekly KPI Snapshot",
         replace_existing=True,
     )
     # subscription audit disabled — subscription_cache refreshed via claim + check-in events

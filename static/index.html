@@ -350,6 +350,11 @@
       padding: 10px 0;
     }
 
+    .leaderboard-tabs { display:flex; gap:8px; margin-top:10px; }
+    .leaderboard-tab-btn.active { background: var(--ap-orange); color:#fff; border-color: var(--ap-orange); }
+    .affiliate-table { width:100%; border-collapse: collapse; font-size:13px; }
+    .affiliate-table th, .affiliate-table td { border-bottom:1px solid #eee; padding:6px; text-align:left; }
+
     #admin-panel {
       display: none;
       background: #fff4e6;
@@ -661,8 +666,13 @@
       <span id="leaderboard-cadence" style="opacity:0.7;">• 🔄 Refresh every 5 minutes</span>
       <span id="leaderboard-loading" style="display:none;">Refreshing…</span>
     </div>
+    <div class="leaderboard-tabs">
+      <button id="leaderboard-tab-default" type="button" class="btn btn-ghost leaderboard-tab-btn active">XP + Ref</button>
+      <button id="leaderboard-tab-affiliate" type="button" class="btn btn-ghost leaderboard-tab-btn">Affiliate</button>
+    </div>
     <div id="leaderboard-summary-card"></div>
     <div id="leaderboard-output">Click to load latest rankings...</div>
+    <div id="affiliate-leaderboard-output" style="display:none; margin-top:12px;">Click to load latest affiliate rankings...</div>
     <button id="leaderboard-retry" type="button" class="btn btn-ghost" style="display:none;margin-top:8px;">Retry</button>
   </div>
 
@@ -2973,6 +2983,7 @@ Active players win more.
     let leaderboardHasValidCache = false;
     let leaderboardSkeletonRendered = false;
     let leaderboardCacheAgeMs = null;
+    let affiliateLeaderboardLoaded = false;
 
     function renderLeaderboardSkeleton() {
       const out = document.getElementById("leaderboard-output");
@@ -3034,6 +3045,70 @@ function setLeaderboardMeta(ts, { isStale = false } = {}) {
       const summaryCard = document.getElementById("leaderboard-summary-card");
       if (summaryCard) summaryCard.innerHTML = "";
       if (out) out.textContent = message;
+    }
+
+    function setLeaderboardTab(tabName) {
+      const defaultBtn = document.getElementById("leaderboard-tab-default");
+      const affiliateBtn = document.getElementById("leaderboard-tab-affiliate");
+      const defaultOut = document.getElementById("leaderboard-output");
+      const affiliateOut = document.getElementById("affiliate-leaderboard-output");
+      const summary = document.getElementById("leaderboard-summary-card");
+      const isAffiliate = tabName === "affiliate";
+      if (defaultBtn) defaultBtn.classList.toggle("active", !isAffiliate);
+      if (affiliateBtn) affiliateBtn.classList.toggle("active", isAffiliate);
+      if (defaultOut) defaultOut.style.display = isAffiliate ? "none" : "block";
+      if (affiliateOut) affiliateOut.style.display = isAffiliate ? "block" : "none";
+      if (summary) summary.style.display = isAffiliate ? "none" : "block";
+      if (isAffiliate && !affiliateLeaderboardLoaded) {
+        loadAffiliateLeaderboard();
+      }
+    }
+
+    async function loadAffiliateLeaderboard() {
+      const target = document.getElementById("affiliate-leaderboard-output");
+      if (!target) return;
+      target.innerHTML = '<div class="leaderboard-empty">Loading affiliate leaderboard...</div>';
+      try {
+        const url = new URL(`${API_BASE}/api/affiliate/leaderboard`);
+        url.searchParams.set("window", "week");
+        if (userId) url.searchParams.set("user_id", userId);
+        const res = await fetch(url.toString());
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        const rows = Array.isArray(data?.leaderboard) ? data.leaderboard : [];
+        const my = data?.my_stats;
+        const myCard = my ? `
+          <div class="leaderboard-summary" style="margin-bottom:10px;">
+            <div class="summary-title">My Stats (This Week)</div>
+            <div class="summary-row"><span>Qualified</span><strong>${Number(my.qualified_week || 0)}</strong></div>
+            <div class="summary-row"><span>Joins</span><strong>${Number(my.joins_week_raw || 0)} (counted ${Number(my.joins_week_counted || 0)})</strong></div>
+            <div class="summary-row"><span>Conversion</span><strong>${(Number(my.conversion_week || 0) * 100).toFixed(1)}%</strong></div>
+            <div class="summary-row"><span>Flag</span><strong>${String(my.quality_flag || "new")}</strong></div>
+          </div>
+        ` : '<div class="leaderboard-empty">Login to see your affiliate stats.</div>';
+        if (!rows.length) {
+          target.innerHTML = `${myCard}<div class="leaderboard-empty">No affiliate leaderboard data yet.</div>`;
+          affiliateLeaderboardLoaded = true;
+          return;
+        }
+        const tableRows = rows.map((r) => `
+          <tr>
+            <td>${Number(r.rank || 0)}</td>
+            <td>${String(r.display_name || r.referrer_id || "-")}</td>
+            <td>${Number(r.qualified_week || 0)}</td>
+            <td>${Number(r.joins_week_raw || 0)}</td>
+            <td>${(Number(r.conversion_week || 0) * 100).toFixed(1)}%</td>
+            <td>${String(r.quality_flag || "new")}</td>
+          </tr>`).join("");
+        target.innerHTML = `${myCard}
+          <table class="affiliate-table">
+            <thead><tr><th>Rank</th><th>Name</th><th>Qualified</th><th>Joins</th><th>Conversion %</th><th>Flag</th></tr></thead>
+            <tbody>${tableRows}</tbody>
+          </table>`;
+        affiliateLeaderboardLoaded = true;
+      } catch (err) {
+        target.innerHTML = `<div class="leaderboard-empty">Affiliate leaderboard unavailable: ${String(err.message || err)}</div>`;
+      }
     }
 
     function getLeaderboardName(row, { withCrown = true } = {}) {
@@ -3306,6 +3381,17 @@ function setLeaderboardMeta(ts, { isStale = false } = {}) {
         retryBtn.dataset.bound = "true";
         retryBtn.addEventListener("click", () => loadLeaderboard({ forceRefresh: true }));
       }
+      const defaultTabBtn = document.getElementById("leaderboard-tab-default");
+      const affiliateTabBtn = document.getElementById("leaderboard-tab-affiliate");
+      if (defaultTabBtn && !defaultTabBtn.dataset.bound) {
+        defaultTabBtn.dataset.bound = "true";
+        defaultTabBtn.addEventListener("click", () => setLeaderboardTab("default"));
+      }
+      if (affiliateTabBtn && !affiliateTabBtn.dataset.bound) {
+        affiliateTabBtn.dataset.bound = "true";
+        affiliateTabBtn.addEventListener("click", () => setLeaderboardTab("affiliate"));
+      }
+      setLeaderboardTab("default");
 
       renderLeaderboardSkeleton();
       const cached = readLeaderboardCache();
