@@ -12,6 +12,11 @@ from affiliate_rewards import (
 )
 
 
+class _UpdateResult:
+    def __init__(self, modified_count):
+        self.modified_count = modified_count
+
+
 class FakeCollection:
     def __init__(self, unique_fields=None):
         self.docs = []
@@ -77,7 +82,7 @@ class FakeCollection:
                     d[k] = v
                 for k, v in update.get("$inc", {}).items():
                     d[k] = d.get(k, 0) + v
-                return
+                return _UpdateResult(1)
         if upsert:
             row = dict(filt)
             for k, v in update.get("$setOnInsert", {}).items():
@@ -85,6 +90,8 @@ class FakeCollection:
             for k, v in update.get("$set", {}).items():
                 row[k] = v
             self.insert_one(row)
+            return _UpdateResult(1)
+        return _UpdateResult(0)
 
     def find_one_and_update(self, filt, update, sort=None, return_document=None):
         matches = [d for d in self.docs if self._match(d, filt)]
@@ -301,6 +308,98 @@ class AffiliateRewardTests(unittest.TestCase):
         self.assertEqual(out["prev_yyyymm"], "202601")
         self.assertEqual(row["status"], "ISSUED")
         self.assertEqual(row["voucher_code"], "SETTLE1")
+
+    def test_settle_skips_reclaim_when_voucher_already_present(self):
+        db = FakeDb()
+        now = datetime(2026, 2, 20, 0, 0, tzinfo=timezone.utc)
+        stale_updated_at = now - timedelta(minutes=16)
+        db.affiliate_ledger.insert_one(
+            {
+                "ledger_type": "AFFILIATE_MONTHLY",
+                "user_id": 91,
+                "year_month": "202601",
+                "tier": "T1",
+                "pool_id": "T1",
+                "qualified_count": 10,
+                "status": "SETTLING",
+                "dedup_key": "AFF:91:202601:T1",
+                "voucher_code": "EXISTING-1",
+                "risk_flags": [],
+                "created_at": stale_updated_at,
+                "updated_at": stale_updated_at,
+            }
+        )
+        db.voucher_pools.insert_one({"pool_id": "T1", "code": "NEXT1", "status": "available"})
+        db.voucher_pools.insert_one({"pool_id": "T1", "code": "NEXT2", "status": "available"})
+
+        first = settle_previous_month_affiliate_rewards(db, now_utc=now)
+        second = settle_previous_month_affiliate_rewards(db, now_utc=now + timedelta(minutes=20))
+
+        row = db.affiliate_ledger.find_one({"dedup_key": "AFF:91:202601:T1"})
+        self.assertEqual(row["voucher_code"], "EXISTING-1")
+        self.assertEqual(row["status"], "ISSUED")
+        self.assertEqual(db.voucher_pools.count_documents({"pool_id": "T1", "status": "issued"}), 0)
+        self.assertEqual(db.voucher_pools.count_documents({"pool_id": "T1", "status": "available"}), 2)
+        self.assertGreaterEqual(first["processed"], 1)
+        self.assertEqual(second["processed"], 0)
+
+    def test_settle_reconciles_from_issued_pool_without_second_claim(self):
+        db = FakeDb()
+        now = datetime(2026, 2, 20, 0, 0, tzinfo=timezone.utc)
+        stale_updated_at = now - timedelta(minutes=16)
+        ledger = db.affiliate_ledger.insert_one(
+            {
+                "ledger_type": "AFFILIATE_MONTHLY",
+                "user_id": 92,
+                "year_month": "202601",
+                "tier": "T1",
+                "pool_id": "T1",
+                "qualified_count": 10,
+                "status": "SETTLING",
+                "dedup_key": "AFF:92:202601:T1",
+                "voucher_code": None,
+                "risk_flags": [],
+                "created_at": stale_updated_at,
+                "updated_at": stale_updated_at,
+            }
+        )
+        db.voucher_pools.insert_one(
+            {
+                "pool_id": "T1",
+                "code": "BOUND1",
+                "status": "issued",
+                "issued_for_ledger_id": str(ledger["_id"]),
+                "issued_at": now - timedelta(minutes=20),
+            }
+        )
+        db.voucher_pools.insert_one({"pool_id": "T1", "code": "NEXT1", "status": "available"})
+        db.voucher_pools.insert_one({"pool_id": "T1", "code": "NEXT2", "status": "available"})
+
+        settle_previous_month_affiliate_rewards(db, now_utc=now, batch_limit=10)
+
+        row = db.affiliate_ledger.find_one({"dedup_key": "AFF:92:202601:T1"})
+        self.assertEqual(row["status"], "ISSUED")
+        self.assertEqual(row["voucher_code"], "BOUND1")
+        self.assertEqual(db.voucher_pools.count_documents({"pool_id": "T1", "status": "available"}), 2)
+        self.assertEqual(db.voucher_pools.count_documents({"pool_id": "T1", "status": "issued"}), 1)
+
+    def test_issue_path_cas_prevents_double_consumption(self):
+        db = FakeDb()
+        db.users.insert_one({"user_id": 66, "blocked": False})
+        now = datetime(2026, 1, 12, tzinfo=timezone.utc)
+        for i in range(1, 11):
+            db.qualified_events.insert_one({"invitee_id": i, "referrer_id": 66, "qualified_at": now})
+        db.voucher_pools.insert_one({"pool_id": "T1", "code": "ONE", "status": "available"})
+        db.voucher_pools.insert_one({"pool_id": "T1", "code": "TWO", "status": "available"})
+
+        first = evaluate_monthly_affiliate_reward(db, referrer_id=66, now_utc=now)
+        second = evaluate_monthly_affiliate_reward(db, referrer_id=66, now_utc=now)
+
+        self.assertEqual(first["status"], "ISSUED")
+        self.assertEqual(second["status"], "ISSUED")
+        self.assertEqual(first.get("voucher_code"), second.get("voucher_code"))
+        self.assertEqual(db.voucher_pools.count_documents({"pool_id": "T1", "status": "issued"}), 1)
+
 
 
 if __name__ == "__main__":

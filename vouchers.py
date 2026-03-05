@@ -4372,12 +4372,16 @@ def admin_metrics_daily_v2():
                 ),
                 "qualified_events": int(
                     db.qualified_events.count_documents(
-                        {"created_at": {"$gte": day_start, "$lt": day_end}}
+                        {"qualified_at": {"$gte": day_start, "$lt": day_end}}
                     )
                 ),
                 "affiliate_rewards_issued": int(
-                    db.affiliate_ledger.count_documents(
-                        {"status": "issued", "created_at": {"$gte": day_start, "$lt": day_end}}
+                    db.voucher_pools.count_documents(
+                        {
+                            "status": "issued",
+                            "issued_for_ledger_id": {"$exists": True, "$nin": [None, ""]},
+                            "issued_at": {"$gte": day_start, "$lt": day_end},
+                        }
                     )
                 ),
             }
