@@ -3077,13 +3077,14 @@ function setLeaderboardMeta(ts, { isStale = false } = {}) {
         const data = await res.json();
         const rows = Array.isArray(data?.leaderboard) ? data.leaderboard : [];
         const my = data?.my_stats;
+        const isAdmin = Boolean(data?.is_admin);
         const myCard = my ? `
           <div class="leaderboard-summary" style="margin-bottom:10px;">
             <div class="summary-title">My Stats (This Week)</div>
             <div class="summary-row"><span>Qualified</span><strong>${Number(my.qualified_week || 0)}</strong></div>
             <div class="summary-row"><span>Joins</span><strong>${Number(my.joins_week_raw || 0)} (counted ${Number(my.joins_week_counted || 0)})</strong></div>
             <div class="summary-row"><span>Conversion</span><strong>${(Number(my.conversion_week || 0) * 100).toFixed(1)}%</strong></div>
-            <div class="summary-row"><span>Flag</span><strong>${String(my.quality_flag || "new")}</strong></div>
+            ${isAdmin ? `<div class="summary-row"><span>Flag</span><strong>${String(my.quality_flag || "new")}</strong></div>` : ""}
           </div>
         ` : '<div class="leaderboard-empty">Login to see your affiliate stats.</div>';
         if (!rows.length) {
@@ -3098,11 +3099,11 @@ function setLeaderboardMeta(ts, { isStale = false } = {}) {
             <td>${Number(r.qualified_week || 0)}</td>
             <td>${Number(r.joins_week_raw || 0)}</td>
             <td>${(Number(r.conversion_week || 0) * 100).toFixed(1)}%</td>
-            <td>${String(r.quality_flag || "new")}</td>
+            ${isAdmin ? `<td>${String(r.quality_flag || "new")}</td>` : ""}
           </tr>`).join("");
         target.innerHTML = `${myCard}
           <table class="affiliate-table">
-            <thead><tr><th>Rank</th><th>Name</th><th>Qualified</th><th>Joins</th><th>Conversion %</th><th>Flag</th></tr></thead>
+            <thead><tr><th>Rank</th><th>Name</th><th>Qualified</th><th>Joins</th><th>Conversion %</th>${isAdmin ? "<th>Flag</th>" : ""}</tr></thead>
             <tbody>${tableRows}</tbody>
           </table>`;
         affiliateLeaderboardLoaded = true;
