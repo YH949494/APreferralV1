@@ -1235,11 +1235,68 @@ def _build_idempotent_claim_response(existing_claim: dict | None):
         return None
     claimed_at = (existing_claim or {}).get("claimed_at")
     return {
-        "status": "ok",
+        "status": "already_claimed",
+        "voucher_code": existing_code,
         "voucher": {
             "code": existing_code,
             "claimedAt": _isoformat_kl(claimed_at) if claimed_at else None,
         },
+    }
+
+
+def _find_existing_claim_for_drop(*, drop_id, telegram_uid, internal_user_id=None):
+    existing_claim = voucher_claims_col.find_one({"drop_id": drop_id, "user_id": telegram_uid})
+    if (existing_claim or {}).get("voucher_code"):
+        return existing_claim
+    if telegram_uid is None and internal_user_id is not None:
+        existing_claim = voucher_claims_col.find_one({"drop_id": drop_id, "user_id": internal_user_id})
+        if (existing_claim or {}).get("voucher_code"):
+            return existing_claim
+
+    keys = []
+    telegram_uid_str = str(telegram_uid or "").strip()
+    if telegram_uid_str:
+        keys.append(("telegram", f"uid:{telegram_uid_str}"))
+
+    internal_uid_str = str(internal_user_id or "").strip()
+    if internal_uid_str and internal_uid_str != telegram_uid_str:
+        keys.append(("internal", f"uid:{internal_uid_str}"))
+
+    if not keys:
+        return None
+
+    lookup_keys = [key for _, key in keys]
+    drop_id_variants = _drop_id_variants(str(drop_id))
+    existing_voucher = db.vouchers.find_one(
+        {
+            "dropId": {"$in": drop_id_variants},
+            "code": {"$exists": True, "$ne": None},
+            "$or": [
+                {"claimedByKey": {"$in": lookup_keys}},
+                {"claimedBy": {"$in": lookup_keys}},
+            ],
+        },
+        {"code": 1, "claimedAt": 1, "dropId": 1, "claimedByKey": 1, "claimedBy": 1},
+    )
+    if not existing_voucher:
+        return None
+
+    matched_key_type = "unknown"
+    for key_type, key_value in keys:
+        if existing_voucher.get("claimedByKey") == key_value or existing_voucher.get("claimedBy") == key_value:
+            matched_key_type = key_type
+            break
+
+    current_app.logger.info(
+        "[claim][IDEMPOTENT_DB_MATCH] drop=%s key=%s claimed_at=%s",
+        drop_id,
+        matched_key_type,
+        bool(existing_voucher.get("claimedAt")),
+    )
+
+    return {
+        "voucher_code": existing_voucher.get("code"),
+        "claimed_at": existing_voucher.get("claimedAt"),
     }
 
 def _acquire_claim_lock(
@@ -3478,7 +3535,7 @@ def api_claim():
  
     claim_drop_id = _coerce_id(drop_id)
     claim_user_id = uid if uid is not None else user_id
-    existing_claim = voucher_claims_col.find_one({"drop_id": claim_drop_id, "user_id": claim_user_id})
+    existing_claim = _find_existing_claim_for_drop(drop_id=claim_drop_id, telegram_uid=uid, internal_user_id=user_id)
     idempotent_payload = _build_idempotent_claim_response(existing_claim)
     if idempotent_payload:
         current_app.logger.info(
@@ -3729,6 +3786,7 @@ def api_claim():
         now=claim_now,
     )
     if claim_doc_id is None:
+        existing_claim = _find_existing_claim_for_drop(drop_id=claim_drop_id, telegram_uid=uid, internal_user_id=user_id)
         idempotent_payload = _build_idempotent_claim_response(existing_claim)
         if idempotent_payload:
             current_app.logger.info(
@@ -3749,6 +3807,10 @@ def api_claim():
             {"_id": claim_doc_id},
             {"$set": {"status": "failed", "error": str(exc), "updated_at": now_utc()}},
         )
+        existing_claim = _find_existing_claim_for_drop(drop_id=claim_drop_id, telegram_uid=uid, internal_user_id=user_id)
+        idempotent_payload = _build_idempotent_claim_response(existing_claim)
+        if idempotent_payload:
+            return jsonify(idempotent_payload), 200
         return jsonify({"status": "error", "code": "already_claimed"}), 409
     except NoCodesLeft as exc:
         voucher_claims_col.update_one(

@@ -2740,10 +2740,31 @@ Active players win more.
 
     document.addEventListener("click", async (e) => {
       if (e.target.closest(".copy-drop-id-btn")) return;      
-      const claimBtn = e.target.closest("button[data-dropid],button[data-claim]");
+      const claimBtn = e.target.closest("button[data-dropid],button[data-claim],button[data-mode='copy']");
       if (!claimBtn) return;
 
       clearClaimError();
+
+      if (claimBtn.dataset.mode === "copy") {
+        const code = claimBtn.dataset.copyCode || "";
+        if (!code || code === "(no code)") {
+          alert("No code available to copy yet. Please claim first.");
+          return;
+        }
+        const oldText = claimBtn.textContent;
+        navigator.clipboard.writeText(code)
+          .then(() => {
+            claimBtn.textContent = "✅ Copied";
+            setTimeout(() => {
+              claimBtn.textContent = "📋 Copy";
+            }, 1000);
+          })
+          .catch(() => {
+            claimBtn.textContent = oldText;
+            alert("Unable to copy automatically. Please copy the code manually: " + code);
+          });
+        return;
+      }
       
       if (!hasRegionSelected()) {
         alert("❌ Please select and lock your region before claiming rewards.");
@@ -2758,6 +2779,7 @@ Active players win more.
 
       const originalText = claimBtn.textContent;
       const wasDisabled = claimBtn.disabled;
+      let shouldRestoreBtn = true;
       let claimSafetyTimer = setTimeout(() => {
         window.__claimInFlight = false;
         if (document.body.contains(claimBtn)) {
@@ -2783,7 +2805,7 @@ Active players win more.
         let out = null;
         try { out = await res.json(); } catch { /* ignore */ }
 
-        const ok = res.ok && (out?.ok === true || out?.status === "ok");
+        const ok = res.ok && (out?.ok === true || out?.status === "ok" || out?.status === "already_claimed");
         if (!ok) {
           const payload = { ...(out || {}) };
           if (res.status === 410 && !payload.code) {
@@ -2796,37 +2818,7 @@ Active players win more.
             retry_after_sec: payload?.retry_after_sec
           });
           const uiModel = claimErrorToUi(payload, res.status);
-          let isBusy = false;
-          let scheduledBusyRetry = false;
-          isBusy = (res.status === 429 && payload?.code === "busy");
-          if (isBusy) {
-            const retryKey = String(dropId);
-            if (claimBtn.dataset.busyRetryKey && claimBtn.dataset.busyRetryKey !== retryKey) {
-              delete claimBtn.dataset.busyRetried;
-              delete claimBtn.dataset.busyRetryKey;
-            }
-            const alreadyRetried = claimBtn.dataset.busyRetried === "1" && claimBtn.dataset.busyRetryKey === retryKey;
-            renderClaimError(uiModel, {
-              retryHandler: () => {
-                if (document.body.contains(claimBtn)) {
-                  claimBtn.click();
-                }
-              }
-            });
-            if (!alreadyRetried) {
-              claimBtn.dataset.busyRetried = "1";
-              claimBtn.dataset.busyRetryKey = retryKey;
-              const retryAfterSec = Number(payload?.retry_after_sec) || 2;
-              const delayMs = (retryAfterSec * 1000) + Math.floor(Math.random() * 501);
-              setTimeout(() => {
-                if (document.body.contains(claimBtn)) {
-                  claimBtn.click();
-                }
-              }, delayMs);
-              scheduledBusyRetry = true;
-            }
-          }
-          if (!isBusy && payload?.code === "sold_out") {
+          if (payload?.code === "sold_out") {
             const soldOutMessage = payload?.message || "Today’s vouchers are fully claimed.";
             if (claimBtn.id === "campaign-voucher-btn") {
               showVoucherSoldOut(soldOutMessage);
@@ -2834,24 +2826,20 @@ Active players win more.
               claimBtn.textContent = "Sold out";
               claimBtn.setAttribute("disabled", "disabled");
             }
+            shouldRestoreBtn = false;
+          } else {
+            delete claimBtn.dataset.mode;
+            delete claimBtn.dataset.copyCode;
           }
-          if (!isBusy && !scheduledBusyRetry) {
-            renderClaimError(uiModel, {
-              retryHandler: () => {
-                if (document.body.contains(claimBtn)) {
-                  claimBtn.click();
-                }
-              }
-            });
-          }
+          renderClaimError(uiModel);
           return;          
         }
 
         if (ok) {
           clearClaimError();
-          delete claimBtn.dataset.busyRetried;
-          delete claimBtn.dataset.busyRetryKey;
-          const codeText = out?.voucher?.code ? String(out.voucher.code) : "(no code)";
+          const codeText = out?.voucher?.code
+            ? String(out.voucher.code)
+            : (out?.voucher_code ? String(out.voucher_code) : "(no code)");
           const claimedAt = out?.voucher?.claimedAt ? fmtKL(out.voucher.claimedAt) : "-";
 
           let copySuccess = false;
@@ -2864,20 +2852,18 @@ Active players win more.
             }
           }
 
+          ensureCodeBlock(claimBtn, codeText);
           if (claimBtn.id === "campaign-voucher-btn") {
             const messageEl = document.getElementById("campaign-voucher-message");
-            if (messageEl) {
-              messageEl.innerText = codeText;
-            }
-            claimBtn.textContent = "📋 Copy to clipboard";
-            claimBtn.removeAttribute("data-dropid");
-            claimBtn.removeAttribute("data-claim");
-            claimBtn.dataset.copyCode = codeText;
-            claimBtn.removeAttribute("disabled");
-          } else {
-            claimBtn.textContent = "View Code";
-            ensureCodeBlock(claimBtn, codeText);
+            if (messageEl) messageEl.innerText = codeText;
           }
+          claimBtn.dataset.mode = "copy";
+          claimBtn.dataset.copyCode = codeText;
+          claimBtn.textContent = "📋 Copy";
+          claimBtn.disabled = false;
+          claimBtn.removeAttribute("data-dropid");
+          claimBtn.removeAttribute("data-claim");
+          shouldRestoreBtn = false;
 
           const copyMsg = copySuccess
             ? "\n\n✅ Code copied to clipboard."
@@ -2887,17 +2873,11 @@ Active players win more.
         
       } catch (err) {
         console.error("Claim request failed", err);
-        renderClaimError(claimErrorToUi({}, null), {
-          retryHandler: () => {
-            if (document.body.contains(claimBtn)) {
-              claimBtn.click();
-            }
-          }
-        });
+        renderClaimError(claimErrorToUi({}, null));
       } finally {
         clearTimeout(claimSafetyTimer);
         window.__claimInFlight = false;
-        if (document.body.contains(claimBtn)) {
+        if (document.body.contains(claimBtn) && claimBtn.dataset.mode !== "copy" && shouldRestoreBtn) {
           claimBtn.disabled = wasDisabled;
           if (claimBtn.textContent === "Claiming…") {
             claimBtn.textContent = originalText;
