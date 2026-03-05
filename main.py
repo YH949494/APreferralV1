@@ -527,6 +527,19 @@ def tick_5min() -> None:
         raise
 
 
+def affiliate_monthly_settle_scheduled() -> None:
+    acquired, lock_doc = acquire_scheduler_lock("affiliate_monthly_settle", ttl_seconds=1800)
+    if not acquired:
+        logger.info(
+            "[JOB][AFFILIATE_MONTHLY] lock_not_acquired owner=%s expires_in_s=%s instance=%s",
+            (lock_doc or {}).get("owner"),
+            expires_in_seconds((lock_doc or {}).get("expireAt")),
+            INSTANCE_ID,
+        )
+        return
+    settle_previous_month_affiliate_rewards(db, now_utc=datetime.now(timezone.utc), batch_limit=1000)
+
+
 def process_verification_queue_scheduled(batch_limit: int = 50) -> None:
     acquired, _lock_doc = acquire_scheduler_lock("verification_queue", ttl_seconds=300)
     if not acquired:
@@ -3442,7 +3455,7 @@ def run_worker():
         replace_existing=True,
     )
     scheduler.add_job(
-        lambda: settle_previous_month_affiliate_rewards(db, now_utc=datetime.now(timezone.utc), batch_limit=1000),
+        affiliate_monthly_settle_scheduled,
         trigger=CronTrigger(day=1, hour=0, minute=10, timezone=KL_TZ),
         id="affiliate_monthly_settle",
         name="Affiliate Monthly Settle (Prev Month)",
