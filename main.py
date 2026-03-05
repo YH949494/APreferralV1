@@ -2270,6 +2270,12 @@ def get_affiliate_leaderboard_week():
             "quality_flag": quality_flag,
         }
 
+    if not is_admin:
+        for row in leaderboard:
+            row.pop("quality_flag", None)
+        if isinstance(my_stats, dict):
+            my_stats.pop("quality_flag", None)
+
     return jsonify(
         {
             "generated_at": (snapshot.get("generated_at") or datetime.now(timezone.utc)).isoformat(),
@@ -2278,6 +2284,7 @@ def get_affiliate_leaderboard_week():
             "rules": snapshot.get("rules") or {},
             "leaderboard": leaderboard,
             "my_stats": my_stats,
+            "is_admin": is_admin,
         }
     ), 200
 
