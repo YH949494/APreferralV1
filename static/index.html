@@ -2856,7 +2856,7 @@ Active players win more.
             if (claimBtn.id === "campaign-voucher-btn") {
               showVoucherSoldOut(soldOutMessage);
             } else {
-              claimBtn.textContent = "Sold out";
+              claimBtn.textContent = "Fully redeemed";
               claimBtn.setAttribute("disabled", "disabled");
             }
             shouldRestoreBtn = false;
@@ -2909,7 +2909,7 @@ Active players win more.
         renderClaimError(claimErrorToUi({}, null));
       } finally {
         clearTimeout(claimSafetyTimer);
-        if (claimCooldownTimer) {
+        if (claimCooldownTimer && !inCooldown) {
           clearInterval(claimCooldownTimer);
           claimCooldownTimer = null;
         }
