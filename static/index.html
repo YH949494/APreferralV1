@@ -2780,9 +2780,11 @@ Active players win more.
       const originalText = claimBtn.textContent;
       const wasDisabled = claimBtn.disabled;
       let shouldRestoreBtn = true;
+      let claimCooldownTimer = null;
+      let inCooldown = false;
       let claimSafetyTimer = setTimeout(() => {
         window.__claimInFlight = false;
-        if (document.body.contains(claimBtn)) {
+        if (document.body.contains(claimBtn) && !inCooldown) {
           claimBtn.disabled = wasDisabled;
           if (claimBtn.textContent === "Claiming…") {
             claimBtn.textContent = originalText;
@@ -2811,12 +2813,43 @@ Active players win more.
           if (res.status === 410 && !payload.code) {
             payload.code = "sold_out";
           }
+          const isBusy429 = res.status === 429 && payload?.code === "busy";
+          const retryAfterSecRaw = Number(payload?.retry_after_sec);
+          const retryAfterSec = Number.isFinite(retryAfterSecRaw) && retryAfterSecRaw > 0
+            ? Math.min(15, Math.ceil(retryAfterSecRaw))
+            : (isBusy429 ? 2 : null);
           console.warn("Claim failed", {
             status: res.status,
             code: payload?.code,
             reason: payload?.reason,
             retry_after_sec: payload?.retry_after_sec
           });
+
+          if (res.status === 429 && retryAfterSec) {
+            shouldRestoreBtn = false;
+            inCooldown = true;
+            claimBtn.setAttribute("disabled", "disabled");
+            let remaining = retryAfterSec;
+            claimBtn.textContent = `Claiming (${remaining}s)`;
+            claimCooldownTimer = setInterval(() => {
+              remaining -= 1;
+              if (remaining <= 0) {
+                clearInterval(claimCooldownTimer);
+                claimCooldownTimer = null;
+                inCooldown = false;
+                if (document.body.contains(claimBtn)) {
+                  claimBtn.disabled = wasDisabled;
+                  claimBtn.textContent = originalText;
+                }
+                return;
+              }
+              if (document.body.contains(claimBtn)) {
+                claimBtn.textContent = `Claiming (${remaining}s)`;
+              }
+            }, 1000);
+            return;
+          }
+
           const uiModel = claimErrorToUi(payload, res.status);
           if (payload?.code === "sold_out") {
             const soldOutMessage = payload?.message || "Today’s vouchers are fully claimed.";
@@ -2876,6 +2909,10 @@ Active players win more.
         renderClaimError(claimErrorToUi({}, null));
       } finally {
         clearTimeout(claimSafetyTimer);
+        if (claimCooldownTimer) {
+          clearInterval(claimCooldownTimer);
+          claimCooldownTimer = null;
+        }
         window.__claimInFlight = false;
         if (document.body.contains(claimBtn) && claimBtn.dataset.mode !== "copy" && shouldRestoreBtn) {
           claimBtn.disabled = wasDisabled;
