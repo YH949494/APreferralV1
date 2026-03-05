@@ -620,6 +620,24 @@ def _record_referral_event(inviter_id: int, invitee_id: int, event: str, occurre
         invitee_id,
         "settled" if event == "referral_settled" else "revoked",
     )
+    try:
+        from affiliate_leaderboard import emit_referral_flow_event
+        emit_referral_flow_event(
+            db,
+            event=event,
+            referrer_id=int(inviter_id),
+            invitee_id=int(invitee_id),
+            ts_utc=occurred_at,
+            meta={},
+            idempotency_key=f"rf|{event}|{int(inviter_id)}|{int(invitee_id)}|{occurred_at.isoformat()}",
+        )
+    except Exception:
+        logger.exception(
+            "[SCHED][REFERRAL_LEDGER] flow_event_emit_failed inviter=%s invitee=%s event=%s",
+            inviter_id,
+            invitee_id,
+            event,
+        )
     return True
 
 
