@@ -49,6 +49,16 @@ class _FakeAggregateCollection:
         return []
 
 
+class _FakeQualifiedAggregateCollection:
+    def __init__(self, rows=None):
+        self.rows = rows or []
+        self.pipelines = []
+
+    def aggregate(self, pipeline):
+        self.pipelines.append(pipeline)
+        return list(self.rows)
+
+
 class _FakeLiveCollection:
     def __init__(self, doc=None):
         self.doc = doc
@@ -71,8 +81,16 @@ class _FakeWeeklyDb:
     def __init__(self, live_doc=None):
         self.pending_referrals = _FakeAggregateCollection()
         self.referral_flow_events = _FakeAggregateCollection()
+        self.referral_events = _FakeAggregateCollection()
         self.qualified_events = _FakeAggregateCollection()
         self.affiliate_weekly_kpis_live = _FakeLiveCollection(live_doc)
+
+
+class _FakeQualifiedWeeklyDb:
+    def __init__(self, *, flow_rows=None, ledger_rows=None):
+        self.pending_referrals = _FakeAggregateCollection()
+        self.referral_flow_events = _FakeQualifiedAggregateCollection(flow_rows)
+        self.referral_events = _FakeQualifiedAggregateCollection(ledger_rows)
 
 
 def test_should_count_referral_join_cooldown_and_cap():
@@ -213,3 +231,30 @@ def test_live_kpi_string_generated_at_z_short_circuits(monkeypatch):
     monkeypatch.setattr(mod, "_build_affiliate_weekly_payload", _fail_build)
     out = compute_affiliate_weekly_kpis_live(db, reference_utc=now)
     assert out["week_start_utc"] == week_start
+
+
+def test_weekly_payload_qualified_ignores_qualified_events_collection():
+    ref = datetime(2026, 1, 7, 12, 0, 0, tzinfo=timezone.utc)
+    db = _FakeQualifiedWeeklyDb(flow_rows=[], ledger_rows=[])
+
+    _, payload = _build_affiliate_weekly_payload(db, reference_utc=ref)
+
+    assert payload["affiliate_weekly_by_referrer"] == {}
+
+
+def test_weekly_payload_qualified_counts_referral_settled_from_flow_events():
+    ref = datetime(2026, 1, 7, 12, 0, 0, tzinfo=timezone.utc)
+    db = _FakeQualifiedWeeklyDb(flow_rows=[{"_id": 123, "qualified_week": 2}], ledger_rows=[])
+
+    _, payload = _build_affiliate_weekly_payload(db, reference_utc=ref)
+
+    assert payload["affiliate_weekly_by_referrer"]["123"]["qualified_week"] == 2
+
+
+def test_weekly_payload_qualified_falls_back_to_referral_events_when_no_flow_settled():
+    ref = datetime(2026, 1, 7, 12, 0, 0, tzinfo=timezone.utc)
+    db = _FakeQualifiedWeeklyDb(flow_rows=[], ledger_rows=[{"_id": 456, "qualified_week": 3}])
+
+    _, payload = _build_affiliate_weekly_payload(db, reference_utc=ref)
+
+    assert payload["affiliate_weekly_by_referrer"]["456"]["qualified_week"] == 3

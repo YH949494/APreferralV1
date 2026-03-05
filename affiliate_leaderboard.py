@@ -160,14 +160,34 @@ def _build_affiliate_weekly_payload(db_ref, *, reference_utc: datetime | None = 
             ]
         )
     )
+    flow_settled_match = {
+        "event": "referral_settled",
+        "ts_utc": {"$gte": week_start_utc, "$lt": week_end_utc},
+        "referrer_id": {"$ne": None},
+    }
     qualified_rows = list(
-        db_ref.qualified_events.aggregate(
+        db_ref.referral_flow_events.aggregate(
             [
-                {"$match": {"qualified_at": {"$gte": week_start_utc, "$lt": week_end_utc}, "referrer_id": {"$ne": None}}},
+                {"$match": flow_settled_match},
                 {"$group": {"_id": "$referrer_id", "qualified_week": {"$sum": 1}}},
             ]
         )
     )
+    if not qualified_rows:
+        qualified_rows = list(
+            db_ref.referral_events.aggregate(
+                [
+                    {
+                        "$match": {
+                            "event": "referral_settled",
+                            "occurred_at": {"$gte": week_start_utc, "$lt": week_end_utc},
+                            "inviter_id": {"$ne": None},
+                        }
+                    },
+                    {"$group": {"_id": "$inviter_id", "qualified_week": {"$sum": 1}}},
+                ]
+            )
+        )
 
     board_map: dict[str, dict[str, Any]] = {}
 

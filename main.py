@@ -2315,14 +2315,39 @@ def get_affiliate_leaderboard_week():
                 }
             )
         )
-        qualified_week = int(
-            db.qualified_events.count_documents(
+        # Use find_one() for existence check instead of count_documents(limit=1)
+        # because some PyMongo versions reject the limit parameter.
+        has_flow_settled = (
+            db.referral_flow_events.find_one(
                 {
-                    "referrer_id": current_user_id,
-                    "qualified_at": {"$gte": week_start_utc, "$lt": week_end_utc},
-                }
+                    "event": "referral_settled",
+                    "ts_utc": {"$gte": week_start_utc, "$lt": week_end_utc},
+                    "referrer_id": {"$ne": None},
+                },
+                {"_id": 1},
             )
+            is not None
         )
+        if has_flow_settled:
+            qualified_week = int(
+                db.referral_flow_events.count_documents(
+                    {
+                        "event": "referral_settled",
+                        "referrer_id": current_user_id,
+                        "ts_utc": {"$gte": week_start_utc, "$lt": week_end_utc},
+                    }
+                )
+            )
+        else:
+            qualified_week = int(
+                db.referral_events.count_documents(
+                    {
+                        "event": "referral_settled",
+                        "inviter_id": current_user_id,
+                        "occurred_at": {"$gte": week_start_utc, "$lt": week_end_utc},
+                    }
+                )
+            )
         conversion_week = float(qualified_week / joins_week_raw) if joins_week_raw > 0 else 0.0
         quality_flag = "new" if joins_week_raw < 10 else ("low_quality" if conversion_week < 0.20 else "ok")
         my_stats = {
