@@ -153,6 +153,18 @@ class AffiliateRewardTests(unittest.TestCase):
         self.assertTrue(first)
         self.assertFalse(second)
 
+
+    def test_monthly_reward_ignores_non_qualified_join_data(self):
+        db = FakeDb()
+        db.users.insert_one({"user_id": 88, "blocked": False})
+        now = datetime(2026, 1, 12, tzinfo=timezone.utc)
+
+        # Non-qualified join-like record should not affect reward counting.
+        db.referral_audit.insert_one({"inviter_user_id": 88, "invitee_user_id": 501, "reason": "join"})
+
+        row = evaluate_monthly_affiliate_reward(db, referrer_id=88, now_utc=now)
+        self.assertIsNone(row)
+
     def test_monthly_tier_and_dedup_key(self):
         db = FakeDb()
         db.users.insert_one({"user_id": 8, "blocked": False})

@@ -38,6 +38,7 @@ from app_context import set_app_bot, set_bot, set_scheduler
 from onboarding import MYWIN_CHAT_ID, onboarding_due_tick, record_first_mywin, record_first_checkin
 from vouchers import vouchers_bp, ensure_voucher_indexes, process_verification_queue, check_channel_subscribed
 from scheduler import settle_pending_referrals, settle_referral_snapshots, settle_xp_snapshots, evaluate_affiliate_simulated_ledgers, compute_affiliate_daily_kpi_yesterday, run_invitee_subscription_audit
+from referral_rate_limit import consume_referral_rate_limits
 from affiliate_leaderboard import (
     should_count_referral_join,
     ensure_affiliate_leaderboard_indexes,
@@ -564,6 +565,7 @@ unknown_invite_links_collection = db["unknown_invite_links"]
 referral_audit_collection = db["referral_audit"]
 unknown_invite_audit_collection = db["unknown_invite_audit"]
 pending_referrals_collection = db["pending_referrals"]
+referral_rate_limits_collection = db["referral_rate_limits"]
 qualified_events_collection = db["qualified_events"]
 affiliate_ledger_collection = db["affiliate_ledger"]
 voucher_pools_collection = db["voucher_pools"]
@@ -575,6 +577,8 @@ except Exception:
     logger.warning("[SCHEDULER][LOCK] failed to create TTL index", exc_info=True)
     
 REFERRAL_HOLD_HOURS = 12
+REFERRAL_HOURLY_LIMIT = int(os.getenv("REFERRAL_HOURLY_LIMIT", "20"))
+REFERRAL_DAILY_LIMIT = int(os.getenv("REFERRAL_DAILY_LIMIT", "200"))
 
 REFERRAL_INCREMENT_GUARD_FIELDS = {
     "weekly_referrals",
@@ -1110,9 +1114,45 @@ def _confirm_referral_on_main_join(
         )
         return
 
+    limiter_now_utc = now_utc()
+    try:
+        allowed, blocked_reason, limit_meta = consume_referral_rate_limits(
+            referral_rate_limits_collection,
+            inviter_id=int(referrer_id),
+            now_utc=limiter_now_utc,
+            hourly_limit=REFERRAL_HOURLY_LIMIT,
+            daily_limit=REFERRAL_DAILY_LIMIT,
+        )
+    except Exception:
+        logger.exception(
+            "[REFERRAL][ERROR] step=rate_limit inviter=%s invitee=%s",
+            referrer_id,
+            invitee_user_id,
+        )
+        allowed, blocked_reason, limit_meta = True, None, {}
+
+    if not allowed:
+        _write_referral_audit(
+            status="skipped",
+            reason=blocked_reason,
+            chat_id=chat_id or GROUP_ID,
+            invitee_user_id=invitee_user_id,
+            invitee_username=invitee_username,
+            invite_link=invite_link_url,
+            inviter_user_id=referrer_id,
+        )
+        logger.info(
+            "[REFERRAL][RATE_LIMIT] inviter=%s key=%s count=%s limit=%s",
+            referrer_id,
+            limit_meta.get("key"),
+            limit_meta.get("count"),
+            limit_meta.get("limit"),
+        )
+        return
+
 
     try:
-        created_at_utc = now_utc()
+        created_at_utc = limiter_now_utc
         created_at_kl = created_at_utc.astimezone(KL_TZ).isoformat()
         result = pending_referrals_collection.update_one(
             {"group_id": chat_id or GROUP_ID, "invitee_user_id": invitee_user_id},
@@ -1368,6 +1408,16 @@ def ensure_indexes():
     pending_referrals_collection.create_index(
         [("inviter_user_id", 1), ("status", 1)],
         name="pending_by_inviter",
+    )
+    referral_rate_limits_collection.create_index(
+        [("key", 1)],
+        unique=True,
+        name="uniq_referral_rate_limit_key",
+    )
+    referral_rate_limits_collection.create_index(
+        [("expireAt", 1)],
+        expireAfterSeconds=0,
+        name="ttl_referral_rate_limit_expire",
     )
     ensure_affiliate_leaderboard_indexes(db)
 
