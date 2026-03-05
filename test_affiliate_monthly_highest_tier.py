@@ -74,6 +74,18 @@ class FakeCollection:
     def count_documents(self, filt):
         return sum(1 for d in self.docs if self._match(d, filt))
 
+    def find_one_and_update(self, filt, update, sort=None, return_document=None):
+        matches = [d for d in self.docs if self._match(d, filt)]
+        if not matches:
+            return None
+        if sort:
+            key, direction = sort[0]
+            matches.sort(key=lambda x: x.get(key, 0), reverse=(direction < 0))
+        d = matches[0]
+        for k, v in update.get("$set", {}).items():
+            d[k] = v
+        return dict(d)
+
     def aggregate(self, pipeline):
         rows = list(self.docs)
         for stage in pipeline:
@@ -96,11 +108,12 @@ class FakeDb:
         self.users = FakeCollection(unique_fields=[("user_id",)])
         self.qualified_events = FakeCollection(unique_fields=[("invitee_id",)])
         self.affiliate_ledger = FakeCollection(unique_fields=[("dedup_key",)])
+        self.voucher_pools = FakeCollection(unique_fields=[("pool_id", "code")])
         self.referral_audit = FakeCollection()
 
 
 class AffiliateMonthlyHighestTierTests(unittest.TestCase):
-    def test_upgrade_in_place_without_duplicates(self):
+    def test_creates_per_tier_ledgers_without_duplicates(self):
         db = FakeDb()
         uid = 1001
         db.users.insert_one({"user_id": uid, "blocked": False})
@@ -112,20 +125,24 @@ class AffiliateMonthlyHighestTierTests(unittest.TestCase):
         for i in range(1, T1_THRESHOLD + 1):
             db.qualified_events.insert_one({"invitee_id": i, "referrer_id": uid, "qualified_at": event_time})
 
+        db.voucher_pools.insert_one({"pool_id": "T1", "code": "H1", "status": "available"})
         first = evaluate_monthly_affiliate_reward(db, referrer_id=uid, now_utc=now)
         self.assertEqual(first["tier"], "T1")
 
         for i in range(T1_THRESHOLD + 1, T2_THRESHOLD + 1):
             db.qualified_events.insert_one({"invitee_id": i, "referrer_id": uid, "qualified_at": event_time})
 
+        db.voucher_pools.insert_one({"pool_id": "T2", "code": "H2", "status": "available"})
         second = evaluate_monthly_affiliate_reward(db, referrer_id=uid, now_utc=now)
-        dedup_key = f"AFF:{uid}:{yyyymm}"
+        dedup_key_t1 = f"AFF:{uid}:{yyyymm}:T1"
+        dedup_key_t2 = f"AFF:{uid}:{yyyymm}:T2"
 
-        self.assertEqual(db.affiliate_ledger.count_documents({"dedup_key": dedup_key}), 1)
+        self.assertEqual(db.affiliate_ledger.count_documents({"dedup_key": dedup_key_t1}), 1)
+        self.assertEqual(db.affiliate_ledger.count_documents({"dedup_key": dedup_key_t2}), 1)
         self.assertEqual(second["tier"], "T2")
-        self.assertEqual(second["dedup_key"], dedup_key)
+        self.assertEqual(second["dedup_key"], dedup_key_t2)
 
-    def test_finalized_monthly_ledger_does_not_upgrade(self):
+    def test_finalized_tier_ledger_does_not_duplicate(self):
         db = FakeDb()
         uid = 1002
         db.users.insert_one({"user_id": uid, "blocked": False})
@@ -137,6 +154,7 @@ class AffiliateMonthlyHighestTierTests(unittest.TestCase):
         for i in range(1, T1_THRESHOLD + 1):
             db.qualified_events.insert_one({"invitee_id": i, "referrer_id": uid, "qualified_at": event_time})
 
+        db.voucher_pools.insert_one({"pool_id": "T1", "code": "F1", "status": "available"})
         created = evaluate_monthly_affiliate_reward(db, referrer_id=uid, now_utc=now)
         self.assertEqual(created["tier"], "T1")
 
@@ -145,12 +163,13 @@ class AffiliateMonthlyHighestTierTests(unittest.TestCase):
         for i in range(T1_THRESHOLD + 1, T2_THRESHOLD + 1):
             db.qualified_events.insert_one({"invitee_id": i, "referrer_id": uid, "qualified_at": event_time})
 
+        db.voucher_pools.insert_one({"pool_id": "T2", "code": "F2", "status": "available"})
         after = evaluate_monthly_affiliate_reward(db, referrer_id=uid, now_utc=now)
-        dedup_key = f"AFF:{uid}:{yyyymm}"
+        dedup_key_t1 = f"AFF:{uid}:{yyyymm}:T1"
 
-        self.assertEqual(db.affiliate_ledger.count_documents({"dedup_key": dedup_key}), 1)
-        self.assertEqual(after["tier"], "T1")
-        self.assertEqual(after["status"], "ISSUED")
+        self.assertEqual(db.affiliate_ledger.count_documents({"dedup_key": dedup_key_t1}), 1)
+        self.assertEqual(after["tier"], "T2")
+        self.assertEqual(db.affiliate_ledger.find_one({"dedup_key": dedup_key_t1})["status"], "ISSUED")
 
 
 if __name__ == "__main__":

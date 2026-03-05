@@ -8,6 +8,7 @@ from affiliate_rewards import (
     evaluate_monthly_affiliate_reward,
     issue_welcome_bonus_if_eligible,
     mark_invitee_qualified,
+    settle_previous_month_affiliate_rewards,
 )
 
 
@@ -156,25 +157,32 @@ class AffiliateRewardTests(unittest.TestCase):
         db = FakeDb()
         db.users.insert_one({"user_id": 8, "blocked": False})
         now = datetime(2026, 1, 10, tzinfo=timezone.utc)
-        for i in range(1, 8):
+        for i in range(1, 26):
             db.qualified_events.insert_one({"invitee_id": i, "referrer_id": 8, "qualified_at": now})
+        db.voucher_pools.insert_one({"pool_id": "T1", "code": "A1", "status": "available"})
         db.voucher_pools.insert_one({"pool_id": "T2", "code": "A", "status": "available"})
         row = evaluate_monthly_affiliate_reward(db, referrer_id=8, now_utc=now)
         self.assertEqual(row["tier"], "T2")
+        self.assertEqual(db.affiliate_ledger.count_documents({"dedup_key": "AFF:8:202601:T1"}), 1)
         self.assertEqual(db.affiliate_ledger.count_documents({"dedup_key": "AFF:8:202601:T2"}), 1)
 
-    def test_t2_risk_pending_review_and_t1_bypass(self):
+    def test_t2_risk_auto_issue_and_t1_bypass(self):
         db = FakeDb()
         db.users.insert_one({"user_id": 9, "blocked": False})
         now = datetime(2026, 1, 12, tzinfo=timezone.utc)
-        for i in range(1, 8):
+        for i in range(1, 26):
             db.qualified_events.insert_one({"invitee_id": i, "referrer_id": 9, "qualified_at": now, "ip": "1.1.1.1"})
+        db.voucher_pools.insert_one({"pool_id": "T1", "code": "T1-A", "status": "available"})
+        db.voucher_pools.insert_one({"pool_id": "T2", "code": "T2-A", "status": "available"})
         row = evaluate_monthly_affiliate_reward(db, referrer_id=9, now_utc=now)
-        self.assertEqual(row["status"], "PENDING_REVIEW")
+        self.assertEqual(row["status"], "ISSUED")
+        statuses = {d.get("status") for d in db.affiliate_ledger.docs}
+        self.assertNotIn("PENDING_REVIEW", statuses)
+        self.assertNotIn("PENDING_MANUAL", statuses)
 
         db2 = FakeDb()
         db2.users.insert_one({"user_id": 5, "blocked": False})
-        for i in range(1, 4):
+        for i in range(1, 11):
             db2.qualified_events.insert_one({"invitee_id": i, "referrer_id": 5, "qualified_at": now, "ip": "1.1.1.1"})
         db2.voucher_pools.insert_one({"pool_id": "T1", "code": "TT1", "status": "available"})
         row2 = evaluate_monthly_affiliate_reward(db2, referrer_id=5, now_utc=now)
@@ -184,18 +192,18 @@ class AffiliateRewardTests(unittest.TestCase):
         db = FakeDb()
         db.users.insert_one({"user_id": 7, "blocked": False})
         now = datetime.now(timezone.utc)
-        for i in range(1, 4):
+        for i in range(1, 11):
             db.qualified_events.insert_one({"invitee_id": i, "referrer_id": 7, "qualified_at": now})
         row = evaluate_monthly_affiliate_reward(db, referrer_id=7, now_utc=now)
         self.assertEqual(row["status"], "OUT_OF_STOCK")
 
         db.voucher_pools.insert_one({"pool_id": "T1", "code": "ONLY1", "status": "available"})
         db.users.insert_one({"user_id": 11, "blocked": False})
-        for i in range(101, 104):
+        for i in range(101, 111):
             db.qualified_events.insert_one({"invitee_id": i, "referrer_id": 11, "qualified_at": now})
         row_a = evaluate_monthly_affiliate_reward(db, referrer_id=11, now_utc=now)
         db.users.insert_one({"user_id": 12, "blocked": False})
-        for i in range(201, 204):
+        for i in range(201, 211):
             db.qualified_events.insert_one({"invitee_id": i, "referrer_id": 12, "qualified_at": now})
         row_b = evaluate_monthly_affiliate_reward(db, referrer_id=12, now_utc=now)
         issued = [r for r in (row_a, row_b) if r.get("status") == "ISSUED"]
@@ -205,7 +213,7 @@ class AffiliateRewardTests(unittest.TestCase):
         db = FakeDb()
         db.users.insert_one({"user_id": 31, "blocked": False})
         now = datetime(2026, 1, 15, tzinfo=timezone.utc)
-        for i in range(1, 4):
+        for i in range(1, 11):
             db.qualified_events.insert_one({"invitee_id": i, "referrer_id": 31, "qualified_at": now})
         db.voucher_pools.insert_one({"pool_id": "T1", "code": "SIMT1", "status": "available"})
 
@@ -222,7 +230,7 @@ class AffiliateRewardTests(unittest.TestCase):
         db = FakeDb()
         db.users.insert_one({"user_id": 41, "blocked": False})
         now = datetime(2026, 1, 15, tzinfo=timezone.utc)
-        for i in range(1, 4):
+        for i in range(1, 11):
             db.qualified_events.insert_one({"invitee_id": i, "referrer_id": 41, "qualified_at": now})
 
         os.environ["AFFILIATE_SIMULATE"] = "1"
@@ -233,6 +241,54 @@ class AffiliateRewardTests(unittest.TestCase):
             os.environ.pop("AFFILIATE_SIMULATE", None)
 
         self.assertEqual(db.affiliate_ledger.count_documents({"dedup_key": "AFF:41:202601:T1"}), 1)
+
+    def test_late_evaluation_issues_each_eligible_tier_once(self):
+        db = FakeDb()
+        db.users.insert_one({"user_id": 55, "blocked": False})
+        now = datetime(2026, 1, 20, tzinfo=timezone.utc)
+        for i in range(1, 61):
+            db.qualified_events.insert_one({"invitee_id": i, "referrer_id": 55, "qualified_at": now})
+        db.voucher_pools.insert_one({"pool_id": "T1", "code": "L1", "status": "available"})
+        db.voucher_pools.insert_one({"pool_id": "T2", "code": "L2", "status": "available"})
+        db.voucher_pools.insert_one({"pool_id": "T3", "code": "L3", "status": "available"})
+
+        evaluate_monthly_affiliate_reward(db, referrer_id=55, now_utc=now)
+        evaluate_monthly_affiliate_reward(db, referrer_id=55, now_utc=now)
+
+        for tier in ("T1", "T2", "T3"):
+            dedup = f"AFF:55:202601:{tier}"
+            self.assertEqual(db.affiliate_ledger.count_documents({"dedup_key": dedup}), 1)
+            row = db.affiliate_ledger.find_one({"dedup_key": dedup})
+            self.assertEqual(row["status"], "ISSUED")
+
+    def test_settle_processes_stale_approved_previous_month(self):
+        db = FakeDb()
+        now = datetime(2026, 2, 20, 0, 0, tzinfo=timezone.utc)
+        stale_updated_at = now - timedelta(minutes=16)
+        db.affiliate_ledger.insert_one(
+            {
+                "ledger_type": "AFFILIATE_MONTHLY",
+                "user_id": 77,
+                "year_month": "202601",
+                "tier": "T1",
+                "pool_id": "T1",
+                "qualified_count": 10,
+                "status": "APPROVED",
+                "dedup_key": "AFF:77:202601:T1",
+                "voucher_code": None,
+                "risk_flags": [],
+                "created_at": stale_updated_at,
+                "updated_at": stale_updated_at,
+            }
+        )
+        db.voucher_pools.insert_one({"pool_id": "T1", "code": "SETTLE1", "status": "available"})
+
+        out = settle_previous_month_affiliate_rewards(db, now_utc=now)
+
+        row = db.affiliate_ledger.find_one({"dedup_key": "AFF:77:202601:T1"})
+        self.assertEqual(out["prev_yyyymm"], "202601")
+        self.assertEqual(row["status"], "ISSUED")
+        self.assertEqual(row["voucher_code"], "SETTLE1")
 
 
 if __name__ == "__main__":
