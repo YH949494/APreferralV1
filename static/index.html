@@ -2850,22 +2850,33 @@ Active players win more.
             return;
           }
 
-          const uiModel = claimErrorToUi(payload, res.status);
           if (payload?.code === "sold_out") {
-            const soldOutMessage = payload?.message || "Today’s vouchers are fully claimed.";
-            if (claimBtn.id === "campaign-voucher-btn") {
-              showVoucherSoldOut(soldOutMessage);
-            } else {
-              claimBtn.textContent = "Fully redeemed";
-              claimBtn.setAttribute("disabled", "disabled");
-            }
-            shouldRestoreBtn = false;
-          } else {
+            const soldOutMessage = payload?.message || "All vouchers have been fully redeemed.";
+
             delete claimBtn.dataset.mode;
             delete claimBtn.dataset.copyCode;
+
+            if (claimBtn.id === "campaign-voucher-btn") {
+              if (typeof showVoucherSoldOut === "function") {
+                showVoucherSoldOut(soldOutMessage);
+              } else {
+                const messageEl = document.getElementById("campaign-voucher-message");
+                if (messageEl) messageEl.innerText = soldOutMessage;
+              }
+            }
+
+            claimBtn.textContent = "Fully redeemed";
+            claimBtn.setAttribute("disabled", "disabled");
+            shouldRestoreBtn = false;
+            clearClaimError();
+            return;
           }
+
+          const uiModel = claimErrorToUi(payload, res.status);
+          delete claimBtn.dataset.mode;
+          delete claimBtn.dataset.copyCode;
           renderClaimError(uiModel);
-          return;          
+          return;
         }
 
         if (ok) {
