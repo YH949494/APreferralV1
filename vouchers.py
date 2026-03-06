@@ -1922,14 +1922,51 @@ def check_channel_subscribed(uid: int) -> bool:
         current_app.logger.info("[welcome] gate_fail uid=%s reason=channel_unset", uid)
         return False
 
-    try:
-        resp = requests.get(
-            f"https://api.telegram.org/bot{token}/getChatMember",
-            params={"chat_id": chat_id, "user_id": uid},
-            timeout=5,
-        )
-    except requests.RequestException as e:
-        current_app.logger.warning("[welcome] gate_fail uid=%s reason=channel_check_error err=%s", uid, e)
+    max_attempts = 3
+    resp = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            resp = requests.get(
+                f"https://api.telegram.org/bot{token}/getChatMember",
+                params={"chat_id": chat_id, "user_id": uid},
+                timeout=8,
+            )
+        except requests.RequestException as e:
+            if attempt >= max_attempts:
+                current_app.logger.warning(
+                    "[welcome] gate_fail uid=%s reason=channel_check_error attempts=%s err=%s",
+                    uid,
+                    attempt,
+                    e,
+                )
+                return False
+            current_app.logger.debug(
+                "[welcome] channel_check_retry uid=%s attempt=%s err=%s",
+                uid,
+                attempt,
+                e,
+            )
+            sleep_s = min(2.0, 0.4 * (2 ** (attempt - 1))) + random.uniform(0, 0.15)
+            time.sleep(sleep_s)
+            continue
+
+        if resp.status_code == 429:
+            if attempt >= max_attempts:
+                current_app.logger.warning(
+                    "[welcome] gate_fail uid=%s reason=channel_check_error attempts=%s err=channel_http_429",
+                    uid,
+                    attempt,
+                )
+                return False
+            current_app.logger.info("[welcome] channel_check_retry uid=%s attempt=%s status=429", uid, attempt)
+            sleep_s = min(2.0, 0.4 * (2 ** (attempt - 1))) + random.uniform(0, 0.15)
+            time.sleep(sleep_s)
+            continue
+
+        break
+
+    if resp is None:
+        current_app.logger.warning("[welcome] gate_fail uid=%s reason=channel_check_error attempts=%s", uid, max_attempts)
         return False
 
     if resp.status_code != 200:

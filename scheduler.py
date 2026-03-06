@@ -1098,45 +1098,45 @@ def evaluate_affiliate_simulated_ledgers(batch_limit: int = 500) -> int:
                 gate_day=gate_day,
                 tier=tier,
             )
-            natural_key = _simulated_ledger_natural_key(
-                inviter_user_id=inviter_user_id,
-                invitee_user_id=invitee_user_id,
-                gate_day=gate_day,
-                tier=tier,
-                cohort_start_utc=joined_main_at,
-            )
+            existing = db.affiliate_ledger.find_one({"dedup_key": dedup_key}, {"_id": 1, "status": 1})
+            if existing and existing.get("status") in final_statuses:
+                continue
 
-            res = db.affiliate_ledger.update_one(
-                {**natural_key, "status": {"$nin": list(final_statuses)}},
-                {
-                    "$set": {
-                        "evaluated_at_utc": now_utc_ts,
-                        "xp_total": user_doc.get("total_xp"),
-                        "monthly_xp": user_doc.get("monthly_xp"),
-                        "still_in_group": bool(still_in_group),
-                        "risk_flags": [],
-                        "abuse_flags": _derive_abuse_flags_for_invitee(invitee_user_id, now_utc_ts),
-                        "would_issue_pool": tier,
-                        "year_month": None,
-                        "updated_at": now_utc_ts,
-                        "status": "SIMULATED_PENDING",
-                        "simulate": True,
+            try:
+                res = db.affiliate_ledger.update_one(
+                    {"dedup_key": dedup_key},
+                    {
+                        "$set": {
+                            "evaluated_at_utc": now_utc_ts,
+                            "xp_total": user_doc.get("total_xp"),
+                            "monthly_xp": user_doc.get("monthly_xp"),
+                            "still_in_group": bool(still_in_group),
+                            "risk_flags": [],
+                            "abuse_flags": _derive_abuse_flags_for_invitee(invitee_user_id, now_utc_ts),
+                            "would_issue_pool": tier,
+                            "year_month": None,
+                            "updated_at": now_utc_ts,
+                            "status": "SIMULATED_PENDING",
+                            "simulate": True,
+                        },
+                        "$setOnInsert": {
+                            "created_at": joined_main_at,
+                            "pool_id": tier,
+                            "tier": tier,
+                            "user_id": int(inviter_user_id),
+                            "invitee_user_id": int(invitee_user_id),
+                            "gate_day": int(gate_day),
+                            "ledger_type": "AFFILIATE_SIMULATION",
+                            "dedup_key": dedup_key,
+                            "voucher_code": None,
+                            "first_seen_at": now_utc_ts,
+                        },
                     },
-                    "$setOnInsert": {
-                        "created_at": joined_main_at,
-                        "pool_id": tier,
-                        "tier": tier,
-                        "user_id": int(inviter_user_id),
-                        "invitee_user_id": int(invitee_user_id),
-                        "gate_day": int(gate_day),
-                        "ledger_type": "AFFILIATE_SIMULATION",
-                        "dedup_key": dedup_key,
-                        "voucher_code": None,
-                        "first_seen_at": now_utc_ts,
-                    },
-                },
-                upsert=True,
-            )
+                    upsert=True,
+                )
+            except DuplicateKeyError:
+                logger.info("[SCHED][AFF_SIM] action=dedup_exists dedup_key=%s", dedup_key)
+                continue
             if res.upserted_id is not None or int(res.modified_count or 0) > 0:
                 created_or_updated += 1
 

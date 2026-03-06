@@ -1,9 +1,11 @@
 import asyncio
 import logging
+from unittest.mock import patch
 
+import requests
 from telegram.error import BadRequest, NetworkError
 
-from telegram_utils import safe_reply_text
+from telegram_utils import send_telegram_http_message, safe_reply_text
 
 
 class DummyMessage:
@@ -65,3 +67,28 @@ def test_safe_reply_text_fallback_removes_markup():
     assert len(msg.calls) == 2
     assert "reply_markup" in msg.calls[0]
     assert "reply_markup" not in msg.calls[1]
+
+
+def test_send_telegram_http_message_retries_then_succeeds():
+    calls = {"n": 0}
+
+    class _Resp:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"ok": True}
+
+    def _fake_post(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise requests.ConnectionError("reset")
+        return _Resp()
+
+    with patch("telegram_utils.requests.post", side_effect=_fake_post), patch("telegram_utils.time.sleep", return_value=None):
+        ok, err, blocked = send_telegram_http_message(123, "hello", token="t")
+
+    assert ok is True
+    assert err is None
+    assert blocked is False
+    assert calls["n"] == 3

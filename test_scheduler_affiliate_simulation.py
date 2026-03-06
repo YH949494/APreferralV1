@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 from unittest import TestCase
 from unittest.mock import patch
 
-from pymongo.errors import WriteError
+from pymongo.errors import DuplicateKeyError, WriteError
 
 import scheduler
 
@@ -188,6 +188,37 @@ class EvaluateAffiliateSimulatedLedgersTests(TestCase):
         self.assertEqual(non_sim[0].get("ledger_type"), "AFFILIATE_MONTHLY")
         simulated = [d for d in fake_db.affiliate_ledger.docs if d.get("simulate") is True and d.get("status") == "SIMULATED_PENDING"]
         self.assertEqual(len(simulated), 4)
+
+
+class _DuplicateOnceCollection(_FakeCollection):
+    def __init__(self, docs=None):
+        super().__init__(docs=docs)
+        self._raised = False
+
+    def update_one(self, filt, update, upsert=False):
+        if not self._raised:
+            self._raised = True
+            raise DuplicateKeyError("dup")
+        return super().update_one(filt, update, upsert=upsert)
+
+
+class EvaluateAffiliateSimulatedLedgersDuplicateKeyTests(TestCase):
+    def test_duplicate_key_does_not_fail_run(self):
+        now_ts = datetime(2026, 1, 20, tzinfo=timezone.utc)
+        fake_db = _FakeDb(now_ts)
+        fake_db.affiliate_ledger = _DuplicateOnceCollection()
+
+        with patch.object(scheduler, "db", fake_db), patch.object(scheduler, "now_utc", return_value=now_ts), patch.object(
+            scheduler, "_get_chat_member_status", return_value="member"
+        ):
+            os.environ["AFFILIATE_SIMULATE"] = "1"
+            try:
+                processed = scheduler.evaluate_affiliate_simulated_ledgers()
+            finally:
+                os.environ.pop("AFFILIATE_SIMULATE", None)
+
+        self.assertGreaterEqual(processed, 3)
+        self.assertGreaterEqual(len(fake_db.affiliate_ledger.docs), 3)
 
 
 if __name__ == "__main__":
