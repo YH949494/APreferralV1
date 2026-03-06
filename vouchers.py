@@ -734,6 +734,9 @@ def _is_new_joiner_audience(audience_type: str) -> bool:
 def _is_pool_drop(drop: dict, audience_type: str | None = None) -> bool:
     if not isinstance(drop, dict):
         return False
+    drop_type = (drop.get("type") or "").strip().lower()
+    if drop_type == "pooled":
+        return True     
     atype = (audience_type or _drop_audience_type(drop) or "").strip().lower()
     if atype == "public_pool":
         return True
