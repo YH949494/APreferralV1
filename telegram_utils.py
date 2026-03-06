@@ -17,6 +17,7 @@ TRANSIENT_EXCEPTIONS = (
     NetworkError,
     httpx.ConnectError,
     httpx.ReadTimeout,
+    httpx.ReadError,
     httpx.WriteTimeout,
     httpx.PoolTimeout,
     TimeoutError,
@@ -38,22 +39,53 @@ def send_telegram_http_message(
     if parse_mode:
         payload["parse_mode"] = parse_mode
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-    try:
-        resp = requests.post(url, json=payload, timeout=timeout)
-    except requests.RequestException as exc:
-        log.warning("[E2][PM_SEND_HTTP][FAIL] chat_id=%s err=%s", chat_id, exc)
-        return False, f"{exc.__class__.__name__}: {exc}", False
+    max_attempts = 3
+    transient_statuses = {429, 502, 503, 504}
+    resp = None
     data = None
-    try:
-        data = resp.json()
-    except ValueError:
+    for attempt in range(1, max_attempts + 1):
+        try:
+            resp = requests.post(url, json=payload, timeout=timeout)
+        except requests.RequestException as exc:
+            if attempt >= max_attempts:
+                log.warning("[E2][PM_SEND_HTTP][FAIL] chat_id=%s attempts=%s err=%s", chat_id, attempt, exc)
+                return False, f"{exc.__class__.__name__}: {exc}", False
+            log.info("[E2][PM_SEND_HTTP][RETRY] chat_id=%s attempt=%s err=%s", chat_id, attempt, exc)
+            delay = min(2.0, 0.4 * (2 ** (attempt - 1))) + random.uniform(0, 0.15)
+            time.sleep(delay)
+            continue
+
         data = None
-    if resp.status_code == 200 and isinstance(data, dict) and data.get("ok"):
-        return True, None, False
+        try:
+            data = resp.json()
+        except ValueError:
+            data = None
+
+        error_code = data.get("error_code") if isinstance(data, dict) else None
+        if resp.status_code == 200 and isinstance(data, dict) and data.get("ok"):
+            return True, None, False
+        if resp.status_code == 403 or error_code == 403:
+            return False, "bot_blocked", True
+
+        should_retry = resp.status_code in transient_statuses or error_code in transient_statuses
+        if should_retry and attempt < max_attempts:
+            log.info(
+                "[E2][PM_SEND_HTTP][RETRY] chat_id=%s attempt=%s status=%s error_code=%s",
+                chat_id,
+                attempt,
+                resp.status_code,
+                error_code,
+            )
+            delay = min(2.0, 0.4 * (2 ** (attempt - 1))) + random.uniform(0, 0.15)
+            time.sleep(delay)
+            continue
+        break
+
+    if resp is None:
+        return False, "telegram_http_error", False
+
     error_code = data.get("error_code") if isinstance(data, dict) else None
     description = data.get("description") if isinstance(data, dict) else None
-    if resp.status_code == 403 or error_code == 403:
-        return False, "bot_blocked", True
     if resp.status_code == 429 or error_code == 429:
         return False, "rate_limited", False
     err = description or f"telegram_http_{resp.status_code}"
