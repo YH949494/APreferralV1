@@ -42,8 +42,14 @@ from referral_rate_limit import consume_referral_rate_limits
 from affiliate_leaderboard import (
     should_count_referral_join,
     ensure_affiliate_leaderboard_indexes,
+    ensure_affiliate_snapshot_indexes,
     compute_affiliate_weekly_kpis_live,
     compute_affiliate_weekly_kpis_final,
+    build_affiliate_leaderboard_snapshot,
+    affiliate_previous_completed_week_window_kl,
+    affiliate_week_window_from_week_key_kl,
+    affiliate_week_window_utc_from_reference,
+    serialize_affiliate_snapshot_entries_for_viewer,
     week_window_utc,
 )
 from affiliate_rewards import (
@@ -506,6 +512,27 @@ def tick_5min() -> None:
                 settle_referral_snapshots_with_cache_clear()
             logger.info(
                 "[JOB][5MIN] step_done name=settle_referral_snapshots elapsed_s=%.2f run_id=%s",
+                step_timer.elapsed_s,
+                run_id,
+            )
+
+            with JobTimer() as step_timer:
+                logger.info(
+                    "[JOB][5MIN] progress step=affiliate_snapshot_check run_id=%s",
+                    run_id,
+                )
+                try:
+                    build_affiliate_leaderboard_snapshot(
+                        db,
+                        mode="scheduler",
+                        force=False,
+                        user_identity_loader=_affiliate_user_identity_map,
+                    )
+                except Exception as exc:
+                    target = affiliate_previous_completed_week_window_kl().get("week_key")
+                    logger.exception("[AFF_SNAPSHOT][ERROR] week_key=%s err=%s", target, exc)
+            logger.info(
+                "[JOB][5MIN] step_done name=affiliate_snapshot_check elapsed_s=%.2f run_id=%s",
                 step_timer.elapsed_s,
                 run_id,
             )
@@ -1433,6 +1460,7 @@ def ensure_indexes():
         name="ttl_referral_rate_limit_expire",
     )
     ensure_affiliate_leaderboard_indexes(db)
+    ensure_affiliate_snapshot_indexes(db)
 
     # --- optional welcome eligibility ---
     db.welcome_eligibility.create_index([("uid", 1)], unique=True)
@@ -2046,6 +2074,29 @@ def format_username(u, current_user_id, is_admin):
     # Admin or own account → show full name
     return name
 
+
+def _affiliate_user_identity_map(user_ids: list[int]) -> dict[str, dict]:
+    ids = []
+    for raw in user_ids:
+        try:
+            ids.append(int(raw))
+        except Exception:
+            continue
+    if not ids:
+        return {}
+
+    out = {}
+    for u in users_collection.find({"user_id": {"$in": ids}}, {"user_id": 1, "username": 1, "first_name": 1}):
+        try:
+            uid = int(u.get("user_id"))
+        except Exception:
+            continue
+        out[str(uid)] = {
+            "username": (str(u.get("username")).lstrip("@") if u.get("username") else None),
+            "display_name": format_username(u, uid, True),
+        }
+    return out
+
 @app.route("/api/leaderboard")
 def get_leaderboard():
     try:
@@ -2297,7 +2348,7 @@ def get_affiliate_leaderboard_week():
                 }
 
     if current_user_id and my_stats is None:
-        week_start_utc, week_end_utc = week_window_utc()
+        week_start_utc, week_end_utc, _ = affiliate_week_window_utc_from_reference()
         joins_week_raw = int(
             pending_referrals_collection.count_documents(
                 {
@@ -2375,6 +2426,114 @@ def get_affiliate_leaderboard_week():
             "is_admin": is_admin,
         }
     ), 200
+
+
+def _serialize_affiliate_snapshot_item(doc: dict) -> dict:
+    return {
+        "week_key": doc.get("week_key"),
+        "week_start_local": doc.get("week_start_local"),
+        "week_end_local": doc.get("week_end_local"),
+        "entry_count": int(doc.get("entry_count", 0) or 0),
+        "snapshot_at": doc.get("snapshot_at").isoformat() if doc.get("snapshot_at") else None,
+        "generated_by": doc.get("generated_by"),
+    }
+
+
+@app.route("/api/leaderboard/affiliate/snapshots", methods=["GET"])
+def api_affiliate_snapshot_list():
+    limit = request.args.get("limit", default=20, type=int)
+    if limit is None or limit <= 0:
+        limit = 20
+    limit = min(limit, 52)
+    docs = list(
+        db.affiliate_leaderboard_snapshots.find(
+            {},
+            {
+                "_id": 0,
+                "week_key": 1,
+                "week_start_local": 1,
+                "week_end_local": 1,
+                "entry_count": 1,
+                "snapshot_at": 1,
+                "generated_by": 1,
+            },
+        ).sort("week_key", -1).limit(limit)
+    )
+    return jsonify({"ok": True, "items": [_serialize_affiliate_snapshot_item(doc) for doc in docs]})
+
+
+@app.route("/api/leaderboard/affiliate/snapshot", methods=["GET"])
+def api_affiliate_snapshot_get():
+    week_key = (request.args.get("week_key") or request.args.get("week_start") or "").strip()
+    if not week_key:
+        return jsonify({"ok": False, "error": "missing_week_key"}), 400
+    if affiliate_week_window_from_week_key_kl(week_key) is None:
+        return jsonify({"ok": False, "error": "invalid_week_key"}), 400
+
+    raw_user_id = request.args.get("user_id")
+    try:
+        current_user_id = int(raw_user_id) if raw_user_id not in (None, "", "undefined") else 0
+    except (TypeError, ValueError):
+        current_user_id = 0
+    user_record = users_collection.find_one({"user_id": current_user_id}, {"is_admin": 1}) or {}
+    is_admin = bool(user_record.get("is_admin", False))
+
+    doc = db.affiliate_leaderboard_snapshots.find_one({"week_key": week_key}, {"_id": 0})
+    if not doc:
+        return jsonify({"ok": False, "error": "snapshot_not_found"}), 404
+
+    entries = serialize_affiliate_snapshot_entries_for_viewer(
+        list(doc.get("entries") or []),
+        current_user_id=current_user_id,
+        is_admin=is_admin,
+        format_username_fn=format_username,
+        mask_username_fn=mask_username,
+    )
+
+    return jsonify(
+        {
+            "ok": True,
+            "week_key": doc.get("week_key"),
+            "week_start_local": doc.get("week_start_local"),
+            "week_end_local": doc.get("week_end_local"),
+            "snapshot_at": doc.get("snapshot_at").isoformat() if doc.get("snapshot_at") else None,
+            "entry_count": int(doc.get("entry_count", 0) or 0),
+            "metric_name": doc.get("metric_name"),
+            "entries": entries,
+        }
+    )
+
+
+@app.route("/api/admin/leaderboard/affiliate/snapshot/regenerate", methods=["POST"])
+def api_admin_affiliate_snapshot_regenerate():
+    ok, err = require_admin_from_query()
+    if not ok:
+        msg, code = err
+        return jsonify({"success": False, "message": msg}), code
+
+    payload = request.get_json(silent=True) or {}
+    week_key = (payload.get("week_key") or "").strip()
+    force = bool(payload.get("force", False))
+    if not week_key:
+        return jsonify({"ok": False, "error": "week_key_required"}), 400
+    week_window = affiliate_week_window_from_week_key_kl(week_key)
+    if week_window is None:
+        return jsonify({"ok": False, "error": "invalid_week_key"}), 400
+    result = build_affiliate_leaderboard_snapshot(
+        db,
+        week_window=week_window,
+        force=force,
+        mode="admin_manual",
+        user_identity_loader=_affiliate_user_identity_map,
+    )
+    return jsonify(
+        {
+            "ok": True,
+            "week_key": week_key,
+            "status": result.get("status"),
+            "entry_count": result.get("entry_count"),
+        }
+    )
 
 
 @app.route("/api/checkin-status/<int:user_id>", methods=["GET"])
