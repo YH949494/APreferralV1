@@ -668,7 +668,7 @@
     </div>
     <div class="leaderboard-tabs">
       <button id="leaderboard-tab-default" type="button" class="btn btn-ghost leaderboard-tab-btn active">XP + Ref</button>
-      <button id="leaderboard-tab-affiliate" type="button" class="btn btn-ghost leaderboard-tab-btn">Affiliate</button>
+      <button id="leaderboard-tab-affiliate" type="button" class="btn btn-ghost leaderboard-tab-btn" style="display:none;">Affiliate</button>
     </div>
     <div id="leaderboard-summary-card"></div>
     <div id="leaderboard-output">Click to load latest rankings...</div>
@@ -2096,6 +2096,10 @@ Active players win more.
         try { voucherData = await voucherRes.json(); } catch (_) {}
 
         const isAdmin = adminData.success && adminData.is_admin;
+        isCurrentUserAdmin = Boolean(isAdmin);
+        const affiliateTabBtn = document.getElementById("leaderboard-tab-affiliate");
+        if (affiliateTabBtn) affiliateTabBtn.style.display = isCurrentUserAdmin ? "inline-flex" : "none";
+        if (!isCurrentUserAdmin && getCurrentLeaderboardTab() === "affiliate") setLeaderboardTab("default");
         if (isAdmin) {
           document.getElementById("admin-panel").style.display = "block";
           document.getElementById("admin-affiliate-pools").style.display = "block";
@@ -3012,6 +3016,7 @@ Active players win more.
     let leaderboardSkeletonRendered = false;
     let leaderboardCacheAgeMs = null;
     let affiliateLeaderboardLoaded = false;
+    let isCurrentUserAdmin = false;
 
     function renderLeaderboardSkeleton() {
       const out = document.getElementById("leaderboard-output");
@@ -3075,12 +3080,23 @@ function setLeaderboardMeta(ts, { isStale = false } = {}) {
       if (out) out.textContent = message;
     }
 
+    function getCurrentLeaderboardTab() {
+      const affiliateBtn = document.getElementById("leaderboard-tab-affiliate");
+      if (affiliateBtn && affiliateBtn.classList.contains("active") && affiliateBtn.style.display !== "none") {
+        return "affiliate";
+      }
+      return "default";
+    }
+
     function setLeaderboardTab(tabName) {
       const defaultBtn = document.getElementById("leaderboard-tab-default");
       const affiliateBtn = document.getElementById("leaderboard-tab-affiliate");
       const defaultOut = document.getElementById("leaderboard-output");
       const affiliateOut = document.getElementById("affiliate-leaderboard-output");
       const summary = document.getElementById("leaderboard-summary-card");
+      if (tabName === "affiliate" && !isCurrentUserAdmin) {
+        tabName = "default";
+      }
       const isAffiliate = tabName === "affiliate";
       if (defaultBtn) defaultBtn.classList.toggle("active", !isAffiliate);
       if (affiliateBtn) affiliateBtn.classList.toggle("active", isAffiliate);
@@ -3097,43 +3113,21 @@ function setLeaderboardMeta(ts, { isStale = false } = {}) {
       if (!target) return;
       target.innerHTML = '<div class="leaderboard-empty">Loading affiliate leaderboard...</div>';
       try {
-        const url = new URL(`${API_BASE}/api/affiliate/leaderboard`);
-        url.searchParams.set("window", "week");
+        const url = new URL(`${API_BASE}/api/leaderboard/affiliate`);
         if (userId) url.searchParams.set("user_id", userId);
         const res = await fetch(url.toString());
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
+        if (!data?.success) throw new Error(data?.error || "Failed to load affiliate leaderboard");
         const rows = Array.isArray(data?.leaderboard) ? data.leaderboard : [];
-        const my = data?.my_stats;
-        const isAdmin = Boolean(data?.is_admin);
-        const myCard = my ? `
-          <div class="leaderboard-summary" style="margin-bottom:10px;">
-            <div class="summary-title">My Stats (This Week)</div>
-            <div class="summary-row"><span>Qualified</span><strong>${Number(my.qualified_week || 0)}</strong></div>
-            <div class="summary-row"><span>Joins</span><strong>${Number(my.joins_week_raw || 0)} (counted ${Number(my.joins_week_counted || 0)})</strong></div>
-            <div class="summary-row"><span>Conversion</span><strong>${(Number(my.conversion_week || 0) * 100).toFixed(1)}%</strong></div>
-            ${isAdmin ? `<div class="summary-row"><span>Flag</span><strong>${String(my.quality_flag || "new")}</strong></div>` : ""}
-          </div>
-        ` : '<div class="leaderboard-empty">Login to see your affiliate stats.</div>';
-        if (!rows.length) {
-          target.innerHTML = `${myCard}<div class="leaderboard-empty">No affiliate leaderboard data yet.</div>`;
-          affiliateLeaderboardLoaded = true;
-          return;
-        }
-        const tableRows = rows.map((r) => `
-          <tr>
-            <td>${Number(r.rank || 0)}</td>
-            <td>${String(r.display_name || r.referrer_id || "-")}</td>
-            <td>${Number(r.qualified_week || 0)}</td>
-            <td>${Number(r.joins_week_raw || 0)}</td>
-            <td>${(Number(r.conversion_week || 0) * 100).toFixed(1)}%</td>
-            ${isAdmin ? `<td>${String(r.quality_flag || "new")}</td>` : ""}
-          </tr>`).join("");
-        target.innerHTML = `${myCard}
-          <table class="affiliate-table">
-            <thead><tr><th>Rank</th><th>Name</th><th>Qualified</th><th>Joins</th><th>Conversion %</th>${isAdmin ? "<th>Flag</th>" : ""}</tr></thead>
-            <tbody>${tableRows}</tbody>
-          </table>`;
+        const lines = rows
+          .map((r, i) => `${i + 1}. ${String(r.username || "unknown")} - ${Number(r.qualified || 0)} Qualified`)
+          .join("\n");
+        const listText = lines || "No affiliate data";
+        target.innerText = `📅 ${data.week_start} → ${data.week_end}
+
+🏆 Affiliate:
+${listText}`;
         affiliateLeaderboardLoaded = true;
       } catch (err) {
         target.innerHTML = `<div class="leaderboard-empty">Affiliate leaderboard unavailable: ${String(err.message || err)}</div>`;
@@ -3529,12 +3523,39 @@ function setLeaderboardMeta(ts, { isStale = false } = {}) {
         const weeksData = await weeksRes.json();
 
         if (!weeksData.success || weeksData.weeks.length === 0) {
-          document.getElementById("leaderboard-output").innerText =
-            "❌ No history available.";
+          const target = getCurrentLeaderboardTab() === "affiliate"
+            ? document.getElementById("affiliate-leaderboard-output")
+            : document.getElementById("leaderboard-output");
+          if (target) target.innerText = "❌ No history available.";
           return;
         }
 
         const lastWeek = weeksData.weeks[0];
+
+        if (getCurrentLeaderboardTab() === "affiliate") {
+          const affUrl = new URL(`${API_BASE}/api/leaderboard/history/affiliate/week/${lastWeek.week_start}`);
+          if (userId) affUrl.searchParams.set("user_id", userId);
+          const affRes = await fetch(affUrl.toString());
+          const affData = await affRes.json();
+          if (!affData.success || !affData.history)
+            throw new Error(affData.error || "Invalid affiliate history data");
+          const history = affData.history;
+          const affiliate = (history.affiliate || [])
+            .map((u, i) => {
+              const qualified = u.qualified ?? 0;
+              const username = u.username || "unknown";
+              return `${i + 1}. ${username} - ${qualified} Qualified`;
+            })
+            .join("\n");
+          const target = document.getElementById("affiliate-leaderboard-output");
+          if (target) {
+            target.innerText = `📅 ${history.week_start} → ${history.week_end}
+
+🏆 Affiliate:
+${affiliate || "No affiliate data"}`;
+          }
+          return;
+        }
 
         const res = await fetch(
           `${API_BASE}/api/leaderboard/history/week/${lastWeek.week_start}`
@@ -3572,8 +3593,10 @@ ${referral}`;
 
       } catch (err) {
         console.error("History error:", err);
-        document.getElementById("leaderboard-output").innerText =
-          "❌ Error loading history.";
+        const target = getCurrentLeaderboardTab() === "affiliate"
+          ? document.getElementById("affiliate-leaderboard-output")
+          : document.getElementById("leaderboard-output");
+        if (target) target.innerText = "❌ Error loading history.";
       }
     }
 

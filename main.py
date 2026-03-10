@@ -244,6 +244,43 @@ def _month_window_utc(reference: datetime | None = None):
         end_local = start_local.replace(month=start_local.month + 1)
     return start_local.astimezone(timezone.utc), end_local.astimezone(timezone.utc), start_local
 
+
+def _get_affiliate_leaderboard_rows(start_utc: datetime, end_utc: datetime, limit: int):
+    pipeline = [
+        {"$match": {"qualified_at": {"$gte": start_utc, "$lt": end_utc}, "referrer_id": {"$ne": None}}},
+        {"$group": {"_id": "$referrer_id", "qualified": {"$sum": 1}}},
+        {"$sort": {"qualified": -1, "_id": 1}},
+        {"$limit": int(limit)},
+    ]
+    rows = list(qualified_events_collection.aggregate(pipeline))
+    user_ids = []
+    for row in rows:
+        try:
+            user_ids.append(int(row.get("_id")))
+        except Exception:
+            continue
+
+    users_by_id = {}
+    if user_ids:
+        for u in users_collection.find({"user_id": {"$in": user_ids}}, {"user_id": 1, "username": 1}):
+            users_by_id[int(u.get("user_id"))] = u
+
+    output = []
+    for row in rows:
+        try:
+            user_id = int(row.get("_id"))
+        except Exception:
+            continue
+        user_doc = users_by_id.get(user_id) or {}
+        output.append(
+            {
+                "user_id": user_id,
+                "username": user_doc.get("username") or "unknown",
+                "qualified": int(row.get("qualified", 0)),
+            }
+        )
+    return output
+
 DEPRECATED_REFERRAL_FIELDS = {
     "weekly_referral_count",
     "total_referral_count",
@@ -2377,6 +2414,37 @@ def get_affiliate_leaderboard_week():
     ), 200
 
 
+@app.route("/api/leaderboard/affiliate", methods=["GET"])
+def get_current_affiliate_leaderboard():
+    ok, err = require_admin_from_query()
+    if not ok:
+        msg, code = err
+        if code == 403:
+            return jsonify({"success": False, "error": "forbidden"}), 403
+        return jsonify({"success": False, "error": msg}), code
+
+    week_start_utc, week_end_utc, week_start_local = _week_window_utc()
+    week_end_local = week_start_local + timedelta(days=6)
+    rows = _get_affiliate_leaderboard_rows(week_start_utc, week_end_utc, 15)
+    leaderboard = [
+        {
+            "user_id": row.get("user_id"),
+            "username": row.get("username") or "unknown",
+            "qualified": int(row.get("qualified", 0)),
+        }
+        for row in rows
+    ]
+
+    return jsonify(
+        {
+            "success": True,
+            "week_start": week_start_local.date().isoformat(),
+            "week_end": week_end_local.date().isoformat(),
+            "leaderboard": leaderboard,
+        }
+    ), 200
+
+
 @app.route("/api/checkin-status/<int:user_id>", methods=["GET"])
 def api_checkin_status(user_id):
     """Return whether the user can check in now and the next reset time."""
@@ -2470,6 +2538,44 @@ def get_week_history(week_start):
         import traceback
         traceback.print_exc()
         return jsonify({"success": False, "error": str(e)}), 500
+
+@app.route("/api/leaderboard/history/affiliate/week/<week_start>", methods=["GET"])
+def get_week_affiliate_history(week_start):
+    """Return archived affiliate leaderboard for a given week_start (format YYYY-MM-DD)."""
+    ok, err = require_admin_from_query()
+    if not ok:
+        msg, code = err
+        if code == 403:
+            return jsonify({"success": False, "error": "forbidden"}), 403
+        return jsonify({"success": False, "error": msg}), code
+
+    try:
+        doc = history_collection.find_one({"week_start": week_start}, {"_id": 0})
+        if not doc:
+            return jsonify({"success": False, "error": "No record found for that week"}), 404
+
+        affiliate_data = doc.get("affiliate") or doc.get("affiliate_leaderboard") or []
+        affiliate = [
+            {
+                "username": u.get("username") or u.get("first_name") or "unknown",
+                "qualified": u.get("weekly_affiliate_qualified") or u.get("qualified") or 0,
+            }
+            for u in affiliate_data
+        ]
+
+        return jsonify({
+            "success": True,
+            "history": {
+                "week_start": doc.get("week_start"),
+                "week_end": doc.get("week_end"),
+                "affiliate": affiliate,
+            }
+        }), 200
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"success": False, "error": str(e)}), 500
+
 
 @app.route("/api/bonus_voucher", methods=["GET"])
 def get_bonus_voucher():
@@ -2707,6 +2813,12 @@ def reset_weekly_xp(run_id: str | None = None):
             top_checkin = list(users_collection.find({}, proj).sort("weekly_xp", DESCENDING).limit(100))
             top_referrals = list(users_collection.find({}, proj).sort("weekly_referrals", DESCENDING).limit(100))
 
+            archive_start_local = KL_TZ.localize(datetime.combine(week_start_date, datetime.min.time()))
+            archive_end_local = archive_start_local + timedelta(days=7)
+            archive_start_utc = archive_start_local.astimezone(timezone.utc)
+            archive_end_utc = archive_end_local.astimezone(timezone.utc)
+            top_affiliate = _get_affiliate_leaderboard_rows(archive_start_utc, archive_end_utc, 100)
+
             history_collection.insert_one({
                 "week_start": week_start_date.isoformat(),
                 "week_end":   week_end_date.isoformat(),
@@ -2717,6 +2829,14 @@ def reset_weekly_xp(run_id: str | None = None):
                 "referral_leaderboard": [
                     {"user_id": u["user_id"], "username": u.get("username", "unknown"), "weekly_referrals": u.get("weekly_referrals", 0)}
                     for u in top_referrals
+                ],
+                "affiliate_leaderboard": [
+                    {
+                        "user_id": u.get("user_id"),
+                        "username": u.get("username") or "unknown",
+                        "weekly_affiliate_qualified": int(u.get("qualified", 0)),
+                    }
+                    for u in top_affiliate
                 ],
                 # store as UTC so later math is safe
                 "archived_at": datetime.now(timezone.utc)
