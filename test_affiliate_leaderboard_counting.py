@@ -5,8 +5,11 @@ from affiliate_leaderboard import (
     MIN_SECONDS_BETWEEN_COUNTED_JOINS,
     compute_affiliate_weekly_kpis_live,
     _build_affiliate_weekly_payload,
-    week_window_utc,
+    affiliate_week_window_utc_from_reference,
+    affiliate_previous_completed_week_window_kl,
+    affiliate_week_window_from_week_key_kl,
     should_count_referral_join,
+    serialize_affiliate_snapshot_entries_for_viewer,
 )
 
 
@@ -136,7 +139,7 @@ def test_build_weekly_payload_contains_required_window_fields():
 
 def test_live_kpi_ttl_returns_cached_without_build(monkeypatch):
     now = datetime(2026, 1, 7, 12, 0, 0, tzinfo=timezone.utc)
-    week_start = datetime(2026, 1, 5, 0, 0, 0, tzinfo=timezone.utc)
+    week_start, _, _ = affiliate_week_window_utc_from_reference(now)
     db = _FakeWeeklyDb(
         live_doc={
             "week_start_utc": week_start,
@@ -158,7 +161,7 @@ def test_live_kpi_ttl_returns_cached_without_build(monkeypatch):
 
 def test_live_kpi_week_mismatch_forces_build_and_current_week_key(monkeypatch):
     now = datetime(2026, 1, 7, 12, 0, 0, tzinfo=timezone.utc)
-    current_week_start, current_week_end = week_window_utc(now)
+    current_week_start, current_week_end, _ = affiliate_week_window_utc_from_reference(now)
     db = _FakeWeeklyDb(
         live_doc={
             "week_start_utc": datetime(2025, 12, 29, 0, 0, 0, tzinfo=timezone.utc),
@@ -191,7 +194,7 @@ def test_live_kpi_week_mismatch_forces_build_and_current_week_key(monkeypatch):
 
 def test_live_kpi_string_generated_at_iso_short_circuits(monkeypatch):
     now = datetime(2026, 1, 7, 12, 0, 0, tzinfo=timezone.utc)
-    week_start = datetime(2026, 1, 5, 0, 0, 0, tzinfo=timezone.utc)
+    week_start, _, _ = affiliate_week_window_utc_from_reference(now)
     db = _FakeWeeklyDb(
         live_doc={
             "week_start_utc": week_start,
@@ -213,7 +216,7 @@ def test_live_kpi_string_generated_at_iso_short_circuits(monkeypatch):
 
 def test_live_kpi_string_generated_at_z_short_circuits(monkeypatch):
     now = datetime(2026, 1, 7, 12, 0, 0, tzinfo=timezone.utc)
-    week_start = datetime(2026, 1, 5, 0, 0, 0, tzinfo=timezone.utc)
+    week_start, _, _ = affiliate_week_window_utc_from_reference(now)
     db = _FakeWeeklyDb(
         live_doc={
             "week_start_utc": week_start,
@@ -258,3 +261,189 @@ def test_weekly_payload_qualified_falls_back_to_referral_events_when_no_flow_set
     _, payload = _build_affiliate_weekly_payload(db, reference_utc=ref)
 
     assert payload["affiliate_weekly_by_referrer"]["456"]["qualified_week"] == 3
+
+
+class _FakeSnapshotCollection:
+    def __init__(self):
+        self.docs = {}
+
+    def create_index(self, *args, **kwargs):
+        return None
+
+    def find_one(self, filt, projection=None):
+        doc = self.docs.get(filt.get("week_key"))
+        return dict(doc) if doc else None
+
+    def update_one(self, filt, update, upsert=False):
+        payload = dict(update.get("$set", {}))
+        self.docs[filt.get("week_key")] = payload
+
+
+class _FakeSnapshotDb:
+    def __init__(self):
+        self.pending_referrals = _FakeAggregateCollection()
+        self.referral_flow_events = _FakeAggregateCollection()
+        self.referral_events = _FakeAggregateCollection()
+        self.affiliate_leaderboard_snapshots = _FakeSnapshotCollection()
+
+
+def test_week_window_from_week_key_kl_requires_monday():
+    assert affiliate_week_window_from_week_key_kl("2026-01-06") is None
+    valid = affiliate_week_window_from_week_key_kl("2026-01-05")
+    assert valid is not None
+    assert valid["week_start_local"] == "2026-01-05"
+
+
+def test_snapshot_builder_skip_and_force_modes():
+    from affiliate_leaderboard import build_affiliate_leaderboard_snapshot
+
+    db = _FakeSnapshotDb()
+    week_window = affiliate_week_window_from_week_key_kl("2026-01-05")
+
+    created = build_affiliate_leaderboard_snapshot(db, week_window=week_window, mode="scheduler")
+    assert created["status"] == "created"
+    skipped = build_affiliate_leaderboard_snapshot(db, week_window=week_window, mode="scheduler")
+    assert skipped["status"] == "skipped_exists"
+    forced = build_affiliate_leaderboard_snapshot(db, week_window=week_window, mode="admin_manual", force=True)
+    assert forced["status"] == "regenerated"
+
+
+def test_affiliate_week_window_uses_kl_boundary():
+    ref = datetime(2026, 1, 4, 16, 5, 0, tzinfo=timezone.utc)
+    week_start_utc, week_end_utc, week_start_local = affiliate_week_window_utc_from_reference(ref)
+    assert week_start_local.isoformat() == "2026-01-05T00:00:00+08:00"
+    assert week_start_utc.isoformat() == "2026-01-04T16:00:00+00:00"
+    assert week_end_utc.isoformat() == "2026-01-11T16:00:00+00:00"
+
+
+def test_previous_completed_week_window_kl_correctness():
+    ref = datetime(2026, 1, 6, 2, 0, 0, tzinfo=timezone.utc)
+    prev = affiliate_previous_completed_week_window_kl(ref)
+    assert prev["week_key"] == "2025-12-29"
+    assert prev["week_start_local"] == "2025-12-29"
+    assert prev["week_end_local"] == "2026-01-04"
+
+
+def test_snapshot_builder_empty_week_creates_empty_entries():
+    from affiliate_leaderboard import build_affiliate_leaderboard_snapshot
+
+    db = _FakeSnapshotDb()
+    week_window = affiliate_week_window_from_week_key_kl("2026-01-05")
+    out = build_affiliate_leaderboard_snapshot(db, week_window=week_window, mode="scheduler", top_n=0)
+    assert out["status"] == "created"
+    doc = db.affiliate_leaderboard_snapshots.find_one({"week_key": "2026-01-05"})
+    assert doc["entry_count"] == 0
+    assert doc["entries"] == []
+
+
+def test_snapshot_builder_uses_identity_loader_and_window_type():
+    from affiliate_leaderboard import build_affiliate_leaderboard_snapshot
+
+    class _RowsCollection:
+        def aggregate(self, pipeline):
+            if any(step.get("$group", {}).get("qualified_week") for step in pipeline if isinstance(step, dict)):
+                return [{"_id": 99, "qualified_week": 4}]
+            if any(step.get("$group", {}).get("joins_week_raw") for step in pipeline if isinstance(step, dict)):
+                return [{"_id": 99, "joins_week_raw": 9}]
+            if any(step.get("$group", {}).get("joins_week_counted") for step in pipeline if isinstance(step, dict)):
+                return [{"_id": 99, "joins_week_counted": 3}]
+            return []
+
+    db = _FakeSnapshotDb()
+    db.pending_referrals = _RowsCollection()
+    db.referral_flow_events = _RowsCollection()
+    db.referral_events = _RowsCollection()
+    week_window = affiliate_week_window_from_week_key_kl("2026-01-05")
+
+    out = build_affiliate_leaderboard_snapshot(
+        db,
+        week_window=week_window,
+        mode="admin_manual",
+        user_identity_loader=lambda ids: {"99": {"username": "alice", "display_name": "alice"}},
+    )
+    assert out["status"] == "created"
+    doc = db.affiliate_leaderboard_snapshots.find_one({"week_key": "2026-01-05"})
+    assert doc["window_type"] == "explicit_week_key"
+    assert doc["entries"][0]["username"] == "alice"
+
+
+def _test_mask_username(name: str) -> str:
+    v = str(name)
+    if len(v) <= 2:
+        return "*" * len(v)
+    return v[:2] + "***"
+
+
+def _test_format_username(u, current_user_id, is_admin):
+    name = (u.get("username") or u.get("first_name") or "").strip()
+    try:
+        uid = int(u.get("user_id") or 0)
+    except Exception:
+        uid = 0
+    if is_admin or uid == int(current_user_id or 0):
+        return name or None
+    return _test_mask_username(name) if name else None
+
+
+def test_snapshot_entries_non_admin_masks_other_user_identity_and_quality_flag():
+    rows = [
+        {
+            "user_id": 100,
+            "username": "alice",
+            "display_name": "alice",
+            "extra": {"quality_flag": "ok", "qualified_week": 2},
+        }
+    ]
+    out = serialize_affiliate_snapshot_entries_for_viewer(
+        rows,
+        current_user_id=200,
+        is_admin=False,
+        format_username_fn=_test_format_username,
+        mask_username_fn=_test_mask_username,
+    )
+    assert out[0]["username"] != "alice"
+    assert out[0]["display_name"] != "alice"
+    assert "user_id" not in out[0]
+    assert "quality_flag" not in out[0]["extra"]
+
+
+def test_snapshot_entries_non_admin_keeps_own_identity_visible():
+    rows = [
+        {
+            "user_id": 200,
+            "username": "selfuser",
+            "display_name": "selfuser",
+            "extra": {"quality_flag": "ok", "qualified_week": 2},
+        }
+    ]
+    out = serialize_affiliate_snapshot_entries_for_viewer(
+        rows,
+        current_user_id=200,
+        is_admin=False,
+        format_username_fn=_test_format_username,
+        mask_username_fn=_test_mask_username,
+    )
+    assert out[0]["display_name"] == "selfuser"
+    assert out[0]["user_id"] == 200
+
+
+def test_snapshot_entries_admin_sees_full_identity_and_quality_flag():
+    rows = [
+        {
+            "user_id": 100,
+            "username": "alice",
+            "display_name": "alice",
+            "extra": {"quality_flag": "ok", "qualified_week": 2},
+        }
+    ]
+    out = serialize_affiliate_snapshot_entries_for_viewer(
+        rows,
+        current_user_id=999,
+        is_admin=True,
+        format_username_fn=_test_format_username,
+        mask_username_fn=_test_mask_username,
+    )
+    assert out[0]["username"] == "alice"
+    assert out[0]["display_name"] == "alice"
+    assert out[0]["user_id"] == 100
+    assert out[0]["extra"].get("quality_flag") == "ok"
