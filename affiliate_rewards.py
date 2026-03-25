@@ -5,6 +5,12 @@ from datetime import datetime, timedelta, timezone
 import pytz
 from pymongo import ASCENDING, ReturnDocument
 from pymongo.errors import DuplicateKeyError
+from telegram_utils import send_telegram_http_message
+from config import (
+    AFFILIATE_GROUP_INVITE_TEXT,
+    AFFILIATE_GROUP_INVITE_URL,
+    AFFILIATE_GROUP_TRIGGER_WEEKLY_VALID_REFERRALS,
+)
 
 KL_TZ = pytz.timezone("Asia/Kuala_Lumpur")
 
@@ -38,6 +44,11 @@ def ensure_affiliate_indexes(db):
     )
 
     db.user_last_seen.create_index([("user_id", ASCENDING)], unique=True, name="uniq_user_last_seen")
+    db.affiliate_group_invites.create_index(
+        [("user_id", ASCENDING), ("week_key", ASCENDING)],
+        unique=True,
+        name="uniq_affiliate_group_invite_user_week",
+    )
 
 
 def _month_window_utc(reference_utc: datetime | None = None):
@@ -148,6 +159,157 @@ def _reconcile_ledger_from_issued_pool(db, *, ledger_id, now_utc: datetime):
 
 def _affiliate_simulate_enabled() -> bool:
     return str(os.getenv("AFFILIATE_SIMULATE", "0")).strip() == "1"
+
+
+def _week_start_kl(reference: datetime | None = None) -> datetime:
+    ref = reference or datetime.now(timezone.utc)
+    if ref.tzinfo is None:
+        ref = ref.replace(tzinfo=timezone.utc)
+    ref_kl = ref.astimezone(KL_TZ)
+    return (ref_kl - timedelta(days=ref_kl.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+def _current_week_key_kl(reference: datetime | None = None) -> str:
+    return _week_start_kl(reference).date().isoformat()
+
+
+def _weekly_valid_referral_count_for_referrer(db, *, referrer_id: int, week_key: str) -> int:
+    settled = int(
+        db.referral_events.count_documents(
+            {"inviter_id": int(referrer_id), "event": "referral_settled", "week_key": week_key}
+        )
+    )
+    revoked = int(
+        db.referral_events.count_documents(
+            {"inviter_id": int(referrer_id), "event": "referral_revoked", "week_key": week_key}
+        )
+    )
+    return max(0, settled - revoked)
+
+
+def _send_affiliate_group_invite_dm(referrer_id: int, *, invite_url: str) -> tuple[bool, str | None]:
+    text = AFFILIATE_GROUP_INVITE_TEXT.format(invite_url=invite_url)
+    ok, err, _ = send_telegram_http_message(int(referrer_id), text)
+    return ok, err
+
+
+def _maybe_trigger_affiliate_group_invite(db, *, referrer_id: int | None, now_utc: datetime) -> None:
+    if referrer_id is None:
+        return
+    invite_url = (AFFILIATE_GROUP_INVITE_URL or "").strip()
+    if not invite_url:
+        logger.info("[AFF_GROUP][SKIP] reason=missing_invite_url referrer=%s", referrer_id)
+        return
+    if _affiliate_simulate_enabled():
+        logger.info("[AFF_GROUP][SKIP] reason=simulate_mode referrer=%s", referrer_id)
+        return
+
+    week_key = _current_week_key_kl(now_utc)
+    count = _weekly_valid_referral_count_for_referrer(db, referrer_id=int(referrer_id), week_key=week_key)
+    threshold = int(AFFILIATE_GROUP_TRIGGER_WEEKLY_VALID_REFERRALS)
+    logger.info("[AFF_GROUP][CHECK] referrer=%s week_key=%s count=%s", referrer_id, week_key, count)
+    if count < threshold:
+        logger.info("[AFF_GROUP][SKIP] reason=below_threshold referrer=%s count=%s", referrer_id, count)
+        return
+    if count > threshold:
+        logger.info("[AFF_GROUP][SKIP] reason=above_threshold_no_backfill referrer=%s count=%s", referrer_id, count)
+        return
+
+    row_filter = {"user_id": int(referrer_id), "week_key": week_key}
+    existing = db.affiliate_group_invites.find_one(row_filter) or {}
+    prev_status = existing.get("status")
+    if prev_status == "sent":
+        logger.info("[AFF_GROUP][SKIP] reason=already_sent referrer=%s week_key=%s", referrer_id, week_key)
+        return
+    if existing.get("sending") is True:
+        logger.info("[AFF_GROUP][SKIP] reason=inflight referrer=%s week_key=%s", referrer_id, week_key)
+        return
+    if prev_status in {"failed", "pending", "skipped"}:
+        logger.info("[AFF_GROUP][RETRY] referrer=%s week_key=%s prev_status=%s", referrer_id, week_key, prev_status)
+    elif prev_status not in {None, ""}:
+        logger.info("[AFF_GROUP][RETRY] referrer=%s week_key=%s prev_status=%s", referrer_id, week_key, prev_status)
+
+    claim_filter = {
+        "user_id": int(referrer_id),
+        "week_key": week_key,
+        "$and": [
+            {"$or": [{"status": {"$ne": "sent"}}, {"status": {"$exists": False}}]},
+            {"$or": [{"sending": {"$ne": True}}, {"sending": {"$exists": False}}]},
+        ],
+    }
+    try:
+        claimed = db.affiliate_group_invites.find_one_and_update(
+            claim_filter,
+            {
+                "$setOnInsert": {
+                    "user_id": int(referrer_id),
+                    "week_key": week_key,
+                    "created_at": now_utc,
+                },
+                "$set": {
+                    "trigger_count": int(count),
+                    "invite_url": invite_url,
+                    "status": "pending",
+                    "sending": True,
+                    "send_attempted_at": now_utc,
+                    "sent_at": None,
+                    "error": None,
+                    "updated_at": now_utc,
+                },
+            },
+            upsert=True,
+            return_document=ReturnDocument.AFTER,
+        )
+    except DuplicateKeyError:
+        existing = db.affiliate_group_invites.find_one(row_filter) or {}
+        if existing.get("status") == "sent":
+            logger.info("[AFF_GROUP][SKIP] reason=already_sent referrer=%s week_key=%s", referrer_id, week_key)
+            return
+        if existing.get("sending") is True:
+            logger.info("[AFF_GROUP][SKIP] reason=inflight referrer=%s week_key=%s", referrer_id, week_key)
+            return
+        logger.info("[AFF_GROUP][RETRY] referrer=%s week_key=%s prev_status=%s", referrer_id, week_key, existing.get("status"))
+        claimed = db.affiliate_group_invites.find_one_and_update(
+            claim_filter,
+            {
+                "$set": {
+                    "trigger_count": int(count),
+                    "invite_url": invite_url,
+                    "status": "pending",
+                    "sending": True,
+                    "send_attempted_at": now_utc,
+                    "sent_at": None,
+                    "error": None,
+                    "updated_at": now_utc,
+                }
+            },
+            return_document=ReturnDocument.AFTER,
+        )
+    if not claimed:
+        latest = db.affiliate_group_invites.find_one(row_filter) or {}
+        if latest.get("status") == "sent":
+            logger.info("[AFF_GROUP][SKIP] reason=already_sent referrer=%s week_key=%s", referrer_id, week_key)
+            return
+        logger.info("[AFF_GROUP][SKIP] reason=inflight referrer=%s week_key=%s", referrer_id, week_key)
+        return
+
+    ok, err = _send_affiliate_group_invite_dm(int(referrer_id), invite_url=invite_url)
+    if ok:
+        db.affiliate_group_invites.update_one(
+            {"user_id": int(referrer_id), "week_key": week_key},
+            {
+                "$set": {"status": "sent", "sending": False, "sent_at": now_utc, "updated_at": now_utc},
+                "$unset": {"error": ""},
+            },
+        )
+        logger.info("[AFF_GROUP][SENT] referrer=%s week_key=%s count=%s", referrer_id, week_key, count)
+        return
+
+    db.affiliate_group_invites.update_one(
+        {"user_id": int(referrer_id), "week_key": week_key},
+        {"$set": {"status": "failed", "sending": False, "error": err, "updated_at": now_utc}},
+    )
+    logger.error("[AFF_GROUP][FAIL] referrer=%s week_key=%s err=%s", referrer_id, week_key, err)
 
 
 def record_user_last_seen(db, *, user_id: int, ip: str | None = None, subnet: str | None = None, session: str | None = None, seen_at: datetime | None = None):
@@ -510,6 +672,10 @@ def mark_invitee_qualified(db, *, invitee_id: int, referrer_id: int | None, now_
         logger.exception("affiliate_qualified_event_emit_failed invitee=%s referrer=%s", invitee_id, referrer_id)
     if referrer_id is not None:
         evaluate_monthly_affiliate_reward(db, referrer_id=int(referrer_id), now_utc=now_utc)
+    try:
+        _maybe_trigger_affiliate_group_invite(db, referrer_id=referrer_id, now_utc=now_utc)
+    except Exception as exc:
+        logger.exception("[AFF_GROUP][FAIL] referrer=%s week_key=unknown err=%s", referrer_id, exc)
     return True
 
 
