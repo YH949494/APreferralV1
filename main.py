@@ -11,7 +11,7 @@ from telegram.ext import (
     ApplicationBuilder, CommandHandler, ChatJoinRequestHandler, ChatMemberHandler,
     CallbackQueryHandler, ContextTypes, MessageHandler, filters
 )
-from telegram.error import BadRequest, Forbidden
+from telegram.error import BadRequest, Forbidden, NetworkError
 from telegram.request import HTTPXRequest
 from datetime import datetime, timedelta, timezone
 from werkzeug.exceptions import HTTPException
@@ -62,6 +62,7 @@ from telegram_utils import safe_reply_text
 from pymongo import DESCENDING, ASCENDING, ReturnDocument  # keep if used elsewhere
 from pymongo.errors import DuplicateKeyError, CursorNotFound, OperationFailure, PyMongoError
 import os, asyncio, traceback, csv, io, requests, logging, time, uuid, socket, subprocess
+import httpx
 import pytz
 from database import init_db, db
 
@@ -3612,6 +3613,18 @@ async def button_handler(update, context):
 # Run Bot + Flask + Scheduler
 # ----------------------------
 def run_worker():
+    transient_polling_errors = (
+        NetworkError,
+        httpx.ConnectError,
+        httpx.ReadError,
+        httpx.ReadTimeout,
+        httpx.WriteTimeout,
+        httpx.PoolTimeout,
+        TimeoutError,
+    )
+    polling_backoff_seconds = (3, 5, 10, 15, 30)
+    stable_start_reset_seconds = 60
+    logger.info("[BOOT] worker mode starting")
     try:
         ensure_voucher_indexes()
         print("Voucher indexes ensured.")
@@ -3813,10 +3826,40 @@ def run_worker():
     print("✅ Bot & Scheduler wired. Starting servers...")
 
     try:
-        app_bot.run_polling(
-            poll_interval=5,
-            allowed_updates=["message", "callback_query", "chat_member", "my_chat_member", "chat_join_request"]
-        )
+        attempt = 0
+        while True:
+            try:
+                logger.info("[WORKER] polling start attempt=%s", attempt + 1)
+                started_at = time.monotonic()
+                app_bot.run_polling(
+                    poll_interval=5,
+                    allowed_updates=["message", "callback_query", "chat_member", "my_chat_member", "chat_join_request"],
+                    close_loop=False,
+                )
+                logger.info("[WORKER] polling exited cleanly")
+                break
+            except transient_polling_errors as exc:
+                elapsed = time.monotonic() - started_at
+                if elapsed >= stable_start_reset_seconds:
+                    attempt = 0
+                delay = polling_backoff_seconds[min(attempt, len(polling_backoff_seconds) - 1)]
+                logger.warning(
+                    "[WORKER] transient polling failure err=%s msg=%s elapsed_s=%.1f retry_in_s=%s",
+                    exc.__class__.__name__,
+                    str(exc),
+                    elapsed,
+                    delay,
+                )
+                attempt += 1
+                time.sleep(delay)
+                continue
+            except Exception as exc:
+                logger.exception(
+                    "[WORKER] fatal polling crash err=%s msg=%s",
+                    exc.__class__.__name__,
+                    str(exc),
+                )
+                raise
     finally:
         scheduler.shutdown(wait=False)
 
