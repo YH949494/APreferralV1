@@ -1499,6 +1499,13 @@ def ensure_indexes():
         print("⚠️ ensure_indexes error:", e)
 
     ensure_affiliate_indexes(db)
+    _ensure_index_if_missing(
+        db["ad_attribution"],
+        "uq_ad_attribution_token",
+        [("token", 1)],
+        unique=True,
+        sparse=True,
+    )
         
 ensure_indexes()
 
@@ -1961,6 +1968,36 @@ def api_set_region(user_id):
 @app.route("/")
 def home():
     return "Bot is alive!"
+
+@app.route("/go")
+def go():
+    bot_username = (os.environ.get("BOT_USERNAME") or "").strip()
+    if not bot_username:
+        logger.error("[GO] missing BOT_USERNAME")
+        return "BOT_USERNAME is not configured", 500
+
+    ad_doc = {
+        "fbclid": request.args.get("fbclid"),
+        "ttclid": request.args.get("ttclid"),
+        "_fbp": request.cookies.get("_fbp"),
+        "_fbc": request.cookies.get("_fbc"),
+        "created_at": datetime.now(timezone.utc),
+    }
+    token = None
+    for _ in range(3):
+        candidate = uuid.uuid4().hex[:10]
+        try:
+            db["ad_attribution"].insert_one({"token": candidate, **ad_doc})
+            token = candidate
+            break
+        except DuplicateKeyError:
+            continue
+    if not token:
+        logger.error("[GO] failed to allocate unique token")
+        return "unable to allocate token", 500
+
+    telegram_url = f"https://t.me/{bot_username}?startapp=attr_{token}"
+    return redirect(telegram_url, code=302)
 
 def _apply_no_store_headers(response):
     response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
