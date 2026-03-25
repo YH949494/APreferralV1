@@ -8,13 +8,20 @@ import random
 import requests
 import time
 from config import KL_TZ
-import hmac, hashlib, urllib.parse, os, json
+import hmac, hashlib, urllib.parse, os, json, secrets
 import config as _cfg 
  
 from database import db, users_collection
 from time_utils import as_aware_utc
 from onboarding import record_onboarding_start, record_visible_ping
 from affiliate_rewards import approve_affiliate_ledger, reject_affiliate_ledger
+from conversion_tracking import (
+    mark_conversion_event,
+    reserve_conversion_event,
+    send_meta_complete_registration,
+    send_tiktok_complete_registration,
+    sha256_hex,
+)
 
 admin_cache_col = db["admin_cache"]
 new_joiner_claims_col = db["new_joiner_claims"]
@@ -28,6 +35,9 @@ voucher_claims_col = db["voucher_claims"]
 invite_link_map_collection = db["invite_link_map"]
 miniapp_sessions_daily_col = db["miniapp_sessions_daily"]
 request_dedup_col = db["request_dedup"]
+ad_attribution_col = db["ad_attribution"]
+conversion_events_col = db["conversion_events"]
+attribution_bootstrap_col = db["attribution_bootstrap"]
 REFERRAL_SNAPSHOT_STALE_SEC = 21600
 
 
@@ -343,6 +353,198 @@ def _miniapp_no_store_json(payload: dict, status_code: int = 200):
     resp.headers["Expires"] = "0"
     return resp
  
+def _verified_telegram_uid_from_request(req) -> int:
+    init_data = extract_raw_init_data_from_query(req)
+    if not init_data:
+        raise ValueError("missing_init_data")
+
+    ok, parsed, reason = verify_telegram_init_data(init_data)
+    if not ok:
+        raise ValueError(str(reason) or "invalid_init_data")
+
+    raw_user = parsed.get("user") if isinstance(parsed, dict) else None
+    if isinstance(raw_user, str):
+        raw_user = json.loads(raw_user or "{}")
+    if not isinstance(raw_user, dict):
+        raise ValueError("missing_user")
+    uid = int(raw_user.get("id") or 0)
+    if not uid:
+        raise ValueError("missing_user_id")
+    return uid
+
+
+def _get_request_user_agent(req=None) -> str:
+    req = req or request
+    return (req.headers.get("User-Agent") or "").strip() if req else ""
+
+
+def _has_real_attribution(payload: dict | None) -> bool:
+    payload = payload or {}
+    for key in ("fbclid", "ttclid", "fbc", "fbp"):
+        value = payload.get(key)
+        if isinstance(value, str):
+            value = value.strip()
+        if value:
+            return True
+    return False
+
+
+def _upsert_ad_attribution(*, uid: int, payload: dict | None, req=None):
+    req = req or request
+    now = now_utc()
+    payload = payload or {}
+    doc = {
+        "external_id_sha256": sha256_hex(uid),
+        "last_seen_at": now,
+    }
+    user_agent = payload.get("user_agent") or _get_request_user_agent(req)
+    ip = payload.get("ip") or _get_client_ip(req)
+    if isinstance(user_agent, str):
+        user_agent = user_agent.strip()
+    if isinstance(ip, str):
+        ip = ip.strip()
+    if user_agent:
+        doc["user_agent"] = user_agent
+    if ip:
+        doc["ip"] = ip
+    for key in ("fbclid", "fbc", "fbp", "ttclid", "landing_url"):
+        value = payload.get(key)
+        if isinstance(value, str):
+            value = value.strip()
+        if value:
+            doc[key] = value
+    ad_attribution_col.update_one(
+        {"user_id": int(uid)},
+        {
+            "$set": doc,
+            "$setOnInsert": {
+                "user_id": int(uid),
+                "first_seen_at": now,
+            },
+        },
+        upsert=True,
+    )
+    return ad_attribution_col.find_one({"user_id": int(uid)}) or {}
+
+
+def _create_attribution_bootstrap(*, payload: dict | None, req=None) -> str:
+    req = req or request
+    payload = payload or {}
+    if not _has_real_attribution(payload):
+        raise ValueError("missing_attribution")
+
+    now = now_utc()
+    expire_at = now + timedelta(days=7)
+    token = secrets.token_urlsafe(24)
+    doc = {
+        "token": token,
+        "created_at": now,
+        "expireAt": expire_at,
+        "bound_user_id": None,
+        "bound_at": None,
+    }
+    for key in ("fbclid", "fbc", "fbp", "ttclid", "landing_url"):
+        value = payload.get(key)
+        if isinstance(value, str):
+            value = value.strip()
+        if value:
+            doc[key] = value
+    user_agent = _get_request_user_agent(req)
+    ip = _get_client_ip(req)
+    if user_agent:
+        doc["user_agent"] = user_agent
+    if ip:
+        doc["ip"] = ip
+    attribution_bootstrap_col.insert_one(doc)
+    current_app.logger.info("[ATTRIBUTION] bootstrap_saved token=%s fbclid=%s ttclid=%s", token[:8], bool(doc.get("fbclid")), bool(doc.get("ttclid")))
+    return token
+
+
+def _bind_attribution_token(*, uid: int, token: str):
+    token = (token or "").strip()
+    if not token:
+        raise ValueError("missing_token")
+
+    bootstrap = attribution_bootstrap_col.find_one({"token": token})
+    if not bootstrap:
+        raise LookupError("bootstrap_not_found")
+
+    expire_at = bootstrap.get("expireAt")
+    if expire_at and expire_at <= now_utc():
+        raise LookupError("bootstrap_expired")
+
+    bound_user_id = bootstrap.get("bound_user_id")
+    if bound_user_id is not None:
+        try:
+            bound_user_id = int(bound_user_id)
+        except (TypeError, ValueError):
+            bound_user_id = None
+    if bound_user_id is not None and bound_user_id != int(uid):
+        current_app.logger.warning("[ATTRIBUTION] bind_conflict uid=%s token=%s", uid, token[:8])
+        raise RuntimeError("bind_conflict")
+
+    payload = {
+        key: bootstrap.get(key)
+        for key in ("fbclid", "fbc", "fbp", "ttclid", "landing_url", "user_agent", "ip")
+        if bootstrap.get(key)
+    }
+    doc = _upsert_ad_attribution(uid=int(uid), payload=payload, req=None)
+    if bound_user_id is None:
+        attribution_bootstrap_col.update_one(
+            {"token": token, "bound_user_id": bootstrap.get("bound_user_id")},
+            {"$set": {"bound_user_id": int(uid), "bound_at": now_utc()}},
+        )
+    current_app.logger.info("[ATTRIBUTION] bind_ok uid=%s token=%s", uid, token[:8])
+    return doc
+
+
+def _track_welcome_claim_conversion(*, uid: int, drop_id, attribution: dict | None):
+    drop_id_str = str(drop_id)
+    event_id = f"welcome_claim:{uid}:{drop_id_str}"
+    tracking_specs = (
+        ("meta", send_meta_complete_registration),
+        ("tiktok", send_tiktok_complete_registration),
+    )
+
+    for network, sender in tracking_specs:
+        try:
+            event_doc, should_send = reserve_conversion_event(
+                conversion_events_col,
+                network=network,
+                event_name="CompleteRegistration",
+                user_id=uid,
+                drop_id=drop_id_str,
+                event_id=event_id,
+            )
+        except Exception:
+            current_app.logger.exception("[TRACKING] reserve_failed network=%s uid=%s drop_id=%s", network, uid, drop_id_str)
+            continue
+
+        if not should_send:
+            current_app.logger.info("[TRACKING] skip_duplicate network=%s uid=%s drop_id=%s status=%s", network, uid, drop_id_str, (event_doc or {}).get("status"))
+            continue
+
+        result = sender(event_id=event_id, user_id=uid, drop_id=drop_id_str, attribution=attribution)
+        status = "sent" if result.get("ok") else "failed"
+        try:
+            mark_conversion_event(
+                conversion_events_col,
+                key=event_doc["key"],
+                status=status,
+                http_status=result.get("http_status"),
+                response_text=result.get("response_text") or result.get("reason") or "",
+            )
+        except Exception:
+            current_app.logger.exception("[TRACKING] persist_failed network=%s uid=%s drop_id=%s", network, uid, drop_id_str)
+
+        if result.get("ok"):
+            current_app.logger.info("[TRACKING] sent network=%s uid=%s drop_id=%s event_id=%s", network, uid, drop_id_str, event_id)
+        elif result.get("skipped"):
+            current_app.logger.info("[TRACKING] skipped network=%s uid=%s drop_id=%s reason=%s", network, uid, drop_id_str, result.get("reason"))
+        else:
+            current_app.logger.warning("[TRACKING] failed network=%s uid=%s drop_id=%s status=%s body=%s", network, uid, drop_id_str, result.get("http_status"), result.get("response_text"))
+
+
 def now_utc():
     return datetime.now(timezone.utc)
 
@@ -468,6 +670,10 @@ def ensure_voucher_indexes():
     welcome_tickets_col.create_index([("uid", ASCENDING)], unique=True)
     welcome_tickets_col.create_index([("cleanup_at", ASCENDING)], expireAfterSeconds=0)
     welcome_eligibility_col.create_index([("uid", ASCENDING)], unique=True)
+    ad_attribution_col.create_index([("user_id", ASCENDING)], unique=True)
+    conversion_events_col.create_index([("key", ASCENDING)], unique=True)
+    attribution_bootstrap_col.create_index([("token", ASCENDING)], unique=True)
+    attribution_bootstrap_col.create_index([("expireAt", ASCENDING)], expireAfterSeconds=0)
     subscription_cache_col.create_index([("expireAt", ASCENDING)], expireAfterSeconds=0)
     try:
         for legacy_name in ("uniq_user_checks", "uniq_tg_verify_user_id", "uq_tg_verif_user_id_sparse"):
@@ -3020,6 +3226,43 @@ def api_visible():
         current_app.logger.exception("[visible] unhandled", extra={"user_id": user_id})
         raise
 
+def api_attribution_bootstrap():
+    body = request.get_json(silent=True) or {}
+    try:
+        token = _create_attribution_bootstrap(payload=body, req=request)
+    except ValueError as exc:
+        return jsonify({"status": "error", "code": str(exc)}), 400
+    except DuplicateKeyError:
+        current_app.logger.exception("[ATTRIBUTION] bootstrap_duplicate")
+        return jsonify({"status": "error", "code": "server_error"}), 500
+    except Exception:
+        current_app.logger.exception("[ATTRIBUTION] bootstrap_failed")
+        return jsonify({"status": "error", "code": "server_error"}), 500
+    return jsonify({"ok": True, "token": token}), 200
+
+
+@vouchers_bp.route("/attribution/bind", methods=["POST"])
+def api_miniapp_attribution_bind():
+    body = request.get_json(silent=True) or {}
+    try:
+        uid = _verified_telegram_uid_from_request(request)
+    except ValueError as exc:
+        return jsonify({"status": "error", "code": str(exc)}), 401
+
+    try:
+        _bind_attribution_token(uid=uid, token=body.get("token") or "")
+    except ValueError as exc:
+        return jsonify({"status": "error", "code": str(exc)}), 400
+    except LookupError as exc:
+        code = str(exc)
+        return jsonify({"status": "error", "code": code}), 410 if code == "bootstrap_expired" else 404
+    except RuntimeError as exc:
+        return jsonify({"status": "error", "code": str(exc)}), 409
+    except Exception:
+        current_app.logger.exception("[ATTRIBUTION] bind_failed uid=%s", uid)
+        return jsonify({"status": "error", "code": "server_error"}), 500
+    return jsonify({"ok": True}), 200
+
 @vouchers_bp.route("/referral/progress", methods=["GET"])
 @vouchers_bp.route("/v2/miniapp/referral/progress", methods=["GET"])
 def api_referral_progress():
@@ -3955,6 +4198,11 @@ def api_claim():
         current_app.logger.info("[WELCOME] gate_pass uid=%s", uid)
         current_app.logger.info("[WELCOME] claim_success uid=%s drop_id=%s", uid, drop_id)
         current_app.logger.info("[claim] success drop=%s audience=%s uid=%s ip=%s", drop_id, audience_type, uid, client_ip)
+        try:
+            attribution = ad_attribution_col.find_one({"user_id": int(uid)}) or {}
+            _track_welcome_claim_conversion(uid=int(uid), drop_id=drop_id, attribution=attribution)
+        except Exception:
+            current_app.logger.exception("[TRACKING] welcome_claim_hook_failed uid=%s drop_id=%s", uid, drop_id)
         current_app.logger.info(
             "[claim] uid=%s drop_id=%s dtype=%s audience=%s decision=allowed reason=success",
             uid,

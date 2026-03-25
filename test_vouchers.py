@@ -1237,3 +1237,147 @@ class ReferralProgressTests(unittest.TestCase):
         self.assertEqual(status, 200)
         body = resp.get_json()
         self.assertEqual(body["total_referrals"], 4)
+
+
+class MiniappAttributionTests(unittest.TestCase):
+    def setUp(self):
+        import vouchers as m
+        self.m = m
+        self.app = Flask(__name__)
+        self.app.add_url_rule("/api/attribution/bootstrap", view_func=m.api_attribution_bootstrap, methods=["POST"])
+        self.orig_extract = m.extract_raw_init_data_from_query
+        self.orig_verify = m.verify_telegram_init_data
+        self.orig_ad_attribution = m.ad_attribution_col
+        self.orig_bootstrap = m.attribution_bootstrap_col
+
+    def tearDown(self):
+        self.m.extract_raw_init_data_from_query = self.orig_extract
+        self.m.verify_telegram_init_data = self.orig_verify
+        self.m.ad_attribution_col = self.orig_ad_attribution
+        self.m.attribution_bootstrap_col = self.orig_bootstrap
+
+    def test_bootstrap_endpoint_rejects_empty_attribution(self):
+        self.m.attribution_bootstrap_col = FakeSimpleCollection([])
+        client = self.app.test_client()
+        resp = client.post(
+            "/api/attribution/bootstrap",
+            json={"landing_url": "https://example.com/landing"},
+            headers={"User-Agent": "UA-1", "X-Forwarded-For": "198.51.100.10"},
+        )
+        status = resp.status_code
+        self.assertEqual(status, 400)
+        self.assertEqual(resp.get_json().get("code"), "missing_attribution")
+        self.assertEqual(len(self.m.attribution_bootstrap_col.docs), 0)
+
+    def test_bootstrap_endpoint_returns_token_and_stores_record(self):
+        self.m.attribution_bootstrap_col = FakeSimpleCollection([])
+        client = self.app.test_client()
+        resp = client.post(
+            "/api/attribution/bootstrap",
+            json={"fbclid": "fb-1", "landing_url": "https://example.com/landing"},
+            headers={"User-Agent": "UA-1", "X-Forwarded-For": "198.51.100.10"},
+        )
+        status = resp.status_code
+        self.assertEqual(status, 200)
+        body = resp.get_json()
+        self.assertTrue(body["ok"])
+        self.assertTrue(body["token"])
+        saved = self.m.attribution_bootstrap_col.find_one({"token": body["token"]})
+        self.assertIsNotNone(saved)
+        self.assertEqual(saved["fbclid"], "fb-1")
+        self.assertEqual(saved["landing_url"], "https://example.com/landing")
+        self.assertEqual(saved["user_agent"], "UA-1")
+        self.assertEqual(saved["ip"], "198.51.100.10")
+
+    def test_bind_endpoint_writes_verified_uid_and_is_idempotent(self):
+        token = "token-1"
+        self.m.extract_raw_init_data_from_query = lambda req: "init"
+        self.m.verify_telegram_init_data = lambda raw: (True, {"user": '{"id": 321, "username": "alice"}'}, "ok")
+        self.m.ad_attribution_col = FakeSimpleCollection([])
+        self.m.attribution_bootstrap_col = FakeSimpleCollection([{
+            "token": token,
+            "fbclid": "fb-1",
+            "ttclid": "tt-1",
+            "landing_url": "https://example.com/landing",
+            "user_agent": "UA-1",
+            "ip": "198.51.100.10",
+            "expireAt": datetime.now(timezone.utc) + timedelta(days=1),
+            "bound_user_id": None,
+            "bound_at": None,
+        }])
+        with self.app.test_request_context(
+            "/v2/miniapp/attribution/bind?init_data=init",
+            method="POST",
+            json={"token": token},
+        ):
+            resp, status = self.m.api_miniapp_attribution_bind()
+        self.assertEqual(status, 200)
+        self.assertEqual(resp.get_json(), {"ok": True})
+        saved = self.m.ad_attribution_col.find_one({"user_id": 321})
+        self.assertIsNotNone(saved)
+        self.assertEqual(saved["fbclid"], "fb-1")
+        self.assertEqual(saved["ttclid"], "tt-1")
+        self.assertEqual(saved["user_agent"], "UA-1")
+        self.assertEqual(saved["ip"], "198.51.100.10")
+
+        with self.app.test_request_context(
+            "/v2/miniapp/attribution/bind?init_data=init",
+            method="POST",
+            json={"token": token},
+        ):
+            resp, status = self.m.api_miniapp_attribution_bind()
+        self.assertEqual(status, 200)
+        self.assertEqual(resp.get_json(), {"ok": True})
+        self.assertEqual(self.m.ad_attribution_col.count_documents({"user_id": 321}), 1)
+
+    def test_bind_endpoint_rejects_rebinding_to_different_uid(self):
+        token = "token-2"
+        self.m.extract_raw_init_data_from_query = lambda req: "init"
+        self.m.verify_telegram_init_data = lambda raw: (True, {"user": '{"id": 999, "username": "bob"}'}, "ok")
+        self.m.ad_attribution_col = FakeSimpleCollection([])
+        self.m.attribution_bootstrap_col = FakeSimpleCollection([{
+            "token": token,
+            "fbclid": "fb-1",
+            "expireAt": datetime.now(timezone.utc) + timedelta(days=1),
+            "bound_user_id": 321,
+            "bound_at": datetime.now(timezone.utc),
+        }])
+        with self.app.test_request_context(
+            "/v2/miniapp/attribution/bind?init_data=init",
+            method="POST",
+            json={"token": token},
+        ):
+            resp, status = self.m.api_miniapp_attribution_bind()
+        self.assertEqual(status, 409)
+        self.assertEqual(resp.get_json().get("code"), "bind_conflict")
+
+
+class WelcomeClaimTrackingTests(unittest.TestCase):
+    def setUp(self):
+        import vouchers as m
+        self.m = m
+        self.app = Flask(__name__)
+        self.orig_conversion_events = m.conversion_events_col
+        self.orig_meta = m.send_meta_complete_registration
+        self.orig_tiktok = m.send_tiktok_complete_registration
+
+    def tearDown(self):
+        self.m.conversion_events_col = self.orig_conversion_events
+        self.m.send_meta_complete_registration = self.orig_meta
+        self.m.send_tiktok_complete_registration = self.orig_tiktok
+
+    def test_track_welcome_claim_conversion_is_idempotent(self):
+        calls = []
+        self.m.conversion_events_col = FakeSimpleCollection([])
+        self.m.send_meta_complete_registration = lambda **kwargs: calls.append(("meta", kwargs["event_id"])) or {"ok": True, "http_status": 200, "response_text": "ok"}
+        self.m.send_tiktok_complete_registration = lambda **kwargs: calls.append(("tiktok", kwargs["event_id"])) or {"ok": True, "http_status": 200, "response_text": "ok"}
+
+        with self.app.app_context():
+            self.m._track_welcome_claim_conversion(uid=42, drop_id="drop-1", attribution={"landing_url": "https://example.com"})
+            self.m._track_welcome_claim_conversion(uid=42, drop_id="drop-1", attribution={"landing_url": "https://example.com"})
+
+        self.assertEqual(calls, [("meta", "welcome_claim:42:drop-1"), ("tiktok", "welcome_claim:42:drop-1")])
+        meta_doc = self.m.conversion_events_col.find_one({"key": "meta|welcome_claim|42|drop-1"})
+        tiktok_doc = self.m.conversion_events_col.find_one({"key": "tiktok|welcome_claim|42|drop-1"})
+        self.assertEqual(meta_doc["status"], "sent")
+        self.assertEqual(tiktok_doc["status"], "sent")
