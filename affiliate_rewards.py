@@ -309,7 +309,6 @@ def evaluate_monthly_affiliate_reward(db, *, referrer_id: int, now_utc: datetime
                     "year_month": yyyymm,
                     "tier": eligible_tier,
                     "pool_id": eligible_tier,
-                    "qualified_count": int(qualified_count),
                     "status": "APPROVED",
                     "dedup_key": dedup_key,
                     "voucher_code": None,
