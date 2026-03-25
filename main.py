@@ -3833,7 +3833,8 @@ def run_worker():
                 started_at = time.monotonic()
                 app_bot.run_polling(
                     poll_interval=5,
-                    allowed_updates=["message", "callback_query", "chat_member", "my_chat_member", "chat_join_request"]
+                    allowed_updates=["message", "callback_query", "chat_member", "my_chat_member", "chat_join_request"],
+                    close_loop=False,
                 )
                 logger.info("[WORKER] polling exited cleanly")
                 break
