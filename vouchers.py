@@ -15,6 +15,7 @@ from database import db, users_collection
 from time_utils import as_aware_utc
 from onboarding import record_onboarding_start, record_visible_ping
 from affiliate_rewards import approve_affiliate_ledger, reject_affiliate_ledger
+from conversion_tracking import send_meta_event, send_tiktok_event
 
 admin_cache_col = db["admin_cache"]
 new_joiner_claims_col = db["new_joiner_claims"]
@@ -3962,6 +3963,23 @@ def api_claim():
             drop_type,
             audience_type,
         )
+        attr = db["ad_attribution"].find_one({"user_id": uid}) or {}
+        if not attr:
+            current_app.logger.info("[conversion] skip uid=%s reason=no_attribution", uid)
+        elif attr.get("conversion_sent"):
+            current_app.logger.info("[conversion] skip uid=%s reason=already_sent", uid)
+        else:
+            current_app.logger.info("[conversion] send_attempt uid=%s", uid)
+            try:
+                send_meta_event(uid, attr)
+                send_tiktok_event(uid, attr)
+                db["ad_attribution"].update_one(
+                    {"_id": attr["_id"]},
+                    {"$set": {"conversion_sent": True}}
+                )
+                current_app.logger.info("[conversion] marked_sent uid=%s", uid)
+            except Exception:
+                current_app.logger.warning("[conversion] send_failed uid=%s", uid, exc_info=True)
      
     response_payload = {"status": "ok", "voucher": result}
     if _is_new_joiner_audience(audience_type):
