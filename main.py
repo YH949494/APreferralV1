@@ -36,7 +36,7 @@ from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_MISSED
 
 from app_context import set_app_bot, set_bot, set_scheduler
 from onboarding import MYWIN_CHAT_ID, onboarding_due_tick, record_first_mywin, record_first_checkin
-from vouchers import vouchers_bp, ensure_voucher_indexes, process_verification_queue, check_channel_subscribed
+from vouchers import vouchers_bp, ensure_voucher_indexes, process_verification_queue, check_channel_subscribed, api_attribution_bootstrap
 from scheduler import settle_pending_referrals, settle_referral_snapshots, settle_xp_snapshots, evaluate_affiliate_simulated_ledgers, compute_affiliate_daily_kpi_yesterday, run_invitee_subscription_audit
 from referral_rate_limit import consume_referral_rate_limits
 from affiliate_leaderboard import (
@@ -1468,6 +1468,7 @@ def ensure_indexes():
     db.welcome_tickets.create_index([("uid", 1)], unique=True)
     db.welcome_tickets.create_index([("cleanup_at", 1)], expireAfterSeconds=0)
     db.miniapp_sessions_daily.create_index([("date_utc", 1), ("user_id", 1)], unique=True)
+    db.ad_attribution.create_index([("token", 1)], unique=True, sparse=True)
     db.voucher_ledger.create_index([("status", 1), ("created_at", 1)])
     db.qualified_events.create_index([("created_at", 1)])
     users_collection.create_index([("first_checkin_at", 1)])
@@ -1633,6 +1634,10 @@ app = Flask(__name__, static_folder="static")
 CORS(app, resources={r"/*": {"origins": "*"}})
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", "dev-secret")
 app.register_blueprint(vouchers_bp, url_prefix="/v2/miniapp")
+
+@app.route("/api/attribution/bootstrap", methods=["POST"])
+def app_api_attribution_bootstrap():
+    return api_attribution_bootstrap()
 admin_bp = Blueprint("admin", __name__)
 
 
@@ -1960,7 +1965,50 @@ def api_set_region(user_id):
 
 @app.route("/")
 def home():
+    accepts_html = "text/html" in (request.headers.get("Accept", "") or "")
+    if accepts_html:
+        return render_template(
+            "index.html",
+            bot_username=os.environ.get("BOT_USERNAME", ""),
+            fallback_miniapp_url=WEBAPP_URL,
+        )
     return "Bot is alive!"
+
+
+@app.route("/healthz")
+def healthz():
+    return "Bot is alive!"
+
+
+# NEW: Ads landing → Telegram Mini App redirect (safe, non-breaking)
+@app.route("/go")
+def go():
+    token = uuid.uuid4().hex[:12]
+
+    fbclid = request.args.get("fbclid")
+    ttclid = request.args.get("ttclid")
+    fbp = request.cookies.get("_fbp")
+    fbc = request.cookies.get("_fbc")
+
+    db.ad_attribution.insert_one(
+        {
+            "token": token,
+            "fbclid": fbclid,
+            "ttclid": ttclid,
+            "fbp": fbp,
+            "fbc": fbc,
+            "created_at": datetime.now(timezone.utc),
+            "bound": False,
+        }
+    )
+
+    bot_username = os.environ.get("BOT_USERNAME", "")
+    if not bot_username:
+        logger.error("[GO] BOT_USERNAME missing; cannot redirect token=%s", token)
+        return jsonify({"ok": False, "error": "BOT_USERNAME is not configured"}), 500
+
+    tg_url = f"https://t.me/{bot_username}?startapp=attr_{token}"
+    return redirect(tg_url, code=302)
 
 def _apply_no_store_headers(response):
     response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"

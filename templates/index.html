@@ -2,8 +2,82 @@
 <html>
   <head>
     <meta charset="utf-8">
-    <meta http-equiv="refresh" content="0; url=/static/index.html">
     <title>Redirecting…</title>
+    <script>
+      const BOT_USERNAME = {{ bot_username|tojson }};
+      const FALLBACK_MINIAPP_URL = {{ fallback_miniapp_url|tojson }};
+
+      function readCookieValue(name) {
+        try {
+          const prefix = `${name}=`;
+          const found = document.cookie.split(";").map((part) => part.trim()).find((part) => part.startsWith(prefix));
+          return found ? decodeURIComponent(found.slice(prefix.length)) : "";
+        } catch (_) {
+          return "";
+        }
+      }
+
+      function captureLandingAttribution() {
+        const qs = new URLSearchParams(location.search);
+        return {
+          fbclid: (qs.get("fbclid") || "").trim(),
+          ttclid: (qs.get("ttclid") || "").trim(),
+          fbc: readCookieValue("_fbc"),
+          fbp: readCookieValue("_fbp"),
+          landing_url: location.href,
+        };
+      }
+
+      function hasRealAttribution(payload) {
+        return [payload?.fbclid, payload?.ttclid, payload?.fbc, payload?.fbp].some(Boolean);
+      }
+
+      function buildTelegramHandoffUrl(token) {
+        const cleanToken = (token || "").trim();
+        if (BOT_USERNAME) {
+          const url = new URL(`https://t.me/${BOT_USERNAME}`);
+          if (cleanToken) url.searchParams.set("startapp", `attr_${cleanToken}`);
+          return url.toString();
+        }
+        console.warn("[attribution] BOT_USERNAME missing; falling back to miniapp URL");
+        const url = new URL(FALLBACK_MINIAPP_URL || "/miniapp", window.location.origin);
+        if (cleanToken) url.searchParams.set("attribution_token", cleanToken);
+        return url.toString();
+      }
+
+      function redirectToTelegram(token) {
+        window.location.replace(buildTelegramHandoffUrl(token));
+      }
+
+      async function bootstrapAndRedirect() {
+        const payload = captureLandingAttribution();
+        if (!hasRealAttribution(payload)) {
+          redirectToTelegram("");
+          return;
+        }
+        let token = "";
+        try {
+          const res = await fetch("/api/attribution/bootstrap", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          });
+          if (res.ok) {
+            const data = await res.json();
+            token = (data?.token || "").trim();
+            if (token) {
+              try { localStorage.setItem("attribution_bootstrap_token_v1", token); } catch (_) {}
+            }
+          }
+        } catch (err) {
+          console.warn("[attribution] bootstrap failed", err);
+        } finally {
+          redirectToTelegram(token);
+        }
+      }
+
+      window.addEventListener("load", bootstrapAndRedirect);
+    </script>
   </head>
   <body></body>
 </html>

@@ -1149,7 +1149,7 @@
     let CURRENT_USERNAME = window.CURRENT_USERNAME || "";
     try {
       if (window.Telegram?.WebApp?.initDataUnsafe?.user?.username) {
-        CURRENT_USERNAME = Telegram.WebApp.initDataUnsafe.user.username || CURRENT_USERNAME;
+        CURRENT_USERNAME = window.Telegram?.WebApp?.initDataUnsafe?.user?.username || CURRENT_USERNAME;
       }
     } catch (_) {}
     if (!CURRENT_USERNAME) {
@@ -1159,7 +1159,7 @@
   </script>
   
   <script>
-    const tg = window.Telegram?.WebApp;
+    const telegramWebApp = window.Telegram?.WebApp || null;
 
     const API_V2 = "/v2/miniapp";
     window.__claimInFlight = false;
@@ -1193,10 +1193,7 @@
 
       while (Date.now() < deadline) {
         const candidate =
-          (typeof tg?.initData === "string" && tg.initData.length ? tg.initData : "") ||
-          (typeof window.Telegram?.WebApp?.initData === "string" && window.Telegram.WebApp.initData.length
-            ? window.Telegram.WebApp.initData
-            : "") ||
+          (typeof telegramWebApp?.initData === "string" && telegramWebApp.initData.length ? telegramWebApp.initData : "") ||
           qs.get("init_data") ||
           "";
 
@@ -1217,10 +1214,7 @@
 
       const candidateInitData =
         (typeof initDataOverride === "string" && initDataOverride.length ? initDataOverride : "") ||
-        (typeof tg?.initData === "string" && tg.initData.length ? tg.initData : "") ||
-        (typeof window.Telegram?.WebApp?.initData === "string" && window.Telegram.WebApp.initData.length
-          ? window.Telegram.WebApp.initData
-          : "") ||
+        (typeof telegramWebApp?.initData === "string" && telegramWebApp.initData.length ? telegramWebApp.initData : "") ||
         urlQS.get("init_data") ||
         "";
 
@@ -1238,12 +1232,12 @@
         h["Authorization"] = `Bearer ${adminSecret}`;
       }
       const usernameHint =
-        CURRENT_USERNAME || tg?.initDataUnsafe?.user?.username || urlQS.get("username") || "";
+        CURRENT_USERNAME || telegramWebApp?.initDataUnsafe?.user?.username || urlQS.get("username") || "";
       if (usernameHint) {
         h["X-Admin-Username"] = usernameHint;
       }
 
-      const tgUserId = tg?.initDataUnsafe?.user?.id;
+      const tgUserId = telegramWebApp?.initDataUnsafe?.user?.id;
       const userIdFromQS = urlQS.get("user_id") || urlQS.get("id");
       const userIdHint =
         tgUserId !== undefined && tgUserId !== null && tgUserId !== ""
@@ -1317,6 +1311,91 @@
         res = await fetch(target, { ...rest, headers });
       }
       return res;
+    }
+
+    const ATTRIBUTION_BOOTSTRAP_TOKEN_KEY = "attribution_bootstrap_token_v1";
+    const ATTRIBUTION_BIND_SENT_KEY = "attribution_bind_sent_v1";
+    const ATTRIBUTION_BIND_RETRY_DELAY_MS = 800;
+
+    function readCookieValue(name) {
+      try {
+        const prefix = `${name}=`;
+        const found = document.cookie.split(";").map((part) => part.trim()).find((part) => part.startsWith(prefix));
+        return found ? decodeURIComponent(found.slice(prefix.length)) : "";
+      } catch (_) {
+        return "";
+      }
+    }
+
+    function getAttributionTokenFromStartParam() {
+      try {
+        const qs = new URLSearchParams(location.search);
+        const raw =
+          (telegramWebApp?.initDataUnsafe?.start_param || "") ||
+          qs.get("tgWebAppStartParam") ||
+          qs.get("startapp") ||
+          qs.get("attribution_token") ||
+          "";
+        if (!raw) return "";
+        return raw.startsWith("attr_") ? raw.slice(5) : raw;
+      } catch (_) {
+        return "";
+      }
+    }
+
+    function scheduleAttributionBindRetry() {
+      if ((window.__attributionBindAttemptCount || 0) >= 2 || window.__attributionBindRetryScheduled) return;
+      window.__attributionBindRetryScheduled = true;
+      window.setTimeout(() => {
+        window.__attributionBindRetryScheduled = false;
+        void bindMiniappAttributionOnce();
+      }, ATTRIBUTION_BIND_RETRY_DELAY_MS);
+    }
+
+    async function bindMiniappAttributionOnce() {
+      window.__attributionBindAttemptCount = (window.__attributionBindAttemptCount || 0) + 1;
+
+      let token = getAttributionTokenFromStartParam();
+      if (token) {
+        console.debug("[attribution] token source=start_param");
+      }
+      try {
+        if (!token) {
+          token = localStorage.getItem(ATTRIBUTION_BOOTSTRAP_TOKEN_KEY) || "";
+        }
+        if (!token || localStorage.getItem(ATTRIBUTION_BIND_SENT_KEY) === "1") {
+          if (!token) scheduleAttributionBindRetry();
+          return;
+        }
+      } catch (_) {
+        scheduleAttributionBindRetry();
+        return;
+      }
+
+      const qs = new URLSearchParams(location.search);
+      const initData = getLatestInitData(
+        (typeof telegramWebApp?.initData === "string" && telegramWebApp.initData.length ? telegramWebApp.initData : "") ||
+        qs.get("init_data") ||
+        ""
+      );
+      if (!initData) {
+        scheduleAttributionBindRetry();
+        return;
+      }
+
+      try {
+        console.debug("[attribution] bind request sent");
+        const res = await v2Fetch(`${API_V2}/attribution/bind`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ token }),
+        });
+        if (!res.ok) throw new Error(`bind ${res.status}`);
+        try { localStorage.setItem(ATTRIBUTION_BIND_SENT_KEY, "1"); } catch (_) {}
+        console.debug("[attribution] bind succeeded");
+      } catch (err) {
+        console.warn("[attribution] bind failed", err);
+      }
     }
 
     async function checkDropModeOnce() {
@@ -1773,7 +1852,7 @@
     const AUTO_REGION_ATTEMPTED_KEY = "auto_region_attempted_v1";
     const OFFICIAL_CHANNEL_LINK = "https://t.me/advantplayofficial";
     window.__didCheckinThisSession = false;
-    const user = tg?.initDataUnsafe?.user || {};
+    const user = telegramWebApp?.initDataUnsafe?.user || {};
     const userId = user.id;
     const username = user.username || user.first_name || "";
     let regionMsg = "";
@@ -2194,8 +2273,8 @@ Active players win more.
       }
       secondaryBtn.textContent = "📣 Join Channel";
       secondaryBtn.onclick = () => {
-        if (tg?.openTelegramLink) {
-          tg.openTelegramLink(OFFICIAL_CHANNEL_LINK);
+        if (telegramWebApp?.openTelegramLink) {
+          telegramWebApp.openTelegramLink(OFFICIAL_CHANNEL_LINK);
         } else {
           window.open(OFFICIAL_CHANNEL_LINK, "_blank");
         }
@@ -2220,7 +2299,7 @@ Active players win more.
         body: JSON.stringify({
           dropId,
           check_only: true,
-          init_data: getLatestInitData() || (tg?.initData || "")
+          init_data: getLatestInitData() || (telegramWebApp?.initData || "")
         })
       });
       let data = null;
@@ -2565,14 +2644,14 @@ Active players win more.
         ctaBtn.textContent = uiModel.ctaText;
         ctaBtn.addEventListener("click", () => {
           if (uiModel.ctaAction === "join_channel") {
-            if (tg?.openTelegramLink) {
-              tg.openTelegramLink(OFFICIAL_CHANNEL_LINK);
+            if (telegramWebApp?.openTelegramLink) {
+              telegramWebApp.openTelegramLink(OFFICIAL_CHANNEL_LINK);
             } else {
               window.open(OFFICIAL_CHANNEL_LINK, "_blank");
             }
           } else if (uiModel.ctaAction === "profile_photo") {
-            if (tg?.openTelegramLink) {
-              tg.openTelegramLink(PROFILE_PHOTO_SETTINGS_LINK);
+            if (telegramWebApp?.openTelegramLink) {
+              telegramWebApp.openTelegramLink(PROFILE_PHOTO_SETTINGS_LINK);
             } else {
               window.open(PROFILE_PHOTO_SETTINGS_LINK, "_blank");
             }
@@ -2800,7 +2879,7 @@ Active players win more.
           method: "POST",
           body: JSON.stringify({
             dropId,
-            init_data: getLatestInitData() || (tg?.initData || "")
+            init_data: getLatestInitData() || (telegramWebApp?.initData || "")
           })
         });
 
@@ -2996,7 +3075,7 @@ Active players win more.
         }
         await navigator.clipboard.writeText(code);
         copyBtn.textContent = "Copied!";
-        tg?.HapticFeedback?.notificationOccurred?.("success");
+        telegramWebApp?.HapticFeedback?.notificationOccurred?.("success");
         setTimeout(() => {
           copyBtn.textContent = originalText;
         }, 2000);
@@ -3397,7 +3476,7 @@ function setLeaderboardMeta(ts, { isStale = false } = {}) {
 
     function getLeaderboardTimeoutMs() {
       const ua = (navigator.userAgent || "").toLowerCase();
-      const platform = String(tg?.platform || "").toLowerCase();
+      const platform = String(telegramWebApp?.platform || "").toLowerCase();
       if (!platform && !ua) return 12000;
       if (platform.includes("desktop") || ua.includes("windows")) return 12000;
       return 6000;
@@ -3894,7 +3973,8 @@ ${referral}`;
     }
 
     window.onload = async () => {
-      if (tg) { tg.ready(); tg.expand(); }
+      if (telegramWebApp) { telegramWebApp.ready(); telegramWebApp.expand(); }
+      await bindMiniappAttributionOnce();
 
       const init = await waitForInitData();
       const hasInit = !!(init && init.length >= 10);
