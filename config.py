@@ -60,5 +60,5 @@ AFFILIATE_GROUP_TRIGGER_WEEKLY_VALID_REFERRALS = int(
 )
 AFFILIATE_GROUP_INVITE_TEXT = os.getenv(
     "AFFILIATE_GROUP_INVITE_TEXT",
-    "🔥 You’ve reached 5 valid referrals this week.\nYou’re invited to join our affiliate group:\n{invite_url}",
+    "🔥 You’ve reached 5 valid referrals this week.\nYou’re invited to join our affiliate group and start earning now:\n{invite_url}",
 )
