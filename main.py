@@ -2,7 +2,7 @@ from flask import (
     Flask, request, jsonify, send_from_directory, make_response,
     render_template, redirect, url_for, flash, g, Blueprint
 )
-from flask_cors import CORS
+from flask_cors import CORS 
 from threading import Thread 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from telegram.constants import ChatType, ParseMode
