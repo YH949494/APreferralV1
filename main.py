@@ -81,11 +81,11 @@ CACHE_TTL_SECONDS = 300
 REGION_IP_CACHE = {}  # ip -> {"ts": epoch_seconds, "region": str|None, "source": str}
 REGION_IP_CACHE_TTL_SECONDS = 3600
 DAILY_GAME_SLOTS = [
-    {"id": "dragon_chi_s_quest_2", "name": "Dragon Chi's Quest 2", "tag": "Med", "maxwin": "100000x"},
+    {"id": "dragon_chi_s_quest_2", "name": "Dragon Chi's Quest 2", "tag": "Med", "maxwin": "100000x", "weight": 2},
     {"id": "piggy_bank_gold_2", "name": "Piggy Bank Gold 2", "tag": "High-Med", "maxwin": "150000x"},
     {"id": "zeustrike_xmas", "name": "Zeustrike Xmas", "tag": "High", "maxwin": "30000x"},
     {"id": "aztec_bonus_hunt_2_xmas", "name": "Aztec: Bonus Hunt 2 Xmas", "tag": "High-Med", "maxwin": "12000x"},
-    {"id": "zeustrike", "name": "Zeustrike", "tag": "High", "maxwin": "30000x"},
+    {"id": "zeustrike", "name": "Zeustrike", "tag": "High", "maxwin": "30000x", "weight": 2},
     {"id": "fighting_bull", "name": "Fighting Bull", "tag": "Med", "maxwin": "8000x"},
     {"id": "cat_mouse", "name": "Cat & Mouse", "tag": "High-Med", "maxwin": "5000x"},
     {"id": "pinata_fest", "name": "Pinata Fest", "tag": "Med", "maxwin": "80000x"},
@@ -112,7 +112,7 @@ DAILY_GAME_SLOTS = [
     {"id": "kingyo_riches", "name": "Kingyo Riches", "tag": "High-Med", "maxwin": "18600x"},
     {"id": "fish_prawn_crab_bonanza", "name": "Fish Prawn Crab Bonanza", "tag": "High-Med", "maxwin": "20000x"},
     {"id": "ramakien_blessing", "name": "Ramakien Blessing", "tag": "Med", "maxwin": "100x"},
-    {"id": "aztec_bonus_hunt_2", "name": "Aztec: Bonus Hunt 2", "tag": "High-Med", "maxwin": "12000x"},
+    {"id": "aztec_bonus_hunt_2", "name": "Aztec: Bonus Hunt 2", "tag": "High-Med", "maxwin": "12000x", "weight": 2},
     {"id": "football_fever", "name": "Football Fever", "tag": "High", "maxwin": "70000x"},
     {"id": "firefly_hunter", "name": "Firefly Hunter", "tag": "High-Med", "maxwin": "4027x"},
     {"id": "dark_ritual", "name": "Dark Ritual", "tag": "High", "maxwin": "20000x"},
