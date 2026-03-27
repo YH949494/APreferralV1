@@ -139,6 +139,16 @@ DAILY_GAME_SLOTS = [
     {"id": "disco_777", "name": "Disco 777", "tag": "Med", "maxwin": "28500x"},
 ]
 
+def build_daily_game_pool(slots):
+    pool = []
+    for slot in (slots or []):
+        weight = slot.get("weight", 1)
+        if not isinstance(weight, int) or weight <= 0:
+            weight = 1
+        for _ in range(weight):
+            pool.append(slot)
+    return pool if pool else list(slots or [])
+
 def _running_under_gunicorn():
     return "gunicorn" in os.environ.get("SERVER_SOFTWARE", "").lower() or os.environ.get("GUNICORN_CMD_ARGS") is not None
 
@@ -2007,9 +2017,13 @@ def api_region_by_ip():
 def api_daily_game():
     now_kl = datetime.now(KL_TZ)
     date_kl = now_kl.strftime("%Y-%m-%d")
+    pool = build_daily_game_pool(DAILY_GAME_SLOTS)
+    if not pool:
+        return jsonify({"ok": False, "error": "daily-game-slots-empty"}), 503
     digest = hashlib.sha256(date_kl.encode("utf-8")).hexdigest()
-    slot_idx = int(digest[:8], 16) % len(DAILY_GAME_SLOTS)
-    slot = DAILY_GAME_SLOTS[slot_idx].copy()
+    slot_idx = int(digest[:8], 16) % len(pool)
+    slot = pool[slot_idx].copy()
+    slot.pop("weight", None)
     # TODO: extend slot payload with reward_hint, mission_flag, tracking_key when rewards flow is enabled.
     return jsonify({
         "ok": True,
