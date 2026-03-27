@@ -61,7 +61,7 @@ from telegram_utils import safe_reply_text
 
 from pymongo import DESCENDING, ASCENDING, ReturnDocument  # keep if used elsewhere
 from pymongo.errors import DuplicateKeyError, CursorNotFound, OperationFailure, PyMongoError
-import os, asyncio, traceback, csv, io, requests, logging, time, uuid, socket, subprocess
+import os, asyncio, traceback, csv, io, requests, logging, time, uuid, socket, subprocess, hashlib
 import httpx
 import pytz
 from database import init_db, db
@@ -80,6 +80,64 @@ LEADERBOARD_CACHE = {}  # key -> {"ts": epoch_seconds, "payload": dict}
 CACHE_TTL_SECONDS = 300
 REGION_IP_CACHE = {}  # ip -> {"ts": epoch_seconds, "region": str|None, "source": str}
 REGION_IP_CACHE_TTL_SECONDS = 3600
+DAILY_GAME_SLOTS = [
+    {"id": "dragon_chi_s_quest_2", "name": "Dragon Chi's Quest 2", "tag": "Med", "maxwin": "100000x"},
+    {"id": "piggy_bank_gold_2", "name": "Piggy Bank Gold 2", "tag": "High-Med", "maxwin": "150000x"},
+    {"id": "zeustrike_xmas", "name": "Zeustrike Xmas", "tag": "High", "maxwin": "30000x"},
+    {"id": "aztec_bonus_hunt_2_xmas", "name": "Aztec: Bonus Hunt 2 Xmas", "tag": "High-Med", "maxwin": "12000x"},
+    {"id": "zeustrike", "name": "Zeustrike", "tag": "High", "maxwin": "30000x"},
+    {"id": "fighting_bull", "name": "Fighting Bull", "tag": "Med", "maxwin": "8000x"},
+    {"id": "cat_mouse", "name": "Cat & Mouse", "tag": "High-Med", "maxwin": "5000x"},
+    {"id": "pinata_fest", "name": "Pinata Fest", "tag": "Med", "maxwin": "80000x"},
+    {"id": "buffalo_rush_highroller", "name": "Buffalo Rush HIGHROLLER", "tag": "High", "maxwin": "15120x"},
+    {"id": "golden_egypt", "name": "Golden Egypt", "tag": "Med", "maxwin": "6000x"},
+    {"id": "mahjong_roar", "name": "Mahjong Roar", "tag": "Med", "maxwin": "2500x"},
+    {"id": "maya_elemental_totem_2", "name": "Maya: Elemental Totem 2", "tag": "High-Med", "maxwin": "2500x"},
+    {"id": "big_net_bass", "name": "Big Net Bass", "tag": "Med", "maxwin": "16000x"},
+    {"id": "sugar_crush", "name": "Sugar Crush", "tag": "Med", "maxwin": "20000x"},
+    {"id": "disco_777_hold_and_win", "name": "Disco 777 Hold and Win", "tag": "High-Med", "maxwin": "512000x"},
+    {"id": "piggy_bank_gold", "name": "Piggy Bank Gold", "tag": "Med", "maxwin": "30000x"},
+    {"id": "leprechaun_s_fortune", "name": "Leprechaun's Fortune", "tag": "Med", "maxwin": "28500x"},
+    {"id": "blackjack_21", "name": "BlackJack 21", "tag": "Low-Med", "maxwin": "100000x"},
+    {"id": "pirate_treasure_hunt", "name": "Pirate Treasure Hunt", "tag": "Low-Med", "maxwin": "1500x"},
+    {"id": "aztec_gold_temple", "name": "Aztec: Gold Temple", "tag": "Med", "maxwin": "10000x"},
+    {"id": "cai_shen_fortune", "name": "Cai Shen Fortune", "tag": "High-Med", "maxwin": "8262x"},
+    {"id": "crazy_bounty_jackpot", "name": "Crazy Bounty: Jackpot", "tag": "High-Med", "maxwin": "50000x"},
+    {"id": "rush_hour_gold", "name": "Rush Hour Gold", "tag": "Med", "maxwin": "1500x"},
+    {"id": "buffalo_rush", "name": "Buffalo Rush", "tag": "Med", "maxwin": "4915x"},
+    {"id": "jumanji_bonanza", "name": "Jumanji Bonanza", "tag": "Low", "maxwin": "150x"},
+    {"id": "phantom_multiplier", "name": "Phantom Multiplier", "tag": "High-Med", "maxwin": "120000x"},
+    {"id": "starry_adventure", "name": "Starry Adventure", "tag": "Low-Med", "maxwin": "25000x"},
+    {"id": "rhapsody_of_muertos", "name": "Rhapsody of Muertos", "tag": "High-Med", "maxwin": "250000x"},
+    {"id": "kingyo_riches", "name": "Kingyo Riches", "tag": "High-Med", "maxwin": "18600x"},
+    {"id": "fish_prawn_crab_bonanza", "name": "Fish Prawn Crab Bonanza", "tag": "High-Med", "maxwin": "20000x"},
+    {"id": "ramakien_blessing", "name": "Ramakien Blessing", "tag": "Med", "maxwin": "100x"},
+    {"id": "aztec_bonus_hunt_2", "name": "Aztec: Bonus Hunt 2", "tag": "High-Med", "maxwin": "12000x"},
+    {"id": "football_fever", "name": "Football Fever", "tag": "High", "maxwin": "70000x"},
+    {"id": "firefly_hunter", "name": "Firefly Hunter", "tag": "High-Med", "maxwin": "4027x"},
+    {"id": "dark_ritual", "name": "Dark Ritual", "tag": "High", "maxwin": "20000x"},
+    {"id": "hungry_slime", "name": "Hungry Slime", "tag": "High-Med", "maxwin": "50000x"},
+    {"id": "crazy_bounty", "name": "Crazy Bounty", "tag": "Med", "maxwin": "10000x"},
+    {"id": "maya_elemental_totem", "name": "Maya: Elemental Totem", "tag": "Med", "maxwin": "1180x"},
+    {"id": "dragon_chi_s_quest", "name": "Dragon Chi's Quest", "tag": "Med", "maxwin": "80000x"},
+    {"id": "xmas_gift_delight", "name": "Xmas Gift Delight", "tag": "Med", "maxwin": "20000x"},
+    {"id": "cookie_hunter", "name": "Cookie Hunter", "tag": "Low-Med", "maxwin": "268x"},
+    {"id": "xiang_qi_ways_2", "name": "Xiang Qi Ways 2", "tag": "Med", "maxwin": "2500x"},
+    {"id": "dj_fever", "name": "DJ Fever", "tag": "Med", "maxwin": "5000x"},
+    {"id": "mace_of_hercules", "name": "Mace of Hercules", "tag": "High-Med", "maxwin": "16128x"},
+    {"id": "jewel_mastermind", "name": "Jewel Mastermind", "tag": "Med", "maxwin": "162x"},
+    {"id": "last_samurai", "name": "Last Samurai", "tag": "High-Med", "maxwin": "15000x"},
+    {"id": "scale_of_heaven_anubis", "name": "Scale of Heaven: Anubis", "tag": "High-Med", "maxwin": "1000x"},
+    {"id": "infinity_ocean", "name": "Infinity Ocean", "tag": "High-Med", "maxwin": "250000x"},
+    {"id": "fantastic_beast", "name": "Fantastic Beast", "tag": "Med", "maxwin": "1200x"},
+    {"id": "aztec_bonus_hunt", "name": "Aztec: Bonus Hunt", "tag": "Med", "maxwin": "800x"},
+    {"id": "bunny_to_the_moon", "name": "Bunny to the Moon", "tag": "Med", "maxwin": "1100x"},
+    {"id": "genie_mystery", "name": "Genie Mystery", "tag": "High", "maxwin": "15000x"},
+    {"id": "boom_of_prosperity", "name": "Boom of Prosperity", "tag": "Med", "maxwin": "730x"},
+    {"id": "slotto_4d", "name": "Slotto 4D", "tag": "Med", "maxwin": "10050x"},
+    {"id": "world_cup_final", "name": "World Cup Final", "tag": "Med", "maxwin": "1180x"},
+    {"id": "disco_777", "name": "Disco 777", "tag": "Med", "maxwin": "28500x"},
+]
 
 def _running_under_gunicorn():
     return "gunicorn" in os.environ.get("SERVER_SOFTWARE", "").lower() or os.environ.get("GUNICORN_CMD_ARGS") is not None
@@ -1943,6 +2001,20 @@ def api_region_by_ip():
         "success": True,
         "region": region,
         "source": f"{ip_source}:{geo_source}",
+    })
+
+@app.route("/v2/miniapp/daily-game", methods=["GET"])
+def api_daily_game():
+    now_kl = datetime.now(KL_TZ)
+    date_kl = now_kl.strftime("%Y-%m-%d")
+    digest = hashlib.sha256(date_kl.encode("utf-8")).hexdigest()
+    slot_idx = int(digest[:8], 16) % len(DAILY_GAME_SLOTS)
+    slot = DAILY_GAME_SLOTS[slot_idx].copy()
+    # TODO: extend slot payload with reward_hint, mission_flag, tracking_key when rewards flow is enabled.
+    return jsonify({
+        "ok": True,
+        "date_kl": date_kl,
+        "slot": slot,
     })
 
 @app.route("/api/set-region/<int:user_id>", methods=["POST"])
