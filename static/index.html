@@ -608,6 +608,15 @@
     </div>
   </div>
 
+  <div class="section" id="daily-game-section" style="display: block;">
+    <div class="section-header">
+      <h3>🎰 Today’s Lucky Game</h3>
+    </div>
+    <p class="section-subtext">Refreshes daily</p>
+    <div id="daily-game-content" style="font-size:14px; line-height:1.4;">Loading today’s recommendation…</div>
+    <p style="margin-top:8px; font-size:12px; color:#777;">Daily recommendation only</p>
+  </div>
+
 
   <div class="section" id="progress-section" style="display: block;">
     <div class="section-header">
@@ -1169,6 +1178,7 @@
     let dropModeMonitorTimer = null;
     let referralProgressAutoLoaded = false;
     let leaderboardAutoLoaded = false;
+    const DAILY_GAME_CACHE_PREFIX = "miniapp_daily_game_v1_";
 
     function getLatestInitData(candidate = "") {
       if (typeof candidate === "string" && candidate.length) {
@@ -1436,6 +1446,69 @@
       if (inlineCopyBtn) {
         inlineCopyBtn.dataset.copyCode = dropId;
         inlineCopyBtn.textContent = "Copy Drop ID";
+      }
+    }
+
+    function renderDailyGame(slot) {
+      const contentEl = document.getElementById("daily-game-content");
+      if (!contentEl) return;
+      if (!slot || !slot.name) {
+        contentEl.textContent = "Today’s recommendation is unavailable right now.";
+        return;
+      }
+      const name = escapeHtml(slot.name);
+      const tag = slot.tag ? `<span style="display:inline-block;margin-top:6px;padding:2px 8px;border-radius:999px;background:#f4f6ff;color:#5a67d8;font-size:12px;">${escapeHtml(slot.tag)}</span>` : "";
+      const maxwin = slot.maxwin ? `<span style="display:inline-block;margin-top:6px;margin-left:6px;padding:2px 8px;border-radius:999px;background:#fff4e6;color:#b26a00;font-size:12px;">Max win ${escapeHtml(slot.maxwin)}</span>` : "";
+      const reason = slot.reason ? `<div style="margin-top:8px;font-size:13px;color:#555;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(slot.reason)}</div>` : "";
+      contentEl.innerHTML = `<div style="font-size:18px;font-weight:700;">${name}</div>${tag}${maxwin}${reason}`;
+    }
+
+    function getDailyGameCache(dateKl) {
+      if (!dateKl) return null;
+      try {
+        const raw = localStorage.getItem(`${DAILY_GAME_CACHE_PREFIX}${dateKl}`);
+        if (!raw) return null;
+        const parsed = JSON.parse(raw);
+        if (!parsed || parsed.date_kl !== dateKl || !parsed.slot) return null;
+        return parsed;
+      } catch (_) {
+        return null;
+      }
+    }
+
+    function setDailyGameCache(payload) {
+      try {
+        if (!payload || !payload.date_kl || !payload.slot) return;
+        localStorage.setItem(`${DAILY_GAME_CACHE_PREFIX}${payload.date_kl}`, JSON.stringify({
+          date_kl: payload.date_kl,
+          slot: payload.slot
+        }));
+      } catch (_) {}
+    }
+
+    async function loadDailyGame() {
+      const sectionEl = document.getElementById("daily-game-section");
+      const contentEl = document.getElementById("daily-game-content");
+      if (!sectionEl || !contentEl) return;
+      contentEl.textContent = "Loading today’s recommendation…";
+      try {
+        const res = await v2Fetch(`${API_V2}/daily-game`);
+        if (!res.ok) throw new Error(`daily-game ${res.status}`);
+        const data = await res.json();
+        if (!data?.ok || !data?.date_kl || !data?.slot) throw new Error("invalid daily-game payload");
+
+        const cached = getDailyGameCache(data.date_kl);
+        if (cached?.slot) {
+          renderDailyGame(cached.slot);
+          return;
+        }
+
+        renderDailyGame(data.slot);
+        setDailyGameCache(data);
+        // TODO: reward_hint, mission_flag, tracking_key rendering can be added here when reward logic is enabled.
+      } catch (err) {
+        console.warn("Daily game load failed:", err);
+        sectionEl.style.display = "none";
       }
     }
     
@@ -3915,6 +3988,7 @@ ${referral}`;
       handleAdminAndVoucher();
       await loadCheckinStatus();
       loadVouchers();
+      await loadDailyGame();
 
       let isDropMode = false;
       try {
