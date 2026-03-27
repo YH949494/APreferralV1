@@ -1486,22 +1486,42 @@
       } catch (_) {}
     }
 
+    function getCurrentKlDateString() {
+      try {
+        const formatter = new Intl.DateTimeFormat("en-CA", {
+          timeZone: "Asia/Kuala_Lumpur",
+          year: "numeric",
+          month: "2-digit",
+          day: "2-digit",
+        });
+        const parts = formatter.formatToParts(new Date());
+        const year = parts.find((p) => p.type === "year")?.value;
+        const month = parts.find((p) => p.type === "month")?.value;
+        const day = parts.find((p) => p.type === "day")?.value;
+        if (!year || !month || !day) return "";
+        return `${year}-${month}-${day}`;
+      } catch (_) {
+        return "";
+      }
+    }
+
     async function loadDailyGame() {
       const sectionEl = document.getElementById("daily-game-section");
       const contentEl = document.getElementById("daily-game-content");
       if (!sectionEl || !contentEl) return;
       contentEl.textContent = "Loading today’s recommendation…";
       try {
-        const res = await v2Fetch(`${API_V2}/daily-game`);
-        if (!res.ok) throw new Error(`daily-game ${res.status}`);
-        const data = await res.json();
-        if (!data?.ok || !data?.date_kl || !data?.slot) throw new Error("invalid daily-game payload");
-
-        const cached = getDailyGameCache(data.date_kl);
+        const dateKl = getCurrentKlDateString();
+        const cached = getDailyGameCache(dateKl);
         if (cached?.slot) {
           renderDailyGame(cached.slot);
           return;
         }
+
+        const res = await v2Fetch(`${API_V2}/daily-game`);
+        if (!res.ok) throw new Error(`daily-game ${res.status}`);
+        const data = await res.json();
+        if (!data?.ok || !data?.date_kl || !data?.slot) throw new Error("invalid daily-game payload");
 
         renderDailyGame(data.slot);
         setDailyGameCache(data);
