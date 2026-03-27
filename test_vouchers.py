@@ -20,6 +20,8 @@ from vouchers import (
     _set_session_cooldown,
     _session_cooldown_payload,
     _should_enforce_session_cooldown,
+    _check_ip_success_limit_for_welcome1,
+    _welcome48h_gate,
     claim_pooled,
     get_claimable_pools,
     get_visible_pools,
@@ -227,6 +229,97 @@ class FakeDb:
         self.vouchers = FakeVouchersCollection(vouchers)
         
 class VoucherAntiHunterTests(unittest.TestCase):
+    def test_welcome48h_gate_denies_and_allows(self):
+        import vouchers as m
+
+        uid = 777
+        fixed_now = datetime(2025, 1, 10, 12, 0, tzinfo=timezone.utc)
+        orig_check_channel_subscribed = m.check_channel_subscribed
+        orig_now_utc = m.now_utc
+        try:
+            m.now_utc = lambda: fixed_now
+
+            m.check_channel_subscribed = lambda _uid: False
+            allowed, code, _message = _welcome48h_gate(uid, {"last_checkin": fixed_now, "joined_main_at": fixed_now - timedelta(hours=72)})
+            self.assertFalse(allowed)
+            self.assertEqual(code, "not_subscribed")
+
+            m.check_channel_subscribed = lambda _uid: True
+            allowed, code, _message = _welcome48h_gate(uid, {"joined_main_at": fixed_now - timedelta(hours=72)})
+            self.assertFalse(allowed)
+            self.assertEqual(code, "no_checkin")
+
+            allowed, code, _message = _welcome48h_gate(uid, {"last_checkin": fixed_now, "joined_main_at": fixed_now - timedelta(hours=47)})
+            self.assertFalse(allowed)
+            self.assertEqual(code, "stay_48h")
+
+            allowed, code, _message = _welcome48h_gate(uid, {"last_checkin": fixed_now, "joined_main_at": fixed_now - timedelta(hours=72)})
+            self.assertTrue(allowed)
+            self.assertEqual(code, "ok")
+        finally:
+            m.check_channel_subscribed = orig_check_channel_subscribed
+            m.now_utc = orig_now_utc
+
+    def test_welcome1_ip_success_limit_helper(self):
+        import vouchers as m
+
+        now = datetime(2025, 1, 10, 12, 0, tzinfo=timezone.utc)
+        day_key = now.strftime("%Y%m%d")
+        fake_rate_limits = FakeRateLimitCollection()
+        orig_claim_rate_limits_col = m.claim_rate_limits_col
+        try:
+            m.claim_rate_limits_col = fake_rate_limits
+            app = Flask(__name__)
+            with app.app_context():
+                allowed, code, _message = _check_ip_success_limit_for_welcome1("1.2.3.4", now=now)
+                self.assertTrue(allowed)
+                self.assertEqual(code, "ok")
+
+                fake_rate_limits.docs.append({
+                    "_id": 99,
+                    "key": f"ip:1.2.3.4:day:{day_key}",
+                    "scope": "ip_claim",
+                    "ip": "1.2.3.4",
+                    "day": day_key,
+                    "count": 1,
+                })
+                allowed, code, _message = _check_ip_success_limit_for_welcome1("1.2.3.4", now=now)
+                self.assertFalse(allowed)
+                self.assertEqual(code, "ip_success_limited")
+
+                self.assertEqual(_check_ip_success_limit_for_welcome1("1.2.3.4", now=now)[0], False)
+
+                class _IncCollection:
+                    def __init__(self):
+                        self.docs = {}
+
+                    def find_one(self, filt):
+                        key = filt.get("key")
+                        doc = self.docs.get(key)
+                        return dict(doc) if doc else None
+
+                    def find_one_and_update(self, filt, update, upsert=False, return_document=None):
+                        key = filt.get("key")
+                        doc = self.docs.get(key)
+                        if not doc:
+                            if not upsert:
+                                return None
+                            doc = {"key": key}
+                            doc.update(update.get("$setOnInsert", {}))
+                            self.docs[key] = doc
+                        for k, v in update.get("$inc", {}).items():
+                            doc[k] = int(doc.get(k, 0) or 0) + int(v)
+                        return dict(doc)
+
+                m.claim_rate_limits_col = _IncCollection()
+                count = m._increment_ip_claim_success(ip="5.6.7.8", now=now)
+                self.assertEqual(count, 1)
+                allowed, code, _message = _check_ip_success_limit_for_welcome1("5.6.7.8", now=now)
+                self.assertFalse(allowed)
+                self.assertEqual(code, "ip_success_limited")
+        finally:
+            m.claim_rate_limits_col = orig_claim_rate_limits_col
+
     def test_get_client_ip_prefers_fly_header_over_private_remote_addr(self):
         req = FakeRequest(
             headers={
