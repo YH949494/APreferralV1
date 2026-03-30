@@ -686,6 +686,79 @@
       color: #9ca3af;
       background: #1f2937;
     }
+
+    /* === ADMIN PANEL CONTRAST REFINEMENT === */
+
+    /* Light-section defaults: voucher-drop heading + white form cards */
+    #admin-panel #adm_drop_container > h4,
+    #admin-panel #adm_drop_container > p,
+    #admin-panel #adm_drop_container > div[style*="background:#fff"] {
+      color: #111827;
+    }
+
+    #admin-panel #adm_drop_container > div[style*="background:#fff"] label,
+    #admin-panel #adm_drop_container > div[style*="background:#fff"] h5,
+    #admin-panel #adm_drop_container > div[style*="background:#fff"] p,
+    #admin-panel #adm_drop_container > div[style*="background:#fff"] span,
+    #admin-panel #adm_drop_container > div[style*="background:#fff"] small,
+    #admin-panel #adm_drop_container > div[style*="background:#fff"] li {
+      color: #111827;
+    }
+
+    /* Force inline-muted helper text in light admin forms to readable dark text */
+    #admin-panel #adm_drop_container > div[style*="background:#fff"] label[style],
+    #admin-panel #adm_drop_container > div[style*="background:#fff"] p[style],
+    #admin-panel #adm_drop_container > div[style*="background:#fff"] span[style],
+    #admin-panel #adm_drop_container > div[style*="background:#fff"] h5[style],
+    #admin-panel #adm_drop_container > div[style*="background:#fff"] small[style] {
+      color: #374151 !important;
+    }
+
+    /* Inputs remain dark for strong field contrast */
+    #admin-panel input,
+    #admin-panel textarea,
+    #admin-panel select {
+      color: #f9fafb;
+      background: #0f172a;
+      border: 1px solid #334155;
+    }
+
+    #admin-panel input::placeholder,
+    #admin-panel textarea::placeholder {
+      color: #94a3b8;
+    }
+
+    /* Dark table/list area needs bright text */
+    #admin-panel #adm_table,
+    #admin-panel #adm_table thead,
+    #admin-panel #adm_table tbody,
+    #admin-panel #adm_table tr,
+    #admin-panel #adm_table th,
+    #admin-panel #adm_table td {
+      color: #f8fafc;
+    }
+
+    /* Make table headers clearly visible */
+    #admin-panel #adm_table th {
+      color: #e5e7eb !important;
+      font-weight: 700;
+    }
+
+    /* Improve generic action/stat text in rows */
+    #admin-panel #adm_table td *,
+    #admin-panel #adm_table th * {
+      color: inherit;
+    }
+
+    /* Buttons */
+    #admin-panel button {
+      color: #ffffff;
+    }
+
+    #admin-panel button:disabled {
+      color: #9ca3af;
+      background: #1f2937;
+    }
   </style>
 </head>
 <body>
