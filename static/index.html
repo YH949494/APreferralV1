@@ -616,6 +616,76 @@
       .leaderboard-row { font-size: 12px; }
       .more-actions { grid-template-columns: 1fr; }
     }
+
+    /* === ADMIN PANEL CONTRAST FIX (SCOPED, SAFE) === */
+
+    #admin-panel,
+    .admin-panel {
+      color: #e5e7eb;
+    }
+
+    /* headings / labels */
+    #admin-panel label,
+    #admin-panel h1,
+    #admin-panel h2,
+    #admin-panel h3 {
+      color: #f9fafb;
+    }
+
+    #admin-panel h4,
+    #admin-panel h5,
+    #admin-panel p,
+    #admin-panel span,
+    #admin-panel code,
+    #admin-panel pre {
+      color: #f3f4f6;
+    }
+
+    /* inputs */
+    #admin-panel input,
+    #admin-panel textarea,
+    #admin-panel select {
+      color: #f9fafb;
+      background: #111827;
+      border: 1px solid #374151;
+    }
+
+    /* placeholder */
+    #admin-panel input::placeholder,
+    #admin-panel textarea::placeholder {
+      color: #9ca3af;
+    }
+
+    /* table content */
+    #admin-panel table,
+    #admin-panel td,
+    #admin-panel th {
+      color: #e5e7eb;
+    }
+
+    /* secondary text */
+    #admin-panel .text-muted {
+      color: #9ca3af;
+    }
+
+    #admin-panel p[style],
+    #admin-panel span[style],
+    #admin-panel label[style],
+    #admin-panel h4[style],
+    #admin-panel h5[style] {
+      color: #f3f4f6 !important;
+    }
+
+    /* buttons */
+    #admin-panel button {
+      color: #ffffff;
+    }
+
+    /* disabled buttons */
+    #admin-panel button:disabled {
+      color: #9ca3af;
+      background: #1f2937;
+    }
   </style>
 </head>
 <body>
