@@ -617,74 +617,95 @@
       .more-actions { grid-template-columns: 1fr; }
     }
 
-    /* === ADMIN PANEL CONTRAST FIX (SCOPED, SAFE) === */
+    /* === ADMIN READABILITY FINAL FIX === */
 
-    #admin-panel,
-    .admin-panel {
-      color: #e5e7eb;
+    /* Light admin sections */
+    #admin-panel #adm_drop_container,
+    #admin-panel #admin-affiliate-pools,
+    #admin-panel #aff_pool_summary,
+    #admin-panel #aff_pending,
+    #admin-panel #aff_kpis_wrap {
+      color: #111827 !important;
     }
 
-    /* headings / labels */
-    #admin-panel label,
-    #admin-panel h1,
-    #admin-panel h2,
-    #admin-panel h3 {
-      color: #f9fafb;
+    /* Readable text inside light admin sections */
+    #admin-panel #adm_drop_container h4,
+    #admin-panel #adm_drop_container h5,
+    #admin-panel #adm_drop_container p,
+    #admin-panel #adm_drop_container span,
+    #admin-panel #adm_drop_container label,
+    #admin-panel #adm_drop_container small,
+    #admin-panel #adm_drop_container li,
+    #admin-panel #admin-affiliate-pools h4,
+    #admin-panel #admin-affiliate-pools h5,
+    #admin-panel #admin-affiliate-pools p,
+    #admin-panel #admin-affiliate-pools span,
+    #admin-panel #admin-affiliate-pools label,
+    #admin-panel #admin-affiliate-pools small,
+    #admin-panel #admin-affiliate-pools li,
+    #admin-panel #admin-affiliate-pools pre {
+      color: #111827 !important;
     }
 
-    #admin-panel h4,
-    #admin-panel h5,
-    #admin-panel p,
-    #admin-panel span,
-    #admin-panel code,
-    #admin-panel pre {
-      color: #f3f4f6;
+    /* Muted/help text in light sections */
+    #admin-panel #adm_drop_container p[style],
+    #admin-panel #adm_drop_container span[style],
+    #admin-panel #adm_drop_container label[style],
+    #admin-panel #adm_drop_container small[style],
+    #admin-panel #admin-affiliate-pools p[style],
+    #admin-panel #admin-affiliate-pools span[style],
+    #admin-panel #admin-affiliate-pools label[style],
+    #admin-panel #admin-affiliate-pools small[style],
+    #admin-panel #admin-affiliate-pools .text-muted {
+      color: #4b5563 !important;
     }
 
-    /* inputs */
+    /* Dark controls */
     #admin-panel input,
     #admin-panel textarea,
     #admin-panel select {
-      color: #f9fafb;
-      background: #111827;
-      border: 1px solid #374151;
+      color: #f9fafb !important;
+      background: #0f172a !important;
+      border: 1px solid #334155 !important;
     }
 
-    /* placeholder */
     #admin-panel input::placeholder,
     #admin-panel textarea::placeholder {
-      color: #9ca3af;
+      color: #94a3b8 !important;
     }
 
-    /* table content */
-    #admin-panel table,
-    #admin-panel td,
-    #admin-panel th {
-      color: #e5e7eb;
+    /* Native file input stays readable on light background */
+    #admin-panel input[type="file"] {
+      color: #111827 !important;
+      background: transparent !important;
+      border: none !important;
     }
 
-    /* secondary text */
-    #admin-panel .text-muted {
-      color: #9ca3af;
+    /* Dark drops table */
+    #admin-panel #adm_table,
+    #admin-panel #adm_table thead,
+    #admin-panel #adm_table tbody,
+    #admin-panel #adm_table tr,
+    #admin-panel #adm_table th,
+    #admin-panel #adm_table td,
+    #admin-panel #adm_table td *,
+    #admin-panel #adm_table th * {
+      color: #f8fafc !important;
     }
 
-    #admin-panel p[style],
-    #admin-panel span[style],
-    #admin-panel label[style],
-    #admin-panel h4[style],
-    #admin-panel h5[style] {
-      color: #f3f4f6 !important;
+    #admin-panel #adm_table th {
+      color: #e5e7eb !important;
+      font-weight: 700;
     }
 
-    /* buttons */
+    /* Buttons */
     #admin-panel button {
-      color: #ffffff;
+      color: #ffffff !important;
     }
 
-    /* disabled buttons */
     #admin-panel button:disabled {
-      color: #9ca3af;
-      background: #1f2937;
+      color: #9ca3af !important;
+      background: #1f2937 !important;
     }
   </style>
 </head>
