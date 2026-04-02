@@ -267,6 +267,67 @@
       display: grid;
       gap: 4px;
     }
+    .progress-hero {
+      margin: 10px 0 12px;
+      padding: 14px;
+      border: 1px solid var(--border-strong);
+      border-radius: var(--radius-md);
+      background: linear-gradient(180deg, rgba(255,94,0,0.16), rgba(255,94,0,0.06));
+      display: grid;
+      gap: 6px;
+    }
+    .progress-hero .journey-kicker {
+      font-size: 12px;
+      color: #ffd6bf;
+      text-transform: uppercase;
+      letter-spacing: .4px;
+      font-weight: 700;
+    }
+    .progress-hero .journey-main {
+      font-size: 17px;
+      font-weight: 700;
+      color: var(--text-main);
+      line-height: 1.35;
+    }
+    .progress-hero .journey-sub {
+      font-size: 13px;
+      color: var(--text-muted);
+    }
+    .journey-steps {
+      display: grid;
+      gap: 8px;
+    }
+    .journey-step {
+      font-size: 14px;
+      border: 1px solid var(--border-light);
+      border-radius: 10px;
+      padding: 9px 10px;
+      background: rgba(255,255,255,.03);
+    }
+    .referral-cta-group {
+      display: grid;
+      gap: 8px;
+      margin-bottom: 8px;
+    }
+    .referral-cta-group .btn-primary {
+      width: 100%;
+      justify-content: center;
+      font-size: 15px;
+      font-weight: 700;
+    }
+    .referral-cta-group .btn-ghost {
+      width: fit-content;
+    }
+    .progress-next-reward {
+      margin-top: 4px;
+      padding: 10px 12px;
+      border: 1px solid var(--border-strong);
+      border-radius: 10px;
+      background: rgba(255, 94, 0, 0.1);
+      color: #ffdcca;
+      font-size: 13px;
+      font-weight: 600;
+    }
 
     .leaderboard-block { margin-bottom: 18px; }
 
@@ -348,6 +409,14 @@
     .leaderboard-list {
       display: grid;
       gap: 8px;
+    }
+    .leaderboard-list.collapsed .leaderboard-row {
+      display: none;
+    }
+    .leaderboard-toggle-wrap {
+      margin-top: 8px;
+      display: flex;
+      justify-content: center;
     }
 
     .leaderboard-row {
@@ -558,6 +627,7 @@
     .more-grid {
       display: grid;
       gap: 12px;
+      opacity: 0.94;
     }
 
     .more-actions {
@@ -733,23 +803,20 @@
     </div>
   </div>
 
-  <div class="section" id="daily-game-section" style="display: block;">
-    <div class="section-header">
-      <h3>🎰 Today’s Lucky Game</h3>
-    </div>
-    <p class="section-subtext">Refreshes daily</p>
-    <div id="daily-game-content" style="font-size:14px; line-height:1.4;">Loading today’s recommendation…</div>
-    <p style="margin-top:8px; font-size:12px; color:#777;">Daily recommendation only</p>
-  </div>
-
-
   <div class="section" id="progress-section" style="display: block;">
     <div class="section-header">
       <h3>🧭 Your Rewards Journey</h3>
     </div>
-    <div id="progress-step-1">1) ✅ Check-in</div>
-    <div id="progress-step-2" style="opacity:0.6;">2) 🔗 Invite friends</div>
-    <div id="progress-step-3" style="opacity:0.6;">3) 🎁 Claim vouchers (when available)</div>
+    <div class="progress-hero">
+      <div class="journey-kicker">Current focus</div>
+      <div id="journey-main-copy" class="journey-main">Complete check-in and move toward your next reward.</div>
+      <div id="journey-sub-copy" class="journey-sub">Your reward progress updates as referral activity comes in.</div>
+    </div>
+    <div class="journey-steps">
+      <div id="progress-step-1" class="journey-step">1) ✅ Check-in</div>
+      <div id="progress-step-2" class="journey-step" style="opacity:0.6;">2) 🔗 Invite friends</div>
+      <div id="progress-step-3" class="journey-step" style="opacity:0.6;">3) 🎁 Claim vouchers (when available)</div>
+    </div>
   </div>
 
   <div class="section" id="region-section" style="display: none;">
@@ -776,10 +843,12 @@
   </div>
 
   <div class="section" id="referral-section">
-    <h3>🔗 Your Referral Link (valid 24h)</h3>
-    <button class="btn btn-primary" onclick="getReferral()">Generate Link</button>
+    <h3>🔗 Invite Friends & Unlock Rewards</h3>
+    <div class="referral-cta-group">
+      <button class="btn btn-primary" onclick="getReferral()">Invite Friends / Get Referral Link</button>
+      <button class="btn btn-ghost" onclick="copyReferral()">📋 Copy to clipboard</button>
+    </div>
     <p id="referral-link">Click the button to get your link</p>
-    <button class="btn btn-ghost" onclick="copyReferral()">📋 Copy to clipboard</button>
     <div class="referral-progress-card" aria-live="polite">
       <h4>🔗 Referral Progress</h4>
       <div class="referral-progress-bar">
@@ -788,9 +857,19 @@
       <div class="referral-progress-meta">
         <div id="referral-progress-count" style="display:none;"></div>
         <div id="referral-progress-remaining">3 more referrals to unlock +200 XP</div>
+        <div id="referral-progress-next" class="progress-next-reward">Next reward: +200 XP at 3 successful referrals.</div>
         <div id="referral-progress-expiry">⏳ This link expires in 24h</div>
       </div>
     </div>
+  </div>
+
+  <div class="section" id="daily-game-section" style="display: block;">
+    <div class="section-header">
+      <h3>🎰 Today’s Lucky Game</h3>
+    </div>
+    <p class="section-subtext">Refreshes daily</p>
+    <div id="daily-game-content" style="font-size:14px; line-height:1.4;">Loading today’s recommendation…</div>
+    <p style="margin-top:8px; font-size:12px; color:#777;">Daily recommendation only</p>
   </div>
 
   <div class="section" id="leaderboard-section">
@@ -2034,15 +2113,21 @@
       const step1 = document.getElementById("progress-step-1");
       const step2 = document.getElementById("progress-step-2");
       const step3 = document.getElementById("progress-step-3");
+      const heroMain = document.getElementById("journey-main-copy");
+      const heroSub = document.getElementById("journey-sub-copy");
       if (!step1 || !step2 || !step3) return;
       if (window.__didCheckinThisSession) {
         step1.style.opacity = "0.8";
         step2.style.opacity = "1";
         step3.style.opacity = "0.6";
+        if (heroMain) heroMain.textContent = "Great start. Share your referral link to unlock your next reward.";
+        if (heroSub) heroSub.textContent = "Referral progress and remaining steps are shown below.";
       } else {
         step1.style.opacity = "1";
         step2.style.opacity = "0.6";
         step3.style.opacity = "0.6";
+        if (heroMain) heroMain.textContent = "Complete check-in and move toward your next reward.";
+        if (heroSub) heroSub.textContent = "After check-in, invite friends to progress to the next reward tier.";
       }
     }
 
@@ -2195,6 +2280,7 @@
       const fillEl = document.getElementById("referral-progress-fill");
       const countEl = document.getElementById("referral-progress-count");
       const remainingEl = document.getElementById("referral-progress-remaining");
+      const nextEl = document.getElementById("referral-progress-next");
       const expiryEl = document.getElementById("referral-progress-expiry");
 
       if (!fillEl || !countEl || !remainingEl || !expiryEl) return;
@@ -2217,6 +2303,13 @@
         remainingEl.textContent = "⚡ 1 more referral to unlock +200 XP";
       } else {
         remainingEl.textContent = `${remaining} more referrals to unlock +200 XP`;
+      }
+      if (nextEl) {
+        if (remaining <= 0) {
+          nextEl.textContent = "✅ Current referral target completed. Keep sharing for your next reward tier.";
+        } else {
+          nextEl.textContent = `Next reward: +200 XP at 3 referrals • Need ${remaining} more.`;
+        }
       }
 
       expiryEl.textContent = "⏳ This link expires in 24h";
@@ -3467,6 +3560,27 @@ function setLeaderboardMeta(ts, { isStale = false } = {}) {
         });
       }
       block.appendChild(list);
+      if (rest.length) {
+        list.classList.add("collapsed");
+        const toggleWrap = document.createElement("div");
+        toggleWrap.className = "leaderboard-toggle-wrap";
+        const toggleBtn = document.createElement("button");
+        toggleBtn.type = "button";
+        toggleBtn.className = "btn btn-ghost";
+        toggleBtn.textContent = "Show More";
+        toggleBtn.addEventListener("click", () => {
+          const expanded = !list.classList.contains("collapsed");
+          if (expanded) {
+            list.classList.add("collapsed");
+            toggleBtn.textContent = "Show More";
+          } else {
+            list.classList.remove("collapsed");
+            toggleBtn.textContent = "View Less";
+          }
+        });
+        toggleWrap.appendChild(toggleBtn);
+        block.appendChild(toggleWrap);
+      }
 
       return block;      
     }
