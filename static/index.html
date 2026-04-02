@@ -2716,7 +2716,7 @@ Active players win more.
       if (!liveDrops.length) {
         const note = document.createElement("p");
         note.className = "campaign-meta";
-        note.innerHTML = "🎁 More vouchers coming soon.<br><br>🎁 Surprise vouchers can appear anytime — stay subscribed to our official channel so you don’t miss the next one.";
+        note.innerHTML = "🎁 More vouchers coming soon.<br><br>🎁 New vouchers drop regularly.<br>Stay subscribed to get them.";
         container.appendChild(note);
       }
 
@@ -2967,7 +2967,7 @@ Active players win more.
         const drops = Array.isArray(data?.drops) ? data.drops : [];
         const userRegion = data?.userRegion || null;
         if (!drops.length) {
-          messageEl.innerText = "Today’s vouchers are fully claimed.";
+          messageEl.innerText = "";
           showVoucherSoldOut();
           renderCampaignDrops(null, [], userRegion);
           return;
@@ -2990,7 +2990,7 @@ Active players win more.
           const publicSoldOut = isPublicSoldOut(topDrop, userRegion);
 
           if (publicSoldOut) {
-            messageText = "Today’s vouchers are fully claimed.";
+            messageText = "";
             showVoucherSoldOut(messageText);
           } else {
             if ((canClaim || isPreview) && dropId) {
@@ -3000,9 +3000,6 @@ Active players win more.
             }
           }
 
-          if (hasExtras) {
-            messageText = `Multiple campaign rewards are available.\n${messageText}`;
-          }
         }
 
         messageEl.innerText = messageText;
