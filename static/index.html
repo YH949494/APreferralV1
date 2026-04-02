@@ -2420,7 +2420,7 @@ Active players win more.
         if (bonusSection && codeEl) {
           if (isAdmin) {
             bonusSection.style.display = "block";
-            codeEl.innerText = voucherData.code || "❌ No active voucher currently.";
+            codeEl.innerText = voucherData.code || "🎁 More vouchers coming soon.";
           } else if (voucherData.code) {
             bonusSection.style.display = "block";
             codeEl.innerText = voucherData.code;
@@ -2716,7 +2716,7 @@ Active players win more.
       if (!liveDrops.length) {
         const note = document.createElement("p");
         note.className = "campaign-meta";
-        note.innerHTML = "🚨 No active drop at the moment.<br><br>🎁 Surprise vouchers can appear anytime — stay subscribed to our official channel so you don’t miss the next one.";
+        note.innerHTML = "🎁 More vouchers coming soon.<br><br>🎁 Surprise vouchers can appear anytime — stay subscribed to our official channel so you don’t miss the next one.";
         container.appendChild(note);
       }
 
