@@ -4322,8 +4322,10 @@ def admin_pools_upload_v2():
 
     data = request.get_json(silent=True) or {}
     pool_id = str(data.get("pool_id") or "").strip().upper()
-    if pool_id not in {"WELCOME", "T1", "T2", "T3", "T4"}:
-        return jsonify({"status": "error", "reason": "bad_pool_id"}), 400
+    allowed_affiliate_pools = {"WELCOME", "T1", "T2", "T3", "T4", "T5"}
+    if pool_id not in allowed_affiliate_pools:
+        current_app.logger.warning("[AFFILIATE][ADMIN_INVALID_POOL] pool_id=%s", pool_id)
+        return jsonify({"status": "error", "reason": "bad_pool_id", "error": "Invalid affiliate pool_id"}), 400
 
     codes_text = str(data.get("codes_text") or "")
     rows = [line.strip() for line in codes_text.replace("\r", "\n").split("\n") if line.strip()]
@@ -4362,7 +4364,7 @@ def admin_pools_summary_v2():
         return err
 
     out = []
-    for pool_id in ("WELCOME", "T1", "T2", "T3", "T4"):
+    for pool_id in ("WELCOME", "T1", "T2", "T3", "T4", "T5"):
         available = db.voucher_pools.count_documents({"pool_id": pool_id, "status": "available"})
         issued = db.voucher_pools.count_documents({"pool_id": pool_id, "status": "issued"})
         sample = db.voucher_pools.find_one({"pool_id": pool_id}, {"display_label": 1, "value_hint": 1, "currency": 1}) or {}

@@ -14,7 +14,7 @@ from config import (
 
 KL_TZ = pytz.timezone("Asia/Kuala_Lumpur")
 
-TIERS = ("T1", "T2", "T3", "T4")
+TIERS = ("T1", "T2", "T3", "T4", "T5")
 POOL_IDS = ("WELCOME",) + TIERS
 FINAL_STATUSES = {"ISSUED", "OUT_OF_STOCK", "REJECTED"}
 SETTLING_STATUS = "SETTLING"
@@ -24,6 +24,7 @@ T1_THRESHOLD = int(os.getenv("AFF_T1_THRESHOLD", "10"))
 T2_THRESHOLD = int(os.getenv("AFF_T2_THRESHOLD", "25"))
 T3_THRESHOLD = int(os.getenv("AFF_T3_THRESHOLD", "50"))
 T4_THRESHOLD = int(os.getenv("AFF_T4_THRESHOLD", "150"))
+T5_THRESHOLD = int(os.getenv("AFF_T5_THRESHOLD", "250"))
 logger = logging.getLogger(__name__)
 
 def ensure_affiliate_indexes(db):
@@ -65,6 +66,8 @@ def _month_window_utc(reference_utc: datetime | None = None):
 
 
 def _tier_for_count(count: int) -> str | None:
+    if count >= T5_THRESHOLD:
+        return "T5"
     if count >= T4_THRESHOLD:
         return "T4"
     if count >= T3_THRESHOLD:
@@ -77,9 +80,23 @@ def _tier_for_count(count: int) -> str | None:
 
 
 def _tier_rank(tier: str | None) -> int:
-    ranks = {"T1": 1, "T2": 2, "T3": 3, "T4": 4}
+    ranks = {"T1": 1, "T2": 2, "T3": 3, "T4": 4, "T5": 5}
     key = (tier or "").strip().upper()  # Normalize legacy/case-variant tier values before ranking.
     return ranks.get(key, 0)
+
+
+def _pool_exists(db, pool_id: str) -> bool:
+    return db.voucher_pools.find_one({"pool_id": str(pool_id)}, {"_id": 1}) is not None
+
+
+def _mark_missing_pool_config(db, *, ledger_id, now_utc: datetime):
+    db.affiliate_ledger.update_one(
+        {"_id": ledger_id, "status": {"$in": [SETTLING_STATUS, "APPROVED", "PENDING_REVIEW", "PENDING_MANUAL"]}, **_no_voucher_filter()},
+        {
+            "$set": {"status": "PENDING_MANUAL", "updated_at": now_utc},
+            "$addToSet": {"risk_flags": "missing_pool_config"},
+        },
+    )
 
 
 def _claim_voucher_from_pool(db, *, pool_id: str, ledger_id, user_id: int, now_utc: datetime):
@@ -456,6 +473,7 @@ def evaluate_monthly_affiliate_reward(db, *, referrer_id: int, now_utc: datetime
         ("T2", T2_THRESHOLD),
         ("T3", T3_THRESHOLD),
         ("T4", T4_THRESHOLD),
+        ("T5", T5_THRESHOLD),
     ) if int(qualified_count) >= int(threshold)]
     risk_flags = _risk_flags_for_referrer_month(db, referrer_id=int(referrer_id), start_utc=start_utc, end_utc=end_utc)
 
@@ -526,6 +544,16 @@ def evaluate_monthly_affiliate_reward(db, *, referrer_id: int, now_utc: datetime
                 if last_ledger and not last_ledger.get("voucher_code") and last_ledger.get("status") != "SIMULATED_PENDING":
                     last_ledger = _reconcile_ledger_from_issued_pool(db, ledger_id=ledger["_id"], now_utc=now_utc) or last_ledger
                 continue
+            if eligible_tier not in POOL_IDS:
+                logger.warning("[AFFILIATE][INVALID_TIER] uid=%s ledger_id=%s tier=%s pool_id=%s", referrer_id, ledger.get("_id"), eligible_tier, eligible_tier)
+                _mark_missing_pool_config(db, ledger_id=ledger["_id"], now_utc=now_utc)
+                last_ledger = db.affiliate_ledger.find_one({"_id": ledger["_id"]})
+                continue
+            if eligible_tier != "WELCOME" and not _pool_exists(db, eligible_tier):
+                logger.warning("[AFFILIATE][POOL_MISSING] uid=%s ledger_id=%s tier=%s pool_id=%s", referrer_id, ledger.get("_id"), eligible_tier, eligible_tier)
+                _mark_missing_pool_config(db, ledger_id=ledger["_id"], now_utc=now_utc)
+                last_ledger = db.affiliate_ledger.find_one({"_id": ledger["_id"]})
+                continue
             voucher = _claim_voucher_from_pool(db, pool_id=eligible_tier, ledger_id=ledger.get("_id"), user_id=int(referrer_id), now_utc=now_utc)
             if voucher:
                 db.affiliate_ledger.update_one(
@@ -549,6 +577,16 @@ def evaluate_monthly_affiliate_reward(db, *, referrer_id: int, now_utc: datetime
             last_ledger = _finalize_issued_if_voucher_exists(db, ledger=db.affiliate_ledger.find_one({"_id": ledger["_id"]}), now_utc=now_utc)
             if last_ledger and not last_ledger.get("voucher_code") and last_ledger.get("status") != "SIMULATED_PENDING":
                 last_ledger = _reconcile_ledger_from_issued_pool(db, ledger_id=ledger["_id"], now_utc=now_utc) or last_ledger
+            continue
+        if eligible_tier not in POOL_IDS:
+            logger.warning("[AFFILIATE][INVALID_TIER] uid=%s ledger_id=%s tier=%s pool_id=%s", referrer_id, ledger.get("_id"), eligible_tier, eligible_tier)
+            _mark_missing_pool_config(db, ledger_id=ledger["_id"], now_utc=now_utc)
+            last_ledger = db.affiliate_ledger.find_one({"_id": ledger["_id"]})
+            continue
+        if eligible_tier != "WELCOME" and not _pool_exists(db, eligible_tier):
+            logger.warning("[AFFILIATE][POOL_MISSING] uid=%s ledger_id=%s tier=%s pool_id=%s", referrer_id, ledger.get("_id"), eligible_tier, eligible_tier)
+            _mark_missing_pool_config(db, ledger_id=ledger["_id"], now_utc=now_utc)
+            last_ledger = db.affiliate_ledger.find_one({"_id": ledger["_id"]})
             continue
         voucher = _claim_voucher_from_pool(db, pool_id=eligible_tier, ledger_id=ledger.get("_id"), user_id=int(referrer_id), now_utc=now_utc)
         if voucher:
@@ -613,6 +651,14 @@ def settle_previous_month_affiliate_rewards(db, *, now_utc: datetime | None = No
                 {"$set": {"status": "REJECTED", "review_reason": "no_tier", "updated_at": now_utc}},
             )
             logger.info("affiliate_monthly_settle uid=%s tier=%s status=%s", uid, tier, "REJECTED")
+            continue
+        if tier not in POOL_IDS:
+            logger.warning("[AFFILIATE][INVALID_TIER] uid=%s ledger_id=%s tier=%s pool_id=%s", uid, ledger.get("_id"), tier, tier)
+            _mark_missing_pool_config(db, ledger_id=ledger["_id"], now_utc=now_utc)
+            continue
+        if tier != "WELCOME" and not _pool_exists(db, tier):
+            logger.warning("[AFFILIATE][POOL_MISSING] uid=%s ledger_id=%s tier=%s pool_id=%s", uid, ledger.get("_id"), tier, tier)
+            _mark_missing_pool_config(db, ledger_id=ledger["_id"], now_utc=now_utc)
             continue
         kl_dt = KL_TZ.localize(datetime(int(prev_yyyymm[:4]), int(prev_yyyymm[4:6]), 15, 12, 0, 0))
         m_start_utc, m_end_utc, _ = _month_window_utc(kl_dt.astimezone(timezone.utc))
@@ -700,9 +746,19 @@ def approve_affiliate_ledger(db, *, ledger_id, now_utc: datetime | None = None):
         if latest and not latest.get("voucher_code") and latest.get("status") != "SIMULATED_PENDING":
             latest = _reconcile_ledger_from_issued_pool(db, ledger_id=ledger["_id"], now_utc=now_utc) or latest
         return latest
+    pool_id = str(ledger.get("pool_id") or "").strip().upper()
+    tier = str(ledger.get("tier") or "").strip().upper()
+    if pool_id not in POOL_IDS:
+        logger.warning("[AFFILIATE][INVALID_TIER] uid=%s ledger_id=%s tier=%s pool_id=%s", ledger.get("user_id"), ledger.get("_id"), tier, pool_id)
+        _mark_missing_pool_config(db, ledger_id=ledger["_id"], now_utc=now_utc)
+        return db.affiliate_ledger.find_one({"_id": ledger["_id"]})
+    if pool_id != "WELCOME" and not _pool_exists(db, pool_id):
+        logger.warning("[AFFILIATE][POOL_MISSING] uid=%s ledger_id=%s tier=%s pool_id=%s", ledger.get("user_id"), ledger.get("_id"), tier, pool_id)
+        _mark_missing_pool_config(db, ledger_id=ledger["_id"], now_utc=now_utc)
+        return db.affiliate_ledger.find_one({"_id": ledger["_id"]})
     voucher = _claim_voucher_from_pool(
         db,
-        pool_id=ledger.get("pool_id"),
+        pool_id=pool_id,
         ledger_id=ledger.get("_id"),
         user_id=int(ledger.get("user_id")),
         now_utc=now_utc,
