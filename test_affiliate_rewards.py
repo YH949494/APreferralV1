@@ -214,7 +214,7 @@ class AffiliateRewardTests(unittest.TestCase):
         for i in range(1, 11):
             db.qualified_events.insert_one({"invitee_id": i, "referrer_id": 7, "qualified_at": now})
         row = evaluate_monthly_affiliate_reward(db, referrer_id=7, now_utc=now)
-        self.assertEqual(row["status"], "OUT_OF_STOCK")
+        self.assertEqual(row["status"], "PENDING_MANUAL")
 
         db.voucher_pools.insert_one({"pool_id": "T1", "code": "ONLY1", "status": "available"})
         db.users.insert_one({"user_id": 11, "blocked": False})

@@ -1044,7 +1044,7 @@
           <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:flex-end;">
             <label style="font-size:12px; color:#555; min-width:120px;">Pool
               <select id="aff_pool_id" style="width:100%; padding:8px; border-radius:6px; border:1px solid #ccc;">
-                <option>WELCOME</option><option>T1</option><option>T2</option><option>T3</option><option>T4</option>
+                <option>WELCOME</option><option>T1</option><option>T2</option><option>T3</option><option>T4</option><option>T5</option>
               </select>
             </label>
             <input id="aff_display_label" type="text" placeholder="Display label (optional)" style="flex:1 1 170px; padding:8px; border-radius:6px; border:1px solid #ccc;">
@@ -4108,9 +4108,16 @@ ${referral}`;
     }
 
 
+    const ALLOWED_AFFILIATE_POOLS = ["WELCOME", "T1", "T2", "T3", "T4", "T5"];
+
     async function affUploadPool() {
+      const selectedPoolId = String(document.getElementById("aff_pool_id").value || "").trim().toUpperCase();
+      if (!ALLOWED_AFFILIATE_POOLS.includes(selectedPoolId)) {
+        alert("Invalid affiliate pool.");
+        return;
+      }
       const body = {
-        pool_id: document.getElementById("aff_pool_id").value,
+        pool_id: selectedPoolId,
         codes_text: document.getElementById("aff_codes_text").value,
         display_label: document.getElementById("aff_display_label").value || null,
         value_hint: document.getElementById("aff_value_hint").value || null,
@@ -4127,6 +4134,11 @@ ${referral}`;
     }
 
     async function affLoadPoolSummary() {
+      const selectedPoolId = String(document.getElementById("aff_pool_id").value || "").trim().toUpperCase();
+      if (!ALLOWED_AFFILIATE_POOLS.includes(selectedPoolId)) {
+        alert("Invalid affiliate pool.");
+        return;
+      }
       const res = await v2Fetch(`${API_V2}/admin/pools/summary${buildAdminQueryTail()}`);
       const data = await res.json();
       document.getElementById("aff_pool_summary").textContent = JSON.stringify(data, null, 2);
