@@ -2194,6 +2194,8 @@
         const d = end - now;
         if (d <= 0) {
           el.innerText = "🎉 You can check in again now!";
+          const resultEl = document.getElementById("checkin-result");
+          if (resultEl && resultEl.innerText === "🎉 You can check in now!") resultEl.innerText = "";
           return;
         }
         const h = Math.floor(d / 3600000);
@@ -2266,6 +2268,7 @@
           startCountdown(data.next_checkin_time);
         } else if (timerEl) {
           timerEl.innerText = "🎉 You can check in now!";
+          if (resultEl && resultEl.innerText === "🎉 You can check in now!") resultEl.innerText = "";
         }
       } catch (err) {
         console.error("Failed to load check-in status:", err);
