@@ -170,6 +170,49 @@ def _coerce_utc(dt_value) -> datetime | None:
     return None
 
 
+def evaluate_referral_engagement(
+    *,
+    invitee_user_id: int,
+    invitee_doc: dict | None,
+    window_start: datetime,
+    window_end: datetime,
+    db_ref=None,
+) -> dict:
+    db_ref = db_ref or db
+    first_checkin_at = _coerce_utc((invitee_doc or {}).get("first_checkin_at"))
+    last_visible_at = _coerce_utc((invitee_doc or {}).get("last_visible_at"))
+    claim_attempt_doc = db_ref.voucher_claims.find_one(
+        {
+            "user_id": invitee_user_id,
+            "created_at": {"$gte": window_start, "$lte": window_end},
+        },
+        {"created_at": 1},
+    ) or {}
+    claim_attempt_at = _coerce_utc(claim_attempt_doc.get("created_at"))
+
+    signals = {
+        "first_checkin": bool(first_checkin_at and window_start <= first_checkin_at <= window_end),
+        "miniapp_open": bool(last_visible_at and window_start <= last_visible_at <= window_end),
+        "claim_attempt": bool(claim_attempt_at and window_start <= claim_attempt_at <= window_end),
+    }
+    points = {
+        "first_checkin": 2 if signals["first_checkin"] else 0,
+        "miniapp_open": 1 if signals["miniapp_open"] else 0,
+        "claim_attempt": 2 if signals["claim_attempt"] else 0,
+    }
+    score = int(sum(points.values()))
+    checkin_required = signals["first_checkin"]
+
+    return {
+        "score": score,
+        "qualified": bool(checkin_required and score >= 3),
+        "signals": signals,
+        "points": points,
+        "window_start": window_start,
+        "window_end": window_end,
+    }
+
+
 def _round_rate(value: float) -> float:
     return round(float(value), 4)
 
@@ -1299,7 +1342,7 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
             step = "check_new_user"
             invitee_doc = db.users.find_one(
                 {"user_id": invitee_user_id},
-                {"created_at": 1, "joined_main_at": 1, "first_checkin_at": 1},
+                {"created_at": 1, "joined_main_at": 1, "first_checkin_at": 1, "last_visible_at": 1},
             )
             if not invitee_doc:
                 db.pending_referrals.update_one(
@@ -1352,14 +1395,28 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
                 revoked += 1
                 continue
 
-            first_checkin_at = _coerce_utc(invitee_doc.get("first_checkin_at"))
-            if not first_checkin_at or first_checkin_at > now_utc_ts:
+            step = "check_engagement"
+            engagement = evaluate_referral_engagement(
+                invitee_user_id=invitee_user_id,
+                invitee_doc=invitee_doc,
+                window_start=join_seen_utc,
+                window_end=now_utc_ts,
+                db_ref=db,
+            )
+            if not engagement.get("qualified"):
                 db.pending_referrals.update_one(
                     {"_id": pending_id},
                     {
                         "$set": {
                             "status": "revoked",
-                            "revoked_reason": "missing_first_checkin",
+                            "revoked_reason": "insufficient_engagement",
+                            "qualification_failure_reason": "insufficient_engagement",
+                            "engagement_score": int(engagement.get("score", 0) or 0),
+                            "engagement_signals": engagement.get("signals") or {},
+                            "engagement_points": engagement.get("points") or {},
+                            "engagement_window_start_utc": engagement.get("window_start"),
+                            "engagement_window_end_utc": engagement.get("window_end"),
+                            "engagement_evaluated_at_utc": now_utc_ts,
                             "revoked_at": now_utc_ts,
                         },
                         "$unset": {"processing_by": "", "processing_at_utc": "", "processing_at": ""},
@@ -1368,9 +1425,14 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
                 _record_referral_event(inviter_user_id, invitee_user_id, "referral_revoked", now_utc_ts)
                 revoked += 1
                 logger.info(
-                    "[SCHED][REFERRAL] revoked inviter=%s invitee=%s reason=missing_first_checkin",
+                    "[SCHED][REFERRAL][ENGAGEMENT] revoked inviter=%s invitee=%s reason=insufficient_engagement score=%s signals=%s points=%s window_start=%s window_end=%s",
                     inviter_user_id,
                     invitee_user_id,
+                    engagement.get("score"),
+                    engagement.get("signals"),
+                    engagement.get("points"),
+                    engagement.get("window_start"),
+                    engagement.get("window_end"),
                 )
                 continue
 
@@ -1458,7 +1520,7 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
             )
             awarded += 1
             logger.info(
-                "[SCHED][REFERRAL] awarded inviter=%s invitee=%s qualify_hours=%s checks=official_channel+first_checkin",
+                "[SCHED][REFERRAL] awarded inviter=%s invitee=%s qualify_hours=%s checks=official_channel+engagement_score",
                 inviter_user_id,
                 invitee_user_id,
                 REFERRAL_HOLD_HOURS,
