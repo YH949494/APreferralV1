@@ -894,7 +894,7 @@ def _ensure_request_dedup_ttl_index() -> None:
         pass
 
 
-def _acquire_request_dedup_lock(*, drop_id: str, uid: int | None, ttl_seconds: int = 2) -> bool:
+def _acquire_request_dedup_lock(*, drop_id: str, uid: int | None, ttl_seconds: int = 5) -> bool:
     _ensure_request_dedup_ttl_index()
     now = now_utc()
     dedup_key = f"dedup:drop:{drop_id}:uid:{uid or 'anon'}"
