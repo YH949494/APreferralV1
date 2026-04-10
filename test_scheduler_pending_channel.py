@@ -116,7 +116,9 @@ class SchedulerPendingChannelTests(unittest.TestCase):
         self.orig_grant_xp = scheduler.grant_xp
         self.orig_award = scheduler.calc_referral_award
         self.orig_first = scheduler.maybe_handle_first_referral
+        self.orig_mark_qualified = scheduler.mark_invitee_qualified
         self.orig_confirm = scheduler.confirm_qualified_invitees
+        self.orig_eval_engagement = scheduler.evaluate_referral_engagement
         self.orig_now_utc = scheduler.now_utc
         self.orig_now_kl = scheduler.now_kl
         self.orig_requests_get = scheduler.requests.get
@@ -143,7 +145,9 @@ class SchedulerPendingChannelTests(unittest.TestCase):
         scheduler.grant_xp = self.orig_grant_xp
         scheduler.calc_referral_award = self.orig_award
         scheduler.maybe_handle_first_referral = self.orig_first
+        scheduler.mark_invitee_qualified = self.orig_mark_qualified
         scheduler.confirm_qualified_invitees = self.orig_confirm
+        scheduler.evaluate_referral_engagement = self.orig_eval_engagement
         scheduler.now_utc = self.orig_now_utc
         scheduler.now_kl = self.orig_now_kl
         scheduler.requests.get = self.orig_requests_get
@@ -211,6 +215,26 @@ class SchedulerPendingChannelTests(unittest.TestCase):
     def test_subscribed_awards_referral(self):
         scheduler._check_official_channel_subscribed_sync = lambda uid: (True, "")
         doc = self._base_pending("pending")
+        scheduler.db = _FakeSchedulerDB([doc], self._user_doc())
+
+        scheduler.settle_pending_referrals(batch_limit=1)
+
+        self.assertEqual(doc["status"], "awarded")
+        self.assertEqual(doc["xp_added"], 10)
+
+    def test_pending_channel_subscribed_awards_referral(self):
+        scheduler._get_official_channel_member_status = lambda uid: "member"
+        scheduler.evaluate_referral_engagement = lambda **kwargs: {
+            "qualified": True,
+            "score": 2,
+            "signals": {},
+            "points": {},
+            "window_start": self.fixed_now - timedelta(hours=1),
+            "window_end": self.fixed_now,
+        }
+        scheduler.mark_invitee_qualified = lambda *args, **kwargs: True
+        doc = self._base_pending("pending_channel")
+        doc["next_retry_at_utc"] = self.fixed_now - timedelta(minutes=1)
         scheduler.db = _FakeSchedulerDB([doc], self._user_doc())
 
         scheduler.settle_pending_referrals(batch_limit=1)

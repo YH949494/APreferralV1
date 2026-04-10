@@ -153,6 +153,38 @@ class AffiliateRewardTests(unittest.TestCase):
         self.assertEqual(out2["status"], "ISSUED")
         self.assertEqual(db.affiliate_ledger.count_documents({"dedup_key": "WELCOME:10"}), 1)
 
+    def test_welcome_reconcile_reuses_existing_issued_pool_voucher(self):
+        db = FakeDb()
+        now = datetime.now(timezone.utc)
+        ledger = {
+            "dedup_key": "WELCOME:55",
+            "user_id": 55,
+            "ledger_type": "AFFILIATE_WELCOME",
+            "status": "SETTLING",
+            "voucher_code": None,
+            "created_at": now,
+            "updated_at": now,
+        }
+        db.affiliate_ledger.insert_one(ledger)
+        ledger_doc = db.affiliate_ledger.find_one({"dedup_key": "WELCOME:55"})
+        db.voucher_pools.insert_one(
+            {
+                "pool_id": "WELCOME",
+                "code": "RECOVERED-W",
+                "status": "issued",
+                "issued_for_ledger_id": str(ledger_doc["_id"]),
+                "ledger_id": ledger_doc["_id"],
+            }
+        )
+        db.voucher_pools.insert_one({"pool_id": "WELCOME", "code": "NEXT-W", "status": "available"})
+
+        out = issue_welcome_bonus_if_eligible(db, user_id=55, is_new_user=True, now_utc=now)
+
+        self.assertEqual(out["status"], "ISSUED")
+        self.assertEqual(out["voucher_code"], "RECOVERED-W")
+        self.assertEqual(db.voucher_pools.count_documents({"pool_id": "WELCOME", "status": "issued"}), 1)
+        self.assertEqual(db.voucher_pools.count_documents({"pool_id": "WELCOME", "status": "available"}), 1)
+
     def test_qualified_event_once_lifetime(self):
         db = FakeDb()
         first = mark_invitee_qualified(db, invitee_id=20, referrer_id=3)

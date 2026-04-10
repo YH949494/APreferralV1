@@ -1,5 +1,7 @@
 from datetime import datetime, timedelta, timezone
 
+from pymongo.errors import DuplicateKeyError
+
 from affiliate_leaderboard import (
     MAX_COUNTED_JOINS_PER_DAY,
     MIN_SECONDS_BETWEEN_COUNTED_JOINS,
@@ -45,6 +47,25 @@ class _FakeCooldownCollection:
 class _FakeDB:
     def __init__(self):
         self.affiliate_referral_cooldown = _FakeCooldownCollection()
+
+
+class _RaceCooldownCollection(_FakeCooldownCollection):
+    def __init__(self):
+        super().__init__()
+        self._first = True
+
+    def find_one_and_update(self, filt, update, upsert=False, return_document=None):
+        if self._first and upsert:
+            self._first = False
+            doc_id = filt["_id"]
+            self.docs[doc_id] = {"_id": doc_id, "counted_joins_today": 0, "last_counted_join_ts": 0}
+            raise DuplicateKeyError("duplicate")
+        return super().find_one_and_update(filt, update, upsert=upsert, return_document=return_document)
+
+
+class _RaceDB:
+    def __init__(self):
+        self.affiliate_referral_cooldown = _RaceCooldownCollection()
 
 
 class _FakeAggregateCollection:
@@ -125,6 +146,17 @@ def test_should_count_referral_join_cooldown_and_cap():
     )
     assert counted is False
     assert reason == "daily_cap"
+
+
+def test_should_count_referral_join_duplicate_key_race_retries():
+    db = _RaceDB()
+    referrer_id = 99
+    now = datetime(2026, 1, 5, 0, 0, 0, tzinfo=timezone.utc)
+
+    counted, reason = should_count_referral_join(db, referrer_id, now)
+
+    assert counted is True
+    assert reason is None
 
 
 def test_build_weekly_payload_contains_required_window_fields():
