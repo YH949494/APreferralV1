@@ -58,7 +58,7 @@ class FakeClaimsCollection:
         self.docs.append(new_doc)
         return FakeInsertResult(new_doc["_id"])
 
-    def find_one(self, filt):
+    def find_one(self, filt, proj=None):  # noqa: ARG002
         for doc in self.docs:
             if self._match(doc, filt):
                 return dict(doc)
@@ -104,7 +104,7 @@ class FakeRateLimitCollection:
                 return False
         return True
 
-    def find_one(self, filt):
+    def find_one(self, filt, proj=None):  # noqa: ARG002
         for doc in self.docs:
             if self._match(doc, filt):
                 return dict(doc)
@@ -166,7 +166,7 @@ class FakeVouchersCollection:
                 return False
         return True
 
-    def find_one(self, filt):
+    def find_one(self, filt, projection=None):  # noqa: ARG002
         for doc in self.docs:
             if self._match(doc, filt):
                 return dict(doc)
@@ -304,6 +304,57 @@ class VoucherAntiHunterTests(unittest.TestCase):
         self.assertIsNone(claim_id_no_code_2)
         payload = _build_idempotent_claim_response(existing_no_code_2)
         self.assertIsNone(payload)
+
+    def test_claim_lock_retry_reuses_existing_claimed_voucher(self):
+        import vouchers as vouchers_module
+
+        claims = FakeClaimsCollection()
+        now = datetime.now(timezone.utc)
+        claims.insert_one(
+            {
+                "drop_id": "drop-retry",
+                "user_id": "user-retry",
+                "status": "failed",
+                "created_at": now,
+                "updated_at": now,
+            }
+        )
+        fake_db = FakeDb(
+            drops=[],
+            vouchers=[
+                {
+                    "type": "pooled",
+                    "dropId": "drop-retry",
+                    "code": "REUSED-CODE",
+                    "status": "claimed",
+                    "claimedByKey": "uid:user-retry",
+                    "claimedAt": now,
+                }
+            ],
+        )
+        original_db = vouchers_module.db
+        original_claims_col = vouchers_module.voucher_claims_col
+        app = Flask(__name__)
+        vouchers_module.db = fake_db
+        vouchers_module.voucher_claims_col = claims
+        try:
+            with app.app_context():
+                claim_id, existing = _acquire_claim_lock(
+                    drop_id="drop-retry",
+                    user_id="user-retry",
+                    client_ip="1.1.1.9",
+                    user_agent="ua",
+                    now=now + timedelta(seconds=1),
+                    claims_col=claims,
+                )
+        finally:
+            vouchers_module.db = original_db
+            vouchers_module.voucher_claims_col = original_claims_col
+
+        self.assertIsNone(claim_id)
+        payload = _build_idempotent_claim_response(existing)
+        self.assertEqual(payload["voucher"]["code"], "REUSED-CODE")
+        self.assertEqual(claims.docs[0]["status"], "failed")
 
     def test_visible_remaining_excludes_reserved_pool_for_non_my_user(self):
         drop = {"public_remaining": 10, "my_remaining": 20}

@@ -174,6 +174,22 @@ def _reconcile_ledger_from_issued_pool(db, *, ledger_id, now_utc: datetime):
     return db.affiliate_ledger.find_one({"_id": ledger_id})
 
 
+def _has_issued_pool_voucher_for_ledger(db, *, ledger_id) -> bool:
+    return (
+        db.voucher_pools.find_one(
+            {
+                "status": "issued",
+                "$or": [
+                    {"issued_for_ledger_id": str(ledger_id)},
+                    {"ledger_id": ledger_id},
+                ],
+            },
+            {"_id": 1},
+        )
+        is not None
+    )
+
+
 def _affiliate_simulate_enabled() -> bool:
     return str(os.getenv("AFFILIATE_SIMULATE", "0")).strip() == "1"
 
@@ -404,6 +420,11 @@ def issue_welcome_bonus_if_eligible(db, *, user_id: int, is_new_user: bool, bloc
             return {"created": False, "status": "ISSUED", "voucher_code": latest.get("voucher_code")}
         return {"created": False, "status": (latest or {}).get("status")}
 
+    if _has_issued_pool_voucher_for_ledger(db, ledger_id=ledger["_id"]):
+        latest = _reconcile_ledger_from_issued_pool(db, ledger_id=ledger["_id"], now_utc=now_utc) or db.affiliate_ledger.find_one({"_id": ledger["_id"]})
+        if latest and latest.get("status") == "ISSUED":
+            return {"created": False, "status": "ISSUED", "voucher_code": latest.get("voucher_code")}
+
     voucher = _claim_voucher_from_pool(db, pool_id="WELCOME", ledger_id=ledger.get("_id"), user_id=int(user_id), now_utc=now_utc)
     if voucher:
         db.affiliate_ledger.update_one(
@@ -554,6 +575,9 @@ def evaluate_monthly_affiliate_reward(db, *, referrer_id: int, now_utc: datetime
                 _mark_missing_pool_config(db, ledger_id=ledger["_id"], now_utc=now_utc)
                 last_ledger = db.affiliate_ledger.find_one({"_id": ledger["_id"]})
                 continue
+            if _has_issued_pool_voucher_for_ledger(db, ledger_id=ledger["_id"]):
+                last_ledger = _reconcile_ledger_from_issued_pool(db, ledger_id=ledger["_id"], now_utc=now_utc) or db.affiliate_ledger.find_one({"_id": ledger["_id"]})
+                continue
             voucher = _claim_voucher_from_pool(db, pool_id=eligible_tier, ledger_id=ledger.get("_id"), user_id=int(referrer_id), now_utc=now_utc)
             if voucher:
                 db.affiliate_ledger.update_one(
@@ -587,6 +611,9 @@ def evaluate_monthly_affiliate_reward(db, *, referrer_id: int, now_utc: datetime
             logger.warning("[AFFILIATE][POOL_MISSING] uid=%s ledger_id=%s tier=%s pool_id=%s", referrer_id, ledger.get("_id"), eligible_tier, eligible_tier)
             _mark_missing_pool_config(db, ledger_id=ledger["_id"], now_utc=now_utc)
             last_ledger = db.affiliate_ledger.find_one({"_id": ledger["_id"]})
+            continue
+        if _has_issued_pool_voucher_for_ledger(db, ledger_id=ledger["_id"]):
+            last_ledger = _reconcile_ledger_from_issued_pool(db, ledger_id=ledger["_id"], now_utc=now_utc) or db.affiliate_ledger.find_one({"_id": ledger["_id"]})
             continue
         voucher = _claim_voucher_from_pool(db, pool_id=eligible_tier, ledger_id=ledger.get("_id"), user_id=int(referrer_id), now_utc=now_utc)
         if voucher:
@@ -668,6 +695,11 @@ def settle_previous_month_affiliate_rewards(db, *, now_utc: datetime | None = No
             {"$set": {"risk_flags": flags, "updated_at": now_utc}},
         )
 
+        if _has_issued_pool_voucher_for_ledger(db, ledger_id=ledger["_id"]):
+            reconciled = _reconcile_ledger_from_issued_pool(db, ledger_id=ledger["_id"], now_utc=now_utc)
+            if reconciled and reconciled.get("voucher_code"):
+                settled += 1
+            continue
         voucher = _claim_voucher_from_pool(db, pool_id=tier, ledger_id=ledger.get("_id"), user_id=uid, now_utc=now_utc)
         if voucher:
             db.affiliate_ledger.update_one(
@@ -756,6 +788,8 @@ def approve_affiliate_ledger(db, *, ledger_id, now_utc: datetime | None = None):
         logger.warning("[AFFILIATE][POOL_MISSING] uid=%s ledger_id=%s tier=%s pool_id=%s", ledger.get("user_id"), ledger.get("_id"), tier, pool_id)
         _mark_missing_pool_config(db, ledger_id=ledger["_id"], now_utc=now_utc)
         return db.affiliate_ledger.find_one({"_id": ledger["_id"]})
+    if _has_issued_pool_voucher_for_ledger(db, ledger_id=ledger["_id"]):
+        return _reconcile_ledger_from_issued_pool(db, ledger_id=ledger["_id"], now_utc=now_utc) or db.affiliate_ledger.find_one({"_id": ledger["_id"]})
     voucher = _claim_voucher_from_pool(
         db,
         pool_id=pool_id,

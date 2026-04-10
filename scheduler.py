@@ -1231,7 +1231,7 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
     while scanned < batch_limit:
         pending = db.pending_referrals.find_one_and_update(
             {
-                "status": "pending",
+                "status": {"$in": ["pending", "pending_channel"]},
                 "created_at_utc": {"$lte": cutoff},
                 "$or": [
                     {"next_retry_at_utc": {"$exists": False}},

@@ -1329,6 +1329,18 @@ def _acquire_claim_lock(
         claim_doc_id = insert_res.inserted_id
     except DuplicateKeyError:
         existing_claim = claims_col.find_one({"drop_id": drop_id, "user_id": user_id})
+        claimed_existing = None
+        if existing_claim and existing_claim.get("voucher_code"):
+            claimed_existing = existing_claim
+        elif claims_col is voucher_claims_col:
+            claimed_existing = _find_existing_claim_for_drop(
+                drop_id=drop_id,
+                telegram_uid=user_id,
+                internal_user_id=user_id,
+            )
+        if claimed_existing and claimed_existing.get("voucher_code"):
+            existing_claim = claimed_existing
+            return None, existing_claim
         if existing_claim and existing_claim.get("status") == "failed":
             retry_claim = claims_col.find_one_and_update(
                 {"_id": existing_claim["_id"], "status": "failed"},

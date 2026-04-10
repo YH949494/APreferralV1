@@ -7,6 +7,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from pymongo import ASCENDING, DESCENDING, ReturnDocument
+from pymongo.errors import DuplicateKeyError
 
 MAX_COUNTED_JOINS_PER_DAY = 10
 MIN_SECONDS_BETWEEN_COUNTED_JOINS = 120
@@ -156,32 +157,42 @@ def should_count_referral_join(db_ref, referrer_id: int, now_utc: datetime) -> t
     now_ts = now_utc.timestamp()
     doc_id = f"{int(referrer_id)}:{day_utc}"
 
-    updated = db_ref.affiliate_referral_cooldown.find_one_and_update(
-        {
-            "_id": doc_id,
-            "$and": [
-                {
-                    "$or": [
-                        {"counted_joins_today": {"$exists": False}},
-                        {"counted_joins_today": {"$lt": MAX_COUNTED_JOINS_PER_DAY}},
-                    ]
-                },
-                {
-                    "$or": [
-                        {"last_counted_join_ts": {"$exists": False}},
-                        {"last_counted_join_ts": {"$lte": now_ts - MIN_SECONDS_BETWEEN_COUNTED_JOINS}},
-                    ]
-                },
-            ],
-        },
-        {
-            "$inc": {"counted_joins_today": 1},
-            "$set": {"last_counted_join_ts": now_ts, "updated_at": now_utc},
-            "$setOnInsert": {"referrer_id": int(referrer_id), "day_utc": day_utc},
-        },
-        upsert=True,
-        return_document=ReturnDocument.AFTER,
-    )
+    query = {
+        "_id": doc_id,
+        "$and": [
+            {
+                "$or": [
+                    {"counted_joins_today": {"$exists": False}},
+                    {"counted_joins_today": {"$lt": MAX_COUNTED_JOINS_PER_DAY}},
+                ]
+            },
+            {
+                "$or": [
+                    {"last_counted_join_ts": {"$exists": False}},
+                    {"last_counted_join_ts": {"$lte": now_ts - MIN_SECONDS_BETWEEN_COUNTED_JOINS}},
+                ]
+            },
+        ],
+    }
+    update = {
+        "$inc": {"counted_joins_today": 1},
+        "$set": {"last_counted_join_ts": now_ts, "updated_at": now_utc},
+        "$setOnInsert": {"referrer_id": int(referrer_id), "day_utc": day_utc},
+    }
+    try:
+        updated = db_ref.affiliate_referral_cooldown.find_one_and_update(
+            query,
+            update,
+            upsert=True,
+            return_document=ReturnDocument.AFTER,
+        )
+    except DuplicateKeyError:
+        updated = db_ref.affiliate_referral_cooldown.find_one_and_update(
+            query,
+            update,
+            upsert=False,
+            return_document=ReturnDocument.AFTER,
+        )
     if updated is not None:
         return True, None
 

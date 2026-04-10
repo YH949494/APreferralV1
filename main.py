@@ -515,7 +515,6 @@ def acquire_scheduler_lock(name: str, ttl_seconds: int) -> tuple[bool, dict | No
         doc = scheduler_locks_collection.find_one({"_id": name})
         return False, doc
     return doc is not None, doc
-    return doc is not None
 
 
 def tick_5min() -> None:
@@ -1342,7 +1341,6 @@ def _confirm_referral_on_main_join(
         )        
         logger.exception(
             "[REFERRAL][ERROR] step=create_pending inviter=%s invitee=%s err=%s",
-            step,
             referrer_id,
             invitee_user_id,
             e,
