@@ -815,9 +815,8 @@
     </div>
 
     <div id="bonus-voucher" style="display: none; margin-top: 16px;">
-      <h4>🎁 Your Affiliate Reward</h4>
-      <p id="voucher-code">Coming soon…</p>
-      <button class="btn btn-ghost" onclick="copyVoucherCode()">📋 Copy to clipboard</button>
+      <h4>🎁 Your Affiliate Rewards</h4>
+      <div id="affiliate-voucher-list"></div>
     </div>
   </div>
 
@@ -2393,17 +2392,54 @@ Active players win more.
       }
     }
 
-    function copyVoucherCode() {
+    function copyVoucherCode(code) {
+      const value = (code || "").trim();
       const codeEl = document.getElementById("voucher-code");
-      const code = codeEl ? codeEl.innerText.trim() : "";
-      if (!code || code.toLowerCase().includes("coming soon")) {
+      const fallback = codeEl ? codeEl.innerText.trim() : "";
+      const codeToCopy = value || fallback;
+      const lower = codeToCopy.toLowerCase();
+      if (!codeToCopy || lower.includes("coming soon")) {
         alert("❌ No voucher code available to copy yet.");
         return;
       }
 
-      navigator.clipboard.writeText(code)
+      navigator.clipboard.writeText(codeToCopy)
         .then(() => alert("Voucher code copied!"))
         .catch(() => alert("Failed to copy voucher."));
+    }
+
+    function renderAffiliateRewards(rewards) {
+      const bonusSection = document.getElementById("bonus-voucher");
+      const listEl = document.getElementById("affiliate-voucher-list");
+      if (!bonusSection || !listEl) return;
+
+      listEl.innerHTML = "";
+      if (!Array.isArray(rewards) || rewards.length === 0) {
+        bonusSection.style.display = "none";
+        return;
+      }
+
+      rewards.forEach((reward) => {
+        const tierText = (reward && reward.tier ? String(reward.tier) : "").trim();
+        const codeText = (reward && reward.code ? String(reward.code) : "").trim();
+        if (!codeText) return;
+        const card = document.createElement("div");
+        card.style.marginBottom = "10px";
+        card.style.padding = "10px";
+        card.style.border = "1px solid rgba(255,255,255,0.12)";
+        card.style.borderRadius = "10px";
+        card.innerHTML = `
+          <p style="margin:0 0 6px 0;"><strong>${tierText || "Affiliate Reward"}</strong></p>
+          <p style="margin:0 0 8px 0;">${codeText}</p>
+          <button class="btn btn-ghost" type="button">📋 Copy to clipboard</button>
+        `;
+        const copyBtn = card.querySelector("button");
+        if (copyBtn) {
+          copyBtn.onclick = () => copyVoucherCode(codeText);
+        }
+        listEl.appendChild(card);
+      });
+      bonusSection.style.display = listEl.children.length > 0 ? "block" : "none";
     }
 
     function copyCampaignVoucherCode() {
@@ -2423,7 +2459,7 @@ Active players win more.
       try {
         const initDataRaw = await waitForInitData();
         const adminUrl = withInitDataInQuery(`${API_BASE}/api/is_admin`, initDataRaw);
-        const bonusVoucherUrl = withInitDataInQuery(`${API_BASE}/api/bonus_voucher`, initDataRaw);
+        const bonusVoucherUrl = withInitDataInQuery(`${API_BASE}/api/affiliate_bonus_vouchers`, initDataRaw);
         const campaignBonusVoucherUrl = withInitDataInQuery(`${API_BASE}/api/campaign_bonus_voucher`, initDataRaw);
         const authHeaders = v2Headers({}, initDataRaw);
         const [adminRes, voucherRes, campaignVoucherRes] = await Promise.all([
@@ -2448,16 +2484,7 @@ Active players win more.
           }
         }
 
-        const bonusSection = document.getElementById("bonus-voucher");
-        const codeEl = document.getElementById("voucher-code");
-        if (bonusSection && codeEl) {
-          if (voucherData.code) {
-            bonusSection.style.display = "block";
-            codeEl.innerText = voucherData.code;
-          } else {
-            bonusSection.style.display = "none";
-          }
-        }
+        renderAffiliateRewards(voucherData.rewards || []);
 
         const campaignBonusSection = document.getElementById("campaign-bonus-voucher");
         const campaignCodeEl = document.getElementById("campaign-voucher-code");
