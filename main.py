@@ -2863,6 +2863,78 @@ def get_bonus_voucher():
         return jsonify({"code": None, "error": str(e)}), 500
 
 
+@app.route("/api/affiliate_bonus_vouchers", methods=["GET"])
+def get_affiliate_bonus_vouchers():
+    try:
+        user_id = None
+        init_data = extract_raw_init_data_from_query(request)
+        ok, parsed, _ = verify_telegram_init_data(init_data)
+        if ok:
+            user_payload = (parsed or {}).get("user", {})
+            if isinstance(user_payload, str):
+                try:
+                    user_payload = json.loads(user_payload)
+                except Exception:
+                    user_payload = {}
+            try:
+                user_id = int((user_payload or {}).get("id"))
+            except Exception:
+                user_id = None
+
+        if user_id is None and _admin_secret_ok(_get_admin_secret(request)):
+            user_id = request.args.get("user_id", type=int)
+
+        if user_id is None:
+            return jsonify({"rewards": []})
+
+        def _mask_voucher_code(raw):
+            code = (raw or "").strip()
+            if not code:
+                return ""
+            if len(code) <= 8:
+                return f"{code[:2]}...{code[-2:]}"
+            return f"{code[:4]}...{code[-4:]}"
+
+        rows = list(
+            affiliate_ledger_collection.find(
+                {
+                    "user_id": user_id,
+                    "status": "ISSUED",
+                    "voucher_code": {"$exists": True, "$nin": [None, ""]},
+                }
+            ).sort([("updated_at", DESCENDING), ("created_at", DESCENDING), ("_id", DESCENDING)])
+        )
+
+        rewards = []
+        seen = set()
+        for row in rows:
+            code = (row.get("voucher_code") or "").strip()
+            if not code:
+                continue
+            tier = row.get("tier") or row.get("reward_tier") or ""
+            dedup_key = (str(tier), code)
+            if dedup_key in seen:
+                continue
+            seen.add(dedup_key)
+
+            issued_at = row.get("updated_at") or row.get("created_at")
+            item = {"tier": str(tier) if tier else "", "code": code}
+            if issued_at is not None:
+                item["issued_at"] = issued_at.isoformat() if hasattr(issued_at, "isoformat") else str(issued_at)
+            rewards.append(item)
+            logger.info(
+                "[BONUS][AFFILIATE_HISTORY_ITEM] user_id=%s tier=%s code=%s",
+                user_id,
+                item["tier"] or "-",
+                _mask_voucher_code(code),
+            )
+
+        return jsonify({"rewards": rewards})
+    except Exception as e:
+        logger.exception("[BONUS_VOUCHER][AFFILIATE_HISTORY_ERROR] %s", e)
+        return jsonify({"rewards": [], "error": str(e)}), 500
+
+
 @app.route("/api/campaign_bonus_voucher", methods=["GET"])
 def get_campaign_bonus_voucher():
     try:
