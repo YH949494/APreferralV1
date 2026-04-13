@@ -164,22 +164,31 @@ def _is_cached_admin(user_json: dict):
     return False, None
 
 def _payload_for_admin_query(req) -> dict | None:
+    init_data_raw = extract_raw_init_data_from_query(req)
+    if not init_data_raw:
+        return None
+    ok, parsed, _ = verify_telegram_init_data(init_data_raw)
+    if not ok:
+        return None
     try:
-        caller_id = req.args.get("user_id", type=int)
+        user_json = json.loads((parsed or {}).get("user", "{}"))
     except Exception:
-        caller_id = None
-
-    if not caller_id:
+        user_json = {}
+    is_admin, source = _is_cached_admin(user_json)
+    if not is_admin:
         return None
 
-    admin_ids = _load_admin_ids()
-    if caller_id not in admin_ids:
+    try:
+        caller_id = int(user_json.get("id"))
+    except Exception:
         return None
 
-    payload = {"id": caller_id, "adminSource": "cache"}
+    payload = {"id": caller_id, "adminSource": source or "cache"}
     username_hint = norm_username(req.args.get("username") or req.args.get("admin_username") or "")
     if username_hint:
         payload["usernameLower"] = username_hint
+    elif norm_username(user_json.get("username", "")):
+        payload["usernameLower"] = norm_username(user_json.get("username", ""))
 
     return payload
 
@@ -2429,17 +2438,17 @@ def verify_telegram_init_data(init_data_raw: str):
     return True, data, "ok"
  
 def _require_admin_via_query():
+    secret = _get_admin_secret(request)
+    if _admin_secret_ok(secret):
+        return {"id": 0, "adminSource": "secret"}, None
+
     payload = _payload_for_admin_query(request)
     if payload:
         return payload, None
-    try:
-        caller_id = request.args.get("user_id", type=int)
-    except Exception:
-        caller_id = None
-     
-    if not caller_id:
-        return None, (jsonify({"status": "error", "code": "missing_user_id"}), 400)
 
+    init_data_raw = extract_raw_init_data_from_query(request)
+    if not init_data_raw:
+        return None, (jsonify({"status": "error", "code": "missing_init_data"}), 400)
     return None, (jsonify({"status": "error", "code": "forbidden"}), 403)
 
 def require_admin():
@@ -3430,6 +3439,23 @@ def api_claim():
 
     if not drop_id:
         return jsonify({"status": "error", "code": "missing_drop_id"}), 400
+
+    if not drop:
+        return jsonify({"status": "error", "code": "drop_not_found", "reason": "drop_not_found"}), 404
+
+    now_ref = now_utc()
+    starts_at = _as_aware_utc(drop.get("startsAt"))
+    ends_at = _as_aware_utc(drop.get("endsAt"))
+    status_value = str(drop.get("status") or "").strip().lower()
+    if (
+        status_value not in ("active", "live")
+        or not is_drop_active(drop, now_ref)
+        or not starts_at
+        or not ends_at
+        or now_ref < starts_at
+        or now_ref >= ends_at
+    ):
+        return jsonify({"status": "error", "code": "not_eligible", "reason": "drop_inactive"}), 403
 
     try:
         uid = int(tg_user["id"])

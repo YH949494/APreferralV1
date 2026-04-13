@@ -81,8 +81,11 @@ class _RequestArgs:
     def __init__(self, args):
         self._args = args
 
-    def get(self, key):
-        return self._args.get(key)
+    def get(self, key, type=None):  # noqa: A002
+        value = self._args.get(key)
+        if type is not None and value is not None:
+            return type(value)
+        return value
 
 
 class _Request:
@@ -90,9 +93,10 @@ class _Request:
         self.args = _RequestArgs(args)
 
 
-def _build_globals(*, users, affiliate_rows, bonus_voucher, request_user_id):
+def _build_globals(*, users, affiliate_rows, bonus_voucher, request_user_id, verified_user_id=None, secret_ok=False):
     logger = _Logger()
     fn = _load_get_bonus_voucher()
+    verified_user_id = request_user_id if verified_user_id is None else verified_user_id
     fn.__globals__.update(
         {
             "request": _Request({"user_id": str(request_user_id)}),
@@ -105,6 +109,11 @@ def _build_globals(*, users, affiliate_rows, bonus_voucher, request_user_id):
             "timezone": timezone,
             "pytz": type("Pytz", (), {"UTC": timezone.utc}),
             "DESCENDING": -1,
+            "extract_raw_init_data_from_query": lambda req: "init",
+            "verify_telegram_init_data": lambda init_data: (True, {"user": {"id": verified_user_id}}, "ok"),
+            "_get_admin_secret": lambda req: req.args.get("admin_secret"),
+            "_admin_secret_ok": lambda secret: bool(secret_ok and secret),
+            "json": __import__("json"),
         }
     )
     return fn, logger
@@ -121,6 +130,20 @@ def test_bonus_voucher_returns_affiliate_code_for_current_user_only():
         request_user_id=1001,
     )
     assert fn() == {"code": "MINE-CODE"}
+
+
+def test_bonus_voucher_ignores_spoofed_query_user_id_and_uses_verified_identity():
+    fn, _ = _build_globals(
+        users={1001: {"user_id": 1001, "vip_tier": "VIP1"}, 9999: {"user_id": 9999, "vip_tier": "VIP1"}},
+        affiliate_rows=[
+            {"_id": 1, "user_id": 9999, "status": "ISSUED", "voucher_code": "SPOOF-CODE"},
+            {"_id": 2, "user_id": 1001, "status": "ISSUED", "voucher_code": "REAL-CODE"},
+        ],
+        bonus_voucher=None,
+        request_user_id=9999,
+        verified_user_id=1001,
+    )
+    assert fn() == {"code": "REAL-CODE"}
 
 
 def test_bonus_voucher_picks_latest_affiliate_row_deterministically():
