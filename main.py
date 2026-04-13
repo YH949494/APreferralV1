@@ -2765,10 +2765,37 @@ def get_bonus_voucher():
         if not is_vip and not is_admin:
             return jsonify({"code": None})
 
+        def _mask_voucher_code(raw):
+            code = (raw or "").strip()
+            if not code:
+                return ""
+            if len(code) <= 8:
+                return f"{code[:2]}...{code[-2:]}"
+            return f"{code[:4]}...{code[-4:]}"
+
+        affiliate_doc = affiliate_ledger_collection.find_one(
+            {
+                "user_id": user_id,
+                "status": "ISSUED",
+                "voucher_code": {"$exists": True, "$nin": [None, ""]},
+            },
+            sort=[("updated_at", DESCENDING), ("created_at", DESCENDING), ("_id", DESCENDING)],
+        )
+        affiliate_code = ((affiliate_doc or {}).get("voucher_code") or "").strip()
+        if affiliate_code:
+            logger.info(
+                "[BONUS_VOUCHER][AFFILIATE_HIT] user_id=%s code=%s",
+                user_id,
+                _mask_voucher_code(affiliate_code),
+            )
+            return jsonify({"code": affiliate_code})
+        logger.info("[BONUS_VOUCHER][AFFILIATE_MISS] user_id=%s", user_id)
+
         now = datetime.now(timezone.utc)
 
         voucher = bonus_voucher_collection.find_one()
         if not voucher:
+            logger.info("[BONUS_VOUCHER][AFFILIATE_FALLBACK] user_id=%s reason=no_global_voucher", user_id)
             return jsonify({"code": None})
 
         start = voucher["start_time"]
@@ -2777,9 +2804,12 @@ def get_bonus_voucher():
         if end.tzinfo is None:   end   = end.replace(tzinfo=pytz.UTC)
 
         if start <= now <= end:
+            logger.info("[BONUS_VOUCHER][AFFILIATE_FALLBACK] user_id=%s reason=active_global_voucher", user_id)
             return jsonify({"code": voucher["code"]})
+        logger.info("[BONUS_VOUCHER][AFFILIATE_FALLBACK] user_id=%s reason=inactive_global_voucher", user_id)
         return jsonify({"code": None})
     except Exception as e:
+        logger.exception("[BONUS_VOUCHER][AFFILIATE_ERROR] %s", e)
         return jsonify({"code": None, "error": str(e)}), 500
 
 @app.route("/api/add_xp", methods=["POST"])
