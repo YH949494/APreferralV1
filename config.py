@@ -54,7 +54,6 @@ logging.getLogger(__name__).info(
     "[MINIAPP_VERSION] resolved=%s source=%s", MINIAPP_VERSION, _source
 )
 
-AFFILIATE_GROUP_INVITE_URL = os.getenv("AFFILIATE_GROUP_INVITE_URL", "")
 AFFILIATE_GROUP_TRIGGER_WEEKLY_VALID_REFERRALS = int(
     os.getenv("AFFILIATE_GROUP_TRIGGER_WEEKLY_VALID_REFERRALS", "5")
 )
@@ -62,3 +61,6 @@ AFFILIATE_GROUP_INVITE_TEXT = os.getenv(
     "AFFILIATE_GROUP_INVITE_TEXT",
     "🔥 You’ve reached 5 valid referrals this week.\nYou’re invited to join our affiliate group and start earning now:\n{invite_url}",
 )
+AFFILIATE_GROUP_UNLOCK_REFERRALS = int(os.getenv("AFFILIATE_GROUP_UNLOCK_REFERRALS", "5"))
+AFFILIATE_GROUP_INVITE_URL = os.getenv("AFFILIATE_GROUP_INVITE_URL", "https://t.me/+2415x7eUHOcwNzE9")
+AFFILIATE_GROUP_DM_ENABLED = os.getenv("AFFILIATE_GROUP_DM_ENABLED", "1") == "1"
