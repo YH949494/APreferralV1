@@ -1430,6 +1430,10 @@
         await new Promise((resolve) => setTimeout(resolve, intervalMs));
       }
 
+      const fallback = getLatestInitData();
+      if (fallback) {
+        return fallback;
+      }
       throw new Error("missing_init_data");
     }
 
@@ -1527,7 +1531,12 @@
 
     async function v2Fetch(path, options = {}) {
       const { headers: extraHeaders, ...rest } = options || {};
-      let initDataRaw = await waitForInitData();
+      let initDataRaw = "";
+      try {
+        initDataRaw = await waitForInitData();
+      } catch (_) {
+        initDataRaw = getLatestInitData() || (typeof tg?.initData === "string" ? tg.initData : "") || "";
+      }
       let headers = v2Headers(extraHeaders || {}, initDataRaw);
       let target = withInitDataInQuery(path, initDataRaw);
 
@@ -2745,7 +2754,9 @@ Active players win more.
 
       card.appendChild(message);
       card.appendChild(btn);
-      if (!hasClaimed && canClaim && !publicSoldOut) {
+      const dropType = String(drop?.type || "").toLowerCase();
+      const isPoolCard = dropType === "pooled" || dropType === "";
+      if (!hasClaimed && canClaim && !publicSoldOut && isPoolCard) {
         applyChannelGate(dropId, message, btn);
       }
 
