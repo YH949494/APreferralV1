@@ -30,6 +30,15 @@ invite_link_map_collection = db["invite_link_map"]
 miniapp_sessions_daily_col = db["miniapp_sessions_daily"]
 request_dedup_col = db["request_dedup"]
 REFERRAL_SNAPSHOT_STALE_SEC = 21600
+PERSONALISED_TYPE_CANONICAL = "personalised"
+PERSONALISED_TYPE_ALIASES = (PERSONALISED_TYPE_CANONICAL, "personalized")
+
+
+def _normalize_drop_type(value) -> str:
+    dtype = str(value or "pooled").strip().lower()
+    if dtype in PERSONALISED_TYPE_ALIASES:
+        return PERSONALISED_TYPE_CANONICAL
+    return dtype
 
 
 def _week_key_kl(reference: datetime) -> str:
@@ -457,7 +466,7 @@ def ensure_voucher_indexes():
         [("type", ASCENDING), ("dropId", ASCENDING), ("usernameLower", ASCENDING)],
         unique=True,
         name="uniq_personalised_assignment",
-        partialFilterExpression={"type": "personalised"}
+        partialFilterExpression={"type": {"$in": list(PERSONALISED_TYPE_ALIASES)}}
     )
     try:
         voucher_claims_col.create_index(
@@ -744,7 +753,7 @@ def _is_new_joiner_audience(audience_type: str) -> bool:
 def _is_pool_drop(drop: dict, audience_type: str | None = None) -> bool:
     if not isinstance(drop, dict):
         return False
-    drop_type = (drop.get("type") or "").strip().lower()
+    drop_type = _normalize_drop_type(drop.get("type"))
     if drop_type == "pooled":
         return True     
     atype = (audience_type or _drop_audience_type(drop) or "").strip().lower()
@@ -2634,7 +2643,7 @@ def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None
     for d in drops:
         drop_id = str(d["_id"])
         drop_id_variants = _drop_id_variants(d.get("_id"))
-        dtype = d.get("type", "pooled")
+        dtype = _normalize_drop_type(d.get("type", "pooled"))
         is_active = is_drop_active(d, ref)
         audience_type = _drop_audience_type(d)
 
@@ -2661,32 +2670,35 @@ def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None
             "_priority": priority,
         }
 
-        if dtype in ("personalised", "personalized"):
+        if dtype == PERSONALISED_TYPE_CANONICAL:
             if not allow_personalised:
                 if not logged_hidden:
                     print(f"[personalised] hidden_no_username uid={uid}")
                     logged_hidden = True
+                current_app.logger.info(
+                    "[visible][personalised_gate] drop=%s dtype=%s uid=%s uname=%s allowed=%s",
+                    drop_id,
+                    dtype,
+                    uid,
+                    usernameLower,
+                    False,
+                )
                 continue
-            if dtype in ("personalised", "personalized"):
-                v_uid   = d.get("assigned_to_user_id")
-                v_uname = norm_uname(d.get("assigned_to_username"))
-             
-                if v_uid is not None:
-                    eligible = (uid is not None and uid == int(v_uid))
-                elif v_uname:
-                    eligible = (uname != "" and uname == v_uname)
-                else:
-                    eligible = False
-
-                if not eligible:
-                    continue
 
             # user must have an unclaimed OR claimed row to show the card (claimed -> show claimed state)
             row = db.vouchers.find_one({
-                "type": {"$in": ["personalised", "personalized"]},
+                "type": {"$in": list(PERSONALISED_TYPE_ALIASES)},
                 "dropId": {"$in": drop_id_variants},
                 "usernameLower": usernameLower
             })
+            current_app.logger.info(
+                "[visible][personalised_gate] drop=%s dtype=%s uid=%s uname=%s allowed=%s",
+                drop_id,
+                dtype,
+                uid,
+                usernameLower,
+                bool(row),
+            )
             if row and is_active:
                 base["userClaimed"] = (row.get("status") == "claimed")
                 if base["userClaimed"]:
@@ -2733,7 +2745,7 @@ def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None
 # ---- Claim handlers ----
 def claim_personalised(drop_id: str, usernameLower: str, ref: datetime):
     drop_id_variants = _drop_id_variants(drop_id)
-    personal_types = ["personalised", "personalized"]
+    personal_types = list(PERSONALISED_TYPE_ALIASES)
  
     # Return existing if already claimed
     existing = db.vouchers.find_one({
@@ -3269,7 +3281,7 @@ def api_drop_mode():
     until_iso = None
 
     if active_drop:
-        drop_type = str(active_drop.get("type") or "pooled").strip().lower()
+        drop_type = _normalize_drop_type(active_drop.get("type") or "pooled")
         if drop_type == "pooled":
             public_remaining = max(0, int(active_drop.get("public_remaining") or 0))
             my_remaining = max(0, int(active_drop.get("my_remaining") or 0))
@@ -3363,12 +3375,12 @@ def claim_voucher_for_user(*, user_id: str, drop_id: str, username: str) -> dict
     if not drop:
         raise NotEligible("drop_not_found")
 
-    dtype = str(drop.get("type", "pooled") or "pooled").strip().lower()
+    dtype = _normalize_drop_type(drop.get("type", "pooled"))
     usernameLower = norm_username(username)
     claim_key = f"uid:{user_id_str}"
     ref = now_utc()
 
-    if dtype in ("personalised", "personalized"):
+    if dtype == PERSONALISED_TYPE_CANONICAL:
         if not usernameLower:
             raise NotEligible("not_eligible")     
         res = claim_personalised(drop_id=drop_id, usernameLower=usernameLower, ref=ref)
@@ -3398,7 +3410,7 @@ def api_claim():
     drop_id = body.get("dropId") or body.get("drop_id")
     check_only = bool(body.get("check_only") or body.get("checkOnly"))
     drop = db.drops.find_one({"_id": _coerce_id(drop_id)}) if drop_id else {}
-    drop_type = str(drop.get("type", "pooled") or "pooled").strip().lower()
+    drop_type = _normalize_drop_type(drop.get("type", "pooled"))
 
     init_data = extract_raw_init_data_from_query(request)
 
@@ -3495,13 +3507,10 @@ def api_claim():
 
     voucher = drop or {}
 
-    v_uid   = voucher.get("assigned_to_user_id")
-    v_uname = norm_uname(voucher.get("assigned_to_username"))
-
-    drop_type = str(voucher.get("type", drop_type) or drop_type).strip().lower()
+    drop_type = _normalize_drop_type(voucher.get("type", drop_type))
  
     username_missing = not (username and username.strip())
-    if drop_type in ("personalised", "personalized") and username_missing:
+    if drop_type == PERSONALISED_TYPE_CANONICAL and username_missing:
         return jsonify({
             "status": "error",
             "code": "not_eligible",
@@ -3512,17 +3521,13 @@ def api_claim():
         }), 403
 
     allowed = True
-    if drop_type in ("personalised", "personalized"):
-        allowed = False
-        if v_uid is not None:
-            try:
-                allowed = (uid is not None and uid == int(v_uid))
-            except (TypeError, ValueError):
-                allowed = False
-        elif v_uname:
-            allowed = (uname != "" and uname == v_uname)
-        else:
-            allowed = False
+    if drop_type == PERSONALISED_TYPE_CANONICAL:
+        assigned_row = db.vouchers.find_one({
+            "type": {"$in": list(PERSONALISED_TYPE_ALIASES)},
+            "dropId": {"$in": _drop_id_variants(drop_id)},
+            "usernameLower": uname,
+        })
+        allowed = bool(assigned_row)
         current_app.logger.info(
             "[claim][personalised_gate] drop=%s dtype=%s uid=%s uname=%s allowed=%s",
             drop_id,
@@ -3533,7 +3538,7 @@ def api_claim():
         )
 
     if not allowed:
-        print(f"[claim401] uid={uid} uname={uname} v_uid={v_uid} v_uname={v_uname}")
+        print(f"[claim401] uid={uid} uname={uname} type={drop_type}")
         return jsonify({
             "status": "error",
             "code": "not_eligible",
@@ -4095,7 +4100,7 @@ def admin_create_drop():
     if err: return err
     data = request.get_json(force=True)
     name = data.get("name")
-    dtype = data.get("type", "pooled")
+    dtype = _normalize_drop_type(data.get("type", "pooled"))
     startsAtLocal = data.get("startsAtLocal")
     if not (name and startsAtLocal):
         return jsonify({"status": "error", "code": "bad_request"}), 400
@@ -4211,7 +4216,7 @@ def admin_create_drop():
     drop_id = res.inserted_id
 
     # Insert vouchers
-    if dtype == "personalised":
+    if dtype == PERSONALISED_TYPE_CANONICAL:
         assignments = data.get("assignments") or []
         docs = []
         for item in assignments:
@@ -4220,7 +4225,7 @@ def admin_create_drop():
             if not u or not c:
                 continue
             docs.append({
-                "type": "personalised",
+                "type": PERSONALISED_TYPE_CANONICAL,
                 "dropId": str(drop_id),
                 "usernameLower": u,
                 "code": c,
@@ -4306,7 +4311,7 @@ def _admin_drop_summary(doc: dict, *, ref=None, skip_expired=False):
     summary = {
         "dropId": drop_id,
         "name": doc.get("name"),
-        "type": doc.get("type", "pooled"),
+        "type": _normalize_drop_type(doc.get("type", "pooled")),
         "status": status,
         "priority": doc.get("priority", 100),
         "startsAt": starts.isoformat() if starts else None,
@@ -4319,9 +4324,9 @@ def _admin_drop_summary(doc: dict, *, ref=None, skip_expired=False):
     if doc.get("audience"):
         summary["audience"] = doc.get("audience")
      
-    if summary["type"] == "personalised":
-        assigned = db.vouchers.count_documents({"type": "personalised", "dropId": {"$in": drop_id_variants}})
-        claimed = db.vouchers.count_documents({"type": "personalised", "dropId": {"$in": drop_id_variants}, "status": "claimed"})
+    if summary["type"] == PERSONALISED_TYPE_CANONICAL:
+        assigned = db.vouchers.count_documents({"type": {"$in": list(PERSONALISED_TYPE_ALIASES)}, "dropId": {"$in": drop_id_variants}})
+        claimed = db.vouchers.count_documents({"type": {"$in": list(PERSONALISED_TYPE_ALIASES)}, "dropId": {"$in": drop_id_variants}, "status": "claimed"})
         summary.update({"assigned": assigned, "claimed": claimed})
     else:
         total = db.vouchers.count_documents({"type": "pooled", "dropId": {"$in": drop_id_variants}})
@@ -4658,7 +4663,7 @@ def admin_add_codes(drop_id):
     drop = db.drops.find_one({"_id": _coerce_id(drop_id)})
     if not drop:
         return jsonify({"status": "error", "code": "not_found"}), 404
-    dtype = drop.get("type", "pooled")
+    dtype = _normalize_drop_type(drop.get("type", "pooled"))
     if dtype != "pooled":
         return jsonify({"status": "error", "code": "bad_request", "reason": "bad_type"}), 400
     pool_value = data.get("pool") or data.get("voucherPool") or "public"
