@@ -2744,6 +2744,14 @@ def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None
 
 # ---- Claim handlers ----
 def claim_personalised(drop_id: str, usernameLower: str, ref: datetime, assigned_user_id=None):
+    logger = current_app.logger
+    user_id_str = str(assigned_user_id or "").strip()
+    logger.info(
+        "[CLAIM_PERSONALISED_ENTRY] drop_id=%s uid=%s uname=%s",
+        drop_id,
+        user_id_str,
+        usernameLower,
+    )
     drop_id_variants = _drop_id_variants(drop_id)
     identity_filters = [
         {"usernameLower": usernameLower},
@@ -2773,6 +2781,14 @@ def claim_personalised(drop_id: str, usernameLower: str, ref: datetime, assigned
         "status": "claimed"
     })
     if existing:
+        code_value = str(existing.get("code") or "")
+        masked_code = f"***{code_value[-4:]}" if code_value else ""
+        logger.info(
+            "[CLAIM_PERSONALISED_HIT] drop_id=%s uid=%s code=%s",
+            drop_id,
+            user_id_str,
+            masked_code,
+        )
         return {"ok": True, "code": existing["code"], "claimedAt": _isoformat_kl(existing.get("claimedAt"))}
 
     # Claim the assigned row atomically
@@ -2794,9 +2810,31 @@ def claim_personalised(drop_id: str, usernameLower: str, ref: datetime, assigned
         # Maybe there is no assignment or it was already claimed; try fetching claimed again to idempotently return
         already = db.vouchers.find_one(personalised_filter)
         if already and already.get("status") == "claimed":
+            code_value = str(already.get("code") or "")
+            masked_code = f"***{code_value[-4:]}" if code_value else ""
+            logger.info(
+                "[CLAIM_PERSONALISED_HIT] drop_id=%s uid=%s code=%s",
+                drop_id,
+                user_id_str,
+                masked_code,
+            )
             return {"ok": True, "code": already["code"], "claimedAt": _isoformat_kl(already.get("claimedAt"))}
+        logger.info(
+            "[CLAIM_PERSONALISED_MISS] drop_id=%s uid=%s uname=%s",
+            drop_id,
+            user_id_str,
+            usernameLower,
+        )
         _safe_log("info", "[CLAIM_PERSONALISED][MISS] drop_id=%s usernameLower=%s filter_used=%s", drop_id, usernameLower, personalised_filter)
         return {"ok": False, "err": "not_eligible"}
+    code_value = str(doc.get("code") or "")
+    masked_code = f"***{code_value[-4:]}" if code_value else ""
+    logger.info(
+        "[CLAIM_PERSONALISED_HIT] drop_id=%s uid=%s code=%s",
+        drop_id,
+        user_id_str,
+        masked_code,
+    )
     return {"ok": True, "code": doc["code"], "claimedAt": _isoformat_kl(doc.get("claimedAt"))}
 
 def reconcile_pooled_remaining(drop_id: str) -> dict:
@@ -3396,6 +3434,12 @@ def claim_voucher_for_user(*, user_id: str, drop_id: str, username: str) -> dict
     if dtype == PERSONALISED_TYPE_CANONICAL:
         if not usernameLower:
             raise NotEligible("not_eligible")     
+        current_app.logger.info(
+            "[CLAIM_ROUTE] type=%s drop_id=%s uid=%s",
+            dtype,
+            drop_id,
+            user_id_str,
+        )
         res = claim_personalised(drop_id=drop_id, usernameLower=usernameLower, ref=ref, assigned_user_id=user_id_str)
         if res.get("ok"):
             return {"code": res["code"], "claimedAt": res["claimedAt"]}
@@ -3417,6 +3461,7 @@ def claim_voucher_for_user(*, user_id: str, drop_id: str, username: str) -> dict
 
 @vouchers_bp.route("/vouchers/claim", methods=["POST"])
 def api_claim():
+    logger = current_app.logger
     # Accept both header names + query param
     body = request.get_json(silent=True) or {}
  
@@ -3460,6 +3505,13 @@ def api_claim():
 
     user_id = str(user_raw.get("id") or "").strip()
     username = user_raw.get("username") or ""
+    user_id_str = user_id
+    logger.info(
+        "[CLAIM_ENTRY] drop_id=%s uid=%s username=%s",
+        drop_id,
+        user_id_str,
+        username,
+    )
  
     if not user_id:
         return jsonify({"status": "error", "code": "auth_failed", "why": "missing_user_id"}), 401
@@ -3482,6 +3534,13 @@ def api_claim():
         or now_ref < starts_at
         or now_ref >= ends_at
     ):
+        logger.info(
+            "[CLAIM_BLOCK] reason=%s drop_id=%s uid=%s username=%s",
+            "drop_not_active",
+            drop_id,
+            user_id_str,
+            username,
+        )
         return jsonify({"status": "error", "code": "not_eligible", "reason": "drop_inactive"}), 403
 
     try:
@@ -3524,6 +3583,13 @@ def api_claim():
  
     username_missing = not (username and username.strip())
     if drop_type == PERSONALISED_TYPE_CANONICAL and username_missing:
+        logger.info(
+            "[CLAIM_BLOCK] reason=%s drop_id=%s uid=%s username=%s",
+            "not_eligible",
+            drop_id,
+            user_id_str,
+            username,
+        )
         return jsonify({
             "status": "error",
             "code": "not_eligible",
@@ -3551,7 +3617,13 @@ def api_claim():
         )
 
     if not allowed:
-        print(f"[claim401] uid={uid} uname={uname} type={drop_type}")
+        logger.info(
+            "[CLAIM_BLOCK] reason=%s drop_id=%s uid=%s username=%s",
+            "no_assignment",
+            drop_id,
+            user_id_str,
+            username,
+        )
         return jsonify({
             "status": "error",
             "code": "not_eligible",
@@ -3564,6 +3636,13 @@ def api_claim():
     user_ctx = load_user_context(uid=uid, username=username, username_lower=uname or username)
 
     if not is_drop_allowed(voucher, uid, uname, user_ctx):
+        logger.info(
+            "[CLAIM_BLOCK] reason=%s drop_id=%s uid=%s username=%s",
+            "region_block",
+            drop_id,
+            user_id_str,
+            username,
+        )
         return jsonify({
             "status": "error",
             "code": "not_eligible",
@@ -3574,6 +3653,13 @@ def api_claim():
         }), 403
 
     if not is_user_eligible_for_drop(user_doc, tg_user, voucher):
+        logger.info(
+            "[CLAIM_BLOCK] reason=%s drop_id=%s uid=%s username=%s",
+            "not_eligible",
+            drop_id,
+            user_id_str,
+            username,
+        )
         return jsonify({
             "status": "error",
             "code": "not_eligible",
@@ -3607,6 +3693,13 @@ def api_claim():
  
     if is_pool_drop and not _is_new_joiner_audience(audience_type):
         if not check_channel_subscribed(uid):
+            logger.info(
+                "[CLAIM_BLOCK] reason=%s drop_id=%s uid=%s username=%s",
+                "not_subscribed",
+                drop_id,
+                user_id_str,
+                username,
+            )
             current_app.logger.info("[claim] deny drop=%s uid=%s reason=not_subscribed", drop_id, uid)
             current_app.logger.info(
                 "[claim] uid=%s drop_id=%s dtype=%s audience=%s decision=blocked reason=not_subscribed",
@@ -3626,6 +3719,13 @@ def api_claim():
             }), 403
 
     if check_only:
+        logger.info(
+            "[CLAIM_BLOCK] reason=%s drop_id=%s uid=%s username=%s",
+            "check_only_block",
+            drop_id,
+            user_id_str,
+            username,
+        )
         return jsonify({"status": "ok", "check_only": True, "subscribed": True}), 200
 
     if is_pool_drop:
@@ -3688,6 +3788,13 @@ def api_claim():
             "[claim] entry drop=%s audience=%s uid=%s ip=%s", drop_id, audience_type, uid, client_ip
         )
         if not check_channel_subscribed(uid):
+            logger.info(
+                "[CLAIM_BLOCK] reason=%s drop_id=%s uid=%s username=%s",
+                "not_subscribed",
+                drop_id,
+                user_id_str,
+                username,
+            )
             current_app.logger.info("[claim] deny drop=%s uid=%s reason=not_subscribed", drop_id, uid)
             current_app.logger.info(
                 "[claim] uid=%s drop_id=%s dtype=%s audience=%s decision=blocked reason=not_subscribed",
@@ -3706,6 +3813,13 @@ def api_claim():
                 "message": "Please subscribe to @advantplayofficial to claim this voucher."
             }), 403
         if drop_type != "pooled":
+            logger.info(
+                "[CLAIM_BLOCK] reason=%s drop_id=%s uid=%s username=%s",
+                "not_eligible",
+                drop_id,
+                user_id_str,
+                username,
+            )
             current_app.logger.info(
                 "[claim] uid=%s drop_id=%s dtype=%s audience=%s decision=blocked reason=bad_drop_type",
                 uid,
@@ -3723,6 +3837,13 @@ def api_claim():
                 "checks_key": None,
             }), 403
         if uid is None:
+            logger.info(
+                "[CLAIM_BLOCK] reason=%s drop_id=%s uid=%s username=%s",
+                "unknown",
+                drop_id,
+                user_id_str,
+                username,
+            )
             current_app.logger.info(
                 "[claim] uid=%s drop_id=%s dtype=%s audience=%s decision=blocked reason=missing_uid",
                 uid,
@@ -3742,6 +3863,13 @@ def api_claim():
         now_ts = now_kl()
         allowed, reason, _ticket = welcome_eligibility(uid, ref=now_ts)
         if not allowed:
+            logger.info(
+                "[CLAIM_BLOCK] reason=%s drop_id=%s uid=%s username=%s",
+                "not_eligible",
+                drop_id,
+                user_id_str,
+                username,
+            )
             current_app.logger.info("[claim] deny drop=%s uid=%s reason=%s", drop_id, uid, reason)
             return jsonify({
                 "status": "error",
@@ -3770,6 +3898,13 @@ def api_claim():
                 "reason": "verify_pic",
             }), 202
         if not cache_has_photo:
+            logger.info(
+                "[CLAIM_BLOCK] reason=%s drop_id=%s uid=%s username=%s",
+                "not_eligible",
+                drop_id,
+                user_id_str,
+                username,
+            )
             current_app.logger.info(
                 "[claim] uid=%s drop_id=%s dtype=%s audience=%s decision=blocked reason=missing_profile_photo",
                 uid,
@@ -3790,6 +3925,13 @@ def api_claim():
         current_app.logger.info("[WELCOME] claim_attempt uid=%s drop_id=%s", uid, drop_id)
 
         if new_joiner_claims_col.find_one({"uid": uid}):
+            logger.info(
+                "[CLAIM_BLOCK] reason=%s drop_id=%s uid=%s username=%s",
+                "duplicate_claim",
+                drop_id,
+                user_id_str,
+                username,
+            )
             current_app.logger.info(
                 "[claim] uid=%s drop_id=%s dtype=%s audience=%s decision=blocked reason=already_claimed_lifetime",
                 uid,
@@ -3849,6 +3991,13 @@ def api_claim():
 
         ticket = get_or_issue_welcome_ticket(uid)
         if not ticket:
+            logger.info(
+                "[CLAIM_BLOCK] reason=%s drop_id=%s uid=%s username=%s",
+                "not_eligible",
+                drop_id,
+                user_id_str,
+                username,
+            )
             current_app.logger.info(
                 "[claim] uid=%s drop_id=%s dtype=%s audience=%s decision=blocked reason=not_eligible",
                 uid,
@@ -3876,6 +4025,13 @@ def api_claim():
                 drop_type,
                 audience_type,
             )         
+            logger.info(
+                "[CLAIM_BLOCK] reason=%s drop_id=%s uid=%s username=%s",
+                "not_eligible",
+                drop_id,
+                user_id_str,
+                username,
+            )
             return jsonify({
                 "status": "error",
                 "code": "not_eligible",
@@ -3907,6 +4063,13 @@ def api_claim():
             )
             return jsonify(idempotent_payload), 200
         current_app.logger.info("[claim][DEDUP] drop=%s uid=%s", drop_id, uid)
+        logger.info(
+            "[CLAIM_BLOCK] reason=%s drop_id=%s uid=%s username=%s",
+            "lock_failed",
+            drop_id,
+            user_id_str,
+            username,
+        )
         return jsonify({"status": "error", "code": "already_claimed"}), 409
 
     # Claim
@@ -3921,6 +4084,13 @@ def api_claim():
         idempotent_payload = _build_idempotent_claim_response(existing_claim)
         if idempotent_payload:
             return jsonify(idempotent_payload), 200
+        logger.info(
+            "[CLAIM_BLOCK] reason=%s drop_id=%s uid=%s username=%s",
+            "duplicate_claim",
+            drop_id,
+            user_id_str,
+            username,
+        )
         return jsonify({"status": "error", "code": "already_claimed"}), 409
     except NoCodesLeft as exc:
         voucher_claims_col.update_one(
@@ -3937,6 +4107,13 @@ def api_claim():
         voucher_claims_col.update_one(
             {"_id": claim_doc_id},
             {"$set": {"status": "failed", "error": str(exc), "updated_at": now_utc()}},
+        )
+        logger.info(
+            "[CLAIM_BLOCK] reason=%s drop_id=%s uid=%s username=%s",
+            "not_eligible",
+            drop_id,
+            user_id_str,
+            username,
         )
         return jsonify({
             "status": "error",
@@ -3984,6 +4161,13 @@ def api_claim():
                 upsert=True,
             )
         except DuplicateKeyError:
+            logger.info(
+                "[CLAIM_BLOCK] reason=%s drop_id=%s uid=%s username=%s",
+                "duplicate_claim",
+                drop_id,
+                user_id_str,
+                username,
+            )
             return jsonify({
                 "status": "error",
                 "code": "not_eligible",
@@ -4010,6 +4194,13 @@ def api_claim():
             {"$set": {"status": "claimed", "claimed_at": now_kl(), "reason_last_fail": None}},
         )
         if not uid:
+            logger.info(
+                "[CLAIM_BLOCK] reason=%s drop_id=%s uid=%s username=%s",
+                "unknown",
+                drop_id,
+                user_id_str,
+                username,
+            )
             return jsonify({
                 "status": "error",
                 "code": "not_eligible",
