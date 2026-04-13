@@ -93,3 +93,119 @@ def test_require_admin_allows_admin_secret():
     ok, err = fn()
     assert ok is True
     assert err is None
+
+
+def _load_api_is_admin():
+    source = Path("main.py").read_text(encoding="utf-8")
+    module = ast.parse(source)
+    fn_node = next(
+        node for node in module.body if isinstance(node, ast.FunctionDef) and node.name == "api_is_admin"
+    )
+    fn_node.decorator_list = []
+    isolated = ast.Module(body=[fn_node], type_ignores=[])
+    ast.fix_missing_locations(isolated)
+    env = {}
+    exec(compile(isolated, filename="main.py", mode="exec"), env)  # noqa: S102
+    return env["api_is_admin"]
+
+
+def test_api_is_admin_verified_admin_true():
+    fn = _load_api_is_admin()
+    calls = []
+
+    fn.__globals__.update(
+        {
+            "request": _Request({"user_id": "9999"}),
+            "extract_raw_init_data_from_query": lambda req: "ok",
+            "verify_telegram_init_data": lambda raw: (True, {"user": {"id": 2222}}, "ok"),
+            "_get_admin_secret": lambda req: "",
+            "_admin_secret_ok": lambda secret: False,
+            "admin_cache_col": _AdminCache([2222]),
+            "_users_update_one": lambda *args, **kwargs: calls.append((args, kwargs)),
+            "datetime": __import__("datetime").datetime,
+            "timezone": __import__("datetime").timezone,
+            "json": __import__("json"),
+            "jsonify": lambda payload: payload,
+            "traceback": __import__("traceback"),
+        }
+    )
+
+    body = fn()
+    assert body["success"] is True
+    assert body["is_admin"] is True
+    assert calls
+
+
+def test_api_is_admin_verified_non_admin_false():
+    fn = _load_api_is_admin()
+
+    fn.__globals__.update(
+        {
+            "request": _Request({"user_id": "2222"}),
+            "extract_raw_init_data_from_query": lambda req: "ok",
+            "verify_telegram_init_data": lambda raw: (True, {"user": {"id": 1111}}, "ok"),
+            "_get_admin_secret": lambda req: "",
+            "_admin_secret_ok": lambda secret: False,
+            "admin_cache_col": _AdminCache([2222]),
+            "_users_update_one": lambda *args, **kwargs: None,
+            "datetime": __import__("datetime").datetime,
+            "timezone": __import__("datetime").timezone,
+            "json": __import__("json"),
+            "jsonify": lambda payload: payload,
+            "traceback": __import__("traceback"),
+        }
+    )
+
+    body = fn()
+    assert body["success"] is True
+    assert body["is_admin"] is False
+
+
+def test_api_is_admin_ignores_spoofed_query_user_id():
+    fn = _load_api_is_admin()
+
+    fn.__globals__.update(
+        {
+            "request": _Request({"user_id": "2222"}),
+            "extract_raw_init_data_from_query": lambda req: "ok",
+            "verify_telegram_init_data": lambda raw: (True, {"user": {"id": 1111}}, "ok"),
+            "_get_admin_secret": lambda req: "",
+            "_admin_secret_ok": lambda secret: False,
+            "admin_cache_col": _AdminCache([2222]),
+            "_users_update_one": lambda *args, **kwargs: None,
+            "datetime": __import__("datetime").datetime,
+            "timezone": __import__("datetime").timezone,
+            "json": __import__("json"),
+            "jsonify": lambda payload: payload,
+            "traceback": __import__("traceback"),
+        }
+    )
+
+    body = fn()
+    assert body["success"] is True
+    assert body["is_admin"] is False
+
+
+def test_api_is_admin_admin_secret_override():
+    fn = _load_api_is_admin()
+
+    fn.__globals__.update(
+        {
+            "request": _Request({"admin_secret": "s"}),
+            "extract_raw_init_data_from_query": lambda req: "",
+            "verify_telegram_init_data": lambda raw: (False, {}, "bad"),
+            "_get_admin_secret": lambda req: req.args.get("admin_secret"),
+            "_admin_secret_ok": lambda secret: secret == "s",
+            "admin_cache_col": _AdminCache([]),
+            "_users_update_one": lambda *args, **kwargs: None,
+            "datetime": __import__("datetime").datetime,
+            "timezone": __import__("datetime").timezone,
+            "json": __import__("json"),
+            "jsonify": lambda payload: payload,
+            "traceback": __import__("traceback"),
+        }
+    )
+
+    body = fn()
+    assert body["success"] is True
+    assert body["is_admin"] is True

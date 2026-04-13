@@ -1835,10 +1835,34 @@ app_bot = ApplicationBuilder().token(BOT_TOKEN).request(httpx_request).build()
 @app.route("/api/is_admin")
 def api_is_admin():
     try:
-        user_id = int(request.args.get("user_id"))
+        admin_secret = _get_admin_secret(request)
+        if _admin_secret_ok(admin_secret):
+            return jsonify({"success": True, "is_admin": True, "source": "secret"})
+
+        init_data = extract_raw_init_data_from_query(request)
+        if not init_data:
+            return jsonify({"success": False, "is_admin": False, "error": "Missing init_data"}), 400
+
+        ok, parsed, _ = verify_telegram_init_data(init_data)
+        if not ok:
+            return jsonify({"success": False, "is_admin": False, "error": "Admins only"}), 403
+
+        user_payload = (parsed or {}).get("user", {})
+        if isinstance(user_payload, str):
+            try:
+                user_payload = json.loads(user_payload)
+            except Exception:
+                user_payload = {}
+
+        user_id = int((user_payload or {}).get("id"))
 
         doc = admin_cache_col.find_one({"_id": "admins"}) or {}
-        ids = set(doc.get("ids", []))
+        ids = set()
+        for raw in doc.get("ids", []):
+            try:
+                ids.add(int(raw))
+            except (TypeError, ValueError):
+                continue
         is_admin = user_id in ids
 
         # optional: cache a per-user flag for faster UI checks
@@ -1857,7 +1881,7 @@ def api_is_admin():
         })
     except Exception as e:
         traceback.print_exc()
-        return jsonify({"success": False, "error": str(e)}), 500
+        return jsonify({"success": False, "is_admin": False, "error": str(e)}), 500
 
 async def refresh_admin_ids(context: ContextTypes.DEFAULT_TYPE):
     try:
