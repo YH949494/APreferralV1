@@ -64,6 +64,7 @@ from pymongo.errors import DuplicateKeyError, CursorNotFound, OperationFailure, 
 import os, asyncio, traceback, csv, io, requests, logging, time, uuid, socket, subprocess, hashlib
 import httpx
 import pytz
+import json
 from database import init_db, db
 
 FIRST_CHECKIN_BONUS_XP = int(os.getenv("FIRST_CHECKIN_BONUS_XP", "200"))
