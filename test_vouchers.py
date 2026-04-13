@@ -20,6 +20,7 @@ from vouchers import (
     _set_session_cooldown,
     _session_cooldown_payload,
     _should_enforce_session_cooldown,
+    claim_personalised,
     claim_pooled,
     get_claimable_pools,
     get_visible_pools,
@@ -225,6 +226,9 @@ class FakeDb:
     def __init__(self, drops, vouchers):
         self.drops = FakeDropsCollection(drops)
         self.vouchers = FakeVouchersCollection(vouchers)
+
+    def __getitem__(self, _name):
+        return FakeSimpleCollection([])
         
 class VoucherAntiHunterTests(unittest.TestCase):
     def test_get_client_ip_prefers_fly_header_over_private_remote_addr(self):
@@ -843,6 +847,209 @@ class VoucherAntiHunterTests(unittest.TestCase):
             m.extract_raw_init_data_from_query = orig_extract
             m.verify_telegram_init_data = orig_verify
             m.db = orig_db
+
+    def test_personalised_drop_visible_to_assigned_user_with_canonical_type(self):
+        import vouchers as m
+        from flask import Flask
+
+        now = datetime.now(timezone.utc)
+        app = Flask(__name__)
+        drop = {
+            "_id": "drop-p1",
+            "name": "P1",
+            "type": "personalised",
+            "status": "active",
+            "startsAt": now - timedelta(minutes=1),
+            "endsAt": now + timedelta(minutes=30),
+        }
+        fake_db = FakeDb([drop], [{"type": "personalised", "dropId": "drop-p1", "usernameLower": "alice", "status": "unclaimed", "code": "A1"}])
+        orig_db = m.db
+        orig_users = m.users_collection
+        orig_get_active_drops = m.get_active_drops
+        orig_load_ctx = m.load_user_context
+        orig_allowed = m.is_drop_allowed
+        orig_eligible = m.is_user_eligible_for_drop
+        try:
+            m.db = fake_db
+            m.users_collection = FakeSimpleCollection([{"user_id": 100, "usernameLower": "alice", "region": "th"}])
+            m.get_active_drops = lambda ref: [drop]
+            m.load_user_context = lambda **kwargs: {}
+            m.is_drop_allowed = lambda *args, **kwargs: True
+            m.is_user_eligible_for_drop = lambda *args, **kwargs: True
+            with app.app_context():
+                cards, _region = user_visible_drops({"usernameLower": "alice", "userId": "100"}, now, tg_user={"id": 100, "username": "alice"})
+            self.assertEqual(len(cards), 1)
+            self.assertEqual(cards[0]["dropId"], "drop-p1")
+        finally:
+            m.db = orig_db
+            m.users_collection = orig_users
+            m.get_active_drops = orig_get_active_drops
+            m.load_user_context = orig_load_ctx
+            m.is_drop_allowed = orig_allowed
+            m.is_user_eligible_for_drop = orig_eligible
+
+    def test_personalised_drop_visible_to_assigned_user_with_legacy_type(self):
+        import vouchers as m
+        from flask import Flask
+
+        now = datetime.now(timezone.utc)
+        app = Flask(__name__)
+        drop = {
+            "_id": "drop-p2",
+            "name": "P2",
+            "type": "personalized",
+            "status": "active",
+            "startsAt": now - timedelta(minutes=1),
+            "endsAt": now + timedelta(minutes=30),
+        }
+        fake_db = FakeDb([drop], [{"type": "personalized", "dropId": "drop-p2", "usernameLower": "alice", "status": "unclaimed", "code": "A2"}])
+        orig_db = m.db
+        orig_users = m.users_collection
+        orig_get_active_drops = m.get_active_drops
+        orig_load_ctx = m.load_user_context
+        orig_allowed = m.is_drop_allowed
+        orig_eligible = m.is_user_eligible_for_drop
+        try:
+            m.db = fake_db
+            m.users_collection = FakeSimpleCollection([{"user_id": 100, "usernameLower": "alice", "region": "th"}])
+            m.get_active_drops = lambda ref: [drop]
+            m.load_user_context = lambda **kwargs: {}
+            m.is_drop_allowed = lambda *args, **kwargs: True
+            m.is_user_eligible_for_drop = lambda *args, **kwargs: True
+            with app.app_context():
+                cards, _region = user_visible_drops({"usernameLower": "alice", "userId": "100"}, now, tg_user={"id": 100, "username": "alice"})
+            self.assertEqual(len(cards), 1)
+            self.assertEqual(cards[0]["dropId"], "drop-p2")
+        finally:
+            m.db = orig_db
+            m.users_collection = orig_users
+            m.get_active_drops = orig_get_active_drops
+            m.load_user_context = orig_load_ctx
+            m.is_drop_allowed = orig_allowed
+            m.is_user_eligible_for_drop = orig_eligible
+
+    def test_claim_personalised_supports_both_type_spellings(self):
+        import vouchers as m
+
+        now = datetime.now(timezone.utc)
+        for dtype in ("personalised", "personalized"):
+            fake_db = FakeDb([], [{"type": dtype, "dropId": "drop-c1", "usernameLower": "alice", "status": "unclaimed", "code": f"C-{dtype}"}])
+            orig_db = m.db
+            try:
+                m.db = fake_db
+                out = claim_personalised("drop-c1", "alice", now)
+                self.assertTrue(out["ok"])
+                self.assertTrue(out["code"].startswith("C-"))
+            finally:
+                m.db = orig_db
+
+    def test_unassigned_user_cannot_see_or_claim_personalised_drop(self):
+        import vouchers as m
+        from flask import Flask
+
+        app = Flask(__name__)
+        now = datetime.now(timezone.utc)
+        drop_id = "drop-p3"
+        drop = {
+            "_id": drop_id,
+            "name": "P3",
+            "type": "personalized",
+            "status": "active",
+            "startsAt": now - timedelta(minutes=5),
+            "endsAt": now + timedelta(minutes=5),
+        }
+        fake_db = FakeDb([drop], [{"type": "personalized", "dropId": drop_id, "usernameLower": "bob", "status": "unclaimed", "code": "B1"}])
+        orig_db = m.db
+        orig_users = m.users_collection
+        orig_extract = m.extract_raw_init_data_from_query
+        orig_verify = m.verify_telegram_init_data
+        orig_get_active_drops = m.get_active_drops
+        orig_load_user_context = m.load_user_context
+        orig_is_drop_allowed = m.is_drop_allowed
+        orig_is_user_eligible = m.is_user_eligible_for_drop
+        orig_dedup = m._acquire_request_dedup_lock
+        try:
+            m.db = fake_db
+            m.users_collection = FakeSimpleCollection([{"user_id": 42, "usernameLower": "alice", "region": "th"}])
+            m.extract_raw_init_data_from_query = lambda req: "ok"
+            m.verify_telegram_init_data = lambda init_data: (True, {"user": '{"id": 42, "username": "alice"}'}, "ok")
+            m.get_active_drops = lambda ref: [drop]
+            m.load_user_context = lambda **kwargs: {}
+            m.is_drop_allowed = lambda *args, **kwargs: True
+            m.is_user_eligible_for_drop = lambda *args, **kwargs: True
+            m._acquire_request_dedup_lock = lambda **kwargs: True
+
+            with app.app_context():
+                cards, _region = user_visible_drops({"usernameLower": "alice", "userId": "42"}, now, tg_user={"id": 42, "username": "alice"})
+            self.assertEqual(cards, [])
+            with app.test_request_context("/vouchers/claim?init_data=ok", method="POST", json={"dropId": drop_id}):
+                resp, status = m.api_claim()
+                self.assertEqual(status, 403)
+                self.assertEqual(resp.get_json().get("code"), "not_eligible")
+        finally:
+            m.db = orig_db
+            m.users_collection = orig_users
+            m.extract_raw_init_data_from_query = orig_extract
+            m.verify_telegram_init_data = orig_verify
+            m.get_active_drops = orig_get_active_drops
+            m.load_user_context = orig_load_user_context
+            m.is_drop_allowed = orig_is_drop_allowed
+            m.is_user_eligible_for_drop = orig_is_user_eligible
+            m._acquire_request_dedup_lock = orig_dedup
+
+    def test_admin_preview_visible_still_lists_personalised_drop(self):
+        import vouchers as m
+        from flask import Flask
+
+        class _Cursor:
+            def __init__(self, docs):
+                self.docs = docs
+
+            def sort(self, *_args, **_kwargs):
+                return self.docs
+
+        class _Drops:
+            def __init__(self, docs):
+                self.docs = docs
+
+            def find(self, _query):
+                return _Cursor(self.docs)
+
+        class _Db:
+            def __init__(self, docs):
+                self.drops = _Drops(docs)
+
+        app = Flask(__name__)
+        now = datetime.now(timezone.utc)
+        drop = {
+            "_id": "drop-admin-preview",
+            "name": "Preview",
+            "type": "personalized",
+            "status": "active",
+            "startsAt": now - timedelta(minutes=1),
+            "endsAt": now + timedelta(minutes=5),
+        }
+
+        orig_db = m.db
+        orig_extract = m.extract_raw_init_data_from_query
+        orig_verify = m.verify_telegram_init_data
+        orig_ctx_preview = m._user_ctx_or_preview
+        try:
+            m.db = _Db([drop])
+            m.extract_raw_init_data_from_query = lambda req: "ok"
+            m.verify_telegram_init_data = lambda init_data: (True, {}, "ok")
+            m._user_ctx_or_preview = lambda req, **kwargs: ({"userId": "0", "usernameLower": "admin"}, True)
+            with app.test_request_context("/vouchers/visible?init_data=ok", method="GET"):
+                resp, status = m.api_visible()
+                self.assertEqual(status, 200)
+                items = resp.get_json()["drops"]
+                self.assertEqual(len(items), 1)
+                self.assertTrue(items[0]["adminPreview"])
+        finally:
+            m.db = orig_db
+            m.extract_raw_init_data_from_query = orig_extract
+            m.verify_telegram_init_data = orig_verify
+            m._user_ctx_or_preview = orig_ctx_preview
 
     def test_kill_switch_blocks_after_threshold(self):
         rate_limits = FakeRateLimitCollection()
