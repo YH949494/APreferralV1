@@ -2667,7 +2667,7 @@ def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None
                     print(f"[personalised] hidden_no_username uid={uid}")
                     logged_hidden = True
                 continue
-            if dtype == "personalized":
+            if dtype in ("personalised", "personalized"):
                 v_uid   = d.get("assigned_to_user_id")
                 v_uname = norm_uname(d.get("assigned_to_username"))
              
