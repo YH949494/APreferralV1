@@ -36,7 +36,16 @@ from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_MISSED
 
 from app_context import set_app_bot, set_bot, set_scheduler
 from onboarding import MYWIN_CHAT_ID, onboarding_due_tick, record_first_mywin, record_first_checkin
-from vouchers import vouchers_bp, ensure_voucher_indexes, process_verification_queue, check_channel_subscribed
+from vouchers import (
+    vouchers_bp,
+    ensure_voucher_indexes,
+    process_verification_queue,
+    check_channel_subscribed,
+    extract_raw_init_data_from_query,
+    verify_telegram_init_data,
+    _get_admin_secret,
+    _admin_secret_ok,
+)
 from scheduler import settle_pending_referrals, settle_referral_snapshots, settle_xp_snapshots, evaluate_affiliate_simulated_ledgers, compute_affiliate_daily_kpi_yesterday, run_invitee_subscription_audit
 from referral_rate_limit import consume_referral_rate_limits
 from affiliate_leaderboard import (
@@ -1686,9 +1695,31 @@ def get_or_create_referral_invite_link_sync(user_id: int, username: str = "") ->
     return invite_link
 
 def require_admin_from_query():
-    caller_id = request.args.get("user_id", type=int)
+    admin_secret = _get_admin_secret(request)
+    if _admin_secret_ok(admin_secret):
+        return True, None
+
+    init_data = extract_raw_init_data_from_query(request)
+    if not init_data:
+        return False, ("Missing init_data", 400)
+
+    ok, parsed, _ = verify_telegram_init_data(init_data)
+    if not ok:
+        return False, ("Admins only", 403)
+
+    user_payload = (parsed or {}).get("user", {})
+    if isinstance(user_payload, str):
+        try:
+            user_payload = json.loads(user_payload)
+        except Exception:
+            user_payload = {}
+    try:
+        caller_id = int((user_payload or {}).get("id"))
+    except Exception:
+        caller_id = None
+
     if not caller_id:
-        return False, ("Missing user_id", 400)
+        return False, ("Admins only", 403)
 
     doc = admin_cache_col.find_one({"_id": "admins"}) or {}
     ids = set()
@@ -2755,7 +2786,27 @@ def get_week_history(week_start):
 @app.route("/api/bonus_voucher", methods=["GET"])
 def get_bonus_voucher():
     try:
-        user_id = int(request.args.get("user_id"))
+        user_id = None
+        init_data = extract_raw_init_data_from_query(request)
+        ok, parsed, _ = verify_telegram_init_data(init_data)
+        if ok:
+            user_payload = (parsed or {}).get("user", {})
+            if isinstance(user_payload, str):
+                try:
+                    user_payload = json.loads(user_payload)
+                except Exception:
+                    user_payload = {}
+            try:
+                user_id = int((user_payload or {}).get("id"))
+            except Exception:
+                user_id = None
+
+        if user_id is None and _admin_secret_ok(_get_admin_secret(request)):
+            user_id = request.args.get("user_id", type=int)
+
+        if user_id is None:
+            return jsonify({"code": None})
+
         user = users_collection.find_one({"user_id": user_id})
         if not user:
             return jsonify({"code": None})

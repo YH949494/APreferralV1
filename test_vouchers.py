@@ -757,6 +757,93 @@ class VoucherAntiHunterTests(unittest.TestCase):
             m._check_cooldown = orig_cooldown
             m.welcome_eligibility = orig_welcome_eligibility
 
+    def test_claim_rejects_inactive_drop(self):
+        import vouchers as m
+        from flask import Flask
+
+        app = Flask(__name__)
+        now = datetime.now(timezone.utc)
+        drop = {
+            "_id": "drop-inactive",
+            "type": "pooled",
+            "status": "draft",
+            "startsAt": now - timedelta(minutes=5),
+            "endsAt": now + timedelta(minutes=5),
+        }
+        orig_extract = m.extract_raw_init_data_from_query
+        orig_verify = m.verify_telegram_init_data
+        orig_db = m.db
+        try:
+            m.extract_raw_init_data_from_query = lambda req: "ok"
+            m.verify_telegram_init_data = lambda init_data: (True, {"user": '{"id": 42, "username": "u42"}'}, "ok")
+            m.db = FakeDb([drop], [])
+            with app.test_request_context("/vouchers/claim?init_data=ok", method="POST", json={"dropId": "drop-inactive"}):
+                resp, status = m.api_claim()
+                self.assertEqual(status, 403)
+                self.assertEqual(resp.get_json().get("reason"), "drop_inactive")
+        finally:
+            m.extract_raw_init_data_from_query = orig_extract
+            m.verify_telegram_init_data = orig_verify
+            m.db = orig_db
+
+    def test_claim_rejects_expired_drop(self):
+        import vouchers as m
+        from flask import Flask
+
+        app = Flask(__name__)
+        now = datetime.now(timezone.utc)
+        drop = {
+            "_id": "drop-expired",
+            "type": "pooled",
+            "status": "active",
+            "startsAt": now - timedelta(days=2),
+            "endsAt": now - timedelta(minutes=1),
+        }
+        orig_extract = m.extract_raw_init_data_from_query
+        orig_verify = m.verify_telegram_init_data
+        orig_db = m.db
+        try:
+            m.extract_raw_init_data_from_query = lambda req: "ok"
+            m.verify_telegram_init_data = lambda init_data: (True, {"user": '{"id": 42, "username": "u42"}'}, "ok")
+            m.db = FakeDb([drop], [])
+            with app.test_request_context("/vouchers/claim?init_data=ok", method="POST", json={"dropId": "drop-expired"}):
+                resp, status = m.api_claim()
+                self.assertEqual(status, 403)
+                self.assertEqual(resp.get_json().get("reason"), "drop_inactive")
+        finally:
+            m.extract_raw_init_data_from_query = orig_extract
+            m.verify_telegram_init_data = orig_verify
+            m.db = orig_db
+
+    def test_claim_rejects_paused_non_live_drop(self):
+        import vouchers as m
+        from flask import Flask
+
+        app = Flask(__name__)
+        now = datetime.now(timezone.utc)
+        drop = {
+            "_id": "drop-paused",
+            "type": "pooled",
+            "status": "paused",
+            "startsAt": now - timedelta(minutes=5),
+            "endsAt": now + timedelta(minutes=5),
+        }
+        orig_extract = m.extract_raw_init_data_from_query
+        orig_verify = m.verify_telegram_init_data
+        orig_db = m.db
+        try:
+            m.extract_raw_init_data_from_query = lambda req: "ok"
+            m.verify_telegram_init_data = lambda init_data: (True, {"user": '{"id": 42, "username": "u42"}'}, "ok")
+            m.db = FakeDb([drop], [])
+            with app.test_request_context("/vouchers/claim?init_data=ok", method="POST", json={"dropId": "drop-paused"}):
+                resp, status = m.api_claim()
+                self.assertEqual(status, 403)
+                self.assertEqual(resp.get_json().get("reason"), "drop_inactive")
+        finally:
+            m.extract_raw_init_data_from_query = orig_extract
+            m.verify_telegram_init_data = orig_verify
+            m.db = orig_db
+
     def test_kill_switch_blocks_after_threshold(self):
         rate_limits = FakeRateLimitCollection()
         now = datetime.now(timezone.utc)
