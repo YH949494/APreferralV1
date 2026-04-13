@@ -2743,12 +2743,28 @@ def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None
     return personal_cards + pooled_cards, user_region
 
 # ---- Claim handlers ----
-def claim_personalised(drop_id: str, usernameLower: str, ref: datetime):
+def claim_personalised(drop_id: str, usernameLower: str, ref: datetime, assigned_user_id=None):
     drop_id_variants = _drop_id_variants(drop_id)
+    identity_filters = [
+        {"usernameLower": usernameLower},
+        {"username": usernameLower},
+        {"assigned_to_username": usernameLower},
+    ]
+
+    safe_user_id = None
+    if assigned_user_id not in (None, ""):
+        safe_user_id = str(assigned_user_id).strip()
+    if safe_user_id:
+        identity_filters.append({"assigned_to_user_id": safe_user_id})
+        try:
+            identity_filters.append({"assigned_to_user_id": int(safe_user_id)})
+        except (TypeError, ValueError):
+            pass
+
     personalised_filter = {
         "type": {"$in": list(PERSONALISED_TYPE_ALIASES)},
         "dropId": {"$in": drop_id_variants},
-        "usernameLower": usernameLower,
+        "$or": identity_filters,
     }
  
     # Return existing if already claimed
@@ -2779,6 +2795,7 @@ def claim_personalised(drop_id: str, usernameLower: str, ref: datetime):
         already = db.vouchers.find_one(personalised_filter)
         if already and already.get("status") == "claimed":
             return {"ok": True, "code": already["code"], "claimedAt": _isoformat_kl(already.get("claimedAt"))}
+        _safe_log("info", "[CLAIM_PERSONALISED][MISS] drop_id=%s usernameLower=%s filter_used=%s", drop_id, usernameLower, personalised_filter)
         return {"ok": False, "err": "not_eligible"}
     return {"ok": True, "code": doc["code"], "claimedAt": _isoformat_kl(doc.get("claimedAt"))}
 
@@ -3379,7 +3396,7 @@ def claim_voucher_for_user(*, user_id: str, drop_id: str, username: str) -> dict
     if dtype == PERSONALISED_TYPE_CANONICAL:
         if not usernameLower:
             raise NotEligible("not_eligible")     
-        res = claim_personalised(drop_id=drop_id, usernameLower=usernameLower, ref=ref)
+        res = claim_personalised(drop_id=drop_id, usernameLower=usernameLower, ref=ref, assigned_user_id=user_id_str)
         if res.get("ok"):
             return {"code": res["code"], "claimedAt": res["claimedAt"]}
         if res.get("err") == "not_eligible":
