@@ -2832,15 +2832,6 @@ def get_bonus_voucher():
         if user_id is None:
             return jsonify({"code": None})
 
-        user = users_collection.find_one({"user_id": user_id})
-        if not user:
-            return jsonify({"code": None})
-
-        is_admin = user.get("is_admin", False)
-        is_vip = (user.get("vip_tier") or user.get("status")) == "VIP1"
-        if not is_vip and not is_admin:
-            return jsonify({"code": None})
-
         def _mask_voucher_code(raw):
             code = (raw or "").strip()
             if not code:
@@ -2860,32 +2851,56 @@ def get_bonus_voucher():
         affiliate_code = ((affiliate_doc or {}).get("voucher_code") or "").strip()
         if affiliate_code:
             logger.info(
-                "[BONUS_VOUCHER][AFFILIATE_HIT] user_id=%s code=%s",
+                "[BONUS][AFFILIATE_HIT] user_id=%s code=%s",
                 user_id,
                 _mask_voucher_code(affiliate_code),
             )
             return jsonify({"code": affiliate_code})
-        logger.info("[BONUS_VOUCHER][AFFILIATE_MISS] user_id=%s", user_id)
-
-        now = datetime.now(timezone.utc)
-
-        voucher = bonus_voucher_collection.find_one()
-        if not voucher:
-            logger.info("[BONUS_VOUCHER][AFFILIATE_FALLBACK] user_id=%s reason=no_global_voucher", user_id)
-            return jsonify({"code": None})
-
-        start = voucher["start_time"]
-        end = voucher["end_time"]
-        if start.tzinfo is None: start = start.replace(tzinfo=pytz.UTC)
-        if end.tzinfo is None:   end   = end.replace(tzinfo=pytz.UTC)
-
-        if start <= now <= end:
-            logger.info("[BONUS_VOUCHER][AFFILIATE_FALLBACK] user_id=%s reason=active_global_voucher", user_id)
-            return jsonify({"code": voucher["code"]})
-        logger.info("[BONUS_VOUCHER][AFFILIATE_FALLBACK] user_id=%s reason=inactive_global_voucher", user_id)
+        logger.info("[BONUS][AFFILIATE_MISS] user_id=%s", user_id)
         return jsonify({"code": None})
     except Exception as e:
         logger.exception("[BONUS_VOUCHER][AFFILIATE_ERROR] %s", e)
+        return jsonify({"code": None, "error": str(e)}), 500
+
+
+@app.route("/api/campaign_bonus_voucher", methods=["GET"])
+def get_campaign_bonus_voucher():
+    try:
+        init_data = extract_raw_init_data_from_query(request)
+        ok, _, _ = verify_telegram_init_data(init_data)
+        if not ok:
+            return jsonify({"code": None})
+
+        now = datetime.now(timezone.utc)
+        voucher = bonus_voucher_collection.find_one()
+        if not voucher:
+            logger.info("[BONUS][CAMPAIGN_MISS] reason=no_voucher")
+            return jsonify({"code": None})
+
+        code = (voucher.get("code") or "").strip()
+        if not code:
+            logger.info("[BONUS][CAMPAIGN_MISS] reason=blank_code")
+            return jsonify({"code": None})
+
+        release = voucher.get("release_time") or voucher.get("start_time")
+        expiry = voucher.get("expiry") or voucher.get("end_time")
+        if release is None:
+            logger.info("[BONUS][CAMPAIGN_MISS] reason=missing_release_time")
+            return jsonify({"code": None})
+        if release.tzinfo is None:
+            release = release.replace(tzinfo=pytz.UTC)
+        if expiry is not None and expiry.tzinfo is None:
+            expiry = expiry.replace(tzinfo=pytz.UTC)
+
+        if release <= now and (expiry is None or now <= expiry):
+            masked = code[:2] + "..." + code[-2:] if len(code) <= 8 else code[:4] + "..." + code[-4:]
+            logger.info("[BONUS][CAMPAIGN_HIT] code=%s", masked)
+            return jsonify({"code": code})
+
+        logger.info("[BONUS][CAMPAIGN_MISS] reason=not_live")
+        return jsonify({"code": None})
+    except Exception as e:
+        logger.exception("[BONUS][CAMPAIGN_ERROR] %s", e)
         return jsonify({"code": None, "error": str(e)}), 500
 
 @app.route("/api/add_xp", methods=["POST"])
