@@ -17,6 +17,20 @@ def _load_get_bonus_voucher():
     return env["get_bonus_voucher"]
 
 
+def _load_get_campaign_bonus_voucher():
+    source = Path("main.py").read_text(encoding="utf-8")
+    module = ast.parse(source)
+    fn_node = next(
+        node for node in module.body if isinstance(node, ast.FunctionDef) and node.name == "get_campaign_bonus_voucher"
+    )
+    fn_node.decorator_list = []
+    isolated = ast.Module(body=[fn_node], type_ignores=[])
+    ast.fix_missing_locations(isolated)
+    env = {}
+    exec(compile(isolated, filename="main.py", mode="exec"), env)  # noqa: S102
+    return env["get_campaign_bonus_voucher"]
+
+
 class _UsersCollection:
     def __init__(self, docs):
         self.docs = docs
@@ -119,9 +133,28 @@ def _build_globals(*, users, affiliate_rows, bonus_voucher, request_user_id, ver
     return fn, logger
 
 
-def test_bonus_voucher_returns_affiliate_code_for_current_user_only():
+def _build_campaign_globals(*, bonus_voucher, init_ok=True):
+    logger = _Logger()
+    fn = _load_get_campaign_bonus_voucher()
+    fn.__globals__.update(
+        {
+            "request": _Request({}),
+            "jsonify": _jsonify,
+            "bonus_voucher_collection": _BonusVoucherCollection(bonus_voucher),
+            "logger": logger,
+            "datetime": datetime,
+            "timezone": timezone,
+            "pytz": type("Pytz", (), {"UTC": timezone.utc}),
+            "extract_raw_init_data_from_query": lambda req: "init",
+            "verify_telegram_init_data": lambda init_data: (init_ok, {"user": {"id": 1001}}, "ok"),
+        }
+    )
+    return fn, logger
+
+
+def test_affiliate_user_gets_code():
     fn, _ = _build_globals(
-        users={1001: {"user_id": 1001, "vip_tier": "VIP1"}},
+        users={1001: {"user_id": 1001}},
         affiliate_rows=[
             {"_id": 1, "user_id": 9999, "status": "ISSUED", "voucher_code": "OTHER-CODE"},
             {"_id": 2, "user_id": 1001, "status": "ISSUED", "voucher_code": "MINE-CODE"},
@@ -132,9 +165,9 @@ def test_bonus_voucher_returns_affiliate_code_for_current_user_only():
     assert fn() == {"code": "MINE-CODE"}
 
 
-def test_bonus_voucher_ignores_spoofed_query_user_id_and_uses_verified_identity():
+def test_spoofed_user_id_ignored():
     fn, _ = _build_globals(
-        users={1001: {"user_id": 1001, "vip_tier": "VIP1"}, 9999: {"user_id": 9999, "vip_tier": "VIP1"}},
+        users={1001: {"user_id": 1001}, 9999: {"user_id": 9999}},
         affiliate_rows=[
             {"_id": 1, "user_id": 9999, "status": "ISSUED", "voucher_code": "SPOOF-CODE"},
             {"_id": 2, "user_id": 1001, "status": "ISSUED", "voucher_code": "REAL-CODE"},
@@ -146,10 +179,10 @@ def test_bonus_voucher_ignores_spoofed_query_user_id_and_uses_verified_identity(
     assert fn() == {"code": "REAL-CODE"}
 
 
-def test_bonus_voucher_picks_latest_affiliate_row_deterministically():
+def test_latest_affiliate_code_selected():
     now = datetime.now(timezone.utc)
     fn, _ = _build_globals(
-        users={1001: {"user_id": 1001, "vip_tier": "VIP1"}},
+        users={1001: {"user_id": 1001}},
         affiliate_rows=[
             {
                 "_id": 1,
@@ -174,37 +207,71 @@ def test_bonus_voucher_picks_latest_affiliate_row_deterministically():
     assert fn() == {"code": "NEWEST-CODE"}
 
 
-def test_bonus_voucher_ignores_blank_affiliate_code_and_falls_back_to_existing_behavior():
-    now = datetime.now(timezone.utc)
+def test_non_affiliate_user_gets_null():
     fn, logger = _build_globals(
-        users={1001: {"user_id": 1001, "vip_tier": "VIP1"}},
+        users={1001: {"user_id": 1001}},
         affiliate_rows=[
             {"_id": 1, "user_id": 1001, "status": "ISSUED", "voucher_code": ""},
             {"_id": 2, "user_id": 1001, "status": "ISSUED", "voucher_code": None},
         ],
-        bonus_voucher={
-            "code": "GLOBAL-CODE",
-            "start_time": now - timedelta(minutes=1),
-            "end_time": now + timedelta(minutes=1),
-        },
+        bonus_voucher=None,
         request_user_id=1001,
     )
-    assert fn() == {"code": "GLOBAL-CODE"}
-    assert any("[BONUS_VOUCHER][AFFILIATE_MISS]" in c[0] for c in logger.info_calls)
+    assert fn() == {"code": None}
+    assert any("[BONUS][AFFILIATE_MISS]" in c[0] for c in logger.info_calls)
 
 
-def test_bonus_voucher_admin_preview_does_not_leak_other_users_affiliate_code():
-    now = datetime.now(timezone.utc)
+def test_no_cross_user_leak():
     fn, _ = _build_globals(
         users={5000: {"user_id": 5000, "is_admin": True}},
         affiliate_rows=[
             {"_id": 1, "user_id": 1001, "status": "ISSUED", "voucher_code": "USER-A-CODE"},
+            {"_id": 2, "user_id": 5000, "status": "ISSUED", "voucher_code": "ADMIN-CODE"},
         ],
-        bonus_voucher={
-            "code": "GLOBAL-CODE",
-            "start_time": now - timedelta(minutes=1),
-            "end_time": now + timedelta(minutes=1),
-        },
+        bonus_voucher=None,
         request_user_id=5000,
     )
+    assert fn() == {"code": "ADMIN-CODE"}
+
+
+def test_campaign_code_visible_to_all_users():
+    now = datetime.now(timezone.utc)
+    fn, logger = _build_campaign_globals(
+        bonus_voucher={
+            "code": "GLOBAL-CODE",
+            "release_time": now - timedelta(minutes=1),
+            "expiry": now + timedelta(minutes=1),
+        }
+    )
     assert fn() == {"code": "GLOBAL-CODE"}
+    assert any("[BONUS][CAMPAIGN_HIT]" in c[0] for c in logger.info_calls)
+
+
+def test_campaign_hidden_if_not_live():
+    now = datetime.now(timezone.utc)
+    fn, logger = _build_campaign_globals(
+        bonus_voucher={
+            "code": "GLOBAL-CODE",
+            "release_time": now + timedelta(minutes=10),
+            "expiry": now + timedelta(minutes=20),
+        }
+    )
+    assert fn() == {"code": None}
+    assert any("[BONUS][CAMPAIGN_MISS]" in c[0] for c in logger.info_calls)
+
+
+def test_init_data_required_for_both_endpoints():
+    fn_affiliate, _ = _build_globals(
+        users={1001: {"user_id": 1001}},
+        affiliate_rows=[{"_id": 1, "user_id": 1001, "status": "ISSUED", "voucher_code": "CODE"}],
+        bonus_voucher=None,
+        request_user_id=1001,
+    )
+    fn_affiliate.__globals__["verify_telegram_init_data"] = lambda init_data: (False, {}, "bad")
+    assert fn_affiliate() == {"code": None}
+
+    fn_campaign, _ = _build_campaign_globals(
+        bonus_voucher={"code": "GLOBAL-CODE", "release_time": datetime.now(timezone.utc) - timedelta(minutes=1)},
+        init_ok=False,
+    )
+    assert fn_campaign() == {"code": None}

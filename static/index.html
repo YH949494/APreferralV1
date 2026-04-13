@@ -808,8 +808,14 @@
     <div id="claim-error" role="status" aria-live="polite"></div>    
     <div id="campaign-voucher-list"></div>
     
+    <div id="campaign-bonus-voucher" style="display: none; margin-top: 16px;">
+      <h4>🎉 Campaign Reward</h4>
+      <p id="campaign-voucher-code">Coming soon…</p>
+      <button class="btn btn-ghost" onclick="copyCampaignVoucherCode()">📋 Copy to clipboard</button>
+    </div>
+
     <div id="bonus-voucher" style="display: none; margin-top: 16px;">
-      <h4>🎁 VIP Bonus Voucher</h4>
+      <h4>🎁 Your Affiliate Reward</h4>
       <p id="voucher-code">Coming soon…</p>
       <button class="btn btn-ghost" onclick="copyVoucherCode()">📋 Copy to clipboard</button>
     </div>
@@ -2400,21 +2406,38 @@ Active players win more.
         .catch(() => alert("Failed to copy voucher."));
     }
 
+    function copyCampaignVoucherCode() {
+      const codeEl = document.getElementById("campaign-voucher-code");
+      const code = codeEl ? codeEl.innerText.trim() : "";
+      if (!code || code.toLowerCase().includes("coming soon")) {
+        alert("❌ No voucher code available to copy yet.");
+        return;
+      }
+
+      navigator.clipboard.writeText(code)
+        .then(() => alert("Voucher code copied!"))
+        .catch(() => alert("Failed to copy voucher."));
+    }
+
     async function handleAdminAndVoucher() {
       try {
         const initDataRaw = await waitForInitData();
         const adminUrl = withInitDataInQuery(`${API_BASE}/api/is_admin`, initDataRaw);
         const bonusVoucherUrl = withInitDataInQuery(`${API_BASE}/api/bonus_voucher`, initDataRaw);
+        const campaignBonusVoucherUrl = withInitDataInQuery(`${API_BASE}/api/campaign_bonus_voucher`, initDataRaw);
         const authHeaders = v2Headers({}, initDataRaw);
-        const [adminRes, voucherRes] = await Promise.all([
+        const [adminRes, voucherRes, campaignVoucherRes] = await Promise.all([
           fetch(adminUrl, { headers: authHeaders }),
-          fetch(bonusVoucherUrl, { headers: authHeaders })
+          fetch(bonusVoucherUrl, { headers: authHeaders }),
+          fetch(campaignBonusVoucherUrl, { headers: authHeaders })
         ]);
 
         let adminData = {};
         let voucherData = {};
+        let campaignVoucherData = {};
         try { adminData = await adminRes.json(); } catch (_) {}
         try { voucherData = await voucherRes.json(); } catch (_) {}
+        try { campaignVoucherData = await campaignVoucherRes.json(); } catch (_) {}
 
         const isAdmin = adminData.success && adminData.is_admin;
         if (isAdmin) {
@@ -2428,14 +2451,22 @@ Active players win more.
         const bonusSection = document.getElementById("bonus-voucher");
         const codeEl = document.getElementById("voucher-code");
         if (bonusSection && codeEl) {
-          if (isAdmin) {
-            bonusSection.style.display = "block";
-            codeEl.innerText = voucherData.code || "More vouchers coming soon.";
-          } else if (voucherData.code) {
+          if (voucherData.code) {
             bonusSection.style.display = "block";
             codeEl.innerText = voucherData.code;
           } else {
             bonusSection.style.display = "none";
+          }
+        }
+
+        const campaignBonusSection = document.getElementById("campaign-bonus-voucher");
+        const campaignCodeEl = document.getElementById("campaign-voucher-code");
+        if (campaignBonusSection && campaignCodeEl) {
+          if (campaignVoucherData.code) {
+            campaignBonusSection.style.display = "block";
+            campaignCodeEl.innerText = campaignVoucherData.code;
+          } else {
+            campaignBonusSection.style.display = "none";
           }
         }
       } catch (err) {
