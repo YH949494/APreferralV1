@@ -2733,10 +2733,11 @@ def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None
 # ---- Claim handlers ----
 def claim_personalised(drop_id: str, usernameLower: str, ref: datetime):
     drop_id_variants = _drop_id_variants(drop_id)
+    personal_types = ["personalised", "personalized"]
  
     # Return existing if already claimed
     existing = db.vouchers.find_one({
-        "type": "personalised",
+        "type": {"$in": personal_types},
         "dropId": {"$in": drop_id_variants},
         "usernameLower": usernameLower,
         "status": "claimed"
@@ -2747,7 +2748,7 @@ def claim_personalised(drop_id: str, usernameLower: str, ref: datetime):
     # Claim the assigned row atomically
     doc = db.vouchers.find_one_and_update(
         {
-            "type": "personalised",
+            "type": {"$in": personal_types},
             "dropId": {"$in": drop_id_variants},
             "usernameLower": usernameLower,
             "status": "unclaimed"
@@ -2764,7 +2765,7 @@ def claim_personalised(drop_id: str, usernameLower: str, ref: datetime):
     if not doc:
         # Maybe there is no assignment or it was already claimed; try fetching claimed again to idempotently return
         already = db.vouchers.find_one({
-            "type": "personalised",
+            "type": {"$in": personal_types},
             "dropId": {"$in": drop_id_variants},
             "usernameLower": usernameLower
         })
@@ -3395,6 +3396,7 @@ def api_claim():
     body = request.get_json(silent=True) or {}
  
     drop_id = body.get("dropId") or body.get("drop_id")
+    check_only = bool(body.get("check_only") or body.get("checkOnly"))
     drop = db.drops.find_one({"_id": _coerce_id(drop_id)}) if drop_id else {}
     drop_type = drop.get("type", "pooled")
 
@@ -3469,14 +3471,16 @@ def api_claim():
         query_id=(data or {}).get("query_id"),
     )
 
-    # Short-lived dedup lock collapses duplicate clicks during lag before heavy checks run.
-    if not _acquire_request_dedup_lock(drop_id=str(drop_id), uid=uid, ttl_seconds=5):
-        return jsonify({
-            "status": "error",
-            "code": "busy",
-            "message": "High traffic — retry in 2–3 seconds.",
-            "retry_after_sec": 2,
-        }), 429
+    # check_only is a preflight probe and must not consume real-claim dedup windows.
+    if not check_only:
+        # Short-lived dedup lock collapses duplicate clicks during lag before heavy checks run.
+        if not _acquire_request_dedup_lock(drop_id=str(drop_id), uid=uid, ttl_seconds=5):
+            return jsonify({
+                "status": "error",
+                "code": "busy",
+                "message": "High traffic — retry in 2–3 seconds.",
+                "retry_after_sec": 2,
+            }), 429
  
     user_doc = None
     if uid is not None:
@@ -3558,7 +3562,6 @@ def api_claim():
         user_id = fallback_user_id or username or ""
 
     audience_type = _drop_audience_type(voucher)
-    check_only = bool(body.get("check_only") or body.get("checkOnly")) 
     client_ip = _get_client_ip(request)
     client_subnet = _compute_subnet_key(client_ip) 
     is_pool_drop = _is_pool_drop(voucher, audience_type)
