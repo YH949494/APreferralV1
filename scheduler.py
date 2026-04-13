@@ -12,6 +12,7 @@ from database import db
 from referral_rules import calc_referral_award
 from xp import grant_xp, now_utc, now_kl
 from affiliate_rewards import mark_invitee_qualified
+from affiliate_group_access import maybe_unlock_affiliate_group
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 _RAW_GROUP_ID = os.environ.get("MAIN_GROUP_ID") or os.environ.get("GROUP_ID") or "-1002304653063"
@@ -1502,6 +1503,13 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
             )
             ref_total = new_ref_total
             maybe_handle_first_referral(inviter_user_id, current_ref_total, new_ref_total, now_utc_ts)
+            maybe_unlock_affiliate_group(
+                db=db,
+                user_id=inviter_user_id,
+                current_ref_total=current_ref_total,
+                new_ref_total=new_ref_total,
+                now_utc=now_utc_ts,
+            )
             
             db.pending_referrals.update_one(
                 {"_id": pending_id},

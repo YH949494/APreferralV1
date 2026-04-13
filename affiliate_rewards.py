@@ -750,10 +750,6 @@ def mark_invitee_qualified(db, *, invitee_id: int, referrer_id: int | None, now_
         logger.exception("affiliate_qualified_event_emit_failed invitee=%s referrer=%s", invitee_id, referrer_id)
     if referrer_id is not None:
         evaluate_monthly_affiliate_reward(db, referrer_id=int(referrer_id), now_utc=now_utc)
-    try:
-        _maybe_trigger_affiliate_group_invite(db, referrer_id=referrer_id, now_utc=now_utc)
-    except Exception as exc:
-        logger.exception("[AFF_GROUP][FAIL] referrer=%s week_key=unknown err=%s", referrer_id, exc)
     return True
 
 
