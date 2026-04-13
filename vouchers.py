@@ -3363,7 +3363,7 @@ def claim_voucher_for_user(*, user_id: str, drop_id: str, username: str) -> dict
     if not drop:
         raise NotEligible("drop_not_found")
 
-    dtype = drop.get("type", "pooled")
+    dtype = str(drop.get("type", "pooled") or "pooled").strip().lower()
     usernameLower = norm_username(username)
     claim_key = f"uid:{user_id_str}"
     ref = now_utc()
@@ -3398,7 +3398,7 @@ def api_claim():
     drop_id = body.get("dropId") or body.get("drop_id")
     check_only = bool(body.get("check_only") or body.get("checkOnly"))
     drop = db.drops.find_one({"_id": _coerce_id(drop_id)}) if drop_id else {}
-    drop_type = drop.get("type", "pooled")
+    drop_type = str(drop.get("type", "pooled") or "pooled").strip().lower()
 
     init_data = extract_raw_init_data_from_query(request)
 
@@ -3498,7 +3498,7 @@ def api_claim():
     v_uid   = voucher.get("assigned_to_user_id")
     v_uname = norm_uname(voucher.get("assigned_to_username"))
 
-    drop_type = voucher.get("type", drop_type)
+    drop_type = str(voucher.get("type", drop_type) or drop_type).strip().lower()
  
     username_missing = not (username and username.strip())
     if drop_type in ("personalised", "personalized") and username_missing:
@@ -3513,14 +3513,24 @@ def api_claim():
 
     allowed = True
     if drop_type in ("personalised", "personalized"):
-        if drop_type == "personalized":
-            allowed = False
-            if v_uid is not None:
+        allowed = False
+        if v_uid is not None:
+            try:
                 allowed = (uid is not None and uid == int(v_uid))
-            elif v_uname:
-                allowed = (uname != "" and uname == v_uname)
-            else:
+            except (TypeError, ValueError):
                 allowed = False
+        elif v_uname:
+            allowed = (uname != "" and uname == v_uname)
+        else:
+            allowed = False
+        current_app.logger.info(
+            "[claim][personalised_gate] drop=%s dtype=%s uid=%s uname=%s allowed=%s",
+            drop_id,
+            drop_type,
+            uid,
+            uname,
+            allowed,
+        )
 
     if not allowed:
         print(f"[claim401] uid={uid} uname={uname} v_uid={v_uid} v_uname={v_uname}")
