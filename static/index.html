@@ -1410,30 +1410,22 @@
       return latestInitData;
     } 
     
-    async function waitForInitData(timeoutMs = 8000, intervalMs = 50) {
-      if (getAdminSecret()) return getLatestInitData("");
-
-      const qs = new URLSearchParams(location.search);
+    async function waitForInitData(timeoutMs = 5000, intervalMs = 50) {
       const deadline = Date.now() + timeoutMs;
 
       while (Date.now() < deadline) {
-        const candidate =
-          (typeof tg?.initData === "string" && tg.initData.length ? tg.initData : "") ||
-          (typeof window.Telegram?.WebApp?.initData === "string" && window.Telegram.WebApp.initData.length
-            ? window.Telegram.WebApp.initData
-            : "") ||
-          qs.get("init_data") ||
-          "";
+        const candidate = typeof window.Telegram?.WebApp?.initData === "string"
+          ? window.Telegram.WebApp.initData
+          : "";
 
-        const stored = getLatestInitData(candidate);
-        if (stored) {
-          return stored;
+        if (candidate) {
+          return getLatestInitData(candidate);
         }
 
         await new Promise((resolve) => setTimeout(resolve, intervalMs));
       }
 
-      return getLatestInitData("");
+      throw new Error("missing_init_data");
     }
 
     function v2Headers(extras = {}, initDataOverride = "") {
@@ -2411,10 +2403,12 @@ Active players win more.
     async function handleAdminAndVoucher() {
       try {
         const initDataRaw = await waitForInitData();
+        const adminUrl = withInitDataInQuery(`${API_BASE}/api/is_admin`, initDataRaw);
         const bonusVoucherUrl = withInitDataInQuery(`${API_BASE}/api/bonus_voucher`, initDataRaw);
+        const authHeaders = v2Headers({}, initDataRaw);
         const [adminRes, voucherRes] = await Promise.all([
-          fetch(`${API_BASE}/api/is_admin?user_id=${userId}`),
-          fetch(bonusVoucherUrl, { headers: v2Headers({}, initDataRaw) })
+          fetch(adminUrl, { headers: authHeaders }),
+          fetch(bonusVoucherUrl, { headers: authHeaders })
         ]);
 
         let adminData = {};
@@ -3941,9 +3935,10 @@ ${referral}`;
 
       try {
         const idempotencyKey = `adminui:${userId}:${input}:${amount}:${Date.now()}`;        
-        const res = await fetch(`${API_BASE}/api/add_xp?user_id=${userId}`, {
+        const initDataRaw = await waitForInitData();
+        const res = await fetch(withInitDataInQuery(`${API_BASE}/api/add_xp`, initDataRaw), {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: v2Headers({}, initDataRaw),
           body: JSON.stringify({ user_id: input, xp: amount, idempotency_key: idempotencyKey })
         });
         const data = await res.json();
@@ -3973,13 +3968,14 @@ ${referral}`;
         return;
       }
       try {
+        const initDataRaw = await waitForInitData();
         const payload = {
           code,
           release_time: new Date(releaseAt).toISOString().replace(".000Z", "Z")
         };
-        const res = await fetch(`${API_BASE}/api/admin/set_bonus?user_id=${userId}`, {
+        const res = await fetch(withInitDataInQuery(`${API_BASE}/api/admin/set_bonus`, initDataRaw), {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: v2Headers({}, initDataRaw),
           body: JSON.stringify(payload)
         });
         const data = await res.json();
