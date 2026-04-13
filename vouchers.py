@@ -2745,13 +2745,15 @@ def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None
 # ---- Claim handlers ----
 def claim_personalised(drop_id: str, usernameLower: str, ref: datetime):
     drop_id_variants = _drop_id_variants(drop_id)
-    personal_types = list(PERSONALISED_TYPE_ALIASES)
+    personalised_filter = {
+        "type": {"$in": list(PERSONALISED_TYPE_ALIASES)},
+        "dropId": {"$in": drop_id_variants},
+        "usernameLower": usernameLower,
+    }
  
     # Return existing if already claimed
     existing = db.vouchers.find_one({
-        "type": {"$in": personal_types},
-        "dropId": {"$in": drop_id_variants},
-        "usernameLower": usernameLower,
+        **personalised_filter,
         "status": "claimed"
     })
     if existing:
@@ -2760,9 +2762,7 @@ def claim_personalised(drop_id: str, usernameLower: str, ref: datetime):
     # Claim the assigned row atomically
     doc = db.vouchers.find_one_and_update(
         {
-            "type": {"$in": personal_types},
-            "dropId": {"$in": drop_id_variants},
-            "usernameLower": usernameLower,
+            **personalised_filter,
             "status": "unclaimed"
         },
         {
@@ -2776,11 +2776,7 @@ def claim_personalised(drop_id: str, usernameLower: str, ref: datetime):
     )
     if not doc:
         # Maybe there is no assignment or it was already claimed; try fetching claimed again to idempotently return
-        already = db.vouchers.find_one({
-            "type": {"$in": personal_types},
-            "dropId": {"$in": drop_id_variants},
-            "usernameLower": usernameLower
-        })
+        already = db.vouchers.find_one(personalised_filter)
         if already and already.get("status") == "claimed":
             return {"ok": True, "code": already["code"], "claimedAt": _isoformat_kl(already.get("claimedAt"))}
         return {"ok": False, "err": "not_eligible"}
