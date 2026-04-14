@@ -22,8 +22,10 @@ from vouchers import (
     _should_enforce_session_cooldown,
     claim_personalised,
     claim_pooled,
+    admin_drop_actions,
     get_claimable_pools,
     get_visible_pools,
+    parse_kl_local,
     reconcile_pooled_remaining,
     user_visible_drops,
     get_active_drops,
@@ -847,6 +849,48 @@ class VoucherAntiHunterTests(unittest.TestCase):
             m.extract_raw_init_data_from_query = orig_extract
             m.verify_telegram_init_data = orig_verify
             m.db = orig_db
+
+    def test_admin_start_now_sets_active_and_rewrites_window(self):
+        import vouchers as m
+        from flask import Flask
+
+        app = Flask(__name__)
+        now = datetime.now(timezone.utc)
+        drop = {
+            "_id": "drop-start-now",
+            "type": "pooled",
+            "status": "upcoming",
+            "startsAt": now + timedelta(hours=2),
+            "endsAt": now + timedelta(hours=3),
+        }
+
+        orig_db = m.db
+        orig_require_admin = m.require_admin
+        orig_now_utc = m.now_utc
+        try:
+            m.db = FakeDb([drop], [])
+            m.require_admin = lambda: ({"id": 1}, None)
+            m.now_utc = lambda: now
+            with app.test_request_context(
+                "/v2/miniapp/admin/drops/drop-start-now/actions",
+                method="POST",
+                json={"op": "start_now"},
+            ):
+                resp = admin_drop_actions("drop-start-now")
+            self.assertEqual(resp.get_json().get("status"), "ok")
+            updated = m.db.drops.docs["drop-start-now"]
+            self.assertEqual(updated.get("status"), "active")
+            self.assertEqual(updated.get("startsAt"), now)
+            self.assertEqual(updated.get("endsAt"), now + timedelta(hours=24))
+        finally:
+            m.db = orig_db
+            m.require_admin = orig_require_admin
+            m.now_utc = orig_now_utc
+
+    def test_parse_kl_local_converts_kl_to_utc(self):
+        parsed = parse_kl_local("2026-04-15 08:30:00")
+        self.assertEqual(parsed.tzinfo, timezone.utc)
+        self.assertEqual(parsed.isoformat(), "2026-04-15T00:30:00+00:00")
 
     def test_personalised_drop_visible_to_assigned_user_with_canonical_type(self):
         import vouchers as m

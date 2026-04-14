@@ -46,7 +46,7 @@ from vouchers import (
     _get_admin_secret,
     _admin_secret_ok,
 )
-from scheduler import settle_pending_referrals, settle_referral_snapshots, settle_xp_snapshots, evaluate_affiliate_simulated_ledgers, compute_affiliate_daily_kpi_yesterday, run_invitee_subscription_audit
+from scheduler import settle_pending_referrals, settle_referral_snapshots, settle_xp_snapshots, evaluate_affiliate_simulated_ledgers, compute_affiliate_daily_kpi_yesterday, run_invitee_subscription_audit, reconcile_drop_statuses
 from referral_rate_limit import consume_referral_rate_limits
 from affiliate_leaderboard import (
     should_count_referral_join,
@@ -3995,6 +3995,13 @@ def run_worker():
         replace_existing=True,
     )
     scheduler.add_job(
+        reconcile_drop_statuses,
+        trigger=CronTrigger(minute="*/1", timezone=KL_TZ),
+        id="drop_status_reconcile",
+        name="Drop Status Reconcile",
+        replace_existing=True,
+    )
+    scheduler.add_job(
         evaluate_affiliate_simulated_ledgers,
         trigger=CronTrigger(hour=1, minute=15, timezone=KL_TZ),
         id="affiliate_simulate_daily",
@@ -4017,6 +4024,15 @@ def run_worker():
         replace_existing=True,
     )
     # subscription audit disabled — subscription_cache refreshed via claim + check-in events
+    try:
+        reconcile_drop_statuses()
+        logger.info("[DROP_STATUS] startup_reconcile_ok")
+    except Exception as exc:
+        logger.exception(
+            "[DROP_STATUS] startup_reconcile_failed err=%s msg=%s",
+            exc.__class__.__name__,
+            str(exc),
+        )
     scheduler.start()
 
     autoscale_state = {"last_target": None}
