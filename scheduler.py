@@ -1003,17 +1003,46 @@ def _recover_stale_processing(now_utc_ts: datetime) -> int:
         },
     )
     return result.modified_count
+def reconcile_drop_statuses(ref_now: datetime | None = None) -> dict:
+    """
+    Reconcile drop status transitions by time:
+      - upcoming/live/active -> active when now is within [startsAt, endsAt)
+      - any non-expired -> expired when endsAt <= now
+    """
+    now = ref_now or datetime.now(timezone.utc)
+
+    activated = db.drops.update_many(
+        {
+            "status": {"$in": ["upcoming", "live", "active"]},
+            "startsAt": {"$lte": now},
+            "endsAt": {"$gt": now},
+        },
+        {"$set": {"status": "active"}},
+    ).modified_count
+
+    expired = db.drops.update_many(
+        {
+            "status": {"$ne": "expired"},
+            "endsAt": {"$lte": now},
+        },
+        {"$set": {"status": "expired"}},
+    ).modified_count
+
+    if activated or expired:
+        logger.info(
+            "[DROP_STATUS] reconciled activated=%s expired=%s now=%s",
+            activated,
+            expired,
+            now.isoformat(),
+        )
+    return {"activated": int(activated), "expired": int(expired)}
+
+
 def sweep_expired_drops():
     """
-    Marks voucher drops as expired once their endsAt passes.
-    Safe to run every minute. No side effects beyond status flip.
+    Backward-compatible wrapper.
     """
-    now = datetime.now(timezone.utc)
-    # Use the same collection name as in vouchers.py ("drops" or "voucher_drops")
-    db.drops.update_many(  # change to db.voucher_drops if you renamed it
-        {"endsAt": {"$lte": now}, "status": {"$ne": "expired"}},
-        {"$set": {"status": "expired"}}
-    )
+    reconcile_drop_statuses()
 
 def archive_weekly_leaderboard():
     """
