@@ -1011,25 +1011,36 @@ def _ensure_welcome_eligibility(uid: int) -> dict | None:
         )
         return None
     try:
-        welcome_eligibility_collection.update_one(
-            {"uid": uid},
-            {
-                "$setOnInsert": {
-                    "uid": uid,                    
+        existing = welcome_eligibility_collection.find_one({"$or": [{"uid": uid}, {"user_id": uid}]}, {"_id": 1, "uid": 1, "user_id": 1})
+        if existing:
+            welcome_eligibility_collection.update_one(
+                {"_id": existing["_id"]},
+                {"$set": {"uid": uid, "user_id": uid}},
+            )
+            if existing.get("uid") != uid or existing.get("user_id") != uid:
+                logger.info("[WELCOME][ELIGIBILITY] normalized uid=%s doc_id=%s", uid, existing.get("_id"))
+        else:
+            welcome_eligibility_collection.insert_one(
+                {
+                    "uid": uid,
+                    "user_id": uid,
                     "created_at": now,
                     "joined_main_at": joined_main_at or now,
                     "source": "main_join",
-                },
-            },
-            upsert=True,
-        )
+                }
+            )
     except DuplicateKeyError:
-        logger.info("[WELCOME][ELIGIBILITY] dup uid=%s (already inserted)", uid)
-        return None
+        existing = welcome_eligibility_collection.find_one({"$or": [{"uid": uid}, {"user_id": uid}]}, {"_id": 1})
+        if existing:
+            welcome_eligibility_collection.update_one({"_id": existing["_id"]}, {"$set": {"uid": uid, "user_id": uid}})
+            logger.info("[WELCOME][ELIGIBILITY] tolerant_lookup_matched_legacy uid=%s doc_id=%s", uid, existing.get("_id"))
+        else:
+            logger.info("[WELCOME][ELIGIBILITY] dup uid=%s (already inserted)", uid)
+            return None
     except Exception:
         logger.exception("[WELCOME][ELIGIBILITY] write_failed uid=%s", uid)
         return None
-    return welcome_eligibility_collection.find_one({"uid": uid})
+    return welcome_eligibility_collection.find_one({"$or": [{"uid": uid}, {"user_id": uid}]})
 
 async def _check_official_channel_subscribed(bot, uid: int) -> tuple[bool, str]:
     if not uid:
