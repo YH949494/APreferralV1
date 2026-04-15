@@ -1812,7 +1812,16 @@ SUB_CACHE_TTL_DAYS = int(os.getenv("SUB_CACHE_TTL_DAYS", "3"))
 def _get_welcome_eligibility(uid: int) -> dict | None:
     if uid is None:
         return None
-    return welcome_eligibility_col.find_one({"user_id": uid})
+    doc = welcome_eligibility_col.find_one({"$or": [{"uid": uid}, {"user_id": uid}]})
+    if doc and (doc.get("uid") != uid or doc.get("user_id") != uid):
+        current_app.logger.info(
+            "[WELCOME][ELIGIBILITY] tolerant_lookup_matched_legacy uid=%s doc_id=%s has_uid=%s has_user_id=%s",
+            uid,
+            doc.get("_id"),
+            doc.get("uid") is not None,
+            doc.get("user_id") is not None,
+        )
+    return doc
 
 def ensure_welcome_eligibility(uid: int, *, users_exists: bool | None = None) -> dict | None:
     if not uid:
@@ -1824,24 +1833,62 @@ def ensure_welcome_eligibility(uid: int, *, users_exists: bool | None = None) ->
     now = now_kl()
     eligible_until = window["eligible_until"]
     try:
-        welcome_eligibility_col.update_one(
-            {"user_id": uid},
-            {
-                "$setOnInsert": {
-                    "user_id": uid,
-                    "uid": uid,
-                    "first_seen_at": now,
-                    "claimed": False,
-                    "claimed_at": None,
+        existing = _get_welcome_eligibility(uid)
+        if existing:
+            welcome_eligibility_col.update_one(
+                {"_id": existing["_id"]},
+                {
+                    "$set": {
+                        "uid": uid,
+                        "user_id": uid,
+                        "eligible_until": eligible_until,
+                    },
                 },
-                "$set": {"eligible_until": eligible_until},
-            },
-            upsert=True,
-        )
+            )
+            if existing.get("uid") != uid or existing.get("user_id") != uid:
+                current_app.logger.info(
+                    "[WELCOME][ELIGIBILITY] normalized uid=%s doc_id=%s",
+                    uid,
+                    existing.get("_id"),
+                )
+        else:
+            welcome_eligibility_col.update_one(
+                {"uid": uid},
+                {
+                    "$setOnInsert": {
+                        "user_id": uid,
+                        "uid": uid,
+                        "first_seen_at": now,
+                        "claimed": False,
+                        "claimed_at": None,
+                    },
+                    "$set": {
+                        "uid": uid,
+                        "user_id": uid,
+                        "eligible_until": eligible_until,
+                    },
+                },
+                upsert=True,
+            )
     except Exception:
-        current_app.logger.exception("[visible][WELCOME_ELIGIBILITY] write failed", extra={"uid": uid})
+        current_app.logger.exception("[WELCOME][ELIGIBILITY] upsert_or_normalize_failed uid=%s", uid)
         return None
-    return welcome_eligibility_col.find_one({"user_id": uid})
+    return _get_welcome_eligibility(uid)
+
+
+def _get_welcome_ticket(uid: int) -> dict | None:
+    if uid is None:
+        return None
+    doc = welcome_tickets_col.find_one({"$or": [{"uid": uid}, {"user_id": uid}]})
+    if doc and (doc.get("uid") != uid or doc.get("user_id") != uid):
+        current_app.logger.info(
+            "[WELCOME][TICKET] tolerant_lookup_matched_legacy uid=%s doc_id=%s has_uid=%s has_user_id=%s",
+            uid,
+            doc.get("_id"),
+            doc.get("uid") is not None,
+            doc.get("user_id") is not None,
+        )
+    return doc
 
 def welcome_eligibility(uid: int | None, *, ref: datetime | None = None) -> tuple[bool, str, dict | None]:
     # Welcome eligibility relies on joined_main_at being within 7 days and an active ticket.
@@ -1881,8 +1928,8 @@ def welcome_eligibility(uid: int | None, *, ref: datetime | None = None) -> tupl
     expires_at = _as_aware_kl(ticket.get("expires_at"))
     if expires_at and now_ref > expires_at:
         welcome_tickets_col.update_one(
-            {"uid": uid},
-            {"$set": {"status": "expired", "reason_last_fail": "expired"}},
+            {"$or": [{"uid": uid}, {"user_id": uid}]},
+            {"$set": {"uid": uid, "user_id": uid, "status": "expired", "reason_last_fail": "expired"}},
         )
         ticket["status"] = "expired"
         reason = "ticket_expired"
@@ -2069,7 +2116,7 @@ def get_or_issue_welcome_ticket(uid: int):
 
     eligibility = ensure_welcome_eligibility(uid)
     if not eligibility:
-        current_app.logger.info("[welcome] eligibility_missing uid=%s deny", uid)
+        current_app.logger.info("[welcome] eligibility_missing uid=%s deny reason=truly_not_found", uid)
         return None
 
     now = now_kl()
@@ -2087,22 +2134,58 @@ def get_or_issue_welcome_ticket(uid: int):
     cleanup_at = expires_at + timedelta(days=30)
 
     try:
-        ticket = welcome_tickets_col.find_one_and_update(
-            {"uid": uid},
-            {
-                "$set": {"cleanup_at": cleanup_at},
-                "$setOnInsert": {
-                    "uid": uid,
-                    "issued_at": now,
-                    "expires_at": expires_at,
-                    "status": "active",
+        existing_ticket = _get_welcome_ticket(uid)
+        if existing_ticket:
+            ticket = welcome_tickets_col.find_one_and_update(
+                {"_id": existing_ticket["_id"]},
+                {
+                    "$set": {
+                        "uid": uid,
+                        "user_id": uid,
+                        "cleanup_at": cleanup_at,
+                    },
+                    "$setOnInsert": {
+                        "issued_at": now,
+                        "expires_at": expires_at,
+                        "status": "active",
+                    },
                 },
-            },
-            upsert=True,
+                upsert=True,
+                return_document=ReturnDocument.AFTER,
+            )
+            if existing_ticket.get("uid") != uid or existing_ticket.get("user_id") != uid:
+                current_app.logger.info(
+                    "[WELCOME][TICKET] normalized uid=%s doc_id=%s",
+                    uid,
+                    existing_ticket.get("_id"),
+                )
+        else:
+            ticket = {
+                "uid": uid,
+                "user_id": uid,
+                "issued_at": now,
+                "expires_at": expires_at,
+                "status": "active",
+                "cleanup_at": cleanup_at,
+            }
+            welcome_tickets_col.insert_one(ticket)
+    except DuplicateKeyError:
+        existing_ticket = _get_welcome_ticket(uid)
+        if not existing_ticket:
+            current_app.logger.exception("[WELCOME][TICKET] upsert_or_normalize_failed uid=%s", uid)
+            return None
+        ticket = welcome_tickets_col.find_one_and_update(
+            {"_id": existing_ticket["_id"]},
+            {"$set": {"uid": uid, "user_id": uid, "cleanup_at": cleanup_at}},
             return_document=ReturnDocument.AFTER,
         )
+        current_app.logger.info(
+            "[WELCOME][TICKET] normalized uid=%s doc_id=%s",
+            uid,
+            existing_ticket.get("_id"),
+        )
     except Exception:
-        current_app.logger.exception("[visible][WELCOME_TICKET] write failed", extra={"uid": uid})
+        current_app.logger.exception("[WELCOME][TICKET] upsert_or_normalize_failed uid=%s", uid)
         return None
 
     issued_at = _as_aware_utc(ticket.get("issued_at"))
@@ -2116,8 +2199,8 @@ def get_or_issue_welcome_ticket(uid: int):
     ticket_expires_at = _as_aware_kl(ticket.get("expires_at")) or expires_at
     if ticket_expires_at and now > ticket_expires_at and ticket.get("status") not in ("expired", "claimed"):
         welcome_tickets_col.update_one(
-            {"uid": uid},
-            {"$set": {"status": "expired", "reason_last_fail": "expired"}},
+            {"$or": [{"uid": uid}, {"user_id": uid}]},
+            {"$set": {"uid": uid, "user_id": uid, "status": "expired", "reason_last_fail": "expired"}},
         )
         ticket["status"] = "expired"
         ticket["expires_at"] = ticket_expires_at
@@ -4024,7 +4107,10 @@ def api_claim():
 
         expires_at = _as_aware_kl(ticket.get("expires_at"))
         if expires_at and now_ts > expires_at:
-            welcome_tickets_col.update_one({"uid": uid}, {"$set": {"status": "expired", "reason_last_fail": "expired"}})
+            welcome_tickets_col.update_one(
+                {"$or": [{"uid": uid}, {"user_id": uid}]},
+                {"$set": {"uid": uid, "user_id": uid, "status": "expired", "reason_last_fail": "expired"}},
+            )
             current_app.logger.info("[welcome] gate_fail uid=%s reason=expired", uid)
             current_app.logger.info(
                 "[claim] uid=%s drop_id=%s dtype=%s audience=%s decision=blocked reason=expired",
@@ -4198,8 +4284,8 @@ def api_claim():
             }), 429
 
         welcome_tickets_col.update_one(
-            {"uid": uid},
-            {"$set": {"status": "claimed", "claimed_at": now_kl(), "reason_last_fail": None}},
+            {"$or": [{"uid": uid}, {"user_id": uid}]},
+            {"$set": {"uid": uid, "user_id": uid, "status": "claimed", "claimed_at": now_kl(), "reason_last_fail": None}},
         )
         if not uid:
             logger.info(
@@ -4218,8 +4304,8 @@ def api_claim():
                 "checks_key": None,
             }), 403     
         welcome_eligibility_col.update_one(
-            {"uid": uid},
-            {"$set": {"claimed": True, "claimed_at": now_kl()}},
+            {"$or": [{"uid": uid}, {"user_id": uid}]},
+            {"$set": {"uid": uid, "user_id": uid, "claimed": True, "claimed_at": now_kl()}},
         )     
         current_app.logger.info("[WELCOME] gate_pass uid=%s", uid)
         current_app.logger.info("[WELCOME] claim_success uid=%s drop_id=%s", uid, drop_id)
