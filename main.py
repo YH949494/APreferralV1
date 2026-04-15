@@ -67,6 +67,7 @@ from affiliate_rewards import (
     settle_previous_month_affiliate_rewards,
 )
 from telegram_utils import safe_reply_text
+from telegram_stats import aggregate_telegram_post_stats_weekly
 
 from pymongo import DESCENDING, ASCENDING, ReturnDocument  # keep if used elsewhere
 from pymongo.errors import DuplicateKeyError, CursorNotFound, OperationFailure, PyMongoError
@@ -4032,6 +4033,13 @@ def run_worker():
         trigger=CronTrigger(day_of_week="mon", hour=0, minute=5, timezone=timezone.utc),
         id="affiliate_weekly_kpi",
         name="Affiliate Weekly KPI Snapshot",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        aggregate_telegram_post_stats_weekly,
+        trigger=CronTrigger(day_of_week="sun", hour=23, minute=55, timezone=KL_TZ),
+        id="telegram_post_stats_weekly",
+        name="Telegram Post Stats Weekly Aggregation",
         replace_existing=True,
     )
     # subscription audit disabled — subscription_cache refreshed via claim + check-in events
