@@ -594,8 +594,9 @@ def norm_uname(s):
 def _welcome_window_for_user(uid: int | None, *, ref: datetime | None = None, user_doc: dict | None = None):
     if uid is None:
         return None
-    user_doc = user_doc or users_collection.find_one({"user_id": uid}, {"joined_main_at": 1})
-    joined_main_at = (user_doc or {}).get("joined_main_at")
+    user_doc = user_doc or users_collection.find_one({"user_id": uid}, {"joined_main_at": 1, "created_at": 1})
+    # Fallback: users who joined via /start without a group event may lack joined_main_at
+    joined_main_at = (user_doc or {}).get("joined_main_at") or (user_doc or {}).get("created_at")
     if not joined_main_at:
         return None
     joined_main_kl = _as_aware_kl(joined_main_at)
@@ -1851,7 +1852,14 @@ def welcome_eligibility(uid: int | None, *, ref: datetime | None = None) -> tupl
         current_app.logger.info("[WELCOME][ELIG] deny uid=%s reason=%s", uid, reason)
         return (False, reason, None)
 
-    window = _welcome_window_for_user(uid, ref=ref)
+    _elig_doc = users_collection.find_one({"user_id": uid}, {"joined_main_at": 1, "created_at": 1}) if uid else None
+    current_app.logger.info(
+        "[WELCOME][ELIG] uid=%s joined_main_at=%s created_at=%s",
+        uid,
+        (_elig_doc or {}).get("joined_main_at"),
+        (_elig_doc or {}).get("created_at"),
+    )
+    window = _welcome_window_for_user(uid, ref=ref, user_doc=_elig_doc)
     if window is None:
         reason = "not_in_welcome_window"
         current_app.logger.info("[WELCOME][ELIG] deny uid=%s reason=%s", uid, reason)
