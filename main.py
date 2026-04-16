@@ -63,6 +63,7 @@ from affiliate_leaderboard import (
 )
 from affiliate_rewards import (
     ensure_affiliate_indexes,
+    issue_welcome_bonus_if_eligible,
     record_user_last_seen,
     settle_previous_month_affiliate_rewards,
 )
@@ -1140,6 +1141,12 @@ async def handle_user_join(
         context="join_main_at",        
     )
     _ensure_welcome_eligibility(uid)
+    try:
+        blocked = (users_collection.find_one({"user_id": uid}, {"blocked": 1}) or {}).get("blocked", False)
+        wb_result = issue_welcome_bonus_if_eligible(db, user_id=uid, is_new_user=True, blocked=bool(blocked))
+        logger.info("[WELCOME] bonus_issued uid=%s result=%s", uid, wb_result)
+    except Exception:
+        logger.exception("[WELCOME] bonus_issue_failed uid=%s", uid)
     logger.info(
         "[WELCOME] join_recorded uid=%s joined_main_at=%s",
         uid,
