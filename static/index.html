@@ -501,7 +501,15 @@
       grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
     }
 
-    #campaign-voucher-list .campaign-card {
+    #affiliate-voucher-list {
+      display: grid;
+      gap: 12px;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      margin-top: 10px;
+    }
+
+    #campaign-voucher-list .campaign-card,
+    #affiliate-voucher-list .campaign-card {
       border: 1px solid var(--border-light);
       background: var(--bg-card-alt);
       border-radius: 12px;
@@ -512,25 +520,29 @@
       gap: 10px;
     }
 
-    #campaign-voucher-list .campaign-card h4 {
+    #campaign-voucher-list .campaign-card h4,
+    #affiliate-voucher-list .campaign-card h4 {
       margin: 0 0 6px 0;
       font-size: 15px;
       color: #ffbe95;
     }
 
-    #campaign-voucher-list .campaign-card p {
+    #campaign-voucher-list .campaign-card p,
+    #affiliate-voucher-list .campaign-card p {
       margin: 4px 0;
       color: var(--text-muted);
       font-size: 14px;
     }
 
-    #campaign-voucher-list .campaign-card .campaign-meta {
+    #campaign-voucher-list .campaign-card .campaign-meta,
+    #affiliate-voucher-list .campaign-card .campaign-meta {
       font-size: 12px;
       color: var(--text-soft);
       margin-top: 6px;
     }
 
-    #campaign-voucher-list .campaign-card button { margin-top: auto; }
+    #campaign-voucher-list .campaign-card button,
+    #affiliate-voucher-list .campaign-card button { margin-top: auto; }
 
     #claim-error {
       display: none;
@@ -2505,20 +2517,34 @@ Active players win more.
         const tierText = (reward && reward.tier ? String(reward.tier) : "").trim();
         const codeText = (reward && reward.code ? String(reward.code) : "").trim();
         if (!codeText) return;
+
         const card = document.createElement("div");
-        card.style.marginBottom = "10px";
-        card.style.padding = "10px";
-        card.style.border = "1px solid rgba(255,255,255,0.12)";
-        card.style.borderRadius = "10px";
-        card.innerHTML = `
-          <p style="margin:0 0 6px 0;"><strong>${tierText || "Affiliate Reward"}</strong></p>
-          <p style="margin:0 0 8px 0;">${codeText}</p>
-          <button class="btn btn-ghost" type="button">📋 Copy to clipboard</button>
-        `;
-        const copyBtn = card.querySelector("button");
-        if (copyBtn) {
-          copyBtn.onclick = () => copyVoucherCode(codeText);
+        card.className = "campaign-card";
+
+        const title = document.createElement("h4");
+        title.textContent = tierText ? `${tierText} Reward` : "Affiliate Reward";
+        card.appendChild(title);
+
+        if (reward.issued_at) {
+          const issuedMeta = document.createElement("p");
+          issuedMeta.className = "campaign-meta";
+          issuedMeta.textContent = `Issued: ${fmtKL(reward.issued_at)}`;
+          card.appendChild(issuedMeta);
         }
+
+        const message = document.createElement("p");
+        message.className = "campaign-message";
+        message.textContent = `Voucher code: ${codeText}`;
+        card.appendChild(message);
+
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "btn btn-ghost";
+        btn.textContent = "📋 Copy to clipboard";
+        btn.dataset.copyCode = codeText;
+        btn.onclick = () => copyVoucherCode(codeText);
+        card.appendChild(btn);
+
         listEl.appendChild(card);
       });
       bonusSection.style.display = listEl.children.length > 0 ? "block" : "none";
