@@ -3616,10 +3616,8 @@ def api_claim():
     now_ref = now_utc()
     starts_at = _as_aware_utc(drop.get("startsAt"))
     ends_at = _as_aware_utc(drop.get("endsAt"))
-    status_value = str(drop.get("status") or "").strip().lower()
     if (
-        status_value not in ("active", "live")
-        or not is_drop_active(drop, now_ref)
+        not is_drop_active(drop, now_ref)
         or not starts_at
         or not ends_at
         or now_ref < starts_at
