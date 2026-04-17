@@ -2486,6 +2486,65 @@ Active players win more.
       }
     }
 
+
+    if (typeof isThaiUiLanguage !== "function") {
+      function isThaiUiLanguage() {
+        try {
+          const tgLang = window.Telegram?.WebApp?.initDataUnsafe?.user?.language_code || "";
+          const navLang = navigator.language || "";
+          return tgLang.toLowerCase().startsWith("th") || navLang.toLowerCase().startsWith("th");
+        } catch {
+          return false;
+        }
+      }
+    }
+
+    if (typeof showToast !== "function") {
+      function showToast(message) {
+        const el = document.createElement("div");
+        el.textContent = message;
+        el.style.position = "fixed";
+        el.style.bottom = "20px";
+        el.style.left = "50%";
+        el.style.transform = "translateX(-50%)";
+        el.style.background = "rgba(0,0,0,0.85)";
+        el.style.color = "#fff";
+        el.style.padding = "10px 16px";
+        el.style.borderRadius = "8px";
+        el.style.fontSize = "14px";
+        el.style.zIndex = "9999";
+        el.style.opacity = "0";
+        el.style.transition = "opacity 0.2s ease";
+
+        document.body.appendChild(el);
+
+        requestAnimationFrame(() => {
+          el.style.opacity = "1";
+        });
+
+        setTimeout(() => {
+          el.style.opacity = "0";
+          setTimeout(() => el.remove(), 200);
+        }, 2500);
+      }
+    }
+
+    function showCopySuccessToast() {
+      const msg = isThaiUiLanguage()
+        ? "คัดลอกโค้ดแล้ว 🎉"
+        : "Code copied 🎉";
+
+      showToast(msg);
+    }
+
+    function showRetentionToast() {
+      const msg = isThaiUiLanguage()
+        ? "ติดตามช่องไว้ — โค้ดส่วนลดใหม่กำลังจะมาเร็วๆ นี้"
+        : "Stay subscribed — new voucher drops are coming soon.";
+
+      showToast(msg);
+    }
+
     function copyVoucherCode(code) {
       const value = (code || "").trim();
       const codeEl = document.getElementById("voucher-code");
@@ -2498,7 +2557,10 @@ Active players win more.
       }
 
       navigator.clipboard.writeText(codeToCopy)
-        .then(() => alert("Voucher code copied!"))
+        .then(() => {
+          showCopySuccessToast();
+          setTimeout(showRetentionToast, 800);
+        })
         .catch(() => alert("Failed to copy voucher."));
     }
 
@@ -2559,7 +2621,10 @@ Active players win more.
       }
 
       navigator.clipboard.writeText(code)
-        .then(() => alert("Voucher code copied!"))
+        .then(() => {
+          showCopySuccessToast();
+          setTimeout(showRetentionToast, 800);
+        })
         .catch(() => alert("Failed to copy voucher."));
     }
 
@@ -3241,6 +3306,8 @@ Active players win more.
         navigator.clipboard.writeText(code)
           .then(() => {
             claimBtn.textContent = "✅ Copied";
+            showCopySuccessToast();
+            setTimeout(showRetentionToast, 800);
             setTimeout(() => {
               claimBtn.textContent = "📋 Copy";
             }, 1000);
