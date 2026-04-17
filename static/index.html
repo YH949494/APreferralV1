@@ -4308,9 +4308,22 @@ ${referral}`;
         alert("Invalid affiliate pool.");
         return;
       }
+      const out = document.getElementById("aff_pool_summary");
       const res = await v2Fetch(`${API_V2}/admin/pools/summary${buildAdminQueryTail()}`);
       const data = await res.json();
-      document.getElementById("aff_pool_summary").textContent = JSON.stringify(data, null, 2);
+      if (data && Array.isArray(data.items)) {
+        let html = "<table><thead><tr><th>Pool</th><th>Available</th><th>Issued</th></tr></thead><tbody>";
+        for (const item of data.items) {
+          const pool = escapeHtml(item.pool_id || "");
+          const available = escapeHtml((item.available ?? "0").toString());
+          const issued = escapeHtml((item.issued ?? "0").toString());
+          html += `<tr><td>${pool}</td><td>${available}</td><td>${issued}</td></tr>`;
+        }
+        html += "</tbody></table>";
+        out.innerHTML = html;
+      } else {
+        out.textContent = JSON.stringify(data, null, 2);
+      }
     }
 
     async function affLoadPending(status) {
