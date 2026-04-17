@@ -82,6 +82,10 @@ def ensure_indexes() -> None:
 
     db_ref["channel_subscription_cache"].create_index([("user_id", ASCENDING)], unique=True)
     db_ref["channel_subscription_cache"].create_index([("expires_at", ASCENDING)], expireAfterSeconds=0)
+    db_ref["telegram_channel_stats"].create_index([("chat_id", ASCENDING)], unique=True)
+    db_ref["telegram_post_stats_raw"].create_index([("chat_id", ASCENDING), ("message_id", ASCENDING)], unique=True)
+    db_ref["telegram_post_stats_raw"].create_index([("posted_at_utc", ASCENDING)])
+    db_ref["telegram_post_stats_weekly"].create_index([("week_start_utc", ASCENDING), ("chat_id", ASCENDING)], unique=True)
 
     try:
         db_ref["admin_xp_cooldowns"].create_index([("expireAt", ASCENDING)], expireAfterSeconds=0)
