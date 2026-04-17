@@ -2755,7 +2755,7 @@ Active players win more.
       secondaryBtn.style.display = "inline-block";
 
       const messageEl = document.getElementById("campaign-voucher-message");
-      if (messageEl) messageEl.innerText = messageText || "🚨 No drop now. Stay subscribed — it can go live anytime.";
+      if (messageEl) messageEl.innerText = messageText || "🚨 Stay subscribed to channel — new vouchers are coming soon.";
     }
 
     const CHANNEL_SUBSCRIBE_PROMPT = "Subscribe to @advantplayofficial to unlock";
@@ -2900,7 +2900,7 @@ Active players win more.
         }
 
         if (publicSoldOut) {
-          message.textContent = "🚨 No drop now. Stay subscribed — it can go live anytime.";
+          message.textContent = "Stay subscribed to channel — new voucher drops are coming soon.";
           btn.textContent = "Sold out";
           btn.removeAttribute("data-dropid");
           btn.setAttribute("disabled", "disabled");
@@ -2959,7 +2959,7 @@ Active players win more.
       if (!liveDrops.length) {
         const note = document.createElement("p");
         note.className = "campaign-meta";
-        note.innerHTML = "🎁 New vouchers drop regularly.<br>Stay subscribed to get them.";
+        note.innerHTML = "🎁 New vouchers drop regularly.<br>Stay subscribed to channel to get them.";
         container.appendChild(note);
       }
 
