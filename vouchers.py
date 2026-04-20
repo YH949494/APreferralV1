@@ -1992,6 +1992,180 @@ def set_cached_subscription_true(uid: int, ttl_seconds: int) -> None:
     except Exception:
         pass
 
+def _get_subscription_cache_doc(uid: int) -> dict | None:
+    if uid is None:
+        return None
+    try:
+        return subscription_cache_col.find_one(
+            {"_id": _subscription_cache_key(uid)},
+            {"subscribed": 1, "first_subscribed_at_utc": 1, "checked_at": 1, "updated_at": 1, "expireAt": 1},
+        )
+    except Exception:
+        return None
+
+
+def _get_durable_first_subscribed_at(uid: int | None):
+    if uid is None:
+        return None
+    try:
+        user_doc = users_collection.find_one(
+            {"user_id": uid},
+            {"official_channel_first_subscribed_at": 1},
+        ) or {}
+    except Exception:
+        user_doc = {}
+    durable_ts = _as_aware_utc(user_doc.get("official_channel_first_subscribed_at"))
+    if durable_ts:
+        return durable_ts
+
+    cache_doc = _get_subscription_cache_doc(uid) or {}
+    cache_ts = _as_aware_utc(cache_doc.get("first_subscribed_at_utc"))
+    if not cache_ts:
+        return None
+    try:
+        users_collection.update_one(
+            {"user_id": uid, "official_channel_first_subscribed_at": {"$exists": False}},
+            {"$set": {"official_channel_first_subscribed_at": cache_ts}},
+            upsert=False,
+        )
+    except Exception:
+        pass
+    return cache_ts
+
+
+def _ensure_durable_first_subscribed_at(uid: int | None, observed_at=None) -> None:
+    if uid is None:
+        return
+    ts = _as_aware_utc(observed_at) or now_utc()
+    try:
+        users_collection.update_one(
+            {"user_id": uid, "official_channel_first_subscribed_at": {"$exists": False}},
+            {"$set": {"official_channel_first_subscribed_at": ts}},
+            upsert=False,
+        )
+    except Exception:
+        pass
+
+
+def _has_current_subscription_evidence(uid: int | None) -> bool:
+    if uid is None:
+        return False
+    if get_cached_subscription(uid):
+        return True
+    return check_channel_subscribed(uid)
+
+
+def _is_retained_days(uid: int | None, *, min_days: int) -> bool:
+    if uid is None:
+        return False
+    if not _has_current_subscription_evidence(uid):
+        return False
+    first_subscribed_at = _get_durable_first_subscribed_at(uid)
+    if not first_subscribed_at:
+        return False
+    retained_for = now_utc() - first_subscribed_at
+    return retained_for >= timedelta(days=min_days)
+
+
+def is_retained_3d(user) -> bool:
+    uid = user if isinstance(user, int) else None
+    if uid is None and isinstance(user, dict):
+        raw_uid = user.get("user_id") if "user_id" in user else user.get("id")
+        try:
+            uid = int(raw_uid)
+        except (TypeError, ValueError):
+            uid = None
+    return _is_retained_days(uid, min_days=3)
+
+
+def is_retained_7d(user) -> bool:
+    uid = user if isinstance(user, int) else None
+    if uid is None and isinstance(user, dict):
+        raw_uid = user.get("user_id") if "user_id" in user else user.get("id")
+        try:
+            uid = int(raw_uid)
+        except (TypeError, ValueError):
+            uid = None
+    return _is_retained_days(uid, min_days=7)
+
+
+def _is_public_pooled_drop(drop: dict) -> bool:
+    if _normalize_drop_type((drop or {}).get("type", "pooled")) != "pooled":
+        return False
+    audience_type = _drop_audience_type(drop)
+    if audience_type != "public":
+        return False
+    elig_mode = str(((drop or {}).get("eligibility") or {}).get("mode") or "public").strip().lower()
+    return elig_mode == "public"
+
+
+def _public_reserve_target(drop: dict, public_remaining_now: int) -> int:
+    reserve_enabled = (drop or {}).get("reserve_enabled")
+    if reserve_enabled is False:
+        return 0
+    reserve_ratio = float((drop or {}).get("reserve_ratio", 0.30) or 0.30)
+    reserve_ratio = max(0.0, min(1.0, reserve_ratio))
+    reserve_total = int((drop or {}).get("reserve_public_total") or 0)
+    if reserve_total <= 0:
+        reserve_total = max(0, int(public_remaining_now or 0))
+    target = int((reserve_total * reserve_ratio) + 0.999999)
+    max_reservable = max(0, reserve_total - 1)
+    return max(0, min(target, max_reservable))
+
+
+def _ensure_reserve_public_total(drop_id: str, drop: dict | None = None) -> int:
+    drop_obj_id = _coerce_id(drop_id)
+    state = drop or db.drops.find_one({"_id": drop_obj_id}, {"reserve_public_total": 1}) or {}
+    existing_total = int(state.get("reserve_public_total") or 0)
+    if existing_total > 0:
+        return existing_total
+
+    drop_id_variants = _drop_id_variants(drop_id)
+    public_total = int(
+        db.vouchers.count_documents(
+            {
+                "type": "pooled",
+                "dropId": {"$in": drop_id_variants},
+                "$or": [{"pool": "public"}, {"pool": {"$exists": False}}],
+            }
+        )
+    )
+    if public_total > 0:
+        db.drops.update_one(
+            {"_id": drop_obj_id, "$or": [{"reserve_public_total": {"$exists": False}}, {"reserve_public_total": {"$lte": 0}}]},
+            {"$set": {"reserve_public_total": public_total}},
+        )
+        _safe_log("info", "[DROP][RESERVE_BASELINE_INIT] drop=%s reserve_public_total=%s", drop_id, public_total)
+    return public_total
+
+
+def _effective_public_visible_remaining(*, drop: dict, drop_id: str, uid: int | None, public_remaining: int) -> int:
+    if public_remaining <= 0:
+        return 0
+    if not _is_public_pooled_drop(drop):
+        return public_remaining
+    if (drop or {}).get("reserve_enabled", True) is False:
+        return public_remaining
+    retained = is_retained_3d(uid)
+    reserve_total = int((drop or {}).get("reserve_public_total") or 0)
+    if reserve_total <= 0:
+        reserve_total = _ensure_reserve_public_total(drop_id, drop=drop)
+    reserve_target = _public_reserve_target({**(drop or {}), "reserve_public_total": reserve_total}, public_remaining)
+    if retained:
+        return public_remaining
+    visible_remaining = max(0, public_remaining - reserve_target)
+    _safe_log(
+        "info",
+        "[DROP][RESERVE_VISIBLE] drop=%s uid=%s retained3d=%s public_remaining=%s reserve_target=%s visible_remaining=%s",
+        drop_id,
+        uid,
+        retained,
+        public_remaining,
+        reserve_target,
+        visible_remaining,
+    )
+    return visible_remaining
+
 def check_channel_subscribed(uid: int) -> bool:
     if uid is None:
         return False
@@ -2094,6 +2268,7 @@ def check_channel_subscribed(uid: int) -> bool:
         pass
 
     if is_subscribed:
+        _ensure_durable_first_subscribed_at(uid, observed_at=now)
         current_app.logger.info("[SUB_CACHE][SET] uid=%s ttl_days=%s", uid, SUB_CACHE_TTL_DAYS)
         return True
 
@@ -2804,7 +2979,13 @@ def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None
             # Need at least one free code OR user already claimed (so they can see their code state)
             public_remaining = max(0, int(d.get("public_remaining") or 0))
             my_remaining = max(0, int(d.get("my_remaining") or 0))
-            visible_remaining = public_remaining + my_remaining if is_my_user else public_remaining
+            public_visible_remaining = _effective_public_visible_remaining(
+                drop=d,
+                drop_id=drop_id,
+                uid=ctx_uid,
+                public_remaining=public_remaining,
+            )
+            visible_remaining = public_visible_remaining + my_remaining if is_my_user else public_visible_remaining
             already = None
             if claim_user_id is not None:
                 already = voucher_claims_col.find_one(
@@ -2819,7 +3000,7 @@ def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None
                 base["visible_remaining"] = visible_remaining
                 pooled_cards.append(base)
             else:
-                if is_my_user or public_remaining > 0:
+                if is_my_user or public_visible_remaining > 0:
                     base["visible_remaining"] = visible_remaining
                     pooled_cards.append(base)
 
@@ -2957,7 +3138,14 @@ def reconcile_pooled_remaining(drop_id: str) -> dict:
         print(f"[pool_reconcile] drop={drop_id} public={actual_free_public} my={actual_free_my}")
     return {"actual_free_public": actual_free_public, "actual_free_my": actual_free_my}
 
-def claim_pooled(drop_id: str, claim_key: str, ref: datetime, *, pools: list[str] | None = None):
+def claim_pooled(
+    drop_id: str,
+    claim_key: str,
+    ref: datetime,
+    *,
+    pools: list[str] | None = None,
+    retained_3d: bool = False,
+):
     drop_id_variants = _drop_id_variants(drop_id)
     drop_obj_id = _coerce_id(drop_id)
 
@@ -2997,6 +3185,46 @@ def claim_pooled(drop_id: str, claim_key: str, ref: datetime, *, pools: list[str
         else:
             continue
 
+        reserve_target = 0
+        reserve_limited = False
+        if pool == "public":
+            drop_state = db.drops.find_one(
+                {"_id": drop_obj_id},
+                {"public_remaining": 1, "reserve_enabled": 1, "reserve_ratio": 1, "reserve_public_total": 1, "type": 1, "audience": 1, "eligibility": 1},
+            ) or {}
+            rem_now = max(0, int(drop_state.get("public_remaining") or 0))
+            if (
+                _is_public_pooled_drop(drop_state)
+                and drop_state.get("reserve_enabled", True) is not False
+            ):
+                reserve_total = int(drop_state.get("reserve_public_total") or 0)
+                if reserve_total <= 0:
+                    reserve_total = _ensure_reserve_public_total(drop_id, drop=drop_state)
+                    if reserve_total > 0:
+                        drop_state["reserve_public_total"] = reserve_total
+                reserve_target = _public_reserve_target(drop_state, rem_now)
+                reserve_limited = reserve_target > 0
+            _safe_log(
+                "info",
+                "[DROP][RESERVE_CHECK] drop=%s uid_key=%s rem=%s reserve_target=%s retained3d=%s reserve_limited=%s",
+                drop_id,
+                claim_key,
+                rem_now,
+                reserve_target,
+                retained_3d,
+                reserve_limited,
+            )
+            if reserve_limited and rem_now <= reserve_target and not retained_3d:
+                _safe_log(
+                    "info",
+                    "[DROP][RESERVE_BLOCK] drop=%s uid_key=%s rem=%s reserve_target=%s",
+                    drop_id,
+                    claim_key,
+                    rem_now,
+                    reserve_target,
+                )
+                continue
+
         # 1) Fast pre-check: if remaining counter already 0, skip querying vouchers.
         #    (Avoids pointless voucher query work during peak)
         try:
@@ -3004,6 +3232,16 @@ def claim_pooled(drop_id: str, claim_key: str, ref: datetime, *, pools: list[str
         except Exception:
             rem = 0
         if rem <= 0:
+            continue
+        if pool == "public" and reserve_limited and rem <= reserve_target and not retained_3d:
+            _safe_log(
+                "info",
+                "[DROP][RESERVE_BLOCK] drop=%s uid_key=%s rem=%s reserve_target=%s",
+                drop_id,
+                claim_key,
+                rem,
+                reserve_target,
+            )
             continue
 
         # 2) Try to claim a voucher FIRST (real scarce resource).
@@ -3048,8 +3286,11 @@ def claim_pooled(drop_id: str, claim_key: str, ref: datetime, *, pools: list[str
 
         # 3) Now decrement drop-level remaining counter.
         #    If we can't decrement (counter is stale/0), rollback voucher to free.
+        drop_update_filter = {"_id": drop_obj_id, remaining_field: {"$gt": 0}}
+        if pool == "public" and reserve_limited and not retained_3d:
+            drop_update_filter["public_remaining"] = {"$gt": reserve_target}
         updated = db.drops.update_one(
-            {"_id": drop_obj_id, remaining_field: {"$gt": 0}},
+            drop_update_filter,
             {"$inc": {remaining_field: -1}}
         )
 
@@ -3069,9 +3310,26 @@ def claim_pooled(drop_id: str, claim_key: str, ref: datetime, *, pools: list[str
                     current_app.logger.exception("[claim][rollback_failed] drop=%s pool=%s", drop_id, pool)
                 except Exception:
                     print(f"[claim][rollback_failed] drop={drop_id} pool={pool}")
+            if pool == "public" and reserve_limited and not retained_3d:
+                _safe_log(
+                    "info",
+                    "[DROP][RESERVE_BLOCK] drop=%s uid_key=%s rem_guard=%s reserve_target=%s",
+                    drop_id,
+                    claim_key,
+                    "public_remaining_gt_guard",
+                    reserve_target,
+                )
             # Try next pool (or end)
             continue
 
+        if pool == "public" and reserve_limited and retained_3d:
+            _safe_log(
+                "info",
+                "[DROP][RESERVE_CLAIM] drop=%s uid_key=%s reserve_target=%s",
+                drop_id,
+                claim_key,
+                reserve_target,
+            )
         return {"ok": True, "code": doc["code"], "claimedAt": _isoformat_kl(doc.get("claimedAt"))}
 
     return {"ok": False, "err": "sold_out"}
@@ -3542,7 +3800,17 @@ def claim_voucher_for_user(*, user_id: str, drop_id: str, username: str) -> dict
     claim_key = f"uid:{user_id_str}"
     user_region = user_doc.get("region") if user_doc else None
     pools = get_claimable_pools(user_region, drop)
-    res = claim_pooled(drop_id=drop_id, claim_key=claim_key, ref=ref, pools=pools)
+    retained_3d = is_retained_3d(uid_int)
+    retained_7d = is_retained_7d(uid_int)
+    _safe_log(
+        "info",
+        "[DROP][RESERVE_CHECK] drop=%s uid=%s retained_3d=%s retained_7d=%s",
+        drop_id,
+        uid_int,
+        retained_3d,
+        retained_7d,
+    )
+    res = claim_pooled(drop_id=drop_id, claim_key=claim_key, ref=ref, pools=pools, retained_3d=retained_3d)
     if res.get("ok"):
         return {"code": res["code"], "claimedAt": res["claimedAt"]}
     if res.get("err") == "sold_out":
