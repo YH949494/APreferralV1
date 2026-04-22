@@ -26,6 +26,7 @@ subscription_cache_col = db["subscription_cache"]
 welcome_eligibility_col = db["welcome_eligibility"]
 tg_verification_queue_col = db["tg_verification_queue"]
 voucher_claims_col = db["voucher_claims"]
+public_pool_access_assignments_col = db["public_pool_access_assignments"]
 invite_link_map_collection = db["invite_link_map"]
 miniapp_sessions_daily_col = db["miniapp_sessions_daily"]
 request_dedup_col = db["request_dedup"]
@@ -122,6 +123,8 @@ DROP_MODE_CACHE_TTL_SECONDS = 2
 _DROP_MODE_CACHE = {"payload": None, "expires_at": None}
 _DROP_MODE_CACHE_LOCK = threading.Lock()
 _DROP_MODE_LAST_LOGGED_UNTIL = None
+PUBLIC_POOL_CLAIM_HISTORY_WINDOW_DAYS = 30
+PUBLIC_POOL_CLAIM_HISTORY_CAP = 50
 
 _RAW_OFFICIAL_CHANNEL_ID = getattr(_cfg, "OFFICIAL_CHANNEL_ID", os.getenv("OFFICIAL_CHANNEL_ID"))
 try:
@@ -473,6 +476,14 @@ def ensure_voucher_indexes():
             [("drop_id", ASCENDING), ("user_id", ASCENDING)],
             unique=True,
             name="uq_claim_drop_user",
+        )
+    except OperationFailure:
+        pass
+    try:
+        public_pool_access_assignments_col.create_index(
+            [("user_id", ASCENDING), ("public_pool_id", ASCENDING)],
+            unique=True,
+            name="uq_public_pool_access_assignment",
         )
     except OperationFailure:
         pass
@@ -2097,6 +2108,147 @@ def _is_public_pooled_drop(drop: dict) -> bool:
         return False
     elig_mode = str(((drop or {}).get("eligibility") or {}).get("mode") or "public").strip().lower()
     return elig_mode == "public"
+
+
+def is_public_pool(pool_doc: dict) -> bool:
+    if not isinstance(pool_doc, dict):
+        return False
+    if not _is_public_pooled_drop(pool_doc):
+        return False
+    audience_type = _drop_audience_type(pool_doc)
+    if audience_type != "public":
+        return False
+    if pool_doc.get("internal_only") is True:
+        return False
+    return True
+
+
+def classify_public_pool_segment(state: dict) -> str:
+    if not (state or {}).get("has_ever_claimed_public_pool"):
+        return "new_user"
+    recent_count = int((state or {}).get("recent_public_claim_count_30d") or 0)
+    if recent_count >= 4:
+        return "repeat"
+    return "light_repeat"
+
+
+def _prune_public_claim_timestamps_recent(timestamps, *, reference_time: datetime | None = None) -> list[datetime]:
+    ref = _as_aware_utc(reference_time or now_utc()) or now_utc()
+    cutoff = ref - timedelta(days=PUBLIC_POOL_CLAIM_HISTORY_WINDOW_DAYS)
+    pruned = []
+    for ts in timestamps or []:
+        parsed = _as_aware_utc(ts)
+        if parsed and parsed >= cutoff:
+            pruned.append(parsed)
+    pruned.sort()
+    if len(pruned) > PUBLIC_POOL_CLAIM_HISTORY_CAP:
+        pruned = pruned[-PUBLIC_POOL_CLAIM_HISTORY_CAP:]
+    return pruned
+
+
+def load_public_pool_claim_state(user_id: int | str, *, reference_time: datetime | None = None) -> dict:
+    ref = _as_aware_utc(reference_time or now_utc()) or now_utc()
+    try:
+        user_id_int = int(user_id)
+    except (TypeError, ValueError):
+        user_id_int = None
+    user_doc = users_collection.find_one({"user_id": user_id_int}, {"has_ever_claimed_public_pool": 1, "public_claim_timestamps_recent": 1})
+    timestamps_recent = _prune_public_claim_timestamps_recent((user_doc or {}).get("public_claim_timestamps_recent"), reference_time=ref)
+    has_ever_claimed = bool((user_doc or {}).get("has_ever_claimed_public_pool"))
+    state = {
+        "has_ever_claimed_public_pool": has_ever_claimed,
+        "public_claim_timestamps_recent": timestamps_recent,
+        "recent_public_claim_count_30d": len(timestamps_recent),
+    }
+    state["segment"] = classify_public_pool_segment(state)
+    return state
+
+
+def assign_public_pool_access_once(user_id: int | str, public_pool_id: str, drop_open_time: datetime, segment: str) -> dict:
+    try:
+        user_id_int = int(user_id)
+    except (TypeError, ValueError):
+        user_id_int = user_id
+    existing = public_pool_access_assignments_col.find_one({"user_id": user_id_int, "public_pool_id": str(public_pool_id)})
+    if existing:
+        return existing
+    assigned_at = now_utc()
+    drop_open_utc = _as_aware_utc(drop_open_time) or assigned_at
+    if segment == "new_user":
+        access_allowed = True
+        delay_seconds = 0
+    elif segment == "light_repeat":
+        access_allowed = random.random() < 0.6
+        delay_seconds = random.randint(15, 45)
+    else:
+        access_allowed = random.random() < 0.2
+        delay_seconds = random.randint(40, 160)
+    eligible_after = drop_open_utc + timedelta(seconds=delay_seconds)
+    base_doc = {
+        "user_id": user_id_int,
+        "public_pool_id": str(public_pool_id),
+        "segment_at_assignment": segment,
+        "access_allowed": bool(access_allowed),
+        "eligible_after": eligible_after,
+        "assigned_at": assigned_at,
+        "updated_at": assigned_at,
+    }
+    try:
+        public_pool_access_assignments_col.insert_one(base_doc)
+        return base_doc
+    except DuplicateKeyError:
+        existing = public_pool_access_assignments_col.find_one({"user_id": user_id_int, "public_pool_id": str(public_pool_id)})
+        if existing:
+            return existing
+        raise
+
+
+def check_public_pool_access(user_id: int | str, public_pool_id: str, drop_open_time: datetime, now: datetime | None = None) -> dict:
+    state = load_public_pool_claim_state(user_id)
+    segment = state["segment"]
+    assignment = assign_public_pool_access_once(
+        user_id=user_id,
+        public_pool_id=public_pool_id,
+        drop_open_time=drop_open_time,
+        segment=segment,
+    )
+    now_ref = _as_aware_utc(now or now_utc()) or now_utc()
+    eligible_after = _as_aware_utc(assignment.get("eligible_after")) or now_ref
+    if not assignment.get("access_allowed"):
+        status = "denied"
+    elif now_ref < eligible_after:
+        status = "too_early"
+    else:
+        status = "allowed"
+    return {
+        "status": status,
+        "segment": segment,
+        "assignment": assignment,
+    }
+
+
+def update_public_pool_claim_state_on_success(user_id: int | str, claimed_at: datetime | None = None) -> None:
+    try:
+        user_id_int = int(user_id)
+    except (TypeError, ValueError):
+        return
+    claim_time = _as_aware_utc(claimed_at or now_utc()) or now_utc()
+    state = load_public_pool_claim_state(user_id_int, reference_time=claim_time)
+    updated_timestamps = list(state["public_claim_timestamps_recent"])
+    updated_timestamps.append(claim_time)
+    updated_timestamps = _prune_public_claim_timestamps_recent(updated_timestamps, reference_time=claim_time)
+    users_collection.update_one(
+        {"user_id": user_id_int},
+        {
+            "$set": {
+                "has_ever_claimed_public_pool": True,
+                "public_claim_timestamps_recent": updated_timestamps,
+                "recent_public_claim_count_30d": len(updated_timestamps),
+                "public_pool_claim_state_updated_at": claim_time,
+            }
+        },
+        upsert=True,
+    )
 
 
 def _public_reserve_target(drop: dict, public_remaining_now: int) -> int:
@@ -4188,6 +4340,41 @@ def api_claim():
         claimable_remaining = _compute_claimable_remaining(user_region, voucher)
         if claimable_remaining <= 0:
             return jsonify({"status": "error", "code": "sold_out"}), 410     
+        claimable_pools = get_claimable_pools(user_region, voucher)
+        if is_public_pool(voucher) and claimable_pools == ["public"] and uid is not None:
+            access_result = check_public_pool_access(
+                user_id=uid,
+                public_pool_id=str(drop_id),
+                drop_open_time=starts_at or now_ref,
+                now=now_ref,
+            )
+            assignment = access_result.get("assignment") or {}
+            segment = access_result.get("segment")
+            current_app.logger.info(
+                "[PUBLIC_POOL_SHAPING] metric=claim_attempt segment=%s user_id=%s public_pool_id=%s access_allowed=%s eligible_after=%s",
+                segment,
+                uid,
+                drop_id,
+                assignment.get("access_allowed"),
+                assignment.get("eligible_after"),
+            )
+            if not assignment.get("access_allowed"):
+                current_app.logger.info(
+                    "[PUBLIC_POOL_SHAPING] metric=denied_assignment segment=%s user_id=%s public_pool_id=%s claim_outcome=denied",
+                    segment,
+                    uid,
+                    drop_id,
+                )
+                return jsonify({"status": "error", "code": "sold_out"}), 410
+            if access_result.get("status") == "too_early":
+                current_app.logger.info(
+                    "[PUBLIC_POOL_SHAPING] metric=delayed_assignment segment=%s user_id=%s public_pool_id=%s claim_outcome=too_early eligible_after=%s",
+                    segment,
+                    uid,
+                    drop_id,
+                    assignment.get("eligible_after"),
+                )
+                return jsonify({"status": "error", "code": "sold_out"}), 410
 
     if _should_enforce_session_cooldown(client_subnet, client_ip):
         session_now = now_utc()
@@ -4591,20 +4778,40 @@ def api_claim():
         return jsonify({"status": "error", "code": "server_error"}), 500
 
     else:
+        claimed_at_utc = now_utc()
         voucher_claims_col.update_one(
             {"_id": claim_doc_id},
             {
                 "$set": {
                     "status": "claimed",
                     "voucher_code": result.get("code"),
-                    "claimed_at": now_utc(),
-                    "updated_at": now_utc(),
+                    "claimed_at": claimed_at_utc,
+                    "updated_at": claimed_at_utc,
                 }
             },
         )
         current_app.logger.info("[claim][OK] drop=%s uid=%s code=%s", drop_id, uid, result.get("code"))
         _apply_kill_success(ip=client_ip, subnet=client_subnet, now=now_utc())
         _set_cooldown(ip=client_ip, subnet=client_subnet, uid=claim_user_id, now=now_utc())      
+        if is_public_pool(voucher):
+            claimed_voucher = db.vouchers.find_one(
+                {
+                    "dropId": {"$in": _drop_id_variants(drop_id)},
+                    "code": result.get("code"),
+                },
+                {"pool": 1},
+            ) or {}
+            claimed_pool = (claimed_voucher.get("pool") or "public").strip().lower()
+            if claimed_pool == "public" and uid is not None:
+                update_public_pool_claim_state_on_success(uid, claimed_at=claimed_at_utc)
+                state_after = load_public_pool_claim_state(uid, reference_time=claimed_at_utc)
+                current_app.logger.info(
+                    "[PUBLIC_POOL_SHAPING] metric=claim_success segment=%s user_id=%s public_pool_id=%s access_allowed=true eligible_after=%s claim_outcome=success",
+                    state_after.get("segment"),
+                    uid,
+                    drop_id,
+                    claimed_at_utc,
+                )
     if _is_new_joiner_audience(audience_type):
         try:
             new_joiner_claims_col.update_one(
