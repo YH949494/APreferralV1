@@ -475,6 +475,70 @@ class VoucherAntiHunterTests(unittest.TestCase):
         finally:
             vouchers_module.db = original_db
 
+    def test_claim_pooled_reconciles_stale_public_remaining_precheck(self):
+        import vouchers as vouchers_module
+
+        now = datetime.now(timezone.utc)
+        fake_db = FakeDb(
+            drops=[{"_id": "drop-3b", "my_remaining": 0, "public_remaining": 0}],
+            vouchers=[
+                {
+                    "type": "pooled",
+                    "dropId": "drop-3b",
+                    "code": "PUB-STALE",
+                    "status": "free",
+                    "pool": "public",
+                }
+            ],
+        )
+        original_db = vouchers_module.db
+        vouchers_module.db = fake_db
+        try:
+            res = claim_pooled(drop_id="drop-3b", claim_key="uid:111", ref=now, pools=["public"])
+            self.assertTrue(res["ok"])
+            self.assertEqual(res["code"], "PUB-STALE")
+            self.assertEqual(fake_db.drops.docs["drop-3b"]["public_remaining"], 0)
+        finally:
+            vouchers_module.db = original_db
+
+    def test_claim_pooled_persists_reconciled_public_remaining(self):
+        import vouchers as vouchers_module
+
+        now = datetime.now(timezone.utc)
+        fake_db = FakeDb(
+            drops=[{"_id": "drop-3c", "my_remaining": 0, "public_remaining": 0}],
+            vouchers=[
+                {
+                    "type": "pooled",
+                    "dropId": "drop-3c",
+                    "code": "PUB-1",
+                    "status": "free",
+                    "pool": "public",
+                },
+                {
+                    "type": "pooled",
+                    "dropId": "drop-3c",
+                    "code": "PUB-2",
+                    "status": "free",
+                    "pool": "public",
+                },
+            ],
+        )
+        original_db = vouchers_module.db
+        vouchers_module.db = fake_db
+        try:
+            res = claim_pooled(
+                drop_id="drop-3c",
+                claim_key="uid:112",
+                ref=now,
+                pools=["public"],
+                retained_3d=True,
+            )
+            self.assertTrue(res["ok"])
+            self.assertEqual(fake_db.drops.docs["drop-3c"]["public_remaining"], 1)
+        finally:
+            vouchers_module.db = original_db
+
     def test_claim_pooled_my_pool_decrements_when_available(self):
         import vouchers as vouchers_module
 
@@ -561,6 +625,111 @@ class VoucherAntiHunterTests(unittest.TestCase):
             self.assertEqual(fake_db.drops.last_query.get("internal_only"), {"$ne": True})
         finally:
             m.db = orig_db
+
+    def test_user_visible_drops_reconciles_stale_public_remaining(self):
+        import vouchers as m
+
+        now = datetime.now(timezone.utc)
+        drop = {
+            "_id": "drop-visible-stale",
+            "name": "Visible stale",
+            "type": "pooled",
+            "status": "active",
+            "startsAt": now - timedelta(minutes=5),
+            "endsAt": now + timedelta(minutes=5),
+            "public_remaining": 0,
+            "my_remaining": 0,
+        }
+        fake_db = FakeDb(
+            drops=[drop],
+            vouchers=[
+                {
+                    "type": "pooled",
+                    "dropId": "drop-visible-stale",
+                    "code": "VIS-1",
+                    "status": "free",
+                    "pool": "public",
+                }
+            ],
+        )
+        orig_db = m.db
+        orig_users = m.users_collection
+        orig_load_user_context = m.load_user_context
+        orig_is_drop_allowed = m.is_drop_allowed
+        orig_is_user_eligible = m.is_user_eligible_for_drop
+        orig_welcome_eligibility = m.welcome_eligibility
+        orig_get_active_drops = m.get_active_drops
+        orig_claims = m.voucher_claims_col
+        try:
+            m.db = fake_db
+            m.users_collection = FakeSimpleCollection([{"user_id": 42, "usernameLower": "alice", "region": "th"}])
+            m.voucher_claims_col = FakeSimpleCollection([])
+            m.load_user_context = lambda **kwargs: {}
+            m.is_drop_allowed = lambda *args, **kwargs: True
+            m.is_user_eligible_for_drop = lambda *args, **kwargs: True
+            m.welcome_eligibility = lambda *_args, **_kwargs: (True, "ok", None)
+            m.get_active_drops = lambda _ref: [drop]
+            with Flask(__name__).app_context():
+                cards, _region = user_visible_drops({"usernameLower": "alice", "userId": "42"}, now, tg_user={"id": 42, "username": "alice"})
+            self.assertEqual(len(cards), 1)
+            self.assertEqual(cards[0]["dropId"], "drop-visible-stale")
+            self.assertEqual(cards[0]["visible_remaining"], 1)
+            self.assertEqual(fake_db.drops.docs["drop-visible-stale"]["public_remaining"], 1)
+        finally:
+            m.db = orig_db
+            m.users_collection = orig_users
+            m.load_user_context = orig_load_user_context
+            m.is_drop_allowed = orig_is_drop_allowed
+            m.is_user_eligible_for_drop = orig_is_user_eligible
+            m.welcome_eligibility = orig_welcome_eligibility
+            m.get_active_drops = orig_get_active_drops
+            m.voucher_claims_col = orig_claims
+
+    def test_user_visible_drops_persists_true_sold_out_zero(self):
+        import vouchers as m
+
+        now = datetime.now(timezone.utc)
+        drop = {
+            "_id": "drop-visible-empty",
+            "name": "Visible empty",
+            "type": "pooled",
+            "status": "active",
+            "startsAt": now - timedelta(minutes=5),
+            "endsAt": now + timedelta(minutes=5),
+            "public_remaining": 0,
+            "my_remaining": 0,
+        }
+        fake_db = FakeDb(drops=[drop], vouchers=[])
+        orig_db = m.db
+        orig_users = m.users_collection
+        orig_load_user_context = m.load_user_context
+        orig_is_drop_allowed = m.is_drop_allowed
+        orig_is_user_eligible = m.is_user_eligible_for_drop
+        orig_welcome_eligibility = m.welcome_eligibility
+        orig_get_active_drops = m.get_active_drops
+        orig_claims = m.voucher_claims_col
+        try:
+            m.db = fake_db
+            m.users_collection = FakeSimpleCollection([{"user_id": 42, "usernameLower": "alice", "region": "th"}])
+            m.voucher_claims_col = FakeSimpleCollection([])
+            m.load_user_context = lambda **kwargs: {}
+            m.is_drop_allowed = lambda *args, **kwargs: True
+            m.is_user_eligible_for_drop = lambda *args, **kwargs: True
+            m.welcome_eligibility = lambda *_args, **_kwargs: (True, "ok", None)
+            m.get_active_drops = lambda _ref: [drop]
+            with Flask(__name__).app_context():
+                cards, _region = user_visible_drops({"usernameLower": "alice", "userId": "42"}, now, tg_user={"id": 42, "username": "alice"})
+            self.assertEqual(cards, [])
+            self.assertEqual(fake_db.drops.docs["drop-visible-empty"]["public_remaining"], 0)
+        finally:
+            m.db = orig_db
+            m.users_collection = orig_users
+            m.load_user_context = orig_load_user_context
+            m.is_drop_allowed = orig_is_drop_allowed
+            m.is_user_eligible_for_drop = orig_is_user_eligible
+            m.welcome_eligibility = orig_welcome_eligibility
+            m.get_active_drops = orig_get_active_drops
+            m.voucher_claims_col = orig_claims
 
     def test_claim_internal_drop_without_ledger_rejected(self):
         import vouchers as m

@@ -2979,6 +2979,29 @@ def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None
             # Need at least one free code OR user already claimed (so they can see their code state)
             public_remaining = max(0, int(d.get("public_remaining") or 0))
             my_remaining = max(0, int(d.get("my_remaining") or 0))
+            if public_remaining <= 0:
+                reconciliation = reconcile_pooled_remaining(drop_id)
+                _persist_reconciled_pooled_remaining(
+                    drop_id,
+                    reconciliation["actual_free_public"],
+                    reconciliation["actual_free_my"],
+                )
+                public_remaining_after = max(0, int(reconciliation.get("actual_free_public") or 0))
+                my_remaining_after = max(0, int(reconciliation.get("actual_free_my") or 0))
+                try:
+                    current_app.logger.info(
+                        "[pool_reconcile_visible] drop=%s counter_before=%s counter_after=%s actual_free_public=%s actual_free_my=%s restored_to_visible=%s",
+                        drop_id,
+                        public_remaining,
+                        public_remaining_after,
+                        reconciliation.get("actual_free_public"),
+                        reconciliation.get("actual_free_my"),
+                        public_remaining_after > 0,
+                    )
+                except Exception:
+                    pass
+                public_remaining = public_remaining_after
+                my_remaining = my_remaining_after
             public_visible_remaining = _effective_public_visible_remaining(
                 drop=d,
                 drop_id=drop_id,
@@ -3123,10 +3146,6 @@ def reconcile_pooled_remaining(drop_id: str) -> dict:
         "status": "free",
         "pool": "my",
     })
-    db.drops.update_one(
-        {"_id": _coerce_id(drop_id)},
-        {"$set": {"public_remaining": actual_free_public, "my_remaining": actual_free_my}},
-    )
     try:
         current_app.logger.info(
             "[pool_reconcile] drop=%s public=%s my=%s",
@@ -3137,6 +3156,31 @@ def reconcile_pooled_remaining(drop_id: str) -> dict:
     except Exception:
         print(f"[pool_reconcile] drop={drop_id} public={actual_free_public} my={actual_free_my}")
     return {"actual_free_public": actual_free_public, "actual_free_my": actual_free_my}
+
+def _persist_reconciled_pooled_remaining(drop_id: str, actual_free_public: int, actual_free_my: int) -> None:
+    safe_public = max(0, int(actual_free_public or 0))
+    safe_my = max(0, int(actual_free_my or 0))
+    try:
+        db.drops.update_one(
+            {"_id": _coerce_id(drop_id)},
+            {"$set": {"public_remaining": safe_public, "my_remaining": safe_my}},
+        )
+        current_app.logger.info(
+            "[pool_reconcile_persist] drop=%s public=%s my=%s",
+            drop_id,
+            safe_public,
+            safe_my,
+        )
+    except Exception:
+        try:
+            current_app.logger.exception(
+                "[pool_reconcile_persist_fail] drop=%s public=%s my=%s",
+                drop_id,
+                safe_public,
+                safe_my,
+            )
+        except Exception:
+            pass
 
 def claim_pooled(
     drop_id: str,
@@ -3232,7 +3276,43 @@ def claim_pooled(
         except Exception:
             rem = 0
         if rem <= 0:
-            continue
+            try:
+                current_app.logger.info(
+                    "[pool_counter_stale_preclaim] drop=%s pool=%s counter_before=%s",
+                    drop_id,
+                    pool,
+                    rem,
+                )
+            except Exception:
+                pass
+            if not reconciled:
+                reconciliation = reconcile_pooled_remaining(drop_id)
+                _persist_reconciled_pooled_remaining(
+                    drop_id,
+                    reconciliation["actual_free_public"],
+                    reconciliation["actual_free_my"],
+                )
+                reconciled = True
+                rem_after = (
+                    reconciliation["actual_free_my"]
+                    if pool == "my"
+                    else reconciliation["actual_free_public"]
+                )
+                try:
+                    current_app.logger.info(
+                        "[pool_reconcile_claim] drop=%s pool=%s counter_before=%s counter_after=%s actual_free_public=%s actual_free_my=%s",
+                        drop_id,
+                        pool,
+                        rem,
+                        rem_after,
+                        reconciliation["actual_free_public"],
+                        reconciliation["actual_free_my"],
+                    )
+                except Exception:
+                    pass
+                rem = max(0, int(rem_after or 0))
+            if rem <= 0:
+                continue
         if pool == "public" and reserve_limited and rem <= reserve_target and not retained_3d:
             _safe_log(
                 "info",
@@ -3260,6 +3340,11 @@ def claim_pooled(
         )
         if not doc and not reconciled:
             reconciliation = reconcile_pooled_remaining(drop_id)
+            _persist_reconciled_pooled_remaining(
+                drop_id,
+                reconciliation["actual_free_public"],
+                reconciliation["actual_free_my"],
+            )
             reconciled = True
             actual_remaining = (
                 reconciliation["actual_free_my"]
@@ -3267,6 +3352,18 @@ def claim_pooled(
                 else reconciliation["actual_free_public"]
             )
             if actual_remaining > 0:
+                try:
+                    current_app.logger.info(
+                        "[pool_reconcile_claim] drop=%s pool=%s counter_before=%s counter_after=%s actual_free_public=%s actual_free_my=%s",
+                        drop_id,
+                        pool,
+                        0,
+                        actual_remaining,
+                        reconciliation["actual_free_public"],
+                        reconciliation["actual_free_my"],
+                    )
+                except Exception:
+                    pass
                 doc = db.vouchers.find_one_and_update(
                     criteria,
                     {
