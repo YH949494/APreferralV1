@@ -20,13 +20,19 @@ from vouchers import (
     _set_session_cooldown,
     _session_cooldown_payload,
     _should_enforce_session_cooldown,
+    assign_public_pool_access_once,
+    check_public_pool_access,
     claim_personalised,
     claim_pooled,
+    classify_public_pool_segment,
     admin_drop_actions,
     get_claimable_pools,
     get_visible_pools,
+    is_public_pool,
+    load_public_pool_claim_state,
     parse_kl_local,
     reconcile_pooled_remaining,
+    update_public_pool_claim_state_on_success,
     user_visible_drops,
     get_active_drops,
 )
@@ -1513,7 +1519,88 @@ class VoucherAntiHunterTests(unittest.TestCase):
         self.assertEqual(payload["reason"], "session_cooldown")
         self.assertEqual(payload["retry_after_sec"], 12)
         self.assertIn("Please try again in", payload["message"])
-        
+
+
+class PublicPoolShapingTests(unittest.TestCase):
+    class _SimpleCollection:
+        def __init__(self, docs=None):
+            self.docs = list(docs or [])
+
+        def find_one(self, filt, projection=None):  # noqa: ARG002
+            for doc in self.docs:
+                if all(doc.get(k) == v for k, v in filt.items()):
+                    return dict(doc)
+            return None
+
+        def insert_one(self, doc):
+            for existing in self.docs:
+                if (
+                    existing.get("user_id") == doc.get("user_id")
+                    and existing.get("public_pool_id") == doc.get("public_pool_id")
+                ):
+                    raise DuplicateKeyError("duplicate key")
+            self.docs.append(dict(doc))
+            class R:
+                inserted_id = 1
+            return R()
+
+        def update_one(self, filt, update, upsert=False):
+            for doc in self.docs:
+                if all(doc.get(k) == v for k, v in filt.items()):
+                    for key, value in update.get("$set", {}).items():
+                        doc[key] = value
+                    return
+            if upsert:
+                fresh = dict(filt)
+                for key, value in update.get("$set", {}).items():
+                    fresh[key] = value
+                self.docs.append(fresh)
+
+    def test_is_public_pool_only_true_for_public_pooled(self):
+        self.assertTrue(is_public_pool({"type": "pooled", "audience": "public", "eligibility": {"mode": "public"}}))
+        self.assertFalse(is_public_pool({"type": "pooled", "audience": "new_joiner", "eligibility": {"mode": "public"}}))
+        self.assertFalse(is_public_pool({"type": "personalised", "audience": "public"}))
+
+    def test_assign_public_pool_access_once_idempotent(self):
+        import vouchers as m
+
+        orig_assignments = m.public_pool_access_assignments_col
+        orig_random = m.random.random
+        orig_randint = m.random.randint
+        m.public_pool_access_assignments_col = self._SimpleCollection()
+        m.random.random = lambda: 0.5
+        m.random.randint = lambda a, b: 20  # noqa: ARG005
+        try:
+            drop_open = datetime(2026, 4, 22, 12, 0, tzinfo=timezone.utc)
+            first = assign_public_pool_access_once(123, "drop-1", drop_open, "light_repeat")
+            second = assign_public_pool_access_once(123, "drop-1", drop_open, "repeat")
+        finally:
+            m.public_pool_access_assignments_col = orig_assignments
+            m.random.random = orig_random
+            m.random.randint = orig_randint
+
+        self.assertEqual(first["eligible_after"], second["eligible_after"])
+        self.assertEqual(first["access_allowed"], second["access_allowed"])
+        self.assertEqual(first["segment_at_assignment"], second["segment_at_assignment"])
+
+    def test_update_public_pool_claim_state_on_success_sets_fields(self):
+        import vouchers as m
+
+        orig_users = m.users_collection
+        users = self._SimpleCollection([{"user_id": 55, "has_ever_claimed_public_pool": False, "public_claim_timestamps_recent": []}])
+        m.users_collection = users
+        try:
+            claimed_at = datetime(2026, 4, 22, 12, 0, tzinfo=timezone.utc)
+            update_public_pool_claim_state_on_success(55, claimed_at=claimed_at)
+            state = load_public_pool_claim_state(55, reference_time=claimed_at)
+        finally:
+            m.users_collection = orig_users
+
+        self.assertTrue(state["has_ever_claimed_public_pool"])
+        self.assertEqual(state["recent_public_claim_count_30d"], 1)
+        self.assertEqual(classify_public_pool_segment(state), "light_repeat")
+
+
 if __name__ == "__main__":
     unittest.main()
 
