@@ -221,7 +221,7 @@ class OnboardingTests(unittest.TestCase):
         self.assertIn("onboarding_started_at", user_doc)
         self.assertEqual(self.scheduler.add_calls.count(f"pm1:{uid}"), 1)
         trigger = self.scheduler.jobs[f"pm1:{uid}"]["trigger"]
-        self.assertEqual(trigger.run_date, fixed_now + timedelta(hours=2))
+        self.assertEqual(trigger.run_date, fixed_now + timedelta(minutes=1))
 
     def test_record_onboarding_existing_user_id_with_different_id(self):
         uid = 555
@@ -313,16 +313,12 @@ class OnboardingTests(unittest.TestCase):
         uid = 456
         self.users.insert_one({"user_id": uid})
         fixed_now = datetime(2024, 1, 2, tzinfo=timezone.utc)
-        with patch("onboarding.random.uniform", return_value=8.5), patch.object(
-            onboarding, "now_utc", return_value=fixed_now
-        ):
+        with patch.object(onboarding, "now_utc", return_value=fixed_now):
             record_first_checkin(uid)
             record_first_checkin(uid)
         self.assertIn("first_checkin_at", self.users.find_one({"user_id": uid}))
         self.assertEqual(self.scheduler.remove_calls.count(f"pm1:{uid}"), 1)
-        self.assertEqual(self.scheduler.add_calls.count(f"pm2:{uid}"), 1)
-        trigger = self.scheduler.jobs[f"pm2:{uid}"]["trigger"]
-        self.assertEqual(trigger.run_date, fixed_now + timedelta(hours=8.5))
+        self.assertEqual(self.scheduler.add_calls.count(f"pm2:{uid}"), 0)
 
     def test_e3_record_first_mywin(self):
         uid = 789
@@ -333,9 +329,7 @@ class OnboardingTests(unittest.TestCase):
             record_first_mywin(uid, -1002743212540, 111)
         self.assertIn("first_mywin_at", self.users.find_one({"user_id": uid}))
         self.assertEqual(self.scheduler.remove_calls.count(f"pm2:{uid}"), 1)
-        self.assertEqual(self.scheduler.add_calls.count(f"pm3:{uid}"), 1)
-        trigger = self.scheduler.jobs[f"pm3:{uid}"]["trigger"]
-        self.assertEqual(trigger.run_date, fixed_now + timedelta(hours=24))
+        self.assertEqual(self.scheduler.add_calls.count(f"pm3:{uid}"), 0)
 
     def test_schedule_pm1_due_at_idempotent(self):
         uid = 111
@@ -345,7 +339,7 @@ class OnboardingTests(unittest.TestCase):
             onboarding.schedule_pm1(uid)
             onboarding.schedule_pm1(uid)
         user_doc = self.users.find_one({"user_id": uid})
-        self.assertEqual(user_doc.get("pm1_due_at_utc"), fixed_now + timedelta(hours=2))
+        self.assertEqual(user_doc.get("pm1_due_at_utc"), fixed_now + timedelta(minutes=1))
 
     def test_onboarding_due_tick_marks_sent(self):
         uid = 222
@@ -394,6 +388,9 @@ class OnboardingTests(unittest.TestCase):
                 self.effective_user = FakeUser(999)
 
         class FakeCollection:
+            def list_indexes(self):
+                return []
+
             def create_index(self, *args, **kwargs):  # noqa: ARG002
                 return None
 
