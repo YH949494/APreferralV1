@@ -41,4 +41,6 @@ primary_region = "sin"
 
 #[deploy]
 #  release_command = "python /app/patch_monthly_xp.py"
- 
+
+[deploy]
+  release_command = "python scripts/backfill_public_pool_claim_state.py"
