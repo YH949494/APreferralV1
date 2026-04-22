@@ -2262,7 +2262,12 @@ def _public_reserve_target(drop: dict, public_remaining_now: int) -> int:
         reserve_total = max(0, int(public_remaining_now or 0))
     target = int((reserve_total * reserve_ratio) + 0.999999)
     max_reservable = max(0, reserve_total - 1)
-    return max(0, min(target, max_reservable))
+    computed = max(0, min(target, max_reservable))
+    # When remaining has already fallen into (or below) the reserve zone, release
+    # the reserve entirely so non-retained users can still claim the tail stock.
+    if public_remaining_now <= computed:
+        return 0
+    return computed
 
 
 def _ensure_reserve_public_total(drop_id: str, drop: dict | None = None) -> int:
