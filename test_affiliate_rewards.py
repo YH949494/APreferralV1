@@ -432,6 +432,38 @@ class AffiliateRewardTests(unittest.TestCase):
         self.assertEqual(first.get("voucher_code"), second.get("voucher_code"))
         self.assertEqual(db.voucher_pools.count_documents({"pool_id": "T1", "status": "issued"}), 1)
 
+    def test_settling_retry_issues_voucher_when_pool_claim_incomplete(self):
+        # Ledger stuck in SETTLING (e.g. process crashed before pool claim ran).
+        # Next evaluate call must retry the pool claim and reach ISSUED.
+        db = FakeDb()
+        db.users.insert_one({"user_id": 77, "blocked": False})
+        now = datetime(2026, 1, 15, tzinfo=timezone.utc)
+        for i in range(1, 11):
+            db.qualified_events.insert_one({"invitee_id": i, "referrer_id": 77, "qualified_at": now})
+        db.voucher_pools.insert_one({"pool_id": "T1", "code": "RETRY1", "status": "available"})
+
+        # Simulate a crash mid-claim: ledger is SETTLING but no pool voucher was claimed.
+        dedup_key = "AFF:77:202601:T1"
+        db.affiliate_ledger.insert_one({
+            "dedup_key": dedup_key,
+            "ledger_type": "AFFILIATE_MONTHLY",
+            "user_id": 77,
+            "year_month": "202601",
+            "tier": "T1",
+            "pool_id": "T1",
+            "status": "SETTLING",
+            "voucher_code": None,
+            "risk_flags": [],
+            "qualified_count": 10,
+            "created_at": now,
+            "updated_at": now,
+        })
+
+        row = evaluate_monthly_affiliate_reward(db, referrer_id=77, now_utc=now)
+
+        self.assertEqual(row["status"], "ISSUED")
+        self.assertIsNotNone(row.get("voucher_code"))
+        self.assertEqual(db.voucher_pools.count_documents({"pool_id": "T1", "status": "issued"}), 1)
 
 
 if __name__ == "__main__":
