@@ -6,7 +6,7 @@ from datetime import timedelta
 import os
 
 from database import init_db, get_db
-from vouchers import _as_aware_utc, is_public_pool, now_utc
+from vouchers import _as_aware_utc, is_public_pool, now_utc 
 
 
 WINDOW_DAYS = 30
