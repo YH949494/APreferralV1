@@ -2808,12 +2808,15 @@ Active players win more.
     }
 
     function isPublicSoldOut(drop, userRegion) {
-      if (isMyRegion(userRegion)) return false;
-      const remaining = drop?.visible_remaining ?? drop?.publicRemainingApprox ?? drop?.remainingApprox;
-      if (remaining === undefined || remaining === null) return false;
-      const remainingValue = Number(remaining);
-      if (Number.isNaN(remainingValue)) return false;
-      return remainingValue <= 0;
+      const claimable = drop?.claimable;
+      if (claimable !== false) return false;
+      const hint = String(
+        drop?.reason || drop?.soldOutReason || drop?.code || drop?.status || ""
+      ).toLowerCase();
+      return hint.includes("sold_out")
+        || hint.includes("sold out")
+        || hint.includes("fully_redeemed")
+        || hint.includes("fully redeemed");
     }
 
     function campaignWindowText(drop) {
@@ -2840,27 +2843,30 @@ Active players win more.
         card.appendChild(meta);
       }
 
-      if (drop && drop.visible_remaining !== undefined && drop.visible_remaining !== null) {
-        const remainMeta = document.createElement("p");
-        remainMeta.className = "campaign-meta";
-        const value = Number(drop.visible_remaining);
-        const label = Number.isNaN(value) ? String(drop.visible_remaining) : value;
-        remainMeta.textContent = `Remaining: ${label}`;
-        card.appendChild(remainMeta);
-      } else if (drop && drop.remainingApprox !== undefined && drop.remainingApprox !== null) {
-        const remainMeta = document.createElement("p");
-        remainMeta.className = "campaign-meta";
-        const value = Number(drop.remainingApprox);
-        const label = Number.isNaN(value) ? String(drop.remainingApprox) : value;
-        remainMeta.textContent = `Remaining: ${label}`;
-        card.appendChild(remainMeta);
-      } else if (drop && drop.codesTotal !== undefined && drop.codesTotal !== null) {
-        const totalMeta = document.createElement("p");
-        totalMeta.className = "campaign-meta";
-        const value = Number(drop.codesTotal);
-        const label = Number.isNaN(value) ? String(drop.codesTotal) : value;
-        totalMeta.textContent = `Total codes: ${label}`;
-        card.appendChild(totalMeta);
+      const showRemainingMeta = !!(drop?.adminPreview || getAdminSecret());
+      if (showRemainingMeta) {
+        if (drop && drop.visible_remaining !== undefined && drop.visible_remaining !== null) {
+          const remainMeta = document.createElement("p");
+          remainMeta.className = "campaign-meta";
+          const value = Number(drop.visible_remaining);
+          const label = Number.isNaN(value) ? String(drop.visible_remaining) : value;
+          remainMeta.textContent = `Remaining: ${label}`;
+          card.appendChild(remainMeta);
+        } else if (drop && drop.remainingApprox !== undefined && drop.remainingApprox !== null) {
+          const remainMeta = document.createElement("p");
+          remainMeta.className = "campaign-meta";
+          const value = Number(drop.remainingApprox);
+          const label = Number.isNaN(value) ? String(drop.remainingApprox) : value;
+          remainMeta.textContent = `Remaining: ${label}`;
+          card.appendChild(remainMeta);
+        } else if (drop && drop.codesTotal !== undefined && drop.codesTotal !== null) {
+          const totalMeta = document.createElement("p");
+          totalMeta.className = "campaign-meta";
+          const value = Number(drop.codesTotal);
+          const label = Number.isNaN(value) ? String(drop.codesTotal) : value;
+          totalMeta.textContent = `Total codes: ${label}`;
+          card.appendChild(totalMeta);
+        }
       }
 
       const message = document.createElement("p");
@@ -2946,8 +2952,8 @@ Active players win more.
       const liveDrops = [];
       const pastDrops = [];
       drops.forEach((drop) => {
-        const remaining = Number(drop?.visible_remaining ?? drop?.publicRemainingApprox ?? drop?.remainingApprox ?? 1);
-        const isEnded = drop?.isActive === false || (!Number.isNaN(remaining) && remaining <= 0);
+        const status = String(drop?.status || "").toLowerCase();
+        const isEnded = drop?.isActive === false || status === "expired" || status === "inactive" || status === "ended" || status === "closed";
         if (isEnded && !drop?.userClaimed) {
           pastDrops.push(drop);
         } else {
