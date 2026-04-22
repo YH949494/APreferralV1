@@ -3411,15 +3411,29 @@ def claim_pooled(
                 reserve_limited,
             )
             if reserve_limited and rem_now <= reserve_target and not retained_3d:
-                _safe_log(
-                    "info",
-                    "[DROP][RESERVE_BLOCK] drop=%s uid_key=%s rem=%s reserve_target=%s",
-                    drop_id,
-                    claim_key,
-                    rem_now,
-                    reserve_target,
-                )
-                continue
+                if not reconciled:
+                    # Counter may be stale — reconcile before giving up
+                    _recon = reconcile_pooled_remaining(drop_id)
+                    _persist_reconciled_pooled_remaining(
+                        drop_id,
+                        _recon["actual_free_public"],
+                        _recon["actual_free_my"],
+                    )
+                    reconciled = True
+                    rem_now = max(0, int(
+                        (_recon["actual_free_my"] if pool == "my" else _recon["actual_free_public"])
+                        or 0
+                    ))
+                if rem_now <= reserve_target:
+                    _safe_log(
+                        "info",
+                        "[DROP][RESERVE_BLOCK] drop=%s uid_key=%s rem=%s reserve_target=%s",
+                        drop_id,
+                        claim_key,
+                        rem_now,
+                        reserve_target,
+                    )
+                    continue
 
         # 1) Fast pre-check: if remaining counter already 0, skip querying vouchers.
         #    (Avoids pointless voucher query work during peak)
@@ -5600,6 +5614,16 @@ def admin_drop_actions(drop_id):
     if op == "start_now":
         now = now_utc()
         db.drops.update_one({"_id": drop["_id"]}, {"$set": {"startsAt": now, "endsAt": now + timedelta(hours=24), "status": "active"}})
+        if _normalize_drop_type(drop.get("type", "pooled")) != PERSONALISED_TYPE_CANONICAL:
+            try:
+                _recon = reconcile_pooled_remaining(str(drop["_id"]))
+                _persist_reconciled_pooled_remaining(
+                    str(drop["_id"]),
+                    _recon["actual_free_public"],
+                    _recon["actual_free_my"],
+                )
+            except Exception:
+                pass
     elif op == "pause":
         db.drops.update_one({"_id": drop["_id"]}, {"$set": {"status": "paused"}})
     elif op == "end_now":
