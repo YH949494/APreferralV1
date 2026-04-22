@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 import os
-import random
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -12,6 +11,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from app_context import get_bot, get_scheduler, run_bot_coroutine
 from telegram_utils import safe_send_message, send_telegram_http_message
 from database import get_collection, users_collection
+from config import MINIAPP_VERSION
 from time_utils import as_aware_utc
 from pymongo.errors import DuplicateKeyError
 
@@ -25,41 +25,43 @@ MYWIN_INVITE_LINK = "https://t.me/+HBNmk5aV_M0xMzVl"
 _RAW_OFFICIAL_CHANNEL_USERNAME = os.getenv("OFFICIAL_CHANNEL_USERNAME", "advantplayofficial")
 OFFICIAL_CHANNEL_USERNAME = (str(_RAW_OFFICIAL_CHANNEL_USERNAME).strip().lstrip("@") or "advantplayofficial")
 OFFICIAL_CHANNEL_URL = f"https://t.me/{OFFICIAL_CHANNEL_USERNAME}"
+BASE_WEBAPP_URL = "https://apreferralv1.fly.dev/miniapp"
+WEBAPP_URL = f"{BASE_WEBAPP_URL}?v={MINIAPP_VERSION}"
 
 def _mywin_link_line() -> str:
     # HTML anchor so "#mywin" is clickable inside PM text
     return f'\n\n🔗 Submit here:\n<a href="{MYWIN_INVITE_LINK}">#mywin</a>'
 
 PM1_TEXT = (
-    "✅ Step 1: Subscribe our Official Channel (required)\n\n"
-    "Why subscribe?\n"
-    "• Get latest news + reward drops first\n"
-    "• See big win screenshots & weekly highlights\n"
-    "• Faster updates for voucher events / VIP opportunities\n\n"
-    "After subscribed, tap “I’ve subscribed” to continue."
+    "Welcome to the community.\n\n"
+    "Here you can get surprise voucher drops, weekly activities, and rewards for staying active.\n\n"
+    "Open the mini-app to check in, track progress, and claim live rewards."
 )
 
 
 def _pm1_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
+            [InlineKeyboardButton("🚀 Open AdvantPlay Mini-App", url=WEBAPP_URL)],
             [InlineKeyboardButton("📢 Join Official Channel", url=OFFICIAL_CHANNEL_URL)],
-            [InlineKeyboardButton("✅ I’ve subscribed", callback_data="pm1_subscribed")],
         ]
     )
 PM2_TEXT = (
-    "You’re making progress 👍\n\n"
-    "Sharing your first win gives a solid boost\n"
-    "and helps you move closer to VIP 1.\n\n"
-    "A screenshot in #mywin is enough."
+    "Have you opened the mini-app yet?\n\n"
+    "Start with a simple check-in to unlock your first progress step.\n\n"
+    "Beginner tip: set a small budget and start with an easy game flow first."
 )
 PM3_TEXT = (
-    "You’re almost there.\n\n"
-    "Inviting just one friend completes your\n"
-    "New Member Path and unlocks VIP 1.\n\n"
-    "Your invite link is ready in the mini app."
+    "You’re closer than you think.\n\n"
+    "Check this week’s leaderboard and your current progress in the mini-app.\n\n"
+    "A small action now keeps you in the game for future rewards."
 )
 PM4_TEXT = (
+    "Surprise voucher drops can happen anytime.\n\n"
+    "Stay subscribed to @advantplayofficial and turn on notifications so you don’t miss the next one.\n\n"
+    "Open the mini-app now and complete your next step."
+)
+PM4_VIP_UNLOCK_TEXT = (
     "Welcome to VIP 1 🎉\n\n"
     "You’re now part of our core members.\n"
     "This is where better access and opportunities begin."
@@ -177,14 +179,14 @@ def send_pm2_if_needed(
 ) -> bool | tuple[bool, str | None, str | None]:
     user = users_collection.find_one(
         {"user_id": uid},
-        {"first_mywin_at": 1, "pm_sent.pm_mywin_tip": 1, "vip_tier": 1, "status": 1},
+        {"first_checkin_at": 1, "pm_sent.pm_mywin_tip": 1, "vip_tier": 1, "status": 1},
     )
     if not user:
         logger.info("[PM2][SKIP] uid=%s reason=missing_user", uid)
         return (True, None, "missing_user") if return_error else False
-    if user.get("first_mywin_at"):
-        logger.info("[PM2][SKIP] uid=%s reason=already_mywin", uid)
-        return (True, None, "already_mywin") if return_error else False
+    if user.get("first_checkin_at"):
+        logger.info("[PM2][SKIP] uid=%s reason=already_checkin", uid)
+        return (True, None, "already_checkin") if return_error else False
     if (user.get("pm_sent") or {}).get("pm_mywin_tip"):
         logger.info("[PM2][SKIP] uid=%s reason=already_sent", uid)
         return (True, None, "already_sent") if return_error else False
@@ -193,7 +195,7 @@ def send_pm2_if_needed(
         return (True, None, "already_vip") if return_error else False
     text = PM2_TEXT
     reply_markup = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("🚀 Submit #mywin", url="https://t.me/+HBNmk5aV_M0xMzVl")]]
+        [[InlineKeyboardButton("🚀 Open AdvantPlay Mini-App", url=WEBAPP_URL)]]
     )
     bot = get_bot()
     if bot:
@@ -242,6 +244,7 @@ def send_pm3_if_needed(
         {
             "first_referral_at": 1,
             "total_referrals": 1,
+            "first_checkin_at": 1,
             "pm_sent.pm_referral_tip": 1,
             "vip_tier": 1,
             "status": 1,
@@ -250,6 +253,9 @@ def send_pm3_if_needed(
     if not user:
         logger.info("[PM3][SKIP] uid=%s reason=missing_user", uid)
         return (True, None, "missing_user") if return_error else False
+    if not user.get("first_checkin_at"):
+        logger.info("[PM3][SKIP] uid=%s reason=no_activity", uid)
+        return (True, None, "no_activity") if return_error else False
     if user.get("first_referral_at") or int(user.get("total_referrals", 0)) >= 1:
         logger.info("[PM3][SKIP] uid=%s reason=already_referral", uid)
         return (True, None, "already_referral") if return_error else False
@@ -259,6 +265,9 @@ def send_pm3_if_needed(
     if _is_vip1(user):
         logger.info("[PM3][SKIP] uid=%s reason=already_vip", uid)
         return (True, None, "already_vip") if return_error else False
+    reply_markup = InlineKeyboardMarkup(
+        [[InlineKeyboardButton("🚀 Open AdvantPlay Mini-App", url=WEBAPP_URL)]]
+    )
     bot = get_bot()
     if bot:
         try:
@@ -267,6 +276,7 @@ def send_pm3_if_needed(
                     bot,
                     chat_id=uid,
                     text=PM3_TEXT,
+                    reply_markup=reply_markup,
                     uid=uid,
                     send_type="pm3",
                     raise_on_non_transient=False,
@@ -430,28 +440,98 @@ def send_mywin14_if_needed(
     logger.warning("[MYWIN14][SEND_FAILED] uid=%s", uid)
     return (False, err, None) if return_error else False
 
-def send_pm4_if_needed(uid: int) -> None:
+def send_pm4_72h_if_needed(
+    uid: int,
+    *,
+    return_error: bool = False,
+) -> bool | tuple[bool, str | None, str | None]:
+    user = users_collection.find_one(
+        {"user_id": uid},
+        {
+            "first_referral_at": 1,
+            "total_referrals": 1,
+            "pm_sent.pm_reengage_72h": 1,
+            "vip_tier": 1,
+            "status": 1,
+        },
+    )
+    if not user:
+        logger.info("[PM4][SKIP] uid=%s reason=missing_user", uid)
+        return (True, None, "missing_user") if return_error else False
+    if user.get("first_referral_at") or int(user.get("total_referrals", 0)) >= 1:
+        logger.info("[PM4][SKIP] uid=%s reason=already_referral", uid)
+        return (True, None, "already_referral") if return_error else False
+    if (user.get("pm_sent") or {}).get("pm_reengage_72h"):
+        logger.info("[PM4][SKIP] uid=%s reason=already_sent", uid)
+        return (True, None, "already_sent") if return_error else False
+    if _is_vip1(user):
+        logger.info("[PM4][SKIP] uid=%s reason=already_vip", uid)
+        return (True, None, "already_vip") if return_error else False
+    reply_markup = InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("🚀 Open AdvantPlay Mini-App", url=WEBAPP_URL)],
+            [InlineKeyboardButton("📢 Join Official Channel", url=OFFICIAL_CHANNEL_URL)],
+        ]
+    )
+    bot = get_bot()
+    if bot:
+        try:
+            ok, err = run_bot_coroutine(
+                safe_send_message(
+                    bot,
+                    chat_id=uid,
+                    text=PM4_TEXT,
+                    reply_markup=reply_markup,
+                    uid=uid,
+                    send_type="pm4",
+                    raise_on_non_transient=False,
+                    return_error=True,
+                ),
+                timeout=70,
+            )
+        except RuntimeError as exc:
+            if "Bot loop not running yet" not in str(exc):
+                raise
+            ok, err, blocked = send_telegram_http_message(uid, PM4_TEXT)
+            if blocked:
+                err = "bot_blocked"
+    else:
+        ok, err, blocked = send_telegram_http_message(uid, PM4_TEXT)
+        if blocked:
+            err = "bot_blocked"
+    if ok:
+        users_collection.update_one(
+            {"user_id": uid},
+            {"$set": {"pm_sent.pm_reengage_72h": now_utc()}},
+        )
+        logger.info("[PM4][SENT] uid=%s", uid)
+        return (True, None, None) if return_error else True
+    logger.warning("[PM4][SEND_FAILED] uid=%s", uid)
+    return (False, err, None) if return_error else False
+
+
+def send_vip_unlock_if_needed(uid: int) -> None:
     user = users_collection.find_one(
         {"user_id": uid},
         {"pm_sent.pm_vip_unlocked": 1},
     )
     if not user:
-        logger.info("[PM4][SKIP] uid=%s reason=missing_user", uid)
+        logger.info("[VIP_UNLOCK][SKIP] uid=%s reason=missing_user", uid)
         return
     if (user.get("pm_sent") or {}).get("pm_vip_unlocked"):
-        logger.info("[PM4][SKIP] uid=%s reason=already_sent", uid)
+        logger.info("[VIP_UNLOCK][SKIP] uid=%s reason=already_sent", uid)
         return
     bot = get_bot()
     if not bot:
-        logger.info("[PM4][SKIP] uid=%s reason=missing_bot", uid)
+        logger.info("[VIP_UNLOCK][SKIP] uid=%s reason=missing_bot", uid)
         return
     ok = run_bot_coroutine(
         safe_send_message(
             bot,
             chat_id=uid,
-            text=PM4_TEXT,
+            text=PM4_VIP_UNLOCK_TEXT,
             uid=uid,
-            send_type="pm4",
+            send_type="vip_unlock",
             raise_on_non_transient=False,
         ),
         timeout=70,
@@ -463,9 +543,9 @@ def send_pm4_if_needed(uid: int) -> None:
         )
         for job_id in (f"pm1:{uid}", f"pm2:{uid}", f"pm3:{uid}"):
             _remove_job(job_id)
-        logger.info("[PM4][SENT] uid=%s", uid)
+        logger.info("[VIP_UNLOCK][SENT] uid=%s", uid)
     else:
-        logger.warning("[PM4][SEND_FAILED] uid=%s", uid)
+        logger.warning("[VIP_UNLOCK][SEND_FAILED] uid=%s", uid)
 
 def _onboarding_test_mode() -> bool:
     return os.getenv("ONBOARDING_TEST_MODE", "").lower() in {"1", "true", "yes"}
@@ -490,7 +570,7 @@ def _schedule_due_at(uid: int, due_field: str, sent_field: str, run_at: datetime
 
 def schedule_pm1(uid: int, ref: datetime | None = None) -> datetime:
     base = ref or now_utc()
-    delay = timedelta(minutes=2) if _onboarding_test_mode() else timedelta(hours=2)
+    delay = timedelta(minutes=1) if _onboarding_test_mode() else timedelta(minutes=1)
     run_at = base + delay
     stored = _schedule_due_at(uid, "pm1_due_at_utc", "pm1_sent_at_utc", run_at)
     if stored:
@@ -503,11 +583,7 @@ def schedule_pm1(uid: int, ref: datetime | None = None) -> datetime:
 
 def schedule_pm2(uid: int, ref: datetime | None = None) -> datetime:
     base = ref or now_utc()
-    if _onboarding_test_mode():
-        run_at = base + timedelta(minutes=3)
-    else:
-        delay_hours = random.uniform(8, 12)
-        run_at = base + timedelta(hours=delay_hours)
+    run_at = base + (timedelta(minutes=2) if _onboarding_test_mode() else timedelta(hours=24))
     stored = _schedule_due_at(uid, "pm2_due_at_utc", "pm2_sent_at_utc", run_at)
     if stored:
         _schedule_job(f"pm2:{uid}", stored, send_pm2_if_needed, uid)
@@ -519,7 +595,7 @@ def schedule_pm2(uid: int, ref: datetime | None = None) -> datetime:
 
 def schedule_pm3(uid: int, ref: datetime | None = None) -> datetime:
     base = ref or now_utc()
-    delay = timedelta(minutes=4) if _onboarding_test_mode() else timedelta(hours=24)
+    delay = timedelta(minutes=3) if _onboarding_test_mode() else timedelta(hours=48)
     run_at = base + delay
     stored = _schedule_due_at(uid, "pm3_due_at_utc", "pm3_sent_at_utc", run_at)
     if stored:
@@ -527,6 +603,19 @@ def schedule_pm3(uid: int, ref: datetime | None = None) -> datetime:
         logger.info("[PM3][SCHEDULED] uid=%s run_at=%s", uid, stored.isoformat())
         return stored
     logger.info("[PM3][SCHEDULED] uid=%s run_at=existing", uid)
+    return run_at
+
+
+def schedule_pm4(uid: int, ref: datetime | None = None) -> datetime:
+    base = ref or now_utc()
+    delay = timedelta(minutes=4) if _onboarding_test_mode() else timedelta(hours=72)
+    run_at = base + delay
+    stored = _schedule_due_at(uid, "pm4_due_at_utc", "pm4_sent_at_utc", run_at)
+    if stored:
+        _schedule_job(f"pm4:{uid}", stored, send_pm4_72h_if_needed, uid)
+        logger.info("[PM4][SCHEDULED] uid=%s run_at=%s", uid, stored.isoformat())
+        return stored
+    logger.info("[PM4][SCHEDULED] uid=%s run_at=existing", uid)
     return run_at
 
 def _acquire_onboarding_lock(ttl_seconds: int = 90) -> tuple[bool, dict | None]:
@@ -553,21 +642,24 @@ def onboarding_due_tick() -> None:
     pm1_filter = _due_filter("pm1_due_at_utc", "pm1_sent_at_utc", "pm1_disabled")
     pm2_filter = _due_filter("pm2_due_at_utc", "pm2_sent_at_utc", "pm2_disabled")
     pm3_filter = _due_filter("pm3_due_at_utc", "pm3_sent_at_utc", "pm3_disabled")
+    pm4_filter = _due_filter("pm4_due_at_utc", "pm4_sent_at_utc", "pm4_disabled")
     mywin7_filter = _due_filter("mywin7_due_at_utc", "mywin7_sent_at_utc", "mywin7_disabled")
     mywin14_filter = _due_filter("mywin14_due_at_utc", "mywin14_sent_at_utc", "mywin14_disabled")
     
     pm1_due_total = users_collection.count_documents(pm1_filter)
     pm2_due_total = users_collection.count_documents(pm2_filter)
     pm3_due_total = users_collection.count_documents(pm3_filter)
+    pm4_due_total = users_collection.count_documents(pm4_filter)
     mywin7_due_total = users_collection.count_documents(mywin7_filter)
     mywin14_due_total = users_collection.count_documents(mywin14_filter)
-    due_total = pm1_due_total + pm2_due_total + pm3_due_total + mywin7_due_total + mywin14_due_total
+    due_total = pm1_due_total + pm2_due_total + pm3_due_total + pm4_due_total + mywin7_due_total + mywin14_due_total
     logger.info(
-        "[ONBOARD][TICK] due_total=%s pm1=%s pm2=%s pm3=%s mywin7=%s mywin14=%s",
+        "[ONBOARD][TICK] due_total=%s pm1=%s pm2=%s pm3=%s pm4=%s mywin7=%s mywin14=%s",
         due_total,
         pm1_due_total,
         pm2_due_total,
         pm3_due_total,
+        pm4_due_total,
         mywin7_due_total,
         mywin14_due_total,        
     )
@@ -656,6 +748,16 @@ def onboarding_due_tick() -> None:
             "pm3_disabled",
             send_pm3_if_needed,
             pm3_filter,
+        )
+        _process_due(
+            "pm4",
+            "pm4_due_at_utc",
+            "pm4_sent_at_utc",
+            "pm4_last_error",
+            "pm4_last_error_at_utc",
+            "pm4_disabled",
+            send_pm4_72h_if_needed,
+            pm4_filter,
         )
         _process_due(
             "mywin7",
@@ -786,6 +888,9 @@ def record_onboarding_start(
                     source,
                 )
                 schedule_pm1(uid, now)
+                schedule_pm2(uid, now)
+                schedule_pm3(uid, now)
+                schedule_pm4(uid, now)
                 _write_onboarding_event(uid, source=source, ts=now)
                 return True
             logger.info(
@@ -802,6 +907,9 @@ def record_onboarding_start(
                 source,
             )
             schedule_pm1(uid, now)
+            schedule_pm2(uid, now)
+            schedule_pm3(uid, now)
+            schedule_pm4(uid, now)
             _write_onboarding_event(uid, source=source, ts=now)
             return True
         except DuplicateKeyError:
@@ -835,6 +943,9 @@ def record_onboarding_start(
                     source,
                 )
                 schedule_pm1(uid, now)
+                schedule_pm2(uid, now)
+                schedule_pm3(uid, now)
+                schedule_pm4(uid, now)
                 _write_onboarding_event(uid, source=source, ts=now)
                 return True
             logger.info(
@@ -889,7 +1000,6 @@ def record_first_checkin(uid: int, *, ref: datetime | None = None) -> bool:
         )        
         _remove_job(f"pm1:{uid}")
         logger.info("[PM1][CANCEL] uid=%s", uid)
-        schedule_pm2(uid, now)
     return created
 
 
@@ -919,7 +1029,6 @@ def record_first_mywin(uid: int, chat_id: int, message_id: int, *, ref: datetime
         )        
         _remove_job(f"pm2:{uid}")
         logger.info("[PM2][CANCEL] uid=%s", uid)
-        schedule_pm3(uid, now)
     return created
 
 
@@ -978,5 +1087,5 @@ def maybe_unlock_vip1(uid: int) -> bool:
         },
     )
     logger.info("[VIP][UNLOCKED] uid=%s", uid)
-    send_pm4_if_needed(uid)
+    send_vip_unlock_if_needed(uid)
     return True
