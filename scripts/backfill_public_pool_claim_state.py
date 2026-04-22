@@ -38,8 +38,11 @@ def main():
 
     voucher_pool_cache = {}
     cursor = db["voucher_claims"].find(
-        {"status": "claimed", "claimed_at": {"$exists": True}},
-        {"user_id": 1, "drop_id": 1, "claimed_at": 1, "voucher_code": 1},
+        {
+            "status": "claimed",
+            "voucher_code": {"$exists": True, "$nin": [None, ""]},
+        },
+        {"user_id": 1, "drop_id": 1, "claimed_at": 1, "updated_at": 1, "created_at": 1, "voucher_code": 1},
     )
     scanned = matched_public_claims = 0
     for claim in cursor:
@@ -65,7 +68,7 @@ def main():
                 voucher_pool_cache[cache_key] = pool_name
             if pool_name != "public":
                 continue
-        claim_at = _as_aware_utc(claim.get("claimed_at"))
+        claim_at = _as_aware_utc(claim.get("claimed_at")) or _as_aware_utc(claim.get("updated_at")) or _as_aware_utc(claim.get("created_at"))
         if not claim_at:
             continue
         by_user[int(user_id)].append(claim_at)
