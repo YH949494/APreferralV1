@@ -3435,57 +3435,54 @@ def claim_pooled(
                     )
                     continue
 
-        # 1) Fast pre-check: if remaining counter already 0, skip querying vouchers.
-        #    (Avoids pointless voucher query work during peak)
+        # 1) Read remaining counter as a hint (not authoritative).
+        #    If hint is non-positive, reconcile once for this claim flow.
         try:
-            rem = int(db.drops.find_one({"_id": drop_obj_id}, projection={remaining_field: 1}).get(remaining_field, 0))
+            rem_hint = int(db.drops.find_one({"_id": drop_obj_id}, projection={remaining_field: 1}).get(remaining_field, 0))
         except Exception:
-            rem = 0
-        if rem <= 0:
+            rem_hint = 0
+        if rem_hint <= 0 and not reconciled:
             try:
                 current_app.logger.info(
                     "[pool_counter_stale_preclaim] drop=%s pool=%s counter_before=%s",
                     drop_id,
                     pool,
-                    rem,
+                    rem_hint,
                 )
             except Exception:
                 pass
-            if not reconciled:
-                reconciliation = reconcile_pooled_remaining(drop_id)
-                _persist_reconciled_pooled_remaining(
+            reconciliation = reconcile_pooled_remaining(drop_id)
+            _persist_reconciled_pooled_remaining(
+                drop_id,
+                reconciliation["actual_free_public"],
+                reconciliation["actual_free_my"],
+            )
+            reconciled = True
+            rem_after = (
+                reconciliation["actual_free_my"]
+                if pool == "my"
+                else reconciliation["actual_free_public"]
+            )
+            try:
+                current_app.logger.info(
+                    "[pool_reconcile_claim] drop=%s pool=%s counter_before=%s counter_after=%s actual_free_public=%s actual_free_my=%s",
                     drop_id,
+                    pool,
+                    rem_hint,
+                    rem_after,
                     reconciliation["actual_free_public"],
                     reconciliation["actual_free_my"],
                 )
-                reconciled = True
-                rem_after = (
-                    reconciliation["actual_free_my"]
-                    if pool == "my"
-                    else reconciliation["actual_free_public"]
-                )
-                try:
-                    current_app.logger.info(
-                        "[pool_reconcile_claim] drop=%s pool=%s counter_before=%s counter_after=%s actual_free_public=%s actual_free_my=%s",
-                        drop_id,
-                        pool,
-                        rem,
-                        rem_after,
-                        reconciliation["actual_free_public"],
-                        reconciliation["actual_free_my"],
-                    )
-                except Exception:
-                    pass
-                rem = max(0, int(rem_after or 0))
-            if rem <= 0:
-                continue
-        if pool == "public" and reserve_limited and rem <= reserve_target and not retained_3d:
+            except Exception:
+                pass
+            rem_hint = max(0, int(rem_after or 0))
+        if pool == "public" and reserve_limited and rem_hint <= reserve_target and not retained_3d:
             _safe_log(
                 "info",
                 "[DROP][RESERVE_BLOCK] drop=%s uid_key=%s rem=%s reserve_target=%s",
                 drop_id,
                 claim_key,
-                rem,
+                rem_hint,
                 reserve_target,
             )
             continue
@@ -3517,32 +3514,31 @@ def claim_pooled(
                 if pool == "my"
                 else reconciliation["actual_free_public"]
             )
-            if actual_remaining > 0:
-                try:
-                    current_app.logger.info(
-                        "[pool_reconcile_claim] drop=%s pool=%s counter_before=%s counter_after=%s actual_free_public=%s actual_free_my=%s",
-                        drop_id,
-                        pool,
-                        0,
-                        actual_remaining,
-                        reconciliation["actual_free_public"],
-                        reconciliation["actual_free_my"],
-                    )
-                except Exception:
-                    pass
-                doc = db.vouchers.find_one_and_update(
-                    criteria,
-                    {
-                        "$set": {
-                            "status": "claimed",
-                            "claimedBy": claim_key,
-                            "claimedByKey": claim_key,
-                            "claimedAt": ref
-                        }
-                    },
-                    sort=[("_id", ASCENDING)],
-                    return_document=ReturnDocument.AFTER
-                )     
+            try:
+                current_app.logger.info(
+                    "[pool_reconcile_claim] drop=%s pool=%s counter_before=%s counter_after=%s actual_free_public=%s actual_free_my=%s",
+                    drop_id,
+                    pool,
+                    0,
+                    actual_remaining,
+                    reconciliation["actual_free_public"],
+                    reconciliation["actual_free_my"],
+                )
+            except Exception:
+                pass
+            doc = db.vouchers.find_one_and_update(
+                criteria,
+                {
+                    "$set": {
+                        "status": "claimed",
+                        "claimedBy": claim_key,
+                        "claimedByKey": claim_key,
+                        "claimedAt": ref
+                    }
+                },
+                sort=[("_id", ASCENDING)],
+                return_document=ReturnDocument.AFTER
+            )
         if not doc:
             # No free voucher in this pool, try next pool
             continue
