@@ -43,6 +43,5 @@ primary_region = "sin"
  # release_command = "python /app/scripts/backfill_public_pool_claim_state.py"
  
 [deploy]
-  release_command = "python /cleanup_xmas_fields.py"
-
+  release_command = "python /app/cleanup_xmas_fields.py --yes"
 
