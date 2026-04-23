@@ -593,9 +593,12 @@ def evaluate_monthly_affiliate_reward(db, *, referrer_id: int, now_utc: datetime
                 {"$set": {"status": "ISSUED", "voucher_code": voucher.get("code"), "updated_at": now_utc}},
             )
         else:
+            # Pool is empty right now — mark retriable so the next tick retries automatically
+            # once codes are restocked. OUT_OF_STOCK is only set by the month-end settler
+            # after the billing month closes.
             db.affiliate_ledger.update_one(
                 {"_id": ledger["_id"], "status": SETTLING_STATUS, **_no_voucher_filter()},
-                {"$set": {"status": "OUT_OF_STOCK", "updated_at": now_utc}},
+                {"$set": {"status": "PENDING_MANUAL", "updated_at": now_utc}, "$addToSet": {"risk_flags": "pool_empty"}},
             )
         last_ledger = db.affiliate_ledger.find_one({"_id": ledger["_id"]})
 
@@ -622,6 +625,7 @@ def settle_previous_month_affiliate_rewards(db, *, now_utc: datetime | None = No
                     {"status": "PENDING_EOM"},
                     {"status": "APPROVED", "updated_at": {"$lt": stale_cutoff}},
                     {"status": SETTLING_STATUS, "updated_at": {"$lt": stale_cutoff}},
+                    {"status": "PENDING_MANUAL", "updated_at": {"$lt": stale_cutoff}},
                 ],
             },
             {"$set": {"status": SETTLING_STATUS, "updated_at": now_utc}},
