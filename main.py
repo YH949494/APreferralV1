@@ -1145,6 +1145,17 @@ async def handle_user_join(
         blocked = (users_collection.find_one({"user_id": uid}, {"blocked": 1}) or {}).get("blocked", False)
         wb_result = issue_welcome_bonus_if_eligible(db, user_id=uid, is_new_user=True, blocked=bool(blocked))
         logger.info("[WELCOME] bonus_issued uid=%s result=%s", uid, wb_result)
+        wb_status = (wb_result or {}).get("status")
+        if wb_status == "NOT_SUBSCRIBED":
+            await context.bot.send_message(
+                chat_id=uid,
+                text="Please subscribe to @advantplayofficial to claim this voucher.",
+            )
+        elif wb_status == "ISSUED":
+            await context.bot.send_message(
+                chat_id=uid,
+                text="You have received your affiliate welcome bonus!",
+            )
     except Exception:
         logger.exception("[WELCOME] bonus_issue_failed uid=%s", uid)
     logger.info(

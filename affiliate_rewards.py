@@ -3,6 +3,7 @@ import os
 from datetime import datetime, timedelta, timezone
 
 import pytz
+import requests
 from pymongo import ASCENDING, ReturnDocument
 from pymongo.errors import DuplicateKeyError
 from telegram_utils import send_telegram_http_message
@@ -26,6 +27,32 @@ T3_THRESHOLD = int(os.getenv("AFF_T3_THRESHOLD", "50"))
 T4_THRESHOLD = int(os.getenv("AFF_T4_THRESHOLD", "150"))
 T5_THRESHOLD = int(os.getenv("AFF_T5_THRESHOLD", "250"))
 logger = logging.getLogger(__name__)
+
+
+def _is_official_channel_subscribed(user_id: int) -> bool:
+    channel_id_raw = os.getenv("OFFICIAL_CHANNEL_ID")
+    token = os.getenv("BOT_TOKEN", "")
+    if not channel_id_raw or not token:
+        return False
+    try:
+        channel_id = int(str(channel_id_raw).strip())
+    except (TypeError, ValueError):
+        return False
+
+    try:
+        resp = requests.get(
+            f"https://api.telegram.org/bot{token}/getChatMember",
+            params={"chat_id": channel_id, "user_id": int(user_id)},
+            timeout=5,
+        )
+        resp.raise_for_status()
+        payload = resp.json() or {}
+        if not payload.get("ok"):
+            return False
+        status = ((payload.get("result") or {}).get("status") or "").strip()
+        return status in ("member", "administrator", "creator")
+    except Exception:
+        return False
 
 def ensure_affiliate_indexes(db):
     db.qualified_events.create_index([("invitee_id", ASCENDING)], unique=True, name="uniq_invitee_id")
@@ -366,6 +393,8 @@ def issue_welcome_bonus_if_eligible(db, *, user_id: int, is_new_user: bool, bloc
     now_utc = now_utc or datetime.now(timezone.utc)
     if not is_new_user or blocked:
         return {"created": False, "status": "SKIPPED"}
+    if not _is_official_channel_subscribed(int(user_id)):
+        return {"created": False, "status": "NOT_SUBSCRIBED"}
 
     dedup_key = f"WELCOME:{int(user_id)}"
     db.affiliate_ledger.update_one(
