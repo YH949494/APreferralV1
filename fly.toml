@@ -38,9 +38,11 @@ primary_region = "sin"
   [[services.ports]]
     port = 443
     handlers = ["tls", "http"]
-
-[deploy]
-  release_command = "python /cleanup_xmas_fields.py
-
+    
 #[deploy]
  # release_command = "python /app/scripts/backfill_public_pool_claim_state.py"
+ 
+[deploy]
+  release_command = "python /cleanup_xmas_fields.py"
+
+
