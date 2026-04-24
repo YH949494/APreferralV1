@@ -741,8 +741,7 @@ def retry_current_month_pending_manual_ledgers(db, *, now_utc: datetime | None =
         {
             "ledger_type": "AFFILIATE_MONTHLY",
             "year_month": yyyymm,
-            "status": "PENDING_MANUAL",
-            "risk_flags": "pool_empty",
+            "status": {"$in": ["PENDING_MANUAL", "APPROVED"]},
             "updated_at": {"$lt": stale_cutoff},
         },
         {"user_id": 1},
