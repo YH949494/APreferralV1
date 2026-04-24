@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from pymongo import ReturnDocument
+from pymongo.errors import DuplicateKeyError
 
 import scheduler
 
@@ -241,6 +242,32 @@ class SchedulerPendingChannelTests(unittest.TestCase):
 
         self.assertEqual(doc["status"], "awarded")
         self.assertEqual(doc["xp_added"], 10)
+
+    def test_duplicate_award_recovers_qualification(self):
+        class _DupAwardEvents:
+            def insert_one(self, doc):
+                raise DuplicateKeyError("duplicate")
+
+        qualified_calls = []
+        scheduler.mark_invitee_qualified = lambda *args, **kwargs: qualified_calls.append(kwargs) or True
+        scheduler._get_official_channel_member_status = lambda uid: "member"
+        scheduler.evaluate_referral_engagement = lambda **kwargs: {
+            "qualified": True,
+            "score": 2,
+            "signals": {},
+            "points": {},
+            "window_start": self.fixed_now - timedelta(hours=1),
+            "window_end": self.fixed_now,
+        }
+        doc = self._base_pending("pending")
+        fake_db = _FakeSchedulerDB([doc], self._user_doc())
+        fake_db.referral_award_events = _DupAwardEvents()
+        scheduler.db = fake_db
+
+        scheduler.settle_pending_referrals(batch_limit=1)
+
+        self.assertEqual(doc["status"], "awarded")
+        self.assertEqual(len(qualified_calls), 1)
 
     def test_channel_sync_helper_retries_once_on_429_then_succeeds(self):
         class _Resp:
