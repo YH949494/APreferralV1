@@ -14,7 +14,7 @@ import config as _cfg
 from database import db, users_collection
 from time_utils import as_aware_utc
 from onboarding import record_onboarding_start, record_visible_ping
-from affiliate_rewards import approve_affiliate_ledger, reject_affiliate_ledger
+from affiliate_rewards import approve_affiliate_ledger, reject_affiliate_ledger, issue_current_month_affiliate_rewards
 from conversion_tracking import send_meta_event, send_tiktok_event
 
 admin_cache_col = db["admin_cache"]
@@ -5811,6 +5811,25 @@ def admin_affiliate_reject_v2(ledger_id):
     data = request.get_json(silent=True) or {}
     reject_affiliate_ledger(db, ledger_id=oid, reason=data.get("reason"), now_utc=datetime.now(timezone.utc))
     return jsonify({"status": "ok"})
+
+
+@vouchers_bp.route("/admin/affiliate/issue-current-month", methods=["POST"])
+def admin_affiliate_issue_current_month_v2():
+    _, err = require_admin()
+    if err:
+        return err
+    payload = request.get_json(silent=True) or {}
+    batch_limit = payload.get("batch_limit", request.args.get("batch_limit", 500))
+    try:
+        batch_limit = max(1, min(int(batch_limit), 5000))
+    except (TypeError, ValueError):
+        batch_limit = 500
+    summary = issue_current_month_affiliate_rewards(
+        db,
+        now_utc=datetime.now(timezone.utc),
+        batch_limit=batch_limit,
+    )
+    return jsonify({"status": "ok", "summary": summary})
 
 @vouchers_bp.route("/admin/drops_v2", methods=["GET"])
 def list_drops_v2():
