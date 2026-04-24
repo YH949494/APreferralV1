@@ -724,6 +724,46 @@ def settle_previous_month_affiliate_rewards(db, *, now_utc: datetime | None = No
     return {"prev_yyyymm": prev_yyyymm, "processed": processed, "settled": settled}
 
 
+def retry_current_month_pending_manual_ledgers(db, *, now_utc: datetime | None = None, batch_limit: int = 50):
+    """Re-evaluate PENDING_MANUAL affiliate ledgers from the current month that stalled due to an empty pool.
+
+    Called from the 5-minute tick so that vouchers are issued automatically once
+    the pool is restocked, without waiting for the month-end settlement job.
+    """
+    now_utc = now_utc or datetime.now(timezone.utc)
+    _, _, yyyymm = _month_window_utc(now_utc)
+    stale_cutoff = now_utc - timedelta(minutes=10)
+
+    seen_users: set[int] = set()
+    processed = 0
+
+    for doc in db.affiliate_ledger.find(
+        {
+            "ledger_type": "AFFILIATE_MONTHLY",
+            "year_month": yyyymm,
+            "status": "PENDING_MANUAL",
+            "risk_flags": "pool_empty",
+            "updated_at": {"$lt": stale_cutoff},
+        },
+        {"user_id": 1},
+        sort=[("updated_at", ASCENDING)],
+        limit=int(batch_limit),
+    ):
+        uid = int(doc["user_id"])
+        if uid in seen_users:
+            continue
+        seen_users.add(uid)
+        processed += 1
+        try:
+            evaluate_monthly_affiliate_reward(db, referrer_id=uid, now_utc=now_utc)
+        except Exception:
+            logger.exception("[AFFILIATE][RETRY_PENDING_MANUAL] uid=%s yyyymm=%s", uid, yyyymm)
+
+    if processed:
+        logger.info("[AFFILIATE][RETRY_PENDING_MANUAL] yyyymm=%s processed=%s", yyyymm, processed)
+    return {"yyyymm": yyyymm, "processed": processed}
+
+
 def mark_invitee_qualified(db, *, invitee_id: int, referrer_id: int | None, now_utc: datetime | None = None):
     now_utc = now_utc or datetime.now(timezone.utc)
     last_seen = db.user_last_seen.find_one({"user_id": int(invitee_id)}) or {}
