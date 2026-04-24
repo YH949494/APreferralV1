@@ -2897,10 +2897,8 @@ Active players win more.
           card.appendChild(claimedMeta);
         }
       } else {
-        if (claimableNow) {
-          message.textContent = "Tap below to claim your reward.";
-        } else {
-          message.textContent = "This campaign will open soon. Please check back later!";
+        if (!claimableNow && !publicSoldOut) {
+          return null;
         }
 
         if (publicSoldOut) {
@@ -2910,12 +2908,10 @@ Active players win more.
           btn.setAttribute("disabled", "disabled");
           btn.className = "btn btn-ghost";
         } else {
+          message.textContent = "Tap below to claim your reward.";
           btn.textContent = "🎟️ Claim now";
           if (dropId) {
             btn.dataset.dropid = dropId;
-          }
-          if (!claimableNow) {
-            btn.setAttribute("disabled", "disabled");
           }
         }
       }
@@ -2969,6 +2965,7 @@ Active players win more.
 
       liveDrops.forEach((drop, index) => {
         const card = createCampaignCard(drop, userRegion);
+        if (!card) return;
         if (index === 0 && primaryDrop) {
           card.dataset.primary = "true";
         }
@@ -2986,7 +2983,8 @@ Active players win more.
         pastWrap.style.marginTop = "8px";
 
         pastDrops.forEach((drop) => {
-          pastWrap.appendChild(createCampaignCard(drop, userRegion));
+          const card = createCampaignCard(drop, userRegion);
+          if (card) pastWrap.appendChild(card);
         });
 
         toggleBtn.addEventListener("click", () => {
