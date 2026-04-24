@@ -3237,10 +3237,17 @@ def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None
                 base["code"] = already.get("voucher_code")
                 claimed_at = _isoformat_kl(already.get("claimed_at"))
                 if claimed_at:
-                    base["claimedAt"] = claimed_at       
-                base["visible_remaining"] = visible_remaining
+                    base["claimedAt"] = claimed_at
+                base["state"] = "claimed"
+                base["canClaim"] = False
                 base["claimable"] = False
+                base["visible_remaining"] = None
                 base["sold_out"] = False
+                current_app.logger.info(
+                    "[VOUCHER][DROP_STATE] state=claimed user_id=%s dropId=%s",
+                    claim_user_id,
+                    drop_id,
+                )
                 pooled_cards.append(base)
             else:
                 claimability = _pooled_claimability_state(
