@@ -2808,6 +2808,7 @@ Active players win more.
     }
 
     function isPublicSoldOut(drop, userRegion) {
+      if (typeof drop?.sold_out === "boolean") return drop.sold_out;
       if (isMyRegion(userRegion)) return false;
       const remaining = drop?.visible_remaining ?? drop?.publicRemainingApprox ?? drop?.remainingApprox;
       if (remaining === undefined || remaining === null) return false;
@@ -2868,6 +2869,7 @@ Active players win more.
       const dropId = drop?.dropId || drop?.id || drop?._id || "";
       const hasClaimed = !!drop?.userClaimed;
       const canClaim = !!(drop?.isActive || drop?.adminPreview);
+      const claimableNow = typeof drop?.claimable === "boolean" ? drop.claimable : canClaim;
       const publicSoldOut = isPublicSoldOut(drop, userRegion);
 
       const btn = document.createElement("button");
@@ -2893,7 +2895,7 @@ Active players win more.
           card.appendChild(claimedMeta);
         }
       } else {
-        if (canClaim) {
+        if (claimableNow) {
           message.textContent = "Tap below to claim your reward.";
         } else {
           message.textContent = "This campaign will open soon. Please check back later!";
@@ -2910,7 +2912,7 @@ Active players win more.
           if (dropId) {
             btn.dataset.dropid = dropId;
           }
-          if (!canClaim) {
+          if (!claimableNow) {
             btn.setAttribute("disabled", "disabled");
           }
         }
@@ -2920,7 +2922,7 @@ Active players win more.
       card.appendChild(btn);
       const dropType = String(drop?.type || "").toLowerCase();
       const isPoolCard = dropType === "pooled" || dropType === "";
-      if (!hasClaimed && canClaim && !publicSoldOut && isPoolCard) {
+      if (!hasClaimed && claimableNow && !publicSoldOut && isPoolCard) {
         applyChannelGate(dropId, message, btn);
       }
 
@@ -3192,7 +3194,7 @@ Active players win more.
 
       try {
         const tail = buildAdminQueryTail();
-        const res = await v2Fetch(`${API_V2}/vouchers/visible${tail}`);
+        const res = await v2Fetch(`${API_V2}/vouchers/visible${tail}`, { cache: "no-store" });
 
         if (res.status === 401) {
           messageEl.innerText = "Coming soon…";
@@ -3230,13 +3232,14 @@ Active players win more.
         } else {
           const canClaim = !!topDrop?.isActive;
           const isPreview = !!topDrop?.adminPreview;
+          const claimableNow = typeof topDrop?.claimable === "boolean" ? topDrop.claimable : (canClaim || isPreview);
           const publicSoldOut = isPublicSoldOut(topDrop, userRegion);
 
           if (publicSoldOut) {
             messageText = "";
             showVoucherSoldOut(messageText);
           } else {
-            if ((canClaim || isPreview) && dropId) {
+            if (claimableNow && dropId) {
               messageText = "Tap below to claim your reward.";
             } else {
               messageText = "A new campaign reward will appear soon. Please check back later!";
