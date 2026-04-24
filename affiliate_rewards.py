@@ -724,43 +724,47 @@ def settle_previous_month_affiliate_rewards(db, *, now_utc: datetime | None = No
     return {"prev_yyyymm": prev_yyyymm, "processed": processed, "settled": settled}
 
 
-def retry_current_month_pending_manual_ledgers(db, *, now_utc: datetime | None = None, batch_limit: int = 50):
-    """Re-evaluate PENDING_MANUAL affiliate ledgers from the current month that stalled due to an empty pool.
+def retry_current_month_pending_manual_ledgers(db, *, now_utc: datetime | None = None, batch_limit: int = 200):
+    """Ensure all qualifying affiliates for the current month have received their tier vouchers.
 
-    Called from the 5-minute tick so that vouchers are issued automatically once
-    the pool is restocked, without waiting for the month-end settlement job.
+    Queries qualified_events directly so it works even when no affiliate_ledger entry
+    has been created yet (covers: missing ledgers, PENDING_MANUAL with any risk flag,
+    missing_pool_config, stalled APPROVED). Called from the 5-minute tick.
     """
     now_utc = now_utc or datetime.now(timezone.utc)
-    _, _, yyyymm = _month_window_utc(now_utc)
-    stale_cutoff = now_utc - timedelta(minutes=10)
+    start_utc, end_utc, yyyymm = _month_window_utc(now_utc)
 
-    seen_users: set[int] = set()
+    pipeline = [
+        {"$match": {
+            "qualified_at": {"$gte": start_utc, "$lt": end_utc},
+            "referrer_id": {"$ne": None},
+        }},
+        {"$group": {"_id": "$referrer_id", "count": {"$sum": 1}}},
+        {"$match": {"count": {"$gte": T1_THRESHOLD}}},
+        {"$limit": int(batch_limit)},
+    ]
+
     processed = 0
-
-    for doc in db.affiliate_ledger.find(
-        {
-            "ledger_type": "AFFILIATE_MONTHLY",
-            "year_month": yyyymm,
-            "status": "PENDING_MANUAL",
-            "risk_flags": "pool_empty",
-            "updated_at": {"$lt": stale_cutoff},
-        },
-        {"user_id": 1},
-        sort=[("updated_at", ASCENDING)],
-        limit=int(batch_limit),
-    ):
-        uid = int(doc["user_id"])
-        if uid in seen_users:
+    for row in db.qualified_events.aggregate(pipeline):
+        uid = int(row["_id"])
+        top_tier = _tier_for_count(int(row["count"]))
+        if not top_tier:
             continue
-        seen_users.add(uid)
+        # Skip if the highest eligible tier is already in a final state
+        top_ledger = db.affiliate_ledger.find_one(
+            {"dedup_key": f"AFF:{uid}:{yyyymm}:{top_tier}"},
+            {"status": 1},
+        )
+        if top_ledger and top_ledger.get("status") in FINAL_STATUSES:
+            continue
         processed += 1
         try:
             evaluate_monthly_affiliate_reward(db, referrer_id=uid, now_utc=now_utc)
         except Exception:
-            logger.exception("[AFFILIATE][RETRY_PENDING_MANUAL] uid=%s yyyymm=%s", uid, yyyymm)
+            logger.exception("[AFFILIATE][RETRY_QUALIFYING] uid=%s yyyymm=%s", uid, yyyymm)
 
     if processed:
-        logger.info("[AFFILIATE][RETRY_PENDING_MANUAL] yyyymm=%s processed=%s", yyyymm, processed)
+        logger.info("[AFFILIATE][RETRY_QUALIFYING] yyyymm=%s processed=%s", yyyymm, processed)
     return {"yyyymm": yyyymm, "processed": processed}
 
 
