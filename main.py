@@ -66,6 +66,7 @@ from affiliate_rewards import (
     issue_welcome_bonus_if_eligible,
     record_user_last_seen,
     settle_previous_month_affiliate_rewards,
+    retry_current_month_pending_manual_ledgers,
 )
 from telegram_utils import safe_reply_text
 
@@ -612,6 +613,21 @@ def tick_5min() -> None:
                     logger.exception("[AFF_SNAPSHOT][ERROR] week_key=%s err=%s", target, exc)
             logger.info(
                 "[JOB][5MIN] step_done name=affiliate_snapshot_check elapsed_s=%.2f run_id=%s",
+                step_timer.elapsed_s,
+                run_id,
+            )
+
+            with JobTimer() as step_timer:
+                logger.info(
+                    "[JOB][5MIN] progress step=retry_pending_manual_vouchers run_id=%s",
+                    run_id,
+                )
+                try:
+                    retry_current_month_pending_manual_ledgers(db, now_utc=datetime.now(timezone.utc))
+                except Exception as exc:
+                    logger.exception("[JOB][5MIN] step_error name=retry_pending_manual_vouchers run_id=%s err=%s", run_id, exc)
+            logger.info(
+                "[JOB][5MIN] step_done name=retry_pending_manual_vouchers elapsed_s=%.2f run_id=%s",
                 step_timer.elapsed_s,
                 run_id,
             )
