@@ -26,6 +26,10 @@ T3_THRESHOLD = int(os.getenv("AFF_T3_THRESHOLD", "50"))
 T4_THRESHOLD = int(os.getenv("AFF_T4_THRESHOLD", "150"))
 T5_THRESHOLD = int(os.getenv("AFF_T5_THRESHOLD", "250"))
 logger = logging.getLogger(__name__)
+logger.info(
+    "[AFFILIATE][TIER_CONFIG] thresholds=%s",
+    {"T1": T1_THRESHOLD, "T2": T2_THRESHOLD, "T3": T3_THRESHOLD, "T4": T4_THRESHOLD, "T5": T5_THRESHOLD},
+)
 
 
 def _is_official_channel_subscribed(user_id: int) -> bool:
@@ -591,6 +595,12 @@ def evaluate_monthly_affiliate_reward(db, *, referrer_id: int, now_utc: datetime
     qualified_count = db.qualified_events.count_documents(
         {"referrer_id": int(referrer_id), "qualified_at": {"$gte": start_utc, "$lt": end_utc}}
     )
+    logger.info(
+        "[AFFILIATE][EVAL_START] user_id=%s qualified_count=%s year_month=%s",
+        int(referrer_id),
+        int(qualified_count),
+        yyyymm,
+    )
     tier = _tier_for_count(int(qualified_count))
     if not tier:
         return None
@@ -662,6 +672,13 @@ def evaluate_monthly_affiliate_reward(db, *, referrer_id: int, now_utc: datetime
             },
             upsert=True,
         )
+        logger.info(
+            "[AFFILIATE][LEDGER_CREATE] user_id=%s tier=%s year_month=%s status=%s",
+            int(referrer_id),
+            eligible_tier,
+            yyyymm,
+            "APPROVED",
+        )
         ledger = db.affiliate_ledger.find_one({"dedup_key": dedup_key})
         if not ledger:
             continue
@@ -728,6 +745,93 @@ def evaluate_monthly_affiliate_reward(db, *, referrer_id: int, now_utc: datetime
         last_ledger = _issue_affiliate_ledger_from_pool(db, ledger=db.affiliate_ledger.find_one({"_id": ledger["_id"]}), now_utc=now_utc)
 
     return last_ledger
+
+
+def issue_current_month_affiliate_rewards(db, now_utc: datetime | None = None, batch_limit: int = 500):
+    now_utc = now_utc or datetime.now(timezone.utc)
+    start_utc, end_utc, yyyymm = _month_window_utc(now_utc)
+    limit = max(1, int(batch_limit))
+    summary = {
+        "year_month": yyyymm,
+        "scanned_users": 0,
+        "eligible_users": 0,
+        "created_ledgers": 0,
+        "issued_count": 0,
+        "skipped_existing": 0,
+        "pending_manual": 0,
+        "pool_empty": 0,
+        "invalid_tier": 0,
+        "errors": 0,
+    }
+
+    pipeline = [
+        {"$match": {"qualified_at": {"$gte": start_utc, "$lt": end_utc}, "referrer_id": {"$ne": None}}},
+        {"$group": {"_id": "$referrer_id", "count": {"$sum": 1}}},
+        {"$match": {"count": {"$gte": T1_THRESHOLD}}},
+        {"$sort": {"count": -1, "_id": 1}},
+        {"$limit": limit},
+    ]
+    rows = list(db.qualified_events.aggregate(pipeline))
+    summary["scanned_users"] = int(len(rows))
+    summary["eligible_users"] = int(len(rows))
+
+    for row in rows:
+        uid = int(row.get("_id"))
+        qualified_count = int(row.get("count") or 0)
+        expected_tiers = [
+            tier_name for tier_name, threshold in (
+                ("T1", T1_THRESHOLD),
+                ("T2", T2_THRESHOLD),
+                ("T3", T3_THRESHOLD),
+                ("T4", T4_THRESHOLD),
+                ("T5", T5_THRESHOLD),
+            ) if qualified_count >= int(threshold)
+        ]
+        existing_before = list(
+            db.affiliate_ledger.find(
+                {
+                    "ledger_type": "AFFILIATE_MONTHLY",
+                    "user_id": uid,
+                    "year_month": yyyymm,
+                    "tier": {"$in": expected_tiers},
+                },
+                {"tier": 1, "status": 1},
+            )
+        )
+        before_status_by_tier = {str(doc.get("tier")): str(doc.get("status") or "") for doc in existing_before}
+        summary["created_ledgers"] += max(0, len(expected_tiers) - len(existing_before))
+        summary["skipped_existing"] += len(existing_before)
+        try:
+            evaluate_monthly_affiliate_reward(db, referrer_id=uid, now_utc=now_utc)
+        except Exception:
+            summary["errors"] += 1
+            logger.exception("[AFFILIATE][BULK_ISSUE_ERROR] user_id=%s year_month=%s", uid, yyyymm)
+            continue
+
+        final_ledgers = list(
+            db.affiliate_ledger.find(
+                {
+                    "ledger_type": "AFFILIATE_MONTHLY",
+                    "user_id": uid,
+                    "year_month": yyyymm,
+                    "tier": {"$in": expected_tiers},
+                }
+            )
+        )
+        for ledger in final_ledgers:
+            before_status = before_status_by_tier.get(str(ledger.get("tier")))
+            status = str(ledger.get("status") or "")
+            if status == "ISSUED" and before_status != "ISSUED":
+                summary["issued_count"] += 1
+            elif status == "PENDING_MANUAL" and before_status != "PENDING_MANUAL":
+                summary["pending_manual"] += 1
+                if "pool_empty" in (ledger.get("risk_flags") or []):
+                    summary["pool_empty"] += 1
+            if "missing_pool_config" in (ledger.get("risk_flags") or []):
+                summary["invalid_tier"] += 1
+
+    logger.info("[AFFILIATE][BULK_ISSUE_SUMMARY] %s", summary)
+    return summary
 
 
 def settle_previous_month_affiliate_rewards(db, *, now_utc: datetime | None = None, batch_limit: int = 500):
@@ -799,49 +903,8 @@ def settle_previous_month_affiliate_rewards(db, *, now_utc: datetime | None = No
 
 
 def retry_current_month_pending_manual_ledgers(db, *, now_utc: datetime | None = None, batch_limit: int = 200):
-    """Ensure all qualifying affiliates for the current month have received their tier vouchers.
-
-    Queries qualified_events directly so it works even when no affiliate_ledger entry
-    has been created yet (covers: missing ledgers, PENDING_MANUAL with any risk flag,
-    missing_pool_config, stalled APPROVED). Called from the 5-minute tick.
-    """
-    now_utc = now_utc or datetime.now(timezone.utc)
-    start_utc, end_utc, yyyymm = _month_window_utc(now_utc)
-
-    pipeline = [
-        {"$match": {
-            "qualified_at": {"$gte": start_utc, "$lt": end_utc},
-            "referrer_id": {"$ne": None},
-        }},
-        {"$group": {"_id": "$referrer_id", "count": {"$sum": 1}}},
-        {"$match": {"count": {"$gte": T1_THRESHOLD}}},
-        {"$limit": int(batch_limit)},
-    ]
-
-    processed = 0
-    for row in db.qualified_events.aggregate(pipeline):
-        uid = int(row["_id"])
-        top_tier = _tier_for_count(int(row["count"]))
-        if not top_tier:
-            continue
-        # Skip if the highest eligible tier is already in a final state
-        top_ledger = db.affiliate_ledger.find_one(
-            {"dedup_key": f"AFF:{uid}:{yyyymm}:{top_tier}"},
-            {"status": 1},
-        )
-        if top_ledger and top_ledger.get("status") in FINAL_STATUSES:
-            continue
-        if top_ledger and "blocked_user" in (top_ledger.get("risk_flags") or []):
-            continue
-        processed += 1
-        try:
-            evaluate_monthly_affiliate_reward(db, referrer_id=uid, now_utc=now_utc)
-        except Exception:
-            logger.exception("[AFFILIATE][RETRY_QUALIFYING] uid=%s yyyymm=%s", uid, yyyymm)
-
-    if processed:
-        logger.info("[AFFILIATE][RETRY_QUALIFYING] yyyymm=%s processed=%s", yyyymm, processed)
-    return {"yyyymm": yyyymm, "processed": processed}
+    out = issue_current_month_affiliate_rewards(db, now_utc=now_utc, batch_limit=batch_limit)
+    return {"yyyymm": out.get("year_month"), "processed": int(out.get("eligible_users", 0))}
 
 
 def mark_invitee_qualified(db, *, invitee_id: int, referrer_id: int | None, now_utc: datetime | None = None):

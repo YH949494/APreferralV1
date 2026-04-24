@@ -1,12 +1,14 @@
 import os
 import unittest
 from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
 
 from pymongo.errors import DuplicateKeyError
 
 from affiliate_rewards import (
     approve_affiliate_ledger,
     evaluate_monthly_affiliate_reward,
+    issue_current_month_affiliate_rewards,
     issue_welcome_bonus_if_eligible,
     mark_invitee_qualified,
     retry_current_month_pending_manual_ledgers,
@@ -84,6 +86,10 @@ class FakeCollection:
                     d[k] = v
                 for k, v in update.get("$inc", {}).items():
                     d[k] = d.get(k, 0) + v
+                for k, v in update.get("$addToSet", {}).items():
+                    current = d.get(k) or []
+                    if v not in current:
+                        d[k] = list(current) + [v]
                 return _UpdateResult(1)
         if upsert:
             row = dict(filt)
@@ -116,14 +122,38 @@ class FakeCollection:
             if "$match" in stage:
                 rows = [r for r in rows if self._match(r, stage["$match"])]
             elif "$group" in stage:
-                key_field = stage["$group"]["_id"].lstrip("$")
+                key_expr = stage["$group"]["_id"]
+                key_field = key_expr.lstrip("$") if isinstance(key_expr, str) else None
                 grouped = {}
                 for r in rows:
-                    key = r.get(key_field)
-                    grouped.setdefault(key, set()).add(r.get("invitee_id"))
-                rows = [{"_id": k, "invitees": list(v)} for k, v in grouped.items()]
+                    key = r.get(key_field) if key_field else None
+                    bucket = grouped.setdefault(key, {"_id": key})
+                    for out_key, out_expr in stage["$group"].items():
+                        if out_key == "_id":
+                            continue
+                        if isinstance(out_expr, dict) and "$sum" in out_expr:
+                            inc = out_expr["$sum"]
+                            if isinstance(inc, int):
+                                bucket[out_key] = int(bucket.get(out_key, 0)) + int(inc)
+                            elif isinstance(inc, str) and inc.startswith("$"):
+                                bucket[out_key] = int(bucket.get(out_key, 0)) + int(r.get(inc.lstrip("$"), 0) or 0)
+                    if not any(isinstance(expr, dict) and "$sum" in expr for expr in stage["$group"].values() if expr != key_expr):
+                        bucket.setdefault("invitees", set()).add(r.get("invitee_id"))
+                normalized = []
+                for b in grouped.values():
+                    out_row = dict(b)
+                    if isinstance(out_row.get("invitees"), set):
+                        out_row["invitees"] = list(out_row["invitees"])
+                    normalized.append(out_row)
+                rows = normalized
             elif "$project" in stage:
                 rows = [{"count": len(r.get("invitees") or [])} for r in rows]
+            elif "$sort" in stage:
+                sort_items = list(stage["$sort"].items())
+                for field, direction in reversed(sort_items):
+                    rows.sort(key=lambda x: x.get(field), reverse=(int(direction) < 0))
+            elif "$limit" in stage:
+                rows = rows[: int(stage["$limit"])]
         return rows
 
     def find(self, filt=None, proj=None):
@@ -143,14 +173,16 @@ class FakeDb:
         self.qualified_events = FakeCollection(unique_fields=[("invitee_id",)])
         self.user_last_seen = FakeCollection(unique_fields=[("user_id",)])
         self.referral_audit = FakeCollection()
+        self.referral_flow_events = FakeCollection()
 
 
 class AffiliateRewardTests(unittest.TestCase):
     def test_welcome_once_with_dedup(self):
         db = FakeDb()
         db.voucher_pools.insert_one({"pool_id": "WELCOME", "code": "W1", "status": "available"})
-        out1 = issue_welcome_bonus_if_eligible(db, user_id=10, is_new_user=True)
-        out2 = issue_welcome_bonus_if_eligible(db, user_id=10, is_new_user=True)
+        with patch("affiliate_rewards._is_official_channel_subscribed", return_value=True):
+            out1 = issue_welcome_bonus_if_eligible(db, user_id=10, is_new_user=True)
+            out2 = issue_welcome_bonus_if_eligible(db, user_id=10, is_new_user=True)
         self.assertEqual(out1["status"], "ISSUED")
         self.assertEqual(out2["status"], "ISSUED")
         self.assertEqual(db.affiliate_ledger.count_documents({"dedup_key": "WELCOME:10"}), 1)
@@ -180,7 +212,8 @@ class AffiliateRewardTests(unittest.TestCase):
         )
         db.voucher_pools.insert_one({"pool_id": "WELCOME", "code": "NEXT-W", "status": "available"})
 
-        out = issue_welcome_bonus_if_eligible(db, user_id=55, is_new_user=True, now_utc=now)
+        with patch("affiliate_rewards._is_official_channel_subscribed", return_value=True):
+            out = issue_welcome_bonus_if_eligible(db, user_id=55, is_new_user=True, now_utc=now)
 
         self.assertEqual(out["status"], "ISSUED")
         self.assertEqual(out["voucher_code"], "RECOVERED-W")
@@ -218,6 +251,39 @@ class AffiliateRewardTests(unittest.TestCase):
         self.assertEqual(row["tier"], "T2")
         self.assertEqual(db.affiliate_ledger.count_documents({"dedup_key": "AFF:8:202601:T1"}), 1)
         self.assertEqual(db.affiliate_ledger.count_documents({"dedup_key": "AFF:8:202601:T2"}), 1)
+
+    def test_thresholds_issue_expected_tiers_once_up_to_t5(self):
+        now = datetime(2026, 1, 10, tzinfo=timezone.utc)
+        cases = [
+            (10, ("T1",)),
+            (25, ("T1", "T2")),
+            (50, ("T1", "T2", "T3")),
+            (150, ("T1", "T2", "T3", "T4")),
+            (250, ("T1", "T2", "T3", "T4", "T5")),
+        ]
+        for idx, (qualified_total, expected_tiers) in enumerate(cases, start=1):
+            db = FakeDb()
+            user_id = 500 + idx
+            db.users.insert_one({"user_id": user_id, "blocked": False})
+            invitee_seed = idx * 10000
+            for offset in range(qualified_total):
+                db.qualified_events.insert_one(
+                    {"invitee_id": invitee_seed + offset, "referrer_id": user_id, "qualified_at": now}
+                )
+            for tier in ("T1", "T2", "T3", "T4", "T5"):
+                db.voucher_pools.insert_one({"pool_id": tier, "code": f"{tier}-{idx}", "status": "available"})
+            evaluate_monthly_affiliate_reward(db, referrer_id=user_id, now_utc=now)
+            evaluate_monthly_affiliate_reward(db, referrer_id=user_id, now_utc=now)
+            with self.subTest(qualified_total=qualified_total):
+                for tier in expected_tiers:
+                    dedup = f"AFF:{user_id}:202601:{tier}"
+                    row = db.affiliate_ledger.find_one({"dedup_key": dedup})
+                    self.assertIsNotNone(row)
+                    self.assertEqual(row["status"], "ISSUED")
+                    self.assertEqual(db.affiliate_ledger.count_documents({"dedup_key": dedup}), 1)
+                for tier in ("T1", "T2", "T3", "T4", "T5"):
+                    if tier not in expected_tiers:
+                        self.assertIsNone(db.affiliate_ledger.find_one({"dedup_key": f"AFF:{user_id}:202601:{tier}"}))
 
     def test_t2_risk_auto_issue_and_t1_bypass(self):
         db = FakeDb()
@@ -313,6 +379,35 @@ class AffiliateRewardTests(unittest.TestCase):
         issued = evaluate_monthly_affiliate_reward(db, referrer_id=42, now_utc=now + timedelta(minutes=1))
         self.assertEqual(issued["status"], "ISSUED")
         self.assertEqual(issued["voucher_code"], "REAL42")
+
+    def test_historical_simulated_pending_not_auto_issued(self):
+        db = FakeDb()
+        user_id = 143
+        db.users.insert_one({"user_id": user_id, "blocked": False})
+        now = datetime(2026, 2, 10, tzinfo=timezone.utc)
+        for i in range(1, 11):
+            db.qualified_events.insert_one({"invitee_id": 14300 + i, "referrer_id": user_id, "qualified_at": now})
+        db.affiliate_ledger.insert_one(
+            {
+                "dedup_key": "AFF:143:202601:T1",
+                "ledger_type": "AFFILIATE_MONTHLY",
+                "user_id": user_id,
+                "year_month": "202601",
+                "tier": "T1",
+                "pool_id": "T1",
+                "status": "SIMULATED_PENDING",
+                "simulate": True,
+                "voucher_code": None,
+                "created_at": now - timedelta(days=30),
+                "updated_at": now - timedelta(days=30),
+            }
+        )
+        db.voucher_pools.insert_one({"pool_id": "T1", "code": "HIST-T1", "status": "available"})
+        out = evaluate_monthly_affiliate_reward(db, referrer_id=user_id, now_utc=now)
+        jan = db.affiliate_ledger.find_one({"dedup_key": "AFF:143:202601:T1"})
+        self.assertEqual(jan["status"], "SIMULATED_PENDING")
+        self.assertEqual(out["status"], "ISSUED")
+        self.assertEqual(db.voucher_pools.count_documents({"pool_id": "T1", "status": "issued"}), 1)
 
     def test_late_evaluation_issues_each_eligible_tier_once(self):
         db = FakeDb()
@@ -485,6 +580,21 @@ class AffiliateRewardTests(unittest.TestCase):
         self.assertEqual(row["status"], "ISSUED")
         self.assertIsNotNone(row.get("voucher_code"))
         self.assertEqual(db.voucher_pools.count_documents({"pool_id": "T1", "status": "issued"}), 1)
+
+    def test_pool_empty_pending_manual_retries_after_refill(self):
+        db = FakeDb()
+        db.users.insert_one({"user_id": 175, "blocked": False})
+        now = datetime(2026, 1, 15, tzinfo=timezone.utc)
+        for i in range(1, 11):
+            db.qualified_events.insert_one({"invitee_id": 17500 + i, "referrer_id": 175, "qualified_at": now})
+        first = evaluate_monthly_affiliate_reward(db, referrer_id=175, now_utc=now)
+        self.assertEqual(first["status"], "PENDING_MANUAL")
+        self.assertIn("pool_empty", first.get("risk_flags") or [])
+        db.voucher_pools.insert_one({"pool_id": "T1", "code": "REFILL-T1", "status": "available"})
+        summary = issue_current_month_affiliate_rewards(db, now_utc=now + timedelta(minutes=5), batch_limit=10)
+        after = db.affiliate_ledger.find_one({"dedup_key": "AFF:175:202601:T1"})
+        self.assertEqual(after["status"], "ISSUED")
+        self.assertGreaterEqual(summary["issued_count"], 1)
 
     def test_approve_ledger_empty_pool_keeps_pending_manual(self):
         db = FakeDb()

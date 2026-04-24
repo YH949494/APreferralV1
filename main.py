@@ -83,6 +83,7 @@ WELCOME_BONUS_XP = int(os.getenv("WELCOME_BONUS_XP", "20"))
 WELCOME_WINDOW_HOURS = int(os.getenv("WELCOME_WINDOW_HOURS", "48"))
 WELCOME_WINDOW_DAYS = 7
 INVITEE_SUB_AUDIT_HOURS = int(os.getenv("INVITEE_SUB_AUDIT_HOURS", "1"))
+AFFILIATE_CURRENT_MONTH_BATCH_LIMIT = int(os.getenv("AFFILIATE_CURRENT_MONTH_BATCH_LIMIT", "500"))
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -623,7 +624,12 @@ def tick_5min() -> None:
                     run_id,
                 )
                 try:
-                    retry_current_month_pending_manual_ledgers(db, now_utc=datetime.now(timezone.utc))
+                    if str(os.getenv("AFFILIATE_SIMULATE", "0")).strip() != "1":
+                        retry_current_month_pending_manual_ledgers(
+                            db,
+                            now_utc=datetime.now(timezone.utc),
+                            batch_limit=AFFILIATE_CURRENT_MONTH_BATCH_LIMIT,
+                        )
                 except Exception as exc:
                     logger.exception("[JOB][5MIN] step_error name=retry_pending_manual_vouchers run_id=%s err=%s", run_id, exc)
             logger.info(
