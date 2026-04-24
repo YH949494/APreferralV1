@@ -2980,6 +2980,70 @@ def _compute_visible_remaining(user_region: str | None, drop: dict, *, uid: int 
 
 def _compute_claimable_remaining(user_region: str | None, drop: dict) -> int:
     return sum(_pool_remaining(drop, pool) for pool in get_claimable_pools(user_region, drop))
+
+
+def _pooled_claimability_state(*, drop: dict, drop_id: str, user_region: str | None, uid: int | None, is_my_user: bool, ref: datetime) -> dict:
+    drop_id_variants = _drop_id_variants(drop_id)
+    pools = get_claimable_pools(user_region, drop)
+    public_free = 0
+    my_free = 0
+
+    if "public" in pools:
+        public_free = int(
+            db.vouchers.count_documents(
+                {
+                    "type": "pooled",
+                    "dropId": {"$in": drop_id_variants},
+                    "status": "free",
+                    "$or": [{"pool": "public"}, {"pool": {"$exists": False}}],
+                }
+            )
+        )
+    if "my" in pools:
+        my_free = int(
+            db.vouchers.count_documents(
+                {
+                    "type": "pooled",
+                    "dropId": {"$in": drop_id_variants},
+                    "status": "free",
+                    "pool": "my",
+                }
+            )
+        )
+
+    claimable_count = max(0, public_free + my_free)
+    if claimable_count <= 0:
+        return {"claimable": False, "sold_out": True, "remaining": 0, "reason": "pool_empty"}
+
+    if is_public_pool(drop) and pools == ["public"] and uid is not None:
+        starts_at = _as_aware_utc(drop.get("startsAt")) or ref
+        access_result = check_public_pool_access(
+            user_id=uid,
+            public_pool_id=str(drop_id),
+            drop_open_time=starts_at,
+            now=ref,
+        )
+        assignment = access_result.get("assignment") or {}
+        if not assignment.get("access_allowed"):
+            return {"claimable": False, "sold_out": False, "remaining": 0, "reason": "shaping_denied"}
+        if access_result.get("status") == "too_early":
+            return {"claimable": False, "sold_out": False, "remaining": 0, "reason": "shaping_too_early"}
+
+    if (
+        "public" in pools
+        and _is_public_pooled_drop(drop)
+        and (drop or {}).get("reserve_enabled", True) is not False
+        and not is_retained_3d(uid)
+        and not is_my_user
+    ):
+        reserve_total = int((drop or {}).get("reserve_public_total") or 0)
+        if reserve_total <= 0:
+            reserve_total = _ensure_reserve_public_total(drop_id, drop=drop)
+        reserve_target = _public_reserve_target({**(drop or {}), "reserve_public_total": reserve_total}, public_free)
+        if public_free <= reserve_target:
+            return {"claimable": False, "sold_out": True, "remaining": 0, "reason": "reserve_block"}
+
+    return {"claimable": True, "sold_out": False, "remaining": claimable_count, "reason": "ok"}
  
 # ---- Core visibility logic ----
 def is_drop_active(doc: dict, ref: datetime) -> bool:
@@ -3161,6 +3225,7 @@ def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None
                 public_remaining=public_remaining,
                 is_my_user=is_my_user,
             )
+            claimable_remaining = max(0, public_remaining + my_remaining)
             visible_remaining = public_visible_remaining + my_remaining if is_my_user else public_visible_remaining
             already = None
             if claim_user_id is not None:
@@ -3174,11 +3239,31 @@ def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None
                 if claimed_at:
                     base["claimedAt"] = claimed_at       
                 base["visible_remaining"] = visible_remaining
+                base["claimable"] = False
+                base["sold_out"] = False
                 pooled_cards.append(base)
             else:
-                if is_my_user or public_visible_remaining > 0:
-                    base["visible_remaining"] = visible_remaining
-                    pooled_cards.append(base)
+                claimability = _pooled_claimability_state(
+                    drop=d,
+                    drop_id=drop_id,
+                    user_region=user_region,
+                    uid=ctx_uid,
+                    is_my_user=is_my_user,
+                    ref=ref,
+                )
+                base["claimable"] = bool(claimability.get("claimable"))
+                base["sold_out"] = bool(claimability.get("sold_out"))
+                base["visible_remaining"] = max(0, int(claimability.get("remaining") or 0))
+                if base["sold_out"] and claimability.get("reason") != "pool_empty" and claimable_remaining > 0:
+                    current_app.logger.warning(
+                        "[VOUCHER][DISPLAY_MISMATCH] dropId=%s user_id=%s available_count=%s assigned_count=%s reason=%s",
+                        drop_id,
+                        claim_user_id,
+                        claimable_remaining,
+                        0,
+                        str(claimability.get("reason") or "unknown"),
+                    )
+                pooled_cards.append(base)
 
     # Sort: personalised first; then pooled by priority desc, startsAt asc
     personal_cards.sort(key=lambda x: (-x["_priority"], x["startsAt"]))
@@ -3335,6 +3420,65 @@ def _persist_reconciled_pooled_remaining(drop_id: str, actual_free_public: int, 
         except Exception:
             pass
 
+
+def _build_atomic_pooled_voucher_filter(*, drop_id_variants: list, pool: str) -> dict | None:
+    if pool == "my":
+        return {
+            "type": "pooled",
+            "dropId": {"$in": drop_id_variants},
+            "status": "free",
+            "pool": "my",
+        }
+    if pool == "public":
+        return {
+            "type": "pooled",
+            "dropId": {"$in": drop_id_variants},
+            "status": "free",
+            "$or": [{"pool": "public"}, {"pool": {"$exists": False}}],
+        }
+    return None
+
+
+def _atomic_claim_pooled_voucher(*, drop_id: str, drop_id_variants: list, pool: str, claim_key: str, ref: datetime):
+    criteria = _build_atomic_pooled_voucher_filter(drop_id_variants=drop_id_variants, pool=pool)
+    if not criteria:
+        return None
+    current_app.logger.info(
+        "[VOUCHER][ATOMIC_CLAIM_ATTEMPT] dropId=%s claim_key=%s pool=%s",
+        drop_id,
+        claim_key,
+        pool,
+    )
+    doc = db.vouchers.find_one_and_update(
+        criteria,
+        {
+            "$set": {
+                "status": "claimed",
+                "claimedBy": claim_key,
+                "claimedByKey": claim_key,
+                "claimedAt": ref
+            }
+        },
+        sort=[("createdAt", ASCENDING), ("_id", ASCENDING)],
+        return_document=ReturnDocument.AFTER
+    )
+    if doc:
+        current_app.logger.info(
+            "[VOUCHER][ATOMIC_CLAIM_SUCCESS] dropId=%s claim_key=%s pool=%s voucher_id=%s",
+            drop_id,
+            claim_key,
+            pool,
+            str(doc.get("_id")),
+        )
+    else:
+        current_app.logger.info(
+            "[VOUCHER][ATOMIC_CLAIM_EMPTY] dropId=%s claim_key=%s pool=%s",
+            drop_id,
+            claim_key,
+            pool,
+        )
+    return doc
+
 def claim_pooled(
     drop_id: str,
     claim_key: str,
@@ -3365,21 +3509,8 @@ def claim_pooled(
     for pool in pool_order:
         if pool == "my":
             remaining_field = "my_remaining"
-            criteria = {
-                "type": "pooled",
-                "dropId": {"$in": drop_id_variants},
-                "status": "free",
-                "pool": "my",
-            }
         elif pool == "public":
             remaining_field = "public_remaining"
-            criteria = {
-                "type": "pooled",
-                "dropId": {"$in": drop_id_variants},
-                "status": "free",
-                # legacy vouchers missing "pool" are treated as public
-                "$or": [{"pool": "public"}, {"pool": {"$exists": False}}],
-            }
         else:
             continue
 
@@ -3493,18 +3624,12 @@ def claim_pooled(
             continue
 
         # 2) Try to claim a voucher FIRST (real scarce resource).
-        doc = db.vouchers.find_one_and_update(
-            criteria,
-            {
-                "$set": {
-                    "status": "claimed",
-                    "claimedBy": claim_key,
-                    "claimedByKey": claim_key,
-                    "claimedAt": ref
-                }
-            },
-            sort=[("_id", ASCENDING)],
-            return_document=ReturnDocument.AFTER
+        doc = _atomic_claim_pooled_voucher(
+            drop_id=drop_id,
+            drop_id_variants=drop_id_variants,
+            pool=pool,
+            claim_key=claim_key,
+            ref=ref,
         )
         if not doc and not reconciled:
             reconciliation = reconcile_pooled_remaining(drop_id)
@@ -3532,19 +3657,13 @@ def claim_pooled(
                     )
                 except Exception:
                     pass
-                doc = db.vouchers.find_one_and_update(
-                    criteria,
-                    {
-                        "$set": {
-                            "status": "claimed",
-                            "claimedBy": claim_key,
-                            "claimedByKey": claim_key,
-                            "claimedAt": ref
-                        }
-                    },
-                    sort=[("_id", ASCENDING)],
-                    return_document=ReturnDocument.AFTER
-                )     
+                doc = _atomic_claim_pooled_voucher(
+                    drop_id=drop_id,
+                    drop_id_variants=drop_id_variants,
+                    pool=pool,
+                    claim_key=claim_key,
+                    ref=ref,
+                )
         if not doc:
             # No free voucher in this pool, try next pool
             continue
@@ -3598,6 +3717,28 @@ def claim_pooled(
         return {"ok": True, "code": doc["code"], "claimedAt": _isoformat_kl(doc.get("claimedAt"))}
 
     return {"ok": False, "err": "sold_out"}
+
+
+def _rollback_pooled_voucher_claim(*, drop_id: str, code: str, claim_key: str) -> bool:
+    if not code:
+        return False
+    try:
+        res = db.vouchers.update_one(
+            {
+                "type": "pooled",
+                "dropId": {"$in": _drop_id_variants(drop_id)},
+                "code": code,
+                "status": "claimed",
+                "claimedByKey": claim_key,
+            },
+            {
+                "$set": {"status": "free"},
+                "$unset": {"claimedBy": "", "claimedByKey": "", "claimedAt": ""},
+            },
+        )
+        return bool(res.modified_count == 1)
+    except Exception:
+        return False
  
 # ---- Public API routes ----
 @vouchers_bp.route("/vouchers/visible", methods=["GET"])
@@ -3664,7 +3805,7 @@ def api_visible():
                     base["remainingApprox"] = public_remaining
                 items.append(base)
 
-            return jsonify({"visibilityMode": "stacked", "nowUtc": ref.isoformat(), "drops": items}), 200
+            return _miniapp_no_store_json({"visibilityMode": "stacked", "nowUtc": ref.isoformat(), "drops": items}, 200)
 
         # ---------- Normal user flow ----------
         user = {}
@@ -3709,12 +3850,12 @@ def api_visible():
             )
      
         drops, user_region = user_visible_drops(user, ref, tg_user=tg_user)
-        return jsonify({
+        return _miniapp_no_store_json({
             "visibilityMode": "stacked",
             "nowUtc": ref.isoformat(),
             "userRegion": user_region,
             "drops": drops,
-        }), 200
+        }, 200)
      
     except Exception:
         current_app.logger.exception("[visible] unhandled", extra={"user_id": user_id})
@@ -4355,44 +4496,18 @@ def api_claim():
         return jsonify({"status": "ok", "check_only": True, "subscribed": True}), 200
 
     if is_pool_drop:
-        claimable_remaining = _compute_claimable_remaining(user_region, voucher)
-        if claimable_remaining <= 0:
+        claimability = _pooled_claimability_state(
+            drop=voucher,
+            drop_id=str(drop_id),
+            user_region=user_region,
+            uid=uid,
+            is_my_user=is_my_user,
+            ref=now_ref,
+        )
+        if claimability.get("sold_out"):
             return jsonify({"status": "error", "code": "sold_out"}), 410     
-        claimable_pools = get_claimable_pools(user_region, voucher)
-        if is_public_pool(voucher) and claimable_pools == ["public"] and uid is not None:
-            access_result = check_public_pool_access(
-                user_id=uid,
-                public_pool_id=str(drop_id),
-                drop_open_time=starts_at or now_ref,
-                now=now_ref,
-            )
-            assignment = access_result.get("assignment") or {}
-            segment = access_result.get("segment")
-            current_app.logger.info(
-                "[PUBLIC_POOL_SHAPING] metric=claim_attempt segment=%s user_id=%s public_pool_id=%s access_allowed=%s eligible_after=%s",
-                segment,
-                uid,
-                drop_id,
-                assignment.get("access_allowed"),
-                assignment.get("eligible_after"),
-            )
-            if not assignment.get("access_allowed"):
-                current_app.logger.info(
-                    "[PUBLIC_POOL_SHAPING] metric=denied_assignment segment=%s user_id=%s public_pool_id=%s claim_outcome=denied",
-                    segment,
-                    uid,
-                    drop_id,
-                )
-                return jsonify({"status": "error", "code": "sold_out"}), 410
-            if access_result.get("status") == "too_early":
-                current_app.logger.info(
-                    "[PUBLIC_POOL_SHAPING] metric=delayed_assignment segment=%s user_id=%s public_pool_id=%s claim_outcome=too_early eligible_after=%s",
-                    segment,
-                    uid,
-                    drop_id,
-                    assignment.get("eligible_after"),
-                )
-                return jsonify({"status": "error", "code": "sold_out"}), 410
+        if not claimability.get("claimable"):
+            return jsonify({"status": "error", "code": "sold_out"}), 410
 
     if _should_enforce_session_cooldown(client_subnet, client_ip):
         session_now = now_utc()
@@ -4406,6 +4521,7 @@ def api_claim():
  
     claim_drop_id = _coerce_id(drop_id)
     claim_user_id = uid if uid is not None else user_id
+    pooled_claim_key = f"uid:{str(user_id or '').strip()}"
     existing_claim = _find_existing_claim_for_drop(drop_id=claim_drop_id, telegram_uid=uid, internal_user_id=user_id)
     idempotent_payload = _build_idempotent_claim_response(existing_claim)
     if idempotent_payload:
@@ -4797,17 +4913,47 @@ def api_claim():
 
     else:
         claimed_at_utc = now_utc()
-        voucher_claims_col.update_one(
-            {"_id": claim_doc_id},
-            {
-                "$set": {
-                    "status": "claimed",
-                    "voucher_code": result.get("code"),
-                    "claimed_at": claimed_at_utc,
-                    "updated_at": claimed_at_utc,
-                }
-            },
-        )
+        try:
+            voucher_claims_col.update_one(
+                {"_id": claim_doc_id},
+                {
+                    "$set": {
+                        "status": "claimed",
+                        "voucher_code": result.get("code"),
+                        "claimed_at": claimed_at_utc,
+                        "updated_at": claimed_at_utc,
+                    }
+                },
+            )
+        except Exception:
+            current_app.logger.warning(
+                "[VOUCHER][ATOMIC_CLAIM_ROLLBACK_KEY] dropId=%s user_id=%s uid=%s rollback_claim_key=%s result_code=%s",
+                drop_id,
+                user_id,
+                uid,
+                pooled_claim_key,
+                result.get("code"),
+            )
+            rollback_ok = _rollback_pooled_voucher_claim(
+                drop_id=str(drop_id),
+                code=str(result.get("code") or ""),
+                claim_key=pooled_claim_key,
+            ) if is_pool_drop else False
+            current_app.logger.warning(
+                "[VOUCHER][ATOMIC_CLAIM_ROLLBACK_WARN] dropId=%s user_id=%s code=%s rollback_ok=%s",
+                drop_id,
+                user_id,
+                result.get("code"),
+                rollback_ok,
+            )
+            try:
+                voucher_claims_col.update_one(
+                    {"_id": claim_doc_id},
+                    {"$set": {"status": "failed", "error": "claim_record_write_failed", "updated_at": now_utc()}},
+                )
+            except Exception:
+                pass
+            return jsonify({"status": "error", "code": "server_error"}), 500
         current_app.logger.info("[claim][OK] drop=%s uid=%s code=%s", drop_id, uid, result.get("code"))
         _apply_kill_success(ip=client_ip, subnet=client_subnet, now=now_utc())
         _set_cooldown(ip=client_ip, subnet=client_subnet, uid=claim_user_id, now=now_utc())      
