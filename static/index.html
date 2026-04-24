@@ -2841,21 +2841,24 @@ Active players win more.
         card.appendChild(meta);
       }
 
-      if (drop && drop.visible_remaining !== undefined && drop.visible_remaining !== null) {
+      const hasClaimed = !!drop?.userClaimed || drop?.state === "claimed" || !!(drop?.code || drop?.voucherCode || drop?.claimedVoucher?.code);
+      const isAdminPreview = !!drop?.adminPreview;
+
+      if (!hasClaimed && isAdminPreview && drop && drop.visible_remaining !== undefined && drop.visible_remaining !== null) {
         const remainMeta = document.createElement("p");
         remainMeta.className = "campaign-meta";
         const value = Number(drop.visible_remaining);
         const label = Number.isNaN(value) ? String(drop.visible_remaining) : value;
         remainMeta.textContent = `Remaining: ${label}`;
         card.appendChild(remainMeta);
-      } else if (drop && drop.remainingApprox !== undefined && drop.remainingApprox !== null) {
+      } else if (!hasClaimed && isAdminPreview && drop && drop.remainingApprox !== undefined && drop.remainingApprox !== null) {
         const remainMeta = document.createElement("p");
         remainMeta.className = "campaign-meta";
         const value = Number(drop.remainingApprox);
         const label = Number.isNaN(value) ? String(drop.remainingApprox) : value;
         remainMeta.textContent = `Remaining: ${label}`;
         card.appendChild(remainMeta);
-      } else if (drop && drop.codesTotal !== undefined && drop.codesTotal !== null) {
+      } else if (!hasClaimed && isAdminPreview && drop && drop.codesTotal !== undefined && drop.codesTotal !== null) {
         const totalMeta = document.createElement("p");
         totalMeta.className = "campaign-meta";
         const value = Number(drop.codesTotal);
@@ -2867,7 +2870,6 @@ Active players win more.
       const message = document.createElement("p");
       message.className = "campaign-message";
       const dropId = drop?.dropId || drop?.id || drop?._id || "";
-      const hasClaimed = !!drop?.userClaimed;
       const canClaim = !!(drop?.isActive || drop?.adminPreview);
       const claimableNow = typeof drop?.claimable === "boolean" ? drop.claimable : canClaim;
       const publicSoldOut = isPublicSoldOut(drop, userRegion);

@@ -737,6 +737,57 @@ class VoucherAntiHunterTests(unittest.TestCase):
             m.get_active_drops = orig_get_active_drops
             m.voucher_claims_col = orig_claims
 
+    def test_user_visible_drops_claimed_sets_claimed_state_without_remaining(self):
+        import vouchers as m
+
+        now = datetime.now(timezone.utc)
+        drop = {
+            "_id": "drop-visible-claimed",
+            "name": "Visible claimed",
+            "type": "pooled",
+            "status": "active",
+            "startsAt": now - timedelta(minutes=5),
+            "endsAt": now + timedelta(minutes=5),
+            "public_remaining": 5,
+            "my_remaining": 0,
+        }
+        fake_db = FakeDb(drops=[drop], vouchers=[])
+        orig_db = m.db
+        orig_users = m.users_collection
+        orig_load_user_context = m.load_user_context
+        orig_is_drop_allowed = m.is_drop_allowed
+        orig_is_user_eligible = m.is_user_eligible_for_drop
+        orig_welcome_eligibility = m.welcome_eligibility
+        orig_get_active_drops = m.get_active_drops
+        orig_claims = m.voucher_claims_col
+        try:
+            m.db = fake_db
+            m.users_collection = FakeSimpleCollection([{"user_id": 42, "usernameLower": "alice", "region": "th"}])
+            m.voucher_claims_col = FakeSimpleCollection([
+                {"drop_id": "drop-visible-claimed", "user_id": 42, "status": "claimed", "voucher_code": "ALREADY-1", "claimed_at": now}
+            ])
+            m.load_user_context = lambda **kwargs: {}
+            m.is_drop_allowed = lambda *args, **kwargs: True
+            m.is_user_eligible_for_drop = lambda *args, **kwargs: True
+            m.welcome_eligibility = lambda *_args, **_kwargs: (True, "ok", None)
+            m.get_active_drops = lambda _ref: [drop]
+            with Flask(__name__).app_context():
+                cards, _region = user_visible_drops({"usernameLower": "alice", "userId": "42"}, now, tg_user={"id": 42, "username": "alice"})
+            self.assertEqual(len(cards), 1)
+            self.assertEqual(cards[0]["state"], "claimed")
+            self.assertFalse(cards[0]["canClaim"])
+            self.assertFalse(cards[0]["claimable"])
+            self.assertIsNone(cards[0]["visible_remaining"])
+        finally:
+            m.db = orig_db
+            m.users_collection = orig_users
+            m.load_user_context = orig_load_user_context
+            m.is_drop_allowed = orig_is_drop_allowed
+            m.is_user_eligible_for_drop = orig_is_user_eligible
+            m.welcome_eligibility = orig_welcome_eligibility
+            m.get_active_drops = orig_get_active_drops
+            m.voucher_claims_col = orig_claims
+
     def test_claim_internal_drop_without_ledger_rejected(self):
         import vouchers as m
         from flask import Flask
