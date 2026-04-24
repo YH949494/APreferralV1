@@ -295,6 +295,25 @@ class AffiliateRewardTests(unittest.TestCase):
 
         self.assertEqual(db.affiliate_ledger.count_documents({"dedup_key": "AFF:41:202601:T1"}), 1)
 
+    def test_current_month_simulated_pending_converts_and_issues_when_sim_off(self):
+        db = FakeDb()
+        db.users.insert_one({"user_id": 42, "blocked": False})
+        now = datetime(2026, 1, 15, tzinfo=timezone.utc)
+        for i in range(1, 11):
+            db.qualified_events.insert_one({"invitee_id": 4200 + i, "referrer_id": 42, "qualified_at": now})
+        db.voucher_pools.insert_one({"pool_id": "T1", "code": "REAL42", "status": "available"})
+
+        os.environ["AFFILIATE_SIMULATE"] = "1"
+        try:
+            simulated = evaluate_monthly_affiliate_reward(db, referrer_id=42, now_utc=now)
+        finally:
+            os.environ.pop("AFFILIATE_SIMULATE", None)
+        self.assertEqual(simulated["status"], "SIMULATED_PENDING")
+
+        issued = evaluate_monthly_affiliate_reward(db, referrer_id=42, now_utc=now + timedelta(minutes=1))
+        self.assertEqual(issued["status"], "ISSUED")
+        self.assertEqual(issued["voucher_code"], "REAL42")
+
     def test_late_evaluation_issues_each_eligible_tier_once(self):
         db = FakeDb()
         db.users.insert_one({"user_id": 55, "blocked": False})
