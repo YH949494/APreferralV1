@@ -477,8 +477,32 @@ def ensure_voucher_indexes():
             unique=True,
             name="uq_claim_drop_user",
         )
-    except OperationFailure:
-        pass
+    except (OperationFailure, DuplicateKeyError) as exc:
+        duplicate_groups = []
+        try:
+            duplicate_groups = list(
+                voucher_claims_col.aggregate(
+                    [
+                        {"$group": {"_id": {"drop_id": "$drop_id", "user_id": "$user_id"}, "count": {"$sum": 1}}},
+                        {"$match": {"count": {"$gt": 1}}},
+                        {"$sort": {"count": -1}},
+                        {"$limit": 20},
+                    ]
+                )
+            )
+        except Exception:
+            duplicate_groups = []
+        try:
+            current_app.logger.error(
+                "[indexes] failed to ensure uq_claim_drop_user; manual cleanup required before unique index can be created. error=%s duplicate_groups=%s",
+                str(exc),
+                duplicate_groups,
+            )
+        except Exception:
+            print(
+                "[indexes] failed to ensure uq_claim_drop_user; manual cleanup required before unique index can be created. "
+                f"error={exc} duplicate_groups={duplicate_groups}"
+            )
     try:
         public_pool_access_assignments_col.create_index(
             [("user_id", ASCENDING), ("public_pool_id", ASCENDING)],
@@ -1278,21 +1302,36 @@ def _build_idempotent_claim_response(existing_claim: dict | None):
     }
 
 
+def _normalize_claim_identity(*, drop_id, telegram_uid):
+    normalized_drop_id = _coerce_id(drop_id)
+    normalized_uid = None
+    try:
+        if telegram_uid is not None:
+            normalized_uid = int(telegram_uid)
+    except (TypeError, ValueError):
+        fallback_uid = str(telegram_uid or "").strip()
+        normalized_uid = fallback_uid or None
+    return normalized_drop_id, normalized_uid
+
+
 def _find_existing_claim_for_drop(*, drop_id, telegram_uid, internal_user_id=None):
-    existing_claim = voucher_claims_col.find_one({"drop_id": drop_id, "user_id": telegram_uid})
+    normalized_drop_id, normalized_telegram_uid = _normalize_claim_identity(drop_id=drop_id, telegram_uid=telegram_uid)
+    existing_claim = voucher_claims_col.find_one({"drop_id": normalized_drop_id, "user_id": normalized_telegram_uid})
     if (existing_claim or {}).get("voucher_code"):
         return existing_claim
-    if telegram_uid is None and internal_user_id is not None:
-        existing_claim = voucher_claims_col.find_one({"drop_id": drop_id, "user_id": internal_user_id})
+    if normalized_telegram_uid is None and internal_user_id is not None:
+        _, normalized_internal_uid = _normalize_claim_identity(drop_id=drop_id, telegram_uid=internal_user_id)
+        existing_claim = voucher_claims_col.find_one({"drop_id": normalized_drop_id, "user_id": normalized_internal_uid})
         if (existing_claim or {}).get("voucher_code"):
             return existing_claim
 
     keys = []
-    telegram_uid_str = str(telegram_uid or "").strip()
+    telegram_uid_str = str(normalized_telegram_uid or "").strip()
     if telegram_uid_str:
         keys.append(("telegram", f"uid:{telegram_uid_str}"))
 
-    internal_uid_str = str(internal_user_id or "").strip()
+    _, normalized_internal_uid = _normalize_claim_identity(drop_id=drop_id, telegram_uid=internal_user_id)
+    internal_uid_str = str(normalized_internal_uid or "").strip()
     if internal_uid_str and internal_uid_str != telegram_uid_str:
         keys.append(("internal", f"uid:{internal_uid_str}"))
 
@@ -1343,6 +1382,9 @@ def _acquire_claim_lock(
     claims_col=voucher_claims_col,
 ):
     now = now or now_utc()
+    drop_id, user_id = _normalize_claim_identity(drop_id=drop_id, telegram_uid=user_id)
+    if user_id is None:
+        return None, None
     claim_doc_id = None
     existing_claim = None
     claim_doc = {
@@ -1357,8 +1399,26 @@ def _acquire_claim_lock(
     try:
         insert_res = claims_col.insert_one(claim_doc)
         claim_doc_id = insert_res.inserted_id
+        try:
+            current_app.logger.info(
+                "[VOUCHER][CLAIM_OWNERSHIP_ACQUIRE] dropId=%s user_id=%s claim_id=%s result_code=acquired",
+                drop_id,
+                user_id,
+                claim_doc_id,
+            )
+        except Exception:
+            pass
     except DuplicateKeyError:
         existing_claim = claims_col.find_one({"drop_id": drop_id, "user_id": user_id})
+        try:
+            current_app.logger.info(
+                "[VOUCHER][CLAIM_OWNERSHIP_DUPLICATE] dropId=%s user_id=%s claim_id=%s result_code=duplicate",
+                drop_id,
+                user_id,
+                str((existing_claim or {}).get("_id") or ""),
+            )
+        except Exception:
+            pass
         claimed_existing = None
         if existing_claim and existing_claim.get("voucher_code"):
             claimed_existing = existing_claim
@@ -1379,7 +1439,42 @@ def _acquire_claim_lock(
             )
             if retry_claim:
                 claim_doc_id = retry_claim["_id"]
+                try:
+                    current_app.logger.info(
+                        "[VOUCHER][CLAIM_OWNERSHIP_ACQUIRE] dropId=%s user_id=%s claim_id=%s result_code=retried",
+                        drop_id,
+                        user_id,
+                        claim_doc_id,
+                    )
+                except Exception:
+                    pass
     return claim_doc_id, existing_claim
+
+
+def _release_claim_ownership(*, claim_doc_id, drop_id, user_id, status, reason, claims_col=voucher_claims_col):
+    now = now_utc()
+    claims_col.update_one(
+        {"_id": claim_doc_id},
+        {
+            "$set": {
+                "status": status,
+                "error": reason,
+                "updated_at": now,
+            },
+            "$unset": {"voucher_code": "", "claimed_at": ""},
+        },
+    )
+    try:
+        current_app.logger.info(
+            "[VOUCHER][CLAIM_OWNERSHIP_RELEASE] dropId=%s user_id=%s claim_id=%s result_code=%s reason=%s",
+            drop_id,
+            user_id,
+            claim_doc_id,
+            status,
+            reason,
+        )
+    except Exception:
+        pass
 
 def _check_new_joiner_rate_limits(*, uid: int, ip: str, now: datetime | None = None):
     """
@@ -4527,8 +4622,15 @@ def api_claim():
         _set_session_cooldown(session_key=session_key, now=session_now)
  
     claim_drop_id = _coerce_id(drop_id)
-    claim_user_id = uid if uid is not None else user_id
-    pooled_claim_key = f"uid:{str(user_id or '').strip()}"
+    claim_user_id = uid if uid is not None else None
+    if claim_user_id is None:
+        try:
+            claim_user_id = int(str(user_id or "").strip())
+        except (TypeError, ValueError):
+            claim_user_id = None
+    if claim_user_id is None:
+        return jsonify({"status": "error", "code": "not_eligible", "reason": "missing_uid"}), 403
+    pooled_claim_key = f"uid:{claim_user_id}"
     existing_claim = _find_existing_claim_for_drop(drop_id=claim_drop_id, telegram_uid=uid, internal_user_id=user_id)
     idempotent_payload = _build_idempotent_claim_response(existing_claim)
     if idempotent_payload:
@@ -4849,7 +4951,12 @@ def api_claim():
                 (existing_claim or {}).get("voucher_code"),
             )
             return jsonify(idempotent_payload), 200
-        current_app.logger.info("[claim][DEDUP] drop=%s uid=%s", drop_id, uid)
+        current_app.logger.info(
+            "[VOUCHER][CLAIM_OWNERSHIP_DUPLICATE] dropId=%s user_id=%s claim_id=%s result_code=claim_in_progress",
+            claim_drop_id,
+            claim_user_id,
+            str((existing_claim or {}).get("_id") or ""),
+        )
         logger.info(
             "[CLAIM_BLOCK] reason=%s drop_id=%s uid=%s username=%s",
             "lock_failed",
@@ -4857,15 +4964,18 @@ def api_claim():
             user_id_str,
             username,
         )
-        return jsonify({"status": "error", "code": "already_claimed"}), 409
+        return jsonify({"status": "error", "code": "claim_in_progress"}), 409
 
     # Claim
     try:
-        result = claim_voucher_for_user(user_id=user_id, drop_id=drop_id, username=username)
+        result = claim_voucher_for_user(user_id=str(claim_user_id), drop_id=drop_id, username=username)
     except AlreadyClaimed as exc:
-        voucher_claims_col.update_one(
-            {"_id": claim_doc_id},
-            {"$set": {"status": "failed", "error": str(exc), "updated_at": now_utc()}},
+        _release_claim_ownership(
+            claim_doc_id=claim_doc_id,
+            drop_id=claim_drop_id,
+            user_id=claim_user_id,
+            status="failed",
+            reason=str(exc),
         )
         existing_claim = _find_existing_claim_for_drop(drop_id=claim_drop_id, telegram_uid=uid, internal_user_id=user_id)
         idempotent_payload = _build_idempotent_claim_response(existing_claim)
@@ -4880,9 +4990,18 @@ def api_claim():
         )
         return jsonify({"status": "error", "code": "already_claimed"}), 409
     except NoCodesLeft as exc:
-        voucher_claims_col.update_one(
-            {"_id": claim_doc_id},
-            {"$set": {"status": "failed", "error": str(exc), "updated_at": now_utc()}},
+        _release_claim_ownership(
+            claim_doc_id=claim_doc_id,
+            drop_id=claim_drop_id,
+            user_id=claim_user_id,
+            status="failed",
+            reason=str(exc),
+        )
+        current_app.logger.info(
+            "[VOUCHER][ATOMIC_CLAIM_EMPTY] dropId=%s user_id=%s claim_id=%s result_code=sold_out",
+            claim_drop_id,
+            claim_user_id,
+            claim_doc_id,
         )
         payload = {"status": "error", "code": "sold_out"}
         if is_my_user:
@@ -4891,9 +5010,12 @@ def api_claim():
             payload["message"] = "All vouchers have been fully redeemed."
         return jsonify(payload), 410
     except NotEligible as exc:
-        voucher_claims_col.update_one(
-            {"_id": claim_doc_id},
-            {"$set": {"status": "failed", "error": str(exc), "updated_at": now_utc()}},
+        _release_claim_ownership(
+            claim_doc_id=claim_doc_id,
+            drop_id=claim_drop_id,
+            user_id=claim_user_id,
+            status="failed",
+            reason=str(exc),
         )
         logger.info(
             "[CLAIM_BLOCK] reason=%s drop_id=%s uid=%s username=%s",
@@ -4911,9 +5033,12 @@ def api_claim():
             "checks_key": None,
         }), 403
     except Exception as exc:
-        voucher_claims_col.update_one(
-            {"_id": claim_doc_id},
-            {"$set": {"status": "failed", "error": str(exc), "updated_at": now_utc()}},
+        _release_claim_ownership(
+            claim_doc_id=claim_doc_id,
+            drop_id=claim_drop_id,
+            user_id=claim_user_id,
+            status="failed",
+            reason=str(exc),
         )
         current_app.logger.exception("claim failed")
         return jsonify({"status": "error", "code": "server_error"}), 500
@@ -4954,13 +5079,22 @@ def api_claim():
                 rollback_ok,
             )
             try:
-                voucher_claims_col.update_one(
-                    {"_id": claim_doc_id},
-                    {"$set": {"status": "failed", "error": "claim_record_write_failed", "updated_at": now_utc()}},
+                _release_claim_ownership(
+                    claim_doc_id=claim_doc_id,
+                    drop_id=claim_drop_id,
+                    user_id=claim_user_id,
+                    status="failed",
+                    reason="claim_record_write_failed",
                 )
             except Exception:
                 pass
             return jsonify({"status": "error", "code": "server_error"}), 500
+        current_app.logger.info(
+            "[VOUCHER][ATOMIC_CLAIM_SUCCESS] dropId=%s user_id=%s claim_id=%s result_code=claimed",
+            claim_drop_id,
+            claim_user_id,
+            claim_doc_id,
+        )
         current_app.logger.info("[claim][OK] drop=%s uid=%s code=%s", drop_id, uid, result.get("code"))
         _apply_kill_success(ip=client_ip, subnet=client_subnet, now=now_utc())
         _set_cooldown(ip=client_ip, subnet=client_subnet, uid=claim_user_id, now=now_utc())      
