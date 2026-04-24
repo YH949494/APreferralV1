@@ -2291,7 +2291,7 @@ def _ensure_reserve_public_total(drop_id: str, drop: dict | None = None) -> int:
     return public_total
 
 
-def _effective_public_visible_remaining(*, drop: dict, drop_id: str, uid: int | None, public_remaining: int) -> int:
+def _effective_public_visible_remaining(*, drop: dict, drop_id: str, uid: int | None, public_remaining: int, is_my_user: bool = False) -> int:
     if public_remaining <= 0:
         return 0
     if not _is_public_pooled_drop(drop):
@@ -2303,7 +2303,7 @@ def _effective_public_visible_remaining(*, drop: dict, drop_id: str, uid: int | 
     if reserve_total <= 0:
         reserve_total = _ensure_reserve_public_total(drop_id, drop=drop)
     reserve_target = _public_reserve_target({**(drop or {}), "reserve_public_total": reserve_total}, public_remaining)
-    if retained:
+    if retained or is_my_user:
         return public_remaining
     visible_remaining = max(0, public_remaining - reserve_target)
     _safe_log(
@@ -3159,6 +3159,7 @@ def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None
                 drop_id=drop_id,
                 uid=ctx_uid,
                 public_remaining=public_remaining,
+                is_my_user=is_my_user,
             )
             visible_remaining = public_visible_remaining + my_remaining if is_my_user else public_visible_remaining
             already = None
@@ -3341,6 +3342,7 @@ def claim_pooled(
     *,
     pools: list[str] | None = None,
     retained_3d: bool = False,
+    is_my_user: bool = False,
 ):
     drop_id_variants = _drop_id_variants(drop_id)
     drop_obj_id = _coerce_id(drop_id)
@@ -3410,7 +3412,7 @@ def claim_pooled(
                 retained_3d,
                 reserve_limited,
             )
-            if reserve_limited and rem_now <= reserve_target and not retained_3d:
+            if reserve_limited and rem_now <= reserve_target and not retained_3d and not is_my_user:
                 if not reconciled:
                     # Counter may be stale — reconcile before giving up
                     _recon = reconcile_pooled_remaining(drop_id)
@@ -3479,7 +3481,7 @@ def claim_pooled(
                 rem = max(0, int(rem_after or 0))
             if rem <= 0:
                 continue
-        if pool == "public" and reserve_limited and rem <= reserve_target and not retained_3d:
+        if pool == "public" and reserve_limited and rem <= reserve_target and not retained_3d and not is_my_user:
             _safe_log(
                 "info",
                 "[DROP][RESERVE_BLOCK] drop=%s uid_key=%s rem=%s reserve_target=%s",
@@ -3550,7 +3552,7 @@ def claim_pooled(
         # 3) Now decrement drop-level remaining counter.
         #    If we can't decrement (counter is stale/0), rollback voucher to free.
         drop_update_filter = {"_id": drop_obj_id, remaining_field: {"$gt": 0}}
-        if pool == "public" and reserve_limited and not retained_3d:
+        if pool == "public" and reserve_limited and not retained_3d and not is_my_user:
             drop_update_filter["public_remaining"] = {"$gt": reserve_target}
         updated = db.drops.update_one(
             drop_update_filter,
@@ -3573,7 +3575,7 @@ def claim_pooled(
                     current_app.logger.exception("[claim][rollback_failed] drop=%s pool=%s", drop_id, pool)
                 except Exception:
                     print(f"[claim][rollback_failed] drop={drop_id} pool={pool}")
-            if pool == "public" and reserve_limited and not retained_3d:
+            if pool == "public" and reserve_limited and not retained_3d and not is_my_user:
                 _safe_log(
                     "info",
                     "[DROP][RESERVE_BLOCK] drop=%s uid_key=%s rem_guard=%s reserve_target=%s",
@@ -4062,18 +4064,20 @@ def claim_voucher_for_user(*, user_id: str, drop_id: str, username: str) -> dict
     # pooled
     claim_key = f"uid:{user_id_str}"
     user_region = user_doc.get("region") if user_doc else None
+    is_my_user = _is_my_region(user_region)
     pools = get_claimable_pools(user_region, drop)
     retained_3d = is_retained_3d(uid_int)
     retained_7d = is_retained_7d(uid_int)
     _safe_log(
         "info",
-        "[DROP][RESERVE_CHECK] drop=%s uid=%s retained_3d=%s retained_7d=%s",
+        "[DROP][RESERVE_CHECK] drop=%s uid=%s retained_3d=%s retained_7d=%s is_my_user=%s",
         drop_id,
         uid_int,
         retained_3d,
         retained_7d,
+        is_my_user,
     )
-    res = claim_pooled(drop_id=drop_id, claim_key=claim_key, ref=ref, pools=pools, retained_3d=retained_3d)
+    res = claim_pooled(drop_id=drop_id, claim_key=claim_key, ref=ref, pools=pools, retained_3d=retained_3d, is_my_user=is_my_user)
     if res.get("ok"):
         return {"code": res["code"], "claimedAt": res["claimedAt"]}
     if res.get("err") == "sold_out":
