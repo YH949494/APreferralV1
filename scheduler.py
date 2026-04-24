@@ -1244,7 +1244,9 @@ def evaluate_affiliate_simulated_ledgers(batch_limit: int = 500) -> int:
 
 
 def confirm_qualified_invitees(batch_limit: int = 200) -> int:
-    logger.info("[SCHED][QUALIFIED] skipped reason=inline_settlement_rule")
+    # Qualification is handled inline by mark_invitee_qualified(...) inside
+    # settle_pending_referrals; keep this no-op for backward call compatibility.
+    logger.info("[SCHED][QUALIFIED] skipped reason=mark_invitee_qualified_is_source_of_truth")
     return 0
 
 def settle_pending_referrals(batch_limit: int = 200) -> None:
@@ -1482,6 +1484,12 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
             try:
                 db.referral_award_events.insert_one(award_doc)
             except DuplicateKeyError:
+                mark_invitee_qualified(
+                    db,
+                    invitee_id=invitee_user_id,
+                    referrer_id=inviter_user_id,
+                    now_utc=now_utc_ts,
+                )
                 db.pending_referrals.update_one(
                     {"_id": pending_id},
                     {
@@ -1499,6 +1507,13 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
                     inviter_user_id,
                     invitee_user_id,
                     award_key,
+                )
+                logger.info(
+                    "[REFERRAL][DUP_AWARD_RECOVER_QUALIFY] inviter_id=%s referrer_id=%s invitee_id=%s pending_referral_id=%s",
+                    inviter_user_id,
+                    inviter_user_id,
+                    invitee_user_id,
+                    pending_id,
                 )
                 continue
 

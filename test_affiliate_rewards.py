@@ -5,9 +5,11 @@ from datetime import datetime, timedelta, timezone
 from pymongo.errors import DuplicateKeyError
 
 from affiliate_rewards import (
+    approve_affiliate_ledger,
     evaluate_monthly_affiliate_reward,
     issue_welcome_bonus_if_eligible,
     mark_invitee_qualified,
+    retry_current_month_pending_manual_ledgers,
     settle_previous_month_affiliate_rewards,
 )
 
@@ -464,6 +466,45 @@ class AffiliateRewardTests(unittest.TestCase):
         self.assertEqual(row["status"], "ISSUED")
         self.assertIsNotNone(row.get("voucher_code"))
         self.assertEqual(db.voucher_pools.count_documents({"pool_id": "T1", "status": "issued"}), 1)
+
+    def test_approve_ledger_empty_pool_keeps_pending_manual(self):
+        db = FakeDb()
+        now = datetime(2026, 1, 15, tzinfo=timezone.utc)
+        inserted = db.affiliate_ledger.insert_one(
+            {
+                "dedup_key": "AFF:201:202601:T1",
+                "ledger_type": "AFFILIATE_MONTHLY",
+                "user_id": 201,
+                "year_month": "202601",
+                "tier": "T1",
+                "pool_id": "T1",
+                "status": "PENDING_MANUAL",
+                "voucher_code": None,
+                "risk_flags": [],
+                "created_at": now,
+                "updated_at": now,
+            }
+        )
+        out = approve_affiliate_ledger(db, ledger_id=inserted["_id"], now_utc=now)
+        self.assertEqual(out["status"], "PENDING_MANUAL")
+
+    def test_blocked_user_creates_review_ledger_and_retry_skips_issuance(self):
+        db = FakeDb()
+        now = datetime(2026, 1, 15, tzinfo=timezone.utc)
+        db.users.insert_one({"user_id": 301, "blocked": True})
+        for i in range(1, 11):
+            db.qualified_events.insert_one({"invitee_id": 3000 + i, "referrer_id": 301, "qualified_at": now})
+        db.voucher_pools.insert_one({"pool_id": "T1", "code": "B-T1", "status": "available"})
+
+        first = evaluate_monthly_affiliate_reward(db, referrer_id=301, now_utc=now)
+        self.assertEqual(first["status"], "PENDING_REVIEW")
+        self.assertIn("blocked_user", first.get("risk_flags") or [])
+
+        retry_current_month_pending_manual_ledgers(db, now_utc=now, batch_limit=10)
+
+        after = db.affiliate_ledger.find_one({"dedup_key": "AFF:301:202601:T1"})
+        self.assertEqual(after["status"], "PENDING_REVIEW")
+        self.assertEqual(db.voucher_pools.count_documents({"pool_id": "T1", "status": "available"}), 1)
 
 
 if __name__ == "__main__":
