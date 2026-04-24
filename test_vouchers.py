@@ -16,6 +16,7 @@ from vouchers import (
     _compute_visible_remaining,
     _derive_session_key,
     _get_client_ip,
+    _release_claim_ownership,
     _set_cooldown,
     _set_session_cooldown,
     _session_cooldown_payload,
@@ -367,6 +368,165 @@ class VoucherAntiHunterTests(unittest.TestCase):
         payload = _build_idempotent_claim_response(existing)
         self.assertEqual(payload["voucher"]["code"], "REUSED-CODE")
         self.assertEqual(claims.docs[0]["status"], "failed")
+
+    def test_same_user_sequential_claim_lock_only_allows_single_voucher(self):
+        import vouchers as vouchers_module
+
+        now = datetime.now(timezone.utc)
+        claims = FakeClaimsCollection()
+        fake_db = FakeDb(
+            drops=[{"_id": "drop-seq", "my_remaining": 0, "public_remaining": 2}],
+            vouchers=[
+                {"type": "pooled", "dropId": "drop-seq", "code": "SEQ1", "status": "free", "pool": "public"},
+                {"type": "pooled", "dropId": "drop-seq", "code": "SEQ2", "status": "free", "pool": "public"},
+            ],
+        )
+        original_db = vouchers_module.db
+        vouchers_module.db = fake_db
+        app = Flask(__name__)
+        try:
+            claim_id, existing = _acquire_claim_lock(
+                drop_id="drop-seq",
+                user_id=101,
+                client_ip="1.1.1.1",
+                user_agent="ua",
+                now=now,
+                claims_col=claims,
+            )
+            self.assertIsNotNone(claim_id)
+            self.assertIsNone(existing)
+
+            with app.app_context():
+                first = claim_pooled(drop_id="drop-seq", claim_key="uid:101", ref=now, pools=["public"])
+            self.assertTrue(first["ok"])
+            claims.update_one(
+                {"_id": claim_id},
+                {"$set": {"status": "claimed", "voucher_code": first["code"], "claimed_at": now}},
+            )
+
+            claim_id_2, existing_2 = _acquire_claim_lock(
+                drop_id="drop-seq",
+                user_id=101,
+                client_ip="1.1.1.1",
+                user_agent="ua",
+                now=now + timedelta(seconds=1),
+                claims_col=claims,
+            )
+            self.assertIsNone(claim_id_2)
+            self.assertEqual(existing_2.get("voucher_code"), first["code"])
+            claimed_rows = [d for d in fake_db.vouchers.docs if d.get("status") == "claimed"]
+            self.assertEqual(len(claimed_rows), 1)
+        finally:
+            vouchers_module.db = original_db
+
+    def test_same_user_duplicate_ownership_does_not_double_allocate(self):
+        import vouchers as vouchers_module
+
+        now = datetime.now(timezone.utc)
+        claims = FakeClaimsCollection()
+        fake_db = FakeDb(
+            drops=[{"_id": "drop-conc", "my_remaining": 0, "public_remaining": 2}],
+            vouchers=[
+                {"type": "pooled", "dropId": "drop-conc", "code": "CONC1", "status": "free", "pool": "public"},
+                {"type": "pooled", "dropId": "drop-conc", "code": "CONC2", "status": "free", "pool": "public"},
+            ],
+        )
+        original_db = vouchers_module.db
+        vouchers_module.db = fake_db
+        app = Flask(__name__)
+        try:
+            claim_id_1, _ = _acquire_claim_lock(
+                drop_id="drop-conc",
+                user_id=202,
+                client_ip="1.1.1.1",
+                user_agent="ua",
+                now=now,
+                claims_col=claims,
+            )
+            claim_id_2, existing_2 = _acquire_claim_lock(
+                drop_id="drop-conc",
+                user_id=202,
+                client_ip="1.1.1.1",
+                user_agent="ua",
+                now=now + timedelta(milliseconds=10),
+                claims_col=claims,
+            )
+            self.assertIsNotNone(claim_id_1)
+            self.assertIsNone(claim_id_2)
+            self.assertIsNotNone(existing_2)
+
+            with app.app_context():
+                first = claim_pooled(drop_id="drop-conc", claim_key="uid:202", ref=now, pools=["public"])
+            self.assertTrue(first["ok"])
+            claims.update_one(
+                {"_id": claim_id_1},
+                {"$set": {"status": "claimed", "voucher_code": first["code"], "claimed_at": now}},
+            )
+            claimed_rows = [d for d in fake_db.vouchers.docs if d.get("status") == "claimed"]
+            self.assertEqual(len(claimed_rows), 1)
+        finally:
+            vouchers_module.db = original_db
+
+    def test_sold_out_after_ownership_acquired_is_not_marked_claimed(self):
+        now = datetime.now(timezone.utc)
+        claims = FakeClaimsCollection()
+        claim_id, _ = _acquire_claim_lock(
+            drop_id="drop-empty",
+            user_id=303,
+            client_ip="1.1.1.1",
+            user_agent="ua",
+            now=now,
+            claims_col=claims,
+        )
+        self.assertIsNotNone(claim_id)
+        _release_claim_ownership(
+            claim_doc_id=claim_id,
+            drop_id="drop-empty",
+            user_id=303,
+            status="failed",
+            reason="sold_out",
+            claims_col=claims,
+        )
+        updated = claims.find_one({"_id": claim_id})
+        self.assertEqual(updated.get("status"), "failed")
+        self.assertEqual(updated.get("error"), "sold_out")
+        self.assertIsNone(updated.get("voucher_code"))
+
+    def test_different_users_can_claim_different_vouchers_same_drop(self):
+        import vouchers as vouchers_module
+
+        now = datetime.now(timezone.utc)
+        fake_db = FakeDb(
+            drops=[{"_id": "drop-multi", "my_remaining": 0, "public_remaining": 2}],
+            vouchers=[
+                {"type": "pooled", "dropId": "drop-multi", "code": "U1", "status": "free", "pool": "public"},
+                {"type": "pooled", "dropId": "drop-multi", "code": "U2", "status": "free", "pool": "public"},
+            ],
+        )
+        original_db = vouchers_module.db
+        vouchers_module.db = fake_db
+        app = Flask(__name__)
+        try:
+            with app.app_context():
+                first = claim_pooled(
+                    drop_id="drop-multi",
+                    claim_key="uid:401",
+                    ref=now,
+                    pools=["public"],
+                    retained_3d=True,
+                )
+                second = claim_pooled(
+                    drop_id="drop-multi",
+                    claim_key="uid:402",
+                    ref=now,
+                    pools=["public"],
+                    retained_3d=True,
+                )
+            self.assertTrue(first["ok"])
+            self.assertTrue(second["ok"])
+            self.assertNotEqual(first["code"], second["code"])
+        finally:
+            vouchers_module.db = original_db
 
     def test_visible_remaining_excludes_reserved_pool_for_non_my_user(self):
         drop = {"public_remaining": 10, "my_remaining": 20}
