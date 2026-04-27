@@ -984,9 +984,14 @@
       <button id="leaderboard-tab-default" type="button" class="btn btn-ghost leaderboard-tab-btn active">XP + Ref</button>
       <button id="leaderboard-tab-affiliate" type="button" class="btn btn-ghost leaderboard-tab-btn">Affiliate</button>
     </div>
+    <div id="affiliate-subtab-bar" style="display:none; gap:6px; margin-top:8px; flex-wrap:wrap;">
+      <button id="aff-subtab-current" type="button" class="btn btn-ghost leaderboard-tab-btn active" onclick="setAffSubTab('current')">This Week</button>
+      <button id="aff-subtab-past" type="button" class="btn btn-ghost leaderboard-tab-btn" onclick="setAffSubTab('past')">Past Week</button>
+    </div>
     <div id="leaderboard-summary-card"></div>
     <div id="leaderboard-output">Click to load latest rankings...</div>
     <div id="affiliate-leaderboard-output" style="display:none; margin-top:12px;">Click to load latest affiliate rankings...</div>
+    <div id="affiliate-leaderboard-past-output" style="display:none; margin-top:12px;"></div>
     <button id="leaderboard-retry" type="button" class="btn btn-ghost" style="display:none;margin-top:8px;">Retry</button>
   </div>
 
@@ -3568,6 +3573,8 @@ Active players win more.
     let leaderboardSkeletonRendered = false;
     let leaderboardCacheAgeMs = null;
     let affiliateLeaderboardLoaded = false;
+    let affiliateSubTab = 'current';
+    let affiliatePastLoaded = false;
 
     function renderLeaderboardSkeleton() {
       const out = document.getElementById("leaderboard-output");
@@ -3636,15 +3643,38 @@ function setLeaderboardMeta(ts, { isStale = false } = {}) {
       const affiliateBtn = document.getElementById("leaderboard-tab-affiliate");
       const defaultOut = document.getElementById("leaderboard-output");
       const affiliateOut = document.getElementById("affiliate-leaderboard-output");
+      const affiliatePastOut = document.getElementById("affiliate-leaderboard-past-output");
+      const subTabBar = document.getElementById("affiliate-subtab-bar");
       const summary = document.getElementById("leaderboard-summary-card");
       const isAffiliate = tabName === "affiliate";
       if (defaultBtn) defaultBtn.classList.toggle("active", !isAffiliate);
       if (affiliateBtn) affiliateBtn.classList.toggle("active", isAffiliate);
       if (defaultOut) defaultOut.style.display = isAffiliate ? "none" : "block";
-      if (affiliateOut) affiliateOut.style.display = isAffiliate ? "block" : "none";
+      if (subTabBar) subTabBar.style.display = isAffiliate ? "flex" : "none";
+      if (affiliateOut) affiliateOut.style.display = (isAffiliate && affiliateSubTab === 'current') ? "block" : "none";
+      if (affiliatePastOut) affiliatePastOut.style.display = (isAffiliate && affiliateSubTab === 'past') ? "block" : "none";
       if (summary) summary.style.display = isAffiliate ? "none" : "block";
-      if (isAffiliate && !affiliateLeaderboardLoaded) {
+      if (isAffiliate && affiliateSubTab === 'current' && !affiliateLeaderboardLoaded) {
         loadAffiliateLeaderboard();
+      }
+    }
+
+    function setAffSubTab(tab) {
+      affiliateSubTab = tab;
+      const currentBtn = document.getElementById("aff-subtab-current");
+      const pastBtn = document.getElementById("aff-subtab-past");
+      const currentOut = document.getElementById("affiliate-leaderboard-output");
+      const pastOut = document.getElementById("affiliate-leaderboard-past-output");
+      if (currentBtn) currentBtn.classList.toggle("active", tab === 'current');
+      if (pastBtn) pastBtn.classList.toggle("active", tab === 'past');
+      if (currentOut) currentOut.style.display = tab === 'current' ? "block" : "none";
+      if (pastOut) pastOut.style.display = tab === 'past' ? "block" : "none";
+      if (tab === 'current' && !affiliateLeaderboardLoaded) {
+        loadAffiliateLeaderboard();
+      }
+      if (tab === 'past' && !affiliatePastLoaded) {
+        affiliatePastLoaded = true;
+        loadAffiliatePastLeaderboard();
       }
     }
 
@@ -3693,6 +3723,85 @@ function setLeaderboardMeta(ts, { isStale = false } = {}) {
         affiliateLeaderboardLoaded = true;
       } catch (err) {
         target.innerHTML = `<div class="leaderboard-empty">Affiliate leaderboard unavailable: ${String(err.message || err)}</div>`;
+      }
+    }
+
+    async function loadAffiliatePastLeaderboard() {
+      const target = document.getElementById("affiliate-leaderboard-past-output");
+      if (!target) return;
+      target.innerHTML = '<div class="leaderboard-empty">Loading past week data...</div>';
+      try {
+        const listRes = await fetch(`${API_BASE}/api/leaderboard/affiliate/snapshots?limit=10`);
+        if (!listRes.ok) throw new Error(`HTTP ${listRes.status}`);
+        const listData = await listRes.json();
+        const items = Array.isArray(listData?.items) ? listData.items : [];
+        if (!items.length) {
+          target.innerHTML = '<div class="leaderboard-empty">No past week snapshots available yet.</div>';
+          return;
+        }
+        const weekOptions = items.map(w =>
+          `<option value="${w.week_key}">${w.week_start_local} → ${w.week_end_local} (${Number(w.entry_count || 0)} entries)</option>`
+        ).join('');
+        target.innerHTML = `
+          <div style="margin-bottom:10px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+            <label style="font-size:12px;color:#666;">Week:</label>
+            <select id="aff-past-week-select" onchange="loadAffiliatePastWeek(this.value)"
+              style="padding:4px 8px;border-radius:6px;border:1px solid #ddd;font-size:13px;">
+              ${weekOptions}
+            </select>
+          </div>
+          <div id="aff-past-week-content"><div class="leaderboard-empty">Loading…</div></div>
+        `;
+        await loadAffiliatePastWeek(items[0].week_key);
+      } catch (err) {
+        target.innerHTML = `<div class="leaderboard-empty">Error loading past leaderboard: ${String(err.message || err)}</div>`;
+      }
+    }
+
+    async function loadAffiliatePastWeek(weekKey) {
+      const content = document.getElementById("aff-past-week-content");
+      if (!content) return;
+      content.innerHTML = '<div class="leaderboard-empty">Loading…</div>';
+      try {
+        const url = new URL(`${API_BASE}/api/leaderboard/affiliate/snapshot`);
+        url.searchParams.set("week_key", weekKey);
+        if (userId) url.searchParams.set("user_id", userId);
+        const res = await fetch(url.toString());
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        if (!data.ok) throw new Error(data.error || "snapshot_not_found");
+        const entries = Array.isArray(data.entries) ? data.entries : [];
+        if (!entries.length) {
+          content.innerHTML = `<div class="leaderboard-empty">No data for week ${weekKey}.</div>`;
+          return;
+        }
+        const myEntry = userId ? entries.find(e => String(e.referrer_id) === String(userId)) : null;
+        const myCard = myEntry ? `
+          <div class="leaderboard-summary" style="margin-bottom:10px;">
+            <div class="summary-title">My Stats (${data.week_start_local} → ${data.week_end_local})</div>
+            <div class="summary-row"><span>Rank</span><strong>#${myEntry.rank || "-"}</strong></div>
+            <div class="summary-row"><span>Qualified</span><strong>${Number(myEntry.qualified_week || 0)}</strong></div>
+            <div class="summary-row"><span>Joins</span><strong>${Number(myEntry.joins_week_raw || 0)}</strong></div>
+            <div class="summary-row"><span>Conversion</span><strong>${(Number(myEntry.conversion_week || 0) * 100).toFixed(1)}%</strong></div>
+          </div>` : '';
+        const tableRows = entries.map(r => `
+          <tr${String(r.referrer_id) === String(userId) ? ' style="background:rgba(99,102,241,.08);"' : ''}>
+            <td>${Number(r.rank || 0)}</td>
+            <td>${String(r.display_name || r.username || r.referrer_id || "-")}</td>
+            <td>${Number(r.qualified_week || 0)}</td>
+            <td>${Number(r.joins_week_raw || 0)}</td>
+            <td>${(Number(r.conversion_week || 0) * 100).toFixed(1)}%</td>
+          </tr>`).join('');
+        content.innerHTML = `${myCard}
+          <div style="font-size:11px;color:#888;margin-bottom:6px;">
+            ${data.week_start_local} → ${data.week_end_local} • ${entries.length} entries
+          </div>
+          <table class="affiliate-table">
+            <thead><tr><th>Rank</th><th>Name</th><th>Qualified</th><th>Joins</th><th>Conversion %</th></tr></thead>
+            <tbody>${tableRows}</tbody>
+          </table>`;
+      } catch (err) {
+        content.innerHTML = `<div class="leaderboard-empty">Error: ${String(err.message || err)}</div>`;
       }
     }
 
