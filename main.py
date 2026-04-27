@@ -2708,8 +2708,23 @@ def _serialize_affiliate_snapshot_item(doc: dict) -> dict:
     }
 
 
+def _affiliate_viewer_context() -> tuple[int, bool]:
+    raw_user_id = request.args.get("user_id")
+    try:
+        current_user_id = int(raw_user_id) if raw_user_id not in (None, "", "undefined") else 0
+    except (TypeError, ValueError):
+        current_user_id = 0
+    user_record = users_collection.find_one({"user_id": current_user_id}, {"is_admin": 1}) or {}
+    return current_user_id, bool(user_record.get("is_admin", False))
+
+
 @app.route("/api/leaderboard/affiliate/snapshots", methods=["GET"])
 def api_affiliate_snapshot_list():
+    current_user_id, is_admin = _affiliate_viewer_context()
+    if not is_admin:
+        print(f"[AFF_LEADERBOARD][PAST_DENY] user_id={current_user_id} reason=admin_required")
+        return jsonify({"status": "error", "reason": "admin_required"}), 403
+
     limit = request.args.get("limit", default=20, type=int)
     if limit is None or limit <= 0:
         limit = 20
@@ -2739,13 +2754,15 @@ def api_affiliate_snapshot_get():
     if affiliate_week_window_from_week_key_kl(week_key) is None:
         return jsonify({"ok": False, "error": "invalid_week_key"}), 400
 
-    raw_user_id = request.args.get("user_id")
-    try:
-        current_user_id = int(raw_user_id) if raw_user_id not in (None, "", "undefined") else 0
-    except (TypeError, ValueError):
-        current_user_id = 0
-    user_record = users_collection.find_one({"user_id": current_user_id}, {"is_admin": 1}) or {}
-    is_admin = bool(user_record.get("is_admin", False))
+    current_user_id, is_admin = _affiliate_viewer_context()
+    _, _, current_week_start_local = affiliate_week_window_utc_from_reference()
+    current_week_key = current_week_start_local.date().isoformat()
+    is_past_week = week_key != current_week_key
+    if is_past_week and not is_admin:
+        print(f"[AFF_LEADERBOARD][PAST_DENY] user_id={current_user_id} reason=admin_required")
+        return jsonify({"status": "error", "reason": "admin_required"}), 403
+    if is_past_week and is_admin:
+        print(f"[AFF_LEADERBOARD][PAST_ADMIN_VIEW] user_id={current_user_id} week_key={week_key}")
 
     doc = db.affiliate_leaderboard_snapshots.find_one({"week_key": week_key}, {"_id": 0})
     if not doc:
