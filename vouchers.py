@@ -2219,12 +2219,12 @@ def is_public_pool(pool_doc: dict) -> bool:
 
 
 def classify_public_pool_segment(state: dict) -> str:
-    if not (state or {}).get("has_ever_claimed_public_pool"):
-        return "new_user"
     recent_count = int((state or {}).get("recent_public_claim_count_30d") or 0)
-    if recent_count >= 4:
-        return "repeat"
-    return "light_repeat"
+    if recent_count <= 2:
+        return "new_user"
+    if recent_count <= 5:
+        return "light_repeat"
+    return "repeat"
 
 
 def _prune_public_claim_timestamps_recent(timestamps, *, reference_time: datetime | None = None) -> list[datetime]:
