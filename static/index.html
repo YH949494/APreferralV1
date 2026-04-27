@@ -3569,6 +3569,7 @@ Active players win more.
     let leaderboardCacheAgeMs = null;
     let affiliateLeaderboardLoaded = false;
     let affiliateSnapshotWeeksLoaded = false;
+    let affiliateLeaderboardIsAdmin = false;
 
     function renderLeaderboardSkeleton() {
       const out = document.getElementById("leaderboard-output");
@@ -3713,6 +3714,10 @@ function setLeaderboardMeta(ts, { isStale = false } = {}) {
     async function loadAffiliateSnapshot(weekKey) {
       const target = document.getElementById("affiliate-leaderboard-output");
       if (!target || !weekKey) return;
+      if (!affiliateLeaderboardIsAdmin) {
+        target.innerHTML = '<div class="leaderboard-empty">Past affiliate leaderboard unavailable: admin_required</div>';
+        return;
+      }
       target.innerHTML = '<div class="leaderboard-empty">Loading past affiliate leaderboard...</div>';
       try {
         const weeks = await fetchAffiliateSnapshotWeeks();
@@ -3736,12 +3741,6 @@ function setLeaderboardMeta(ts, { isStale = false } = {}) {
       if (!target) return;
       target.innerHTML = '<div class="leaderboard-empty">Loading affiliate leaderboard...</div>';
       try {
-        let weeks = [];
-        try {
-          weeks = await fetchAffiliateSnapshotWeeks();
-        } catch (_) {
-          weeks = [];
-        }
         const url = new URL(`${API_BASE}/api/affiliate/leaderboard`);
         url.searchParams.set("window", "week");
         if (userId) url.searchParams.set("user_id", userId);
@@ -3751,6 +3750,15 @@ function setLeaderboardMeta(ts, { isStale = false } = {}) {
         const rows = Array.isArray(data?.leaderboard) ? data.leaderboard : [];
         const my = data?.my_stats;
         const isAdmin = Boolean(data?.is_admin);
+        affiliateLeaderboardIsAdmin = isAdmin;
+        let weeks = [];
+        if (isAdmin) {
+          try {
+            weeks = await fetchAffiliateSnapshotWeeks();
+          } catch (_) {
+            weeks = [];
+          }
+        }
         const myCard = my ? `
           <div class="leaderboard-summary" style="margin-bottom:10px;">
             <div class="summary-title">My Stats (This Week)</div>
@@ -3761,11 +3769,11 @@ function setLeaderboardMeta(ts, { isStale = false } = {}) {
           </div>
         ` : '<div class="leaderboard-empty">Login to see your affiliate stats.</div>';
         if (!rows.length) {
-          target.innerHTML = `${renderAffiliateHistoryControls(weeks)}${myCard}<div class="leaderboard-empty">No affiliate leaderboard data yet.</div>`;
+          target.innerHTML = `${isAdmin ? renderAffiliateHistoryControls(weeks) : ""}${myCard}<div class="leaderboard-empty">No affiliate leaderboard data yet.</div>`;
           affiliateLeaderboardLoaded = true;
           return;
         }
-        target.innerHTML = `${renderAffiliateHistoryControls(weeks)}${myCard}${renderAffiliateRows(rows, { isAdmin })}`;
+        target.innerHTML = `${isAdmin ? renderAffiliateHistoryControls(weeks) : ""}${myCard}${renderAffiliateRows(rows, { isAdmin })}`;
         affiliateLeaderboardLoaded = true;
       } catch (err) {
         target.innerHTML = `<div class="leaderboard-empty">Affiliate leaderboard unavailable: ${escapeHtml(String(err.message || err))}</div>`;
