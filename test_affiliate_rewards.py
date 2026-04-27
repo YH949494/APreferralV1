@@ -8,6 +8,8 @@ from pymongo.errors import DuplicateKeyError
 from affiliate_rewards import (
     approve_affiliate_ledger,
     evaluate_monthly_affiliate_reward,
+    issue_current_week_affiliate_rewards,
+    issue_previous_week_affiliate_rewards,
     issue_current_month_affiliate_rewards,
     issue_welcome_bonus_if_eligible,
     mark_invitee_qualified,
@@ -327,6 +329,84 @@ class AffiliateRewardTests(unittest.TestCase):
         row_b = evaluate_monthly_affiliate_reward(db, referrer_id=12, now_utc=now)
         issued = [r for r in (row_a, row_b) if r.get("status") == "ISSUED"]
         self.assertEqual(len(issued), 1)
+
+    def test_previous_week_t1_issues_once_and_is_idempotent(self):
+        db = FakeDb()
+        uid = 7001
+        db.users.insert_one({"user_id": uid, "blocked": False})
+        now = datetime(2026, 1, 12, 1, 0, tzinfo=timezone.utc)
+        event_time = datetime(2026, 1, 5, 1, 0, tzinfo=timezone.utc)
+        for i in range(10):
+            db.qualified_events.insert_one({"invitee_id": 700100 + i, "referrer_id": uid, "qualified_at": event_time})
+        db.voucher_pools.insert_one({"pool_id": "T1", "code": "WEEK-T1", "status": "available"})
+
+        first = issue_previous_week_affiliate_rewards(db, now_utc=now)
+        second = issue_previous_week_affiliate_rewards(db, now_utc=now)
+
+        self.assertEqual(first["week_key"], "2026-01-05")
+        self.assertEqual(first["issued_count"], 1)
+        self.assertEqual(second["issued_count"], 0)
+        ledger = db.affiliate_ledger.find_one({"dedup_key": f"AFFW:{uid}:2026-01-05:T1"})
+        self.assertIsNotNone(ledger)
+        self.assertEqual(ledger["ledger_type"], "AFFILIATE_WEEKLY")
+        self.assertEqual(ledger["status"], "ISSUED")
+        self.assertEqual(ledger["voucher_code"], "WEEK-T1")
+        self.assertEqual(db.voucher_pools.count_documents({"pool_id": "T1", "status": "issued"}), 1)
+
+    def test_current_week_t1_issues_after_qualified_threshold_before_week_end(self):
+        db = FakeDb()
+        uid = 7011
+        db.users.insert_one({"user_id": uid, "blocked": False})
+        now = datetime(2026, 1, 7, 6, 0, tzinfo=timezone.utc)
+        for i in range(10):
+            db.qualified_events.insert_one({"invitee_id": 701100 + i, "referrer_id": uid, "qualified_at": now})
+        db.voucher_pools.insert_one({"pool_id": "T1", "code": "CUR-WEEK-T1", "status": "available"})
+
+        first = issue_current_week_affiliate_rewards(db, now_utc=now)
+        second = issue_current_week_affiliate_rewards(db, now_utc=now + timedelta(minutes=30))
+
+        self.assertEqual(first["week_key"], "2026-01-05")
+        self.assertEqual(first["issued_count"], 1)
+        self.assertEqual(second["issued_count"], 0)
+        ledger = db.affiliate_ledger.find_one({"dedup_key": f"AFFW:{uid}:2026-01-05:T1"})
+        self.assertEqual(ledger["status"], "ISSUED")
+        self.assertEqual(ledger["voucher_code"], "CUR-WEEK-T1")
+
+    def test_previous_week_pool_empty_stays_pending_manual(self):
+        db = FakeDb()
+        uid = 7002
+        db.users.insert_one({"user_id": uid, "blocked": False})
+        now = datetime(2026, 1, 12, 1, 0, tzinfo=timezone.utc)
+        event_time = datetime(2026, 1, 5, 1, 0, tzinfo=timezone.utc)
+        for i in range(10):
+            db.qualified_events.insert_one({"invitee_id": 700200 + i, "referrer_id": uid, "qualified_at": event_time})
+
+        out = issue_previous_week_affiliate_rewards(db, now_utc=now)
+
+        self.assertEqual(out["pending_manual"], 1)
+        self.assertEqual(out["pool_empty"], 1)
+        ledger = db.affiliate_ledger.find_one({"dedup_key": f"AFFW:{uid}:2026-01-05:T1"})
+        self.assertEqual(ledger["status"], "PENDING_MANUAL")
+        self.assertIn("pool_empty", ledger.get("risk_flags") or [])
+
+    def test_previous_week_simulation_does_not_consume_voucher(self):
+        db = FakeDb()
+        uid = 7003
+        db.users.insert_one({"user_id": uid, "blocked": False})
+        now = datetime(2026, 1, 12, 1, 0, tzinfo=timezone.utc)
+        event_time = datetime(2026, 1, 5, 1, 0, tzinfo=timezone.utc)
+        for i in range(10):
+            db.qualified_events.insert_one({"invitee_id": 700300 + i, "referrer_id": uid, "qualified_at": event_time})
+        db.voucher_pools.insert_one({"pool_id": "T1", "code": "SIM-T1", "status": "available"})
+
+        with patch.dict(os.environ, {"AFFILIATE_SIMULATE": "1"}):
+            out = issue_previous_week_affiliate_rewards(db, now_utc=now)
+
+        self.assertEqual(out["issued_count"], 0)
+        ledger = db.affiliate_ledger.find_one({"dedup_key": f"AFFW:{uid}:2026-01-05:T1"})
+        self.assertEqual(ledger["status"], "SIMULATED_PENDING")
+        self.assertEqual(ledger["would_issue_pool"], "T1")
+        self.assertEqual(db.voucher_pools.count_documents({"pool_id": "T1", "status": "available"}), 1)
 
     def test_simulate_mode_creates_ledger_without_pool_consumption(self):
         db = FakeDb()

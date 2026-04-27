@@ -223,19 +223,36 @@ def _compute_affiliate_weekly_rows(db_ref, week_start_utc: datetime, week_end_ut
             ]
         )
     )
+    qualified_rows = []
+    qualified_collection = getattr(db_ref, "qualified_events", None)
+    if qualified_collection is not None:
+        qualified_rows = list(
+            qualified_collection.aggregate(
+                [
+                    {
+                        "$match": {
+                            "qualified_at": {"$gte": week_start_utc, "$lt": week_end_utc},
+                            "referrer_id": {"$ne": None},
+                        }
+                    },
+                    {"$group": {"_id": "$referrer_id", "qualified_week": {"$sum": 1}}},
+                ]
+            )
+        )
     flow_settled_match = {
         "event": "referral_settled",
         "ts_utc": {"$gte": week_start_utc, "$lt": week_end_utc},
         "referrer_id": {"$ne": None},
     }
-    qualified_rows = list(
-        db_ref.referral_flow_events.aggregate(
-            [
-                {"$match": flow_settled_match},
-                {"$group": {"_id": "$referrer_id", "qualified_week": {"$sum": 1}}},
-            ]
+    if not qualified_rows:
+        qualified_rows = list(
+            db_ref.referral_flow_events.aggregate(
+                [
+                    {"$match": flow_settled_match},
+                    {"$group": {"_id": "$referrer_id", "qualified_week": {"$sum": 1}}},
+                ]
+            )
         )
-    )
     if not qualified_rows:
         qualified_rows = list(
             db_ref.referral_events.aggregate(

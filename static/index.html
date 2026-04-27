@@ -3568,6 +3568,7 @@ Active players win more.
     let leaderboardSkeletonRendered = false;
     let leaderboardCacheAgeMs = null;
     let affiliateLeaderboardLoaded = false;
+    let affiliateSnapshotWeeksLoaded = false;
 
     function renderLeaderboardSkeleton() {
       const out = document.getElementById("leaderboard-output");
@@ -3648,11 +3649,99 @@ function setLeaderboardMeta(ts, { isStale = false } = {}) {
       }
     }
 
+    function renderAffiliateHistoryControls(items = [], activeWeekKey = "") {
+      if (!items.length) return "";
+      const options = items.map((item) => {
+        const key = String(item.week_key || "");
+        const label = `${String(item.week_start_local || key)} - ${String(item.week_end_local || "")}`;
+        return `<option value="${escapeHtml(key)}" ${key === activeWeekKey ? "selected" : ""}>${escapeHtml(label)}</option>`;
+      }).join("");
+      return `
+        <div class="leaderboard-summary" style="margin-bottom:10px;">
+          <div class="summary-title">Affiliate History</div>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+            <button type="button" class="btn btn-ghost" onclick="loadAffiliateLeaderboard()">Current Week</button>
+            <select id="affiliate-week-select" onchange="loadAffiliateSnapshot(this.value)" style="min-width:190px;padding:8px;border:1px solid #ddd;border-radius:6px;background:#fff;">
+              <option value="">Past week...</option>
+              ${options}
+            </select>
+          </div>
+        </div>
+      `;
+    }
+
+    async function fetchAffiliateSnapshotWeeks() {
+      if (affiliateSnapshotWeeksLoaded && Array.isArray(window.__affiliateSnapshotWeeks)) {
+        return window.__affiliateSnapshotWeeks;
+      }
+      const url = new URL(`${API_BASE}/api/leaderboard/affiliate/snapshots`);
+      url.searchParams.set("limit", "12");
+      const res = await fetch(url.toString());
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      window.__affiliateSnapshotWeeks = Array.isArray(data?.items) ? data.items : [];
+      affiliateSnapshotWeeksLoaded = true;
+      return window.__affiliateSnapshotWeeks;
+    }
+
+    function renderAffiliateRows(rows, { isAdmin = false, snapshotMeta = null } = {}) {
+      if (!rows.length) return '<div class="leaderboard-empty">No affiliate leaderboard data yet.</div>';
+      const tableRows = rows.map((r) => {
+        const extra = r.extra || {};
+        const qualified = r.qualified_week ?? r.metric_value ?? extra.qualified_week ?? 0;
+        const joins = r.joins_week_raw ?? extra.joins_week_raw ?? 0;
+        const conversion = r.conversion_week ?? extra.conversion_week ?? 0;
+        const flag = r.quality_flag ?? extra.quality_flag ?? "new";
+        return `
+          <tr>
+            <td>${Number(r.rank || 0)}</td>
+            <td>${escapeHtml(String(r.display_name || r.username || r.referrer_id || "-"))}</td>
+            <td>${Number(qualified || 0)}</td>
+            <td>${Number(joins || 0)}</td>
+            <td>${(Number(conversion || 0) * 100).toFixed(1)}%</td>
+            ${isAdmin ? `<td>${escapeHtml(String(flag || "new"))}</td>` : ""}
+          </tr>`;
+      }).join("");
+      const meta = snapshotMeta ? `<div class="leaderboard-empty" style="margin-bottom:8px;">${escapeHtml(snapshotMeta)}</div>` : "";
+      return `${meta}
+        <table class="affiliate-table">
+          <thead><tr><th>Rank</th><th>Name</th><th>Qualified</th><th>Joins</th><th>Conversion %</th>${isAdmin ? "<th>Flag</th>" : ""}</tr></thead>
+          <tbody>${tableRows}</tbody>
+        </table>`;
+    }
+
+    async function loadAffiliateSnapshot(weekKey) {
+      const target = document.getElementById("affiliate-leaderboard-output");
+      if (!target || !weekKey) return;
+      target.innerHTML = '<div class="leaderboard-empty">Loading past affiliate leaderboard...</div>';
+      try {
+        const weeks = await fetchAffiliateSnapshotWeeks();
+        const url = new URL(`${API_BASE}/api/leaderboard/affiliate/snapshot`);
+        url.searchParams.set("week_key", weekKey);
+        if (userId) url.searchParams.set("user_id", userId);
+        const res = await fetch(url.toString());
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        const rows = Array.isArray(data?.entries) ? data.entries : [];
+        const selected = weeks.find((item) => String(item.week_key) === String(weekKey));
+        const meta = selected ? `${selected.week_start_local} - ${selected.week_end_local}` : weekKey;
+        target.innerHTML = `${renderAffiliateHistoryControls(weeks, weekKey)}${renderAffiliateRows(rows, { snapshotMeta: meta })}`;
+      } catch (err) {
+        target.innerHTML = `<div class="leaderboard-empty">Past affiliate leaderboard unavailable: ${escapeHtml(String(err.message || err))}</div>`;
+      }
+    }
+
     async function loadAffiliateLeaderboard() {
       const target = document.getElementById("affiliate-leaderboard-output");
       if (!target) return;
       target.innerHTML = '<div class="leaderboard-empty">Loading affiliate leaderboard...</div>';
       try {
+        let weeks = [];
+        try {
+          weeks = await fetchAffiliateSnapshotWeeks();
+        } catch (_) {
+          weeks = [];
+        }
         const url = new URL(`${API_BASE}/api/affiliate/leaderboard`);
         url.searchParams.set("window", "week");
         if (userId) url.searchParams.set("user_id", userId);
@@ -3672,27 +3761,14 @@ function setLeaderboardMeta(ts, { isStale = false } = {}) {
           </div>
         ` : '<div class="leaderboard-empty">Login to see your affiliate stats.</div>';
         if (!rows.length) {
-          target.innerHTML = `${myCard}<div class="leaderboard-empty">No affiliate leaderboard data yet.</div>`;
+          target.innerHTML = `${renderAffiliateHistoryControls(weeks)}${myCard}<div class="leaderboard-empty">No affiliate leaderboard data yet.</div>`;
           affiliateLeaderboardLoaded = true;
           return;
         }
-        const tableRows = rows.map((r) => `
-          <tr>
-            <td>${Number(r.rank || 0)}</td>
-            <td>${String(r.display_name || r.referrer_id || "-")}</td>
-            <td>${Number(r.qualified_week || 0)}</td>
-            <td>${Number(r.joins_week_raw || 0)}</td>
-            <td>${(Number(r.conversion_week || 0) * 100).toFixed(1)}%</td>
-            ${isAdmin ? `<td>${String(r.quality_flag || "new")}</td>` : ""}
-          </tr>`).join("");
-        target.innerHTML = `${myCard}
-          <table class="affiliate-table">
-            <thead><tr><th>Rank</th><th>Name</th><th>Qualified</th><th>Joins</th><th>Conversion %</th>${isAdmin ? "<th>Flag</th>" : ""}</tr></thead>
-            <tbody>${tableRows}</tbody>
-          </table>`;
+        target.innerHTML = `${renderAffiliateHistoryControls(weeks)}${myCard}${renderAffiliateRows(rows, { isAdmin })}`;
         affiliateLeaderboardLoaded = true;
       } catch (err) {
-        target.innerHTML = `<div class="leaderboard-empty">Affiliate leaderboard unavailable: ${String(err.message || err)}</div>`;
+        target.innerHTML = `<div class="leaderboard-empty">Affiliate leaderboard unavailable: ${escapeHtml(String(err.message || err))}</div>`;
       }
     }
 

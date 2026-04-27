@@ -95,6 +95,22 @@ def _month_window_utc(reference_utc: datetime | None = None):
     return start_kl.astimezone(timezone.utc), end_kl.astimezone(timezone.utc), start_kl.strftime("%Y%m")
 
 
+def _week_window_utc(reference_utc: datetime | None = None):
+    now_utc = reference_utc or datetime.now(timezone.utc)
+    if now_utc.tzinfo is None:
+        now_utc = now_utc.replace(tzinfo=timezone.utc)
+    ref_kl = now_utc.astimezone(KL_TZ)
+    start_kl = (ref_kl - timedelta(days=ref_kl.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+    end_kl = start_kl + timedelta(days=7)
+    return start_kl.astimezone(timezone.utc), end_kl.astimezone(timezone.utc), start_kl.date().isoformat()
+
+
+def _previous_completed_week_window_utc(reference_utc: datetime | None = None):
+    current_start_utc, _, _ = _week_window_utc(reference_utc)
+    prev_ref = current_start_utc - timedelta(seconds=1)
+    return _week_window_utc(prev_ref)
+
+
 def _tier_for_count(count: int) -> str | None:
     if count >= T5_THRESHOLD:
         return "T5"
@@ -587,6 +603,18 @@ def _risk_flags_for_referrer_month(db, *, referrer_id: int, start_utc: datetime,
     return flags
 
 
+def _eligible_tiers_for_count(qualified_count: int) -> list[str]:
+    return [
+        tier_name for tier_name, threshold in (
+            ("T1", T1_THRESHOLD),
+            ("T2", T2_THRESHOLD),
+            ("T3", T3_THRESHOLD),
+            ("T4", T4_THRESHOLD),
+            ("T5", T5_THRESHOLD),
+        ) if int(qualified_count) >= int(threshold)
+    ]
+
+
 def evaluate_monthly_affiliate_reward(db, *, referrer_id: int, now_utc: datetime | None = None):
     now_utc = now_utc or datetime.now(timezone.utc)
     user_doc = db.users.find_one({"user_id": int(referrer_id)}, {"blocked": 1}) or {}
@@ -636,13 +664,7 @@ def evaluate_monthly_affiliate_reward(db, *, referrer_id: int, now_utc: datetime
             yyyymm,
         )
         return db.affiliate_ledger.find_one({"dedup_key": dedup_key})
-    eligible_tiers = [tier_name for tier_name, threshold in (
-        ("T1", T1_THRESHOLD),
-        ("T2", T2_THRESHOLD),
-        ("T3", T3_THRESHOLD),
-        ("T4", T4_THRESHOLD),
-        ("T5", T5_THRESHOLD),
-    ) if int(qualified_count) >= int(threshold)]
+    eligible_tiers = _eligible_tiers_for_count(int(qualified_count))
     risk_flags = _risk_flags_for_referrer_month(db, referrer_id=int(referrer_id), start_utc=start_utc, end_utc=end_utc)
 
     last_ledger = None
@@ -745,6 +767,249 @@ def evaluate_monthly_affiliate_reward(db, *, referrer_id: int, now_utc: datetime
         last_ledger = _issue_affiliate_ledger_from_pool(db, ledger=db.affiliate_ledger.find_one({"_id": ledger["_id"]}), now_utc=now_utc)
 
     return last_ledger
+
+
+def evaluate_weekly_affiliate_reward(
+    db,
+    *,
+    referrer_id: int,
+    week_start_utc: datetime,
+    week_end_utc: datetime,
+    week_key: str,
+    now_utc: datetime | None = None,
+):
+    now_utc = now_utc or datetime.now(timezone.utc)
+    if now_utc.tzinfo is None:
+        now_utc = now_utc.replace(tzinfo=timezone.utc)
+    user_doc = db.users.find_one({"user_id": int(referrer_id)}, {"blocked": 1}) or {}
+    qualified_count = db.qualified_events.count_documents(
+        {"referrer_id": int(referrer_id), "qualified_at": {"$gte": week_start_utc, "$lt": week_end_utc}}
+    )
+    logger.info(
+        "[AFFILIATE][WEEKLY_EVAL_START] user_id=%s qualified_count=%s week_key=%s",
+        int(referrer_id),
+        int(qualified_count),
+        week_key,
+    )
+    tier = _tier_for_count(int(qualified_count))
+    if not tier:
+        return None
+
+    eligible_tiers = _eligible_tiers_for_count(int(qualified_count))
+    base_risk_flags = ["blocked_user"] if user_doc.get("blocked") else []
+    last_ledger = None
+    for eligible_tier in eligible_tiers:
+        dedup_key = f"AFFW:{int(referrer_id)}:{week_key}:{eligible_tier}"
+        insert_doc = {
+            "ledger_type": "AFFILIATE_WEEKLY",
+            "user_id": int(referrer_id),
+            "week_key": week_key,
+            "week_start_utc": week_start_utc,
+            "week_end_utc": week_end_utc,
+            "year_month": None,
+            "tier": eligible_tier,
+            "pool_id": eligible_tier,
+            "status": "PENDING_REVIEW" if user_doc.get("blocked") else "APPROVED",
+            "dedup_key": dedup_key,
+            "voucher_code": None,
+            "risk_flags": list(base_risk_flags),
+            "created_at": now_utc,
+            "updated_at": now_utc,
+        }
+        set_doc = {
+            "qualified_count": int(qualified_count),
+            "week_start_utc": week_start_utc,
+            "week_end_utc": week_end_utc,
+            "risk_flags": list(base_risk_flags),
+            "updated_at": now_utc,
+        }
+        if user_doc.get("blocked"):
+            set_doc["status"] = "PENDING_REVIEW"
+            set_doc["review_reason"] = "blocked_user"
+        db.affiliate_ledger.update_one(
+            {"dedup_key": dedup_key},
+            {"$setOnInsert": insert_doc, "$set": set_doc},
+            upsert=True,
+        )
+        logger.info(
+            "[AFFILIATE][WEEKLY_LEDGER_CREATE] user_id=%s tier=%s week_key=%s",
+            int(referrer_id),
+            eligible_tier,
+            week_key,
+        )
+        ledger = db.affiliate_ledger.find_one({"dedup_key": dedup_key})
+        if not ledger:
+            continue
+
+        status = ledger.get("status")
+        if status in FINAL_STATUSES:
+            last_ledger = ledger
+            continue
+        if user_doc.get("blocked"):
+            last_ledger = ledger
+            continue
+        if _affiliate_simulate_enabled():
+            db.affiliate_ledger.update_one(
+                {"_id": ledger["_id"]},
+                {
+                    "$set": {
+                        "status": "SIMULATED_PENDING",
+                        "simulate": True,
+                        "would_issue_pool": eligible_tier,
+                        "evaluated_at_utc": now_utc,
+                        "qualified_count": int(qualified_count),
+                        "updated_at": now_utc,
+                    }
+                },
+            )
+            last_ledger = db.affiliate_ledger.find_one({"_id": ledger["_id"]})
+            continue
+
+        if status == "SIMULATED_PENDING":
+            db.affiliate_ledger.update_one(
+                {"_id": ledger["_id"], "status": "SIMULATED_PENDING"},
+                {"$set": {"status": "APPROVED", "simulate": False, "updated_at": now_utc}},
+            )
+            ledger = db.affiliate_ledger.find_one({"_id": ledger["_id"]}) or ledger
+            status = ledger.get("status")
+
+        if status != SETTLING_STATUS:
+            settle_res = db.affiliate_ledger.update_one(
+                {"_id": ledger["_id"], "status": {"$nin": list(FINAL_STATUSES)}, **_no_voucher_filter()},
+                {"$set": {"status": SETTLING_STATUS, "updated_at": now_utc}},
+            )
+            if settle_res.modified_count == 0:
+                refreshed = db.affiliate_ledger.find_one({"_id": ledger["_id"]})
+                last_ledger = _finalize_issued_if_voucher_exists(db, ledger=refreshed, now_utc=now_utc)
+                if last_ledger and not last_ledger.get("voucher_code") and last_ledger.get("status") != "SIMULATED_PENDING":
+                    last_ledger = _reconcile_ledger_from_issued_pool(db, ledger_id=ledger["_id"], now_utc=now_utc) or last_ledger
+                continue
+
+        last_ledger = _issue_affiliate_ledger_from_pool(
+            db,
+            ledger=db.affiliate_ledger.find_one({"_id": ledger["_id"]}),
+            now_utc=now_utc,
+        )
+
+    return last_ledger
+
+
+def issue_weekly_affiliate_rewards_for_window(
+    db,
+    *,
+    week_start_utc: datetime,
+    week_end_utc: datetime,
+    week_key: str,
+    now_utc: datetime | None = None,
+    batch_limit: int = 500,
+):
+    now_utc = now_utc or datetime.now(timezone.utc)
+    limit = max(1, int(batch_limit))
+    summary = {
+        "week_key": week_key,
+        "week_start_utc": week_start_utc,
+        "week_end_utc": week_end_utc,
+        "scanned_users": 0,
+        "eligible_users": 0,
+        "created_ledgers": 0,
+        "issued_count": 0,
+        "skipped_existing": 0,
+        "pending_manual": 0,
+        "pool_empty": 0,
+        "errors": 0,
+    }
+
+    pipeline = [
+        {"$match": {"qualified_at": {"$gte": week_start_utc, "$lt": week_end_utc}, "referrer_id": {"$ne": None}}},
+        {"$group": {"_id": "$referrer_id", "count": {"$sum": 1}}},
+        {"$match": {"count": {"$gte": T1_THRESHOLD}}},
+        {"$sort": {"count": -1, "_id": 1}},
+        {"$limit": limit},
+    ]
+    rows = list(db.qualified_events.aggregate(pipeline))
+    summary["scanned_users"] = int(len(rows))
+    summary["eligible_users"] = int(len(rows))
+
+    for row in rows:
+        uid = int(row.get("_id"))
+        qualified_count = int(row.get("count") or 0)
+        expected_tiers = _eligible_tiers_for_count(qualified_count)
+        existing_before = list(
+            db.affiliate_ledger.find(
+                {
+                    "ledger_type": "AFFILIATE_WEEKLY",
+                    "user_id": uid,
+                    "week_key": week_key,
+                    "tier": {"$in": expected_tiers},
+                },
+                {"tier": 1, "status": 1},
+            )
+        )
+        before_status_by_tier = {str(doc.get("tier")): str(doc.get("status") or "") for doc in existing_before}
+        summary["created_ledgers"] += max(0, len(expected_tiers) - len(existing_before))
+        summary["skipped_existing"] += len(existing_before)
+        try:
+            evaluate_weekly_affiliate_reward(
+                db,
+                referrer_id=uid,
+                week_start_utc=week_start_utc,
+                week_end_utc=week_end_utc,
+                week_key=week_key,
+                now_utc=now_utc,
+            )
+        except Exception:
+            summary["errors"] += 1
+            logger.exception("[AFFILIATE][WEEKLY_BULK_ISSUE_ERROR] user_id=%s week_key=%s", uid, week_key)
+            continue
+
+        final_ledgers = list(
+            db.affiliate_ledger.find(
+                {
+                    "ledger_type": "AFFILIATE_WEEKLY",
+                    "user_id": uid,
+                    "week_key": week_key,
+                    "tier": {"$in": expected_tiers},
+                }
+            )
+        )
+        for ledger in final_ledgers:
+            before_status = before_status_by_tier.get(str(ledger.get("tier")))
+            status = str(ledger.get("status") or "")
+            if status == "ISSUED" and before_status != "ISSUED":
+                summary["issued_count"] += 1
+            elif status == "PENDING_MANUAL" and before_status != "PENDING_MANUAL":
+                summary["pending_manual"] += 1
+                if "pool_empty" in (ledger.get("risk_flags") or []):
+                    summary["pool_empty"] += 1
+
+    logger.info("[AFFILIATE][WEEKLY_BULK_ISSUE_SUMMARY] %s", summary)
+    return summary
+
+
+def issue_current_week_affiliate_rewards(db, now_utc: datetime | None = None, batch_limit: int = 500):
+    now_utc = now_utc or datetime.now(timezone.utc)
+    week_start_utc, week_end_utc, week_key = _week_window_utc(now_utc)
+    return issue_weekly_affiliate_rewards_for_window(
+        db,
+        week_start_utc=week_start_utc,
+        week_end_utc=week_end_utc,
+        week_key=week_key,
+        now_utc=now_utc,
+        batch_limit=batch_limit,
+    )
+
+
+def issue_previous_week_affiliate_rewards(db, now_utc: datetime | None = None, batch_limit: int = 500):
+    now_utc = now_utc or datetime.now(timezone.utc)
+    week_start_utc, week_end_utc, week_key = _previous_completed_week_window_utc(now_utc)
+    return issue_weekly_affiliate_rewards_for_window(
+        db,
+        week_start_utc=week_start_utc,
+        week_end_utc=week_end_utc,
+        week_key=week_key,
+        now_utc=now_utc,
+        batch_limit=batch_limit,
+    )
 
 
 def issue_current_month_affiliate_rewards(db, now_utc: datetime | None = None, batch_limit: int = 500):

@@ -117,6 +117,14 @@ class _FakeQualifiedWeeklyDb:
         self.referral_events = _FakeQualifiedAggregateCollection(ledger_rows)
 
 
+class _FakeAlignedQualifiedWeeklyDb:
+    def __init__(self, *, qualified_rows=None, flow_rows=None, ledger_rows=None):
+        self.pending_referrals = _FakeAggregateCollection()
+        self.qualified_events = _FakeQualifiedAggregateCollection(qualified_rows)
+        self.referral_flow_events = _FakeQualifiedAggregateCollection(flow_rows)
+        self.referral_events = _FakeQualifiedAggregateCollection(ledger_rows)
+
+
 def test_should_count_referral_join_cooldown_and_cap():
     db = _FakeDB()
     referrer_id = 42
@@ -354,6 +362,21 @@ def test_previous_completed_week_window_kl_correctness():
     assert prev["week_key"] == "2025-12-29"
     assert prev["week_start_local"] == "2025-12-29"
     assert prev["week_end_local"] == "2026-01-04"
+
+
+def test_weekly_leaderboard_prefers_qualified_events_for_reward_alignment():
+    db = _FakeAlignedQualifiedWeeklyDb(
+        qualified_rows=[{"_id": 42, "qualified_week": 10}],
+        flow_rows=[{"_id": 42, "qualified_week": 12}],
+        ledger_rows=[],
+    )
+    payload_start, payload = _build_affiliate_weekly_payload(
+        db,
+        reference_utc=datetime(2026, 1, 6, 2, 0, 0, tzinfo=timezone.utc),
+    )
+
+    assert payload_start.isoformat() == "2026-01-04T16:00:00+00:00"
+    assert payload["affiliate_leaderboard_week"][0]["qualified_week"] == 10
 
 
 def test_snapshot_builder_empty_week_creates_empty_entries():

@@ -66,6 +66,8 @@ from affiliate_rewards import (
     issue_welcome_bonus_if_eligible,
     record_user_last_seen,
     settle_previous_month_affiliate_rewards,
+    issue_current_week_affiliate_rewards,
+    issue_previous_week_affiliate_rewards,
     retry_current_month_pending_manual_ledgers,
 )
 from telegram_utils import safe_reply_text
@@ -84,6 +86,8 @@ WELCOME_WINDOW_HOURS = int(os.getenv("WELCOME_WINDOW_HOURS", "48"))
 WELCOME_WINDOW_DAYS = 7
 INVITEE_SUB_AUDIT_HOURS = int(os.getenv("INVITEE_SUB_AUDIT_HOURS", "1"))
 AFFILIATE_CURRENT_MONTH_BATCH_LIMIT = int(os.getenv("AFFILIATE_CURRENT_MONTH_BATCH_LIMIT", "500"))
+AFFILIATE_PREVIOUS_WEEK_BATCH_LIMIT = int(os.getenv("AFFILIATE_PREVIOUS_WEEK_BATCH_LIMIT", "500"))
+AFFILIATE_CURRENT_WEEK_BATCH_LIMIT = int(os.getenv("AFFILIATE_CURRENT_WEEK_BATCH_LIMIT", "500"))
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -666,6 +670,42 @@ def affiliate_monthly_settle_scheduled() -> None:
         )
         return
     settle_previous_month_affiliate_rewards(db, now_utc=datetime.now(timezone.utc), batch_limit=1000)
+
+
+def affiliate_weekly_settle_scheduled() -> None:
+    acquired, lock_doc = acquire_scheduler_lock("affiliate_weekly_settle", ttl_seconds=1800)
+    if not acquired:
+        logger.info(
+            "[JOB][AFFILIATE_WEEKLY] lock_not_acquired owner=%s expires_in_s=%s instance=%s",
+            (lock_doc or {}).get("owner"),
+            expires_in_seconds((lock_doc or {}).get("expireAt")),
+            INSTANCE_ID,
+        )
+        return
+    result = issue_previous_week_affiliate_rewards(
+        db,
+        now_utc=datetime.now(timezone.utc),
+        batch_limit=AFFILIATE_PREVIOUS_WEEK_BATCH_LIMIT,
+    )
+    logger.info("[JOB][AFFILIATE_WEEKLY] done result=%s", result)
+
+
+def affiliate_current_week_issue_scheduled() -> None:
+    acquired, lock_doc = acquire_scheduler_lock("affiliate_current_week_issue", ttl_seconds=1500)
+    if not acquired:
+        logger.info(
+            "[JOB][AFFILIATE_CURRENT_WEEK] lock_not_acquired owner=%s expires_in_s=%s instance=%s",
+            (lock_doc or {}).get("owner"),
+            expires_in_seconds((lock_doc or {}).get("expireAt")),
+            INSTANCE_ID,
+        )
+        return
+    result = issue_current_week_affiliate_rewards(
+        db,
+        now_utc=datetime.now(timezone.utc),
+        batch_limit=AFFILIATE_CURRENT_WEEK_BATCH_LIMIT,
+    )
+    logger.info("[JOB][AFFILIATE_CURRENT_WEEK] done result=%s", result)
 
 
 def process_verification_queue_scheduled(batch_limit: int = 50) -> None:
@@ -4021,6 +4061,20 @@ def run_worker():
         trigger=CronTrigger(day=1, hour=0, minute=10, timezone=KL_TZ),
         id="affiliate_monthly_settle",
         name="Affiliate Monthly Settle (Prev Month)",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        affiliate_weekly_settle_scheduled,
+        trigger=CronTrigger(day_of_week="mon", hour=0, minute=15, timezone=KL_TZ),
+        id="affiliate_weekly_settle",
+        name="Affiliate Weekly Settle (Prev Week)",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        affiliate_current_week_issue_scheduled,
+        trigger=CronTrigger(minute="*/30", timezone=KL_TZ),
+        id="affiliate_current_week_issue",
+        name="Affiliate Current Week Issue",
         replace_existing=True,
     )
     scheduler.add_job(
