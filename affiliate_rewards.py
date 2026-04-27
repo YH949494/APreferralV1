@@ -603,6 +603,16 @@ def evaluate_monthly_affiliate_reward(db, *, referrer_id: int, now_utc: datetime
     )
     tier = _tier_for_count(int(qualified_count))
     if not tier:
+        # Count is below T1 threshold — group-access milestone (5 weekly valid refs) is separate
+        # from voucher tiers. T1 requires AFF_T1_THRESHOLD (default 10) monthly qualified refs.
+        logger.info(
+            "[AFFILIATE][BELOW_THRESHOLD] user_id=%s qualified_count=%s t1_threshold=%s year_month=%s"
+            " hint=voucher_requires_monthly_qualified_not_weekly_group_access",
+            int(referrer_id),
+            int(qualified_count),
+            T1_THRESHOLD,
+            yyyymm,
+        )
         return None
     if user_doc.get("blocked"):
         dedup_key = f"AFF:{int(referrer_id)}:{yyyymm}:{tier}"
