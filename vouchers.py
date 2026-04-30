@@ -3236,7 +3236,8 @@ def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None
         if not is_user_eligible_for_drop(user_doc, tg_user or {}, d):
             continue    
 
-        priority = d.get("priority", 100)     
+        priority = d.get("priority", 100)
+        pinned = bool(d.get("pinned", False))
         base = {
             "dropId": drop_id,
             "name": d.get("name"),
@@ -3244,6 +3245,8 @@ def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None
             "endsAt": _as_aware_utc(d.get("endsAt")).isoformat() if d.get("endsAt") else None,
             "isActive": is_active,
             "userClaimed": False,
+            "pinned": pinned,
+            "_pinned": pinned,
             "_priority": priority,
         }
 
@@ -3367,11 +3370,12 @@ def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None
                     )
                 pooled_cards.append(base)
 
-    # Sort: personalised first; then pooled by priority desc, startsAt asc
-    personal_cards.sort(key=lambda x: (-x["_priority"], x["startsAt"]))
-    pooled_cards.sort(key=lambda x: (-x["_priority"], x["startsAt"]))
+    # Sort: pinned first, then by priority desc, then startsAt asc
+    personal_cards.sort(key=lambda x: (not x["_pinned"], -x["_priority"], x["startsAt"] or ""))
+    pooled_cards.sort(key=lambda x: (not x["_pinned"], -x["_priority"], x["startsAt"] or ""))
 
     for card in personal_cards + pooled_cards:
+        card.pop("_pinned", None)
         card.pop("_priority", None)
 
     # Stacked: return all (cap optional)
@@ -4394,10 +4398,8 @@ def api_claim():
     now_ref = now_utc()
     starts_at = _as_aware_utc(drop.get("startsAt"))
     ends_at = _as_aware_utc(drop.get("endsAt"))
-    status_value = str(drop.get("status") or "").strip().lower()
     if (
-        status_value not in ("active", "live")
-        or not is_drop_active(drop, now_ref)
+        not is_drop_active(drop, now_ref)
         or not starts_at
         or not ends_at
         or now_ref < starts_at
@@ -5354,6 +5356,7 @@ def admin_create_drop():
         "startsAt": startsAt,
         "endsAt": endsAt,
         "priority": priority,
+        "pinned": bool(data.get("pinned", False)),
         "visibilityMode": "stacked",
         "status": status
     }

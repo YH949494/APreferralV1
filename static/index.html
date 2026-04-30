@@ -2945,10 +2945,12 @@ Active players win more.
 
       const liveDrops = [];
       const pastDrops = [];
-      drops.forEach((drop) => {
+      drops.forEach((drop, index) => {
         const remaining = Number(drop?.visible_remaining ?? drop?.publicRemainingApprox ?? drop?.remainingApprox ?? 1);
         const isEnded = drop?.isActive === false || (!Number.isNaN(remaining) && remaining <= 0);
-        if (isEnded && !drop?.userClaimed) {
+        // Pinned drops and the primary campaign drop (index 0) always stay at top
+        const isPinned = !!drop?.pinned || index === 0;
+        if (isEnded && !drop?.userClaimed && !isPinned) {
           pastDrops.push(drop);
         } else {
           liveDrops.push(drop);
