@@ -279,7 +279,14 @@ def _issue_affiliate_ledger_from_pool(db, ledger, now_utc: datetime):
             if latest and latest.get("status") == "ISSUED":
                 logger.info("[AFFILIATE][RECONCILE_ISSUED] ledger_id=%s code=%s", ledger_id, latest.get("voucher_code"))
             return latest
-        return latest
+        # When the caller already transitioned the ledger to SETTLING (no-op double-settle),
+        # modified_count==0 is not a concurrency conflict — proceed to claim the voucher.
+        if (latest or {}).get("status") != SETTLING_STATUS:
+            return latest
+        logger.info(
+            "[AFFILIATE][SETTLING_PROCEED] ledger_id=%s user_id=%s tier=%s reason=pre_settled",
+            ledger_id, int(user_id), tier,
+        )
 
     if _has_issued_pool_voucher_for_ledger(db, ledger_id=ledger_id):
         latest = _reconcile_ledger_from_issued_pool(db, ledger_id=ledger_id, now_utc=now_utc) or db.affiliate_ledger.find_one({"_id": ledger_id})
