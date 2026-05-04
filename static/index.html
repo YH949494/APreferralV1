@@ -879,6 +879,24 @@
       color: #9ca3af;
       background: #1f2937;
     }
+
+    .admin-collapse-toggle {
+      width: 100%;
+      margin-top: 12px;
+      text-align: left;
+    }
+
+    .admin-collapse-panel {
+      margin-top: 10px;
+    }
+
+    .admin-monitoring-block {
+      margin-top: 14px;
+      background:#fff;
+      border:1px solid #ddd;
+      border-radius:8px;
+      padding:12px;
+    }
   </style>
 </head>
 <body>
@@ -1017,11 +1035,13 @@
         <button onclick="loadAdminPastWeekAffiliateLeaderboard()">📊 Past Week Affiliate</button>
 
         <div id="adm_drop_container" style="margin-top:18px; text-align:left;">
-          <h4 style="margin-bottom:8px;">🎟️ Voucher Drops</h4>
-          <p style="margin:4px 0 12px 0; color:#666; font-size:13px;">All times are saved in UTC and shown in Kuala Lumpur (UTC+08:00).</p>
+          <button id="admin-voucher-drops-toggle" type="button" class="admin-collapse-toggle"></button>
+          <div id="admin-voucher-drops-panel" class="admin-collapse-panel">
+            <h4 style="margin-bottom:8px;">🎟️ Voucher Drops</h4>
+            <p style="margin:4px 0 12px 0; color:#666; font-size:13px;">All times are saved in UTC and shown in Kuala Lumpur (UTC+08:00).</p>
 
-          <div style="background:#fff; border:1px solid #ddd; border-radius:8px; padding:12px; margin-bottom:16px;">
-            <h5 style="margin:0 0 10px 0;">➕ Create Drop</h5>
+            <div style="background:#fff; border:1px solid #ddd; border-radius:8px; padding:12px; margin-bottom:16px;">
+              <h5 style="margin:0 0 10px 0;">➕ Create Drop</h5>
             <div style="display:flex; flex-wrap:wrap; gap:10px;">
               <input id="adm_name" type="text" placeholder="Campaign name" style="flex:1 1 220px; padding:8px; border-radius:6px; border:1px solid #ccc;">
               <input id="adm_pri" type="number" placeholder="Priority (higher = top)" style="flex:1 1 160px; padding:8px; border-radius:6px; border:1px solid #ccc;">
@@ -1088,11 +1108,11 @@
               <textarea id="adm_wl_text" rows="3" placeholder="Whitelist usernames (optional)" style="width:100%; margin-top:8px; padding:8px; border-radius:6px; border:1px solid #ccc; font-family:monospace;"></textarea>
             </div>
 
-            <button id="adm_create_btn" type="button" style="margin-top:12px;">Create Drop</button>
-          </div>
+              <button id="adm_create_btn" type="button" style="margin-top:12px;">Create Drop</button>
+            </div>
 
-          <div style="background:#fff; border:1px solid #ddd; border-radius:8px; padding:12px; margin-bottom:16px;">
-            <h5 style="margin:0 0 10px 0;">📥 Add to Existing Drop</h5>
+            <div style="background:#fff; border:1px solid #ddd; border-radius:8px; padding:12px; margin-bottom:16px;">
+              <h5 style="margin:0 0 10px 0;">📥 Add to Existing Drop</h5>
             <div style="display:flex; flex-wrap:wrap; gap:10px; align-items:flex-end;">
               <input id="adm_add_drop_id" type="text" placeholder="Drop ID" style="flex:1 1 200px; padding:8px; border-radius:6px; border:1px solid #ccc;">
               <label style="flex:1 1 160px; font-size:12px; color:#555;">Data type
@@ -1113,11 +1133,14 @@
               <input id="adm_add_csv" type="file" accept=".csv,.txt" style="flex:1;">
               <button id="adm_add_parse_btn" type="button">Import CSV</button>
             </div>
-            <button id="adm_add_btn" type="button" style="margin-top:12px;">Add Data</button>
+              <button id="adm_add_btn" type="button" style="margin-top:12px;">Add Data</button>
+            </div>
           </div>
 
-          <div style="overflow-x:auto;">
-            <table id="adm_table" style="width:100%; border-collapse:collapse; font-size:13px;">
+          <div class="admin-monitoring-block">
+            <h5 style="margin:0 0 10px 0;">📋 Existing Drops</h5>
+            <div style="overflow-x:auto;">
+              <table id="adm_table" style="width:100%; border-collapse:collapse; font-size:13px;">
               <thead>
                 <tr style="background:#f7f7f7;">
                   <th style="text-align:left; padding:6px;">Name</th>
@@ -1131,10 +1154,11 @@
               <tbody>
                 <tr><td colspan="6" style="padding:6px;">Loading…</td></tr>
               </tbody>
-            </table>
+              </table>
+            </div>
           </div>
         </div>
-      </div>
+        <button id="admin-affiliate-pools-toggle" type="button" class="admin-collapse-toggle"></button>
         <div id="admin-affiliate-pools" style="display:none; background:#fff; border:1px solid #ddd; border-radius:8px; padding:12px; margin-top:14px;">
           <h5 style="margin:0 0 8px 0;">Affiliate Voucher Pools</h5>
           <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:flex-end;">
@@ -2661,7 +2685,8 @@ Active players win more.
         const isAdmin = adminData.success && adminData.is_admin;
         if (isAdmin) {
           document.getElementById("admin-panel").style.display = "block";
-          document.getElementById("admin-affiliate-pools").style.display = "block";
+          setupAdminCollapse("admin-voucher-drops-toggle", "admin-voucher-drops-panel", "adminCollapse:voucherDrops", "🎟️ Voucher Drops");
+          setupAdminCollapse("admin-affiliate-pools-toggle", "admin-affiliate-pools", "adminCollapse:affiliatePools", "Affiliate Voucher Pools");
           document.getElementById("admin-affiliate-leaderboard-wrap").style.display = "block";
           if (typeof adm_list === "function") {
             adm_list();
@@ -2684,6 +2709,35 @@ Active players win more.
       } catch (err) {
         console.error("❌ Error checking admin or loading voucher:", err);
       }
+    }
+
+    function setupAdminCollapse(buttonId, panelId, storageKey, label) {
+      const button = document.getElementById(buttonId);
+      const panel = document.getElementById(panelId);
+      if (!button || !panel) return;
+
+      const applyState = (open) => {
+        panel.style.display = open ? "block" : "none";
+        button.setAttribute("aria-expanded", open ? "true" : "false");
+        button.textContent = `${label} ${open ? "▾" : "▸"}`;
+      };
+
+      const readOpenState = () => localStorage.getItem(storageKey) === "open";
+
+      if (button.dataset.collapseInitialized === "1") {
+        applyState(readOpenState());
+        return;
+      }
+
+      button.dataset.collapseInitialized = "1";
+      let isOpen = readOpenState();
+      applyState(isOpen);
+
+      button.addEventListener("click", () => {
+        isOpen = !isOpen;
+        localStorage.setItem(storageKey, isOpen ? "open" : "closed");
+        applyState(isOpen);
+      });
     }
 
     function resetVoucherButton() {
