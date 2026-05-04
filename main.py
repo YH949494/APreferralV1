@@ -2141,7 +2141,15 @@ async def process_checkin(user_id, username, region, update=None):
     if update and getattr(update, "message", None):
         await update.message.reply_text(msg)
 
-    return {"success": True, "message": msg}
+    return {
+        "success": True,
+        "message": msg,
+        "base_xp": base_xp,
+        "bonus_xp": bonus_xp,
+        "total_xp": base_xp + bonus_xp,
+        "streak": streak,
+        "streak_label": labels.get(streak, "") if bonus_xp else "",
+    }
 
 @app.route("/api/streak/<int:user_id>")
 def api_streak(user_id):

@@ -961,25 +961,196 @@
       color: #ffffff !important;
       opacity: 1 !important;
     }
+
+    /* ── v2 UI: AP wordmark, core grid, XP toast, region overlay, secondary grid ── */
+
+    .app-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 4px 0 10px;
+    }
+    .ap-wordmark {
+      font-family: var(--font-display);
+      font-size: 18px;
+      font-weight: 800;
+      letter-spacing: 1.2px;
+      line-height: 1;
+    }
+    .ap-wordmark .wm-advant { color: var(--ap-orange); }
+    .ap-wordmark .wm-play   { color: #9a9a9a; }
+    .app-header .user-chip {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      background: var(--bg-card);
+      border: 1px solid var(--border-light);
+      border-radius: 99px;
+      padding: 5px 12px 5px 6px;
+      font-size: 12px;
+      color: var(--text-muted);
+    }
+    .app-header .user-chip .avatar {
+      width: 22px; height: 22px;
+      border-radius: 50%;
+      background: linear-gradient(135deg, var(--ap-orange), #a020f0);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 11px;
+    }
+
+    .core-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      margin: 14px 0;
+    }
+    .core-grid > #checkin-section,
+    .core-grid > #daily-game-section {
+      margin: 0;
+    }
+    .core-grid > #referral-section {
+      grid-column: 1 / -1;
+      margin: 0;
+    }
+
+    .secondary-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 10px;
+      margin: 14px 0;
+    }
+    .sec-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border-light);
+      border-radius: var(--radius-md);
+      padding: 14px 8px;
+      cursor: pointer;
+      transition: border-color 0.15s, transform 0.1s;
+      text-align: center;
+      color: inherit;
+      text-decoration: none;
+      display: block;
+    }
+    .sec-card:hover  { border-color: rgba(255,94,0,0.35); }
+    .sec-card:active { transform: scale(0.97); }
+    .sec-icon { font-size: 22px; display: block; margin-bottom: 6px; }
+    .sec-label { font-size: 11px; font-weight: 600; color: var(--text-muted); line-height: 1.3; }
+
+    #xp-toast {
+      position: fixed;
+      top: 60px;
+      left: 50%;
+      transform: translateX(-50%) translateY(-20px);
+      background: var(--bg-card);
+      border: 1px solid var(--border-strong);
+      border-radius: var(--radius-lg);
+      padding: 14px 22px;
+      text-align: center;
+      z-index: 9000;
+      opacity: 0;
+      transition: opacity 0.25s ease, transform 0.25s ease;
+      pointer-events: none;
+      min-width: 200px;
+      box-shadow: var(--shadow-soft);
+    }
+    #xp-toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+    #xp-toast .xp-amount {
+      font-family: var(--font-display);
+      font-size: 28px; font-weight: 800;
+      color: var(--ap-orange); line-height: 1;
+    }
+    #xp-toast .xp-label { font-size: 12px; color: var(--text-muted); margin-top: 4px; }
+    #xp-toast .xp-streak-badge {
+      display: inline-block;
+      background: rgba(255,94,0,0.15);
+      border: 1px solid var(--border-strong);
+      color: var(--ap-orange-strong);
+      font-size: 10px; font-weight: 700;
+      padding: 2px 8px; border-radius: 99px;
+      margin-top: 6px; letter-spacing: 0.5px;
+    }
+
+    #region-section.region-overlay {
+      position: fixed;
+      inset: 0; margin: 0; padding: 0;
+      background: rgba(0,0,0,0.85);
+      backdrop-filter: blur(6px);
+      -webkit-backdrop-filter: blur(6px);
+      z-index: 8000;
+      border: none; border-radius: 0; box-shadow: none;
+      overflow-y: auto;
+    }
+    #region-section.region-overlay .region-modal-inner {
+      position: absolute;
+      top: 50%; left: 50%;
+      transform: translate(-50%, -50%);
+      width: calc(100% - 36px); max-width: 360px;
+      background: var(--bg-card);
+      border: 1px solid var(--border-strong);
+      border-radius: var(--radius-lg);
+      padding: 24px 22px;
+      box-shadow: var(--shadow-soft);
+    }
+    #region-section.region-overlay .region-modal-inner .section-header { justify-content: center; }
+    #region-section.region-overlay .region-modal-inner #region-select,
+    #region-section.region-overlay .region-modal-inner .btn { width: 100%; }
+    #region-section.region-overlay .region-modal-inner .btn { margin-top: 10px; }
   </style>
 </head>
 <body>
 
+  <!-- ADVANTPLAY wordmark header -->
+  <div class="app-header">
+    <div class="ap-wordmark">
+      <span class="wm-advant">ADVANT</span><span class="wm-play">PLAY</span>
+    </div>
+    <div class="user-chip" id="header-user-chip" style="display:none;">
+      <div class="avatar">👤</div>
+      <span id="header-username"></span>
+    </div>
+  </div>
+
+  <!-- XP toast (shown after successful check-in) -->
+  <div id="xp-toast" role="status" aria-live="polite">
+    <div class="xp-amount" id="xp-toast-amount">+0 XP</div>
+    <div class="xp-label"  id="xp-toast-label">Check-in reward</div>
+    <div class="xp-streak-badge" id="xp-toast-streak" style="display:none;"></div>
+  </div>
+
+  <!-- Region — first-timer modal overlay only -->
+  <div class="section region-overlay" id="region-section" style="display: none;">
+    <div class="region-modal-inner">
+      <div class="section-header">
+        <h3>🌍 Select Your Region</h3>
+      </div>
+      <p class="section-subtext">Select your region to continue. You won’t be asked again.</p>
+      <select id="region-select">
+        <option value="">-- Please choose --</option>
+        <option value="Malaysia">🇲🇾 Malaysia</option>
+        <option value="Thailand">🇹🇭 Thailand</option>
+        <option value="Indonesia">🇮🇩 Indonesia</option>
+        <option value="Other">🌐 Other</option>
+      </select>
+      <button class="btn btn-primary" onclick="setRegion()">Save Region</button>
+      <p id="region-message" class="region-hint"></p>
+    </div>
+  </div>
+
+  <!-- 1. Campaign Rewards — always at top -->
   <div class="section" id="voucher-section" style="display: block;">
     <div class="section-header">
       <h3>🎟️ Campaign Rewards</h3>
       <span class="badge">HOT</span>
     </div>
-    <!-- Claim what’s live now. Limited slots. -->
     <p id="campaign-voucher-message">
       🎁 Surprise vouchers can appear anytime.
       <br>
       Subscribe to our official channel for the next drop.
     </p>
     <button id="campaign-voucher-btn" type="button" class="btn btn-primary" style="display: none;"></button>
-    <div id="claim-error" role="status" aria-live="polite"></div>    
+    <div id="claim-error" role="status" aria-live="polite"></div>
     <div id="campaign-voucher-list"></div>
-    
+
     <div id="campaign-bonus-voucher" style="display: none; margin-top: 16px;">
       <h4>🎉 Campaign Reward</h4>
       <p id="campaign-voucher-code">Coming soon…</p>
@@ -992,6 +1163,48 @@
     </div>
   </div>
 
+  <!-- 2. Core grid: Check-in + Lucky Game (side by side), Referral (full width) -->
+  <div class="core-grid">
+
+    <div class="section" id="checkin-section">
+      <h3>✅ Daily Check-in</h3>
+      <button class="btn btn-primary" onclick="checkIn()">Check In</button>
+      <p id="checkin-result"></p>
+      <p id="checkin-timer" style="color: gray;"></p>
+    </div>
+
+    <div class="section" id="daily-game-section" style="display: block;">
+      <div class="section-header">
+        <h3>🎰 Today’s Lucky Game</h3>
+      </div>
+      <p class="section-subtext">Refreshes daily</p>
+      <div id="daily-game-content" style="font-size:14px; line-height:1.4;">Loading today’s recommendation…</div>
+      <p style="margin-top:8px; font-size:12px; color:#777;">Daily recommendation only</p>
+    </div>
+
+    <div class="section" id="referral-section">
+      <h3>🔗 Invite Friends & Unlock Rewards</h3>
+      <div class="referral-cta-group">
+        <button class="btn btn-primary" onclick="getReferral()">Invite Friends / Get Referral Link</button>
+        <button class="btn btn-ghost" onclick="copyReferral()">📋 Copy to clipboard</button>
+      </div>
+      <p id="referral-link">Click the button to get your link</p>
+      <div class="referral-progress-card" aria-live="polite">
+        <h4>🔗 Referral Progress</h4>
+        <div class="referral-progress-bar">
+          <div class="referral-progress-fill" id="referral-progress-fill"></div>
+        </div>
+        <div class="referral-progress-meta">
+          <div id="referral-progress-count" style="display:none;"></div>
+          <div id="referral-progress-remaining">3 more referrals to unlock +200 XP</div>
+          <div id="referral-progress-next" class="progress-next-reward">Next reward: +200 XP at 3 successful referrals.</div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- 3. Rewards Journey progress guide -->
   <div class="section" id="progress-section" style="display: block;">
     <div class="section-header">
       <h3>🧭 Your Rewards Journey</h3>
@@ -1008,59 +1221,24 @@
     </div>
   </div>
 
-  <div class="section" id="region-section" style="display: none;">
-    <div class="section-header">
-      <h3>🌍 Select Your Region</h3>
-    </div>
-    <p class="section-subtext">Select your region to continue.</p>
-    <select id="region-select">
-      <option value="">-- Please choose --</option>
-      <option value="Malaysia">🇲🇾 Malaysia</option>
-      <option value="Thailand">🇹🇭 Thailand</option>
-      <option value="Indonesia">🇮🇩 Indonesia</option>
-      <option value="Other">🌐 Other</option>
-    </select>
-    <button class="btn btn-primary" onclick="setRegion()">Save Region</button>
-    <p id="region-message" class="region-hint"></p>
+  <!-- 4. Secondary quick-action grid -->
+  <div class="secondary-grid">
+    <a href="#" class="sec-card" onclick="event.preventDefault(); toggleLeaderboardSection();">
+      <span class="sec-icon">🏆</span>
+      <div class="sec-label">Weekly<br>Leaderboard</div>
+    </a>
+    <a href="https://t.me/advantplayofficial" target="_blank" rel="noopener" class="sec-card">
+      <span class="sec-icon">📣</span>
+      <div class="sec-label">Official<br>Channel</div>
+    </a>
+    <a href="#" id="infoHubBtn" class="sec-card" onclick="event.preventDefault();">
+      <span class="sec-icon">ℹ️</span>
+      <div class="sec-label">Info<br>Hub</div>
+    </a>
   </div>
 
-  <div class="section" id="checkin-section">
-    <h3>✅ Daily Check-in</h3>
-    <button class="btn btn-primary" onclick="checkIn()">Check In</button>
-    <p id="checkin-result"></p>
-    <p id="checkin-timer" style="color: gray;"></p>
-  </div>
-
-  <div class="section" id="referral-section">
-    <h3>🔗 Invite Friends & Unlock Rewards</h3>
-    <div class="referral-cta-group">
-      <button class="btn btn-primary" onclick="getReferral()">Invite Friends / Get Referral Link</button>
-      <button class="btn btn-ghost" onclick="copyReferral()">📋 Copy to clipboard</button>
-    </div>
-    <p id="referral-link">Click the button to get your link</p>
-    <div class="referral-progress-card" aria-live="polite">
-      <h4>🔗 Referral Progress</h4>
-      <div class="referral-progress-bar">
-        <div class="referral-progress-fill" id="referral-progress-fill"></div>
-      </div>
-      <div class="referral-progress-meta">
-        <div id="referral-progress-count" style="display:none;"></div>
-        <div id="referral-progress-remaining">3 more referrals to unlock +200 XP</div>
-        <div id="referral-progress-next" class="progress-next-reward">Next reward: +200 XP at 3 successful referrals.</div>
-      </div>
-    </div>
-  </div>
-
-  <div class="section" id="daily-game-section" style="display: block;">
-    <div class="section-header">
-      <h3>🎰 Today’s Lucky Game</h3>
-    </div>
-    <p class="section-subtext">Refreshes daily</p>
-    <div id="daily-game-content" style="font-size:14px; line-height:1.4;">Loading today’s recommendation…</div>
-    <p style="margin-top:8px; font-size:12px; color:#777;">Daily recommendation only</p>
-  </div>
-
-  <div class="section" id="leaderboard-section">
+  <!-- Leaderboard — toggled by secondary grid card -->
+  <div class="section" id="leaderboard-section" style="display:none;">
     <h3>🏆 Weekly Leaderboard</h3>
     <button class="btn btn-ghost" onclick="loadLeaderboard({ forceRefresh: true })">View Leaderboard</button>
     <div style="display:flex;gap:8px;align-items:center;font-size:12px;color:#666;margin-top:6px;flex-wrap:wrap;">
@@ -1077,17 +1255,9 @@
     <button id="leaderboard-retry" type="button" class="btn btn-ghost" style="display:none;margin-top:8px;">Retry</button>
   </div>
 
-  <div class="section" id="more-section">
-    <div class="section-header">
-      <h3>➕ More</h3>
-    </div>
+  <!-- More / Admin — hidden by default, revealed on admin auth -->
+  <div class="section" id="more-section" style="display:none;">
     <div class="more-grid">
-      <div class="more-actions">
-        <a href="https://t.me/advantplayofficial" target="_blank" class="btn btn-ghost">📣 Official Channel</a>
-        <button type="button" class="btn btn-ghost" onclick="toggleLeaderboardSection()">🏆 Weekly Leaderboard</button>
-        <button id="infoHubBtn" type="button" class="btn btn-ghost">ℹ️ Info Hub</button>
-      </div>
-      
       <button id="setAdminSecretBtn" class="btn btn-ghost" style="display:none;">Enter Password</button>
 
       <div class="section" id="admin-panel">
@@ -1566,6 +1736,11 @@
     if (!CURRENT_USERNAME) {
       const qs = new URLSearchParams(location.search);
       CURRENT_USERNAME = qs.get("username") || "";
+    }
+    if (CURRENT_USERNAME) {
+      const chip = document.getElementById("header-user-chip");
+      const label = document.getElementById("header-username");
+      if (chip && label) { label.textContent = "@" + CURRENT_USERNAME; chip.style.display = "flex"; }
     }
   </script>
   
@@ -2340,7 +2515,6 @@
       const checkinSection = document.getElementById("checkin-section");
       const referralSection = document.getElementById("referral-section");
       const leaderboardSection = document.getElementById("leaderboard-section");
-      const moreSection = document.getElementById("more-section");
 
       if (voucherSection) voucherSection.style.display = "block";
       if (progressSection) progressSection.style.display = "block";
@@ -2350,14 +2524,12 @@
         if (checkinSection) checkinSection.style.display = "block";
         if (referralSection) referralSection.style.display = window.__didCheckinThisSession ? "block" : "none";
         if (leaderboardSection) leaderboardSection.style.display = "none";
-        if (moreSection) moreSection.style.display = "block";
       } else {
         if (regionSection) regionSection.style.display = "block";
         if (regionMessage) regionMessage.textContent = "Select your region to continue.";
         if (checkinSection) checkinSection.style.display = "none";
         if (referralSection) referralSection.style.display = "none";
         if (leaderboardSection) leaderboardSection.style.display = "none";
-        if (moreSection) moreSection.style.display = "none";
       }
 
       updateProgressJourney();
@@ -2395,6 +2567,25 @@
       update();
     }
 
+    let _xpToastTimer = null;
+    function showXpToast(totalXp, streak, streakLabel) {
+      const toast = document.getElementById("xp-toast");
+      if (!toast) return;
+      document.getElementById("xp-toast-amount").textContent = "+" + totalXp + " XP";
+      document.getElementById("xp-toast-label").textContent =
+        streak > 1 ? "🔥 " + streak + "-day streak" : "Daily check-in reward";
+      const badge = document.getElementById("xp-toast-streak");
+      if (streakLabel) {
+        badge.textContent = streakLabel;
+        badge.style.display = "inline-block";
+      } else {
+        badge.style.display = "none";
+      }
+      toast.classList.add("show");
+      if (_xpToastTimer) clearTimeout(_xpToastTimer);
+      _xpToastTimer = setTimeout(() => toast.classList.remove("show"), 3500);
+    }
+
     async function checkIn() {
       if (!hasRegionSelected()) {
         alert("❌ Please select and lock your region before check-in.");
@@ -2424,6 +2615,7 @@
             referralSection.style.display = "block";
             referralSection.scrollIntoView({ behavior: "smooth", block: "start" });
           }
+          showXpToast(data.total_xp || data.base_xp || 20, data.streak || 1, data.streak_label || "");
           loadLeaderboard();
         }
 
@@ -2747,6 +2939,7 @@ Active players win more.
 
         const isAdmin = adminData.success && adminData.is_admin;
         if (isAdmin) {
+          const _ms = document.getElementById("more-section"); if (_ms) _ms.style.display = "block";
           document.getElementById("admin-panel").style.display = "block";
           setupAdminCollapse("admin-voucher-drops-toggle", "admin-voucher-drops-panel", "adminCollapse:voucherDrops", "🎟️ Voucher Drops");
           setupAdminCollapse("admin-affiliate-pools-toggle", "admin-affiliate-pools", "adminCollapse:affiliatePools", "Affiliate Voucher Pools");
@@ -4805,6 +4998,7 @@ ${referral}`;
 
       if (!hasInit) {
         if (isAdminMode) {
+          const _ms = document.getElementById("more-section"); if (_ms) _ms.style.display = "block";
           document.getElementById("admin-panel").style.display = "block";
           setupAdminCollapse("admin-affiliate-pools-toggle", "admin-affiliate-pools", "adminCollapse:affiliatePools", "Affiliate Voucher Pools");
           setupAdminCollapse("admin-voucher-drops-toggle", "admin-voucher-drops-panel", "adminCollapse:voucherDrops", "🎟️ Voucher Drops");
@@ -4844,6 +5038,7 @@ ${referral}`;
       }
 
       if (isAdminMode) {
+        const _ms = document.getElementById("more-section"); if (_ms) _ms.style.display = "block";
         document.getElementById("admin-panel").style.display = "block";
         setupAdminCollapse("admin-affiliate-pools-toggle", "admin-affiliate-pools", "adminCollapse:affiliatePools", "Affiliate Voucher Pools");
         setupAdminCollapse("admin-voucher-drops-toggle", "admin-voucher-drops-panel", "adminCollapse:voucherDrops", "🎟️ Voucher Drops");
