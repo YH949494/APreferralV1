@@ -716,6 +716,7 @@
     /* Light admin sections */
     #admin-panel #adm_drop_container,
     #admin-affiliate-pools,
+    #admin-affiliate-leaderboard-wrap,
     #aff_pool_summary,
     #aff_pending,
     #aff_kpis_wrap {
@@ -737,7 +738,10 @@
     #admin-affiliate-pools label,
     #admin-affiliate-pools small,
     #admin-affiliate-pools li,
-    #admin-affiliate-pools pre {
+    #admin-affiliate-pools pre,
+    #admin-affiliate-leaderboard-wrap h5,
+    #admin-affiliate-leaderboard-wrap th,
+    #admin-affiliate-leaderboard-wrap td {
       color: #111827 !important;
     }
 
@@ -750,7 +754,8 @@
     #admin-affiliate-pools span[style],
     #admin-affiliate-pools label[style],
     #admin-affiliate-pools small[style],
-    #admin-affiliate-pools .text-muted {
+    #admin-affiliate-pools .text-muted,
+    #admin-affiliate-leaderboard-wrap .leaderboard-empty {
       color: #4b5563 !important;
     }
 
@@ -875,17 +880,95 @@
       background: #1f2937;
     }
 
-    /* ============================================================
-       v2 LAYOUT — AP wordmark, core grid, XP toast, region overlay
-       ============================================================ */
+    .admin-collapse-toggle {
+      width: 100%;
+      margin-top: 12px;
+      text-align: left;
+    }
 
-    /* App header with AdvantPlay wordmark */
+    .admin-collapse-panel {
+      margin-top: 10px;
+    }
+
+    .admin-monitoring-block {
+      margin-top: 14px;
+      background:#fff;
+      border:1px solid #ddd;
+      border-radius:8px;
+      padding:12px;
+    }
+
+    /* Existing Drops monitoring table: force readable light-card theme */
+    #admin-panel .admin-monitoring-block {
+      background: #ffffff !important;
+      color: #111827 !important;
+    }
+
+    #admin-panel .admin-monitoring-block h5 {
+      color: #111827 !important;
+      opacity: 1 !important;
+    }
+
+    #admin-panel .admin-monitoring-block #adm_table {
+      background: #ffffff !important;
+      color: #111827 !important;
+      opacity: 1 !important;
+    }
+
+    #admin-panel .admin-monitoring-block #adm_table thead,
+    #admin-panel .admin-monitoring-block #adm_table thead tr {
+      background: #e5e7eb !important;
+      color: #111827 !important;
+      opacity: 1 !important;
+    }
+
+    #admin-panel .admin-monitoring-block #adm_table tbody,
+    #admin-panel .admin-monitoring-block #adm_table tbody tr {
+      background: #ffffff !important;
+      color: #111827 !important;
+      opacity: 1 !important;
+    }
+
+    #admin-panel .admin-monitoring-block #adm_table tbody tr:nth-child(even) {
+      background: #f9fafb !important;
+    }
+
+    #admin-panel .admin-monitoring-block #adm_table th,
+    #admin-panel .admin-monitoring-block #adm_table td,
+    #admin-panel .admin-monitoring-block #adm_table th *,
+    #admin-panel .admin-monitoring-block #adm_table td * {
+      color: #111827 !important;
+      opacity: 1 !important;
+      text-shadow: none !important;
+    }
+
+    #admin-panel .admin-monitoring-block #adm_table a,
+    #admin-panel .admin-monitoring-block #adm_table code {
+      color: #0f172a !important;
+      opacity: 1 !important;
+    }
+
+    #admin-panel .admin-monitoring-block #adm_table .muted,
+    #admin-panel .admin-monitoring-block #adm_table [style*="color:#666"],
+    #admin-panel .admin-monitoring-block #adm_table [style*="color: #666"],
+    #admin-panel .admin-monitoring-block #adm_table [style*="opacity"] {
+      color: #374151 !important;
+      opacity: 1 !important;
+    }
+
+    /* Keep table action buttons readable */
+    #admin-panel .admin-monitoring-block #adm_table button {
+      color: #ffffff !important;
+      opacity: 1 !important;
+    }
+
+    /* ── v2 UI: AP wordmark, core grid, XP toast, region overlay, secondary grid ── */
+
     .app-header {
       display: flex;
       align-items: center;
       justify-content: space-between;
       padding: 4px 0 10px;
-      margin-bottom: 4px;
     }
     .ap-wordmark {
       font-family: var(--font-display);
@@ -915,7 +998,6 @@
       font-size: 11px;
     }
 
-    /* Core action grid (check-in + lucky game side-by-side, referral full-width) */
     .core-grid {
       display: grid;
       grid-template-columns: 1fr 1fr;
@@ -925,14 +1007,12 @@
     .core-grid > #checkin-section,
     .core-grid > #daily-game-section {
       margin: 0;
-      padding: 16px 15px;
     }
     .core-grid > #referral-section {
       grid-column: 1 / -1;
       margin: 0;
     }
 
-    /* Secondary grid (leaderboard / channel / info hub) */
     .secondary-grid {
       display: grid;
       grid-template-columns: 1fr 1fr 1fr;
@@ -954,14 +1034,8 @@
     .sec-card:hover  { border-color: rgba(255,94,0,0.35); }
     .sec-card:active { transform: scale(0.97); }
     .sec-icon { font-size: 22px; display: block; margin-bottom: 6px; }
-    .sec-label {
-      font-size: 11px;
-      font-weight: 600;
-      color: var(--text-muted);
-      line-height: 1.3;
-    }
+    .sec-label { font-size: 11px; font-weight: 600; color: var(--text-muted); line-height: 1.3; }
 
-    /* XP toast notification */
     #xp-toast {
       position: fixed;
       top: 60px;
@@ -979,57 +1053,38 @@
       min-width: 200px;
       box-shadow: var(--shadow-soft);
     }
-    #xp-toast.show {
-      opacity: 1;
-      transform: translateX(-50%) translateY(0);
-    }
+    #xp-toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
     #xp-toast .xp-amount {
       font-family: var(--font-display);
-      font-size: 28px;
-      font-weight: 800;
-      color: var(--ap-orange);
-      line-height: 1;
+      font-size: 28px; font-weight: 800;
+      color: var(--ap-orange); line-height: 1;
     }
-    #xp-toast .xp-label {
-      font-size: 12px;
-      color: var(--text-muted);
-      margin-top: 4px;
-    }
+    #xp-toast .xp-label { font-size: 12px; color: var(--text-muted); margin-top: 4px; }
     #xp-toast .xp-streak-badge {
       display: inline-block;
       background: rgba(255,94,0,0.15);
       border: 1px solid var(--border-strong);
       color: var(--ap-orange-strong);
-      font-size: 10px;
-      font-weight: 700;
-      padding: 2px 8px;
-      border-radius: 99px;
-      margin-top: 6px;
-      letter-spacing: 0.5px;
+      font-size: 10px; font-weight: 700;
+      padding: 2px 8px; border-radius: 99px;
+      margin-top: 6px; letter-spacing: 0.5px;
     }
 
-    /* Region select as modal overlay (first-timer only) */
     #region-section.region-overlay {
       position: fixed;
-      inset: 0;
-      margin: 0;
-      padding: 0;
+      inset: 0; margin: 0; padding: 0;
       background: rgba(0,0,0,0.85);
       backdrop-filter: blur(6px);
       -webkit-backdrop-filter: blur(6px);
       z-index: 8000;
-      border: none;
-      border-radius: 0;
-      box-shadow: none;
+      border: none; border-radius: 0; box-shadow: none;
       overflow-y: auto;
     }
     #region-section.region-overlay .region-modal-inner {
       position: absolute;
-      top: 50%;
-      left: 50%;
+      top: 50%; left: 50%;
       transform: translate(-50%, -50%);
-      width: calc(100% - 36px);
-      max-width: 360px;
+      width: calc(100% - 36px); max-width: 360px;
       background: var(--bg-card);
       border: 1px solid var(--border-strong);
       border-radius: var(--radius-lg);
@@ -1044,31 +1099,31 @@
 </head>
 <body>
 
-  <!-- App header with AdvantPlay wordmark -->
+  <!-- ADVANTPLAY wordmark header -->
   <div class="app-header">
     <div class="ap-wordmark">
       <span class="wm-advant">ADVANT</span><span class="wm-play">PLAY</span>
     </div>
     <div class="user-chip" id="header-user-chip" style="display:none;">
       <div class="avatar">👤</div>
-      <span id="header-username">@user</span>
+      <span id="header-username"></span>
     </div>
   </div>
 
-  <!-- XP toast notification (shown after check-in) -->
+  <!-- XP toast (shown after successful check-in) -->
   <div id="xp-toast" role="status" aria-live="polite">
     <div class="xp-amount" id="xp-toast-amount">+0 XP</div>
-    <div class="xp-label" id="xp-toast-label">Check-in reward</div>
+    <div class="xp-label"  id="xp-toast-label">Check-in reward</div>
     <div class="xp-streak-badge" id="xp-toast-streak" style="display:none;"></div>
   </div>
 
-  <!-- Region selection — first-timer modal overlay -->
+  <!-- Region — first-timer modal overlay only -->
   <div class="section region-overlay" id="region-section" style="display: none;">
     <div class="region-modal-inner">
       <div class="section-header">
         <h3>🌍 Select Your Region</h3>
       </div>
-      <p class="section-subtext">Select your region to continue. You won't be asked again.</p>
+      <p class="section-subtext">Select your region to continue. You won’t be asked again.</p>
       <select id="region-select">
         <option value="">-- Please choose --</option>
         <option value="Malaysia">🇲🇾 Malaysia</option>
@@ -1108,7 +1163,7 @@
     </div>
   </div>
 
-  <!-- 2. Core Actions: Check-in + Lucky Game (side by side), Referral (full-width) -->
+  <!-- 2. Core grid: Check-in + Lucky Game (side by side), Referral (full width) -->
   <div class="core-grid">
 
     <div class="section" id="checkin-section">
@@ -1149,7 +1204,7 @@
 
   </div>
 
-  <!-- 3. Progress Guide -->
+  <!-- 3. Rewards Journey progress guide -->
   <div class="section" id="progress-section" style="display: block;">
     <div class="section-header">
       <h3>🧭 Your Rewards Journey</h3>
@@ -1166,7 +1221,7 @@
     </div>
   </div>
 
-  <!-- 4. Secondary Quick Actions: Leaderboard / Channel / Info Hub -->
+  <!-- 4. Secondary quick-action grid -->
   <div class="secondary-grid">
     <a href="#" class="sec-card" onclick="event.preventDefault(); toggleLeaderboardSection();">
       <span class="sec-icon">🏆</span>
@@ -1182,7 +1237,7 @@
     </a>
   </div>
 
-  <!-- Leaderboard section — hidden by default, toggled from secondary grid -->
+  <!-- Leaderboard — toggled by secondary grid card -->
   <div class="section" id="leaderboard-section" style="display:none;">
     <h3>🏆 Weekly Leaderboard</h3>
     <button class="btn btn-ghost" onclick="loadLeaderboard({ forceRefresh: true })">View Leaderboard</button>
@@ -1200,6 +1255,7 @@
     <button id="leaderboard-retry" type="button" class="btn btn-ghost" style="display:none;margin-top:8px;">Retry</button>
   </div>
 
+  <!-- More / Admin — hidden by default, revealed on admin auth -->
   <div class="section" id="more-section" style="display:none;">
     <div class="more-grid">
       <button id="setAdminSecretBtn" class="btn btn-ghost" style="display:none;">Enter Password</button>
@@ -1210,21 +1266,14 @@
         <button onclick="viewJoinRequests()">📥 View Join Requests</button>
         <button onclick="loadPreviousLeaderboard()">🏆 View Past Leaderboard</button>
         <button onclick="openVoucherModal()">🎁 Create Bonus Voucher</button>
-        <div style="margin-top:12px; background:#fff; border:1px solid #ddd; border-radius:8px; padding:12px;">
-          <h5 style="margin:0 0 8px 0;">3. RETENTION</h5>
-          <div style="display:flex; gap:8px; flex-wrap:wrap;">
-            <button type="button" onclick="loadRetentionKpis()">Load Retention KPIs</button>
-            <button type="button" onclick="exportRetentionKpisCsv()">Export CSV</button>
-          </div>
-          <div id="retention_kpis_wrap" style="margin-top:8px; overflow:auto;"></div>
-        </div>
-
         <div id="adm_drop_container" style="margin-top:18px; text-align:left;">
-          <h4 style="margin-bottom:8px;">🎟️ Voucher Drops</h4>
-          <p style="margin:4px 0 12px 0; color:#666; font-size:13px;">All times are saved in UTC and shown in Kuala Lumpur (UTC+08:00).</p>
+          <button id="admin-voucher-drops-toggle" type="button" class="admin-collapse-toggle"></button>
+          <div id="admin-voucher-drops-panel" class="admin-collapse-panel">
+            <h4 style="margin-bottom:8px;">🎟️ Voucher Drops</h4>
+            <p style="margin:4px 0 12px 0; color:#666; font-size:13px;">All times are saved in UTC and shown in Kuala Lumpur (UTC+08:00).</p>
 
-          <div style="background:#fff; border:1px solid #ddd; border-radius:8px; padding:12px; margin-bottom:16px;">
-            <h5 style="margin:0 0 10px 0;">➕ Create Drop</h5>
+            <div style="background:#fff; border:1px solid #ddd; border-radius:8px; padding:12px; margin-bottom:16px;">
+              <h5 style="margin:0 0 10px 0;">➕ Create Drop</h5>
             <div style="display:flex; flex-wrap:wrap; gap:10px;">
               <input id="adm_name" type="text" placeholder="Campaign name" style="flex:1 1 220px; padding:8px; border-radius:6px; border:1px solid #ccc;">
               <input id="adm_pri" type="number" placeholder="Priority (higher = top)" style="flex:1 1 160px; padding:8px; border-radius:6px; border:1px solid #ccc;">
@@ -1291,11 +1340,11 @@
               <textarea id="adm_wl_text" rows="3" placeholder="Whitelist usernames (optional)" style="width:100%; margin-top:8px; padding:8px; border-radius:6px; border:1px solid #ccc; font-family:monospace;"></textarea>
             </div>
 
-            <button id="adm_create_btn" type="button" style="margin-top:12px;">Create Drop</button>
-          </div>
+              <button id="adm_create_btn" type="button" style="margin-top:12px;">Create Drop</button>
+            </div>
 
-          <div style="background:#fff; border:1px solid #ddd; border-radius:8px; padding:12px; margin-bottom:16px;">
-            <h5 style="margin:0 0 10px 0;">📥 Add to Existing Drop</h5>
+            <div style="background:#fff; border:1px solid #ddd; border-radius:8px; padding:12px; margin-bottom:16px;">
+              <h5 style="margin:0 0 10px 0;">📥 Add to Existing Drop</h5>
             <div style="display:flex; flex-wrap:wrap; gap:10px; align-items:flex-end;">
               <input id="adm_add_drop_id" type="text" placeholder="Drop ID" style="flex:1 1 200px; padding:8px; border-radius:6px; border:1px solid #ccc;">
               <label style="flex:1 1 160px; font-size:12px; color:#555;">Data type
@@ -1316,28 +1365,12 @@
               <input id="adm_add_csv" type="file" accept=".csv,.txt" style="flex:1;">
               <button id="adm_add_parse_btn" type="button">Import CSV</button>
             </div>
-            <button id="adm_add_btn" type="button" style="margin-top:12px;">Add Data</button>
+              <button id="adm_add_btn" type="button" style="margin-top:12px;">Add Data</button>
+            </div>
           </div>
 
-          <div style="overflow-x:auto;">
-            <table id="adm_table" style="width:100%; border-collapse:collapse; font-size:13px;">
-              <thead>
-                <tr style="background:#f7f7f7;">
-                  <th style="text-align:left; padding:6px;">Name</th>
-                  <th style="padding:6px;">Type</th>
-                  <th style="padding:6px;">Status</th>
-                  <th style="padding:6px;">Window (KL)</th>
-                  <th style="padding:6px;">Stats</th>
-                  <th style="padding:6px;">Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr><td colspan="6" style="padding:6px;">Loading…</td></tr>
-              </tbody>
-            </table>
-          </div>
         </div>
-      </div>
+        <button id="admin-affiliate-pools-toggle" type="button" class="admin-collapse-toggle"></button>
         <div id="admin-affiliate-pools" style="display:none; background:#fff; border:1px solid #ddd; border-radius:8px; padding:12px; margin-top:14px;">
           <h5 style="margin:0 0 8px 0;">Affiliate Voucher Pools</h5>
           <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:flex-end;">
@@ -1365,6 +1398,31 @@
             <h5 style="margin:0 0 8px 0;">Affiliate KPI (Daily)</h5>
             <button type="button" onclick="affLoadDailyKpis()">Load last 14 days</button>
             <div id="aff_kpis_wrap" style="margin-top:8px; overflow:auto;"></div>
+          </div>
+        </div>
+        <button id="admin-past-affiliate-toggle" type="button" class="admin-collapse-toggle"></button>
+        <div id="admin-affiliate-leaderboard-wrap" style="display:none; background:#fff; border:1px solid #ddd; border-radius:8px; padding:12px; margin-top:14px; overflow-x:auto;">
+          <h5 style="margin:0 0 8px 0;">📊 Past Week Affiliate Leaderboard</h5>
+          <div id="admin-affiliate-leaderboard-output">Loading…</div>
+        </div>
+        <div class="admin-monitoring-block">
+          <h5 style="margin:0 0 10px 0;">📋 Existing Drops</h5>
+          <div style="overflow-x:auto;">
+            <table id="adm_table" style="width:100%; border-collapse:collapse; font-size:13px;">
+            <thead>
+              <tr style="background:#f7f7f7;">
+                <th style="text-align:left; padding:6px;">Name</th>
+                <th style="padding:6px;">Type</th>
+                <th style="padding:6px;">Status</th>
+                <th style="padding:6px;">Window (KL)</th>
+                <th style="padding:6px;">Stats</th>
+                <th style="padding:6px;">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td colspan="6" style="padding:6px;">Loading…</td></tr>
+            </tbody>
+            </table>
           </div>
         </div>
       </div>
@@ -2883,7 +2941,13 @@ Active players win more.
         if (isAdmin) {
           const _ms = document.getElementById("more-section"); if (_ms) _ms.style.display = "block";
           document.getElementById("admin-panel").style.display = "block";
-          document.getElementById("admin-affiliate-pools").style.display = "block";
+          setupAdminCollapse("admin-voucher-drops-toggle", "admin-voucher-drops-panel", "adminCollapse:voucherDrops", "🎟️ Voucher Drops");
+          setupAdminCollapse("admin-affiliate-pools-toggle", "admin-affiliate-pools", "adminCollapse:affiliatePools", "Affiliate Voucher Pools");
+          setupAdminCollapse("admin-past-affiliate-toggle", "admin-affiliate-leaderboard-wrap", "adminCollapse:pastAffiliate", "📊 Past Week Affiliate", () => {
+            if (typeof loadAdminPastWeekAffiliateLeaderboard === "function") {
+              loadAdminPastWeekAffiliateLeaderboard();
+            }
+          });
           if (typeof adm_list === "function") {
             adm_list();
           }
@@ -2904,6 +2968,43 @@ Active players win more.
       } catch (err) {
         console.error("❌ Error checking admin or loading voucher:", err);
       }
+    }
+
+    function setupAdminCollapse(buttonId, panelId, storageKey, label, onOpen) {
+      const button = document.getElementById(buttonId);
+      const panel = document.getElementById(panelId);
+      if (!button || !panel) return;
+
+      const maybeLoad = () => {
+        if (typeof onOpen !== "function") return;
+        if (button.dataset.collapseLoaded === "1") return;
+        button.dataset.collapseLoaded = "1";
+        onOpen();
+      };
+
+      const applyState = (open) => {
+        panel.style.display = open ? "block" : "none";
+        button.setAttribute("aria-expanded", open ? "true" : "false");
+        button.textContent = `${label} ${open ? "▾" : "▸"}`;
+        if (open) maybeLoad();
+      };
+
+      const readOpenState = () => localStorage.getItem(storageKey) === "open";
+
+      if (button.dataset.collapseInitialized === "1") {
+        applyState(readOpenState());
+        return;
+      }
+
+      button.dataset.collapseInitialized = "1";
+      let isOpen = readOpenState();
+      applyState(isOpen);
+
+      button.addEventListener("click", () => {
+        isOpen = !isOpen;
+        localStorage.setItem(storageKey, isOpen ? "open" : "closed");
+        applyState(isOpen);
+      });
     }
 
     function resetVoucherButton() {
@@ -4012,6 +4113,40 @@ function setLeaderboardMeta(ts, { isStale = false } = {}) {
       }
     }
 
+    async function loadAdminPastWeekAffiliateLeaderboard() {
+      const wrap = document.getElementById("admin-affiliate-leaderboard-wrap");
+      const out = document.getElementById("admin-affiliate-leaderboard-output");
+      if (!wrap || !out) return;
+      wrap.style.display = "block";
+      out.innerHTML = '<div class="leaderboard-empty">Loading past week affiliate leaderboard…</div>';
+      try {
+        const listUrl = new URL(`${API_BASE}/api/leaderboard/affiliate/snapshots`);
+        listUrl.searchParams.set("limit", "1");
+        if (userId) listUrl.searchParams.set("user_id", userId);
+        const listRes = await fetch(listUrl.toString());
+        if (!listRes.ok) throw new Error(`HTTP ${listRes.status}`);
+        const listData = await listRes.json();
+        const items = Array.isArray(listData?.items) ? listData.items : [];
+        if (!items.length) {
+          out.innerHTML = '<div class="leaderboard-empty">No past week snapshot available yet.</div>';
+          return;
+        }
+        const weekItem = items[0];
+        const weekKey = weekItem.week_key;
+        const snapUrl = new URL(`${API_BASE}/api/leaderboard/affiliate/snapshot`);
+        snapUrl.searchParams.set("week_key", weekKey);
+        if (userId) snapUrl.searchParams.set("user_id", userId);
+        const snapRes = await fetch(snapUrl.toString());
+        if (!snapRes.ok) throw new Error(`HTTP ${snapRes.status}`);
+        const snapData = await snapRes.json();
+        const rows = Array.isArray(snapData?.entries) ? snapData.entries : [];
+        const meta = `${weekItem.week_start_local || weekKey} – ${weekItem.week_end_local || ""}`;
+        out.innerHTML = renderAffiliateRows(rows, { isAdmin: true, snapshotMeta: meta });
+      } catch (err) {
+        out.innerHTML = `<div class="leaderboard-empty">Error loading past week affiliate leaderboard: ${escapeHtml(String(err.message || err))}</div>`;
+      }
+    }
+
     function getLeaderboardName(row, { withCrown = true } = {}) {
       const baseName = (row?.username || row?.first_name || row?.user_id || "Anonymous")
         .toString()
@@ -4829,11 +4964,14 @@ ${referral}`;
         + `<td style="padding:6px; border-bottom:1px solid #eee;">${escapeHtml(r.cohort_month || "")}</td>`
         + `<td style="padding:6px; border-bottom:1px solid #eee;">${Number(r.cohort_size || 0)}</td>`
         + `<td style="padding:6px; border-bottom:1px solid #eee;">${_retFmt(r.d7_retention_rate, r.d7_retained, r.d7_eligible)}</td>`
+        + `<td style="padding:6px; border-bottom:1px solid #eee;">${_retFmt(r.d7_claim_retention_rate, r.d7_claim_retained, r.d7_eligible)}</td>`
         + `<td style="padding:6px; border-bottom:1px solid #eee;">${_retFmt(r.d14_retention_rate, r.d14_retained, r.d14_eligible)}</td>`
+        + `<td style="padding:6px; border-bottom:1px solid #eee;">${_retFmt(r.d14_claim_retention_rate, r.d14_claim_retained, r.d14_eligible)}</td>`
         + `<td style="padding:6px; border-bottom:1px solid #eee;">${_retFmt(r.d30_retention_rate, r.d30_retained, r.d30_eligible)}</td>`
+        + `<td style="padding:6px; border-bottom:1px solid #eee;">${_retFmt(r.d30_claim_retention_rate, r.d30_claim_retained, r.d30_eligible)}</td>`
         + `<td style="padding:6px; border-bottom:1px solid #eee;">${escapeHtml(r.diagnosis || "")}</td>`
         + `</tr>`).join("");
-      wrap.innerHTML = `<table style="width:100%; border-collapse:collapse; font-size:12px;"><thead><tr style="background:#fafafa;"><th style="padding:6px; text-align:left;">Cohort Month</th><th style="padding:6px; text-align:left;">Users</th><th style="padding:6px; text-align:left;">D7</th><th style="padding:6px; text-align:left;">D14</th><th style="padding:6px; text-align:left;">D30</th><th style="padding:6px; text-align:left;">Diagnosis</th></tr></thead><tbody>${htmlRows}</tbody></table>`;
+      wrap.innerHTML = `<table style="width:100%; border-collapse:collapse; font-size:12px;"><thead><tr style="background:#fafafa;"><th style="padding:6px; text-align:left;">Cohort Month</th><th style="padding:6px; text-align:left;">Users</th><th style="padding:6px; text-align:left;">D7</th><th style="padding:6px; text-align:left;">D7 Claim</th><th style="padding:6px; text-align:left;">D14</th><th style="padding:6px; text-align:left;">D14 Claim</th><th style="padding:6px; text-align:left;">D30</th><th style="padding:6px; text-align:left;">D30 Claim</th><th style="padding:6px; text-align:left;">Diagnosis</th></tr></thead><tbody>${htmlRows}</tbody></table>`;
     }
 
     async function loadRetentionKpis(months = 12) {
@@ -4862,7 +5000,13 @@ ${referral}`;
         if (isAdminMode) {
           const _ms = document.getElementById("more-section"); if (_ms) _ms.style.display = "block";
           document.getElementById("admin-panel").style.display = "block";
-          document.getElementById("admin-affiliate-pools").style.display = "block";
+          setupAdminCollapse("admin-affiliate-pools-toggle", "admin-affiliate-pools", "adminCollapse:affiliatePools", "Affiliate Voucher Pools");
+          setupAdminCollapse("admin-voucher-drops-toggle", "admin-voucher-drops-panel", "adminCollapse:voucherDrops", "🎟️ Voucher Drops");
+          setupAdminCollapse("admin-past-affiliate-toggle", "admin-affiliate-leaderboard-wrap", "adminCollapse:pastAffiliate", "📊 Past Week Affiliate", () => {
+            if (typeof loadAdminPastWeekAffiliateLeaderboard === "function") {
+              loadAdminPastWeekAffiliateLeaderboard();
+            }
+          });
           adm_list();
         }
         return;
@@ -4896,7 +5040,13 @@ ${referral}`;
       if (isAdminMode) {
         const _ms = document.getElementById("more-section"); if (_ms) _ms.style.display = "block";
         document.getElementById("admin-panel").style.display = "block";
-        document.getElementById("admin-affiliate-pools").style.display = "block";
+        setupAdminCollapse("admin-affiliate-pools-toggle", "admin-affiliate-pools", "adminCollapse:affiliatePools", "Affiliate Voucher Pools");
+        setupAdminCollapse("admin-voucher-drops-toggle", "admin-voucher-drops-panel", "adminCollapse:voucherDrops", "🎟️ Voucher Drops");
+        setupAdminCollapse("admin-past-affiliate-toggle", "admin-affiliate-leaderboard-wrap", "adminCollapse:pastAffiliate", "📊 Past Week Affiliate", () => {
+          if (typeof loadAdminPastWeekAffiliateLeaderboard === "function") {
+            loadAdminPastWeekAffiliateLeaderboard();
+          }
+        });
         adm_list();
       }
     };
