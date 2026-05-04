@@ -897,6 +897,31 @@
       border-radius:8px;
       padding:12px;
     }
+
+    .admin-monitoring-block,
+    .admin-monitoring-block h5 {
+      color: #1f2933;
+    }
+
+    .admin-monitoring-block #adm_table,
+    .admin-monitoring-block #adm_table td,
+    .admin-monitoring-block #adm_table th,
+    .admin-monitoring-block #adm_table td *,
+    .admin-monitoring-block #adm_table th * {
+      color: #1f2933 !important;
+    }
+
+    .admin-monitoring-block #adm_table thead tr {
+      background: #f7f7f7;
+    }
+
+    .admin-monitoring-block #adm_table tbody tr {
+      background: #ffffff;
+    }
+
+    .admin-monitoring-block #adm_table tbody tr:nth-child(even) {
+      background:#fafafa;
+    }
   </style>
 </head>
 <body>
@@ -1032,7 +1057,7 @@
         <button onclick="viewJoinRequests()">📥 View Join Requests</button>
         <button onclick="loadPreviousLeaderboard()">🏆 View Past Leaderboard</button>
         <button onclick="openVoucherModal()">🎁 Create Bonus Voucher</button>
-        <button onclick="loadAdminPastWeekAffiliateLeaderboard()">📊 Past Week Affiliate</button>
+        <button id="admin-past-affiliate-toggle" type="button" class="admin-collapse-toggle"></button>
 
         <div id="adm_drop_container" style="margin-top:18px; text-align:left;">
           <button id="admin-voucher-drops-toggle" type="button" class="admin-collapse-toggle"></button>
@@ -2687,11 +2712,14 @@ Active players win more.
           document.getElementById("admin-panel").style.display = "block";
           setupAdminCollapse("admin-voucher-drops-toggle", "admin-voucher-drops-panel", "adminCollapse:voucherDrops", "🎟️ Voucher Drops");
           setupAdminCollapse("admin-affiliate-pools-toggle", "admin-affiliate-pools", "adminCollapse:affiliatePools", "Affiliate Voucher Pools");
-          document.getElementById("admin-affiliate-leaderboard-wrap").style.display = "block";
+          setupAdminCollapse("admin-past-affiliate-toggle", "admin-affiliate-leaderboard-wrap", "adminCollapse:pastAffiliate", "📊 Past Week Affiliate", () => {
+            if (typeof loadAdminPastWeekAffiliateLeaderboard === "function") {
+              loadAdminPastWeekAffiliateLeaderboard();
+            }
+          });
           if (typeof adm_list === "function") {
             adm_list();
           }
-          loadAdminPastWeekAffiliateLeaderboard();
         }
 
         renderAffiliateRewards(voucherData.rewards || []);
@@ -2711,15 +2739,23 @@ Active players win more.
       }
     }
 
-    function setupAdminCollapse(buttonId, panelId, storageKey, label) {
+    function setupAdminCollapse(buttonId, panelId, storageKey, label, onOpen) {
       const button = document.getElementById(buttonId);
       const panel = document.getElementById(panelId);
       if (!button || !panel) return;
+
+      const maybeLoad = () => {
+        if (typeof onOpen !== "function") return;
+        if (button.dataset.collapseLoaded === "1") return;
+        button.dataset.collapseLoaded = "1";
+        onOpen();
+      };
 
       const applyState = (open) => {
         panel.style.display = open ? "block" : "none";
         button.setAttribute("aria-expanded", open ? "true" : "false");
         button.textContent = `${label} ${open ? "▾" : "▸"}`;
+        if (open) maybeLoad();
       };
 
       const readOpenState = () => localStorage.getItem(storageKey) === "open";
@@ -4732,10 +4768,14 @@ ${referral}`;
       if (!hasInit) {
         if (isAdminMode) {
           document.getElementById("admin-panel").style.display = "block";
-          document.getElementById("admin-affiliate-pools").style.display = "block";
-          document.getElementById("admin-affiliate-leaderboard-wrap").style.display = "block";
+          setupAdminCollapse("admin-affiliate-pools-toggle", "admin-affiliate-pools", "adminCollapse:affiliatePools", "Affiliate Voucher Pools");
+          setupAdminCollapse("admin-voucher-drops-toggle", "admin-voucher-drops-panel", "adminCollapse:voucherDrops", "🎟️ Voucher Drops");
+          setupAdminCollapse("admin-past-affiliate-toggle", "admin-affiliate-leaderboard-wrap", "adminCollapse:pastAffiliate", "📊 Past Week Affiliate", () => {
+            if (typeof loadAdminPastWeekAffiliateLeaderboard === "function") {
+              loadAdminPastWeekAffiliateLeaderboard();
+            }
+          });
           adm_list();
-          loadAdminPastWeekAffiliateLeaderboard();
         }
         return;
       }
@@ -4767,10 +4807,14 @@ ${referral}`;
 
       if (isAdminMode) {
         document.getElementById("admin-panel").style.display = "block";
-        document.getElementById("admin-affiliate-pools").style.display = "block";
-        document.getElementById("admin-affiliate-leaderboard-wrap").style.display = "block";
+        setupAdminCollapse("admin-affiliate-pools-toggle", "admin-affiliate-pools", "adminCollapse:affiliatePools", "Affiliate Voucher Pools");
+        setupAdminCollapse("admin-voucher-drops-toggle", "admin-voucher-drops-panel", "adminCollapse:voucherDrops", "🎟️ Voucher Drops");
+        setupAdminCollapse("admin-past-affiliate-toggle", "admin-affiliate-leaderboard-wrap", "adminCollapse:pastAffiliate", "📊 Past Week Affiliate", () => {
+          if (typeof loadAdminPastWeekAffiliateLeaderboard === "function") {
+            loadAdminPastWeekAffiliateLeaderboard();
+          }
+        });
         adm_list();
-        loadAdminPastWeekAffiliateLeaderboard();
       }
     };
 
