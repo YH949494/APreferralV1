@@ -36,6 +36,7 @@ from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_MISSED
 
 from app_context import set_app_bot, set_bot, set_scheduler
 from onboarding import MYWIN_CHAT_ID, onboarding_due_tick, record_first_mywin, record_first_checkin
+from retention_kpis import RETENTION_COLLECTION, compute_retention_kpis, ensure_retention_indexes
 from vouchers import (
     vouchers_bp,
     ensure_voucher_indexes,
@@ -565,6 +566,28 @@ def tick_5min() -> None:
     try:
         with JobTimer() as total_timer:
             with JobTimer() as step_timer:
+                logger.info("[JOB][5MIN] progress step=retention_kpis_daily run_id=%s", run_id)
+                try:
+                    now_utc = datetime.now(timezone.utc)
+                    today_key = now_utc.strftime("%Y-%m-%d")
+                    cache_key = "retention_kpis:last_daily_compute"
+                    cache_doc = admin_cache_col.find_one({"_id": cache_key}, {"day": 1}) or {}
+                    if cache_doc.get("day") != today_key:
+                        compute_retention_kpis(db, months=12, now_utc=now_utc)
+                        admin_cache_col.update_one(
+                            {"_id": cache_key},
+                            {"$set": {"day": today_key, "computed_at_utc": now_utc}},
+                            upsert=True,
+                        )
+                except Exception as exc:
+                    logger.exception("[JOB][5MIN] step_error name=retention_kpis_daily run_id=%s err=%s", run_id, exc)
+            logger.info(
+                "[JOB][5MIN] step_done name=retention_kpis_daily elapsed_s=%.2f run_id=%s",
+                step_timer.elapsed_s,
+                run_id,
+            )
+
+            with JobTimer() as step_timer:
                 logger.info(
                     "[JOB][5MIN] progress step=settle_pending_referrals run_id=%s",
                     run_id,
@@ -756,6 +779,7 @@ try:
     scheduler_locks_collection.create_index([("expireAt", ASCENDING)], expireAfterSeconds=0)
 except Exception:
     logger.warning("[SCHEDULER][LOCK] failed to create TTL index", exc_info=True)
+ensure_retention_indexes(db)
     
 REFERRAL_HOLD_HOURS = 12
 REFERRAL_HOURLY_LIMIT = int(os.getenv("REFERRAL_HOURLY_LIMIT", "20"))
@@ -1894,6 +1918,52 @@ def joins_export():
         },
     )
     return jsonify(list(cur))
+
+
+@admin_bp.get("/api/admin/retention-kpis")
+def retention_kpis_api():
+    ok, err = require_admin_from_query()
+    if not ok:
+        msg, code = err
+        return jsonify({"success": False, "message": msg}), code
+    months = request.args.get("months", default=12, type=int) or 12
+    months = max(1, min(months, 24))
+    rows = list(db[RETENTION_COLLECTION].find({}, {"_id": 0}).sort("cohort_month", -1).limit(months))
+    return jsonify({"success": True, "months": months, "data": rows})
+
+
+@admin_bp.get("/api/admin/retention-kpis/export")
+def retention_kpis_export():
+    ok, err = require_admin_from_query()
+    if not ok:
+        msg, code = err
+        return jsonify({"success": False, "message": msg}), code
+    months = request.args.get("months", default=12, type=int) or 12
+    months = max(1, min(months, 24))
+    rows = list(db[RETENTION_COLLECTION].find({}, {"_id": 0}).sort("cohort_month", -1).limit(months))
+    import csv
+    import io
+    from flask import Response
+    out = io.StringIO()
+    w = csv.writer(out)
+    cols = ["cohort_month", "cohort_size", "d7_eligible", "d7_retained", "d7_retention_rate", "d14_eligible", "d14_retained", "d14_retention_rate", "d30_eligible", "d30_retained", "d30_retention_rate", "diagnosis", "computed_at_utc"]
+    w.writerow(cols)
+    for r in rows:
+        w.writerow([r.get(c, "") for c in cols])
+    filename = f"retention_cohort_kpis_{datetime.now(timezone.utc).strftime('%Y%m%d')}.csv"
+    return Response(out.getvalue(), mimetype="text/csv", headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+
+@admin_bp.post("/api/admin/retention-kpis/recompute")
+def retention_kpis_recompute():
+    ok, err = require_admin_from_query()
+    if not ok:
+        msg, code = err
+        return jsonify({"success": False, "message": msg}), code
+    months = request.args.get("months", default=12, type=int) or 12
+    months = max(1, min(months, 24))
+    rows = compute_retention_kpis(db, months=months, now_utc=datetime.now(timezone.utc))
+    return jsonify({"success": True, "months": months, "count": len(rows)})
 
 
 app.register_blueprint(admin_bp)

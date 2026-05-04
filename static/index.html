@@ -4627,6 +4627,42 @@ ${referral}`;
       renderAffDailyKpis(data.rows || []);
     }
 
+    function _retFmt(rate, retained, eligible) {
+      const pct = (Number(rate || 0) * 100).toFixed(1);
+      return `${pct}% (${Number(retained || 0)}/${Number(eligible || 0)})`;
+    }
+
+    function renderRetentionKpis(rows) {
+      const wrap = document.getElementById("retention_kpis_wrap");
+      if (!wrap) return;
+      if (!rows || !rows.length) {
+        wrap.innerHTML = `<div style="color:#666; font-size:13px;">No retention cohort KPIs yet.</div>`;
+        return;
+      }
+      const htmlRows = rows.map((r) => `<tr>`
+        + `<td style="padding:6px; border-bottom:1px solid #eee;">${escapeHtml(r.cohort_month || "")}</td>`
+        + `<td style="padding:6px; border-bottom:1px solid #eee;">${Number(r.cohort_size || 0)}</td>`
+        + `<td style="padding:6px; border-bottom:1px solid #eee;">${_retFmt(r.d7_retention_rate, r.d7_retained, r.d7_eligible)}</td>`
+        + `<td style="padding:6px; border-bottom:1px solid #eee;">${_retFmt(r.d14_retention_rate, r.d14_retained, r.d14_eligible)}</td>`
+        + `<td style="padding:6px; border-bottom:1px solid #eee;">${_retFmt(r.d30_retention_rate, r.d30_retained, r.d30_eligible)}</td>`
+        + `<td style="padding:6px; border-bottom:1px solid #eee;">${escapeHtml(r.diagnosis || "")}</td>`
+        + `</tr>`).join("");
+      wrap.innerHTML = `<table style="width:100%; border-collapse:collapse; font-size:12px;"><thead><tr style="background:#fafafa;"><th style="padding:6px; text-align:left;">Cohort Month</th><th style="padding:6px; text-align:left;">Users</th><th style="padding:6px; text-align:left;">D7</th><th style="padding:6px; text-align:left;">D14</th><th style="padding:6px; text-align:left;">D30</th><th style="padding:6px; text-align:left;">Diagnosis</th></tr></thead><tbody>${htmlRows}</tbody></table>`;
+    }
+
+    async function loadRetentionKpis(months = 12) {
+      const wrap = document.getElementById("retention_kpis_wrap");
+      if (wrap) wrap.innerHTML = `<div style="color:#666; font-size:13px;">Loading…</div>`;
+      const res = await fetch(withInitDataInQuery(`${API_BASE}/api/admin/retention-kpis?months=${months}`, initDataRaw), { headers: authHeaders });
+      const data = await res.json();
+      renderRetentionKpis(data.data || []);
+    }
+
+    function exportRetentionKpisCsv(months = 12) {
+      const url = withInitDataInQuery(`${API_BASE}/api/admin/retention-kpis/export?months=${months}&format=csv`, initDataRaw);
+      window.open(url, "_blank");
+    }
+
     window.onload = async () => {
       if (tg) { tg.ready(); tg.expand(); }
 
