@@ -63,7 +63,6 @@
       display: flex;
       align-items: center;
       justify-content: center;
-      gap: 10px;
       margin-bottom: 18px;
     }
 
@@ -136,17 +135,13 @@
     .ap-logo {
       display: flex;
       align-items: center;
-      gap: 9px;
     }
-
-    /* AP icon mark — geometric SVG inline */
-    .ap-mark { flex-shrink: 0; }
 
     .ap-wordmark {
       font-family: var(--font-display);
-      font-size: 17px;
+      font-size: 18px;
       font-weight: 800;
-      letter-spacing: 1px;
+      letter-spacing: 1.2px;
       line-height: 1;
     }
 
@@ -510,13 +505,7 @@
   <div id="region-overlay">
     <div class="region-modal">
       <div class="region-modal-logo">
-        <!-- AP mark (inline SVG) -->
-        <svg class="ap-mark" width="32" height="32" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <polygon points="24,4 6,44 14,44 24,22 34,44 42,44" fill="#ff5e00"/>
-          <rect x="26" y="14" width="14" height="7" rx="3.5" fill="#ff5e00"/>
-          <rect x="33" y="14" width="7" height="18" rx="3.5" fill="#ff5e00"/>
-        </svg>
-        <div class="ap-wordmark">
+        <div class="ap-wordmark" style="font-size:22px;">
           <span class="wm-advant">ADVANT</span><span class="wm-play">PLAY</span>
         </div>
       </div>
@@ -546,11 +535,6 @@
     <!-- Header with AP logo -->
     <div class="app-header">
       <div class="ap-logo">
-        <svg class="ap-mark" width="28" height="28" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <polygon points="24,4 6,44 14,44 24,22 34,44 42,44" fill="#ff5e00"/>
-          <rect x="26" y="14" width="14" height="7" rx="3.5" fill="#ff5e00"/>
-          <rect x="33" y="14" width="7" height="18" rx="3.5" fill="#ff5e00"/>
-        </svg>
         <div class="ap-wordmark">
           <span class="wm-advant">ADVANT</span><span class="wm-play">PLAY</span>
         </div>
@@ -687,40 +671,39 @@
     }
 
     // XP toast helper
-    function showXpToast(xp, label, isStreak) {
+    let xpToastTimer = null;
+    function showXpToast(xp, label, isStreak, streakText) {
       const toast = document.getElementById('xp-toast');
       document.getElementById('xp-amount').textContent = '+' + xp + ' XP';
       document.getElementById('xp-label').textContent = label;
       const streak = document.getElementById('xp-streak');
       streak.style.display = isStreak ? 'inline-block' : 'none';
-      if (isStreak) streak.textContent = '🔥 Day Streak Bonus!';
+      if (isStreak) streak.textContent = streakText || '🔥 Streak Bonus!';
 
       toast.classList.add('show');
-      setTimeout(() => toast.classList.remove('show'), 3000);
+      if (xpToastTimer) clearTimeout(xpToastTimer);
+      xpToastTimer = setTimeout(() => toast.classList.remove('show'), 3000);
+    }
+
+    function applyCheckinUI() {
+      checkedIn = true;
+      document.getElementById('checkin-sub').textContent = 'Done ✓ — see you tomorrow';
+      document.getElementById('guide-bar').style.width = '40%';
+      document.getElementById('step-1').classList.add('done');
+      document.getElementById('step-1-num').textContent = '✓';
     }
 
     // Normal check-in (+20 XP)
     function simulateCheckin() {
       if (checkedIn) return;
-      checkedIn = true;
-      document.getElementById('checkin-sub').textContent = 'Done ✓ — see you tomorrow';
-      document.getElementById('guide-bar').style.width = '40%';
-      const s = document.getElementById('step-1');
-      s.classList.add('done');
-      document.getElementById('step-1-num').textContent = '✓';
-      showXpToast(20, 'Daily check-in reward', false);
+      applyCheckinUI();
+      showXpToast(20, 'Daily check-in reward', false, '');
     }
 
     // Streak check-in demo (+220 XP)
     function simulateStreakCheckin() {
-      checkedIn = false; // allow re-trigger for demo
-      simulateCheckin();
-      setTimeout(() => {
-        document.getElementById('xp-amount').textContent = '+220 XP';
-        document.getElementById('xp-label').textContent = '7-day streak bonus';
-        document.getElementById('xp-streak').style.display = 'inline-block';
-        document.getElementById('xp-streak').textContent = '🔥 7-Day Streak!';
-      }, 50);
+      applyCheckinUI();
+      showXpToast(220, '7-day streak bonus', true, '🔥 7-Day Streak!');
     }
 
     function resetCheckin() {
