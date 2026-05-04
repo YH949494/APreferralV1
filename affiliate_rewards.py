@@ -735,20 +735,9 @@ def evaluate_monthly_affiliate_reward(db, *, referrer_id: int, now_utc: datetime
             last_ledger = db.affiliate_ledger.find_one({"_id": ledger["_id"]})
             continue
 
-        if status == "SIMULATED_PENDING" and str(ledger.get("year_month") or "") == str(yyyymm):
-            db.affiliate_ledger.update_one(
-                {"_id": ledger["_id"], "status": "SIMULATED_PENDING"},
-                {"$set": {"status": "APPROVED", "simulate": False, "updated_at": now_utc}},
-            )
-            logger.info(
-                "[AFFILIATE][SIM_TO_REAL_CURRENT_MONTH] ledger_id=%s user_id=%s tier=%s year_month=%s",
-                ledger.get("_id"),
-                int(referrer_id),
-                eligible_tier,
-                yyyymm,
-            )
-            ledger = db.affiliate_ledger.find_one({"_id": ledger["_id"]}) or ledger
-            status = ledger.get("status")
+        if status == "SIMULATED_PENDING":
+            last_ledger = ledger
+            continue
 
         # If stuck in SETTLING, check whether pool claim already completed and reconcile;
         # if the pool claim never ran, fall through to retry it now.
@@ -873,12 +862,8 @@ def evaluate_weekly_affiliate_reward(
             continue
 
         if status == "SIMULATED_PENDING":
-            db.affiliate_ledger.update_one(
-                {"_id": ledger["_id"], "status": "SIMULATED_PENDING"},
-                {"$set": {"status": "APPROVED", "simulate": False, "updated_at": now_utc}},
-            )
-            ledger = db.affiliate_ledger.find_one({"_id": ledger["_id"]}) or ledger
-            status = ledger.get("status")
+            last_ledger = ledger
+            continue
 
         if status != SETTLING_STATUS:
             settle_res = db.affiliate_ledger.update_one(
