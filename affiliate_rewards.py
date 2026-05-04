@@ -1127,6 +1127,7 @@ def settle_previous_month_affiliate_rewards(db, *, now_utc: datetime | None = No
                     {"status": "APPROVED", "updated_at": {"$lt": stale_cutoff}},
                     {"status": SETTLING_STATUS, "updated_at": {"$lt": stale_cutoff}},
                     {"status": "PENDING_MANUAL", "updated_at": {"$lt": stale_cutoff}},
+                    {"status": "SIMULATED_PENDING", "updated_at": {"$lt": stale_cutoff}},
                 ],
             },
             {"$set": {"status": SETTLING_STATUS, "updated_at": now_utc}},
