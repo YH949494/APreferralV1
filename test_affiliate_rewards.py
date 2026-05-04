@@ -441,7 +441,7 @@ class AffiliateRewardTests(unittest.TestCase):
 
         self.assertEqual(db.affiliate_ledger.count_documents({"dedup_key": "AFF:41:202601:T1"}), 1)
 
-    def test_current_month_simulated_pending_converts_and_issues_when_sim_off(self):
+    def test_current_month_simulated_pending_not_auto_issued_when_sim_off(self):
         db = FakeDb()
         db.users.insert_one({"user_id": 42, "blocked": False})
         now = datetime(2026, 1, 15, tzinfo=timezone.utc)
@@ -456,9 +456,25 @@ class AffiliateRewardTests(unittest.TestCase):
             os.environ.pop("AFFILIATE_SIMULATE", None)
         self.assertEqual(simulated["status"], "SIMULATED_PENDING")
 
-        issued = evaluate_monthly_affiliate_reward(db, referrer_id=42, now_utc=now + timedelta(minutes=1))
-        self.assertEqual(issued["status"], "ISSUED")
-        self.assertEqual(issued["voucher_code"], "REAL42")
+        row = evaluate_monthly_affiliate_reward(db, referrer_id=42, now_utc=now + timedelta(minutes=1))
+        self.assertEqual(row["status"], "SIMULATED_PENDING")
+        self.assertIsNone(row.get("voucher_code"))
+        self.assertEqual(db.voucher_pools.count_documents({"pool_id": "T1", "status": "issued"}), 0)
+
+    def test_mark_invitee_qualified_triggers_monthly_evaluation(self):
+        db = FakeDb()
+        db.users.insert_one({"user_id": 77, "blocked": False})
+        now = datetime(2026, 1, 15, tzinfo=timezone.utc)
+        db.voucher_pools.insert_one({"pool_id": "T1", "code": "M77", "status": "available"})
+        for i in range(1, 10):
+            db.qualified_events.insert_one({"invitee_id": 7700 + i, "referrer_id": 77, "qualified_at": now})
+
+        out = mark_invitee_qualified(db, invitee_id=7799, referrer_id=77, now_utc=now)
+        self.assertTrue(out)
+        ledger = db.affiliate_ledger.find_one({"dedup_key": "AFF:77:202601:T1"})
+        self.assertIsNotNone(ledger)
+        self.assertEqual(ledger["status"], "ISSUED")
+        self.assertEqual(ledger["voucher_code"], "M77")
 
     def test_historical_simulated_pending_not_auto_issued(self):
         db = FakeDb()

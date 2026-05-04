@@ -35,6 +35,10 @@ class _FakeCollection:
                             pass
                     if not (isinstance(val, datetime) and v["$gte"] <= val < v["$lt"]):
                         return False
+                elif isinstance(v, dict) and "$regex" in v:
+                    import re
+                    if not re.search(v["$regex"], str(doc.get(k, ""))):
+                        return False
                 else:
                     if doc.get(k) != v:
                         return False
@@ -96,7 +100,7 @@ def test_no_per_user_queries_bulk_pattern():
     db = _DB(users=[{"user_id": 1, "joined_main_at": join}, {"user_id": 2, "joined_main_at": join}])
     compute_retention_for_month(db, datetime(2026, 1, 1, tzinfo=timezone.utc), join + timedelta(days=40))
     assert db.users.find_calls == 1
-    assert db.xp_events.find_calls <= 1
+    assert db.xp_events.find_calls <= 3
     assert db.voucher_claims.find_calls <= 1
     assert db.new_joiner_claims.find_calls <= 1
 
@@ -115,9 +119,9 @@ def test_activity_outside_bounds_ignored_and_query_bounded():
     out = compute_retention_for_month(db, datetime(2026, 1, 1, tzinfo=timezone.utc), join + timedelta(days=90))
     assert out["d7_retained"] == 1
     queries = db.xp_events.queries
-    assert len(queries) == 1
-    q0 = queries[0]
-    assert "$and" in q0
+    assert len(queries) == 3
+    for q0 in queries:
+        assert any(k in q0 for k in ("created_at", "createdAt", "ts"))
 
 
 def test_claim_string_and_day_string_are_parsed_and_counted():
@@ -130,3 +134,50 @@ def test_claim_string_and_day_string_are_parsed_and_counted():
     out = compute_retention_for_month(db, datetime(2026, 1, 1, tzinfo=timezone.utc), join + timedelta(days=60))
     assert out["d7_retained"] == 1
     assert out["d14_retained"] == 1
+
+
+def test_claim_only_d7_does_not_count_xp_checkin():
+    join = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    db = _DB(
+        users=[{"user_id": 1, "joined_main_at": join}],
+        xp_events=[{"user_id": 1, "type": "checkin", "created_at": join + timedelta(days=7, hours=1)}],
+    )
+    out = compute_retention_for_month(db, datetime(2026, 1, 1, tzinfo=timezone.utc), join + timedelta(days=40))
+    assert out["d7_retained"] == 1
+    assert out["d7_claim_retained"] == 0
+
+
+def test_claim_only_d14_counts_voucher_claims():
+    join = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    db = _DB(
+        users=[{"user_id": 1, "joined_main_at": join}],
+        voucher_claims=[{"user_id": 1, "claimed_at": join + timedelta(days=14, hours=1)}],
+    )
+    out = compute_retention_for_month(db, datetime(2026, 1, 1, tzinfo=timezone.utc), join + timedelta(days=60))
+    assert out["d14_claim_retained"] == 1
+
+
+def test_claim_only_d30_counts_new_joiner_claims_and_rate_eligible_denominator():
+    join = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    db = _DB(
+        users=[
+            {"user_id": 1, "joined_main_at": join},
+            {"user_id": 2, "joined_main_at": join},
+        ],
+        new_joiner_claims=[{"uid": 1, "claimed_at": join + timedelta(days=30, hours=1)}],
+    )
+    out = compute_retention_for_month(db, datetime(2026, 1, 1, tzinfo=timezone.utc), join + timedelta(days=90))
+    assert out["d30_eligible"] == 2
+    assert out["d30_claim_retained"] == 1
+    assert out["d30_claim_retention_rate"] == 0.5
+
+
+def test_general_retention_fields_unchanged_with_claim_metrics():
+    join = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    db = _DB(
+        users=[{"user_id": 1, "joined_main_at": join}],
+        voucher_claims=[{"user_id": 1, "claimed_at": join + timedelta(days=7, hours=1)}],
+    )
+    out = compute_retention_for_month(db, datetime(2026, 1, 1, tzinfo=timezone.utc), join + timedelta(days=40))
+    assert "d7_retained" in out
+    assert "d7_retention_rate" in out

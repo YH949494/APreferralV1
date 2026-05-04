@@ -49,11 +49,19 @@ def ensure_retention_indexes(db) -> None:
     except Exception:
         pass
     try:
+        db.voucher_claims.create_index([("user_id", ASCENDING), ("claimed_at", ASCENDING)])
+    except Exception:
+        pass
+    try:
         db.xp_events.create_index([("user_id", ASCENDING), ("type", ASCENDING), ("created_at", ASCENDING)])
     except Exception:
         pass
     try:
-        db.xp_events.create_index([("user_id", ASCENDING), ("created_at", ASCENDING)])
+        db.xp_events.create_index([("user_id", ASCENDING), ("createdAt", ASCENDING)])
+    except Exception:
+        pass
+    try:
+        db.xp_events.create_index([("user_id", ASCENDING), ("ts", ASCENDING)])
     except Exception:
         pass
     try:
@@ -126,6 +134,7 @@ def compute_retention_for_month(db, cohort_start: datetime, now_utc: datetime) -
     uids = list(by_uid.keys())
 
     activity_by_uid: dict[int, set[datetime]] = {uid: set() for uid in uids}
+    claim_activity_by_uid: dict[int, set[datetime]] = {uid: set() for uid in uids}
     def _append(uid_value: Any, ts: Any) -> None:
         try:
             uid_int = int(uid_value)
@@ -133,6 +142,13 @@ def compute_retention_for_month(db, cohort_start: datetime, now_utc: datetime) -
             return
         if uid_int in activity_by_uid and isinstance(ts, datetime):
             activity_by_uid[uid_int].add(ts)
+    def _append_claim(uid_value: Any, ts: Any) -> None:
+        try:
+            uid_int = int(uid_value)
+        except Exception:
+            return
+        if uid_int in claim_activity_by_uid and isinstance(ts, datetime):
+            claim_activity_by_uid[uid_int].add(ts)
 
     def _pick_ts(row: dict, fields: tuple[str, ...]) -> datetime | None:
         for f in fields:
@@ -148,35 +164,38 @@ def compute_retention_for_month(db, cohort_start: datetime, now_utc: datetime) -
             xp_cur = db.xp_events.find(
                 {
                     "user_id": {"$in": uids},
-                    "$and": [
-                        {
-                            "$or": [
-                                {"created_at": {"$gte": activity_start, "$lt": activity_end}},
-                                {"createdAt": {"$gte": activity_start, "$lt": activity_end}},
-                                {"ts": {"$gte": activity_start, "$lt": activity_end}},
-                            ]
-                        },
-                        {
-                            "$or": [
-                                {"type": "checkin"},
-                                {"unique_key": {"$regex": r"^checkin:"}},
-                            ]
-                        },
-                    ],
+                    "created_at": {"$gte": activity_start, "$lt": activity_end},
+                    "$or": [{"type": "checkin"}, {"unique_key": {"$regex": r"^checkin:"}}],
                 },
-                {"_id": 0, "user_id": 1, "created_at": 1, "createdAt": 1, "ts": 1},
+                {"_id": 0, "user_id": 1, "created_at": 1},
             )
             for row in xp_cur:
-                _append(row.get("user_id"), _pick_ts(row, ("created_at", "createdAt", "ts")))
+                _append(row.get("user_id"), _pick_ts(row, ("created_at",)))
         except Exception:
             pass
+        for ts_field in ("createdAt", "ts"):
+            try:
+                xp_legacy_cur = db.xp_events.find(
+                    {
+                        "user_id": {"$in": uids},
+                        ts_field: {"$gte": activity_start, "$lt": activity_end},
+                        "$or": [{"type": "checkin"}, {"unique_key": {"$regex": r"^checkin:"}}],
+                    },
+                    {"_id": 0, "user_id": 1, ts_field: 1},
+                )
+                for row in xp_legacy_cur:
+                    _append(row.get("user_id"), _pick_ts(row, (ts_field,)))
+            except Exception:
+                pass
         try:
             cur = db.voucher_claims.find(
                 {"user_id": {"$in": uids}, **_bounded_or_timestamp_filter(("claimed_at", "claimedAt", "created_at", "createdAt", "ts"), activity_start, activity_end)},
                 {"_id": 0, "user_id": 1, "claimed_at": 1, "claimedAt": 1, "created_at": 1, "createdAt": 1, "ts": 1},
             )
             for row in cur:
-                _append(row.get("user_id"), _pick_ts(row, ("claimed_at", "claimedAt", "created_at", "createdAt", "ts")))
+                ts = _pick_ts(row, ("claimed_at", "claimedAt", "created_at", "createdAt", "ts"))
+                _append(row.get("user_id"), ts)
+                _append_claim(row.get("user_id"), ts)
         except Exception:
             pass
         try:
@@ -191,7 +210,9 @@ def compute_retention_for_month(db, cohort_start: datetime, now_utc: datetime) -
                 uid_val = row.get("uid")
                 if uid_val is None:
                     uid_val = row.get("user_id")
-                _append(uid_val, _pick_ts(row, ("claimed_at", "claimedAt", "created_at", "createdAt", "ts")))
+                ts = _pick_ts(row, ("claimed_at", "claimedAt", "created_at", "createdAt", "ts"))
+                _append(uid_val, ts)
+                _append_claim(uid_val, ts)
         except Exception:
             pass
         try:
@@ -241,6 +262,20 @@ def compute_retention_for_month(db, cohort_start: datetime, now_utc: datetime) -
         out[f"d{day}_eligible"] = eligible
         out[f"d{day}_retained"] = retained
         out[f"d{day}_retention_rate"] = _rate(retained, eligible)
+        claim_retained = 0
+        for uid, u in by_uid.items():
+            joined = u.get("joined_main_at")
+            if not isinstance(joined, datetime):
+                continue
+            age = now_utc - joined
+            if age < timedelta(days=day):
+                continue
+            win_start = joined + timedelta(days=day)
+            win_end = win_start + timedelta(days=1)
+            if any((h >= win_start and h < win_end) for h in claim_activity_by_uid.get(uid, set())):
+                claim_retained += 1
+        out[f"d{day}_claim_retained"] = claim_retained
+        out[f"d{day}_claim_retention_rate"] = _rate(claim_retained, eligible)
 
     out["diagnosis"] = diagnosis_for(out)
     out["computed_at_utc"] = now_utc
