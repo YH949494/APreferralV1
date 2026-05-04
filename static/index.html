@@ -4643,11 +4643,14 @@ ${referral}`;
         + `<td style="padding:6px; border-bottom:1px solid #eee;">${escapeHtml(r.cohort_month || "")}</td>`
         + `<td style="padding:6px; border-bottom:1px solid #eee;">${Number(r.cohort_size || 0)}</td>`
         + `<td style="padding:6px; border-bottom:1px solid #eee;">${_retFmt(r.d7_retention_rate, r.d7_retained, r.d7_eligible)}</td>`
+        + `<td style="padding:6px; border-bottom:1px solid #eee;">${_retFmt(r.d7_claim_retention_rate, r.d7_claim_retained, r.d7_eligible)}</td>`
         + `<td style="padding:6px; border-bottom:1px solid #eee;">${_retFmt(r.d14_retention_rate, r.d14_retained, r.d14_eligible)}</td>`
+        + `<td style="padding:6px; border-bottom:1px solid #eee;">${_retFmt(r.d14_claim_retention_rate, r.d14_claim_retained, r.d14_eligible)}</td>`
         + `<td style="padding:6px; border-bottom:1px solid #eee;">${_retFmt(r.d30_retention_rate, r.d30_retained, r.d30_eligible)}</td>`
+        + `<td style="padding:6px; border-bottom:1px solid #eee;">${_retFmt(r.d30_claim_retention_rate, r.d30_claim_retained, r.d30_eligible)}</td>`
         + `<td style="padding:6px; border-bottom:1px solid #eee;">${escapeHtml(r.diagnosis || "")}</td>`
         + `</tr>`).join("");
-      wrap.innerHTML = `<table style="width:100%; border-collapse:collapse; font-size:12px;"><thead><tr style="background:#fafafa;"><th style="padding:6px; text-align:left;">Cohort Month</th><th style="padding:6px; text-align:left;">Users</th><th style="padding:6px; text-align:left;">D7</th><th style="padding:6px; text-align:left;">D14</th><th style="padding:6px; text-align:left;">D30</th><th style="padding:6px; text-align:left;">Diagnosis</th></tr></thead><tbody>${htmlRows}</tbody></table>`;
+      wrap.innerHTML = `<table style="width:100%; border-collapse:collapse; font-size:12px;"><thead><tr style="background:#fafafa;"><th style="padding:6px; text-align:left;">Cohort Month</th><th style="padding:6px; text-align:left;">Users</th><th style="padding:6px; text-align:left;">D7</th><th style="padding:6px; text-align:left;">D7 Claim</th><th style="padding:6px; text-align:left;">D14</th><th style="padding:6px; text-align:left;">D14 Claim</th><th style="padding:6px; text-align:left;">D30</th><th style="padding:6px; text-align:left;">D30 Claim</th><th style="padding:6px; text-align:left;">Diagnosis</th></tr></thead><tbody>${htmlRows}</tbody></table>`;
     }
 
     async function loadRetentionKpis(months = 12) {
