@@ -1,0 +1,660 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mini-Bot UI Mockup</title>
+  <style>
+    @import url("https://fonts.googleapis.com/css2?family=Syne:wght@600;700;800&family=DM+Sans:wght@400;500;600;700&display=swap");
+
+    :root {
+      --ap-orange: #ff5e00;
+      --ap-orange-strong: #ff7b2f;
+      --bg-page: #0d0d0f;
+      --bg-page-grad: radial-gradient(circle at top, rgba(255,94,0,0.14), transparent 42%), #0d0d0f;
+      --bg-card: #17171c;
+      --bg-card-alt: #1f1f25;
+      --text-main: #f0eee8;
+      --text-muted: #a49f93;
+      --text-soft: #716c64;
+      --border-light: rgba(255,255,255,0.08);
+      --border-orange: rgba(255,94,0,0.3);
+      --status-success: #4fd88a;
+      --radius-sm: 10px;
+      --radius-md: 14px;
+      --radius-lg: 18px;
+      --font-display: "Syne", sans-serif;
+      --font-body: "DM Sans", sans-serif;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    html, body {
+      height: 100%;
+      background: var(--bg-page-grad);
+      font-family: var(--font-body);
+      color: var(--text-main);
+      font-size: 15px;
+    }
+
+    /* ── REGION OVERLAY (first-timer only) ── */
+    #region-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.82);
+      backdrop-filter: blur(6px);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 100;
+      padding: 24px;
+    }
+
+    .region-modal {
+      background: var(--bg-card);
+      border: 1px solid var(--border-orange);
+      border-radius: var(--radius-lg);
+      padding: 28px 24px;
+      width: 100%;
+      max-width: 360px;
+      text-align: center;
+    }
+
+    .region-modal h2 {
+      font-family: var(--font-display);
+      font-size: 20px;
+      margin-bottom: 8px;
+    }
+
+    .region-modal p {
+      color: var(--text-muted);
+      font-size: 13px;
+      margin-bottom: 20px;
+    }
+
+    .region-option {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 14px 16px;
+      border: 1px solid var(--border-light);
+      border-radius: var(--radius-md);
+      margin-bottom: 10px;
+      cursor: pointer;
+      transition: border-color 0.15s, background 0.15s;
+      font-size: 15px;
+      font-weight: 500;
+    }
+
+    .region-option:hover {
+      border-color: var(--ap-orange);
+      background: rgba(255,94,0,0.07);
+    }
+
+    .region-option span.flag { font-size: 22px; }
+
+    .btn-region-confirm {
+      margin-top: 6px;
+      width: 100%;
+      padding: 14px;
+      background: var(--ap-orange);
+      color: #fff;
+      font-family: var(--font-display);
+      font-weight: 700;
+      font-size: 15px;
+      border: none;
+      border-radius: var(--radius-md);
+      cursor: pointer;
+    }
+
+    /* ── MAIN LAYOUT ── */
+    .page {
+      min-height: 100dvh;
+      padding: 18px 16px 28px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    /* ── HEADER ── */
+    .app-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 4px 0 2px;
+    }
+
+    .app-header .brand {
+      font-family: var(--font-display);
+      font-size: 18px;
+      font-weight: 800;
+      letter-spacing: -0.3px;
+      color: var(--text-main);
+    }
+
+    .app-header .brand span { color: var(--ap-orange); }
+
+    .user-chip {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      background: var(--bg-card);
+      border: 1px solid var(--border-light);
+      border-radius: 99px;
+      padding: 5px 12px 5px 6px;
+      font-size: 12px;
+      color: var(--text-muted);
+    }
+
+    .user-avatar {
+      width: 24px;
+      height: 24px;
+      border-radius: 50%;
+      background: linear-gradient(135deg, var(--ap-orange), #a020f0);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 11px;
+    }
+
+    /* ── CAMPAIGN REWARDS (always top) ── */
+    .campaign-card {
+      background: linear-gradient(135deg, rgba(255,94,0,0.18), rgba(255,94,0,0.06)), var(--bg-card);
+      border: 1px solid var(--border-orange);
+      border-radius: var(--radius-lg);
+      padding: 18px;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .campaign-card::before {
+      content: "";
+      position: absolute;
+      top: -30px; right: -30px;
+      width: 120px; height: 120px;
+      border-radius: 50%;
+      background: radial-gradient(circle, rgba(255,94,0,0.2), transparent 70%);
+      pointer-events: none;
+    }
+
+    .campaign-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 10px;
+    }
+
+    .campaign-title {
+      font-family: var(--font-display);
+      font-size: 16px;
+      font-weight: 700;
+    }
+
+    .badge-hot {
+      background: rgba(255,94,0,0.18);
+      color: var(--ap-orange-strong);
+      border: 1px solid rgba(255,94,0,0.35);
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.8px;
+      padding: 3px 8px;
+      border-radius: 99px;
+      text-transform: uppercase;
+    }
+
+    .campaign-body {
+      color: var(--text-muted);
+      font-size: 13px;
+      line-height: 1.5;
+      margin-bottom: 14px;
+    }
+
+    .voucher-slot {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: rgba(255,255,255,0.04);
+      border: 1px solid var(--border-orange);
+      border-radius: var(--radius-md);
+      padding: 12px 14px;
+      margin-bottom: 8px;
+    }
+
+    .voucher-slot-info { font-size: 13px; }
+    .voucher-slot-label { font-weight: 600; color: var(--text-main); }
+    .voucher-slot-sub { color: var(--text-muted); font-size: 11px; margin-top: 2px; }
+
+    .btn-claim {
+      background: var(--ap-orange);
+      color: #fff;
+      border: none;
+      border-radius: var(--radius-sm);
+      padding: 8px 16px;
+      font-size: 12px;
+      font-weight: 700;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+
+    .campaign-empty {
+      text-align: center;
+      color: var(--text-soft);
+      font-size: 13px;
+      padding: 8px 0 2px;
+    }
+
+    /* ── 3 CORE ACTION GRID ── */
+    .core-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+
+    .core-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border-light);
+      border-radius: var(--radius-lg);
+      padding: 18px 16px;
+      cursor: pointer;
+      transition: border-color 0.15s, transform 0.1s;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .core-card:active { transform: scale(0.97); }
+    .core-card:hover { border-color: rgba(255,94,0,0.4); }
+
+    /* Referral spans full width */
+    .core-card.full-width {
+      grid-column: 1 / -1;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 16px 18px;
+    }
+
+    .core-icon {
+      font-size: 30px;
+      margin-bottom: 12px;
+      display: block;
+    }
+
+    .core-card.full-width .core-icon {
+      font-size: 28px;
+      margin-bottom: 0;
+    }
+
+    .core-label {
+      font-family: var(--font-display);
+      font-size: 14px;
+      font-weight: 700;
+      color: var(--text-main);
+      line-height: 1.2;
+    }
+
+    .core-sub {
+      font-size: 11px;
+      color: var(--text-muted);
+      margin-top: 4px;
+    }
+
+    .core-card .status-dot {
+      position: absolute;
+      top: 12px; right: 12px;
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: var(--status-success);
+    }
+
+    .core-card .status-dot.pending {
+      background: #f0a500;
+    }
+
+    .core-action-right {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .btn-action-sm {
+      background: var(--ap-orange);
+      color: #fff;
+      border: none;
+      border-radius: var(--radius-sm);
+      padding: 9px 16px;
+      font-size: 13px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    /* ── PROGRESS GUIDE (new user guidance) ── */
+    .progress-guide {
+      background: var(--bg-card);
+      border: 1px solid var(--border-light);
+      border-radius: var(--radius-lg);
+      padding: 16px 18px;
+    }
+
+    .progress-guide-title {
+      font-family: var(--font-display);
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.6px;
+      margin-bottom: 12px;
+    }
+
+    .step-list {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .step-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 13px;
+      color: var(--text-muted);
+    }
+
+    .step-item.done { color: var(--text-main); }
+
+    .step-num {
+      width: 24px; height: 24px;
+      border-radius: 50%;
+      background: var(--bg-card-alt);
+      border: 1px solid var(--border-light);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 11px;
+      font-weight: 700;
+      flex-shrink: 0;
+      color: var(--text-soft);
+    }
+
+    .step-item.done .step-num {
+      background: rgba(79,216,138,0.15);
+      border-color: rgba(79,216,138,0.4);
+      color: var(--status-success);
+    }
+
+    .progress-bar-wrap {
+      height: 4px;
+      background: rgba(255,255,255,0.06);
+      border-radius: 99px;
+      margin-top: 14px;
+      overflow: hidden;
+    }
+
+    .progress-bar-fill {
+      height: 100%;
+      width: 33%;
+      background: linear-gradient(90deg, var(--ap-orange), var(--ap-orange-strong));
+      border-radius: 99px;
+      transition: width 0.4s ease;
+    }
+
+    /* ── SECONDARY GRID ── */
+    .secondary-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+
+    .sec-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border-light);
+      border-radius: var(--radius-md);
+      padding: 14px;
+      cursor: pointer;
+      transition: border-color 0.15s;
+    }
+
+    .sec-card:hover { border-color: rgba(255,94,0,0.3); }
+
+    .sec-icon { font-size: 22px; margin-bottom: 8px; display: block; }
+
+    .sec-label {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text-muted);
+    }
+
+    /* ── DEMO TOGGLE ── */
+    .demo-bar {
+      position: fixed;
+      bottom: 0; left: 0; right: 0;
+      background: #111;
+      border-top: 1px solid rgba(255,255,255,0.08);
+      padding: 10px 16px;
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      font-size: 12px;
+      color: #888;
+      z-index: 50;
+    }
+
+    .demo-bar button {
+      background: rgba(255,255,255,0.08);
+      border: none;
+      color: #ccc;
+      border-radius: 6px;
+      padding: 5px 10px;
+      font-size: 11px;
+      cursor: pointer;
+    }
+
+    .demo-bar button:hover { background: rgba(255,94,0,0.2); color: #ff7b2f; }
+  </style>
+</head>
+<body>
+
+  <!-- FIRST-TIMER: Region overlay -->
+  <div id="region-overlay">
+    <div class="region-modal">
+      <h2>👋 Welcome!</h2>
+      <p>Select your region to get started.<br>You won't be asked again.</p>
+
+      <div class="region-option" onclick="selectRegion(this)" data-val="Malaysia">
+        <span class="flag">🇲🇾</span> Malaysia
+      </div>
+      <div class="region-option" onclick="selectRegion(this)" data-val="Thailand">
+        <span class="flag">🇹🇭</span> Thailand
+      </div>
+      <div class="region-option" onclick="selectRegion(this)" data-val="Indonesia">
+        <span class="flag">🇮🇩</span> Indonesia
+      </div>
+      <div class="region-option" onclick="selectRegion(this)" data-val="Other">
+        <span class="flag">🌐</span> Other
+      </div>
+
+      <button class="btn-region-confirm" onclick="confirmRegion()">Continue →</button>
+    </div>
+  </div>
+
+  <!-- MAIN PAGE -->
+  <div class="page" id="main-page">
+
+    <!-- Header -->
+    <div class="app-header">
+      <div class="brand">Advan<span>t</span>Play</div>
+      <div class="user-chip">
+        <div class="user-avatar">👤</div>
+        <span>@username</span>
+      </div>
+    </div>
+
+    <!-- 1. Campaign Rewards — always top -->
+    <div class="campaign-card">
+      <div class="campaign-top">
+        <div class="campaign-title">🎟️ Campaign Rewards</div>
+        <span class="badge-hot">Live</span>
+      </div>
+
+      <!-- State A: voucher available -->
+      <div id="voucher-available">
+        <div class="voucher-slot">
+          <div class="voucher-slot-info">
+            <div class="voucher-slot-label">Welcome Bonus — 50% Off</div>
+            <div class="voucher-slot-sub">12 slots left · Expires tonight</div>
+          </div>
+          <button class="btn-claim">Claim</button>
+        </div>
+      </div>
+
+      <!-- State B: no active voucher (toggle below) -->
+      <div id="voucher-empty" style="display:none;">
+        <div class="campaign-empty">
+          🎁 No active drop right now.<br>
+          <span style="font-size:12px;">Subscribe to our channel for the next drop.</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- 2. 3 Core Actions -->
+    <div class="core-grid">
+
+      <!-- Check-in -->
+      <div class="core-card" onclick="simulateCheckin()">
+        <div class="status-dot" id="checkin-dot"></div>
+        <span class="core-icon">✅</span>
+        <div class="core-label">Daily<br>Check-in</div>
+        <div class="core-sub" id="checkin-sub">Tap to check in</div>
+      </div>
+
+      <!-- Lucky Game -->
+      <div class="core-card">
+        <span class="core-icon">🎰</span>
+        <div class="core-label">Lucky<br>Game</div>
+        <div class="core-sub">Today's pick</div>
+      </div>
+
+      <!-- Referral — full width -->
+      <div class="core-card full-width" onclick="simulateReferral()">
+        <div>
+          <span class="core-icon" style="display:inline; font-size:22px; margin-right:8px;">🔗</span>
+          <span class="core-label" style="display:inline;">Invite Friends</span>
+          <div class="core-sub">3 referrals → unlock +200 XP</div>
+        </div>
+        <div class="core-action-right">
+          <button class="btn-action-sm">Get Link</button>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- 3. Progress Guide (new user guidance) -->
+    <div class="progress-guide" id="progress-guide">
+      <div class="progress-guide-title">Your Progress</div>
+      <div class="step-list">
+        <div class="step-item done" id="step-1">
+          <div class="step-num">✓</div>
+          <span>Check in daily</span>
+        </div>
+        <div class="step-item" id="step-2">
+          <div class="step-num">2</div>
+          <span>Invite 3 friends to unlock +200 XP</span>
+        </div>
+        <div class="step-item" id="step-3">
+          <div class="step-num">3</div>
+          <span>Claim your reward when a drop is live</span>
+        </div>
+      </div>
+      <div class="progress-bar-wrap">
+        <div class="progress-bar-fill" id="guide-bar" style="width:33%;"></div>
+      </div>
+    </div>
+
+    <!-- 4. Secondary Actions -->
+    <div class="secondary-grid">
+      <div class="sec-card">
+        <span class="sec-icon">🏆</span>
+        <div class="sec-label">Weekly Leaderboard</div>
+      </div>
+      <div class="sec-card">
+        <span class="sec-icon">📣</span>
+        <div class="sec-label">Official Channel</div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- DEMO CONTROLS (remove in production) -->
+  <div class="demo-bar">
+    <span>Demo:</span>
+    <button onclick="toggleVoucher()">Toggle Voucher</button>
+    <button onclick="toggleRegion()">Show Region</button>
+    <button onclick="toggleProgress()">Toggle Progress</button>
+  </div>
+
+  <script>
+    let selectedRegion = null;
+    let checkedIn = false;
+    let referralDone = false;
+
+    // ── Region logic ──
+    function selectRegion(el) {
+      document.querySelectorAll('.region-option').forEach(o => o.style.borderColor = '');
+      el.style.borderColor = '#ff5e00';
+      selectedRegion = el.dataset.val;
+    }
+
+    function confirmRegion() {
+      if (!selectedRegion) {
+        alert('Please select a region first.');
+        return;
+      }
+      document.getElementById('region-overlay').style.display = 'none';
+      localStorage.setItem('region', selectedRegion);
+    }
+
+    // Check on load — skip overlay if already set
+    if (localStorage.getItem('region')) {
+      document.getElementById('region-overlay').style.display = 'none';
+    }
+
+    // ── Check-in simulation ──
+    function simulateCheckin() {
+      if (checkedIn) return;
+      checkedIn = true;
+      document.getElementById('checkin-sub').textContent = 'Done ✓ — see you tomorrow';
+      document.getElementById('checkin-dot').classList.remove('pending');
+      // Update progress bar
+      document.getElementById('guide-bar').style.width = '50%';
+      document.getElementById('step-1').classList.add('done');
+      document.getElementById('step-1').querySelector('.step-num').textContent = '✓';
+    }
+
+    // ── Referral simulation ──
+    function simulateReferral() {
+      alert('Your referral link:\nhttps://t.me/advantplay_bot?start=ref_demo123\n\n(Tap to copy in real app)');
+    }
+
+    // ── Demo toggles ──
+    function toggleVoucher() {
+      const a = document.getElementById('voucher-available');
+      const b = document.getElementById('voucher-empty');
+      if (a.style.display === 'none') {
+        a.style.display = 'block'; b.style.display = 'none';
+      } else {
+        a.style.display = 'none'; b.style.display = 'block';
+      }
+    }
+
+    function toggleRegion() {
+      localStorage.removeItem('region');
+      document.getElementById('region-overlay').style.display = 'flex';
+      selectedRegion = null;
+      document.querySelectorAll('.region-option').forEach(o => o.style.borderColor = '');
+    }
+
+    function toggleProgress() {
+      const g = document.getElementById('progress-guide');
+      g.style.display = g.style.display === 'none' ? 'block' : 'none';
+    }
+  </script>
+
+</body>
+</html>
