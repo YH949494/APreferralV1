@@ -716,6 +716,7 @@
     /* Light admin sections */
     #admin-panel #adm_drop_container,
     #admin-affiliate-pools,
+    #admin-affiliate-leaderboard-wrap,
     #aff_pool_summary,
     #aff_pending,
     #aff_kpis_wrap {
@@ -737,7 +738,10 @@
     #admin-affiliate-pools label,
     #admin-affiliate-pools small,
     #admin-affiliate-pools li,
-    #admin-affiliate-pools pre {
+    #admin-affiliate-pools pre,
+    #admin-affiliate-leaderboard-wrap h5,
+    #admin-affiliate-leaderboard-wrap th,
+    #admin-affiliate-leaderboard-wrap td {
       color: #111827 !important;
     }
 
@@ -750,7 +754,8 @@
     #admin-affiliate-pools span[style],
     #admin-affiliate-pools label[style],
     #admin-affiliate-pools small[style],
-    #admin-affiliate-pools .text-muted {
+    #admin-affiliate-pools .text-muted,
+    #admin-affiliate-leaderboard-wrap .leaderboard-empty {
       color: #4b5563 !important;
     }
 
@@ -1009,14 +1014,7 @@
         <button onclick="viewJoinRequests()">📥 View Join Requests</button>
         <button onclick="loadPreviousLeaderboard()">🏆 View Past Leaderboard</button>
         <button onclick="openVoucherModal()">🎁 Create Bonus Voucher</button>
-        <div style="margin-top:12px; background:#fff; border:1px solid #ddd; border-radius:8px; padding:12px;">
-          <h5 style="margin:0 0 8px 0;">3. RETENTION</h5>
-          <div style="display:flex; gap:8px; flex-wrap:wrap;">
-            <button type="button" onclick="loadRetentionKpis()">Load Retention KPIs</button>
-            <button type="button" onclick="exportRetentionKpisCsv()">Export CSV</button>
-          </div>
-          <div id="retention_kpis_wrap" style="margin-top:8px; overflow:auto;"></div>
-        </div>
+        <button onclick="loadAdminPastWeekAffiliateLeaderboard()">📊 Past Week Affiliate</button>
 
         <div id="adm_drop_container" style="margin-top:18px; text-align:left;">
           <h4 style="margin-bottom:8px;">🎟️ Voucher Drops</h4>
@@ -1165,6 +1163,10 @@
             <button type="button" onclick="affLoadDailyKpis()">Load last 14 days</button>
             <div id="aff_kpis_wrap" style="margin-top:8px; overflow:auto;"></div>
           </div>
+        </div>
+        <div id="admin-affiliate-leaderboard-wrap" style="display:none; background:#fff; border:1px solid #ddd; border-radius:8px; padding:12px; margin-top:14px; overflow-x:auto;">
+          <h5 style="margin:0 0 8px 0;">📊 Past Week Affiliate Leaderboard</h5>
+          <div id="admin-affiliate-leaderboard-output">Loading…</div>
         </div>
       </div>
     </div>
@@ -2660,9 +2662,11 @@ Active players win more.
         if (isAdmin) {
           document.getElementById("admin-panel").style.display = "block";
           document.getElementById("admin-affiliate-pools").style.display = "block";
+          document.getElementById("admin-affiliate-leaderboard-wrap").style.display = "block";
           if (typeof adm_list === "function") {
             adm_list();
           }
+          loadAdminPastWeekAffiliateLeaderboard();
         }
 
         renderAffiliateRewards(voucherData.rewards || []);
@@ -3788,6 +3792,40 @@ function setLeaderboardMeta(ts, { isStale = false } = {}) {
       }
     }
 
+    async function loadAdminPastWeekAffiliateLeaderboard() {
+      const wrap = document.getElementById("admin-affiliate-leaderboard-wrap");
+      const out = document.getElementById("admin-affiliate-leaderboard-output");
+      if (!wrap || !out) return;
+      wrap.style.display = "block";
+      out.innerHTML = '<div class="leaderboard-empty">Loading past week affiliate leaderboard…</div>';
+      try {
+        const listUrl = new URL(`${API_BASE}/api/leaderboard/affiliate/snapshots`);
+        listUrl.searchParams.set("limit", "1");
+        if (userId) listUrl.searchParams.set("user_id", userId);
+        const listRes = await fetch(listUrl.toString());
+        if (!listRes.ok) throw new Error(`HTTP ${listRes.status}`);
+        const listData = await listRes.json();
+        const items = Array.isArray(listData?.items) ? listData.items : [];
+        if (!items.length) {
+          out.innerHTML = '<div class="leaderboard-empty">No past week snapshot available yet.</div>';
+          return;
+        }
+        const weekItem = items[0];
+        const weekKey = weekItem.week_key;
+        const snapUrl = new URL(`${API_BASE}/api/leaderboard/affiliate/snapshot`);
+        snapUrl.searchParams.set("week_key", weekKey);
+        if (userId) snapUrl.searchParams.set("user_id", userId);
+        const snapRes = await fetch(snapUrl.toString());
+        if (!snapRes.ok) throw new Error(`HTTP ${snapRes.status}`);
+        const snapData = await snapRes.json();
+        const rows = Array.isArray(snapData?.entries) ? snapData.entries : [];
+        const meta = `${weekItem.week_start_local || weekKey} – ${weekItem.week_end_local || ""}`;
+        out.innerHTML = renderAffiliateRows(rows, { isAdmin: true, snapshotMeta: meta });
+      } catch (err) {
+        out.innerHTML = `<div class="leaderboard-empty">Error loading past week affiliate leaderboard: ${escapeHtml(String(err.message || err))}</div>`;
+      }
+    }
+
     function getLeaderboardName(row, { withCrown = true } = {}) {
       const baseName = (row?.username || row?.first_name || row?.user_id || "Anonymous")
         .toString()
@@ -4638,7 +4676,9 @@ ${referral}`;
         if (isAdminMode) {
           document.getElementById("admin-panel").style.display = "block";
           document.getElementById("admin-affiliate-pools").style.display = "block";
+          document.getElementById("admin-affiliate-leaderboard-wrap").style.display = "block";
           adm_list();
+          loadAdminPastWeekAffiliateLeaderboard();
         }
         return;
       }
@@ -4671,7 +4711,9 @@ ${referral}`;
       if (isAdminMode) {
         document.getElementById("admin-panel").style.display = "block";
         document.getElementById("admin-affiliate-pools").style.display = "block";
+        document.getElementById("admin-affiliate-leaderboard-wrap").style.display = "block";
         adm_list();
+        loadAdminPastWeekAffiliateLeaderboard();
       }
     };
 
