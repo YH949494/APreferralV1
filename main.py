@@ -1946,7 +1946,7 @@ def retention_kpis_export():
     from flask import Response
     out = io.StringIO()
     w = csv.writer(out)
-    cols = ["cohort_month", "cohort_size", "d7_eligible", "d7_retained", "d7_retention_rate", "d14_eligible", "d14_retained", "d14_retention_rate", "d30_eligible", "d30_retained", "d30_retention_rate", "diagnosis", "computed_at_utc"]
+    cols = ["cohort_month", "cohort_size", "d7_eligible", "d7_retained", "d7_retention_rate", "d7_claim_retained", "d7_claim_retention_rate", "d14_eligible", "d14_retained", "d14_retention_rate", "d14_claim_retained", "d14_claim_retention_rate", "d30_eligible", "d30_retained", "d30_retention_rate", "d30_claim_retained", "d30_claim_retention_rate", "diagnosis", "computed_at_utc"]
     w.writerow(cols)
     for r in rows:
         w.writerow([r.get(c, "") for c in cols])
