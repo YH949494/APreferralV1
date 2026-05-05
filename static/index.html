@@ -151,6 +151,22 @@
       border-color: rgba(255, 255, 255, 0.2);
     }
 
+    .btn-secondary {
+      background: linear-gradient(180deg, #2c2f36, #1d2026);
+      color: #fff;
+      border: 1px solid rgba(255, 255, 255, 0.14);
+    }
+
+    .btn-secondary:hover { background: #2d3038; }
+
+    #adm_starts::-webkit-calendar-picker-indicator,
+    #adm_ends::-webkit-calendar-picker-indicator,
+    #adm_edit_starts_at::-webkit-calendar-picker-indicator,
+    #adm_edit_ends_at::-webkit-calendar-picker-indicator {
+      filter: invert(1);
+      cursor: pointer;
+    }
+
     #admin-panel button:not(.btn),
     .modal-content button:not(.btn) {
       background: linear-gradient(180deg, #2c2f36, #1d2026);
