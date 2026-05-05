@@ -5938,6 +5938,19 @@ def admin_drop_actions(drop_id):
         db.drops.update_one({"_id": drop["_id"]}, {"$set": {"status": "paused"}})
     elif op == "end_now":
         db.drops.update_one({"_id": drop["_id"]}, {"$set": {"endsAt": now_utc(), "status": "expired"}})
+    elif op == "set_dates":
+        starts_str = data.get("startsAt")
+        ends_str = data.get("endsAt")
+        if not starts_str or not ends_str:
+            return jsonify({"status": "error", "code": "missing_fields"}), 400
+        try:
+            new_starts = parse_kl_local(starts_str)
+            new_ends = parse_kl_local(ends_str)
+        except ValueError as exc:
+            return jsonify({"status": "error", "code": "bad_request", "message": str(exc)}), 400
+        if new_ends <= new_starts:
+            return jsonify({"status": "error", "code": "bad_request", "message": "endsAt must be after startsAt"}), 400
+        db.drops.update_one({"_id": drop["_id"]}, {"$set": {"startsAt": new_starts, "endsAt": new_ends}})
     else:
         return jsonify({"status": "error", "code": "bad_request"}), 400
 
