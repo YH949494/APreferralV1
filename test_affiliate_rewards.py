@@ -644,6 +644,47 @@ class AffiliateRewardTests(unittest.TestCase):
         self.assertEqual(first.get("voucher_code"), second.get("voucher_code"))
         self.assertEqual(db.voucher_pools.count_documents({"pool_id": "T1", "status": "issued"}), 1)
 
+    def test_monthly_upsert_no_set_conflict_creates_and_issues_t1(self):
+        db = FakeDb()
+        db.users.insert_one({"user_id": 166, "blocked": False})
+        now = datetime(2026, 1, 16, tzinfo=timezone.utc)
+        for i in range(1, 15):
+            db.qualified_events.insert_one({"invitee_id": 16600 + i, "referrer_id": 166, "qualified_at": now})
+        db.voucher_pools.insert_one({"pool_id": "T1", "code": "UPSERT-T1", "status": "available"})
+
+        row = evaluate_monthly_affiliate_reward(db, referrer_id=166, now_utc=now)
+
+        self.assertEqual(row["dedup_key"], "AFF:166:202601:T1")
+        self.assertEqual(row["status"], "ISSUED")
+        self.assertIsNotNone(row.get("voucher_code"))
+
+    def test_existing_issued_ledger_rerun_keeps_status_and_voucher_code(self):
+        db = FakeDb()
+        db.users.insert_one({"user_id": 167, "blocked": False})
+        now = datetime(2026, 1, 16, tzinfo=timezone.utc)
+        for i in range(1, 15):
+            db.qualified_events.insert_one({"invitee_id": 16700 + i, "referrer_id": 167, "qualified_at": now})
+
+        db.affiliate_ledger.insert_one({
+            "dedup_key": "AFF:167:202601:T1",
+            "ledger_type": "AFFILIATE_MONTHLY",
+            "user_id": 167,
+            "year_month": "202601",
+            "tier": "T1",
+            "pool_id": "T1",
+            "status": "ISSUED",
+            "voucher_code": "LOCKED-T1",
+            "risk_flags": [],
+            "qualified_count": 14,
+            "created_at": now,
+            "updated_at": now,
+        })
+
+        row = evaluate_monthly_affiliate_reward(db, referrer_id=167, now_utc=now + timedelta(minutes=1))
+
+        self.assertEqual(row["status"], "ISSUED")
+        self.assertEqual(row.get("voucher_code"), "LOCKED-T1")
+
     def test_settling_retry_issues_voucher_when_pool_claim_incomplete(self):
         # Ledger stuck in SETTLING (e.g. process crashed before pool claim ran).
         # Next evaluate call must retry the pool claim and reach ISSUED.

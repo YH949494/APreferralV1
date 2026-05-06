@@ -706,22 +706,20 @@ def evaluate_monthly_affiliate_reward(db, *, referrer_id: int, now_utc: datetime
             db.affiliate_ledger.update_one(
                 {"dedup_key": dedup_key},
                 {
-                    "$setOnInsert": {
-                        "ledger_type": "AFFILIATE_MONTHLY",
-                        "user_id": int(referrer_id),
-                        "year_month": yyyymm,
-                        "tier": eligible_tier,
-                        "pool_id": eligible_tier,
-                        "status": "APPROVED",
-                        "dedup_key": dedup_key,
-                        "voucher_code": None,
-                        "risk_flags": list(risk_flags),
-                        "created_at": now_utc,
-                        "updated_at": now_utc,
-                    },
-                    "$set": {
-                        "qualified_count": int(qualified_count),
-                        "risk_flags": list(risk_flags),
+                "$setOnInsert": {
+                    "ledger_type": "AFFILIATE_MONTHLY",
+                    "user_id": int(referrer_id),
+                    "year_month": yyyymm,
+                    "tier": eligible_tier,
+                    "pool_id": eligible_tier,
+                    "status": "APPROVED",
+                    "dedup_key": dedup_key,
+                    "voucher_code": None,
+                    "created_at": now_utc,
+                },
+                "$set": {
+                    "qualified_count": int(qualified_count),
+                    "risk_flags": list(risk_flags),
                         "updated_at": now_utc,
                     },
                 },
