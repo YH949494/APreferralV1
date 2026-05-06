@@ -854,31 +854,45 @@ def evaluate_weekly_affiliate_reward(
             "status": "PENDING_REVIEW" if user_doc.get("blocked") else "APPROVED",
             "dedup_key": dedup_key,
             "voucher_code": None,
-            "risk_flags": list(base_risk_flags),
             "created_at": now_utc,
-            "updated_at": now_utc,
         }
         set_doc = {
             "qualified_count": int(qualified_count),
-            "week_start_utc": week_start_utc,
-            "week_end_utc": week_end_utc,
             "risk_flags": list(base_risk_flags),
             "updated_at": now_utc,
         }
         if user_doc.get("blocked"):
             set_doc["status"] = "PENDING_REVIEW"
             set_doc["review_reason"] = "blocked_user"
-        db.affiliate_ledger.update_one(
-            {"dedup_key": dedup_key},
-            {"$setOnInsert": insert_doc, "$set": set_doc},
-            upsert=True,
-        )
         logger.info(
-            "[AFFILIATE][WEEKLY_LEDGER_CREATE] user_id=%s tier=%s week_key=%s",
+            "[AFFILIATE][WEEKLY_LEDGER_CREATE_ATTEMPT] user_id=%s tier=%s week_key=%s",
             int(referrer_id),
             eligible_tier,
             week_key,
         )
+        try:
+            db.affiliate_ledger.update_one(
+                {"dedup_key": dedup_key},
+                {"$setOnInsert": insert_doc, "$set": set_doc},
+                upsert=True,
+            )
+            logger.info(
+                "[AFFILIATE][WEEKLY_LEDGER_CREATE_OK] user_id=%s tier=%s week_key=%s",
+                int(referrer_id),
+                eligible_tier,
+                week_key,
+            )
+        except Exception as e:
+            logger.error(
+                "[AFFILIATE][WEEKLY_LEDGER_CREATE_ERROR] user_id=%s tier=%s week_key=%s err_class=%s err_msg=%s",
+                int(referrer_id),
+                eligible_tier,
+                week_key,
+                e.__class__.__name__,
+                str(e),
+                exc_info=True,
+            )
+            raise
         ledger = db.affiliate_ledger.find_one({"dedup_key": dedup_key})
         if not ledger:
             continue
@@ -984,7 +998,6 @@ def issue_weekly_affiliate_rewards_for_window(
             )
         )
         before_status_by_tier = {str(doc.get("tier")): str(doc.get("status") or "") for doc in existing_before}
-        summary["created_ledgers"] += max(0, len(expected_tiers) - len(existing_before))
         summary["skipped_existing"] += len(existing_before)
         try:
             evaluate_weekly_affiliate_reward(
@@ -995,9 +1008,16 @@ def issue_weekly_affiliate_rewards_for_window(
                 week_key=week_key,
                 now_utc=now_utc,
             )
-        except Exception:
+        except Exception as e:
             summary["errors"] += 1
-            logger.exception("[AFFILIATE][WEEKLY_BULK_ISSUE_ERROR] user_id=%s week_key=%s", uid, week_key)
+            logger.error(
+                "[AFFILIATE][WEEKLY_BULK_ISSUE_ERROR] user_id=%s week_key=%s err_class=%s err_msg=%s",
+                uid,
+                week_key,
+                e.__class__.__name__,
+                str(e),
+                exc_info=True,
+            )
             continue
 
         final_ledgers = list(
