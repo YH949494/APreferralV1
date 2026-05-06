@@ -1283,14 +1283,13 @@ def maybe_shout_referral_congrats(inviter_user_id: int, now_utc_ts: datetime) ->
         return
 
     threshold, voucher = hit_tier
-    try:
-        db.referral_tier_congrats.insert_one({
-            "user_id": inviter_user_id,
-            "month_key": month_key,
-            "tier": threshold,
-            "sent_at": now_utc_ts,
-        })
-    except DuplicateKeyError:
+
+    # Check dedup before sending but do NOT record yet — record only after confirmed send
+    already_sent = db.referral_tier_congrats.find_one(
+        {"user_id": inviter_user_id, "month_key": month_key, "tier": threshold},
+        {"_id": 1},
+    )
+    if already_sent:
         return
 
     tier_idx = next(i for i, (t, _) in enumerate(REFERRAL_CONGRATS_TIERS) if t == threshold)
@@ -1324,8 +1323,21 @@ def maybe_shout_referral_congrats(inviter_user_id: int, now_utc_ts: datetime) ->
                 "[REFERRAL][CONGRATS] send_failed inviter=%s tier=%s status=%s body=%s",
                 inviter_user_id, threshold, resp.status_code, resp.text[:200],
             )
+            return
     except Exception:
         logger.exception("[REFERRAL][CONGRATS] send_error inviter=%s tier=%s", inviter_user_id, threshold)
+        return
+
+    # Record dedup only after confirmed send to keep the tier retryable on failure
+    try:
+        db.referral_tier_congrats.insert_one({
+            "user_id": inviter_user_id,
+            "month_key": month_key,
+            "tier": threshold,
+            "sent_at": now_utc_ts,
+        })
+    except DuplicateKeyError:
+        pass
 
 
 def settle_pending_referrals(batch_limit: int = 200) -> None:
