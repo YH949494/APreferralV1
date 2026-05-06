@@ -27,6 +27,15 @@ except (TypeError, ValueError):
     OFFICIAL_CHANNEL_ID = -1002396761021
 API_BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"
 REFERRAL_HOLD_HOURS = int(os.getenv("REFERRAL_QUALIFY_HOURS", "48"))
+
+AFFILIATE_CONGRATS_CHANNEL_ID = int(os.getenv("AFFILIATE_CONGRATS_CHANNEL_ID", "-1003820861717"))
+REFERRAL_CONGRATS_TIERS = [
+    (10, 10),
+    (25, 15),
+    (50, 50),
+    (150, 125),
+    (250, 250),
+]
 REFERRAL_CHANNEL_RETRY_HOURS = 12
 REFERRAL_CHANNEL_EXPIRE_DAYS = 7
 INVITEE_SUB_AUDIT_ENABLED = os.getenv("INVITEE_SUB_AUDIT_ENABLED", "1") == "1"
@@ -1249,6 +1258,76 @@ def confirm_qualified_invitees(batch_limit: int = 200) -> int:
     logger.info("[SCHED][QUALIFIED] skipped reason=mark_invitee_qualified_is_source_of_truth")
     return 0
 
+def maybe_shout_referral_congrats(inviter_user_id: int, now_utc_ts: datetime) -> None:
+    from html import escape as html_escape
+    month_key = _month_start_kl(now_utc_ts).date().isoformat()
+    settled = db.referral_events.count_documents({
+        "inviter_id": inviter_user_id,
+        "event": "referral_settled",
+        "month_key": month_key,
+    })
+    revoked = db.referral_events.count_documents({
+        "inviter_id": inviter_user_id,
+        "event": "referral_revoked",
+        "month_key": month_key,
+    })
+    monthly_count = settled - revoked
+
+    hit_tier = None
+    for threshold, voucher in REFERRAL_CONGRATS_TIERS:
+        if monthly_count >= threshold > (monthly_count - 1):
+            hit_tier = (threshold, voucher)
+            break
+
+    if not hit_tier:
+        return
+
+    threshold, voucher = hit_tier
+    try:
+        db.referral_tier_congrats.insert_one({
+            "user_id": inviter_user_id,
+            "month_key": month_key,
+            "tier": threshold,
+            "sent_at": now_utc_ts,
+        })
+    except DuplicateKeyError:
+        return
+
+    tier_idx = next(i for i, (t, _) in enumerate(REFERRAL_CONGRATS_TIERS) if t == threshold)
+    is_last = tier_idx == len(REFERRAL_CONGRATS_TIERS) - 1
+    if not is_last:
+        next_tier, next_voucher = REFERRAL_CONGRATS_TIERS[tier_idx + 1]
+        tail = f"Next: {next_tier} refs = ${next_voucher}! 💪"
+    else:
+        tail = "Absolute legend! 🏆"
+
+    user_doc = db.users.find_one({"user_id": inviter_user_id}, {"user_id": 1, "username": 1, "first_name": 1})
+    if user_doc and user_doc.get("username"):
+        mention = f'<a href="tg://user?id={inviter_user_id}">@{html_escape(user_doc["username"])}</a>'
+    elif user_doc and user_doc.get("first_name"):
+        mention = f'<a href="tg://user?id={inviter_user_id}">{html_escape(user_doc["first_name"])}</a>'
+    else:
+        mention = f'<a href="tg://user?id={inviter_user_id}">user</a>'
+
+    text = (
+        f"🎉 {mention} just hit <b>{threshold} valid referrals</b> this month "
+        f"— <b>${voucher} voucher</b> unlocked! {tail}"
+    )
+    try:
+        resp = requests.post(
+            f"{API_BASE}/sendMessage",
+            json={"chat_id": AFFILIATE_CONGRATS_CHANNEL_ID, "text": text, "parse_mode": "HTML"},
+            timeout=10,
+        )
+        if not resp.ok:
+            logger.warning(
+                "[REFERRAL][CONGRATS] send_failed inviter=%s tier=%s status=%s body=%s",
+                inviter_user_id, threshold, resp.status_code, resp.text[:200],
+            )
+    except Exception:
+        logger.exception("[REFERRAL][CONGRATS] send_error inviter=%s tier=%s", inviter_user_id, threshold)
+
+
 def settle_pending_referrals(batch_limit: int = 200) -> None:
     now_utc_ts = now_utc()
     cutoff = now_utc_ts - timedelta(hours=REFERRAL_HOLD_HOURS)
@@ -1554,7 +1633,8 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
                 new_ref_total=new_ref_total,
                 now_utc=now_utc_ts,
             )
-            
+            maybe_shout_referral_congrats(inviter_user_id, now_utc_ts)
+
             db.pending_referrals.update_one(
                 {"_id": pending_id},
                 {
