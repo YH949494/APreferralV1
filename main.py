@@ -1647,6 +1647,11 @@ def ensure_indexes():
         [("inviter_user_id", 1), ("status", 1)],
         name="pending_by_inviter",
     )
+    db.referral_tier_congrats.create_index(
+        [("user_id", 1), ("month_key", 1), ("tier", 1)],
+        unique=True,
+        name="uniq_referral_tier_congrats",
+    )
     referral_rate_limits_collection.create_index(
         [("key", 1)],
         unique=True,
