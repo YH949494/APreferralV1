@@ -5754,20 +5754,52 @@ def admin_affiliate_pending_v2():
     if status not in {"PENDING_REVIEW", "PENDING_MANUAL", "SIMULATED_PENDING"}:
         return jsonify({"status": "error", "reason": "bad_status"}), 400
 
+    now_utc = datetime.now(timezone.utc)
+    month_start_utc = now_utc.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    week_start_utc = (now_utc - timedelta(days=now_utc.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+    threshold_by_tier = {
+        "T1": int(os.getenv("AFF_T1_THRESHOLD", "10")),
+        "T2": int(os.getenv("AFF_T2_THRESHOLD", "25")),
+        "T3": int(os.getenv("AFF_T3_THRESHOLD", "50")),
+        "T4": int(os.getenv("AFF_T4_THRESHOLD", "150")),
+        "T5": int(os.getenv("AFF_T5_THRESHOLD", "300")),
+    }
     rows = list(db.affiliate_ledger.find({"status": status}).sort("created_at", 1).limit(200))
     items = []
     for row in rows:
+        uid = row.get("user_id")
+        qualified_week = int(db.qualified_events.count_documents({"referrer_id": uid, "qualified_at": {"$gte": week_start_utc, "$lt": now_utc}}))
+        qualified_month = int(db.qualified_events.count_documents({"referrer_id": uid, "qualified_at": {"$gte": month_start_utc, "$lt": now_utc}}))
+        qualified_total = int(db.qualified_events.count_documents({"referrer_id": uid}))
+        eligible_tier = None
+        for tier_name in ("T5", "T4", "T3", "T2", "T1"):
+            if qualified_month >= threshold_by_tier[tier_name]:
+                eligible_tier = tier_name
+                break
+        missing_ledger_reason = None
+        if not eligible_tier:
+            missing_ledger_reason = "below_current_month_threshold"
+        elif str(row.get("tier") or "").upper() != eligible_tier:
+            missing_ledger_reason = "higher_tier_reached"
         items.append(
             {
                 "ledger_id": str(row.get("_id")),
-                "user_id": row.get("user_id"),
+                "user_id": uid,
                 "year_month": row.get("year_month"),
                 "tier": row.get("tier"),
                 "pool_id": row.get("pool_id"),
                 "status": row.get("status"),
+                "ledger_status": row.get("status"),
+                "voucher_code": row.get("voucher_code"),
                 "risk_flags": row.get("risk_flags") or [],
                 "simulate": bool(row.get("simulate")),
                 "would_issue_pool": row.get("would_issue_pool"),
+                "qualified_week": qualified_week,
+                "qualified_month": qualified_month,
+                "qualified_total": qualified_total,
+                "eligible_tier": eligible_tier,
+                "expected_pool_id": eligible_tier,
+                "missing_ledger_reason": missing_ledger_reason,
                 "gate_day": row.get("gate_day"),
                 "still_in_group": row.get("still_in_group"),
                 "xp_total": row.get("xp_total"),
