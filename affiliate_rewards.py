@@ -24,7 +24,7 @@ T1_THRESHOLD = int(os.getenv("AFF_T1_THRESHOLD", "10"))
 T2_THRESHOLD = int(os.getenv("AFF_T2_THRESHOLD", "25"))
 T3_THRESHOLD = int(os.getenv("AFF_T3_THRESHOLD", "50"))
 T4_THRESHOLD = int(os.getenv("AFF_T4_THRESHOLD", "150"))
-T5_THRESHOLD = int(os.getenv("AFF_T5_THRESHOLD", "250"))
+T5_THRESHOLD = int(os.getenv("AFF_T5_THRESHOLD", "300"))
 logger = logging.getLogger(__name__)
 logger.info(
     "[AFFILIATE][TIER_CONFIG] thresholds=%s",
@@ -301,7 +301,7 @@ def _issue_affiliate_ledger_from_pool(db, ledger, now_utc: datetime):
             {"$set": {"status": "ISSUED", "voucher_code": voucher.get("code"), "updated_at": now_utc}},
         )
         logger.info(
-            "[AFFILIATE][ISSUE_SUCCESS] ledger_id=%s user_id=%s tier=%s pool_id=%s code=%s",
+            "[AFFILIATE][ISSUE_OK] ledger_id=%s user_id=%s tier=%s pool_id=%s code=%s",
             ledger_id,
             int(user_id),
             tier,
@@ -315,7 +315,7 @@ def _issue_affiliate_ledger_from_pool(db, ledger, now_utc: datetime):
         {"$set": {"status": "PENDING_MANUAL", "updated_at": now_utc}, "$addToSet": {"risk_flags": "pool_empty"}},
     )
     logger.info(
-        "[AFFILIATE][POOL_EMPTY] ledger_id=%s user_id=%s tier=%s pool_id=%s",
+        "[AFFILIATE][ISSUE_SKIP] ledger_id=%s user_id=%s tier=%s pool_id=%s reason=pool_empty",
         ledger_id,
         int(user_id),
         tier,
@@ -630,6 +630,7 @@ def evaluate_monthly_affiliate_reward(db, *, referrer_id: int, now_utc: datetime
     qualified_count = db.qualified_events.count_documents(
         {"referrer_id": int(referrer_id), "qualified_at": {"$gte": start_utc, "$lt": end_utc}}
     )
+    logger.info("[AFFILIATE][EVAL_COUNT] user_id=%s year_month=%s qualified_count=%s", int(referrer_id), yyyymm, int(qualified_count))
     logger.info(
         "[AFFILIATE][EVAL_START] user_id=%s qualified_count=%s year_month=%s",
         int(referrer_id),
@@ -714,6 +715,7 @@ def evaluate_monthly_affiliate_reward(db, *, referrer_id: int, now_utc: datetime
 
         status = ledger.get("status")
         if status in FINAL_STATUSES:
+            logger.info("[AFFILIATE][LEDGER_SKIP] user_id=%s tier=%s year_month=%s reason=final_status status=%s", int(referrer_id), eligible_tier, yyyymm, status)
             last_ledger = ledger
             continue
 
@@ -736,6 +738,7 @@ def evaluate_monthly_affiliate_reward(db, *, referrer_id: int, now_utc: datetime
             continue
 
         if status == "SIMULATED_PENDING":
+            logger.info("[AFFILIATE][LEDGER_SKIP] user_id=%s tier=%s year_month=%s reason=simulated_pending", int(referrer_id), eligible_tier, yyyymm)
             last_ledger = ledger
             continue
 
@@ -1165,6 +1168,33 @@ def retry_current_month_pending_manual_ledgers(db, *, now_utc: datetime | None =
     return {"yyyymm": out.get("year_month"), "processed": int(out.get("eligible_users", 0))}
 
 
+def catch_up_missing_current_month_affiliate_ledgers(db, *, now_utc: datetime | None = None, batch_limit: int = 500):
+    now_utc = now_utc or datetime.now(timezone.utc)
+    start_utc, end_utc, yyyymm = _month_window_utc(now_utc)
+    logger.info("[AFFILIATE][CATCHUP_START] year_month=%s batch_limit=%s", yyyymm, int(batch_limit))
+    rows = list(
+        db.qualified_events.aggregate(
+            [
+                {"$match": {"qualified_at": {"$gte": start_utc, "$lt": end_utc}, "referrer_id": {"$ne": None}}},
+                {"$group": {"_id": "$referrer_id", "count": {"$sum": 1}}},
+                {"$match": {"count": {"$gte": T1_THRESHOLD}}},
+                {"$sort": {"count": -1, "_id": 1}},
+                {"$limit": max(1, int(batch_limit))},
+            ]
+        )
+    )
+    processed = 0
+    for row in rows:
+        uid = int(row.get("_id"))
+        qcount = int(row.get("count") or 0)
+        eligible_tier = _tier_for_count(qcount)
+        logger.info("[AFFILIATE][CATCHUP_USER] user_id=%s year_month=%s qualified_count=%s eligible_tier=%s", uid, yyyymm, qcount, eligible_tier)
+        evaluate_monthly_affiliate_reward(db, referrer_id=uid, now_utc=now_utc)
+        processed += 1
+    logger.info("[AFFILIATE][CATCHUP_DONE] year_month=%s processed=%s", yyyymm, processed)
+    return {"year_month": yyyymm, "processed": processed}
+
+
 def mark_invitee_qualified(db, *, invitee_id: int, referrer_id: int | None, now_utc: datetime | None = None):
     now_utc = now_utc or datetime.now(timezone.utc)
     last_seen = db.user_last_seen.find_one({"user_id": int(invitee_id)}) or {}
@@ -1179,6 +1209,8 @@ def mark_invitee_qualified(db, *, invitee_id: int, referrer_id: int | None, now_
     try:
         db.qualified_events.insert_one(doc)
     except DuplicateKeyError:
+        if referrer_id is not None:
+            evaluate_monthly_affiliate_reward(db, referrer_id=int(referrer_id), now_utc=now_utc)
         return False
     try:
         from affiliate_leaderboard import emit_referral_flow_event

@@ -261,7 +261,7 @@ class AffiliateRewardTests(unittest.TestCase):
             (25, ("T1", "T2")),
             (50, ("T1", "T2", "T3")),
             (150, ("T1", "T2", "T3", "T4")),
-            (250, ("T1", "T2", "T3", "T4", "T5")),
+            (300, ("T1", "T2", "T3", "T4", "T5")),
         ]
         for idx, (qualified_total, expected_tiers) in enumerate(cases, start=1):
             db = FakeDb()

@@ -70,6 +70,7 @@ from affiliate_rewards import (
     issue_current_week_affiliate_rewards,
     issue_previous_week_affiliate_rewards,
     retry_current_month_pending_manual_ledgers,
+    catch_up_missing_current_month_affiliate_ledgers,
 )
 from telegram_utils import safe_reply_text
 
@@ -652,6 +653,11 @@ def tick_5min() -> None:
                 )
                 try:
                     if str(os.getenv("AFFILIATE_SIMULATE", "0")).strip() != "1":
+                        catch_up_missing_current_month_affiliate_ledgers(
+                            db,
+                            now_utc=datetime.now(timezone.utc),
+                            batch_limit=AFFILIATE_CURRENT_MONTH_BATCH_LIMIT,
+                        )
                         retry_current_month_pending_manual_ledgers(
                             db,
                             now_utc=datetime.now(timezone.utc),
