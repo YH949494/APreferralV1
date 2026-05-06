@@ -673,45 +673,90 @@ def evaluate_monthly_affiliate_reward(db, *, referrer_id: int, now_utc: datetime
         )
         return db.affiliate_ledger.find_one({"dedup_key": dedup_key})
     eligible_tiers = _eligible_tiers_for_count(int(qualified_count))
-    risk_flags = _risk_flags_for_referrer_month(db, referrer_id=int(referrer_id), start_utc=start_utc, end_utc=end_utc)
+    try:
+        risk_flags = _risk_flags_for_referrer_month(db, referrer_id=int(referrer_id), start_utc=start_utc, end_utc=end_utc)
+    except Exception as exc:
+        logger.exception(
+            "[AFFILIATE][EVAL_ERROR] referrer_id=%s year_month=%s qualified_count=%s eligible_tiers=%s err_class=%s err_msg=%s",
+            int(referrer_id),
+            yyyymm,
+            int(qualified_count),
+            eligible_tiers,
+            exc.__class__.__name__,
+            str(exc),
+            exc_info=True,
+        )
+        risk_flags = ["risk_flags_calc_failed"]
 
     last_ledger = None
     for eligible_tier in eligible_tiers:
         dedup_key = f"AFF:{int(referrer_id)}:{yyyymm}:{eligible_tier}"
-        db.affiliate_ledger.update_one(
-            {"dedup_key": dedup_key},
-            {
-                "$setOnInsert": {
-                    "ledger_type": "AFFILIATE_MONTHLY",
-                    "user_id": int(referrer_id),
-                    "year_month": yyyymm,
-                    "tier": eligible_tier,
-                    "pool_id": eligible_tier,
-                    "status": "APPROVED",
-                    "dedup_key": dedup_key,
-                    "voucher_code": None,
-                    "risk_flags": list(risk_flags),
-                    "created_at": now_utc,
-                    "updated_at": now_utc,
-                },
-                "$set": {
-                    "qualified_count": int(qualified_count),
-                    "risk_flags": list(risk_flags),
-                    "updated_at": now_utc,
-                },
-            },
-            upsert=True,
-        )
         logger.info(
-            "[AFFILIATE][LEDGER_CREATE] user_id=%s tier=%s year_month=%s status=%s",
+            "[AFFILIATE][LEDGER_CREATE_ATTEMPT] referrer_id=%s year_month=%s tier=%s pool_id=%s dedup_key=%s qualified_count=%s eligible_tiers=%s risk_flags=%s",
             int(referrer_id),
-            eligible_tier,
             yyyymm,
-            "APPROVED",
+            eligible_tier,
+            eligible_tier,
+            dedup_key,
+            int(qualified_count),
+            eligible_tiers,
+            list(risk_flags),
         )
+        try:
+            db.affiliate_ledger.update_one(
+                {"dedup_key": dedup_key},
+                {
+                    "$setOnInsert": {
+                        "ledger_type": "AFFILIATE_MONTHLY",
+                        "user_id": int(referrer_id),
+                        "year_month": yyyymm,
+                        "tier": eligible_tier,
+                        "pool_id": eligible_tier,
+                        "status": "APPROVED",
+                        "dedup_key": dedup_key,
+                        "voucher_code": None,
+                        "risk_flags": list(risk_flags),
+                        "created_at": now_utc,
+                        "updated_at": now_utc,
+                    },
+                    "$set": {
+                        "qualified_count": int(qualified_count),
+                        "risk_flags": list(risk_flags),
+                        "updated_at": now_utc,
+                    },
+                },
+                upsert=True,
+            )
+        except Exception as exc:
+            logger.exception(
+                "[AFFILIATE][LEDGER_CREATE_ERROR] referrer_id=%s year_month=%s tier=%s dedup_key=%s qualified_count=%s eligible_tiers=%s risk_flags=%s err_class=%s err_msg=%s",
+                int(referrer_id),
+                yyyymm,
+                eligible_tier,
+                dedup_key,
+                int(qualified_count),
+                eligible_tiers,
+                list(risk_flags),
+                exc.__class__.__name__,
+                str(exc),
+                exc_info=True,
+            )
+            raise
         ledger = db.affiliate_ledger.find_one({"dedup_key": dedup_key})
         if not ledger:
             continue
+        logger.info(
+            "[AFFILIATE][LEDGER_CREATE_OK] referrer_id=%s year_month=%s tier=%s pool_id=%s dedup_key=%s qualified_count=%s eligible_tiers=%s risk_flags=%s status=%s",
+            int(referrer_id),
+            yyyymm,
+            eligible_tier,
+            eligible_tier,
+            dedup_key,
+            int(qualified_count),
+            eligible_tiers,
+            list(risk_flags),
+            str(ledger.get("status") or ""),
+        )
 
         status = ledger.get("status")
         if status in FINAL_STATUSES:
@@ -1059,13 +1104,19 @@ def issue_current_month_affiliate_rewards(db, now_utc: datetime | None = None, b
             )
         )
         before_status_by_tier = {str(doc.get("tier")): str(doc.get("status") or "") for doc in existing_before}
-        summary["created_ledgers"] += max(0, len(expected_tiers) - len(existing_before))
         summary["skipped_existing"] += len(existing_before)
         try:
             evaluate_monthly_affiliate_reward(db, referrer_id=uid, now_utc=now_utc)
-        except Exception:
+        except Exception as exc:
             summary["errors"] += 1
-            logger.exception("[AFFILIATE][BULK_ISSUE_ERROR] user_id=%s year_month=%s", uid, yyyymm)
+            logger.exception(
+                "[AFFILIATE][BULK_ISSUE_ERROR] user_id=%s year_month=%s err_class=%s err_msg=%s",
+                uid,
+                yyyymm,
+                exc.__class__.__name__,
+                str(exc),
+                exc_info=True,
+            )
             continue
 
         final_ledgers = list(
@@ -1078,6 +1129,8 @@ def issue_current_month_affiliate_rewards(db, now_utc: datetime | None = None, b
                 }
             )
         )
+        created_tiers = {str(doc.get("tier")) for doc in final_ledgers} - set(before_status_by_tier.keys())
+        summary["created_ledgers"] += len(created_tiers)
         for ledger in final_ledgers:
             before_status = before_status_by_tier.get(str(ledger.get("tier")))
             status = str(ledger.get("status") or "")
