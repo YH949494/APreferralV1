@@ -1,5 +1,5 @@
 from pymongo import MongoClient, ASCENDING 
-from pymongo.errors import DuplicateKeyError
+from pymongo.errors import DuplicateKeyError, OperationFailure, PyMongoError
 import os
 import datetime
 from datetime import timezone, timedelta
@@ -61,6 +61,28 @@ def get_db():
 
 def get_collection(name: str) -> CollectionProxy:
     return CollectionProxy(name)
+
+
+def safe_create_index(collection, keys, *, name: str, unique: bool = False, partialFilterExpression=None) -> bool:
+    try:
+        existing = collection.index_information()
+        if name in existing:
+            logger.info("[DB][INDEX] exists collection=%s name=%s", getattr(collection, "name", "unknown"), name)
+            return True
+        kwargs = {"name": name, "unique": unique}
+        if partialFilterExpression is not None:
+            kwargs["partialFilterExpression"] = partialFilterExpression
+        collection.create_index(keys, **kwargs)
+        logger.info("[DB][INDEX] created collection=%s name=%s", getattr(collection, "name", "unknown"), name)
+        return True
+    except (OperationFailure, PyMongoError) as exc:
+        logger.warning(
+            "[DB][INDEX] create_failed collection=%s name=%s error=%s",
+            getattr(collection, "name", "unknown"),
+            name,
+            exc,
+        )
+        return False
 
 
 def ensure_indexes() -> None:

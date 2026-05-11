@@ -80,7 +80,7 @@ import os, asyncio, traceback, csv, io, requests, logging, time, uuid, socket, s
 import httpx
 import pytz
 import json
-from database import init_db, db
+from database import init_db, db, safe_create_index
 
 FIRST_CHECKIN_BONUS_XP = int(os.getenv("FIRST_CHECKIN_BONUS_XP", "200"))
 WELCOME_BONUS_XP = int(os.getenv("WELCOME_BONUS_XP", "20"))
@@ -90,6 +90,7 @@ INVITEE_SUB_AUDIT_HOURS = int(os.getenv("INVITEE_SUB_AUDIT_HOURS", "1"))
 AFFILIATE_CURRENT_MONTH_BATCH_LIMIT = int(os.getenv("AFFILIATE_CURRENT_MONTH_BATCH_LIMIT", "500"))
 AFFILIATE_PREVIOUS_WEEK_BATCH_LIMIT = int(os.getenv("AFFILIATE_PREVIOUS_WEEK_BATCH_LIMIT", "500"))
 AFFILIATE_CURRENT_WEEK_BATCH_LIMIT = int(os.getenv("AFFILIATE_CURRENT_WEEK_BATCH_LIMIT", "500"))
+QUERY_TELEMETRY_LOGS = os.getenv("QUERY_TELEMETRY_LOGS", "0") == "1"
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -1670,7 +1671,19 @@ def ensure_indexes():
     db.welcome_eligibility.create_index([("expires_at", 1)], expireAfterSeconds=0)
     db.welcome_tickets.create_index([("uid", 1)], unique=True)
     db.welcome_tickets.create_index([("cleanup_at", 1)], expireAfterSeconds=0)
-    db.miniapp_sessions_daily.create_index([("date_utc", 1), ("user_id", 1)], unique=True)
+    safe_create_index(
+        db.miniapp_sessions_daily,
+        [("date_utc", 1), ("user_id", 1)],
+        name="miniapp_sessions_daily_date_utc_user_id_uidx",
+        unique=True,
+    )
+    safe_create_index(users_collection, [("weekly_xp", DESCENDING)], name="users_weekly_xp_desc_idx")
+    safe_create_index(users_collection, [("weekly_referrals", DESCENDING)], name="users_weekly_referrals_desc_idx")
+    safe_create_index(
+        invite_link_map_collection,
+        [("chat_id", ASCENDING), ("inviter_id", ASCENDING), ("is_active", ASCENDING), ("created_at", DESCENDING)],
+        name="invite_link_map_chat_inviter_active_created_desc_idx",
+    )
     db.voucher_ledger.create_index([("status", 1), ("created_at", 1)])
     db.qualified_events.create_index([("created_at", 1)])
     users_collection.create_index([("first_checkin_at", 1)])
@@ -1751,10 +1764,19 @@ def get_or_create_referral_invite_link_sync(user_id: int, username: str = "") ->
     Caches the link in Mongo to avoid rate limits.
     """
     # 1) Reuse latest active invite link from DB if available
-    latest_link_doc = invite_link_map_collection.find_one(
-        {"chat_id": GROUP_ID, "inviter_id": user_id, "is_active": True},
-        sort=[("created_at", -1)],
-    )
+    if QUERY_TELEMETRY_LOGS:
+        with JobTimer() as invite_query_timer:
+            logger.info("[QUERY][invite_link_lookup] collection=invite_link_map filter_fields=chat_id,inviter_id,is_active sort_fields=created_at limit=1")
+            latest_link_doc = invite_link_map_collection.find_one(
+                {"chat_id": GROUP_ID, "inviter_id": user_id, "is_active": True},
+                sort=[("created_at", -1)],
+            )
+        logger.info("[QUERY][invite_link_lookup] duration_ms=%s returned=%s", invite_query_timer.ms, 1 if latest_link_doc else 0)
+    else:
+        latest_link_doc = invite_link_map_collection.find_one(
+            {"chat_id": GROUP_ID, "inviter_id": user_id, "is_active": True},
+            sort=[("created_at", -1)],
+        )
     if latest_link_doc and latest_link_doc.get("invite_link"):
         invite_link = latest_link_doc["invite_link"]
         logger.info(
@@ -2486,33 +2508,58 @@ def get_leaderboard():
             cached_payload = cached_entry["payload"]
         else:
             xp_query = {"user_id": {"$ne": None}}
-            logger.info(
-                "[lb_query] users.find filter=%s sort=weekly_xp:-1 limit=%s",
-                xp_query,
-                leaderboard_limit,
-            )
-            xp_rows = list(
-                users_collection
-                .find(xp_query, {"user_id": 1, "username": 1, "weekly_xp": 1, "vip_tier": 1, "status": 1})
-                .sort("weekly_xp", DESCENDING)
-                .limit(leaderboard_limit)
-            )
-
-            referral_rows = list(
-                users_collection.find(
-                    {"user_id": {"$ne": None}},
-                    {
-                        "user_id": 1,
-                        "username": 1,
-                        "weekly_referrals": 1,
-                        "total_referrals": 1,
-                        "vip_tier": 1,
-                        "status": 1,
-                    },
+            if QUERY_TELEMETRY_LOGS:
+                with JobTimer() as xp_timer:
+                    logger.info("[QUERY][leaderboard_xp] collection=users filter_fields=user_id sort_fields=weekly_xp limit=%s", leaderboard_limit)
+                    xp_rows = list(
+                        users_collection
+                        .find(xp_query, {"user_id": 1, "username": 1, "weekly_xp": 1, "vip_tier": 1, "status": 1})
+                        .sort("weekly_xp", DESCENDING)
+                        .limit(leaderboard_limit)
+                    )
+                logger.info("[QUERY][leaderboard_xp] duration_ms=%s returned=%s", xp_timer.ms, len(xp_rows))
+            else:
+                xp_rows = list(
+                    users_collection
+                    .find(xp_query, {"user_id": 1, "username": 1, "weekly_xp": 1, "vip_tier": 1, "status": 1})
+                    .sort("weekly_xp", DESCENDING)
+                    .limit(leaderboard_limit)
                 )
-                .sort("weekly_referrals", DESCENDING)
-                .limit(leaderboard_limit)
-            )
+            if QUERY_TELEMETRY_LOGS:
+                with JobTimer() as ref_timer:
+                    logger.info("[QUERY][leaderboard_referrals] collection=users filter_fields=user_id sort_fields=weekly_referrals limit=%s", leaderboard_limit)
+                    referral_rows = list(
+                        users_collection.find(
+                            {"user_id": {"$ne": None}},
+                            {
+                                "user_id": 1,
+                                "username": 1,
+                                "weekly_referrals": 1,
+                                "total_referrals": 1,
+                                "vip_tier": 1,
+                                "status": 1,
+                            },
+                        )
+                        .sort("weekly_referrals", DESCENDING)
+                        .limit(leaderboard_limit)
+                    )
+                logger.info("[QUERY][leaderboard_referrals] duration_ms=%s returned=%s", ref_timer.ms, len(referral_rows))
+            else:
+                referral_rows = list(
+                    users_collection.find(
+                        {"user_id": {"$ne": None}},
+                        {
+                            "user_id": 1,
+                            "username": 1,
+                            "weekly_referrals": 1,
+                            "total_referrals": 1,
+                            "vip_tier": 1,
+                            "status": 1,
+                        },
+                    )
+                    .sort("weekly_referrals", DESCENDING)
+                    .limit(leaderboard_limit)
+                )
             if referral_rows:
                 top_row = referral_rows[0]
                 logger.info(
