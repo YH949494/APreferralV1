@@ -11,11 +11,15 @@ from vouchers import (
     _check_cooldown,
     _check_session_cooldown,
     _check_kill_switch,
+    _check_public_pool_campaign_cap,
+    _claim_ip_payload,
     _compute_subnet_key,
     _compute_claimable_remaining,
     _compute_visible_remaining,
     _derive_session_key,
+    _fingerprint_hash,
     _get_client_ip,
+    _apply_public_pool_campaign_success,
     _release_claim_ownership,
     _set_cooldown,
     _set_session_cooldown,
@@ -37,6 +41,7 @@ from vouchers import (
     user_visible_drops,
     get_active_drops,
 )
+import vouchers as vouchers_module
 
 
 class FakeInsertResult:
@@ -240,6 +245,54 @@ class FakeDb:
         return FakeSimpleCollection([])
         
 class VoucherAntiHunterTests(unittest.TestCase):
+    def test_public_pool_ip_payload_hashes_ip(self):
+        app = Flask(__name__)
+        with app.test_request_context(headers={"Fly-Client-IP": "203.0.113.9", "User-Agent": "UA/1"}):
+            payload = _claim_ip_payload(vouchers_module.request)
+        self.assertTrue(payload["ip_hash"])
+        self.assertNotEqual(payload["ip_hash"], "203.0.113.9")
+        self.assertEqual(payload["subnet"], "203.0.113.0/24")
+        self.assertEqual(len(_fingerprint_hash("abc")), 64)
+
+    def test_public_pool_caps_for_ip_and_subnet(self):
+        fake = FakeRateLimitCollection()
+        original = vouchers_module.claim_rate_limits_col
+        original_subnet_hard_block = vouchers_module.PUBLIC_POOL_SUBNET_HARD_BLOCK
+        vouchers_module.claim_rate_limits_col = fake
+        try:
+            vouchers_module.PUBLIC_POOL_SUBNET_HARD_BLOCK = False
+            now = datetime.now(timezone.utc)
+            fp = {"ip_hash": "h1", "subnet": "203.0.113.0/24"}
+            self.assertTrue(_check_public_pool_campaign_cap("drop-1", fp, now=now)[0])
+            _apply_public_pool_campaign_success("drop-1", fp, now=now)
+            _apply_public_pool_campaign_success("drop-1", fp, now=now)
+            _apply_public_pool_campaign_success("drop-1", fp, now=now)
+            ok, reason, _ = _check_public_pool_campaign_cap("drop-1", fp, now=now)
+            self.assertFalse(ok)
+            self.assertEqual(reason, "ip_rate_limited")
+
+            for i in range(8):
+                _apply_public_pool_campaign_success("drop-2", {"ip_hash": f"h{i}", "subnet": "198.51.100.0/24"}, now=now)
+            ok2, reason2, _ = _check_public_pool_campaign_cap("drop-2", {"ip_hash": "x", "subnet": "198.51.100.0/24"}, now=now)
+            self.assertTrue(ok2)
+            self.assertEqual(reason2, "subnet_pressure")
+
+            vouchers_module.PUBLIC_POOL_SUBNET_HARD_BLOCK = True
+            ok3, reason3, _ = _check_public_pool_campaign_cap("drop-2", {"ip_hash": "x", "subnet": "198.51.100.0/24"}, now=now)
+            self.assertFalse(ok3)
+            self.assertEqual(reason3, "subnet_rate_limited")
+        finally:
+            vouchers_module.claim_rate_limits_col = original
+            vouchers_module.PUBLIC_POOL_SUBNET_HARD_BLOCK = original_subnet_hard_block
+
+    def test_public_pool_unknown_ip_does_not_hard_block(self):
+        ok, _, _ = _check_public_pool_campaign_cap("drop-3", {"ip_hash": "", "subnet": "unknown"}, now=datetime.now(timezone.utc))
+        self.assertTrue(ok)
+
+    def test_public_pool_default_thresholds(self):
+        self.assertEqual(vouchers_module.PUBLIC_POOL_IP_MAX_SUCCESS, 3)
+        self.assertEqual(vouchers_module.PUBLIC_POOL_SUBNET_MAX_SUCCESS, 8)
+
     def test_get_client_ip_prefers_fly_header_over_private_remote_addr(self):
         req = FakeRequest(
             headers={
