@@ -48,6 +48,7 @@ from vouchers import (
     _admin_secret_ok,
 )
 from scheduler import settle_pending_referrals, settle_referral_snapshots, settle_xp_snapshots, evaluate_affiliate_simulated_ledgers, compute_affiliate_daily_kpi_yesterday, run_invitee_subscription_audit, reconcile_drop_statuses
+from affiliate_dashboard_export import run_affiliate_dashboard_export_monthly_scheduled
 from referral_rate_limit import consume_referral_rate_limits
 from affiliate_leaderboard import (
     should_count_referral_join,
@@ -4266,6 +4267,15 @@ def run_worker():
         name="Affiliate Simulation Daily",
         replace_existing=True,
         kwargs={"batch_limit": 1000},
+    )
+    aff_tz_name = os.getenv("SCHEDULER_CRON_TIMEZONE", "Asia/Kuala_Lumpur")
+    aff_tz = pytz.timezone(aff_tz_name)
+    scheduler.add_job(
+        run_affiliate_dashboard_export_monthly_scheduled,
+        trigger=CronTrigger(day=1, hour=8, minute=0, timezone=aff_tz),
+        id="affiliate_dashboard_monthly_export",
+        name="Affiliate Dashboard Monthly Export",
+        replace_existing=True,
     )
     scheduler.add_job(
         compute_affiliate_daily_kpi_yesterday,
