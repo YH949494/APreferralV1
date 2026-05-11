@@ -125,6 +125,11 @@ _DROP_MODE_CACHE_LOCK = threading.Lock()
 _DROP_MODE_LAST_LOGGED_UNTIL = None
 PUBLIC_POOL_CLAIM_HISTORY_WINDOW_DAYS = 30
 PUBLIC_POOL_CLAIM_HISTORY_CAP = 50
+PUBLIC_POOL_IP_MAX_SUCCESS = int(os.getenv("PUBLIC_POOL_IP_MAX_SUCCESS", "3"))
+PUBLIC_POOL_SUBNET_MAX_SUCCESS = int(os.getenv("PUBLIC_POOL_SUBNET_MAX_SUCCESS", "8"))
+PUBLIC_POOL_IP_WINDOW_SECONDS = int(os.getenv("PUBLIC_POOL_IP_WINDOW_SECONDS", "86400"))
+PUBLIC_POOL_IP_BLOCK_SECONDS = int(os.getenv("PUBLIC_POOL_IP_BLOCK_SECONDS", "86400"))
+PUBLIC_POOL_SUBNET_HARD_BLOCK = os.getenv("PUBLIC_POOL_SUBNET_HARD_BLOCK", "0").lower() in ("1", "true", "yes", "on")
 
 _RAW_OFFICIAL_CHANNEL_ID = getattr(_cfg, "OFFICIAL_CHANNEL_ID", os.getenv("OFFICIAL_CHANNEL_ID"))
 try:
@@ -516,6 +521,13 @@ def ensure_voucher_indexes():
     claim_rate_limits_col.create_index([("key", ASCENDING)], unique=True)
     claim_rate_limits_col.create_index([("expiresAt", ASCENDING)], expireAfterSeconds=0)
     claim_rate_limits_col.create_index([("scope", ASCENDING), ("ip", ASCENDING), ("day", ASCENDING)])
+    try:
+        _ensure_index_if_missing(claim_rate_limits_col, "ix_public_pool_ip", [("scope", ASCENDING), ("drop_id", ASCENDING), ("ip_hash", ASCENDING)])
+        _ensure_index_if_missing(claim_rate_limits_col, "ix_public_pool_subnet", [("scope", ASCENDING), ("drop_id", ASCENDING), ("subnet", ASCENDING)])
+        _ensure_index_if_missing(voucher_claims_col, "ix_claim_drop_ip_hash", [("drop_id", ASCENDING), ("claim_ip_hash", ASCENDING)])
+        _ensure_index_if_missing(voucher_claims_col, "ix_claim_drop_subnet", [("drop_id", ASCENDING), ("claim_subnet", ASCENDING)])
+    except (OperationFailure, PyMongoError):
+        _safe_log("warning", "[indexes] failed to ensure public pool abuse indexes")
     _ensure_request_dedup_ttl_index()
     profile_photo_cache_col.create_index([("uid", ASCENDING)], unique=True)
     profile_photo_cache_col.create_index([("expiresAt", ASCENDING)], expireAfterSeconds=0)
@@ -848,6 +860,106 @@ def _derive_session_key(
     )
     seed = f"{uid or ''}:{auth_date or ''}:{query_id or ''}:{salt}"
     return hashlib.sha256(seed.encode("utf-8")).hexdigest()[:32]
+
+
+def _fingerprint_hash(value: str) -> str:
+    raw = str(value or "")
+    salt = (
+        os.environ.get("PUBLIC_POOL_FINGERPRINT_SALT")
+        or os.environ.get("BOT_TOKEN")
+        or os.environ.get("SECRET_KEY")
+        or getattr(_cfg, "SECRET_KEY", "")
+    )
+    return hashlib.sha256(f"{salt}:{raw}".encode("utf-8")).hexdigest()
+
+
+def _claim_ip_payload(req) -> dict:
+    ip = _get_client_ip(req)
+    ip_public = _is_public_ipv4(ip)
+    ip_hash = _fingerprint_hash(ip) if ip_public else ""
+    subnet = _compute_subnet_key(ip) if ip_public else "unknown"
+    return {
+        "raw_ip": ip,
+        "ip_hash": ip_hash,
+        "subnet": subnet,
+        "ip_public": ip_public,
+    }
+
+
+def _check_public_pool_campaign_cap(drop_id, fingerprint, now=None) -> tuple[bool, str | None, int]:
+    now = now or now_utc()
+    blocked_seconds = 0
+    ip_hash = (fingerprint or {}).get("ip_hash") or ""
+    subnet = (fingerprint or {}).get("subnet") or "unknown"
+
+    if not ip_hash or _is_unknown_subnet(subnet):
+        _safe_log("warning", "[PUBLIC_POOL_ABUSE][IP_UNKNOWN] drop=%s", str(drop_id))
+        return True, None, 0
+
+    ip_key = _rate_limit_key("ppool", "drop", drop_id, "ip", ip_hash)
+    ip_doc = claim_rate_limits_col.find_one({"key": ip_key}) or {}
+    ip_blocked_until = _as_aware_utc(ip_doc.get("blockedUntil"))
+    if ip_blocked_until and ip_blocked_until > now:
+        return False, "ip_rate_limited", _seconds_until(ip_blocked_until, now)
+    ip_first_at = _as_aware_utc(ip_doc.get("firstAt"))
+    ip_count = int(ip_doc.get("count", 0) or 0)
+    if ip_first_at and (now - ip_first_at).total_seconds() <= PUBLIC_POOL_IP_WINDOW_SECONDS and ip_count >= PUBLIC_POOL_IP_MAX_SUCCESS:
+        return False, "ip_rate_limited", PUBLIC_POOL_IP_BLOCK_SECONDS
+
+    subnet_key = _rate_limit_key("ppool", "drop", drop_id, "subnet", subnet)
+    subnet_doc = claim_rate_limits_col.find_one({"key": subnet_key}) or {}
+    subnet_blocked_until = _as_aware_utc(subnet_doc.get("blockedUntil"))
+    if subnet_blocked_until and subnet_blocked_until > now and PUBLIC_POOL_SUBNET_HARD_BLOCK:
+        return False, "subnet_rate_limited", _seconds_until(subnet_blocked_until, now)
+    subnet_first_at = _as_aware_utc(subnet_doc.get("firstAt"))
+    subnet_count = int(subnet_doc.get("count", 0) or 0)
+    if subnet_first_at and (now - subnet_first_at).total_seconds() <= PUBLIC_POOL_IP_WINDOW_SECONDS and subnet_count >= PUBLIC_POOL_SUBNET_MAX_SUCCESS:
+        if PUBLIC_POOL_SUBNET_HARD_BLOCK:
+            return False, "subnet_rate_limited", PUBLIC_POOL_IP_BLOCK_SECONDS
+        return True, "subnet_pressure", 0
+    return True, None, blocked_seconds
+
+
+def _apply_public_pool_campaign_success(drop_id, fingerprint, now=None) -> None:
+    now = now or now_utc()
+    ip_hash = (fingerprint or {}).get("ip_hash") or ""
+    subnet = (fingerprint or {}).get("subnet") or "unknown"
+    if not ip_hash or _is_unknown_subnet(subnet):
+        return
+
+    def _inc(scope: str, identifier: str, max_success: int):
+        key_suffix = "ip" if scope == "public_pool_ip" else "subnet"
+        key = _rate_limit_key("ppool", "drop", drop_id, key_suffix, identifier)
+        doc = claim_rate_limits_col.find_one({"key": key}) or {}
+        first_at = _as_aware_utc(doc.get("firstAt"))
+        count = int(doc.get("count", 0) or 0)
+        in_window = bool(first_at and (now - first_at).total_seconds() <= PUBLIC_POOL_IP_WINDOW_SECONDS)
+        next_count = (count + 1) if in_window else 1
+        next_first = first_at if in_window else now
+        blocked_until = now + timedelta(seconds=PUBLIC_POOL_IP_BLOCK_SECONDS) if next_count > max_success else None
+        expires_at = now + timedelta(seconds=PUBLIC_POOL_IP_BLOCK_SECONDS if blocked_until else PUBLIC_POOL_IP_WINDOW_SECONDS)
+        update = {
+            "$set": {
+                "key": key,
+                "scope": scope,
+                "drop_id": str(drop_id),
+                "count": next_count,
+                "firstAt": next_first,
+                "expiresAt": expires_at,
+            }
+        }
+        if scope == "public_pool_ip":
+            update["$set"]["ip_hash"] = identifier
+        else:
+            update["$set"]["subnet"] = identifier
+        if blocked_until:
+            update["$set"]["blockedUntil"] = blocked_until
+        else:
+            update["$unset"] = {"blockedUntil": ""}
+        claim_rate_limits_col.update_one({"key": key}, update, upsert=True)
+
+    _inc("public_pool_ip", ip_hash, PUBLIC_POOL_IP_MAX_SUCCESS)
+    _inc("public_pool_subnet", subnet, PUBLIC_POOL_SUBNET_MAX_SUCCESS)
 
 
 def _should_enforce_session_cooldown(subnet: str | None, ip: str | None) -> bool:
@@ -4423,6 +4535,7 @@ def api_claim():
     except Exception:
         uid = None
     uname = norm_uname(tg_user.get("username"))
+    claim_ip_context = _claim_ip_payload(request)
     session_key = _derive_session_key(
         init_data_raw=init_data,
         uid=uid,
@@ -4551,8 +4664,8 @@ def api_claim():
         user_id = fallback_user_id or username or ""
 
     audience_type = _drop_audience_type(voucher)
-    client_ip = _get_client_ip(request)
-    client_subnet = _compute_subnet_key(client_ip) 
+    client_ip = claim_ip_context.get("raw_ip") or ""
+    client_subnet = claim_ip_context.get("subnet") or "unknown"
     is_pool_drop = _is_pool_drop(voucher, audience_type)
     # Sample claim IP logs during bursts to reduce log amplification while preserving visibility.
     if random.random() < 0.01:
@@ -4674,6 +4787,19 @@ def api_claim():
             "reason": cooldown_reason,
             "message": f"Please try again in {cooldown_retry} seconds.",
         }), 429
+
+    public_pool_subnet_pressure = False
+    if is_public_pool(voucher):
+        cap_ok, cap_reason, cap_retry = _check_public_pool_campaign_cap(str(drop_id), claim_ip_context, now=now_utc())
+        if not cap_ok:
+            return jsonify({
+                "status": "error",
+                "code": "rate_limited",
+                "reason": "rate_limited",
+                "message": f"Please try again in {cap_retry} seconds.",
+            }), 429
+        if cap_reason == "subnet_pressure":
+            public_pool_subnet_pressure = True
   
     if _is_new_joiner_audience(audience_type):
         current_app.logger.info(
@@ -5052,15 +5178,26 @@ def api_claim():
     else:
         claimed_at_utc = now_utc()
         try:
+            claim_set = {
+                "status": "claimed",
+                "voucher_code": result.get("code"),
+                "claimed_at": claimed_at_utc,
+                "updated_at": claimed_at_utc,
+                "claim_ip_hash": claim_ip_context.get("ip_hash") or None,
+                "claim_subnet": claim_ip_context.get("subnet") or "unknown",
+            }
+            if public_pool_subnet_pressure:
+                claim_set["public_pool_subnet_pressure"] = True
+                current_app.logger.info(
+                    "[PUBLIC_POOL_ABUSE][SUBNET_PRESSURE] drop_id=%s subnet=%s uid=%s",
+                    drop_id,
+                    claim_ip_context.get("subnet") or "unknown",
+                    uid,
+                )
             voucher_claims_col.update_one(
                 {"_id": claim_doc_id},
                 {
-                    "$set": {
-                        "status": "claimed",
-                        "voucher_code": result.get("code"),
-                        "claimed_at": claimed_at_utc,
-                        "updated_at": claimed_at_utc,
-                    }
+                    "$set": claim_set
                 },
             )
         except Exception:
@@ -5104,6 +5241,8 @@ def api_claim():
         current_app.logger.info("[claim][OK] drop=%s uid=%s code=%s", drop_id, uid, result.get("code"))
         _apply_kill_success(ip=client_ip, subnet=client_subnet, now=now_utc())
         _set_cooldown(ip=client_ip, subnet=client_subnet, uid=claim_user_id, now=now_utc())      
+        if is_public_pool(voucher):
+            _apply_public_pool_campaign_success(str(drop_id), claim_ip_context, now=claimed_at_utc)
         if is_public_pool(voucher):
             claimed_voucher = db.vouchers.find_one(
                 {
