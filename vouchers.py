@@ -2219,12 +2219,18 @@ def is_public_pool(pool_doc: dict) -> bool:
 
 
 def classify_public_pool_segment(state: dict) -> str:
+    # Lifetime flag isolates true first-time public-pool claimers, while the rolling
+    # 30-day count controls repeat pressure for prior claimers. This avoids
+    # punishing old users forever while still protecting first-time acquisition.
+    has_ever_claimed = bool((state or {}).get("has_ever_claimed_public_pool"))
     recent_count = int((state or {}).get("recent_public_claim_count_30d") or 0)
-    if recent_count <= 2:
+    if not has_ever_claimed:
         return "new_user"
+    if recent_count <= 2:
+        return "light_user"
     if recent_count <= 5:
         return "light_repeat"
-    return "repeat"
+    return "heavy_repeat"
 
 
 def _prune_public_claim_timestamps_recent(timestamps, *, reference_time: datetime | None = None) -> list[datetime]:
@@ -2269,11 +2275,11 @@ def assign_public_pool_access_once(user_id: int | str, public_pool_id: str, drop
         return existing
     assigned_at = now_utc()
     drop_open_utc = _as_aware_utc(drop_open_time) or assigned_at
-    if segment == "new_user":
+    if segment in ("new_user", "light_user"):
         access_allowed = True
         delay_seconds = 0
     elif segment == "light_repeat":
-        access_allowed = random.random() < 0.6
+        access_allowed = random.random() < 0.5
         delay_seconds = random.randint(15, 45)
     else:
         access_allowed = random.random() < 0.2

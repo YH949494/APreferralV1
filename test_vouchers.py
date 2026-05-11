@@ -1784,7 +1784,7 @@ class PublicPoolShapingTests(unittest.TestCase):
         try:
             drop_open = datetime(2026, 4, 22, 12, 0, tzinfo=timezone.utc)
             first = assign_public_pool_access_once(123, "drop-1", drop_open, "light_repeat")
-            second = assign_public_pool_access_once(123, "drop-1", drop_open, "repeat")
+            second = assign_public_pool_access_once(123, "drop-1", drop_open, "heavy_repeat")
         finally:
             m.public_pool_access_assignments_col = orig_assignments
             m.random.random = orig_random
@@ -1809,7 +1809,60 @@ class PublicPoolShapingTests(unittest.TestCase):
 
         self.assertTrue(state["has_ever_claimed_public_pool"])
         self.assertEqual(state["recent_public_claim_count_30d"], 1)
-        self.assertEqual(classify_public_pool_segment(state), "light_repeat")
+        self.assertEqual(classify_public_pool_segment(state), "light_user")
+
+    def test_classify_public_pool_segment_hybrid_rules(self):
+        self.assertEqual(classify_public_pool_segment({"has_ever_claimed_public_pool": False, "recent_public_claim_count_30d": 0}), "new_user")
+        self.assertEqual(classify_public_pool_segment({"has_ever_claimed_public_pool": False, "recent_public_claim_count_30d": 2}), "new_user")
+        self.assertEqual(classify_public_pool_segment({"has_ever_claimed_public_pool": True, "recent_public_claim_count_30d": 0}), "light_user")
+        self.assertEqual(classify_public_pool_segment({"has_ever_claimed_public_pool": True, "recent_public_claim_count_30d": 2}), "light_user")
+        self.assertEqual(classify_public_pool_segment({"has_ever_claimed_public_pool": True, "recent_public_claim_count_30d": 3}), "light_repeat")
+        self.assertEqual(classify_public_pool_segment({"has_ever_claimed_public_pool": True, "recent_public_claim_count_30d": 5}), "light_repeat")
+        self.assertEqual(classify_public_pool_segment({"has_ever_claimed_public_pool": True, "recent_public_claim_count_30d": 6}), "heavy_repeat")
+
+    def test_assign_public_pool_access_once_light_repeat_threshold(self):
+        import vouchers as m
+
+        orig_assignments = m.public_pool_access_assignments_col
+        orig_random = m.random.random
+        orig_randint = m.random.randint
+        m.public_pool_access_assignments_col = self._SimpleCollection()
+        m.random.randint = lambda a, b: 20  # noqa: ARG005
+        drop_open = datetime(2026, 4, 22, 12, 0, tzinfo=timezone.utc)
+        try:
+            m.random.random = lambda: 0.49
+            allowed = assign_public_pool_access_once(124, "drop-1", drop_open, "light_repeat")
+            m.random.random = lambda: 0.50
+            denied = assign_public_pool_access_once(125, "drop-1", drop_open, "light_repeat")
+        finally:
+            m.public_pool_access_assignments_col = orig_assignments
+            m.random.random = orig_random
+            m.random.randint = orig_randint
+
+        self.assertTrue(allowed["access_allowed"])
+        self.assertFalse(denied["access_allowed"])
+
+    def test_assign_public_pool_access_once_heavy_repeat_threshold(self):
+        import vouchers as m
+
+        orig_assignments = m.public_pool_access_assignments_col
+        orig_random = m.random.random
+        orig_randint = m.random.randint
+        m.public_pool_access_assignments_col = self._SimpleCollection()
+        m.random.randint = lambda a, b: 40  # noqa: ARG005
+        drop_open = datetime(2026, 4, 22, 12, 0, tzinfo=timezone.utc)
+        try:
+            m.random.random = lambda: 0.19
+            allowed = assign_public_pool_access_once(126, "drop-1", drop_open, "heavy_repeat")
+            m.random.random = lambda: 0.20
+            denied = assign_public_pool_access_once(127, "drop-1", drop_open, "heavy_repeat")
+        finally:
+            m.public_pool_access_assignments_col = orig_assignments
+            m.random.random = orig_random
+            m.random.randint = orig_randint
+
+        self.assertTrue(allowed["access_allowed"])
+        self.assertFalse(denied["access_allowed"])
 
 
 if __name__ == "__main__":
