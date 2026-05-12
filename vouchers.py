@@ -1414,6 +1414,18 @@ def _build_idempotent_claim_response(existing_claim: dict | None):
     }
 
 
+def _welcome_claim_guide_payload(audience_type: str):
+    if not _is_new_joiner_audience(audience_type):
+        return None
+    return {
+        "type": "welcome_voucher",
+        "title": "How to use your welcome voucher",
+        "message": "Your welcome voucher code is ready. Follow the guide to redeem it. If you need help, comment in the chatroom for help.",
+        "guide_url": "https://t.me/advantplayofficial/714",
+        "help_url": "https://t.me/advantplaychat",
+    }
+
+
 def _normalize_claim_identity(*, drop_id, telegram_uid):
     normalized_drop_id = _coerce_id(drop_id)
     normalized_uid = None
@@ -4753,6 +4765,9 @@ def api_claim():
     existing_claim = _find_existing_claim_for_drop(drop_id=claim_drop_id, telegram_uid=uid, internal_user_id=user_id)
     idempotent_payload = _build_idempotent_claim_response(existing_claim)
     if idempotent_payload:
+        guide_payload = _welcome_claim_guide_payload(audience_type)
+        if guide_payload:
+            idempotent_payload["claim_guide"] = guide_payload
         current_app.logger.info(
             "[claim][IDEMPOTENT_RETURN] drop=%s uid=%s code=%s",
             drop_id,
@@ -5076,6 +5091,9 @@ def api_claim():
         existing_claim = _find_existing_claim_for_drop(drop_id=claim_drop_id, telegram_uid=uid, internal_user_id=user_id)
         idempotent_payload = _build_idempotent_claim_response(existing_claim)
         if idempotent_payload:
+            guide_payload = _welcome_claim_guide_payload(audience_type)
+            if guide_payload:
+                idempotent_payload["claim_guide"] = guide_payload
             current_app.logger.info(
                 "[claim][IDEMPOTENT_RETURN] drop=%s uid=%s code=%s",
                 drop_id,
@@ -5112,6 +5130,9 @@ def api_claim():
         existing_claim = _find_existing_claim_for_drop(drop_id=claim_drop_id, telegram_uid=uid, internal_user_id=user_id)
         idempotent_payload = _build_idempotent_claim_response(existing_claim)
         if idempotent_payload:
+            guide_payload = _welcome_claim_guide_payload(audience_type)
+            if guide_payload:
+                idempotent_payload["claim_guide"] = guide_payload
             return jsonify(idempotent_payload), 200
         logger.info(
             "[CLAIM_BLOCK] reason=%s drop_id=%s uid=%s username=%s",
@@ -5358,6 +5379,9 @@ def api_claim():
                 current_app.logger.warning("[conversion] send_failed uid=%s", uid, exc_info=True)
      
     response_payload = {"status": "ok", "voucher": result}
+    guide_payload = _welcome_claim_guide_payload(audience_type)
+    if guide_payload:
+        response_payload["claim_guide"] = guide_payload
     if _is_new_joiner_audience(audience_type):
         _append_retention_message(response_payload, WELCOME_BONUS_RETENTION_MESSAGE)
     elif is_pool_drop:

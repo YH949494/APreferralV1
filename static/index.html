@@ -2061,6 +2061,71 @@
       }
     }
 
+    function openTelegramSafeLink(url) {
+      const target = String(url || "").trim();
+      if (!target) return;
+      const tgOpen = window.Telegram?.WebApp?.openTelegramLink;
+      if (typeof tgOpen === "function" && /^https?:\/\/t\.me\//i.test(target)) {
+        tgOpen(target);
+        return;
+      }
+      window.open(target, "_blank", "noopener,noreferrer");
+    }
+
+    function showWelcomeVoucherGuidePopup(claimGuide) {
+      try {
+        if (!claimGuide || claimGuide.type !== "welcome_voucher") return;
+        const existing = document.getElementById("welcome-voucher-guide-modal");
+        if (existing) existing.remove();
+
+        const overlay = document.createElement("div");
+        overlay.id = "welcome-voucher-guide-modal";
+        overlay.className = "modal";
+        overlay.style.display = "flex";
+
+        const content = document.createElement("div");
+        content.className = "modal-content";
+
+        const title = document.createElement("h3");
+        title.textContent = String(claimGuide.title || "How to use your welcome voucher");
+        const message = document.createElement("p");
+        message.textContent = String(claimGuide.message || "");
+
+        const guideBtn = document.createElement("button");
+        guideBtn.type = "button";
+        guideBtn.className = "btn btn-primary";
+        guideBtn.textContent = "📖 Open Claim Guide";
+        guideBtn.addEventListener("click", () => openTelegramSafeLink(claimGuide.guide_url));
+
+        const helpBtn = document.createElement("button");
+        helpBtn.type = "button";
+        helpBtn.className = "btn btn-ghost";
+        helpBtn.style.marginTop = "10px";
+        helpBtn.textContent = "💬 Need Help";
+        helpBtn.addEventListener("click", () => openTelegramSafeLink(claimGuide.help_url));
+
+        const closeBtn = document.createElement("button");
+        closeBtn.type = "button";
+        closeBtn.className = "btn";
+        closeBtn.style.marginTop = "10px";
+        closeBtn.textContent = "Close";
+        closeBtn.addEventListener("click", () => overlay.remove());
+
+        content.appendChild(title);
+        content.appendChild(message);
+        content.appendChild(guideBtn);
+        content.appendChild(helpBtn);
+        content.appendChild(closeBtn);
+        overlay.appendChild(content);
+        overlay.addEventListener("click", (evt) => {
+          if (evt.target === overlay) overlay.remove();
+        });
+        document.body.appendChild(overlay);
+      } catch (popupErr) {
+        console.warn("Welcome claim guide popup failed", popupErr);
+      }
+    }
+
     function renderDailyGame(slot) {
       const contentEl = document.getElementById("daily-game-content");
       if (!contentEl) return;
@@ -3907,6 +3972,9 @@ Active players win more.
             ? "\n\n✅ Code copied to clipboard."
             : "\n\n📋 Tap the copy button below if clipboard access is blocked.";
           alert(`🎟️ Your code: ${codeText}\nClaimed at: ${claimedAt}${copyMsg}`);
+          if (out?.claim_guide?.type === "welcome_voucher") {
+            showWelcomeVoucherGuidePopup(out.claim_guide);
+          }
         }
         
       } catch (err) {
