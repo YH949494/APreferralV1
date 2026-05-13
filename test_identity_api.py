@@ -10,6 +10,7 @@ def _load_symbols():
         "_safe_non_negative_int",
         "derive_identity_tier",
         "compute_next_tier_progress",
+        "compute_weekly_rank",
         "api_me_identity",
     }
     body = []
@@ -25,15 +26,20 @@ def _load_symbols():
     ast.fix_missing_locations(isolated)
     env = {}
     exec(compile(isolated, filename="main.py", mode="exec"), env)  # noqa: S102
+    env["datetime"] = __import__("datetime").datetime
     return env
 
 
 class _Users:
-    def __init__(self, doc):
+    def __init__(self, doc, higher_count=0):
         self.doc = doc
+        self.higher_count = higher_count
 
     def find_one(self, _f, _p):
         return self.doc
+
+    def count_documents(self, _q):
+        return self.higher_count
 
 
 class _Req:
@@ -116,9 +122,45 @@ def test_endpoint_alias_fallback_and_shape():
     for k in (
         "user_id", "display_name", "tier_name", "tier_icon", "weekly_xp", "monthly_xp", "total_xp",
         "weekly_referrals", "monthly_referrals", "total_referrals", "streak_days", "next_tier_name",
-        "next_tier_progress_pct", "next_tier_hint", "source_vip_tier",
+        "next_tier_progress_pct", "next_tier_hint", "source_vip_tier", "weekly_rank",
     ):
         assert k in body
+
+
+def test_weekly_rank_present_when_activity_exists():
+    env = _load_symbols()
+    fn = env["api_me_identity"]
+    env.update(
+        {
+            "request": _Req(),
+            "extract_raw_init_data_from_query": lambda req: "ok",
+            "verify_telegram_init_data": lambda raw: (True, {"user": {"id": 1001, "username": "tg_u"}}, "ok"),
+            "users_collection": _Users({"user_id": 1001, "weekly_xp": 10, "weekly_referrals": 2}, higher_count=3),
+            "jsonify": lambda payload: payload,
+            "json": __import__("json"),
+            "datetime": __import__("datetime").datetime,
+        }
+    )
+    body = fn()
+    assert body["weekly_rank"] == 4
+
+
+def test_weekly_rank_null_when_no_weekly_activity():
+    env = _load_symbols()
+    fn = env["api_me_identity"]
+    env.update(
+        {
+            "request": _Req(),
+            "extract_raw_init_data_from_query": lambda req: "ok",
+            "verify_telegram_init_data": lambda raw: (True, {"user": {"id": 1001, "username": "tg_u"}}, "ok"),
+            "users_collection": _Users({"user_id": 1001, "weekly_xp": 0, "weekly_referrals": 0}, higher_count=99),
+            "jsonify": lambda payload: payload,
+            "json": __import__("json"),
+            "datetime": __import__("datetime").datetime,
+        }
+    )
+    body = fn()
+    assert body["weekly_rank"] is None
 
 
 def test_missing_user_doc_safe_defaults_and_no_crash():

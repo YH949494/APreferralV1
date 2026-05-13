@@ -1209,6 +1209,8 @@
       <div id="identity-display-name" style="margin-top:6px; font-weight:600;">User</div>
       <div id="identity-streak" class="badge" style="display:none; margin-top:8px;"></div>
       <div class="identity-meta">
+        <span id="identity-weekly-rank">Weekly Rank: Not ranked yet</span>
+        <span id="identity-weekly-xp">Weekly XP: 0</span>
         <span id="identity-weekly-ref">Weekly refs: 0</span>
         <span id="identity-total-ref">Total refs: 0</span>
         <span id="identity-total-xp">Total XP: 0</span>
@@ -5230,18 +5232,29 @@ ${referral}`;
         const tierEl = document.getElementById("identity-tier-name");
         const displayNameEl = document.getElementById("identity-display-name");
         const streakEl = document.getElementById("identity-streak");
+        const weeklyRankEl = document.getElementById("identity-weekly-rank");
+        const weeklyXpEl = document.getElementById("identity-weekly-xp");
         const weeklyRefEl = document.getElementById("identity-weekly-ref");
         const totalRefEl = document.getElementById("identity-total-ref");
         const totalXpEl = document.getElementById("identity-total-xp");
         const progressEl = document.getElementById("identity-progress-fill");
         const hintEl = document.getElementById("identity-hint");
-        if (!tierEl || !displayNameEl || !streakEl || !weeklyRefEl || !totalRefEl || !totalXpEl || !progressEl || !hintEl) {
+        if (!tierEl || !displayNameEl || !streakEl || !weeklyRankEl || !weeklyXpEl || !weeklyRefEl || !totalRefEl || !totalXpEl || !progressEl || !hintEl) {
           return;
         }
         const displayName = data.display_name || "My Profile";
         tierEl.textContent = `${data.tier_icon || "🌱"} ${data.tier_name || "Rookie"}`;
         displayNameEl.textContent = displayName;
-        weeklyRefEl.textContent = `Weekly refs: ${Number(data.weekly_referrals || 0)}`;
+        const weeklyXp = Number(data.weekly_xp || 0);
+        const weeklyRef = Number(data.weekly_referrals || 0);
+        const weeklyRank = Number(data.weekly_rank || 0);
+        if (weeklyRank > 0 && (weeklyXp > 0 || weeklyRef > 0)) {
+          weeklyRankEl.textContent = `Weekly Rank: #${weeklyRank}`;
+        } else {
+          weeklyRankEl.textContent = "Weekly Rank: Not ranked yet";
+        }
+        weeklyXpEl.textContent = `Weekly XP: ${weeklyXp}`;
+        weeklyRefEl.textContent = `Weekly Referrals: ${weeklyRef}`;
         totalRefEl.textContent = `Total refs: ${Number(data.total_referrals || 0)}`;
         totalXpEl.textContent = `Total XP: ${Number(data.total_xp || 0)}`;
         progressEl.style.width = `${Math.max(0, Math.min(100, Number(data.next_tier_progress_pct || 0)))}%`;
