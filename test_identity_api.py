@@ -70,6 +70,12 @@ def test_normalize_malformed_and_negative_values():
     assert n(None) == 0
     assert n("bad") == 0
     assert n(float("nan")) == 0
+    assert n("inf") == 0
+    assert n("-inf") == 0
+    assert n("Infinity") == 0
+    assert n("1e309") == 0
+    assert n(float("inf")) == 0
+    assert n(float("-inf")) == 0
     assert n(-999) == 0
 
 
@@ -89,7 +95,7 @@ def test_endpoint_alias_fallback_and_shape():
                     "lifetime_referrals": 2,
                     "checkin_streak": 7,
                     "vip_tier": "VIP9",
-                    "weekly_xp": "12",
+                    "weekly_xp": "inf",
                     "monthly_xp": None,
                     "weekly_referrals": -3,
                     "monthly_referrals": "2",
@@ -105,6 +111,7 @@ def test_endpoint_alias_fallback_and_shape():
     assert body["total_referrals"] == 2
     assert body["streak_days"] == 7
     assert body["tier_name"] == "Silver"
+    assert body["weekly_xp"] == 0
     assert body["source_vip_tier"] == "VIP9"
     for k in (
         "user_id", "display_name", "tier_name", "tier_icon", "weekly_xp", "monthly_xp", "total_xp",

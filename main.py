@@ -446,9 +446,12 @@ def _safe_non_negative_int(value) -> int:
         n = float(value)
     except (TypeError, ValueError):
         return 0
-    if n != n:
+    if n != n or n in (float("inf"), float("-inf")):
         return 0
-    return max(0, int(n))
+    try:
+        return max(0, int(n))
+    except OverflowError:
+        return 0
 
 
 def derive_identity_tier(total_referrals: int, total_xp: int) -> dict:
