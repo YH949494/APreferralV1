@@ -24,6 +24,12 @@ from config import (
     WEEKLY_XP_BUCKET,
     WEEKLY_REFERRAL_BUCKET,
     MINIAPP_VERSION,
+    GROWTH_LEADERBOARD_ENABLED,
+    GROWTH_LEADERBOARD_CHANNEL_ID,
+    GROWTH_LEADERBOARD_CRON_DAY,
+    GROWTH_LEADERBOARD_CRON_HOUR,
+    GROWTH_LEADERBOARD_CRON_MINUTE,
+    GROWTH_LEADERBOARD_TIMEZONE,
 )
 from time_utils import expires_in_seconds, tz_name
 
@@ -47,7 +53,7 @@ from vouchers import (
     _get_admin_secret,
     _admin_secret_ok,
 )
-from scheduler import settle_pending_referrals, settle_referral_snapshots, settle_xp_snapshots, evaluate_affiliate_simulated_ledgers, compute_affiliate_daily_kpi_yesterday, run_invitee_subscription_audit, reconcile_drop_statuses
+from scheduler import settle_pending_referrals, settle_referral_snapshots, settle_xp_snapshots, evaluate_affiliate_simulated_ledgers, compute_affiliate_daily_kpi_yesterday, run_invitee_subscription_audit, reconcile_drop_statuses, post_growth_leaderboard_weekly
 from affiliate_dashboard_export import run_affiliate_dashboard_export_monthly_scheduled
 from referral_rate_limit import consume_referral_rate_limits
 from affiliate_leaderboard import (
@@ -4291,6 +4297,32 @@ def run_worker():
         name="Affiliate Weekly KPI Snapshot",
         replace_existing=True,
     )
+    if GROWTH_LEADERBOARD_ENABLED:
+        if not GROWTH_LEADERBOARD_CHANNEL_ID:
+            logger.warning("[GROWTH_LEADERBOARD] enabled but missing GROWTH_LEADERBOARD_CHANNEL_ID")
+        else:
+            growth_tz = pytz.timezone(GROWTH_LEADERBOARD_TIMEZONE)
+            scheduler.add_job(
+                post_growth_leaderboard_weekly,
+                trigger=CronTrigger(
+                    day_of_week=GROWTH_LEADERBOARD_CRON_DAY.lower(),
+                    hour=GROWTH_LEADERBOARD_CRON_HOUR,
+                    minute=GROWTH_LEADERBOARD_CRON_MINUTE,
+                    timezone=growth_tz,
+                ),
+                id="growth_leaderboard_weekly",
+                name="Growth Leaderboard Weekly",
+                replace_existing=True,
+            )
+            job = scheduler.get_job("growth_leaderboard_weekly")
+            logger.info(
+                "[GROWTH_LEADERBOARD] scheduled enabled=1 day=%s hour=%s minute=%s timezone=%s next_run=%s",
+                GROWTH_LEADERBOARD_CRON_DAY,
+                GROWTH_LEADERBOARD_CRON_HOUR,
+                GROWTH_LEADERBOARD_CRON_MINUTE,
+                GROWTH_LEADERBOARD_TIMEZONE,
+                getattr(job, "next_run_time", None),
+            )
     # subscription audit disabled — subscription_cache refreshed via claim + check-in events
     try:
         reconcile_drop_statuses()
