@@ -25,3 +25,13 @@ def test_affiliate_rewards_block_hides_when_empty_and_renders_multiple():
     assert "bonusSection.style.display = \"none\";" in html
     assert "rewards.forEach((reward) => {" in html
     assert "🎁 Your Affiliate Rewards" in html
+
+
+def test_claim_error_state_rendering_hooks_present():
+    html = Path("static/index.html").read_text(encoding="utf-8")
+    assert 'displayState === "fully_redeemed"' in html
+    assert 'displayState === "high_traffic"' in html
+    assert 'hideRetry: true' in html
+    assert 'displayState === "cooldown"' in html
+    assert 'Retry available in ${remaining}s' in html
+    assert 'Fully Claimed' in html

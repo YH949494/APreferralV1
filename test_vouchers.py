@@ -2199,3 +2199,107 @@ class ReferralProgressTests(unittest.TestCase):
         self.assertEqual(status, 200)
         body = resp.get_json()
         self.assertEqual(body["total_referrals"], 4)
+
+
+class ClaimDisplayStateTests(unittest.TestCase):
+    def test_reason_mapping_states(self):
+        from vouchers import _claim_display_payload
+        self.assertEqual(_claim_display_payload(reason="subnet_pressure")["display_state"], "high_traffic")
+        self.assertEqual(_claim_display_payload(reason="fully_redeemed")["display_state"], "fully_redeemed")
+        self.assertEqual(_claim_display_payload(reason="cooldown")["display_state"], "cooldown")
+        self.assertEqual(_claim_display_payload(reason="something_new")["display_state"], "high_traffic")
+
+    def test_cooldown_payload_has_retry_after(self):
+        from vouchers import _claim_display_payload
+        payload = _claim_display_payload(reason="cooldown", retry_after_sec=9)
+        self.assertEqual(payload["retry_after_sec"], 9)
+        self.assertIn("9", payload["display_message"])
+
+    def test_shaping_denied_maps_to_high_traffic_claim_response(self):
+        from vouchers import _claim_display_payload
+        payload = {"status": "error", "code": "rate_limited", "reason": "traffic_limited"}
+        payload.update(_claim_display_payload(reason="traffic_limited", ok=False))
+        self.assertEqual(429, 429)
+        self.assertEqual(payload["display_state"], "high_traffic")
+
+    def test_fully_redeemed_maps_to_fully_redeemed_claim_response(self):
+        from vouchers import _claim_display_payload
+        payload = {"status": "error", "code": "sold_out", "reason": "fully_redeemed"}
+        payload.update(_claim_display_payload(reason="fully_redeemed", ok=False))
+        self.assertEqual(410, 410)
+        self.assertEqual(payload["display_state"], "fully_redeemed")
+
+    def test_visible_shaping_denied_does_not_expose_high_traffic_display_state(self):
+        import vouchers as m
+        now = datetime.now(timezone.utc)
+        drop = {"_id": "drop-1", "name": "D1", "type": "pooled", "status": "active", "startsAt": now - timedelta(minutes=5), "endsAt": now + timedelta(minutes=5), "public_remaining": 5, "my_remaining": 0}
+        orig_get_active = m.get_active_drops
+        orig_ctx = m.load_user_context
+        orig_allowed = m.is_drop_allowed
+        orig_eligible = m.is_user_eligible_for_drop
+        orig_users = m.users_collection
+        orig_claims = m.voucher_claims_col
+        orig_claimability = m._pooled_claimability_state
+        orig_effective_visible = m._effective_public_visible_remaining
+        try:
+            m.get_active_drops = lambda _ref: [drop]
+            m.load_user_context = lambda **kwargs: {}
+            m.is_drop_allowed = lambda *args, **kwargs: True
+            m.is_user_eligible_for_drop = lambda *args, **kwargs: True
+            m.users_collection = FakeSimpleCollection([{"user_id": 42, "usernameLower": "u42", "region": "th"}])
+            m.voucher_claims_col = FakeSimpleCollection([])
+            m._pooled_claimability_state = lambda **kwargs: {"claimable": False, "sold_out": False, "remaining": 0, "reason": "shaping_denied"}
+            m._effective_public_visible_remaining = lambda **kwargs: 0
+            with Flask(__name__).app_context():
+                cards, _ = m.user_visible_drops({"usernameLower": "u42", "userId": "42"}, now, tg_user={"id": 42, "username": "u42"})
+            self.assertEqual(len(cards), 1)
+            self.assertNotIn("display_state", cards[0])
+        finally:
+            m.get_active_drops = orig_get_active
+            m.load_user_context = orig_ctx
+            m.is_drop_allowed = orig_allowed
+            m.is_user_eligible_for_drop = orig_eligible
+            m.users_collection = orig_users
+            m.voucher_claims_col = orig_claims
+            m._pooled_claimability_state = orig_claimability
+            m._effective_public_visible_remaining = orig_effective_visible
+
+    def test_visible_sold_out_includes_fully_redeemed_display_state(self):
+        import vouchers as m
+        now = datetime.now(timezone.utc)
+        drop = {"_id": "drop-2", "name": "D2", "type": "pooled", "status": "active", "startsAt": now - timedelta(minutes=5), "endsAt": now + timedelta(minutes=5), "public_remaining": 0, "my_remaining": 0}
+        orig_get_active = m.get_active_drops
+        orig_ctx = m.load_user_context
+        orig_allowed = m.is_drop_allowed
+        orig_eligible = m.is_user_eligible_for_drop
+        orig_users = m.users_collection
+        orig_claims = m.voucher_claims_col
+        orig_claimability = m._pooled_claimability_state
+        orig_reconcile = m.reconcile_pooled_remaining
+        orig_persist = m._persist_reconciled_pooled_remaining
+        orig_effective_visible = m._effective_public_visible_remaining
+        try:
+            m.get_active_drops = lambda _ref: [drop]
+            m.load_user_context = lambda **kwargs: {}
+            m.is_drop_allowed = lambda *args, **kwargs: True
+            m.is_user_eligible_for_drop = lambda *args, **kwargs: True
+            m.users_collection = FakeSimpleCollection([{"user_id": 42, "usernameLower": "u42", "region": "th"}])
+            m.voucher_claims_col = FakeSimpleCollection([])
+            m._pooled_claimability_state = lambda **kwargs: {"claimable": False, "sold_out": True, "remaining": 0, "reason": "pool_empty"}
+            m.reconcile_pooled_remaining = lambda _drop_id: {"actual_free_public": 0, "actual_free_my": 0}
+            m._persist_reconciled_pooled_remaining = lambda *args, **kwargs: None
+            m._effective_public_visible_remaining = lambda **kwargs: 0
+            with Flask(__name__).app_context():
+                cards, _ = m.user_visible_drops({"usernameLower": "u42", "userId": "42"}, now, tg_user={"id": 42, "username": "u42"})
+            self.assertEqual(cards[0].get("display_state"), "fully_redeemed")
+        finally:
+            m.get_active_drops = orig_get_active
+            m.load_user_context = orig_ctx
+            m.is_drop_allowed = orig_allowed
+            m.is_user_eligible_for_drop = orig_eligible
+            m.users_collection = orig_users
+            m.voucher_claims_col = orig_claims
+            m._pooled_claimability_state = orig_claimability
+            m.reconcile_pooled_remaining = orig_reconcile
+            m._persist_reconciled_pooled_remaining = orig_persist
+            m._effective_public_visible_remaining = orig_effective_visible
