@@ -1030,14 +1030,50 @@ _REQUEST_DEDUP_TTL_READY = False
 _REQUEST_DEDUP_TTL_LOCK = threading.Lock()
 
 
+
+
+def _claim_display_payload(*, reason: str | None = None, retry_after_sec: int | None = None, ok: bool = False) -> dict:
+    reason_key = str(reason or "").strip().lower()
+    high_traffic_reasons = {"subnet_pressure", "ip_rate_limited", "rate_limited", "heavy_repeat_hold", "traffic_limited", "subnet_rate_limited"}
+    fully_redeemed_reasons = {"fully_redeemed", "drop_exhausted", "no_codes_remaining", "sold_out"}
+    cooldown_reasons = {"cooldown", "session_cooldown"}
+    if ok or reason_key in {"success", "active"}:
+        state = "claimable"
+        title = "🎁 Limited rewards available"
+        message = ""
+    elif reason_key in fully_redeemed_reasons:
+        state = "fully_redeemed"
+        title = "🎟️ All rewards have been claimed."
+        message = ""
+    elif reason_key in cooldown_reasons:
+        state = "cooldown"
+        title = "⏳ Please wait before trying again."
+        if retry_after_sec and int(retry_after_sec) > 0:
+            message = f"Try again in {int(retry_after_sec)} seconds."
+        else:
+            message = ""
+    else:
+        state = "high_traffic"
+        title = "⚠️ High traffic detected"
+        message = "Please try again shortly."
+    payload = {"display_state": state, "display_title": title, "display_message": message}
+    if retry_after_sec and int(retry_after_sec) > 0:
+        payload["retry_after_sec"] = int(retry_after_sec)
+    try:
+        current_app.logger.info("[CLAIM_UI] display_state=%s reason=%s uid=%s drop_id=%s", state, reason_key, getattr(g, 'uid', None), request.view_args.get('drop_id') if request else None)
+    except Exception:
+        pass
+    return payload
 def _session_cooldown_payload(retry_seconds: int) -> dict:
-    return {
+    payload = {
         "ok": False,
         "code": "rate_limited",
         "reason": "session_cooldown",
         "retry_after_sec": int(retry_seconds),
         "message": f"Please try again in {int(retry_seconds)} seconds.",
     }
+    payload.update(_claim_display_payload(reason="session_cooldown", retry_after_sec=int(retry_seconds), ok=False))
+    return payload
  
 
 def _ensure_request_dedup_ttl_index() -> None:
@@ -3486,6 +3522,10 @@ def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None
                 base["claimable"] = bool(claimability.get("claimable"))
                 base["sold_out"] = bool(claimability.get("sold_out"))
                 base["visible_remaining"] = max(0, int(claimability.get("remaining") or 0))
+                if base["sold_out"]:
+                    base.update(_claim_display_payload(reason="fully_redeemed", ok=False))
+                elif base["claimable"]:
+                    base.update(_claim_display_payload(reason="active", ok=True))
                 if base["sold_out"] and claimability.get("reason") != "pool_empty" and claimable_remaining > 0:
                     current_app.logger.warning(
                         "[VOUCHER][DISPLAY_MISMATCH] dropId=%s user_id=%s available_count=%s assigned_count=%s reason=%s",
@@ -4738,9 +4778,22 @@ def api_claim():
             ref=now_ref,
         )
         if claimability.get("sold_out"):
-            return jsonify({"status": "error", "code": "sold_out"}), 410     
+            payload = {"status": "error", "code": "sold_out", "reason": "fully_redeemed"}
+            payload.update(_claim_display_payload(reason="fully_redeemed", ok=False))
+            return jsonify(payload), 410     
         if not claimability.get("claimable"):
-            return jsonify({"status": "error", "code": "sold_out"}), 410
+            claim_reason = str(claimability.get("reason") or "").strip().lower()
+            if claim_reason in ("shaping_denied", "shaping_too_early"):
+                payload = {
+                    "status": "error",
+                    "code": "rate_limited",
+                    "reason": "traffic_limited",
+                }
+                payload.update(_claim_display_payload(reason="traffic_limited", ok=False))
+                return jsonify(payload), 429
+            payload = {"status": "error", "code": "sold_out", "reason": "fully_redeemed"}
+            payload.update(_claim_display_payload(reason="fully_redeemed", ok=False))
+            return jsonify(payload), 410
 
     if _should_enforce_session_cooldown(client_subnet, client_ip):
         session_now = now_utc()
@@ -4782,12 +4835,14 @@ def api_claim():
         now=now_utc(),
     )
     if not kill_ok:
-        return jsonify({
+        payload = {
             "status": "error",
             "code": "rate_limited",
             "reason": kill_reason,
             "message": f"Please try again in {kill_retry} seconds.",
-        }), 429
+        }
+        payload.update(_claim_display_payload(reason=kill_reason, retry_after_sec=kill_retry, ok=False))
+        return jsonify(payload), 429
 
     cooldown_ok, cooldown_reason, cooldown_retry = _check_cooldown(
         ip=client_ip,
@@ -4796,23 +4851,27 @@ def api_claim():
         now=now_utc(),
     )
     if not cooldown_ok:
-        return jsonify({
+        payload = {
             "status": "error",
             "code": "rate_limited",
             "reason": cooldown_reason,
             "message": f"Please try again in {cooldown_retry} seconds.",
-        }), 429
+        }
+        payload.update(_claim_display_payload(reason=cooldown_reason, retry_after_sec=cooldown_retry, ok=False))
+        return jsonify(payload), 429
 
     public_pool_subnet_pressure = False
     if is_public_pool(voucher):
         cap_ok, cap_reason, cap_retry = _check_public_pool_campaign_cap(str(drop_id), claim_ip_context, now=now_utc())
         if not cap_ok:
-            return jsonify({
+            payload = {
                 "status": "error",
                 "code": "rate_limited",
                 "reason": "rate_limited",
                 "message": f"Please try again in {cap_retry} seconds.",
-            }), 429
+            }
+            payload.update(_claim_display_payload(reason=cap_reason or "rate_limited", retry_after_sec=cap_retry, ok=False))
+            return jsonify(payload), 429
         if cap_reason == "subnet_pressure":
             public_pool_subnet_pressure = True
   
@@ -5379,6 +5438,7 @@ def api_claim():
                 current_app.logger.warning("[conversion] send_failed uid=%s", uid, exc_info=True)
      
     response_payload = {"status": "ok", "voucher": result}
+    response_payload.update(_claim_display_payload(reason="success", ok=True))
     guide_payload = _welcome_claim_guide_payload(audience_type)
     if guide_payload:
         response_payload["claim_guide"] = guide_payload

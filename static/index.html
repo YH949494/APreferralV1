@@ -3345,13 +3345,13 @@ Active players win more.
 
         if (publicSoldOut) {
           message.textContent = "Stay subscribed to channel — new voucher drops are coming soon.";
-          btn.textContent = "Fully Redeemed";
+          btn.textContent = "Fully Claimed";
           btn.removeAttribute("data-dropid");
           btn.setAttribute("disabled", "disabled");
           btn.className = "btn btn-ghost";
         } else {
           message.textContent = "Tap below to claim your reward.";
-          btn.textContent = "🎟️ Claim now";
+          btn.textContent = "Claim Reward";
           if (dropId) {
             btn.dataset.dropid = dropId;
           }
@@ -3460,14 +3460,31 @@ Active players win more.
     function claimErrorToUi(payload = {}, status) {
       const code = payload?.code || "";
       const reason = payload?.reason || payload?.checks_key || "";
+      const displayState = payload?.display_state || "";
       const retryAfterSec = normalizeRetryAfterSec(payload?.retry_after_sec);
 
-      if (code === "sold_out") {
+      if (displayState === "claimable") return null;
+      if (displayState === "fully_redeemed" || code === "sold_out") {
         return {
-          title: "All claimed",
-          message: "This drop is fully claimed.",
+          title: payload?.display_title || "🎟️ All rewards have been claimed.",
+          message: payload?.display_message || "",
           severity: "info",
           hideRetry: true
+        };
+      }
+      if (displayState === "cooldown") {
+        return {
+          title: payload?.display_title || "⏳ Please wait before trying again.",
+          message: payload?.display_message || (retryAfterSec ? `Try again in ${retryAfterSec} seconds.` : ""),
+          retryAfterSec,
+          severity: "warn"
+        };
+      }
+      if (displayState === "high_traffic") {
+        return {
+          title: payload?.display_title || "⚠️ High traffic detected",
+          message: payload?.display_message || "Please try again shortly.",
+          severity: "warn"
         };
       }
 
