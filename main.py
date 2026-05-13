@@ -480,6 +480,26 @@ def compute_next_tier_progress(total_referrals: int, total_xp: int, current_tier
     hint = f"{need_refs:,} more referrals or {need_xp:,} XP to {next_tier['name']}"
     return next_tier["name"], progress_pct, hint
 
+
+def compute_weekly_rank(user_id: int, weekly_xp: int, weekly_referrals: int, updated_at) -> int | None:
+    wxp = _safe_non_negative_int(weekly_xp)
+    wref = _safe_non_negative_int(weekly_referrals)
+    if wxp <= 0 and wref <= 0:
+        return None
+    if users_collection.find_one({"user_id": user_id}, {"_id": 1}) is None:
+        return None
+    ts = updated_at if isinstance(updated_at, datetime) else datetime.min
+    higher_count = users_collection.count_documents(
+        {
+            "$or": [
+                {"weekly_xp": {"$gt": wxp}},
+                {"weekly_xp": wxp, "weekly_referrals": {"$gt": wref}},
+                {"weekly_xp": wxp, "weekly_referrals": wref, "updated_at": {"$gt": ts}},
+            ]
+        }
+    )
+    return int(higher_count) + 1
+
 def _current_month_window_utc(reference: datetime | None = None):
     """Return (start_utc, end_utc, start_local, end_local) for the current month."""
 
@@ -1736,6 +1756,11 @@ def ensure_indexes():
     safe_create_index(users_collection, [("weekly_xp", DESCENDING)], name="users_weekly_xp_desc_idx")
     safe_create_index(users_collection, [("weekly_referrals", DESCENDING)], name="users_weekly_referrals_desc_idx")
     safe_create_index(
+        users_collection,
+        [("weekly_xp", DESCENDING), ("weekly_referrals", DESCENDING), ("updated_at", DESCENDING)],
+        name="users_weekly_rank_sort_idx",
+    )
+    safe_create_index(
         invite_link_map_collection,
         [("chat_id", ASCENDING), ("inviter_id", ASCENDING), ("is_active", ASCENDING), ("created_at", DESCENDING)],
         name="invite_link_map_chat_inviter_active_created_desc_idx",
@@ -2176,6 +2201,7 @@ def api_me_identity():
             "checkin_streak": 1,
             "vip_tier": 1,
             "status": 1,
+            "updated_at": 1,
         },
     ) or {}
     display_name = (
@@ -2194,16 +2220,20 @@ def api_me_identity():
         total_xp,
         derived_tier["name"],
     )
+    weekly_xp = _safe_non_negative_int(user_doc.get("weekly_xp", 0))
+    weekly_referrals = _safe_non_negative_int(user_doc.get("weekly_referrals", 0))
+    weekly_rank = compute_weekly_rank(user_id, weekly_xp, weekly_referrals, user_doc.get("updated_at"))
     return jsonify(
         {
             "user_id": user_id,
             "display_name": display_name,
             "tier_name": derived_tier["name"],
             "tier_icon": derived_tier["icon"],
-            "weekly_xp": _safe_non_negative_int(user_doc.get("weekly_xp", 0)),
+            "weekly_xp": weekly_xp,
             "monthly_xp": _safe_non_negative_int(user_doc.get("monthly_xp", 0)),
             "total_xp": total_xp,
-            "weekly_referrals": _safe_non_negative_int(user_doc.get("weekly_referrals", 0)),
+            "weekly_referrals": weekly_referrals,
+            "weekly_rank": weekly_rank,
             "monthly_referrals": _safe_non_negative_int(user_doc.get("monthly_referrals", 0)),
             "total_referrals": total_referrals,
             "streak_days": _safe_non_negative_int(user_doc.get("streak_days", user_doc.get("checkin_streak", user_doc.get("streak", 0)))),
