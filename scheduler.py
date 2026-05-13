@@ -5,6 +5,7 @@ import pytz
 import requests
 import socket
 import time
+from html import escape as html_escape
 from pymongo import ReturnDocument, UpdateOne
 from pymongo.errors import DuplicateKeyError
 from requests import RequestException
@@ -454,6 +455,107 @@ def compute_affiliate_daily_kpi(day_utc: str, *, db_ref=None, now_utc_ts: dateti
         quality_rate_7d,
     )
     return payload
+
+
+def post_growth_leaderboard_weekly(*, db_ref=None, now_utc_ts: datetime | None = None) -> bool:
+    db_ref = db_ref or db
+    now_utc_ts = now_utc_ts or now_utc()
+    tz_name = os.getenv("GROWTH_LEADERBOARD_TIMEZONE", "Asia/Kuala_Lumpur")
+    local_tz = pytz.timezone(tz_name)
+    channel_id_raw = (os.getenv("GROWTH_LEADERBOARD_CHANNEL_ID", "") or "").strip()
+    if not channel_id_raw:
+        logger.warning("[GROWTH_LEADERBOARD] skip reason=missing_channel_id")
+        return False
+
+    try:
+        channel_id = int(channel_id_raw)
+    except (TypeError, ValueError):
+        logger.warning("[GROWTH_LEADERBOARD] skip reason=invalid_channel_id value=%s", channel_id_raw)
+        return False
+
+    now_local = now_utc_ts.astimezone(local_tz)
+    week_start_local = now_local.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=now_local.weekday())
+    week_end_local = week_start_local + timedelta(days=7)
+    week_start_utc = week_start_local.astimezone(timezone.utc)
+    week_end_utc = week_end_local.astimezone(timezone.utc)
+    week_key = week_start_local.date().isoformat()
+
+    existing = db_ref.growth_leaderboard_posts.find_one({"week_key": week_key}, {"_id": 1})
+    if existing:
+        logger.info("[GROWTH_LEADERBOARD] skip reason=already_posted week_key=%s", week_key)
+        return False
+
+    rows = list(
+        db_ref.qualified_events.aggregate(
+            [
+                {"$match": {"qualified_at": {"$gte": week_start_utc, "$lt": week_end_utc}, "referrer_id": {"$ne": None}}},
+                {"$group": {"_id": "$referrer_id", "qualified_count": {"$sum": 1}}},
+                {"$match": {"qualified_count": {"$gt": 0}}},
+                {"$sort": {"qualified_count": -1, "_id": 1}},
+                {"$limit": 5},
+            ]
+        )
+    )
+    if not rows:
+        logger.info("[GROWTH_LEADERBOARD] skip reason=no_qualified_referrals week_key=%s", week_key)
+        return False
+
+    medals = ["🥇", "🥈", "🥉"]
+    lines = ["<b>🏆 Top 5 Growth Leaders This Week</b>", ""]
+    for idx, row in enumerate(rows, start=1):
+        uid = int(row.get("_id"))
+        qcount = int(row.get("qualified_count", 0) or 0)
+        user = db_ref.users.find_one({"user_id": uid}, {"username": 1, "first_name": 1}) or {}
+        display_name = user.get("username") or user.get("first_name") or f"User {uid}"
+        display_name = html_escape(str(display_name))
+        prefix = medals[idx - 1] if idx <= 3 else f"#{idx}"
+        lines.append(f"{prefix} {display_name} — {qcount} qualified invites")
+    lines.extend(
+        [
+            "",
+            "<i>Invite more qualified members, join our affiliate program, and earn up to <b>$450/month</b>.</i>",
+        ]
+    )
+    text = "\n".join(lines)
+
+    lock = db_ref.growth_leaderboard_posts.update_one(
+        {"week_key": week_key},
+        {
+            "$setOnInsert": {
+                "week_key": week_key,
+                "week_start_utc": week_start_utc,
+                "week_end_utc": week_end_utc,
+                "created_at": now_utc_ts,
+                "status": "posting",
+            }
+        },
+        upsert=True,
+    )
+    if not getattr(lock, "upserted_id", None):
+        logger.info("[GROWTH_LEADERBOARD] skip reason=already_posted_race week_key=%s", week_key)
+        return False
+
+    resp = requests.post(
+        f"{API_BASE}/sendMessage",
+        json={
+            "chat_id": channel_id,
+            "text": text,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True,
+        },
+        timeout=10,
+    )
+    resp.raise_for_status()
+    payload = resp.json() if resp.content else {}
+    if not payload.get("ok"):
+        raise RuntimeError(payload.get("description") or "telegram_not_ok")
+    message_id = ((payload.get("result") or {}).get("message_id"))
+    db_ref.growth_leaderboard_posts.update_one(
+        {"week_key": week_key},
+        {"$set": {"status": "posted", "posted_at": now_utc_ts, "message_id": message_id}},
+    )
+    logger.info("[GROWTH_LEADERBOARD] posted week_key=%s message_id=%s", week_key, message_id)
+    return True
 
 
 def compute_affiliate_daily_kpi_yesterday() -> dict:
