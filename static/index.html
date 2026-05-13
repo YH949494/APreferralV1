@@ -76,6 +76,25 @@
       border: 1px solid var(--border-light);
       box-shadow: var(--shadow-soft);
     }
+    .identity-top { display:flex; justify-content:space-between; align-items:center; gap:10px; }
+    .identity-tier { font-family: var(--font-display); font-weight:700; font-size:20px; }
+    .identity-meta { display:flex; gap:12px; margin-top:8px; color:var(--text-muted); font-size:13px; flex-wrap:wrap; }
+    .identity-progress { margin-top:10px; }
+    .identity-progress-bar { width:100%; height:8px; background:rgba(255,255,255,0.08); border-radius:999px; overflow:hidden; }
+    .identity-progress-fill { height:100%; width:0%; background:linear-gradient(90deg, #ff7a2e, var(--ap-orange)); }
+    .identity-hint { margin-top:6px; color:var(--text-muted); font-size:12px; }
+    .identity-modal { display:none; position:fixed; inset:0; background:rgba(0,0,0,.55); z-index:2000; }
+    .identity-modal-body { max-width:480px; margin:12vh auto 0; background:var(--bg-card); border:1px solid var(--border-light); border-radius:var(--radius-lg); padding:16px; }
+    .header-profile-wrap { display:flex; flex-direction:column; align-items:flex-end; gap:1px; }
+    .header-rank-hint { display:none; font-size:10px; line-height:1.1; opacity:.55; color:var(--text-muted); font-weight:400; }
+    .user-chip.identity-entry { cursor:pointer; animation: identityPillGlow 6s ease-in-out infinite; }
+    @keyframes identityPillGlow {
+      0%, 100% { box-shadow: 0 0 0 rgba(255, 94, 0, 0); }
+      50% { box-shadow: 0 0 0 3px rgba(255, 94, 0, 0.16); }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .user-chip.identity-entry { animation: none; }
+    }
 
     .section-header {
       display: flex;
@@ -1120,9 +1139,12 @@
     <div class="ap-wordmark">
       <span class="wm-advant">ADVANT</span><span class="wm-play">PLAY</span>
     </div>
-    <div class="user-chip" id="header-user-chip" style="display:none;">
-      <div class="avatar">👤</div>
-      <span id="header-username"></span>
+    <div class="header-profile-wrap">
+      <div class="user-chip" id="header-user-chip" style="display:none;">
+        <div class="avatar">👤</div>
+        <span id="header-username"></span>
+      </div>
+      <div id="header-rank-hint" class="header-rank-hint">Tap to view rank</div>
     </div>
   </div>
 
@@ -1176,6 +1198,25 @@
     <div id="bonus-voucher" style="display: none; margin-top: 16px;">
       <h4>🎁 Your Affiliate Rewards</h4>
       <div id="affiliate-voucher-list"></div>
+    </div>
+  </div>
+  <div id="identity-modal" class="identity-modal">
+    <div class="identity-modal-body">
+      <div class="identity-top">
+        <div id="identity-tier-name" class="identity-tier">🌱 Rookie</div>
+        <button id="identity-modal-close" type="button" class="btn btn-ghost">Close</button>
+      </div>
+      <div id="identity-display-name" style="margin-top:6px; font-weight:600;">User</div>
+      <div id="identity-streak" class="badge" style="display:none; margin-top:8px;"></div>
+      <div class="identity-meta">
+        <span id="identity-weekly-ref">Weekly refs: 0</span>
+        <span id="identity-total-ref">Total refs: 0</span>
+        <span id="identity-total-xp">Total XP: 0</span>
+      </div>
+      <div class="identity-progress">
+        <div class="identity-progress-bar"><div id="identity-progress-fill" class="identity-progress-fill"></div></div>
+        <div id="identity-hint" class="identity-hint"></div>
+      </div>
     </div>
   </div>
 
@@ -5177,6 +5218,61 @@ ${referral}`;
       window.open(url, "_blank");
     }
 
+    async function loadIdentityCard() {
+      try {
+        const res = await v2Fetch(`${API_BASE}/api/me/identity`);
+        if (!res.ok) return;
+        const data = await res.json();
+        if (!data) return;
+        const chipEl = document.getElementById("header-user-chip");
+        const chipNameEl = document.getElementById("header-username");
+        const hintChipEl = document.getElementById("header-rank-hint");
+        const tierEl = document.getElementById("identity-tier-name");
+        const displayNameEl = document.getElementById("identity-display-name");
+        const streakEl = document.getElementById("identity-streak");
+        const weeklyRefEl = document.getElementById("identity-weekly-ref");
+        const totalRefEl = document.getElementById("identity-total-ref");
+        const totalXpEl = document.getElementById("identity-total-xp");
+        const progressEl = document.getElementById("identity-progress-fill");
+        const hintEl = document.getElementById("identity-hint");
+        if (!tierEl || !displayNameEl || !streakEl || !weeklyRefEl || !totalRefEl || !totalXpEl || !progressEl || !hintEl) {
+          return;
+        }
+        const displayName = data.display_name || "My Profile";
+        tierEl.textContent = `${data.tier_icon || "🌱"} ${data.tier_name || "Rookie"}`;
+        displayNameEl.textContent = displayName;
+        weeklyRefEl.textContent = `Weekly refs: ${Number(data.weekly_referrals || 0)}`;
+        totalRefEl.textContent = `Total refs: ${Number(data.total_referrals || 0)}`;
+        totalXpEl.textContent = `Total XP: ${Number(data.total_xp || 0)}`;
+        progressEl.style.width = `${Math.max(0, Math.min(100, Number(data.next_tier_progress_pct || 0)))}%`;
+        hintEl.textContent = data.next_tier_hint || "";
+        const streakDays = Number(data.streak_days || 0);
+        if (streakDays > 0) {
+          streakEl.style.display = "inline-flex";
+          streakEl.textContent = `🔥 ${streakDays} day streak`;
+        } else {
+          streakEl.style.display = "none";
+          streakEl.textContent = "";
+        }
+        if (chipEl && chipNameEl) {
+          chipNameEl.textContent = displayName || "My Profile";
+          chipEl.style.display = "inline-flex";
+          chipEl.classList.add("identity-entry");
+          if (hintChipEl) hintChipEl.style.display = "block";
+        }
+      } catch (_) {}
+    }
+    document.addEventListener("click", (e) => {
+      if (e.target && (e.target.id === "header-user-chip" || (e.target.closest && e.target.closest("#header-user-chip")))) {
+        const modal = document.getElementById("identity-modal");
+        if (modal) modal.style.display = "block";
+      }
+      if (e.target && (e.target.id === "identity-modal-close" || e.target.id === "identity-modal")) {
+        const modal = document.getElementById("identity-modal");
+        if (modal) modal.style.display = "none";
+      }
+    });
+
     window.onload = async () => {
       if (tg) { tg.ready(); tg.expand(); }
 
@@ -5204,6 +5300,7 @@ ${referral}`;
 
       await checkRegionStatus();
       handleAdminAndVoucher();
+      loadIdentityCard();
       await loadCheckinStatus();
       loadVouchers();
       await loadDailyGame();

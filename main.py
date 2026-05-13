@@ -431,6 +431,52 @@ def _get_user_snapshot(user_id: int) -> tuple[dict | None, str | None, int | Non
     logger.info("[SNAPSHOT][READ] uid=%s age=%ss", user_id, snapshot_age_sec)
     return snapshot, snapshot_ts, snapshot_age_sec
 
+IDENTITY_TIERS = [
+    {"name": "Legend", "icon": "🐉", "min_referrals": 100, "min_xp": 100000},
+    {"name": "Elite", "icon": "👑", "min_referrals": 50, "min_xp": 40000},
+    {"name": "Captain", "icon": "⚔️", "min_referrals": 20, "min_xp": 15000},
+    {"name": "Silver", "icon": "🥈", "min_referrals": 5, "min_xp": 5000},
+    {"name": "Bronze", "icon": "🥉", "min_referrals": 1, "min_xp": 1500},
+    {"name": "Rookie", "icon": "🌱", "min_referrals": 0, "min_xp": 0},
+]
+
+
+def _safe_non_negative_int(value) -> int:
+    try:
+        n = float(value)
+    except (TypeError, ValueError):
+        return 0
+    if n != n:
+        return 0
+    return max(0, int(n))
+
+
+def derive_identity_tier(total_referrals: int, total_xp: int) -> dict:
+    refs = _safe_non_negative_int(total_referrals)
+    xp_total = _safe_non_negative_int(total_xp)
+    for tier in IDENTITY_TIERS:
+        if refs >= tier["min_referrals"] or xp_total >= tier["min_xp"]:
+            return tier
+    return IDENTITY_TIERS[-1]
+
+
+def compute_next_tier_progress(total_referrals: int, total_xp: int, current_tier_name: str) -> tuple[str | None, int, str]:
+    ordered = list(reversed(IDENTITY_TIERS))
+    idx = next((i for i, t in enumerate(ordered) if t["name"] == current_tier_name), len(ordered) - 1)
+    if idx >= len(ordered) - 1:
+        return None, 100, "Top tier unlocked"
+
+    next_tier = ordered[idx + 1]
+    refs = _safe_non_negative_int(total_referrals)
+    xp_total = _safe_non_negative_int(total_xp)
+    ref_pct = int(min(100, (refs / max(1, next_tier["min_referrals"])) * 100))
+    xp_pct = int(min(100, (xp_total / max(1, next_tier["min_xp"])) * 100))
+    progress_pct = max(ref_pct, xp_pct)
+    need_refs = max(0, next_tier["min_referrals"] - refs)
+    need_xp = max(0, next_tier["min_xp"] - xp_total)
+    hint = f"{need_refs:,} more referrals or {need_xp:,} XP to {next_tier['name']}"
+    return next_tier["name"], progress_pct, hint
+
 def _current_month_window_utc(reference: datetime | None = None):
     """Return (start_utc, end_utc, start_local, end_local) for the current month."""
 
@@ -2083,6 +2129,87 @@ def api_is_admin():
     except Exception as e:
         traceback.print_exc()
         return jsonify({"success": False, "is_admin": False, "error": str(e)}), 500
+
+
+@app.route("/api/me/identity", methods=["GET"])
+def api_me_identity():
+    try:
+        init_data = extract_raw_init_data_from_query(request)
+        if not init_data:
+            return jsonify({"success": False, "error": "Missing init_data"}), 400
+        ok, parsed, _ = verify_telegram_init_data(init_data)
+        if not ok:
+            return jsonify({"success": False, "error": "Unauthorized"}), 403
+        user_payload = (parsed or {}).get("user", {})
+        if isinstance(user_payload, str):
+            try:
+                user_payload = json.loads(user_payload)
+            except Exception:
+                user_payload = {}
+        user_id = int((user_payload or {}).get("id"))
+    except Exception:
+        return jsonify({"success": False, "error": "Unauthorized"}), 403
+
+    user_doc = users_collection.find_one(
+        {"user_id": user_id},
+        {
+            "user_id": 1,
+            "username": 1,
+            "display_name": 1,
+            "name": 1,
+            "first_name": 1,
+            "last_name": 1,
+            "weekly_xp": 1,
+            "monthly_xp": 1,
+            "total_xp": 1,
+            "lifetime_xp": 1,
+            "xp": 1,
+            "weekly_referrals": 1,
+            "monthly_referrals": 1,
+            "total_referrals": 1,
+            "lifetime_referrals": 1,
+            "streak": 1,
+            "streak_days": 1,
+            "checkin_streak": 1,
+            "vip_tier": 1,
+            "status": 1,
+        },
+    ) or {}
+    display_name = (
+        user_doc.get("display_name")
+        or user_doc.get("name")
+        or user_doc.get("first_name")
+        or user_doc.get("username")
+        or user_payload.get("username")
+        or "User"
+    )
+    total_xp = _safe_non_negative_int(user_doc.get("total_xp", user_doc.get("lifetime_xp", user_doc.get("xp", 0))))
+    total_referrals = _safe_non_negative_int(user_doc.get("total_referrals", user_doc.get("lifetime_referrals", 0)))
+    derived_tier = derive_identity_tier(total_referrals, total_xp)
+    next_tier_name, next_tier_progress_pct, next_tier_hint = compute_next_tier_progress(
+        total_referrals,
+        total_xp,
+        derived_tier["name"],
+    )
+    return jsonify(
+        {
+            "user_id": user_id,
+            "display_name": display_name,
+            "tier_name": derived_tier["name"],
+            "tier_icon": derived_tier["icon"],
+            "weekly_xp": _safe_non_negative_int(user_doc.get("weekly_xp", 0)),
+            "monthly_xp": _safe_non_negative_int(user_doc.get("monthly_xp", 0)),
+            "total_xp": total_xp,
+            "weekly_referrals": _safe_non_negative_int(user_doc.get("weekly_referrals", 0)),
+            "monthly_referrals": _safe_non_negative_int(user_doc.get("monthly_referrals", 0)),
+            "total_referrals": total_referrals,
+            "streak_days": _safe_non_negative_int(user_doc.get("streak_days", user_doc.get("checkin_streak", user_doc.get("streak", 0)))),
+            "next_tier_name": next_tier_name,
+            "next_tier_progress_pct": int(next_tier_progress_pct),
+            "next_tier_hint": next_tier_hint,
+            "source_vip_tier": user_doc.get("vip_tier") or user_doc.get("status"),
+        }
+    )
 
 async def refresh_admin_ids(context: ContextTypes.DEFAULT_TYPE):
     try:
