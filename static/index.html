@@ -3227,8 +3227,7 @@ Active players win more.
         const nextValue = !!input.checked;
         pmPreferencesState[key] = nextValue;
         try {
-          const pmPrefsUrl = withInitDataInQuery(`${API_BASE}/api/me/pm-preferences`, initDataRaw);
-          const res = await v2Fetch(pmPrefsUrl, {
+          const res = await v2Fetch(`${API_BASE}/api/me/pm-preferences`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ pm_preferences: { [key]: nextValue } }),
@@ -3238,6 +3237,7 @@ Active players win more.
             throw new Error(`${res.status} ${res.statusText}`);
           }
         } catch (err) {
+          console.warn("PM preferences save failed", err);
           pmPreferencesState[key] = previous;
           input.checked = previous;
         }
@@ -3246,14 +3246,12 @@ Active players win more.
 
     async function loadPmPreferences() {
       if (pmPreferencesLoaded) return;
-      pmPreferencesLoaded = true;
       const errorEl = document.getElementById("pm-preferences-error");
       const listEl = document.getElementById("pm-preferences-list");
       if (!listEl) return;
       setPmPreferencesEnabled(false);
       try {
-        const pmPrefsUrl = withInitDataInQuery(`${API_BASE}/api/me/pm-preferences`, initDataRaw);
-        const res = await v2Fetch(pmPrefsUrl);
+        const res = await v2Fetch(`${API_BASE}/api/me/pm-preferences`);
         if (res.status === 401 || res.status === 403) throw new Error("unauthorized");
         if (!res.ok) {
           console.warn(`PM preferences fetch failed: ${res.status}`);
@@ -3269,7 +3267,9 @@ Active players win more.
         });
         if (errorEl) errorEl.style.display = "none";
         setPmPreferencesEnabled(true);
+        pmPreferencesLoaded = true;
       } catch (err) {
+        console.warn("PM preferences load failed", err);
         if (errorEl) errorEl.style.display = "block";
       }
     }
