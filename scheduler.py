@@ -46,6 +46,10 @@ SUB_CACHE_TTL_DAYS = int(os.getenv("SUB_CACHE_TTL_DAYS", "14"))
 RECENT_CHECK_SKIP_HOURS = int(os.getenv("RECENT_CHECK_SKIP_HOURS", "6"))
 TG_GETCHATMEMBER_TIMEOUT_SEC = int(os.getenv("TG_GETCHATMEMBER_TIMEOUT_SEC", "5"))
 TG_REQUEST_SLEEP_MS = int(os.getenv("TG_REQUEST_SLEEP_MS", "80"))
+WINBACK_ENABLED = os.getenv("WINBACK_ENABLED", "0") == "1"
+WINBACK_INACTIVE_DAYS = int(os.getenv("WINBACK_INACTIVE_DAYS", "7"))
+WINBACK_COOLDOWN_DAYS = int(os.getenv("WINBACK_COOLDOWN_DAYS", "14"))
+WINBACK_BATCH_LIMIT = int(os.getenv("WINBACK_BATCH_LIMIT", "100"))
 
 KL_TZ = pytz.timezone("Asia/Kuala_Lumpur")
 
@@ -1512,6 +1516,104 @@ def _maybe_send_referral_qualified_dm(
             inviter_user_id,
             invitee_user_id,
         )
+
+
+def _coerce_winback_dt(value):
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+    return None
+
+
+def run_winback_campaign(batch_limit=None, dry_run=False, now_utc_ts=None) -> dict:
+    now_ts = now_utc_ts if isinstance(now_utc_ts, datetime) else now_utc()
+    inactivity_cutoff = now_ts - timedelta(days=WINBACK_INACTIVE_DAYS)
+    cooldown_cutoff = now_ts - timedelta(days=WINBACK_COOLDOWN_DAYS)
+    limit = int(batch_limit if batch_limit is not None else WINBACK_BATCH_LIMIT)
+
+    out = {
+        "scanned": 0,
+        "eligible": 0,
+        "sent": 0,
+        "suppressed": 0,
+        "failed": 0,
+        "dry_run": bool(dry_run),
+    }
+
+    cursor = db.users.find({}, {
+        "user_id": 1,
+        "is_bot": 1,
+        "restrictions": 1,
+        "last_seen_at": 1,
+        "last_checkin": 1,
+        "miniapp_opened_at": 1,
+        "updated_at": 1,
+        "last_winback_pm_at": 1,
+    }).limit(max(limit, 0))
+
+    for user_doc in cursor:
+        out["scanned"] += 1
+        user_id = user_doc.get("user_id")
+        if not user_id:
+            out["suppressed"] += 1
+            continue
+        if user_doc.get("is_bot") is True:
+            out["suppressed"] += 1
+            continue
+        restrictions = user_doc.get("restrictions")
+        if isinstance(restrictions, dict) and restrictions.get("no_pm") is True:
+            out["suppressed"] += 1
+            continue
+
+        latest_activity_at = None
+        for key in ("last_seen_at", "last_checkin", "miniapp_opened_at", "updated_at"):
+            dt = _coerce_winback_dt(user_doc.get(key))
+            if dt is not None and (latest_activity_at is None or dt > latest_activity_at):
+                latest_activity_at = dt
+
+        if latest_activity_at is None or latest_activity_at > inactivity_cutoff:
+            out["suppressed"] += 1
+            continue
+
+        last_winback_pm_at = _coerce_winback_dt(user_doc.get("last_winback_pm_at"))
+        if last_winback_pm_at is not None and last_winback_pm_at > cooldown_cutoff:
+            out["suppressed"] += 1
+            continue
+
+        if not pm_allowed(int(user_id), "winback", default=True, users_collection=db.users, logger=logger):
+            out["suppressed"] += 1
+            continue
+
+        out["eligible"] += 1
+        if dry_run:
+            continue
+
+        try:
+            resp = requests.post(
+                f"{API_BASE}/sendMessage",
+                json={
+                    "chat_id": int(user_id),
+                    "text": "👋 We haven’t seen you for a while.\nYour daily check-in streak and rewards are waiting.",
+                },
+                timeout=10,
+            )
+            resp.raise_for_status()
+            payload = resp.json() if resp.content else {}
+            if not payload.get("ok", True):
+                raise RuntimeError(payload.get("description") or "telegram_not_ok")
+            db.users.update_one({"user_id": int(user_id)}, {"$set": {"last_winback_pm_at": now_ts}})
+            out["sent"] += 1
+        except Exception:
+            out["failed"] += 1
+            logger.exception("[WINBACK][SEND_FAILED] uid=%s", user_id)
+    return out
+
+
+def run_winback_campaign_if_enabled(batch_limit=None, dry_run=False, now_utc_ts=None) -> dict:
+    if not WINBACK_ENABLED:
+        return {"scanned": 0, "eligible": 0, "sent": 0, "suppressed": 0, "failed": 0, "dry_run": bool(dry_run)}
+    return run_winback_campaign(batch_limit=batch_limit, dry_run=dry_run, now_utc_ts=now_utc_ts)
 
 def settle_pending_referrals(batch_limit: int = 200) -> None:
     now_utc_ts = now_utc()
