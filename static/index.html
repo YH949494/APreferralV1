@@ -2997,10 +2997,14 @@
     async function loadReferralProgress() {
       referralProgressAutoLoaded = true;
       try {
-        const res = await v2Fetch(`${API_V2}/referral/progress`);
-        if (res.status === 401 || res.status === 403) return;
-        if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-        const data = await res.json();
+        const unifiedData = window.__REFERRAL_STATUS_PAYLOAD__;
+        let data = unifiedData && typeof unifiedData === "object" ? unifiedData : null;
+        if (!data || !Number.isFinite(Number(data?.progress_pct))) {
+          const res = await v2Fetch(`${API_V2}/referral/progress`);
+          if (res.status === 401 || res.status === 403) return;
+          if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+          data = await res.json();
+        }
         renderReferralProgress(data || {});
       } catch (err) {
         console.warn("Referral progress load failed:", err);
@@ -3066,7 +3070,9 @@
         }
         if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
         const data = await res.json();
+        window.__REFERRAL_STATUS_PAYLOAD__ = data || null;
         renderReferralStatus(data || {});
+        renderReferralProgress(data || {});
       } catch (err) {
         console.warn("Referral status load failed:", err);
         listEl.textContent = "Could not load referral progress right now. Please try again later.";
