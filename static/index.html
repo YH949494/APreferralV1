@@ -302,6 +302,28 @@
       display: grid;
       gap: 4px;
     }
+    .referral-status-card {
+      margin-top: 10px;
+      padding: 12px;
+      border: 1px solid var(--border-light);
+      border-radius: var(--radius-md);
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.02));
+      display: grid;
+      gap: 8px;
+    }
+    .referral-status-list {
+      display: grid;
+      gap: 7px;
+      font-size: 13px;
+    }
+    .referral-status-user {
+      color: var(--text-main);
+      font-weight: 600;
+    }
+    .referral-status-meta {
+      color: var(--text-muted);
+      font-size: 12px;
+    }
     .checkin-status-card {
       margin-top: 10px;
       padding: 12px;
@@ -1275,6 +1297,10 @@
           <div id="referral-progress-next" class="progress-next-reward">Next reward: +400 XP at 3 successful referrals.</div>
         </div>
       </div>
+      <div class="referral-status-card" aria-live="polite">
+        <h4>Referral Progress</h4>
+        <div id="referral-status-list" class="referral-status-list">Loading...</div>
+      </div>
     </div>
 
   </div>
@@ -1847,6 +1873,7 @@
     let dropModeLifted = false;
     let dropModeMonitorTimer = null;
     let referralProgressAutoLoaded = false;
+    let referralStatusAutoLoaded = false;
     let leaderboardAutoLoaded = false;
     const DAILY_GAME_CACHE_PREFIX = "miniapp_daily_game_v1_";
 
@@ -2039,6 +2066,10 @@
       if (!referralProgressAutoLoaded) {
         referralProgressAutoLoaded = true;
         try { loadReferralProgress(); } catch (_) {}
+      }
+      if (!referralStatusAutoLoaded) {
+        referralStatusAutoLoaded = true;
+        try { loadReferralStatus(); } catch (_) {}
       }
     }
 
@@ -2936,6 +2967,72 @@
         renderReferralProgress(data || {});
       } catch (err) {
         console.warn("Referral progress load failed:", err);
+      }
+    }
+
+    function referralStatusLabel(statusValue) {
+      const raw = String(statusValue || "").toLowerCase();
+      if (raw === "qualified") return { icon: "🟢", text: "Qualified" };
+      if (raw === "failed") return { icon: "🔴", text: "Failed" };
+      return { icon: "🟡", text: "Pending" };
+    }
+
+    function renderReferralStatus(data = {}) {
+      const listEl = document.getElementById("referral-status-list");
+      if (!listEl) return;
+
+      while (listEl.firstChild) listEl.removeChild(listEl.firstChild);
+      const rows = Array.isArray(data?.referrals) ? data.referrals : [];
+      if (!rows.length) {
+        listEl.textContent = "Your referrals will appear here after someone joins using your invite link.";
+        return;
+      }
+
+      rows.forEach((row) => {
+        const line = document.createElement("div");
+        const label = document.createElement("div");
+        label.className = "referral-status-user";
+        const rawName =
+          row?.invitee_username ||
+          row?.username ||
+          row?.display_name ||
+          row?.invitee_display_name ||
+          "User";
+        const safeUsername = typeof rawName === "string" && rawName.trim() ? rawName.trim() : "User";
+        label.textContent = safeUsername.startsWith("@") ? safeUsername : `@${safeUsername}`;
+
+        const meta = document.createElement("div");
+        meta.className = "referral-status-meta";
+        const status = referralStatusLabel(row?.status);
+        const parts = [`${status.icon} ${status.text}`];
+        if (status.text === "Pending") {
+          const remaining = Number(row?.remaining_hold_hours);
+          parts.push(Number.isFinite(remaining) && remaining > 0 ? `${Math.floor(remaining)}h remaining` : "Processing...");
+        }
+        meta.textContent = parts.join(" • ");
+        line.appendChild(label);
+        line.appendChild(meta);
+        listEl.appendChild(line);
+      });
+    }
+
+    async function loadReferralStatus() {
+      referralStatusAutoLoaded = true;
+      const listEl = document.getElementById("referral-status-list");
+      if (!listEl) return;
+      listEl.textContent = "Loading...";
+      try {
+        const res = await v2Fetch(`${API_BASE}/api/referral/status`);
+        if (res.status === 401 || res.status === 403) {
+          listEl.textContent = "Please open this mini app from Telegram to view your referral progress.";
+          return;
+        }
+        if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+        const data = await res.json();
+        renderReferralStatus(data || {});
+      } catch (err) {
+        console.warn("Referral status load failed:", err);
+        listEl.textContent = "Could not load referral progress right now. Please try again later.";
       }
     }
     
