@@ -1243,8 +1243,8 @@
       <p id="checkin-timer" style="color: gray;"></p>
       <div id="checkin-streak-card" class="checkin-status-card" style="display:none;">
         <div id="checkin-streak-value">Current streak: 0 days</div>
-        <div id="checkin-freeze-value">Freeze tokens: 0 / 3</div>
-        <div class="muted">Freeze protects your streak if you miss 1 day.</div>
+        <div id="checkin-freeze-value" style="display:none;">Freeze tokens: 0 / 3</div>
+        <div id="checkin-freeze-note" class="muted" style="display:none;">Freeze saved your streak this time.</div>
       </div>
     </div>
 
@@ -2774,7 +2774,8 @@
         if (typeof data.streak !== "undefined" || typeof data.streak_freeze_tokens !== "undefined") {
           const currentStreak = (typeof data.streak !== "undefined") ? data.streak : window.__currentStreakDays;
           const currentTokens = (typeof data.streak_freeze_tokens !== "undefined") ? data.streak_freeze_tokens : window.__currentStreakFreezeTokens;
-          updateCheckinStreakCard(currentStreak, currentTokens, freezeMaxTokens);
+          const showFreeze = data.streak_freeze_used === true || data.streak_freeze_earned === true;
+          updateCheckinStreakCard(currentStreak, currentTokens, freezeMaxTokens, showFreeze);
           window.__streakFreezeMaxTokens = Math.max(1, safeInt(freezeMaxTokens, 3));
           window.__currentStreakDays = Math.max(0, safeInt(currentStreak, 0));
           window.__currentStreakFreezeTokens = Math.min(window.__streakFreezeMaxTokens, Math.max(0, safeInt(currentTokens, 0)));
@@ -2845,16 +2846,21 @@
       return Number.isFinite(n) ? Math.floor(n) : fallback;
     }
 
-    function updateCheckinStreakCard(streak, tokens, maxTokens) {
+    function updateCheckinStreakCard(streak, tokens, maxTokens, showFreeze = false) {
       const cardEl = document.getElementById("checkin-streak-card");
       const streakEl = document.getElementById("checkin-streak-value");
       const freezeEl = document.getElementById("checkin-freeze-value");
+      const freezeNoteEl = document.getElementById("checkin-freeze-note");
       if (!cardEl || !streakEl || !freezeEl) return;
       const safeStreak = Math.max(0, safeInt(streak, 0));
       const safeMax = Math.max(1, safeInt(maxTokens, 3));
       const safeTokens = Math.min(safeMax, Math.max(0, safeInt(tokens, 0)));
       streakEl.innerText = `Current streak: ${safeStreak} days`;
       freezeEl.innerText = `Freeze tokens: ${safeTokens} / ${safeMax}`;
+      freezeEl.style.display = showFreeze ? "block" : "none";
+      if (freezeNoteEl) {
+        freezeNoteEl.style.display = showFreeze ? "block" : "none";
+      }
       cardEl.style.display = "grid";
     }
 
@@ -5288,7 +5294,7 @@ ${referral}`;
         window.__streakFreezeMaxTokens = Math.max(1, safeInt(data.streak_freeze_max_tokens, window.__streakFreezeMaxTokens || 3));
         window.__currentStreakDays = Math.max(0, safeInt(data.streak, data.streak_days));
         window.__currentStreakFreezeTokens = Math.min(window.__streakFreezeMaxTokens, Math.max(0, safeInt(data.streak_freeze_tokens, 0)));
-        updateCheckinStreakCard(window.__currentStreakDays, window.__currentStreakFreezeTokens, window.__streakFreezeMaxTokens);
+        updateCheckinStreakCard(window.__currentStreakDays, window.__currentStreakFreezeTokens, window.__streakFreezeMaxTokens, false);
         const chipEl = document.getElementById("header-user-chip");
         const chipNameEl = document.getElementById("header-username");
         const hintChipEl = document.getElementById("header-rank-hint");
