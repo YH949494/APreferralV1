@@ -1,4 +1,5 @@
 from flask import Blueprint, request, jsonify, current_app
+import logging
 from pymongo import ASCENDING, DESCENDING, ReturnDocument
 from pymongo.errors import OperationFailure, PyMongoError, DuplicateKeyError, BulkWriteError
 from bson.objectid import ObjectId
@@ -118,6 +119,7 @@ SUBNET_KILL_MAX_SUCCESSES = int(os.getenv("SUBNET_KILL_MAX_SUCCESSES", "4"))
 KILL_BLOCK_SECONDS = int(os.getenv("KILL_BLOCK_SECONDS", "86400"))
 CLAIM_COOLDOWN_SECONDS = int(os.getenv("CLAIM_COOLDOWN_SECONDS", "180"))
 SESSION_COOLDOWN_SEC = int(os.getenv("SESSION_COOLDOWN_SEC", "30"))
+DEBUG_INITDATA = os.getenv("DEBUG_INITDATA", "0").strip().lower() in ("1", "true", "yes", "on")
 _BYPASS_WARNING_LOGGED = False
 DROP_MODE_CACHE_TTL_SECONDS = 2
 _DROP_MODE_CACHE = {"payload": None, "expires_at": None}
@@ -3031,15 +3033,19 @@ def parse_init_data(raw: str) -> dict:
 
 def verify_telegram_init_data(init_data_raw: str):
     import os, hmac, hashlib, time, json, urllib.parse
-
-    print("[initdata] verifier=canonical_parse_qsl")
+    try:
+        logger = current_app.logger
+    except Exception:
+        logger = logging.getLogger(__name__)
 
     raw = init_data_raw or ""
     decoded = urllib.parse.unquote_plus(raw)
     raw_hash = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:8] if raw else "none"
     decoded_hash = hashlib.sha256(decoded.encode("utf-8")).hexdigest()[:8] if decoded else "none"
-    print(f"[initdata] raw_len={len(raw)} raw_sha={raw_hash}")
-    print(f"[initdata] decoded_len={len(decoded)} decoded_sha={decoded_hash}")
+    if DEBUG_INITDATA:
+        logger.info("[initdata] verifier=canonical_parse_qsl")
+        logger.info(f"[initdata] raw_len={len(raw)} raw_sha={raw_hash}")
+        logger.info(f"[initdata] decoded_len={len(decoded)} decoded_sha={decoded_hash}")
  
     # 1. Parse & decode ONCE (Telegram spec compliant)
     pairs = urllib.parse.parse_qsl(
@@ -3051,13 +3057,15 @@ def verify_telegram_init_data(init_data_raw: str):
     data = dict(pairs)
     provided_hash = data.get("hash", "").lower()
          
-    print(
-        f"[initdata] has_user={'user' in data} "
-        f"has_auth_date={'auth_date' in data} "
-        f"has_hash={'hash' in data}"
-    )
+    if DEBUG_INITDATA:
+        logger.info(
+            f"[initdata] has_user={'user' in data} "
+            f"has_auth_date={'auth_date' in data} "
+            f"has_hash={'hash' in data}"
+        )
  
     if not provided_hash or len(provided_hash) != 64:
+        logger.warning("[initdata] verify_failed reason=missing_hash")
         return False, {}, "invalid_hash"
 
     # 2. Build data_check_string (sorted, hash excluded)
@@ -3083,32 +3091,39 @@ def verify_telegram_init_data(init_data_raw: str):
         hashlib.sha256
     ).hexdigest()
  
-    print(
-        f"[initdata] hash_check "
-        f"bot_tail={token[-4:]} "
-        f"dcs_sha={dcs_sha} "
-        f"provided={provided_hash[:8]} "
-        f"computed={computed[:8]}"
-    )
+    if DEBUG_INITDATA:
+        logger.info(
+            f"[initdata] hash_check "
+            f"bot_tail={token[-4:]} "
+            f"dcs_sha={dcs_sha} "
+            f"provided={provided_hash[:8]} "
+            f"computed={computed[:8]}"
+        )
  
     if not hmac.compare_digest(computed, provided_hash):
+        logger.warning("[initdata] verify_failed reason=bad_hash")
         return False, {}, "hash_mismatch"
 
     # 4. Freshness check (24h)
     try:
         auth_date = int(data.get("auth_date", "0"))
-        if time.time() - auth_date > 86400:
+        auth_age_s = int(time.time() - auth_date)
+        if auth_age_s > 86400:
+            logger.warning("[initdata] verify_failed reason=expired_auth_date")
             return False, {}, "auth_date_expired"
     except Exception:
-        pass
+        logger.warning("[initdata] verify_failed reason=missing_auth_date")
+        return False, {}, "auth_date_invalid"
      
     # 5. Parse Telegram user JSON (already decoded)
     try:
         user = json.loads(data.get("user", "{}"))
     except Exception:
+        logger.warning("[initdata] verify_failed reason=malformed_initdata")
         return False, {}, "user_parse_error"
      
     if not user.get("id"):
+        logger.warning("[initdata] verify_failed reason=missing_user")
         return False, {}, "missing_user_id"
 
     try:
@@ -3123,6 +3138,8 @@ def verify_telegram_init_data(init_data_raw: str):
         pass
 
     data["user"] = json.dumps(user)
+    if not DEBUG_INITDATA:
+        logger.info("[initdata] verify_ok uid=%s auth_age_s=%s", user.get("id"), auth_age_s)
     return True, data, "ok"
  
 def _require_admin_via_query():
