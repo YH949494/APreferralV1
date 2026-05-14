@@ -16,6 +16,101 @@ from xp import grant_xp, now_utc, now_kl
 from affiliate_rewards import mark_invitee_qualified
 from affiliate_group_access import maybe_unlock_affiliate_group
 
+from telegram_utils import send_telegram_http_message
+
+WELCOME_REMINDER_AFTER_HOURS = int(os.getenv("WELCOME_REMINDER_AFTER_HOURS", "12"))
+WELCOME_FINAL_WARNING_HOURS = int(os.getenv("WELCOME_FINAL_WARNING_HOURS", "36"))
+WELCOME_EXPIRY_HOURS = int(os.getenv("WELCOME_EXPIRY_HOURS", "48"))
+WELCOME_REMINDER_BATCH_LIMIT = int(os.getenv("WELCOME_REMINDER_BATCH_LIMIT", "200"))
+WELCOME_REMINDER_LINK = os.getenv("WELCOME_REMINDER_LINK", "https://apreferralv1.fly.dev/miniapp")
+
+
+def _welcome_reminder_text(*, final_warning: bool) -> str:
+    if final_warning:
+        return f"⏳ Final reminder — your welcome reward expires soon.\n{WELCOME_REMINDER_LINK}"
+    return f"🎁 Your welcome reward is waiting.\nClaim it before it expires.\n{WELCOME_REMINDER_LINK}"
+
+
+def process_welcome_voucher_lifecycle(*, now_ref: datetime | None = None, batch_limit: int | None = None, db_ref=None, send_fn=None) -> dict:
+    db_ref = db_ref or db
+    send_fn = send_fn or send_telegram_http_message
+    now_ts = _coerce_utc(now_ref) or now_utc()
+    limit = int(batch_limit or WELCOME_REMINDER_BATCH_LIMIT)
+    scanned = reminder_sent = final_warning_sent = expired = send_failed = 0
+
+    cursor = db_ref.welcome_eligibility.find(
+        {"claimed": {"$ne": True}, "expired_at": {"$exists": False}},
+        {"_id": 1, "uid": 1, "user_id": 1, "first_seen_at": 1, "eligible_until": 1, "claimed": 1, "claimed_at": 1, "lifecycle_state": 1, "reminder_sent_at": 1, "final_warning_sent_at": 1, "expired_at": 1},
+    ).limit(limit)
+
+    for doc in cursor:
+        scanned += 1
+        uid = doc.get("uid") or doc.get("user_id")
+        if not uid:
+            continue
+        if doc.get("claimed") or doc.get("claimed_at"):
+            db_ref.welcome_eligibility.update_one({"_id": doc["_id"], "claimed": {"$ne": True}}, {"$set": {"claimed": True, "lifecycle_state": "claimed", "updated_at": now_ts}})
+            continue
+
+        first_seen = _coerce_utc(doc.get("first_seen_at"))
+        eligible_until = _coerce_utc(doc.get("eligible_until"))
+        created_ref = first_seen or (eligible_until - timedelta(hours=WELCOME_EXPIRY_HOURS) if eligible_until else None)
+        if not created_ref:
+            continue
+        expiry_at = eligible_until or (created_ref + timedelta(hours=WELCOME_EXPIRY_HOURS))
+
+        if now_ts >= expiry_at:
+            claim_doc = db_ref.new_joiner_claims.find_one({"uid": int(uid)}, {"_id": 1})
+            if claim_doc:
+                db_ref.welcome_eligibility.update_one({"_id": doc["_id"]}, {"$set": {"claimed": True, "lifecycle_state": "claimed", "updated_at": now_ts}})
+                continue
+            res = db_ref.welcome_eligibility.update_one(
+                {"_id": doc["_id"], "expired_at": {"$exists": False}, "claimed": {"$ne": True}},
+                {"$set": {"expired_at": now_ts, "lifecycle_state": "expired", "updated_at": now_ts}},
+            )
+            if res.modified_count:
+                expired += 1
+                logger.info("[WELCOME_LIFECYCLE] welcome_expired uid=%s", uid)
+            continue
+
+        claim_doc = db_ref.new_joiner_claims.find_one({"uid": int(uid)}, {"_id": 1})
+        if claim_doc:
+            db_ref.welcome_eligibility.update_one({"_id": doc["_id"]}, {"$set": {"claimed": True, "lifecycle_state": "claimed", "updated_at": now_ts}})
+            continue
+
+        age_hours = (now_ts - created_ref).total_seconds() / 3600.0
+        needs_final = age_hours >= WELCOME_FINAL_WARNING_HOURS and not doc.get("final_warning_sent_at")
+        needs_reminder = age_hours >= WELCOME_REMINDER_AFTER_HOURS and not doc.get("reminder_sent_at") and not needs_final
+
+        if not (needs_reminder or needs_final):
+            continue
+
+        text = _welcome_reminder_text(final_warning=needs_final)
+        ok, err, _blocked = send_fn(int(uid), text)
+        if not ok:
+            send_failed += 1
+            logger.warning("[WELCOME_LIFECYCLE] send_failed uid=%s final_warning=%s err=%s", uid, needs_final, err)
+            continue
+
+        if needs_final:
+            res = db_ref.welcome_eligibility.update_one(
+                {"_id": doc["_id"], "final_warning_sent_at": {"$exists": False}, "claimed": {"$ne": True}, "expired_at": {"$exists": False}},
+                {"$set": {"final_warning_sent_at": now_ts, "lifecycle_state": "final_warning", "updated_at": now_ts}},
+            )
+            if res.modified_count:
+                final_warning_sent += 1
+                logger.info("[WELCOME_LIFECYCLE] final_warning_sent uid=%s", uid)
+        else:
+            res = db_ref.welcome_eligibility.update_one(
+                {"_id": doc["_id"], "reminder_sent_at": {"$exists": False}, "claimed": {"$ne": True}, "expired_at": {"$exists": False}},
+                {"$set": {"reminder_sent_at": now_ts, "lifecycle_state": "reminded", "updated_at": now_ts}},
+            )
+            if res.modified_count:
+                reminder_sent += 1
+                logger.info("[WELCOME_LIFECYCLE] reminder_sent uid=%s", uid)
+
+    return {"scanned": scanned, "reminder_sent": reminder_sent, "final_warning_sent": final_warning_sent, "expired": expired, "send_failed": send_failed}
+
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 _RAW_GROUP_ID = os.environ.get("MAIN_GROUP_ID") or os.environ.get("GROUP_ID") or "-1002304653063"
 try:

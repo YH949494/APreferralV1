@@ -2186,6 +2186,7 @@ def ensure_welcome_eligibility(uid: int, *, users_exists: bool | None = None) ->
                         "first_seen_at": now,
                         "claimed": False,
                         "claimed_at": None,
+                        "lifecycle_state": "eligible",
                     },
                     "$set": {
                         "uid": uid,
@@ -5448,7 +5449,7 @@ def api_claim():
             }), 403     
         welcome_eligibility_col.update_one(
             {"$or": [{"uid": uid}, {"user_id": uid}]},
-            {"$set": {"uid": uid, "user_id": uid, "claimed": True, "claimed_at": now_kl()}},
+            {"$set": {"uid": uid, "user_id": uid, "claimed": True, "claimed_at": now_kl(), "lifecycle_state": "claimed", "updated_at": now_utc()}},
         )     
         current_app.logger.info("[WELCOME] gate_pass uid=%s", uid)
         current_app.logger.info("[WELCOME] claim_success uid=%s drop_id=%s", uid, drop_id)
