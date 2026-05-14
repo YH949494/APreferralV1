@@ -335,13 +335,6 @@
       font-size: 13px;
     }
     .checkin-status-card .muted { color: var(--text-muted); font-size: 12px; }
-    .pm-preferences-card {
-      margin-top: 12px;
-      border: 1px solid rgba(255, 255, 255, 0.12);
-      border-radius: 10px;
-      padding: 12px;
-      background: rgba(255, 255, 255, 0.02);
-    }
     .pm-preferences-subtext {
       margin: 6px 0 10px;
       color: var(--text-muted);
@@ -1275,6 +1268,27 @@
         <div class="identity-progress-bar"><div id="identity-progress-fill" class="identity-progress-fill"></div></div>
         <div id="identity-hint" class="identity-hint"></div>
       </div>
+      <div style="margin-top:12px;">
+        <button id="open-pm-preferences" type="button" class="btn btn-ghost">🔔 Notification Preferences</button>
+      </div>
+    </div>
+  </div>
+  <div id="pm-preferences-modal" class="identity-modal">
+    <div class="identity-modal-body" aria-live="polite">
+      <div class="identity-top">
+        <div class="identity-tier">Notification Preferences</div>
+        <button id="pm-preferences-modal-close" type="button" class="btn btn-ghost">Close</button>
+      </div>
+      <div class="pm-preferences-subtext">All notifications are enabled by default. You can turn off specific updates anytime.</div>
+      <div id="pm-preferences-error" class="pm-preferences-subtext" style="display:none;">Preferences unavailable right now.</div>
+      <div class="pm-preferences-list" id="pm-preferences-list">
+        <label class="pm-preferences-row"><span>Referral Updates</span><input type="checkbox" data-pm-key="referral_updates"></label>
+        <label class="pm-preferences-row"><span>Check-in Reminders</span><input type="checkbox" data-pm-key="checkin_reminders"></label>
+        <label class="pm-preferences-row"><span>Streak Alerts</span><input type="checkbox" data-pm-key="streak_alerts"></label>
+        <label class="pm-preferences-row"><span>Winback Messages</span><input type="checkbox" data-pm-key="winback"></label>
+        <label class="pm-preferences-row"><span>Announcements</span><input type="checkbox" data-pm-key="announcements"></label>
+      </div>
+      <div class="pm-preferences-subtext">Notifications are enabled by default.</div>
     </div>
   </div>
 
@@ -1323,18 +1337,6 @@
       <div class="referral-status-card" aria-live="polite">
         <h4>Referral Progress</h4>
         <div id="referral-status-list" class="referral-status-list">Loading...</div>
-      </div>
-      <div class="pm-preferences-card" id="pm-preferences-card" aria-live="polite">
-        <h4>🔔 Notification Preferences</h4>
-        <div class="pm-preferences-subtext">Choose which updates you want to receive.</div>
-        <div id="pm-preferences-error" class="pm-preferences-subtext" style="display:none;">Preferences unavailable right now.</div>
-        <div class="pm-preferences-list" id="pm-preferences-list">
-          <label class="pm-preferences-row"><span>Referral Updates</span><input type="checkbox" data-pm-key="referral_updates"></label>
-          <label class="pm-preferences-row"><span>Check-in Reminders</span><input type="checkbox" data-pm-key="checkin_reminders"></label>
-          <label class="pm-preferences-row"><span>Streak Alerts</span><input type="checkbox" data-pm-key="streak_alerts"></label>
-          <label class="pm-preferences-row"><span>Winback Messages</span><input type="checkbox" data-pm-key="winback"></label>
-          <label class="pm-preferences-row"><span>Announcements</span><input type="checkbox" data-pm-key="announcements"></label>
-        </div>
       </div>
     </div>
 
@@ -3252,7 +3254,7 @@ Active players win more.
         const data = await res.json();
         const serverPrefs = (data && typeof data.pm_preferences === "object" && data.pm_preferences) ? data.pm_preferences : {};
         PM_PREFERENCE_KEYS.forEach((key) => {
-          const value = !!serverPrefs[key];
+          const value = serverPrefs[key] !== false;
           pmPreferencesState[key] = value;
           const input = listEl.querySelector(`input[data-pm-key='${key}']`);
           if (input) input.checked = value;
@@ -5543,8 +5545,17 @@ ${referral}`;
         const modal = document.getElementById("identity-modal");
         if (modal) modal.style.display = "block";
       }
+      if (e.target && e.target.id === "open-pm-preferences") {
+        const modal = document.getElementById("pm-preferences-modal");
+        if (modal) modal.style.display = "block";
+        loadPmPreferences();
+      }
       if (e.target && (e.target.id === "identity-modal-close" || e.target.id === "identity-modal")) {
         const modal = document.getElementById("identity-modal");
+        if (modal) modal.style.display = "none";
+      }
+      if (e.target && (e.target.id === "pm-preferences-modal-close" || e.target.id === "pm-preferences-modal")) {
+        const modal = document.getElementById("pm-preferences-modal");
         if (modal) modal.style.display = "none";
       }
     });
@@ -5581,7 +5592,6 @@ ${referral}`;
       loadVouchers();
       await loadDailyGame();
       bindPmPreferenceToggles();
-      loadPmPreferences();
 
       let isDropMode = false;
       try {
