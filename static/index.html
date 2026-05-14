@@ -3227,12 +3227,16 @@ Active players win more.
         const nextValue = !!input.checked;
         pmPreferencesState[key] = nextValue;
         try {
-          const res = await v2Fetch(`${API_BASE}/api/me/pm-preferences`, {
+          const pmPrefsUrl = withInitDataInQuery(`${API_BASE}/api/me/pm-preferences`, initDataRaw);
+          const res = await v2Fetch(pmPrefsUrl, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ pm_preferences: { [key]: nextValue } }),
           });
-          if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+          if (!res.ok) {
+            console.warn(`PM preferences fetch failed: ${res.status}`);
+            throw new Error(`${res.status} ${res.statusText}`);
+          }
         } catch (err) {
           pmPreferencesState[key] = previous;
           input.checked = previous;
@@ -3248,9 +3252,13 @@ Active players win more.
       if (!listEl) return;
       setPmPreferencesEnabled(false);
       try {
-        const res = await v2Fetch(`${API_BASE}/api/me/pm-preferences`);
+        const pmPrefsUrl = withInitDataInQuery(`${API_BASE}/api/me/pm-preferences`, initDataRaw);
+        const res = await v2Fetch(pmPrefsUrl);
         if (res.status === 401 || res.status === 403) throw new Error("unauthorized");
-        if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+        if (!res.ok) {
+          console.warn(`PM preferences fetch failed: ${res.status}`);
+          throw new Error(`${res.status} ${res.statusText}`);
+        }
         const data = await res.json();
         const serverPrefs = (data && typeof data.pm_preferences === "object" && data.pm_preferences) ? data.pm_preferences : {};
         PM_PREFERENCE_KEYS.forEach((key) => {
