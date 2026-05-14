@@ -1779,6 +1779,18 @@ def ensure_indexes():
         [("inviter_user_id", 1), ("status", 1)],
         name="pending_by_inviter",
     )
+    pending_referrals_collection.create_index(
+        [("inviter_user_id", 1), ("created_at_utc", -1)],
+        name="pending_by_inviter_created_desc",
+    )
+    qualified_events_collection.create_index(
+        [("referrer_id", 1), ("invitee_id", 1)],
+        name="qualified_by_referrer_invitee",
+    )
+    referral_events_collection.create_index(
+        [("inviter_id", 1), ("invitee_id", 1), ("event", 1)],
+        name="referral_events_by_inviter_invitee_event",
+    )
     db.referral_tier_congrats.create_index(
         [("user_id", 1), ("month_key", 1), ("tier", 1)],
         unique=True,
@@ -2304,6 +2316,118 @@ def api_me_identity():
             "source_vip_tier": user_doc.get("vip_tier") or user_doc.get("status"),
         }
     )
+
+
+def _coerce_utc_datetime(value):
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        dt = value
+    elif isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return None
+        try:
+            dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except Exception:
+            return None
+    else:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _map_referral_status(raw_status):
+    s = str(raw_status or "").strip().lower()
+    if s in {"pending", "pending_channel", "processing"}:
+        return "pending"
+    if s in {"awarded", "qualified", "settled", "success"}:
+        return "qualified"
+    if s in {"revoked", "failed", "rejected", "expired"}:
+        return "failed"
+    return "pending"
+
+
+def _build_referral_status_payload(user_id: int, now_utc: datetime):
+    rows = list(
+        pending_referrals_collection.find(
+            {"inviter_user_id": int(user_id)},
+            {
+                "_id": 0,
+                "invitee_user_id": 1,
+                "invitee_username": 1,
+                "status": 1,
+                "created_at_utc": 1,
+            },
+        ).sort("created_at_utc", -1).limit(50)
+    )
+    invitee_ids = [r.get("invitee_user_id") for r in rows if r.get("invitee_user_id") is not None]
+    qualified_pairs = {
+        (int(d.get("referrer_id")), int(d.get("invitee_id")))
+        for d in qualified_events_collection.find(
+            {"referrer_id": int(user_id), "invitee_id": {"$in": invitee_ids}},
+            {"_id": 0, "referrer_id": 1, "invitee_id": 1},
+        )
+        if d.get("referrer_id") is not None and d.get("invitee_id") is not None
+    }
+    revoked_pairs = {
+        (int(d.get("inviter_id")), int(d.get("invitee_id")))
+        for d in referral_events_collection.find(
+            {"inviter_id": int(user_id), "invitee_id": {"$in": invitee_ids}, "event": "referral_revoked"},
+            {"_id": 0, "inviter_id": 1, "invitee_id": 1},
+        )
+        if d.get("inviter_id") is not None and d.get("invitee_id") is not None
+    }
+
+    referrals = []
+    for row in rows:
+        invitee_user_id = row.get("invitee_user_id")
+        pair_key = (int(user_id), int(invitee_user_id)) if invitee_user_id is not None else None
+        status = _map_referral_status(row.get("status"))
+        if pair_key and pair_key in qualified_pairs:
+            status = "qualified"
+        elif pair_key and pair_key in revoked_pairs and status != "qualified":
+            status = "failed"
+        created_at = _coerce_utc_datetime(row.get("created_at_utc"))
+        age_hours = 0
+        if created_at is not None:
+            age_hours = max(0, int((now_utc - created_at).total_seconds() // 3600))
+        remaining_hold_hours = max(0, REFERRAL_HOLD_HOURS - age_hours) if status == "pending" else 0
+        referrals.append(
+            {
+                "invitee_user_id": invitee_user_id,
+                "invitee_username": row.get("invitee_username"),
+                "status": status,
+                "created_at": created_at.isoformat() if created_at else None,
+                "age_hours": age_hours,
+                "remaining_hold_hours": remaining_hold_hours,
+                "qualified_at": None,
+            }
+        )
+    return {"ok": True, "hold_hours": REFERRAL_HOLD_HOURS, "referrals": referrals}
+
+
+@app.route("/api/referral/status", methods=["GET"])
+def api_referral_status():
+    try:
+        init_data = extract_raw_init_data_from_query(request)
+        if not init_data:
+            return jsonify({"ok": False, "error": "Unauthorized"}), 401
+        ok, parsed, _ = verify_telegram_init_data(init_data)
+        if not ok:
+            return jsonify({"ok": False, "error": "Unauthorized"}), 401
+        user_payload = (parsed or {}).get("user", {})
+        if isinstance(user_payload, str):
+            try:
+                user_payload = json.loads(user_payload)
+            except Exception:
+                user_payload = {}
+        user_id = int((user_payload or {}).get("id"))
+    except Exception:
+        return jsonify({"ok": False, "error": "Unauthorized"}), 401
+    payload = _build_referral_status_payload(user_id, datetime.now(timezone.utc))
+    return jsonify(payload)
 
 async def refresh_admin_ids(context: ContextTypes.DEFAULT_TYPE):
     try:
