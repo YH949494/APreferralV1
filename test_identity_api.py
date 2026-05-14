@@ -27,6 +27,7 @@ def _load_symbols():
     env = {}
     exec(compile(isolated, filename="main.py", mode="exec"), env)  # noqa: S102
     env["datetime"] = __import__("datetime").datetime
+    env["STREAK_FREEZE_MAX_TOKENS"] = 3
     return env
 
 
@@ -100,6 +101,7 @@ def test_endpoint_alias_fallback_and_shape():
                     "lifetime_xp": 5000,
                     "lifetime_referrals": 2,
                     "checkin_streak": 7,
+                    "streak_freeze_tokens": 2,
                     "vip_tier": "VIP9",
                     "weekly_xp": "inf",
                     "monthly_xp": None,
@@ -119,10 +121,13 @@ def test_endpoint_alias_fallback_and_shape():
     assert body["tier_name"] == "Silver"
     assert body["weekly_xp"] == 0
     assert body["source_vip_tier"] == "VIP9"
+    assert body["streak_freeze_tokens"] == 2
+    assert body["streak_freeze_max_tokens"] == 3
     for k in (
         "user_id", "display_name", "tier_name", "tier_icon", "weekly_xp", "monthly_xp", "total_xp",
         "weekly_referrals", "monthly_referrals", "total_referrals", "streak_days", "next_tier_name",
-        "next_tier_progress_pct", "next_tier_hint", "source_vip_tier", "weekly_rank",
+        "next_tier_progress_pct", "next_tier_hint", "source_vip_tier", "weekly_rank", "streak",
+        "streak_freeze_tokens", "streak_freeze_max_tokens",
     ):
         assert k in body
 
@@ -180,6 +185,25 @@ def test_missing_user_doc_safe_defaults_and_no_crash():
     assert body["user_id"] == 555
     assert body["display_name"] == "tg_user"
     assert body["tier_name"] == "Rookie"
+    assert body["streak_freeze_tokens"] == 0
+    assert body["streak_freeze_max_tokens"] == 3
+
+
+def test_freeze_tokens_clamped_to_max():
+    env = _load_symbols()
+    fn = env["api_me_identity"]
+    env.update(
+        {
+            "request": _Req(),
+            "extract_raw_init_data_from_query": lambda req: "ok",
+            "verify_telegram_init_data": lambda raw: (True, {"user": {"id": 555, "username": "tg_user"}}, "ok"),
+            "users_collection": _Users({"user_id": 555, "streak_freeze_tokens": 999}),
+            "jsonify": lambda payload: payload,
+            "json": __import__("json"),
+        }
+    )
+    body = fn()
+    assert body["streak_freeze_tokens"] == 3
 
 
 def test_legend_next_tier_values():

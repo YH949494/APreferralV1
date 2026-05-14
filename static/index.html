@@ -302,6 +302,17 @@
       display: grid;
       gap: 4px;
     }
+    .checkin-status-card {
+      margin-top: 10px;
+      padding: 12px;
+      border: 1px solid var(--border-light);
+      border-radius: var(--radius-md);
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.02));
+      display: grid;
+      gap: 5px;
+      font-size: 13px;
+    }
+    .checkin-status-card .muted { color: var(--text-muted); font-size: 12px; }
     .progress-hero {
       margin: 10px 0 12px;
       padding: 14px;
@@ -1230,6 +1241,11 @@
       <button class="btn btn-primary" onclick="checkIn()">Check In</button>
       <p id="checkin-result"></p>
       <p id="checkin-timer" style="color: gray;"></p>
+      <div id="checkin-streak-card" class="checkin-status-card" style="display:none;">
+        <div id="checkin-streak-value">Current streak: 0 days</div>
+        <div id="checkin-freeze-value">Freeze tokens: 0 / 3</div>
+        <div class="muted">Freeze protects your streak if you miss 1 day.</div>
+      </div>
     </div>
 
     <div class="section" id="daily-game-section" style="display: block;">
@@ -2754,6 +2770,16 @@
         const data = await res.json();
 
         document.getElementById("checkin-result").innerText = data.message || "❌ Check-in failed.";
+        const freezeMaxTokens = data.streak_freeze_max_tokens || window.__streakFreezeMaxTokens || 3;
+        if (typeof data.streak !== "undefined" || typeof data.streak_freeze_tokens !== "undefined") {
+          const currentStreak = (typeof data.streak !== "undefined") ? data.streak : window.__currentStreakDays;
+          const currentTokens = (typeof data.streak_freeze_tokens !== "undefined") ? data.streak_freeze_tokens : window.__currentStreakFreezeTokens;
+          updateCheckinStreakCard(currentStreak, currentTokens, freezeMaxTokens);
+          window.__streakFreezeMaxTokens = Math.max(1, safeInt(freezeMaxTokens, 3));
+          window.__currentStreakDays = Math.max(0, safeInt(currentStreak, 0));
+          window.__currentStreakFreezeTokens = Math.min(window.__streakFreezeMaxTokens, Math.max(0, safeInt(currentTokens, 0)));
+        }
+        appendFreezeNotices(data);
 
         if (data.next_checkin_time) {
           startCountdown(data.next_checkin_time);
@@ -2812,6 +2838,39 @@
       if (data.checked_in === true) return true;
       const msg = String(data.message || "");
       return /already checked in/i.test(msg);
+    }
+
+    function safeInt(value, fallback = 0) {
+      const n = Number(value);
+      return Number.isFinite(n) ? Math.floor(n) : fallback;
+    }
+
+    function updateCheckinStreakCard(streak, tokens, maxTokens) {
+      const cardEl = document.getElementById("checkin-streak-card");
+      const streakEl = document.getElementById("checkin-streak-value");
+      const freezeEl = document.getElementById("checkin-freeze-value");
+      if (!cardEl || !streakEl || !freezeEl) return;
+      const safeStreak = Math.max(0, safeInt(streak, 0));
+      const safeMax = Math.max(1, safeInt(maxTokens, 3));
+      const safeTokens = Math.min(safeMax, Math.max(0, safeInt(tokens, 0)));
+      streakEl.innerText = `Current streak: ${safeStreak} days`;
+      freezeEl.innerText = `Freeze tokens: ${safeTokens} / ${safeMax}`;
+      cardEl.style.display = "grid";
+    }
+
+    function appendFreezeNotices(data) {
+      if (!data) return;
+      const resultEl = document.getElementById("checkin-result");
+      if (!resultEl) return;
+      const existing = String(resultEl.innerText || "");
+      let next = existing;
+      if (data.streak_freeze_used === true && !/streak freeze used/i.test(existing)) {
+        next += (next ? "\n" : "") + "🧊 Streak Freeze used — your streak continues.";
+      }
+      if (data.streak_freeze_earned === true && !/freeze token earned/i.test(existing)) {
+        next += (next ? "\n" : "") + "🧊 +1 Freeze Token earned.";
+      }
+      resultEl.innerText = next;
     }
 
     function formatExpiryTimer(seconds) {
@@ -5226,6 +5285,10 @@ ${referral}`;
         if (!res.ok) return;
         const data = await res.json();
         if (!data) return;
+        window.__streakFreezeMaxTokens = Math.max(1, safeInt(data.streak_freeze_max_tokens, window.__streakFreezeMaxTokens || 3));
+        window.__currentStreakDays = Math.max(0, safeInt(data.streak, data.streak_days));
+        window.__currentStreakFreezeTokens = Math.min(window.__streakFreezeMaxTokens, Math.max(0, safeInt(data.streak_freeze_tokens, 0)));
+        updateCheckinStreakCard(window.__currentStreakDays, window.__currentStreakFreezeTokens, window.__streakFreezeMaxTokens);
         const chipEl = document.getElementById("header-user-chip");
         const chipNameEl = document.getElementById("header-username");
         const hintChipEl = document.getElementById("header-rank-hint");
