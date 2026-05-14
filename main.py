@@ -2264,63 +2264,6 @@ def api_is_admin():
 
 
 
-@app.route("/api/me/pm-preferences", methods=["GET"])
-def api_me_pm_preferences_get():
-    try:
-        init_data = extract_raw_init_data_from_query(request)
-        if not init_data:
-            return jsonify({"ok": False, "error": "Missing init_data"}), 400
-        ok, parsed, _ = verify_telegram_init_data(init_data)
-        if not ok:
-            return jsonify({"ok": False, "error": "Unauthorized"}), 403
-        user_payload = (parsed or {}).get("user", {})
-        if isinstance(user_payload, str):
-            try:
-                user_payload = json.loads(user_payload)
-            except Exception:
-                user_payload = {}
-        user_id = int((user_payload or {}).get("id"))
-    except Exception:
-        return jsonify({"ok": False, "error": "Unauthorized"}), 403
-
-    user_doc = users_collection.find_one({"user_id": user_id}, {"pm_preferences": 1}) or {}
-    return jsonify({"ok": True, "pm_preferences": merged_pm_preferences(user_doc.get("pm_preferences"))})
-
-
-@app.route("/api/me/pm-preferences", methods=["POST"])
-def api_me_pm_preferences_post():
-    try:
-        init_data = extract_raw_init_data_from_query(request)
-        if not init_data:
-            return jsonify({"ok": False, "error": "Missing init_data"}), 400
-        ok, parsed, _ = verify_telegram_init_data(init_data)
-        if not ok:
-            return jsonify({"ok": False, "error": "Unauthorized"}), 403
-        user_payload = (parsed or {}).get("user", {})
-        if isinstance(user_payload, str):
-            try:
-                user_payload = json.loads(user_payload)
-            except Exception:
-                user_payload = {}
-        user_id = int((user_payload or {}).get("id"))
-    except Exception:
-        return jsonify({"ok": False, "error": "Unauthorized"}), 403
-
-    body = request.get_json(silent=True) or {}
-    raw_updates = body.get("pm_preferences")
-    updates = {}
-    if isinstance(raw_updates, dict):
-        for key in PM_PREFERENCE_DEFAULTS:
-            value = raw_updates.get(key)
-            if value is True:
-                updates[f"pm_preferences.{key}"] = True
-            elif value is False:
-                updates[f"pm_preferences.{key}"] = False
-    if updates:
-        users_collection.update_one({"user_id": user_id}, {"$set": updates}, upsert=True)
-    user_doc = users_collection.find_one({"user_id": user_id}, {"pm_preferences": 1}) or {}
-    return jsonify({"ok": True, "pm_preferences": merged_pm_preferences(user_doc.get("pm_preferences"))})
-
 @app.route("/api/me/identity", methods=["GET"])
 def api_me_identity():
     try:
