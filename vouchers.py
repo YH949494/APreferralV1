@@ -4340,11 +4340,58 @@ def api_referral_progress():
             link_expires_in_seconds = min(86400.0, remaining_seconds)  # cap at 24h
 
     referrals = []
+    def build_public_referral_user_label(row):
+        row = row or {}
+
+        def _clean_username(value):
+            if value is None:
+                return ""
+            text = str(value).strip()
+            if text.startswith("@"):
+                text = text[1:]
+            return text.strip()
+
+        username = _clean_username(row.get("username"))
+        if not username:
+            username = _clean_username(row.get("invitee_username"))
+        if not username:
+            username = _clean_username(row.get("usernameLower"))
+        if username:
+            return f"@{username}"
+
+        for key in ("first_name", "invitee_first_name", "display_name", "invitee_display_name", "name"):
+            value = row.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+
+        for key in ("invitee_user_id", "user_id", "uid"):
+            value = row.get(key)
+            if value is None:
+                continue
+            digits = "".join(ch for ch in str(value) if ch.isdigit())
+            if digits:
+                return f"User •••{digits[-4:]}"
+
+        return "User"
+
     if inviter_id is not None:
         rows = list(
             db.pending_referrals.find(
                 {"inviter_user_id": int(inviter_id)},
-                {"_id": 0, "invitee_user_id": 1, "invitee_username": 1, "status": 1, "revoked_reason": 1},
+                {
+                    "_id": 0,
+                    "invitee_user_id": 1,
+                    "invitee_username": 1,
+                    "first_name": 1,
+                    "invitee_first_name": 1,
+                    "display_name": 1,
+                    "invitee_display_name": 1,
+                    "name": 1,
+                    "username": 1,
+                    "usernameLower": 1,
+                    "status": 1,
+                    "revoked_reason": 1,
+                },
             ).sort("created_at_utc", -1).limit(50)
         )
         invitee_ids = [r.get("invitee_user_id") for r in rows if r.get("invitee_user_id") is not None]
@@ -4376,10 +4423,13 @@ def api_referral_progress():
                 {"status": status, "revoked_reason": row.get("revoked_reason")},
                 logger=current_app.logger,
             )
+            label = build_public_referral_user_label(row)
             referrals.append(
                 {
                     "invitee_user_id": invitee_user_id,
                     "invitee_username": row.get("invitee_username"),
+                    "display_label": label,
+                    "invitee_label": label,
                     "status": mapped["status"],
                     "status_label": mapped["label"],
                     "status_icon": mapped["icon"],

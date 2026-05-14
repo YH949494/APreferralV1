@@ -11,6 +11,7 @@ def _load_symbols():
         "REFERRAL_HOLD_HOURS",
         "_coerce_utc_datetime",
         "_map_referral_status",
+        "build_public_referral_user_label",
         "_build_referral_status_payload",
         "api_referral_status",
     }
@@ -135,6 +136,33 @@ def test_pending_referral_shape_and_time_fields():
     assert item["age_hours"] == 3
     assert item["remaining_hold_hours"] == 9
     assert item["qualified_at"] is None
+    assert item["display_label"] == "@abc"
+
+
+def test_invitee_display_label_fallbacks_and_masking():
+    env = _load_symbols()
+    _inject_unified_stubs(env)
+    now = datetime(2026, 5, 14, 12, 0, tzinfo=timezone.utc)
+    env.update(
+        {
+            "pending_referrals_collection": _Collection([
+                {"inviter_user_id": 1, "invitee_user_id": 11, "invitee_username": "TestUser", "status": "pending", "created_at_utc": now},
+                {"inviter_user_id": 1, "invitee_user_id": 22, "first_name": "Alice", "status": "pending", "created_at_utc": now - timedelta(minutes=1)},
+                {"inviter_user_id": 1, "invitee_user_id": 987654321, "status": "pending", "created_at_utc": now - timedelta(minutes=2)},
+                {"inviter_user_id": 1, "status": "pending", "created_at_utc": now - timedelta(minutes=3)},
+            ]),
+            "qualified_events_collection": _Collection([]),
+            "referral_events_collection": _Collection([]),
+        }
+    )
+    out = env["_build_referral_status_payload"](1, now)
+    labels = [r["display_label"] for r in out["referrals"]]
+    assert labels[0] == "@TestUser"
+    assert labels[1] == "Alice"
+    assert labels[2] == "User •••4321"
+    assert labels[3] == "User"
+    assert "987654321" not in labels[2]
+    assert out["referrals"][2]["invitee_label"] == "User •••4321"
 
 
 def test_awarded_pending_maps_qualified():
