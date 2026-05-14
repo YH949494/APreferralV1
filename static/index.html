@@ -335,6 +335,29 @@
       font-size: 13px;
     }
     .checkin-status-card .muted { color: var(--text-muted); font-size: 12px; }
+    .pm-preferences-card {
+      margin-top: 12px;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 10px;
+      padding: 12px;
+      background: rgba(255, 255, 255, 0.02);
+    }
+    .pm-preferences-subtext {
+      margin: 6px 0 10px;
+      color: var(--text-muted);
+      font-size: 12px;
+    }
+    .pm-preferences-list {
+      display: grid;
+      gap: 8px;
+    }
+    .pm-preferences-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
+      font-size: 14px;
+    }
     .progress-hero {
       margin: 10px 0 12px;
       padding: 14px;
@@ -1300,6 +1323,18 @@
       <div class="referral-status-card" aria-live="polite">
         <h4>Referral Progress</h4>
         <div id="referral-status-list" class="referral-status-list">Loading...</div>
+      </div>
+      <div class="pm-preferences-card" id="pm-preferences-card" aria-live="polite">
+        <h4>🔔 Notification Preferences</h4>
+        <div class="pm-preferences-subtext">Choose which updates you want to receive.</div>
+        <div id="pm-preferences-error" class="pm-preferences-subtext" style="display:none;">Preferences unavailable right now.</div>
+        <div class="pm-preferences-list" id="pm-preferences-list">
+          <label class="pm-preferences-row"><span>Referral Updates</span><input type="checkbox" data-pm-key="referral_updates"></label>
+          <label class="pm-preferences-row"><span>Check-in Reminders</span><input type="checkbox" data-pm-key="checkin_reminders"></label>
+          <label class="pm-preferences-row"><span>Streak Alerts</span><input type="checkbox" data-pm-key="streak_alerts"></label>
+          <label class="pm-preferences-row"><span>Winback Messages</span><input type="checkbox" data-pm-key="winback"></label>
+          <label class="pm-preferences-row"><span>Announcements</span><input type="checkbox" data-pm-key="announcements"></label>
+        </div>
       </div>
     </div>
 
@@ -3057,7 +3092,7 @@
         const link = data.referral_link;
         if (link) {
           latestReferralLink = link;
-          display.innerText = link + "\n👆 Tap 'Copy to Clipboard' to copy";3
+          display.innerText = link + "\n👆 Tap 'Copy to Clipboard' to copy";
           loadReferralProgress();          
         } else {
           display.innerText = "❌ Failed to get link.";
@@ -3165,6 +3200,68 @@ Active players win more.
           setTimeout(showRetentionToast, 800);
         })
         .catch(() => alert("Failed to copy voucher."));
+    }
+
+    const PM_PREFERENCE_KEYS = ["referral_updates", "checkin_reminders", "streak_alerts", "winback", "announcements"];
+    let pmPreferencesLoaded = false;
+    let pmPreferencesState = {};
+
+    function setPmPreferencesEnabled(enabled) {
+      const listEl = document.getElementById("pm-preferences-list");
+      if (!listEl) return;
+      const inputs = listEl.querySelectorAll("input[type='checkbox'][data-pm-key]");
+      inputs.forEach((input) => { input.disabled = !enabled; });
+    }
+
+    function bindPmPreferenceToggles() {
+      const listEl = document.getElementById("pm-preferences-list");
+      if (!listEl) return;
+      listEl.addEventListener("change", async (event) => {
+        const input = event.target;
+        if (!(input instanceof HTMLInputElement) || input.type !== "checkbox") return;
+        const key = String(input.dataset.pmKey || "");
+        if (!PM_PREFERENCE_KEYS.includes(key)) return;
+        const previous = !!pmPreferencesState[key];
+        const nextValue = !!input.checked;
+        pmPreferencesState[key] = nextValue;
+        try {
+          const res = await v2Fetch(`${API_BASE}/api/me/pm-preferences`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ pm_preferences: { [key]: nextValue } }),
+          });
+          if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+        } catch (err) {
+          pmPreferencesState[key] = previous;
+          input.checked = previous;
+        }
+      });
+    }
+
+    async function loadPmPreferences() {
+      if (pmPreferencesLoaded) return;
+      pmPreferencesLoaded = true;
+      const errorEl = document.getElementById("pm-preferences-error");
+      const listEl = document.getElementById("pm-preferences-list");
+      if (!listEl) return;
+      setPmPreferencesEnabled(false);
+      try {
+        const res = await v2Fetch(`${API_BASE}/api/me/pm-preferences`);
+        if (res.status === 401 || res.status === 403) throw new Error("unauthorized");
+        if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+        const data = await res.json();
+        const serverPrefs = (data && typeof data.pm_preferences === "object" && data.pm_preferences) ? data.pm_preferences : {};
+        PM_PREFERENCE_KEYS.forEach((key) => {
+          const value = !!serverPrefs[key];
+          pmPreferencesState[key] = value;
+          const input = listEl.querySelector(`input[data-pm-key='${key}']`);
+          if (input) input.checked = value;
+        });
+        if (errorEl) errorEl.style.display = "none";
+        setPmPreferencesEnabled(true);
+      } catch (err) {
+        if (errorEl) errorEl.style.display = "block";
+      }
     }
 
     function renderAffiliateRewards(rewards) {
@@ -5483,6 +5580,8 @@ ${referral}`;
       await loadCheckinStatus();
       loadVouchers();
       await loadDailyGame();
+      bindPmPreferenceToggles();
+      loadPmPreferences();
 
       let isDropMode = false;
       try {
