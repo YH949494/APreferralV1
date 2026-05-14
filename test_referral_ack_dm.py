@@ -36,9 +36,13 @@ class _Logger:
     def __init__(self):
         self.warnings = []
         self.exceptions = []
+        self.infos = []
 
     def warning(self, *args, **kwargs):
         self.warnings.append((args, kwargs))
+
+    def info(self, *args, **kwargs):
+        self.infos.append((args, kwargs))
 
     def exception(self, *args, **kwargs):
         self.exceptions.append((args, kwargs))
@@ -73,6 +77,8 @@ def test_ack_dm_sent_once_and_duplicate_skips():
             "Forbidden": type("Forbidden", (Exception,), {}),
             "BadRequest": type("BadRequest", (Exception,), {}),
             "logger": logger,
+            "pm_allowed": lambda *args, **kwargs: True,
+            "users_collection": object(),
         }
     )
 
@@ -99,6 +105,8 @@ def test_ack_dm_failure_does_not_raise():
             "Forbidden": type("Forbidden", (Exception,), {}),
             "BadRequest": type("BadRequest", (Exception,), {}),
             "logger": logger,
+            "pm_allowed": lambda *args, **kwargs: True,
+            "users_collection": object(),
         }
     )
 
@@ -123,6 +131,8 @@ def test_missing_inviter_or_invitee_skips():
             "Forbidden": type("Forbidden", (Exception,), {}),
             "BadRequest": type("BadRequest", (Exception,), {}),
             "logger": logger,
+            "pm_allowed": lambda *args, **kwargs: True,
+            "users_collection": object(),
         }
     )
 
@@ -131,3 +141,29 @@ def test_missing_inviter_or_invitee_skips():
 
     assert notifications.calls == 0
     assert not bot.sent
+
+def test_ack_dm_suppressed_when_preference_disabled():
+    fn = _load_ack_func()
+    bot = _Bot()
+    logger = _Logger()
+    notifications = _NotificationsCollection(first_insert=True)
+
+    fn.__globals__.update(
+        {
+            "RUNNER_MODE": "web",
+            "now_utc": lambda: datetime(2026, 1, 1, tzinfo=timezone.utc),
+            "referral_notifications_collection": notifications,
+            "call_bot_in_loop": lambda coro: coro,
+            "app_bot": type("AB", (), {"bot": bot})(),
+            "Forbidden": type("Forbidden", (Exception,), {}),
+            "BadRequest": type("BadRequest", (Exception,), {}),
+            "logger": logger,
+            "pm_allowed": lambda *args, **kwargs: False,
+            "users_collection": object(),
+        }
+    )
+
+    fn(123, 456, "newuser")
+
+    assert not bot.sent
+    assert notifications.calls == 1

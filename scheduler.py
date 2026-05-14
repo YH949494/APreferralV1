@@ -8,6 +8,7 @@ import time
 from html import escape as html_escape
 from pymongo import ReturnDocument, UpdateOne
 from pymongo.errors import DuplicateKeyError
+from pm_preferences import pm_allowed
 from requests import RequestException
 from database import db
 from referral_rules import calc_referral_award
@@ -1453,21 +1454,40 @@ def _maybe_send_referral_qualified_dm(
         return
     dedupe_key = f"ref_qualified:{int(inviter_user_id)}:{int(invitee_user_id)}"
     now_ts = now_utc()
+    pref_allowed = pm_allowed(
+        int(inviter_user_id),
+        "referral_updates",
+        default=True,
+        users_collection=db.users,
+        logger=logger,
+    )
+    set_on_insert = {
+        "key": dedupe_key,
+        "type": "ref_qualified",
+        "inviter_user_id": int(inviter_user_id),
+        "invitee_user_id": int(invitee_user_id),
+        "invitee_username": invitee_username,
+        "created_at": now_ts,
+    }
+    if not pref_allowed:
+        set_on_insert["suppressed"] = True
+        set_on_insert["suppressed_reason"] = "pm_preference"
     result = db.referral_notifications.update_one(
         {"key": dedupe_key},
         {
-            "$setOnInsert": {
-                "key": dedupe_key,
-                "type": "ref_qualified",
-                "inviter_user_id": int(inviter_user_id),
-                "invitee_user_id": int(invitee_user_id),
-                "invitee_username": invitee_username,
-                "created_at": now_ts,
-            }
+            "$setOnInsert": set_on_insert
         },
         upsert=True,
     )
     if not getattr(result, "upserted_id", None):
+        return
+    if not pref_allowed:
+        logger.info(
+            "[PM_PREF][SUPPRESSED] uid=%s key=%s type=%s",
+            inviter_user_id,
+            "referral_updates",
+            "ref_qualified",
+        )
         return
     if invitee_username:
         text = (
