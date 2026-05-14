@@ -17,7 +17,12 @@ class _FakeCollection:
         self.calls.append((keys, kwargs))
         if self.fail:
             raise self.fail
-        self._index_info[kwargs["name"]] = {"key": dict(keys)}
+        self._index_info[kwargs["name"]] = {"key": list(keys)}
+        return kwargs["name"]
+
+    def list_indexes(self):
+        for idx_name, spec in self._index_info.items():
+            yield {"name": idx_name, "key": spec.get("key", [])}
 
 
 def plan_index_specs(query_shapes: dict[str, bool]):
@@ -54,9 +59,9 @@ def test_safe_create_index_pymongo_error_returns_false():
 
 def test_safe_create_index_uses_explicit_name_and_idempotent():
     col = _FakeCollection()
-    assert safe_create_index(col, [("weekly_xp", -1)], name="users_weekly_xp_desc_idx") is True
+    assert safe_create_index(col, [("weekly_xp", -1)], name="users_weekly_xp_desc_idx") == "users_weekly_xp_desc_idx"
     assert col.calls[0][1]["name"] == "users_weekly_xp_desc_idx"
-    assert safe_create_index(col, [("weekly_xp", -1)], name="users_weekly_xp_desc_idx") is True
+    assert safe_create_index(col, [("weekly_xp", -1)], name="users_weekly_xp_desc_idx") == "users_weekly_xp_desc_idx"
     assert len(col.calls) == 1
 
 
@@ -78,3 +83,17 @@ def test_due_time_indexes_only_for_used_fields():
     assert "users_pm1_due_at_utc_asc_idx" in names
     assert "users_mywin14_due_at_utc_asc_idx" in names
     assert "users_pm2_due_at_utc_asc_idx" not in names
+
+
+def test_safe_create_index_equivalent_name_conflict_returns_existing_name():
+    col = _FakeCollection(fail=OperationFailure("exists", code=85))
+    col._index_info["date_utc_1_user_id_1"] = {"key": [("date_utc", 1), ("user_id", 1)]}
+    got = safe_create_index(col, [("date_utc", 1), ("user_id", 1)], name="miniapp_sessions_daily_date_utc_user_id_uidx")
+    assert got == "date_utc_1_user_id_1"
+
+
+def test_safe_create_index_conflict_without_equivalent_returns_false():
+    col = _FakeCollection(fail=OperationFailure("exists", code=85))
+    col._index_info["other"] = {"key": [("other_field", 1)]}
+    got = safe_create_index(col, [("date_utc", 1), ("user_id", 1)], name="miniapp_sessions_daily_date_utc_user_id_uidx")
+    assert got is False
