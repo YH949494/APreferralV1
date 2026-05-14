@@ -63,19 +63,59 @@ def get_collection(name: str) -> CollectionProxy:
     return CollectionProxy(name)
 
 
-def safe_create_index(collection, keys, *, name: str, unique: bool = False, partialFilterExpression=None) -> bool:
+def _normalize_index_keys(keys):
+    """Normalize Mongo index key specs to a comparable tuple format."""
+    if isinstance(keys, dict):
+        items = keys.items()
+    else:
+        items = keys
+    out = []
+    for item in items:
+        if isinstance(item, (list, tuple)) and len(item) == 2:
+            out.append((item[0], item[1]))
+    return tuple(out)
+
+
+def _find_equivalent_index_name(collection, keys):
+    requested = _normalize_index_keys(keys)
+    for idx in collection.list_indexes():
+        idx_keys = idx.get("key")
+        if _normalize_index_keys(idx_keys) == requested:
+            return idx.get("name")
+    return None
+
+
+def safe_create_index(collection, keys, *, name: str, unique: bool = False, partialFilterExpression=None):
     try:
         existing = collection.index_information()
         if name in existing:
             logger.info("[DB][INDEX] exists collection=%s name=%s", getattr(collection, "name", "unknown"), name)
-            return True
+            return name
         kwargs = {"name": name, "unique": unique}
         if partialFilterExpression is not None:
             kwargs["partialFilterExpression"] = partialFilterExpression
-        collection.create_index(keys, **kwargs)
+        created_name = collection.create_index(keys, **kwargs)
         logger.info("[DB][INDEX] created collection=%s name=%s", getattr(collection, "name", "unknown"), name)
-        return True
-    except (OperationFailure, PyMongoError) as exc:
+        return created_name or name
+    except OperationFailure as exc:
+        if exc.code in (68, 85, 86):
+            existing_name = _find_equivalent_index_name(collection, keys)
+            if existing_name:
+                logger.info(
+                    "[DB][INDEX] already_exists_equivalent collection=%s requested=%s existing=%s",
+                    getattr(collection, "name", "unknown"),
+                    name,
+                    existing_name,
+                )
+                return existing_name
+        logger.warning(
+            "[DB][INDEX] create_failed collection=%s name=%s error=%s",
+            getattr(collection, "name", "unknown"),
+            name,
+            exc,
+        )
+        return False
+    except PyMongoError as exc:
         logger.warning(
             "[DB][INDEX] create_failed collection=%s name=%s error=%s",
             getattr(collection, "name", "unknown"),
