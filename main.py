@@ -56,7 +56,7 @@ from vouchers import (
     resolve_referral_counts_with_snapshot_fallback,
 )
 from referral_rules import calc_referral_progress, REFERRAL_XP_PER_SUCCESS, REFERRAL_BONUS_INTERVAL, REFERRAL_BONUS_XP
-from scheduler import settle_pending_referrals, settle_referral_snapshots, settle_xp_snapshots, evaluate_affiliate_simulated_ledgers, compute_affiliate_daily_kpi_yesterday, run_invitee_subscription_audit, reconcile_drop_statuses, post_growth_leaderboard_weekly
+from scheduler import settle_pending_referrals, settle_referral_snapshots, settle_xp_snapshots, evaluate_affiliate_simulated_ledgers, compute_affiliate_daily_kpi_yesterday, run_invitee_subscription_audit, reconcile_drop_statuses, post_growth_leaderboard_weekly, process_welcome_voucher_lifecycle
 from affiliate_dashboard_export import run_affiliate_dashboard_export_monthly_scheduled
 from referral_rate_limit import consume_referral_rate_limits
 from affiliate_leaderboard import (
@@ -4727,6 +4727,13 @@ def run_worker():
         trigger=CronTrigger(minute="*/1", timezone=KL_TZ),
         id="onboarding_due_tick",
         name="Onboarding Due Tick",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        process_welcome_voucher_lifecycle,
+        trigger=CronTrigger(minute="*/30", timezone=KL_TZ),
+        id="welcome_voucher_lifecycle",
+        name="Welcome Voucher Lifecycle",
         replace_existing=True,
     )
     scheduler.add_job(
