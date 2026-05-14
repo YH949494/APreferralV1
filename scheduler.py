@@ -1442,6 +1442,57 @@ def maybe_shout_referral_congrats(inviter_user_id: int, now_utc_ts: datetime) ->
         pass
 
 
+
+
+def _maybe_send_referral_qualified_dm(
+    inviter_user_id: int | None,
+    invitee_user_id: int | None,
+    invitee_username: str | None = None,
+) -> None:
+    if not inviter_user_id or not invitee_user_id:
+        return
+    dedupe_key = f"ref_qualified:{int(inviter_user_id)}:{int(invitee_user_id)}"
+    now_ts = now_utc()
+    result = db.referral_notifications.update_one(
+        {"key": dedupe_key},
+        {
+            "$setOnInsert": {
+                "key": dedupe_key,
+                "type": "ref_qualified",
+                "inviter_user_id": int(inviter_user_id),
+                "invitee_user_id": int(invitee_user_id),
+                "invitee_username": invitee_username,
+                "created_at": now_ts,
+            }
+        },
+        upsert=True,
+    )
+    if not getattr(result, "upserted_id", None):
+        return
+    if invitee_username:
+        text = (
+            f"🎉 @{invitee_username} qualified from your invite!\n"
+            "+60 XP has been credited."
+        )
+    else:
+        text = "🎉 Your referral qualified!\n+60 XP has been credited."
+    try:
+        resp = requests.post(
+            f"{API_BASE}/sendMessage",
+            json={"chat_id": int(inviter_user_id), "text": text},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        payload = resp.json() if resp.content else {}
+        if not payload.get("ok", True):
+            raise RuntimeError(payload.get("description") or "telegram_not_ok")
+    except Exception:
+        logger.exception(
+            "[REFERRAL_QUALIFIED_DM_FAILED] inviter=%s invitee=%s",
+            inviter_user_id,
+            invitee_user_id,
+        )
+
 def settle_pending_referrals(batch_limit: int = 200) -> None:
     now_utc_ts = now_utc()
     cutoff = now_utc_ts - timedelta(hours=REFERRAL_HOLD_HOURS)
@@ -1683,6 +1734,11 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
                     referrer_id=inviter_user_id,
                     now_utc=now_utc_ts,
                 )
+                _maybe_send_referral_qualified_dm(
+                    inviter_user_id,
+                    invitee_user_id,
+                    (invitee_doc or {}).get("username"),
+                )
                 db.pending_referrals.update_one(
                     {"_id": pending_id},
                     {
@@ -1737,6 +1793,11 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
                 invitee_id=invitee_user_id,
                 referrer_id=inviter_user_id,
                 now_utc=now_utc_ts,
+            )
+            _maybe_send_referral_qualified_dm(
+                inviter_user_id,
+                invitee_user_id,
+                (invitee_doc or {}).get("username"),
             )
             ref_total = new_ref_total
             maybe_handle_first_referral(inviter_user_id, current_ref_total, new_ref_total, now_utc_ts)
