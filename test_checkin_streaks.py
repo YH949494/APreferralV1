@@ -4,7 +4,7 @@ from unittest.mock import patch
 from flask import Flask
 
 import checkin
-from config import KL_TZ, STREAK_MILESTONES, XP_BASE_PER_CHECKIN
+from config import KL_TZ, STREAK_MILESTONES, XP_BASE_PER_CHECKIN, STREAK_FREEZE_DEFAULT_TOKENS, STREAK_FREEZE_MAX_TOKENS
 
 
 class FakeUsersCollection:
@@ -33,6 +33,22 @@ class FixedDatetime(datetime):
         if tz is not None:
             return cls._now.astimezone(tz)
         return cls._now
+
+
+class FakeStreakEventsCollection:
+    def __init__(self):
+        self.docs = {}
+
+    def update_one(self, filt, update, upsert=False):  # noqa: ARG002
+        event_id = filt["_id"]
+        if event_id in self.docs:
+            return
+        self.docs[event_id] = update["$setOnInsert"].copy()
+
+
+class FakeDb:
+    def __init__(self):
+        self.streak_events = FakeStreakEventsCollection()
 
 
 def _run_checkin(client, user_id=1001, username="alice"):
@@ -97,6 +113,7 @@ def test_consecutive_kl_day_increments_streak_by_one():
 
     with (
         patch.object(checkin, "users_collection", users),
+        patch.object(checkin, "db", FakeDb()),
         patch.object(checkin, "record_user_last_seen", lambda *args, **kwargs: None),
         patch.object(checkin, "record_first_checkin", lambda *args, **kwargs: None),
         patch.object(checkin, "grant_xp", lambda *args: True),
@@ -128,6 +145,7 @@ def test_missed_day_resets_streak_to_one():
         _run_checkin(client)
         FixedDatetime._now = datetime(2026, 1, 2, 10, 0, tzinfo=KL_TZ)
         _run_checkin(client)
+        users.docs[1001]["streak_freeze_tokens"] = 0
         FixedDatetime._now = datetime(2026, 1, 4, 10, 0, tzinfo=KL_TZ)
         _run_checkin(client)
 
@@ -263,3 +281,299 @@ def test_bad_last_checkin_unsupported_type_does_not_500():
     assert response.status_code == 200
     assert payload["success"] is True
     assert users.docs[1001]["streak"] == 1
+
+
+def test_new_user_starts_with_default_freeze_tokens():
+    app = Flask(__name__)
+    app.add_url_rule("/checkin", "checkin", checkin.handle_checkin)
+    users = FakeUsersCollection()
+
+    with (
+        patch.object(checkin, "users_collection", users),
+        patch.object(checkin, "db", FakeDb()),
+        patch.object(checkin, "record_user_last_seen", lambda *args, **kwargs: None),
+        patch.object(checkin, "record_first_checkin", lambda *args, **kwargs: None),
+        patch.object(checkin, "grant_xp", lambda *args: True),
+        patch.object(checkin, "datetime", FixedDatetime),
+    ):
+        FixedDatetime._now = datetime(2026, 1, 1, 9, 0, tzinfo=KL_TZ)
+        client = app.test_client()
+        _, payload = _run_checkin(client)
+
+    assert payload["streak_freeze_tokens"] == STREAK_FREEZE_DEFAULT_TOKENS
+
+
+def test_existing_user_missing_freeze_field_treated_as_zero():
+    app = Flask(__name__)
+    app.add_url_rule("/checkin", "checkin", checkin.handle_checkin)
+    users = FakeUsersCollection()
+    users.docs[1001] = {"user_id": 1001, "last_checkin": datetime(2026, 1, 1, 9, 0, tzinfo=KL_TZ), "streak": 4}
+
+    with (
+        patch.object(checkin, "users_collection", users),
+        patch.object(checkin, "db", FakeDb()),
+        patch.object(checkin, "record_user_last_seen", lambda *args, **kwargs: None),
+        patch.object(checkin, "record_first_checkin", lambda *args, **kwargs: None),
+        patch.object(checkin, "grant_xp", lambda *args: True),
+        patch.object(checkin, "datetime", FixedDatetime),
+    ):
+        FixedDatetime._now = datetime(2026, 1, 3, 9, 0, tzinfo=KL_TZ)
+        client = app.test_client()
+        _, payload = _run_checkin(client)
+
+    assert payload["streak"] == 1
+    assert payload["streak_freeze_tokens"] == 0
+
+
+def test_gap_two_days_with_token_consumes_and_continues_streak_and_event_idempotent():
+    app = Flask(__name__)
+    app.add_url_rule("/checkin", "checkin", checkin.handle_checkin)
+    users = FakeUsersCollection()
+    users.docs[1001] = {"user_id": 1001, "last_checkin": datetime(2026, 1, 1, 9, 0, tzinfo=KL_TZ), "streak": 3, "streak_freeze_tokens": 1}
+    fake_db = FakeDb()
+
+    with (
+        patch.object(checkin, "users_collection", users),
+        patch.object(checkin, "db", fake_db),
+        patch.object(checkin, "record_user_last_seen", lambda *args, **kwargs: None),
+        patch.object(checkin, "record_first_checkin", lambda *args, **kwargs: None),
+        patch.object(checkin, "grant_xp", lambda *args: True),
+        patch.object(checkin, "datetime", FixedDatetime),
+    ):
+        FixedDatetime._now = datetime(2026, 1, 3, 9, 0, tzinfo=KL_TZ)
+        client = app.test_client()
+        _, payload = _run_checkin(client)
+        _run_checkin(client)
+
+    assert payload["streak"] == 4
+    assert payload["streak_freeze_used"] is True
+    assert payload["streak_freeze_tokens"] == 0
+    assert len(fake_db.streak_events.docs) == 1
+
+
+def test_gap_two_days_without_token_resets_streak_to_one():
+    app = Flask(__name__)
+    app.add_url_rule("/checkin", "checkin", checkin.handle_checkin)
+    users = FakeUsersCollection()
+    users.docs[1001] = {"user_id": 1001, "last_checkin": datetime(2026, 1, 1, 9, 0, tzinfo=KL_TZ), "streak": 3, "streak_freeze_tokens": 0}
+    with (
+        patch.object(checkin, "users_collection", users),
+        patch.object(checkin, "db", FakeDb()),
+        patch.object(checkin, "record_user_last_seen", lambda *args, **kwargs: None),
+        patch.object(checkin, "record_first_checkin", lambda *args, **kwargs: None),
+        patch.object(checkin, "grant_xp", lambda *args: True),
+        patch.object(checkin, "datetime", FixedDatetime),
+    ):
+        FixedDatetime._now = datetime(2026, 1, 3, 9, 0, tzinfo=KL_TZ)
+        client = app.test_client()
+        _, payload = _run_checkin(client)
+    assert payload["streak"] == 1
+
+
+def test_gap_more_than_two_days_resets_even_with_token():
+    app = Flask(__name__)
+    app.add_url_rule("/checkin", "checkin", checkin.handle_checkin)
+    users = FakeUsersCollection()
+    users.docs[1001] = {"user_id": 1001, "last_checkin": datetime(2026, 1, 1, 9, 0, tzinfo=KL_TZ), "streak": 5, "streak_freeze_tokens": 2}
+    with (
+        patch.object(checkin, "users_collection", users),
+        patch.object(checkin, "db", FakeDb()),
+        patch.object(checkin, "record_user_last_seen", lambda *args, **kwargs: None),
+        patch.object(checkin, "record_first_checkin", lambda *args, **kwargs: None),
+        patch.object(checkin, "grant_xp", lambda *args: True),
+        patch.object(checkin, "datetime", FixedDatetime),
+    ):
+        FixedDatetime._now = datetime(2026, 1, 4, 9, 0, tzinfo=KL_TZ)
+        client = app.test_client()
+        _, payload = _run_checkin(client)
+    assert payload["streak"] == 1
+
+
+def test_same_day_duplicate_does_not_consume_or_earn_token():
+    app = Flask(__name__)
+    app.add_url_rule("/checkin", "checkin", checkin.handle_checkin)
+    users = FakeUsersCollection()
+    users.docs[1001] = {"user_id": 1001, "last_checkin": datetime(2026, 1, 7, 9, 0, tzinfo=KL_TZ), "streak": 7, "streak_freeze_tokens": 2}
+    with (
+        patch.object(checkin, "users_collection", users),
+        patch.object(checkin, "db", FakeDb()),
+        patch.object(checkin, "record_user_last_seen", lambda *args, **kwargs: None),
+        patch.object(checkin, "record_first_checkin", lambda *args, **kwargs: None),
+        patch.object(checkin, "grant_xp", lambda *args: True),
+        patch.object(checkin, "datetime", FixedDatetime),
+    ):
+        FixedDatetime._now = datetime(2026, 1, 7, 10, 0, tzinfo=KL_TZ)
+        client = app.test_client()
+        _, payload = _run_checkin(client)
+    assert payload["success"] is False
+    assert users.docs[1001]["streak_freeze_tokens"] == 2
+
+
+def test_milestone_earns_freeze_token_capped_at_max():
+    app = Flask(__name__)
+    app.add_url_rule("/checkin", "checkin", checkin.handle_checkin)
+    users = FakeUsersCollection()
+    users.docs[1001] = {"user_id": 1001, "last_checkin": datetime(2026, 1, 6, 9, 0, tzinfo=KL_TZ), "streak": 6, "streak_freeze_tokens": STREAK_FREEZE_MAX_TOKENS}
+    with (
+        patch.object(checkin, "users_collection", users),
+        patch.object(checkin, "db", FakeDb()),
+        patch.object(checkin, "record_user_last_seen", lambda *args, **kwargs: None),
+        patch.object(checkin, "record_first_checkin", lambda *args, **kwargs: None),
+        patch.object(checkin, "grant_xp", lambda *args: True),
+        patch.object(checkin, "datetime", FixedDatetime),
+    ):
+        FixedDatetime._now = datetime(2026, 1, 7, 9, 0, tzinfo=KL_TZ)
+        client = app.test_client()
+        _, payload = _run_checkin(client)
+    assert payload["streak"] == 7
+    assert payload["streak_freeze_tokens"] == STREAK_FREEZE_MAX_TOKENS
+
+
+def test_freeze_use_and_milestone_same_checkin_consumes_then_earns():
+    app = Flask(__name__)
+    app.add_url_rule("/checkin", "checkin", checkin.handle_checkin)
+    users = FakeUsersCollection()
+    users.docs[1001] = {"user_id": 1001, "last_checkin": datetime(2026, 1, 5, 9, 0, tzinfo=KL_TZ), "streak": 6, "streak_freeze_tokens": 1}
+    with (
+        patch.object(checkin, "users_collection", users),
+        patch.object(checkin, "db", FakeDb()),
+        patch.object(checkin, "record_user_last_seen", lambda *args, **kwargs: None),
+        patch.object(checkin, "record_first_checkin", lambda *args, **kwargs: None),
+        patch.object(checkin, "grant_xp", lambda *args: True),
+        patch.object(checkin, "datetime", FixedDatetime),
+    ):
+        FixedDatetime._now = datetime(2026, 1, 7, 9, 0, tzinfo=KL_TZ)
+        client = app.test_client()
+        _, payload = _run_checkin(client)
+    assert payload["streak"] == 7
+    assert payload["streak_freeze_tokens"] == 1
+
+
+def test_malformed_last_checkin_does_not_consume_token():
+    app = Flask(__name__)
+    app.add_url_rule("/checkin", "checkin", checkin.handle_checkin)
+    users = FakeUsersCollection()
+    users.docs[1001] = {"user_id": 1001, "last_checkin": "bad-date", "streak": 12, "streak_freeze_tokens": 2}
+    with (
+        patch.object(checkin, "users_collection", users),
+        patch.object(checkin, "db", FakeDb()),
+        patch.object(checkin, "record_user_last_seen", lambda *args, **kwargs: None),
+        patch.object(checkin, "record_first_checkin", lambda *args, **kwargs: None),
+        patch.object(checkin, "grant_xp", lambda *args: True),
+        patch.object(checkin, "datetime", FixedDatetime),
+    ):
+        FixedDatetime._now = datetime(2026, 1, 10, 9, 0, tzinfo=KL_TZ)
+        client = app.test_client()
+        _, payload = _run_checkin(client)
+    assert payload["streak"] == 1
+    assert payload["streak_freeze_tokens"] == 2
+
+
+def test_freeze_tokens_string_value_is_parsed_and_used():
+    app = Flask(__name__)
+    app.add_url_rule("/checkin", "checkin", checkin.handle_checkin)
+    users = FakeUsersCollection()
+    users.docs[1001] = {"user_id": 1001, "last_checkin": datetime(2026, 1, 1, 9, 0, tzinfo=KL_TZ), "streak": 2, "streak_freeze_tokens": "2"}
+
+    with (
+        patch.object(checkin, "users_collection", users),
+        patch.object(checkin, "db", FakeDb()),
+        patch.object(checkin, "record_user_last_seen", lambda *args, **kwargs: None),
+        patch.object(checkin, "record_first_checkin", lambda *args, **kwargs: None),
+        patch.object(checkin, "grant_xp", lambda *args: True),
+        patch.object(checkin, "datetime", FixedDatetime),
+    ):
+        FixedDatetime._now = datetime(2026, 1, 3, 9, 0, tzinfo=KL_TZ)
+        client = app.test_client()
+        _, payload = _run_checkin(client)
+
+    assert payload["streak"] == 3
+    assert payload["streak_freeze_tokens"] == 1
+
+
+def test_freeze_tokens_none_becomes_zero_for_existing_user():
+    app = Flask(__name__)
+    app.add_url_rule("/checkin", "checkin", checkin.handle_checkin)
+    users = FakeUsersCollection()
+    users.docs[1001] = {"user_id": 1001, "last_checkin": datetime(2026, 1, 1, 9, 0, tzinfo=KL_TZ), "streak": 2, "streak_freeze_tokens": None}
+
+    with (
+        patch.object(checkin, "users_collection", users),
+        patch.object(checkin, "db", FakeDb()),
+        patch.object(checkin, "record_user_last_seen", lambda *args, **kwargs: None),
+        patch.object(checkin, "record_first_checkin", lambda *args, **kwargs: None),
+        patch.object(checkin, "grant_xp", lambda *args: True),
+        patch.object(checkin, "datetime", FixedDatetime),
+    ):
+        FixedDatetime._now = datetime(2026, 1, 3, 9, 0, tzinfo=KL_TZ)
+        client = app.test_client()
+        _, payload = _run_checkin(client)
+
+    assert payload["streak"] == 1
+    assert payload["streak_freeze_tokens"] == 0
+
+
+def test_freeze_tokens_bad_string_becomes_zero_for_existing_user():
+    app = Flask(__name__)
+    app.add_url_rule("/checkin", "checkin", checkin.handle_checkin)
+    users = FakeUsersCollection()
+    users.docs[1001] = {"user_id": 1001, "last_checkin": datetime(2026, 1, 1, 9, 0, tzinfo=KL_TZ), "streak": 2, "streak_freeze_tokens": "bad"}
+
+    with (
+        patch.object(checkin, "users_collection", users),
+        patch.object(checkin, "db", FakeDb()),
+        patch.object(checkin, "record_user_last_seen", lambda *args, **kwargs: None),
+        patch.object(checkin, "record_first_checkin", lambda *args, **kwargs: None),
+        patch.object(checkin, "grant_xp", lambda *args: True),
+        patch.object(checkin, "datetime", FixedDatetime),
+    ):
+        FixedDatetime._now = datetime(2026, 1, 3, 9, 0, tzinfo=KL_TZ)
+        client = app.test_client()
+        _, payload = _run_checkin(client)
+
+    assert payload["streak"] == 1
+    assert payload["streak_freeze_tokens"] == 0
+
+
+def test_freeze_tokens_negative_clamps_to_zero():
+    app = Flask(__name__)
+    app.add_url_rule("/checkin", "checkin", checkin.handle_checkin)
+    users = FakeUsersCollection()
+    users.docs[1001] = {"user_id": 1001, "last_checkin": datetime(2026, 1, 1, 9, 0, tzinfo=KL_TZ), "streak": 2, "streak_freeze_tokens": -5}
+
+    with (
+        patch.object(checkin, "users_collection", users),
+        patch.object(checkin, "db", FakeDb()),
+        patch.object(checkin, "record_user_last_seen", lambda *args, **kwargs: None),
+        patch.object(checkin, "record_first_checkin", lambda *args, **kwargs: None),
+        patch.object(checkin, "grant_xp", lambda *args: True),
+        patch.object(checkin, "datetime", FixedDatetime),
+    ):
+        FixedDatetime._now = datetime(2026, 1, 3, 9, 0, tzinfo=KL_TZ)
+        client = app.test_client()
+        _, payload = _run_checkin(client)
+
+    assert payload["streak"] == 1
+    assert payload["streak_freeze_tokens"] == 0
+
+
+def test_freeze_tokens_huge_value_clamps_to_max():
+    app = Flask(__name__)
+    app.add_url_rule("/checkin", "checkin", checkin.handle_checkin)
+    users = FakeUsersCollection()
+    users.docs[1001] = {"user_id": 1001, "last_checkin": datetime(2026, 1, 1, 9, 0, tzinfo=KL_TZ), "streak": 2, "streak_freeze_tokens": 999}
+
+    with (
+        patch.object(checkin, "users_collection", users),
+        patch.object(checkin, "db", FakeDb()),
+        patch.object(checkin, "record_user_last_seen", lambda *args, **kwargs: None),
+        patch.object(checkin, "record_first_checkin", lambda *args, **kwargs: None),
+        patch.object(checkin, "grant_xp", lambda *args: True),
+        patch.object(checkin, "datetime", FixedDatetime),
+    ):
+        FixedDatetime._now = datetime(2026, 1, 3, 9, 0, tzinfo=KL_TZ)
+        client = app.test_client()
+        _, payload = _run_checkin(client)
+
+    assert payload["streak"] == 3
+    assert payload["streak_freeze_tokens"] == STREAK_FREEZE_MAX_TOKENS - 1

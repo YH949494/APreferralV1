@@ -19,6 +19,8 @@ STREAK_MILESTONES = {
     84: 900,
     112: 1200,    
 }
+STREAK_FREEZE_DEFAULT_TOKENS = 1
+STREAK_FREEZE_MAX_TOKENS = 3
 
 # Announcement milestone buckets
 WEEKLY_XP_BUCKET = 1000

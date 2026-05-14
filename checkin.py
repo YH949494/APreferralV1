@@ -3,7 +3,14 @@ from datetime import datetime, timedelta, time, timezone
 
 from flask import jsonify, request
 
-from config import KL_TZ, XP_BASE_PER_CHECKIN, STREAK_MILESTONES, FIRST_CHECKIN_BONUS
+from config import (
+    KL_TZ,
+    XP_BASE_PER_CHECKIN,
+    STREAK_MILESTONES,
+    FIRST_CHECKIN_BONUS,
+    STREAK_FREEZE_DEFAULT_TOKENS,
+    STREAK_FREEZE_MAX_TOKENS,
+)
 from database import db, get_collection, init_db
 from onboarding import record_first_checkin
 from xp import grant_xp
@@ -39,6 +46,18 @@ def _kl_local_date(dt):
     return aware_utc.astimezone(KL_TZ).date()
 
 
+def _safe_freeze_tokens(value, default=0):
+    try:
+        tokens = int(value)
+    except (TypeError, ValueError):
+        tokens = default
+    if tokens < 0:
+        return 0
+    if tokens > STREAK_FREEZE_MAX_TOKENS:
+        return STREAK_FREEZE_MAX_TOKENS
+    return tokens
+
+
 def handle_checkin():
     user_id = request.args.get("user_id", type=int)
     username = request.args.get("username", default="")
@@ -55,6 +74,15 @@ def handle_checkin():
     first_checkin = not user
     last_checkin = user.get("last_checkin") if user else None
     streak = user.get("streak", 0) if user else 0
+    if user:
+        tokens = _safe_freeze_tokens(user.get("streak_freeze_tokens"), default=0)
+    else:
+        tokens = _safe_freeze_tokens(STREAK_FREEZE_DEFAULT_TOKENS, default=STREAK_FREEZE_DEFAULT_TOKENS)
+    tokens_before_freeze = tokens
+    tokens_after_freeze = tokens
+    freeze_used = False
+    freeze_earned = False
+    previous_streak = streak
 
     if last_checkin is not None:
         last_date = _kl_local_date(last_checkin)
@@ -72,13 +100,24 @@ def handle_checkin():
                 "message": "⏳ You’ve already checked in today!",
                 "next_checkin_time": next_midnight.isoformat()
             })
-
-        elif (today - last_date) == timedelta(days=1):
-            streak += 1  # Continue streak
         else:
-            streak = 1  # Missed a day → reset streak
+            gap_days = (today - last_date).days
+            if gap_days == 1:
+                streak += 1  # Continue streak
+            elif gap_days == 2 and tokens > 0:
+                tokens -= 1
+                tokens_after_freeze = tokens
+                streak += 1
+                freeze_used = True
+            else:
+                streak = 1  # Missed a day → reset streak
     else:
         streak = 1  # First check-in ever
+
+    if streak in STREAK_MILESTONES:
+        new_tokens = min(STREAK_FREEZE_MAX_TOKENS, tokens + 1)
+        freeze_earned = new_tokens > tokens
+        tokens = new_tokens
 
     # Bonus XP from unified milestone table
     bonus_xp = STREAK_MILESTONES.get(streak, 0)
@@ -89,14 +128,36 @@ def handle_checkin():
             "$set": {
                 "username": username,
                 "last_checkin": now,
-                "streak": streak
+                "streak": streak,
+                "streak_freeze_tokens": tokens,
             },
             "$setOnInsert": {
-                "status": "Normal",               
+                "status": "Normal",
             }
         },
         upsert=True,
     )
+
+    if freeze_used:
+        freeze_event_key = f"streak_freeze:{user_id}:{today.strftime('%Y%m%d')}"
+        db.streak_events.update_one(
+            {"_id": freeze_event_key},
+            {
+                "$setOnInsert": {
+                    "_id": freeze_event_key,
+                    "user_id": user_id,
+                    "type": "streak_freeze_used",
+                    "previous_streak": previous_streak,
+                    "new_streak": streak,
+                    "tokens_before": tokens_before_freeze,
+                    "tokens_after": tokens_after_freeze,
+                    "last_checkin_date": last_date.isoformat(),
+                    "checkin_date": today.isoformat(),
+                    "created_at": now,
+                }
+            },
+            upsert=True,
+        )
 
     checkin_key = f"checkin:{today.strftime('%Y%m%d')}"
     total_xp = XP_BASE_PER_CHECKIN + bonus_xp
@@ -125,8 +186,14 @@ def handle_checkin():
             f"✅ Check-in successful! +{XP_BASE_PER_CHECKIN} XP"
             f"{bonus_text}{first_bonus_text}"
         ),
-        "next_checkin_time": next_midnight.isoformat()
+        "next_checkin_time": next_midnight.isoformat(),
+        "streak": streak,
+        "streak_freeze_tokens": tokens,
+        "streak_freeze_used": freeze_used,
+        "streak_freeze_earned": freeze_earned,
     }
+    if freeze_used:
+        payload["message"] += " 🧊 Streak Freeze used! Your streak continues."
     return jsonify(payload)
 
 
