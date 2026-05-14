@@ -24,6 +24,7 @@ from config import (
     WEEKLY_XP_BUCKET,
     WEEKLY_REFERRAL_BUCKET,
     MINIAPP_VERSION,
+    STREAK_FREEZE_MAX_TOKENS,
     GROWTH_LEADERBOARD_ENABLED,
     GROWTH_LEADERBOARD_CHANNEL_ID,
     GROWTH_LEADERBOARD_CRON_DAY,
@@ -2222,6 +2223,9 @@ def api_me_identity():
     )
     weekly_xp = _safe_non_negative_int(user_doc.get("weekly_xp", 0))
     weekly_referrals = _safe_non_negative_int(user_doc.get("weekly_referrals", 0))
+    streak_freeze_tokens = _safe_non_negative_int(user_doc.get("streak_freeze_tokens", 0))
+    if streak_freeze_tokens > STREAK_FREEZE_MAX_TOKENS:
+        streak_freeze_tokens = STREAK_FREEZE_MAX_TOKENS
     weekly_rank = compute_weekly_rank(user_id, weekly_xp, weekly_referrals, user_doc.get("updated_at"))
     return jsonify(
         {
@@ -2237,6 +2241,9 @@ def api_me_identity():
             "monthly_referrals": _safe_non_negative_int(user_doc.get("monthly_referrals", 0)),
             "total_referrals": total_referrals,
             "streak_days": _safe_non_negative_int(user_doc.get("streak_days", user_doc.get("checkin_streak", user_doc.get("streak", 0)))),
+            "streak": _safe_non_negative_int(user_doc.get("streak", user_doc.get("streak_days", user_doc.get("checkin_streak", 0)))),
+            "streak_freeze_tokens": streak_freeze_tokens,
+            "streak_freeze_max_tokens": STREAK_FREEZE_MAX_TOKENS,
             "next_tier_name": next_tier_name,
             "next_tier_progress_pct": int(next_tier_progress_pct),
             "next_tier_hint": next_tier_hint,
