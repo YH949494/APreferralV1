@@ -1,4 +1,5 @@
-from datetime import datetime, timedelta, time
+import logging
+from datetime import datetime, timedelta, time, timezone
 
 from flask import jsonify, request
 
@@ -9,8 +10,34 @@ from xp import grant_xp
 from affiliate_rewards import record_user_last_seen
 
 users_collection = get_collection("users")
+logger = logging.getLogger(__name__)
+_DATETIME_CLASS = datetime
 
 # Timezone & XP come from a single source of truth (config.py)
+
+
+def _to_aware_utc(dt):
+    if dt is None:
+        return None
+    if isinstance(dt, str):
+        try:
+            parsed = _DATETIME_CLASS.fromisoformat(dt.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        dt = parsed
+    if not isinstance(dt, _DATETIME_CLASS):
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=KL_TZ).astimezone(timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _kl_local_date(dt):
+    aware_utc = _to_aware_utc(dt)
+    if aware_utc is None:
+        return None
+    return aware_utc.astimezone(KL_TZ).date()
+
 
 def handle_checkin():
     user_id = request.args.get("user_id", type=int)
@@ -29,10 +56,16 @@ def handle_checkin():
     last_checkin = user.get("last_checkin") if user else None
     streak = user.get("streak", 0) if user else 0
 
-    if last_checkin:
-        last_date = last_checkin.astimezone(KL_TZ).date()
-
-        if last_date == today:
+    if last_checkin is not None:
+        last_date = _kl_local_date(last_checkin)
+        if last_date is None:
+            logger.warning(
+                "[CHECKIN][BAD_LAST_CHECKIN] uid=%s value_type=%s",
+                user_id,
+                type(last_checkin).__name__,
+            )
+            streak = 1
+        elif last_date == today:
             # Already checked in today
             return jsonify({
                 "success": False,
@@ -40,7 +73,7 @@ def handle_checkin():
                 "next_checkin_time": next_midnight.isoformat()
             })
 
-        if (today - last_date) == timedelta(days=1):
+        elif (today - last_date) == timedelta(days=1):
             streak += 1  # Continue streak
         else:
             streak = 1  # Missed a day → reset streak
