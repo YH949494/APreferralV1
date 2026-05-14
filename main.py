@@ -53,7 +53,9 @@ from vouchers import (
     verify_telegram_init_data,
     _get_admin_secret,
     _admin_secret_ok,
+    resolve_referral_counts_with_snapshot_fallback,
 )
+from referral_rules import calc_referral_progress, REFERRAL_XP_PER_SUCCESS, REFERRAL_BONUS_INTERVAL, REFERRAL_BONUS_XP
 from scheduler import settle_pending_referrals, settle_referral_snapshots, settle_xp_snapshots, evaluate_affiliate_simulated_ledgers, compute_affiliate_daily_kpi_yesterday, run_invitee_subscription_audit, reconcile_drop_statuses, post_growth_leaderboard_weekly
 from affiliate_dashboard_export import run_affiliate_dashboard_export_monthly_scheduled
 from referral_rate_limit import consume_referral_rate_limits
@@ -2498,7 +2500,37 @@ def _build_referral_status_payload(user_id: int, now_utc: datetime):
                 "qualified_at": None,
             }
         )
-    return {"ok": True, "hold_hours": REFERRAL_HOLD_HOURS, "referrals": referrals}
+    user_doc = users_collection.find_one(
+        {"user_id": int(user_id)},
+        {"total_referrals": 1, "weekly_referrals": 1, "monthly_referrals": 1, "snapshot_updated_at": 1, "user_id": 1},
+    )
+    resolved = resolve_referral_counts_with_snapshot_fallback(int(user_id), user_doc, now_utc)
+    stats = resolved.get("stats") or {}
+    total_referrals = int(stats.get("total_referrals", 0))
+    progress = calc_referral_progress(total_referrals, milestone_size=REFERRAL_BONUS_INTERVAL)
+    payload = {"ok": True, "hold_hours": REFERRAL_HOLD_HOURS, "referrals": referrals}
+    payload.update(
+        {
+            "total_referrals": total_referrals,
+            "weekly_referrals": int(stats.get("weekly_referrals", 0)),
+            "monthly_referrals": int(stats.get("monthly_referrals", 0)),
+            "progress": int(progress.get("progress", 0)),
+            "remaining": int(progress.get("remaining", REFERRAL_BONUS_INTERVAL)),
+            "progress_pct": float(progress.get("progress_pct", 0)),
+            "near_miss": bool(progress.get("near_miss", False)),
+            "next_bonus_xp": REFERRAL_BONUS_XP,
+            "base_referral_xp": REFERRAL_XP_PER_SUCCESS,
+            "bonus_interval": REFERRAL_BONUS_INTERVAL,
+            "bonus_xp": REFERRAL_BONUS_XP,
+        }
+    )
+    snapshot_ts = resolved.get("snapshot_updated_at")
+    if snapshot_ts is not None:
+        payload["snapshot_updated_at"] = snapshot_ts.isoformat()
+    if resolved.get("snapshot_age_sec") is not None:
+        payload["snapshot_age_sec"] = int(resolved.get("snapshot_age_sec"))
+    logger.info("[REF_STATUS][UNIFIED_PAYLOAD] uid=%s source=%s", user_id, resolved.get("source"))
+    return payload
 
 
 @app.route("/api/referral/status", methods=["GET"])

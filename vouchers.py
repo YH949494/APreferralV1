@@ -87,6 +87,63 @@ def _ledger_referral_counts(referral_events_col, inviter_id: int, now_ref: datet
     }
 
 
+def resolve_referral_counts_with_snapshot_fallback(inviter_id: int | None, user_doc: dict | None, now_ref: datetime) -> dict:
+    referral_events_col = db["referral_events"]
+    snapshot_total = int((user_doc or {}).get("total_referrals", 0) or 0)
+    snapshot_weekly = int((user_doc or {}).get("weekly_referrals", 0) or 0)
+    snapshot_monthly = int((user_doc or {}).get("monthly_referrals", 0) or 0)
+    snapshot_ts = as_aware_utc((user_doc or {}).get("snapshot_updated_at"))
+    snapshot_age_sec = None if not snapshot_ts else max(0, int((now_ref - snapshot_ts).total_seconds()))
+
+    source = "snapshot"
+    fallback_reason = None
+    if inviter_id is not None:
+        if not user_doc:
+            source = "ledger"
+            fallback_reason = "snapshot_missing"
+        elif snapshot_total <= 0:
+            settled_exists = referral_events_col.count_documents(
+                {"inviter_id": inviter_id, "event": "referral_settled"},
+                limit=1,
+            )
+            if int(settled_exists) > 0:
+                source = "ledger"
+                fallback_reason = "mismatch_detected"
+        elif snapshot_ts is not None and snapshot_age_sec is not None and snapshot_age_sec > REFERRAL_SNAPSHOT_STALE_SEC:
+            current_app.logger.info("[REF_PROGRESS][SNAPSHOT_STALE] uid=%s age_sec=%s", inviter_id, snapshot_age_sec)
+            ledger_total = max(
+                0,
+                int(referral_events_col.count_documents({"inviter_id": inviter_id, "event": "referral_settled"}))
+                - int(referral_events_col.count_documents({"inviter_id": inviter_id, "event": "referral_revoked"})),
+            )
+            if ledger_total != snapshot_total:
+                source = "ledger"
+                fallback_reason = "snapshot_stale"
+                current_app.logger.info(
+                    "[REF_PROGRESS][SNAPSHOT_FALLBACK] uid=%s reason=%s snapshot_total=%s ledger_total=%s",
+                    inviter_id,
+                    fallback_reason,
+                    snapshot_total,
+                    ledger_total,
+                )
+
+    if source == "ledger" and inviter_id is not None:
+        stats = _ledger_referral_counts(referral_events_col, int(inviter_id), now_ref)
+    else:
+        stats = {
+            "total_referrals": max(0, snapshot_total),
+            "weekly_referrals": max(0, snapshot_weekly),
+            "monthly_referrals": max(0, snapshot_monthly),
+        }
+    return {
+        "stats": stats,
+        "source": source,
+        "fallback_reason": fallback_reason,
+        "snapshot_updated_at": snapshot_ts,
+        "snapshot_age_sec": snapshot_age_sec,
+    }
+
+
 def _ensure_index_if_missing(col, name, keys, **kwargs):
     """Create index only when missing by name; safe for concurrent startup calls."""
     try:
@@ -3377,7 +3434,6 @@ def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None
 
     user_ctx = load_user_context(uid=ctx_uid, username=raw_username if tg_user else usernameLower, username_lower=usernameLower or uname)
 
-    referral_events_col = db["referral_events"]
     user_doc = None
     if ctx_uid is not None:
         user_doc = users_collection.find_one({"user_id": ctx_uid})
@@ -4232,44 +4288,12 @@ def api_referral_progress():
 
     now_ref = as_aware_utc(datetime.now(timezone.utc))
     inviter_id = uid if uid is not None else (user_doc or {}).get("user_id")
-    snapshot_total = int((user_doc or {}).get("total_referrals", 0) or 0)
-    snapshot_weekly = int((user_doc or {}).get("weekly_referrals", 0) or 0)
-    snapshot_monthly = int((user_doc or {}).get("monthly_referrals", 0) or 0)
-    snapshot_ts = as_aware_utc((user_doc or {}).get("snapshot_updated_at"))
-    snapshot_age_sec = None if not snapshot_ts else max(0, int((now_ref - snapshot_ts).total_seconds()))
-
-    source = "snapshot"
-    fallback_reason = None
-    if inviter_id is not None:
-        if not user_doc:
-            source = "ledger"
-            fallback_reason = "snapshot_missing"
-        elif snapshot_total <= 0:
-            settled_exists = referral_events_col.count_documents(
-                {"inviter_id": inviter_id, "event": "referral_settled"},
-                limit=1,
-            )
-            if int(settled_exists) > 0:
-                source = "ledger"
-                fallback_reason = "mismatch_detected"
-        elif snapshot_ts is not None and snapshot_age_sec is not None and snapshot_age_sec > REFERRAL_SNAPSHOT_STALE_SEC:
-            ledger_total = max(
-                0,
-                int(referral_events_col.count_documents({"inviter_id": inviter_id, "event": "referral_settled"}))
-                - int(referral_events_col.count_documents({"inviter_id": inviter_id, "event": "referral_revoked"})),
-            )
-            if ledger_total != snapshot_total:
-                source = "ledger"
-                fallback_reason = "snapshot_stale"
-
-    if source == "ledger" and inviter_id is not None:
-        stats = _ledger_referral_counts(referral_events_col, int(inviter_id), now_ref)
-    else:
-        stats = {
-            "total_referrals": max(0, snapshot_total),
-            "weekly_referrals": max(0, snapshot_weekly),
-            "monthly_referrals": max(0, snapshot_monthly),
-        }
+    resolved = resolve_referral_counts_with_snapshot_fallback(inviter_id, user_doc, now_ref)
+    stats = resolved.get("stats") or {}
+    source = resolved.get("source")
+    fallback_reason = resolved.get("fallback_reason")
+    snapshot_ts = resolved.get("snapshot_updated_at")
+    snapshot_age_sec = resolved.get("snapshot_age_sec")
 
     total_referrals = int(stats.get("total_referrals", 0))
     weekly_referrals = int(stats.get("weekly_referrals", 0))
