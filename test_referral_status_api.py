@@ -1,6 +1,7 @@
 import ast
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
+from referral_rules import build_public_referral_status
 
 
 def _load_symbols():
@@ -92,6 +93,7 @@ def _inject_unified_stubs(env):
             "REFERRAL_BONUS_INTERVAL": 3,
             "REFERRAL_BONUS_XP": 400,
             "REFERRAL_XP_PER_SUCCESS": 60,
+            "build_public_referral_status": build_public_referral_status,
             "logger": type("L", (), {"info": lambda *args, **kwargs: None})(),
         }
     )
@@ -150,6 +152,7 @@ def test_awarded_pending_maps_qualified():
     )
     out = env["_build_referral_status_payload"](1, now)
     assert out["referrals"][0]["status"] == "qualified"
+    assert out["referrals"][0]["status_label"] == "Qualified"
 
 
 def test_qualified_event_overrides_stale_pending():
@@ -188,6 +191,51 @@ def test_referral_revoked_maps_failed_without_qualified():
     )
     out = env["_build_referral_status_payload"](1, now)
     assert out["referrals"][0]["status"] == "failed"
+    assert out["referrals"][0]["status_label"] == "Not eligible"
+
+
+def test_specific_public_reason_mappings():
+    fn = build_public_referral_status
+    assert fn({"status": "failed", "revoked_reason": "not_subscribed_channel"})["label"] == "Not subscribed"
+    assert fn({"status": "failed", "revoked_reason": "left_channel"})["label"] == "Left channel"
+    assert fn({"status": "failed", "revoked_reason": "left_group"})["label"] == "Left group"
+    assert fn({"status": "failed", "revoked_reason": "abuse"})["label"] == "Not eligible"
+    assert fn({"status": "failed", "revoked_reason": "something_new"})["label"] == "Not eligible"
+    assert fn({"status": "qualified"})["label"] == "Qualified"
+
+
+def test_vouchers_and_main_mapping_consistency_matrix():
+    env = _load_symbols()
+    _inject_unified_stubs(env)
+    now = datetime.now(timezone.utc)
+    cases = [
+        {"status": "pending", "revoked_reason": None, "q": False, "r": False, "label": "Checking"},
+        {"status": "pending", "revoked_reason": None, "q": True, "r": False, "label": "Qualified"},
+        {"status": "pending", "revoked_reason": None, "q": False, "r": True, "label": "Not eligible"},
+        {"status": "failed", "revoked_reason": "not_subscribed_channel", "q": False, "r": False, "label": "Not subscribed"},
+        {"status": "failed", "revoked_reason": "left_channel", "q": False, "r": False, "label": "Left channel"},
+        {"status": "failed", "revoked_reason": "left_group", "q": False, "r": False, "label": "Left group"},
+        {"status": "failed", "revoked_reason": "abuse", "q": False, "r": False, "label": "Not eligible"},
+        {"status": "failed", "revoked_reason": "new_reason", "q": False, "r": False, "label": "Not eligible"},
+    ]
+    for idx, case in enumerate(cases, start=1):
+        invitee_id = idx
+        env.update(
+            {
+                "pending_referrals_collection": _Collection([
+                    {"inviter_user_id": 1, "invitee_user_id": invitee_id, "status": case["status"], "revoked_reason": case["revoked_reason"], "created_at_utc": now}
+                ]),
+                "qualified_events_collection": _Collection(
+                    [{"referrer_id": 1, "invitee_id": invitee_id}] if case["q"] else []
+                ),
+                "referral_events_collection": _Collection(
+                    [{"inviter_id": 1, "invitee_id": invitee_id, "event": "referral_revoked"}] if case["r"] else []
+                ),
+            }
+        )
+        out = env["_build_referral_status_payload"](1, now)
+        row = out["referrals"][0]
+        assert row["status_label"] == case["label"]
 
 
 def test_cap_latest_50_and_excludes_internal_fields():

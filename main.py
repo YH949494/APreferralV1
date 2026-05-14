@@ -55,7 +55,7 @@ from vouchers import (
     _admin_secret_ok,
     resolve_referral_counts_with_snapshot_fallback,
 )
-from referral_rules import calc_referral_progress, REFERRAL_XP_PER_SUCCESS, REFERRAL_BONUS_INTERVAL, REFERRAL_BONUS_XP
+from referral_rules import calc_referral_progress, REFERRAL_XP_PER_SUCCESS, REFERRAL_BONUS_INTERVAL, REFERRAL_BONUS_XP, build_public_referral_status
 from scheduler import settle_pending_referrals, settle_referral_snapshots, settle_xp_snapshots, evaluate_affiliate_simulated_ledgers, compute_affiliate_daily_kpi_yesterday, run_invitee_subscription_audit, reconcile_drop_statuses, post_growth_leaderboard_weekly, process_welcome_voucher_lifecycle
 from affiliate_dashboard_export import run_affiliate_dashboard_export_monthly_scheduled
 from referral_rate_limit import consume_referral_rate_limits
@@ -2396,6 +2396,7 @@ def _build_referral_status_payload(user_id: int, now_utc: datetime):
                 "invitee_user_id": 1,
                 "invitee_username": 1,
                 "status": 1,
+                "revoked_reason": 1,
                 "created_at_utc": 1,
             },
         ).sort("created_at_utc", -1).limit(50)
@@ -2432,11 +2433,15 @@ def _build_referral_status_payload(user_id: int, now_utc: datetime):
         if created_at is not None:
             age_hours = max(0, int((now_utc - created_at).total_seconds() // 3600))
         remaining_hold_hours = max(0, REFERRAL_HOLD_HOURS - age_hours) if status == "pending" else 0
+        public_status = build_public_referral_status({"status": status, "revoked_reason": row.get("revoked_reason")}, logger=logger)
         referrals.append(
             {
                 "invitee_user_id": invitee_user_id,
                 "invitee_username": row.get("invitee_username"),
-                "status": status,
+                "status": public_status["status"],
+                "status_label": public_status["label"],
+                "status_icon": public_status["icon"],
+                "status_tone": public_status["tone"],
                 "created_at": created_at.isoformat() if created_at else None,
                 "age_hours": age_hours,
                 "remaining_hold_hours": remaining_hold_hours,

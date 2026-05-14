@@ -85,3 +85,24 @@ def reconcile_referrals(referrals: list[dict], xp_events: list[dict]) -> list[di
     if success_keys != expected_success:
         return [{"kind": "success_mismatch", "expected": sorted(expected_success), "actual": sorted(success_keys)}]
     return []
+
+
+def build_public_referral_status(row: dict | None, logger=None) -> dict[str, str]:
+    raw_status = str((row or {}).get("status") or "").strip().lower()
+    raw_reason = str((row or {}).get("revoked_reason") or "").strip().lower()
+    reason = raw_reason or raw_status
+    if reason in {"qualified", "success", "settled", "awarded"}:
+        return {"status": "qualified", "label": "Qualified", "icon": "🟢", "tone": "success"}
+    if reason in {"pending", "pending_channel", "processing"}:
+        return {"status": "pending", "label": "Checking", "icon": "🟡", "tone": "warning"}
+    if reason == "not_subscribed_channel":
+        return {"status": "failed", "label": "Not subscribed", "icon": "🔴", "tone": "danger"}
+    if reason == "left_channel":
+        return {"status": "failed", "label": "Left channel", "icon": "🔴", "tone": "danger"}
+    if reason == "left_group":
+        return {"status": "failed", "label": "Left group", "icon": "🔴", "tone": "danger"}
+    if reason in {"duplicate", "blocked", "abuse", "deny_severe", "unknown", "revoked", "failed", "rejected", "expired"}:
+        return {"status": "failed", "label": "Not eligible", "icon": "🔴", "tone": "danger"}
+    if logger is not None:
+        logger.info("[REFERRAL_PROGRESS][UNKNOWN_REASON] raw_status=%s raw_reason=%s", raw_status, raw_reason)
+    return {"status": "failed", "label": "Not eligible", "icon": "🔴", "tone": "danger"}

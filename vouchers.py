@@ -17,6 +17,7 @@ from time_utils import as_aware_utc
 from onboarding import record_onboarding_start, record_visible_ping
 from affiliate_rewards import approve_affiliate_ledger, reject_affiliate_ledger, issue_current_month_affiliate_rewards
 from conversion_tracking import send_meta_event, send_tiktok_event
+from referral_rules import build_public_referral_status
 
 admin_cache_col = db["admin_cache"]
 new_joiner_claims_col = db["new_joiner_claims"]
@@ -4338,6 +4339,54 @@ def api_referral_progress():
             remaining_seconds = max(0.0, 86400 - elapsed)
             link_expires_in_seconds = min(86400.0, remaining_seconds)  # cap at 24h
 
+    referrals = []
+    if inviter_id is not None:
+        rows = list(
+            db.pending_referrals.find(
+                {"inviter_user_id": int(inviter_id)},
+                {"_id": 0, "invitee_user_id": 1, "invitee_username": 1, "status": 1, "revoked_reason": 1},
+            ).sort("created_at_utc", -1).limit(50)
+        )
+        invitee_ids = [r.get("invitee_user_id") for r in rows if r.get("invitee_user_id") is not None]
+        qualified_pairs = {
+            (int(d.get("referrer_id")), int(d.get("invitee_id")))
+            for d in db.qualified_events.find(
+                {"referrer_id": int(inviter_id), "invitee_id": {"$in": invitee_ids}},
+                {"_id": 0, "referrer_id": 1, "invitee_id": 1},
+            )
+            if d.get("referrer_id") is not None and d.get("invitee_id") is not None
+        }
+        revoked_pairs = {
+            (int(d.get("inviter_id")), int(d.get("invitee_id")))
+            for d in db.referral_events.find(
+                {"inviter_id": int(inviter_id), "invitee_id": {"$in": invitee_ids}, "event": "referral_revoked"},
+                {"_id": 0, "inviter_id": 1, "invitee_id": 1},
+            )
+            if d.get("inviter_id") is not None and d.get("invitee_id") is not None
+        }
+        for row in rows:
+            invitee_user_id = row.get("invitee_user_id")
+            pair_key = (int(inviter_id), int(invitee_user_id)) if invitee_user_id is not None else None
+            status = str(row.get("status") or "").strip().lower()
+            if pair_key and pair_key in qualified_pairs:
+                status = "qualified"
+            elif pair_key and pair_key in revoked_pairs and status != "qualified":
+                status = "failed"
+            mapped = build_public_referral_status(
+                {"status": status, "revoked_reason": row.get("revoked_reason")},
+                logger=current_app.logger,
+            )
+            referrals.append(
+                {
+                    "invitee_user_id": invitee_user_id,
+                    "invitee_username": row.get("invitee_username"),
+                    "status": mapped["status"],
+                    "status_label": mapped["label"],
+                    "status_icon": mapped["icon"],
+                    "status_tone": mapped["tone"],
+                }
+            )
+
     return jsonify(
         {
             "total_referrals": total_referrals,
@@ -4349,6 +4398,7 @@ def api_referral_progress():
             "near_miss": near_miss,
             "progress_pct": progress_pct,
             "link_expires_in_seconds": link_expires_in_seconds,
+            "referrals": referrals,
         }
     ), 200
 

@@ -2974,11 +2974,14 @@
       }
     }
 
-    function referralStatusLabel(statusValue) {
-      const raw = String(statusValue || "").toLowerCase();
+    function referralStatusLabel(row = {}) {
+      const apiIcon = typeof row?.status_icon === "string" ? row.status_icon : "";
+      const apiText = typeof row?.status_label === "string" ? row.status_label : "";
+      if (apiIcon && apiText) return { icon: apiIcon, text: apiText };
+      const raw = String(row?.status || "").toLowerCase();
       if (raw === "qualified") return { icon: "🟢", text: "Qualified" };
-      if (raw === "failed") return { icon: "🔴", text: "Failed" };
-      return { icon: "🟡", text: "Pending" };
+      if (raw === "pending") return { icon: "🟡", text: "Checking" };
+      return { icon: "🔴", text: "Not eligible" };
     }
 
     function renderReferralStatus(data = {}) {
@@ -3007,9 +3010,9 @@
 
         const meta = document.createElement("div");
         meta.className = "referral-status-meta";
-        const status = referralStatusLabel(row?.status);
+        const status = referralStatusLabel(row);
         const parts = [`${status.icon} ${status.text}`];
-        if (status.text === "Pending") {
+        if (status.text === "Checking") {
           const remaining = Number(row?.remaining_hold_hours);
           parts.push(Number.isFinite(remaining) && remaining > 0 ? `${Math.floor(remaining)}h remaining` : "Processing...");
         }
