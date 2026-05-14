@@ -46,6 +46,10 @@ class _Requests:
 class _Logger:
     def __init__(self):
         self.exceptions = []
+        self.infos = []
+
+    def info(self, *args, **kwargs):
+        self.infos.append((args, kwargs))
 
     def exception(self, *args, **kwargs):
         self.exceptions.append((args, kwargs))
@@ -73,10 +77,11 @@ def test_sends_once_after_qualification():
     fn.__globals__.update(
         {
             "now_utc": lambda: datetime(2026, 1, 1, tzinfo=timezone.utc),
-            "db": type("DB", (), {"referral_notifications": notifications})(),
+            "db": type("DB", (), {"referral_notifications": notifications, "users": object()})(),
             "requests": requests,
             "API_BASE": "https://api.telegram.org/botTEST",
             "logger": logger,
+            "pm_allowed": lambda *args, **kwargs: True,
         }
     )
 
@@ -95,10 +100,11 @@ def test_duplicate_suppressed():
     fn.__globals__.update(
         {
             "now_utc": lambda: datetime(2026, 1, 1, tzinfo=timezone.utc),
-            "db": type("DB", (), {"referral_notifications": notifications})(),
+            "db": type("DB", (), {"referral_notifications": notifications, "users": object()})(),
             "requests": requests,
             "API_BASE": "https://api.telegram.org/botTEST",
             "logger": _Logger(),
+            "pm_allowed": lambda *args, **kwargs: True,
         }
     )
 
@@ -116,10 +122,11 @@ def test_failure_does_not_crash():
     fn.__globals__.update(
         {
             "now_utc": lambda: datetime(2026, 1, 1, tzinfo=timezone.utc),
-            "db": type("DB", (), {"referral_notifications": notifications})(),
+            "db": type("DB", (), {"referral_notifications": notifications, "users": object()})(),
             "requests": requests,
             "API_BASE": "https://api.telegram.org/botTEST",
             "logger": logger,
+            "pm_allowed": lambda *args, **kwargs: True,
         }
     )
 
@@ -136,10 +143,11 @@ def test_no_send_when_missing_required_ids():
     fn.__globals__.update(
         {
             "now_utc": lambda: datetime(2026, 1, 1, tzinfo=timezone.utc),
-            "db": type("DB", (), {"referral_notifications": notifications})(),
+            "db": type("DB", (), {"referral_notifications": notifications, "users": object()})(),
             "requests": requests,
             "API_BASE": "https://api.telegram.org/botTEST",
             "logger": _Logger(),
+            "pm_allowed": lambda *args, **kwargs: True,
         }
     )
 
@@ -148,3 +156,24 @@ def test_no_send_when_missing_required_ids():
 
     assert notifications.calls == 0
     assert len(requests.calls) == 0
+
+def test_qualified_dm_suppressed_when_preference_disabled():
+    fn = _load_func()
+    notifications = _NotificationsCollection(first_insert=True)
+    requests = _Requests()
+
+    fn.__globals__.update(
+        {
+            "now_utc": lambda: datetime(2026, 1, 1, tzinfo=timezone.utc),
+            "db": type("DB", (), {"referral_notifications": notifications, "users": object()})(),
+            "requests": requests,
+            "API_BASE": "https://api.telegram.org/botTEST",
+            "logger": _Logger(),
+            "pm_allowed": lambda *args, **kwargs: False,
+        }
+    )
+
+    fn(123, 456, None)
+
+    assert len(requests.calls) == 0
+    assert notifications.calls == 1
