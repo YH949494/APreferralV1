@@ -83,7 +83,7 @@
     .identity-progress-bar { width:100%; height:8px; background:rgba(255,255,255,0.08); border-radius:999px; overflow:hidden; }
     .identity-progress-fill { height:100%; width:0%; background:linear-gradient(90deg, #ff7a2e, var(--ap-orange)); }
     .identity-hint { margin-top:6px; color:var(--text-muted); font-size:12px; }
-    .identity-modal { display:none; position:fixed; inset:0; background:rgba(0,0,0,.55); z-index:2000; }
+    .identity-modal { display:none; position:fixed; inset:0; background:rgba(0,0,0,.55); z-index:0; }
     .identity-modal-body { max-width:480px; margin:12vh auto 0; background:var(--bg-card); border:1px solid var(--border-light); border-radius:var(--radius-lg); padding:16px; }
     .header-profile-wrap { display:flex; flex-direction:column; align-items:flex-end; gap:1px; }
     .header-rank-hint { display:none; font-size:10px; line-height:1.1; opacity:.55; color:var(--text-muted); font-weight:400; }
@@ -1085,7 +1085,7 @@
       opacity: 0;
       transition: opacity 0.25s ease, transform 0.25s ease;
       pointer-events: none;
-      min-width: 200px;
+      min-width: px;
       box-shadow: var(--shadow-soft);
     }
     #xp-toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
@@ -1255,8 +1255,8 @@
         </div>
         <div class="referral-progress-meta">
           <div id="referral-progress-count" style="display:none;"></div>
-          <div id="referral-progress-remaining">3 more referrals to unlock +200 XP</div>
-          <div id="referral-progress-next" class="progress-next-reward">Next reward: +200 XP at 3 successful referrals.</div>
+          <div id="referral-progress-remaining">3 more referrals to unlock + XP</div>
+          <div id="referral-progress-next" class="progress-next-reward">Next reward: +400 XP at 3 successful referrals.</div>
         </div>
       </div>
     </div>
@@ -1565,8 +1565,8 @@
 
           <p><b>🔗 Referral</b></p>
           <ul style="list-style:none;padding:0;line-height:1.6;">
-            <li>+30 XP per referral</li>
-            <li>3 referrals → +200 XP bonus</li>
+            <li>+60 XP per referral</li>
+            <li>3 referrals → +400 XP bonus</li>
           </ul>
 
           <p><b>📸 #mywin</b></p>
@@ -2846,15 +2846,15 @@
       );
       const remaining = Number.isFinite(remainingRaw) ? Math.max(0, remainingRaw) : 0;
       if (data?.near_miss) {
-        remainingEl.textContent = "⚡ 1 more referral to unlock +200 XP";
+        remainingEl.textContent = "⚡ 1 more referral to unlock +400 XP";
       } else {
-        remainingEl.textContent = `${remaining} more referrals to unlock +200 XP`;
+        remainingEl.textContent = `${remaining} more referrals to unlock +400 XP`;
       }
       if (nextEl) {
         if (remaining <= 0) {
           nextEl.textContent = "✅ Current referral target completed. Keep sharing for your next reward tier.";
         } else {
-          nextEl.textContent = `Next reward: +200 XP at 3 referrals • Need ${remaining} more.`;
+          nextEl.textContent = `Next reward: +400 XP at 3 referrals • Need ${remaining} more.`;
         }
       }
 
