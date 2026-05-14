@@ -854,6 +854,7 @@ referral_audit_collection = db["referral_audit"]
 unknown_invite_audit_collection = db["unknown_invite_audit"]
 pending_referrals_collection = db["pending_referrals"]
 referral_rate_limits_collection = db["referral_rate_limits"]
+referral_notifications_collection = db["referral_notifications"]
 qualified_events_collection = db["qualified_events"]
 affiliate_ledger_collection = db["affiliate_ledger"]
 voucher_pools_collection = db["voucher_pools"]
@@ -1081,6 +1082,54 @@ def _maybe_send_near_miss_dm(inviter_user_id: int, total_referrals_after: int) -
         {"user_id": inviter_user_id},
         {"$set": {"last_near_miss_dm_at": now_ts}},
     )
+
+def _maybe_send_referral_join_ack_dm(
+    inviter_user_id: int | None,
+    invitee_user_id: int | None,
+    invitee_username: str | None = None,
+) -> None:
+    if RUNNER_MODE != "web":
+        return
+    if not inviter_user_id or not invitee_user_id:
+        return
+    dedupe_key = f"ref_join_ack:{int(inviter_user_id)}:{int(invitee_user_id)}"
+    now_ts = now_utc()
+    result = referral_notifications_collection.update_one(
+        {"key": dedupe_key},
+        {
+            "$setOnInsert": {
+                "key": dedupe_key,
+                "type": "ref_join_ack",
+                "inviter_user_id": int(inviter_user_id),
+                "invitee_user_id": int(invitee_user_id),
+                "invitee_username": invitee_username,
+                "created_at": now_ts,
+            }
+        },
+        upsert=True,
+    )
+    if not getattr(result, "upserted_id", None):
+        return
+    invitee_label = f"@{invitee_username}" if invitee_username else "Someone"
+    text = (
+        f"🎉 {invitee_label} joined using your invite link!\n"
+        "They’re now being checked. Qualified referrals count after the hold period."
+    )
+    try:
+        call_bot_in_loop(app_bot.bot.send_message(chat_id=int(inviter_user_id), text=text))
+    except (Forbidden, BadRequest) as exc:
+        logger.warning(
+            "[REFERRAL_ACK_DM_FAILED] inviter=%s invitee=%s err=%s",
+            inviter_user_id,
+            invitee_user_id,
+            exc,
+        )
+    except Exception:
+        logger.exception(
+            "[REFERRAL_ACK_DM_FAILED] inviter=%s invitee=%s",
+            inviter_user_id,
+            invitee_user_id,
+        )
 
 def maybe_shout_milestones(user_id: int):
     """
@@ -1529,6 +1578,11 @@ def _confirm_referral_on_main_join(
                 invitee_user_id,
                 invite_link_log,
                 REFERRAL_HOLD_HOURS,
+            )
+            _maybe_send_referral_join_ack_dm(
+                int(referrer_id),
+                int(invitee_user_id),
+                invitee_username=invitee_username,
             )
         else:            
             logger.info(
