@@ -2995,18 +2995,33 @@
         return;
       }
 
+      function buildPublicReferralLabel(row = {}) {
+        const cleanUsername = (value) => {
+          if (value == null) return "";
+          let text = String(value).trim();
+          if (text.startsWith("@")) text = text.slice(1);
+          return text.trim();
+        };
+        const username = cleanUsername(row?.username) || cleanUsername(row?.invitee_username) || cleanUsername(row?.usernameLower);
+        if (username) return `@${username}`;
+        const name = row?.first_name || row?.invitee_first_name || row?.display_name || row?.invitee_display_name || row?.name;
+        if (typeof name === "string" && name.trim()) return name.trim();
+        const rawId = row?.invitee_user_id ?? row?.user_id ?? row?.uid;
+        if (rawId !== null && rawId !== undefined) {
+          const digits = String(rawId).replace(/\D+/g, "");
+          if (digits) return `User •••${digits.slice(-4)}`;
+        }
+        return "User";
+      }
+
       rows.forEach((row) => {
         const line = document.createElement("div");
         const label = document.createElement("div");
         label.className = "referral-status-user";
-        const rawName =
-          row?.invitee_username ||
-          row?.username ||
-          row?.display_name ||
-          row?.invitee_display_name ||
-          "User";
-        const safeUsername = typeof rawName === "string" && rawName.trim() ? rawName.trim() : "User";
-        label.textContent = safeUsername.startsWith("@") ? safeUsername : `@${safeUsername}`;
+        label.textContent = buildPublicReferralLabel({
+          ...row,
+          display_name: row?.display_label || row?.invitee_label || row?.display_name,
+        });
 
         const meta = document.createElement("div");
         meta.className = "referral-status-meta";

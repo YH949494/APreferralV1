@@ -2387,6 +2387,41 @@ def _map_referral_status(raw_status):
     return "pending"
 
 
+def build_public_referral_user_label(row):
+    row = row or {}
+
+    def _clean_username(value):
+        if value is None:
+            return ""
+        text = str(value).strip()
+        if text.startswith("@"):
+            text = text[1:]
+        return text.strip()
+
+    username = _clean_username(row.get("username"))
+    if not username:
+        username = _clean_username(row.get("invitee_username"))
+    if not username:
+        username = _clean_username(row.get("usernameLower"))
+    if username:
+        return f"@{username}"
+
+    for key in ("first_name", "invitee_first_name", "display_name", "invitee_display_name", "name"):
+        value = row.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+
+    for key in ("invitee_user_id", "user_id", "uid"):
+        value = row.get(key)
+        if value is None:
+            continue
+        digits = "".join(ch for ch in str(value) if ch.isdigit())
+        if digits:
+            return f"User •••{digits[-4:]}"
+
+    return "User"
+
+
 def _build_referral_status_payload(user_id: int, now_utc: datetime):
     rows = list(
         pending_referrals_collection.find(
@@ -2395,6 +2430,13 @@ def _build_referral_status_payload(user_id: int, now_utc: datetime):
                 "_id": 0,
                 "invitee_user_id": 1,
                 "invitee_username": 1,
+                "first_name": 1,
+                "invitee_first_name": 1,
+                "display_name": 1,
+                "invitee_display_name": 1,
+                "name": 1,
+                "username": 1,
+                "usernameLower": 1,
                 "status": 1,
                 "revoked_reason": 1,
                 "created_at_utc": 1,
@@ -2434,10 +2476,13 @@ def _build_referral_status_payload(user_id: int, now_utc: datetime):
             age_hours = max(0, int((now_utc - created_at).total_seconds() // 3600))
         remaining_hold_hours = max(0, REFERRAL_HOLD_HOURS - age_hours) if status == "pending" else 0
         public_status = build_public_referral_status({"status": status, "revoked_reason": row.get("revoked_reason")}, logger=logger)
+        label = build_public_referral_user_label(row)
         referrals.append(
             {
                 "invitee_user_id": invitee_user_id,
                 "invitee_username": row.get("invitee_username"),
+                "display_label": label,
+                "invitee_label": label,
                 "status": public_status["status"],
                 "status_label": public_status["label"],
                 "status_icon": public_status["icon"],
