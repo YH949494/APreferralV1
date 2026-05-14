@@ -1035,6 +1035,21 @@ def _maybe_send_near_miss_dm(inviter_user_id: int, total_referrals_after: int) -
         return
     if not inviter_user_id:
         return
+    pref_allowed = pm_allowed(
+        inviter_user_id,
+        "referral_updates",
+        default=True,
+        users_collection=users_collection,
+        logger=logger,
+    )
+    if not pref_allowed:
+        logger.info(
+            "[PM_PREF][SUPPRESSED] uid=%s key=%s type=%s",
+            inviter_user_id,
+            "referral_updates",
+            "ref_near_miss",
+        )
+        return
     progress = total_referrals_after % 3
     if progress != 2:
         return
