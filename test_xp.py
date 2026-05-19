@@ -3,6 +3,7 @@ import unittest
 
 from xp import grant_xp
 from database import update_user_xp
+import xp as xp_module
 
 class FakeResult:
     def __init__(self, upserted_id):
@@ -90,6 +91,43 @@ class GrantXPTests(unittest.TestCase):
         self.assertFalse(second)
         self.assertEqual(len(db.xp_events.store), 1)
         self.assertEqual(len(db.xp_ledger.store), 1)
+
+    def test_ensure_xp_indexes_uses_safe_path_for_new_remediation_indexes(self):
+        calls = []
+        original_safe = xp_module._safe_create_index
+
+        class _FakeAggEvents:
+            def aggregate(self, pipeline):  # noqa: ARG002
+                return []
+
+            def delete_many(self, filt):  # noqa: ARG002
+                return None
+
+            def create_index(self, keys, **kwargs):
+                return kwargs.get("name")
+
+        class _FakeLedgerCollection:
+            def create_index(self, keys, **kwargs):
+                return kwargs.get("name")
+
+        class _FakeIdxDB:
+            def __init__(self):
+                self.xp_events = _FakeAggEvents()
+                self.xp_ledger = _FakeLedgerCollection()
+
+        def _capture_safe(collection, keys, *, name, partialFilterExpression=None):
+            calls.append((collection, tuple(keys), name, partialFilterExpression))
+            return name
+
+        xp_module._safe_create_index = _capture_safe
+        try:
+            xp_module.ensure_xp_indexes(_FakeIdxDB())
+        finally:
+            xp_module._safe_create_index = original_safe
+
+        names = {c[2] for c in calls}
+        self.assertIn("xp_events_unique_key_user_id_idx", names)
+        self.assertIn("xp_events_user_created_invalidated_idx", names)
 
 
 class FakeAdminCooldowns:
