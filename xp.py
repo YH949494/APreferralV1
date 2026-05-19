@@ -12,6 +12,16 @@ from config import KL_TZ
 
 logger = logging.getLogger(__name__)
 
+def _safe_create_index(collection, keys, *, name: str, partialFilterExpression=None):
+    from database import safe_create_index
+
+    return safe_create_index(
+        collection,
+        keys,
+        name=name,
+        partialFilterExpression=partialFilterExpression,
+    )
+
 
 def now_utc() -> datetime:
     return datetime.now(timezone.utc)
@@ -105,7 +115,12 @@ def ensure_xp_indexes(db) -> None:
     def _dedupe_xp_events():
         dup_groups = db.xp_events.aggregate(
             [
-                {"$match": {"unique_key": {"$exists": True}}},
+                {
+                    "$match": {
+                        "unique_key": {"$exists": True},
+                        "user_id": {"$exists": True, "$ne": None},
+                    }
+                },
                 {
                     "$group": {
                         "_id": {"user_id": "$user_id", "unique_key": "$unique_key"},
@@ -141,6 +156,20 @@ def ensure_xp_indexes(db) -> None:
     logger.info("[xp_indexes] ensure ok name=%s", index_name)
     index_name = db.xp_events.create_index(
         [("user_id", 1), ("created_at", -1)], name="user_createdAt"
+    )
+    logger.info("[xp_indexes] ensure ok name=%s", index_name)
+    index_name = _safe_create_index(
+        db.xp_events,
+        [("unique_key", 1), ("user_id", 1)],
+        name="xp_events_unique_key_user_id_idx",
+        partialFilterExpression={"unique_key": {"$exists": True}, "user_id": {"$exists": True}},
+    )
+    logger.info("[xp_indexes] ensure ok name=%s", index_name)
+    index_name = _safe_create_index(
+        db.xp_events,
+        [("user_id", 1), ("created_at", 1), ("invalidated", 1)],
+        name="xp_events_user_created_invalidated_idx",
+        partialFilterExpression={"user_id": {"$exists": True}},
     )
     logger.info("[xp_indexes] ensure ok name=%s", index_name)
     

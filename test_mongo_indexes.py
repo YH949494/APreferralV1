@@ -37,7 +37,11 @@ def plan_index_specs(query_shapes: dict[str, bool]):
     if query_shapes.get("invite_lookup_chat_inviter_active_created"):
         specs.append(("invite_link_map", [("chat_id", 1), ("inviter_id", 1), ("is_active", 1), ("created_at", -1)], "invite_link_map_chat_inviter_active_created_desc_idx"))
     if query_shapes.get("invite_lookup_inviter_created"):
-        specs.append(("invite_link_map", [("inviter_id", 1), ("created_at", -1)], "invite_link_map_inviter_created_desc_idx"))
+        specs.append(("invite_link_map", [("inviter_id", 1), ("created_at", -1)], "invite_link_map_inviter_created_idx"))
+    if query_shapes.get("snapshot_updated_at_stale"):
+        specs.append(("users", [("snapshot_updated_at", 1)], "users_snapshot_updated_at_idx"))
+    if query_shapes.get("referral_audit_inviter_created"):
+        specs.append(("referral_audit", [("inviter_user_id", 1), ("created_at", 1)], "referral_audit_inviter_created_idx"))
     if query_shapes.get("miniapp_date"):
         specs.append(("miniapp_sessions_daily", [("date", 1)], "miniapp_sessions_daily_date_asc_idx"))
     elif query_shapes.get("miniapp_day"):
@@ -71,7 +75,7 @@ def test_plan_indexes_only_from_matching_query_shapes():
     assert "users_weekly_xp_desc_idx" in names
     assert "users_weekly_referrals_desc_idx" not in names
     assert "invite_link_map_chat_inviter_active_created_desc_idx" in names
-    assert "invite_link_map_inviter_created_desc_idx" not in names
+    assert "invite_link_map_inviter_created_idx" not in names
     assert "miniapp_sessions_daily_day_asc_idx" in names
     assert "miniapp_sessions_daily_date_asc_idx" not in names
     assert "miniapp_sessions_daily_created_at_asc_idx" not in names
@@ -83,6 +87,36 @@ def test_due_time_indexes_only_for_used_fields():
     assert "users_pm1_due_at_utc_asc_idx" in names
     assert "users_mywin14_due_at_utc_asc_idx" in names
     assert "users_pm2_due_at_utc_asc_idx" not in names
+
+
+def test_new_targeting_index_shapes_can_be_planned():
+    specs = plan_index_specs(
+        {
+            "invite_lookup_inviter_created": True,
+            "snapshot_updated_at_stale": True,
+            "referral_audit_inviter_created": True,
+        }
+    )
+    names = {s[2] for s in specs}
+    assert "invite_link_map_inviter_created_idx" in names
+    assert "users_snapshot_updated_at_idx" in names
+    assert "referral_audit_inviter_created_idx" in names
+
+
+def test_safe_create_index_passes_partial_filter_expression():
+    col = _FakeCollection()
+    safe_create_index(
+        col,
+        [("pm1_due_at_utc", 1), ("pm1_sent_at_utc", 1), ("pm1_disabled", 1)],
+        name="users_pm1_due_pending_idx",
+        partialFilterExpression={"pm1_due_at_utc": {"$exists": True}, "pm1_sent_at_utc": {"$exists": False}},
+    )
+    kwargs = col.calls[0][1]
+    assert kwargs["name"] == "users_pm1_due_pending_idx"
+    assert kwargs["partialFilterExpression"] == {
+        "pm1_due_at_utc": {"$exists": True},
+        "pm1_sent_at_utc": {"$exists": False},
+    }
 
 
 def test_safe_create_index_equivalent_name_conflict_returns_existing_name():

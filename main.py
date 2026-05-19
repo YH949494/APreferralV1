@@ -1868,6 +1868,62 @@ def ensure_indexes():
         [("chat_id", ASCENDING), ("inviter_id", ASCENDING), ("is_active", ASCENDING), ("created_at", DESCENDING)],
         name="invite_link_map_chat_inviter_active_created_desc_idx",
     )
+    safe_create_index(
+        invite_link_map_collection,
+        [("inviter_id", ASCENDING), ("created_at", DESCENDING)],
+        name="invite_link_map_inviter_created_idx",
+        partialFilterExpression={"inviter_id": {"$exists": True}},
+    )
+    safe_create_index(
+        users_collection,
+        [("snapshot_updated_at", ASCENDING)],
+        name="users_snapshot_updated_at_idx",
+        partialFilterExpression={"snapshot_updated_at": {"$exists": True}},
+    )
+    safe_create_index(
+        db.referral_audit,
+        [("inviter_user_id", ASCENDING), ("created_at", ASCENDING)],
+        name="referral_audit_inviter_created_idx",
+        partialFilterExpression={"inviter_user_id": {"$exists": True}},
+    )
+    safe_create_index(db.miniapp_sessions_daily, [("date_utc", ASCENDING)], name="miniapp_sessions_daily_date_utc_idx")
+    safe_create_index(db.miniapp_sessions_daily, [("date", ASCENDING)], name="miniapp_sessions_daily_date_idx")
+    safe_create_index(
+        users_collection,
+        [("pm1_due_at_utc", ASCENDING), ("pm1_sent_at_utc", ASCENDING), ("pm1_disabled", ASCENDING)],
+        name="users_pm1_due_pending_idx",
+        partialFilterExpression={"pm1_due_at_utc": {"$exists": True}, "pm1_sent_at_utc": {"$exists": False}},
+    )
+    safe_create_index(
+        users_collection,
+        [("pm2_due_at_utc", ASCENDING), ("pm2_sent_at_utc", ASCENDING), ("pm2_disabled", ASCENDING)],
+        name="users_pm2_due_pending_idx",
+        partialFilterExpression={"pm2_due_at_utc": {"$exists": True}, "pm2_sent_at_utc": {"$exists": False}},
+    )
+    safe_create_index(
+        users_collection,
+        [("pm3_due_at_utc", ASCENDING), ("pm3_sent_at_utc", ASCENDING), ("pm3_disabled", ASCENDING)],
+        name="users_pm3_due_pending_idx",
+        partialFilterExpression={"pm3_due_at_utc": {"$exists": True}, "pm3_sent_at_utc": {"$exists": False}},
+    )
+    safe_create_index(
+        users_collection,
+        [("pm4_due_at_utc", ASCENDING), ("pm4_sent_at_utc", ASCENDING), ("pm4_disabled", ASCENDING)],
+        name="users_pm4_due_pending_idx",
+        partialFilterExpression={"pm4_due_at_utc": {"$exists": True}, "pm4_sent_at_utc": {"$exists": False}},
+    )
+    safe_create_index(
+        users_collection,
+        [("mywin7_due_at_utc", ASCENDING), ("mywin7_sent_at_utc", ASCENDING), ("mywin7_disabled", ASCENDING)],
+        name="users_mywin7_due_pending_idx",
+        partialFilterExpression={"mywin7_due_at_utc": {"$exists": True}, "mywin7_sent_at_utc": {"$exists": False}},
+    )
+    safe_create_index(
+        users_collection,
+        [("mywin14_due_at_utc", ASCENDING), ("mywin14_sent_at_utc", ASCENDING), ("mywin14_disabled", ASCENDING)],
+        name="users_mywin14_due_pending_idx",
+        partialFilterExpression={"mywin14_due_at_utc": {"$exists": True}, "mywin14_sent_at_utc": {"$exists": False}},
+    )
     db.voucher_ledger.create_index([("status", 1), ("created_at", 1)])
     db.qualified_events.create_index([("created_at", 1)])
     users_collection.create_index([("first_checkin_at", 1)])
