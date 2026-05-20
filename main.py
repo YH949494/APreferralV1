@@ -1892,37 +1892,37 @@ def ensure_indexes():
         users_collection,
         [("pm1_due_at_utc", ASCENDING), ("pm1_sent_at_utc", ASCENDING), ("pm1_disabled", ASCENDING)],
         name="users_pm1_due_pending_idx",
-        partialFilterExpression={"pm1_due_at_utc": {"$exists": True}, "pm1_sent_at_utc": {"$exists": False}},
+        partialFilterExpression={"pm1_due_at_utc": {"$exists": True}},
     )
     safe_create_index(
         users_collection,
         [("pm2_due_at_utc", ASCENDING), ("pm2_sent_at_utc", ASCENDING), ("pm2_disabled", ASCENDING)],
         name="users_pm2_due_pending_idx",
-        partialFilterExpression={"pm2_due_at_utc": {"$exists": True}, "pm2_sent_at_utc": {"$exists": False}},
+        partialFilterExpression={"pm2_due_at_utc": {"$exists": True}},
     )
     safe_create_index(
         users_collection,
         [("pm3_due_at_utc", ASCENDING), ("pm3_sent_at_utc", ASCENDING), ("pm3_disabled", ASCENDING)],
         name="users_pm3_due_pending_idx",
-        partialFilterExpression={"pm3_due_at_utc": {"$exists": True}, "pm3_sent_at_utc": {"$exists": False}},
+        partialFilterExpression={"pm3_due_at_utc": {"$exists": True}},
     )
     safe_create_index(
         users_collection,
         [("pm4_due_at_utc", ASCENDING), ("pm4_sent_at_utc", ASCENDING), ("pm4_disabled", ASCENDING)],
         name="users_pm4_due_pending_idx",
-        partialFilterExpression={"pm4_due_at_utc": {"$exists": True}, "pm4_sent_at_utc": {"$exists": False}},
+        partialFilterExpression={"pm4_due_at_utc": {"$exists": True}},
     )
     safe_create_index(
         users_collection,
         [("mywin7_due_at_utc", ASCENDING), ("mywin7_sent_at_utc", ASCENDING), ("mywin7_disabled", ASCENDING)],
         name="users_mywin7_due_pending_idx",
-        partialFilterExpression={"mywin7_due_at_utc": {"$exists": True}, "mywin7_sent_at_utc": {"$exists": False}},
+        partialFilterExpression={"mywin7_due_at_utc": {"$exists": True}},
     )
     safe_create_index(
         users_collection,
         [("mywin14_due_at_utc", ASCENDING), ("mywin14_sent_at_utc", ASCENDING), ("mywin14_disabled", ASCENDING)],
         name="users_mywin14_due_pending_idx",
-        partialFilterExpression={"mywin14_due_at_utc": {"$exists": True}, "mywin14_sent_at_utc": {"$exists": False}},
+        partialFilterExpression={"mywin14_due_at_utc": {"$exists": True}},
     )
     db.voucher_ledger.create_index([("status", 1), ("created_at", 1)])
     db.qualified_events.create_index([("created_at", 1)])
