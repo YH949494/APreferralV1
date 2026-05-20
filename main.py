@@ -4428,13 +4428,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await safe_reply_text(
                 message,
                 "👋 Welcome to AdvantPlay Community!\n\n"
-                "Before you start 👇:\n\n"      
-                "📣 Channel subscribers get:\n" 
-                "• ⚡ Voucher drops\n"
-                "• 🎁 Extra bonus campaigns\n"
-                "• 👑 VIP-only announcements\n\n"                
+                "Join our channel to get: 👇:\n\n"      
+                "⚡ Daily voucher drops\n"
+                "🎁 Bonus campaigns\n"
+                "👑 VIP-only announcements\n"
+                "🏆 Weekly ranking rewards\n\n"                
 
-                "Start your journey here 👇",
+                "Start here 👇",
                 reply_markup=InlineKeyboardMarkup(keyboard),
                 uid=user.id,
                 send_type="start",
