@@ -954,6 +954,8 @@ def _write_snapshot_heartbeat(source: str, now_utc_ts: datetime) -> None:
         logger.exception("[SNAPSHOT][HEARTBEAT] failed type=%s", source)
         
 def settle_xp_snapshots() -> None:
+    run_started = time.monotonic()
+    verbose_snapshot_logs = os.getenv("SNAPSHOT_VERBOSE_LOGS", "").strip() == "1"
     now_utc_ts = now_utc()
     week_start_utc, week_end_utc = _week_window_utc(now_utc_ts)
     month_start_utc, month_end_utc = _month_window_utc(now_utc_ts)
@@ -1005,11 +1007,15 @@ def settle_xp_snapshots() -> None:
         },
     ]
     results = list(db.xp_events.aggregate(pipeline))
+    processed_count = len(results)
+    skipped_count = 0
+    written_count = 0
     if results:
         updates = []
         for row in results:
             uid = row.get("_id")
             if uid is None:
+                skipped_count += 1
                 continue
             total_xp = int(row.get("total_xp", 0))
             weekly_xp = int(row.get("weekly_xp", 0))
@@ -1029,6 +1035,7 @@ def settle_xp_snapshots() -> None:
             )
         if updates:
             db.users.bulk_write(updates, ordered=False)
+            written_count = len(updates)
 
     publish_result = db.users.update_many(
         {},
@@ -1050,17 +1057,26 @@ def settle_xp_snapshots() -> None:
         "[SNAPSHOT] publish_done users=%s version_inc=1",
         publish_result.modified_count,
     )    
-    _write_snapshot_heartbeat("xp", now_utc_ts)    
+    _write_snapshot_heartbeat("xp", now_utc_ts)
+    elapsed_ms = int((time.monotonic() - run_started) * 1000)
+    logger.info(
+        "[SCHED][SNAPSHOT_SUMMARY] kind=xp processed=%s written=%s skipped=%s elapsed_ms=%s",
+        processed_count,
+        written_count,
+        skipped_count,
+        elapsed_ms,
+    )
     for row in results:
         uid = row.get("_id")
         if uid is None:
             continue
 
-        logger.info(
-            "[SCHED][SNAPSHOT_WRITE] uid=%s weekly_xp=%s",
-            uid,
-            int(row.get("weekly_xp", 0)),
-        )
+        if verbose_snapshot_logs:
+            logger.debug(
+                "[SCHED][SNAPSHOT_WRITE] uid=%s weekly_xp=%s",
+                uid,
+                int(row.get("weekly_xp", 0)),
+            )
         if int(row.get("monthly_xp", 0)) >= 800:
             try:
                 from onboarding import maybe_unlock_vip1
