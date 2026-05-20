@@ -3167,7 +3167,7 @@ Active players win more.
     function showRetentionToast() {
       const msg = isThaiUiLanguage()
         ? "ติดตามช่องไว้ — โค้ดส่วนลดใหม่กำลังจะมาเร็วๆ นี้"
-        : "Stay subscribed — new voucher drops are coming soon.";
+        : "Stay subscribed — Next drop coming soon.";
 
       showToast(msg);
     }
@@ -3426,7 +3426,7 @@ Active players win more.
       secondaryBtn.style.display = "inline-block";
 
       const messageEl = document.getElementById("campaign-voucher-message");
-      if (messageEl) messageEl.innerText = messageText || "🚨 Stay subscribed to channel — new vouchers are coming soon.";
+      if (messageEl) messageEl.innerText = messageText || "🚨 Stay subscribed to channel — Next drop coming soon.";
     }
 
     const CHANNEL_SUBSCRIBE_PROMPT = "Subscribe to @advantplayofficial to unlock";
@@ -3573,7 +3573,7 @@ Active players win more.
         }
 
         if (publicSoldOut) {
-          message.textContent = "Stay subscribed to channel — new voucher drops are coming soon.";
+          message.textContent = "Stay subscribed to channel — Next drop coming soon.";
           btn.textContent = "Fully Claimed";
           btn.removeAttribute("data-dropid");
           btn.setAttribute("disabled", "disabled");
@@ -3630,7 +3630,7 @@ Active players win more.
       if (!liveDrops.length) {
         const note = document.createElement("p");
         note.className = "campaign-meta";
-        note.innerHTML = "🎁 New vouchers drop regularly.<br>Stay subscribed to channel to get them.";
+        note.innerHTML = "🎁 Next drop coming soon.<br>Stay subscribed to channel to get them.";
         container.appendChild(note);
       }
 
