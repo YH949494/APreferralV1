@@ -4342,6 +4342,11 @@ def api_referral_progress():
     referrals = []
     def build_public_referral_user_label(row):
         row = row or {}
+        def normalize_user_id_display(value):
+            raw = str(value or "").strip()
+            if raw.lower().startswith("uid:"):
+                raw = raw.split(":", 1)[1].strip()
+            return raw
 
         def _clean_username(value):
             if value is None:
@@ -4368,9 +4373,9 @@ def api_referral_progress():
             value = row.get(key)
             if value is None:
                 continue
-            digits = "".join(ch for ch in str(value) if ch.isdigit())
-            if digits:
-                return f"User •••{digits[-4:]}"
+            normalized = normalize_user_id_display(value)
+            if normalized:
+                return normalized
 
         return "User"
 

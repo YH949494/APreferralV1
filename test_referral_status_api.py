@@ -159,10 +159,27 @@ def test_invitee_display_label_fallbacks_and_masking():
     labels = [r["display_label"] for r in out["referrals"]]
     assert labels[0] == "@TestUser"
     assert labels[1] == "Alice"
-    assert labels[2] == "User •••4321"
+    assert labels[2] == "987654321"
     assert labels[3] == "User"
-    assert "987654321" not in labels[2]
-    assert out["referrals"][2]["invitee_label"] == "User •••4321"
+    assert out["referrals"][2]["invitee_label"] == "987654321"
+
+
+def test_invitee_display_label_strips_uid_prefix_only():
+    env = _load_symbols()
+    _inject_unified_stubs(env)
+    now = datetime(2026, 5, 14, 12, 0, tzinfo=timezone.utc)
+    env.update(
+        {
+            "pending_referrals_collection": _Collection([
+                {"inviter_user_id": 1, "uid": "UID: abc-123", "status": "pending", "created_at_utc": now},
+            ]),
+            "qualified_events_collection": _Collection([]),
+            "referral_events_collection": _Collection([]),
+        }
+    )
+    out = env["_build_referral_status_payload"](1, now)
+    assert out["referrals"][0]["display_label"] == "abc-123"
+    assert out["referrals"][0]["invitee_label"] == "abc-123"
 
 
 def test_awarded_pending_maps_qualified():
