@@ -109,13 +109,12 @@ def test_safe_create_index_passes_partial_filter_expression():
         col,
         [("pm1_due_at_utc", 1), ("pm1_sent_at_utc", 1), ("pm1_disabled", 1)],
         name="users_pm1_due_pending_idx",
-        partialFilterExpression={"pm1_due_at_utc": {"$exists": True}, "pm1_sent_at_utc": {"$exists": False}},
+        partialFilterExpression={"pm1_due_at_utc": {"$exists": True}},
     )
     kwargs = col.calls[0][1]
     assert kwargs["name"] == "users_pm1_due_pending_idx"
     assert kwargs["partialFilterExpression"] == {
         "pm1_due_at_utc": {"$exists": True},
-        "pm1_sent_at_utc": {"$exists": False},
     }
 
 
