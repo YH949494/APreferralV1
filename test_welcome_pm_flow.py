@@ -72,6 +72,42 @@ def test_welcome_reminder_gates_and_sets_sent_at():
     assert any("welcome_unclaimed_reminder_sent_at" in c[0][1].get("$set", {}) for c in updates)
 
 
+def test_welcome_reminder_skips_for_start_source():
+    (fn,) = _load_defs("_send_welcome_unclaimed_reminder_if_needed")
+    sent = []
+
+    class Users:
+        def find_one(self, *args, **kwargs):
+            return {"pm_reachable": True}
+
+    class Ctx:
+        bot = object()
+
+    async def safe_send_message(*args, **kwargs):
+        sent.append(True)
+        return True, None
+
+    fn.__globals__.update({
+        "users_collection": Users(),
+        "welcome_eligibility": lambda *a, **k: (True, "ok", {}),
+        "_welcome_bonus_claimed": lambda *a, **k: False,
+        "safe_send_message": safe_send_message,
+        "InlineKeyboardMarkup": lambda x: x,
+        "InlineKeyboardButton": lambda *a, **k: (a, k),
+        "WebAppInfo": lambda url: url,
+        "WEBAPP_URL": "https://example.com",
+        "logger": type("L", (), {"info": lambda *a, **k: None, "warning": lambda *a, **k: None, "exception": lambda *a, **k: None})(),
+        "now_utc": lambda: datetime(2026, 1, 1, tzinfo=timezone.utc),
+        "datetime": datetime,
+        "timedelta": timedelta,
+        "Forbidden": Exception,
+        "BadRequest": Exception,
+    })
+    ok = asyncio.run(fn(Ctx(), 11, source="start"))
+    assert ok is False
+    assert sent == []
+
+
 def test_welcome_reminder_not_sent_when_claimed():
     (fn,) = _load_defs("_send_welcome_unclaimed_reminder_if_needed")
     sent = []
@@ -172,3 +208,74 @@ def test_forbidden_marks_pm_blocked_non_fatal():
     ok = asyncio.run(fn(Ctx(), 13))
     assert ok is False
     assert any(c[0][1].get("$set", {}).get("pm_blocked") is True for c in updates)
+
+
+def test_welcome_bonus_claimed_affiliate_ledger_issued():
+    (fn,) = _load_defs("_welcome_bonus_claimed")
+    fn.__globals__.update({
+        "welcome_eligibility_collection": type("C", (), {"find_one": lambda *a, **k: {}})(),
+        "db": {"welcome_tickets": type("C", (), {"find_one": lambda *a, **k: {}})(),
+               "affiliate_ledger": type("C", (), {"find_one": lambda *a, **k: {"status": "ISSUED", "pool_id": "WELCOME"}})(),
+               "voucher_claims": type("C", (), {"find_one": lambda *a, **k: {}})(),
+               "voucher_pools": type("C", (), {"find_one": lambda *a, **k: {}})(),
+               "new_joiner_claims": type("C", (), {"find_one": lambda *a, **k: {}})()},
+        "logger": type("L", (), {"info": lambda *a, **k: None, "exception": lambda *a, **k: None})(),
+    })
+    assert fn(42) is True
+
+
+def test_welcome_bonus_claimed_affiliate_ledger_voucher_code():
+    (fn,) = _load_defs("_welcome_bonus_claimed")
+    fn.__globals__.update({
+        "welcome_eligibility_collection": type("C", (), {"find_one": lambda *a, **k: {}})(),
+        "db": {"welcome_tickets": type("C", (), {"find_one": lambda *a, **k: {}})(),
+               "affiliate_ledger": type("C", (), {"find_one": lambda *a, **k: {"status": "PENDING", "voucher_code": "ABC123"}})(),
+               "voucher_claims": type("C", (), {"find_one": lambda *a, **k: {}})(),
+               "voucher_pools": type("C", (), {"find_one": lambda *a, **k: {}})(),
+               "new_joiner_claims": type("C", (), {"find_one": lambda *a, **k: {}})()},
+        "logger": type("L", (), {"info": lambda *a, **k: None, "exception": lambda *a, **k: None})(),
+    })
+    assert fn(42) is True
+
+
+def test_welcome_bonus_claimed_voucher_pools_welcome_issued_to_uid():
+    (fn,) = _load_defs("_welcome_bonus_claimed")
+    fn.__globals__.update({
+        "welcome_eligibility_collection": type("C", (), {"find_one": lambda *a, **k: {}})(),
+        "db": {"welcome_tickets": type("C", (), {"find_one": lambda *a, **k: {}})(),
+               "affiliate_ledger": type("C", (), {"find_one": lambda *a, **k: {}})(),
+               "voucher_claims": type("C", (), {"find_one": lambda *a, **k: {}})(),
+               "voucher_pools": type("C", (), {"find_one": lambda *a, **k: {"status": "issued"}})(),
+               "new_joiner_claims": type("C", (), {"find_one": lambda *a, **k: {}})()},
+        "logger": type("L", (), {"info": lambda *a, **k: None, "exception": lambda *a, **k: None})(),
+    })
+    assert fn(42) is True
+
+
+def test_welcome_bonus_claimed_new_joiner_claimed_at():
+    (fn,) = _load_defs("_welcome_bonus_claimed")
+    fn.__globals__.update({
+        "welcome_eligibility_collection": type("C", (), {"find_one": lambda *a, **k: {}})(),
+        "db": {"welcome_tickets": type("C", (), {"find_one": lambda *a, **k: {}})(),
+               "affiliate_ledger": type("C", (), {"find_one": lambda *a, **k: {}})(),
+               "voucher_claims": type("C", (), {"find_one": lambda *a, **k: {}})(),
+               "voucher_pools": type("C", (), {"find_one": lambda *a, **k: {}})(),
+               "new_joiner_claims": type("C", (), {"find_one": lambda *a, **k: {"claimed_at": datetime(2026, 1, 1, tzinfo=timezone.utc)}})()},
+        "logger": type("L", (), {"info": lambda *a, **k: None, "exception": lambda *a, **k: None})(),
+    })
+    assert fn(42) is True
+
+
+def test_welcome_bonus_claimed_collection_errors_non_fatal():
+    (fn,) = _load_defs("_welcome_bonus_claimed")
+
+    class Err:
+        def find_one(self, *args, **kwargs):
+            raise RuntimeError("boom")
+
+    fn.__globals__.update({
+        "welcome_eligibility_collection": Err(),
+        "db": {"welcome_tickets": Err(), "affiliate_ledger": Err(), "voucher_claims": Err(), "voucher_pools": Err(), "new_joiner_claims": Err()},
+        "logger": type("L", (), {"info": lambda *a, **k: None, "exception": lambda *a, **k: None})(),
+    })
+    assert fn(42) is False
