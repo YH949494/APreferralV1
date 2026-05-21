@@ -54,6 +54,7 @@ from vouchers import (
     _get_admin_secret,
     _admin_secret_ok,
     resolve_referral_counts_with_snapshot_fallback,
+    welcome_eligibility,
 )
 from referral_rules import calc_referral_progress, REFERRAL_XP_PER_SUCCESS, REFERRAL_BONUS_INTERVAL, REFERRAL_BONUS_XP, build_public_referral_status
 from scheduler import settle_pending_referrals, settle_referral_snapshots, settle_xp_snapshots, evaluate_affiliate_simulated_ledgers, compute_affiliate_daily_kpi_yesterday, run_invitee_subscription_audit, reconcile_drop_statuses, post_growth_leaderboard_weekly, process_welcome_voucher_lifecycle
@@ -1400,17 +1401,6 @@ async def handle_user_join(
         blocked = (users_collection.find_one({"user_id": uid}, {"blocked": 1}) or {}).get("blocked", False)
         wb_result = issue_welcome_bonus_if_eligible(db, user_id=uid, is_new_user=True, blocked=bool(blocked))
         logger.info("[WELCOME] bonus_issued uid=%s result=%s", uid, wb_result)
-        wb_status = (wb_result or {}).get("status")
-        if wb_status == "NOT_SUBSCRIBED":
-            await context.bot.send_message(
-                chat_id=uid,
-                text="Please subscribe to @advantplayofficial to claim this voucher.",
-            )
-        elif wb_status == "ISSUED":
-            await context.bot.send_message(
-                chat_id=uid,
-                text="You have received your affiliate welcome bonus!",
-            )
     except Exception:
         logger.exception("[WELCOME] bonus_issue_failed uid=%s", uid)
     logger.info(
@@ -4395,6 +4385,76 @@ def update_monthly_vip_status(run_id: str | None = None):
 # Telegram Bot Handlers
 # ----------------------------
 
+
+def _mark_private_interaction(uid: int, username: str | None = None) -> None:
+    now_ts = now_utc()
+    update_doc = {
+        "$set": {
+            "pm_reachable": True,
+            "last_private_interaction_at": now_ts,
+            "last_private_interaction_source": "private_chat",
+        },
+        "$setOnInsert": {
+            "status": "Normal",
+        },
+        "$unset": {
+            "pm_blocked": "",
+        },
+    }
+    if username:
+        update_doc["$set"]["username"] = username
+    existing = users_collection.find_one({"user_id": uid}, {"bot_started_at": 1, "first_private_interaction_at": 1}) or {}
+    if not existing.get("bot_started_at"):
+        update_doc["$set"]["bot_started_at"] = now_ts
+    if not existing.get("first_private_interaction_at"):
+        update_doc["$set"]["first_private_interaction_at"] = now_ts
+    _users_update_one({"user_id": uid}, update_doc, upsert=True, context="private_interaction")
+
+
+def _welcome_bonus_claimed(uid: int) -> bool:
+    eligibility = welcome_eligibility_collection.find_one({"$or": [{"uid": uid}, {"user_id": uid}]}, {"claimed_at": 1, "consumed_at": 1, "issued_at": 1}) or {}
+    if eligibility.get("claimed_at") or eligibility.get("consumed_at") or eligibility.get("issued_at"):
+        return True
+    ticket = db["welcome_tickets"].find_one({"$or": [{"uid": uid}, {"user_id": uid}]}, {"status": 1, "claimed_at": 1, "consumed_at": 1, "issued_at": 1}) or {}
+    if ticket.get("claimed_at") or ticket.get("consumed_at") or ticket.get("issued_at"):
+        return True
+    return str(ticket.get("status") or "").lower() in {"claimed", "consumed", "issued"}
+
+
+async def _send_welcome_unclaimed_reminder_if_needed(context: ContextTypes.DEFAULT_TYPE, uid: int) -> bool:
+    user = users_collection.find_one({"user_id": uid}, {"pm_reachable": 1, "welcome_unclaimed_reminder_sent_at": 1}) or {}
+    if not user.get("pm_reachable"):
+        return False
+    allowed, reason, _ticket = welcome_eligibility(uid, ref=now_utc())
+    if not allowed:
+        logger.info("[PM][WELCOME_UNCLAIMED][SKIP] uid=%s reason=%s", uid, reason)
+        return False
+    if _welcome_bonus_claimed(uid):
+        logger.info("[PM][WELCOME_UNCLAIMED][SKIP] uid=%s reason=already_claimed", uid)
+        return False
+    last_sent = user.get("welcome_unclaimed_reminder_sent_at")
+    if isinstance(last_sent, datetime) and (now_utc() - last_sent) < timedelta(hours=24):
+        logger.info("[PM][WELCOME_UNCLAIMED][SKIP] uid=%s reason=cooldown", uid)
+        return False
+
+    reminder_text = "You still have a welcome bonus waiting. Open the mini-app to claim it before it expires."
+    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🎁 Claim in Mini-App", web_app=WebAppInfo(url=WEBAPP_URL))]])
+    try:
+        ok, err = await safe_send_message(context.bot, chat_id=uid, text=reminder_text, reply_markup=keyboard, uid=uid, send_type="welcome_unclaimed", raise_on_non_transient=False, return_error=True)
+    except (Forbidden, BadRequest) as exc:
+        err = str(exc)
+        ok = False
+    if ok:
+        _users_update_one({"user_id": uid}, {"$set": {"welcome_unclaimed_reminder_sent_at": now_utc()}}, context="welcome_unclaimed_sent")
+        return True
+
+    err_text = str(err or "unknown")
+    if "forbidden" in err_text.lower() or "can't initiate conversation" in err_text.lower() or "bot was blocked" in err_text.lower():
+        _users_update_one({"user_id": uid}, {"$set": {"pm_blocked": True, "last_pm_forbidden_at": now_utc()}}, context="welcome_unclaimed_forbidden")
+    logger.warning("[PM][UNREACHABLE] uid=%s type=welcome_unclaimed reason=%s", uid, err_text)
+    return False
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_private_chat(update):
         logger.info(
@@ -4410,6 +4470,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.effective_message
     
     if user:
+        _mark_private_interaction(user.id, user.username)
         _users_update_one(
             {"user_id": user.id},
             {"$setOnInsert": {
@@ -4446,6 +4507,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 send_type="start",
                 raise_on_non_transient=False,
             )
+        await _send_welcome_unclaimed_reminder_if_needed(context, user.id)
             
 async def member_update_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     member = update.chat_member or update.my_chat_member
@@ -4527,6 +4589,16 @@ def _is_mywin_message(message) -> bool:
     if message.document:
         return True
     return False
+
+async def private_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_private_chat(update):
+        return
+    user = update.effective_user
+    if not user or user.is_bot:
+        return
+    _mark_private_interaction(user.id, user.username)
+    await _send_welcome_unclaimed_reminder_if_needed(context, user.id)
+
 
 async def mywin_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.effective_message
@@ -4700,6 +4772,7 @@ def run_worker():
     app_bot.add_handler(ChatMemberHandler(member_update_handler, ChatMemberHandler.MY_CHAT_MEMBER))
     app_bot.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, new_chat_members_handler))   
     app_bot.add_handler(MessageHandler(filters.Chat(MYWIN_CHAT_ID), mywin_message_handler))    
+    app_bot.add_handler(MessageHandler(filters.ChatType.PRIVATE & ~filters.COMMAND, private_message_handler))
     app_bot.add_handler(CallbackQueryHandler(button_handler))
 
     # 4) Scheduler (KL time for human-facing schedules)
