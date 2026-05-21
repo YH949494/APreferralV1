@@ -167,6 +167,8 @@ BYPASS_ADMIN = os.getenv("BYPASS_ADMIN", "0").lower() in ("1", "true", "yes", "o
 HARDCODED_ADMIN_USERNAMES = {"gracy_ap", "teohyaohui"}  # allow manual overrides if cache is empty
 WELCOME_WINDOW_HOURS = int(getattr(_cfg, "WELCOME_WINDOW_HOURS", os.getenv("WELCOME_WINDOW_HOURS", "48")))
 WELCOME_WINDOW_DAYS = 7
+WELCOME_UNCLAIMED_WINDOW_DAYS = int(getattr(_cfg, "WELCOME_UNCLAIMED_WINDOW_DAYS", os.getenv("WELCOME_UNCLAIMED_WINDOW_DAYS", "7")))
+WELCOME_CLAIMED_VISIBLE_DAYS = int(getattr(_cfg, "WELCOME_CLAIMED_VISIBLE_DAYS", os.getenv("WELCOME_CLAIMED_VISIBLE_DAYS", "3")))
 PROFILE_PHOTO_CACHE_TTL_SECONDS = 60
 VERIFY_QUEUE_MAX_ATTEMPTS = int(os.getenv("VERIFY_QUEUE_MAX_ATTEMPTS", "3"))
 VERIFY_QUEUE_BACKOFF_BASE_SECONDS = int(os.getenv("VERIFY_QUEUE_BACKOFF_BASE_SECONDS", "30"))
@@ -710,11 +712,11 @@ def _welcome_window_for_user(uid: int | None, *, ref: datetime | None = None, us
     if not joined_main_kl:
         return None
     ref_kl = (ref or now_kl()).astimezone(KL_TZ)
-    if joined_main_kl < (ref_kl - timedelta(days=WELCOME_WINDOW_DAYS)):
+    if joined_main_kl < (ref_kl - timedelta(days=WELCOME_UNCLAIMED_WINDOW_DAYS)):
         return None
     return {
         "joined_main_at": joined_main_kl,
-        "eligible_until": joined_main_kl + timedelta(days=WELCOME_WINDOW_DAYS),
+        "eligible_until": joined_main_kl + timedelta(days=WELCOME_UNCLAIMED_WINDOW_DAYS),
     }
 
 def _get_client_ip(req=None) -> str:
@@ -1495,11 +1497,43 @@ def _set_cooldown(
         upsert=True,
     )
 
-def _build_idempotent_claim_response(existing_claim: dict | None):
+
+
+def _welcome_claim_visible_until(claimed_at):
+    claimed_ts = _as_aware_utc(claimed_at)
+    if not claimed_ts:
+        return None
+    return claimed_ts + timedelta(days=WELCOME_CLAIMED_VISIBLE_DAYS)
+
+
+def _is_welcome_claim_still_visible(claimed_at, *, ref=None):
+    visible_until = _welcome_claim_visible_until(claimed_at)
+    if not visible_until:
+        return False
+    ref_ts = _as_aware_utc(ref) if ref is not None else now_utc()
+    if not ref_ts:
+        ref_ts = now_utc()
+    return ref_ts <= visible_until
+
+
+def _resolve_welcome_claimed_at(*candidates):
+    for candidate in candidates:
+        claimed_ts = _as_aware_utc(candidate)
+        if claimed_ts:
+            return claimed_ts
+    return None
+
+def _build_idempotent_claim_response(existing_claim: dict | None, *, enforce_welcome_visibility: bool = False, ref: datetime | None = None):
     existing_code = (existing_claim or {}).get("voucher_code")
     if not existing_code:
         return None
-    claimed_at = (existing_claim or {}).get("claimed_at")
+    claimed_at = _resolve_welcome_claimed_at((existing_claim or {}).get("claimed_at"), (existing_claim or {}).get("issued_at"), (existing_claim or {}).get("consumed_at"))
+    if enforce_welcome_visibility and not _is_welcome_claim_still_visible(claimed_at, ref=ref):
+        return {
+            "status": "already_claimed_expired",
+            "ok": False,
+            "message": "Your welcome voucher is no longer available in the mini-app.",
+        }
     return {
         "status": "already_claimed",
         "voucher_code": existing_code,
@@ -3569,6 +3603,10 @@ def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None
                     {"drop_id": _coerce_id(d.get("_id")), "user_id": claim_user_id, "status": "claimed"}
                 )
             if already:
+                claimed_at_ts = _resolve_welcome_claimed_at(already.get("claimed_at"), already.get("issued_at"), already.get("consumed_at"))
+                if _is_new_joiner_audience(audience_type) and not _is_welcome_claim_still_visible(claimed_at_ts, ref=ref):
+                    current_app.logger.info("[visible][WELCOME] hide_claimed_expired uid=%s drop=%s claimed_at=%s", claim_user_id, drop_id, claimed_at_ts)
+                    continue
                 base["userClaimed"] = True
                 base["code"] = already.get("voucher_code")
                 claimed_at = _isoformat_kl(already.get("claimed_at"))
@@ -4963,7 +5001,7 @@ def api_claim():
         return jsonify({"status": "error", "code": "not_eligible", "reason": "missing_uid"}), 403
     pooled_claim_key = f"uid:{claim_user_id}"
     existing_claim = _find_existing_claim_for_drop(drop_id=claim_drop_id, telegram_uid=uid, internal_user_id=user_id)
-    idempotent_payload = _build_idempotent_claim_response(existing_claim)
+    idempotent_payload = _build_idempotent_claim_response(existing_claim, enforce_welcome_visibility=_is_new_joiner_audience(audience_type), ref=now_utc())
     if idempotent_payload:
         guide_payload = _welcome_claim_guide_payload(audience_type)
         if guide_payload:
@@ -5295,7 +5333,7 @@ def api_claim():
     )
     if claim_doc_id is None:
         existing_claim = _find_existing_claim_for_drop(drop_id=claim_drop_id, telegram_uid=uid, internal_user_id=user_id)
-        idempotent_payload = _build_idempotent_claim_response(existing_claim)
+        idempotent_payload = _build_idempotent_claim_response(existing_claim, enforce_welcome_visibility=_is_new_joiner_audience(audience_type), ref=now_utc())
         if idempotent_payload:
             guide_payload = _welcome_claim_guide_payload(audience_type)
             if guide_payload:
@@ -5334,7 +5372,7 @@ def api_claim():
             reason=str(exc),
         )
         existing_claim = _find_existing_claim_for_drop(drop_id=claim_drop_id, telegram_uid=uid, internal_user_id=user_id)
-        idempotent_payload = _build_idempotent_claim_response(existing_claim)
+        idempotent_payload = _build_idempotent_claim_response(existing_claim, enforce_welcome_visibility=_is_new_joiner_audience(audience_type), ref=now_utc())
         if idempotent_payload:
             guide_payload = _welcome_claim_guide_payload(audience_type)
             if guide_payload:
