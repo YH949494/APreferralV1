@@ -4412,16 +4412,101 @@ def _mark_private_interaction(uid: int, username: str | None = None) -> None:
 
 
 def _welcome_bonus_claimed(uid: int) -> bool:
-    eligibility = welcome_eligibility_collection.find_one({"$or": [{"uid": uid}, {"user_id": uid}]}, {"claimed_at": 1, "consumed_at": 1, "issued_at": 1}) or {}
-    if eligibility.get("claimed_at") or eligibility.get("consumed_at") or eligibility.get("issued_at"):
-        return True
-    ticket = db["welcome_tickets"].find_one({"$or": [{"uid": uid}, {"user_id": uid}]}, {"status": 1, "claimed_at": 1, "consumed_at": 1, "issued_at": 1}) or {}
-    if ticket.get("claimed_at") or ticket.get("consumed_at") or ticket.get("issued_at"):
-        return True
-    return str(ticket.get("status") or "").lower() in {"claimed", "consumed", "issued"}
+    final_statuses_upper = {"ISSUED", "CLAIMED", "CONSUMED", "REDEEMED", "USED"}
+    final_statuses_lower = {s.lower() for s in final_statuses_upper}
+
+    def _has_text(value) -> bool:
+        return isinstance(value, str) and bool(value.strip())
+
+    try:
+        eligibility = welcome_eligibility_collection.find_one({"$or": [{"uid": uid}, {"user_id": uid}]}, {"claimed_at": 1, "consumed_at": 1, "issued_at": 1}) or {}
+        if eligibility.get("claimed_at") or eligibility.get("consumed_at") or eligibility.get("issued_at"):
+            logger.info("[WELCOME][CLAIMED_DETECTED] uid=%s source=welcome_eligibility_collection status=claimed_like", uid)
+            return True
+    except Exception:
+        logger.exception("[WELCOME][CLAIMED_CHECK_ERROR] uid=%s source=welcome_eligibility_collection", uid)
+
+    try:
+        ticket = db["welcome_tickets"].find_one({"$or": [{"uid": uid}, {"user_id": uid}]}, {"status": 1, "claimed_at": 1, "consumed_at": 1, "issued_at": 1}) or {}
+        ticket_status = str(ticket.get("status") or "").lower()
+        if ticket.get("claimed_at") or ticket.get("consumed_at") or ticket.get("issued_at") or ticket_status in {"claimed", "consumed", "issued"}:
+            logger.info("[WELCOME][CLAIMED_DETECTED] uid=%s source=welcome_tickets status=%s", uid, ticket_status or "claimed_like")
+            return True
+    except Exception:
+        logger.exception("[WELCOME][CLAIMED_CHECK_ERROR] uid=%s source=welcome_tickets", uid)
+
+    try:
+        affiliate_doc = db["affiliate_ledger"].find_one(
+            {
+                "user_id": uid,
+                "$or": [
+                    {"ledger_type": "WELCOME"},
+                    {"tier": "WELCOME"},
+                    {"pool_id": "WELCOME"},
+                ],
+            },
+            {"status": 1, "voucher_code": 1},
+        ) or {}
+        status = str(affiliate_doc.get("status") or "").upper()
+        voucher_code = affiliate_doc.get("voucher_code")
+        if status in final_statuses_upper or _has_text(voucher_code):
+            logger.info("[WELCOME][CLAIMED_DETECTED] uid=%s source=affiliate_ledger status=%s", uid, status or "voucher_code")
+            return True
+    except Exception:
+        logger.exception("[WELCOME][CLAIMED_CHECK_ERROR] uid=%s source=affiliate_ledger", uid)
+
+    try:
+        voucher_claim_doc = db["voucher_claims"].find_one(
+            {"$or": [{"user_id": uid}, {"uid": uid}]},
+            {"claimed_at": 1, "pool_id": 1, "drop_id": 1, "dropId": 1, "category": 1, "audience": 1, "type": 1, "status": 1},
+        ) or {}
+        is_welcome = str(voucher_claim_doc.get("pool_id") or "").upper() == "WELCOME"
+        if not is_welcome:
+            for k in ("drop_id", "dropId", "category", "audience", "type"):
+                val = str(voucher_claim_doc.get(k) or "").lower()
+                if "welcome" in val or "new_joiner" in val:
+                    is_welcome = True
+                    break
+        claim_status = str(voucher_claim_doc.get("status") or "").lower()
+        if is_welcome and (voucher_claim_doc.get("claimed_at") or claim_status in final_statuses_lower):
+            logger.info("[WELCOME][CLAIMED_DETECTED] uid=%s source=voucher_claims status=%s", uid, claim_status or "claimed_at")
+            return True
+    except Exception:
+        logger.exception("[WELCOME][CLAIMED_CHECK_ERROR] uid=%s source=voucher_claims", uid)
+
+    try:
+        pool_doc = db["voucher_pools"].find_one(
+            {
+                "pool_id": "WELCOME",
+                "$or": [{"issued_to": uid}, {"issued_to_user_id": uid}],
+            },
+            {"status": 1},
+        ) or {}
+        pool_status = str(pool_doc.get("status") or "").lower()
+        if pool_doc and pool_status in final_statuses_lower:
+            logger.info("[WELCOME][CLAIMED_DETECTED] uid=%s source=voucher_pools status=%s", uid, pool_status)
+            return True
+    except Exception:
+        logger.exception("[WELCOME][CLAIMED_CHECK_ERROR] uid=%s source=voucher_pools", uid)
+
+    try:
+        joiner_doc = db["new_joiner_claims"].find_one(
+            {"$or": [{"uid": uid}, {"user_id": uid}]},
+            {"claimed_at": 1, "status": 1},
+        ) or {}
+        joiner_status = str(joiner_doc.get("status") or "").lower()
+        if joiner_doc.get("claimed_at") or joiner_status in final_statuses_lower:
+            logger.info("[WELCOME][CLAIMED_DETECTED] uid=%s source=new_joiner_claims status=%s", uid, joiner_status or "claimed_at")
+            return True
+    except Exception:
+        logger.exception("[WELCOME][CLAIMED_CHECK_ERROR] uid=%s source=new_joiner_claims", uid)
+    return False
 
 
-async def _send_welcome_unclaimed_reminder_if_needed(context: ContextTypes.DEFAULT_TYPE, uid: int) -> bool:
+async def _send_welcome_unclaimed_reminder_if_needed(context: ContextTypes.DEFAULT_TYPE, uid: int, source: str = "private_message") -> bool:
+    if source == "start":
+        logger.info("[PM][WELCOME_UNCLAIMED][SKIP] uid=%s reason=start_reply_already_contains_miniapp", uid)
+        return False
     user = users_collection.find_one({"user_id": uid}, {"pm_reachable": 1, "welcome_unclaimed_reminder_sent_at": 1}) or {}
     if not user.get("pm_reachable"):
         return False
@@ -4507,7 +4592,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 send_type="start",
                 raise_on_non_transient=False,
             )
-        await _send_welcome_unclaimed_reminder_if_needed(context, user.id)
+        await _send_welcome_unclaimed_reminder_if_needed(context, user.id, source="start")
             
 async def member_update_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     member = update.chat_member or update.my_chat_member
