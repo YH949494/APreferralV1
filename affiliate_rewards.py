@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 import pytz
 import requests
 from pymongo import ASCENDING, ReturnDocument
-from pymongo.errors import DuplicateKeyError
+from pymongo.errors import DuplicateKeyError, OperationFailure
 from telegram_utils import send_telegram_http_message
 from config import (
     AFFILIATE_GROUP_INVITE_TEXT,
@@ -73,6 +73,24 @@ def ensure_affiliate_indexes(db):
         name="uniq_affiliate_simulated_natural",
         partialFilterExpression={"simulate": True, "ledger_type": "AFFILIATE_SIMULATION"},
     )
+    try:
+        db.affiliate_ledger.create_index(
+            [("user_id", ASCENDING), ("year_month", ASCENDING), ("tier", ASCENDING)],
+            unique=True,
+            name="uniq_affiliate_monthly_user_month_tier",
+            partialFilterExpression={"ledger_type": "AFFILIATE_MONTHLY"},
+        )
+    except DuplicateKeyError:
+        logger.warning(
+            "[AFFILIATE][INDEX_WARN] name=uniq_affiliate_monthly_user_month_tier reason=duplicate_existing_data"
+        )
+    except OperationFailure as exc:
+        if int(getattr(exc, "code", 0) or 0) == 11000:
+            logger.warning(
+                "[AFFILIATE][INDEX_WARN] name=uniq_affiliate_monthly_user_month_tier reason=duplicate_existing_data"
+            )
+        else:
+            raise
 
     db.user_last_seen.create_index([("user_id", ASCENDING)], unique=True, name="uniq_user_last_seen")
     db.affiliate_group_invites.create_index(
@@ -256,6 +274,39 @@ def _issue_affiliate_ledger_from_pool(db, ledger, now_utc: datetime):
         logger.warning("[AFFILIATE][INVALID_TIER] uid=%s ledger_id=%s tier=%s pool_id=%s", user_id, ledger_id, tier, pool_id)
         _mark_missing_pool_config(db, ledger_id=ledger_id, now_utc=now_utc)
         return db.affiliate_ledger.find_one({"_id": ledger_id})
+    if (ledger.get("ledger_type") or "").strip().upper() == "AFFILIATE_MONTHLY":
+        duplicate = db.affiliate_ledger.find_one(
+            {
+                "_id": {"$ne": ledger_id},
+                "ledger_type": "AFFILIATE_MONTHLY",
+                "user_id": int(user_id),
+                "year_month": ledger.get("year_month"),
+                "tier": tier,
+                "status": {"$in": ["ISSUED", "SETTLING", "APPROVED", "PENDING_EOM"]},
+            },
+            {"_id": 1},
+        )
+        if duplicate:
+            db.affiliate_ledger.update_one(
+                {"_id": ledger_id, **_no_voucher_filter()},
+                {
+                    "$set": {
+                        "status": "REJECTED",
+                        "review_reason": "duplicate_monthly_tier",
+                        "duplicate_of": duplicate.get("_id"),
+                        "updated_at": now_utc,
+                    }
+                },
+            )
+            logger.warning(
+                "[AFFILIATE][DUPLICATE_MONTHLY_TIER] uid=%s year_month=%s tier=%s current_id=%s duplicate_id=%s",
+                int(user_id),
+                ledger.get("year_month"),
+                tier,
+                ledger_id,
+                duplicate.get("_id"),
+            )
+            return db.affiliate_ledger.find_one({"_id": ledger_id})
 
     logger.info(
         "[AFFILIATE][ISSUE_ATTEMPT] ledger_id=%s user_id=%s tier=%s pool_id=%s status=%s",
