@@ -3,9 +3,10 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
-from pymongo.errors import DuplicateKeyError
+from pymongo.errors import DuplicateKeyError, OperationFailure
 
 from affiliate_rewards import (
+    ensure_affiliate_indexes,
     approve_affiliate_ledger,
     evaluate_monthly_affiliate_reward,
     issue_current_week_affiliate_rewards,
@@ -174,11 +175,40 @@ class FakeDb:
         self.affiliate_ledger = FakeCollection(unique_fields=[("dedup_key",)])
         self.qualified_events = FakeCollection(unique_fields=[("invitee_id",)])
         self.user_last_seen = FakeCollection(unique_fields=[("user_id",)])
+        self.affiliate_group_invites = FakeCollection(unique_fields=[("user_id", "week_key")])
         self.referral_audit = FakeCollection()
         self.referral_flow_events = FakeCollection()
 
 
 class AffiliateRewardTests(unittest.TestCase):
+    def test_ensure_affiliate_indexes_duplicate_key_operation_failure_is_non_fatal(self):
+        db = FakeDb()
+        original = db.affiliate_ledger.create_index
+        call_count = {"n": 0}
+
+        def _create_index(*args, **kwargs):
+            call_count["n"] += 1
+            if kwargs.get("name") == "uniq_affiliate_monthly_user_month_tier":
+                raise OperationFailure("duplicate key", code=11000)
+            return original(*args, **kwargs)
+
+        db.affiliate_ledger.create_index = _create_index
+        ensure_affiliate_indexes(db)
+        self.assertGreater(call_count["n"], 0)
+
+    def test_ensure_affiliate_indexes_non_duplicate_operation_failure_raises(self):
+        db = FakeDb()
+        original = db.affiliate_ledger.create_index
+
+        def _create_index(*args, **kwargs):
+            if kwargs.get("name") == "uniq_affiliate_monthly_user_month_tier":
+                raise OperationFailure("other failure", code=12345)
+            return original(*args, **kwargs)
+
+        db.affiliate_ledger.create_index = _create_index
+        with self.assertRaises(OperationFailure):
+            ensure_affiliate_indexes(db)
+
     def test_welcome_once_with_dedup(self):
         db = FakeDb()
         db.voucher_pools.insert_one({"pool_id": "WELCOME", "code": "W1", "status": "available"})
@@ -732,6 +762,95 @@ class AffiliateRewardTests(unittest.TestCase):
         after = db.affiliate_ledger.find_one({"dedup_key": "AFF:175:202601:T1"})
         self.assertEqual(after["status"], "ISSUED")
         self.assertGreaterEqual(summary["issued_count"], 1)
+
+    def test_duplicate_monthly_tier_is_rejected_before_pool_claim(self):
+        db = FakeDb()
+        now = datetime(2026, 1, 15, tzinfo=timezone.utc)
+        db.voucher_pools.insert_one({"pool_id": "T2", "code": "T2-ONLY", "status": "available"})
+        db.affiliate_ledger.insert_one(
+            {
+                "dedup_key": "AFF:501:202601:T2:1",
+                "ledger_type": "AFFILIATE_MONTHLY",
+                "user_id": 501,
+                "year_month": "202601",
+                "tier": "T2",
+                "pool_id": "T2",
+                "status": "ISSUED",
+                "voucher_code": "ALREADY-T2",
+                "risk_flags": [],
+                "created_at": now,
+                "updated_at": now,
+            }
+        )
+        dupe = db.affiliate_ledger.insert_one(
+            {
+                "dedup_key": "AFF:501:202601:T2:2",
+                "ledger_type": "AFFILIATE_MONTHLY",
+                "user_id": 501,
+                "year_month": "202601",
+                "tier": "T2",
+                "pool_id": "T2",
+                "status": "APPROVED",
+                "voucher_code": None,
+                "risk_flags": [],
+                "created_at": now,
+                "updated_at": now,
+            }
+        )
+
+        approve_affiliate_ledger(db, ledger_id=dupe["_id"], now_utc=now)
+
+        rejected = db.affiliate_ledger.find_one({"_id": dupe["_id"]})
+        self.assertEqual(rejected["status"], "REJECTED")
+        self.assertEqual(rejected["review_reason"], "duplicate_monthly_tier")
+        self.assertIsNotNone(rejected.get("duplicate_of"))
+        self.assertEqual(db.voucher_pools.count_documents({"pool_id": "T2", "status": "available"}), 1)
+        self.assertEqual(db.voucher_pools.count_documents({"pool_id": "T2", "status": "issued"}), 0)
+
+    def test_non_duplicate_or_allowed_variants_still_issue_normally(self):
+        db = FakeDb()
+        now = datetime(2026, 1, 15, tzinfo=timezone.utc)
+        db.voucher_pools.insert_one({"pool_id": "T2", "code": "ISSUE-T2", "status": "available"})
+        db.voucher_pools.insert_one({"pool_id": "T3", "code": "ISSUE-T3", "status": "available"})
+        db.voucher_pools.insert_one({"pool_id": "T2", "code": "ISSUE-T2-NEXT", "status": "available"})
+        same_month_diff_tier = db.affiliate_ledger.insert_one(
+            {
+                "dedup_key": "AFF:601:202601:T3",
+                "ledger_type": "AFFILIATE_MONTHLY",
+                "user_id": 601,
+                "year_month": "202601",
+                "tier": "T3",
+                "pool_id": "T3",
+                "status": "APPROVED",
+                "voucher_code": None,
+                "risk_flags": [],
+                "created_at": now,
+                "updated_at": now,
+            }
+        )
+        diff_month_same_tier = db.affiliate_ledger.insert_one(
+            {
+                "dedup_key": "AFF:601:202602:T2",
+                "ledger_type": "AFFILIATE_MONTHLY",
+                "user_id": 601,
+                "year_month": "202602",
+                "tier": "T2",
+                "pool_id": "T2",
+                "status": "APPROVED",
+                "voucher_code": None,
+                "risk_flags": [],
+                "created_at": now,
+                "updated_at": now,
+            }
+        )
+
+        approve_affiliate_ledger(db, ledger_id=same_month_diff_tier["_id"], now_utc=now)
+        approve_affiliate_ledger(db, ledger_id=diff_month_same_tier["_id"], now_utc=now)
+
+        issued_t3 = db.affiliate_ledger.find_one({"_id": same_month_diff_tier["_id"]})
+        issued_t2_other_month = db.affiliate_ledger.find_one({"_id": diff_month_same_tier["_id"]})
+        self.assertEqual(issued_t3["status"], "ISSUED")
+        self.assertEqual(issued_t2_other_month["status"], "ISSUED")
 
     def test_approve_ledger_empty_pool_keeps_pending_manual(self):
         db = FakeDb()
