@@ -1,0 +1,54 @@
+name: Bot Segment Sync
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Run mode"
+        required: true
+        default: "dry-run"
+        type: choice
+        options:
+          - dry-run
+          - commit
+
+jobs:
+  bot-segment-sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    env:
+      MONGO_URL: ${{ secrets.MONGO_URL }}
+      MONGO_DB: referral_bot
+      GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+      BOT_SEGMENT_SHEET_ID: 1oAKJkxZ_o-uUi6I7jXJdTKRau35nR1wv2B8ShLUkWCg
+      BOT_SEGMENT_SHEET_GID: "1307413730"
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Validate required secrets
+        run: |
+          test -n "$MONGO_URL" || (echo "Missing MONGO_URL secret" && exit 1)
+          test -n "$GOOGLE_SERVICE_ACCOUNT_JSON" || (echo "Missing GOOGLE_SERVICE_ACCOUNT_JSON secret" && exit 1)
+
+      - name: Dry run bot segment sync
+        if: ${{ inputs.mode == 'dry-run' }}
+        run: |
+          python bot_segment_sync.py --dry-run
+
+      - name: Commit bot segment sync
+        if: ${{ inputs.mode == 'commit' }}
+        run: |
+          python bot_segment_sync.py --commit
