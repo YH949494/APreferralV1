@@ -1251,6 +1251,8 @@
       <div class="identity-progress">
         <div class="identity-progress-bar"><div id="identity-progress-fill" class="identity-progress-fill"></div></div>
         <div id="identity-hint" class="identity-hint"></div>
+        <button id="share-rank-btn" type="button" class="btn btn-primary" style="margin-top:10px;" onclick="shareMyRankCaption()">📣 Share My Rank</button>
+        <p id="share-rank-status" class="leaderboard-empty" style="display:none;margin-top:8px;" role="status" aria-live="polite"></p>
       </div>
     </div>
   </div>
@@ -3093,6 +3095,72 @@
         }
       } catch {
         display.innerText = "❌ Error connecting to server.";
+      }
+    }
+
+    async function copyTextToClipboard(text) {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(text);
+        return;
+      }
+
+      const textArea = document.createElement("textarea");
+      textArea.value = text;
+      textArea.setAttribute("readonly", "");
+      textArea.style.position = "fixed";
+      textArea.style.left = "-9999px";
+      textArea.style.top = "0";
+      document.body.appendChild(textArea);
+      textArea.focus();
+      textArea.select();
+      try {
+        if (!document.execCommand("copy")) {
+          throw new Error("copy_command_failed");
+        }
+      } finally {
+        document.body.removeChild(textArea);
+      }
+    }
+
+    function setShareRankStatus(message, isError = false) {
+      const status = document.getElementById("share-rank-status");
+      if (!status) return;
+      status.textContent = message;
+      status.style.display = "block";
+      status.style.color = isError ? "#900" : "#176b2c";
+    }
+
+    async function shareMyRankCaption() {
+      const btn = document.getElementById("share-rank-btn");
+      const originalText = btn ? btn.textContent : "";
+      try {
+        if (btn) {
+          btn.disabled = true;
+          btn.textContent = "Preparing…";
+        }
+        setShareRankStatus("Preparing your rank card…");
+        const res = await v2Fetch(`${API_BASE}/api/share-rank-caption`, { method: "POST", body: "{}" });
+        let data = {};
+        try {
+          data = await res.json();
+        } catch (_) {
+          data = {};
+        }
+
+        if (!res.ok || data?.ok !== true || typeof data?.caption !== "string" || !data.caption.trim()) {
+          throw new Error(data?.error || `share_rank_${res.status}`);
+        }
+
+        await copyTextToClipboard(data.caption);
+        setShareRankStatus("✅ Rank card copied. Paste it in the community and challenge others.");
+      } catch (err) {
+        console.warn("[SHARE_RANK][FAIL]", err);
+        setShareRankStatus("Could not copy your rank card right now. Please try again.", true);
+      } finally {
+        if (btn) {
+          btn.disabled = false;
+          btn.textContent = originalText || "📣 Share My Rank";
+        }
       }
     }
 
