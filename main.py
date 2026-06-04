@@ -563,14 +563,15 @@ def choose_share_rank_achievement(rank, weekly_xp: int, streak: int, total_refer
 
 
 def build_share_rank_caption(rank, weekly_xp: int, title: str, highlight: str) -> str:
-    rank_label = f"#{int(rank)}" if rank is not None else "Unranked"
+    rank_line = f"🏆 Currently Ranked #{int(rank)}" if rank is not None else "🏆 Not Ranked Yet"
     weekly_xp_value = _safe_non_negative_int(weekly_xp)
     return (
-        f"🏆 Currently Ranked {rank_label}\n\n"
+        "My current rank 👇\n\n"
+        f"{rank_line}\n\n"
         f"⚡ Weekly XP: {weekly_xp_value}\n"
         f"🎖️ {title}\n"
         f"✨ {highlight}\n\n"
-        "Still climbing."
+        "What's yours? 👀"
     )
 
 

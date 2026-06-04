@@ -77,11 +77,12 @@ def test_caption_generation_ranked_format():
     env = _load_share_rank_symbols()
     caption = env["build_share_rank_caption"](2, 750, "Podium Holder", "Top 3 This Week")
     assert caption == (
+        "My current rank 👇\n\n"
         "🏆 Currently Ranked #2\n\n"
         "⚡ Weekly XP: 750\n"
         "🎖️ Podium Holder\n"
         "✨ Top 3 This Week\n\n"
-        "Still climbing."
+        "What's yours? 👀"
     )
 
 
@@ -119,7 +120,14 @@ def test_unranked_user_fallback_caption_and_payload():
     assert body["ok"] is True
     assert body["rank"] is None
     assert body["weekly_xp"] == 0
-    assert "Currently Ranked Unranked" in body["caption"]
+    assert body["caption"] == (
+        "My current rank 👇\n\n"
+        "🏆 Not Ranked Yet\n\n"
+        "⚡ Weekly XP: 0\n"
+        "🎖️ Rising Star\n"
+        "✨ Climbing the Leaderboard\n\n"
+        "What's yours? 👀"
+    )
     assert body["title"] == "Rising Star"
 
 
