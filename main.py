@@ -504,6 +504,103 @@ def compute_weekly_rank(user_id: int, weekly_xp: int, weekly_referrals: int, upd
     )
     return int(higher_count) + 1
 
+
+def _extract_verified_telegram_user_id() -> tuple[int | None, tuple[dict, int] | None]:
+    init_data = extract_raw_init_data_from_query(request)
+    if not init_data:
+        return None, ({"ok": False, "error": "Missing init_data"}, 400)
+
+    ok, parsed, _ = verify_telegram_init_data(init_data)
+    if not ok:
+        return None, ({"ok": False, "error": "Unauthorized"}, 403)
+
+    user_payload = (parsed or {}).get("user", {})
+    if isinstance(user_payload, str):
+        try:
+            user_payload = json.loads(user_payload)
+        except Exception:
+            user_payload = {}
+
+    try:
+        user_id = int((user_payload or {}).get("id"))
+    except (TypeError, ValueError):
+        user_id = None
+
+    if not user_id:
+        return None, ({"ok": False, "error": "Unauthorized"}, 403)
+    return user_id, None
+
+
+def choose_share_rank_achievement(rank, weekly_xp: int, streak: int, total_referrals: int) -> tuple[str, str]:
+    rank_value = _safe_non_negative_int(rank) if rank is not None else 0
+    weekly_xp_value = _safe_non_negative_int(weekly_xp)
+    streak_value = _safe_non_negative_int(streak)
+    total_referrals_value = _safe_non_negative_int(total_referrals)
+
+    if rank_value == 1:
+        return "Leader of the Pack", "Currently Ranked #1"
+    if 0 < rank_value <= 3:
+        return "Podium Holder", "Top 3 This Week"
+    if 0 < rank_value <= 10:
+        return "Elite Player", "Top 10 This Week"
+    if streak_value >= 56:
+        return "Iron Will", "56-Day Check-in Streak"
+    if streak_value >= 28:
+        return "Unstoppable", "28-Day Check-in Streak"
+    if streak_value >= 14:
+        return "Consistent Challenger", "14-Day Check-in Streak"
+    if streak_value >= 7:
+        return "Hot Streak", "7-Day Check-in Streak"
+    if total_referrals_value >= 10:
+        return "Community Builder", "10 Successful Referrals"
+    if total_referrals_value >= 3:
+        return "Referral Machine", "3 Successful Referrals"
+    if weekly_xp_value >= 1000:
+        return "Momentum Builder", "Earned 1000+ XP This Week"
+    if weekly_xp_value >= 500:
+        return "XP Hunter", "Earned 500+ XP This Week"
+    return "Rising Star", "Climbing the Leaderboard"
+
+
+def build_share_rank_caption(rank, weekly_xp: int, title: str, highlight: str) -> str:
+    rank_label = f"#{int(rank)}" if rank is not None else "Unranked"
+    weekly_xp_value = _safe_non_negative_int(weekly_xp)
+    return (
+        f"🏆 Currently Ranked {rank_label}\n\n"
+        f"⚡ Weekly XP: {weekly_xp_value}\n"
+        f"🎖️ {title}\n"
+        f"✨ {highlight}\n\n"
+        "Still climbing."
+    )
+
+
+def _load_share_rank_user_snapshot(user_id: int) -> dict | None:
+    return users_collection.find_one(
+        {"user_id": user_id},
+        {
+            "user_id": 1,
+            "weekly_xp": 1,
+            "weekly_referrals": 1,
+            "total_referrals": 1,
+            "streak": 1,
+            "streak_days": 1,
+            "checkin_streak": 1,
+            "updated_at": 1,
+        },
+    )
+
+
+def _compute_share_rank(user_id: int, user_doc: dict) -> int | None:
+    weekly_xp = _safe_non_negative_int((user_doc or {}).get("weekly_xp", 0))
+    weekly_referrals = _safe_non_negative_int((user_doc or {}).get("weekly_referrals", 0))
+    try:
+        return compute_weekly_rank(user_id, weekly_xp, weekly_referrals, (user_doc or {}).get("updated_at"))
+    except PyMongoError:
+        raise
+    except Exception:
+        logger.exception("[SHARE_RANK][FAIL] stage=rank_calculation uid=%s", user_id)
+        return None
+
 def _current_month_window_utc(reference: datetime | None = None):
     """Return (start_utc, end_utc, start_local, end_local) for the current month."""
 
@@ -2350,6 +2447,7 @@ def api_me_identity():
             "streak": 1,
             "streak_days": 1,
             "checkin_streak": 1,
+            "streak_freeze_tokens": 1,
             "vip_tier": 1,
             "status": 1,
             "updated_at": 1,
@@ -3208,6 +3306,51 @@ def get_leaderboard():
             }
         ), 200
 
+
+
+@app.route("/api/share-rank-caption", methods=["POST"])
+def api_share_rank_caption():
+    user_id = None
+    try:
+        logger.info("[SHARE_RANK][REQUEST] remote_addr=%s", request.remote_addr)
+        user_id, auth_error = _extract_verified_telegram_user_id()
+        if auth_error:
+            body, status = auth_error
+            logger.warning("[SHARE_RANK][FAIL] stage=auth status=%s error=%s", status, body.get("error"))
+            return jsonify(body), status
+
+        user_doc = _load_share_rank_user_snapshot(user_id)
+        if not user_doc:
+            logger.warning("[SHARE_RANK][FAIL] stage=user_lookup uid=%s status=404", user_id)
+            return jsonify({"ok": False, "error": "User not found"}), 404
+
+        weekly_xp = _safe_non_negative_int(user_doc.get("weekly_xp", 0))
+        total_referrals = _safe_non_negative_int(user_doc.get("total_referrals", 0))
+        streak = _safe_non_negative_int(user_doc.get("streak_days", user_doc.get("checkin_streak", user_doc.get("streak", 0))))
+        rank = _compute_share_rank(user_id, user_doc)
+        title, highlight = choose_share_rank_achievement(rank, weekly_xp, streak, total_referrals)
+        caption = build_share_rank_caption(rank, weekly_xp, title, highlight)
+
+        logger.info(
+            "[SHARE_RANK][SUCCESS] uid=%s rank=%s weekly_xp=%s title=%s",
+            user_id,
+            rank if rank is not None else "unranked",
+            weekly_xp,
+            title,
+        )
+        return jsonify(
+            {
+                "ok": True,
+                "caption": caption,
+                "rank": rank,
+                "weekly_xp": weekly_xp,
+                "title": title,
+                "highlight": highlight,
+            }
+        )
+    except Exception:
+        logger.exception("[SHARE_RANK][FAIL] stage=unexpected uid=%s", user_id)
+        return jsonify({"ok": False, "error": "Unable to create rank caption"}), 500
 
 @app.route("/api/affiliate/leaderboard", methods=["GET"])
 def get_affiliate_leaderboard_week():

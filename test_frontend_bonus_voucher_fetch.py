@@ -35,3 +35,17 @@ def test_claim_error_state_rendering_hooks_present():
     assert 'displayState === "cooldown"' in html
     assert 'Retry available in ${remaining}s' in html
     assert 'Fully Claimed' in html
+
+
+def test_share_rank_button_lives_in_identity_modal_not_leaderboard_controls():
+    html = Path("static/index.html").read_text(encoding="utf-8")
+    identity_start = html.index('<div id="identity-modal"')
+    identity_end = html.index('<!-- 2. Core grid', identity_start)
+    leaderboard_start = html.index('<div class="section" id="leaderboard-section"')
+    leaderboard_end = html.index('<!-- More / Admin', leaderboard_start)
+    identity_html = html[identity_start:identity_end]
+    leaderboard_html = html[leaderboard_start:leaderboard_end]
+    assert 'id="share-rank-btn"' in identity_html
+    assert 'id="share-rank-status"' in identity_html
+    assert 'id="share-rank-btn"' not in leaderboard_html
+    assert 'id="share-rank-status"' not in leaderboard_html
