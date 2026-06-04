@@ -1,5 +1,7 @@
 import logging
 import os
+import re
+from typing import Any
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
@@ -7,6 +9,90 @@ from zoneinfo import ZoneInfo
 KL_TZ = ZoneInfo("Asia/Kuala_Lumpur")
 
 MYWIN_CHAT_ID = int(os.getenv("MYWIN_CHAT_ID", "0"))  # 0 means "not configured"
+
+BOT_SEGMENT_DEFAULT_PROBABILITY = 0.70
+BOT_SEGMENT_PROBABILITY_MAP = {
+    "new_user": 0.70,
+    "new_joiner": 0.70,
+    "potential": 0.50,
+    "high_value": 0.50,
+    "active_player": 0.30,
+    "normal_actual": 0.70,
+    "low_value": 0.10,
+    "voucher_hunter": 0.10,
+    "welcome_abuse": 0.05,
+    "multi_account": 0.05,
+    "unclassified": BOT_SEGMENT_DEFAULT_PROBABILITY,
+}
+
+_BOT_SEGMENT_ALIASES = {
+    "new": "new_user",
+    "newuser": "new_user",
+    "new_users": "new_user",
+    "new_player": "new_user",
+    "new_players": "new_user",
+    "new_joiners": "new_joiner",
+    "joiner": "new_joiner",
+    "potential_user": "potential",
+    "potential_users": "potential",
+    "highvalue": "high_value",
+    "high_value_user": "high_value",
+    "active": "active_player",
+    "active_players": "active_player",
+    "normal": "normal_actual",
+    "normal_actuals": "normal_actual",
+    "lowvalue": "low_value",
+    "low_value_user": "low_value",
+    "voucherhunter": "voucher_hunter",
+    "voucher_hunters": "voucher_hunter",
+    "welcome_abuser": "welcome_abuse",
+    "welcome_abusers": "welcome_abuse",
+    "multiaccount": "multi_account",
+    "multi_accounts": "multi_account",
+    "multiple_account": "multi_account",
+    "multiple_accounts": "multi_account",
+    "unclassed": "unclassified",
+    "unknown": "unclassified",
+    "na": "unclassified",
+    "n_a": "unclassified",
+    "none": "unclassified",
+    "null": "unclassified",
+}
+
+
+def _canonicalize_for_bot_segment(raw: Any) -> str:
+    value = str(raw or "").strip().lower()
+    value = re.sub(r"[\s\-/]+", "_", value)
+    value = re.sub(r"_+", "_", value).strip("_")
+    return value
+
+
+def normalize_for_bot_segment(raw: Any) -> str:
+    canonical = _canonicalize_for_bot_segment(raw)
+    if not canonical:
+        return "unclassified"
+    canonical = _BOT_SEGMENT_ALIASES.get(canonical, canonical)
+    if canonical in BOT_SEGMENT_PROBABILITY_MAP:
+        return canonical
+    return "unclassified"
+
+
+def public_pool_probability_for_bot_segment(raw: Any) -> float:
+    normalized = normalize_for_bot_segment(raw)
+    return float(BOT_SEGMENT_PROBABILITY_MAP.get(normalized, BOT_SEGMENT_DEFAULT_PROBABILITY))
+
+
+def is_new_user_segment(raw_or_normalized: Any) -> bool:
+    return normalize_for_bot_segment(raw_or_normalized) in {"new_user", "new_joiner"}
+
+
+def is_blank_or_unknown_for_bot_segment(raw: Any) -> bool:
+    canonical = _canonicalize_for_bot_segment(raw)
+    if not canonical:
+        return True
+    canonical = _BOT_SEGMENT_ALIASES.get(canonical, canonical)
+    return canonical not in BOT_SEGMENT_PROBABILITY_MAP or canonical == "unclassified"
+
 
 # Check-in XP settings (single source of truth)
 XP_BASE_PER_CHECKIN = 20
