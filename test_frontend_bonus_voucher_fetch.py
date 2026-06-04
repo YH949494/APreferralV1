@@ -49,3 +49,13 @@ def test_share_rank_button_lives_in_identity_modal_not_leaderboard_controls():
     assert 'id="share-rank-status"' in identity_html
     assert 'id="share-rank-btn"' not in leaderboard_html
     assert 'id="share-rank-status"' not in leaderboard_html
+
+
+def test_share_rank_button_has_scoped_compact_styling():
+    html = Path("static/index.html").read_text(encoding="utf-8")
+    assert "#share-rank-btn {" in html
+    assert "display: inline-flex;" in html
+    assert "width: auto;" in html
+    assert "padding: 8px 12px;" in html
+    assert "font-size: 13px;" in html
+    assert ".btn.btn-primary" not in html
