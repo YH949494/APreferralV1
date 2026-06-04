@@ -194,6 +194,20 @@ def handle_checkin():
     }
     if freeze_used:
         payload["message"] += " 🧊 Streak Freeze used! Your streak continues."
+
+    from vouchers import get_welcome_reward_progress
+
+    welcome_progress = get_welcome_reward_progress(user_id, now=now)
+    if welcome_progress.get("eligible") and not welcome_progress.get("hide"):
+        completed = int(welcome_progress.get("checkins_completed") or 0)
+        required = int(welcome_progress.get("checkins_required") or 3)
+        payload["welcome_progress"] = welcome_progress
+        if welcome_progress.get("unlocked") or completed >= required:
+            payload["welcome_message"] = "🎉 Reward Unlocked!\n\nClaim now."
+        else:
+            remaining = max(0, required - completed)
+            plural = "check-ins" if remaining != 1 else "check-in"
+            payload["welcome_message"] = f"🎁 Progress: {completed}/{required}\n\n{remaining} more {plural} to unlock your reward."
     return jsonify(payload)
 
 
