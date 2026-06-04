@@ -8,7 +8,13 @@ import threading
 import random
 import requests
 import time
-from config import KL_TZ
+from config import (
+    KL_TZ,
+    normalize_for_bot_segment,
+    public_pool_probability_for_bot_segment,
+    is_new_user_segment,
+    is_blank_or_unknown_for_bot_segment,
+)
 import hmac, hashlib, urllib.parse, os, json
 import config as _cfg 
  
@@ -33,6 +39,7 @@ invite_link_map_collection = db["invite_link_map"]
 miniapp_sessions_daily_col = db["miniapp_sessions_daily"]
 request_dedup_col = db["request_dedup"]
 REFERRAL_SNAPSHOT_STALE_SEC = 21600
+logger = logging.getLogger(__name__)
 PERSONALISED_TYPE_CANONICAL = "personalised"
 PERSONALISED_TYPE_ALIASES = (PERSONALISED_TYPE_CANONICAL, "personalized")
 
@@ -2653,41 +2660,140 @@ def load_public_pool_claim_state(user_id: int | str, *, reference_time: datetime
     return state
 
 
-def assign_public_pool_access_once(user_id: int | str, public_pool_id: str, drop_open_time: datetime, segment: str) -> dict:
+def _count_public_pool_assignments_for_user(user_id_int) -> int:
+    if user_id_int is None:
+        return 0
+    filt = {"user_id": user_id_int}
+    if hasattr(public_pool_access_assignments_col, "count_documents"):
+        return int(public_pool_access_assignments_col.count_documents(filt))
+    return sum(
+        1
+        for doc in getattr(public_pool_access_assignments_col, "docs", [])
+        if doc.get("user_id") == user_id_int
+    )
+
+
+def _load_user_bot_segment(user_id_int) -> tuple[str | None, str, float, bool]:
+    try:
+        user_doc = (
+            users_collection.find_one(
+                {"user_id": user_id_int},
+                {
+                    "for_bot_segment": 1,
+                    "bot_segment": 1,
+                    "for_bot_segment_normalized": 1,
+                    "bot_segment_probability": 1,
+                },
+            )
+            if user_id_int is not None
+            else None
+        )
+    except RuntimeError:
+        user_doc = None
+    raw_segment = (user_doc or {}).get("for_bot_segment")
+    if raw_segment is None or str(raw_segment).strip() == "":
+        raw_segment = (user_doc or {}).get("bot_segment")
+    normalized = normalize_for_bot_segment(raw_segment)
+    probability = public_pool_probability_for_bot_segment(normalized)
+    fallback = is_blank_or_unknown_for_bot_segment(raw_segment)
+    return raw_segment, normalized, probability, fallback
+
+
+def assign_public_pool_access_once(
+    user_id: int | str,
+    public_pool_id: str,
+    drop_open_time: datetime,
+    segment: str | None = None,
+    *,
+    user_doc: dict | None = None,
+    legacy_public_pool_segment: str | None = None,
+) -> dict:
     try:
         user_id_int = int(user_id)
     except (TypeError, ValueError):
         user_id_int = user_id
-    existing = public_pool_access_assignments_col.find_one({"user_id": user_id_int, "public_pool_id": str(public_pool_id)})
+    existing = public_pool_access_assignments_col.find_one(
+        {"user_id": user_id_int, "public_pool_id": str(public_pool_id)}
+    )
     if existing:
+        logger.info(
+            "[PUBLIC_POOL][SEGMENT_REUSE] uid=%s pool=%s allowed=%s",
+            user_id_int,
+            public_pool_id,
+            bool(existing.get("access_allowed")),
+        )
         return existing
+
+    if user_doc is not None:
+        raw_segment = user_doc.get("for_bot_segment")
+        if raw_segment is None or str(raw_segment).strip() == "":
+            raw_segment = user_doc.get("bot_segment")
+        normalized_segment = normalize_for_bot_segment(raw_segment)
+        fallback = is_blank_or_unknown_for_bot_segment(raw_segment)
+    else:
+        raw_segment, normalized_segment, _base_probability, fallback = _load_user_bot_segment(
+            user_id_int
+        )
+
+    assignment_count_before = _count_public_pool_assignments_for_user(user_id_int)
+    boost_applied = bool(is_new_user_segment(normalized_segment) and assignment_count_before < 3)
+    if boost_applied:
+        probability = 1.0
+        probability_source = "for_bot_segment_new_user_svd_boost"
+        delay_seconds = 0
+    else:
+        probability = public_pool_probability_for_bot_segment(normalized_segment)
+        probability_source = "for_bot_segment"
+        delay_seconds = 0 if probability >= 1.0 else random.randint(15, 45)
+    if fallback:
+        logger.info(
+            "[PUBLIC_POOL][SEGMENT_FALLBACK] uid=%s reason=blank_or_unknown probability=0.7",
+            user_id_int,
+        )
+    access_allowed = True if probability >= 1.0 else (random.random() < probability)
     assigned_at = now_utc()
     drop_open_utc = _as_aware_utc(drop_open_time) or assigned_at
-    if segment in ("new_user", "light_user"):
-        access_allowed = True
-        delay_seconds = 0
-    elif segment == "light_repeat":
-        access_allowed = random.random() < 0.5
-        delay_seconds = random.randint(15, 45)
-    else:
-        access_allowed = random.random() < 0.2
-        delay_seconds = random.randint(40, 160)
     eligible_after = drop_open_utc + timedelta(seconds=delay_seconds)
+    audit_segment = legacy_public_pool_segment if legacy_public_pool_segment is not None else segment
     base_doc = {
         "user_id": user_id_int,
         "public_pool_id": str(public_pool_id),
-        "segment_at_assignment": segment,
+        "segment_at_assignment": normalized_segment,
+        "for_bot_segment": raw_segment,
+        "for_bot_segment_normalized": normalized_segment,
+        "public_pool_assignment_count_before": assignment_count_before,
+        "new_user_svd_boost_applied": boost_applied,
+        "probability": probability,
+        "probability_source": probability_source,
+        "legacy_public_pool_segment": audit_segment,
         "access_allowed": bool(access_allowed),
         "eligible_after": eligible_after,
         "assigned_at": assigned_at,
         "updated_at": assigned_at,
     }
+    logger.info(
+        "[PUBLIC_POOL][SEGMENT_ASSIGN] uid=%s pool=%s segment=%s probability=%s allowed=%s boost=%s",
+        user_id_int,
+        public_pool_id,
+        normalized_segment,
+        probability,
+        bool(access_allowed),
+        boost_applied,
+    )
     try:
         public_pool_access_assignments_col.insert_one(base_doc)
         return base_doc
     except DuplicateKeyError:
-        existing = public_pool_access_assignments_col.find_one({"user_id": user_id_int, "public_pool_id": str(public_pool_id)})
+        existing = public_pool_access_assignments_col.find_one(
+            {"user_id": user_id_int, "public_pool_id": str(public_pool_id)}
+        )
         if existing:
+            logger.info(
+                "[PUBLIC_POOL][SEGMENT_REUSE] uid=%s pool=%s allowed=%s",
+                user_id_int,
+                public_pool_id,
+                bool(existing.get("access_allowed")),
+            )
             return existing
         raise
 
@@ -2700,6 +2806,7 @@ def check_public_pool_access(user_id: int | str, public_pool_id: str, drop_open_
         public_pool_id=public_pool_id,
         drop_open_time=drop_open_time,
         segment=segment,
+        legacy_public_pool_segment=segment,
     )
     now_ref = _as_aware_utc(now or now_utc()) or now_utc()
     eligible_after = _as_aware_utc(assignment.get("eligible_after")) or now_ref

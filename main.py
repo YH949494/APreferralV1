@@ -715,6 +715,33 @@ def acquire_scheduler_lock(name: str, ttl_seconds: int) -> tuple[bool, dict | No
     return doc is not None, doc
 
 
+
+def bot_segment_sheet_sync_scheduled() -> None:
+    acquired, lock_doc = acquire_scheduler_lock("bot_segment_sheet_sync", ttl_seconds=1800)
+    if not acquired:
+        logger.info(
+            "[BOT_SEGMENT_SYNC] lock_not_acquired owner=%s expires_in_s=%s",
+            (lock_doc or {}).get("owner"),
+            expires_in_seconds((lock_doc or {}).get("expireAt")),
+        )
+        return
+    logger.info("[BOT_SEGMENT_SYNC] start")
+    try:
+        from bot_segment_sync import sync_bot_segments_from_sheet
+
+        summary = sync_bot_segments_from_sheet(dry_run=False)
+        if summary.get("ok"):
+            logger.info("[BOT_SEGMENT_SYNC] done summary=%s", summary)
+        else:
+            logger.error(
+                "[BOT_SEGMENT_SYNC] failed err=%s summary=%s",
+                summary.get("error"),
+                summary,
+            )
+    except Exception as exc:
+        logger.exception("[BOT_SEGMENT_SYNC] failed err=%s", str(exc))
+
+
 def tick_5min() -> None:
     run_id = _new_run_id()
     now_local = datetime.now(KL_TZ)
@@ -5131,6 +5158,21 @@ def run_worker():
         name="Affiliate Weekly KPI Snapshot",
         replace_existing=True,
     )
+
+    if os.getenv("BOT_SEGMENT_SYNC_ENABLED", "1") == "1":
+        scheduler.add_job(
+            bot_segment_sheet_sync_scheduled,
+            trigger=CronTrigger(
+                day_of_week=os.getenv("BOT_SEGMENT_SYNC_DAY_OF_WEEK", "wed"),
+                hour=int(os.getenv("BOT_SEGMENT_SYNC_HOUR", "9")),
+                minute=int(os.getenv("BOT_SEGMENT_SYNC_MINUTE", "30")),
+                timezone=KL_TZ,
+            ),
+            id="bot_segment_sheet_sync",
+            name="Bot Segment Sheet Sync",
+            replace_existing=True,
+        )
+
     if GROWTH_LEADERBOARD_ENABLED:
         if not GROWTH_LEADERBOARD_CHANNEL_ID:
             logger.warning("[GROWTH_LEADERBOARD] enabled but missing GROWTH_LEADERBOARD_CHANNEL_ID")

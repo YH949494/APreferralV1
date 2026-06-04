@@ -4,6 +4,8 @@ from flask import Flask
 
 from pymongo.errors import DuplicateKeyError
 
+from config import normalize_for_bot_segment, public_pool_probability_for_bot_segment, is_new_user_segment
+
 from vouchers import (
     _acquire_claim_lock,
     _apply_kill_success,
@@ -1836,8 +1838,8 @@ class PublicPoolShapingTests(unittest.TestCase):
         m.random.randint = lambda a, b: 20  # noqa: ARG005
         try:
             drop_open = datetime(2026, 4, 22, 12, 0, tzinfo=timezone.utc)
-            first = assign_public_pool_access_once(123, "drop-1", drop_open, "light_repeat")
-            second = assign_public_pool_access_once(123, "drop-1", drop_open, "heavy_repeat")
+            first = assign_public_pool_access_once(123, "drop-1", drop_open, "light_repeat", user_doc={"for_bot_segment": "Potential"})
+            second = assign_public_pool_access_once(123, "drop-1", drop_open, "heavy_repeat", user_doc={"for_bot_segment": "Voucher Hunter"})
         finally:
             m.public_pool_access_assignments_col = orig_assignments
             m.random.random = orig_random
@@ -1846,6 +1848,8 @@ class PublicPoolShapingTests(unittest.TestCase):
         self.assertEqual(first["eligible_after"], second["eligible_after"])
         self.assertEqual(first["access_allowed"], second["access_allowed"])
         self.assertEqual(first["segment_at_assignment"], second["segment_at_assignment"])
+        self.assertEqual(first["for_bot_segment_normalized"], "potential")
+        self.assertEqual(first["probability_source"], "for_bot_segment")
 
     def test_update_public_pool_claim_state_on_success_sets_fields(self):
         import vouchers as m
@@ -1873,7 +1877,36 @@ class PublicPoolShapingTests(unittest.TestCase):
         self.assertEqual(classify_public_pool_segment({"has_ever_claimed_public_pool": True, "recent_public_claim_count_30d": 5}), "light_repeat")
         self.assertEqual(classify_public_pool_segment({"has_ever_claimed_public_pool": True, "recent_public_claim_count_30d": 6}), "heavy_repeat")
 
-    def test_assign_public_pool_access_once_light_repeat_threshold(self):
+    def test_for_bot_segment_normalization_and_probability_map(self):
+        cases = {
+            "Voucher Hunter": "voucher_hunter",
+            "voucher-hunter": "voucher_hunter",
+            "High Value": "high_value",
+            "Active Player": "active_player",
+            "": "unclassified",
+            None: "unclassified",
+            "not a real segment": "unclassified",
+        }
+        for raw, expected in cases.items():
+            self.assertEqual(normalize_for_bot_segment(raw), expected)
+        probs = {
+            "voucher_hunter": 0.10,
+            "welcome_abuse": 0.05,
+            "multi_account": 0.05,
+            "potential": 0.50,
+            "high_value": 0.50,
+            "active_player": 0.30,
+            "normal_actual": 0.70,
+            "new_user": 0.70,
+            "new_joiner": 0.70,
+            "unclassified": 0.70,
+            None: 0.70,
+        }
+        for raw, expected in probs.items():
+            self.assertEqual(public_pool_probability_for_bot_segment(raw), expected)
+        self.assertTrue(is_new_user_segment("New Joiner"))
+
+    def test_assign_public_pool_access_once_uses_for_bot_segment_probability(self):
         import vouchers as m
 
         orig_assignments = m.public_pool_access_assignments_col
@@ -1884,9 +1917,9 @@ class PublicPoolShapingTests(unittest.TestCase):
         drop_open = datetime(2026, 4, 22, 12, 0, tzinfo=timezone.utc)
         try:
             m.random.random = lambda: 0.49
-            allowed = assign_public_pool_access_once(124, "drop-1", drop_open, "light_repeat")
+            allowed = assign_public_pool_access_once(124, "drop-1", drop_open, "heavy_repeat", user_doc={"for_bot_segment": "Potential"})
             m.random.random = lambda: 0.50
-            denied = assign_public_pool_access_once(125, "drop-1", drop_open, "light_repeat")
+            denied = assign_public_pool_access_once(125, "drop-1", drop_open, "new_user", user_doc={"for_bot_segment": "Potential"})
         finally:
             m.public_pool_access_assignments_col = orig_assignments
             m.random.random = orig_random
@@ -1894,28 +1927,61 @@ class PublicPoolShapingTests(unittest.TestCase):
 
         self.assertTrue(allowed["access_allowed"])
         self.assertFalse(denied["access_allowed"])
+        self.assertEqual(allowed["legacy_public_pool_segment"], "heavy_repeat")
+        self.assertEqual(allowed["for_bot_segment_normalized"], "potential")
+        self.assertEqual(allowed["probability"], 0.5)
+        self.assertFalse(allowed["new_user_svd_boost_applied"])
 
-    def test_assign_public_pool_access_once_heavy_repeat_threshold(self):
+    def test_assign_public_pool_access_once_new_user_svd_boost_first_three(self):
         import vouchers as m
 
         orig_assignments = m.public_pool_access_assignments_col
         orig_random = m.random.random
-        orig_randint = m.random.randint
         m.public_pool_access_assignments_col = self._SimpleCollection()
-        m.random.randint = lambda a, b: 40  # noqa: ARG005
+        m.random.random = lambda: 0.99
         drop_open = datetime(2026, 4, 22, 12, 0, tzinfo=timezone.utc)
         try:
-            m.random.random = lambda: 0.19
-            allowed = assign_public_pool_access_once(126, "drop-1", drop_open, "heavy_repeat")
-            m.random.random = lambda: 0.20
-            denied = assign_public_pool_access_once(127, "drop-1", drop_open, "heavy_repeat")
+            first = assign_public_pool_access_once(126, "drop-1", drop_open, user_doc={"for_bot_segment": "new_user"})
+            second = assign_public_pool_access_once(126, "drop-2", drop_open, user_doc={"for_bot_segment": "new_user"})
+            third = assign_public_pool_access_once(126, "drop-3", drop_open, user_doc={"for_bot_segment": "new_user"})
+            fourth = assign_public_pool_access_once(126, "drop-4", drop_open, user_doc={"for_bot_segment": "new_user"})
+            joiner = assign_public_pool_access_once(127, "drop-1", drop_open, user_doc={"for_bot_segment": "new_joiner"})
+            potential = assign_public_pool_access_once(128, "drop-1", drop_open, user_doc={"for_bot_segment": "potential"})
         finally:
             m.public_pool_access_assignments_col = orig_assignments
             m.random.random = orig_random
-            m.random.randint = orig_randint
 
-        self.assertTrue(allowed["access_allowed"])
-        self.assertFalse(denied["access_allowed"])
+        self.assertEqual(first["public_pool_assignment_count_before"], 0)
+        self.assertEqual(second["public_pool_assignment_count_before"], 1)
+        self.assertEqual(third["public_pool_assignment_count_before"], 2)
+        self.assertTrue(first["access_allowed"])
+        self.assertTrue(second["access_allowed"])
+        self.assertTrue(third["access_allowed"])
+        self.assertTrue(first["new_user_svd_boost_applied"])
+        self.assertEqual(first["probability"], 1.0)
+        self.assertEqual(first["probability_source"], "for_bot_segment_new_user_svd_boost")
+        self.assertEqual(fourth["public_pool_assignment_count_before"], 3)
+        self.assertFalse(fourth["new_user_svd_boost_applied"])
+        self.assertEqual(fourth["probability"], 0.7)
+        self.assertTrue(joiner["new_user_svd_boost_applied"])
+        self.assertFalse(potential["new_user_svd_boost_applied"])
+
+    def test_assign_public_pool_access_once_missing_segment_falls_back(self):
+        import vouchers as m
+
+        orig_assignments = m.public_pool_access_assignments_col
+        orig_random = m.random.random
+        m.public_pool_access_assignments_col = self._SimpleCollection()
+        m.random.random = lambda: 0.69
+        try:
+            drop_open = datetime(2026, 4, 22, 12, 0, tzinfo=timezone.utc)
+            assignment = assign_public_pool_access_once(129, "drop-1", drop_open, user_doc={})
+        finally:
+            m.public_pool_access_assignments_col = orig_assignments
+            m.random.random = orig_random
+        self.assertTrue(assignment["access_allowed"])
+        self.assertEqual(assignment["for_bot_segment_normalized"], "unclassified")
+        self.assertEqual(assignment["probability"], 0.7)
 
 
 if __name__ == "__main__":
