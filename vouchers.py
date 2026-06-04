@@ -169,6 +169,7 @@ WELCOME_WINDOW_HOURS = int(getattr(_cfg, "WELCOME_WINDOW_HOURS", os.getenv("WELC
 WELCOME_WINDOW_DAYS = 7
 WELCOME_UNCLAIMED_WINDOW_DAYS = int(getattr(_cfg, "WELCOME_UNCLAIMED_WINDOW_DAYS", os.getenv("WELCOME_UNCLAIMED_WINDOW_DAYS", "7")))
 WELCOME_CLAIMED_VISIBLE_DAYS = int(getattr(_cfg, "WELCOME_CLAIMED_VISIBLE_DAYS", os.getenv("WELCOME_CLAIMED_VISIBLE_DAYS", "3")))
+WELCOME_REWARD_CHECKINS_REQUIRED = 3
 PROFILE_PHOTO_CACHE_TTL_SECONDS = 60
 VERIFY_QUEUE_MAX_ATTEMPTS = int(os.getenv("VERIFY_QUEUE_MAX_ATTEMPTS", "3"))
 VERIFY_QUEUE_BACKOFF_BASE_SECONDS = int(os.getenv("VERIFY_QUEUE_BACKOFF_BASE_SECONDS", "30"))
@@ -719,6 +720,138 @@ def _welcome_window_for_user(uid: int | None, *, ref: datetime | None = None, us
         "eligible_until": joined_main_kl + timedelta(days=WELCOME_UNCLAIMED_WINDOW_DAYS),
     }
 
+
+def _welcome_progress_log(tag: str, uid: int | None, progress: dict, reason: str | None = None) -> None:
+    try:
+        current_app.logger.info(
+            "%s uid=%s reason=%s eligible=%s unlocked=%s expired=%s hide=%s channel_joined=%s checkins=%s/%s eligible_until=%s days_remaining=%s",
+            tag,
+            uid,
+            reason,
+            progress.get("eligible"),
+            progress.get("unlocked"),
+            progress.get("expired"),
+            progress.get("hide"),
+            progress.get("channel_joined"),
+            progress.get("checkins_completed"),
+            progress.get("checkins_required"),
+            progress.get("eligible_until"),
+            progress.get("days_remaining"),
+        )
+    except RuntimeError:
+        logging.getLogger(__name__).info("%s uid=%s reason=%s progress=%s", tag, uid, reason, progress)
+
+
+def _empty_welcome_progress(*, eligible=False, expired=False, hide=True, reason=None) -> dict:
+    progress = {
+        "eligible": bool(eligible),
+        "unlocked": False,
+        "expired": bool(expired),
+        "hide": bool(hide),
+        "channel_joined": False,
+        "checkins_completed": 0,
+        "checkins_required": WELCOME_REWARD_CHECKINS_REQUIRED,
+        "eligible_until": None,
+        "days_remaining": 0,
+    }
+    return progress
+
+
+def _count_welcome_checkin_days(uid: int, joined_main_at: datetime, eligible_until: datetime) -> int:
+    start_utc = joined_main_at.astimezone(timezone.utc)
+    end_utc = eligible_until.astimezone(timezone.utc)
+    days: set[str] = set()
+
+    def add_day(created_at) -> None:
+        created_kl = _as_aware_kl(created_at)
+        if not created_kl:
+            return
+        if joined_main_at <= created_kl <= eligible_until:
+            days.add(created_kl.date().isoformat())
+
+    try:
+        cursor = db.xp_events.find(
+            {
+                "user_id": uid,
+                "type": "checkin",
+                "created_at": {"$gte": start_utc, "$lte": end_utc},
+            },
+            {"created_at": 1, "unique_key": 1},
+        )
+        for event in cursor:
+            add_day(event.get("created_at"))
+            if len(days) >= WELCOME_REWARD_CHECKINS_REQUIRED:
+                return len(days)
+    except Exception:
+        _welcome_progress_log("[WELCOME_V2][PROGRESS]", uid, {"checkins_completed": len(days), "checkins_required": WELCOME_REWARD_CHECKINS_REQUIRED}, "xp_events_count_failed")
+
+    try:
+        cursor = db.xp_ledger.find(
+            {
+                "user_id": uid,
+                "source": "checkin",
+                "created_at": {"$gte": start_utc, "$lte": end_utc},
+            },
+            {"created_at": 1, "source_id": 1},
+        )
+        for event in cursor:
+            add_day(event.get("created_at"))
+            if len(days) >= WELCOME_REWARD_CHECKINS_REQUIRED:
+                return len(days)
+    except Exception:
+        _welcome_progress_log("[WELCOME_V2][PROGRESS]", uid, {"checkins_completed": len(days), "checkins_required": WELCOME_REWARD_CHECKINS_REQUIRED}, "xp_ledger_count_failed")
+
+    return len(days)
+
+
+def get_welcome_reward_progress(uid, now=None) -> dict:
+    """Return Welcome Voucher V2 progress without issuing or consuming inventory."""
+    try:
+        uid = int(uid)
+    except (TypeError, ValueError):
+        progress = _empty_welcome_progress(reason="bad_uid")
+        _welcome_progress_log("[WELCOME_V2][PROGRESS]", uid, progress, "bad_uid")
+        return progress
+
+    now_ref = _as_aware_kl(now) or now_kl()
+    user_doc = users_collection.find_one({"user_id": uid}, {"joined_main_at": 1, "created_at": 1}) or {}
+    window = _welcome_window_for_user(uid, ref=now_ref, user_doc=user_doc)
+    raw_joined = user_doc.get("joined_main_at") or user_doc.get("created_at")
+    joined_main_at = _as_aware_kl(raw_joined)
+    if not joined_main_at:
+        progress = _empty_welcome_progress(reason="missing_joined_main_at")
+        _welcome_progress_log("[WELCOME_V2][PROGRESS]", uid, progress, "missing_joined_main_at")
+        return progress
+
+    eligible_until = (window or {}).get("eligible_until") or (joined_main_at + timedelta(days=WELCOME_UNCLAIMED_WINDOW_DAYS))
+    eligible_until = _as_aware_kl(eligible_until)
+    expired = bool(eligible_until and now_ref > eligible_until)
+    seconds_remaining = max(0, int(((eligible_until or now_ref) - now_ref).total_seconds()))
+    days_remaining = int((seconds_remaining + 86399) // 86400) if seconds_remaining else 0
+
+    checkins_completed = _count_welcome_checkin_days(uid, joined_main_at, eligible_until) if eligible_until else 0
+    channel_joined = _has_current_subscription_evidence(uid)
+
+    allowed, reason, _ticket = welcome_eligibility(uid, ref=now_ref)
+    eligible = bool(allowed)
+    unlocked = bool(eligible and channel_joined and checkins_completed >= WELCOME_REWARD_CHECKINS_REQUIRED)
+    hide = bool((expired and checkins_completed < WELCOME_REWARD_CHECKINS_REQUIRED) or (not eligible and reason != "ticket_claimed"))
+    progress = {
+        "eligible": eligible,
+        "unlocked": unlocked,
+        "expired": expired,
+        "hide": hide,
+        "channel_joined": bool(channel_joined),
+        "checkins_completed": min(int(checkins_completed), WELCOME_REWARD_CHECKINS_REQUIRED),
+        "checkins_required": WELCOME_REWARD_CHECKINS_REQUIRED,
+        "eligible_until": eligible_until.isoformat() if eligible_until else None,
+        "days_remaining": days_remaining,
+    }
+    tag = "[WELCOME_V2][UNLOCKED]" if unlocked else ("[WELCOME_V2][HIDDEN_EXPIRED]" if hide else "[WELCOME_V2][LOCKED]")
+    _welcome_progress_log("[WELCOME_V2][PROGRESS]", uid, progress, reason)
+    _welcome_progress_log(tag, uid, progress, reason)
+    return progress
+
 def _get_client_ip(req=None) -> str:
     req = req or request
     if not req:
@@ -875,9 +1008,9 @@ def _is_pool_drop(drop: dict, audience_type: str | None = None) -> bool:
     return bool(drop.get("is_pool") is True)
 
 WELCOME_BONUS_RETENTION_MESSAGE = (
-    "🎉 Welcome Bonus unlocked!\n"
-    "More exclusive vouchers and surprise drops are released in our channel.\n"
-    "Stay subscribed so you won’t miss the next one."
+    "🎁 Reward claimed!\n"
+    "📣 Stay in the channel.\n"
+    "More voucher drops coming soon."
 )
 
 POOL_VOUCHER_RETENTION_MESSAGE = (
@@ -3499,10 +3632,11 @@ def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None
         is_active = is_drop_active(d, ref)
         audience_type = _drop_audience_type(d)
 
+        welcome_progress = None
         if _is_new_joiner_audience(audience_type):
-            allowed, reason, _ticket = welcome_eligibility(ctx_uid, ref=ref)
-            if not allowed:
-                current_app.logger.info("[visible][WELCOME] hide uid=%s reason=%s", ctx_uid, reason)
+            welcome_progress = get_welcome_reward_progress(ctx_uid, now=ref)
+            if welcome_progress.get("hide"):
+                current_app.logger.info("[visible][WELCOME] hide uid=%s reason=welcome_v2_hidden progress=%s", ctx_uid, welcome_progress)
                 continue
     
         if not is_drop_allowed(d, ctx_uid, usernameLower or uname, user_ctx):
@@ -3519,6 +3653,8 @@ def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None
             "endsAt": _as_aware_utc(d.get("endsAt")).isoformat() if d.get("endsAt") else None,
             "isActive": is_active,
             "userClaimed": False,
+            "type": dtype,
+            "audience": audience_type,
             "_priority": priority,
         }
 
@@ -3624,6 +3760,19 @@ def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None
                 )
                 pooled_cards.append(base)
             else:
+                if _is_new_joiner_audience(audience_type) and welcome_progress and not welcome_progress.get("unlocked"):
+                    base["name"] = "🎁 New Member Reward"
+                    base["state"] = "welcome_locked"
+                    base["claimable"] = False
+                    base["canClaim"] = False
+                    base["sold_out"] = False
+                    base["visible_remaining"] = None
+                    base["welcome_progress"] = welcome_progress
+                    pooled_cards.append(base)
+                    continue
+                if _is_new_joiner_audience(audience_type) and welcome_progress:
+                    base["name"] = "🎁 Welcome Voucher"
+                    base["welcome_progress"] = welcome_progress
                 claimability = _pooled_claimability_state(
                     drop=d,
                     drop_id=drop_id,
@@ -5065,6 +5214,7 @@ def api_claim():
             "[claim] entry drop=%s audience=%s uid=%s ip=%s", drop_id, audience_type, uid, client_ip
         )
         if not check_channel_subscribed(uid):
+            progress = get_welcome_reward_progress(uid, now=now_kl())
             logger.info(
                 "[CLAIM_BLOCK] reason=%s drop_id=%s uid=%s username=%s",
                 "not_subscribed",
@@ -5080,14 +5230,16 @@ def api_claim():
                 drop_type,
                 audience_type,
             )
+            current_app.logger.info("[WELCOME_V2][CLAIM_BLOCKED] uid=%s drop_id=%s reason=not_subscribed progress=%s", uid, drop_id, progress)
             return jsonify({
                 "status": "error",
-                "code": "not_subscribed",
+                "code": "welcome_locked",
                 "ok": False,
                 "eligible": False,
                 "reason": "not_subscribed",
                 "checks_key": None,
-                "message": "Please subscribe to @advantplayofficial to claim this voucher."
+                "message": "Complete 3 check-ins to unlock your reward.",
+                "progress": progress,
             }), 403
         if drop_type != "pooled":
             logger.info(
@@ -5140,6 +5292,7 @@ def api_claim():
         now_ts = now_kl()
         allowed, reason, _ticket = welcome_eligibility(uid, ref=now_ts)
         if not allowed:
+            progress = get_welcome_reward_progress(uid, now=now_ts)
             logger.info(
                 "[CLAIM_BLOCK] reason=%s drop_id=%s uid=%s username=%s",
                 "not_eligible",
@@ -5148,14 +5301,39 @@ def api_claim():
                 username,
             )
             current_app.logger.info("[claim] deny drop=%s uid=%s reason=%s", drop_id, uid, reason)
+            current_app.logger.info("[WELCOME_V2][CLAIM_BLOCKED] uid=%s drop_id=%s reason=%s progress=%s", uid, drop_id, reason, progress)
+            code = "welcome_hidden" if progress.get("hide") else "not_eligible"
             return jsonify({
                 "status": "error",
-                "code": "not_eligible",
+                "code": code,
                 "reason": reason,
                 "ok": False,
                 "eligible": False,
                 "checks_key": None,
+                "progress": progress,
             }), 403
+        progress = get_welcome_reward_progress(uid, now=now_ts)
+        if not progress.get("unlocked"):
+            current_app.logger.info("[WELCOME_V2][CLAIM_BLOCKED] uid=%s drop_id=%s reason=welcome_locked progress=%s", uid, drop_id, progress)
+            if progress.get("hide"):
+                return jsonify({
+                    "status": "hidden",
+                    "code": "welcome_hidden",
+                    "ok": False,
+                    "eligible": False,
+                    "reason": "welcome_hidden",
+                    "hide": True,
+                    "progress": progress,
+                }), 403
+            return jsonify({
+                "ok": False,
+                "status": "error",
+                "code": "welcome_locked",
+                "reason": "welcome_locked",
+                "message": "Complete 3 check-ins to unlock your reward.",
+                "progress": progress,
+            }), 403
+        current_app.logger.info("[WELCOME_V2][CLAIM_ALLOWED] uid=%s drop_id=%s progress=%s", uid, drop_id, progress)
         cache_has_photo, cache_stale = _profile_photo_cache_status(uid)
         if cache_stale:
             ok, _err = enqueue_verification(

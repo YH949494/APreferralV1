@@ -3518,6 +3518,8 @@ Active players win more.
       }
 
       const hasClaimed = !!drop?.userClaimed || drop?.state === "claimed" || !!(drop?.code || drop?.voucherCode || drop?.claimedVoucher?.code);
+      const isWelcomeLocked = drop?.state === "welcome_locked" || drop?.code === "welcome_locked";
+      const welcomeProgress = drop?.welcome_progress || drop?.progress || null;
       const isAdminPreview = !!drop?.adminPreview;
 
       if (!hasClaimed && isAdminPreview && drop && drop.visible_remaining !== undefined && drop.visible_remaining !== null) {
@@ -3554,7 +3556,22 @@ Active players win more.
       btn.type = "button";
       btn.className = "btn btn-primary";
 
-      if (hasClaimed) {
+      if (isWelcomeLocked && !hasClaimed) {
+        title.textContent = "🎁 New Member Reward";
+        const completed = Number(welcomeProgress?.checkins_completed ?? 0);
+        const required = Number(welcomeProgress?.checkins_required ?? 3);
+        const daysRemaining = Number(welcomeProgress?.days_remaining ?? 0);
+        message.innerHTML = `Channel: ${welcomeProgress?.channel_joined ? "✅" : "⬜"}<br>Check-ins: ${completed}/${required}`;
+        if (daysRemaining > 0) {
+          const expiresMeta = document.createElement("p");
+          expiresMeta.className = "campaign-meta";
+          expiresMeta.textContent = `Expires in ${daysRemaining} day${daysRemaining === 1 ? "" : "s"}`;
+          card.appendChild(expiresMeta);
+        }
+        btn.textContent = "Unlock your reward after 3 check-ins.";
+        btn.setAttribute("disabled", "disabled");
+        btn.className = "btn btn-ghost";
+      } else if (hasClaimed) {
         const codeText = drop?.code ? String(drop.code) : "(no code)";
         message.textContent = drop?.code ? `Voucher code: ${codeText}` : "Reward already claimed.";
         if (drop?.code) {
@@ -3584,7 +3601,12 @@ Active players win more.
           btn.setAttribute("disabled", "disabled");
           btn.className = "btn btn-ghost";
         } else {
-          message.textContent = "Tap below to claim your reward.";
+          if (welcomeProgress?.unlocked) {
+            title.textContent = "🎁 Welcome Voucher";
+            message.textContent = "Claim now";
+          } else {
+            message.textContent = "Tap below to claim your reward.";
+          }
           btn.textContent = "Claim Reward";
           if (dropId) {
             btn.dataset.dropid = dropId;
@@ -4160,6 +4182,21 @@ Active players win more.
             return;
           }
 
+          if (payload?.code === "welcome_hidden" || payload?.hide === true || payload?.progress?.hide === true) {
+            clearClaimError();
+            shouldRestoreBtn = false;
+            await loadVouchers();
+            return;
+          }
+
+          if (payload?.code === "welcome_locked") {
+            const messageEl = document.getElementById("campaign-voucher-message");
+            if (messageEl) messageEl.innerText = payload?.message || "Complete 3 check-ins to unlock your reward.";
+            clearClaimError();
+            shouldRestoreBtn = true;
+            return;
+          }
+
           if (payload?.code === "sold_out") {
             const soldOutMessage = payload?.message || "All vouchers have been fully redeemed.";
 
@@ -4209,7 +4246,10 @@ Active players win more.
           ensureCodeBlock(claimBtn, codeText);
           if (claimBtn.id === "campaign-voucher-btn") {
             const messageEl = document.getElementById("campaign-voucher-message");
-            if (messageEl) messageEl.innerText = codeText;
+            const retentionMessage = out?.message && String(out.message).includes("🎁 Reward claimed!")
+              ? out.message
+              : "🎁 Reward claimed!\n\n📣 Stay in the channel.\nMore voucher drops coming soon.";
+            if (messageEl) messageEl.innerText = retentionMessage;
           }
           claimBtn.dataset.mode = "copy";
           claimBtn.dataset.copyCode = codeText;
