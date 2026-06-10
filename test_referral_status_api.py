@@ -1,4 +1,5 @@
 import ast
+import os
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from referral_rules import build_public_referral_status
@@ -26,7 +27,7 @@ def _load_symbols():
             body.append(node)
     isolated = ast.Module(body=body, type_ignores=[])
     ast.fix_missing_locations(isolated)
-    env = {}
+    env = {"os": os}
     exec(compile(isolated, filename="main.py", mode="exec"), env)  # noqa: S102
     env["datetime"] = datetime
     env["timezone"] = timezone

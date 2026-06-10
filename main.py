@@ -994,7 +994,7 @@ except Exception:
     logger.warning("[SCHEDULER][LOCK] failed to create TTL index", exc_info=True)
 ensure_retention_indexes(db)
     
-REFERRAL_HOLD_HOURS = 12
+REFERRAL_HOLD_HOURS = int(os.getenv("REFERRAL_QUALIFY_HOURS", os.getenv("REFERRAL_HOLD_HOURS", "48")))
 REFERRAL_HOURLY_LIMIT = int(os.getenv("REFERRAL_HOURLY_LIMIT", "20"))
 REFERRAL_DAILY_LIMIT = int(os.getenv("REFERRAL_DAILY_LIMIT", "200"))
 
