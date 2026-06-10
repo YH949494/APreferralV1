@@ -42,6 +42,9 @@ REFERRAL_SNAPSHOT_STALE_SEC = 21600
 logger = logging.getLogger(__name__)
 PERSONALISED_TYPE_CANONICAL = "personalised"
 PERSONALISED_TYPE_ALIASES = (PERSONALISED_TYPE_CANONICAL, "personalized")
+AUDIENCE_MODE_SEGMENT = "segment"
+AUDIENCE_MODE_PUBLIC = "public"
+AUDIENCE_MODE_ALLOWED = {AUDIENCE_MODE_SEGMENT, AUDIENCE_MODE_PUBLIC}
 
 
 def _normalize_drop_type(value) -> str:
@@ -49,6 +52,28 @@ def _normalize_drop_type(value) -> str:
     if dtype in PERSONALISED_TYPE_ALIASES:
         return PERSONALISED_TYPE_CANONICAL
     return dtype
+
+
+def _normalize_audience_mode(value) -> str:
+    mode = str(value or AUDIENCE_MODE_SEGMENT).strip().lower()
+    if mode not in AUDIENCE_MODE_ALLOWED:
+        return AUDIENCE_MODE_SEGMENT
+    return mode
+
+
+def _drop_audience_mode(drop: dict) -> str:
+    return _normalize_audience_mode((drop or {}).get("audience_mode"))
+
+
+def _log_audience_mode(drop_id, uid, mode, decision, reason) -> None:
+    logger.info(
+        "[AUDIENCE_MODE] drop=%s uid=%s mode=%s decision=%s reason=%s",
+        drop_id,
+        uid,
+        _normalize_audience_mode(mode),
+        decision,
+        reason,
+    )
 
 
 def _week_key_kl(reference: datetime) -> str:
@@ -3627,18 +3652,25 @@ def _pooled_claimability_state(*, drop: dict, drop_id: str, user_region: str | N
         return {"claimable": False, "sold_out": True, "remaining": 0, "reason": "pool_empty"}
 
     if is_public_pool(drop) and pools == ["public"] and uid is not None:
-        starts_at = _as_aware_utc(drop.get("startsAt")) or ref
-        access_result = check_public_pool_access(
-            user_id=uid,
-            public_pool_id=str(drop_id),
-            drop_open_time=starts_at,
-            now=ref,
-        )
-        assignment = access_result.get("assignment") or {}
-        if not assignment.get("access_allowed"):
-            return {"claimable": False, "sold_out": False, "remaining": 0, "reason": "shaping_denied"}
-        if access_result.get("status") == "too_early":
-            return {"claimable": False, "sold_out": False, "remaining": 0, "reason": "shaping_too_early"}
+        audience_mode = _drop_audience_mode(drop)
+        if audience_mode == AUDIENCE_MODE_PUBLIC:
+            _log_audience_mode(drop_id, uid, audience_mode, "allow", "segment_filter_bypassed")
+        else:
+            starts_at = _as_aware_utc(drop.get("startsAt")) or ref
+            access_result = check_public_pool_access(
+                user_id=uid,
+                public_pool_id=str(drop_id),
+                drop_open_time=starts_at,
+                now=ref,
+            )
+            assignment = access_result.get("assignment") or {}
+            if not assignment.get("access_allowed"):
+                _log_audience_mode(drop_id, uid, audience_mode, "deny", "shaping_denied")
+                return {"claimable": False, "sold_out": False, "remaining": 0, "reason": "shaping_denied"}
+            if access_result.get("status") == "too_early":
+                _log_audience_mode(drop_id, uid, audience_mode, "deny", "shaping_too_early")
+                return {"claimable": False, "sold_out": False, "remaining": 0, "reason": "shaping_too_early"}
+            _log_audience_mode(drop_id, uid, audience_mode, "allow", "segment_filter_passed")
 
     if (
         "public" in pools
@@ -6003,6 +6035,7 @@ def admin_create_drop():
 
     eligibility_raw = data.get("eligibility") or {}
     audience_raw = data.get("audience") or {}
+    audience_mode = _normalize_audience_mode(data.get("audience_mode"))
 
     elig_mode = eligibility_raw.get("mode") or "public"
     elig_allow_raw = eligibility_raw.get("allow") or []
@@ -6061,6 +6094,7 @@ def admin_create_drop():
         drop_doc["eligibility"] = clean_eligibility
 
     if dtype == "pooled":
+        drop_doc["audience_mode"] = audience_mode
         drop_doc["public_remaining"] = 0
         drop_doc["my_remaining"] = 0     
         wl_raw = data.get("whitelistUsernames") or []
@@ -6191,6 +6225,8 @@ def _admin_drop_summary(doc: dict, *, ref=None, skip_expired=False):
         "startsAt": starts.isoformat() if starts else None,
         "endsAt": ends.isoformat() if ends else None,
     }
+    if summary["type"] == "pooled":
+        summary["audience_mode"] = _drop_audience_mode(doc)
 
     audience_type = _drop_audience_type(doc)
     if audience_type and audience_type != "public":
