@@ -1983,6 +1983,299 @@ class PublicPoolShapingTests(unittest.TestCase):
         self.assertEqual(assignment["for_bot_segment_normalized"], "unclassified")
         self.assertEqual(assignment["probability"], 0.7)
 
+    def test_missing_audience_mode_keeps_legacy_segment_behavior(self):
+        import vouchers as m
+
+        now = datetime.now(timezone.utc)
+        drop = {
+            "_id": "drop-legacy-segment",
+            "type": "pooled",
+            "audience": "public",
+            "eligibility": {"mode": "public"},
+            "startsAt": now - timedelta(minutes=5),
+            "public_remaining": 1,
+            "my_remaining": 0,
+        }
+        orig_db = m.db
+        orig_users = m.users_collection
+        orig_assignments = m.public_pool_access_assignments_col
+        orig_random = m.random.random
+        try:
+            m.db = FakeDb([drop], [{"type": "pooled", "dropId": "drop-legacy-segment", "status": "free", "pool": "public"}])
+            m.users_collection = FakeVouchersCollection([{"user_id": 501, "for_bot_segment": "Voucher Hunter"}])
+            m.public_pool_access_assignments_col = self._SimpleCollection()
+            m.random.random = lambda: 0.99
+            with Flask(__name__).app_context():
+                state = m._pooled_claimability_state(
+                    drop=drop,
+                    drop_id="drop-legacy-segment",
+                    user_region="Thailand",
+                    uid=501,
+                    is_my_user=False,
+                    ref=now,
+                )
+            self.assertFalse(state["claimable"])
+            self.assertEqual(state["reason"], "shaping_denied")
+        finally:
+            m.db = orig_db
+            m.users_collection = orig_users
+            m.public_pool_access_assignments_col = orig_assignments
+            m.random.random = orig_random
+
+    def test_segment_audience_mode_keeps_segment_filter(self):
+        import vouchers as m
+
+        now = datetime.now(timezone.utc)
+        drop = {
+            "_id": "drop-explicit-segment",
+            "type": "pooled",
+            "audience": "public",
+            "audience_mode": "segment",
+            "eligibility": {"mode": "public"},
+            "startsAt": now - timedelta(minutes=5),
+            "public_remaining": 1,
+            "my_remaining": 0,
+        }
+        orig_db = m.db
+        orig_users = m.users_collection
+        orig_assignments = m.public_pool_access_assignments_col
+        orig_random = m.random.random
+        try:
+            m.db = FakeDb([drop], [{"type": "pooled", "dropId": "drop-explicit-segment", "status": "free", "pool": "public"}])
+            m.users_collection = FakeVouchersCollection([{"user_id": 502, "for_bot_segment": "Voucher Hunter"}])
+            m.public_pool_access_assignments_col = self._SimpleCollection()
+            m.random.random = lambda: 0.99
+            with Flask(__name__).app_context():
+                state = m._pooled_claimability_state(
+                    drop=drop,
+                    drop_id="drop-explicit-segment",
+                    user_region="Thailand",
+                    uid=502,
+                    is_my_user=False,
+                    ref=now,
+                )
+            self.assertFalse(state["claimable"])
+            self.assertEqual(state["reason"], "shaping_denied")
+        finally:
+            m.db = orig_db
+            m.users_collection = orig_users
+            m.public_pool_access_assignments_col = orig_assignments
+            m.random.random = orig_random
+
+    def test_public_audience_mode_bypasses_segment_filter_for_voucher_hunter(self):
+        import vouchers as m
+
+        now = datetime.now(timezone.utc)
+        drop = {
+            "_id": "drop-open-fcfs",
+            "type": "pooled",
+            "audience": "public",
+            "audience_mode": "public",
+            "eligibility": {"mode": "public"},
+            "startsAt": now - timedelta(minutes=5),
+            "public_remaining": 1,
+            "my_remaining": 0,
+        }
+        orig_db = m.db
+        orig_users = m.users_collection
+        orig_assignments = m.public_pool_access_assignments_col
+        orig_random = m.random.random
+        try:
+            m.db = FakeDb([drop], [{"type": "pooled", "dropId": "drop-open-fcfs", "status": "free", "pool": "public"}])
+            m.users_collection = FakeVouchersCollection([{"user_id": 503, "for_bot_segment": "Voucher Hunter"}])
+            m.public_pool_access_assignments_col = self._SimpleCollection()
+            m.random.random = lambda: 0.99
+            with Flask(__name__).app_context():
+                state = m._pooled_claimability_state(
+                    drop=drop,
+                    drop_id="drop-open-fcfs",
+                    user_region="Thailand",
+                    uid=503,
+                    is_my_user=False,
+                    ref=now,
+                )
+            self.assertTrue(state["claimable"])
+            self.assertEqual(state["reason"], "ok")
+            self.assertEqual(m.public_pool_access_assignments_col.docs, [])
+        finally:
+            m.db = orig_db
+            m.users_collection = orig_users
+            m.public_pool_access_assignments_col = orig_assignments
+            m.random.random = orig_random
+
+    def test_public_audience_mode_still_blocks_unsubscribed_user(self):
+        import vouchers as m
+
+        app = Flask(__name__)
+        now = datetime.now(timezone.utc)
+        drop = {
+            "_id": "drop-public-unsub",
+            "type": "pooled",
+            "audience": "public",
+            "audience_mode": "public",
+            "eligibility": {"mode": "public"},
+            "status": "active",
+            "startsAt": now - timedelta(minutes=5),
+            "endsAt": now + timedelta(minutes=5),
+            "public_remaining": 1,
+            "my_remaining": 0,
+        }
+        orig_extract = m.extract_raw_init_data_from_query
+        orig_verify = m.verify_telegram_init_data
+        orig_db = m.db
+        orig_users = m.users_collection
+        orig_dedup = m._acquire_request_dedup_lock
+        orig_load_user_context = m.load_user_context
+        orig_is_drop_allowed = m.is_drop_allowed
+        orig_is_user_eligible = m.is_user_eligible_for_drop
+        orig_subscribed = m.check_channel_subscribed
+        try:
+            m.extract_raw_init_data_from_query = lambda req: "ok"
+            m.verify_telegram_init_data = lambda init_data: (True, {"user": '{"id": 601, "username": "u601"}'}, "ok")
+            m.db = FakeDb([drop], [{"type": "pooled", "dropId": "drop-public-unsub", "status": "free", "pool": "public"}])
+            m.users_collection = FakeVouchersCollection([{"user_id": 601, "region": "Thailand", "for_bot_segment": "Voucher Hunter"}])
+            m._acquire_request_dedup_lock = lambda **kwargs: True
+            m.load_user_context = lambda **kwargs: {}
+            m.is_drop_allowed = lambda *args, **kwargs: True
+            m.is_user_eligible_for_drop = lambda *args, **kwargs: True
+            m.check_channel_subscribed = lambda uid: False
+            with app.test_request_context("/vouchers/claim?init_data=ok", method="POST", json={"dropId": "drop-public-unsub"}):
+                resp, status = m.api_claim()
+            self.assertEqual(status, 403)
+            self.assertEqual(resp.get_json().get("code"), "not_subscribed")
+        finally:
+            m.extract_raw_init_data_from_query = orig_extract
+            m.verify_telegram_init_data = orig_verify
+            m.db = orig_db
+            m.users_collection = orig_users
+            m._acquire_request_dedup_lock = orig_dedup
+            m.load_user_context = orig_load_user_context
+            m.is_drop_allowed = orig_is_drop_allowed
+            m.is_user_eligible_for_drop = orig_is_user_eligible
+            m.check_channel_subscribed = orig_subscribed
+
+    def test_public_audience_mode_still_returns_duplicate_claim_idempotently(self):
+        import vouchers as m
+
+        app = Flask(__name__)
+        now = datetime.now(timezone.utc)
+        drop = {
+            "_id": "drop-public-dup",
+            "type": "pooled",
+            "audience": "public",
+            "audience_mode": "public",
+            "eligibility": {"mode": "public"},
+            "status": "active",
+            "startsAt": now - timedelta(minutes=5),
+            "endsAt": now + timedelta(minutes=5),
+            "public_remaining": 1,
+            "my_remaining": 0,
+        }
+        orig_extract = m.extract_raw_init_data_from_query
+        orig_verify = m.verify_telegram_init_data
+        orig_db = m.db
+        orig_users = m.users_collection
+        orig_claims = m.voucher_claims_col
+        orig_dedup = m._acquire_request_dedup_lock
+        orig_load_user_context = m.load_user_context
+        orig_is_drop_allowed = m.is_drop_allowed
+        orig_is_user_eligible = m.is_user_eligible_for_drop
+        orig_subscribed = m.check_channel_subscribed
+        orig_should_enforce = m._should_enforce_session_cooldown
+        try:
+            m.extract_raw_init_data_from_query = lambda req: "ok"
+            m.verify_telegram_init_data = lambda init_data: (True, {"user": '{"id": 602, "username": "u602"}'}, "ok")
+            m.db = FakeDb([drop], [{"type": "pooled", "dropId": "drop-public-dup", "status": "free", "pool": "public"}])
+            m.users_collection = FakeVouchersCollection([{"user_id": 602, "region": "Thailand", "for_bot_segment": "Voucher Hunter"}])
+            m.voucher_claims_col = FakeSimpleCollection([
+                {"drop_id": "drop-public-dup", "user_id": 602, "status": "claimed", "voucher_code": "OPEN-1", "claimed_at": now}
+            ])
+            m._acquire_request_dedup_lock = lambda **kwargs: True
+            m.load_user_context = lambda **kwargs: {}
+            m.is_drop_allowed = lambda *args, **kwargs: True
+            m.is_user_eligible_for_drop = lambda *args, **kwargs: True
+            m.check_channel_subscribed = lambda uid: True
+            m._should_enforce_session_cooldown = lambda *args, **kwargs: False
+            with app.test_request_context("/vouchers/claim?init_data=ok", method="POST", json={"dropId": "drop-public-dup"}):
+                resp, status = m.api_claim()
+            payload = resp.get_json()
+            self.assertEqual(status, 200)
+            self.assertEqual(payload.get("code"), "OPEN-1")
+        finally:
+            m.extract_raw_init_data_from_query = orig_extract
+            m.verify_telegram_init_data = orig_verify
+            m.db = orig_db
+            m.users_collection = orig_users
+            m.voucher_claims_col = orig_claims
+            m._acquire_request_dedup_lock = orig_dedup
+            m.load_user_context = orig_load_user_context
+            m.is_drop_allowed = orig_is_drop_allowed
+            m.is_user_eligible_for_drop = orig_is_user_eligible
+            m.check_channel_subscribed = orig_subscribed
+            m._should_enforce_session_cooldown = orig_should_enforce
+
+    def test_admin_create_drop_invalid_audience_mode_normalizes_to_segment(self):
+        import vouchers as m
+
+        class _InsertableDrops(FakeDropsCollection):
+            def insert_one(self, doc):
+                stored = dict(doc)
+                stored["_id"] = "created-drop"
+                self.docs["created-drop"] = stored
+
+                class R:
+                    inserted_id = "created-drop"
+
+                return R()
+
+        class _InsertableVouchers(FakeVouchersCollection):
+            def insert_many(self, docs, ordered=False):  # noqa: ARG002
+                start = len(self.docs) + 1
+                for idx, doc in enumerate(docs, start=start):
+                    item = dict(doc)
+                    item.setdefault("_id", idx)
+                    self.docs.append(item)
+
+                class R:
+                    inserted_ids = list(range(start, start + len(docs)))
+
+                return R()
+
+        class _Db:
+            def __init__(self):
+                self.drops = _InsertableDrops([])
+                self.vouchers = _InsertableVouchers([])
+
+            def __getitem__(self, _name):
+                return FakeSimpleCollection([])
+
+        app = Flask(__name__)
+        orig_db = m.db
+        orig_require_admin = m.require_admin
+        try:
+            fake_db = _Db()
+            m.db = fake_db
+            m.require_admin = lambda: ({"id": 1}, None)
+            with app.test_request_context(
+                "/v2/miniapp/admin/drops",
+                method="POST",
+                json={
+                    "name": "Bad audience mode",
+                    "type": "pooled",
+                    "startsAtLocal": "2026-04-22 12:00:00",
+                    "audience_mode": "everyone-now",
+                    "codes": ["BADMODE-1"],
+                },
+            ):
+                resp = m.admin_create_drop()
+            payload, status = resp if isinstance(resp, tuple) else (resp, 200)
+            self.assertEqual(status, 200)
+            self.assertEqual(payload.get_json().get("status"), "ok")
+            self.assertEqual(fake_db.drops.docs["created-drop"]["audience_mode"], "segment")
+        finally:
+            m.db = orig_db
+            m.require_admin = orig_require_admin
+
 
 if __name__ == "__main__":
     unittest.main()
