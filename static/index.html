@@ -8,8 +8,44 @@
   <script>
     window.UI_VERSION = new URLSearchParams(window.location.search).get("v") || "unknown";
     console.info("UI_VERSION", window.UI_VERSION);
-    console.info("[MINIAPP] loaded static/index.html v=" + (new URLSearchParams(location.search).get("v")||""));    
-  </script>  
+    console.info("[MINIAPP] loaded static/index.html v=" + (new URLSearchParams(location.search).get("v")||""));
+
+    // Telegram-native alert with graceful fallback to window.alert.
+    // Note: showAlert is non-blocking — pass onClose for follow-up actions (e.g. reload).
+    window.tgAlert = function (message, onClose) {
+      const text = String(message ?? "");
+      try {
+        const wa = window.Telegram?.WebApp;
+        if (wa && typeof wa.showAlert === "function" && (!wa.isVersionAtLeast || wa.isVersionAtLeast("6.2"))) {
+          wa.showAlert(text, onClose);
+          return;
+        }
+      } catch (_) {}
+      window.alert(text);
+      if (typeof onClose === "function") onClose();
+    };
+
+    window.hapticNotify = function (type) {
+      try { window.Telegram?.WebApp?.HapticFeedback?.notificationOccurred?.(type); } catch (_) {}
+    };
+
+    window.hapticImpact = function (style) {
+      try { window.Telegram?.WebApp?.HapticFeedback?.impactOccurred?.(style || "light"); } catch (_) {}
+    };
+
+    // Temporarily swap a button label (e.g. "✓ Copied"), then restore it.
+    window.flashButtonLabel = function (btn, label, ms = 1600) {
+      if (!btn) return;
+      if (btn.dataset.flashTimer) clearTimeout(Number(btn.dataset.flashTimer));
+      if (!("originalLabel" in btn.dataset)) btn.dataset.originalLabel = btn.textContent;
+      btn.textContent = label;
+      btn.dataset.flashTimer = String(setTimeout(() => {
+        btn.textContent = btn.dataset.originalLabel;
+        delete btn.dataset.originalLabel;
+        delete btn.dataset.flashTimer;
+      }, ms));
+    };
+  </script>
   <style>
     @import url("https://fonts.googleapis.com/css2?family=Syne:wght@600;700;800&family=DM+Sans:wght@400;500;600;700&display=swap");
 
@@ -791,17 +827,25 @@
 
     /* === ADMIN READABILITY FINAL FIX === */
 
-    /* Light admin sections */
+    /* Admin sections follow the app's dark theme */
     #admin-panel #adm_drop_container,
     #admin-affiliate-pools,
     #admin-affiliate-leaderboard-wrap,
     #aff_pool_summary,
     #aff_pending,
     #aff_kpis_wrap {
-      color: #111827 !important;
+      color: var(--text-main) !important;
     }
 
-    /* Readable text inside light admin sections */
+    /* Darken inline white admin cards so they match the rest of the app */
+    #admin-panel #adm_drop_container > div[style*="background:#fff"],
+    #admin-affiliate-pools[style*="background:#fff"],
+    #admin-affiliate-leaderboard-wrap[style*="background:#fff"] {
+      background: var(--bg-card-alt) !important;
+      border-color: var(--border-light) !important;
+    }
+
+    /* Readable text inside admin sections */
     #admin-panel #adm_drop_container h4,
     #admin-panel #adm_drop_container h5,
     #admin-panel #adm_drop_container p,
@@ -820,10 +864,10 @@
     #admin-affiliate-leaderboard-wrap h5,
     #admin-affiliate-leaderboard-wrap th,
     #admin-affiliate-leaderboard-wrap td {
-      color: #111827 !important;
+      color: var(--text-main) !important;
     }
 
-    /* Muted/help text in light sections */
+    /* Muted/help text in admin sections */
     #admin-panel #adm_drop_container p[style],
     #admin-panel #adm_drop_container span[style],
     #admin-panel #adm_drop_container label[style],
@@ -834,7 +878,7 @@
     #admin-affiliate-pools small[style],
     #admin-affiliate-pools .text-muted,
     #admin-affiliate-leaderboard-wrap .leaderboard-empty {
-      color: #4b5563 !important;
+      color: var(--text-muted) !important;
     }
 
     /* Dark controls */
@@ -851,9 +895,9 @@
       color: #94a3b8 !important;
     }
 
-    /* Native file input stays readable on light background */
+    /* Native file input stays readable on dark background */
     #admin-panel input[type="file"] {
-      color: #111827 !important;
+      color: var(--text-main) !important;
       background: transparent !important;
       border: none !important;
     }
@@ -887,11 +931,11 @@
 
     /* === ADMIN PANEL CONTRAST REFINEMENT === */
 
-    /* Light-section defaults: voucher-drop heading + white form cards */
+    /* Voucher-drop heading + form cards on dark theme */
     #admin-panel #adm_drop_container > h4,
     #admin-panel #adm_drop_container > p,
     #admin-panel #adm_drop_container > div[style*="background:#fff"] {
-      color: #111827;
+      color: var(--text-main);
     }
 
     #admin-panel #adm_drop_container > div[style*="background:#fff"] label,
@@ -900,16 +944,16 @@
     #admin-panel #adm_drop_container > div[style*="background:#fff"] span,
     #admin-panel #adm_drop_container > div[style*="background:#fff"] small,
     #admin-panel #adm_drop_container > div[style*="background:#fff"] li {
-      color: #111827;
+      color: var(--text-main);
     }
 
-    /* Force inline-muted helper text in light admin forms to readable dark text */
+    /* Force inline-muted helper text in admin forms to readable light text */
     #admin-panel #adm_drop_container > div[style*="background:#fff"] label[style],
     #admin-panel #adm_drop_container > div[style*="background:#fff"] p[style],
     #admin-panel #adm_drop_container > div[style*="background:#fff"] span[style],
     #admin-panel #adm_drop_container > div[style*="background:#fff"] h5[style],
     #admin-panel #adm_drop_container > div[style*="background:#fff"] small[style] {
-      color: #374151 !important;
+      color: var(--text-muted) !important;
     }
 
     /* Inputs remain dark for strong field contrast */
@@ -970,59 +1014,59 @@
 
     .admin-monitoring-block {
       margin-top: 14px;
-      background:#fff;
-      border:1px solid #ddd;
-      border-radius:8px;
-      padding:12px;
+      background: var(--bg-card-alt);
+      border: 1px solid var(--border-light);
+      border-radius: 8px;
+      padding: 12px;
     }
 
-    /* Existing Drops monitoring table: force readable light-card theme */
+    /* Existing Drops monitoring table: readable dark-card theme */
     #admin-panel .admin-monitoring-block {
-      background: #ffffff !important;
-      color: #111827 !important;
+      background: var(--bg-card-alt) !important;
+      color: var(--text-main) !important;
     }
 
     #admin-panel .admin-monitoring-block h5 {
-      color: #111827 !important;
+      color: var(--text-main) !important;
       opacity: 1 !important;
     }
 
     #admin-panel .admin-monitoring-block #adm_table {
-      background: #ffffff !important;
-      color: #111827 !important;
+      background: transparent !important;
+      color: var(--text-main) !important;
       opacity: 1 !important;
     }
 
     #admin-panel .admin-monitoring-block #adm_table thead,
     #admin-panel .admin-monitoring-block #adm_table thead tr {
-      background: #e5e7eb !important;
-      color: #111827 !important;
+      background: rgba(255, 255, 255, 0.07) !important;
+      color: var(--text-main) !important;
       opacity: 1 !important;
     }
 
     #admin-panel .admin-monitoring-block #adm_table tbody,
     #admin-panel .admin-monitoring-block #adm_table tbody tr {
-      background: #ffffff !important;
-      color: #111827 !important;
+      background: transparent !important;
+      color: var(--text-main) !important;
       opacity: 1 !important;
     }
 
     #admin-panel .admin-monitoring-block #adm_table tbody tr:nth-child(even) {
-      background: #f9fafb !important;
+      background: rgba(255, 255, 255, 0.03) !important;
     }
 
     #admin-panel .admin-monitoring-block #adm_table th,
     #admin-panel .admin-monitoring-block #adm_table td,
     #admin-panel .admin-monitoring-block #adm_table th *,
     #admin-panel .admin-monitoring-block #adm_table td * {
-      color: #111827 !important;
+      color: var(--text-main) !important;
       opacity: 1 !important;
       text-shadow: none !important;
     }
 
     #admin-panel .admin-monitoring-block #adm_table a,
     #admin-panel .admin-monitoring-block #adm_table code {
-      color: #0f172a !important;
+      color: var(--ap-orange-strong) !important;
       opacity: 1 !important;
     }
 
@@ -1030,7 +1074,7 @@
     #admin-panel .admin-monitoring-block #adm_table [style*="color:#666"],
     #admin-panel .admin-monitoring-block #adm_table [style*="color: #666"],
     #admin-panel .admin-monitoring-block #adm_table [style*="opacity"] {
-      color: #374151 !important;
+      color: var(--text-muted) !important;
       opacity: 1 !important;
     }
 
@@ -1183,8 +1227,8 @@
       <span class="wm-advant">ADVANT</span><span class="wm-play">PLAY</span>
     </div>
     <div class="header-profile-wrap">
-      <div class="user-chip" id="header-user-chip" style="display:none;">
-        <div class="avatar">👤</div>
+      <div class="user-chip" id="header-user-chip" style="display:none;" role="button" tabindex="0" aria-label="View your rank and stats">
+        <div class="avatar" aria-hidden="true">👤</div>
         <span id="header-username"></span>
       </div>
       <div id="header-rank-hint" class="header-rank-hint">Tap to view rank</div>
@@ -1205,7 +1249,7 @@
         <h3>🌍 Select Your Region</h3>
       </div>
       <p class="section-subtext">Select your region to continue. You won’t be asked again.</p>
-      <select id="region-select">
+      <select id="region-select" aria-label="Select your region">
         <option value="">-- Please choose --</option>
         <option value="Malaysia">🇲🇾 Malaysia</option>
         <option value="Thailand">🇹🇭 Thailand</option>
@@ -1235,7 +1279,7 @@
     <div id="campaign-bonus-voucher" style="display: none; margin-top: 16px;">
       <h4>🎉 Campaign Reward</h4>
       <p id="campaign-voucher-code">Coming soon…</p>
-      <button class="btn btn-ghost" onclick="copyCampaignVoucherCode()">📋 Copy to clipboard</button>
+      <button id="copy-campaign-voucher-btn" class="btn btn-ghost" onclick="copyCampaignVoucherCode()" aria-label="Copy voucher code to clipboard">📋 Copy to clipboard</button>
     </div>
 
     <div id="bonus-voucher" style="display: none; margin-top: 16px;">
@@ -1294,8 +1338,9 @@
     <div class="section" id="referral-section">
       <h3>🔗 Invite Friends & Unlock Rewards</h3>
       <div class="referral-cta-group">
-        <button class="btn btn-primary" onclick="getReferral()">Invite Friends / Get Referral Link</button>
-        <button class="btn btn-ghost" onclick="copyReferral()">📋 Copy to clipboard</button>
+        <button id="get-referral-btn" class="btn btn-primary" onclick="getReferral()">Invite Friends / Get Referral Link</button>
+        <button id="share-referral-btn" class="btn btn-ghost" onclick="shareReferralViaTelegram()" aria-label="Share referral link via Telegram">📤 Share via Telegram</button>
+        <button id="copy-referral-btn" class="btn btn-ghost" onclick="copyReferral()" aria-label="Copy referral link to clipboard">📋 Copy to clipboard</button>
       </div>
       <p id="referral-link">Click the button to get your link</p>
       <div class="referral-progress-card" aria-live="polite">
@@ -1356,7 +1401,7 @@
     <button class="btn btn-ghost" onclick="loadLeaderboard({ forceRefresh: true })">View Leaderboard</button>
     <div style="display:flex;gap:8px;align-items:center;font-size:12px;color:#666;margin-top:6px;flex-wrap:wrap;">
       <span id="leaderboard-cadence" style="opacity:0.7;">• 🔄 Refresh every 5 minutes</span>
-      <span id="leaderboard-loading" style="display:none;">Refreshing…</span>
+      <span id="leaderboard-loading" style="display:none;" role="status" aria-live="polite">Refreshing…</span>
     </div>
     <div class="leaderboard-tabs">
       <button id="leaderboard-tab-default" type="button" class="btn btn-ghost leaderboard-tab-btn active">XP + Ref</button>
@@ -1829,7 +1874,7 @@
         try { localStorage.setItem("X-Admin-Secret", val.trim()); } catch {}
         const ok = await validateSecret();
         if (ok) {
-          alert("✅ Secret accepted. Enabling admin panel…");
+          tgAlert("✅ Secret accepted. Enabling admin panel…");
           const panel = document.getElementById("admin-panel");
           if (panel) panel.style.display = "block";
           const affiliatePools = document.getElementById("admin-affiliate-pools");
@@ -1837,7 +1882,7 @@
           try { adm_list && adm_list(); } catch {}
         } else {
           try { localStorage.removeItem("X-Admin-Secret"); } catch {}
-          alert("❌ Secret rejected (401). Please try again.");
+          tgAlert("❌ Secret rejected (401). Please try again.");
         }
       }
 
@@ -1980,8 +2025,7 @@
         btn.style.cssText = "padding:6px 10px; border:1px solid #ddd; background:#fff; border-radius:8px; cursor:pointer;";
         btn.onclick = () => {
           try { localStorage.removeItem('X-Admin-Secret'); } catch {}
-          alert("Admin mode cleared. Reloading…");
-          location.reload();
+          tgAlert("Admin mode cleared. Reloading…", () => location.reload());
         };
         const hasAdmin = !!getAdminSecret();
         if (hasAdmin) {
@@ -2447,13 +2491,13 @@
       if (eligMode === "tier" || eligMode === "user_id") {
         const parts = eligValues.split(/[\n,]/).map(x => x.trim()).filter(Boolean);
         if (!parts.length) {
-          alert("Please provide eligibility values."); return;
+          tgAlert("Please provide eligibility values."); return;
         }
         if (eligMode === "tier") {
           eligibility.allow = parts;
         } else {
           const ids = parts.map(Number).filter(n => Number.isFinite(n));
-          if (!ids.length) { alert("Please provide numeric user IDs."); return; }
+          if (!ids.length) { tgAlert("Please provide numeric user IDs."); return; }
           eligibility.allow = ids;
         }
       }
@@ -2475,7 +2519,7 @@
       }
 
       if (!payload.name || !payload.startsAtLocal) {
-        alert("Name and Start Time are required."); return;
+        tgAlert("Name and Start Time are required."); return;
       }
 
       if (type === "personalised") {
@@ -2485,12 +2529,12 @@
           const [u, c] = line.split(/[,\t]/).map(s => s?.trim());
           return u && c ? { username: u, code: c } : null;
         }).filter(Boolean);
-        if (!assignments.length) { alert("Please provide username,code pairs."); return; }
+        if (!assignments.length) { tgAlert("Please provide username,code pairs."); return; }
         payload.assignments = assignments;
       } else {
         const codes = (document.querySelector("#adm_codes_text").value || "")
           .split(/\r?\n/).map(x => x.trim()).filter(Boolean);
-        if (!codes.length) { alert("Please provide codes."); return; }
+        if (!codes.length) { tgAlert("Please provide codes."); return; }
         payload.codes = codes;
         payload.pool = document.querySelector("#adm_create_pool")?.value || "public";        
         const wl = splitList(document.querySelector("#adm_wl_text").value);
@@ -2499,7 +2543,7 @@
 
       try {
         const userId = getAdminUserId();
-        if (!userId) { alert("Missing admin user id. Open via Telegram to continue."); return; }
+        if (!userId) { tgAlert("Missing admin user id. Open via Telegram to continue."); return; }
         const tail = buildAdminQueryTail();
         const res = await v2Fetch(`${API_V2}/admin/drops${tail}`, {
           method: "POST",
@@ -2508,10 +2552,10 @@
 
         const data = await res.json();
         if (!res.ok || data.status !== "ok") throw new Error(JSON.stringify(data));
-        alert(`Created drop: ${data.dropId}`);
+        tgAlert(`Created drop: ${data.dropId}`);
         adm_list();
       } catch (e) {
-        alert(`Create failed: ${e.message}`);
+        tgAlert(`Create failed: ${e.message}`);
       }
     }
 
@@ -2558,7 +2602,7 @@
       const dropId = document.getElementById("adm_add_drop_id")?.value.trim();
       const kind = document.getElementById("adm_add_kind")?.value;
       const raw = document.getElementById("adm_add_text")?.value.trim();
-      if (!dropId || !raw) { alert("Drop ID and data are required."); return; }
+      if (!dropId || !raw) { tgAlert("Drop ID and data are required."); return; }
 
       let payload = {};
       if (kind === "personalised") {
@@ -2566,18 +2610,18 @@
           const [u, c] = line.split(/[,\t]/).map(x => x?.trim());
           return u && c ? { username: u, code: c } : null;
         }).filter(Boolean);
-        if (!assignments.length) { alert("Provide username,code lines."); return; }
+        if (!assignments.length) { tgAlert("Provide username,code lines."); return; }
         payload = { type: "personalised", assignments };
       } else {
         const codes = raw.split(/\r?\n/).map(x => x.trim()).filter(Boolean);
-        if (!codes.length) { alert("Provide one CODE per line."); return; }
+        if (!codes.length) { tgAlert("Provide one CODE per line."); return; }
         const pool = document.getElementById("adminPool")?.value || "public";
         payload = { type: "pooled", pool, codes };
       }
 
       try {
         const userId = getAdminUserId();
-        if (!userId) { alert("Missing admin user id. Open via Telegram to continue."); return; }
+        if (!userId) { tgAlert("Missing admin user id. Open via Telegram to continue."); return; }
         const tail = buildAdminQueryTail();
         const res = await v2Fetch(`${API_V2}/admin/drops/${dropId}/codes${tail}`, {
           method: "POST",
@@ -2585,10 +2629,10 @@
         });
         const data = await res.json();
         if (!res.ok || data.status !== "ok") throw new Error(JSON.stringify(data));
-        alert("Added successfully.");
+        tgAlert("Added successfully.");
         adm_list();
       } catch (e) {
-        alert(`Add failed: ${e.message}`);
+        tgAlert(`Add failed: ${e.message}`);
       }
     };
 
@@ -2793,13 +2837,14 @@
         badge.style.display = "none";
       }
       toast.classList.add("show");
+      hapticNotify("success");
       if (_xpToastTimer) clearTimeout(_xpToastTimer);
       _xpToastTimer = setTimeout(() => toast.classList.remove("show"), 3500);
     }
 
     async function checkIn() {
       if (!hasRegionSelected()) {
-        alert("❌ Please select and lock your region before check-in.");
+        tgAlert("❌ Please select and lock your region before check-in.");
         return;
       }
 
@@ -2843,6 +2888,7 @@
 
       } catch (err) {
         console.error("Check-in error:", err);
+        hapticNotify("error");
         document.getElementById("checkin-result").innerText = "❌ Error connecting to server.";
       }
     }
@@ -3079,11 +3125,18 @@
     
     async function getReferral() {
       if (!hasRegionSelected()) {
-        alert("❌ Please select and lock your region before generating a referral link.");
+        tgAlert("❌ Please select and lock your region before generating a referral link.");
         return;
       }
 
       const display = document.getElementById("referral-link");
+      const btn = document.getElementById("get-referral-btn");
+      const originalLabel = btn ? btn.textContent : "";
+      if (btn) {
+        btn.disabled = true;
+        btn.setAttribute("aria-busy", "true");
+        btn.textContent = "Getting link…";
+      }
       try {
         const res = await fetch(`${API_BASE}/api/referral?user_id=${userId}&username=${username}`);
         const rawText = await res.text();
@@ -3098,13 +3151,20 @@
         const link = data.referral_link;
         if (link) {
           latestReferralLink = link;
+          hapticNotify("success");
           display.innerText = link + "\n👆 Tap 'Copy to Clipboard' to copy";
-          loadReferralProgress();          
+          loadReferralProgress();
         } else {
           display.innerText = "❌ Failed to get link.";
         }
       } catch {
         display.innerText = "❌ Error connecting to server.";
+      } finally {
+        if (btn) {
+          btn.disabled = false;
+          btn.removeAttribute("aria-busy");
+          btn.textContent = originalLabel;
+        }
       }
     }
 
@@ -3174,26 +3234,51 @@
       }
     }
 
+    const REFERRAL_SHARE_TEXT = `Join AdvantPlay 👇
+✔ Daily XP rewards
+✔ Surprise voucher drops
+✔ Weekly bonus for Top 10
+
+Active players win more.`;
+
+    function buildReferralCaption(link) {
+      return `${REFERRAL_SHARE_TEXT}
+👉 ${link}`;
+    }
+
     async function copyReferral() {
       if (!latestReferralLink) {
-        alert("Please generate your referral link first.");
+        tgAlert("Please generate your referral link first.");
         return;
       }
 
       try {
-        const caption = `Join AdvantPlay 👇
-✔ Daily XP rewards  
-✔ Surprise voucher drops  
-✔ Weekly bonus for Top 10  
-
-Active players win more.
-👉 ${latestReferralLink}`;
-
-        await navigator.clipboard.writeText(caption);
-        alert("Copy successful");
+        await copyTextToClipboard(buildReferralCaption(latestReferralLink));
+        flashButtonLabel(document.getElementById("copy-referral-btn"), "✓ Copied");
+        showCopySuccessToast();
       } catch {
-        alert("❌ Copy failed. Please copy manually.");
+        hapticNotify("error");
+        tgAlert("❌ Copy failed. Please copy manually.");
       }
+    }
+
+    async function shareReferralViaTelegram() {
+      if (!hasRegionSelected()) {
+        tgAlert("❌ Please select and lock your region before sharing your referral link.");
+        return;
+      }
+
+      if (!latestReferralLink) {
+        await getReferral();
+      }
+      if (!latestReferralLink) {
+        tgAlert("❌ Could not get your referral link. Please try again.");
+        return;
+      }
+
+      hapticImpact("light");
+      const shareUrl = `https://t.me/share/url?url=${encodeURIComponent(latestReferralLink)}&text=${encodeURIComponent(REFERRAL_SHARE_TEXT)}`;
+      openTelegramSafeLink(shareUrl);
     }
 
 
@@ -3244,6 +3329,7 @@ Active players win more.
         ? "คัดลอกโค้ดแล้ว 🎉"
         : "Code copied 🎉";
 
+      hapticNotify("success");
       showToast(msg);
     }
 
@@ -3255,23 +3341,24 @@ Active players win more.
       showToast(msg);
     }
 
-    function copyVoucherCode(code) {
+    function copyVoucherCode(code, btn) {
       const value = (code || "").trim();
       const codeEl = document.getElementById("voucher-code");
       const fallback = codeEl ? codeEl.innerText.trim() : "";
       const codeToCopy = value || fallback;
       const lower = codeToCopy.toLowerCase();
       if (!codeToCopy || lower.includes("coming soon")) {
-        alert("❌ No voucher code available to copy yet.");
+        tgAlert("❌ No voucher code available to copy yet.");
         return;
       }
 
       navigator.clipboard.writeText(codeToCopy)
         .then(() => {
+          flashButtonLabel(btn, "✓ Copied");
           showCopySuccessToast();
           setTimeout(showRetentionToast, 800);
         })
-        .catch(() => alert("Failed to copy voucher."));
+        .catch(() => { hapticNotify("error"); tgAlert("Failed to copy voucher."); });
     }
 
     function renderAffiliateRewards(rewards) {
@@ -3314,7 +3401,7 @@ Active players win more.
         btn.className = "btn btn-ghost";
         btn.textContent = "📋 Copy to clipboard";
         btn.dataset.copyCode = codeText;
-        btn.onclick = () => copyVoucherCode(codeText);
+        btn.onclick = () => copyVoucherCode(codeText, btn);
         card.appendChild(btn);
 
         listEl.appendChild(card);
@@ -3326,16 +3413,17 @@ Active players win more.
       const codeEl = document.getElementById("campaign-voucher-code");
       const code = codeEl ? codeEl.innerText.trim() : "";
       if (!code || code.toLowerCase().includes("coming soon")) {
-        alert("❌ No voucher code available to copy yet.");
+        tgAlert("❌ No voucher code available to copy yet.");
         return;
       }
 
       navigator.clipboard.writeText(code)
         .then(() => {
+          flashButtonLabel(document.getElementById("copy-campaign-voucher-btn"), "✓ Copied");
           showCopySuccessToast();
           setTimeout(showRetentionToast, 800);
         })
-        .catch(() => alert("Failed to copy voucher."));
+        .catch(() => { hapticNotify("error"); tgAlert("Failed to copy voucher."); });
     }
 
     async function handleAdminAndVoucher() {
@@ -3882,6 +3970,7 @@ Active players win more.
     function renderClaimError(uiModel, options = {}) {
       const container = document.getElementById("claim-error");
       if (!container || !uiModel) return;
+      hapticNotify("error");
 
       if (claimErrorCountdownTimer) {
         clearInterval(claimErrorCountdownTimer);
@@ -4055,13 +4144,13 @@ Active players win more.
       if (!btn) return;
 
       const dropId = btn.getAttribute("data-id");
-      if (!dropId) { alert("No dropId on this row."); return; }
+      if (!dropId) { tgAlert("No dropId on this row."); return; }
 
       const op = btn.getAttribute("data-op");
 
       try {
         const userId = getAdminUserId();
-        if (!userId) { alert("Missing admin user id. Open via Telegram to continue."); return; }
+        if (!userId) { tgAlert("Missing admin user id. Open via Telegram to continue."); return; }
         const tail = buildAdminQueryTail();
 
         const res = await v2Fetch(`${API_V2}/admin/drops/${dropId}/actions${tail}`, {
@@ -4073,7 +4162,7 @@ Active players win more.
         try { payload = await res.json(); } catch {}
 
         if (res.status === 401) {
-          alert("Not authorized (401). Please set your Telegram username");
+          tgAlert("Not authorized (401). Please set your Telegram username");
           return;
         }
         if (!res.ok || (payload && payload.status !== "ok")) {
@@ -4081,7 +4170,7 @@ Active players win more.
         }
         adm_list && adm_list();
       } catch (err) {
-        alert(`Action failed: ${err.message}`);
+        tgAlert(`Action failed: ${err.message}`);
       }
     });
 
@@ -4114,13 +4203,13 @@ Active players win more.
         if (!_editDropId) return;
         const startsVal = document.getElementById("adm_edit_starts_at").value;
         const endsVal   = document.getElementById("adm_edit_ends_at").value;
-        if (!startsVal || !endsVal) { alert("Both start and end date/time are required."); return; }
+        if (!startsVal || !endsVal) { tgAlert("Both start and end date/time are required."); return; }
         const startsAt = toKLStringFromNative(startsVal);
         const endsAt   = toKLStringFromNative(endsVal);
-        if (!startsAt || !endsAt) { alert("Invalid date format."); return; }
+        if (!startsAt || !endsAt) { tgAlert("Invalid date format."); return; }
         try {
           const userId = getAdminUserId();
-          if (!userId) { alert("Missing admin user id. Open via Telegram to continue."); return; }
+          if (!userId) { tgAlert("Missing admin user id. Open via Telegram to continue."); return; }
           const tail = buildAdminQueryTail();
           const saveBtn = document.getElementById("adm_edit_dates_save");
           saveBtn.disabled = true;
@@ -4138,7 +4227,7 @@ Active players win more.
           _editDropId = null;
           adm_list && adm_list();
         } catch (err) {
-          alert(`Failed to update dates: ${err.message}`);
+          tgAlert(`Failed to update dates: ${err.message}`);
         } finally {
           const saveBtn = document.getElementById("adm_edit_dates_save");
           if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = "Save"; }
@@ -4156,7 +4245,7 @@ Active players win more.
       if (claimBtn.dataset.mode === "copy") {
         const code = claimBtn.dataset.copyCode || "";
         if (!code || code === "(no code)") {
-          alert("No code available to copy yet. Please claim first.");
+          tgAlert("No code available to copy yet. Please claim first.");
           return;
         }
         const oldText = claimBtn.textContent;
@@ -4171,13 +4260,13 @@ Active players win more.
           })
           .catch(() => {
             claimBtn.textContent = oldText;
-            alert("Unable to copy automatically. Please copy the code manually: " + code);
+            tgAlert("Unable to copy automatically. Please copy the code manually: " + code);
           });
         return;
       }
       
       if (!hasRegionSelected()) {
-        alert("❌ Please select and lock your region before claiming rewards.");
+        tgAlert("❌ Please select and lock your region before claiming rewards.");
         return;
       }
 
@@ -4340,7 +4429,7 @@ Active players win more.
           const copyMsg = copySuccess
             ? "\n\n✅ Code copied to clipboard."
             : "\n\n📋 Tap the copy button below if clipboard access is blocked.";
-          alert(`🎟️ Your code: ${codeText}\nClaimed at: ${claimedAt}${copyMsg}`);
+          tgAlert(`🎟️ Your code: ${codeText}\nClaimed at: ${claimedAt}${copyMsg}`);
           if (out?.claim_guide?.type === "welcome_voucher") {
             showWelcomeVoucherGuidePopup(out.claim_guide);
           }
@@ -4373,7 +4462,7 @@ Active players win more.
       e.stopImmediatePropagation();
 
       const dropId = (btn.dataset.copyDropid || btn.getAttribute("data-copy-dropid") || btn.dataset.dropid || "").trim();
-      if (!dropId) return alert("No dropId found.");
+      if (!dropId) return tgAlert("No dropId found.");
 
       const originalText = btn.textContent;      
       try {
@@ -4417,7 +4506,7 @@ Active players win more.
         || "";
 
       if (!code || code === "(no code)") {
-        alert("No code available to copy yet. Please claim first.");
+        tgAlert("No code available to copy yet. Please claim first.");
         return;
       }
       const originalText = copyBtn.textContent;
@@ -4433,7 +4522,7 @@ Active players win more.
         }, 2000);
       } catch (copyErr) {
         console.warn("Manual copy failed", copyErr);
-        alert("Unable to copy automatically. Please copy the code manually: " + code);
+        tgAlert("Unable to copy automatically. Please copy the code manually: " + code);
       }
     });
     let leaderboardInitOnce = false;
@@ -4984,11 +5073,11 @@ function setLeaderboardMeta(ts, { isStale = false } = {}) {
       const affiliateTabBtn = document.getElementById("leaderboard-tab-affiliate");
       if (defaultTabBtn && !defaultTabBtn.dataset.bound) {
         defaultTabBtn.dataset.bound = "true";
-        defaultTabBtn.addEventListener("click", () => setLeaderboardTab("default"));
+        defaultTabBtn.addEventListener("click", () => { hapticImpact("light"); setLeaderboardTab("default"); });
       }
       if (affiliateTabBtn && !affiliateTabBtn.dataset.bound) {
         affiliateTabBtn.dataset.bound = "true";
-        affiliateTabBtn.addEventListener("click", () => setLeaderboardTab("affiliate"));
+        affiliateTabBtn.addEventListener("click", () => { hapticImpact("light"); setLeaderboardTab("affiliate"); });
       }
       setLeaderboardTab("default");
 
@@ -5160,7 +5249,7 @@ ${referral}`;
       const amount = parseInt(document.getElementById("xp-amount").value.trim());
 
       if (!input || isNaN(amount)) {
-        alert("Please enter both @username and amount.");
+        tgAlert("Please enter both @username and amount.");
         return;
       }
 
@@ -5173,12 +5262,12 @@ ${referral}`;
           body: JSON.stringify({ user_id: input, xp: amount, idempotency_key: idempotencyKey })
         });
         const data = await res.json();
-        alert(data.message || "XP updated.");
+        tgAlert(data.message || "XP updated.");
         if (data.success) {
           loadLeaderboard();
         }
       } catch (err) {
-        alert("❌ Failed to connect to server.");
+        tgAlert("❌ Failed to connect to server.");
         console.error("Add XP error:", err);
       }
     }
@@ -5195,7 +5284,7 @@ ${referral}`;
       const code = document.getElementById("voucher-code-input").value.trim();
       const releaseAt = document.getElementById("voucher-expiry-input").value;
       if (!code || !releaseAt) {
-        alert("Please enter both voucher code and release time.");
+        tgAlert("Please enter both voucher code and release time.");
         return;
       }
       try {
@@ -5211,14 +5300,14 @@ ${referral}`;
         });
         const data = await res.json();
         if (data.status === "success") {
-          alert("✅ Voucher scheduled.");
+          tgAlert("✅ Voucher scheduled.");
           closeVoucherModal();
           handleAdminAndVoucher();
         } else {
-          alert("❌ " + (data.message || "Failed to schedule voucher."));
+          tgAlert("❌ " + (data.message || "Failed to schedule voucher."));
         }
       } catch (err) {
-        alert("❌ Failed to schedule voucher.");
+        tgAlert("❌ Failed to schedule voucher.");
         console.error("Voucher error:", err);
       }
     }
@@ -5278,7 +5367,7 @@ ${referral}`;
 
     async function setRegion() {
       const region = document.getElementById("region-select").value;
-      if (!region) { alert("Please select a region."); return; }
+      if (!region) { tgAlert("Please select a region."); return; }
 
       try {
         const res = await fetch(`${API_BASE}/api/set-region/${userId}`, {
@@ -5296,12 +5385,12 @@ ${referral}`;
           setStoredRegion(data.region || region);
           applyRegionGate(data.region || region);
           loadVouchers();
-          alert("Region saved and locked!");
+          tgAlert("Region saved and locked!");
         } else {
-          alert("❌ " + (data.error || "Failed to set region."));
+          tgAlert("❌ " + (data.error || "Failed to set region."));
         }
       } catch (err) {
-        alert("❌ Error saving region.");
+        tgAlert("❌ Error saving region.");
         console.error("Set region error:", err);
       }
     }
@@ -5313,9 +5402,9 @@ ${referral}`;
         const data = await res.json();
         if (!data.success) throw new Error(data.error || "Failed to load");
         const list = data.requests.map(r => `• @${r.username || r.user_id}`).join("\n");
-        alert(list || "No pending join requests.");
+        tgAlert(list || "No pending join requests.");
       } catch (e) {
-        alert("❌ Error loading join requests.");
+        tgAlert("❌ Error loading join requests.");
         console.error(e);
       }
     }
@@ -5334,7 +5423,7 @@ ${referral}`;
         a.remove();
         URL.revokeObjectURL(url);
       } catch (e) {
-        alert("❌ Error exporting CSV.");
+        tgAlert("❌ Error exporting CSV.");
         console.error(e);
       }
     }
@@ -5345,7 +5434,7 @@ ${referral}`;
     async function affUploadPool() {
       const selectedPoolId = String(document.getElementById("aff_pool_id").value || "").trim().toUpperCase();
       if (!ALLOWED_AFFILIATE_POOLS.includes(selectedPoolId)) {
-        alert("Invalid affiliate pool.");
+        tgAlert("Invalid affiliate pool.");
         return;
       }
       const body = {
@@ -5361,14 +5450,14 @@ ${referral}`;
         body: JSON.stringify(body),
       });
       const data = await res.json();
-      alert(data.status === "ok" ? `Uploaded ${data.inserted}/${data.received}` : `Upload failed: ${data.reason || 'error'}`);
+      tgAlert(data.status === "ok" ? `Uploaded ${data.inserted}/${data.received}` : `Upload failed: ${data.reason || 'error'}`);
       affLoadPoolSummary();
     }
 
     async function affLoadPoolSummary() {
       const selectedPoolId = String(document.getElementById("aff_pool_id").value || "").trim().toUpperCase();
       if (!ALLOWED_AFFILIATE_POOLS.includes(selectedPoolId)) {
-        alert("Invalid affiliate pool.");
+        tgAlert("Invalid affiliate pool.");
         return;
       }
       const out = document.getElementById("aff_pool_summary");
