@@ -5022,7 +5022,9 @@ def run_worker():
         print("run_boot_catchup error:", e)
 
     # 3) Telegram handlers
+    logger.info("[BOT][STARTUP] registering start handler instance=%s", INSTANCE_ID)
     app_bot.add_handler(CommandHandler("start", start))
+    logger.info("[BOT][STARTUP] start handler registered instance=%s", INSTANCE_ID)
     app_bot.add_handler(ChatJoinRequestHandler(join_request_handler))    
     app_bot.add_handler(ChatMemberHandler(member_update_handler, ChatMemberHandler.CHAT_MEMBER))
     app_bot.add_handler(ChatMemberHandler(member_update_handler, ChatMemberHandler.MY_CHAT_MEMBER))
@@ -5299,6 +5301,7 @@ def run_worker():
         while True:
             try:
                 logger.info("[WORKER] polling start attempt=%s", attempt + 1)
+                logger.info("[BOT][POLLING_START] attempt=%s instance=%s", attempt + 1, INSTANCE_ID)
                 started_at = time.monotonic()
                 app_bot.run_polling(
                     poll_interval=5,
@@ -5313,6 +5316,12 @@ def run_worker():
                     attempt = 0
                 delay = polling_backoff_seconds[min(attempt, len(polling_backoff_seconds) - 1)]
                 logger.warning(
+                    "[BOT][POLLING_ERROR] kind=transient err=%s msg=%s instance=%s",
+                    exc.__class__.__name__,
+                    str(exc),
+                    INSTANCE_ID,
+                )
+                logger.warning(
                     "[WORKER] transient polling failure err=%s msg=%s elapsed_s=%.1f retry_in_s=%s",
                     exc.__class__.__name__,
                     str(exc),
@@ -5323,6 +5332,12 @@ def run_worker():
                 time.sleep(delay)
                 continue
             except Exception as exc:
+                logger.error(
+                    "[BOT][POLLING_ERROR] kind=fatal err=%s msg=%s instance=%s",
+                    exc.__class__.__name__,
+                    str(exc),
+                    INSTANCE_ID,
+                )
                 logger.exception(
                     "[WORKER] fatal polling crash err=%s msg=%s",
                     exc.__class__.__name__,
