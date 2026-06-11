@@ -1452,12 +1452,6 @@
                   <option value="public">Public</option>
                   <option value="my">MY Reserve</option>
                 </select>
-              </label>
-              <label id="adm_audience_mode_label" style="flex:1 1 220px; font-size:12px; color:#555; display:none;">Audience Mode
-                <select id="adm_audience_mode" style="width:100%; padding:8px; border-radius:6px; border:1px solid #ccc;">
-                  <option value="segment" selected>Segment Filtered</option>
-                  <option value="public">Open FCFS / Everyone</option>
-                </select>
               </label>              
             </div>
 
@@ -1579,13 +1573,12 @@
                 <th style="padding:6px;">Type</th>
                 <th style="padding:6px;">Status</th>
                 <th style="padding:6px;">Window (KL)</th>
-                <th style="padding:6px;">Audience</th>
                 <th style="padding:6px;">Stats</th>
                 <th style="padding:6px;">Actions</th>
               </tr>
             </thead>
             <tbody>
-              <tr><td colspan="7" style="padding:6px;">Loading…</td></tr>
+              <tr><td colspan="6" style="padding:6px;">Loading…</td></tr>
             </tbody>
             </table>
           </div>
@@ -2393,9 +2386,7 @@
     if (admTypeEl) {
       const updateAdmCreatePoolVisibility = (mode) => {
         const poolLabel = document.getElementById("adm_create_pool_label");
-        const audienceModeLabel = document.getElementById("adm_audience_mode_label");
         if (poolLabel) poolLabel.style.display = mode === "pooled" ? "flex" : "none";
-        if (audienceModeLabel) audienceModeLabel.style.display = mode === "pooled" ? "flex" : "none";
       };      
       admTypeEl.addEventListener("change", (e) => {
         const mode = e.target.value;
@@ -2411,12 +2402,12 @@
     async function adm_list() {
       const tbody = document.querySelector("#adm_table tbody");
       if (!tbody) return;
-      tbody.innerHTML = `<tr><td colspan="7" style="padding:6px;">Loading…</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="6" style="padding:6px;">Loading…</td></tr>`;
 
       try {
         const userId = getAdminUserId();
         if (!userId) {
-          tbody.innerHTML = `<tr><td colspan="7" style="padding:6px;">Admin user ID required. Open via Telegram to manage drops.</td></tr>`;
+          tbody.innerHTML = `<tr><td colspan="6" style="padding:6px;">Admin user ID required. Open via Telegram to manage drops.</td></tr>`;
           return;
         }
         const tail = buildAdminQueryTail();
@@ -2431,9 +2422,6 @@
           const stats = d.type === "pooled"
             ? `${d.codesFree}/${d.codesTotal} free`
             : `${d.claimed}/${d.assigned} claimed`;
-          const audienceMode = d.type === "pooled"
-            ? (d.audience_mode === "public" ? "Open FCFS" : "Segment")
-            : "";
 
           const tr = document.createElement("tr");
           tr.innerHTML = `
@@ -2441,7 +2429,6 @@
             <td>${d.type}</td>
             <td>${d.status}</td>
             <td>${fmtKL(d.startsAt)} → ${fmtKL(d.endsAt)}</td>
-            <td>${audienceMode}</td>
             <td>${stats}</td>
             <td>
               <button data-op="start_now" data-id="${id}">Start</button>
@@ -2454,10 +2441,10 @@
         });
 
         if (!tbody.children.length) {
-          tbody.innerHTML = `<tr><td colspan="7" style="padding:6px;">No drops found.</td></tr>`;
+          tbody.innerHTML = `<tr><td colspan="6" style="padding:6px;">No drops found.</td></tr>`;
         }
       } catch (e) {
-        tbody.innerHTML = `<tr><td colspan="7" style="padding:6px;">Voucher endpoint error: ${e.message}</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="6" style="padding:6px;">Voucher endpoint error: ${e.message}</td></tr>`;
       }
     }
 
@@ -2550,7 +2537,6 @@
         if (!codes.length) { tgAlert("Please provide codes."); return; }
         payload.codes = codes;
         payload.pool = document.querySelector("#adm_create_pool")?.value || "public";        
-        payload.audience_mode = document.querySelector("#adm_audience_mode")?.value || "segment";
         const wl = splitList(document.querySelector("#adm_wl_text").value);
         if (wl.length) payload.whitelistUsernames = wl;
       }
