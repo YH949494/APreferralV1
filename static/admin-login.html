@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <title>Admin Login</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: #1a1208;
+      color: #fff3e6;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      padding: 16px;
+    }
+    .card {
+      width: 100%;
+      max-width: 380px;
+      background: #241a0e;
+      border: 1px solid #3d2c17;
+      border-radius: 16px;
+      padding: 32px 24px;
+      text-align: center;
+    }
+    h1 { font-size: 1.3rem; color: #ffd7bf; margin-bottom: 8px; }
+    .sub { color: #c9b49a; font-size: 0.9rem; margin-bottom: 24px; }
+    .msg {
+      border-radius: 10px;
+      padding: 10px 12px;
+      font-size: 0.85rem;
+      margin-bottom: 16px;
+      text-align: left;
+    }
+    .msg.error { background: #3a1410; border: 1px solid #7a2c20; color: #ffb4a3; }
+    .msg.info  { background: #14253a; border: 1px solid #2c4d7a; color: #a3cdff; }
+    #widget-slot { display: flex; justify-content: center; min-height: 48px; }
+    .foot { margin-top: 24px; font-size: 0.75rem; color: #8a7a64; }
+    .foot a { color: #c9b49a; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>&#9881;&#65039; Admin Panel</h1>
+    <p class="sub">Sign in with Telegram to continue</p>
+
+    <div id="server-notice" class="msg error" hidden>__SERVER_NOTICE__</div>
+    <div id="login-error" class="msg error" hidden></div>
+    <div id="tg-note" class="msg info" hidden>
+      You appear to be inside Telegram. Open the admin panel from the miniapp instead
+      &mdash; it signs you in automatically.
+    </div>
+
+    <div id="widget-slot">
+      <script async src="https://telegram.org/widget-login.js"
+        data-telegram-login="__BOT_USERNAME__"
+        data-size="large"
+        data-auth-url="/api/admin/auth/telegram-login"></script>
+    </div>
+    <div id="widget-fallback" class="msg error" hidden>
+      Telegram login could not load. Make sure the bot's login domain is configured
+      via @BotFather (/setdomain) and that scripts from telegram.org are not blocked.
+    </div>
+
+    <p class="foot">Access is limited to whitelisted Telegram admin accounts.<br>
+      All login attempts are logged.</p>
+  </div>
+
+  <script>
+    (function () {
+      var ERRORS = {
+        disabled: "Admin web login is currently disabled.",
+        rate_limited: "Too many attempts. Please wait a minute and try again.",
+        missing_hash: "Telegram login data was incomplete. Please try again.",
+        invalid_hash: "Telegram login verification failed. Please try again.",
+        expired: "The login confirmation expired. Please try again.",
+        missing_user_id: "Telegram login data was incomplete. Please try again.",
+        missing_bot_token: "Server is missing its bot configuration.",
+        not_admin: "This Telegram account is not authorized for admin access."
+      };
+
+      var notice = document.getElementById("server-notice");
+      if (notice && notice.textContent.trim()) notice.hidden = false;
+
+      var code = new URLSearchParams(location.search).get("login_error");
+      if (code) {
+        var box = document.getElementById("login-error");
+        box.textContent = ERRORS[code] || "Login failed (" + code + "). Please try again.";
+        box.hidden = false;
+      }
+
+      try {
+        if (window.Telegram && window.Telegram.WebApp && window.Telegram.WebApp.initData) {
+          document.getElementById("tg-note").hidden = false;
+        }
+      } catch (_) {}
+
+      // The widget script replaces itself with an iframe; if none appears the
+      // domain is likely not registered with BotFather or the script is blocked.
+      setTimeout(function () {
+        var slot = document.getElementById("widget-slot");
+        if (slot && !slot.querySelector("iframe")) {
+          document.getElementById("widget-fallback").hidden = false;
+        }
+      }, 4000);
+    })();
+  </script>
+</body>
+</html>

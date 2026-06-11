@@ -56,6 +56,7 @@ from vouchers import (
     resolve_referral_counts_with_snapshot_fallback,
     welcome_eligibility,
 )
+from admin_auth import admin_auth_bp, configure_admin_session
 from referral_rules import calc_referral_progress, REFERRAL_XP_PER_SUCCESS, REFERRAL_BONUS_INTERVAL, REFERRAL_BONUS_XP, build_public_referral_status
 from scheduler import settle_pending_referrals, settle_referral_snapshots, settle_xp_snapshots, evaluate_affiliate_simulated_ledgers, compute_affiliate_daily_kpi_yesterday, run_invitee_subscription_audit, reconcile_drop_statuses, post_growth_leaderboard_weekly, process_welcome_voucher_lifecycle
 from affiliate_dashboard_export import run_affiliate_dashboard_export_monthly_scheduled
@@ -2242,6 +2243,8 @@ app = Flask(__name__, static_folder="static")
 CORS(app, resources={r"/*": {"origins": "*"}})
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", "dev-secret")
 app.register_blueprint(vouchers_bp, url_prefix="/v2/miniapp")
+configure_admin_session(app)
+app.register_blueprint(admin_auth_bp)
 admin_bp = Blueprint("admin", __name__)
 
 
