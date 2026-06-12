@@ -1868,6 +1868,25 @@
 
       btn.addEventListener("click", openSecretPrompt);
 
+      // Browser session bootstrap: when opened outside Telegram (/admin),
+      // a Telegram Login cookie may already exist — check it without initData.
+      // Uses a relative URL so this works regardless of host.
+      if (!inTelegram) {
+        fetch("/api/is_admin", { credentials: "same-origin" })
+          .then(function(r) { return r.ok ? r.json() : null; })
+          .then(function(data) {
+            if (!data || !data.success || !data.is_admin) return;
+            var ms = document.getElementById("more-section");
+            if (ms) ms.style.display = "block";
+            var panel = document.getElementById("admin-panel");
+            if (panel) panel.style.display = "block";
+            var affiliatePools = document.getElementById("admin-affiliate-pools");
+            if (affiliatePools) affiliatePools.style.display = "block";
+            try { adm_list && adm_list(); } catch (_) {}
+          })
+          .catch(function() {});
+      }
+
       async function openSecretPrompt() {
         const val = prompt("Enter admin secret:");
         if (!val) return;

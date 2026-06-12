@@ -2204,6 +2204,14 @@ def require_admin_from_query():
     if _admin_secret_ok(admin_secret):
         return True, None
 
+    # Phase B: browser Telegram Login session — wrapped so any failure falls through
+    try:
+        from admin_auth import session_admin
+        if session_admin():
+            return True, None
+    except Exception:
+        pass
+
     init_data = extract_raw_init_data_from_query(request)
     if not init_data:
         return False, ("Missing init_data", 400)
@@ -2390,6 +2398,14 @@ def api_is_admin():
         admin_secret = _get_admin_secret(request)
         if _admin_secret_ok(admin_secret):
             return jsonify({"success": True, "is_admin": True, "source": "secret"})
+
+        # Phase B: browser Telegram Login session
+        try:
+            from admin_auth import session_admin
+            if session_admin():
+                return jsonify({"success": True, "is_admin": True, "source": "session"})
+        except Exception:
+            pass
 
         init_data = extract_raw_init_data_from_query(request)
         if not init_data:
