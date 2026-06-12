@@ -3480,6 +3480,19 @@ def _require_admin_via_query():
     if _admin_secret_ok(secret):
         return {"id": 0, "adminSource": "secret"}, None
 
+    # Phase B: browser Telegram Login session — wrapped so any failure falls through
+    try:
+        from admin_auth import session_admin
+        claims = session_admin()
+        if claims:
+            return {
+                "id": claims["id"],
+                "adminSource": "session",
+                "usernameLower": claims.get("username", ""),
+            }, None
+    except Exception:
+        pass
+
     payload = _payload_for_admin_query(request)
     if payload:
         return payload, None
