@@ -54,11 +54,29 @@
       .then(function (d) {
         banner(d.partial_errors ? ("Some metrics failed to load: " + d.partial_errors.join("; ")) : null, "warn");
 
+        var u = d.users;
+        // Telegram count card with stale indicator. `extraClass` lets the
+        // official channel use the headline style while the chatroom stays
+        // a secondary-highlight card.
+        function tgCard(label, val, stale, cachedAt, extraClass) {
+          var missing = val === null || val === undefined;
+          var staleHtml = stale
+            ? ' <span class="tag heuristic" title="Last updated: ' + (cachedAt ? new Date(cachedAt).toLocaleString() : "unknown") + '">stale</span>'
+            : '';
+          var sub = stale
+            ? "Telegram API unavailable — last known value"
+            : (cachedAt ? ("cached " + new Date(cachedAt).toLocaleTimeString()) : "");
+          return '<div class="kpi ' + (extraClass || "") + '"><div class="label">' + label + staleHtml + '</div>' +
+            '<div class="' + (missing ? "value missing" : "value") + '">' + (missing ? "—" : fmt(val)) + '</div>' +
+            '<div class="sub">' + sub + '</div></div>';
+        }
         $("#cards-users").innerHTML =
-          kpiCard("Total Users", d.users.total) +
-          kpiCard("Active Today", d.users.active_today) +
-          kpiCard("Active 7d", d.users.active_7d) +
-          kpiCard("Active 30d", d.users.active_30d);
+          tgCard("OFFICIAL CHANNEL SUBSCRIBERS", u.official_channel_subscribers, u.official_channel_subscribers_stale, u.official_channel_subscribers_cached_at, "kpi-headline") +
+          tgCard("ADVANTPLAY CHATROOM MEMBERS", u.chatroom_members, u.chatroom_members_stale, u.chatroom_members_cached_at, "kpi-secondary") +
+          kpiCard("Registered Users", u.registered) +
+          kpiCard("Active 30d", u.active_30d) +
+          kpiCard("Active 7d", u.active_7d) +
+          kpiCard("Active Today", u.active_today);
 
         $("#cards-community").innerHTML =
           kpiCard("Check-ins Today", d.community.checkins_today) +

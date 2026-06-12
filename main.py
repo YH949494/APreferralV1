@@ -2374,6 +2374,45 @@ def retention_kpis_recompute():
 _DASHBOARD_CACHE: dict[str, tuple[float, dict]] = {}
 _DASHBOARD_CACHE_TTL_S = 300  # 5 minutes
 
+# Telegram member count is cached separately with a 1-hour TTL, keyed by
+# chat_id so the official channel and chatroom are cached independently.
+from dashboard_telegram import get_member_count_cached, MEMBER_CACHE_TTL_S
+_TG_MEMBER_CACHE: dict[int, dict] = {}
+_TG_MEMBER_CACHE_TTL_S = MEMBER_CACHE_TTL_S
+
+# Env override for community chat; falls back to the main group.
+_COMMUNITY_CHAT_ID: int | None = None
+try:
+    _raw_comm = os.environ.get("COMMUNITY_CHAT_ID") or os.environ.get("MYWIN_CHAT_ID", "")
+    if _raw_comm:
+        _COMMUNITY_CHAT_ID = int(_raw_comm)
+except (TypeError, ValueError):
+    pass
+if _COMMUNITY_CHAT_ID is None:
+    try:
+        from onboarding import MYWIN_CHAT_ID as _ONBOARDING_CHAT_ID
+        _COMMUNITY_CHAT_ID = _ONBOARDING_CHAT_ID
+    except Exception:
+        pass
+
+
+def _tg_fetch_member_count(chat_id: int) -> int:
+    return call_bot_in_loop(app_bot.bot.get_chat_member_count(chat_id=chat_id), timeout=10)
+
+
+def _get_tg_member_count(chat_id: int) -> dict:
+    """Return Telegram member count with 1-hour caching and graceful fallback.
+
+    Returns {"count": int|None, "stale": bool, "cached_at": str|None}.
+    """
+    return get_member_count_cached(
+        chat_id,
+        _tg_fetch_member_count,
+        cache=_TG_MEMBER_CACHE,
+        ttl=_TG_MEMBER_CACHE_TTL_S,
+        logger=logger,
+    )
+
 
 def _dashboard_cache_get(key: str):
     entry = _DASHBOARD_CACHE.get(key)
@@ -2462,8 +2501,26 @@ def dashboard_summary():
             errors.append(e)
         return val
 
+    # ---- Telegram counts (per-chat 1-hour cache, graceful fallback) ----
+    # Official channel subscribers and AdvantPlay chatroom members are fetched
+    # independently; each falls back to its last cached value on API failure.
+    def _tg_metric(chat_id, label):
+        if not chat_id:
+            return {"count": None, "stale": True, "cached_at": None}
+        try:
+            res = _get_tg_member_count(chat_id)
+        except Exception as exc:  # pragma: no cover - helper handles failures internally
+            errors.append(f"{label}: {exc}")
+            return {"count": None, "stale": True, "cached_at": None}
+        if res.get("stale"):
+            errors.append(f"{label}: telegram unavailable, serving cached value")
+        return res
+
+    official_subs = _tg_metric(OFFICIAL_CHANNEL_ID, "official_channel_subscribers")
+    chatroom_members = _tg_metric(_COMMUNITY_CHAT_ID, "chatroom_members")
+
     # ---- Users ----
-    total_users = grab(lambda: users_collection.count_documents({}))
+    registered_users = grab(lambda: users_collection.count_documents({}))
     active_today = grab(lambda: len(sessions.distinct("user_id", {"date_utc": _date_str(now.date())})))
     active_7d = grab(lambda: _active_since(6))
     active_30d = grab(lambda: _active_since(29))
@@ -2511,7 +2568,15 @@ def dashboard_summary():
         "as_of": now.isoformat(),
         "cache_ttl_s": _DASHBOARD_CACHE_TTL_S,
         "users": {
-            "total": total_users,
+            "official_channel_subscribers": official_subs["count"],
+            "official_channel_subscribers_stale": official_subs["stale"],
+            "official_channel_subscribers_cached_at": official_subs["cached_at"],
+            "chatroom_members": chatroom_members["count"],
+            "chatroom_members_stale": chatroom_members["stale"],
+            "chatroom_members_cached_at": chatroom_members["cached_at"],
+            "official_channel_id": OFFICIAL_CHANNEL_ID,
+            "community_chat_id": _COMMUNITY_CHAT_ID,
+            "registered": registered_users,
             "active_today": active_today,
             "active_7d": active_7d,
             "active_30d": active_30d,
