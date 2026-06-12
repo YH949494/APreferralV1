@@ -54,11 +54,27 @@
       .then(function (d) {
         banner(d.partial_errors ? ("Some metrics failed to load: " + d.partial_errors.join("; ")) : null, "warn");
 
+        var u = d.users;
+        // Community Followers card — headline KPI with stale indicator.
+        var followersCard = (function() {
+          var val = u.community_followers;
+          var missing = val === null || val === undefined;
+          var staleHtml = u.community_followers_stale
+            ? ' <span class="tag heuristic" title="Last updated: ' + (u.community_followers_cached_at ? new Date(u.community_followers_cached_at).toLocaleString() : "unknown") + '">stale</span>'
+            : '';
+          var sub = u.community_followers_stale
+            ? "Telegram API unavailable — last known value"
+            : (u.community_followers_cached_at ? ("cached " + new Date(u.community_followers_cached_at).toLocaleTimeString()) : "");
+          return '<div class="kpi kpi-headline"><div class="label">COMMUNITY FOLLOWERS' + staleHtml + '</div>' +
+            '<div class="' + (missing ? "value missing" : "value") + '">' + (missing ? "Unavailable" : fmt(val)) + '</div>' +
+            '<div class="sub">' + sub + '</div></div>';
+        })();
         $("#cards-users").innerHTML =
-          kpiCard("Total Users", d.users.total) +
-          kpiCard("Active Today", d.users.active_today) +
-          kpiCard("Active 7d", d.users.active_7d) +
-          kpiCard("Active 30d", d.users.active_30d);
+          followersCard +
+          kpiCard("Registered Users", u.registered) +
+          kpiCard("Active 7d", u.active_7d) +
+          kpiCard("Active 30d", u.active_30d) +
+          kpiCard("Active Today", u.active_today);
 
         $("#cards-community").innerHTML =
           kpiCard("Check-ins Today", d.community.checkins_today) +

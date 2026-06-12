@@ -2374,6 +2374,49 @@ def retention_kpis_recompute():
 _DASHBOARD_CACHE: dict[str, tuple[float, dict]] = {}
 _DASHBOARD_CACHE_TTL_S = 300  # 5 minutes
 
+# Telegram member count is cached separately with a 1-hour TTL.
+# Shape: {"count": int, "ts": float, "chat_id": int}
+_TG_MEMBER_CACHE: dict[int, dict] = {}
+_TG_MEMBER_CACHE_TTL_S = 3600  # 1 hour
+
+# Env override for community chat; falls back to the main group.
+_COMMUNITY_CHAT_ID: int | None = None
+try:
+    _raw_comm = os.environ.get("COMMUNITY_CHAT_ID") or os.environ.get("MYWIN_CHAT_ID", "")
+    if _raw_comm:
+        _COMMUNITY_CHAT_ID = int(_raw_comm)
+except (TypeError, ValueError):
+    pass
+if _COMMUNITY_CHAT_ID is None:
+    try:
+        from onboarding import MYWIN_CHAT_ID as _ONBOARDING_CHAT_ID
+        _COMMUNITY_CHAT_ID = _ONBOARDING_CHAT_ID
+    except Exception:
+        pass
+
+
+def _get_tg_member_count(chat_id: int) -> dict:
+    """Return Telegram member count with 1-hour caching and graceful fallback.
+
+    Returns:
+        {"count": int|None, "stale": bool, "cached_at": str|None}
+    """
+    now_ts = time.time()
+    cached = _TG_MEMBER_CACHE.get(chat_id)
+    if cached and (now_ts - cached["ts"]) < _TG_MEMBER_CACHE_TTL_S:
+        return {"count": cached["count"], "stale": False, "cached_at": datetime.fromtimestamp(cached["ts"], tz=timezone.utc).isoformat()}
+
+    # Attempt a live Telegram API call.
+    try:
+        count = call_bot_in_loop(app_bot.bot.get_chat_member_count(chat_id=chat_id), timeout=10)
+        _TG_MEMBER_CACHE[chat_id] = {"count": int(count), "ts": now_ts}
+        return {"count": int(count), "stale": False, "cached_at": datetime.fromtimestamp(now_ts, tz=timezone.utc).isoformat()}
+    except Exception as exc:
+        logger.warning("[DASHBOARD] tg_member_count failed chat_id=%s: %s", chat_id, exc)
+        if cached:
+            return {"count": cached["count"], "stale": True, "cached_at": datetime.fromtimestamp(cached["ts"], tz=timezone.utc).isoformat()}
+        return {"count": None, "stale": True, "cached_at": None}
+
 
 def _dashboard_cache_get(key: str):
     entry = _DASHBOARD_CACHE.get(key)
@@ -2462,8 +2505,16 @@ def dashboard_summary():
             errors.append(e)
         return val
 
+    # ---- Community Followers (Telegram, 1-hour cache, graceful fallback) ----
+    tg_followers = {"count": None, "stale": True, "cached_at": None}
+    if _COMMUNITY_CHAT_ID:
+        try:
+            tg_followers = _get_tg_member_count(_COMMUNITY_CHAT_ID)
+        except Exception as exc:
+            errors.append(f"community_followers: {exc}")
+
     # ---- Users ----
-    total_users = grab(lambda: users_collection.count_documents({}))
+    registered_users = grab(lambda: users_collection.count_documents({}))
     active_today = grab(lambda: len(sessions.distinct("user_id", {"date_utc": _date_str(now.date())})))
     active_7d = grab(lambda: _active_since(6))
     active_30d = grab(lambda: _active_since(29))
@@ -2511,10 +2562,14 @@ def dashboard_summary():
         "as_of": now.isoformat(),
         "cache_ttl_s": _DASHBOARD_CACHE_TTL_S,
         "users": {
-            "total": total_users,
-            "active_today": active_today,
+            "community_followers": tg_followers["count"],
+            "community_followers_stale": tg_followers["stale"],
+            "community_followers_cached_at": tg_followers["cached_at"],
+            "community_chat_id": _COMMUNITY_CHAT_ID,
+            "registered": registered_users,
             "active_7d": active_7d,
             "active_30d": active_30d,
+            "active_today": active_today,
         },
         "community": {
             "checkins_today": checkins_today,
