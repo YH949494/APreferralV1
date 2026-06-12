@@ -110,6 +110,8 @@ html, body {
 .kpi-headline { border-color: var(--accent); background: rgba(255,159,67,0.07); }
 .kpi-headline .label { color: var(--accent); }
 .kpi-headline .value { font-size: 36px; }
+.kpi-secondary { border-color: var(--accent-2); background: rgba(77,171,247,0.06); }
+.kpi-secondary .label { color: var(--accent-2); }
 
 .section-title { font-size: 15px; font-weight: 600; margin: 8px 0 12px; color: var(--text); }
 .section { margin-bottom: 28px; }

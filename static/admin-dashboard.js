@@ -55,25 +55,27 @@
         banner(d.partial_errors ? ("Some metrics failed to load: " + d.partial_errors.join("; ")) : null, "warn");
 
         var u = d.users;
-        // Community Followers card — headline KPI with stale indicator.
-        var followersCard = (function() {
-          var val = u.community_followers;
+        // Telegram count card with stale indicator. `extraClass` lets the
+        // official channel use the headline style while the chatroom stays
+        // a secondary-highlight card.
+        function tgCard(label, val, stale, cachedAt, extraClass) {
           var missing = val === null || val === undefined;
-          var staleHtml = u.community_followers_stale
-            ? ' <span class="tag heuristic" title="Last updated: ' + (u.community_followers_cached_at ? new Date(u.community_followers_cached_at).toLocaleString() : "unknown") + '">stale</span>'
+          var staleHtml = stale
+            ? ' <span class="tag heuristic" title="Last updated: ' + (cachedAt ? new Date(cachedAt).toLocaleString() : "unknown") + '">stale</span>'
             : '';
-          var sub = u.community_followers_stale
+          var sub = stale
             ? "Telegram API unavailable — last known value"
-            : (u.community_followers_cached_at ? ("cached " + new Date(u.community_followers_cached_at).toLocaleTimeString()) : "");
-          return '<div class="kpi kpi-headline"><div class="label">COMMUNITY FOLLOWERS' + staleHtml + '</div>' +
-            '<div class="' + (missing ? "value missing" : "value") + '">' + (missing ? "Unavailable" : fmt(val)) + '</div>' +
+            : (cachedAt ? ("cached " + new Date(cachedAt).toLocaleTimeString()) : "");
+          return '<div class="kpi ' + (extraClass || "") + '"><div class="label">' + label + staleHtml + '</div>' +
+            '<div class="' + (missing ? "value missing" : "value") + '">' + (missing ? "—" : fmt(val)) + '</div>' +
             '<div class="sub">' + sub + '</div></div>';
-        })();
+        }
         $("#cards-users").innerHTML =
-          followersCard +
+          tgCard("OFFICIAL CHANNEL SUBSCRIBERS", u.official_channel_subscribers, u.official_channel_subscribers_stale, u.official_channel_subscribers_cached_at, "kpi-headline") +
+          tgCard("ADVANTPLAY CHATROOM MEMBERS", u.chatroom_members, u.chatroom_members_stale, u.chatroom_members_cached_at, "kpi-secondary") +
           kpiCard("Registered Users", u.registered) +
-          kpiCard("Active 7d", u.active_7d) +
           kpiCard("Active 30d", u.active_30d) +
+          kpiCard("Active 7d", u.active_7d) +
           kpiCard("Active Today", u.active_today);
 
         $("#cards-community").innerHTML =
