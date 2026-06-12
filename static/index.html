@@ -1868,25 +1868,6 @@
 
       btn.addEventListener("click", openSecretPrompt);
 
-      // Browser session bootstrap: when opened outside Telegram (/admin),
-      // a Telegram Login cookie may already exist — check it without initData.
-      // Uses a relative URL so this works regardless of host.
-      if (!inTelegram) {
-        fetch("/api/is_admin", { credentials: "same-origin" })
-          .then(function(r) { return r.ok ? r.json() : null; })
-          .then(function(data) {
-            if (!data || !data.success || !data.is_admin) return;
-            var ms = document.getElementById("more-section");
-            if (ms) ms.style.display = "block";
-            var panel = document.getElementById("admin-panel");
-            if (panel) panel.style.display = "block";
-            var affiliatePools = document.getElementById("admin-affiliate-pools");
-            if (affiliatePools) affiliatePools.style.display = "block";
-            try { adm_list && adm_list(); } catch (_) {}
-          })
-          .catch(function() {});
-      }
-
       async function openSecretPrompt() {
         const val = prompt("Enter admin secret:");
         if (!val) return;
@@ -5710,6 +5691,10 @@ ${referral}`;
     window.onload = async () => {
       if (tg) { tg.ready(); tg.expand(); }
 
+      // /admin is handled entirely by adminBrowserBootstrap below.
+      // Skip waitForInitData() which would hang for 5 s then throw.
+      if (window.location.pathname === "/admin") return;
+
       const init = await waitForInitData();
       const hasInit = !!(init && init.length >= 10);
       const isAdminMode = !!getAdminSecret();
@@ -5813,7 +5798,70 @@ ${referral}`;
         initInfoHub();
       });
       window.addEventListener("load", initInfoHub);
-    })();      
+    })();
+  </script>
+
+  <script>
+    // Admin browser bootstrap — runs only when this page is served at /admin.
+    // Fires after all other scripts so setupAdminCollapse and adm_list are defined.
+    // Does NOT call waitForInitData() — the session cookie provides auth instead.
+    (function adminBrowserBootstrap() {
+      if (window.location.pathname !== "/admin") return;
+
+      console.log("[admin-bootstrap] /admin detected");
+
+      function revealAdminPanel() {
+        var ms = document.getElementById("more-section");
+        if (ms) ms.style.display = "block";
+        var panel = document.getElementById("admin-panel");
+        if (panel) panel.style.display = "block";
+        if (typeof setupAdminCollapse === "function") {
+          setupAdminCollapse("admin-voucher-drops-toggle", "admin-voucher-drops-panel",
+            "adminCollapse:voucherDrops", "🎟️ Voucher Drops");
+          setupAdminCollapse("admin-affiliate-pools-toggle", "admin-affiliate-pools",
+            "adminCollapse:affiliatePools", "Affiliate Voucher Pools");
+          setupAdminCollapse("admin-past-affiliate-toggle", "admin-affiliate-leaderboard-wrap",
+            "adminCollapse:pastAffiliate", "📊 Past Week Affiliate", function () {
+              if (typeof loadAdminPastWeekAffiliateLeaderboard === "function") {
+                loadAdminPastWeekAffiliateLeaderboard();
+              }
+            });
+        }
+        if (typeof adm_list === "function") adm_list();
+        console.log("[admin-bootstrap] admin panel revealed");
+      }
+
+      function showNotAuthorized() {
+        console.log("[admin-bootstrap] not authorized");
+        var existing = document.getElementById("admin-bootstrap-error");
+        if (existing) return;
+        var div = document.createElement("div");
+        div.id = "admin-bootstrap-error";
+        div.style.cssText = "position:fixed;top:0;left:0;right:0;padding:12px 16px;" +
+          "background:#3a1410;color:#ffb4a3;font-size:0.9rem;text-align:center;z-index:9999;";
+        div.textContent = "This session is not authorized for admin access. ";
+        var link = document.createElement("a");
+        link.href = "/admin";
+        link.textContent = "Sign in again";
+        link.style.color = "#ffd7bf";
+        div.appendChild(link);
+        document.body.prepend(div);
+      }
+
+      fetch("/api/is_admin", { credentials: "same-origin" })
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+          if (data && data.success && data.is_admin) {
+            console.log("[admin-bootstrap] session admin confirmed, source:", data.source);
+            revealAdminPanel();
+          } else {
+            showNotAuthorized();
+          }
+        })
+        .catch(function (err) {
+          console.error("[admin-bootstrap] /api/is_admin request failed:", err);
+        });
+    }());
   </script>
 </body>
 </html>
