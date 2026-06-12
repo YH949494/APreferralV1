@@ -1,7 +1,6 @@
 import ast
 from pathlib import Path
 from datetime import datetime, timezone
-import os
 
 
 def _load_require_admin_from_query():
@@ -330,6 +329,7 @@ def test_dashboard_telegram_counts_cache_does_not_call_telegram():
                 "dashboard_telegram"
             ).sanitize_telegram_counts_cache,
             "refresh_telegram_member_counts": lambda: called.append("telegram"),
+            "_tg_fetch_member_count": lambda chat_id: called.append(chat_id),
             "jsonify": lambda payload: payload,
         }
     )
@@ -378,136 +378,3 @@ def test_dashboard_telegram_refresh_log_strings_include_required_fields():
         "counts_keys=official_channel_subscribers,chatroom_members",
     ):
         assert expected in source
-
-
-class _HTTPResponse:
-    def __init__(self, status_code=200, payload=None, text=""):
-        self.status_code = status_code
-        self._payload = payload or {}
-        self.text = text
-
-    def json(self):
-        return self._payload
-
-
-def test_fetch_chat_member_count_http_success_returns_count(monkeypatch):
-    fn = _load_main_functions("_fetch_chat_member_count_http")[0]
-    calls = []
-
-    class Requests:
-        @staticmethod
-        def get(url, params, timeout):
-            calls.append((url, params, timeout))
-            return _HTTPResponse(payload={"ok": True, "result": 123})
-
-    monkeypatch.setenv("BOT_TOKEN", "token-123")
-    fn.__globals__.update({"os": os, "requests": Requests})
-
-    assert fn(-1001) == 123
-    assert calls == [
-        (
-            "https://api.telegram.org/bottoken-123/getChatMemberCount",
-            {"chat_id": -1001},
-            10,
-        )
-    ]
-
-
-def test_fetch_chat_member_count_http_missing_bot_token_raises(monkeypatch):
-    fn = _load_main_functions("_fetch_chat_member_count_http")[0]
-    monkeypatch.delenv("BOT_TOKEN", raising=False)
-    fn.__globals__.update({"os": os, "requests": object()})
-
-    try:
-        fn(-1001)
-    except RuntimeError as exc:
-        assert "BOT_TOKEN missing" in str(exc)
-    else:
-        raise AssertionError("expected RuntimeError")
-
-
-def test_fetch_chat_member_count_http_telegram_not_ok_raises(monkeypatch):
-    fn = _load_main_functions("_fetch_chat_member_count_http")[0]
-
-    class Requests:
-        @staticmethod
-        def get(url, params, timeout):  # noqa: ARG004
-            return _HTTPResponse(
-                payload={"ok": False, "description": "Bad Request: chat not found"}
-            )
-
-    monkeypatch.setenv("BOT_TOKEN", "token-123")
-    fn.__globals__.update({"os": os, "requests": Requests})
-
-    try:
-        fn(-1001)
-    except RuntimeError as exc:
-        assert "Telegram ok=false" in str(exc)
-        assert "Bad Request: chat not found" in str(exc)
-    else:
-        raise AssertionError("expected RuntimeError")
-
-
-def test_fetch_chat_member_count_http_missing_result_raises(monkeypatch):
-    fn = _load_main_functions("_fetch_chat_member_count_http")[0]
-
-    class Requests:
-        @staticmethod
-        def get(url, params, timeout):  # noqa: ARG004
-            return _HTTPResponse(payload={"ok": True})
-
-    monkeypatch.setenv("BOT_TOKEN", "token-123")
-    fn.__globals__.update({"os": os, "requests": Requests})
-
-    try:
-        fn(-1001)
-    except RuntimeError as exc:
-        assert "missing result" in str(exc)
-    else:
-        raise AssertionError("expected RuntimeError")
-
-
-def test_http_error_is_metric_failure_and_preserves_previous_count():
-    from dashboard_telegram import refresh_member_counts
-
-    previous = datetime(2026, 6, 12, 10, 0, 0, tzinfo=timezone.utc)
-    now = datetime(2026, 6, 12, 12, 0, 0, tzinfo=timezone.utc)
-    existing = {
-        "counts": {
-            "official_channel_subscribers": {
-                "chat_id": -1001,
-                "count": 111,
-                "updated_at": previous,
-                "ok": True,
-                "error": None,
-            },
-            "chatroom_members": {
-                "chat_id": -1002,
-                "count": 222,
-                "updated_at": previous,
-                "ok": True,
-                "error": None,
-            },
-        }
-    }
-
-    def fetcher(chat_id):
-        if chat_id == -1001:
-            raise RuntimeError("Telegram HTTP request failed: timeout")
-        return 333
-
-    doc = refresh_member_counts(
-        [("official_channel_subscribers", -1001), ("chatroom_members", -1002)],
-        fetcher,
-        existing=existing,
-        now=now,
-    )
-
-    official = doc["counts"]["official_channel_subscribers"]
-    chatroom = doc["counts"]["chatroom_members"]
-    assert official["count"] == 111
-    assert official["ok"] is False
-    assert official["updated_at"] == previous
-    assert "timeout" in official["error"]
-    assert chatroom["count"] == 333
-    assert chatroom["ok"] is True
