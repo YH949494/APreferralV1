@@ -227,9 +227,9 @@ def _login_page(notice: str = ""):
 def admin_panel():
     admin = session_admin()
     if admin:
-        # Same UI as /miniapp — one admin frontend for both entry points.
+        # Browser admins get the dedicated dashboard; /miniapp keeps index.html.
         resp = make_response(
-            send_from_directory(current_app.static_folder or "static", "index.html")
+            send_from_directory(current_app.static_folder or "static", "admin-dashboard.html")
         )
         return _no_store(resp)
     if not ADMIN_WEB_LOGIN_ENABLED:

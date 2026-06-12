@@ -88,7 +88,7 @@ from telegram_utils import safe_reply_text
 
 from pymongo import DESCENDING, ASCENDING, ReturnDocument  # keep if used elsewhere
 from pymongo.errors import DuplicateKeyError, CursorNotFound, OperationFailure, PyMongoError
-import os, asyncio, traceback, csv, io, requests, logging, time, uuid, socket, subprocess, hashlib
+import os, asyncio, traceback, csv, io, requests, logging, time, uuid, socket, subprocess, hashlib, re
 import httpx
 import pytz
 import json
@@ -2365,8 +2365,362 @@ def retention_kpis_recompute():
     return jsonify({"success": True, "months": months, "count": len(rows)})
 
 
+# ======================================================================
+# Admin Dashboard APIs (read-only operational visibility)
+# Phases 0/1/2: Executive Summary, Activation Funnel, Abuse overview.
+# No business logic — pure aggregation over existing collections.
+# ======================================================================
+
+_DASHBOARD_CACHE: dict[str, tuple[float, dict]] = {}
+_DASHBOARD_CACHE_TTL_S = 300  # 5 minutes
+
+
+def _dashboard_cache_get(key: str):
+    entry = _DASHBOARD_CACHE.get(key)
+    if not entry:
+        return None
+    ts, payload = entry
+    if (time.time() - ts) > _DASHBOARD_CACHE_TTL_S:
+        return None
+    return payload
+
+
+def _dashboard_cache_set(key: str, payload: dict) -> None:
+    _DASHBOARD_CACHE[key] = (time.time(), payload)
+    if len(_DASHBOARD_CACHE) > 256:
+        _DASHBOARD_CACHE.clear()
+
+
+def _utc_now():
+    return datetime.now(timezone.utc)
+
+
+def _utc_today_start(now=None):
+    now = now or _utc_now()
+    return datetime(now.year, now.month, now.day, tzinfo=timezone.utc)
+
+
+def _date_str(d) -> str:
+    return d.strftime("%Y-%m-%d")
+
+
+def _safe_count(fn):
+    """Run a count query, returning (value, None) or (None, error_str)."""
+    try:
+        return int(fn()), None
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("[ADMIN_DASHBOARD] count failed: %s", exc)
+        return None, str(exc)
+
+
+# Segment label matchers (abuse module). Stored labels are free-form, so we
+# match case-insensitively against the canonical and common alias spellings.
+_SEG_VOUCHER_HUNTER_RE = re.compile(r"^\s*voucher[\s_\-]?hunters?\s*$", re.IGNORECASE)
+_SEG_WELCOME_ABUSE_RE = re.compile(r"^\s*welcome[\s_\-]?abus(?:e|er|ers)\s*$", re.IGNORECASE)
+
+
+def _count_segment(regex) -> int:
+    return int(
+        users_collection.count_documents(
+            {"$or": [{"for_bot_segment": regex}, {"bot_segment": regex}]}
+        )
+    )
+
+
+@admin_bp.get("/api/admin/dashboard/summary")
+def dashboard_summary():
+    ok, err = require_admin_from_query()
+    if not ok:
+        msg, code = err
+        return jsonify({"success": False, "message": msg}), code
+
+    cached = _dashboard_cache_get("summary")
+    if cached is not None and request.args.get("refresh") != "1":
+        return jsonify(cached)
+
+    now = _utc_now()
+    today_start = _utc_today_start(now)
+    d7 = now - timedelta(days=7)
+    d30 = now - timedelta(days=30)
+    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+    sessions = db["miniapp_sessions_daily"]
+    claims = db["voucher_claims"]
+    tickets = db["welcome_tickets"]
+    drops = db["drops"]
+    vouchers = db["vouchers"]
+
+    def _active_since(days_back: int) -> int:
+        start = _date_str((now - timedelta(days=days_back)).date())
+        return len(sessions.distinct("user_id", {"date_utc": {"$gte": start}}))
+
+    errors: list[str] = []
+
+    def grab(fn):
+        val, e = _safe_count(fn)
+        if e:
+            errors.append(e)
+        return val
+
+    # ---- Users ----
+    total_users = grab(lambda: users_collection.count_documents({}))
+    active_today = grab(lambda: len(sessions.distinct("user_id", {"date_utc": _date_str(now.date())})))
+    active_7d = grab(lambda: _active_since(6))
+    active_30d = grab(lambda: _active_since(29))
+
+    # ---- Community (check-ins) ----
+    checkins_today = grab(lambda: xp_events_collection.count_documents({"type": "checkin", "created_at": {"$gte": today_start}}))
+    checkins_7d = grab(lambda: xp_events_collection.count_documents({"type": "checkin", "created_at": {"$gte": d7}}))
+
+    # ---- Referrals ----
+    pending_referrals = grab(lambda: pending_referrals_collection.count_documents({"status": {"$in": ["pending", "pending_channel", "processing"]}}))
+    qualified_total = grab(lambda: qualified_events_collection.count_documents({}))
+    qualified_7d = grab(lambda: qualified_events_collection.count_documents({"qualified_at": {"$gte": d7}}))
+    revoked_referrals = grab(lambda: pending_referrals_collection.count_documents({"status": {"$in": ["revoked", "failed", "rejected", "expired"]}}))
+
+    # ---- Vouchers ----
+    active_campaigns = grab(lambda: drops.count_documents({"status": "active"}))
+    claims_today = grab(lambda: claims.count_documents({"status": "claimed", "created_at": {"$gte": today_start}}))
+    remaining_codes = grab(lambda: vouchers.count_documents({"status": "unclaimed"}))
+
+    # ---- Welcome ----
+    welcome_eligible = grab(lambda: welcome_eligibility_collection.count_documents({}))
+    welcome_claimed = grab(lambda: tickets.count_documents({"status": "claimed"}))
+    welcome_conversion = None
+    if welcome_eligible and welcome_claimed is not None and welcome_eligible > 0:
+        welcome_conversion = round(100.0 * welcome_claimed / welcome_eligible, 1)
+
+    # ---- Affiliate ----
+    affiliate_pending = grab(lambda: affiliate_ledger_collection.count_documents({"status": {"$in": ["PENDING_REVIEW", "PENDING_MANUAL"]}}))
+    affiliate_approved_month = grab(lambda: affiliate_ledger_collection.count_documents({"status": {"$in": ["APPROVED", "ISSUED"]}, "updated_at": {"$gte": month_start}}))
+
+    # ---- System / worker health ----
+    heartbeat = admin_cache_col.find_one({"_id": "snapshot_heartbeat"}, {"ts_utc": 1}) or {}
+    hb_ts = _normalize_snapshot_updated_at(heartbeat.get("ts_utc"))
+    if hb_ts is None:
+        snapshot_age = None
+        worker_status = "unknown"
+    else:
+        snapshot_age = int((now - hb_ts).total_seconds())
+        worker_status = "healthy" if snapshot_age <= 900 else "stale"
+    last_run_doc = audit_events_collection.find_one({"_id": "monthly_job:last_run"}, {"run_at_utc": 1}) or {}
+    last_scheduler_run = last_run_doc.get("run_at_utc")
+
+    payload = {
+        "success": True,
+        "as_of": now.isoformat(),
+        "cache_ttl_s": _DASHBOARD_CACHE_TTL_S,
+        "users": {
+            "total": total_users,
+            "active_today": active_today,
+            "active_7d": active_7d,
+            "active_30d": active_30d,
+        },
+        "community": {
+            "checkins_today": checkins_today,
+            "checkins_7d": checkins_7d,
+        },
+        "referrals": {
+            "pending": pending_referrals,
+            "qualified_total": qualified_total,
+            "qualified_7d": qualified_7d,
+            "revoked": revoked_referrals,
+        },
+        "vouchers": {
+            "active_campaigns": active_campaigns,
+            "claims_today": claims_today,
+            "remaining_codes": remaining_codes,
+        },
+        "welcome": {
+            "eligible": welcome_eligible,
+            "claimed": welcome_claimed,
+            "conversion_pct": welcome_conversion,
+        },
+        "affiliate": {
+            "pending_review": affiliate_pending,
+            "approved_this_month": affiliate_approved_month,
+        },
+        "system": {
+            "worker_status": worker_status,
+            "snapshot_age_seconds": snapshot_age,
+            "last_snapshot_publish": hb_ts.isoformat() if hb_ts else None,
+            "last_scheduler_run": last_scheduler_run.isoformat() if isinstance(last_scheduler_run, datetime) else None,
+        },
+        "partial_errors": errors or None,
+    }
+    _dashboard_cache_set("summary", payload)
+    return jsonify(payload)
+
+
+@admin_bp.get("/api/admin/dashboard/funnel")
+def dashboard_funnel():
+    ok, err = require_admin_from_query()
+    if not ok:
+        msg, code = err
+        return jsonify({"success": False, "message": msg}), code
+
+    window = (request.args.get("window") or "7d").strip().lower()
+    days_by_window = {"today": 1, "7d": 7, "30d": 30}
+    if window not in days_by_window:
+        window = "7d"
+    days = days_by_window[window]
+
+    cache_key = f"funnel:{window}"
+    if request.args.get("refresh") != "1":
+        cached = _dashboard_cache_get(cache_key)
+        if cached is not None:
+            return jsonify(cached)
+
+    now = _utc_now()
+    if window == "today":
+        start = _utc_today_start(now)
+    else:
+        start = now - timedelta(days=days)
+
+    tickets = db["welcome_tickets"]
+
+    # Stage counts are distinct users entering each stage within the window.
+    join_count = int(users_collection.count_documents({"joined_main_at": {"$gte": start}}))
+    checkin_users = len(xp_events_collection.distinct("user_id", {"type": "checkin", "created_at": {"$gte": start}}))
+    welcome_unlock = int(welcome_eligibility_collection.count_documents({"created_at": {"$gte": start}}))
+    welcome_claim = int(tickets.count_documents({"status": "claimed", "claimed_at": {"$gte": start}}))
+
+    raw_stages = [
+        {"name": "Join Group", "count": join_count, "data_quality": "exact"},
+        {"name": "PM Start", "count": None, "data_quality": "missing",
+         "note": "No PM-start instrumentation. Requires the bot to record a distinct /start event."},
+        {"name": "Check-in", "count": checkin_users, "data_quality": "exact"},
+        {"name": "Welcome Unlock", "count": welcome_unlock, "data_quality": "exact"},
+        {"name": "Welcome Claim", "count": welcome_claim, "data_quality": "approx",
+         "note": "Welcome tickets expire/clean up via TTL; older windows may undercount."},
+        {"name": "First Play", "count": None, "data_quality": "missing",
+         "note": "No first-play signal exists. Requires game-backend instrumentation."},
+    ]
+
+    # Conversion/drop-off computed only across stages with real counts,
+    # carrying the last known baseline forward across data-missing stages.
+    stages = []
+    baseline = None
+    prev = None
+    for s in raw_stages:
+        out = dict(s)
+        cnt = s["count"]
+        if cnt is None:
+            out["conversion_pct"] = None
+            out["dropoff_pct"] = None
+        else:
+            if baseline is None:
+                baseline = cnt
+                out["conversion_pct"] = 100.0
+                out["dropoff_pct"] = 0.0
+            else:
+                out["conversion_pct"] = round(100.0 * cnt / baseline, 1) if baseline > 0 else None
+                if prev and prev > 0:
+                    out["dropoff_pct"] = round(100.0 * (prev - cnt) / prev, 1)
+                else:
+                    out["dropoff_pct"] = None
+            prev = cnt
+        stages.append(out)
+
+    payload = {
+        "success": True,
+        "window": window,
+        "as_of": now.isoformat(),
+        "stages": stages,
+    }
+    _dashboard_cache_set(cache_key, payload)
+    return jsonify(payload)
+
+
+@admin_bp.get("/api/admin/dashboard/abuse")
+def dashboard_abuse():
+    ok, err = require_admin_from_query()
+    if not ok:
+        msg, code = err
+        return jsonify({"success": False, "message": msg}), code
+
+    if request.args.get("refresh") != "1":
+        cached = _dashboard_cache_get("abuse")
+        if cached is not None:
+            return jsonify(cached)
+
+    now = _utc_now()
+    claims = db["voucher_claims"]
+    rate_limits = db["claim_rate_limits"]
+    errors: list[str] = []
+
+    # Repeat claimers: users with more than one successful claim.
+    repeat_claimers = None
+    try:
+        agg = claims.aggregate([
+            {"$match": {"status": "claimed"}},
+            {"$group": {"_id": "$user_id", "n": {"$sum": 1}}},
+            {"$match": {"n": {"$gt": 1}}},
+            {"$count": "c"},
+        ])
+        agg_list = list(agg)
+        repeat_claimers = int(agg_list[0]["c"]) if agg_list else 0
+    except Exception as exc:
+        errors.append(f"repeat_claimers: {exc}")
+
+    # Blocked IPs: rate-limit records with an active block window.
+    blocked_ips = None
+    try:
+        blocked_ips = int(rate_limits.count_documents({"blockedUntil": {"$gt": now}}))
+    except Exception as exc:
+        errors.append(f"blocked_ips: {exc}")
+
+    # Suspicious referrers (heuristic): referrers with >=5 invites and 0 qualified.
+    suspicious_referrers = None
+    try:
+        agg = pending_referrals_collection.aggregate([
+            {"$group": {
+                "_id": "$inviter_user_id",
+                "invited": {"$sum": 1},
+                "qualified": {"$sum": {"$cond": [{"$in": ["$status", ["qualified", "awarded", "settled", "success"]]}, 1, 0]}},
+            }},
+            {"$match": {"invited": {"$gte": 5}, "qualified": 0}},
+            {"$count": "c"},
+        ])
+        agg_list = list(agg)
+        suspicious_referrers = int(agg_list[0]["c"]) if agg_list else 0
+    except Exception as exc:
+        errors.append(f"suspicious_referrers: {exc}")
+
+    voucher_hunter_count = None
+    welcome_abuse_count = None
+    try:
+        voucher_hunter_count = _count_segment(_SEG_VOUCHER_HUNTER_RE)
+    except Exception as exc:
+        errors.append(f"voucher_hunter: {exc}")
+    try:
+        welcome_abuse_count = _count_segment(_SEG_WELCOME_ABUSE_RE)
+    except Exception as exc:
+        errors.append(f"welcome_abuse: {exc}")
+
+    payload = {
+        "success": True,
+        "as_of": now.isoformat(),
+        "metrics": {
+            "repeat_claimers": {"value": repeat_claimers, "data_quality": "exact",
+                                "note": "Users with >1 successful voucher claim (all-time)."},
+            "blocked_ips": {"value": blocked_ips, "data_quality": "exact",
+                            "note": "Claim rate-limit records with an active block window."},
+            "suspicious_referrers": {"value": suspicious_referrers, "data_quality": "heuristic",
+                                     "note": ">=5 invites with 0 qualified. Heuristic, not a confirmed fraud signal."},
+            "voucher_hunter_count": {"value": voucher_hunter_count, "data_quality": "approx",
+                                     "note": "Users labelled voucher_hunter by bot segmentation."},
+            "welcome_abuse_count": {"value": welcome_abuse_count, "data_quality": "approx",
+                                    "note": "Users labelled welcome_abuse by bot segmentation."},
+        },
+        "partial_errors": errors or None,
+    }
+    _dashboard_cache_set("abuse", payload)
+    return jsonify(payload)
+
+
 app.register_blueprint(admin_bp)
-    
+
 # ---- Always return JSON on errors (prevents "Invalid JSON") ----
 @app.errorhandler(HTTPException)
 def _json_http_exc(e):
