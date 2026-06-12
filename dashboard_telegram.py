@@ -44,6 +44,42 @@ def _iso(dt: datetime | None) -> str | None:
     return dt.isoformat() if dt is not None else None
 
 
+def _safe_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def sanitize_telegram_counts_cache(doc: dict | None) -> dict:
+    """Return a read-only, dashboard-safe view of the cached count document."""
+    if not doc:
+        return {"success": True, "exists": False, "updated_at": None, "counts": {}}
+
+    counts = {}
+    for name, entry in ((doc.get("counts") or {}).items()):
+        if not isinstance(entry, dict):
+            continue
+        chat_id = entry.get("chat_id")
+        error = entry.get("error")
+        counts[name] = {
+            "chat_id": str(chat_id) if chat_id is not None else None,
+            "count": _safe_int(entry.get("count")),
+            "ok": bool(entry.get("ok", False)),
+            "updated_at": _iso(_as_dt(entry.get("updated_at"))),
+            "error": str(error) if error is not None else None,
+        }
+
+    return {
+        "success": True,
+        "exists": True,
+        "updated_at": _iso(_as_dt(doc.get("updated_at"))),
+        "counts": counts,
+    }
+
+
 def refresh_member_counts(
     metrics: Iterable[tuple[str, Any]],
     fetcher: Callable[[Any], Any],
@@ -84,6 +120,7 @@ def refresh_member_counts(
         except Exception as exc:  # noqa: BLE001 - isolate per-metric failures
             ok = False
             error = str(exc)
+            error_type = exc.__class__.__name__
             count = prev.get("count")
             counts[name] = {
                 "chat_id": chat_id or prev.get("chat_id"),
@@ -93,19 +130,17 @@ def refresh_member_counts(
                 "error": error,
                 "error_at": now,
             }
+        else:
+            error_type = None
         if logger is not None:
             logger.info(
-                "[DASHBOARD_TG_REFRESH]\n"
-                "metric=%s\n"
-                "chat_id=%s\n"
-                "ok=%s\n"
-                "count=%s\n"
-                "error=%s",
-                name,
-                chat_id,
-                str(ok).lower(),
-                count,
-                error,
+                "[DASHBOARD_TG_REFRESH][RESULT]\n"
+                f"metric={name}\n"
+                f"chat_id={chat_id}\n"
+                f"ok={str(ok).lower()}\n"
+                f"count={count}\n"
+                f"error_type={error_type}\n"
+                f"error={error}"
             )
 
     return {"updated_at": now, "counts": counts}
