@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="robots" content="noindex, nofollow" />
+  <title>APReferral · Admin Dashboard</title>
+  <link rel="stylesheet" href="/static/admin-dashboard.css" />
+</head>
+<body>
+  <div class="app">
+    <nav class="sidebar">
+      <div class="brand">APReferral Admin</div>
+      <button class="nav-item active" data-view="summary">Executive Summary</button>
+      <button class="nav-item" data-view="funnel">Activation Funnel</button>
+      <button class="nav-item" data-view="abuse">Abuse Overview</button>
+      <button class="nav-item disabled" disabled>Vouchers</button>
+      <button class="nav-item disabled" disabled>Referrals</button>
+      <button class="nav-item disabled" disabled>Affiliate</button>
+      <button class="nav-item disabled" disabled>Audit</button>
+    </nav>
+
+    <main class="main">
+      <div class="topbar">
+        <h1 id="view-title">Executive Summary</h1>
+        <div class="right">
+          <span class="admin-chip" id="admin-chip">…</span>
+          <button class="btn" id="refresh-btn">↻ Refresh</button>
+          <button class="btn" id="logout-btn">Logout</button>
+        </div>
+      </div>
+
+      <div id="global-banner"></div>
+
+      <!-- SUMMARY VIEW -->
+      <section id="view-summary">
+        <div class="section">
+          <div class="section-title">Users</div>
+          <div class="card-grid" id="cards-users"></div>
+        </div>
+        <div class="section">
+          <div class="section-title">Community &amp; Welcome</div>
+          <div class="card-grid" id="cards-community"></div>
+        </div>
+        <div class="section">
+          <div class="section-title">Referrals</div>
+          <div class="card-grid" id="cards-referrals"></div>
+        </div>
+        <div class="section">
+          <div class="section-title">Vouchers &amp; Affiliate</div>
+          <div class="card-grid" id="cards-vouchers"></div>
+        </div>
+        <div class="section">
+          <div class="section-title">System Health</div>
+          <div class="card-grid" id="cards-system"></div>
+        </div>
+      </section>
+
+      <!-- FUNNEL VIEW -->
+      <section id="view-funnel" class="hidden">
+        <div class="controls" style="margin-bottom:16px;">
+          <div class="seg" id="funnel-window">
+            <button data-window="today">Today</button>
+            <button data-window="7d" class="active">7d</button>
+            <button data-window="30d">30d</button>
+          </div>
+        </div>
+        <div id="funnel-body"></div>
+      </section>
+
+      <!-- ABUSE VIEW -->
+      <section id="view-abuse" class="hidden">
+        <div class="card-grid" id="cards-abuse"></div>
+        <div id="abuse-notes"></div>
+      </section>
+    </main>
+  </div>
+
+  <script src="/static/admin-dashboard.js"></script>
+</body>
+</html>
