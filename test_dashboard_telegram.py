@@ -21,6 +21,7 @@ from dashboard_telegram import (
     TELEGRAM_COUNTS_DOC_ID,
     read_member_count,
     refresh_member_counts,
+    sanitize_telegram_counts_cache,
 )
 
 OFFICIAL = -1002396761021
@@ -115,6 +116,33 @@ class RefreshMemberCountsTests(unittest.TestCase):
         doc = refresh_member_counts(METRICS, fetcher, existing={}, now=NOW)
         self.assertEqual(set(doc["counts"]), {m[0] for m in METRICS})
 
+    def test_result_logs_include_required_fields(self):
+        messages = []
+
+        class Logger:
+            def info(self, message):
+                messages.append(message)
+
+        def fetcher(chat_id):
+            if chat_id == OFFICIAL:
+                return 24830
+            raise RuntimeError("telegram timeout")
+
+        refresh_member_counts(METRICS, fetcher, existing={}, now=NOW, logger=Logger())
+
+        joined = "\n".join(messages)
+        self.assertIn("[DASHBOARD_TG_REFRESH][RESULT]", joined)
+        self.assertIn("metric=official_channel_subscribers", joined)
+        self.assertIn(f"chat_id={OFFICIAL}", joined)
+        self.assertIn("ok=true", joined)
+        self.assertIn("count=24830", joined)
+        self.assertIn("error_type=None", joined)
+        self.assertIn("metric=chatroom_members", joined)
+        self.assertIn(f"chat_id={CHATROOM}", joined)
+        self.assertIn("ok=false", joined)
+        self.assertIn("error_type=RuntimeError", joined)
+        self.assertIn("error=telegram timeout", joined)
+
 
 class ReadMemberCountTests(unittest.TestCase):
     def _entry(self, *, count=24830, age_s=60, ok=True):
@@ -174,6 +202,62 @@ class ReadMemberCountTests(unittest.TestCase):
         params = list(inspect.signature(read_member_count).parameters)
         self.assertEqual(params[0], "entry")
         self.assertNotIn("fetcher", params)
+
+
+class SanitizeTelegramCountsCacheTests(unittest.TestCase):
+    def test_missing_doc_returns_exists_false(self):
+        self.assertEqual(
+            sanitize_telegram_counts_cache(None),
+            {"success": True, "exists": False, "updated_at": None, "counts": {}},
+        )
+
+    def test_present_doc_is_sanitized(self):
+        doc = {
+            "_id": TELEGRAM_COUNTS_DOC_ID,
+            "updated_at": NOW,
+            "internal": "ignored",
+            "counts": {
+                "official_channel_subscribers": {
+                    "chat_id": OFFICIAL,
+                    "count": "24830",
+                    "ok": True,
+                    "updated_at": NOW,
+                    "error": None,
+                    "raw": "ignored",
+                },
+                "chatroom_members": {
+                    "chat_id": CHATROOM,
+                    "count": 5120,
+                    "ok": False,
+                    "updated_at": NOW.isoformat(),
+                    "error": RuntimeError("permission denied"),
+                },
+            },
+        }
+
+        body = sanitize_telegram_counts_cache(doc)
+
+        self.assertTrue(body["success"])
+        self.assertTrue(body["exists"])
+        self.assertEqual(body["updated_at"], NOW.isoformat())
+        self.assertEqual(
+            set(body["counts"]),
+            {"official_channel_subscribers", "chatroom_members"},
+        )
+        self.assertEqual(
+            body["counts"]["official_channel_subscribers"],
+            {
+                "chat_id": str(OFFICIAL),
+                "count": 24830,
+                "ok": True,
+                "updated_at": NOW.isoformat(),
+                "error": None,
+            },
+        )
+        self.assertEqual(
+            body["counts"]["chatroom_members"]["error"],
+            "permission denied",
+        )
 
 
 class ContractTests(unittest.TestCase):

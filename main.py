@@ -2381,6 +2381,7 @@ from dashboard_telegram import (
     MEMBER_COUNT_STALE_AFTER_S,
     refresh_member_counts,
     read_member_count,
+    sanitize_telegram_counts_cache,
 )
 
 # Env override for community chat; falls back to the main group.
@@ -2407,33 +2408,74 @@ def _telegram_count_metrics() -> list[tuple[str, int | None]]:
     ]
 
 
-def _tg_fetch_member_count(chat_id: int) -> int:
-    # Runs only in the worker process, where app_bot's polling loop exists.
-    # call_bot_in_loop dispatches the coroutine onto that loop from the
-    # scheduler thread; in web mode there is no loop and this would raise.
-    return call_bot_in_loop(app_bot.bot.get_chat_member_count(chat_id=chat_id), timeout=10)
+def _fetch_chat_member_count_http(chat_id: int) -> int:
+    """Fetch a Telegram chat member count through the Bot HTTP API."""
+    bot_token = (os.environ.get("BOT_TOKEN") or "").strip()
+    if not bot_token:
+        raise RuntimeError("BOT_TOKEN missing for Telegram member count refresh")
+
+    url = f"https://api.telegram.org/bot{bot_token}/getChatMemberCount"
+    try:
+        resp = requests.get(url, params={"chat_id": chat_id}, timeout=10)
+    except Exception as exc:  # noqa: BLE001 - surface as per-metric refresh failure
+        raise RuntimeError(f"Telegram HTTP request failed: {exc}") from exc
+
+    if resp.status_code != 200:
+        raise RuntimeError(
+            f"Telegram HTTP status {resp.status_code}: {getattr(resp, 'text', '')}"
+        )
+
+    try:
+        payload = resp.json()
+    except Exception as exc:  # noqa: BLE001 - malformed Telegram response
+        raise RuntimeError(f"Telegram HTTP invalid JSON: {exc}") from exc
+
+    if not payload.get("ok"):
+        description = payload.get("description") or payload
+        raise RuntimeError(f"Telegram ok=false: {description}")
+
+    if "result" not in payload:
+        raise RuntimeError("Telegram response missing result")
+
+    try:
+        return int(payload["result"])
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f"Telegram response result is not an int: {payload.get('result')}") from exc
 
 
 def refresh_telegram_member_counts() -> dict:
     """Worker-side refresh: fetch live counts and cache them in admin_cache.
 
-    Calls the Telegram API (only safe in the worker, where the bot loop runs),
-    preserving the previous count per-metric on failure, and upserts the result
-    into ``admin_cache`` doc ``telegram_member_counts``. The dashboard reads this
-    document only and never calls Telegram itself. Never raises.
+    Calls Telegram's HTTP API from the worker scheduler, preserving the previous
+    count per-metric on failure, and upserts the result into ``admin_cache`` doc
+    ``telegram_member_counts``. The dashboard reads this document only and never
+    calls Telegram itself. Never raises.
     """
+    logger.info(
+        "[DASHBOARD_TG_REFRESH][START]\n"
+        f"runner_mode={RUNNER_MODE}\n"
+        f"official_channel_id={OFFICIAL_CHANNEL_ID}\n"
+        f"community_chat_id={_COMMUNITY_CHAT_ID}"
+    )
     try:
         existing = admin_cache_col.find_one({"_id": TELEGRAM_COUNTS_DOC_ID}) or {}
         doc = refresh_member_counts(
             _telegram_count_metrics(),
-            _tg_fetch_member_count,
+            _fetch_chat_member_count_http,
             existing=existing,
             logger=logger,
         )
-        admin_cache_col.update_one(
+        result = admin_cache_col.update_one(
             {"_id": TELEGRAM_COUNTS_DOC_ID},
             {"$set": {"updated_at": doc["updated_at"], "counts": doc["counts"]}},
             upsert=True,
+        )
+        logger.info(
+            "[DASHBOARD_TG_REFRESH][WRITE]\n"
+            f"matched={getattr(result, 'matched_count', None)}\n"
+            f"modified={getattr(result, 'modified_count', None)}\n"
+            f"upserted_id={getattr(result, 'upserted_id', None)}\n"
+            "counts_keys=official_channel_subscribers,chatroom_members"
         )
         return doc
     except Exception:
@@ -2647,6 +2689,37 @@ def dashboard_summary():
     }
     _dashboard_cache_set("summary", payload)
     return jsonify(payload)
+
+
+@admin_bp.get("/api/admin/dashboard/telegram-counts/cache")
+def dashboard_telegram_counts_cache():
+    ok, err = require_admin_from_query()
+    if not ok:
+        msg, code = err
+        return jsonify({"success": False, "message": msg}), code
+
+    doc = admin_cache_col.find_one({"_id": TELEGRAM_COUNTS_DOC_ID})
+    return jsonify(sanitize_telegram_counts_cache(doc))
+
+
+@admin_bp.post("/api/admin/dashboard/telegram-counts/refresh")
+def dashboard_telegram_counts_refresh():
+    ok, err = require_admin_from_query()
+    if not ok:
+        msg, code = err
+        return jsonify({"success": False, "message": msg}), code
+
+    if RUNNER_MODE != "worker":
+        return jsonify(
+            {
+                "success": False,
+                "code": "worker_only",
+                "message": "Telegram count refresh runs in worker; check scheduler logs.",
+            }
+        )
+
+    doc = refresh_telegram_member_counts()
+    return jsonify({"success": bool(doc), "cache": sanitize_telegram_counts_cache(doc)})
 
 
 @admin_bp.get("/api/admin/dashboard/funnel")
@@ -5673,16 +5746,25 @@ def run_worker():
     # exists) and cached in admin_cache for the dashboard to read. First run is
     # delayed so app_bot.run_polling has started its loop; then on an interval.
     tg_refresh_minutes = int(os.getenv("TELEGRAM_COUNT_REFRESH_MINUTES", "60"))
+    tg_first_run_at = datetime.now(timezone.utc) + timedelta(seconds=60)
     scheduler.add_job(
         refresh_telegram_member_counts,
         trigger="interval",
         minutes=tg_refresh_minutes,
-        next_run_time=datetime.now(timezone.utc) + timedelta(seconds=60),
+        next_run_time=tg_first_run_at,
         id="telegram_member_counts_refresh",
         name="Telegram Member Counts Refresh",
         replace_existing=True,
         max_instances=1,
         coalesce=True,
+    )
+    logger.info(
+        "[DASHBOARD_TG_REFRESH][REGISTERED]\n"
+        f"runner_mode={RUNNER_MODE}\n"
+        f"official_channel_id={OFFICIAL_CHANNEL_ID}\n"
+        f"community_chat_id={_COMMUNITY_CHAT_ID}\n"
+        f"interval_minutes={tg_refresh_minutes}\n"
+        f"first_run_at={tg_first_run_at.isoformat()}"
     )
 
     # subscription audit disabled — subscription_cache refreshed via claim + check-in events
