@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="robots" content="noindex, nofollow">
   <title>Admin Login</title>
-  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <!-- Intentionally NO telegram-web-app.js — this is a browser login page, not a MiniApp -->
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
@@ -40,7 +40,6 @@
     .msg.info  { background: #14253a; border: 1px solid #2c4d7a; color: #a3cdff; }
     #widget-slot { display: flex; justify-content: center; min-height: 48px; }
     .foot { margin-top: 24px; font-size: 0.75rem; color: #8a7a64; }
-    .foot a { color: #c9b49a; }
   </style>
 </head>
 <body>
@@ -49,40 +48,42 @@
     <p class="sub">Sign in with Telegram to continue</p>
 
     <div id="server-notice" class="msg error" hidden>__SERVER_NOTICE__</div>
-    <div id="login-error" class="msg error" hidden></div>
+    <div id="login-error"   class="msg error" hidden></div>
     <div id="tg-note" class="msg info" hidden>
-      You appear to be inside Telegram. Open the admin panel from the miniapp instead
+      You appear to be inside Telegram. Open the admin panel via the miniapp instead
       &mdash; it signs you in automatically.
     </div>
 
-    <div id="widget-slot">
-      <script async src="https://telegram.org/widget-login.js"
-        data-telegram-login="__BOT_USERNAME__"
-        data-size="large"
-        data-auth-url="/api/admin/auth/telegram-login"></script>
-    </div>
+    <!-- Widget injected here by JS; empty until script loads -->
+    <div id="widget-slot"></div>
+
     <div id="widget-fallback" class="msg error" hidden>
-      Telegram login could not load. Make sure the bot's login domain is configured
-      via @BotFather (/setdomain) and that scripts from telegram.org are not blocked.
+      Telegram login could not load. Check that the bot&rsquo;s login domain is
+      registered with @BotFather (<code>/setdomain</code>) and that scripts from
+      telegram.org are not blocked.
     </div>
 
     <p class="foot">Access is limited to whitelisted Telegram admin accounts.<br>
       All login attempts are logged.</p>
   </div>
 
+  <!-- Server injects the bot username here; empty string = not configured -->
+  <script>var ADMIN_BOT_USERNAME = "__BOT_USERNAME__";</script>
+
   <script>
     (function () {
       var ERRORS = {
-        disabled: "Admin web login is currently disabled.",
-        rate_limited: "Too many attempts. Please wait a minute and try again.",
-        missing_hash: "Telegram login data was incomplete. Please try again.",
-        invalid_hash: "Telegram login verification failed. Please try again.",
-        expired: "The login confirmation expired. Please try again.",
+        disabled:        "Admin web login is currently disabled.",
+        rate_limited:    "Too many attempts. Please wait a minute and try again.",
+        missing_hash:    "Telegram login data was incomplete. Please try again.",
+        invalid_hash:    "Telegram login verification failed. Please try again.",
+        expired:         "The login confirmation expired. Please try again.",
         missing_user_id: "Telegram login data was incomplete. Please try again.",
-        missing_bot_token: "Server is missing its bot configuration.",
-        not_admin: "This Telegram account is not authorized for admin access."
+        missing_bot_token: "Server is missing its bot token configuration.",
+        not_admin:       "This Telegram account is not authorized for admin access."
       };
 
+      // --- Error / notice display ---
       var notice = document.getElementById("server-notice");
       if (notice && notice.textContent.trim()) notice.hidden = false;
 
@@ -93,21 +94,61 @@
         box.hidden = false;
       }
 
-      try {
-        if (window.Telegram && window.Telegram.WebApp && window.Telegram.WebApp.initData) {
-          document.getElementById("tg-note").hidden = false;
-        }
-      } catch (_) {}
+      // --- Inside-Telegram detection (fallback note only, no MiniApp SDK needed) ---
+      if (/Telegram/i.test(navigator.userAgent || "")) {
+        document.getElementById("tg-note").hidden = false;
+      }
 
-      // The widget script replaces itself with an iframe; if none appears the
-      // domain is likely not registered with BotFather or the script is blocked.
+      // --- Bot username check ---
+      console.log("[admin-login] bot_username:", ADMIN_BOT_USERNAME || "(missing)");
+
+      if (!ADMIN_BOT_USERNAME) {
+        var n = document.getElementById("server-notice");
+        if (!(n.textContent || "").trim()) {
+          n.textContent = "BOT_USERNAME is not configured on the server.";
+          n.hidden = false;
+        }
+        console.error("[admin-login] BOT_USERNAME is not set — widget will not render");
+        return; // nothing more to do
+      }
+
+      // --- Inject Telegram Login Widget dynamically ---
+      // Script URL: telegram-widget.js (Login Widget), NOT telegram-web-app.js (MiniApp SDK)
+      var slot = document.getElementById("widget-slot");
+      var s = document.createElement("script");
+      s.async = true;
+      s.src = "https://telegram.org/js/telegram-widget.js?22";
+      s.setAttribute("data-telegram-login", ADMIN_BOT_USERNAME);
+      s.setAttribute("data-size", "large");
+      s.setAttribute("data-auth-url", "/api/admin/auth/telegram-login");
+      s.setAttribute("data-request-access", "write");
+
+      s.onload = function () {
+        console.log("[admin-login] Telegram widget script loaded for bot:", ADMIN_BOT_USERNAME);
+      };
+      s.onerror = function () {
+        console.error(
+          "[admin-login] Telegram widget script failed to load —",
+          "check /setdomain config in BotFather and network connectivity to telegram.org"
+        );
+        document.getElementById("widget-fallback").hidden = false;
+      };
+
+      console.log("[admin-login] injecting Telegram Login Widget for bot:", ADMIN_BOT_USERNAME);
+      slot.appendChild(s);
+
+      // Secondary check: if no iframe appears after 5 s the widget did not render
+      // (e.g. domain not registered, CSP block, ad blocker)
       setTimeout(function () {
-        var slot = document.getElementById("widget-slot");
         if (slot && !slot.querySelector("iframe")) {
+          console.warn(
+            "[admin-login] widget iframe not detected after 5 s —",
+            "domain may not be registered via /setdomain, or scripts are blocked"
+          );
           document.getElementById("widget-fallback").hidden = false;
         }
-      }, 4000);
-    })();
+      }, 5000);
+    }());
   </script>
 </body>
 </html>
