@@ -2408,20 +2408,48 @@ def _telegram_count_metrics() -> list[tuple[str, int | None]]:
     ]
 
 
-def _tg_fetch_member_count(chat_id: int) -> int:
-    # Runs only in the worker process, where app_bot's polling loop exists.
-    # call_bot_in_loop dispatches the coroutine onto that loop from the
-    # scheduler thread; in web mode there is no loop and this would raise.
-    return call_bot_in_loop(app_bot.bot.get_chat_member_count(chat_id=chat_id), timeout=10)
+def _fetch_chat_member_count_http(chat_id: int) -> int:
+    """Fetch a Telegram chat member count through the Bot HTTP API."""
+    bot_token = (os.environ.get("BOT_TOKEN") or "").strip()
+    if not bot_token:
+        raise RuntimeError("BOT_TOKEN missing for Telegram member count refresh")
+
+    url = f"https://api.telegram.org/bot{bot_token}/getChatMemberCount"
+    try:
+        resp = requests.get(url, params={"chat_id": chat_id}, timeout=10)
+    except Exception as exc:  # noqa: BLE001 - surface as per-metric refresh failure
+        raise RuntimeError(f"Telegram HTTP request failed: {exc}") from exc
+
+    if resp.status_code != 200:
+        raise RuntimeError(
+            f"Telegram HTTP status {resp.status_code}: {getattr(resp, 'text', '')}"
+        )
+
+    try:
+        payload = resp.json()
+    except Exception as exc:  # noqa: BLE001 - malformed Telegram response
+        raise RuntimeError(f"Telegram HTTP invalid JSON: {exc}") from exc
+
+    if not payload.get("ok"):
+        description = payload.get("description") or payload
+        raise RuntimeError(f"Telegram ok=false: {description}")
+
+    if "result" not in payload:
+        raise RuntimeError("Telegram response missing result")
+
+    try:
+        return int(payload["result"])
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f"Telegram response result is not an int: {payload.get('result')}") from exc
 
 
 def refresh_telegram_member_counts() -> dict:
     """Worker-side refresh: fetch live counts and cache them in admin_cache.
 
-    Calls the Telegram API (only safe in the worker, where the bot loop runs),
-    preserving the previous count per-metric on failure, and upserts the result
-    into ``admin_cache`` doc ``telegram_member_counts``. The dashboard reads this
-    document only and never calls Telegram itself. Never raises.
+    Calls Telegram's HTTP API from the worker scheduler, preserving the previous
+    count per-metric on failure, and upserts the result into ``admin_cache`` doc
+    ``telegram_member_counts``. The dashboard reads this document only and never
+    calls Telegram itself. Never raises.
     """
     logger.info(
         "[DASHBOARD_TG_REFRESH][START]\n"
@@ -2433,7 +2461,7 @@ def refresh_telegram_member_counts() -> dict:
         existing = admin_cache_col.find_one({"_id": TELEGRAM_COUNTS_DOC_ID}) or {}
         doc = refresh_member_counts(
             _telegram_count_metrics(),
-            _tg_fetch_member_count,
+            _fetch_chat_member_count_http,
             existing=existing,
             logger=logger,
         )
