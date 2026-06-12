@@ -2376,9 +2376,12 @@ _DASHBOARD_CACHE_TTL_S = 300  # 5 minutes
 
 # Telegram member count is cached separately with a 1-hour TTL, keyed by
 # chat_id so the official channel and chatroom are cached independently.
-from dashboard_telegram import get_member_count_cached, MEMBER_CACHE_TTL_S
-_TG_MEMBER_CACHE: dict[int, dict] = {}
-_TG_MEMBER_CACHE_TTL_S = MEMBER_CACHE_TTL_S
+from dashboard_telegram import (
+    TELEGRAM_COUNTS_DOC_ID,
+    MEMBER_COUNT_STALE_AFTER_S,
+    refresh_member_counts,
+    read_member_count,
+)
 
 # Env override for community chat; falls back to the main group.
 _COMMUNITY_CHAT_ID: int | None = None
@@ -2396,22 +2399,46 @@ if _COMMUNITY_CHAT_ID is None:
         pass
 
 
+def _telegram_count_metrics() -> list[tuple[str, int | None]]:
+    """The (metric_name, chat_id) pairs cached for the dashboard."""
+    return [
+        ("official_channel_subscribers", OFFICIAL_CHANNEL_ID),
+        ("chatroom_members", _COMMUNITY_CHAT_ID),
+    ]
+
+
 def _tg_fetch_member_count(chat_id: int) -> int:
+    # Runs only in the worker process, where app_bot's polling loop exists.
+    # call_bot_in_loop dispatches the coroutine onto that loop from the
+    # scheduler thread; in web mode there is no loop and this would raise.
     return call_bot_in_loop(app_bot.bot.get_chat_member_count(chat_id=chat_id), timeout=10)
 
 
-def _get_tg_member_count(chat_id: int) -> dict:
-    """Return Telegram member count with 1-hour caching and graceful fallback.
+def refresh_telegram_member_counts() -> dict:
+    """Worker-side refresh: fetch live counts and cache them in admin_cache.
 
-    Returns {"count": int|None, "stale": bool, "cached_at": str|None}.
+    Calls the Telegram API (only safe in the worker, where the bot loop runs),
+    preserving the previous count per-metric on failure, and upserts the result
+    into ``admin_cache`` doc ``telegram_member_counts``. The dashboard reads this
+    document only and never calls Telegram itself. Never raises.
     """
-    return get_member_count_cached(
-        chat_id,
-        _tg_fetch_member_count,
-        cache=_TG_MEMBER_CACHE,
-        ttl=_TG_MEMBER_CACHE_TTL_S,
-        logger=logger,
-    )
+    try:
+        existing = admin_cache_col.find_one({"_id": TELEGRAM_COUNTS_DOC_ID}) or {}
+        doc = refresh_member_counts(
+            _telegram_count_metrics(),
+            _tg_fetch_member_count,
+            existing=existing,
+            logger=logger,
+        )
+        admin_cache_col.update_one(
+            {"_id": TELEGRAM_COUNTS_DOC_ID},
+            {"$set": {"updated_at": doc["updated_at"], "counts": doc["counts"]}},
+            upsert=True,
+        )
+        return doc
+    except Exception:
+        logger.exception("[DASHBOARD_TG_REFRESH] refresh failed")
+        return {}
 
 
 def _dashboard_cache_get(key: str):
@@ -2501,23 +2528,28 @@ def dashboard_summary():
             errors.append(e)
         return val
 
-    # ---- Telegram counts (per-chat 1-hour cache, graceful fallback) ----
-    # Official channel subscribers and AdvantPlay chatroom members are fetched
-    # independently; each falls back to its last cached value on API failure.
-    def _tg_metric(chat_id, label):
-        if not chat_id:
-            return {"count": None, "stale": True, "cached_at": None}
-        try:
-            res = _get_tg_member_count(chat_id)
-        except Exception as exc:  # pragma: no cover - helper handles failures internally
-            errors.append(f"{label}: {exc}")
-            return {"count": None, "stale": True, "cached_at": None}
-        if res.get("stale"):
+    # ---- Telegram counts (worker-cached; read-only here) ----
+    # The worker refreshes these into admin_cache; the dashboard never calls the
+    # Telegram API directly (the bot loop only exists in the worker process).
+    # Each metric falls back to its last cached value and is flagged stale.
+    tg_cache_doc = admin_cache_col.find_one({"_id": TELEGRAM_COUNTS_DOC_ID}) or {}
+    tg_counts = tg_cache_doc.get("counts") or {}
+
+    def _tg_metric(label):
+        res = read_member_count(tg_counts.get(label), now=now)
+        status = res.get("status")
+        if status != "ok":
+            logger.info(
+                "[DASHBOARD_TG_CACHE]\nmetric=%s\nstatus=%s\nage_seconds=%s",
+                label,
+                status,
+                res.get("age_seconds"),
+            )
             errors.append(f"{label}: telegram unavailable, serving cached value")
         return res
 
-    official_subs = _tg_metric(OFFICIAL_CHANNEL_ID, "official_channel_subscribers")
-    chatroom_members = _tg_metric(_COMMUNITY_CHAT_ID, "chatroom_members")
+    official_subs = _tg_metric("official_channel_subscribers")
+    chatroom_members = _tg_metric("chatroom_members")
 
     # ---- Users ----
     registered_users = grab(lambda: users_collection.count_documents({}))
@@ -5637,6 +5669,22 @@ def run_worker():
                 GROWTH_LEADERBOARD_TIMEZONE,
                 getattr(job, "next_run_time", None),
             )
+    # Telegram member counts: refreshed only in the worker (where the bot loop
+    # exists) and cached in admin_cache for the dashboard to read. First run is
+    # delayed so app_bot.run_polling has started its loop; then on an interval.
+    tg_refresh_minutes = int(os.getenv("TELEGRAM_COUNT_REFRESH_MINUTES", "60"))
+    scheduler.add_job(
+        refresh_telegram_member_counts,
+        trigger="interval",
+        minutes=tg_refresh_minutes,
+        next_run_time=datetime.now(timezone.utc) + timedelta(seconds=60),
+        id="telegram_member_counts_refresh",
+        name="Telegram Member Counts Refresh",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
+
     # subscription audit disabled — subscription_cache refreshed via claim + check-in events
     try:
         reconcile_drop_statuses()
