@@ -2397,7 +2397,31 @@ if _COMMUNITY_CHAT_ID is None:
 
 
 def _tg_fetch_member_count(chat_id: int) -> int:
-    return call_bot_in_loop(app_bot.bot.get_chat_member_count(chat_id=chat_id), timeout=10)
+    # Diagnostic instrumentation for the dashboard "telegram unavailable" path.
+    # Logs the full context of every failed count fetch, then re-raises so the
+    # existing stale/None fallback in get_member_count_cached is unchanged.
+    _app_bot = globals().get("app_bot", None)
+    app_bot_exists = _app_bot is not None
+    bot_exists = bool(app_bot_exists and getattr(_app_bot, "bot", None) is not None)
+    try:
+        return call_bot_in_loop(_app_bot.bot.get_chat_member_count(chat_id=chat_id), timeout=10)
+    except Exception as exc:
+        logger.warning(
+            "[DASHBOARD_TG_COUNT]\n"
+            "chat_id=%s\n"
+            "runner_mode=%s\n"
+            "app_bot_exists=%s\n"
+            "bot_exists=%s\n"
+            "exception_type=%s\n"
+            "exception=%s",
+            chat_id,
+            RUNNER_MODE,
+            str(app_bot_exists).lower(),
+            str(bot_exists).lower(),
+            type(exc).__name__,
+            exc,
+        )
+        raise
 
 
 def _get_tg_member_count(chat_id: int) -> dict:
