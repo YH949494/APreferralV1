@@ -179,8 +179,12 @@ def test_admin_page_serves_login_without_session(monkeypatch):
     assert res.status_code == 200
     assert res.headers["Cache-Control"].startswith("no-store")
     html = res.get_data(as_text=True)
-    assert 'data-telegram-login="test_bot"' in html
-    assert "widget-login.js" in html
+    # Bot username injected into the JS variable (widget rendered dynamically)
+    assert 'ADMIN_BOT_USERNAME = "test_bot"' in html
+    # Correct widget script URL (NOT telegram-web-app.js / widget-login.js)
+    assert "telegram-widget.js" in html
+    # MiniApp SDK must not be loaded (comments mentioning it are fine)
+    assert 'src="https://telegram.org/js/telegram-web-app.js"' not in html
 
 
 def test_admin_page_serves_index_with_session(monkeypatch):
