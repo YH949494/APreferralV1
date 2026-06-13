@@ -3,7 +3,7 @@
 (function () {
   "use strict";
 
-  var state = { view: "summary", funnelWindow: "7d" };
+  var state = { view: "summary", funnelWindow: "7d", referralsWindow: "7d" };
 
   function $(sel, root) { return (root || document).querySelector(sel); }
   function $all(sel, root) { return Array.prototype.slice.call((root || document).querySelectorAll(sel)); }
@@ -317,7 +317,7 @@
   function loadReferrals(refresh) {
     skeletonGrid($("#cards-referrals-summary"), 7);
     statePanel("referrals-body", "loading", "Loading referrers…");
-    api("/api/admin/dashboard/referrals" + (refresh ? "?refresh=1" : ""))
+    api("/api/admin/dashboard/referrals?window=" + encodeURIComponent(state.referralsWindow) + (refresh ? "&refresh=1" : ""))
       .then(function (d) {
         var s = d.summary;
         $("#cards-referrals-summary").innerHTML =
@@ -571,6 +571,13 @@
         state.funnelWindow = b.dataset.window;
         $all("#funnel-window button").forEach(function (x) { x.classList.toggle("active", x === b); });
         loadFunnel(false);
+      });
+    });
+    $all("#referrals-window button").forEach(function (b) {
+      b.addEventListener("click", function () {
+        state.referralsWindow = b.dataset.window;
+        $all("#referrals-window button").forEach(function (x) { x.classList.toggle("active", x === b); });
+        loadReferrals(false);
       });
     });
 

@@ -86,6 +86,15 @@
 
       <!-- REFERRALS VIEW -->
       <section id="view-referrals" class="hidden">
+        <div class="controls" style="margin-bottom:16px;">
+          <div class="seg" id="referrals-window">
+            <button data-window="all">All Time</button>
+            <button data-window="today">Today</button>
+            <button data-window="7d" class="active">7d</button>
+            <button data-window="30d">30d</button>
+            <button data-window="90d">90d</button>
+          </div>
+        </div>
         <div class="card-grid" id="cards-referrals-summary"></div>
         <div class="section-title">Top Referrers</div>
         <input class="filter-input" id="referrals-filter" placeholder="Filter by referrer id / username…" />

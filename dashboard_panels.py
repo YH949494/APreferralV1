@@ -328,6 +328,27 @@ _PENDING_STATUSES = ["pending", "pending_channel", "processing"]
 _QUALIFIED_STATUSES = ["awarded", "qualified", "settled", "success"]
 _REVOKED_STATUSES = ["revoked", "failed", "rejected", "expired"]
 
+# Supported time-filter windows for the referrals panel. Maps window -> number
+# of days back from "now"; ``all`` means no time filter and ``today`` is handled
+# specially (start of the current UTC day).
+_REFERRAL_WINDOW_DAYS = {"today": 1, "7d": 7, "30d": 30, "90d": 90, "all": None}
+_DEFAULT_REFERRAL_WINDOW = "7d"
+
+
+def _normalize_referral_window(window: Any) -> str:
+    w = str(window or "").strip().lower()
+    return w if w in _REFERRAL_WINDOW_DAYS else _DEFAULT_REFERRAL_WINDOW
+
+
+def _referral_window_start(window: str, now: datetime) -> datetime | None:
+    """Return the inclusive start cutoff for a window, or None for ``all``."""
+    if window == "all":
+        return None
+    if window == "today":
+        return now.replace(hour=0, minute=0, second=0, microsecond=0)
+    days = _REFERRAL_WINDOW_DAYS.get(window) or _REFERRAL_WINDOW_DAYS[_DEFAULT_REFERRAL_WINDOW]
+    return now - timedelta(days=days)
+
 
 def _classify_referral_status(status: Any) -> str:
     s = str(status or "").lower()
@@ -345,26 +366,37 @@ def build_referrals_panel(
     users_col,
     welcome_eligibility_col,
     now: datetime | None = None,
+    window: str = _DEFAULT_REFERRAL_WINDOW,
     top_n: int = 25,
     invitees_per_referrer_cap: int = 200,
 ) -> dict:
     now = now or _utc_now()
     errors: list[str] = []
 
+    window = _normalize_referral_window(window)
+    window_start = _referral_window_start(window, now)
+    # Time filter applied to every referral metric below. ``all`` => no filter.
+    time_filter: dict = (
+        {} if window_start is None else {"created_at_utc": {"$gte": window_start}}
+    )
+
+    def _with_time(extra: dict) -> dict:
+        return {**time_filter, **extra}
+
     total_referrers = metric(
-        lambda: len(pending_referrals_col.distinct("inviter_user_id"))
+        lambda: len(pending_referrals_col.distinct("inviter_user_id", time_filter or None))
     )
     total_invitees = metric(
-        lambda: len(pending_referrals_col.distinct("invitee_user_id"))
+        lambda: len(pending_referrals_col.distinct("invitee_user_id", time_filter or None))
     )
     qualified = metric(
-        lambda: int(pending_referrals_col.count_documents({"status": {"$in": _QUALIFIED_STATUSES}}))
+        lambda: int(pending_referrals_col.count_documents(_with_time({"status": {"$in": _QUALIFIED_STATUSES}})))
     )
     pending = metric(
-        lambda: int(pending_referrals_col.count_documents({"status": {"$in": _PENDING_STATUSES}}))
+        lambda: int(pending_referrals_col.count_documents(_with_time({"status": {"$in": _PENDING_STATUSES}})))
     )
     revoked = metric(
-        lambda: int(pending_referrals_col.count_documents({"status": {"$in": _REVOKED_STATUSES}}))
+        lambda: int(pending_referrals_col.count_documents(_with_time({"status": {"$in": _REVOKED_STATUSES}})))
     )
 
     # ---- Top referrers (bounded aggregation) ----
@@ -373,7 +405,7 @@ def build_referrals_panel(
     try:
         agg = pending_referrals_col.aggregate(
             [
-                {"$match": {"inviter_user_id": {"$ne": None}}},
+                {"$match": _with_time({"inviter_user_id": {"$ne": None}})},
                 {
                     "$group": {
                         "_id": "$inviter_user_id",
@@ -469,6 +501,7 @@ def build_referrals_panel(
 
     return {
         "success": True,
+        "window": window,
         "as_of": now.isoformat(),
         "summary": {
             "total_referrers": total_referrers,
