@@ -2819,7 +2819,7 @@ def dashboard_funnel():
         }
         checkin_users.discard(None)
 
-    unlock_user_ids = set()
+    eligible_user_ids = set()
     if cohort_user_ids:
         for doc in welcome_eligibility_collection.find(
             {
@@ -2833,7 +2833,7 @@ def dashboard_funnel():
         ):
             uid = _doc_uid(doc)
             if uid in cohort_user_ids:
-                unlock_user_ids.add(uid)
+                eligible_user_ids.add(uid)
 
     claim_user_ids = set()
     if cohort_user_ids:
@@ -2895,12 +2895,16 @@ def dashboard_funnel():
     raw_stages = [
         _count_stage("Join Group", join_count),
         _count_stage(
+            "Welcome Eligible",
+            len(eligible_user_ids & cohort_user_ids),
+            note="Eligibility record created on join; not final unlock state.",
+        ),
+        _count_stage(
             "PM Start",
             pm_start_count,
             note="Uses first_private_interaction_at from private /start or first private-message handlers.",
         ),
         _count_stage("Check-in", len(checkin_users & cohort_user_ids)),
-        _count_stage("Welcome Unlock", len(unlock_user_ids & cohort_user_ids)),
         _count_stage(
             "Welcome Claim",
             len(claim_user_ids & cohort_user_ids),

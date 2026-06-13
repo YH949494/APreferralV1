@@ -606,7 +606,7 @@ def test_dashboard_funnel_welcome_claim_uses_affiliate_welcome_issued_for_cohort
     assert stages["Welcome Claim"]["data_quality"] == "exact"
 
 
-def test_dashboard_funnel_welcome_unlock_counts_distinct_cohort_users():
+def test_dashboard_funnel_welcome_eligible_counts_distinct_cohort_users():
     users = _DocCollection(
         {"user_id": uid, "joined_main_at": datetime(2026, 6, 10, tzinfo=timezone.utc)}
         for uid in range(1, 6)
@@ -622,10 +622,22 @@ def test_dashboard_funnel_welcome_unlock_counts_distinct_cohort_users():
     )
 
     body = _run_dashboard_funnel(users=users, welcome_eligibility=welcome_eligibility)
+    stage_names = [stage["name"] for stage in body["stages"]]
     stages = {stage["name"]: stage for stage in body["stages"]}
 
-    assert stages["Welcome Unlock"]["count"] == 2
-    assert stages["Welcome Unlock"]["conversion_pct"] == 40.0
+    assert "Welcome Eligible" in stage_names
+    assert "Welcome Unlock" not in stage_names
+    assert stage_names == [
+        "Join Group",
+        "Welcome Eligible",
+        "PM Start",
+        "Check-in",
+        "Welcome Claim",
+        "First Play",
+    ]
+    assert stages["Welcome Eligible"]["count"] == 2
+    assert stages["Welcome Eligible"]["conversion_pct"] == 40.0
+    assert stages["Welcome Eligible"]["note"] == "Eligibility record created on join; not final unlock state."
 
 
 def test_dashboard_funnel_legacy_welcome_claim_sources_dedupe_same_user():
