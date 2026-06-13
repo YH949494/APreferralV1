@@ -339,6 +339,55 @@ def test_dashboard_telegram_counts_cache_does_not_call_telegram():
     assert called == []
 
 
+def test_dashboard_telegram_counts_cache_uses_browser_compatible_guard():
+    source = Path("main.py").read_text(encoding="utf-8")
+    module = ast.parse(source)
+    for name in ("dashboard_telegram_counts_cache", "dashboard_telegram_counts_refresh"):
+        fn_node = next(
+            node for node in module.body
+            if isinstance(node, ast.FunctionDef) and node.name == name
+        )
+        calls = [
+            node.func.id for node in ast.walk(fn_node)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        ]
+
+        assert "require_admin_from_query" in calls
+        assert "require_admin" not in calls
+
+
+def test_require_admin_allows_browser_admin_session_without_init_data():
+    fn = _load_require_admin_from_query()
+    fn.__globals__.update(
+        {
+            "request": _Request({}),
+            "extract_raw_init_data_from_query": lambda req: "",
+            "verify_telegram_init_data": lambda raw: (False, {}, "bad"),
+            "_get_admin_secret": lambda req: "",
+            "_admin_secret_ok": lambda secret: False,
+            "admin_cache_col": _AdminCache([]),
+            "json": __import__("json"),
+        }
+    )
+    import sys
+    import types
+
+    admin_auth = types.ModuleType("admin_auth")
+    admin_auth.session_admin = lambda: {"id": 2222, "username": "admin"}
+    previous = sys.modules.get("admin_auth")
+    sys.modules["admin_auth"] = admin_auth
+    try:
+        ok, err = fn()
+    finally:
+        if previous is None:
+            sys.modules.pop("admin_auth", None)
+        else:
+            sys.modules["admin_auth"] = previous
+
+    assert ok is True
+    assert err is None
+
+
 def test_dashboard_telegram_counts_refresh_web_mode_is_worker_only():
     called = []
     fn = _load_main_functions("dashboard_telegram_counts_refresh")[0]
