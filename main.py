@@ -2751,14 +2751,15 @@ def dashboard_funnel():
 
     # Stage counts are distinct users entering each stage within the window.
     join_count = int(users_collection.count_documents({"joined_main_at": {"$gte": start}}))
+    pm_start_count = int(users_collection.count_documents({"first_private_interaction_at": {"$gte": start}}))
     checkin_users = len(xp_events_collection.distinct("user_id", {"type": "checkin", "created_at": {"$gte": start}}))
     welcome_unlock = int(welcome_eligibility_collection.count_documents({"created_at": {"$gte": start}}))
     welcome_claim = int(tickets.count_documents({"status": "claimed", "claimed_at": {"$gte": start}}))
 
     raw_stages = [
         {"name": "Join Group", "count": join_count, "data_quality": "exact"},
-        {"name": "PM Start", "count": None, "data_quality": "missing",
-         "note": "No PM-start instrumentation. Requires the bot to record a distinct /start event."},
+        {"name": "PM Start", "count": pm_start_count, "data_quality": "exact",
+         "note": "Uses first_private_interaction_at, written by private /start and first private-message handlers."},
         {"name": "Check-in", "count": checkin_users, "data_quality": "exact"},
         {"name": "Welcome Unlock", "count": welcome_unlock, "data_quality": "exact"},
         {"name": "Welcome Claim", "count": welcome_claim, "data_quality": "approx",
