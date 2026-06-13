@@ -137,6 +137,37 @@ class _TelegramCountsCache:
         return None
 
 
+class _CountCollection:
+    def __init__(self, value=0):
+        self.value = value
+        self.filters = []
+
+    def count_documents(self, filt):
+        self.filters.append(filt)
+        if callable(self.value):
+            return self.value(filt)
+        return self.value
+
+
+class _DistinctCollection:
+    def __init__(self, values=None):
+        self.values = values or []
+        self.calls = []
+
+    def distinct(self, field, filt):
+        self.calls.append((field, filt))
+        return self.values
+
+
+class _FunnelDb:
+    def __init__(self, tickets):
+        self.tickets = tickets
+
+    def __getitem__(self, name):
+        assert name == "welcome_tickets"
+        return self.tickets
+
+
 def test_api_is_admin_verified_admin_true():
     fn = _load_api_is_admin()
     calls = []
@@ -408,6 +439,49 @@ def test_dashboard_telegram_counts_refresh_web_mode_is_worker_only():
         "message": "Telegram count refresh runs in worker; check scheduler logs.",
     }
     assert called == []
+
+
+def test_dashboard_funnel_counts_pm_start_from_first_private_interaction():
+    now = datetime(2026, 6, 13, 12, 0, 0, tzinfo=timezone.utc)
+
+    def user_count(filt):
+        if "first_private_interaction_at" in filt:
+            return 11
+        if "joined_main_at" in filt:
+            return 5
+        return 0
+
+    users = _CountCollection(user_count)
+    xp_events = _DistinctCollection([1, 2, 3])
+    welcome = _CountCollection(4)
+    tickets = _CountCollection(2)
+    cached = []
+
+    fn = _load_main_functions("dashboard_funnel")[0]
+    fn.__globals__.update(
+        {
+            "require_admin_from_query": lambda: (True, None),
+            "request": _Request({"window": "7d", "refresh": "1"}),
+            "_dashboard_cache_get": lambda key: None,
+            "_dashboard_cache_set": lambda key, payload: cached.append((key, payload)),
+            "_utc_now": lambda: now,
+            "_utc_today_start": lambda ref: datetime(ref.year, ref.month, ref.day, tzinfo=timezone.utc),
+            "timedelta": __import__("datetime").timedelta,
+            "db": _FunnelDb(tickets),
+            "users_collection": users,
+            "xp_events_collection": xp_events,
+            "welcome_eligibility_collection": welcome,
+            "jsonify": lambda payload: payload,
+        }
+    )
+
+    body = fn()
+    stages = {stage["name"]: stage for stage in body["stages"]}
+
+    assert stages["PM Start"]["count"] == 11
+    assert stages["PM Start"]["data_quality"] == "exact"
+    assert any("first_private_interaction_at" in filt for filt in users.filters)
+    assert stages["Join Group"]["count"] == 5
 
 
 def test_dashboard_telegram_refresh_log_strings_include_required_fields():
