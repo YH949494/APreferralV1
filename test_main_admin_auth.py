@@ -149,6 +149,75 @@ class _CountCollection:
         return self.value
 
 
+class _DocCollection:
+    def __init__(self, docs=None):
+        self.docs = list(docs or [])
+        self.count_filters = []
+        self.find_filters = []
+        self.distinct_calls = []
+
+    def _match_value(self, value, condition):
+        if isinstance(condition, dict):
+            for op, expected in condition.items():
+                if op == "$gte":
+                    if value is None or value < expected:
+                        return False
+                elif op == "$in":
+                    if value not in expected:
+                        return False
+                elif op == "$regex":
+                    import re
+
+                    if value is None or re.search(expected, str(value)) is None:
+                        return False
+                else:
+                    raise AssertionError(f"unsupported op {op}")
+            return True
+        return value == condition
+
+    def _matches(self, doc, filt):
+        for key, condition in (filt or {}).items():
+            if key == "$or":
+                if not any(self._matches(doc, sub) for sub in condition):
+                    return False
+                continue
+            if not self._match_value(doc.get(key), condition):
+                return False
+        return True
+
+    def find(self, filt, projection=None):  # noqa: ARG002
+        self.find_filters.append(filt)
+        return [doc for doc in self.docs if self._matches(doc, filt)]
+
+    def count_documents(self, filt):
+        self.count_filters.append(filt)
+        return len(self.find(filt))
+
+    def distinct(self, field, filt):
+        self.distinct_calls.append((field, filt))
+        return sorted({doc.get(field) for doc in self.find(filt) if doc.get(field) is not None})
+
+
+class _FunnelDb:
+    def __init__(
+        self,
+        *,
+        welcome_tickets=None,
+        affiliate_ledger=None,
+        new_joiner_claims=None,
+        voucher_claims=None,
+    ):
+        self.collections = {
+            "welcome_tickets": welcome_tickets or _DocCollection(),
+            "affiliate_ledger": affiliate_ledger or _DocCollection(),
+            "new_joiner_claims": new_joiner_claims or _DocCollection(),
+            "voucher_claims": voucher_claims or _DocCollection(),
+        }
+
+    def __getitem__(self, name):
+        return self.collections[name]
+
+
 class _DistinctCollection:
     def __init__(self, values=None):
         self.values = values or []
@@ -157,15 +226,6 @@ class _DistinctCollection:
     def distinct(self, field, filt):
         self.calls.append((field, filt))
         return self.values
-
-
-class _FunnelDb:
-    def __init__(self, tickets):
-        self.tickets = tickets
-
-    def __getitem__(self, name):
-        assert name == "welcome_tickets"
-        return self.tickets
 
 
 def test_api_is_admin_verified_admin_true():
@@ -441,47 +501,218 @@ def test_dashboard_telegram_counts_refresh_web_mode_is_worker_only():
     assert called == []
 
 
-def test_dashboard_funnel_counts_pm_start_from_first_private_interaction():
+def _run_dashboard_funnel(
+    *,
+    users,
+    xp_events=None,
+    welcome_eligibility=None,
+    affiliate_ledger=None,
+    new_joiner_claims=None,
+    welcome_tickets=None,
+    voucher_claims=None,
+    window="7d",
+):
     now = datetime(2026, 6, 13, 12, 0, 0, tzinfo=timezone.utc)
-
-    def user_count(filt):
-        if "first_private_interaction_at" in filt:
-            return 11
-        if "joined_main_at" in filt:
-            return 5
-        return 0
-
-    users = _CountCollection(user_count)
-    xp_events = _DistinctCollection([1, 2, 3])
-    welcome = _CountCollection(4)
-    tickets = _CountCollection(2)
     cached = []
-
     fn = _load_main_functions("dashboard_funnel")[0]
     fn.__globals__.update(
         {
             "require_admin_from_query": lambda: (True, None),
-            "request": _Request({"window": "7d", "refresh": "1"}),
+            "request": _Request({"window": window, "refresh": "1"}),
             "_dashboard_cache_get": lambda key: None,
             "_dashboard_cache_set": lambda key, payload: cached.append((key, payload)),
             "_utc_now": lambda: now,
             "_utc_today_start": lambda ref: datetime(ref.year, ref.month, ref.day, tzinfo=timezone.utc),
             "timedelta": __import__("datetime").timedelta,
-            "db": _FunnelDb(tickets),
+            "db": _FunnelDb(
+                welcome_tickets=welcome_tickets,
+                affiliate_ledger=affiliate_ledger,
+                new_joiner_claims=new_joiner_claims,
+                voucher_claims=voucher_claims,
+            ),
             "users_collection": users,
-            "xp_events_collection": xp_events,
-            "welcome_eligibility_collection": welcome,
+            "xp_events_collection": xp_events or _DocCollection(),
+            "welcome_eligibility_collection": welcome_eligibility or _DocCollection(),
             "jsonify": lambda payload: payload,
         }
     )
+    return fn()
 
-    body = fn()
+
+def test_dashboard_funnel_counts_checkin_distinct_cohort_users():
+    users = _DocCollection(
+        {"user_id": uid, "joined_main_at": datetime(2026, 6, 10, tzinfo=timezone.utc)}
+        for uid in range(1, 11)
+    )
+    events = []
+    for index in range(30):
+        events.append(
+            {
+                "user_id": [1, 2, 3, 4, 999][index % 5],
+                "created_at": datetime(2026, 6, 12, tzinfo=timezone.utc),
+                "type": "checkin" if index % 3 == 0 else "other",
+                "reason": "checkin" if index % 3 == 1 else "other",
+                "unique_key": "checkin:20260612" if index % 3 == 2 else "other",
+            }
+        )
+
+    body = _run_dashboard_funnel(users=users, xp_events=_DocCollection(events))
     stages = {stage["name"]: stage for stage in body["stages"]}
 
-    assert stages["PM Start"]["count"] == 11
-    assert stages["PM Start"]["data_quality"] == "exact"
-    assert any("first_private_interaction_at" in filt for filt in users.filters)
-    assert stages["Join Group"]["count"] == 5
+    assert stages["Join Group"]["count"] == 10
+    assert stages["Check-in"]["count"] == 4
+    assert stages["Check-in"]["conversion_pct"] == 40.0
+    assert stages["Check-in"]["dropoff_pct"] == 60.0
+    assert stages["Check-in"]["data_quality"] != "invalid"
+
+
+def test_dashboard_funnel_pm_start_only_counts_cohort_users():
+    users = _DocCollection(
+        [
+            {"user_id": 1, "joined_main_at": datetime(2026, 6, 10, tzinfo=timezone.utc), "first_private_interaction_at": datetime(2026, 6, 11, tzinfo=timezone.utc)},
+            {"user_id": 2, "joined_main_at": datetime(2026, 6, 10, tzinfo=timezone.utc)},
+            {"user_id": 3, "joined_main_at": datetime(2026, 6, 10, tzinfo=timezone.utc), "first_private_interaction_at": datetime(2026, 6, 12, tzinfo=timezone.utc)},
+            {"user_id": 999, "first_private_interaction_at": datetime(2026, 6, 12, tzinfo=timezone.utc)},
+        ]
+    )
+
+    body = _run_dashboard_funnel(users=users)
+    stages = {stage["name"]: stage for stage in body["stages"]}
+
+    assert stages["Join Group"]["count"] == 3
+    assert stages["PM Start"]["count"] == 2
+    assert stages["PM Start"]["conversion_pct"] == 66.7
+
+
+def test_dashboard_funnel_welcome_claim_uses_affiliate_welcome_issued_for_cohort():
+    users = _DocCollection(
+        {"user_id": uid, "joined_main_at": datetime(2026, 6, 10, tzinfo=timezone.utc)}
+        for uid in range(1, 11)
+    )
+    affiliate = _DocCollection(
+        [
+            {"user_id": 1, "ledger_type": "WELCOME", "status": "ISSUED", "updated_at": datetime(2026, 6, 12, tzinfo=timezone.utc)},
+            {"user_id": 2, "tier": "WELCOME", "status": "ISSUED", "updated_at": datetime(2026, 6, 12, tzinfo=timezone.utc)},
+            {"user_id": 3, "pool_id": "WELCOME", "status": "ISSUED", "updated_at": datetime(2026, 6, 12, tzinfo=timezone.utc)},
+            {"user_id": 999, "pool_id": "WELCOME", "status": "ISSUED", "updated_at": datetime(2026, 6, 12, tzinfo=timezone.utc)},
+            {"user_id": 4, "pool_id": "WELCOME", "status": "PENDING_MANUAL", "updated_at": datetime(2026, 6, 12, tzinfo=timezone.utc)},
+        ]
+    )
+
+    body = _run_dashboard_funnel(users=users, affiliate_ledger=affiliate)
+    stages = {stage["name"]: stage for stage in body["stages"]}
+
+    assert stages["Welcome Claim"]["count"] == 3
+    assert stages["Welcome Claim"]["data_quality"] == "exact"
+
+
+def test_dashboard_funnel_welcome_unlock_counts_distinct_cohort_users():
+    users = _DocCollection(
+        {"user_id": uid, "joined_main_at": datetime(2026, 6, 10, tzinfo=timezone.utc)}
+        for uid in range(1, 6)
+    )
+    created_at = datetime(2026, 6, 12, tzinfo=timezone.utc)
+    welcome_eligibility = _DocCollection(
+        [
+            {"uid": 1, "created_at": created_at},
+            {"user_id": 2, "created_at": created_at},
+            {"uid": 2, "created_at": created_at},
+            {"uid": 999, "created_at": created_at},
+        ]
+    )
+
+    body = _run_dashboard_funnel(users=users, welcome_eligibility=welcome_eligibility)
+    stages = {stage["name"]: stage for stage in body["stages"]}
+
+    assert stages["Welcome Unlock"]["count"] == 2
+    assert stages["Welcome Unlock"]["conversion_pct"] == 40.0
+
+
+def test_dashboard_funnel_legacy_welcome_claim_sources_dedupe_same_user():
+    users = _DocCollection(
+        {"user_id": uid, "joined_main_at": datetime(2026, 6, 10, tzinfo=timezone.utc)}
+        for uid in range(1, 5)
+    )
+    claimed_at = datetime(2026, 6, 12, tzinfo=timezone.utc)
+
+    body = _run_dashboard_funnel(
+        users=users,
+        welcome_eligibility=_DocCollection(
+            [
+                {"uid": 1, "claimed": True, "claimed_at": claimed_at, "created_at": claimed_at},
+                {"user_id": 2, "claimed": True, "claimed_at": claimed_at, "created_at": claimed_at},
+            ]
+        ),
+        new_joiner_claims=_DocCollection(
+            [
+                {"uid": 1, "claimed_at": claimed_at},
+                {"user_id": 3, "claimed_at": claimed_at},
+            ]
+        ),
+        welcome_tickets=_DocCollection(
+            [
+                {"uid": 3, "status": "claimed", "claimed_at": claimed_at},
+                {"user_id": 999, "status": "claimed", "claimed_at": claimed_at},
+            ]
+        ),
+        voucher_claims=_DocCollection(
+            [
+                {"user_id": 4, "status": "claimed", "claimed_at": claimed_at, "pool_id": "PUBLIC"},
+            ]
+        ),
+    )
+    stages = {stage["name"]: stage for stage in body["stages"]}
+
+    assert stages["Welcome Claim"]["count"] == 3
+
+
+def test_dashboard_funnel_empty_cohort_is_safe():
+    body = _run_dashboard_funnel(
+        users=_DocCollection(),
+        xp_events=_DocCollection(
+            [{"user_id": 1, "created_at": datetime(2026, 6, 12, tzinfo=timezone.utc), "type": "checkin"}]
+        ),
+        affiliate_ledger=_DocCollection(
+            [{"user_id": 1, "ledger_type": "WELCOME", "status": "ISSUED", "updated_at": datetime(2026, 6, 12, tzinfo=timezone.utc)}]
+        ),
+    )
+
+    assert body["method"] == "join_cohort"
+    assert body["cohort_size"] == 0
+    for stage in body["stages"]:
+        if stage["count"] is not None:
+            assert stage["count"] == 0
+            assert stage["conversion_pct"] in (0.0, None)
+            assert stage["dropoff_pct"] in (0.0, None)
+
+
+def test_dashboard_funnel_no_stage_conversion_exceeds_100():
+    users = _DocCollection(
+        {"user_id": uid, "joined_main_at": datetime(2026, 6, 10, tzinfo=timezone.utc)}
+        for uid in (1, 2)
+    )
+    body = _run_dashboard_funnel(
+        users=users,
+        xp_events=_DocCollection(
+            [
+                {"user_id": 1, "created_at": datetime(2026, 6, 12, tzinfo=timezone.utc), "type": "checkin"},
+                {"user_id": 2, "created_at": datetime(2026, 6, 12, tzinfo=timezone.utc), "reason": "checkin"},
+                {"user_id": 999, "created_at": datetime(2026, 6, 12, tzinfo=timezone.utc), "unique_key": "checkin:20260612"},
+            ]
+        ),
+        affiliate_ledger=_DocCollection(
+            [
+                {"user_id": 1, "ledger_type": "WELCOME", "status": "ISSUED", "updated_at": datetime(2026, 6, 12, tzinfo=timezone.utc)},
+                {"user_id": 2, "ledger_type": "WELCOME", "status": "ISSUED", "updated_at": datetime(2026, 6, 12, tzinfo=timezone.utc)},
+                {"user_id": 999, "ledger_type": "WELCOME", "status": "ISSUED", "updated_at": datetime(2026, 6, 12, tzinfo=timezone.utc)},
+            ]
+        ),
+    )
+
+    for stage in body["stages"]:
+        if stage["conversion_pct"] is not None:
+            assert stage["conversion_pct"] <= 100.0
+            assert stage["data_quality"] != "invalid"
 
 
 def test_dashboard_telegram_refresh_log_strings_include_required_fields():
