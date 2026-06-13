@@ -14,10 +14,12 @@
       <button class="nav-item active" data-view="summary">Executive Summary</button>
       <button class="nav-item" data-view="funnel">Activation Funnel</button>
       <button class="nav-item" data-view="abuse">Abuse Overview</button>
-      <button class="nav-item disabled" disabled>Vouchers</button>
-      <button class="nav-item disabled" disabled>Referrals</button>
-      <button class="nav-item disabled" disabled>Affiliate</button>
-      <button class="nav-item disabled" disabled>Audit</button>
+      <button class="nav-item" data-view="vouchers">Vouchers</button>
+      <button class="nav-item" data-view="referrals">Referrals</button>
+      <button class="nav-item" data-view="affiliate">Affiliate</button>
+      <button class="nav-item" data-view="audit">Audit</button>
+      <button class="nav-item" data-view="users">User Drilldown</button>
+      <button class="nav-item" data-view="settings">Settings</button>
     </nav>
 
     <main class="main">
@@ -72,6 +74,55 @@
       <section id="view-abuse" class="hidden">
         <div class="card-grid" id="cards-abuse"></div>
         <div id="abuse-notes"></div>
+      </section>
+
+      <!-- VOUCHERS VIEW -->
+      <section id="view-vouchers" class="hidden">
+        <div class="card-grid" id="cards-voucher-summary"></div>
+        <div class="section-title">Campaigns</div>
+        <input class="filter-input" id="vouchers-filter" placeholder="Filter campaigns by name / status…" />
+        <div id="vouchers-body"></div>
+      </section>
+
+      <!-- REFERRALS VIEW -->
+      <section id="view-referrals" class="hidden">
+        <div class="card-grid" id="cards-referrals-summary"></div>
+        <div class="section-title">Top Referrers</div>
+        <input class="filter-input" id="referrals-filter" placeholder="Filter by referrer id / username…" />
+        <div id="referrals-body"></div>
+      </section>
+
+      <!-- AFFILIATE VIEW -->
+      <section id="view-affiliate" class="hidden">
+        <div class="card-grid" id="cards-affiliate-summary"></div>
+        <div class="section-title">Pool Availability &amp; Monthly Issuance</div>
+        <div id="affiliate-pools"></div>
+        <div class="section-title">Affiliates</div>
+        <input class="filter-input" id="affiliate-filter" placeholder="Filter by user id / tier / status…" />
+        <div id="affiliate-body"></div>
+      </section>
+
+      <!-- AUDIT VIEW -->
+      <section id="view-audit" class="hidden">
+        <div class="card-grid" id="cards-audit-summary"></div>
+        <div class="section-title">Audit Trail</div>
+        <input class="filter-input" id="audit-filter" placeholder="Filter by actor / action / result…" />
+        <div id="audit-body"></div>
+      </section>
+
+      <!-- USER DRILLDOWN VIEW -->
+      <section id="view-users" class="hidden">
+        <div class="controls" style="margin-bottom:16px;">
+          <input class="filter-input" id="user-search" placeholder="Search Telegram user_id or username…" style="max-width:340px;margin:0;" />
+          <button class="btn primary" id="user-search-btn">Search</button>
+        </div>
+        <div id="user-body"><div class="empty">Search by Telegram user_id or username to view a user profile.</div></div>
+      </section>
+
+      <!-- SETTINGS VIEW -->
+      <section id="view-settings" class="hidden">
+        <div style="margin-bottom:16px;"><span class="tag heuristic" style="font-size:12px;padding:4px 12px;">READ ONLY</span></div>
+        <div id="settings-body"></div>
       </section>
     </main>
   </div>

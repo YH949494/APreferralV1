@@ -3023,6 +3023,184 @@ def dashboard_abuse():
     return jsonify(payload)
 
 
+# ---------------------------------------------------------------------------
+# Admin dashboard panels (Phase C): Vouchers / Referrals / Affiliate / Audit /
+# User drilldown / Settings. All read-only — they only report on data the bot
+# already produced and never alter voucher, referral, affiliate, XP/check-in,
+# MiniApp or scheduler behaviour. Query/shaping logic lives in the pure,
+# unit-tested ``dashboard_panels`` module; these routes are thin wrappers that
+# inject the live collections and apply the shared admin guard + cache.
+# ---------------------------------------------------------------------------
+import dashboard_panels as _panels  # noqa: E402
+
+
+def _panel_cached(key, builder, *, ttl_key=True):
+    """Run a panel builder behind the existing dashboard cache + admin guard."""
+    if request.args.get("refresh") != "1":
+        cached = _dashboard_cache_get(key)
+        if cached is not None:
+            return jsonify(cached)
+    payload = builder()
+    _dashboard_cache_set(key, payload)
+    return jsonify(payload)
+
+
+@admin_bp.get("/api/admin/dashboard/vouchers")
+def dashboard_vouchers():
+    ok, err = require_admin_from_query()
+    if not ok:
+        msg, code = err
+        return jsonify({"success": False, "message": msg}), code
+    return _panel_cached(
+        "panel:vouchers",
+        lambda: _panels.build_vouchers_panel(
+            drops_col=db["drops"],
+            vouchers_col=db["vouchers"],
+            voucher_claims_col=db["voucher_claims"],
+            welcome_eligibility_col=welcome_eligibility_collection,
+            now=_utc_now(),
+        ),
+    )
+
+
+@admin_bp.get("/api/admin/dashboard/referrals")
+def dashboard_referrals():
+    ok, err = require_admin_from_query()
+    if not ok:
+        msg, code = err
+        return jsonify({"success": False, "message": msg}), code
+    return _panel_cached(
+        "panel:referrals",
+        lambda: _panels.build_referrals_panel(
+            pending_referrals_col=pending_referrals_collection,
+            qualified_events_col=qualified_events_collection,
+            users_col=users_collection,
+            welcome_eligibility_col=welcome_eligibility_collection,
+            now=_utc_now(),
+        ),
+    )
+
+
+@admin_bp.get("/api/admin/dashboard/referrals/detail")
+def dashboard_referrals_detail():
+    ok, err = require_admin_from_query()
+    if not ok:
+        msg, code = err
+        return jsonify({"success": False, "message": msg}), code
+    try:
+        referrer_id = int(request.args.get("user_id", ""))
+    except (TypeError, ValueError):
+        return jsonify({"success": False, "message": "user_id required"}), 400
+    return jsonify(
+        _panels.build_referral_detail(
+            referrer_id=referrer_id,
+            pending_referrals_col=pending_referrals_collection,
+            users_col=users_collection,
+            welcome_eligibility_col=welcome_eligibility_collection,
+            now=_utc_now(),
+        )
+    )
+
+
+@admin_bp.get("/api/admin/dashboard/affiliate")
+def dashboard_affiliate():
+    ok, err = require_admin_from_query()
+    if not ok:
+        msg, code = err
+        return jsonify({"success": False, "message": msg}), code
+    return _panel_cached(
+        "panel:affiliate",
+        lambda: _panels.build_affiliate_panel(
+            affiliate_ledger_col=affiliate_ledger_collection,
+            voucher_pools_col=voucher_pools_collection,
+            now=_utc_now(),
+        ),
+    )
+
+
+@admin_bp.get("/api/admin/dashboard/affiliate/detail")
+def dashboard_affiliate_detail():
+    ok, err = require_admin_from_query()
+    if not ok:
+        msg, code = err
+        return jsonify({"success": False, "message": msg}), code
+    try:
+        user_id = int(request.args.get("user_id", ""))
+    except (TypeError, ValueError):
+        return jsonify({"success": False, "message": "user_id required"}), 400
+    return jsonify(
+        _panels.build_affiliate_detail(
+            user_id=user_id,
+            affiliate_ledger_col=affiliate_ledger_collection,
+            now=_utc_now(),
+        )
+    )
+
+
+@admin_bp.get("/api/admin/dashboard/audit")
+def dashboard_audit():
+    ok, err = require_admin_from_query()
+    if not ok:
+        msg, code = err
+        return jsonify({"success": False, "message": msg}), code
+    return _panel_cached(
+        "panel:audit",
+        lambda: _panels.build_audit_panel(
+            admin_login_audit_col=db["admin_login_audit"],
+            audit_events_col=audit_events_collection,
+            referral_audit_col=referral_audit_collection,
+            admin_cache_col=admin_cache_col,
+            now=_utc_now(),
+        ),
+    )
+
+
+@admin_bp.get("/api/admin/dashboard/user")
+def dashboard_user_drilldown():
+    ok, err = require_admin_from_query()
+    if not ok:
+        msg, code = err
+        return jsonify({"success": False, "message": msg}), code
+    query = request.args.get("query") or request.args.get("q") or ""
+    return jsonify(
+        _panels.build_user_drilldown(
+            query=query,
+            users_col=users_collection,
+            welcome_eligibility_col=welcome_eligibility_collection,
+            voucher_claims_col=db["voucher_claims"],
+            affiliate_ledger_col=affiliate_ledger_collection,
+            pending_referrals_col=pending_referrals_collection,
+            qualified_events_col=qualified_events_collection,
+            now=_utc_now(),
+        )
+    )
+
+
+@admin_bp.get("/api/admin/dashboard/settings")
+def dashboard_settings():
+    ok, err = require_admin_from_query()
+    if not ok:
+        msg, code = err
+        return jsonify({"success": False, "message": msg}), code
+    import config as _cfg
+
+    constants = {
+        "XP_BASE_PER_CHECKIN": getattr(_cfg, "XP_BASE_PER_CHECKIN", None),
+        "FIRST_CHECKIN_BONUS": getattr(_cfg, "FIRST_CHECKIN_BONUS", None),
+        "STREAK_MILESTONES": getattr(_cfg, "STREAK_MILESTONES", None),
+        "STREAK_FREEZE_DEFAULT_TOKENS": getattr(_cfg, "STREAK_FREEZE_DEFAULT_TOKENS", None),
+        "STREAK_FREEZE_MAX_TOKENS": getattr(_cfg, "STREAK_FREEZE_MAX_TOKENS", None),
+        "WEEKLY_XP_BUCKET": getattr(_cfg, "WEEKLY_XP_BUCKET", None),
+        "WEEKLY_REFERRAL_BUCKET": getattr(_cfg, "WEEKLY_REFERRAL_BUCKET", None),
+        "GROUP_ID": GROUP_ID,
+        "OFFICIAL_CHANNEL_ID": OFFICIAL_CHANNEL_ID,
+        "COMMUNITY_CHAT_ID": _COMMUNITY_CHAT_ID,
+        "CHANNEL_USERNAME": CHANNEL_USERNAME,
+        "MINIAPP_VERSION": getattr(_cfg, "MINIAPP_VERSION", None),
+    }
+    return jsonify(_panels.build_settings_panel(os.environ, constants=constants))
+
+
 app.register_blueprint(admin_bp)
 
 # ---- Always return JSON on errors (prevents "Invalid JSON") ----
