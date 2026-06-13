@@ -3069,14 +3069,16 @@ def dashboard_referrals():
     if not ok:
         msg, code = err
         return jsonify({"success": False, "message": msg}), code
+    window = _panels._normalize_referral_window(request.args.get("window"))
     return _panel_cached(
-        "panel:referrals",
+        f"panel:referrals:{window}",
         lambda: _panels.build_referrals_panel(
             pending_referrals_col=pending_referrals_collection,
             qualified_events_col=qualified_events_collection,
             users_col=users_collection,
             welcome_eligibility_col=welcome_eligibility_collection,
             now=_utc_now(),
+            window=window,
         ),
     )
 

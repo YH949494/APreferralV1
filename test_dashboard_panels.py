@@ -224,6 +224,46 @@ def test_referrals_panel_aggregates_referrers():
     assert top["invitees"] == 3 and top["qualified"] == 1
     assert top["welcome_claimed"] == 1 and top["checkin_completed"] == 1
     assert top["username"] == "boss"
+    # Default window is 7d and is echoed back in the response.
+    assert out["window"] == "7d"
+
+
+def test_referrals_panel_applies_time_window():
+    pending = FakeCollection([
+        # Recent (within 7d / 30d)
+        {"inviter_user_id": 100, "invitee_user_id": 1, "status": "awarded", "created_at_utc": NOW - timedelta(days=2)},
+        {"inviter_user_id": 100, "invitee_user_id": 2, "status": "pending", "created_at_utc": NOW - timedelta(days=2)},
+        # Old (outside 7d, inside 30d)
+        {"inviter_user_id": 200, "invitee_user_id": 3, "status": "awarded", "created_at_utc": NOW - timedelta(days=20)},
+        # Ancient (outside everything but "all")
+        {"inviter_user_id": 300, "invitee_user_id": 4, "status": "awarded", "created_at_utc": NOW - timedelta(days=200)},
+    ])
+    users = FakeCollection([])
+    welcome = FakeCollection([])
+
+    def _run(window):
+        return dp.build_referrals_panel(
+            pending_referrals_col=pending, qualified_events_col=FakeCollection([]),
+            users_col=users, welcome_eligibility_col=welcome, now=NOW, window=window,
+        )
+
+    out7 = _run("7d")
+    assert out7["window"] == "7d"
+    assert out7["summary"]["total_referrers"]["value"] == 1
+    assert out7["summary"]["total_invitees"]["value"] == 2
+    assert out7["summary"]["qualified_referrals"]["value"] == 1
+
+    out30 = _run("30d")
+    assert out30["summary"]["total_referrers"]["value"] == 2
+    assert out30["summary"]["total_invitees"]["value"] == 3
+
+    out_all = _run("all")
+    assert out_all["window"] == "all"
+    assert out_all["summary"]["total_referrers"]["value"] == 3
+    assert out_all["summary"]["total_invitees"]["value"] == 4
+
+    # Unknown windows fall back to the 7d default.
+    assert _run("bogus")["window"] == "7d"
 
 
 def test_referral_detail_lists_invitees():
