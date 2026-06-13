@@ -2747,56 +2747,185 @@ def dashboard_funnel():
     else:
         start = now - timedelta(days=days)
 
+    window_end = now
     tickets = db["welcome_tickets"]
+    affiliate_ledger = db["affiliate_ledger"]
+    new_joiner_claims = db["new_joiner_claims"]
 
-    # Stage counts are distinct users entering each stage within the window.
-    join_count = int(users_collection.count_documents({"joined_main_at": {"$gte": start}}))
-    pm_start_count = int(users_collection.count_documents({"first_private_interaction_at": {"$gte": start}}))
-    checkin_users = len(xp_events_collection.distinct("user_id", {"type": "checkin", "created_at": {"$gte": start}}))
-    welcome_unlock = int(welcome_eligibility_collection.count_documents({"created_at": {"$gte": start}}))
-    welcome_claim = int(tickets.count_documents({"status": "claimed", "claimed_at": {"$gte": start}}))
+    def _cohort_uid(value):
+        if value is None:
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return value
+
+    def _doc_uid(doc):
+        return _cohort_uid((doc or {}).get("uid") or (doc or {}).get("user_id"))
+
+    def _count_stage(name, count, *, data_quality="exact", note=None):
+        out = {"name": name, "count": int(count), "data_quality": data_quality}
+        if note:
+            out["note"] = note
+        if join_count <= 0:
+            out["conversion_pct"] = 0.0
+            out["dropoff_pct"] = 0.0
+            return out
+        conversion = round(100.0 * int(count) / join_count, 1)
+        out["conversion_pct"] = conversion
+        out["dropoff_pct"] = round(100.0 - conversion, 1)
+        if int(count) > join_count:
+            out["data_quality"] = "invalid"
+            out["note"] = "Stage count exceeds join cohort; query needs audit."
+        return out
+
+    cohort_docs = users_collection.find(
+        {"joined_main_at": {"$gte": start}},
+        {"user_id": 1, "joined_main_at": 1},
+    )
+    cohort_user_ids = {
+        uid for uid in (_cohort_uid((doc or {}).get("user_id")) for doc in cohort_docs)
+        if uid is not None
+    }
+    cohort_user_id_list = list(cohort_user_ids)
+    join_count = len(cohort_user_ids)
+
+    # Every later stage is intersected with the Join Group cohort.
+    pm_start_count = int(
+        users_collection.count_documents(
+            {
+                "user_id": {"$in": cohort_user_id_list},
+                "first_private_interaction_at": {"$gte": start},
+            }
+        )
+    ) if cohort_user_ids else 0
+
+    checkin_users = set()
+    if cohort_user_ids:
+        checkin_users = {
+            _cohort_uid(uid)
+            for uid in xp_events_collection.distinct(
+                "user_id",
+                {
+                    "user_id": {"$in": cohort_user_id_list},
+                    "created_at": {"$gte": start},
+                    "$or": [
+                        {"type": "checkin"},
+                        {"reason": "checkin"},
+                        {"unique_key": {"$regex": r"^checkin:"}},
+                    ],
+                },
+            )
+        }
+        checkin_users.discard(None)
+
+    unlock_user_ids = set()
+    if cohort_user_ids:
+        for doc in welcome_eligibility_collection.find(
+            {
+                "created_at": {"$gte": start},
+                "$or": [
+                    {"uid": {"$in": cohort_user_id_list}},
+                    {"user_id": {"$in": cohort_user_id_list}},
+                ],
+            },
+            {"uid": 1, "user_id": 1},
+        ):
+            uid = _doc_uid(doc)
+            if uid in cohort_user_ids:
+                unlock_user_ids.add(uid)
+
+    claim_user_ids = set()
+    if cohort_user_ids:
+        for doc in affiliate_ledger.find(
+            {
+                "status": "ISSUED",
+                "updated_at": {"$gte": start},
+                "user_id": {"$in": cohort_user_id_list},
+                "$or": [
+                    {"ledger_type": "WELCOME"},
+                    {"tier": "WELCOME"},
+                    {"pool_id": "WELCOME"},
+                ],
+            },
+            {"user_id": 1},
+        ):
+            uid = _doc_uid(doc)
+            if uid in cohort_user_ids:
+                claim_user_ids.add(uid)
+        for collection, query in (
+            (
+                welcome_eligibility_collection,
+                {
+                    "claimed": True,
+                    "claimed_at": {"$gte": start},
+                    "$or": [
+                        {"uid": {"$in": cohort_user_id_list}},
+                        {"user_id": {"$in": cohort_user_id_list}},
+                    ],
+                },
+            ),
+            (
+                new_joiner_claims,
+                {
+                    "claimed_at": {"$gte": start},
+                    "$or": [
+                        {"uid": {"$in": cohort_user_id_list}},
+                        {"user_id": {"$in": cohort_user_id_list}},
+                    ],
+                },
+            ),
+            (
+                tickets,
+                {
+                    "status": "claimed",
+                    "claimed_at": {"$gte": start},
+                    "$or": [
+                        {"uid": {"$in": cohort_user_id_list}},
+                        {"user_id": {"$in": cohort_user_id_list}},
+                    ],
+                },
+            ),
+        ):
+            for doc in collection.find(query, {"uid": 1, "user_id": 1}):
+                uid = _doc_uid(doc)
+                if uid in cohort_user_ids:
+                    claim_user_ids.add(uid)
 
     raw_stages = [
-        {"name": "Join Group", "count": join_count, "data_quality": "exact"},
-        {"name": "PM Start", "count": pm_start_count, "data_quality": "exact",
-         "note": "Uses first_private_interaction_at, written by private /start and first private-message handlers."},
-        {"name": "Check-in", "count": checkin_users, "data_quality": "exact"},
-        {"name": "Welcome Unlock", "count": welcome_unlock, "data_quality": "exact"},
-        {"name": "Welcome Claim", "count": welcome_claim, "data_quality": "approx",
-         "note": "Welcome tickets expire/clean up via TTL; older windows may undercount."},
+        _count_stage("Join Group", join_count),
+        _count_stage(
+            "PM Start",
+            pm_start_count,
+            note="Uses first_private_interaction_at from private /start or first private-message handlers.",
+        ),
+        _count_stage("Check-in", len(checkin_users & cohort_user_ids)),
+        _count_stage("Welcome Unlock", len(unlock_user_ids & cohort_user_ids)),
+        _count_stage(
+            "Welcome Claim",
+            len(claim_user_ids & cohort_user_ids),
+            note="Current source includes affiliate_ledger WELCOME ISSUED plus legacy welcome claim sources.",
+        ),
         {"name": "First Play", "count": None, "data_quality": "missing",
          "note": "No first-play signal exists. Requires game-backend instrumentation."},
     ]
 
-    # Conversion/drop-off computed only across stages with real counts,
-    # carrying the last known baseline forward across data-missing stages.
     stages = []
-    baseline = None
-    prev = None
     for s in raw_stages:
         out = dict(s)
-        cnt = s["count"]
-        if cnt is None:
+        if s["count"] is None:
             out["conversion_pct"] = None
             out["dropoff_pct"] = None
-        else:
-            if baseline is None:
-                baseline = cnt
-                out["conversion_pct"] = 100.0
-                out["dropoff_pct"] = 0.0
-            else:
-                out["conversion_pct"] = round(100.0 * cnt / baseline, 1) if baseline > 0 else None
-                if prev and prev > 0:
-                    out["dropoff_pct"] = round(100.0 * (prev - cnt) / prev, 1)
-                else:
-                    out["dropoff_pct"] = None
-            prev = cnt
         stages.append(out)
 
     payload = {
         "success": True,
         "window": window,
         "as_of": now.isoformat(),
+        "method": "join_cohort",
+        "cohort_size": join_count,
+        "window_start": start.isoformat(),
+        "window_end": window_end.isoformat(),
         "stages": stages,
     }
     _dashboard_cache_set(cache_key, payload)
