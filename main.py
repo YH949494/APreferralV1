@@ -2535,6 +2535,55 @@ def _count_segment(regex) -> int:
     )
 
 
+def _dashboard_window_start(window, now):
+    window = (window or "7d").strip().lower()
+    if window not in {"all", "today", "7d", "30d", "90d"}:
+        window = "7d"
+    if window == "all":
+        return window, None
+    if window == "today":
+        return window, _utc_today_start(now)
+    return window, now - timedelta(days=int(window[:-1]))
+
+
+def _dashboard_claim_time_filter(*, status, start, success):
+    query = {"status": status}
+    if start is None:
+        return query
+    primary = "claimed_at" if success else "updated_at"
+    query["$or"] = [
+        {primary: {"$gte": start}},
+        {primary: {"$exists": False}, "created_at": {"$gte": start}},
+    ]
+    return query
+
+
+def _dashboard_drop_id_variants(value):
+    variants = []
+    if value is not None:
+        variants.append(value)
+        text = str(value)
+        if text not in variants:
+            variants.append(text)
+    return variants
+
+
+def _dashboard_doc_user_id(doc: dict):
+    value = (doc or {}).get("uid")
+    if value is None:
+        value = (doc or {}).get("user_id")
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return value
+
+
+def _dashboard_dt(value):
+    return value.isoformat() if isinstance(value, datetime) else None
+
+
 @admin_bp.get("/api/admin/dashboard/summary")
 def dashboard_summary():
     ok, err = require_admin_from_query()

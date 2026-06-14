@@ -165,6 +165,10 @@ class _DocCollection:
                 elif op == "$in":
                     if value not in expected:
                         return False
+                elif op == "$exists":
+                    exists = value is not None
+                    if bool(expected) != exists:
+                        return False
                 elif op == "$regex":
                     import re
 
@@ -216,6 +220,14 @@ class _FunnelDb:
 
     def __getitem__(self, name):
         return self.collections[name]
+
+
+class _DashboardDb:
+    def __init__(self, **collections):
+        self.collections = collections
+
+    def __getitem__(self, name):
+        return self.collections.get(name) or _DocCollection()
 
 
 class _DistinctCollection:
@@ -539,6 +551,60 @@ def _run_dashboard_funnel(
     return fn()
 
 
+def _run_dashboard_vouchers(
+    *,
+    voucher_claims=None,
+    drops=None,
+    vouchers=None,
+    affiliate_ledger=None,
+    welcome_eligibility=None,
+    new_joiner_claims=None,
+    welcome_tickets=None,
+    window=None,
+):
+    now = datetime(2026, 6, 13, 12, 0, 0, tzinfo=timezone.utc)
+    cached = []
+    funcs = _load_main_functions(
+        "_safe_count",
+        "_dashboard_window_start",
+        "_dashboard_claim_time_filter",
+        "_dashboard_drop_id_variants",
+        "_dashboard_doc_user_id",
+        "_dashboard_dt",
+        "dashboard_vouchers",
+    )
+    fn = funcs[-1]
+    args = {"refresh": "1"}
+    if window is not None:
+        args["window"] = window
+    fn.__globals__.update(
+        {
+            "require_admin_from_query": lambda: (True, None),
+            "request": _Request(args),
+            "_dashboard_cache_get": lambda key: None,
+            "_dashboard_cache_set": lambda key, payload: cached.append((key, payload)),
+            "_utc_now": lambda: now,
+            "_utc_today_start": lambda ref: datetime(ref.year, ref.month, ref.day, tzinfo=timezone.utc),
+            "datetime": __import__("datetime").datetime,
+            "timezone": __import__("datetime").timezone,
+            "timedelta": __import__("datetime").timedelta,
+            "db": _DashboardDb(
+                voucher_claims=voucher_claims or _DocCollection(),
+                drops=drops or _DocCollection(),
+                vouchers=vouchers or _DocCollection(),
+                affiliate_ledger=affiliate_ledger or _DocCollection(),
+                welcome_tickets=welcome_tickets or _DocCollection(),
+                new_joiner_claims=new_joiner_claims or _DocCollection(),
+            ),
+            "welcome_eligibility_collection": welcome_eligibility or _DocCollection(),
+            "jsonify": lambda payload: payload,
+        }
+    )
+    body = fn()
+    assert cached
+    return body
+
+
 def test_dashboard_funnel_counts_checkin_distinct_cohort_users():
     users = _DocCollection(
         {"user_id": uid, "joined_main_at": datetime(2026, 6, 10, tzinfo=timezone.utc)}
@@ -725,6 +791,126 @@ def test_dashboard_funnel_no_stage_conversion_exceeds_100():
         if stage["conversion_pct"] is not None:
             assert stage["conversion_pct"] <= 100.0
             assert stage["data_quality"] != "invalid"
+
+
+def test_dashboard_vouchers_defaults_to_7d_and_filters_metrics_and_campaign_stats():
+    recent = datetime(2026, 6, 12, 10, 0, 0, tzinfo=timezone.utc)
+    recent_2 = datetime(2026, 6, 11, 10, 0, 0, tzinfo=timezone.utc)
+    old = datetime(2026, 6, 1, 10, 0, 0, tzinfo=timezone.utc)
+    body = _run_dashboard_vouchers(
+        voucher_claims=_DocCollection(
+            [
+                {"drop_id": "drop-a", "user_id": 1, "status": "claimed", "claimed_at": recent, "created_at": recent},
+                {"drop_id": "drop-a", "user_id": 1, "status": "claimed", "claimed_at": recent_2, "created_at": recent_2},
+                {"drop_id": "drop-a", "user_id": 2, "status": "claimed", "claimed_at": old, "created_at": old},
+                {"drop_id": "drop-a", "user_id": 3, "status": "failed", "updated_at": recent, "created_at": recent},
+                {"drop_id": "drop-a", "user_id": 4, "status": "failed", "updated_at": old, "created_at": old},
+            ]
+        ),
+        drops=_DocCollection(
+            [
+                {
+                    "_id": "drop-a",
+                    "name": "Campaign A",
+                    "type": "pooled",
+                    "status": "active",
+                    "startsAt": recent,
+                    "endsAt": recent,
+                }
+            ]
+        ),
+        vouchers=_DocCollection(
+            [
+                {"dropId": "drop-a", "status": "claimed"},
+                {"dropId": "drop-a", "status": "free"},
+                {"dropId": "drop-a", "status": "unclaimed"},
+            ]
+        ),
+        affiliate_ledger=_DocCollection(
+            [
+                {"user_id": 10, "status": "ISSUED", "ledger_type": "WELCOME", "updated_at": recent},
+                {"user_id": 11, "status": "ISSUED", "pool_id": "WELCOME", "updated_at": old},
+            ]
+        ),
+    )
+
+    assert body["window"] == "7d"
+    assert body["metrics"]["claimed_codes"]["value"] == 2
+    assert body["metrics"]["failed_claims"]["value"] == 1
+    assert body["metrics"]["repeat_claimers"]["value"] == 1
+    assert body["metrics"]["welcome_claims"]["value"] == 1
+    assert body["campaigns"] == [
+        {
+            "dropId": "drop-a",
+            "name": "Campaign A",
+            "type": "pooled",
+            "status": "active",
+            "startsAt": recent.isoformat(),
+            "endsAt": recent.isoformat(),
+            "total_codes": 3,
+            "remaining_codes": 2,
+            "claimed_codes": 2,
+            "failed_claims": 1,
+        }
+    ]
+
+
+def test_dashboard_vouchers_all_time_includes_old_claims_and_welcome_legacy_dedupes():
+    recent = datetime(2026, 6, 12, 10, 0, 0, tzinfo=timezone.utc)
+    old = datetime(2026, 6, 1, 10, 0, 0, tzinfo=timezone.utc)
+    body = _run_dashboard_vouchers(
+        window="all",
+        voucher_claims=_DocCollection(
+            [
+                {"drop_id": "drop-a", "user_id": 1, "status": "claimed", "claimed_at": recent, "created_at": recent},
+                {"drop_id": "drop-a", "user_id": 2, "status": "claimed", "claimed_at": old, "created_at": old},
+                {"drop_id": "drop-a", "user_id": 3, "status": "failed", "updated_at": old, "created_at": old},
+            ]
+        ),
+        affiliate_ledger=_DocCollection(
+            [
+                {"user_id": 10, "status": "ISSUED", "ledger_type": "WELCOME", "updated_at": recent},
+                {"user_id": 11, "status": "ISSUED", "pool_id": "WELCOME", "updated_at": old},
+            ]
+        ),
+        welcome_eligibility=_DocCollection(
+            [
+                {"uid": 10, "claimed": True, "claimed_at": recent},
+                {"uid": 12, "claimed": True, "claimed_at": old},
+            ]
+        ),
+        new_joiner_claims=_DocCollection([{"uid": 12, "claimed_at": old}]),
+        welcome_tickets=_DocCollection([{"uid": 13, "status": "claimed", "claimed_at": old}]),
+    )
+
+    assert body["window"] == "all"
+    assert body["window_start"] is None
+    assert body["metrics"]["claimed_codes"]["value"] == 2
+    assert body["metrics"]["failed_claims"]["value"] == 1
+    assert body["metrics"]["welcome_claims"]["value"] == 4
+
+
+def test_dashboard_vouchers_rejects_missing_admin():
+    fn = _load_main_functions(
+        "_safe_count",
+        "_dashboard_window_start",
+        "_dashboard_claim_time_filter",
+        "_dashboard_drop_id_variants",
+        "_dashboard_doc_user_id",
+        "_dashboard_dt",
+        "dashboard_vouchers",
+    )[-1]
+    fn.__globals__.update(
+        {
+            "require_admin_from_query": lambda: (False, ("Admins only", 403)),
+            "jsonify": lambda payload: payload,
+        }
+    )
+
+    body, status = fn()
+
+    assert status == 403
+    assert body == {"success": False, "message": "Admins only"}
 
 
 def test_dashboard_telegram_refresh_log_strings_include_required_fields():

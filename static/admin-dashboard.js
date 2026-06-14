@@ -14,6 +14,15 @@
     return String(v);
   }
 
+  function esc(v) {
+    return String(v === null || v === undefined ? "" : v)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+  }
+
   function api(path) {
     return fetch(path, { credentials: "same-origin", headers: { "Accept": "application/json" } })
       .then(function (r) {
