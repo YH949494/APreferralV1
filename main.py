@@ -3072,151 +3072,184 @@ def dashboard_abuse():
     return jsonify(payload)
 
 
+# ---------------------------------------------------------------------------
+# Admin dashboard panels (Phase C): Vouchers / Referrals / Affiliate / Audit /
+# User drilldown / Settings. All read-only — they only report on data the bot
+# already produced and never alter voucher, referral, affiliate, XP/check-in,
+# MiniApp or scheduler behaviour. Query/shaping logic lives in the pure,
+# unit-tested ``dashboard_panels`` module; these routes are thin wrappers that
+# inject the live collections and apply the shared admin guard + cache.
+# ---------------------------------------------------------------------------
+import dashboard_panels as _panels  # noqa: E402
+
+
+def _panel_cached(key, builder, *, ttl_key=True):
+    """Run a panel builder behind the existing dashboard cache + admin guard."""
+    if request.args.get("refresh") != "1":
+        cached = _dashboard_cache_get(key)
+        if cached is not None:
+            return jsonify(cached)
+    payload = builder()
+    _dashboard_cache_set(key, payload)
+    return jsonify(payload)
+
+
 @admin_bp.get("/api/admin/dashboard/vouchers")
 def dashboard_vouchers():
     ok, err = require_admin_from_query()
     if not ok:
         msg, code = err
         return jsonify({"success": False, "message": msg}), code
+    return _panel_cached(
+        "panel:vouchers",
+        lambda: _panels.build_vouchers_panel(
+            drops_col=db["drops"],
+            vouchers_col=db["vouchers"],
+            voucher_claims_col=db["voucher_claims"],
+            welcome_eligibility_col=welcome_eligibility_collection,
+            now=_utc_now(),
+        ),
+    )
 
-    now = _utc_now()
-    window, start = _dashboard_window_start(request.args.get("window"), now)
-    cache_key = f"vouchers:{window}"
-    if request.args.get("refresh") != "1":
-        cached = _dashboard_cache_get(cache_key)
-        if cached is not None:
-            return jsonify(cached)
 
-    claims = db["voucher_claims"]
-    drops = db["drops"]
-    vouchers = db["vouchers"]
-    affiliate_ledger = db["affiliate_ledger"]
-    tickets = db["welcome_tickets"]
-    new_joiner_claims = db["new_joiner_claims"]
-    errors: list[str] = []
+@admin_bp.get("/api/admin/dashboard/referrals")
+def dashboard_referrals():
+    ok, err = require_admin_from_query()
+    if not ok:
+        msg, code = err
+        return jsonify({"success": False, "message": msg}), code
+    window = _panels._normalize_referral_window(request.args.get("window"))
+    return _panel_cached(
+        f"panel:referrals:{window}",
+        lambda: _panels.build_referrals_panel(
+            pending_referrals_col=pending_referrals_collection,
+            qualified_events_col=qualified_events_collection,
+            users_col=users_collection,
+            welcome_eligibility_col=welcome_eligibility_collection,
+            now=_utc_now(),
+            window=window,
+        ),
+    )
 
-    def grab(fn):
-        val, e = _safe_count(fn)
-        if e:
-            errors.append(e)
-        return val
 
-    claimed_filter = _dashboard_claim_time_filter(status="claimed", start=start, success=True)
-    failed_filter = _dashboard_claim_time_filter(status="failed", start=start, success=False)
-
-    claimed_codes = grab(lambda: claims.count_documents(claimed_filter))
-    failed_claims = grab(lambda: claims.count_documents(failed_filter))
-
-    repeat_claimers = None
+@admin_bp.get("/api/admin/dashboard/referrals/detail")
+def dashboard_referrals_detail():
+    ok, err = require_admin_from_query()
+    if not ok:
+        msg, code = err
+        return jsonify({"success": False, "message": msg}), code
     try:
-        per_user = {}
-        for doc in claims.find(claimed_filter, {"user_id": 1}):
-            uid = _dashboard_doc_user_id(doc)
-            if uid is None:
-                continue
-            per_user[uid] = per_user.get(uid, 0) + 1
-        repeat_claimers = sum(1 for count in per_user.values() if count > 1)
-    except Exception as exc:
-        errors.append(f"repeat_claimers: {exc}")
-
-    welcome_claim_users = set()
-    try:
-        affiliate_query = {
-            "status": "ISSUED",
-            "$or": [
-                {"ledger_type": "WELCOME"},
-                {"tier": "WELCOME"},
-                {"pool_id": "WELCOME"},
-            ],
-        }
-        if start is not None:
-            affiliate_query["updated_at"] = {"$gte": start}
-        for doc in affiliate_ledger.find(affiliate_query, {"user_id": 1}):
-            uid = _dashboard_doc_user_id(doc)
-            if uid is not None:
-                welcome_claim_users.add(uid)
-
-        legacy_queries = [
-            (
-                welcome_eligibility_collection,
-                {"claimed": True, **({"claimed_at": {"$gte": start}} if start is not None else {})},
-            ),
-            (
-                new_joiner_claims,
-                {"claimed_at": {"$gte": start}} if start is not None else {},
-            ),
-            (
-                tickets,
-                {"status": "claimed", **({"claimed_at": {"$gte": start}} if start is not None else {})},
-            ),
-        ]
-        for collection, query in legacy_queries:
-            for doc in collection.find(query, {"uid": 1, "user_id": 1}):
-                uid = _dashboard_doc_user_id(doc)
-                if uid is not None:
-                    welcome_claim_users.add(uid)
-    except Exception as exc:
-        errors.append(f"welcome_claims: {exc}")
-    welcome_claims = len(welcome_claim_users)
-
-    campaigns = []
-    try:
-        drop_docs = list(drops.find({}, {"_id": 1, "name": 1, "type": 1, "status": 1, "startsAt": 1, "endsAt": 1, "priority": 1}))
-        drop_docs.sort(
-            key=lambda doc: (
-                doc.get("startsAt") if isinstance(doc.get("startsAt"), datetime) else datetime.min.replace(tzinfo=timezone.utc),
-                str(doc.get("_id")),
-            ),
-            reverse=True,
+        referrer_id = int(request.args.get("user_id", ""))
+    except (TypeError, ValueError):
+        return jsonify({"success": False, "message": "user_id required"}), 400
+    return jsonify(
+        _panels.build_referral_detail(
+            referrer_id=referrer_id,
+            pending_referrals_col=pending_referrals_collection,
+            users_col=users_collection,
+            welcome_eligibility_col=welcome_eligibility_collection,
+            now=_utc_now(),
         )
-        for doc in drop_docs[:100]:
-            variants = _dashboard_drop_id_variants(doc.get("_id"))
-            code_base = {"dropId": {"$in": variants}} if variants else {}
-            claim_base = {"drop_id": {"$in": variants}} if variants else {}
-            campaign_claim_filter = dict(claimed_filter)
-            campaign_claim_filter.update(claim_base)
-            campaign_failed_filter = dict(failed_filter)
-            campaign_failed_filter.update(claim_base)
-            total_codes = int(vouchers.count_documents(code_base)) if code_base else 0
-            remaining_codes = int(
-                vouchers.count_documents({**code_base, "status": {"$in": ["free", "unclaimed"]}})
-            ) if code_base else 0
-            campaign_claims = int(claims.count_documents(campaign_claim_filter))
-            campaign_failed = int(claims.count_documents(campaign_failed_filter))
-            campaigns.append(
-                {
-                    "dropId": str(doc.get("_id")),
-                    "name": doc.get("name") or str(doc.get("_id")),
-                    "type": doc.get("type") or "pooled",
-                    "status": doc.get("status") or "unknown",
-                    "startsAt": _dashboard_dt(doc.get("startsAt")),
-                    "endsAt": _dashboard_dt(doc.get("endsAt")),
-                    "total_codes": total_codes,
-                    "remaining_codes": remaining_codes,
-                    "claimed_codes": campaign_claims,
-                    "failed_claims": campaign_failed,
-                }
-            )
-    except Exception as exc:
-        errors.append(f"campaigns: {exc}")
+    )
 
-    payload = {
-        "success": True,
-        "as_of": now.isoformat(),
-        "window": window,
-        "window_start": start.isoformat() if isinstance(start, datetime) else None,
-        "window_end": now.isoformat(),
-        "metrics": {
-            "claimed_codes": {"value": claimed_codes, "data_quality": "exact", "note": "Successful voucher claim records in selected window."},
-            "failed_claims": {"value": failed_claims, "data_quality": "exact", "note": "Failed voucher claim records in selected window."},
-            "repeat_claimers": {"value": repeat_claimers, "data_quality": "exact", "note": "Users with >1 successful voucher claim in selected window."},
-            "welcome_claims": {"value": welcome_claims, "data_quality": "exact", "note": "Distinct users from affiliate_ledger WELCOME ISSUED plus legacy welcome claim sources in selected window."},
-        },
-        "campaigns": campaigns,
-        "partial_errors": errors or None,
+
+@admin_bp.get("/api/admin/dashboard/affiliate")
+def dashboard_affiliate():
+    ok, err = require_admin_from_query()
+    if not ok:
+        msg, code = err
+        return jsonify({"success": False, "message": msg}), code
+    return _panel_cached(
+        "panel:affiliate",
+        lambda: _panels.build_affiliate_panel(
+            affiliate_ledger_col=affiliate_ledger_collection,
+            voucher_pools_col=voucher_pools_collection,
+            now=_utc_now(),
+        ),
+    )
+
+
+@admin_bp.get("/api/admin/dashboard/affiliate/detail")
+def dashboard_affiliate_detail():
+    ok, err = require_admin_from_query()
+    if not ok:
+        msg, code = err
+        return jsonify({"success": False, "message": msg}), code
+    try:
+        user_id = int(request.args.get("user_id", ""))
+    except (TypeError, ValueError):
+        return jsonify({"success": False, "message": "user_id required"}), 400
+    return jsonify(
+        _panels.build_affiliate_detail(
+            user_id=user_id,
+            affiliate_ledger_col=affiliate_ledger_collection,
+            now=_utc_now(),
+        )
+    )
+
+
+@admin_bp.get("/api/admin/dashboard/audit")
+def dashboard_audit():
+    ok, err = require_admin_from_query()
+    if not ok:
+        msg, code = err
+        return jsonify({"success": False, "message": msg}), code
+    return _panel_cached(
+        "panel:audit",
+        lambda: _panels.build_audit_panel(
+            admin_login_audit_col=db["admin_login_audit"],
+            audit_events_col=audit_events_collection,
+            referral_audit_col=referral_audit_collection,
+            admin_cache_col=admin_cache_col,
+            now=_utc_now(),
+        ),
+    )
+
+
+@admin_bp.get("/api/admin/dashboard/user")
+def dashboard_user_drilldown():
+    ok, err = require_admin_from_query()
+    if not ok:
+        msg, code = err
+        return jsonify({"success": False, "message": msg}), code
+    query = request.args.get("query") or request.args.get("q") or ""
+    return jsonify(
+        _panels.build_user_drilldown(
+            query=query,
+            users_col=users_collection,
+            welcome_eligibility_col=welcome_eligibility_collection,
+            voucher_claims_col=db["voucher_claims"],
+            affiliate_ledger_col=affiliate_ledger_collection,
+            pending_referrals_col=pending_referrals_collection,
+            qualified_events_col=qualified_events_collection,
+            now=_utc_now(),
+        )
+    )
+
+
+@admin_bp.get("/api/admin/dashboard/settings")
+def dashboard_settings():
+    ok, err = require_admin_from_query()
+    if not ok:
+        msg, code = err
+        return jsonify({"success": False, "message": msg}), code
+    import config as _cfg
+
+    constants = {
+        "XP_BASE_PER_CHECKIN": getattr(_cfg, "XP_BASE_PER_CHECKIN", None),
+        "FIRST_CHECKIN_BONUS": getattr(_cfg, "FIRST_CHECKIN_BONUS", None),
+        "STREAK_MILESTONES": getattr(_cfg, "STREAK_MILESTONES", None),
+        "STREAK_FREEZE_DEFAULT_TOKENS": getattr(_cfg, "STREAK_FREEZE_DEFAULT_TOKENS", None),
+        "STREAK_FREEZE_MAX_TOKENS": getattr(_cfg, "STREAK_FREEZE_MAX_TOKENS", None),
+        "WEEKLY_XP_BUCKET": getattr(_cfg, "WEEKLY_XP_BUCKET", None),
+        "WEEKLY_REFERRAL_BUCKET": getattr(_cfg, "WEEKLY_REFERRAL_BUCKET", None),
+        "GROUP_ID": GROUP_ID,
+        "OFFICIAL_CHANNEL_ID": OFFICIAL_CHANNEL_ID,
+        "COMMUNITY_CHAT_ID": _COMMUNITY_CHAT_ID,
+        "CHANNEL_USERNAME": CHANNEL_USERNAME,
+        "MINIAPP_VERSION": getattr(_cfg, "MINIAPP_VERSION", None),
     }
-    _dashboard_cache_set(cache_key, payload)
-    return jsonify(payload)
+    return jsonify(_panels.build_settings_panel(os.environ, constants=constants))
 
 
 app.register_blueprint(admin_bp)
