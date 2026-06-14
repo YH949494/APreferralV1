@@ -118,6 +118,31 @@ def _drop_id_variants(drop_id: Any) -> list:
 # 1. Vouchers panel
 # ---------------------------------------------------------------------------
 
+_DASHBOARD_WINDOW_DAYS = {"today": 1, "7d": 7, "30d": 30, "90d": 90, "all": None}
+_DEFAULT_DASHBOARD_WINDOW = "7d"
+
+
+def _normalize_dashboard_window(window: Any) -> str:
+    w = str(window or _DEFAULT_DASHBOARD_WINDOW).strip().lower()
+    return w if w in _DASHBOARD_WINDOW_DAYS else _DEFAULT_DASHBOARD_WINDOW
+
+
+def _dashboard_window_start(window: str, now: datetime) -> datetime | None:
+    window = _normalize_dashboard_window(window)
+    if window == "all":
+        return None
+    if window == "today":
+        return datetime(now.year, now.month, now.day, tzinfo=timezone.utc)
+    return now - timedelta(days=int(window[:-1]))
+
+
+def _windowed_claim_filter(status: str, field: str, window_start: datetime | None) -> dict:
+    query = {"status": status}
+    if window_start is not None:
+        query[field] = {"$gte": window_start}
+    return query
+
+
 # Computed drop status follows vouchers.py: a stored "paused"/"expired" wins,
 # otherwise it is derived from startsAt/endsAt relative to ``now``.
 def compute_drop_status(doc: Mapping, now: datetime) -> str:
@@ -140,10 +165,14 @@ def build_vouchers_panel(
     voucher_claims_col,
     welcome_eligibility_col,
     now: datetime | None = None,
+    window: str = _DEFAULT_DASHBOARD_WINDOW,
     max_campaigns: int = 200,
 ) -> dict:
     now = now or _utc_now()
-    d7 = now - timedelta(days=7)
+    window = _normalize_dashboard_window(window)
+    window_start = _dashboard_window_start(window, now)
+    claimed_filter = _windowed_claim_filter("claimed", "claimed_at", window_start)
+    failed_filter = _windowed_claim_filter("failed", "created_at", window_start)
     errors: list[str] = []
 
     def grab(fn):
@@ -170,13 +199,13 @@ def build_vouchers_panel(
 
         total_codes = grab(lambda v=str(drop_id): vouchers_col.count_documents({"dropId": v}))
         claimed = grab(
-            lambda v=variants: voucher_claims_col.count_documents(
-                {"drop_id": {"$in": v}, "status": "claimed"}
+            lambda v=variants, base=claimed_filter: voucher_claims_col.count_documents(
+                {**base, "drop_id": {"$in": v}}
             )
         )
         failed = grab(
-            lambda v=variants: voucher_claims_col.count_documents(
-                {"drop_id": {"$in": v}, "status": "failed"}
+            lambda v=variants, base=failed_filter: voucher_claims_col.count_documents(
+                {**base, "drop_id": {"$in": v}}
             )
         )
         remaining = None
@@ -186,15 +215,19 @@ def build_vouchers_panel(
             my = doc.get("my_remaining")
             if isinstance(pub, int) or isinstance(my, int):
                 remaining = (pub or 0) + (my or 0)
-        if remaining is None and isinstance(total_codes, int) and isinstance(claimed, int):
-            remaining = max(total_codes - claimed, 0)
+        if remaining is None:
+            remaining = grab(
+                lambda v=str(drop_id): vouchers_col.count_documents(
+                    {"dropId": v, "status": {"$in": ["unclaimed", "free"]}}
+                )
+            )
 
         # Failure-reason breakdown for the expandable row.
         failure_reasons = []
         try:
             agg = voucher_claims_col.aggregate(
                 [
-                    {"$match": {"drop_id": {"$in": variants}, "status": "failed"}},
+                    {"$match": {**failed_filter, "drop_id": {"$in": variants}}},
                     {"$group": {"_id": "$error", "n": {"$sum": 1}}},
                     {"$sort": {"n": -1}},
                     {"$limit": 20},
@@ -247,8 +280,8 @@ def build_vouchers_panel(
 
     # ---- Aggregate code totals across all drops ----
     total_codes_all = metric(lambda: int(vouchers_col.count_documents({})))
-    claimed_codes_all = metric(
-        lambda: int(voucher_claims_col.count_documents({"status": "claimed"}))
+    claimed_codes = metric(
+        lambda: int(voucher_claims_col.count_documents(claimed_filter))
     )
     remaining_codes_all = metric(
         lambda: int(vouchers_col.count_documents({"status": {"$in": ["unclaimed", "free"]}}))
@@ -256,23 +289,21 @@ def build_vouchers_panel(
     claim_rate = None
     if (
         total_codes_all["value"] is not None
-        and claimed_codes_all["value"] is not None
+        and claimed_codes["value"] is not None
     ):
-        claim_rate = _pct(claimed_codes_all["value"], total_codes_all["value"])
+        claim_rate = _pct(claimed_codes["value"], total_codes_all["value"])
 
-    failed_7d = metric(
+    failed_claims = metric(
         lambda: int(
-            voucher_claims_col.count_documents(
-                {"status": "failed", "created_at": {"$gte": d7}}
-            )
+            voucher_claims_col.count_documents(failed_filter)
         ),
-        note="Voucher claim attempts that failed in the last 7 days.",
+        note="Voucher claim attempts that failed in the selected window.",
     )
 
-    def _repeat_claimers_7d():
+    def _repeat_claimers():
         agg = voucher_claims_col.aggregate(
             [
-                {"$match": {"status": "claimed", "claimed_at": {"$gte": d7}}},
+                {"$match": claimed_filter},
                 {"$group": {"_id": "$user_id", "n": {"$sum": 1}}},
                 {"$match": {"n": {"$gt": 1}}},
                 {"$count": "c"},
@@ -281,39 +312,43 @@ def build_vouchers_panel(
         agg_list = list(agg)
         return int(agg_list[0]["c"]) if agg_list else 0
 
-    repeat_claimers_7d = metric(
-        _repeat_claimers_7d,
+    repeat_claimers = metric(
+        _repeat_claimers,
         quality="heuristic",
-        note="Distinct users with >1 successful claim in the last 7 days.",
+        note="Distinct users with >1 successful claim in the selected window.",
     )
 
-    welcome_claims_7d = metric(
+    welcome_query = {"claimed": True}
+    if window_start is not None:
+        welcome_query["claimed_at"] = {"$gte": window_start}
+    welcome_claims = metric(
         lambda: int(
-            welcome_eligibility_col.count_documents(
-                {"claimed": True, "claimed_at": {"$gte": d7}}
-            )
+            welcome_eligibility_col.count_documents(welcome_query)
         ),
-        note="welcome_eligibility records claimed in the last 7 days.",
+        note="welcome_eligibility records claimed in the selected window.",
     )
 
     return {
         "success": True,
         "as_of": now.isoformat(),
+        "window": window,
+        "window_start": window_start.isoformat() if window_start else None,
+        "window_end": now.isoformat(),
         "summary": {
             "active_campaigns": {"value": status_counts.get("active", 0), "data_quality": "exact"},
             "upcoming_campaigns": {"value": status_counts.get("upcoming", 0), "data_quality": "exact"},
             "ended_campaigns": {"value": status_counts.get("expired", 0), "data_quality": "exact"},
             "paused_campaigns": {"value": status_counts.get("paused", 0), "data_quality": "exact"},
             "total_codes": total_codes_all,
-            "claimed_codes": claimed_codes_all,
+            "claimed_codes": claimed_codes,
             "remaining_codes": remaining_codes_all,
             "claim_rate_pct": {
                 "value": claim_rate,
                 "data_quality": "exact" if claim_rate is not None else "missing",
             },
-            "failed_claims_7d": failed_7d,
-            "repeat_claimers_7d": repeat_claimers_7d,
-            "welcome_claims_7d": welcome_claims_7d,
+            "failed_claims": failed_claims,
+            "repeat_claimers": repeat_claimers,
+            "welcome_claims": welcome_claims,
         },
         "campaigns": rows,
         "partial_errors": errors or None,

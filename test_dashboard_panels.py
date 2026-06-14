@@ -171,14 +171,61 @@ def test_vouchers_panel_status_and_counts():
     assert s["active_campaigns"]["value"] == 1   # d1 active; d3 computed expired
     assert s["upcoming_campaigns"]["value"] == 1
     assert s["ended_campaigns"]["value"] == 1
-    assert s["failed_claims_7d"]["value"] == 1
-    assert s["repeat_claimers_7d"]["value"] == 1   # user 1 claimed twice
-    assert s["welcome_claims_7d"]["value"] == 1
+    assert s["failed_claims"]["value"] == 1
+    assert s["repeat_claimers"]["value"] == 1   # user 1 claimed twice
+    assert s["welcome_claims"]["value"] == 1
     # d1 row detail
     d1 = next(c for c in out["campaigns"] if c["drop_id"] == "d1")
     assert d1["claimed"] == 2
     assert d1["remaining"] == 8  # pooled counters 5+3
     assert d1["detail"]["failure_reasons"] == [{"reason": "sold_out", "count": 1}]
+
+
+def test_vouchers_panel_window_filters_claim_stats():
+    drops = FakeCollection([
+        {"_id": "d1", "name": "Active Drop", "type": "personalised", "status": "active",
+         "startsAt": NOW - timedelta(days=20), "endsAt": NOW + timedelta(days=1)},
+    ])
+    vouchers = FakeCollection([
+        {"dropId": "d1", "status": "claimed"},
+        {"dropId": "d1", "status": "unclaimed"},
+        {"dropId": "d1", "status": "unclaimed"},
+    ])
+    claims = FakeCollection([
+        {"drop_id": "d1", "status": "claimed", "claimed_at": NOW - timedelta(days=1), "user_id": 1},
+        {"drop_id": "d1", "status": "claimed", "claimed_at": NOW - timedelta(days=20), "user_id": 2},
+        {"drop_id": "d1", "status": "failed", "created_at": NOW - timedelta(days=1), "error": "sold_out"},
+        {"drop_id": "d1", "status": "failed", "created_at": NOW - timedelta(days=20), "error": "not_eligible"},
+    ])
+    welcome = FakeCollection([
+        {"uid": 7, "claimed": True, "claimed_at": NOW - timedelta(days=1)},
+        {"uid": 8, "claimed": True, "claimed_at": NOW - timedelta(days=20)},
+    ])
+
+    d7 = dp.build_vouchers_panel(
+        drops_col=drops, vouchers_col=vouchers, voucher_claims_col=claims,
+        welcome_eligibility_col=welcome, now=NOW, window="7d",
+    )
+    all_time = dp.build_vouchers_panel(
+        drops_col=drops, vouchers_col=vouchers, voucher_claims_col=claims,
+        welcome_eligibility_col=welcome, now=NOW, window="all",
+    )
+
+    assert d7["window"] == "7d"
+    assert d7["summary"]["claimed_codes"]["value"] == 1
+    assert d7["summary"]["failed_claims"]["value"] == 1
+    assert d7["summary"]["welcome_claims"]["value"] == 1
+    assert d7["campaigns"][0]["claimed"] == 1
+    assert d7["campaigns"][0]["detail"]["claim_attempts"]["failed"] == 1
+    assert d7["campaigns"][0]["detail"]["failure_reasons"] == [{"reason": "sold_out", "count": 1}]
+
+    assert all_time["window"] == "all"
+    assert all_time["window_start"] is None
+    assert all_time["summary"]["claimed_codes"]["value"] == 2
+    assert all_time["summary"]["failed_claims"]["value"] == 2
+    assert all_time["summary"]["welcome_claims"]["value"] == 2
+    assert all_time["campaigns"][0]["claimed"] == 2
+    assert all_time["campaigns"][0]["detail"]["claim_attempts"]["failed"] == 2
 
 
 def test_vouchers_panel_handles_empty():

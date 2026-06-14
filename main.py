@@ -3100,14 +3100,16 @@ def dashboard_vouchers():
     if not ok:
         msg, code = err
         return jsonify({"success": False, "message": msg}), code
+    window = _panels._normalize_dashboard_window(request.args.get("window"))
     return _panel_cached(
-        "panel:vouchers",
+        f"panel:vouchers:{window}",
         lambda: _panels.build_vouchers_panel(
             drops_col=db["drops"],
             vouchers_col=db["vouchers"],
             voucher_claims_col=db["voucher_claims"],
             welcome_eligibility_col=welcome_eligibility_collection,
             now=_utc_now(),
+            window=window,
         ),
     )
 

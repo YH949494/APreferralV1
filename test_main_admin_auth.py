@@ -564,30 +564,35 @@ def _run_dashboard_vouchers(
 ):
     now = datetime(2026, 6, 13, 12, 0, 0, tzinfo=timezone.utc)
     cached = []
-    funcs = _load_main_functions(
-        "_safe_count",
-        "_dashboard_window_start",
-        "_dashboard_claim_time_filter",
-        "_dashboard_drop_id_variants",
-        "_dashboard_doc_user_id",
-        "_dashboard_dt",
-        "dashboard_vouchers",
-    )
-    fn = funcs[-1]
+    calls = []
+    fn = _load_main_functions("dashboard_vouchers")[0]
     args = {"refresh": "1"}
     if window is not None:
         args["window"] = window
+
+    class _Panels:
+        @staticmethod
+        def _normalize_dashboard_window(value):
+            value = (value or "7d").strip().lower()
+            return value if value in {"all", "today", "7d", "30d", "90d"} else "7d"
+
+        @staticmethod
+        def build_vouchers_panel(**kwargs):
+            calls.append(kwargs)
+            return {
+                "success": True,
+                "window": kwargs.get("window"),
+                "summary": {},
+                "campaigns": [],
+            }
+
     fn.__globals__.update(
         {
             "require_admin_from_query": lambda: (True, None),
             "request": _Request(args),
-            "_dashboard_cache_get": lambda key: None,
-            "_dashboard_cache_set": lambda key, payload: cached.append((key, payload)),
+            "_panel_cached": lambda key, builder: cached.append(key) or builder(),
             "_utc_now": lambda: now,
-            "_utc_today_start": lambda ref: datetime(ref.year, ref.month, ref.day, tzinfo=timezone.utc),
-            "datetime": __import__("datetime").datetime,
-            "timezone": __import__("datetime").timezone,
-            "timedelta": __import__("datetime").timedelta,
+            "_panels": _Panels,
             "db": _DashboardDb(
                 voucher_claims=voucher_claims or _DocCollection(),
                 drops=drops or _DocCollection(),
@@ -602,6 +607,8 @@ def _run_dashboard_vouchers(
     )
     body = fn()
     assert cached
+    body["_cache_key"] = cached[0]
+    body["_calls"] = calls
     return body
 
 
@@ -835,24 +842,9 @@ def test_dashboard_vouchers_defaults_to_7d_and_filters_metrics_and_campaign_stat
     )
 
     assert body["window"] == "7d"
-    assert body["metrics"]["claimed_codes"]["value"] == 2
-    assert body["metrics"]["failed_claims"]["value"] == 1
-    assert body["metrics"]["repeat_claimers"]["value"] == 1
-    assert body["metrics"]["welcome_claims"]["value"] == 1
-    assert body["campaigns"] == [
-        {
-            "dropId": "drop-a",
-            "name": "Campaign A",
-            "type": "pooled",
-            "status": "active",
-            "startsAt": recent.isoformat(),
-            "endsAt": recent.isoformat(),
-            "total_codes": 3,
-            "remaining_codes": 2,
-            "claimed_codes": 2,
-            "failed_claims": 1,
-        }
-    ]
+    assert body["_cache_key"] == "panel:vouchers:7d"
+    assert body["_calls"][0]["window"] == "7d"
+    assert body["_calls"][0]["voucher_claims_col"].docs
 
 
 def test_dashboard_vouchers_all_time_includes_old_claims_and_welcome_legacy_dedupes():
@@ -884,22 +876,12 @@ def test_dashboard_vouchers_all_time_includes_old_claims_and_welcome_legacy_dedu
     )
 
     assert body["window"] == "all"
-    assert body["window_start"] is None
-    assert body["metrics"]["claimed_codes"]["value"] == 2
-    assert body["metrics"]["failed_claims"]["value"] == 1
-    assert body["metrics"]["welcome_claims"]["value"] == 4
+    assert body["_cache_key"] == "panel:vouchers:all"
+    assert body["_calls"][0]["window"] == "all"
 
 
 def test_dashboard_vouchers_rejects_missing_admin():
-    fn = _load_main_functions(
-        "_safe_count",
-        "_dashboard_window_start",
-        "_dashboard_claim_time_filter",
-        "_dashboard_drop_id_variants",
-        "_dashboard_doc_user_id",
-        "_dashboard_dt",
-        "dashboard_vouchers",
-    )[-1]
+    fn = _load_main_functions("dashboard_vouchers")[0]
     fn.__globals__.update(
         {
             "require_admin_from_query": lambda: (False, ("Admins only", 403)),

@@ -3,7 +3,7 @@
 (function () {
   "use strict";
 
-  var state = { view: "summary", funnelWindow: "7d", referralsWindow: "7d" };
+  var state = { view: "summary", funnelWindow: "7d", referralsWindow: "7d", voucherWindow: "7d" };
 
   function $(sel, root) { return (root || document).querySelector(sel); }
   function $all(sel, root) { return Array.prototype.slice.call((root || document).querySelectorAll(sel)); }
@@ -278,7 +278,7 @@
   function loadVouchers(refresh) {
     skeletonGrid($("#cards-voucher-summary"), 6);
     statePanel("vouchers-body", "loading", "Loading campaigns…");
-    api("/api/admin/dashboard/vouchers" + (refresh ? "?refresh=1" : ""))
+    api("/api/admin/dashboard/vouchers?window=" + encodeURIComponent(state.voucherWindow) + (refresh ? "&refresh=1" : ""))
       .then(function (d) {
         var s = d.summary;
         $("#cards-voucher-summary").innerHTML =
@@ -286,8 +286,8 @@
           dqCard("Ended", s.ended_campaigns) + dqCard("Total Codes", s.total_codes) +
           dqCard("Claimed Codes", s.claimed_codes) + dqCard("Remaining Codes", s.remaining_codes) +
           dqCard("Claim Rate", s.claim_rate_pct.value === null ? s.claim_rate_pct : { value: s.claim_rate_pct.value + "%", data_quality: s.claim_rate_pct.data_quality }) +
-          dqCard("Failed Claims 7d", s.failed_claims_7d) + dqCard("Repeat Claimers 7d", s.repeat_claimers_7d) +
-          dqCard("Welcome Claims 7d", s.welcome_claims_7d);
+          dqCard("Failed Claims", s.failed_claims) + dqCard("Repeat Claimers", s.repeat_claimers) +
+          dqCard("Welcome Claims", s.welcome_claims);
 
         var rows = (d.campaigns || []).map(function (c) {
           var det = c.detail || {};
@@ -587,6 +587,13 @@
         state.referralsWindow = b.dataset.window;
         $all("#referrals-window button").forEach(function (x) { x.classList.toggle("active", x === b); });
         loadReferrals(false);
+      });
+    });
+    $all("#vouchers-window button").forEach(function (b) {
+      b.addEventListener("click", function () {
+        state.voucherWindow = b.dataset.window;
+        $all("#vouchers-window button").forEach(function (x) { x.classList.toggle("active", x === b); });
+        loadVouchers(false);
       });
     });
 
