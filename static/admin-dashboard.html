@@ -14,7 +14,7 @@
       <button class="nav-item active" data-view="summary">Executive Summary</button>
       <button class="nav-item" data-view="funnel">Activation Funnel</button>
       <button class="nav-item" data-view="abuse">Abuse Overview</button>
-      <button class="nav-item disabled" disabled>Vouchers</button>
+      <button class="nav-item" data-view="vouchers">Vouchers</button>
       <button class="nav-item disabled" disabled>Referrals</button>
       <button class="nav-item disabled" disabled>Affiliate</button>
       <button class="nav-item disabled" disabled>Audit</button>
@@ -72,6 +72,21 @@
       <section id="view-abuse" class="hidden">
         <div class="card-grid" id="cards-abuse"></div>
         <div id="abuse-notes"></div>
+      </section>
+
+      <!-- VOUCHERS VIEW -->
+      <section id="view-vouchers" class="hidden">
+        <div class="controls" style="margin-bottom:16px;">
+          <div class="seg" id="vouchers-window">
+            <button data-window="all">All Time</button>
+            <button data-window="today">Today</button>
+            <button data-window="7d" class="active">7d</button>
+            <button data-window="30d">30d</button>
+            <button data-window="90d">90d</button>
+          </div>
+        </div>
+        <div class="card-grid" id="cards-vouchers-detail"></div>
+        <div id="vouchers-body"></div>
       </section>
     </main>
   </div>

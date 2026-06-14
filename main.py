@@ -2535,6 +2535,55 @@ def _count_segment(regex) -> int:
     )
 
 
+def _dashboard_window_start(window, now):
+    window = (window or "7d").strip().lower()
+    if window not in {"all", "today", "7d", "30d", "90d"}:
+        window = "7d"
+    if window == "all":
+        return window, None
+    if window == "today":
+        return window, _utc_today_start(now)
+    return window, now - timedelta(days=int(window[:-1]))
+
+
+def _dashboard_claim_time_filter(*, status, start, success):
+    query = {"status": status}
+    if start is None:
+        return query
+    primary = "claimed_at" if success else "updated_at"
+    query["$or"] = [
+        {primary: {"$gte": start}},
+        {primary: {"$exists": False}, "created_at": {"$gte": start}},
+    ]
+    return query
+
+
+def _dashboard_drop_id_variants(value):
+    variants = []
+    if value is not None:
+        variants.append(value)
+        text = str(value)
+        if text not in variants:
+            variants.append(text)
+    return variants
+
+
+def _dashboard_doc_user_id(doc: dict):
+    value = (doc or {}).get("uid")
+    if value is None:
+        value = (doc or {}).get("user_id")
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return value
+
+
+def _dashboard_dt(value):
+    return value.isoformat() if isinstance(value, datetime) else None
+
+
 @admin_bp.get("/api/admin/dashboard/summary")
 def dashboard_summary():
     ok, err = require_admin_from_query()
@@ -3020,6 +3069,153 @@ def dashboard_abuse():
         "partial_errors": errors or None,
     }
     _dashboard_cache_set("abuse", payload)
+    return jsonify(payload)
+
+
+@admin_bp.get("/api/admin/dashboard/vouchers")
+def dashboard_vouchers():
+    ok, err = require_admin_from_query()
+    if not ok:
+        msg, code = err
+        return jsonify({"success": False, "message": msg}), code
+
+    now = _utc_now()
+    window, start = _dashboard_window_start(request.args.get("window"), now)
+    cache_key = f"vouchers:{window}"
+    if request.args.get("refresh") != "1":
+        cached = _dashboard_cache_get(cache_key)
+        if cached is not None:
+            return jsonify(cached)
+
+    claims = db["voucher_claims"]
+    drops = db["drops"]
+    vouchers = db["vouchers"]
+    affiliate_ledger = db["affiliate_ledger"]
+    tickets = db["welcome_tickets"]
+    new_joiner_claims = db["new_joiner_claims"]
+    errors: list[str] = []
+
+    def grab(fn):
+        val, e = _safe_count(fn)
+        if e:
+            errors.append(e)
+        return val
+
+    claimed_filter = _dashboard_claim_time_filter(status="claimed", start=start, success=True)
+    failed_filter = _dashboard_claim_time_filter(status="failed", start=start, success=False)
+
+    claimed_codes = grab(lambda: claims.count_documents(claimed_filter))
+    failed_claims = grab(lambda: claims.count_documents(failed_filter))
+
+    repeat_claimers = None
+    try:
+        per_user = {}
+        for doc in claims.find(claimed_filter, {"user_id": 1}):
+            uid = _dashboard_doc_user_id(doc)
+            if uid is None:
+                continue
+            per_user[uid] = per_user.get(uid, 0) + 1
+        repeat_claimers = sum(1 for count in per_user.values() if count > 1)
+    except Exception as exc:
+        errors.append(f"repeat_claimers: {exc}")
+
+    welcome_claim_users = set()
+    try:
+        affiliate_query = {
+            "status": "ISSUED",
+            "$or": [
+                {"ledger_type": "WELCOME"},
+                {"tier": "WELCOME"},
+                {"pool_id": "WELCOME"},
+            ],
+        }
+        if start is not None:
+            affiliate_query["updated_at"] = {"$gte": start}
+        for doc in affiliate_ledger.find(affiliate_query, {"user_id": 1}):
+            uid = _dashboard_doc_user_id(doc)
+            if uid is not None:
+                welcome_claim_users.add(uid)
+
+        legacy_queries = [
+            (
+                welcome_eligibility_collection,
+                {"claimed": True, **({"claimed_at": {"$gte": start}} if start is not None else {})},
+            ),
+            (
+                new_joiner_claims,
+                {"claimed_at": {"$gte": start}} if start is not None else {},
+            ),
+            (
+                tickets,
+                {"status": "claimed", **({"claimed_at": {"$gte": start}} if start is not None else {})},
+            ),
+        ]
+        for collection, query in legacy_queries:
+            for doc in collection.find(query, {"uid": 1, "user_id": 1}):
+                uid = _dashboard_doc_user_id(doc)
+                if uid is not None:
+                    welcome_claim_users.add(uid)
+    except Exception as exc:
+        errors.append(f"welcome_claims: {exc}")
+    welcome_claims = len(welcome_claim_users)
+
+    campaigns = []
+    try:
+        drop_docs = list(drops.find({}, {"_id": 1, "name": 1, "type": 1, "status": 1, "startsAt": 1, "endsAt": 1, "priority": 1}))
+        drop_docs.sort(
+            key=lambda doc: (
+                doc.get("startsAt") if isinstance(doc.get("startsAt"), datetime) else datetime.min.replace(tzinfo=timezone.utc),
+                str(doc.get("_id")),
+            ),
+            reverse=True,
+        )
+        for doc in drop_docs[:100]:
+            variants = _dashboard_drop_id_variants(doc.get("_id"))
+            code_base = {"dropId": {"$in": variants}} if variants else {}
+            claim_base = {"drop_id": {"$in": variants}} if variants else {}
+            campaign_claim_filter = dict(claimed_filter)
+            campaign_claim_filter.update(claim_base)
+            campaign_failed_filter = dict(failed_filter)
+            campaign_failed_filter.update(claim_base)
+            total_codes = int(vouchers.count_documents(code_base)) if code_base else 0
+            remaining_codes = int(
+                vouchers.count_documents({**code_base, "status": {"$in": ["free", "unclaimed"]}})
+            ) if code_base else 0
+            campaign_claims = int(claims.count_documents(campaign_claim_filter))
+            campaign_failed = int(claims.count_documents(campaign_failed_filter))
+            campaigns.append(
+                {
+                    "dropId": str(doc.get("_id")),
+                    "name": doc.get("name") or str(doc.get("_id")),
+                    "type": doc.get("type") or "pooled",
+                    "status": doc.get("status") or "unknown",
+                    "startsAt": _dashboard_dt(doc.get("startsAt")),
+                    "endsAt": _dashboard_dt(doc.get("endsAt")),
+                    "total_codes": total_codes,
+                    "remaining_codes": remaining_codes,
+                    "claimed_codes": campaign_claims,
+                    "failed_claims": campaign_failed,
+                }
+            )
+    except Exception as exc:
+        errors.append(f"campaigns: {exc}")
+
+    payload = {
+        "success": True,
+        "as_of": now.isoformat(),
+        "window": window,
+        "window_start": start.isoformat() if isinstance(start, datetime) else None,
+        "window_end": now.isoformat(),
+        "metrics": {
+            "claimed_codes": {"value": claimed_codes, "data_quality": "exact", "note": "Successful voucher claim records in selected window."},
+            "failed_claims": {"value": failed_claims, "data_quality": "exact", "note": "Failed voucher claim records in selected window."},
+            "repeat_claimers": {"value": repeat_claimers, "data_quality": "exact", "note": "Users with >1 successful voucher claim in selected window."},
+            "welcome_claims": {"value": welcome_claims, "data_quality": "exact", "note": "Distinct users from affiliate_ledger WELCOME ISSUED plus legacy welcome claim sources in selected window."},
+        },
+        "campaigns": campaigns,
+        "partial_errors": errors or None,
+    }
+    _dashboard_cache_set(cache_key, payload)
     return jsonify(payload)
 
 

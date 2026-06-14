@@ -3,7 +3,7 @@
 (function () {
   "use strict";
 
-  var state = { view: "summary", funnelWindow: "7d" };
+  var state = { view: "summary", funnelWindow: "7d", voucherWindow: "7d" };
 
   function $(sel, root) { return (root || document).querySelector(sel); }
   function $all(sel, root) { return Array.prototype.slice.call((root || document).querySelectorAll(sel)); }
@@ -12,6 +12,15 @@
     if (v === null || v === undefined) return "—";
     if (typeof v === "number") return v.toLocaleString();
     return String(v);
+  }
+
+  function esc(v) {
+    return String(v === null || v === undefined ? "" : v)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
   }
 
   function api(path) {
@@ -167,14 +176,63 @@
       .catch(function (e) { if (e.message !== "unauthorized") banner("Failed to load abuse data: " + e.message); });
   }
 
+  // ---------- Vouchers ----------
+  function loadVouchersDashboard(refresh) {
+    var grid = $("#cards-vouchers-detail");
+    var body = $("#vouchers-body");
+    skeletonGrid(grid, 4);
+    body.innerHTML = '<div class="loading">Loading vouchers...</div>';
+    api("/api/admin/dashboard/vouchers?window=" + encodeURIComponent(state.voucherWindow) + (refresh ? "&refresh=1" : ""))
+      .then(function (d) {
+        banner(d.partial_errors ? ("Some voucher metrics failed to load: " + d.partial_errors.join("; ")) : null, "warn");
+        var m = d.metrics;
+        function card(label, item) {
+          var missing = item.value === null || item.value === undefined;
+          return '<div class="kpi"><div class="label">' + label +
+            ' <span class="tag ' + item.data_quality + '">' + item.data_quality + "</span></div>" +
+            '<div class="' + (missing ? "value missing" : "value") + '">' + (missing ? "Data Not Available" : fmt(item.value)) + "</div>" +
+            '<div class="sub">' + esc(item.note || "") + "</div></div>";
+        }
+        grid.innerHTML =
+          card("Claimed Codes", m.claimed_codes) +
+          card("Failed Claims", m.failed_claims) +
+          card("Repeat Claimers", m.repeat_claimers) +
+          card("Welcome Claims", m.welcome_claims);
+
+        var campaigns = d.campaigns || [];
+        if (!campaigns.length) {
+          body.innerHTML = '<div class="empty">No voucher campaigns found.</div>';
+          return;
+        }
+        var rows = campaigns.map(function (c) {
+          return "<tr>" +
+            "<td><strong>" + esc(c.name || c.dropId) + "</strong><div class=\"note\">" + esc(c.dropId) + "</div></td>" +
+            "<td>" + esc(c.status || "") + "</td>" +
+            "<td>" + esc(c.type || "") + "</td>" +
+            "<td>" + fmt(c.claimed_codes) + "</td>" +
+            "<td>" + fmt(c.failed_claims) + "</td>" +
+            "<td>" + fmt(c.remaining_codes) + " / " + fmt(c.total_codes) + "</td>" +
+            "</tr>";
+        }).join("");
+        body.innerHTML =
+          '<table class="funnel-table"><thead><tr>' +
+          "<th>Campaign</th><th>Status</th><th>Type</th><th>Claimed</th><th>Failed</th><th>Remaining</th>" +
+          "</tr></thead><tbody>" + rows + "</tbody></table>" +
+          '<div class="note">Claimed and failed columns use the selected window. Window: ' + esc(d.window) + ".</div>";
+      })
+      .catch(function (e) {
+        if (e.message !== "unauthorized") body.innerHTML = '<div class="banner error">Failed: ' + esc(e.message) + "</div>";
+      });
+  }
+
   // ---------- View switching ----------
   function switchView(view) {
     state.view = view;
     $all(".nav-item").forEach(function (b) { b.classList.toggle("active", b.dataset.view === view); });
-    ["summary", "funnel", "abuse"].forEach(function (v) {
+    ["summary", "funnel", "abuse", "vouchers"].forEach(function (v) {
       $("#view-" + v).classList.toggle("hidden", v !== view);
     });
-    var titles = { summary: "Executive Summary", funnel: "Activation Funnel", abuse: "Abuse Overview" };
+    var titles = { summary: "Executive Summary", funnel: "Activation Funnel", abuse: "Abuse Overview", vouchers: "Vouchers" };
     $("#view-title").textContent = titles[view] || view;
     banner(null);
     refreshCurrent(false);
@@ -184,6 +242,7 @@
     if (state.view === "summary") loadSummary(force);
     else if (state.view === "funnel") loadFunnel(force);
     else if (state.view === "abuse") loadAbuse(force);
+    else if (state.view === "vouchers") loadVouchersDashboard(force);
   }
 
   function bind() {
@@ -200,6 +259,13 @@
         state.funnelWindow = b.dataset.window;
         $all("#funnel-window button").forEach(function (x) { x.classList.toggle("active", x === b); });
         loadFunnel(false);
+      });
+    });
+    $all("#vouchers-window button").forEach(function (b) {
+      b.addEventListener("click", function () {
+        state.voucherWindow = b.dataset.window;
+        $all("#vouchers-window button").forEach(function (x) { x.classList.toggle("active", x === b); });
+        loadVouchersDashboard(false);
       });
     });
   }
