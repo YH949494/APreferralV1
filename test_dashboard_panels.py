@@ -30,6 +30,8 @@ class FakeCollection:
             for op, expected in cond.items():
                 if op == "$gte" and not (value is not None and value >= expected):
                     return False
+                elif op == "$lte" and not (value is not None and value <= expected):
+                    return False
                 elif op == "$lt" and not (value is not None and value < expected):
                     return False
                 elif op == "$gt" and not (value is not None and value > expected):
@@ -163,9 +165,11 @@ def test_vouchers_panel_status_and_counts():
         {"uid": 7, "claimed": True, "claimed_at": NOW - timedelta(days=1)},
     ])
 
+    # Use window="all" so all three drops are returned — this test verifies
+    # status-label logic, not window filtering (covered by a dedicated test).
     out = dp.build_vouchers_panel(
         drops_col=drops, vouchers_col=vouchers, voucher_claims_col=claims,
-        welcome_eligibility_col=welcome, now=NOW,
+        welcome_eligibility_col=welcome, now=NOW, window="all",
     )
     s = out["summary"]
     assert s["active_campaigns"]["value"] == 1   # d1 active; d3 computed expired
@@ -226,6 +230,45 @@ def test_vouchers_panel_window_filters_claim_stats():
     assert all_time["summary"]["welcome_claims"]["value"] == 2
     assert all_time["campaigns"][0]["claimed"] == 2
     assert all_time["campaigns"][0]["detail"]["claim_attempts"]["failed"] == 2
+
+
+def test_vouchers_panel_window_filters_campaign_rows():
+    """7d should exclude expired 2025 campaigns; All Time should include them."""
+    past_2025 = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    past_2025_end = datetime(2025, 12, 31, tzinfo=timezone.utc)
+    drops = FakeCollection([
+        # Old 2025 campaign — fully before the 7d window
+        {"_id": "old", "name": "2025 Campaign", "type": "personalised",
+         "startsAt": past_2025, "endsAt": past_2025_end},
+        # Campaign overlapping the last 7 days (started before, ends after)
+        {"_id": "overlap", "name": "Overlap Campaign", "type": "personalised",
+         "startsAt": NOW - timedelta(days=10), "endsAt": NOW + timedelta(days=2)},
+        # Campaign entirely within the last 7 days
+        {"_id": "recent", "name": "Recent Campaign", "type": "personalised",
+         "startsAt": NOW - timedelta(days=3), "endsAt": NOW + timedelta(days=1)},
+    ])
+    empty = FakeCollection([])
+
+    d7 = dp.build_vouchers_panel(
+        drops_col=drops, vouchers_col=empty, voucher_claims_col=empty,
+        welcome_eligibility_col=empty, now=NOW, window="7d",
+    )
+    campaign_ids_7d = {c["drop_id"] for c in d7["campaigns"]}
+    assert "old" not in campaign_ids_7d, "7d should exclude expired 2025 campaign"
+    assert "overlap" in campaign_ids_7d, "7d should include campaign overlapping the window"
+    assert "recent" in campaign_ids_7d, "7d should include campaign within the window"
+    # Status counts must reflect the filtered set only
+    total_counted = sum(d7["summary"][k]["value"] for k in
+                        ("active_campaigns", "upcoming_campaigns", "ended_campaigns", "paused_campaigns"))
+    assert total_counted == len(d7["campaigns"])
+
+    all_time = dp.build_vouchers_panel(
+        drops_col=drops, vouchers_col=empty, voucher_claims_col=empty,
+        welcome_eligibility_col=empty, now=NOW, window="all",
+    )
+    campaign_ids_all = {c["drop_id"] for c in all_time["campaigns"]}
+    assert "old" in campaign_ids_all, "All Time should include historical 2025 campaigns"
+    assert len(all_time["campaigns"]) == 3
 
 
 def test_vouchers_panel_handles_empty():
