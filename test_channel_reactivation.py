@@ -1,5 +1,5 @@
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import channel_reactivation as campaign
 
@@ -24,6 +24,10 @@ def _match_value(value, condition):
         if "$exists" in condition and bool(condition["$exists"]) != exists:
             return False
         if "$ne" in condition and exists and value == condition["$ne"]:
+            return False
+        if "$in" in condition and (not exists or value not in condition["$in"]):
+            return False
+        if "$lte" in condition and (not exists or not (value <= condition["$lte"])):
             return False
         return True
     return value == condition
@@ -178,6 +182,23 @@ class ChannelReactivationTests(unittest.TestCase):
         self.assertEqual(result["sent"], 2)
         self.assertEqual(sent, [1, 2])
 
+    def test_already_subscribed_users_excluded_before_send(self):
+        db = _DB([{"user_id": 10, "telegram_user_id": 10}])
+        campaign.set_campaign_active(db, True)
+        sent = []
+
+        result = campaign.process_reactivation_campaign(
+            db_ref=db,
+            membership_checker=lambda uid: (True, "status:member"),
+            send_fn=lambda uid: sent.append(uid) or (True, None),
+            now_ref=self.now,
+        )
+
+        self.assertEqual(result["sent"], 0)
+        self.assertEqual(result["skipped_subscribed"], 1)
+        self.assertEqual(sent, [])
+        self.assertEqual(db.channel_reactivation_messages.count_documents({"status": "skipped_subscribed"}), 1)
+
     def test_process_skips_existing_reward_record(self):
         db = _DB([{"user_id": 10, "telegram_user_id": 10}])
         campaign.set_campaign_active(db, True)
@@ -225,28 +246,105 @@ class ChannelReactivationTests(unittest.TestCase):
         self.assertEqual(db.channel_reactivation_rewards.count_documents({}), 0)
         self.assertEqual(db.xp_events.count_documents({}), 0)
 
-    def test_verify_awards_once(self):
+    def test_verify_marks_pending_and_does_not_award_immediately(self):
         db = _DB([{"user_id": 10, "telegram_user_id": 10}])
 
-        first = campaign.verify_reactivation_claim(
-            db,
-            10,
-            membership_checker=lambda uid: (True, "status:member"),
-            now_ref=self.now,
-        )
-        second = campaign.verify_reactivation_claim(
+        result = campaign.verify_reactivation_claim(
             db,
             10,
             membership_checker=lambda uid: (True, "status:member"),
             now_ref=self.now,
         )
 
-        self.assertTrue(first["success"])
-        self.assertEqual(first["xp_awarded"], 50)
-        self.assertFalse(second["success"])
-        self.assertEqual(second["code"], "already_claimed")
-        self.assertEqual(db.channel_reactivation_rewards.count_documents({"status": "claimed"}), 1)
+        self.assertTrue(result["success"])
+        self.assertEqual(result["code"], "pending")
+        self.assertIn("Stay subscribed for 72 hours", result["message"])
+        self.assertEqual(db.xp_events.count_documents({}), 0)
+        reward = db.channel_reactivation_rewards.find_one({"user_id": 10})
+        self.assertEqual(reward["status"], "pending")
+        self.assertEqual(reward["verified_at"], self.now)
+        self.assertEqual(reward["reward_due_at"], self.now + timedelta(hours=72))
+        self.assertIsNone(reward["rewarded_at"])
+        self.assertIsNone(reward["cancelled_at"])
+
+    def test_pending_reward_granted_after_hold_period(self):
+        db = _DB([{"user_id": 10, "telegram_user_id": 10}])
+        campaign.verify_reactivation_claim(
+            db,
+            10,
+            membership_checker=lambda uid: (True, "status:member"),
+            now_ref=self.now,
+        )
+        due = self.now + timedelta(hours=72, seconds=1)
+
+        result = campaign.process_pending_reactivation_rewards(
+            db_ref=db,
+            membership_checker=lambda uid: (True, "status:member"),
+            now_ref=due,
+        )
+
+        self.assertEqual(result["rewarded"], 1)
+        reward = db.channel_reactivation_rewards.find_one({"user_id": 10})
+        self.assertEqual(reward["status"], "rewarded")
+        self.assertEqual(reward["rewarded_at"], due)
+        self.assertEqual(reward["xp_awarded"], 50)
         self.assertEqual(db.xp_events.count_documents({}), 1)
+
+    def test_pending_reward_cancelled_if_user_leaves_channel(self):
+        db = _DB([{"user_id": 10, "telegram_user_id": 10}])
+        campaign.verify_reactivation_claim(
+            db,
+            10,
+            membership_checker=lambda uid: (True, "status:member"),
+            now_ref=self.now,
+        )
+        due = self.now + timedelta(hours=72, seconds=1)
+
+        result = campaign.process_pending_reactivation_rewards(
+            db_ref=db,
+            membership_checker=lambda uid: (False, "status:left"),
+            now_ref=due,
+        )
+
+        self.assertEqual(result["cancelled"], 1)
+        reward = db.channel_reactivation_rewards.find_one({"user_id": 10})
+        self.assertEqual(reward["status"], "cancelled")
+        self.assertEqual(reward["cancelled_at"], due)
+        self.assertIsNone(reward["rewarded_at"])
+        self.assertEqual(reward["xp_awarded"], 0)
+        self.assertEqual(db.xp_events.count_documents({}), 0)
+
+    def test_blocked_user_marked_failed_blocked(self):
+        db = _DB([{"user_id": 10, "telegram_user_id": 10}])
+        campaign.set_campaign_active(db, True)
+
+        result = campaign.process_reactivation_campaign(
+            db_ref=db,
+            membership_checker=lambda uid: (False, "status:left"),
+            send_fn=lambda uid: (False, "Forbidden: bot was blocked by the user"),
+            now_ref=self.now,
+        )
+
+        self.assertEqual(result["failed_blocked"], 1)
+        self.assertEqual(db.channel_reactivation_messages.count_documents({"status": "failed_blocked"}), 1)
+        user_doc = db.users.find_one({"user_id": 10})
+        self.assertEqual(user_doc["reactivation_failure_reason"], "Forbidden: bot was blocked by the user")
+        self.assertEqual(user_doc["reactivation_failed_blocked_at"], self.now)
+
+    def test_blocked_user_not_retried(self):
+        db = _DB([{"user_id": 10, "telegram_user_id": 10, "reactivation_failed_blocked_at": self.now}])
+        campaign.set_campaign_active(db, True)
+        sent = []
+
+        result = campaign.process_reactivation_campaign(
+            db_ref=db,
+            membership_checker=lambda uid: (False, "status:left"),
+            send_fn=lambda uid: sent.append(uid) or (True, None),
+            now_ref=self.now + timedelta(minutes=1),
+        )
+
+        self.assertEqual(result["scanned"], 0)
+        self.assertEqual(sent, [])
 
 
 if __name__ == "__main__":
