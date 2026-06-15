@@ -24,6 +24,7 @@ VERIFY_CALLBACK_DATA = "reactivate_verify"
 REWARD_XP = int(os.getenv("CHANNEL_REACTIVATION_REWARD_XP", "50"))
 DAILY_SEND_LIMIT = int(os.getenv("CHANNEL_REACTIVATION_DAILY_LIMIT", "1000"))
 MINUTE_SEND_LIMIT = int(os.getenv("CHANNEL_REACTIVATION_MINUTE_LIMIT", "20"))
+REWARD_HOLD_HOURS = int(os.getenv("CHANNEL_REACTIVATION_REWARD_HOLD_HOURS", "72"))
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 OFFICIAL_CHANNEL_USERNAME = os.getenv("OFFICIAL_CHANNEL_USERNAME", "@advantplayofficial")
 OFFICIAL_CHANNEL_URL = os.getenv(
@@ -63,7 +64,8 @@ def ensure_channel_reactivation_indexes(db) -> None:
     _messages(db).create_index([("campaign_id", 1), ("status", 1), ("sent_day", 1)], name="reactivation_messages_status_day")
     _messages(db).create_index([("campaign_id", 1), ("created_at", -1)], name="reactivation_messages_created")
     _rewards(db).create_index([("campaign_id", 1), ("user_id", 1)], unique=True, name="uniq_reactivation_reward_user")
-    _rewards(db).create_index([("campaign_id", 1), ("claimed_at", -1)], name="reactivation_rewards_claimed")
+    _rewards(db).create_index([("campaign_id", 1), ("status", 1), ("reward_due_at", 1)], name="reactivation_rewards_status_due")
+    _rewards(db).create_index([("campaign_id", 1), ("rewarded_at", -1)], name="reactivation_rewards_rewarded")
 
 
 def set_campaign_active(db, active: bool, *, actor: str = "admin") -> dict:
@@ -105,6 +107,7 @@ def _registered_not_rewarded_filter() -> dict:
             {"is_banned": {"$ne": True}},
             {"status": {"$ne": "banned"}},
             {"reactivation_reward_claimed": {"$ne": True}},
+            {"reactivation_failed_blocked_at": {"$exists": False}},
             {"reactivation_dm_sent_at": {"$exists": False}},
         ]
     }
@@ -124,10 +127,14 @@ def campaign_summary(db) -> dict:
     eligible = db.users.count_documents(_registered_not_rewarded_filter())
     sent = _messages(db).count_documents({"campaign_id": CAMPAIGN_ID, "status": "sent"})
     sent_today = _messages(db).count_documents({"campaign_id": CAMPAIGN_ID, "status": "sent", "sent_day": today})
-    verified = _rewards(db).count_documents({"campaign_id": CAMPAIGN_ID, "status": "claimed"})
-    xp_rows = _rewards(db).find({"campaign_id": CAMPAIGN_ID, "status": "claimed"}, {"xp_awarded": 1})
+    verified = _rewards(db).count_documents({"campaign_id": CAMPAIGN_ID, "status": {"$in": ["pending", "rewarded"]}})
+    pending = _rewards(db).count_documents({"campaign_id": CAMPAIGN_ID, "status": "pending"})
+    rewarded = _rewards(db).count_documents({"campaign_id": CAMPAIGN_ID, "status": "rewarded"})
+    cancelled = _rewards(db).count_documents({"campaign_id": CAMPAIGN_ID, "status": "cancelled"})
+    xp_rows = _rewards(db).find({"campaign_id": CAMPAIGN_ID, "status": "rewarded"}, {"xp_awarded": 1})
     xp_awarded = sum(int(row.get("xp_awarded", 0) or 0) for row in xp_rows)
     failed = _messages(db).count_documents({"campaign_id": CAMPAIGN_ID, "status": "failed"})
+    failed_blocked = _messages(db).count_documents({"campaign_id": CAMPAIGN_ID, "status": "failed_blocked"})
     skipped_subscribed = _messages(db).count_documents({"campaign_id": CAMPAIGN_ID, "status": "skipped_subscribed"})
     return {
         "success": True,
@@ -137,11 +144,16 @@ def campaign_summary(db) -> dict:
         "messages_sent": int(sent),
         "messages_sent_today": int(sent_today),
         "successful_verifications": int(verified),
+        "pending_rewards": int(pending),
+        "rewarded": int(rewarded),
+        "cancelled_rewards": int(cancelled),
         "xp_awarded": int(xp_awarded),
         "send_failures": int(failed),
+        "failed_blocked": int(failed_blocked),
         "skipped_already_subscribed": int(skipped_subscribed),
         "daily_limit": DAILY_SEND_LIMIT,
         "minute_limit": MINUTE_SEND_LIMIT,
+        "reward_hold_hours": REWARD_HOLD_HOURS,
         "updated_at": campaign.get("updated_at"),
     }
 
@@ -214,7 +226,14 @@ def send_reactivation_dm(uid: int, *, token: str | None = None) -> tuple[bool, s
         return False, f"{exc.__class__.__name__}: {exc}"
     if resp.status_code == 200 and data.get("ok"):
         return True, None
+    if resp.status_code == 403 or data.get("error_code") == 403:
+        return False, "bot_blocked"
     return False, data.get("description") or f"telegram_http_{resp.status_code}"
+
+
+def _is_blocked_send_error(err: str | None) -> bool:
+    msg = str(err or "").lower()
+    return "bot_blocked" in msg or "blocked by the user" in msg or "forbidden" in msg
 
 
 def _record_message(db, uid: int, status: str, ts: datetime, **fields) -> None:
@@ -242,7 +261,20 @@ def process_reactivation_campaign(
     now_ref: datetime | None = None,
 ) -> dict:
     ts = now_ref or now_utc()
-    stats = {"active": is_campaign_active(db_ref), "scanned": 0, "sent": 0, "skipped_subscribed": 0, "failed": 0}
+    reward_stats = process_pending_reactivation_rewards(
+        db_ref=db_ref,
+        membership_checker=membership_checker,
+        now_ref=ts,
+    )
+    stats = {
+        "active": is_campaign_active(db_ref),
+        "scanned": 0,
+        "sent": 0,
+        "skipped_subscribed": 0,
+        "failed": 0,
+        "failed_blocked": 0,
+        "rewards": reward_stats,
+    }
     if not stats["active"]:
         return stats
     checker = membership_checker or check_official_channel_subscribed
@@ -282,6 +314,14 @@ def process_reactivation_campaign(
                 _record_message(db_ref, uid, "sent", ts, sent_at=ts, sent_day=today)
                 db_ref.users.update_one({"user_id": user_doc.get("user_id", uid)}, {"$set": {"reactivation_dm_sent_at": ts}})
                 stats["sent"] += 1
+            elif _is_blocked_send_error(err):
+                _record_message(db_ref, uid, "failed_blocked", ts, error=err, failed_at=ts)
+                db_ref.users.update_one(
+                    {"user_id": user_doc.get("user_id", uid)},
+                    {"$set": {"reactivation_failed_blocked_at": ts, "reactivation_failure_reason": err}},
+                )
+                logger.warning("[CHANNEL_REACTIVATION] send_blocked uid=%s err=%s", uid, err)
+                stats["failed_blocked"] += 1
             else:
                 _record_message(db_ref, uid, "failed", ts, error=err, failed_at=ts)
                 logger.warning("[CHANNEL_REACTIVATION] send_failed uid=%s err=%s", uid, err)
@@ -302,7 +342,17 @@ def verify_reactivation_claim(
 ) -> dict:
     ts = now_ref or now_utc()
     uid = int(uid)
-    if _rewards(db).find_one({"campaign_id": CAMPAIGN_ID, "user_id": uid}):
+    existing_reward = _rewards(db).find_one({"campaign_id": CAMPAIGN_ID, "user_id": uid})
+    if existing_reward and existing_reward.get("status") == "pending":
+        return {
+            "success": True,
+            "code": "pending",
+            "message": f"✅ Subscription verified.\n\nStay subscribed for {REWARD_HOLD_HOURS} hours to receive your +{REWARD_XP} XP reward.",
+            "reward_due_at": existing_reward.get("reward_due_at"),
+        }
+    if existing_reward and existing_reward.get("status") == "cancelled":
+        return {"success": False, "code": "cancelled", "message": "This reward was cancelled because the subscription requirement was not maintained."}
+    if existing_reward and existing_reward.get("status") == "rewarded":
         return {"success": False, "code": "already_claimed", "message": "You already claimed this XP bonus."}
     user_doc = db.users.find_one(
         {"user_id": uid},
@@ -328,29 +378,135 @@ def verify_reactivation_claim(
             "reason": reason,
         }
 
-    unique_key = f"{CAMPAIGN_ID}:{uid}"
-    granted = grant_xp(db, uid, "official_channel_reactivation", unique_key, REWARD_XP)
-    if not granted:
-        return {"success": False, "code": "already_claimed", "message": "You already claimed this XP bonus."}
-
+    reward_due_at = ts + timedelta(hours=REWARD_HOLD_HOURS)
     reward_doc = {
         "campaign_id": CAMPAIGN_ID,
         "user_id": uid,
-        "status": "claimed",
-        "claimed_at": ts,
-        "xp_awarded": REWARD_XP,
+        "status": "pending",
+        "verified_at": ts,
+        "reward_due_at": reward_due_at,
+        "rewarded_at": None,
+        "cancelled_at": None,
+        "xp_awarded": 0,
         "membership_reason": reason,
     }
     try:
         _rewards(db).insert_one(reward_doc)
     except DuplicateKeyError:
-        logger.info("[CHANNEL_REACTIVATION] duplicate_reward_after_xp uid=%s", uid)
+        return {
+            "success": True,
+            "code": "pending",
+            "message": f"✅ Subscription verified.\n\nStay subscribed for {REWARD_HOLD_HOURS} hours to receive your +{REWARD_XP} XP reward.",
+        }
 
     db.users.update_one(
         {"user_id": uid},
-        {"$set": {"reactivation_reward_claimed": True, "reactivation_reward_claimed_at": ts}},
+        {"$set": {"reactivation_verified_at": ts, "reactivation_reward_due_at": reward_due_at}},
     )
-    return {"success": True, "code": "claimed", "message": f"Verified! +{REWARD_XP} XP has been added.", "xp_awarded": REWARD_XP}
+    return {
+        "success": True,
+        "code": "pending",
+        "message": f"✅ Subscription verified.\n\nStay subscribed for {REWARD_HOLD_HOURS} hours to receive your +{REWARD_XP} XP reward.",
+        "reward_due_at": reward_due_at,
+    }
+
+
+def process_pending_reactivation_rewards(
+    *,
+    db_ref,
+    membership_checker: Callable[[int], tuple[bool, str]] | None = None,
+    now_ref: datetime | None = None,
+    batch_limit: int = 200,
+) -> dict:
+    ts = now_ref or now_utc()
+    checker = membership_checker or check_official_channel_subscribed
+    stats = {"scanned": 0, "rewarded": 0, "cancelled": 0, "failed": 0}
+    cursor = _rewards(db_ref).find(
+        {
+            "campaign_id": CAMPAIGN_ID,
+            "status": "pending",
+            "reward_due_at": {"$lte": ts},
+        },
+        {"user_id": 1, "reward_due_at": 1, "verified_at": 1},
+    ).limit(batch_limit)
+
+    for reward_doc in cursor:
+        stats["scanned"] += 1
+        uid = int(reward_doc.get("user_id"))
+        try:
+            subscribed, reason = checker(uid)
+            if not subscribed:
+                _rewards(db_ref).update_one(
+                    {"campaign_id": CAMPAIGN_ID, "user_id": uid, "status": "pending"},
+                    {
+                        "$set": {
+                            "status": "cancelled",
+                            "cancelled_at": ts,
+                            "rewarded_at": None,
+                            "xp_awarded": 0,
+                            "membership_reason": reason,
+                            "updated_at": ts,
+                        }
+                    },
+                )
+                db_ref.users.update_one(
+                    {"user_id": uid},
+                    {"$set": {"reactivation_reward_status": "cancelled", "reactivation_cancelled_at": ts}},
+                )
+                stats["cancelled"] += 1
+                continue
+
+            unique_key = f"{CAMPAIGN_ID}:{uid}"
+            granted = grant_xp(db_ref, uid, "official_channel_reactivation", unique_key, REWARD_XP)
+            if not granted:
+                _rewards(db_ref).update_one(
+                    {"campaign_id": CAMPAIGN_ID, "user_id": uid, "status": "pending"},
+                    {
+                        "$set": {
+                            "status": "rewarded",
+                            "rewarded_at": ts,
+                            "cancelled_at": None,
+                            "xp_awarded": 0,
+                            "membership_reason": reason,
+                            "updated_at": ts,
+                        }
+                    },
+                )
+                stats["rewarded"] += 1
+                continue
+
+            _rewards(db_ref).update_one(
+                {"campaign_id": CAMPAIGN_ID, "user_id": uid, "status": "pending"},
+                {
+                    "$set": {
+                        "status": "rewarded",
+                        "rewarded_at": ts,
+                        "cancelled_at": None,
+                        "xp_awarded": REWARD_XP,
+                        "membership_reason": reason,
+                        "updated_at": ts,
+                    }
+                },
+            )
+            db_ref.users.update_one(
+                {"user_id": uid},
+                {
+                    "$set": {
+                        "reactivation_reward_claimed": True,
+                        "reactivation_reward_claimed_at": ts,
+                        "reactivation_reward_status": "rewarded",
+                    }
+                },
+            )
+            stats["rewarded"] += 1
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("[CHANNEL_REACTIVATION] pending_reward_failed uid=%s", uid)
+            _rewards(db_ref).update_one(
+                {"campaign_id": CAMPAIGN_ID, "user_id": uid, "status": "pending"},
+                {"$set": {"last_error": f"{exc.__class__.__name__}: {exc}", "updated_at": ts}},
+            )
+            stats["failed"] += 1
+    return stats
 
 
 def json_default(value):
