@@ -65,7 +65,6 @@ def _rewards(db):
 
 
 def ensure_channel_reactivation_indexes(db) -> None:
-    _campaigns(db).create_index([("_id", 1)], unique=True)
     _messages(db).create_index([("campaign_id", 1), ("user_id", 1)], unique=True, name="uniq_reactivation_message_user")
     _messages(db).create_index([("campaign_id", 1), ("status", 1), ("sent_day", 1)], name="reactivation_messages_status_day")
     _messages(db).create_index([("campaign_id", 1), ("created_at", -1)], name="reactivation_messages_created")
