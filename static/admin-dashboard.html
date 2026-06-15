@@ -17,6 +17,7 @@
       <button class="nav-item" data-view="vouchers">Vouchers</button>
       <button class="nav-item" data-view="referrals">Referrals</button>
       <button class="nav-item" data-view="affiliate">Affiliate</button>
+      <button class="nav-item" data-view="reactivation">Reactivation</button>
       <button class="nav-item" data-view="audit">Audit</button>
       <button class="nav-item" data-view="users">User Drilldown</button>
       <button class="nav-item" data-view="settings">Settings</button>
@@ -120,6 +121,19 @@
         <div id="affiliate-body"></div>
       </section>
 
+      <!-- REACTIVATION VIEW -->
+      <section id="view-reactivation" class="hidden">
+        <div class="controls" style="margin-bottom:16px;">
+          <input class="filter-input" id="reactivation-per-run-limit" type="number" min="1" max="1000" value="100" style="max-width:160px;margin:0;" />
+          <button class="btn primary" id="reactivation-start-btn">Start Campaign</button>
+          <button class="btn" id="reactivation-pause-btn">Pause Campaign</button>
+          <span class="admin-chip" id="reactivation-status">...</span>
+          <span class="admin-chip" id="reactivation-limit-status">Limit: 100</span>
+        </div>
+        <div class="card-grid" id="cards-reactivation-summary"></div>
+        <div id="reactivation-body"></div>
+      </section>
+
       <!-- AUDIT VIEW -->
       <section id="view-audit" class="hidden">
         <div class="card-grid" id="cards-audit-summary"></div>
@@ -145,6 +159,41 @@
     </main>
   </div>
 
+  <script>
+    (function () {
+      function $(id) { return document.getElementById(id); }
+      function refreshLimit() {
+        fetch('/api/admin/channel-reactivation/summary', { credentials: 'same-origin', headers: { 'Accept': 'application/json' } })
+          .then(function (r) { return r.ok ? r.json() : null; })
+          .then(function (d) {
+            if (!d) return;
+            var input = $('reactivation-per-run-limit');
+            var label = $('reactivation-limit-status');
+            if (input && d.per_run_limit) input.value = d.per_run_limit;
+            if (input && d.max_per_run_limit) input.max = d.max_per_run_limit;
+            if (label) label.textContent = 'Limit: ' + (d.per_run_limit || 100) + ' / max ' + (d.max_per_run_limit || 1000);
+          })
+          .catch(function () {});
+      }
+      document.addEventListener('click', function (event) {
+        var btn = event.target && event.target.closest && event.target.closest('#reactivation-start-btn');
+        if (!btn) return;
+        var input = $('reactivation-per-run-limit');
+        var limit = parseInt((input && input.value) || '100', 10);
+        if (isNaN(limit)) limit = 100;
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        fetch('/api/admin/channel-reactivation/start', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ per_run_limit: limit })
+        }).then(function () { refreshLimit(); });
+      }, true);
+      document.addEventListener('DOMContentLoaded', refreshLimit);
+      setInterval(refreshLimit, 30000);
+    })();
+  </script>
   <script src="/static/admin-dashboard.js"></script>
 </body>
 </html>

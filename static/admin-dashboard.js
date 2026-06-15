@@ -1,5 +1,5 @@
 /* APReferral Admin Dashboard — browser-only, session-cookie auth.
-   No Telegram SDK. Reuses existing /api/admin/* endpoints. Read-only. */
+   No Telegram SDK. Reuses existing /api/admin/* endpoints. */
 (function () {
   "use strict";
 
@@ -25,6 +25,17 @@
 
   function api(path) {
     return fetch(path, { credentials: "same-origin", headers: { "Accept": "application/json" } })
+      .then(function (r) {
+        if (r.status === 401) { window.location.href = "/static/admin-login.html"; throw new Error("unauthorized"); }
+        return r.json().then(function (j) {
+          if (!r.ok) throw new Error((j && j.message) || ("HTTP " + r.status));
+          return j;
+        });
+      });
+  }
+
+  function apiPost(path) {
+    return fetch(path, { method: "POST", credentials: "same-origin", headers: { "Accept": "application/json" } })
       .then(function (r) {
         if (r.status === 401) { window.location.href = "/static/admin-login.html"; throw new Error("unauthorized"); }
         return r.json().then(function (j) {
@@ -64,9 +75,6 @@
         banner(d.partial_errors ? ("Some metrics failed to load: " + d.partial_errors.join("; ")) : null, "warn");
 
         var u = d.users;
-        // Telegram count card with stale indicator. `extraClass` lets the
-        // official channel use the headline style while the chatroom stays
-        // a secondary-highlight card.
         function tgCard(label, val, stale, cachedAt, extraClass) {
           var missing = val === null || val === undefined;
           var staleHtml = stale
@@ -176,7 +184,6 @@
       .catch(function (e) { if (e.message !== "unauthorized") banner("Failed to load abuse data: " + e.message); });
   }
 
-  // ---------- Shared helpers for Phase C panels ----------
   function esc(s) {
     return String(s === null || s === undefined ? "" : s)
       .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
@@ -185,7 +192,6 @@
   function dt(v) { return v ? new Date(v).toLocaleString() : "—"; }
   function pct(v) { return (v === null || v === undefined) ? "—" : v + "%"; }
 
-  // Render a {value, data_quality, note} metric as a KPI card.
   function dqCard(label, m) {
     m = m || {};
     var missing = m.value === null || m.value === undefined || m.data_quality === "missing";
@@ -201,7 +207,6 @@
     $("#" + elId).innerHTML = '<div class="' + kind + '">' + esc(msg) + "</div>";
   }
 
-  // Build an expandable table. rows: [{cells:[], detailHtml, search}]
   function expandTable(headers, rows) {
     if (!rows.length) return '<div class="empty">No records.</div>';
     var head = "<thead><tr>" + headers.map(function (h) {
@@ -219,7 +224,6 @@
     return '<table class="data-table">' + head + "<tbody>" + body + "</tbody></table>";
   }
 
-  // Wire row expand/collapse + lazy detail loading inside a container.
   function bindExpand(containerId, onExpand) {
     var c = $("#" + containerId);
     if (!c) return;
@@ -274,7 +278,6 @@
     });
   }
 
-  // ---------- Vouchers ----------
   function loadVouchers(refresh) {
     skeletonGrid($("#cards-voucher-summary"), 6);
     statePanel("vouchers-body", "loading", "Loading campaigns…");
@@ -322,7 +325,6 @@
       .catch(function (e) { if (e.message !== "unauthorized") statePanel("vouchers-body", "banner error", "Failed: " + e.message); });
   }
 
-  // ---------- Referrals ----------
   function loadReferrals(refresh) {
     skeletonGrid($("#cards-referrals-summary"), 7);
     statePanel("referrals-body", "loading", "Loading referrers…");
@@ -373,7 +375,6 @@
       .catch(function (e) { if (e.message !== "unauthorized") statePanel("referrals-body", "banner error", "Failed: " + e.message); });
   }
 
-  // ---------- Affiliate ----------
   function loadAffiliate(refresh) {
     skeletonGrid($("#cards-affiliate-summary"), 4);
     statePanel("affiliate-body", "loading", "Loading affiliates…");
@@ -424,6 +425,35 @@
       .catch(function (e) { if (e.message !== "unauthorized") statePanel("affiliate-body", "banner error", "Failed: " + e.message); });
   }
 
+  function loadReactivation(refresh) {
+    skeletonGrid($("#cards-reactivation-summary"), 4);
+    statePanel("reactivation-body", "loading", "Loading campaign...");
+    api("/api/admin/channel-reactivation/summary" + (refresh ? "?refresh=1" : ""))
+      .then(function (d) {
+        $("#reactivation-status").textContent = d.active ? "Active" : "Paused";
+        $("#cards-reactivation-summary").innerHTML =
+          kpiCard("Eligible Users", d.eligible_users) +
+          kpiCard("Messages Sent", d.messages_sent, fmt(d.messages_sent_today) + " today") +
+          kpiCard("Successful Verifications", d.successful_verifications) +
+          kpiCard("XP Awarded", d.xp_awarded) +
+          kpiCard("Send Failures", d.send_failures) +
+          kpiCard("Skipped Subscribed", d.skipped_already_subscribed);
+        $("#reactivation-body").innerHTML =
+          '<div class="detail-grid">' +
+          kvBlock("Safety Limits", [["Daily Send Limit", d.daily_limit], ["Messages Sent Today", d.messages_sent_today], ["Per-Minute Limit", d.minute_limit]]) +
+          kvBlock("Campaign", [["Campaign ID", d.campaign_id], ["Status", d.active ? "Active" : "Paused"], ["Updated", dt(d.updated_at)]]) +
+          "</div>";
+      })
+      .catch(function (e) { if (e.message !== "unauthorized") statePanel("reactivation-body", "banner error", "Failed: " + e.message); });
+  }
+
+  function setReactivation(active) {
+    var path = active ? "/api/admin/channel-reactivation/start" : "/api/admin/channel-reactivation/pause";
+    apiPost(path)
+      .then(function () { loadReactivation(true); })
+      .catch(function (e) { if (e.message !== "unauthorized") banner("Failed to update campaign: " + e.message); });
+  }
+
   function affiliateDetailHtml(det) {
     var ledger = (det.ledger || []).map(function (l) {
       return "<tr><td>" + esc(l.ledger_type) + "</td><td>" + esc(l.tier || "—") + '</td><td><span class="pill ' +
@@ -437,7 +467,6 @@
       '<div class="detail-block" style="margin-top:12px;"><h4>Vouchers Issued</h4><table class="mini-table"><thead><tr><th>Code</th><th>Pool</th><th>Issued</th></tr></thead><tbody>' + vouchers + "</tbody></table></div>";
   }
 
-  // ---------- Audit ----------
   function loadAudit(refresh) {
     skeletonGrid($("#cards-audit-summary"), 6);
     statePanel("audit-body", "loading", "Loading audit trail…");
@@ -472,7 +501,6 @@
       .catch(function (e) { if (e.message !== "unauthorized") statePanel("audit-body", "banner error", "Failed: " + e.message); });
   }
 
-  // ---------- User Drilldown ----------
   function loadUser(query) {
     if (!query) { statePanel("user-body", "empty", "Search by Telegram user_id or username to view a user profile."); return; }
     statePanel("user-body", "loading", "Searching…");
@@ -505,7 +533,6 @@
       .catch(function (e) { if (e.message !== "unauthorized") statePanel("user-body", "banner error", "Failed: " + e.message); });
   }
 
-  // ---------- Settings ----------
   function loadSettings(refresh) {
     statePanel("settings-body", "loading", "Loading configuration…");
     api("/api/admin/dashboard/settings" + (refresh ? "?refresh=1" : ""))
@@ -538,15 +565,15 @@
       .catch(function (e) { if (e.message !== "unauthorized") statePanel("settings-body", "banner error", "Failed: " + e.message); });
   }
 
-  // ---------- View switching ----------
-  var VIEWS = ["summary", "funnel", "abuse", "vouchers", "referrals", "affiliate", "audit", "users", "settings"];
+  var VIEWS = ["summary", "funnel", "abuse", "vouchers", "referrals", "affiliate", "reactivation", "audit", "users", "settings"];
   function switchView(view) {
     state.view = view;
     $all(".nav-item").forEach(function (b) { b.classList.toggle("active", b.dataset.view === view); });
     VIEWS.forEach(function (v) { $("#view-" + v).classList.toggle("hidden", v !== view); });
     var titles = {
       summary: "Executive Summary", funnel: "Activation Funnel", abuse: "Abuse Overview",
-      vouchers: "Vouchers", referrals: "Referrals", affiliate: "Affiliate", audit: "Audit",
+      vouchers: "Vouchers", referrals: "Referrals", affiliate: "Affiliate", reactivation: "Reactivation",
+      audit: "Audit",
       users: "User Drilldown", settings: "Settings (Read Only)"
     };
     $("#view-title").textContent = titles[view] || view;
@@ -561,6 +588,7 @@
     else if (state.view === "vouchers") loadVouchers(force);
     else if (state.view === "referrals") loadReferrals(force);
     else if (state.view === "affiliate") loadAffiliate(force);
+    else if (state.view === "reactivation") loadReactivation(force);
     else if (state.view === "audit") loadAudit(force);
     else if (state.view === "users") { /* user view loads on search */ }
     else if (state.view === "settings") loadSettings(force);
@@ -575,6 +603,8 @@
       fetch("/api/admin/auth/logout", { method: "POST", credentials: "same-origin" })
         .finally(function () { window.location.href = "/admin"; });
     });
+    $("#reactivation-start-btn").addEventListener("click", function () { setReactivation(true); });
+    $("#reactivation-pause-btn").addEventListener("click", function () { setReactivation(false); });
     $all("#funnel-window button").forEach(function (b) {
       b.addEventListener("click", function () {
         state.funnelWindow = b.dataset.window;
@@ -597,21 +627,18 @@
       });
     });
 
-    // Phase C: client-side table filters.
     [["vouchers-filter", "vouchers-body"], ["referrals-filter", "referrals-body"],
      ["affiliate-filter", "affiliate-body"], ["audit-filter", "audit-body"]].forEach(function (pair) {
       var input = $("#" + pair[0]);
       if (input) input.addEventListener("input", function () { applyFilter(pair[1], input.value); });
     });
 
-    // User drilldown search.
     var us = $("#user-search"), ub = $("#user-search-btn");
     function doUserSearch() { loadUser((us.value || "").trim()); }
     if (ub) ub.addEventListener("click", doUserSearch);
     if (us) us.addEventListener("keydown", function (e) { if (e.key === "Enter") doUserSearch(); });
   }
 
-  // ---------- Boot ----------
   api("/api/admin/auth/me")
     .then(function (d) {
       var a = d.admin || {};

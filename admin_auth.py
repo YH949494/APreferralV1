@@ -318,3 +318,57 @@ def admin_me():
             },
         }
     )
+
+
+def _admin_api_authorized() -> bool:
+    if session_admin():
+        return True
+    try:
+        from vouchers import _admin_secret_ok, _get_admin_secret
+
+        return _admin_secret_ok(_get_admin_secret(request))
+    except Exception:
+        logger.exception("[admin_login] reactivation admin auth check failed")
+        return False
+
+
+def _reactivation_payload(active: bool | None = None, *, per_run_limit=None):
+    from channel_reactivation import (
+        campaign_summary,
+        ensure_channel_reactivation_indexes,
+        set_campaign_active,
+    )
+    from database import db
+
+    ensure_channel_reactivation_indexes(db)
+    if active is None:
+        return campaign_summary(db)
+    return set_campaign_active(db, active, actor="admin", per_run_limit=per_run_limit)
+
+
+@admin_auth_bp.get("/api/admin/channel-reactivation/summary")
+def admin_channel_reactivation_summary():
+    if not _admin_api_authorized():
+        return jsonify({"success": False, "message": "Admins only"}), 403
+    return jsonify(_reactivation_payload())
+
+
+@admin_auth_bp.post("/api/admin/channel-reactivation/start")
+def admin_channel_reactivation_start():
+    if not _admin_api_authorized():
+        return jsonify({"success": False, "message": "Admins only"}), 403
+    payload = request.get_json(silent=True) or {}
+    summary = _reactivation_payload(True, per_run_limit=payload.get("per_run_limit"))
+    logger.info(
+        "[CHANNEL_REACTIVATION] campaign_started actor=admin per_run_limit=%s max_per_run_limit=%s",
+        summary.get("per_run_limit"),
+        summary.get("max_per_run_limit"),
+    )
+    return jsonify(summary)
+
+
+@admin_auth_bp.post("/api/admin/channel-reactivation/pause")
+def admin_channel_reactivation_pause():
+    if not _admin_api_authorized():
+        return jsonify({"success": False, "message": "Admins only"}), 403
+    return jsonify(_reactivation_payload(False))
