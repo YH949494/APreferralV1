@@ -182,6 +182,24 @@ class ChannelReactivationTests(unittest.TestCase):
         self.assertEqual(result["sent"], 2)
         self.assertEqual(sent, [1, 2])
 
+    def test_start_per_run_limit_100_processes_only_100_candidates(self):
+        db = _DB([{"user_id": i, "telegram_user_id": i} for i in range(1, 151)])
+        summary = campaign.set_campaign_active(db, True, per_run_limit=100)
+        sent = []
+
+        result = campaign.process_reactivation_campaign(
+            db_ref=db,
+            membership_checker=lambda uid: (False, "status:left"),
+            send_fn=lambda uid: sent.append(uid) or (True, None),
+            now_ref=self.now,
+        )
+
+        self.assertEqual(summary["per_run_limit"], 100)
+        self.assertEqual(result["per_run_limit"], 100)
+        self.assertEqual(result["scanned"], 100)
+        self.assertEqual(result["sent"], 100)
+        self.assertEqual(len(sent), 100)
+
     def test_already_subscribed_users_excluded_before_send(self):
         db = _DB([{"user_id": 10, "telegram_user_id": 10}])
         campaign.set_campaign_active(db, True)
