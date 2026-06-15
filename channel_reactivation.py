@@ -35,7 +35,7 @@ OFFICIAL_CHANNEL_URL = os.getenv(
 VERIFICATION_PENDING_MESSAGE = (
     f"✅ Subscription verified.\n\n"
     f"Stay subscribed for {REWARD_HOLD_HOURS} hours to receive your +{REWARD_XP} XP reward.\n\n"
-    "Stay subscribed because vouchers may show up anytime."
+    "Vouchers can drop at any time.."
 )
 _RAW_OFFICIAL_CHANNEL_ID = os.getenv("OFFICIAL_CHANNEL_ID")
 try:
