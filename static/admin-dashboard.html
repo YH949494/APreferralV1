@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta name="robots" content="noindex, nofollow" />
-  <title>APReferral Â· Admin Dashboard</title>
+  <title>APReferral · Admin Dashboard</title>
   <link rel="stylesheet" href="/static/admin-dashboard.css" />
 </head>
 <body>
@@ -27,8 +27,8 @@
       <div class="topbar">
         <h1 id="view-title">Executive Summary</h1>
         <div class="right">
-          <span class="admin-chip" id="admin-chip">â€¦</span>
-          <button class="btn" id="refresh-btn">â†» Refresh</button>
+          <span class="admin-chip" id="admin-chip">…</span>
+          <button class="btn" id="refresh-btn">↻ Refresh</button>
           <button class="btn" id="logout-btn">Logout</button>
         </div>
       </div>
@@ -90,7 +90,7 @@
         </div>
         <div class="card-grid" id="cards-voucher-summary"></div>
         <div class="section-title">Campaigns</div>
-        <input class="filter-input" id="vouchers-filter" placeholder="Filter campaigns by name / statusâ€¦" />
+        <input class="filter-input" id="vouchers-filter" placeholder="Filter campaigns by name / status…" />
         <div id="vouchers-body"></div>
       </section>
 
@@ -107,7 +107,7 @@
         </div>
         <div class="card-grid" id="cards-referrals-summary"></div>
         <div class="section-title">Top Referrers</div>
-        <input class="filter-input" id="referrals-filter" placeholder="Filter by referrer id / usernameâ€¦" />
+        <input class="filter-input" id="referrals-filter" placeholder="Filter by referrer id / username…" />
         <div id="referrals-body"></div>
       </section>
 
@@ -117,13 +117,14 @@
         <div class="section-title">Pool Availability &amp; Monthly Issuance</div>
         <div id="affiliate-pools"></div>
         <div class="section-title">Affiliates</div>
-        <input class="filter-input" id="affiliate-filter" placeholder="Filter by user id / tier / statusâ€¦" />
+        <input class="filter-input" id="affiliate-filter" placeholder="Filter by user id / tier / status…" />
         <div id="affiliate-body"></div>
       </section>
 
       <!-- REACTIVATION VIEW -->
       <section id="view-reactivation" class="hidden">
         <div class="controls" style="margin-bottom:16px;">
+          <input class="filter-input" id="reactivation-per-run-limit" type="number" min="1" max="1000" value="100" style="max-width:160px;margin:0;" />
           <button class="btn primary" id="reactivation-start-btn">Start Campaign</button>
           <button class="btn" id="reactivation-pause-btn">Pause Campaign</button>
           <span class="admin-chip" id="reactivation-status">...</span>
@@ -136,14 +137,14 @@
       <section id="view-audit" class="hidden">
         <div class="card-grid" id="cards-audit-summary"></div>
         <div class="section-title">Audit Trail</div>
-        <input class="filter-input" id="audit-filter" placeholder="Filter by actor / action / resultâ€¦" />
+        <input class="filter-input" id="audit-filter" placeholder="Filter by actor / action / result…" />
         <div id="audit-body"></div>
       </section>
 
       <!-- USER DRILLDOWN VIEW -->
       <section id="view-users" class="hidden">
         <div class="controls" style="margin-bottom:16px;">
-          <input class="filter-input" id="user-search" placeholder="Search Telegram user_id or usernameâ€¦" style="max-width:340px;margin:0;" />
+          <input class="filter-input" id="user-search" placeholder="Search Telegram user_id or username…" style="max-width:340px;margin:0;" />
           <button class="btn primary" id="user-search-btn">Search</button>
         </div>
         <div id="user-body"><div class="empty">Search by Telegram user_id or username to view a user profile.</div></div>
