@@ -24,6 +24,7 @@ VERIFY_CALLBACK_DATA = "reactivate_verify"
 REWARD_XP = int(os.getenv("CHANNEL_REACTIVATION_REWARD_XP", "50"))
 DAILY_SEND_LIMIT = int(os.getenv("CHANNEL_REACTIVATION_DAILY_LIMIT", "1000"))
 MINUTE_SEND_LIMIT = int(os.getenv("CHANNEL_REACTIVATION_MINUTE_LIMIT", "20"))
+MAX_PER_RUN_LIMIT = int(os.getenv("CHANNEL_REACTIVATION_MAX_PER_RUN_LIMIT", "1000"))
 REWARD_HOLD_HOURS = int(os.getenv("CHANNEL_REACTIVATION_REWARD_HOLD_HOURS", "72"))
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 OFFICIAL_CHANNEL_USERNAME = os.getenv("OFFICIAL_CHANNEL_USERNAME", "@advantplayofficial")
@@ -68,16 +69,27 @@ def ensure_channel_reactivation_indexes(db) -> None:
     _rewards(db).create_index([("campaign_id", 1), ("rewarded_at", -1)], name="reactivation_rewards_rewarded")
 
 
-def set_campaign_active(db, active: bool, *, actor: str = "admin") -> dict:
+def _coerce_per_run_limit(value, *, default: int | None = None) -> int:
+    try:
+        limit = int(value)
+    except (TypeError, ValueError):
+        limit = int(default or MINUTE_SEND_LIMIT)
+    return max(1, min(limit, MAX_PER_RUN_LIMIT))
+
+
+def set_campaign_active(db, active: bool, *, actor: str = "admin", per_run_limit: int | None = None) -> dict:
     ts = now_utc()
+    set_fields = {
+        "active": bool(active),
+        "updated_at": ts,
+        "updated_by": actor,
+    }
+    if per_run_limit is not None:
+        set_fields["per_run_limit"] = _coerce_per_run_limit(per_run_limit)
     _campaigns(db).update_one(
         {"_id": CAMPAIGN_ID},
         {
-            "$set": {
-                "active": bool(active),
-                "updated_at": ts,
-                "updated_by": actor,
-            },
+            "$set": set_fields,
             "$setOnInsert": {
                 "_id": CAMPAIGN_ID,
                 "created_at": ts,
@@ -153,6 +165,8 @@ def campaign_summary(db) -> dict:
         "skipped_already_subscribed": int(skipped_subscribed),
         "daily_limit": DAILY_SEND_LIMIT,
         "minute_limit": MINUTE_SEND_LIMIT,
+        "per_run_limit": _coerce_per_run_limit(campaign.get("per_run_limit"), default=MINUTE_SEND_LIMIT),
+        "max_per_run_limit": MAX_PER_RUN_LIMIT,
         "reward_hold_hours": REWARD_HOLD_HOURS,
         "updated_at": campaign.get("updated_at"),
     }
@@ -279,10 +293,19 @@ def process_reactivation_campaign(
         return stats
     checker = membership_checker or check_official_channel_subscribed
     sender = send_fn or send_reactivation_dm
+    campaign_doc = _campaigns(db_ref).find_one({"_id": CAMPAIGN_ID}, {"per_run_limit": 1}) or {}
+    stored_limit = campaign_doc.get("per_run_limit")
+    if stored_limit is not None:
+        configured_limit = batch_limit if batch_limit is not None else stored_limit
+    elif batch_limit is not None:
+        configured_limit = min(int(batch_limit), MINUTE_SEND_LIMIT)
+    else:
+        configured_limit = MINUTE_SEND_LIMIT
     today = _day_key(ts)
     sent_today = _messages(db_ref).count_documents({"campaign_id": CAMPAIGN_ID, "status": "sent", "sent_day": today})
     remaining_today = max(0, DAILY_SEND_LIMIT - int(sent_today))
-    per_run_limit = min(int(batch_limit or MINUTE_SEND_LIMIT), MINUTE_SEND_LIMIT, remaining_today)
+    per_run_limit = min(_coerce_per_run_limit(configured_limit, default=MINUTE_SEND_LIMIT), remaining_today)
+    stats["per_run_limit"] = per_run_limit
     if per_run_limit <= 0:
         stats["daily_limit_reached"] = True
         return stats
