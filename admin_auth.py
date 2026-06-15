@@ -332,7 +332,7 @@ def _admin_api_authorized() -> bool:
         return False
 
 
-def _reactivation_payload(active: bool | None = None):
+def _reactivation_payload(active: bool | None = None, *, per_run_limit=None):
     from channel_reactivation import (
         campaign_summary,
         ensure_channel_reactivation_indexes,
@@ -343,7 +343,7 @@ def _reactivation_payload(active: bool | None = None):
     ensure_channel_reactivation_indexes(db)
     if active is None:
         return campaign_summary(db)
-    return set_campaign_active(db, active, actor="admin")
+    return set_campaign_active(db, active, actor="admin", per_run_limit=per_run_limit)
 
 
 @admin_auth_bp.get("/api/admin/channel-reactivation/summary")
@@ -357,7 +357,14 @@ def admin_channel_reactivation_summary():
 def admin_channel_reactivation_start():
     if not _admin_api_authorized():
         return jsonify({"success": False, "message": "Admins only"}), 403
-    return jsonify(_reactivation_payload(True))
+    payload = request.get_json(silent=True) or {}
+    summary = _reactivation_payload(True, per_run_limit=payload.get("per_run_limit"))
+    logger.info(
+        "[CHANNEL_REACTIVATION] campaign_started actor=admin per_run_limit=%s max_per_run_limit=%s",
+        summary.get("per_run_limit"),
+        summary.get("max_per_run_limit"),
+    )
+    return jsonify(summary)
 
 
 @admin_auth_bp.post("/api/admin/channel-reactivation/pause")
