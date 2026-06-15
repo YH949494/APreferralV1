@@ -1,0 +1,1113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>AdvantPlay — Redesign Preview</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Syne:wght@600;700;800&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --orange:       #ff5e00;
+      --orange-glow:  rgba(255, 94, 0, 0.22);
+      --orange-dim:   rgba(255, 94, 0, 0.12);
+      --gold:         #f5c518;
+      --gold-dim:     rgba(245, 197, 24, 0.14);
+      --green:        #4fd88a;
+      --green-dim:    rgba(79, 216, 138, 0.14);
+      --bg:           #0d0d0f;
+      --bg-card:      #16161b;
+      --bg-card2:     #1e1e25;
+      --bg-nav:       #111116;
+      --text:         #f0eee8;
+      --text-muted:   #8c8880;
+      --text-soft:    #5a5650;
+      --border:       rgba(255,255,255,0.07);
+      --border-glow:  rgba(255,94,0,0.28);
+      --r-sm: 10px;
+      --r-md: 16px;
+      --r-lg: 22px;
+      --r-xl: 28px;
+      --font-d: "Syne", sans-serif;
+      --font-b: "DM Sans", sans-serif;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: var(--font-b);
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100dvh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+
+    /* ── Phone frame ── */
+    .phone {
+      width: 375px;
+      height: 720px;
+      background: var(--bg);
+      border-radius: 44px;
+      overflow: hidden;
+      position: relative;
+      box-shadow: 0 0 0 1px rgba(255,255,255,0.08),
+                  0 40px 80px rgba(0,0,0,0.7),
+                  0 0 60px var(--orange-glow);
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* ── Screens ── */
+    .screen {
+      position: absolute;
+      inset: 0;
+      bottom: 70px;
+      overflow-y: auto;
+      display: none;
+      flex-direction: column;
+      scrollbar-width: none;
+    }
+    .screen::-webkit-scrollbar { display: none; }
+    .screen.active { display: flex; }
+
+    /* ── Background glow ── */
+    .bg-glow {
+      position: absolute;
+      top: -60px; left: 50%;
+      transform: translateX(-50%);
+      width: 320px; height: 320px;
+      background: radial-gradient(circle, var(--orange-glow) 0%, transparent 70%);
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    /* ── Bottom nav ── */
+    .nav {
+      position: absolute;
+      bottom: 0; left: 0; right: 0;
+      height: 70px;
+      background: var(--bg-nav);
+      border-top: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-around;
+      padding: 0 8px;
+      padding-bottom: env(safe-area-inset-bottom, 0);
+      z-index: 100;
+    }
+
+    .nav-btn {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 4px;
+      padding: 10px 4px;
+      cursor: pointer;
+      transition: all .2s;
+      border-radius: var(--r-sm);
+      position: relative;
+    }
+
+    .nav-btn .nav-icon {
+      font-size: 22px;
+      line-height: 1;
+      transition: transform .2s;
+    }
+
+    .nav-btn .nav-label {
+      font-size: 10px;
+      font-weight: 600;
+      color: var(--text-muted);
+      transition: color .2s;
+      letter-spacing: 0.3px;
+    }
+
+    .nav-btn.active .nav-label { color: var(--orange); }
+    .nav-btn.active .nav-icon { transform: scale(1.12); }
+
+    .nav-btn.active::before {
+      content: '';
+      position: absolute;
+      top: 0; left: 50%;
+      transform: translateX(-50%);
+      width: 32px; height: 3px;
+      background: var(--orange);
+      border-radius: 0 0 4px 4px;
+    }
+
+    /* ── Shared layout ── */
+    .screen-inner {
+      padding: 20px 16px 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+      position: relative;
+      z-index: 1;
+    }
+
+    .page-title {
+      font-family: var(--font-d);
+      font-size: 22px;
+      font-weight: 800;
+      letter-spacing: -0.4px;
+    }
+
+    /* ── Cards ── */
+    .card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--r-lg);
+      padding: 18px;
+    }
+
+    .card.glow {
+      border-color: var(--border-glow);
+      box-shadow: 0 0 24px var(--orange-dim), inset 0 1px 0 rgba(255,255,255,0.05);
+    }
+
+    /* ── Buttons ── */
+    .btn {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      padding: 14px 20px;
+      border-radius: var(--r-md);
+      font-family: var(--font-b);
+      font-weight: 700;
+      font-size: 15px;
+      cursor: pointer;
+      border: none;
+      transition: all .18s;
+      width: 100%;
+    }
+
+    .btn-primary {
+      background: linear-gradient(135deg, #ff7b2f, #ff5e00);
+      color: #fff;
+      box-shadow: 0 6px 24px rgba(255,94,0,0.38);
+    }
+
+    .btn-primary:active { transform: scale(0.97); }
+
+    .btn-ghost {
+      background: transparent;
+      border: 1.5px solid var(--border-glow);
+      color: var(--orange);
+    }
+
+    .btn-sm {
+      padding: 9px 16px;
+      font-size: 13px;
+      border-radius: var(--r-sm);
+      width: auto;
+    }
+
+    /* ── Tags / Pills ── */
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      padding: 4px 10px;
+      border-radius: 20px;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.4px;
+    }
+
+    .pill-orange { background: var(--orange-dim); color: var(--orange); border: 1px solid var(--border-glow); }
+    .pill-gold   { background: var(--gold-dim);   color: var(--gold);   border: 1px solid rgba(245,197,24,0.28); }
+    .pill-green  { background: var(--green-dim);  color: var(--green);  border: 1px solid rgba(79,216,138,0.28); }
+
+    /* ── Progress bar ── */
+    .progress-track {
+      height: 6px;
+      background: rgba(255,255,255,0.07);
+      border-radius: 6px;
+      overflow: hidden;
+    }
+    .progress-fill {
+      height: 100%;
+      border-radius: 6px;
+      background: linear-gradient(90deg, #ff5e00, #ff7b2f);
+      box-shadow: 0 0 8px var(--orange-glow);
+    }
+
+    /* ── Divider ── */
+    .divider {
+      height: 1px;
+      background: var(--border);
+      margin: 4px 0;
+    }
+
+    /* ── Tab switcher ── */
+    .tab-row {
+      display: flex;
+      gap: 6px;
+      background: rgba(255,255,255,0.04);
+      border-radius: var(--r-sm);
+      padding: 4px;
+    }
+
+    .tab {
+      flex: 1;
+      text-align: center;
+      padding: 8px 0;
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text-muted);
+      border-radius: 8px;
+      cursor: pointer;
+      transition: all .2s;
+    }
+
+    .tab.active {
+      background: var(--bg-card2);
+      color: var(--text);
+      box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+    }
+
+    /* ── Stat row ── */
+    .stat-row {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 10px;
+    }
+
+    .stat-box {
+      background: var(--bg-card2);
+      border: 1px solid var(--border);
+      border-radius: var(--r-md);
+      padding: 14px 10px;
+      text-align: center;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .stat-val {
+      font-family: var(--font-d);
+      font-size: 20px;
+      font-weight: 800;
+      color: var(--text);
+    }
+
+    .stat-lbl {
+      font-size: 11px;
+      color: var(--text-muted);
+      font-weight: 500;
+    }
+
+    /* ──────────────────────────── HOME SCREEN ──────────────────────────── */
+
+    .user-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 2px;
+    }
+
+    .avatar {
+      width: 40px; height: 40px;
+      border-radius: 50%;
+      background: linear-gradient(135deg, #ff5e00, #c43c00);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 18px;
+    }
+
+    .user-info { display: flex; align-items: center; gap: 10px; }
+
+    .user-name {
+      font-family: var(--font-d);
+      font-size: 16px;
+      font-weight: 700;
+    }
+
+    .user-sub {
+      font-size: 12px;
+      color: var(--text-muted);
+      margin-top: 1px;
+    }
+
+    /* Hero card */
+    .hero-card {
+      background: linear-gradient(135deg, #1a1008, #17120a);
+      border: 1px solid var(--border-glow);
+      border-radius: var(--r-xl);
+      padding: 22px 20px;
+      position: relative;
+      overflow: hidden;
+      box-shadow: 0 12px 40px rgba(255,94,0,0.18);
+    }
+
+    .hero-card::before {
+      content: '';
+      position: absolute;
+      top: -40px; right: -40px;
+      width: 180px; height: 180px;
+      background: radial-gradient(circle, rgba(255,94,0,0.2) 0%, transparent 70%);
+      pointer-events: none;
+    }
+
+    .hero-label {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text-muted);
+      letter-spacing: 1px;
+      text-transform: uppercase;
+      margin-bottom: 6px;
+    }
+
+    .hero-streak {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 16px;
+    }
+
+    .flame {
+      font-size: 34px;
+      line-height: 1;
+      filter: drop-shadow(0 0 8px rgba(255,150,0,0.6));
+    }
+
+    .streak-num {
+      font-family: var(--font-d);
+      font-size: 38px;
+      font-weight: 800;
+      color: var(--orange);
+      line-height: 1;
+    }
+
+    .streak-text {
+      display: flex;
+      flex-direction: column;
+    }
+
+    .streak-days {
+      font-size: 13px;
+      color: var(--text-muted);
+      font-weight: 500;
+    }
+
+    .xp-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 8px;
+    }
+
+    .xp-label { font-size: 13px; color: var(--text-muted); }
+    .xp-val { font-family: var(--font-d); font-size: 15px; font-weight: 700; color: var(--gold); }
+
+    /* Daily game card */
+    .daily-card {
+      background: var(--bg-card2);
+      border: 1px solid var(--border);
+      border-radius: var(--r-lg);
+      padding: 16px;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+
+    .daily-icon {
+      width: 46px; height: 46px;
+      border-radius: var(--r-sm);
+      background: linear-gradient(135deg, #1a1a2e, #252540);
+      border: 1px solid rgba(255,255,255,0.08);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 22px;
+      flex-shrink: 0;
+    }
+
+    .daily-title { font-size: 14px; font-weight: 600; margin-bottom: 4px; }
+    .daily-sub { font-size: 12px; color: var(--text-muted); }
+
+    /* ──────────────────────────── REWARDS SCREEN ──────────────────────────── */
+
+    .voucher-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--r-lg);
+      overflow: hidden;
+    }
+
+    .voucher-top {
+      padding: 16px 18px;
+      border-bottom: 1px dashed rgba(255,255,255,0.08);
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+
+    .voucher-icon {
+      width: 44px; height: 44px;
+      border-radius: 12px;
+      background: var(--orange-dim);
+      border: 1px solid var(--border-glow);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 20px;
+      flex-shrink: 0;
+    }
+
+    .voucher-title { font-size: 15px; font-weight: 700; margin-bottom: 3px; }
+    .voucher-sub   { font-size: 12px; color: var(--text-muted); }
+
+    .voucher-bottom {
+      padding: 12px 18px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .voucher-expiry { font-size: 12px; color: var(--text-soft); }
+    .voucher-expiry span { color: var(--text-muted); font-weight: 600; }
+
+    .voucher-locked {
+      opacity: 0.5;
+    }
+
+    .voucher-locked .voucher-icon {
+      background: rgba(255,255,255,0.04);
+      border-color: var(--border);
+    }
+
+    /* ──────────────────────────── REFER SCREEN ──────────────────────────── */
+
+    .link-box {
+      background: var(--bg-card2);
+      border: 1px solid var(--border);
+      border-radius: var(--r-md);
+      padding: 12px 14px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .link-text {
+      flex: 1;
+      font-size: 13px;
+      color: var(--text-muted);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    /* Journey timeline */
+    .journey {
+      display: flex;
+      align-items: flex-start;
+      gap: 0;
+      padding: 4px 0 8px;
+    }
+
+    .journey-step {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      flex: 1;
+      position: relative;
+    }
+
+    .journey-step:not(:last-child)::after {
+      content: '';
+      position: absolute;
+      top: 14px;
+      left: calc(50% + 14px);
+      right: calc(-50% + 14px);
+      height: 2px;
+      background: var(--border);
+    }
+
+    .journey-step.done:not(:last-child)::after {
+      background: linear-gradient(90deg, var(--orange), var(--border));
+    }
+
+    .journey-dot {
+      width: 28px; height: 28px;
+      border-radius: 50%;
+      border: 2px solid var(--border);
+      background: var(--bg-card2);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 11px;
+      font-weight: 700;
+      color: var(--text-muted);
+      z-index: 1;
+      margin-bottom: 6px;
+    }
+
+    .journey-step.done .journey-dot {
+      border-color: var(--orange);
+      background: var(--orange-dim);
+      color: var(--orange);
+    }
+
+    .journey-step.current .journey-dot {
+      border-color: var(--orange);
+      background: var(--orange);
+      color: #fff;
+      box-shadow: 0 0 12px var(--orange-glow);
+    }
+
+    .journey-label { font-size: 10px; color: var(--text-muted); text-align: center; }
+    .journey-step.done .journey-label { color: var(--orange); }
+
+    .next-milestone {
+      background: var(--orange-dim);
+      border: 1px solid var(--border-glow);
+      border-radius: var(--r-md);
+      padding: 14px 16px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .milestone-text { font-size: 13px; color: var(--text-muted); margin-top: 2px; }
+    .milestone-reward { font-family: var(--font-d); font-size: 18px; font-weight: 800; color: var(--gold); }
+
+    .ref-status-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+
+    .ref-status-box {
+      background: var(--bg-card2);
+      border-radius: var(--r-md);
+      border: 1px solid var(--border);
+      padding: 14px;
+      text-align: center;
+    }
+
+    .ref-status-num {
+      font-family: var(--font-d);
+      font-size: 26px;
+      font-weight: 800;
+      margin-bottom: 4px;
+    }
+
+    /* ──────────────────────────── LEADERBOARD SCREEN ──────────────────────────── */
+
+    .podium-wrap {
+      display: flex;
+      align-items: flex-end;
+      justify-content: center;
+      gap: 8px;
+      padding: 8px 0;
+    }
+
+    .podium-item {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .podium-item.first { order: 2; }
+    .podium-item.second { order: 1; }
+    .podium-item.third { order: 3; }
+
+    .p-avatar {
+      width: 48px; height: 48px;
+      border-radius: 50%;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 20px;
+      position: relative;
+    }
+
+    .podium-item.first .p-avatar { width: 60px; height: 60px; font-size: 24px; }
+
+    .p-avatar::after {
+      content: attr(data-medal);
+      position: absolute;
+      bottom: -6px; right: -6px;
+      font-size: 16px;
+    }
+
+    .podium-item.first .p-avatar::after { font-size: 20px; }
+
+    .p-name { font-size: 12px; font-weight: 600; color: var(--text-muted); text-align: center; }
+    .p-xp   { font-size: 11px; color: var(--text-soft); }
+    .podium-item.first .p-name { font-size: 14px; color: var(--text); }
+    .podium-item.first .p-xp   { font-size: 12px; color: var(--text-muted); }
+
+    .podium-block {
+      border-radius: 10px 10px 0 0;
+      width: 80px;
+    }
+
+    .podium-item.first .podium-block { background: linear-gradient(180deg, rgba(255,94,0,0.25), rgba(255,94,0,0.08)); height: 60px; border: 1px solid var(--border-glow); border-bottom: none; width: 90px; }
+    .podium-item.second .podium-block { background: rgba(255,255,255,0.04); height: 40px; border: 1px solid var(--border); border-bottom: none; }
+    .podium-item.third .podium-block  { background: rgba(255,255,255,0.04); height: 28px; border: 1px solid var(--border); border-bottom: none; }
+
+    .rank-list { display: flex; flex-direction: column; gap: 8px; }
+
+    .rank-row {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 12px 14px;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--r-md);
+    }
+
+    .rank-num {
+      font-family: var(--font-d);
+      font-size: 15px;
+      font-weight: 800;
+      color: var(--text-soft);
+      width: 22px;
+      text-align: center;
+      flex-shrink: 0;
+    }
+
+    .rank-avatar {
+      width: 34px; height: 34px;
+      border-radius: 50%;
+      flex-shrink: 0;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 16px;
+    }
+
+    .rank-name { font-size: 14px; font-weight: 600; flex: 1; }
+    .rank-xp   { font-size: 13px; color: var(--text-muted); font-weight: 500; }
+
+    .rank-row.you {
+      border-color: var(--border-glow);
+      background: var(--orange-dim);
+    }
+
+    .rank-row.you .rank-num { color: var(--orange); }
+    .rank-row.you .rank-name { color: var(--text); }
+
+    /* Sticky you-row */
+    .you-sticky {
+      position: absolute;
+      bottom: 0; left: 0; right: 0;
+      padding: 10px 16px;
+      background: linear-gradient(to top, var(--bg) 60%, transparent);
+      pointer-events: none;
+    }
+
+    .you-sticky .rank-row {
+      pointer-events: all;
+      box-shadow: 0 -8px 24px rgba(0,0,0,0.5);
+    }
+
+    /* ── Preview note ── */
+    .preview-label {
+      position: fixed;
+      top: 12px; left: 50%;
+      transform: translateX(-50%);
+      background: rgba(255,94,0,0.15);
+      border: 1px solid var(--border-glow);
+      border-radius: 20px;
+      padding: 6px 16px;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--orange);
+      letter-spacing: 0.5px;
+      z-index: 999;
+    }
+
+    /* Screen tabs at top of leaderboard */
+    .screen-tabs {
+      display: flex;
+      gap: 8px;
+      overflow-x: auto;
+      scrollbar-width: none;
+      padding-bottom: 2px;
+    }
+
+    .screen-tab {
+      padding: 7px 16px;
+      border-radius: 20px;
+      font-size: 13px;
+      font-weight: 600;
+      white-space: nowrap;
+      cursor: pointer;
+      border: 1.5px solid var(--border);
+      color: var(--text-muted);
+      transition: all .2s;
+    }
+
+    .screen-tab.active {
+      border-color: var(--border-glow);
+      color: var(--orange);
+      background: var(--orange-dim);
+    }
+
+    /* Avatar bg colors */
+    .av-a { background: linear-gradient(135deg, #ff5e00, #c43c00); }
+    .av-b { background: linear-gradient(135deg, #4c5fdb, #2a3bad); }
+    .av-c { background: linear-gradient(135deg, #2daa6f, #196642); }
+    .av-d { background: linear-gradient(135deg, #c44bdb, #7c1e8c); }
+    .av-e { background: linear-gradient(135deg, #dba52d, #9c6c10); }
+
+    /* Section label */
+    .section-label {
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--text-muted);
+      letter-spacing: 0.8px;
+      text-transform: uppercase;
+    }
+  </style>
+</head>
+<body>
+
+<div class="preview-label">✦ REDESIGN PREVIEW</div>
+
+<div class="phone">
+
+  <!-- ── BG glow ── -->
+  <div class="bg-glow"></div>
+
+  <!-- ══════════════════════════ HOME SCREEN ══════════════════════════ -->
+  <div class="screen active" id="screen-home">
+    <div class="screen-inner">
+
+      <!-- User row -->
+      <div class="user-row">
+        <div class="user-info">
+          <div class="avatar av-a">👤</div>
+          <div>
+            <div class="user-name">Hey, Alex 👋</div>
+            <div class="user-sub">Member since Jan 2025</div>
+          </div>
+        </div>
+        <div class="pill pill-gold">⭐ Gold</div>
+      </div>
+
+      <!-- Hero streak + checkin -->
+      <div class="hero-card">
+        <div class="hero-label">DAILY STREAK</div>
+        <div class="hero-streak">
+          <div class="flame">🔥</div>
+          <div class="streak-num">7</div>
+          <div class="streak-text">
+            <div style="font-size:15px;font-weight:700;">days</div>
+            <div class="streak-days">Keep it going!</div>
+          </div>
+        </div>
+
+        <div class="xp-row">
+          <div class="xp-label">Your XP</div>
+          <div class="xp-val">⚡ 1,240</div>
+        </div>
+        <div class="progress-track" style="margin-bottom:14px;">
+          <div class="progress-fill" style="width:62%;"></div>
+        </div>
+
+        <button class="btn btn-primary">
+          ✓ Check In Today &nbsp;+50 XP
+        </button>
+      </div>
+
+      <!-- Stats row -->
+      <div class="stat-row">
+        <div class="stat-box">
+          <div class="stat-val">#12</div>
+          <div class="stat-lbl">Rank</div>
+        </div>
+        <div class="stat-box">
+          <div class="stat-val">5</div>
+          <div class="stat-lbl">Referrals</div>
+        </div>
+        <div class="stat-box">
+          <div class="stat-val" style="color:var(--gold);">1.2k</div>
+          <div class="stat-lbl">Total XP</div>
+        </div>
+      </div>
+
+      <!-- Daily game pick -->
+      <div class="section-label">Today's Pick</div>
+      <div class="daily-card">
+        <div class="daily-icon">🎰</div>
+        <div>
+          <div class="daily-title">Mega Fortune Slots</div>
+          <div class="daily-sub">High RTP today · Lucky window open</div>
+        </div>
+        <div class="pill pill-orange" style="flex-shrink:0;">🎯 Hot</div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ══════════════════════════ REWARDS SCREEN ══════════════════════════ -->
+  <div class="screen" id="screen-rewards">
+    <div class="screen-inner">
+
+      <div class="page-title">Rewards</div>
+
+      <!-- Tab filter -->
+      <div class="tab-row">
+        <div class="tab active">Campaign</div>
+        <div class="tab">Bonus</div>
+        <div class="tab">Affiliate</div>
+      </div>
+
+      <!-- Claimable voucher -->
+      <div class="voucher-card glow">
+        <div class="voucher-top">
+          <div class="voucher-icon">🎟️</div>
+          <div>
+            <div class="voucher-title">50% Off Slots</div>
+            <div class="voucher-sub">Weekend Warrior Campaign</div>
+          </div>
+          <div class="pill pill-green" style="margin-left:auto;flex-shrink:0;">✓ Eligible</div>
+        </div>
+        <div class="voucher-bottom">
+          <div class="voucher-expiry">Expires <span>2 days</span></div>
+          <button class="btn btn-primary btn-sm">Claim</button>
+        </div>
+      </div>
+
+      <!-- Claimable voucher 2 -->
+      <div class="voucher-card">
+        <div class="voucher-top">
+          <div class="voucher-icon">🃏</div>
+          <div>
+            <div class="voucher-title">$10 Free Bet</div>
+            <div class="voucher-sub">Referral Milestone Reward</div>
+          </div>
+          <div class="pill pill-gold" style="margin-left:auto;flex-shrink:0;">⭐ Gold</div>
+        </div>
+        <div class="voucher-bottom">
+          <div class="voucher-expiry">Expires <span>5 days</span></div>
+          <button class="btn btn-primary btn-sm">Claim</button>
+        </div>
+      </div>
+
+      <!-- Locked voucher -->
+      <div class="voucher-card voucher-locked">
+        <div class="voucher-top">
+          <div class="voucher-icon" style="font-size:18px;">🔒</div>
+          <div>
+            <div class="voucher-title">$25 Cashback</div>
+            <div class="voucher-sub">Reach Platinum tier to unlock</div>
+          </div>
+        </div>
+        <div class="voucher-bottom">
+          <div class="voucher-expiry">Requires <span>Platinum tier</span></div>
+          <button class="btn btn-ghost btn-sm" style="opacity:0.5;">Locked</button>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ══════════════════════════ REFER SCREEN ══════════════════════════ -->
+  <div class="screen" id="screen-refer">
+    <div class="screen-inner">
+
+      <div class="page-title">Refer Friends</div>
+
+      <!-- Link box -->
+      <div class="link-box">
+        <div class="link-text">t.me/AdvantPlayBot?start=ref_alex7</div>
+        <button class="btn btn-ghost btn-sm" style="flex-shrink:0;">Copy</button>
+      </div>
+
+      <!-- Journey -->
+      <div class="section-label">Your Journey</div>
+      <div class="card">
+        <div class="journey">
+          <div class="journey-step done">
+            <div class="journey-dot">✓</div>
+            <div class="journey-label">1</div>
+          </div>
+          <div class="journey-step done">
+            <div class="journey-dot">✓</div>
+            <div class="journey-label">3</div>
+          </div>
+          <div class="journey-step current">
+            <div class="journey-dot">5</div>
+            <div class="journey-label">Next</div>
+          </div>
+          <div class="journey-step">
+            <div class="journey-dot">10</div>
+            <div class="journey-label">10</div>
+          </div>
+          <div class="journey-step">
+            <div class="journey-dot">20</div>
+            <div class="journey-label">20</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Next milestone -->
+      <div class="next-milestone">
+        <div>
+          <div class="milestone-reward">$10 Bonus</div>
+          <div class="milestone-text">5 qualified referrals · 2 away!</div>
+        </div>
+        <div style="font-size:28px;">🎯</div>
+      </div>
+
+      <!-- Status -->
+      <div class="section-label">Referral Status</div>
+      <div class="ref-status-row">
+        <div class="ref-status-box">
+          <div class="ref-status-num" style="color:var(--gold);">2</div>
+          <div class="stat-lbl">🟡 Pending</div>
+        </div>
+        <div class="ref-status-box">
+          <div class="ref-status-num" style="color:var(--green);">3</div>
+          <div class="stat-lbl">🟢 Qualified</div>
+        </div>
+      </div>
+
+      <!-- CTAs -->
+      <button class="btn btn-primary">✈️ &nbsp;Invite on Telegram</button>
+      <button class="btn btn-ghost">Share Link</button>
+
+    </div>
+  </div>
+
+  <!-- ══════════════════════════ LEADERBOARD SCREEN ══════════════════════════ -->
+  <div class="screen" id="screen-lb" style="padding-bottom:120px;">
+    <div class="screen-inner">
+
+      <div class="page-title">Leaderboard</div>
+
+      <!-- Tabs -->
+      <div class="screen-tabs">
+        <div class="screen-tab active">XP Rank</div>
+        <div class="screen-tab">Referrals</div>
+        <div class="screen-tab">Affiliate</div>
+      </div>
+
+      <!-- Podium -->
+      <div class="podium-wrap">
+        <div class="podium-item second">
+          <div class="p-avatar av-b" data-medal="🥈">😊</div>
+          <div class="p-name">Mia</div>
+          <div class="p-xp">920 XP</div>
+          <div class="podium-block"></div>
+        </div>
+        <div class="podium-item first">
+          <div class="p-avatar av-a" data-medal="🥇">😎</div>
+          <div class="p-name">Bob</div>
+          <div class="p-xp">1,240 XP</div>
+          <div class="podium-block"></div>
+        </div>
+        <div class="podium-item third">
+          <div class="p-avatar av-c" data-medal="🥉">🙂</div>
+          <div class="p-name">Carol</div>
+          <div class="p-xp">880 XP</div>
+          <div class="podium-block"></div>
+        </div>
+      </div>
+
+      <!-- Rank list -->
+      <div class="rank-list">
+        <div class="rank-row">
+          <div class="rank-num">4</div>
+          <div class="rank-avatar av-d">😄</div>
+          <div class="rank-name">Dan</div>
+          <div class="rank-xp">750 XP</div>
+        </div>
+        <div class="rank-row">
+          <div class="rank-num">5</div>
+          <div class="rank-avatar av-e">😐</div>
+          <div class="rank-name">Eve</div>
+          <div class="rank-xp">640 XP</div>
+        </div>
+        <div class="rank-row">
+          <div class="rank-num">6</div>
+          <div class="rank-avatar av-b">🙃</div>
+          <div class="rank-name">Frank</div>
+          <div class="rank-xp">590 XP</div>
+        </div>
+        <div class="rank-row">
+          <div class="rank-num">7</div>
+          <div class="rank-avatar av-c">😑</div>
+          <div class="rank-name">Grace</div>
+          <div class="rank-xp">520 XP</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Sticky your rank -->
+    <div class="you-sticky">
+      <div class="rank-row you">
+        <div class="rank-num">#12</div>
+        <div class="rank-avatar av-a">👤</div>
+        <div class="rank-name">You (Alex)</div>
+        <div class="rank-xp" style="color:var(--orange);font-weight:700;">520 XP</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══════════════════════════ BOTTOM NAV ══════════════════════════ -->
+  <nav class="nav">
+    <div class="nav-btn active" onclick="switchTab('home', this)">
+      <div class="nav-icon">🏠</div>
+      <div class="nav-label">Home</div>
+    </div>
+    <div class="nav-btn" onclick="switchTab('rewards', this)">
+      <div class="nav-icon">🎁</div>
+      <div class="nav-label">Rewards</div>
+    </div>
+    <div class="nav-btn" onclick="switchTab('refer', this)">
+      <div class="nav-icon">🔗</div>
+      <div class="nav-label">Refer</div>
+    </div>
+    <div class="nav-btn" onclick="switchTab('lb', this)">
+      <div class="nav-icon">🏆</div>
+      <div class="nav-label">Ranks</div>
+    </div>
+  </nav>
+
+</div><!-- /phone -->
+
+<script>
+  function switchTab(name, btn) {
+    document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+    document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+    document.getElementById('screen-' + name).classList.add('active');
+    btn.classList.add('active');
+
+    // Bounce animation
+    btn.querySelector('.nav-icon').style.transform = 'scale(1.3)';
+    setTimeout(() => btn.querySelector('.nav-icon').style.transform = '', 200);
+  }
+
+  // Tab switchers inside screens
+  document.querySelectorAll('.tab-row').forEach(row => {
+    row.querySelectorAll('.tab').forEach(tab => {
+      tab.addEventListener('click', () => {
+        row.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+        tab.classList.add('active');
+      });
+    });
+  });
+
+  document.querySelectorAll('.screen-tabs').forEach(row => {
+    row.querySelectorAll('.screen-tab').forEach(tab => {
+      tab.addEventListener('click', () => {
+        row.querySelectorAll('.screen-tab').forEach(t => t.classList.remove('active'));
+        tab.classList.add('active');
+      });
+    });
+  });
+
+  // Simulate check-in button
+  const checkinBtn = document.querySelector('.btn-primary');
+  if (checkinBtn) {
+    checkinBtn.addEventListener('click', function() {
+      this.textContent = '✅ Checked In! +50 XP';
+      this.style.background = 'linear-gradient(135deg, #2daa6f, #196642)';
+      this.style.boxShadow = '0 6px 24px rgba(79,216,138,0.3)';
+    });
+  }
+</script>
+</body>
+</html>
