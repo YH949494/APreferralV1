@@ -185,8 +185,17 @@ def build_vouchers_panel(
     # ---- Campaign rows (with per-drop detail for expandable rows) ----
     rows: list[dict] = []
     status_counts = {"active": 0, "upcoming": 0, "expired": 0, "paused": 0}
+    # Include campaigns that overlap the selected window:
+    #   campaign.startsAt <= window_end  AND  campaign.endsAt >= window_start
+    # For "All Time" (window_start is None) no date filter is applied.
+    drop_query: dict = {}
+    if window_start is not None:
+        drop_query = {
+            "startsAt": {"$lte": now},
+            "endsAt": {"$gte": window_start},
+        }
     try:
-        drop_docs = list(drops_col.find({}).limit(max_campaigns))
+        drop_docs = list(drops_col.find(drop_query).limit(max_campaigns))
     except Exception as exc:  # noqa: BLE001
         errors.append(f"drops: {exc}")
         drop_docs = []
