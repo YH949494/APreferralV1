@@ -318,3 +318,50 @@ def admin_me():
             },
         }
     )
+
+
+def _admin_api_authorized() -> bool:
+    if session_admin():
+        return True
+    try:
+        from vouchers import _admin_secret_ok, _get_admin_secret
+
+        return _admin_secret_ok(_get_admin_secret(request))
+    except Exception:
+        logger.exception("[admin_login] reactivation admin auth check failed")
+        return False
+
+
+def _reactivation_payload(active: bool | None = None):
+    from channel_reactivation import (
+        campaign_summary,
+        ensure_channel_reactivation_indexes,
+        set_campaign_active,
+    )
+    from database import db
+
+    ensure_channel_reactivation_indexes(db)
+    if active is None:
+        return campaign_summary(db)
+    return set_campaign_active(db, active, actor="admin")
+
+
+@admin_auth_bp.get("/api/admin/channel-reactivation/summary")
+def admin_channel_reactivation_summary():
+    if not _admin_api_authorized():
+        return jsonify({"success": False, "message": "Admins only"}), 403
+    return jsonify(_reactivation_payload())
+
+
+@admin_auth_bp.post("/api/admin/channel-reactivation/start")
+def admin_channel_reactivation_start():
+    if not _admin_api_authorized():
+        return jsonify({"success": False, "message": "Admins only"}), 403
+    return jsonify(_reactivation_payload(True))
+
+
+@admin_auth_bp.post("/api/admin/channel-reactivation/pause")
+def admin_channel_reactivation_pause():
+    if not _admin_api_authorized():
+        return jsonify({"success": False, "message": "Admins only"}), 403
+    return jsonify(_reactivation_payload(False))
