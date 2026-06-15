@@ -32,6 +32,11 @@ OFFICIAL_CHANNEL_URL = os.getenv(
     "OFFICIAL_CHANNEL_URL",
     f"https://t.me/{OFFICIAL_CHANNEL_USERNAME.lstrip('@')}",
 )
+VERIFICATION_PENDING_MESSAGE = (
+    f"✅ Subscription verified.\n\n"
+    f"Stay subscribed for {REWARD_HOLD_HOURS} hours to receive your +{REWARD_XP} XP reward.\n\n"
+    "Stay subscribed because vouchers may show up anytime."
+)
 _RAW_OFFICIAL_CHANNEL_ID = os.getenv("OFFICIAL_CHANNEL_ID")
 try:
     OFFICIAL_CHANNEL_ID = int(_RAW_OFFICIAL_CHANNEL_ID) if _RAW_OFFICIAL_CHANNEL_ID not in (None, "") else -1002396761021
@@ -370,7 +375,7 @@ def verify_reactivation_claim(
         return {
             "success": True,
             "code": "pending",
-            "message": f"✅ Subscription verified.\n\nStay subscribed for {REWARD_HOLD_HOURS} hours to receive your +{REWARD_XP} XP reward.",
+            "message": VERIFICATION_PENDING_MESSAGE,
             "reward_due_at": existing_reward.get("reward_due_at"),
         }
     if existing_reward and existing_reward.get("status") == "cancelled":
@@ -419,7 +424,7 @@ def verify_reactivation_claim(
         return {
             "success": True,
             "code": "pending",
-            "message": f"✅ Subscription verified.\n\nStay subscribed for {REWARD_HOLD_HOURS} hours to receive your +{REWARD_XP} XP reward.",
+            "message": VERIFICATION_PENDING_MESSAGE,
         }
 
     db.users.update_one(
@@ -429,7 +434,7 @@ def verify_reactivation_claim(
     return {
         "success": True,
         "code": "pending",
-        "message": f"✅ Subscription verified.\n\nStay subscribed for {REWARD_HOLD_HOURS} hours to receive your +{REWARD_XP} XP reward.",
+        "message": VERIFICATION_PENDING_MESSAGE,
         "reward_due_at": reward_due_at,
     }
 
