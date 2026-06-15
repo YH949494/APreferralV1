@@ -125,6 +125,7 @@ def _registered_not_rewarded_filter() -> dict:
             {"reactivation_reward_claimed": {"$ne": True}},
             {"reactivation_failed_blocked_at": {"$exists": False}},
             {"reactivation_dm_sent_at": {"$exists": False}},
+            {"reactivation_skipped_subscribed_at": {"$exists": False}},
         ]
     }
 
