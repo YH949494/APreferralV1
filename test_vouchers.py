@@ -1906,6 +1906,22 @@ class PublicPoolShapingTests(unittest.TestCase):
             self.assertEqual(public_pool_probability_for_bot_segment(raw), expected)
         self.assertTrue(is_new_user_segment("New Joiner"))
 
+    def test_ghost_segment_normalizes_with_conservative_probability(self):
+        for raw in ("Ghost", "ghost", "Ghosts", "ghost_player", "ghost-user", "Ghost Users"):
+            self.assertEqual(normalize_for_bot_segment(raw), "ghost")
+            self.assertEqual(public_pool_probability_for_bot_segment(raw), 0.05)
+
+    def test_old_player_segment_normalizes_with_default_probability(self):
+        for raw in ("Old Player", "old player", "old-player", "old_player", "OldPlayer", "Old Players"):
+            self.assertEqual(normalize_for_bot_segment(raw), "old_player")
+            self.assertEqual(public_pool_probability_for_bot_segment(raw), 0.70)
+        self.assertFalse(is_new_user_segment("Old Player"))
+
+    def test_malformed_segment_labels_still_fall_back_to_unclassified(self):
+        for raw in ("   ", "???", "<<unknown>>", "ghost_train", "old_playerz"):
+            self.assertEqual(normalize_for_bot_segment(raw), "unclassified")
+            self.assertEqual(public_pool_probability_for_bot_segment(raw), 0.70)
+
     def test_assign_public_pool_access_once_uses_for_bot_segment_probability(self):
         import vouchers as m
 

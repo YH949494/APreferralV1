@@ -22,6 +22,13 @@ BOT_SEGMENT_PROBABILITY_MAP = {
     "voucher_hunter": 0.10,
     "welcome_abuse": 0.05,
     "multi_account": 0.05,
+    # Ghost: no after-campaign play/withdrawal signal — reactivation-only,
+    # conservative default so public-pool exposure stays low until UIM
+    # reports renewed activity.
+    "ghost": 0.05,
+    # Old Player: UIM hasn't defined a different rule for this bucket yet,
+    # so it stays at the same default as the other "normal" segments.
+    "old_player": BOT_SEGMENT_DEFAULT_PROBABILITY,
     "unclassified": BOT_SEGMENT_DEFAULT_PROBABILITY,
 }
 
@@ -51,6 +58,15 @@ _BOT_SEGMENT_ALIASES = {
     "multi_accounts": "multi_account",
     "multiple_account": "multi_account",
     "multiple_accounts": "multi_account",
+    "ghosts": "ghost",
+    "ghost_player": "ghost",
+    "ghost_players": "ghost",
+    "ghost_user": "ghost",
+    "ghost_users": "ghost",
+    "oldplayer": "old_player",
+    "old_players": "old_player",
+    "old_user": "old_player",
+    "old_users": "old_player",
     "unclassed": "unclassified",
     "unknown": "unclassified",
     "na": "unclassified",

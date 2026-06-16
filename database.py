@@ -144,6 +144,8 @@ def ensure_indexes() -> None:
     )
     db_ref["segment_snapshots"].create_index([("snapshot_month", ASCENDING)])
 
+    db_ref["user_claim_risk_history"].create_index([("user_id", ASCENDING), ("synced_at", ASCENDING)])
+
     db_ref["monthly_xp_history"].create_index([("user_id", ASCENDING), ("month", ASCENDING)], unique=True)
     db_ref["monthly_xp_history"].create_index([("month", ASCENDING)])
 
@@ -175,6 +177,7 @@ users_collection = get_collection("users")
 
 user_snapshots_col = get_collection("user_snapshots")
 segment_snapshots_col = get_collection("segment_snapshots")
+user_claim_risk_history_col = get_collection("user_claim_risk_history")
                                 
 monthly_xp_history_collection = get_collection("monthly_xp_history")                          
 
