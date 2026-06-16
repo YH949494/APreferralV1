@@ -1341,6 +1341,62 @@ def _validation_compare(uim_value: Any, backend_value: Any) -> tuple[float | Non
     return float(difference), difference_pct, status
 
 
+def _validation_metric_gap(metric_key: str) -> dict | None:
+    """Phase 5B gap/mapping summary for one validation metric, or ``None``
+    if this metric hasn't been documented yet (see ``uim_kpi_mapping.py``).
+    Lets the Validation page explain *why* a metric is missing/mismatched
+    instead of just showing a red/gray status with no context.
+    """
+    from uim_kpi_mapping import get_kpi_mapping_by_key
+
+    entry = get_kpi_mapping_by_key(metric_key)
+    if entry is None:
+        return None
+    return {
+        "implementation_status": entry["implementation_status"],
+        "backend_gap": entry["backend_gap"],
+        "source_tab": entry["source_tab"],
+        "confirmed": entry["confirmed"],
+    }
+
+
+def build_kpi_gap_report_panel(*, now: datetime | None = None) -> dict:
+    """Phase 5B: read-only UIM formula mapping / backend KPI gap report.
+
+    Documents, per UIM KPI, how UIM defines the metric, which sheet tab/
+    columns it should come from, what (if anything) the backend currently
+    uses in its place, and the resulting gap. Pure documentation — computes
+    nothing live, touches no collections, and is safe to call with no DB at
+    all (used by the admin dashboard's "Validation" page to explain why a
+    metric is red/gray).
+    """
+    from uim_kpi_mapping import get_kpi_mapping
+
+    now = now or _utc_now()
+    mapping = get_kpi_mapping()
+    status_counts: dict[str, int] = {}
+    for entry in mapping:
+        status_counts[entry["implementation_status"]] = (
+            status_counts.get(entry["implementation_status"], 0) + 1
+        )
+    return {
+        "success": True,
+        "generated_at": now.isoformat(),
+        "data_source": (
+            "Phase 5B diagnostic mapping — documents intended UIM formulas "
+            "and backend gaps; read only, no live computation"
+        ),
+        "summary": {
+            "total_kpis_documented": len(mapping),
+            "exact_available": status_counts.get("exact_available", 0),
+            "backend_missing": status_counts.get("backend_missing", 0),
+            "definition_mismatch": status_counts.get("definition_mismatch", 0),
+            "source_missing": status_counts.get("source_missing", 0),
+        },
+        "kpis": mapping,
+    }
+
+
 def build_validation_panel(
     *,
     users_col,
@@ -1383,6 +1439,7 @@ def build_validation_panel(
                 "difference_pct": difference_pct,
                 "status": status,
                 "uim_note": uim_notes.get(key),
+                "gap": _validation_metric_gap(key),
             }
         )
 

@@ -687,15 +687,19 @@
 
         var rows = (d.metrics || []).map(function (m) {
           var statusClass = m.status === "green" ? "ok" : m.status === "yellow" ? "neutral" : m.status === "red" ? "rejected" : "neutral";
+          var gapText = m.gap
+            ? "[" + m.gap.implementation_status + "] " + m.gap.backend_gap
+            : (m.status === "gray" || m.status === "red" ? "Not yet documented (Phase 5B)" : "");
           return "<tr><td>" + esc(m.metric) + "</td>" +
             '<td class="num">' + (m.uim_value === null || m.uim_value === undefined ? "—" : fmt(m.uim_value)) + "</td>" +
             '<td class="num">' + (m.backend_value === null || m.backend_value === undefined ? "—" : fmt(m.backend_value)) + "</td>" +
             '<td class="num">' + (m.difference === null || m.difference === undefined ? "—" : fmt(m.difference)) + "</td>" +
             '<td class="num">' + (m.difference_pct === null || m.difference_pct === undefined ? "—" : fmt(m.difference_pct) + "%") + "</td>" +
-            '<td><span class="pill ' + statusClass + '">' + (VALIDATION_STATUS_LABEL[m.status] || m.status) + "</span></td></tr>";
+            '<td><span class="pill ' + statusClass + '">' + (VALIDATION_STATUS_LABEL[m.status] || m.status) + "</span></td>" +
+            '<td style="max-width:360px;font-size:12px;color:var(--muted,#888);">' + esc(gapText) + "</td></tr>";
         }).join("");
         $("#validation-body").innerHTML = rows
-          ? '<table class="mini-table"><thead><tr><th>Metric</th><th class="num">UIM Value</th><th class="num">Backend Value</th><th class="num">Difference</th><th class="num">Difference %</th><th>Status</th></tr></thead><tbody>' + rows + "</tbody></table>"
+          ? '<table class="mini-table"><thead><tr><th>Metric</th><th class="num">UIM Value</th><th class="num">Backend Value</th><th class="num">Difference</th><th class="num">Difference %</th><th>Status</th><th>Gap / Why</th></tr></thead><tbody>' + rows + "</tbody></table>"
           : '<div class="empty">No metrics to compare.</div>';
 
         if (d.partial_errors) banner("Some validation metrics degraded: " + d.partial_errors.join("; "), "warn");
