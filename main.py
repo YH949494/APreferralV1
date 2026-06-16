@@ -2584,6 +2584,31 @@ def _dashboard_dt(value):
     return value.isoformat() if isinstance(value, datetime) else None
 
 
+_ADMIN_DASHBOARD_WINDOWS = {"7d": 7, "30d": 30, "all": None}
+_DEFAULT_ADMIN_DASHBOARD_WINDOW = "7d"
+
+
+def _normalize_admin_dashboard_window(window):
+    value = str(window or _DEFAULT_ADMIN_DASHBOARD_WINDOW).strip().lower()
+    return value if value in _ADMIN_DASHBOARD_WINDOWS else _DEFAULT_ADMIN_DASHBOARD_WINDOW
+
+
+def _admin_dashboard_window_start(window, now):
+    window = _normalize_admin_dashboard_window(window)
+    days = _ADMIN_DASHBOARD_WINDOWS[window]
+    return None if days is None else now - timedelta(days=days)
+
+
+def _admin_dashboard_window_label(window):
+    return {"7d": "last 7 days", "30d": "last 30 days", "all": "all time"}[
+        _normalize_admin_dashboard_window(window)
+    ]
+
+
+def _admin_dashboard_time_filter(field, window_start):
+    return {} if window_start is None else {field: {"$gte": window_start}}
+
+
 @admin_bp.get("/api/admin/dashboard/summary")
 def dashboard_summary():
     ok, err = require_admin_from_query()
@@ -2591,7 +2616,9 @@ def dashboard_summary():
         msg, code = err
         return jsonify({"success": False, "message": msg}), code
 
-    cached = _dashboard_cache_get("summary")
+    window = _normalize_admin_dashboard_window(request.args.get("window"))
+    cache_key = f"summary:{window}"
+    cached = _dashboard_cache_get(cache_key)
     if cached is not None and request.args.get("refresh") != "1":
         return jsonify(cached)
 
@@ -2599,6 +2626,7 @@ def dashboard_summary():
     today_start = _utc_today_start(now)
     d7 = now - timedelta(days=7)
     d30 = now - timedelta(days=30)
+    window_start = _admin_dashboard_window_start(window, now)
     month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 
     sessions = db["miniapp_sessions_daily"]
@@ -2647,32 +2675,60 @@ def dashboard_summary():
     active_today = grab(lambda: len(sessions.distinct("user_id", {"date_utc": _date_str(now.date())})))
     active_7d = grab(lambda: _active_since(6))
     active_30d = grab(lambda: _active_since(29))
+    active_selected = grab(
+        lambda: len(
+            sessions.distinct(
+                "user_id",
+                {} if window_start is None else {"date_utc": {"$gte": _date_str(window_start.date())}},
+            )
+        )
+    )
 
     # ---- Community (check-ins) ----
     checkins_today = grab(lambda: xp_events_collection.count_documents({"type": "checkin", "created_at": {"$gte": today_start}}))
     checkins_7d = grab(lambda: xp_events_collection.count_documents({"type": "checkin", "created_at": {"$gte": d7}}))
+    checkins_selected = grab(
+        lambda: xp_events_collection.count_documents(
+            {"type": "checkin", **_admin_dashboard_time_filter("created_at", window_start)}
+        )
+    )
 
     # ---- Referrals ----
-    pending_referrals = grab(lambda: pending_referrals_collection.count_documents({"status": {"$in": ["pending", "pending_channel", "processing"]}}))
+    referral_window = _admin_dashboard_time_filter("created_at_utc", window_start)
+    pending_referrals = grab(lambda: pending_referrals_collection.count_documents({**referral_window, "status": {"$in": ["pending", "pending_channel", "processing"]}}))
     qualified_total = grab(lambda: qualified_events_collection.count_documents({}))
     qualified_7d = grab(lambda: qualified_events_collection.count_documents({"qualified_at": {"$gte": d7}}))
-    revoked_referrals = grab(lambda: pending_referrals_collection.count_documents({"status": {"$in": ["revoked", "failed", "rejected", "expired"]}}))
+    qualified_selected = grab(lambda: qualified_events_collection.count_documents(_admin_dashboard_time_filter("qualified_at", window_start)))
+    revoked_referrals = grab(lambda: pending_referrals_collection.count_documents({**referral_window, "status": {"$in": ["revoked", "failed", "rejected", "expired"]}}))
 
     # ---- Vouchers ----
-    active_campaigns = grab(lambda: drops.count_documents({"status": "active"}))
+    campaign_window = {}
+    if window_start is not None:
+        campaign_window = {"startsAt": {"$lte": now}, "endsAt": {"$gte": window_start}}
+    active_campaigns = grab(lambda: drops.count_documents({"status": "active", **campaign_window}))
     claims_today = grab(lambda: claims.count_documents({"status": "claimed", "created_at": {"$gte": today_start}}))
+    claims_selected = grab(lambda: claims.count_documents({"status": "claimed", **_admin_dashboard_time_filter("claimed_at", window_start)}))
     remaining_codes = grab(lambda: vouchers.count_documents({"status": "unclaimed"}))
 
     # ---- Welcome ----
-    welcome_eligible = grab(lambda: welcome_eligibility_collection.count_documents({}))
-    welcome_claimed = grab(lambda: tickets.count_documents({"status": "claimed"}))
+    def _welcome_eligible_count():
+        if window_start is None:
+            return welcome_eligibility_collection.count_documents({})
+        ts = window_start
+        return welcome_eligibility_collection.count_documents({
+            "$or": [{"created_at": {"$gte": ts}}, {"first_seen_at": {"$gte": ts}}]
+        })
+    welcome_eligible = grab(_welcome_eligible_count)
+    welcome_claimed = grab(lambda: tickets.count_documents({"status": "claimed", **_admin_dashboard_time_filter("claimed_at", window_start)}))
     welcome_conversion = None
     if welcome_eligible and welcome_claimed is not None and welcome_eligible > 0:
         welcome_conversion = round(100.0 * welcome_claimed / welcome_eligible, 1)
 
     # ---- Affiliate ----
-    affiliate_pending = grab(lambda: affiliate_ledger_collection.count_documents({"status": {"$in": ["PENDING_REVIEW", "PENDING_MANUAL"]}}))
+    affiliate_window = _admin_dashboard_time_filter("updated_at", window_start)
+    affiliate_pending = grab(lambda: affiliate_ledger_collection.count_documents({**affiliate_window, "status": {"$in": ["PENDING_REVIEW", "PENDING_MANUAL"]}}))
     affiliate_approved_month = grab(lambda: affiliate_ledger_collection.count_documents({"status": {"$in": ["APPROVED", "ISSUED"]}, "updated_at": {"$gte": month_start}}))
+    affiliate_approved_selected = grab(lambda: affiliate_ledger_collection.count_documents({**affiliate_window, "status": {"$in": ["APPROVED", "ISSUED"]}}))
 
     # ---- System / worker health ----
     heartbeat = admin_cache_col.find_one({"_id": "snapshot_heartbeat"}, {"ts_utc": 1}) or {}
@@ -2689,6 +2745,12 @@ def dashboard_summary():
     payload = {
         "success": True,
         "as_of": now.isoformat(),
+        "generated_at": now.isoformat(),
+        "window": window,
+        "window_label": _admin_dashboard_window_label(window),
+        "window_start": window_start.isoformat() if window_start else None,
+        "window_end": now.isoformat(),
+        "data_source": "UIM",
         "cache_ttl_s": _DASHBOARD_CACHE_TTL_S,
         "users": {
             "official_channel_subscribers": official_subs["count"],
@@ -2700,22 +2762,26 @@ def dashboard_summary():
             "official_channel_id": OFFICIAL_CHANNEL_ID,
             "community_chat_id": _COMMUNITY_CHAT_ID,
             "registered": registered_users,
+            "active_selected": active_selected,
             "active_today": active_today,
             "active_7d": active_7d,
             "active_30d": active_30d,
         },
         "community": {
+            "checkins_selected": checkins_selected,
             "checkins_today": checkins_today,
             "checkins_7d": checkins_7d,
         },
         "referrals": {
             "pending": pending_referrals,
+            "qualified": qualified_selected,
             "qualified_total": qualified_total,
             "qualified_7d": qualified_7d,
             "revoked": revoked_referrals,
         },
         "vouchers": {
             "active_campaigns": active_campaigns,
+            "claims": claims_selected,
             "claims_today": claims_today,
             "remaining_codes": remaining_codes,
         },
@@ -2726,6 +2792,7 @@ def dashboard_summary():
         },
         "affiliate": {
             "pending_review": affiliate_pending,
+            "approved": affiliate_approved_selected,
             "approved_this_month": affiliate_approved_month,
         },
         "system": {
@@ -2736,7 +2803,7 @@ def dashboard_summary():
         },
         "partial_errors": errors or None,
     }
-    _dashboard_cache_set("summary", payload)
+    _dashboard_cache_set(cache_key, payload)
     return jsonify(payload)
 
 
@@ -2778,11 +2845,7 @@ def dashboard_funnel():
         msg, code = err
         return jsonify({"success": False, "message": msg}), code
 
-    window = (request.args.get("window") or "7d").strip().lower()
-    days_by_window = {"today": 1, "7d": 7, "30d": 30}
-    if window not in days_by_window:
-        window = "7d"
-    days = days_by_window[window]
+    window = _normalize_admin_dashboard_window(request.args.get("window"))
 
     cache_key = f"funnel:{window}"
     if request.args.get("refresh") != "1":
@@ -2791,10 +2854,7 @@ def dashboard_funnel():
             return jsonify(cached)
 
     now = _utc_now()
-    if window == "today":
-        start = _utc_today_start(now)
-    else:
-        start = now - timedelta(days=days)
+    start = _admin_dashboard_window_start(window, now)
 
     window_end = now
     tickets = db["welcome_tickets"]
@@ -2828,10 +2888,8 @@ def dashboard_funnel():
             out["note"] = "Stage count exceeds join cohort; query needs audit."
         return out
 
-    cohort_docs = users_collection.find(
-        {"joined_main_at": {"$gte": start}},
-        {"user_id": 1, "joined_main_at": 1},
-    )
+    cohort_query = _admin_dashboard_time_filter("joined_main_at", start)
+    cohort_docs = users_collection.find(cohort_query, {"user_id": 1, "joined_main_at": 1})
     cohort_user_ids = {
         uid for uid in (_cohort_uid((doc or {}).get("user_id")) for doc in cohort_docs)
         if uid is not None
@@ -2844,7 +2902,7 @@ def dashboard_funnel():
         users_collection.count_documents(
             {
                 "user_id": {"$in": cohort_user_id_list},
-                "first_private_interaction_at": {"$gte": start},
+                "first_private_interaction_at": {"$exists": True, "$ne": None} if start is None else {"$gte": start},
             }
         )
     ) if cohort_user_ids else 0
@@ -2857,7 +2915,7 @@ def dashboard_funnel():
                 "user_id",
                 {
                     "user_id": {"$in": cohort_user_id_list},
-                    "created_at": {"$gte": start},
+                    **_admin_dashboard_time_filter("created_at", start),
                     "$or": [
                         {"type": "checkin"},
                         {"reason": "checkin"},
@@ -2872,7 +2930,7 @@ def dashboard_funnel():
     if cohort_user_ids:
         for doc in welcome_eligibility_collection.find(
             {
-                "created_at": {"$gte": start},
+                **_admin_dashboard_time_filter("created_at", start),
                 "$or": [
                     {"uid": {"$in": cohort_user_id_list}},
                     {"user_id": {"$in": cohort_user_id_list}},
@@ -2889,7 +2947,7 @@ def dashboard_funnel():
         for doc in affiliate_ledger.find(
             {
                 "status": "ISSUED",
-                "updated_at": {"$gte": start},
+                **_admin_dashboard_time_filter("updated_at", start),
                 "user_id": {"$in": cohort_user_id_list},
                 "$or": [
                     {"ledger_type": "WELCOME"},
@@ -2907,7 +2965,7 @@ def dashboard_funnel():
                 welcome_eligibility_collection,
                 {
                     "claimed": True,
-                    "claimed_at": {"$gte": start},
+                    **_admin_dashboard_time_filter("claimed_at", start),
                     "$or": [
                         {"uid": {"$in": cohort_user_id_list}},
                         {"user_id": {"$in": cohort_user_id_list}},
@@ -2917,7 +2975,7 @@ def dashboard_funnel():
             (
                 new_joiner_claims,
                 {
-                    "claimed_at": {"$gte": start},
+                    **_admin_dashboard_time_filter("claimed_at", start),
                     "$or": [
                         {"uid": {"$in": cohort_user_id_list}},
                         {"user_id": {"$in": cohort_user_id_list}},
@@ -2928,7 +2986,7 @@ def dashboard_funnel():
                 tickets,
                 {
                     "status": "claimed",
-                    "claimed_at": {"$gte": start},
+                    **_admin_dashboard_time_filter("claimed_at", start),
                     "$or": [
                         {"uid": {"$in": cohort_user_id_list}},
                         {"user_id": {"$in": cohort_user_id_list}},
@@ -2975,9 +3033,12 @@ def dashboard_funnel():
         "success": True,
         "window": window,
         "as_of": now.isoformat(),
+        "generated_at": now.isoformat(),
+        "window_label": _admin_dashboard_window_label(window),
+        "data_source": "UIM",
         "method": "join_cohort",
         "cohort_size": join_count,
-        "window_start": start.isoformat(),
+        "window_start": start.isoformat() if start else None,
         "window_end": window_end.isoformat(),
         "stages": stages,
     }
@@ -2992,12 +3053,15 @@ def dashboard_abuse():
         msg, code = err
         return jsonify({"success": False, "message": msg}), code
 
+    window = _normalize_admin_dashboard_window(request.args.get("window"))
+    cache_key = f"abuse:{window}"
     if request.args.get("refresh") != "1":
-        cached = _dashboard_cache_get("abuse")
+        cached = _dashboard_cache_get(cache_key)
         if cached is not None:
             return jsonify(cached)
 
     now = _utc_now()
+    window_start = _admin_dashboard_window_start(window, now)
     claims = db["voucher_claims"]
     rate_limits = db["claim_rate_limits"]
     errors: list[str] = []
@@ -3006,7 +3070,7 @@ def dashboard_abuse():
     repeat_claimers = None
     try:
         agg = claims.aggregate([
-            {"$match": {"status": "claimed"}},
+            {"$match": {"status": "claimed", **_admin_dashboard_time_filter("claimed_at", window_start)}},
             {"$group": {"_id": "$user_id", "n": {"$sum": 1}}},
             {"$match": {"n": {"$gt": 1}}},
             {"$count": "c"},
@@ -3027,6 +3091,7 @@ def dashboard_abuse():
     suspicious_referrers = None
     try:
         agg = pending_referrals_collection.aggregate([
+            {"$match": _admin_dashboard_time_filter("created_at_utc", window_start)},
             {"$group": {
                 "_id": "$inviter_user_id",
                 "invited": {"$sum": 1},
@@ -3054,13 +3119,19 @@ def dashboard_abuse():
     payload = {
         "success": True,
         "as_of": now.isoformat(),
+        "generated_at": now.isoformat(),
+        "window": window,
+        "window_label": _admin_dashboard_window_label(window),
+        "window_start": window_start.isoformat() if window_start else None,
+        "window_end": now.isoformat(),
+        "data_source": "UIM",
         "metrics": {
             "repeat_claimers": {"value": repeat_claimers, "data_quality": "exact",
-                                "note": "Users with >1 successful voucher claim (all-time)."},
+                                "note": f"Users with >1 successful voucher claim ({_admin_dashboard_window_label(window)})."},
             "blocked_ips": {"value": blocked_ips, "data_quality": "exact",
                             "note": "Claim rate-limit records with an active block window."},
             "suspicious_referrers": {"value": suspicious_referrers, "data_quality": "heuristic",
-                                     "note": ">=5 invites with 0 qualified. Heuristic, not a confirmed fraud signal."},
+                                     "note": f">=5 invites with 0 qualified ({_admin_dashboard_window_label(window)}). Heuristic, not a confirmed fraud signal."},
             "voucher_hunter_count": {"value": voucher_hunter_count, "data_quality": "approx",
                                      "note": "Users labelled voucher_hunter by bot segmentation."},
             "welcome_abuse_count": {"value": welcome_abuse_count, "data_quality": "approx",
@@ -3068,7 +3139,7 @@ def dashboard_abuse():
         },
         "partial_errors": errors or None,
     }
-    _dashboard_cache_set("abuse", payload)
+    _dashboard_cache_set(cache_key, payload)
     return jsonify(payload)
 
 
@@ -3090,6 +3161,13 @@ def _panel_cached(key, builder, *, ttl_key=True):
         if cached is not None:
             return jsonify(cached)
     payload = builder()
+    generated_at = _utc_now().isoformat()
+    payload.setdefault("generated_at", payload.get("as_of") or generated_at)
+    payload.setdefault("data_source", "UIM")
+    if "window" not in payload:
+        payload.setdefault("window", "all")
+        payload.setdefault("window_label", "all time")
+        payload.setdefault("window_start", None)
     _dashboard_cache_set(key, payload)
     return jsonify(payload)
 

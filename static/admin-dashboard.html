@@ -25,7 +25,10 @@
 
     <main class="main">
       <div class="topbar">
-        <h1 id="view-title">Executive Summary</h1>
+        <div>
+          <h1 id="view-title">Executive Summary</h1>
+          <div class="note" id="dashboard-meta"></div>
+        </div>
         <div class="right">
           <span class="admin-chip" id="admin-chip">…</span>
           <button class="btn" id="refresh-btn">↻ Refresh</button>
@@ -37,6 +40,13 @@
 
       <!-- SUMMARY VIEW -->
       <section id="view-summary">
+        <div class="controls" style="margin-bottom:16px;">
+          <div class="seg" id="summary-window">
+            <button data-window="all">All Time</button>
+            <button data-window="7d" class="active">7d</button>
+            <button data-window="30d">30d</button>
+          </div>
+        </div>
         <div class="section">
           <div class="section-title">Users</div>
           <div class="card-grid" id="cards-users"></div>
@@ -63,7 +73,7 @@
       <section id="view-funnel" class="hidden">
         <div class="controls" style="margin-bottom:16px;">
           <div class="seg" id="funnel-window">
-            <button data-window="today">Today</button>
+            <button data-window="all">All Time</button>
             <button data-window="7d" class="active">7d</button>
             <button data-window="30d">30d</button>
           </div>
@@ -73,6 +83,13 @@
 
       <!-- ABUSE VIEW -->
       <section id="view-abuse" class="hidden">
+        <div class="controls" style="margin-bottom:16px;">
+          <div class="seg" id="abuse-window">
+            <button data-window="all">All Time</button>
+            <button data-window="7d" class="active">7d</button>
+            <button data-window="30d">30d</button>
+          </div>
+        </div>
         <div class="card-grid" id="cards-abuse"></div>
         <div id="abuse-notes"></div>
       </section>
@@ -82,10 +99,8 @@
         <div class="controls" style="margin-bottom:16px;">
           <div class="seg" id="vouchers-window">
             <button data-window="all">All Time</button>
-            <button data-window="today">Today</button>
             <button data-window="7d" class="active">7d</button>
             <button data-window="30d">30d</button>
-            <button data-window="90d">90d</button>
           </div>
         </div>
         <div class="card-grid" id="cards-voucher-summary"></div>

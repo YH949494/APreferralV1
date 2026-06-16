@@ -1,6 +1,6 @@
 import ast
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 
 def _load_require_admin_from_query():
@@ -164,6 +164,9 @@ class _DocCollection:
                         return False
                 elif op == "$in":
                     if value not in expected:
+                        return False
+                elif op == "$ne":
+                    if value == expected:
                         return False
                 elif op == "$exists":
                     exists = value is not None
@@ -536,6 +539,10 @@ def _run_dashboard_funnel(
             "_utc_now": lambda: now,
             "_utc_today_start": lambda ref: datetime(ref.year, ref.month, ref.day, tzinfo=timezone.utc),
             "timedelta": __import__("datetime").timedelta,
+            "_normalize_admin_dashboard_window": lambda value: value if value in {"7d", "30d", "all"} else "7d",
+            "_admin_dashboard_window_start": lambda value, ref: None if value == "all" else ref - timedelta(days=7 if value == "7d" else 30),
+            "_admin_dashboard_window_label": lambda value: {"7d": "last 7 days", "30d": "last 30 days", "all": "all time"}.get(value, "last 7 days"),
+            "_admin_dashboard_time_filter": lambda field, start: {} if start is None else {field: {"$gte": start}},
             "db": _FunnelDb(
                 welcome_tickets=welcome_tickets,
                 affiliate_ledger=affiliate_ledger,
@@ -912,3 +919,25 @@ def test_dashboard_telegram_refresh_log_strings_include_required_fields():
         "counts_keys=official_channel_subscribers,chatroom_members",
     ):
         assert expected in source
+
+
+def test_dashboard_funnel_recent_window_excludes_2025_cohort_but_all_time_includes_it():
+    users = _DocCollection(
+        [
+            {"user_id": 1, "joined_main_at": datetime(2025, 12, 31, tzinfo=timezone.utc)},
+            {"user_id": 2, "joined_main_at": datetime(2026, 6, 12, tzinfo=timezone.utc)},
+        ]
+    )
+
+    recent = _run_dashboard_funnel(users=users, window="7d")
+    all_time = _run_dashboard_funnel(users=users, window="all")
+
+    assert recent["window"] == "7d"
+    assert recent["window_start"] == datetime(2026, 6, 6, 12, 0, 0, tzinfo=timezone.utc).isoformat()
+    assert recent["generated_at"] == datetime(2026, 6, 13, 12, 0, 0, tzinfo=timezone.utc).isoformat()
+    assert recent["data_source"] == "UIM"
+    assert {stage["name"]: stage for stage in recent["stages"]}["Join Group"]["count"] == 1
+
+    assert all_time["window"] == "all"
+    assert all_time["window_start"] is None
+    assert {stage["name"]: stage for stage in all_time["stages"]}["Join Group"]["count"] == 2
