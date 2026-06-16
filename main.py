@@ -2707,11 +2707,18 @@ def dashboard_summary():
         campaign_window = {"startsAt": {"$lte": now}, "endsAt": {"$gte": window_start}}
     active_campaigns = grab(lambda: drops.count_documents({"status": "active", **campaign_window}))
     claims_today = grab(lambda: claims.count_documents({"status": "claimed", "created_at": {"$gte": today_start}}))
-    claims_selected = grab(lambda: claims.count_documents({"status": "claimed", **_admin_dashboard_time_filter("created_at", window_start)}))
+    claims_selected = grab(lambda: claims.count_documents({"status": "claimed", **_admin_dashboard_time_filter("claimed_at", window_start)}))
     remaining_codes = grab(lambda: vouchers.count_documents({"status": "unclaimed"}))
 
     # ---- Welcome ----
-    welcome_eligible = grab(lambda: welcome_eligibility_collection.count_documents(_admin_dashboard_time_filter("created_at", window_start)))
+    def _welcome_eligible_count():
+        if window_start is None:
+            return welcome_eligibility_collection.count_documents({})
+        ts = window_start
+        return welcome_eligibility_collection.count_documents({
+            "$or": [{"created_at": {"$gte": ts}}, {"first_seen_at": {"$gte": ts}}]
+        })
+    welcome_eligible = grab(_welcome_eligible_count)
     welcome_claimed = grab(lambda: tickets.count_documents({"status": "claimed", **_admin_dashboard_time_filter("claimed_at", window_start)}))
     welcome_conversion = None
     if welcome_eligible and welcome_claimed is not None and welcome_eligible > 0:
