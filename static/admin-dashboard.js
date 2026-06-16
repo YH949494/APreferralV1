@@ -713,6 +713,46 @@
       });
   }
 
+  // ---------- Backend Segment Engine (Phase 6A, shadow mode) ----------
+  function loadBackendSegmentEngine(refresh) {
+    setMeta("Loading…");
+    skeletonGrid($("#cards-bse-summary"), 4);
+    statePanel("bse-segment-body", "loading", "Loading backend segment engine snapshot…");
+    var month = ($("#bse-month") || {}).value || "";
+    var qs = [refresh ? "refresh=1" : "", month ? "month=" + encodeURIComponent(month) : ""].filter(Boolean).join("&");
+    api("/api/admin/dashboard/backend-segment-engine" + (qs ? "?" + qs : ""))
+      .then(function (d) {
+        renderMeta(d, "snapshot_month " + (d.snapshot_month || ""));
+        var s = d.summary || {};
+        $("#cards-bse-summary").innerHTML =
+          dqCard("Total Users Evaluated", { value: s.total_users_evaluated }) +
+          dqCard("Compared vs UIM", { value: s.uim_compared }) +
+          dqCard("Match Rate %", { value: s.match_rate }) +
+          dqCard("Mismatch Rate %", { value: s.mismatch_rate });
+
+        var segRows = Object.keys(d.segment_distribution || {}).sort().map(function (k) {
+          return "<tr><td>" + esc(k) + '</td><td class="num">' + fmt(d.segment_distribution[k]) + "</td></tr>";
+        }).join("");
+        $("#bse-segment-body").innerHTML = segRows
+          ? '<table class="mini-table"><thead><tr><th>Backend Segment</th><th class="num">Users</th></tr></thead><tbody>' + segRows + "</tbody></table>"
+          : '<div class="empty">No backend segment snapshots for this month yet.</div>';
+
+        var riskRows = Object.keys(d.claim_risk_distribution || {}).sort().map(function (k) {
+          return "<tr><td>" + esc(k) + '</td><td class="num">' + fmt(d.claim_risk_distribution[k]) + "</td></tr>";
+        }).join("");
+        $("#bse-claim-risk-body").innerHTML = riskRows
+          ? '<table class="mini-table"><thead><tr><th>Claim Risk Level</th><th class="num">Users</th></tr></thead><tbody>' + riskRows + "</tbody></table>"
+          : '<div class="empty">No claim risk data for this month yet.</div>';
+      })
+      .catch(function (e) {
+        if (e.message !== "unauthorized") {
+          setMeta("Failed to update");
+          $("#cards-bse-summary").innerHTML = '<div class="banner error">Failed: ' + esc(e.message) + "</div>";
+          statePanel("bse-segment-body", "banner error", "Failed: " + e.message);
+        }
+      });
+  }
+
   function loadUser(query) {
     if (!query) { setMeta(""); statePanel("user-body", "empty", "Search by Telegram user_id or username to view a user profile."); return; }
     setMeta("Loading…");
@@ -791,7 +831,7 @@
       });
   }
 
-  var VIEWS = ["summary", "funnel", "abuse", "vouchers", "referrals", "affiliate", "reactivation", "audit", "segments", "validation", "users", "settings"];
+  var VIEWS = ["summary", "funnel", "abuse", "vouchers", "referrals", "affiliate", "reactivation", "audit", "segments", "validation", "backendSegmentEngine", "users", "settings"];
   function switchView(view) {
     state.view = view;
     $all(".nav-item").forEach(function (b) { b.classList.toggle("active", b.dataset.view === view); });
@@ -800,6 +840,7 @@
       summary: "Executive Summary", funnel: "Activation Funnel", abuse: "Abuse Overview",
       vouchers: "Vouchers", referrals: "Referrals", affiliate: "Affiliate", reactivation: "Reactivation",
       audit: "Audit", segments: "Segment Overview", validation: "Data → Validation / UIM Compare",
+      backendSegmentEngine: "Data → Backend Segment Engine (Shadow Mode)",
       users: "User Drilldown", settings: "Settings (Read Only)"
     };
     $("#view-title").textContent = titles[view] || view;
@@ -818,6 +859,7 @@
     else if (state.view === "audit") loadAudit(force);
     else if (state.view === "segments") loadSegments(force);
     else if (state.view === "validation") loadValidation(force);
+    else if (state.view === "backendSegmentEngine") loadBackendSegmentEngine(force);
     else if (state.view === "users") { /* user view loads on search */ }
     else if (state.view === "settings") loadSettings(force);
   }
@@ -919,6 +961,9 @@
 
     var valApplyBtn = $("#validation-apply-btn");
     if (valApplyBtn) valApplyBtn.addEventListener("click", function () { loadValidation(true); });
+
+    var bseApplyBtn = $("#bse-apply-btn");
+    if (bseApplyBtn) bseApplyBtn.addEventListener("click", function () { loadBackendSegmentEngine(true); });
 
     var us = $("#user-search"), ub = $("#user-search-btn");
     function doUserSearch() { loadUser((us.value || "").trim()); }

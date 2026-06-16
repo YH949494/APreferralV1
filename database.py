@@ -146,6 +146,14 @@ def ensure_indexes() -> None:
 
     db_ref["user_claim_risk_history"].create_index([("user_id", ASCENDING), ("synced_at", ASCENDING)])
 
+    # Phase 6A — backend-owned segment engine, shadow mode only. Idempotent
+    # per (user_id, snapshot_month); never read by the bot, never written by
+    # bot_segment_sync/claim_risk_sync.
+    db_ref["backend_segment_snapshots"].create_index(
+        [("user_id", ASCENDING), ("snapshot_month", ASCENDING)], unique=True
+    )
+    db_ref["backend_segment_snapshots"].create_index([("snapshot_month", ASCENDING)])
+
     db_ref["monthly_xp_history"].create_index([("user_id", ASCENDING), ("month", ASCENDING)], unique=True)
     db_ref["monthly_xp_history"].create_index([("month", ASCENDING)])
 
@@ -178,6 +186,16 @@ users_collection = get_collection("users")
 user_snapshots_col = get_collection("user_snapshots")
 segment_snapshots_col = get_collection("segment_snapshots")
 user_claim_risk_history_col = get_collection("user_claim_risk_history")
+
+# Phase 6A — backend segment engine shadow output. Reference/audit only;
+# nothing in the bot reads this collection yet (see backend_segment_engine.py).
+backend_segment_snapshots_col = get_collection("backend_segment_snapshots")
+
+# Phase 6A — placeholder for Marketing's raw_data fields (after_bet_amount,
+# withdrawal_amount, is_new_player) once a dedicated ingestion/sync exists.
+# Reading this collection is best-effort: if it's empty/unpopulated, the
+# segment engine reports unclassified/low-confidence rather than guessing.
+marketing_raw_data_col = get_collection("marketing_raw_data")
                                 
 monthly_xp_history_collection = get_collection("monthly_xp_history")                          
 

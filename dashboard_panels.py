@@ -1469,6 +1469,61 @@ def build_validation_panel(
     }
 
 
+def build_backend_segment_engine_panel(*, snapshots_col, now: datetime | None = None, month: str | None = None) -> dict:
+    """Phase 6A: read-only summary of the latest ``backend_segment_snapshots``.
+
+    Shadow-mode dashboard view only — reads the snapshot collection written
+    by ``backend_segment_engine.run_shadow_segment_engine``; never queries
+    or writes ``users``, never touches segment classification, voucher
+    allocation, public-pool probability, or reward logic.
+    """
+    now = now or _utc_now()
+    month = month or f"{now.year:04d}-{now.month:02d}"
+
+    docs = list(snapshots_col.find({"snapshot_month": month}))
+
+    segment_counts: dict[str, int] = {}
+    claim_risk_counts: dict[str, int] = {}
+    matches = 0
+    mismatches = 0
+    compared = 0
+    for doc in docs:
+        segment_counts[doc.get("backend_segment", "unclassified")] = (
+            segment_counts.get(doc.get("backend_segment", "unclassified"), 0) + 1
+        )
+        claim_risk_counts[doc.get("claim_risk_level", "normal")] = (
+            claim_risk_counts.get(doc.get("claim_risk_level", "normal"), 0) + 1
+        )
+        comparison = doc.get("uim_comparison")
+        if comparison is not None:
+            compared += 1
+            if comparison.get("match"):
+                matches += 1
+            else:
+                mismatches += 1
+
+    total = len(docs)
+    return {
+        "success": True,
+        "generated_at": now.isoformat(),
+        "data_source": (
+            "Phase 6A backend segment engine — SHADOW MODE. Read-only "
+            "comparison/audit view; does not drive bot behaviour, voucher "
+            "allocation, or reward logic. UIM for_bot_segment remains the "
+            "production source of truth."
+        ),
+        "snapshot_month": month,
+        "summary": {
+            "total_users_evaluated": total,
+            "uim_compared": compared,
+            "match_rate": round(100.0 * matches / compared, 2) if compared else None,
+            "mismatch_rate": round(100.0 * mismatches / compared, 2) if compared else None,
+        },
+        "segment_distribution": segment_counts,
+        "claim_risk_distribution": claim_risk_counts,
+    }
+
+
 # ---------------------------------------------------------------------------
 # 5. User drilldown
 # ---------------------------------------------------------------------------
