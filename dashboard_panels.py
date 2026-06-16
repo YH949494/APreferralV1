@@ -1258,24 +1258,16 @@ def build_segments_panel(
 # 4b. Validation panel (UIM vs Backend) — Phase 5
 # ---------------------------------------------------------------------------
 
-# Metrics with no backend equivalent yet: shown with backend_value=None and
-# status="gray" rather than guessed at. See uim_validation.METRIC_KEYS for
-# the full ordered metric list (this set is the subset we can't compute).
-_VALIDATION_BACKEND_MISSING = {
-    "voucher_claimers",
-    "actual_players",
-    "old_players",
-    "claim_risk",
-    "campaign_quality",
-    "affiliate_quality",
-}
-
+# Only these metrics have a clear, already-existing backend equivalent
+# (total user count / existing segment counts). Everything else in
+# uim_validation.METRIC_KEYS has no backend equivalent yet and is reported
+# with backend_value=None / status="gray" rather than guessed at — in
+# particular the claim-risk tiers, welcome-abuse/farming-risk invitee
+# counts and "actual"/"old" player totals, none of which map to an
+# existing segment or query without inventing new classification rules.
 _VALIDATION_SEGMENT_METRIC_KEYS = {
     "high_value_players": ("high_value",),
-    "normal_actual_players": ("normal_actual",),
-    "low_value_players": ("low_value",),
-    "voucher_hunters": ("voucher_hunter",),
-    "new_players": ("new_user", "new_joiner"),
+    "new_player_total": ("new_user", "new_joiner"),
 }
 
 
@@ -1301,14 +1293,17 @@ def _current_segment_counts(users_col) -> dict[str, int]:
 
 
 def _compute_backend_validation_metrics(*, users_col) -> dict[str, int | None]:
-    """Backend-side values for the 12 validation metrics.
+    """Backend-side values for the UIM "dashboard" KPI metrics.
 
-    Only ``total_campaign_players`` and the five segment-derived counts are
-    computable from existing data; the rest are intentionally ``None``
-    (rendered as the "gray / missing source data" status) rather than
-    invented, per the read-only/no-new-classification constraint.
+    Only ``total_campaign_players`` and the segment-derived counts in
+    ``_VALIDATION_SEGMENT_METRIC_KEYS`` are computable from existing data;
+    every other metric in ``uim_validation.METRIC_KEYS`` is intentionally
+    ``None`` (rendered as the "gray / missing source data" status) rather
+    than invented, per the read-only/no-new-classification constraint.
     """
-    values: dict[str, int | None] = {key: None for key in _VALIDATION_BACKEND_MISSING}
+    from uim_validation import METRIC_KEYS
+
+    values: dict[str, int | None] = {key: None for key in METRIC_KEYS}
     values["total_campaign_players"] = int(users_col.count_documents({}))
     segment_counts = _current_segment_counts(users_col)
     for metric_key, segment_names in _VALIDATION_SEGMENT_METRIC_KEYS.items():
@@ -1362,6 +1357,7 @@ def build_validation_panel(
     now = now or _utc_now()
     uim_ok = bool(uim_result.get("ok"))
     uim_values: dict = uim_result.get("values") or {}
+    uim_notes: dict = uim_result.get("notes") or {}
 
     backend_values = _compute_backend_validation_metrics(users_col=users_col)
 
@@ -1380,6 +1376,7 @@ def build_validation_panel(
                 "difference": difference,
                 "difference_pct": difference_pct,
                 "status": status,
+                "uim_note": uim_notes.get(key),
             }
         )
 
@@ -1387,12 +1384,12 @@ def build_validation_panel(
         "success": True,
         "generated_at": now.isoformat(),
         "comparison_period": comparison_period,
-        "data_source": "UIM Google Sheet (KPI tab) vs backend dashboard calculations — read only",
+        "data_source": 'UIM Google Sheet "dashboard" KPI tab vs backend dashboard calculations — read only',
         "uim_source": {
             "ok": uim_ok,
             "error": uim_result.get("error"),
             "spreadsheet_id": uim_result.get("spreadsheet_id"),
-            "worksheet_gid": uim_result.get("worksheet_gid"),
+            "worksheet_title": uim_result.get("worksheet_title"),
         },
         "summary": {
             "total_metrics_compared": len(metrics),
