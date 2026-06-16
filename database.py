@@ -154,6 +154,16 @@ def ensure_indexes() -> None:
     )
     db_ref["backend_segment_snapshots"].create_index([("snapshot_month", ASCENDING)])
 
+    # Phase 2A — weekly marketing raw-data upload. dedupe_key prevents
+    # re-uploading the same weekly file from creating duplicate rows;
+    # upload_batch_id is indexed for upload-history lookups.
+    db_ref["marketing_raw_data"].create_index([("dedupe_key", ASCENDING)], unique=True)
+    db_ref["marketing_raw_data"].create_index([("upload_batch_id", ASCENDING)])
+    db_ref["marketing_raw_data"].create_index([("snapshot_week", ASCENDING)])
+
+    db_ref["marketing_upload_batches"].create_index([("upload_batch_id", ASCENDING)], unique=True)
+    db_ref["marketing_upload_batches"].create_index([("uploaded_at", ASCENDING)])
+
     db_ref["monthly_xp_history"].create_index([("user_id", ASCENDING), ("month", ASCENDING)], unique=True)
     db_ref["monthly_xp_history"].create_index([("month", ASCENDING)])
 
@@ -191,13 +201,13 @@ user_claim_risk_history_col = get_collection("user_claim_risk_history")
 # nothing in the bot reads this collection yet (see backend_segment_engine.py).
 backend_segment_snapshots_col = get_collection("backend_segment_snapshots")
 
-# Phase 6A — placeholder for Marketing's raw_data fields (after_bet_amount,
-# withdrawal_amount, is_new_player) once a dedicated ingestion/sync exists.
-# Reading this collection is best-effort: if it's empty/unpopulated, the
-# segment engine reports unclassified/low-confidence rather than guessing.
+# Phase 2A — weekly Marketing raw-data upload (data ingestion only; no
+# segment calculation, no users.bot_segment writes). See marketing_upload.py.
+# Also used by the Phase 6A backend segment engine for marketing field lookups.
 marketing_raw_data_col = get_collection("marketing_raw_data")
-                                
-monthly_xp_history_collection = get_collection("monthly_xp_history")                          
+marketing_upload_batches_col = get_collection("marketing_upload_batches")
+
+monthly_xp_history_collection = get_collection("monthly_xp_history")
 
 channel_subscription_cache = get_collection("channel_subscription_cache")
 admin_xp_cooldowns = get_collection("admin_xp_cooldowns")

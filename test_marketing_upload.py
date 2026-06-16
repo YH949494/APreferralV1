@@ -1,0 +1,334 @@
+import unittest
+from datetime import datetime, timezone
+
+from pymongo.errors import DuplicateKeyError
+
+import marketing_upload as mu
+
+
+class FakeInsertManyResult:
+    def __init__(self, inserted_ids):
+        self.inserted_ids = inserted_ids
+
+
+class FakeMarketingCollection:
+    def __init__(self):
+        self.docs = []
+        self._next_id = 1
+
+    def distinct(self, field, filt):
+        keys = filt.get(field, {}).get("$in", [])
+        existing = {d[field] for d in self.docs if field in d}
+        return [k for k in keys if k in existing]
+
+    def insert_many(self, docs, ordered=False):  # noqa: ARG002
+        inserted_ids = []
+        for doc in docs:
+            existing_keys = {d.get("dedupe_key") for d in self.docs}
+            if doc.get("dedupe_key") in existing_keys:
+                raise DuplicateKeyError("duplicate key")
+            doc = dict(doc)
+            doc["_id"] = self._next_id
+            self._next_id += 1
+            self.docs.append(doc)
+            inserted_ids.append(doc["_id"])
+        return FakeInsertManyResult(inserted_ids)
+
+
+class FakeBatchesCollection:
+    def __init__(self):
+        self.docs = []
+
+    def insert_one(self, doc):
+        self.docs.append(dict(doc))
+
+    def find(self, filt):  # noqa: ARG002
+        return list(self.docs)
+
+
+def _sorted_history(docs):
+    return sorted(docs, key=lambda d: d.get("uploaded_at"), reverse=True)
+
+
+class FakeBatchesCollectionWithSort(FakeBatchesCollection):
+    def find(self, filt):  # noqa: ARG002
+        return self
+
+
+def _csv_bytes(rows, headers=None):
+    headers = headers or ["campaign_id", "campaign_name", "account", "coupon_code"]
+    lines = [",".join(headers)]
+    for row in rows:
+        lines.append(",".join(str(row.get(h, "")) for h in headers))
+    return ("\n".join(lines)).encode("utf-8")
+
+
+NOW = datetime(2024, 5, 15, tzinfo=timezone.utc)  # ISO week 2024-W20
+
+
+class CsvImportTests(unittest.TestCase):
+    def test_basic_csv_import(self):
+        content = _csv_bytes([
+            {"campaign_id": "c1", "campaign_name": "Camp 1", "account": "acc1", "coupon_code": "X1"},
+            {"campaign_id": "c2", "campaign_name": "Camp 2", "account": "acc2", "coupon_code": "X2"},
+        ])
+        marketing_col = FakeMarketingCollection()
+        batches_col = FakeBatchesCollection()
+        summary = mu.ingest_upload(
+            content=content, file_name="weekly.csv", uploaded_by="admin",
+            now=NOW, marketing_col=marketing_col, batches_col=batches_col,
+        )
+        self.assertTrue(summary["ok"])
+        self.assertEqual(summary["rows_total"], 2)
+        self.assertEqual(summary["rows_imported"], 2)
+        self.assertEqual(summary["rows_failed"], 0)
+        self.assertEqual(summary["duplicate_rows"], 0)
+        self.assertEqual(summary["snapshot_week"], "2024-W20")
+        self.assertEqual(summary["snapshot_month"], "2024-05")
+        self.assertEqual(len(marketing_col.docs), 2)
+        self.assertEqual(len(batches_col.docs), 1)
+
+    def test_extra_columns_are_stored_verbatim(self):
+        content = _csv_bytes(
+            [{"campaign_id": "c1", "campaign_name": "Camp 1", "account": "acc1", "coupon_code": "X1", "withdraw_amount": "50"}],
+            headers=["campaign_id", "campaign_name", "account", "coupon_code", "withdraw_amount"],
+        )
+        marketing_col = FakeMarketingCollection()
+        batches_col = FakeBatchesCollection()
+        summary = mu.ingest_upload(
+            content=content, file_name="weekly.csv", uploaded_by="admin",
+            now=NOW, marketing_col=marketing_col, batches_col=batches_col,
+        )
+        self.assertTrue(summary["ok"])
+        self.assertEqual(marketing_col.docs[0]["withdraw_amount"], "50")
+
+    def test_missing_required_columns_rejected(self):
+        content = _csv_bytes([{"campaign_id": "c1"}], headers=["campaign_id"])
+        marketing_col = FakeMarketingCollection()
+        batches_col = FakeBatchesCollection()
+        summary = mu.ingest_upload(
+            content=content, file_name="weekly.csv", uploaded_by="admin",
+            now=NOW, marketing_col=marketing_col, batches_col=batches_col,
+        )
+        self.assertFalse(summary["ok"])
+        self.assertIn("missing required columns", summary["error"])
+        self.assertEqual(len(marketing_col.docs), 0)
+        self.assertEqual(len(batches_col.docs), 0)
+
+    def test_rows_with_missing_required_values_are_failed(self):
+        content = _csv_bytes([
+            {"campaign_id": "c1", "campaign_name": "Camp 1", "account": "", "coupon_code": "X1"},
+            {"campaign_id": "c2", "campaign_name": "Camp 2", "account": "acc2", "coupon_code": "X2"},
+        ])
+        marketing_col = FakeMarketingCollection()
+        batches_col = FakeBatchesCollection()
+        summary = mu.ingest_upload(
+            content=content, file_name="weekly.csv", uploaded_by="admin",
+            now=NOW, marketing_col=marketing_col, batches_col=batches_col,
+        )
+        self.assertTrue(summary["ok"])
+        self.assertEqual(summary["rows_imported"], 1)
+        self.assertEqual(summary["rows_failed"], 1)
+
+    def test_unsupported_file_type_rejected(self):
+        marketing_col = FakeMarketingCollection()
+        batches_col = FakeBatchesCollection()
+        summary = mu.ingest_upload(
+            content=b"abc", file_name="weekly.txt", uploaded_by="admin",
+            now=NOW, marketing_col=marketing_col, batches_col=batches_col,
+        )
+        self.assertFalse(summary["ok"])
+        self.assertIn("unsupported file type", summary["error"])
+
+    def test_uppercase_headers_are_matched_case_insensitively(self):
+        content = _csv_bytes(
+            [{"CAMPAIGN_ID": "c1", "CAMPAIGN_NAME": "Camp 1", "ACCOUNT": "acc1", "COUPON_CODE": "X1"}],
+            headers=["CAMPAIGN_ID", "CAMPAIGN_NAME", "ACCOUNT", "COUPON_CODE"],
+        )
+        marketing_col = FakeMarketingCollection()
+        batches_col = FakeBatchesCollection()
+        summary = mu.ingest_upload(
+            content=content, file_name="weekly.csv", uploaded_by="admin",
+            now=NOW, marketing_col=marketing_col, batches_col=batches_col,
+        )
+        self.assertTrue(summary["ok"])
+        self.assertEqual(summary["rows_imported"], 1)
+        self.assertEqual(summary["rows_failed"], 0)
+
+    def test_oversized_file_rejected(self):
+        marketing_col = FakeMarketingCollection()
+        batches_col = FakeBatchesCollection()
+        big_content = b"x" * (mu.MAX_FILE_SIZE_BYTES + 1)
+        summary = mu.ingest_upload(
+            content=big_content, file_name="weekly.csv", uploaded_by="admin",
+            now=NOW, marketing_col=marketing_col, batches_col=batches_col,
+        )
+        self.assertFalse(summary["ok"])
+        self.assertIn("exceeds maximum size", summary["error"])
+
+
+class XlsxImportTests(unittest.TestCase):
+    def _xlsx_bytes(self, headers, rows):
+        import io
+
+        import openpyxl
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.append(headers)
+        for row in rows:
+            ws.append(row)
+        buf = io.BytesIO()
+        wb.save(buf)
+        return buf.getvalue()
+
+    def test_basic_xlsx_import(self):
+        content = self._xlsx_bytes(
+            ["campaign_id", "campaign_name", "account", "coupon_code"],
+            [["c1", "Camp 1", "acc1", "X1"], ["c2", "Camp 2", "acc2", "X2"]],
+        )
+        marketing_col = FakeMarketingCollection()
+        batches_col = FakeBatchesCollection()
+        summary = mu.ingest_upload(
+            content=content, file_name="weekly.xlsx", uploaded_by="admin",
+            now=NOW, marketing_col=marketing_col, batches_col=batches_col,
+        )
+        self.assertTrue(summary["ok"])
+        self.assertEqual(summary["rows_imported"], 2)
+
+
+class DuplicatePreventionTests(unittest.TestCase):
+    def test_reuploading_same_file_same_week_does_not_duplicate(self):
+        content = _csv_bytes([
+            {"campaign_id": "c1", "campaign_name": "Camp 1", "account": "acc1", "coupon_code": "X1"},
+        ])
+        marketing_col = FakeMarketingCollection()
+        batches_col = FakeBatchesCollection()
+        first = mu.ingest_upload(
+            content=content, file_name="weekly.csv", uploaded_by="admin",
+            now=NOW, marketing_col=marketing_col, batches_col=batches_col,
+        )
+        second = mu.ingest_upload(
+            content=content, file_name="weekly.csv", uploaded_by="admin",
+            now=NOW, marketing_col=marketing_col, batches_col=batches_col,
+        )
+        self.assertTrue(first["ok"])
+        self.assertTrue(second["ok"])
+        self.assertEqual(first["rows_imported"], 1)
+        self.assertEqual(second["rows_imported"], 0)
+        self.assertEqual(second["duplicate_rows"], 1)
+        self.assertEqual(len(marketing_col.docs), 1)
+
+    def test_duplicate_rows_within_same_batch_are_not_imported_twice(self):
+        content = _csv_bytes([
+            {"campaign_id": "c1", "campaign_name": "Camp 1", "account": "acc1", "coupon_code": "X1"},
+            {"campaign_id": "c1", "campaign_name": "Camp 1", "account": "acc1", "coupon_code": "X1"},
+        ])
+        marketing_col = FakeMarketingCollection()
+        batches_col = FakeBatchesCollection()
+        summary = mu.ingest_upload(
+            content=content, file_name="weekly.csv", uploaded_by="admin",
+            now=NOW, marketing_col=marketing_col, batches_col=batches_col,
+        )
+        self.assertTrue(summary["ok"])
+        self.assertEqual(summary["rows_imported"], 1)
+        self.assertEqual(summary["duplicate_rows"], 1)
+
+    def test_different_week_creates_separate_snapshot(self):
+        content = _csv_bytes([
+            {"campaign_id": "c1", "campaign_name": "Camp 1", "account": "acc1", "coupon_code": "X1"},
+        ])
+        marketing_col = FakeMarketingCollection()
+        batches_col = FakeBatchesCollection()
+        first = mu.ingest_upload(
+            content=content, file_name="weekly.csv", uploaded_by="admin",
+            now=NOW, marketing_col=marketing_col, batches_col=batches_col,
+        )
+        next_week = datetime(2024, 5, 22, tzinfo=timezone.utc)
+        second = mu.ingest_upload(
+            content=content, file_name="weekly.csv", uploaded_by="admin",
+            now=next_week, marketing_col=marketing_col, batches_col=batches_col,
+        )
+        self.assertTrue(first["ok"])
+        self.assertTrue(second["ok"])
+        self.assertEqual(second["rows_imported"], 1)
+        self.assertEqual(second["duplicate_rows"], 0)
+        self.assertEqual(len(marketing_col.docs), 2)
+
+
+class DedupeLookupChunkingTests(unittest.TestCase):
+    def test_large_batch_chunks_existing_key_lookup(self):
+        rows = [
+            {"campaign_id": "c1", "campaign_name": "Camp 1", "account": "acc%d" % i, "coupon_code": "X%d" % i}
+            for i in range(mu._DEDUPE_LOOKUP_CHUNK_SIZE + 10)
+        ]
+        content = _csv_bytes(rows)
+        marketing_col = FakeMarketingCollection()
+        batches_col = FakeBatchesCollection()
+        calls = []
+        original_distinct = marketing_col.distinct
+
+        def counting_distinct(field, filt):
+            calls.append(len(filt.get(field, {}).get("$in", [])))
+            return original_distinct(field, filt)
+
+        marketing_col.distinct = counting_distinct
+        summary = mu.ingest_upload(
+            content=content, file_name="weekly.csv", uploaded_by="admin",
+            now=NOW, marketing_col=marketing_col, batches_col=batches_col,
+        )
+        self.assertTrue(summary["ok"])
+        self.assertEqual(summary["rows_imported"], mu._DEDUPE_LOOKUP_CHUNK_SIZE + 10)
+        self.assertGreater(len(calls), 1)
+        for n in calls:
+            self.assertLessEqual(n, mu._DEDUPE_LOOKUP_CHUNK_SIZE)
+
+
+class UploadBatchTests(unittest.TestCase):
+    def test_upload_batch_doc_created_with_expected_fields(self):
+        content = _csv_bytes([
+            {"campaign_id": "c1", "campaign_name": "Camp 1", "account": "acc1", "coupon_code": "X1"},
+        ])
+        marketing_col = FakeMarketingCollection()
+        batches_col = FakeBatchesCollection()
+        mu.ingest_upload(
+            content=content, file_name="weekly.csv", uploaded_by="admin",
+            now=NOW, marketing_col=marketing_col, batches_col=batches_col,
+        )
+        self.assertEqual(len(batches_col.docs), 1)
+        batch = batches_col.docs[0]
+        for field in ("upload_batch_id", "file_name", "snapshot_week", "snapshot_month",
+                      "rows_total", "rows_imported", "rows_failed", "duplicate_rows",
+                      "uploaded_by", "uploaded_at", "status"):
+            self.assertIn(field, batch)
+        self.assertEqual(batch["status"], "completed")
+
+
+class UploadHistoryTests(unittest.TestCase):
+    def test_get_upload_history_returns_batches(self):
+        class SortableBatches:
+            def __init__(self, docs):
+                self.docs = docs
+
+            def find(self, filt):  # noqa: ARG002
+                return self
+
+            def sort(self, field, direction):
+                self.docs = sorted(self.docs, key=lambda d: d[field], reverse=(direction < 0))
+                return self
+
+            def limit(self, n):
+                return self.docs[:n]
+
+        docs = [
+            {"upload_batch_id": "a", "uploaded_at": datetime(2024, 5, 1, tzinfo=timezone.utc)},
+            {"upload_batch_id": "b", "uploaded_at": datetime(2024, 5, 8, tzinfo=timezone.utc)},
+        ]
+        batches_col = SortableBatches(docs)
+        history = mu.get_upload_history(batches_col=batches_col, limit=10)
+        self.assertEqual(history[0]["upload_batch_id"], "b")
+        self.assertEqual(history[1]["upload_batch_id"], "a")
+
+
+if __name__ == "__main__":
+    unittest.main()
