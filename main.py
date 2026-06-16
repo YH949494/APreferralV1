@@ -3223,6 +3223,31 @@ def dashboard_validation():
     return _panel_cached("panel:validation", _build)
 
 
+@admin_bp.get("/api/admin/dashboard/backend-segment-engine")
+def dashboard_backend_segment_engine():
+    """Phase 6A: read-only summary of the shadow-mode backend segment engine.
+
+    Reads ``backend_segment_snapshots`` only — never queries or writes
+    ``users``, never touches segment classification, voucher allocation,
+    public-pool probability, or reward logic. UIM remains production truth.
+    """
+    ok, err = require_admin_from_query()
+    if not ok:
+        msg, code = err
+        return jsonify({"success": False, "message": msg}), code
+    month = request.args.get("month") or None
+    now = _utc_now()
+    cache_key = f"panel:backend_segment_engine:{month or ''}"
+    return _panel_cached(
+        cache_key,
+        lambda: _panels.build_backend_segment_engine_panel(
+            snapshots_col=db["backend_segment_snapshots"],
+            now=now,
+            month=month,
+        ),
+    )
+
+
 @admin_bp.get("/api/admin/dashboard/kpi-gap-report")
 def dashboard_kpi_gap_report():
     """Phase 5B: read-only UIM formula mapping / backend KPI gap report.

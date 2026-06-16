@@ -21,6 +21,7 @@
       <button class="nav-item" data-view="audit">Audit</button>
       <button class="nav-item" data-view="segments">Segment Overview</button>
       <button class="nav-item" data-view="validation">Data → Validation</button>
+      <button class="nav-item" data-view="backendSegmentEngine">Data → Backend Segment Engine</button>
       <button class="nav-item" data-view="users">User Drilldown</button>
       <button class="nav-item" data-view="settings">Settings</button>
     </nav>
@@ -186,6 +187,20 @@
         <div class="card-grid" id="cards-validation-summary"></div>
         <div class="section-title">Metric Comparison</div>
         <div id="validation-body"></div>
+      </section>
+
+      <!-- BACKEND SEGMENT ENGINE VIEW (Phase 6A, shadow mode) -->
+      <section id="view-backendSegmentEngine" class="hidden">
+        <div style="margin-bottom:16px;"><span class="tag heuristic" style="font-size:12px;padding:4px 12px;">SHADOW MODE — backend-computed, comparison/audit only. UIM for_bot_segment remains production source of truth.</span></div>
+        <div class="controls" style="margin-bottom:16px;">
+          <input class="filter-input" id="bse-month" placeholder="Snapshot month (YYYY-MM), default current" style="max-width:200px;margin:0;" />
+          <button class="btn primary" id="bse-apply-btn">Refresh</button>
+        </div>
+        <div class="card-grid" id="cards-bse-summary"></div>
+        <div class="section-title">Segment Distribution</div>
+        <div id="bse-segment-body"></div>
+        <div class="section-title">Claim Risk Distribution</div>
+        <div id="bse-claim-risk-body"></div>
       </section>
 
       <!-- USER DRILLDOWN VIEW -->
