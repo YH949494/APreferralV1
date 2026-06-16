@@ -521,3 +521,69 @@ def test_settings_panel_secret_value_field_is_masked_dict():
     salt = out["sections"]["voucher_settings"]["public_pool_fingerprint_salt"]
     assert isinstance(salt, dict) and salt["masked"] is True and salt["configured"] is True
     assert "salty" not in repr(out)
+
+
+# ---------------------------------------------------------------------------
+# Segment overview
+# ---------------------------------------------------------------------------
+
+def test_segments_panel_counts_and_top_segments():
+    users = FakeCollection([
+        {"user_id": 1, "for_bot_segment": "High Value", "has_ever_claimed_public_pool": True},
+        {"user_id": 2, "for_bot_segment": "high_value", "has_ever_claimed_public_pool": True},
+        {"user_id": 3, "bot_segment": "voucher_hunter", "has_ever_claimed_public_pool": False},
+        {"user_id": 4, "for_bot_segment": "", "bot_segment": None, "has_ever_claimed_public_pool": False},
+        {"user_id": 5},
+    ])
+    out = dp.build_segments_panel(users_col=users, now=NOW, window="all")
+    s = out["summary"]
+    assert s["total_users"]["value"] == 5
+    assert s["users_without_segment"]["value"] == 2
+    assert s["users_with_segment"]["value"] == 3
+    assert s["public_pool_claimed"]["value"] == 2
+    assert s["public_pool_not_claimed"]["value"] == 3
+    top = {row["segment"]: row["count"] for row in out["top_segments"]}
+    assert top["high_value"] == 2
+    assert top["voucher_hunter"] == 1
+
+
+def test_segments_panel_segment_filter():
+    users = FakeCollection([
+        {"user_id": 1, "for_bot_segment": "new_user"},
+        {"user_id": 2, "for_bot_segment": "new_user"},
+        {"user_id": 3, "for_bot_segment": "low_value"},
+    ])
+    out = dp.build_segments_panel(users_col=users, now=NOW, window="all", segment_filter="new_user")
+    assert out["segment_filter"] == "new_user"
+    assert out["filtered_count"] == 2
+
+
+def test_segments_panel_never_writes():
+    # Builder only ever calls read methods on the collection; no write/update
+    # method exists on FakeCollection, so any accidental write call would
+    # raise AttributeError and fail this test.
+    users = FakeCollection([{"user_id": 1, "for_bot_segment": "new_user"}])
+    out = dp.build_segments_panel(users_col=users, now=NOW, window="7d")
+    assert out["success"] is True
+
+
+def test_segments_panel_unknown_labels_count_as_missing():
+    users = FakeCollection([
+        {"user_id": 1, "for_bot_segment": "Unknown"},
+        {"user_id": 2, "for_bot_segment": "N/A"},
+        {"user_id": 3, "for_bot_segment": "high_value"},
+    ])
+    out = dp.build_segments_panel(users_col=users, now=NOW, window="all")
+    s = out["summary"]
+    assert s["users_without_segment"]["value"] == 2
+    assert s["users_with_segment"]["value"] == 1
+
+
+def test_segments_panel_filter_uses_same_normalizer():
+    users = FakeCollection([
+        {"user_id": 1, "for_bot_segment": "High Value"},
+        {"user_id": 2, "for_bot_segment": "highvalue"},
+        {"user_id": 3, "for_bot_segment": "low_value"},
+    ])
+    out = dp.build_segments_panel(users_col=users, now=NOW, window="all", segment_filter="High-Value")
+    assert out["filtered_count"] == 2

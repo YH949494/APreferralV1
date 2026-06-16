@@ -984,6 +984,119 @@ def build_audit_panel(
 
 
 # ---------------------------------------------------------------------------
+# 4b. Segment overview (read-only — reports on segment fields the bot/UIM
+# already write; never computes or assigns a segment).
+# ---------------------------------------------------------------------------
+
+_TOP_SEGMENTS_LIMIT = 15
+
+
+def _segment_is_blank(raw: Any) -> bool:
+    return raw is None or str(raw).strip() == ""
+
+
+def build_segments_panel(
+    *,
+    users_col,
+    now: datetime | None = None,
+    window: str = _DEFAULT_DASHBOARD_WINDOW,
+    segment_filter: str | None = None,
+) -> dict:
+    """Read-only segment distribution built from existing user fields.
+
+    Only reports on ``for_bot_segment`` / ``bot_segment`` (normalized via the
+    existing ``config.normalize_for_bot_segment``) and the existing
+    ``has_ever_claimed_public_pool`` flag. No new segment classification is
+    introduced here.
+    """
+    from config import (  # local import avoids a hard dep at module load
+        is_blank_or_unknown_for_bot_segment,
+        normalize_for_bot_segment,
+    )
+
+    now = now or _utc_now()
+    window = _normalize_dashboard_window(window)
+    window_start = _dashboard_window_start(window, now)
+    errors: list[str] = []
+
+    total_users = metric(lambda: int(users_col.count_documents({})))
+
+    without_segment = None
+    normalized_counts: dict[str, int] = {}
+    try:
+        blank_count = 0
+        for doc in users_col.find({}, {"for_bot_segment": 1, "bot_segment": 1}):
+            raw = doc.get("for_bot_segment")
+            if _segment_is_blank(raw):
+                raw = doc.get("bot_segment")
+            if is_blank_or_unknown_for_bot_segment(raw):
+                blank_count += 1
+                continue
+            normalized = normalize_for_bot_segment(raw)
+            normalized_counts[normalized] = normalized_counts.get(normalized, 0) + 1
+        without_segment = blank_count
+    except Exception as exc:  # noqa: BLE001
+        errors.append(f"segment_breakdown: {exc}")
+
+    with_segment = None
+    if total_users["value"] is not None and without_segment is not None:
+        with_segment = int(total_users["value"]) - int(without_segment)
+
+    top_segments = sorted(normalized_counts.items(), key=lambda kv: kv[1], reverse=True)[:_TOP_SEGMENTS_LIMIT]
+    top_segments_rows = [{"segment": name, "count": count} for name, count in top_segments]
+
+    filtered_count = None
+    if segment_filter:
+        filtered_count = normalized_counts.get(normalize_for_bot_segment(segment_filter))
+
+    public_pool_claimed = metric(
+        lambda: int(users_col.count_documents({"has_ever_claimed_public_pool": True})),
+        note="Users with has_ever_claimed_public_pool=true (existing field; no new classification).",
+    )
+    public_pool_not_claimed = None
+    if total_users["value"] is not None and public_pool_claimed["value"] is not None:
+        public_pool_not_claimed = int(total_users["value"]) - int(public_pool_claimed["value"])
+
+    recently_updated = metric(
+        lambda: int(
+            users_col.count_documents(
+                {"bot_segment_synced_at": {"$gte": window_start}} if window_start is not None else {"bot_segment_synced_at": {"$exists": True}}
+            )
+        ),
+        quality="approx",
+        note=f"Users with bot_segment_synced_at set ({_admin_dashboard_window_label_local(window)})." if window_start is not None
+        else "Users with a bot_segment_synced_at timestamp recorded (all time).",
+    )
+
+    return {
+        "success": True,
+        "as_of": now.isoformat(),
+        "window": window,
+        "window_start": window_start.isoformat() if window_start else None,
+        "window_end": now.isoformat(),
+        "summary": {
+            "total_users": total_users,
+            "users_with_segment": {"value": with_segment, "data_quality": "exact" if with_segment is not None else "missing",
+                                    "note": "Users with a non-blank for_bot_segment or bot_segment value."},
+            "users_without_segment": {"value": without_segment, "data_quality": "exact" if without_segment is not None else "missing",
+                                       "note": "Users missing both for_bot_segment and bot_segment."},
+            "public_pool_claimed": public_pool_claimed,
+            "public_pool_not_claimed": {"value": public_pool_not_claimed,
+                                         "data_quality": "exact" if public_pool_not_claimed is not None else "missing"},
+            "recently_updated": recently_updated,
+        },
+        "top_segments": top_segments_rows,
+        "segment_filter": segment_filter or None,
+        "filtered_count": filtered_count,
+        "partial_errors": errors or None,
+    }
+
+
+def _admin_dashboard_window_label_local(window: str) -> str:
+    return {"today": "today", "7d": "last 7 days", "30d": "last 30 days", "90d": "last 90 days", "all": "all time"}.get(window, window)
+
+
+# ---------------------------------------------------------------------------
 # 5. User drilldown
 # ---------------------------------------------------------------------------
 

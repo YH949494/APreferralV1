@@ -19,6 +19,7 @@
       <button class="nav-item" data-view="affiliate">Affiliate</button>
       <button class="nav-item" data-view="reactivation">Reactivation</button>
       <button class="nav-item" data-view="audit">Audit</button>
+      <button class="nav-item" data-view="segments">Segment Overview</button>
       <button class="nav-item" data-view="users">User Drilldown</button>
       <button class="nav-item" data-view="settings">Settings</button>
     </nav>
@@ -155,6 +156,22 @@
         <div class="section-title">Audit Trail</div>
         <input class="filter-input" id="audit-filter" placeholder="Filter by actor / action / result…" />
         <div id="audit-body"></div>
+      </section>
+
+      <!-- SEGMENT OVERVIEW VIEW -->
+      <section id="view-segments" class="hidden">
+        <div style="margin-bottom:16px;"><span class="tag heuristic" style="font-size:12px;padding:4px 12px;">READ ONLY — UIM is the source of truth</span></div>
+        <div class="controls" style="margin-bottom:16px;">
+          <div class="seg" id="segments-window">
+            <button data-window="all">All Time</button>
+            <button data-window="7d" class="active">7d</button>
+            <button data-window="30d">30d</button>
+          </div>
+          <input class="filter-input" id="segments-filter" placeholder="Filter by segment name (e.g. high_value)…" style="max-width:280px;margin:0;" />
+        </div>
+        <div class="card-grid" id="cards-segments-summary"></div>
+        <div class="section-title">Top Segments</div>
+        <div id="segments-body"></div>
       </section>
 
       <!-- USER DRILLDOWN VIEW -->

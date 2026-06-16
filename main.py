@@ -3172,6 +3172,26 @@ def _panel_cached(key, builder, *, ttl_key=True):
     return jsonify(payload)
 
 
+@admin_bp.get("/api/admin/dashboard/segments")
+def dashboard_segments():
+    ok, err = require_admin_from_query()
+    if not ok:
+        msg, code = err
+        return jsonify({"success": False, "message": msg}), code
+    window = _panels._normalize_dashboard_window(request.args.get("window"))
+    segment_filter = request.args.get("segment") or None
+    cache_key = f"panel:segments:{window}:{segment_filter or ''}"
+    return _panel_cached(
+        cache_key,
+        lambda: _panels.build_segments_panel(
+            users_col=users_collection,
+            now=_utc_now(),
+            window=window,
+            segment_filter=segment_filter,
+        ),
+    )
+
+
 @admin_bp.get("/api/admin/dashboard/vouchers")
 def dashboard_vouchers():
     ok, err = require_admin_from_query()
