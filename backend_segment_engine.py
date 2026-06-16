@@ -137,8 +137,10 @@ def _is_new_player_flag(value: Any) -> bool | None:
         return str(value).strip().lower() in {"true", "yes", "new"}
 
 
-def _days_since(moment: datetime | None, now: datetime) -> float | None:
-    if moment is None:
+def _days_since(moment: Any, now: datetime) -> float | None:
+    # Malformed historical values (string/int/etc, same as users.last_checkin
+    # elsewhere in this codebase) must not abort the whole snapshot run.
+    if not isinstance(moment, datetime):
         return None
     if moment.tzinfo is None:
         moment = moment.replace(tzinfo=timezone.utc)
@@ -436,7 +438,10 @@ def run_shadow_segment_engine(
             database.init_db()
             users_col = database.users_collection
         if voucher_claims_col is None:
-            voucher_claims_col = getattr(database, "voucher_claims_col", None)
+            # database.py has no dedicated voucher_claims_col (it's only
+            # constructed in vouchers.py as db["voucher_claims"]) — resolve
+            # the real collection the same way so claim_count isn't silently 0.
+            voucher_claims_col = database.db["voucher_claims"]
         if marketing_col is None:
             marketing_col = database.marketing_raw_data_col
         if snapshots_col is None:

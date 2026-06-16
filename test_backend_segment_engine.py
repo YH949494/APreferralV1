@@ -67,6 +67,12 @@ class SegmentRuleTests(unittest.TestCase):
         result = engine.classify_segment(m)
         self.assertNotEqual(result["segment"], "ghost")
 
+    def test_malformed_last_active_at_does_not_crash(self):
+        m = _metrics(after_bet_amount=0, withdrawal_amount=0, claim_count=0, referral_count=0, checkin_count=0, last_active_at="not-a-date")
+        result = engine.classify_segment(m)
+        self.assertNotEqual(result["segment"], "ghost")
+        self.assertEqual(result["segment"], "unclassified")
+
     def test_new_player_fallback(self):
         m = _metrics(after_bet_amount=0, withdrawal_amount=0, is_new_player=1)
         result = engine.classify_segment(m)
