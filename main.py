@@ -962,6 +962,7 @@ def process_verification_queue_scheduled(batch_limit: int = 50) -> None:
 # ----------------------------
 init_db(MONGO_URL)
 users_collection = db["users"]
+segment_snapshots_collection = db["segment_snapshots"]
 # SNAPSHOT FIELDS — ONLY WRITTEN BY WORKER
 # weekly_xp, monthly_xp, total_xp, weekly_referrals, monthly_referrals, total_referrals, vip_tier, vip_month
 # DEPRECATED — DO NOT USE (ledger-based referrals only)
@@ -3190,6 +3191,7 @@ def dashboard_segments():
             mode=mode,
             segment_filter=segment_filter,
             month=month,
+            segment_snapshots_col=segment_snapshots_collection,
         ),
     )
 

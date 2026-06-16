@@ -139,6 +139,11 @@ def ensure_indexes() -> None:
 
     db_ref["user_snapshots"].create_index([("user_id", ASCENDING)], unique=True)
 
+    db_ref["segment_snapshots"].create_index(
+        [("user_id", ASCENDING), ("snapshot_week", ASCENDING)], unique=True
+    )
+    db_ref["segment_snapshots"].create_index([("snapshot_month", ASCENDING)])
+
     db_ref["monthly_xp_history"].create_index([("user_id", ASCENDING), ("month", ASCENDING)], unique=True)
     db_ref["monthly_xp_history"].create_index([("month", ASCENDING)])
 
@@ -169,6 +174,7 @@ users_collection = get_collection("users")
 # weekly_referral_count, total_referral_count, ref_count_total, monthly_referral_count
 
 user_snapshots_col = get_collection("user_snapshots")
+segment_snapshots_col = get_collection("segment_snapshots")
                                 
 monthly_xp_history_collection = get_collection("monthly_xp_history")                          
 

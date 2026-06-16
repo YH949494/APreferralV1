@@ -1,5 +1,6 @@
 import os
 import unittest
+from datetime import datetime, timezone
 from unittest.mock import patch
 
 import bot_segment_sync as sync
@@ -30,6 +31,42 @@ class FakeUsersCollection:
                 self.docs[uid].update(update.get("$set", {}))
                 modified += 1
         return FakeBulkResult(modified)
+
+
+class FakeSnapshotBulkResult:
+    def __init__(self, upserted_count=0, modified_count=0):
+        self.upserted_count = upserted_count
+        self.modified_count = modified_count
+
+
+class FakeSegmentSnapshotsCollection:
+    def __init__(self):
+        self.docs = {}  # (user_id, snapshot_week) -> doc
+        self.bulk_calls = 0
+
+    def bulk_write(self, ops, ordered=False):  # noqa: ARG002
+        self.bulk_calls += 1
+        upserted = 0
+        modified = 0
+        for op in ops:
+            filt = getattr(op, "_filter", {})
+            update = getattr(op, "_doc", {})
+            key = (filt["user_id"], filt["snapshot_week"])
+            if key in self.docs:
+                self.docs[key].update(update.get("$set", {}))
+                modified += 1
+            else:
+                self.docs[key] = dict(update.get("$set", {}))
+                upserted += 1
+        return FakeSnapshotBulkResult(upserted_count=upserted, modified_count=modified)
+
+    def find(self, filt=None):
+        filt = filt or {}
+        out = []
+        for doc in self.docs.values():
+            if all(doc.get(k) == v for k, v in filt.items()):
+                out.append(dict(doc))
+        return out
 
 
 class BotSegmentSyncTests(unittest.TestCase):
@@ -66,8 +103,11 @@ class BotSegmentSyncTests(unittest.TestCase):
 
     def test_commit_updates_existing_users_only(self):
         users = FakeUsersCollection([{"user_id": 100}, {"user_id": 101}, {"user_id": 102}])
+        snapshots = FakeSegmentSnapshotsCollection()
         with patch.object(sync.database, "init_db") as init_db:
-            summary = sync.sync_bot_segments_from_sheet(dry_run=False, users_col=users, rows=self._rows())
+            summary = sync.sync_bot_segments_from_sheet(
+                dry_run=False, users_col=users, segment_snapshots_col=snapshots, rows=self._rows()
+            )
         init_db.assert_not_called()
         self.assertTrue(summary["ok"])
         self.assertEqual(summary["users_write_attempted"], 3)
@@ -81,6 +121,26 @@ class BotSegmentSyncTests(unittest.TestCase):
         self.assertEqual(users.docs[102]["for_bot_segment_normalized"], "unclassified")
         self.assertEqual(users.docs[102]["bot_segment_probability"], 0.70)
         self.assertNotIn(999, users.docs)
+        self.assertEqual(summary["snapshots_written"], 3)
+        self.assertEqual(len(snapshots.docs), 3)
+
+    def test_commit_writes_idempotent_snapshot_per_week(self):
+        users = FakeUsersCollection([{"user_id": 100}, {"user_id": 101}, {"user_id": 102}])
+        snapshots = FakeSegmentSnapshotsCollection()
+        with patch.object(sync.database, "init_db"):
+            sync.sync_bot_segments_from_sheet(
+                dry_run=False, users_col=users, segment_snapshots_col=snapshots, rows=self._rows()
+            )
+            second = sync.sync_bot_segments_from_sheet(
+                dry_run=False, users_col=users, segment_snapshots_col=snapshots, rows=self._rows()
+            )
+        self.assertTrue(second["ok"])
+        # Same ISO week re-run must not create duplicate snapshot records.
+        self.assertEqual(len(snapshots.docs), 3)
+        snap = snapshots.docs[(100, sync._snapshot_week_key(datetime.now(timezone.utc)))]
+        self.assertEqual(snap["telegram_user_id"], 100)
+        self.assertEqual(snap["normalized_segment"], "voucher_hunter")
+        self.assertEqual(snap["source"], "UIM")
 
     def test_missing_credentials_fail_safely(self):
         with patch.dict(os.environ, {}, clear=True), patch.object(sync.database, "init_db") as init_db:

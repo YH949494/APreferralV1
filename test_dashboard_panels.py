@@ -651,3 +651,92 @@ def test_segments_panel_invalid_month_defaults_to_snapshot():
     out = dp.build_segments_panel(users_col=users, now=NOW, mode="month", month="not-a-month")
     assert out["mode"] == "snapshot"
     assert out["selected_month"] is None
+
+
+# ---------------------------------------------------------------------------
+# Segment snapshot history (monthly, from segment_snapshots collection)
+# ---------------------------------------------------------------------------
+
+def test_monthly_segment_distribution_latest_per_user():
+    snapshots = FakeCollection([
+        {"user_id": 1, "normalized_segment": "high_value", "snapshot_month": "2026-06",
+         "snapshot_week": "2026-W23", "created_at": datetime(2026, 6, 1, tzinfo=timezone.utc)},
+        # Same user, later week in same month, segment changed — only the latest should count.
+        {"user_id": 1, "normalized_segment": "low_value", "snapshot_month": "2026-06",
+         "snapshot_week": "2026-W24", "created_at": datetime(2026, 6, 8, tzinfo=timezone.utc)},
+        {"user_id": 2, "normalized_segment": "voucher_hunter", "snapshot_month": "2026-06",
+         "snapshot_week": "2026-W23", "created_at": datetime(2026, 6, 1, tzinfo=timezone.utc)},
+        # Different month, should be excluded.
+        {"user_id": 3, "normalized_segment": "high_value", "snapshot_month": "2026-05",
+         "snapshot_week": "2026-W20", "created_at": datetime(2026, 5, 1, tzinfo=timezone.utc)},
+    ])
+    out = dp.build_monthly_segment_distribution(segment_snapshots_col=snapshots, month="2026-06")
+    assert out["has_data"] is True
+    assert out["total_users"] == 2
+    counts = out["segment_counts"]
+    assert counts == {"low_value": 1, "voucher_hunter": 1}
+
+
+def test_monthly_segment_distribution_no_duplicate_count_across_weekly_snapshots():
+    snapshots = FakeCollection([
+        {"user_id": 1, "normalized_segment": "high_value", "snapshot_month": "2026-06",
+         "snapshot_week": "2026-W23", "created_at": datetime(2026, 6, 1, tzinfo=timezone.utc)},
+        {"user_id": 1, "normalized_segment": "high_value", "snapshot_month": "2026-06",
+         "snapshot_week": "2026-W24", "created_at": datetime(2026, 6, 8, tzinfo=timezone.utc)},
+        {"user_id": 1, "normalized_segment": "high_value", "snapshot_month": "2026-06",
+         "snapshot_week": "2026-W25", "created_at": datetime(2026, 6, 15, tzinfo=timezone.utc)},
+    ])
+    out = dp.build_monthly_segment_distribution(segment_snapshots_col=snapshots, month="2026-06")
+    assert out["total_users"] == 1
+    assert out["segment_counts"] == {"high_value": 1}
+
+
+def test_monthly_segment_distribution_empty_state_for_missing_month():
+    snapshots = FakeCollection([])
+    out = dp.build_monthly_segment_distribution(segment_snapshots_col=snapshots, month="2026-07")
+    assert out["has_data"] is False
+    assert out["total_users"] == 0
+    assert out["top_segments"] == []
+
+
+def test_segments_panel_snapshot_month_mode_uses_snapshot_collection():
+    snapshots = FakeCollection([
+        {"user_id": 1, "normalized_segment": "high_value", "snapshot_month": "2026-06",
+         "snapshot_week": "2026-W23", "created_at": datetime(2026, 6, 1, tzinfo=timezone.utc)},
+        {"user_id": 2, "normalized_segment": "high_value", "snapshot_month": "2026-06",
+         "snapshot_week": "2026-W23", "created_at": datetime(2026, 6, 1, tzinfo=timezone.utc)},
+    ])
+    users = FakeCollection([{"user_id": 1}, {"user_id": 2}])
+    out = dp.build_segments_panel(
+        users_col=users, now=NOW, mode="snapshot_month", month="2026-06", segment_snapshots_col=snapshots,
+    )
+    assert out["mode"] == "snapshot_month"
+    assert out["selected_month"] == "2026-06"
+    assert out["has_data"] is True
+    assert out["summary"]["total_users"]["value"] == 2
+    top = {row["segment"]: row["count"] for row in out["top_segments"]}
+    assert top == {"high_value": 2}
+
+
+def test_segments_panel_snapshot_month_mode_empty_state_no_data():
+    users = FakeCollection([{"user_id": 1}])
+    snapshots = FakeCollection([])
+    out = dp.build_segments_panel(
+        users_col=users, now=NOW, mode="snapshot_month", month="2026-08", segment_snapshots_col=snapshots,
+    )
+    assert out["mode"] == "snapshot_month"
+    assert out["has_data"] is False
+    assert out["summary"]["total_users"]["value"] == 0
+    assert out["top_segments"] == []
+
+
+def test_segments_panel_snapshot_month_mode_missing_month_returns_clear_state():
+    users = FakeCollection([{"user_id": 1}])
+    snapshots = FakeCollection([])
+    out = dp.build_segments_panel(
+        users_col=users, now=NOW, mode="snapshot_month", month=None, segment_snapshots_col=snapshots,
+    )
+    assert out["mode"] == "snapshot_month"
+    assert out["selected_month"] is None
+    assert out["has_data"] is False
+    assert out["partial_errors"]
