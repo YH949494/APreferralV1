@@ -3178,9 +3178,10 @@ def dashboard_segments():
     if not ok:
         msg, code = err
         return jsonify({"success": False, "message": msg}), code
-    mode = _panels._normalize_segment_mode(request.args.get("mode"))
+    month = request.args.get("month") or None
+    mode = _panels._normalize_segment_mode(request.args.get("mode") or ("month" if month else None))
     segment_filter = request.args.get("segment") or None
-    cache_key = f"panel:segments:{mode}:{segment_filter or ''}"
+    cache_key = f"panel:segments:{mode}:{month or ''}:{segment_filter or ''}"
     return _panel_cached(
         cache_key,
         lambda: _panels.build_segments_panel(
@@ -3188,6 +3189,7 @@ def dashboard_segments():
             now=_utc_now(),
             mode=mode,
             segment_filter=segment_filter,
+            month=month,
         ),
     )
 

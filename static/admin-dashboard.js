@@ -11,6 +11,7 @@
     referralsWindow: "7d",
     voucherWindow: "7d",
     segmentsMode: "snapshot",
+    segmentsMonth: "",
     segmentsFilter: ""
   };
 
@@ -600,11 +601,30 @@
   }
 
   // ---------- Segment Overview ----------
+  function initSegmentMonthOptions() {
+    var el = $("#segments-month");
+    if (!el || el.options.length) return;
+    var opts = ['<option value="">Pick a month…</option>'];
+    var d = new Date();
+    d.setUTCDate(1);
+    for (var i = 0; i < 12; i++) {
+      var y = d.getUTCFullYear(), m = d.getUTCMonth() + 1;
+      var value = y + "-" + (m < 10 ? "0" + m : m);
+      var label = d.toLocaleDateString(undefined, { month: "long", year: "numeric", timeZone: "UTC" });
+      opts.push('<option value="' + value + '">' + esc(label) + "</option>");
+      d.setUTCMonth(d.getUTCMonth() - 1);
+    }
+    el.innerHTML = opts.join("");
+  }
+
   function loadSegments(refresh) {
     setMeta("Mode: " + state.segmentsMode + " · Loading…");
     skeletonGrid($("#cards-segments-summary"), 6);
     statePanel("segments-body", "loading", "Loading segments…");
-    var qs = "mode=" + encodeURIComponent(state.segmentsMode) + (refresh ? "&refresh=1" : "");
+    var qs = state.segmentsMode === "month" && state.segmentsMonth
+      ? "month=" + encodeURIComponent(state.segmentsMonth)
+      : "mode=" + encodeURIComponent(state.segmentsMode);
+    if (refresh) qs += "&refresh=1";
     if (state.segmentsFilter) qs += "&segment=" + encodeURIComponent(state.segmentsFilter);
     api("/api/admin/dashboard/segments?" + qs)
       .then(function (d) {
@@ -814,11 +834,25 @@
       if (input) input.addEventListener("input", function () { applyFilter(pair[1], input.value); });
     });
 
+    initSegmentMonthOptions();
     on("#segments-mode", "click", "button", function (e) {
       state.segmentsMode = e.target.dataset.mode;
       seg("segments-mode", e.target);
+      var monthSelect = $("#segments-month");
+      if (monthSelect) monthSelect.value = "";
       loadSegments(false);
     });
+    var segMonthSelect = $("#segments-month");
+    if (segMonthSelect) {
+      segMonthSelect.addEventListener("change", function () {
+        state.segmentsMonth = segMonthSelect.value || "";
+        if (state.segmentsMonth) {
+          state.segmentsMode = "month";
+          seg("segments-mode", null);
+        }
+        loadSegments(false);
+      });
+    }
     var segFilterInput = $("#segments-filter");
     if (segFilterInput) {
       var segFilterTimer = null;

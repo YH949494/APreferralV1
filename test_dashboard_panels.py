@@ -629,3 +629,25 @@ def test_segments_panel_unknown_mode_defaults_to_snapshot():
     users = FakeCollection([{"user_id": 1, "for_bot_segment": "high_value"}])
     out = dp.build_segments_panel(users_col=users, now=NOW, mode="30d")
     assert out["mode"] == "snapshot"
+
+
+def test_segments_panel_explicit_month_filters_by_sync_timestamp():
+    users = FakeCollection([
+        {"user_id": 1, "for_bot_segment": "high_value", "bot_segment_synced_at": datetime(2026, 3, 5, tzinfo=timezone.utc)},
+        {"user_id": 2, "for_bot_segment": "low_value", "bot_segment_synced_at": datetime(2026, 4, 1, tzinfo=timezone.utc)},
+        {"user_id": 3, "for_bot_segment": "voucher_hunter", "bot_segment_synced_at": datetime(2026, 3, 31, 23, 59, tzinfo=timezone.utc)},
+    ])
+    out = dp.build_segments_panel(users_col=users, now=NOW, mode="month", month="2026-03")
+    assert out["mode"] == "month"
+    assert out["selected_month"] == "2026-03"
+    assert out["month_start"] == datetime(2026, 3, 1, tzinfo=timezone.utc).isoformat()
+    assert out["month_end"] == datetime(2026, 4, 1, tzinfo=timezone.utc).isoformat()
+    top = {row["segment"]: row["count"] for row in out["top_segments"]}
+    assert top == {"high_value": 1, "voucher_hunter": 1}
+
+
+def test_segments_panel_invalid_month_defaults_to_snapshot():
+    users = FakeCollection([{"user_id": 1, "for_bot_segment": "high_value"}])
+    out = dp.build_segments_panel(users_col=users, now=NOW, mode="month", month="not-a-month")
+    assert out["mode"] == "snapshot"
+    assert out["selected_month"] is None

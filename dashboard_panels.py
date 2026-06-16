@@ -990,13 +990,27 @@ def build_audit_panel(
 
 _TOP_SEGMENTS_LIMIT = 15
 
-_SEGMENT_MODES = {"snapshot", "this_month", "last_month"}
+_SEGMENT_MODES = {"snapshot", "this_month", "last_month", "month"}
 _DEFAULT_SEGMENT_MODE = "snapshot"
 
 
 def _normalize_segment_mode(mode: Any) -> str:
     m = str(mode or _DEFAULT_SEGMENT_MODE).strip().lower()
     return m if m in _SEGMENT_MODES else _DEFAULT_SEGMENT_MODE
+
+
+def _parse_segment_month(month: Any) -> tuple[datetime | None, datetime | None, str | None]:
+    """Parse an explicit "YYYY-MM" month string into UTC [start, end) bounds."""
+    raw = str(month or "").strip()
+    try:
+        start = datetime.strptime(raw, "%Y-%m").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None, None, None
+    if start.month == 12:
+        end = start.replace(year=start.year + 1, month=1)
+    else:
+        end = start.replace(month=start.month + 1)
+    return start, end, raw
 
 
 def _month_bounds(now: datetime, *, months_back: int) -> tuple[datetime, datetime]:
@@ -1015,11 +1029,14 @@ def _month_bounds(now: datetime, *, months_back: int) -> tuple[datetime, datetim
     return start, end
 
 
-def _segment_mode_label(mode: str) -> str:
+def _segment_mode_label(mode: str, selected_month: str | None = None) -> str:
+    if mode == "month" and selected_month:
+        return f"Synced in {selected_month}"
     return {
         "snapshot": "Current segment snapshot",
         "this_month": "Synced this month",
         "last_month": "Synced last month",
+        "month": "Synced in selected month",
     }.get(mode, mode)
 
 
@@ -1033,6 +1050,7 @@ def build_segments_panel(
     now: datetime | None = None,
     mode: str = _DEFAULT_SEGMENT_MODE,
     segment_filter: str | None = None,
+    month: str | None = None,
 ) -> dict:
     """Read-only segment distribution built from existing user fields.
 
@@ -1046,6 +1064,8 @@ def build_segments_panel(
         is a point-in-time snapshot, not a time-windowed metric).
       - "this_month" / "last_month": only users whose ``bot_segment_synced_at``
         falls within that calendar month (UTC), grouped by normalized segment.
+      - "month": an explicit "YYYY-MM" month (via ``month``), for browsing
+        any past month rather than just this/last month.
     """
     from config import (  # local import avoids a hard dep at module load
         is_blank_or_unknown_for_bot_segment,
@@ -1058,10 +1078,15 @@ def build_segments_panel(
 
     month_start: datetime | None = None
     month_end: datetime | None = None
+    selected_month: str | None = None
     if mode == "this_month":
         month_start, month_end = _month_bounds(now, months_back=0)
     elif mode == "last_month":
         month_start, month_end = _month_bounds(now, months_back=1)
+    elif mode == "month":
+        month_start, month_end, selected_month = _parse_segment_month(month)
+        if month_start is None:
+            mode = _DEFAULT_SEGMENT_MODE
 
     sync_filter: dict = {}
     if month_start is not None:
@@ -1112,14 +1137,15 @@ def build_segments_panel(
             )
         ),
         quality="approx",
-        note=f"Users with bot_segment_synced_at in {_segment_mode_label(mode).lower()}." if month_start is not None
+        note=f"Users with bot_segment_synced_at in {_segment_mode_label(mode, selected_month).lower()}." if month_start is not None
         else "Users with a bot_segment_synced_at timestamp recorded (all time).",
     )
 
     return {
         "success": True,
         "mode": mode,
-        "mode_label": _segment_mode_label(mode),
+        "mode_label": _segment_mode_label(mode, selected_month),
+        "selected_month": selected_month,
         "as_of": now.isoformat(),
         "generated_at": now.isoformat(),
         "month_start": month_start.isoformat() if month_start else None,
