@@ -5763,9 +5763,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.effective_message
     
     if user:
-        _mark_private_interaction(user.id, user.username)
+        user_id = user.id
+        user_doc_before = users_collection.find_one(
+            {"user_id": user_id},
+            {"pm_sent.pm0_welcome": 1},
+        ) or {}
+        first_time_pm0 = not (user_doc_before.get("pm_sent") or {}).get("pm0_welcome")
+
+        _mark_private_interaction(user_id, user.username)
         _users_update_one(
-            {"user_id": user.id},
+            {"user_id": user_id},
             {"$setOnInsert": {
                 "username": user.username,
                 "last_checkin": None,
@@ -5774,32 +5781,64 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             upsert=True,
             context="start_user_insert",
         )
-        user_doc = users_collection.find_one({"user_id": user.id}, {"joined_main_at": 1})
+        user_doc = users_collection.find_one({"user_id": user_id}, {"joined_main_at": 1})
         if not (user_doc or {}).get("joined_main_at"):
             logger.info(
                 "[WELCOME][JOIN_BACKFILL_DISABLED] uid=%s joined_main_at_missing",
-                user.id,
+                user_id,
             ) 
-        keyboard = [
+        welcome_keyboard = [
             [InlineKeyboardButton("📣 Join Channel", url="https://t.me/+Zy3UGGkE17kyNDA9")],
             [InlineKeyboardButton("🚀 Open AdvantPlay Mini-App", web_app=WebAppInfo(url=WEBAPP_URL))],
         ]
+        normal_keyboard = [
+            [InlineKeyboardButton("📣 Join Channel", url="https://t.me/+Zy3UGGkE17kyNDA9")],
+            [InlineKeyboardButton("🚀 Open AdvantPlay Mini-App", web_app=WebAppInfo(url=WEBAPP_URL))],
+        ]        
         if message:
-            await safe_reply_text(
-                message,
-                "👋 Welcome to AdvantPlay Community!\n\n"
-                "Join our channel to get: 👇:\n\n"      
-                "⚡ Daily voucher drops\n"
-                "🎁 Bonus campaigns\n"
-                "👑 VIP-only announcements\n"
-                "🏆 Weekly ranking rewards\n\n"                
+            if first_time_pm0:
+                sent = await safe_reply_text(
+                    message,
+                    "🎁 Your Welcome Voucher Is Waiting\n\n"
+                    "It is not activated yet.\n\n"
+                    "Complete these steps to unlock it:\n\n"
+                    "1️⃣ Follow @AdvantPlayOfficial\n"
+                    "2️⃣ Check in 3 days within 7 days\n"
+                    "3️⃣ Claim your Welcome Voucher\n\n"
+                    "✅ No deposit required\n"
+                    "⏱ Less than 1 minute per day\n\n"
+                    "👇 Start now",
+                    reply_markup=InlineKeyboardMarkup(welcome_keyboard),
+                    uid=user_id,
+                    send_type="start",
+                    raise_on_non_transient=False,
+                )
+                if sent:
+                    _users_update_one(
+                        {"user_id": user_id},
+                        {"$set": {"pm_sent.pm0_welcome": now_utc()}},
+                        context="pm0_welcome_sent",
+                    )
+                    logger.info("[PM0][SENT] uid=%s type=welcome_first_time", user_id)
+            else:
+                sent = await safe_reply_text(
+                    message,
+                    "👋 Welcome to AdvantPlay Community!\n\n"
+                    "Join our channel to get: 👇:\n\n"      
+                    "⚡ Daily voucher drops\n"
+                    "🎁 Bonus campaigns\n"
+                    "👑 VIP-only announcements\n"
+                    "🏆 Weekly ranking rewards\n\n"                
 
-                "Start here 👇",
-                reply_markup=InlineKeyboardMarkup(keyboard),
-                uid=user.id,
-                send_type="start",
-                raise_on_non_transient=False,
-            )
+                    "Start here 👇",
+                    reply_markup=InlineKeyboardMarkup(normal_keyboard),
+                    uid=user_id,
+                    send_type="start",
+                    raise_on_non_transient=False,
+                )
+                if sent:
+                    logger.info("[PM0][SENT] uid=%s type=normal_returning", user_id)
+
         await _send_welcome_unclaimed_reminder_if_needed(context, user.id, source="start")
             
 async def member_update_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
