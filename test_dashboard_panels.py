@@ -740,3 +740,104 @@ def test_segments_panel_snapshot_month_mode_missing_month_returns_clear_state():
     assert out["selected_month"] is None
     assert out["has_data"] is False
     assert out["partial_errors"]
+
+
+# ---------------------------------------------------------------------------
+# Validation panel (Phase 5: UIM vs Backend)
+# ---------------------------------------------------------------------------
+
+def test_validation_panel_computes_variance_and_status():
+    users = FakeCollection([
+        {"user_id": 1, "for_bot_segment": "high_value"},
+        {"user_id": 2, "for_bot_segment": "high_value"},
+        {"user_id": 3, "for_bot_segment": "low_value"},
+        {"user_id": 4, "for_bot_segment": "voucher_hunter"},
+        {"user_id": 5, "for_bot_segment": "new_user"},
+    ])
+    uim_result = {
+        "ok": True,
+        "error": None,
+        "values": {
+            "total_campaign_players": 5,
+            "high_value_players": 2,
+            "low_value_players": 3,  # backend will compute 1 -> red variance
+            "voucher_hunters": 1,
+            "new_players": 1,
+        },
+        "spreadsheet_id": "sheet123",
+        "worksheet_gid": "1495862202",
+    }
+    out = dp.build_validation_panel(users_col=users, uim_result=uim_result, now=NOW, comparison_period="2026-W24")
+    assert out["success"] is True
+    assert out["comparison_period"] == "2026-W24"
+    by_metric = {m["metric"]: m for m in out["metrics"]}
+
+    assert by_metric["total_campaign_players"]["uim_value"] == 5
+    assert by_metric["total_campaign_players"]["backend_value"] == 5
+    assert by_metric["total_campaign_players"]["status"] == "green"
+
+    assert by_metric["high_value_players"]["backend_value"] == 2
+    assert by_metric["high_value_players"]["status"] == "green"
+
+    assert by_metric["low_value_players"]["uim_value"] == 3
+    assert by_metric["low_value_players"]["backend_value"] == 1
+    assert by_metric["low_value_players"]["difference"] == -2
+    assert by_metric["low_value_players"]["status"] == "red"
+
+    # No backend equivalent yet -> gray, never invented.
+    assert by_metric["claim_risk"]["backend_value"] is None
+    assert by_metric["claim_risk"]["status"] == "gray"
+    assert by_metric["voucher_claimers"]["status"] == "gray"
+
+    assert out["summary"]["total_metrics_compared"] == 12
+    assert out["summary"]["missing_metrics"] >= 6
+
+
+def test_validation_panel_status_thresholds():
+    users = FakeCollection([])
+    cases = [
+        (100, 101, "green"),   # 1% diff
+        (100, 104, "yellow"),  # 4% diff
+        (100, 90, "red"),      # 10% diff
+    ]
+    for uim_v, backend_v, expected in cases:
+        diff, pct, status = dp._validation_compare(uim_v, backend_v)
+        assert status == expected, (uim_v, backend_v, status)
+    # zero baseline edge cases
+    assert dp._validation_compare(0, 0) == (0.0, 0.0, "green")
+    diff, pct, status = dp._validation_compare(0, 5)
+    assert status == "red"
+    assert pct is None
+
+
+def test_validation_panel_missing_uim_source_returns_gray_not_crash():
+    users = FakeCollection([{"user_id": 1, "for_bot_segment": "high_value"}])
+    uim_result = {
+        "ok": False,
+        "error": "missing Google service account credentials",
+        "values": {},
+        "spreadsheet_id": "sheet123",
+        "worksheet_gid": "1495862202",
+    }
+    out = dp.build_validation_panel(users_col=users, uim_result=uim_result, now=NOW, comparison_period="2026-W24")
+    assert out["success"] is True
+    assert out["uim_source"]["ok"] is False
+    assert out["partial_errors"] == ["missing Google service account credentials"]
+    for m in out["metrics"]:
+        assert m["uim_value"] is None
+        assert m["status"] == "gray"
+    assert out["summary"]["missing_metrics"] == 12
+
+
+def test_validation_panel_does_not_crash_on_partial_uim_values():
+    users = FakeCollection([
+        {"user_id": 1, "for_bot_segment": "high_value"},
+        {"user_id": 2, "bot_segment": "low_value"},
+    ])
+    uim_result = {"ok": True, "error": None, "values": {"total_campaign_players": 2}, "spreadsheet_id": "s", "worksheet_gid": "g"}
+    out = dp.build_validation_panel(users_col=users, uim_result=uim_result, now=NOW, comparison_period="2026-W24")
+    by_metric = {m["metric"]: m for m in out["metrics"]}
+    assert by_metric["total_campaign_players"]["status"] == "green"
+    # Metrics with no UIM value provided fall back to gray, no crash.
+    assert by_metric["high_value_players"]["uim_value"] is None
+    assert by_metric["high_value_players"]["status"] == "gray"

@@ -3153,6 +3153,7 @@ def dashboard_abuse():
 # inject the live collections and apply the shared admin guard + cache.
 # ---------------------------------------------------------------------------
 import dashboard_panels as _panels  # noqa: E402
+import uim_validation as _uim_validation  # noqa: E402
 
 
 def _panel_cached(key, builder, *, ttl_key=True):
@@ -3194,6 +3195,34 @@ def dashboard_segments():
             segment_snapshots_col=segment_snapshots_collection,
         ),
     )
+
+
+@admin_bp.get("/api/admin/dashboard/validation")
+def dashboard_validation():
+    """Phase 5: read-only UIM (Google Sheet) vs backend KPI comparison.
+
+    Debug/compare tool only — never writes to ``users``, never touches
+    segment classification, voucher allocation, public-pool probability or
+    reward logic. Comparison period defaults to the current ISO week.
+    """
+    ok, err = require_admin_from_query()
+    if not ok:
+        msg, code = err
+        return jsonify({"success": False, "message": msg}), code
+    now = _utc_now()
+    comparison_period = request.args.get("period") or _uim_validation.bot_segment_sync._snapshot_week_key(now)
+    cache_key = f"panel:validation:{comparison_period}"
+
+    def _build():
+        uim_result = _uim_validation.fetch_uim_validation_metrics()
+        return _panels.build_validation_panel(
+            users_col=users_collection,
+            uim_result=uim_result,
+            now=now,
+            comparison_period=comparison_period,
+        )
+
+    return _panel_cached(cache_key, _build)
 
 
 @admin_bp.get("/api/admin/dashboard/vouchers")

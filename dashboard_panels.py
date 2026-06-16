@@ -1255,6 +1255,158 @@ def build_segments_panel(
 
 
 # ---------------------------------------------------------------------------
+# 4b. Validation panel (UIM vs Backend) — Phase 5
+# ---------------------------------------------------------------------------
+
+# Metrics with no backend equivalent yet: shown with backend_value=None and
+# status="gray" rather than guessed at. See uim_validation.METRIC_KEYS for
+# the full ordered metric list (this set is the subset we can't compute).
+_VALIDATION_BACKEND_MISSING = {
+    "voucher_claimers",
+    "actual_players",
+    "old_players",
+    "claim_risk",
+    "campaign_quality",
+    "affiliate_quality",
+}
+
+_VALIDATION_SEGMENT_METRIC_KEYS = {
+    "high_value_players": ("high_value",),
+    "normal_actual_players": ("normal_actual",),
+    "low_value_players": ("low_value",),
+    "voucher_hunters": ("voucher_hunter",),
+    "new_players": ("new_user", "new_joiner"),
+}
+
+
+def _current_segment_counts(users_col) -> dict[str, int]:
+    """Current (point-in-time) normalized segment counts from ``users``.
+
+    Mirrors the counting logic in ``build_segments_panel`` (mode="snapshot")
+    so the validation panel's backend numbers match what the Segment
+    Overview tab already shows for "now".
+    """
+    from config import is_blank_or_unknown_for_bot_segment, normalize_for_bot_segment
+
+    counts: dict[str, int] = {}
+    for doc in users_col.find({}, {"for_bot_segment": 1, "bot_segment": 1}):
+        raw = doc.get("for_bot_segment")
+        if _segment_is_blank(raw):
+            raw = doc.get("bot_segment")
+        if is_blank_or_unknown_for_bot_segment(raw):
+            continue
+        normalized = normalize_for_bot_segment(raw)
+        counts[normalized] = counts.get(normalized, 0) + 1
+    return counts
+
+
+def _compute_backend_validation_metrics(*, users_col) -> dict[str, int | None]:
+    """Backend-side values for the 12 validation metrics.
+
+    Only ``total_campaign_players`` and the five segment-derived counts are
+    computable from existing data; the rest are intentionally ``None``
+    (rendered as the "gray / missing source data" status) rather than
+    invented, per the read-only/no-new-classification constraint.
+    """
+    values: dict[str, int | None] = {key: None for key in _VALIDATION_BACKEND_MISSING}
+    values["total_campaign_players"] = int(users_col.count_documents({}))
+    segment_counts = _current_segment_counts(users_col)
+    for metric_key, segment_names in _VALIDATION_SEGMENT_METRIC_KEYS.items():
+        values[metric_key] = sum(segment_counts.get(name, 0) for name in segment_names)
+    return values
+
+
+def _validation_compare(uim_value: Any, backend_value: Any) -> tuple[float | None, float | None, str]:
+    """Return ``(difference, difference_pct, status)`` for one metric.
+
+    Status thresholds: green <=1% variance, yellow >1% and <=5%, red >5%,
+    gray when either side is missing. When the UIM value is exactly 0 but
+    the backend differs, percentage variance is undefined (division by
+    zero) so we report ``difference_pct=None`` but still flag red since an
+    absolute mismatch exists.
+    """
+    if uim_value is None or backend_value is None:
+        return None, None, "gray"
+    difference = backend_value - uim_value
+    if uim_value == 0:
+        if backend_value == 0:
+            return 0.0, 0.0, "green"
+        return float(difference), None, "red"
+    difference_pct = round(100.0 * difference / abs(uim_value), 2)
+    abs_pct = abs(difference_pct)
+    if abs_pct <= 1:
+        status = "green"
+    elif abs_pct <= 5:
+        status = "yellow"
+    else:
+        status = "red"
+    return float(difference), difference_pct, status
+
+
+def build_validation_panel(
+    *,
+    users_col,
+    uim_result: dict,
+    now: datetime | None = None,
+    comparison_period: str | None = None,
+) -> dict:
+    """Build the UIM-vs-Backend validation comparison (Phase 5, read-only).
+
+    ``uim_result`` is the dict returned by
+    ``uim_validation.fetch_uim_validation_metrics`` — fetching/parsing the
+    sheet is the caller's responsibility so this function (and its tests)
+    never need real Google credentials or network access.
+    """
+    from uim_validation import METRIC_KEYS
+
+    now = now or _utc_now()
+    uim_ok = bool(uim_result.get("ok"))
+    uim_values: dict = uim_result.get("values") or {}
+
+    backend_values = _compute_backend_validation_metrics(users_col=users_col)
+
+    metrics: list[dict] = []
+    counts = {"green": 0, "yellow": 0, "red": 0, "gray": 0}
+    for key in METRIC_KEYS:
+        uim_v = uim_values.get(key)
+        backend_v = backend_values.get(key)
+        difference, difference_pct, status = _validation_compare(uim_v, backend_v)
+        counts[status] += 1
+        metrics.append(
+            {
+                "metric": key,
+                "uim_value": uim_v,
+                "backend_value": backend_v,
+                "difference": difference,
+                "difference_pct": difference_pct,
+                "status": status,
+            }
+        )
+
+    return {
+        "success": True,
+        "generated_at": now.isoformat(),
+        "comparison_period": comparison_period,
+        "data_source": "UIM Google Sheet (KPI tab) vs backend dashboard calculations — read only",
+        "uim_source": {
+            "ok": uim_ok,
+            "error": uim_result.get("error"),
+            "spreadsheet_id": uim_result.get("spreadsheet_id"),
+            "worksheet_gid": uim_result.get("worksheet_gid"),
+        },
+        "summary": {
+            "total_metrics_compared": len(metrics),
+            "matched_metrics": counts["green"],
+            "warning_metrics": counts["yellow"],
+            "failed_metrics": counts["red"],
+            "missing_metrics": counts["gray"],
+        },
+        "metrics": metrics,
+        "partial_errors": [uim_result["error"]] if (not uim_ok and uim_result.get("error")) else None,
+    }
+
+
+# ---------------------------------------------------------------------------
 # 5. User drilldown
 # ---------------------------------------------------------------------------
 

@@ -12,7 +12,8 @@
     voucherWindow: "7d",
     segmentsMode: "snapshot",
     segmentsMonth: "",
-    segmentsFilter: ""
+    segmentsFilter: "",
+    validationPeriod: ""
   };
 
   function $(sel, root) { return (root || document).querySelector(sel); }
@@ -662,6 +663,54 @@
       });
   }
 
+  // ---------- Validation / UIM Compare ----------
+  var VALIDATION_STATUS_LABEL = { green: "Matched", yellow: "Warning", red: "Failed", gray: "Missing" };
+
+  function loadValidation(refresh) {
+    setMeta("Loading…");
+    skeletonGrid($("#cards-validation-summary"), 4);
+    statePanel("validation-body", "loading", "Loading UIM vs backend comparison…");
+    var qs = state.validationPeriod ? "period=" + encodeURIComponent(state.validationPeriod) : "";
+    if (refresh) qs += (qs ? "&" : "") + "refresh=1";
+    api("/api/admin/dashboard/validation" + (qs ? "?" + qs : ""))
+      .then(function (d) {
+        renderMeta(d, d.comparison_period || "current week");
+        var s = d.summary || {};
+        $("#cards-validation-summary").innerHTML =
+          dqCard("Total Metrics Compared", { value: s.total_metrics_compared }) +
+          dqCard("Matched Metrics", { value: s.matched_metrics }) +
+          dqCard("Warning Metrics", { value: s.warning_metrics }) +
+          dqCard("Failed Metrics", { value: s.failed_metrics }) +
+          dqCard("Missing Source Data", { value: s.missing_metrics });
+
+        if (d.uim_source && !d.uim_source.ok) {
+          banner("UIM source unavailable: " + (d.uim_source.error || "unknown error") + " — showing missing_source for all metrics.", "warn");
+        }
+
+        var rows = (d.metrics || []).map(function (m) {
+          var statusClass = m.status === "green" ? "ok" : m.status === "yellow" ? "neutral" : m.status === "red" ? "rejected" : "neutral";
+          return "<tr><td>" + esc(m.metric) + "</td>" +
+            '<td class="num">' + (m.uim_value === null || m.uim_value === undefined ? "—" : fmt(m.uim_value)) + "</td>" +
+            '<td class="num">' + (m.backend_value === null || m.backend_value === undefined ? "—" : fmt(m.backend_value)) + "</td>" +
+            '<td class="num">' + (m.difference === null || m.difference === undefined ? "—" : fmt(m.difference)) + "</td>" +
+            '<td class="num">' + (m.difference_pct === null || m.difference_pct === undefined ? "—" : fmt(m.difference_pct) + "%") + "</td>" +
+            '<td><span class="pill ' + statusClass + '">' + (VALIDATION_STATUS_LABEL[m.status] || m.status) + "</span></td></tr>";
+        }).join("");
+        $("#validation-body").innerHTML = rows
+          ? '<table class="mini-table"><thead><tr><th>Metric</th><th class="num">UIM Value</th><th class="num">Backend Value</th><th class="num">Difference</th><th class="num">Difference %</th><th>Status</th></tr></thead><tbody>' + rows + "</tbody></table>"
+          : '<div class="empty">No metrics to compare.</div>';
+
+        if (d.partial_errors) banner("Some validation metrics degraded: " + d.partial_errors.join("; "), "warn");
+      })
+      .catch(function (e) {
+        if (e.message !== "unauthorized") {
+          setMeta("Failed to update");
+          $("#cards-validation-summary").innerHTML = '<div class="banner error">Failed: ' + esc(e.message) + "</div>";
+          statePanel("validation-body", "banner error", "Failed: " + e.message);
+        }
+      });
+  }
+
   function loadUser(query) {
     if (!query) { setMeta(""); statePanel("user-body", "empty", "Search by Telegram user_id or username to view a user profile."); return; }
     setMeta("Loading…");
@@ -740,7 +789,7 @@
       });
   }
 
-  var VIEWS = ["summary", "funnel", "abuse", "vouchers", "referrals", "affiliate", "reactivation", "audit", "segments", "users", "settings"];
+  var VIEWS = ["summary", "funnel", "abuse", "vouchers", "referrals", "affiliate", "reactivation", "audit", "segments", "validation", "users", "settings"];
   function switchView(view) {
     state.view = view;
     $all(".nav-item").forEach(function (b) { b.classList.toggle("active", b.dataset.view === view); });
@@ -748,7 +797,7 @@
     var titles = {
       summary: "Executive Summary", funnel: "Activation Funnel", abuse: "Abuse Overview",
       vouchers: "Vouchers", referrals: "Referrals", affiliate: "Affiliate", reactivation: "Reactivation",
-      audit: "Audit", segments: "Segment Overview",
+      audit: "Audit", segments: "Segment Overview", validation: "Data → Validation / UIM Compare",
       users: "User Drilldown", settings: "Settings (Read Only)"
     };
     $("#view-title").textContent = titles[view] || view;
@@ -766,6 +815,7 @@
     else if (state.view === "reactivation") loadReactivation(force);
     else if (state.view === "audit") loadAudit(force);
     else if (state.view === "segments") loadSegments(force);
+    else if (state.view === "validation") loadValidation(force);
     else if (state.view === "users") { /* user view loads on search */ }
     else if (state.view === "settings") loadSettings(force);
   }
@@ -864,6 +914,14 @@
         }, 300);
       });
     }
+
+    var valPeriodInput = $("#validation-period"), valApplyBtn = $("#validation-apply-btn");
+    function applyValidationPeriod() {
+      state.validationPeriod = (valPeriodInput.value || "").trim();
+      loadValidation(false);
+    }
+    if (valApplyBtn) valApplyBtn.addEventListener("click", applyValidationPeriod);
+    if (valPeriodInput) valPeriodInput.addEventListener("keydown", function (e) { if (e.key === "Enter") applyValidationPeriod(); });
 
     var us = $("#user-search"), ub = $("#user-search-btn");
     function doUserSearch() { loadUser((us.value || "").trim()); }
