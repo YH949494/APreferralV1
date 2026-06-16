@@ -162,10 +162,10 @@
       <section id="view-segments" class="hidden">
         <div style="margin-bottom:16px;"><span class="tag heuristic" style="font-size:12px;padding:4px 12px;">READ ONLY — UIM is the source of truth</span></div>
         <div class="controls" style="margin-bottom:16px;">
-          <div class="seg" id="segments-window">
-            <button data-window="all">All Time</button>
-            <button data-window="7d" class="active">7d</button>
-            <button data-window="30d">30d</button>
+          <div class="seg" id="segments-mode">
+            <button data-mode="snapshot" class="active">Current segment snapshot</button>
+            <button data-mode="this_month">Synced this month</button>
+            <button data-mode="last_month">Synced last month</button>
           </div>
           <input class="filter-input" id="segments-filter" placeholder="Filter by segment name (e.g. high_value)…" style="max-width:280px;margin:0;" />
         </div>

@@ -10,7 +10,7 @@
     abuseWindow: "7d",
     referralsWindow: "7d",
     voucherWindow: "7d",
-    segmentsWindow: "7d",
+    segmentsMode: "snapshot",
     segmentsFilter: ""
   };
 
@@ -601,14 +601,14 @@
 
   // ---------- Segment Overview ----------
   function loadSegments(refresh) {
-    setMeta("Window: " + state.segmentsWindow + " · Loading…");
+    setMeta("Mode: " + state.segmentsMode + " · Loading…");
     skeletonGrid($("#cards-segments-summary"), 6);
     statePanel("segments-body", "loading", "Loading segments…");
-    var qs = "window=" + encodeURIComponent(state.segmentsWindow) + (refresh ? "&refresh=1" : "");
+    var qs = "mode=" + encodeURIComponent(state.segmentsMode) + (refresh ? "&refresh=1" : "");
     if (state.segmentsFilter) qs += "&segment=" + encodeURIComponent(state.segmentsFilter);
     api("/api/admin/dashboard/segments?" + qs)
       .then(function (d) {
-        renderMeta(d, state.segmentsWindow);
+        renderMeta(d, d.mode_label || state.segmentsMode);
         var s = d.summary;
         $("#cards-segments-summary").innerHTML =
           dqCard("Total Users", s.total_users) +
@@ -635,7 +635,7 @@
       })
       .catch(function (e) {
         if (e.message !== "unauthorized") {
-          setMeta("Window: " + state.segmentsWindow + " · Failed to update");
+          setMeta("Mode: " + state.segmentsMode + " · Failed to update");
           $("#cards-segments-summary").innerHTML = '<div class="banner error">Failed: ' + esc(e.message) + "</div>";
           statePanel("segments-body", "banner error", "Failed: " + e.message);
         }
@@ -814,9 +814,9 @@
       if (input) input.addEventListener("input", function () { applyFilter(pair[1], input.value); });
     });
 
-    on("#segments-window", "click", "button", function (e) {
-      state.segmentsWindow = e.target.dataset.window;
-      seg("segments-window", e.target);
+    on("#segments-mode", "click", "button", function (e) {
+      state.segmentsMode = e.target.dataset.mode;
+      seg("segments-mode", e.target);
       loadSegments(false);
     });
     var segFilterInput = $("#segments-filter");

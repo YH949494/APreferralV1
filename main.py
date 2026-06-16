@@ -3178,15 +3178,15 @@ def dashboard_segments():
     if not ok:
         msg, code = err
         return jsonify({"success": False, "message": msg}), code
-    window = _panels._normalize_dashboard_window(request.args.get("window"))
+    mode = _panels._normalize_segment_mode(request.args.get("mode"))
     segment_filter = request.args.get("segment") or None
-    cache_key = f"panel:segments:{window}:{segment_filter or ''}"
+    cache_key = f"panel:segments:{mode}:{segment_filter or ''}"
     return _panel_cached(
         cache_key,
         lambda: _panels.build_segments_panel(
             users_col=users_collection,
             now=_utc_now(),
-            window=window,
+            mode=mode,
             segment_filter=segment_filter,
         ),
     )

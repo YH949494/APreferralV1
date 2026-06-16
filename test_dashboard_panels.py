@@ -535,7 +535,9 @@ def test_segments_panel_counts_and_top_segments():
         {"user_id": 4, "for_bot_segment": "", "bot_segment": None, "has_ever_claimed_public_pool": False},
         {"user_id": 5},
     ])
-    out = dp.build_segments_panel(users_col=users, now=NOW, window="all")
+    out = dp.build_segments_panel(users_col=users, now=NOW, mode="snapshot")
+    assert out["mode"] == "snapshot"
+    assert out["month_start"] is None and out["month_end"] is None
     s = out["summary"]
     assert s["total_users"]["value"] == 5
     assert s["users_without_segment"]["value"] == 2
@@ -553,7 +555,7 @@ def test_segments_panel_segment_filter():
         {"user_id": 2, "for_bot_segment": "new_user"},
         {"user_id": 3, "for_bot_segment": "low_value"},
     ])
-    out = dp.build_segments_panel(users_col=users, now=NOW, window="all", segment_filter="new_user")
+    out = dp.build_segments_panel(users_col=users, now=NOW, mode="snapshot", segment_filter="new_user")
     assert out["segment_filter"] == "new_user"
     assert out["filtered_count"] == 2
 
@@ -563,7 +565,7 @@ def test_segments_panel_never_writes():
     # method exists on FakeCollection, so any accidental write call would
     # raise AttributeError and fail this test.
     users = FakeCollection([{"user_id": 1, "for_bot_segment": "new_user"}])
-    out = dp.build_segments_panel(users_col=users, now=NOW, window="7d")
+    out = dp.build_segments_panel(users_col=users, now=NOW, mode="snapshot")
     assert out["success"] is True
 
 
@@ -573,7 +575,7 @@ def test_segments_panel_unknown_labels_count_as_missing():
         {"user_id": 2, "for_bot_segment": "N/A"},
         {"user_id": 3, "for_bot_segment": "high_value"},
     ])
-    out = dp.build_segments_panel(users_col=users, now=NOW, window="all")
+    out = dp.build_segments_panel(users_col=users, now=NOW, mode="snapshot")
     s = out["summary"]
     assert s["users_without_segment"]["value"] == 2
     assert s["users_with_segment"]["value"] == 1
@@ -585,5 +587,45 @@ def test_segments_panel_filter_uses_same_normalizer():
         {"user_id": 2, "for_bot_segment": "highvalue"},
         {"user_id": 3, "for_bot_segment": "low_value"},
     ])
-    out = dp.build_segments_panel(users_col=users, now=NOW, window="all", segment_filter="High-Value")
+    out = dp.build_segments_panel(users_col=users, now=NOW, mode="snapshot", segment_filter="High-Value")
     assert out["filtered_count"] == 2
+
+
+def test_segments_panel_this_month_filters_by_sync_timestamp():
+    this_month_ts = datetime(NOW.year, NOW.month, 15, tzinfo=timezone.utc)
+    last_month_start, _ = dp._month_bounds(NOW, months_back=1)
+    last_month_ts = datetime(last_month_start.year, last_month_start.month, 10, tzinfo=timezone.utc)
+    users = FakeCollection([
+        {"user_id": 1, "for_bot_segment": "high_value", "bot_segment_synced_at": this_month_ts},
+        {"user_id": 2, "for_bot_segment": "low_value", "bot_segment_synced_at": last_month_ts},
+        {"user_id": 3, "for_bot_segment": "high_value"},  # never synced
+    ])
+    out = dp.build_segments_panel(users_col=users, now=NOW, mode="this_month")
+    assert out["mode"] == "this_month"
+    assert out["month_start"] is not None and out["month_end"] is not None
+    s = out["summary"]
+    assert s["total_users"]["value"] == 1
+    top = {row["segment"]: row["count"] for row in out["top_segments"]}
+    assert top == {"high_value": 1}
+
+
+def test_segments_panel_last_month_filters_by_sync_timestamp():
+    this_month_ts = datetime(NOW.year, NOW.month, 15, tzinfo=timezone.utc)
+    last_month_start, _ = dp._month_bounds(NOW, months_back=1)
+    last_month_ts = datetime(last_month_start.year, last_month_start.month, 10, tzinfo=timezone.utc)
+    users = FakeCollection([
+        {"user_id": 1, "for_bot_segment": "high_value", "bot_segment_synced_at": this_month_ts},
+        {"user_id": 2, "for_bot_segment": "low_value", "bot_segment_synced_at": last_month_ts},
+        {"user_id": 3, "for_bot_segment": "voucher_hunter", "bot_segment_synced_at": last_month_ts},
+    ])
+    out = dp.build_segments_panel(users_col=users, now=NOW, mode="last_month")
+    s = out["summary"]
+    assert s["total_users"]["value"] == 2
+    top = {row["segment"]: row["count"] for row in out["top_segments"]}
+    assert top == {"low_value": 1, "voucher_hunter": 1}
+
+
+def test_segments_panel_unknown_mode_defaults_to_snapshot():
+    users = FakeCollection([{"user_id": 1, "for_bot_segment": "high_value"}])
+    out = dp.build_segments_panel(users_col=users, now=NOW, mode="30d")
+    assert out["mode"] == "snapshot"
