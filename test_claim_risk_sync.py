@@ -1,3 +1,4 @@
+import os
 import unittest
 from datetime import datetime, timezone
 from unittest.mock import patch
@@ -184,6 +185,38 @@ class ClaimRiskSyncTests(unittest.TestCase):
         init_db.assert_called_once()
         self.assertTrue(summary["ok"])
         self.assertEqual(summary["users_matched"], 1)
+
+    def test_env_override_takes_precedence_over_hardcoded_defaults(self):
+        users = FakeUsersCollection([{"user_id": 100}])
+        env = {
+            "BOT_SEGMENT_SHEET_ID": "env-sheet-id",
+            "BOT_SEGMENT_SHEET_GID": "env-gid",
+        }
+        with patch.dict(os.environ, env), patch.object(
+            sync.bot_segment_sync, "fetch_sheet_rows", return_value=self._rows()
+        ) as fetch_sheet_rows:
+            summary = sync.sync_claim_risk_from_sheet(dry_run=True, users_col=users, rows=None)
+        fetch_sheet_rows.assert_called_once_with(spreadsheet_id="env-sheet-id", worksheet_gid="env-gid")
+        self.assertTrue(summary["ok"])
+
+    def test_explicit_args_take_precedence_over_env_override(self):
+        users = FakeUsersCollection([{"user_id": 100}])
+        env = {
+            "BOT_SEGMENT_SHEET_ID": "env-sheet-id",
+            "BOT_SEGMENT_SHEET_GID": "env-gid",
+        }
+        with patch.dict(os.environ, env), patch.object(
+            sync.bot_segment_sync, "fetch_sheet_rows", return_value=self._rows()
+        ) as fetch_sheet_rows:
+            summary = sync.sync_claim_risk_from_sheet(
+                dry_run=True,
+                users_col=users,
+                rows=None,
+                spreadsheet_id="explicit-sheet-id",
+                worksheet_gid="explicit-gid",
+            )
+        fetch_sheet_rows.assert_called_once_with(spreadsheet_id="explicit-sheet-id", worksheet_gid="explicit-gid")
+        self.assertTrue(summary["ok"])
 
 
 if __name__ == "__main__":
