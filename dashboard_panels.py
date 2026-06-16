@@ -990,6 +990,38 @@ def build_audit_panel(
 
 _TOP_SEGMENTS_LIMIT = 15
 
+_SEGMENT_MODES = {"snapshot", "this_month", "last_month"}
+_DEFAULT_SEGMENT_MODE = "snapshot"
+
+
+def _normalize_segment_mode(mode: Any) -> str:
+    m = str(mode or _DEFAULT_SEGMENT_MODE).strip().lower()
+    return m if m in _SEGMENT_MODES else _DEFAULT_SEGMENT_MODE
+
+
+def _month_bounds(now: datetime, *, months_back: int) -> tuple[datetime, datetime]:
+    """Return [start, end) UTC bounds for the month ``months_back`` months before ``now``."""
+    year, month = now.year, now.month
+    for _ in range(months_back):
+        month -= 1
+        if month < 1:
+            month = 12
+            year -= 1
+    start = datetime(year, month, 1, tzinfo=timezone.utc)
+    if month == 12:
+        end = datetime(year + 1, 1, 1, tzinfo=timezone.utc)
+    else:
+        end = datetime(year, month + 1, 1, tzinfo=timezone.utc)
+    return start, end
+
+
+def _segment_mode_label(mode: str) -> str:
+    return {
+        "snapshot": "Current segment snapshot",
+        "this_month": "Synced this month",
+        "last_month": "Synced last month",
+    }.get(mode, mode)
+
 
 def _segment_is_blank(raw: Any) -> bool:
     return raw is None or str(raw).strip() == ""
@@ -999,7 +1031,7 @@ def build_segments_panel(
     *,
     users_col,
     now: datetime | None = None,
-    window: str = _DEFAULT_DASHBOARD_WINDOW,
+    mode: str = _DEFAULT_SEGMENT_MODE,
     segment_filter: str | None = None,
 ) -> dict:
     """Read-only segment distribution built from existing user fields.
@@ -1008,6 +1040,12 @@ def build_segments_panel(
     existing ``config.normalize_for_bot_segment``) and the existing
     ``has_ever_claimed_public_pool`` flag. No new segment classification is
     introduced here.
+
+    ``mode`` controls which users are counted:
+      - "snapshot": all current users, no date filter (segment distribution
+        is a point-in-time snapshot, not a time-windowed metric).
+      - "this_month" / "last_month": only users whose ``bot_segment_synced_at``
+        falls within that calendar month (UTC), grouped by normalized segment.
     """
     from config import (  # local import avoids a hard dep at module load
         is_blank_or_unknown_for_bot_segment,
@@ -1015,17 +1053,27 @@ def build_segments_panel(
     )
 
     now = now or _utc_now()
-    window = _normalize_dashboard_window(window)
-    window_start = _dashboard_window_start(window, now)
+    mode = _normalize_segment_mode(mode)
     errors: list[str] = []
 
-    total_users = metric(lambda: int(users_col.count_documents({})))
+    month_start: datetime | None = None
+    month_end: datetime | None = None
+    if mode == "this_month":
+        month_start, month_end = _month_bounds(now, months_back=0)
+    elif mode == "last_month":
+        month_start, month_end = _month_bounds(now, months_back=1)
+
+    sync_filter: dict = {}
+    if month_start is not None:
+        sync_filter = {"bot_segment_synced_at": {"$gte": month_start, "$lt": month_end}}
+
+    total_users = metric(lambda: int(users_col.count_documents(sync_filter)))
 
     without_segment = None
     normalized_counts: dict[str, int] = {}
     try:
         blank_count = 0
-        for doc in users_col.find({}, {"for_bot_segment": 1, "bot_segment": 1}):
+        for doc in users_col.find(sync_filter, {"for_bot_segment": 1, "bot_segment": 1}):
             raw = doc.get("for_bot_segment")
             if _segment_is_blank(raw):
                 raw = doc.get("bot_segment")
@@ -1050,30 +1098,33 @@ def build_segments_panel(
         filtered_count = normalized_counts.get(normalize_for_bot_segment(segment_filter))
 
     public_pool_claimed = metric(
-        lambda: int(users_col.count_documents({"has_ever_claimed_public_pool": True})),
+        lambda: int(users_col.count_documents({**sync_filter, "has_ever_claimed_public_pool": True})),
         note="Users with has_ever_claimed_public_pool=true (existing field; no new classification).",
     )
     public_pool_not_claimed = None
     if total_users["value"] is not None and public_pool_claimed["value"] is not None:
         public_pool_not_claimed = int(total_users["value"]) - int(public_pool_claimed["value"])
 
-    recently_updated = metric(
+    synced_count = metric(
         lambda: int(
             users_col.count_documents(
-                {"bot_segment_synced_at": {"$gte": window_start}} if window_start is not None else {"bot_segment_synced_at": {"$exists": True}}
+                sync_filter if month_start is not None else {"bot_segment_synced_at": {"$exists": True}}
             )
         ),
         quality="approx",
-        note=f"Users with bot_segment_synced_at set ({_admin_dashboard_window_label_local(window)})." if window_start is not None
+        note=f"Users with bot_segment_synced_at in {_segment_mode_label(mode).lower()}." if month_start is not None
         else "Users with a bot_segment_synced_at timestamp recorded (all time).",
     )
 
     return {
         "success": True,
+        "mode": mode,
+        "mode_label": _segment_mode_label(mode),
         "as_of": now.isoformat(),
-        "window": window,
-        "window_start": window_start.isoformat() if window_start else None,
-        "window_end": now.isoformat(),
+        "generated_at": now.isoformat(),
+        "month_start": month_start.isoformat() if month_start else None,
+        "month_end": month_end.isoformat() if month_end else None,
+        "data_source": "users collection (for_bot_segment / bot_segment / bot_segment_synced_at — read only)",
         "summary": {
             "total_users": total_users,
             "users_with_segment": {"value": with_segment, "data_quality": "exact" if with_segment is not None else "missing",
@@ -1083,17 +1134,13 @@ def build_segments_panel(
             "public_pool_claimed": public_pool_claimed,
             "public_pool_not_claimed": {"value": public_pool_not_claimed,
                                          "data_quality": "exact" if public_pool_not_claimed is not None else "missing"},
-            "recently_updated": recently_updated,
+            "recently_updated": synced_count,
         },
         "top_segments": top_segments_rows,
         "segment_filter": segment_filter or None,
         "filtered_count": filtered_count,
         "partial_errors": errors or None,
     }
-
-
-def _admin_dashboard_window_label_local(window: str) -> str:
-    return {"today": "today", "7d": "last 7 days", "30d": "last 30 days", "90d": "last 90 days", "all": "all time"}.get(window, window)
 
 
 # ---------------------------------------------------------------------------
