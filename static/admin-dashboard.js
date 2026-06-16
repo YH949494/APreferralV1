@@ -9,7 +9,9 @@
     funnelWindow: "7d",
     abuseWindow: "7d",
     referralsWindow: "7d",
-    voucherWindow: "7d"
+    voucherWindow: "7d",
+    segmentsWindow: "7d",
+    segmentsFilter: ""
   };
 
   function $(sel, root) { return (root || document).querySelector(sel); }
@@ -597,6 +599,49 @@
       });
   }
 
+  // ---------- Segment Overview ----------
+  function loadSegments(refresh) {
+    setMeta("Window: " + state.segmentsWindow + " · Loading…");
+    skeletonGrid($("#cards-segments-summary"), 6);
+    statePanel("segments-body", "loading", "Loading segments…");
+    var qs = "window=" + encodeURIComponent(state.segmentsWindow) + (refresh ? "&refresh=1" : "");
+    if (state.segmentsFilter) qs += "&segment=" + encodeURIComponent(state.segmentsFilter);
+    api("/api/admin/dashboard/segments?" + qs)
+      .then(function (d) {
+        renderMeta(d, state.segmentsWindow);
+        var s = d.summary;
+        $("#cards-segments-summary").innerHTML =
+          dqCard("Total Users", s.total_users) +
+          dqCard("Users With Segment", s.users_with_segment) +
+          dqCard("Users Without Segment", s.users_without_segment) +
+          dqCard("Public Pool — Claimed", s.public_pool_claimed) +
+          dqCard("Public Pool — Never Claimed", s.public_pool_not_claimed) +
+          dqCard("Recently Synced", s.recently_updated);
+
+        if (d.segment_filter) {
+          $("#cards-segments-summary").insertAdjacentHTML("beforeend",
+            '<div class="kpi"><div class="label">Filtered: ' + esc(d.segment_filter) + '</div>' +
+            '<div class="value">' + (d.filtered_count === null || d.filtered_count === undefined ? "0" : fmt(d.filtered_count)) + "</div></div>");
+        }
+
+        var rows = (d.top_segments || []).map(function (row) {
+          return "<tr><td>" + esc(row.segment) + '</td><td class="num">' + fmt(row.count) + "</td></tr>";
+        }).join("");
+        $("#segments-body").innerHTML = rows
+          ? '<table class="mini-table"><thead><tr><th>Segment</th><th class="num">Users</th></tr></thead><tbody>' + rows + "</tbody></table>"
+          : '<div class="empty">No segment data for selected period.</div>';
+
+        if (d.partial_errors) banner("Some segment metrics degraded: " + d.partial_errors.join("; "), "warn");
+      })
+      .catch(function (e) {
+        if (e.message !== "unauthorized") {
+          setMeta("Window: " + state.segmentsWindow + " · Failed to update");
+          $("#cards-segments-summary").innerHTML = '<div class="banner error">Failed: ' + esc(e.message) + "</div>";
+          statePanel("segments-body", "banner error", "Failed: " + e.message);
+        }
+      });
+  }
+
   function loadUser(query) {
     if (!query) { setMeta(""); statePanel("user-body", "empty", "Search by Telegram user_id or username to view a user profile."); return; }
     setMeta("Loading…");
@@ -675,7 +720,7 @@
       });
   }
 
-  var VIEWS = ["summary", "funnel", "abuse", "vouchers", "referrals", "affiliate", "reactivation", "audit", "users", "settings"];
+  var VIEWS = ["summary", "funnel", "abuse", "vouchers", "referrals", "affiliate", "reactivation", "audit", "segments", "users", "settings"];
   function switchView(view) {
     state.view = view;
     $all(".nav-item").forEach(function (b) { b.classList.toggle("active", b.dataset.view === view); });
@@ -683,7 +728,7 @@
     var titles = {
       summary: "Executive Summary", funnel: "Activation Funnel", abuse: "Abuse Overview",
       vouchers: "Vouchers", referrals: "Referrals", affiliate: "Affiliate", reactivation: "Reactivation",
-      audit: "Audit",
+      audit: "Audit", segments: "Segment Overview",
       users: "User Drilldown", settings: "Settings (Read Only)"
     };
     $("#view-title").textContent = titles[view] || view;
@@ -700,6 +745,7 @@
     else if (state.view === "affiliate") loadAffiliate(force);
     else if (state.view === "reactivation") loadReactivation(force);
     else if (state.view === "audit") loadAudit(force);
+    else if (state.view === "segments") loadSegments(force);
     else if (state.view === "users") { /* user view loads on search */ }
     else if (state.view === "settings") loadSettings(force);
   }
@@ -767,6 +813,23 @@
       var input = $("#" + pair[0]);
       if (input) input.addEventListener("input", function () { applyFilter(pair[1], input.value); });
     });
+
+    on("#segments-window", "click", "button", function (e) {
+      state.segmentsWindow = e.target.dataset.window;
+      seg("segments-window", e.target);
+      loadSegments(false);
+    });
+    var segFilterInput = $("#segments-filter");
+    if (segFilterInput) {
+      var segFilterTimer = null;
+      segFilterInput.addEventListener("input", function () {
+        clearTimeout(segFilterTimer);
+        segFilterTimer = setTimeout(function () {
+          state.segmentsFilter = (segFilterInput.value || "").trim().toLowerCase();
+          loadSegments(false);
+        }, 300);
+      });
+    }
 
     var us = $("#user-search"), ub = $("#user-search-btn");
     function doUserSearch() { loadUser((us.value || "").trim()); }
