@@ -20,6 +20,7 @@
       <button class="nav-item" data-view="reactivation">Reactivation</button>
       <button class="nav-item" data-view="audit">Audit</button>
       <button class="nav-item" data-view="segments">Segment Overview</button>
+      <button class="nav-item" data-view="validation">Data → Validation</button>
       <button class="nav-item" data-view="users">User Drilldown</button>
       <button class="nav-item" data-view="settings">Settings</button>
     </nav>
@@ -173,6 +174,18 @@
         <div class="card-grid" id="cards-segments-summary"></div>
         <div class="section-title">Top Segments</div>
         <div id="segments-body"></div>
+      </section>
+
+      <!-- VALIDATION / UIM COMPARE VIEW -->
+      <section id="view-validation" class="hidden">
+        <div style="margin-bottom:16px;"><span class="tag heuristic" style="font-size:12px;padding:4px 12px;">READ ONLY — comparison/debug tool, UIM is the source of truth</span></div>
+        <div class="controls" style="margin-bottom:16px;">
+          <input class="filter-input" id="validation-period" placeholder="Historical period comparison — coming later" style="max-width:320px;margin:0;" disabled />
+          <button class="btn primary" id="validation-apply-btn">Refresh</button>
+        </div>
+        <div class="card-grid" id="cards-validation-summary"></div>
+        <div class="section-title">Metric Comparison</div>
+        <div id="validation-body"></div>
       </section>
 
       <!-- USER DRILLDOWN VIEW -->

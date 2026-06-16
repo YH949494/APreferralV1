@@ -1255,6 +1255,164 @@ def build_segments_panel(
 
 
 # ---------------------------------------------------------------------------
+# 4b. Validation panel (UIM vs Backend) — Phase 5
+# ---------------------------------------------------------------------------
+
+# Only these metrics have a clear, already-existing backend equivalent
+# (total user count / existing segment counts). Everything else in
+# uim_validation.METRIC_KEYS has no backend equivalent yet and is reported
+# with backend_value=None / status="gray" rather than guessed at — in
+# particular the claim-risk tiers, welcome-abuse/farming-risk invitee
+# counts and "actual"/"old" player totals, none of which map to an
+# existing segment or query without inventing new classification rules.
+_VALIDATION_SEGMENT_METRIC_KEYS = {
+    "high_value_players": ("high_value",),
+    "new_player_total": ("new_user", "new_joiner"),
+}
+
+
+def _current_segment_counts(users_col) -> dict[str, int]:
+    """Current (point-in-time) normalized segment counts from ``users``.
+
+    Mirrors the counting logic in ``build_segments_panel`` (mode="snapshot")
+    so the validation panel's backend numbers match what the Segment
+    Overview tab already shows for "now".
+    """
+    from config import is_blank_or_unknown_for_bot_segment, normalize_for_bot_segment
+
+    counts: dict[str, int] = {}
+    for doc in users_col.find({}, {"for_bot_segment": 1, "bot_segment": 1}):
+        raw = doc.get("for_bot_segment")
+        if _segment_is_blank(raw):
+            raw = doc.get("bot_segment")
+        if is_blank_or_unknown_for_bot_segment(raw):
+            continue
+        normalized = normalize_for_bot_segment(raw)
+        counts[normalized] = counts.get(normalized, 0) + 1
+    return counts
+
+
+def _compute_backend_validation_metrics(*, users_col) -> dict[str, int | None]:
+    """Current backend-side values for the UIM "dashboard" KPI metrics.
+
+    Only ``total_campaign_players`` and the segment-derived counts in
+    ``_VALIDATION_SEGMENT_METRIC_KEYS`` are computable from existing data;
+    every other metric in ``uim_validation.METRIC_KEYS`` is intentionally
+    ``None`` (rendered as the "gray / missing source data" status) rather
+    than invented, per the read-only/no-new-classification constraint.
+
+    Always reads the live ``users`` collection — this release only compares
+    "now vs now", matching the always-live UIM "dashboard" tab.
+    """
+    from uim_validation import METRIC_KEYS
+
+    values: dict[str, int | None] = {key: None for key in METRIC_KEYS}
+    values["total_campaign_players"] = int(users_col.count_documents({}))
+    segment_counts = _current_segment_counts(users_col)
+    for metric_key, segment_names in _VALIDATION_SEGMENT_METRIC_KEYS.items():
+        values[metric_key] = sum(segment_counts.get(name, 0) for name in segment_names)
+    return values
+
+
+def _validation_compare(uim_value: Any, backend_value: Any) -> tuple[float | None, float | None, str]:
+    """Return ``(difference, difference_pct, status)`` for one metric.
+
+    Status thresholds: green <=1% variance, yellow >1% and <=5%, red >5%,
+    gray when either side is missing. When the UIM value is exactly 0 but
+    the backend differs, percentage variance is undefined (division by
+    zero) so we report ``difference_pct=None`` but still flag red since an
+    absolute mismatch exists.
+    """
+    if uim_value is None or backend_value is None:
+        return None, None, "gray"
+    difference = backend_value - uim_value
+    if uim_value == 0:
+        if backend_value == 0:
+            return 0.0, 0.0, "green"
+        return float(difference), None, "red"
+    difference_pct = round(100.0 * difference / abs(uim_value), 2)
+    abs_pct = abs(difference_pct)
+    if abs_pct <= 1:
+        status = "green"
+    elif abs_pct <= 5:
+        status = "yellow"
+    else:
+        status = "red"
+    return float(difference), difference_pct, status
+
+
+def build_validation_panel(
+    *,
+    users_col,
+    uim_result: dict,
+    now: datetime | None = None,
+) -> dict:
+    """Build the UIM-vs-Backend validation comparison (Phase 5, read-only).
+
+    ``uim_result`` is the dict returned by
+    ``uim_validation.fetch_uim_validation_metrics`` — fetching/parsing the
+    sheet is the caller's responsibility so this function (and its tests)
+    never need real Google credentials or network access.
+
+    Always compares the live UIM "dashboard" tab values against the live
+    backend (``users`` collection) values, both as of "now". There is no
+    historical/period mode in this release.
+    """
+    from uim_validation import METRIC_KEYS
+
+    now = now or _utc_now()
+    uim_ok = bool(uim_result.get("ok"))
+    uim_values: dict = uim_result.get("values") or {}
+    uim_notes: dict = uim_result.get("notes") or {}
+
+    backend_values = _compute_backend_validation_metrics(users_col=users_col)
+
+    metrics: list[dict] = []
+    counts = {"green": 0, "yellow": 0, "red": 0, "gray": 0}
+    for key in METRIC_KEYS:
+        uim_v = uim_values.get(key)
+        backend_v = backend_values.get(key)
+        difference, difference_pct, status = _validation_compare(uim_v, backend_v)
+        counts[status] += 1
+        metrics.append(
+            {
+                "metric": key,
+                "uim_value": uim_v,
+                "backend_value": backend_v,
+                "difference": difference,
+                "difference_pct": difference_pct,
+                "status": status,
+                "uim_note": uim_notes.get(key),
+            }
+        )
+
+    partial_errors = []
+    if not uim_ok and uim_result.get("error"):
+        partial_errors.append(uim_result["error"])
+
+    return {
+        "success": True,
+        "generated_at": now.isoformat(),
+        "data_source": 'UIM Google Sheet "dashboard" KPI tab vs backend dashboard calculations — read only',
+        "uim_source": {
+            "ok": uim_ok,
+            "error": uim_result.get("error"),
+            "spreadsheet_id": uim_result.get("spreadsheet_id"),
+            "worksheet_title": uim_result.get("worksheet_title"),
+        },
+        "summary": {
+            "total_metrics_compared": len(metrics),
+            "matched_metrics": counts["green"],
+            "warning_metrics": counts["yellow"],
+            "failed_metrics": counts["red"],
+            "missing_metrics": counts["gray"],
+        },
+        "metrics": metrics,
+        "partial_errors": partial_errors or None,
+    }
+
+
+# ---------------------------------------------------------------------------
 # 5. User drilldown
 # ---------------------------------------------------------------------------
 

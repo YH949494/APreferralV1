@@ -132,6 +132,36 @@ def fetch_sheet_rows(*, spreadsheet_id: str, worksheet_gid: str) -> list[list[An
     return worksheet.get_all_values()
 
 
+def fetch_sheet_rows_by_title(
+    *, spreadsheet_id: str, worksheet_title: str, cell_range: str | None = None
+) -> list[list[Any]]:
+    """Same as ``fetch_sheet_rows`` but selects the worksheet/tab by name.
+
+    Used when a tab's gid isn't a stable/known reference point (e.g. the
+    UIM "dashboard" KPI tab) — looking it up by title is more robust than
+    a hardcoded gid that could point at the wrong tab. ``cell_range`` (e.g.
+    "A1:D100") restricts the fetch to the known KPI row-type/label/value/
+    notes columns instead of pulling the whole sheet.
+    """
+    credentials = _service_account_credentials()
+    if credentials is None:
+        raise RuntimeError("missing Google service account credentials: set GOOGLE_SERVICE_ACCOUNT_JSON or GOOGLE_SERVICE_ACCOUNT_FILE")
+    import gspread
+
+    client = gspread.authorize(credentials)
+    spreadsheet = client.open_by_key(spreadsheet_id)
+    try:
+        worksheet = spreadsheet.worksheet(worksheet_title)
+    except gspread.exceptions.WorksheetNotFound as exc:
+        available = ", ".join(ws.title for ws in spreadsheet.worksheets())
+        raise RuntimeError(
+            f"worksheet title not found: {worksheet_title!r} (available tabs: {available})"
+        ) from exc
+    if cell_range:
+        return worksheet.get_values(cell_range)
+    return worksheet.get_all_values()
+
+
 def _chunks(items: list[int], size: int) -> Iterable[list[int]]:
     for idx in range(0, len(items), size):
         yield items[idx : idx + size]
