@@ -1009,7 +1009,10 @@ def build_segments_panel(
     ``has_ever_claimed_public_pool`` flag. No new segment classification is
     introduced here.
     """
-    from config import normalize_for_bot_segment  # local import avoids a hard dep at module load
+    from config import (  # local import avoids a hard dep at module load
+        is_blank_or_unknown_for_bot_segment,
+        normalize_for_bot_segment,
+    )
 
     now = now or _utc_now()
     window = _normalize_dashboard_window(window)
@@ -1026,7 +1029,7 @@ def build_segments_panel(
             raw = doc.get("for_bot_segment")
             if _segment_is_blank(raw):
                 raw = doc.get("bot_segment")
-            if _segment_is_blank(raw):
+            if is_blank_or_unknown_for_bot_segment(raw):
                 blank_count += 1
                 continue
             normalized = normalize_for_bot_segment(raw)
@@ -1044,7 +1047,7 @@ def build_segments_panel(
 
     filtered_count = None
     if segment_filter:
-        filtered_count = normalized_counts.get(str(segment_filter).strip().lower())
+        filtered_count = normalized_counts.get(normalize_for_bot_segment(segment_filter))
 
     public_pool_claimed = metric(
         lambda: int(users_col.count_documents({"has_ever_claimed_public_pool": True})),

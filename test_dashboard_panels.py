@@ -565,3 +565,25 @@ def test_segments_panel_never_writes():
     users = FakeCollection([{"user_id": 1, "for_bot_segment": "new_user"}])
     out = dp.build_segments_panel(users_col=users, now=NOW, window="7d")
     assert out["success"] is True
+
+
+def test_segments_panel_unknown_labels_count_as_missing():
+    users = FakeCollection([
+        {"user_id": 1, "for_bot_segment": "Unknown"},
+        {"user_id": 2, "for_bot_segment": "N/A"},
+        {"user_id": 3, "for_bot_segment": "high_value"},
+    ])
+    out = dp.build_segments_panel(users_col=users, now=NOW, window="all")
+    s = out["summary"]
+    assert s["users_without_segment"]["value"] == 2
+    assert s["users_with_segment"]["value"] == 1
+
+
+def test_segments_panel_filter_uses_same_normalizer():
+    users = FakeCollection([
+        {"user_id": 1, "for_bot_segment": "High Value"},
+        {"user_id": 2, "for_bot_segment": "highvalue"},
+        {"user_id": 3, "for_bot_segment": "low_value"},
+    ])
+    out = dp.build_segments_panel(users_col=users, now=NOW, window="all", segment_filter="High-Value")
+    assert out["filtered_count"] == 2
