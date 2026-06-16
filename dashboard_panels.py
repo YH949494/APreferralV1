@@ -990,7 +990,7 @@ def build_audit_panel(
 
 _TOP_SEGMENTS_LIMIT = 15
 
-_SEGMENT_MODES = {"snapshot", "this_month", "last_month", "month"}
+_SEGMENT_MODES = {"snapshot", "this_month", "last_month", "month", "snapshot_month"}
 _DEFAULT_SEGMENT_MODE = "snapshot"
 
 
@@ -1032,16 +1032,50 @@ def _month_bounds(now: datetime, *, months_back: int) -> tuple[datetime, datetim
 def _segment_mode_label(mode: str, selected_month: str | None = None) -> str:
     if mode == "month" and selected_month:
         return f"Synced in {selected_month}"
+    if mode == "snapshot_month" and selected_month:
+        return f"Segment snapshot history for {selected_month}"
     return {
         "snapshot": "Current segment snapshot",
         "this_month": "Synced this month",
         "last_month": "Synced last month",
         "month": "Synced in selected month",
+        "snapshot_month": "Segment snapshot history (monthly)",
     }.get(mode, mode)
 
 
 def _segment_is_blank(raw: Any) -> bool:
     return raw is None or str(raw).strip() == ""
+
+
+def build_monthly_segment_distribution(*, segment_snapshots_col, month: str) -> dict:
+    """Monthly segment distribution from segment_snapshots (latest snapshot per user).
+
+    ``month`` is a "YYYY-MM" string. Uses the most recent snapshot per
+    ``user_id`` within that month (multiple weekly snapshots in the same
+    month are collapsed to one), grouped by ``normalized_segment``.
+    Returns a clear empty state when no snapshots exist for the month.
+    """
+    docs = list(segment_snapshots_col.find({"snapshot_month": month}))
+    latest_by_user: dict[Any, dict] = {}
+    for doc in docs:
+        user_id = doc.get("user_id")
+        existing = latest_by_user.get(user_id)
+        if existing is None or (doc.get("created_at") or datetime.min) >= (existing.get("created_at") or datetime.min):
+            latest_by_user[user_id] = doc
+
+    normalized_counts: dict[str, int] = {}
+    for doc in latest_by_user.values():
+        normalized = doc.get("normalized_segment") or "unclassified"
+        normalized_counts[normalized] = normalized_counts.get(normalized, 0) + 1
+
+    top_segments = sorted(normalized_counts.items(), key=lambda kv: kv[1], reverse=True)[:_TOP_SEGMENTS_LIMIT]
+    return {
+        "month": month,
+        "has_data": bool(latest_by_user),
+        "total_users": len(latest_by_user),
+        "top_segments": [{"segment": name, "count": count} for name, count in top_segments],
+        "segment_counts": normalized_counts,
+    }
 
 
 def build_segments_panel(
@@ -1051,6 +1085,7 @@ def build_segments_panel(
     mode: str = _DEFAULT_SEGMENT_MODE,
     segment_filter: str | None = None,
     month: str | None = None,
+    segment_snapshots_col=None,
 ) -> dict:
     """Read-only segment distribution built from existing user fields.
 
@@ -1075,6 +1110,56 @@ def build_segments_panel(
     now = now or _utc_now()
     mode = _normalize_segment_mode(mode)
     errors: list[str] = []
+
+    if mode == "snapshot_month":
+        _, _, selected_month = _parse_segment_month(month)
+        if selected_month is None or segment_snapshots_col is None:
+            return {
+                "success": True,
+                "mode": "snapshot_month",
+                "mode_label": _segment_mode_label("snapshot_month", selected_month),
+                "selected_month": selected_month,
+                "as_of": now.isoformat(),
+                "generated_at": now.isoformat(),
+                "month_start": None,
+                "month_end": None,
+                "data_source": "segment_snapshots collection (read only)",
+                "summary": {
+                    "total_users": {"value": 0, "data_quality": "missing", "note": "No month specified or no snapshot collection available."},
+                },
+                "top_segments": [],
+                "segment_filter": segment_filter or None,
+                "filtered_count": None,
+                "has_data": False,
+                "partial_errors": ["snapshot_month requires a valid 'month' (YYYY-MM)"] if selected_month is None else None,
+            }
+        distribution = build_monthly_segment_distribution(segment_snapshots_col=segment_snapshots_col, month=selected_month)
+        filtered_count = None
+        if segment_filter:
+            filtered_count = distribution["segment_counts"].get(normalize_for_bot_segment(segment_filter))
+        return {
+            "success": True,
+            "mode": "snapshot_month",
+            "mode_label": _segment_mode_label("snapshot_month", selected_month),
+            "selected_month": selected_month,
+            "as_of": now.isoformat(),
+            "generated_at": now.isoformat(),
+            "month_start": None,
+            "month_end": None,
+            "data_source": "segment_snapshots collection (latest snapshot per user in month — read only)",
+            "summary": {
+                "total_users": {
+                    "value": distribution["total_users"],
+                    "data_quality": "exact" if distribution["has_data"] else "missing",
+                    "note": "No snapshots recorded for this month yet." if not distribution["has_data"] else None,
+                },
+            },
+            "top_segments": distribution["top_segments"],
+            "segment_filter": segment_filter or None,
+            "filtered_count": filtered_count,
+            "has_data": distribution["has_data"],
+            "partial_errors": None,
+        }
 
     month_start: datetime | None = None
     month_end: datetime | None = None

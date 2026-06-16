@@ -38,6 +38,7 @@ def _empty_summary(*, dry_run: bool) -> dict:
         "blank_segments": 0,
         "unknown_segments": 0,
         "invalid_user_ids": 0,
+        "snapshots_written": 0,
         "dry_run": bool(dry_run),
         "error": None,
     }
@@ -63,6 +64,58 @@ def _resolve_users_collection(users_col=None):
         return users_col
     database.init_db()
     return database.users_collection
+
+
+def _resolve_segment_snapshots_collection(segment_snapshots_col=None):
+    if segment_snapshots_col is not None:
+        return segment_snapshots_col
+    return database.segment_snapshots_col
+
+
+def _snapshot_week_key(moment: datetime) -> str:
+    iso_year, iso_week, _ = moment.isocalendar()
+    return f"{iso_year:04d}-W{iso_week:02d}"
+
+
+def _snapshot_month_key(moment: datetime) -> str:
+    return f"{moment.year:04d}-{moment.month:02d}"
+
+
+def _write_segment_snapshots(segment_snapshots_col, matched_updates: list[dict], *, now: datetime) -> int:
+    """Insert one idempotent snapshot per synced user for this ISO week.
+
+    Upserts on (user_id, snapshot_week) so re-running the sync within the
+    same week replaces the existing snapshot instead of duplicating it.
+    """
+    snapshot_week = _snapshot_week_key(now)
+    snapshot_month = _snapshot_month_key(now)
+    ops = []
+    for item in matched_updates:
+        fields = item["set"]
+        user_id = item["user_id"]
+        ops.append(
+            UpdateOne(
+                {"user_id": user_id, "snapshot_week": snapshot_week},
+                {
+                    "$set": {
+                        "user_id": user_id,
+                        "telegram_user_id": user_id,
+                        "segment": fields.get("for_bot_segment"),
+                        "normalized_segment": fields.get("for_bot_segment_normalized"),
+                        "snapshot_week": snapshot_week,
+                        "snapshot_month": snapshot_month,
+                        "source": "UIM",
+                        "created_at": now,
+                    }
+                },
+                upsert=True,
+            )
+        )
+    written = 0
+    for batch in _chunks(ops, BATCH_SIZE):
+        result = segment_snapshots_col.bulk_write(batch, ordered=False)
+        written += int(getattr(result, "upserted_count", 0) or 0) + int(getattr(result, "modified_count", 0) or 0)
+    return written
 
 
 def fetch_sheet_rows(*, spreadsheet_id: str, worksheet_gid: str) -> list[list[Any]]:
@@ -96,7 +149,9 @@ def _existing_user_ids(users_col, user_ids: list[int]) -> set[int]:
     return existing
 
 
-def _parse_rows(rows: list[list[Any]], summary: dict, *, spreadsheet_id: str, worksheet_gid: str) -> tuple[list[dict], list[int]]:
+def _parse_rows(
+    rows: list[list[Any]], summary: dict, *, spreadsheet_id: str, worksheet_gid: str, now: datetime | None = None
+) -> tuple[list[dict], list[int]]:
     if not rows:
         raise RuntimeError("sheet returned no rows")
     headers = [str(value or "").strip().lower() for value in rows[0]]
@@ -108,7 +163,7 @@ def _parse_rows(rows: list[list[Any]], summary: dict, *, spreadsheet_id: str, wo
     updates: list[dict] = []
     user_ids: list[int] = []
     seen: set[int] = set()
-    now = datetime.now(timezone.utc)
+    now = now or datetime.now(timezone.utc)
     for row in rows[1:]:
         summary["rows_scanned"] += 1
         raw_user_id = row[0] if row else ""
@@ -153,6 +208,7 @@ def sync_bot_segments_from_sheet(
     *,
     dry_run: bool = True,
     users_col=None,
+    segment_snapshots_col=None,
     rows: list[list[Any]] | None = None,
     spreadsheet_id: str | None = None,
     worksheet_gid: str | None = None,
@@ -160,10 +216,11 @@ def sync_bot_segments_from_sheet(
     summary = _empty_summary(dry_run=dry_run)
     spreadsheet_id = spreadsheet_id or os.getenv("BOT_SEGMENT_SHEET_ID", DEFAULT_BOT_SEGMENT_SHEET_ID)
     worksheet_gid = str(worksheet_gid or os.getenv("BOT_SEGMENT_SHEET_GID", DEFAULT_BOT_SEGMENT_SHEET_GID))
+    now = datetime.now(timezone.utc)
     try:
         if rows is None:
             rows = fetch_sheet_rows(spreadsheet_id=spreadsheet_id, worksheet_gid=worksheet_gid)
-        updates, user_ids = _parse_rows(rows, summary, spreadsheet_id=spreadsheet_id, worksheet_gid=worksheet_gid)
+        updates, user_ids = _parse_rows(rows, summary, spreadsheet_id=spreadsheet_id, worksheet_gid=worksheet_gid, now=now)
         users_col = _resolve_users_collection(users_col)
         existing_ids = _existing_user_ids(users_col, user_ids) if user_ids else set()
         summary["users_missing_in_db"] = max(0, len(set(user_ids)) - len(existing_ids))
@@ -181,6 +238,8 @@ def sync_bot_segments_from_sheet(
             modified += int(getattr(result, "modified_count", 0) or 0)
         summary["users_modified"] = modified
         summary["users_updated"] = modified
+        segment_snapshots_col = _resolve_segment_snapshots_collection(segment_snapshots_col)
+        summary["snapshots_written"] = _write_segment_snapshots(segment_snapshots_col, matched_updates, now=now)
         summary["ok"] = True
         logger.info("[BOT_SEGMENT_SYNC] commit_summary=%s", summary)
         return summary
