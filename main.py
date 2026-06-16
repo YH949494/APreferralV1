@@ -3203,44 +3203,24 @@ def dashboard_validation():
 
     Debug/compare tool only — never writes to ``users``, never touches
     segment classification, voucher allocation, public-pool probability or
-    reward logic. Comparison period defaults to the current ISO week.
+    reward logic. Always compares current live UIM values vs current live
+    backend values; there is no historical/period mode in this release.
     """
     ok, err = require_admin_from_query()
     if not ok:
         msg, code = err
         return jsonify({"success": False, "message": msg}), code
     now = _utc_now()
-    current_period = _uim_validation.bot_segment_sync._snapshot_week_key(now)
-    comparison_period = request.args.get("period") or current_period
-    cache_key = f"panel:validation:{comparison_period}"
 
     def _build():
-        # The UIM "dashboard" tab is a live KPI view with no historical
-        # dimension, so it can only answer for the current week — fetching
-        # it for a past period would silently compare today's sheet values
-        # against that period's backend numbers. For non-current periods we
-        # skip the sheet fetch entirely and let the backend-only (segment
-        # snapshot) side of the comparison speak for itself.
-        if comparison_period == current_period:
-            uim_result = _uim_validation.fetch_uim_validation_metrics()
-        else:
-            uim_result = {
-                "ok": False,
-                "error": "UIM dashboard tab is live-only; no historical data for periods other than the current week.",
-                "values": {},
-                "notes": {},
-                "spreadsheet_id": None,
-                "worksheet_title": _uim_validation.DEFAULT_VALIDATION_SHEET_TAB,
-            }
+        uim_result = _uim_validation.fetch_uim_validation_metrics()
         return _panels.build_validation_panel(
             users_col=users_collection,
             uim_result=uim_result,
-            segment_snapshots_col=segment_snapshots_collection,
             now=now,
-            comparison_period=comparison_period,
         )
 
-    return _panel_cached(cache_key, _build)
+    return _panel_cached("panel:validation", _build)
 
 
 @admin_bp.get("/api/admin/dashboard/vouchers")

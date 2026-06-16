@@ -132,12 +132,16 @@ def fetch_sheet_rows(*, spreadsheet_id: str, worksheet_gid: str) -> list[list[An
     return worksheet.get_all_values()
 
 
-def fetch_sheet_rows_by_title(*, spreadsheet_id: str, worksheet_title: str) -> list[list[Any]]:
+def fetch_sheet_rows_by_title(
+    *, spreadsheet_id: str, worksheet_title: str, cell_range: str | None = None
+) -> list[list[Any]]:
     """Same as ``fetch_sheet_rows`` but selects the worksheet/tab by name.
 
     Used when a tab's gid isn't a stable/known reference point (e.g. the
     UIM "dashboard" KPI tab) — looking it up by title is more robust than
-    a hardcoded gid that could point at the wrong tab.
+    a hardcoded gid that could point at the wrong tab. ``cell_range`` (e.g.
+    "A1:D100") restricts the fetch to the known KPI row-type/label/value/
+    notes columns instead of pulling the whole sheet.
     """
     credentials = _service_account_credentials()
     if credentials is None:
@@ -153,6 +157,8 @@ def fetch_sheet_rows_by_title(*, spreadsheet_id: str, worksheet_title: str) -> l
         raise RuntimeError(
             f"worksheet title not found: {worksheet_title!r} (available tabs: {available})"
         ) from exc
+    if cell_range:
+        return worksheet.get_values(cell_range)
     return worksheet.get_all_values()
 
 

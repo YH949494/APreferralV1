@@ -767,9 +767,8 @@ def test_validation_panel_computes_variance_and_status():
         "spreadsheet_id": "sheet123",
         "worksheet_title": "dashboard",
     }
-    out = dp.build_validation_panel(users_col=users, uim_result=uim_result, now=NOW, comparison_period="2026-W24")
+    out = dp.build_validation_panel(users_col=users, uim_result=uim_result, now=NOW)
     assert out["success"] is True
-    assert out["comparison_period"] == "2026-W24"
     assert out["uim_source"]["worksheet_title"] == "dashboard"
     by_metric = {m["metric"]: m for m in out["metrics"]}
 
@@ -821,7 +820,7 @@ def test_validation_panel_missing_uim_source_returns_gray_not_crash():
         "spreadsheet_id": "sheet123",
         "worksheet_title": "dashboard",
     }
-    out = dp.build_validation_panel(users_col=users, uim_result=uim_result, now=NOW, comparison_period="2026-W24")
+    out = dp.build_validation_panel(users_col=users, uim_result=uim_result, now=NOW)
     assert out["success"] is True
     assert out["uim_source"]["ok"] is False
     assert out["partial_errors"] == ["missing Google service account credentials"]
@@ -837,55 +836,9 @@ def test_validation_panel_does_not_crash_on_partial_uim_values():
         {"user_id": 2, "bot_segment": "low_value"},
     ])
     uim_result = {"ok": True, "error": None, "values": {"total_campaign_players": 2}, "spreadsheet_id": "s", "worksheet_title": "dashboard"}
-    out = dp.build_validation_panel(users_col=users, uim_result=uim_result, now=NOW, comparison_period="2026-W24")
+    out = dp.build_validation_panel(users_col=users, uim_result=uim_result, now=NOW)
     by_metric = {m["metric"]: m for m in out["metrics"]}
     assert by_metric["total_campaign_players"]["status"] == "green"
     # Metrics with no UIM value provided fall back to gray, no crash.
     assert by_metric["high_value_players"]["uim_value"] is None
     assert by_metric["high_value_players"]["status"] == "gray"
-
-
-def test_validation_panel_past_period_uses_segment_snapshots():
-    # Current-week users collection must NOT be touched for a past period.
-    users = FakeCollection([{"user_id": 999, "for_bot_segment": "high_value"}])
-    snapshots = FakeCollection([
-        {"user_id": 1, "normalized_segment": "high_value", "snapshot_week": "2026-W20"},
-        {"user_id": 2, "normalized_segment": "high_value", "snapshot_week": "2026-W20"},
-        {"user_id": 3, "normalized_segment": "new_user", "snapshot_week": "2026-W20"},
-        {"user_id": 4, "normalized_segment": "low_value", "snapshot_week": "2026-W20"},
-        # Different week -> must be excluded from the count.
-        {"user_id": 5, "normalized_segment": "high_value", "snapshot_week": "2026-W21"},
-    ])
-    uim_result = {"ok": True, "error": None, "values": {"total_campaign_players": 4}, "spreadsheet_id": "s", "worksheet_title": "dashboard"}
-    out = dp.build_validation_panel(
-        users_col=users,
-        uim_result=uim_result,
-        segment_snapshots_col=snapshots,
-        now=NOW,
-        comparison_period="2026-W20",
-    )
-    assert out["comparison_period"] == "2026-W20"
-    assert out["is_current_period"] is False
-    assert out["has_data"] is True
-    by_metric = {m["metric"]: m for m in out["metrics"]}
-    assert by_metric["total_campaign_players"]["backend_value"] == 4
-    assert by_metric["high_value_players"]["backend_value"] == 2
-    assert by_metric["new_player_total"]["backend_value"] == 1
-
-
-def test_validation_panel_past_period_without_snapshots_has_no_data():
-    users = FakeCollection([{"user_id": 999, "for_bot_segment": "high_value"}])
-    uim_result = {"ok": True, "error": None, "values": {"total_campaign_players": 4}, "spreadsheet_id": "s", "worksheet_title": "dashboard"}
-    out = dp.build_validation_panel(
-        users_col=users,
-        uim_result=uim_result,
-        segment_snapshots_col=FakeCollection([]),
-        now=NOW,
-        comparison_period="2026-W20",
-    )
-    assert out["is_current_period"] is False
-    assert out["has_data"] is False
-    for m in out["metrics"]:
-        assert m["backend_value"] is None
-    assert out["partial_errors"]
-    assert "2026-W20" in out["partial_errors"][0]

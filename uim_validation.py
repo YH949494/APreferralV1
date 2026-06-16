@@ -31,6 +31,11 @@ DEFAULT_VALIDATION_SHEET_ID = bot_segment_sync.DEFAULT_BOT_SEGMENT_SHEET_ID
 # Primary Phase 5 KPI source: the "dashboard" tab, selected by title.
 DEFAULT_VALIDATION_SHEET_TAB = "dashboard"
 
+# KPI rows live in columns A-D (row type, label, value, notes); 100 rows is
+# comfortably more than the confirmed KPI label count, with headroom for
+# future additions without fetching the whole sheet.
+DEFAULT_VALIDATION_SHEET_RANGE = "A1:D100"
+
 # campaign_roi (gid=1495862202) is a different tab on the same spreadsheet.
 # Not the Phase 5 KPI source — kept only so a future "campaign quality"
 # mapping doesn't have to rediscover the gid.
@@ -139,7 +144,9 @@ def fetch_uim_validation_metrics(
     try:
         if rows is None:
             rows = bot_segment_sync.fetch_sheet_rows_by_title(
-                spreadsheet_id=spreadsheet_id, worksheet_title=worksheet_title
+                spreadsheet_id=spreadsheet_id,
+                worksheet_title=worksheet_title,
+                cell_range=DEFAULT_VALIDATION_SHEET_RANGE,
             )
         values, notes = parse_uim_kpi_rows(rows)
         return {

@@ -1292,22 +1292,8 @@ def _current_segment_counts(users_col) -> dict[str, int]:
     return counts
 
 
-def _segment_counts_from_snapshots(docs: list[dict]) -> dict[str, int]:
-    counts: dict[str, int] = {}
-    for doc in docs:
-        normalized = doc.get("normalized_segment") or "unclassified"
-        counts[normalized] = counts.get(normalized, 0) + 1
-    return counts
-
-
-def _compute_backend_validation_metrics(
-    *,
-    users_col,
-    segment_snapshots_col,
-    comparison_period: str,
-    current_period: str,
-) -> tuple[dict[str, int | None], bool]:
-    """Backend-side values for the UIM "dashboard" KPI metrics.
+def _compute_backend_validation_metrics(*, users_col) -> dict[str, int | None]:
+    """Current backend-side values for the UIM "dashboard" KPI metrics.
 
     Only ``total_campaign_players`` and the segment-derived counts in
     ``_VALIDATION_SEGMENT_METRIC_KEYS`` are computable from existing data;
@@ -1315,41 +1301,17 @@ def _compute_backend_validation_metrics(
     ``None`` (rendered as the "gray / missing source data" status) rather
     than invented, per the read-only/no-new-classification constraint.
 
-    The requested ``comparison_period`` (an ISO week, e.g. "2026-W24")
-    actually selects *which* backend data is read:
-      - the **current** week reads the live ``users`` collection (today's
-        state), matching what the always-live UIM "dashboard" tab shows;
-      - any **other** week reads that week's ``segment_snapshots`` records
-        (written by the weekly UIM sync — see Phase 4A) instead, so a past
-        period is never silently answered with today's numbers.
-
-    Returns ``(values, has_data)`` — ``has_data`` is ``False`` when a past
-    period was requested but no snapshot exists for it yet, in which case
-    every value is ``None`` (gray) rather than substituting current data.
+    Always reads the live ``users`` collection — this release only compares
+    "now vs now", matching the always-live UIM "dashboard" tab.
     """
     from uim_validation import METRIC_KEYS
 
     values: dict[str, int | None] = {key: None for key in METRIC_KEYS}
-
-    if comparison_period == current_period:
-        values["total_campaign_players"] = int(users_col.count_documents({}))
-        segment_counts = _current_segment_counts(users_col)
-        has_data = True
-    else:
-        docs = (
-            list(segment_snapshots_col.find({"snapshot_week": comparison_period}))
-            if segment_snapshots_col is not None
-            else []
-        )
-        has_data = bool(docs)
-        if not has_data:
-            return values, False
-        values["total_campaign_players"] = len({doc.get("user_id") for doc in docs})
-        segment_counts = _segment_counts_from_snapshots(docs)
-
+    values["total_campaign_players"] = int(users_col.count_documents({}))
+    segment_counts = _current_segment_counts(users_col)
     for metric_key, segment_names in _VALIDATION_SEGMENT_METRIC_KEYS.items():
         values[metric_key] = sum(segment_counts.get(name, 0) for name in segment_names)
-    return values, has_data
+    return values
 
 
 def _validation_compare(uim_value: Any, backend_value: Any) -> tuple[float | None, float | None, str]:
@@ -1383,9 +1345,7 @@ def build_validation_panel(
     *,
     users_col,
     uim_result: dict,
-    segment_snapshots_col=None,
     now: datetime | None = None,
-    comparison_period: str | None = None,
 ) -> dict:
     """Build the UIM-vs-Backend validation comparison (Phase 5, read-only).
 
@@ -1394,35 +1354,18 @@ def build_validation_panel(
     sheet is the caller's responsibility so this function (and its tests)
     never need real Google credentials or network access.
 
-    ``comparison_period`` (an ISO week, e.g. "2026-W24") actually changes
-    what's compared, not just the label:
-      - for the **current** week, ``uim_result`` (the live "dashboard" tab)
-        is compared against the live ``users`` collection, as before;
-      - for any **other** week, the UIM "dashboard" tab is a live-only KPI
-        view with no historical dimension, so it cannot answer for a past
-        period — the caller is expected to pass an ``uim_result`` with
-        ``ok=False`` for non-current periods (see ``dashboard_validation``
-        in ``main.py``) rather than silently reusing today's sheet values.
-        The backend side still reports that week's numbers from
-        ``segment_snapshots`` (Phase 4A) when available, so the panel shows
-        useful backend history even though no UIM counterpart exists yet.
+    Always compares the live UIM "dashboard" tab values against the live
+    backend (``users`` collection) values, both as of "now". There is no
+    historical/period mode in this release.
     """
-    from bot_segment_sync import _snapshot_week_key
     from uim_validation import METRIC_KEYS
 
     now = now or _utc_now()
-    current_period = _snapshot_week_key(now)
-    comparison_period = comparison_period or current_period
     uim_ok = bool(uim_result.get("ok"))
     uim_values: dict = uim_result.get("values") or {}
     uim_notes: dict = uim_result.get("notes") or {}
 
-    backend_values, backend_has_data = _compute_backend_validation_metrics(
-        users_col=users_col,
-        segment_snapshots_col=segment_snapshots_col,
-        comparison_period=comparison_period,
-        current_period=current_period,
-    )
+    backend_values = _compute_backend_validation_metrics(users_col=users_col)
 
     metrics: list[dict] = []
     counts = {"green": 0, "yellow": 0, "red": 0, "gray": 0}
@@ -1446,15 +1389,10 @@ def build_validation_panel(
     partial_errors = []
     if not uim_ok and uim_result.get("error"):
         partial_errors.append(uim_result["error"])
-    if comparison_period != current_period and not backend_has_data:
-        partial_errors.append(f"No segment_snapshots data found for period {comparison_period}.")
 
     return {
         "success": True,
         "generated_at": now.isoformat(),
-        "comparison_period": comparison_period,
-        "is_current_period": comparison_period == current_period,
-        "has_data": backend_has_data,
         "data_source": 'UIM Google Sheet "dashboard" KPI tab vs backend dashboard calculations — read only',
         "uim_source": {
             "ok": uim_ok,

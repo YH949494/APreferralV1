@@ -13,7 +13,6 @@
     segmentsMode: "snapshot",
     segmentsMonth: "",
     segmentsFilter: "",
-    validationPeriod: ""
   };
 
   function $(sel, root) { return (root || document).querySelector(sel); }
@@ -670,11 +669,10 @@
     setMeta("Loading…");
     skeletonGrid($("#cards-validation-summary"), 4);
     statePanel("validation-body", "loading", "Loading UIM vs backend comparison…");
-    var qs = state.validationPeriod ? "period=" + encodeURIComponent(state.validationPeriod) : "";
-    if (refresh) qs += (qs ? "&" : "") + "refresh=1";
+    var qs = refresh ? "refresh=1" : "";
     api("/api/admin/dashboard/validation" + (qs ? "?" + qs : ""))
       .then(function (d) {
-        renderMeta(d, d.comparison_period || "current week");
+        renderMeta(d, "current (live)");
         var s = d.summary || {};
         $("#cards-validation-summary").innerHTML =
           dqCard("Total Metrics Compared", { value: s.total_metrics_compared }) +
@@ -915,13 +913,8 @@
       });
     }
 
-    var valPeriodInput = $("#validation-period"), valApplyBtn = $("#validation-apply-btn");
-    function applyValidationPeriod() {
-      state.validationPeriod = (valPeriodInput.value || "").trim();
-      loadValidation(false);
-    }
-    if (valApplyBtn) valApplyBtn.addEventListener("click", applyValidationPeriod);
-    if (valPeriodInput) valPeriodInput.addEventListener("keydown", function (e) { if (e.key === "Enter") applyValidationPeriod(); });
+    var valApplyBtn = $("#validation-apply-btn");
+    if (valApplyBtn) valApplyBtn.addEventListener("click", function () { loadValidation(true); });
 
     var us = $("#user-search"), ub = $("#user-search-btn");
     function doUserSearch() { loadUser((us.value || "").trim()); }
