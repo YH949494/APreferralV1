@@ -2251,6 +2251,8 @@ def require_admin_from_query():
 app = Flask(__name__, static_folder="static")
 CORS(app, resources={r"/*": {"origins": "*"}})
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", "dev-secret")
+# Phase 2A: weekly Marketing raw-data upload (CSV/XLSX), 50MB cap.
+app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024
 app.register_blueprint(vouchers_bp, url_prefix="/v2/miniapp")
 configure_admin_session(app)
 app.register_blueprint(admin_auth_bp)
@@ -3263,6 +3265,69 @@ def dashboard_kpi_gap_report():
         return jsonify({"success": False, "message": msg}), code
     now = _utc_now()
     return _panel_cached("panel:kpi_gap_report", lambda: _panels.build_kpi_gap_report_panel(now=now))
+
+
+import marketing_upload as _marketing_upload  # noqa: E402
+
+
+def _current_admin_identity() -> str:
+    """Best-effort admin identity for ``uploaded_by`` — never raises."""
+    try:
+        from admin_auth import session_admin
+
+        admin = session_admin()
+        if admin and admin.get("username"):
+            return str(admin["username"])
+    except Exception:
+        pass
+    return "admin"
+
+
+@admin_bp.post("/api/admin/data/upload-player-performance")
+def upload_player_performance():
+    """Phase 2A: weekly Marketing raw-data upload (CSV/XLSX), ingestion only.
+
+    Stores every uploaded column verbatim into ``marketing_raw_data`` (one
+    weekly snapshot per upload, never overwritten) plus an audit row into
+    ``marketing_upload_batches``. Does not calculate segments, does not
+    touch ``users.bot_segment``/``for_bot_segment``, and does not change
+    bot/voucher/reward behaviour in any way.
+    """
+    ok, err = require_admin_from_query()
+    if not ok:
+        msg, code = err
+        return jsonify({"success": False, "message": msg}), code
+
+    upload = request.files.get("file")
+    if upload is None or not upload.filename:
+        return jsonify({"success": False, "message": "missing file"}), 400
+
+    content = upload.read()
+    summary = _marketing_upload.ingest_upload(
+        content=content,
+        file_name=upload.filename,
+        uploaded_by=_current_admin_identity(),
+        now=_utc_now(),
+    )
+    if not summary.get("ok"):
+        return jsonify({"success": False, "message": summary.get("error") or "upload failed", **summary}), 400
+    return jsonify({"success": True, **summary})
+
+
+@admin_bp.get("/api/admin/data/upload-history")
+def data_upload_history():
+    """Phase 2A: most recent weekly marketing-data upload batches."""
+    ok, err = require_admin_from_query()
+    if not ok:
+        msg, code = err
+        return jsonify({"success": False, "message": msg}), code
+    limit = min(max(int(request.args.get("limit", 50) or 50), 1), 200)
+    batches = _marketing_upload.get_upload_history(limit=limit)
+    for b in batches:
+        b["_id"] = str(b.get("_id"))
+        if b.get("uploaded_at") is not None:
+            b["uploaded_at"] = b["uploaded_at"].isoformat() if hasattr(b["uploaded_at"], "isoformat") else b["uploaded_at"]
+    return jsonify({"success": True, "batches": batches})
 
 
 @admin_bp.get("/api/admin/dashboard/vouchers")

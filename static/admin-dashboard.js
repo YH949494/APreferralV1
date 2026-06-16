@@ -753,6 +753,73 @@
       });
   }
 
+  // ---------- Upload Player Performance (Phase 2A) ----------
+  function uploadPlayerPerformance() {
+    var input = $("#upload-file-input");
+    var file = input && input.files && input.files[0];
+    if (!file) { statePanel("upload-result-body", "empty", "Select a file first."); return; }
+    statePanel("upload-result-body", "loading", "Uploading and importing…");
+    var formData = new FormData();
+    formData.append("file", file);
+    fetch("/api/admin/data/upload-player-performance" + window.location.search, {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Accept": "application/json" },
+      body: formData,
+    })
+      .then(function (r) {
+        if (r.status === 401) { window.location.href = "/static/admin-login.html"; throw new Error("unauthorized"); }
+        return r.json().then(function (j) { return { ok: r.ok, body: j }; });
+      })
+      .then(function (res) {
+        var d = res.body;
+        if (!res.ok || !d.success) {
+          statePanel("upload-result-body", "banner error", "Failed: " + esc(d.message || "upload failed"));
+          return;
+        }
+        $("#upload-result-body").innerHTML =
+          '<div class="card-grid">' +
+          dqCard("Rows Total", { value: d.rows_total }) +
+          dqCard("Rows Imported", { value: d.rows_imported }) +
+          dqCard("Rows Failed", { value: d.rows_failed }) +
+          dqCard("Duplicate Rows", { value: d.duplicate_rows }) +
+          "</div>" +
+          '<table class="mini-table"><tbody>' +
+          "<tr><td>Snapshot Week</td><td>" + esc(d.snapshot_week) + "</td></tr>" +
+          "<tr><td>Snapshot Month</td><td>" + esc(d.snapshot_month) + "</td></tr>" +
+          "<tr><td>Upload Batch ID</td><td>" + esc(d.upload_batch_id) + "</td></tr>" +
+          "<tr><td>Status</td><td>" + esc(d.status) + "</td></tr>" +
+          "</tbody></table>";
+      })
+      .catch(function (e) {
+        if (e.message !== "unauthorized") {
+          statePanel("upload-result-body", "banner error", "Failed: " + esc(e.message));
+        }
+      });
+  }
+
+  // ---------- Upload History (Phase 2A) ----------
+  function loadUploadHistory() {
+    statePanel("upload-history-body", "loading", "Loading upload history…");
+    api("/api/admin/data/upload-history")
+      .then(function (d) {
+        var rows = (d.batches || []).map(function (b) {
+          return "<tr><td>" + esc(b.uploaded_at) + "</td><td>" + esc(b.file_name) + "</td>" +
+            "<td>" + esc(b.snapshot_week) + "</td><td>" + esc(b.snapshot_month) + "</td>" +
+            '<td class="num">' + fmt(b.rows_imported) + '</td><td class="num">' + fmt(b.rows_failed) + "</td>" +
+            "<td>" + esc(b.status) + "</td><td>" + esc(b.uploaded_by) + "</td></tr>";
+        }).join("");
+        $("#upload-history-body").innerHTML = rows
+          ? '<table class="mini-table"><thead><tr><th>Upload Date</th><th>File Name</th><th>Snapshot Week</th><th>Snapshot Month</th><th class="num">Rows Imported</th><th class="num">Rows Failed</th><th>Status</th><th>Uploader</th></tr></thead><tbody>' + rows + "</tbody></table>"
+          : '<div class="empty">No uploads yet.</div>';
+      })
+      .catch(function (e) {
+        if (e.message !== "unauthorized") {
+          statePanel("upload-history-body", "banner error", "Failed: " + esc(e.message));
+        }
+      });
+  }
+
   function loadUser(query) {
     if (!query) { setMeta(""); statePanel("user-body", "empty", "Search by Telegram user_id or username to view a user profile."); return; }
     setMeta("Loading…");
@@ -831,7 +898,7 @@
       });
   }
 
-  var VIEWS = ["summary", "funnel", "abuse", "vouchers", "referrals", "affiliate", "reactivation", "audit", "segments", "validation", "backendSegmentEngine", "users", "settings"];
+  var VIEWS = ["summary", "funnel", "abuse", "vouchers", "referrals", "affiliate", "reactivation", "audit", "segments", "validation", "backendSegmentEngine", "uploadPlayerPerformance", "uploadHistory", "users", "settings"];
   function switchView(view) {
     state.view = view;
     $all(".nav-item").forEach(function (b) { b.classList.toggle("active", b.dataset.view === view); });
@@ -841,6 +908,7 @@
       vouchers: "Vouchers", referrals: "Referrals", affiliate: "Affiliate", reactivation: "Reactivation",
       audit: "Audit", segments: "Segment Overview", validation: "Data → Validation / UIM Compare",
       backendSegmentEngine: "Data → Backend Segment Engine (Shadow Mode)",
+      uploadPlayerPerformance: "Data → Upload Player Performance", uploadHistory: "Data → Upload History",
       users: "User Drilldown", settings: "Settings (Read Only)"
     };
     $("#view-title").textContent = titles[view] || view;
@@ -860,6 +928,8 @@
     else if (state.view === "segments") loadSegments(force);
     else if (state.view === "validation") loadValidation(force);
     else if (state.view === "backendSegmentEngine") loadBackendSegmentEngine(force);
+    else if (state.view === "uploadPlayerPerformance") { /* upload view loads on submit */ }
+    else if (state.view === "uploadHistory") loadUploadHistory(force);
     else if (state.view === "users") { /* user view loads on search */ }
     else if (state.view === "settings") loadSettings(force);
   }
@@ -964,6 +1034,11 @@
 
     var bseApplyBtn = $("#bse-apply-btn");
     if (bseApplyBtn) bseApplyBtn.addEventListener("click", function () { loadBackendSegmentEngine(true); });
+
+    var uploadSubmitBtn = $("#upload-submit-btn");
+    if (uploadSubmitBtn) uploadSubmitBtn.addEventListener("click", uploadPlayerPerformance);
+    var uploadHistoryRefreshBtn = $("#upload-history-refresh-btn");
+    if (uploadHistoryRefreshBtn) uploadHistoryRefreshBtn.addEventListener("click", function () { loadUploadHistory(true); });
 
     var us = $("#user-search"), ub = $("#user-search-btn");
     function doUserSearch() { loadUser((us.value || "").trim()); }

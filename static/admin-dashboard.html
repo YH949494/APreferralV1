@@ -22,6 +22,8 @@
       <button class="nav-item" data-view="segments">Segment Overview</button>
       <button class="nav-item" data-view="validation">Data → Validation</button>
       <button class="nav-item" data-view="backendSegmentEngine">Data → Backend Segment Engine</button>
+      <button class="nav-item" data-view="uploadPlayerPerformance">Data → Upload Player Performance</button>
+      <button class="nav-item" data-view="uploadHistory">Data → Upload History</button>
       <button class="nav-item" data-view="users">User Drilldown</button>
       <button class="nav-item" data-view="settings">Settings</button>
     </nav>
@@ -201,6 +203,24 @@
         <div id="bse-segment-body"></div>
         <div class="section-title">Claim Risk Distribution</div>
         <div id="bse-claim-risk-body"></div>
+      </section>
+
+      <!-- UPLOAD PLAYER PERFORMANCE VIEW (Phase 2A) -->
+      <section id="view-uploadPlayerPerformance" class="hidden">
+        <div style="margin-bottom:16px;"><span class="tag heuristic" style="font-size:12px;padding:4px 12px;">INGESTION ONLY — does not calculate segments or change bot behaviour</span></div>
+        <div class="controls" style="margin-bottom:16px;">
+          <input type="file" id="upload-file-input" accept=".csv,.xlsx" />
+          <button class="btn primary" id="upload-submit-btn">Upload File</button>
+        </div>
+        <div id="upload-result-body"><div class="empty">Select a weekly player performance CSV/XLSX file and click Upload.</div></div>
+      </section>
+
+      <!-- UPLOAD HISTORY VIEW (Phase 2A) -->
+      <section id="view-uploadHistory" class="hidden">
+        <div class="controls" style="margin-bottom:16px;">
+          <button class="btn primary" id="upload-history-refresh-btn">Refresh</button>
+        </div>
+        <div id="upload-history-body"></div>
       </section>
 
       <!-- USER DRILLDOWN VIEW -->
