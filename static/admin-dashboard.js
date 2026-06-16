@@ -3,7 +3,14 @@
 (function () {
   "use strict";
 
-  var state = { view: "summary", funnelWindow: "7d", referralsWindow: "7d", voucherWindow: "7d" };
+  var state = {
+    view: "summary",
+    summaryWindow: "7d",
+    funnelWindow: "7d",
+    abuseWindow: "7d",
+    referralsWindow: "7d",
+    voucherWindow: "7d"
+  };
 
   function $(sel, root) { return (root || document).querySelector(sel); }
   function $all(sel, root) { return Array.prototype.slice.call((root || document).querySelectorAll(sel)); }
@@ -51,6 +58,24 @@
     el.innerHTML = '<div class="banner ' + (kind || "error") + '">' + msg + "</div>";
   }
 
+  function setMeta(text) {
+    var el = $("#dashboard-meta");
+    if (el) el.textContent = text || "";
+  }
+
+  function renderMeta(d, fallbackWindow) {
+    d = d || {};
+    var parts = [];
+    if (d.window_label || d.window || fallbackWindow) {
+      parts.push("Window: " + (d.window_label || d.window || fallbackWindow));
+    }
+    if (d.generated_at || d.as_of) {
+      parts.push("Last updated: " + new Date(d.generated_at || d.as_of).toLocaleString());
+    }
+    if (d.data_source) parts.push("Source: " + d.data_source);
+    setMeta(parts.join(" · "));
+  }
+
   function kpiCard(label, value, sub, missing) {
     var cls = missing ? "value missing" : "value";
     var val = missing ? "Data Not Available" : fmt(value);
@@ -67,11 +92,13 @@
 
   // ---------- Summary ----------
   function loadSummary(refresh) {
+    setMeta("Window: " + state.summaryWindow + " · Loading…");
     ["cards-users", "cards-community", "cards-referrals", "cards-vouchers", "cards-system"].forEach(function (id) {
       skeletonGrid($("#" + id), 4);
     });
-    api("/api/admin/dashboard/summary" + (refresh ? "?refresh=1" : ""))
+    api("/api/admin/dashboard/summary?window=" + encodeURIComponent(state.summaryWindow) + (refresh ? "&refresh=1" : ""))
       .then(function (d) {
+        renderMeta(d, state.summaryWindow);
         banner(d.partial_errors ? ("Some metrics failed to load: " + d.partial_errors.join("; ")) : null, "warn");
 
         var u = d.users;
@@ -91,28 +118,29 @@
           tgCard("OFFICIAL CHANNEL SUBSCRIBERS", u.official_channel_subscribers, u.official_channel_subscribers_stale, u.official_channel_subscribers_cached_at, "kpi-headline") +
           tgCard("ADVANTPLAY CHATROOM MEMBERS", u.chatroom_members, u.chatroom_members_stale, u.chatroom_members_cached_at, "kpi-secondary") +
           kpiCard("Registered Users", u.registered) +
-          kpiCard("Active 30d", u.active_30d) +
+          kpiCard("Active Users", u.active_selected, d.window_label) +
           kpiCard("Active 7d", u.active_7d) +
+          kpiCard("Active 30d", u.active_30d) +
           kpiCard("Active Today", u.active_today);
 
         $("#cards-community").innerHTML =
+          kpiCard("Check-ins", d.community.checkins_selected, d.window_label) +
           kpiCard("Check-ins Today", d.community.checkins_today) +
-          kpiCard("Check-ins 7d", d.community.checkins_7d) +
           kpiCard("Welcome Eligible", d.welcome.eligible) +
           kpiCard("Welcome Claimed", d.welcome.claimed,
             d.welcome.conversion_pct !== null ? (d.welcome.conversion_pct + "% conversion") : "");
 
         $("#cards-referrals").innerHTML =
           kpiCard("Pending Referrals", d.referrals.pending) +
-          kpiCard("Qualified (total)", d.referrals.qualified_total, fmt(d.referrals.qualified_7d) + " in 7d") +
+          kpiCard("Qualified", d.referrals.qualified, d.window_label) +
           kpiCard("Revoked Referrals", d.referrals.revoked);
 
         $("#cards-vouchers").innerHTML =
           kpiCard("Active Campaigns", d.vouchers.active_campaigns) +
-          kpiCard("Claims Today", d.vouchers.claims_today) +
+          kpiCard("Claims", d.vouchers.claims, d.window_label) +
           kpiCard("Remaining Codes", d.vouchers.remaining_codes) +
           kpiCard("Affiliate Pending", d.affiliate.pending_review) +
-          kpiCard("Affiliate Approved (mo)", d.affiliate.approved_this_month);
+          kpiCard("Affiliate Approved", d.affiliate.approved, d.window_label);
 
         var sys = d.system;
         var st = sys.worker_status || "unknown";
@@ -124,15 +152,28 @@
           kpiCard("Last Snapshot Publish", sys.last_snapshot_publish ? new Date(sys.last_snapshot_publish).toLocaleString() : "—") +
           kpiCard("Last Scheduler Run", sys.last_scheduler_run ? new Date(sys.last_scheduler_run).toLocaleString() : "—");
       })
-      .catch(function (e) { if (e.message !== "unauthorized") banner("Failed to load summary: " + e.message); });
+      .catch(function (e) {
+        if (e.message !== "unauthorized") {
+          setMeta("Window: " + state.summaryWindow + " · Failed to update");
+          ["cards-users", "cards-community", "cards-referrals", "cards-vouchers", "cards-system"].forEach(function (id) {
+            $("#" + id).innerHTML = '<div class="banner error">Failed: ' + esc(e.message) + "</div>";
+          });
+        }
+      });
   }
 
   // ---------- Funnel ----------
   function loadFunnel(refresh) {
+    setMeta("Window: " + state.funnelWindow + " · Loading…");
     var body = $("#funnel-body");
     body.innerHTML = '<div class="loading">Loading funnel…</div>';
     api("/api/admin/dashboard/funnel?window=" + encodeURIComponent(state.funnelWindow) + (refresh ? "&refresh=1" : ""))
       .then(function (d) {
+        renderMeta(d, state.funnelWindow);
+        if (!(d.stages || []).length) {
+          body.innerHTML = '<div class="empty">No data for selected period.</div>';
+          return;
+        }
         var maxCount = 0;
         d.stages.forEach(function (s) { if (typeof s.count === "number" && s.count > maxCount) maxCount = s.count; });
         var rows = d.stages.map(function (s) {
@@ -153,18 +194,25 @@
           '<table class="funnel-table"><thead><tr>' +
           "<th>Stage</th><th>Users</th><th></th><th>Conversion</th><th>Drop-off</th><th>Quality</th>" +
           "</tr></thead><tbody>" + rows + "</tbody></table>" +
-          '<div class="note">Conversion is relative to the first stage with data. Window: ' + d.window + ".</div>";
+          '<div class="note">Conversion is relative to the first stage with data.</div>';
       })
-      .catch(function (e) { if (e.message !== "unauthorized") body.innerHTML = '<div class="banner error">Failed: ' + e.message + "</div>"; });
+      .catch(function (e) {
+        if (e.message !== "unauthorized") {
+          setMeta("Window: " + state.funnelWindow + " · Failed to update");
+          body.innerHTML = '<div class="banner error">Failed: ' + esc(e.message) + "</div>";
+        }
+      });
   }
 
   // ---------- Abuse ----------
   function loadAbuse(refresh) {
+    setMeta("Window: " + state.abuseWindow + " · Loading…");
     var grid = $("#cards-abuse");
     skeletonGrid(grid, 5);
     $("#abuse-notes").innerHTML = "";
-    api("/api/admin/dashboard/abuse" + (refresh ? "?refresh=1" : ""))
+    api("/api/admin/dashboard/abuse?window=" + encodeURIComponent(state.abuseWindow) + (refresh ? "&refresh=1" : ""))
       .then(function (d) {
+        renderMeta(d, state.abuseWindow);
         var m = d.metrics;
         function card(label, item) {
           var missing = item.value === null || item.value === undefined;
@@ -179,9 +227,16 @@
           card("Suspicious Referrers", m.suspicious_referrers) +
           card("Voucher Hunters", m.voucher_hunter_count) +
           card("Welcome Abuse", m.welcome_abuse_count);
-        if (d.partial_errors) $("#abuse-notes").innerHTML = '<div class="banner warn">Partial errors: ' + d.partial_errors.join("; ") + "</div>";
+        $("#abuse-notes").innerHTML =
+          (d.partial_errors ? '<div class="banner warn">Partial errors: ' + d.partial_errors.join("; ") + "</div>" : "");
       })
-      .catch(function (e) { if (e.message !== "unauthorized") banner("Failed to load abuse data: " + e.message); });
+      .catch(function (e) {
+        if (e.message !== "unauthorized") {
+          setMeta("Window: " + state.abuseWindow + " · Failed to update");
+          grid.innerHTML = '<div class="banner error">Failed: ' + esc(e.message) + "</div>";
+          $("#abuse-notes").innerHTML = "";
+        }
+      });
   }
 
   function esc(s) {
@@ -208,7 +263,7 @@
   }
 
   function expandTable(headers, rows) {
-    if (!rows.length) return '<div class="empty">No records.</div>';
+    if (!rows.length) return '<div class="empty">No data for selected period.</div>';
     var head = "<thead><tr>" + headers.map(function (h) {
       return '<th' + (h.num ? ' class="num"' : "") + ">" + esc(h.label) + "</th>";
     }).join("") + "</tr></thead>";
@@ -279,10 +334,12 @@
   }
 
   function loadVouchers(refresh) {
+    setMeta("Window: " + state.voucherWindow + " · Loading…");
     skeletonGrid($("#cards-voucher-summary"), 6);
     statePanel("vouchers-body", "loading", "Loading campaigns…");
     api("/api/admin/dashboard/vouchers?window=" + encodeURIComponent(state.voucherWindow) + (refresh ? "&refresh=1" : ""))
       .then(function (d) {
+        renderMeta(d, state.voucherWindow);
         var s = d.summary;
         $("#cards-voucher-summary").innerHTML =
           dqCard("Active Campaigns", s.active_campaigns) + dqCard("Upcoming", s.upcoming_campaigns) +
@@ -322,14 +379,22 @@
         bindExpand("vouchers-body");
         if (d.partial_errors) banner("Some voucher metrics degraded: " + d.partial_errors.join("; "), "warn");
       })
-      .catch(function (e) { if (e.message !== "unauthorized") statePanel("vouchers-body", "banner error", "Failed: " + e.message); });
+      .catch(function (e) {
+        if (e.message !== "unauthorized") {
+          setMeta("Window: " + state.voucherWindow + " · Failed to update");
+          $("#cards-voucher-summary").innerHTML = '<div class="banner error">Failed: ' + esc(e.message) + "</div>";
+          statePanel("vouchers-body", "banner error", "Failed: " + e.message);
+        }
+      });
   }
 
   function loadReferrals(refresh) {
+    setMeta("Window: " + state.referralsWindow + " · Loading…");
     skeletonGrid($("#cards-referrals-summary"), 7);
     statePanel("referrals-body", "loading", "Loading referrers…");
     api("/api/admin/dashboard/referrals?window=" + encodeURIComponent(state.referralsWindow) + (refresh ? "&refresh=1" : ""))
       .then(function (d) {
+        renderMeta(d, state.referralsWindow);
         var s = d.summary;
         $("#cards-referrals-summary").innerHTML =
           dqCard("Total Referrers", s.total_referrers) + dqCard("Total Invitees", s.total_invitees) +
@@ -372,15 +437,23 @@
         if (d.note) $("#referrals-body").insertAdjacentHTML("beforeend", '<div class="note">' + esc(d.note) + "</div>");
         if (d.partial_errors) banner("Some referral metrics degraded: " + d.partial_errors.join("; "), "warn");
       })
-      .catch(function (e) { if (e.message !== "unauthorized") statePanel("referrals-body", "banner error", "Failed: " + e.message); });
+      .catch(function (e) {
+        if (e.message !== "unauthorized") {
+          setMeta("Window: " + state.referralsWindow + " · Failed to update");
+          $("#cards-referrals-summary").innerHTML = '<div class="banner error">Failed: ' + esc(e.message) + "</div>";
+          statePanel("referrals-body", "banner error", "Failed: " + e.message);
+        }
+      });
   }
 
   function loadAffiliate(refresh) {
+    setMeta("Loading…");
     skeletonGrid($("#cards-affiliate-summary"), 4);
     statePanel("affiliate-body", "loading", "Loading affiliates…");
     $("#affiliate-pools").innerHTML = "";
     api("/api/admin/dashboard/affiliate" + (refresh ? "?refresh=1" : ""))
       .then(function (d) {
+        renderMeta(d, "all time");
         var s = d.summary;
         $("#cards-affiliate-summary").innerHTML =
           dqCard("Pending Review", s.pending_review) + dqCard("Approved", s.approved) +
@@ -422,14 +495,23 @@
         if (d.note) $("#affiliate-body").insertAdjacentHTML("beforeend", '<div class="note">' + esc(d.note) + "</div>");
         if (d.partial_errors) banner("Some affiliate metrics degraded: " + d.partial_errors.join("; "), "warn");
       })
-      .catch(function (e) { if (e.message !== "unauthorized") statePanel("affiliate-body", "banner error", "Failed: " + e.message); });
+      .catch(function (e) {
+        if (e.message !== "unauthorized") {
+          setMeta("Failed to update");
+          $("#cards-affiliate-summary").innerHTML = '<div class="banner error">Failed: ' + esc(e.message) + "</div>";
+          $("#affiliate-pools").innerHTML = "";
+          statePanel("affiliate-body", "banner error", "Failed: " + e.message);
+        }
+      });
   }
 
   function loadReactivation(refresh) {
+    setMeta("Loading…");
     skeletonGrid($("#cards-reactivation-summary"), 4);
     statePanel("reactivation-body", "loading", "Loading campaign...");
     api("/api/admin/channel-reactivation/summary" + (refresh ? "?refresh=1" : ""))
       .then(function (d) {
+        renderMeta(d, "all time");
         $("#reactivation-status").textContent = d.active ? "Active" : "Paused";
         $("#cards-reactivation-summary").innerHTML =
           kpiCard("Eligible Users", d.eligible_users) +
@@ -444,7 +526,13 @@
           kvBlock("Campaign", [["Campaign ID", d.campaign_id], ["Status", d.active ? "Active" : "Paused"], ["Updated", dt(d.updated_at)]]) +
           "</div>";
       })
-      .catch(function (e) { if (e.message !== "unauthorized") statePanel("reactivation-body", "banner error", "Failed: " + e.message); });
+      .catch(function (e) {
+        if (e.message !== "unauthorized") {
+          setMeta("Failed to update");
+          $("#cards-reactivation-summary").innerHTML = '<div class="banner error">Failed: ' + esc(e.message) + "</div>";
+          statePanel("reactivation-body", "banner error", "Failed: " + e.message);
+        }
+      });
   }
 
   function setReactivation(active) {
@@ -468,10 +556,12 @@
   }
 
   function loadAudit(refresh) {
+    setMeta("Loading…");
     skeletonGrid($("#cards-audit-summary"), 6);
     statePanel("audit-body", "loading", "Loading audit trail…");
     api("/api/admin/dashboard/audit" + (refresh ? "?refresh=1" : ""))
       .then(function (d) {
+        renderMeta(d, "all time");
         var s = d.summary;
         $("#cards-audit-summary").innerHTML =
           dqCard("Admin Logins", s.admin_logins) + dqCard("Auth Events", s.auth_events) +
@@ -498,14 +588,22 @@
         bindExpand("audit-body");
         if (d.partial_errors) banner("Some audit sources degraded: " + d.partial_errors.join("; "), "warn");
       })
-      .catch(function (e) { if (e.message !== "unauthorized") statePanel("audit-body", "banner error", "Failed: " + e.message); });
+      .catch(function (e) {
+        if (e.message !== "unauthorized") {
+          setMeta("Failed to update");
+          $("#cards-audit-summary").innerHTML = '<div class="banner error">Failed: ' + esc(e.message) + "</div>";
+          statePanel("audit-body", "banner error", "Failed: " + e.message);
+        }
+      });
   }
 
   function loadUser(query) {
-    if (!query) { statePanel("user-body", "empty", "Search by Telegram user_id or username to view a user profile."); return; }
+    if (!query) { setMeta(""); statePanel("user-body", "empty", "Search by Telegram user_id or username to view a user profile."); return; }
+    setMeta("Loading…");
     statePanel("user-body", "loading", "Searching…");
     api("/api/admin/dashboard/user?query=" + encodeURIComponent(query))
       .then(function (d) {
+        renderMeta(d, "all time");
         if (!d.success) { statePanel("user-body", "empty", d.message || "No user found."); return; }
         var p = d.profile, x = d.xp || {}, ci = d.checkin || {}, rs = d.referral_stats || {}, ws = d.welcome_status || {};
         var risk = (d.risk_flags || []).length
@@ -530,13 +628,20 @@
           '<div class="detail-block" style="margin-top:14px;"><h4>Affiliate History</h4><table class="mini-table"><thead><tr><th>Type</th><th>Tier</th><th>Status</th><th>Month</th><th>Updated</th></tr></thead><tbody>' + ah + "</tbody></table></div>";
         if (d.partial_errors) banner("Some user metrics degraded: " + d.partial_errors.join("; "), "warn");
       })
-      .catch(function (e) { if (e.message !== "unauthorized") statePanel("user-body", "banner error", "Failed: " + e.message); });
+      .catch(function (e) {
+        if (e.message !== "unauthorized") {
+          setMeta("Failed to update");
+          statePanel("user-body", "banner error", "Failed: " + e.message);
+        }
+      });
   }
 
   function loadSettings(refresh) {
+    setMeta("Loading…");
     statePanel("settings-body", "loading", "Loading configuration…");
     api("/api/admin/dashboard/settings" + (refresh ? "?refresh=1" : ""))
       .then(function (d) {
+        renderMeta(d, "all time");
         var sec = d.sections || {};
         function render(obj, indent) {
           indent = indent || 0;
@@ -562,7 +667,12 @@
             "</div><div class=\"detail-block\">" + render(sec[k]) + "</div></div>";
         }).join("");
       })
-      .catch(function (e) { if (e.message !== "unauthorized") statePanel("settings-body", "banner error", "Failed: " + e.message); });
+      .catch(function (e) {
+        if (e.message !== "unauthorized") {
+          setMeta("Failed to update");
+          statePanel("settings-body", "banner error", "Failed: " + e.message);
+        }
+      });
   }
 
   var VIEWS = ["summary", "funnel", "abuse", "vouchers", "referrals", "affiliate", "reactivation", "audit", "users", "settings"];
@@ -612,6 +722,31 @@
         loadFunnel(false);
       });
     });
+
+    function seg(id, activeBtn) {
+      $all("#" + id + " button").forEach(function (x) { x.classList.toggle("active", x === activeBtn); });
+    }
+    function on(id, evt, sel, fn) {
+      var el = $(id);
+      if (!el) return;
+      el.addEventListener(evt, function (e) {
+        var t = e.target && e.target.closest && e.target.closest(sel);
+        if (t) fn({ target: t });
+      });
+    }
+
+    on("#summary-window", "click", "button", function (e) {
+      state.summaryWindow = e.target.dataset.window;
+      seg("summary-window", e.target);
+      loadSummary();
+    });
+
+    on("#abuse-window", "click", "button", function (e) {
+      state.abuseWindow = e.target.dataset.window;
+      seg("abuse-window", e.target);
+      loadAbuse();
+    });
+
     $all("#referrals-window button").forEach(function (b) {
       b.addEventListener("click", function () {
         state.referralsWindow = b.dataset.window;

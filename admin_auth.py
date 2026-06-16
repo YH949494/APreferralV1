@@ -350,7 +350,13 @@ def _reactivation_payload(active: bool | None = None, *, per_run_limit=None):
 def admin_channel_reactivation_summary():
     if not _admin_api_authorized():
         return jsonify({"success": False, "message": "Admins only"}), 403
-    return jsonify(_reactivation_payload())
+    payload = _reactivation_payload()
+    payload.setdefault("generated_at", datetime.now(timezone.utc).isoformat())
+    payload.setdefault("data_source", "UIM")
+    payload.setdefault("window", "all")
+    payload.setdefault("window_label", "all time")
+    payload.setdefault("window_start", None)
+    return jsonify(payload)
 
 
 @admin_auth_bp.post("/api/admin/channel-reactivation/start")
