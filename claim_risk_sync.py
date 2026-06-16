@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 from datetime import datetime, timezone
 from typing import Any, Iterable
 
@@ -202,8 +203,10 @@ def sync_claim_risk_from_sheet(
     worksheet_gid: str | None = None,
 ) -> dict:
     summary = _empty_summary(dry_run=dry_run)
-    spreadsheet_id = spreadsheet_id or bot_segment_sync.DEFAULT_BOT_SEGMENT_SHEET_ID
-    worksheet_gid = str(worksheet_gid or bot_segment_sync.DEFAULT_BOT_SEGMENT_SHEET_GID)
+    spreadsheet_id = spreadsheet_id or os.getenv("BOT_SEGMENT_SHEET_ID", bot_segment_sync.DEFAULT_BOT_SEGMENT_SHEET_ID)
+    worksheet_gid = str(
+        worksheet_gid or os.getenv("BOT_SEGMENT_SHEET_GID", bot_segment_sync.DEFAULT_BOT_SEGMENT_SHEET_GID)
+    )
     now = datetime.now(timezone.utc)
     try:
         if rows is None:
