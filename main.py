@@ -3210,14 +3210,32 @@ def dashboard_validation():
         msg, code = err
         return jsonify({"success": False, "message": msg}), code
     now = _utc_now()
-    comparison_period = request.args.get("period") or _uim_validation.bot_segment_sync._snapshot_week_key(now)
+    current_period = _uim_validation.bot_segment_sync._snapshot_week_key(now)
+    comparison_period = request.args.get("period") or current_period
     cache_key = f"panel:validation:{comparison_period}"
 
     def _build():
-        uim_result = _uim_validation.fetch_uim_validation_metrics()
+        # The UIM "dashboard" tab is a live KPI view with no historical
+        # dimension, so it can only answer for the current week — fetching
+        # it for a past period would silently compare today's sheet values
+        # against that period's backend numbers. For non-current periods we
+        # skip the sheet fetch entirely and let the backend-only (segment
+        # snapshot) side of the comparison speak for itself.
+        if comparison_period == current_period:
+            uim_result = _uim_validation.fetch_uim_validation_metrics()
+        else:
+            uim_result = {
+                "ok": False,
+                "error": "UIM dashboard tab is live-only; no historical data for periods other than the current week.",
+                "values": {},
+                "notes": {},
+                "spreadsheet_id": None,
+                "worksheet_title": _uim_validation.DEFAULT_VALIDATION_SHEET_TAB,
+            }
         return _panels.build_validation_panel(
             users_col=users_collection,
             uim_result=uim_result,
+            segment_snapshots_col=segment_snapshots_collection,
             now=now,
             comparison_period=comparison_period,
         )

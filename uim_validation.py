@@ -18,6 +18,7 @@ Never writes anywhere; never touches bot/segment/voucher/reward logic.
 from __future__ import annotations
 
 import logging
+import os
 import re
 from typing import Any
 
@@ -128,7 +129,12 @@ def fetch_uim_validation_metrics(
     On any sheet/credential failure this degrades to ``ok=False`` with an
     empty ``values`` dict rather than crashing the caller.
     """
-    spreadsheet_id = spreadsheet_id or DEFAULT_VALIDATION_SHEET_ID
+    # Reuse the same configured-sheet fallback as bot_segment_sync's weekly
+    # UIM sync (env var first, hardcoded default only as a last resort) so
+    # staging/prod deployments pointed at a non-default UIM sheet compare
+    # against the *same* spreadsheet the sync job reads, not always the
+    # hardcoded default.
+    spreadsheet_id = spreadsheet_id or os.getenv("BOT_SEGMENT_SHEET_ID", DEFAULT_VALIDATION_SHEET_ID)
     worksheet_title = worksheet_title or DEFAULT_VALIDATION_SHEET_TAB
     try:
         if rows is None:
