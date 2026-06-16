@@ -793,6 +793,14 @@ def test_validation_panel_computes_variance_and_status():
     assert out["summary"]["total_metrics_compared"] == 14
     assert out["summary"]["missing_metrics"] >= 11
 
+    # Phase 5B: each metric carries a "gap" explanation when documented.
+    assert by_metric["total_campaign_players"]["gap"]["implementation_status"] == "definition_mismatch"
+    assert by_metric["high_value_players"]["gap"]["implementation_status"] == "definition_mismatch"
+    assert by_metric["new_player_total"]["gap"]["implementation_status"] == "definition_mismatch"
+    # Metrics with no Phase 5B writeup yet (out of this phase's 7-KPI focus)
+    # report gap=None rather than inventing one.
+    assert by_metric["welcome_abuse_invitees"]["gap"] is None
+
 
 def test_validation_panel_status_thresholds():
     users = FakeCollection([])
@@ -842,3 +850,41 @@ def test_validation_panel_does_not_crash_on_partial_uim_values():
     # Metrics with no UIM value provided fall back to gray, no crash.
     assert by_metric["high_value_players"]["uim_value"] is None
     assert by_metric["high_value_players"]["status"] == "gray"
+
+
+# ---------------------------------------------------------------------------
+# KPI gap report (Phase 5B: UIM Formula Mapping / Backend KPI Gap Report)
+# ---------------------------------------------------------------------------
+
+def test_kpi_gap_report_documents_seven_focus_kpis():
+    out = dp.build_kpi_gap_report_panel(now=NOW)
+    assert out["success"] is True
+    assert out["summary"]["total_kpis_documented"] == 7
+    keys = {k["uim_metric_key"] for k in out["kpis"]}
+    assert keys == {
+        "total_campaign_players",
+        "voucher_claimer_accounts",
+        "actual_players",
+        "high_value_players",
+        "new_player_total",
+        "old_player_total",
+        "claim_risk",
+    }
+
+
+def test_kpi_gap_report_status_counts_match_entries():
+    out = dp.build_kpi_gap_report_panel(now=NOW)
+    s = out["summary"]
+    total = s["exact_available"] + s["backend_missing"] + s["definition_mismatch"] + s["source_missing"]
+    assert total == s["total_kpis_documented"]
+
+
+def test_kpi_gap_report_never_invents_proxy_calculations():
+    out = dp.build_kpi_gap_report_panel(now=NOW)
+    by_key = {k["uim_metric_key"]: k for k in out["kpis"]}
+    # No KPI is marked exact_available -- none of these are actually solved
+    # yet, and the report must not pretend otherwise.
+    assert all(k["implementation_status"] != "exact_available" for k in out["kpis"])
+    assert by_key["total_campaign_players"]["implementation_status"] == "definition_mismatch"
+    assert by_key["high_value_players"]["implementation_status"] == "definition_mismatch"
+    assert by_key["new_player_total"]["implementation_status"] == "definition_mismatch"

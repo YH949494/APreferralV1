@@ -3223,6 +3223,23 @@ def dashboard_validation():
     return _panel_cached("panel:validation", _build)
 
 
+@admin_bp.get("/api/admin/dashboard/kpi-gap-report")
+def dashboard_kpi_gap_report():
+    """Phase 5B: read-only UIM formula mapping / backend KPI gap report.
+
+    Pure documentation endpoint — does not query any collection, does not
+    fetch the live UIM sheet, and never touches segment classification,
+    voucher allocation, public-pool probability or reward logic. Explains
+    *why* each Validation-page metric is red/gray, not just that it is.
+    """
+    ok, err = require_admin_from_query()
+    if not ok:
+        msg, code = err
+        return jsonify({"success": False, "message": msg}), code
+    now = _utc_now()
+    return _panel_cached("panel:kpi_gap_report", lambda: _panels.build_kpi_gap_report_panel(now=now))
+
+
 @admin_bp.get("/api/admin/dashboard/vouchers")
 def dashboard_vouchers():
     ok, err = require_admin_from_query()
