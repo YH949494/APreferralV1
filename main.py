@@ -3253,6 +3253,74 @@ def dashboard_backend_segment_engine():
     )
 
 
+import re as _re
+_SNAPSHOT_WEEK_RE = _re.compile(r"^\d{4}-W(?:0[1-9]|[1-4]\d|5[0-3])$")
+
+
+@admin_bp.post("/api/admin/dashboard/backend-segment-engine/run")
+def backend_segment_engine_run():
+    """Phase 3C: Admin-triggered execution of the backend segment engine.
+
+    Shadow mode only — writes to backend_segment_snapshots, never to
+    users.bot_segment, voucher allocation, or reward logic.
+
+    POST body: {"snapshot_week": "YYYY-Www", "dry_run": true|false}
+    """
+    ok, err = require_admin_from_query()
+    if not ok:
+        msg, code = err
+        return jsonify({"ok": False, "error": msg}), code
+
+    body = request.get_json(silent=True) or {}
+    snapshot_week = body.get("snapshot_week")
+    dry_run = bool(body.get("dry_run", True))
+
+    if not snapshot_week:
+        return jsonify({"ok": False, "error": "snapshot_week is required. Do not omit or default."}), 400
+    if not _SNAPSHOT_WEEK_RE.match(str(snapshot_week)):
+        return jsonify({"ok": False, "error": f"Invalid snapshot_week format '{snapshot_week}'. Expected YYYY-Www (e.g. 2026-W25)."}), 400
+
+    # Fail fast if no marketing data exists for this week.
+    mkt_count = db["marketing_raw_data"].count_documents({"snapshot_week": snapshot_week})
+    if mkt_count == 0:
+        return jsonify({"ok": False, "error": f"No marketing_raw_data found for snapshot_week '{snapshot_week}'. Upload data first."}), 422
+
+    admin_identity = _current_admin_identity()
+    logger.info(
+        "[BSE_RUN] admin=%s snapshot_week=%s dry_run=%s mkt_rows=%d",
+        admin_identity, snapshot_week, dry_run, mkt_count,
+    )
+
+    import backend_segment_engine as _bse
+    summary = _bse.run_shadow_segment_engine(
+        snapshot_week=snapshot_week,
+        dry_run=dry_run,
+    )
+
+    logger.info(
+        "[BSE_RUN] done admin=%s snapshot_week=%s dry_run=%s ok=%s users_evaluated=%d snapshots_written=%d",
+        admin_identity, snapshot_week, dry_run,
+        summary.get("ok"), summary.get("users_evaluated", 0), summary.get("snapshots_written", 0),
+    )
+
+    # Invalidate cached dashboard panel so it reflects new snapshots.
+    if not dry_run and summary.get("ok"):
+        for k in list(LEADERBOARD_CACHE.keys()):
+            if k.startswith("panel:backend_segment_engine"):
+                LEADERBOARD_CACHE.pop(k, None)
+
+    return jsonify({
+        "ok": summary.get("ok", False),
+        "snapshot_week": snapshot_week,
+        "dry_run": dry_run,
+        "users_evaluated": summary.get("users_evaluated", 0),
+        "snapshots_written": summary.get("snapshots_written", 0),
+        "segment_counts": summary.get("segment_distribution", {}),
+        "claim_risk_counts": summary.get("claim_risk_distribution", {}),
+        "error": summary.get("error"),
+    })
+
+
 @admin_bp.get("/api/admin/dashboard/kpi-gap-report")
 def dashboard_kpi_gap_report():
     """Phase 5B: read-only UIM formula mapping / backend KPI gap report.
