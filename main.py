@@ -3245,6 +3245,7 @@ def dashboard_backend_segment_engine():
         cache_key,
         lambda: _panels.build_backend_segment_engine_panel(
             snapshots_col=db["backend_segment_snapshots"],
+            segment_snapshots_col=segment_snapshots_collection,
             now=now,
             month=month,
             snapshot_week=snapshot_week,

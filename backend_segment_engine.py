@@ -423,6 +423,15 @@ def build_snapshot_doc(
         "snapshot_week": snapshot_week,
         "snapshot_month": _snapshot_month_key(now),
         "calculated_at": now,
+        # Phase 4: raw input metrics stored for dashboard mismatch detail table.
+        # Never used for re-classification; shadow mode only.
+        "metrics_snapshot": {
+            "after_total_bet_amount": metrics.get("after_total_bet_amount"),
+            "withdraw_amount": metrics.get("withdraw_amount"),
+            "claim_count": _as_int(metrics.get("claim_count"), 0),
+            "referral_count": _as_int(metrics.get("referral_count"), 0),
+            "checkin_count": _as_int(metrics.get("checkin_count"), 0),
+        },
     }
     if uim_segment_raw is not None:
         doc["uim_comparison"] = compare_with_uim(

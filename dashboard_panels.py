@@ -1472,11 +1472,12 @@ def build_validation_panel(
 def build_backend_segment_engine_panel(
     *,
     snapshots_col,
+    segment_snapshots_col=None,
     now: datetime | None = None,
     month: str | None = None,
     snapshot_week: str | None = None,
 ) -> dict:
-    """Phase 3: read-only summary of the latest ``backend_segment_snapshots``.
+    """Phase 3/4: read-only summary of the latest ``backend_segment_snapshots``.
 
     Shadow-mode dashboard view only — reads the snapshot collection written
     by ``backend_segment_engine.run_shadow_segment_engine``; never queries
@@ -1485,24 +1486,36 @@ def build_backend_segment_engine_panel(
 
     When ``snapshot_week`` (e.g. "2026-W24") is provided, filter by that week.
     Otherwise, filter by ``month`` (YYYY-MM), defaulting to the current month.
+
+    Phase 4 additions (all read-only):
+      - ``backend_counts_by_week``: backend snapshot counts grouped by week.
+      - ``uim_counts_by_week``: UIM snapshot counts grouped by week (requires
+        ``segment_snapshots_col``; empty dict when not supplied).
+      - ``match_rate`` / ``mismatch_rate``: surfaced at top level for convenience.
+      - ``mismatch_by_segment_pair``: mismatch count per (backend, uim) pair.
+      - ``mismatch_details``: up to 200 mismatch rows with full metric fields.
     """
     now = now or _utc_now()
 
     if snapshot_week:
         query: dict = {"snapshot_week": snapshot_week}
+        resolved_month: str | None = None
     else:
-        month = month or f"{now.year:04d}-{now.month:02d}"
-        query = {"snapshot_month": month}
+        resolved_month = month or f"{now.year:04d}-{now.month:02d}"
+        query = {"snapshot_month": resolved_month}
 
     docs = list(snapshots_col.find(query))
 
     segment_counts: dict[str, int] = {}
     claim_risk_counts: dict[str, int] = {}
     age_distribution: dict[str, int] = {"new_player": 0, "old_player": 0, "unknown": 0}
+    backend_counts_by_week: dict[str, int] = {}
     matches = 0
     mismatches = 0
     compared = 0
+    mismatch_pair_counts: dict[tuple[str, str], int] = {}
     comparison_rows: list[dict] = []
+    mismatch_details: list[dict] = []
 
     for doc in docs:
         seg = doc.get("backend_segment", "unclassified")
@@ -1517,30 +1530,73 @@ def build_backend_segment_engine_panel(
         else:
             age_distribution["unknown"] += 1
 
+        w = doc.get("snapshot_week") or "unknown"
+        backend_counts_by_week[w] = backend_counts_by_week.get(w, 0) + 1
+
         comparison = doc.get("uim_comparison")
         if comparison is not None:
             compared += 1
-            if comparison.get("match"):
+            is_match = bool(comparison.get("match"))
+            b_seg = comparison.get("backend_segment") or seg
+            u_seg = comparison.get("uim_segment") or "unknown"
+            if is_match:
                 matches += 1
             else:
                 mismatches += 1
+                pair = (b_seg, u_seg)
+                mismatch_pair_counts[pair] = mismatch_pair_counts.get(pair, 0) + 1
+                if len(mismatch_details) < 200:
+                    ms = doc.get("metrics_snapshot") or {}
+                    mismatch_details.append(
+                        {
+                            "account": doc.get("account"),
+                            "backend_segment": b_seg,
+                            "uim_segment": u_seg,
+                            "match": False,
+                            "confidence": doc.get("confidence"),
+                            "reason": doc.get("segment_reason"),
+                            "after_total_bet_amount": ms.get("after_total_bet_amount"),
+                            "withdraw_amount": ms.get("withdraw_amount"),
+                            "claim_count": ms.get("claim_count"),
+                            "referral_count": ms.get("referral_count"),
+                            "checkin_count": ms.get("checkin_count"),
+                        }
+                    )
             if len(comparison_rows) < 50:
                 comparison_rows.append(
                     {
                         "account": doc.get("account"),
-                        "backend_segment": comparison.get("backend_segment"),
-                        "uim_segment": comparison.get("uim_segment"),
-                        "match": comparison.get("match"),
+                        "backend_segment": b_seg,
+                        "uim_segment": u_seg,
+                        "match": is_match,
                         "confidence": doc.get("confidence"),
                         "reason": doc.get("segment_reason"),
                     }
                 )
+
+    # UIM counts by week — graceful when no collection supplied.
+    uim_counts_by_week: dict[str, int] = {}
+    if segment_snapshots_col is not None:
+        for udoc in segment_snapshots_col.find(query):
+            uw = udoc.get("snapshot_week") or "unknown"
+            uim_counts_by_week[uw] = uim_counts_by_week.get(uw, 0) + 1
+
+    mismatch_by_segment_pair = sorted(
+        [
+            {"backend_segment": k[0], "uim_segment": k[1], "count": v}
+            for k, v in mismatch_pair_counts.items()
+        ],
+        key=lambda x: x["count"],
+        reverse=True,
+    )
 
     total = len(docs)
     hv = segment_counts.get("high_value", 0)
     lv = segment_counts.get("low_value", 0)
     na = segment_counts.get("normal_actual", 0)
     actual_players = hv + lv + na
+    match_rate = round(100.0 * matches / compared, 2) if compared else None
+    mismatch_rate = round(100.0 * mismatches / compared, 2) if compared else None
 
     return {
         "success": True,
@@ -1551,7 +1607,7 @@ def build_backend_segment_engine_panel(
             "allocation, or reward logic. UIM for_bot_segment remains the "
             "production source of truth."
         ),
-        "snapshot_month": month if not snapshot_week else None,
+        "snapshot_month": resolved_month,
         "snapshot_week": snapshot_week or None,
         "summary": {
             "total_users_evaluated": total,
@@ -1566,12 +1622,18 @@ def build_backend_segment_engine_panel(
             "uim_compared": compared,
             "uim_matches": matches,
             "uim_mismatches": mismatches,
-            "match_rate": round(100.0 * matches / compared, 2) if compared else None,
-            "mismatch_rate": round(100.0 * mismatches / compared, 2) if compared else None,
+            "match_rate": match_rate,
+            "mismatch_rate": mismatch_rate,
         },
+        "match_rate": match_rate,
+        "mismatch_rate": mismatch_rate,
         "segment_distribution": segment_counts,
         "claim_risk_distribution": claim_risk_counts,
         "player_age_distribution": age_distribution,
+        "backend_counts_by_week": backend_counts_by_week,
+        "uim_counts_by_week": uim_counts_by_week,
+        "mismatch_by_segment_pair": mismatch_by_segment_pair,
+        "mismatch_details": mismatch_details,
         "comparison_rows": comparison_rows,
     }
 

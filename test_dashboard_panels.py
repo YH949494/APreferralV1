@@ -990,3 +990,282 @@ def test_bse_panel_player_age_distribution():
     assert age["new_player"] == 1
     assert age["old_player"] == 2
     assert age.get("unknown", 0) == 0
+
+
+# ---------------------------------------------------------------------------
+# Phase 4: Segment Dashboard Refinement
+# ---------------------------------------------------------------------------
+
+def _make_p4_snapshots():
+    """Three backend snapshots across two weeks with UIM comparison data."""
+    return FakeCollection([
+        {
+            "account": "alice",
+            "backend_segment": "high_value",
+            "player_age_type": "old_player",
+            "snapshot_week": "2026-W24",
+            "snapshot_month": "2026-06",
+            "claim_risk_level": "normal",
+            "confidence": "high",
+            "segment_reason": "after_bet_multiple >= 8x",
+            "uim_comparison": {"backend_segment": "high_value", "uim_segment": "high_value", "match": True},
+            "metrics_snapshot": {
+                "after_total_bet_amount": 800.0,
+                "withdraw_amount": 100.0,
+                "claim_count": 2,
+                "referral_count": 1,
+                "checkin_count": 5,
+            },
+        },
+        {
+            "account": "bob",
+            "backend_segment": "low_value",
+            "player_age_type": "old_player",
+            "snapshot_week": "2026-W25",
+            "snapshot_month": "2026-06",
+            "claim_risk_level": "normal",
+            "confidence": "high",
+            "segment_reason": "after_bet_multiple < 8x",
+            "uim_comparison": {"backend_segment": "low_value", "uim_segment": "high_value", "match": False},
+            "metrics_snapshot": {
+                "after_total_bet_amount": 300.0,
+                "withdraw_amount": 200.0,
+                "claim_count": 5,
+                "referral_count": 3,
+                "checkin_count": 7,
+            },
+        },
+        {
+            "account": "carol",
+            "backend_segment": "ghost",
+            "player_age_type": "new_player",
+            "snapshot_week": "2026-W25",
+            "snapshot_month": "2026-06",
+            "claim_risk_level": "normal",
+            "confidence": "high",
+            "segment_reason": "no play, no referrals, no checkins",
+            "uim_comparison": {"backend_segment": "ghost", "uim_segment": "normal_actual", "match": False},
+            "metrics_snapshot": {
+                "after_total_bet_amount": 0.0,
+                "withdraw_amount": 0.0,
+                "claim_count": 0,
+                "referral_count": 0,
+                "checkin_count": 0,
+            },
+        },
+    ])
+
+
+def _make_p4_uim_snapshots():
+    """Matching UIM segment_snapshots for the same weeks."""
+    return FakeCollection([
+        {"user_id": 1, "segment": "high_value", "snapshot_week": "2026-W24", "snapshot_month": "2026-06"},
+        {"user_id": 2, "segment": "high_value", "snapshot_week": "2026-W25", "snapshot_month": "2026-06"},
+        {"user_id": 3, "segment": "normal_actual", "snapshot_week": "2026-W25", "snapshot_month": "2026-06"},
+        {"user_id": 4, "segment": "ghost", "snapshot_week": "2026-W25", "snapshot_month": "2026-06"},
+    ])
+
+
+class TestPhase4WeeklyFilter:
+    def test_weekly_filter_scopes_backend_counts_by_week(self):
+        """snapshot_week filter produces a single-entry backend_counts_by_week."""
+        col = _make_p4_snapshots()
+        out = dp.build_backend_segment_engine_panel(snapshots_col=col, snapshot_week="2026-W25")
+        assert out["backend_counts_by_week"] == {"2026-W25": 2}
+
+    def test_weekly_filter_correct_totals(self):
+        col = _make_p4_snapshots()
+        out = dp.build_backend_segment_engine_panel(snapshots_col=col, snapshot_week="2026-W25")
+        assert out["summary"]["total_users_evaluated"] == 2
+        assert out["snapshot_week"] == "2026-W25"
+        assert out["snapshot_month"] is None
+
+    def test_weekly_filter_uim_counts_by_week(self):
+        col = _make_p4_snapshots()
+        uim_col = _make_p4_uim_snapshots()
+        out = dp.build_backend_segment_engine_panel(
+            snapshots_col=col, segment_snapshots_col=uim_col, snapshot_week="2026-W25"
+        )
+        assert out["uim_counts_by_week"] == {"2026-W25": 3}
+
+    def test_weekly_filter_no_uim_col_gives_empty_dict(self):
+        col = _make_p4_snapshots()
+        out = dp.build_backend_segment_engine_panel(snapshots_col=col, snapshot_week="2026-W25")
+        assert out["uim_counts_by_week"] == {}
+
+
+class TestPhase4MonthlyFilter:
+    def test_monthly_filter_backend_counts_by_week_has_both_weeks(self):
+        col = _make_p4_snapshots()
+        out = dp.build_backend_segment_engine_panel(
+            snapshots_col=col, month="2026-06",
+            now=datetime(2026, 6, 16, tzinfo=timezone.utc),
+        )
+        byw = out["backend_counts_by_week"]
+        assert byw.get("2026-W24") == 1
+        assert byw.get("2026-W25") == 2
+
+    def test_monthly_filter_uim_counts_by_week_all_weeks(self):
+        col = _make_p4_snapshots()
+        uim_col = _make_p4_uim_snapshots()
+        out = dp.build_backend_segment_engine_panel(
+            snapshots_col=col, segment_snapshots_col=uim_col, month="2026-06",
+            now=datetime(2026, 6, 16, tzinfo=timezone.utc),
+        )
+        uyw = out["uim_counts_by_week"]
+        assert uyw.get("2026-W24") == 1
+        assert uyw.get("2026-W25") == 3
+
+    def test_monthly_filter_snapshot_month_set_week_none(self):
+        col = _make_p4_snapshots()
+        out = dp.build_backend_segment_engine_panel(
+            snapshots_col=col, month="2026-06",
+            now=datetime(2026, 6, 16, tzinfo=timezone.utc),
+        )
+        assert out["snapshot_month"] == "2026-06"
+        assert out["snapshot_week"] is None
+
+    def test_week_overrides_month(self):
+        col = _make_p4_snapshots()
+        out = dp.build_backend_segment_engine_panel(
+            snapshots_col=col, snapshot_week="2026-W24", month="2026-06",
+            now=datetime(2026, 6, 16, tzinfo=timezone.utc),
+        )
+        assert out["summary"]["total_users_evaluated"] == 1
+        assert out["snapshot_week"] == "2026-W24"
+        assert out["snapshot_month"] is None
+
+
+class TestPhase4MatchRate:
+    def test_overall_match_rate_top_level(self):
+        """match_rate is surfaced at the top level as well as inside summary."""
+        col = _make_p4_snapshots()
+        out = dp.build_backend_segment_engine_panel(
+            snapshots_col=col, month="2026-06",
+            now=datetime(2026, 6, 16, tzinfo=timezone.utc),
+        )
+        # 3 compared, 1 match → 33.33 %
+        assert out["summary"]["uim_compared"] == 3
+        assert out["summary"]["uim_matches"] == 1
+        assert out["summary"]["uim_mismatches"] == 2
+        assert out["match_rate"] == round(100.0 / 3, 2)
+        assert out["mismatch_rate"] == round(200.0 / 3, 2)
+        assert out["match_rate"] == out["summary"]["match_rate"]
+
+    def test_match_rate_none_when_no_uim_comparison(self):
+        col = FakeCollection([
+            {"account": "x", "backend_segment": "ghost", "snapshot_week": "2026-W25",
+             "snapshot_month": "2026-06", "claim_risk_level": "normal",
+             "player_age_type": "old_player", "confidence": "high"},
+        ])
+        out = dp.build_backend_segment_engine_panel(snapshots_col=col, snapshot_week="2026-W25")
+        assert out["match_rate"] is None
+        assert out["summary"]["match_rate"] is None
+
+    def test_match_rate_100_when_all_match(self):
+        col = FakeCollection([
+            {
+                "account": "u1", "backend_segment": "high_value", "snapshot_week": "2026-W25",
+                "snapshot_month": "2026-06", "claim_risk_level": "normal",
+                "player_age_type": "old_player", "confidence": "high",
+                "uim_comparison": {"backend_segment": "high_value", "uim_segment": "high_value", "match": True},
+            },
+        ])
+        out = dp.build_backend_segment_engine_panel(snapshots_col=col, snapshot_week="2026-W25")
+        assert out["match_rate"] == 100.0
+        assert out["mismatch_rate"] == 0.0
+
+
+class TestPhase4MismatchTable:
+    def test_mismatch_by_segment_pair_counts(self):
+        """mismatch_by_segment_pair groups mismatched (backend, uim) pairs."""
+        col = _make_p4_snapshots()
+        out = dp.build_backend_segment_engine_panel(
+            snapshots_col=col, month="2026-06",
+            now=datetime(2026, 6, 16, tzinfo=timezone.utc),
+        )
+        pairs = {(r["backend_segment"], r["uim_segment"]): r["count"] for r in out["mismatch_by_segment_pair"]}
+        assert pairs[("low_value", "high_value")] == 1
+        assert pairs[("ghost", "normal_actual")] == 1
+        assert len(pairs) == 2
+
+    def test_mismatch_details_only_contains_mismatches(self):
+        col = _make_p4_snapshots()
+        out = dp.build_backend_segment_engine_panel(
+            snapshots_col=col, month="2026-06",
+            now=datetime(2026, 6, 16, tzinfo=timezone.utc),
+        )
+        # alice matched → not in mismatch_details
+        accounts = {r["account"] for r in out["mismatch_details"]}
+        assert "alice" not in accounts
+        assert "bob" in accounts
+        assert "carol" in accounts
+
+    def test_mismatch_details_all_required_fields(self):
+        """Every row must have all Phase 4 required fields."""
+        col = _make_p4_snapshots()
+        out = dp.build_backend_segment_engine_panel(
+            snapshots_col=col, month="2026-06",
+            now=datetime(2026, 6, 16, tzinfo=timezone.utc),
+        )
+        required = {
+            "account", "backend_segment", "uim_segment", "match",
+            "confidence", "reason",
+            "after_total_bet_amount", "withdraw_amount",
+            "claim_count", "referral_count", "checkin_count",
+        }
+        for row in out["mismatch_details"]:
+            assert required <= row.keys(), f"Missing fields in row: {required - row.keys()}"
+
+    def test_mismatch_details_metric_values_correct(self):
+        col = _make_p4_snapshots()
+        out = dp.build_backend_segment_engine_panel(
+            snapshots_col=col, month="2026-06",
+            now=datetime(2026, 6, 16, tzinfo=timezone.utc),
+        )
+        by_account = {r["account"]: r for r in out["mismatch_details"]}
+        bob = by_account["bob"]
+        assert bob["after_total_bet_amount"] == 300.0
+        assert bob["withdraw_amount"] == 200.0
+        assert bob["claim_count"] == 5
+        assert bob["referral_count"] == 3
+        assert bob["checkin_count"] == 7
+        carol = by_account["carol"]
+        assert carol["after_total_bet_amount"] == 0.0
+        assert carol["claim_count"] == 0
+
+    def test_mismatch_details_match_field_always_false(self):
+        col = _make_p4_snapshots()
+        out = dp.build_backend_segment_engine_panel(
+            snapshots_col=col, month="2026-06",
+            now=datetime(2026, 6, 16, tzinfo=timezone.utc),
+        )
+        assert all(r["match"] is False for r in out["mismatch_details"])
+
+    def test_comparison_rows_backwards_compat_includes_matches(self):
+        """comparison_rows (legacy field) must still include matched rows."""
+        col = _make_p4_snapshots()
+        out = dp.build_backend_segment_engine_panel(
+            snapshots_col=col, month="2026-06",
+            now=datetime(2026, 6, 16, tzinfo=timezone.utc),
+        )
+        # alice matched — must appear in comparison_rows
+        accounts = {r["account"] for r in out["comparison_rows"]}
+        assert "alice" in accounts
+        assert "bob" in accounts
+        assert "carol" in accounts
+
+    def test_mismatch_details_empty_when_no_mismatches(self):
+        col = FakeCollection([
+            {
+                "account": "u1", "backend_segment": "high_value", "snapshot_week": "2026-W25",
+                "snapshot_month": "2026-06", "claim_risk_level": "normal",
+                "player_age_type": "old_player", "confidence": "high",
+                "uim_comparison": {"backend_segment": "high_value", "uim_segment": "high_value", "match": True},
+                "metrics_snapshot": {"after_total_bet_amount": 800.0, "withdraw_amount": 100.0,
+                                      "claim_count": 2, "referral_count": 1, "checkin_count": 5},
+            },
+        ])
+        out = dp.build_backend_segment_engine_panel(snapshots_col=col, snapshot_week="2026-W25")
+        assert out["mismatch_details"] == []
+        assert out["mismatch_by_segment_pair"] == []
