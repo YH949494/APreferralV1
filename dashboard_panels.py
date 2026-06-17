@@ -1639,6 +1639,236 @@ def build_backend_segment_engine_panel(
 
 
 # ---------------------------------------------------------------------------
+# Phase 5 — Backend vs UIM comparison analysis
+# ---------------------------------------------------------------------------
+
+_UIMC_PROJ = {
+    "_id": 0,
+    "account": 1,
+    "backend_segment": 1,
+    "player_age_type": 1,
+    "claim_risk_level": 1,
+    "confidence": 1,
+    "segment_reason": 1,
+    "uim_comparison": 1,
+    "metrics_snapshot": 1,
+}
+
+
+def build_uim_comparison_panel(
+    *,
+    snapshots_col,
+    segment_snapshots_col=None,
+    snapshot_week: str,
+    filter_backend_segment: str | None = None,
+    filter_uim_segment: str | None = None,
+    filter_match: bool | None = None,
+    filter_claim_risk_level: str | None = None,
+    page: int = 1,
+    per_page: int = 200,
+    now: datetime | None = None,
+) -> dict:
+    """Phase 5: read-only Backend vs UIM comparison panel.
+
+    Reads backend_segment_snapshots for snapshot_week and returns:
+    - Comparison summary (match/mismatch rates, totals)
+    - Full cross-tab matrix (backend_segment rows × uim_segment columns)
+    - Paginated, filterable detail rows (with player_age_type, claim_risk_level)
+    - Rule audit (per-segment average input metrics for manual tuning)
+
+    Summary stats and rule audit always reflect the full unfiltered dataset.
+    Filters only narrow the detail row list.
+
+    Never writes, never touches segment classification or production fields.
+    """
+    now = now or _utc_now()
+    page = max(1, int(page))
+    per_page = max(1, min(500, int(per_page)))
+
+    # --- Load all docs for the week with a tight projection ---
+    all_docs = list(snapshots_col.find({"snapshot_week": snapshot_week}, _UIMC_PROJ))
+    total_backend_users = len(all_docs)
+
+    # UIM total: from segment_snapshots_col if provided; else count backend
+    # docs that had a UIM comparison (i.e. had for_bot_segment at engine time).
+    if segment_snapshots_col is not None:
+        total_uim_users: int = segment_snapshots_col.count_documents(
+            {"snapshot_week": snapshot_week}
+        )
+    else:
+        total_uim_users = sum(1 for d in all_docs if d.get("uim_comparison") is not None)
+
+    compared = 0
+    matched = 0
+    mismatched = 0
+
+    # cross-tab: matrix[backend_seg][uim_seg] = count (all comparisons, not just mismatches)
+    matrix: dict[str, dict[str, int]] = {}
+    backend_segs_seen: set[str] = set()
+    uim_segs_seen: set[str] = set()
+
+    # rule audit accumulators (per backend_segment, over all docs regardless of UIM match)
+    audit_acc: dict[str, dict] = {}
+
+    for doc in all_docs:
+        b_seg = doc.get("backend_segment") or "unclassified"
+        ms = doc.get("metrics_snapshot") or {}
+
+        if b_seg not in audit_acc:
+            audit_acc[b_seg] = {
+                "count": 0,
+                "sum_atb": 0.0, "n_atb": 0,
+                "sum_wd": 0.0,  "n_wd": 0,
+                "sum_claim": 0, "sum_ref": 0, "sum_checkin": 0,
+            }
+        a = audit_acc[b_seg]
+        a["count"] += 1
+
+        atb = ms.get("after_total_bet_amount")
+        if atb is not None:
+            try:
+                a["sum_atb"] += float(atb)
+                a["n_atb"] += 1
+            except (TypeError, ValueError):
+                pass
+
+        wd = ms.get("withdraw_amount")
+        if wd is not None:
+            try:
+                a["sum_wd"] += float(wd)
+                a["n_wd"] += 1
+            except (TypeError, ValueError):
+                pass
+
+        try:
+            a["sum_claim"]   += int(ms.get("claim_count",   0) or 0)
+            a["sum_ref"]     += int(ms.get("referral_count", 0) or 0)
+            a["sum_checkin"] += int(ms.get("checkin_count",  0) or 0)
+        except (TypeError, ValueError):
+            pass
+
+        cmp = doc.get("uim_comparison")
+        if cmp is None:
+            continue
+
+        compared += 1
+        is_match = bool(cmp.get("match"))
+        u_seg = cmp.get("uim_segment") or "unknown"
+
+        if is_match:
+            matched += 1
+        else:
+            mismatched += 1
+
+        backend_segs_seen.add(b_seg)
+        uim_segs_seen.add(u_seg)
+
+        if b_seg not in matrix:
+            matrix[b_seg] = {}
+        matrix[b_seg][u_seg] = matrix[b_seg].get(u_seg, 0) + 1
+
+    match_rate    = round(100.0 * matched    / compared, 2) if compared else None
+    mismatch_rate = round(100.0 * mismatched / compared, 2) if compared else None
+
+    # --- Apply filters, build paginated detail list ---
+    detail_all: list[dict] = []
+    for doc in all_docs:
+        b_seg   = doc.get("backend_segment") or "unclassified"
+        risk    = doc.get("claim_risk_level") or "normal"
+        cmp     = doc.get("uim_comparison")
+        u_seg   = (cmp.get("uim_segment") if cmp else None) or None
+        is_match = bool(cmp.get("match")) if cmp is not None else None
+
+        if filter_backend_segment and b_seg != filter_backend_segment:
+            continue
+        if filter_uim_segment and u_seg != filter_uim_segment:
+            continue
+        if filter_match is not None:
+            if is_match is None or is_match != filter_match:
+                continue
+        if filter_claim_risk_level and risk != filter_claim_risk_level:
+            continue
+
+        ms = doc.get("metrics_snapshot") or {}
+        detail_all.append({
+            "account":               doc.get("account"),
+            "backend_segment":       b_seg,
+            "uim_segment":           u_seg,
+            "match":                 is_match,
+            "confidence":            doc.get("confidence"),
+            "reason":                doc.get("segment_reason"),
+            "after_total_bet_amount": ms.get("after_total_bet_amount"),
+            "withdraw_amount":       ms.get("withdraw_amount"),
+            "claim_count":           ms.get("claim_count"),
+            "referral_count":        ms.get("referral_count"),
+            "checkin_count":         ms.get("checkin_count"),
+            "player_age_type":       doc.get("player_age_type"),
+            "claim_risk_level":      risk,
+        })
+
+    total_details = len(detail_all)
+    start = (page - 1) * per_page
+    paged = detail_all[start : start + per_page]
+
+    # --- Rule audit output ---
+    rule_audit: dict[str, dict] = {}
+    for seg, a in audit_acc.items():
+        n = a["count"]
+        rule_audit[seg] = {
+            "count": n,
+            "avg_after_total_bet_amount": round(a["sum_atb"] / a["n_atb"], 4) if a["n_atb"] else None,
+            "avg_withdraw_amount":        round(a["sum_wd"]  / a["n_wd"],  4) if a["n_wd"]  else None,
+            "avg_claim_count":            round(a["sum_claim"]   / n, 4) if n else None,
+            "avg_referral_count":         round(a["sum_ref"]     / n, 4) if n else None,
+            "avg_checkin_count":          round(a["sum_checkin"] / n, 4) if n else None,
+        }
+
+    # --- Mismatch matrix output ---
+    all_b = sorted(backend_segs_seen)
+    all_u = sorted(uim_segs_seen)
+    matrix_rows = [
+        {
+            "backend_segment":   b,
+            "by_uim_segment":    {u: matrix.get(b, {}).get(u, 0) for u in all_u},
+        }
+        for b in all_b
+    ]
+
+    return {
+        "ok": True,
+        "generated_at": now.isoformat(),
+        "snapshot_week": snapshot_week,
+        "filters": {
+            "snapshot_week":       snapshot_week,
+            "backend_segment":     filter_backend_segment,
+            "uim_segment":         filter_uim_segment,
+            "match":               filter_match,
+            "claim_risk_level":    filter_claim_risk_level,
+        },
+        "summary": {
+            "total_backend_users": total_backend_users,
+            "total_uim_users":     total_uim_users,
+            "compared_users":      compared,
+            "matched_users":       matched,
+            "mismatched_users":    mismatched,
+            "match_rate":          match_rate,
+            "mismatch_rate":       mismatch_rate,
+        },
+        "mismatch_matrix": {
+            "backend_segments": all_b,
+            "uim_segments":     all_u,
+            "rows":             matrix_rows,
+        },
+        "details":       paged,
+        "total_details": total_details,
+        "page":          page,
+        "per_page":      per_page,
+        "has_more":      start + per_page < total_details,
+        "rule_audit":    rule_audit,
+    }
+
+
+# ---------------------------------------------------------------------------
 # 5. User drilldown
 # ---------------------------------------------------------------------------
 

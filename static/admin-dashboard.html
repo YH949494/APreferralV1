@@ -220,6 +220,59 @@
         <div id="bse-age-body"></div>
         <div class="section-title">UIM Comparison</div>
         <div id="bse-comparison-body"></div>
+
+        <!-- Phase 5: Backend vs UIM Analysis -->
+        <div class="section-title" style="margin-top:28px;">Backend vs UIM Analysis <span style="font-size:11px;font-weight:400;color:var(--muted,#8892a4);">(Phase 5 — read-only, shadow mode)</span></div>
+        <div style="background:var(--bg-card,#1e2230);border:1px solid var(--border,#2d3348);border-radius:8px;padding:16px;margin-bottom:20px;">
+          <div style="font-size:11px;color:var(--muted,#8892a4);margin-bottom:12px;">Compares backend_segment_snapshots against UIM for_bot_segment to identify rule-quality issues. Does not tune rules or write any fields.</div>
+          <div class="controls" style="flex-wrap:wrap;gap:8px;margin-bottom:8px;">
+            <input class="filter-input" id="uimc-week" placeholder="snapshot_week e.g. 2026-W25" style="max-width:200px;margin:0;" />
+            <select class="filter-input" id="uimc-backend-seg" style="max-width:170px;margin:0;">
+              <option value="">All backend segments</option>
+              <option value="high_value">high_value</option>
+              <option value="low_value">low_value</option>
+              <option value="normal_actual">normal_actual</option>
+              <option value="voucher_hunter">voucher_hunter</option>
+              <option value="ghost">ghost</option>
+              <option value="active_community_player">active_community_player</option>
+              <option value="unclassified">unclassified</option>
+            </select>
+            <select class="filter-input" id="uimc-uim-seg" style="max-width:170px;margin:0;">
+              <option value="">All UIM segments</option>
+              <option value="high_value">high_value</option>
+              <option value="low_value">low_value</option>
+              <option value="normal_actual">normal_actual</option>
+              <option value="voucher_hunter">voucher_hunter</option>
+              <option value="ghost">ghost</option>
+              <option value="active_community_player">active_community_player</option>
+              <option value="unclassified">unclassified</option>
+              <option value="unknown">unknown (no UIM)</option>
+            </select>
+            <select class="filter-input" id="uimc-match" style="max-width:140px;margin:0;">
+              <option value="">Match + Mismatch</option>
+              <option value="false">Mismatches only</option>
+              <option value="true">Matches only</option>
+            </select>
+            <select class="filter-input" id="uimc-risk" style="max-width:160px;margin:0;">
+              <option value="">All risk levels</option>
+              <option value="normal">normal</option>
+              <option value="medium_risk">medium_risk</option>
+              <option value="high_risk_review">high_risk_review</option>
+              <option value="abuse_freeze">abuse_freeze</option>
+            </select>
+            <button class="btn primary" id="uimc-apply-btn">Analyse</button>
+            <button class="btn" id="uimc-export-btn" style="background:var(--bg-card,#2a3040);border:1px solid var(--border,#2d3348);">Export CSV</button>
+          </div>
+        </div>
+        <div class="section-title">Comparison Summary</div>
+        <div class="card-grid" id="cards-uimc-summary"></div>
+        <div class="section-title">Cross-Tab Matrix <span style="font-size:11px;font-weight:400;color:var(--muted,#8892a4);">(backend rows × UIM columns)</span></div>
+        <div id="uimc-matrix-body"></div>
+        <div class="section-title">Rule Audit by Backend Segment <span style="font-size:11px;font-weight:400;color:var(--muted,#8892a4);">(average input metrics — evidence for manual review)</span></div>
+        <div id="uimc-audit-body"></div>
+        <div class="section-title">Detail Table</div>
+        <div id="uimc-detail-body"></div>
+        <div id="uimc-pagination" style="display:flex;gap:8px;align-items:center;margin-top:12px;font-size:12px;"></div>
       </section>
 
       <!-- UPLOAD PLAYER PERFORMANCE VIEW (Phase 2A) -->
