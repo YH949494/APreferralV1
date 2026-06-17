@@ -146,13 +146,14 @@ def ensure_indexes() -> None:
 
     db_ref["user_claim_risk_history"].create_index([("user_id", ASCENDING), ("synced_at", ASCENDING)])
 
-    # Phase 6A — backend-owned segment engine, shadow mode only. Idempotent
-    # per (user_id, snapshot_month); never read by the bot, never written by
+    # Phase 3 — backend-owned segment engine, shadow mode only. Idempotent
+    # per (account, snapshot_week); never read by the bot, never written by
     # bot_segment_sync/claim_risk_sync.
     db_ref["backend_segment_snapshots"].create_index(
-        [("user_id", ASCENDING), ("snapshot_month", ASCENDING)], unique=True
+        [("account", ASCENDING), ("snapshot_week", ASCENDING)], unique=True
     )
     db_ref["backend_segment_snapshots"].create_index([("snapshot_month", ASCENDING)])
+    db_ref["backend_segment_snapshots"].create_index([("snapshot_week", ASCENDING)])
 
     # Phase 2A — weekly marketing raw-data upload. dedupe_key prevents
     # re-uploading the same weekly file from creating duplicate rows;

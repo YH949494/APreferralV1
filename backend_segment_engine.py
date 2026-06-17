@@ -1,52 +1,41 @@
-"""Phase 6A — Backend-Owned Segment Engine (shadow mode).
+"""Phase 3 — Backend-Owned Segment Engine (Shadow Mode, Real Data).
 
-Direction change from Phase 5/5B: instead of the backend only copying UIM's
-pre-computed ``for_bot_segment`` (``bot_segment_sync.py``) and claim-risk
-fields (``claim_risk_sync.py``) verbatim, the backend now computes its own
-segment + claim-risk classification from source data it owns or can ingest.
+Direction change from Phase 6A: the engine now ingests real marketing data
+from the ``marketing_raw_data`` collection (keyed by ``account`` / username),
+joins to the ``users`` collection by username, and stores weekly snapshots
+keyed by ``(account, snapshot_week)`` instead of ``(user_id, snapshot_month)``.
 
 This module is **shadow mode only**:
-  - Writes go to a brand new ``backend_segment_snapshots`` collection, never
-    to ``users.for_bot_segment`` / ``users.bot_segment`` / ``users.bot_segment_probability``.
+  - Writes go to ``backend_segment_snapshots`` collection, never to
+    ``users.for_bot_segment`` / ``users.bot_segment`` / ``users.bot_segment_probability``.
   - ``bot_segment_sync.py``, ``claim_risk_sync.py``, the validation dashboard
     and ``vouchers.py`` probability logic are untouched and keep running
     exactly as before — they remain the production reference/fallback.
   - Nothing here is read by the bot's runtime behaviour (vouchers, rewards,
     public-pool probability). This is a comparison/audit tool only.
 
-Data sources
-------------
-Marketing raw data (``after_bet_amount``, ``withdrawal_amount``,
-``is_new_player``) does not exist anywhere in this backend yet — confirmed
-in ``uim_kpi_mapping.py`` (Phase 5B gap report). This module reads it from a
-new ``marketing_raw_data`` collection (``database.marketing_raw_data_col``)
-keyed by ``user_id``, which some future ingestion job is expected to
-populate. Building that ingestion job is out of scope for Phase 6A — until
-it exists, every user's marketing fields resolve to ``None`` and the engine
-correctly reports ``unclassified`` / ``confidence="low"`` for them (this is
-required behaviour per the Phase 6A acceptance criteria, not a bug).
-
-Bot-database fields are read from the existing ``users`` collection and
-``voucher_claims`` collection using the closest already-existing field for
-each concept (there is no dedicated "checkin_count" or "last_active_at"
-field in this schema today, so the best available proxies are used and
-called out explicitly in ``_BOT_DB_FIELD_NOTES`` below).
+Key changes from Phase 6A
+--------------------------
+- Marketing join is by ``account`` (username), not ``user_id``.
+- Snapshot unique key is ``(account, snapshot_week)`` not ``(user_id, snapshot_month)``.
+- ``new_player`` / ``old_player`` are NOT segments — stored as ``player_age_type``
+  separately via ``classify_player_age_type()``.
+- Ghost rule: ``after_total_bet_amount == 0 AND referral_count == 0 AND
+  checkin_count == 0`` — no ``last_active_at`` check.
+- Normal Actual rule: ``after_total_bet_amount > 0 AND NOT high_value AND NOT
+  low_value`` (covers withdrawal_amount=0 case too).
+- ``actual_players`` KPI = high_value + low_value + normal_actual.
+- Supports both field-name conventions: ``after_total_bet_amount`` /
+  ``withdraw_amount`` (spec) and ``after_bet_amount`` / ``withdrawal_amount``
+  (legacy) — whichever is non-null wins.
 
 Segment priority
 -----------------
-The task spec lists High Value / Low Value / Normal Actual / Voucher Hunter
-/ Ghost / New Player / Old Player / Active Community Player as if they were
-independent outcomes, but the snapshot schema stores a single
-``backend_segment`` string. Priority order below is this module's explicit
-design choice (not specified by the business) and should be confirmed
-before Phase 6B promotes this out of shadow mode:
-
     high_value > low_value > normal_actual > voucher_hunter > ghost
-    > new_player > old_player > active_community_player > unclassified
+    > active_community_player > unclassified
 
-Financial/behavioural signals (value, activity, claim abuse, inactivity)
-outrank the is_new_player attribute and the provisional "active community"
-rule, since the latter two are coarser/lower-confidence signals.
+``player_age_type`` is determined independently:
+    "new_player" if is_new_player=1 else "old_player"
 """
 
 from __future__ import annotations
@@ -69,7 +58,6 @@ BATCH_SIZE = 500
 # Segment rule thresholds.
 HIGH_VALUE_AFTER_BET_MULTIPLE = 8.0
 VOUCHER_HUNTER_CLAIM_THRESHOLD = 3
-GHOST_INACTIVITY_DAYS = 30
 
 # "Active Community Player" is explicitly provisional per the task spec —
 # configurable via env vars, always stored with confidence="low".
@@ -82,9 +70,7 @@ CLAIM_RISK_HIGH_MIN = 20
 CLAIM_RISK_ABUSE_MIN = 50
 
 # Documents which `users`/`voucher_claims` field each bot-database concept
-# is read from today, since several concepts (checkin count, last activity,
-# channel status, welcome voucher history) have no dedicated field in this
-# schema and are approximated from the closest existing one.
+# is read from today.
 _BOT_DB_FIELD_NOTES = {
     "claim_count": "voucher_claims collection, count of all claim docs for user_id",
     "referral_count": "users.total_referrals",
@@ -109,6 +95,12 @@ def _snapshot_month_key(moment: datetime) -> str:
     return f"{moment.year:04d}-{moment.month:02d}"
 
 
+def _snapshot_week_key(moment: datetime) -> str:
+    """Return ISO week string e.g. '2026-W24'."""
+    iso_year, iso_week, _ = moment.isocalendar()
+    return f"{iso_year:04d}-W{iso_week:02d}"
+
+
 def _as_float_or_none(value: Any) -> float | None:
     if value is None or value == "":
         return None
@@ -127,19 +119,8 @@ def _as_int(value: Any, default: int = 0) -> int:
         return default
 
 
-def _is_new_player_flag(value: Any) -> bool | None:
-    """Tri-state: True/False if known, None if marketing didn't supply it."""
-    if value is None or value == "":
-        return None
-    try:
-        return int(value) == 1
-    except (TypeError, ValueError):
-        return str(value).strip().lower() in {"true", "yes", "new"}
-
-
 def _days_since(moment: Any, now: datetime) -> float | None:
-    # Malformed historical values (string/int/etc, same as users.last_checkin
-    # elsewhere in this codebase) must not abort the whole snapshot run.
+    # Malformed historical values must not abort the whole snapshot run.
     if not isinstance(moment, datetime):
         return None
     if moment.tzinfo is None:
@@ -167,6 +148,26 @@ def classify_claim_risk(claim_count: int) -> tuple[str, str]:
 
 
 # ---------------------------------------------------------------------------
+# Player age type (independent from segment)
+# ---------------------------------------------------------------------------
+
+
+def classify_player_age_type(is_new_player_value: Any) -> str:
+    """Return 'new_player' if is_new_player=1, else 'old_player'.
+
+    This is stored as ``player_age_type`` in the snapshot, separate from
+    ``backend_segment``. new_player / old_player are NOT segments in Phase 3.
+    """
+    if is_new_player_value is None or is_new_player_value == "":
+        return "old_player"
+    try:
+        return "new_player" if int(is_new_player_value) == 1 else "old_player"
+    except (TypeError, ValueError):
+        val = str(is_new_player_value).strip().lower()
+        return "new_player" if val in {"true", "yes", "new"} else "old_player"
+
+
+# ---------------------------------------------------------------------------
 # Segment classification
 # ---------------------------------------------------------------------------
 
@@ -174,94 +175,87 @@ def classify_claim_risk(claim_count: int) -> tuple[str, str]:
 def classify_segment(metrics: dict, *, now: datetime | None = None) -> dict:
     """Classify one user's backend segment from normalized input metrics.
 
-    ``metrics`` keys (all optional except none — missing keys are treated
-    as ``None``/0 per field, see inline handling):
-      - after_bet_amount, withdrawal_amount: float|None (Marketing)
-      - is_new_player: 0/1/None (Marketing)
+    Supports both field-name conventions:
+      - after_total_bet_amount / withdraw_amount  (Phase 3 spec)
+      - after_bet_amount / withdrawal_amount       (legacy / compatibility)
+
+    ``metrics`` keys (all optional — missing keys are treated as None/0):
+      - after_total_bet_amount (or after_bet_amount): float|None (Marketing)
+      - withdraw_amount (or withdrawal_amount): float|None (Marketing)
+      - is_new_player: 0/1/None — used only for player_age_type, not segment
       - claim_count, referral_count, checkin_count, xp: int (bot DB)
-      - last_active_at: datetime|None (bot DB)
+
+    Ghost rule (Phase 3): after_total_bet == 0 AND referral_count == 0 AND
+    checkin_count == 0  (NO last_active_at check).
 
     Returns ``{"segment": str, "segment_reason": str, "confidence": str,
     "source_fields_used": list[str]}``.
     """
     now = now or _utc_now()
-    after_bet_amount = _as_float_or_none(metrics.get("after_bet_amount"))
-    withdrawal_amount = _as_float_or_none(metrics.get("withdrawal_amount"))
-    is_new_player = _is_new_player_flag(metrics.get("is_new_player"))
+
+    # Support both naming conventions — prefer Phase 3 spec names.
+    after_total_bet = _as_float_or_none(
+        metrics.get("after_total_bet_amount") if metrics.get("after_total_bet_amount") is not None
+        else metrics.get("after_bet_amount")
+    )
+    withdraw = _as_float_or_none(
+        metrics.get("withdraw_amount") if metrics.get("withdraw_amount") is not None
+        else metrics.get("withdrawal_amount")
+    )
+
     claim_count = _as_int(metrics.get("claim_count"), 0)
     referral_count = _as_int(metrics.get("referral_count"), 0)
     checkin_count = _as_int(metrics.get("checkin_count"), 0)
     xp = _as_int(metrics.get("xp"), 0)
-    last_active_at = metrics.get("last_active_at")
 
-    marketing_available = after_bet_amount is not None and withdrawal_amount is not None
+    marketing_available = after_total_bet is not None and withdraw is not None
 
     if marketing_available:
-        if withdrawal_amount > 0:
-            ratio = after_bet_amount / withdrawal_amount
+        if withdraw > 0:
+            ratio = after_total_bet / withdraw
             if ratio >= HIGH_VALUE_AFTER_BET_MULTIPLE:
                 return {
                     "segment": "high_value",
                     "segment_reason": "after_bet_multiple >= 8x",
                     "confidence": "high",
-                    "source_fields_used": ["after_bet_amount", "withdrawal_amount"],
+                    "source_fields_used": ["after_total_bet_amount", "withdraw_amount"],
                 }
             return {
                 "segment": "low_value",
                 "segment_reason": "after_bet_multiple < 8x",
                 "confidence": "high",
-                "source_fields_used": ["after_bet_amount", "withdrawal_amount"],
+                "source_fields_used": ["after_total_bet_amount", "withdraw_amount"],
             }
-        if after_bet_amount > 0:
+        if after_total_bet > 0:
+            # withdraw == 0, after_total_bet > 0: played but didn't withdraw
             return {
                 "segment": "normal_actual",
                 "segment_reason": "has play activity",
                 "confidence": "high",
-                "source_fields_used": ["after_bet_amount", "withdrawal_amount"],
+                "source_fields_used": ["after_total_bet_amount", "withdraw_amount"],
             }
-        # after_bet_amount == 0 and withdrawal_amount == 0.
+        # after_total_bet == 0 and withdraw == 0.
         if claim_count >= VOUCHER_HUNTER_CLAIM_THRESHOLD:
             return {
                 "segment": "voucher_hunter",
                 "segment_reason": "repeat claims with no play",
                 "confidence": "high",
-                "source_fields_used": ["after_bet_amount", "claim_count"],
+                "source_fields_used": ["after_total_bet_amount", "claim_count"],
             }
-        days_inactive = _days_since(last_active_at, now)
-        if (
-            referral_count == 0
-            and checkin_count == 0
-            and days_inactive is not None
-            and days_inactive > GHOST_INACTIVITY_DAYS
-        ):
+        # Ghost rule (Phase 3): no last_active_at check
+        if referral_count == 0 and checkin_count == 0:
             return {
                 "segment": "ghost",
                 "segment_reason": "inactive user",
                 "confidence": "high",
                 "source_fields_used": [
-                    "after_bet_amount",
+                    "after_total_bet_amount",
                     "referral_count",
                     "checkin_count",
-                    "last_active_at",
                 ],
             }
 
     # Fall through to lower-confidence attribute-based classification.
-    if is_new_player is True:
-        return {
-            "segment": "new_player",
-            "segment_reason": "is_new_player=1",
-            "confidence": "high" if marketing_available else "low",
-            "source_fields_used": ["is_new_player"],
-        }
-    if is_new_player is False:
-        return {
-            "segment": "old_player",
-            "segment_reason": "is_new_player=0",
-            "confidence": "high" if marketing_available else "low",
-            "source_fields_used": ["is_new_player"],
-        }
-
     if xp >= ACTIVE_COMMUNITY_XP_THRESHOLD or checkin_count >= ACTIVE_COMMUNITY_CHECKIN_THRESHOLD:
         return {
             "segment": "active_community_player",
@@ -273,7 +267,7 @@ def classify_segment(metrics: dict, *, now: datetime | None = None) -> dict:
 
     return {
         "segment": "unclassified",
-        "segment_reason": "missing marketing data: after_bet_amount/withdrawal_amount"
+        "segment_reason": "missing marketing data: after_total_bet_amount/withdraw_amount"
         if not marketing_available
         else "no play, no claims, no clear inactivity signal",
         "confidence": "low",
@@ -290,9 +284,8 @@ def compare_with_uim(*, backend_segment: str, uim_segment_raw: Any) -> dict:
     """Compare the backend segment against UIM's existing ``for_bot_segment``.
 
     Both sides are normalized through ``config.normalize_for_bot_segment``
-    (backend's ``new_player``/``old_player`` map onto the same canonical
-    buckets UIM already uses) so a label-casing/alias difference isn't
-    reported as a mismatch. Never writes anything — comparison output only.
+    so a label-casing/alias difference isn't reported as a mismatch.
+    Never writes anything — comparison output only.
     """
     backend_canonical = _backend_segment_to_canonical(backend_segment)
     uim_canonical = config.normalize_for_bot_segment(uim_segment_raw)
@@ -338,25 +331,37 @@ def _claim_counts(voucher_claims_col, user_ids: list[int]) -> dict[int, int]:
     return counts
 
 
-def _marketing_rows(marketing_col, user_ids: list[int]) -> dict[int, dict]:
-    rows: dict[int, dict] = {}
+def _marketing_rows_by_account(marketing_col, snapshot_week: str) -> dict[str, dict]:
+    """Return dict[account_lower -> doc] for the given snapshot_week.
+
+    Deduplicates by account (first occurrence wins).
+    """
+    rows: dict[str, dict] = {}
     if marketing_col is None:
         return rows
-    for batch in _chunks(user_ids, BATCH_SIZE):
-        cursor = marketing_col.find({"user_id": {"$in": batch}})
-        for doc in cursor:
-            try:
-                rows[int(doc["user_id"])] = doc
-            except (TypeError, ValueError, KeyError):
-                continue
+    cursor = marketing_col.find({"snapshot_week": snapshot_week})
+    for doc in cursor:
+        acct = (doc.get("account") or "").strip().lower()
+        if acct and acct not in rows:
+            rows[acct] = doc
     return rows
 
 
 def _build_metrics_for_user(user_doc: dict, claim_count: int, marketing_row: dict | None) -> dict:
     marketing_row = marketing_row or {}
+
+    def _first_not_none(*keys):
+        """Return the value of the first key that is not None/missing."""
+        for k in keys:
+            v = marketing_row.get(k)
+            if v is not None:
+                return v
+        return None
+
     return {
-        "after_bet_amount": marketing_row.get("after_bet_amount"),
-        "withdrawal_amount": marketing_row.get("withdrawal_amount"),
+        # Phase 3 spec field names (primary), legacy aliases as fallback.
+        "after_total_bet_amount": _first_not_none("after_total_bet_amount", "after_bet_amount"),
+        "withdraw_amount": _first_not_none("withdraw_amount", "withdrawal_amount"),
         "is_new_player": marketing_row.get("is_new_player"),
         "claim_count": claim_count,
         "referral_count": user_doc.get("total_referrals", 0),
@@ -373,23 +378,30 @@ def _build_metrics_for_user(user_doc: dict, claim_count: int, marketing_row: dic
 
 def build_snapshot_doc(
     *,
-    user_id: int,
+    account: str,
+    user_id: int | None,
+    telegram_user_id: int | None,
     metrics: dict,
     now: datetime,
+    snapshot_week: str,
     uim_segment_raw: Any = None,
 ) -> dict:
     """Build one ``backend_segment_snapshots`` document (does not write it)."""
     classification = classify_segment(metrics, now=now)
     claim_level, claim_reason = classify_claim_risk(metrics.get("claim_count", 0))
-    doc = {
+    player_age_type = classify_player_age_type(metrics.get("is_new_player"))
+
+    doc: dict = {
+        "account": account,
         "user_id": user_id,
-        "telegram_user_id": user_id,
+        "telegram_user_id": telegram_user_id,
         "backend_segment": classification["segment"],
+        "player_age_type": player_age_type,
         "claim_risk_level": claim_level,
         "segment_reason": classification["segment_reason"],
         "claim_risk_reason": claim_reason,
-        "source_fields_used": classification["source_fields_used"],
         "confidence": classification["confidence"],
+        "snapshot_week": snapshot_week,
         "snapshot_month": _snapshot_month_key(now),
         "calculated_at": now,
     }
@@ -421,55 +433,107 @@ def run_shadow_segment_engine(
     voucher_claims_col=None,
     marketing_col=None,
     snapshots_col=None,
-    user_ids: list[int] | None = None,
+    snapshot_week: str | None = None,
     now: datetime | None = None,
     dry_run: bool = False,
 ) -> dict:
     """Evaluate users and upsert ``backend_segment_snapshots`` (shadow mode).
 
+    Iterates all accounts from the ``marketing_raw_data`` collection for the
+    given ``snapshot_week``, joins to ``users`` by username (case-insensitive),
+    and writes one snapshot doc per account.
+
+    For accounts not found in the bot DB, ``user_id`` / ``telegram_user_id``
+    are stored as None and bot-DB fields default to 0.
+
+    Idempotent on ``(account, snapshot_week)`` — re-running replaces the
+    existing snapshot rather than duplicating it.
+
     Never touches ``users`` or any production segment/voucher/reward field.
-    Idempotent on ``(user_id, snapshot_month)`` — re-running within the same
-    month replaces the existing snapshot rather than duplicating it.
     """
     now = now or _utc_now()
+    if snapshot_week is None:
+        snapshot_week = _snapshot_week_key(now)
+
     summary = _empty_summary(dry_run=dry_run)
     try:
         if users_col is None:
             database.init_db()
             users_col = database.users_collection
         if voucher_claims_col is None:
-            # database.py has no dedicated voucher_claims_col (it's only
-            # constructed in vouchers.py as db["voucher_claims"]) — resolve
-            # the real collection the same way so claim_count isn't silently 0.
             voucher_claims_col = database.db["voucher_claims"]
         if marketing_col is None:
             marketing_col = database.marketing_raw_data_col
         if snapshots_col is None:
             snapshots_col = database.backend_segment_snapshots_col
 
-        query = {"user_id": {"$in": user_ids}} if user_ids is not None else {}
-        user_docs = list(users_col.find(query))
-        ids = [int(u["user_id"]) for u in user_docs if u.get("user_id") is not None]
+        # Step 1: Load all marketing rows for the week, keyed by account.
+        marketing_rows = _marketing_rows_by_account(marketing_col, snapshot_week)
 
-        claim_counts = _claim_counts(voucher_claims_col, ids)
-        marketing_rows = _marketing_rows(marketing_col, ids)
+        if not marketing_rows:
+            # No marketing data for this week; return ok with zero rows.
+            summary["ok"] = True
+            logger.info(
+                "[BACKEND_SEGMENT_ENGINE] no_marketing_data snapshot_week=%s", snapshot_week
+            )
+            return summary
 
+        # Step 2: Build a lookup of users by lowercased username.
+        all_users = list(users_col.find({}))
+        users_by_username: dict[str, dict] = {}
+        for u in all_users:
+            uname = (u.get("username") or "").strip().lower()
+            if uname:
+                users_by_username[uname] = u
+
+        # Step 3: Collect user_ids for claim count lookup.
+        known_user_ids: list[int] = []
+        for acct_lower, mrow in marketing_rows.items():
+            user_doc = users_by_username.get(acct_lower)
+            if user_doc is not None and user_doc.get("user_id") is not None:
+                try:
+                    known_user_ids.append(int(user_doc["user_id"]))
+                except (TypeError, ValueError):
+                    pass
+
+        claim_counts = _claim_counts(voucher_claims_col, known_user_ids)
+
+        # Step 4: Build snapshot docs.
         docs: list[dict] = []
-        for user_doc in user_docs:
-            uid = int(user_doc["user_id"])
-            metrics = _build_metrics_for_user(user_doc, claim_counts.get(uid, 0), marketing_rows.get(uid))
+        for acct_lower, mrow in marketing_rows.items():
+            account = (mrow.get("account") or acct_lower).strip()
+            user_doc = users_by_username.get(acct_lower) or {}
+
+            user_id: int | None = None
+            telegram_user_id: int | None = None
+            if user_doc.get("user_id") is not None:
+                try:
+                    user_id = int(user_doc["user_id"])
+                    telegram_user_id = user_id
+                except (TypeError, ValueError):
+                    pass
+
+            claim_count = claim_counts.get(user_id, 0) if user_id is not None else 0
+            metrics = _build_metrics_for_user(user_doc, claim_count, mrow)
             uim_raw = user_doc.get("for_bot_segment") or user_doc.get("bot_segment")
-            doc = build_snapshot_doc(user_id=uid, metrics=metrics, now=now, uim_segment_raw=uim_raw)
+
+            doc = build_snapshot_doc(
+                account=account,
+                user_id=user_id,
+                telegram_user_id=telegram_user_id,
+                metrics=metrics,
+                now=now,
+                snapshot_week=snapshot_week,
+                uim_segment_raw=uim_raw,
+            )
             docs.append(doc)
 
         summary["users_evaluated"] = len(docs)
         for doc in docs:
-            summary["segment_distribution"][doc["backend_segment"]] = (
-                summary["segment_distribution"].get(doc["backend_segment"], 0) + 1
-            )
-            summary["claim_risk_distribution"][doc["claim_risk_level"]] = (
-                summary["claim_risk_distribution"].get(doc["claim_risk_level"], 0) + 1
-            )
+            seg = doc.get("backend_segment", "unclassified")
+            summary["segment_distribution"][seg] = summary["segment_distribution"].get(seg, 0) + 1
+            risk = doc.get("claim_risk_level", "normal")
+            summary["claim_risk_distribution"][risk] = summary["claim_risk_distribution"].get(risk, 0) + 1
             comparison = doc.get("uim_comparison")
             if comparison is not None:
                 summary["uim_compared"] += 1
@@ -480,12 +544,15 @@ def run_shadow_segment_engine(
 
         if dry_run or not docs:
             summary["ok"] = True
-            logger.info("[BACKEND_SEGMENT_ENGINE] dry_run_summary=%s", {k: v for k, v in summary.items() if k != "error"})
+            logger.info(
+                "[BACKEND_SEGMENT_ENGINE] dry_run_summary=%s",
+                {k: v for k, v in summary.items() if k != "error"},
+            )
             return summary
 
         ops = [
             UpdateOne(
-                {"user_id": doc["user_id"], "snapshot_month": doc["snapshot_month"]},
+                {"account": doc["account"], "snapshot_week": doc["snapshot_week"]},
                 {"$set": doc},
                 upsert=True,
             )
@@ -494,10 +561,15 @@ def run_shadow_segment_engine(
         written = 0
         for batch in _chunks(ops, BATCH_SIZE):
             result = snapshots_col.bulk_write(batch, ordered=False)
-            written += int(getattr(result, "upserted_count", 0) or 0) + int(getattr(result, "modified_count", 0) or 0)
+            written += int(getattr(result, "upserted_count", 0) or 0) + int(
+                getattr(result, "modified_count", 0) or 0
+            )
         summary["snapshots_written"] = written
         summary["ok"] = True
-        logger.info("[BACKEND_SEGMENT_ENGINE] commit_summary=%s", {k: v for k, v in summary.items() if k != "error"})
+        logger.info(
+            "[BACKEND_SEGMENT_ENGINE] commit_summary=%s",
+            {k: v for k, v in summary.items() if k != "error"},
+        )
         return summary
     except (RuntimeError, ValueError, PyMongoError) as exc:
         summary["error"] = str(exc)
@@ -509,11 +581,12 @@ def main() -> int:
     import argparse
     import json
 
-    parser = argparse.ArgumentParser(description="Phase 6A backend segment engine (shadow mode)")
+    parser = argparse.ArgumentParser(description="Phase 3 backend segment engine (shadow mode)")
     parser.add_argument("--dry-run", action="store_true", help="Evaluate and report only; do not write snapshots")
+    parser.add_argument("--snapshot-week", default=None, help="ISO week key e.g. 2026-W24 (default: current week)")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO)
-    summary = run_shadow_segment_engine(dry_run=args.dry_run)
+    summary = run_shadow_segment_engine(dry_run=args.dry_run, snapshot_week=args.snapshot_week)
     print(json.dumps(summary, default=str, sort_keys=True))
     return 0 if summary.get("ok") else 1
 

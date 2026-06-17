@@ -1469,31 +1469,54 @@ def build_validation_panel(
     }
 
 
-def build_backend_segment_engine_panel(*, snapshots_col, now: datetime | None = None, month: str | None = None) -> dict:
-    """Phase 6A: read-only summary of the latest ``backend_segment_snapshots``.
+def build_backend_segment_engine_panel(
+    *,
+    snapshots_col,
+    now: datetime | None = None,
+    month: str | None = None,
+    snapshot_week: str | None = None,
+) -> dict:
+    """Phase 3: read-only summary of the latest ``backend_segment_snapshots``.
 
     Shadow-mode dashboard view only — reads the snapshot collection written
     by ``backend_segment_engine.run_shadow_segment_engine``; never queries
     or writes ``users``, never touches segment classification, voucher
     allocation, public-pool probability, or reward logic.
+
+    When ``snapshot_week`` (e.g. "2026-W24") is provided, filter by that week.
+    Otherwise, filter by ``month`` (YYYY-MM), defaulting to the current month.
     """
     now = now or _utc_now()
-    month = month or f"{now.year:04d}-{now.month:02d}"
 
-    docs = list(snapshots_col.find({"snapshot_month": month}))
+    if snapshot_week:
+        query: dict = {"snapshot_week": snapshot_week}
+    else:
+        month = month or f"{now.year:04d}-{now.month:02d}"
+        query = {"snapshot_month": month}
+
+    docs = list(snapshots_col.find(query))
 
     segment_counts: dict[str, int] = {}
     claim_risk_counts: dict[str, int] = {}
+    age_distribution: dict[str, int] = {"new_player": 0, "old_player": 0, "unknown": 0}
     matches = 0
     mismatches = 0
     compared = 0
+    comparison_rows: list[dict] = []
+
     for doc in docs:
-        segment_counts[doc.get("backend_segment", "unclassified")] = (
-            segment_counts.get(doc.get("backend_segment", "unclassified"), 0) + 1
-        )
-        claim_risk_counts[doc.get("claim_risk_level", "normal")] = (
-            claim_risk_counts.get(doc.get("claim_risk_level", "normal"), 0) + 1
-        )
+        seg = doc.get("backend_segment", "unclassified")
+        segment_counts[seg] = segment_counts.get(seg, 0) + 1
+
+        risk = doc.get("claim_risk_level", "normal")
+        claim_risk_counts[risk] = claim_risk_counts.get(risk, 0) + 1
+
+        age_type = doc.get("player_age_type")
+        if age_type in age_distribution:
+            age_distribution[age_type] += 1
+        else:
+            age_distribution["unknown"] += 1
+
         comparison = doc.get("uim_comparison")
         if comparison is not None:
             compared += 1
@@ -1501,26 +1524,55 @@ def build_backend_segment_engine_panel(*, snapshots_col, now: datetime | None = 
                 matches += 1
             else:
                 mismatches += 1
+            if len(comparison_rows) < 50:
+                comparison_rows.append(
+                    {
+                        "account": doc.get("account"),
+                        "backend_segment": comparison.get("backend_segment"),
+                        "uim_segment": comparison.get("uim_segment"),
+                        "match": comparison.get("match"),
+                        "confidence": doc.get("confidence"),
+                        "reason": doc.get("segment_reason"),
+                    }
+                )
 
     total = len(docs)
+    hv = segment_counts.get("high_value", 0)
+    lv = segment_counts.get("low_value", 0)
+    na = segment_counts.get("normal_actual", 0)
+    actual_players = hv + lv + na
+
     return {
         "success": True,
         "generated_at": now.isoformat(),
         "data_source": (
-            "Phase 6A backend segment engine — SHADOW MODE. Read-only "
+            "Phase 3 backend segment engine — SHADOW MODE. Read-only "
             "comparison/audit view; does not drive bot behaviour, voucher "
             "allocation, or reward logic. UIM for_bot_segment remains the "
             "production source of truth."
         ),
-        "snapshot_month": month,
+        "snapshot_month": month if not snapshot_week else None,
+        "snapshot_week": snapshot_week or None,
         "summary": {
             "total_users_evaluated": total,
+            "high_value": hv,
+            "low_value": lv,
+            "normal_actual": na,
+            "actual_players": actual_players,
+            "voucher_hunter": segment_counts.get("voucher_hunter", 0),
+            "ghost": segment_counts.get("ghost", 0),
+            "active_community_player": segment_counts.get("active_community_player", 0),
+            "unclassified": segment_counts.get("unclassified", 0),
             "uim_compared": compared,
+            "uim_matches": matches,
+            "uim_mismatches": mismatches,
             "match_rate": round(100.0 * matches / compared, 2) if compared else None,
             "mismatch_rate": round(100.0 * mismatches / compared, 2) if compared else None,
         },
         "segment_distribution": segment_counts,
         "claim_risk_distribution": claim_risk_counts,
+        "player_age_distribution": age_distribution,
+        "comparison_rows": comparison_rows,
     }
 
 

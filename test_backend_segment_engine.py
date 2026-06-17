@@ -6,8 +6,8 @@ import backend_segment_engine as engine
 
 def _metrics(**overrides):
     base = {
-        "after_bet_amount": None,
-        "withdrawal_amount": None,
+        "after_total_bet_amount": None,
+        "withdraw_amount": None,
         "is_new_player": None,
         "claim_count": 0,
         "referral_count": 0,
@@ -21,67 +21,88 @@ def _metrics(**overrides):
 
 class SegmentRuleTests(unittest.TestCase):
     def test_high_value_rule(self):
-        m = _metrics(after_bet_amount=800, withdrawal_amount=100)
+        m = _metrics(after_total_bet_amount=800, withdraw_amount=100)
         result = engine.classify_segment(m)
         self.assertEqual(result["segment"], "high_value")
         self.assertEqual(result["segment_reason"], "after_bet_multiple >= 8x")
         self.assertEqual(result["confidence"], "high")
 
     def test_high_value_boundary_exactly_8x(self):
-        m = _metrics(after_bet_amount=800, withdrawal_amount=100)
+        m = _metrics(after_total_bet_amount=800, withdraw_amount=100)
         self.assertEqual(engine.classify_segment(m)["segment"], "high_value")
 
     def test_low_value_rule(self):
-        m = _metrics(after_bet_amount=300, withdrawal_amount=100)
+        m = _metrics(after_total_bet_amount=300, withdraw_amount=100)
         result = engine.classify_segment(m)
         self.assertEqual(result["segment"], "low_value")
         self.assertEqual(result["segment_reason"], "after_bet_multiple < 8x")
 
     def test_normal_actual_rule(self):
-        m = _metrics(after_bet_amount=500, withdrawal_amount=0)
+        m = _metrics(after_total_bet_amount=500, withdraw_amount=0)
         result = engine.classify_segment(m)
         self.assertEqual(result["segment"], "normal_actual")
         self.assertEqual(result["segment_reason"], "has play activity")
 
+    def test_normal_actual_no_withdrawal(self):
+        # after_total_bet > 0 with no withdrawal is still normal_actual
+        m = _metrics(after_total_bet_amount=100, withdraw_amount=0)
+        self.assertEqual(engine.classify_segment(m)["segment"], "normal_actual")
+
     def test_voucher_hunter_rule(self):
-        m = _metrics(after_bet_amount=0, withdrawal_amount=0, claim_count=3)
+        m = _metrics(after_total_bet_amount=0, withdraw_amount=0, claim_count=3)
         result = engine.classify_segment(m)
         self.assertEqual(result["segment"], "voucher_hunter")
         self.assertEqual(result["segment_reason"], "repeat claims with no play")
 
     def test_voucher_hunter_requires_threshold(self):
-        m = _metrics(after_bet_amount=0, withdrawal_amount=0, claim_count=2)
+        m = _metrics(after_total_bet_amount=0, withdraw_amount=0, claim_count=2)
         result = engine.classify_segment(m)
         self.assertNotEqual(result["segment"], "voucher_hunter")
 
     def test_ghost_rule(self):
-        old = datetime.now(timezone.utc) - timedelta(days=45)
-        m = _metrics(after_bet_amount=0, withdrawal_amount=0, claim_count=0, referral_count=0, checkin_count=0, last_active_at=old)
+        m = _metrics(
+            after_total_bet_amount=0, withdraw_amount=0,
+            claim_count=0, referral_count=0, checkin_count=0,
+        )
         result = engine.classify_segment(m)
         self.assertEqual(result["segment"], "ghost")
         self.assertEqual(result["segment_reason"], "inactive user")
 
-    def test_ghost_rule_not_triggered_within_30_days(self):
-        recent = datetime.now(timezone.utc) - timedelta(days=10)
-        m = _metrics(after_bet_amount=0, withdrawal_amount=0, claim_count=0, referral_count=0, checkin_count=0, last_active_at=recent)
-        result = engine.classify_segment(m)
-        self.assertNotEqual(result["segment"], "ghost")
+    def test_ghost_rule_no_last_active_check(self):
+        # Phase 3: ghost does NOT require last_active_at check — a recently
+        # active user with zero bet/referral/checkin is still ghost.
+        recent = datetime.now(timezone.utc) - timedelta(days=1)
+        m = _metrics(
+            after_total_bet_amount=0, withdraw_amount=0,
+            claim_count=0, referral_count=0, checkin_count=0,
+            last_active_at=recent,
+        )
+        self.assertEqual(engine.classify_segment(m)["segment"], "ghost")
+
+    def test_ghost_not_triggered_if_has_referrals(self):
+        m = _metrics(
+            after_total_bet_amount=0, withdraw_amount=0,
+            claim_count=0, referral_count=1, checkin_count=0,
+        )
+        self.assertNotEqual(engine.classify_segment(m)["segment"], "ghost")
+
+    def test_ghost_not_triggered_if_has_checkins(self):
+        m = _metrics(
+            after_total_bet_amount=0, withdraw_amount=0,
+            claim_count=0, referral_count=0, checkin_count=1,
+        )
+        self.assertNotEqual(engine.classify_segment(m)["segment"], "ghost")
 
     def test_malformed_last_active_at_does_not_crash(self):
-        m = _metrics(after_bet_amount=0, withdrawal_amount=0, claim_count=0, referral_count=0, checkin_count=0, last_active_at="not-a-date")
+        # Phase 3: ghost is triggered by referral/checkin conditions only;
+        # malformed last_active_at is ignored — no crash, ghost still returned.
+        m = _metrics(
+            after_total_bet_amount=0, withdraw_amount=0,
+            claim_count=0, referral_count=0, checkin_count=0,
+            last_active_at="not-a-date",
+        )
         result = engine.classify_segment(m)
-        self.assertNotEqual(result["segment"], "ghost")
-        self.assertEqual(result["segment"], "unclassified")
-
-    def test_new_player_fallback(self):
-        m = _metrics(after_bet_amount=0, withdrawal_amount=0, is_new_player=1)
-        result = engine.classify_segment(m)
-        self.assertEqual(result["segment"], "new_player")
-
-    def test_old_player_fallback(self):
-        m = _metrics(after_bet_amount=0, withdrawal_amount=0, is_new_player=0)
-        result = engine.classify_segment(m)
-        self.assertEqual(result["segment"], "old_player")
+        self.assertEqual(result["segment"], "ghost")
 
     def test_active_community_player_is_low_confidence(self):
         m = _metrics(xp=engine.ACTIVE_COMMUNITY_XP_THRESHOLD + 1)
@@ -95,6 +116,75 @@ class SegmentRuleTests(unittest.TestCase):
         self.assertEqual(result["segment"], "unclassified")
         self.assertEqual(result["confidence"], "low")
         self.assertIn("missing marketing data", result["segment_reason"])
+
+
+class FieldNameAliasTests(unittest.TestCase):
+    """Both Phase 3 and legacy field-name conventions must produce the same results."""
+
+    def test_phase3_field_names_high_value(self):
+        m = _metrics(after_total_bet_amount=800, withdraw_amount=100)
+        self.assertEqual(engine.classify_segment(m)["segment"], "high_value")
+
+    def test_legacy_field_names_high_value(self):
+        # after_bet_amount / withdrawal_amount (Phase 6A names) still work
+        m = _metrics(after_bet_amount=800, withdrawal_amount=100)
+        self.assertEqual(engine.classify_segment(m)["segment"], "high_value")
+
+    def test_phase3_field_names_low_value(self):
+        m = _metrics(after_total_bet_amount=300, withdraw_amount=100)
+        self.assertEqual(engine.classify_segment(m)["segment"], "low_value")
+
+    def test_legacy_field_names_low_value(self):
+        m = _metrics(after_bet_amount=300, withdrawal_amount=100)
+        self.assertEqual(engine.classify_segment(m)["segment"], "low_value")
+
+
+class PlayerAgeTypeTests(unittest.TestCase):
+    def test_new_player_flag_1(self):
+        self.assertEqual(engine.classify_player_age_type(1), "new_player")
+
+    def test_new_player_flag_string_1(self):
+        self.assertEqual(engine.classify_player_age_type("1"), "new_player")
+
+    def test_new_player_flag_0(self):
+        self.assertEqual(engine.classify_player_age_type(0), "old_player")
+
+    def test_new_player_flag_none(self):
+        self.assertEqual(engine.classify_player_age_type(None), "old_player")
+
+    def test_new_player_flag_string_true(self):
+        self.assertEqual(engine.classify_player_age_type("true"), "new_player")
+
+    def test_player_age_type_stored_separately_from_segment(self):
+        # A ghost user still has player_age_type stored independently
+        now = datetime(2026, 6, 16, tzinfo=timezone.utc)
+        doc = engine.build_snapshot_doc(
+            account="testuser",
+            user_id=100,
+            telegram_user_id=100,
+            metrics=_metrics(
+                after_total_bet_amount=0, withdraw_amount=0,
+                is_new_player=1,
+                referral_count=0, checkin_count=0,
+            ),
+            now=now,
+            snapshot_week="2026-W25",
+        )
+        self.assertEqual(doc["backend_segment"], "ghost")
+        self.assertEqual(doc["player_age_type"], "new_player")
+
+    def test_old_player_with_high_value_segment(self):
+        now = datetime(2026, 6, 16, tzinfo=timezone.utc)
+        doc = engine.build_snapshot_doc(
+            account="alice",
+            user_id=42,
+            telegram_user_id=42,
+            metrics=_metrics(after_total_bet_amount=800, withdraw_amount=100, is_new_player=0),
+            now=now,
+            snapshot_week="2026-W25",
+        )
+        self.assertEqual(doc["backend_segment"], "high_value")
+        self.assertEqual(doc["player_age_type"], "old_player")
 
 
 class ClaimRiskRuleTests(unittest.TestCase):
@@ -123,6 +213,15 @@ class ClaimRiskRuleTests(unittest.TestCase):
         self.assertEqual(level, "abuse_freeze")
         self.assertEqual(reason, "claim_count=51")
 
+    def test_claim_risk_reason_example_14(self):
+        _, reason = engine.classify_claim_risk(14)
+        self.assertEqual(reason, "claim_count=14")
+
+    def test_claim_risk_reason_example_53(self):
+        level, reason = engine.classify_claim_risk(53)
+        self.assertEqual(level, "abuse_freeze")
+        self.assertEqual(reason, "claim_count=53")
+
 
 class SnapshotIdempotencyTests(unittest.TestCase):
     class _FakeBulkResult:
@@ -140,63 +239,173 @@ class SnapshotIdempotencyTests(unittest.TestCase):
             for op in ops:
                 filt = getattr(op, "_filter", {})
                 update = getattr(op, "_doc", {})
-                key = (filt["user_id"], filt["snapshot_month"])
+                # Phase 3: unique key is (account, snapshot_week)
+                key = (filt.get("account"), filt.get("snapshot_week"))
                 is_new = key not in self.docs
                 self.docs[key] = update.get("$set", {})
                 if is_new:
                     upserted += 1
                 else:
                     modified += 1
-            return SnapshotIdempotencyTests._FakeBulkResult(modified_count=modified, upserted_count=upserted)
+            return SnapshotIdempotencyTests._FakeBulkResult(
+                modified_count=modified, upserted_count=upserted
+            )
 
     class _FakeUsersCollection:
         def __init__(self, docs):
-            self._docs = docs
+            self._docs = list(docs)
 
         def find(self, filt=None):
             return list(self._docs)
 
-    class _FakeEmptyLookupCollection:
-        """Stands in for voucher_claims_col / marketing_col with no data."""
+    class _FakeMarketingCollection:
+        """Simulates marketing_raw_data with docs per snapshot_week."""
 
+        def __init__(self, week_docs):
+            # week_docs: dict[snapshot_week -> list[doc]]
+            self._week_docs = week_docs
+
+        def find(self, filt=None):
+            filt = filt or {}
+            week = filt.get("snapshot_week")
+            if isinstance(week, str):
+                return list(self._week_docs.get(week, []))
+            return []
+
+    class _FakeEmptyCollection:
         def find(self, filt=None):
             return []
 
         def aggregate(self, pipeline):
             return []
 
-    def test_rerunning_same_month_replaces_not_duplicates(self):
+    def test_rerunning_same_week_replaces_not_duplicates(self):
+        week = "2026-W25"
         now = datetime(2026, 6, 16, tzinfo=timezone.utc)
-        users = self._FakeUsersCollection([{"user_id": 100, "total_referrals": 0, "for_bot_segment": "high_value"}])
+        marketing = self._FakeMarketingCollection({
+            week: [{"account": "alice", "after_total_bet_amount": 800,
+                    "withdraw_amount": 100, "snapshot_week": week}]
+        })
+        users = self._FakeUsersCollection([
+            {"user_id": 100, "username": "alice", "total_referrals": 0, "for_bot_segment": "high_value"}
+        ])
         snapshots = self._FakeSnapshotsCollection()
-        empty = self._FakeEmptyLookupCollection()
+        empty = self._FakeEmptyCollection()
 
         summary1 = engine.run_shadow_segment_engine(
-            users_col=users, voucher_claims_col=empty, marketing_col=empty, snapshots_col=snapshots, now=now
+            users_col=users, voucher_claims_col=empty, marketing_col=marketing,
+            snapshots_col=snapshots, snapshot_week=week, now=now,
         )
         self.assertTrue(summary1["ok"])
         self.assertEqual(len(snapshots.docs), 1)
 
         summary2 = engine.run_shadow_segment_engine(
-            users_col=users, voucher_claims_col=empty, marketing_col=empty, snapshots_col=snapshots, now=now
+            users_col=users, voucher_claims_col=empty, marketing_col=marketing,
+            snapshots_col=snapshots, snapshot_week=week, now=now,
         )
         self.assertTrue(summary2["ok"])
-        # Still exactly one doc for (user_id=100, snapshot_month) — idempotent.
+        # Still exactly one doc for (account=alice, snapshot_week) — idempotent.
         self.assertEqual(len(snapshots.docs), 1)
 
-    def test_different_month_creates_separate_snapshot(self):
-        users = self._FakeUsersCollection([{"user_id": 100, "total_referrals": 0}])
+    def test_different_week_creates_separate_snapshot(self):
+        week1 = "2026-W24"
+        week2 = "2026-W25"
+        mrow = {"account": "alice", "after_total_bet_amount": 100, "withdraw_amount": 0}
+        marketing = self._FakeMarketingCollection({
+            week1: [{**mrow, "snapshot_week": week1}],
+            week2: [{**mrow, "snapshot_week": week2}],
+        })
+        users = self._FakeUsersCollection([{"user_id": 100, "username": "alice", "total_referrals": 0}])
         snapshots = self._FakeSnapshotsCollection()
-        empty = self._FakeEmptyLookupCollection()
+        empty = self._FakeEmptyCollection()
+
         engine.run_shadow_segment_engine(
-            users_col=users, voucher_claims_col=empty, marketing_col=empty, snapshots_col=snapshots,
-            now=datetime(2026, 6, 1, tzinfo=timezone.utc),
+            users_col=users, voucher_claims_col=empty, marketing_col=marketing,
+            snapshots_col=snapshots, snapshot_week=week1,
+            now=datetime(2026, 6, 9, tzinfo=timezone.utc),
         )
         engine.run_shadow_segment_engine(
-            users_col=users, voucher_claims_col=empty, marketing_col=empty, snapshots_col=snapshots,
-            now=datetime(2026, 7, 1, tzinfo=timezone.utc),
+            users_col=users, voucher_claims_col=empty, marketing_col=marketing,
+            snapshots_col=snapshots, snapshot_week=week2,
+            now=datetime(2026, 6, 16, tzinfo=timezone.utc),
         )
         self.assertEqual(len(snapshots.docs), 2)
+
+    def test_missing_marketing_data_returns_ok_zero_users(self):
+        marketing = self._FakeMarketingCollection({})
+        users = self._FakeUsersCollection([{"user_id": 100, "username": "alice"}])
+        snapshots = self._FakeSnapshotsCollection()
+        empty = self._FakeEmptyCollection()
+
+        summary = engine.run_shadow_segment_engine(
+            users_col=users, voucher_claims_col=empty, marketing_col=marketing,
+            snapshots_col=snapshots, snapshot_week="2026-W99",
+        )
+        self.assertTrue(summary["ok"])
+        self.assertEqual(summary["users_evaluated"], 0)
+        self.assertEqual(len(snapshots.docs), 0)
+
+
+class ActualPlayersKPITests(unittest.TestCase):
+    """actual_players KPI = high_value + low_value + normal_actual."""
+
+    class _FakeSnapshotsCollection:
+        def __init__(self):
+            self.docs = {}
+
+        def bulk_write(self, ops, ordered=False):
+            for op in ops:
+                filt = getattr(op, "_filter", {})
+                update = getattr(op, "_doc", {})
+                key = (filt.get("account"), filt.get("snapshot_week"))
+                self.docs[key] = update.get("$set", {})
+            return type("R", (), {"modified_count": 0, "upserted_count": len(ops)})()
+
+    class _FakeEmptyCollection:
+        def find(self, filt=None):
+            return []
+
+        def aggregate(self, pipeline):
+            return []
+
+    def _marketing_col(self, docs, week):
+        class _MC:
+            def find(self_, filt=None):
+                filt = filt or {}
+                if filt.get("snapshot_week") == week:
+                    return list(docs)
+                return []
+        return _MC()
+
+    def test_actual_players_kpi_components(self):
+        week = "2026-W25"
+        now = datetime(2026, 6, 16, tzinfo=timezone.utc)
+        marketing_docs = [
+            {"account": "hv_user", "after_total_bet_amount": 800, "withdraw_amount": 100, "snapshot_week": week},
+            {"account": "lv_user", "after_total_bet_amount": 200, "withdraw_amount": 100, "snapshot_week": week},
+            {"account": "na_user", "after_total_bet_amount": 50, "withdraw_amount": 0, "snapshot_week": week},
+            {"account": "gh_user", "after_total_bet_amount": 0, "withdraw_amount": 0, "snapshot_week": week},
+        ]
+        users = type("UC", (), {"find": lambda self, f=None: []})()
+        snapshots = self._FakeSnapshotsCollection()
+        empty = self._FakeEmptyCollection()
+
+        summary = engine.run_shadow_segment_engine(
+            users_col=users, voucher_claims_col=empty,
+            marketing_col=self._marketing_col(marketing_docs, week),
+            snapshots_col=snapshots,
+            snapshot_week=week, now=now,
+        )
+        self.assertTrue(summary["ok"])
+        dist = summary["segment_distribution"]
+        self.assertEqual(dist.get("high_value", 0), 1)
+        self.assertEqual(dist.get("low_value", 0), 1)
+        self.assertEqual(dist.get("normal_actual", 0), 1)
+        self.assertEqual(dist.get("ghost", 0), 1)
+        actual_players = (
+            dist.get("high_value", 0) + dist.get("low_value", 0) + dist.get("normal_actual", 0)
+        )
+        self.assertEqual(actual_players, 3)
 
 
 class UimComparisonTests(unittest.TestCase):
@@ -210,10 +419,6 @@ class UimComparisonTests(unittest.TestCase):
         result = engine.compare_with_uim(backend_segment="low_value", uim_segment_raw="high_value")
         self.assertFalse(result["match"])
 
-    def test_new_player_alias_matches_uim_new_user(self):
-        result = engine.compare_with_uim(backend_segment="new_player", uim_segment_raw="new_user")
-        self.assertTrue(result["match"])
-
     def test_blank_uim_value_normalizes_to_unclassified(self):
         result = engine.compare_with_uim(backend_segment="unclassified", uim_segment_raw="")
         self.assertTrue(result["match"])
@@ -222,11 +427,39 @@ class UimComparisonTests(unittest.TestCase):
 class MissingMarketingDataTests(unittest.TestCase):
     def test_snapshot_doc_reports_unclassified_and_low_confidence(self):
         now = datetime(2026, 6, 16, tzinfo=timezone.utc)
-        doc = engine.build_snapshot_doc(user_id=1, metrics=_metrics(), now=now)
+        doc = engine.build_snapshot_doc(
+            account="testuser",
+            user_id=1,
+            telegram_user_id=1,
+            metrics=_metrics(),
+            now=now,
+            snapshot_week="2026-W25",
+        )
         self.assertEqual(doc["backend_segment"], "unclassified")
         self.assertEqual(doc["confidence"], "low")
+        self.assertEqual(doc["snapshot_week"], "2026-W25")
         self.assertEqual(doc["snapshot_month"], "2026-06")
         self.assertEqual(doc["claim_risk_level"], "normal")
+        self.assertIn("account", doc)
+        self.assertIn("player_age_type", doc)
+
+    def test_snapshot_doc_includes_all_schema_fields(self):
+        now = datetime(2026, 6, 16, tzinfo=timezone.utc)
+        doc = engine.build_snapshot_doc(
+            account="alice",
+            user_id=42,
+            telegram_user_id=42,
+            metrics=_metrics(after_total_bet_amount=800, withdraw_amount=100, is_new_player=1),
+            now=now,
+            snapshot_week="2026-W25",
+        )
+        for field in (
+            "account", "user_id", "telegram_user_id", "backend_segment",
+            "player_age_type", "claim_risk_level", "segment_reason",
+            "claim_risk_reason", "confidence", "snapshot_week",
+            "snapshot_month", "calculated_at",
+        ):
+            self.assertIn(field, doc, f"Missing schema field: {field}")
 
 
 if __name__ == "__main__":

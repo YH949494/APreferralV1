@@ -713,20 +713,35 @@
       });
   }
 
-  // ---------- Backend Segment Engine (Phase 6A, shadow mode) ----------
+  // ---------- Backend Segment Engine (Phase 3, shadow mode) ----------
   function loadBackendSegmentEngine(refresh) {
     setMeta("Loading…");
-    skeletonGrid($("#cards-bse-summary"), 4);
+    skeletonGrid($("#cards-bse-summary"), 8);
     statePanel("bse-segment-body", "loading", "Loading backend segment engine snapshot…");
+    var week = ($("#bse-week") || {}).value || "";
     var month = ($("#bse-month") || {}).value || "";
-    var qs = [refresh ? "refresh=1" : "", month ? "month=" + encodeURIComponent(month) : ""].filter(Boolean).join("&");
+    var qs = [
+      refresh ? "refresh=1" : "",
+      week ? "snapshot_week=" + encodeURIComponent(week) : "",
+      month ? "month=" + encodeURIComponent(month) : ""
+    ].filter(Boolean).join("&");
     api("/api/admin/dashboard/backend-segment-engine" + (qs ? "?" + qs : ""))
       .then(function (d) {
-        renderMeta(d, "snapshot_month " + (d.snapshot_month || ""));
+        var label = d.snapshot_week ? ("week " + d.snapshot_week) : ("month " + (d.snapshot_month || ""));
+        renderMeta(d, "snapshot " + label);
         var s = d.summary || {};
+        var actualPlayers = (s.high_value || 0) + (s.low_value || 0) + (s.normal_actual || 0);
         $("#cards-bse-summary").innerHTML =
-          dqCard("Total Users Evaluated", { value: s.total_users_evaluated }) +
-          dqCard("Compared vs UIM", { value: s.uim_compared }) +
+          dqCard("Users Evaluated", { value: s.total_users_evaluated }) +
+          dqCard("High Value", { value: s.high_value }) +
+          dqCard("Low Value", { value: s.low_value }) +
+          dqCard("Normal Actual", { value: s.normal_actual }) +
+          dqCard("Actual Players (HV+LV+NA)", { value: s.actual_players != null ? s.actual_players : actualPlayers }) +
+          dqCard("Voucher Hunter", { value: s.voucher_hunter }) +
+          dqCard("Ghost", { value: s.ghost }) +
+          dqCard("Active Community", { value: s.active_community_player }) +
+          dqCard("Unclassified", { value: s.unclassified }) +
+          dqCard("UIM Compared", { value: s.uim_compared }) +
           dqCard("Match Rate %", { value: s.match_rate }) +
           dqCard("Mismatch Rate %", { value: s.mismatch_rate });
 
@@ -735,14 +750,32 @@
         }).join("");
         $("#bse-segment-body").innerHTML = segRows
           ? '<table class="mini-table"><thead><tr><th>Backend Segment</th><th class="num">Users</th></tr></thead><tbody>' + segRows + "</tbody></table>"
-          : '<div class="empty">No backend segment snapshots for this month yet.</div>';
+          : '<div class="empty">No backend segment snapshots for this period yet.</div>';
 
         var riskRows = Object.keys(d.claim_risk_distribution || {}).sort().map(function (k) {
           return "<tr><td>" + esc(k) + '</td><td class="num">' + fmt(d.claim_risk_distribution[k]) + "</td></tr>";
         }).join("");
         $("#bse-claim-risk-body").innerHTML = riskRows
           ? '<table class="mini-table"><thead><tr><th>Claim Risk Level</th><th class="num">Users</th></tr></thead><tbody>' + riskRows + "</tbody></table>"
-          : '<div class="empty">No claim risk data for this month yet.</div>';
+          : '<div class="empty">No claim risk data for this period yet.</div>';
+
+        var age = d.player_age_distribution || {};
+        var ageRows = ["new_player", "old_player", "unknown"].map(function (k) {
+          return "<tr><td>" + esc(k) + '</td><td class="num">' + fmt(age[k] || 0) + "</td></tr>";
+        }).join("");
+        $("#bse-age-body").innerHTML = ageRows
+          ? '<table class="mini-table"><thead><tr><th>Player Age Type</th><th class="num">Users</th></tr></thead><tbody>' + ageRows + "</tbody></table>"
+          : '<div class="empty">No player age data available.</div>';
+
+        var cmpRows = (d.comparison_rows || []).map(function (r) {
+          var matchCell = r.match
+            ? '<td style="color:var(--green,green)">match</td>'
+            : '<td style="color:var(--red,red)">mismatch</td>';
+          return "<tr><td>" + esc(r.account || "") + "</td><td>" + esc(r.backend_segment || "") + "</td><td>" + esc(r.uim_segment || "") + "</td>" + matchCell + "<td>" + esc(r.confidence || "") + "</td><td>" + esc(r.reason || "") + "</td></tr>";
+        }).join("");
+        $("#bse-comparison-body").innerHTML = cmpRows
+          ? '<table class="mini-table"><thead><tr><th>Account</th><th>Backend Segment</th><th>UIM Segment</th><th>Match</th><th>Confidence</th><th>Reason</th></tr></thead><tbody>' + cmpRows + "</tbody></table>"
+          : '<div class="empty">No UIM comparison data available. Run the engine with marketing data to populate.</div>';
       })
       .catch(function (e) {
         if (e.message !== "unauthorized") {
