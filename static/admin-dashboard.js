@@ -786,6 +786,69 @@
       });
   }
 
+  // ---------- Backend Segment Engine Run (Phase 3C) ----------
+  function runBackendSegmentEngine(dryRun) {
+    var weekInput = $("#bse-run-week");
+    var week = (weekInput || {}).value || "";
+    week = week.trim();
+    var resultEl = $("#bse-run-result");
+    if (!week) {
+      if (resultEl) resultEl.innerHTML = '<span style="color:var(--red,#e05c5c)">snapshot_week is required (e.g. 2026-W25).</span>';
+      return;
+    }
+    if (!/^\d{4}-W(0[1-9]|[1-4]\d|5[0-3])$/.test(week)) {
+      if (resultEl) resultEl.innerHTML = '<span style="color:var(--red,#e05c5c)">Invalid format. Use YYYY-Www (e.g. 2026-W25).</span>';
+      return;
+    }
+    var label = dryRun ? "Dry run" : "Commit run";
+    if (resultEl) resultEl.innerHTML = '<span style="color:var(--muted,#8892a4)">' + label + ' running for ' + esc(week) + '…</span>';
+    var dryBtn = $("#bse-dry-run-btn");
+    var commitBtn = $("#bse-commit-run-btn");
+    if (dryBtn) dryBtn.disabled = true;
+    if (commitBtn) commitBtn.disabled = true;
+    fetch("/api/admin/dashboard/backend-segment-engine/run" + window.location.search, {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Accept": "application/json", "Content-Type": "application/json" },
+      body: JSON.stringify({ snapshot_week: week, dry_run: dryRun }),
+    })
+      .then(function (r) {
+        if (r.status === 401) { window.location.href = "/static/admin-login.html"; throw new Error("unauthorized"); }
+        return r.json().then(function (j) { return { ok: r.ok, body: j }; });
+      })
+      .then(function (res) {
+        var d = res.body;
+        if (dryBtn) dryBtn.disabled = false;
+        if (commitBtn) commitBtn.disabled = false;
+        if (!res.ok || !d.ok) {
+          if (resultEl) resultEl.innerHTML = '<span style="color:var(--red,#e05c5c)">Error: ' + esc(d.error || "unknown error") + '</span>';
+          return;
+        }
+        var lines = [
+          (dryRun ? "<b>Dry run</b> completed" : "<b>Commit run</b> completed") + " for " + esc(d.snapshot_week),
+          "Users evaluated: <b>" + fmt(d.users_evaluated) + "</b>",
+          dryRun ? "Snapshots written: <b>0 (dry run)</b>" : "Snapshots written: <b>" + fmt(d.snapshots_written) + "</b>",
+        ];
+        var segs = d.segment_counts || {};
+        var segParts = Object.keys(segs).sort().map(function (k) { return esc(k) + ": " + fmt(segs[k]); });
+        if (segParts.length) lines.push("Segments: " + segParts.join(" | "));
+        if (resultEl) resultEl.innerHTML = '<span style="color:var(--green,#4caf82)">' + lines.join(" &nbsp;&bull;&nbsp; ") + '</span>';
+        // After a successful commit, sync the week filter and refresh the dashboard panel.
+        if (!dryRun) {
+          var weekFilter = $("#bse-week");
+          if (weekFilter) weekFilter.value = week;
+          loadBackendSegmentEngine(true);
+        }
+      })
+      .catch(function (e) {
+        if (dryBtn) dryBtn.disabled = false;
+        if (commitBtn) commitBtn.disabled = false;
+        if (e.message !== "unauthorized") {
+          if (resultEl) resultEl.innerHTML = '<span style="color:var(--red,#e05c5c)">Failed: ' + esc(e.message) + '</span>';
+        }
+      });
+  }
+
   // ---------- Upload Player Performance (Phase 2A) ----------
   function uploadPlayerPerformance() {
     var input = $("#upload-file-input");
@@ -1193,6 +1256,11 @@
 
     var bseApplyBtn = $("#bse-apply-btn");
     if (bseApplyBtn) bseApplyBtn.addEventListener("click", function () { loadBackendSegmentEngine(true); });
+
+    var bseDryRunBtn = $("#bse-dry-run-btn");
+    if (bseDryRunBtn) bseDryRunBtn.addEventListener("click", function () { runBackendSegmentEngine(true); });
+    var bseCommitRunBtn = $("#bse-commit-run-btn");
+    if (bseCommitRunBtn) bseCommitRunBtn.addEventListener("click", function () { runBackendSegmentEngine(false); });
 
     var uploadSubmitBtn = $("#upload-submit-btn");
     if (uploadSubmitBtn) uploadSubmitBtn.addEventListener("click", uploadPlayerPerformance);
