@@ -174,6 +174,9 @@ def ensure_indexes() -> None:
         [("snapshot_week", ASCENDING), ("dry_run", ASCENDING), ("status", ASCENDING)]
     )
 
+    # voucher_claims.user_id — critical for run_shadow_segment_engine's aggregate
+    db_ref["voucher_claims"].create_index([("user_id", ASCENDING)])
+
     # Phase 2A — weekly marketing raw-data upload. dedupe_key prevents
     # re-uploading the same weekly file from creating duplicate rows;
     # upload_batch_id is indexed for upload-history lookups.

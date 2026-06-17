@@ -55,6 +55,20 @@ logger = logging.getLogger(__name__)
 
 BATCH_SIZE = 500
 
+_USER_PROJECTION = {
+    "_id": 0,
+    "username": 1,
+    "user_id": 1,
+    "total_referrals": 1,
+    "checkin_count": 1,
+    "checkin_streak": 1,
+    "total_xp": 1,
+    "for_bot_segment": 1,
+    "bot_segment": 1,
+    "last_active_at": 1,
+    "last_checkin": 1,
+}
+
 # Segment rule thresholds.
 HIGH_VALUE_AFTER_BET_MULTIPLE = 8.0
 VOUCHER_HUNTER_CLAIM_THRESHOLD = 3
@@ -445,6 +459,9 @@ def _empty_summary(*, dry_run: bool) -> dict:
         "ok": False,
         "users_evaluated": 0,
         "snapshots_written": 0,
+        "total_rows": 0,
+        "rows_processed": 0,
+        "elapsed_seconds": 0.0,
         "segment_distribution": {},
         "claim_risk_distribution": {},
         "uim_matches": 0,
@@ -464,6 +481,7 @@ def run_shadow_segment_engine(
     snapshot_week: str | None = None,
     now: datetime | None = None,
     dry_run: bool = False,
+    progress_cb=None,
 ) -> dict:
     """Evaluate users and upsert ``backend_segment_snapshots`` (shadow mode).
 
@@ -478,12 +496,25 @@ def run_shadow_segment_engine(
     existing snapshot rather than duplicating it.
 
     Never touches ``users`` or any production segment/voucher/reward field.
+
+    ``progress_cb(rows_done, total_rows)`` is called after each bulk_write
+    batch (and once at 0 after marketing data loads) so callers can track
+    real-time progress without polling the engine internals.
     """
     now = now or _utc_now()
+    started_at = _utc_now()
     if snapshot_week is None:
         snapshot_week = _snapshot_week_key(now)
 
     summary = _empty_summary(dry_run=dry_run)
+
+    def _call_progress(rows_done: int, total: int) -> None:
+        if progress_cb is not None:
+            try:
+                progress_cb(rows_done, total)
+            except Exception:
+                pass
+
     try:
         if users_col is None:
             database.init_db()
@@ -499,24 +530,35 @@ def run_shadow_segment_engine(
         marketing_rows = _marketing_rows_by_account(marketing_col, snapshot_week)
 
         if not marketing_rows:
-            # No marketing data for this week; return ok with zero rows.
             summary["ok"] = True
+            summary["elapsed_seconds"] = (_utc_now() - started_at).total_seconds()
             logger.info(
                 "[BACKEND_SEGMENT_ENGINE] no_marketing_data snapshot_week=%s", snapshot_week
             )
             return summary
 
-        # Step 2: Build a lookup of users by lowercased username.
-        all_users = list(users_col.find({}))
-        users_by_username: dict[str, dict] = {}
-        for u in all_users:
-            uname = (u.get("username") or "").strip().lower()
-            if uname:
-                users_by_username[uname] = u
+        total_rows = len(marketing_rows)
+        summary["total_rows"] = total_rows
+        _call_progress(0, total_rows)
 
-        # Step 3: Collect user_ids for claim count lookup.
+        # Step 2: Batch-query only the users whose username appears in the
+        # marketing data.  Keys of marketing_rows are already lowercased, so a
+        # case-insensitive collation match gives us the right docs without a
+        # full-collection scan.  _USER_PROJECTION keeps each document small.
+        username_candidates = list(marketing_rows.keys())
+        users_by_username: dict[str, dict] = {}
+        for batch in _chunks(username_candidates, BATCH_SIZE):
+            for u in users_col.find(
+                {"username": {"$in": batch}},
+                _USER_PROJECTION,
+            ).collation({"locale": "en", "strength": 2}):
+                uname = (u.get("username") or "").strip().lower()
+                if uname:
+                    users_by_username[uname] = u
+
+        # Step 3: Collect user_ids for batch claim-count lookup.
         known_user_ids: list[int] = []
-        for acct_lower, mrow in marketing_rows.items():
+        for acct_lower in marketing_rows:
             user_doc = users_by_username.get(acct_lower)
             if user_doc is not None and user_doc.get("user_id") is not None:
                 try:
@@ -526,7 +568,7 @@ def run_shadow_segment_engine(
 
         claim_counts = _claim_counts(voucher_claims_col, known_user_ids)
 
-        # Step 4: Build snapshot docs.
+        # Step 4: Build snapshot docs (pure in-memory, no extra DB calls).
         docs: list[dict] = []
         for acct_lower, mrow in marketing_rows.items():
             account = (mrow.get("account") or acct_lower).strip()
@@ -572,12 +614,16 @@ def run_shadow_segment_engine(
 
         if dry_run or not docs:
             summary["ok"] = True
+            summary["rows_processed"] = total_rows
+            summary["elapsed_seconds"] = (_utc_now() - started_at).total_seconds()
+            _call_progress(total_rows, total_rows)
             logger.info(
                 "[BACKEND_SEGMENT_ENGINE] dry_run_summary=%s",
                 {k: v for k, v in summary.items() if k != "error"},
             )
             return summary
 
+        # Step 5: Bulk-write in batches; report progress after each batch.
         ops = [
             UpdateOne(
                 {"account": doc["account"], "snapshot_week": doc["snapshot_week"]},
@@ -592,15 +638,20 @@ def run_shadow_segment_engine(
             written += int(getattr(result, "upserted_count", 0) or 0) + int(
                 getattr(result, "modified_count", 0) or 0
             )
+            _call_progress(written, total_rows)
+
         summary["snapshots_written"] = written
+        summary["rows_processed"] = total_rows
+        summary["elapsed_seconds"] = (_utc_now() - started_at).total_seconds()
         summary["ok"] = True
         logger.info(
             "[BACKEND_SEGMENT_ENGINE] commit_summary=%s",
             {k: v for k, v in summary.items() if k != "error"},
         )
         return summary
-    except (RuntimeError, ValueError, PyMongoError) as exc:
+    except Exception as exc:
         summary["error"] = str(exc)
+        summary["elapsed_seconds"] = (_utc_now() - started_at).total_seconds()
         logger.error("[BACKEND_SEGMENT_ENGINE] failed err=%s", str(exc))
         return summary
 
