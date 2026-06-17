@@ -146,13 +146,26 @@ def ensure_indexes() -> None:
 
     db_ref["user_claim_risk_history"].create_index([("user_id", ASCENDING), ("synced_at", ASCENDING)])
 
-    # Phase 6A — backend-owned segment engine, shadow mode only. Idempotent
-    # per (user_id, snapshot_month); never read by the bot, never written by
+    # Phase 3 — backend-owned segment engine, shadow mode only. Idempotent
+    # per (account, snapshot_week); never read by the bot, never written by
     # bot_segment_sync/claim_risk_sync.
+    #
+    # Drop the Phase 6A unique index (user_id, snapshot_month) if it exists on
+    # this deployment before creating the new one, otherwise MongoDB keeps
+    # enforcing the old key and rejects inserts with user_id=None or multiple
+    # weeks in the same month for the same user.
+    try:
+        db_ref["backend_segment_snapshots"].drop_index(
+            [("user_id", ASCENDING), ("snapshot_month", ASCENDING)]
+        )
+        logger.info("[DB] Dropped stale backend_segment_snapshots index (user_id, snapshot_month)")
+    except Exception:
+        pass  # index didn't exist — nothing to drop
     db_ref["backend_segment_snapshots"].create_index(
-        [("user_id", ASCENDING), ("snapshot_month", ASCENDING)], unique=True
+        [("account", ASCENDING), ("snapshot_week", ASCENDING)], unique=True
     )
     db_ref["backend_segment_snapshots"].create_index([("snapshot_month", ASCENDING)])
+    db_ref["backend_segment_snapshots"].create_index([("snapshot_week", ASCENDING)])
 
     # Phase 2A — weekly marketing raw-data upload. dedupe_key prevents
     # re-uploading the same weekly file from creating duplicate rows;
