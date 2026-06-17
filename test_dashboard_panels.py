@@ -888,3 +888,105 @@ def test_kpi_gap_report_never_invents_proxy_calculations():
     assert by_key["total_campaign_players"]["implementation_status"] == "definition_mismatch"
     assert by_key["high_value_players"]["implementation_status"] == "definition_mismatch"
     assert by_key["new_player_total"]["implementation_status"] == "definition_mismatch"
+
+
+# ---------------------------------------------------------------------------
+# P2 regression: snapshot_week filter reaches the panel builder query layer
+# ---------------------------------------------------------------------------
+
+def _make_bse_snapshots():
+    """Two weeks in the same month with distinct segment distributions."""
+    return FakeCollection([
+        # Week 24 — high_value
+        {"account": "alice", "backend_segment": "high_value",   "snapshot_week": "2026-W24", "snapshot_month": "2026-06",
+         "claim_risk_level": "normal", "player_age_type": "old_player", "confidence": "high"},
+        # Week 25 — low_value
+        {"account": "bob",   "backend_segment": "low_value",    "snapshot_week": "2026-W25", "snapshot_month": "2026-06",
+         "claim_risk_level": "normal", "player_age_type": "old_player", "confidence": "high"},
+        # Week 25 — ghost
+        {"account": "carol", "backend_segment": "ghost",        "snapshot_week": "2026-W25", "snapshot_month": "2026-06",
+         "claim_risk_level": "normal", "player_age_type": "new_player", "confidence": "high"},
+    ])
+
+
+def test_bse_panel_snapshot_week_scopes_to_single_week():
+    """P2 regression: passing snapshot_week returns only that week's docs."""
+    col = _make_bse_snapshots()
+    out = dp.build_backend_segment_engine_panel(snapshots_col=col, snapshot_week="2026-W24")
+    assert out["summary"]["total_users_evaluated"] == 1
+    assert out["summary"]["high_value"] == 1
+    assert out["summary"]["low_value"] == 0
+    assert out["snapshot_week"] == "2026-W24"
+    assert out["snapshot_month"] is None
+
+
+def test_bse_panel_different_weeks_return_different_data():
+    """P2 regression: W24 and W25 must not return the same result set."""
+    col = _make_bse_snapshots()
+    out_w24 = dp.build_backend_segment_engine_panel(snapshots_col=col, snapshot_week="2026-W24")
+    out_w25 = dp.build_backend_segment_engine_panel(snapshots_col=col, snapshot_week="2026-W25")
+    assert out_w24["summary"]["total_users_evaluated"] == 1
+    assert out_w25["summary"]["total_users_evaluated"] == 2
+    assert out_w24["summary"]["high_value"] == 1
+    assert out_w25["summary"]["low_value"] == 1
+    assert out_w25["summary"]["ghost"] == 1
+
+
+def test_bse_panel_month_fallback_returns_all_weeks_in_month():
+    """When no snapshot_week is given, month query covers all weeks."""
+    col = _make_bse_snapshots()
+    out = dp.build_backend_segment_engine_panel(
+        snapshots_col=col, month="2026-06",
+        now=datetime(2026, 6, 16, tzinfo=timezone.utc),
+    )
+    assert out["summary"]["total_users_evaluated"] == 3
+    assert out["snapshot_month"] == "2026-06"
+    assert out["snapshot_week"] is None
+
+
+def test_bse_panel_snapshot_week_overrides_month():
+    """snapshot_week takes precedence; month is ignored when week is set."""
+    col = _make_bse_snapshots()
+    out = dp.build_backend_segment_engine_panel(
+        snapshots_col=col, snapshot_week="2026-W25", month="2026-06",
+        now=datetime(2026, 6, 16, tzinfo=timezone.utc),
+    )
+    # Only the two W25 docs, not all three
+    assert out["summary"]["total_users_evaluated"] == 2
+
+
+def test_bse_panel_actual_players_kpi():
+    """actual_players = high_value + low_value + normal_actual."""
+    col = FakeCollection([
+        {"account": "u1", "backend_segment": "high_value",    "snapshot_week": "2026-W25",
+         "snapshot_month": "2026-06", "claim_risk_level": "normal", "player_age_type": "old_player", "confidence": "high"},
+        {"account": "u2", "backend_segment": "low_value",     "snapshot_week": "2026-W25",
+         "snapshot_month": "2026-06", "claim_risk_level": "normal", "player_age_type": "old_player", "confidence": "high"},
+        {"account": "u3", "backend_segment": "normal_actual", "snapshot_week": "2026-W25",
+         "snapshot_month": "2026-06", "claim_risk_level": "normal", "player_age_type": "new_player", "confidence": "high"},
+        {"account": "u4", "backend_segment": "ghost",         "snapshot_week": "2026-W25",
+         "snapshot_month": "2026-06", "claim_risk_level": "normal", "player_age_type": "old_player", "confidence": "high"},
+    ])
+    out = dp.build_backend_segment_engine_panel(snapshots_col=col, snapshot_week="2026-W25")
+    s = out["summary"]
+    assert s["high_value"] == 1
+    assert s["low_value"] == 1
+    assert s["normal_actual"] == 1
+    assert s["actual_players"] == 3  # KPI = HV + LV + NA
+
+
+def test_bse_panel_player_age_distribution():
+    """player_age_distribution must reflect player_age_type field, not segment."""
+    col = FakeCollection([
+        {"account": "u1", "backend_segment": "ghost", "player_age_type": "new_player",
+         "snapshot_week": "2026-W25", "snapshot_month": "2026-06", "claim_risk_level": "normal", "confidence": "high"},
+        {"account": "u2", "backend_segment": "ghost", "player_age_type": "old_player",
+         "snapshot_week": "2026-W25", "snapshot_month": "2026-06", "claim_risk_level": "normal", "confidence": "high"},
+        {"account": "u3", "backend_segment": "high_value", "player_age_type": "old_player",
+         "snapshot_week": "2026-W25", "snapshot_month": "2026-06", "claim_risk_level": "normal", "confidence": "high"},
+    ])
+    out = dp.build_backend_segment_engine_panel(snapshots_col=col, snapshot_week="2026-W25")
+    age = out["player_age_distribution"]
+    assert age["new_player"] == 1
+    assert age["old_player"] == 2
+    assert age.get("unknown", 0) == 0

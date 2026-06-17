@@ -462,5 +462,102 @@ class MissingMarketingDataTests(unittest.TestCase):
             self.assertIn(field, doc, f"Missing schema field: {field}")
 
 
+class AccountCasingRegressionTests(unittest.TestCase):
+    """P2 regression: account field must be found regardless of CSV header casing.
+
+    marketing_upload._normalize_header stores headers verbatim, so valid
+    uploads may produce documents keyed as 'account', 'Account', 'ACCOUNT',
+    or any other mixed case.  The engine must not silently skip these rows.
+    """
+
+    def _doc(self, key: str, value: str = "alice") -> dict:
+        return {key: value, "after_total_bet_amount": 800, "withdraw_amount": 100}
+
+    def test_lowercase_account_key(self):
+        self.assertEqual(engine._doc_account(self._doc("account")), "alice")
+
+    def test_titlecase_account_key(self):
+        self.assertEqual(engine._doc_account(self._doc("Account")), "alice")
+
+    def test_uppercase_account_key(self):
+        self.assertEqual(engine._doc_account(self._doc("ACCOUNT")), "alice")
+
+    def test_mixed_case_account_key(self):
+        self.assertEqual(engine._doc_account(self._doc("AcCoUnT")), "alice")
+
+    def test_missing_account_returns_empty_string(self):
+        self.assertEqual(engine._doc_account({"other_field": "x"}), "")
+
+    def test_marketing_rows_by_account_title_case(self):
+        """All casing variants must appear in the returned dict."""
+        week = "2026-W25"
+        docs = [
+            {"Account": "alice", "after_total_bet_amount": 800, "withdraw_amount": 100, "snapshot_week": week},
+            {"ACCOUNT": "bob",   "after_total_bet_amount": 200, "withdraw_amount": 50,  "snapshot_week": week},
+            {"account": "carol", "after_total_bet_amount": 50,  "withdraw_amount": 0,   "snapshot_week": week},
+        ]
+
+        class _FakeMktCol:
+            def find(self, filt=None):
+                filt = filt or {}
+                if filt.get("snapshot_week") == week:
+                    return list(docs)
+                return []
+
+        rows = engine._marketing_rows_by_account(_FakeMktCol(), week)
+        self.assertIn("alice", rows)
+        self.assertIn("bob", rows)
+        self.assertIn("carol", rows)
+        self.assertEqual(len(rows), 3)
+
+    def test_all_casing_variants_produce_correct_segment(self):
+        """End-to-end: engine classifies 'Account' header rows correctly."""
+        week = "2026-W25"
+        now = datetime(2026, 6, 16, tzinfo=timezone.utc)
+        docs_per_variant = [
+            ("account", "u1", 800, 100),
+            ("Account", "u2", 800, 100),
+            ("ACCOUNT", "u3", 800, 100),
+            ("AcCoUnT", "u4", 800, 100),
+        ]
+        mkt_docs = [
+            {key: username, "after_total_bet_amount": bet, "withdraw_amount": wd, "snapshot_week": week}
+            for key, username, bet, wd in docs_per_variant
+        ]
+
+        class _FakeMktCol:
+            def find(self, filt=None):
+                filt = filt or {}
+                return list(mkt_docs) if filt.get("snapshot_week") == week else []
+
+        class _FakeSnapshotsCol:
+            def __init__(self):
+                self.written = []
+
+            def bulk_write(self, ops, ordered=False):
+                self.written.extend(ops)
+                return type("R", (), {"modified_count": 0, "upserted_count": len(ops)})()
+
+        users_col = type("UC", (), {"find": lambda self, f=None: []})()
+        snaps = _FakeSnapshotsCol()
+        empty = type("EC", (), {
+            "find": lambda self, f=None: [],
+            "aggregate": lambda self, p: [],
+        })()
+
+        summary = engine.run_shadow_segment_engine(
+            users_col=users_col,
+            voucher_claims_col=empty,
+            marketing_col=_FakeMktCol(),
+            snapshots_col=snaps,
+            snapshot_week=week,
+            now=now,
+        )
+        self.assertTrue(summary["ok"])
+        # All four rows must be evaluated — none silently dropped.
+        self.assertEqual(summary["users_evaluated"], 4)
+        self.assertEqual(summary["segment_distribution"].get("high_value", 0), 4)
+
+
 if __name__ == "__main__":
     unittest.main()
