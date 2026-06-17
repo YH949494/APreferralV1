@@ -136,6 +136,17 @@ def ensure_indexes() -> None:
 
     db_ref["users"].create_index([("user_id", ASCENDING)], unique=True)
     db_ref["users"].create_index([("username", ASCENDING)])
+    # Case-insensitive username index used by the backend segment engine's
+    # batched $in lookup (locale+strength must match the query collation exactly
+    # or MongoDB falls back to a full collection scan).
+    try:
+        db_ref["users"].create_index(
+            [("username", ASCENDING)],
+            name="username_ci_idx",
+            collation={"locale": "en", "strength": 2},
+        )
+    except Exception:
+        logger.warning("[DB][INDEX] Failed to create username_ci_idx", exc_info=True)
 
     db_ref["user_snapshots"].create_index([("user_id", ASCENDING)], unique=True)
 
@@ -173,6 +184,9 @@ def ensure_indexes() -> None:
     db_ref["backend_segment_engine_runs"].create_index(
         [("snapshot_week", ASCENDING), ("dry_run", ASCENDING), ("status", ASCENDING)]
     )
+
+    # voucher_claims.user_id — critical for run_shadow_segment_engine's aggregate
+    db_ref["voucher_claims"].create_index([("user_id", ASCENDING)])
 
     # Phase 2A — weekly marketing raw-data upload. dedupe_key prevents
     # re-uploading the same weekly file from creating duplicate rows;

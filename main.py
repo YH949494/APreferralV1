@@ -3260,13 +3260,32 @@ _SNAPSHOT_WEEK_RE = _re.compile(r"^\d{4}-W(?:0[1-9]|[1-4]\d|5[0-3])$")
 def _bse_run_background(job_id: str, snapshot_week: str, dry_run: bool, admin_identity: str) -> None:
     """Background thread: run the segment engine and update job status in Mongo."""
     runs_col = db["backend_segment_engine_runs"]
+    start_ts = datetime.now(timezone.utc)
     try:
         runs_col.update_one(
             {"job_id": job_id},
-            {"$set": {"status": "running", "started_at": datetime.now(timezone.utc)}},
+            {"$set": {"status": "running", "started_at": start_ts}},
         )
         import backend_segment_engine as _bse
-        summary = _bse.run_shadow_segment_engine(snapshot_week=snapshot_week, dry_run=dry_run)
+
+        def _progress(rows_done: int, total: int) -> None:
+            elapsed = (datetime.now(timezone.utc) - start_ts).total_seconds()
+            try:
+                runs_col.update_one(
+                    {"job_id": job_id},
+                    {"$set": {
+                        "rows_processed": rows_done,
+                        "total_rows": total,
+                        "elapsed_seconds": elapsed,
+                        "last_progress_at": datetime.now(timezone.utc),
+                    }},
+                )
+            except Exception:
+                pass
+
+        summary = _bse.run_shadow_segment_engine(
+            snapshot_week=snapshot_week, dry_run=dry_run, progress_cb=_progress
+        )
 
         if not dry_run and summary.get("ok"):
             for k in list(LEADERBOARD_CACHE.keys()):
@@ -3274,11 +3293,15 @@ def _bse_run_background(job_id: str, snapshot_week: str, dry_run: bool, admin_id
                     LEADERBOARD_CACHE.pop(k, None)
 
         status = "success" if summary.get("ok") else "failed"
+        elapsed = (datetime.now(timezone.utc) - start_ts).total_seconds()
         runs_col.update_one(
             {"job_id": job_id},
             {"$set": {
                 "status": status,
                 "finished_at": datetime.now(timezone.utc),
+                "elapsed_seconds": elapsed,
+                "rows_processed": summary.get("rows_processed", 0),
+                "total_rows": summary.get("total_rows", 0),
                 "summary": {
                     "users_evaluated": summary.get("users_evaluated", 0),
                     "snapshots_written": summary.get("snapshots_written", 0),
@@ -3289,17 +3312,19 @@ def _bse_run_background(job_id: str, snapshot_week: str, dry_run: bool, admin_id
             }},
         )
         logger.info(
-            "[BSE_RUN] done job_id=%s admin=%s snapshot_week=%s dry_run=%s status=%s",
-            job_id, admin_identity, snapshot_week, dry_run, status,
+            "[BSE_RUN] done job_id=%s admin=%s snapshot_week=%s dry_run=%s status=%s elapsed=%.1fs",
+            job_id, admin_identity, snapshot_week, dry_run, status, elapsed,
         )
     except Exception as exc:
         logger.error("[BSE_RUN] background error job_id=%s err=%s", job_id, str(exc))
         try:
+            elapsed = (datetime.now(timezone.utc) - start_ts).total_seconds()
             runs_col.update_one(
                 {"job_id": job_id},
                 {"$set": {
                     "status": "failed",
                     "finished_at": datetime.now(timezone.utc),
+                    "elapsed_seconds": elapsed,
                     "error": str(exc),
                 }},
             )
@@ -3390,6 +3415,10 @@ def backend_segment_engine_run():
         "queued_at": now_ts,
         "started_at": None,
         "finished_at": None,
+        "total_rows": 0,
+        "rows_processed": 0,
+        "elapsed_seconds": 0.0,
+        "last_progress_at": None,
         "summary": None,
         "error": None,
     })
@@ -3433,7 +3462,7 @@ def backend_segment_engine_run_status():
     if doc is None:
         return jsonify({"ok": False, "error": f"Job not found: {job_id}"}), 404
 
-    for field in ("queued_at", "started_at", "finished_at"):
+    for field in ("queued_at", "started_at", "finished_at", "last_progress_at"):
         if isinstance(doc.get(field), datetime):
             doc[field] = doc[field].isoformat()
 
