@@ -142,11 +142,11 @@ def ensure_indexes() -> None:
     try:
         db_ref["users"].create_index(
             [("username", ASCENDING)],
-            name="users_username_ci",
+            name="username_ci_idx",
             collation={"locale": "en", "strength": 2},
         )
     except Exception:
-        logger.warning("[DB][INDEX] Failed to create users_username_ci", exc_info=True)
+        logger.warning("[DB][INDEX] Failed to create username_ci_idx", exc_info=True)
 
     db_ref["user_snapshots"].create_index([("user_id", ASCENDING)], unique=True)
 
