@@ -847,11 +847,32 @@
         headers: { "Accept": "application/json" },
       })
         .then(function (r) {
-          if (r.status === 401) { clearInterval(interval); window.location.href = "/static/admin-login.html"; throw new Error("unauthorized"); }
-          return r.json();
+          // 401: redirect to login, abort poll
+          if (r.status === 401) {
+            clearInterval(interval);
+            window.location.href = "/static/admin-login.html";
+            throw new Error("unauthorized");
+          }
+          var httpOk = r.ok;
+          // Attempt JSON parse; recover gracefully if body is not JSON
+          return r.json().then(
+            function (d) { return { httpOk: httpOk, d: d, parseOk: true }; },
+            function ()  { return { httpOk: httpOk, d: null, parseOk: false }; }
+          );
         })
-        .then(function (d) {
-          if (!d.ok) {
+        .then(function (res) {
+          if (!res) { return; } // swallowed by the 401 throw above
+          // Non-JSON body (nginx 502/504 HTML, empty body, truncated response)
+          if (!res.parseOk) {
+            clearInterval(interval);
+            if (dryBtn) dryBtn.disabled = false;
+            if (commitBtn) commitBtn.disabled = false;
+            if (resultEl) resultEl.innerHTML = '<span style="color:var(--red,#e05c5c)">Failed: server returned an unexpected non-JSON response</span>';
+            return;
+          }
+          var d = res.d || {};
+          // HTTP error (400/403/404/5xx) or API-level ok:false
+          if (!res.httpOk || !d.ok) {
             clearInterval(interval);
             if (dryBtn) dryBtn.disabled = false;
             if (commitBtn) commitBtn.disabled = false;
@@ -859,15 +880,22 @@
             return;
           }
           var status = d.status;
+          // Still in progress — keep polling
           if (status === "queued" || status === "running") {
             if (resultEl) resultEl.innerHTML = '<span style="color:var(--muted,#8892a4)">' + label + ' ' + esc(status) + ' for ' + esc(week) + '…</span>';
             return;
           }
+          // Terminal state — stop polling regardless of status value
           clearInterval(interval);
           if (dryBtn) dryBtn.disabled = false;
           if (commitBtn) commitBtn.disabled = false;
           if (status === "failed") {
             if (resultEl) resultEl.innerHTML = '<span style="color:var(--red,#e05c5c)">Failed: ' + esc(d.error || "unknown error") + '</span>';
+            return;
+          }
+          // Guard: only render green success on explicit "success" status
+          if (status !== "success") {
+            if (resultEl) resultEl.innerHTML = '<span style="color:var(--red,#e05c5c)">Failed: unexpected job status “' + esc(String(status)) + '”</span>';
             return;
           }
           var s = d.summary || {};
@@ -887,8 +915,8 @@
           }
         })
         .catch(function (e) {
-          if (e.message === "unauthorized") { clearInterval(interval); }
-          // network glitch during poll — keep polling silently
+          if (e.message === "unauthorized") { return; }
+          // Transient network error — keep polling silently
         });
     }, 2000);
   }
