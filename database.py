@@ -143,6 +143,7 @@ def ensure_indexes() -> None:
         [("user_id", ASCENDING), ("snapshot_week", ASCENDING)], unique=True
     )
     db_ref["segment_snapshots"].create_index([("snapshot_month", ASCENDING)])
+    db_ref["segment_snapshots"].create_index([("snapshot_week", ASCENDING)])
 
     db_ref["user_claim_risk_history"].create_index([("user_id", ASCENDING), ("synced_at", ASCENDING)])
 
