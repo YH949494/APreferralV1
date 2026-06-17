@@ -160,6 +160,10 @@ def ensure_indexes() -> None:
     db_ref["marketing_raw_data"].create_index([("dedupe_key", ASCENDING)], unique=True)
     db_ref["marketing_raw_data"].create_index([("upload_batch_id", ASCENDING)])
     db_ref["marketing_raw_data"].create_index([("snapshot_week", ASCENDING)])
+    # Phase 2B — Raw Data Explorer aggregation indexes.
+    db_ref["marketing_raw_data"].create_index([("snapshot_month", ASCENDING)])
+    db_ref["marketing_raw_data"].create_index([("account", ASCENDING)])
+    db_ref["marketing_raw_data"].create_index([("campaign_id", ASCENDING)])
 
     db_ref["marketing_upload_batches"].create_index([("upload_batch_id", ASCENDING)], unique=True)
     db_ref["marketing_upload_batches"].create_index([("uploaded_at", ASCENDING)])

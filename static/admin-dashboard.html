@@ -24,6 +24,7 @@
       <button class="nav-item" data-view="backendSegmentEngine">Data → Backend Segment Engine</button>
       <button class="nav-item" data-view="uploadPlayerPerformance">Data → Upload Player Performance</button>
       <button class="nav-item" data-view="uploadHistory">Data → Upload History</button>
+      <button class="nav-item" data-view="rawExplorer">Data → Raw Data Explorer</button>
       <button class="nav-item" data-view="users">User Drilldown</button>
       <button class="nav-item" data-view="settings">Settings</button>
     </nav>
@@ -221,6 +222,29 @@
           <button class="btn primary" id="upload-history-refresh-btn">Refresh</button>
         </div>
         <div id="upload-history-body"></div>
+      </section>
+
+      <!-- RAW DATA EXPLORER VIEW (Phase 2B) -->
+      <section id="view-rawExplorer" class="hidden">
+        <div style="margin-bottom:16px;"><span class="tag heuristic" style="font-size:12px;padding:4px 12px;">READ ONLY — validation only, does not calculate segments or change bot behaviour</span></div>
+        <div class="controls" style="margin-bottom:16px;">
+          <input class="filter-input" id="explorer-week" placeholder="Snapshot week e.g. 2024-W20 (default: latest)" style="max-width:240px;margin:0;" />
+          <input class="filter-input" id="explorer-month" placeholder="Or snapshot month e.g. 2024-05" style="max-width:220px;margin:0;" />
+          <button class="btn primary" id="explorer-apply-btn">Load</button>
+        </div>
+        <div id="explorer-snapshot-label" style="margin-bottom:16px;color:var(--muted);font-size:13px;"></div>
+        <div class="section-title">Summary</div>
+        <div class="card-grid" id="cards-explorer-summary"></div>
+        <div class="section-title">Data Quality</div>
+        <div id="explorer-quality-body"></div>
+        <div class="section-title">Campaign Breakdown</div>
+        <div id="explorer-campaign-body"></div>
+        <div class="section-title">Platform Breakdown</div>
+        <div id="explorer-platform-body"></div>
+        <div class="section-title">Currency Breakdown</div>
+        <div id="explorer-currency-body"></div>
+        <div class="section-title">Upload Snapshot History</div>
+        <div id="explorer-snapshot-body"></div>
       </section>
 
       <!-- USER DRILLDOWN VIEW -->
