@@ -786,7 +786,7 @@
       });
   }
 
-  // ---------- Backend Segment Engine Run (Phase 3C) ----------
+  // ---------- Backend Segment Engine Run (Phase 3C — async job) ----------
   function runBackendSegmentEngine(dryRun) {
     var weekInput = $("#bse-run-week");
     var week = (weekInput || {}).value || "";
@@ -801,7 +801,7 @@
       return;
     }
     var label = dryRun ? "Dry run" : "Commit run";
-    if (resultEl) resultEl.innerHTML = '<span style="color:var(--muted,#8892a4)">' + label + ' running for ' + esc(week) + '…</span>';
+    if (resultEl) resultEl.innerHTML = '<span style="color:var(--muted,#8892a4)">' + label + ' queuing for ' + esc(week) + '…</span>';
     var dryBtn = $("#bse-dry-run-btn");
     var commitBtn = $("#bse-commit-run-btn");
     if (dryBtn) dryBtn.disabled = true;
@@ -818,27 +818,15 @@
       })
       .then(function (res) {
         var d = res.body;
-        if (dryBtn) dryBtn.disabled = false;
-        if (commitBtn) commitBtn.disabled = false;
         if (!res.ok || !d.ok) {
+          if (dryBtn) dryBtn.disabled = false;
+          if (commitBtn) commitBtn.disabled = false;
           if (resultEl) resultEl.innerHTML = '<span style="color:var(--red,#e05c5c)">Error: ' + esc(d.error || "unknown error") + '</span>';
           return;
         }
-        var lines = [
-          (dryRun ? "<b>Dry run</b> completed" : "<b>Commit run</b> completed") + " for " + esc(d.snapshot_week),
-          "Users evaluated: <b>" + fmt(d.users_evaluated) + "</b>",
-          dryRun ? "Snapshots written: <b>0 (dry run)</b>" : "Snapshots written: <b>" + fmt(d.snapshots_written) + "</b>",
-        ];
-        var segs = d.segment_counts || {};
-        var segParts = Object.keys(segs).sort().map(function (k) { return esc(k) + ": " + fmt(segs[k]); });
-        if (segParts.length) lines.push("Segments: " + segParts.join(" | "));
-        if (resultEl) resultEl.innerHTML = '<span style="color:var(--green,#4caf82)">' + lines.join(" &nbsp;&bull;&nbsp; ") + '</span>';
-        // After a successful commit, sync the week filter and refresh the dashboard panel.
-        if (!dryRun) {
-          var weekFilter = $("#bse-week");
-          if (weekFilter) weekFilter.value = week;
-          loadBackendSegmentEngine(true);
-        }
+        var jobId = d.job_id;
+        if (resultEl) resultEl.innerHTML = '<span style="color:var(--muted,#8892a4)">' + label + ' running for ' + esc(week) + '… (job ' + esc(jobId) + ')</span>';
+        _pollBseJob(jobId, dryRun, week, dryBtn, commitBtn, resultEl);
       })
       .catch(function (e) {
         if (dryBtn) dryBtn.disabled = false;
@@ -847,6 +835,55 @@
           if (resultEl) resultEl.innerHTML = '<span style="color:var(--red,#e05c5c)">Failed: ' + esc(e.message) + '</span>';
         }
       });
+  }
+
+  function _pollBseJob(jobId, dryRun, week, dryBtn, commitBtn, resultEl) {
+    var label = dryRun ? "Dry run" : "Commit run";
+    var qs = window.location.search;
+    var statusBase = "/api/admin/dashboard/backend-segment-engine/run-status" + qs + (qs ? "&" : "?");
+    var interval = setInterval(function () {
+      fetch(statusBase + "job_id=" + encodeURIComponent(jobId), {
+        credentials: "same-origin",
+        headers: { "Accept": "application/json" },
+      })
+        .then(function (r) {
+          if (r.status === 401) { clearInterval(interval); window.location.href = "/static/admin-login.html"; throw new Error("unauthorized"); }
+          return r.json();
+        })
+        .then(function (d) {
+          var status = d.status;
+          if (status === "queued" || status === "running") {
+            if (resultEl) resultEl.innerHTML = '<span style="color:var(--muted,#8892a4)">' + label + ' ' + esc(status) + ' for ' + esc(week) + '…</span>';
+            return;
+          }
+          clearInterval(interval);
+          if (dryBtn) dryBtn.disabled = false;
+          if (commitBtn) commitBtn.disabled = false;
+          if (status === "failed") {
+            if (resultEl) resultEl.innerHTML = '<span style="color:var(--red,#e05c5c)">Failed: ' + esc(d.error || "unknown error") + '</span>';
+            return;
+          }
+          var s = d.summary || {};
+          var lines = [
+            (dryRun ? "<b>Dry run</b> completed" : "<b>Commit run</b> completed") + " for " + esc(week),
+            "Users evaluated: <b>" + fmt(s.users_evaluated) + "</b>",
+            dryRun ? "Snapshots written: <b>0 (dry run)</b>" : "Snapshots written: <b>" + fmt(s.snapshots_written) + "</b>",
+          ];
+          var segs = s.segment_distribution || {};
+          var segParts = Object.keys(segs).sort().map(function (k) { return esc(k) + ": " + fmt(segs[k]); });
+          if (segParts.length) lines.push("Segments: " + segParts.join(" | "));
+          if (resultEl) resultEl.innerHTML = '<span style="color:var(--green,#4caf82)">' + lines.join(" &nbsp;&bull;&nbsp; ") + '</span>';
+          if (!dryRun) {
+            var weekFilter = $("#bse-week");
+            if (weekFilter) weekFilter.value = week;
+            loadBackendSegmentEngine(true);
+          }
+        })
+        .catch(function (e) {
+          if (e.message === "unauthorized") { clearInterval(interval); }
+          // network glitch during poll — keep polling silently
+        });
+    }, 2000);
   }
 
   // ---------- Upload Player Performance (Phase 2A) ----------

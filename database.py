@@ -168,6 +168,12 @@ def ensure_indexes() -> None:
     db_ref["backend_segment_snapshots"].create_index([("snapshot_month", ASCENDING)])
     db_ref["backend_segment_snapshots"].create_index([("snapshot_week", ASCENDING)])
 
+    # Phase 3C — async job tracking for backend segment engine runs
+    db_ref["backend_segment_engine_runs"].create_index([("job_id", ASCENDING)], unique=True)
+    db_ref["backend_segment_engine_runs"].create_index(
+        [("snapshot_week", ASCENDING), ("dry_run", ASCENDING), ("status", ASCENDING)]
+    )
+
     # Phase 2A — weekly marketing raw-data upload. dedupe_key prevents
     # re-uploading the same weekly file from creating duplicate rows;
     # upload_batch_id is indexed for upload-history lookups.
@@ -218,6 +224,7 @@ user_claim_risk_history_col = get_collection("user_claim_risk_history")
 # Phase 6A — backend segment engine shadow output. Reference/audit only;
 # nothing in the bot reads this collection yet (see backend_segment_engine.py).
 backend_segment_snapshots_col = get_collection("backend_segment_snapshots")
+backend_segment_engine_runs_col = get_collection("backend_segment_engine_runs")
 
 # Phase 2A — weekly Marketing raw-data upload (data ingestion only; no
 # segment calculation, no users.bot_segment writes). See marketing_upload.py.

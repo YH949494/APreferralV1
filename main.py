@@ -3257,9 +3257,62 @@ import re as _re
 _SNAPSHOT_WEEK_RE = _re.compile(r"^\d{4}-W(?:0[1-9]|[1-4]\d|5[0-3])$")
 
 
+def _bse_run_background(job_id: str, snapshot_week: str, dry_run: bool, admin_identity: str) -> None:
+    """Background thread: run the segment engine and update job status in Mongo."""
+    runs_col = db["backend_segment_engine_runs"]
+    try:
+        runs_col.update_one(
+            {"job_id": job_id},
+            {"$set": {"status": "running", "started_at": datetime.now(timezone.utc)}},
+        )
+        import backend_segment_engine as _bse
+        summary = _bse.run_shadow_segment_engine(snapshot_week=snapshot_week, dry_run=dry_run)
+
+        if not dry_run and summary.get("ok"):
+            for k in list(LEADERBOARD_CACHE.keys()):
+                if k.startswith("panel:backend_segment_engine"):
+                    LEADERBOARD_CACHE.pop(k, None)
+
+        status = "success" if summary.get("ok") else "failed"
+        runs_col.update_one(
+            {"job_id": job_id},
+            {"$set": {
+                "status": status,
+                "finished_at": datetime.now(timezone.utc),
+                "summary": {
+                    "users_evaluated": summary.get("users_evaluated", 0),
+                    "snapshots_written": summary.get("snapshots_written", 0),
+                    "segment_distribution": summary.get("segment_distribution", {}),
+                    "claim_risk_distribution": summary.get("claim_risk_distribution", {}),
+                },
+                "error": summary.get("error"),
+            }},
+        )
+        logger.info(
+            "[BSE_RUN] done job_id=%s admin=%s snapshot_week=%s dry_run=%s status=%s",
+            job_id, admin_identity, snapshot_week, dry_run, status,
+        )
+    except Exception as exc:
+        logger.error("[BSE_RUN] background error job_id=%s err=%s", job_id, str(exc))
+        try:
+            runs_col.update_one(
+                {"job_id": job_id},
+                {"$set": {
+                    "status": "failed",
+                    "finished_at": datetime.now(timezone.utc),
+                    "error": str(exc),
+                }},
+            )
+        except Exception:
+            pass
+
+
 @admin_bp.post("/api/admin/dashboard/backend-segment-engine/run")
 def backend_segment_engine_run():
     """Phase 3C: Admin-triggered execution of the backend segment engine.
+
+    Returns immediately with a job_id; the engine runs in a background thread.
+    Poll GET /run-status?job_id=... for completion.
 
     Shadow mode only — writes to backend_segment_snapshots, never to
     users.bot_segment, voucher allocation, or reward logic.
@@ -3286,39 +3339,80 @@ def backend_segment_engine_run():
         return jsonify({"ok": False, "error": f"No marketing_raw_data found for snapshot_week '{snapshot_week}'. Upload data first."}), 422
 
     admin_identity = _current_admin_identity()
-    logger.info(
-        "[BSE_RUN] admin=%s snapshot_week=%s dry_run=%s mkt_rows=%d",
-        admin_identity, snapshot_week, dry_run, mkt_count,
-    )
 
-    import backend_segment_engine as _bse
-    summary = _bse.run_shadow_segment_engine(
-        snapshot_week=snapshot_week,
-        dry_run=dry_run,
-    )
-
-    logger.info(
-        "[BSE_RUN] done admin=%s snapshot_week=%s dry_run=%s ok=%s users_evaluated=%d snapshots_written=%d",
-        admin_identity, snapshot_week, dry_run,
-        summary.get("ok"), summary.get("users_evaluated", 0), summary.get("snapshots_written", 0),
-    )
-
-    # Invalidate cached dashboard panel so it reflects new snapshots.
-    if not dry_run and summary.get("ok"):
-        for k in list(LEADERBOARD_CACHE.keys()):
-            if k.startswith("panel:backend_segment_engine"):
-                LEADERBOARD_CACHE.pop(k, None)
-
-    return jsonify({
-        "ok": summary.get("ok", False),
+    # Reject duplicate in-progress job for the same (snapshot_week, dry_run).
+    runs_col = db["backend_segment_engine_runs"]
+    existing = runs_col.find_one({
         "snapshot_week": snapshot_week,
         "dry_run": dry_run,
-        "users_evaluated": summary.get("users_evaluated", 0),
-        "snapshots_written": summary.get("snapshots_written", 0),
-        "segment_counts": summary.get("segment_distribution", {}),
-        "claim_risk_counts": summary.get("claim_risk_distribution", {}),
-        "error": summary.get("error"),
+        "status": {"$in": ["queued", "running"]},
     })
+    if existing:
+        return jsonify({
+            "ok": False,
+            "error": (
+                f"A {'dry run' if dry_run else 'commit run'} for {snapshot_week} "
+                f"is already in progress (job_id={existing['job_id']})."
+            ),
+            "job_id": existing["job_id"],
+        }), 409
+
+    job_id = str(uuid.uuid4())
+    now_ts = datetime.now(timezone.utc)
+    runs_col.insert_one({
+        "job_id": job_id,
+        "admin_user": admin_identity,
+        "snapshot_week": snapshot_week,
+        "dry_run": dry_run,
+        "status": "queued",
+        "queued_at": now_ts,
+        "started_at": None,
+        "finished_at": None,
+        "summary": None,
+        "error": None,
+    })
+    logger.info(
+        "[BSE_RUN] queued job_id=%s admin=%s snapshot_week=%s dry_run=%s mkt_rows=%d",
+        job_id, admin_identity, snapshot_week, dry_run, mkt_count,
+    )
+
+    t = Thread(target=_bse_run_background, args=(job_id, snapshot_week, dry_run, admin_identity), daemon=True)
+    t.start()
+
+    return jsonify({
+        "ok": True,
+        "job_id": job_id,
+        "status": "queued",
+        "snapshot_week": snapshot_week,
+        "dry_run": dry_run,
+    })
+
+
+@admin_bp.get("/api/admin/dashboard/backend-segment-engine/run-status")
+def backend_segment_engine_run_status():
+    """Phase 3C: Poll status of an async backend segment engine job.
+
+    GET ?job_id=<uuid>
+    Returns job document with status, summary, and error fields.
+    """
+    ok, err = require_admin_from_query()
+    if not ok:
+        msg, code = err
+        return jsonify({"ok": False, "error": msg}), code
+
+    job_id = request.args.get("job_id", "").strip()
+    if not job_id:
+        return jsonify({"ok": False, "error": "job_id is required"}), 400
+
+    doc = db["backend_segment_engine_runs"].find_one({"job_id": job_id}, {"_id": 0})
+    if doc is None:
+        return jsonify({"ok": False, "error": f"Job not found: {job_id}"}), 404
+
+    for field in ("queued_at", "started_at", "finished_at"):
+        if isinstance(doc.get(field), datetime):
+            doc[field] = doc[field].isoformat()
+
+    return jsonify({"ok": True, **doc})
 
 
 @admin_bp.get("/api/admin/dashboard/kpi-gap-report")
