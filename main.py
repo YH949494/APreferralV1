@@ -3238,14 +3238,16 @@ def dashboard_backend_segment_engine():
         msg, code = err
         return jsonify({"success": False, "message": msg}), code
     month = request.args.get("month") or None
+    snapshot_week = request.args.get("snapshot_week") or None
     now = _utc_now()
-    cache_key = f"panel:backend_segment_engine:{month or ''}"
+    cache_key = f"panel:backend_segment_engine:{snapshot_week or ''}{month or ''}"
     return _panel_cached(
         cache_key,
         lambda: _panels.build_backend_segment_engine_panel(
             snapshots_col=db["backend_segment_snapshots"],
             now=now,
             month=month,
+            snapshot_week=snapshot_week,
         ),
     )
 

@@ -331,17 +331,36 @@ def _claim_counts(voucher_claims_col, user_ids: list[int]) -> dict[int, int]:
     return counts
 
 
+def _doc_account(doc: dict) -> str:
+    """Extract the account value from a marketing doc case-insensitively.
+
+    marketing_upload._normalize_header does NOT lowercase, so the stored field
+    name reflects the original CSV/XLSX header casing: 'account', 'Account',
+    or 'ACCOUNT' are all valid. Try each common casing before giving up.
+    """
+    for key in ("account", "Account", "ACCOUNT"):
+        val = doc.get(key)
+        if val is not None and str(val).strip():
+            return str(val).strip()
+    # Fallback: scan all keys case-insensitively (handles any other casing).
+    for k, v in doc.items():
+        if k.lower() == "account" and v is not None and str(v).strip():
+            return str(v).strip()
+    return ""
+
+
 def _marketing_rows_by_account(marketing_col, snapshot_week: str) -> dict[str, dict]:
     """Return dict[account_lower -> doc] for the given snapshot_week.
 
-    Deduplicates by account (first occurrence wins).
+    Deduplicates by account (first occurrence wins). Lookups are
+    case-insensitive to match whatever casing the CSV upload used.
     """
     rows: dict[str, dict] = {}
     if marketing_col is None:
         return rows
     cursor = marketing_col.find({"snapshot_week": snapshot_week})
     for doc in cursor:
-        acct = (doc.get("account") or "").strip().lower()
+        acct = _doc_account(doc).lower()
         if acct and acct not in rows:
             rows[acct] = doc
     return rows

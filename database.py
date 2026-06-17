@@ -149,6 +149,18 @@ def ensure_indexes() -> None:
     # Phase 3 — backend-owned segment engine, shadow mode only. Idempotent
     # per (account, snapshot_week); never read by the bot, never written by
     # bot_segment_sync/claim_risk_sync.
+    #
+    # Drop the Phase 6A unique index (user_id, snapshot_month) if it exists on
+    # this deployment before creating the new one, otherwise MongoDB keeps
+    # enforcing the old key and rejects inserts with user_id=None or multiple
+    # weeks in the same month for the same user.
+    try:
+        db_ref["backend_segment_snapshots"].drop_index(
+            [("user_id", ASCENDING), ("snapshot_month", ASCENDING)]
+        )
+        logger.info("[DB] Dropped stale backend_segment_snapshots index (user_id, snapshot_month)")
+    except Exception:
+        pass  # index didn't exist — nothing to drop
     db_ref["backend_segment_snapshots"].create_index(
         [("account", ASCENDING), ("snapshot_week", ASCENDING)], unique=True
     )
