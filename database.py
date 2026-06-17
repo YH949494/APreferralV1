@@ -136,6 +136,17 @@ def ensure_indexes() -> None:
 
     db_ref["users"].create_index([("user_id", ASCENDING)], unique=True)
     db_ref["users"].create_index([("username", ASCENDING)])
+    # Case-insensitive username index used by the backend segment engine's
+    # batched $in lookup (locale+strength must match the query collation exactly
+    # or MongoDB falls back to a full collection scan).
+    try:
+        db_ref["users"].create_index(
+            [("username", ASCENDING)],
+            name="users_username_ci",
+            collation={"locale": "en", "strength": 2},
+        )
+    except Exception:
+        logger.warning("[DB][INDEX] Failed to create users_username_ci", exc_info=True)
 
     db_ref["user_snapshots"].create_index([("user_id", ASCENDING)], unique=True)
 
