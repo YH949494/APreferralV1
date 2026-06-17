@@ -851,6 +851,13 @@
           return r.json();
         })
         .then(function (d) {
+          if (!d.ok) {
+            clearInterval(interval);
+            if (dryBtn) dryBtn.disabled = false;
+            if (commitBtn) commitBtn.disabled = false;
+            if (resultEl) resultEl.innerHTML = '<span style="color:var(--red,#e05c5c)">Failed: ' + esc(d.error || "unknown error") + '</span>';
+            return;
+          }
           var status = d.status;
           if (status === "queued" || status === "running") {
             if (resultEl) resultEl.innerHTML = '<span style="color:var(--muted,#8892a4)">' + label + ' ' + esc(status) + ' for ' + esc(week) + '…</span>';

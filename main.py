@@ -3340,12 +3340,34 @@ def backend_segment_engine_run():
 
     admin_identity = _current_admin_identity()
 
-    # Reject duplicate in-progress job for the same (snapshot_week, dry_run).
+    # Jobs stuck queued/running for longer than this are assumed stranded (web
+    # worker recycled before the thread could finish) and are expired on the
+    # next POST so the admin can re-run without manual intervention.
+    _BSE_JOB_STALE_S = 900  # 15 minutes
     runs_col = db["backend_segment_engine_runs"]
+    stale_cutoff = datetime.now(timezone.utc) - timedelta(seconds=_BSE_JOB_STALE_S)
+
+    # Expire any stale in-progress jobs for this (snapshot_week, dry_run).
+    runs_col.update_many(
+        {
+            "snapshot_week": snapshot_week,
+            "dry_run": dry_run,
+            "status": {"$in": ["queued", "running"]},
+            "queued_at": {"$lte": stale_cutoff},
+        },
+        {"$set": {
+            "status": "failed",
+            "finished_at": datetime.now(timezone.utc),
+            "error": "Job timed out — web worker was recycled before completion. Re-run to retry.",
+        }},
+    )
+
+    # Reject duplicate fresh in-progress job for the same (snapshot_week, dry_run).
     existing = runs_col.find_one({
         "snapshot_week": snapshot_week,
         "dry_run": dry_run,
         "status": {"$in": ["queued", "running"]},
+        "queued_at": {"$gt": stale_cutoff},
     })
     if existing:
         return jsonify({
@@ -3376,7 +3398,10 @@ def backend_segment_engine_run():
         job_id, admin_identity, snapshot_week, dry_run, mkt_count,
     )
 
-    t = Thread(target=_bse_run_background, args=(job_id, snapshot_week, dry_run, admin_identity), daemon=True)
+    # Non-daemon so gunicorn's graceful shutdown waits for the thread to finish
+    # rather than killing it mid-run (hard SIGKILL is still unrecoverable, but
+    # the 15-minute stale-expiry above handles that case on the next POST).
+    t = Thread(target=_bse_run_background, args=(job_id, snapshot_week, dry_run, admin_identity), daemon=False)
     t.start()
 
     return jsonify({
