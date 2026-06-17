@@ -3330,6 +3330,43 @@ def data_upload_history():
     return jsonify({"success": True, "batches": batches})
 
 
+import marketing_explorer as _marketing_explorer  # noqa: E402
+
+
+@admin_bp.get("/api/admin/data/raw-explorer")
+def data_raw_explorer():
+    """Phase 2B: read-only validation and exploration of uploaded marketing data.
+
+    Returns summary cards, campaign/platform/currency breakdowns, upload snapshot
+    history, and data-quality checks for the marketing_raw_data collection.
+
+    Does NOT calculate segments, does NOT touch users.bot_segment or
+    for_bot_segment, and does NOT modify bot/voucher/reward behaviour.
+
+    Query parameters:
+        snapshot_week  – ISO week e.g. ``2024-W20`` (takes precedence over month).
+        snapshot_month – ISO month e.g. ``2024-05``.
+        If neither is provided the latest uploaded snapshot is used.
+    """
+    ok, err = require_admin_from_query()
+    if not ok:
+        msg, code = err
+        return jsonify({"success": False, "message": msg}), code
+
+    snapshot_week = (request.args.get("snapshot_week") or "").strip() or None
+    snapshot_month = (request.args.get("snapshot_month") or "").strip() or None
+
+    try:
+        payload = _marketing_explorer.get_raw_explorer(
+            snapshot_week=snapshot_week,
+            snapshot_month=snapshot_month,
+        )
+        return jsonify({"success": True, **payload})
+    except Exception as exc:
+        logger.exception("[RAW_EXPLORER] unexpected error: %s", exc)
+        return jsonify({"success": False, "message": "explorer query failed"}), 500
+
+
 @admin_bp.get("/api/admin/dashboard/vouchers")
 def dashboard_vouchers():
     ok, err = require_admin_from_query()

@@ -820,6 +820,130 @@
       });
   }
 
+  // ---------- Raw Data Explorer (Phase 2B) ----------
+  function loadRawExplorer(force) {
+    var week = ($("#explorer-week") || {}).value || "";
+    var month = ($("#explorer-month") || {}).value || "";
+    var url = "/api/admin/data/raw-explorer";
+    var params = [];
+    if (week.trim()) params.push("snapshot_week=" + encodeURIComponent(week.trim()));
+    else if (month.trim()) params.push("snapshot_month=" + encodeURIComponent(month.trim()));
+    if (params.length) url += "?" + params.join("&");
+
+    var bodies = ["cards-explorer-summary", "explorer-quality-body", "explorer-campaign-body",
+                  "explorer-platform-body", "explorer-currency-body", "explorer-snapshot-body"];
+    bodies.forEach(function (id) { statePanel(id, "loading", "Loading…"); });
+
+    api(url)
+      .then(function (d) {
+        var sf = d.snapshot_filter || {};
+        var label = $("#explorer-snapshot-label");
+        if (label) {
+          var parts = [];
+          if (sf.snapshot_week) parts.push("Week: " + esc(sf.snapshot_week));
+          if (sf.snapshot_month) parts.push("Month: " + esc(sf.snapshot_month));
+          label.textContent = parts.length ? "Showing snapshot — " + parts.join(" / ") : "No data uploaded yet.";
+        }
+
+        // Summary cards
+        var s = d.summary || {};
+        var fmtAmt = function (v) { return v == null ? "—" : fmt(Math.round(v)); };
+        var summaryCards = [
+          dqCard("Rows Total", { value: fmt(s.rows_total) }),
+          dqCard("Distinct Accounts", { value: fmt(s.distinct_accounts) }),
+          dqCard("Campaigns", { value: fmt(s.campaign_count) }),
+          dqCard("Platforms", { value: fmt(s.platform_count) }),
+          dqCard("Currencies", { value: fmt(s.currency_count) }),
+          dqCard("New Players", { value: fmt(s.new_players) }),
+          dqCard("Total Withdraw", { value: fmtAmt(s.total_withdraw_amount) }),
+          dqCard("Total After Bet", { value: fmtAmt(s.total_after_bet_amount) }),
+        ].join("");
+        $("#cards-explorer-summary").innerHTML = summaryCards || '<div class="empty">No data.</div>';
+
+        // Data quality
+        var dq = d.data_quality || {};
+        var checks = dq.checks || {};
+        var statusColor = { green: "var(--ok)", yellow: "var(--warn)", red: "var(--bad)" };
+        var overallStatus = dq.overall_status || "green";
+        var qualityRows = Object.keys(checks).map(function (key) {
+          var c = checks[key];
+          var color = statusColor[c.status] || "var(--muted)";
+          var label = key.replace(/_/g, " ").replace(/\b\w/g, function (l) { return l.toUpperCase(); });
+          return "<tr>" +
+            "<td>" + esc(label) + "</td>" +
+            '<td class="num">' + fmt(c.count) + "</td>" +
+            '<td class="num">' + (c.pct != null ? c.pct.toFixed(2) + "%" : "—") + "</td>" +
+            '<td><span style="color:' + color + ';font-weight:600;">' + esc(c.status.toUpperCase()) + "</span></td>" +
+            "</tr>";
+        }).join("");
+        var overallColor = statusColor[overallStatus] || "var(--muted)";
+        var qualityHtml = qualityRows
+          ? '<div style="margin-bottom:8px;">Overall: <span style="color:' + overallColor + ';font-weight:600;">' + esc(overallStatus.toUpperCase()) + '</span> &nbsp;·&nbsp; Total rows checked: ' + fmt(dq.total_rows) + '</div>' +
+            '<table class="mini-table"><thead><tr><th>Check</th><th class="num">Issues</th><th class="num">%</th><th>Status</th></tr></thead><tbody>' + qualityRows + "</tbody></table>"
+          : '<div class="empty">No data.</div>';
+        $("#explorer-quality-body").innerHTML = qualityHtml;
+
+        // Campaign breakdown
+        var camps = d.campaign_breakdown || [];
+        var campRows = camps.map(function (c) {
+          return "<tr><td>" + esc(c.campaign_id) + "</td><td>" + esc(c.campaign_name) + "</td>" +
+            '<td class="num">' + fmt(c.rows) + "</td>" +
+            '<td class="num">' + fmt(c.accounts) + "</td>" +
+            '<td class="num">' + fmtAmt(c.withdraw_amount) + "</td>" +
+            '<td class="num">' + fmtAmt(c.after_total_bet_amount) + "</td></tr>";
+        }).join("");
+        $("#explorer-campaign-body").innerHTML = campRows
+          ? '<table class="mini-table"><thead><tr><th>Campaign ID</th><th>Campaign Name</th><th class="num">Rows</th><th class="num">Accounts</th><th class="num">Withdraw</th><th class="num">After Bet</th></tr></thead><tbody>' + campRows + "</tbody></table>"
+          : '<div class="empty">No campaign data.</div>';
+
+        // Platform breakdown
+        var platforms = d.platform_breakdown || [];
+        var platRows = platforms.map(function (p) {
+          return "<tr><td>" + esc(p.platform_code) + "</td>" +
+            '<td class="num">' + fmt(p.rows) + "</td>" +
+            '<td class="num">' + fmt(p.accounts) + "</td>" +
+            '<td class="num">' + fmtAmt(p.withdraw_amount) + "</td>" +
+            '<td class="num">' + fmtAmt(p.after_total_bet_amount) + "</td></tr>";
+        }).join("");
+        $("#explorer-platform-body").innerHTML = platRows
+          ? '<table class="mini-table"><thead><tr><th>Platform Code</th><th class="num">Rows</th><th class="num">Accounts</th><th class="num">Withdraw</th><th class="num">After Bet</th></tr></thead><tbody>' + platRows + "</tbody></table>"
+          : '<div class="empty">No platform data.</div>';
+
+        // Currency breakdown
+        var currencies = d.currency_breakdown || [];
+        var currRows = currencies.map(function (c) {
+          return "<tr><td>" + esc(c.currency_code) + "</td>" +
+            '<td class="num">' + fmt(c.rows) + "</td>" +
+            '<td class="num">' + fmt(c.accounts) + "</td>" +
+            '<td class="num">' + fmtAmt(c.withdraw_amount) + "</td>" +
+            '<td class="num">' + fmtAmt(c.after_total_bet_amount) + "</td></tr>";
+        }).join("");
+        $("#explorer-currency-body").innerHTML = currRows
+          ? '<table class="mini-table"><thead><tr><th>Currency Code</th><th class="num">Rows</th><th class="num">Accounts</th><th class="num">Withdraw</th><th class="num">After Bet</th></tr></thead><tbody>' + currRows + "</tbody></table>"
+          : '<div class="empty">No currency data.</div>';
+
+        // Snapshot history
+        var snaps = d.snapshot_summary || [];
+        var snapRows = snaps.map(function (sn) {
+          return "<tr><td>" + esc(sn.snapshot_week) + "</td><td>" + esc(sn.snapshot_month) + "</td>" +
+            '<td class="num">' + fmt(sn.rows) + "</td>" +
+            "<td>" + esc(sn.uploaded_at) + "</td>" +
+            "<td>" + esc(sn.file_name) + "</td>" +
+            "<td>" + esc(sn.status) + "</td></tr>";
+        }).join("");
+        $("#explorer-snapshot-body").innerHTML = snapRows
+          ? '<table class="mini-table"><thead><tr><th>Snapshot Week</th><th>Month</th><th class="num">Rows</th><th>Uploaded At</th><th>File</th><th>Status</th></tr></thead><tbody>' + snapRows + "</tbody></table>"
+          : '<div class="empty">No upload records.</div>';
+      })
+      .catch(function (e) {
+        if (e.message !== "unauthorized") {
+          bodies.forEach(function (id) {
+            statePanel(id, "banner error", "Failed: " + esc(e.message));
+          });
+        }
+      });
+  }
+
   function loadUser(query) {
     if (!query) { setMeta(""); statePanel("user-body", "empty", "Search by Telegram user_id or username to view a user profile."); return; }
     setMeta("Loading…");
@@ -898,7 +1022,7 @@
       });
   }
 
-  var VIEWS = ["summary", "funnel", "abuse", "vouchers", "referrals", "affiliate", "reactivation", "audit", "segments", "validation", "backendSegmentEngine", "uploadPlayerPerformance", "uploadHistory", "users", "settings"];
+  var VIEWS = ["summary", "funnel", "abuse", "vouchers", "referrals", "affiliate", "reactivation", "audit", "segments", "validation", "backendSegmentEngine", "uploadPlayerPerformance", "uploadHistory", "rawExplorer", "users", "settings"];
   function switchView(view) {
     state.view = view;
     $all(".nav-item").forEach(function (b) { b.classList.toggle("active", b.dataset.view === view); });
@@ -909,6 +1033,7 @@
       audit: "Audit", segments: "Segment Overview", validation: "Data → Validation / UIM Compare",
       backendSegmentEngine: "Data → Backend Segment Engine (Shadow Mode)",
       uploadPlayerPerformance: "Data → Upload Player Performance", uploadHistory: "Data → Upload History",
+      rawExplorer: "Data → Raw Data Explorer",
       users: "User Drilldown", settings: "Settings (Read Only)"
     };
     $("#view-title").textContent = titles[view] || view;
@@ -930,6 +1055,7 @@
     else if (state.view === "backendSegmentEngine") loadBackendSegmentEngine(force);
     else if (state.view === "uploadPlayerPerformance") { /* upload view loads on submit */ }
     else if (state.view === "uploadHistory") loadUploadHistory(force);
+    else if (state.view === "rawExplorer") loadRawExplorer(force);
     else if (state.view === "users") { /* user view loads on search */ }
     else if (state.view === "settings") loadSettings(force);
   }
@@ -1039,6 +1165,9 @@
     if (uploadSubmitBtn) uploadSubmitBtn.addEventListener("click", uploadPlayerPerformance);
     var uploadHistoryRefreshBtn = $("#upload-history-refresh-btn");
     if (uploadHistoryRefreshBtn) uploadHistoryRefreshBtn.addEventListener("click", function () { loadUploadHistory(true); });
+
+    var explorerApplyBtn = $("#explorer-apply-btn");
+    if (explorerApplyBtn) explorerApplyBtn.addEventListener("click", function () { loadRawExplorer(true); });
 
     var us = $("#user-search"), ub = $("#user-search-btn");
     function doUserSearch() { loadUser((us.value || "").trim()); }
