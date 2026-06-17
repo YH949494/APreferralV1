@@ -3469,6 +3469,124 @@ def backend_segment_engine_run_status():
     return jsonify({"ok": True, **doc})
 
 
+@admin_bp.get("/api/admin/dashboard/backend-segment-engine/uim-comparison")
+def backend_segment_engine_uim_comparison():
+    """Phase 5: Backend vs UIM segment comparison analysis.
+
+    GET ?snapshot_week=YYYY-Www
+        &backend_segment=<optional filter>
+        &uim_segment=<optional filter>
+        &match=true|false (optional; omit for all)
+        &claim_risk_level=<optional filter>
+        &page=1 &per_page=200
+
+    Returns comparison summary, mismatch matrix, paginated detail rows,
+    and rule audit (per-segment avg metrics). Shadow mode — read-only.
+    """
+    ok, err = require_admin_from_query()
+    if not ok:
+        msg, code = err
+        return jsonify({"ok": False, "error": msg}), code
+
+    snapshot_week = request.args.get("snapshot_week", "").strip()
+    if not snapshot_week:
+        return jsonify({"ok": False, "error": "snapshot_week is required"}), 400
+    if not _SNAPSHOT_WEEK_RE.match(snapshot_week):
+        return jsonify({"ok": False, "error": f"Invalid snapshot_week '{snapshot_week}'"}), 400
+
+    filter_backend_segment = request.args.get("backend_segment", "").strip() or None
+    filter_uim_segment     = request.args.get("uim_segment", "").strip() or None
+    filter_claim_risk      = request.args.get("claim_risk_level", "").strip() or None
+
+    match_param = request.args.get("match", "").strip().lower()
+    filter_match: bool | None = None
+    if match_param == "true":
+        filter_match = True
+    elif match_param == "false":
+        filter_match = False
+
+    try:
+        page     = max(1, int(request.args.get("page", 1)))
+        per_page = max(1, min(500, int(request.args.get("per_page", 200))))
+    except (TypeError, ValueError):
+        page, per_page = 1, 200
+
+    return jsonify(_panels.build_uim_comparison_panel(
+        snapshots_col=db["backend_segment_snapshots"],
+        segment_snapshots_col=db["segment_snapshots"],
+        snapshot_week=snapshot_week,
+        filter_backend_segment=filter_backend_segment,
+        filter_uim_segment=filter_uim_segment,
+        filter_match=filter_match,
+        filter_claim_risk_level=filter_claim_risk,
+        page=page,
+        per_page=per_page,
+    ))
+
+
+@admin_bp.get("/api/admin/dashboard/backend-segment-engine/uim-comparison/export")
+def backend_segment_engine_uim_comparison_export():
+    """Phase 5: Export uim-comparison detail rows as CSV (all pages, up to 10 000 rows).
+
+    Accepts same filter params as /uim-comparison (except page/per_page).
+    Returns CSV with Content-Disposition: attachment.
+    """
+    ok, err = require_admin_from_query()
+    if not ok:
+        msg, code = err
+        return jsonify({"ok": False, "error": msg}), code
+
+    snapshot_week = request.args.get("snapshot_week", "").strip()
+    if not snapshot_week:
+        return jsonify({"ok": False, "error": "snapshot_week is required"}), 400
+    if not _SNAPSHOT_WEEK_RE.match(snapshot_week):
+        return jsonify({"ok": False, "error": f"Invalid snapshot_week '{snapshot_week}'"}), 400
+
+    filter_backend_segment = request.args.get("backend_segment", "").strip() or None
+    filter_uim_segment     = request.args.get("uim_segment", "").strip() or None
+    filter_claim_risk      = request.args.get("claim_risk_level", "").strip() or None
+
+    match_param = request.args.get("match", "").strip().lower()
+    filter_match: bool | None = None
+    if match_param == "true":
+        filter_match = True
+    elif match_param == "false":
+        filter_match = False
+
+    result = _panels.build_uim_comparison_panel(
+        snapshots_col=db["backend_segment_snapshots"],
+        segment_snapshots_col=db["segment_snapshots"],
+        snapshot_week=snapshot_week,
+        filter_backend_segment=filter_backend_segment,
+        filter_uim_segment=filter_uim_segment,
+        filter_match=filter_match,
+        filter_claim_risk_level=filter_claim_risk,
+        page=1,
+        per_page=10_000,
+    )
+
+    _CSV_FIELDS = [
+        "account", "backend_segment", "uim_segment", "match",
+        "confidence", "reason",
+        "after_total_bet_amount", "withdraw_amount",
+        "claim_count", "referral_count", "checkin_count",
+        "player_age_type", "claim_risk_level",
+    ]
+    out = io.StringIO()
+    writer = csv.DictWriter(out, fieldnames=_CSV_FIELDS, extrasaction="ignore")
+    writer.writeheader()
+    for row in result.get("details", []):
+        writer.writerow({k: ("" if row.get(k) is None else row[k]) for k in _CSV_FIELDS})
+
+    filename = f"uim_comparison_{snapshot_week}.csv"
+    from flask import Response as _FlaskResponse
+    return _FlaskResponse(
+        out.getvalue(),
+        mimetype="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 @admin_bp.get("/api/admin/dashboard/kpi-gap-report")
 def dashboard_kpi_gap_report():
     """Phase 5B: read-only UIM formula mapping / backend KPI gap report.

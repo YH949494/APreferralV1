@@ -921,6 +921,176 @@
     }, 2000);
   }
 
+  // ---------- Phase 5: Backend vs UIM Comparison ----------
+  var _uimcPage = 1;
+  var _uimcPerPage = 200;
+
+  function loadUimComparison(resetPage) {
+    if (resetPage) _uimcPage = 1;
+    var week = ($("#uimc-week") || {}).value || "";
+    if (!week) {
+      statePanel("uimc-detail-body", "empty", "Enter a snapshot_week (e.g. 2026-W25) and click Analyse.");
+      $("#cards-uimc-summary").innerHTML = "";
+      $("#uimc-matrix-body").innerHTML = "";
+      $("#uimc-audit-body").innerHTML = "";
+      $("#uimc-pagination").innerHTML = "";
+      return;
+    }
+    statePanel("uimc-detail-body", "loading", "Loading comparison…");
+    $("#cards-uimc-summary").innerHTML = "";
+    var bSeg  = ($("#uimc-backend-seg") || {}).value || "";
+    var uSeg  = ($("#uimc-uim-seg")     || {}).value || "";
+    var match = ($("#uimc-match")        || {}).value || "";
+    var risk  = ($("#uimc-risk")         || {}).value || "";
+    var qs = [
+      "snapshot_week=" + encodeURIComponent(week),
+      bSeg  ? "backend_segment="  + encodeURIComponent(bSeg)  : "",
+      uSeg  ? "uim_segment="      + encodeURIComponent(uSeg)  : "",
+      match ? "match="            + encodeURIComponent(match) : "",
+      risk  ? "claim_risk_level=" + encodeURIComponent(risk)  : "",
+      "page="     + _uimcPage,
+      "per_page=" + _uimcPerPage,
+    ].filter(Boolean).join("&");
+    api("/api/admin/dashboard/backend-segment-engine/uim-comparison?" + qs)
+      .then(function (d) {
+        // --- Summary cards ---
+        var s = d.summary || {};
+        $("#cards-uimc-summary").innerHTML =
+          dqCard("Total Backend Users",  { value: s.total_backend_users }) +
+          dqCard("Total UIM Users",      { value: s.total_uim_users }) +
+          dqCard("Compared Users",       { value: s.compared_users }) +
+          dqCard("Matched",              { value: s.matched_users }) +
+          dqCard("Mismatched",           { value: s.mismatched_users }) +
+          dqCard("Match Rate %",         { value: s.match_rate }) +
+          dqCard("Mismatch Rate %",      { value: s.mismatch_rate });
+
+        // --- Cross-tab matrix ---
+        var mx = d.mismatch_matrix || {};
+        var uSegs = mx.uim_segments || [];
+        var mxRows = mx.rows || [];
+        if (uSegs.length && mxRows.length) {
+          var hdr = "<tr><th>Backend ↓ / UIM →</th>" + uSegs.map(function (u) { return "<th class='num'>" + esc(u) + "</th>"; }).join("") + "</tr>";
+          var body = mxRows.map(function (r) {
+            var cells = uSegs.map(function (u) {
+              var v = (r.by_uim_segment || {})[u] || 0;
+              var style = (r.backend_segment !== u && v > 0) ? " style='color:var(--red,#e05c5c)'" : "";
+              return "<td class='num'" + style + ">" + fmt(v) + "</td>";
+            }).join("");
+            return "<tr><td><b>" + esc(r.backend_segment) + "</b></td>" + cells + "</tr>";
+          }).join("");
+          $("#uimc-matrix-body").innerHTML = '<div style="overflow-x:auto"><table class="mini-table"><thead>' + hdr + '</thead><tbody>' + body + '</tbody></table></div>';
+        } else {
+          $("#uimc-matrix-body").innerHTML = '<div class="empty">No comparison data available. Run the segment engine with marketing data first.</div>';
+        }
+
+        // --- Rule audit ---
+        var audit = d.rule_audit || {};
+        var auditSegs = Object.keys(audit).sort();
+        if (auditSegs.length) {
+          var auditRows = auditSegs.map(function (seg) {
+            var a = audit[seg] || {};
+            function fmtAvg(v) { return v == null ? "—" : (typeof v === "number" ? v.toFixed(2) : esc(String(v))); }
+            return "<tr><td><b>" + esc(seg) + "</b></td>" +
+              '<td class="num">' + fmt(a.count) + "</td>" +
+              '<td class="num">' + fmtAvg(a.avg_after_total_bet_amount) + "</td>" +
+              '<td class="num">' + fmtAvg(a.avg_withdraw_amount)        + "</td>" +
+              '<td class="num">' + fmtAvg(a.avg_claim_count)            + "</td>" +
+              '<td class="num">' + fmtAvg(a.avg_referral_count)         + "</td>" +
+              '<td class="num">' + fmtAvg(a.avg_checkin_count)          + "</td></tr>";
+          }).join("");
+          $("#uimc-audit-body").innerHTML =
+            '<table class="mini-table"><thead><tr>' +
+            "<th>Backend Segment</th><th class='num'>Count</th>" +
+            "<th class='num'>Avg After Bet</th><th class='num'>Avg Withdraw</th>" +
+            "<th class='num'>Avg Claims</th><th class='num'>Avg Referrals</th><th class='num'>Avg Checkins</th>" +
+            "</tr></thead><tbody>" + auditRows + "</tbody></table>";
+        } else {
+          $("#uimc-audit-body").innerHTML = '<div class="empty">No data.</div>';
+        }
+
+        // --- Detail table ---
+        var rows = d.details || [];
+        if (rows.length) {
+          var detailRows = rows.map(function (r) {
+            var matchCell = r.match === true
+              ? '<td style="color:var(--green,green)">match</td>'
+              : r.match === false
+              ? '<td style="color:var(--red,red)">mismatch</td>'
+              : '<td style="color:var(--muted,#8892a4)">—</td>';
+            function fmtNum(v) { return (v == null || v === "") ? "—" : fmt(v); }
+            return "<tr>" +
+              "<td>" + esc(r.account || "") + "</td>" +
+              "<td>" + esc(r.backend_segment || "") + "</td>" +
+              "<td>" + esc(r.uim_segment || "—") + "</td>" +
+              matchCell +
+              "<td>" + esc(r.confidence || "") + "</td>" +
+              "<td>" + esc(r.reason || "") + "</td>" +
+              '<td class="num">' + fmtNum(r.after_total_bet_amount) + "</td>" +
+              '<td class="num">' + fmtNum(r.withdraw_amount) + "</td>" +
+              '<td class="num">' + fmtNum(r.claim_count) + "</td>" +
+              '<td class="num">' + fmtNum(r.referral_count) + "</td>" +
+              '<td class="num">' + fmtNum(r.checkin_count) + "</td>" +
+              "<td>" + esc(r.player_age_type || "") + "</td>" +
+              "<td>" + esc(r.claim_risk_level || "") + "</td>" +
+              "</tr>";
+          }).join("");
+          var th = "<tr><th>Account</th><th>Backend Seg.</th><th>UIM Seg.</th><th>Match</th>" +
+            "<th>Confidence</th><th>Reason</th>" +
+            "<th class='num'>After Bet</th><th class='num'>Withdraw</th>" +
+            "<th class='num'>Claims</th><th class='num'>Referrals</th><th class='num'>Checkins</th>" +
+            "<th>Age Type</th><th>Claim Risk</th></tr>";
+          $("#uimc-detail-body").innerHTML =
+            '<div style="overflow-x:auto"><table class="mini-table"><thead>' + th + '</thead><tbody>' + detailRows + "</tbody></table></div>";
+        } else {
+          $("#uimc-detail-body").innerHTML = '<div class="empty">No rows match the current filters.</div>';
+        }
+
+        // --- Pagination ---
+        var total = d.total_details || 0;
+        var totalPages = Math.max(1, Math.ceil(total / _uimcPerPage));
+        var pEl = $("#uimc-pagination");
+        if (pEl) {
+          pEl.innerHTML =
+            '<button class="btn" id="uimc-prev-btn"' + (_uimcPage <= 1 ? " disabled" : "") + '>← Prev</button>' +
+            '<span>Page ' + _uimcPage + ' / ' + totalPages + ' &nbsp;(' + fmt(total) + ' rows)</span>' +
+            '<button class="btn" id="uimc-next-btn"' + (!d.has_more ? " disabled" : "") + '>Next →</button>';
+          var prevBtn = $("#uimc-prev-btn");
+          var nextBtn = $("#uimc-next-btn");
+          if (prevBtn) prevBtn.addEventListener("click", function () { _uimcPage--; loadUimComparison(false); });
+          if (nextBtn) nextBtn.addEventListener("click", function () { _uimcPage++; loadUimComparison(false); });
+        }
+      })
+      .catch(function (e) {
+        if (e.message !== "unauthorized") {
+          statePanel("uimc-detail-body", "banner error", "Failed: " + esc(e.message));
+        }
+      });
+  }
+
+  function exportUimComparisonCsv() {
+    var week = ($("#uimc-week") || {}).value || "";
+    if (!week) { alert("Enter a snapshot_week first."); return; }
+    var bSeg  = ($("#uimc-backend-seg") || {}).value || "";
+    var uSeg  = ($("#uimc-uim-seg")     || {}).value || "";
+    var match = ($("#uimc-match")        || {}).value || "";
+    var risk  = ($("#uimc-risk")         || {}).value || "";
+    var qs = [
+      "snapshot_week=" + encodeURIComponent(week),
+      bSeg  ? "backend_segment="  + encodeURIComponent(bSeg)  : "",
+      uSeg  ? "uim_segment="      + encodeURIComponent(uSeg)  : "",
+      match ? "match="            + encodeURIComponent(match) : "",
+      risk  ? "claim_risk_level=" + encodeURIComponent(risk)  : "",
+    ].filter(Boolean).join("&");
+    var url = "/api/admin/dashboard/backend-segment-engine/uim-comparison/export?" +
+      qs + (window.location.search ? "&" + window.location.search.slice(1) : "");
+    var a = document.createElement("a");
+    a.href = url;
+    a.download = "uim_comparison_" + week + ".csv";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  }
+
   // ---------- Upload Player Performance (Phase 2A) ----------
   function uploadPlayerPerformance() {
     var input = $("#upload-file-input");
@@ -1333,6 +1503,11 @@
     if (bseDryRunBtn) bseDryRunBtn.addEventListener("click", function () { runBackendSegmentEngine(true); });
     var bseCommitRunBtn = $("#bse-commit-run-btn");
     if (bseCommitRunBtn) bseCommitRunBtn.addEventListener("click", function () { runBackendSegmentEngine(false); });
+
+    var uimcApplyBtn = $("#uimc-apply-btn");
+    if (uimcApplyBtn) uimcApplyBtn.addEventListener("click", function () { loadUimComparison(true); });
+    var uimcExportBtn = $("#uimc-export-btn");
+    if (uimcExportBtn) uimcExportBtn.addEventListener("click", exportUimComparisonCsv);
 
     var uploadSubmitBtn = $("#upload-submit-btn");
     if (uploadSubmitBtn) uploadSubmitBtn.addEventListener("click", uploadPlayerPerformance);
