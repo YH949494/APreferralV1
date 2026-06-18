@@ -38,7 +38,8 @@ import csv
 import io
 import logging
 import os
-from datetime import datetime, timezone
+from collections import Counter
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import uuid4
 
@@ -60,6 +61,27 @@ REQUIRED_COLUMNS = ("campaign_id", "campaign_name", "account")
 # back to empty-string components rather than skipping the row entirely —
 # a missing coupon_code is still a meaningful (and dedupe-able) row.
 DEDUPE_KEY_FIELDS = ("account", "campaign_id", "coupon_code")
+
+REDEEM_TIME_ALIASES = (
+    "coupon_redeem_time",
+    "redeem_time",
+    "coupon_redeemed_at",
+    "redeemed_at",
+    "claim_time",
+    "claimed_at",
+)
+
+_DATETIME_FORMATS = (
+    "%Y-%m-%d %H:%M:%S",
+    "%Y-%m-%d %H:%M",
+    "%Y-%m-%d",
+    "%Y/%m/%d %H:%M:%S",
+    "%Y/%m/%d %H:%M",
+    "%Y/%m/%d",
+    "%d/%m/%Y %H:%M:%S",
+    "%d/%m/%Y %H:%M",
+    "%d/%m/%Y",
+)
 
 
 def _normalize_header(value: Any) -> str:
@@ -92,6 +114,111 @@ def _snapshot_week_key(moment: datetime) -> str:
 
 def _snapshot_month_key(moment: datetime) -> str:
     return f"{moment.year:04d}-{moment.month:02d}"
+
+
+def _normalize_dt(moment: datetime) -> datetime:
+    if moment.tzinfo is None:
+        return moment.replace(tzinfo=timezone.utc)
+    return moment.astimezone(timezone.utc)
+
+
+def _parse_datetime(value: Any) -> datetime | None:
+    if value in (None, ""):
+        return None
+    if isinstance(value, datetime):
+        return _normalize_dt(value)
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        # Excel serial dates use 1899-12-30 as the practical epoch.
+        if value > 20000:
+            return datetime(1899, 12, 30, tzinfo=timezone.utc) + timedelta(days=float(value))
+        return None
+
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        return _normalize_dt(datetime.fromisoformat(text))
+    except ValueError:
+        pass
+    for fmt in _DATETIME_FORMATS:
+        try:
+            return datetime.strptime(text, fmt).replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+    return None
+
+
+def _redeem_time_from_row(row_lc: dict) -> datetime | None:
+    for alias in REDEEM_TIME_ALIASES:
+        parsed = _parse_datetime(row_lc.get(alias))
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _period_from_manual(manual_period: str | None) -> tuple[str, str, datetime] | None:
+    period = (manual_period or "").strip()
+    if not period:
+        return None
+    if "W" in period:
+        try:
+            year_s, week_s = period.split("-W", 1)
+            start = datetime.fromisocalendar(int(year_s), int(week_s), 1).replace(tzinfo=timezone.utc)
+        except (TypeError, ValueError):
+            return None
+        return _snapshot_week_key(start), _snapshot_month_key(start), start
+    try:
+        start = datetime.strptime(period, "%Y-%m").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+    return _snapshot_week_key(start), _snapshot_month_key(start), start
+
+
+def _resolve_row_period(row_lc: dict, *, manual_period: str | None, upload_time: datetime) -> dict:
+    redeem_time = _redeem_time_from_row(row_lc)
+    if redeem_time is not None:
+        return {
+            "snapshot_week": _snapshot_week_key(redeem_time),
+            "snapshot_month": _snapshot_month_key(redeem_time),
+            "period_source": "coupon_redeem_time",
+            "source_redeem_time": redeem_time,
+        }
+
+    manual = _period_from_manual(manual_period)
+    if manual is not None:
+        week, month, manual_dt = manual
+        return {
+            "snapshot_week": week,
+            "snapshot_month": month,
+            "period_source": "manual_period",
+            "source_redeem_time": None,
+            "source_period_time": manual_dt,
+        }
+
+    upload_time = _normalize_dt(upload_time)
+    return {
+        "snapshot_week": _snapshot_week_key(upload_time),
+        "snapshot_month": _snapshot_month_key(upload_time),
+        "period_source": "upload_time",
+        "source_redeem_time": None,
+    }
+
+
+def _coverage_summary(rows_by_month: dict[str, int], rows_by_week: dict[str, int]) -> dict:
+    months = sorted(rows_by_month)
+    weeks = sorted(rows_by_week)
+    return {
+        "months": months,
+        "weeks": weeks,
+        "month_start": months[0] if months else None,
+        "month_end": months[-1] if months else None,
+        "week_start": weeks[0] if weeks else None,
+        "week_end": weeks[-1] if weeks else None,
+        "months_label": ", ".join(months),
+        "weeks_label": f"{weeks[0]} -> {weeks[-1]}" if weeks else "",
+    }
 
 
 def _utc_now() -> datetime:
@@ -189,6 +316,11 @@ def _empty_summary(*, file_name: str) -> dict:
         "file_name": file_name,
         "snapshot_week": None,
         "snapshot_month": None,
+        "period_source": None,
+        "source_redeem_time": None,
+        "rows_by_snapshot_month": {},
+        "rows_by_snapshot_week": {},
+        "coverage": _coverage_summary({}, {}),
         "rows_total": 0,
         "rows_imported": 0,
         "rows_failed": 0,
@@ -204,6 +336,7 @@ def ingest_upload(
     file_name: str,
     uploaded_by: str,
     now: datetime | None = None,
+    manual_period: str | None = None,
     marketing_col=None,
     batches_col=None,
 ) -> dict:
@@ -232,15 +365,12 @@ def ingest_upload(
         if batches_col is None:
             batches_col = database.marketing_upload_batches_col
 
-        snapshot_week = _snapshot_week_key(now)
-        snapshot_month = _snapshot_month_key(now)
+        now = _normalize_dt(now)
         upload_batch_id = uuid4().hex
 
         summary.update(
             {
                 "upload_batch_id": upload_batch_id,
-                "snapshot_week": snapshot_week,
-                "snapshot_month": snapshot_month,
                 "rows_total": len(rows),
             }
         )
@@ -249,12 +379,18 @@ def ingest_upload(
         seen_keys_this_batch: set[str] = set()
         rows_failed = 0
         duplicate_rows = 0
+        candidate_rows_by_month: Counter[str] = Counter()
+        candidate_rows_by_week: Counter[str] = Counter()
+        period_sources: Counter[str] = Counter()
 
         for row in rows:
             row_lc = _lower_key_map(row)
             if any(not _row_value_ci(row_lc, field) for field in REQUIRED_COLUMNS):
                 rows_failed += 1
                 continue
+            period_info = _resolve_row_period(row_lc, manual_period=manual_period, upload_time=now)
+            snapshot_week = period_info["snapshot_week"]
+            snapshot_month = period_info["snapshot_month"]
             dedupe_key = _build_dedupe_key(row_lc, snapshot_week=snapshot_week)
             if dedupe_key in seen_keys_this_batch:
                 duplicate_rows += 1
@@ -266,14 +402,22 @@ def ingest_upload(
                     "upload_batch_id": upload_batch_id,
                     "snapshot_week": snapshot_week,
                     "snapshot_month": snapshot_month,
+                    "period_source": period_info["period_source"],
+                    "source_redeem_time": period_info["source_redeem_time"],
                     "dedupe_key": dedupe_key,
                     "uploaded_at": now,
                     "uploaded_by": uploaded_by,
                     "source": "manual_upload",
                 }
             )
+            if period_info.get("source_period_time") is not None:
+                doc["source_period_time"] = period_info["source_period_time"]
+            candidate_rows_by_month[snapshot_month] += 1
+            candidate_rows_by_week[snapshot_week] += 1
+            period_sources[period_info["period_source"]] += 1
             candidate_docs.append(doc)
 
+        insert_docs: list[dict] = []
         if candidate_docs:
             existing_keys = _existing_dedupe_keys(marketing_col, [d["dedupe_key"] for d in candidate_docs])
             insert_docs = []
