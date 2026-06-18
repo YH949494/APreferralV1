@@ -861,12 +861,29 @@ def _welcome_progress_pct(completed_days: int) -> int:
     return pct_by_days.get(safe_days, 100)
 
 
-def _welcome_claim_drop_id(now_ref: datetime | None = None) -> str | None:
+def _welcome_claim_drop_id(now_ref: datetime | None = None, uid: int | None = None) -> str | None:
     ref = _as_aware_utc(now_ref) or now_utc()
     try:
         for drop in get_active_drops(ref):
-            if _is_new_joiner_audience(_drop_audience_type(drop)):
-                return str(drop.get("_id") or drop.get("dropId") or "")
+            if not _is_new_joiner_audience(_drop_audience_type(drop)):
+                continue
+            drop_id = str(drop.get("_id") or drop.get("dropId") or "")
+            if not drop_id:
+                continue
+            try:
+                state = _pooled_claimability_state(
+                    drop=drop,
+                    drop_id=drop_id,
+                    user_region=None,
+                    uid=uid,
+                    is_my_user=False,
+                    ref=ref,
+                )
+                if not state.get("claimable"):
+                    continue
+            except Exception:
+                pass
+            return drop_id
     except Exception:
         _safe_log("warning", "[WELCOME_PROGRESS_API] claim_drop_lookup_failed")
     return None
@@ -925,7 +942,7 @@ def build_welcome_progress_response(user_id: int, *, now: datetime | None = None
         "message": message,
     }
     if status == "unlocked":
-        payload["claim_drop_id"] = _welcome_claim_drop_id(now_ref)
+        payload["claim_drop_id"] = _welcome_claim_drop_id(now_ref, uid=user_id)
     return payload
 
 
