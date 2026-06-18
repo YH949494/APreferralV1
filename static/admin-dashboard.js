@@ -899,8 +899,14 @@
             return;
           }
           var s = d.summary || {};
+          var matchRateColor = (s.identity_match_rate >= 80) ? "var(--green,#4caf82)"
+                             : (s.identity_match_rate >= 40) ? "var(--yellow,#e0b44a)"
+                             : "var(--red,#e05c5c)";
           var lines = [
             (dryRun ? "<b>Dry run</b> completed" : "<b>Commit run</b> completed") + " for " + esc(week),
+            "Rows: <b>" + fmt(s.total_rows) + "</b>",
+            "Identity matched: <b style='color:" + matchRateColor + "'>" + fmt(s.matched_rows) + " (" + s.identity_match_rate + "%)</b>",
+            "Unmatched: <b>" + fmt(s.unmatched_rows) + "</b>",
             "Users evaluated: <b>" + fmt(s.users_evaluated) + "</b>",
             dryRun ? "Snapshots written: <b>0 (dry run)</b>" : "Snapshots written: <b>" + fmt(s.snapshots_written) + "</b>",
           ];
