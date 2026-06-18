@@ -88,6 +88,45 @@ class CsvImportTests(unittest.TestCase):
         self.assertEqual(len(marketing_col.docs), 2)
         self.assertEqual(len(batches_col.docs), 1)
 
+    def test_redeem_time_drives_mixed_snapshot_periods(self):
+        content = _csv_bytes(
+            [
+                {"campaign_id": "c1", "campaign_name": "Camp 1", "account": "acc1", "coupon_code": "X1", "coupon_redeem_time": "2024-03-18 10:00:00"},
+                {"campaign_id": "c2", "campaign_name": "Camp 2", "account": "acc2", "coupon_code": "X2", "coupon_redeem_time": "2024-04-02 11:00:00"},
+                {"campaign_id": "c3", "campaign_name": "Camp 3", "account": "acc3", "coupon_code": "X3", "coupon_redeem_time": "2024-05-15 12:00:00"},
+            ],
+            headers=["campaign_id", "campaign_name", "account", "coupon_code", "coupon_redeem_time"],
+        )
+        marketing_col = FakeMarketingCollection()
+        batches_col = FakeBatchesCollection()
+        summary = mu.ingest_upload(
+            content=content, file_name="historical.csv", uploaded_by="admin",
+            now=NOW, marketing_col=marketing_col, batches_col=batches_col,
+        )
+        self.assertTrue(summary["ok"])
+        self.assertIsNone(summary["snapshot_week"])
+        self.assertIsNone(summary["snapshot_month"])
+        self.assertEqual(summary["period_source"], "coupon_redeem_time")
+        self.assertEqual(summary["rows_by_snapshot_month"], {"2024-03": 1, "2024-04": 1, "2024-05": 1})
+        self.assertIn("2024-W12", summary["rows_by_snapshot_week"])
+        self.assertEqual({d["period_source"] for d in marketing_col.docs}, {"coupon_redeem_time"})
+        self.assertTrue(all(d.get("source_redeem_time") is not None for d in marketing_col.docs))
+
+    def test_missing_redeem_time_uses_manual_period_before_upload_time(self):
+        content = _csv_bytes([
+            {"campaign_id": "c1", "campaign_name": "Camp 1", "account": "acc1", "coupon_code": "X1"},
+        ])
+        marketing_col = FakeMarketingCollection()
+        batches_col = FakeBatchesCollection()
+        summary = mu.ingest_upload(
+            content=content, file_name="manual.csv", uploaded_by="admin",
+            now=NOW, manual_period="2024-04", marketing_col=marketing_col, batches_col=batches_col,
+        )
+        self.assertTrue(summary["ok"])
+        self.assertEqual(summary["snapshot_month"], "2024-04")
+        self.assertEqual(summary["period_source"], "manual_period")
+        self.assertEqual(marketing_col.docs[0]["period_source"], "manual_period")
+
     def test_extra_columns_are_stored_verbatim(self):
         content = _csv_bytes(
             [{"campaign_id": "c1", "campaign_name": "Camp 1", "account": "acc1", "coupon_code": "X1", "withdraw_amount": "50"}],

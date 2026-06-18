@@ -2027,6 +2027,23 @@
   }
 
   // ---------- Upload Player Performance (Phase 2A) ----------
+  function rowsByTable(map, label) {
+    var keys = Object.keys(map || {}).sort();
+    if (!keys.length) return '<div class="empty">No ' + esc(label) + ' rows.</div>';
+    return '<table class="mini-table"><thead><tr><th>' + esc(label) + '</th><th class="num">Rows</th></tr></thead><tbody>' +
+      keys.map(function (k) {
+        return '<tr><td>' + esc(k) + '</td><td class="num">' + fmt(map[k]) + '</td></tr>';
+      }).join("") +
+      '</tbody></table>';
+  }
+
+  function coverageText(coverage) {
+    coverage = coverage || {};
+    var months = coverage.months_label || (coverage.months || []).join(", ");
+    var weeks = coverage.weeks_label || ((coverage.week_start && coverage.week_end) ? coverage.week_start + " -> " + coverage.week_end : "");
+    return { months: months || "none", weeks: weeks || "none" };
+  }
+
   function uploadPlayerPerformance() {
     var input = $("#upload-file-input");
     var file = input && input.files && input.files[0];
@@ -2034,6 +2051,8 @@
     statePanel("upload-result-body", "loading", "Uploading and importing…");
     var formData = new FormData();
     formData.append("file", file);
+    var manualPeriod = (($("#upload-manual-period") || {}).value || "").trim();
+    if (manualPeriod) formData.append("manual_period", manualPeriod);
     fetch("/api/admin/data/upload-player-performance" + window.location.search, {
       method: "POST",
       credentials: "same-origin",
@@ -2050,6 +2069,7 @@
           statePanel("upload-result-body", "banner error", "Failed: " + esc(d.message || "upload failed"));
           return;
         }
+        var cov = coverageText(d.coverage);
         $("#upload-result-body").innerHTML =
           '<div class="card-grid">' +
           dqCard("Rows Total", { value: d.rows_total }) +
@@ -2058,11 +2078,16 @@
           dqCard("Duplicate Rows", { value: d.duplicate_rows }) +
           "</div>" +
           '<table class="mini-table"><tbody>' +
-          "<tr><td>Snapshot Week</td><td>" + esc(d.snapshot_week) + "</td></tr>" +
-          "<tr><td>Snapshot Month</td><td>" + esc(d.snapshot_month) + "</td></tr>" +
+          "<tr><td>Period Source</td><td>" + esc(d.period_source || "") + "</td></tr>" +
+          "<tr><td>Months</td><td>" + esc(cov.months) + "</td></tr>" +
+          "<tr><td>Weeks</td><td>" + esc(cov.weeks) + "</td></tr>" +
           "<tr><td>Upload Batch ID</td><td>" + esc(d.upload_batch_id) + "</td></tr>" +
           "<tr><td>Status</td><td>" + esc(d.status) + "</td></tr>" +
-          "</tbody></table>";
+          "</tbody></table>" +
+          '<div class="section-title">Rows by Month</div>' +
+          rowsByTable(d.rows_by_snapshot_month, "Month") +
+          '<div class="section-title">Rows by Week</div>' +
+          rowsByTable(d.rows_by_snapshot_week, "Week");
       })
       .catch(function (e) {
         if (e.message !== "unauthorized") {
@@ -2077,13 +2102,18 @@
     api("/api/admin/data/upload-history")
       .then(function (d) {
         var rows = (d.batches || []).map(function (b) {
+          var cov = coverageText(b.coverage);
+          var monthRows = Object.keys(b.rows_by_snapshot_month || {}).sort().map(function (m) {
+            return esc(m) + ": " + fmt(b.rows_by_snapshot_month[m]);
+          }).join("<br>");
           return "<tr><td>" + esc(b.uploaded_at) + "</td><td>" + esc(b.file_name) + "</td>" +
-            "<td>" + esc(b.snapshot_week) + "</td><td>" + esc(b.snapshot_month) + "</td>" +
+            "<td>" + esc(cov.months) + "</td><td>" + esc(cov.weeks) + "</td>" +
+            "<td>" + (monthRows || "none") + "</td>" +
             '<td class="num">' + fmt(b.rows_imported) + '</td><td class="num">' + fmt(b.rows_failed) + "</td>" +
             "<td>" + esc(b.status) + "</td><td>" + esc(b.uploaded_by) + "</td></tr>";
         }).join("");
         $("#upload-history-body").innerHTML = rows
-          ? '<table class="mini-table"><thead><tr><th>Upload Date</th><th>File Name</th><th>Snapshot Week</th><th>Snapshot Month</th><th class="num">Rows Imported</th><th class="num">Rows Failed</th><th>Status</th><th>Uploader</th></tr></thead><tbody>' + rows + "</tbody></table>"
+          ? '<table class="mini-table"><thead><tr><th>Upload Date</th><th>File Name</th><th>Months</th><th>Weeks</th><th>Rows by Month</th><th class="num">Rows Imported</th><th class="num">Rows Failed</th><th>Status</th><th>Uploader</th></tr></thead><tbody>' + rows + "</tbody></table>"
           : '<div class="empty">No uploads yet.</div>';
       })
       .catch(function (e) {
@@ -2094,13 +2124,23 @@
   }
 
   // ---------- Raw Data Explorer (Phase 2B) ----------
+  function updateExplorerPeriodOptions(available, selectedType, selectedPeriod) {
+    var select = $("#explorer-period");
+    if (!select) return;
+    var options = ((available || {})[selectedType] || []);
+    select.innerHTML = options.length
+      ? options.map(function (p) {
+          return '<option value="' + esc(p) + '"' + (p === selectedPeriod ? " selected" : "") + ">" + esc(p) + "</option>";
+        }).join("")
+      : '<option value="">Latest available</option>';
+  }
+
   function loadRawExplorer(force) {
-    var week = ($("#explorer-week") || {}).value || "";
-    var month = ($("#explorer-month") || {}).value || "";
+    var type = (($("#explorer-period-type") || {}).value || "weekly").trim();
+    var period = (($("#explorer-period") || {}).value || "").trim();
     var url = "/api/admin/data/raw-explorer";
-    var params = [];
-    if (week.trim()) params.push("snapshot_week=" + encodeURIComponent(week.trim()));
-    else if (month.trim()) params.push("snapshot_month=" + encodeURIComponent(month.trim()));
+    var params = ["period_type=" + encodeURIComponent(type)];
+    if (period) params.push("period=" + encodeURIComponent(period));
     if (params.length) url += "?" + params.join("&");
 
     var bodies = ["cards-explorer-summary", "explorer-quality-body", "explorer-campaign-body",
@@ -2110,11 +2150,12 @@
     api(url)
       .then(function (d) {
         var sf = d.snapshot_filter || {};
+        updateExplorerPeriodOptions(d.available_periods, sf.period_type || type, sf.period || period);
         var label = $("#explorer-snapshot-label");
         if (label) {
           var parts = [];
-          if (sf.snapshot_week) parts.push("Week: " + esc(sf.snapshot_week));
-          if (sf.snapshot_month) parts.push("Month: " + esc(sf.snapshot_month));
+          if (sf.period_type) parts.push("View: " + esc(sf.period_type));
+          if (sf.period) parts.push("Period: " + esc(sf.period));
           label.textContent = parts.length ? "Showing snapshot — " + parts.join(" / ") : "No data uploaded yet.";
         }
 
@@ -2198,14 +2239,15 @@
         // Snapshot history
         var snaps = d.snapshot_summary || [];
         var snapRows = snaps.map(function (sn) {
-          return "<tr><td>" + esc(sn.snapshot_week) + "</td><td>" + esc(sn.snapshot_month) + "</td>" +
+          var cov = coverageText(sn.coverage);
+          return "<tr><td>" + esc(cov.weeks) + "</td><td>" + esc(cov.months) + "</td>" +
             '<td class="num">' + fmt(sn.rows) + "</td>" +
             "<td>" + esc(sn.uploaded_at) + "</td>" +
             "<td>" + esc(sn.file_name) + "</td>" +
             "<td>" + esc(sn.status) + "</td></tr>";
         }).join("");
         $("#explorer-snapshot-body").innerHTML = snapRows
-          ? '<table class="mini-table"><thead><tr><th>Snapshot Week</th><th>Month</th><th class="num">Rows</th><th>Uploaded At</th><th>File</th><th>Status</th></tr></thead><tbody>' + snapRows + "</tbody></table>"
+          ? '<table class="mini-table"><thead><tr><th>Weeks</th><th>Months</th><th class="num">Rows in Period</th><th>Uploaded At</th><th>File</th><th>Status</th></tr></thead><tbody>' + snapRows + "</tbody></table>"
           : '<div class="empty">No upload records.</div>';
       })
       .catch(function (e) {
@@ -2491,6 +2533,11 @@
 
     var explorerApplyBtn = $("#explorer-apply-btn");
     if (explorerApplyBtn) explorerApplyBtn.addEventListener("click", function () { loadRawExplorer(true); });
+    var explorerPeriodType = $("#explorer-period-type");
+    if (explorerPeriodType) explorerPeriodType.addEventListener("change", function () {
+      updateExplorerPeriodOptions({}, explorerPeriodType.value || "weekly", "");
+      loadRawExplorer(true);
+    });
 
     var us = $("#user-search"), ub = $("#user-search-btn");
     function doUserSearch() { loadUser((us.value || "").trim()); }
