@@ -3589,10 +3589,17 @@ def backend_segment_engine_uim_comparison_export():
 
 @admin_bp.get("/api/admin/dashboard/backend-segment-engine/identity-match-audit")
 def backend_segment_engine_identity_match_audit():
-    """Identity-match audit: how many marketing accounts resolved to a users doc.
+    """Identity-match audit comparing two resolution strategies for a snapshot_week.
 
-    Returns total / matched / unmatched counts, match-rate %, and up to 20
-    sample rows for each bucket (matched and unmatched).  Read-only.
+    Method A  (current engine):  marketing_raw_data.account  →  users.username
+              Reads pre-computed backend_segment_snapshots — instant.
+
+    Method B  (proposed):        marketing_raw_data.coupon_code  →
+                                 voucher_claims.voucher_code  →  user_id
+              Queries live from marketing_raw_data + voucher_claims.
+
+    Returns total / matched / unmatched / match_rate_pct for both methods plus
+    up to 20 sample rows each.  Read-only — never writes anything.
     """
     ok, err = require_admin_from_query()
     if not ok:
@@ -3603,41 +3610,134 @@ def backend_segment_engine_identity_match_audit():
     if not snapshot_week:
         return jsonify({"success": False, "message": "snapshot_week is required"}), 400
 
-    col = db["backend_segment_snapshots"]
-    base_filter = {"snapshot_week": snapshot_week}
-    proj = {"_id": 0, "account": 1, "username": 1, "user_id": 1}
+    # ------------------------------------------------------------------ #
+    # Method A — account → username (pre-computed snapshots)              #
+    # ------------------------------------------------------------------ #
+    snaps_col = db["backend_segment_snapshots"]
+    base = {"snapshot_week": snapshot_week}
+    snap_proj = {"_id": 0, "account": 1, "username": 1, "user_id": 1}
 
-    total = col.count_documents(base_filter)
-    matched = col.count_documents({**base_filter, "user_id": {"$ne": None}})
-    unmatched = total - matched
-    match_rate = round(matched / total * 100, 2) if total else 0.0
+    total_snaps = snaps_col.count_documents(base)
+    matched_snaps = snaps_col.count_documents({**base, "user_id": {"$ne": None}})
 
-    sample_matched = list(
-        col.find({**base_filter, "user_id": {"$ne": None}}, proj).limit(20)
-    )
-    sample_unmatched = list(
-        col.find({**base_filter, "user_id": None}, proj).limit(20)
-    )
-
-    def _clean(rows):
-        out = []
-        for r in rows:
-            out.append({
+    def _snap_rows(filt):
+        return [
+            {
                 "account": r.get("account"),
-                "username": r.get("username"),
+                "resolve_field": r.get("username"),
                 "user_id": str(r["user_id"]) if r.get("user_id") is not None else None,
-            })
-        return out
+            }
+            for r in snaps_col.find(filt, snap_proj).limit(20)
+        ]
+
+    method_a = {
+        "description": "account → users.username (current engine join)",
+        "join_from": "marketing_raw_data.account",
+        "join_via": "users.username (collation)",
+        "total": total_snaps,
+        "matched": matched_snaps,
+        "unmatched": total_snaps - matched_snaps,
+        "match_rate_pct": round(matched_snaps / total_snaps * 100, 2) if total_snaps else 0.0,
+        "sample_matched": _snap_rows({**base, "user_id": {"$ne": None}}),
+        "sample_unmatched": _snap_rows({**base, "user_id": None}),
+    }
+
+    # ------------------------------------------------------------------ #
+    # Method B — coupon_code → voucher_claims.voucher_code → user_id     #
+    # ------------------------------------------------------------------ #
+    marketing_col = db["marketing_raw_data"]
+    vc_col = db["voucher_claims"]
+
+    def _get_coupon(doc: dict) -> str | None:
+        """Extract coupon_code from a marketing row, tolerating mixed-case headers."""
+        for key in ("coupon_code", "Coupon_Code", "COUPON_CODE"):
+            v = doc.get(key)
+            if v is not None and str(v).strip():
+                return str(v).strip()
+        for k, v in doc.items():
+            if k.lower().replace(" ", "_") == "coupon_code" and v is not None and str(v).strip():
+                return str(v).strip()
+        return None
+
+    def _get_account(doc: dict) -> str:
+        for key in ("account", "Account", "ACCOUNT"):
+            v = doc.get(key)
+            if v is not None and str(v).strip():
+                return str(v).strip()
+        for k, v in doc.items():
+            if k.lower() == "account" and v is not None and str(v).strip():
+                return str(v).strip()
+        return ""
+
+    marketing_proj = {"_id": 0, "account": 1, "Account": 1, "ACCOUNT": 1,
+                      "coupon_code": 1, "Coupon_Code": 1, "COUPON_CODE": 1}
+    marketing_docs = list(marketing_col.find({"snapshot_week": snapshot_week}, marketing_proj))
+    total_marketing = len(marketing_docs)
+
+    # Batch-lookup voucher_claims by coupon_code
+    all_coupons = [c for c in (_get_coupon(d) for d in marketing_docs) if c]
+    _BATCH = 500
+    coupon_to_user: dict[str, int] = {}
+    for i in range(0, len(all_coupons), _BATCH):
+        batch = all_coupons[i: i + _BATCH]
+        for claim in vc_col.find(
+            {"voucher_code": {"$in": batch}, "user_id": {"$ne": None}},
+            {"_id": 0, "voucher_code": 1, "user_id": 1},
+        ):
+            code = claim.get("voucher_code")
+            uid = claim.get("user_id")
+            if code and uid is not None:
+                coupon_to_user[code] = uid
+
+    b_matched_rows: list[dict] = []
+    b_unmatched_rows: list[dict] = []
+    for doc in marketing_docs:
+        acct = _get_account(doc)
+        coupon = _get_coupon(doc)
+        uid = coupon_to_user.get(coupon) if coupon else None
+        row = {
+            "account": acct,
+            "coupon_code": coupon,
+            "user_id": str(uid) if uid is not None else None,
+        }
+        if uid is not None:
+            b_matched_rows.append(row)
+        else:
+            b_unmatched_rows.append(row)
+
+    rows_with_coupon = sum(1 for d in marketing_docs if _get_coupon(d))
+    b_matched = len(b_matched_rows)
+    b_unmatched = len(b_unmatched_rows)
+
+    method_b = {
+        "description": "coupon_code → voucher_claims.voucher_code → user_id (proposed)",
+        "join_from": "marketing_raw_data.coupon_code",
+        "join_via": "voucher_claims.voucher_code",
+        "total": total_marketing,
+        "rows_with_coupon_code": rows_with_coupon,
+        "rows_without_coupon_code": total_marketing - rows_with_coupon,
+        "matched": b_matched,
+        "unmatched": b_unmatched,
+        "match_rate_pct": round(b_matched / total_marketing * 100, 2) if total_marketing else 0.0,
+        "coupon_match_rate_pct": round(b_matched / rows_with_coupon * 100, 2) if rows_with_coupon else 0.0,
+        "sample_matched": b_matched_rows[:20],
+        "sample_unmatched": b_unmatched_rows[:20],
+    }
+
+    # Recommendation
+    if method_b["match_rate_pct"] > method_a["match_rate_pct"]:
+        recommendation = "coupon_code → voucher_claims.voucher_code — higher match rate; switch engine join to Method B"
+    elif method_a["match_rate_pct"] >= 80:
+        recommendation = "account → users.username — current join is healthy; no change needed"
+    else:
+        recommendation = "both methods show low match rate — investigate data source alignment"
 
     return jsonify({
         "ok": True,
         "snapshot_week": snapshot_week,
-        "total": total,
-        "matched": matched,
-        "unmatched": unmatched,
-        "match_rate_pct": match_rate,
-        "sample_matched": _clean(sample_matched),
-        "sample_unmatched": _clean(sample_unmatched),
+        "method_a": method_a,
+        "method_b": method_b,
+        "recommendation": recommendation,
     })
 
 
