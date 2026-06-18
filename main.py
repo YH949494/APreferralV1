@@ -3254,6 +3254,31 @@ def dashboard_backend_segment_engine():
     )
 
 
+@admin_bp.get("/api/admin/dashboard/backend-segment-engine/takeover-readiness")
+def backend_segment_engine_takeover_readiness():
+    """Phase 7A: read-only backend segment takeover migration report.
+
+    Discovery/planning endpoint only. Does not write to users or snapshots and
+    does not alter segment, voucher allocation, campaign, or reward behavior.
+    """
+    ok, err = require_admin_from_query()
+    if not ok:
+        msg, code = err
+        return jsonify({"success": False, "message": msg}), code
+
+    snapshot_week = request.args.get("snapshot_week") or None
+    cache_key = f"panel:backend_segment_engine:takeover_readiness:{snapshot_week or 'latest'}"
+    return _panel_cached(
+        cache_key,
+        lambda: _panels.build_backend_segment_takeover_readiness_panel(
+            users_col=users_collection,
+            snapshots_col=db["backend_segment_snapshots"],
+            snapshot_week=snapshot_week,
+            now=_utc_now(),
+        ),
+    )
+
+
 import re as _re
 _SNAPSHOT_WEEK_RE = _re.compile(r"^\d{4}-W(?:0[1-9]|[1-4]\d|5[0-3])$")
 
