@@ -776,37 +776,32 @@ def _count_welcome_checkin_days(uid: int, joined_main_at: datetime, eligible_unt
         if joined_main_at <= created_kl <= eligible_until:
             days.add(created_kl.date().isoformat())
 
-    try:
-        cursor = db.xp_events.find(
-            {
-                "user_id": uid,
-                "type": "checkin",
-                "created_at": {"$gte": start_utc, "$lte": end_utc},
-            },
-            {"created_at": 1, "unique_key": 1},
-        )
-        for event in cursor:
-            add_day(event.get("created_at"))
-            if len(days) >= WELCOME_REWARD_CHECKINS_REQUIRED:
-                return len(days)
-    except Exception:
-        _welcome_progress_log("[WELCOME_V2][PROGRESS]", uid, {"checkins_completed": len(days), "checkins_required": WELCOME_REWARD_CHECKINS_REQUIRED}, "xp_events_count_failed")
-
-    try:
-        cursor = db.xp_ledger.find(
-            {
-                "user_id": uid,
-                "source": "checkin",
-                "created_at": {"$gte": start_utc, "$lte": end_utc},
-            },
-            {"created_at": 1, "source_id": 1},
-        )
-        for event in cursor:
-            add_day(event.get("created_at"))
-            if len(days) >= WELCOME_REWARD_CHECKINS_REQUIRED:
-                return len(days)
-    except Exception:
-        _welcome_progress_log("[WELCOME_V2][PROGRESS]", uid, {"checkins_completed": len(days), "checkins_required": WELCOME_REWARD_CHECKINS_REQUIRED}, "xp_ledger_count_failed")
+    checkin_sources = (
+        ("xp_events", db.xp_events, ("type", "source")),
+        ("xp_ledger", db.xp_ledger, ("source", "type")),
+    )
+    for collection_name, collection, fields in checkin_sources:
+        for field in fields:
+            try:
+                cursor = collection.find(
+                    {
+                        "user_id": uid,
+                        field: "checkin",
+                        "created_at": {"$gte": start_utc, "$lte": end_utc},
+                    },
+                    {"created_at": 1, "unique_key": 1, "source_id": 1},
+                )
+                for event in cursor:
+                    add_day(event.get("created_at"))
+                    if len(days) >= WELCOME_REWARD_CHECKINS_REQUIRED:
+                        return len(days)
+            except Exception:
+                _welcome_progress_log(
+                    "[WELCOME_V2][PROGRESS]",
+                    uid,
+                    {"checkins_completed": len(days), "checkins_required": WELCOME_REWARD_CHECKINS_REQUIRED},
+                    f"{collection_name}_{field}_count_failed",
+                )
 
     return len(days)
 
@@ -858,6 +853,85 @@ def get_welcome_reward_progress(uid, now=None) -> dict:
     _welcome_progress_log("[WELCOME_V2][PROGRESS]", uid, progress, reason)
     _welcome_progress_log(tag, uid, progress, reason)
     return progress
+
+
+def _welcome_progress_pct(completed_days: int) -> int:
+    pct_by_days = {0: 0, 1: 33, 2: 67, 3: 100}
+    safe_days = max(0, min(int(completed_days or 0), WELCOME_REWARD_CHECKINS_REQUIRED))
+    return pct_by_days.get(safe_days, 100)
+
+
+def _welcome_claim_drop_id(now_ref: datetime | None = None) -> str | None:
+    ref = _as_aware_utc(now_ref) or now_utc()
+    try:
+        for drop in get_active_drops(ref):
+            if _is_new_joiner_audience(_drop_audience_type(drop)):
+                return str(drop.get("_id") or drop.get("dropId") or "")
+    except Exception:
+        _safe_log("warning", "[WELCOME_PROGRESS_API] claim_drop_lookup_failed")
+    return None
+
+
+def build_welcome_progress_response(user_id: int, *, now: datetime | None = None) -> dict:
+    """Read-only miniapp payload for the Welcome Voucher progress card."""
+    now_ref = _as_aware_kl(now) or now_kl()
+    progress = get_welcome_reward_progress(user_id, now=now_ref)
+    completed_days = max(0, min(int(progress.get("checkins_completed") or 0), WELCOME_REWARD_CHECKINS_REQUIRED))
+    required_days = WELCOME_REWARD_CHECKINS_REQUIRED
+    remaining_days = max(0, required_days - completed_days)
+    eligible_until = progress.get("eligible_until")
+    status = "in_progress"
+    visible = bool(progress.get("eligible") and not progress.get("hide"))
+
+    ticket = _get_welcome_ticket(user_id)
+    ticket_status = str((ticket or {}).get("status") or "").strip().lower()
+    eligibility_doc = _get_welcome_eligibility(user_id) or {}
+    claimed = bool(
+        ticket_status == "claimed"
+        or eligibility_doc.get("claimed")
+        or new_joiner_claims_col.find_one({"uid": user_id}, {"_id": 1})
+    )
+    expired = bool(ticket_status == "expired" or progress.get("expired"))
+
+    if claimed:
+        status = "claimed"
+        visible = False
+        message = "Your Welcome Voucher has already been claimed."
+    elif expired:
+        status = "expired"
+        visible = False
+        message = "Your welcome voucher window has expired."
+    elif not visible:
+        status = "not_eligible"
+        message = "Welcome Voucher is not available for this account."
+    elif progress.get("unlocked"):
+        status = "unlocked"
+        message = "Your Welcome Voucher is ready."
+    else:
+        if remaining_days == 1:
+            message = "1 more day to go."
+        else:
+            message = f"Complete {remaining_days} more check-ins to unlock your voucher."
+
+    payload = {
+        "visible": bool(visible),
+        "status": status,
+        "required_days": required_days,
+        "completed_days": completed_days,
+        "remaining_days": remaining_days,
+        "progress_pct": _welcome_progress_pct(completed_days),
+        "reward_value": "RM5",
+        "eligible_until": eligible_until,
+        "message": message,
+    }
+    if status == "unlocked":
+        payload["claim_drop_id"] = _welcome_claim_drop_id(now_ref)
+    return payload
+
+
+@vouchers_bp.route("/api/welcome-progress/<int:user_id>", methods=["GET"])
+def api_welcome_progress(user_id: int):
+    return _miniapp_no_store_json(build_welcome_progress_response(user_id))
 
 def _get_client_ip(req=None) -> str:
     req = req or request

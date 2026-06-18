@@ -55,6 +55,7 @@ from vouchers import (
     _admin_secret_ok,
     resolve_referral_counts_with_snapshot_fallback,
     welcome_eligibility,
+    build_welcome_progress_response,
 )
 from admin_auth import admin_auth_bp, configure_admin_session
 from referral_rules import calc_referral_progress, REFERRAL_XP_PER_SUCCESS, REFERRAL_BONUS_INTERVAL, REFERRAL_BONUS_XP, build_public_referral_status
@@ -5356,6 +5357,20 @@ def api_checkin_status(user_id):
         "message": "🎉 You can check in now!",
         "next_checkin_time": None,
     })
+
+@app.route("/api/welcome-progress/<int:user_id>", methods=["GET"])
+def welcome_progress_api(user_id):
+    try:
+        payload = build_welcome_progress_response(user_id)
+    except Exception:
+        logger.exception("[WELCOME_PROGRESS_API] failed uid=%s", user_id)
+        payload = {"visible": False, "status": "not_eligible"}
+    resp = jsonify(payload)
+    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    resp.headers["Pragma"] = "no-cache"
+    resp.headers["Expires"] = "0"
+    return resp
+
 
 @app.route("/api/leaderboard/history/weeks", methods=["GET"])
 def get_all_weeks():

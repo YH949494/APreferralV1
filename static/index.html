@@ -348,6 +348,44 @@
       display: grid;
       gap: 4px;
     }
+    .welcome-progress-card {
+      margin-top: 6px;
+      padding: 14px;
+      border: 1px solid var(--border-light);
+      border-radius: var(--radius-md);
+      background: linear-gradient(180deg, rgba(255, 94, 0, 0.12), rgba(255, 94, 0, 0.04));
+      display: grid;
+      gap: 9px;
+    }
+    .welcome-progress-bar {
+      width: 100%;
+      height: 10px;
+      background: rgba(255, 255, 255, 0.14);
+      border-radius: 999px;
+      overflow: hidden;
+    }
+    .welcome-progress-fill {
+      height: 100%;
+      width: 0%;
+      background: linear-gradient(90deg, #ff9b62, var(--ap-orange));
+      transition: width 0.25s ease;
+    }
+    .welcome-progress-meta {
+      font-size: 13px;
+      color: var(--text-muted);
+      display: grid;
+      gap: 4px;
+    }
+    .welcome-progress-title {
+      margin: 0;
+      font-size: 16px;
+      font-weight: 700;
+      color: var(--text-main);
+    }
+    .welcome-progress-message {
+      color: #ffdcca;
+      font-weight: 600;
+    }
     .referral-status-card {
       margin-top: 10px;
       padding: 12px;
@@ -1360,6 +1398,21 @@
       </div>
     </div>
 
+  </div>
+
+  <div class="section" id="welcome-progress-section" style="display: none;">
+    <div class="welcome-progress-card" aria-live="polite">
+      <h3 class="welcome-progress-title" id="welcome-progress-title">🎁 Welcome Voucher Progress</h3>
+      <div class="welcome-progress-bar">
+        <div class="welcome-progress-fill" id="welcome-progress-fill"></div>
+      </div>
+      <div class="welcome-progress-meta">
+        <div id="welcome-progress-count">Progress: 0/3 ✅</div>
+        <div id="welcome-progress-reward">Reward Value: RM5</div>
+        <div id="welcome-progress-message" class="welcome-progress-message"></div>
+      </div>
+      <button id="welcome-progress-claim-btn" type="button" class="btn btn-primary" style="display:none;">Claim Welcome Voucher</button>
+    </div>
   </div>
 
   <!-- 3. Rewards Journey progress guide -->
@@ -2760,6 +2813,82 @@
       }
     }
 
+    function hideWelcomeProgress() {
+      const section = document.getElementById("welcome-progress-section");
+      if (section) section.style.display = "none";
+    }
+
+    function renderWelcomeProgress(data = {}) {
+      const section = document.getElementById("welcome-progress-section");
+      const titleEl = document.getElementById("welcome-progress-title");
+      const fillEl = document.getElementById("welcome-progress-fill");
+      const countEl = document.getElementById("welcome-progress-count");
+      const rewardEl = document.getElementById("welcome-progress-reward");
+      const messageEl = document.getElementById("welcome-progress-message");
+      const claimBtn = document.getElementById("welcome-progress-claim-btn");
+      if (!section || !titleEl || !fillEl || !countEl || !rewardEl || !messageEl || !claimBtn) return;
+
+      if (!data?.visible) {
+        hideWelcomeProgress();
+        return;
+      }
+
+      const required = Math.max(1, safeInt(data.required_days, 3));
+      const completed = Math.max(0, Math.min(required, safeInt(data.completed_days, 0)));
+      const progressPct = Math.max(0, Math.min(100, Number(data.progress_pct || 0)));
+      const status = String(data.status || "in_progress");
+
+      section.style.display = "block";
+      fillEl.style.width = `${progressPct}%`;
+      rewardEl.textContent = `Reward Value: ${data.reward_value || "RM5"}`;
+      claimBtn.style.display = "none";
+      claimBtn.removeAttribute("data-dropid");
+      claimBtn.removeAttribute("data-claim");
+
+      if (status === "unlocked") {
+        titleEl.textContent = "🎉 Voucher Unlocked";
+        countEl.textContent = "Your Welcome Voucher is ready.";
+        messageEl.textContent = "";
+        const claimDropId = data.claim_drop_id || data.drop_id || "";
+        if (claimDropId) {
+          claimBtn.dataset.dropid = claimDropId;
+          claimBtn.removeAttribute("disabled");
+        } else {
+          claimBtn.setAttribute("disabled", "disabled");
+        }
+        claimBtn.textContent = "Claim Welcome Voucher";
+        claimBtn.style.display = "inline-flex";
+        return;
+      }
+
+      titleEl.textContent = "🎁 Welcome Voucher Progress";
+      countEl.textContent = `Progress: ${completed}/${required} ✅`;
+      if (completed === 2 && required === 3) {
+        messageEl.textContent = "1 more day to go.";
+      } else {
+        const remaining = Math.max(0, safeInt(data.remaining_days, required - completed));
+        messageEl.textContent = data.message || `Complete ${remaining} more check-ins to unlock your voucher.`;
+      }
+    }
+
+    async function loadWelcomeProgress() {
+      if (!userId || !hasRegionSelected()) {
+        hideWelcomeProgress();
+        return;
+      }
+      try {
+        const res = await fetch(`${API_BASE}/api/welcome-progress/${userId}`, { cache: "no-store" });
+        if (!res.ok) {
+          hideWelcomeProgress();
+          return;
+        }
+        const data = await res.json();
+        renderWelcomeProgress(data || {});
+      } catch (_) {
+        hideWelcomeProgress();
+      }
+    }
+
     function applyRegionGate(regionValue = null) {
       const region = regionValue !== null ? regionValue : getStoredRegion();
       const hasRegion = !!(region && String(region).trim());
@@ -2883,6 +3012,7 @@
             referralSection.scrollIntoView({ behavior: "smooth", block: "start" });
           }
           showXpToast(data.total_xp || data.base_xp || 20, data.streak || 1, data.streak_label || "");
+          loadWelcomeProgress();
           loadLeaderboard();
         }
 
@@ -4352,6 +4482,7 @@ Active players win more.`;
           if (payload?.code === "welcome_hidden" || payload?.hide === true || payload?.progress?.hide === true) {
             clearClaimError();
             shouldRestoreBtn = false;
+            await loadWelcomeProgress();
             await loadVouchers();
             return;
           }
@@ -4433,8 +4564,9 @@ Active players win more.`;
           if (out?.claim_guide?.type === "welcome_voucher") {
             showWelcomeVoucherGuidePopup(out.claim_guide);
           }
+          await loadWelcomeProgress();
         }
-        
+
       } catch (err) {
         console.error("Claim request failed", err);
         renderClaimError(claimErrorToUi({}, null));
@@ -5324,6 +5456,7 @@ ${referral}`;
           regionMsg = `✅ Region locked: ${data.region}`;
           setStoredRegion(data.region || "");
           applyRegionGate(data.region || "");
+          loadWelcomeProgress();
           loadVouchers();
         } else {
           setStoredRegion("");
@@ -5344,6 +5477,7 @@ ${referral}`;
                 if (lockData?.success) {
                   setStoredRegion(lockData.region || guessedRegion);
                   applyRegionGate(lockData.region || guessedRegion);
+                  loadWelcomeProgress();
                   loadVouchers();
                   return;
                 }
@@ -5384,6 +5518,7 @@ ${referral}`;
           regionMsg = `✅ Region locked: ${data.region}`;
           setStoredRegion(data.region || region);
           applyRegionGate(data.region || region);
+          loadWelcomeProgress();
           loadVouchers();
           tgAlert("Region saved and locked!");
         } else {
@@ -5721,6 +5856,7 @@ ${referral}`;
       handleAdminAndVoucher();
       loadIdentityCard();
       await loadCheckinStatus();
+      loadWelcomeProgress();
       loadVouchers();
       await loadDailyGame();
 
