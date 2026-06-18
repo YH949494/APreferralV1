@@ -369,5 +369,103 @@ class UploadHistoryTests(unittest.TestCase):
         self.assertEqual(history[1]["upload_batch_id"], "a")
 
 
+class HeaderNormalisationTests(unittest.TestCase):
+    """Spaced, hyphenated, and mixed-case redeem-time headers must all be detected."""
+
+    def _run(self, header_name: str, date_value: str = "2024-03-18 10:00:00"):
+        """Upload a single row with the given header name for the redeem time column."""
+        headers = ["campaign_id", "campaign_name", "account", "coupon_code", header_name]
+        content = _csv_bytes(
+            [{"campaign_id": "c1", "campaign_name": "Camp", "account": "u1",
+              "coupon_code": "X1", header_name: date_value}],
+            headers=headers,
+        )
+        marketing_col = FakeMarketingCollection()
+        batches_col = FakeBatchesCollection()
+        summary = mu.ingest_upload(
+            content=content, file_name="test.csv", uploaded_by="admin",
+            now=NOW, marketing_col=marketing_col, batches_col=batches_col,
+        )
+        return summary, marketing_col
+
+    def test_spaced_header_coupon_redeem_time(self):
+        """'coupon redeem time' (spaces) must be treated as coupon_redeem_time."""
+        summary, marketing_col = self._run("coupon redeem time")
+        self.assertTrue(summary["ok"])
+        self.assertEqual(summary["period_source"], "coupon_redeem_time")
+        self.assertEqual(summary["rows_by_snapshot_month"], {"2024-03": 1})
+        self.assertEqual(summary["detected_redeem_time_column"], "coupon_redeem_time")
+        self.assertIsNone(summary["redeem_time_column_warning"])
+        self.assertEqual(marketing_col.docs[0]["period_source"], "coupon_redeem_time")
+
+    def test_title_case_header(self):
+        """'Coupon Redeem Time' (title case) must be detected."""
+        summary, _ = self._run("Coupon Redeem Time")
+        self.assertEqual(summary["period_source"], "coupon_redeem_time")
+        self.assertEqual(summary["detected_redeem_time_column"], "coupon_redeem_time")
+
+    def test_hyphenated_header(self):
+        """'coupon-redeem-time' (hyphens) must be detected."""
+        summary, _ = self._run("coupon-redeem-time")
+        self.assertEqual(summary["period_source"], "coupon_redeem_time")
+        self.assertEqual(summary["detected_redeem_time_column"], "coupon_redeem_time")
+
+    def test_underscored_header_still_works(self):
+        """Original 'coupon_redeem_time' (underscores) must still work."""
+        summary, _ = self._run("coupon_redeem_time")
+        self.assertEqual(summary["period_source"], "coupon_redeem_time")
+        self.assertEqual(summary["detected_redeem_time_column"], "coupon_redeem_time")
+
+    def test_march_april_may_june_spaced_header(self):
+        """Full historical dataset with 'coupon redeem time' header must produce
+        separate snapshot_month values for March, April, May, June."""
+        headers = ["campaign_id", "campaign_name", "account", "coupon_code", "coupon redeem time"]
+        rows = [
+            {"campaign_id": "c1", "campaign_name": "C", "account": f"u{i}",
+             "coupon_code": f"X{i}", "coupon redeem time": date}
+            for i, date in enumerate([
+                "2024-03-05 09:00:00",
+                "2024-04-12 10:00:00",
+                "2024-05-20 11:00:00",
+                "2024-06-03 12:00:00",
+            ])
+        ]
+        content = _csv_bytes(rows, headers=headers)
+        marketing_col = FakeMarketingCollection()
+        batches_col = FakeBatchesCollection()
+        summary = mu.ingest_upload(
+            content=content, file_name="historical.csv", uploaded_by="admin",
+            now=NOW, marketing_col=marketing_col, batches_col=batches_col,
+        )
+        self.assertTrue(summary["ok"])
+        self.assertEqual(summary["period_source"], "coupon_redeem_time")
+        months = summary["rows_by_snapshot_month"]
+        self.assertIn("2024-03", months)
+        self.assertIn("2024-04", months)
+        self.assertIn("2024-05", months)
+        self.assertIn("2024-06", months)
+        # Must have multiple distinct weeks — not all in one week
+        self.assertGreater(len(summary["rows_by_snapshot_week"]), 1)
+        self.assertIsNone(summary["redeem_time_column_warning"])
+        self.assertEqual(summary["detected_redeem_time_column"], "coupon_redeem_time")
+
+    def test_no_redeem_time_column_shows_warning(self):
+        """When no redeem time column is present, warning must be set."""
+        content = _csv_bytes([
+            {"campaign_id": "c1", "campaign_name": "C", "account": "u1", "coupon_code": "X1"},
+        ])
+        marketing_col = FakeMarketingCollection()
+        batches_col = FakeBatchesCollection()
+        summary = mu.ingest_upload(
+            content=content, file_name="no_redeem.csv", uploaded_by="admin",
+            now=NOW, marketing_col=marketing_col, batches_col=batches_col,
+        )
+        self.assertTrue(summary["ok"])
+        self.assertIsNone(summary["detected_redeem_time_column"])
+        self.assertIsNotNone(summary["redeem_time_column_warning"])
+        self.assertIn("upload_time fallback", summary["redeem_time_column_warning"])
+        self.assertEqual(summary["period_source"], "upload_time")
+
+
 if __name__ == "__main__":
     unittest.main()
