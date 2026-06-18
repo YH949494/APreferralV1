@@ -932,6 +932,17 @@ def build_welcome_progress_response(user_id: int, *, now: datetime | None = None
         else:
             message = f"Complete {remaining_days} more check-ins to unlock your voucher."
 
+    claim_drop_id = None
+    if status == "unlocked":
+        claim_drop_id = _welcome_claim_drop_id(now_ref, uid=user_id)
+        if not claim_drop_id:
+            _safe_log(
+                "warning",
+                f"[WELCOME_PROGRESS][NO_CLAIM_DROP] uid={user_id} completed_days={completed_days}",
+            )
+            status = "unlocked_pending"
+            message = "Check-ins completed. Claim slot is not available yet. Please check again later."
+
     payload = {
         "visible": bool(visible),
         "status": status,
@@ -939,12 +950,12 @@ def build_welcome_progress_response(user_id: int, *, now: datetime | None = None
         "completed_days": completed_days,
         "remaining_days": remaining_days,
         "progress_pct": _welcome_progress_pct(completed_days),
-        "reward_value": "RM5",
+        "reward_value": "$1",
         "eligible_until": eligible_until,
         "message": message,
     }
-    if status == "unlocked":
-        payload["claim_drop_id"] = _welcome_claim_drop_id(now_ref, uid=user_id)
+    if claim_drop_id:
+        payload["claim_drop_id"] = claim_drop_id
     return payload
 
 
