@@ -80,7 +80,21 @@ _USER_PROJECTION = {
 
 # Segment rule thresholds.
 HIGH_VALUE_AFTER_BET_MULTIPLE = 8.0
-VOUCHER_HUNTER_CLAIM_THRESHOLD = 3
+
+# VH v2 thresholds (Phase 6B — deployed 2026-06).
+# A user is Voucher Hunter when ALL of:
+#   claim_count >= VH_V2_CLAIM_THRESHOLD
+#   after_total_bet_amount < VH_V2_AFTER_BET_MAX
+#   referral_count < VH_V2_REFERRAL_MAX
+# Plus protection rules applied in classify_segment():
+#   withdraw_amount > 0  →  not VH (falls to high/low value)
+#   after_total_bet >= 1000  →  not VH (handled implicitly by < 100 check)
+VH_V2_CLAIM_THRESHOLD: int   = 10
+VH_V2_AFTER_BET_MAX: float   = 100.0
+VH_V2_REFERRAL_MAX: int      = 20
+
+# Legacy constant kept for backward-compat references in tests/tooling.
+VOUCHER_HUNTER_CLAIM_THRESHOLD = VH_V2_CLAIM_THRESHOLD
 
 # "Active Community Player" is explicitly provisional per the task spec —
 # configurable via env vars, always stored with confidence="low".
@@ -208,6 +222,15 @@ def classify_segment(metrics: dict, *, now: datetime | None = None) -> dict:
       - is_new_player: 0/1/None — used only for player_age_type, not segment
       - claim_count, referral_count, checkin_count, xp: int (bot DB)
 
+    Priority order (Phase 6B VH v2):
+      high_value > low_value > voucher_hunter > normal_actual > ghost
+      > active_community_player > unclassified
+
+    VH v2 rule (Phase 6B): claim_count >= 10 AND after_bet < 100 AND
+    referral_count < 20. Withdraw > 0 triggers high/low value first so the
+    withdrawal protection is implicit. after_bet >= 1000 fails the < 100
+    check so the high-bet protection is also implicit.
+
     Ghost rule (Phase 3): after_total_bet == 0 AND referral_count == 0 AND
     checkin_count == 0  (NO last_active_at check).
 
@@ -234,6 +257,8 @@ def classify_segment(metrics: dict, *, now: datetime | None = None) -> dict:
     marketing_available = after_total_bet is not None and withdraw is not None
 
     if marketing_available:
+        # 1. High Value / 2. Low Value — withdrawal users always land here first.
+        #    Implicit withdrawal protection for VH: withdraw > 0 never reaches VH block.
         if withdraw > 0:
             ratio = after_total_bet / withdraw
             if ratio >= HIGH_VALUE_AFTER_BET_MULTIPLE:
@@ -249,23 +274,43 @@ def classify_segment(metrics: dict, *, now: datetime | None = None) -> dict:
                 "confidence": "high",
                 "source_fields_used": ["after_total_bet_amount", "withdraw_amount"],
             }
+
+        # withdraw == 0 from here.
+
+        # 3. Voucher Hunter v2 (Phase 6B) — evaluated before normal_actual so
+        #    low-bet claimers are captured even when after_bet > 0.
+        #    after_bet < 100 implicitly handles the high-bet protection
+        #    (after_bet >= 1000 fails this check and falls to normal_actual).
+        if (
+            claim_count >= VH_V2_CLAIM_THRESHOLD
+            and after_total_bet < VH_V2_AFTER_BET_MAX
+            and referral_count < VH_V2_REFERRAL_MAX
+        ):
+            return {
+                "segment": "voucher_hunter",
+                "segment_reason": (
+                    f"claim_count={claim_count} >= {VH_V2_CLAIM_THRESHOLD}"
+                    f", after_bet={after_total_bet} < {VH_V2_AFTER_BET_MAX}"
+                    f", referral_count={referral_count} < {VH_V2_REFERRAL_MAX}"
+                ),
+                "confidence": "high",
+                "source_fields_used": [
+                    "after_total_bet_amount",
+                    "claim_count",
+                    "referral_count",
+                ],
+            }
+
+        # 5. Normal Actual — played (withdraw == 0, after_bet > 0, didn't qualify VH).
         if after_total_bet > 0:
-            # withdraw == 0, after_total_bet > 0: played but didn't withdraw
             return {
                 "segment": "normal_actual",
                 "segment_reason": "has play activity",
                 "confidence": "high",
                 "source_fields_used": ["after_total_bet_amount", "withdraw_amount"],
             }
-        # after_total_bet == 0 and withdraw == 0.
-        if claim_count >= VOUCHER_HUNTER_CLAIM_THRESHOLD:
-            return {
-                "segment": "voucher_hunter",
-                "segment_reason": "repeat claims with no play",
-                "confidence": "high",
-                "source_fields_used": ["after_total_bet_amount", "claim_count"],
-            }
-        # Ghost rule (Phase 3): no last_active_at check
+
+        # 6. Ghost — after_bet == 0, withdraw == 0, not VH, no community signals.
         if referral_count == 0 and checkin_count == 0:
             return {
                 "segment": "ghost",
@@ -278,7 +323,8 @@ def classify_segment(metrics: dict, *, now: datetime | None = None) -> dict:
                 ],
             }
 
-    # Fall through to lower-confidence attribute-based classification.
+    # 4. Active Community — attribute-based fallthrough (no marketing data or
+    #    has community activity but no qualifying play/claim signal above).
     if xp >= ACTIVE_COMMUNITY_XP_THRESHOLD or checkin_count >= ACTIVE_COMMUNITY_CHECKIN_THRESHOLD:
         return {
             "segment": "active_community_player",
@@ -288,6 +334,7 @@ def classify_segment(metrics: dict, *, now: datetime | None = None) -> dict:
             "source_fields_used": ["xp", "checkin_count"],
         }
 
+    # 7. Unclassified.
     return {
         "segment": "unclassified",
         "segment_reason": "missing marketing data: after_total_bet_amount/withdraw_amount"
