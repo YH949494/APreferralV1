@@ -3621,6 +3621,58 @@ def backend_segment_engine_voucher_hunter_mismatch_audit():
     ))
 
 
+@admin_bp.get("/api/admin/dashboard/backend-segment-engine/voucher-hunter-rule-simulator")
+def backend_segment_engine_voucher_hunter_rule_simulator():
+    """Phase 6A: read-only simulation of a refined voucher_hunter rule.
+
+    GET ?snapshot_week=YYYY-Www
+        &claim_threshold=10&after_bet_threshold=100&referral_threshold=20
+        &withdrawal_protection=true&high_bet_protection=true
+
+    Simulates rule in memory only. Never writes, never modifies segments.
+    """
+    ok, err = require_admin_from_query()
+    if not ok:
+        msg, code = err
+        return jsonify({"ok": False, "error": msg}), code
+
+    snapshot_week = request.args.get("snapshot_week", "").strip()
+    if not snapshot_week:
+        return jsonify({"ok": False, "error": "snapshot_week is required"}), 400
+    if not _SNAPSHOT_WEEK_RE.match(snapshot_week):
+        return jsonify({"ok": False, "error": f"Invalid snapshot_week '{snapshot_week}'"}), 400
+
+    def _int(key, default):
+        try:
+            return int(request.args.get(key, default))
+        except (TypeError, ValueError):
+            return default
+
+    def _float(key, default):
+        try:
+            return float(request.args.get(key, default))
+        except (TypeError, ValueError):
+            return default
+
+    def _bool(key, default):
+        v = request.args.get(key, "").lower()
+        if v in ("true", "1", "yes"):
+            return True
+        if v in ("false", "0", "no"):
+            return False
+        return default
+
+    return jsonify(_panels.build_voucher_hunter_rule_simulator(
+        snapshots_col=db["backend_segment_snapshots"],
+        snapshot_week=snapshot_week,
+        claim_threshold=_int("claim_threshold", 10),
+        after_bet_threshold=_float("after_bet_threshold", 100.0),
+        referral_threshold=_int("referral_threshold", 20),
+        withdrawal_protection=_bool("withdrawal_protection", True),
+        high_bet_protection=_bool("high_bet_protection", True),
+    ))
+
+
 @admin_bp.get("/api/admin/dashboard/backend-segment-engine/voucher-hunter-false-positive-analysis")
 def backend_segment_engine_voucher_hunter_false_positive_analysis():
     """Phase 5E-FP: false-positive analysis for uim_segment=voucher_hunter.

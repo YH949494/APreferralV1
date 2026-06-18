@@ -2259,6 +2259,205 @@ def build_unclassified_audit(
 
 
 # ---------------------------------------------------------------------------
+# 4f. Voucher Hunter Rule Simulator (Phase 6A)
+# ---------------------------------------------------------------------------
+
+_VHRS_PROJ = _VHMA_PROJ  # same fields as mismatch audit projection
+
+
+def build_voucher_hunter_rule_simulator(
+    *,
+    snapshots_col,
+    snapshot_week: str,
+    claim_threshold: int = 10,
+    after_bet_threshold: float = 100.0,
+    referral_threshold: int = 20,
+    withdrawal_protection: bool = True,
+    high_bet_protection: bool = True,
+    top_n: int = 50,
+    now: datetime | None = None,
+) -> dict:
+    """Phase 6A: read-only simulation of a refined voucher_hunter rule.
+
+    Loads all backend_segment_snapshots for the given week, applies the
+    simulated rule in memory, and returns:
+    - simulation summary
+    - match rate impact vs UIM
+    - segment migration table
+    - false positive review (protected users that UIM called VH)
+    - false negative review (newly captured users not currently VH)
+
+    Never writes, never modifies segments or rewards.
+    """
+    now = now or _utc_now()
+
+    docs = list(snapshots_col.find({"snapshot_week": snapshot_week}, _VHRS_PROJ))
+    total = len(docs)
+
+    def _pct(num: int, den: int) -> float | None:
+        return round(num / den * 100, 2) if den else None
+
+    def _sf(v):
+        try:
+            return float(v) if v is not None else 0.0
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _si(v):
+        try:
+            return int(v) if v is not None else 0
+        except (TypeError, ValueError):
+            return 0
+
+    # --- Simulation pass ---
+    current_vh_count = 0
+    simulated_vh_count = 0
+    compared = 0
+    current_matched = 0
+    simulated_matched = 0
+
+    migration: dict[tuple[str, str], int] = {}
+    fp_candidates: list[dict] = []   # sim=False, uim=voucher_hunter
+    fn_candidates: list[dict] = []   # sim=True,  backend != voucher_hunter
+
+    for doc in docs:
+        ms = doc.get("metrics_snapshot") or {}
+        cmp = doc.get("uim_comparison") or {}
+
+        current_seg = doc.get("backend_segment") or "unclassified"
+        uim_seg = cmp.get("uim_segment") or ""
+
+        atb    = _sf(ms.get("after_total_bet_amount"))
+        wd     = _sf(ms.get("withdraw_amount"))
+        claims = _si(ms.get("claim_count"))
+        refs   = _si(ms.get("referral_count"))
+
+        # Current backend VH count
+        if current_seg == "voucher_hunter":
+            current_vh_count += 1
+
+        # Simulate
+        sim_vh = (claims >= claim_threshold) and (atb < after_bet_threshold)
+        if withdrawal_protection and wd > 0:
+            sim_vh = False
+        if high_bet_protection and atb >= 1000:
+            sim_vh = False
+        if refs >= referral_threshold:
+            sim_vh = False
+
+        sim_seg = "voucher_hunter" if sim_vh else current_seg
+        if sim_seg == "voucher_hunter":
+            simulated_vh_count += 1
+
+        # Migration
+        key = (current_seg, sim_seg)
+        migration[key] = migration.get(key, 0) + 1
+
+        # Match rate vs UIM
+        if uim_seg:
+            compared += 1
+            if current_seg == uim_seg:
+                current_matched += 1
+            if sim_seg == uim_seg:
+                simulated_matched += 1
+
+        # False positive candidates: sim=False AND uim=voucher_hunter
+        if not sim_vh and uim_seg == "voucher_hunter":
+            fp_candidates.append({
+                "account":         doc.get("account"),
+                "backend_segment": current_seg,
+                "uim_segment":     uim_seg,
+                "after_bet":       ms.get("after_total_bet_amount"),
+                "withdrawal":      ms.get("withdraw_amount"),
+                "claims":          claims,
+                "referrals":       refs,
+                "checkins":        _si(ms.get("checkin_count")),
+                "player_age_type": doc.get("player_age_type"),
+                "claim_risk_level": doc.get("claim_risk_level"),
+                "confidence":      doc.get("confidence"),
+            })
+
+        # False negative candidates: sim=True AND current backend != voucher_hunter
+        if sim_vh and current_seg != "voucher_hunter":
+            fn_candidates.append({
+                "account":         doc.get("account"),
+                "backend_segment": current_seg,
+                "uim_segment":     uim_seg,
+                "after_bet":       ms.get("after_total_bet_amount"),
+                "withdrawal":      ms.get("withdraw_amount"),
+                "claims":          claims,
+                "referrals":       refs,
+                "checkins":        _si(ms.get("checkin_count")),
+                "player_age_type": doc.get("player_age_type"),
+                "claim_risk_level": doc.get("claim_risk_level"),
+                "confidence":      doc.get("confidence"),
+            })
+
+    # UIM VH count from docs
+    uim_vh_count = sum(
+        1 for doc in docs
+        if (doc.get("uim_comparison") or {}).get("uim_segment") == "voucher_hunter"
+    )
+
+    # Section 1 — Simulation Summary
+    simulation_summary = {
+        "total_users":                      total,
+        "simulated_voucher_hunter_count":   simulated_vh_count,
+        "simulated_voucher_hunter_pct":     _pct(simulated_vh_count, total),
+        "current_backend_voucher_hunter_count": current_vh_count,
+        "current_uim_voucher_hunter_count": uim_vh_count,
+    }
+
+    # Section 2 — Match Rate Simulation
+    cur_rate = _pct(current_matched, compared)
+    sim_rate = _pct(simulated_matched, compared)
+    match_rate_simulation = {
+        "compared_users":      compared,
+        "current_matches":     current_matched,
+        "current_mismatches":  compared - current_matched,
+        "previous_match_rate": cur_rate,
+        "simulated_matches":   simulated_matched,
+        "simulated_mismatches": compared - simulated_matched,
+        "match_rate":          sim_rate,
+        "delta":               round((sim_rate or 0) - (cur_rate or 0), 2) if (cur_rate is not None and sim_rate is not None) else None,
+    }
+
+    # Section 3 — Segment Migration
+    segment_migration = sorted(
+        [{"from_segment": k[0], "to_segment": k[1], "users": v}
+         for k, v in migration.items() if k[0] != k[1]],
+        key=lambda x: -x["users"],
+    )
+
+    # Section 4 — False Positive Review (top_n by after_bet → refs → wd)
+    fp_review = sorted(
+        fp_candidates,
+        key=lambda r: (-(_sf(r["after_bet"])), -r["referrals"], -(_sf(r["withdrawal"]))),
+    )[:top_n]
+
+    # Section 5 — False Negative Review (top_n by claims desc)
+    fn_review = sorted(fn_candidates, key=lambda r: -r["claims"])[:top_n]
+
+    return {
+        "ok": True,
+        "generated_at": now.isoformat(),
+        "snapshot_week": snapshot_week,
+        "params_used": {
+            "claim_threshold":      claim_threshold,
+            "after_bet_threshold":  after_bet_threshold,
+            "referral_threshold":   referral_threshold,
+            "withdrawal_protection": withdrawal_protection,
+            "high_bet_protection":  high_bet_protection,
+        },
+        "simulation_summary":    simulation_summary,
+        "match_rate_simulation": match_rate_simulation,
+        "segment_migration":     segment_migration,
+        "false_positive_review": fp_review,
+        "false_negative_review": fn_review,
+    }
+
+
+# ---------------------------------------------------------------------------
 # 4e. Voucher Hunter False Positive Analysis (Phase 5E-FP)
 # ---------------------------------------------------------------------------
 
