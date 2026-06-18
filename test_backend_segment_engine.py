@@ -80,12 +80,52 @@ class SegmentRuleTests(unittest.TestCase):
         m = _metrics(after_total_bet_amount=5000, withdraw_amount=0, claim_count=15, referral_count=0)
         self.assertEqual(engine.classify_segment(m)["segment"], "normal_actual")
 
-    def test_voucher_hunter_v2_withdrawal_not_vh(self):
-        # Case F: withdraw > 0 → high/low value before VH check; never VH
-        m = _metrics(after_total_bet_amount=0, withdraw_amount=5, claim_count=15, referral_count=0)
+    def test_voucher_hunter_v2_withdrawal_high_value_not_vh(self):
+        # Phase 7D: withdraw > 0 with ratio >= 8x → high_value takes priority over VH.
+        m = _metrics(after_total_bet_amount=800, withdraw_amount=100, claim_count=15, referral_count=0)
         result = engine.classify_segment(m)
-        self.assertNotEqual(result["segment"], "voucher_hunter")
-        self.assertIn(result["segment"], ("high_value", "low_value"))
+        self.assertEqual(result["segment"], "high_value")
+
+    # --- Phase 7D tests ---
+
+    def test_vh_rule_a_extreme_low_bet_per_claim(self):
+        # Rule A: claim_count >= 20 AND after_bet_per_claim < 2 → VH
+        # after_bet=10, claim_count=20 → bet_per_claim=0.5 < 2
+        m = _metrics(after_total_bet_amount=10, withdraw_amount=0, claim_count=20, referral_count=0)
+        result = engine.classify_segment(m)
+        self.assertEqual(result["segment"], "voucher_hunter")
+        self.assertIn("extreme_low_bet_per_claim", result["segment_reason"])
+
+    def test_vh_rule_b_claim_and_withdraw_no_after_bet(self):
+        # Rule B: claim_count >= 10, after_bet == 0, withdraw > 0 → VH
+        m = _metrics(after_total_bet_amount=0, withdraw_amount=50, claim_count=12, referral_count=0)
+        result = engine.classify_segment(m)
+        self.assertEqual(result["segment"], "voucher_hunter")
+        self.assertIn("claim_and_withdraw_no_after_bet", result["segment_reason"])
+
+    def test_vh_rule_c_high_claim_low_play(self):
+        # Rule C: claim_count >= 10, after_bet < 100, bet_per_claim < 10 → VH
+        # after_bet=50, claim_count=10 → bet_per_claim=5.0 < 10
+        m = _metrics(after_total_bet_amount=50, withdraw_amount=0, claim_count=10, referral_count=0)
+        result = engine.classify_segment(m)
+        self.assertEqual(result["segment"], "voucher_hunter")
+        self.assertIn("high_claim_low_play", result["segment_reason"])
+
+    def test_vh_rule_b_high_value_takes_priority(self):
+        # Rule B would match (after_bet==0, withdraw>0, claim_count>=10) but
+        # high_value (ratio >= 8x) is checked first — ratio undefined when after_bet=0
+        # so ratio=0, which is < 8x → VH wins, NOT high_value.
+        # Use after_bet > 0 with ratio >= 8x to confirm high_value wins.
+        m = _metrics(after_total_bet_amount=800, withdraw_amount=100, claim_count=15, referral_count=0)
+        result = engine.classify_segment(m)
+        self.assertEqual(result["segment"], "high_value")
+
+    def test_former_low_value_now_vh_rule_b(self):
+        # Pre-7D: withdraw > 0 and after_bet < 100 → low_value.
+        # Post-7D: claim_count >= 10 AND after_bet == 0 AND withdraw > 0 → VH (Rule B).
+        m = _metrics(after_total_bet_amount=0, withdraw_amount=20, claim_count=10, referral_count=5)
+        result = engine.classify_segment(m)
+        self.assertEqual(result["segment"], "voucher_hunter")
 
     def test_ghost_rule(self):
         m = _metrics(
