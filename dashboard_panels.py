@@ -1801,6 +1801,7 @@ def build_backend_segment_takeover_readiness_panel(
     *,
     users_col=None,
     snapshots_col=None,
+    snapshot_week: str | None = None,
     now: datetime | None = None,
 ) -> dict:
     """Phase 7A: read-only migration report for backend segment takeover."""
@@ -1822,9 +1823,11 @@ def build_backend_segment_takeover_readiness_panel(
 
     if snapshots_col is not None:
         try:
-            week_docs = list(snapshots_col.find({}, {"snapshot_week": 1}))
-            weeks = sorted({d.get("snapshot_week") for d in week_docs if d.get("snapshot_week")})
-            latest_snapshot_week = weeks[-1] if weeks else None
+            if snapshot_week:
+                latest_snapshot_week = snapshot_week
+            else:
+                distinct_weeks = sorted(w for w in snapshots_col.distinct("snapshot_week") if w)
+                latest_snapshot_week = distinct_weeks[-1] if distinct_weeks else None
             query = {"snapshot_week": latest_snapshot_week} if latest_snapshot_week else {}
             docs = list(snapshots_col.find(query, {"uim_comparison": 1, "backend_segment": 1}))
             backend_snapshot_count = len(docs)
@@ -1879,7 +1882,7 @@ def build_backend_segment_takeover_readiness_panel(
                 "Sign off active_community_player and ghost production semantics.",
                 "Set acceptable mismatch thresholds for voucher_hunter before using it in restrictions.",
             ],
-            "estimated_effort_to_remove_uim_entirely": "Medium: about 3-5 focused engineering days after Phase 7A data confirms acceptable mismatch rates; longer if voucher_hunter or active_community require rule changes.",
+            "estimated_effort_to_remove_uim_entirely": "Medium: about 3-5 focused engineering days after Phase 7A data confirms acceptable mismatch rates; longer if voucher_hunter or active_community_player require rule changes.",
         },
         "risk_assessment": {
             "high": [d for d in dependency_inventory if d["risk"] == "high"],
@@ -2532,7 +2535,7 @@ def _vhpi_simulated_segment(current_seg: str, ms: dict) -> str:
       1. high_value  (unchanged)
       2. voucher_hunter  ← NEW: checked before low_value
       3. low_value
-      4. normal_actual / ghost / active_community / unclassified (unchanged)
+      4. normal_actual / ghost / active_community_player / unclassified (unchanged)
 
     Only users that currently have marketing data can move (their current_seg
     is already one of the marketing-resolved segments). Users without

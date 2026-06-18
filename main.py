@@ -3266,12 +3266,14 @@ def backend_segment_engine_takeover_readiness():
         msg, code = err
         return jsonify({"success": False, "message": msg}), code
 
-    cache_key = "panel:backend_segment_engine:takeover_readiness"
+    snapshot_week = request.args.get("snapshot_week") or None
+    cache_key = f"panel:backend_segment_engine:takeover_readiness:{snapshot_week or 'latest'}"
     return _panel_cached(
         cache_key,
         lambda: _panels.build_backend_segment_takeover_readiness_panel(
             users_col=users_collection,
             snapshots_col=db["backend_segment_snapshots"],
+            snapshot_week=snapshot_week,
             now=_utc_now(),
         ),
     )
