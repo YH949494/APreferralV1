@@ -2259,6 +2259,228 @@ def build_unclassified_audit(
 
 
 # ---------------------------------------------------------------------------
+# 4c. Segment Rule Simulator (Phase 5D)
+# ---------------------------------------------------------------------------
+
+_SRS_PROJ = {
+    "_id": 0,
+    "account": 1,
+    "backend_segment": 1,
+    "player_age_type": 1,
+    "metrics_snapshot": 1,
+    "uim_comparison": 1,
+}
+
+_SRS_ALL_SEGMENTS = [
+    "high_value", "low_value", "normal_actual",
+    "voucher_hunter", "ghost", "active_community_player", "unclassified",
+]
+
+_SRS_HIGH_VALUE_RATIO = 8.0
+
+
+def _srs_simulate_segment(ms: dict, params: dict) -> str:
+    """Re-classify a single user using simulated thresholds.
+
+    Mirrors the production priority order:
+      high_value > low_value > normal_actual > voucher_hunter > ghost
+      > active_community_player > unclassified
+
+    Only ghost, voucher_hunter, and active_community_player thresholds are
+    configurable via params. High/low/normal_actual rules are unchanged.
+    """
+    try:
+        atb = float(ms.get("after_total_bet_amount") or 0)
+    except (TypeError, ValueError):
+        atb = 0.0
+    try:
+        wd = float(ms.get("withdraw_amount") or 0)
+    except (TypeError, ValueError):
+        wd = 0.0
+    try:
+        claims = int(ms.get("claim_count") or 0)
+    except (TypeError, ValueError):
+        claims = 0
+    try:
+        refs = int(ms.get("referral_count") or 0)
+    except (TypeError, ValueError):
+        refs = 0
+    try:
+        checkins = int(ms.get("checkin_count") or 0)
+    except (TypeError, ValueError):
+        checkins = 0
+
+    marketing_available = ms.get("after_total_bet_amount") is not None and ms.get("withdraw_amount") is not None
+
+    if marketing_available:
+        if wd > 0:
+            ratio = atb / wd if wd else 0.0
+            return "high_value" if ratio >= _SRS_HIGH_VALUE_RATIO else "low_value"
+        if atb > 0:
+            return "normal_actual"
+        # after_bet == 0, withdraw == 0
+        vh_min_claims = params["vh_min_claims"]
+        vh_max_after_bet = params["vh_max_after_bet"]
+        vh_max_checkins = params["vh_max_checkins"]
+        if claims >= vh_min_claims and atb <= vh_max_after_bet and checkins <= vh_max_checkins:
+            return "voucher_hunter"
+        g_max_checkins = params["ghost_max_checkins"]
+        g_max_refs = params["ghost_max_referrals"]
+        g_max_claims = params["ghost_max_claims"]
+        if refs <= g_max_refs and checkins <= g_max_checkins and claims <= g_max_claims:
+            return "ghost"
+
+    # Attribute-based (no marketing data or fell through ghost/vh)
+    ac_min_checkins = params["ac_min_checkins"]
+    ac_min_refs = params["ac_min_referrals"]
+    if checkins >= ac_min_checkins or refs >= ac_min_refs:
+        return "active_community_player"
+
+    return "unclassified"
+
+
+def build_segment_rule_simulator(
+    *,
+    snapshots_col,
+    snapshot_week: str,
+    # Ghost thresholds
+    ghost_max_checkins: int = 0,
+    ghost_max_referrals: int = 0,
+    ghost_max_claims: int = 0,
+    # Voucher hunter thresholds
+    vh_min_claims: int = 3,
+    vh_max_after_bet: float = 0.0,
+    vh_max_checkins: int = 9999,
+    # Active community thresholds
+    ac_min_checkins: int = 14,
+    ac_min_referrals: int = 1,
+    now: datetime | None = None,
+) -> dict:
+    """Phase 5D: read-only simulation of segment rule changes.
+
+    Loads backend_segment_snapshots for the given week, re-classifies every
+    user using the provided thresholds (in memory only), and returns:
+    - segment distribution comparison (current vs simulated)
+    - match rate impact against UIM segments
+    - top segment movements
+    - production impact summary
+
+    Never writes, never modifies segments or rewards.
+    """
+    now = now or _utc_now()
+
+    docs = list(snapshots_col.find({"snapshot_week": snapshot_week}, _SRS_PROJ))
+    total = len(docs)
+
+    params = {
+        "ghost_max_checkins": ghost_max_checkins,
+        "ghost_max_referrals": ghost_max_referrals,
+        "ghost_max_claims": ghost_max_claims,
+        "vh_min_claims": vh_min_claims,
+        "vh_max_after_bet": vh_max_after_bet,
+        "vh_max_checkins": vh_max_checkins,
+        "ac_min_checkins": ac_min_checkins,
+        "ac_min_referrals": ac_min_referrals,
+    }
+
+    # Accumulators
+    current_dist: dict[str, int] = {s: 0 for s in _SRS_ALL_SEGMENTS}
+    simulated_dist: dict[str, int] = {s: 0 for s in _SRS_ALL_SEGMENTS}
+    movements: dict[tuple[str, str], int] = {}
+
+    current_matched = 0
+    simulated_matched = 0
+    compared = 0
+
+    for doc in docs:
+        current_seg = doc.get("backend_segment") or "unclassified"
+        ms = doc.get("metrics_snapshot") or {}
+        sim_seg = _srs_simulate_segment(ms, params)
+
+        current_dist[current_seg] = current_dist.get(current_seg, 0) + 1
+        simulated_dist[sim_seg] = simulated_dist.get(sim_seg, 0) + 1
+
+        if current_seg != sim_seg:
+            key = (current_seg, sim_seg)
+            movements[key] = movements.get(key, 0) + 1
+
+        cmp = doc.get("uim_comparison") or {}
+        uim_seg = cmp.get("uim_segment")
+        if uim_seg:
+            compared += 1
+            if current_seg == uim_seg:
+                current_matched += 1
+            if sim_seg == uim_seg:
+                simulated_matched += 1
+
+    def _pct(num: int, den: int) -> float | None:
+        return round(num / den * 100, 2) if den else None
+
+    # Output 1: segment distribution comparison
+    distribution = []
+    for seg in _SRS_ALL_SEGMENTS:
+        cur = current_dist.get(seg, 0)
+        sim = simulated_dist.get(seg, 0)
+        diff = sim - cur
+        distribution.append({
+            "segment": seg,
+            "current_users": cur,
+            "simulated_users": sim,
+            "difference": diff,
+            "difference_str": ("+" if diff > 0 else "") + str(diff),
+        })
+
+    # Output 2: match rate impact
+    cur_match_rate = _pct(current_matched, compared)
+    sim_match_rate = _pct(simulated_matched, compared)
+    match_rate_impact = {
+        "compared_users": compared,
+        "current_matched": current_matched,
+        "current_mismatched": compared - current_matched,
+        "current_match_rate": cur_match_rate,
+        "current_mismatch_rate": _pct(compared - current_matched, compared),
+        "simulated_matched": simulated_matched,
+        "simulated_mismatched": compared - simulated_matched,
+        "simulated_match_rate": sim_match_rate,
+        "simulated_mismatch_rate": _pct(compared - simulated_matched, compared),
+        "match_rate_delta": round((sim_match_rate or 0) - (cur_match_rate or 0), 2) if (cur_match_rate is not None and sim_match_rate is not None) else None,
+    }
+
+    # Output 3: top segment movements
+    top_movements = sorted(
+        [
+            {"from_segment": k[0], "to_segment": k[1], "users": v}
+            for k, v in movements.items()
+        ],
+        key=lambda x: -x["users"],
+    )[:20]
+
+    # Output 4: production impact summary
+    production_impact = {
+        "current_unclassified":    current_dist.get("unclassified", 0),
+        "simulated_unclassified":  simulated_dist.get("unclassified", 0),
+        "current_ghost":           current_dist.get("ghost", 0),
+        "simulated_ghost":         simulated_dist.get("ghost", 0),
+        "current_voucher_hunter":  current_dist.get("voucher_hunter", 0),
+        "simulated_voucher_hunter": simulated_dist.get("voucher_hunter", 0),
+        "current_match_rate":      cur_match_rate,
+        "simulated_match_rate":    sim_match_rate,
+    }
+
+    return {
+        "ok": True,
+        "generated_at": now.isoformat(),
+        "snapshot_week": snapshot_week,
+        "total_users": total,
+        "params_used": params,
+        "segment_distribution": distribution,
+        "match_rate_impact": match_rate_impact,
+        "top_movements": top_movements,
+        "production_impact": production_impact,
+    }
+
+
+# ---------------------------------------------------------------------------
 # 5. User drilldown
 # ---------------------------------------------------------------------------
 

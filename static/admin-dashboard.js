@@ -1371,6 +1371,126 @@
       });
   }
 
+  // ---------- Segment Rule Simulator (Phase 5D) ----------
+  function runSegmentRuleSimulator() {
+    var week = ($("#srs-week") || {}).value || "";
+    if (!week) {
+      statePanel("srs-distribution-body", "banner", "Enter a snapshot_week and click Run Simulation.");
+      $("#cards-srs-impact").innerHTML = "";
+      $("#cards-srs-match-rate").innerHTML = "";
+      $("#srs-movements-body").innerHTML = "";
+      return;
+    }
+
+    function numVal(id, def) {
+      var el = $("#" + id);
+      var v = el ? el.value : "";
+      var n = parseFloat(v);
+      return isNaN(n) ? def : n;
+    }
+
+    var params = [
+      "snapshot_week=" + encodeURIComponent(week),
+      "ghost_max_checkins="  + numVal("srs-ghost-checkins", 0),
+      "ghost_max_referrals=" + numVal("srs-ghost-referrals", 0),
+      "ghost_max_claims="    + numVal("srs-ghost-claims", 0),
+      "vh_min_claims="       + numVal("srs-vh-claims", 3),
+      "vh_max_after_bet="    + numVal("srs-vh-after-bet", 0),
+      "vh_max_checkins="     + numVal("srs-vh-checkins", 9999),
+      "ac_min_checkins="     + numVal("srs-ac-checkins", 14),
+      "ac_min_referrals="    + numVal("srs-ac-referrals", 1),
+    ].join("&");
+
+    statePanel("srs-distribution-body", "loading", "Running simulation…");
+    $("#cards-srs-impact").innerHTML = "";
+    $("#cards-srs-match-rate").innerHTML = "";
+    $("#srs-movements-body").innerHTML = "";
+
+    api("/api/admin/dashboard/backend-segment-engine/segment-rule-simulator?" + params)
+      .then(function (d) {
+        var pi = d.production_impact || {};
+        var mr = d.match_rate_impact || {};
+
+        function diffBadge(cur, sim) {
+          var diff = sim - cur;
+          if (diff === 0) return "";
+          var col = diff > 0 ? "var(--green,#4caf88)" : "var(--red,#e05c5c)";
+          return ' <span style="color:' + col + ';font-size:11px;">(' + (diff > 0 ? "+" : "") + diff + ')</span>';
+        }
+
+        function rateDiff(cur, sim) {
+          if (cur == null || sim == null) return "";
+          var diff = Math.round((sim - cur) * 100) / 100;
+          if (diff === 0) return "";
+          var col = diff > 0 ? "var(--green,#4caf88)" : "var(--red,#e05c5c)";
+          return ' <span style="color:' + col + ';font-size:11px;">(' + (diff > 0 ? "+" : "") + diff + '%)</span>';
+        }
+
+        // Production impact cards
+        $("#cards-srs-impact").innerHTML =
+          '<div class="kpi"><div class="label">Current Unclassified</div><div class="value">' + fmt(pi.current_unclassified) + '</div></div>' +
+          '<div class="kpi"><div class="label">Simulated Unclassified</div><div class="value">' + fmt(pi.simulated_unclassified) + diffBadge(pi.current_unclassified, pi.simulated_unclassified) + '</div></div>' +
+          '<div class="kpi"><div class="label">Current Ghost</div><div class="value">' + fmt(pi.current_ghost) + '</div></div>' +
+          '<div class="kpi"><div class="label">Simulated Ghost</div><div class="value">' + fmt(pi.simulated_ghost) + diffBadge(pi.current_ghost, pi.simulated_ghost) + '</div></div>' +
+          '<div class="kpi"><div class="label">Current Voucher Hunter</div><div class="value">' + fmt(pi.current_voucher_hunter) + '</div></div>' +
+          '<div class="kpi"><div class="label">Simulated Voucher Hunter</div><div class="value">' + fmt(pi.simulated_voucher_hunter) + diffBadge(pi.current_voucher_hunter, pi.simulated_voucher_hunter) + '</div></div>';
+
+        // Match rate cards
+        $("#cards-srs-match-rate").innerHTML =
+          '<div class="kpi"><div class="label">Current Match Rate</div><div class="value">' + (pi.current_match_rate != null ? pi.current_match_rate + "%" : "—") + '</div></div>' +
+          '<div class="kpi"><div class="label">Simulated Match Rate</div><div class="value">' + (pi.simulated_match_rate != null ? pi.simulated_match_rate + "%" : "—") + rateDiff(pi.current_match_rate, pi.simulated_match_rate) + '</div></div>' +
+          '<div class="kpi"><div class="label">Current Mismatch Rate</div><div class="value">' + (mr.current_mismatch_rate != null ? mr.current_mismatch_rate + "%" : "—") + '</div></div>' +
+          '<div class="kpi"><div class="label">Simulated Mismatch Rate</div><div class="value">' + (mr.simulated_mismatch_rate != null ? mr.simulated_mismatch_rate + "%" : "—") + rateDiff(mr.current_mismatch_rate, mr.simulated_mismatch_rate) + '</div></div>' +
+          '<div class="kpi"><div class="label">Compared Users</div><div class="value">' + fmt(mr.compared_users) + '</div></div>' +
+          '<div class="kpi"><div class="label">Match Rate Δ</div><div class="value">' + (mr.match_rate_delta != null ? (mr.match_rate_delta > 0 ? "+" : "") + mr.match_rate_delta + "%" : "—") + '</div></div>';
+
+        // Distribution table
+        var dist = d.segment_distribution || [];
+        if (dist.length) {
+          var distRows = dist.map(function (r) {
+            var diff = r.difference || 0;
+            var diffCol = diff > 0 ? "var(--green,#4caf88)" : diff < 0 ? "var(--red,#e05c5c)" : "";
+            return "<tr>" +
+              "<td><b>" + esc(r.segment) + "</b></td>" +
+              '<td class="num">' + fmt(r.current_users) + "</td>" +
+              '<td class="num">' + fmt(r.simulated_users) + "</td>" +
+              '<td class="num" style="color:' + diffCol + '">' + esc(r.difference_str) + "</td>" +
+              "</tr>";
+          }).join("");
+          $("#srs-distribution-body").innerHTML =
+            '<div style="overflow-x:auto"><table class="mini-table">' +
+            '<thead><tr><th>Segment</th><th class="num">Current</th><th class="num">Simulated</th><th class="num">Difference</th></tr></thead>' +
+            "<tbody>" + distRows + "</tbody></table></div>";
+        } else {
+          $("#srs-distribution-body").innerHTML = '<div class="empty">No data.</div>';
+        }
+
+        // Movements table
+        var moves = d.top_movements || [];
+        if (moves.length) {
+          var moveRows = moves.map(function (r) {
+            return "<tr>" +
+              "<td>" + esc(r.from_segment) + "</td>" +
+              "<td>→</td>" +
+              "<td>" + esc(r.to_segment) + "</td>" +
+              '<td class="num"><b>' + fmt(r.users) + "</b></td>" +
+              "</tr>";
+          }).join("");
+          $("#srs-movements-body").innerHTML =
+            '<div style="overflow-x:auto"><table class="mini-table">' +
+            '<thead><tr><th>From Segment</th><th></th><th>To Segment</th><th class="num">Users</th></tr></thead>' +
+            "<tbody>" + moveRows + "</tbody></table></div>";
+        } else {
+          $("#srs-movements-body").innerHTML = '<div class="empty">No segment movements — all users stayed in the same segment.</div>';
+        }
+      })
+      .catch(function (e) {
+        if (e.message !== "unauthorized") {
+          statePanel("srs-distribution-body", "banner error", "Simulation failed: " + esc(e.message));
+        }
+      });
+  }
+
   // ---------- Identity Match Audit ----------
   function _imaRateColor(pct) {
     return pct >= 80 ? "var(--green,#4caf88)" : pct >= 40 ? "var(--yellow,#e0b44a)" : "var(--red,#e05c5c)";
@@ -1699,7 +1819,7 @@
       });
   }
 
-  var VIEWS = ["summary", "funnel", "abuse", "vouchers", "referrals", "affiliate", "reactivation", "audit", "segments", "validation", "backendSegmentEngine", "voucherHunterAudit", "unclassifiedAudit", "uploadPlayerPerformance", "uploadHistory", "rawExplorer", "users", "settings"];
+  var VIEWS = ["summary", "funnel", "abuse", "vouchers", "referrals", "affiliate", "reactivation", "audit", "segments", "validation", "backendSegmentEngine", "voucherHunterAudit", "unclassifiedAudit", "segmentRuleSimulator", "uploadPlayerPerformance", "uploadHistory", "rawExplorer", "users", "settings"];
   function switchView(view) {
     state.view = view;
     $all(".nav-item").forEach(function (b) { b.classList.toggle("active", b.dataset.view === view); });
@@ -1711,6 +1831,7 @@
       backendSegmentEngine: "Data → Backend Segment Engine (Shadow Mode)",
       voucherHunterAudit: "Data → Voucher Hunter Mismatch Audit (Phase 5B)",
       unclassifiedAudit: "Data → Unclassified Audit (Phase 5C)",
+      segmentRuleSimulator: "Data → Segment Rule Simulator (Phase 5D)",
       uploadPlayerPerformance: "Data → Upload Player Performance", uploadHistory: "Data → Upload History",
       rawExplorer: "Data → Raw Data Explorer",
       users: "User Drilldown", settings: "Settings (Read Only)"
@@ -1734,6 +1855,7 @@
     else if (state.view === "backendSegmentEngine") loadBackendSegmentEngine(force);
     else if (state.view === "voucherHunterAudit") loadVoucherHunterMismatchAudit();
     else if (state.view === "unclassifiedAudit") loadUnclassifiedAudit();
+    else if (state.view === "segmentRuleSimulator") { /* loads on Run Simulation click */ }
     else if (state.view === "uploadPlayerPerformance") { /* upload view loads on submit */ }
     else if (state.view === "uploadHistory") loadUploadHistory(force);
     else if (state.view === "rawExplorer") loadRawExplorer(force);
@@ -1857,6 +1979,9 @@
 
     var uncaApplyBtn = $("#unca-apply-btn");
     if (uncaApplyBtn) uncaApplyBtn.addEventListener("click", loadUnclassifiedAudit);
+
+    var srsRunBtn = $("#srs-run-btn");
+    if (srsRunBtn) srsRunBtn.addEventListener("click", runSegmentRuleSimulator);
 
     var imaApplyBtn = $("#ima-apply-btn");
     if (imaApplyBtn) imaApplyBtn.addEventListener("click", loadIdentityMatchAudit);
