@@ -1491,6 +1491,129 @@
       });
   }
 
+  // ---------- Voucher Hunter False Positive Analysis (Phase 5E-FP) ----------
+  function loadVoucherHunterFalsePositive() {
+    var week = ($("#vhfp-week") || {}).value || "";
+    if (!week) {
+      $("#cards-vhfp-summary").innerHTML = "";
+      statePanel("vhfp-atb-body", "banner", "Enter a snapshot_week and click Run Analysis.");
+      ["vhfp-wd-body","vhfp-ref-body","vhfp-chk-body","vhfp-matrix-body","vhfp-fp-body"].forEach(function(id){ $("#"+id).innerHTML=""; });
+      return;
+    }
+    statePanel("vhfp-atb-body", "loading", "Running analysis…");
+    ["cards-vhfp-summary","vhfp-wd-body","vhfp-ref-body","vhfp-chk-body","vhfp-matrix-body","vhfp-fp-body"].forEach(function(id){ $("#"+id).innerHTML=""; });
+
+    api("/api/admin/dashboard/backend-segment-engine/voucher-hunter-false-positive-analysis?snapshot_week=" + encodeURIComponent(week))
+      .then(function (d) {
+        var kpis = d.summary_kpis || {};
+
+        // Summary cards
+        $("#cards-vhfp-summary").innerHTML =
+          dqCard("Total UIM VH", { value: kpis.total_uim_voucher_hunter }) +
+          dqCard("With Any Bet", { value: kpis.users_with_any_bet, note: (kpis.users_with_any_bet_pct != null ? kpis.users_with_any_bet_pct + "%" : "") }) +
+          dqCard("With Any Withdrawal", { value: kpis.users_with_any_withdrawal, note: (kpis.users_with_any_withdrawal_pct != null ? kpis.users_with_any_withdrawal_pct + "%" : "") }) +
+          dqCard("With Any Referral", { value: kpis.users_with_any_referral, note: (kpis.users_with_any_referral_pct != null ? kpis.users_with_any_referral_pct + "%" : "") }) +
+          dqCard("Bet ≥ 1000", { value: kpis.users_bet_gte_1000, note: (kpis.users_bet_gte_1000_pct != null ? kpis.users_bet_gte_1000_pct + "%" : "") });
+
+        // Generic 3-col distribution table renderer
+        function dist3(rows, containerId, cols) {
+          if (!rows || !rows.length) { $("#"+containerId).innerHTML = '<div class="empty">No data.</div>'; return; }
+          var ths = cols.map(function(c){ return "<th" + (c.num ? " class='num'" : "") + ">" + esc(c.label) + "</th>"; }).join("");
+          var trs = rows.map(function(r) {
+            return "<tr>" + cols.map(function(c) {
+              var v = r[c.key];
+              if (c.num) return '<td class="num">' + (v == null ? "—" : (c.pct ? v + "%" : (typeof v === "number" ? v.toFixed(2) : esc(String(v))))) + "</td>";
+              return "<td><b>" + esc(String(v || "")) + "</b></td>";
+            }).join("") + "</tr>";
+          }).join("");
+          $("#"+containerId).innerHTML =
+            '<div style="overflow-x:auto"><table class="mini-table"><thead><tr>' + ths + '</tr></thead><tbody>' + trs + '</tbody></table></div>';
+        }
+
+        // After Bet Distribution
+        dist3(d.after_bet_distribution, "vhfp-atb-body", [
+          {label:"Bucket", key:"bucket"},
+          {label:"Users", key:"users", num:true},
+          {label:"%", key:"percentage", num:true, pct:true},
+          {label:"Avg Claims", key:"avg_claims", num:true},
+          {label:"Avg Referrals", key:"avg_referrals", num:true},
+          {label:"Avg Checkins", key:"avg_checkins", num:true},
+        ]);
+
+        // Withdrawal Distribution
+        dist3(d.withdrawal_distribution, "vhfp-wd-body", [
+          {label:"Bucket", key:"bucket"},
+          {label:"Users", key:"users", num:true},
+          {label:"%", key:"percentage", num:true, pct:true},
+          {label:"Avg After Bet", key:"avg_after_bet", num:true},
+        ]);
+
+        // Referral Distribution
+        dist3(d.referral_distribution, "vhfp-ref-body", [
+          {label:"Bucket", key:"bucket"},
+          {label:"Users", key:"users", num:true},
+          {label:"%", key:"percentage", num:true, pct:true},
+          {label:"Avg After Bet", key:"avg_after_bet", num:true},
+          {label:"Avg Claims", key:"avg_claims", num:true},
+        ]);
+
+        // Check-in Distribution
+        dist3(d.checkin_distribution, "vhfp-chk-body", [
+          {label:"Bucket", key:"bucket"},
+          {label:"Users", key:"users", num:true},
+          {label:"%", key:"percentage", num:true, pct:true},
+          {label:"Avg Claims", key:"avg_claims", num:true},
+        ]);
+
+        // Evidence Matrix
+        dist3(d.evidence_matrix, "vhfp-matrix-body", [
+          {label:"Backend Segment", key:"backend_segment"},
+          {label:"Count", key:"count", num:true},
+          {label:"%", key:"percentage", num:true, pct:true},
+          {label:"Avg After Bet", key:"avg_after_bet", num:true},
+          {label:"Avg Withdrawal", key:"avg_withdrawal", num:true},
+          {label:"Avg Claims", key:"avg_claims", num:true},
+          {label:"Avg Referrals", key:"avg_referrals", num:true},
+          {label:"Avg Checkins", key:"avg_checkins", num:true},
+        ]);
+
+        // False Positive Candidates
+        var fps = d.false_positive_candidates || [];
+        if (fps.length) {
+          function fmtNum(v) { return (v == null || v === "") ? "—" : fmt(v); }
+          var fpRows = fps.map(function(r) {
+            return "<tr>" +
+              "<td>" + esc(r.account || "") + "</td>" +
+              "<td>" + esc(r.backend_segment || "") + "</td>" +
+              "<td>voucher_hunter</td>" +
+              '<td class="num">' + fmtNum(r.after_bet) + "</td>" +
+              '<td class="num">' + fmtNum(r.withdrawal) + "</td>" +
+              '<td class="num">' + fmtNum(r.claims) + "</td>" +
+              '<td class="num">' + fmtNum(r.referrals) + "</td>" +
+              '<td class="num">' + fmtNum(r.checkins) + "</td>" +
+              "<td>" + esc(r.player_age_type || "") + "</td>" +
+              "<td>" + esc(r.claim_risk_level || "") + "</td>" +
+              "<td>" + esc(r.confidence || "") + "</td>" +
+              "</tr>";
+          }).join("");
+          $("#vhfp-fp-body").innerHTML =
+            '<div style="overflow-x:auto"><table class="mini-table">' +
+            '<thead><tr><th>Account</th><th>Backend Seg.</th><th>UIM Seg.</th>' +
+            "<th class='num'>After Bet</th><th class='num'>Withdraw</th>" +
+            "<th class='num'>Claims</th><th class='num'>Referrals</th><th class='num'>Checkins</th>" +
+            "<th>Age Type</th><th>Claim Risk</th><th>Confidence</th></tr></thead>" +
+            "<tbody>" + fpRows + "</tbody></table></div>";
+        } else {
+          $("#vhfp-fp-body").innerHTML = '<div class="empty">No false positive candidates found.</div>';
+        }
+      })
+      .catch(function (e) {
+        if (e.message !== "unauthorized") {
+          statePanel("vhfp-atb-body", "banner error", "Failed: " + esc(e.message));
+        }
+      });
+  }
+
   // ---------- Voucher Hunter Rule Quality Analysis (Phase 5E) ----------
   function loadVoucherHunterQuality() {
     var week = ($("#vhqa-week") || {}).value || "";
@@ -1934,7 +2057,7 @@
       });
   }
 
-  var VIEWS = ["summary", "funnel", "abuse", "vouchers", "referrals", "affiliate", "reactivation", "audit", "segments", "validation", "backendSegmentEngine", "voucherHunterAudit", "unclassifiedAudit", "segmentRuleSimulator", "voucherHunterQuality", "uploadPlayerPerformance", "uploadHistory", "rawExplorer", "users", "settings"];
+  var VIEWS = ["summary", "funnel", "abuse", "vouchers", "referrals", "affiliate", "reactivation", "audit", "segments", "validation", "backendSegmentEngine", "voucherHunterAudit", "unclassifiedAudit", "segmentRuleSimulator", "voucherHunterQuality", "voucherHunterFalsePositive", "uploadPlayerPerformance", "uploadHistory", "rawExplorer", "users", "settings"];
   function switchView(view) {
     state.view = view;
     $all(".nav-item").forEach(function (b) { b.classList.toggle("active", b.dataset.view === view); });
@@ -1948,6 +2071,7 @@
       unclassifiedAudit: "Data → Unclassified Audit (Phase 5C)",
       segmentRuleSimulator: "Data → Segment Rule Simulator (Phase 5D)",
       voucherHunterQuality: "Data → Voucher Hunter Rule Quality Analysis (Phase 5E)",
+      voucherHunterFalsePositive: "Data → Voucher Hunter False Positive Analysis (Phase 5E-FP)",
       uploadPlayerPerformance: "Data → Upload Player Performance", uploadHistory: "Data → Upload History",
       rawExplorer: "Data → Raw Data Explorer",
       users: "User Drilldown", settings: "Settings (Read Only)"
@@ -1973,6 +2097,7 @@
     else if (state.view === "unclassifiedAudit") loadUnclassifiedAudit();
     else if (state.view === "segmentRuleSimulator") { /* loads on Run Simulation click */ }
     else if (state.view === "voucherHunterQuality") { /* loads on Run Analysis click */ }
+    else if (state.view === "voucherHunterFalsePositive") { /* loads on Run Analysis click */ }
     else if (state.view === "uploadPlayerPerformance") { /* upload view loads on submit */ }
     else if (state.view === "uploadHistory") loadUploadHistory(force);
     else if (state.view === "rawExplorer") loadRawExplorer(force);
@@ -2102,6 +2227,9 @@
 
     var vhqaApplyBtn = $("#vhqa-apply-btn");
     if (vhqaApplyBtn) vhqaApplyBtn.addEventListener("click", loadVoucherHunterQuality);
+
+    var vhfpApplyBtn = $("#vhfp-apply-btn");
+    if (vhfpApplyBtn) vhfpApplyBtn.addEventListener("click", loadVoucherHunterFalsePositive);
 
     var imaApplyBtn = $("#ima-apply-btn");
     if (imaApplyBtn) imaApplyBtn.addEventListener("click", loadIdentityMatchAudit);
