@@ -1491,6 +1491,121 @@
       });
   }
 
+  // ---------- Voucher Hunter Rule Quality Analysis (Phase 5E) ----------
+  function loadVoucherHunterQuality() {
+    var week = ($("#vhqa-week") || {}).value || "";
+    if (!week) {
+      $("#cards-vhqa-summary").innerHTML = "";
+      statePanel("vhqa-breakdown-body", "banner", "Enter a snapshot_week and click Run Analysis.");
+      $("#vhqa-threshold-body").innerHTML = "";
+      $("#vhqa-top-claims-body").innerHTML = "";
+      $("#vhqa-top-bet-body").innerHTML = "";
+      $("#vhqa-top-refs-body").innerHTML = "";
+      return;
+    }
+    statePanel("vhqa-breakdown-body", "loading", "Running analysis…");
+    $("#cards-vhqa-summary").innerHTML = "";
+    $("#vhqa-threshold-body").innerHTML = "";
+    $("#vhqa-top-claims-body").innerHTML = "";
+    $("#vhqa-top-bet-body").innerHTML = "";
+    $("#vhqa-top-refs-body").innerHTML = "";
+
+    api("/api/admin/dashboard/backend-segment-engine/voucher-hunter-quality-analysis?snapshot_week=" + encodeURIComponent(week))
+      .then(function (d) {
+        // Summary card
+        $("#cards-vhqa-summary").innerHTML =
+          dqCard("Total UIM Voucher Hunter", { value: d.total_uim_voucher_hunter });
+
+        // Group breakdown table
+        var groups = d.group_breakdown || [];
+        if (groups.length) {
+          var gRows = groups.map(function (r) {
+            function fmtA(v) { return v == null ? "—" : (typeof v === "number" ? v.toFixed(2) : esc(String(v))); }
+            return "<tr>" +
+              "<td><b>" + esc(r.backend_segment) + "</b></td>" +
+              '<td class="num">' + fmt(r.user_count) + "</td>" +
+              '<td class="num">' + (r.pct_of_total != null ? r.pct_of_total + "%" : "—") + "</td>" +
+              '<td class="num">' + fmtA(r.avg_after_bet) + "</td>" +
+              '<td class="num">' + fmtA(r.avg_withdraw) + "</td>" +
+              '<td class="num">' + fmtA(r.avg_claims) + "</td>" +
+              '<td class="num">' + fmtA(r.avg_referrals) + "</td>" +
+              '<td class="num">' + fmtA(r.avg_checkins) + "</td>" +
+              "<td>" + esc(r.dominant_claim_risk || "—") + "</td>" +
+              '<td class="num">' + fmt(r.new_players) + "</td>" +
+              '<td class="num">' + fmt(r.old_players) + "</td>" +
+              "</tr>";
+          }).join("");
+          $("#vhqa-breakdown-body").innerHTML =
+            '<div style="overflow-x:auto"><table class="mini-table">' +
+            '<thead><tr>' +
+            "<th>Backend Segment</th><th class='num'>Users</th><th class='num'>%</th>" +
+            "<th class='num'>Avg After Bet</th><th class='num'>Avg Withdraw</th>" +
+            "<th class='num'>Avg Claims</th><th class='num'>Avg Referrals</th><th class='num'>Avg Checkins</th>" +
+            "<th>Dom. Claim Risk</th><th class='num'>New</th><th class='num'>Old</th>" +
+            "</tr></thead><tbody>" + gRows + "</tbody></table></div>";
+        } else {
+          $("#vhqa-breakdown-body").innerHTML = '<div class="empty">No data.</div>';
+        }
+
+        // Claim threshold breakdown
+        var thresholds = d.claim_threshold_breakdown || [];
+        if (thresholds.length) {
+          var tRows = thresholds.map(function (r) {
+            return "<tr>" +
+              "<td><b>" + esc(r.threshold) + "</b></td>" +
+              '<td class="num">' + fmt(r.count) + "</td>" +
+              '<td class="num">' + (r.percentage != null ? r.percentage + "%" : "—") + "</td>" +
+              "</tr>";
+          }).join("");
+          $("#vhqa-threshold-body").innerHTML =
+            '<div style="overflow-x:auto"><table class="mini-table">' +
+            '<thead><tr><th>Threshold</th><th class="num">Count</th><th class="num">% of UIM VH</th></tr></thead>' +
+            "<tbody>" + tRows + "</tbody></table></div>";
+        } else {
+          $("#vhqa-threshold-body").innerHTML = '<div class="empty">No data.</div>';
+        }
+
+        // Shared sample table renderer
+        function renderTopTable(rows, containerId) {
+          if (!rows || !rows.length) {
+            $("#" + containerId).innerHTML = '<div class="empty">No data.</div>';
+            return;
+          }
+          function fmtNum(v) { return (v == null || v === "") ? "—" : fmt(v); }
+          var tRows = rows.map(function (r) {
+            return "<tr>" +
+              "<td>" + esc(r.account || "") + "</td>" +
+              "<td>" + esc(r.backend_segment || "") + "</td>" +
+              '<td class="num">' + fmtNum(r.claims) + "</td>" +
+              '<td class="num">' + fmtNum(r.after_bet) + "</td>" +
+              '<td class="num">' + fmtNum(r.withdraw) + "</td>" +
+              '<td class="num">' + fmtNum(r.referrals) + "</td>" +
+              '<td class="num">' + fmtNum(r.checkins) + "</td>" +
+              "<td>" + esc(r.age_type || "") + "</td>" +
+              "<td>" + esc(r.claim_risk || "") + "</td>" +
+              "<td>" + esc(r.confidence || "") + "</td>" +
+              "</tr>";
+          }).join("");
+          $("#" + containerId).innerHTML =
+            '<div style="overflow-x:auto"><table class="mini-table">' +
+            '<thead><tr><th>Account</th><th>Backend Seg.</th>' +
+            "<th class='num'>Claims</th><th class='num'>After Bet</th><th class='num'>Withdraw</th>" +
+            "<th class='num'>Referrals</th><th class='num'>Checkins</th>" +
+            "<th>Age Type</th><th>Claim Risk</th><th>Confidence</th></tr></thead>" +
+            "<tbody>" + tRows + "</tbody></table></div>";
+        }
+
+        renderTopTable(d.top_by_claims,    "vhqa-top-claims-body");
+        renderTopTable(d.top_by_after_bet, "vhqa-top-bet-body");
+        renderTopTable(d.top_by_referrals, "vhqa-top-refs-body");
+      })
+      .catch(function (e) {
+        if (e.message !== "unauthorized") {
+          statePanel("vhqa-breakdown-body", "banner error", "Failed: " + esc(e.message));
+        }
+      });
+  }
+
   // ---------- Identity Match Audit ----------
   function _imaRateColor(pct) {
     return pct >= 80 ? "var(--green,#4caf88)" : pct >= 40 ? "var(--yellow,#e0b44a)" : "var(--red,#e05c5c)";
@@ -1819,7 +1934,7 @@
       });
   }
 
-  var VIEWS = ["summary", "funnel", "abuse", "vouchers", "referrals", "affiliate", "reactivation", "audit", "segments", "validation", "backendSegmentEngine", "voucherHunterAudit", "unclassifiedAudit", "segmentRuleSimulator", "uploadPlayerPerformance", "uploadHistory", "rawExplorer", "users", "settings"];
+  var VIEWS = ["summary", "funnel", "abuse", "vouchers", "referrals", "affiliate", "reactivation", "audit", "segments", "validation", "backendSegmentEngine", "voucherHunterAudit", "unclassifiedAudit", "segmentRuleSimulator", "voucherHunterQuality", "uploadPlayerPerformance", "uploadHistory", "rawExplorer", "users", "settings"];
   function switchView(view) {
     state.view = view;
     $all(".nav-item").forEach(function (b) { b.classList.toggle("active", b.dataset.view === view); });
@@ -1832,6 +1947,7 @@
       voucherHunterAudit: "Data → Voucher Hunter Mismatch Audit (Phase 5B)",
       unclassifiedAudit: "Data → Unclassified Audit (Phase 5C)",
       segmentRuleSimulator: "Data → Segment Rule Simulator (Phase 5D)",
+      voucherHunterQuality: "Data → Voucher Hunter Rule Quality Analysis (Phase 5E)",
       uploadPlayerPerformance: "Data → Upload Player Performance", uploadHistory: "Data → Upload History",
       rawExplorer: "Data → Raw Data Explorer",
       users: "User Drilldown", settings: "Settings (Read Only)"
@@ -1856,6 +1972,7 @@
     else if (state.view === "voucherHunterAudit") loadVoucherHunterMismatchAudit();
     else if (state.view === "unclassifiedAudit") loadUnclassifiedAudit();
     else if (state.view === "segmentRuleSimulator") { /* loads on Run Simulation click */ }
+    else if (state.view === "voucherHunterQuality") { /* loads on Run Analysis click */ }
     else if (state.view === "uploadPlayerPerformance") { /* upload view loads on submit */ }
     else if (state.view === "uploadHistory") loadUploadHistory(force);
     else if (state.view === "rawExplorer") loadRawExplorer(force);
@@ -1982,6 +2099,9 @@
 
     var srsRunBtn = $("#srs-run-btn");
     if (srsRunBtn) srsRunBtn.addEventListener("click", runSegmentRuleSimulator);
+
+    var vhqaApplyBtn = $("#vhqa-apply-btn");
+    if (vhqaApplyBtn) vhqaApplyBtn.addEventListener("click", loadVoucherHunterQuality);
 
     var imaApplyBtn = $("#ima-apply-btn");
     if (imaApplyBtn) imaApplyBtn.addEventListener("click", loadIdentityMatchAudit);

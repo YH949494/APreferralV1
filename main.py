@@ -3621,6 +3621,39 @@ def backend_segment_engine_voucher_hunter_mismatch_audit():
     ))
 
 
+@admin_bp.get("/api/admin/dashboard/backend-segment-engine/voucher-hunter-quality-analysis")
+def backend_segment_engine_voucher_hunter_quality_analysis():
+    """Phase 5E: read-only analysis of users where uim_segment=voucher_hunter.
+
+    GET ?snapshot_week=YYYY-Www&top_n=20
+
+    Groups by backend_segment with avg metrics, top-N lists by claims/after_bet/
+    referrals, and claim threshold breakdown to determine UIM over-classification.
+    Never writes, never modifies segments or rewards.
+    """
+    ok, err = require_admin_from_query()
+    if not ok:
+        msg, code = err
+        return jsonify({"ok": False, "error": msg}), code
+
+    snapshot_week = request.args.get("snapshot_week", "").strip()
+    if not snapshot_week:
+        return jsonify({"ok": False, "error": "snapshot_week is required"}), 400
+    if not _SNAPSHOT_WEEK_RE.match(snapshot_week):
+        return jsonify({"ok": False, "error": f"Invalid snapshot_week '{snapshot_week}'"}), 400
+
+    try:
+        top_n = max(1, min(100, int(request.args.get("top_n", 20))))
+    except (TypeError, ValueError):
+        top_n = 20
+
+    return jsonify(_panels.build_voucher_hunter_quality_analysis(
+        snapshots_col=db["backend_segment_snapshots"],
+        snapshot_week=snapshot_week,
+        top_n=top_n,
+    ))
+
+
 @admin_bp.get("/api/admin/dashboard/backend-segment-engine/segment-rule-simulator")
 def backend_segment_engine_segment_rule_simulator():
     """Phase 5D: read-only simulation of segment rule changes.
