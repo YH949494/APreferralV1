@@ -872,5 +872,216 @@ class CouponIdentityResolutionTests(unittest.TestCase):
         self.assertEqual(doc["username"], "tghandle")
 
 
+class PeriodAssignmentTests(unittest.TestCase):
+    """Snapshot period (snapshot_week/month) must come from the row's own fields,
+    not from the admin-provided snapshot_week or engine run time."""
+
+    class _FakeSnapshotsCollection:
+        def __init__(self):
+            self.docs = {}
+
+        def bulk_write(self, ops, ordered=False):
+            for op in ops:
+                filt = getattr(op, "_filter", {})
+                update = getattr(op, "_doc", {})
+                key = (filt.get("account"), filt.get("snapshot_week"))
+                self.docs[key] = update.get("$set", {})
+            return type("R", (), {"modified_count": 0, "upserted_count": len(ops)})()
+
+    class _FakeEmptyCollection:
+        def find(self, filt=None):
+            return []
+
+        def aggregate(self, pipeline):
+            return []
+
+    def _marketing_col(self, docs, admin_week):
+        class _MC:
+            def find(self_, filt=None):
+                filt = filt or {}
+                if filt.get("snapshot_week") == admin_week:
+                    return list(docs)
+                return []
+        return _MC()
+
+    def _run(self, mkt_docs, admin_week, now):
+        snaps = self._FakeSnapshotsCollection()
+        empty = self._FakeEmptyCollection()
+        users = type("UC", (), {"find": lambda self, f=None: []})()
+        summary = engine.run_shadow_segment_engine(
+            users_col=users,
+            voucher_claims_col=empty,
+            marketing_col=self._marketing_col(mkt_docs, admin_week),
+            snapshots_col=snaps,
+            snapshot_week=admin_week,
+            now=now,
+        )
+        return summary, snaps
+
+    def test_march_april_may_june_rows_produce_separate_weeks(self):
+        """Four rows with redeem dates in March, April, May, June must each
+        produce a distinct snapshot_week and snapshot_month, not all land in
+        the admin-provided week."""
+        admin_week = "2026-W25"
+        now = datetime(2026, 6, 16, tzinfo=timezone.utc)
+        mkt_docs = [
+            {
+                "account": "alice",
+                "after_total_bet_amount": 100,
+                "withdraw_amount": 0,
+                "snapshot_week": admin_week,  # admin filter key
+                "snapshot_month": "2026-03",  # row's own period from upload
+                # override snapshot_week on the row to match coupon_redeem_time
+                # (marketing_upload stores this; we simulate it here)
+            },
+            {
+                "account": "bob",
+                "after_total_bet_amount": 200,
+                "withdraw_amount": 50,
+                "snapshot_week": admin_week,
+                "snapshot_month": "2026-04",
+            },
+            {
+                "account": "carol",
+                "after_total_bet_amount": 50,
+                "withdraw_amount": 0,
+                "snapshot_week": admin_week,
+                "snapshot_month": "2026-05",
+            },
+            {
+                "account": "dave",
+                "after_total_bet_amount": 300,
+                "withdraw_amount": 100,
+                "snapshot_week": admin_week,
+                "snapshot_month": "2026-06",
+            },
+        ]
+        summary, snaps = self._run(mkt_docs, admin_week, now)
+
+        self.assertTrue(summary["ok"])
+        months_written = {doc["snapshot_month"] for doc in snaps.docs.values()}
+        self.assertIn("2026-03", months_written)
+        self.assertIn("2026-04", months_written)
+        self.assertIn("2026-05", months_written)
+        self.assertIn("2026-06", months_written)
+
+    def test_row_period_fields_override_admin_week_for_snapshot_key(self):
+        """A row returned by the admin-week DB filter but carrying its own
+        snapshot_week (e.g. '2026-W10' set from coupon_redeem_time at upload)
+        must produce a snapshot keyed to W10 / 2026-03, not to the admin week.
+
+        In real MongoDB, marketing_upload stores snapshot_week=W10 on the row.
+        The engine queries by admin_week as the upload-batch identifier but
+        then reads the row's own period fields for the snapshot key.
+        """
+        admin_week = "2026-W25"
+        row_week = "2026-W10"   # what was set during upload from redeem date
+        now = datetime(2026, 6, 16, tzinfo=timezone.utc)
+
+        class _MC:
+            """Returns row with row_week/row_month when queried for admin_week."""
+            def find(self_, filt=None):
+                filt = filt or {}
+                if filt.get("snapshot_week") == admin_week:
+                    return [{
+                        "account": "alice",
+                        "after_total_bet_amount": 100,
+                        "withdraw_amount": 0,
+                        "snapshot_week": row_week,
+                        "snapshot_month": "2026-03",
+                        "period_source": "coupon_redeem_time",
+                    }]
+                return []
+
+        snaps = self._FakeSnapshotsCollection()
+        empty = self._FakeEmptyCollection()
+        users = type("UC", (), {"find": lambda self, f=None: []})()
+        summary = engine.run_shadow_segment_engine(
+            users_col=users,
+            voucher_claims_col=empty,
+            marketing_col=_MC(),
+            snapshots_col=snaps,
+            snapshot_week=admin_week,
+            now=now,
+        )
+        self.assertTrue(summary["ok"])
+        # Snapshot must be keyed by the row's own week (W10), not admin week (W25).
+        self.assertIn(("alice", row_week), snaps.docs)
+        self.assertNotIn(("alice", admin_week), snaps.docs)
+        doc = snaps.docs[("alice", row_week)]
+        self.assertEqual(doc["snapshot_month"], "2026-03")
+        self.assertEqual(doc["snapshot_period_source"], "coupon_redeem_time")
+
+    def test_row_without_period_fields_uses_manual_fallback(self):
+        """A row with no snapshot_week/month fields falls back to the admin week
+        and is labelled manual_fallback."""
+        admin_week = "2026-W25"
+        now = datetime(2026, 6, 16, tzinfo=timezone.utc)
+
+        class _MC:
+            def find(self_, filt=None):
+                filt = filt or {}
+                if filt.get("snapshot_week") == admin_week:
+                    # Row has no snapshot_month / period_source
+                    return [{"account": "fallback_user", "after_total_bet_amount": 10,
+                             "withdraw_amount": 0, "snapshot_week": admin_week}]
+                return []
+
+        snaps = self._FakeSnapshotsCollection()
+        empty = self._FakeEmptyCollection()
+        users = type("UC", (), {"find": lambda self, f=None: []})()
+        summary = engine.run_shadow_segment_engine(
+            users_col=users,
+            voucher_claims_col=empty,
+            marketing_col=_MC(),
+            snapshots_col=snaps,
+            snapshot_week=admin_week,
+            now=now,
+        )
+        self.assertTrue(summary["ok"])
+        self.assertIn(("fallback_user", admin_week), snaps.docs)
+        doc = snaps.docs[("fallback_user", admin_week)]
+        self.assertEqual(doc["snapshot_period_source"], "manual_fallback")
+        self.assertEqual(summary["manual_fallback_count"], 1)
+
+    def test_dry_run_summary_includes_period_breakdown(self):
+        """Dry-run summary must include records_by_snapshot_week,
+        records_by_snapshot_month, and manual_fallback_count."""
+        admin_week = "2026-W25"
+        now = datetime(2026, 6, 16, tzinfo=timezone.utc)
+        mkt_docs = [
+            {"account": "u1", "after_total_bet_amount": 100, "withdraw_amount": 0,
+             "snapshot_week": admin_week, "snapshot_month": "2026-03",
+             "period_source": "coupon_redeem_time"},
+            {"account": "u2", "after_total_bet_amount": 200, "withdraw_amount": 50,
+             "snapshot_week": admin_week, "snapshot_month": "2026-04",
+             "period_source": "coupon_redeem_time"},
+            {"account": "u3", "after_total_bet_amount": 0, "withdraw_amount": 0,
+             "snapshot_week": admin_week},  # no month → manual_fallback
+        ]
+        snaps = self._FakeSnapshotsCollection()
+        empty = self._FakeEmptyCollection()
+        users = type("UC", (), {"find": lambda self, f=None: []})()
+        summary = engine.run_shadow_segment_engine(
+            users_col=users,
+            voucher_claims_col=empty,
+            marketing_col=self._marketing_col(mkt_docs, admin_week),
+            snapshots_col=snaps,
+            snapshot_week=admin_week,
+            now=now,
+            dry_run=True,
+        )
+        self.assertTrue(summary["ok"])
+        self.assertTrue(summary["dry_run"])
+        self.assertIn("records_by_snapshot_week", summary)
+        self.assertIn("records_by_snapshot_month", summary)
+        self.assertIn("manual_fallback_count", summary)
+        self.assertEqual(summary["manual_fallback_count"], 1)
+        self.assertIn("2026-03", summary["records_by_snapshot_month"])
+        self.assertIn("2026-04", summary["records_by_snapshot_month"])
+        # u3 falls back → counted in admin_week
+        self.assertIn(admin_week, summary["records_by_snapshot_week"])
+
+
 if __name__ == "__main__":
     unittest.main()

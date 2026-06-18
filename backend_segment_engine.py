@@ -456,21 +456,44 @@ def _doc_coupon(doc: dict) -> str | None:
     return None
 
 
-def _marketing_rows_by_account(marketing_col, snapshot_week: str) -> dict[str, dict]:
-    """Return dict[account_lower -> doc] for the given snapshot_week.
+def _marketing_rows_by_account(marketing_col, snapshot_week: str) -> dict[str, list[dict]]:
+    """Return dict[account_lower -> list[doc]] for the given snapshot_week filter.
 
-    Deduplicates by account (first occurrence wins). Lookups are
-    case-insensitive to match whatever casing the CSV upload used.
+    All rows for an account are kept so the engine can write one snapshot per
+    (account, snapshot_week) derived from the row's own period fields.
+    Case-insensitive on account name.
     """
-    rows: dict[str, dict] = {}
+    rows: dict[str, list[dict]] = {}
     if marketing_col is None:
         return rows
     cursor = marketing_col.find({"snapshot_week": snapshot_week})
     for doc in cursor:
         acct = _doc_account(doc).lower()
-        if acct and acct not in rows:
-            rows[acct] = doc
+        if acct:
+            rows.setdefault(acct, []).append(doc)
     return rows
+
+
+def _row_period(row: dict, *, fallback_week: str, fallback_now: datetime) -> tuple[str, str, str]:
+    """Return (snapshot_week, snapshot_month, period_source) for a marketing row.
+
+    Priority:
+      1. Row's own ``snapshot_week`` / ``snapshot_month`` (set during upload from
+         coupon_redeem_time, manual_period, or upload_time — in that order).
+      2. Admin-provided ``fallback_week`` + derived month — labelled "manual_fallback".
+    """
+    row_week = (row.get("snapshot_week") or "").strip()
+    row_month = (row.get("snapshot_month") or "").strip()
+    row_source = (row.get("period_source") or "").strip()
+
+    if row_week and row_month:
+        # Re-map upload-time sourced rows to a more descriptive source label.
+        source = row_source if row_source else "coupon_redeem_time"
+        return row_week, row_month, source
+
+    # Row has no period information — use the admin-provided week as fallback.
+    month = _snapshot_month_key(fallback_now) if not row_month else row_month
+    return fallback_week, month, "manual_fallback"
 
 
 def _build_metrics_for_user(user_doc: dict, claim_count: int, marketing_row: dict | None) -> dict:
@@ -511,6 +534,8 @@ def build_snapshot_doc(
     metrics: dict,
     now: datetime,
     snapshot_week: str,
+    snapshot_month: str | None = None,
+    snapshot_period_source: str = "coupon_redeem_time",
     uim_segment_raw: Any = None,
 ) -> dict:
     """Build one ``backend_segment_snapshots`` document (does not write it)."""
@@ -530,7 +555,8 @@ def build_snapshot_doc(
         "claim_risk_reason": claim_reason,
         "confidence": classification["confidence"],
         "snapshot_week": snapshot_week,
-        "snapshot_month": _snapshot_month_key(now),
+        "snapshot_month": snapshot_month if snapshot_month else _snapshot_month_key(now),
+        "snapshot_period_source": snapshot_period_source,
         "calculated_at": now,
         # Phase 4: raw input metrics stored for dashboard mismatch detail table.
         # Never used for re-classification; shadow mode only.
@@ -567,6 +593,10 @@ def _empty_summary(*, dry_run: bool) -> dict:
         "uim_compared": 0,
         "dry_run": bool(dry_run),
         "error": None,
+        # Period breakdown (new)
+        "records_by_snapshot_week": {},
+        "records_by_snapshot_month": {},
+        "manual_fallback_count": 0,
     }
 
 
@@ -627,10 +657,11 @@ def run_shadow_segment_engine(
         if snapshots_col is None:
             snapshots_col = database.backend_segment_snapshots_col
 
-        # Step 1: Load all marketing rows for the week, keyed by account.
-        marketing_rows = _marketing_rows_by_account(marketing_col, snapshot_week)
+        # Step 1: Load all marketing rows for the admin-specified week, grouped by account.
+        # Each account may have multiple rows (different upload batches or dates).
+        marketing_rows_by_acct = _marketing_rows_by_account(marketing_col, snapshot_week)
 
-        if not marketing_rows:
+        if not marketing_rows_by_acct:
             summary["ok"] = True
             summary["elapsed_seconds"] = (_utc_now() - started_at).total_seconds()
             logger.info(
@@ -638,16 +669,14 @@ def run_shadow_segment_engine(
             )
             return summary
 
-        total_rows = len(marketing_rows)
+        # Flatten to count total source rows.
+        all_mrows: list[dict] = [r for rows in marketing_rows_by_acct.values() for r in rows]
+        total_rows = len(all_mrows)
         summary["total_rows"] = total_rows
         _call_progress(0, total_rows)
 
         # Step 2: Resolve identity via coupon_code → voucher_claims.voucher_code.
-        # Extract all coupon codes present in this week's marketing rows, then
-        # batch-query voucher_claims to get the Telegram user_id for each code.
-        all_coupons: list[str] = [
-            c for c in (_doc_coupon(row) for row in marketing_rows.values()) if c
-        ]
+        all_coupons: list[str] = [c for c in (_doc_coupon(r) for r in all_mrows) if c]
         coupon_to_uid: dict[str, int] = {}
         for batch in _chunks(all_coupons, BATCH_SIZE):
             for claim in voucher_claims_col.find(
@@ -676,44 +705,65 @@ def run_shadow_segment_engine(
         # claim_counts: all historical claims per resolved user_id.
         claim_counts = _claim_counts(voucher_claims_col, resolved_user_ids)
 
-        # Step 4: Build snapshot docs (pure in-memory, no extra DB calls).
+        # Step 4: Build snapshot docs grouped by (account, snapshot_week).
+        # snapshot_week/month come from the row's own period fields (set at upload
+        # time from coupon_redeem_time). The admin-provided snapshot_week is used
+        # only as a fallback when a row has no period fields.
         matched_rows = 0
         unmatched_rows = 0
-        docs: list[dict] = []
-        for acct_lower, mrow in marketing_rows.items():
-            account = _doc_account(mrow) or acct_lower
-            coupon = _doc_coupon(mrow)
-            user_id: int | None = coupon_to_uid.get(coupon) if coupon else None
-            user_doc: dict = users_by_uid.get(user_id) or {} if user_id is not None else {}
+        # Key: (account_lower, row_snapshot_week) → best-metrics doc
+        # We keep the last row per (account, week) — all rows for the same
+        # (account, week) represent the same player in the same period.
+        docs_by_key: dict[tuple[str, str], dict] = {}
 
-            telegram_user_id: int | None = user_id
-            username: str | None = (user_doc.get("username") or "").strip() or None
+        for acct_lower, mrows in marketing_rows_by_acct.items():
+            coupon_matched = False
+            for mrow in mrows:
+                account = _doc_account(mrow) or acct_lower
+                coupon = _doc_coupon(mrow)
+                user_id: int | None = coupon_to_uid.get(coupon) if coupon else None
+                user_doc: dict = users_by_uid.get(user_id) or {} if user_id is not None else {}
 
-            if user_id is not None:
+                telegram_user_id: int | None = user_id
+                username: str | None = (user_doc.get("username") or "").strip() or None
+
+                if user_id is not None:
+                    coupon_matched = True
+
+                row_week, row_month, period_source = _row_period(
+                    mrow, fallback_week=snapshot_week, fallback_now=now
+                )
+
+                claim_count = claim_counts.get(user_id, 0) if user_id is not None else 0
+                metrics = _build_metrics_for_user(user_doc, claim_count, mrow)
+                uim_raw = user_doc.get("for_bot_segment") or user_doc.get("bot_segment")
+
+                doc = build_snapshot_doc(
+                    account=account,
+                    username=username,
+                    user_id=user_id,
+                    telegram_user_id=telegram_user_id,
+                    metrics=metrics,
+                    now=now,
+                    snapshot_week=row_week,
+                    snapshot_month=row_month,
+                    snapshot_period_source=period_source,
+                    uim_segment_raw=uim_raw,
+                )
+                docs_by_key[(acct_lower, row_week)] = doc
+
+            if coupon_matched:
                 matched_rows += 1
             else:
                 unmatched_rows += 1
 
-            claim_count = claim_counts.get(user_id, 0) if user_id is not None else 0
-            metrics = _build_metrics_for_user(user_doc, claim_count, mrow)
-            uim_raw = user_doc.get("for_bot_segment") or user_doc.get("bot_segment")
+        docs = list(docs_by_key.values())
 
-            doc = build_snapshot_doc(
-                account=account,
-                username=username,
-                user_id=user_id,
-                telegram_user_id=telegram_user_id,
-                metrics=metrics,
-                now=now,
-                snapshot_week=snapshot_week,
-                uim_segment_raw=uim_raw,
-            )
-            docs.append(doc)
-
+        total_accounts = len(marketing_rows_by_acct)
         summary["matched_rows"] = matched_rows
         summary["unmatched_rows"] = unmatched_rows
         summary["identity_match_rate"] = (
-            round(matched_rows / total_rows * 100, 2) if total_rows else 0.0
+            round(matched_rows / total_accounts * 100, 2) if total_accounts else 0.0
         )
 
         summary["users_evaluated"] = len(docs)
@@ -729,6 +779,13 @@ def run_shadow_segment_engine(
                     summary["uim_matches"] += 1
                 else:
                     summary["uim_mismatches"] += 1
+            # Period breakdown
+            dw = doc.get("snapshot_week", "unknown")
+            dm = doc.get("snapshot_month", "unknown")
+            summary["records_by_snapshot_week"][dw] = summary["records_by_snapshot_week"].get(dw, 0) + 1
+            summary["records_by_snapshot_month"][dm] = summary["records_by_snapshot_month"].get(dm, 0) + 1
+            if doc.get("snapshot_period_source") == "manual_fallback":
+                summary["manual_fallback_count"] += 1
 
         if dry_run or not docs:
             summary["ok"] = True
