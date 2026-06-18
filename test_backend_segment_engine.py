@@ -559,5 +559,250 @@ class AccountCasingRegressionTests(unittest.TestCase):
         self.assertEqual(summary["segment_distribution"].get("high_value", 0), 4)
 
 
+class DocCouponTests(unittest.TestCase):
+    """_doc_coupon tolerates mixed-case coupon_code headers."""
+
+    def test_lowercase_key(self):
+        self.assertEqual(engine._doc_coupon({"coupon_code": "ABC"}), "ABC")
+
+    def test_title_case_key(self):
+        self.assertEqual(engine._doc_coupon({"Coupon_Code": "DEF"}), "DEF")
+
+    def test_uppercase_key(self):
+        self.assertEqual(engine._doc_coupon({"COUPON_CODE": "GHI"}), "GHI")
+
+    def test_arbitrary_mixed_case(self):
+        self.assertEqual(engine._doc_coupon({"cOuPoN_cOdE": "JKL"}), "JKL")
+
+    def test_missing_coupon_returns_none(self):
+        self.assertIsNone(engine._doc_coupon({"account": "alice"}))
+
+    def test_empty_coupon_returns_none(self):
+        self.assertIsNone(engine._doc_coupon({"coupon_code": ""}))
+
+    def test_whitespace_only_returns_none(self):
+        self.assertIsNone(engine._doc_coupon({"coupon_code": "   "}))
+
+    def test_strips_whitespace(self):
+        self.assertEqual(engine._doc_coupon({"coupon_code": "  X1 "}), "X1")
+
+
+class CouponIdentityResolutionTests(unittest.TestCase):
+    """Engine resolves user identity via coupon_code → voucher_claims → user_id."""
+
+    class _FakeVoucherClaims:
+        """Supports find(filter, proj) and aggregate() for _claim_counts."""
+
+        def __init__(self, claims):
+            self._claims = list(claims)
+
+        def find(self, filt=None, proj=None):
+            filt = filt or {}
+            results = list(self._claims)
+            in_codes = (filt.get("voucher_code") or {}).get("$in")
+            if in_codes is not None:
+                results = [c for c in results if c.get("voucher_code") in in_codes]
+            results = [c for c in results if c.get("user_id") is not None]
+            return results
+
+        def aggregate(self, pipeline):
+            match_stage = next(
+                (s["$match"] for s in pipeline if "$match" in s), {}
+            )
+            in_ids = (match_stage.get("user_id") or {}).get("$in", [])
+            from collections import Counter
+            counts = Counter(
+                c["user_id"] for c in self._claims
+                if c.get("user_id") in in_ids
+            )
+            return [{"_id": uid, "count": cnt} for uid, cnt in counts.items()]
+
+    class _FakeUsers:
+        def __init__(self, users):
+            self._users = list(users)
+
+        def find(self, filt=None, proj=None):
+            filt = filt or {}
+            results = list(self._users)
+            in_ids = (filt.get("user_id") or {}).get("$in")
+            if in_ids is not None:
+                results = [u for u in results if u.get("user_id") in in_ids]
+            return results
+
+    class _FakeSnapshots:
+        def __init__(self):
+            self.docs = {}
+
+        def bulk_write(self, ops, ordered=False):
+            for op in ops:
+                filt = getattr(op, "_filter", {})
+                update = getattr(op, "_doc", {})
+                key = (filt.get("account"), filt.get("snapshot_week"))
+                self.docs[key] = update.get("$set", {})
+            return type("R", (), {"modified_count": 0, "upserted_count": len(ops)})()
+
+    class _FakeMkt:
+        def __init__(self, docs, week):
+            self._docs = docs
+            self._week = week
+
+        def find(self, filt=None):
+            filt = filt or {}
+            return list(self._docs) if filt.get("snapshot_week") == self._week else []
+
+    def _run(self, mkt_docs, claims, users, week="2026-W25",
+             now=None, dry_run=False):
+        now = now or datetime(2026, 6, 16, tzinfo=timezone.utc)
+        snaps = self._FakeSnapshots()
+        summary = engine.run_shadow_segment_engine(
+            users_col=self._FakeUsers(users),
+            voucher_claims_col=self._FakeVoucherClaims(claims),
+            marketing_col=self._FakeMkt(mkt_docs, week),
+            snapshots_col=snaps,
+            snapshot_week=week,
+            now=now,
+            dry_run=dry_run,
+        )
+        return summary, snaps
+
+    def test_matched_row_resolves_user_id_and_username(self):
+        week = "2026-W25"
+        summary, snaps = self._run(
+            mkt_docs=[{"account": "player1", "coupon_code": "ABC123",
+                       "after_total_bet_amount": 800, "withdraw_amount": 100,
+                       "snapshot_week": week}],
+            claims=[{"voucher_code": "ABC123", "user_id": 999}],
+            users=[{"user_id": 999, "username": "tguser", "total_referrals": 5,
+                    "streak": 3, "total_xp": 1000}],
+        )
+        self.assertTrue(summary["ok"])
+        self.assertEqual(summary["matched_rows"], 1)
+        self.assertEqual(summary["unmatched_rows"], 0)
+        self.assertEqual(summary["identity_match_rate"], 100.0)
+        doc = snaps.docs[("player1", week)]
+        self.assertEqual(doc["user_id"], 999)
+        self.assertEqual(doc["username"], "tguser")
+        self.assertEqual(doc["backend_segment"], "high_value")
+
+    def test_unmatched_coupon_gives_none_user_id(self):
+        week = "2026-W25"
+        summary, snaps = self._run(
+            mkt_docs=[{"account": "player2", "coupon_code": "NOMATCH",
+                       "after_total_bet_amount": 100, "withdraw_amount": 0,
+                       "snapshot_week": week}],
+            claims=[],
+            users=[],
+        )
+        self.assertTrue(summary["ok"])
+        self.assertEqual(summary["matched_rows"], 0)
+        self.assertEqual(summary["unmatched_rows"], 1)
+        self.assertEqual(summary["identity_match_rate"], 0.0)
+        doc = snaps.docs[("player2", week)]
+        self.assertIsNone(doc["user_id"])
+        self.assertIsNone(doc["username"])
+
+    def test_row_without_coupon_code_gives_none_user_id(self):
+        week = "2026-W25"
+        summary, snaps = self._run(
+            mkt_docs=[{"account": "player3", "after_total_bet_amount": 100,
+                       "withdraw_amount": 0, "snapshot_week": week}],
+            claims=[{"voucher_code": "ANYCODE", "user_id": 111}],
+            users=[{"user_id": 111, "username": "tg3"}],
+        )
+        self.assertTrue(summary["ok"])
+        self.assertEqual(summary["matched_rows"], 0)
+        self.assertEqual(summary["unmatched_rows"], 1)
+        doc = snaps.docs[("player3", week)]
+        self.assertIsNone(doc["user_id"])
+
+    def test_partial_match_rate(self):
+        week = "2026-W25"
+        mkt_docs = [
+            {"account": "p1", "coupon_code": "C1", "after_total_bet_amount": 100,
+             "withdraw_amount": 0, "snapshot_week": week},
+            {"account": "p2", "coupon_code": "C2", "after_total_bet_amount": 100,
+             "withdraw_amount": 0, "snapshot_week": week},
+            {"account": "p3", "coupon_code": "NOEXIST", "after_total_bet_amount": 100,
+             "withdraw_amount": 0, "snapshot_week": week},
+            {"account": "p4", "after_total_bet_amount": 100,
+             "withdraw_amount": 0, "snapshot_week": week},
+        ]
+        claims = [
+            {"voucher_code": "C1", "user_id": 1},
+            {"voucher_code": "C2", "user_id": 2},
+        ]
+        users = [
+            {"user_id": 1, "username": "tg1", "total_referrals": 0, "streak": 0, "total_xp": 0},
+            {"user_id": 2, "username": "tg2", "total_referrals": 0, "streak": 0, "total_xp": 0},
+        ]
+        summary, _ = self._run(mkt_docs=mkt_docs, claims=claims, users=users)
+        self.assertTrue(summary["ok"])
+        self.assertEqual(summary["matched_rows"], 2)
+        self.assertEqual(summary["unmatched_rows"], 2)
+        self.assertEqual(summary["identity_match_rate"], 50.0)
+
+    def test_checkin_count_reads_streak_field(self):
+        """Regression: users.streak (not checkin_count/checkin_streak) is the check-in field."""
+        week = "2026-W25"
+        summary, snaps = self._run(
+            mkt_docs=[{"account": "p1", "coupon_code": "CC1",
+                       "after_total_bet_amount": 0, "withdraw_amount": 0,
+                       "snapshot_week": week}],
+            claims=[{"voucher_code": "CC1", "user_id": 5}],
+            users=[{"user_id": 5, "username": "u5", "streak": 7,
+                    "total_referrals": 0, "total_xp": 0}],
+        )
+        self.assertTrue(summary["ok"])
+        doc = snaps.docs[("p1", week)]
+        # streak=7 → checkin_count=7 → ghost rule requires checkin_count==0, so NOT ghost
+        self.assertNotEqual(doc["backend_segment"], "ghost")
+
+    def test_referral_count_from_user_doc(self):
+        week = "2026-W25"
+        summary, snaps = self._run(
+            mkt_docs=[{"account": "p1", "coupon_code": "CC2",
+                       "after_total_bet_amount": 0, "withdraw_amount": 0,
+                       "snapshot_week": week}],
+            claims=[{"voucher_code": "CC2", "user_id": 6}],
+            users=[{"user_id": 6, "username": "u6", "streak": 0,
+                    "total_referrals": 2, "total_xp": 0}],
+        )
+        doc = snaps.docs[("p1", week)]
+        # referral_count=2 → not ghost (ghost needs referral_count==0)
+        self.assertNotEqual(doc["backend_segment"], "ghost")
+
+    def test_dry_run_reports_identity_stats_without_writing(self):
+        week = "2026-W25"
+        summary, snaps = self._run(
+            mkt_docs=[{"account": "p1", "coupon_code": "DRY1",
+                       "after_total_bet_amount": 100, "withdraw_amount": 0,
+                       "snapshot_week": week}],
+            claims=[{"voucher_code": "DRY1", "user_id": 77}],
+            users=[{"user_id": 77, "username": "dry_user", "streak": 0,
+                    "total_referrals": 0, "total_xp": 0}],
+            dry_run=True,
+        )
+        self.assertTrue(summary["ok"])
+        self.assertTrue(summary["dry_run"])
+        self.assertEqual(summary["matched_rows"], 1)
+        self.assertEqual(summary["identity_match_rate"], 100.0)
+        self.assertEqual(len(snaps.docs), 0)  # nothing written in dry run
+
+    def test_snapshot_contains_username_field(self):
+        """username is stored in snapshot so dashboards can display it."""
+        week = "2026-W25"
+        _, snaps = self._run(
+            mkt_docs=[{"account": "mktacct", "coupon_code": "USR1",
+                       "after_total_bet_amount": 100, "withdraw_amount": 0,
+                       "snapshot_week": week}],
+            claims=[{"voucher_code": "USR1", "user_id": 42}],
+            users=[{"user_id": 42, "username": "tghandle",
+                    "streak": 0, "total_referrals": 0, "total_xp": 0}],
+        )
+        doc = snaps.docs[("mktacct", week)]
+        self.assertIn("username", doc)
+        self.assertEqual(doc["username"], "tghandle")
+
+
 if __name__ == "__main__":
     unittest.main()

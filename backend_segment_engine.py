@@ -1,9 +1,20 @@
 """Phase 3 — Backend-Owned Segment Engine (Shadow Mode, Real Data).
 
 Direction change from Phase 6A: the engine now ingests real marketing data
-from the ``marketing_raw_data`` collection (keyed by ``account`` / username),
-joins to the ``users`` collection by username, and stores weekly snapshots
-keyed by ``(account, snapshot_week)`` instead of ``(user_id, snapshot_month)``.
+from the ``marketing_raw_data`` collection, resolves Telegram user identity
+via coupon code (``marketing_raw_data.coupon_code`` →
+``voucher_claims.voucher_code`` → ``voucher_claims.user_id``), looks up the
+``users`` document by that ``user_id``, and stores weekly snapshots keyed by
+``(account, snapshot_week)``.
+
+Identity resolution rationale
+-------------------------------
+Marketing uploads use a gaming-platform ``account`` field (not Telegram
+username).  The shared key between the two systems is the voucher/coupon code:
+the player redeems a code in the gaming platform → that same code appears in
+``voucher_claims.voucher_code`` alongside their Telegram ``user_id``.
+Using this join raises the identity match rate from 0 % (account→username) to
+≈91 % (coupon_code→voucher_claims).
 
 This module is **shadow mode only**:
   - Writes go to ``backend_segment_snapshots`` collection, never to
@@ -16,8 +27,7 @@ This module is **shadow mode only**:
 
 Key changes from Phase 6A
 --------------------------
-- Marketing join is by ``account`` (username), not ``user_id``.
-- Snapshot unique key is ``(account, snapshot_week)`` not ``(user_id, snapshot_month)``.
+- Identity join: coupon_code → voucher_claims → user_id (replaces account → username).
 - ``new_player`` / ``old_player`` are NOT segments — stored as ``player_age_type``
   separately via ``classify_player_age_type()``.
 - Ghost rule: ``after_total_bet_amount == 0 AND referral_count == 0 AND
@@ -60,8 +70,7 @@ _USER_PROJECTION = {
     "username": 1,
     "user_id": 1,
     "total_referrals": 1,
-    "checkin_count": 1,
-    "checkin_streak": 1,
+    "streak": 1,           # actual check-in streak field (not checkin_count/checkin_streak)
     "total_xp": 1,
     "for_bot_segment": 1,
     "bot_segment": 1,
@@ -88,7 +97,7 @@ CLAIM_RISK_ABUSE_MIN = 50
 _BOT_DB_FIELD_NOTES = {
     "claim_count": "voucher_claims collection, count of all claim docs for user_id",
     "referral_count": "users.total_referrals",
-    "checkin_count": "users.checkin_count if present, else users.checkin_streak (current streak, not lifetime count) as best-effort proxy",
+    "checkin_count": "users.streak (current check-in streak)",
     "xp": "users.total_xp",
     "last_active_at": "users.last_active_at if present, else users.last_checkin as best-effort proxy",
     "channel_status": "users.channel_status (not used by any v1 rule; carried through for future rules)",
@@ -363,6 +372,18 @@ def _doc_account(doc: dict) -> str:
     return ""
 
 
+def _doc_coupon(doc: dict) -> str | None:
+    """Extract coupon_code from a marketing row, tolerating mixed-case headers."""
+    for key in ("coupon_code", "Coupon_Code", "COUPON_CODE"):
+        v = doc.get(key)
+        if v is not None and str(v).strip():
+            return str(v).strip()
+    for k, v in doc.items():
+        if k.lower().replace(" ", "_") == "coupon_code" and v is not None and str(v).strip():
+            return str(v).strip()
+    return None
+
+
 def _marketing_rows_by_account(marketing_col, snapshot_week: str) -> dict[str, dict]:
     """Return dict[account_lower -> doc] for the given snapshot_week.
 
@@ -398,7 +419,7 @@ def _build_metrics_for_user(user_doc: dict, claim_count: int, marketing_row: dic
         "is_new_player": marketing_row.get("is_new_player"),
         "claim_count": claim_count,
         "referral_count": user_doc.get("total_referrals", 0),
-        "checkin_count": user_doc.get("checkin_count", user_doc.get("checkin_streak", 0)),
+        "checkin_count": user_doc.get("streak", 0),
         "xp": user_doc.get("total_xp", 0),
         "last_active_at": user_doc.get("last_active_at", user_doc.get("last_checkin")),
     }
@@ -412,6 +433,7 @@ def _build_metrics_for_user(user_doc: dict, claim_count: int, marketing_row: dic
 def build_snapshot_doc(
     *,
     account: str,
+    username: str | None = None,
     user_id: int | None,
     telegram_user_id: int | None,
     metrics: dict,
@@ -426,6 +448,7 @@ def build_snapshot_doc(
 
     doc: dict = {
         "account": account,
+        "username": username,
         "user_id": user_id,
         "telegram_user_id": telegram_user_id,
         "backend_segment": classification["segment"],
@@ -461,6 +484,9 @@ def _empty_summary(*, dry_run: bool) -> dict:
         "snapshots_written": 0,
         "total_rows": 0,
         "rows_processed": 0,
+        "matched_rows": 0,
+        "unmatched_rows": 0,
+        "identity_match_rate": 0.0,
         "elapsed_seconds": 0.0,
         "segment_distribution": {},
         "claim_risk_distribution": {},
@@ -485,12 +511,15 @@ def run_shadow_segment_engine(
 ) -> dict:
     """Evaluate users and upsert ``backend_segment_snapshots`` (shadow mode).
 
-    Iterates all accounts from the ``marketing_raw_data`` collection for the
-    given ``snapshot_week``, joins to ``users`` by username (case-insensitive),
-    and writes one snapshot doc per account.
+    Identity resolution (Method B):
+        marketing_raw_data.coupon_code
+            → voucher_claims.voucher_code → user_id
+            → users document (by user_id)
 
-    For accounts not found in the bot DB, ``user_id`` / ``telegram_user_id``
-    are stored as None and bot-DB fields default to 0.
+    For rows without a coupon_code or whose code has no matching claim,
+    ``user_id`` / ``telegram_user_id`` are stored as None and bot-DB fields
+    default to 0.  The snapshot is still written for every marketing row so
+    the full account list is preserved.
 
     Idempotent on ``(account, snapshot_week)`` — re-running replaces the
     existing snapshot rather than duplicating it.
@@ -541,47 +570,57 @@ def run_shadow_segment_engine(
         summary["total_rows"] = total_rows
         _call_progress(0, total_rows)
 
-        # Step 2: Batch-query only the users whose username appears in the
-        # marketing data.  Keys of marketing_rows are already lowercased, so a
-        # case-insensitive collation match gives us the right docs without a
-        # full-collection scan.  _USER_PROJECTION keeps each document small.
-        username_candidates = list(marketing_rows.keys())
-        users_by_username: dict[str, dict] = {}
-        for batch in _chunks(username_candidates, BATCH_SIZE):
-            for u in users_col.find(
-                {"username": {"$in": batch}},
-                _USER_PROJECTION,
-            ).collation({"locale": "en", "strength": 2}):
-                uname = (u.get("username") or "").strip().lower()
-                if uname:
-                    users_by_username[uname] = u
+        # Step 2: Resolve identity via coupon_code → voucher_claims.voucher_code.
+        # Extract all coupon codes present in this week's marketing rows, then
+        # batch-query voucher_claims to get the Telegram user_id for each code.
+        all_coupons: list[str] = [
+            c for c in (_doc_coupon(row) for row in marketing_rows.values()) if c
+        ]
+        coupon_to_uid: dict[str, int] = {}
+        for batch in _chunks(all_coupons, BATCH_SIZE):
+            for claim in voucher_claims_col.find(
+                {"voucher_code": {"$in": batch}, "user_id": {"$ne": None}},
+                {"_id": 0, "voucher_code": 1, "user_id": 1},
+            ):
+                code = claim.get("voucher_code")
+                uid = claim.get("user_id")
+                if code and uid is not None:
+                    try:
+                        coupon_to_uid[code] = int(uid)
+                    except (TypeError, ValueError):
+                        pass
 
-        # Step 3: Collect user_ids for batch claim-count lookup.
-        known_user_ids: list[int] = []
-        for acct_lower in marketing_rows:
-            user_doc = users_by_username.get(acct_lower)
-            if user_doc is not None and user_doc.get("user_id") is not None:
+        # Step 3: Batch-query users by the resolved user_ids.
+        resolved_user_ids: list[int] = list(set(coupon_to_uid.values()))
+        users_by_uid: dict[int, dict] = {}
+        for batch in _chunks(resolved_user_ids, BATCH_SIZE):
+            for u in users_col.find({"user_id": {"$in": batch}}, _USER_PROJECTION):
                 try:
-                    known_user_ids.append(int(user_doc["user_id"]))
-                except (TypeError, ValueError):
+                    uid_key = int(u["user_id"])
+                    users_by_uid[uid_key] = u
+                except (TypeError, ValueError, KeyError):
                     pass
 
-        claim_counts = _claim_counts(voucher_claims_col, known_user_ids)
+        # claim_counts: all historical claims per resolved user_id.
+        claim_counts = _claim_counts(voucher_claims_col, resolved_user_ids)
 
         # Step 4: Build snapshot docs (pure in-memory, no extra DB calls).
+        matched_rows = 0
+        unmatched_rows = 0
         docs: list[dict] = []
         for acct_lower, mrow in marketing_rows.items():
-            account = (mrow.get("account") or acct_lower).strip()
-            user_doc = users_by_username.get(acct_lower) or {}
+            account = _doc_account(mrow) or acct_lower
+            coupon = _doc_coupon(mrow)
+            user_id: int | None = coupon_to_uid.get(coupon) if coupon else None
+            user_doc: dict = users_by_uid.get(user_id) or {} if user_id is not None else {}
 
-            user_id: int | None = None
-            telegram_user_id: int | None = None
-            if user_doc.get("user_id") is not None:
-                try:
-                    user_id = int(user_doc["user_id"])
-                    telegram_user_id = user_id
-                except (TypeError, ValueError):
-                    pass
+            telegram_user_id: int | None = user_id
+            username: str | None = (user_doc.get("username") or "").strip() or None
+
+            if user_id is not None:
+                matched_rows += 1
+            else:
+                unmatched_rows += 1
 
             claim_count = claim_counts.get(user_id, 0) if user_id is not None else 0
             metrics = _build_metrics_for_user(user_doc, claim_count, mrow)
@@ -589,6 +628,7 @@ def run_shadow_segment_engine(
 
             doc = build_snapshot_doc(
                 account=account,
+                username=username,
                 user_id=user_id,
                 telegram_user_id=telegram_user_id,
                 metrics=metrics,
@@ -597,6 +637,12 @@ def run_shadow_segment_engine(
                 uim_segment_raw=uim_raw,
             )
             docs.append(doc)
+
+        summary["matched_rows"] = matched_rows
+        summary["unmatched_rows"] = unmatched_rows
+        summary["identity_match_rate"] = (
+            round(matched_rows / total_rows * 100, 2) if total_rows else 0.0
+        )
 
         summary["users_evaluated"] = len(docs)
         for doc in docs:
