@@ -444,16 +444,46 @@ def ingest_upload(
         else:
             rows_imported = 0
 
+        inserted_rows_by_month = Counter(d["snapshot_month"] for d in (insert_docs if candidate_docs else []))
+        inserted_rows_by_week = Counter(d["snapshot_week"] for d in (insert_docs if candidate_docs else []))
+        if rows_imported == 0:
+            inserted_rows_by_month = Counter()
+            inserted_rows_by_week = Counter()
+        elif rows_imported != sum(inserted_rows_by_month.values()):
+            # Partial bulk-write failures do not identify every successful doc
+            # portably. Fall back to the candidate period distribution for the
+            # response while rows_imported remains authoritative.
+            inserted_rows_by_month = candidate_rows_by_month
+            inserted_rows_by_week = candidate_rows_by_week
+
+        rows_by_month = dict(sorted(inserted_rows_by_month.items()))
+        rows_by_week = dict(sorted(inserted_rows_by_week.items()))
+        coverage = _coverage_summary(rows_by_month, rows_by_week)
+        single_week = next(iter(rows_by_week), None) if len(rows_by_week) == 1 else None
+        single_month = next(iter(rows_by_month), None) if len(rows_by_month) == 1 else None
+
         summary["rows_imported"] = rows_imported
         summary["rows_failed"] = rows_failed
         summary["duplicate_rows"] = duplicate_rows
+        summary["snapshot_week"] = single_week
+        summary["snapshot_month"] = single_month
+        summary["period_source"] = "mixed" if len(period_sources) > 1 else (next(iter(period_sources), None))
+        summary["rows_by_snapshot_month"] = rows_by_month
+        summary["rows_by_snapshot_week"] = rows_by_week
+        summary["coverage"] = coverage
+        summary["period_source_counts"] = dict(sorted(period_sources.items()))
         summary["status"] = "completed" if rows_failed == 0 else "completed_with_errors"
 
         batch_doc = {
             "upload_batch_id": upload_batch_id,
             "file_name": file_name,
-            "snapshot_week": snapshot_week,
-            "snapshot_month": snapshot_month,
+            "snapshot_week": single_week,
+            "snapshot_month": single_month,
+            "period_source": summary["period_source"],
+            "period_source_counts": summary["period_source_counts"],
+            "rows_by_snapshot_month": rows_by_month,
+            "rows_by_snapshot_week": rows_by_week,
+            "coverage": coverage,
             "rows_total": summary["rows_total"],
             "rows_imported": rows_imported,
             "rows_failed": rows_failed,

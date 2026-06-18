@@ -196,6 +196,8 @@ def ensure_indexes() -> None:
     db_ref["marketing_raw_data"].create_index([("snapshot_week", ASCENDING)])
     # Phase 2B — Raw Data Explorer aggregation indexes.
     db_ref["marketing_raw_data"].create_index([("snapshot_month", ASCENDING)])
+    db_ref["marketing_raw_data"].create_index([("period_source", ASCENDING)])
+    db_ref["marketing_raw_data"].create_index([("source_redeem_time", ASCENDING)])
     db_ref["marketing_raw_data"].create_index([("account", ASCENDING)])
     db_ref["marketing_raw_data"].create_index([("campaign_id", ASCENDING)])
 

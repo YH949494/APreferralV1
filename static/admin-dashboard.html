@@ -616,6 +616,7 @@
         <div style="margin-bottom:16px;"><span class="tag heuristic" style="font-size:12px;padding:4px 12px;">INGESTION ONLY — does not calculate segments or change bot behaviour</span></div>
         <div class="controls" style="margin-bottom:16px;">
           <input type="file" id="upload-file-input" accept=".csv,.xlsx" />
+          <input class="filter-input" id="upload-manual-period" placeholder="Fallback period e.g. 2026-W25 or 2026-06" style="max-width:260px;margin:0;" />
           <button class="btn primary" id="upload-submit-btn">Upload File</button>
         </div>
         <div id="upload-result-body"><div class="empty">Select a weekly player performance CSV/XLSX file and click Upload.</div></div>
@@ -633,8 +634,11 @@
       <section id="view-rawExplorer" class="hidden">
         <div style="margin-bottom:16px;"><span class="tag heuristic" style="font-size:12px;padding:4px 12px;">READ ONLY — validation only, does not calculate segments or change bot behaviour</span></div>
         <div class="controls" style="margin-bottom:16px;">
-          <input class="filter-input" id="explorer-week" placeholder="Snapshot week e.g. 2024-W20 (default: latest)" style="max-width:240px;margin:0;" />
-          <input class="filter-input" id="explorer-month" placeholder="Or snapshot month e.g. 2024-05" style="max-width:220px;margin:0;" />
+          <select class="filter-input" id="explorer-period-type" style="max-width:160px;margin:0;">
+            <option value="weekly">Weekly</option>
+            <option value="monthly">Monthly</option>
+          </select>
+          <select class="filter-input" id="explorer-period" style="max-width:220px;margin:0;"></select>
           <button class="btn primary" id="explorer-apply-btn">Load</button>
         </div>
         <div id="explorer-snapshot-label" style="margin-bottom:16px;color:var(--muted);font-size:13px;"></div>

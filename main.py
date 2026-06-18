@@ -3238,10 +3238,22 @@ def dashboard_backend_segment_engine():
     if not ok:
         msg, code = err
         return jsonify({"success": False, "message": msg}), code
+    period_type = (request.args.get("period_type") or "").strip().lower() or None
+    period = (request.args.get("period") or "").strip() or None
     month = request.args.get("month") or None
     snapshot_week = request.args.get("snapshot_week") or None
+    if period_type == "weekly" and period:
+        snapshot_week = period
+        month = None
+    elif period_type == "monthly" and period:
+        month = period
+        snapshot_week = None
+    elif period_type not in (None, "", "weekly", "monthly"):
+        return jsonify({"success": False, "message": "period_type must be weekly or monthly"}), 400
+    resolved_period_type = "weekly" if snapshot_week else "monthly"
+    resolved_period = snapshot_week or month or "latest"
     now = _utc_now()
-    cache_key = f"panel:backend_segment_engine:{snapshot_week or ''}{month or ''}"
+    cache_key = f"panel:backend_segment_engine:{resolved_period_type}:{resolved_period}"
     return _panel_cached(
         cache_key,
         lambda: _panels.build_backend_segment_engine_panel(
@@ -4024,11 +4036,18 @@ def upload_player_performance():
         return jsonify({"success": False, "message": "missing file"}), 400
 
     content = upload.read()
+    manual_period = (
+        request.form.get("manual_period")
+        or request.form.get("period")
+        or request.form.get("snapshot_period")
+        or None
+    )
     summary = _marketing_upload.ingest_upload(
         content=content,
         file_name=upload.filename,
         uploaded_by=_current_admin_identity(),
         now=_utc_now(),
+        manual_period=manual_period,
     )
     if not summary.get("ok"):
         return jsonify({"success": False, "message": summary.get("error") or "upload failed", **summary}), 400
@@ -4076,11 +4095,17 @@ def data_raw_explorer():
 
     snapshot_week = (request.args.get("snapshot_week") or "").strip() or None
     snapshot_month = (request.args.get("snapshot_month") or "").strip() or None
+    period_type = (request.args.get("period_type") or "").strip().lower() or None
+    period = (request.args.get("period") or "").strip() or None
+    if period_type not in (None, "weekly", "monthly"):
+        return jsonify({"success": False, "message": "period_type must be weekly or monthly"}), 400
 
     try:
         payload = _marketing_explorer.get_raw_explorer(
             snapshot_week=snapshot_week,
             snapshot_month=snapshot_month,
+            period_type=period_type,
+            period=period,
         )
         return jsonify({"success": True, **payload})
     except Exception as exc:

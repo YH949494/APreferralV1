@@ -39,21 +39,30 @@ def _resolve_snapshot(
     *,
     snapshot_week: str | None,
     snapshot_month: str | None,
+    period_type: str | None = None,
+    period: str | None = None,
 ) -> tuple[dict, dict]:
     """Return (match_filter, snapshot_info).
 
     Precedence: snapshot_week > snapshot_month > auto-detect latest week.
     Returns empty filter when the collection is empty (no data uploaded yet).
     """
+    if period_type == "weekly" and period:
+        snapshot_week = period
+        snapshot_month = None
+    elif period_type == "monthly" and period:
+        snapshot_month = period
+        snapshot_week = None
+
     if snapshot_week:
         return (
             {"snapshot_week": snapshot_week},
-            {"snapshot_week": snapshot_week, "snapshot_month": None},
+            {"snapshot_week": snapshot_week, "snapshot_month": None, "period_type": "weekly", "period": snapshot_week},
         )
     if snapshot_month:
         return (
             {"snapshot_month": snapshot_month},
-            {"snapshot_week": None, "snapshot_month": snapshot_month},
+            {"snapshot_week": None, "snapshot_month": snapshot_month, "period_type": "monthly", "period": snapshot_month},
         )
     latest = marketing_col.find_one(
         {},
@@ -61,12 +70,12 @@ def _resolve_snapshot(
         projection={"snapshot_week": 1, "snapshot_month": 1},
     )
     if not latest:
-        return {}, {"snapshot_week": None, "snapshot_month": None}
+        return {}, {"snapshot_week": None, "snapshot_month": None, "period_type": "weekly", "period": None}
     week = latest.get("snapshot_week")
     month = latest.get("snapshot_month")
     return (
         {"snapshot_week": week},
-        {"snapshot_week": week, "snapshot_month": month},
+        {"snapshot_week": week, "snapshot_month": month, "period_type": "weekly", "period": week},
     )
 
 
@@ -228,24 +237,44 @@ def _run_currency_breakdown(marketing_col, match_filter: dict) -> list[dict]:
 
 # --- upload snapshot summary ---
 
+def _contains_period(batch: dict, *, snapshot_week: str | None, snapshot_month: str | None) -> bool:
+    if snapshot_week:
+        weeks = (batch.get("coverage") or {}).get("weeks") or []
+        return batch.get("snapshot_week") == snapshot_week or snapshot_week in weeks
+    if snapshot_month:
+        months = (batch.get("coverage") or {}).get("months") or []
+        return batch.get("snapshot_month") == snapshot_month or snapshot_month in months
+    return True
+
+
+def _period_count(batch: dict, *, snapshot_week: str | None, snapshot_month: str | None) -> int:
+    if snapshot_week:
+        return int((batch.get("rows_by_snapshot_week") or {}).get(snapshot_week, 0) or 0)
+    if snapshot_month:
+        return int((batch.get("rows_by_snapshot_month") or {}).get(snapshot_month, 0) or 0)
+    return int(batch.get("rows_imported", batch.get("rows_total", 0)) or 0)
+
+
 def _run_snapshot_summary(batches_col, *, snapshot_week: str | None, snapshot_month: str | None) -> list[dict]:
     """Return upload batch rows relevant to the current snapshot filter."""
     filt: dict = {}
-    if snapshot_week:
-        filt["snapshot_week"] = snapshot_week
-    elif snapshot_month:
-        filt["snapshot_month"] = snapshot_month
 
     rows = []
     cursor = batches_col.find(filt).sort("uploaded_at", -1).limit(50)
     for b in cursor:
+        if not _contains_period(b, snapshot_week=snapshot_week, snapshot_month=snapshot_month):
+            continue
         uploaded_at = b.get("uploaded_at")
         if hasattr(uploaded_at, "isoformat"):
             uploaded_at = uploaded_at.isoformat()
         rows.append({
             "snapshot_week": b.get("snapshot_week"),
             "snapshot_month": b.get("snapshot_month"),
-            "rows": b.get("rows_imported", b.get("rows_total", 0)),
+            "coverage": b.get("coverage") or {},
+            "rows_by_snapshot_month": b.get("rows_by_snapshot_month") or {},
+            "rows_by_snapshot_week": b.get("rows_by_snapshot_week") or {},
+            "rows": _period_count(b, snapshot_week=snapshot_week, snapshot_month=snapshot_month),
+            "rows_imported": b.get("rows_imported", b.get("rows_total", 0)),
             "accounts": None,
             "campaigns": None,
             "uploaded_at": uploaded_at,
@@ -253,6 +282,21 @@ def _run_snapshot_summary(batches_col, *, snapshot_week: str | None, snapshot_mo
             "status": b.get("status"),
         })
     return rows
+
+
+def _available_periods(marketing_col) -> dict:
+    def _distinct(field: str) -> list[str]:
+        if not hasattr(marketing_col, "distinct"):
+            return []
+        try:
+            return sorted([str(v) for v in marketing_col.distinct(field) if v], reverse=True)
+        except TypeError:
+            return sorted([str(v) for v in marketing_col.distinct(field, {}) if v], reverse=True)
+
+    return {
+        "weekly": _distinct("snapshot_week"),
+        "monthly": _distinct("snapshot_month"),
+    }
 
 
 # --- data quality ---
@@ -364,6 +408,8 @@ def get_raw_explorer(
     *,
     snapshot_week: str | None = None,
     snapshot_month: str | None = None,
+    period_type: str | None = None,
+    period: str | None = None,
     marketing_col=None,
     batches_col=None,
 ) -> dict:
@@ -385,7 +431,11 @@ def get_raw_explorer(
         batches_col = database.marketing_upload_batches_col
 
     match_filter, snapshot_info = _resolve_snapshot(
-        marketing_col, snapshot_week=snapshot_week, snapshot_month=snapshot_month
+        marketing_col,
+        snapshot_week=snapshot_week,
+        snapshot_month=snapshot_month,
+        period_type=period_type,
+        period=period,
     )
 
     summary = _run_summary(marketing_col, match_filter)
@@ -407,6 +457,7 @@ def get_raw_explorer(
         "snapshot_summary": snapshot_summary,
         "data_quality": data_quality,
         "snapshot_filter": snapshot_info,
+        "available_periods": _available_periods(marketing_col),
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "data_source": "marketing_raw_data",
     }
