@@ -853,16 +853,14 @@
     var week = (weekInput || {}).value || "";
     week = week.trim();
     var resultEl = $("#bse-run-result");
-    if (!week) {
-      if (resultEl) resultEl.innerHTML = '<span style="color:var(--red,#e05c5c)">snapshot_week is required (e.g. 2026-W25).</span>';
-      return;
-    }
-    if (!/^\d{4}-W(0[1-9]|[1-4]\d|5[0-3])$/.test(week)) {
-      if (resultEl) resultEl.innerHTML = '<span style="color:var(--red,#e05c5c)">Invalid format. Use YYYY-Www (e.g. 2026-W25).</span>';
+    // Validate format only when a value is provided; blank = process all periods.
+    if (week && !/^\d{4}-W(0[1-9]|[1-4]\d|5[0-3])$/.test(week)) {
+      if (resultEl) resultEl.innerHTML = '<span style="color:var(--red,#e05c5c)">Invalid format. Use YYYY-Www (e.g. 2026-W25), or leave blank to process all periods.</span>';
       return;
     }
     var label = dryRun ? "Dry run" : "Commit run";
-    if (resultEl) resultEl.innerHTML = '<span style="color:var(--muted,#8892a4)">' + label + ' queuing for ' + esc(week) + '…</span>';
+    var scopeLabel = week ? ("week " + week) : "all periods";
+    if (resultEl) resultEl.innerHTML = '<span style="color:var(--muted,#8892a4)">' + label + ' queuing for ' + esc(scopeLabel) + '…</span>';
     var dryBtn = $("#bse-dry-run-btn");
     var commitBtn = $("#bse-commit-run-btn");
     if (dryBtn) dryBtn.disabled = true;
@@ -871,7 +869,7 @@
       method: "POST",
       credentials: "same-origin",
       headers: { "Accept": "application/json", "Content-Type": "application/json" },
-      body: JSON.stringify({ snapshot_week: week, dry_run: dryRun }),
+      body: JSON.stringify({ snapshot_week: week || null, dry_run: dryRun }),
     })
       .then(function (r) {
         if (r.status === 401) { window.location.href = "/static/admin-login.html"; throw new Error("unauthorized"); }
@@ -886,7 +884,7 @@
           return;
         }
         var jobId = d.job_id;
-        if (resultEl) resultEl.innerHTML = '<span style="color:var(--muted,#8892a4)">' + label + ' running for ' + esc(week) + '… (job ' + esc(jobId) + ')</span>';
+        if (resultEl) resultEl.innerHTML = '<span style="color:var(--muted,#8892a4)">' + label + ' running for ' + esc(scopeLabel) + '… (job ' + esc(jobId) + ')</span>';
         _pollBseJob(jobId, dryRun, week, dryBtn, commitBtn, resultEl);
       })
       .catch(function (e) {

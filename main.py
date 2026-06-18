@@ -3407,7 +3407,11 @@ def backend_segment_engine_run():
     Shadow mode only — writes to backend_segment_snapshots, never to
     users.bot_segment, voucher allocation, or reward logic.
 
-    POST body: {"snapshot_week": "YYYY-Www", "dry_run": true|false}
+    POST body: {"snapshot_week": "YYYY-Www"|null, "dry_run": true|false}
+
+    snapshot_week is optional. When omitted or null, all uploaded marketing rows
+    across all periods are processed and each snapshot's period is derived from
+    the row's own coupon_redeem_time-based snapshot_week field.
     """
     ok, err = require_admin_from_query()
     if not ok:
@@ -3415,18 +3419,19 @@ def backend_segment_engine_run():
         return jsonify({"ok": False, "error": msg}), code
 
     body = request.get_json(silent=True) or {}
-    snapshot_week = body.get("snapshot_week")
+    snapshot_week = (body.get("snapshot_week") or "").strip() or None
     dry_run = bool(body.get("dry_run", True))
 
-    if not snapshot_week:
-        return jsonify({"ok": False, "error": "snapshot_week is required. Do not omit or default."}), 400
-    if not _SNAPSHOT_WEEK_RE.match(str(snapshot_week)):
+    # Validate format only when a value is explicitly provided.
+    if snapshot_week and not _SNAPSHOT_WEEK_RE.match(snapshot_week):
         return jsonify({"ok": False, "error": f"Invalid snapshot_week format '{snapshot_week}'. Expected YYYY-Www (e.g. 2026-W25)."}), 400
 
-    # Fail fast if no marketing data exists for this week.
-    mkt_count = db["marketing_raw_data"].count_documents({"snapshot_week": snapshot_week})
+    # Fail fast if no marketing data exists for the given filter (or at all).
+    mkt_query = {"snapshot_week": snapshot_week} if snapshot_week else {}
+    mkt_count = db["marketing_raw_data"].count_documents(mkt_query)
     if mkt_count == 0:
-        return jsonify({"ok": False, "error": f"No marketing_raw_data found for snapshot_week '{snapshot_week}'. Upload data first."}), 422
+        scope = f"snapshot_week '{snapshot_week}'" if snapshot_week else "any snapshot_week"
+        return jsonify({"ok": False, "error": f"No marketing_raw_data found for {scope}. Upload data first."}), 422
 
     admin_identity = _current_admin_identity()
 
@@ -3463,7 +3468,8 @@ def backend_segment_engine_run():
         return jsonify({
             "ok": False,
             "error": (
-                f"A {'dry run' if dry_run else 'commit run'} for {snapshot_week} "
+                f"A {'dry run' if dry_run else 'commit run'} for "
+                f"{snapshot_week or 'all periods'} "
                 f"is already in progress (job_id={existing['job_id']})."
             ),
             "job_id": existing["job_id"],
