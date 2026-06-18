@@ -1278,7 +1278,14 @@ class TestPhase7ATakeoverReadiness:
             {"user_id": 2, "bot_segment": "voucher_hunter"},
             {"user_id": 3, "for_bot_segment": ""},
         ])
+        # Stale W24 doc should be excluded; only W25 (latest) counts.
         snapshots = FakeCollection([
+            {
+                "account": "u0",
+                "snapshot_week": "2026-W24",
+                "backend_segment": "low_value",
+                "uim_comparison": {"match": False},
+            },
             {
                 "account": "u1",
                 "snapshot_week": "2026-W25",
@@ -1303,6 +1310,8 @@ class TestPhase7ATakeoverReadiness:
         assert out["phase"] == "7A"
         assert out["live_coverage"]["users_with_for_bot_segment"] == 1
         assert out["live_coverage"]["users_with_bot_segment"] == 1
+        assert out["live_coverage"]["latest_snapshot_week"] == "2026-W25"
+        # Only the two W25 docs, not the stale W24 doc.
         assert out["live_coverage"]["backend_snapshot_count"] == 2
         assert out["live_coverage"]["backend_uim_mismatches"] == 1
         assert out["section_1_segment_dependency_audit"]
@@ -1316,3 +1325,4 @@ class TestPhase7ATakeoverReadiness:
         readiness = {row["segment"]: row["status"] for row in out["section_4_segment_readiness_assessment"]}
         assert readiness["high_value"] == "READY"
         assert readiness["unclassified"] == "NOT READY"
+        assert readiness["active_community_player"] == "PARTIAL"

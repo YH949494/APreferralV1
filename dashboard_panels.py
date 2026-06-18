@@ -1774,7 +1774,7 @@ def _takeover_segment_readiness() -> list[dict]:
         {"segment": "low_value", "status": "READY", "explanation": "Backend rule has high-confidence after-bet/withdrawal source fields and deterministic below-8x rule."},
         {"segment": "normal_actual", "status": "READY", "explanation": "Backend rule has high-confidence play activity rule after VH and withdrawal buckets are excluded."},
         {"segment": "voucher_hunter", "status": "PARTIAL", "explanation": "VH v2 exists, but prior quality/false-positive analysis shows this is the highest-risk behavior gate and needs dual-run mismatch logging before primary use."},
-        {"segment": "active_community", "status": "PARTIAL", "explanation": "Backend emits active_community_player from provisional XP/check-in rules with low confidence; needs business sign-off."},
+        {"segment": "active_community_player", "status": "PARTIAL", "explanation": "Backend emits active_community_player from provisional XP/check-in rules with low confidence; needs business sign-off."},
         {"segment": "ghost", "status": "PARTIAL", "explanation": "Rule is deterministic when marketing data is present, but inactivity semantics are sensitive to missing marketing snapshots."},
         {"segment": "unclassified", "status": "NOT READY", "explanation": "Fallback for missing or insufficient data; should not drive production targeting except as an explicit fallback bucket."},
     ]
@@ -1822,10 +1822,12 @@ def build_backend_segment_takeover_readiness_panel(
 
     if snapshots_col is not None:
         try:
-            docs = list(snapshots_col.find({}, {"snapshot_week": 1, "uim_comparison": 1, "backend_segment": 1}))
-            backend_snapshot_count = len(docs)
-            weeks = sorted({d.get("snapshot_week") for d in docs if d.get("snapshot_week")})
+            week_docs = list(snapshots_col.find({}, {"snapshot_week": 1}))
+            weeks = sorted({d.get("snapshot_week") for d in week_docs if d.get("snapshot_week")})
             latest_snapshot_week = weeks[-1] if weeks else None
+            query = {"snapshot_week": latest_snapshot_week} if latest_snapshot_week else {}
+            docs = list(snapshots_col.find(query, {"uim_comparison": 1, "backend_segment": 1}))
+            backend_snapshot_count = len(docs)
             compared_docs = [d for d in docs if _nested_get(d, "uim_comparison.match") is not None]
             backend_compared = len(compared_docs)
             backend_mismatches = sum(1 for d in compared_docs if _nested_get(d, "uim_comparison.match") is False)
