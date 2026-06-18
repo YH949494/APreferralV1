@@ -1642,6 +1642,259 @@ def build_backend_segment_engine_panel(
 # Phase 5 — Backend vs UIM comparison analysis
 # ---------------------------------------------------------------------------
 
+def _takeover_static_dependency_inventory() -> list[dict]:
+    """Phase 7A static audit of segment reads used for operating decisions."""
+    return [
+        {
+            "file": "bot_segment_sync.py",
+            "function": "sync_bot_segments_from_sheet() / _prepare_user_update()",
+            "purpose": "Imports UIM Google Sheet for_bot_segment values into users and writes segment_snapshots history.",
+            "reads": ["for_bot_segment", "Google Sheet segment", "UIM segment"],
+            "current_source": "UIM user_profile_summary Google Sheet",
+            "recommended_backend_source": "backend_segment_snapshots.backend_segment, later materialized as users.final_segment",
+            "business_decision": "Upstream feed for all bot-facing segment decisions.",
+            "risk": "high",
+        },
+        {
+            "file": "vouchers.py",
+            "function": "_load_user_bot_segment()",
+            "purpose": "Loads a user's bot-facing segment and derives public-pool probability.",
+            "reads": ["for_bot_segment", "bot_segment", "for_bot_segment_normalized", "bot_segment_probability"],
+            "current_source": "users fields populated by bot_segment_sync.py from UIM Google Sheet",
+            "recommended_backend_source": "latest backend_segment_snapshots.backend_segment; Phase 7B materialized users.final_segment",
+            "business_decision": "Public Pool / SVD traffic shaping.",
+            "risk": "high",
+        },
+        {
+            "file": "vouchers.py",
+            "function": "assign_public_pool_access_once()",
+            "purpose": "Applies segment probability and new-user SVD boost before creating access assignment.",
+            "reads": ["for_bot_segment", "bot_segment"],
+            "current_source": "users fields populated by UIM Google Sheet sync or injected user_doc",
+            "recommended_backend_source": "users.final_segment with backend_segment_snapshots fallback while dual-running",
+            "business_decision": "Public Pool allocation, delayed eligibility, and SVD boost.",
+            "risk": "high",
+        },
+        {
+            "file": "config.py",
+            "function": "normalize_for_bot_segment() / public_pool_probability_for_bot_segment() / is_new_user_segment()",
+            "purpose": "Maps manual/UIM labels to canonical segment names and allocation probabilities.",
+            "reads": ["for_bot_segment", "bot_segment"],
+            "current_source": "Manual label vocabulary shared by UIM Sheet sync and voucher logic",
+            "recommended_backend_source": "Backend segment vocabulary plus a backend-owned probability policy",
+            "business_decision": "Segment normalization, public-pool probability, new-user SVD boost.",
+            "risk": "high",
+        },
+        {
+            "file": "main.py",
+            "function": "bot_segment_sheet_sync_scheduled()",
+            "purpose": "Scheduled UIM Sheet sync keeps users.for_bot_segment current.",
+            "reads": ["Google Sheet segment", "UIM segment"],
+            "current_source": "UIM Google Sheet via bot_segment_sync.sync_bot_segments_from_sheet()",
+            "recommended_backend_source": "Backend segment engine scheduled run plus users.final_segment read model",
+            "business_decision": "Operational freshness of production segment labels.",
+            "risk": "high",
+        },
+        {
+            "file": "main.py",
+            "function": "_count_segment() / legacy admin summary metrics",
+            "purpose": "Counts users by for_bot_segment/bot_segment for dashboard abuse and segment KPIs.",
+            "reads": ["for_bot_segment", "bot_segment", "UIM segment"],
+            "current_source": "users collection bot-facing segment fields",
+            "recommended_backend_source": "backend_segment_snapshots.backend_segment or users.final_segment",
+            "business_decision": "Admin monitoring and operational interpretation.",
+            "risk": "medium",
+        },
+        {
+            "file": "dashboard_panels.py",
+            "function": "build_segments_panel() / _current_segment_counts()",
+            "purpose": "Builds Segment Overview and validation counts from legacy user segment fields.",
+            "reads": ["for_bot_segment", "bot_segment"],
+            "current_source": "users collection bot-facing segment fields",
+            "recommended_backend_source": "backend_segment_snapshots.backend_segment; users.final_segment after Phase 7B",
+            "business_decision": "Admin reporting and validation dashboard.",
+            "risk": "medium",
+        },
+        {
+            "file": "backend_segment_engine.py",
+            "function": "run_shadow_segment_engine() / compare_with_uim()",
+            "purpose": "Reads legacy UIM segment only to compare backend output with current production labels.",
+            "reads": ["for_bot_segment", "bot_segment", "UIM segment"],
+            "current_source": "users fields populated from UIM Google Sheet",
+            "recommended_backend_source": "Keep only as dual-run comparison in Phase 7A/7B; remove in Phase 7C",
+            "business_decision": "No production behavior; migration validation only.",
+            "risk": "low",
+        },
+        {
+            "file": "uim_validation.py",
+            "function": "fetch_uim_validation_metrics()",
+            "purpose": "Reads UIM dashboard tab for KPI comparison.",
+            "reads": ["UIM segment", "Google Sheet segment"],
+            "current_source": "UIM Google Sheet dashboard tab",
+            "recommended_backend_source": "Backend KPI read models and backend_segment_snapshots",
+            "business_decision": "Validation/reporting only.",
+            "risk": "medium",
+        },
+        {
+            "file": "uim_kpi_mapping.py",
+            "function": "get_kpi_mapping()",
+            "purpose": "Documents formula/source gaps between UIM and backend metrics.",
+            "reads": ["UIM segment", "marketing segment", "manual segment mapping"],
+            "current_source": "Static mapping of UIM definitions and backend gaps",
+            "recommended_backend_source": "Backend-owned KPI definitions plus final_segment mapping",
+            "business_decision": "Migration planning only.",
+            "risk": "low",
+        },
+    ]
+
+
+def _takeover_voucher_allocation_audit() -> list[dict]:
+    return [
+        {"system": "Public Pool", "current_dependency": "UIM/Sheet via users.for_bot_segment or users.bot_segment", "current_logic": "Segment probability map in config.py controls access probability and delay.", "recommended_replacement": "Use users.final_segment from backend engine; keep UIM fallback and mismatch logs in Phase 7B.", "migration_risk": "high", "safe_to_migrate_first": False},
+        {"system": "SVD", "current_dependency": "Manual new-user logic derived from normalized for_bot_segment/new_joiner labels", "current_logic": "assign_public_pool_access_once() boosts first three assignments for new_user/new_joiner to 100%.", "recommended_replacement": "Backend final_segment plus backend player_age_type for new-player handling.", "migration_risk": "high", "safe_to_migrate_first": False},
+        {"system": "Welcome Voucher", "current_dependency": "No direct UIM segment dependency found in claim gate; uses welcome_eligibility and joined-main timing.", "current_logic": "Eligibility and lifecycle collections drive visibility/claiming.", "recommended_replacement": "No segment replacement required; optionally compare backend player_age_type for audit only.", "migration_risk": "low", "safe_to_migrate_first": True},
+        {"system": "Special Voucher", "current_dependency": "No direct for_bot_segment/bot_segment dependency found; uses drop audience/eligibility allow lists and restrictions.", "current_logic": "Manual admin-created drop eligibility and personalized/pooled voucher assignment.", "recommended_replacement": "If future segment allow lists are added, read users.final_segment only.", "migration_risk": "medium", "safe_to_migrate_first": True},
+        {"system": "Campaign Voucher", "current_dependency": "No direct segment filtering found except Public Pool shaping path for public pooled drops.", "current_logic": "Drop audience, pool availability, channel subscription, manual restrictions, and public-pool shaping.", "recommended_replacement": "Separate campaign audience from segment; where segment is required, read backend final_segment.", "migration_risk": "medium", "safe_to_migrate_first": True},
+    ]
+
+
+def _takeover_campaign_eligibility_audit() -> list[dict]:
+    return [
+        {"campaign": "VIP Campaigns", "current_source": "XP/referral-derived vip_tier/status, not UIM segment", "future_source": "Keep VIP source separate; optionally enrich with backend final_segment for targeting.", "migration_risk": "low"},
+        {"campaign": "High Value Campaigns", "current_source": "Legacy for_bot_segment only where operators manually target high_value; dashboard counts use UIM labels.", "future_source": "backend_segment_snapshots.backend_segment == high_value, materialized to users.final_segment.", "migration_risk": "medium"},
+        {"campaign": "Low Value Reactivation", "current_source": "channel_reactivation.py uses subscription/reward status, not segment; any low-value targeting is manual/operator-side.", "future_source": "users.final_segment == low_value plus backend recency/activity guardrails.", "migration_risk": "medium"},
+        {"campaign": "Voucher Hunter Restrictions", "current_source": "UIM/Sheet for_bot_segment currently informs voucher_hunter probability; restrictions.no_campaign is separate manual user flag.", "future_source": "backend voucher_hunter final_segment plus explicit restrictions flag where needed.", "migration_risk": "high"},
+        {"campaign": "XP Campaigns", "current_source": "XP/check-in/referral collections; no direct UIM segment gate found.", "future_source": "Keep XP source separate; use final_segment only for campaign audience reporting.", "migration_risk": "low"},
+    ]
+
+
+def _takeover_segment_readiness() -> list[dict]:
+    return [
+        {"segment": "high_value", "status": "READY", "explanation": "Backend rule has high-confidence after-bet/withdrawal source fields and deterministic 8x rule."},
+        {"segment": "low_value", "status": "READY", "explanation": "Backend rule has high-confidence after-bet/withdrawal source fields and deterministic below-8x rule."},
+        {"segment": "normal_actual", "status": "READY", "explanation": "Backend rule has high-confidence play activity rule after VH and withdrawal buckets are excluded."},
+        {"segment": "voucher_hunter", "status": "PARTIAL", "explanation": "VH v2 exists, but prior quality/false-positive analysis shows this is the highest-risk behavior gate and needs dual-run mismatch logging before primary use."},
+        {"segment": "active_community", "status": "PARTIAL", "explanation": "Backend emits active_community_player from provisional XP/check-in rules with low confidence; needs business sign-off."},
+        {"segment": "ghost", "status": "PARTIAL", "explanation": "Rule is deterministic when marketing data is present, but inactivity semantics are sensitive to missing marketing snapshots."},
+        {"segment": "unclassified", "status": "NOT READY", "explanation": "Fallback for missing or insufficient data; should not drive production targeting except as an explicit fallback bucket."},
+    ]
+
+
+def _takeover_rollout_plan() -> list[dict]:
+    return [
+        {"phase": "7A", "name": "Dual-read readiness", "behavior": "Read backend and UIM side-by-side, log mismatches, no behavior changes.", "deliverables": ["dependency inventory", "mismatch logging plan", "coverage dashboard", "risk-ranked rollout order"]},
+        {"phase": "7B", "name": "Backend primary with UIM fallback", "behavior": "Operational reads prefer users.final_segment; UIM remains fallback when backend segment is missing or stale.", "deliverables": ["final_segment read model", "fallback counters", "per-system migration toggles"]},
+        {"phase": "7C", "name": "Backend only", "behavior": "Remove UIM dependency from operational reads after mismatch and stale-data thresholds are acceptable.", "deliverables": ["remove bot_segment production reads", "retire UIM sync from runtime path", "keep historical snapshots read-only"]},
+    ]
+
+
+def _nested_get(doc: dict, dotted: str, default=None):
+    current = doc
+    for part in dotted.split("."):
+        if not isinstance(current, dict) or part not in current:
+            return default
+        current = current.get(part)
+    return current
+
+
+def build_backend_segment_takeover_readiness_panel(
+    *,
+    users_col=None,
+    snapshots_col=None,
+    now: datetime | None = None,
+) -> dict:
+    """Phase 7A: read-only migration report for backend segment takeover."""
+    now = now or _utc_now()
+    live_errors: list[str] = []
+    users_with_for_bot_segment = None
+    users_with_bot_segment = None
+    backend_snapshot_count = None
+    backend_compared = None
+    backend_mismatches = None
+    latest_snapshot_week = None
+
+    if users_col is not None:
+        try:
+            users_with_for_bot_segment = int(users_col.count_documents({"for_bot_segment": {"$exists": True, "$ne": ""}}))
+            users_with_bot_segment = int(users_col.count_documents({"bot_segment": {"$exists": True, "$ne": ""}}))
+        except Exception as exc:
+            live_errors.append(f"users_segment_counts: {exc}")
+
+    if snapshots_col is not None:
+        try:
+            docs = list(snapshots_col.find({}, {"snapshot_week": 1, "uim_comparison": 1, "backend_segment": 1}))
+            backend_snapshot_count = len(docs)
+            weeks = sorted({d.get("snapshot_week") for d in docs if d.get("snapshot_week")})
+            latest_snapshot_week = weeks[-1] if weeks else None
+            compared_docs = [d for d in docs if _nested_get(d, "uim_comparison.match") is not None]
+            backend_compared = len(compared_docs)
+            backend_mismatches = sum(1 for d in compared_docs if _nested_get(d, "uim_comparison.match") is False)
+        except Exception as exc:
+            live_errors.append(f"backend_snapshot_counts: {exc}")
+
+    dependency_inventory = _takeover_static_dependency_inventory()
+    return {
+        "success": True,
+        "generated_at": now.isoformat(),
+        "phase": "7A",
+        "data_source": "Read-only code audit plus live segment coverage counters. No writes, no segment changes, no voucher changes, no allocation changes.",
+        "live_coverage": {
+            "users_with_for_bot_segment": users_with_for_bot_segment,
+            "users_with_bot_segment": users_with_bot_segment,
+            "backend_snapshot_count": backend_snapshot_count,
+            "latest_snapshot_week": latest_snapshot_week,
+            "backend_uim_compared": backend_compared,
+            "backend_uim_mismatches": backend_mismatches,
+            "partial_errors": live_errors or None,
+        },
+        "section_1_segment_dependency_audit": dependency_inventory,
+        "section_2_voucher_allocation": _takeover_voucher_allocation_audit(),
+        "section_3_campaign_eligibility": _takeover_campaign_eligibility_audit(),
+        "section_4_segment_readiness_assessment": _takeover_segment_readiness(),
+        "section_5_dual_run_plan": _takeover_rollout_plan(),
+        "success_criteria_answers": {
+            "where_is_uim_still_used": [
+                "Production segment feed: bot_segment_sync.py -> users.for_bot_segment.",
+                "Voucher public-pool/SVD shaping: vouchers.py reads users.for_bot_segment/users.bot_segment.",
+                "Admin reporting and validation: main.py/dashboard_panels.py/uim_validation.py.",
+                "Backend segment engine comparison only: backend_segment_engine.py reads UIM fields for mismatch analysis.",
+            ],
+            "safe_to_migrate_first": [
+                "Read-only dashboards and validation panels.",
+                "Welcome Voucher reporting, because claim gates do not directly depend on UIM segment.",
+                "VIP/XP campaign reporting, because primary eligibility is XP/referral/status based.",
+            ],
+            "high_risk_systems": [
+                "Public Pool allocation",
+                "SVD new-user boost",
+                "Voucher Hunter restrictions/probability",
+                "Any operator-managed high_value/low_value campaign audience that currently relies on UIM labels",
+            ],
+            "blockers_before_backend_source_of_truth": [
+                "Create users.final_segment read model populated from backend_segment_snapshots.",
+                "Define stale/missing backend segment fallback behavior.",
+                "Add per-decision mismatch logging in Phase 7A.",
+                "Sign off active_community_player and ghost production semantics.",
+                "Set acceptable mismatch thresholds for voucher_hunter before using it in restrictions.",
+            ],
+            "estimated_effort_to_remove_uim_entirely": "Medium: about 3-5 focused engineering days after Phase 7A data confirms acceptable mismatch rates; longer if voucher_hunter or active_community require rule changes.",
+        },
+        "risk_assessment": {
+            "high": [d for d in dependency_inventory if d["risk"] == "high"],
+            "medium": [d for d in dependency_inventory if d["risk"] == "medium"],
+            "low": [d for d in dependency_inventory if d["risk"] == "low"],
+        },
+        "recommended_rollout_order": [
+            "Dashboards and validation reads",
+            "Welcome/VIP/XP reporting surfaces",
+            "High-value and low-value campaign audience reads",
+            "Public Pool and SVD with UIM fallback",
+            "Voucher Hunter restrictions after mismatch thresholds are accepted",
+            "Remove UIM sync from operational runtime",
+        ],
+    }
+
+
 _UIMC_PROJ = {
     "_id": 0,
     "account": 1,

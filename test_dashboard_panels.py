@@ -1269,3 +1269,50 @@ class TestPhase4MismatchTable:
         out = dp.build_backend_segment_engine_panel(snapshots_col=col, snapshot_week="2026-W25")
         assert out["mismatch_details"] == []
         assert out["mismatch_by_segment_pair"] == []
+
+
+class TestPhase7ATakeoverReadiness:
+    def test_takeover_readiness_report_sections_and_live_counts(self):
+        users = FakeCollection([
+            {"user_id": 1, "for_bot_segment": "high_value"},
+            {"user_id": 2, "bot_segment": "voucher_hunter"},
+            {"user_id": 3, "for_bot_segment": ""},
+        ])
+        snapshots = FakeCollection([
+            {
+                "account": "u1",
+                "snapshot_week": "2026-W25",
+                "backend_segment": "high_value",
+                "uim_comparison": {"match": True},
+            },
+            {
+                "account": "u2",
+                "snapshot_week": "2026-W25",
+                "backend_segment": "normal_actual",
+                "uim_comparison": {"match": False},
+            },
+        ])
+
+        out = dp.build_backend_segment_takeover_readiness_panel(
+            users_col=users,
+            snapshots_col=snapshots,
+            now=NOW,
+        )
+
+        assert out["success"] is True
+        assert out["phase"] == "7A"
+        assert out["live_coverage"]["users_with_for_bot_segment"] == 1
+        assert out["live_coverage"]["users_with_bot_segment"] == 1
+        assert out["live_coverage"]["backend_snapshot_count"] == 2
+        assert out["live_coverage"]["backend_uim_mismatches"] == 1
+        assert out["section_1_segment_dependency_audit"]
+        assert out["section_2_voucher_allocation"]
+        assert out["section_3_campaign_eligibility"]
+        assert out["section_4_segment_readiness_assessment"]
+        assert out["section_5_dual_run_plan"]
+
+        systems = {row["system"]: row for row in out["section_2_voucher_allocation"]}
+        assert systems["Public Pool"]["migration_risk"] == "high"
+        readiness = {row["segment"]: row["status"] for row in out["section_4_segment_readiness_assessment"]}
+        assert readiness["high_value"] == "READY"
+        assert readiness["unclassified"] == "NOT READY"
