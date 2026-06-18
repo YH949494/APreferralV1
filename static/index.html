@@ -2840,24 +2840,35 @@
 
       section.style.display = "block";
       fillEl.style.width = `${progressPct}%`;
-      rewardEl.textContent = `Reward Value: ${data.reward_value || "RM5"}`;
+      rewardEl.textContent = `Reward Value: $1`;
       claimBtn.style.display = "none";
       claimBtn.removeAttribute("data-dropid");
       claimBtn.removeAttribute("data-claim");
 
       if (status === "unlocked") {
-        titleEl.textContent = "🎉 Voucher Unlocked";
-        countEl.textContent = "Your Welcome Voucher is ready.";
-        messageEl.textContent = "";
         const claimDropId = data.claim_drop_id || data.drop_id || "";
         if (claimDropId) {
+          titleEl.textContent = "🎉 Voucher Unlocked";
+          countEl.textContent = "Your Welcome Voucher is ready.";
+          messageEl.textContent = "";
           claimBtn.dataset.dropid = claimDropId;
           claimBtn.removeAttribute("disabled");
+          claimBtn.textContent = "Claim Welcome Voucher";
+          claimBtn.style.display = "inline-flex";
         } else {
-          claimBtn.setAttribute("disabled", "disabled");
+          console.log(`[WELCOME_UI][CLAIM_BUTTON_DISABLED] uid=${userId} reason=no_claim_drop_id completed_days=${completed}`);
+          titleEl.textContent = "🎁 Welcome Voucher Progress";
+          countEl.textContent = `Progress: ${completed}/${required} ✅`;
+          messageEl.textContent = data.message || "Check-ins completed. Claim slot is not available yet. Please check again later.";
         }
-        claimBtn.textContent = "Claim Welcome Voucher";
-        claimBtn.style.display = "inline-flex";
+        return;
+      }
+
+      if (status === "unlocked_pending") {
+        console.log(`[WELCOME_UI][CLAIM_BUTTON_DISABLED] uid=${userId} reason=no_claim_drop_id completed_days=${completed}`);
+        titleEl.textContent = "🎁 Welcome Voucher Progress";
+        countEl.textContent = `Progress: ${completed}/${required} ✅`;
+        messageEl.textContent = data.message || "Check-ins completed. Claim slot is not available yet. Please check again later.";
         return;
       }
 
@@ -4401,7 +4412,11 @@ Active players win more.`;
       }
 
       const dropId = claimBtn.getAttribute("data-dropid") || claimBtn.getAttribute("data-claim");
-      if (!dropId) return;
+      if (!dropId) {
+        console.log(`[WELCOME_UI][CLAIM_BUTTON_DISABLED] uid=${userId} reason=no_claim_drop_id completed_days=unknown`);
+        tgAlert("❌ Claim slot is not available yet. Please check again later.");
+        return;
+      }
 
       if (window.__claimInFlight) return;
       window.__claimInFlight = true;
