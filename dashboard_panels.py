@@ -2067,6 +2067,198 @@ def build_voucher_hunter_mismatch_audit(
 
 
 # ---------------------------------------------------------------------------
+# 4b. Unclassified Audit (Phase 5C)
+# ---------------------------------------------------------------------------
+
+_UNCA_PROJ = {
+    "_id": 0,
+    "account": 1,
+    "backend_segment": 1,
+    "player_age_type": 1,
+    "claim_risk_level": 1,
+    "confidence": 1,
+    "segment_reason": 1,
+    "metrics_snapshot": 1,
+}
+
+
+def build_unclassified_audit(
+    *,
+    snapshots_col,
+    snapshot_week: str,
+    sample_limit: int = 20,
+    now: datetime | None = None,
+) -> dict:
+    """Phase 5C: read-only audit explaining why users fell into 'unclassified'.
+
+    Queries backend_segment_snapshots for rows where backend_segment='unclassified'.
+    Returns summary KPIs, claim risk breakdown, activity bucket breakdown,
+    top reasons, and sample users per bucket.
+
+    Never writes, never modifies segments or rewards.
+    """
+    now = now or _utc_now()
+
+    docs = list(snapshots_col.find(
+        {"snapshot_week": snapshot_week, "backend_segment": "unclassified"},
+        _UNCA_PROJ,
+    ))
+
+    total_backend = snapshots_col.count_documents({"snapshot_week": snapshot_week})
+    total_unclassified = len(docs)
+
+    def _pct(num: int, den: int) -> float | None:
+        return round(num / den * 100, 2) if den else None
+
+    # --- Summary KPIs ---
+    sum_atb = 0.0; n_atb = 0
+    sum_wd = 0.0; n_wd = 0
+    sum_claim = 0; sum_ref = 0; sum_checkin = 0
+    new_count = 0; old_count = 0
+
+    for doc in docs:
+        ms = doc.get("metrics_snapshot") or {}
+        atb = ms.get("after_total_bet_amount")
+        wd  = ms.get("withdraw_amount")
+        try:
+            if atb is not None:
+                sum_atb += float(atb); n_atb += 1
+        except (TypeError, ValueError):
+            pass
+        try:
+            if wd is not None:
+                sum_wd += float(wd); n_wd += 1
+        except (TypeError, ValueError):
+            pass
+        try:
+            sum_claim   += int(ms.get("claim_count",   0) or 0)
+            sum_ref     += int(ms.get("referral_count", 0) or 0)
+            sum_checkin += int(ms.get("checkin_count",  0) or 0)
+        except (TypeError, ValueError):
+            pass
+        age = doc.get("player_age_type") or ""
+        if age == "new_player":
+            new_count += 1
+        elif age == "old_player":
+            old_count += 1
+
+    n = total_unclassified or 1  # avoid div/0
+
+    summary_kpis = {
+        "total_backend_users":  total_backend,
+        "unclassified_users":   total_unclassified,
+        "unclassified_pct":     _pct(total_unclassified, total_backend),
+        "new_players":          new_count,
+        "old_players":          old_count,
+        "avg_after_bet":        round(sum_atb / n_atb, 4) if n_atb else 0.0,
+        "avg_withdraw":         round(sum_wd  / n_wd,  4) if n_wd  else 0.0,
+        "avg_claims":           round(sum_claim   / n, 4),
+        "avg_referrals":        round(sum_ref     / n, 4),
+        "avg_checkins":         round(sum_checkin / n, 4),
+    }
+
+    # --- Claim Risk Breakdown ---
+    risk_acc: dict[str, int] = {}
+    for doc in docs:
+        risk = doc.get("claim_risk_level") or "normal"
+        risk_acc[risk] = risk_acc.get(risk, 0) + 1
+
+    claim_risk_breakdown = sorted(
+        [
+            {
+                "claim_risk": risk,
+                "users": cnt,
+                "percentage": _pct(cnt, total_unclassified),
+            }
+            for risk, cnt in risk_acc.items()
+        ],
+        key=lambda x: -x["users"],
+    )
+
+    # --- Activity Bucket Classification ---
+    def _bucket(ms: dict) -> str:
+        try:
+            atb  = float(ms.get("after_total_bet_amount") or 0)
+            wd   = float(ms.get("withdraw_amount") or 0)
+            cl   = int(ms.get("claim_count", 0) or 0)
+            chk  = int(ms.get("checkin_count", 0) or 0)
+        except (TypeError, ValueError):
+            return "other"
+        if wd > 0:
+            return "withdraw_user"
+        if atb > 0 and wd == 0:
+            return "play_no_withdraw"
+        if atb == 0 and cl > 2:
+            return "claim_only"
+        if atb == 0 and wd == 0 and cl <= 2 and chk <= 2:
+            return "inactive_light"
+        return "other"
+
+    bucket_acc: dict[str, int] = {}
+    bucket_samples: dict[str, list] = {}
+
+    for doc in docs:
+        ms = doc.get("metrics_snapshot") or {}
+        bkt = _bucket(ms)
+        bucket_acc[bkt] = bucket_acc.get(bkt, 0) + 1
+        if bkt not in bucket_samples:
+            bucket_samples[bkt] = []
+        if len(bucket_samples[bkt]) < sample_limit:
+            bucket_samples[bkt].append({
+                "account":    doc.get("account"),
+                "after_bet":  ms.get("after_total_bet_amount"),
+                "withdraw":   ms.get("withdraw_amount"),
+                "claims":     ms.get("claim_count"),
+                "referrals":  ms.get("referral_count"),
+                "checkins":   ms.get("checkin_count"),
+                "age_type":   doc.get("player_age_type"),
+                "claim_risk": doc.get("claim_risk_level"),
+                "confidence": doc.get("confidence"),
+                "reason":     doc.get("segment_reason"),
+            })
+
+    _BUCKET_ORDER = ["inactive_light", "claim_only", "play_no_withdraw", "withdraw_user", "other"]
+    activity_buckets = [
+        {
+            "bucket":     bkt,
+            "users":      bucket_acc.get(bkt, 0),
+            "percentage": _pct(bucket_acc.get(bkt, 0), total_unclassified),
+        }
+        for bkt in _BUCKET_ORDER
+        if bucket_acc.get(bkt, 0) > 0
+    ]
+
+    # --- Top Reasons ---
+    reason_acc: dict[str, int] = {}
+    for doc in docs:
+        reason = (doc.get("segment_reason") or "").strip() or "unknown"
+        reason_acc[reason] = reason_acc.get(reason, 0) + 1
+
+    top_reasons = sorted(
+        [
+            {
+                "reason":     r,
+                "users":      cnt,
+                "percentage": _pct(cnt, total_unclassified),
+            }
+            for r, cnt in reason_acc.items()
+        ],
+        key=lambda x: -x["users"],
+    )[:20]
+
+    return {
+        "ok": True,
+        "generated_at": now.isoformat(),
+        "snapshot_week": snapshot_week,
+        "summary_kpis": summary_kpis,
+        "claim_risk_breakdown": claim_risk_breakdown,
+        "activity_buckets": activity_buckets,
+        "top_reasons": top_reasons,
+        "sample_users": bucket_samples,
+    }
+
+
+# ---------------------------------------------------------------------------
 # 5. User drilldown
 # ---------------------------------------------------------------------------
 
