@@ -1091,6 +1091,72 @@
     document.body.removeChild(a);
   }
 
+  // ---------- Identity Match Audit ----------
+  function loadIdentityMatchAudit() {
+    var week = ($("#ima-week") || {}).value || "";
+    if (!week) {
+      $("#cards-ima-summary").innerHTML = "";
+      statePanel("ima-body", "empty", "Enter a snapshot_week and click Run Audit.");
+      return;
+    }
+    statePanel("ima-body", "loading", "Running audit…");
+    $("#cards-ima-summary").innerHTML = "";
+    api("/api/admin/dashboard/backend-segment-engine/identity-match-audit?snapshot_week=" +
+        encodeURIComponent(week))
+      .then(function (d) {
+        // Summary cards
+        var matchColor = d.match_rate_pct >= 80 ? "var(--green,#4caf88)"
+                       : d.match_rate_pct >= 40 ? "var(--yellow,#e0b44a)"
+                       : "var(--red,#e05c5c)";
+        $("#cards-ima-summary").innerHTML =
+          card("Total Accounts", fmt(d.total), "marketing rows for " + esc(d.snapshot_week)) +
+          card("Matched", fmt(d.matched), "user_id resolved") +
+          card("Unmatched", fmt(d.unmatched), "user_id = null — join failed") +
+          '<div class="stat-card"><div class="stat-label">Match Rate</div>' +
+          '<div class="stat-value" style="color:' + matchColor + '">' + d.match_rate_pct + '%</div>' +
+          '<div class="stat-sub">' + (d.match_rate_pct >= 80 ? "healthy" : d.match_rate_pct >= 40 ? "partial" : "critical — join mismatch likely") + '</div></div>';
+
+        var html = "";
+
+        // Matched samples
+        html += '<div class="section-title" style="margin-top:20px;">Sample Matched Rows <span style="font-size:11px;font-weight:400;color:var(--muted,#8892a4);">(up to 20)</span></div>';
+        if (d.sample_matched && d.sample_matched.length) {
+          html += '<div style="overflow-x:auto"><table class="mini-table"><thead><tr>' +
+            '<th>account</th><th>username</th><th>user_id</th>' +
+            '</tr></thead><tbody>';
+          d.sample_matched.forEach(function (r) {
+            html += '<tr><td>' + esc(r.account || "") + '</td><td>' + esc(r.username || "") + '</td><td>' + esc(r.user_id || "") + '</td></tr>';
+          });
+          html += '</tbody></table></div>';
+        } else {
+          html += '<div class="empty">No matched rows.</div>';
+        }
+
+        // Unmatched samples
+        html += '<div class="section-title" style="margin-top:20px;">Sample Unmatched Rows <span style="font-size:11px;font-weight:400;color:var(--muted,#8892a4);">(up to 20)</span></div>';
+        if (d.sample_unmatched && d.sample_unmatched.length) {
+          html += '<div style="overflow-x:auto"><table class="mini-table"><thead><tr>' +
+            '<th>account</th><th>username (resolved)</th><th>user_id</th>' +
+            '</tr></thead><tbody>';
+          d.sample_unmatched.forEach(function (r) {
+            html += '<tr><td>' + esc(r.account || "") + '</td>' +
+              '<td style="color:var(--muted,#8892a4)">' + esc(r.username || "—") + '</td>' +
+              '<td style="color:var(--muted,#8892a4)">—</td></tr>';
+          });
+          html += '</tbody></table></div>';
+        } else {
+          html += '<div class="empty">No unmatched rows — all accounts resolved!</div>';
+        }
+
+        $("#ima-body").innerHTML = html;
+      })
+      .catch(function (e) {
+        if (e.message !== "unauthorized") {
+          statePanel("ima-body", "banner error", "Failed: " + esc(e.message));
+        }
+      });
+  }
+
   // ---------- Upload Player Performance (Phase 2A) ----------
   function uploadPlayerPerformance() {
     var input = $("#upload-file-input");
@@ -1508,6 +1574,9 @@
     if (uimcApplyBtn) uimcApplyBtn.addEventListener("click", function () { loadUimComparison(true); });
     var uimcExportBtn = $("#uimc-export-btn");
     if (uimcExportBtn) uimcExportBtn.addEventListener("click", exportUimComparisonCsv);
+
+    var imaApplyBtn = $("#ima-apply-btn");
+    if (imaApplyBtn) imaApplyBtn.addEventListener("click", loadIdentityMatchAudit);
 
     var uploadSubmitBtn = $("#upload-submit-btn");
     if (uploadSubmitBtn) uploadSubmitBtn.addEventListener("click", uploadPlayerPerformance);
