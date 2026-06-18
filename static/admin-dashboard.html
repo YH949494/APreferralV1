@@ -25,6 +25,7 @@
       <button class="nav-item" data-view="voucherHunterAudit">Data → Voucher Hunter Mismatch</button>
       <button class="nav-item" data-view="unclassifiedAudit">Data → Unclassified Audit</button>
       <button class="nav-item" data-view="segmentRuleSimulator">Data → Segment Rule Simulator</button>
+      <button class="nav-item" data-view="voucherHunterQuality">Data → VH Rule Quality</button>
       <button class="nav-item" data-view="uploadPlayerPerformance">Data → Upload Player Performance</button>
       <button class="nav-item" data-view="uploadHistory">Data → Upload History</button>
       <button class="nav-item" data-view="rawExplorer">Data → Raw Data Explorer</button>
@@ -426,6 +427,42 @@
 
         <div class="section-title">Top Segment Movements <span style="font-size:11px;font-weight:400;color:var(--muted,#8892a4);">(top 20, sorted by users)</span></div>
         <div id="srs-movements-body"></div>
+      </section>
+
+      <!-- VOUCHER HUNTER RULE QUALITY ANALYSIS VIEW (Phase 5E) -->
+      <section id="view-voucherHunterQuality" class="hidden">
+        <div style="margin-bottom:16px;"><span class="tag heuristic" style="font-size:12px;padding:4px 12px;">READ ONLY — analysis only. Does not modify segment rules, bot_segment, voucher allocation, or reward logic.</span></div>
+        <div style="background:var(--bg-card,#1e2230);border:1px solid var(--border,#2d3348);border-radius:8px;padding:16px;margin-bottom:20px;">
+          <div style="font-weight:600;font-size:13px;margin-bottom:4px;">Voucher Hunter Rule Quality Analysis</div>
+          <div style="font-size:11px;color:var(--muted,#8892a4);margin-bottom:12px;">
+            Analyses all users where UIM classified them as <b>voucher_hunter</b>, grouped by what the backend engine classified them as.
+            Goal: determine whether UIM is over-classifying real players (normal_actual / low_value / high_value).
+          </div>
+          <div class="controls" style="flex-wrap:wrap;gap:8px;margin-bottom:8px;">
+            <input class="filter-input" id="vhqa-week" placeholder="snapshot_week e.g. 2026-W25" style="max-width:220px;margin:0;" />
+            <button class="btn primary" id="vhqa-apply-btn">Run Analysis</button>
+          </div>
+        </div>
+
+        <div class="section-title">Summary</div>
+        <div class="card-grid" id="cards-vhqa-summary"></div>
+
+        <div class="section-title">Group Breakdown by Backend Segment</div>
+        <div style="font-size:11px;color:var(--muted,#8892a4);margin-bottom:8px;">Avg metrics per backend segment for UIM voucher_hunter users.</div>
+        <div id="vhqa-breakdown-body"></div>
+
+        <div class="section-title">Claim Threshold Breakdown</div>
+        <div style="font-size:11px;color:var(--muted,#8892a4);margin-bottom:8px;">How many UIM voucher_hunter users actually have high claim counts? Used to evaluate whether raising the backend claim threshold would reduce over-classification.</div>
+        <div id="vhqa-threshold-body"></div>
+
+        <div class="section-title">Top 20 by Claim Count</div>
+        <div id="vhqa-top-claims-body"></div>
+
+        <div class="section-title">Top 20 by After Bet Amount</div>
+        <div id="vhqa-top-bet-body"></div>
+
+        <div class="section-title">Top 20 by Referral Count</div>
+        <div id="vhqa-top-refs-body"></div>
       </section>
 
       <!-- UPLOAD PLAYER PERFORMANCE VIEW (Phase 2A) -->

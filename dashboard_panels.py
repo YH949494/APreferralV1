@@ -2259,6 +2259,196 @@ def build_unclassified_audit(
 
 
 # ---------------------------------------------------------------------------
+# 4d. Voucher Hunter Rule Quality Analysis (Phase 5E)
+# ---------------------------------------------------------------------------
+
+_VHQA_PROJ = {
+    "_id": 0,
+    "account": 1,
+    "backend_segment": 1,
+    "player_age_type": 1,
+    "claim_risk_level": 1,
+    "confidence": 1,
+    "segment_reason": 1,
+    "uim_comparison": 1,
+    "metrics_snapshot": 1,
+}
+
+
+def build_voucher_hunter_quality_analysis(
+    *,
+    snapshots_col,
+    snapshot_week: str,
+    top_n: int = 20,
+    now: datetime | None = None,
+) -> dict:
+    """Phase 5E: read-only analysis of users where uim_segment=voucher_hunter.
+
+    Groups by backend_segment and computes avg metrics to determine whether
+    the UIM voucher_hunter classification is over-classifying real players.
+    Also returns top-N users by claim_count, after_bet, and referral_count,
+    plus claim threshold breakdown (>=10, >=20, >=50).
+
+    Never writes, never modifies segments or rewards.
+    """
+    now = now or _utc_now()
+
+    docs = list(snapshots_col.find(
+        {"snapshot_week": snapshot_week, "uim_comparison.uim_segment": "voucher_hunter"},
+        _VHQA_PROJ,
+    ))
+
+    total = len(docs)
+
+    def _pct(num: int, den: int) -> float | None:
+        return round(num / den * 100, 2) if den else None
+
+    # --- Per-group accumulators ---
+    acc: dict[str, dict] = {}
+
+    for doc in docs:
+        seg = doc.get("backend_segment") or "unclassified"
+        ms = doc.get("metrics_snapshot") or {}
+
+        if seg not in acc:
+            acc[seg] = {
+                "user_count": 0,
+                "sum_atb": 0.0, "n_atb": 0,
+                "sum_wd": 0.0, "n_wd": 0,
+                "sum_claim": 0, "sum_ref": 0, "sum_checkin": 0,
+                "new_player": 0, "old_player": 0,
+                "claim_risk_counts": {},
+            }
+        a = acc[seg]
+        a["user_count"] += 1
+
+        try:
+            atb = ms.get("after_total_bet_amount")
+            if atb is not None:
+                a["sum_atb"] += float(atb); a["n_atb"] += 1
+        except (TypeError, ValueError):
+            pass
+        try:
+            wd = ms.get("withdraw_amount")
+            if wd is not None:
+                a["sum_wd"] += float(wd); a["n_wd"] += 1
+        except (TypeError, ValueError):
+            pass
+        try:
+            a["sum_claim"]   += int(ms.get("claim_count",   0) or 0)
+            a["sum_ref"]     += int(ms.get("referral_count", 0) or 0)
+            a["sum_checkin"] += int(ms.get("checkin_count",  0) or 0)
+        except (TypeError, ValueError):
+            pass
+
+        age = doc.get("player_age_type") or ""
+        if age == "new_player":
+            a["new_player"] += 1
+        elif age == "old_player":
+            a["old_player"] += 1
+
+        risk = doc.get("claim_risk_level") or "normal"
+        a["claim_risk_counts"][risk] = a["claim_risk_counts"].get(risk, 0) + 1
+
+    # Build group breakdown sorted by user_count desc
+    _seg_order = [
+        "normal_actual", "low_value", "high_value", "voucher_hunter",
+        "active_community_player", "ghost", "unclassified",
+    ]
+
+    def _seg_sort_key(seg):
+        try:
+            return _seg_order.index(seg)
+        except ValueError:
+            return 99
+
+    group_breakdown = []
+    for seg in sorted(acc.keys(), key=_seg_sort_key):
+        a = acc[seg]
+        n = a["user_count"] or 1
+        # Dominant claim risk
+        dominant_risk = max(a["claim_risk_counts"], key=a["claim_risk_counts"].get) if a["claim_risk_counts"] else None
+        group_breakdown.append({
+            "backend_segment":   seg,
+            "user_count":        a["user_count"],
+            "pct_of_total":      _pct(a["user_count"], total),
+            "avg_after_bet":     round(a["sum_atb"] / a["n_atb"], 2) if a["n_atb"] else None,
+            "avg_withdraw":      round(a["sum_wd"]  / a["n_wd"],  2) if a["n_wd"]  else None,
+            "avg_claims":        round(a["sum_claim"]   / n, 2),
+            "avg_referrals":     round(a["sum_ref"]     / n, 2),
+            "avg_checkins":      round(a["sum_checkin"] / n, 2),
+            "dominant_claim_risk": dominant_risk,
+            "new_players":       a["new_player"],
+            "old_players":       a["old_player"],
+        })
+
+    # --- Top-N lists ---
+    def _ms_float(doc, key):
+        try:
+            return float(doc.get("metrics_snapshot", {}).get(key) or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _ms_int(doc, key):
+        try:
+            return int(doc.get("metrics_snapshot", {}).get(key) or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    def _sample_row(doc):
+        ms = doc.get("metrics_snapshot") or {}
+        return {
+            "account":    doc.get("account"),
+            "backend_segment": doc.get("backend_segment") or "unclassified",
+            "after_bet":  ms.get("after_total_bet_amount"),
+            "withdraw":   ms.get("withdraw_amount"),
+            "claims":     ms.get("claim_count"),
+            "referrals":  ms.get("referral_count"),
+            "checkins":   ms.get("checkin_count"),
+            "age_type":   doc.get("player_age_type"),
+            "claim_risk": doc.get("claim_risk_level"),
+            "confidence": doc.get("confidence"),
+            "reason":     doc.get("segment_reason"),
+        }
+
+    top_by_claims = [
+        _sample_row(d)
+        for d in sorted(docs, key=lambda x: _ms_int(x, "claim_count"), reverse=True)[:top_n]
+    ]
+    top_by_after_bet = [
+        _sample_row(d)
+        for d in sorted(docs, key=lambda x: _ms_float(x, "after_total_bet_amount"), reverse=True)[:top_n]
+    ]
+    top_by_referrals = [
+        _sample_row(d)
+        for d in sorted(docs, key=lambda x: _ms_int(x, "referral_count"), reverse=True)[:top_n]
+    ]
+
+    # --- Claim threshold breakdown ---
+    thresholds = [10, 20, 50]
+    claim_threshold_breakdown = []
+    for t in thresholds:
+        cnt = sum(1 for d in docs if _ms_int(d, "claim_count") >= t)
+        claim_threshold_breakdown.append({
+            "threshold":  f">= {t} claims",
+            "count":      cnt,
+            "percentage": _pct(cnt, total),
+        })
+
+    return {
+        "ok": True,
+        "generated_at": now.isoformat(),
+        "snapshot_week": snapshot_week,
+        "total_uim_voucher_hunter": total,
+        "group_breakdown": group_breakdown,
+        "top_by_claims":     top_by_claims,
+        "top_by_after_bet":  top_by_after_bet,
+        "top_by_referrals":  top_by_referrals,
+        "claim_threshold_breakdown": claim_threshold_breakdown,
+    }
+
+
+# ---------------------------------------------------------------------------
 # 4c. Segment Rule Simulator (Phase 5D)
 # ---------------------------------------------------------------------------
 
