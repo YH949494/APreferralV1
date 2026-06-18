@@ -1105,16 +1105,14 @@
         encodeURIComponent(week))
       .then(function (d) {
         // Summary cards
-        var matchColor = d.match_rate_pct >= 80 ? "var(--green,#4caf88)"
-                       : d.match_rate_pct >= 40 ? "var(--yellow,#e0b44a)"
-                       : "var(--red,#e05c5c)";
+        var matchLabel = d.match_rate_pct >= 80 ? "healthy"
+                       : d.match_rate_pct >= 40 ? "partial"
+                       : "critical — join mismatch likely";
         $("#cards-ima-summary").innerHTML =
-          card("Total Accounts", fmt(d.total), "marketing rows for " + esc(d.snapshot_week)) +
-          card("Matched", fmt(d.matched), "user_id resolved") +
-          card("Unmatched", fmt(d.unmatched), "user_id = null — join failed") +
-          '<div class="stat-card"><div class="stat-label">Match Rate</div>' +
-          '<div class="stat-value" style="color:' + matchColor + '">' + d.match_rate_pct + '%</div>' +
-          '<div class="stat-sub">' + (d.match_rate_pct >= 80 ? "healthy" : d.match_rate_pct >= 40 ? "partial" : "critical — join mismatch likely") + '</div></div>';
+          dqCard("Total Accounts", { value: d.total, note: "marketing rows for " + d.snapshot_week }) +
+          dqCard("Matched", { value: d.matched, note: "user_id resolved" }) +
+          dqCard("Unmatched", { value: d.unmatched, note: "user_id = null — join failed" }) +
+          dqCard("Match Rate %", { value: d.match_rate_pct, note: matchLabel });
 
         var html = "";
 
