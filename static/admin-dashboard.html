@@ -28,6 +28,7 @@
       <button class="nav-item" data-view="voucherHunterQuality">Data → VH Rule Quality</button>
       <button class="nav-item" data-view="voucherHunterFalsePositive">Data → VH False Positive</button>
       <button class="nav-item" data-view="voucherHunterRuleSimulator">Data → VH Rule Simulator</button>
+      <button class="nav-item" data-view="vhPriorityImpact">Data → VH Priority Impact</button>
       <button class="nav-item" data-view="uploadPlayerPerformance">Data → Upload Player Performance</button>
       <button class="nav-item" data-view="uploadHistory">Data → Upload History</button>
       <button class="nav-item" data-view="rawExplorer">Data → Raw Data Explorer</button>
@@ -564,6 +565,41 @@
 
         <div class="section-title">False Negative Review <span style="font-size:11px;font-weight:400;color:var(--muted,#8892a4);">(sim=VH, backend≠voucher_hunter — top 50 by claims)</span></div>
         <div id="vhrs-fn-body"></div>
+      </section>
+
+      <!-- VH PRIORITY IMPACT ANALYSIS VIEW (Phase 7C) -->
+      <section id="view-vhPriorityImpact" class="hidden">
+        <div style="margin-bottom:16px;"><span class="tag heuristic" style="font-size:12px;padding:4px 12px;">SIMULATION ONLY — read-only. No writes to users, segments, voucher allocation, or rewards.</span></div>
+        <div style="background:var(--bg-card,#1e2230);border:1px solid var(--border,#2d3348);border-radius:8px;padding:16px;margin-bottom:20px;">
+          <div style="font-weight:600;font-size:13px;margin-bottom:4px;">VH Priority Impact Analysis</div>
+          <div style="font-size:11px;color:var(--muted,#8892a4);margin-bottom:12px;">
+            Simulates moving <b>Voucher Hunter BEFORE Low Value</b> in the segment priority order.
+            Measures how many Low Value users would move to VH and whether this improves classification quality.
+          </div>
+          <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:12px;">
+            <div>
+              <div style="font-size:11px;font-weight:600;margin-bottom:6px;color:var(--muted,#8892a4);">SNAPSHOT WEEK</div>
+              <input class="filter-input" id="vhpi-week" placeholder="e.g. 2026-W25" style="max-width:220px;margin:0;" />
+            </div>
+          </div>
+          <button class="btn primary" id="vhpi-run-btn">Run Analysis</button>
+        </div>
+
+        <div class="section-title">Decision Metrics</div>
+        <div class="card-grid" id="cards-vhpi-decision"></div>
+
+        <div class="section-title">Summary</div>
+        <div class="card-grid" id="cards-vhpi-summary"></div>
+
+        <div class="section-title">Low Value Impact</div>
+        <div style="font-size:11px;color:var(--muted,#8892a4);margin-bottom:8px;">Key KPI — how much of the Low Value segment disappears if VH is evaluated first?</div>
+        <div class="card-grid" id="cards-vhpi-lv"></div>
+
+        <div class="section-title">Migration Breakdown</div>
+        <div id="vhpi-migration-body"></div>
+
+        <div class="section-title">Candidate Table <span style="font-size:11px;font-weight:400;color:var(--muted,#8892a4);">(users that would change, sorted by claim_count desc)</span></div>
+        <div id="vhpi-candidates-body"></div>
       </section>
 
       <!-- UPLOAD PLAYER PERFORMANCE VIEW (Phase 2A) -->

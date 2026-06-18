@@ -3621,6 +3621,39 @@ def backend_segment_engine_voucher_hunter_mismatch_audit():
     ))
 
 
+@admin_bp.get("/api/admin/dashboard/backend-segment-engine/vh-priority-impact")
+def backend_segment_engine_vh_priority_impact():
+    """Phase 7C: read-only simulation of promoting VH above Low Value.
+
+    GET ?snapshot_week=YYYY-Www&candidate_limit=200
+
+    Returns summary, migration breakdown, low-value impact, extreme-case
+    count, candidate table, and decision metrics.
+    Never writes, never modifies segments or rewards.
+    """
+    ok, err = require_admin_from_query()
+    if not ok:
+        msg, code = err
+        return jsonify({"ok": False, "error": msg}), code
+
+    snapshot_week = request.args.get("snapshot_week", "").strip()
+    if not snapshot_week:
+        return jsonify({"ok": False, "error": "snapshot_week is required"}), 400
+    if not _SNAPSHOT_WEEK_RE.match(snapshot_week):
+        return jsonify({"ok": False, "error": f"Invalid snapshot_week '{snapshot_week}'"}), 400
+
+    try:
+        candidate_limit = max(1, min(500, int(request.args.get("candidate_limit", 200))))
+    except (TypeError, ValueError):
+        candidate_limit = 200
+
+    return jsonify(_panels.build_vh_priority_impact(
+        snapshots_col=db["backend_segment_snapshots"],
+        snapshot_week=snapshot_week,
+        candidate_limit=candidate_limit,
+    ))
+
+
 @admin_bp.get("/api/admin/dashboard/backend-segment-engine/voucher-hunter-rule-simulator")
 def backend_segment_engine_voucher_hunter_rule_simulator():
     """Phase 6A: read-only simulation of a refined voucher_hunter rule.

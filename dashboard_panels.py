@@ -2259,6 +2259,205 @@ def build_unclassified_audit(
 
 
 # ---------------------------------------------------------------------------
+# 4g. VH Priority Impact Analysis (Phase 7C)
+# ---------------------------------------------------------------------------
+
+_VHPI_PROJ = _VHMA_PROJ  # account, backend_segment, metrics_snapshot, uim_comparison, etc.
+
+# VH v2 thresholds mirrored here to avoid importing the engine module.
+_VH_CLAIM_MIN   = 10
+_VH_AFTER_BET_MAX = 100.0
+_VH_REF_MAX     = 20
+
+
+def _vhpi_simulated_segment(current_seg: str, ms: dict) -> str:
+    """Re-classify one user with VH promoted above Low Value.
+
+    Proposed priority order:
+      1. high_value  (unchanged)
+      2. voucher_hunter  ← NEW: checked before low_value
+      3. low_value
+      4. normal_actual / ghost / active_community / unclassified (unchanged)
+
+    Only users that currently have marketing data can move (their current_seg
+    is already one of the marketing-resolved segments). Users without
+    marketing data are unchanged.
+    """
+    try:
+        atb  = float(ms.get("after_total_bet_amount") or 0)
+    except (TypeError, ValueError):
+        atb = 0.0
+    try:
+        wd   = float(ms.get("withdraw_amount") or 0)
+    except (TypeError, ValueError):
+        wd = 0.0
+    try:
+        cl   = int(ms.get("claim_count") or 0)
+    except (TypeError, ValueError):
+        cl = 0
+    try:
+        refs = int(ms.get("referral_count") or 0)
+    except (TypeError, ValueError):
+        refs = 0
+
+    marketing_available = ms.get("after_total_bet_amount") is not None and ms.get("withdraw_amount") is not None
+    if not marketing_available:
+        return current_seg  # no marketing data — result unchanged
+
+    # 1. High Value (unchanged — highest priority)
+    if wd > 0:
+        ratio = atb / wd
+        if ratio >= 8.0:
+            return "high_value"
+
+    # 2. Voucher Hunter v2 — now checked BEFORE low_value
+    if cl >= _VH_CLAIM_MIN and atb < _VH_AFTER_BET_MAX and refs < _VH_REF_MAX:
+        return "voucher_hunter"
+
+    # 3. Low Value (withdraw > 0, ratio < 8x, didn't qualify for VH)
+    if wd > 0:
+        return "low_value"
+
+    # 4-7: play / ghost / community / unclassified (unchanged)
+    return current_seg
+
+
+def build_vh_priority_impact(
+    *,
+    snapshots_col,
+    snapshot_week: str,
+    candidate_limit: int = 200,
+    now: datetime | None = None,
+) -> dict:
+    """Phase 7C: read-only simulation of promoting VH above Low Value.
+
+    Loads backend_segment_snapshots for the week, re-classifies each user
+    with the proposed priority order (VH before Low Value), and returns
+    summary metrics, migration breakdown, low-value impact, extreme-case
+    count, candidate table, and decision metrics.
+
+    Never writes, never modifies segments or rewards.
+    """
+    now = now or _utc_now()
+
+    docs = list(snapshots_col.find({"snapshot_week": snapshot_week}, _VHPI_PROJ))
+    total = len(docs)
+
+    def _pct(num: int, den: int) -> float | None:
+        return round(num / den * 100, 2) if den else None
+
+    # --- Simulation pass ---
+    users_changed = 0
+    current_lv_count = 0
+    remaining_lv_count = 0
+    migration: dict[tuple[str, str], int] = {}
+    lv_to_vh = 0
+    na_to_vh = 0
+    other_to_vh = 0
+    extreme_vh = 0
+    candidates: list[dict] = []
+
+    for doc in docs:
+        current_seg = doc.get("backend_segment") or "unclassified"
+        ms = doc.get("metrics_snapshot") or {}
+
+        if current_seg == "low_value":
+            current_lv_count += 1
+
+        sim_seg = _vhpi_simulated_segment(current_seg, ms)
+
+        if sim_seg == "low_value":
+            remaining_lv_count += 1
+
+        if sim_seg != current_seg:
+            users_changed += 1
+            key = (current_seg, sim_seg)
+            migration[key] = migration.get(key, 0) + 1
+
+            if sim_seg == "voucher_hunter":
+                if current_seg == "low_value":
+                    lv_to_vh += 1
+                elif current_seg == "normal_actual":
+                    na_to_vh += 1
+                else:
+                    other_to_vh += 1
+
+            # Build candidate row
+            try:
+                atb  = float(ms.get("after_total_bet_amount") or 0)
+            except (TypeError, ValueError):
+                atb = 0.0
+            try:
+                wd   = float(ms.get("withdraw_amount") or 0)
+            except (TypeError, ValueError):
+                wd = 0.0
+            try:
+                cl   = int(ms.get("claim_count") or 0)
+            except (TypeError, ValueError):
+                cl = 0
+
+            candidates.append({
+                "account":          doc.get("account"),
+                "current_segment":  current_seg,
+                "simulated_segment": sim_seg,
+                "claim_count":      ms.get("claim_count"),
+                "after_bet":        ms.get("after_total_bet_amount"),
+                "withdrawal":       ms.get("withdraw_amount"),
+                "after_bet_multiple": round(atb / wd, 4) if wd else None,
+                "after_bet_per_claim": round(atb / max(cl, 1), 4),
+                "claim_risk_level": doc.get("claim_risk_level"),
+                "player_age_type":  doc.get("player_age_type"),
+            })
+
+        # Extreme VH: claim_count >= 20 AND after_bet_per_claim < 2
+        try:
+            cl  = int(ms.get("claim_count") or 0)
+            atb = float(ms.get("after_total_bet_amount") or 0)
+        except (TypeError, ValueError):
+            cl = 0; atb = 0.0
+        if cl >= 20 and (atb / max(cl, 1)) < 2:
+            extreme_vh += 1
+
+    # Sort candidates by claim_count desc
+    candidates.sort(key=lambda r: -(r["claim_count"] or 0))
+    candidates = candidates[:candidate_limit]
+
+    # Migration breakdown (sorted by users desc)
+    migration_breakdown = sorted(
+        [{"from_segment": k[0], "to_segment": k[1], "users": v}
+         for k, v in migration.items()],
+        key=lambda x: -x["users"],
+    )
+
+    return {
+        "ok": True,
+        "generated_at": now.isoformat(),
+        "snapshot_week": snapshot_week,
+        "summary": {
+            "users_scanned":                total,
+            "users_changed":                users_changed,
+            "low_value_to_voucher_hunter":  lv_to_vh,
+            "normal_actual_to_voucher_hunter": na_to_vh,
+            "other_to_voucher_hunter":      other_to_vh,
+        },
+        "migration_breakdown": migration_breakdown,
+        "low_value_impact": {
+            "current_low_value":       current_lv_count,
+            "remaining_low_value":     remaining_lv_count,
+            "moved_to_voucher_hunter": lv_to_vh,
+            "pct_removed":             _pct(lv_to_vh, current_lv_count),
+        },
+        "extreme_vh": {"extreme_vh": extreme_vh},
+        "decision_metrics": {
+            "low_value_removed_pct":    _pct(lv_to_vh, current_lv_count),
+            "voucher_hunter_growth_pct": _pct(lv_to_vh + na_to_vh + other_to_vh, total),
+            "extreme_vh_count":         extreme_vh,
+        },
+        "candidates": candidates,
+    }
+
+
+# ---------------------------------------------------------------------------
 # 4f. Voucher Hunter Rule Simulator (Phase 6A)
 # ---------------------------------------------------------------------------
 

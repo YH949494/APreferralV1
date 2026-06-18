@@ -1491,6 +1491,105 @@
       });
   }
 
+  // ---------- VH Priority Impact Analysis (Phase 7C) ----------
+  function runVhPriorityImpact() {
+    var week = ($("#vhpi-week") || {}).value || "";
+    if (!week) {
+      statePanel("vhpi-migration-body", "banner", "Enter a snapshot_week and click Run Analysis.");
+      ["cards-vhpi-decision","cards-vhpi-summary","cards-vhpi-lv","vhpi-candidates-body"].forEach(function(id){ $("#"+id).innerHTML=""; });
+      return;
+    }
+    statePanel("vhpi-migration-body", "loading", "Running analysis…");
+    ["cards-vhpi-decision","cards-vhpi-summary","cards-vhpi-lv","vhpi-candidates-body"].forEach(function(id){ $("#"+id).innerHTML=""; });
+
+    api("/api/admin/dashboard/backend-segment-engine/vh-priority-impact?snapshot_week=" + encodeURIComponent(week))
+      .then(function (d) {
+        var sm = d.summary || {};
+        var lv = d.low_value_impact || {};
+        var dm = d.decision_metrics || {};
+        var ev = (d.extreme_vh || {}).extreme_vh;
+
+        // Decision metrics cards (key KPIs first)
+        function pctColor(pct) {
+          return pct == null ? "" : pct >= 50 ? "var(--red,#e05c5c)" : pct >= 20 ? "var(--yellow,#e0b44a)" : "var(--green,#4caf88)";
+        }
+        $("#cards-vhpi-decision").innerHTML =
+          '<div class="kpi"><div class="label">Low Value Removed %</div>' +
+          '<div class="value" style="color:' + pctColor(dm.low_value_removed_pct) + '">' +
+          (dm.low_value_removed_pct != null ? dm.low_value_removed_pct + "%" : "—") + '</div></div>' +
+          dqCard("VH Growth (% of total)", { value: dm.voucher_hunter_growth_pct != null ? dm.voucher_hunter_growth_pct + "%" : "—" }) +
+          dqCard("Extreme VH Users", { value: ev != null ? ev : "—", note: "claims≥20, bet/claim<2" });
+
+        // Summary cards
+        $("#cards-vhpi-summary").innerHTML =
+          dqCard("Users Scanned", { value: sm.users_scanned }) +
+          dqCard("Users Changed", { value: sm.users_changed }) +
+          dqCard("Low Value → VH", { value: sm.low_value_to_voucher_hunter }) +
+          dqCard("Normal Actual → VH", { value: sm.normal_actual_to_voucher_hunter }) +
+          dqCard("Other → VH", { value: sm.other_to_voucher_hunter });
+
+        // Low value impact cards
+        $("#cards-vhpi-lv").innerHTML =
+          dqCard("Current Low Value", { value: lv.current_low_value }) +
+          dqCard("Remaining Low Value", { value: lv.remaining_low_value }) +
+          dqCard("Moved to VH", { value: lv.moved_to_voucher_hunter }) +
+          '<div class="kpi"><div class="label">% of Low Value Removed</div>' +
+          '<div class="value" style="color:' + pctColor(lv.pct_removed) + '">' +
+          (lv.pct_removed != null ? lv.pct_removed + "%" : "—") + '</div></div>';
+
+        // Migration breakdown table
+        var mig = d.migration_breakdown || [];
+        if (mig.length) {
+          var migRows = mig.map(function(r) {
+            return "<tr><td>" + esc(r.from_segment) + "</td><td>→</td><td>" + esc(r.to_segment) + "</td>" +
+              '<td class="num"><b>' + fmt(r.users) + "</b></td></tr>";
+          }).join("");
+          $("#vhpi-migration-body").innerHTML =
+            '<div style="overflow-x:auto"><table class="mini-table">' +
+            '<thead><tr><th>From</th><th></th><th>To</th><th class="num">Users</th></tr></thead>' +
+            "<tbody>" + migRows + "</tbody></table></div>";
+        } else {
+          $("#vhpi-migration-body").innerHTML = '<div class="empty">No segment movements — priority change has no effect on this snapshot.</div>';
+        }
+
+        // Candidate table
+        var cands = d.candidates || [];
+        if (cands.length) {
+          function fmtN(v) { return (v == null || v === "") ? "—" : (typeof v === "number" ? v.toFixed(2) : esc(String(v))); }
+          function fmtI(v) { return (v == null || v === "") ? "—" : fmt(v); }
+          var cRows = cands.map(function(r) {
+            return "<tr>" +
+              "<td>" + esc(r.account || "") + "</td>" +
+              "<td>" + esc(r.current_segment || "") + "</td>" +
+              "<td><b>" + esc(r.simulated_segment || "") + "</b></td>" +
+              '<td class="num">' + fmtI(r.claim_count) + "</td>" +
+              '<td class="num">' + fmtN(r.after_bet) + "</td>" +
+              '<td class="num">' + fmtN(r.withdrawal) + "</td>" +
+              '<td class="num">' + fmtN(r.after_bet_multiple) + "</td>" +
+              '<td class="num">' + fmtN(r.after_bet_per_claim) + "</td>" +
+              "<td>" + esc(r.claim_risk_level || "") + "</td>" +
+              "<td>" + esc(r.player_age_type || "") + "</td>" +
+              "</tr>";
+          }).join("");
+          $("#vhpi-candidates-body").innerHTML =
+            '<div style="font-size:11px;color:var(--muted,#8892a4);margin-bottom:8px;">' + cands.length + ' users shown</div>' +
+            '<div style="overflow-x:auto"><table class="mini-table">' +
+            '<thead><tr><th>Account</th><th>Current</th><th>Simulated</th>' +
+            "<th class='num'>Claims</th><th class='num'>After Bet</th><th class='num'>Withdrawal</th>" +
+            "<th class='num'>Bet Multiple</th><th class='num'>Bet/Claim</th>" +
+            "<th>Claim Risk</th><th>Age Type</th></tr></thead>" +
+            "<tbody>" + cRows + "</tbody></table></div>";
+        } else {
+          $("#vhpi-candidates-body").innerHTML = '<div class="empty">No users would change segment.</div>';
+        }
+      })
+      .catch(function (e) {
+        if (e.message !== "unauthorized") {
+          statePanel("vhpi-migration-body", "banner error", "Analysis failed: " + esc(e.message));
+        }
+      });
+  }
+
   // ---------- Voucher Hunter Rule Simulator (Phase 6A) ----------
   function runVoucherHunterRuleSimulator() {
     var week = ($("#vhrs-week") || {}).value || "";
@@ -2171,7 +2270,7 @@
       });
   }
 
-  var VIEWS = ["summary", "funnel", "abuse", "vouchers", "referrals", "affiliate", "reactivation", "audit", "segments", "validation", "backendSegmentEngine", "voucherHunterAudit", "unclassifiedAudit", "segmentRuleSimulator", "voucherHunterQuality", "voucherHunterFalsePositive", "voucherHunterRuleSimulator", "uploadPlayerPerformance", "uploadHistory", "rawExplorer", "users", "settings"];
+  var VIEWS = ["summary", "funnel", "abuse", "vouchers", "referrals", "affiliate", "reactivation", "audit", "segments", "validation", "backendSegmentEngine", "voucherHunterAudit", "unclassifiedAudit", "segmentRuleSimulator", "voucherHunterQuality", "voucherHunterFalsePositive", "voucherHunterRuleSimulator", "vhPriorityImpact", "uploadPlayerPerformance", "uploadHistory", "rawExplorer", "users", "settings"];
   function switchView(view) {
     state.view = view;
     $all(".nav-item").forEach(function (b) { b.classList.toggle("active", b.dataset.view === view); });
@@ -2187,6 +2286,7 @@
       voucherHunterQuality: "Data → Voucher Hunter Rule Quality Analysis (Phase 5E)",
       voucherHunterFalsePositive: "Data → Voucher Hunter False Positive Analysis (Phase 5E-FP)",
       voucherHunterRuleSimulator: "Data → Voucher Hunter Rule Simulator (Phase 6A)",
+      vhPriorityImpact: "Data → VH Priority Impact Analysis (Phase 7C)",
       uploadPlayerPerformance: "Data → Upload Player Performance", uploadHistory: "Data → Upload History",
       rawExplorer: "Data → Raw Data Explorer",
       users: "User Drilldown", settings: "Settings (Read Only)"
@@ -2214,6 +2314,7 @@
     else if (state.view === "voucherHunterQuality") { /* loads on Run Analysis click */ }
     else if (state.view === "voucherHunterFalsePositive") { /* loads on Run Analysis click */ }
     else if (state.view === "voucherHunterRuleSimulator") { /* loads on Run Simulation click */ }
+    else if (state.view === "vhPriorityImpact") { /* loads on Run Analysis click */ }
     else if (state.view === "uploadPlayerPerformance") { /* upload view loads on submit */ }
     else if (state.view === "uploadHistory") loadUploadHistory(force);
     else if (state.view === "rawExplorer") loadRawExplorer(force);
@@ -2349,6 +2450,9 @@
 
     var vhrsRunBtn = $("#vhrs-run-btn");
     if (vhrsRunBtn) vhrsRunBtn.addEventListener("click", runVoucherHunterRuleSimulator);
+
+    var vhpiRunBtn = $("#vhpi-run-btn");
+    if (vhpiRunBtn) vhpiRunBtn.addEventListener("click", runVhPriorityImpact);
 
     var imaApplyBtn = $("#ima-apply-btn");
     if (imaApplyBtn) imaApplyBtn.addEventListener("click", loadIdentityMatchAudit);
