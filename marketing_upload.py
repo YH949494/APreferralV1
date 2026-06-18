@@ -64,11 +64,23 @@ DEDUPE_KEY_FIELDS = ("account", "campaign_id", "coupon_code")
 
 REDEEM_TIME_ALIASES = (
     "coupon_redeem_time",
+    "coupon redeem time",
     "redeem_time",
+    "redeem time",
     "coupon_redeemed_at",
+    "coupon redeemed at",
     "redeemed_at",
+    "redeemed at",
     "claim_time",
+    "claim time",
     "claimed_at",
+    "claimed at",
+)
+
+# Canonical form of every alias (spaces/hyphens → underscores, lowercased).
+# Used to match whatever header normalisation the caller applied.
+_REDEEM_TIME_ALIASES_CANONICAL: frozenset[str] = frozenset(
+    alias.replace(" ", "_").replace("-", "_") for alias in REDEEM_TIME_ALIASES
 )
 
 _DATETIME_FORMATS = (
@@ -103,8 +115,17 @@ def _row_value_ci(row_lc: dict, field: str) -> str:
     return str(row_lc.get(field.lower()) or "").strip()
 
 
+def _normalize_key(key: Any) -> str:
+    """Lowercase and replace spaces/hyphens with underscores.
+
+    Ensures headers like "coupon redeem time" and "coupon-redeem-time"
+    resolve to the same canonical key as "coupon_redeem_time".
+    """
+    return str(key if key is not None else "").strip().lower().replace(" ", "_").replace("-", "_")
+
+
 def _lower_key_map(row: dict) -> dict:
-    return {str(k).lower(): v for k, v in row.items()}
+    return {_normalize_key(k): v for k, v in row.items()}
 
 
 def _snapshot_week_key(moment: datetime) -> str:
@@ -151,10 +172,21 @@ def _parse_datetime(value: Any) -> datetime | None:
 
 
 def _redeem_time_from_row(row_lc: dict) -> datetime | None:
+    """Return the parsed redeem datetime from the first matching alias, or None."""
     for alias in REDEEM_TIME_ALIASES:
-        parsed = _parse_datetime(row_lc.get(alias))
+        canonical = alias.replace(" ", "_").replace("-", "_")
+        parsed = _parse_datetime(row_lc.get(canonical))
         if parsed is not None:
             return parsed
+    return None
+
+
+def _detect_redeem_time_column(row_lc: dict) -> str | None:
+    """Return the canonical alias name that is present and parseable in row_lc."""
+    for alias in REDEEM_TIME_ALIASES:
+        canonical = alias.replace(" ", "_").replace("-", "_")
+        if _parse_datetime(row_lc.get(canonical)) is not None:
+            return canonical
     return None
 
 
@@ -317,7 +349,10 @@ def _empty_summary(*, file_name: str) -> dict:
         "snapshot_week": None,
         "snapshot_month": None,
         "period_source": None,
+        "period_source_counts": {},
         "source_redeem_time": None,
+        "detected_redeem_time_column": None,
+        "redeem_time_column_warning": None,
         "rows_by_snapshot_month": {},
         "rows_by_snapshot_week": {},
         "coverage": _coverage_summary({}, {}),
@@ -382,12 +417,16 @@ def ingest_upload(
         candidate_rows_by_month: Counter[str] = Counter()
         candidate_rows_by_week: Counter[str] = Counter()
         period_sources: Counter[str] = Counter()
+        detected_redeem_col: str | None = None
 
         for row in rows:
             row_lc = _lower_key_map(row)
             if any(not _row_value_ci(row_lc, field) for field in REQUIRED_COLUMNS):
                 rows_failed += 1
                 continue
+            # Detect which redeem-time column is present (checked once per batch).
+            if detected_redeem_col is None:
+                detected_redeem_col = _detect_redeem_time_column(row_lc)
             period_info = _resolve_row_period(row_lc, manual_period=manual_period, upload_time=now)
             snapshot_week = period_info["snapshot_week"]
             snapshot_month = period_info["snapshot_month"]
@@ -462,16 +501,25 @@ def ingest_upload(
         single_week = next(iter(rows_by_week), None) if len(rows_by_week) == 1 else None
         single_month = next(iter(rows_by_month), None) if len(rows_by_month) == 1 else None
 
+        redeem_col_warning: str | None = None
+        if detected_redeem_col is None and not manual_period:
+            redeem_col_warning = (
+                "No coupon redeem time column detected; using upload_time fallback. "
+                f"Expected one of: {', '.join(REDEEM_TIME_ALIASES[:6])}."
+            )
+
         summary["rows_imported"] = rows_imported
         summary["rows_failed"] = rows_failed
         summary["duplicate_rows"] = duplicate_rows
         summary["snapshot_week"] = single_week
         summary["snapshot_month"] = single_month
         summary["period_source"] = "mixed" if len(period_sources) > 1 else (next(iter(period_sources), None))
+        summary["period_source_counts"] = dict(sorted(period_sources.items()))
         summary["rows_by_snapshot_month"] = rows_by_month
         summary["rows_by_snapshot_week"] = rows_by_week
         summary["coverage"] = coverage
-        summary["period_source_counts"] = dict(sorted(period_sources.items()))
+        summary["detected_redeem_time_column"] = detected_redeem_col
+        summary["redeem_time_column_warning"] = redeem_col_warning
         summary["status"] = "completed" if rows_failed == 0 else "completed_with_errors"
 
         batch_doc = {
@@ -484,6 +532,8 @@ def ingest_upload(
             "rows_by_snapshot_month": rows_by_month,
             "rows_by_snapshot_week": rows_by_week,
             "coverage": coverage,
+            "detected_redeem_time_column": detected_redeem_col,
+            "redeem_time_column_warning": redeem_col_warning,
             "rows_total": summary["rows_total"],
             "rows_imported": rows_imported,
             "rows_failed": rows_failed,
