@@ -1244,6 +1244,133 @@
       });
   }
 
+  // ---------- Unclassified Audit (Phase 5C) ----------
+  function loadUnclassifiedAudit() {
+    var week = ($("#unca-week") || {}).value || "";
+    if (!week) {
+      $("#cards-unca-summary").innerHTML = "";
+      statePanel("unca-claim-risk-body", "banner", "Enter a snapshot_week and click Run Audit.");
+      $("#unca-bucket-body").innerHTML = "";
+      $("#unca-reasons-body").innerHTML = "";
+      $("#unca-samples-body").innerHTML = "";
+      return;
+    }
+    statePanel("unca-claim-risk-body", "loading", "Running audit…");
+    $("#cards-unca-summary").innerHTML = "";
+    $("#unca-bucket-body").innerHTML = "";
+    $("#unca-reasons-body").innerHTML = "";
+    $("#unca-samples-body").innerHTML = "";
+
+    api("/api/admin/dashboard/backend-segment-engine/unclassified-audit?snapshot_week=" + encodeURIComponent(week))
+      .then(function (d) {
+        var kpis = d.summary_kpis || {};
+
+        // Summary cards
+        $("#cards-unca-summary").innerHTML =
+          dqCard("Total Unclassified", { value: kpis.unclassified_users }) +
+          dqCard("% of Backend Users", { value: (kpis.unclassified_pct != null ? kpis.unclassified_pct + "%" : "—") }) +
+          dqCard("New Players", { value: kpis.new_players }) +
+          dqCard("Old Players", { value: kpis.old_players }) +
+          dqCard("Avg After Bet", { value: (kpis.avg_after_bet != null ? kpis.avg_after_bet.toFixed(2) : "—") }) +
+          dqCard("Avg Withdraw", { value: (kpis.avg_withdraw != null ? kpis.avg_withdraw.toFixed(2) : "—") }) +
+          dqCard("Avg Claims", { value: (kpis.avg_claims != null ? kpis.avg_claims.toFixed(2) : "—") }) +
+          dqCard("Avg Referrals", { value: (kpis.avg_referrals != null ? kpis.avg_referrals.toFixed(2) : "—") }) +
+          dqCard("Avg Checkins", { value: (kpis.avg_checkins != null ? kpis.avg_checkins.toFixed(2) : "—") });
+
+        // Claim Risk Breakdown
+        var risks = d.claim_risk_breakdown || [];
+        if (risks.length) {
+          var riskRows = risks.map(function (r) {
+            return "<tr>" +
+              "<td><b>" + esc(r.claim_risk) + "</b></td>" +
+              '<td class="num">' + fmt(r.users) + "</td>" +
+              '<td class="num">' + (r.percentage != null ? r.percentage + "%" : "—") + "</td>" +
+              "</tr>";
+          }).join("");
+          $("#unca-claim-risk-body").innerHTML =
+            '<div style="overflow-x:auto"><table class="mini-table">' +
+            '<thead><tr><th>Claim Risk</th><th class="num">Users</th><th class="num">%</th></tr></thead>' +
+            "<tbody>" + riskRows + "</tbody></table></div>";
+        } else {
+          $("#unca-claim-risk-body").innerHTML = '<div class="empty">No data.</div>';
+        }
+
+        // Activity Buckets
+        var buckets = d.activity_buckets || [];
+        if (buckets.length) {
+          var bktRows = buckets.map(function (r) {
+            return "<tr>" +
+              "<td><b>" + esc(r.bucket) + "</b></td>" +
+              '<td class="num">' + fmt(r.users) + "</td>" +
+              '<td class="num">' + (r.percentage != null ? r.percentage + "%" : "—") + "</td>" +
+              "</tr>";
+          }).join("");
+          $("#unca-bucket-body").innerHTML =
+            '<div style="overflow-x:auto"><table class="mini-table">' +
+            '<thead><tr><th>Bucket</th><th class="num">Users</th><th class="num">%</th></tr></thead>' +
+            "<tbody>" + bktRows + "</tbody></table></div>";
+        } else {
+          $("#unca-bucket-body").innerHTML = '<div class="empty">No data.</div>';
+        }
+
+        // Top Reasons
+        var reasons = d.top_reasons || [];
+        if (reasons.length) {
+          var rsnRows = reasons.map(function (r) {
+            return "<tr>" +
+              "<td>" + esc(r.reason) + "</td>" +
+              '<td class="num">' + fmt(r.users) + "</td>" +
+              '<td class="num">' + (r.percentage != null ? r.percentage + "%" : "—") + "</td>" +
+              "</tr>";
+          }).join("");
+          $("#unca-reasons-body").innerHTML =
+            '<div style="overflow-x:auto"><table class="mini-table">' +
+            '<thead><tr><th>Reason</th><th class="num">Users</th><th class="num">%</th></tr></thead>' +
+            "<tbody>" + rsnRows + "</tbody></table></div>";
+        } else {
+          $("#unca-reasons-body").innerHTML = '<div class="empty">No data.</div>';
+        }
+
+        // Sample users per bucket
+        var samps = d.sample_users || {};
+        var bktOrder = ["inactive_light", "claim_only", "play_no_withdraw", "withdraw_user", "other"];
+        var sampHtml = "";
+        bktOrder.forEach(function (bkt) {
+          var rows = samps[bkt];
+          if (!rows || !rows.length) return;
+          function fmtNum(v) { return (v == null || v === "") ? "—" : fmt(v); }
+          var tRows = rows.map(function (r) {
+            return "<tr>" +
+              "<td>" + esc(r.account || "") + "</td>" +
+              '<td class="num">' + fmtNum(r.after_bet) + "</td>" +
+              '<td class="num">' + fmtNum(r.withdraw) + "</td>" +
+              '<td class="num">' + fmtNum(r.claims) + "</td>" +
+              '<td class="num">' + fmtNum(r.referrals) + "</td>" +
+              '<td class="num">' + fmtNum(r.checkins) + "</td>" +
+              "<td>" + esc(r.age_type || "") + "</td>" +
+              "<td>" + esc(r.claim_risk || "") + "</td>" +
+              "<td>" + esc(r.confidence || "") + "</td>" +
+              "<td>" + esc(r.reason || "") + "</td>" +
+              "</tr>";
+          }).join("");
+          sampHtml +=
+            '<div style="font-weight:600;font-size:12px;margin:16px 0 6px;">' + esc(bkt) + ' (' + rows.length + ' samples)</div>' +
+            '<div style="overflow-x:auto"><table class="mini-table">' +
+            '<thead><tr><th>Account</th>' +
+            "<th class='num'>After Bet</th><th class='num'>Withdraw</th>" +
+            "<th class='num'>Claims</th><th class='num'>Referrals</th><th class='num'>Checkins</th>" +
+            "<th>Age Type</th><th>Claim Risk</th><th>Confidence</th><th>Reason</th></tr></thead>" +
+            "<tbody>" + tRows + "</tbody></table></div>";
+        });
+        $("#unca-samples-body").innerHTML = sampHtml || '<div class="empty">No sample users available.</div>';
+      })
+      .catch(function (e) {
+        if (e.message !== "unauthorized") {
+          statePanel("unca-claim-risk-body", "banner error", "Failed: " + esc(e.message));
+        }
+      });
+  }
+
   // ---------- Identity Match Audit ----------
   function _imaRateColor(pct) {
     return pct >= 80 ? "var(--green,#4caf88)" : pct >= 40 ? "var(--yellow,#e0b44a)" : "var(--red,#e05c5c)";
@@ -1572,7 +1699,7 @@
       });
   }
 
-  var VIEWS = ["summary", "funnel", "abuse", "vouchers", "referrals", "affiliate", "reactivation", "audit", "segments", "validation", "backendSegmentEngine", "voucherHunterAudit", "uploadPlayerPerformance", "uploadHistory", "rawExplorer", "users", "settings"];
+  var VIEWS = ["summary", "funnel", "abuse", "vouchers", "referrals", "affiliate", "reactivation", "audit", "segments", "validation", "backendSegmentEngine", "voucherHunterAudit", "unclassifiedAudit", "uploadPlayerPerformance", "uploadHistory", "rawExplorer", "users", "settings"];
   function switchView(view) {
     state.view = view;
     $all(".nav-item").forEach(function (b) { b.classList.toggle("active", b.dataset.view === view); });
@@ -1583,6 +1710,7 @@
       audit: "Audit", segments: "Segment Overview", validation: "Data → Validation / UIM Compare",
       backendSegmentEngine: "Data → Backend Segment Engine (Shadow Mode)",
       voucherHunterAudit: "Data → Voucher Hunter Mismatch Audit (Phase 5B)",
+      unclassifiedAudit: "Data → Unclassified Audit (Phase 5C)",
       uploadPlayerPerformance: "Data → Upload Player Performance", uploadHistory: "Data → Upload History",
       rawExplorer: "Data → Raw Data Explorer",
       users: "User Drilldown", settings: "Settings (Read Only)"
@@ -1605,6 +1733,7 @@
     else if (state.view === "validation") loadValidation(force);
     else if (state.view === "backendSegmentEngine") loadBackendSegmentEngine(force);
     else if (state.view === "voucherHunterAudit") loadVoucherHunterMismatchAudit();
+    else if (state.view === "unclassifiedAudit") loadUnclassifiedAudit();
     else if (state.view === "uploadPlayerPerformance") { /* upload view loads on submit */ }
     else if (state.view === "uploadHistory") loadUploadHistory(force);
     else if (state.view === "rawExplorer") loadRawExplorer(force);
@@ -1725,6 +1854,9 @@
 
     var vhmaApplyBtn = $("#vhma-apply-btn");
     if (vhmaApplyBtn) vhmaApplyBtn.addEventListener("click", loadVoucherHunterMismatchAudit);
+
+    var uncaApplyBtn = $("#unca-apply-btn");
+    if (uncaApplyBtn) uncaApplyBtn.addEventListener("click", loadUnclassifiedAudit);
 
     var imaApplyBtn = $("#ima-apply-btn");
     if (imaApplyBtn) imaApplyBtn.addEventListener("click", loadIdentityMatchAudit);

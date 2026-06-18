@@ -23,6 +23,7 @@
       <button class="nav-item" data-view="validation">Data → Validation</button>
       <button class="nav-item" data-view="backendSegmentEngine">Data → Backend Segment Engine</button>
       <button class="nav-item" data-view="voucherHunterAudit">Data → Voucher Hunter Mismatch</button>
+      <button class="nav-item" data-view="unclassifiedAudit">Data → Unclassified Audit</button>
       <button class="nav-item" data-view="uploadPlayerPerformance">Data → Upload Player Performance</button>
       <button class="nav-item" data-view="uploadHistory">Data → Upload History</button>
       <button class="nav-item" data-view="rawExplorer">Data → Raw Data Explorer</button>
@@ -318,6 +319,39 @@
 
         <div class="section-title">Sample Users per Mismatch Group <span style="font-size:11px;font-weight:400;color:var(--muted,#8892a4);">(top 20 per group, mismatches only)</span></div>
         <div id="vhma-samples-body"></div>
+      </section>
+
+      <!-- UNCLASSIFIED AUDIT VIEW (Phase 5C) -->
+      <section id="view-unclassifiedAudit" class="hidden">
+        <div style="margin-bottom:16px;"><span class="tag heuristic" style="font-size:12px;padding:4px 12px;">READ ONLY — analysis only. Does not modify segment rules, bot_segment, voucher allocation, or reward logic.</span></div>
+        <div style="background:var(--bg-card,#1e2230);border:1px solid var(--border,#2d3348);border-radius:8px;padding:16px;margin-bottom:20px;">
+          <div style="font-weight:600;font-size:13px;margin-bottom:4px;">Unclassified Audit</div>
+          <div style="font-size:11px;color:var(--muted,#8892a4);margin-bottom:12px;">
+            Analyses users where the backend segment engine returned <b>unclassified</b>.
+            Provides claim risk breakdown, activity buckets, and top reasons to determine next segmentation refinements.
+          </div>
+          <div class="controls" style="flex-wrap:wrap;gap:8px;margin-bottom:8px;">
+            <input class="filter-input" id="unca-week" placeholder="snapshot_week e.g. 2026-W25" style="max-width:220px;margin:0;" />
+            <button class="btn primary" id="unca-apply-btn">Run Audit</button>
+          </div>
+        </div>
+
+        <div class="section-title">Summary</div>
+        <div class="card-grid" id="cards-unca-summary"></div>
+
+        <div class="section-title">Claim Risk Breakdown</div>
+        <div style="font-size:11px;color:var(--muted,#8892a4);margin-bottom:8px;">Determine whether unclassified users are mostly abuse-related or simply inactive.</div>
+        <div id="unca-claim-risk-body"></div>
+
+        <div class="section-title">Activity Bucket Breakdown</div>
+        <div style="font-size:11px;color:var(--muted,#8892a4);margin-bottom:8px;">Buckets: inactive_light · claim_only · play_no_withdraw · withdraw_user · other.</div>
+        <div id="unca-bucket-body"></div>
+
+        <div class="section-title">Top Reasons <span style="font-size:11px;font-weight:400;color:var(--muted,#8892a4);">(top 20)</span></div>
+        <div id="unca-reasons-body"></div>
+
+        <div class="section-title">Sample Users per Activity Bucket <span style="font-size:11px;font-weight:400;color:var(--muted,#8892a4);">(up to 20 per bucket)</span></div>
+        <div id="unca-samples-body"></div>
       </section>
 
       <!-- UPLOAD PLAYER PERFORMANCE VIEW (Phase 2A) -->
