@@ -222,8 +222,12 @@
           <div id="bse-run-result" style="min-height:20px;font-size:12px;"></div>
         </div>
         <div class="controls" style="margin-bottom:16px;">
-          <input class="filter-input" id="bse-week" placeholder="Snapshot week (YYYY-Www)" style="max-width:180px;margin:0;" />
-          <input class="filter-input" id="bse-month" placeholder="Snapshot month (YYYY-MM)" style="max-width:180px;margin:0;" />
+          <select class="filter-input" id="bse-week" style="max-width:200px;margin:0;">
+            <option value="">All weeks</option>
+          </select>
+          <select class="filter-input" id="bse-month" style="max-width:200px;margin:0;">
+            <option value="">All months</option>
+          </select>
           <button class="btn primary" id="bse-apply-btn">Refresh</button>
         </div>
         <div class="section-title">Summary</div>
