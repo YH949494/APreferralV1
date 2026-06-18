@@ -4248,6 +4248,39 @@ def dashboard_settings():
     return jsonify(_panels.build_settings_panel(os.environ, constants=constants))
 
 
+@admin_bp.get("/api/admin/dashboard/segment-probability-config")
+def dashboard_segment_probability_config():
+    """Read-only panel: segment probability configuration.
+
+    Returns the active SEGMENT_PROBABILITY_CONFIG so admins can verify which
+    probability is applied per backend segment. No editing — configuration
+    lives in config.py.
+    """
+    ok, err = require_admin_from_query()
+    if not ok:
+        msg, code = err
+        return jsonify({"success": False, "message": msg}), code
+    import config as _cfg
+
+    rows = []
+    for seg, pct in _cfg.SEGMENT_PROBABILITY_CONFIG.items():
+        rows.append({
+            "segment": seg,
+            "probability_pct": pct,
+            "description": _cfg.SEGMENT_PROBABILITY_DESCRIPTIONS.get(seg, ""),
+        })
+    return jsonify({
+        "success": True,
+        "rows": rows,
+        "new_player_override": {
+            "probability_pct": 100,
+            "condition": "player_age_type == new_player AND assignment_count < 3",
+            "description": "First 3 eligible SVD/public opportunities for new players",
+        },
+        "source": "config.SEGMENT_PROBABILITY_CONFIG",
+    })
+
+
 app.register_blueprint(admin_bp)
 
 # ---- Always return JSON on errors (prevents "Invalid JSON") ----

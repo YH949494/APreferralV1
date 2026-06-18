@@ -10,6 +10,33 @@ KL_TZ = ZoneInfo("Asia/Kuala_Lumpur")
 
 MYWIN_CHAT_ID = int(os.getenv("MYWIN_CHAT_ID", "0"))  # 0 means "not configured"
 
+# ---------------------------------------------------------------------------
+# Backend segment probability configuration (single source of truth).
+# Probabilities are integers (0–100). Applied when backend_segment is available
+# on a user doc. New-player override (100%) is enforced separately in
+# assign_public_pool_access_once when player_age_type == "new_player" and the
+# user is within their eligible new-player window (first 3 assignments).
+# ---------------------------------------------------------------------------
+SEGMENT_PROBABILITY_CONFIG: dict[str, int] = {
+    "high_value": 50,
+    "normal_actual": 30,
+    "active_community_player": 20,
+    "low_value": 10,
+    "voucher_hunter": 10,
+    "ghost": 5,
+    "unclassified": 10,
+}
+
+SEGMENT_PROBABILITY_DESCRIPTIONS: dict[str, str] = {
+    "high_value": "High-value spenders — highest priority after new players",
+    "normal_actual": "Primary active player segment",
+    "active_community_player": "Community-engaged players (check-in / XP activity)",
+    "low_value": "Low engagement — withdrew but low bet ratio",
+    "voucher_hunter": "Claim-focused users with low play conversion",
+    "ghost": "Inactive users — no bets, withdrawals, referrals or check-ins",
+    "unclassified": "Segment data unavailable or not yet classified",
+}
+
 BOT_SEGMENT_DEFAULT_PROBABILITY = 0.70
 BOT_SEGMENT_PROBABILITY_MAP = {
     "new_user": 0.70,
@@ -17,6 +44,7 @@ BOT_SEGMENT_PROBABILITY_MAP = {
     "potential": 0.50,
     "high_value": 0.50,
     "active_player": 0.30,
+    "active_community_player": 0.20,
     "normal_actual": 0.70,
     "low_value": 0.10,
     "voucher_hunter": 0.10,
@@ -31,6 +59,11 @@ BOT_SEGMENT_PROBABILITY_MAP = {
     "old_player": BOT_SEGMENT_DEFAULT_PROBABILITY,
     "unclassified": BOT_SEGMENT_DEFAULT_PROBABILITY,
 }
+
+
+def backend_segment_probability(segment: str) -> float:
+    """Return probability (0.0–1.0) for a backend segment using SEGMENT_PROBABILITY_CONFIG."""
+    return SEGMENT_PROBABILITY_CONFIG.get(segment, SEGMENT_PROBABILITY_CONFIG["unclassified"]) / 100.0
 
 _BOT_SEGMENT_ALIASES = {
     "new": "new_user",

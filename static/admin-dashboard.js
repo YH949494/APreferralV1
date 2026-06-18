@@ -617,6 +617,31 @@
     el.innerHTML = opts.join("");
   }
 
+  function loadSegmentProbabilityConfig(refresh) {
+    setMeta("Loading segment probability configuration…");
+    statePanel("seg-prob-body", "loading", "Loading…");
+    api("/api/admin/dashboard/segment-probability-config")
+      .then(function (d) {
+        setMeta("Source: " + (d.source || "config.SEGMENT_PROBABILITY_CONFIG"));
+        var np = d.new_player_override || {};
+        $("#cards-seg-prob-summary").innerHTML =
+          card("New Player Override", "100%", "player_age_type=new_player AND first 3 assignments", "good") +
+          card("Segments configured", String((d.rows || []).length), "", "neutral");
+        var rows = (d.rows || []).map(function (row) {
+          return "<tr><td>" + esc(row.segment) + "</td><td><strong>" + esc(String(row.probability_pct)) + "%</strong></td><td>" + esc(row.description) + "</td></tr>";
+        });
+        $("#seg-prob-body").innerHTML =
+          "<table class='data-table'><thead><tr><th>Segment</th><th>Probability</th><th>Description</th></tr></thead><tbody>" +
+          rows.join("") +
+          "<tr style='border-top:2px solid var(--border)'><td><em>new_player override</em></td><td><strong>100%</strong></td><td>" + esc(np.description || "") + "</td></tr>" +
+          "</tbody></table>";
+      })
+      .catch(function (e) {
+        setMeta("Failed");
+        statePanel("seg-prob-body", "banner error", "Failed: " + e.message);
+      });
+  }
+
   function loadSegments(refresh) {
     setMeta("Mode: " + state.segmentsMode + " · Loading…");
     skeletonGrid($("#cards-segments-summary"), 6);
@@ -2270,7 +2295,7 @@
       });
   }
 
-  var VIEWS = ["summary", "funnel", "abuse", "vouchers", "referrals", "affiliate", "reactivation", "audit", "segments", "validation", "backendSegmentEngine", "voucherHunterAudit", "unclassifiedAudit", "segmentRuleSimulator", "voucherHunterQuality", "voucherHunterFalsePositive", "voucherHunterRuleSimulator", "vhPriorityImpact", "uploadPlayerPerformance", "uploadHistory", "rawExplorer", "users", "settings"];
+  var VIEWS = ["summary", "funnel", "abuse", "vouchers", "referrals", "affiliate", "reactivation", "audit", "segmentProbabilityConfig", "segments", "validation", "backendSegmentEngine", "voucherHunterAudit", "unclassifiedAudit", "segmentRuleSimulator", "voucherHunterQuality", "voucherHunterFalsePositive", "voucherHunterRuleSimulator", "vhPriorityImpact", "uploadPlayerPerformance", "uploadHistory", "rawExplorer", "users", "settings"];
   function switchView(view) {
     state.view = view;
     $all(".nav-item").forEach(function (b) { b.classList.toggle("active", b.dataset.view === view); });
@@ -2278,7 +2303,8 @@
     var titles = {
       summary: "Executive Summary", funnel: "Activation Funnel", abuse: "Abuse Overview",
       vouchers: "Vouchers", referrals: "Referrals", affiliate: "Affiliate", reactivation: "Reactivation",
-      audit: "Audit", segments: "Segment Overview", validation: "Data → Validation / UIM Compare",
+      audit: "Audit", segmentProbabilityConfig: "Segment Probability Configuration (Read Only)",
+      segments: "Segment Overview", validation: "Data → Validation / UIM Compare",
       backendSegmentEngine: "Data → Backend Segment Engine (Shadow Mode)",
       voucherHunterAudit: "Data → Voucher Hunter Mismatch Audit (Phase 5B)",
       unclassifiedAudit: "Data → Unclassified Audit (Phase 5C)",
@@ -2305,6 +2331,7 @@
     else if (state.view === "affiliate") loadAffiliate(force);
     else if (state.view === "reactivation") loadReactivation(force);
     else if (state.view === "audit") loadAudit(force);
+    else if (state.view === "segmentProbabilityConfig") loadSegmentProbabilityConfig(force);
     else if (state.view === "segments") loadSegments(force);
     else if (state.view === "validation") loadValidation(force);
     else if (state.view === "backendSegmentEngine") loadBackendSegmentEngine(force);

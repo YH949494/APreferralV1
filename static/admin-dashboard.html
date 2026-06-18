@@ -19,6 +19,7 @@
       <button class="nav-item" data-view="affiliate">Affiliate</button>
       <button class="nav-item" data-view="reactivation">Reactivation</button>
       <button class="nav-item" data-view="audit">Audit</button>
+      <button class="nav-item" data-view="segmentProbabilityConfig">Segment Probability Config</button>
       <button class="nav-item" data-view="segments">Segment Overview</button>
       <button class="nav-item" data-view="validation">Data → Validation</button>
       <button class="nav-item" data-view="backendSegmentEngine">Data → Backend Segment Engine</button>
@@ -171,6 +172,14 @@
       </section>
 
       <!-- SEGMENT OVERVIEW VIEW -->
+      <!-- SEGMENT PROBABILITY CONFIG VIEW -->
+      <section id="view-segmentProbabilityConfig" class="hidden">
+        <div style="margin-bottom:16px;"><span class="tag heuristic" style="font-size:12px;padding:4px 12px;">READ ONLY — active configuration from config.SEGMENT_PROBABILITY_CONFIG</span></div>
+        <div class="card-grid" id="cards-seg-prob-summary"></div>
+        <div class="section-title">Segment Probability Configuration</div>
+        <div id="seg-prob-body"></div>
+      </section>
+
       <section id="view-segments" class="hidden">
         <div style="margin-bottom:16px;"><span class="tag heuristic" style="font-size:12px;padding:4px 12px;">READ ONLY — UIM is the source of truth</span></div>
         <div class="controls" style="margin-bottom:16px;">
