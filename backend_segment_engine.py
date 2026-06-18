@@ -456,8 +456,13 @@ def _doc_coupon(doc: dict) -> str | None:
     return None
 
 
-def _marketing_rows_by_account(marketing_col, snapshot_week: str) -> dict[str, list[dict]]:
-    """Return dict[account_lower -> list[doc]] for the given snapshot_week filter.
+def _marketing_rows_by_account(marketing_col, snapshot_week: str | None) -> dict[str, list[dict]]:
+    """Return dict[account_lower -> list[doc]] optionally filtered by snapshot_week.
+
+    When ``snapshot_week`` is None all uploaded rows are returned, letting the
+    engine derive each snapshot's period from the row's own period fields
+    (set at upload time from coupon_redeem_time). Pass a specific week string
+    to restrict processing to that upload batch.
 
     All rows for an account are kept so the engine can write one snapshot per
     (account, snapshot_week) derived from the row's own period fields.
@@ -466,7 +471,8 @@ def _marketing_rows_by_account(marketing_col, snapshot_week: str) -> dict[str, l
     rows: dict[str, list[dict]] = {}
     if marketing_col is None:
         return rows
-    cursor = marketing_col.find({"snapshot_week": snapshot_week})
+    query = {"snapshot_week": snapshot_week} if snapshot_week else {}
+    cursor = marketing_col.find(query)
     for doc in cursor:
         acct = _doc_account(doc).lower()
         if acct:
@@ -474,26 +480,28 @@ def _marketing_rows_by_account(marketing_col, snapshot_week: str) -> dict[str, l
     return rows
 
 
-def _row_period(row: dict, *, fallback_week: str, fallback_now: datetime) -> tuple[str, str, str]:
+def _row_period(row: dict, *, fallback_week: str | None, fallback_now: datetime) -> tuple[str, str, str]:
     """Return (snapshot_week, snapshot_month, period_source) for a marketing row.
 
     Priority:
       1. Row's own ``snapshot_week`` / ``snapshot_month`` (set during upload from
          coupon_redeem_time, manual_period, or upload_time — in that order).
       2. Admin-provided ``fallback_week`` + derived month — labelled "manual_fallback".
+         If ``fallback_week`` is also None, derive from ``fallback_now``.
     """
     row_week = (row.get("snapshot_week") or "").strip()
     row_month = (row.get("snapshot_month") or "").strip()
     row_source = (row.get("period_source") or "").strip()
 
     if row_week and row_month:
-        # Re-map upload-time sourced rows to a more descriptive source label.
         source = row_source if row_source else "coupon_redeem_time"
         return row_week, row_month, source
 
-    # Row has no period information — use the admin-provided week as fallback.
+    # Row has no period information — use the admin-provided week as fallback,
+    # or derive from the engine run time when no week was specified at all.
+    effective_week = fallback_week or _snapshot_week_key(fallback_now)
     month = _snapshot_month_key(fallback_now) if not row_month else row_month
-    return fallback_week, month, "manual_fallback"
+    return effective_week, month, "manual_fallback"
 
 
 def _build_metrics_for_user(user_doc: dict, claim_count: int, marketing_row: dict | None) -> dict:
@@ -634,8 +642,10 @@ def run_shadow_segment_engine(
     """
     now = now or _utc_now()
     started_at = _utc_now()
-    if snapshot_week is None:
-        snapshot_week = _snapshot_week_key(now)
+    # snapshot_week=None means "process all uploaded rows across all periods".
+    # The period for each snapshot is derived from the row's own snapshot_week
+    # field (set at upload time from coupon_redeem_time). Do NOT default to the
+    # current week — that would silently re-introduce the original bug.
 
     summary = _empty_summary(dry_run=dry_run)
 
@@ -657,8 +667,8 @@ def run_shadow_segment_engine(
         if snapshots_col is None:
             snapshots_col = database.backend_segment_snapshots_col
 
-        # Step 1: Load all marketing rows for the admin-specified week, grouped by account.
-        # Each account may have multiple rows (different upload batches or dates).
+        # Step 1: Load marketing rows (all weeks when snapshot_week=None, or a
+        # specific week when one is provided), grouped by account.
         marketing_rows_by_acct = _marketing_rows_by_account(marketing_col, snapshot_week)
 
         if not marketing_rows_by_acct:
