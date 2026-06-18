@@ -739,16 +739,52 @@
   }
 
   // ---------- Backend Segment Engine (Phase 3, shadow mode) ----------
+  function _populateBsePeriodDropdowns(autoSelectLatestWeek) {
+    return api("/api/admin/dashboard/backend-segment-engine/available-periods")
+      .then(function (d) {
+        var weekSel = $("#bse-week");
+        var monthSel = $("#bse-month");
+        if (!weekSel || !monthSel) return;
+        var prevWeek = weekSel.value;
+        var prevMonth = monthSel.value;
+        weekSel.innerHTML = '<option value="">All weeks</option>';
+        (d.snapshot_weeks || []).forEach(function (w) {
+          var opt = document.createElement("option");
+          opt.value = w;
+          opt.textContent = w;
+          weekSel.appendChild(opt);
+        });
+        monthSel.innerHTML = '<option value="">All months</option>';
+        (d.snapshot_months || []).forEach(function (m) {
+          var opt = document.createElement("option");
+          opt.value = m;
+          opt.textContent = m;
+          monthSel.appendChild(opt);
+        });
+        if (autoSelectLatestWeek && d.snapshot_weeks && d.snapshot_weeks.length > 0) {
+          weekSel.value = d.snapshot_weeks[0];
+        } else if (prevWeek) {
+          weekSel.value = prevWeek;
+        }
+        if (prevMonth) monthSel.value = prevMonth;
+      })
+      .catch(function () {});
+  }
+
   function loadBackendSegmentEngine(refresh) {
     setMeta("Loading…");
     skeletonGrid($("#cards-bse-summary"), 8);
     statePanel("bse-segment-body", "loading", "Loading backend segment engine snapshot…");
-    var week = ($("#bse-week") || {}).value || "";
-    var month = ($("#bse-month") || {}).value || "";
+    var weekSel = $("#bse-week");
+    var monthSel = $("#bse-month");
+    var week = (weekSel || {}).value || "";
+    var month = (monthSel || {}).value || "";
+    // Week takes priority; if week is set, ignore month
+    if (week) month = "";
     var qs = [
       refresh ? "refresh=1" : "",
       week ? "snapshot_week=" + encodeURIComponent(week) : "",
-      month ? "month=" + encodeURIComponent(month) : ""
+      (!week && month) ? "month=" + encodeURIComponent(month) : ""
     ].filter(Boolean).join("&");
     api("/api/admin/dashboard/backend-segment-engine" + (qs ? "?" + qs : ""))
       .then(function (d) {
@@ -2376,7 +2412,15 @@
     else if (state.view === "segmentProbabilityConfig") loadSegmentProbabilityConfig(force);
     else if (state.view === "segments") loadSegments(force);
     else if (state.view === "validation") loadValidation(force);
-    else if (state.view === "backendSegmentEngine") loadBackendSegmentEngine(force);
+    else if (state.view === "backendSegmentEngine") {
+      var _bseWeekSel = $("#bse-week");
+      var _bseDropdownsLoaded = _bseWeekSel && _bseWeekSel.options.length > 1;
+      if (!_bseDropdownsLoaded) {
+        _populateBsePeriodDropdowns(true).then(function () { loadBackendSegmentEngine(force); });
+      } else {
+        loadBackendSegmentEngine(force);
+      }
+    }
     else if (state.view === "voucherHunterAudit") loadVoucherHunterMismatchAudit();
     else if (state.view === "unclassifiedAudit") loadUnclassifiedAudit();
     else if (state.view === "segmentRuleSimulator") { /* loads on Run Simulation click */ }
@@ -2490,7 +2534,9 @@
     if (valApplyBtn) valApplyBtn.addEventListener("click", function () { loadValidation(true); });
 
     var bseApplyBtn = $("#bse-apply-btn");
-    if (bseApplyBtn) bseApplyBtn.addEventListener("click", function () { loadBackendSegmentEngine(true); });
+    if (bseApplyBtn) bseApplyBtn.addEventListener("click", function () {
+      _populateBsePeriodDropdowns(false).then(function () { loadBackendSegmentEngine(true); });
+    });
 
     var bseDryRunBtn = $("#bse-dry-run-btn");
     if (bseDryRunBtn) bseDryRunBtn.addEventListener("click", function () { runBackendSegmentEngine(true); });

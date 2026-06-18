@@ -3266,6 +3266,33 @@ def dashboard_backend_segment_engine():
     )
 
 
+@admin_bp.get("/api/admin/dashboard/backend-segment-engine/available-periods")
+def backend_segment_engine_available_periods():
+    """Return distinct snapshot_week and snapshot_month values from segment_snapshots.
+
+    Read-only. Does not affect UIM, bot segment, voucher allocation, or rewards.
+    """
+    ok, err = require_admin_from_query()
+    if not ok:
+        msg, code = err
+        return jsonify({"success": False, "message": msg}), code
+
+    col = db["backend_segment_snapshots"]
+    raw_weeks = sorted(
+        (w for w in col.distinct("snapshot_week") if w),
+        reverse=True,
+    )
+    raw_months = sorted(
+        (m for m in col.distinct("snapshot_month") if m),
+        reverse=True,
+    )
+    return jsonify({
+        "ok": True,
+        "snapshot_weeks": raw_weeks,
+        "snapshot_months": raw_months,
+    })
+
+
 @admin_bp.get("/api/admin/dashboard/backend-segment-engine/takeover-readiness")
 def backend_segment_engine_takeover_readiness():
     """Phase 7A: read-only backend segment takeover migration report.
