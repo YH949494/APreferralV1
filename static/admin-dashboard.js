@@ -938,6 +938,7 @@
       statePanel("uimc-detail-body", "empty", "Enter a snapshot_week (e.g. 2026-W25) and click Analyse.");
       $("#cards-uimc-summary").innerHTML = "";
       $("#uimc-matrix-body").innerHTML = "";
+      $("#uimc-mismatch-pairs-body").innerHTML = "";
       $("#uimc-audit-body").innerHTML = "";
       $("#uimc-pagination").innerHTML = "";
       return;
@@ -987,6 +988,40 @@
           $("#uimc-matrix-body").innerHTML = '<div style="overflow-x:auto"><table class="mini-table"><thead>' + hdr + '</thead><tbody>' + body + '</tbody></table></div>';
         } else {
           $("#uimc-matrix-body").innerHTML = '<div class="empty">No comparison data available. Run the segment engine with marketing data first.</div>';
+        }
+
+        // --- Top mismatch pairs ---
+        var pairs = d.top_mismatch_pairs || [];
+        if (pairs.length) {
+          var pairRows = pairs.map(function (p) {
+            return '<tr style="cursor:pointer" data-bseg="' + esc(p.backend_segment) + '" data-useg="' + esc(p.uim_segment) + '">' +
+              '<td>' + esc(p.backend_segment) + '</td>' +
+              '<td>' + esc(p.uim_segment) + '</td>' +
+              '<td class="num">' + fmt(p.count) + '</td>' +
+              '<td class="num">' + p.percentage_of_compared_users + '%</td>' +
+              '</tr>';
+          }).join("");
+          var pairHtml = '<div style="overflow-x:auto"><table class="mini-table" id="uimc-pairs-table">' +
+            '<thead><tr><th>Backend Segment</th><th>UIM Segment</th><th class="num">Users</th><th class="num">% of Compared</th></tr></thead>' +
+            '<tbody>' + pairRows + '</tbody></table></div>' +
+            '<div style="font-size:11px;color:var(--muted,#8892a4);margin-top:4px;">Click a row to filter the Detail Table to that pair.</div>';
+          $("#uimc-mismatch-pairs-body").innerHTML = pairHtml;
+          var pairTable = document.getElementById("uimc-pairs-table");
+          if (pairTable) {
+            pairTable.addEventListener("click", function (e) {
+              var row = e.target.closest("tr[data-bseg]");
+              if (!row) return;
+              var bSel = $("#uimc-backend-seg");
+              var uSel = $("#uimc-uim-seg");
+              var mSel = $("#uimc-match");
+              if (bSel) bSel.value = row.getAttribute("data-bseg");
+              if (uSel) uSel.value = row.getAttribute("data-useg");
+              if (mSel) mSel.value = "false";
+              loadUimComparison(true);
+            });
+          }
+        } else {
+          $("#uimc-mismatch-pairs-body").innerHTML = '<div class="empty">No mismatch pairs found.</div>';
         }
 
         // --- Rule audit ---
