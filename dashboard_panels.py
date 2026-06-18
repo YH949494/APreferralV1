@@ -2262,7 +2262,7 @@ def build_unclassified_audit(
 # 4e. Voucher Hunter False Positive Analysis (Phase 5E-FP)
 # ---------------------------------------------------------------------------
 
-_VHFP_PROJ = _VHQA_PROJ  # same projection as quality analysis
+_VHFP_PROJ = _VHMA_PROJ  # same fields as voucher hunter mismatch audit projection
 
 
 def build_voucher_hunter_false_positive_analysis(
