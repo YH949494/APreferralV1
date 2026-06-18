@@ -3621,6 +3621,57 @@ def backend_segment_engine_voucher_hunter_mismatch_audit():
     ))
 
 
+@admin_bp.get("/api/admin/dashboard/backend-segment-engine/segment-rule-simulator")
+def backend_segment_engine_segment_rule_simulator():
+    """Phase 5D: read-only simulation of segment rule changes.
+
+    GET ?snapshot_week=YYYY-Www
+        &ghost_max_checkins=0&ghost_max_referrals=0&ghost_max_claims=0
+        &vh_min_claims=3&vh_max_after_bet=0&vh_max_checkins=9999
+        &ac_min_checkins=14&ac_min_referrals=1
+
+    Reclassifies backend_segment_snapshots in memory using the provided
+    thresholds and returns a distribution comparison, match rate impact,
+    top segment movements, and production impact summary.
+    Never writes, never modifies segments or rewards.
+    """
+    ok, err = require_admin_from_query()
+    if not ok:
+        msg, code = err
+        return jsonify({"ok": False, "error": msg}), code
+
+    snapshot_week = request.args.get("snapshot_week", "").strip()
+    if not snapshot_week:
+        return jsonify({"ok": False, "error": "snapshot_week is required"}), 400
+    if not _SNAPSHOT_WEEK_RE.match(snapshot_week):
+        return jsonify({"ok": False, "error": f"Invalid snapshot_week '{snapshot_week}'"}), 400
+
+    def _int(key: str, default: int) -> int:
+        try:
+            return int(request.args.get(key, default))
+        except (TypeError, ValueError):
+            return default
+
+    def _float(key: str, default: float) -> float:
+        try:
+            return float(request.args.get(key, default))
+        except (TypeError, ValueError):
+            return default
+
+    return jsonify(_panels.build_segment_rule_simulator(
+        snapshots_col=db["backend_segment_snapshots"],
+        snapshot_week=snapshot_week,
+        ghost_max_checkins=_int("ghost_max_checkins", 0),
+        ghost_max_referrals=_int("ghost_max_referrals", 0),
+        ghost_max_claims=_int("ghost_max_claims", 0),
+        vh_min_claims=_int("vh_min_claims", 3),
+        vh_max_after_bet=_float("vh_max_after_bet", 0.0),
+        vh_max_checkins=_int("vh_max_checkins", 9999),
+        ac_min_checkins=_int("ac_min_checkins", 14),
+        ac_min_referrals=_int("ac_min_referrals", 1),
+    ))
+
+
 @admin_bp.get("/api/admin/dashboard/backend-segment-engine/unclassified-audit")
 def backend_segment_engine_unclassified_audit():
     """Phase 5C: read-only audit explaining why users fell into 'unclassified'.
