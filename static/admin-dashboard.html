@@ -27,6 +27,7 @@
       <button class="nav-item" data-view="segmentRuleSimulator">Data → Segment Rule Simulator</button>
       <button class="nav-item" data-view="voucherHunterQuality">Data → VH Rule Quality</button>
       <button class="nav-item" data-view="voucherHunterFalsePositive">Data → VH False Positive</button>
+      <button class="nav-item" data-view="voucherHunterRuleSimulator">Data → VH Rule Simulator</button>
       <button class="nav-item" data-view="uploadPlayerPerformance">Data → Upload Player Performance</button>
       <button class="nav-item" data-view="uploadHistory">Data → Upload History</button>
       <button class="nav-item" data-view="rawExplorer">Data → Raw Data Explorer</button>
@@ -507,6 +508,62 @@
         <div class="section-title">False Positive Candidates <span style="font-size:11px;font-weight:400;color:var(--muted,#8892a4);">(top 50 by after_bet → referrals → checkins)</span></div>
         <div style="font-size:11px;color:var(--muted,#8892a4);margin-bottom:8px;">Users who look like real players but were labelled Voucher Hunter by UIM. Review queue for rule refinement.</div>
         <div id="vhfp-fp-body"></div>
+      </section>
+
+      <!-- VOUCHER HUNTER RULE SIMULATOR VIEW (Phase 6A) -->
+      <section id="view-voucherHunterRuleSimulator" class="hidden">
+        <div style="margin-bottom:16px;"><span class="tag heuristic" style="font-size:12px;padding:4px 12px;">SIMULATION ONLY — read-only. No writes to users, segments, voucher allocation, or rewards.</span></div>
+        <div style="background:var(--bg-card,#1e2230);border:1px solid var(--border,#2d3348);border-radius:8px;padding:16px;margin-bottom:20px;">
+          <div style="font-weight:600;font-size:13px;margin-bottom:4px;">Voucher Hunter Rule Simulator</div>
+          <div style="font-size:11px;color:var(--muted,#8892a4);margin-bottom:12px;">
+            Test a refined voucher_hunter rule against <b>backend_segment_snapshots</b> in memory only.
+            Rule: claim_count ≥ threshold AND after_bet &lt; threshold, with optional withdrawal and high-bet protections.
+          </div>
+          <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:16px;margin-bottom:16px;">
+            <div>
+              <div style="font-size:11px;font-weight:600;margin-bottom:6px;color:var(--muted,#8892a4);">SNAPSHOT WEEK</div>
+              <input class="filter-input" id="vhrs-week" placeholder="e.g. 2026-W25" style="width:100%;margin:0;" />
+            </div>
+            <div>
+              <div style="font-size:11px;font-weight:600;margin-bottom:6px;color:var(--muted,#8892a4);">CLAIM THRESHOLD</div>
+              <input class="filter-input" id="vhrs-claim" type="number" min="1" value="10" style="width:100%;margin:0;" />
+            </div>
+            <div>
+              <div style="font-size:11px;font-weight:600;margin-bottom:6px;color:var(--muted,#8892a4);">AFTER BET THRESHOLD (&lt; value)</div>
+              <input class="filter-input" id="vhrs-bet" type="number" min="0" step="1" value="100" style="width:100%;margin:0;" />
+            </div>
+            <div>
+              <div style="font-size:11px;font-weight:600;margin-bottom:6px;color:var(--muted,#8892a4);">REFERRAL PROTECTION (≥ value → not VH)</div>
+              <input class="filter-input" id="vhrs-ref" type="number" min="0" value="20" style="width:100%;margin:0;" />
+            </div>
+          </div>
+          <div style="display:flex;gap:24px;margin-bottom:16px;align-items:center;flex-wrap:wrap;">
+            <label style="display:flex;align-items:center;gap:8px;font-size:12px;cursor:pointer;">
+              <input type="checkbox" id="vhrs-wd-protect" checked style="width:16px;height:16px;" />
+              Protect Withdrawal Users (wd &gt; 0 → not VH)
+            </label>
+            <label style="display:flex;align-items:center;gap:8px;font-size:12px;cursor:pointer;">
+              <input type="checkbox" id="vhrs-hb-protect" checked style="width:16px;height:16px;" />
+              Protect High Bet Users (after_bet ≥ 1000 → not VH)
+            </label>
+          </div>
+          <button class="btn primary" id="vhrs-run-btn">Run Simulation</button>
+        </div>
+
+        <div class="section-title">Simulation Summary</div>
+        <div class="card-grid" id="cards-vhrs-summary"></div>
+
+        <div class="section-title">Match Rate Impact</div>
+        <div class="card-grid" id="cards-vhrs-match"></div>
+
+        <div class="section-title">Segment Migration <span style="font-size:11px;font-weight:400;color:var(--muted,#8892a4);">(changed rows only)</span></div>
+        <div id="vhrs-migration-body"></div>
+
+        <div class="section-title">False Positive Review <span style="font-size:11px;font-weight:400;color:var(--muted,#8892a4);">(sim=not VH, UIM=voucher_hunter — top 50)</span></div>
+        <div id="vhrs-fp-body"></div>
+
+        <div class="section-title">False Negative Review <span style="font-size:11px;font-weight:400;color:var(--muted,#8892a4);">(sim=VH, backend≠voucher_hunter — top 50 by claims)</span></div>
+        <div id="vhrs-fn-body"></div>
       </section>
 
       <!-- UPLOAD PLAYER PERFORMANCE VIEW (Phase 2A) -->

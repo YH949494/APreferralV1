@@ -1491,6 +1491,120 @@
       });
   }
 
+  // ---------- Voucher Hunter Rule Simulator (Phase 6A) ----------
+  function runVoucherHunterRuleSimulator() {
+    var week = ($("#vhrs-week") || {}).value || "";
+    if (!week) {
+      statePanel("vhrs-migration-body", "banner", "Enter a snapshot_week and click Run Simulation.");
+      ["cards-vhrs-summary","cards-vhrs-match","vhrs-fp-body","vhrs-fn-body"].forEach(function(id){ $("#"+id).innerHTML=""; });
+      return;
+    }
+
+    function numVal(id, def) { var v = parseFloat(($("#"+id)||{}).value); return isNaN(v) ? def : v; }
+    function chk(id) { var el = $("#"+id); return el ? el.checked : true; }
+
+    var params = [
+      "snapshot_week="       + encodeURIComponent(week),
+      "claim_threshold="     + numVal("vhrs-claim", 10),
+      "after_bet_threshold=" + numVal("vhrs-bet", 100),
+      "referral_threshold="  + numVal("vhrs-ref", 20),
+      "withdrawal_protection=" + (chk("vhrs-wd-protect") ? "true" : "false"),
+      "high_bet_protection="   + (chk("vhrs-hb-protect") ? "true" : "false"),
+    ].join("&");
+
+    statePanel("vhrs-migration-body", "loading", "Running simulation…");
+    ["cards-vhrs-summary","cards-vhrs-match","vhrs-fp-body","vhrs-fn-body"].forEach(function(id){ $("#"+id).innerHTML=""; });
+
+    api("/api/admin/dashboard/backend-segment-engine/voucher-hunter-rule-simulator?" + params)
+      .then(function (d) {
+        var ss = d.simulation_summary || {};
+        var mr = d.match_rate_simulation || {};
+
+        function diffBadge(cur, sim) {
+          if (cur == null || sim == null) return "";
+          var diff = sim - cur;
+          if (diff === 0) return "";
+          var col = diff > 0 ? "var(--green,#4caf88)" : "var(--red,#e05c5c)";
+          return ' <span style="color:' + col + ';font-size:11px;">(' + (diff > 0 ? "+" : "") + diff + ')</span>';
+        }
+        function rateDiff(cur, sim) {
+          if (cur == null || sim == null) return "";
+          var diff = Math.round((sim - cur) * 100) / 100;
+          if (diff === 0) return "";
+          var col = diff > 0 ? "var(--green,#4caf88)" : "var(--red,#e05c5c)";
+          return ' <span style="color:' + col + ';font-size:11px;">(' + (diff > 0 ? "+" : "") + diff + '%)</span>';
+        }
+
+        // Summary cards
+        $("#cards-vhrs-summary").innerHTML =
+          dqCard("Total Users", { value: ss.total_users }) +
+          dqCard("Current Backend VH", { value: ss.current_backend_voucher_hunter_count }) +
+          dqCard("Simulated VH", { value: ss.simulated_voucher_hunter_count,
+            note: (ss.simulated_voucher_hunter_pct != null ? ss.simulated_voucher_hunter_pct + "%" : "") }) +
+          dqCard("UIM VH", { value: ss.current_uim_voucher_hunter_count });
+
+        // Match rate cards
+        $("#cards-vhrs-match").innerHTML =
+          dqCard("Previous Match Rate", { value: (mr.previous_match_rate != null ? mr.previous_match_rate + "%" : "—") }) +
+          dqCard("Simulated Match Rate", { value: (mr.match_rate != null ? mr.match_rate + "%" : "—") + (mr.delta != null ? ' <span style="font-size:11px;color:' + (mr.delta >= 0 ? "var(--green,#4caf88)" : "var(--red,#e05c5c)") + '">(' + (mr.delta >= 0 ? "+" : "") + mr.delta + "%)</span>" : "") }) +
+          dqCard("Compared Users", { value: mr.compared_users }) +
+          dqCard("Current Matches", { value: mr.current_matches }) +
+          dqCard("Simulated Matches", { value: mr.simulated_matches,
+            note: mr.simulated_mismatches != null ? mr.simulated_mismatches + " mismatches" : "" });
+
+        // Migration table
+        var mig = d.segment_migration || [];
+        if (mig.length) {
+          var migRows = mig.map(function(r) {
+            return "<tr><td>" + esc(r.from_segment) + "</td><td>→</td><td>" + esc(r.to_segment) + "</td>" +
+              '<td class="num"><b>' + fmt(r.users) + "</b></td></tr>";
+          }).join("");
+          $("#vhrs-migration-body").innerHTML =
+            '<div style="overflow-x:auto"><table class="mini-table">' +
+            '<thead><tr><th>From</th><th></th><th>To</th><th class="num">Users</th></tr></thead>' +
+            "<tbody>" + migRows + "</tbody></table></div>";
+        } else {
+          $("#vhrs-migration-body").innerHTML = '<div class="empty">No segment movements — rule produced identical classifications.</div>';
+        }
+
+        // Shared candidate table renderer
+        function renderCandidates(rows, containerId) {
+          if (!rows || !rows.length) { $("#"+containerId).innerHTML = '<div class="empty">No candidates.</div>'; return; }
+          function fmtNum(v) { return (v == null || v === "") ? "—" : fmt(v); }
+          var trs = rows.map(function(r) {
+            return "<tr>" +
+              "<td>" + esc(r.account || "") + "</td>" +
+              "<td>" + esc(r.backend_segment || "") + "</td>" +
+              "<td>" + esc(r.uim_segment || "") + "</td>" +
+              '<td class="num">' + fmtNum(r.after_bet) + "</td>" +
+              '<td class="num">' + fmtNum(r.withdrawal) + "</td>" +
+              '<td class="num">' + fmtNum(r.claims) + "</td>" +
+              '<td class="num">' + fmtNum(r.referrals) + "</td>" +
+              '<td class="num">' + fmtNum(r.checkins) + "</td>" +
+              "<td>" + esc(r.player_age_type || "") + "</td>" +
+              "<td>" + esc(r.claim_risk_level || "") + "</td>" +
+              "<td>" + esc(r.confidence || "") + "</td>" +
+              "</tr>";
+          }).join("");
+          $("#"+containerId).innerHTML =
+            '<div style="overflow-x:auto"><table class="mini-table">' +
+            '<thead><tr><th>Account</th><th>Backend Seg.</th><th>UIM Seg.</th>' +
+            "<th class='num'>After Bet</th><th class='num'>Withdraw</th>" +
+            "<th class='num'>Claims</th><th class='num'>Referrals</th><th class='num'>Checkins</th>" +
+            "<th>Age Type</th><th>Claim Risk</th><th>Confidence</th></tr></thead>" +
+            "<tbody>" + trs + "</tbody></table></div>";
+        }
+
+        renderCandidates(d.false_positive_review, "vhrs-fp-body");
+        renderCandidates(d.false_negative_review, "vhrs-fn-body");
+      })
+      .catch(function (e) {
+        if (e.message !== "unauthorized") {
+          statePanel("vhrs-migration-body", "banner error", "Simulation failed: " + esc(e.message));
+        }
+      });
+  }
+
   // ---------- Voucher Hunter False Positive Analysis (Phase 5E-FP) ----------
   function loadVoucherHunterFalsePositive() {
     var week = ($("#vhfp-week") || {}).value || "";
@@ -2057,7 +2171,7 @@
       });
   }
 
-  var VIEWS = ["summary", "funnel", "abuse", "vouchers", "referrals", "affiliate", "reactivation", "audit", "segments", "validation", "backendSegmentEngine", "voucherHunterAudit", "unclassifiedAudit", "segmentRuleSimulator", "voucherHunterQuality", "voucherHunterFalsePositive", "uploadPlayerPerformance", "uploadHistory", "rawExplorer", "users", "settings"];
+  var VIEWS = ["summary", "funnel", "abuse", "vouchers", "referrals", "affiliate", "reactivation", "audit", "segments", "validation", "backendSegmentEngine", "voucherHunterAudit", "unclassifiedAudit", "segmentRuleSimulator", "voucherHunterQuality", "voucherHunterFalsePositive", "voucherHunterRuleSimulator", "uploadPlayerPerformance", "uploadHistory", "rawExplorer", "users", "settings"];
   function switchView(view) {
     state.view = view;
     $all(".nav-item").forEach(function (b) { b.classList.toggle("active", b.dataset.view === view); });
@@ -2072,6 +2186,7 @@
       segmentRuleSimulator: "Data → Segment Rule Simulator (Phase 5D)",
       voucherHunterQuality: "Data → Voucher Hunter Rule Quality Analysis (Phase 5E)",
       voucherHunterFalsePositive: "Data → Voucher Hunter False Positive Analysis (Phase 5E-FP)",
+      voucherHunterRuleSimulator: "Data → Voucher Hunter Rule Simulator (Phase 6A)",
       uploadPlayerPerformance: "Data → Upload Player Performance", uploadHistory: "Data → Upload History",
       rawExplorer: "Data → Raw Data Explorer",
       users: "User Drilldown", settings: "Settings (Read Only)"
@@ -2098,6 +2213,7 @@
     else if (state.view === "segmentRuleSimulator") { /* loads on Run Simulation click */ }
     else if (state.view === "voucherHunterQuality") { /* loads on Run Analysis click */ }
     else if (state.view === "voucherHunterFalsePositive") { /* loads on Run Analysis click */ }
+    else if (state.view === "voucherHunterRuleSimulator") { /* loads on Run Simulation click */ }
     else if (state.view === "uploadPlayerPerformance") { /* upload view loads on submit */ }
     else if (state.view === "uploadHistory") loadUploadHistory(force);
     else if (state.view === "rawExplorer") loadRawExplorer(force);
@@ -2230,6 +2346,9 @@
 
     var vhfpApplyBtn = $("#vhfp-apply-btn");
     if (vhfpApplyBtn) vhfpApplyBtn.addEventListener("click", loadVoucherHunterFalsePositive);
+
+    var vhrsRunBtn = $("#vhrs-run-btn");
+    if (vhrsRunBtn) vhrsRunBtn.addEventListener("click", runVoucherHunterRuleSimulator);
 
     var imaApplyBtn = $("#ima-apply-btn");
     if (imaApplyBtn) imaApplyBtn.addEventListener("click", loadIdentityMatchAudit);
