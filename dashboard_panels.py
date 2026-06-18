@@ -1887,6 +1887,186 @@ def build_uim_comparison_panel(
 
 
 # ---------------------------------------------------------------------------
+# 5b. Voucher Hunter Mismatch Audit (Phase 5B)
+# ---------------------------------------------------------------------------
+
+_FOCUS_SEGMENTS = {
+    "unclassified", "normal_actual", "low_value",
+    "high_value", "ghost", "active_community_player",
+}
+
+_VHMA_PROJ = {
+    "_id": 0,
+    "account": 1,
+    "backend_segment": 1,
+    "player_age_type": 1,
+    "claim_risk_level": 1,
+    "confidence": 1,
+    "segment_reason": 1,
+    "uim_comparison": 1,
+    "metrics_snapshot": 1,
+}
+
+
+def build_voucher_hunter_mismatch_audit(
+    *,
+    snapshots_col,
+    snapshot_week: str,
+    sample_limit: int = 20,
+    now: datetime | None = None,
+) -> dict:
+    """Phase 5B: read-only audit explaining why users with uim_segment=voucher_hunter
+    were not classified as voucher_hunter by the backend engine.
+
+    Queries backend_segment_snapshots for rows where uim_comparison.uim_segment
+    equals 'voucher_hunter'. Groups by backend_segment, computing average input
+    metrics and player age counts. Returns top-20 sample users per mismatch group.
+
+    Never writes, never modifies segments or rewards.
+    """
+    now = now or _utc_now()
+
+    query: dict = {
+        "snapshot_week": snapshot_week,
+        "uim_comparison.uim_segment": "voucher_hunter",
+    }
+    docs = list(snapshots_col.find(query, _VHMA_PROJ))
+
+    total_voucher_hunter = len(docs)
+
+    # --- Accumulators per backend_segment ---
+    acc: dict[str, dict] = {}
+    samples: dict[str, list] = {}
+
+    for doc in docs:
+        b_seg = doc.get("backend_segment") or "unclassified"
+        ms = doc.get("metrics_snapshot") or {}
+        cmp = doc.get("uim_comparison") or {}
+        is_match = bool(cmp.get("match"))
+
+        if b_seg not in acc:
+            acc[b_seg] = {
+                "user_count": 0,
+                "sum_atb": 0.0, "n_atb": 0,
+                "sum_wd": 0.0, "n_wd": 0,
+                "sum_claim": 0,
+                "sum_ref": 0,
+                "sum_checkin": 0,
+                "new_player_count": 0,
+                "old_player_count": 0,
+                "mismatch_count": 0,
+            }
+        a = acc[b_seg]
+        a["user_count"] += 1
+        if not is_match:
+            a["mismatch_count"] += 1
+
+        atb = ms.get("after_total_bet_amount")
+        if atb is not None:
+            try:
+                a["sum_atb"] += float(atb)
+                a["n_atb"] += 1
+            except (TypeError, ValueError):
+                pass
+
+        wd = ms.get("withdraw_amount")
+        if wd is not None:
+            try:
+                a["sum_wd"] += float(wd)
+                a["n_wd"] += 1
+            except (TypeError, ValueError):
+                pass
+
+        try:
+            a["sum_claim"]   += int(ms.get("claim_count",   0) or 0)
+            a["sum_ref"]     += int(ms.get("referral_count", 0) or 0)
+            a["sum_checkin"] += int(ms.get("checkin_count",  0) or 0)
+        except (TypeError, ValueError):
+            pass
+
+        age = doc.get("player_age_type") or ""
+        if age == "new_player":
+            a["new_player_count"] += 1
+        elif age == "old_player":
+            a["old_player_count"] += 1
+
+        # Collect samples (up to sample_limit per segment, mismatches first)
+        if b_seg not in samples:
+            samples[b_seg] = []
+        if not is_match and len(samples[b_seg]) < sample_limit:
+            samples[b_seg].append({
+                "account":                doc.get("account"),
+                "backend_segment":        b_seg,
+                "uim_segment":            cmp.get("uim_segment"),
+                "after_total_bet_amount": ms.get("after_total_bet_amount"),
+                "withdraw_amount":        ms.get("withdraw_amount"),
+                "claim_count":            ms.get("claim_count"),
+                "referral_count":         ms.get("referral_count"),
+                "checkin_count":          ms.get("checkin_count"),
+                "player_age_type":        doc.get("player_age_type"),
+                "claim_risk_level":       doc.get("claim_risk_level"),
+                "confidence":             doc.get("confidence"),
+                "reason":                 doc.get("segment_reason"),
+            })
+
+    total_mismatches = sum(
+        a["mismatch_count"] for a in acc.values()
+        if a.get("mismatch_count", 0) > 0
+    )
+
+    def _pct(num: int, den: int) -> float | None:
+        return round(num / den * 100, 2) if den else None
+
+    segment_breakdown: list[dict] = []
+    for seg, a in sorted(acc.items(), key=lambda x: -x[1]["mismatch_count"]):
+        n = a["user_count"]
+        mc = a["mismatch_count"]
+        segment_breakdown.append({
+            "backend_segment":            seg,
+            "user_count":                 n,
+            "mismatch_count":             mc,
+            "avg_after_total_bet_amount": round(a["sum_atb"] / a["n_atb"], 4) if a["n_atb"] else None,
+            "avg_withdraw_amount":        round(a["sum_wd"]  / a["n_wd"],  4) if a["n_wd"]  else None,
+            "avg_claim_count":            round(a["sum_claim"]   / n, 4) if n else None,
+            "avg_referral_count":         round(a["sum_ref"]     / n, 4) if n else None,
+            "avg_checkin_count":          round(a["sum_checkin"] / n, 4) if n else None,
+            "avg_claim_risk_score":       None,  # not stored as numeric — see claim_risk_level in samples
+            "new_player_count":           a["new_player_count"],
+            "old_player_count":           a["old_player_count"],
+            "pct_of_voucher_hunter":      _pct(mc, total_voucher_hunter),
+            "pct_of_mismatches":          _pct(mc, total_mismatches),
+        })
+
+    summary_table = [
+        {
+            "backend_segment":       row["backend_segment"],
+            "users":                 row["mismatch_count"],
+            "pct_of_voucher_hunter": row["pct_of_voucher_hunter"],
+            "pct_of_mismatches":     row["pct_of_mismatches"],
+        }
+        for row in segment_breakdown
+        if row["backend_segment"] in _FOCUS_SEGMENTS and row["mismatch_count"] > 0
+    ]
+
+    return {
+        "ok": True,
+        "generated_at": now.isoformat(),
+        "snapshot_week": snapshot_week,
+        "totals": {
+            "total_voucher_hunter_uim_users": total_voucher_hunter,
+            "total_mismatches": total_mismatches,
+        },
+        "segment_breakdown": segment_breakdown,
+        "summary_table": summary_table,
+        "sample_users": {
+            seg: lst
+            for seg, lst in samples.items()
+            if seg in _FOCUS_SEGMENTS
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
 # 5. User drilldown
 # ---------------------------------------------------------------------------
 

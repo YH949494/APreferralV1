@@ -22,6 +22,7 @@
       <button class="nav-item" data-view="segments">Segment Overview</button>
       <button class="nav-item" data-view="validation">Data → Validation</button>
       <button class="nav-item" data-view="backendSegmentEngine">Data → Backend Segment Engine</button>
+      <button class="nav-item" data-view="voucherHunterAudit">Data → Voucher Hunter Mismatch</button>
       <button class="nav-item" data-view="uploadPlayerPerformance">Data → Upload Player Performance</button>
       <button class="nav-item" data-view="uploadHistory">Data → Upload History</button>
       <button class="nav-item" data-view="rawExplorer">Data → Raw Data Explorer</button>
@@ -287,6 +288,36 @@
         </div>
         <div class="card-grid" id="cards-ima-summary"></div>
         <div id="ima-body"></div>
+      </section>
+
+      <!-- VOUCHER HUNTER MISMATCH AUDIT VIEW (Phase 5B) -->
+      <section id="view-voucherHunterAudit" class="hidden">
+        <div style="margin-bottom:16px;"><span class="tag heuristic" style="font-size:12px;padding:4px 12px;">READ ONLY — analysis only. Does not modify segment rules, bot_segment, voucher allocation, or reward logic.</span></div>
+        <div style="background:var(--bg-card,#1e2230);border:1px solid var(--border,#2d3348);border-radius:8px;padding:16px;margin-bottom:20px;">
+          <div style="font-weight:600;font-size:13px;margin-bottom:4px;">Voucher Hunter Mismatch Audit</div>
+          <div style="font-size:11px;color:var(--muted,#8892a4);margin-bottom:12px;">
+            Analyses users where UIM classified them as <b>voucher_hunter</b> but the backend engine did not.
+            Returns avg metrics and sample users per mismatch group to support Phase 5 rule tuning.
+          </div>
+          <div class="controls" style="flex-wrap:wrap;gap:8px;margin-bottom:8px;">
+            <input class="filter-input" id="vhma-week" placeholder="snapshot_week e.g. 2026-W25" style="max-width:220px;margin:0;" />
+            <button class="btn primary" id="vhma-apply-btn">Run Audit</button>
+          </div>
+        </div>
+
+        <div class="section-title">Totals</div>
+        <div class="card-grid" id="cards-vhma-totals"></div>
+
+        <div class="section-title">Mismatch Summary by Backend Segment</div>
+        <div style="font-size:11px;color:var(--muted,#8892a4);margin-bottom:8px;">Focus segments only — rows where backend_segment ≠ voucher_hunter and UIM = voucher_hunter.</div>
+        <div id="vhma-summary-body"></div>
+
+        <div class="section-title">Segment Breakdown — Avg Input Metrics</div>
+        <div style="font-size:11px;color:var(--muted,#8892a4);margin-bottom:8px;">Avg metrics for mismatch users in each backend segment. Use to determine whether backend thresholds are too conservative or UIM rules are too aggressive.</div>
+        <div id="vhma-breakdown-body"></div>
+
+        <div class="section-title">Sample Users per Mismatch Group <span style="font-size:11px;font-weight:400;color:var(--muted,#8892a4);">(top 20 per group, mismatches only)</span></div>
+        <div id="vhma-samples-body"></div>
       </section>
 
       <!-- UPLOAD PLAYER PERFORMANCE VIEW (Phase 2A) -->

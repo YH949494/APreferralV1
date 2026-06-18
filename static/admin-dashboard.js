@@ -1132,6 +1132,118 @@
     document.body.removeChild(a);
   }
 
+  // ---------- Voucher Hunter Mismatch Audit (Phase 5B) ----------
+  function loadVoucherHunterMismatchAudit() {
+    var week = ($("#vhma-week") || {}).value || "";
+    if (!week) {
+      statePanel("vhma-summary-body", "banner", "Enter a snapshot_week and click Run Audit.");
+      $("#cards-vhma-totals").innerHTML = "";
+      $("#vhma-breakdown-body").innerHTML = "";
+      $("#vhma-samples-body").innerHTML = "";
+      return;
+    }
+    statePanel("vhma-summary-body", "loading", "Running audit…");
+    $("#cards-vhma-totals").innerHTML = "";
+    $("#vhma-breakdown-body").innerHTML = "";
+    $("#vhma-samples-body").innerHTML = "";
+    api("/api/admin/dashboard/backend-segment-engine/voucher-hunter-mismatch-audit?snapshot_week=" + encodeURIComponent(week))
+      .then(function (d) {
+        // Totals
+        var t = d.totals || {};
+        $("#cards-vhma-totals").innerHTML =
+          dqCard("UIM Voucher Hunter Users", { value: t.total_voucher_hunter_uim_users }) +
+          dqCard("Total Mismatches",         { value: t.total_mismatches });
+
+        // Summary table
+        var st = d.summary_table || [];
+        if (st.length) {
+          var stRows = st.map(function (r) {
+            return "<tr>" +
+              "<td><b>" + esc(r.backend_segment) + "</b></td>" +
+              '<td class="num">' + fmt(r.users) + "</td>" +
+              '<td class="num">' + (r.pct_of_voucher_hunter != null ? r.pct_of_voucher_hunter + "%" : "—") + "</td>" +
+              '<td class="num">' + (r.pct_of_mismatches != null ? r.pct_of_mismatches + "%" : "—") + "</td>" +
+              "</tr>";
+          }).join("");
+          $("#vhma-summary-body").innerHTML =
+            '<div style="overflow-x:auto"><table class="mini-table">' +
+            '<thead><tr><th>Backend Segment</th><th class="num">Users</th><th class="num">% of Voucher Hunter</th><th class="num">% of Mismatches</th></tr></thead>' +
+            "<tbody>" + stRows + "</tbody></table></div>";
+        } else {
+          $("#vhma-summary-body").innerHTML = '<div class="empty">No focus-segment mismatches found for this week.</div>';
+        }
+
+        // Breakdown table
+        var bd = d.segment_breakdown || [];
+        if (bd.length) {
+          function fmtAvg(v) { return v == null ? "—" : (typeof v === "number" ? v.toFixed(2) : esc(String(v))); }
+          var bdRows = bd.map(function (r) {
+            return "<tr>" +
+              "<td><b>" + esc(r.backend_segment) + "</b></td>" +
+              '<td class="num">' + fmt(r.mismatch_count) + "</td>" +
+              '<td class="num">' + fmtAvg(r.avg_after_total_bet_amount) + "</td>" +
+              '<td class="num">' + fmtAvg(r.avg_withdraw_amount) + "</td>" +
+              '<td class="num">' + fmtAvg(r.avg_claim_count) + "</td>" +
+              '<td class="num">' + fmtAvg(r.avg_referral_count) + "</td>" +
+              '<td class="num">' + fmtAvg(r.avg_checkin_count) + "</td>" +
+              '<td class="num">' + fmt(r.new_player_count) + "</td>" +
+              '<td class="num">' + fmt(r.old_player_count) + "</td>" +
+              "</tr>";
+          }).join("");
+          $("#vhma-breakdown-body").innerHTML =
+            '<div style="overflow-x:auto"><table class="mini-table">' +
+            '<thead><tr>' +
+            "<th>Backend Segment</th><th class='num'>Mismatches</th>" +
+            "<th class='num'>Avg After Bet</th><th class='num'>Avg Withdraw</th>" +
+            "<th class='num'>Avg Claims</th><th class='num'>Avg Referrals</th><th class='num'>Avg Checkins</th>" +
+            "<th class='num'>New Players</th><th class='num'>Old Players</th>" +
+            "</tr></thead><tbody>" + bdRows + "</tbody></table></div>";
+        } else {
+          $("#vhma-breakdown-body").innerHTML = '<div class="empty">No data.</div>';
+        }
+
+        // Sample users per group
+        var samps = d.sample_users || {};
+        var segOrder = ["unclassified", "normal_actual", "low_value", "high_value", "ghost", "active_community_player"];
+        var sampHtml = "";
+        segOrder.forEach(function (seg) {
+          var rows = samps[seg];
+          if (!rows || !rows.length) return;
+          function fmtNum(v) { return (v == null || v === "") ? "—" : fmt(v); }
+          var tRows = rows.map(function (r) {
+            return "<tr>" +
+              "<td>" + esc(r.account || "") + "</td>" +
+              "<td>" + esc(r.backend_segment || "") + "</td>" +
+              "<td>voucher_hunter</td>" +
+              '<td class="num">' + fmtNum(r.after_total_bet_amount) + "</td>" +
+              '<td class="num">' + fmtNum(r.withdraw_amount) + "</td>" +
+              '<td class="num">' + fmtNum(r.claim_count) + "</td>" +
+              '<td class="num">' + fmtNum(r.referral_count) + "</td>" +
+              '<td class="num">' + fmtNum(r.checkin_count) + "</td>" +
+              "<td>" + esc(r.player_age_type || "") + "</td>" +
+              "<td>" + esc(r.claim_risk_level || "") + "</td>" +
+              "<td>" + esc(r.confidence || "") + "</td>" +
+              "<td>" + esc(r.reason || "") + "</td>" +
+              "</tr>";
+          }).join("");
+          sampHtml +=
+            '<div style="font-weight:600;font-size:12px;margin:16px 0 6px;">' + esc(seg) + ' (' + rows.length + ' samples)</div>' +
+            '<div style="overflow-x:auto"><table class="mini-table">' +
+            '<thead><tr><th>Account</th><th>Backend Seg.</th><th>UIM Seg.</th>' +
+            "<th class='num'>After Bet</th><th class='num'>Withdraw</th>" +
+            "<th class='num'>Claims</th><th class='num'>Referrals</th><th class='num'>Checkins</th>" +
+            "<th>Age Type</th><th>Claim Risk</th><th>Confidence</th><th>Reason</th></tr></thead>" +
+            "<tbody>" + tRows + "</tbody></table></div>";
+        });
+        $("#vhma-samples-body").innerHTML = sampHtml || '<div class="empty">No sample users available.</div>';
+      })
+      .catch(function (e) {
+        if (e.message !== "unauthorized") {
+          statePanel("vhma-summary-body", "banner error", "Failed: " + esc(e.message));
+        }
+      });
+  }
+
   // ---------- Identity Match Audit ----------
   function _imaRateColor(pct) {
     return pct >= 80 ? "var(--green,#4caf88)" : pct >= 40 ? "var(--yellow,#e0b44a)" : "var(--red,#e05c5c)";
@@ -1460,7 +1572,7 @@
       });
   }
 
-  var VIEWS = ["summary", "funnel", "abuse", "vouchers", "referrals", "affiliate", "reactivation", "audit", "segments", "validation", "backendSegmentEngine", "uploadPlayerPerformance", "uploadHistory", "rawExplorer", "users", "settings"];
+  var VIEWS = ["summary", "funnel", "abuse", "vouchers", "referrals", "affiliate", "reactivation", "audit", "segments", "validation", "backendSegmentEngine", "voucherHunterAudit", "uploadPlayerPerformance", "uploadHistory", "rawExplorer", "users", "settings"];
   function switchView(view) {
     state.view = view;
     $all(".nav-item").forEach(function (b) { b.classList.toggle("active", b.dataset.view === view); });
@@ -1470,6 +1582,7 @@
       vouchers: "Vouchers", referrals: "Referrals", affiliate: "Affiliate", reactivation: "Reactivation",
       audit: "Audit", segments: "Segment Overview", validation: "Data → Validation / UIM Compare",
       backendSegmentEngine: "Data → Backend Segment Engine (Shadow Mode)",
+      voucherHunterAudit: "Data → Voucher Hunter Mismatch Audit (Phase 5B)",
       uploadPlayerPerformance: "Data → Upload Player Performance", uploadHistory: "Data → Upload History",
       rawExplorer: "Data → Raw Data Explorer",
       users: "User Drilldown", settings: "Settings (Read Only)"
@@ -1491,6 +1604,7 @@
     else if (state.view === "segments") loadSegments(force);
     else if (state.view === "validation") loadValidation(force);
     else if (state.view === "backendSegmentEngine") loadBackendSegmentEngine(force);
+    else if (state.view === "voucherHunterAudit") loadVoucherHunterMismatchAudit();
     else if (state.view === "uploadPlayerPerformance") { /* upload view loads on submit */ }
     else if (state.view === "uploadHistory") loadUploadHistory(force);
     else if (state.view === "rawExplorer") loadRawExplorer(force);
@@ -1608,6 +1722,9 @@
     if (uimcApplyBtn) uimcApplyBtn.addEventListener("click", function () { loadUimComparison(true); });
     var uimcExportBtn = $("#uimc-export-btn");
     if (uimcExportBtn) uimcExportBtn.addEventListener("click", exportUimComparisonCsv);
+
+    var vhmaApplyBtn = $("#vhma-apply-btn");
+    if (vhmaApplyBtn) vhmaApplyBtn.addEventListener("click", loadVoucherHunterMismatchAudit);
 
     var imaApplyBtn = $("#ima-apply-btn");
     if (imaApplyBtn) imaApplyBtn.addEventListener("click", loadIdentityMatchAudit);
