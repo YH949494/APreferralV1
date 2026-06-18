@@ -49,15 +49,43 @@ class SegmentRuleTests(unittest.TestCase):
         self.assertEqual(engine.classify_segment(m)["segment"], "normal_actual")
 
     def test_voucher_hunter_rule(self):
-        m = _metrics(after_total_bet_amount=0, withdraw_amount=0, claim_count=3)
+        # VH v2: claim_count >= 10, after_bet < 100, referral_count < 20
+        m = _metrics(after_total_bet_amount=0, withdraw_amount=0, claim_count=10)
         result = engine.classify_segment(m)
         self.assertEqual(result["segment"], "voucher_hunter")
-        self.assertEqual(result["segment_reason"], "repeat claims with no play")
 
     def test_voucher_hunter_requires_threshold(self):
-        m = _metrics(after_total_bet_amount=0, withdraw_amount=0, claim_count=2)
+        # claim_count=9 is one below the v2 threshold of 10
+        m = _metrics(after_total_bet_amount=0, withdraw_amount=0, claim_count=9)
         result = engine.classify_segment(m)
         self.assertNotEqual(result["segment"], "voucher_hunter")
+
+    def test_voucher_hunter_v2_small_after_bet(self):
+        # Case B: small after_bet still qualifies if claim_count >= 10
+        m = _metrics(after_total_bet_amount=50, withdraw_amount=0, claim_count=15, referral_count=3)
+        self.assertEqual(engine.classify_segment(m)["segment"], "voucher_hunter")
+
+    def test_voucher_hunter_v2_after_bet_at_threshold(self):
+        # Case C: after_bet >= 100 → not VH → normal_actual
+        m = _metrics(after_total_bet_amount=100, withdraw_amount=0, claim_count=15, referral_count=3)
+        self.assertEqual(engine.classify_segment(m)["segment"], "normal_actual")
+
+    def test_voucher_hunter_v2_referral_protection(self):
+        # Case D: referral_count >= 20 → not VH → normal_actual (has play) or unclassified
+        m = _metrics(after_total_bet_amount=50, withdraw_amount=0, claim_count=15, referral_count=20)
+        self.assertNotEqual(engine.classify_segment(m)["segment"], "voucher_hunter")
+
+    def test_voucher_hunter_v2_high_bet_not_vh(self):
+        # Case E: after_bet >= 1000 → after_bet < 100 fails → normal_actual
+        m = _metrics(after_total_bet_amount=5000, withdraw_amount=0, claim_count=15, referral_count=0)
+        self.assertEqual(engine.classify_segment(m)["segment"], "normal_actual")
+
+    def test_voucher_hunter_v2_withdrawal_not_vh(self):
+        # Case F: withdraw > 0 → high/low value before VH check; never VH
+        m = _metrics(after_total_bet_amount=0, withdraw_amount=5, claim_count=15, referral_count=0)
+        result = engine.classify_segment(m)
+        self.assertNotEqual(result["segment"], "voucher_hunter")
+        self.assertIn(result["segment"], ("high_value", "low_value"))
 
     def test_ghost_rule(self):
         m = _metrics(
