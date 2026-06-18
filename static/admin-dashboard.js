@@ -1102,58 +1102,6 @@
     return pct >= 80 ? "var(--green,#4caf88)" : pct >= 40 ? "var(--yellow,#e0b44a)" : "var(--red,#e05c5c)";
   }
 
-  function _imaMethodBlock(m, matchedHeaders, unmatchedHeaders, rowFn) {
-    var rateColor = _imaRateColor(m.match_rate_pct);
-    var html = '<div style="background:var(--bg-card,#1e2230);border:1px solid var(--border,#2d3348);border-radius:8px;padding:16px;margin-bottom:16px;">';
-    html += '<div style="font-weight:600;font-size:13px;margin-bottom:4px;">' + esc(m.description) + '</div>';
-    html += '<div style="font-size:11px;color:var(--muted,#8892a4);margin-bottom:12px;">' +
-      esc(m.join_from) + ' &rarr; ' + esc(m.join_via) + '</div>';
-    html += '<div class="card-grid">';
-    html += dqCard("Total", { value: m.total });
-    html += dqCard("Matched", { value: m.matched, note: "user_id resolved" });
-    html += dqCard("Unmatched", { value: m.unmatched, note: "join failed" });
-    var rateNote = m.match_rate_pct >= 80 ? "healthy" : m.match_rate_pct >= 40 ? "partial" : "critical";
-    html += '<div class="kpi"><div class="label">Match Rate</div>' +
-      '<div class="value" style="color:' + rateColor + '">' + m.match_rate_pct + '%</div>' +
-      '<div class="sub">' + rateNote + '</div></div>';
-    if (m.rows_with_coupon_code !== undefined) {
-      html += dqCard("Has Coupon Code", { value: m.rows_with_coupon_code, note: m.rows_without_coupon_code + " rows have no code" });
-      if (m.coupon_match_rate_pct !== undefined) {
-        html += '<div class="kpi"><div class="label">Coupon Match Rate</div>' +
-          '<div class="value" style="color:' + _imaRateColor(m.coupon_match_rate_pct) + '">' + m.coupon_match_rate_pct + '%</div>' +
-          '<div class="sub">of rows that have a coupon_code</div></div>';
-      }
-    }
-    html += '</div>';
-
-    // Sample matched
-    html += '<div style="font-weight:600;font-size:12px;margin:12px 0 6px;">Sample Matched (up to 20)</div>';
-    if (m.sample_matched && m.sample_matched.length) {
-      html += '<div style="overflow-x:auto"><table class="mini-table"><thead><tr>' +
-        matchedHeaders.map(function (h) { return '<th>' + esc(h) + '</th>'; }).join('') +
-        '</tr></thead><tbody>';
-      m.sample_matched.forEach(function (r) { html += '<tr>' + rowFn(r, true) + '</tr>'; });
-      html += '</tbody></table></div>';
-    } else {
-      html += '<div class="empty">No matched rows.</div>';
-    }
-
-    // Sample unmatched
-    html += '<div style="font-weight:600;font-size:12px;margin:12px 0 6px;">Sample Unmatched (up to 20)</div>';
-    if (m.sample_unmatched && m.sample_unmatched.length) {
-      html += '<div style="overflow-x:auto"><table class="mini-table"><thead><tr>' +
-        unmatchedHeaders.map(function (h) { return '<th>' + esc(h) + '</th>'; }).join('') +
-        '</tr></thead><tbody>';
-      m.sample_unmatched.forEach(function (r) { html += '<tr>' + rowFn(r, false) + '</tr>'; });
-      html += '</tbody></table></div>';
-    } else {
-      html += '<div class="empty">No unmatched rows.</div>';
-    }
-
-    html += '</div>';
-    return html;
-  }
-
   function loadIdentityMatchAudit() {
     var week = ($("#ima-week") || {}).value || "";
     if (!week) {
@@ -1166,50 +1114,39 @@
     api("/api/admin/dashboard/backend-segment-engine/identity-match-audit?snapshot_week=" +
         encodeURIComponent(week))
       .then(function (d) {
-        var a = d.method_a || {};
-        var b = d.method_b || {};
+        var rateColor = _imaRateColor(d.identity_match_rate);
+        var rateNote = d.identity_match_rate >= 80 ? "healthy" : d.identity_match_rate >= 40 ? "partial" : "critical";
 
-        // Top summary: winner recommendation
-        var recColor = b.match_rate_pct > a.match_rate_pct ? "var(--green,#4caf88)" : "var(--muted,#8892a4)";
         $("#cards-ima-summary").innerHTML =
-          '<div class="kpi" style="grid-column:1/-1;">' +
-          '<div class="label">Recommendation</div>' +
-          '<div class="value" style="font-size:14px;color:' + recColor + '">' + esc(d.recommendation || "—") + '</div>' +
-          '<div class="sub">snapshot_week: ' + esc(d.snapshot_week) + '</div>' +
-          '</div>' +
-          dqCard("Method A Match Rate", { value: a.match_rate_pct, note: "account → username" }) +
-          dqCard("Method B Match Rate", { value: b.match_rate_pct, note: "coupon_code → voucher_claims" });
+          dqCard("Total Rows", { value: d.total_rows }) +
+          dqCard("Matched Rows", { value: d.matched_rows, note: "user_id resolved" }) +
+          dqCard("Unmatched Rows", { value: d.unmatched_rows, note: "no coupon match" }) +
+          '<div class="kpi"><div class="label">Identity Match Rate</div>' +
+          '<div class="value" style="color:' + rateColor + '">' + d.identity_match_rate + '%</div>' +
+          '<div class="sub">' + rateNote + ' &middot; ' + esc(d.snapshot_week) + '</div></div>';
 
-        var html = "";
+        var cols = ["account", "coupon_code", "user_id"];
+        var thRow = cols.map(function (h) { return '<th>' + esc(h) + '</th>'; }).join('');
 
-        // Method A block
-        html += '<div class="section-title" style="margin-top:20px;">Method A — Current Engine Join</div>';
-        html += _imaMethodBlock(
-          a,
-          ["account", "username (resolved)", "user_id"],
-          ["account", "username (resolved)", "user_id"],
-          function (r, matched) {
-            var muted = matched ? "" : ' style="color:var(--muted,#8892a4)"';
-            return '<td>' + esc(r.account || "") + '</td>' +
-              '<td' + muted + '>' + esc(r.resolve_field || "—") + '</td>' +
-              '<td' + muted + '>' + esc(r.user_id || "—") + '</td>';
+        function sampleTable(rows, title, matched) {
+          var html = '<div style="font-weight:600;font-size:12px;margin:16px 0 6px;">' + title + ' (up to 20)</div>';
+          if (rows && rows.length) {
+            html += '<div style="overflow-x:auto"><table class="mini-table"><thead><tr>' + thRow + '</tr></thead><tbody>';
+            rows.forEach(function (r) {
+              var muted = matched ? "" : ' style="color:var(--muted,#8892a4)"';
+              html += '<tr><td>' + esc(r.account || "") + '</td>' +
+                '<td' + muted + '>' + esc(r.coupon_code || "—") + '</td>' +
+                '<td' + muted + '>' + esc(r.user_id || "—") + '</td></tr>';
+            });
+            html += '</tbody></table></div>';
+          } else {
+            html += '<div class="empty">No rows.</div>';
           }
-        );
+          return html;
+        }
 
-        // Method B block
-        html += '<div class="section-title" style="margin-top:8px;">Method B — Proposed Voucher Code Join</div>';
-        html += _imaMethodBlock(
-          b,
-          ["account", "coupon_code", "user_id"],
-          ["account", "coupon_code", "user_id"],
-          function (r, matched) {
-            var muted = matched ? "" : ' style="color:var(--muted,#8892a4)"';
-            return '<td>' + esc(r.account || "") + '</td>' +
-              '<td' + muted + '>' + esc(r.coupon_code || "—") + '</td>' +
-              '<td' + muted + '>' + esc(r.user_id || "—") + '</td>';
-          }
-        );
-
+        var html = sampleTable(d.sample_matched, "Sample Matched Rows", true);
+        html += sampleTable(d.sample_unmatched, "Sample Unmatched Rows", false);
         $("#ima-body").innerHTML = html;
       })
       .catch(function (e) {
