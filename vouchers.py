@@ -14,6 +14,8 @@ from config import (
     public_pool_probability_for_bot_segment,
     is_new_user_segment,
     is_blank_or_unknown_for_bot_segment,
+    backend_segment_probability,
+    SEGMENT_PROBABILITY_CONFIG,
 )
 import hmac, hashlib, urllib.parse, os, json
 import config as _cfg 
@@ -2774,6 +2776,8 @@ def _load_user_bot_segment(user_id_int) -> tuple[str | None, str, float, bool]:
                     "bot_segment": 1,
                     "for_bot_segment_normalized": 1,
                     "bot_segment_probability": 1,
+                    "backend_segment": 1,
+                    "player_age_type": 1,
                 },
             )
             if user_id_int is not None
@@ -2826,21 +2830,61 @@ def assign_public_pool_access_once(
             user_id_int
         )
 
+    # Resolve backend segment and player_age_type from user doc if available.
+    _udoc = user_doc or {}
+    backend_seg = _udoc.get("backend_segment") or None
+    player_age_type = _udoc.get("player_age_type") or None
+
     assignment_count_before = _count_public_pool_assignments_for_user(user_id_int)
-    boost_applied = bool(is_new_user_segment(normalized_segment) and assignment_count_before < 3)
+    eligible_new_player_window = assignment_count_before < 3
+
+    # New-player override: 100% for first 3 eligible opportunities.
+    new_player_override = bool(player_age_type == "new_player" and eligible_new_player_window)
+    # Legacy SVD boost for UIM new_user / new_joiner segments (backward compat).
+    legacy_svd_boost = bool(is_new_user_segment(normalized_segment) and eligible_new_player_window)
+
+    boost_applied = new_player_override or legacy_svd_boost
+
     if boost_applied:
         probability = 1.0
-        probability_source = "for_bot_segment_new_user_svd_boost"
+        if new_player_override:
+            probability_source = "new_player_override"
+        else:
+            probability_source = "for_bot_segment_new_user_svd_boost"
         delay_seconds = 0
+    elif backend_seg and backend_seg in SEGMENT_PROBABILITY_CONFIG:
+        # Use centralised backend segment probabilities.
+        probability = backend_segment_probability(backend_seg)
+        probability_source = "backend"
+        delay_seconds = 0 if probability >= 1.0 else random.randint(15, 45)
     else:
+        # Fallback: UIM-based probability (existing behavior).
         probability = public_pool_probability_for_bot_segment(normalized_segment)
         probability_source = "for_bot_segment"
         delay_seconds = 0 if probability >= 1.0 else random.randint(15, 45)
+
     if fallback:
         logger.info(
-            "[PUBLIC_POOL][SEGMENT_FALLBACK] uid=%s reason=blank_or_unknown probability=0.7",
+            "[PUBLIC_POOL][SEGMENT_FALLBACK] uid=%s reason=blank_or_unknown probability=%.2f",
             user_id_int,
+            probability,
         )
+
+    # Enhanced probability decision log.
+    logger.info(
+        "[PUBLIC_POOL][PROB_DECISION] account=%s segment=%s backend_segment=%s "
+        "player_age_type=%s probability_used=%.4f source=%s "
+        "new_player_override=%s boost_applied=%s ts=%s",
+        user_id_int,
+        normalized_segment,
+        backend_seg,
+        player_age_type,
+        probability,
+        probability_source,
+        new_player_override,
+        boost_applied,
+        now_utc().isoformat(),
+    )
     access_allowed = True if probability >= 1.0 else (random.random() < probability)
     assigned_at = now_utc()
     drop_open_utc = _as_aware_utc(drop_open_time) or assigned_at
@@ -2852,8 +2896,11 @@ def assign_public_pool_access_once(
         "segment_at_assignment": normalized_segment,
         "for_bot_segment": raw_segment,
         "for_bot_segment_normalized": normalized_segment,
+        "backend_segment_at_assignment": backend_seg,
+        "player_age_type_at_assignment": player_age_type,
         "public_pool_assignment_count_before": assignment_count_before,
         "new_user_svd_boost_applied": boost_applied,
+        "new_player_override_applied": new_player_override,
         "probability": probability,
         "probability_source": probability_source,
         "legacy_public_pool_segment": audit_segment,
