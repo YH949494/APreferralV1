@@ -3587,6 +3587,60 @@ def backend_segment_engine_uim_comparison_export():
     )
 
 
+@admin_bp.get("/api/admin/dashboard/backend-segment-engine/identity-match-audit")
+def backend_segment_engine_identity_match_audit():
+    """Identity-match audit: how many marketing accounts resolved to a users doc.
+
+    Returns total / matched / unmatched counts, match-rate %, and up to 20
+    sample rows for each bucket (matched and unmatched).  Read-only.
+    """
+    ok, err = require_admin_from_query()
+    if not ok:
+        msg, code = err
+        return jsonify({"success": False, "message": msg}), code
+
+    snapshot_week = request.args.get("snapshot_week", "").strip()
+    if not snapshot_week:
+        return jsonify({"success": False, "message": "snapshot_week is required"}), 400
+
+    col = db["backend_segment_snapshots"]
+    base_filter = {"snapshot_week": snapshot_week}
+    proj = {"_id": 0, "account": 1, "username": 1, "user_id": 1}
+
+    total = col.count_documents(base_filter)
+    matched = col.count_documents({**base_filter, "user_id": {"$ne": None}})
+    unmatched = total - matched
+    match_rate = round(matched / total * 100, 2) if total else 0.0
+
+    sample_matched = list(
+        col.find({**base_filter, "user_id": {"$ne": None}}, proj).limit(20)
+    )
+    sample_unmatched = list(
+        col.find({**base_filter, "user_id": None}, proj).limit(20)
+    )
+
+    def _clean(rows):
+        out = []
+        for r in rows:
+            out.append({
+                "account": r.get("account"),
+                "username": r.get("username"),
+                "user_id": str(r["user_id"]) if r.get("user_id") is not None else None,
+            })
+        return out
+
+    return jsonify({
+        "ok": True,
+        "snapshot_week": snapshot_week,
+        "total": total,
+        "matched": matched,
+        "unmatched": unmatched,
+        "match_rate_pct": match_rate,
+        "sample_matched": _clean(sample_matched),
+        "sample_unmatched": _clean(sample_unmatched),
+    })
+
+
 @admin_bp.get("/api/admin/dashboard/kpi-gap-report")
 def dashboard_kpi_gap_report():
     """Phase 5B: read-only UIM formula mapping / backend KPI gap report.
