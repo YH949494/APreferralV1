@@ -1706,6 +1706,7 @@ def build_uim_comparison_panel(
     matrix: dict[str, dict[str, int]] = {}
     backend_segs_seen: set[str] = set()
     uim_segs_seen: set[str] = set()
+    mismatch_pair_counts: dict[tuple[str, str], int] = {}
 
     # rule audit accumulators (per backend_segment, over all docs regardless of UIM match)
     audit_acc: dict[str, dict] = {}
@@ -1759,6 +1760,8 @@ def build_uim_comparison_panel(
             matched += 1
         else:
             mismatched += 1
+            key = (b_seg, u_seg)
+            mismatch_pair_counts[key] = mismatch_pair_counts.get(key, 0) + 1
 
         backend_segs_seen.add(b_seg)
         uim_segs_seen.add(u_seg)
@@ -1769,6 +1772,20 @@ def build_uim_comparison_panel(
 
     match_rate    = round(100.0 * matched    / compared, 2) if compared else None
     mismatch_rate = round(100.0 * mismatched / compared, 2) if compared else None
+
+    top_mismatch_pairs = sorted(
+        [
+            {
+                "backend_segment": k[0],
+                "uim_segment": k[1],
+                "count": v,
+                "percentage_of_compared_users": round(v / compared * 100, 1) if compared else 0.0,
+            }
+            for k, v in mismatch_pair_counts.items()
+        ],
+        key=lambda x: x["count"],
+        reverse=True,
+    )[:20]
 
     # --- Apply filters, build paginated detail list ---
     detail_all: list[dict] = []
@@ -1859,6 +1876,7 @@ def build_uim_comparison_panel(
             "uim_segments":     all_u,
             "rows":             matrix_rows,
         },
+        "top_mismatch_pairs": top_mismatch_pairs,
         "details":       paged,
         "total_details": total_details,
         "page":          page,
