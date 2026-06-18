@@ -26,6 +26,7 @@
       <button class="nav-item" data-view="unclassifiedAudit">Data → Unclassified Audit</button>
       <button class="nav-item" data-view="segmentRuleSimulator">Data → Segment Rule Simulator</button>
       <button class="nav-item" data-view="voucherHunterQuality">Data → VH Rule Quality</button>
+      <button class="nav-item" data-view="voucherHunterFalsePositive">Data → VH False Positive</button>
       <button class="nav-item" data-view="uploadPlayerPerformance">Data → Upload Player Performance</button>
       <button class="nav-item" data-view="uploadHistory">Data → Upload History</button>
       <button class="nav-item" data-view="rawExplorer">Data → Raw Data Explorer</button>
@@ -463,6 +464,49 @@
 
         <div class="section-title">Top 20 by Referral Count</div>
         <div id="vhqa-top-refs-body"></div>
+      </section>
+
+      <!-- VOUCHER HUNTER FALSE POSITIVE ANALYSIS VIEW (Phase 5E-FP) -->
+      <section id="view-voucherHunterFalsePositive" class="hidden">
+        <div style="margin-bottom:16px;"><span class="tag heuristic" style="font-size:12px;padding:4px 12px;">READ ONLY — analysis only. Does not modify segment rules, bot_segment, voucher allocation, or reward logic.</span></div>
+        <div style="background:var(--bg-card,#1e2230);border:1px solid var(--border,#2d3348);border-radius:8px;padding:16px;margin-bottom:20px;">
+          <div style="font-weight:600;font-size:13px;margin-bottom:4px;">Voucher Hunter False Positive Analysis</div>
+          <div style="font-size:11px;color:var(--muted,#8892a4);margin-bottom:12px;">
+            Quantifies how many UIM <b>voucher_hunter</b> users show real player signals (after_bet, withdrawals, referrals, checkins).
+            Use to determine whether UIM is over-classifying real players before changing any rules.
+          </div>
+          <div class="controls" style="flex-wrap:wrap;gap:8px;margin-bottom:8px;">
+            <input class="filter-input" id="vhfp-week" placeholder="snapshot_week e.g. 2026-W25" style="max-width:220px;margin:0;" />
+            <button class="btn primary" id="vhfp-apply-btn">Run Analysis</button>
+          </div>
+        </div>
+
+        <div class="section-title">Summary</div>
+        <div class="card-grid" id="cards-vhfp-summary"></div>
+
+        <div class="section-title">After Bet Distribution</div>
+        <div style="font-size:11px;color:var(--muted,#8892a4);margin-bottom:8px;">How many UIM Voucher Hunters actually have betting activity?</div>
+        <div id="vhfp-atb-body"></div>
+
+        <div class="section-title">Withdrawal Distribution</div>
+        <div style="font-size:11px;color:var(--muted,#8892a4);margin-bottom:8px;">How many UIM Voucher Hunters actually cash out?</div>
+        <div id="vhfp-wd-body"></div>
+
+        <div class="section-title">Referral Distribution</div>
+        <div style="font-size:11px;color:var(--muted,#8892a4);margin-bottom:8px;">Identify community contributors incorrectly labelled as Voucher Hunter.</div>
+        <div id="vhfp-ref-body"></div>
+
+        <div class="section-title">Check-in Distribution</div>
+        <div style="font-size:11px;color:var(--muted,#8892a4);margin-bottom:8px;">Are UIM Voucher Hunters active ecosystem participants?</div>
+        <div id="vhfp-chk-body"></div>
+
+        <div class="section-title">Segment Evidence Matrix</div>
+        <div style="font-size:11px;color:var(--muted,#8892a4);margin-bottom:8px;">Avg metrics per backend segment for all UIM Voucher Hunters — quantifies where mismatches originate.</div>
+        <div id="vhfp-matrix-body"></div>
+
+        <div class="section-title">False Positive Candidates <span style="font-size:11px;font-weight:400;color:var(--muted,#8892a4);">(top 50 by after_bet → referrals → checkins)</span></div>
+        <div style="font-size:11px;color:var(--muted,#8892a4);margin-bottom:8px;">Users who look like real players but were labelled Voucher Hunter by UIM. Review queue for rule refinement.</div>
+        <div id="vhfp-fp-body"></div>
       </section>
 
       <!-- UPLOAD PLAYER PERFORMANCE VIEW (Phase 2A) -->

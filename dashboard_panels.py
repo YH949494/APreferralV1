@@ -2259,6 +2259,231 @@ def build_unclassified_audit(
 
 
 # ---------------------------------------------------------------------------
+# 4e. Voucher Hunter False Positive Analysis (Phase 5E-FP)
+# ---------------------------------------------------------------------------
+
+_VHFP_PROJ = _VHQA_PROJ  # same projection as quality analysis
+
+
+def build_voucher_hunter_false_positive_analysis(
+    *,
+    snapshots_col,
+    snapshot_week: str,
+    top_n: int = 50,
+    now: datetime | None = None,
+) -> dict:
+    """Phase 5E-FP: read-only false-positive analysis of uim_segment=voucher_hunter.
+
+    Provides after_bet / withdrawal / referral / checkin distribution tables,
+    a false-positive candidate list (top_n sorted by after_bet → referrals →
+    checkins), and a backend-segment evidence matrix.
+
+    Never writes, never modifies segments or rewards.
+    """
+    now = now or _utc_now()
+
+    docs = list(snapshots_col.find(
+        {"snapshot_week": snapshot_week, "uim_comparison.uim_segment": "voucher_hunter"},
+        _VHFP_PROJ,
+    ))
+
+    total = len(docs)
+
+    def _pct(num: int, den: int) -> float | None:
+        return round(num / den * 100, 2) if den else None
+
+    def _safe_float(v):
+        try:
+            return float(v) if v is not None else 0.0
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _safe_int(v):
+        try:
+            return int(v) if v is not None else 0
+        except (TypeError, ValueError):
+            return 0
+
+    # Pre-extract metrics once
+    rows = []
+    for doc in docs:
+        ms = doc.get("metrics_snapshot") or {}
+        rows.append({
+            "doc":      doc,
+            "atb":      _safe_float(ms.get("after_total_bet_amount")),
+            "wd":       _safe_float(ms.get("withdraw_amount")),
+            "claims":   _safe_int(ms.get("claim_count")),
+            "refs":     _safe_int(ms.get("referral_count")),
+            "checkins": _safe_int(ms.get("checkin_count")),
+        })
+
+    # ---- Analysis 1: After Bet Distribution ----
+    _atb_buckets = [
+        ("after_bet = 0",           lambda v: v == 0),
+        ("0 < after_bet < 100",     lambda v: 0 < v < 100),
+        ("100 <= after_bet < 1000", lambda v: 100 <= v < 1000),
+        ("1000 <= after_bet < 5000",lambda v: 1000 <= v < 5000),
+        ("after_bet >= 5000",       lambda v: v >= 5000),
+    ]
+    after_bet_distribution = []
+    for label, predicate in _atb_buckets:
+        bucket_rows = [r for r in rows if predicate(r["atb"])]
+        n = len(bucket_rows)
+        after_bet_distribution.append({
+            "bucket":        label,
+            "users":         n,
+            "percentage":    _pct(n, total),
+            "avg_claims":    round(sum(r["claims"]   for r in bucket_rows) / n, 2) if n else None,
+            "avg_referrals": round(sum(r["refs"]     for r in bucket_rows) / n, 2) if n else None,
+            "avg_checkins":  round(sum(r["checkins"] for r in bucket_rows) / n, 2) if n else None,
+        })
+
+    # ---- Analysis 2: Withdrawal Distribution ----
+    _wd_buckets = [
+        ("withdraw = 0",          lambda v: v == 0),
+        ("0 < withdraw < 10",     lambda v: 0 < v < 10),
+        ("10 <= withdraw < 100",  lambda v: 10 <= v < 100),
+        ("withdraw >= 100",       lambda v: v >= 100),
+    ]
+    withdrawal_distribution = []
+    for label, predicate in _wd_buckets:
+        bucket_rows = [r for r in rows if predicate(r["wd"])]
+        n = len(bucket_rows)
+        withdrawal_distribution.append({
+            "bucket":       label,
+            "users":        n,
+            "percentage":   _pct(n, total),
+            "avg_after_bet": round(sum(r["atb"] for r in bucket_rows) / n, 2) if n else None,
+        })
+
+    # ---- Analysis 3: Referral Distribution ----
+    _ref_buckets = [
+        ("0 referrals",    lambda v: v == 0),
+        ("1-5 referrals",  lambda v: 1 <= v <= 5),
+        ("6-20 referrals", lambda v: 6 <= v <= 20),
+        ("21-50 referrals",lambda v: 21 <= v <= 50),
+        ("> 50 referrals", lambda v: v > 50),
+    ]
+    referral_distribution = []
+    for label, predicate in _ref_buckets:
+        bucket_rows = [r for r in rows if predicate(r["refs"])]
+        n = len(bucket_rows)
+        referral_distribution.append({
+            "bucket":       label,
+            "users":        n,
+            "percentage":   _pct(n, total),
+            "avg_after_bet": round(sum(r["atb"]    for r in bucket_rows) / n, 2) if n else None,
+            "avg_claims":    round(sum(r["claims"] for r in bucket_rows) / n, 2) if n else None,
+        })
+
+    # ---- Analysis 4: Check-in Distribution ----
+    _chk_buckets = [
+        ("0 checkins",    lambda v: v == 0),
+        ("1-7 checkins",  lambda v: 1 <= v <= 7),
+        ("8-30 checkins", lambda v: 8 <= v <= 30),
+        ("> 30 checkins", lambda v: v > 30),
+    ]
+    checkin_distribution = []
+    for label, predicate in _chk_buckets:
+        bucket_rows = [r for r in rows if predicate(r["checkins"])]
+        n = len(bucket_rows)
+        checkin_distribution.append({
+            "bucket":      label,
+            "users":       n,
+            "percentage":  _pct(n, total),
+            "avg_claims":  round(sum(r["claims"] for r in bucket_rows) / n, 2) if n else None,
+        })
+
+    # ---- Analysis 5: False Positive Candidates ----
+    sorted_fp = sorted(rows, key=lambda r: (-r["atb"], -r["refs"], -r["checkins"]))[:top_n]
+    false_positive_candidates = []
+    for r in sorted_fp:
+        doc = r["doc"]
+        ms = doc.get("metrics_snapshot") or {}
+        cmp = doc.get("uim_comparison") or {}
+        false_positive_candidates.append({
+            "account":        doc.get("account"),
+            "backend_segment": doc.get("backend_segment") or "unclassified",
+            "uim_segment":    cmp.get("uim_segment"),
+            "after_bet":      ms.get("after_total_bet_amount"),
+            "withdrawal":     ms.get("withdraw_amount"),
+            "claims":         ms.get("claim_count"),
+            "referrals":      ms.get("referral_count"),
+            "checkins":       ms.get("checkin_count"),
+            "player_age_type": doc.get("player_age_type"),
+            "claim_risk_level": doc.get("claim_risk_level"),
+            "confidence":     doc.get("confidence"),
+        })
+
+    # ---- Analysis 6: Segment Evidence Matrix ----
+    _ev_seg_order = [
+        "voucher_hunter", "normal_actual", "low_value", "high_value",
+        "active_community_player", "ghost", "unclassified",
+    ]
+
+    ev_acc: dict[str, dict] = {}
+    for r in rows:
+        seg = r["doc"].get("backend_segment") or "unclassified"
+        if seg not in ev_acc:
+            ev_acc[seg] = {"n": 0, "atb": 0.0, "wd": 0.0, "cl": 0, "rf": 0, "chk": 0}
+        a = ev_acc[seg]
+        a["n"] += 1; a["atb"] += r["atb"]; a["wd"] += r["wd"]
+        a["cl"] += r["claims"]; a["rf"] += r["refs"]; a["chk"] += r["checkins"]
+
+    def _seg_ev_order(seg):
+        try:
+            return _ev_seg_order.index(seg)
+        except ValueError:
+            return 99
+
+    evidence_matrix = []
+    for seg in sorted(ev_acc.keys(), key=_seg_ev_order):
+        a = ev_acc[seg]
+        n = a["n"] or 1
+        evidence_matrix.append({
+            "backend_segment": seg,
+            "count":           a["n"],
+            "percentage":      _pct(a["n"], total),
+            "avg_after_bet":   round(a["atb"] / n, 2),
+            "avg_withdrawal":  round(a["wd"]  / n, 2),
+            "avg_claims":      round(a["cl"]  / n, 2),
+            "avg_referrals":   round(a["rf"]  / n, 2),
+            "avg_checkins":    round(a["chk"] / n, 2),
+        })
+
+    # ---- Summary KPIs ----
+    users_with_bet    = sum(1 for r in rows if r["atb"] > 0)
+    users_with_wd     = sum(1 for r in rows if r["wd"]  > 0)
+    users_with_refs   = sum(1 for r in rows if r["refs"] > 0)
+    users_bet_gte1k   = sum(1 for r in rows if r["atb"] >= 1000)
+
+    summary_kpis = {
+        "total_uim_voucher_hunter": total,
+        "users_with_any_bet":        users_with_bet,
+        "users_with_any_bet_pct":    _pct(users_with_bet, total),
+        "users_with_any_withdrawal": users_with_wd,
+        "users_with_any_withdrawal_pct": _pct(users_with_wd, total),
+        "users_with_any_referral":   users_with_refs,
+        "users_with_any_referral_pct": _pct(users_with_refs, total),
+        "users_bet_gte_1000":        users_bet_gte1k,
+        "users_bet_gte_1000_pct":    _pct(users_bet_gte1k, total),
+    }
+
+    return {
+        "ok": True,
+        "generated_at": now.isoformat(),
+        "snapshot_week": snapshot_week,
+        "summary_kpis": summary_kpis,
+        "after_bet_distribution":   after_bet_distribution,
+        "withdrawal_distribution":  withdrawal_distribution,
+        "referral_distribution":    referral_distribution,
+        "checkin_distribution":     checkin_distribution,
+        "false_positive_candidates": false_positive_candidates,
+        "evidence_matrix":          evidence_matrix,
+    }
+
+
+# ---------------------------------------------------------------------------
 # 4d. Voucher Hunter Rule Quality Analysis (Phase 5E)
 # ---------------------------------------------------------------------------
 
