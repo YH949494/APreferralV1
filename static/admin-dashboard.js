@@ -830,8 +830,8 @@
         setMeta("Source: " + (d.source || "config.SEGMENT_PROBABILITY_CONFIG"));
         var np = d.new_player_override || {};
         $("#cards-seg-prob-summary").innerHTML =
-          card("New Player Override", "100%", "player_age_type=new_player AND first 3 assignments", "good") +
-          card("Segments configured", String((d.rows || []).length), "", "neutral");
+          kpiCard("New Player Override", "100%", "player_age_type=new_player AND first 3 assignments", false) +
+          kpiCard("Segments configured", String((d.rows || []).length), "", false);
         var rows = (d.rows || []).map(function (row) {
           return "<tr><td>" + esc(row.segment) + "</td><td><strong>" + esc(String(row.probability_pct)) + "%</strong></td><td>" + esc(row.description) + "</td></tr>";
         });
