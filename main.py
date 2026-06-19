@@ -2389,11 +2389,12 @@ def funnel_dashboard_api():
             start = datetime.fromisoformat(date_from_raw.replace("Z", "+00:00"))
             if start.tzinfo is None:
                 start = start.replace(tzinfo=timezone.utc)
-            # Normalize date-only date_to (YYYY-MM-DD) to end of that day so users who
-            # joined on the selected end date are included (midnight would exclude them).
+            # Normalize date-only date_to to midnight of the *next* day so that
+            # queries using $lt (exclusive) include the entire selected day.
             if len(date_to_raw.strip()) == 10:
-                end = datetime.strptime(date_to_raw.strip(), "%Y-%m-%d").replace(
-                    hour=23, minute=59, second=59, tzinfo=timezone.utc
+                end = (
+                    datetime.strptime(date_to_raw.strip(), "%Y-%m-%d").replace(tzinfo=timezone.utc)
+                    + timedelta(days=1)
                 )
             else:
                 end = datetime.fromisoformat(date_to_raw.replace("Z", "+00:00"))

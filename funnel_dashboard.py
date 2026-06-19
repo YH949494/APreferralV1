@@ -34,6 +34,49 @@ def _rate(n: int, d: int) -> float:
     return round(100.0 * n / d, 1) if d > 0 else 0.0
 
 
+def _coerce_float(v: Any) -> float:
+    """Coerce a value that may be a number or a CSV-string to float.
+
+    Returns 0.0 for None, empty string, or any non-numeric value so callers
+    can safely compare against 0 without special-casing the type.
+    """
+    if v is None or v == "":
+        return 0.0
+    if isinstance(v, (int, float)):
+        return float(v)
+    try:
+        return float(str(v).strip())
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def _is_explicit_true(v: Any) -> bool:
+    """Return True only for an unambiguously truthy is_new_player value."""
+    if isinstance(v, str):
+        return v.strip().lower() in ("1", "true", "yes", "y")
+    return v in (True, 1)
+
+
+def _is_explicit_false(v: Any) -> bool:
+    """Return True only for an unambiguously falsy is_new_player value."""
+    if isinstance(v, str):
+        return v.strip().lower() in ("0", "false", "no", "n")
+    return v in (False, 0)
+
+
+def _date_range_filter(field: str, start: datetime | None, end: datetime) -> dict:
+    """MongoDB filter constraining *field* to the half-open interval [start, end).
+
+    Uses $lt (exclusive upper bound) so callers can pass midnight of the next
+    day when normalising a date-only custom date_to input, without accidentally
+    including events timestamped at exactly that midnight.
+    """
+    f: dict = {"$lt": end}
+    if start is not None:
+        f["$gte"] = start
+    return {field: f}
+
+
 def _coerce_dt(v: Any) -> datetime | None:
     if isinstance(v, datetime):
         if v.tzinfo is None:
@@ -195,7 +238,7 @@ def compute_funnel(
     """Full activation funnel computation for users who joined in [start, end]."""
 
     # ---- Cohort ----
-    cohort_q: dict = {"joined_main_at": {"$lte": end}}
+    cohort_q: dict = {"joined_main_at": {"$lt": end}}
     if start is not None:
         cohort_q["joined_main_at"]["$gte"] = start
 
@@ -218,7 +261,7 @@ def compute_funnel(
     # Bound by [start, end] so historical custom windows don't count later activity.
     start_bot_uids: set[int] = set()
     if cohort_uids:
-        bot_ts: dict = {"$exists": True, "$ne": None, "$lte": end}
+        bot_ts: dict = {"$exists": True, "$ne": None, "$lt": end}
         if start is not None:
             bot_ts["$gte"] = start
         for doc in db.users.find(
@@ -237,7 +280,7 @@ def compute_funnel(
     if cohort_uids:
         # Apply both lower and upper bounds so custom historical windows don't pull
         # check-ins that occurred after the selected end date.
-        checkin_ts: dict = {"$lte": end}
+        checkin_ts: dict = {"$lt": end}
         if start is not None:
             checkin_ts["$gte"] = start
         checkin_q: dict = {
@@ -276,7 +319,7 @@ def compute_funnel(
     welcome_unlock_count = max(progress_3_count, len(eligible_uids))
 
     # ---- Stage 8: Welcome Claim ----
-    # Use {"$not": {"$gt": end}} so documents without a timestamp field are included
+    # Use {"$not": {"$gte": end}} so documents without a timestamp field are included
     # (legacy records) while claims that occurred after end are excluded.
     claim_uids: set[int] = set()
     if cohort_uids:
@@ -285,7 +328,7 @@ def compute_funnel(
             {
                 "status": "ISSUED",
                 "user_id": {"$in": cohort_list},
-                "updated_at": {"$not": {"$gt": end}},
+                "updated_at": {"$not": {"$gte": end}},
                 "$or": [
                     {"ledger_type": "WELCOME"},
                     {"tier": "WELCOME"},
@@ -302,7 +345,7 @@ def compute_funnel(
         for doc in db.welcome_eligibility.find(
             {
                 "claimed": True,
-                "claimed_at": {"$not": {"$gt": end}},
+                "claimed_at": {"$not": {"$gte": end}},
                 "$or": [
                     {"uid": {"$in": cohort_list}},
                     {"user_id": {"$in": cohort_list}},
@@ -317,7 +360,7 @@ def compute_funnel(
         # new_joiner_claims
         for doc in db.new_joiner_claims.find(
             {
-                "claimed_at": {"$not": {"$gt": end}},
+                "claimed_at": {"$not": {"$gte": end}},
                 "$or": [{"uid": {"$in": cohort_list}}, {"user_id": {"$in": cohort_list}}],
             },
             {"uid": 1, "user_id": 1},
@@ -330,7 +373,7 @@ def compute_funnel(
         for doc in db.welcome_tickets.find(
             {
                 "status": "claimed",
-                "claimed_at": {"$not": {"$gt": end}},
+                "claimed_at": {"$not": {"$gte": end}},
                 "$or": [
                     {"uid": {"$in": cohort_list}},
                     {"user_id": {"$in": cohort_list}},
@@ -372,24 +415,20 @@ def compute_funnel(
                 if start is not None:
                     start_date_str = start.strftime("%Y-%m-%d")
                     mkt_q["$or"] = [
-                        {"week_start": {"$gte": start_date_str, "$lte": end_date_str}},
-                        {"created_at": {"$gte": start, "$lte": end}},
+                        {"week_start": {"$gte": start_date_str, "$lt": end_date_str}},
+                        {"created_at": {"$gte": start, "$lt": end}},
                     ]
                 else:
                     mkt_q["$or"] = [
-                        {"week_start": {"$lte": end_date_str}},
-                        {"created_at": {"$lte": end}},
+                        {"week_start": {"$lt": end_date_str}},
+                        {"created_at": {"$lt": end}},
                     ]
                 for doc in db.marketing_raw_data.find(
                     mkt_q, {"coupon_code": 1, "after_total_bet_amount": 1}
                 ):
-                    # after_total_bet_amount may be numeric or string depending on
-                    # how the marketing CSV was ingested; coerce before comparing.
-                    bet_raw = doc.get("after_total_bet_amount")
-                    try:
-                        bet_val = float(bet_raw) if bet_raw is not None else 0.0
-                    except (ValueError, TypeError):
-                        bet_val = 0.0
+                    bet_val = _coerce_float(
+                        doc.get("after_total_bet_amount") or doc.get("after_bet_amount")
+                    )
                     if bet_val <= 0:
                         continue
                     code = str(doc.get("coupon_code") or "")
@@ -531,12 +570,11 @@ def compute_funnel(
                     uid = code_map.get(code)
                     if uid:
                         is_new = doc.get("is_new_player")
-                        if is_new in (1, True, "1", "true"):
+                        if _is_explicit_true(is_new):
                             new_player_uids.add(uid)
-                        elif is_new in (0, False, "0", "false"):
-                            # Only explicitly false/0 values count as returning;
-                            # absent or null is_new_player stays unidentified.
+                        elif _is_explicit_false(is_new):
                             returning_player_uids.add(uid)
+                        # else: missing/blank/ambiguous → unknown (neither set)
     except Exception:
         pass
 
@@ -588,8 +626,8 @@ def compute_funnel(
         "player_split": {
             "new_player_count": len(new_player_uids),
             "returning_player_count": len(returning_player_uids),
-            "unidentified_count": len(cohort_uids - new_player_uids - returning_player_uids),
-            "note": "Identified via coupon_code → marketing_raw_data. Unidentified users have no uploaded marketing record.",
+            "unknown_count": len(cohort_uids - new_player_uids - returning_player_uids),
+            "note": "Identified via coupon_code → marketing_raw_data. Unknown: no marketing record or ambiguous is_new_player value.",
         },
         "new_player_funnel": new_player_stages,
         "returning_player_funnel": returning_player_stages,

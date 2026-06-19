@@ -510,7 +510,7 @@
       '<div class="card-grid" style="margin-bottom:20px">' +
       kpiCard("New Players", fmt(ps.new_player_count), "Identified via is_new_player=1") +
       kpiCard("Returning Players", fmt(ps.returning_player_count), "Identified via is_new_player=0") +
-      kpiCard("Unidentified", fmt(ps.unidentified_count), "No marketing data match") +
+      kpiCard("Unknown", fmt(ps.unknown_count), "No marketing data or ambiguous is_new_player") +
       "</div>" +
       (ps.note ? '<div class="note" style="margin-bottom:16px">' + esc(ps.note) + "</div>" : "");
 
