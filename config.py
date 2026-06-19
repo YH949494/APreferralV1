@@ -210,7 +210,16 @@ AFFILIATE_GROUP_DM_ENABLED = os.getenv("AFFILIATE_GROUP_DM_ENABLED", "1") == "1"
 DATABOT_BASE_URL = os.getenv("DATABOT_BASE_URL", "").rstrip("/")
 DATABOT_API_KEY = os.getenv("DATABOT_API_KEY", "")
 DATABOT_ENABLED = os.getenv("DATABOT_ENABLED", "false").lower() == "true"
-DATABOT_TIMEOUT_SECONDS = int(os.getenv("DATABOT_TIMEOUT_SECONDS", "5"))
+def _parse_int_env(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name) or default)
+    except (ValueError, TypeError):
+        logging.getLogger(__name__).warning(
+            "[DATABOT] invalid env %s — using default %d", name, default
+        )
+        return default
+
+DATABOT_TIMEOUT_SECONDS = _parse_int_env("DATABOT_TIMEOUT_SECONDS", 5)
 
 GROWTH_LEADERBOARD_ENABLED = os.getenv("GROWTH_LEADERBOARD_ENABLED", "0") == "1"
 GROWTH_LEADERBOARD_CHANNEL_ID = os.getenv("GROWTH_LEADERBOARD_CHANNEL_ID", "").strip()
