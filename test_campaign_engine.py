@@ -157,7 +157,7 @@ def test_preview_audience_recency_filter_no_active_users():
 
 
 def test_preview_audience_recency_uses_or_query():
-    """Recency filter must include last_checkin fallback, not only last_active_at."""
+    """Recency query must cover last_active_at, last_checkin, and last_checkin_at."""
     db, snapshots_col, users_col, _ = _mock_db(agg_results=[
         {"_id": "ghost", "count": 3, "avg_bet": 0.0, "avg_claims": 0.0}
     ])
@@ -165,10 +165,26 @@ def test_preview_audience_recency_uses_or_query():
     preview_audience(db, {"activity_recency_days": 30})
     call_args = users_col.find.call_args
     query = call_args[0][0]
-    assert "$or" in query, "Recency query must use $or to cover last_active_at and last_checkin"
+    assert "$or" in query, "Recency query must use $or"
     or_fields = [list(cond.keys())[0] for cond in query["$or"]]
     assert "last_active_at" in or_fields
     assert "last_checkin" in or_fields
+    assert "last_checkin_at" in or_fields
+
+
+def test_preview_audience_recency_includes_checkin_only_users():
+    """Users with only last_checkin (no last_active_at) must not be excluded."""
+    agg = [{"_id": "normal_actual", "count": 10, "avg_bet": 200.0, "avg_claims": 1.0}]
+    db, snapshots_col, users_col, _ = _mock_db(agg_results=agg)
+    # Simulate users that only have last_checkin set
+    users_col.find.return_value = [{"user_id": 101}, {"user_id": 102}]
+    result = preview_audience(db, {"activity_recency_days": 14}, voucher_value=5.0)
+    # aggregate must be called (users were found via last_checkin $or branch)
+    snapshots_col.aggregate.assert_called_once()
+    # user_id filter injected into the snapshot match
+    call_kwargs = snapshots_col.aggregate.call_args[0][0]
+    match_stage = call_kwargs[0]["$match"]
+    assert match_stage["user_id"]["$in"] == [101, 102]
 
 
 def test_preview_audience_suggestions_populated():

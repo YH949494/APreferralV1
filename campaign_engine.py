@@ -160,8 +160,9 @@ def preview_audience(db, filters: dict, voucher_value: float = 0.0) -> dict:
     match["snapshot_week"] = snapshot_week
 
     # Activity recency: match users active within N days.
-    # Uses $or across last_active_at and last_checkin so users who only have
-    # check-in timestamps (no last_active_at written yet) are not excluded.
+    # $or covers all three timestamp fields so users are not excluded just
+    # because one field is missing (last_checkin_at is written by some flows,
+    # last_checkin by the main check-in path, last_active_at by others).
     recency_days = filters.get("activity_recency_days")
     if recency_days:
         cutoff = datetime.now(timezone.utc) - timedelta(days=int(recency_days))
@@ -173,6 +174,7 @@ def preview_audience(db, filters: dict, voucher_value: float = 0.0) -> dict:
                     "$or": [
                         {"last_active_at": {"$gte": cutoff}},
                         {"last_checkin": {"$gte": cutoff}},
+                        {"last_checkin_at": {"$gte": cutoff}},
                     ],
                 },
                 projection={"user_id": 1, "_id": 0},
