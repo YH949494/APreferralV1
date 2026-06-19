@@ -1,0 +1,441 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="robots" content="noindex, nofollow" />
+  <title>APReferral · Activation Funnel Dashboard</title>
+  <link rel="stylesheet" href="/static/admin-dashboard.css" />
+  <style>
+    /* ---- Funnel-dashboard specific styles ---- */
+    .funnel-vis {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 24px 28px;
+      margin-bottom: 24px;
+    }
+    .funnel-stage-row {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      margin-bottom: 10px;
+    }
+    .funnel-stage-row:last-child { margin-bottom: 0; }
+    .fs-label {
+      width: 200px;
+      flex-shrink: 0;
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--text);
+    }
+    .fs-bar-wrap {
+      flex: 1;
+      background: var(--panel-2);
+      border-radius: 6px;
+      height: 28px;
+      position: relative;
+      overflow: hidden;
+    }
+    .fs-bar {
+      height: 100%;
+      border-radius: 6px;
+      transition: width 0.4s ease;
+      display: flex;
+      align-items: center;
+      padding: 0 10px;
+      font-size: 11px;
+      font-weight: 600;
+      color: #1a1a1a;
+      white-space: nowrap;
+      overflow: hidden;
+    }
+    .fs-bar.green  { background: linear-gradient(90deg, #51cf66, #40c057); }
+    .fs-bar.yellow { background: linear-gradient(90deg, #ffd43b, #fab005); }
+    .fs-bar.red    { background: linear-gradient(90deg, #ff6b6b, #fa5252); }
+    .fs-bar.gray   { background: var(--muted); }
+    .fs-bar.accent { background: linear-gradient(90deg, #4dabf7, #339af0); }
+    .fs-meta {
+      width: 120px;
+      flex-shrink: 0;
+      text-align: right;
+      font-size: 12px;
+      color: var(--muted);
+    }
+    .fs-count {
+      width: 80px;
+      flex-shrink: 0;
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--text);
+    }
+    .fs-drop-arrow {
+      text-align: center;
+      color: var(--bad);
+      font-size: 11px;
+      padding-left: 214px;
+      margin: -4px 0 2px;
+      opacity: 0.8;
+    }
+    .fs-separator {
+      border: none;
+      border-top: 1px dashed var(--border);
+      margin: 14px 0;
+    }
+    .fs-sub-label {
+      font-size: 12px;
+      color: var(--muted);
+      font-style: italic;
+    }
+    .missing-stage {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      margin-bottom: 10px;
+      opacity: 0.5;
+    }
+
+    /* Drop-off analysis card */
+    .dropoff-card {
+      background: var(--panel);
+      border: 2px solid var(--bad);
+      border-radius: var(--radius);
+      padding: 20px 24px;
+      margin-bottom: 24px;
+    }
+    .dropoff-card .title {
+      font-size: 13px;
+      text-transform: uppercase;
+      letter-spacing: 0.4px;
+      color: var(--bad);
+      font-weight: 700;
+      margin-bottom: 8px;
+    }
+    .dropoff-card .stage-name {
+      font-size: 24px;
+      font-weight: 700;
+      color: var(--text);
+    }
+    .dropoff-card .pct {
+      font-size: 40px;
+      font-weight: 700;
+      color: var(--bad);
+      line-height: 1;
+      margin: 8px 0;
+    }
+    .dropoff-card .sub {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    /* Welcome effectiveness */
+    .welcome-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+      gap: 14px;
+      margin-bottom: 24px;
+    }
+    .progress-bar-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 8px;
+      font-size: 13px;
+    }
+    .progress-bar-row .pb-label { width: 80px; flex-shrink: 0; color: var(--muted); }
+    .progress-bar-row .pb-wrap { flex: 1; background: var(--panel-2); border-radius: 4px; height: 8px; }
+    .progress-bar-row .pb-fill { height: 100%; border-radius: 4px; background: var(--accent); }
+    .progress-bar-row .pb-val { width: 50px; text-align: right; font-variant-numeric: tabular-nums; color: var(--text); font-weight: 600; }
+
+    /* Split funnel */
+    .split-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 20px;
+      margin-bottom: 24px;
+    }
+    @media (max-width: 900px) { .split-grid { grid-template-columns: 1fr; } }
+    .split-panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 18px 20px;
+    }
+    .split-panel .panel-title {
+      font-size: 13px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.4px;
+      margin-bottom: 14px;
+      color: var(--accent);
+    }
+    .split-panel.returning .panel-title { color: var(--accent-2); }
+
+    /* Custom date picker */
+    .date-range {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .date-range input[type=date] {
+      background: var(--panel);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 7px 10px;
+      font-size: 13px;
+      cursor: pointer;
+    }
+    .date-range input[type=date]:focus {
+      outline: none;
+      border-color: var(--accent);
+    }
+
+    /* Controls row */
+    .controls-row {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      flex-wrap: wrap;
+      margin-bottom: 20px;
+    }
+    .custom-range-wrap { display: none; align-items: center; gap: 8px; }
+    .custom-range-wrap.visible { display: flex; }
+
+    /* Stage row in table: highlight largest drop */
+    tr.largest-drop td { background: rgba(255,107,107,0.06); }
+
+    /* Retention cards */
+    .retention-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+      margin-bottom: 24px;
+    }
+    .ret-card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 20px;
+    }
+    .ret-card .ret-label {
+      font-size: 12px;
+      text-transform: uppercase;
+      color: var(--muted);
+      letter-spacing: 0.4px;
+    }
+    .ret-card .ret-rate {
+      font-size: 38px;
+      font-weight: 700;
+      margin: 8px 0 4px;
+    }
+    .ret-card .ret-rate.green { color: var(--ok); }
+    .ret-card .ret-rate.yellow { color: var(--warn); }
+    .ret-card .ret-rate.red { color: var(--bad); }
+    .ret-card .ret-rate.muted { color: var(--muted); font-size: 22px; }
+    .ret-card .ret-sub { color: var(--muted); font-size: 12px; }
+
+    /* Back button */
+    .back-link {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      color: var(--muted);
+      font-size: 13px;
+      text-decoration: none;
+      padding: 6px 12px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+    }
+    .back-link:hover { color: var(--text); border-color: var(--accent); }
+
+    /* Section header with icon */
+    .section-header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 16px;
+    }
+    .section-icon {
+      width: 28px;
+      height: 28px;
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 14px;
+      flex-shrink: 0;
+    }
+    .section-icon.blue { background: rgba(77,171,247,0.15); }
+    .section-icon.orange { background: rgba(255,159,67,0.15); }
+    .section-icon.red { background: rgba(255,107,107,0.15); }
+    .section-icon.green { background: rgba(81,207,102,0.15); }
+    .section-title-lg {
+      font-size: 16px;
+      font-weight: 700;
+      color: var(--text);
+    }
+
+    /* Insights panel */
+    .insight-list { list-style: none; padding: 0; margin: 0; }
+    .insight-list li {
+      padding: 10px 14px;
+      background: var(--panel-2);
+      border-radius: 8px;
+      margin-bottom: 8px;
+      font-size: 13px;
+      border-left: 3px solid var(--border);
+    }
+    .insight-list li.warn { border-left-color: var(--warn); }
+    .insight-list li.bad { border-left-color: var(--bad); }
+    .insight-list li.ok { border-left-color: var(--ok); }
+    .insight-list li.info { border-left-color: var(--accent-2); }
+
+    /* full-width panel */
+    .wide-panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 20px 24px;
+      margin-bottom: 24px;
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <!-- Sidebar -->
+    <nav class="sidebar">
+      <div class="brand">APReferral Admin</div>
+      <a href="/static/admin-dashboard.html" class="nav-item" style="text-decoration:none;">← Admin Dashboard</a>
+      <button class="nav-item active" data-section="funnel-vis">Funnel Overview</button>
+      <button class="nav-item" data-section="stage-table">Stage Breakdown</button>
+      <button class="nav-item" data-section="dropoff">Drop-off Analysis</button>
+      <button class="nav-item" data-section="welcome">Welcome Voucher</button>
+      <button class="nav-item" data-section="split">New vs Returning</button>
+      <button class="nav-item" data-section="retention">Retention</button>
+    </nav>
+
+    <!-- Main -->
+    <main class="main">
+      <div class="topbar">
+        <div>
+          <h1>Activation Funnel Dashboard</h1>
+          <div class="note" id="dashboard-meta">Loading…</div>
+        </div>
+        <div class="right">
+          <span class="admin-chip" id="admin-chip"></span>
+          <button class="btn" id="refresh-btn">↻ Refresh</button>
+        </div>
+      </div>
+
+      <div id="global-banner"></div>
+
+      <!-- Filters -->
+      <div class="controls-row">
+        <div class="seg" id="window-seg">
+          <button data-window="7d" class="active">Weekly (7d)</button>
+          <button data-window="30d">Monthly (30d)</button>
+          <button data-window="all">All Time</button>
+          <button data-window="custom">Custom</button>
+        </div>
+        <div class="custom-range-wrap" id="custom-range">
+          <div class="date-range">
+            <label style="color:var(--muted);font-size:13px;">From</label>
+            <input type="date" id="date-from" />
+            <label style="color:var(--muted);font-size:13px;">To</label>
+            <input type="date" id="date-to" />
+            <button class="btn primary" id="apply-custom">Apply</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- ============================================================
+           SECTION 1: Funnel Visualization
+      ============================================================ -->
+      <div id="section-funnel-vis" class="section">
+        <div class="section-header">
+          <div class="section-icon blue">⚡</div>
+          <div class="section-title-lg">Funnel Visualization</div>
+        </div>
+        <div class="funnel-vis" id="funnel-vis-body">
+          <div class="loading">Loading funnel…</div>
+        </div>
+        <div class="wide-panel" id="insights-panel" style="display:none;">
+          <div class="section-title" style="margin-bottom:12px;">Key Insights</div>
+          <ul class="insight-list" id="insights-list"></ul>
+        </div>
+      </div>
+
+      <!-- ============================================================
+           SECTION 2: Stage Breakdown Table
+      ============================================================ -->
+      <div id="section-stage-table" class="section">
+        <div class="section-header">
+          <div class="section-icon orange">📊</div>
+          <div class="section-title-lg">Stage Breakdown</div>
+        </div>
+        <div id="stage-table-body">
+          <div class="loading">Loading…</div>
+        </div>
+      </div>
+
+      <!-- ============================================================
+           SECTION 3: Largest Drop-off Analysis
+      ============================================================ -->
+      <div id="section-dropoff" class="section">
+        <div class="section-header">
+          <div class="section-icon red">🚨</div>
+          <div class="section-title-lg">Largest Drop-off Analysis</div>
+        </div>
+        <div id="dropoff-body">
+          <div class="loading">Loading…</div>
+        </div>
+      </div>
+
+      <!-- ============================================================
+           SECTION 4: Welcome Voucher Effectiveness
+      ============================================================ -->
+      <div id="section-welcome" class="section">
+        <div class="section-header">
+          <div class="section-icon green">🎫</div>
+          <div class="section-title-lg">Welcome Voucher Effectiveness</div>
+        </div>
+        <div id="welcome-body">
+          <div class="loading">Loading…</div>
+        </div>
+      </div>
+
+      <!-- ============================================================
+           SECTION 5: New vs Returning Player Funnel
+      ============================================================ -->
+      <div id="section-split" class="section">
+        <div class="section-header">
+          <div class="section-icon blue">👥</div>
+          <div class="section-title-lg">New Player vs Returning Player Funnel</div>
+        </div>
+        <div id="split-body">
+          <div class="loading">Loading…</div>
+        </div>
+      </div>
+
+      <!-- ============================================================
+           SECTION 6: Retention
+      ============================================================ -->
+      <div id="section-retention" class="section">
+        <div class="section-header">
+          <div class="section-icon green">🔄</div>
+          <div class="section-title-lg">Retention Performance</div>
+        </div>
+        <div id="retention-body">
+          <div class="loading">Loading…</div>
+        </div>
+      </div>
+
+    </main>
+  </div>
+  <script src="/static/funnel-dashboard.js"></script>
+</body>
+</html>
