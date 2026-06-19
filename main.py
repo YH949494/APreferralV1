@@ -44,6 +44,7 @@ from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_MISSED
 from app_context import set_app_bot, set_bot, set_scheduler
 from onboarding import MYWIN_CHAT_ID, onboarding_due_tick, record_first_mywin, record_first_checkin
 from retention_kpis import RETENTION_COLLECTION, compute_retention_kpis, ensure_retention_indexes
+from funnel_dashboard import compute_funnel
 from vouchers import (
     vouchers_bp,
     ensure_voucher_indexes,
@@ -2367,6 +2368,75 @@ def retention_kpis_recompute():
     months = max(1, min(months, 24))
     rows = compute_retention_kpis(db, months=months, now_utc=datetime.now(timezone.utc))
     return jsonify({"success": True, "months": months, "count": len(rows)})
+
+
+@admin_bp.get("/api/admin/funnel-dashboard")
+def funnel_dashboard_api():
+    ok, err = require_admin_from_query()
+    if not ok:
+        msg, code = err
+        return jsonify({"success": False, "message": msg}), code
+
+    window = request.args.get("window", "7d").strip().lower()
+    date_from_raw = request.args.get("date_from", "").strip()
+    date_to_raw = request.args.get("date_to", "").strip()
+    refresh = request.args.get("refresh") == "1"
+
+    now = _utc_now()
+
+    if window == "custom" and date_from_raw and date_to_raw:
+        try:
+            start = datetime.fromisoformat(date_from_raw.replace("Z", "+00:00"))
+            if start.tzinfo is None:
+                start = start.replace(tzinfo=timezone.utc)
+            # Normalize date-only date_to to midnight of the *next* day so that
+            # queries using $lt (exclusive) include the entire selected day.
+            if len(date_to_raw.strip()) == 10:
+                end = (
+                    datetime.strptime(date_to_raw.strip(), "%Y-%m-%d").replace(tzinfo=timezone.utc)
+                    + timedelta(days=1)
+                )
+            else:
+                end = datetime.fromisoformat(date_to_raw.replace("Z", "+00:00"))
+                if end.tzinfo is None:
+                    end = end.replace(tzinfo=timezone.utc)
+            if end > now:
+                end = now
+        except (ValueError, TypeError):
+            return jsonify({"success": False, "message": "Invalid date_from or date_to format."}), 400
+        window_label = f"{date_from_raw[:10]} to {date_to_raw[:10]}"
+        cache_key = f"funnel_v2:custom:{date_from_raw[:10]}:{date_to_raw[:10]}"
+    else:
+        if window not in ("7d", "30d", "all"):
+            window = "7d"
+        start = _admin_dashboard_window_start(window, now)
+        end = now
+        window_label = _admin_dashboard_window_label(window)
+        cache_key = f"funnel_v2:{window}"
+
+    if not refresh:
+        cached = _dashboard_cache_get(cache_key)
+        if cached is not None:
+            return jsonify(cached)
+
+    try:
+        result = compute_funnel(db, start, end, now)
+    except Exception as exc:
+        logger.exception("[FUNNEL_DASHBOARD] compute failed: %s", exc)
+        return jsonify({"success": False, "message": f"Funnel compute error: {exc}"}), 500
+
+    payload = {
+        "success": True,
+        "window": window,
+        "window_label": window_label,
+        "window_start": start.isoformat() if start else None,
+        "window_end": end.isoformat(),
+        "as_of": now.isoformat(),
+        "generated_at": now.isoformat(),
+        **result,
+    }
+    _dashboard_cache_set(cache_key, payload)
+    return jsonify(payload)
 
 
 # ======================================================================
