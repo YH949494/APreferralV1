@@ -202,6 +202,16 @@ AFFILIATE_GROUP_UNLOCK_REFERRALS = int(os.getenv("AFFILIATE_GROUP_UNLOCK_REFERRA
 AFFILIATE_GROUP_INVITE_URL = os.getenv("AFFILIATE_GROUP_INVITE_URL", "https://t.me/+2415x7eUHOcwNzE9")
 AFFILIATE_GROUP_DM_ENABLED = os.getenv("AFFILIATE_GROUP_DM_ENABLED", "1") == "1"
 
+# ---------------------------------------------------------------------------
+# Databot integration (shadow / read-only — Phase 1).
+# All Databot calls are non-blocking; APReferral falls back to local logic
+# whenever Databot is disabled or unreachable.
+# ---------------------------------------------------------------------------
+DATABOT_BASE_URL = os.getenv("DATABOT_BASE_URL", "").rstrip("/")
+DATABOT_API_KEY = os.getenv("DATABOT_API_KEY", "")
+DATABOT_ENABLED = os.getenv("DATABOT_ENABLED", "false").lower() == "true"
+DATABOT_TIMEOUT_SECONDS = int(os.getenv("DATABOT_TIMEOUT_SECONDS", "5"))
+
 GROWTH_LEADERBOARD_ENABLED = os.getenv("GROWTH_LEADERBOARD_ENABLED", "0") == "1"
 GROWTH_LEADERBOARD_CHANNEL_ID = os.getenv("GROWTH_LEADERBOARD_CHANNEL_ID", "").strip()
 GROWTH_LEADERBOARD_CRON_DAY = os.getenv("GROWTH_LEADERBOARD_CRON_DAY", "SUN")
