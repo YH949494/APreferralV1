@@ -212,6 +212,7 @@ pre.payload { background: var(--bg); border: 1px solid var(--border); border-rad
 .mini-table { width: 100%; border-collapse: collapse; font-size: 12px; }
 .mini-table th, .mini-table td { padding: 6px 8px; text-align: left; border-bottom: 1px solid var(--border); }
 .mini-table th { color: var(--muted); font-size: 10px; text-transform: uppercase; }
+.mini-table td.num, .mini-table th.num { text-align: right; font-variant-numeric: tabular-nums; }
 
 .dq { font-size: 10px; margin-left: 6px; vertical-align: middle; }
 .tag.delayed { background: rgba(255,159,67,0.15); color: var(--accent); }

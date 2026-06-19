@@ -4409,6 +4409,46 @@ def dashboard_segment_probability_config():
     })
 
 
+@admin_bp.get("/api/admin/dashboard/segment-roi")
+def dashboard_segment_roi():
+    """Segment ROI Dashboard — read-only aggregation of backend_segment_snapshots.
+
+    Aggregates per-segment metrics (bet amount, claims, withdrawals, referrals,
+    check-ins) and computes derived ROI metrics.  Never writes, never classifies
+    users, never touches voucher/reward/public-pool logic.
+
+    Query params:
+      snapshot_month  – YYYY-MM  (default: current month)
+      snapshot_week   – YYYY-Www (overrides snapshot_month when supplied)
+      trend_months    – int 1-12 (default 3)
+    """
+    ok, err = require_admin_from_query()
+    if not ok:
+        msg, code = err
+        return jsonify({"success": False, "message": msg}), code
+
+    snapshot_week = (request.args.get("snapshot_week") or "").strip() or None
+    snapshot_month = (request.args.get("snapshot_month") or "").strip() or None
+    try:
+        trend_months = max(1, min(12, int(request.args.get("trend_months") or 3)))
+    except (ValueError, TypeError):
+        trend_months = 3
+
+    cache_key = (
+        f"panel:segment_roi:{snapshot_week or ''}:{snapshot_month or ''}:{trend_months}"
+    )
+    return _panel_cached(
+        cache_key,
+        lambda: _panels.build_segment_roi_panel(
+            snapshots_col=db["backend_segment_snapshots"],
+            snapshot_month=snapshot_month,
+            snapshot_week=snapshot_week,
+            now=_utc_now(),
+            trend_months=trend_months,
+        ),
+    )
+
+
 app.register_blueprint(admin_bp)
 
 # ---- Always return JSON on errors (prevents "Invalid JSON") ----

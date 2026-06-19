@@ -3745,6 +3745,237 @@ def _env(env: Mapping, name: str, default: Any = None) -> Any:
     return val if val not in (None, "") else default
 
 
+def build_segment_roi_panel(
+    *,
+    snapshots_col,
+    snapshot_month: str | None = None,
+    snapshot_week: str | None = None,
+    now: datetime | None = None,
+    trend_months: int = 3,
+) -> dict:
+    """Segment ROI Dashboard — read-only aggregation of backend_segment_snapshots.
+
+    Groups users by their backend_segment and sums the metrics_snapshot fields
+    stored by the shadow segment engine.  Never writes, never classifies users,
+    never touches voucher/reward logic.
+
+    ROI score = after_bet_amount / max(claim_count, 1).
+    A higher score means each voucher claim generated more betting activity.
+
+    Period resolution (in priority order):
+      1. snapshot_week if supplied (e.g. "2026-W24")
+      2. snapshot_month if supplied (e.g. "2026-06")
+      3. Current calendar month (default)
+    """
+    now = now or _utc_now()
+
+    if snapshot_week:
+        match_stage: dict = {"snapshot_week": snapshot_week}
+        period_label = snapshot_week
+        period_type = "weekly"
+    elif snapshot_month:
+        match_stage = {"snapshot_month": snapshot_month}
+        period_label = snapshot_month
+        period_type = "monthly"
+    else:
+        resolved_month = f"{now.year:04d}-{now.month:02d}"
+        match_stage = {"snapshot_month": resolved_month}
+        period_label = resolved_month
+        period_type = "monthly"
+
+    # Deduplicate within the period: for each (account, user_id) pair keep the
+    # latest week's metrics, then aggregate by segment.
+    pipeline: list[dict] = [
+        {"$match": match_stage},
+        {"$sort": {"snapshot_week": -1}},
+        # One row per account — the latest snapshot in the period.
+        {"$group": {
+            "_id": "$account",
+            "segment": {"$first": "$backend_segment"},
+            "after_bet": {"$first": {"$ifNull": ["$metrics_snapshot.after_total_bet_amount", 0]}},
+            "withdraw": {"$first": {"$ifNull": ["$metrics_snapshot.withdraw_amount", 0]}},
+            "claims": {"$first": {"$ifNull": ["$metrics_snapshot.claim_count", 0]}},
+            "referrals": {"$first": {"$ifNull": ["$metrics_snapshot.referral_count", 0]}},
+            "checkins": {"$first": {"$ifNull": ["$metrics_snapshot.checkin_count", 0]}},
+        }},
+        {"$group": {
+            "_id": "$segment",
+            "users": {"$sum": 1},
+            "after_bet_amount": {"$sum": "$after_bet"},
+            "withdrawal_amount": {"$sum": "$withdraw"},
+            "claim_count": {"$sum": "$claims"},
+            "referral_count": {"$sum": "$referrals"},
+            "checkin_count": {"$sum": "$checkins"},
+        }},
+    ]
+
+    try:
+        raw_segments = list(snapshots_col.aggregate(pipeline))
+    except Exception:
+        raw_segments = []
+
+    segments: list[dict] = []
+    for raw in raw_segments:
+        seg = raw.get("_id") or "unclassified"
+        users = int(raw.get("users") or 0)
+        after_bet = float(raw.get("after_bet_amount") or 0.0)
+        withdrawal = float(raw.get("withdrawal_amount") or 0.0)
+        claims = int(raw.get("claim_count") or 0)
+        referrals = int(raw.get("referral_count") or 0)
+        checkins = int(raw.get("checkin_count") or 0)
+
+        cost_per_user = round(claims / users, 2) if users > 0 else 0.0
+        bet_per_user = round(after_bet / users, 2) if users > 0 else 0.0
+        claim_per_user = round(claims / users, 2) if users > 0 else 0.0
+        referral_per_user = round(referrals / users, 2) if users > 0 else 0.0
+        roi_score = round(after_bet / max(claims, 1), 2)
+
+        segments.append({
+            "segment": seg,
+            "users": users,
+            "claim_count": claims,
+            "voucher_cost": claims,
+            "after_bet_amount": round(after_bet, 2),
+            "withdrawal_amount": round(withdrawal, 2),
+            "referral_count": referrals,
+            "checkin_count": checkins,
+            "cost_per_user": cost_per_user,
+            "bet_per_user": bet_per_user,
+            "claim_per_user": claim_per_user,
+            "referral_per_user": referral_per_user,
+            "roi_score": roi_score,
+        })
+
+    segments.sort(key=lambda x: x["roi_score"], reverse=True)
+    ranking = [s["segment"] for s in segments]
+    top_value = ranking[0] if ranking else None
+    lowest_value = ranking[-1] if len(ranking) > 1 else (ranking[0] if ranking else None)
+
+    recommendations = _build_roi_recommendations(segments)
+    trend = _build_roi_trend(snapshots_col, now=now, months=trend_months)
+
+    available_months: list[str] = []
+    try:
+        available_months = sorted(
+            (m for m in snapshots_col.distinct("snapshot_month") if m),
+            reverse=True,
+        )
+    except Exception:
+        pass
+
+    return {
+        "ok": True,
+        "period": period_label,
+        "period_type": period_type,
+        "segments": segments,
+        "ranking": ranking,
+        "top_value_segment": top_value,
+        "lowest_value_segment": lowest_value,
+        "recommendations": recommendations,
+        "trend": trend,
+        "available_months": available_months,
+        "generated_at": now.isoformat(),
+    }
+
+
+def _build_roi_recommendations(segments: list[dict]) -> dict:
+    if not segments:
+        return {
+            "deserves_more_rewards": None,
+            "fewer_vouchers": None,
+            "produces_real_betting": [],
+            "mainly_cost": [],
+        }
+
+    by_roi = sorted(segments, key=lambda x: x["roi_score"], reverse=True)
+    by_bet = sorted(segments, key=lambda x: x["after_bet_amount"], reverse=True)
+
+    produces_real_betting = [
+        s["segment"] for s in by_bet if s["after_bet_amount"] > 0
+    ][:3]
+
+    mainly_cost = [
+        s["segment"]
+        for s in segments
+        if s["claim_count"] > 0 and s["after_bet_amount"] == 0.0
+    ]
+
+    # "fewer vouchers" — highest claims but zero (or near-zero) betting
+    fewer_vouchers_candidates = [
+        s for s in sorted(segments, key=lambda x: x["claim_count"], reverse=True)
+        if s["roi_score"] < 5.0 and s["claim_count"] > 0
+    ]
+    fewer_vouchers = fewer_vouchers_candidates[0]["segment"] if fewer_vouchers_candidates else None
+
+    return {
+        "deserves_more_rewards": by_roi[0]["segment"] if by_roi else None,
+        "fewer_vouchers": fewer_vouchers,
+        "produces_real_betting": produces_real_betting,
+        "mainly_cost": mainly_cost,
+    }
+
+
+def _build_roi_trend(snapshots_col, *, now: datetime, months: int = 3) -> list[dict]:
+    """Month-over-month ROI metrics per segment for the last N available months."""
+    try:
+        all_months = sorted(
+            (m for m in snapshots_col.distinct("snapshot_month") if m),
+            reverse=True,
+        )
+    except Exception:
+        return []
+
+    selected = all_months[:months]
+    if not selected:
+        return []
+
+    pipeline: list[dict] = [
+        {"$match": {"snapshot_month": {"$in": selected}}},
+        {"$sort": {"snapshot_week": -1}},
+        # One row per (account, month)
+        {"$group": {
+            "_id": {"month": "$snapshot_month", "account": "$account"},
+            "segment": {"$first": "$backend_segment"},
+            "after_bet": {"$first": {"$ifNull": ["$metrics_snapshot.after_total_bet_amount", 0]}},
+            "claims": {"$first": {"$ifNull": ["$metrics_snapshot.claim_count", 0]}},
+            "referrals": {"$first": {"$ifNull": ["$metrics_snapshot.referral_count", 0]}},
+        }},
+        {"$group": {
+            "_id": {"month": "$_id.month", "segment": "$segment"},
+            "users": {"$sum": 1},
+            "after_bet_amount": {"$sum": "$after_bet"},
+            "claim_count": {"$sum": "$claims"},
+            "referral_count": {"$sum": "$referrals"},
+        }},
+        {"$sort": {"_id.month": 1}},
+    ]
+
+    try:
+        raw = list(snapshots_col.aggregate(pipeline))
+    except Exception:
+        return []
+
+    by_month: dict[str, dict] = {}
+    for row in raw:
+        month = (row.get("_id") or {}).get("month") or "unknown"
+        seg = (row.get("_id") or {}).get("segment") or "unclassified"
+        users = int(row.get("users") or 0)
+        after_bet = float(row.get("after_bet_amount") or 0.0)
+        claims = int(row.get("claim_count") or 0)
+        roi = round(after_bet / max(claims, 1), 2)
+        if month not in by_month:
+            by_month[month] = {}
+        by_month[month][seg] = {
+            "users": users,
+            "after_bet_amount": round(after_bet, 2),
+            "claim_count": claims,
+            "referral_count": int(row.get("referral_count") or 0),
+            "roi_score": roi,
+        }
+
+    return [{"month": m, "segments": by_month[m]} for m in sorted(by_month)]
+
+
 def build_settings_panel(env: Mapping | None = None, *, constants: Mapping | None = None) -> dict:
     import os
 

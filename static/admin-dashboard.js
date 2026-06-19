@@ -13,6 +13,7 @@
     segmentsMode: "snapshot",
     segmentsMonth: "",
     segmentsFilter: "",
+    roiMonth: "",
   };
 
   function $(sel, root) { return (root || document).querySelector(sel); }
@@ -596,6 +597,210 @@
           setMeta("Failed to update");
           $("#cards-audit-summary").innerHTML = '<div class="banner error">Failed: ' + esc(e.message) + "</div>";
           statePanel("audit-body", "banner error", "Failed: " + e.message);
+        }
+      });
+  }
+
+  // ---------- Segment ROI ----------
+  var SEG_COLORS = {
+    high_value: "#51cf66",
+    normal_actual: "#4dabf7",
+    active_community_player: "#74c0fc",
+    low_value: "#ffd43b",
+    voucher_hunter: "#ff9f43",
+    ghost: "#8892a4",
+    unclassified: "#6b7080",
+  };
+
+  function roiColor(score) {
+    if (score >= 50) return "var(--ok,#51cf66)";
+    if (score >= 10) return "var(--accent-2,#4dabf7)";
+    if (score >= 1) return "var(--warn,#ffd43b)";
+    return "var(--bad,#ff6b6b)";
+  }
+
+  function roiBadge(score) {
+    var color = roiColor(score);
+    return '<span style="font-weight:700;color:' + color + '">' + fmt(score) + '</span>';
+  }
+
+  function _populateRoiMonthDropdown(months) {
+    var sel = $("#roi-month");
+    if (!sel) return;
+    var html = '<option value="">Current month (default)</option>';
+    (months || []).forEach(function (m) {
+      html += '<option value="' + esc(m) + '"' + (m === state.roiMonth ? " selected" : "") + '>' + esc(m) + '</option>';
+    });
+    sel.innerHTML = html;
+    if (state.roiMonth) sel.value = state.roiMonth;
+  }
+
+  function loadSegmentRoi(refresh) {
+    setMeta("Loading Segment ROI…");
+    var grid = $("#cards-roi-summary");
+    var recEl = $("#roi-recommendations");
+    var tblEl = $("#roi-table");
+    var rankEl = $("#roi-ranking");
+    var trendEl = $("#roi-trend");
+    if (grid) skeletonGrid(grid, 4);
+    if (recEl) recEl.innerHTML = '<div class="loading">Loading…</div>';
+    if (tblEl) tblEl.innerHTML = "";
+    if (rankEl) rankEl.innerHTML = "";
+    if (trendEl) trendEl.innerHTML = "";
+
+    var params = [];
+    if (state.roiMonth) params.push("snapshot_month=" + encodeURIComponent(state.roiMonth));
+
+    api("/api/admin/dashboard/segment-roi" + (params.length ? "?" + params.join("&") : ""))
+      .then(function (d) {
+        setMeta("Period: " + d.period + " · Last updated: " + (d.generated_at ? new Date(d.generated_at).toLocaleString() : ""));
+        _populateRoiMonthDropdown(d.available_months || []);
+
+        // Summary KPIs
+        var totalUsers = 0, totalBet = 0, totalClaims = 0;
+        (d.segments || []).forEach(function (s) {
+          totalUsers += s.users || 0;
+          totalBet += s.after_bet_amount || 0;
+          totalClaims += s.claim_count || 0;
+        });
+        var overallRoi = totalClaims > 0 ? (totalBet / totalClaims).toFixed(2) : "—";
+        if (grid) grid.innerHTML =
+          '<div class="kpi kpi-headline"><div class="label">Total Users</div><div class="value">' + fmt(totalUsers) + '</div></div>' +
+          '<div class="kpi"><div class="label">Total Bet Amount</div><div class="value">' + fmt(Math.round(totalBet)) + '</div></div>' +
+          '<div class="kpi"><div class="label">Total Claims (Voucher Cost)</div><div class="value">' + fmt(totalClaims) + '</div></div>' +
+          '<div class="kpi kpi-secondary"><div class="label">Overall ROI Score</div><div class="value">' + overallRoi + '</div><div class="sub">bet per claim</div></div>';
+
+        // Recommendations
+        var rec = d.recommendations || {};
+        if (recEl) {
+          var recHtml = '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;">';
+          function recCard(title, value, note, color) {
+            return '<div style="background:var(--bg-card,#1e2230);border:1px solid var(--border,#2d3348);border-radius:8px;padding:14px;">' +
+              '<div style="font-size:11px;text-transform:uppercase;letter-spacing:0.4px;color:var(--muted,#8892a4);">' + title + '</div>' +
+              '<div style="font-size:18px;font-weight:700;margin-top:6px;color:' + (color || "var(--text)") + '">' + esc(value || "—") + '</div>' +
+              (note ? '<div style="font-size:11px;color:var(--muted,#8892a4);margin-top:4px;">' + esc(note) + '</div>' : '') +
+              '</div>';
+          }
+          recHtml += recCard("Deserves More Rewards", rec.deserves_more_rewards, "Highest ROI score", "var(--ok,#51cf66)");
+          recHtml += recCard("Fewer Vouchers", rec.fewer_vouchers, "High claims, low betting", "var(--bad,#ff6b6b)");
+          recHtml += recCard("Produces Real Betting", (rec.produces_real_betting || []).join(", ") || "—", "Top segments by bet amount", "var(--accent-2,#4dabf7)");
+          recHtml += recCard("Mainly Cost (no betting)", (rec.mainly_cost || []).join(", ") || "—", "Claims with zero bet return", "var(--warn,#ffd43b)");
+          recHtml += '</div>';
+          recEl.innerHTML = recHtml;
+        }
+
+        // Comparison Table
+        if (tblEl) {
+          var cols = ["Segment", "Users", "Claims", "After Bet", "Withdrawal", "Referrals", "Check-ins",
+                      "Cost/User", "Bet/User", "Claim/User", "Ref/User", "ROI Score"];
+          var thRow = cols.map(function (c) { return '<th>' + esc(c) + '</th>'; }).join('');
+          var rows = (d.segments || []).map(function (s, i) {
+            var dot = '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:' +
+              (SEG_COLORS[s.segment] || "#6b7080") + ';margin-right:5px;vertical-align:middle;"></span>';
+            return '<tr>' +
+              '<td>' + dot + '<strong>' + esc(s.segment) + '</strong></td>' +
+              '<td class="num">' + fmt(s.users) + '</td>' +
+              '<td class="num">' + fmt(s.claim_count) + '</td>' +
+              '<td class="num">' + fmt(Math.round(s.after_bet_amount)) + '</td>' +
+              '<td class="num">' + fmt(Math.round(s.withdrawal_amount)) + '</td>' +
+              '<td class="num">' + fmt(s.referral_count) + '</td>' +
+              '<td class="num">' + fmt(s.checkin_count) + '</td>' +
+              '<td class="num">' + fmt(s.cost_per_user) + '</td>' +
+              '<td class="num">' + fmt(s.bet_per_user) + '</td>' +
+              '<td class="num">' + fmt(s.claim_per_user) + '</td>' +
+              '<td class="num">' + fmt(s.referral_per_user) + '</td>' +
+              '<td class="num">' + roiBadge(s.roi_score) + '</td>' +
+              '</tr>';
+          }).join('');
+          tblEl.innerHTML = '<div style="overflow-x:auto"><table class="mini-table">' +
+            '<thead><tr>' + thRow + '</tr></thead>' +
+            '<tbody>' + rows + '</tbody></table></div>';
+        }
+
+        // Ranking
+        if (rankEl) {
+          var rankHtml = '<div style="display:flex;flex-direction:column;gap:8px;">';
+          (d.ranking || []).forEach(function (seg, i) {
+            var segData = (d.segments || []).find(function (s) { return s.segment === seg; }) || {};
+            var roi = segData.roi_score !== undefined ? segData.roi_score : 0;
+            var maxRoi = d.segments && d.segments.length ? (d.segments[0].roi_score || 1) : 1;
+            var barPct = maxRoi > 0 ? Math.round(100 * roi / maxRoi) : 0;
+            var medal = i === 0 ? " 🥇" : i === 1 ? " 🥈" : i === 2 ? " 🥉" : "";
+            var color = SEG_COLORS[seg] || "#6b7080";
+            rankHtml += '<div style="background:var(--bg-card,#1e2230);border:1px solid var(--border,#2d3348);border-radius:8px;padding:10px 14px;">' +
+              '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">' +
+              '<span style="font-weight:600;font-size:13px;">' +
+              '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:' + color + ';margin-right:6px;vertical-align:middle;"></span>' +
+              (i + 1) + '. ' + esc(seg) + esc(medal) + '</span>' +
+              '<span style="font-size:13px;color:' + roiColor(roi) + ';font-weight:700;">ROI ' + fmt(roi) + '</span>' +
+              '</div>' +
+              '<div style="height:6px;background:var(--border,#2d3348);border-radius:3px;">' +
+              '<div style="height:6px;width:' + barPct + '%;background:' + roiColor(roi) + ';border-radius:3px;transition:width 0.4s;"></div></div>' +
+              '<div style="font-size:11px;color:var(--muted,#8892a4);margin-top:5px;">' +
+              esc(segData.users || 0) + ' users · ' + esc(segData.claim_count || 0) + ' claims · ' +
+              fmt(Math.round(segData.after_bet_amount || 0)) + ' bet</div>' +
+              '</div>';
+          });
+          rankHtml += '</div>';
+          rankEl.innerHTML = rankHtml;
+        }
+
+        // Trend
+        if (trendEl) {
+          var trend = d.trend || [];
+          if (!trend.length) {
+            trendEl.innerHTML = '<div class="empty">No trend data available.</div>';
+          } else {
+            var allSegs = [];
+            trend.forEach(function (t) {
+              Object.keys(t.segments || {}).forEach(function (s) {
+                if (allSegs.indexOf(s) === -1) allSegs.push(s);
+              });
+            });
+            var trendHtml = '<div style="overflow-x:auto"><table class="mini-table">' +
+              '<thead><tr><th>Segment</th>';
+            trend.forEach(function (t) { trendHtml += '<th>' + esc(t.month) + ' ROI</th><th>' + esc(t.month) + ' Users</th>'; });
+            trendHtml += '<th>MoM Change</th></tr></thead><tbody>';
+            allSegs.sort().forEach(function (seg) {
+              trendHtml += '<tr><td><span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:' +
+                (SEG_COLORS[seg] || "#6b7080") + ';margin-right:5px;vertical-align:middle;"></span>' + esc(seg) + '</td>';
+              var rois = [];
+              trend.forEach(function (t) {
+                var sd = (t.segments || {})[seg] || {};
+                var r = sd.roi_score !== undefined ? sd.roi_score : null;
+                var u = sd.users !== undefined ? sd.users : null;
+                rois.push(r);
+                trendHtml += '<td style="color:' + (r !== null ? roiColor(r) : "var(--muted)") + '">' +
+                  (r !== null ? fmt(r) : "—") + '</td>';
+                trendHtml += '<td>' + (u !== null ? fmt(u) : "—") + '</td>';
+              });
+              var validRois = rois.filter(function (r) { return r !== null; });
+              var momHtml = "—";
+              if (validRois.length >= 2) {
+                var last = validRois[validRois.length - 1];
+                var prev = validRois[validRois.length - 2];
+                if (prev !== 0) {
+                  var change = ((last - prev) / Math.max(prev, 0.01) * 100).toFixed(1);
+                  var arrow = last >= prev ? "↑" : "↓";
+                  var momColor = last >= prev ? "var(--ok,#51cf66)" : "var(--bad,#ff6b6b)";
+                  momHtml = '<span style="color:' + momColor + '">' + arrow + " " + Math.abs(change) + '%</span>';
+                }
+              }
+              trendHtml += '<td>' + momHtml + '</td></tr>';
+            });
+            trendHtml += '</tbody></table></div>';
+            trendEl.innerHTML = trendHtml;
+          }
+        }
+      })
+      .catch(function (e) {
+        if (e.message !== "unauthorized") {
+          setMeta("Segment ROI · Failed");
+          if (grid) grid.innerHTML = '<div class="banner error">Failed: ' + esc(e.message) + '</div>';
+          if (recEl) recEl.innerHTML = "";
+          if (tblEl) tblEl.innerHTML = "";
+          if (rankEl) rankEl.innerHTML = "";
+          if (trendEl) trendEl.innerHTML = "";
         }
       });
   }
@@ -2371,7 +2576,7 @@
       });
   }
 
-  var VIEWS = ["summary", "funnel", "abuse", "vouchers", "referrals", "affiliate", "reactivation", "audit", "segmentProbabilityConfig", "segments", "validation", "backendSegmentEngine", "voucherHunterAudit", "unclassifiedAudit", "segmentRuleSimulator", "voucherHunterQuality", "voucherHunterFalsePositive", "voucherHunterRuleSimulator", "vhPriorityImpact", "uploadPlayerPerformance", "uploadHistory", "rawExplorer", "users", "settings"];
+  var VIEWS = ["summary", "funnel", "abuse", "vouchers", "referrals", "affiliate", "reactivation", "audit", "segmentProbabilityConfig", "segmentRoi", "segments", "validation", "backendSegmentEngine", "voucherHunterAudit", "unclassifiedAudit", "segmentRuleSimulator", "voucherHunterQuality", "voucherHunterFalsePositive", "voucherHunterRuleSimulator", "vhPriorityImpact", "uploadPlayerPerformance", "uploadHistory", "rawExplorer", "users", "settings"];
   function switchView(view) {
     state.view = view;
     $all(".nav-item").forEach(function (b) { b.classList.toggle("active", b.dataset.view === view); });
@@ -2380,6 +2585,7 @@
       summary: "Executive Summary", funnel: "Activation Funnel", abuse: "Abuse Overview",
       vouchers: "Vouchers", referrals: "Referrals", affiliate: "Affiliate", reactivation: "Reactivation",
       audit: "Audit", segmentProbabilityConfig: "Segment Probability Configuration (Read Only)",
+      segmentRoi: "Segment ROI Dashboard",
       segments: "Segment Overview", validation: "Data → Validation / UIM Compare",
       backendSegmentEngine: "Data → Backend Segment Engine (Shadow Mode)",
       voucherHunterAudit: "Data → Voucher Hunter Mismatch Audit (Phase 5B)",
@@ -2408,6 +2614,7 @@
     else if (state.view === "reactivation") loadReactivation(force);
     else if (state.view === "audit") loadAudit(force);
     else if (state.view === "segmentProbabilityConfig") loadSegmentProbabilityConfig(force);
+    else if (state.view === "segmentRoi") loadSegmentRoi(force);
     else if (state.view === "segments") loadSegments(force);
     else if (state.view === "validation") loadValidation(force);
     else if (state.view === "backendSegmentEngine") {
@@ -2496,6 +2703,16 @@
       var input = $("#" + pair[0]);
       if (input) input.addEventListener("input", function () { applyFilter(pair[1], input.value); });
     });
+
+    var roiApplyBtn = $("#roi-apply-btn");
+    if (roiApplyBtn) roiApplyBtn.addEventListener("click", function () { loadSegmentRoi(true); });
+    var roiMonthSel = $("#roi-month");
+    if (roiMonthSel) {
+      roiMonthSel.addEventListener("change", function () {
+        state.roiMonth = roiMonthSel.value || "";
+        loadSegmentRoi(false);
+      });
+    }
 
     initSegmentMonthOptions();
     on("#segments-mode", "click", "button", function (e) {
