@@ -15,6 +15,7 @@
       <button class="nav-item" data-view="funnel">Activation Funnel</button>
       <a href="/static/funnel-dashboard.html" class="nav-item" style="text-decoration:none;" target="_blank">Funnel Dashboard ↗</a>
       <button class="nav-item" data-view="abuse">Abuse Overview</button>
+      <button class="nav-item" data-view="campaigns">Campaigns</button>
       <button class="nav-item" data-view="vouchers">Vouchers</button>
       <button class="nav-item" data-view="referrals">Referrals</button>
       <button class="nav-item" data-view="affiliate">Affiliate</button>
@@ -108,6 +109,142 @@
         </div>
         <div class="card-grid" id="cards-abuse"></div>
         <div id="abuse-notes"></div>
+      </section>
+
+      <!-- CAMPAIGNS VIEW -->
+      <section id="view-campaigns" class="hidden">
+        <div class="controls" style="margin-bottom:16px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+          <div class="seg" id="campaigns-status-filter">
+            <button data-status="" class="active">All Active</button>
+            <button data-status="draft">Draft</button>
+            <button data-status="active">Active</button>
+            <button data-status="paused">Paused</button>
+            <button data-status="ended">Ended</button>
+          </div>
+          <button class="btn" id="campaigns-new-btn" style="margin-left:auto;">+ New Campaign</button>
+        </div>
+
+        <!-- Campaign list -->
+        <div id="campaigns-list-panel">
+          <div id="campaigns-list-body"></div>
+        </div>
+
+        <!-- Campaign builder / editor (hidden until New or Edit clicked) -->
+        <div id="campaigns-editor-panel" class="hidden">
+          <div class="section" style="max-width:720px;">
+            <div class="section-title" id="campaigns-editor-title">New Campaign</div>
+
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px;">
+              <div>
+                <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">Campaign Name *</label>
+                <input class="filter-input" id="ce-name" placeholder="e.g. VIP Retention June" style="width:100%;box-sizing:border-box;" />
+              </div>
+              <div>
+                <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">Campaign Type</label>
+                <select id="ce-type" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--card-bg);color:var(--text);">
+                  <option value="">— select —</option>
+                  <option value="vip_campaign">VIP Campaign</option>
+                  <option value="exclusive_voucher">Exclusive Voucher</option>
+                  <option value="retention_reward">Retention Reward</option>
+                  <option value="first_bet_campaign">First-Bet Campaign</option>
+                  <option value="reload_incentive">Reload Incentive</option>
+                  <option value="referral_campaign">Referral Campaign</option>
+                  <option value="xp_campaign">XP Campaign</option>
+                  <option value="community_event">Community Event</option>
+                  <option value="turnover_improvement">Turnover Improvement</option>
+                  <option value="task_based_reward">Task-Based Reward</option>
+                  <option value="anti_abuse_control">Anti-Abuse Control</option>
+                  <option value="reactivation_campaign">Reactivation Campaign</option>
+                </select>
+              </div>
+            </div>
+
+            <div style="margin-bottom:12px;">
+              <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">Description</label>
+              <textarea id="ce-description" rows="2" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--card-bg);color:var(--text);box-sizing:border-box;resize:vertical;" placeholder="Optional internal notes…"></textarea>
+            </div>
+
+            <div class="section-title" style="font-size:13px;margin-bottom:8px;">Targeting Filters</div>
+
+            <div style="margin-bottom:10px;">
+              <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">Segments (multi-select)</label>
+              <div id="ce-segments" style="display:flex;flex-wrap:wrap;gap:6px;">
+                <label class="ce-chip-label"><input type="checkbox" value="high_value" /> High Value</label>
+                <label class="ce-chip-label"><input type="checkbox" value="normal_actual" /> Normal Actual</label>
+                <label class="ce-chip-label"><input type="checkbox" value="active_community_player" /> Active Community</label>
+                <label class="ce-chip-label"><input type="checkbox" value="low_value" /> Low Value</label>
+                <label class="ce-chip-label"><input type="checkbox" value="voucher_hunter" /> Voucher Hunter</label>
+                <label class="ce-chip-label"><input type="checkbox" value="ghost" /> Ghost</label>
+                <label class="ce-chip-label"><input type="checkbox" value="unclassified" /> Unclassified</label>
+              </div>
+            </div>
+
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:10px;">
+              <div>
+                <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">Player Age Type</label>
+                <div style="display:flex;gap:8px;">
+                  <label class="ce-chip-label"><input type="checkbox" id="ce-age-new" value="new_player" /> New Player</label>
+                  <label class="ce-chip-label"><input type="checkbox" id="ce-age-old" value="old_player" /> Old Player</label>
+                </div>
+              </div>
+              <div>
+                <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">Claim Risk Level</label>
+                <div style="display:flex;flex-wrap:wrap;gap:6px;">
+                  <label class="ce-chip-label"><input type="checkbox" value="normal" class="ce-risk-cb" /> Normal</label>
+                  <label class="ce-chip-label"><input type="checkbox" value="medium_risk" class="ce-risk-cb" /> Medium Risk</label>
+                  <label class="ce-chip-label"><input type="checkbox" value="high_risk_review" class="ce-risk-cb" /> High Risk</label>
+                  <label class="ce-chip-label"><input type="checkbox" value="abuse_freeze" class="ce-risk-cb" /> Abuse Freeze</label>
+                </div>
+              </div>
+            </div>
+
+            <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:10px;margin-bottom:10px;">
+              <div>
+                <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">Referrals ≥</label>
+                <input type="number" id="ce-ref-min" class="filter-input" min="0" placeholder="any" style="width:100%;box-sizing:border-box;" />
+              </div>
+              <div>
+                <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">Referrals ≤</label>
+                <input type="number" id="ce-ref-max" class="filter-input" min="0" placeholder="any" style="width:100%;box-sizing:border-box;" />
+              </div>
+              <div>
+                <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">Check-ins ≥</label>
+                <input type="number" id="ce-chk-min" class="filter-input" min="0" placeholder="any" style="width:100%;box-sizing:border-box;" />
+              </div>
+              <div>
+                <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">Check-ins ≤</label>
+                <input type="number" id="ce-chk-max" class="filter-input" min="0" placeholder="any" style="width:100%;box-sizing:border-box;" />
+              </div>
+            </div>
+
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px;">
+              <div>
+                <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">Active within (days)</label>
+                <input type="number" id="ce-recency" class="filter-input" min="1" placeholder="e.g. 30" style="width:100%;box-sizing:border-box;" />
+              </div>
+              <div>
+                <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">Expected Voucher Value (MYR)</label>
+                <input type="number" id="ce-voucher-value" class="filter-input" min="0" step="0.01" placeholder="0.00" style="width:100%;box-sizing:border-box;" />
+              </div>
+            </div>
+
+            <div style="display:flex;gap:8px;margin-bottom:16px;">
+              <button class="btn" id="ce-preview-btn">Preview Audience</button>
+              <button class="btn" id="ce-save-btn">Save Campaign</button>
+              <button class="btn" id="ce-cancel-btn" style="background:transparent;border:1px solid var(--border);">Cancel</button>
+            </div>
+
+            <!-- Audience preview results -->
+            <div id="ce-preview-result" class="hidden">
+              <div class="section-title" style="font-size:13px;margin-bottom:8px;">Audience Preview</div>
+              <div class="card-grid" id="ce-preview-cards"></div>
+              <div class="section-title" style="font-size:13px;margin-top:16px;margin-bottom:8px;">Segment Distribution</div>
+              <div id="ce-segment-dist"></div>
+              <div class="section-title" style="font-size:13px;margin-top:16px;margin-bottom:8px;">Historical Performance</div>
+              <div id="ce-historical"></div>
+            </div>
+          </div>
+        </div>
       </section>
 
       <!-- VOUCHERS VIEW -->
