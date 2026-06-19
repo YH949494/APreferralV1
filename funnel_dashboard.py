@@ -215,31 +215,40 @@ def compute_funnel(
     join_count = len(cohort_uids)
 
     # ---- Stage 2: Start Bot ----
-    start_bot_count = 0
+    # Bound by [start, end] so historical custom windows don't count later activity.
+    start_bot_uids: set[int] = set()
     if cohort_uids:
-        q_bot: dict = {
-            "user_id": {"$in": cohort_list},
-            "first_private_interaction_at": {"$exists": True, "$ne": None},
-        }
+        bot_ts: dict = {"$exists": True, "$ne": None, "$lte": end}
         if start is not None:
-            q_bot["first_private_interaction_at"] = {"$gte": start}
-        start_bot_count = db.users.count_documents(q_bot)
+            bot_ts["$gte"] = start
+        for doc in db.users.find(
+            {"user_id": {"$in": cohort_list}, "first_private_interaction_at": bot_ts},
+            {"user_id": 1},
+        ):
+            uid = _coerce_uid(doc.get("user_id"))
+            if uid in cohort_uids:
+                start_bot_uids.add(uid)
+    start_bot_count = len(start_bot_uids)
 
     # ---- Stages 3–6: Check-in progress ----
     # Count distinct check-in days per user in the window
     checkin_days_by_uid: dict[int, set[str]] = {uid: set() for uid in cohort_uids}
 
     if cohort_uids:
+        # Apply both lower and upper bounds so custom historical windows don't pull
+        # check-ins that occurred after the selected end date.
+        checkin_ts: dict = {"$lte": end}
+        if start is not None:
+            checkin_ts["$gte"] = start
         checkin_q: dict = {
             "user_id": {"$in": cohort_list},
+            "created_at": checkin_ts,
             "$or": [
                 {"type": "checkin"},
                 {"reason": "checkin"},
                 {"unique_key": {"$regex": r"^checkin:"}},
             ],
         }
-        if start is not None:
-            checkin_q["created_at"] = {"$gte": start}
 
         for doc in db.xp_events.find(checkin_q, {"user_id": 1, "created_at": 1}):
             uid = _coerce_uid(doc.get("user_id"))
@@ -267,6 +276,8 @@ def compute_funnel(
     welcome_unlock_count = max(progress_3_count, len(eligible_uids))
 
     # ---- Stage 8: Welcome Claim ----
+    # Use {"$not": {"$gt": end}} so documents without a timestamp field are included
+    # (legacy records) while claims that occurred after end are excluded.
     claim_uids: set[int] = set()
     if cohort_uids:
         # affiliate_ledger WELCOME ISSUED
@@ -274,6 +285,7 @@ def compute_funnel(
             {
                 "status": "ISSUED",
                 "user_id": {"$in": cohort_list},
+                "updated_at": {"$not": {"$gt": end}},
                 "$or": [
                     {"ledger_type": "WELCOME"},
                     {"tier": "WELCOME"},
@@ -290,6 +302,7 @@ def compute_funnel(
         for doc in db.welcome_eligibility.find(
             {
                 "claimed": True,
+                "claimed_at": {"$not": {"$gt": end}},
                 "$or": [
                     {"uid": {"$in": cohort_list}},
                     {"user_id": {"$in": cohort_list}},
@@ -303,7 +316,10 @@ def compute_funnel(
 
         # new_joiner_claims
         for doc in db.new_joiner_claims.find(
-            {"$or": [{"uid": {"$in": cohort_list}}, {"user_id": {"$in": cohort_list}}]},
+            {
+                "claimed_at": {"$not": {"$gt": end}},
+                "$or": [{"uid": {"$in": cohort_list}}, {"user_id": {"$in": cohort_list}}],
+            },
             {"uid": 1, "user_id": 1},
         ):
             uid = _coerce_uid(doc.get("uid") or doc.get("user_id"))
@@ -314,6 +330,7 @@ def compute_funnel(
         for doc in db.welcome_tickets.find(
             {
                 "status": "claimed",
+                "claimed_at": {"$not": {"$gt": end}},
                 "$or": [
                     {"uid": {"$in": cohort_list}},
                     {"user_id": {"$in": cohort_list}},
@@ -347,16 +364,34 @@ def compute_funnel(
                     code_to_uid[str(code)] = uid
 
             if code_to_uid:
-                mkt_q: dict = {
-                    "coupon_code": {"$in": list(code_to_uid.keys())},
-                    "after_total_bet_amount": {"$gt": 0},
-                }
+                # Fetch all matched records without a server-side numeric filter because
+                # after_total_bet_amount is often stored as a string from CSV uploads;
+                # {"$gt": 0} would silently skip those rows. Convert to float in Python.
+                mkt_q: dict = {"coupon_code": {"$in": list(code_to_uid.keys())}}
+                end_date_str = end.strftime("%Y-%m-%d")
                 if start is not None:
+                    start_date_str = start.strftime("%Y-%m-%d")
                     mkt_q["$or"] = [
-                        {"week_start": {"$gte": start.strftime("%Y-%m-%d")}},
-                        {"created_at": {"$gte": start}},
+                        {"week_start": {"$gte": start_date_str, "$lte": end_date_str}},
+                        {"created_at": {"$gte": start, "$lte": end}},
                     ]
-                for doc in db.marketing_raw_data.find(mkt_q, {"coupon_code": 1}):
+                else:
+                    mkt_q["$or"] = [
+                        {"week_start": {"$lte": end_date_str}},
+                        {"created_at": {"$lte": end}},
+                    ]
+                for doc in db.marketing_raw_data.find(
+                    mkt_q, {"coupon_code": 1, "after_total_bet_amount": 1}
+                ):
+                    # after_total_bet_amount may be numeric or string depending on
+                    # how the marketing CSV was ingested; coerce before comparing.
+                    bet_raw = doc.get("after_total_bet_amount")
+                    try:
+                        bet_val = float(bet_raw) if bet_raw is not None else 0.0
+                    except (ValueError, TypeError):
+                        bet_val = 0.0
+                    if bet_val <= 0:
+                        continue
                     code = str(doc.get("coupon_code") or "")
                     uid = code_to_uid.get(code)
                     if uid:
@@ -498,7 +533,9 @@ def compute_funnel(
                         is_new = doc.get("is_new_player")
                         if is_new in (1, True, "1", "true"):
                             new_player_uids.add(uid)
-                        else:
+                        elif is_new in (0, False, "0", "false"):
+                            # Only explicitly false/0 values count as returning;
+                            # absent or null is_new_player stays unidentified.
                             returning_player_uids.add(uid)
     except Exception:
         pass
@@ -510,10 +547,7 @@ def compute_funnel(
         sub_list = list(sub_uids)
         sub_n = len(sub_uids)
 
-        sub_bot = sum(
-            1 for uid in sub_uids
-            if cohort_by_uid.get(uid, {}).get("first_private_interaction_at") is not None
-        )
+        sub_bot = len(sub_uids & start_bot_uids)
         sub_p1 = sum(1 for uid in sub_uids if len(checkin_days_by_uid.get(uid, set())) >= 1)
         sub_p2 = sum(1 for uid in sub_uids if len(checkin_days_by_uid.get(uid, set())) >= 2)
         sub_p3 = sum(1 for uid in sub_uids if len(checkin_days_by_uid.get(uid, set())) >= 3)
