@@ -159,14 +159,22 @@ def preview_audience(db, filters: dict, voucher_value: float = 0.0) -> dict:
     match = _build_snapshot_match(filters)
     match["snapshot_week"] = snapshot_week
 
-    # Activity recency: cross-reference with users.last_active_at
+    # Activity recency: match users active within N days.
+    # Uses $or across last_active_at and last_checkin so users who only have
+    # check-in timestamps (no last_active_at written yet) are not excluded.
     recency_days = filters.get("activity_recency_days")
     if recency_days:
         cutoff = datetime.now(timezone.utc) - timedelta(days=int(recency_days))
         active_user_ids = [
             u["user_id"]
             for u in users_col.find(
-                {"last_active_at": {"$gte": cutoff}, "user_id": {"$ne": None}},
+                {
+                    "user_id": {"$ne": None},
+                    "$or": [
+                        {"last_active_at": {"$gte": cutoff}},
+                        {"last_checkin": {"$gte": cutoff}},
+                    ],
+                },
                 projection={"user_id": 1, "_id": 0},
             )
             if u.get("user_id")

@@ -2864,7 +2864,7 @@
 
     $all("#campaigns-status-filter button").forEach(function (b) {
       b.addEventListener("click", function () {
-        seg("campaigns-status-filter", b);
+        $all("#campaigns-status-filter button").forEach(function (x) { x.classList.toggle("active", x === b); });
         loadCampaigns(true);
       });
     });
