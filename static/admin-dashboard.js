@@ -94,6 +94,17 @@
     el.innerHTML = html;
   }
 
+  function applyDatabotLink(url) {
+    var link = $("#databot-link");
+    if (!link) return;
+    if (url && typeof url === "string") {
+      link.href = url;
+      link.style.display = "";
+    } else {
+      link.style.display = "none";
+    }
+  }
+
   // ---------- Summary ----------
   function loadSummary(refresh) {
     setMeta("Window: " + state.summaryWindow + " · Loading…");
@@ -2561,8 +2572,9 @@
         var titles = {
           voucher_settings: "Voucher Settings", referral_settings: "Referral Settings",
           affiliate_settings: "Affiliate Settings", xp_checkin_settings: "XP & Check-in",
-          bot_settings: "Bot Settings", security: "Security"
+          bot_settings: "Bot Settings", databot_settings: "Databot", security: "Security"
         };
+        applyDatabotLink((sec.databot_settings || {}).dashboard_url);
         $("#settings-body").innerHTML = Object.keys(sec).map(function (k) {
           return '<div class="settings-section"><div class="section-title">' + esc(titles[k] || k) +
             "</div><div class=\"detail-block\">" + render(sec[k]) + "</div></div>";
@@ -3109,6 +3121,9 @@
       $("#admin-chip").textContent = "@" + (a.username || a.id);
       bind();
       switchView("summary");
+      api("/api/admin/dashboard/settings").then(function (sd) {
+        applyDatabotLink(((sd.sections || {}).databot_settings || {}).dashboard_url);
+      }).catch(function () {});
     })
     .catch(function () { /* api() already redirects on 401 */ });
 })();
