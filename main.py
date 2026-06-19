@@ -2258,6 +2258,10 @@ app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024
 app.register_blueprint(vouchers_bp, url_prefix="/v2/miniapp")
 configure_admin_session(app)
 app.register_blueprint(admin_auth_bp)
+
+from campaigns import campaigns_bp
+app.register_blueprint(campaigns_bp)
+
 admin_bp = Blueprint("admin", __name__)
 
 

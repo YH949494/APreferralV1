@@ -217,3 +217,16 @@ pre.payload { background: var(--bg); border: 1px solid var(--border); border-rad
 .dq { font-size: 10px; margin-left: 6px; vertical-align: middle; }
 .tag.delayed { background: rgba(255,159,67,0.15); color: var(--accent); }
 .settings-section { margin-bottom: 22px; }
+
+/* Campaign engine chip labels */
+.ce-chip-label { display:inline-flex;align-items:center;gap:5px;padding:5px 10px;border:1px solid var(--border);border-radius:20px;font-size:12px;cursor:pointer;transition:background 0.15s; }
+.ce-chip-label:hover { background: var(--panel-2); }
+.ce-chip-label input[type=checkbox] { accent-color: var(--accent); }
+.pill.draft { background: rgba(139,147,167,0.18); color: var(--muted); }
+.pill.archived { background: rgba(139,147,167,0.1); color: var(--muted); opacity:0.6; }
+.campaign-card { background: var(--card-bg); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; margin-bottom: 10px; }
+.campaign-card-header { display:flex;justify-content:space-between;align-items:center;margin-bottom:6px; }
+.campaign-card-title { font-size:14px;font-weight:600;color:var(--text); }
+.campaign-card-meta { font-size:11px;color:var(--muted);display:flex;gap:12px;flex-wrap:wrap;margin-top:4px; }
+.campaign-card-actions { display:flex;gap:6px;margin-top:10px; }
+
