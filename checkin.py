@@ -15,6 +15,7 @@ from database import db, get_collection, init_db
 from onboarding import record_first_checkin
 from xp import grant_xp
 from affiliate_rewards import record_user_last_seen
+from reactivation_journey import handle_successful_checkin
 
 users_collection = get_collection("users")
 logger = logging.getLogger(__name__)
@@ -208,6 +209,13 @@ def handle_checkin():
             remaining = max(0, required - completed)
             plural = "check-ins" if remaining != 1 else "check-in"
             payload["welcome_message"] = f"🎁 Progress: {completed}/{required}\n\n{remaining} more {plural} to unlock your reward."
+
+    try:
+        journey_result = handle_successful_checkin(db, int(user_id), now_ref=datetime.now(timezone.utc))
+        if journey_result.get("voucher_code"):
+            payload["reactivation_journey"] = {"tier": 1, "voucher_code": journey_result.get("voucher_code")}
+    except Exception:
+        logger.exception("[REACT_JOURNEY][ERROR] uid=%s tier=1 reason=checkin_hook_failed", user_id)
     return jsonify(payload)
 
 

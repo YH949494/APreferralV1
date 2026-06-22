@@ -16,6 +16,7 @@ except ModuleNotFoundError:  # pragma: no cover - production requirements includ
         pass
 
 from xp import grant_xp
+from reactivation_journey import create_or_update_journey
 
 logger = logging.getLogger(__name__)
 
@@ -431,6 +432,11 @@ def verify_reactivation_claim(
         {"user_id": uid},
         {"$set": {"reactivation_verified_at": ts, "reactivation_reward_due_at": reward_due_at}},
     )
+    if hasattr(db, "reactivation_journey") or hasattr(db, "__getitem__"):
+        try:
+            create_or_update_journey(db, uid, campaign_id=CAMPAIGN_ID, verified_at=ts, now_ref=ts)
+        except Exception:
+            logger.exception("[REACT_JOURNEY][ERROR] uid=%s campaign_id=%s reason=create_failed", uid, CAMPAIGN_ID)
     return {
         "success": True,
         "code": "pending",

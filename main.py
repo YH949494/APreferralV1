@@ -87,6 +87,8 @@ from affiliate_rewards import (
     catch_up_missing_current_month_affiliate_ledgers,
 )
 from telegram_utils import safe_reply_text
+from channel_reactivation import set_campaign_active, campaign_summary as channel_reactivation_summary, process_reactivation_campaign, verify_reactivation_claim, check_official_channel_subscribed, VERIFY_CALLBACK_DATA
+from reactivation_journey import ensure_reactivation_journey_indexes, evaluate_pending_journeys, handle_successful_checkin, journey_summary, journey_users, upload_pool_codes
 
 from pymongo import DESCENDING, ASCENDING, ReturnDocument  # keep if used elsewhere
 from pymongo.errors import DuplicateKeyError, CursorNotFound, OperationFailure, PyMongoError
@@ -2263,6 +2265,86 @@ from campaigns import campaigns_bp
 app.register_blueprint(campaigns_bp)
 
 admin_bp = Blueprint("admin", __name__)
+
+
+def _admin_error_response(err):
+    msg, code = err
+    return jsonify({"success": False, "message": msg}), code
+
+
+@admin_bp.get("/api/admin/channel-reactivation/summary")
+def api_admin_channel_reactivation_summary():
+    ok, err = require_admin_from_query()
+    if not ok:
+        return _admin_error_response(err)
+    base = channel_reactivation_summary(db)
+    try:
+        journey = journey_summary(db)
+        base.update({
+            "tier1_completed": journey.get("tier1_completed", 0),
+            "tier1_issued": journey.get("tier1_issued", 0),
+            "tier2_completed": journey.get("tier2_completed", 0),
+            "tier2_issued": journey.get("tier2_issued", 0),
+            "tier3_completed": journey.get("tier3_completed", 0),
+            "tier3_issued": journey.get("tier3_issued", 0),
+            "out_of_stock_by_tier": journey.get("out_of_stock_by_tier", {}),
+            "reactivation_pools": journey.get("pools", []),
+        })
+    except Exception:
+        logger.exception("[REACT_JOURNEY][ERROR] reason=summary_failed")
+    return jsonify(base)
+
+
+@admin_bp.post("/api/admin/channel-reactivation/start")
+def api_admin_channel_reactivation_start():
+    ok, err = require_admin_from_query()
+    if not ok:
+        return _admin_error_response(err)
+    data = request.get_json(silent=True) or {}
+    per_run_limit = data.get("per_run_limit", request.args.get("per_run_limit"))
+    return jsonify(set_campaign_active(db, True, per_run_limit=per_run_limit))
+
+
+@admin_bp.post("/api/admin/channel-reactivation/pause")
+def api_admin_channel_reactivation_pause():
+    ok, err = require_admin_from_query()
+    if not ok:
+        return _admin_error_response(err)
+    return jsonify(set_campaign_active(db, False))
+
+
+@admin_bp.get("/api/admin/reactivation/journey/summary")
+def api_admin_reactivation_journey_summary():
+    ok, err = require_admin_from_query()
+    if not ok:
+        return _admin_error_response(err)
+    return jsonify(journey_summary(db))
+
+
+@admin_bp.get("/api/admin/reactivation/journey/users")
+def api_admin_reactivation_journey_users():
+    ok, err = require_admin_from_query()
+    if not ok:
+        return _admin_error_response(err)
+    limit = request.args.get("limit", default=100, type=int)
+    return jsonify({
+        "success": True,
+        "items": journey_users(db, status=request.args.get("status"), tier=request.args.get("tier"), limit=limit),
+    })
+
+
+@admin_bp.post("/api/admin/reactivation/journey/pools/upload")
+def api_admin_reactivation_journey_pools_upload():
+    ok, err = require_admin_from_query()
+    if not ok:
+        return _admin_error_response(err)
+    data = request.get_json(silent=True) or {}
+    codes = data.get("codes")
+    if isinstance(codes, str):
+        codes = [line.strip() for line in codes.replace("\r", "\n").split("\n")]
+    result = upload_pool_codes(db, str(data.get("pool_id") or ""), list(codes or []))
+    status_code = 200 if result.get("success") else 400
+    return jsonify(result), status_code
 
 
 @admin_bp.get("/api/admin/joins/daily")
@@ -4916,6 +4998,12 @@ async def process_checkin(user_id, username, region, update=None):
 
     maybe_shout_milestones(int(user_id))
 
+    reactivation_journey_result = None
+    try:
+        reactivation_journey_result = handle_successful_checkin(db, int(user_id), now_ref=now_utc_ts)
+    except Exception:
+        logger.exception("[REACT_JOURNEY][ERROR] uid=%s tier=1 reason=checkin_hook_failed", user_id)
+
     labels = {7: "🎉 7-day streak bonus!", 14: "🔥 14-day streak bonus!", 28: "🏆 28-day streak bonus!"}
     lines = [
         f"✅ Check-in successful! (+{base_xp} XP)",
@@ -4929,7 +5017,7 @@ async def process_checkin(user_id, username, region, update=None):
     if update and getattr(update, "message", None):
         await update.message.reply_text(msg)
 
-    return {
+    result_payload = {
         "success": True,
         "message": msg,
         "base_xp": base_xp,
@@ -4938,6 +5026,9 @@ async def process_checkin(user_id, username, region, update=None):
         "streak": streak,
         "streak_label": labels.get(streak, "") if bonus_xp else "",
     }
+    if reactivation_journey_result and reactivation_journey_result.get("voucher_code"):
+        result_payload["reactivation_journey"] = {"tier": 1, "voucher_code": reactivation_journey_result.get("voucher_code")}
+    return result_payload
 
 @app.route("/api/streak/<int:user_id>")
 def api_streak(user_id):
@@ -7114,6 +7205,18 @@ async def button_handler(update, context):
                 logger.exception("[PM1][SUB_VERIFY] uid=%s err=send_failed", user_id)
         return
 
+    if query.data == VERIFY_CALLBACK_DATA:
+        result = verify_reactivation_claim(db, int(user_id), membership_checker=check_official_channel_subscribed, now_ref=datetime.now(timezone.utc))
+        if result.get("success"):
+            await query.answer("Verified", show_alert=True)
+        else:
+            await query.answer(result.get("message") or "Unable to verify", show_alert=True)
+        try:
+            await query.edit_message_text(result.get("message") or "Verification updated.")
+        except Exception:
+            pass
+        return
+
     if query.data == "checkin":
         user = users_collection.find_one({"user_id": user_id})
         if user and user.get("welcome_xp_claimed"):
@@ -7168,6 +7271,7 @@ def run_worker():
     logger.info("[BOOT] worker mode starting")
     try:
         ensure_voucher_indexes()
+        ensure_reactivation_journey_indexes(db)
         print("Voucher indexes ensured.")
     except Exception as e:
         print("Failed to register vouchers blueprint / ensure indexes:", e)
@@ -7278,6 +7382,13 @@ def run_worker():
         trigger=CronTrigger(minute="*/30", timezone=KL_TZ),
         id="welcome_voucher_lifecycle",
         name="Welcome Voucher Lifecycle",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        lambda: evaluate_pending_journeys(db, membership_checker=check_official_channel_subscribed, now_ref=datetime.now(timezone.utc), batch_limit=300),
+        trigger=CronTrigger(minute="*/30", timezone=KL_TZ),
+        id="reactivation_journey_evaluate",
+        name="Reactivation Journey Evaluate",
         replace_existing=True,
     )
     scheduler.add_job(
@@ -7521,6 +7632,7 @@ def run_worker():
 def run_web():
     try:
         ensure_voucher_indexes()
+        ensure_reactivation_journey_indexes(db)
         print("Voucher indexes ensured.")
     except Exception as e:
         print("Failed to register vouchers blueprint / ensure indexes:", e)
