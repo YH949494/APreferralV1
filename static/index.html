@@ -1411,6 +1411,17 @@
         <div id="welcome-progress-reward">Reward Value: RM5</div>
         <div id="welcome-progress-message" class="welcome-progress-message"></div>
       </div>
+      <div id="welcome-channel-reminder" style="display:none;">
+        <ul style="list-style:none;padding:0;margin:8px 0;font-size:14px;">
+          <li>✅ Check in 3/3</li>
+          <li id="welcome-channel-status-item">❌ Subscribe to @AdvantPlayOfficial</li>
+        </ul>
+        <p style="font-size:13px;color:#555;margin:4px 0 8px;">Join the channel to unlock your Welcome Voucher.</p>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;">
+          <a href="https://t.me/advantplayofficial" target="_blank" rel="noopener" class="btn btn-primary" style="text-decoration:none;">Join Channel</a>
+          <button id="welcome-verify-sub-btn" type="button" class="btn btn-ghost">Verify Subscription</button>
+        </div>
+      </div>
       <button id="welcome-progress-claim-btn" type="button" class="btn btn-primary" style="display:none;">Claim Welcome Voucher</button>
     </div>
   </div>
@@ -2826,9 +2837,11 @@
       const rewardEl = document.getElementById("welcome-progress-reward");
       const messageEl = document.getElementById("welcome-progress-message");
       const claimBtn = document.getElementById("welcome-progress-claim-btn");
+      const channelReminder = document.getElementById("welcome-channel-reminder");
       if (!section || !titleEl || !fillEl || !countEl || !rewardEl || !messageEl || !claimBtn) return;
 
-      if (!data?.visible) {
+      // hide_welcome_card is the authoritative gate for permanent ineligibility
+      if (data?.hide_welcome_card === true || !data?.visible) {
         hideWelcomeProgress();
         return;
       }
@@ -2837,6 +2850,7 @@
       const completed = Math.max(0, Math.min(required, safeInt(data.completed_days, 0)));
       const progressPct = Math.max(0, Math.min(100, Number(data.progress_pct || 0)));
       const status = String(data.status || "in_progress");
+      const pendingReason = String(data.welcome_pending_reason || "");
 
       section.style.display = "block";
       fillEl.style.width = `${progressPct}%`;
@@ -2844,7 +2858,27 @@
       claimBtn.style.display = "none";
       claimBtn.removeAttribute("data-dropid");
       claimBtn.removeAttribute("data-claim");
+      if (channelReminder) channelReminder.style.display = "none";
 
+      // CHANNEL_NOT_JOINED: actionable — show subscribe reminder
+      if (pendingReason === "CHANNEL_NOT_JOINED") {
+        titleEl.textContent = "🎁 Welcome Voucher Waiting";
+        countEl.textContent = `Progress: ${completed}/${required} ✅`;
+        messageEl.textContent = "";
+        if (channelReminder) channelReminder.style.display = "block";
+        return;
+      }
+
+      // Operational pending: temporary system/drop unavailability
+      const operationalReasons = ["NO_ACTIVE_DROP", "NO_FREE_CODES", "COUNTER_MISMATCH", "DROP_NOT_LIVE_YET"];
+      if (operationalReasons.includes(pendingReason)) {
+        titleEl.textContent = "🎁 Welcome Voucher";
+        countEl.textContent = `Progress: ${completed}/${required} ✅`;
+        messageEl.textContent = "You've completed all requirements. Voucher distribution is temporarily unavailable. Please check again later.";
+        return;
+      }
+
+      // claim_drop_id exists: show claim button
       if (status === "unlocked") {
         const claimDropId = data.claim_drop_id || data.drop_id || "";
         if (claimDropId) {
@@ -2857,21 +2891,22 @@
           claimBtn.style.display = "inline-flex";
         } else {
           console.log(`[WELCOME_UI][CLAIM_BUTTON_DISABLED] uid=${userId} reason=no_claim_drop_id completed_days=${completed}`);
-          titleEl.textContent = "🎁 Welcome Voucher Progress";
+          titleEl.textContent = "🎁 Welcome Voucher";
           countEl.textContent = `Progress: ${completed}/${required} ✅`;
-          messageEl.textContent = data.message || "Check-ins completed. Claim slot is not available yet. Please check again later.";
+          messageEl.textContent = "You've completed all requirements. Voucher distribution is temporarily unavailable. Please check again later.";
         }
         return;
       }
 
       if (status === "unlocked_pending") {
         console.log(`[WELCOME_UI][CLAIM_BUTTON_DISABLED] uid=${userId} reason=no_claim_drop_id completed_days=${completed}`);
-        titleEl.textContent = "🎁 Welcome Voucher Progress";
+        titleEl.textContent = "🎁 Welcome Voucher";
         countEl.textContent = `Progress: ${completed}/${required} ✅`;
-        messageEl.textContent = data.message || "Check-ins completed. Claim slot is not available yet. Please check again later.";
+        messageEl.textContent = "You've completed all requirements. Voucher distribution is temporarily unavailable. Please check again later.";
         return;
       }
 
+      // Default: in-progress state
       titleEl.textContent = "🎁 Welcome Voucher Progress";
       countEl.textContent = `Progress: ${completed}/${required} ✅`;
       if (completed === 2 && required === 3) {
@@ -2899,6 +2934,13 @@
         hideWelcomeProgress();
       }
     }
+
+    (function () {
+      const verifyBtn = document.getElementById("welcome-verify-sub-btn");
+      if (verifyBtn) {
+        verifyBtn.addEventListener("click", () => loadWelcomeProgress());
+      }
+    })();
 
     function applyRegionGate(regionValue = null) {
       const region = regionValue !== null ? regionValue : getStoredRegion();

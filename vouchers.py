@@ -850,6 +850,7 @@ def get_welcome_reward_progress(uid, now=None) -> dict:
         "checkins_required": WELCOME_REWARD_CHECKINS_REQUIRED,
         "eligible_until": eligible_until.isoformat() if eligible_until else None,
         "days_remaining": days_remaining,
+        "eligibility_reason": reason,
     }
     tag = "[WELCOME_V2][UNLOCKED]" if unlocked else ("[WELCOME_V2][HIDDEN_EXPIRED]" if hide else "[WELCOME_V2][LOCKED]")
     _welcome_progress_log("[WELCOME_V2][PROGRESS]", uid, progress, reason)
@@ -889,6 +890,79 @@ def _welcome_claim_drop_id(now_ref: datetime | None = None, uid: int | None = No
     except Exception:
         _safe_log("warning", "[WELCOME_PROGRESS_API] claim_drop_lookup_failed")
     return None
+
+
+_WELCOME_PERMANENT_REASONS = frozenset(
+    {"ELIGIBILITY_FAILED", "AUDIENCE_MISMATCH", "WINDOW_EXPIRED", "ALREADY_CLAIMED", "REGION_MISMATCH", "RISK_BLOCKED"}
+)
+_WELCOME_OPERATIONAL_REASONS = frozenset({"NO_ACTIVE_DROP", "NO_FREE_CODES", "COUNTER_MISMATCH", "DROP_NOT_LIVE_YET"})
+
+
+def _welcome_claim_drop_reason(now_ref: datetime | None = None, uid: int | None = None) -> str:
+    """Return a stable reason code explaining why no welcome claim drop is available."""
+    ref = _as_aware_utc(now_ref) or now_utc()
+    try:
+        found_drop = False
+        for drop in get_active_drops(ref):
+            if not _is_new_joiner_audience(_drop_audience_type(drop)):
+                continue
+            drop_id = str(drop.get("_id") or drop.get("dropId") or "")
+            if not drop_id:
+                continue
+            found_drop = True
+            starts_at = _as_aware_utc(drop.get("startsAt"))
+            if starts_at and ref < starts_at:
+                return "DROP_NOT_LIVE_YET"
+            try:
+                state = _pooled_claimability_state(
+                    drop=drop,
+                    drop_id=drop_id,
+                    user_region=None,
+                    uid=uid,
+                    is_my_user=False,
+                    ref=ref,
+                )
+                pool_reason = state.get("reason", "")
+                if pool_reason == "pool_empty":
+                    return "NO_FREE_CODES"
+                if pool_reason in ("shaping_too_early",):
+                    return "DROP_NOT_LIVE_YET"
+            except Exception:
+                return "COUNTER_MISMATCH"
+        if not found_drop:
+            return "NO_ACTIVE_DROP"
+    except Exception:
+        pass
+    return "NO_ACTIVE_DROP"
+
+
+def classify_welcome_pending_reason(
+    progress: dict,
+    now_ref: datetime | None = None,
+    uid: int | None = None,
+) -> str:
+    """Classify why a user with completed_days >= 3 has no claim_drop_id."""
+    channel_joined = bool(progress.get("channel_joined"))
+    eligible = bool(progress.get("eligible"))
+
+    if not channel_joined:
+        return "CHANNEL_NOT_JOINED"
+
+    if not eligible:
+        r = str(progress.get("eligibility_reason") or "").lower()
+        if "claimed" in r:
+            return "ALREADY_CLAIMED"
+        if "expired" in r or "window" in r:
+            return "WINDOW_EXPIRED"
+        if "risk" in r or "blocked" in r:
+            return "RISK_BLOCKED"
+        if "audience" in r or "mismatch" in r:
+            return "AUDIENCE_MISMATCH"
+        if "region" in r:
+            return "REGION_MISMATCH"
+        return "ELIGIBILITY_FAILED"
+
+    return _welcome_claim_drop_reason(now_ref, uid)
 
 
 def build_welcome_progress_response(user_id: int, *, now: datetime | None = None) -> dict:
@@ -943,8 +1017,22 @@ def build_welcome_progress_response(user_id: int, *, now: datetime | None = None
             status = "unlocked_pending"
             message = "Check-ins completed. Claim slot is not available yet. Please check again later."
 
+    # Determine hide_welcome_card and welcome_pending_reason
+    hide_welcome_card = False
+    welcome_pending_reason = None
+
+    if claim_drop_id:
+        _safe_log("info", f"[WELCOME_PROGRESS][CLAIM_READY] uid={user_id} drop_id={claim_drop_id}")
+    elif completed_days >= required_days:
+        welcome_pending_reason = classify_welcome_pending_reason(progress, now_ref, uid=user_id)
+        hide_welcome_card = welcome_pending_reason in _WELCOME_PERMANENT_REASONS
+        if hide_welcome_card:
+            _safe_log("info", f"[WELCOME_PROGRESS][HIDE_CARD] uid={user_id} reason={welcome_pending_reason}")
+        else:
+            _safe_log("info", f"[WELCOME_PROGRESS][PENDING_VISIBLE] uid={user_id} reason={welcome_pending_reason}")
+
     payload = {
-        "visible": bool(visible),
+        "visible": bool(visible) and not hide_welcome_card,
         "status": status,
         "required_days": required_days,
         "completed_days": completed_days,
@@ -953,6 +1041,8 @@ def build_welcome_progress_response(user_id: int, *, now: datetime | None = None
         "reward_value": "$1",
         "eligible_until": eligible_until,
         "message": message,
+        "hide_welcome_card": hide_welcome_card,
+        "welcome_pending_reason": welcome_pending_reason,
     }
     if claim_drop_id:
         payload["claim_drop_id"] = claim_drop_id
