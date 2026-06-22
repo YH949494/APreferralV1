@@ -517,6 +517,12 @@
       .then(function (d) {
         renderMeta(d, "all time");
         $("#reactivation-status").textContent = d.active ? "Active" : "Paused";
+        var toggleBtn = $("#reactivation-toggle-btn");
+        if (toggleBtn) {
+          toggleBtn.textContent = d.active ? "⏸ Pause Campaign" : "▶ Start Campaign";
+          toggleBtn.className = d.active ? "btn" : "btn primary";
+          toggleBtn._campaignActive = d.active;
+        }
         $("#cards-reactivation-summary").innerHTML =
           kpiCard("Eligible Users", d.eligible_users) +
           kpiCard("Messages Sent", d.messages_sent, fmt(d.messages_sent_today) + " today") +
@@ -2984,6 +2990,7 @@
     bindCampaigns();
     $("#reactivation-start-btn").addEventListener("click", function () { setReactivation(true); });
     $("#reactivation-pause-btn").addEventListener("click", function () { setReactivation(false); });
+    $("#reactivation-toggle-btn").addEventListener("click", function () { setReactivation(!this._campaignActive); });
     $all("#funnel-window button").forEach(function (b) {
       b.addEventListener("click", function () {
         state.funnelWindow = b.dataset.window;
