@@ -2336,6 +2336,38 @@
   }
 
   // ---------- Upload History (Phase 2A) ----------
+  function renderSegSyncStatus(s) {
+    if (s === null || s === undefined || s === "pending") return "Not Started";
+    if (s === "running") return "Syncing";
+    if (s === "completed") return "Synced";
+    if (s === "failed") return "Failed";
+    return "Not Started";
+  }
+
+  function loadUimImportHistory() {
+    statePanel("uim-import-history-body", "loading", "Loading UIM import history…");
+    api("/api/admin/data/uim-import/history")
+      .then(function (d) {
+        var rows = (d.batches || []).map(function (b) {
+          return "<tr><td>" + esc(b.committed_at) + "</td>" +
+            '<td class="num">' + fmt(b.rows_written) + "</td>" +
+            '<td class="num">' + fmt(b.rows_scanned) + "</td>" +
+            '<td class="num">' + fmt(b.users_updated) + "</td>" +
+            '<td class="num">' + fmt(b.users_missing) + "</td>" +
+            "<td>" + renderSegSyncStatus(b.seg_sync_status) + "</td>" +
+            "<td>" + esc(b.batch_id) + "</td></tr>";
+        }).join("");
+        $("#uim-import-history-body").innerHTML = rows
+          ? '<table class="mini-table"><thead><tr><th>Committed At</th><th class="num">Rows Written</th><th class="num">Rows Scanned</th><th class="num">Users Updated</th><th class="num">Users Missing</th><th>Seg Sync</th><th>Batch ID</th></tr></thead><tbody>' + rows + "</tbody></table>"
+          : '<div class="empty">No UIM imports yet.</div>';
+      })
+      .catch(function (e) {
+        if (e.message !== "unauthorized") {
+          statePanel("uim-import-history-body", "banner error", "Failed: " + esc(e.message));
+        }
+      });
+  }
+
   function loadUploadHistory() {
     statePanel("upload-history-body", "loading", "Loading upload history…");
     api("/api/admin/data/upload-history")
