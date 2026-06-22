@@ -44,6 +44,12 @@ try:
 except (TypeError, ValueError):
     OFFICIAL_CHANNEL_ID = -1002396761021
 
+_RAW_OFFICIAL_GROUP_ID = os.getenv("MAIN_GROUP_ID") or os.getenv("GROUP_ID")
+try:
+    OFFICIAL_GROUP_ID = int(_RAW_OFFICIAL_GROUP_ID) if _RAW_OFFICIAL_GROUP_ID not in (None, "") else -1002304653063
+except (TypeError, ValueError):
+    OFFICIAL_GROUP_ID = -1002304653063
+
 
 def now_utc() -> datetime:
     return datetime.now(timezone.utc)
@@ -119,6 +125,7 @@ def _registered_not_rewarded_filter() -> dict:
                     {"user_id": {"$exists": True, "$ne": None}},
                 ]
             },
+            {"last_checkin": {"$exists": True, "$ne": None}},  # was once active
             {"blocked": {"$ne": True}},
             {"banned": {"$ne": True}},
             {"is_banned": {"$ne": True}},
@@ -178,17 +185,7 @@ def campaign_summary(db) -> dict:
     }
 
 
-def check_official_channel_subscribed(uid: int, *, token: str | None = None, channel_id: int | None = None) -> tuple[bool, str]:
-    bot_token = token or BOT_TOKEN
-    chat_id = OFFICIAL_CHANNEL_ID if channel_id is None else channel_id
-    if not uid:
-        return False, "missing_uid"
-    if not bot_token:
-        return False, "missing_bot_token"
-    if chat_id is None:
-        return False, "missing_channel_id"
-    if requests is None:
-        return False, "missing_requests"
+def _check_single_chat(uid: int, chat_id: int, bot_token: str) -> tuple[bool, str]:
     try:
         resp = requests.get(
             f"https://api.telegram.org/bot{bot_token}/getChatMember",
@@ -202,6 +199,28 @@ def check_official_channel_subscribed(uid: int, *, token: str | None = None, cha
         return False, f"telegram_not_ok:{payload.get('description', 'unknown')}"
     status = (payload.get("result") or {}).get("status")
     return status in {"member", "administrator", "creator"}, f"status:{status}"
+
+
+def check_official_channel_subscribed(uid: int, *, token: str | None = None, channel_id: int | None = None) -> tuple[bool, str]:
+    """Return (True, reason) only if the user is a member of BOTH the official channel AND the group."""
+    bot_token = token or BOT_TOKEN
+    if not uid:
+        return False, "missing_uid"
+    if not bot_token:
+        return False, "missing_bot_token"
+    if requests is None:
+        return False, "missing_requests"
+
+    check_channel_id = OFFICIAL_CHANNEL_ID if channel_id is None else channel_id
+    in_channel, channel_reason = _check_single_chat(uid, check_channel_id, bot_token)
+    if not in_channel:
+        return False, f"channel:{channel_reason}"
+
+    in_group, group_reason = _check_single_chat(uid, OFFICIAL_GROUP_ID, bot_token)
+    if not in_group:
+        return False, f"group:{group_reason}"
+
+    return True, "channel:ok,group:ok"
 
 
 def _message_text() -> str:

@@ -119,9 +119,13 @@ class _Ledger(_Collection):
         return None
 
 
+_DEFAULT_LAST_CHECKIN = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+
 class _DB:
     def __init__(self, users):
-        self.users = _Collection(users)
+        seeded = [dict({"last_checkin": _DEFAULT_LAST_CHECKIN}, **u) for u in users]
+        self.users = _Collection(seeded)
         self.channel_reactivation_campaigns = _Collection()
         self.channel_reactivation_messages = _Collection()
         self.channel_reactivation_rewards = _Collection()
