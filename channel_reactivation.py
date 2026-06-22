@@ -202,7 +202,8 @@ def _check_single_chat(uid: int, chat_id: int, bot_token: str) -> tuple[bool, st
 
 
 def check_official_channel_subscribed(uid: int, *, token: str | None = None, channel_id: int | None = None) -> tuple[bool, str]:
-    """Return (True, reason) only if the user is a member of BOTH the official channel AND the group."""
+    """Return (True, reason) if the user is still in AT LEAST ONE of channel or group (not a target).
+    Return (False, reason) only if the user has left BOTH — meaning they are a reactivation target."""
     bot_token = token or BOT_TOKEN
     if not uid:
         return False, "missing_uid"
@@ -213,14 +214,19 @@ def check_official_channel_subscribed(uid: int, *, token: str | None = None, cha
 
     check_channel_id = OFFICIAL_CHANNEL_ID if channel_id is None else channel_id
     in_channel, channel_reason = _check_single_chat(uid, check_channel_id, bot_token)
-    if not in_channel:
-        return False, f"channel:{channel_reason}"
-
     in_group, group_reason = _check_single_chat(uid, OFFICIAL_GROUP_ID, bot_token)
-    if not in_group:
-        return False, f"group:{group_reason}"
 
-    return True, "channel:ok,group:ok"
+    if in_channel or in_group:
+        # Still present in at least one — not a reactivation target, skip
+        parts = []
+        if in_channel:
+            parts.append(f"channel:{channel_reason}")
+        if in_group:
+            parts.append(f"group:{group_reason}")
+        return True, ",".join(parts)
+
+    # Left both channel and group — eligible reactivation target
+    return False, f"channel:{channel_reason},group:{group_reason}"
 
 
 def _message_text() -> str:
