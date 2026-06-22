@@ -171,13 +171,34 @@ def create_or_update_journey(
         logger.info("[REACT_JOURNEY][CREATE] uid=%s campaign_id=%s", uid, campaign_id)
         return {"success": True, "code": "created", "journey": doc}
     except DuplicateKeyError:
+        reset = {
+            "verified_at": verified_ts,
+            "reactivated_at": verified_ts,
+            "status": "active",
+            "blocked_reason": None,
+            "updated_at": ts,
+            "tier1_completed_at": None,
+            "tier1_claimed_at": None,
+            "tier1_voucher_code": None,
+            "tier1_voucher_status": None,
+            "tier2_completed_at": None,
+            "tier2_claimed_at": None,
+            "tier2_voucher_code": None,
+            "tier2_voucher_status": None,
+            "tier3_completed_at": None,
+            "tier3_claimed_at": None,
+            "tier3_voucher_code": None,
+            "tier3_voucher_status": None,
+            "active_days_7": 0,
+            "active_days_30": 0,
+        }
         _journeys(db_ref).update_one(
             {"user_id": uid, "campaign_id": campaign_id},
-            {"$set": {"verified_at": verified_ts, "updated_at": ts, "status": "active", "blocked_reason": None}},
+            {"$set": reset},
         )
         existing = _journeys(db_ref).find_one({"user_id": uid, "campaign_id": campaign_id}) or {}
-        logger.info("[REACT_JOURNEY][SKIP] uid=%s campaign_id=%s reason=already_exists", uid, campaign_id)
-        return {"success": True, "code": "exists", "journey": existing}
+        logger.info("[REACT_JOURNEY][RESET] uid=%s campaign_id=%s reason=repeat_journey", uid, campaign_id)
+        return {"success": True, "code": "reset", "journey": existing}
 
 
 def upload_pool_codes(db_ref, pool_id: str, codes: list[str], *, metadata: dict | None = None, now_ref: datetime | None = None) -> dict:

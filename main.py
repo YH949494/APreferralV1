@@ -2272,28 +2272,6 @@ def _admin_error_response(err):
     return jsonify({"success": False, "message": msg}), code
 
 
-@admin_bp.get("/api/admin/channel-reactivation/summary")
-def api_admin_channel_reactivation_summary():
-    ok, err = require_admin_from_query()
-    if not ok:
-        return _admin_error_response(err)
-    base = channel_reactivation_summary(db)
-    try:
-        journey = journey_summary(db)
-        base.update({
-            "tier1_completed": journey.get("tier1_completed", 0),
-            "tier1_issued": journey.get("tier1_issued", 0),
-            "tier2_completed": journey.get("tier2_completed", 0),
-            "tier2_issued": journey.get("tier2_issued", 0),
-            "tier3_completed": journey.get("tier3_completed", 0),
-            "tier3_issued": journey.get("tier3_issued", 0),
-            "out_of_stock_by_tier": journey.get("out_of_stock_by_tier", {}),
-            "reactivation_pools": journey.get("pools", []),
-        })
-    except Exception:
-        logger.exception("[REACT_JOURNEY][ERROR] reason=summary_failed")
-    return jsonify(base)
-
 
 @admin_bp.post("/api/admin/channel-reactivation/start")
 def api_admin_channel_reactivation_start():

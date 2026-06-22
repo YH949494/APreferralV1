@@ -160,7 +160,7 @@ class ReactivationJourneyTests(unittest.TestCase):
         second = journey.create_or_update_journey(self.db, 10, verified_at=self.now, now_ref=self.now)
 
         self.assertEqual(first["code"], "created")
-        self.assertEqual(second["code"], "exists")
+        self.assertEqual(second["code"], "reset")
         self.assertEqual(self.db.reactivation_journey.count_documents({}), 1)
 
     def test_tier1_issued_once_after_first_checkin(self):
