@@ -217,7 +217,10 @@ def ensure_indexes() -> None:
             "[ADMIN_XP] Failed to create TTL index for admin_xp_cooldowns",
             exc_info=True,
         )
-    
+
+    safe_create_index(db_ref["uim_import_batches"], [("batch_id", ASCENDING)], name="batch_id_unique", unique=True)
+    safe_create_index(db_ref["uim_import_batches"], [("committed_at", -1)], name="committed_at_desc")
+
     _indexes_initialized = True
 
 
@@ -247,6 +250,7 @@ backend_segment_engine_runs_col = get_collection("backend_segment_engine_runs")
 # Also used by the Phase 6A backend segment engine for marketing field lookups.
 marketing_raw_data_col = get_collection("marketing_raw_data")
 marketing_upload_batches_col = get_collection("marketing_upload_batches")
+uim_import_batches_col = get_collection("uim_import_batches")
 
 monthly_xp_history_collection = get_collection("monthly_xp_history")
 

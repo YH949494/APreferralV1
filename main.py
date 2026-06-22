@@ -4453,6 +4453,48 @@ def dashboard_segment_roi():
     )
 
 
+import uim_import as _uim_import
+
+
+@admin_bp.post("/api/admin/data/uim-import/commit")
+def uim_import_commit():
+    ok, err = require_admin_from_query()
+    if not ok:
+        msg, code = err
+        return jsonify({"success": False, "message": msg}), code
+    body = request.get_json(silent=True) or {}
+    rows = body.get("rows")
+    if not rows or not isinstance(rows, list):
+        return jsonify({"success": False, "message": "rows required"}), 400
+    try:
+        result = _uim_import.commit_batch(rows)
+    except Exception as exc:
+        return jsonify({"success": False, "message": str(exc)}), 500
+    _uim_import.trigger_seg_sync_background(result["batch_id"])
+    return jsonify({"success": True, **result})
+
+
+@admin_bp.get("/api/admin/data/uim-import/history")
+def uim_import_history():
+    ok, err = require_admin_from_query()
+    if not ok:
+        msg, code = err
+        return jsonify({"success": False, "message": msg}), code
+    limit = request.args.get("limit", default=50, type=int) or 50
+    batches = _uim_import.get_import_history(limit=limit)
+    return jsonify({"success": True, "batches": batches})
+
+
+@admin_bp.post("/api/admin/data/uim-import/<batch_id>/resync")
+def uim_import_resync(batch_id: str):
+    ok, err = require_admin_from_query()
+    if not ok:
+        msg, code = err
+        return jsonify({"success": False, "message": msg}), code
+    result = _uim_import.run_seg_sync(batch_id)
+    return jsonify({"success": result.get("ok", False), **result})
+
+
 app.register_blueprint(admin_bp)
 
 # ---- Always return JSON on errors (prevents "Invalid JSON") ----
