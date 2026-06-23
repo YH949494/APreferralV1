@@ -5497,6 +5497,8 @@ ${referral}`;
                   const lockData = await lockRes.json();
                   if (lockData?.success) {
                     setStoredRegion(lockData.region || guessedRegion);
+                    // Refresh vouchers now that backend has the region saved.
+                    loadVouchers();
                   }
                 }
               } catch (geoErr) {

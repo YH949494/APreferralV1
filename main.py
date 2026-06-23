@@ -5009,9 +5009,7 @@ def api_checkin():
         if not user_id:
             return jsonify({"success": False, "error": "Missing user_id"}), 400
 
-        user = users_collection.find_one({"user_id": int(user_id)})
-        if not user:
-            return jsonify({"success": False, "error": "User not found"}), 400
+        user = users_collection.find_one({"user_id": int(user_id)}) or {}
 
         record_user_last_seen(
             db,
@@ -5021,7 +5019,7 @@ def api_checkin():
             session=request.headers.get("X-Session-Id") or request.cookies.get("session") or request.headers.get("User-Agent"),
         )
 
-        # ✅ Call check-in logic
+        # ✅ Call check-in logic — process_checkin upserts, region is optional
         result = asyncio.run(
             process_checkin(int(user_id), username, user.get("region"))
         )
