@@ -572,9 +572,8 @@ def build_share_rank_caption(rank, weekly_xp: int, title: str, highlight: str) -
         "My current rank 👇\n\n"
         f"{rank_line}\n\n"
         f"⚡ Weekly XP: {weekly_xp_value}\n"
-        f"🎖️ {title}\n"
         f"✨ {highlight}\n\n"
-        "What's yours? 👀"
+        "🎁 Weekly Top 10 Get Bonus Voucher Codes"
     )
 
 
