@@ -2918,7 +2918,7 @@
     }
 
     async function loadWelcomeProgress() {
-      if (!userId || !hasRegionSelected()) {
+      if (!userId) {
         hideWelcomeProgress();
         return;
       }
@@ -2943,31 +2943,21 @@
     })();
 
     function applyRegionGate(regionValue = null) {
-      const region = regionValue !== null ? regionValue : getStoredRegion();
-      const hasRegion = !!(region && String(region).trim());
+      // Region is optional — never block access to any section.
+      // The region-section is hidden by default and never shown automatically.
       const regionSection = document.getElementById("region-section");
-      const regionMessage = document.getElementById("region-message");
       const voucherSection = document.getElementById("voucher-section");
       const progressSection = document.getElementById("progress-section");
       const checkinSection = document.getElementById("checkin-section");
       const referralSection = document.getElementById("referral-section");
       const leaderboardSection = document.getElementById("leaderboard-section");
 
+      if (regionSection) regionSection.style.display = "none";
       if (voucherSection) voucherSection.style.display = "block";
       if (progressSection) progressSection.style.display = "block";
-
-      if (hasRegion) {
-        if (regionSection) regionSection.style.display = "none";
-        if (checkinSection) checkinSection.style.display = "block";
-        if (referralSection) referralSection.style.display = window.__didCheckinThisSession ? "block" : "none";
-        if (leaderboardSection) leaderboardSection.style.display = "none";
-      } else {
-        if (regionSection) regionSection.style.display = "block";
-        if (regionMessage) regionMessage.textContent = "Select your region to continue.";
-        if (checkinSection) checkinSection.style.display = "none";
-        if (referralSection) referralSection.style.display = "none";
-        if (leaderboardSection) leaderboardSection.style.display = "none";
-      }
+      if (checkinSection) checkinSection.style.display = "block";
+      if (referralSection) referralSection.style.display = window.__didCheckinThisSession ? "block" : "none";
+      if (leaderboardSection) leaderboardSection.style.display = "none";
 
       updateProgressJourney();
     }
@@ -3025,11 +3015,6 @@
     }
 
     async function checkIn() {
-      if (!hasRegionSelected()) {
-        tgAlert("❌ Please select and lock your region before check-in.");
-        return;
-      }
-
       try {
         const res = await fetch(`${API_BASE}/api/checkin`, {
           method: "POST",
@@ -3307,11 +3292,6 @@
     }
     
     async function getReferral() {
-      if (!hasRegionSelected()) {
-        tgAlert("❌ Please select and lock your region before generating a referral link.");
-        return;
-      }
-
       const display = document.getElementById("referral-link");
       const btn = document.getElementById("get-referral-btn");
       const originalLabel = btn ? btn.textContent : "";
@@ -3446,11 +3426,6 @@ Active players win more.`;
     }
 
     async function shareReferralViaTelegram() {
-      if (!hasRegionSelected()) {
-        tgAlert("❌ Please select and lock your region before sharing your referral link.");
-        return;
-      }
-
       if (!latestReferralLink) {
         await getReferral();
       }
@@ -4244,14 +4219,6 @@ Active players win more.`;
       const section = document.getElementById("voucher-section");
       const messageEl = document.getElementById("campaign-voucher-message");
       if (!section || !messageEl) return;
-      if (!hasRegionSelected()) {
-        section.style.display = "block";
-        messageEl.innerText = "Select region to view/claim rewards.";
-        resetVoucherButton();
-        renderCampaignDrops(null, [], null);
-        return;
-      }
-
       section.style.display = "block";
       messageEl.innerText = "Loading reward…";
       resetVoucherButton();
@@ -4448,11 +4415,6 @@ Active players win more.`;
         return;
       }
       
-      if (!hasRegionSelected()) {
-        tgAlert("❌ Please select and lock your region before claiming rewards.");
-        return;
-      }
-
       const dropId = claimBtn.getAttribute("data-dropid") || claimBtn.getAttribute("data-claim");
       if (!dropId) {
         console.log(`[WELCOME_UI][CLAIM_BUTTON_DISABLED] uid=${userId} reason=no_claim_drop_id completed_days=unknown`);
@@ -5517,37 +5479,33 @@ ${referral}`;
           loadVouchers();
         } else {
           setStoredRegion("");
+          // Attempt silent IP-based region detection in background; never block user.
           const alreadyAttempted = ssGet(AUTO_REGION_ATTEMPTED_KEY) === "1";
           if (!alreadyAttempted) {
             ssSet(AUTO_REGION_ATTEMPTED_KEY, "1");
-            try {
-              const guessRes = await fetch(`${API_BASE}/api/region-by-ip`);
-              const guessData = await guessRes.json();
-              const guessedRegion = guessData?.region || "";
-              if (guessedRegion) {
-                const lockRes = await fetch(`${API_BASE}/api/set-region/${userId}`, {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({ user_id: userId, region: guessedRegion })
-                });
-                const lockData = await lockRes.json();
-                if (lockData?.success) {
-                  setStoredRegion(lockData.region || guessedRegion);
-                  applyRegionGate(lockData.region || guessedRegion);
-                  loadWelcomeProgress();
-                  loadVouchers();
-                  return;
+            (async () => {
+              try {
+                const guessRes = await fetch(`${API_BASE}/api/region-by-ip`);
+                const guessData = await guessRes.json();
+                const guessedRegion = guessData?.region || "";
+                if (guessedRegion) {
+                  const lockRes = await fetch(`${API_BASE}/api/set-region/${userId}`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ user_id: userId, region: guessedRegion })
+                  });
+                  const lockData = await lockRes.json();
+                  if (lockData?.success) {
+                    setStoredRegion(lockData.region || guessedRegion);
+                  }
                 }
+              } catch (geoErr) {
+                console.warn("Auto region detection failed", geoErr);
               }
-            } catch (geoErr) {
-              console.warn("Auto region detection failed", geoErr);
-            }
+            })();
           }
-
-          document.getElementById("region-section").style.display = "block";
-          document.getElementById("region-message").innerText =
-            "⚠️ Please select your region (only once).";
           applyRegionGate("");
+          loadWelcomeProgress();
           loadVouchers();
         }
 
