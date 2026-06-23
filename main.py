@@ -4928,18 +4928,20 @@ async def process_checkin(user_id, username, region, update=None):
     bonus_xp = STREAK_MILESTONES.get(streak, 0)
 
     now_utc_ts = now_utc()
+    set_fields = {
+        "username": username,
+        "last_checkin": now_utc_ts,
+        "streak": streak,
+    }
+    if region:
+        set_fields["region"] = region
     _users_update_one(
         {"user_id": user_id},
         {
-            "$set": {
-                "username": username,
-                "region": region,
-                "last_checkin": now_utc_ts,
-                "streak": streak
-            },
+            "$set": set_fields,
             "$max": {"longest_streak": streak},
             "$setOnInsert": {
-                "status": "Normal",                
+                "status": "Normal",
             },
         },
         upsert=True,
@@ -4997,7 +4999,7 @@ def api_streak(user_id):
 # -------------------------------
 @app.route("/api/checkin", methods=["POST"])
 def api_checkin():
-    """Mini-app triggers this after region is set"""
+    """Mini-app triggers check-in (region is optional)"""
     try:
         data = request.get_json(silent=True) or {}
         user_id = data.get("user_id")
@@ -5005,10 +5007,8 @@ def api_checkin():
 
         if not user_id:
             return jsonify({"success": False, "error": "Missing user_id"}), 400
- 
-        user = users_collection.find_one({"user_id": int(user_id)})
-        if not user or "region" not in user:
-            return jsonify({"success": False, "error": "Region not set"}), 400
+
+        user = users_collection.find_one({"user_id": int(user_id)}) or {}
 
         record_user_last_seen(
             db,
@@ -5018,9 +5018,9 @@ def api_checkin():
             session=request.headers.get("X-Session-Id") or request.cookies.get("session") or request.headers.get("User-Agent"),
         )
 
-        # ✅ Call check-in logic
+        # ✅ Call check-in logic — process_checkin upserts, region is optional
         result = asyncio.run(
-            process_checkin(int(user_id), username, user["region"])
+            process_checkin(int(user_id), username, user.get("region"))
         )
 
         # ✅ Always calculate next reset time (12AM UTC+8)
