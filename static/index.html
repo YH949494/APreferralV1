@@ -1175,20 +1175,47 @@
     <!-- CAMPAIGN HERO CARD (#voucher-section) -->
     <div id="voucher-section" style="display:block;">
       <div class="ap-hero-bg">
-        <img src="redesign/hero-band.jpg" alt="" onerror="this.style.display='none'">
+        <img id="ap-hero-img" src="" alt="" onerror="this.style.display='none'" style="display:none;">
         <div class="ap-hero-bg-grad"></div>
       </div>
       <div class="ap-hero-inner">
-        <div class="ap-hero-top-row">
-          <span class="ap-hero-live-badge">
-            <span class="ap-hero-live-dot"></span>
-            CAMPAIGN REWARD
-          </span>
+
+        <!-- State A: active drop, eligible user -->
+        <div id="ap-hero-drop-state" style="display:none;">
+          <div class="ap-hero-top-row">
+            <span class="ap-hero-live-badge">
+              <span class="ap-hero-live-dot"></span>
+              LIVE DROP
+            </span>
+            <span id="ap-hero-countdown" style="font-size:11px;color:#a39e95;font-weight:600;letter-spacing:.3px;"></span>
+          </div>
+          <div class="ap-hero-kicker">LIMITED DROP</div>
+          <div id="ap-hero-title" style="font-family:var(--font-display);font-weight:800;font-size:20px;line-height:1.25;margin-bottom:4px;color:var(--text-main);"></div>
+          <div id="ap-hero-subtitle" style="font-size:13px;color:#cdbfb2;margin-bottom:12px;line-height:1.45;"></div>
+          <div id="ap-hero-stock" style="display:none;margin-bottom:10px;">
+            <div style="display:flex;align-items:center;justify-content:space-between;font-size:12px;color:#a39e95;margin-bottom:5px;">
+              <span>Vouchers remaining</span>
+              <span id="ap-hero-remaining" style="font-weight:700;color:#f2efe9;"></span>
+            </div>
+            <div style="height:5px;border-radius:99px;background:rgba(255,255,255,.08);overflow:hidden;">
+              <div id="ap-hero-stock-fill" style="height:100%;border-radius:99px;background:linear-gradient(90deg,var(--ap-orange),#f5b63f);width:0%;transition:width .4s ease;"></div>
+            </div>
+          </div>
+          <p id="campaign-voucher-message" style="display:none;"></p>
+          <button id="campaign-voucher-btn" type="button" class="btn btn-primary" style="display:none;width:100%;justify-content:center;"></button>
+          <div id="claim-error" role="status" aria-live="polite"></div>
+          <div id="campaign-voucher-list"></div>
         </div>
-        <p id="campaign-voucher-message">🎁 Surprise vouchers can appear anytime. Subscribe to our channel for the next drop.</p>
-        <button id="campaign-voucher-btn" type="button" class="btn btn-primary" style="display:none;width:100%;justify-content:center;"></button>
-        <div id="claim-error" role="status" aria-live="polite"></div>
-        <div id="campaign-voucher-list"></div>
+
+        <!-- State B: no active drop / ineligible user -->
+        <div id="ap-hero-nodrop-state" style="display:block;">
+          <div style="padding:4px 0 10px;">
+            <div style="font-family:var(--font-display);font-weight:700;font-size:15px;color:var(--text-main);margin-bottom:5px;">No active drop right now</div>
+            <div style="font-size:13px;color:#a39e95;line-height:1.5;margin-bottom:14px;">Subscribe to our official channel to be the first to know when the next drop goes live.</div>
+            <a href="https://t.me/advantplayofficial" target="_blank" rel="noopener" class="btn btn-primary" style="display:inline-flex;width:100%;justify-content:center;text-decoration:none;">Join Channel</a>
+          </div>
+        </div>
+
         <div id="campaign-bonus-voucher" style="display:none; margin-top:16px;">
           <h4 style="color:var(--status-success);font-size:14px;margin:0 0 6px;">🎉 Campaign Reward</h4>
           <p id="campaign-voucher-code" style="font-size:14px;color:var(--text-muted);">Coming soon…</p>
@@ -1455,6 +1482,11 @@
                     </select>
                     <span style="font-size:11px; color:#777;">Leave empty for all regions.</span>
                   </label>
+                </div>
+                <div style="margin-top:10px; display:flex; flex-wrap:wrap; gap:10px;">
+                  <input id="adm_hero_title" type="text" placeholder="Hero title (optional — defaults to campaign name)" style="flex:1 1 260px; padding:8px; border-radius:6px; border:1px solid #ccc;">
+                  <input id="adm_hero_subtitle" type="text" placeholder="Hero subtitle (optional)" style="flex:1 1 260px; padding:8px; border-radius:6px; border:1px solid #ccc;">
+                  <input id="adm_hero_image" type="text" placeholder="Hero image URL (optional)" style="flex:1 1 260px; padding:8px; border-radius:6px; border:1px solid #ccc;">
                 </div>
                 <div id="adm_personalised" style="margin-top:12px;">
                   <p style="margin:0 0 6px 0; font-size:13px; color:#555;">Paste <code>@username,code</code> per line or import CSV:</p>
@@ -2473,6 +2505,13 @@
       if (endsAtLocal) {
         payload.endsAtLocal = endsAtLocal;
       }
+
+      const heroTitle = (document.querySelector("#adm_hero_title")?.value || "").trim();
+      const heroSubtitle = (document.querySelector("#adm_hero_subtitle")?.value || "").trim();
+      const heroImage = (document.querySelector("#adm_hero_image")?.value || "").trim();
+      if (heroTitle) payload.hero_title = heroTitle;
+      if (heroSubtitle) payload.hero_subtitle = heroSubtitle;
+      if (heroImage) payload.hero_image = heroImage;
 
       if (!payload.name || !payload.startsAtLocal) {
         tgAlert("Name and Start Time are required."); return;
@@ -3849,48 +3888,95 @@ Active players win more.`;
       return card;
     }
 
+    let _heroCountdownTimer = null;
+
+    function startHeroCountdown(endsAt) {
+      clearInterval(_heroCountdownTimer);
+      const el = document.getElementById("ap-hero-countdown");
+      if (!el || !endsAt) return;
+      function tick() {
+        const diff = new Date(endsAt) - Date.now();
+        if (diff <= 0) { el.textContent = "Ending…"; clearInterval(_heroCountdownTimer); return; }
+        const h = Math.floor(diff / 3600000);
+        const m = Math.floor((diff % 3600000) / 60000);
+        const s = Math.floor((diff % 60000) / 1000);
+        el.textContent = h > 0
+          ? `${h}h ${String(m).padStart(2, "0")}m ${String(s).padStart(2, "0")}s left`
+          : `${String(m).padStart(2, "0")}m ${String(s).padStart(2, "0")}s left`;
+      }
+      tick();
+      _heroCountdownTimer = setInterval(tick, 1000);
+    }
+
     function renderCampaignDrops(primaryDrop, extraDrops = [], userRegion) {
+      const dropState = document.getElementById("ap-hero-drop-state");
+      const noDropState = document.getElementById("ap-hero-nodrop-state");
       const container = document.getElementById("campaign-voucher-list");
       if (!container) return;
       container.innerHTML = "";
 
       const drops = [];
       if (primaryDrop) drops.push(primaryDrop);
-      if (Array.isArray(extraDrops) && extraDrops.length) {
-        drops.push(...extraDrops);
-      }
+      if (Array.isArray(extraDrops) && extraDrops.length) drops.push(...extraDrops);
 
-      if (!drops.length) {
-        container.style.display = "none";
+      const liveDrops = drops.filter((drop) => {
+        const remaining = Number(drop?.visible_remaining ?? drop?.publicRemainingApprox ?? drop?.remainingApprox ?? 1);
+        const isEnded = drop?.isActive === false || (!Number.isNaN(remaining) && remaining <= 0 && !drop?.userClaimed);
+        return !isEnded || drop?.userClaimed;
+      });
+
+      const pastDrops = drops.filter((drop) => {
+        const remaining = Number(drop?.visible_remaining ?? drop?.publicRemainingApprox ?? drop?.remainingApprox ?? 1);
+        const isEnded = drop?.isActive === false || (!Number.isNaN(remaining) && remaining <= 0 && !drop?.userClaimed);
+        return isEnded && !drop?.userClaimed;
+      });
+
+      if (!liveDrops.length) {
+        // No active/eligible drop — show nodrop state
+        if (dropState) dropState.style.display = "none";
+        if (noDropState) noDropState.style.display = "block";
+        clearInterval(_heroCountdownTimer);
         return;
       }
 
-      const liveDrops = [];
-      const pastDrops = [];
-      drops.forEach((drop) => {
-        const remaining = Number(drop?.visible_remaining ?? drop?.publicRemainingApprox ?? drop?.remainingApprox ?? 1);
-        const isEnded = drop?.isActive === false || (!Number.isNaN(remaining) && remaining <= 0);
-        if (isEnded && !drop?.userClaimed) {
-          pastDrops.push(drop);
-        } else {
-          liveDrops.push(drop);
-        }
-      });
+      // Active drop: show drop state, hide nodrop state
+      if (noDropState) noDropState.style.display = "none";
+      if (dropState) dropState.style.display = "block";
 
-      container.style.display = "grid";
-      if (!liveDrops.length) {
-        const note = document.createElement("p");
-        note.className = "campaign-meta";
-        note.innerHTML = "🎁 Next drop coming soon.<br>Stay subscribed to channel to get them.";
-        container.appendChild(note);
+      const primary = liveDrops[0];
+      const heroTitle = document.getElementById("ap-hero-title");
+      const heroSub = document.getElementById("ap-hero-subtitle");
+      const heroImg = document.getElementById("ap-hero-img");
+      const heroStock = document.getElementById("ap-hero-stock");
+      const heroRemaining = document.getElementById("ap-hero-remaining");
+      const heroFill = document.getElementById("ap-hero-stock-fill");
+
+      if (heroTitle) heroTitle.textContent = primary.hero_title || primary.name || "Campaign Reward";
+      if (heroSub) heroSub.textContent = primary.hero_subtitle || "No deposit required · New & active players";
+
+      if (heroImg && primary.hero_image) {
+        heroImg.src = primary.hero_image;
+        heroImg.style.display = "";
+      } else if (heroImg) {
+        heroImg.style.display = "none";
       }
 
+      const remaining = primary.visible_remaining;
+      if (heroStock && remaining !== null && remaining !== undefined && !primary.userClaimed) {
+        heroRemaining.textContent = String(remaining);
+        heroFill.style.width = "100%"; // no total available on user side
+        heroStock.style.display = "block";
+      } else if (heroStock) {
+        heroStock.style.display = "none";
+      }
+
+      startHeroCountdown(primary.endsAt);
+
+      container.style.display = "grid";
       liveDrops.forEach((drop, index) => {
         const card = createCampaignCard(drop, userRegion);
         if (!card) return;
-        if (index === 0 && primaryDrop) {
-          card.dataset.primary = "true";
-        }
+        if (index === 0) card.dataset.primary = "true";
         container.appendChild(card);
       });
 
@@ -3899,22 +3985,18 @@ Active players win more.`;
         toggleBtn.type = "button";
         toggleBtn.className = "btn btn-ghost";
         toggleBtn.textContent = "View past drops";
-
         const pastWrap = document.createElement("div");
         pastWrap.style.display = "none";
         pastWrap.style.marginTop = "8px";
-
         pastDrops.forEach((drop) => {
           const card = createCampaignCard(drop, userRegion);
           if (card) pastWrap.appendChild(card);
         });
-
         toggleBtn.addEventListener("click", () => {
           const isHidden = pastWrap.style.display === "none";
           pastWrap.style.display = isHidden ? "grid" : "none";
           toggleBtn.textContent = isHidden ? "Hide past drops" : "View past drops";
         });
-
         container.appendChild(toggleBtn);
         container.appendChild(pastWrap);
       }

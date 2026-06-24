@@ -4015,6 +4015,9 @@ def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None
             "type": dtype,
             "audience": audience_type,
             "_priority": priority,
+            "hero_title": d.get("hero_title") or None,
+            "hero_subtitle": d.get("hero_subtitle") or None,
+            "hero_image": d.get("hero_image") or None,
         }
 
         if dtype == PERSONALISED_TYPE_CANONICAL:
@@ -6299,6 +6302,10 @@ def admin_create_drop():
     if audience_type:
         audience_clean["type"] = audience_type     
       
+    hero_title = (data.get("hero_title") or "").strip() or None
+    hero_subtitle = (data.get("hero_subtitle") or "").strip() or None
+    hero_image = (data.get("hero_image") or "").strip() or None
+
     drop_doc = {
         "name": name,
         "type": dtype,
@@ -6308,7 +6315,13 @@ def admin_create_drop():
         "visibilityMode": "stacked",
         "status": status
     }
- 
+    if hero_title:
+        drop_doc["hero_title"] = hero_title
+    if hero_subtitle:
+        drop_doc["hero_subtitle"] = hero_subtitle
+    if hero_image:
+        drop_doc["hero_image"] = hero_image
+
     if data.get("eligibility") is not None or clean_eligibility.get("mode") != "public" or clean_eligibility.get("allow"):
         drop_doc["eligibility"] = clean_eligibility
 
@@ -6488,7 +6501,7 @@ def _admin_drop_summary(doc: dict, *, ref=None, skip_expired=False):
             "codesFreeMy": free_my,
         })
 
-    for key in ("whitelistUsernames", "visibilityMode"):
+    for key in ("whitelistUsernames", "visibilityMode", "hero_title", "hero_subtitle", "hero_image"):
         if key in doc:
             summary[key] = doc[key]
 
