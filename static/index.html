@@ -1228,6 +1228,25 @@
       </div>
     </div>
 
+    <!-- ACTIVE CAMPAIGNS (extra eligible drops, collapsible) -->
+    <div id="ap-campaigns-section" style="display:none;margin-bottom:14px;">
+      <button id="ap-campaigns-toggle" type="button"
+        style="width:100%;display:flex;align-items:center;justify-content:space-between;
+               background:var(--bg-card);border:1px solid var(--border-light);border-radius:16px;
+               padding:13px 15px;cursor:pointer;-webkit-tap-highlight-color:transparent;
+               font-family:var(--font-body);color:var(--text-main);font-size:14px;font-weight:700;
+               transition:border-color .15s;"
+        aria-expanded="false">
+        <span id="ap-campaigns-toggle-label">🔥 Active Campaigns</span>
+        <svg id="ap-campaigns-chevron" width="16" height="16" viewBox="0 0 24 24" fill="none"
+             stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"
+             style="transition:transform .2s;flex:none;">
+          <path d="m6 9 6 6 6-6"/>
+        </svg>
+      </button>
+      <div id="ap-campaigns-list" style="display:none;margin-top:9px;gap:10px;flex-direction:column;"></div>
+    </div>
+
     <!-- IDENTITY MODAL -->
     <div id="identity-modal" class="identity-modal">
       <div class="identity-modal-body">
@@ -3999,6 +4018,50 @@ Active players win more.`;
         });
         container.appendChild(toggleBtn);
         container.appendChild(pastWrap);
+      }
+
+      // Populate "Active Campaigns" collapsible section with extra eligible drops
+      renderActiveCampaignsSection(extraDrops, userRegion);
+    }
+
+    function renderActiveCampaignsSection(extraDrops, userRegion) {
+      const section = document.getElementById("ap-campaigns-section");
+      const list = document.getElementById("ap-campaigns-list");
+      const label = document.getElementById("ap-campaigns-toggle-label");
+      const toggle = document.getElementById("ap-campaigns-toggle");
+      const chevron = document.getElementById("ap-campaigns-chevron");
+      if (!section || !list) return;
+
+      const eligible = (Array.isArray(extraDrops) ? extraDrops : []).filter((drop) => {
+        if (!drop) return false;
+        const remaining = Number(drop?.visible_remaining ?? drop?.publicRemainingApprox ?? drop?.remainingApprox ?? 1);
+        const isEnded = drop?.isActive === false || (!Number.isNaN(remaining) && remaining <= 0 && !drop?.userClaimed);
+        return !isEnded || drop?.userClaimed;
+      });
+
+      if (!eligible.length) {
+        section.style.display = "none";
+        return;
+      }
+
+      section.style.display = "block";
+      if (label) label.textContent = `🔥 Active Campaigns (${eligible.length})`;
+
+      list.innerHTML = "";
+      eligible.forEach((drop) => {
+        const card = createCampaignCard(drop, userRegion);
+        if (card) list.appendChild(card);
+      });
+
+      // Wire toggle only once
+      if (!toggle._apWired) {
+        toggle._apWired = true;
+        toggle.addEventListener("click", () => {
+          const isOpen = list.style.display !== "none";
+          list.style.display = isOpen ? "none" : "flex";
+          toggle.setAttribute("aria-expanded", String(!isOpen));
+          if (chevron) chevron.style.transform = isOpen ? "" : "rotate(180deg)";
+        });
       }
     }
 
