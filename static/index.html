@@ -1255,9 +1255,190 @@
     #region-section.region-overlay .region-modal-inner #region-select,
     #region-section.region-overlay .region-modal-inner .btn { width: 100%; }
     #region-section.region-overlay .region-modal-inner .btn { margin-top: 10px; }
+
+    /* ── DASHBOARD v3 ENHANCEMENTS ── */
+
+    .app-header {
+      border-bottom: 1px solid rgba(255, 94, 0, 0.14);
+      padding-bottom: 12px;
+    }
+
+    .section-kicker {
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.9px;
+      text-transform: uppercase;
+      color: var(--ap-orange-strong);
+      margin-bottom: 4px;
+      opacity: 0.9;
+    }
+
+    #campaign-voucher-btn {
+      width: 100%;
+      margin-top: 10px;
+      font-size: 15px;
+      font-weight: 700;
+      padding: 14px;
+    }
+
+    #checkin-section .btn-primary {
+      width: 100%;
+      justify-content: center;
+    }
+
+    .journey-step-v2 {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 12px;
+      background: rgba(255, 255, 255, 0.03);
+      border: 1px solid var(--border-light);
+      border-radius: 10px;
+      font-size: 13px;
+      transition: border-color 0.15s;
+    }
+    .journey-step-v2.active { border-color: rgba(255, 94, 0, 0.3); }
+    .js-circle {
+      width: 26px; height: 26px;
+      border-radius: 50%;
+      background: rgba(255, 94, 0, 0.12);
+      border: 1px solid rgba(255, 94, 0, 0.25);
+      color: var(--ap-orange);
+      font-size: 11px; font-weight: 700;
+      display: flex; align-items: center; justify-content: center;
+      flex-shrink: 0;
+    }
+    .js-circle.done {
+      background: rgba(79, 216, 138, 0.12);
+      border-color: rgba(79, 216, 138, 0.25);
+      color: var(--status-success);
+    }
+    .js-text { flex: 1; color: var(--text-main); }
+
+    .referral-share-row {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 8px;
+    }
+    .referral-share-row .btn { flex: 1; justify-content: center; }
+
+    .progress-hero-v2 {
+      background: linear-gradient(135deg, rgba(255, 94, 0, 0.14), rgba(255, 94, 0, 0.04));
+      border: 1px solid rgba(255, 94, 0, 0.22);
+      border-radius: var(--radius-md);
+      padding: 14px;
+      margin-bottom: 12px;
+    }
+    .progress-hero-v2 .journey-kicker {
+      font-size: 10px; font-weight: 700; letter-spacing: 0.8px;
+      text-transform: uppercase; color: #ffd6bf; margin-bottom: 4px;
+    }
+    .progress-hero-v2 .journey-main {
+      font-size: 15px; font-weight: 700; color: var(--text-main); line-height: 1.35; margin-bottom: 4px;
+    }
+    .progress-hero-v2 .journey-sub { font-size: 12px; color: var(--text-muted); }
+
+    .dash-status-strip {
+      display: flex;
+      gap: 8px;
+      padding: 10px 0 4px;
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
+      scrollbar-width: none;
+    }
+    .dash-status-strip::-webkit-scrollbar { display: none; }
+    .dash-status-pill {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      background: var(--bg-card);
+      border: 1px solid var(--border-light);
+      border-radius: 99px;
+      padding: 5px 12px;
+      font-size: 12px;
+      color: var(--text-muted);
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+    .dash-status-pill .ds-val { color: var(--text-main); font-weight: 600; }
+
+    .checkin-card-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 10px;
+    }
+    .checkin-card-top h3 { margin-bottom: 0; }
+    .streak-inline-badge {
+      background: rgba(255, 94, 0, 0.12);
+      border: 1px solid rgba(255, 94, 0, 0.22);
+      border-radius: 99px;
+      padding: 3px 10px;
+      font-size: 11px;
+      font-weight: 700;
+      color: var(--ap-orange);
+    }
+
+    .game-label-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      background: rgba(255, 94, 0, 0.1);
+      border: 1px solid rgba(255, 94, 0, 0.2);
+      border-radius: 99px;
+      padding: 3px 10px;
+      font-size: 11px;
+      color: var(--ap-orange);
+      font-weight: 600;
+      margin-bottom: 8px;
+    }
+
+    #referral-link {
+      font-size: 13px;
+      word-break: break-all;
+      background: rgba(255, 255, 255, 0.03);
+      border: 1px solid var(--border-light);
+      border-radius: 8px;
+      padding: 8px 10px;
+      margin: 8px 0;
+    }
+
+    .sec-card { transition: border-color 0.15s, transform 0.1s, background 0.15s; }
+    .sec-card:hover { background: var(--bg-card-alt); }
+
+    /* Voucher section featured-top border glow */
+    #voucher-section {
+      border-color: rgba(255, 94, 0, 0.22);
+      background: linear-gradient(180deg, rgba(255, 94, 0, 0.07), rgba(255,255,255,0.01)), var(--bg-card);
+    }
+
+    /* Progress section featured */
+    #progress-section {
+      border-color: rgba(255, 94, 0, 0.18);
+    }
+
+    /* Core grid cards — equal height feel */
+    .core-grid > .section {
+      display: flex;
+      flex-direction: column;
+    }
+    #checkin-section .checkin-status-card { margin-top: auto; }
+
+    /* Leaderboard section spacing */
+    #leaderboard-section { margin-top: 0; }
+
+    /* Welcome progress card spacing */
+    #welcome-progress-section .welcome-progress-card { margin-top: 0; }
   </style>
 </head>
 <body>
+
+  <!-- XP toast (shown after successful check-in) -->
+  <div id="xp-toast" role="status" aria-live="polite">
+    <div class="xp-amount" id="xp-toast-amount">+0 XP</div>
+    <div class="xp-label"  id="xp-toast-label">Check-in reward</div>
+    <div class="xp-streak-badge" id="xp-toast-streak" style="display:none;"></div>
+  </div>
 
   <!-- ADVANTPLAY wordmark header -->
   <div class="app-header">
@@ -1273,11 +1454,20 @@
     </div>
   </div>
 
-  <!-- XP toast (shown after successful check-in) -->
-  <div id="xp-toast" role="status" aria-live="polite">
-    <div class="xp-amount" id="xp-toast-amount">+0 XP</div>
-    <div class="xp-label"  id="xp-toast-label">Check-in reward</div>
-    <div class="xp-streak-badge" id="xp-toast-streak" style="display:none;"></div>
+  <!-- Dashboard status strip — streak & XP snapshot -->
+  <div class="dash-status-strip">
+    <div class="dash-status-pill">
+      <span>🔥</span>
+      <span id="ds-streak-label" class="ds-val">Streak</span>
+    </div>
+    <div class="dash-status-pill">
+      <span>⭐</span>
+      <span id="ds-xp-label" class="ds-val">Weekly XP</span>
+    </div>
+    <div class="dash-status-pill">
+      <span>🏅</span>
+      <span id="ds-rank-label" class="ds-val">Rank</span>
+    </div>
   </div>
 
   <!-- Region — first-timer modal overlay only -->
@@ -1301,6 +1491,7 @@
 
   <!-- 1. Campaign Rewards — always at top -->
   <div class="section" id="voucher-section" style="display: block;">
+    <div class="section-kicker">Active Campaign</div>
     <div class="section-header">
       <h3>🎟️ Campaign Rewards</h3>
       <span class="badge">HOT</span>
@@ -1353,10 +1544,14 @@
   <div class="core-grid">
 
     <div class="section" id="checkin-section">
-      <h3>✅ Daily Check-in</h3>
-      <button class="btn btn-primary" onclick="checkIn()">Check In</button>
-      <p id="checkin-result"></p>
-      <p id="checkin-timer" style="color: gray;"></p>
+      <div class="section-kicker">Daily</div>
+      <div class="checkin-card-top">
+        <h3>✅ Check-in</h3>
+        <span class="streak-inline-badge" id="ds-streak-badge" style="display:none;">🔥 0d</span>
+      </div>
+      <button class="btn btn-primary" onclick="checkIn()">Check In Now</button>
+      <p id="checkin-result" style="margin-top:8px; font-size:13px;"></p>
+      <p id="checkin-timer" style="color: gray; font-size:12px;"></p>
       <div id="checkin-streak-card" class="checkin-status-card" style="display:none;">
         <div id="checkin-streak-value">Current streak: 0 days</div>
         <div id="checkin-freeze-value" style="display:none;">Freeze tokens: 0 / 3</div>
@@ -1365,20 +1560,21 @@
     </div>
 
     <div class="section" id="daily-game-section" style="display: block;">
-      <div class="section-header">
-        <h3>🎰 Today’s Lucky Game</h3>
-      </div>
-      <p class="section-subtext">Refreshes daily</p>
-      <div id="daily-game-content" style="font-size:14px; line-height:1.4;">Loading today’s recommendation…</div>
-      <p style="margin-top:8px; font-size:12px; color:#777;">Daily recommendation only</p>
+      <div class="section-kicker">Today’s Pick</div>
+      <h3>🎰 Lucky Game</h3>
+      <div id="daily-game-content" style="font-size:13px; line-height:1.4;">Loading…</div>
+      <p style="margin-top:6px; font-size:11px; color:#777;">Daily recommendation only</p>
     </div>
 
     <div class="section" id="referral-section">
+      <div class="section-kicker">Earn More XP</div>
       <h3>🔗 Invite Friends & Unlock Rewards</h3>
       <div class="referral-cta-group">
         <button id="get-referral-btn" class="btn btn-primary" onclick="getReferral()">Invite Friends / Get Referral Link</button>
-        <button id="share-referral-btn" class="btn btn-ghost" onclick="shareReferralViaTelegram()" aria-label="Share referral link via Telegram">📤 Share via Telegram</button>
-        <button id="copy-referral-btn" class="btn btn-ghost" onclick="copyReferral()" aria-label="Copy referral link to clipboard">📋 Copy to clipboard</button>
+        <div class="referral-share-row">
+          <button id="share-referral-btn" class="btn btn-ghost" onclick="shareReferralViaTelegram()" aria-label="Share referral link via Telegram">📤 Share</button>
+          <button id="copy-referral-btn" class="btn btn-ghost" onclick="copyReferral()" aria-label="Copy referral link to clipboard">📋 Copy</button>
+        </div>
       </div>
       <p id="referral-link">Click the button to get your link</p>
       <div class="referral-progress-card" aria-live="polite">
@@ -1402,6 +1598,7 @@
 
   <div class="section" id="welcome-progress-section" style="display: none;">
     <div class="welcome-progress-card" aria-live="polite">
+      <div class="section-kicker">New Member</div>
       <h3 class="welcome-progress-title" id="welcome-progress-title">🎁 Welcome Voucher Progress</h3>
       <div class="welcome-progress-bar">
         <div class="welcome-progress-fill" id="welcome-progress-fill"></div>
@@ -1428,22 +1625,33 @@
 
   <!-- 3. Rewards Journey progress guide -->
   <div class="section" id="progress-section" style="display: block;">
+    <div class="section-kicker">Your Path</div>
     <div class="section-header">
-      <h3>🧭 Your Rewards Journey</h3>
+      <h3>🧭 Rewards Journey</h3>
     </div>
-    <div class="progress-hero">
+    <div class="progress-hero-v2">
       <div class="journey-kicker">Current focus</div>
       <div id="journey-main-copy" class="journey-main">Complete check-in and move toward your next reward.</div>
       <div id="journey-sub-copy" class="journey-sub">Your reward progress updates as referral activity comes in.</div>
     </div>
     <div class="journey-steps">
-      <div id="progress-step-1" class="journey-step">1) ✅ Check-in</div>
-      <div id="progress-step-2" class="journey-step" style="opacity:0.6;">2) 🔗 Invite friends</div>
-      <div id="progress-step-3" class="journey-step" style="opacity:0.6;">3) 🎁 Claim vouchers (when available)</div>
+      <div id="progress-step-1" class="journey-step-v2 active">
+        <div class="js-circle" id="js-circle-1">1</div>
+        <div class="js-text">✅ Daily Check-in — earn XP every day</div>
+      </div>
+      <div id="progress-step-2" class="journey-step-v2" style="opacity:0.65;">
+        <div class="js-circle" id="js-circle-2">2</div>
+        <div class="js-text">🔗 Invite friends — unlock bonus XP</div>
+      </div>
+      <div id="progress-step-3" class="journey-step-v2" style="opacity:0.5;">
+        <div class="js-circle" id="js-circle-3">3</div>
+        <div class="js-text">🎁 Claim vouchers — when available</div>
+      </div>
     </div>
   </div>
 
   <!-- 4. Secondary quick-action grid -->
+  <div class="section-kicker" style="margin: 14px 0 6px;">Quick Access</div>
   <div class="secondary-grid">
     <a href="#" class="sec-card" onclick="event.preventDefault(); toggleLeaderboardSection();">
       <span class="sec-icon">🏆</span>
@@ -1461,6 +1669,7 @@
 
   <!-- Leaderboard — toggled by secondary grid card -->
   <div class="section" id="leaderboard-section" style="display:none;">
+    <div class="section-kicker">This Week</div>
     <h3>🏆 Weekly Leaderboard</h3>
     <button class="btn btn-ghost" onclick="loadLeaderboard({ forceRefresh: true })">View Leaderboard</button>
     <div style="display:flex;gap:8px;align-items:center;font-size:12px;color:#666;margin-top:6px;flex-wrap:wrap;">
@@ -2810,15 +3019,22 @@
       const heroSub = document.getElementById("journey-sub-copy");
       if (!step1 || !step2 || !step3) return;
       if (window.__didCheckinThisSession) {
-        step1.style.opacity = "0.8";
+        step1.style.opacity = "1";
         step2.style.opacity = "1";
-        step3.style.opacity = "0.6";
+        step3.style.opacity = "0.65";
+        step1.classList.remove("active");
+        step2.classList.add("active");
+        // Mark step 1 circle as done
+        const c1 = document.getElementById("js-circle-1");
+        if (c1) { c1.classList.add("done"); c1.textContent = "✓"; }
         if (heroMain) heroMain.textContent = "Great start. Share your referral link to unlock your next reward.";
         if (heroSub) heroSub.textContent = "Referral progress and remaining steps are shown below.";
       } else {
         step1.style.opacity = "1";
-        step2.style.opacity = "0.6";
-        step3.style.opacity = "0.6";
+        step2.style.opacity = "0.65";
+        step3.style.opacity = "0.5";
+        step1.classList.add("active");
+        step2.classList.remove("active");
         if (heroMain) heroMain.textContent = "Complete check-in and move toward your next reward.";
         if (heroSub) heroSub.textContent = "After check-in, invite friends to progress to the next reward tier.";
       }
@@ -5826,6 +6042,23 @@ ${referral}`;
           chipEl.style.display = "inline-flex";
           chipEl.classList.add("identity-entry");
           if (hintChipEl) hintChipEl.style.display = "block";
+        }
+
+        // Populate dashboard status strip
+        const dsStreak = document.getElementById("ds-streak-label");
+        const dsXp = document.getElementById("ds-xp-label");
+        const dsRank = document.getElementById("ds-rank-label");
+        const dsBadge = document.getElementById("ds-streak-badge");
+        const streakDaysVal = Number(data.streak_days || 0);
+        if (dsStreak) dsStreak.textContent = streakDaysVal > 0 ? `${streakDaysVal}d streak` : "Start streak";
+        if (dsXp) dsXp.textContent = `${Number(data.weekly_xp || 0)} XP`;
+        const weeklyRankVal = Number(data.weekly_rank || 0);
+        if (dsRank) dsRank.textContent = weeklyRankVal > 0 ? `#${weeklyRankVal} this week` : "Not ranked";
+        if (dsBadge) {
+          if (streakDaysVal > 0) {
+            dsBadge.textContent = `🔥 ${streakDaysVal}d`;
+            dsBadge.style.display = "inline-block";
+          }
         }
       } catch (_) {}
     }
