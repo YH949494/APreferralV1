@@ -573,7 +573,7 @@ def build_share_rank_caption(rank, weekly_xp: int, title: str, highlight: str) -
         f"{rank_line}\n\n"
         f"⚡ Weekly XP: {weekly_xp_value}\n"
         f"✨ {highlight}\n\n"
-        "🎁 Weekly Top 10 Get Bonus Voucher Codes"
+        "🎁 Subscribe to @AdvantPlayOfficial for Voucher Drops"
     )
 
 
