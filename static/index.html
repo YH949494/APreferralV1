@@ -718,6 +718,14 @@
       color: var(--text-main);
       box-shadow: none;
     }
+    .ap-step-btn-done {
+      background: rgba(255,255,255,.08);
+      border: 1px solid rgba(255,255,255,.1);
+      color: var(--text-muted);
+      box-shadow: none;
+      cursor: default;
+      opacity: 0.7;
+    }
     .ap-ref-bars {
       display: flex;
       gap: 5px;
@@ -2772,6 +2780,70 @@
         if (heroMain) heroMain.textContent = "Complete check-in and move toward your next reward.";
         if (heroSub) heroSub.textContent = "After check-in, invite friends to progress to the next reward tier.";
       }
+      updateJourneyUI();
+    }
+
+    function updateJourneyUI() {
+      const step1Done = !!window.__didCheckinThisSession;
+      const step2Done = !!(window.__referralsDone);
+      const step3Done = !!(window.__didClaimDrop);
+
+      const doneCount = [step1Done, step2Done, step3Done].filter(Boolean).length;
+
+      // Update progress counter
+      const doneLabel = document.getElementById("ap-journey-done-label");
+      if (doneLabel) doneLabel.textContent = `${doneCount} of 3 done`;
+
+      // Update step dots
+      const dot1 = document.getElementById("ap-step-1-dot");
+      const dot2 = document.getElementById("ap-step-2-dot");
+      const dot3 = document.getElementById("ap-step-3-dot");
+
+      function setDot(el, state) {
+        if (!el) return;
+        el.classList.remove("active", "done");
+        if (state === "done") {
+          el.classList.add("done");
+          el.textContent = "✓";
+        } else if (state === "active") {
+          el.classList.add("active");
+          el.textContent = el.id.replace("ap-step-", "").replace("-dot", "");
+        } else {
+          el.textContent = el.id.replace("ap-step-", "").replace("-dot", "");
+        }
+      }
+
+      // Determine active step: first incomplete step
+      const step1Active = !step1Done;
+      const step2Active = step1Done && !step2Done;
+      const step3Active = step1Done && step2Done && !step3Done;
+
+      setDot(dot1, step1Done ? "done" : step1Active ? "active" : "default");
+      setDot(dot2, step2Done ? "done" : step2Active ? "active" : "default");
+      setDot(dot3, step3Done ? "done" : step3Active ? "active" : "default");
+
+      // Update check-in button state
+      const checkinBtn = document.getElementById("ap-checkin-btn");
+      if (checkinBtn) {
+        if (step1Done) {
+          checkinBtn.textContent = "Checked in";
+          checkinBtn.disabled = true;
+          checkinBtn.classList.remove("ap-step-btn-ghost");
+          checkinBtn.classList.add("ap-step-btn-done");
+          checkinBtn.onclick = null;
+        } else {
+          checkinBtn.textContent = "Check in";
+          checkinBtn.disabled = false;
+          checkinBtn.classList.remove("ap-step-btn-done");
+          checkinBtn.onclick = checkIn;
+        }
+      }
+
+      // Update step 1 title to show checkmark prefix when done
+      const step1Title = document.getElementById("progress-step-1");
+      if (step1Title) {
+        step1Title.style.opacity = step1Done ? "0.7" : "1";
+      }
     }
 
     function hideWelcomeProgress() {
@@ -2993,6 +3065,7 @@
 
         if (data.success) {
           window.__didCheckinThisSession = true;
+          updateJourneyUI();
           applyRegionGate(getStoredRegion());
           const referralSection = document.getElementById("referral-section");
           if (referralSection) {
@@ -3024,6 +3097,7 @@
         if (isCheckedInToday(data)) {
           window.__didCheckinThisSession = true;
           applyRegionGate(getStoredRegion());
+          updateJourneyUI();
         }
 
         if (data.message && resultEl) {
@@ -3112,6 +3186,8 @@
       );
       const safeCount = Number.isFinite(progressCount) ? Math.max(0, progressCount) : 0;
       countEl.textContent = `${safeCount} / 3`;
+      window.__referralsDone = safeCount >= 3;
+      updateJourneyUI();
 
       const remainingRaw = Number(
         data?.remaining_referrals ?? data?.remaining ?? Math.max(0, 3 - safeCount)
@@ -4604,6 +4680,8 @@ Active players win more.`;
             }
           }
 
+          window.__didClaimDrop = true;
+          updateJourneyUI();
           ensureCodeBlock(claimBtn, codeText);
           if (claimBtn.id === "campaign-voucher-btn") {
             const messageEl = document.getElementById("campaign-voucher-message");
