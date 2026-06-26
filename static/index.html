@@ -4067,12 +4067,11 @@ Active players win more.`;
       startHeroCountdown(primary.endsAt);
 
       container.style.display = "grid";
-      liveDrops.forEach((drop, index) => {
-        const card = createCampaignCard(drop, userRegion);
-        if (!card) return;
-        if (index === 0) card.dataset.primary = "true";
-        container.appendChild(card);
-      });
+      const primaryCard = createCampaignCard(primary, userRegion);
+      if (primaryCard) {
+        primaryCard.dataset.primary = "true";
+        container.appendChild(primaryCard);
+      }
 
       if (pastDrops.length) {
         const toggleBtn = document.createElement("button");
@@ -4120,7 +4119,7 @@ Active players win more.`;
       }
 
       section.style.display = "block";
-      if (label) label.textContent = `🔥 Active Campaigns (${eligible.length})`;
+      if (label) label.textContent = `🔥 Active Campaigns (${eligible.length} more)`;
 
       list.innerHTML = "";
       eligible.forEach((drop) => {
