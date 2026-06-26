@@ -5,6 +5,7 @@
   <title>AdvantPlay Rewards</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <script src="/static/i18n.js"></script>
   <script>
     window.UI_VERSION = new URLSearchParams(window.location.search).get("v") || "unknown";
     console.info("UI_VERSION", window.UI_VERSION);
@@ -1119,40 +1120,40 @@
         <span class="ap-wordmark"><span class="wm-advant">ADVANT</span><span class="wm-play">PLAY</span></span>
       </div>
       <div class="ap-region-card">
-        <div class="ap-region-title">Welcome to AdvantPlay</div>
-        <div class="ap-region-sub">Choose your region to continue. You won't be asked again.</div>
+        <div class="ap-region-title" data-i18n="region_welcome">Welcome to AdvantPlay</div>
+        <div class="ap-region-sub" data-i18n="region_sub">Choose your region to continue. You won't be asked again.</div>
 
         <div class="ap-region-option" onclick="apPickRegion('Malaysia', this)">
           <span class="ap-region-code">MY</span>
-          <span class="ap-region-option-name">Malaysia</span>
+          <span class="ap-region-option-name" data-i18n="region_malaysia">Malaysia</span>
           <span class="ap-region-check"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg></span>
           <div class="ap-region-option-ring"></div>
         </div>
         <div class="ap-region-option" onclick="apPickRegion('Thailand', this)">
           <span class="ap-region-code">TH</span>
-          <span class="ap-region-option-name">Thailand</span>
+          <span class="ap-region-option-name" data-i18n="region_thailand">Thailand</span>
           <span class="ap-region-check"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg></span>
           <div class="ap-region-option-ring"></div>
         </div>
         <div class="ap-region-option" onclick="apPickRegion('Indonesia', this)">
           <span class="ap-region-code">ID</span>
-          <span class="ap-region-option-name">Indonesia</span>
+          <span class="ap-region-option-name" data-i18n="region_indonesia">Indonesia</span>
           <span class="ap-region-check"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg></span>
           <div class="ap-region-option-ring"></div>
         </div>
         <div class="ap-region-option" onclick="apPickRegion('Other', this)" style="margin-bottom:16px;">
           <span class="ap-region-code" style="color:#a39e95;"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18 14 14 0 0 1 0-18"/></svg></span>
-          <span class="ap-region-option-name">Other region</span>
+          <span class="ap-region-option-name" data-i18n="region_other">Other region</span>
           <span class="ap-region-check"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg></span>
           <div class="ap-region-option-ring"></div>
         </div>
 
-        <button id="ap-region-confirm-btn" class="ap-region-confirm-btn" onclick="apConfirmRegion()" disabled>
+        <button id="ap-region-confirm-btn" class="ap-region-confirm-btn" onclick="apConfirmRegion()" disabled data-i18n="region_select_btn">
           Select a region
         </button>
         <div id="region-message" style="font-size:12px;color:#a39e95;margin-top:8px;text-align:center;"></div>
       </div>
-      <div class="ap-region-foot">Your region tailors vouchers &amp; events. Asked once.</div>
+      <div class="ap-region-foot" data-i18n="region_foot">Your region tailors vouchers &amp; events. Asked once.</div>
     </div>
     <!-- Hidden select required by setRegion() -->
     <select id="region-select" style="display:none;" aria-label="Select your region">
@@ -1178,6 +1179,12 @@
     <div class="ap-header">
       <div class="ap-wordmark"><span class="wm-advant">ADVANT</span><span class="wm-play">PLAY</span></div>
       <div class="ap-header-right">
+        <!-- Language selector -->
+        <div id="ap-lang-switcher" aria-label="Language">
+          <button class="ap-lang-btn" data-lang="en" onclick="setLang('en')">EN</button>
+          <button class="ap-lang-btn" data-lang="th" onclick="setLang('th')">TH</button>
+          <button class="ap-lang-btn" data-lang="id" onclick="setLang('id')">ID</button>
+        </div>
         <!-- Region badge (updated by bridge) -->
         <span id="ap-region-badge" class="ap-region-badge" style="display:none;">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#ff7b2f" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18 14 14 0 0 1 0-18"/></svg>
@@ -1231,16 +1238,16 @@
           <div class="ap-hero-top-row">
             <span class="ap-hero-live-badge">
               <span class="ap-hero-live-dot"></span>
-              LIVE DROP
+              <span data-i18n="live_drop">LIVE DROP</span>
             </span>
             <span id="ap-hero-countdown" style="font-size:11px;color:#a39e95;font-weight:600;letter-spacing:.3px;"></span>
           </div>
-          <div class="ap-hero-kicker">LIMITED DROP</div>
+          <div class="ap-hero-kicker" data-i18n="limited_drop">LIMITED DROP</div>
           <div id="ap-hero-title" style="font-family:system-ui,-apple-system,'SF Pro Display',Inter,sans-serif;font-weight:800;font-size:20px;line-height:1.1;letter-spacing:normal;margin-bottom:4px;color:var(--text-main);"></div>
           <div id="ap-hero-subtitle" style="font-size:13px;color:#cdbfb2;margin-bottom:12px;line-height:1.45;"></div>
           <div id="ap-hero-stock" style="display:none;margin-bottom:10px;">
             <div style="display:flex;align-items:center;justify-content:space-between;font-size:12px;color:#a39e95;margin-bottom:5px;">
-              <span>Vouchers remaining</span>
+              <span data-i18n="vouchers_remaining">Vouchers remaining</span>
               <span id="ap-hero-remaining" style="font-weight:700;color:#f2efe9;"></span>
             </div>
             <div style="height:5px;border-radius:99px;background:rgba(255,255,255,.08);overflow:hidden;">
@@ -1256,19 +1263,19 @@
         <!-- State B: no active drop / ineligible user -->
         <div id="ap-hero-nodrop-state" style="display:block;">
           <div style="padding:4px 0 10px;">
-            <div style="font-family:var(--font-display);font-weight:700;font-size:15px;color:var(--text-main);margin-bottom:5px;">No active drop right now</div>
-            <div style="font-size:13px;color:#a39e95;line-height:1.5;margin-bottom:14px;">Subscribe to our official channel to be the first to know when the next drop goes live.</div>
-            <a href="https://t.me/advantplayofficial" target="_blank" rel="noopener" class="btn btn-primary" style="display:inline-flex;width:100%;justify-content:center;text-decoration:none;">Join Channel</a>
+            <div style="font-family:var(--font-display);font-weight:700;font-size:15px;color:var(--text-main);margin-bottom:5px;" data-i18n="no_active_drop">No active drop right now</div>
+            <div style="font-size:13px;color:#a39e95;line-height:1.5;margin-bottom:14px;" data-i18n="no_active_drop_sub">Subscribe to our official channel to be the first to know when the next drop goes live.</div>
+            <a href="https://t.me/advantplayofficial" target="_blank" rel="noopener" class="btn btn-primary" style="display:inline-flex;width:100%;justify-content:center;text-decoration:none;" data-i18n="join_channel">Join Channel</a>
           </div>
         </div>
 
         <div id="campaign-bonus-voucher" style="display:none; margin-top:16px;">
-          <h4 style="color:var(--status-success);font-size:14px;margin:0 0 6px;">🎉 Campaign Reward</h4>
-          <p id="campaign-voucher-code" style="font-size:14px;color:var(--text-muted);">Coming soon…</p>
-          <button id="copy-campaign-voucher-btn" class="btn btn-ghost" onclick="copyCampaignVoucherCode()" aria-label="Copy voucher code to clipboard">📋 Copy to clipboard</button>
+          <h4 style="color:var(--status-success);font-size:14px;margin:0 0 6px;" data-i18n="campaign_reward">🎉 Campaign Reward</h4>
+          <p id="campaign-voucher-code" style="font-size:14px;color:var(--text-muted);" data-i18n="coming_soon" data-i18n-dynamic>Coming soon…</p>
+          <button id="copy-campaign-voucher-btn" class="btn btn-ghost" onclick="copyCampaignVoucherCode()" aria-label="Copy voucher code to clipboard" data-i18n="copy_to_clipboard">📋 Copy to clipboard</button>
         </div>
         <div id="bonus-voucher" style="display:none; margin-top:16px;">
-          <h4 style="color:#f5b63f;font-size:14px;margin:0 0 6px;">🎁 Your Affiliate Rewards</h4>
+          <h4 style="color:#f5b63f;font-size:14px;margin:0 0 6px;" data-i18n="affiliate_rewards">🎁 Your Affiliate Rewards</h4>
           <div id="affiliate-voucher-list"></div>
         </div>
       </div>
@@ -1284,7 +1291,7 @@
       <div class="identity-modal-body">
         <div class="identity-top">
           <div id="identity-tier-name" class="identity-tier">🌱 Rookie</div>
-          <button id="identity-modal-close" type="button" class="btn btn-ghost">Close</button>
+          <button id="identity-modal-close" type="button" class="btn btn-ghost" data-i18n="close">Close</button>
         </div>
         <div id="identity-display-name" style="margin-top:6px; font-weight:600;">User</div>
         <div id="identity-streak" class="badge" style="display:none; margin-top:8px;"></div>
@@ -1298,7 +1305,7 @@
         <div class="identity-progress">
           <div class="identity-progress-bar"><div id="identity-progress-fill" class="identity-progress-fill"></div></div>
           <div id="identity-hint" class="identity-hint"></div>
-          <button id="share-rank-btn" type="button" class="btn btn-primary" style="margin-top:10px;" onclick="shareMyRankCaption()">📣 Share My Rank</button>
+          <button id="share-rank-btn" type="button" class="btn btn-primary" style="margin-top:10px;" onclick="shareMyRankCaption()" data-i18n="share_my_rank">📣 Share My Rank</button>
           <p id="share-rank-status" class="leaderboard-empty" style="display:none;margin-top:8px;" role="status" aria-live="polite"></p>
         </div>
       </div>
@@ -1309,7 +1316,7 @@
       <div class="ap-journey-header">
         <span class="ap-journey-title">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ff7b2f" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="m15.5 8.5-2 5-5 2 2-5z"/></svg>
-          Your rewards journey
+          <span data-i18n="your_rewards_journey">Your rewards journey</span>
         </span>
         <span class="ap-journey-done-label" id="ap-journey-done-label">0 of 3 done</span>
       </div>
@@ -1320,10 +1327,10 @@
         <div class="ap-step-body">
           <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
             <div>
-              <div id="progress-step-1" class="ap-step-title">Check in today</div>
-              <div class="ap-step-sub" id="ap-step-1-sub">+20 XP · keeps your streak alive</div>
+              <div id="progress-step-1" class="ap-step-title" data-i18n="check_in_today">Check in today</div>
+              <div class="ap-step-sub" id="ap-step-1-sub" data-i18n="xp_streak_sub">+20 XP · keeps your streak alive</div>
             </div>
-            <button onclick="checkIn()" class="ap-step-btn" id="ap-checkin-btn">Check in</button>
+            <button onclick="checkIn()" class="ap-step-btn" id="ap-checkin-btn" data-i18n="check_in">Check in</button>
           </div>
         </div>
       </div>
@@ -1334,8 +1341,8 @@
         <div class="ap-step-body">
           <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
             <div style="flex:1;">
-              <div id="progress-step-2" class="ap-step-title">Invite 3 friends</div>
-              <div id="referral-progress-remaining" class="ap-step-sub">unlock +400 XP</div>
+              <div id="progress-step-2" class="ap-step-title" data-i18n="invite_friends">Invite 3 friends</div>
+              <div id="referral-progress-remaining" class="ap-step-sub" data-i18n="unlock_xp">unlock +400 XP</div>
               <div id="referral-progress-count" class="ap-step-sub" style="display:none;"></div>
               <div class="ap-ref-bars" id="ap-ref-bars">
                 <div class="ap-ref-bar" id="ap-ref-bar-1"></div>
@@ -1343,14 +1350,14 @@
                 <div class="ap-ref-bar" id="ap-ref-bar-3"></div>
               </div>
             </div>
-            <button onclick="getReferral()" class="ap-step-btn ap-step-btn-ghost" id="ap-get-referral-btn">Get link</button>
+            <button onclick="getReferral()" class="ap-step-btn ap-step-btn-ghost" id="ap-get-referral-btn" data-i18n="get_link">Get link</button>
           </div>
           <!-- Inline referral link output (visible in new UI) -->
           <div id="referral-link-inline" style="display:none;margin-top:10px;">
             <div style="font-family:monospace;font-size:12px;color:#a39e95;word-break:break-all;padding:8px 10px;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.1);border-radius:8px;" id="referral-link-inline-text"></div>
             <div style="display:flex;gap:8px;margin-top:8px;">
-              <button onclick="copyReferral()" class="ap-step-btn ap-step-btn-ghost" style="flex:1;font-size:12px;padding:7px 10px;" id="copy-referral-btn-inline">📋 Copy</button>
-              <button onclick="shareReferralViaTelegram()" class="ap-step-btn" style="flex:1;font-size:12px;padding:7px 10px;">📤 Share</button>
+              <button onclick="copyReferral()" class="ap-step-btn ap-step-btn-ghost" style="flex:1;font-size:12px;padding:7px 10px;" id="copy-referral-btn-inline" data-i18n="copy">📋 Copy</button>
+              <button onclick="shareReferralViaTelegram()" class="ap-step-btn" style="flex:1;font-size:12px;padding:7px 10px;" data-i18n="share">📤 Share</button>
             </div>
           </div>
           <!-- Hidden referral progress elements required by JS -->
@@ -1366,8 +1373,8 @@
         <div class="ap-step-body">
           <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
             <div>
-              <div id="progress-step-3" class="ap-step-title">Claim a live drop</div>
-              <div class="ap-step-sub" id="ap-step-3-sub">Campaign reward at the top ↑</div>
+              <div id="progress-step-3" class="ap-step-title" data-i18n="claim_a_live_drop">Claim a live drop</div>
+              <div class="ap-step-sub" id="ap-step-3-sub" data-i18n="campaign_reward_top">Campaign reward at the top ↑</div>
             </div>
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#6e6961" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>
           </div>
@@ -1387,8 +1394,8 @@
         <div class="ap-tile-icon">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M9.9 15.5A2 2 0 0 0 8.5 14L2.4 12.5a.5.5 0 0 1 0-1L8.5 10A2 2 0 0 0 9.9 8.5L11.5 2.4a.5.5 0 0 1 1 0L14 8.5a2 2 0 0 0 1.4 1.4l6.2 1.6a.5.5 0 0 1 0 1L15.5 14a2 2 0 0 0-1.4 1.4l-1.6 6.2a.5.5 0 0 1-1 0z"/></svg>
         </div>
-        <div class="ap-tile-name">Lucky Game</div>
-        <div id="daily-game-content" class="ap-tile-sub">Loading today's pick…</div>
+        <div class="ap-tile-name" data-i18n="lucky_game">Lucky Game</div>
+        <div id="daily-game-content" class="ap-tile-sub" data-i18n="loading_today">Loading today's pick…</div>
       </div>
 
       <!-- Invite & Earn tile -->
@@ -1396,8 +1403,8 @@
         <div class="ap-tile-icon">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M19 8v6M22 11h-6"/></svg>
         </div>
-        <div class="ap-tile-name">Invite &amp; earn</div>
-        <div class="ap-tile-sub">+60 XP per friend</div>
+        <div class="ap-tile-name" data-i18n="invite_earn">Invite &amp; earn</div>
+        <div class="ap-tile-sub" data-i18n="xp_per_friend">+60 XP per friend</div>
       </div>
 
     </div>
@@ -1409,46 +1416,46 @@
         <div class="ap-chip-icon" style="color:#f5b63f;">
           <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9H4.5a2.5 2.5 0 0 1 0-5H6M18 9h1.5a2.5 2.5 0 0 0 0-5H18M4 22h16M10 14.7V18M14 14.7V18M18 2H6v7a6 6 0 0 0 12 0z"/></svg>
         </div>
-        <div class="ap-chip-label">Leaderboard</div>
+        <div class="ap-chip-label" data-i18n="leaderboard_chip">Leaderboard</div>
       </div>
       <!-- Channel -->
       <a href="https://t.me/advantplayofficial" target="_blank" rel="noopener" class="ap-chip">
         <div class="ap-chip-icon" style="color:#ff7b2f;">
           <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="m3 11 18-5v12L3 14z"/><path d="M11.6 16.8a3 3 0 1 1-5.8-1.6"/></svg>
         </div>
-        <div class="ap-chip-label">Channel</div>
+        <div class="ap-chip-label" data-i18n="channel_chip">Channel</div>
       </a>
       <!-- Info Hub -->
       <a href="#" id="infoHubBtn" class="ap-chip" onclick="event.preventDefault();">
         <div class="ap-chip-icon" style="color:#9a95cf;">
           <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 16v-4M12 8h.01"/></svg>
         </div>
-        <div class="ap-chip-label">Info Hub</div>
+        <div class="ap-chip-label" data-i18n="info_hub_chip">Info Hub</div>
       </a>
     </div>
 
     <!-- LEADERBOARD SECTION (toggled) -->
     <div class="section" id="leaderboard-section" style="display:none;">
-      <h3>🏆 Weekly Leaderboard</h3>
-      <button class="btn btn-ghost" onclick="loadLeaderboard({ forceRefresh: true })">View Leaderboard</button>
+      <h3 data-i18n="weekly_leaderboard">🏆 Weekly Leaderboard</h3>
+      <button class="btn btn-ghost" onclick="loadLeaderboard({ forceRefresh: true })" data-i18n="view_leaderboard">View Leaderboard</button>
       <div style="display:flex;gap:8px;align-items:center;font-size:12px;color:#666;margin-top:6px;flex-wrap:wrap;">
-        <span id="leaderboard-cadence" style="opacity:.7;">• 🔄 Refresh every 5 minutes</span>
-        <span id="leaderboard-loading" style="display:none;" role="status" aria-live="polite">Refreshing…</span>
+        <span id="leaderboard-cadence" style="opacity:.7;" data-i18n="refresh_cadence">• 🔄 Refresh every 5 minutes</span>
+        <span id="leaderboard-loading" style="display:none;" role="status" aria-live="polite" data-i18n="refreshing">Refreshing…</span>
       </div>
       <div class="leaderboard-tabs">
-        <button id="leaderboard-tab-default" type="button" class="btn btn-ghost leaderboard-tab-btn active">XP + Ref</button>
-        <button id="leaderboard-tab-affiliate" type="button" class="btn btn-ghost leaderboard-tab-btn">Affiliate</button>
+        <button id="leaderboard-tab-default" type="button" class="btn btn-ghost leaderboard-tab-btn active" data-i18n="leaderboard_tab_default">XP + Ref</button>
+        <button id="leaderboard-tab-affiliate" type="button" class="btn btn-ghost leaderboard-tab-btn" data-i18n="leaderboard_tab_affiliate">Affiliate</button>
       </div>
       <div id="leaderboard-summary-card"></div>
-      <div id="leaderboard-output">Click to load latest rankings...</div>
-      <div id="affiliate-leaderboard-output" style="display:none; margin-top:12px;">Click to load latest affiliate rankings...</div>
-      <button id="leaderboard-retry" type="button" class="btn btn-ghost" style="display:none;margin-top:8px;">Retry</button>
+      <div id="leaderboard-output" data-i18n="click_to_load" data-i18n-dynamic>Click to load latest rankings...</div>
+      <div id="affiliate-leaderboard-output" style="display:none; margin-top:12px;" data-i18n="click_to_load_affiliate" data-i18n-dynamic>Click to load latest affiliate rankings...</div>
+      <button id="leaderboard-retry" type="button" class="btn btn-ghost" style="display:none;margin-top:8px;" data-i18n="retry">Retry</button>
     </div>
 
     <!-- WELCOME PROGRESS (hidden, managed by JS) -->
     <div class="section" id="welcome-progress-section" style="display:none;">
       <div class="welcome-progress-card" aria-live="polite">
-        <h3 class="welcome-progress-title" id="welcome-progress-title">🎁 Welcome Voucher Progress</h3>
+        <h3 class="welcome-progress-title" id="welcome-progress-title" data-i18n="welcome_voucher_progress">🎁 Welcome Voucher Progress</h3>
         <div class="welcome-progress-bar">
           <div class="welcome-progress-fill" id="welcome-progress-fill"></div>
         </div>
@@ -1459,16 +1466,16 @@
         </div>
         <div id="welcome-channel-reminder" style="display:none;">
           <ul style="list-style:none;padding:0;margin:8px 0;font-size:14px;">
-            <li>✅ Check in 3/3</li>
-            <li id="welcome-channel-status-item">❌ Subscribe to @AdvantPlayOfficial</li>
+            <li data-i18n="welcome_checkin_done">✅ Check in 3/3</li>
+            <li id="welcome-channel-status-item" data-i18n="welcome_subscribe">❌ Subscribe to @AdvantPlayOfficial</li>
           </ul>
-          <p style="font-size:13px;color:var(--text-muted);margin:4px 0 8px;">Join the channel to unlock your Welcome Voucher.</p>
+          <p style="font-size:13px;color:var(--text-muted);margin:4px 0 8px;" data-i18n="join_channel_to_unlock">Join the channel to unlock your Welcome Voucher.</p>
           <div style="display:flex;gap:8px;flex-wrap:wrap;">
-            <a href="https://t.me/advantplayofficial" target="_blank" rel="noopener" class="btn btn-primary" style="text-decoration:none;">Join Channel</a>
-            <button id="welcome-verify-sub-btn" type="button" class="btn btn-ghost">Verify Subscription</button>
+            <a href="https://t.me/advantplayofficial" target="_blank" rel="noopener" class="btn btn-primary" style="text-decoration:none;" data-i18n="join_channel">Join Channel</a>
+            <button id="welcome-verify-sub-btn" type="button" class="btn btn-ghost" data-i18n="verify_subscription">Verify Subscription</button>
           </div>
         </div>
-        <button id="welcome-progress-claim-btn" type="button" class="btn btn-primary" style="display:none;">Claim Welcome Voucher</button>
+        <button id="welcome-progress-claim-btn" type="button" class="btn btn-primary" style="display:none;" data-i18n="claim_welcome_voucher">Claim Welcome Voucher</button>
       </div>
     </div>
 
@@ -1661,12 +1668,12 @@
     <div class="referral-cta-group">
       <button id="get-referral-btn" class="btn btn-primary" onclick="getReferral()">Invite Friends / Get Referral Link</button>
       <button id="share-referral-btn" class="btn btn-ghost" onclick="shareReferralViaTelegram()">📤 Share via Telegram</button>
-      <button id="copy-referral-btn" class="btn btn-ghost" onclick="copyReferral()">📋 Copy to clipboard</button>
+      <button id="copy-referral-btn" class="btn btn-ghost" onclick="copyReferral()" data-i18n="copy_to_clipboard">📋 Copy to clipboard</button>
     </div>
     <p id="referral-link">Click the button to get your link</p>
     <div class="referral-status-card" aria-live="polite">
-      <h4>Referral Progress</h4>
-      <div id="referral-status-list" class="referral-status-list">Loading...</div>
+      <h4 data-i18n="referral_progress">Referral Progress</h4>
+      <div id="referral-status-list" class="referral-status-list" data-i18n="loading">Loading...</div>
     </div>
   </div>
 
@@ -1692,32 +1699,32 @@
   <!-- INFO HUB MODAL -->
   <div id="infoHubModal" style="display:none;position:fixed;z-index:1000;left:0;top:0;width:100%;height:100%;background-color:rgba(0,0,0,0.5);">
     <div style="background:linear-gradient(180deg, #0f172a 0%, #111827 100%);color:rgba(255,255,255,0.85);margin:8% auto;padding:20px;border-radius:12px;width:92%;max-width:400px;text-align:left;">
-      <h2 style="margin-bottom:10px;">ℹ️ Info Hub</h2>
+      <h2 style="margin-bottom:10px;" data-i18n="info_hub_title">ℹ️ Info Hub</h2>
       <div style="display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap;">
-        <button class="tab-btn active" data-tab="tab-how" style="flex:1;padding:8px 10px;border:1px solid rgba(255,255,255,0.08);border-radius:6px;background:linear-gradient(135deg, #ff7a18, #ffb347);color:#fff;box-shadow:0 4px 12px rgba(255,122,24,0.3);cursor:pointer;">🎯 How It Works</button>
-        <button class="tab-btn" data-tab="tab-xp" style="flex:1;padding:8px 10px;border:1px solid rgba(255,255,255,0.08);border-radius:6px;background:rgba(255,255,255,0.06);color:rgba(255,255,255,0.7);cursor:pointer;">⭐ XP</button>
-        <button class="tab-btn" data-tab="tab-vip" style="flex:1;padding:8px 10px;border:1px solid rgba(255,255,255,0.08);border-radius:6px;background:rgba(255,255,255,0.06);color:rgba(255,255,255,0.7);cursor:pointer;">👑 VIP</button>
-        <button class="tab-btn" data-tab="tab-event" style="flex:1;padding:8px 10px;border:1px solid rgba(255,255,255,0.08);border-radius:6px;background:rgba(255,255,255,0.06);color:rgba(255,255,255,0.7);cursor:pointer;">🎉 Events</button>
+        <button class="tab-btn active" data-tab="tab-how" style="flex:1;padding:8px 10px;border:1px solid rgba(255,255,255,0.08);border-radius:6px;background:linear-gradient(135deg, #ff7a18, #ffb347);color:#fff;box-shadow:0 4px 12px rgba(255,122,24,0.3);cursor:pointer;" data-i18n="how_it_works_tab">🎯 How It Works</button>
+        <button class="tab-btn" data-tab="tab-xp" style="flex:1;padding:8px 10px;border:1px solid rgba(255,255,255,0.08);border-radius:6px;background:rgba(255,255,255,0.06);color:rgba(255,255,255,0.7);cursor:pointer;" data-i18n="xp_tab">⭐ XP</button>
+        <button class="tab-btn" data-tab="tab-vip" style="flex:1;padding:8px 10px;border:1px solid rgba(255,255,255,0.08);border-radius:6px;background:rgba(255,255,255,0.06);color:rgba(255,255,255,0.7);cursor:pointer;" data-i18n="vip_tab">👑 VIP</button>
+        <button class="tab-btn" data-tab="tab-event" style="flex:1;padding:8px 10px;border:1px solid rgba(255,255,255,0.08);border-radius:6px;background:rgba(255,255,255,0.06);color:rgba(255,255,255,0.7);cursor:pointer;" data-i18n="events_tab">🎉 Events</button>
       </div>
       <div id="tab-how" class="tab-panel active" style="text-align:left;">
-        <p style="margin-bottom:8px;"><b>How AdvantPlay Works</b></p>
+        <p style="margin-bottom:8px;"><b data-i18n="info_hub_how_works">How AdvantPlay Works</b></p>
         <ul style="margin:0; padding:0; list-style:none; line-height:1.7;">
-          <li>1️⃣ Check-in daily → Earn XP</li>
-          <li>2️⃣ Invite friends → Earn bonus XP</li>
-          <li>3️⃣ Join weekly events → Win vouchers</li>
-          <li>4️⃣ Weekly Top 10 → Extra rewards</li>
+          <li data-i18n="info_hub_step1">1️⃣ Check-in daily → Earn XP</li>
+          <li data-i18n="info_hub_step2">2️⃣ Invite friends → Earn bonus XP</li>
+          <li data-i18n="info_hub_step3">3️⃣ Join weekly events → Win vouchers</li>
+          <li data-i18n="info_hub_step4">4️⃣ Weekly Top 10 → Extra rewards</li>
         </ul>
         <hr style="border:none; border-top:1px solid #eee; margin:12px 0;">
-        <p style="font-size:13px;color:#666;">More activity = More rewards.</p>
+        <p style="font-size:13px;color:#666;" data-i18n="more_activity">More activity = More rewards.</p>
       </div>
       <div id="tab-xp" class="tab-panel" style="display:none; text-align:left;">
         <div class="infohub-scroll">
-          <p style="margin:0 0 6px 0;"><b>Weekly Top 10 XP = Extra Voucher Code</b></p>
+          <p style="margin:0 0 6px 0;"><b data-i18n="xp_top10">Weekly Top 10 XP = Extra Voucher Code</b></p>
           <hr style="border:none;border-top:1px solid #ddd;margin:10px 0;">
-          <p><b>How to Earn XP</b></p>
-          <p><b>✅ Daily Check-in</b></p>
+          <p><b data-i18n="how_to_earn_xp">How to Earn XP</b></p>
+          <p><b data-i18n="daily_checkin_label">✅ Daily Check-in</b></p>
           <ul style="list-style:none;padding:0;line-height:1.6;"><li>+20 XP daily</li></ul>
-          <p><b>🔥 Streak Bonus</b></p>
+          <p><b data-i18n="streak_bonus">🔥 Streak Bonus</b></p>
           <ul style="list-style:none;padding:0;line-height:1.6;">
             <li>7d +50 XP</li><li>14d +150 XP</li><li>28d +300 XP</li><li>56d +600 XP</li><li>84d +900 XP</li><li>112d +1200 XP</li>
           </ul>
@@ -1728,21 +1735,21 @@
         </div>
       </div>
       <div id="tab-vip" class="tab-panel" style="text-align:left;display:none;">
-        <p style="margin-bottom:8px;"><b>VIP System (Monthly Reset)</b></p>
+        <p style="margin-bottom:8px;"><b data-i18n="vip_system">VIP System (Monthly Reset)</b></p>
         <ul style="list-style:none;padding:0;line-height:1.7;">
-          <li>👑 Crown = VIP1</li><li>800 Monthly XP → VIP1</li><li>Below 800 at refresh → Normal</li><li>VIP1 unlocks Bonus Voucher</li><li>VIP vouchers limited • first come first served</li>
+          <li data-i18n="vip_crown">👑 Crown = VIP1</li><li data-i18n="vip_800">800 Monthly XP → VIP1</li><li data-i18n="vip_below">Below 800 at refresh → Normal</li><li data-i18n="vip_unlocks">VIP1 unlocks Bonus Voucher</li><li data-i18n="vip_limited">VIP vouchers limited • first come first served</li>
         </ul>
         <hr style="border:none;border-top:1px solid #eee;margin:12px 0;">
-        <p style="font-size:13px;color:#666;">Maintain XP to keep VIP status.</p>
+        <p style="font-size:13px;color:#666;" data-i18n="vip_maintain">Maintain XP to keep VIP status.</p>
       </div>
       <div id="tab-event" class="tab-panel" style="text-align:left;display:none;">
-        <p style="margin-bottom:8px;"><b>Event Highlights</b></p>
+        <p style="margin-bottom:8px;"><b data-i18n="event_highlights">Event Highlights</b></p>
         <ul style="list-style:none;padding:0;line-height:1.7;">
-          <li>🎁 Surprise Voucher Drops</li><li>🎟️ Weekly Lucky Draw</li><li>🎄 #ComebackIsReal</li>
+          <li data-i18n="event1">🎁 Surprise Voucher Drops</li><li data-i18n="event2">🎟️ Weekly Lucky Draw</li><li data-i18n="event3">🎄 #ComebackIsReal</li>
         </ul>
-        <a href="https://telegra.ph/Advanced-Guide-Placeholder-01-01" target="_blank" class="btn btn-ghost" style="display:inline-block;text-decoration:none;">Campaign link</a>
+        <a href="https://telegra.ph/Advanced-Guide-Placeholder-01-01" target="_blank" class="btn btn-ghost" style="display:inline-block;text-decoration:none;" data-i18n="campaign_link">Campaign link</a>
       </div>
-      <button id="closeInfoHub" style="margin-top:14px;padding:10px 20px;background:linear-gradient(135deg, #ff7a18, #ffb347);color:#fff;border:none;border-radius:8px;cursor:pointer;width:100%;">Close</button>
+      <button id="closeInfoHub" style="margin-top:14px;padding:10px 20px;background:linear-gradient(135deg, #ff7a18, #ffb347);color:#fff;border:none;border-radius:8px;cursor:pointer;width:100%;" data-i18n="info_hub_close">Close</button>
     </div>
   </div>
 
@@ -2795,14 +2802,14 @@
         step1.style.opacity = "0.8";
         step2.style.opacity = "1";
         step3.style.opacity = "0.6";
-        if (heroMain) heroMain.textContent = "Great start. Share your referral link to unlock your next reward.";
-        if (heroSub) heroSub.textContent = "Referral progress and remaining steps are shown below.";
+        if (heroMain) heroMain.textContent = t("great_start") || "Great start. Share your referral link to unlock your next reward.";
+        if (heroSub) heroSub.textContent = t("referral_shown_below") || "Referral progress and remaining steps are shown below.";
       } else {
         step1.style.opacity = "1";
         step2.style.opacity = "0.6";
         step3.style.opacity = "0.6";
-        if (heroMain) heroMain.textContent = "Complete check-in and move toward your next reward.";
-        if (heroSub) heroSub.textContent = "After check-in, invite friends to progress to the next reward tier.";
+        if (heroMain) heroMain.textContent = t("complete_checkin") || "Complete check-in and move toward your next reward.";
+        if (heroSub) heroSub.textContent = t("invite_after_checkin") || "After check-in, invite friends to progress to the next reward tier.";
       }
       updateJourneyUI();
     }
@@ -2816,7 +2823,7 @@
 
       // Update progress counter
       const doneLabel = document.getElementById("ap-journey-done-label");
-      if (doneLabel) doneLabel.textContent = `${doneCount} of 3 done`;
+      if (doneLabel) doneLabel.textContent = t("n_of_3_done", { n: doneCount });
 
       // Update step dots
       const dot1 = document.getElementById("ap-step-1-dot");
@@ -2850,13 +2857,13 @@
       const checkinBtn = document.getElementById("ap-checkin-btn");
       if (checkinBtn) {
         if (step1Done) {
-          checkinBtn.textContent = "Checked in";
+          checkinBtn.textContent = t("checked_in");
           checkinBtn.disabled = true;
           checkinBtn.classList.remove("ap-step-btn-ghost");
           checkinBtn.classList.add("ap-step-btn-done");
           checkinBtn.onclick = null;
         } else {
-          checkinBtn.textContent = "Check in";
+          checkinBtn.textContent = t("check_in");
           checkinBtn.disabled = false;
           checkinBtn.classList.remove("ap-step-btn-done");
           checkinBtn.onclick = checkIn;
@@ -2908,8 +2915,8 @@
 
       // CHANNEL_NOT_JOINED: actionable — show subscribe reminder
       if (pendingReason === "CHANNEL_NOT_JOINED") {
-        titleEl.textContent = "🎁 Welcome Voucher Waiting";
-        countEl.textContent = `Progress: ${completed}/${required} ✅`;
+        titleEl.textContent = t("welcome_voucher_waiting");
+        countEl.textContent = t("progress_label", { completed, required });
         messageEl.textContent = "";
         if (channelReminder) channelReminder.style.display = "block";
         return;
@@ -2918,9 +2925,9 @@
       // Operational pending: temporary system/drop unavailability
       const operationalReasons = ["NO_ACTIVE_DROP", "NO_FREE_CODES", "COUNTER_MISMATCH", "DROP_NOT_LIVE_YET"];
       if (operationalReasons.includes(pendingReason)) {
-        titleEl.textContent = "🎁 Welcome Voucher";
-        countEl.textContent = `Progress: ${completed}/${required} ✅`;
-        messageEl.textContent = "You've completed all requirements. Voucher distribution is temporarily unavailable. Please check again later.";
+        titleEl.textContent = t("welcome_voucher");
+        countEl.textContent = t("progress_label", { completed, required });
+        messageEl.textContent = t("voucher_temporarily_unavailable");
         return;
       }
 
@@ -2928,38 +2935,38 @@
       if (status === "unlocked") {
         const claimDropId = data.claim_drop_id || data.drop_id || "";
         if (claimDropId) {
-          titleEl.textContent = "🎉 Voucher Unlocked";
-          countEl.textContent = "Your Welcome Voucher is ready.";
+          titleEl.textContent = t("voucher_unlocked");
+          countEl.textContent = t("voucher_ready");
           messageEl.textContent = "";
           claimBtn.dataset.dropid = claimDropId;
           claimBtn.removeAttribute("disabled");
-          claimBtn.textContent = "Claim Welcome Voucher";
+          claimBtn.textContent = t("claim_welcome_voucher");
           claimBtn.style.display = "inline-flex";
         } else {
           console.log(`[WELCOME_UI][CLAIM_BUTTON_DISABLED] uid=${userId} reason=no_claim_drop_id completed_days=${completed}`);
-          titleEl.textContent = "🎁 Welcome Voucher";
-          countEl.textContent = `Progress: ${completed}/${required} ✅`;
-          messageEl.textContent = "You've completed all requirements. Voucher distribution is temporarily unavailable. Please check again later.";
+          titleEl.textContent = t("welcome_voucher");
+          countEl.textContent = t("progress_label", { completed, required });
+          messageEl.textContent = t("voucher_temporarily_unavailable");
         }
         return;
       }
 
       if (status === "unlocked_pending") {
         console.log(`[WELCOME_UI][CLAIM_BUTTON_DISABLED] uid=${userId} reason=no_claim_drop_id completed_days=${completed}`);
-        titleEl.textContent = "🎁 Welcome Voucher";
-        countEl.textContent = `Progress: ${completed}/${required} ✅`;
-        messageEl.textContent = "You've completed all requirements. Voucher distribution is temporarily unavailable. Please check again later.";
+        titleEl.textContent = t("welcome_voucher");
+        countEl.textContent = t("progress_label", { completed, required });
+        messageEl.textContent = t("voucher_temporarily_unavailable");
         return;
       }
 
       // Default: in-progress state
-      titleEl.textContent = "🎁 Welcome Voucher Progress";
-      countEl.textContent = `Progress: ${completed}/${required} ✅`;
+      titleEl.textContent = t("welcome_voucher_progress");
+      countEl.textContent = t("progress_label", { completed, required });
       if (completed === 2 && required === 3) {
-        messageEl.textContent = "1 more day to go.";
+        messageEl.textContent = t("one_more_day");
       } else {
         const remaining = Math.max(0, safeInt(data.remaining_days, required - completed));
-        messageEl.textContent = data.message || `Complete ${remaining} more check-ins to unlock your voucher.`;
+        messageEl.textContent = data.message || t("complete_n_more", { n: remaining });
       }
     }
 
@@ -3046,7 +3053,7 @@
       if (!toast) return;
       document.getElementById("xp-toast-amount").textContent = "+" + totalXp + " XP";
       document.getElementById("xp-toast-label").textContent =
-        streak > 1 ? "🔥 " + streak + "-day streak" : "Daily check-in reward";
+        streak > 1 ? "🔥 " + streak + "-day streak" : t("check_in_reward");
       const badge = document.getElementById("xp-toast-streak");
       if (streakLabel) {
         badge.textContent = streakLabel;
@@ -3218,19 +3225,19 @@
       );
       const remaining = Number.isFinite(remainingRaw) ? Math.max(0, remainingRaw) : 0;
       if (data?.near_miss) {
-        remainingEl.textContent = "⚡ 1 more referral to unlock +400 XP";
+        remainingEl.textContent = t("near_miss_referral");
       } else {
-        remainingEl.textContent = `${remaining} more referrals to unlock +400 XP`;
+        remainingEl.textContent = t("n_more_referrals", { n: remaining });
       }
       if (nextEl) {
         if (remaining <= 0) {
-          nextEl.textContent = "✅ Current referral target completed. Keep sharing for your next reward tier.";
+          nextEl.textContent = t("referral_target_done");
         } else {
           nextEl.textContent = `Next reward: +400 XP at 3 referrals • Need ${remaining} more.`;
         }
       }
 
-      expiryEl.textContent = "⏳ This link expires in 24h";
+      expiryEl.textContent = t("link_expires");
     }
 
     async function loadReferralProgress() {
@@ -3255,9 +3262,9 @@
       const apiText = typeof row?.status_label === "string" ? row.status_label : "";
       if (apiIcon && apiText) return { icon: apiIcon, text: apiText };
       const raw = String(row?.status || "").toLowerCase();
-      if (raw === "qualified") return { icon: "🟢", text: "Qualified" };
-      if (raw === "pending") return { icon: "🟡", text: "Checking" };
-      return { icon: "🔴", text: "Not eligible" };
+      if (raw === "qualified") return { icon: "🟢", text: t("qualified") };
+      if (raw === "pending") return { icon: "🟡", text: t("checking") };
+      return { icon: "🔴", text: t("not_eligible") };
     }
 
     function renderReferralStatus(data = {}) {
@@ -3267,7 +3274,7 @@
       while (listEl.firstChild) listEl.removeChild(listEl.firstChild);
       const rows = Array.isArray(data?.referrals) ? data.referrals : [];
       if (!rows.length) {
-        listEl.textContent = "Your referrals will appear here after someone joins using your invite link.";
+        listEl.textContent = t("referral_empty");
         return;
       }
 
@@ -3323,11 +3330,11 @@
       referralStatusAutoLoaded = true;
       const listEl = document.getElementById("referral-status-list");
       if (!listEl) return;
-      listEl.textContent = "Loading...";
+      listEl.textContent = t("loading");
       try {
         const res = await v2Fetch(`${API_BASE}/api/referral/status`);
         if (res.status === 401 || res.status === 403) {
-          listEl.textContent = "Please open this mini app from Telegram to view your referral progress.";
+          listEl.textContent = t("open_via_telegram");
           return;
         }
         if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
@@ -3337,7 +3344,7 @@
         renderReferralProgress(data || {});
       } catch (err) {
         console.warn("Referral status load failed:", err);
-        listEl.textContent = "Could not load referral progress right now. Please try again later.";
+        listEl.textContent = t("referral_load_error");
       }
     }
     
@@ -3350,7 +3357,7 @@
 
       const allBtns = [btn, inlineBtn].filter(Boolean);
       const originalLabels = allBtns.map(b => b.textContent);
-      allBtns.forEach(b => { b.disabled = true; b.setAttribute("aria-busy", "true"); b.textContent = "Getting…"; });
+      allBtns.forEach(b => { b.disabled = true; b.setAttribute("aria-busy", "true"); b.textContent = t("getting"); });
 
       function showInlineError(msg) {
         if (inlineText) { inlineText.textContent = msg; }
@@ -3425,7 +3432,7 @@
       try {
         if (btn) {
           btn.disabled = true;
-          btn.textContent = "Preparing…";
+          btn.textContent = t("preparing");
         }
         setShareRankStatus("Preparing your rank card…");
         const res = await v2Fetch(`${API_BASE}/api/share-rank-caption`, { method: "POST", body: "{}" });
@@ -3467,7 +3474,7 @@ Active players win more.`;
 
     async function copyReferral() {
       if (!latestReferralLink) {
-        tgAlert("Please generate your referral link first.");
+        tgAlert(t("please_generate_link"));
         return;
       }
 
@@ -3478,7 +3485,7 @@ Active players win more.`;
         showCopySuccessToast();
       } catch {
         hapticNotify("error");
-        tgAlert("❌ Copy failed. Please copy manually.");
+        tgAlert(t("copy_failed"));
       }
     }
 
@@ -3487,7 +3494,7 @@ Active players win more.`;
         await getReferral();
       }
       if (!latestReferralLink) {
-        tgAlert("❌ Could not get your referral link. Please try again.");
+        tgAlert(t("could_not_get_link"));
         return;
       }
 
@@ -3540,20 +3547,12 @@ Active players win more.`;
     }
 
     function showCopySuccessToast() {
-      const msg = isThaiUiLanguage()
-        ? "คัดลอกโค้ดแล้ว 🎉"
-        : "Code copied 🎉";
-
       hapticNotify("success");
-      showToast(msg);
+      showToast(t("copied_simple"));
     }
 
     function showRetentionToast() {
-      const msg = isThaiUiLanguage()
-        ? "ติดตามช่องไว้ — โค้ดส่วนลดใหม่กำลังจะมาเร็วๆ นี้"
-        : "Stay subscribed — Next drop coming soon.";
-
-      showToast(msg);
+      showToast(t("stay_subscribed"));
     }
 
     function copyVoucherCode(code, btn) {
@@ -3563,7 +3562,7 @@ Active players win more.`;
       const codeToCopy = value || fallback;
       const lower = codeToCopy.toLowerCase();
       if (!codeToCopy || lower.includes("coming soon")) {
-        tgAlert("❌ No voucher code available to copy yet.");
+        tgAlert(t("no_voucher_to_copy"));
         return;
       }
 
@@ -3573,7 +3572,7 @@ Active players win more.`;
           showCopySuccessToast();
           setTimeout(showRetentionToast, 800);
         })
-        .catch(() => { hapticNotify("error"); tgAlert("Failed to copy voucher."); });
+        .catch(() => { hapticNotify("error"); tgAlert(t("failed_to_copy_voucher")); });
     }
 
     function renderAffiliateRewards(rewards) {
@@ -3614,7 +3613,7 @@ Active players win more.`;
         const btn = document.createElement("button");
         btn.type = "button";
         btn.className = "btn btn-ghost";
-        btn.textContent = "📋 Copy to clipboard";
+        btn.textContent = t("copy_to_clipboard");
         btn.dataset.copyCode = codeText;
         btn.onclick = () => copyVoucherCode(codeText, btn);
         card.appendChild(btn);
@@ -3628,7 +3627,7 @@ Active players win more.`;
       const codeEl = document.getElementById("campaign-voucher-code");
       const code = codeEl ? codeEl.innerText.trim() : "";
       if (!code || code.toLowerCase().includes("coming soon")) {
-        tgAlert("❌ No voucher code available to copy yet.");
+        tgAlert(t("no_voucher_to_copy"));
         return;
       }
 
@@ -3638,7 +3637,7 @@ Active players win more.`;
           showCopySuccessToast();
           setTimeout(showRetentionToast, 800);
         })
-        .catch(() => { hapticNotify("error"); tgAlert("Failed to copy voucher."); });
+        .catch(() => { hapticNotify("error"); tgAlert(t("failed_to_copy_voucher")); });
     }
 
     async function handleAdminAndVoucher() {
@@ -3750,7 +3749,7 @@ Active players win more.`;
       primaryBtn.onclick = null;
       const secondaryBtn = document.getElementById("campaign-voucher-channel-btn");
       if (secondaryBtn) secondaryBtn.style.display = "none";
-      primaryBtn.textContent = "📋 Copy to clipboard";
+      primaryBtn.textContent = t("copy_to_clipboard");
       primaryBtn.removeAttribute("data-dropid");
       primaryBtn.removeAttribute("data-claim");
       primaryBtn.removeAttribute("disabled");
@@ -3764,7 +3763,7 @@ Active players win more.`;
       primaryBtn.onclick = null;
       const secondaryBtn = document.getElementById("campaign-voucher-channel-btn");
       if (secondaryBtn) secondaryBtn.style.display = "none";
-      primaryBtn.textContent = "🎟️ Claim now";
+      primaryBtn.textContent = "🎟️ " + t("claim_now_label");
       primaryBtn.removeAttribute("data-copy-code");
       if (dropId) {
         primaryBtn.dataset.dropid = dropId;
@@ -3783,7 +3782,7 @@ Active players win more.`;
     function showVoucherSoldOut(messageText) {
       const primaryBtn = document.getElementById("campaign-voucher-btn");
       if (!primaryBtn) return;
-      primaryBtn.textContent = "✅ Check-in now";
+      primaryBtn.textContent = "✅ " + t("check_in");
       primaryBtn.removeAttribute("disabled");
       primaryBtn.removeAttribute("data-copy-code");
       primaryBtn.removeAttribute("data-dropid");
@@ -3801,7 +3800,7 @@ Active players win more.`;
         secondaryBtn.style.marginLeft = "8px";
         primaryBtn.insertAdjacentElement("afterend", secondaryBtn);
       }
-      secondaryBtn.textContent = "📣 Join Channel";
+      secondaryBtn.textContent = "📣 " + t("join_channel");
       secondaryBtn.onclick = () => {
         if (tg?.openTelegramLink) {
           tg.openTelegramLink(OFFICIAL_CHANNEL_LINK);
@@ -3812,7 +3811,7 @@ Active players win more.`;
       secondaryBtn.style.display = "inline-block";
 
       const messageEl = document.getElementById("campaign-voucher-message");
-      if (messageEl) messageEl.innerText = messageText || "🚨 Stay subscribed to channel — Next drop coming soon.";
+      if (messageEl) messageEl.innerText = messageText || "🚨 " + t("stay_subscribed");
     }
 
     const CHANNEL_SUBSCRIBE_PROMPT = "Subscribe to @advantplayofficial to unlock";
@@ -3938,7 +3937,7 @@ Active players win more.`;
       btn.className = "btn btn-primary";
 
       if (isWelcomeLocked && !hasClaimed) {
-        title.textContent = "🎁 New Member Reward";
+        title.textContent = t("new_member_reward");
         const completed = Number(welcomeProgress?.checkins_completed ?? 0);
         const required = Number(welcomeProgress?.checkins_required ?? 3);
         const daysRemaining = Number(welcomeProgress?.days_remaining ?? 0);
@@ -3949,18 +3948,18 @@ Active players win more.`;
           expiresMeta.textContent = `Expires in ${daysRemaining} day${daysRemaining === 1 ? "" : "s"}`;
           card.appendChild(expiresMeta);
         }
-        btn.textContent = "Unlock your reward after 3 check-ins.";
+        btn.textContent = t("unlock_after_checkins");
         btn.setAttribute("disabled", "disabled");
         btn.className = "btn btn-ghost";
       } else if (hasClaimed) {
         const codeText = drop?.code ? String(drop.code) : "(no code)";
         message.textContent = drop?.code ? `Voucher code: ${codeText}` : "Reward already claimed.";
         if (drop?.code) {
-          btn.textContent = "📋 Copy to clipboard";
+          btn.textContent = t("copy_to_clipboard");
           btn.dataset.copyCode = codeText;
           btn.className = "btn btn-ghost";
         } else {
-          btn.textContent = "No code available";
+          btn.textContent = t("no_code_available");
           btn.setAttribute("disabled", "disabled");
           btn.className = "btn btn-ghost";
         }
@@ -3976,19 +3975,19 @@ Active players win more.`;
         }
 
         if (publicSoldOut) {
-          message.textContent = "Stay subscribed to channel — Next drop coming soon.";
-          btn.textContent = "Fully Claimed";
+          message.textContent = t("stay_subscribed");
+          btn.textContent = t("fully_claimed");
           btn.removeAttribute("data-dropid");
           btn.setAttribute("disabled", "disabled");
           btn.className = "btn btn-ghost";
         } else {
           if (welcomeProgress?.unlocked) {
-            title.textContent = "🎁 Welcome Voucher";
-            message.textContent = "Claim now";
+            title.textContent = t("welcome_voucher");
+            message.textContent = t("claim_now_label");
           } else {
-            message.textContent = "Tap below to claim your reward.";
+            message.textContent = t("claim_your_reward");
           }
-          btn.textContent = "Claim Reward";
+          btn.textContent = t("claim_reward");
           if (dropId) {
             btn.dataset.dropid = dropId;
           }
@@ -4014,7 +4013,7 @@ Active players win more.`;
       if (!el || !endsAt) return;
       function tick() {
         const diff = new Date(endsAt) - Date.now();
-        if (diff <= 0) { el.textContent = "Ending…"; clearInterval(_heroCountdownTimer); return; }
+        if (diff <= 0) { el.textContent = t("ending"); clearInterval(_heroCountdownTimer); return; }
         const h = Math.floor(diff / 3600000);
         const m = Math.floor((diff % 3600000) / 60000);
         const s = Math.floor((diff % 60000) / 1000);
@@ -4201,13 +4200,13 @@ Active players win more.`;
       if (code === "rate_limited") {
         if (reason === "ip_killed" || reason === "subnet_killed") {
           return {
-            title: "Temporarily blocked",
-            message: "Please try later.",
+            title: t("temporarily_blocked"),
+            message: t("please_try_later"),
             severity: "warn"
           };
         }
         return {
-          title: "Too fast",
+          title: t("too_fast"),
           message: retryAfterSec
             ? `Please wait ${retryAfterSec}s and try again.`
             : "Please wait a moment and try again.",
@@ -4218,9 +4217,9 @@ Active players win more.`;
 
       if (code === "blocked" && reason === "missing_profile_photo") {
         return {
-          title: "Profile photo required",
-          message: "Set a Telegram profile photo, then retry.",
-          ctaText: "Set profile photo",
+          title: t("profile_photo_required"),
+          message: t("set_profile_photo"),
+          ctaText: t("set_profile_photo_btn"),
           ctaAction: "profile_photo",
           severity: "warn"
         };
@@ -4228,9 +4227,9 @@ Active players win more.`;
 
       if (code === "not_subscribed") {
         return {
-          title: "Subscribe required",
-          message: "Join the official channel to claim this pool drop.",
-          ctaText: "Join official channel",
+          title: t("subscribe_required"),
+          message: t("join_official_channel"),
+          ctaText: t("join_official_channel_btn"),
           ctaAction: "join_channel",
           severity: "warn"
         };
@@ -4242,15 +4241,15 @@ Active players win more.`;
         status === 503
       ) {
         return {
-          title: "Verification busy",
-          message: "Can’t verify subscription now. Try again shortly.",
+          title: t("verification_busy"),
+          message: t("cant_verify"),
           severity: "warn"
         };
       }
 
       return {
-        title: "Temporarily unavailable",
-        message: "Please try again.",
+        title: t("temporarily_unavailable"),
+        message: t("please_try_again"),
         severity: "warn"
       };
     }
@@ -4311,7 +4310,7 @@ Active players win more.`;
         const retryBtn = document.createElement("button");
         retryBtn.type = "button";
         retryBtn.className = "btn btn-primary";
-        retryBtn.textContent = "Retry";
+        retryBtn.textContent = t("retry");
         retryBtn.addEventListener("click", () => {
           if (typeof options.retryHandler === "function") {
             options.retryHandler();
@@ -4326,17 +4325,17 @@ Active players win more.`;
         if (uiModel.retryAfterSec) {
           let remaining = uiModel.retryAfterSec;
           retryBtn.setAttribute("disabled", "disabled");
-          countdown.textContent = `Retry available in ${remaining}s`;
+          countdown.textContent = t("retry_available_in", { n: remaining });
           claimErrorCountdownTimer = setInterval(() => {
             remaining -= 1;
             if (remaining <= 0) {
               clearInterval(claimErrorCountdownTimer);
               claimErrorCountdownTimer = null;
               retryBtn.removeAttribute("disabled");
-              countdown.textContent = "You can retry now.";
+              countdown.textContent = t("you_can_retry");
               return;
             }
-            countdown.textContent = `Retry available in ${remaining}s`;
+            countdown.textContent = t("retry_available_in", { n: remaining });
           }, 1000);
         }
       }
@@ -4359,7 +4358,7 @@ Active players win more.`;
         const res = await v2Fetch(`${API_V2}/vouchers/visible${tail}`, { cache: "no-store" });
 
         if (res.status === 401) {
-          messageEl.innerText = "Coming soon…";
+          messageEl.innerText = t("coming_soon");
           return;
         }
 
@@ -4525,22 +4524,22 @@ Active players win more.`;
       if (claimBtn.dataset.mode === "copy") {
         const code = claimBtn.dataset.copyCode || "";
         if (!code || code === "(no code)") {
-          tgAlert("No code available to copy yet. Please claim first.");
+          tgAlert(t("no_code_to_copy"));
           return;
         }
         const oldText = claimBtn.textContent;
         navigator.clipboard.writeText(code)
           .then(() => {
-            claimBtn.textContent = "✅ Copied";
+            claimBtn.textContent = t("copied");
             showCopySuccessToast();
             setTimeout(showRetentionToast, 800);
             setTimeout(() => {
-              claimBtn.textContent = "📋 Copy";
+              claimBtn.textContent = t("copy");
             }, 1000);
           })
           .catch(() => {
             claimBtn.textContent = oldText;
-            tgAlert("Unable to copy automatically. Please copy the code manually: " + code);
+            tgAlert(t("unable_to_copy") + code);
           });
         return;
       }
@@ -4548,7 +4547,7 @@ Active players win more.`;
       const dropId = claimBtn.getAttribute("data-dropid") || claimBtn.getAttribute("data-claim");
       if (!dropId) {
         console.log(`[WELCOME_UI][CLAIM_BUTTON_DISABLED] uid=${userId} reason=no_claim_drop_id completed_days=unknown`);
-        tgAlert("❌ Claim slot is not available yet. Please check again later.");
+        tgAlert(t("claim_not_available"));
         return;
       }
 
@@ -4564,14 +4563,14 @@ Active players win more.`;
         window.__claimInFlight = false;
         if (document.body.contains(claimBtn) && !inCooldown) {
           claimBtn.disabled = wasDisabled;
-          if (claimBtn.textContent === "Claiming…") {
+          if (claimBtn.textContent === t("claiming")) {
             claimBtn.textContent = originalText;
           }
         }
       }, 10000);
 
       claimBtn.setAttribute("disabled", "disabled");
-      claimBtn.textContent = "Claiming…";
+      claimBtn.textContent = t("claiming");
 
       try {
         const res = await v2Fetch(`${API_V2}/vouchers/claim`, {
@@ -4659,7 +4658,7 @@ Active players win more.`;
               }
             }
 
-            claimBtn.textContent = "Fully redeemed";
+            claimBtn.textContent = t("fully_redeemed");
             claimBtn.setAttribute("disabled", "disabled");
             shouldRestoreBtn = false;
             clearClaimError();
@@ -4702,7 +4701,7 @@ Active players win more.`;
           }
           claimBtn.dataset.mode = "copy";
           claimBtn.dataset.copyCode = codeText;
-          claimBtn.textContent = "📋 Copy";
+          claimBtn.textContent = t("copy");
           claimBtn.disabled = false;
           claimBtn.removeAttribute("data-dropid");
           claimBtn.removeAttribute("data-claim");
@@ -4730,7 +4729,7 @@ Active players win more.`;
         window.__claimInFlight = false;
         if (document.body.contains(claimBtn) && claimBtn.dataset.mode !== "copy" && shouldRestoreBtn) {
           claimBtn.disabled = wasDisabled;
-          if (claimBtn.textContent === "Claiming…") {
+          if (claimBtn.textContent === t("claiming")) {
             claimBtn.textContent = originalText;
           }
         }
@@ -4805,7 +4804,7 @@ Active players win more.`;
         }, 2000);
       } catch (copyErr) {
         console.warn("Manual copy failed", copyErr);
-        tgAlert("Unable to copy automatically. Please copy the code manually: " + code);
+        tgAlert(t("unable_to_copy") + code);
       }
     });
     let leaderboardInitOnce = false;
@@ -4825,16 +4824,16 @@ Active players win more.`;
       if (leaderboardSkeletonRendered) return;
       leaderboardSkeletonRendered = true;
       if (summaryCard) {
-        summaryCard.innerHTML = '<div class="leaderboard-summary">⏳ Loading weekly stats…</div>';
+        summaryCard.innerHTML = `<div class="leaderboard-summary">${t("loading_weekly_stats")}</div>`;
       }
       out.innerHTML = `
         <div class="leaderboard-block">
-          <div class="leaderboard-header"><h4>⭐ XP Leaderboard</h4></div>
-          <div class="leaderboard-empty">Loading...</div>
+          <div class="leaderboard-header"><h4>${t("xp_leaderboard")}</h4></div>
+          <div class="leaderboard-empty">${t("loading")}</div>
         </div>
         <div class="leaderboard-block">
-          <div class="leaderboard-header"><h4>🔗 Referral Leaderboard</h4></div>
-          <div class="leaderboard-empty">Loading...</div>
+          <div class="leaderboard-header"><h4>${t("referral_leaderboard")}</h4></div>
+          <div class="leaderboard-empty">${t("loading")}</div>
         </div>
       `;
     }
@@ -4854,7 +4853,7 @@ function setLeaderboardMeta(ts, { isStale = false } = {}) {
   const cadence = document.getElementById("leaderboard-cadence");
   if (lastUpdated) lastUpdated.textContent = formatLastUpdated(ts);
   if (cacheTag) cacheTag.style.display = isStale ? "inline-flex" : "none";
-  if (cadence) cadence.textContent = "🔄 Updates every 5 minutes";
+  if (cadence) cadence.textContent = t("refresh_cadence");
 }
 
 
@@ -4933,7 +4932,7 @@ function setLeaderboardMeta(ts, { isStale = false } = {}) {
     }
 
     function renderAffiliateRows(rows, { isAdmin = false, snapshotMeta = null } = {}) {
-      if (!rows.length) return '<div class="leaderboard-empty">No affiliate leaderboard data yet.</div>';
+      if (!rows.length) return `<div class="leaderboard-empty">${t("no_affiliate_data")}</div>`;
       const tableRows = rows.map((r) => {
         const extra = r.extra || {};
         const qualified = r.qualified_week ?? r.metric_value ?? extra.qualified_week ?? 0;
@@ -4986,7 +4985,7 @@ function setLeaderboardMeta(ts, { isStale = false } = {}) {
     async function loadAffiliateLeaderboard() {
       const target = document.getElementById("affiliate-leaderboard-output");
       if (!target) return;
-      target.innerHTML = '<div class="leaderboard-empty">Loading affiliate leaderboard...</div>';
+      target.innerHTML = `<div class="leaderboard-empty">${t("loading")}</div>`;
       try {
         const url = new URL(`${API_BASE}/api/affiliate/leaderboard`);
         url.searchParams.set("window", "week");
@@ -5014,9 +5013,9 @@ function setLeaderboardMeta(ts, { isStale = false } = {}) {
             <div class="summary-row"><span>Conversion</span><strong>${(Number(my.conversion_week || 0) * 100).toFixed(1)}%</strong></div>
             ${isAdmin ? `<div class="summary-row"><span>Flag</span><strong>${String(my.quality_flag || "new")}</strong></div>` : ""}
           </div>
-        ` : '<div class="leaderboard-empty">Login to see your affiliate stats.</div>';
+        ` : `<div class="leaderboard-empty">${t("login_affiliate_stats")}</div>`;
         if (!rows.length) {
-          target.innerHTML = `${isAdmin ? renderAffiliateHistoryControls(weeks) : ""}${myCard}<div class="leaderboard-empty">No affiliate leaderboard data yet.</div>`;
+          target.innerHTML = `${isAdmin ? renderAffiliateHistoryControls(weeks) : ""}${myCard}<div class="leaderboard-empty">${t("no_affiliate_data")}</div>`;
           affiliateLeaderboardLoaded = true;
           return;
         }
@@ -5114,7 +5113,7 @@ function setLeaderboardMeta(ts, { isStale = false } = {}) {
       if (!rows.length) {
         const empty = document.createElement("div");
         empty.className = "leaderboard-empty";
-        empty.textContent = "No data yet.";
+        empty.textContent = t("no_data");
         block.appendChild(empty);
         return block;
       }
@@ -5143,7 +5142,7 @@ function setLeaderboardMeta(ts, { isStale = false } = {}) {
       if (!rest.length) {
         const empty = document.createElement("div");
         empty.className = "leaderboard-empty";
-        empty.textContent = "No additional ranks yet.";
+        empty.textContent = t("no_additional_ranks");
         list.appendChild(empty);
       } else {
         rest.forEach((row, idx) => {
@@ -5177,15 +5176,15 @@ function setLeaderboardMeta(ts, { isStale = false } = {}) {
         const toggleBtn = document.createElement("button");
         toggleBtn.type = "button";
         toggleBtn.className = "btn btn-ghost";
-        toggleBtn.textContent = "Show More";
+        toggleBtn.textContent = t("show_more");
         toggleBtn.addEventListener("click", () => {
           const expanded = !list.classList.contains("collapsed");
           if (expanded) {
             list.classList.add("collapsed");
-            toggleBtn.textContent = "Show More";
+            toggleBtn.textContent = t("show_more");
           } else {
             list.classList.remove("collapsed");
-            toggleBtn.textContent = "View Less";
+            toggleBtn.textContent = t("view_less");
           }
         });
         toggleWrap.appendChild(toggleBtn);
@@ -5225,7 +5224,7 @@ function setLeaderboardMeta(ts, { isStale = false } = {}) {
       if (summaryCard) {
         const userStats = data?.user;
         if (!userStats || typeof userStats !== "object") {
-          summaryCard.innerHTML = '<div class="leaderboard-summary">Login to see your progress.</div>';
+          summaryCard.innerHTML = `<div class="leaderboard-summary">${t("login_to_see_progress")}</div>`;
         } else {
           const userMonthlyXp = Number(data.user?.monthly_xp || 0);
           const vipLine = userMonthlyXp < 800
@@ -5241,18 +5240,18 @@ function setLeaderboardMeta(ts, { isStale = false } = {}) {
       }
 
       const xpBlock = buildLeaderboardBlock({
-        title: "⭐ XP Leaderboard",
+        title: t("xp_leaderboard"),
         rows: xpRows,
         metricLabel: "XP",
-        championLabel: "XP Champion",
-        nudgeText: "Earn XP via daily check-in and community actions."
+        championLabel: t("xp_champion"),
+        nudgeText: t("earn_xp_nudge")
       });
       const refBlock = buildLeaderboardBlock({
-        title: "🔗 Referral Leaderboard",
+        title: t("referral_leaderboard"),
         rows: refRows,
         metricLabel: "Ref",
-        championLabel: "Referral Champion",
-        nudgeText: "Invite friends to climb the referral ranks."
+        championLabel: t("referral_champion"),
+        nudgeText: t("invite_friends_nudge")
       });
 
       out.appendChild(xpBlock);
