@@ -4059,7 +4059,37 @@ Active players win more.`;
         container.appendChild(primaryCard);
       }
 
-      if (pastDrops.length) {
+      // Render extra live drops and past drops toggle below the hero card
+      renderActiveCampaignsSection(extraDrops, pastDrops, userRegion);
+    }
+
+    function renderActiveCampaignsSection(extraDrops, pastDrops, userRegion) {
+      const section = document.getElementById("ap-campaigns-section");
+      const list = document.getElementById("ap-campaigns-list");
+      if (!section || !list) return;
+
+      const eligible = (Array.isArray(extraDrops) ? extraDrops : []).filter((drop) => {
+        if (!drop) return false;
+        const remaining = Number(drop?.visible_remaining ?? drop?.publicRemainingApprox ?? drop?.remainingApprox ?? 1);
+        const isEnded = drop?.isActive === false || (!Number.isNaN(remaining) && remaining <= 0 && !drop?.userClaimed);
+        return !isEnded || drop?.userClaimed;
+      });
+
+      const hasPast = Array.isArray(pastDrops) && pastDrops.length > 0;
+
+      if (!eligible.length && !hasPast) {
+        section.style.display = "none";
+        return;
+      }
+
+      section.style.display = "block";
+      list.innerHTML = "";
+      eligible.forEach((drop) => {
+        const card = createCampaignCard(drop, userRegion);
+        if (card) list.appendChild(card);
+      });
+
+      if (hasPast) {
         const toggleBtn = document.createElement("button");
         toggleBtn.type = "button";
         toggleBtn.className = "btn btn-ghost";
@@ -4076,37 +4106,9 @@ Active players win more.`;
           pastWrap.style.display = isHidden ? "grid" : "none";
           toggleBtn.textContent = isHidden ? "Hide past drops" : "View past drops";
         });
-        container.appendChild(toggleBtn);
-        container.appendChild(pastWrap);
+        list.appendChild(toggleBtn);
+        list.appendChild(pastWrap);
       }
-
-      // Populate "Active Campaigns" collapsible section with extra eligible drops
-      renderActiveCampaignsSection(extraDrops, userRegion);
-    }
-
-    function renderActiveCampaignsSection(extraDrops, userRegion) {
-      const section = document.getElementById("ap-campaigns-section");
-      const list = document.getElementById("ap-campaigns-list");
-      if (!section || !list) return;
-
-      const eligible = (Array.isArray(extraDrops) ? extraDrops : []).filter((drop) => {
-        if (!drop) return false;
-        const remaining = Number(drop?.visible_remaining ?? drop?.publicRemainingApprox ?? drop?.remainingApprox ?? 1);
-        const isEnded = drop?.isActive === false || (!Number.isNaN(remaining) && remaining <= 0 && !drop?.userClaimed);
-        return !isEnded || drop?.userClaimed;
-      });
-
-      if (!eligible.length) {
-        section.style.display = "none";
-        return;
-      }
-
-      section.style.display = "block";
-      list.innerHTML = "";
-      eligible.forEach((drop) => {
-        const card = createCampaignCard(drop, userRegion);
-        if (card) list.appendChild(card);
-      });
     }
 
     function clearClaimError() {
