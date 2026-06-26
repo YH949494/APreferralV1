@@ -1311,7 +1311,7 @@
                 <div class="ap-ref-bar" id="ap-ref-bar-3"></div>
               </div>
             </div>
-            <button onclick="getReferral()" class="ap-step-btn ap-step-btn-ghost">Get link</button>
+            <button onclick="getReferral()" class="ap-step-btn ap-step-btn-ghost" id="ap-get-referral-btn">Get link</button>
           </div>
           <!-- Inline referral link output (visible in new UI) -->
           <div id="referral-link-inline" style="display:none;margin-top:10px;">
@@ -3244,12 +3244,20 @@
     async function getReferral() {
       const display = document.getElementById("referral-link");
       const btn = document.getElementById("get-referral-btn");
-      const originalLabel = btn ? btn.textContent : "";
-      if (btn) {
-        btn.disabled = true;
-        btn.setAttribute("aria-busy", "true");
-        btn.textContent = "Getting link…";
+      const inlineBtn = document.getElementById("ap-get-referral-btn");
+      const inlineWrap = document.getElementById("referral-link-inline");
+      const inlineText = document.getElementById("referral-link-inline-text");
+
+      const allBtns = [btn, inlineBtn].filter(Boolean);
+      const originalLabels = allBtns.map(b => b.textContent);
+      allBtns.forEach(b => { b.disabled = true; b.setAttribute("aria-busy", "true"); b.textContent = "Getting…"; });
+
+      function showInlineError(msg) {
+        if (inlineText) { inlineText.textContent = msg; }
+        if (inlineWrap) { inlineWrap.style.display = "block"; }
+        if (display) { display.innerText = msg; }
       }
+
       try {
         const res = await fetch(`${API_BASE}/api/referral?user_id=${userId}&username=${username}`);
         const rawText = await res.text();
@@ -3257,7 +3265,7 @@
         try {
           data = JSON.parse(rawText);
         } catch {
-          display.innerText = "❌ Invalid server response.";
+          showInlineError("❌ Invalid server response.");
           return;
         }
 
@@ -3265,26 +3273,17 @@
         if (link) {
           latestReferralLink = link;
           hapticNotify("success");
-          display.innerText = link + "\n👆 Tap 'Copy to Clipboard' to copy";
-          // Also populate the inline referral area in the journey card
-          const inlineWrap = document.getElementById("referral-link-inline");
-          const inlineText = document.getElementById("referral-link-inline-text");
-          if (inlineWrap && inlineText) {
-            inlineText.textContent = link;
-            inlineWrap.style.display = "block";
-          }
+          if (display) { display.innerText = link + "\n👆 Tap 'Copy to Clipboard' to copy"; }
+          if (inlineText) { inlineText.textContent = link; }
+          if (inlineWrap) { inlineWrap.style.display = "block"; }
           loadReferralProgress();
         } else {
-          display.innerText = "❌ Failed to get link.";
+          showInlineError("❌ Failed to get link.");
         }
       } catch {
-        display.innerText = "❌ Error connecting to server.";
+        showInlineError("❌ Error connecting to server.");
       } finally {
-        if (btn) {
-          btn.disabled = false;
-          btn.removeAttribute("aria-busy");
-          btn.textContent = originalLabel;
-        }
+        allBtns.forEach((b, i) => { b.disabled = false; b.removeAttribute("aria-busy"); b.textContent = originalLabels[i]; });
       }
     }
 
