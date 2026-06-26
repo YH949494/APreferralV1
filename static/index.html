@@ -4073,7 +4073,7 @@ Active players win more.`;
       if (heroSub) heroSub.textContent = primary.hero_subtitle || "No deposit required · New & active players";
 
       if (heroImg) {
-        const heroImgUrl = primary.hero_image || primary.heroImage || primary.image || "redesign/hero-band.jpg";
+        const heroImgUrl = primary.hero_image || primary.heroImage || primary.image || "/static/redesign/hero-band.jpg";
         const heroImgSource = (primary.hero_image || primary.heroImage || primary.image) ? "api" : "fallback";
         console.log(`[HERO_CARD][IMAGE] source=${heroImgSource} url=${heroImgUrl}`);
         heroImg.src = heroImgUrl;
