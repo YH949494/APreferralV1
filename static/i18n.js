@@ -607,7 +607,8 @@
   /* ------------------------------------------------------------------ */
   function applyTranslations() {
     // data-i18n attributes — simple textContent replacement
-    document.querySelectorAll("[data-i18n]").forEach(function (el) {
+    // Skip elements marked data-i18n-dynamic: JS owns their content after first load
+    document.querySelectorAll("[data-i18n]:not([data-i18n-dynamic])").forEach(function (el) {
       const key = el.getAttribute("data-i18n");
       el.textContent = t(key);
     });
