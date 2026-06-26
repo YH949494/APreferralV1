@@ -4072,11 +4072,12 @@ Active players win more.`;
       if (heroTitle) heroTitle.textContent = primary.hero_title || primary.name || "Campaign Reward";
       if (heroSub) heroSub.textContent = primary.hero_subtitle || "No deposit required · New & active players";
 
-      if (heroImg && primary.hero_image) {
-        heroImg.src = primary.hero_image;
+      if (heroImg) {
+        const heroImgUrl = primary.hero_image || primary.heroImage || primary.image || "redesign/hero-band.jpg";
+        const heroImgSource = (primary.hero_image || primary.heroImage || primary.image) ? "api" : "fallback";
+        console.log(`[HERO_CARD][IMAGE] source=${heroImgSource} url=${heroImgUrl}`);
+        heroImg.src = heroImgUrl;
         heroImg.style.display = "";
-      } else if (heroImg) {
-        heroImg.style.display = "none";
       }
 
       const remaining = primary.visible_remaining;
