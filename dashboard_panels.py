@@ -4050,6 +4050,13 @@ def build_settings_panel(env: Mapping | None = None, *, constants: Mapping | Non
         },
     }
 
+    databot_settings = {
+        "dashboard_url": _env(env, "DATABOT_DASHBOARD_URL"),
+        "enabled": _env(env, "DATABOT_ENABLED", "false"),
+        "base_url": _env(env, "DATABOT_BASE_URL"),
+        "timeout_seconds": _env(env, "DATABOT_TIMEOUT_SECONDS", "5"),
+    }
+
     security = {
         "secrets_configured": {
             name: bool(env.get(name)) for name in sorted(_SECRET_ENV_NAMES)
@@ -4067,6 +4074,7 @@ def build_settings_panel(env: Mapping | None = None, *, constants: Mapping | Non
             "affiliate_settings": affiliate_settings,
             "xp_checkin_settings": xp_checkin_settings,
             "bot_settings": bot_settings,
+            "databot_settings": databot_settings,
             "security": security,
         },
     }

@@ -523,6 +523,31 @@ def test_settings_panel_secret_value_field_is_masked_dict():
     assert "salty" not in repr(out)
 
 
+def test_settings_panel_databot_dashboard_url_default_empty():
+    out = dp.build_settings_panel({}, constants={})
+    databot = out["sections"]["databot_settings"]
+    assert databot["dashboard_url"] is None
+
+
+def test_settings_panel_databot_dashboard_url_hidden_when_empty():
+    out = dp.build_settings_panel({"DATABOT_DASHBOARD_URL": ""}, constants={})
+    databot = out["sections"]["databot_settings"]
+    assert not databot["dashboard_url"]
+
+
+def test_settings_panel_databot_dashboard_url_visible_when_set():
+    env = {"DATABOT_DASHBOARD_URL": "https://databot.example.com/dashboard"}
+    out = dp.build_settings_panel(env, constants={})
+    databot = out["sections"]["databot_settings"]
+    assert databot["dashboard_url"] == "https://databot.example.com/dashboard"
+
+
+def test_settings_panel_databot_dashboard_url_uses_configured_value():
+    url = "https://custom.databot.internal/admin"
+    out = dp.build_settings_panel({"DATABOT_DASHBOARD_URL": url}, constants={})
+    assert out["sections"]["databot_settings"]["dashboard_url"] == url
+
+
 # ---------------------------------------------------------------------------
 # Segment overview
 # ---------------------------------------------------------------------------
