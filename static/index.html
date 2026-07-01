@@ -4117,14 +4117,17 @@ Active players win more.`;
       const drops = [];
       if (primaryDrop) drops.push(primaryDrop);
       if (Array.isArray(extraDrops) && extraDrops.length) drops.push(...extraDrops);
+      const isAffiliateBundleDrop = (drop) => drop?.reward_type === "affiliate_bundle" || drop?.type === "affiliate_bundle";
+      const affiliateBundleDrops = drops.filter(isAffiliateBundleDrop);
+      const campaignDrops = drops.filter((drop) => !isAffiliateBundleDrop(drop));
 
-      const liveDrops = drops.filter((drop) => {
+      const liveDrops = campaignDrops.filter((drop) => {
         const remaining = Number(drop?.visible_remaining ?? drop?.publicRemainingApprox ?? drop?.remainingApprox ?? 1);
         const isEnded = drop?.isActive === false || (!Number.isNaN(remaining) && remaining <= 0 && !drop?.userClaimed);
         return !isEnded || drop?.userClaimed;
       });
 
-      const pastDrops = drops.filter((drop) => {
+      const pastDrops = campaignDrops.filter((drop) => {
         const remaining = Number(drop?.visible_remaining ?? drop?.publicRemainingApprox ?? drop?.remainingApprox ?? 1);
         const isEnded = drop?.isActive === false || (!Number.isNaN(remaining) && remaining <= 0 && !drop?.userClaimed);
         return isEnded && !drop?.userClaimed;
@@ -4135,6 +4138,7 @@ Active players win more.`;
         if (dropState) dropState.style.display = "none";
         if (noDropState) noDropState.style.display = "block";
         clearInterval(_heroCountdownTimer);
+        renderActiveCampaignsSection(affiliateBundleDrops, pastDrops, userRegion);
         return;
       }
 
@@ -4180,7 +4184,8 @@ Active players win more.`;
       }
 
       // Render extra live drops and past drops toggle below the hero card
-      renderActiveCampaignsSection(extraDrops, pastDrops, userRegion);
+      const secondaryDrops = liveDrops.slice(1).concat(affiliateBundleDrops);
+      renderActiveCampaignsSection(secondaryDrops, pastDrops, userRegion);
     }
 
     function renderActiveCampaignsSection(extraDrops, pastDrops, userRegion) {

@@ -4752,7 +4752,7 @@ def api_visible():
      
         drops, user_region = user_visible_drops(user, ref, tg_user=tg_user)
         if uid is not None:
-            drops = affiliate_bundle_visible_cards(db, user_id=uid) + drops
+            drops = drops + affiliate_bundle_visible_cards(db, user_id=uid)
         return _miniapp_no_store_json({
             "visibilityMode": "stacked",
             "nowUtc": ref.isoformat(),

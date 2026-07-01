@@ -190,6 +190,21 @@ def _ledger_has_affiliate_bundle(ledger: dict | None) -> bool:
     return bool(ledger.get("vouchers"))
 
 
+def _affiliate_bundle_codes(ledger: dict | None) -> list[str]:
+    codes = []
+    for item in (ledger or {}).get("vouchers") or []:
+        code = str((item or {}).get("code") or "").strip()
+        if code:
+            codes.append(code)
+    return codes
+
+
+def _affiliate_bundle_matches_pool_rows(ledger: dict | None, pool_rows: list[dict]) -> bool:
+    bundle_codes = set(_affiliate_bundle_codes(ledger))
+    pool_codes = {str((row or {}).get("code") or "").strip() for row in pool_rows or [] if (row or {}).get("code")}
+    return bool(bundle_codes) and bundle_codes == pool_codes
+
+
 def _pool_exists(db, pool_id: str) -> bool:
     return (
         db.voucher_pools.find_one(
@@ -290,6 +305,23 @@ def _rollback_pool_vouchers(db, *, vouchers: list[dict], ledger_id, reason: str)
     return rolled_back
 
 
+def _guarded_rollback_attempt_vouchers(db, *, vouchers: list[dict], ledger_id, reason: str, now_utc: datetime):
+    latest = db.affiliate_ledger.find_one({"_id": ledger_id})
+    latest = _finalize_issued_if_voucher_exists(db, ledger=latest, now_utc=now_utc)
+    if latest and latest.get("status") == "ISSUED" and _ledger_has_affiliate_bundle(latest):
+        return latest
+
+    issued_rows = _issued_pool_vouchers_for_ledger(db, ledger_id=ledger_id)
+    if _affiliate_bundle_matches_pool_rows(latest, issued_rows):
+        return latest
+
+    if latest and latest.get("status") != SETTLING_STATUS:
+        return latest
+
+    _rollback_pool_vouchers(db, vouchers=vouchers, ledger_id=ledger_id, reason=reason)
+    return db.affiliate_ledger.find_one({"_id": ledger_id})
+
+
 def _available_pool_count(db, *, pool_id: str) -> int:
     return int(
         db.voucher_pools.count_documents(
@@ -314,7 +346,13 @@ def _claim_affiliate_bundle_from_pool(db, *, pool_id: str, ledger_id, user_id: i
     for _ in range(needed):
         voucher = _claim_voucher_from_pool(db, pool_id=pool_id, ledger_id=ledger_id, user_id=user_id, now_utc=now_utc)
         if not voucher:
-            _rollback_pool_vouchers(db, vouchers=claimed, ledger_id=ledger_id, reason="affiliate_bundle_partial_claim")
+            _guarded_rollback_attempt_vouchers(
+                db,
+                vouchers=claimed,
+                ledger_id=ledger_id,
+                reason="affiliate_bundle_partial_claim",
+                now_utc=now_utc,
+            )
             return None
         claimed.append(voucher)
     return claimed
@@ -423,7 +461,6 @@ def _reconcile_affiliate_bundle_from_issued_pool(db, *, ledger, now_utc: datetim
         return None
     required = int(spec["voucher_count"])
     if len(issued) != required:
-        _rollback_pool_vouchers(db, vouchers=issued, ledger_id=ledger_id, reason="affiliate_bundle_incomplete_reconcile")
         return None
     stored = _store_affiliate_bundle_on_ledger(db, ledger_id=ledger_id, tier=tier, vouchers=issued, now_utc=now_utc)
     if stored:
@@ -549,8 +586,16 @@ def _issue_affiliate_ledger_from_pool(db, ledger, now_utc: datetime):
             now_utc=now_utc,
         )
         if not issued:
-            _rollback_pool_vouchers(db, vouchers=vouchers, ledger_id=ledger_id, reason="affiliate_bundle_ledger_update_failed")
-            return db.affiliate_ledger.find_one({"_id": ledger_id})
+            latest = _guarded_rollback_attempt_vouchers(
+                db,
+                vouchers=vouchers,
+                ledger_id=ledger_id,
+                reason="affiliate_bundle_ledger_update_failed",
+                now_utc=now_utc,
+            )
+            if latest and latest.get("status") == "ISSUED" and _ledger_has_affiliate_bundle(latest):
+                return latest
+            return latest or db.affiliate_ledger.find_one({"_id": ledger_id})
         logger.info(
             "[AFFILIATE][BUNDLE_ISSUE_OK] ledger_id=%s user_id=%s tier=%s pool_id=%s count=%s total=%s",
             ledger_id,
@@ -561,6 +606,12 @@ def _issue_affiliate_ledger_from_pool(db, ledger, now_utc: datetime):
             issued.get("total_value"),
         )
         return issued
+
+    latest = _finalize_issued_if_voucher_exists(db, ledger=db.affiliate_ledger.find_one({"_id": ledger_id}), now_utc=now_utc)
+    if latest and latest.get("status") == "ISSUED":
+        return latest
+    if _has_issued_pool_voucher_for_ledger(db, ledger_id=ledger_id):
+        return latest
 
     db.affiliate_ledger.update_one(
         {"_id": ledger_id, "status": SETTLING_STATUS, **_no_voucher_filter()},
