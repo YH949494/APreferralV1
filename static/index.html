@@ -3889,6 +3889,88 @@ Active players win more.`;
       title.textContent = drop?.name || "Campaign reward";
       card.appendChild(title);
 
+      const isAffiliateBundle = drop?.reward_type === "affiliate_bundle" || drop?.type === "affiliate_bundle";
+      if (isAffiliateBundle) {
+        const tierText = (drop?.affiliate_tier || "").trim();
+        const iconText = drop?.tier_icon || "🎁";
+        const vouchers = Array.isArray(drop?.vouchers) ? drop.vouchers : [];
+        const voucherCount = Number(drop?.voucher_count ?? vouchers.length);
+        const totalValue = Number(drop?.total_value ?? vouchers.reduce((sum, item) => sum + Number(item?.value || 0), 0));
+        const currency = drop?.currency || "$";
+        title.textContent = `${iconText} Affiliate Reward${tierText ? ` - ${tierText}` : ""}`;
+
+        const countMeta = document.createElement("p");
+        countMeta.className = "campaign-meta";
+        countMeta.textContent = `✅ ${Number.isNaN(voucherCount) ? vouchers.length : voucherCount} vouchers available`;
+        card.appendChild(countMeta);
+
+        const totalMeta = document.createElement("p");
+        totalMeta.className = "campaign-meta";
+        totalMeta.textContent = `💰 Total value: ${currency}${Number.isNaN(totalValue) ? 0 : totalValue}`;
+        card.appendChild(totalMeta);
+
+        if (drop?.issued_at || drop?.claimedAt) {
+          const issuedMeta = document.createElement("p");
+          issuedMeta.className = "campaign-meta";
+          issuedMeta.textContent = `Issued: ${fmtKL(drop.issued_at || drop.claimedAt)}`;
+          card.appendChild(issuedMeta);
+        }
+
+        const voucherPanel = document.createElement("div");
+        voucherPanel.className = "campaign-message";
+        voucherPanel.style.display = "none";
+        voucherPanel.style.marginTop = "8px";
+        voucherPanel.style.gap = "8px";
+        voucherPanel.style.flexDirection = "column";
+
+        vouchers.forEach((voucher, index) => {
+          const codeText = (voucher?.code ? String(voucher.code) : "").trim();
+          if (!codeText) return;
+
+          const itemWrap = document.createElement("div");
+          itemWrap.style.display = "flex";
+          itemWrap.style.flexDirection = "column";
+          itemWrap.style.gap = "6px";
+          itemWrap.style.padding = "8px 0";
+          itemWrap.style.borderTop = "1px solid var(--border-soft)";
+
+          const voucherLabel = document.createElement("p");
+          voucherLabel.className = "campaign-meta";
+          voucherLabel.textContent = `🎫 Voucher ${index + 1} (${currency}${Number(voucher?.value || 0)})`;
+          itemWrap.appendChild(voucherLabel);
+
+          const codeLine = document.createElement("p");
+          codeLine.className = "campaign-message";
+          codeLine.textContent = codeText;
+          itemWrap.appendChild(codeLine);
+
+          const copyBtn = document.createElement("button");
+          copyBtn.type = "button";
+          copyBtn.className = "btn btn-ghost";
+          copyBtn.textContent = t("copy");
+          copyBtn.dataset.copyCode = codeText;
+          itemWrap.appendChild(copyBtn);
+
+          voucherPanel.appendChild(itemWrap);
+        });
+
+        const toggleBtn = document.createElement("button");
+        toggleBtn.type = "button";
+        toggleBtn.className = "btn btn-primary";
+        toggleBtn.textContent = "▼ Show Voucher Codes";
+        toggleBtn.setAttribute("aria-expanded", "false");
+        toggleBtn.onclick = () => {
+          const isOpen = voucherPanel.style.display !== "none";
+          voucherPanel.style.display = isOpen ? "none" : "flex";
+          toggleBtn.textContent = isOpen ? "▼ Show Voucher Codes" : "▲ Hide Voucher Codes";
+          toggleBtn.setAttribute("aria-expanded", isOpen ? "false" : "true");
+        };
+
+        card.appendChild(voucherPanel);
+        card.appendChild(toggleBtn);
+        return card;
+      }
+
       const windowText = campaignWindowText(drop);
       if (windowText) {
         const meta = document.createElement("p");

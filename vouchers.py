@@ -23,7 +23,12 @@ import config as _cfg
 from database import db, users_collection
 from time_utils import as_aware_utc
 from onboarding import record_onboarding_start, record_visible_ping
-from affiliate_rewards import approve_affiliate_ledger, reject_affiliate_ledger, issue_current_month_affiliate_rewards
+from affiliate_rewards import (
+    affiliate_bundle_visible_cards,
+    approve_affiliate_ledger,
+    reject_affiliate_ledger,
+    issue_current_month_affiliate_rewards,
+)
 from conversion_tracking import send_meta_event, send_tiktok_event
 from referral_rules import build_public_referral_status
 
@@ -4746,6 +4751,8 @@ def api_visible():
             )
      
         drops, user_region = user_visible_drops(user, ref, tg_user=tg_user)
+        if uid is not None:
+            drops = affiliate_bundle_visible_cards(db, user_id=uid) + drops
         return _miniapp_no_store_json({
             "visibilityMode": "stacked",
             "nowUtc": ref.isoformat(),
