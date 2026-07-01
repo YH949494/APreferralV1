@@ -5943,6 +5943,7 @@ def get_bonus_voucher():
             {
                 "user_id": user_id,
                 "status": "ISSUED",
+                "reward_type": {"$ne": "affiliate_bundle"},
                 "voucher_code": {"$exists": True, "$nin": [None, ""]},
             },
             sort=[("updated_at", DESCENDING), ("created_at", DESCENDING), ("_id", DESCENDING)],
@@ -5999,6 +6000,7 @@ def get_affiliate_bonus_vouchers():
                 {
                     "user_id": user_id,
                     "status": "ISSUED",
+                    "reward_type": {"$ne": "affiliate_bundle"},
                     "voucher_code": {"$exists": True, "$nin": [None, ""]},
                 }
             ).sort([("updated_at", DESCENDING), ("created_at", DESCENDING), ("_id", DESCENDING)])
