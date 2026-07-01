@@ -6944,8 +6944,11 @@ def admin_drop_actions(drop_id):
     elif op == "set_dates":
         starts_str = data.get("startsAt")
         ends_str = data.get("endsAt")
+        name = data.get("name")
         if not starts_str or not ends_str:
             return jsonify({"status": "error", "code": "missing_fields"}), 400
+        if name is not None and (not isinstance(name, str) or not name.strip()):
+            return jsonify({"status": "error", "code": "bad_request", "message": "name cannot be empty"}), 400
         try:
             new_starts = parse_kl_local(starts_str)
             new_ends = parse_kl_local(ends_str)
@@ -6953,7 +6956,10 @@ def admin_drop_actions(drop_id):
             return jsonify({"status": "error", "code": "bad_request", "message": str(exc)}), 400
         if new_ends <= new_starts:
             return jsonify({"status": "error", "code": "bad_request", "message": "endsAt must be after startsAt"}), 400
-        db.drops.update_one({"_id": drop["_id"]}, {"$set": {"startsAt": new_starts, "endsAt": new_ends}})
+        update_doc = {"startsAt": new_starts, "endsAt": new_ends}
+        if name is not None:
+            update_doc["name"] = name.strip()
+        db.drops.update_one({"_id": drop["_id"]}, {"$set": update_doc})
     else:
         return jsonify({"status": "error", "code": "bad_request"}), 400
 
