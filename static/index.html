@@ -1704,7 +1704,11 @@
   <!-- EDIT DROP DATES MODAL -->
   <div id="adm_edit_dates_modal" style="display:none;position:fixed;z-index:2000;left:0;top:0;width:100%;height:100%;background:rgba(0,0,0,0.6);">
     <div style="background:#1e293b;color:#fff;margin:12% auto;padding:20px;border-radius:12px;width:90%;max-width:360px;box-shadow:0 8px 32px rgba(0,0,0,0.5);">
-      <h3 style="margin:0 0 16px;font-size:16px;">Edit Drop Dates <span style="font-size:12px;color:#94a3b8;">(KL time)</span></h3>
+      <h3 style="margin:0 0 16px;font-size:16px;">Edit Drop <span style="font-size:12px;color:#94a3b8;">(KL time)</span></h3>
+      <label style="display:block;margin-bottom:12px;font-size:13px;">
+        Name
+        <input type="text" id="adm_edit_name" style="display:block;width:100%;margin-top:4px;padding:7px;border-radius:6px;border:1px solid #334155;background:#0f172a;color:#fff;font-size:13px;box-sizing:border-box;">
+      </label>
       <label style="display:block;margin-bottom:12px;font-size:13px;">
         Start
         <input type="datetime-local" id="adm_edit_starts_at" style="display:block;width:100%;margin-top:4px;padding:7px;border-radius:6px;border:1px solid #334155;background:#0f172a;color:#fff;font-size:13px;box-sizing:border-box;">
@@ -2511,7 +2515,7 @@
               <button data-op="start_now" data-id="${id}">Start</button>
               <button data-op="pause"     data-id="${id}">Pause</button>
               <button data-op="end_now"   data-id="${id}">End</button>
-              <button type="button" class="btn btn-secondary adm-edit-dates-btn" data-id="${id}" data-starts="${d.startsAt || ""}" data-ends="${d.endsAt || ""}">✏️ Dates</button>
+              <button type="button" class="btn btn-secondary adm-edit-dates-btn" data-id="${id}" data-name="${escapeHtml(d.name || "")}" data-starts="${escapeHtml(d.startsAt || "")}" data-ends="${escapeHtml(d.endsAt || "")}">🖊 Edit</button>
               <button type="button" class="btn btn-secondary copy-drop-id-btn" data-copy-dropid="${id}">📋 Copy ID</button>
             </td>`;
           tbody.appendChild(tr);
@@ -4579,6 +4583,7 @@ Active players win more.`;
         const btn = e.target.closest(".adm-edit-dates-btn");
         if (!btn) return;
         _editDropId = btn.getAttribute("data-id");
+        document.getElementById("adm_edit_name").value = btn.getAttribute("data-name") || "";
         document.getElementById("adm_edit_starts_at").value = isoToKLInputValue(btn.getAttribute("data-starts"));
         document.getElementById("adm_edit_ends_at").value   = isoToKLInputValue(btn.getAttribute("data-ends"));
         document.getElementById("adm_edit_dates_modal").style.display = "block";
@@ -4598,8 +4603,10 @@ Active players win more.`;
 
       document.getElementById("adm_edit_dates_save").addEventListener("click", async () => {
         if (!_editDropId) return;
+        const nameVal = document.getElementById("adm_edit_name").value.trim();
         const startsVal = document.getElementById("adm_edit_starts_at").value;
         const endsVal   = document.getElementById("adm_edit_ends_at").value;
+        if (!nameVal) { tgAlert("Name is required."); return; }
         if (!startsVal || !endsVal) { tgAlert("Both start and end date/time are required."); return; }
         const startsAt = toKLStringFromNative(startsVal);
         const endsAt   = toKLStringFromNative(endsVal);
@@ -4613,7 +4620,7 @@ Active players win more.`;
           saveBtn.textContent = "Saving…";
           const res = await v2Fetch(`${API_V2}/admin/drops/${_editDropId}/actions${tail}`, {
             method: "POST",
-            body: JSON.stringify({ op: "set_dates", startsAt, endsAt })
+            body: JSON.stringify({ op: "set_dates", name: nameVal, startsAt, endsAt })
           });
           let payload = null;
           try { payload = await res.json(); } catch {}
@@ -4624,7 +4631,7 @@ Active players win more.`;
           _editDropId = null;
           adm_list && adm_list();
         } catch (err) {
-          tgAlert(`Failed to update dates: ${err.message}`);
+          tgAlert(`Failed to update drop: ${err.message}`);
         } finally {
           const saveBtn = document.getElementById("adm_edit_dates_save");
           if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = "Save"; }
