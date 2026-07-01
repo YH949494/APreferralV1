@@ -1048,6 +1048,30 @@
     .admin-collapse-panel { margin-top: 10px; }
     #adm_edit_dates::-webkit-calendar-picker-indicator, #adm_starts::-webkit-calendar-picker-indicator, #adm_ends::-webkit-calendar-picker-indicator, #adm_edit_starts_at::-webkit-calendar-picker-indicator, #adm_edit_ends_at::-webkit-calendar-picker-indicator { filter: invert(1); cursor: pointer; }
 
+    /* ===== ADMIN AFFILIATE POOLS DARK MODE ===== */
+    #admin-affiliate-pools { background: #111827 !important; border: 1px solid #374151 !important; }
+    #admin-affiliate-pools h5 { color: #f9fafb !important; font-weight: 700; }
+    #admin-affiliate-pools label { color: #f9fafb !important; font-size: 13px !important; }
+    #admin-affiliate-pools .admin-label { color: #9ca3af; }
+    #admin-affiliate-pools select { background: #1f2937 !important; color: #f9fafb !important; border: 1px solid #374151 !important; }
+    #admin-affiliate-pools select option { background: #1f2937; color: #f9fafb; }
+    #admin-affiliate-pools input { background: #1f2937 !important; color: #f9fafb !important; border: 1px solid #374151 !important; }
+    #admin-affiliate-pools input::placeholder { color: #9ca3af; }
+    #admin-affiliate-pools textarea { background: #1f2937 !important; color: #f9fafb !important; border: 1px solid #374151 !important; }
+    #admin-affiliate-pools textarea::placeholder { color: #9ca3af; }
+    #admin-affiliate-pools pre { background: #1f2937 !important; border: 1px solid #374151 !important; color: #e5e7eb !important; }
+    #admin-affiliate-pools table { width: 100%; border-collapse: collapse; }
+    #admin-affiliate-pools table thead { background: rgba(255, 94, 0, 0.1); }
+    #admin-affiliate-pools table th { color: #ff5e00; font-weight: 700; padding: 8px; text-align: left; border-bottom: 1px solid #374151; }
+    #admin-affiliate-pools table td { color: #f9fafb; padding: 8px; border-bottom: 1px solid #374151; }
+    .aff-pool-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; margin-top: 10px; }
+    .aff-pool-card { background: #1f2937; border: 1px solid #374151; border-radius: 6px; padding: 12px; display: flex; flex-direction: column; gap: 6px; }
+    .aff-pool-card-name { color: #ff5e00; font-weight: 700; font-size: 13px; }
+    .aff-pool-card-stat { color: #9ca3af; font-size: 12px; }
+    .aff-pool-card-value { color: #f9fafb; font-weight: 600; font-size: 14px; }
+    .aff-pool-card.low-stock { border-color: #f87171; background: rgba(248, 113, 113, 0.08); }
+    .aff-pool-card.low-stock .aff-pool-card-name { color: #fca5a5; }
+
     /* ===== WELCOME PROGRESS ===== */
     .referral-progress-card { margin-top: 14px; padding: 14px; border: 1px solid var(--border-light); border-radius: var(--radius-md); background: linear-gradient(180deg, rgba(255,94,0,.1), rgba(255,94,0,.04)); display: grid; gap: 8px; }
     .referral-progress-bar { width: 100%; height: 10px; background: rgba(255,255,255,.14); border-radius: 999px; overflow: hidden; }
@@ -5841,14 +5865,22 @@ ${referral}`;
       const res = await v2Fetch(`${API_V2}/admin/pools/summary${buildAdminQueryTail()}`);
       const data = await res.json();
       if (data && Array.isArray(data.items)) {
-        let html = "<table><thead><tr><th>Pool</th><th>Available</th><th>Issued</th></tr></thead><tbody>";
+        let html = '<div class="aff-pool-cards">';
         for (const item of data.items) {
           const pool = escapeHtml(item.pool_id || "");
-          const available = escapeHtml((item.available ?? "0").toString());
-          const issued = escapeHtml((item.issued ?? "0").toString());
-          html += `<tr><td>${pool}</td><td>${available}</td><td>${issued}</td></tr>`;
+          const available = Number(item.available ?? 0);
+          const issued = Number(item.issued ?? 0);
+          const isLowStock = available <= 10;
+          const cardClass = isLowStock ? 'aff-pool-card low-stock' : 'aff-pool-card';
+          html += `<div class="${cardClass}">
+            <div class="aff-pool-card-name">${pool}</div>
+            <div class="aff-pool-card-stat">Available</div>
+            <div class="aff-pool-card-value">${available}</div>
+            <div class="aff-pool-card-stat">Issued</div>
+            <div class="aff-pool-card-value">${issued}</div>
+          </div>`;
         }
-        html += "</tbody></table>";
+        html += '</div>';
         out.innerHTML = html;
       } else {
         out.textContent = JSON.stringify(data, null, 2);
