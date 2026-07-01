@@ -955,6 +955,13 @@
     .affiliate-table { width: 100%; border-collapse: collapse; font-size: 13px; }
     .affiliate-table th, .affiliate-table td { border-bottom: 1px solid rgba(255,255,255,.12); padding: 6px; text-align: left; }
 
+    /* Dark mode styles for Admin Affiliate Leaderboard */
+    .admin-affiliate-leaderboard-dark { background: #1f2937 !important; }
+    .admin-affiliate-leaderboard-dark .affiliate-table { color: #f9fafb; }
+    .admin-affiliate-leaderboard-dark .affiliate-table th { background: #111827; color: #f9fafb; font-weight: 600; border-bottom: 1px solid #374151; }
+    .admin-affiliate-leaderboard-dark .affiliate-table td { border-bottom: 1px solid #374151; color: #f9fafb; }
+    .admin-affiliate-leaderboard-dark .leaderboard-empty { color: #9ca3af; }
+
     /* ===== SECTION (generic, used by leaderboard + admin + welcome-progress) ===== */
     .section {
       background: linear-gradient(180deg, rgba(255,255,255,.03), rgba(255,255,255,.01)), var(--bg-card);
@@ -1645,8 +1652,8 @@
             </div>
           </div>
           <button id="admin-past-affiliate-toggle" type="button" class="admin-collapse-toggle"></button>
-          <div id="admin-affiliate-leaderboard-wrap" style="display:none; background:#fff; border:1px solid #ddd; border-radius:8px; padding:12px; margin-top:14px; overflow-x:auto;">
-            <h5 style="margin:0 0 8px 0;">📊 Past Week Affiliate Leaderboard</h5>
+          <div id="admin-affiliate-leaderboard-wrap" class="admin-affiliate-leaderboard-dark" style="display:none; background:#1f2937; border:1px solid #374151; border-radius:8px; padding:12px; margin-top:14px; overflow-x:auto;">
+            <h5 style="margin:0 0 8px 0; color:#f9fafb;">📊 Past Week Affiliate Leaderboard</h5>
             <div id="admin-affiliate-leaderboard-output">Loading…</div>
           </div>
           <div class="admin-monitoring-block">
