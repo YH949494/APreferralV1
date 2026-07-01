@@ -2515,7 +2515,7 @@
               <button data-op="start_now" data-id="${id}">Start</button>
               <button data-op="pause"     data-id="${id}">Pause</button>
               <button data-op="end_now"   data-id="${id}">End</button>
-              <button type="button" class="btn btn-secondary adm-edit-dates-btn" data-id="${id}" data-name="${d.name || ""}" data-starts="${d.startsAt || ""}" data-ends="${d.endsAt || ""}">🖊 Edit</button>
+              <button type="button" class="btn btn-secondary adm-edit-dates-btn" data-id="${id}" data-name="${escapeHtml(d.name || "")}" data-starts="${escapeHtml(d.startsAt || "")}" data-ends="${escapeHtml(d.endsAt || "")}">🖊 Edit</button>
               <button type="button" class="btn btn-secondary copy-drop-id-btn" data-copy-dropid="${id}">📋 Copy ID</button>
             </td>`;
           tbody.appendChild(tr);
