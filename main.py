@@ -60,7 +60,7 @@ from vouchers import (
 )
 from admin_auth import admin_auth_bp, configure_admin_session
 from referral_rules import calc_referral_progress, REFERRAL_XP_PER_SUCCESS, REFERRAL_BONUS_INTERVAL, REFERRAL_BONUS_XP, build_public_referral_status
-from scheduler import settle_pending_referrals, settle_referral_snapshots, settle_xp_snapshots, evaluate_affiliate_simulated_ledgers, compute_affiliate_daily_kpi_yesterday, run_invitee_subscription_audit, reconcile_drop_statuses, post_growth_leaderboard_weekly, process_welcome_voucher_lifecycle
+from scheduler import settle_pending_referrals, settle_referral_snapshots, settle_xp_snapshots, evaluate_affiliate_simulated_ledgers, compute_affiliate_daily_kpi_yesterday, run_invitee_subscription_audit, reconcile_drop_statuses, post_growth_leaderboard_weekly, process_welcome_voucher_lifecycle, process_welcome_reminders
 from affiliate_dashboard_export import run_affiliate_dashboard_export_monthly_scheduled
 from referral_rate_limit import consume_referral_rate_limits
 from affiliate_leaderboard import (
@@ -4239,6 +4239,24 @@ def dashboard_vouchers():
     )
 
 
+@admin_bp.get("/api/admin/dashboard/welcome-journey")
+def dashboard_welcome_journey():
+    ok, err = require_admin_from_query()
+    if not ok:
+        msg, code = err
+        return jsonify({"success": False, "message": msg}), code
+    window = _panels._normalize_dashboard_window(request.args.get("window"))
+    return _panel_cached(
+        f"panel:welcome_journey:{window}",
+        lambda: _panels.build_welcome_journey_panel(
+            welcome_eligibility_col=welcome_eligibility_collection,
+            welcome_analytics_events_col=db["welcome_analytics_events"],
+            now=_utc_now(),
+            window=window,
+        ),
+    )
+
+
 @admin_bp.get("/api/admin/dashboard/referrals")
 def dashboard_referrals():
     ok, err = require_admin_from_query()
@@ -7321,6 +7339,13 @@ def run_worker():
         trigger=CronTrigger(minute="*/30", timezone=KL_TZ),
         id="welcome_voucher_lifecycle",
         name="Welcome Voucher Lifecycle",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        process_welcome_reminders,
+        trigger=CronTrigger(minute=0, timezone=KL_TZ),
+        id="welcome_progress_reminders",
+        name="Welcome Voucher Progress Reminders",
         replace_existing=True,
     )
     scheduler.add_job(

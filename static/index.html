@@ -1084,11 +1084,12 @@
     .referral-progress-bar { width: 100%; height: 10px; background: rgba(255,255,255,.14); border-radius: 999px; overflow: hidden; }
     .referral-progress-meta { font-size: 13px; color: var(--text-muted); display: grid; gap: 4px; }
     .welcome-progress-card { margin-top: 6px; padding: 14px; border: 1px solid var(--border-light); border-radius: var(--radius-md); background: linear-gradient(180deg, rgba(255,94,0,.12), rgba(255,94,0,.04)); display: grid; gap: 9px; }
-    .welcome-progress-bar { width: 100%; height: 10px; background: rgba(255,255,255,.14); border-radius: 999px; overflow: hidden; }
-    .welcome-progress-fill { height: 100%; width: 0%; background: linear-gradient(90deg, #ff9b62, var(--ap-orange)); transition: width .25s ease; }
+    .welcome-progress-squares { font-size: 22px; letter-spacing: 3px; }
     .welcome-progress-meta { font-size: 13px; color: var(--text-muted); display: grid; gap: 4px; }
     .welcome-progress-title { margin: 0; font-size: 16px; font-weight: 700; color: var(--text-main); }
     .welcome-progress-message { color: #ffdcca; font-weight: 600; }
+    .welcome-progress-next-action { color: #ffdcca; font-weight: 600; }
+    .welcome-progress-countdown { color: var(--text-muted); }
     .referral-status-card { margin-top: 10px; padding: 12px; border: 1px solid var(--border-light); border-radius: var(--radius-md); background: linear-gradient(180deg, rgba(255,255,255,.04), rgba(255,255,255,.02)); display: grid; gap: 8px; }
     .referral-status-list { display: grid; gap: 7px; font-size: 13px; }
     .referral-status-user { color: var(--text-main); font-weight: 600; }
@@ -1551,25 +1552,19 @@
     <div class="section" id="welcome-progress-section" style="display:none;">
       <div class="welcome-progress-card" aria-live="polite">
         <h3 class="welcome-progress-title" id="welcome-progress-title" data-i18n="welcome_voucher_progress">🎁 Welcome Voucher Progress</h3>
-        <div class="welcome-progress-bar">
-          <div class="welcome-progress-fill" id="welcome-progress-fill"></div>
-        </div>
+        <div class="welcome-progress-squares" id="welcome-progress-squares">⬜⬜⬜ 0/3</div>
         <div class="welcome-progress-meta">
-          <div id="welcome-progress-count">Progress: 0/3 ✅</div>
-          <div id="welcome-progress-reward">Reward Value: RM5</div>
-          <div id="welcome-progress-message" class="welcome-progress-message"></div>
+          <div id="welcome-progress-next-action" class="welcome-progress-next-action"></div>
+          <div id="welcome-progress-countdown" class="welcome-progress-countdown" style="display:none;"></div>
         </div>
         <div id="welcome-channel-reminder" style="display:none;">
-          <ul style="list-style:none;padding:0;margin:8px 0;font-size:14px;">
-            <li data-i18n="welcome_checkin_done">✅ Check in 3/3</li>
-            <li id="welcome-channel-status-item" data-i18n="welcome_subscribe">❌ Subscribe to @AdvantPlayOfficial</li>
-          </ul>
           <p style="font-size:13px;color:var(--text-muted);margin:4px 0 8px;" data-i18n="join_channel_to_unlock">Join the channel to unlock your Welcome Voucher.</p>
           <div style="display:flex;gap:8px;flex-wrap:wrap;">
             <a href="https://t.me/advantplayofficial" target="_blank" rel="noopener" class="btn btn-primary" style="text-decoration:none;" data-i18n="join_channel">Join Channel</a>
             <button id="welcome-verify-sub-btn" type="button" class="btn btn-ghost" data-i18n="verify_subscription">Verify Subscription</button>
           </div>
         </div>
+        <button id="welcome-checkin-btn" type="button" class="btn btn-primary" style="display:none;" data-i18n="check_in">Check In</button>
         <button id="welcome-progress-claim-btn" type="button" class="btn btn-primary" style="display:none;" data-i18n="claim_welcome_voucher">Claim Welcome Voucher</button>
       </div>
     </div>
@@ -2986,18 +2981,34 @@
     function hideWelcomeProgress() {
       const section = document.getElementById("welcome-progress-section");
       if (section) section.style.display = "none";
+      const rewardsJourney = document.getElementById("progress-section");
+      if (rewardsJourney) rewardsJourney.style.display = "";
+    }
+
+    function formatWelcomeCountdown(nextCheckinAt) {
+      const target = nextCheckinAt ? new Date(nextCheckinAt) : null;
+      if (!target || Number.isNaN(target.getTime())) return null;
+      const diffMs = target.getTime() - Date.now();
+      if (diffMs <= 0) return { available: true };
+      const totalMinutes = Math.ceil(diffMs / 60000);
+      if (totalMinutes < 60) {
+        return { available: false, text: `⏰ Check-in available in ${totalMinutes} minutes` };
+      }
+      const hours = Math.floor(totalMinutes / 60);
+      const minutes = totalMinutes % 60;
+      return { available: false, text: `⏳ Next check-in:\n${hours}h ${minutes}m` };
     }
 
     function renderWelcomeProgress(data = {}) {
       const section = document.getElementById("welcome-progress-section");
       const titleEl = document.getElementById("welcome-progress-title");
-      const fillEl = document.getElementById("welcome-progress-fill");
-      const countEl = document.getElementById("welcome-progress-count");
-      const rewardEl = document.getElementById("welcome-progress-reward");
-      const messageEl = document.getElementById("welcome-progress-message");
+      const squaresEl = document.getElementById("welcome-progress-squares");
+      const nextActionEl = document.getElementById("welcome-progress-next-action");
+      const countdownEl = document.getElementById("welcome-progress-countdown");
       const claimBtn = document.getElementById("welcome-progress-claim-btn");
+      const checkinBtn = document.getElementById("welcome-checkin-btn");
       const channelReminder = document.getElementById("welcome-channel-reminder");
-      if (!section || !titleEl || !fillEl || !countEl || !rewardEl || !messageEl || !claimBtn) return;
+      if (!section || !titleEl || !squaresEl || !nextActionEl || !countdownEl || !claimBtn || !checkinBtn) return;
 
       // hide_welcome_card is the authoritative gate for permanent ineligibility
       if (data?.hide_welcome_card === true || !data?.visible) {
@@ -3007,23 +3018,25 @@
 
       const required = Math.max(1, safeInt(data.required_days, 3));
       const completed = Math.max(0, Math.min(required, safeInt(data.completed_days, 0)));
-      const progressPct = Math.max(0, Math.min(100, Number(data.progress_pct || 0)));
       const status = String(data.status || "in_progress");
       const pendingReason = String(data.welcome_pending_reason || "");
 
       section.style.display = "block";
-      fillEl.style.width = `${progressPct}%`;
-      rewardEl.textContent = `Reward Value: $1`;
+      const rewardsJourney = document.getElementById("progress-section");
+      if (rewardsJourney) rewardsJourney.style.display = "none";
+      titleEl.textContent = t("welcome_voucher_progress");
+      squaresEl.textContent = `${"🟩".repeat(completed)}${"⬜".repeat(required - completed)} ${completed}/${required}`;
       claimBtn.style.display = "none";
       claimBtn.removeAttribute("data-dropid");
       claimBtn.removeAttribute("data-claim");
+      checkinBtn.style.display = "none";
+      countdownEl.style.display = "none";
+      nextActionEl.textContent = "";
       if (channelReminder) channelReminder.style.display = "none";
 
       // CHANNEL_NOT_JOINED: actionable — show subscribe reminder
       if (pendingReason === "CHANNEL_NOT_JOINED") {
-        titleEl.textContent = t("welcome_voucher_waiting");
-        countEl.textContent = t("progress_label", { completed, required });
-        messageEl.textContent = "";
+        nextActionEl.textContent = "🎉 Your welcome reward is unlocked.";
         if (channelReminder) channelReminder.style.display = "block";
         return;
       }
@@ -3031,48 +3044,48 @@
       // Operational pending: temporary system/drop unavailability
       const operationalReasons = ["NO_ACTIVE_DROP", "NO_FREE_CODES", "COUNTER_MISMATCH", "DROP_NOT_LIVE_YET"];
       if (operationalReasons.includes(pendingReason)) {
-        titleEl.textContent = t("welcome_voucher");
-        countEl.textContent = t("progress_label", { completed, required });
-        messageEl.textContent = t("voucher_temporarily_unavailable");
+        nextActionEl.textContent = t("voucher_temporarily_unavailable");
         return;
       }
 
-      // claim_drop_id exists: show claim button
+      // claim_drop_id exists: show claim button (State 4 — Ready To Claim)
       if (status === "unlocked") {
         const claimDropId = data.claim_drop_id || data.drop_id || "";
         if (claimDropId) {
-          titleEl.textContent = t("voucher_unlocked");
-          countEl.textContent = t("voucher_ready");
-          messageEl.textContent = "";
+          nextActionEl.textContent = "🎉 Your welcome reward is unlocked.\n\nStay subscribed for future voucher drops and bonus rewards.";
           claimBtn.dataset.dropid = claimDropId;
           claimBtn.removeAttribute("disabled");
           claimBtn.textContent = t("claim_welcome_voucher");
           claimBtn.style.display = "inline-flex";
         } else {
           console.log(`[WELCOME_UI][CLAIM_BUTTON_DISABLED] uid=${userId} reason=no_claim_drop_id completed_days=${completed}`);
-          titleEl.textContent = t("welcome_voucher");
-          countEl.textContent = t("progress_label", { completed, required });
-          messageEl.textContent = t("voucher_temporarily_unavailable");
+          nextActionEl.textContent = t("voucher_temporarily_unavailable");
         }
         return;
       }
 
       if (status === "unlocked_pending") {
         console.log(`[WELCOME_UI][CLAIM_BUTTON_DISABLED] uid=${userId} reason=no_claim_drop_id completed_days=${completed}`);
-        titleEl.textContent = t("welcome_voucher");
-        countEl.textContent = t("progress_label", { completed, required });
-        messageEl.textContent = t("voucher_temporarily_unavailable");
+        nextActionEl.textContent = t("voucher_temporarily_unavailable");
         return;
       }
 
-      // Default: in-progress state
-      titleEl.textContent = t("welcome_voucher_progress");
-      countEl.textContent = t("progress_label", { completed, required });
-      if (completed === 2 && required === 3) {
-        messageEl.textContent = t("one_more_day");
+      // Default: in-progress states (State 1–3)
+      if (completed === 0) {
+        nextActionEl.textContent = "Complete 3 check-ins within 7 days to unlock your reward.";
+      } else if (completed === required - 1) {
+        nextActionEl.textContent = "Just one more check-in to unlock your reward.";
       } else {
-        const remaining = Math.max(0, safeInt(data.remaining_days, required - completed));
-        messageEl.textContent = data.message || t("complete_n_more", { n: remaining });
+        nextActionEl.textContent = `Complete Day ${completed + 1} check-in to unlock your reward.`;
+      }
+
+      const countdown = formatWelcomeCountdown(data.next_checkin_at);
+      if (data.can_checkin || (countdown && countdown.available) || completed === 0) {
+        countdownEl.style.display = "none";
+        checkinBtn.style.display = "inline-flex";
+      } else if (countdown) {
+        countdownEl.textContent = countdown.text;
+        countdownEl.style.display = "block";
       }
     }
 
@@ -3098,6 +3111,10 @@
       const verifyBtn = document.getElementById("welcome-verify-sub-btn");
       if (verifyBtn) {
         verifyBtn.addEventListener("click", () => loadWelcomeProgress());
+      }
+      const welcomeCheckinBtn = document.getElementById("welcome-checkin-btn");
+      if (welcomeCheckinBtn) {
+        welcomeCheckinBtn.addEventListener("click", () => checkIn());
       }
     })();
 

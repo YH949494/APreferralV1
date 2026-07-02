@@ -71,6 +71,12 @@ def process_welcome_voucher_lifecycle(*, now_ref: datetime | None = None, batch_
             if res.modified_count:
                 expired += 1
                 logger.info("[WELCOME_LIFECYCLE] welcome_expired uid=%s", uid)
+                try:
+                    from vouchers import log_welcome_event
+
+                    log_welcome_event("welcome_abandoned", uid, {"reason": "window_expired"}, now=now_ts)
+                except Exception:
+                    logger.warning("[WELCOME_LIFECYCLE] failed to log welcome_abandoned uid=%s", uid)
             continue
 
         claim_doc = db_ref.new_joiner_claims.find_one({"uid": int(uid)}, {"_id": 1})
@@ -110,6 +116,154 @@ def process_welcome_voucher_lifecycle(*, now_ref: datetime | None = None, batch_
                 logger.info("[WELCOME_LIFECYCLE] reminder_sent uid=%s", uid)
 
     return {"scanned": scanned, "reminder_sent": reminder_sent, "final_warning_sent": final_warning_sent, "expired": expired, "send_failed": send_failed}
+
+
+WELCOME_PROGRESS_REMINDER_BATCH_LIMIT = int(os.getenv("WELCOME_PROGRESS_REMINDER_BATCH_LIMIT", "500"))
+
+_WELCOME_PROGRESS_REMINDER_20H = (
+    "🎁 Welcome Voucher Progress\n\n"
+    "🟩⬜⬜ 1/3\n\n"
+    "Complete Day 2 check-in to unlock your reward.\n\n"
+    "Takes less than 10 seconds."
+)
+_WELCOME_PROGRESS_REMINDER_28H = (
+    "⚠️ Don't lose your Welcome Voucher\n\n"
+    "🟩⬜⬜ 1/3\n\n"
+    "Complete Day 2 check-in to stay eligible.\n\n"
+    "Your reward expires after 7 days."
+)
+_WELCOME_PROGRESS_REMINDER_DAY2 = (
+    "🎁 Welcome Voucher Progress\n\n"
+    "🟩🟩⬜ 2/3\n\n"
+    "Just one more check-in to unlock your reward."
+)
+
+
+def _welcome_reminder_anti_abuse_blocked(uid: int, *, db_ref, progress: dict) -> str | None:
+    """Return a reason code if reminders must be suppressed for this user, else None."""
+    if progress.get("claimed"):
+        return "welcome_claimed"
+    if progress.get("expired"):
+        return "welcome_expired"
+    user_doc = db_ref.users.find_one(
+        {"user_id": uid},
+        {"pm_blocked": 1, "claim_risk_level": 1, "multi_account_flag": 1, "welcome_abuse_flag": 1, "left_channel": 1},
+    ) or {}
+    if user_doc.get("pm_blocked"):
+        return "telegram_blocked"
+    risk_level = str(user_doc.get("claim_risk_level") or "").lower()
+    if risk_level in ("high", "blocked", "risk_blocked"):
+        return "risk_blocked"
+    if user_doc.get("multi_account_flag"):
+        return "multi_account"
+    if user_doc.get("welcome_abuse_flag"):
+        return "welcome_abuse"
+    if user_doc.get("left_channel"):
+        return "user_left_channel"
+    return None
+
+
+def process_welcome_reminders(*, now_ref: datetime | None = None, batch_limit: int | None = None, db_ref=None, send_fn=None) -> dict:
+    """Hourly reminder job for the Welcome Voucher Progress journey (V2).
+
+    Sends the three check-in nudges defined by the spec (20h after Day 1,
+    28h after Day 1 if still stuck on 1/3, and 20h after Day 2). Reads
+    progress from ``vouchers.get_welcome_progress`` and tracks send state on
+    the ``welcome_reminders`` collection so each reminder fires at most once.
+    """
+    from vouchers import get_welcome_progress, log_welcome_event
+
+    db_ref = db_ref or db
+    send_fn = send_fn or send_telegram_http_message
+    now_ts = _coerce_utc(now_ref) or now_utc()
+    limit = int(batch_limit or WELCOME_PROGRESS_REMINDER_BATCH_LIMIT)
+
+    scanned = reminder_20h_sent = reminder_28h_sent = day2_reminder_sent = skipped_abuse = send_failed = 0
+
+    cursor = db_ref.welcome_reminders.find(
+        {
+            "$or": [
+                {"reminder_20h_sent": {"$ne": True}},
+                {"reminder_28h_sent": {"$ne": True}},
+                {"day2_reminder_sent": {"$ne": True}},
+            ]
+        }
+    ).limit(limit)
+
+    for doc in cursor:
+        scanned += 1
+        uid = doc.get("user_id")
+        if not uid:
+            continue
+        uid = int(uid)
+
+        progress = get_welcome_progress(uid, now=now_ts)
+        blocked_reason = _welcome_reminder_anti_abuse_blocked(uid, db_ref=db_ref, progress=progress)
+        if blocked_reason:
+            skipped_abuse += 1
+            logger.info("[WELCOME_PROGRESS_REMINDER] skip uid=%s reason=%s", uid, blocked_reason)
+            continue
+
+        completed = int(progress.get("completed") or 0)
+        day1_at = _coerce_utc(doc.get("day1_at"))
+        day2_at = _coerce_utc(doc.get("day2_at"))
+
+        # Reminder #1: completed == 1, 20h elapsed since Day 1, not yet sent.
+        if (
+            completed == 1
+            and day1_at
+            and not doc.get("reminder_20h_sent")
+            and (now_ts - day1_at) >= timedelta(hours=20)
+        ):
+            ok, err, _blocked = send_fn(uid, _WELCOME_PROGRESS_REMINDER_20H)
+            if ok:
+                db_ref.welcome_reminders.update_one({"_id": doc["_id"]}, {"$set": {"reminder_20h_sent": True, "updated_at": now_ts}})
+                log_welcome_event("welcome_reminder_20h_sent", uid, now=now_ts)
+                reminder_20h_sent += 1
+            else:
+                send_failed += 1
+                logger.warning("[WELCOME_PROGRESS_REMINDER] send_failed uid=%s stage=20h err=%s", uid, err)
+
+        # Reminder #2: completed == 1, 28h elapsed since Day 1, still stuck, not yet sent.
+        if (
+            completed == 1
+            and day1_at
+            and not doc.get("reminder_28h_sent")
+            and (now_ts - day1_at) >= timedelta(hours=28)
+        ):
+            ok, err, _blocked = send_fn(uid, _WELCOME_PROGRESS_REMINDER_28H)
+            if ok:
+                db_ref.welcome_reminders.update_one({"_id": doc["_id"]}, {"$set": {"reminder_28h_sent": True, "updated_at": now_ts}})
+                log_welcome_event("welcome_reminder_28h_sent", uid, now=now_ts)
+                reminder_28h_sent += 1
+            else:
+                send_failed += 1
+                logger.warning("[WELCOME_PROGRESS_REMINDER] send_failed uid=%s stage=28h err=%s", uid, err)
+
+        # Reminder #3: completed == 2, 20h elapsed since Day 2, not yet sent.
+        if (
+            completed == 2
+            and day2_at
+            and not doc.get("day2_reminder_sent")
+            and (now_ts - day2_at) >= timedelta(hours=20)
+        ):
+            ok, err, _blocked = send_fn(uid, _WELCOME_PROGRESS_REMINDER_DAY2)
+            if ok:
+                db_ref.welcome_reminders.update_one({"_id": doc["_id"]}, {"$set": {"day2_reminder_sent": True, "updated_at": now_ts}})
+                log_welcome_event("welcome_reminder_day2_sent", uid, now=now_ts)
+                day2_reminder_sent += 1
+            else:
+                send_failed += 1
+                logger.warning("[WELCOME_PROGRESS_REMINDER] send_failed uid=%s stage=day2 err=%s", uid, err)
+
+    return {
+        "scanned": scanned,
+        "reminder_20h_sent": reminder_20h_sent,
+        "reminder_28h_sent": reminder_28h_sent,
+        "day2_reminder_sent": day2_reminder_sent,
+        "skipped_abuse": skipped_abuse,
+        "send_failed": send_failed,
+    }
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 _RAW_GROUP_ID = os.environ.get("MAIN_GROUP_ID") or os.environ.get("GROUP_ID") or "-1002304653063"
