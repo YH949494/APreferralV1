@@ -365,6 +365,88 @@ def build_vouchers_panel(
 
 
 # ---------------------------------------------------------------------------
+# 1b. Welcome Voucher Progress journey (V2) panel
+# ---------------------------------------------------------------------------
+
+def build_welcome_journey_panel(
+    *,
+    welcome_eligibility_col,
+    welcome_analytics_events_col,
+    now: datetime | None = None,
+    window: str = _DEFAULT_DASHBOARD_WINDOW,
+) -> dict:
+    """KPIs for the Welcome Voucher Progress journey (V2).
+
+    Reads only from ``welcome_eligibility`` (eligibility/claim state) and
+    ``welcome_analytics_events`` (the append-only V2 event log written by
+    ``vouchers.log_welcome_event``); never touches claim/voucher issuance.
+    """
+    now = now or _utc_now()
+    window = _normalize_dashboard_window(window)
+    window_start = _dashboard_window_start(window, now)
+
+    def _event_user_count(event: str) -> int:
+        match: dict = {"event": event}
+        if window_start is not None:
+            match["created_at"] = {"$gte": window_start}
+        return len(welcome_analytics_events_col.distinct("user_id", match))
+
+    def _eligible_users() -> int:
+        query: dict = {}
+        if window_start is not None:
+            query["created_at"] = {"$gte": window_start}
+        return int(welcome_eligibility_col.count_documents(query))
+
+    def _claimed_users() -> int:
+        query = {"claimed": True}
+        if window_start is not None:
+            query["claimed_at"] = {"$gte": window_start}
+        return int(welcome_eligibility_col.count_documents(query))
+
+    def _reminder_recovery_rate():
+        recipients: set = set()
+        for reminder_event in ("welcome_reminder_20h_sent", "welcome_reminder_28h_sent", "welcome_reminder_day2_sent"):
+            match: dict = {"event": reminder_event}
+            if window_start is not None:
+                match["created_at"] = {"$gte": window_start}
+            recipients.update(welcome_analytics_events_col.distinct("user_id", match))
+        if not recipients:
+            return None
+        completed_match: dict = {"event": "welcome_completed", "user_id": {"$in": list(recipients)}}
+        completed = set(welcome_analytics_events_col.distinct("user_id", completed_match))
+        return _pct(len(completed), len(recipients))
+
+    eligible = metric(_eligible_users, note="Distinct welcome_eligibility records created in the selected window.")
+    d1_users = metric(lambda: _event_user_count("welcome_checkin_d1"), note="Distinct users who logged a Day 1 check-in.")
+    d2_users = metric(lambda: _event_user_count("welcome_checkin_d2"), note="Distinct users who logged a Day 2 check-in.")
+    d3_users = metric(lambda: _event_user_count("welcome_checkin_d3"), note="Distinct users who logged a Day 3 check-in.")
+    completed_users = metric(lambda: _event_user_count("welcome_completed"), note="Distinct users who unlocked the welcome reward.")
+    claimed_users = metric(_claimed_users, note="welcome_eligibility records claimed in the selected window.")
+
+    d2_rate = _pct(d2_users["value"], d1_users["value"]) if d1_users["value"] and d2_users["value"] is not None else None
+    d3_rate = _pct(d3_users["value"], d2_users["value"]) if d2_users["value"] and d3_users["value"] is not None else None
+    completion_rate = _pct(completed_users["value"], eligible["value"]) if eligible["value"] else None
+    claim_rate = _pct(claimed_users["value"], completed_users["value"]) if completed_users["value"] else None
+    reminder_recovery_rate = metric(_reminder_recovery_rate, quality="heuristic", note="Share of reminder recipients who reached welcome_completed afterwards.")
+
+    return {
+        "success": True,
+        "as_of": now.isoformat(),
+        "window": window,
+        "window_start": window_start.isoformat() if window_start else None,
+        "window_end": now.isoformat(),
+        "summary": {
+            "welcome_eligible_users": eligible,
+            "welcome_d2_rate_pct": {"value": d2_rate, "data_quality": "exact" if d2_rate is not None else "missing"},
+            "welcome_d3_rate_pct": {"value": d3_rate, "data_quality": "exact" if d3_rate is not None else "missing"},
+            "welcome_completion_rate_pct": {"value": completion_rate, "data_quality": "exact" if completion_rate is not None else "missing"},
+            "welcome_claim_rate_pct": {"value": claim_rate, "data_quality": "exact" if claim_rate is not None else "missing"},
+            "reminder_recovery_rate_pct": reminder_recovery_rate,
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
 # 2. Referrals panel
 # ---------------------------------------------------------------------------
 

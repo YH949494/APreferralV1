@@ -195,8 +195,9 @@ def handle_checkin():
     if freeze_used:
         payload["message"] += " 🧊 Streak Freeze used! Your streak continues."
 
-    from vouchers import get_welcome_reward_progress
+    from vouchers import get_welcome_reward_progress, record_welcome_checkin_progress
 
+    record_welcome_checkin_progress(user_id, now=now)
     welcome_progress = get_welcome_reward_progress(user_id, now=now)
     if welcome_progress.get("eligible") and not welcome_progress.get("hide"):
         completed = int(welcome_progress.get("checkins_completed") or 0)

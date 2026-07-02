@@ -39,6 +39,8 @@ profile_photo_cache_col = db["profile_photo_cache"]
 welcome_tickets_col = db["welcome_tickets"]
 subscription_cache_col = db["subscription_cache"]
 welcome_eligibility_col = db["welcome_eligibility"]
+welcome_reminders_col = db["welcome_reminders"]
+welcome_analytics_events_col = db["welcome_analytics_events"]
 tg_verification_queue_col = db["tg_verification_queue"]
 voucher_claims_col = db["voucher_claims"]
 public_pool_access_assignments_col = db["public_pool_access_assignments"]
@@ -611,6 +613,10 @@ def ensure_voucher_indexes():
     welcome_tickets_col.create_index([("uid", ASCENDING)], unique=True)
     welcome_tickets_col.create_index([("cleanup_at", ASCENDING)], expireAfterSeconds=0)
     welcome_eligibility_col.create_index([("uid", ASCENDING)], unique=True)
+    welcome_reminders_col.create_index([("user_id", ASCENDING)], unique=True)
+    welcome_reminders_col.create_index([("updated_at", ASCENDING)])
+    welcome_analytics_events_col.create_index([("user_id", ASCENDING), ("event", ASCENDING)])
+    welcome_analytics_events_col.create_index([("created_at", ASCENDING)])
     subscription_cache_col.create_index([("expireAt", ASCENDING)], expireAfterSeconds=0)
     try:
         for legacy_name in ("uniq_user_checks", "uniq_tg_verify_user_id", "uq_tg_verif_user_id_sparse"):
@@ -869,6 +875,142 @@ def _welcome_progress_pct(completed_days: int) -> int:
     return pct_by_days.get(safe_days, 100)
 
 
+def log_welcome_event(event: str, uid, meta: dict | None = None, *, now: datetime | None = None) -> None:
+    """Append-only analytics event for the Welcome Voucher Progress journey (V2)."""
+    try:
+        uid_int = int(uid)
+    except (TypeError, ValueError):
+        return
+    now_ref = _as_aware_utc(now) or now_utc()
+    doc = {
+        "event": str(event),
+        "user_id": uid_int,
+        "meta": meta or {},
+        "created_at": now_ref,
+    }
+    try:
+        welcome_analytics_events_col.insert_one(doc)
+    except Exception:
+        _safe_log("warning", "[WELCOME_V2][ANALYTICS] failed to record event=%s uid=%s", event, uid_int)
+
+
+def _welcome_status(progress: dict) -> str:
+    if not progress.get("eligible"):
+        return "not_eligible"
+    if progress.get("claimed"):
+        return "claimed"
+    if progress.get("expired"):
+        return "expired"
+    if progress.get("unlocked"):
+        return "completed"
+    return "in_progress"
+
+
+def _welcome_next_checkin_estimate(uid: int, completed: int, now_ref: datetime) -> tuple[bool, datetime | None]:
+    """Best-effort estimate of when the next check-in becomes available."""
+    user_doc = users_collection.find_one({"user_id": uid}, {"last_checkin": 1}) or {}
+    last_checkin = _as_aware_kl(user_doc.get("last_checkin"))
+    if not last_checkin or completed <= 0:
+        return True, None
+    today = now_ref.astimezone(KL_TZ).date()
+    if last_checkin.date() == today:
+        next_midnight = datetime.combine(today + timedelta(days=1), datetime.min.time(), tzinfo=KL_TZ)
+        return False, next_midnight
+    return True, None
+
+
+def get_welcome_progress(user_id, now: datetime | None = None) -> dict:
+    """Spec-shaped Welcome Voucher Progress payload (Welcome Voucher Progress Journey V2).
+
+    Wraps ``get_welcome_reward_progress`` (the source of truth for eligibility,
+    check-in counting and unlock state) and reshapes it into the contract
+    consumed by the frontend journey and the reminder scheduler.
+    """
+    try:
+        uid = int(user_id)
+    except (TypeError, ValueError):
+        return {
+            "eligible": False,
+            "claimed": False,
+            "expired": False,
+            "completed": 0,
+            "required": WELCOME_REWARD_CHECKINS_REQUIRED,
+            "progress_pct": 0,
+            "next_required_day": 1,
+            "next_checkin_at": None,
+            "can_checkin": False,
+            "status": "not_eligible",
+        }
+
+    now_ref = _as_aware_kl(now) or now_kl()
+    progress = get_welcome_reward_progress(uid, now=now_ref)
+    completed = int(progress.get("checkins_completed") or 0)
+    required = int(progress.get("checkins_required") or WELCOME_REWARD_CHECKINS_REQUIRED)
+    reason = str(progress.get("eligibility_reason") or "").lower()
+    claimed = "claimed" in reason
+
+    can_checkin, next_checkin_at = _welcome_next_checkin_estimate(uid, completed, now_ref)
+
+    out = {
+        "eligible": bool(progress.get("eligible")),
+        "claimed": claimed,
+        "expired": bool(progress.get("expired")),
+        "completed": min(completed, required),
+        "required": required,
+        "progress_pct": _welcome_progress_pct(completed),
+        "next_required_day": min(completed + 1, required),
+        "next_checkin_at": next_checkin_at.astimezone(timezone.utc).isoformat() if next_checkin_at else None,
+        "can_checkin": bool(can_checkin) and completed < required,
+    }
+    out["status"] = _welcome_status({**progress, "claimed": claimed})
+    return out
+
+
+def record_welcome_checkin_progress(user_id, *, now: datetime | None = None) -> dict | None:
+    """Update the ``welcome_reminders`` tracker after a check-in and fire analytics.
+
+    Called from the check-in flow only; a no-op for users who are not on the
+    Welcome Voucher Progress journey. Returns the updated progress dict.
+    """
+    try:
+        uid = int(user_id)
+    except (TypeError, ValueError):
+        return None
+
+    now_ref = _as_aware_kl(now) or now_kl()
+    progress = get_welcome_progress(uid, now=now_ref)
+    if not progress.get("eligible"):
+        return progress
+
+    completed = int(progress.get("completed") or 0)
+    now_utc_ts = now_ref.astimezone(timezone.utc)
+
+    existing = welcome_reminders_col.find_one({"user_id": uid}) or {}
+    updates: dict = {"updated_at": now_utc_ts}
+    if completed >= 1 and not existing.get("day1_at"):
+        updates["day1_at"] = now_utc_ts
+        log_welcome_event("welcome_checkin_d1", uid, now=now_ref)
+    if completed >= 2 and not existing.get("day2_at"):
+        updates["day2_at"] = now_utc_ts
+        log_welcome_event("welcome_checkin_d2", uid, now=now_ref)
+    if completed >= 3:
+        log_welcome_event("welcome_checkin_d3", uid, now=now_ref)
+        log_welcome_event("welcome_completed", uid, now=now_ref)
+
+    if updates:
+        welcome_reminders_col.update_one(
+            {"user_id": uid},
+            {"$set": updates, "$setOnInsert": {
+                "user_id": uid,
+                "reminder_20h_sent": False,
+                "reminder_28h_sent": False,
+                "day2_reminder_sent": False,
+            }},
+            upsert=True,
+        )
+    return progress
+
+
 def _welcome_claim_drop_id(now_ref: datetime | None = None, uid: int | None = None) -> str | None:
     ref = _as_aware_utc(now_ref) or now_utc()
     try:
@@ -1036,6 +1178,7 @@ def build_welcome_progress_response(user_id: int, *, now: datetime | None = None
         else:
             _safe_log("info", f"[WELCOME_PROGRESS][PENDING_VISIBLE] uid={user_id} reason={welcome_pending_reason}")
 
+    can_checkin, next_checkin_at = _welcome_next_checkin_estimate(user_id, completed_days, now_ref)
     payload = {
         "visible": bool(visible) and not hide_welcome_card,
         "status": status,
@@ -1048,9 +1191,13 @@ def build_welcome_progress_response(user_id: int, *, now: datetime | None = None
         "message": message,
         "hide_welcome_card": hide_welcome_card,
         "welcome_pending_reason": welcome_pending_reason,
+        "can_checkin": bool(can_checkin) and status not in ("claimed", "expired", "not_eligible"),
+        "next_checkin_at": next_checkin_at.astimezone(timezone.utc).isoformat() if next_checkin_at else None,
     }
     if claim_drop_id:
         payload["claim_drop_id"] = claim_drop_id
+    if bool(visible) and not hide_welcome_card:
+        log_welcome_event("welcome_progress_view", user_id, {"status": status, "completed_days": completed_days}, now=now_ref)
     return payload
 
 
@@ -6143,6 +6290,7 @@ def api_claim():
         )     
         current_app.logger.info("[WELCOME] gate_pass uid=%s", uid)
         current_app.logger.info("[WELCOME] claim_success uid=%s drop_id=%s", uid, drop_id)
+        log_welcome_event("welcome_claimed", uid, {"drop_id": str(drop_id)})
         current_app.logger.info("[claim] success drop=%s audience=%s uid=%s ip=%s", drop_id, audience_type, uid, client_ip)
         current_app.logger.info(
             "[claim] uid=%s drop_id=%s dtype=%s audience=%s decision=allowed reason=success",
