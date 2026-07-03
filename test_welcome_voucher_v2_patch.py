@@ -52,6 +52,11 @@ def test_vip_audience_unaffected():
     assert _drop_audience_type({"audience": {"type": "vip1"}}) == "vip1"
 
 
+def test_welcome_marker_overrides_explicit_public_audience_type():
+    drop = {"audience": {"type": "public"}, "campaign_type": "welcome_voucher"}
+    assert _drop_audience_type(drop) == "new_joiner"
+
+
 def test_various_explicit_welcome_marker_fields_normalize_to_new_joiner():
     variants = [
         {"audience_type": "welcome"},

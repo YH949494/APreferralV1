@@ -1398,21 +1398,21 @@ def _drop_audience_type(drop: dict) -> str:
         return "public"
 
     audience = drop.get("audience")
+
+    # Check every known welcome/new-joiner marker field *before* falling back to a
+    # generic audience.type value. A drop can carry an explicit but generic
+    # audience.type (e.g. "public") alongside a welcome campaign_type/category/tags
+    # marker — the welcome marker must win, otherwise those drops are silently
+    # treated as non-welcome. See _normalize_audience_marker.
     if isinstance(audience, str):
         marker = _normalize_audience_marker(audience)
         if marker:
             return marker
-        atype = audience.strip().lower()
-        if atype:
-            return atype
     elif isinstance(audience, dict):
         for key in ("type", "audience", "kind", "segment"):
             marker = _normalize_audience_marker(audience.get(key))
             if marker:
                 return marker
-        atype = (audience.get("type") or audience.get("audience") or "").strip().lower()
-        if atype:
-            return atype
 
     for key in ("audience_type", "audienceType", "campaign_type", "campaignType",
                 "reward_type", "rewardType", "category"):
@@ -1432,6 +1432,16 @@ def _drop_audience_type(drop: dict) -> str:
         marker = _normalize_audience_marker(item)
         if marker:
             return marker
+
+    # No welcome marker found anywhere; fall back to the raw audience value.
+    if isinstance(audience, str):
+        atype = audience.strip().lower()
+        if atype:
+            return atype
+    elif isinstance(audience, dict):
+        atype = (audience.get("type") or audience.get("audience") or "").strip().lower()
+        if atype:
+            return atype
 
     return "public"
 
