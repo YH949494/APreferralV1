@@ -28,6 +28,7 @@ from affiliate_rewards import (
     approve_affiliate_ledger,
     reject_affiliate_ledger,
     issue_current_month_affiliate_rewards,
+    is_user_blocked_for_self_invite,
 )
 from conversion_tracking import send_meta_event, send_tiktok_event
 from referral_rules import build_public_referral_status
@@ -2745,6 +2746,10 @@ def welcome_eligibility(uid: int | None, *, ref: datetime | None = None) -> tupl
         reason = "no_uid"
         current_app.logger.info("[WELCOME][ELIG] deny uid=%s reason=%s", uid, reason)
         return (False, reason, None)
+
+    if is_user_blocked_for_self_invite(db, uid):
+        current_app.logger.info("[WELCOME_BLOCKED_SELF_INVITE] user_id=%s", uid)
+        return (False, "self_invite_blocked", None)
 
     _elig_doc = users_collection.find_one({"user_id": uid}, {"joined_main_at": 1, "created_at": 1}) if uid else None
     current_app.logger.info(
