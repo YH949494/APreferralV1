@@ -1016,7 +1016,17 @@ def _welcome_claim_drop_id(now_ref: datetime | None = None, uid: int | None = No
     ref = _as_aware_utc(now_ref) or now_utc()
     try:
         for drop in get_active_drops(ref):
-            if not _is_new_joiner_audience(_drop_audience_type(drop)):
+            audience_type = _drop_audience_type(drop)
+            if not _is_new_joiner_audience(audience_type):
+                if _is_pool_drop(drop, audience_type):
+                    _safe_log(
+                        "warning",
+                        "[WELCOME][DROP_SKIP] drop_id=%s name=%s reason=audience_not_new_joiner audience=%s campaign_type=%s",
+                        str(drop.get("_id") or drop.get("dropId") or ""),
+                        drop.get("name"),
+                        drop.get("audience"),
+                        drop.get("campaign_type") or drop.get("campaignType"),
+                    )
                 continue
             drop_id = str(drop.get("_id") or drop.get("dropId") or "")
             if not drop_id:
@@ -1043,14 +1053,35 @@ def _welcome_claim_drop_id(now_ref: datetime | None = None, uid: int | None = No
 _WELCOME_PERMANENT_REASONS = frozenset(
     {"ELIGIBILITY_FAILED", "AUDIENCE_MISMATCH", "WINDOW_EXPIRED", "ALREADY_CLAIMED", "REGION_MISMATCH", "RISK_BLOCKED"}
 )
-_WELCOME_OPERATIONAL_REASONS = frozenset({"NO_ACTIVE_DROP", "NO_FREE_CODES", "COUNTER_MISMATCH", "DROP_NOT_LIVE_YET"})
+_WELCOME_OPERATIONAL_REASONS = frozenset(
+    {
+        "NO_ACTIVE_DROP",
+        "NO_FREE_CODES",
+        "COUNTER_MISMATCH",
+        "DROP_NOT_LIVE_YET",
+        "POOL_RESERVED",
+        "SHAPING_DENIED",
+    }
+)
+
+# Maps _pooled_claimability_state() "reason" values to the stable welcome pending-reason
+# codes surfaced to clients. Every operational failure must map to something other than
+# NO_ACTIVE_DROP once a matching new_joiner drop was actually found.
+_WELCOME_POOL_REASON_MAP = {
+    "pool_empty": "NO_FREE_CODES",
+    "shaping_too_early": "DROP_NOT_LIVE_YET",
+    "shaping_denied": "SHAPING_DENIED",
+    "reserve_block": "POOL_RESERVED",
+    "counter_mismatch": "COUNTER_MISMATCH",
+}
 
 
 def _welcome_claim_drop_reason(now_ref: datetime | None = None, uid: int | None = None) -> str:
     """Return a stable reason code explaining why no welcome claim drop is available."""
     ref = _as_aware_utc(now_ref) or now_utc()
+    reason = "NO_ACTIVE_DROP"
+    found_drop = False
     try:
-        found_drop = False
         for drop in get_active_drops(ref):
             if not _is_new_joiner_audience(_drop_audience_type(drop)):
                 continue
@@ -1060,7 +1091,8 @@ def _welcome_claim_drop_reason(now_ref: datetime | None = None, uid: int | None 
             found_drop = True
             starts_at = _as_aware_utc(drop.get("startsAt"))
             if starts_at and ref < starts_at:
-                return "DROP_NOT_LIVE_YET"
+                reason = "DROP_NOT_LIVE_YET"
+                break
             try:
                 state = _pooled_claimability_state(
                     drop=drop,
@@ -1070,18 +1102,30 @@ def _welcome_claim_drop_reason(now_ref: datetime | None = None, uid: int | None 
                     is_my_user=False,
                     ref=ref,
                 )
+                if state.get("claimable"):
+                    # This drop is actually claimable; _welcome_claim_drop_id should have
+                    # returned it. Keep scanning rather than reporting an operational
+                    # failure for a drop that isn't actually blocked.
+                    continue
                 pool_reason = state.get("reason", "")
-                if pool_reason == "pool_empty":
-                    return "NO_FREE_CODES"
-                if pool_reason in ("shaping_too_early",):
-                    return "DROP_NOT_LIVE_YET"
+                reason = _WELCOME_POOL_REASON_MAP.get(pool_reason, "COUNTER_MISMATCH")
             except Exception:
-                return "COUNTER_MISMATCH"
-        if not found_drop:
-            return "NO_ACTIVE_DROP"
+                reason = "COUNTER_MISMATCH"
+            break
+        if found_drop and reason == "NO_ACTIVE_DROP":
+            # A matching new_joiner drop exists but no specific operational failure was
+            # detected; never report NO_ACTIVE_DROP when a drop was actually found.
+            reason = "COUNTER_MISMATCH"
     except Exception:
-        pass
-    return "NO_ACTIVE_DROP"
+        reason = "NO_ACTIVE_DROP"
+
+    if reason != "NO_ACTIVE_DROP" or found_drop:
+        _safe_log(
+            "info",
+            "[WELCOME][PENDING_REASON] uid=%s reason=%s found_drop=%s",
+            uid, reason, found_drop,
+        )
+    return reason
 
 
 def classify_welcome_pending_reason(
@@ -1318,29 +1362,76 @@ def load_user_context(*, uid=None, username: str | None = None, username_lower: 
 
     return ctx
 
+_WELCOME_AUDIENCE_MARKERS = {
+    "welcome": "new_joiner",
+    "welcome_voucher": "new_joiner",
+    "welcome_bonus": "new_joiner",
+    "new_joiner": "new_joiner",
+    "new joiner": "new_joiner",
+    "newjoiner": "new_joiner",
+    "new member": "new_joiner",
+    "new_joiner_48h": "new_joiner_48h",
+    "new joiner 48h": "new_joiner_48h",
+    "newjoiner48h": "new_joiner_48h",
+}
+
+
+def _normalize_audience_marker(value) -> str | None:
+    """Normalize a raw audience/campaign/category/tag marker into 'new_joiner' or
+    'new_joiner_48h'. Returns None if the value isn't a recognized welcome marker."""
+    if not isinstance(value, str):
+        return None
+    lowered = " ".join(value.strip().lower().replace("-", "_").split())
+    if not lowered:
+        return None
+    return _WELCOME_AUDIENCE_MARKERS.get(lowered)
+
+
 def _drop_audience_type(drop: dict) -> str:
-    """Return drop audience type: public|vip1|new_joiner|new_joiner_48h (case-insensitive)."""
+    """Return drop audience type: public|vip1|new_joiner|new_joiner_48h (case-insensitive).
+
+    Recognizes explicit welcome/new-joiner markers from several known fields so live
+    pooled welcome drops aren't silently dropped just because they don't use the
+    legacy audience.type="new_joiner" convention. See _normalize_audience_marker.
+    """
     if not isinstance(drop, dict):
         return "public"
 
     audience = drop.get("audience")
     if isinstance(audience, str):
+        marker = _normalize_audience_marker(audience)
+        if marker:
+            return marker
         atype = audience.strip().lower()
         if atype:
             return atype
     elif isinstance(audience, dict):
+        for key in ("type", "audience", "kind", "segment"):
+            marker = _normalize_audience_marker(audience.get(key))
+            if marker:
+                return marker
         atype = (audience.get("type") or audience.get("audience") or "").strip().lower()
         if atype:
             return atype
 
+    for key in ("audience_type", "audienceType", "campaign_type", "campaignType",
+                "reward_type", "rewardType", "category"):
+        marker = _normalize_audience_marker(drop.get(key))
+        if marker:
+            return marker
+
+    tags = drop.get("tags")
+    if isinstance(tags, (list, tuple)):
+        for tag in tags:
+            marker = _normalize_audience_marker(tag)
+            if marker:
+                return marker
+
     wl = drop.get("whitelistUsernames") or []
     for item in wl:
-        if isinstance(item, str):
-            lowered = item.strip().lower()
-            if lowered in ("new_joiner_48h", "new joiner 48h", "newjoiner48h"):
-                return "new_joiner_48h"
-            if lowered in ("new_joiner", "new joiner", "newjoiner"):
-                return "new_joiner"
+        marker = _normalize_audience_marker(item)
+        if marker:
+            return marker
 
     return "public"
 
@@ -6389,7 +6480,14 @@ def admin_create_drop():
     if err: return err
     data = request.get_json(force=True)
     name = data.get("name")
-    dtype = _normalize_drop_type(data.get("type", "pooled"))
+    # "new_joiner" is an admin-UI-only eligibility shortcut for Welcome Voucher pooled
+    # drops: it always maps to eligibility.mode="public" + audience.type="new_joiner" +
+    # type="pooled" (see below), never a real eligibility mode.
+    is_welcome_shortcut = (
+        isinstance(data.get("eligibility"), dict)
+        and str(data["eligibility"].get("mode") or "").strip().lower() == "new_joiner"
+    )
+    dtype = "pooled" if is_welcome_shortcut else _normalize_drop_type(data.get("type", "pooled"))
     startsAtLocal = data.get("startsAtLocal")
     if not (name and startsAtLocal):
         return jsonify({"status": "error", "code": "bad_request"}), 400
@@ -6452,6 +6550,8 @@ def admin_create_drop():
         audience_type_raw = (audience_raw.get("type") or audience_raw.get("audience") or "").strip().lower()
         if audience_type_raw:
             audience_type = audience_type_raw
+    if is_welcome_shortcut and not audience_type:
+        audience_type = "new_joiner"
     regions_raw = audience_raw.get("regions") if isinstance(audience_raw, dict) else None
     if regions_raw is not None:
         regions = []
@@ -6460,8 +6560,12 @@ def admin_create_drop():
                 regions.append(str(r))
         audience_clean["regions"] = regions
     if audience_type:
-        audience_clean["type"] = audience_type     
-      
+        audience_clean["type"] = audience_type
+
+    campaign_type_raw = (data.get("campaign_type") or data.get("campaignType") or "").strip().lower()
+    if is_welcome_shortcut and not campaign_type_raw:
+        campaign_type_raw = "welcome_voucher"
+
     hero_title = (data.get("hero_title") or "").strip() or None
     hero_subtitle = (data.get("hero_subtitle") or "").strip() or None
     hero_image = (data.get("hero_image") or "").strip() or None
@@ -6481,6 +6585,8 @@ def admin_create_drop():
         drop_doc["hero_subtitle"] = hero_subtitle
     if hero_image:
         drop_doc["hero_image"] = hero_image
+    if campaign_type_raw:
+        drop_doc["campaign_type"] = campaign_type_raw
 
     if data.get("eligibility") is not None or clean_eligibility.get("mode") != "public" or clean_eligibility.get("allow"):
         drop_doc["eligibility"] = clean_eligibility
