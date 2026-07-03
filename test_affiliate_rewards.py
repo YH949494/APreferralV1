@@ -267,6 +267,47 @@ class AffiliateRewardTests(unittest.TestCase):
         self.assertEqual(db.voucher_pools.count_documents({"pool_id": "WELCOME", "status": "issued"}), 1)
         self.assertEqual(db.voucher_pools.count_documents({"pool_id": "WELCOME", "status": "available"}), 1)
 
+    def test_welcome_blocked_for_self_invite(self):
+        db = FakeDb()
+        db.voucher_pools.insert_one({"pool_id": "WELCOME", "code": "SW1", "status": "available"})
+        db.referral_audit.insert_one(
+            {
+                "invitee_user_id": 77,
+                "inviter_user_id": 77,
+                "status": "skipped",
+                "reason": "self_invite",
+            }
+        )
+        with patch("affiliate_rewards._is_official_channel_subscribed", return_value=True):
+            out = issue_welcome_bonus_if_eligible(db, user_id=77, is_new_user=True)
+        self.assertEqual(out["status"], "BLOCKED_SELF_INVITE")
+        self.assertFalse(out["created"])
+        self.assertEqual(db.affiliate_ledger.count_documents({"dedup_key": "WELCOME:77"}), 0)
+
+    def test_welcome_allowed_for_valid_referred_invitee(self):
+        db = FakeDb()
+        db.voucher_pools.insert_one({"pool_id": "WELCOME", "code": "SW2", "status": "available"})
+        db.referral_audit.insert_one(
+            {
+                "invitee_user_id": 88,
+                "inviter_user_id": 5,
+                "status": "confirmed",
+                "reason": "qualified",
+            }
+        )
+        with patch("affiliate_rewards._is_official_channel_subscribed", return_value=True):
+            out = issue_welcome_bonus_if_eligible(db, user_id=88, is_new_user=True)
+        self.assertEqual(out["status"], "ISSUED")
+        self.assertEqual(db.affiliate_ledger.count_documents({"dedup_key": "WELCOME:88"}), 1)
+
+    def test_welcome_allowed_for_organic_new_user(self):
+        db = FakeDb()
+        db.voucher_pools.insert_one({"pool_id": "WELCOME", "code": "SW3", "status": "available"})
+        with patch("affiliate_rewards._is_official_channel_subscribed", return_value=True):
+            out = issue_welcome_bonus_if_eligible(db, user_id=99, is_new_user=True)
+        self.assertEqual(out["status"], "ISSUED")
+        self.assertEqual(db.affiliate_ledger.count_documents({"dedup_key": "WELCOME:99"}), 1)
+
     def test_qualified_event_once_lifetime(self):
         db = FakeDb()
         first = mark_invitee_qualified(db, invitee_id=20, referrer_id=3)

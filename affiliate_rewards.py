@@ -797,10 +797,38 @@ def record_user_last_seen(db, *, user_id: int, ip: str | None = None, subnet: st
     )
 
 
+def is_user_blocked_for_self_invite(db, user_id: int) -> bool:
+    """True if `user_id` has a referral/referral_event marking them as a self-invite.
+
+    Covers: invitee_user_id == inviter_user_id, reason == "self_invite", and
+    status == "skipped" with reason == "self_invite".
+    """
+    uid = int(user_id)
+    try:
+        docs = db.referral_audit.find({"invitee_user_id": uid})
+    except Exception:
+        logger.exception("[WELCOME_BLOCKED_SELF_INVITE] lookup_failed user_id=%s", uid)
+        return False
+    for doc in docs:
+        inviter_user_id = doc.get("inviter_user_id")
+        reason = doc.get("reason")
+        status = doc.get("status")
+        if inviter_user_id is not None and inviter_user_id == uid:
+            return True
+        if reason == "self_invite":
+            return True
+        if status == "skipped" and reason == "self_invite":
+            return True
+    return False
+
+
 def issue_welcome_bonus_if_eligible(db, *, user_id: int, is_new_user: bool, blocked: bool = False, now_utc: datetime | None = None):
     now_utc = now_utc or datetime.now(timezone.utc)
     if not is_new_user or blocked:
         return {"created": False, "status": "SKIPPED"}
+    if is_user_blocked_for_self_invite(db, user_id):
+        logger.info("[WELCOME_BLOCKED_SELF_INVITE] user_id=%s", int(user_id))
+        return {"created": False, "status": "BLOCKED_SELF_INVITE"}
     if not _is_official_channel_subscribed(int(user_id)):
         return {"created": False, "status": "NOT_SUBSCRIBED"}
 
