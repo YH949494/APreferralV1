@@ -32,6 +32,7 @@
         <button class="nav-group-header" data-group-toggle="campaign-control">2 · Campaign Control</button>
         <div class="nav-group-body">
           <button class="nav-item" data-view="campaignBuilder">Campaign Builder <span class="badge badge-live">Live Control</span></button>
+          <button class="nav-item" data-view="campaignPerformance">Campaign Performance <span class="badge badge-readonly">Read Only</span></button>
           <button class="nav-item" data-view="activeCampaigns">Active Campaigns <span class="badge badge-readonly">Read Only</span></button>
           <button class="nav-item" data-view="draftCampaigns">Draft Campaigns <span class="badge badge-readonly">Read Only</span></button>
           <button class="nav-item" data-view="compiledDrops">Compiled Voucher Drops <span class="badge badge-readonly">Read Only</span></button>
@@ -481,6 +482,35 @@
             </div>
           </div>
         </div>
+      </section>
+
+      <!-- CAMPAIGN PERFORMANCE VIEW (P4) -->
+      <section id="view-campaignPerformance" class="hidden">
+        <div class="controls" style="margin-bottom:12px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+          <span style="font-size:12px;color:var(--muted);">Read-only analytics over existing campaigns/drops/vouchers/claims. Never mutates a campaign, drop, voucher, or claim.</span>
+          <select id="cp-status" style="margin-left:auto;padding:6px;border:1px solid var(--border);border-radius:6px;background:var(--card-bg);color:var(--text);">
+            <option value="active">Active</option>
+            <option value="completed">Completed</option>
+            <option value="cancelled">Cancelled</option>
+            <option value="all">All</option>
+          </select>
+          <select id="cp-window" style="padding:6px;border:1px solid var(--border);border-radius:6px;background:var(--card-bg);color:var(--text);">
+            <option value="all">All time</option>
+            <option value="7d">Last 7 days</option>
+            <option value="30d">Last 30 days</option>
+          </select>
+          <select id="cp-sort" style="padding:6px;border:1px solid var(--border);border-radius:6px;background:var(--card-bg);color:var(--text);">
+            <option value="created_at">Sort: Latest first</option>
+            <option value="score">Sort: Score</option>
+            <option value="claim_rate">Sort: Claim Rate</option>
+            <option value="claimed">Sort: Claimed</option>
+          </select>
+          <button class="btn" id="cp-refresh-btn">Refresh</button>
+          <button class="btn" id="cp-compare-btn" style="background:transparent;border:1px solid var(--border);">Compare Selected</button>
+        </div>
+        <div id="cp-list-body"></div>
+        <div id="cp-detail-panel" class="hidden" style="margin-top:16px;border-top:1px solid var(--border);padding-top:16px;"></div>
+        <div id="cp-compare-panel" class="hidden" style="margin-top:16px;border-top:1px solid var(--border);padding-top:16px;"></div>
       </section>
 
       <!-- ACTIVE CAMPAIGNS VIEW -->

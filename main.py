@@ -2264,6 +2264,9 @@ app.register_blueprint(campaigns_bp)
 from campaign_builder import campaign_builder_bp, batch_release_tick
 app.register_blueprint(campaign_builder_bp)
 
+from campaign_performance import campaign_performance_bp
+app.register_blueprint(campaign_performance_bp)
+
 admin_bp = Blueprint("admin", __name__)
 
 
