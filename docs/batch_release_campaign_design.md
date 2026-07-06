@@ -191,20 +191,45 @@ child batch drop is indistinguishable to affiliate settlement from a claim
 against any manually-created drop today; batch campaigns simply produce
 more drops, which affiliate settlement never looks at.
 
-**Anti-abuse**: also requires no new mechanism, but one existing knob needs
-to be *pointed at* the new lineage field. Because each batch is its own
-`drop_id`, the existing per-drop dedup guarantee (`voucher_claims` unique
-index on `(drop_id, user_id)`) only prevents a user from claiming twice
-*from the same batch* — by itself it would allow one user to claim once per
-batch, e.g. 10 times across a 10-batch campaign. This is the same property
-Phase 2's plain "Batch release" style already had, and there is already an
-existing, unused-for-this-purpose primitive built for exactly this shape:
+**Anti-abuse**: because each batch is its own `drop_id`, the existing
+per-drop dedup guarantee (`voucher_claims` unique index on
+`(drop_id, user_id)`) only prevents a user from claiming twice *from the
+same batch* — by itself it would allow one user to claim once per batch,
+e.g. 10 times across a 10-batch campaign. This is the same property
+Phase 2's plain "Batch release" style already had.
+
+**Correction from initial draft**: this doc originally proposed reusing
 `_check_public_pool_campaign_cap()` / `_apply_public_pool_campaign_success()`
-(`vouchers.py:1562-1637`). Wiring the campaign's `campaign_id` through as the
-cap's scoping key (optional, defaults to no cap = today's per-batch
-behavior) lets an admin cap total claims per user across the whole
-campaign, without adding any new anti-abuse code — purely an additive,
-opt-in use of a function that already exists for this class of problem.
+(`vouchers.py:1562-1637`) as a per-user campaign cap. On inspection those
+functions are keyed only by `ip_hash`/`subnet` per `drop_id`
+(`_rate_limit_key("ppool", "drop", drop_id, "ip"/"subnet", ...)`) — they
+take no user identifier at all. Rekeying them by `campaign_id` would not
+produce a per-user cap: a user rotating IPs would still claim every batch,
+while unrelated users behind the same NAT/subnet could be wrongly blocked
+together. That function stays exactly as-is (it's a legitimate per-drop
+IP/subnet rate limiter, orthogonal to this problem) and is not reused here.
+
+The correct additive mechanism is a **new, small, user-keyed check**,
+parallel to — not a rewrite of — the existing per-drop dedup guarantee:
+1. Denormalize `campaign_id` onto `voucher_claims` documents at claim time
+   (additive field, written alongside the existing `drop_id`/`user_id`,
+   populated only when the drop being claimed has a `campaign_id`).
+2. Add an index on `voucher_claims.(campaign_id, user_id)`.
+3. A new gate, `_check_campaign_user_cap(campaign_id, user_id, max_claims)`,
+   runs only when the campaign explicitly sets
+   `max_claims_per_user_per_campaign` (absent/null = no cap = today's
+   per-batch-only behavior, unchanged for every existing drop and every
+   campaign that doesn't opt in). It does
+   `voucher_claims_col.count_documents({campaign_id, user_id})` and denies
+   the claim if the count already meets the configured max, before the
+   existing per-drop idempotency/FCFS logic runs — it never touches
+   `claim_pooled`'s voucher-picking or counter-decrement logic, it only
+   adds one more precondition check in the same place `_check_cooldown`/
+   `_check_kill_switch` already run in `api_claim`.
+
+This is genuinely new (small) code, not a reuse of an existing function —
+but it is scoped, additive, opt-in, and sits alongside the untouched claim
+engine rather than inside it.
 
 ---
 
@@ -262,12 +287,15 @@ opt-in use of a function that already exists for this class of problem.
    of `reconcile_drop_statuses`. It can be disabled at any time and the
    worst case is that no *new* batches get created — already-created
    batches keep functioning as ordinary drops, claimable exactly as today.
-4. **Anti-abuse extension is opt-in.** Threading `campaign_id` through
-   `_check_public_pool_campaign_cap` is a new optional parameter with a
-   default that preserves every existing call site's behavior unchanged
-   (no cap unless a campaign explicitly sets one) — consistent with the
-   additive-parameter pattern Phase 2 already used for
-   `assign_public_pool_access_once`'s `force_probability`.
+4. **Anti-abuse extension is opt-in and additive.** The new
+   `_check_campaign_user_cap` gate and the denormalized
+   `voucher_claims.campaign_id` field only take effect when a campaign
+   explicitly sets `max_claims_per_user_per_campaign`; every existing drop
+   and every campaign that doesn't opt in behaves exactly as today (no cap,
+   per-batch dedup only) — consistent with the additive-parameter pattern
+   Phase 2 already used for `assign_public_pool_access_once`'s
+   `force_probability`. `_check_public_pool_campaign_cap` (the existing
+   IP/subnet rate limiter) is untouched and unrelated to this cap.
 5. **No backfill required.** Historical drops created before Phase 3 ships
    have no `campaign_id`/`campaign_batch_index` and are simply reported as
    "not campaign-managed" in the new aggregation endpoint; nothing requires
