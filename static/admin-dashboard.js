@@ -2902,7 +2902,350 @@
     });
   }
 
-  var VIEWS = ["summary", "funnel", "abuse", "campaigns", "vouchers", "referrals", "affiliate", "reactivation", "audit", "segmentProbabilityConfig", "segmentRoi", "segments", "validation", "backendSegmentEngine", "voucherHunterAudit", "unclassifiedAudit", "segmentRuleSimulator", "voucherHunterQuality", "voucherHunterFalsePositive", "voucherHunterRuleSimulator", "vhPriorityImpact", "uploadPlayerPerformance", "uploadHistory", "rawExplorer", "users", "settings"];
+  // ---------- Voucher Drops (migrated from legacy MiniApp admin panel) ----------
+  // Reuses the same /v2/miniapp/admin/drops* endpoints used by static/index.html#admin-panel.
+  function toKLLocalString(inputValue) {
+    if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(inputValue || "")) return "";
+    var parts = inputValue.split("T");
+    return parts[0] + " " + parts[1] + ":00";
+  }
+
+  function loadDrops(force) {
+    statePanel("drops-list-body", "loading", "Loading drops…");
+    fetch("/v2/miniapp/admin/drops_v2", { credentials: "same-origin", headers: { "Accept": "application/json" } })
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        var items = data.items || [];
+        var dropSelect = $("#dra-drop-id");
+        if (dropSelect) {
+          var pooled = items.filter(function (d) { return d.type === "pooled"; });
+          dropSelect.innerHTML = '<option value="">— select a pooled drop —</option>' +
+            pooled.map(function (d) { return '<option value="' + esc(d.dropId) + '">' + esc(d.name) + " (" + esc(d.status) + ")</option>"; }).join("");
+        }
+        if (!items.length) {
+          statePanel("drops-list-body", "empty", "No drops found.");
+          return;
+        }
+        var rows = items.map(function (d) {
+          var codesInfo = d.type === "personalised"
+            ? ("Assigned " + fmt(d.assigned) + " / Claimed " + fmt(d.claimed))
+            : ("Free " + fmt(d.codesFree) + " / Total " + fmt(d.codesTotal));
+          return "<tr>" +
+            "<td>" + esc(d.name) + "</td>" +
+            "<td>" + esc(d.type) + "</td>" +
+            '<td><span class="pill ' + esc(d.status) + '">' + esc(d.status) + "</span></td>" +
+            "<td>" + fmt(d.priority) + "</td>" +
+            "<td>" + codesInfo + "</td>" +
+            "<td>" +
+            '<button class="btn" data-drop-op="start_now" data-drop-id="' + esc(d.dropId) + '">Start</button> ' +
+            '<button class="btn" data-drop-op="pause" data-drop-id="' + esc(d.dropId) + '">Pause</button> ' +
+            '<button class="btn" data-drop-op="end_now" data-drop-id="' + esc(d.dropId) + '">End</button>' +
+            "</td></tr>";
+        }).join("");
+        $("#drops-list-body").innerHTML =
+          '<table class="data-table"><thead><tr><th>Name</th><th>Type</th><th>Status</th><th>Priority</th><th>Codes</th><th>Actions</th></tr></thead><tbody>' +
+          rows + "</tbody></table>";
+      })
+      .catch(function (e) { statePanel("drops-list-body", "error", "Failed to load drops: " + e.message); });
+  }
+
+  function bindDrops() {
+    var refreshBtn = $("#drops-refresh-btn");
+    if (refreshBtn) refreshBtn.addEventListener("click", function () { loadDrops(true); });
+
+    var typeSel = $("#dr-type");
+    function toggleDropTypeUi() {
+      var isPersonalised = typeSel && typeSel.value === "personalised";
+      var poolRow = $("#dr-pool-row");
+      if (poolRow) poolRow.style.display = isPersonalised ? "none" : "block";
+      var label = $("#dr-codes-label");
+      var codesEl = $("#dr-codes");
+      if (label) label.textContent = isPersonalised ? "Assignments (one \"username,code\" pair per line)" : "Codes (one per line)";
+      if (codesEl) codesEl.placeholder = isPersonalised ? "username1,CODE1\nusername2,CODE2" : "CODE1\nCODE2\nCODE3";
+    }
+    if (typeSel) { typeSel.addEventListener("change", toggleDropTypeUi); toggleDropTypeUi(); }
+
+    var createBtn = $("#dr-create-btn");
+    if (createBtn) createBtn.addEventListener("click", function () {
+      var resultEl = $("#dr-create-result");
+      var name = ($("#dr-name").value || "").trim();
+      var type = $("#dr-type").value || "pooled";
+      var startsAtLocal = toKLLocalString($("#dr-starts").value);
+      if (!name || !startsAtLocal) {
+        resultEl.textContent = "Name and Starts At are required.";
+        return;
+      }
+      var payload = {
+        name: name,
+        type: type,
+        startsAtLocal: startsAtLocal,
+        priority: parseInt($("#dr-priority").value, 10) || 100,
+      };
+      var endsAtLocal = toKLLocalString($("#dr-ends").value);
+      if (endsAtLocal) payload.endsAtLocal = endsAtLocal;
+
+      var codesRaw = ($("#dr-codes").value || "").split(/\r?\n/).map(function (x) { return x.trim(); }).filter(Boolean);
+      if (type === "personalised") {
+        var assignments = codesRaw.map(function (line) {
+          var parts = line.split(/[,\t]/).map(function (s) { return s.trim(); });
+          return parts[0] && parts[1] ? { username: parts[0], code: parts[1] } : null;
+        }).filter(Boolean);
+        if (!assignments.length) { resultEl.textContent = "Please provide username,code pairs."; return; }
+        payload.assignments = assignments;
+      } else {
+        if (!codesRaw.length) { resultEl.textContent = "Please provide codes."; return; }
+        payload.codes = codesRaw;
+        payload.pool = $("#dr-pool").value || "public";
+      }
+
+      createBtn.disabled = true;
+      resultEl.textContent = "Creating…";
+      fetch("/v2/miniapp/admin/drops", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      }).then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }); })
+        .then(function (res) {
+          if (!res.ok || res.d.status !== "ok") throw new Error(res.d.code || "unknown");
+          resultEl.textContent = "Created drop: " + res.d.dropId;
+          loadDrops(true);
+        })
+        .catch(function (e) { resultEl.textContent = "Create failed: " + e.message; })
+        .finally(function () { createBtn.disabled = false; });
+    });
+
+    var addBtn = $("#dra-add-btn");
+    if (addBtn) addBtn.addEventListener("click", function () {
+      var resultEl = $("#dra-add-result");
+      var dropId = $("#dra-drop-id").value;
+      if (!dropId) { resultEl.textContent = "Please select a drop."; return; }
+      var codes = ($("#dra-codes").value || "").split(/\r?\n/).map(function (x) { return x.trim(); }).filter(Boolean);
+      if (!codes.length) { resultEl.textContent = "Please provide codes."; return; }
+      var payload = { type: "pooled", pool: $("#dra-pool").value || "public", codes: codes };
+
+      addBtn.disabled = true;
+      resultEl.textContent = "Adding…";
+      fetch("/v2/miniapp/admin/drops/" + encodeURIComponent(dropId) + "/codes", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      }).then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }); })
+        .then(function (res) {
+          if (!res.ok || res.d.status !== "ok") throw new Error(res.d.code || "unknown");
+          resultEl.textContent = "Added " + res.d.inserted + " code(s).";
+          loadDrops(true);
+        })
+        .catch(function (e) { resultEl.textContent = "Add failed: " + e.message; })
+        .finally(function () { addBtn.disabled = false; });
+    });
+
+    document.addEventListener("click", function (event) {
+      var btn = event.target && event.target.closest && event.target.closest("[data-drop-op]");
+      if (!btn) return;
+      var op = btn.dataset.dropOp;
+      var dropId = btn.dataset.dropId;
+      if (op === "end_now" && !confirm("End this drop now?")) return;
+      btn.disabled = true;
+      fetch("/v2/miniapp/admin/drops/" + encodeURIComponent(dropId) + "/actions", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ op: op }),
+      }).then(function (r) { return r.json(); })
+        .then(function (d) {
+          if (d.status === "ok") loadDrops(true);
+          else banner("Drop action failed: " + (d.code || "unknown"), "error");
+        })
+        .catch(function (e) { banner("Drop action failed: " + e.message, "error"); })
+        .finally(function () { btn.disabled = false; });
+    });
+  }
+
+  // ---------- Affiliate Voucher Pools (migrated from legacy MiniApp admin panel) ----------
+  function loadAffiliatePools(force) {
+    statePanel("affiliate-pools-summary-body", "loading", "Loading pool summary…");
+    fetch("/v2/miniapp/admin/pools/summary", { credentials: "same-origin", headers: { "Accept": "application/json" } })
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        var items = data.items || [];
+        var rows = items.map(function (p) {
+          return "<tr><td>" + esc(p.pool_id) + "</td><td>" + fmt(p.available) + "</td><td>" + fmt(p.issued) + "</td>" +
+            "<td>" + esc(p.display_label || "—") + "</td><td>" + esc(p.value_hint || "—") + "</td><td>" + esc(p.currency || "—") + "</td></tr>";
+        }).join("");
+        $("#affiliate-pools-summary-body").innerHTML =
+          '<table class="data-table"><thead><tr><th>Pool</th><th>Available</th><th>Issued</th><th>Label</th><th>Value Hint</th><th>Currency</th></tr></thead><tbody>' +
+          rows + "</tbody></table>";
+      })
+      .catch(function (e) { statePanel("affiliate-pools-summary-body", "error", "Failed to load pool summary: " + e.message); });
+  }
+
+  function bindAffiliatePools() {
+    var uploadBtn = $("#ap-upload-btn");
+    if (!uploadBtn) return;
+    uploadBtn.addEventListener("click", function () {
+      var resultEl = $("#ap-upload-result");
+      var codesText = $("#ap-codes").value || "";
+      if (!codesText.trim()) { resultEl.textContent = "Please provide codes."; return; }
+      var payload = {
+        pool_id: $("#ap-pool-id").value,
+        codes_text: codesText,
+        display_label: ($("#ap-display-label").value || "").trim() || null,
+        value_hint: ($("#ap-value-hint").value || "").trim() || null,
+        currency: ($("#ap-currency").value || "").trim() || null,
+      };
+      uploadBtn.disabled = true;
+      resultEl.textContent = "Uploading…";
+      fetch("/v2/miniapp/admin/pools/upload", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      }).then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }); })
+        .then(function (res) {
+          if (!res.ok || res.d.status !== "ok") throw new Error(res.d.reason || "unknown");
+          resultEl.textContent = "Inserted " + res.d.inserted + " / " + res.d.received + " code(s) into " + res.d.pool_id + ".";
+          $("#ap-codes").value = "";
+          loadAffiliatePools(true);
+        })
+        .catch(function (e) { resultEl.textContent = "Upload failed: " + e.message; })
+        .finally(function () { uploadBtn.disabled = false; });
+    });
+  }
+
+  // ---------- Pending Affiliate Rewards (migrated from legacy MiniApp admin panel) ----------
+  function loadAffiliatePending(force) {
+    var activeBtn = $("#affp-status-filter .active");
+    var status = (activeBtn && activeBtn.dataset.status) || "PENDING_REVIEW";
+    statePanel("affp-body", "loading", "Loading pending affiliate rewards…");
+    fetch("/v2/miniapp/admin/affiliate/pending?status=" + encodeURIComponent(status), { credentials: "same-origin", headers: { "Accept": "application/json" } })
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        var items = data.items || [];
+        if (!items.length) {
+          statePanel("affp-body", "empty", "No entries for " + status + ".");
+          return;
+        }
+        var rows = items.map(function (it) {
+          return "<tr>" +
+            "<td>" + fmt(it.user_id) + "</td>" +
+            "<td>" + esc(it.tier || "—") + "</td>" +
+            "<td>" + esc(it.year_month || "—") + "</td>" +
+            "<td>" + esc(it.eligible_tier || "—") + "</td>" +
+            "<td>" + fmt(it.qualified_month) + "</td>" +
+            "<td>" + esc((it.risk_flags || []).join(", ") || "—") + "</td>" +
+            "<td>" +
+            '<button class="btn" data-affp-op="approve" data-ledger-id="' + esc(it.ledger_id) + '">Approve</button> ' +
+            '<button class="btn" data-affp-op="reject" data-ledger-id="' + esc(it.ledger_id) + '">Reject</button>' +
+            "</td></tr>";
+        }).join("");
+        $("#affp-body").innerHTML =
+          '<table class="data-table"><thead><tr><th>User ID</th><th>Tier</th><th>Month</th><th>Eligible Tier</th><th>Qualified (Month)</th><th>Risk Flags</th><th>Actions</th></tr></thead><tbody>' +
+          rows + "</tbody></table>";
+      })
+      .catch(function (e) { statePanel("affp-body", "error", "Failed to load pending rewards: " + e.message); });
+  }
+
+  function bindAffiliatePending() {
+    var refreshBtn = $("#affp-refresh-btn");
+    if (refreshBtn) refreshBtn.addEventListener("click", function () { loadAffiliatePending(true); });
+
+    $all("#affp-status-filter button").forEach(function (b) {
+      b.addEventListener("click", function () {
+        $all("#affp-status-filter button").forEach(function (x) { x.classList.toggle("active", x === b); });
+        loadAffiliatePending(true);
+      });
+    });
+
+    document.addEventListener("click", function (event) {
+      var btn = event.target && event.target.closest && event.target.closest("[data-affp-op]");
+      if (!btn) return;
+      var op = btn.dataset.affpOp;
+      var ledgerId = btn.dataset.ledgerId;
+      if (op === "reject") {
+        var reason = prompt("Reason for rejection (optional):") || "";
+        btn.disabled = true;
+        fetch("/v2/miniapp/admin/affiliate/" + encodeURIComponent(ledgerId) + "/reject", {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ reason: reason }),
+        }).then(function (r) { return r.json(); })
+          .then(function (d) {
+            if (d.status === "ok") loadAffiliatePending(true);
+            else banner("Reject failed: " + (d.reason || "unknown"), "error");
+          })
+          .catch(function (e) { banner("Reject failed: " + e.message, "error"); })
+          .finally(function () { btn.disabled = false; });
+      } else if (op === "approve") {
+        if (!confirm("Approve this affiliate reward? A voucher may be issued immediately.")) return;
+        btn.disabled = true;
+        fetch("/v2/miniapp/admin/affiliate/" + encodeURIComponent(ledgerId) + "/approve", {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+        }).then(function (r) { return r.json(); })
+          .then(function (d) {
+            if (d.status === "ok") loadAffiliatePending(true);
+            else banner("Approve failed: " + (d.reason || "unknown"), "error");
+          })
+          .catch(function (e) { banner("Approve failed: " + e.message, "error"); })
+          .finally(function () { btn.disabled = false; });
+      }
+    });
+  }
+
+  // ---------- Join Requests (read-only; no manual approve/reject endpoint exists) ----------
+  function bindJoinRequests() {
+    var btn = $("#jr-refresh-btn");
+    if (!btn) return;
+    btn.addEventListener("click", function () {
+      statePanel("jr-body", "loading", "Loading join requests…");
+      fetch("/api/join_requests", { credentials: "same-origin", headers: { "Accept": "application/json" } })
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+          if (!data.success) throw new Error(data.message || data.error || "unknown");
+          var items = data.requests || [];
+          if (!items.length) { statePanel("jr-body", "empty", "No pending join requests."); return; }
+          var rows = items.map(function (it) {
+            return "<tr><td>" + fmt(it.user_id) + "</td><td>" + esc(it.username || "—") + "</td></tr>";
+          }).join("");
+          $("#jr-body").innerHTML =
+            '<table class="data-table"><thead><tr><th>User ID</th><th>Username</th></tr></thead><tbody>' + rows + "</tbody></table>";
+        })
+        .catch(function (e) { statePanel("jr-body", "error", "Failed to load join requests: " + e.message); });
+    });
+  }
+
+  // ---------- Add / Reduce XP (migrated from legacy MiniApp admin panel) ----------
+  function bindXpAdjust() {
+    var btn = $("#xp-submit-btn");
+    if (!btn) return;
+    btn.addEventListener("click", function () {
+      var resultEl = $("#xp-result");
+      var username = ($("#xp-username").value || "").trim();
+      var amount = parseInt($("#xp-amount").value, 10);
+      if (!username || !amount) { resultEl.textContent = "Username and a non-zero XP amount are required."; return; }
+      btn.disabled = true;
+      resultEl.textContent = "Submitting…";
+      fetch("/api/add_xp", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ user_id: username, xp: amount }),
+      }).then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }); })
+        .then(function (res) {
+          if (!res.ok || !res.d.success) throw new Error(res.d.message || "unknown");
+          resultEl.textContent = res.d.message || "XP updated.";
+          $("#xp-amount").value = "";
+        })
+        .catch(function (e) { resultEl.textContent = "Failed: " + e.message; })
+        .finally(function () { btn.disabled = false; });
+    });
+  }
+
+  var VIEWS =["summary", "funnel", "abuse", "campaigns", "vouchers", "drops", "referrals", "affiliate", "affiliatePools", "affiliatePending", "reactivation", "audit", "segmentProbabilityConfig", "segmentRoi", "segments", "validation", "backendSegmentEngine", "voucherHunterAudit", "unclassifiedAudit", "segmentRuleSimulator", "voucherHunterQuality", "voucherHunterFalsePositive", "voucherHunterRuleSimulator", "vhPriorityImpact", "uploadPlayerPerformance", "uploadHistory", "rawExplorer", "users", "joinRequests", "xpAdjust", "settings"];
   function switchView(view) {
     state.view = view;
     $all(".nav-item").forEach(function (b) { b.classList.toggle("active", b.dataset.view === view); });
@@ -2913,7 +3256,8 @@
     var titles = {
       summary: "Executive Summary", funnel: "Activation Funnel", abuse: "Abuse Overview",
       campaigns: "Campaign Engine",
-      vouchers: "Vouchers", referrals: "Referrals", affiliate: "Affiliate", reactivation: "Reactivation",
+      vouchers: "Vouchers", drops: "Voucher Drops", referrals: "Referrals", affiliate: "Affiliate",
+      affiliatePools: "Affiliate Voucher Pools", affiliatePending: "Pending Affiliate Rewards", reactivation: "Reactivation",
       audit: "Audit", segmentProbabilityConfig: "Segment Probability Configuration (Read Only)",
       segmentRoi: "Segment ROI Dashboard",
       segments: "Segment Overview", validation: "Data → Validation / UIM Compare",
@@ -2927,7 +3271,8 @@
       vhPriorityImpact: "Data → VH Priority Impact Analysis (Phase 7C)",
       uploadPlayerPerformance: "Data → Upload Player Performance", uploadHistory: "Data → Upload History",
       rawExplorer: "Data → Raw Data Explorer",
-      users: "User Drilldown", settings: "Settings (Read Only)"
+      users: "User Drilldown", joinRequests: "Join Requests", xpAdjust: "Add / Reduce XP",
+      settings: "Settings (Read Only)"
     };
     $("#view-title").textContent = titles[view] || view;
     banner(null);
@@ -2940,8 +3285,11 @@
     else if (state.view === "abuse") loadAbuse(force);
     else if (state.view === "campaigns") loadCampaigns(force);
     else if (state.view === "vouchers") loadVouchers(force);
+    else if (state.view === "drops") loadDrops(force);
     else if (state.view === "referrals") loadReferrals(force);
     else if (state.view === "affiliate") loadAffiliate(force);
+    else if (state.view === "affiliatePools") loadAffiliatePools(force);
+    else if (state.view === "affiliatePending") loadAffiliatePending(force);
     else if (state.view === "reactivation") loadReactivation(force);
     else if (state.view === "audit") loadAudit(force);
     else if (state.view === "segmentProbabilityConfig") loadSegmentProbabilityConfig(force);
@@ -2968,6 +3316,8 @@
     else if (state.view === "uploadHistory") loadUploadHistory(force);
     else if (state.view === "rawExplorer") loadRawExplorer(force);
     else if (state.view === "users") { /* user view loads on search */ }
+    else if (state.view === "joinRequests") { /* loads on Load Join Requests click */ }
+    else if (state.view === "xpAdjust") { /* form submit only, no load */ }
     else if (state.view === "settings") loadSettings(force);
   }
 
@@ -2987,6 +3337,11 @@
         .finally(function () { window.location.href = "/admin"; });
     });
     bindCampaigns();
+    bindDrops();
+    bindAffiliatePools();
+    bindAffiliatePending();
+    bindJoinRequests();
+    bindXpAdjust();
     $("#reactivation-start-btn").addEventListener("click", function () { setReactivation(true); });
     $("#reactivation-pause-btn").addEventListener("click", function () { setReactivation(false); });
     $all("#funnel-window button").forEach(function (b) {

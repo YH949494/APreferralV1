@@ -33,6 +33,7 @@
         <div class="nav-group-body">
           <button class="nav-item" data-view="campaigns">Campaigns <span class="badge badge-live">Live Control</span></button>
           <button class="nav-item" data-view="vouchers">Vouchers Overview <span class="badge badge-readonly">Read Only</span></button>
+          <button class="nav-item" data-view="drops">Voucher Drops <span class="badge badge-live">Live Control</span></button>
           <a href="/static/index.html#admin-panel" class="nav-item nav-item-external" target="_blank" rel="noopener">
             Legacy MiniApp Admin ↗ <span class="badge badge-legacy">Legacy</span>
           </a>
@@ -46,6 +47,7 @@
           <button class="nav-item" data-view="referrals">Referrals <span class="badge badge-readonly">Read Only</span></button>
           <button class="nav-item" data-view="audit">Audit <span class="badge badge-readonly">Read Only</span></button>
           <button class="nav-item" data-view="users">User Drilldown <span class="badge badge-readonly">Read Only</span></button>
+          <button class="nav-item" data-view="joinRequests">Join Requests <span class="badge badge-readonly">Read Only</span></button>
           <a href="/static/index.html#admin-panel" class="nav-item nav-item-external" target="_blank" rel="noopener">
             Legacy MiniApp Admin ↗ <span class="badge badge-legacy">Legacy</span>
           </a>
@@ -76,6 +78,8 @@
         <button class="nav-group-header" data-group-toggle="affiliate">6 · Affiliate</button>
         <div class="nav-group-body">
           <button class="nav-item" data-view="affiliate">Affiliate Dashboard <span class="badge badge-readonly">Read Only</span></button>
+          <button class="nav-item" data-view="affiliatePools">Affiliate Voucher Pools <span class="badge badge-live">Live Control</span></button>
+          <button class="nav-item" data-view="affiliatePending">Pending Affiliate Rewards <span class="badge badge-live">Live Control</span></button>
           <a href="/static/index.html#admin-panel" class="nav-item nav-item-external" target="_blank" rel="noopener">
             Legacy MiniApp Admin ↗ <span class="badge badge-legacy">Legacy</span>
           </a>
@@ -97,6 +101,7 @@
         <button class="nav-group-header" data-group-toggle="abuse-risk">8 · Abuse &amp; Risk</button>
         <div class="nav-group-body">
           <button class="nav-item" data-view="abuse">Abuse Overview <span class="badge badge-readonly">Read Only</span></button>
+          <button class="nav-item" data-view="xpAdjust">Add / Reduce XP <span class="badge badge-live">Live Control</span></button>
           <button class="nav-item" data-view="voucherHunterAudit">Voucher Hunter Mismatch <span class="badge badge-readonly">Read Only</span></button>
           <button class="nav-item" data-view="unclassifiedAudit">Unclassified Audit <span class="badge badge-readonly">Read Only</span></button>
           <button class="nav-item" data-view="voucherHunterQuality">VH Rule Quality <span class="badge badge-readonly">Read Only</span></button>
@@ -357,6 +362,87 @@
         <div id="vouchers-body"></div>
       </section>
 
+      <!-- VOUCHER DROPS VIEW -->
+      <section id="view-drops" class="hidden">
+        <div style="margin-bottom:16px;"><span class="tag heuristic" style="font-size:12px;padding:4px 12px;">LIVE CONTROL — creates/mutates voucher drops immediately. Migrated from legacy MiniApp admin panel; same backend endpoints.</span></div>
+
+        <div class="controls" style="margin-bottom:16px;">
+          <button class="btn primary" id="drops-refresh-btn">Refresh Drops</button>
+        </div>
+        <div class="section-title">Existing Drops</div>
+        <div id="drops-list-body"></div>
+
+        <div class="section" style="max-width:720px;margin-top:24px;">
+          <div class="section-title">Create Drop</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:10px;">
+            <div>
+              <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">Name *</label>
+              <input class="filter-input" id="dr-name" placeholder="e.g. VIP Drop June" style="width:100%;box-sizing:border-box;" />
+            </div>
+            <div>
+              <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">Type</label>
+              <select id="dr-type" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--card-bg);color:var(--text);">
+                <option value="pooled">Pooled</option>
+                <option value="personalised">Personalised</option>
+              </select>
+            </div>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:10px;">
+            <div>
+              <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">Starts At (KL time) *</label>
+              <input class="filter-input" id="dr-starts" type="datetime-local" style="width:100%;box-sizing:border-box;" />
+            </div>
+            <div>
+              <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">Ends At (KL time)</label>
+              <input class="filter-input" id="dr-ends" type="datetime-local" style="width:100%;box-sizing:border-box;" />
+            </div>
+            <div>
+              <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">Priority</label>
+              <input class="filter-input" id="dr-priority" type="number" value="100" style="width:100%;box-sizing:border-box;" />
+            </div>
+          </div>
+          <div id="dr-pool-row" style="margin-bottom:10px;">
+            <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">Pool (pooled drops only)</label>
+            <select id="dr-pool" style="width:200px;padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--card-bg);color:var(--text);">
+              <option value="public">public</option>
+              <option value="my">my</option>
+            </select>
+          </div>
+          <div style="margin-bottom:12px;">
+            <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;" id="dr-codes-label">Codes (one per line)</label>
+            <textarea id="dr-codes" rows="5" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--card-bg);color:var(--text);box-sizing:border-box;resize:vertical;" placeholder="CODE1&#10;CODE2&#10;CODE3"></textarea>
+            <div style="font-size:11px;color:var(--muted);margin-top:4px;" id="dr-codes-hint">Pooled: one code per line. Personalised: one "username,code" pair per line.</div>
+          </div>
+          <button class="btn primary" id="dr-create-btn">Create Drop</button>
+          <div id="dr-create-result" style="margin-top:10px;font-size:12px;"></div>
+        </div>
+
+        <div class="section" style="max-width:720px;margin-top:24px;">
+          <div class="section-title">Add Codes to Existing Drop</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:10px;">
+            <div>
+              <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">Drop</label>
+              <select id="dra-drop-id" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--card-bg);color:var(--text);">
+                <option value="">— select a pooled drop —</option>
+              </select>
+            </div>
+            <div>
+              <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">Pool</label>
+              <select id="dra-pool" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--card-bg);color:var(--text);">
+                <option value="public">public</option>
+                <option value="my">my</option>
+              </select>
+            </div>
+          </div>
+          <div style="margin-bottom:12px;">
+            <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">Codes (one per line)</label>
+            <textarea id="dra-codes" rows="5" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--card-bg);color:var(--text);box-sizing:border-box;resize:vertical;" placeholder="CODE1&#10;CODE2"></textarea>
+          </div>
+          <button class="btn primary" id="dra-add-btn">Add Codes</button>
+          <div id="dra-add-result" style="margin-top:10px;font-size:12px;"></div>
+        </div>
+      </section>
+
       <!-- REFERRALS VIEW -->
       <section id="view-referrals" class="hidden">
         <div class="controls" style="margin-bottom:16px;">
@@ -382,6 +468,65 @@
         <div class="section-title">Affiliates</div>
         <input class="filter-input" id="affiliate-filter" placeholder="Filter by user id / tier / status…" />
         <div id="affiliate-body"></div>
+      </section>
+
+      <!-- AFFILIATE VOUCHER POOLS VIEW -->
+      <section id="view-affiliatePools" class="hidden">
+        <div style="margin-bottom:16px;"><span class="tag heuristic" style="font-size:12px;padding:4px 12px;">LIVE CONTROL — uploads codes into affiliate reward pools immediately. Migrated from legacy MiniApp admin panel; same backend endpoints.</span></div>
+
+        <div class="section" style="max-width:640px;">
+          <div class="section-title">Upload Pool Codes</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:10px;">
+            <div>
+              <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">Pool *</label>
+              <select id="ap-pool-id" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--card-bg);color:var(--text);">
+                <option value="WELCOME">WELCOME</option>
+                <option value="T1">T1</option>
+                <option value="T2">T2</option>
+                <option value="T3">T3</option>
+                <option value="T4">T4</option>
+                <option value="T5">T5</option>
+              </select>
+            </div>
+            <div>
+              <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">Currency</label>
+              <input class="filter-input" id="ap-currency" placeholder="e.g. MYR" style="width:100%;box-sizing:border-box;" />
+            </div>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:10px;">
+            <div>
+              <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">Display Label</label>
+              <input class="filter-input" id="ap-display-label" placeholder="e.g. RM50 Voucher" style="width:100%;box-sizing:border-box;" />
+            </div>
+            <div>
+              <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">Value Hint</label>
+              <input class="filter-input" id="ap-value-hint" placeholder="e.g. 50" style="width:100%;box-sizing:border-box;" />
+            </div>
+          </div>
+          <div style="margin-bottom:12px;">
+            <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">Codes (one per line) *</label>
+            <textarea id="ap-codes" rows="5" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--card-bg);color:var(--text);box-sizing:border-box;resize:vertical;" placeholder="CODE1&#10;CODE2"></textarea>
+          </div>
+          <button class="btn primary" id="ap-upload-btn">Upload Codes</button>
+          <div id="ap-upload-result" style="margin-top:10px;font-size:12px;"></div>
+        </div>
+
+        <div class="section-title" style="margin-top:24px;">Pool Summary</div>
+        <div id="affiliate-pools-summary-body"></div>
+      </section>
+
+      <!-- PENDING AFFILIATE REWARDS VIEW -->
+      <section id="view-affiliatePending" class="hidden">
+        <div style="margin-bottom:16px;"><span class="tag heuristic" style="font-size:12px;padding:4px 12px;">LIVE CONTROL — approve/reject issues or blocks affiliate reward vouchers immediately. Migrated from legacy MiniApp admin panel; same backend endpoints.</span></div>
+        <div class="controls" style="margin-bottom:16px;">
+          <div class="seg" id="affp-status-filter">
+            <button data-status="PENDING_REVIEW" class="active">Pending Review</button>
+            <button data-status="PENDING_MANUAL">Pending Manual</button>
+            <button data-status="SIMULATED_PENDING">Simulated Pending</button>
+          </div>
+          <button class="btn" id="affp-refresh-btn">Refresh</button>
+        </div>
+        <div id="affp-body"></div>
       </section>
 
       <!-- REACTIVATION VIEW -->
@@ -931,6 +1076,33 @@
           <button class="btn primary" id="user-search-btn">Search</button>
         </div>
         <div id="user-body"><div class="empty">Search by Telegram user_id or username to view a user profile.</div></div>
+      </section>
+
+      <!-- JOIN REQUESTS VIEW -->
+      <section id="view-joinRequests" class="hidden">
+        <div style="margin-bottom:16px;"><span class="tag heuristic" style="font-size:12px;padding:4px 12px;">READ ONLY — join requests are auto-processed by the bot's ChatJoinRequestHandler; there is no manual approve/reject endpoint yet (same limitation as the legacy panel).</span></div>
+        <div class="controls" style="margin-bottom:16px;">
+          <button class="btn primary" id="jr-refresh-btn">Load Join Requests</button>
+        </div>
+        <div id="jr-body"><div class="empty">Click Load Join Requests to view pending channel join requests.</div></div>
+      </section>
+
+      <!-- ADD / REDUCE XP VIEW -->
+      <section id="view-xpAdjust" class="hidden">
+        <div style="margin-bottom:16px;"><span class="tag heuristic" style="font-size:12px;padding:4px 12px;">LIVE CONTROL — grants or deducts XP immediately. Migrated from legacy MiniApp admin panel; same backend endpoint.</span></div>
+        <div class="section" style="max-width:480px;">
+          <div class="section-title">Add / Reduce XP</div>
+          <div style="margin-bottom:10px;">
+            <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">Username *</label>
+            <input class="filter-input" id="xp-username" placeholder="e.g. @username or username" style="width:100%;box-sizing:border-box;" />
+          </div>
+          <div style="margin-bottom:12px;">
+            <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">XP Amount * <span style="font-weight:400;color:var(--muted);">(negative to reduce)</span></label>
+            <input class="filter-input" id="xp-amount" type="number" placeholder="e.g. 100 or -50" style="width:100%;box-sizing:border-box;" />
+          </div>
+          <button class="btn primary" id="xp-submit-btn">Submit</button>
+          <div id="xp-result" style="margin-top:10px;font-size:12px;"></div>
+        </div>
       </section>
 
       <!-- SETTINGS VIEW -->
