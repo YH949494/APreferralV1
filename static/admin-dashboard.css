@@ -136,6 +136,25 @@ html, body {
 }
 .btn:hover { border-color: var(--accent); }
 .btn.primary { background: var(--accent); color: #1a1a1a; border-color: var(--accent); font-weight: 600; }
+.btn-loading {
+  opacity: 0.7;
+  pointer-events: none;
+  cursor: wait;
+}
+.btn-spinner {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  margin-right: 6px;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  vertical-align: -1px;
+  animation: btn-spin 0.6s linear infinite;
+}
+@keyframes btn-spin {
+  to { transform: rotate(360deg); }
+}
 .seg { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
 .seg button { background: var(--panel); color: var(--muted); border: none; padding: 7px 14px; cursor: pointer; font-size: 13px; }
 .seg button.active { background: var(--accent); color: #1a1a1a; font-weight: 600; }
