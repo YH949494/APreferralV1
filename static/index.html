@@ -1612,6 +1612,7 @@
                   <label style="flex:1 1 200px; font-size:12px; color:#555;">Eligibility Mode
                     <select id="adm_elig_mode" style="width:100%; padding:8px; border-radius:6px; border:1px solid #ccc;">
                       <option value="public">Public</option>
+                      <option value="new_joiner">Welcome Voucher / New Joiner</option>
                       <option value="tier">VIP Tier</option>
                       <option value="user_id">User IDs</option>
                       <option value="admin_only">Admin preview only</option>
@@ -2618,6 +2619,18 @@
       } else {
         wrap.style.display = "none";
       }
+
+      // Welcome Voucher / New Joiner is always a pooled drop — force + lock the type selector.
+      const typeEl = document.getElementById("adm_type");
+      if (typeEl) {
+        if (mode === "new_joiner") {
+          typeEl.value = "pooled";
+          typeEl.disabled = true;
+          typeEl.dispatchEvent(new Event("change"));
+        } else {
+          typeEl.disabled = false;
+        }
+      }
     }
 
     async function adm_create() {
@@ -2657,6 +2670,12 @@
       const regions = regionSel ? Array.from(regionSel.selectedOptions).map(o => o.value).filter(Boolean) : [];
       if (regions.length) {
         payload.audience = { regions };
+      }
+
+      if (eligMode === "new_joiner") {
+        payload.type = "pooled";
+        payload.audience = { ...(payload.audience || {}), type: "new_joiner" };
+        payload.campaign_type = "welcome_voucher";
       }
 
       const endsValue = (document.querySelector("#adm_ends")?.value || "").trim();
