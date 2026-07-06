@@ -59,6 +59,20 @@ def _log_info(msg, *args):
         logger.info(msg, *args)
 
 
+def _log_warning(msg, *args):
+    if has_app_context():
+        current_app.logger.warning(msg, *args)
+    else:
+        logger.warning(msg, *args)
+
+
+def _log_exception(msg, *args):
+    if has_app_context():
+        current_app.logger.exception(msg, *args)
+    else:
+        logger.exception(msg, *args)
+
+
 PERSONALISED_TYPE_CANONICAL = "personalised"
 PERSONALISED_TYPE_ALIASES = (PERSONALISED_TYPE_CANONICAL, "personalized")
 
@@ -3545,19 +3559,19 @@ def get_or_issue_welcome_ticket(uid: int):
 
     eligibility = ensure_welcome_eligibility(uid)
     if not eligibility:
-        current_app.logger.info("[welcome] eligibility_missing uid=%s deny reason=truly_not_found", uid)
+        _log_info("[welcome] eligibility_missing uid=%s deny reason=truly_not_found", uid)
         return None
 
     now = now_kl()
     expires_at = _as_aware_kl(eligibility.get("eligible_until"))
     if not expires_at:
-        current_app.logger.info("[welcome] eligibility_invalid uid=%s deny", uid)
+        _log_info("[welcome] eligibility_invalid uid=%s deny", uid)
         return None
     if eligibility.get("claimed"):
-        current_app.logger.info("[welcome] eligibility_claimed uid=%s deny", uid)
+        _log_info("[welcome] eligibility_claimed uid=%s deny", uid)
         return None
     if now > expires_at:
-        current_app.logger.info("[welcome] eligibility_expired uid=%s deny", uid)
+        _log_info("[welcome] eligibility_expired uid=%s deny", uid)
         return None
 
     cleanup_at = expires_at + timedelta(days=30)
@@ -3583,7 +3597,7 @@ def get_or_issue_welcome_ticket(uid: int):
                 return_document=ReturnDocument.AFTER,
             )
             if existing_ticket.get("uid") != uid or existing_ticket.get("user_id") != uid:
-                current_app.logger.info(
+                _log_info(
                     "[WELCOME][TICKET] normalized uid=%s doc_id=%s",
                     uid,
                     existing_ticket.get("_id"),
@@ -3601,20 +3615,20 @@ def get_or_issue_welcome_ticket(uid: int):
     except DuplicateKeyError:
         existing_ticket = _get_welcome_ticket(uid)
         if not existing_ticket:
-            current_app.logger.exception("[WELCOME][TICKET] upsert_or_normalize_failed uid=%s", uid)
+            _log_exception("[WELCOME][TICKET] upsert_or_normalize_failed uid=%s", uid)
             return None
         ticket = welcome_tickets_col.find_one_and_update(
             {"_id": existing_ticket["_id"]},
             {"$set": {"uid": uid, "user_id": uid, "cleanup_at": cleanup_at}},
             return_document=ReturnDocument.AFTER,
         )
-        current_app.logger.info(
+        _log_info(
             "[WELCOME][TICKET] normalized uid=%s doc_id=%s",
             uid,
             existing_ticket.get("_id"),
         )
     except Exception:
-        current_app.logger.exception("[WELCOME][TICKET] upsert_or_normalize_failed uid=%s", uid)
+        _log_exception("[WELCOME][TICKET] upsert_or_normalize_failed uid=%s", uid)
         return None
 
     issued_at = _as_aware_utc(ticket.get("issued_at"))
@@ -3635,9 +3649,9 @@ def get_or_issue_welcome_ticket(uid: int):
         ticket["expires_at"] = ticket_expires_at
 
     if just_created:
-        current_app.logger.info("[welcome] ticket_issued uid=%s expires_at=%s", uid, expires_at.isoformat())
+        _log_info("[welcome] ticket_issued uid=%s expires_at=%s", uid, expires_at.isoformat())
     else:
-        current_app.logger.info("[welcome] ticket_exists uid=%s status=%s", uid, ticket.get("status"))
+        _log_info("[welcome] ticket_exists uid=%s status=%s", uid, ticket.get("status"))
     return ticket
 
 
