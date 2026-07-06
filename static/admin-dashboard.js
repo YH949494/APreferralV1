@@ -3023,59 +3023,90 @@
         (isBatch && status === "active"
           ? '<div class="campaign-card-actions">' +
             (c.batch_status === "scheduled" || c.batch_status === "active"
-              ? '<button class="btn" onclick="cbPauseBatch(' + JSON.stringify(c.id) + ')">Pause</button>' +
-                '<button class="btn" onclick="cbReleaseNextBatch(' + JSON.stringify(c.id) + ')">Release Next Now</button>'
+              ? '<button class="btn" onclick="cbPauseBatch(this,' + JSON.stringify(c.id) + ')">Pause</button>' +
+                '<button class="btn" onclick="cbReleaseNextBatch(this,' + JSON.stringify(c.id) + ')">Release Next Now</button>'
               : '') +
-            (c.batch_status === "paused" ? '<button class="btn" onclick="cbResumeBatch(' + JSON.stringify(c.id) + ')">Resume</button>' : '') +
+            (c.batch_status === "paused" ? '<button class="btn" onclick="cbResumeBatch(this,' + JSON.stringify(c.id) + ')">Resume</button>' : '') +
             (["scheduled", "active", "paused"].indexOf(c.batch_status) >= 0
-              ? '<button class="btn" style="background:transparent;border:1px solid var(--border);" onclick="cbCancelBatch(' + JSON.stringify(c.id) + ')">Cancel</button>'
+              ? '<button class="btn" style="background:transparent;border:1px solid var(--border);" onclick="cbCancelBatch(this,' + JSON.stringify(c.id) + ')">Cancel</button>'
               : '') +
-            '<button class="btn" style="background:transparent;border:1px solid var(--border);" onclick="cbToggleBatchAnalytics(' + JSON.stringify(c.id) + ')">Analytics</button>' +
+            '<button class="btn" style="background:transparent;border:1px solid var(--border);" onclick="cbToggleBatchAnalytics(this,' + JSON.stringify(c.id) + ')">Analytics</button>' +
             '</div><div id="cb-analytics-' + esc(c.id) + '" class="hidden" style="margin-top:10px;"></div>'
           : '') +
         '</div>';
     }).join("");
   }
 
-  window.cbPauseBatch = function (id) {
+  function cbBtnStart(btn, loadingText) {
+    if (!btn || btn.dataset.loading === "1") return false;
+    btn.dataset.loading = "1";
+    btn.dataset.originalText = btn.textContent;
+    btn.disabled = true;
+    btn.classList.add("btn-loading");
+    btn.innerHTML = '<span class="btn-spinner"></span>' + esc(loadingText);
+    return true;
+  }
+
+  function cbBtnStop(btn) {
+    if (!btn) return;
+    btn.dataset.loading = "";
+    btn.disabled = false;
+    btn.classList.remove("btn-loading");
+    btn.textContent = btn.dataset.originalText || btn.textContent;
+  }
+
+  function cbErrMsg(res, e) {
+    if (e) return e.message;
+    return (res.body && (res.body.message || res.body.code)) || "unknown error";
+  }
+
+  window.cbPauseBatch = function (btn, id) {
+    if (!cbBtnStart(btn, "⏳ Pausing...")) return;
+    banner("Pausing campaign...", "ok");
     cbApi("/api/admin/campaign-builder/campaigns/" + id + "/pause", { method: "POST", body: {} }).then(function (res) {
-      if (res.ok) { banner("Campaign paused.", "ok"); refreshCurrent(true); }
-      else banner("Pause failed: " + ((res.body && res.body.code) || "unknown"), "error");
-    });
+      if (res.ok) { banner("✅ Campaign paused", "ok"); refreshCurrent(true); }
+      else { cbBtnStop(btn); banner("❌ Failed to pause campaign: " + cbErrMsg(res), "error"); }
+    }).catch(function (e) { cbBtnStop(btn); banner("❌ Failed to pause campaign: " + cbErrMsg(null, e), "error"); });
   };
 
-  window.cbResumeBatch = function (id) {
+  window.cbResumeBatch = function (btn, id) {
+    if (!cbBtnStart(btn, "⏳ Resuming...")) return;
     cbApi("/api/admin/campaign-builder/campaigns/" + id + "/resume", { method: "POST", body: {} }).then(function (res) {
-      if (res.ok) { banner("Campaign resumed.", "ok"); refreshCurrent(true); }
-      else banner("Resume failed: " + ((res.body && res.body.code) || "unknown"), "error");
-    });
+      if (res.ok) { banner("✅ Campaign resumed", "ok"); refreshCurrent(true); }
+      else { cbBtnStop(btn); banner("❌ Failed to resume campaign: " + cbErrMsg(res), "error"); }
+    }).catch(function (e) { cbBtnStop(btn); banner("❌ Failed to resume campaign: " + cbErrMsg(null, e), "error"); });
   };
 
-  window.cbCancelBatch = function (id) {
-    if (!confirm("Cancel this batch campaign? Unreleased child drops will be disabled. Already-released/claimed drops are not affected.")) return;
+  window.cbCancelBatch = function (btn, id) {
+    if (!confirm("Cancel all unreleased batches? Already-released/claimed drops are not affected.")) return;
+    if (!cbBtnStart(btn, "⏳ Cancelling...")) return;
     cbApi("/api/admin/campaign-builder/campaigns/" + id + "/cancel", { method: "POST", body: {} }).then(function (res) {
-      if (res.ok) { banner("Campaign cancelled.", "ok"); refreshCurrent(true); }
-      else banner("Cancel failed: " + ((res.body && res.body.code) || "unknown"), "error");
-    });
+      if (res.ok) { banner("✅ Campaign cancelled", "ok"); refreshCurrent(true); }
+      else { cbBtnStop(btn); banner("❌ Failed to cancel campaign: " + cbErrMsg(res), "error"); }
+    }).catch(function (e) { cbBtnStop(btn); banner("❌ Failed to cancel campaign: " + cbErrMsg(null, e), "error"); });
   };
 
-  window.cbReleaseNextBatch = function (id) {
+  window.cbReleaseNextBatch = function (btn, id) {
+    if (!cbBtnStart(btn, "⏳ Releasing...")) return;
+    banner("Releasing next batch...", "ok");
     cbApi("/api/admin/campaign-builder/campaigns/" + id + "/release-next", { method: "POST", body: {} }).then(function (res) {
-      if (!res.ok) { banner("Release failed: " + ((res.body && res.body.code) || "unknown"), "error"); return; }
-      if (!res.body.released_drop_id) { banner("No unreleased batches left.", "ok"); return; }
-      banner("Released next batch.", "ok");
+      if (!res.ok) { cbBtnStop(btn); banner("❌ Failed to release batch: " + cbErrMsg(res), "error"); return; }
+      if (!res.body.released_drop_id) { cbBtnStop(btn); banner("No unreleased batches left.", "ok"); return; }
+      banner("✅ Batch released", "ok");
       refreshCurrent(true);
-    });
+    }).catch(function (e) { cbBtnStop(btn); banner("❌ Failed to release batch: " + cbErrMsg(null, e), "error"); });
   };
 
-  window.cbToggleBatchAnalytics = function (id) {
+  window.cbToggleBatchAnalytics = function (btn, id) {
     var el = $("#cb-analytics-" + id);
     if (!el) return;
     if (!el.classList.contains("hidden")) { el.classList.add("hidden"); return; }
+    if (!cbBtnStart(btn, "⏳ Loading...")) return;
     el.classList.remove("hidden");
     el.innerHTML = '<div style="font-size:12px;color:var(--muted);">Loading analytics…</div>';
     cbApi("/api/admin/campaign-builder/campaigns/" + id + "/analytics").then(function (res) {
-      if (!res.ok) { el.innerHTML = '<div class="banner error">Failed to load analytics.</div>'; return; }
+      cbBtnStop(btn);
+      if (!res.ok) { el.innerHTML = '<div class="banner error">Failed to load analytics.</div>'; banner("❌ Failed to load analytics: " + cbErrMsg(res), "error"); return; }
       var a = res.body.analytics;
       el.innerHTML =
         '<div class="card-grid">' +
@@ -3091,7 +3122,7 @@
           return '<tr><td>' + d.batch_index + '</td><td>' + esc(d.drop_id) + '</td><td>' + esc(d.release_time || "—") + '</td><td>' + esc(d.status) +
             '</td><td>' + fmt(d.total_codes) + '</td><td>' + fmt(d.claimed) + '</td><td>' + fmt(d.remaining) + '</td></tr>';
         }).join("") + '</tbody></table>';
-    });
+    }).catch(function (e) { cbBtnStop(btn); el.innerHTML = '<div class="banner error">Failed to load analytics.</div>'; banner("❌ Failed to load analytics: " + cbErrMsg(null, e), "error"); });
   };
 
   function loadCompiledDrops(force) {
@@ -3388,14 +3419,17 @@
 
     var launchBtn = $("#cb-launch-btn");
     if (launchBtn) launchBtn.addEventListener("click", function () {
+      if (launchBtn.dataset.loading === "1") return;
       var confirmVal = ($("#cb-launch-confirm").value || "").trim();
       if (confirmVal !== "LAUNCH") { $("#cb-launch-result").innerHTML = '<div class="banner error">Type LAUNCH exactly to confirm.</div>'; return; }
       if (!cb.campaignId) { $("#cb-launch-result").innerHTML = '<div class="banner error">Save the draft first.</div>'; return; }
-      launchBtn.disabled = true;
+      cbBtnStart(launchBtn, "⏳ Launching...");
       cbApi("/api/admin/campaign-builder/campaigns/" + cb.campaignId + "/compile", { method: "POST", body: { confirm: "LAUNCH" } })
         .then(function (res) {
           if (!res.ok) {
-            $("#cb-launch-result").innerHTML = '<div class="banner error">Compile failed: ' + esc((res.body && res.body.code) || "unknown") + '</div>';
+            var errMsg = cbErrMsg(res);
+            $("#cb-launch-result").innerHTML = '<div class="banner error">Compile failed: ' + esc(errMsg) + '</div>';
+            banner("❌ Failed to launch campaign: " + errMsg, "error");
             return;
           }
           if (res.body.child_drop_ids) {
@@ -3407,9 +3441,13 @@
               esc((res.body.compiled_drop_ids || []).join(", ")) + '</div>' +
               (res.body.warnings && res.body.warnings.length ? '<div style="margin-top:6px;font-size:12px;color:var(--muted);">' + res.body.warnings.map(esc).join("<br/>") + '</div>' : '');
           }
-          banner("Campaign launched.", "ok");
+          banner("✅ Campaign launched", "ok");
         })
-        .finally(function () { launchBtn.disabled = false; });
+        .catch(function (e) {
+          $("#cb-launch-result").innerHTML = '<div class="banner error">Compile failed: ' + esc(e.message) + '</div>';
+          banner("❌ Failed to launch campaign: " + e.message, "error");
+        })
+        .finally(function () { cbBtnStop(launchBtn); });
     });
   }
 
