@@ -3323,6 +3323,186 @@
     });
   })();
 
+  // ---------- Campaign Intelligence (P5) ----------
+  // Read-only recommendations layer over /api/admin/campaign-builder/intelligence/*.
+  // Never calls a mutating endpoint; nothing here schedules or launches a campaign.
+  var ci = { tab: "rankings", campaignId: null };
+
+  function ciBadge(type) {
+    return type === "good" ? '<span class="pill active">✓ ' : '<span class="pill">⚠ ';
+  }
+
+  function ciInsightList(insights) {
+    if (!insights || !insights.length) return '<span style="color:var(--muted);font-size:12px;">No notable signals yet.</span>';
+    return insights.map(function (i) { return ciBadge(i.type) + esc(i.text) + '</span>'; }).join(" ");
+  }
+
+  function loadCampaignIntelligence(force) {
+    if (force) { ci.campaignId = null; }
+    var body = $("#ci-tab-body");
+    body.innerHTML = '<div style="font-size:12px;color:var(--muted);">Loading…</div>';
+    if (ci.tab === "rankings") return ciLoadRankings(body);
+    if (ci.tab === "insights") return ciLoadInsights(body);
+    if (ci.tab === "recommendations") return ciLoadRecommendations(body);
+    if (ci.tab === "segments") return ciLoadSegments(body);
+    if (ci.tab === "templates") return ciLoadTemplates(body);
+    if (ci.tab === "releases") return ciLoadReleases(body);
+    if (ci.tab === "bestTime") return ciLoadBestTime(body);
+    if (ci.tab === "playbook") return ciLoadPlaybook(body);
+  }
+
+  function ciLoadRankings(body) {
+    api("/api/admin/campaign-builder/intelligence/rankings").then(function (res) {
+      var rows = res.rankings || [];
+      if (!rows.length) { body.innerHTML = '<p style="color:var(--muted);font-size:13px;">No campaigns to rank yet.</p>'; return; }
+      body.innerHTML = '<table class="data-table"><thead><tr>' +
+        '<th>Rank</th><th>Campaign</th><th>Type</th><th>Score</th><th>Claim Rate</th><th>Actual %</th><th>VH %</th><th>Conv %</th><th>Avg Speed (min)</th><th></th>' +
+        '</tr></thead><tbody>' +
+        rows.map(function (r) {
+          return '<tr>' +
+            '<td>' + r.rank + '</td>' +
+            '<td>' + esc(r.campaign_name) + '</td>' +
+            '<td>' + esc(r.campaign_type) + '</td>' +
+            '<td>' + fmt(r.campaign_score) + '</td>' +
+            '<td>' + (r.claim_rate == null ? "—" : r.claim_rate + "%") + '</td>' +
+            '<td>' + (r.actual_player_pct == null ? "—" : r.actual_player_pct + "%") + '</td>' +
+            '<td>' + (r.voucher_hunter_pct == null ? "—" : r.voucher_hunter_pct + "%") + '</td>' +
+            '<td>' + (r.conversion_pct == null ? "—" : r.conversion_pct + "%") + '</td>' +
+            '<td>' + fmt(r.avg_claim_speed_minutes) + '</td>' +
+            '<td><button class="btn" onclick="ciOpenCampaign(' + JSON.stringify(r.campaign_id) + ')">Details</button></td>' +
+            '</tr>';
+        }).join("") + '</tbody></table>';
+    }).catch(function (e) { body.innerHTML = '<div class="banner error">Failed to load rankings.</div>'; banner("❌ " + e.message, "error"); });
+  }
+
+  window.ciOpenCampaign = function (campaignId) {
+    ci.campaignId = campaignId;
+    ci.tab = "insights";
+    $all("#ci-tabs button").forEach(function (b) { b.classList.toggle("active", b.dataset.tab === "insights"); });
+    loadCampaignIntelligence(false);
+  };
+
+  function ciRequireCampaign(body, onReady) {
+    if (!ci.campaignId) {
+      body.innerHTML = '<p style="color:var(--muted);font-size:13px;">Pick a campaign from the Rankings tab (click "Details") to see this view.</p>';
+      return;
+    }
+    api("/api/admin/campaign-builder/intelligence/campaign/" + ci.campaignId).then(function (res) {
+      onReady(res.campaign);
+    }).catch(function (e) { body.innerHTML = '<div class="banner error">Failed to load campaign detail.</div>'; banner("❌ " + e.message, "error"); });
+  }
+
+  function ciLoadInsights(body) {
+    ciRequireCampaign(body, function (c) {
+      body.innerHTML = '<h3 style="margin-top:0;">' + esc(c.campaign_name) + ' <span style="font-size:12px;color:var(--muted);">(rank #' + fmt(c.rank) + ', score ' + fmt(c.campaign_score) + ')</span></h3>' +
+        '<div style="display:flex;flex-wrap:wrap;gap:8px;">' + ciInsightList(c.insights) + '</div>';
+    });
+  }
+
+  function ciLoadRecommendations(body) {
+    ciRequireCampaign(body, function (c) {
+      var recs = c.recommendations || [];
+      body.innerHTML = '<h3 style="margin-top:0;">' + esc(c.campaign_name) + '</h3>' +
+        (recs.length
+          ? '<ul>' + recs.map(function (r) { return '<li>' + esc(r) + '</li>'; }).join("") + '</ul>'
+          : '<p style="color:var(--muted);font-size:13px;">No changes recommended — this campaign is performing within normal thresholds.</p>');
+    });
+  }
+
+  function ciSegmentMatrixTable(matrix) {
+    return '<table class="data-table"><thead><tr><th>Segment</th><th>Claimed</th><th>Conversion</th><th>Score</th></tr></thead><tbody>' +
+      matrix.map(function (r) {
+        return '<tr><td>' + esc(r.segment) + '</td><td>' + fmt(r.claimed) + '</td><td>' + (r.conversion_pct == null ? "—" : r.conversion_pct + "%") + '</td><td>' + esc(r.score) + '</td></tr>';
+      }).join("") + '</tbody></table>';
+  }
+
+  function ciLoadSegments(body) {
+    api("/api/admin/campaign-builder/intelligence/segments").then(function (res) {
+      body.innerHTML = '<div class="section-title" style="font-size:13px;">Segment ROI (global, all campaigns)</div>' +
+        '<table class="data-table"><thead><tr><th>Segment</th><th>Claimed</th><th>Avg Conversion</th><th>ROI</th></tr></thead><tbody>' +
+        (res.segment_roi || []).map(function (r) {
+          return '<tr><td>' + esc(r.segment) + '</td><td>' + fmt(r.claimed) + '</td><td>' + (r.avg_conversion_pct == null ? "—" : r.avg_conversion_pct + "%") + '</td><td>' + fmt(r.roi) + '</td></tr>';
+        }).join("") + '</tbody></table>' +
+        '<div style="margin-top:12px;display:flex;gap:24px;flex-wrap:wrap;">' +
+        '<div><strong>Prioritize:</strong> ' + (res.recommended_segments || []).map(esc).join(", ") + '</div>' +
+        '<div><strong>Limit:</strong> ' + (res.avoid_segments || []).map(esc).join(", ") + '</div>' +
+        '</div>' +
+        (ci.campaignId ? '<div class="section-title" style="font-size:13px;margin-top:16px;">Per-Campaign Segment Matrix</div><div id="ci-segment-per-campaign"></div>' : '');
+      if (ci.campaignId) {
+        api("/api/admin/campaign-builder/intelligence/campaign/" + ci.campaignId).then(function (res2) {
+          $("#ci-segment-per-campaign").innerHTML = ciSegmentMatrixTable(res2.campaign.segment_matrix);
+        });
+      }
+    }).catch(function (e) { body.innerHTML = '<div class="banner error">Failed to load segments.</div>'; banner("❌ " + e.message, "error"); });
+  }
+
+  function ciLoadTemplates(body) {
+    api("/api/admin/campaign-builder/intelligence/templates").then(function (res) {
+      var rows = res.templates || [];
+      body.innerHTML = '<table class="data-table"><thead><tr><th>Template</th><th>Campaigns</th><th>Avg Score</th><th>Avg Claim Rate</th><th>Avg Conversion</th><th>Avg Abuse</th></tr></thead><tbody>' +
+        rows.map(function (r) {
+          return '<tr><td>' + esc(r.template) + '</td><td>' + fmt(r.campaign_count) + '</td><td>' + fmt(r.avg_score) + '</td>' +
+            '<td>' + (r.avg_claim_rate == null ? "—" : r.avg_claim_rate + "%") + '</td>' +
+            '<td>' + (r.avg_conversion_pct == null ? "—" : r.avg_conversion_pct + "%") + '</td>' +
+            '<td>' + (r.avg_abuse_pct == null ? "—" : r.avg_abuse_pct + "%") + '</td></tr>';
+        }).join("") + '</tbody></table>';
+    }).catch(function (e) { body.innerHTML = '<div class="banner error">Failed to load templates.</div>'; banner("❌ " + e.message, "error"); });
+  }
+
+  function ciLoadReleases(body) {
+    api("/api/admin/campaign-builder/intelligence/releases").then(function (res) {
+      var rows = res.releases || [];
+      body.innerHTML = '<table class="data-table"><thead><tr><th>Release Strategy</th><th>Campaigns</th><th>Avg Claim Speed (min)</th><th>Avg Conversion</th><th>Avg Abuse</th><th>Avg Completion</th></tr></thead><tbody>' +
+        rows.map(function (r) {
+          return '<tr><td>' + esc(r.release_strategy) + '</td><td>' + fmt(r.campaign_count) + '</td><td>' + fmt(r.avg_claim_speed_minutes) + '</td>' +
+            '<td>' + (r.avg_conversion_pct == null ? "—" : r.avg_conversion_pct + "%") + '</td>' +
+            '<td>' + (r.avg_abuse_pct == null ? "—" : r.avg_abuse_pct + "%") + '</td>' +
+            '<td>' + (r.avg_completion_pct == null ? "—" : r.avg_completion_pct + "%") + '</td></tr>';
+        }).join("") + '</tbody></table>';
+    }).catch(function (e) { body.innerHTML = '<div class="banner error">Failed to load release strategy ranking.</div>'; banner("❌ " + e.message, "error"); });
+  }
+
+  function ciLoadBestTime(body) {
+    api("/api/admin/campaign-builder/intelligence/best-time").then(function (res) {
+      var rows = res.hours || [];
+      body.innerHTML = '<div style="font-size:14px;font-weight:600;margin-bottom:12px;">' + esc(res.recommendation) + '</div>' +
+        (rows.length
+          ? '<table class="data-table"><thead><tr><th>Hour</th><th>Score</th><th>Sample Size</th></tr></thead><tbody>' +
+            rows.map(function (r) { return '<tr><td>' + esc(r.label) + '</td><td>' + fmt(r.score) + '</td><td>' + fmt(r.sample_size) + '</td></tr>'; }).join("") + '</tbody></table>'
+          : '');
+    }).catch(function (e) { body.innerHTML = '<div class="banner error">Failed to load best-time analysis.</div>'; banner("❌ " + e.message, "error"); });
+  }
+
+  function ciLoadPlaybook(body) {
+    var path = "/api/admin/campaign-builder/intelligence/playbook" + (ci.campaignId ? "?campaign_id=" + ci.campaignId : "");
+    api(path).then(function (res) {
+      var p = res.playbook;
+      body.innerHTML = '<div style="font-size:12px;color:var(--muted);margin-bottom:10px;">Based on: ' + esc(p.based_on_campaign_name) + ' — recommendation only, no auto-launch.</div>' +
+        '<table class="data-table"><tbody>' +
+        '<tr><td>Template</td><td>' + esc(p.template) + '</td></tr>' +
+        '<tr><td>Audience</td><td>' + esc(p.audience) + '</td></tr>' +
+        '<tr><td>Release</td><td>' + esc(p.release.strategy) + (p.release.rate_per_hour ? ' (' + fmt(p.release.rate_per_hour) + '/hour)' : '') + '</td></tr>' +
+        '<tr><td>Voucher Count</td><td>' + fmt(p.voucher_count) + '</td></tr>' +
+        '<tr><td>Expected Claim Rate</td><td>' + (p.expected_claim_rate_pct == null ? "—" : p.expected_claim_rate_pct + "%") + '</td></tr>' +
+        '<tr><td>Expected Abuse</td><td>' + (p.expected_abuse_pct == null ? "—" : p.expected_abuse_pct + "%") + '</td></tr>' +
+        '<tr><td>Confidence</td><td>' + esc(p.confidence) + '</td></tr>' +
+        '</tbody></table>' +
+        (p.recommendations && p.recommendations.length
+          ? '<div class="section-title" style="font-size:13px;margin-top:12px;">Supporting Recommendations</div><ul>' + p.recommendations.map(function (r) { return '<li>' + esc(r) + '</li>'; }).join("") + '</ul>'
+          : '');
+    }).catch(function (e) { body.innerHTML = '<div class="banner error">Failed to load playbook.</div>'; banner("❌ " + e.message, "error"); });
+  }
+
+  (function bindCampaignIntelligenceControls() {
+    $all("#ci-tabs button").forEach(function (b) {
+      b.addEventListener("click", function () {
+        ci.tab = b.dataset.tab;
+        $all("#ci-tabs button").forEach(function (x) { x.classList.toggle("active", x === b); });
+        loadCampaignIntelligence(false);
+      });
+    });
+  })();
+
   window.cbDelete = function (id) {
     if (!confirm("Delete this draft campaign? Any drops it already compiled are NOT affected.")) return;
     cbApi("/api/admin/campaign-builder/campaigns/" + id, { method: "DELETE" }).then(function (res) {
@@ -4013,7 +4193,7 @@
     });
   }
 
-  var VIEWS =["summary", "funnel", "abuse", "campaignBuilder", "campaignPerformance", "activeCampaigns", "draftCampaigns", "compiledDrops", "campaigns", "vouchers", "drops", "referrals", "affiliate", "affiliatePools", "affiliatePending", "reactivation", "audit", "segmentProbabilityConfig", "segmentRoi", "segments", "validation", "backendSegmentEngine", "voucherHunterAudit", "unclassifiedAudit", "segmentRuleSimulator", "voucherHunterQuality", "voucherHunterFalsePositive", "voucherHunterRuleSimulator", "vhPriorityImpact", "uploadPlayerPerformance", "uploadHistory", "rawExplorer", "users", "joinRequests", "xpAdjust", "settings"];
+  var VIEWS =["summary", "funnel", "abuse", "campaignBuilder", "campaignPerformance", "campaignIntelligence", "activeCampaigns", "draftCampaigns", "compiledDrops", "campaigns", "vouchers", "drops", "referrals", "affiliate", "affiliatePools", "affiliatePending", "reactivation", "audit", "segmentProbabilityConfig", "segmentRoi", "segments", "validation", "backendSegmentEngine", "voucherHunterAudit", "unclassifiedAudit", "segmentRuleSimulator", "voucherHunterQuality", "voucherHunterFalsePositive", "voucherHunterRuleSimulator", "vhPriorityImpact", "uploadPlayerPerformance", "uploadHistory", "rawExplorer", "users", "joinRequests", "xpAdjust", "settings"];
   function switchView(view) {
     state.view = view;
     $all(".nav-item").forEach(function (b) { b.classList.toggle("active", b.dataset.view === view); });
@@ -4023,7 +4203,8 @@
     if (activeGroup) activeGroup.classList.remove("collapsed");
     var titles = {
       summary: "Executive Summary", funnel: "Activation Funnel", abuse: "Abuse Overview",
-      campaignBuilder: "Campaign Builder (P2)", campaignPerformance: "Campaign Performance (P4)", activeCampaigns: "Active Campaigns",
+      campaignBuilder: "Campaign Builder (P2)", campaignPerformance: "Campaign Performance (P4)",
+      campaignIntelligence: "Campaign Intelligence (P5)", activeCampaigns: "Active Campaigns",
       draftCampaigns: "Draft Campaigns", compiledDrops: "Compiled Voucher Drops",
       campaigns: "Campaigns (Legacy Targeting)",
       vouchers: "Vouchers", drops: "Voucher Drops", referrals: "Referrals", affiliate: "Affiliate",
@@ -4055,6 +4236,7 @@
     else if (state.view === "abuse") loadAbuse(force);
     else if (state.view === "campaignBuilder") loadCampaignBuilder(force);
     else if (state.view === "campaignPerformance") loadCampaignPerformance(force);
+    else if (state.view === "campaignIntelligence") loadCampaignIntelligence(force);
     else if (state.view === "activeCampaigns") loadActiveCampaigns(force);
     else if (state.view === "draftCampaigns") loadDraftCampaigns(force);
     else if (state.view === "compiledDrops") loadCompiledDrops(force);
