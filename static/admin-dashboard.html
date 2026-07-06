@@ -33,6 +33,7 @@
         <div class="nav-group-body">
           <button class="nav-item" data-view="campaignBuilder">Campaign Builder <span class="badge badge-live">Live Control</span></button>
           <button class="nav-item" data-view="campaignPerformance">Campaign Performance <span class="badge badge-readonly">Read Only</span></button>
+          <button class="nav-item" data-view="campaignIntelligence">Campaign Intelligence <span class="badge badge-readonly">Read Only</span></button>
           <button class="nav-item" data-view="activeCampaigns">Active Campaigns <span class="badge badge-readonly">Read Only</span></button>
           <button class="nav-item" data-view="draftCampaigns">Draft Campaigns <span class="badge badge-readonly">Read Only</span></button>
           <button class="nav-item" data-view="compiledDrops">Compiled Voucher Drops <span class="badge badge-readonly">Read Only</span></button>
@@ -511,6 +512,22 @@
         <div id="cp-list-body"></div>
         <div id="cp-detail-panel" class="hidden" style="margin-top:16px;border-top:1px solid var(--border);padding-top:16px;"></div>
         <div id="cp-compare-panel" class="hidden" style="margin-top:16px;border-top:1px solid var(--border);padding-top:16px;"></div>
+      </section>
+
+      <!-- CAMPAIGN INTELLIGENCE VIEW (P5) -->
+      <section id="view-campaignIntelligence" class="hidden">
+        <div style="margin-bottom:12px;font-size:12px;color:var(--muted);">Read-only recommendations layer on top of Campaign Performance. Never executes, schedules, or auto-launches a campaign — "what should I run next", not a button that runs it.</div>
+        <div class="seg" id="ci-tabs" style="margin-bottom:16px;">
+          <button data-tab="rankings" class="active">Rankings</button>
+          <button data-tab="insights">Insights</button>
+          <button data-tab="recommendations">Recommendations</button>
+          <button data-tab="segments">Segments</button>
+          <button data-tab="templates">Templates</button>
+          <button data-tab="releases">Release Strategy</button>
+          <button data-tab="bestTime">Best Time</button>
+          <button data-tab="playbook">Playbook</button>
+        </div>
+        <div id="ci-tab-body"></div>
       </section>
 
       <!-- ACTIVE CAMPAIGNS VIEW -->
