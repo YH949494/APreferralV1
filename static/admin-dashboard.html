@@ -11,33 +11,128 @@
   <div class="app">
     <nav class="sidebar">
       <div class="brand">APReferral Admin</div>
-      <button class="nav-item active" data-view="summary">Executive Summary</button>
-      <button class="nav-item" data-view="funnel">Activation Funnel</button>
-      <a href="/static/funnel-dashboard.html" class="nav-item" style="text-decoration:none;" target="_blank">Funnel Dashboard ↗</a>
-      <button class="nav-item" data-view="abuse">Abuse Overview</button>
-      <button class="nav-item" data-view="campaigns">Campaigns</button>
-      <button class="nav-item" data-view="vouchers">Vouchers</button>
-      <button class="nav-item" data-view="referrals">Referrals</button>
-      <button class="nav-item" data-view="affiliate">Affiliate</button>
-      <button class="nav-item" data-view="reactivation">Reactivation</button>
-      <button class="nav-item" data-view="audit">Audit</button>
-      <button class="nav-item" data-view="segmentProbabilityConfig">Segment Probability Config</button>
-      <button class="nav-item" data-view="segmentRoi">Segment ROI</button>
-      <button class="nav-item" data-view="segments">Segment Overview</button>
-      <button class="nav-item" data-view="validation">Data → Validation</button>
-      <button class="nav-item" data-view="backendSegmentEngine">Data → Backend Segment Engine</button>
-      <button class="nav-item" data-view="voucherHunterAudit">Data → Voucher Hunter Mismatch</button>
-      <button class="nav-item" data-view="unclassifiedAudit">Data → Unclassified Audit</button>
-      <button class="nav-item" data-view="segmentRuleSimulator">Data → Segment Rule Simulator</button>
-      <button class="nav-item" data-view="voucherHunterQuality">Data → VH Rule Quality</button>
-      <button class="nav-item" data-view="voucherHunterFalsePositive">Data → VH False Positive</button>
-      <button class="nav-item" data-view="voucherHunterRuleSimulator">Data → VH Rule Simulator</button>
-      <button class="nav-item" data-view="vhPriorityImpact">Data → VH Priority Impact</button>
-      <button class="nav-item" data-view="uploadPlayerPerformance">Data → Upload Player Performance</button>
-      <button class="nav-item" data-view="uploadHistory">Data → Upload History</button>
-      <button class="nav-item" data-view="rawExplorer">Data → Raw Data Explorer</button>
-      <button class="nav-item" data-view="users">User Drilldown</button>
-      <button class="nav-item" data-view="settings">Settings</button>
+
+      <div class="nav-legend">
+        <span class="badge badge-live" title="Mutates production data immediately">Live Control</span>
+        <span class="badge badge-readonly" title="Read-only view, no mutation">Read Only</span>
+        <span class="badge badge-legacy" title="Old standalone page, kept until decommission">Legacy</span>
+        <span class="badge badge-hidden" title="Advanced/internal tool, not part of daily workflow">Hidden Tool</span>
+      </div>
+
+      <!-- 1. HOME -->
+      <div class="nav-group" data-group="home">
+        <button class="nav-group-header" data-group-toggle="home">1 · Home</button>
+        <div class="nav-group-body">
+          <button class="nav-item active" data-view="summary">Executive Summary <span class="badge badge-readonly">Read Only</span></button>
+        </div>
+      </div>
+
+      <!-- 2. CAMPAIGN CONTROL -->
+      <div class="nav-group" data-group="campaign-control">
+        <button class="nav-group-header" data-group-toggle="campaign-control">2 · Campaign Control</button>
+        <div class="nav-group-body">
+          <button class="nav-item" data-view="campaigns">Campaigns <span class="badge badge-live">Live Control</span></button>
+          <button class="nav-item" data-view="vouchers">Vouchers Overview <span class="badge badge-readonly">Read Only</span></button>
+          <a href="/static/index.html#admin-panel" class="nav-item nav-item-external" target="_blank" rel="noopener">
+            Legacy MiniApp Admin ↗ <span class="badge badge-legacy">Legacy</span>
+          </a>
+        </div>
+      </div>
+
+      <!-- 3. COMMUNITY DASHBOARD -->
+      <div class="nav-group" data-group="community-dashboard">
+        <button class="nav-group-header" data-group-toggle="community-dashboard">3 · Community Dashboard</button>
+        <div class="nav-group-body">
+          <button class="nav-item" data-view="referrals">Referrals <span class="badge badge-readonly">Read Only</span></button>
+          <button class="nav-item" data-view="audit">Audit <span class="badge badge-readonly">Read Only</span></button>
+          <button class="nav-item" data-view="users">User Drilldown <span class="badge badge-readonly">Read Only</span></button>
+          <a href="/static/index.html#admin-panel" class="nav-item nav-item-external" target="_blank" rel="noopener">
+            Legacy MiniApp Admin ↗ <span class="badge badge-legacy">Legacy</span>
+          </a>
+        </div>
+      </div>
+
+      <!-- 4. FUNNEL -->
+      <div class="nav-group" data-group="funnel">
+        <button class="nav-group-header" data-group-toggle="funnel">4 · Funnel</button>
+        <div class="nav-group-body">
+          <button class="nav-item" data-view="funnel">Activation Funnel <span class="badge badge-readonly">Read Only</span></button>
+          <a href="/static/funnel-dashboard.html" class="nav-item nav-item-external" target="_blank" rel="noopener">
+            Funnel Dashboard (standalone) ↗ <span class="badge badge-legacy">Legacy</span>
+          </a>
+        </div>
+      </div>
+
+      <!-- 5. REACTIVATION -->
+      <div class="nav-group" data-group="reactivation">
+        <button class="nav-group-header" data-group-toggle="reactivation">5 · Reactivation</button>
+        <div class="nav-group-body">
+          <button class="nav-item" data-view="reactivation">Channel Reactivation <span class="badge badge-live">Live Control</span></button>
+        </div>
+      </div>
+
+      <!-- 6. AFFILIATE -->
+      <div class="nav-group" data-group="affiliate">
+        <button class="nav-group-header" data-group-toggle="affiliate">6 · Affiliate</button>
+        <div class="nav-group-body">
+          <button class="nav-item" data-view="affiliate">Affiliate Dashboard <span class="badge badge-readonly">Read Only</span></button>
+          <a href="/static/index.html#admin-panel" class="nav-item nav-item-external" target="_blank" rel="noopener">
+            Legacy MiniApp Admin ↗ <span class="badge badge-legacy">Legacy</span>
+          </a>
+        </div>
+      </div>
+
+      <!-- 7. SEGMENTS -->
+      <div class="nav-group" data-group="segments">
+        <button class="nav-group-header" data-group-toggle="segments">7 · Segments</button>
+        <div class="nav-group-body">
+          <button class="nav-item" data-view="segments">Segment Overview <span class="badge badge-readonly">Read Only</span></button>
+          <button class="nav-item" data-view="segmentProbabilityConfig">Segment Probability Config <span class="badge badge-readonly">Read Only</span></button>
+          <button class="nav-item" data-view="segmentRoi">Segment ROI <span class="badge badge-readonly">Read Only</span></button>
+        </div>
+      </div>
+
+      <!-- 8. ABUSE & RISK -->
+      <div class="nav-group" data-group="abuse-risk">
+        <button class="nav-group-header" data-group-toggle="abuse-risk">8 · Abuse &amp; Risk</button>
+        <div class="nav-group-body">
+          <button class="nav-item" data-view="abuse">Abuse Overview <span class="badge badge-readonly">Read Only</span></button>
+          <button class="nav-item" data-view="voucherHunterAudit">Voucher Hunter Mismatch <span class="badge badge-readonly">Read Only</span></button>
+          <button class="nav-item" data-view="unclassifiedAudit">Unclassified Audit <span class="badge badge-readonly">Read Only</span></button>
+          <button class="nav-item" data-view="voucherHunterQuality">VH Rule Quality <span class="badge badge-readonly">Read Only</span></button>
+          <button class="nav-item" data-view="voucherHunterFalsePositive">VH False Positive <span class="badge badge-readonly">Read Only</span></button>
+          <button class="nav-item" data-view="segmentRuleSimulator">Segment Rule Simulator <span class="badge badge-hidden">Hidden Tool</span></button>
+          <button class="nav-item" data-view="voucherHunterRuleSimulator">VH Rule Simulator <span class="badge badge-hidden">Hidden Tool</span></button>
+          <button class="nav-item" data-view="vhPriorityImpact">VH Priority Impact <span class="badge badge-hidden">Hidden Tool</span></button>
+        </div>
+      </div>
+
+      <!-- 9. VALIDATION -->
+      <div class="nav-group" data-group="validation">
+        <button class="nav-group-header" data-group-toggle="validation">9 · Validation</button>
+        <div class="nav-group-body">
+          <button class="nav-item" data-view="validation">Validation / UIM Compare <span class="badge badge-readonly">Read Only</span></button>
+        </div>
+      </div>
+
+      <!-- 10. AUTOMATION -->
+      <div class="nav-group" data-group="automation">
+        <button class="nav-group-header" data-group-toggle="automation">10 · Automation</button>
+        <div class="nav-group-body">
+          <button class="nav-item" data-view="backendSegmentEngine">Backend Segment Engine <span class="badge badge-live">Live Control</span></button>
+          <button class="nav-item" data-view="uploadPlayerPerformance">Upload Player Performance <span class="badge badge-live">Live Control</span></button>
+          <button class="nav-item" data-view="uploadHistory">Upload History <span class="badge badge-readonly">Read Only</span></button>
+          <button class="nav-item" data-view="rawExplorer">Raw Data Explorer <span class="badge badge-readonly">Read Only</span></button>
+        </div>
+      </div>
+
+      <!-- 11. ADMIN SETTINGS -->
+      <div class="nav-group" data-group="admin-settings">
+        <button class="nav-group-header" data-group-toggle="admin-settings">11 · Admin Settings</button>
+        <div class="nav-group-body">
+          <button class="nav-item" data-view="settings">Settings <span class="badge badge-readonly">Read Only</span></button>
+        </div>
+      </div>
     </nav>
 
     <main class="main">
