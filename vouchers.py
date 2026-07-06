@@ -6812,9 +6812,16 @@ def _admin_drop_summary(doc: dict, *, ref=None, skip_expired=False):
             "codesFreeMy": free_my,
         })
 
-    for key in ("whitelistUsernames", "visibilityMode", "hero_title", "hero_subtitle", "hero_image", "campaign_id", "campaign_name"):
+    for key in (
+        "whitelistUsernames", "visibilityMode", "hero_title", "hero_subtitle", "hero_image",
+        "campaign_id", "campaign_name",
+        "batch_parent_id", "batch_index", "batch_count", "batch_status",
+    ):
         if key in doc:
             summary[key] = doc[key]
+    if doc.get("batch_release_at") is not None:
+        rel = doc["batch_release_at"]
+        summary["batch_release_at"] = rel.isoformat() if isinstance(rel, datetime) else rel
 
     return summary
 

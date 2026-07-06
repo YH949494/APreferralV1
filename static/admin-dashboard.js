@@ -3002,24 +3002,97 @@
     }
     body.innerHTML = items.map(function (c) {
       var drops = c.compiled_drop_ids || [];
+      var isBatch = !!c.release_type;
       return '<div class="campaign-card">' +
         '<div class="campaign-card-header">' +
         '<div class="campaign-card-title">' + esc(c.campaign_name) + '</div>' +
         '<span class="pill ' + esc(status) + '">' + esc(status) + '</span>' +
+        (isBatch ? '<span class="pill">batch: ' + esc(c.batch_status || "") + '</span>' : '') +
         '</div>' +
         '<div class="campaign-card-meta">' +
         '<span>' + esc(CB_TYPE_LABELS[c.campaign_type] || c.campaign_type) + '</span>' +
         '<span>' + esc(CB_AUDIENCE_LABELS[c.audience_mode] || c.audience_mode) + '</span>' +
         (drops.length ? '<span>' + drops.length + ' drop(s)</span>' : '') +
+        (isBatch ? '<span>' + (c.released_batches || 0) + '/' + (c.batch_count || "?") + ' batches released</span>' : '') +
         '<span style="margin-left:auto;">' + esc((c.created_at || "").slice(0, 10)) + '</span>' +
         '</div>' +
         (status === "draft"
           ? '<div class="campaign-card-actions"><button class="btn" onclick="cbResume(' + JSON.stringify(c.id) + ')">Resume</button>' +
             '<button class="btn" style="background:transparent;border:1px solid var(--border);" onclick="cbDelete(' + JSON.stringify(c.id) + ')">Delete</button></div>'
           : '') +
+        (isBatch && status === "active"
+          ? '<div class="campaign-card-actions">' +
+            (c.batch_status === "scheduled" || c.batch_status === "active"
+              ? '<button class="btn" onclick="cbPauseBatch(' + JSON.stringify(c.id) + ')">Pause</button>' +
+                '<button class="btn" onclick="cbReleaseNextBatch(' + JSON.stringify(c.id) + ')">Release Next Now</button>'
+              : '') +
+            (c.batch_status === "paused" ? '<button class="btn" onclick="cbResumeBatch(' + JSON.stringify(c.id) + ')">Resume</button>' : '') +
+            (["scheduled", "active", "paused"].indexOf(c.batch_status) >= 0
+              ? '<button class="btn" style="background:transparent;border:1px solid var(--border);" onclick="cbCancelBatch(' + JSON.stringify(c.id) + ')">Cancel</button>'
+              : '') +
+            '<button class="btn" style="background:transparent;border:1px solid var(--border);" onclick="cbToggleBatchAnalytics(' + JSON.stringify(c.id) + ')">Analytics</button>' +
+            '</div><div id="cb-analytics-' + esc(c.id) + '" class="hidden" style="margin-top:10px;"></div>'
+          : '') +
         '</div>';
     }).join("");
   }
+
+  window.cbPauseBatch = function (id) {
+    cbApi("/api/admin/campaign-builder/campaigns/" + id + "/pause", { method: "POST", body: {} }).then(function (res) {
+      if (res.ok) { banner("Campaign paused.", "ok"); refreshCurrent(true); }
+      else banner("Pause failed: " + ((res.body && res.body.code) || "unknown"), "error");
+    });
+  };
+
+  window.cbResumeBatch = function (id) {
+    cbApi("/api/admin/campaign-builder/campaigns/" + id + "/resume", { method: "POST", body: {} }).then(function (res) {
+      if (res.ok) { banner("Campaign resumed.", "ok"); refreshCurrent(true); }
+      else banner("Resume failed: " + ((res.body && res.body.code) || "unknown"), "error");
+    });
+  };
+
+  window.cbCancelBatch = function (id) {
+    if (!confirm("Cancel this batch campaign? Unreleased child drops will be disabled. Already-released/claimed drops are not affected.")) return;
+    cbApi("/api/admin/campaign-builder/campaigns/" + id + "/cancel", { method: "POST", body: {} }).then(function (res) {
+      if (res.ok) { banner("Campaign cancelled.", "ok"); refreshCurrent(true); }
+      else banner("Cancel failed: " + ((res.body && res.body.code) || "unknown"), "error");
+    });
+  };
+
+  window.cbReleaseNextBatch = function (id) {
+    cbApi("/api/admin/campaign-builder/campaigns/" + id + "/release-next", { method: "POST", body: {} }).then(function (res) {
+      if (!res.ok) { banner("Release failed: " + ((res.body && res.body.code) || "unknown"), "error"); return; }
+      if (!res.body.released_drop_id) { banner("No unreleased batches left.", "ok"); return; }
+      banner("Released next batch.", "ok");
+      refreshCurrent(true);
+    });
+  };
+
+  window.cbToggleBatchAnalytics = function (id) {
+    var el = $("#cb-analytics-" + id);
+    if (!el) return;
+    if (!el.classList.contains("hidden")) { el.classList.add("hidden"); return; }
+    el.classList.remove("hidden");
+    el.innerHTML = '<div style="font-size:12px;color:var(--muted);">Loading analytics…</div>';
+    cbApi("/api/admin/campaign-builder/campaigns/" + id + "/analytics").then(function (res) {
+      if (!res.ok) { el.innerHTML = '<div class="banner error">Failed to load analytics.</div>'; return; }
+      var a = res.body.analytics;
+      el.innerHTML =
+        '<div class="card-grid">' +
+        kpiCard("Total Vouchers", a.total_vouchers) +
+        kpiCard("Released", a.released_vouchers) +
+        kpiCard("Claimed", a.claimed_vouchers) +
+        kpiCard("Remaining", a.remaining_vouchers) +
+        kpiCard("Completion %", a.completion_pct) +
+        '</div>' +
+        '<div style="margin-top:8px;font-size:12px;">Next release: ' + esc(a.next_release_at || "—") + ' &nbsp; Batches: ' + a.released_batches + '/' + a.total_batches + '</div>' +
+        '<table class="data-table" style="margin-top:8px;"><thead><tr><th>#</th><th>Drop</th><th>Release Time</th><th>Status</th><th>Codes</th><th>Claimed</th><th>Remaining</th></tr></thead><tbody>' +
+        (a.child_drops || []).map(function (d) {
+          return '<tr><td>' + d.batch_index + '</td><td>' + esc(d.drop_id) + '</td><td>' + esc(d.release_time || "—") + '</td><td>' + esc(d.status) +
+            '</td><td>' + fmt(d.total_codes) + '</td><td>' + fmt(d.claimed) + '</td><td>' + fmt(d.remaining) + '</td></tr>';
+        }).join("") + '</tbody></table>';
+    });
+  };
 
   function loadCompiledDrops(force) {
     fetch("/v2/miniapp/admin/drops", { credentials: "same-origin" }).then(function (r) { return r.json(); })
@@ -3188,9 +3261,26 @@
     var rp = cb.campaign.release_params || {};
     $("#cb-starts-at").value = rp.startsAtLocal || "";
     $("#cb-ends-at").value = rp.endsAtLocal || "";
+
+    var isBatch = !!cb.campaign.release_type;
+    $("#cb-batch-toggle").checked = isBatch;
+    $("#cb-batch-params").classList.toggle("hidden", !isBatch);
+    $("#cb-total-vouchers").value = cb.campaign.total_vouchers || "";
+    $("#cb-batch-size").value = cb.campaign.batch_size || "";
+    $("#cb-release-type").value = cb.campaign.release_type || "hourly";
+    $("#cb-release-interval-minutes").value = cb.campaign.release_interval_minutes || "";
+    $("#cb-custom-schedule").value = (cb.campaign.release_schedule || []).join("\n");
+    _cbToggleBatchTypeFields();
+
     _cbRenderAudienceParams();
     _cbRenderRewardParams();
     _cbHighlight();
+  }
+
+  function _cbToggleBatchTypeFields() {
+    var rt = $("#cb-release-type").value;
+    $("#cb-interval-minutes-wrap").classList.toggle("hidden", rt !== "interval_minutes");
+    $("#cb-custom-schedule-wrap").classList.toggle("hidden", rt !== "custom");
   }
 
   function _cbCollectFromForm() {
@@ -3199,6 +3289,15 @@
       startsAtLocal: ($("#cb-starts-at").value || "").trim(),
       endsAtLocal: ($("#cb-ends-at").value || "").trim(),
     };
+    if ($("#cb-batch-toggle").checked) {
+      cb.campaign.release_type = $("#cb-release-type").value;
+      cb.campaign.total_vouchers = parseInt($("#cb-total-vouchers").value, 10) || 0;
+      cb.campaign.batch_size = parseInt($("#cb-batch-size").value, 10) || 0;
+      cb.campaign.release_interval_minutes = parseInt($("#cb-release-interval-minutes").value, 10) || null;
+      cb.campaign.release_schedule = ($("#cb-custom-schedule").value || "").split("\n").map(function (s) { return s.trim(); }).filter(Boolean);
+    } else {
+      cb.campaign.release_type = null;
+    }
   }
 
   function _cbGoStep(n) {
@@ -3220,7 +3319,14 @@
       release_params: cb.campaign.release_params,
       reward_type: cb.campaign.reward_type,
       reward_params: cb.campaign.reward_params,
+      release_type: cb.campaign.release_type || null,
     };
+    if (cb.campaign.release_type) {
+      body.total_vouchers = cb.campaign.total_vouchers;
+      body.batch_size = cb.campaign.batch_size;
+      body.release_interval_minutes = cb.campaign.release_interval_minutes;
+      body.release_schedule = cb.campaign.release_schedule || [];
+    }
     var url = cb.campaignId ? "/api/admin/campaign-builder/campaigns/" + cb.campaignId : "/api/admin/campaign-builder/campaigns";
     var method = cb.campaignId ? "PUT" : "POST";
     cbApi(url, { method: method, body: body }).then(function (res) {
@@ -3260,6 +3366,13 @@
       });
     });
 
+    var batchToggle = $("#cb-batch-toggle");
+    if (batchToggle) batchToggle.addEventListener("change", function () {
+      $("#cb-batch-params").classList.toggle("hidden", !batchToggle.checked);
+    });
+    var releaseTypeSel = $("#cb-release-type");
+    if (releaseTypeSel) releaseTypeSel.addEventListener("change", _cbToggleBatchTypeFields);
+
     var saveDraftBtn = $("#cb-save-draft-btn");
     if (saveDraftBtn) saveDraftBtn.addEventListener("click", function () { _cbSaveDraft(); });
 
@@ -3285,9 +3398,15 @@
             $("#cb-launch-result").innerHTML = '<div class="banner error">Compile failed: ' + esc((res.body && res.body.code) || "unknown") + '</div>';
             return;
           }
-          $("#cb-launch-result").innerHTML = '<div class="banner ok">Compiled ' + (res.body.compiled_drop_ids || []).length + ' drop(s): ' +
-            esc((res.body.compiled_drop_ids || []).join(", ")) + '</div>' +
-            (res.body.warnings && res.body.warnings.length ? '<div style="margin-top:6px;font-size:12px;color:var(--muted);">' + res.body.warnings.map(esc).join("<br/>") + '</div>' : '');
+          if (res.body.child_drop_ids) {
+            $("#cb-launch-result").innerHTML = '<div class="banner ok">Compiled ' + res.body.child_drop_ids.length + ' child drop(s). Released now: ' +
+              ((res.body.released_now || []).length) + '</div>' +
+              (res.body.warnings && res.body.warnings.length ? '<div style="margin-top:6px;font-size:12px;color:var(--muted);">' + res.body.warnings.map(esc).join("<br/>") + '</div>' : '');
+          } else {
+            $("#cb-launch-result").innerHTML = '<div class="banner ok">Compiled ' + (res.body.compiled_drop_ids || []).length + ' drop(s): ' +
+              esc((res.body.compiled_drop_ids || []).join(", ")) + '</div>' +
+              (res.body.warnings && res.body.warnings.length ? '<div style="margin-top:6px;font-size:12px;color:var(--muted);">' + res.body.warnings.map(esc).join("<br/>") + '</div>' : '');
+          }
           banner("Campaign launched.", "ok");
         })
         .finally(function () { launchBtn.disabled = false; });
@@ -3296,6 +3415,25 @@
 
   function _cbRenderPreview(p) {
     var el = $("#cb-preview-result");
+    if (p.batch_count !== undefined) {
+      el.innerHTML =
+        '<div class="card-grid">' +
+        kpiCard("Total Vouchers", p.total_vouchers) +
+        kpiCard("Batch Size", p.batch_size) +
+        kpiCard("Number of Batches", p.batch_count) +
+        kpiCard("Estimated Duration (h)", p.estimated_duration_hours) +
+        '</div>' +
+        '<div style="margin-top:12px;"><div class="section-title" style="font-size:13px;">Release Schedule</div>' +
+        '<div>First: ' + esc(p.first_release_at || "—") + ' &nbsp; Last: ' + esc(p.last_release_at || "—") + '</div>' +
+        '<div style="max-height:160px;overflow-y:auto;margin-top:6px;font-size:12px;">' +
+        (p.release_schedule || []).map(function (t, i) { return '<div>Batch ' + (i + 1) + ': ' + esc(t || "manual — not auto-released") + '</div>'; }).join("") +
+        '</div></div>' +
+        '<div style="margin-top:12px;font-size:12px;">Audience: ' + esc(p.audience_mode || "") + ' &nbsp; Drop type: ' + esc(p.drop_type || "") +
+        (p.region_restriction ? ' &nbsp; Region: ' + esc(p.region_restriction.join(", ")) : '') + '</div>' +
+        (p.warnings && p.warnings.length ? '<div style="margin-top:12px;padding:10px;border:1px solid var(--border);border-radius:6px;font-size:12px;color:var(--muted);"><strong>Notes:</strong><br/>' + p.warnings.map(esc).join("<br/>") + '</div>' : '') +
+        (!p.launchable ? '<div class="banner error" style="margin-top:8px;">Not launchable — resolve the errors above first.</div>' : '');
+      return;
+    }
     var safety = p.safety_checks || {};
     var segDist = Object.keys(p.segment_distribution || {}).map(function (k) {
       return '<div>' + esc(CB_SEGMENT_LABELS[k] || k) + ': ' + fmt(p.segment_distribution[k]) + '</div>';
