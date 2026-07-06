@@ -40,7 +40,7 @@ from datetime import datetime, timedelta, timezone
 
 from bson.objectid import ObjectId
 from flask import Blueprint, jsonify, request
-from pymongo import ASCENDING, DESCENDING
+from pymongo import ASCENDING, DESCENDING, ReturnDocument
 
 import database
 from config import (
@@ -852,18 +852,30 @@ def preview_batch_campaign(campaign_doc: dict) -> dict:
 # P3 — Batch Release Campaign: compiler
 # ---------------------------------------------------------------------------
 
+COMPILE_LEASE_SECONDS = 30
+
+
 def compile_batch_campaign(campaign_doc: dict) -> tuple[dict, int]:
     """Compile a draft batch campaign into N child voucher drops.
 
     Idempotent/crash-safe by construction:
-      - Guarded by a compare-and-swap on batch_status draft->compiling, so a
-        repeated LAUNCH click cannot start a second compile run.
+      - Guarded by an atomic, leased compare-and-swap on batch_status
+        draft->compiling (a single find_one_and_update whose result decides
+        whether *this* call is the one allowed to proceed — not a
+        write-then-reread, which cannot tell two concurrent winners apart).
+        A repeated/concurrent LAUNCH click cannot start a second compile
+        run: only the caller whose CAS actually matched proceeds; every
+        other concurrent caller is rejected outright with
+        "compile_in_progress" instead of racing ahead. The lease expires
+        after COMPILE_LEASE_SECONDS so a genuinely crashed compile can still
+        be retried and resumed (see below) once the lease goes stale.
       - Ground truth for "which batches already exist" is read from the
         `drops` collection itself (batch_parent_id + batch_index), not from
         the parent doc's cached child_drop_ids — so if the process crashes
         mid-way (some child drops inserted, parent doc not yet updated), a
-        retried compile call resumes from the first missing batch index
-        instead of duplicating already-created drops.
+        retried compile call (after the lease goes stale) resumes from the
+        first missing batch index instead of duplicating already-created
+        drops.
       - Writes exclusively through vouchers.create_drop_from_spec — the same
         insert primitive P2 and admin_create_drop use. No duplicate
         drop-insert logic.
@@ -880,14 +892,28 @@ def compile_batch_campaign(campaign_doc: dict) -> tuple[dict, int]:
     if errors:
         return {"status": "error", "code": "validation_failed", "errors": errors}, 400
 
-    # Compare-and-swap: only one caller can move draft -> compiling.
-    if campaign_doc.get("batch_status") != "compiling":
-        _col().update_one(
-            {"_id": campaign_id, "batch_status": {"$in": ["draft", None]}},
-            {"$set": {"batch_status": "compiling", "compile_started_at": datetime.now(timezone.utc)}},
-        )
-    fresh = _col().find_one({"_id": campaign_id}) or campaign_doc
-    if fresh.get("batch_status") != "compiling":
+    # Atomic leased CAS: only the caller whose update actually matches may
+    # proceed. A concurrent second caller's filter will not match (the
+    # first caller already flipped batch_status, and its lease is fresh),
+    # so it is rejected here instead of both callers racing into the
+    # drop-creation loop below.
+    now0 = datetime.now(timezone.utc)
+    stale_before = now0 - timedelta(seconds=COMPILE_LEASE_SECONDS)
+    fresh = _col().find_one_and_update(
+        {
+            "_id": campaign_id,
+            "$or": [
+                {"batch_status": {"$in": ["draft", None]}},
+                {"batch_status": "compiling", "compile_started_at": {"$lt": stale_before}},
+            ],
+        },
+        {"$set": {"batch_status": "compiling", "compile_started_at": now0}},
+        return_document=ReturnDocument.AFTER,
+    )
+    if fresh is None:
+        current = _col().find_one({"_id": campaign_id}) or campaign_doc
+        if current.get("batch_status") == "compiling":
+            return {"status": "error", "code": "compile_in_progress"}, 409
         return {"status": "error", "code": "not_draft"}, 400
 
     eligibility, audience, audience_warnings = _build_audience(fresh, db)
@@ -1072,15 +1098,31 @@ def _release_next_batch(campaign_id) -> str | None:
     ends = next_child.get("endsAt")
     starts_aware = starts if (starts and starts.tzinfo) else (starts.replace(tzinfo=timezone.utc) if starts else None)
     ends_aware = ends if (ends and ends.tzinfo) else (ends.replace(tzinfo=timezone.utc) if ends else None)
-    new_status = "active" if (starts_aware and starts_aware <= now and (not ends_aware or now < ends_aware)) else "upcoming"
+
+    update_fields = {
+        "batch_status": "released",
+        "batch_actual_release_at": now,
+    }
+    if ends_aware and now >= ends_aware:
+        # The window computed at compile time (startsAt/endsAt, default
+        # 24h) has already elapsed by the time this batch is actually
+        # released — e.g. a "manual" batch released well after compiling,
+        # or any batch released long after a pause/resume. Re-anchor the
+        # window to the actual release moment (preserving the originally
+        # configured duration) so the voucher isn't dead on arrival; a
+        # release action should mean "live now for its intended duration",
+        # not "live during whatever window was guessed at compile time".
+        duration = (ends_aware - starts_aware) if starts_aware else timedelta(hours=24)
+        starts_aware = now
+        ends_aware = now + duration
+        update_fields["startsAt"] = starts_aware
+        update_fields["endsAt"] = ends_aware
+
+    update_fields["status"] = "active" if (starts_aware and starts_aware <= now and (not ends_aware or now < ends_aware)) else "upcoming"
 
     db.drops.update_one(
         {"_id": next_child["_id"], "batch_status": "scheduled"},
-        {"$set": {
-            "status": new_status,
-            "batch_status": "released",
-            "batch_actual_release_at": now,
-        }},
+        {"$set": update_fields},
     )
 
     campaign = _col().find_one({"_id": ObjectId(campaign_id_str)}) or {}
@@ -1184,7 +1226,6 @@ def _acquire_batch_lock(name: str, ttl_seconds: int) -> bool:
     duplicated here (not imported) to avoid a circular import between
     campaign_builder.py and main.py. Same collection, same semantics."""
     from pymongo.errors import DuplicateKeyError
-    from pymongo import ReturnDocument
 
     col = database.db[BATCH_LOCK_COLLECTION]
     now = datetime.now(timezone.utc)
@@ -1219,7 +1260,14 @@ def batch_release_tick() -> dict:
         the future (or there's nothing left to release), capped at
         batch_count iterations as a hard safety bound.
     """
-    if not _acquire_batch_lock("batch_release_tick", ttl_seconds=240):
+    # TTL must stay under the cron cadence (main.py schedules this tick
+    # every 60s via CronTrigger(minute="*/1")). A longer TTL (e.g. the 240s
+    # originally used here) would hold the lock across several scheduled
+    # firings, silently skipping them — which breaks "every X minutes"
+    # release cadence for X below ~4. 50s still comfortably prevents two
+    # overlapping runs of this lightweight tick while letting every
+    # legitimate per-minute firing actually acquire the lock.
+    if not _acquire_batch_lock("batch_release_tick", ttl_seconds=50):
         return {"skipped": "lock_not_acquired"}
 
     now = datetime.now(timezone.utc)

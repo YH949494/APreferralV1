@@ -127,7 +127,10 @@ scheduler.add_job(
    `find_one_and_update` CAS + TTL pattern `main.py`'s
    `acquire_scheduler_lock` uses, duplicated locally to avoid a circular
    import between `campaign_builder.py` and `main.py` — same collection,
-   same semantics).
+   same semantics). TTL is `50s`, deliberately kept **below** the 60s cron
+   cadence — a longer TTL would hold the lock across one or more
+   subsequent scheduled firings, silently skipping them and breaking
+   "every X minutes" cadence for X below ~4.
 2. Finds campaigns with `batch_status in (scheduled, active)`,
    `release_type != manual`, and `next_release_at <= now`.
 3. For each, repeatedly calls `_release_next_batch()` while the next batch
@@ -156,13 +159,28 @@ button.
 - **Insufficient codes blocks launch**: `validate_batch_params()` rejects
   compile if uploaded codes/assignments < `total_vouchers`, before any
   drop is created.
-- **Idempotent compile**: a compare-and-swap on `batch_status`
-  (`draft -> compiling`) blocks a second concurrent/duplicate LAUNCH
-  request. If the process crashes mid-compile, ground truth for "which
+- **Idempotent compile**: an atomic, leased compare-and-swap on
+  `batch_status` (`draft -> compiling`, via a single `find_one_and_update`
+  whose *return value* — not a separate re-read — decides who may
+  proceed) blocks a second concurrent/duplicate LAUNCH request outright;
+  every other concurrent caller is rejected with `compile_in_progress`
+  instead of racing into the drop-creation loop. The lease
+  (`COMPILE_LEASE_SECONDS = 30`) expires so a genuinely crashed compile
+  can still be retried after a short delay: ground truth for "which
   batches already exist" is read from `drops` (`batch_parent_id` +
   `batch_index`), not the parent doc's cache — a retried compile call
-  resumes from the first missing batch index instead of duplicating
-  drops.
+  (once the lease goes stale) resumes from the first missing batch index
+  instead of duplicating drops.
+- **Delayed/manual release re-anchors the drop window**: `startsAt`/
+  `endsAt` are stamped at compile time (default 24h duration). If a batch
+  is actually released — via the tick or "Release Next Now" — after that
+  window has already elapsed (e.g. a `manual` batch released days later,
+  or any batch released long after a pause/resume), `_release_next_batch`
+  re-anchors the window to the actual release moment
+  (`startsAt = now, endsAt = now + original_duration`) before flipping
+  `paused -> active`, so the voucher isn't dead on arrival. Normal
+  on-time automatic releases are unaffected (the window hasn't elapsed,
+  so no re-anchoring happens).
 - **Pause is reliable without touching scheduler core**: every child drop
   starts as `status="paused"`; the scheduler's own
   `reconcile_drop_statuses` never auto-activates a paused drop. Only
@@ -209,7 +227,7 @@ views are all untouched.
 
 | Case | Handling |
 |---|---|
-| Repeated LAUNCH request | CAS `draft -> compiling` on the parent; a second concurrent call sees `batch_status != draft` and is rejected with `not_draft`. |
+| Repeated LAUNCH request | Leased atomic CAS `draft -> compiling` on the parent (single `find_one_and_update`, not write-then-reread); a concurrent second call's CAS does not match and it is rejected with `compile_in_progress` (or `not_draft` once genuinely compiled) — it never reaches the drop-creation loop. |
 | Compiler partially creates child drops | Ground truth is `drops` (`batch_parent_id`+`batch_index`), not the parent cache; retry resumes from the first missing index. |
 | Scheduler runs twice | `_release_next_batch()` CAS on the child's `batch_status`; second run finds nothing left in `scheduled` state for that slot. |
 | App crashes midway | Same as "partially creates child drops" — `batch_status` stays `compiling`, safe to retry the compile call. |

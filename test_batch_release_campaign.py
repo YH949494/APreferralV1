@@ -47,6 +47,9 @@ def _matches(doc: dict, filt: dict) -> bool:
                 elif op == "$in":
                     if val not in opval:
                         return False
+                elif op == "$nin":
+                    if val in opval:
+                        return False
                 elif op == "$lte":
                     if val is None or val > opval:
                         return False
@@ -138,7 +141,15 @@ class FakeCollection:
                     d.update(update["$set"])
                 return dict(d)
         if upsert:
-            new_doc = {"_id": filt.get("_id")}
+            target_id = filt.get("_id")
+            if target_id is not None and any(d.get("_id") == target_id for d in self.docs):
+                # A document with this _id exists but didn't satisfy the
+                # rest of the filter — real MongoDB would reject the
+                # upsert-insert with a duplicate key error on _id instead
+                # of silently creating a second document with the same id.
+                from pymongo.errors import DuplicateKeyError
+                raise DuplicateKeyError("E11000 duplicate key error (fake)")
+            new_doc = {"_id": target_id}
             if "$set" in update:
                 new_doc.update(update["$set"])
             if "$setOnInsert" in update:
@@ -252,6 +263,79 @@ class BatchReleaseCampaignTests(unittest.TestCase):
         self.assertEqual(self.fake_db["drops"].count_documents({}), 0)
         stored = campaign_builder._col().find_one({"_id": doc["_id"]})
         self.assertEqual(stored["batch_status"], "draft")
+
+    # Manual release delayed 7 days past compile time must still be
+    # visible/claimable — the release window is re-anchored to the actual
+    # release moment, not left pinned to the compile-time default.
+    def test_manual_release_after_7_days_is_still_visible(self):
+        doc = self._draft(release_type="manual", total_vouchers=50, batch_size=50,
+                           reward_params={"codes": self._codes(50), "pool": "public"})
+        campaign_builder.compile_batch_campaign(doc)
+        campaign_id = doc["_id"]
+        drop_id = campaign_builder._col().find_one({"_id": campaign_id})["child_drop_ids"][0]
+
+        # Simulate compiling now, but the admin only clicks "release" 7
+        # days later — well past the 24h default endsAt computed at
+        # compile time.
+        far_past_ends = datetime.now(timezone.utc) - timedelta(days=7)
+        far_past_starts = far_past_ends - timedelta(hours=24)
+        self.fake_db["drops"].update_one(
+            {"_id": ObjectId(drop_id)},
+            {"$set": {"startsAt": far_past_starts, "endsAt": far_past_ends}},
+        )
+
+        result, code = campaign_builder.release_next_batch_now(campaign_id)
+        self.assertEqual(code, 200)
+        self.assertEqual(result["released_drop_id"], drop_id)
+
+        released_drop = self.fake_db["drops"].find_one({"_id": ObjectId(drop_id)})
+        now = datetime.now(timezone.utc)
+        self.assertEqual(released_drop["status"], "active")
+        self.assertLessEqual(released_drop["startsAt"], now)
+        self.assertGreater(released_drop["endsAt"], now)
+        # Original configured duration (24h) is preserved, just re-anchored.
+        self.assertAlmostEqual(
+            (released_drop["endsAt"] - released_drop["startsAt"]).total_seconds(), 24 * 3600, delta=5
+        )
+        # Now visible via the exact same query vouchers.get_active_drops uses
+        # (status not in expired/paused, startsAt<=ref<endsAt).
+        visible = self.fake_db["drops"].find({
+            "status": {"$nin": ["expired", "paused"]},
+            "startsAt": {"$lte": now},
+            "endsAt": {"$gt": now},
+        })
+        self.assertIn(drop_id, [str(d["_id"]) for d in visible])
+
+    # An automatic (interval_minutes) campaign resumed 7 days after being
+    # paused must also re-anchor the overdue batch's window instead of
+    # releasing an already-expired drop.
+    def test_resume_after_7_days_reanchors_overdue_batch_window(self):
+        doc = self._draft(release_type="interval_minutes", release_interval_minutes=5,
+                           total_vouchers=150, batch_size=50,
+                           reward_params={"codes": self._codes(150), "pool": "public"})
+        campaign_builder.compile_batch_campaign(doc)
+        campaign_id = doc["_id"]
+        campaign_builder.pause_batch_campaign(campaign_id)
+
+        # 7 days pass while paused — the next batch's pre-computed window
+        # (startsAt/endsAt stamped at compile time) is long gone.
+        seven_days_ago = datetime.now(timezone.utc) - timedelta(days=7)
+        next_child = self.fake_db["drops"].find_one({"batch_parent_id": str(campaign_id), "batch_status": "scheduled"})
+        self.fake_db["drops"].update_one(
+            {"_id": next_child["_id"]},
+            {"$set": {"startsAt": seven_days_ago, "endsAt": seven_days_ago + timedelta(hours=24)}},
+        )
+        campaign_builder._col().update_one({"_id": campaign_id}, {"$set": {"next_release_at": seven_days_ago}})
+
+        campaign_builder.resume_batch_campaign(campaign_id)
+        campaign_builder.batch_release_tick()
+
+        released_drop = self.fake_db["drops"].find_one({"_id": next_child["_id"]})
+        now = datetime.now(timezone.utc)
+        self.assertEqual(released_drop["batch_status"], "released")
+        self.assertEqual(released_drop["status"], "active")
+        self.assertLessEqual(released_drop["startsAt"], now)
+        self.assertGreater(released_drop["endsAt"], now)
 
     # 4. manual release creates unreleased children
     def test_manual_release_creates_unreleased_children(self):
@@ -422,13 +506,42 @@ class BatchReleaseCampaignTests(unittest.TestCase):
         finally:
             vouchers.create_drop_from_spec = original
 
-        # Retry: only the missing batch is created, existing ones untouched.
+        # An immediate retry (still within the compile lease window) must
+        # be rejected — this is what prevents two concurrent LAUNCH clicks
+        # from both compiling. It is not a "not_draft" terminal state, just
+        # "try again shortly".
         stored = campaign_builder._col().find_one({"_id": campaign_id})
         self.assertEqual(stored["batch_status"], "compiling")
-        result2, code2 = campaign_builder.compile_batch_campaign(stored)
+        immediate_retry, immediate_code = campaign_builder.compile_batch_campaign(stored)
+        self.assertEqual(immediate_code, 409)
+        self.assertEqual(immediate_retry["code"], "compile_in_progress")
+        self.assertEqual(self.fake_db["drops"].count_documents({"batch_parent_id": str(campaign_id)}), 2)
+
+        # Once the lease goes stale (e.g. a genuinely crashed compile,
+        # retried after a delay), the retry resumes from the missing batch
+        # only — existing ones are untouched, no duplicates.
+        stale_started_at = datetime.now(timezone.utc) - timedelta(seconds=campaign_builder.COMPILE_LEASE_SECONDS + 1)
+        campaign_builder._col().update_one({"_id": campaign_id}, {"$set": {"compile_started_at": stale_started_at}})
+        stored2 = campaign_builder._col().find_one({"_id": campaign_id})
+        result2, code2 = campaign_builder.compile_batch_campaign(stored2)
         self.assertEqual(code2, 200, result2)
         self.assertEqual(len(result2["child_drop_ids"]), 3)
         self.assertEqual(self.fake_db["drops"].count_documents({"batch_parent_id": str(campaign_id)}), 3)
+
+    def test_concurrent_launch_only_one_compiles(self):
+        """Two 'concurrent' LAUNCH calls starting from the same draft
+        snapshot: only the one whose CAS actually matches may proceed."""
+        doc = self._draft()
+        winner, winner_code = campaign_builder.compile_batch_campaign(doc)
+        # A second call using the same stale (pre-compile) snapshot,
+        # simulating a racing request that read the campaign before the
+        # first call's CAS took effect.
+        loser, loser_code = campaign_builder.compile_batch_campaign(doc)
+        self.assertEqual(winner_code, 200)
+        self.assertIn(loser_code, (400, 409))
+        self.assertIn(loser["code"], ("not_draft", "compile_in_progress"))
+        # Exactly one set of child drops exists — no duplicates.
+        self.assertEqual(self.fake_db["drops"].count_documents({"batch_parent_id": str(doc["_id"])}), 10)
 
     def test_repeated_launch_request_is_rejected_once_scheduled(self):
         doc = self._draft()
@@ -460,6 +573,70 @@ class BatchReleaseCampaignTests(unittest.TestCase):
         self.assertEqual(len(preview["release_schedule"]), 10)
         self.assertIsNotNone(preview["first_release_at"])
         self.assertIsNotNone(preview["last_release_at"])
+
+    # --- Tick lock TTL (50s) vs cron cadence (60s): releases every 1/2/3 minutes ---
+
+    def test_release_schedule_spacing_for_1_2_3_minute_intervals(self):
+        first = datetime.now(timezone.utc)
+        for minutes in (1, 2, 3):
+            schedule = campaign_builder.compute_release_schedule(
+                release_type="interval_minutes",
+                batch_count=4,
+                first_release_at=first,
+                release_interval_minutes=minutes,
+            )
+            gaps = [(schedule[i + 1] - schedule[i]).total_seconds() for i in range(len(schedule) - 1)]
+            self.assertTrue(all(g == minutes * 60 for g in gaps), (minutes, gaps))
+
+    def test_tick_lock_ttl_is_below_cron_cadence(self):
+        """The lock must expire well before the next scheduled minute-tick
+        fires, or 1/2/3-minute release cadences get silently skipped."""
+        acquired_first = campaign_builder._acquire_batch_lock("test_cadence_lock", ttl_seconds=50)
+        self.assertTrue(acquired_first)
+        # Immediately re-acquiring (same "tick period") must fail — this is
+        # what prevents two overlapping runs of the tick.
+        acquired_immediately_after = campaign_builder._acquire_batch_lock("test_cadence_lock", ttl_seconds=50)
+        self.assertFalse(acquired_immediately_after)
+        # Once the lock's TTL has elapsed (simulating the next scheduled
+        # minute boundary, since TTL=50s < cron cadence=60s), a new tick
+        # must be able to acquire it again.
+        lock_doc = self.fake_db[campaign_builder.BATCH_LOCK_COLLECTION].find_one({"_id": "test_cadence_lock"})
+        lock_doc["expireAt"] = datetime.now(timezone.utc) - timedelta(seconds=1)
+        self.fake_db[campaign_builder.BATCH_LOCK_COLLECTION].update_one(
+            {"_id": "test_cadence_lock"}, {"$set": {"expireAt": lock_doc["expireAt"]}}
+        )
+        acquired_next_period = campaign_builder._acquire_batch_lock("test_cadence_lock", ttl_seconds=50)
+        self.assertTrue(acquired_next_period)
+
+    def _run_interval_campaign_and_assert_batch2_releases_on_time(self, minutes):
+        doc = self._draft(release_type="interval_minutes", release_interval_minutes=minutes,
+                           total_vouchers=150, batch_size=50,
+                           reward_params={"codes": self._codes(150), "pool": "public"})
+        campaign_builder.compile_batch_campaign(doc)
+        campaign_id = doc["_id"]
+        stored = campaign_builder._col().find_one({"_id": campaign_id})
+        self.assertEqual(stored["released_batches"], 1)  # batch 1 released immediately at launch
+
+        # Simulate the clock reaching batch 2's due time (minutes after
+        # batch 1) — the tick's own lock (TTL 50s, below the 60s cron
+        # cadence) must not be what's blocking this; only next_release_at
+        # gates it.
+        campaign_builder._col().update_one(
+            {"_id": campaign_id},
+            {"$set": {"next_release_at": datetime.now(timezone.utc) - timedelta(seconds=1)}},
+        )
+        campaign_builder.batch_release_tick()
+        stored2 = campaign_builder._col().find_one({"_id": campaign_id})
+        self.assertEqual(stored2["released_batches"], 2, f"interval_minutes={minutes} did not release on time")
+
+    def test_release_every_1_minute_releases_on_time(self):
+        self._run_interval_campaign_and_assert_batch2_releases_on_time(1)
+
+    def test_release_every_2_minutes_releases_on_time(self):
+        self._run_interval_campaign_and_assert_batch2_releases_on_time(2)
+
+    def test_release_every_3_minutes_releases_on_time(self):
+        self._run_interval_campaign_and_assert_batch2_releases_on_time(3)
 
 
 if __name__ == "__main__":
