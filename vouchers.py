@@ -6512,6 +6512,18 @@ def admin_create_drop():
     user, err = require_admin()
     if err: return err
     data = request.get_json(force=True)
+    result, status_code = create_drop_from_spec(data)
+    return jsonify(result), status_code
+
+
+def create_drop_from_spec(data: dict) -> tuple[dict, int]:
+    """Build + insert a drop (and its vouchers) from a drop spec dict.
+
+    This is the same body-insertion logic `admin_create_drop` has always used,
+    factored out so other callers (e.g. the campaign compiler) can create a
+    drop without going through an HTTP request. Returns (json_body, http_status).
+    """
+    data = data or {}
     name = data.get("name")
     # "new_joiner" is an admin-UI-only eligibility shortcut for Welcome Voucher pooled
     # drops: it always maps to eligibility.mode="public" + audience.type="new_joiner" +
@@ -6523,24 +6535,24 @@ def admin_create_drop():
     dtype = "pooled" if is_welcome_shortcut else _normalize_drop_type(data.get("type", "pooled"))
     startsAtLocal = data.get("startsAtLocal")
     if not (name and startsAtLocal):
-        return jsonify({"status": "error", "code": "bad_request"}), 400
+        return ({"status": "error", "code": "bad_request"}), 400
 
     try:
         startsAt = parse_kl_local(startsAtLocal)
     except ValueError:
-        return jsonify({"status": "error", "code": "bad_start"}), 400
+        return ({"status": "error", "code": "bad_start"}), 400
 
     endsAtLocal = data.get("endsAtLocal")
     if endsAtLocal:
         try:
             endsAt = parse_kl_local(endsAtLocal)
         except ValueError:
-            return jsonify({"status": "error", "code": "bad_end"}), 400
+            return ({"status": "error", "code": "bad_end"}), 400
     else:
         endsAt = startsAt + timedelta(hours=24)
 
     if endsAt <= startsAt:
-        return jsonify({"status": "error", "code": "end_before_start"}), 400
+        return ({"status": "error", "code": "end_before_start"}), 400
 
     priority = int(data.get("priority", 100))
     
@@ -6676,10 +6688,10 @@ def admin_create_drop():
     else:
         pool_value = data.get("pool") or data.get("voucherPool") or "public"
         if pool_value not in ("public", "my"):
-            return jsonify({"status": "error", "code": "bad_request", "reason": "bad_pool"}), 400     
+            return ({"status": "error", "code": "bad_request", "reason": "bad_pool"}), 400     
         codes = _normalize_codes(data.get("codes"))
         if not codes:
-            return jsonify({"status": "error", "code": "bad_request", "reason": "empty_codes"}), 400     
+            return ({"status": "error", "code": "bad_request", "reason": "empty_codes"}), 400     
         docs = []
         for c in codes:
             docs.append({
@@ -6695,7 +6707,7 @@ def admin_create_drop():
             try:
                 result = db.vouchers.insert_many(docs, ordered=False)
             except DuplicateKeyError:
-                return jsonify({"status": "error", "code": "duplicate_code"}), 409
+                return ({"status": "error", "code": "duplicate_code"}), 409
             except BulkWriteError as exc:
                 # ordered=False may throw BulkWriteError on duplicates; normalize to 409
                 details = exc.details or {}
@@ -6706,7 +6718,7 @@ def admin_create_drop():
                     if inserted:
                         remaining_field = "public_remaining" if pool_value == "public" else "my_remaining"
                         db.drops.update_one({"_id": drop_id}, {"$inc": {remaining_field: inserted}})                 
-                    return jsonify({
+                    return ({
                         "status": "error",
                         "code": "duplicate_code",
                         "inserted": inserted,
@@ -6716,14 +6728,14 @@ def admin_create_drop():
                     current_app.logger.exception("[admin][drops] insert_many_failed")
                 except Exception:
                     print("[admin][drops] insert_many_failed")
-                return jsonify({"status": "error", "code": "server_error"}), 500
+                return ({"status": "error", "code": "server_error"}), 500
             else:
                 inserted = len(result.inserted_ids)
                 if inserted:
                     remaining_field = "public_remaining" if pool_value == "public" else "my_remaining"
                     db.drops.update_one({"_id": drop_id}, {"$inc": {remaining_field: inserted}})
 
-    return jsonify({"status": "ok", "dropId": str(drop_id)})
+    return {"status": "ok", "dropId": str(drop_id)}, 200
     
 def _admin_drop_summary(doc: dict, *, ref=None, skip_expired=False):
     """Return a normalised representation of a drop for admin surfaces."""
@@ -6800,7 +6812,7 @@ def _admin_drop_summary(doc: dict, *, ref=None, skip_expired=False):
             "codesFreeMy": free_my,
         })
 
-    for key in ("whitelistUsernames", "visibilityMode", "hero_title", "hero_subtitle", "hero_image"):
+    for key in ("whitelistUsernames", "visibilityMode", "hero_title", "hero_subtitle", "hero_image", "campaign_id", "campaign_name"):
         if key in doc:
             summary[key] = doc[key]
 
