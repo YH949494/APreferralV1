@@ -31,9 +31,13 @@
       <div class="nav-group" data-group="campaign-control">
         <button class="nav-group-header" data-group-toggle="campaign-control">2 · Campaign Control</button>
         <div class="nav-group-body">
-          <button class="nav-item" data-view="campaigns">Campaigns <span class="badge badge-live">Live Control</span></button>
+          <button class="nav-item" data-view="campaignBuilder">Campaign Builder <span class="badge badge-live">Live Control</span></button>
+          <button class="nav-item" data-view="activeCampaigns">Active Campaigns <span class="badge badge-readonly">Read Only</span></button>
+          <button class="nav-item" data-view="draftCampaigns">Draft Campaigns <span class="badge badge-readonly">Read Only</span></button>
+          <button class="nav-item" data-view="compiledDrops">Compiled Voucher Drops <span class="badge badge-readonly">Read Only</span></button>
+          <button class="nav-item" data-view="campaigns">Campaigns (Legacy Targeting) <span class="badge badge-live">Live Control</span></button>
           <button class="nav-item" data-view="vouchers">Vouchers Overview <span class="badge badge-readonly">Read Only</span></button>
-          <button class="nav-item" data-view="drops">Voucher Drops <span class="badge badge-live">Live Control</span></button>
+          <button class="nav-item" data-view="drops">Voucher Drop Manager <span class="badge badge-live">Live Control</span></button>
           <a href="/static/index.html#admin-panel" class="nav-item nav-item-external" target="_blank" rel="noopener">
             Legacy MiniApp Admin ↗ <span class="badge badge-legacy">Legacy</span>
           </a>
@@ -345,6 +349,120 @@
             </div>
           </div>
         </div>
+      </section>
+
+      <!-- CAMPAIGN BUILDER (P2) VIEW -->
+      <section id="view-campaignBuilder" class="hidden">
+        <div class="controls" style="margin-bottom:16px;display:flex;gap:8px;align-items:center;">
+          <button class="btn" id="cb-new-btn">+ New Campaign</button>
+          <span style="color:var(--muted);font-size:12px;">Compiles into existing Voucher Drops. Does not change claim, eligibility, scheduler, or affiliate logic.</span>
+        </div>
+
+        <!-- Draft resume list -->
+        <div id="cb-list-panel">
+          <div class="section-title" style="font-size:13px;margin-bottom:8px;">Drafts in progress</div>
+          <div id="cb-draft-list-body"></div>
+        </div>
+
+        <!-- Wizard -->
+        <div id="cb-wizard-panel" class="hidden">
+          <div class="section" style="max-width:820px;">
+            <div class="seg" id="cb-steps" style="margin-bottom:16px;">
+              <button data-step="1" class="active">1 · Type</button>
+              <button data-step="2">2 · Audience</button>
+              <button data-step="3">3 · Release</button>
+              <button data-step="4">4 · Reward</button>
+              <button data-step="5">5 · Preview</button>
+              <button data-step="6">6 · Launch</button>
+            </div>
+
+            <!-- Step 1: Campaign Type -->
+            <div class="cb-step" data-step-panel="1">
+              <div style="margin-bottom:12px;">
+                <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">Campaign Name *</label>
+                <input class="filter-input" id="cb-name" placeholder="e.g. Weekend Surprise" style="width:100%;box-sizing:border-box;" />
+              </div>
+              <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">Campaign Type</label>
+              <div id="cb-type-options" style="display:flex;flex-wrap:wrap;gap:8px;"></div>
+              <div id="cb-type-notes" style="margin-top:8px;font-size:12px;color:var(--muted);"></div>
+            </div>
+
+            <!-- Step 2: Audience -->
+            <div class="cb-step hidden" data-step-panel="2">
+              <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">Audience Mode</label>
+              <div id="cb-audience-options" style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px;"></div>
+              <div id="cb-audience-params"></div>
+            </div>
+
+            <!-- Step 3: Release -->
+            <div class="cb-step hidden" data-step-panel="3">
+              <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">Release Style</label>
+              <div class="seg" id="cb-release-options">
+                <button data-release="immediate" class="active">Immediate</button>
+                <button data-release="scheduled">Scheduled</button>
+              </div>
+              <div id="cb-release-params" style="margin-top:12px;display:grid;grid-template-columns:1fr 1fr;gap:12px;max-width:520px;">
+                <div>
+                  <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">Starts (KL time, scheduled only)</label>
+                  <input class="filter-input" id="cb-starts-at" placeholder="YYYY-MM-DD HH:MM:SS" style="width:100%;box-sizing:border-box;" />
+                </div>
+                <div>
+                  <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">Ends (KL time, optional — default +24h)</label>
+                  <input class="filter-input" id="cb-ends-at" placeholder="YYYY-MM-DD HH:MM:SS" style="width:100%;box-sizing:border-box;" />
+                </div>
+              </div>
+              <div style="margin-top:8px;font-size:12px;color:var(--muted);">P2 supports Immediate and Scheduled only. Batch/Drip/Manual release are P3.</div>
+            </div>
+
+            <!-- Step 4: Reward -->
+            <div class="cb-step hidden" data-step-panel="4">
+              <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">Reward Type</label>
+              <div class="seg" id="cb-reward-options">
+                <button data-reward="voucher_pool" class="active">Voucher Pool</button>
+                <button data-reward="personalised_voucher">Personalised Voucher</button>
+                <button data-reward="affiliate_reward_pool">Affiliate Reward Pool</button>
+                <button data-reward="xp">XP</button>
+                <button data-reward="combined">Combined</button>
+              </div>
+              <div id="cb-reward-params" style="margin-top:12px;"></div>
+            </div>
+
+            <!-- Step 5: Preview -->
+            <div class="cb-step hidden" data-step-panel="5">
+              <button class="btn" id="cb-preview-btn">Run Preview</button>
+              <div id="cb-preview-result" style="margin-top:12px;"></div>
+            </div>
+
+            <!-- Step 6: Launch -->
+            <div class="cb-step hidden" data-step-panel="6">
+              <div style="margin-bottom:10px;font-size:13px;">Type <strong>LAUNCH</strong> to compile this campaign into voucher drop(s). This cannot be undone from here — rollback only deletes the campaign record, generated drops keep running.</div>
+              <input class="filter-input" id="cb-launch-confirm" placeholder="Type LAUNCH" style="max-width:240px;" />
+              <button class="btn primary" id="cb-launch-btn" style="margin-left:8px;">Compile &amp; Launch</button>
+              <div id="cb-launch-result" style="margin-top:12px;"></div>
+            </div>
+
+            <div style="display:flex;gap:8px;margin-top:20px;border-top:1px solid var(--border);padding-top:16px;">
+              <button class="btn" id="cb-save-draft-btn">Save Draft</button>
+              <button class="btn" id="cb-back-btn" style="background:transparent;border:1px solid var(--border);">Back to list</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ACTIVE CAMPAIGNS VIEW -->
+      <section id="view-activeCampaigns" class="hidden">
+        <div id="ac-list-body"></div>
+      </section>
+
+      <!-- DRAFT CAMPAIGNS VIEW -->
+      <section id="view-draftCampaigns" class="hidden">
+        <div id="dc-list-body"></div>
+      </section>
+
+      <!-- COMPILED VOUCHER DROPS VIEW -->
+      <section id="view-compiledDrops" class="hidden">
+        <div style="margin-bottom:12px;font-size:12px;color:var(--muted);">Voucher drops generated by the Campaign Builder compiler. They behave identically to manually-created drops — see them in Voucher Drop Manager too.</div>
+        <div id="cd-list-body"></div>
       </section>
 
       <!-- VOUCHERS VIEW -->

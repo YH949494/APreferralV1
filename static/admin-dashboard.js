@@ -2902,6 +2902,417 @@
     });
   }
 
+  // ---------- Campaign Builder (P2) ----------
+  // Authoring layer that compiles into the existing Voucher Drop engine via
+  // /api/admin/campaign-builder/*. Never calls claim/eligibility/scheduler
+  // endpoints directly.
+  var cb = {
+    meta: null,
+    campaignId: null,
+    campaign: null,
+    step: 1,
+  };
+
+  var CB_TYPE_LABELS = {
+    smart_default: "Smart Default", public: "Public", welcome: "Welcome",
+    segment: "Segment", affiliate: "Affiliate", personalised: "Personalised",
+    fcfs: "FCFS", surprise: "Surprise", test: "Test",
+  };
+  var CB_AUDIENCE_LABELS = {
+    smart_segment_pct: "Smart Segment %", equal_chance: "Equal Chance",
+    no_segment_filter: "No Segment Filter", whitelist: "Whitelist",
+    vip: "VIP", region: "Region", admin_only: "Admin Only",
+  };
+  var CB_SEGMENT_LABELS = {
+    high_value: "High Value", normal_actual: "Normal Actual",
+    active_community_player: "Active Community", low_value: "Low Value",
+    voucher_hunter: "Voucher Hunter", ghost: "Ghost", unclassified: "Unclassified",
+  };
+
+  function cbApi(path, opts) {
+    opts = opts || {};
+    var fetchOpts = { credentials: "same-origin", headers: { "Accept": "application/json" } };
+    if (opts.method) fetchOpts.method = opts.method;
+    if (opts.body !== undefined) {
+      fetchOpts.headers["Content-Type"] = "application/json";
+      fetchOpts.body = JSON.stringify(opts.body);
+    }
+    return fetch(path, fetchOpts).then(function (r) {
+      if (r.status === 401) { window.location.href = "/static/admin-login.html"; throw new Error("unauthorized"); }
+      return r.json().then(function (j) { return { ok: r.ok, status: r.status, body: j }; });
+    });
+  }
+
+  function ensureCbMeta() {
+    if (cb.meta) return Promise.resolve(cb.meta);
+    return cbApi("/api/admin/campaign-builder/meta").then(function (res) {
+      if (res.ok) cb.meta = res.body;
+      return cb.meta;
+    });
+  }
+
+  function loadCampaignBuilder(force) {
+    if (force) { cb.campaignId = null; cb.campaign = null; }
+    $("#cb-wizard-panel").classList.add("hidden");
+    $("#cb-list-panel").classList.remove("hidden");
+    ensureCbMeta().then(function () {
+      return cbApi("/api/admin/campaign-builder/campaigns?status=draft");
+    }).then(function (res) {
+      var body = $("#cb-draft-list-body");
+      var items = (res.body && res.body.campaigns) || [];
+      if (!items.length) {
+        body.innerHTML = '<p style="color:var(--muted);font-size:13px;padding:16px 0;">No drafts. Click <strong>+ New Campaign</strong> to start the wizard.</p>';
+        return;
+      }
+      body.innerHTML = items.map(function (c) {
+        return '<div class="campaign-card">' +
+          '<div class="campaign-card-header">' +
+          '<div class="campaign-card-title">' + esc(c.campaign_name) + '</div>' +
+          '<span class="pill draft">draft</span>' +
+          '</div>' +
+          '<div class="campaign-card-meta">' +
+          '<span>' + esc(CB_TYPE_LABELS[c.campaign_type] || c.campaign_type) + '</span>' +
+          '<span>' + esc(CB_AUDIENCE_LABELS[c.audience_mode] || c.audience_mode) + '</span>' +
+          '<span style="margin-left:auto;">' + esc((c.created_at || "").slice(0, 10)) + '</span>' +
+          '</div>' +
+          '<div class="campaign-card-actions">' +
+          '<button class="btn" onclick="cbResume(' + JSON.stringify(c.id) + ')">Resume</button>' +
+          '</div></div>';
+      }).join("");
+    }).catch(function (e) { banner("Failed to load campaign builder: " + e.message, "error"); });
+  }
+
+  function loadActiveCampaigns(force) {
+    cbApi("/api/admin/campaign-builder/campaigns?status=active").then(function (res) {
+      _cbRenderCampaignList("ac-list-body", (res.body && res.body.campaigns) || [], "active");
+    });
+  }
+
+  function loadDraftCampaigns(force) {
+    cbApi("/api/admin/campaign-builder/campaigns?status=draft").then(function (res) {
+      _cbRenderCampaignList("dc-list-body", (res.body && res.body.campaigns) || [], "draft");
+    });
+  }
+
+  function _cbRenderCampaignList(elId, items, status) {
+    var body = $("#" + elId);
+    if (!items.length) {
+      body.innerHTML = '<p style="color:var(--muted);font-size:13px;padding:16px 0;">No ' + status + ' campaigns.</p>';
+      return;
+    }
+    body.innerHTML = items.map(function (c) {
+      var drops = c.compiled_drop_ids || [];
+      return '<div class="campaign-card">' +
+        '<div class="campaign-card-header">' +
+        '<div class="campaign-card-title">' + esc(c.campaign_name) + '</div>' +
+        '<span class="pill ' + esc(status) + '">' + esc(status) + '</span>' +
+        '</div>' +
+        '<div class="campaign-card-meta">' +
+        '<span>' + esc(CB_TYPE_LABELS[c.campaign_type] || c.campaign_type) + '</span>' +
+        '<span>' + esc(CB_AUDIENCE_LABELS[c.audience_mode] || c.audience_mode) + '</span>' +
+        (drops.length ? '<span>' + drops.length + ' drop(s)</span>' : '') +
+        '<span style="margin-left:auto;">' + esc((c.created_at || "").slice(0, 10)) + '</span>' +
+        '</div>' +
+        (status === "draft"
+          ? '<div class="campaign-card-actions"><button class="btn" onclick="cbResume(' + JSON.stringify(c.id) + ')">Resume</button>' +
+            '<button class="btn" style="background:transparent;border:1px solid var(--border);" onclick="cbDelete(' + JSON.stringify(c.id) + ')">Delete</button></div>'
+          : '') +
+        '</div>';
+    }).join("");
+  }
+
+  function loadCompiledDrops(force) {
+    fetch("/v2/miniapp/admin/drops", { credentials: "same-origin" }).then(function (r) { return r.json(); })
+      .then(function (data) {
+        var items = (data.items || []).filter(function (d) { return !!d.campaign_id; });
+        var body = $("#cd-list-body");
+        if (!items.length) {
+          body.innerHTML = '<p style="color:var(--muted);font-size:13px;padding:16px 0;">No compiled drops yet. Launch a campaign in Campaign Builder to generate one.</p>';
+          return;
+        }
+        body.innerHTML = '<table class="data-table"><thead><tr><th>Drop</th><th>Campaign</th><th>Status</th><th>Type</th><th>Codes</th></tr></thead><tbody>' +
+          items.map(function (d) {
+            return '<tr><td>' + esc(d.name) + '</td><td>' + esc(d.campaign_name || "") + '</td><td>' + esc(d.status) + '</td><td>' + esc(d.type) +
+              '</td><td>' + (d.type === "personalised" ? (fmt(d.claimed) + "/" + fmt(d.assigned)) : (fmt(d.codesFree) + "/" + fmt(d.codesTotal))) + '</td></tr>';
+          }).join("") + '</tbody></table>';
+      }).catch(function (e) { banner("Failed to load compiled drops: " + e.message, "error"); });
+  }
+
+  window.cbDelete = function (id) {
+    if (!confirm("Delete this draft campaign? Any drops it already compiled are NOT affected.")) return;
+    cbApi("/api/admin/campaign-builder/campaigns/" + id, { method: "DELETE" }).then(function (res) {
+      if (res.ok) { banner("Draft deleted.", "ok"); refreshCurrent(true); }
+      else banner("Delete failed: " + ((res.body && res.body.code) || "unknown"), "error");
+    });
+  };
+
+  window.cbResume = function (id) {
+    cbApi("/api/admin/campaign-builder/campaigns/" + id).then(function (res) {
+      if (!res.ok) { banner("Failed to load campaign", "error"); return; }
+      cb.campaignId = id;
+      cb.campaign = res.body.campaign;
+      state.view = "campaignBuilder";
+      switchView("campaignBuilder");
+      _cbOpenWizard();
+    });
+  };
+
+  function _cbOpenWizard() {
+    $("#cb-list-panel").classList.add("hidden");
+    $("#cb-wizard-panel").classList.remove("hidden");
+    ensureCbMeta().then(function () {
+      _cbRenderTypeOptions();
+      _cbRenderAudienceOptions();
+      _cbPopulateFromCampaign();
+      _cbGoStep(1);
+    });
+  }
+
+  function _cbNewDraft() {
+    cb.campaignId = null;
+    cb.campaign = { campaign_type: "smart_default", audience_mode: "smart_segment_pct", audience_params: {}, release_style: "immediate", release_params: {}, reward_type: "voucher_pool", reward_params: { codes: [], pool: "public" } };
+    _cbOpenWizard();
+  }
+
+  function _cbRenderTypeOptions() {
+    var wrap = $("#cb-type-options");
+    wrap.innerHTML = (cb.meta.campaign_types || []).map(function (t) {
+      return '<button class="btn cb-type-btn" data-type="' + t + '" style="background:transparent;border:1px solid var(--border);">' + esc(CB_TYPE_LABELS[t] || t) + '</button>';
+    }).join("");
+    $all(".cb-type-btn", wrap).forEach(function (b) {
+      b.addEventListener("click", function () {
+        cb.campaign.campaign_type = b.dataset.type;
+        var defaults = (cb.meta.template_defaults || {})[b.dataset.type] || {};
+        if (!cb._touchedAudience) cb.campaign.audience_mode = defaults.audience_mode || cb.campaign.audience_mode;
+        if (!cb._touchedRelease) cb.campaign.release_style = defaults.release_style || cb.campaign.release_style;
+        if (!cb._touchedReward) cb.campaign.reward_type = defaults.reward_type || cb.campaign.reward_type;
+        _cbPopulateFromCampaign();
+      });
+    });
+  }
+
+  function _cbRenderAudienceOptions() {
+    var wrap = $("#cb-audience-options");
+    wrap.innerHTML = (cb.meta.audience_modes || []).map(function (m) {
+      return '<button class="btn cb-audience-btn" data-mode="' + m + '" style="background:transparent;border:1px solid var(--border);">' + esc(CB_AUDIENCE_LABELS[m] || m) + '</button>';
+    }).join("");
+    $all(".cb-audience-btn", wrap).forEach(function (b) {
+      b.addEventListener("click", function () {
+        cb._touchedAudience = true;
+        cb.campaign.audience_mode = b.dataset.mode;
+        _cbRenderAudienceParams();
+        _cbHighlight();
+      });
+    });
+  }
+
+  function _cbRenderAudienceParams() {
+    var mode = cb.campaign.audience_mode;
+    var params = cb.campaign.audience_params || {};
+    var el = $("#cb-audience-params");
+    if (mode === "whitelist") {
+      el.innerHTML = '<label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">Usernames (one per line, or from affiliate export)</label>' +
+        '<textarea id="cb-whitelist-usernames" rows="4" style="width:100%;box-sizing:border-box;" placeholder="@alice\n@bob">' + esc((params.usernames || []).join("\n")) + '</textarea>';
+      $("#cb-whitelist-usernames").addEventListener("change", function (e) {
+        cb.campaign.audience_params.usernames = e.target.value.split("\n").map(function (s) { return s.trim(); }).filter(Boolean);
+      });
+    } else if (mode === "vip") {
+      el.innerHTML = '<label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">Tier</label>' +
+        '<input class="filter-input" id="cb-vip-tier" value="' + esc(params.tier || "VIP") + '" style="max-width:200px;" />';
+      $("#cb-vip-tier").addEventListener("change", function (e) { cb.campaign.audience_params.tier = e.target.value; });
+    } else if (mode === "region") {
+      el.innerHTML = '<label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">Regions (comma-separated)</label>' +
+        '<input class="filter-input" id="cb-regions" value="' + esc((params.regions || []).join(", ")) + '" style="max-width:300px;" />';
+      $("#cb-regions").addEventListener("change", function (e) {
+        cb.campaign.audience_params.regions = e.target.value.split(",").map(function (s) { return s.trim(); }).filter(Boolean);
+      });
+    } else if (mode === "smart_segment_pct" || cb.campaign.campaign_type === "segment") {
+      var segs = params.segments || [];
+      el.innerHTML = '<label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">Restrict to backend segment(s) (leave empty = no restriction, weighted by global defaults only)</label>' +
+        '<div style="display:flex;flex-wrap:wrap;gap:6px;">' +
+        (cb.meta.valid_segments || []).map(function (s) {
+          return '<label class="ce-chip-label"><input type="checkbox" class="cb-segment-cb" value="' + s + '" ' + (segs.indexOf(s) >= 0 ? "checked" : "") + ' /> ' + esc(CB_SEGMENT_LABELS[s] || s) + '</label>';
+        }).join("") + '</div>';
+      $all(".cb-segment-cb", el).forEach(function (cbx) {
+        cbx.addEventListener("change", function () {
+          cb.campaign.audience_params.segments = $all(".cb-segment-cb", el).filter(function (x) { return x.checked; }).map(function (x) { return x.value; });
+        });
+      });
+    } else {
+      el.innerHTML = '<div style="font-size:12px;color:var(--muted);">No further configuration needed for this audience mode.</div>';
+    }
+  }
+
+  function _cbRenderRewardParams() {
+    var type = cb.campaign.reward_type;
+    var params = cb.campaign.reward_params || {};
+    var el = $("#cb-reward-params");
+    if (type === "personalised_voucher") {
+      el.innerHTML = '<label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">Assignments (username,code — one per line)</label>' +
+        '<textarea id="cb-assignments" rows="5" style="width:100%;box-sizing:border-box;" placeholder="@alice,CODE1\n@bob,CODE2">' +
+        esc((params.assignments || []).map(function (a) { return a.username + "," + a.code; }).join("\n")) + '</textarea>';
+      $("#cb-assignments").addEventListener("change", function (e) {
+        cb.campaign.reward_params.assignments = e.target.value.split("\n").map(function (line) {
+          var parts = line.split(",");
+          return { username: (parts[0] || "").trim(), code: (parts[1] || "").trim() };
+        }).filter(function (a) { return a.username && a.code; });
+      });
+    } else if (type === "xp") {
+      el.innerHTML = '<label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">XP Amount (grant manually via Add/Reduce XP for the resolved audience — no drop is generated)</label>' +
+        '<input type="number" class="filter-input" id="cb-xp-amount" value="' + esc(params.xp_amount || "") + '" style="max-width:160px;" />';
+      $("#cb-xp-amount").addEventListener("change", function (e) { cb.campaign.reward_params.xp_amount = parseInt(e.target.value, 10) || 0; });
+    } else {
+      el.innerHTML = '<label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">Voucher Codes (one per line)</label>' +
+        '<textarea id="cb-codes" rows="5" style="width:100%;box-sizing:border-box;" placeholder="CODE1\nCODE2\nCODE3">' + esc((params.codes || []).join("\n")) + '</textarea>' +
+        '<label style="font-size:12px;font-weight:600;display:block;margin:8px 0 4px;">Pool</label>' +
+        '<select id="cb-pool" style="padding:6px;border:1px solid var(--border);border-radius:6px;background:var(--card-bg);color:var(--text);">' +
+        '<option value="public"' + (params.pool !== "my" ? " selected" : "") + '>public</option>' +
+        '<option value="my"' + (params.pool === "my" ? " selected" : "") + '>my</option></select>';
+      $("#cb-codes").addEventListener("change", function (e) {
+        cb.campaign.reward_params.codes = e.target.value.split("\n").map(function (s) { return s.trim(); }).filter(Boolean);
+      });
+      $("#cb-pool").addEventListener("change", function (e) { cb.campaign.reward_params.pool = e.target.value; });
+    }
+  }
+
+  function _cbHighlight() {
+    $all(".cb-type-btn").forEach(function (b) { b.classList.toggle("active", b.dataset.type === cb.campaign.campaign_type); });
+    $all(".cb-audience-btn").forEach(function (b) { b.classList.toggle("active", b.dataset.mode === cb.campaign.audience_mode); });
+    $all("#cb-release-options button").forEach(function (b) { b.classList.toggle("active", b.dataset.release === cb.campaign.release_style); });
+    $all("#cb-reward-options button").forEach(function (b) { b.classList.toggle("active", b.dataset.reward === cb.campaign.reward_type); });
+  }
+
+  function _cbPopulateFromCampaign() {
+    $("#cb-name").value = cb.campaign.campaign_name || "";
+    $("#cb-type-notes").textContent = ((cb.meta.template_defaults || {})[cb.campaign.campaign_type] || {}).notes || "";
+    var rp = cb.campaign.release_params || {};
+    $("#cb-starts-at").value = rp.startsAtLocal || "";
+    $("#cb-ends-at").value = rp.endsAtLocal || "";
+    _cbRenderAudienceParams();
+    _cbRenderRewardParams();
+    _cbHighlight();
+  }
+
+  function _cbCollectFromForm() {
+    cb.campaign.campaign_name = ($("#cb-name").value || "").trim();
+    cb.campaign.release_params = {
+      startsAtLocal: ($("#cb-starts-at").value || "").trim(),
+      endsAtLocal: ($("#cb-ends-at").value || "").trim(),
+    };
+  }
+
+  function _cbGoStep(n) {
+    cb.step = n;
+    $all("#cb-steps button").forEach(function (b) { b.classList.toggle("active", parseInt(b.dataset.step, 10) === n); });
+    $all(".cb-step").forEach(function (p) { p.classList.toggle("hidden", parseInt(p.dataset.stepPanel, 10) !== n); });
+    if (n === 1) $("#cb-type-notes").textContent = ((cb.meta.template_defaults || {})[cb.campaign.campaign_type] || {}).notes || "";
+  }
+
+  function _cbSaveDraft(thenFn) {
+    _cbCollectFromForm();
+    if (!cb.campaign.campaign_name) { banner("Campaign name is required.", "error"); return; }
+    var body = {
+      campaign_name: cb.campaign.campaign_name,
+      campaign_type: cb.campaign.campaign_type,
+      audience_mode: cb.campaign.audience_mode,
+      audience_params: cb.campaign.audience_params,
+      release_style: cb.campaign.release_style,
+      release_params: cb.campaign.release_params,
+      reward_type: cb.campaign.reward_type,
+      reward_params: cb.campaign.reward_params,
+    };
+    var url = cb.campaignId ? "/api/admin/campaign-builder/campaigns/" + cb.campaignId : "/api/admin/campaign-builder/campaigns";
+    var method = cb.campaignId ? "PUT" : "POST";
+    cbApi(url, { method: method, body: body }).then(function (res) {
+      if (!res.ok) { banner("Save failed: " + ((res.body && res.body.code) || "unknown"), "error"); return; }
+      cb.campaignId = res.body.campaign.id;
+      cb.campaign = res.body.campaign;
+      banner("Draft saved.", "ok");
+      if (thenFn) thenFn();
+    });
+  }
+
+  function bindCampaignBuilder() {
+    var newBtn = $("#cb-new-btn");
+    if (newBtn) newBtn.addEventListener("click", _cbNewDraft);
+
+    var backBtn = $("#cb-back-btn");
+    if (backBtn) backBtn.addEventListener("click", function () { loadCampaignBuilder(true); });
+
+    $all("#cb-steps button").forEach(function (b) {
+      b.addEventListener("click", function () { _cbGoStep(parseInt(b.dataset.step, 10)); });
+    });
+
+    $all("#cb-release-options button").forEach(function (b) {
+      b.addEventListener("click", function () {
+        cb._touchedRelease = true;
+        cb.campaign.release_style = b.dataset.release;
+        _cbHighlight();
+      });
+    });
+
+    $all("#cb-reward-options button").forEach(function (b) {
+      b.addEventListener("click", function () {
+        cb._touchedReward = true;
+        cb.campaign.reward_type = b.dataset.reward;
+        _cbRenderRewardParams();
+        _cbHighlight();
+      });
+    });
+
+    var saveDraftBtn = $("#cb-save-draft-btn");
+    if (saveDraftBtn) saveDraftBtn.addEventListener("click", function () { _cbSaveDraft(); });
+
+    var previewBtn = $("#cb-preview-btn");
+    if (previewBtn) previewBtn.addEventListener("click", function () {
+      _cbSaveDraft(function () {
+        cbApi("/api/admin/campaign-builder/campaigns/" + cb.campaignId + "/preview", { method: "POST", body: {} }).then(function (res) {
+          if (!res.ok) { $("#cb-preview-result").innerHTML = '<div class="banner error">Preview failed: ' + esc((res.body && res.body.code) || "unknown") + '</div>'; return; }
+          _cbRenderPreview(res.body.preview);
+        });
+      });
+    });
+
+    var launchBtn = $("#cb-launch-btn");
+    if (launchBtn) launchBtn.addEventListener("click", function () {
+      var confirmVal = ($("#cb-launch-confirm").value || "").trim();
+      if (confirmVal !== "LAUNCH") { $("#cb-launch-result").innerHTML = '<div class="banner error">Type LAUNCH exactly to confirm.</div>'; return; }
+      if (!cb.campaignId) { $("#cb-launch-result").innerHTML = '<div class="banner error">Save the draft first.</div>'; return; }
+      launchBtn.disabled = true;
+      cbApi("/api/admin/campaign-builder/campaigns/" + cb.campaignId + "/compile", { method: "POST", body: { confirm: "LAUNCH" } })
+        .then(function (res) {
+          if (!res.ok) {
+            $("#cb-launch-result").innerHTML = '<div class="banner error">Compile failed: ' + esc((res.body && res.body.code) || "unknown") + '</div>';
+            return;
+          }
+          $("#cb-launch-result").innerHTML = '<div class="banner ok">Compiled ' + (res.body.compiled_drop_ids || []).length + ' drop(s): ' +
+            esc((res.body.compiled_drop_ids || []).join(", ")) + '</div>' +
+            (res.body.warnings && res.body.warnings.length ? '<div style="margin-top:6px;font-size:12px;color:var(--muted);">' + res.body.warnings.map(esc).join("<br/>") + '</div>' : '');
+          banner("Campaign launched.", "ok");
+        })
+        .finally(function () { launchBtn.disabled = false; });
+    });
+  }
+
+  function _cbRenderPreview(p) {
+    var el = $("#cb-preview-result");
+    var safety = p.safety_checks || {};
+    var segDist = Object.keys(p.segment_distribution || {}).map(function (k) {
+      return '<div>' + esc(CB_SEGMENT_LABELS[k] || k) + ': ' + fmt(p.segment_distribution[k]) + '</div>';
+    }).join("");
+    el.innerHTML =
+      '<div class="card-grid">' +
+      kpiCard("Expected Drops", p.expected_drop_count) +
+      kpiCard("Estimated Reach", p.estimated_reach) +
+      kpiCard("Expected Voucher Count", p.expected_voucher_count) +
+      kpiCard("Campaign Duration (h)", safety.campaign_duration_hours) +
+      '</div>' +
+      '<div style="margin-top:12px;"><div class="section-title" style="font-size:13px;">Compiler Output</div>' +
+      '<div>' + (p.expected_drop_names || []).join(", ") + '</div></div>' +
+      (segDist ? '<div style="margin-top:12px;"><div class="section-title" style="font-size:13px;">Segment Distribution</div>' + segDist + '</div>' : '') +
+      (p.warnings && p.warnings.length ? '<div style="margin-top:12px;padding:10px;border:1px solid var(--border);border-radius:6px;font-size:12px;color:var(--muted);"><strong>Notes:</strong><br/>' + p.warnings.map(esc).join("<br/>") + '</div>' : '');
+  }
+
   // ---------- Voucher Drops (migrated from legacy MiniApp admin panel) ----------
   // Reuses the same /v2/miniapp/admin/drops* endpoints used by static/index.html#admin-panel.
   function toKLLocalString(inputValue) {
@@ -3245,7 +3656,7 @@
     });
   }
 
-  var VIEWS =["summary", "funnel", "abuse", "campaigns", "vouchers", "drops", "referrals", "affiliate", "affiliatePools", "affiliatePending", "reactivation", "audit", "segmentProbabilityConfig", "segmentRoi", "segments", "validation", "backendSegmentEngine", "voucherHunterAudit", "unclassifiedAudit", "segmentRuleSimulator", "voucherHunterQuality", "voucherHunterFalsePositive", "voucherHunterRuleSimulator", "vhPriorityImpact", "uploadPlayerPerformance", "uploadHistory", "rawExplorer", "users", "joinRequests", "xpAdjust", "settings"];
+  var VIEWS =["summary", "funnel", "abuse", "campaignBuilder", "activeCampaigns", "draftCampaigns", "compiledDrops", "campaigns", "vouchers", "drops", "referrals", "affiliate", "affiliatePools", "affiliatePending", "reactivation", "audit", "segmentProbabilityConfig", "segmentRoi", "segments", "validation", "backendSegmentEngine", "voucherHunterAudit", "unclassifiedAudit", "segmentRuleSimulator", "voucherHunterQuality", "voucherHunterFalsePositive", "voucherHunterRuleSimulator", "vhPriorityImpact", "uploadPlayerPerformance", "uploadHistory", "rawExplorer", "users", "joinRequests", "xpAdjust", "settings"];
   function switchView(view) {
     state.view = view;
     $all(".nav-item").forEach(function (b) { b.classList.toggle("active", b.dataset.view === view); });
@@ -3255,7 +3666,9 @@
     if (activeGroup) activeGroup.classList.remove("collapsed");
     var titles = {
       summary: "Executive Summary", funnel: "Activation Funnel", abuse: "Abuse Overview",
-      campaigns: "Campaign Engine",
+      campaignBuilder: "Campaign Builder (P2)", activeCampaigns: "Active Campaigns",
+      draftCampaigns: "Draft Campaigns", compiledDrops: "Compiled Voucher Drops",
+      campaigns: "Campaigns (Legacy Targeting)",
       vouchers: "Vouchers", drops: "Voucher Drops", referrals: "Referrals", affiliate: "Affiliate",
       affiliatePools: "Affiliate Voucher Pools", affiliatePending: "Pending Affiliate Rewards", reactivation: "Reactivation",
       audit: "Audit", segmentProbabilityConfig: "Segment Probability Configuration (Read Only)",
@@ -3283,6 +3696,10 @@
     if (state.view === "summary") loadSummary(force);
     else if (state.view === "funnel") loadFunnel(force);
     else if (state.view === "abuse") loadAbuse(force);
+    else if (state.view === "campaignBuilder") loadCampaignBuilder(force);
+    else if (state.view === "activeCampaigns") loadActiveCampaigns(force);
+    else if (state.view === "draftCampaigns") loadDraftCampaigns(force);
+    else if (state.view === "compiledDrops") loadCompiledDrops(force);
     else if (state.view === "campaigns") loadCampaigns(force);
     else if (state.view === "vouchers") loadVouchers(force);
     else if (state.view === "drops") loadDrops(force);
@@ -3337,6 +3754,7 @@
         .finally(function () { window.location.href = "/admin"; });
     });
     bindCampaigns();
+    bindCampaignBuilder();
     bindDrops();
     bindAffiliatePools();
     bindAffiliatePending();

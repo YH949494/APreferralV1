@@ -2261,6 +2261,9 @@ app.register_blueprint(admin_auth_bp)
 from campaigns import campaigns_bp
 app.register_blueprint(campaigns_bp)
 
+from campaign_builder import campaign_builder_bp
+app.register_blueprint(campaign_builder_bp)
+
 admin_bp = Blueprint("admin", __name__)
 
 
