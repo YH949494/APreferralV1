@@ -411,7 +411,41 @@
                   <input class="filter-input" id="cb-ends-at" placeholder="YYYY-MM-DD HH:MM:SS" style="width:100%;box-sizing:border-box;" />
                 </div>
               </div>
-              <div style="margin-top:8px;font-size:12px;color:var(--muted);">P2 supports Immediate and Scheduled only. Batch/Drip/Manual release are P3.</div>
+              <div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--border);">
+                <label style="font-size:12px;font-weight:600;display:flex;align-items:center;gap:6px;">
+                  <input type="checkbox" id="cb-batch-toggle" /> Batch Release Campaign (split into multiple scheduled voucher drops)
+                </label>
+                <div id="cb-batch-params" class="hidden" style="margin-top:12px;display:grid;grid-template-columns:1fr 1fr;gap:12px;max-width:520px;">
+                  <div>
+                    <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">Total Vouchers</label>
+                    <input type="number" class="filter-input" id="cb-total-vouchers" style="width:100%;box-sizing:border-box;" />
+                  </div>
+                  <div>
+                    <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">Batch Size</label>
+                    <input type="number" class="filter-input" id="cb-batch-size" style="width:100%;box-sizing:border-box;" />
+                  </div>
+                  <div>
+                    <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">Release Type</label>
+                    <select id="cb-release-type" style="width:100%;box-sizing:border-box;padding:6px;border:1px solid var(--border);border-radius:6px;background:var(--card-bg);color:var(--text);">
+                      <option value="interval_minutes">Every X minutes</option>
+                      <option value="hourly">Hourly</option>
+                      <option value="daily">Daily</option>
+                      <option value="weekly">Weekly</option>
+                      <option value="manual">Manual</option>
+                      <option value="custom">Custom schedule</option>
+                    </select>
+                  </div>
+                  <div id="cb-interval-minutes-wrap">
+                    <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">Interval (minutes)</label>
+                    <input type="number" class="filter-input" id="cb-release-interval-minutes" style="width:100%;box-sizing:border-box;" />
+                  </div>
+                </div>
+                <div id="cb-custom-schedule-wrap" class="hidden" style="margin-top:12px;max-width:520px;">
+                  <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">Custom Schedule (one KL datetime per line, exactly one per batch, "YYYY-MM-DD HH:MM:SS")</label>
+                  <textarea id="cb-custom-schedule" rows="4" style="width:100%;box-sizing:border-box;" placeholder="2026-07-10 09:00:00\n2026-07-10 15:00:00"></textarea>
+                </div>
+              </div>
+              <div style="margin-top:8px;font-size:12px;color:var(--muted);">Immediate/Scheduled release a single drop. Batch Release compiles many child drops over time (see docs).</div>
             </div>
 
             <!-- Step 4: Reward -->

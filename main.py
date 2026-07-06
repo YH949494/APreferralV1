@@ -2261,7 +2261,7 @@ app.register_blueprint(admin_auth_bp)
 from campaigns import campaigns_bp
 app.register_blueprint(campaigns_bp)
 
-from campaign_builder import campaign_builder_bp
+from campaign_builder import campaign_builder_bp, batch_release_tick
 app.register_blueprint(campaign_builder_bp)
 
 admin_bp = Blueprint("admin", __name__)
@@ -7356,6 +7356,13 @@ def run_worker():
         trigger=CronTrigger(minute="*/1", timezone=KL_TZ),
         id="drop_status_reconcile",
         name="Drop Status Reconcile",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        batch_release_tick,
+        trigger=CronTrigger(minute="*/1", timezone=KL_TZ),
+        id="batch_release_tick",
+        name="Batch Release Campaign Tick",
         replace_existing=True,
     )
     scheduler.add_job(
