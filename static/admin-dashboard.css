@@ -45,20 +45,70 @@ html, body {
   margin-bottom: 12px;
 }
 .nav-item {
-  display: block;
-  padding: 10px 20px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 9px 20px;
   color: var(--muted);
   cursor: pointer;
   border: none;
   background: none;
   width: 100%;
   text-align: left;
-  font-size: 14px;
+  font-size: 13px;
 }
 .nav-item:hover { background: var(--panel-2); color: var(--text); }
 .nav-item.active { color: var(--accent); border-left: 3px solid var(--accent); background: var(--panel-2); }
 .nav-item.disabled { opacity: 0.4; cursor: not-allowed; }
 .nav-item.disabled::after { content: " · soon"; font-size: 11px; }
+.nav-item-external { text-decoration: none; }
+
+/* Unified nav: legend + collapsible section groups */
+.nav-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 0 20px 14px;
+  margin-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+.nav-group { border-bottom: 1px solid var(--border); }
+.nav-group:last-child { border-bottom: none; }
+.nav-group-header {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  padding: 12px 20px 8px;
+  cursor: pointer;
+}
+.nav-group-header::before { content: "▾ "; color: var(--muted); }
+.nav-group.collapsed .nav-group-header::before { content: "▸ "; }
+.nav-group.collapsed .nav-group-body { display: none; }
+.nav-group-body { padding-bottom: 4px; }
+
+.badge {
+  display: inline-block;
+  flex-shrink: 0;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.2px;
+  white-space: nowrap;
+}
+.badge-live { background: rgba(255,107,107,0.16); color: var(--bad); }
+.badge-readonly { background: rgba(77,171,247,0.15); color: var(--accent-2); }
+.badge-legacy { background: rgba(139,147,167,0.18); color: var(--muted); }
+.badge-hidden { background: rgba(255,212,59,0.14); color: var(--warn); }
 
 /* Main */
 .main { flex: 1; padding: 24px 28px; overflow-x: hidden; }

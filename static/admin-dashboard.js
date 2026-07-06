@@ -2907,6 +2907,9 @@
     state.view = view;
     $all(".nav-item").forEach(function (b) { b.classList.toggle("active", b.dataset.view === view); });
     VIEWS.forEach(function (v) { $("#view-" + v).classList.toggle("hidden", v !== view); });
+    var activeBtn = document.querySelector('.nav-item[data-view="' + view + '"]');
+    var activeGroup = activeBtn && activeBtn.closest(".nav-group");
+    if (activeGroup) activeGroup.classList.remove("collapsed");
     var titles = {
       summary: "Executive Summary", funnel: "Activation Funnel", abuse: "Abuse Overview",
       campaigns: "Campaign Engine",
@@ -2971,6 +2974,12 @@
   function bind() {
     $all(".nav-item[data-view]").forEach(function (b) {
       b.addEventListener("click", function () { switchView(b.dataset.view); });
+    });
+    $all(".nav-group-header").forEach(function (h) {
+      h.addEventListener("click", function () {
+        var group = h.closest(".nav-group");
+        if (group) group.classList.toggle("collapsed");
+      });
     });
     $("#refresh-btn").addEventListener("click", function () { refreshCurrent(true); });
     $("#logout-btn").addEventListener("click", function () {
