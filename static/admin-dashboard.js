@@ -3142,6 +3142,187 @@
       }).catch(function (e) { banner("Failed to load compiled drops: " + e.message, "error"); });
   }
 
+  // ---------- Campaign Performance (P4) ----------
+  // Read-only analytics over campaign_builder_campaigns / drops / vouchers /
+  // voucher_claims via /api/admin/campaign-builder/performance/*. Never
+  // calls a mutating campaign-builder or drop-manager endpoint.
+  var cp = { selected: {} };
+
+  var CP_BADGE_CLASS = {
+    "High Quality": "pill active", "Good": "pill active",
+    "Neutral": "pill draft", "Risky": "pill", "Bad": "pill",
+  };
+
+  function cpApi(path) {
+    return fetch(path, { credentials: "same-origin", headers: { "Accept": "application/json" } }).then(function (r) {
+      if (r.status === 401) { window.location.href = "/static/admin-login.html"; throw new Error("unauthorized"); }
+      return r.json().then(function (j) { return { ok: r.ok, status: r.status, body: j }; });
+    });
+  }
+
+  function loadCampaignPerformance(force) {
+    if (force) { cp.selected = {}; }
+    $("#cp-detail-panel").classList.add("hidden");
+    $("#cp-compare-panel").classList.add("hidden");
+    var status = $("#cp-status").value || "active";
+    var windowVal = $("#cp-window").value || "all";
+    var sort = $("#cp-sort").value || "created_at";
+    var body = $("#cp-list-body");
+    body.innerHTML = '<div style="font-size:12px;color:var(--muted);">Loading…</div>';
+    cpApi("/api/admin/campaign-builder/performance?status=" + status + "&window=" + windowVal + "&sort=" + sort)
+      .then(function (res) {
+        if (!res.ok) { body.innerHTML = '<div class="banner error">Failed to load campaign performance.</div>'; return; }
+        var items = (res.body && res.body.campaigns) || [];
+        if (!items.length) {
+          body.innerHTML = '<p style="color:var(--muted);font-size:13px;padding:16px 0;">No campaigns match this filter.</p>';
+          return;
+        }
+        body.innerHTML = '<table class="data-table"><thead><tr>' +
+          '<th></th><th>Campaign</th><th>Status</th><th>Type</th><th>Total</th><th>Released</th><th>Claimed</th>' +
+          '<th>Claim Rate</th><th>Voucher Hunter %</th><th>Actual Player %</th><th>Score</th><th>Actions</th>' +
+          '</tr></thead><tbody>' +
+          items.map(function (c) {
+            var badgeCls = CP_BADGE_CLASS[c.badge] || "pill";
+            return '<tr>' +
+              '<td><input type="checkbox" class="cp-compare-check" data-id="' + esc(c.campaign_id) + '" ' + (cp.selected[c.campaign_id] ? "checked" : "") + ' /></td>' +
+              '<td>' + esc(c.campaign_name) + (c.is_batch ? ' <span class="pill">batch</span>' : '') + '</td>' +
+              '<td>' + esc(c.status) + '</td>' +
+              '<td>' + esc(c.campaign_type) + '</td>' +
+              '<td>' + fmt(c.total_vouchers) + '</td>' +
+              '<td>' + fmt(c.total_released) + '</td>' +
+              '<td>' + fmt(c.total_claimed) + '</td>' +
+              '<td>' + (c.claim_rate == null ? "—" : c.claim_rate + "%") + '</td>' +
+              '<td>' + (c.voucher_hunter_claim_share_pct == null ? "—" : c.voucher_hunter_claim_share_pct + "%") + '</td>' +
+              '<td>' + (c.actual_player_claim_share_pct == null ? "—" : c.actual_player_claim_share_pct + "%") + '</td>' +
+              '<td>' + c.campaign_score + ' <span class="' + badgeCls + '">' + esc(c.badge) + '</span></td>' +
+              '<td><button class="btn" onclick="cpViewDetails(' + JSON.stringify(c.campaign_id) + ')">View Details</button></td>' +
+              '</tr>';
+          }).join("") + '</tbody></table>';
+        $all(".cp-compare-check").forEach(function (cb) {
+          cb.addEventListener("change", function () {
+            if (cb.checked) cp.selected[cb.dataset.id] = true; else delete cp.selected[cb.dataset.id];
+          });
+        });
+      }).catch(function (e) { body.innerHTML = '<div class="banner error">Failed to load campaign performance.</div>'; banner("❌ " + e.message, "error"); });
+  }
+
+  function cpSegmentRows(quality) {
+    var labels = { high_value: "High Value", normal_actual: "Normal Actual", low_value: "Low Value", voucher_hunter: "Voucher Hunter", ghost: "Ghost", unknown: "Unknown" };
+    return Object.keys(labels).map(function (k) {
+      return '<tr><td>' + labels[k] + '</td><td>' + fmt(quality[k] || 0) + '</td></tr>';
+    }).join("") + (quality.unknown_reason ? '<tr><td colspan="2" style="font-size:11px;color:var(--muted);">unknown reason: ' + esc(quality.unknown_reason) + '</td></tr>' : "");
+  }
+
+  function cpNullable(obj) {
+    if (obj && typeof obj === "object" && "reason" in obj) return "Data Not Available (" + esc(obj.reason) + ")";
+    return fmt(obj);
+  }
+
+  function cpRenderDetail(p) {
+    var el = $("#cp-detail-panel");
+    el.classList.remove("hidden");
+    var v = p.volume, s = p.speed, a = p.abuse_risk, conv = p.conversion_proxy;
+    el.innerHTML =
+      '<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;">' +
+      '<h3 style="margin:0;">' + esc(p.campaign_name) + '</h3>' +
+      '<span class="' + (CP_BADGE_CLASS[p.badge] || "pill") + '">' + esc(p.badge) + ' (score ' + p.campaign_score + ')</span>' +
+      '<button class="btn" style="margin-left:auto;background:transparent;border:1px solid var(--border);" onclick="$(\'#cp-detail-panel\').classList.add(\'hidden\')">Close</button>' +
+      '</div>' +
+      '<div class="card-grid">' +
+      kpiCard("Total Vouchers", v.total_vouchers) + kpiCard("Released", v.total_released) +
+      kpiCard("Claimed", v.total_claimed) + kpiCard("Remaining", v.total_remaining) +
+      kpiCard("Claim Rate", v.claim_rate == null ? null : v.claim_rate + "%", null, v.claim_rate == null) +
+      kpiCard("Release Completion", v.release_completion_pct == null ? null : v.release_completion_pct + "%", null, v.release_completion_pct == null) +
+      '</div>' +
+      '<div class="section-title" style="margin-top:16px;font-size:13px;">Claim Speed</div>' +
+      '<div class="card-grid">' +
+      kpiCard("Time to First Claim (min)", s.time_to_first_claim_minutes, null, s.time_to_first_claim_minutes == null) +
+      kpiCard("Time to 50% Claimed (min)", s.time_to_50pct_claimed_minutes, null, s.time_to_50pct_claimed_minutes == null) +
+      kpiCard("Time to Sold Out (min)", s.time_to_sold_out_minutes, null, s.time_to_sold_out_minutes == null) +
+      kpiCard("Avg Claim Speed / Batch (min)", s.average_claim_speed_minutes, null, s.average_claim_speed_minutes == null) +
+      '</div>' +
+      '<div class="section-title" style="margin-top:16px;font-size:13px;">Segment Breakdown (Quality)</div>' +
+      '<table class="data-table"><tbody>' + cpSegmentRows(p.quality) + '</tbody></table>' +
+      '<div class="section-title" style="margin-top:16px;font-size:13px;">Abuse Risk</div>' +
+      '<table class="data-table"><tbody>' +
+      '<tr><td>Repeat Claimers</td><td>' + fmt(a.repeat_claimers) + '</td></tr>' +
+      '<tr><td>Same IP/Subnet Claims</td><td>' + fmt(a.same_ip_subnet_claims) + ' (' + fmt(a.same_ip_subnet_clusters) + ' clusters)</td></tr>' +
+      '<tr><td>Claim Cooldown Hits</td><td>' + cpNullable(a.claim_cooldown_hits) + '</td></tr>' +
+      '<tr><td>Voucher Hunter Claim Share</td><td>' + (a.voucher_hunter_claim_share_pct == null ? "—" : a.voucher_hunter_claim_share_pct + "%") + '</td></tr>' +
+      '<tr><td>Suspicious Claims</td><td>' + fmt(a.suspicious_claims) + (a.suspicious_claim_pct == null ? "" : " (" + a.suspicious_claim_pct + "%)") + '</td></tr>' +
+      '</tbody></table>' +
+      '<div class="section-title" style="margin-top:16px;font-size:13px;">Conversion Proxy</div>' +
+      '<table class="data-table"><tbody>' +
+      '<tr><td>Qualified After Claim</td><td>' + cpNullable(conv.qualified_after_claim) + '</td></tr>' +
+      '<tr><td>Referred After Claim</td><td>' + cpNullable(conv.referral_after_claim) + '</td></tr>' +
+      '<tr><td>Checked In After Claim</td><td>' + cpNullable(conv.checkin_after_claim) + '</td></tr>' +
+      '<tr><td>After Bet / Withdrawal</td><td>' + cpNullable(conv.after_bet_or_withdrawal) + '</td></tr>' +
+      '</tbody></table>' +
+      '<div class="section-title" style="margin-top:16px;font-size:13px;">Score Explanation</div>' +
+      '<table class="data-table"><tbody>' +
+      '<tr><td>Quality Score</td><td>' + fmt(p.score_breakdown.quality_score) + '</td></tr>' +
+      '<tr><td>Abuse Penalty</td><td>-' + fmt(p.score_breakdown.abuse_penalty) + '</td></tr>' +
+      '<tr><td>Conversion Bonus</td><td>+' + fmt(p.score_breakdown.conversion_bonus) + '</td></tr>' +
+      '<tr><td><strong>Campaign Score</strong></td><td><strong>' + fmt(p.campaign_score) + '</strong></td></tr>' +
+      '</tbody></table>' +
+      (p.child_drops && p.child_drops.length > 1
+        ? '<div class="section-title" style="margin-top:16px;font-size:13px;">Batch / Drop Breakdown</div>' +
+          '<table class="data-table"><thead><tr><th>#</th><th>Drop</th><th>Release Time</th><th>Total</th><th>Claimed</th><th>Remaining</th><th>Claim Rate</th><th>Voucher Hunter %</th></tr></thead><tbody>' +
+          p.child_drops.map(function (d) {
+            return '<tr><td>' + fmt(d.batch_index) + '</td><td>' + esc(d.drop_name) + '</td><td>' + esc(d.release_time || "—") +
+              '</td><td>' + fmt(d.total_codes) + '</td><td>' + fmt(d.claimed) + '</td><td>' + fmt(d.remaining) +
+              '</td><td>' + (d.claim_rate == null ? "—" : d.claim_rate + "%") + '</td><td>' + (d.voucher_hunter_share == null ? "—" : d.voucher_hunter_share + "%") + '</td></tr>';
+          }).join("") + '</tbody></table>'
+        : '');
+  }
+
+  window.cpViewDetails = function (id) {
+    var windowVal = $("#cp-window").value || "all";
+    var el = $("#cp-detail-panel");
+    el.classList.remove("hidden");
+    el.innerHTML = '<div style="font-size:12px;color:var(--muted);">Loading details…</div>';
+    cpApi("/api/admin/campaign-builder/performance/" + id + "?window=" + windowVal).then(function (res) {
+      if (!res.ok) { el.innerHTML = '<div class="banner error">Failed to load campaign details.</div>'; return; }
+      cpRenderDetail(res.body.performance);
+    }).catch(function (e) { el.innerHTML = '<div class="banner error">Failed to load campaign details.</div>'; banner("❌ " + e.message, "error"); });
+  };
+
+  (function bindCampaignPerformanceControls() {
+    ["cp-status", "cp-window", "cp-sort"].forEach(function (id) {
+      var el = document.getElementById(id);
+      if (el) el.addEventListener("change", function () { loadCampaignPerformance(false); });
+    });
+    var refreshBtn = document.getElementById("cp-refresh-btn");
+    if (refreshBtn) refreshBtn.addEventListener("click", function () { loadCampaignPerformance(true); });
+    var compareBtn = document.getElementById("cp-compare-btn");
+    if (compareBtn) compareBtn.addEventListener("click", function () {
+      var ids = Object.keys(cp.selected);
+      var panel = $("#cp-compare-panel");
+      if (ids.length < 2) { banner("Select at least 2 campaigns to compare.", "error"); return; }
+      panel.classList.remove("hidden");
+      panel.innerHTML = '<div style="font-size:12px;color:var(--muted);">Loading comparison…</div>';
+      var windowVal = $("#cp-window").value || "all";
+      cpApi("/api/admin/campaign-builder/performance/compare?campaign_ids=" + ids.join(",") + "&window=" + windowVal).then(function (res) {
+        if (!res.ok) { panel.innerHTML = '<div class="banner error">Failed to load comparison.</div>'; return; }
+        var rows = res.body.campaigns || [];
+        panel.innerHTML = '<div class="section-title" style="font-size:13px;margin-bottom:8px;">Comparison</div>' +
+          '<table class="data-table"><thead><tr><th>Metric</th>' + rows.map(function (r) { return '<th>' + esc(r.campaign_name) + '</th>'; }).join("") + '</tr></thead><tbody>' +
+          [
+            ["Status", function (r) { return esc(r.status); }],
+            ["Total Vouchers", function (r) { return fmt(r.volume.total_vouchers); }],
+            ["Released", function (r) { return fmt(r.volume.total_released); }],
+            ["Claimed", function (r) { return fmt(r.volume.total_claimed); }],
+            ["Claim Rate", function (r) { return r.volume.claim_rate == null ? "—" : r.volume.claim_rate + "%"; }],
+            ["Voucher Hunter Share", function (r) { return r.abuse_risk.voucher_hunter_claim_share_pct == null ? "—" : r.abuse_risk.voucher_hunter_claim_share_pct + "%"; }],
+            ["Suspicious Claims", function (r) { return fmt(r.abuse_risk.suspicious_claims); }],
+            ["Score", function (r) { return fmt(r.campaign_score) + " (" + esc(r.badge) + ")"; }],
+          ].map(function (row) {
+            return '<tr><td>' + row[0] + '</td>' + rows.map(function (r) { return '<td>' + row[1](r) + '</td>'; }).join("") + '</tr>';
+          }).join("") + '</tbody></table>';
+      }).catch(function (e) { panel.innerHTML = '<div class="banner error">Failed to load comparison.</div>'; banner("❌ " + e.message, "error"); });
+    });
+  })();
+
   window.cbDelete = function (id) {
     if (!confirm("Delete this draft campaign? Any drops it already compiled are NOT affected.")) return;
     cbApi("/api/admin/campaign-builder/campaigns/" + id, { method: "DELETE" }).then(function (res) {
@@ -3832,7 +4013,7 @@
     });
   }
 
-  var VIEWS =["summary", "funnel", "abuse", "campaignBuilder", "activeCampaigns", "draftCampaigns", "compiledDrops", "campaigns", "vouchers", "drops", "referrals", "affiliate", "affiliatePools", "affiliatePending", "reactivation", "audit", "segmentProbabilityConfig", "segmentRoi", "segments", "validation", "backendSegmentEngine", "voucherHunterAudit", "unclassifiedAudit", "segmentRuleSimulator", "voucherHunterQuality", "voucherHunterFalsePositive", "voucherHunterRuleSimulator", "vhPriorityImpact", "uploadPlayerPerformance", "uploadHistory", "rawExplorer", "users", "joinRequests", "xpAdjust", "settings"];
+  var VIEWS =["summary", "funnel", "abuse", "campaignBuilder", "campaignPerformance", "activeCampaigns", "draftCampaigns", "compiledDrops", "campaigns", "vouchers", "drops", "referrals", "affiliate", "affiliatePools", "affiliatePending", "reactivation", "audit", "segmentProbabilityConfig", "segmentRoi", "segments", "validation", "backendSegmentEngine", "voucherHunterAudit", "unclassifiedAudit", "segmentRuleSimulator", "voucherHunterQuality", "voucherHunterFalsePositive", "voucherHunterRuleSimulator", "vhPriorityImpact", "uploadPlayerPerformance", "uploadHistory", "rawExplorer", "users", "joinRequests", "xpAdjust", "settings"];
   function switchView(view) {
     state.view = view;
     $all(".nav-item").forEach(function (b) { b.classList.toggle("active", b.dataset.view === view); });
@@ -3842,7 +4023,7 @@
     if (activeGroup) activeGroup.classList.remove("collapsed");
     var titles = {
       summary: "Executive Summary", funnel: "Activation Funnel", abuse: "Abuse Overview",
-      campaignBuilder: "Campaign Builder (P2)", activeCampaigns: "Active Campaigns",
+      campaignBuilder: "Campaign Builder (P2)", campaignPerformance: "Campaign Performance (P4)", activeCampaigns: "Active Campaigns",
       draftCampaigns: "Draft Campaigns", compiledDrops: "Compiled Voucher Drops",
       campaigns: "Campaigns (Legacy Targeting)",
       vouchers: "Vouchers", drops: "Voucher Drops", referrals: "Referrals", affiliate: "Affiliate",
@@ -3873,6 +4054,7 @@
     else if (state.view === "funnel") loadFunnel(force);
     else if (state.view === "abuse") loadAbuse(force);
     else if (state.view === "campaignBuilder") loadCampaignBuilder(force);
+    else if (state.view === "campaignPerformance") loadCampaignPerformance(force);
     else if (state.view === "activeCampaigns") loadActiveCampaigns(force);
     else if (state.view === "draftCampaigns") loadDraftCampaigns(force);
     else if (state.view === "compiledDrops") loadCompiledDrops(force);
