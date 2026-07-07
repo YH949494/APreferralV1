@@ -175,12 +175,10 @@
       '<div class="attention-text"><strong>' + esc(title) + '</strong>' + (sub ? '<span>' + esc(sub) + '</span>' : '') + '</div></div>';
   }
 
-  function loadAttentionRequired() {
-    var el = $("#attention-required");
-    if (!el) return;
-    el.innerHTML = '<div class="attention-empty">Checking for issues…</div>';
-
-    Promise.all([
+  // Returns a Promise<[{sev, title, sub}]> — the raw signal list, shared by
+  // the Home "Attention Required" panel and the topbar notification bell.
+  function computeAttentionSignals() {
+    return Promise.all([
       fetch("/v2/miniapp/admin/pools/summary", { credentials: "same-origin", headers: { "Accept": "application/json" } })
         .then(function (r) { return r.json(); }).catch(function () { return null; }),
       cbApi("/api/admin/campaign-builder/campaigns?status=active").catch(function () { return { ok: false }; }),
@@ -188,30 +186,90 @@
         .then(function (r) { return r.json(); }).catch(function () { return null; }),
     ]).then(function (results) {
       var pools = results[0], activeCampaigns = results[1], affiliatePending = results[2];
-      var items = [];
+      var signals = [];
 
       if (pools && pools.items) {
         pools.items.filter(function (p) { return typeof p.available === "number" && p.available < 10; })
           .forEach(function (p) {
-            items.push(attentionItem("red", "Voucher pool low: " + p.pool_id, p.available + " code(s) remaining"));
+            signals.push({ sev: "red", title: "Voucher pool low: " + p.pool_id, sub: p.available + " code(s) remaining", view: "affiliatePools" });
           });
       }
 
       if (activeCampaigns && activeCampaigns.ok && activeCampaigns.body && activeCampaigns.body.campaigns) {
         activeCampaigns.body.campaigns.filter(function (c) { return c.batch_status === "paused"; })
           .forEach(function (c) {
-            items.push(attentionItem("yellow", "Campaign paused: " + c.campaign_name, "Batch release is paused — resume from Campaign Center"));
+            signals.push({ sev: "yellow", title: "Campaign paused: " + c.campaign_name, sub: "Batch release is paused — resume from Campaign Center", view: "activeCampaigns" });
           });
       }
 
       if (affiliatePending && affiliatePending.items && affiliatePending.items.length) {
-        items.push(attentionItem("yellow", affiliatePending.items.length + " affiliate reward(s) pending approval", "Review in Affiliate Center → Pending Approvals"));
+        signals.push({ sev: "yellow", title: affiliatePending.items.length + " affiliate reward(s) pending approval", sub: "Review in Affiliate Center → Pending Approvals", view: "affiliatePending" });
       }
 
-      el.innerHTML = items.length ? items.join("") : '<div class="attention-empty">✅ Nothing needs attention right now.</div>';
+      return signals;
+    });
+  }
+
+  function loadAttentionRequired() {
+    var el = $("#attention-required");
+    if (!el) return;
+    el.innerHTML = '<div class="attention-empty">Checking for issues…</div>';
+    computeAttentionSignals().then(function (signals) {
+      el.innerHTML = signals.length
+        ? signals.map(function (s) { return attentionItem(s.sev, s.title, s.sub); }).join("")
+        : '<div class="attention-empty">✅ Nothing needs attention right now.</div>';
     }).catch(function () {
       el.innerHTML = '<div class="attention-empty">Could not check for issues.</div>';
     });
+  }
+
+  // ---------- Notification bell (topbar) ----------
+  function refreshNotifBell() {
+    var countEl = $("#notif-count");
+    var dropdownEl = $("#notif-dropdown");
+    if (!countEl) return;
+    computeAttentionSignals().then(function (signals) {
+      lastNotifSignals = signals;
+      if (signals.length) {
+        countEl.textContent = signals.length > 9 ? "9+" : String(signals.length);
+        countEl.classList.remove("hidden");
+      } else {
+        countEl.classList.add("hidden");
+      }
+      if (dropdownEl && !dropdownEl.classList.contains("hidden")) renderNotifDropdown();
+    }).catch(function () { /* silent — bell is a passive convenience, not the source of truth */ });
+  }
+
+  var lastNotifSignals = [];
+  function renderNotifDropdown() {
+    var dropdownEl = $("#notif-dropdown");
+    if (!dropdownEl) return;
+    dropdownEl.innerHTML = lastNotifSignals.length
+      ? lastNotifSignals.map(function (s) {
+          return '<div class="attention-item sev-' + s.sev + '" onclick="goToViewAndClick(\'' + s.view + '\',\'\')" tabindex="0" role="button">' +
+            '<span class="attention-dot"></span><div class="attention-text"><strong>' + esc(s.title) + '</strong>' +
+            (s.sub ? '<span>' + esc(s.sub) + '</span>' : '') + '</div></div>';
+        }).join("")
+      : '<div class="attention-empty">✅ Nothing needs attention right now.</div>';
+  }
+
+  function bindNotifBell() {
+    var bell = $("#notif-bell");
+    var dropdownEl = $("#notif-dropdown");
+    if (!bell || !dropdownEl) return;
+    bell.addEventListener("click", function (e) {
+      e.stopPropagation();
+      var opening = dropdownEl.classList.contains("hidden");
+      dropdownEl.classList.toggle("hidden", !opening);
+      if (opening) renderNotifDropdown();
+    });
+    document.addEventListener("click", function (e) {
+      if (!dropdownEl.classList.contains("hidden") && !dropdownEl.contains(e.target) && e.target !== bell) {
+        dropdownEl.classList.add("hidden");
+      }
+    });
+    refreshNotifBell();
+    setInterval(refreshNotifBell, 90000);
   }
 
   // ---------- Summary ----------
@@ -384,7 +442,45 @@
   }
 
   function statePanel(elId, kind, msg) {
-    $("#" + elId).innerHTML = '<div class="' + kind + '">' + esc(msg) + "</div>";
+    var el = $("#" + elId);
+    if (!el) return;
+    if (kind === "loading") {
+      var rows = "";
+      for (var i = 0; i < 3; i++) rows += '<div class="skeleton-row"><div class="skeleton"></div><div class="skeleton"></div></div>';
+      el.innerHTML = '<div class="skeleton-stack" aria-busy="true" aria-label="' + esc(msg || "Loading") + '">' + rows + "</div>";
+      return;
+    }
+    if (kind === "empty") {
+      el.innerHTML = emptyState(msg);
+      return;
+    }
+    el.innerHTML = '<div class="' + kind + '">' + esc(msg) + "</div>";
+  }
+
+  // Empty-state CTAs may live on a different nav view than the one currently
+  // shown (e.g. "No active campaigns" shown on Overview, but the create
+  // wizard lives under Create Campaign) — navigate there first, then click.
+  window.goToViewAndClick = function (view, btnId) {
+    var navBtn = document.querySelector('.nav-item[data-view="' + view + '"]');
+    if (navBtn) navBtn.click();
+    setTimeout(function () {
+      var b = document.getElementById(btnId);
+      if (b) b.click();
+    }, 60);
+  };
+
+  // title/subtitle/CTA empty state; accepts a plain string (legacy callers) or
+  // { icon, title, sub, ctaHtml } for a richer empty state with an action button.
+  function emptyState(msg) {
+    if (typeof msg === "string" || !msg) {
+      return '<div class="empty-state"><div class="empty-state-icon">' + (msg && /fail|error/i.test(msg) ? "⚠" : "✅") + '</div>' +
+        '<div class="empty-state-sub">' + esc(msg || "Nothing here yet.") + '</div></div>';
+    }
+    return '<div class="empty-state">' +
+      '<div class="empty-state-icon">' + esc(msg.icon || "✅") + '</div>' +
+      '<div class="empty-state-title">' + esc(msg.title || "") + '</div>' +
+      (msg.sub ? '<div class="empty-state-sub">' + esc(msg.sub) + '</div>' : "") +
+      (msg.ctaHtml || "") + '</div>';
   }
 
   function expandTable(headers, rows) {
@@ -2894,7 +2990,10 @@
       var body = $("#campaigns-list-body");
       var items = data.campaigns || [];
       if (!items.length) {
-        body.innerHTML = '<p style="color:var(--muted);font-size:13px;padding:16px 0;">No campaigns found. Click <strong>+ New Campaign</strong> to create one.</p>';
+        body.innerHTML = emptyState({
+          icon: "📋", title: "No campaigns yet", sub: "Create your first campaign to start targeting players.",
+          ctaHtml: '<button class="btn primary" onclick="document.getElementById(\'campaigns-new-btn\').click()">+ Create Campaign</button>',
+        });
         return;
       }
       body.innerHTML = items.map(function (c) {
@@ -2913,7 +3012,7 @@
           (c.description ? '<div style="font-size:12px;color:var(--muted);margin-top:6px;">' + esc(c.description) + '</div>' : '') +
           '<div class="campaign-card-actions">' +
           '<button class="btn" onclick="editCampaign(' + JSON.stringify(c.id) + ')">Edit</button>' +
-          '<button class="btn" style="background:transparent;border:1px solid var(--border);" onclick="archiveCampaign(' + JSON.stringify(c.id) + ', ' + JSON.stringify(c.name) + ')">Archive</button>' +
+          '<button class="btn danger" onclick="archiveCampaign(' + JSON.stringify(c.id) + ', ' + JSON.stringify(c.name) + ')">Archive</button>' +
           '</div></div>';
       }).join("");
     }).catch(function (e) {
@@ -3089,7 +3188,10 @@
       var body = $("#cb-draft-list-body");
       var items = (res.body && res.body.campaigns) || [];
       if (!items.length) {
-        body.innerHTML = '<p style="color:var(--muted);font-size:13px;padding:16px 0;">No drafts. Click <strong>+ New Campaign</strong> to start the wizard.</p>';
+        body.innerHTML = emptyState({
+          icon: "📝", title: "No drafts in progress", sub: "Start the campaign wizard to create one.",
+          ctaHtml: '<button class="btn primary" onclick="document.getElementById(\'cb-new-btn\').click()">+ New Campaign</button>',
+        });
         return;
       }
       body.innerHTML = items.map(function (c) {
@@ -3125,7 +3227,12 @@
   function _cbRenderCampaignList(elId, items, status) {
     var body = $("#" + elId);
     if (!items.length) {
-      body.innerHTML = '<p style="color:var(--muted);font-size:13px;padding:16px 0;">No ' + status + ' campaigns.</p>';
+      body.innerHTML = status === "active"
+        ? emptyState({
+            icon: "🚀", title: "No active campaigns", sub: "Create your first campaign to start reaching players.",
+            ctaHtml: '<button class="btn primary" onclick="goToViewAndClick(\'campaignBuilder\',\'cb-new-btn\')">+ Create Campaign</button>',
+          })
+        : emptyState("No " + status + " campaigns.");
       return;
     }
     body.innerHTML = items.map(function (c) {
@@ -3150,17 +3257,17 @@
           : '') +
         (status === "draft"
           ? '<div class="campaign-card-actions"><button class="btn" onclick="cbResume(' + JSON.stringify(c.id) + ')">Resume</button>' +
-            '<button class="btn" style="background:transparent;border:1px solid var(--border);" onclick="cbDelete(' + JSON.stringify(c.id) + ')">Delete</button></div>'
+            '<button class="btn danger" onclick="cbDelete(' + JSON.stringify(c.id) + ')">Delete</button></div>'
           : '') +
         (isBatch && status === "active"
           ? '<div class="campaign-card-actions">' +
             (c.batch_status === "scheduled" || c.batch_status === "active"
-              ? '<button class="btn" onclick="cbPauseBatch(this,' + JSON.stringify(c.id) + ')">Pause</button>' +
-                '<button class="btn" onclick="cbReleaseNextBatch(this,' + JSON.stringify(c.id) + ')">Release Next Now</button>'
+              ? '<button class="btn danger" onclick="cbPauseBatch(this,' + JSON.stringify(c.id) + ')">Pause</button>' +
+                '<button class="btn primary" onclick="cbReleaseNextBatch(this,' + JSON.stringify(c.id) + ')">Release Next Now</button>'
               : '') +
-            (c.batch_status === "paused" ? '<button class="btn" onclick="cbResumeBatch(this,' + JSON.stringify(c.id) + ')">Resume</button>' : '') +
+            (c.batch_status === "paused" ? '<button class="btn primary" onclick="cbResumeBatch(this,' + JSON.stringify(c.id) + ')">Resume</button>' : '') +
             (["scheduled", "active", "paused"].indexOf(c.batch_status) >= 0
-              ? '<button class="btn" style="background:transparent;border:1px solid var(--border);" onclick="cbCancelBatch(this,' + JSON.stringify(c.id) + ')">Cancel</button>'
+              ? '<button class="btn danger" onclick="cbCancelBatch(this,' + JSON.stringify(c.id) + ')">Cancel</button>'
               : '') +
             '<button class="btn" style="background:transparent;border:1px solid var(--border);" onclick="cbToggleBatchAnalytics(this,' + JSON.stringify(c.id) + ')">Analytics</button>' +
             '</div><div id="cb-analytics-' + esc(c.id) + '" class="hidden" style="margin-top:10px;"></div>'
@@ -4021,7 +4128,7 @@
             "<td>" +
             '<button class="btn" data-drop-op="start_now" data-drop-id="' + esc(d.dropId) + '">Start</button> ' +
             '<button class="btn" data-drop-op="pause" data-drop-id="' + esc(d.dropId) + '">Pause</button> ' +
-            '<button class="btn" data-drop-op="end_now" data-drop-id="' + esc(d.dropId) + '">End</button>' +
+            '<button class="btn danger" data-drop-op="end_now" data-drop-id="' + esc(d.dropId) + '">End</button>' +
             "</td></tr>";
         }).join("");
         $("#drops-list-body").innerHTML =
@@ -4154,13 +4261,30 @@
       .then(function (r) { return r.json(); })
       .then(function (data) {
         var items = data.items || [];
-        var rows = items.map(function (p) {
-          return "<tr><td>" + esc(p.pool_id) + "</td><td>" + fmt(p.available) + "</td><td>" + fmt(p.issued) + "</td>" +
-            "<td>" + esc(p.display_label || "—") + "</td><td>" + esc(p.value_hint || "—") + "</td><td>" + esc(p.currency || "—") + "</td></tr>";
-        }).join("");
-        $("#affiliate-pools-summary-body").innerHTML =
-          '<table class="data-table"><thead><tr><th>Pool</th><th>Available</th><th>Issued</th><th>Label</th><th>Value Hint</th><th>Currency</th></tr></thead><tbody>' +
-          rows + "</tbody></table>";
+        if (!items.length) {
+          $("#affiliate-pools-summary-body").innerHTML = emptyState("No voucher pools configured yet.");
+          return;
+        }
+        $("#affiliate-pools-summary-body").innerHTML = '<div class="card-grid">' + items.map(function (p) {
+          var available = p.available || 0;
+          var issued = p.issued || 0;
+          var total = available + issued;
+          var pctIssued = total > 0 ? Math.round((issued / total) * 100) : 0;
+          var sev = available < 10 ? "red" : (available < 50 ? "yellow" : "green");
+          return '<div class="kpi">' +
+            '<div style="display:flex;justify-content:space-between;align-items:center;">' +
+            '<div class="label">' + esc(p.pool_id) + '</div>' +
+            '<span class="pill ' + (sev === "red" ? "rejected" : sev === "yellow" ? "pending" : "approved") + '">' +
+            (sev === "red" ? "Low" : sev === "yellow" ? "Watch" : "Healthy") + '</span>' +
+            '</div>' +
+            '<div class="value">' + fmt(available) + '</div>' +
+            '<div class="sub">available · ' + fmt(issued) + ' issued</div>' +
+            '<div class="progress-row"><div class="bar-wrap"><div class="bar" style="width:' + pctIssued + '%;"></div></div>' +
+            '<div class="progress-label">' + pctIssued + '% used</div></div>' +
+            '<div class="sub" style="margin-top:8px;">' + esc(p.display_label || "—") +
+            (p.value_hint ? " · " + esc(p.value_hint) : "") + (p.currency ? " " + esc(p.currency) : "") + '</div>' +
+            '</div>';
+        }).join("") + '</div>';
       })
       .catch(function (e) { statePanel("affiliate-pools-summary-body", "error", "Failed to load pool summary: " + e.message); });
   }
@@ -4221,8 +4345,8 @@
             "<td>" + fmt(it.qualified_month) + "</td>" +
             "<td>" + esc((it.risk_flags || []).join(", ") || "—") + "</td>" +
             "<td>" +
-            '<button class="btn" data-affp-op="approve" data-ledger-id="' + esc(it.ledger_id) + '">Approve</button> ' +
-            '<button class="btn" data-affp-op="reject" data-ledger-id="' + esc(it.ledger_id) + '">Reject</button>' +
+            '<button class="btn primary" data-affp-op="approve" data-ledger-id="' + esc(it.ledger_id) + '">Approve</button> ' +
+            '<button class="btn danger" data-affp-op="reject" data-ledger-id="' + esc(it.ledger_id) + '">Reject</button>' +
             "</td></tr>";
         }).join("");
         $("#affp-body").innerHTML =
@@ -4436,6 +4560,7 @@
       fetch("/api/admin/auth/logout", { method: "POST", credentials: "same-origin" })
         .finally(function () { window.location.href = "/admin"; });
     });
+    bindNotifBell();
     bindCampaigns();
     bindCampaignBuilder();
     bindDrops();

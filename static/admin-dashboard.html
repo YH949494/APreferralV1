@@ -126,6 +126,12 @@
           <div class="note" id="dashboard-meta"></div>
         </div>
         <div class="right">
+          <div class="notif-wrap">
+            <button class="notif-bell" id="notif-bell" aria-label="Notifications" title="Notifications">
+              🔔<span class="notif-count hidden" id="notif-count">0</span>
+            </button>
+            <div class="notif-dropdown hidden" id="notif-dropdown"></div>
+          </div>
           <span class="admin-chip" id="admin-chip">…</span>
           <button class="btn" id="refresh-btn">↻ Refresh</button>
           <button class="btn" id="logout-btn">Logout</button>
@@ -313,7 +319,7 @@
 
             <div style="display:flex;gap:8px;margin-bottom:16px;">
               <button class="btn" id="ce-preview-btn">Preview Audience</button>
-              <button class="btn" id="ce-save-btn">Save Campaign</button>
+              <button class="btn primary" id="ce-save-btn">Save Campaign</button>
               <button class="btn" id="ce-cancel-btn" style="background:transparent;border:1px solid var(--border);">Cancel</button>
             </div>
 
@@ -455,7 +461,7 @@
             </div>
 
             <div style="display:flex;gap:8px;margin-top:20px;border-top:1px solid var(--border);padding-top:16px;">
-              <button class="btn" id="cb-save-draft-btn">Save Draft</button>
+              <button class="btn primary" id="cb-save-draft-btn">Save Draft</button>
               <button class="btn" id="cb-back-btn" style="background:transparent;border:1px solid var(--border);">Back to list</button>
             </div>
           </div>
@@ -710,7 +716,7 @@
         <div class="controls" style="margin-bottom:16px;">
           <input class="filter-input" id="reactivation-per-run-limit" type="number" min="1" max="1000" value="100" style="max-width:160px;margin:0;" />
           <button class="btn primary" id="reactivation-start-btn">Start Campaign</button>
-          <button class="btn" id="reactivation-pause-btn">Pause Campaign</button>
+          <button class="btn danger" id="reactivation-pause-btn">Pause Campaign</button>
           <span class="admin-chip" id="reactivation-status">...</span>
           <span class="admin-chip" id="reactivation-limit-status">Limit: 100</span>
         </div>
