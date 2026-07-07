@@ -18,6 +18,21 @@ def _mk_drop(now):
     }
 
 
+def _mk_regular_drop(now):
+    return {
+        "_id": "drop-regular",
+        "name": "Regular Voucher",
+        "type": "pooled",
+        "status": "active",
+        "startsAt": now - timedelta(minutes=5),
+        "endsAt": now + timedelta(minutes=5),
+        "public_remaining": 10,
+        "my_remaining": 0,
+        "audience": "public",
+        "reserve_enabled": False,
+    }
+
+
 class C:
     def __init__(self, docs=None): self.docs = docs or []
     def find_one(self, q=None, proj=None):
@@ -86,6 +101,31 @@ def test_claimed_visible_endpoint_within_3_days_and_hidden_after():
         with app.app_context():
             cards2, _ = m.user_visible_drops({"usernameLower": "u", "userId": "42"}, now, tg_user={"id": 42, "username": "u"})
         assert cards2 == []
+    finally:
+        m.welcome_eligibility, m.get_welcome_reward_progress, m.get_active_drops, m.voucher_claims_col, m.load_user_context, m.is_drop_allowed, m.is_user_eligible_for_drop, m.users_collection, m._pooled_claimability_state = orig
+
+
+def test_non_welcome_claimed_voucher_visibility_unaffected_by_age():
+    now = datetime.now(timezone.utc)
+    app = Flask(__name__)
+    orig = m.welcome_eligibility, m.get_welcome_reward_progress, m.get_active_drops, m.voucher_claims_col, m.load_user_context, m.is_drop_allowed, m.is_user_eligible_for_drop, m.users_collection, m._pooled_claimability_state
+    try:
+        m.welcome_eligibility = lambda *_a, **_k: (True, "ok", {})
+        m.get_welcome_reward_progress = lambda *_a, **_k: {"eligible": False, "unlocked": False, "expired": False, "hide": True, "channel_joined": True, "checkins_completed": 0, "checkins_required": 3, "eligible_until": None, "days_remaining": 0}
+        m.get_active_drops = lambda _r: [_mk_regular_drop(now)]
+        m.users_collection = C([{"user_id": 42, "region": "th"}])
+        m.load_user_context = lambda **_k: {}
+        m.is_drop_allowed = lambda *a, **k: True
+        m.is_user_eligible_for_drop = lambda *a, **k: True
+        m._pooled_claimability_state = lambda **_k: {"claimable": True, "sold_out": False, "remaining": 1}
+
+        # Claimed long ago (well beyond WELCOME_CLAIMED_VISIBLE_DAYS) but not a Welcome/new_joiner drop.
+        m.voucher_claims_col = C([{"drop_id": "drop-regular", "user_id": 42, "status": "claimed", "voucher_code": "REG-OLD", "claimed_at": now - timedelta(days=30)}])
+        with app.app_context():
+            cards, _ = m.user_visible_drops({"usernameLower": "u", "userId": "42"}, now, tg_user={"id": 42, "username": "u"})
+        assert len(cards) == 1
+        assert cards[0].get("code") == "REG-OLD"
+        assert cards[0].get("state") == "claimed"
     finally:
         m.welcome_eligibility, m.get_welcome_reward_progress, m.get_active_drops, m.voucher_claims_col, m.load_user_context, m.is_drop_allowed, m.is_user_eligible_for_drop, m.users_collection, m._pooled_claimability_state = orig
 
