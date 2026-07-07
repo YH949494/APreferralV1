@@ -21,127 +21,100 @@
 
       <!-- 1. HOME -->
       <div class="nav-group" data-group="home">
-        <button class="nav-group-header" data-group-toggle="home">1 · Home</button>
+        <button class="nav-group-header" data-group-toggle="home">🏠 Home</button>
         <div class="nav-group-body">
           <button class="nav-item active" data-view="summary">Executive Summary <span class="badge badge-readonly">Read Only</span></button>
         </div>
       </div>
 
-      <!-- 2. CAMPAIGN CONTROL -->
-      <div class="nav-group" data-group="campaign-control">
-        <button class="nav-group-header" data-group-toggle="campaign-control">2 · Campaign Control</button>
+      <!-- 2. CAMPAIGN CENTER -->
+      <div class="nav-group" data-group="campaign-center">
+        <button class="nav-group-header" data-group-toggle="campaign-center">🚀 Campaign Center</button>
         <div class="nav-group-body">
-          <button class="nav-item" data-view="campaignBuilder">Campaign Builder <span class="badge badge-live">Live Control</span></button>
-          <button class="nav-item" data-view="campaignPerformance">Campaign Performance <span class="badge badge-readonly">Read Only</span></button>
-          <button class="nav-item" data-view="campaignIntelligence">Campaign Intelligence <span class="badge badge-readonly">Read Only</span></button>
-          <button class="nav-item" data-view="activeCampaigns">Active Campaigns <span class="badge badge-readonly">Read Only</span></button>
-          <button class="nav-item" data-view="draftCampaigns">Draft Campaigns <span class="badge badge-readonly">Read Only</span></button>
+          <button class="nav-item" data-view="activeCampaigns">Overview — Running <span class="badge badge-readonly">Read Only</span></button>
+          <button class="nav-item" data-view="campaignBuilder">Create Campaign <span class="badge badge-live">Live Control</span></button>
+          <button class="nav-item" data-view="draftCampaigns">Drafts <span class="badge badge-readonly">Read Only</span></button>
+          <button class="nav-item" data-view="campaignPerformance">Performance <span class="badge badge-readonly">Read Only</span></button>
+          <button class="nav-item" data-view="campaignIntelligence">Intelligence <span class="badge badge-readonly">Read Only</span></button>
           <button class="nav-item" data-view="compiledDrops">Compiled Voucher Drops <span class="badge badge-readonly">Read Only</span></button>
-          <button class="nav-item" data-view="campaigns">Campaigns (Legacy Targeting) <span class="badge badge-live">Live Control</span></button>
-          <button class="nav-item" data-view="vouchers">Vouchers Overview <span class="badge badge-readonly">Read Only</span></button>
-          <button class="nav-item" data-view="drops">Voucher Drop Manager <span class="badge badge-live">Live Control</span></button>
-          <a href="/static/index.html#admin-panel" class="nav-item nav-item-external" target="_blank" rel="noopener">
-            Legacy MiniApp Admin ↗ <span class="badge badge-legacy">Legacy</span>
-          </a>
+          <button class="nav-item" data-view="campaigns">Advanced ▾ Legacy Targeting <span class="badge badge-live">Live Control</span></button>
+          <button class="nav-item" data-view="vouchers">Advanced ▾ Vouchers Overview <span class="badge badge-readonly">Read Only</span></button>
         </div>
       </div>
 
-      <!-- 3. COMMUNITY DASHBOARD -->
-      <div class="nav-group" data-group="community-dashboard">
-        <button class="nav-group-header" data-group-toggle="community-dashboard">3 · Community Dashboard</button>
+      <!-- 3. COMMUNITY CENTER -->
+      <div class="nav-group" data-group="community-center">
+        <button class="nav-group-header" data-group-toggle="community-center">👥 Community Center</button>
         <div class="nav-group-body">
           <button class="nav-item" data-view="referrals">Referrals <span class="badge badge-readonly">Read Only</span></button>
-          <button class="nav-item" data-view="audit">Audit <span class="badge badge-readonly">Read Only</span></button>
-          <button class="nav-item" data-view="users">User Drilldown <span class="badge badge-readonly">Read Only</span></button>
-          <button class="nav-item" data-view="joinRequests">Join Requests <span class="badge badge-readonly">Read Only</span></button>
-          <a href="/static/index.html#admin-panel" class="nav-item nav-item-external" target="_blank" rel="noopener">
-            Legacy MiniApp Admin ↗ <span class="badge badge-legacy">Legacy</span>
-          </a>
-        </div>
-      </div>
-
-      <!-- 4. FUNNEL -->
-      <div class="nav-group" data-group="funnel">
-        <button class="nav-group-header" data-group-toggle="funnel">4 · Funnel</button>
-        <div class="nav-group-body">
           <button class="nav-item" data-view="funnel">Activation Funnel <span class="badge badge-readonly">Read Only</span></button>
-          <a href="/static/funnel-dashboard.html" class="nav-item nav-item-external" target="_blank" rel="noopener">
-            Funnel Dashboard (standalone) ↗ <span class="badge badge-legacy">Legacy</span>
-          </a>
+          <button class="nav-item" data-view="audit">Audit <span class="badge badge-readonly">Read Only</span></button>
+          <button class="nav-item" data-view="joinRequests">Join Requests <span class="badge badge-readonly">Read Only</span></button>
         </div>
       </div>
 
-      <!-- 5. REACTIVATION -->
-      <div class="nav-group" data-group="reactivation">
-        <button class="nav-group-header" data-group-toggle="reactivation">5 · Reactivation</button>
+      <!-- 4. AFFILIATE CENTER -->
+      <div class="nav-group" data-group="affiliate-center">
+        <button class="nav-group-header" data-group-toggle="affiliate-center">💰 Affiliate Center</button>
+        <div class="nav-group-body">
+          <button class="nav-item" data-view="affiliate">Overview <span class="badge badge-readonly">Read Only</span></button>
+          <button class="nav-item" data-view="affiliatePending">Pending Approvals <span class="badge badge-live">Live Control</span></button>
+          <button class="nav-item" data-view="affiliatePools">Voucher Pools <span class="badge badge-live">Live Control</span></button>
+        </div>
+      </div>
+
+      <!-- 5. REACTIVATION CENTER -->
+      <div class="nav-group" data-group="reactivation-center">
+        <button class="nav-group-header" data-group-toggle="reactivation-center">♻ Reactivation Center</button>
         <div class="nav-group-body">
           <button class="nav-item" data-view="reactivation">Channel Reactivation <span class="badge badge-live">Live Control</span></button>
         </div>
       </div>
 
-      <!-- 6. AFFILIATE -->
-      <div class="nav-group" data-group="affiliate">
-        <button class="nav-group-header" data-group-toggle="affiliate">6 · Affiliate</button>
+      <!-- 6. USER INTELLIGENCE -->
+      <div class="nav-group" data-group="user-intelligence">
+        <button class="nav-group-header" data-group-toggle="user-intelligence">👤 User Intelligence</button>
         <div class="nav-group-body">
-          <button class="nav-item" data-view="affiliate">Affiliate Dashboard <span class="badge badge-readonly">Read Only</span></button>
-          <button class="nav-item" data-view="affiliatePools">Affiliate Voucher Pools <span class="badge badge-live">Live Control</span></button>
-          <button class="nav-item" data-view="affiliatePending">Pending Affiliate Rewards <span class="badge badge-live">Live Control</span></button>
-          <a href="/static/index.html#admin-panel" class="nav-item nav-item-external" target="_blank" rel="noopener">
-            Legacy MiniApp Admin ↗ <span class="badge badge-legacy">Legacy</span>
-          </a>
-        </div>
-      </div>
-
-      <!-- 7. SEGMENTS -->
-      <div class="nav-group" data-group="segments">
-        <button class="nav-group-header" data-group-toggle="segments">7 · Segments</button>
-        <div class="nav-group-body">
-          <button class="nav-item" data-view="segments">Segment Overview <span class="badge badge-readonly">Read Only</span></button>
-          <button class="nav-item" data-view="segmentProbabilityConfig">Segment Probability Config <span class="badge badge-readonly">Read Only</span></button>
+          <button class="nav-item" data-view="segments">Segments <span class="badge badge-readonly">Read Only</span></button>
+          <button class="nav-item" data-view="users">Search User <span class="badge badge-readonly">Read Only</span></button>
           <button class="nav-item" data-view="segmentRoi">Segment ROI <span class="badge badge-readonly">Read Only</span></button>
+          <button class="nav-item" data-view="segmentProbabilityConfig">Segment Probability Config <span class="badge badge-readonly">Read Only</span></button>
         </div>
       </div>
 
-      <!-- 8. ABUSE & RISK -->
-      <div class="nav-group" data-group="abuse-risk">
-        <button class="nav-group-header" data-group-toggle="abuse-risk">8 · Abuse &amp; Risk</button>
+      <!-- 7. RISK & ABUSE -->
+      <div class="nav-group" data-group="risk-abuse">
+        <button class="nav-group-header" data-group-toggle="risk-abuse">🛡 Risk &amp; Abuse</button>
         <div class="nav-group-body">
           <button class="nav-item" data-view="abuse">Abuse Overview <span class="badge badge-readonly">Read Only</span></button>
-          <button class="nav-item" data-view="xpAdjust">Add / Reduce XP <span class="badge badge-live">Live Control</span></button>
           <button class="nav-item" data-view="voucherHunterAudit">Voucher Hunter Mismatch <span class="badge badge-readonly">Read Only</span></button>
           <button class="nav-item" data-view="unclassifiedAudit">Unclassified Audit <span class="badge badge-readonly">Read Only</span></button>
-          <button class="nav-item" data-view="voucherHunterQuality">VH Rule Quality <span class="badge badge-readonly">Read Only</span></button>
-          <button class="nav-item" data-view="voucherHunterFalsePositive">VH False Positive <span class="badge badge-readonly">Read Only</span></button>
-          <button class="nav-item" data-view="segmentRuleSimulator">Segment Rule Simulator <span class="badge badge-hidden">Hidden Tool</span></button>
-          <button class="nav-item" data-view="voucherHunterRuleSimulator">VH Rule Simulator <span class="badge badge-hidden">Hidden Tool</span></button>
-          <button class="nav-item" data-view="vhPriorityImpact">VH Priority Impact <span class="badge badge-hidden">Hidden Tool</span></button>
-        </div>
-      </div>
-
-      <!-- 9. VALIDATION -->
-      <div class="nav-group" data-group="validation">
-        <button class="nav-group-header" data-group-toggle="validation">9 · Validation</button>
-        <div class="nav-group-body">
           <button class="nav-item" data-view="validation">Validation / UIM Compare <span class="badge badge-readonly">Read Only</span></button>
+          <button class="nav-item" data-view="xpAdjust">Add / Reduce XP <span class="badge badge-live">Live Control</span></button>
+          <button class="nav-item" data-view="voucherHunterQuality">Advanced ▾ VH Rule Quality <span class="badge badge-hidden">Hidden Tool</span></button>
+          <button class="nav-item" data-view="voucherHunterFalsePositive">Advanced ▾ VH False Positive <span class="badge badge-hidden">Hidden Tool</span></button>
+          <button class="nav-item" data-view="segmentRuleSimulator">Advanced ▾ Segment Rule Simulator <span class="badge badge-hidden">Hidden Tool</span></button>
+          <button class="nav-item" data-view="voucherHunterRuleSimulator">Advanced ▾ VH Rule Simulator <span class="badge badge-hidden">Hidden Tool</span></button>
+          <button class="nav-item" data-view="vhPriorityImpact">Advanced ▾ VH Priority Impact <span class="badge badge-hidden">Hidden Tool</span></button>
         </div>
       </div>
 
-      <!-- 10. AUTOMATION -->
-      <div class="nav-group" data-group="automation">
-        <button class="nav-group-header" data-group-toggle="automation">10 · Automation</button>
+      <!-- 8. OPERATIONS -->
+      <div class="nav-group" data-group="operations">
+        <button class="nav-group-header" data-group-toggle="operations">⚙ Operations</button>
         <div class="nav-group-body">
+          <button class="nav-item" data-view="drops">Voucher Drop Manager <span class="badge badge-live">Live Control</span></button>
           <button class="nav-item" data-view="backendSegmentEngine">Backend Segment Engine <span class="badge badge-live">Live Control</span></button>
           <button class="nav-item" data-view="uploadPlayerPerformance">Upload Player Performance <span class="badge badge-live">Live Control</span></button>
           <button class="nav-item" data-view="uploadHistory">Upload History <span class="badge badge-readonly">Read Only</span></button>
           <button class="nav-item" data-view="rawExplorer">Raw Data Explorer <span class="badge badge-readonly">Read Only</span></button>
-        </div>
-      </div>
-
-      <!-- 11. ADMIN SETTINGS -->
-      <div class="nav-group" data-group="admin-settings">
-        <button class="nav-group-header" data-group-toggle="admin-settings">11 · Admin Settings</button>
-        <div class="nav-group-body">
           <button class="nav-item" data-view="settings">Settings <span class="badge badge-readonly">Read Only</span></button>
+          <a href="/static/index.html#admin-panel" class="nav-item nav-item-external" target="_blank" rel="noopener">
+            Legacy MiniApp Admin ↗ <span class="badge badge-legacy">Legacy</span>
+          </a>
+          <a href="/static/funnel-dashboard.html" class="nav-item nav-item-external" target="_blank" rel="noopener">
+            Funnel Dashboard (standalone) ↗ <span class="badge badge-legacy">Legacy</span>
+          </a>
         </div>
       </div>
     </nav>
@@ -153,6 +126,12 @@
           <div class="note" id="dashboard-meta"></div>
         </div>
         <div class="right">
+          <div class="notif-wrap">
+            <button class="notif-bell" id="notif-bell" aria-label="Notifications" title="Notifications">
+              🔔<span class="notif-count hidden" id="notif-count">0</span>
+            </button>
+            <div class="notif-dropdown hidden" id="notif-dropdown"></div>
+          </div>
           <span class="admin-chip" id="admin-chip">…</span>
           <button class="btn" id="refresh-btn">↻ Refresh</button>
           <button class="btn" id="logout-btn">Logout</button>
@@ -169,6 +148,10 @@
             <button data-window="7d" class="active">7d</button>
             <button data-window="30d">30d</button>
           </div>
+        </div>
+        <div class="section">
+          <div class="section-title">⚠ Attention Required</div>
+          <div class="attention-list" id="attention-required"></div>
         </div>
         <div class="section">
           <div class="section-title">Users</div>
@@ -336,7 +319,7 @@
 
             <div style="display:flex;gap:8px;margin-bottom:16px;">
               <button class="btn" id="ce-preview-btn">Preview Audience</button>
-              <button class="btn" id="ce-save-btn">Save Campaign</button>
+              <button class="btn primary" id="ce-save-btn">Save Campaign</button>
               <button class="btn" id="ce-cancel-btn" style="background:transparent;border:1px solid var(--border);">Cancel</button>
             </div>
 
@@ -478,7 +461,7 @@
             </div>
 
             <div style="display:flex;gap:8px;margin-top:20px;border-top:1px solid var(--border);padding-top:16px;">
-              <button class="btn" id="cb-save-draft-btn">Save Draft</button>
+              <button class="btn primary" id="cb-save-draft-btn">Save Draft</button>
               <button class="btn" id="cb-back-btn" style="background:transparent;border:1px solid var(--border);">Back to list</button>
             </div>
           </div>
@@ -733,7 +716,7 @@
         <div class="controls" style="margin-bottom:16px;">
           <input class="filter-input" id="reactivation-per-run-limit" type="number" min="1" max="1000" value="100" style="max-width:160px;margin:0;" />
           <button class="btn primary" id="reactivation-start-btn">Start Campaign</button>
-          <button class="btn" id="reactivation-pause-btn">Pause Campaign</button>
+          <button class="btn danger" id="reactivation-pause-btn">Pause Campaign</button>
           <span class="admin-chip" id="reactivation-status">...</span>
           <span class="admin-chip" id="reactivation-limit-status">Limit: 100</span>
         </div>
