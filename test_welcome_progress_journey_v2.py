@@ -181,6 +181,71 @@ def test_process_welcome_reminders_skips_claimed_users(monkeypatch):
     assert sent == []
 
 
+def test_process_welcome_reminders_day2_uses_bot_send_fn_when_available(monkeypatch):
+    now = datetime(2026, 1, 4, 12, 0, tzinfo=timezone.utc)
+    day2_at = now - timedelta(hours=21)
+    doc = {
+        "_id": "r3",
+        "user_id": 44,
+        "day1_at": now - timedelta(days=1, hours=21),
+        "day2_at": day2_at,
+        "reminder_20h_sent": True,
+        "reminder_28h_sent": True,
+        "day2_reminder_sent": False,
+    }
+    fake_db = FakeReminderDb([doc])
+    bot_sent = []
+    http_sent = []
+
+    def fake_bot_send(uid, text):
+        bot_sent.append((uid, text))
+        return True
+
+    def fake_http_send(uid, text):
+        http_sent.append((uid, text))
+        return True, None, False
+
+    monkeypatch.setattr(m, "get_welcome_progress", lambda uid, now=None: {"completed": 2, "claimed": False, "expired": False})
+
+    result = scheduler.process_welcome_reminders(now_ref=now, db_ref=fake_db, send_fn=fake_http_send, bot_send_fn=fake_bot_send)
+
+    assert result["day2_reminder_sent"] == 1
+    assert doc["day2_reminder_sent"] is True
+    assert bot_sent == [(44, scheduler._WELCOME_PROGRESS_REMINDER_DAY2)]
+    assert http_sent == []
+
+
+def test_process_welcome_reminders_day2_falls_back_to_http_when_bot_send_fails(monkeypatch):
+    now = datetime(2026, 1, 4, 12, 0, tzinfo=timezone.utc)
+    day2_at = now - timedelta(hours=21)
+    doc = {
+        "_id": "r4",
+        "user_id": 45,
+        "day1_at": now - timedelta(days=1, hours=21),
+        "day2_at": day2_at,
+        "reminder_20h_sent": True,
+        "reminder_28h_sent": True,
+        "day2_reminder_sent": False,
+    }
+    fake_db = FakeReminderDb([doc])
+    http_sent = []
+
+    def fake_bot_send(uid, text):  # noqa: ARG001
+        raise RuntimeError("bot loop not running")
+
+    def fake_http_send(uid, text):
+        http_sent.append((uid, text))
+        return True, None, False
+
+    monkeypatch.setattr(m, "get_welcome_progress", lambda uid, now=None: {"completed": 2, "claimed": False, "expired": False})
+
+    result = scheduler.process_welcome_reminders(now_ref=now, db_ref=fake_db, send_fn=fake_http_send, bot_send_fn=fake_bot_send)
+
+    assert result["day2_reminder_sent"] == 1
+    assert doc["day2_reminder_sent"] is True
+    assert http_sent == [(45, scheduler._WELCOME_PROGRESS_REMINDER_DAY2)]
+
+
 class FakeDistinctCollection:
     def __init__(self, docs):
         self.docs = docs

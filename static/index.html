@@ -3145,7 +3145,11 @@
       statusBody.style.display = "none";
       body.style.display = "";
       titleEl.textContent = t("welcome_voucher_progress");
-      squaresEl.textContent = `${"🟩".repeat(completed)}${"⬜".repeat(required - completed)} ${completed}/${required}`;
+      const dayLabels = [];
+      for (let day = 1; day <= required; day++) {
+        dayLabels.push(`Day ${day} ${day <= completed ? "✅" : "⬜"}`);
+      }
+      squaresEl.textContent = `${dayLabels.join(" / ")} → Welcome Reward`;
       checkinBtn.style.display = "none";
       countdownEl.style.display = "none";
       nextActionEl.textContent = "";
@@ -4297,10 +4301,11 @@ Active players win more.`;
           if (welcomeProgress?.unlocked) {
             title.textContent = t("welcome_voucher");
             message.textContent = t("claim_now_label");
+            btn.textContent = t("view_reward");
           } else {
             message.textContent = t("claim_your_reward");
+            btn.textContent = t("claim_reward");
           }
-          btn.textContent = t("claim_reward");
           if (dropId) {
             btn.dataset.dropid = dropId;
           }

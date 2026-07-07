@@ -163,13 +163,18 @@ def _welcome_reminder_anti_abuse_blocked(uid: int, *, db_ref, progress: dict) ->
     return None
 
 
-def process_welcome_reminders(*, now_ref: datetime | None = None, batch_limit: int | None = None, db_ref=None, send_fn=None) -> dict:
+def process_welcome_reminders(*, now_ref: datetime | None = None, batch_limit: int | None = None, db_ref=None, send_fn=None, bot_send_fn=None) -> dict:
     """Hourly reminder job for the Welcome Voucher Progress journey (V2).
 
     Sends the three check-in nudges defined by the spec (20h after Day 1,
     28h after Day 1 if still stuck on 1/3, and 20h after Day 2). Reads
     progress from ``vouchers.get_welcome_progress`` and tracks send state on
     the ``welcome_reminders`` collection so each reminder fires at most once.
+
+    ``bot_send_fn(uid, text) -> bool`` is an optional hook used only for the
+    Day 2 reminder so it can include a Mini-App button via the live bot
+    (InlineKeyboardButton/WebAppInfo). When it is absent, raises, or returns a
+    falsy result, the reminder falls back to plain-text ``send_fn`` (HTTP).
     """
     from vouchers import get_welcome_progress, log_welcome_event
 
@@ -247,7 +252,15 @@ def process_welcome_reminders(*, now_ref: datetime | None = None, batch_limit: i
             and not doc.get("day2_reminder_sent")
             and (now_ts - day2_at) >= timedelta(hours=20)
         ):
-            ok, err, _blocked = send_fn(uid, _WELCOME_PROGRESS_REMINDER_DAY2)
+            ok, err = False, None
+            if bot_send_fn is not None:
+                try:
+                    ok = bool(bot_send_fn(uid, _WELCOME_PROGRESS_REMINDER_DAY2))
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("[WELCOME_PROGRESS_REMINDER] bot_send_failed uid=%s err=%s", uid, exc)
+                    ok = False
+            if not ok:
+                ok, err, _blocked = send_fn(uid, _WELCOME_PROGRESS_REMINDER_DAY2)
             if ok:
                 db_ref.welcome_reminders.update_one({"_id": doc["_id"]}, {"$set": {"day2_reminder_sent": True, "updated_at": now_ts}})
                 log_welcome_event("welcome_reminder_day2_sent", uid, now=now_ts)
