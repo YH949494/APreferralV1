@@ -197,8 +197,8 @@
           });
       }
 
-      if (activeCampaigns && activeCampaigns.ok && activeCampaigns.body && activeCampaigns.body.items) {
-        activeCampaigns.body.items.filter(function (c) { return c.batch_status === "paused"; })
+      if (activeCampaigns && activeCampaigns.ok && activeCampaigns.body && activeCampaigns.body.campaigns) {
+        activeCampaigns.body.campaigns.filter(function (c) { return c.batch_status === "paused"; })
           .forEach(function (c) {
             items.push(attentionItem("yellow", "Campaign paused: " + c.campaign_name, "Batch release is paused — resume from Campaign Center"));
           });
