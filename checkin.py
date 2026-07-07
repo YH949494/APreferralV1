@@ -208,7 +208,7 @@ def handle_checkin():
         else:
             remaining = max(0, required - completed)
             plural = "check-ins" if remaining != 1 else "check-in"
-            payload["welcome_message"] = f"🎁 Progress: {completed}/{required}\n\n{remaining} more {plural} to unlock your reward."
+            payload["welcome_message"] = f"{remaining} more {plural} to unlock Welcome Reward."
     return jsonify(payload)
 
 

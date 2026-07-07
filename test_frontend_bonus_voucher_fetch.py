@@ -59,3 +59,21 @@ def test_share_rank_button_has_scoped_compact_styling():
     assert "padding: 8px 12px;" in html
     assert "font-size: 13px;" in html
     assert ".btn.btn-primary" not in html
+
+
+def test_welcome_progress_card_renders_labelled_days():
+    html = Path("static/index.html").read_text(encoding="utf-8")
+    assert 'dayLabels.push(`Day ${day} ${day <= completed ? "✅" : "⬜"}`);' in html
+    assert 'squaresEl.textContent = `${dayLabels.join(" / ")} → Welcome Reward`;' in html
+
+
+def test_welcome_unlocked_campaign_cta_says_view_reward():
+    html = Path("static/index.html").read_text(encoding="utf-8")
+    unlocked_start = html.index("if (welcomeProgress?.unlocked) {")
+    unlocked_end = html.index("} else {", unlocked_start)
+    unlocked_block = html[unlocked_start:unlocked_end]
+    assert 'btn.textContent = t("view_reward");' in unlocked_block
+    assert 'btn.textContent = t("claim_reward");' not in unlocked_block
+
+    i18n = Path("static/i18n.js").read_text(encoding="utf-8")
+    assert 'view_reward: "View Reward",' in i18n
