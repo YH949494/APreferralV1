@@ -60,6 +60,81 @@
     var el = $("#global-banner");
     if (!msg) { el.innerHTML = ""; return; }
     el.innerHTML = '<div class="banner ' + (kind || "error") + '">' + msg + "</div>";
+    if (kind === "ok") toast(msg, "success");
+    else if (kind === "error") toast(msg, "error");
+  }
+
+  // ---------- Toast framework: every action gets non-blocking feedback ----------
+  function toastStack() {
+    var el = $("#toast-stack");
+    if (!el) {
+      el = document.createElement("div");
+      el.id = "toast-stack";
+      el.className = "toast-stack";
+      document.body.appendChild(el);
+    }
+    return el;
+  }
+  function toast(msg, kind) {
+    if (!msg) return;
+    var stack = toastStack();
+    var el = document.createElement("div");
+    el.className = "toast toast-" + (kind || "success");
+    el.textContent = msg;
+    stack.appendChild(el);
+    setTimeout(function () {
+      el.classList.add("fade-out");
+      setTimeout(function () { el.remove(); }, 260);
+    }, 4200);
+  }
+  window.toast = toast;
+
+  // ---------- Reusable button loading-state feedback ----------
+  function btnStart(btn, loadingText) {
+    if (!btn || btn.dataset.loading === "1") return false;
+    btn.dataset.loading = "1";
+    if (btn.dataset.originalText === undefined) btn.dataset.originalText = btn.textContent;
+    btn.disabled = true;
+    btn.classList.add("btn-loading");
+    btn.innerHTML = '<span class="btn-spinner"></span>' + esc(loadingText || "Working...");
+    return true;
+  }
+  function btnStop(btn) {
+    if (!btn) return;
+    btn.dataset.loading = "";
+    btn.disabled = false;
+    btn.classList.remove("btn-loading");
+    if (btn.dataset.originalText !== undefined) btn.textContent = btn.dataset.originalText;
+  }
+
+  // ---------- Typed-confirmation modal for destructive actions ----------
+  function confirmTyped(word, title, message) {
+    return new Promise(function (resolve) {
+      var overlay = document.createElement("div");
+      overlay.className = "modal-overlay";
+      overlay.innerHTML =
+        '<div class="modal-box">' +
+        '<h3>' + esc(title) + '</h3>' +
+        '<p>' + esc(message) + ' Type <strong>' + esc(word) + '</strong> to confirm.</p>' +
+        '<input class="filter-input" id="confirm-typed-input" placeholder="Type ' + esc(word) + '" autocomplete="off" />' +
+        '<div class="modal-actions">' +
+        '<button class="btn" id="confirm-typed-cancel">Cancel</button>' +
+        '<button class="btn primary" id="confirm-typed-ok">Confirm</button>' +
+        '</div></div>';
+      document.body.appendChild(overlay);
+      var input = overlay.querySelector("#confirm-typed-input");
+      input.focus();
+      function done(result) { overlay.remove(); resolve(result); }
+      overlay.querySelector("#confirm-typed-cancel").addEventListener("click", function () { done(false); });
+      overlay.querySelector("#confirm-typed-ok").addEventListener("click", function () {
+        done((input.value || "").trim() === word);
+      });
+      overlay.addEventListener("click", function (e) { if (e.target === overlay) done(false); });
+      input.addEventListener("keydown", function (e) {
+        if (e.key === "Enter") done((input.value || "").trim() === word);
+        if (e.key === "Escape") done(false);
+      });
+    });
   }
 
   function setMeta(text) {
@@ -94,12 +169,58 @@
     el.innerHTML = html;
   }
 
+  // ---------- Attention Required (Home) ----------
+  function attentionItem(sev, title, sub) {
+    return '<div class="attention-item sev-' + sev + '"><span class="attention-dot"></span>' +
+      '<div class="attention-text"><strong>' + esc(title) + '</strong>' + (sub ? '<span>' + esc(sub) + '</span>' : '') + '</div></div>';
+  }
+
+  function loadAttentionRequired() {
+    var el = $("#attention-required");
+    if (!el) return;
+    el.innerHTML = '<div class="attention-empty">Checking for issues…</div>';
+
+    Promise.all([
+      fetch("/v2/miniapp/admin/pools/summary", { credentials: "same-origin", headers: { "Accept": "application/json" } })
+        .then(function (r) { return r.json(); }).catch(function () { return null; }),
+      cbApi("/api/admin/campaign-builder/campaigns?status=active").catch(function () { return { ok: false }; }),
+      fetch("/v2/miniapp/admin/affiliate/pending?status=PENDING_REVIEW", { credentials: "same-origin", headers: { "Accept": "application/json" } })
+        .then(function (r) { return r.json(); }).catch(function () { return null; }),
+    ]).then(function (results) {
+      var pools = results[0], activeCampaigns = results[1], affiliatePending = results[2];
+      var items = [];
+
+      if (pools && pools.items) {
+        pools.items.filter(function (p) { return typeof p.available === "number" && p.available < 10; })
+          .forEach(function (p) {
+            items.push(attentionItem("red", "Voucher pool low: " + p.pool_id, p.available + " code(s) remaining"));
+          });
+      }
+
+      if (activeCampaigns && activeCampaigns.ok && activeCampaigns.body && activeCampaigns.body.items) {
+        activeCampaigns.body.items.filter(function (c) { return c.batch_status === "paused"; })
+          .forEach(function (c) {
+            items.push(attentionItem("yellow", "Campaign paused: " + c.campaign_name, "Batch release is paused — resume from Campaign Center"));
+          });
+      }
+
+      if (affiliatePending && affiliatePending.items && affiliatePending.items.length) {
+        items.push(attentionItem("yellow", affiliatePending.items.length + " affiliate reward(s) pending approval", "Review in Affiliate Center → Pending Approvals"));
+      }
+
+      el.innerHTML = items.length ? items.join("") : '<div class="attention-empty">✅ Nothing needs attention right now.</div>';
+    }).catch(function () {
+      el.innerHTML = '<div class="attention-empty">Could not check for issues.</div>';
+    });
+  }
+
   // ---------- Summary ----------
   function loadSummary(refresh) {
     setMeta("Window: " + state.summaryWindow + " · Loading…");
     ["cards-users", "cards-community", "cards-referrals", "cards-vouchers", "cards-system"].forEach(function (id) {
       skeletonGrid($("#" + id), 4);
     });
+    loadAttentionRequired();
     api("/api/admin/dashboard/summary?window=" + encodeURIComponent(state.summaryWindow) + (refresh ? "&refresh=1" : ""))
       .then(function (d) {
         renderMeta(d, state.summaryWindow);
@@ -539,11 +660,18 @@
       });
   }
 
-  function setReactivation(active) {
+  function setReactivation(active, btn) {
     var path = active ? "/api/admin/channel-reactivation/start" : "/api/admin/channel-reactivation/pause";
+    if (btn) btnStart(btn, active ? "⏳ Starting..." : "⏳ Pausing...");
     apiPost(path)
-      .then(function () { loadReactivation(true); })
-      .catch(function (e) { if (e.message !== "unauthorized") banner("Failed to update campaign: " + e.message); });
+      .then(function () {
+        toast(active ? "✅ Reactivation campaign started" : "✅ Reactivation campaign paused", "success");
+        loadReactivation(true);
+      })
+      .catch(function (e) {
+        if (e.message !== "unauthorized") banner("❌ Failed to update campaign: " + e.message, "error");
+      })
+      .finally(function () { if (btn) btnStop(btn); });
   }
 
   function affiliateDetailHtml(det) {
@@ -3016,6 +3144,10 @@
         (isBatch ? '<span>' + (c.released_batches || 0) + '/' + (c.batch_count || "?") + ' batches released</span>' : '') +
         '<span style="margin-left:auto;">' + esc((c.created_at || "").slice(0, 10)) + '</span>' +
         '</div>' +
+        (isBatch && c.batch_count
+          ? '<div class="bar-wrap" style="margin-top:8px;width:100%;"><div class="bar" style="width:' +
+            Math.round(100 * Math.min(1, (c.released_batches || 0) / c.batch_count)) + '%;"></div></div>'
+          : '') +
         (status === "draft"
           ? '<div class="campaign-card-actions"><button class="btn" onclick="cbResume(' + JSON.stringify(c.id) + ')">Resume</button>' +
             '<button class="btn" style="background:transparent;border:1px solid var(--border);" onclick="cbDelete(' + JSON.stringify(c.id) + ')">Delete</button></div>'
@@ -3504,10 +3636,12 @@
   })();
 
   window.cbDelete = function (id) {
-    if (!confirm("Delete this draft campaign? Any drops it already compiled are NOT affected.")) return;
-    cbApi("/api/admin/campaign-builder/campaigns/" + id, { method: "DELETE" }).then(function (res) {
-      if (res.ok) { banner("Draft deleted.", "ok"); refreshCurrent(true); }
-      else banner("Delete failed: " + ((res.body && res.body.code) || "unknown"), "error");
+    confirmTyped("DELETE", "Delete draft campaign?", "Any drops it already compiled are NOT affected.").then(function (ok) {
+      if (!ok) return;
+      cbApi("/api/admin/campaign-builder/campaigns/" + id, { method: "DELETE" }).then(function (res) {
+        if (res.ok) { banner("✅ Draft deleted", "ok"); refreshCurrent(true); }
+        else banner("❌ Delete failed: " + ((res.body && res.body.code) || "unknown"), "error");
+      });
     });
   };
 
@@ -3957,9 +4091,10 @@
         .then(function (res) {
           if (!res.ok || res.d.status !== "ok") throw new Error(res.d.code || "unknown");
           resultEl.textContent = "Created drop: " + res.d.dropId;
+          toast("✅ Voucher drop created: " + res.d.dropId, "success");
           loadDrops(true);
         })
-        .catch(function (e) { resultEl.textContent = "Create failed: " + e.message; })
+        .catch(function (e) { resultEl.textContent = "Create failed: " + e.message; toast("❌ Failed to create drop: " + e.message, "error"); })
         .finally(function () { createBtn.disabled = false; });
     });
 
@@ -3983,9 +4118,10 @@
         .then(function (res) {
           if (!res.ok || res.d.status !== "ok") throw new Error(res.d.code || "unknown");
           resultEl.textContent = "Added " + res.d.inserted + " code(s).";
+          toast("✅ Added " + res.d.inserted + " code(s)", "success");
           loadDrops(true);
         })
-        .catch(function (e) { resultEl.textContent = "Add failed: " + e.message; })
+        .catch(function (e) { resultEl.textContent = "Add failed: " + e.message; toast("❌ Failed to add codes: " + e.message, "error"); })
         .finally(function () { addBtn.disabled = false; });
     });
 
@@ -4003,10 +4139,10 @@
         body: JSON.stringify({ op: op }),
       }).then(function (r) { return r.json(); })
         .then(function (d) {
-          if (d.status === "ok") loadDrops(true);
-          else banner("Drop action failed: " + (d.code || "unknown"), "error");
+          if (d.status === "ok") { toast("✅ Drop updated", "success"); loadDrops(true); }
+          else banner("❌ Drop action failed: " + (d.code || "unknown"), "error");
         })
-        .catch(function (e) { banner("Drop action failed: " + e.message, "error"); })
+        .catch(function (e) { banner("❌ Drop action failed: " + e.message, "error"); })
         .finally(function () { btn.disabled = false; });
     });
   }
@@ -4054,10 +4190,11 @@
         .then(function (res) {
           if (!res.ok || res.d.status !== "ok") throw new Error(res.d.reason || "unknown");
           resultEl.textContent = "Inserted " + res.d.inserted + " / " + res.d.received + " code(s) into " + res.d.pool_id + ".";
+          toast("✅ Inserted " + res.d.inserted + "/" + res.d.received + " code(s) into " + res.d.pool_id, "success");
           $("#ap-codes").value = "";
           loadAffiliatePools(true);
         })
-        .catch(function (e) { resultEl.textContent = "Upload failed: " + e.message; })
+        .catch(function (e) { resultEl.textContent = "Upload failed: " + e.message; toast("❌ Upload failed: " + e.message, "error"); })
         .finally(function () { uploadBtn.disabled = false; });
     });
   }
@@ -4121,10 +4258,10 @@
           body: JSON.stringify({ reason: reason }),
         }).then(function (r) { return r.json(); })
           .then(function (d) {
-            if (d.status === "ok") loadAffiliatePending(true);
-            else banner("Reject failed: " + (d.reason || "unknown"), "error");
+            if (d.status === "ok") { toast("✅ Affiliate reward rejected", "success"); loadAffiliatePending(true); }
+            else banner("❌ Reject failed: " + (d.reason || "unknown"), "error");
           })
-          .catch(function (e) { banner("Reject failed: " + e.message, "error"); })
+          .catch(function (e) { banner("❌ Reject failed: " + e.message, "error"); })
           .finally(function () { btn.disabled = false; });
       } else if (op === "approve") {
         if (!confirm("Approve this affiliate reward? A voucher may be issued immediately.")) return;
@@ -4135,10 +4272,10 @@
           headers: { "Content-Type": "application/json" },
         }).then(function (r) { return r.json(); })
           .then(function (d) {
-            if (d.status === "ok") loadAffiliatePending(true);
-            else banner("Approve failed: " + (d.reason || "unknown"), "error");
+            if (d.status === "ok") { toast("✅ Affiliate reward approved", "success"); loadAffiliatePending(true); }
+            else banner("❌ Approve failed: " + (d.reason || "unknown"), "error");
           })
-          .catch(function (e) { banner("Approve failed: " + e.message, "error"); })
+          .catch(function (e) { banner("❌ Approve failed: " + e.message, "error"); })
           .finally(function () { btn.disabled = false; });
       }
     });
@@ -4186,9 +4323,10 @@
         .then(function (res) {
           if (!res.ok || !res.d.success) throw new Error(res.d.message || "unknown");
           resultEl.textContent = res.d.message || "XP updated.";
+          toast("✅ " + (res.d.message || "XP updated"), "success");
           $("#xp-amount").value = "";
         })
-        .catch(function (e) { resultEl.textContent = "Failed: " + e.message; })
+        .catch(function (e) { resultEl.textContent = "Failed: " + e.message; toast("❌ Failed to update XP: " + e.message, "error"); })
         .finally(function () { btn.disabled = false; });
     });
   }
@@ -4288,7 +4426,12 @@
         if (group) group.classList.toggle("collapsed");
       });
     });
-    $("#refresh-btn").addEventListener("click", function () { refreshCurrent(true); });
+    $("#refresh-btn").addEventListener("click", function () {
+      var btn = this;
+      if (!btnStart(btn, "⏳ Refreshing...")) return;
+      refreshCurrent(true);
+      setTimeout(function () { btnStop(btn); }, 600);
+    });
     $("#logout-btn").addEventListener("click", function () {
       fetch("/api/admin/auth/logout", { method: "POST", credentials: "same-origin" })
         .finally(function () { window.location.href = "/admin"; });
@@ -4300,8 +4443,8 @@
     bindAffiliatePending();
     bindJoinRequests();
     bindXpAdjust();
-    $("#reactivation-start-btn").addEventListener("click", function () { setReactivation(true); });
-    $("#reactivation-pause-btn").addEventListener("click", function () { setReactivation(false); });
+    $("#reactivation-start-btn").addEventListener("click", function () { setReactivation(true, this); });
+    $("#reactivation-pause-btn").addEventListener("click", function () { setReactivation(false, this); });
     $all("#funnel-window button").forEach(function (b) {
       b.addEventListener("click", function () {
         state.funnelWindow = b.dataset.window;
