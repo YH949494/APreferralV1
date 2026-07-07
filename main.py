@@ -6902,15 +6902,16 @@ async def _send_welcome_unclaimed_reminder_if_needed(context: ContextTypes.DEFAU
     return False
 
 
-def _send_welcome_day2_reminder_via_bot(uid: int, text: str) -> bool:
-    """Send the Welcome Voucher Day-2 reminder with a Mini-App button via the live bot.
+def _send_welcome_reminder_via_bot(uid: int, text: str) -> bool:
+    """Send a Welcome reminder with a Mini-App button via the live bot.
 
-    Used as ``bot_send_fn`` by the sync APScheduler job in scheduler.py; a
-    falsy/exception result there falls back to the plain-text HTTP path.
+    Used as ``bot_send_fn`` by the sync APScheduler Welcome reminder jobs in
+    scheduler.py (voucher lifecycle + progress journey); a falsy/exception
+    result there falls back to the plain-text HTTP path.
     """
     keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🎁 Open Mini-App", web_app=WebAppInfo(url=WEBAPP_URL))]])
     ok, _err = call_bot_in_loop(
-        safe_send_message(app_bot.bot, chat_id=uid, text=text, reply_markup=keyboard, uid=uid, send_type="welcome_day2_reminder", raise_on_non_transient=False, return_error=True)
+        safe_send_message(app_bot.bot, chat_id=uid, text=text, reply_markup=keyboard, uid=uid, send_type="welcome_reminder", raise_on_non_transient=False, return_error=True)
     )
     return bool(ok)
 
@@ -7362,6 +7363,7 @@ def run_worker():
         id="welcome_voucher_lifecycle",
         name="Welcome Voucher Lifecycle",
         replace_existing=True,
+        kwargs={"bot_send_fn": _send_welcome_reminder_via_bot},
     )
     scheduler.add_job(
         process_welcome_reminders,
@@ -7369,7 +7371,7 @@ def run_worker():
         id="welcome_progress_reminders",
         name="Welcome Voucher Progress Reminders",
         replace_existing=True,
-        kwargs={"bot_send_fn": _send_welcome_day2_reminder_via_bot},
+        kwargs={"bot_send_fn": _send_welcome_reminder_via_bot},
     )
     scheduler.add_job(
         reconcile_drop_statuses,

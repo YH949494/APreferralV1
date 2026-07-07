@@ -371,6 +371,39 @@
       margin-top: 6px; letter-spacing: .5px;
     }
 
+    /* ===== WELCOME DAY 1 TOAST ===== */
+    #welcome-day1-toast {
+      position: fixed;
+      top: 128px;
+      left: 50%;
+      transform: translateX(-50%) translateY(-20px);
+      background: var(--bg-card);
+      border: 1px solid var(--border-strong);
+      border-radius: var(--radius-lg);
+      padding: 14px 20px;
+      text-align: center;
+      z-index: 9000;
+      max-width: min(320px, calc(100% - 32px));
+      opacity: 0;
+      transition: opacity .25s ease, transform .25s ease;
+      pointer-events: none;
+      box-shadow: var(--shadow-soft);
+    }
+    #welcome-day1-toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+    #welcome-day1-toast .welcome-day1-toast-title {
+      font-family: var(--font-display);
+      font-size: 16px; font-weight: 800;
+      color: var(--ap-orange); line-height: 1.3;
+    }
+    #welcome-day1-toast .welcome-day1-toast-body {
+      font-size: 12px; color: var(--text-muted); margin-top: 6px; white-space: pre-line;
+    }
+
+    /* ===== WELCOME UNLOCK CELEBRATION MODAL ===== */
+    .welcome-unlock-modal-content { display: grid; gap: 10px; }
+    .welcome-unlock-badge { font-size: 44px; line-height: 1; }
+    .welcome-unlock-body { color: var(--text-muted); font-size: 14px; margin: 0; }
+
     /* ===== XP / IDENTITY STRIP ===== */
     .ap-xp-strip {
       background: var(--bg-card);
@@ -1090,6 +1123,8 @@
     .welcome-progress-message { color: #ffdcca; font-weight: 600; }
     .welcome-progress-next-action { color: #ffdcca; font-weight: 600; }
     .welcome-progress-countdown { color: var(--text-muted); }
+    .welcome-progress-expiry { font-size: 12px; font-weight: 700; color: var(--text-muted); }
+    .welcome-progress-expiry.welcome-progress-expiry-urgent { color: #ff8a5c; }
     .welcome-status-badge { display: inline-block; padding: 4px 10px; border-radius: 999px; font-size: 13px; font-weight: 700; background: rgba(255,255,255,.14); color: var(--text-main); width: fit-content; }
     .welcome-status-message { margin: 0; font-size: 13px; color: var(--text-muted); }
     .welcome-status-issued { margin: 0; font-size: 13px; color: var(--text-muted); }
@@ -1278,6 +1313,23 @@
     <div class="xp-amount" id="xp-toast-amount">+0 XP</div>
     <div class="xp-label"  id="xp-toast-label">Check-in reward</div>
     <div class="xp-streak-badge" id="xp-toast-streak" style="display:none;"></div>
+  </div>
+
+  <!-- ===== WELCOME DAY 1 TOAST ===== -->
+  <div id="welcome-day1-toast" role="status" aria-live="polite">
+    <div class="welcome-day1-toast-title" id="welcome-day1-toast-title">🎉 Great start!</div>
+    <div class="welcome-day1-toast-body" id="welcome-day1-toast-body"></div>
+  </div>
+
+  <!-- ===== WELCOME UNLOCK CELEBRATION MODAL ===== -->
+  <div id="welcome-unlock-modal" class="modal">
+    <div class="modal-content welcome-unlock-modal-content">
+      <div class="welcome-unlock-badge">🎉</div>
+      <h3>Congratulations!</h3>
+      <p class="welcome-unlock-body">You completed your Welcome Journey.<br>Your FREE Welcome Voucher is ready.</p>
+      <button type="button" class="btn btn-primary" id="welcome-unlock-claim-btn">Claim it now</button>
+      <button type="button" class="btn btn-ghost" id="welcome-unlock-close-btn">Later</button>
+    </div>
   </div>
 
   <!-- ===== MAIN PAGE CONTENT ===== -->
@@ -1566,6 +1618,7 @@
         <div id="welcome-progress-body">
           <h3 class="welcome-progress-title" id="welcome-progress-title" data-i18n="welcome_voucher_progress">🎁 Welcome Voucher Progress</h3>
           <div class="welcome-progress-squares" id="welcome-progress-squares">⬜⬜⬜ 0/3</div>
+          <div class="welcome-progress-expiry" id="welcome-progress-expiry" style="display:none;"></div>
           <div class="welcome-progress-meta">
             <div id="welcome-progress-next-action" class="welcome-progress-next-action"></div>
             <div id="welcome-progress-countdown" class="welcome-progress-countdown" style="display:none;"></div>
@@ -3117,12 +3170,33 @@
       return { available: false, text: `⏳ Next check-in:\n${hours}h ${minutes}m` };
     }
 
+    function renderWelcomeExpiry(el, eligibleUntil) {
+      const target = eligibleUntil ? new Date(eligibleUntil) : null;
+      if (!target || Number.isNaN(target.getTime())) {
+        el.style.display = "none";
+        return;
+      }
+      const diffMs = target.getTime() - Date.now();
+      el.classList.remove("welcome-progress-expiry-urgent");
+      if (diffMs <= 0) {
+        el.textContent = "⏳ Expiring soon";
+        el.classList.add("welcome-progress-expiry-urgent");
+        el.style.display = "block";
+        return;
+      }
+      const daysRemaining = Math.max(1, Math.ceil(diffMs / 86400000));
+      el.textContent = `⏳ ${daysRemaining} day${daysRemaining === 1 ? "" : "s"} remaining`;
+      if (daysRemaining <= 1) el.classList.add("welcome-progress-expiry-urgent");
+      el.style.display = "block";
+    }
+
     function renderWelcomeProgress(data = {}) {
       const section = document.getElementById("welcome-progress-section");
       const body = document.getElementById("welcome-progress-body");
       const statusBody = document.getElementById("welcome-status-card-body");
       const titleEl = document.getElementById("welcome-progress-title");
       const squaresEl = document.getElementById("welcome-progress-squares");
+      const expiryEl = document.getElementById("welcome-progress-expiry");
       const nextActionEl = document.getElementById("welcome-progress-next-action");
       const countdownEl = document.getElementById("welcome-progress-countdown");
       const checkinBtn = document.getElementById("welcome-checkin-btn");
@@ -3154,6 +3228,7 @@
       countdownEl.style.display = "none";
       nextActionEl.textContent = "";
       if (channelReminder) channelReminder.style.display = "none";
+      if (expiryEl) renderWelcomeExpiry(expiryEl, data.eligible_until);
 
       // CHANNEL_NOT_JOINED: actionable — show subscribe reminder
       if (pendingReason === "CHANNEL_NOT_JOINED") {
@@ -3281,6 +3356,48 @@
       update();
     }
 
+    let _welcomeDay1ToastTimer = null;
+    function showWelcomeDay1Toast(message) {
+      const toast = document.getElementById("welcome-day1-toast");
+      const body = document.getElementById("welcome-day1-toast-body");
+      if (!toast || !body) return;
+      const lines = String(message || "").split("\n").filter((line) => line.trim() !== "");
+      body.textContent = lines.slice(1).join(" ");
+      toast.classList.add("show");
+      if (_welcomeDay1ToastTimer) clearTimeout(_welcomeDay1ToastTimer);
+      _welcomeDay1ToastTimer = setTimeout(() => toast.classList.remove("show"), 4500);
+    }
+
+    function showWelcomeUnlockModal() {
+      const modal = document.getElementById("welcome-unlock-modal");
+      if (!modal) return;
+      modal.style.display = "flex";
+      hapticNotify("success");
+    }
+
+    function closeWelcomeUnlockModal() {
+      const modal = document.getElementById("welcome-unlock-modal");
+      if (modal) modal.style.display = "none";
+    }
+
+    (function initWelcomeUnlockModal() {
+      const claimBtn = document.getElementById("welcome-unlock-claim-btn");
+      const closeBtn = document.getElementById("welcome-unlock-close-btn");
+      const modal = document.getElementById("welcome-unlock-modal");
+      if (claimBtn) {
+        claimBtn.addEventListener("click", () => {
+          closeWelcomeUnlockModal();
+          highlightWelcomeRewardCard();
+        });
+      }
+      if (closeBtn) closeBtn.addEventListener("click", closeWelcomeUnlockModal);
+      if (modal) {
+        modal.addEventListener("click", (evt) => {
+          if (evt.target === modal) closeWelcomeUnlockModal();
+        });
+      }
+    })();
+
     let _xpToastTimer = null;
     function showXpToast(totalXp, streak, streakLabel) {
       const toast = document.getElementById("xp-toast");
@@ -3338,6 +3455,11 @@
             referralSection.scrollIntoView({ behavior: "smooth", block: "start" });
           }
           showXpToast(data.total_xp || data.base_xp || 20, data.streak || 1, data.streak_label || "");
+          if (data.welcome_celebration === "day1") {
+            showWelcomeDay1Toast(data.welcome_message);
+          } else if (data.welcome_celebration === "unlock") {
+            showWelcomeUnlockModal();
+          }
           loadWelcomeProgress();
           loadLeaderboard();
         }

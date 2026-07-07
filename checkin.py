@@ -203,11 +203,27 @@ def handle_checkin():
         completed = int(welcome_progress.get("checkins_completed") or 0)
         required = int(welcome_progress.get("checkins_required") or 3)
         payload["welcome_progress"] = welcome_progress
+        remaining = max(0, required - completed)
         if welcome_progress.get("unlocked") or completed >= required:
-            payload["welcome_message"] = "🎉 Reward Unlocked!\n\nClaim now."
-        else:
-            remaining = max(0, required - completed)
+            payload["welcome_celebration"] = "unlock"
+            payload["welcome_message"] = (
+                "🎉 Congratulations!\n\n"
+                "You completed your Welcome Journey.\n\n"
+                "Your FREE Welcome Voucher is ready.\n\n"
+                "Claim it now."
+            )
+        elif completed == 1:
             plural = "check-ins" if remaining != 1 else "check-in"
+            payload["welcome_celebration"] = "day1"
+            payload["welcome_message"] = (
+                "🎉 Great start!\n\n"
+                "Day 1 completed.\n\n"
+                f"Only {remaining} more daily {plural} remain.\n\n"
+                "Come back tomorrow to continue your Welcome Reward journey."
+            )
+        else:
+            plural = "check-ins" if remaining != 1 else "check-in"
+            payload["welcome_celebration"] = None
             payload["welcome_message"] = f"{remaining} more {plural} to unlock Welcome Reward."
     return jsonify(payload)
 

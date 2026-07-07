@@ -591,7 +591,7 @@ def test_successful_checkin_records_welcome_progress_after_xp_write():
     assert call_order.index("record_welcome_checkin_progress") > call_order.index("grant_xp")
 
 
-def test_checkin_response_uses_exact_remaining_count_copy():
+def test_checkin_response_uses_day1_celebration_copy():
     app = Flask(__name__)
     app.add_url_rule("/checkin", "checkin", checkin.handle_checkin)
     users = FakeUsersCollection()
@@ -612,7 +612,9 @@ def test_checkin_response_uses_exact_remaining_count_copy():
         client = app.test_client()
         _, payload = _run_checkin(client)
 
-    assert payload["welcome_message"] == "2 more check-ins to unlock Welcome Reward."
+    assert payload["welcome_celebration"] == "day1"
+    assert "Day 1 completed" in payload["welcome_message"]
+    assert "Only 2 more daily check-ins remain" in payload["welcome_message"]
 
 
 def test_checkin_response_singular_remaining_count_copy():
@@ -637,6 +639,32 @@ def test_checkin_response_singular_remaining_count_copy():
         _, payload = _run_checkin(client)
 
     assert payload["welcome_message"] == "1 more check-in to unlock Welcome Reward."
+
+
+def test_checkin_response_uses_unlock_celebration_copy():
+    app = Flask(__name__)
+    app.add_url_rule("/checkin", "checkin", checkin.handle_checkin)
+    users = FakeUsersCollection()
+
+    def fake_progress(*args, **kwargs):
+        return {"eligible": True, "hide": False, "unlocked": True, "checkins_completed": 3, "checkins_required": 3}
+
+    with (
+        patch.object(checkin, "users_collection", users),
+        patch.object(checkin, "record_user_last_seen", lambda *args, **kwargs: None),
+        patch.object(checkin, "record_first_checkin", lambda *args, **kwargs: None),
+        patch.object(checkin, "grant_xp", lambda *args: True),
+        patch.object(checkin, "datetime", FixedDatetime),
+        patch.object(vouchers, "record_welcome_checkin_progress", lambda *args, **kwargs: None),
+        patch.object(vouchers, "get_welcome_reward_progress", fake_progress),
+    ):
+        FixedDatetime._now = datetime(2026, 1, 1, 8, 0, tzinfo=KL_TZ)
+        client = app.test_client()
+        _, payload = _run_checkin(client)
+
+    assert payload["welcome_celebration"] == "unlock"
+    assert "Congratulations" in payload["welcome_message"]
+    assert "Claim it now" in payload["welcome_message"]
 
 
 def test_freeze_tokens_huge_value_clamps_to_max():
