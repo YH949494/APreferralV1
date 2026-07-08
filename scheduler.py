@@ -27,11 +27,26 @@ WELCOME_REMINDER_LINK = os.getenv("WELCOME_REMINDER_LINK", "https://apreferralv1
 
 def _welcome_reminder_text(*, final_warning: bool) -> str:
     if final_warning:
-        return f"⏳ Final reminder — your welcome reward expires soon.\n{WELCOME_REMINDER_LINK}"
-    return f"🎁 Your welcome reward is waiting.\nClaim it before it expires.\n{WELCOME_REMINDER_LINK}"
+        return (
+            "⏳ Last chance!\n\n"
+            "Your AdvantPlay Welcome Voucher is about to expire — don't miss out.\n"
+            f"{WELCOME_REMINDER_LINK}"
+        )
+    return (
+        "🎁 Your AdvantPlay Welcome Voucher is waiting.\n\n"
+        "Finish your check-ins to claim it before it expires.\n"
+        f"{WELCOME_REMINDER_LINK}"
+    )
 
 
-def process_welcome_voucher_lifecycle(*, now_ref: datetime | None = None, batch_limit: int | None = None, db_ref=None, send_fn=None) -> dict:
+def process_welcome_voucher_lifecycle(*, now_ref: datetime | None = None, batch_limit: int | None = None, db_ref=None, send_fn=None, bot_send_fn=None) -> dict:
+    """Hourly/30-min sweep for the legacy Welcome eligibility window.
+
+    ``bot_send_fn(uid, text) -> bool`` is an optional hook (mirrors
+    ``process_welcome_reminders``) used to deliver the reminder with a
+    Mini-App button via the live bot. When it is absent, raises, or returns a
+    falsy result, the reminder falls back to plain-text ``send_fn`` (HTTP).
+    """
     db_ref = db_ref or db
     send_fn = send_fn or send_telegram_http_message
     now_ts = _coerce_utc(now_ref) or now_utc()
@@ -92,7 +107,15 @@ def process_welcome_voucher_lifecycle(*, now_ref: datetime | None = None, batch_
             continue
 
         text = _welcome_reminder_text(final_warning=needs_final)
-        ok, err, _blocked = send_fn(int(uid), text)
+        ok, err = False, None
+        if bot_send_fn is not None:
+            try:
+                ok = bool(bot_send_fn(int(uid), text))
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[WELCOME_LIFECYCLE] bot_send_failed uid=%s err=%s", uid, exc)
+                ok = False
+        if not ok:
+            ok, err, _blocked = send_fn(int(uid), text)
         if not ok:
             send_failed += 1
             logger.warning("[WELCOME_LIFECYCLE] send_failed uid=%s final_warning=%s err=%s", uid, needs_final, err)
@@ -120,23 +143,42 @@ def process_welcome_voucher_lifecycle(*, now_ref: datetime | None = None, batch_
 
 WELCOME_PROGRESS_REMINDER_BATCH_LIMIT = int(os.getenv("WELCOME_PROGRESS_REMINDER_BATCH_LIMIT", "500"))
 
+# Reminder 1 (friendly): a gentle nudge shortly after Day 1.
 _WELCOME_PROGRESS_REMINDER_20H = (
-    "🎁 Welcome Voucher Progress\n\n"
+    "🎁 Nice one on Day 1!\n\n"
     "🟩⬜⬜ 1/3\n\n"
-    "Complete Day 2 check-in to unlock your reward.\n\n"
+    "Come back for your Day 2 check-in to keep your Welcome Voucher journey going.\n\n"
     "Takes less than 10 seconds."
 )
+# Reminder 2 (more urgency): still stuck on 1/3, reward window closing in.
 _WELCOME_PROGRESS_REMINDER_28H = (
     "⚠️ Don't lose your Welcome Voucher\n\n"
     "🟩⬜⬜ 1/3\n\n"
-    "Complete Day 2 check-in to stay eligible.\n\n"
-    "Your reward expires after 7 days."
+    "Your Day 2 check-in is still waiting — complete it now to stay eligible.\n\n"
+    "Your reward expires 7 days after joining."
 )
+# Reminder 3 (high excitement): one check-in away from unlocking.
 _WELCOME_PROGRESS_REMINDER_DAY2 = (
-    "🎁 Welcome Voucher Progress\n\n"
+    "🔥 So close! Just 1 check-in left\n\n"
     "🟩🟩⬜ 2/3\n\n"
-    "Just one more check-in to unlock your reward."
+    "Complete Day 3 today and your FREE Welcome Voucher is yours to claim."
 )
+
+
+def _send_welcome_reminder(uid: int, text: str, *, send_fn, bot_send_fn, stage: str) -> tuple[bool, str | None]:
+    """Send a Welcome reminder, preferring the Mini-App-button bot path.
+
+    Falls back to plain-text ``send_fn`` (HTTP) when ``bot_send_fn`` is
+    absent, raises, or returns a falsy result.
+    """
+    if bot_send_fn is not None:
+        try:
+            if bool(bot_send_fn(uid, text)):
+                return True, None
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[WELCOME_PROGRESS_REMINDER] bot_send_failed uid=%s stage=%s err=%s", uid, stage, exc)
+    ok, err, _blocked = send_fn(uid, text)
+    return ok, err
 
 
 def _welcome_reminder_anti_abuse_blocked(uid: int, *, db_ref, progress: dict) -> str | None:
@@ -220,7 +262,7 @@ def process_welcome_reminders(*, now_ref: datetime | None = None, batch_limit: i
             and not doc.get("reminder_20h_sent")
             and (now_ts - day1_at) >= timedelta(hours=20)
         ):
-            ok, err, _blocked = send_fn(uid, _WELCOME_PROGRESS_REMINDER_20H)
+            ok, err = _send_welcome_reminder(uid, _WELCOME_PROGRESS_REMINDER_20H, send_fn=send_fn, bot_send_fn=bot_send_fn, stage="20h")
             if ok:
                 db_ref.welcome_reminders.update_one({"_id": doc["_id"]}, {"$set": {"reminder_20h_sent": True, "updated_at": now_ts}})
                 log_welcome_event("welcome_reminder_20h_sent", uid, now=now_ts)
@@ -236,7 +278,7 @@ def process_welcome_reminders(*, now_ref: datetime | None = None, batch_limit: i
             and not doc.get("reminder_28h_sent")
             and (now_ts - day1_at) >= timedelta(hours=28)
         ):
-            ok, err, _blocked = send_fn(uid, _WELCOME_PROGRESS_REMINDER_28H)
+            ok, err = _send_welcome_reminder(uid, _WELCOME_PROGRESS_REMINDER_28H, send_fn=send_fn, bot_send_fn=bot_send_fn, stage="28h")
             if ok:
                 db_ref.welcome_reminders.update_one({"_id": doc["_id"]}, {"$set": {"reminder_28h_sent": True, "updated_at": now_ts}})
                 log_welcome_event("welcome_reminder_28h_sent", uid, now=now_ts)
@@ -252,15 +294,7 @@ def process_welcome_reminders(*, now_ref: datetime | None = None, batch_limit: i
             and not doc.get("day2_reminder_sent")
             and (now_ts - day2_at) >= timedelta(hours=20)
         ):
-            ok, err = False, None
-            if bot_send_fn is not None:
-                try:
-                    ok = bool(bot_send_fn(uid, _WELCOME_PROGRESS_REMINDER_DAY2))
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning("[WELCOME_PROGRESS_REMINDER] bot_send_failed uid=%s err=%s", uid, exc)
-                    ok = False
-            if not ok:
-                ok, err, _blocked = send_fn(uid, _WELCOME_PROGRESS_REMINDER_DAY2)
+            ok, err = _send_welcome_reminder(uid, _WELCOME_PROGRESS_REMINDER_DAY2, send_fn=send_fn, bot_send_fn=bot_send_fn, stage="day2")
             if ok:
                 db_ref.welcome_reminders.update_one({"_id": doc["_id"]}, {"$set": {"day2_reminder_sent": True, "updated_at": now_ts}})
                 log_welcome_event("welcome_reminder_day2_sent", uid, now=now_ts)
