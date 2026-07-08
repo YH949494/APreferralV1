@@ -57,6 +57,7 @@ from vouchers import (
     resolve_referral_counts_with_snapshot_fallback,
     welcome_eligibility,
     build_welcome_progress_response,
+    get_rejoin_buffer_settings,
 )
 from admin_auth import admin_auth_bp, configure_admin_session
 from referral_rules import calc_referral_progress, REFERRAL_XP_PER_SUCCESS, REFERRAL_BONUS_INTERVAL, REFERRAL_BONUS_XP, build_public_referral_status
@@ -313,11 +314,10 @@ except (TypeError, ValueError):
     OFFICIAL_CHANNEL_ID = CHANNEL_ID
 
 # Rejoin buffer applied to public/pooled voucher claims after a user leaves and
-# rejoins the official channel (see member_update_handler / vouchers.py).
-try:
-    REJOIN_CLAIM_BUFFER_HOURS = float(os.getenv("REJOIN_CLAIM_BUFFER_HOURS", "12"))
-except (TypeError, ValueError):
-    REJOIN_CLAIM_BUFFER_HOURS = 12.0
+# rejoins the official channel. The buffer duration is admin-editable (see
+# vouchers.get_rejoin_buffer_settings / the "Rejoin Buffer" admin dashboard
+# control); this is only the fallback used if that lookup fails.
+REJOIN_CLAIM_BUFFER_HOURS_FALLBACK = 12.0
 
 def _to_kl_date(dt_any):
     """Accepts aware/naive datetime or ISO string and returns date in KL."""
@@ -7102,7 +7102,11 @@ async def member_update_handler(update: Update, context: ContextTypes.DEFAULT_TY
             set_fields["official_channel_first_subscribed_at"] = now
         buffer_until = None
         if had_left:
-            buffer_until = now + timedelta(hours=REJOIN_CLAIM_BUFFER_HOURS)
+            try:
+                buffer_hours = get_rejoin_buffer_settings().get("hours") or REJOIN_CLAIM_BUFFER_HOURS_FALLBACK
+            except Exception:
+                buffer_hours = REJOIN_CLAIM_BUFFER_HOURS_FALLBACK
+            buffer_until = now + timedelta(hours=buffer_hours)
             set_fields["rejoin_buffer_until"] = buffer_until
         users_collection.update_one(
             {"user_id": user.id},
