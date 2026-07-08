@@ -1,5 +1,6 @@
 from flask import Blueprint, request, jsonify, current_app, has_app_context
 import logging
+import math
 from pymongo import ASCENDING, DESCENDING, ReturnDocument
 from pymongo.errors import OperationFailure, PyMongoError, DuplicateKeyError, BulkWriteError
 from bson.objectid import ObjectId
@@ -247,7 +248,7 @@ try:
     MAIN_GROUP_ID = int(str(_RAW_MAIN_GROUP_ID).strip()) if _RAW_MAIN_GROUP_ID not in (None, "") else None
 except (TypeError, ValueError):
     MAIN_GROUP_ID = None
- 
+
 def _load_admin_ids() -> set:
     try:
         doc = admin_cache_col.find_one({"_id": "admins"}) or {}
@@ -1495,6 +1496,11 @@ POOL_VOUCHER_RETENTION_MESSAGE = (
     "🎁 Voucher claimed successfully!\n"
     "More voucher drops are coming soon — channel subscribers only.\n"
     "Stay subscribed to catch the next drop."
+)
+
+PUBLIC_POOL_REJOIN_RETENTION_MESSAGE = (
+    "Stay subscribed to @AdvantPlayOfficial. Leaving and rejoining may delay "
+    "future public voucher claims."
 )
 
 def _append_retention_message(payload: dict, retention_message: str) -> None:
@@ -3073,6 +3079,42 @@ def _is_public_pooled_drop(drop: dict) -> bool:
         return False
     elig_mode = str(((drop or {}).get("eligibility") or {}).get("mode") or "public").strip().lower()
     return elig_mode == "public"
+
+
+def check_rejoin_buffer_for_pooled_claim(uid: int | None, now: datetime | None = None) -> dict:
+    """Gate public/pooled voucher claims behind the official-channel rejoin buffer.
+
+    Only call this on the public/pooled claim path. Welcome/new_joiner, personalised,
+    affiliate, and admin-preview claims must never call this helper.
+    """
+    ref = _as_aware_utc(now or now_utc()) or now_utc()
+    if uid is None:
+        return {"ok": True}
+
+    user_doc = users_collection.find_one({"user_id": uid}, {"rejoin_buffer_until": 1}) or {}
+    buffer_until = _as_aware_utc(user_doc.get("rejoin_buffer_until"))
+    if not buffer_until or ref >= buffer_until:
+        return {"ok": True}
+
+    retry_after_sec = max(0, int((buffer_until - ref).total_seconds()))
+    hours_left = max(1, math.ceil(retry_after_sec / 3600))
+    _safe_log(
+        "info",
+        "[CHANNEL][REJOIN_BUFFER_BLOCK] uid=%s buffer_until=%s retry_after_sec=%s",
+        uid,
+        buffer_until,
+        retry_after_sec,
+    )
+    return {
+        "ok": False,
+        "code": "rejoin_buffer_active",
+        "reason": "rejoin_buffer_active",
+        "retry_after_sec": retry_after_sec,
+        "message": (
+            f"You recently rejoined @AdvantPlayOfficial. Please stay subscribed for "
+            f"{hours_left} more hours before claiming public voucher drops."
+        ),
+    }
 
 
 def is_public_pool(pool_doc: dict) -> bool:
@@ -5747,6 +5789,27 @@ def api_claim():
         )
         return jsonify({"status": "ok", "check_only": True, "subscribed": True}), 200
 
+    if is_public_pool(voucher):
+        rejoin_check = check_rejoin_buffer_for_pooled_claim(uid, now_ref)
+        if not rejoin_check.get("ok"):
+            logger.info(
+                "[CLAIM_BLOCK] reason=%s drop_id=%s uid=%s username=%s",
+                "rejoin_buffer_active",
+                drop_id,
+                user_id_str,
+                username,
+            )
+            payload = {
+                "status": "error",
+                "code": rejoin_check.get("code"),
+                "ok": False,
+                "eligible": False,
+                "reason": rejoin_check.get("reason"),
+                "retry_after_sec": rejoin_check.get("retry_after_sec"),
+                "message": rejoin_check.get("message"),
+            }
+            return jsonify(payload), 403
+
     if is_pool_drop:
         claimability = _pooled_claimability_state(
             drop=voucher,
@@ -6455,6 +6518,8 @@ def api_claim():
         _append_retention_message(response_payload, WELCOME_BONUS_RETENTION_MESSAGE)
     elif is_pool_drop:
         _append_retention_message(response_payload, POOL_VOUCHER_RETENTION_MESSAGE)
+        if is_public_pool(voucher):
+            _append_retention_message(response_payload, PUBLIC_POOL_REJOIN_RETENTION_MESSAGE)
     if not _is_new_joiner_audience(audience_type):
         current_app.logger.info(
             "[claim] uid=%s drop_id=%s dtype=%s audience=%s decision=allowed reason=success",
