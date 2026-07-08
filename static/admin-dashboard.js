@@ -2793,9 +2793,62 @@
       });
   }
 
+  // ---------- Rejoin Buffer admin toggle ----------
+  function loadRejoinBufferSettings() {
+    var statusEl = $("#rb-status");
+    if (statusEl) statusEl.textContent = "Loading…";
+    return api("/v2/miniapp/admin/rejoin-buffer/settings")
+      .then(function (d) {
+        var s = d.settings || {};
+        var modeEl = $("#rb-mode");
+        var hoursEl = $("#rb-hours");
+        var idsEl = $("#rb-test-user-ids");
+        if (modeEl) modeEl.value = s.mode || "disabled";
+        if (hoursEl) hoursEl.value = s.hours || 12;
+        if (idsEl) idsEl.value = (s.test_user_ids || []).join("\n");
+        if (statusEl) {
+          statusEl.textContent = "Current: " + (s.mode || "disabled") + " · " + (s.hours || 12) + "h · " +
+            ((s.test_user_ids || []).length) + " test user(s)";
+        }
+      })
+      .catch(function (e) {
+        if (e.message !== "unauthorized" && statusEl) statusEl.textContent = "Failed to load: " + e.message;
+      });
+  }
+
+  function bindRejoinBufferSettings() {
+    var btn = $("#rb-save-btn");
+    if (!btn) return;
+    btn.addEventListener("click", function () {
+      var resultEl = $("#rb-result");
+      var mode = ($("#rb-mode").value || "disabled").trim();
+      var hours = parseFloat($("#rb-hours").value);
+      if (!hours || hours <= 0) { resultEl.textContent = "Buffer hours must be a positive number."; return; }
+      var idsRaw = ($("#rb-test-user-ids").value || "").trim();
+      var testUserIds = idsRaw ? idsRaw.split(/[\n,]+/).map(function (s) { return s.trim(); }).filter(Boolean) : [];
+      btn.disabled = true;
+      resultEl.textContent = "Saving…";
+      fetch("/v2/miniapp/admin/rejoin-buffer/settings", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json", "Accept": "application/json" },
+        body: JSON.stringify({ mode: mode, hours: hours, test_user_ids: testUserIds }),
+      }).then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }); })
+        .then(function (res) {
+          if (!res.ok || res.d.status !== "ok") throw new Error(res.d.message || res.d.code || "unknown");
+          resultEl.textContent = "Saved.";
+          toast("✅ Rejoin buffer settings saved", "success");
+          loadRejoinBufferSettings();
+        })
+        .catch(function (e) { resultEl.textContent = "Failed: " + e.message; toast("❌ Failed to save rejoin buffer settings: " + e.message, "error"); })
+        .finally(function () { btn.disabled = false; });
+    });
+  }
+
   function loadSettings(refresh) {
     setMeta("Loading…");
     statePanel("settings-body", "loading", "Loading configuration…");
+    loadRejoinBufferSettings();
     api("/api/admin/dashboard/settings" + (refresh ? "?refresh=1" : ""))
       .then(function (d) {
         renderMeta(d, "all time");
@@ -4485,7 +4538,7 @@
       uploadPlayerPerformance: "Data → Upload Player Performance", uploadHistory: "Data → Upload History",
       rawExplorer: "Data → Raw Data Explorer",
       users: "User Drilldown", joinRequests: "Join Requests", xpAdjust: "Add / Reduce XP",
-      settings: "Settings (Read Only)"
+      settings: "Settings"
     };
     $("#view-title").textContent = titles[view] || view;
     banner(null);
@@ -4568,6 +4621,7 @@
     bindAffiliatePending();
     bindJoinRequests();
     bindXpAdjust();
+    bindRejoinBufferSettings();
     $("#reactivation-start-btn").addEventListener("click", function () { setReactivation(true, this); });
     $("#reactivation-pause-btn").addEventListener("click", function () { setReactivation(false, this); });
     $all("#funnel-window button").forEach(function (b) {

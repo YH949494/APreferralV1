@@ -1,5 +1,6 @@
 from flask import Blueprint, request, jsonify, current_app, has_app_context
 import logging
+import math
 from pymongo import ASCENDING, DESCENDING, ReturnDocument
 from pymongo.errors import OperationFailure, PyMongoError, DuplicateKeyError, BulkWriteError
 from bson.objectid import ObjectId
@@ -247,7 +248,76 @@ try:
     MAIN_GROUP_ID = int(str(_RAW_MAIN_GROUP_ID).strip()) if _RAW_MAIN_GROUP_ID not in (None, "") else None
 except (TypeError, ValueError):
     MAIN_GROUP_ID = None
- 
+
+# ----------------------------
+# Rejoin buffer (official-channel leave -> rejoin) admin toggle
+# ----------------------------
+REJOIN_BUFFER_MODE_DISABLED = "disabled"
+REJOIN_BUFFER_MODE_TEST_USERS_ONLY = "test_users_only"
+REJOIN_BUFFER_MODE_ENABLED = "enabled"
+REJOIN_BUFFER_MODES = (REJOIN_BUFFER_MODE_DISABLED, REJOIN_BUFFER_MODE_TEST_USERS_ONLY, REJOIN_BUFFER_MODE_ENABLED)
+REJOIN_BUFFER_SETTINGS_DOC_ID = "rejoin_buffer"
+DEFAULT_REJOIN_BUFFER_SETTINGS = {
+    "mode": REJOIN_BUFFER_MODE_DISABLED,
+    "hours": 12,
+    "test_user_ids": [],
+}
+app_settings_col = db["app_settings"]
+
+
+def get_rejoin_buffer_settings() -> dict:
+    """Return the current rejoin-buffer admin config, normalized with defaults."""
+    try:
+        doc = app_settings_col.find_one({"_id": REJOIN_BUFFER_SETTINGS_DOC_ID}) or {}
+    except Exception:
+        doc = {}
+
+    mode = str(doc.get("mode") or DEFAULT_REJOIN_BUFFER_SETTINGS["mode"]).strip().lower()
+    if mode not in REJOIN_BUFFER_MODES:
+        mode = DEFAULT_REJOIN_BUFFER_SETTINGS["mode"]
+
+    try:
+        hours = float(doc.get("hours", DEFAULT_REJOIN_BUFFER_SETTINGS["hours"]))
+    except (TypeError, ValueError):
+        hours = DEFAULT_REJOIN_BUFFER_SETTINGS["hours"]
+    if hours <= 0:
+        hours = DEFAULT_REJOIN_BUFFER_SETTINGS["hours"]
+
+    test_user_ids = set()
+    for raw_id in (doc.get("test_user_ids") or []):
+        try:
+            test_user_ids.add(int(raw_id))
+        except (TypeError, ValueError):
+            continue
+
+    return {"mode": mode, "hours": hours, "test_user_ids": sorted(test_user_ids)}
+
+
+def set_rejoin_buffer_settings(*, mode: str, hours: float, test_user_ids: list, updated_by: str | None = None) -> dict:
+    """Persist the rejoin-buffer admin config. Caller must already validate inputs."""
+    doc = {
+        "mode": mode,
+        "hours": hours,
+        "test_user_ids": test_user_ids,
+        "updated_at": now_utc(),
+        "updated_by": updated_by,
+    }
+    app_settings_col.update_one(
+        {"_id": REJOIN_BUFFER_SETTINGS_DOC_ID},
+        {"$set": doc},
+        upsert=True,
+    )
+    _safe_log(
+        "info",
+        "[CHANNEL][REJOIN_BUFFER_SETTINGS_UPDATED] mode=%s hours=%s test_user_count=%s by=%s",
+        mode,
+        hours,
+        len(test_user_ids),
+        updated_by,
+    )
+    return get_rejoin_buffer_settings()
+
+
 def _load_admin_ids() -> set:
     try:
         doc = admin_cache_col.find_one({"_id": "admins"}) or {}
@@ -1495,6 +1565,11 @@ POOL_VOUCHER_RETENTION_MESSAGE = (
     "🎁 Voucher claimed successfully!\n"
     "More voucher drops are coming soon — channel subscribers only.\n"
     "Stay subscribed to catch the next drop."
+)
+
+PUBLIC_POOL_REJOIN_RETENTION_MESSAGE = (
+    "Stay subscribed to @AdvantPlayOfficial. Leaving and rejoining may delay "
+    "future public voucher claims."
 )
 
 def _append_retention_message(payload: dict, retention_message: str) -> None:
@@ -3073,6 +3148,57 @@ def _is_public_pooled_drop(drop: dict) -> bool:
         return False
     elig_mode = str(((drop or {}).get("eligibility") or {}).get("mode") or "public").strip().lower()
     return elig_mode == "public"
+
+
+def check_rejoin_buffer_for_pooled_claim(uid: int | None, now: datetime | None = None) -> dict:
+    """Gate public/pooled voucher claims behind the official-channel rejoin buffer.
+
+    Only call this on the public/pooled claim path. Welcome/new_joiner, personalised,
+    affiliate, and admin-preview claims must never call this helper.
+
+    Controlled by the admin-editable rejoin-buffer settings doc:
+      - mode="disabled": never blocks anyone.
+      - mode="test_users_only": only blocks uids in the configured test_user_ids list.
+      - mode="enabled": blocks any user with an active rejoin_buffer_until.
+    """
+    ref = _as_aware_utc(now or now_utc()) or now_utc()
+    if uid is None:
+        return {"ok": True}
+
+    settings = get_rejoin_buffer_settings()
+    mode = settings["mode"]
+    if mode == REJOIN_BUFFER_MODE_DISABLED:
+        _safe_log("info", "[CHANNEL][REJOIN_BUFFER_SKIP] mode=%s uid=%s reason=mode_disabled", mode, uid)
+        return {"ok": True}
+    if mode == REJOIN_BUFFER_MODE_TEST_USERS_ONLY and uid not in settings["test_user_ids"]:
+        _safe_log("info", "[CHANNEL][REJOIN_BUFFER_SKIP] mode=%s uid=%s reason=not_test_user", mode, uid)
+        return {"ok": True}
+
+    user_doc = users_collection.find_one({"user_id": uid}, {"rejoin_buffer_until": 1}) or {}
+    buffer_until = _as_aware_utc(user_doc.get("rejoin_buffer_until"))
+    if not buffer_until or ref >= buffer_until:
+        return {"ok": True}
+
+    retry_after_sec = max(0, int((buffer_until - ref).total_seconds()))
+    hours_left = max(1, math.ceil(retry_after_sec / 3600))
+    _safe_log(
+        "info",
+        "[CHANNEL][REJOIN_BUFFER_BLOCK] mode=%s uid=%s buffer_until=%s retry_after_sec=%s",
+        mode,
+        uid,
+        buffer_until,
+        retry_after_sec,
+    )
+    return {
+        "ok": False,
+        "code": "rejoin_buffer_active",
+        "reason": "rejoin_buffer_active",
+        "retry_after_sec": retry_after_sec,
+        "message": (
+            f"You recently rejoined @AdvantPlayOfficial. Please stay subscribed for "
+            f"{hours_left} more hours before claiming public voucher drops."
+        ),
+    }
 
 
 def is_public_pool(pool_doc: dict) -> bool:
@@ -5747,6 +5873,27 @@ def api_claim():
         )
         return jsonify({"status": "ok", "check_only": True, "subscribed": True}), 200
 
+    if is_public_pool(voucher):
+        rejoin_check = check_rejoin_buffer_for_pooled_claim(uid, now_ref)
+        if not rejoin_check.get("ok"):
+            logger.info(
+                "[CLAIM_BLOCK] reason=%s drop_id=%s uid=%s username=%s",
+                "rejoin_buffer_active",
+                drop_id,
+                user_id_str,
+                username,
+            )
+            payload = {
+                "status": "error",
+                "code": rejoin_check.get("code"),
+                "ok": False,
+                "eligible": False,
+                "reason": rejoin_check.get("reason"),
+                "retry_after_sec": rejoin_check.get("retry_after_sec"),
+                "message": rejoin_check.get("message"),
+            }
+            return jsonify(payload), 403
+
     if is_pool_drop:
         claimability = _pooled_claimability_state(
             drop=voucher,
@@ -6455,6 +6602,8 @@ def api_claim():
         _append_retention_message(response_payload, WELCOME_BONUS_RETENTION_MESSAGE)
     elif is_pool_drop:
         _append_retention_message(response_payload, POOL_VOUCHER_RETENTION_MESSAGE)
+        if is_public_pool(voucher):
+            _append_retention_message(response_payload, PUBLIC_POOL_REJOIN_RETENTION_MESSAGE)
     if not _is_new_joiner_audience(audience_type):
         current_app.logger.info(
             "[claim] uid=%s drop_id=%s dtype=%s audience=%s decision=allowed reason=success",
@@ -6892,6 +7041,62 @@ def admin_pools_summary_v2():
             }
         )
     return jsonify({"status": "ok", "items": out})
+
+
+@vouchers_bp.route("/admin/rejoin-buffer/settings", methods=["GET"])
+def admin_get_rejoin_buffer_settings():
+    _, err = require_admin()
+    if err:
+        return err
+    return jsonify({"status": "ok", "settings": get_rejoin_buffer_settings()})
+
+
+@vouchers_bp.route("/admin/rejoin-buffer/settings", methods=["POST"])
+def admin_set_rejoin_buffer_settings():
+    user, err = require_admin()
+    if err:
+        return err
+
+    body = request.get_json(silent=True) or {}
+
+    mode = str(body.get("mode") or "").strip().lower()
+    if mode not in REJOIN_BUFFER_MODES:
+        return jsonify({
+            "status": "error",
+            "code": "bad_mode",
+            "message": "mode must be one of: " + ", ".join(REJOIN_BUFFER_MODES),
+        }), 400
+
+    try:
+        hours = float(body.get("hours", DEFAULT_REJOIN_BUFFER_SETTINGS["hours"]))
+    except (TypeError, ValueError):
+        return jsonify({"status": "error", "code": "bad_hours", "message": "hours must be a positive number"}), 400
+    if hours <= 0:
+        return jsonify({"status": "error", "code": "bad_hours", "message": "hours must be a positive number"}), 400
+
+    raw_ids = body.get("test_user_ids")
+    if isinstance(raw_ids, str):
+        raw_ids = [part.strip() for part in raw_ids.replace(",", "\n").splitlines() if part.strip()]
+    test_user_ids = set()
+    if isinstance(raw_ids, list):
+        for raw_id in raw_ids:
+            try:
+                test_user_ids.add(int(str(raw_id).strip()))
+            except (TypeError, ValueError):
+                return jsonify({
+                    "status": "error",
+                    "code": "bad_test_user_ids",
+                    "message": f"invalid Telegram user id: {raw_id!r}",
+                }), 400
+
+    updated_by = (user or {}).get("usernameLower") or (user or {}).get("username")
+    settings = set_rejoin_buffer_settings(
+        mode=mode,
+        hours=hours,
+        test_user_ids=sorted(test_user_ids),
+        updated_by=updated_by,
+    )
+    return jsonify({"status": "ok", "settings": settings})
 
 
 @vouchers_bp.route("/admin/affiliate/kpis", methods=["GET"])

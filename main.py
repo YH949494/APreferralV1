@@ -57,6 +57,7 @@ from vouchers import (
     resolve_referral_counts_with_snapshot_fallback,
     welcome_eligibility,
     build_welcome_progress_response,
+    get_rejoin_buffer_settings,
 )
 from admin_auth import admin_auth_bp, configure_admin_session
 from referral_rules import calc_referral_progress, REFERRAL_XP_PER_SUCCESS, REFERRAL_BONUS_INTERVAL, REFERRAL_BONUS_XP, build_public_referral_status
@@ -311,6 +312,12 @@ try:
     OFFICIAL_CHANNEL_ID = int(_RAW_OFFICIAL_CHANNEL_ID) if _RAW_OFFICIAL_CHANNEL_ID not in (None, "") else CHANNEL_ID
 except (TypeError, ValueError):
     OFFICIAL_CHANNEL_ID = CHANNEL_ID
+
+# Rejoin buffer applied to public/pooled voucher claims after a user leaves and
+# rejoins the official channel. The buffer duration is admin-editable (see
+# vouchers.get_rejoin_buffer_settings / the "Rejoin Buffer" admin dashboard
+# control); this is only the fallback used if that lookup fails.
+REJOIN_CLAIM_BUFFER_HOURS_FALLBACK = 12.0
 
 def _to_kl_date(dt_any):
     """Accepts aware/naive datetime or ISO string and returns date in KL."""
@@ -7052,9 +7059,25 @@ async def member_update_handler(update: Update, context: ContextTypes.DEFAULT_TY
                 pending_doc.get("inviter_user_id"),
             )
         return
+
+    if left_group and chat_id == OFFICIAL_CHANNEL_ID and isinstance(user.id, int):
+        now = now_utc()
+        users_collection.update_one(
+            {"user_id": user.id},
+            {
+                "$set": {
+                    "left_official_channel_at": now,
+                    "official_channel_currently_subscribed": False,
+                }
+            },
+            upsert=True,
+        )
+        logger.info("[CHANNEL][LEAVE] uid=%s chat_id=%s", user.id, chat_id)
+        return
+
     if not became_member:
         return
-        
+
     if chat_id == GROUP_ID:
         _confirm_referral_on_main_join(
             user.id,
@@ -7062,7 +7085,44 @@ async def member_update_handler(update: Update, context: ContextTypes.DEFAULT_TY
             invite_link=getattr(member, "invite_link", None),
             chat_id=member.chat.id,
         )
-    
+
+    if chat_id == OFFICIAL_CHANNEL_ID and isinstance(user.id, int):
+        now = now_utc()
+        existing_user_doc = users_collection.find_one(
+            {"user_id": user.id},
+            {"left_official_channel_at": 1, "official_channel_first_subscribed_at": 1},
+        ) or {}
+        had_left = bool(existing_user_doc.get("left_official_channel_at"))
+        is_first_subscribe = not existing_user_doc.get("official_channel_first_subscribed_at")
+        set_fields = {
+            "rejoined_official_channel_at": now,
+            "official_channel_currently_subscribed": True,
+        }
+        if is_first_subscribe:
+            set_fields["official_channel_first_subscribed_at"] = now
+        buffer_until = None
+        if had_left:
+            try:
+                buffer_hours = get_rejoin_buffer_settings().get("hours") or REJOIN_CLAIM_BUFFER_HOURS_FALLBACK
+            except Exception:
+                buffer_hours = REJOIN_CLAIM_BUFFER_HOURS_FALLBACK
+            buffer_until = now + timedelta(hours=buffer_hours)
+            set_fields["rejoin_buffer_until"] = buffer_until
+        users_collection.update_one(
+            {"user_id": user.id},
+            {"$set": set_fields},
+            upsert=True,
+        )
+        if had_left:
+            logger.info(
+                "[CHANNEL][REJOIN] uid=%s chat_id=%s buffer_until=%s",
+                user.id,
+                chat_id,
+                buffer_until,
+            )
+        elif is_first_subscribe:
+            logger.info("[CHANNEL][FIRST_JOIN] uid=%s chat_id=%s", user.id, chat_id)
+
     # 1) 先记录 join（保持你原本逻辑：哪个 chat 触发就记录哪个 chat）
     try:
         await handle_user_join(
