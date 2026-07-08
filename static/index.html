@@ -1637,7 +1637,7 @@
           <div class="welcome-status-badge" id="welcome-status-badge">🎁 Ready to Claim</div>
           <p class="welcome-status-message" id="welcome-status-message">Your Welcome Reward has been unlocked.</p>
           <p class="welcome-status-issued" id="welcome-status-issued" style="display:none;"></p>
-          <button id="welcome-view-reward-btn" type="button" class="btn btn-primary">View Reward ↑</button>
+          <button id="welcome-view-reward-btn" type="button" class="btn btn-primary">🎟️ Claim Now</button>
         </div>
       </div>
     </div>
@@ -2439,7 +2439,11 @@
       window.open(target, "_blank", "noopener,noreferrer");
     }
 
-    function showWelcomeVoucherGuidePopup(claimGuide) {
+    // Post-claim journey (Phase 2): Voucher Claimed -> Celebrate -> Copy Code
+    // -> Redeem Guide -> Play Now -> Community CTA, all surfaced in this one
+    // popup so improving reward presentation/confidence/next-action never
+    // costs the user an extra required click.
+    function showWelcomeVoucherGuidePopup(claimGuide, claim = {}) {
       try {
         if (!claimGuide || claimGuide.type !== "welcome_voucher") return;
         const existing = document.getElementById("welcome-voucher-guide-modal");
@@ -2453,16 +2457,74 @@
         const content = document.createElement("div");
         content.className = "modal-content";
 
+        const badge = document.createElement("div");
+        badge.className = "welcome-unlock-badge";
+        badge.textContent = "🎉";
+        content.appendChild(badge);
+
         const title = document.createElement("h3");
-        title.textContent = String(claimGuide.title || "How to use your welcome voucher");
+        title.textContent = String(claimGuide.title || "🎉 Your Welcome Voucher is ready!");
+        content.appendChild(title);
+
         const message = document.createElement("p");
         message.textContent = String(claimGuide.message || "");
+        content.appendChild(message);
+
+        const code = String(claim.code || "").trim();
+        if (code && code !== "(no code)") {
+          const codeRow = document.createElement("div");
+          codeRow.style.display = "flex";
+          codeRow.style.alignItems = "center";
+          codeRow.style.gap = "8px";
+          codeRow.style.margin = "8px 0";
+
+          const codeText = document.createElement("code");
+          codeText.textContent = code;
+          codeText.style.fontSize = "16px";
+          codeText.style.fontWeight = "700";
+          codeText.style.flex = "1";
+
+          const copyBtn = document.createElement("button");
+          copyBtn.type = "button";
+          copyBtn.className = "btn btn-ghost";
+          copyBtn.textContent = "📋 " + t("copy");
+          copyBtn.addEventListener("click", () => {
+            navigator.clipboard?.writeText(code)
+              .then(() => flashButtonLabel(copyBtn, "✓ Copied"))
+              .catch(() => tgAlert(t("unable_to_copy") + code));
+          });
+
+          codeRow.appendChild(codeText);
+          codeRow.appendChild(copyBtn);
+          content.appendChild(codeRow);
+        }
 
         const guideBtn = document.createElement("button");
         guideBtn.type = "button";
         guideBtn.className = "btn btn-primary";
-        guideBtn.textContent = "📖 Open Claim Guide";
+        guideBtn.textContent = "📖 Open Redemption Guide";
         guideBtn.addEventListener("click", () => openTelegramSafeLink(claimGuide.guide_url));
+        content.appendChild(guideBtn);
+
+        if (claimGuide.play_url) {
+          const playBtn = document.createElement("button");
+          playBtn.type = "button";
+          playBtn.className = "btn btn-primary";
+          playBtn.style.marginTop = "10px";
+          playBtn.textContent = "🎮 Play Now";
+          playBtn.addEventListener("click", () => window.open(claimGuide.play_url, "_blank", "noopener,noreferrer"));
+          content.appendChild(playBtn);
+        }
+
+        if (claimGuide.community_url) {
+          const communityBtn = document.createElement("button");
+          communityBtn.type = "button";
+          communityBtn.className = "btn btn-ghost";
+          communityBtn.style.marginTop = "10px";
+          communityBtn.textContent = "💬 Join the Community";
+          communityBtn.addEventListener("click", () => openTelegramSafeLink(claimGuide.community_url));
+          content.appendChild(communityBtn);
+        }
 
         const helpBtn = document.createElement("button");
         helpBtn.type = "button";
@@ -2470,6 +2532,7 @@
         helpBtn.style.marginTop = "10px";
         helpBtn.textContent = "💬 Need Help";
         helpBtn.addEventListener("click", () => openTelegramSafeLink(claimGuide.help_url));
+        content.appendChild(helpBtn);
 
         const closeBtn = document.createElement("button");
         closeBtn.type = "button";
@@ -2477,17 +2540,14 @@
         closeBtn.style.marginTop = "10px";
         closeBtn.textContent = "Close";
         closeBtn.addEventListener("click", () => overlay.remove());
-
-        content.appendChild(title);
-        content.appendChild(message);
-        content.appendChild(guideBtn);
-        content.appendChild(helpBtn);
         content.appendChild(closeBtn);
+
         overlay.appendChild(content);
         overlay.addEventListener("click", (evt) => {
           if (evt.target === overlay) overlay.remove();
         });
         document.body.appendChild(overlay);
+        hapticNotify("success");
       } catch (popupErr) {
         console.warn("Welcome claim guide popup failed", popupErr);
       }
@@ -3300,7 +3360,9 @@
       }
       const viewRewardBtn = document.getElementById("welcome-view-reward-btn");
       if (viewRewardBtn) {
-        viewRewardBtn.addEventListener("click", () => highlightWelcomeRewardCard());
+        // One-tap claim (see claimWelcomeRewardOneTap): reuses the exact
+        // existing claim button/handler instead of only scrolling to it.
+        viewRewardBtn.addEventListener("click", () => claimWelcomeRewardOneTap());
       }
     })();
 
@@ -3380,6 +3442,25 @@
       if (modal) modal.style.display = "none";
     }
 
+    // One-tap claim: Unlock -> Claim Now (was Unlock -> View Reward -> Scroll -> Claim).
+    // Tapping "Claim it now" in the unlock modal refreshes the voucher card
+    // (so it carries the current claimable dropId) and programmatically
+    // triggers the SAME delegated claim button handler used everywhere else
+    // in the app (see the document "click" listener above, ~line 4967) - so
+    // every backend guarantee (validation, anti-abuse, FCFS allocation,
+    // personalized voucher logic, claim locking, rate limits, analytics) is
+    // reused unchanged. If the card isn't ready yet, falls back to the
+    // previous scroll-to-card behaviour so the user can tap Claim manually.
+    async function claimWelcomeRewardOneTap() {
+      await loadVouchers();
+      const cardBtn = document.querySelector('.campaign-card[data-welcome-card="true"] button[data-dropid]');
+      if (cardBtn && !cardBtn.disabled) {
+        cardBtn.click();
+      } else {
+        highlightWelcomeRewardCard();
+      }
+    }
+
     (function initWelcomeUnlockModal() {
       const claimBtn = document.getElementById("welcome-unlock-claim-btn");
       const closeBtn = document.getElementById("welcome-unlock-close-btn");
@@ -3387,7 +3468,7 @@
       if (claimBtn) {
         claimBtn.addEventListener("click", () => {
           closeWelcomeUnlockModal();
-          highlightWelcomeRewardCard();
+          claimWelcomeRewardOneTap();
         });
       }
       if (closeBtn) closeBtn.addEventListener("click", closeWelcomeUnlockModal);
@@ -5162,7 +5243,7 @@ Active players win more.`;
             : "\n\n📋 Tap the copy button below if clipboard access is blocked.";
           tgAlert(`🎟️ Your code: ${codeText}\nClaimed at: ${claimedAt}${copyMsg}`);
           if (out?.claim_guide?.type === "welcome_voucher") {
-            showWelcomeVoucherGuidePopup(out.claim_guide);
+            showWelcomeVoucherGuidePopup(out.claim_guide, { code: codeText, claimedAt });
           }
           await loadWelcomeProgress();
         }

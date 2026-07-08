@@ -403,13 +403,24 @@ def build_welcome_journey_panel(
             query["claimed_at"] = {"$gte": window_start}
         return int(welcome_eligibility_col.count_documents(query))
 
-    def _reminder_recovery_rate():
+    _REMINDER_STAGE_EVENTS = (
+        "welcome_reminder_20h_sent",
+        "welcome_reminder_28h_sent",
+        "welcome_reminder_day2_sent",
+        "welcome_recovery_sent",
+    )
+
+    def _reminder_recipients() -> set:
         recipients: set = set()
-        for reminder_event in ("welcome_reminder_20h_sent", "welcome_reminder_28h_sent", "welcome_reminder_day2_sent"):
+        for reminder_event in _REMINDER_STAGE_EVENTS:
             match: dict = {"event": reminder_event}
             if window_start is not None:
                 match["created_at"] = {"$gte": window_start}
             recipients.update(welcome_analytics_events_col.distinct("user_id", match))
+        return recipients
+
+    def _reminder_recovery_rate():
+        recipients = _reminder_recipients()
         if not recipients:
             return None
         completed_match: dict = {"event": "welcome_completed", "user_id": {"$in": list(recipients)}}
@@ -423,11 +434,24 @@ def build_welcome_journey_panel(
     completed_users = metric(lambda: _event_user_count("welcome_completed"), note="Distinct users who unlocked the welcome reward.")
     claimed_users = metric(_claimed_users, note="welcome_eligibility records claimed in the selected window.")
 
+    # Reminder funnel (Phase 2). All stages reuse the append-only
+    # welcome_analytics_events log written by vouchers.log_welcome_event - no
+    # new tracking system. "Delivered" is not modeled: the Telegram Bot API
+    # does not confirm message delivery, only send success/failure, so there
+    # is no reliable signal to report between "Sent" and "MiniApp Open".
+    reminder_sent_users = metric(lambda: len(_reminder_recipients()), note="Distinct users sent any Welcome reminder (20h/28h/day2/recovery stages combined).")
+    miniapp_open_users = metric(
+        lambda: _event_user_count("welcome_progress_view"),
+        note="Distinct users who opened the mini-app while the Welcome card was visible (proxy via welcome_progress_view, fired by /api/welcome-progress).",
+    )
+    recovery_sent_users = metric(lambda: _event_user_count("welcome_recovery_sent"), note="Distinct users sent the Smart Recovery Journey nudge (stalled well past the normal reminder window).")
+
     d2_rate = _pct(d2_users["value"], d1_users["value"]) if d1_users["value"] and d2_users["value"] is not None else None
     d3_rate = _pct(d3_users["value"], d2_users["value"]) if d2_users["value"] and d3_users["value"] is not None else None
     completion_rate = _pct(completed_users["value"], eligible["value"]) if eligible["value"] else None
     claim_rate = _pct(claimed_users["value"], completed_users["value"]) if completed_users["value"] else None
     reminder_recovery_rate = metric(_reminder_recovery_rate, quality="heuristic", note="Share of reminder recipients who reached welcome_completed afterwards.")
+    reminder_to_open_rate = _pct(miniapp_open_users["value"], reminder_sent_users["value"]) if reminder_sent_users["value"] else None
 
     return {
         "success": True,
@@ -442,6 +466,11 @@ def build_welcome_journey_panel(
             "welcome_completion_rate_pct": {"value": completion_rate, "data_quality": "exact" if completion_rate is not None else "missing"},
             "welcome_claim_rate_pct": {"value": claim_rate, "data_quality": "exact" if claim_rate is not None else "missing"},
             "reminder_recovery_rate_pct": reminder_recovery_rate,
+            "welcome_reminder_sent_users": reminder_sent_users,
+            "welcome_recovery_sent_users": recovery_sent_users,
+            "welcome_miniapp_open_users": miniapp_open_users,
+            "reminder_to_miniapp_open_rate_pct": {"value": reminder_to_open_rate, "data_quality": "exact" if reminder_to_open_rate is not None else "missing"},
+            "welcome_first_deposit_users": {"value": None, "data_quality": "unavailable", "note": "Deposit/bet activity is not present in this backend (see uim_kpi_mapping.py) - requires a feed from the platform's deposit ledger before this can be tracked."},
         },
     }
 

@@ -288,3 +288,131 @@ def test_welcome_journey_panel_computes_rates():
     assert summary["welcome_eligible_users"]["value"] == 2
     assert summary["welcome_d2_rate_pct"]["value"] == 50.0
     assert summary["welcome_completion_rate_pct"]["value"] == 50.0
+
+
+def test_welcome_journey_panel_reports_reminder_and_open_funnel():
+    events = [
+        {"event": "welcome_reminder_20h_sent", "user_id": 1},
+        {"event": "welcome_reminder_20h_sent", "user_id": 2},
+        {"event": "welcome_recovery_sent", "user_id": 2},
+        {"event": "welcome_progress_view", "user_id": 1},
+        {"event": "welcome_completed", "user_id": 1},
+    ]
+    events_col = FakeDistinctCollection(events)
+
+    class FakeEligCol:
+        def count_documents(self, filt):
+            return 0
+
+    panel = dashboard_panels.build_welcome_journey_panel(
+        welcome_eligibility_col=FakeEligCol(),
+        welcome_analytics_events_col=events_col,
+        now=datetime(2026, 1, 5, tzinfo=timezone.utc),
+        window="all",
+    )
+    summary = panel["summary"]
+    assert summary["welcome_reminder_sent_users"]["value"] == 2
+    assert summary["welcome_recovery_sent_users"]["value"] == 1
+    assert summary["welcome_miniapp_open_users"]["value"] == 1
+    assert summary["welcome_first_deposit_users"]["data_quality"] == "unavailable"
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: personalization, locale fallback, adaptive timing, recovery stage
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_welcome_display_name_prefers_first_name_and_falls_back():
+    assert m.resolve_welcome_display_name(1, user_doc={"first_name": "John"}) == "John"
+    assert m.resolve_welcome_display_name(1, user_doc={"username": "jdoe"}) == "jdoe"
+    assert m.resolve_welcome_display_name(1, user_doc={}) is None
+    assert m.resolve_welcome_display_name(1, user_doc={"first_name": "  "}) is None
+
+
+def test_resolve_welcome_locale_falls_back_to_en():
+    assert m.resolve_welcome_locale({"language_code": "th"}) == "th"
+    assert m.resolve_welcome_locale({"language_code": "fr"}) == "en"
+    assert m.resolve_welcome_locale({}) == "en"
+    assert m.resolve_welcome_locale(None) == "en"
+
+
+def test_render_welcome_reminder_greeting_present_and_absent():
+    with_name = scheduler._render_welcome_reminder("day1_20h", display_name="John", locale="en")
+    assert with_name.startswith("Hi John 👋")
+    without_name = scheduler._render_welcome_reminder("day1_20h", display_name=None, locale="en")
+    assert not without_name.startswith("Hi")
+    assert without_name == scheduler._WELCOME_PROGRESS_REMINDER_20H
+
+
+def test_lifecycle_pipeline_skips_users_already_owned_by_v2_pipeline():
+    now = datetime(2026, 5, 14, 12, 0, tzinfo=timezone.utc)
+    doc = {"_id": 1, "uid": 7, "first_seen_at": now - timedelta(hours=13)}
+
+    class _FakeWelcomeReminders:
+        def find_one(self, filt, projection=None):
+            return {"user_id": 7} if filt.get("user_id") == 7 else None
+
+    class _FakeDb2:
+        def __init__(self):
+            self.welcome_eligibility = FakeReminderCollectionForLifecycle([doc])
+            self.new_joiner_claims = FakeReminderCollectionForLifecycle([])
+            self.welcome_reminders = _FakeWelcomeReminders()
+
+    sent = []
+    out = scheduler.process_welcome_voucher_lifecycle(
+        now_ref=now, db_ref=_FakeDb2(), send_fn=lambda uid, text: (sent.append(uid), (True, None, False))[-1]
+    )
+    assert sent == []
+    assert out["reminder_sent"] == 0
+
+
+class FakeReminderCollectionForLifecycle:
+    def __init__(self, docs):
+        self.docs = docs
+
+    def find(self, filt=None, projection=None):
+        class _Cursor(list):
+            def limit(self, n):
+                return _Cursor(self[:n])
+        out = [d for d in self.docs if not d.get("claimed") and "expired_at" not in d]
+        return _Cursor(out)
+
+    def find_one(self, filt=None, projection=None):
+        filt = filt or {}
+        for d in self.docs:
+            if all(d.get(k) == v for k, v in filt.items()):
+                return d
+        return None
+
+    def update_one(self, filt, update, upsert=False):
+        for d in self.docs:
+            if d.get("_id") == filt.get("_id"):
+                d.update(update.get("$set", {}))
+
+
+def test_process_welcome_reminders_sends_recovery_after_day2_reminder(monkeypatch):
+    now = datetime(2026, 1, 6, 12, 0, tzinfo=timezone.utc)
+    doc = {
+        "_id": "r9",
+        "user_id": 99,
+        "day1_at": now - timedelta(days=3),
+        "day2_at": now - timedelta(hours=49),
+        "reminder_20h_sent": True,
+        "reminder_28h_sent": True,
+        "day2_reminder_sent": True,
+        "recovery_sent": False,
+    }
+    fake_db = FakeReminderDb([doc])
+    sent = []
+
+    def fake_send(uid, text):
+        sent.append((uid, text))
+        return True, None, False
+
+    monkeypatch.setattr(m, "get_welcome_progress", lambda uid, now=None: {"completed": 2, "claimed": False, "expired": False})
+
+    result = scheduler.process_welcome_reminders(now_ref=now, db_ref=fake_db, send_fn=fake_send)
+
+    assert result["recovery_sent"] == 1
+    assert doc["recovery_sent"] is True
+    assert len(sent) == 1
