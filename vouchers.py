@@ -4460,6 +4460,10 @@ def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None
             if row and is_active:
                 base["userClaimed"] = (row.get("status") == "claimed")
                 if base["userClaimed"]:
+                    claimed_at_ts = _resolve_welcome_claimed_at(row.get("claimedAt"))
+                    if _is_new_joiner_audience(audience_type) and not _is_welcome_claim_still_visible(claimed_at_ts, ref=ref):
+                        current_app.logger.info("[visible][WELCOME] hide_claimed_expired_personalised uid=%s drop=%s claimed_at=%s", claim_user_id, drop_id, claimed_at_ts)
+                        continue
                     base["code"] = row.get("code")
                     claimed_at = _isoformat_kl(row.get("claimedAt"))
                     if claimed_at:

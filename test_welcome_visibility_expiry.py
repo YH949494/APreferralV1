@@ -18,6 +18,49 @@ def _mk_drop(now):
     }
 
 
+def _mk_personalised_welcome_drop(now):
+    return {
+        "_id": "drop-welcome-personal",
+        "name": "Welcome Personalised",
+        "type": "personalised",
+        "status": "active",
+        "startsAt": now - timedelta(minutes=5),
+        "endsAt": now + timedelta(minutes=5),
+        "audience": "new_joiner",
+    }
+
+
+def _mk_personalised_regular_drop(now):
+    return {
+        "_id": "drop-regular-personal",
+        "name": "Regular Personalised",
+        "type": "personalised",
+        "status": "active",
+        "startsAt": now - timedelta(minutes=5),
+        "endsAt": now + timedelta(minutes=5),
+        "audience": "public",
+    }
+
+
+class VouchersC:
+    """Fake db.vouchers collection supporting the $in queries used by the
+    personalised branch of user_visible_drops()."""
+    def __init__(self, docs=None): self.docs = docs or []
+    def find_one(self, q=None, proj=None):
+        q = q or {}
+        for d in self.docs:
+            ok = True
+            for k, v in q.items():
+                if isinstance(v, dict) and "$in" in v:
+                    if d.get(k) not in v["$in"]:
+                        ok = False
+                elif d.get(k) != v:
+                    ok = False
+            if ok:
+                return d
+        return None
+
+
 def _mk_regular_drop(now):
     return {
         "_id": "drop-regular",
@@ -177,3 +220,82 @@ def test_expired_incomplete_welcome_card_hidden():
         assert cards == []
     finally:
         m.get_welcome_reward_progress, m.get_active_drops, m.voucher_claims_col, m.load_user_context, m.is_drop_allowed, m.is_user_eligible_for_drop, m.users_collection, m._pooled_claimability_state = orig
+
+
+def test_personalised_welcome_claimed_voucher_hidden_after_expiry():
+    now = datetime.now(timezone.utc)
+    app = Flask(__name__)
+    orig = m.welcome_eligibility, m.get_welcome_reward_progress, m.get_active_drops, m.voucher_claims_col, m.load_user_context, m.is_drop_allowed, m.is_user_eligible_for_drop, m.users_collection, m._pooled_claimability_state
+    try:
+        m.welcome_eligibility = lambda *_a, **_k: (True, "ok", {})
+        m.get_welcome_reward_progress = lambda *_a, **_k: {"eligible": True, "unlocked": True, "expired": False, "hide": False, "channel_joined": True, "checkins_completed": 3, "checkins_required": 3, "eligible_until": None, "days_remaining": 7}
+        m.get_active_drops = lambda _r: [_mk_personalised_welcome_drop(now)]
+        m.voucher_claims_col = C([])
+        m.users_collection = C([{"user_id": 42, "region": "th"}])
+        m.load_user_context = lambda **_k: {}
+        m.is_drop_allowed = lambda *a, **k: True
+        m.is_user_eligible_for_drop = lambda *a, **k: True
+        m._pooled_claimability_state = lambda **_k: {"claimable": True, "sold_out": False, "remaining": 1}
+
+        # Claimed within the visibility window -> still visible with code.
+        m.db.vouchers = VouchersC([{
+            "type": "personalised",
+            "dropId": "drop-welcome-personal",
+            "usernameLower": "u",
+            "code": "PWEL-RECENT",
+            "status": "claimed",
+            "claimedAt": now - timedelta(days=2),
+        }])
+        with app.app_context():
+            cards, _ = m.user_visible_drops({"usernameLower": "u", "userId": "42"}, now, tg_user={"id": 42, "username": "u"})
+        assert len(cards) == 1 and cards[0].get("code") == "PWEL-RECENT"
+
+        # Claimed beyond WELCOME_CLAIMED_VISIBLE_DAYS -> must be hidden entirely, code must never be returned.
+        m.db.vouchers = VouchersC([{
+            "type": "personalised",
+            "dropId": "drop-welcome-personal",
+            "usernameLower": "u",
+            "code": "PWEL-OLD",
+            "status": "claimed",
+            "claimedAt": now - timedelta(days=4),
+        }])
+        with app.app_context():
+            cards2, _ = m.user_visible_drops({"usernameLower": "u", "userId": "42"}, now, tg_user={"id": 42, "username": "u"})
+        assert cards2 == []
+    finally:
+        m.welcome_eligibility, m.get_welcome_reward_progress, m.get_active_drops, m.voucher_claims_col, m.load_user_context, m.is_drop_allowed, m.is_user_eligible_for_drop, m.users_collection, m._pooled_claimability_state = orig
+        del m.db.vouchers
+
+
+def test_personalised_non_welcome_claimed_voucher_visibility_unaffected_by_age():
+    now = datetime.now(timezone.utc)
+    app = Flask(__name__)
+    orig = m.welcome_eligibility, m.get_welcome_reward_progress, m.get_active_drops, m.voucher_claims_col, m.load_user_context, m.is_drop_allowed, m.is_user_eligible_for_drop, m.users_collection, m._pooled_claimability_state
+    try:
+        m.welcome_eligibility = lambda *_a, **_k: (True, "ok", {})
+        m.get_welcome_reward_progress = lambda *_a, **_k: {"eligible": False, "unlocked": False, "expired": False, "hide": True, "channel_joined": True, "checkins_completed": 0, "checkins_required": 3, "eligible_until": None, "days_remaining": 0}
+        m.get_active_drops = lambda _r: [_mk_personalised_regular_drop(now)]
+        m.voucher_claims_col = C([])
+        m.users_collection = C([{"user_id": 42, "region": "th"}])
+        m.load_user_context = lambda **_k: {}
+        m.is_drop_allowed = lambda *a, **k: True
+        m.is_user_eligible_for_drop = lambda *a, **k: True
+        m._pooled_claimability_state = lambda **_k: {"claimable": True, "sold_out": False, "remaining": 1}
+
+        # Claimed long ago, but this is a normal (non-Welcome) personalised drop -> must stay visible.
+        m.db.vouchers = VouchersC([{
+            "type": "personalised",
+            "dropId": "drop-regular-personal",
+            "usernameLower": "u",
+            "code": "REG-PERSONAL-OLD",
+            "status": "claimed",
+            "claimedAt": now - timedelta(days=30),
+        }])
+        with app.app_context():
+            cards, _ = m.user_visible_drops({"usernameLower": "u", "userId": "42"}, now, tg_user={"id": 42, "username": "u"})
+        assert len(cards) == 1
+        assert cards[0].get("code") == "REG-PERSONAL-OLD"
+        assert cards[0].get("userClaimed") is True
+    finally:
+        m.welcome_eligibility, m.get_welcome_reward_progress, m.get_active_drops, m.voucher_claims_col, m.load_user_context, m.is_drop_allowed, m.is_user_eligible_for_drop, m.users_collection, m._pooled_claimability_state = orig
+        del m.db.vouchers
