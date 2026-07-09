@@ -16,6 +16,7 @@ except ModuleNotFoundError:  # pragma: no cover - production requirements includ
         pass
 
 from xp import grant_xp
+from reactivation_journey import create_or_update_journey
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +43,12 @@ try:
     OFFICIAL_CHANNEL_ID = int(_RAW_OFFICIAL_CHANNEL_ID) if _RAW_OFFICIAL_CHANNEL_ID not in (None, "") else -1002396761021
 except (TypeError, ValueError):
     OFFICIAL_CHANNEL_ID = -1002396761021
+
+_RAW_OFFICIAL_GROUP_ID = os.getenv("MAIN_GROUP_ID") or os.getenv("GROUP_ID")
+try:
+    OFFICIAL_GROUP_ID = int(_RAW_OFFICIAL_GROUP_ID) if _RAW_OFFICIAL_GROUP_ID not in (None, "") else -1002304653063
+except (TypeError, ValueError):
+    OFFICIAL_GROUP_ID = -1002304653063
 
 
 def now_utc() -> datetime:
@@ -118,6 +125,7 @@ def _registered_not_rewarded_filter() -> dict:
                     {"user_id": {"$exists": True, "$ne": None}},
                 ]
             },
+            {"last_checkin": {"$exists": True, "$ne": None}},  # was once active
             {"blocked": {"$ne": True}},
             {"banned": {"$ne": True}},
             {"is_banned": {"$ne": True}},
@@ -177,17 +185,7 @@ def campaign_summary(db) -> dict:
     }
 
 
-def check_official_channel_subscribed(uid: int, *, token: str | None = None, channel_id: int | None = None) -> tuple[bool, str]:
-    bot_token = token or BOT_TOKEN
-    chat_id = OFFICIAL_CHANNEL_ID if channel_id is None else channel_id
-    if not uid:
-        return False, "missing_uid"
-    if not bot_token:
-        return False, "missing_bot_token"
-    if chat_id is None:
-        return False, "missing_channel_id"
-    if requests is None:
-        return False, "missing_requests"
+def _check_single_chat(uid: int, chat_id: int, bot_token: str) -> tuple[bool, str]:
     try:
         resp = requests.get(
             f"https://api.telegram.org/bot{bot_token}/getChatMember",
@@ -201,6 +199,34 @@ def check_official_channel_subscribed(uid: int, *, token: str | None = None, cha
         return False, f"telegram_not_ok:{payload.get('description', 'unknown')}"
     status = (payload.get("result") or {}).get("status")
     return status in {"member", "administrator", "creator"}, f"status:{status}"
+
+
+def check_official_channel_subscribed(uid: int, *, token: str | None = None, channel_id: int | None = None) -> tuple[bool, str]:
+    """Return (True, reason) if the user is still in AT LEAST ONE of channel or group (not a target).
+    Return (False, reason) only if the user has left BOTH — meaning they are a reactivation target."""
+    bot_token = token or BOT_TOKEN
+    if not uid:
+        return False, "missing_uid"
+    if not bot_token:
+        return False, "missing_bot_token"
+    if requests is None:
+        return False, "missing_requests"
+
+    check_channel_id = OFFICIAL_CHANNEL_ID if channel_id is None else channel_id
+    in_channel, channel_reason = _check_single_chat(uid, check_channel_id, bot_token)
+    in_group, group_reason = _check_single_chat(uid, OFFICIAL_GROUP_ID, bot_token)
+
+    if in_channel or in_group:
+        # Still present in at least one — not a reactivation target, skip
+        parts = []
+        if in_channel:
+            parts.append(f"channel:{channel_reason}")
+        if in_group:
+            parts.append(f"group:{group_reason}")
+        return True, ",".join(parts)
+
+    # Left both channel and group — eligible reactivation target
+    return False, f"channel:{channel_reason},group:{group_reason}"
 
 
 def _message_text() -> str:
@@ -431,6 +457,11 @@ def verify_reactivation_claim(
         {"user_id": uid},
         {"$set": {"reactivation_verified_at": ts, "reactivation_reward_due_at": reward_due_at}},
     )
+    if hasattr(db, "reactivation_journey") or hasattr(db, "__getitem__"):
+        try:
+            create_or_update_journey(db, uid, campaign_id=CAMPAIGN_ID, verified_at=ts, now_ref=ts)
+        except Exception:
+            logger.exception("[REACT_JOURNEY][ERROR] uid=%s campaign_id=%s reason=create_failed", uid, CAMPAIGN_ID)
     return {
         "success": True,
         "code": "pending",

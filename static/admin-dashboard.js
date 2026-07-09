@@ -738,14 +738,25 @@
           kpiCard("Eligible Users", d.eligible_users) +
           kpiCard("Messages Sent", d.messages_sent, fmt(d.messages_sent_today) + " today") +
           kpiCard("Successful Verifications", d.successful_verifications) +
-          kpiCard("XP Awarded", d.xp_awarded) +
-          kpiCard("Send Failures", d.send_failures) +
-          kpiCard("Skipped Subscribed", d.skipped_already_subscribed);
+          kpiCard("Tier 1 Completed", d.tier1_completed || 0) +
+          kpiCard("Tier 1 Issued", d.tier1_issued || 0) +
+          kpiCard("Tier 2 Completed", d.tier2_completed || 0) +
+          kpiCard("Tier 2 Issued", d.tier2_issued || 0) +
+          kpiCard("Tier 3 Completed", d.tier3_completed || 0) +
+          kpiCard("Tier 3 Issued", d.tier3_issued || 0) +
+          kpiCard("Out of Stock", ((d.out_of_stock_by_tier || {}).tier1 || 0) + ((d.out_of_stock_by_tier || {}).tier2 || 0) + ((d.out_of_stock_by_tier || {}).tier3 || 0));
+        var pools = (d.reactivation_pools || []).map(function (p) {
+          return '<tr><td>' + esc(p.pool_id) + '</td><td class="num">' + fmt(p.available) + '</td><td class="num">' + fmt(p.issued) + '</td></tr>';
+        }).join("") || '<tr><td colspan="3">No pool rows.</td></tr>';
         $("#reactivation-body").innerHTML =
           '<div class="detail-grid">' +
           kvBlock("Safety Limits", [["Daily Send Limit", d.daily_limit], ["Messages Sent Today", d.messages_sent_today], ["Per-Minute Limit", d.minute_limit]]) +
           kvBlock("Campaign", [["Campaign ID", d.campaign_id], ["Status", d.active ? "Active" : "Paused"], ["Updated", dt(d.updated_at)]]) +
-          "</div>";
+          kvBlock("Out of Stock", [["Tier 1", (d.out_of_stock_by_tier || {}).tier1 || 0], ["Tier 2", (d.out_of_stock_by_tier || {}).tier2 || 0], ["Tier 3", (d.out_of_stock_by_tier || {}).tier3 || 0]]) +
+          '</div>' +
+          '<div class="detail-block" style="margin-top:12px;"><h4>Reactivation Voucher Pools</h4><table class="mini-table"><thead><tr><th>Pool</th><th class="num">Available</th><th class="num">Issued</th></tr></thead><tbody>' + pools + '</tbody></table></div>' +
+          '<div class="detail-block" style="margin-top:12px;"><h4>Upload Reactivation Codes</h4><div class="filters"><select id="reactivation-upload-pool" class="filter-input"><option>COMEBACK_T1</option><option>COMEBACK_T2</option><option>COMEBACK_T3</option></select><textarea id="reactivation-upload-codes" class="filter-input" rows="5" placeholder="code\nABC123\nABC456" style="min-width:260px;"></textarea><button class="btn" id="reactivation-upload-btn">Upload Codes</button></div><div class="note" id="reactivation-upload-status"></div></div>';
+        bindReactivationUpload();
       })
       .catch(function (e) {
         if (e.message !== "unauthorized") {
@@ -756,6 +767,30 @@
       });
   }
 
+  function bindReactivationUpload() {
+    var btn = $("#reactivation-upload-btn");
+    if (!btn) return;
+    btn.addEventListener("click", function () {
+      var pool = $("#reactivation-upload-pool").value;
+      var codesText = $("#reactivation-upload-codes").value || "";
+      var codes = codesText.replace(/\r/g, "\n").split("\n").map(function (x) { return x.trim(); }).filter(Boolean);
+      var status = $("#reactivation-upload-status");
+      status.textContent = "Uploading...";
+      fetch("/api/admin/reactivation/journey/pools/upload", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Accept": "application/json", "Content-Type": "application/json" },
+        body: JSON.stringify({ pool_id: pool, codes: codes })
+      }).then(function (r) {
+        return r.json().then(function (j) { if (!r.ok) throw new Error(j.message || j.reason || ("HTTP " + r.status)); return j; });
+      }).then(function (j) {
+        status.textContent = "Inserted " + fmt(j.inserted) + " codes; duplicates " + fmt(j.duplicates || 0) + ".";
+        loadReactivation(true);
+      }).catch(function (e) {
+        status.textContent = "Failed: " + e.message;
+      });
+    });
+  }
   function setReactivation(active, btn) {
     var path = active ? "/api/admin/channel-reactivation/start" : "/api/admin/channel-reactivation/pause";
     if (btn) btnStart(btn, active ? "⏳ Starting..." : "⏳ Pausing...");
