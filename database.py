@@ -125,6 +125,87 @@ def safe_create_index(collection, keys, *, name: str, unique: bool = False, part
         return False
 
 
+def _ensure_equivalent_index(collection, keys, *, name: str, unique: bool = False, **extra_kwargs):
+    """Create ``name`` on ``keys`` without ever dropping an existing index.
+
+    Startup must not crash (Mongo error code 85 IndexOptionsConflict) just
+    because a collection already has an index on the same key pattern under
+    a different name. Before creating, inspect ``list_indexes()``:
+      - same keys + same ``unique`` + same partialFilterExpression/collation
+        -> reuse the existing index (log action=reused), regardless of name.
+      - same keys but incompatible options (different uniqueness, filter, or
+        collation) -> log action=conflict and raise; this is a real conflict
+        that needs a human decision, not an automatic drop.
+      - no existing index on those keys -> create it (log action=created).
+    Returns the name of the index now in effect (existing or newly created).
+    """
+    collection_name = getattr(collection, "name", "unknown")
+    requested_keys = _normalize_index_keys(keys)
+    requested_partial = extra_kwargs.get("partialFilterExpression")
+    requested_collation = extra_kwargs.get("collation")
+
+    try:
+        existing_indexes = list(collection.list_indexes())
+    except PyMongoError:
+        existing_indexes = []
+
+    for idx in existing_indexes:
+        if _normalize_index_keys(idx.get("key") or {}) != requested_keys:
+            continue
+        existing_name = idx.get("name")
+        existing_unique = bool(idx.get("unique", False))
+        existing_partial = idx.get("partialFilterExpression")
+        existing_collation = idx.get("collation")
+        compatible = (
+            existing_unique == bool(unique)
+            and existing_partial == requested_partial
+            and existing_collation == requested_collation
+        )
+        if compatible:
+            logger.info(
+                "[DB][INDEX] action=%s collection=%s desired_name=%s existing_name=%s keys=%s",
+                "exists" if existing_name == name else "reused",
+                collection_name, name, existing_name, requested_keys,
+            )
+            return existing_name
+        logger.error(
+            "[DB][INDEX] action=conflict collection=%s desired_name=%s existing_name=%s keys=%s "
+            "desired_unique=%s existing_unique=%s desired_partial=%s existing_partial=%s",
+            collection_name, name, existing_name, requested_keys,
+            unique, existing_unique, requested_partial, existing_partial,
+        )
+        raise OperationFailure(
+            f"[DB][INDEX] incompatible existing index '{existing_name}' on {collection_name} "
+            f"keys={requested_keys} (unique={existing_unique}) conflicts with requested "
+            f"'{name}' (unique={unique})",
+            code=85,
+        )
+
+    kwargs = dict(extra_kwargs)
+    kwargs["unique"] = unique
+    try:
+        created_name = collection.create_index(keys, name=name, **kwargs)
+        logger.info(
+            "[DB][INDEX] action=created collection=%s desired_name=%s existing_name=%s keys=%s",
+            collection_name, name, created_name or name, requested_keys,
+        )
+        return created_name or name
+    except OperationFailure as exc:
+        if exc.code in (68, 85, 86) or "already exists" in str(exc).lower():
+            existing_name = _find_equivalent_index_name(collection, keys)
+            if existing_name:
+                logger.info(
+                    "[DB][INDEX] action=reused collection=%s desired_name=%s existing_name=%s keys=%s (race)",
+                    collection_name, name, existing_name, requested_keys,
+                )
+                return existing_name
+        logger.error(
+            "[DB][INDEX] action=conflict collection=%s desired_name=%s keys=%s error=%s",
+            collection_name, name, requested_keys, exc,
+        )
+        raise
+
+
 def ensure_indexes() -> None:
     global _indexes_initialized
     if _indexes_initialized:

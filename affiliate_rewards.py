@@ -7,6 +7,7 @@ import requests
 from pymongo import ASCENDING, ReturnDocument
 from pymongo.errors import DuplicateKeyError, OperationFailure
 from telegram_utils import send_telegram_http_message
+from database import _ensure_equivalent_index
 from config import (
     AFFILIATE_GROUP_INVITE_TEXT,
     AFFILIATE_GROUP_INVITE_URL,
@@ -70,7 +71,12 @@ def ensure_affiliate_indexes(db):
     db.qualified_events.create_index([("invitee_id", ASCENDING)], unique=True, name="uniq_invitee_id")
     db.qualified_events.create_index([("referrer_id", ASCENDING), ("qualified_at", ASCENDING)], name="qualified_by_referrer_time")
 
-    db.voucher_pools.create_index([("pool_id", ASCENDING), ("code", ASCENDING)], unique=True, name="uniq_pool_code")
+    _ensure_equivalent_index(
+        db.voucher_pools,
+        [("pool_id", ASCENDING), ("code", ASCENDING)],
+        unique=True,
+        name="uniq_pool_code",
+    )
     db.voucher_pools.create_index([("pool_id", ASCENDING), ("status", ASCENDING)], name="pool_status")
 
     db.affiliate_ledger.create_index([("dedup_key", ASCENDING)], unique=True, name="uniq_affiliate_dedup")

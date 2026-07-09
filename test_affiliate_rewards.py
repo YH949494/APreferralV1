@@ -34,6 +34,9 @@ class FakeCollection:
     def create_index(self, *args, **kwargs):
         return None
 
+    def list_indexes(self):
+        return []
+
     def _match_value(self, value, cond):
         if isinstance(cond, dict):
             for op, expected in cond.items():

@@ -43,6 +43,7 @@ def vouchers_module(monkeypatch):
     fake_database_module.db = _FakeDB()
     fake_database_module.users_collection = _FakeCollection()
     fake_database_module.get_collection = lambda name: _FakeCollection()
+    fake_database_module._ensure_equivalent_index = lambda *args, **kwargs: None
     monkeypatch.setitem(sys.modules, "database", fake_database_module)
 
     if "vouchers" in sys.modules:
