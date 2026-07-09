@@ -793,25 +793,31 @@
       return d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()) + "T" + pad(d.getHours()) + ":" + pad(d.getMinutes());
     }
     var t1 = cfg.tier1 || {}, t2 = cfg.tier2 || {}, t3 = cfg.tier3 || {};
+    function field(labelText, inputHtml) {
+      return '<div class="rjc-field"><label>' + labelText + "</label>" + inputHtml + "</div>";
+    }
     host.innerHTML =
-      '<div class="filters">' +
-      '<label>Mode<br/><select id="rjc-mode" class="filter-input">' + opts(modes, cfg.mode) + "</select></label>" +
-      '<label>Reward Type<br/><select id="rjc-reward-type" class="filter-input">' + opts(rewardTypes, cfg.reward_type) + "</select></label>" +
+      '<div class="rjc-grid">' +
+      field("Mode", '<select id="rjc-mode" class="filter-input">' + opts(modes, cfg.mode) + "</select>") +
+      field("Reward Type", '<select id="rjc-reward-type" class="filter-input">' + opts(rewardTypes, cfg.reward_type) + "</select>") +
       "</div>" +
-      '<div class="filters"><label style="flex:1;">Test User IDs (comma/newline separated)<br/><textarea id="rjc-test-users" class="filter-input" rows="2" style="width:100%;">' + esc((cfg.test_user_ids || []).join(", ")) + "</textarea></label></div>" +
-      '<div class="filters">' +
-      '<label>Campaign Start<br/><input type="datetime-local" id="rjc-start" class="filter-input" value="' + isoLocal(cfg.campaign_start_at) + '"/></label>' +
-      '<label>Campaign End<br/><input type="datetime-local" id="rjc-end" class="filter-input" value="' + isoLocal(cfg.campaign_end_at) + '"/></label>' +
+      '<div class="rjc-grid rjc-grid-1">' +
+      field("Test User IDs (comma/newline separated)", '<textarea id="rjc-test-users" class="filter-input" rows="2" style="width:100%;">' + esc((cfg.test_user_ids || []).join(", ")) + "</textarea>") +
+      "</div>" +
+      '<div class="rjc-grid">' +
+      field("Campaign Start", '<input type="datetime-local" id="rjc-start" class="filter-input" value="' + isoLocal(cfg.campaign_start_at) + '"/>') +
+      field("Campaign End", '<input type="datetime-local" id="rjc-end" class="filter-input" value="' + isoLocal(cfg.campaign_end_at) + '"/>') +
       "</div>" +
       [1, 2, 3].map(function (tier) {
         var t = tier === 1 ? t1 : tier === 2 ? t2 : t3;
         var extra = tier === 1 ? "" :
-          '<label>Days Required<br/><input type="number" min="1" id="rjc-t' + tier + '-days" class="filter-input" value="' + (t.threshold_days != null ? t.threshold_days : "") + '"/></label>' +
-          '<label>Window (days)<br/><input type="number" min="1" id="rjc-t' + tier + '-window" class="filter-input" value="' + (t.window_days != null ? t.window_days : "") + '"/></label>';
-        return '<div class="filters"><strong style="align-self:center;">Tier ' + tier + '</strong>' +
-          '<label>Voucher Pool Enabled<br/><select id="rjc-t' + tier + '-pool" class="filter-input"><option value="true"' + (t.pool_enabled !== false ? " selected" : "") + '>Yes</option><option value="false"' + (t.pool_enabled === false ? " selected" : "") + '>No</option></select></label>' +
+          field("Check-ins Required", '<input type="number" min="1" id="rjc-t' + tier + '-days" class="filter-input" value="' + (t.threshold_days != null ? t.threshold_days : "") + '"/>') +
+          field("Completion Window (days)", '<input type="number" min="1" id="rjc-t' + tier + '-window" class="filter-input" value="' + (t.window_days != null ? t.window_days : "") + '"/>');
+        return '<div class="rjc-tier-card"><h5>Tier ' + tier + ' Reward</h5>' +
+          field("Voucher Pool Enabled", '<select id="rjc-t' + tier + '-pool" class="filter-input"><option value="true"' + (t.pool_enabled !== false ? " selected" : "") + '>Yes</option><option value="false"' + (t.pool_enabled === false ? " selected" : "") + '>No</option></select>') +
           extra +
-          '<label>XP Amount<br/><input type="number" min="0" id="rjc-t' + tier + '-xp" class="filter-input" value="' + (t.xp_amount || 0) + '"/></label></div>';
+          field("XP Reward", '<input type="number" min="0" id="rjc-t' + tier + '-xp" class="filter-input" value="' + (t.xp_amount || 0) + '"/>') +
+          "</div>";
       }).join("") +
       '<div class="controls" style="margin-top:8px;"><button class="btn primary" id="rjc-save-btn">Save Rollout Config</button><span class="note" id="rjc-save-status"></span></div>';
 

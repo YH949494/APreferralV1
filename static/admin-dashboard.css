@@ -287,6 +287,19 @@ html, body {
 .kv .v { color: var(--text); text-align: right; word-break: break-word; }
 pre.payload { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 10px; font-size: 11px; overflow-x: auto; color: var(--muted); margin: 0; }
 
+#reactivation-journey-config .rjc-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin-bottom: 12px; }
+#reactivation-journey-config .rjc-grid-1 { grid-template-columns: 1fr; }
+#reactivation-journey-config .rjc-field { display: flex; flex-direction: column; gap: 4px; }
+#reactivation-journey-config .rjc-field label { font-size: 12px; font-weight: 600; color: var(--muted); }
+#reactivation-journey-config .rjc-field .filter-input { width: 100%; }
+#reactivation-journey-config .rjc-tier-card { background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; padding: 12px; margin-bottom: 12px; }
+#reactivation-journey-config .rjc-tier-card h5 { margin: 0 0 10px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.4px; color: var(--accent); }
+#reactivation-journey-config .rjc-tier-card .rjc-field { margin-bottom: 12px; }
+#reactivation-journey-config .rjc-tier-card .rjc-field:last-child { margin-bottom: 0; }
+@media (max-width: 640px) {
+  #reactivation-journey-config .rjc-grid { grid-template-columns: 1fr; }
+}
+
 .mini-table { width: 100%; border-collapse: collapse; font-size: 12px; }
 .mini-table th, .mini-table td { padding: 6px 8px; text-align: left; border-bottom: 1px solid var(--border); }
 .mini-table th { color: var(--muted); font-size: 10px; text-transform: uppercase; }
