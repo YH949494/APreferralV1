@@ -361,5 +361,64 @@ class ReactivationJourneyTests(unittest.TestCase):
         self.assertTrue(valid["success"])
 
 
+class ComputeJourneyStatusTests(unittest.TestCase):
+    def setUp(self):
+        self.now = datetime(2026, 6, 15, tzinfo=timezone.utc)
+
+    def _cfg(self, **overrides):
+        cfg = {
+            "mode": "enabled",
+            "reward_type": "tiered_vouchers",
+            "campaign_start_at": None,
+            "campaign_end_at": None,
+        }
+        cfg.update(overrides)
+        return cfg
+
+    def test_disabled_mode(self):
+        cfg = self._cfg(mode="disabled")
+        self.assertEqual(journey.compute_journey_status(cfg, now_ref=self.now), "disabled")
+
+    def test_reward_type_disabled(self):
+        cfg = self._cfg(mode="enabled", reward_type="disabled")
+        self.assertEqual(journey.compute_journey_status(cfg, now_ref=self.now), "disabled")
+
+    def test_test_only_within_window(self):
+        cfg = self._cfg(
+            mode="test_users_only",
+            campaign_start_at=datetime(2026, 6, 1, tzinfo=timezone.utc),
+            campaign_end_at=datetime(2026, 7, 1, tzinfo=timezone.utc),
+        )
+        self.assertEqual(journey.compute_journey_status(cfg, now_ref=self.now), "test_only")
+
+    def test_live_within_window(self):
+        cfg = self._cfg(
+            mode="enabled",
+            campaign_start_at=datetime(2026, 6, 1, tzinfo=timezone.utc),
+            campaign_end_at=datetime(2026, 7, 1, tzinfo=timezone.utc),
+        )
+        self.assertEqual(journey.compute_journey_status(cfg, now_ref=self.now), "live")
+
+    def test_scheduled_before_campaign_start(self):
+        cfg = self._cfg(mode="enabled", campaign_start_at=datetime(2026, 7, 1, tzinfo=timezone.utc))
+        self.assertEqual(journey.compute_journey_status(cfg, now_ref=self.now), "scheduled")
+
+    def test_expired_after_campaign_end(self):
+        cfg = self._cfg(mode="enabled", campaign_end_at=datetime(2026, 1, 1, tzinfo=timezone.utc))
+        self.assertEqual(journey.compute_journey_status(cfg, now_ref=self.now), "expired")
+
+    def test_config_error_on_invalid_mode(self):
+        cfg = self._cfg(mode="bogus")
+        self.assertEqual(journey.compute_journey_status(cfg, now_ref=self.now), "config_error")
+
+    def test_config_error_on_inverted_window(self):
+        cfg = self._cfg(
+            mode="enabled",
+            campaign_start_at=datetime(2026, 7, 1, tzinfo=timezone.utc),
+            campaign_end_at=datetime(2026, 6, 1, tzinfo=timezone.utc),
+        )
+        self.assertEqual(journey.compute_journey_status(cfg, now_ref=self.now), "config_error")
+
+
 if __name__ == "__main__":
     unittest.main()

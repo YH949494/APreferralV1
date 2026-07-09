@@ -89,7 +89,7 @@ from affiliate_rewards import (
 )
 from telegram_utils import safe_reply_text, safe_send_message
 from channel_reactivation import set_campaign_active, campaign_summary as channel_reactivation_summary, process_reactivation_campaign, verify_reactivation_claim, check_official_channel_subscribed, VERIFY_CALLBACK_DATA
-from reactivation_journey import ensure_reactivation_journey_indexes, evaluate_pending_journeys, handle_successful_checkin, journey_summary, journey_users, upload_pool_codes, get_journey_config, update_journey_config
+from reactivation_journey import ensure_reactivation_journey_indexes, evaluate_pending_journeys, handle_successful_checkin, journey_summary, journey_users, upload_pool_codes, get_journey_config, update_journey_config, compute_journey_status, now_utc as journey_now_utc
 
 from pymongo import DESCENDING, ASCENDING, ReturnDocument  # keep if used elsewhere
 from pymongo.errors import DuplicateKeyError, CursorNotFound, OperationFailure, PyMongoError
@@ -2326,13 +2326,21 @@ def api_admin_reactivation_journey_users():
     })
 
 
+def _decorate_journey_config(cfg: dict) -> dict:
+    now_ts = journey_now_utc()
+    cfg["test_user_ids"] = sorted(cfg.get("test_user_ids", set()))
+    cfg["computed_status"] = compute_journey_status(cfg, now_ref=now_ts)
+    cfg["server_now_utc"] = now_ts.isoformat()
+    cfg["server_now_kl"] = now_ts.astimezone(KL_TZ).isoformat()
+    return cfg
+
+
 @admin_bp.get("/api/admin/reactivation/journey/config")
 def api_admin_reactivation_journey_config_get():
     ok, err = require_admin_from_query()
     if not ok:
         return _admin_error_response(err)
-    cfg = get_journey_config(db)
-    cfg["test_user_ids"] = sorted(cfg.get("test_user_ids", set()))
+    cfg = _decorate_journey_config(get_journey_config(db))
     return jsonify({"success": True, "config": cfg})
 
 
@@ -2344,7 +2352,7 @@ def api_admin_reactivation_journey_config_set():
     data = request.get_json(silent=True) or {}
     result = update_journey_config(db, data)
     if result.get("success"):
-        result["config"]["test_user_ids"] = sorted(result["config"].get("test_user_ids", set()))
+        result["config"] = _decorate_journey_config(result["config"])
     status_code = 200 if result.get("success") else 400
     return jsonify(result), status_code
 

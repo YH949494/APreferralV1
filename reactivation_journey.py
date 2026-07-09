@@ -81,8 +81,9 @@ def get_journey_config(db_ref) -> dict:
         "tier3": dict(DEFAULT_CONFIG["tier3"]),
         "campaign_start_at": DEFAULT_CONFIG["campaign_start_at"],
         "campaign_end_at": DEFAULT_CONFIG["campaign_end_at"],
+        "updated_at": None,
     }
-    for key in ("mode", "reward_type", "test_user_ids", "campaign_start_at", "campaign_end_at"):
+    for key in ("mode", "reward_type", "test_user_ids", "campaign_start_at", "campaign_end_at", "updated_at"):
         if key in stored:
             cfg[key] = stored[key]
     for tier_key in ("tier1", "tier2", "tier3"):
@@ -197,6 +198,34 @@ def is_journey_enabled_for_user(db_ref, uid: int, *, cfg: dict | None = None, no
     if mode == "test_users_only" and int(uid) not in cfg.get("test_user_ids", set()):
         return False, "not_test_user"
     return True, "ok"
+
+
+VALID_COMPUTED_STATUSES = {"disabled", "test_only", "live", "scheduled", "expired", "config_error"}
+
+
+def compute_journey_status(cfg: dict, now_ref: datetime | None = None) -> str:
+    """Human-facing rollout status derived from the raw config, distinct from
+    is_journey_enabled_for_user's per-user gate."""
+    ts = _coerce_utc(now_ref) or now_utc()
+    mode = cfg.get("mode")
+    reward_type = cfg.get("reward_type")
+    if mode not in VALID_MODES or reward_type not in VALID_REWARD_TYPES:
+        return "config_error"
+    start = _coerce_utc(cfg.get("campaign_start_at"))
+    end = _coerce_utc(cfg.get("campaign_end_at"))
+    if start and end and start >= end:
+        return "config_error"
+    if mode == "disabled" or reward_type == "disabled":
+        return "disabled"
+    if start and ts < start:
+        return "scheduled"
+    if end and ts > end:
+        return "expired"
+    if mode == "test_users_only":
+        return "test_only"
+    if mode == "enabled":
+        return "live"
+    return "config_error"
 
 
 def now_utc() -> datetime:
