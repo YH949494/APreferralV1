@@ -146,6 +146,61 @@ def _telegram_uid(user_doc: dict) -> int | None:
         return None
 
 
+def eligibility_funnel(db) -> dict:
+    """Diagnostic breakdown of the reactivation eligibility filter, stage by stage.
+
+    Mirrors the exact conditions and order of `_registered_not_rewarded_filter()`
+    (same $and clauses, same precedence) so the final stage always equals
+    `campaign_summary()['eligible_users']`. Uses one aggregation pass instead of
+    one count_documents() per stage to avoid repeated full collection scans.
+    """
+    stages = [
+        (
+            "registered",
+            {
+                "$or": [
+                    {"$and": [{"$ne": ["$telegram_user_id", None]}, {"$ne": [{"$type": "$telegram_user_id"}, "missing"]}]},
+                    {"$and": [{"$ne": ["$user_id", None]}, {"$ne": [{"$type": "$user_id"}, "missing"]}]},
+                ]
+            },
+        ),
+        ("started_bot", {"$and": [{"$ne": ["$last_checkin", None]}, {"$ne": [{"$type": "$last_checkin"}, "missing"]}]}),
+        (
+            "not_blocked_or_banned",
+            {
+                "$and": [
+                    {"$ne": ["$blocked", True]},
+                    {"$ne": ["$banned", True]},
+                    {"$ne": ["$is_banned", True]},
+                    {"$ne": ["$status", "banned"]},
+                ]
+            },
+        ),
+        ("not_already_verified", {"$ne": ["$reactivation_reward_claimed", True]}),
+        ("not_failed_blocked", {"$eq": [{"$type": "$reactivation_failed_blocked_at"}, "missing"]}),
+        ("not_in_cooldown", {"$eq": [{"$type": "$reactivation_dm_sent_at"}, "missing"]}),
+        ("not_campaign_excluded", {"$eq": [{"$type": "$reactivation_skipped_subscribed_at"}, "missing"]}),
+    ]
+
+    project = {"_id": 0}
+    group = {"_id": None, "total_users": {"$sum": 1}}
+    running: list[dict] = []
+    for name, expr in stages:
+        running.append(expr)
+        combined = {"$and": running} if len(running) > 1 else running[0]
+        flag_field = f"pass_{name}"
+        project[flag_field] = {"$cond": [combined, 1, 0]}
+        group[name] = {"$sum": f"${flag_field}"}
+
+    pipeline = [{"$project": project}, {"$group": group}]
+    result = list(db.users.aggregate(pipeline))
+    row = result[0] if result else {}
+    ordered = {"total_users": int(row.get("total_users", 0))}
+    for name, _ in stages:
+        ordered[name] = int(row.get(name, 0))
+    return ordered
+
+
 def campaign_summary(db) -> dict:
     today = _day_key(now_utc())
     campaign = _campaigns(db).find_one({"_id": CAMPAIGN_ID}) or {}
