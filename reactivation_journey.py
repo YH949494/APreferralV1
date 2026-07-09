@@ -26,10 +26,14 @@ try:
 except Exception:  # pragma: no cover
     send_telegram_http_message = None
 
+try:
+    from xp import grant_xp
+except Exception:  # pragma: no cover
+    grant_xp = None
+
 logger = logging.getLogger(__name__)
 
 CAMPAIGN_ID = "official_channel_reactivation_phase1"
-JOURNEY_ENABLED = os.getenv("REACTIVATION_JOURNEY_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
 REWARD_REPEAT_DAYS = int(os.getenv("REACTIVATION_REWARD_REPEAT_DAYS", "180"))
 POOLS = {
     1: "COMEBACK_T1",
@@ -41,6 +45,110 @@ TIER_MESSAGES = {
     2: "🔥 You stayed active for 7 days. Your second voucher is ready.",
     3: "🏆 30 days active! Your final comeback voucher is ready.",
 }
+
+# Admin-controlled rollout config. Everything defaults OFF so deploying this
+# module never starts handing out rewards on its own — an admin must opt in
+# via the dashboard (or the config endpoints) before any real user is affected.
+CONFIG_ID = "reactivation_journey"
+VALID_MODES = {"disabled", "test_users_only", "enabled"}
+VALID_REWARD_TYPES = {"disabled", "xp_only", "tiered_vouchers", "xp_plus_tiered_vouchers"}
+
+DEFAULT_CONFIG = {
+    "_id": CONFIG_ID,
+    "mode": "disabled",
+    "reward_type": "tiered_vouchers",
+    "test_user_ids": [],
+    "tier1": {"pool_enabled": True, "xp_amount": 0},
+    "tier2": {"pool_enabled": True, "threshold_days": 5, "window_days": 7, "xp_amount": 0},
+    "tier3": {"pool_enabled": True, "threshold_days": 20, "window_days": 30, "xp_amount": 0},
+    "campaign_start_at": None,
+    "campaign_end_at": None,
+}
+
+
+def _config_col(db_ref):
+    return _col(db_ref, "reactivation_journey_config")
+
+
+def get_journey_config(db_ref) -> dict:
+    stored = _config_col(db_ref).find_one({"_id": CONFIG_ID}) or {}
+    cfg = {
+        "mode": DEFAULT_CONFIG["mode"],
+        "reward_type": DEFAULT_CONFIG["reward_type"],
+        "test_user_ids": list(DEFAULT_CONFIG["test_user_ids"]),
+        "tier1": dict(DEFAULT_CONFIG["tier1"]),
+        "tier2": dict(DEFAULT_CONFIG["tier2"]),
+        "tier3": dict(DEFAULT_CONFIG["tier3"]),
+        "campaign_start_at": DEFAULT_CONFIG["campaign_start_at"],
+        "campaign_end_at": DEFAULT_CONFIG["campaign_end_at"],
+    }
+    for key in ("mode", "reward_type", "test_user_ids", "campaign_start_at", "campaign_end_at"):
+        if key in stored:
+            cfg[key] = stored[key]
+    for tier_key in ("tier1", "tier2", "tier3"):
+        if isinstance(stored.get(tier_key), dict):
+            cfg[tier_key] = {**cfg[tier_key], **stored[tier_key]}
+    if cfg["mode"] not in VALID_MODES:
+        cfg["mode"] = "disabled"
+    if cfg["reward_type"] not in VALID_REWARD_TYPES:
+        cfg["reward_type"] = "disabled"
+    cfg["test_user_ids"] = {int(x) for x in (cfg.get("test_user_ids") or []) if str(x).strip().lstrip("-").isdigit()}
+    return cfg
+
+
+def update_journey_config(db_ref, updates: dict, *, now_ref: datetime | None = None) -> dict:
+    ts = _coerce_utc(now_ref) or now_utc()
+    allowed = {"mode", "reward_type", "test_user_ids", "tier1", "tier2", "tier3", "campaign_start_at", "campaign_end_at"}
+    changes = {k: v for k, v in (updates or {}).items() if k in allowed}
+    if "mode" in changes and changes["mode"] not in VALID_MODES:
+        return {"success": False, "reason": "bad_mode"}
+    if "reward_type" in changes and changes["reward_type"] not in VALID_REWARD_TYPES:
+        return {"success": False, "reason": "bad_reward_type"}
+    if "test_user_ids" in changes:
+        raw = changes["test_user_ids"]
+        if isinstance(raw, str):
+            raw = [x.strip() for x in raw.replace(",", "\n").split("\n")]
+        cleaned = []
+        for x in raw or []:
+            try:
+                cleaned.append(int(x))
+            except (TypeError, ValueError):
+                continue
+        changes["test_user_ids"] = cleaned
+    for tier_key in ("tier1", "tier2", "tier3"):
+        if tier_key in changes and not isinstance(changes[tier_key], dict):
+            del changes[tier_key]
+    for dt_key in ("campaign_start_at", "campaign_end_at"):
+        if dt_key in changes:
+            changes[dt_key] = _coerce_utc(changes[dt_key]) if changes[dt_key] else None
+    changes["updated_at"] = ts
+    _config_col(db_ref).update_one({"_id": CONFIG_ID}, {"$set": changes}, upsert=True)
+    return {"success": True, "config": get_journey_config(db_ref)}
+
+
+def _within_campaign_window(cfg: dict, ts: datetime) -> bool:
+    start = _coerce_utc(cfg.get("campaign_start_at"))
+    end = _coerce_utc(cfg.get("campaign_end_at"))
+    if start and ts < start:
+        return False
+    if end and ts > end:
+        return False
+    return True
+
+
+def is_journey_enabled_for_user(db_ref, uid: int, *, cfg: dict | None = None, now_ref: datetime | None = None) -> tuple[bool, str]:
+    ts = _coerce_utc(now_ref) or now_utc()
+    cfg = cfg or get_journey_config(db_ref)
+    mode = cfg.get("mode", "disabled")
+    if mode == "disabled":
+        return False, "mode_disabled"
+    if cfg.get("reward_type") == "disabled":
+        return False, "reward_type_disabled"
+    if not _within_campaign_window(cfg, ts):
+        return False, "outside_campaign_window"
+    if mode == "test_users_only" and int(uid) not in cfg.get("test_user_ids", set()):
+        return False, "not_test_user"
+    return True, "ok"
 
 
 def now_utc() -> datetime:
@@ -118,9 +226,11 @@ def create_or_update_journey(
     ts = _coerce_utc(now_ref) or now_utc()
     verified_ts = _coerce_utc(verified_at) or ts
     uid = int(uid)
-    if not JOURNEY_ENABLED:
-        logger.info("[REACT_JOURNEY][SKIP] uid=%s campaign_id=%s reason=disabled", uid, campaign_id)
-        return {"success": False, "code": "disabled"}
+    cfg = get_journey_config(db_ref)
+    allowed, reason = is_journey_enabled_for_user(db_ref, uid, cfg=cfg, now_ref=ts)
+    if not allowed:
+        logger.info("[REACT_JOURNEY][SKIP] uid=%s campaign_id=%s reason=%s", uid, campaign_id, reason)
+        return {"success": False, "code": "disabled", "reason": reason}
 
     user_doc = _user_doc(db_ref, uid)
     blocked, reason = _is_blocked_user(user_doc)
@@ -275,7 +385,7 @@ def _send_pm(uid: int, text: str, send_fn=None) -> None:
         logger.exception("[REACT_JOURNEY][ERROR] uid=%s campaign_id=%s reason=pm_send_failed", uid, CAMPAIGN_ID)
 
 
-def complete_tier(db_ref, uid: int, tier: int, *, campaign_id: str = CAMPAIGN_ID, now_ref: datetime | None = None, send_fn=None) -> dict:
+def complete_tier(db_ref, uid: int, tier: int, *, campaign_id: str = CAMPAIGN_ID, now_ref: datetime | None = None, send_fn=None, cfg: dict | None = None) -> dict:
     ts = _coerce_utc(now_ref) or now_utc()
     uid = int(uid)
     tier = int(tier)
@@ -283,6 +393,12 @@ def complete_tier(db_ref, uid: int, tier: int, *, campaign_id: str = CAMPAIGN_ID
     claimed_field = f"tier{tier}_claimed_at"
     code_field = f"tier{tier}_voucher_code"
     status_field = f"tier{tier}_voucher_status"
+
+    cfg = cfg or get_journey_config(db_ref)
+    allowed, reason = is_journey_enabled_for_user(db_ref, uid, cfg=cfg, now_ref=ts)
+    if not allowed:
+        logger.info("[REACT_JOURNEY][SKIP] uid=%s campaign_id=%s tier=%s reason=%s", uid, campaign_id, tier, reason)
+        return {"success": False, "code": "disabled", "reason": reason}
 
     user_doc = _user_doc(db_ref, uid)
     blocked, reason = _is_blocked_user(user_doc)
@@ -303,39 +419,68 @@ def complete_tier(db_ref, uid: int, tier: int, *, campaign_id: str = CAMPAIGN_ID
     if tier == 3 and not journey.get("tier2_completed_at"):
         return {"success": False, "code": "tier2_required"}
 
-    voucher_code, voucher_status = _issue_code(db_ref, uid, tier, journey_id=journey.get("_id"), now_ref=ts)
-    update_set = {
-        completed_field: ts,
-        status_field: voucher_status,
-        "updated_at": ts,
-    }
+    # Atomically claim this tier before touching voucher inventory or granting
+    # XP. This is the idempotency boundary: only the caller whose update
+    # actually flips completed_field from None -> ts may issue a reward, so a
+    # check-in request racing the scheduler (or two scheduler runs overlapping)
+    # cannot both pull a code from the pool / grant XP for the same tier.
+    claim = _journeys(db_ref).update_one(
+        {"user_id": uid, "campaign_id": campaign_id, completed_field: None, "status": {"$ne": "blocked"}},
+        {"$set": {completed_field: ts, "updated_at": ts}},
+    )
+    if not getattr(claim, "modified_count", 0):
+        logger.info("[REACT_JOURNEY][SKIP] uid=%s campaign_id=%s tier=%s reason=race_lost", uid, campaign_id, tier)
+        return {"success": True, "code": "noop"}
+
+    tier_cfg = cfg.get(f"tier{tier}", {}) or {}
+    reward_type = cfg.get("reward_type", "disabled")
+    want_voucher = bool(tier_cfg.get("pool_enabled", True)) and reward_type in ("tiered_vouchers", "xp_plus_tiered_vouchers")
+    want_xp = reward_type in ("xp_only", "xp_plus_tiered_vouchers")
+    xp_amount = int(tier_cfg.get("xp_amount") or 0)
+
+    voucher_code, voucher_status = (None, "SKIPPED")
+    if want_voucher:
+        voucher_code, voucher_status = _issue_code(db_ref, uid, tier, journey_id=journey.get("_id"), now_ref=ts)
+
+    xp_granted = 0
+    if want_xp and xp_amount > 0 and grant_xp:
+        try:
+            if grant_xp(db_ref, uid, "reactivation_journey", f"reactivation_journey:tier{tier}:{uid}", xp_amount):
+                xp_granted = xp_amount
+        except Exception:
+            logger.exception("[REACT_JOURNEY][ERROR] uid=%s campaign_id=%s tier=%s reason=xp_grant_failed", uid, campaign_id, tier)
+
+    update_set = {status_field: voucher_status, "updated_at": ts}
     if voucher_code:
         update_set[claimed_field] = ts
         update_set[code_field] = voucher_code
+    if xp_granted:
+        update_set[f"tier{tier}_xp_granted"] = xp_granted
     if tier == 3:
         update_set["status"] = "completed"
-    result = _journeys(db_ref).update_one(
-        {"user_id": uid, "campaign_id": campaign_id, completed_field: None},
-        {"$set": update_set},
-    )
-    if not getattr(result, "modified_count", 0):
-        logger.info("[REACT_JOURNEY][SKIP] uid=%s campaign_id=%s tier=%s reason=race_lost", uid, campaign_id, tier)
-        return {"success": True, "code": "noop"}
-    if voucher_code:
+    _journeys(db_ref).update_one({"user_id": uid, "campaign_id": campaign_id}, {"$set": update_set})
+
+    if voucher_code or xp_granted:
         logger.info("[REACT_JOURNEY][T%s_ISSUED] uid=%s campaign_id=%s tier=%s", tier, uid, campaign_id, tier)
         _send_pm(uid, TIER_MESSAGES[tier], send_fn=send_fn)
-    else:
+        return {"success": True, "code": "issued", "voucher_code": voucher_code, "xp_granted": xp_granted}
+    if want_voucher:
         logger.warning("[REACT_JOURNEY][OUT_OF_STOCK] uid=%s campaign_id=%s tier=%s reason=completed_pending_stock", uid, campaign_id, tier)
-    return {"success": True, "code": "issued" if voucher_code else "out_of_stock", "voucher_code": voucher_code}
+        return {"success": True, "code": "out_of_stock", "voucher_code": None, "xp_granted": 0}
+    return {"success": True, "code": "noop", "voucher_code": None, "xp_granted": 0}
 
 
 def handle_successful_checkin(db_ref, uid: int, *, campaign_id: str = CAMPAIGN_ID, now_ref: datetime | None = None, send_fn=None) -> dict:
+    cfg = get_journey_config(db_ref)
+    allowed, _reason = is_journey_enabled_for_user(db_ref, int(uid), cfg=cfg, now_ref=now_ref)
+    if not allowed:
+        return {"success": True, "code": "disabled"}
     journey = _journeys(db_ref).find_one({"user_id": int(uid), "campaign_id": campaign_id, "status": "active"})
     if not journey:
         return {"success": True, "code": "no_journey"}
     if journey.get("tier1_completed_at"):
         return {"success": True, "code": "tier1_already_done"}
-    return complete_tier(db_ref, int(uid), 1, campaign_id=campaign_id, now_ref=now_ref, send_fn=send_fn)
+    return complete_tier(db_ref, int(uid), 1, campaign_id=campaign_id, now_ref=now_ref, send_fn=send_fn, cfg=cfg)
 
 
 def _event_created_at(row: dict):
@@ -376,6 +521,16 @@ def evaluate_pending_journeys(
 ) -> dict:
     ts = _coerce_utc(now_ref) or now_utc()
     stats = {"scanned": 0, "tier2_issued": 0, "tier3_issued": 0, "skipped": 0, "out_of_stock": 0, "blocked": 0}
+    cfg = get_journey_config(db_ref)
+    if cfg.get("mode") == "disabled" or cfg.get("reward_type") == "disabled" or not _within_campaign_window(cfg, ts):
+        logger.info("[REACT_JOURNEY][SCHEDULER_SKIP] reason=mode_%s", cfg.get("mode"))
+        return stats
+    tier2_cfg = cfg.get("tier2", {}) or {}
+    tier3_cfg = cfg.get("tier3", {}) or {}
+    tier2_days = int(tier2_cfg.get("threshold_days") or 5)
+    tier2_window = int(tier2_cfg.get("window_days") or 7)
+    tier3_days = int(tier3_cfg.get("threshold_days") or 20)
+    tier3_window = int(tier3_cfg.get("window_days") or 30)
     cursor = _journeys(db_ref).find({"status": "active"}, {"user_id": 1, "campaign_id": 1, "reactivated_at": 1, "tier1_completed_at": 1, "tier2_completed_at": 1, "tier3_completed_at": 1})
     if hasattr(cursor, "limit"):
         cursor = cursor.limit(batch_limit)
@@ -383,6 +538,9 @@ def evaluate_pending_journeys(
         stats["scanned"] += 1
         uid = int(journey.get("user_id"))
         try:
+            if cfg.get("mode") == "test_users_only" and uid not in cfg.get("test_user_ids", set()):
+                stats["skipped"] += 1
+                continue
             blocked, reason = _is_blocked_user(_user_doc(db_ref, uid))
             if blocked:
                 _journeys(db_ref).update_one({"user_id": uid, "campaign_id": journey.get("campaign_id")}, {"$set": {"status": "blocked", "blocked_reason": reason, "updated_at": ts}})
@@ -398,17 +556,17 @@ def evaluate_pending_journeys(
             if not reactivated_at:
                 stats["skipped"] += 1
                 continue
-            active7 = count_unique_checkin_days(db_ref, uid, reactivated_at, 7)
-            active30 = count_unique_checkin_days(db_ref, uid, reactivated_at, 30)
+            active7 = count_unique_checkin_days(db_ref, uid, reactivated_at, tier2_window)
+            active30 = count_unique_checkin_days(db_ref, uid, reactivated_at, tier3_window)
             _journeys(db_ref).update_one({"user_id": uid, "campaign_id": journey.get("campaign_id")}, {"$set": {"active_days_7": active7, "active_days_30": active30, "updated_at": ts}})
-            if reactivated_at + timedelta(days=7) <= ts and journey.get("tier1_completed_at") and not journey.get("tier2_completed_at") and active7 >= 5:
-                result = complete_tier(db_ref, uid, 2, campaign_id=journey.get("campaign_id") or CAMPAIGN_ID, now_ref=ts, send_fn=send_fn)
+            if reactivated_at + timedelta(days=tier2_window) <= ts and journey.get("tier1_completed_at") and not journey.get("tier2_completed_at") and active7 >= tier2_days:
+                result = complete_tier(db_ref, uid, 2, campaign_id=journey.get("campaign_id") or CAMPAIGN_ID, now_ref=ts, send_fn=send_fn, cfg=cfg)
                 if result.get("code") == "issued":
                     stats["tier2_issued"] += 1
                 elif result.get("code") == "out_of_stock":
                     stats["out_of_stock"] += 1
-            if reactivated_at + timedelta(days=30) <= ts and journey.get("tier2_completed_at") and not journey.get("tier3_completed_at") and active30 >= 20:
-                result = complete_tier(db_ref, uid, 3, campaign_id=journey.get("campaign_id") or CAMPAIGN_ID, now_ref=ts, send_fn=send_fn)
+            if reactivated_at + timedelta(days=tier3_window) <= ts and journey.get("tier2_completed_at") and not journey.get("tier3_completed_at") and active30 >= tier3_days:
+                result = complete_tier(db_ref, uid, 3, campaign_id=journey.get("campaign_id") or CAMPAIGN_ID, now_ref=ts, send_fn=send_fn, cfg=cfg)
                 if result.get("code") == "issued":
                     stats["tier3_issued"] += 1
                 elif result.get("code") == "out_of_stock":

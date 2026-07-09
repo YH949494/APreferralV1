@@ -132,6 +132,8 @@ class _DB:
         self.reactivation_journey = _Collection(unique_fields=[("user_id", "campaign_id")])
         self.voucher_pools = _Collection(unique_fields=[("pool_id", "code")])
         self.xp_events = _Collection()
+        self.xp_ledger = _Collection()
+        self.reactivation_journey_config = _Collection()
 
     def __getitem__(self, name):
         return getattr(self, name)
@@ -142,6 +144,7 @@ class ReactivationJourneyTests(unittest.TestCase):
         self.now = datetime(2026, 6, 1, 0, 0, tzinfo=timezone.utc)
         self.db = _DB()
         self.db.users.insert_one({"user_id": 10, "status": "Normal"})
+        journey.update_journey_config(self.db, {"mode": "enabled", "reward_type": "tiered_vouchers"}, now_ref=self.now)
 
     def _add_checkins(self, uid, count, start=None):
         start = start or self.now
@@ -235,6 +238,90 @@ class ReactivationJourneyTests(unittest.TestCase):
         self.assertEqual(summary["tier1_completed"], 1)
         self.assertEqual(summary["tier1_issued"], 1)
         self.assertEqual(summary["pools"][0]["issued"], 1)
+
+    def test_default_mode_is_disabled_and_blocks_everything(self):
+        fresh_db = _DB()
+        fresh_db.users.insert_one({"user_id": 10, "status": "Normal"})
+        fresh_db.voucher_pools.insert_one({"pool_id": "COMEBACK_T1", "code": "Z1", "status": "available", "created_at": self.now})
+
+        created = journey.create_or_update_journey(fresh_db, 10, verified_at=self.now, now_ref=self.now)
+        checkin_result = journey.handle_successful_checkin(fresh_db, 10, now_ref=self.now)
+        eval_stats = journey.evaluate_pending_journeys(fresh_db, now_ref=self.now + timedelta(days=31), membership_checker=lambda uid: (True, "member"))
+
+        self.assertEqual(journey.get_journey_config(fresh_db)["mode"], "disabled")
+        self.assertFalse(created["success"])
+        self.assertEqual(created["code"], "disabled")
+        self.assertEqual(fresh_db.reactivation_journey.count_documents({}), 0)
+        self.assertEqual(checkin_result["code"], "disabled")
+        self.assertEqual(eval_stats["scanned"], 0)
+        self.assertEqual(fresh_db.voucher_pools.count_documents({"status": "issued"}), 0)
+
+    def test_test_users_only_mode_gates_by_user_id(self):
+        journey.update_journey_config(self.db, {"mode": "test_users_only", "test_user_ids": [10]}, now_ref=self.now)
+        self.db.users.insert_one({"user_id": 11, "status": "Normal"})
+        self.db.voucher_pools.insert_one({"pool_id": "COMEBACK_T1", "code": "TU1", "status": "available", "created_at": self.now})
+        self.db.voucher_pools.insert_one({"pool_id": "COMEBACK_T1", "code": "TU2", "status": "available", "created_at": self.now})
+
+        allowed = journey.create_or_update_journey(self.db, 10, verified_at=self.now, now_ref=self.now)
+        blocked = journey.create_or_update_journey(self.db, 11, verified_at=self.now, now_ref=self.now)
+
+        self.assertTrue(allowed["success"])
+        self.assertFalse(blocked["success"])
+        self.assertEqual(blocked["code"], "disabled")
+        self.assertEqual(blocked["reason"], "not_test_user")
+        self.assertEqual(self.db.reactivation_journey.count_documents({}), 1)
+
+    def test_xp_only_reward_type_skips_voucher_and_grants_xp(self):
+        journey.update_journey_config(self.db, {"mode": "enabled", "reward_type": "xp_only", "tier1": {"pool_enabled": True, "xp_amount": 50}}, now_ref=self.now)
+        journey.create_or_update_journey(self.db, 10, verified_at=self.now, now_ref=self.now)
+        self.db.voucher_pools.insert_one({"pool_id": "COMEBACK_T1", "code": "XP1", "status": "available", "created_at": self.now})
+
+        result = journey.handle_successful_checkin(self.db, 10, now_ref=self.now, send_fn=lambda *a, **k: (True, None, False))
+
+        self.assertEqual(result["code"], "issued")
+        self.assertEqual(result["xp_granted"], 50)
+        self.assertIsNone(result.get("voucher_code"))
+        self.assertEqual(self.db.voucher_pools.count_documents({"status": "issued"}), 0)
+        self.assertEqual(self.db.xp_events.count_documents({"user_id": 10}), 1)
+
+    def test_xp_plus_tiered_vouchers_issues_both(self):
+        journey.update_journey_config(self.db, {"mode": "enabled", "reward_type": "xp_plus_tiered_vouchers", "tier1": {"pool_enabled": True, "xp_amount": 25}}, now_ref=self.now)
+        journey.create_or_update_journey(self.db, 10, verified_at=self.now, now_ref=self.now)
+        self.db.voucher_pools.insert_one({"pool_id": "COMEBACK_T1", "code": "COMBO1", "status": "available", "created_at": self.now})
+
+        result = journey.handle_successful_checkin(self.db, 10, now_ref=self.now, send_fn=lambda *a, **k: (True, None, False))
+
+        self.assertEqual(result["code"], "issued")
+        self.assertEqual(result["voucher_code"], "COMBO1")
+        self.assertEqual(result["xp_granted"], 25)
+
+    def test_complete_tier_is_idempotent_against_concurrent_retry(self):
+        journey.create_or_update_journey(self.db, 10, verified_at=self.now, now_ref=self.now)
+        self.db.voucher_pools.insert_one({"pool_id": "COMEBACK_T1", "code": "RACE1", "status": "available", "created_at": self.now})
+        self.db.voucher_pools.insert_one({"pool_id": "COMEBACK_T1", "code": "RACE2", "status": "available", "created_at": self.now})
+
+        first = journey.complete_tier(self.db, 10, 1, now_ref=self.now)
+        second = journey.complete_tier(self.db, 10, 1, now_ref=self.now)
+
+        self.assertEqual(first["code"], "issued")
+        self.assertEqual(second["code"], "noop")
+        # Only one code should ever be pulled from the pool for this user/tier,
+        # even though both calls raced against the same "not yet completed" state.
+        self.assertEqual(self.db.voucher_pools.count_documents({"status": "issued"}), 1)
+        self.assertEqual(self.db.voucher_pools.count_documents({"status": "available"}), 1)
+
+    def test_scheduler_does_nothing_when_disabled(self):
+        journey.create_or_update_journey(self.db, 10, verified_at=self.now, now_ref=self.now)
+        self.db.reactivation_journey.update_one({"user_id": 10}, {"$set": {"tier1_completed_at": self.now}})
+        self._add_checkins(10, 5)
+        self.db.voucher_pools.insert_one({"pool_id": "COMEBACK_T2", "code": "SKIP1", "status": "available", "created_at": self.now})
+        journey.update_journey_config(self.db, {"mode": "disabled"}, now_ref=self.now)
+
+        stats = journey.evaluate_pending_journeys(self.db, now_ref=self.now + timedelta(days=8), membership_checker=lambda uid: (True, "member"))
+
+        self.assertEqual(stats["scanned"], 0)
+        self.assertEqual(stats["tier2_issued"], 0)
+        self.assertEqual(self.db.voucher_pools.count_documents({"status": "issued"}), 0)
 
 
 if __name__ == "__main__":

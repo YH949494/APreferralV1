@@ -89,7 +89,7 @@ from affiliate_rewards import (
 )
 from telegram_utils import safe_reply_text, safe_send_message
 from channel_reactivation import set_campaign_active, campaign_summary as channel_reactivation_summary, process_reactivation_campaign, verify_reactivation_claim, check_official_channel_subscribed, VERIFY_CALLBACK_DATA
-from reactivation_journey import ensure_reactivation_journey_indexes, evaluate_pending_journeys, handle_successful_checkin, journey_summary, journey_users, upload_pool_codes
+from reactivation_journey import ensure_reactivation_journey_indexes, evaluate_pending_journeys, handle_successful_checkin, journey_summary, journey_users, upload_pool_codes, get_journey_config, update_journey_config
 
 from pymongo import DESCENDING, ASCENDING, ReturnDocument  # keep if used elsewhere
 from pymongo.errors import DuplicateKeyError, CursorNotFound, OperationFailure, PyMongoError
@@ -2324,6 +2324,29 @@ def api_admin_reactivation_journey_users():
         "success": True,
         "items": journey_users(db, status=request.args.get("status"), tier=request.args.get("tier"), limit=limit),
     })
+
+
+@admin_bp.get("/api/admin/reactivation/journey/config")
+def api_admin_reactivation_journey_config_get():
+    ok, err = require_admin_from_query()
+    if not ok:
+        return _admin_error_response(err)
+    cfg = get_journey_config(db)
+    cfg["test_user_ids"] = sorted(cfg.get("test_user_ids", set()))
+    return jsonify({"success": True, "config": cfg})
+
+
+@admin_bp.post("/api/admin/reactivation/journey/config")
+def api_admin_reactivation_journey_config_set():
+    ok, err = require_admin_from_query()
+    if not ok:
+        return _admin_error_response(err)
+    data = request.get_json(silent=True) or {}
+    result = update_journey_config(db, data)
+    if result.get("success"):
+        result["config"]["test_user_ids"] = sorted(result["config"].get("test_user_ids", set()))
+    status_code = 200 if result.get("success") else 400
+    return jsonify(result), status_code
 
 
 @admin_bp.post("/api/admin/reactivation/journey/pools/upload")
