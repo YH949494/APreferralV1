@@ -284,7 +284,14 @@ def ensure_reactivation_journey_indexes(db_ref) -> None:
         )
     else:  # pragma: no cover - database helper unavailable (e.g. stub env)
         voucher_pools.create_index([("pool_id", ASCENDING), ("code", ASCENDING)], unique=True, name="uq_voucher_pool_code")
-    voucher_pools.create_index([("pool_id", ASCENDING), ("status", ASCENDING)], name="ix_voucher_pool_status")
+    if _ensure_equivalent_index is not None:
+        _ensure_equivalent_index(
+            voucher_pools,
+            [("pool_id", ASCENDING), ("status", ASCENDING)],
+            name="ix_voucher_pool_status",
+        )
+    else:  # pragma: no cover - database helper unavailable (e.g. stub env)
+        voucher_pools.create_index([("pool_id", ASCENDING), ("status", ASCENDING)], name="ix_voucher_pool_status")
 
 
 def _is_blocked_user(user_doc: dict | None) -> tuple[bool, str | None]:
