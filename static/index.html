@@ -1116,15 +1116,92 @@
     .referral-progress-card { margin-top: 14px; padding: 14px; border: 1px solid var(--border-light); border-radius: var(--radius-md); background: linear-gradient(180deg, rgba(255,94,0,.1), rgba(255,94,0,.04)); display: grid; gap: 8px; }
     .referral-progress-bar { width: 100%; height: 10px; background: rgba(255,255,255,.14); border-radius: 999px; overflow: hidden; }
     .referral-progress-meta { font-size: 13px; color: var(--text-muted); display: grid; gap: 4px; }
-    .welcome-progress-card { margin-top: 6px; padding: 14px; border: 1px solid var(--border-light); border-radius: var(--radius-md); background: linear-gradient(180deg, rgba(255,94,0,.12), rgba(255,94,0,.04)); display: grid; gap: 9px; }
-    .welcome-progress-squares { font-size: 22px; letter-spacing: 3px; }
+    .welcome-progress-card {
+      margin-top: 6px;
+      padding: 22px 20px 20px;
+      border: 1px solid rgba(255,255,255,.08);
+      border-radius: 20px;
+      background: linear-gradient(160deg, #1c1c22 0%, #16161b 55%, #1a1410 100%);
+      box-shadow: 0 1px 0 rgba(255,255,255,.04) inset, 0 12px 28px rgba(0,0,0,.35);
+      display: grid;
+      gap: 14px;
+      overflow: hidden;
+    }
+    .welcome-progress-card > * { min-width: 0; }
     .welcome-progress-meta { font-size: 13px; color: var(--text-muted); display: grid; gap: 4px; }
-    .welcome-progress-title { margin: 0; font-size: 16px; font-weight: 700; color: var(--text-main); }
+    .welcome-progress-title { margin: 0; font-size: 17px; font-weight: 700; color: var(--text-main); letter-spacing: -.1px; }
     .welcome-progress-message { color: #ffdcca; font-weight: 600; }
-    .welcome-progress-next-action { color: #ffdcca; font-weight: 600; }
-    .welcome-progress-countdown { color: var(--text-muted); }
+    .welcome-progress-next-action { color: #d8d3c9; font-weight: 500; font-size: 14px; line-height: 1.4; text-align: center; }
+    .welcome-progress-countdown { color: var(--text-muted); font-size: 13px; font-weight: 600; text-align: center; white-space: pre-line; }
     .welcome-progress-expiry { font-size: 12px; font-weight: 700; color: var(--text-muted); }
     .welcome-progress-expiry.welcome-progress-expiry-urgent { color: #ff8a5c; }
+
+    /* ===== WELCOME TIMELINE (3-step check-in) ===== */
+    .welcome-step-label {
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: .4px;
+      text-transform: uppercase;
+      color: var(--ap-orange-strong);
+      text-align: center;
+    }
+    .welcome-timeline {
+      display: flex;
+      align-items: center;
+      padding: 4px 4px 0;
+    }
+    .welcome-timeline-step {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 6px;
+      flex: 0 0 auto;
+    }
+    .welcome-timeline-circle {
+      width: 34px;
+      height: 34px;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 14px;
+      font-weight: 700;
+      border: 2px solid rgba(255,255,255,.14);
+      color: var(--text-muted);
+      background: rgba(255,255,255,.04);
+      transition: all .2s ease;
+      flex-shrink: 0;
+    }
+    .welcome-timeline-day {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text-muted);
+    }
+    .welcome-timeline-step.is-done .welcome-timeline-circle {
+      background: var(--ap-orange);
+      border-color: var(--ap-orange);
+      color: #fff;
+      box-shadow: 0 4px 10px rgba(255,94,0,.35);
+    }
+    .welcome-timeline-step.is-done .welcome-timeline-day { color: var(--ap-orange-strong); }
+    .welcome-timeline-step.is-current .welcome-timeline-circle {
+      border-color: var(--ap-orange);
+      color: var(--ap-orange-strong);
+      background: rgba(255,94,0,.12);
+      box-shadow: 0 0 0 4px rgba(255,94,0,.14);
+    }
+    .welcome-timeline-step.is-current .welcome-timeline-day { color: var(--text-main); font-weight: 700; }
+    .welcome-timeline-line {
+      flex: 1 1 auto;
+      height: 3px;
+      min-width: 12px;
+      background: rgba(255,255,255,.12);
+      border-radius: 999px;
+      margin: 0 4px 18px;
+      transition: background .2s ease;
+    }
+    .welcome-timeline-line.is-filled { background: var(--ap-orange); }
+    .welcome-progress-card .welcome-cta { width: 100%; font-size: 15px; font-weight: 700; padding: 13px 16px; }
     .welcome-status-badge { display: inline-block; padding: 4px 10px; border-radius: 999px; font-size: 13px; font-weight: 700; background: rgba(255,255,255,.14); color: var(--text-main); width: fit-content; }
     .welcome-status-message { margin: 0; font-size: 13px; color: var(--text-muted); }
     .welcome-status-issued { margin: 0; font-size: 13px; color: var(--text-muted); }
@@ -1617,27 +1694,26 @@
       <div class="welcome-progress-card" aria-live="polite">
         <div id="welcome-progress-body">
           <h3 class="welcome-progress-title" id="welcome-progress-title" data-i18n="welcome_voucher_progress">🎁 Welcome Voucher Progress</h3>
-          <div class="welcome-progress-squares" id="welcome-progress-squares">⬜⬜⬜ 0/3</div>
           <div class="welcome-progress-expiry" id="welcome-progress-expiry" style="display:none;"></div>
-          <div class="welcome-progress-meta">
-            <div id="welcome-progress-next-action" class="welcome-progress-next-action"></div>
-            <div id="welcome-progress-countdown" class="welcome-progress-countdown" style="display:none;"></div>
-          </div>
+          <div class="welcome-step-label" id="welcome-step-label">Step 1 of 3</div>
+          <div class="welcome-timeline" id="welcome-progress-squares"></div>
+          <div id="welcome-progress-countdown" class="welcome-progress-countdown" style="display:none;"></div>
+          <div id="welcome-progress-next-action" class="welcome-progress-next-action"></div>
           <div id="welcome-channel-reminder" style="display:none;">
-            <p style="font-size:13px;color:var(--text-muted);margin:4px 0 8px;" data-i18n="join_channel_to_unlock">Join the channel to unlock your Welcome Voucher.</p>
+            <p style="font-size:13px;color:var(--text-muted);margin:4px 0 8px;text-align:center;" data-i18n="join_channel_to_unlock">Join the channel to unlock your Welcome Voucher.</p>
             <div style="display:flex;gap:8px;flex-wrap:wrap;">
-              <a href="https://t.me/advantplayofficial" target="_blank" rel="noopener" class="btn btn-primary" style="text-decoration:none;" data-i18n="join_channel">Join Channel</a>
-              <button id="welcome-verify-sub-btn" type="button" class="btn btn-ghost" data-i18n="verify_subscription">Verify Subscription</button>
+              <a href="https://t.me/advantplayofficial" target="_blank" rel="noopener" class="btn btn-primary welcome-cta" style="text-decoration:none;" data-i18n="join_channel">Join Channel</a>
+              <button id="welcome-verify-sub-btn" type="button" class="btn btn-ghost welcome-cta" data-i18n="verify_subscription">Verify Subscription</button>
             </div>
           </div>
-          <button id="welcome-checkin-btn" type="button" class="btn btn-primary" style="display:none;" data-i18n="check_in">Check In</button>
+          <button id="welcome-checkin-btn" type="button" class="btn btn-primary welcome-cta" style="display:none;" data-i18n="check_in">Check In</button>
         </div>
         <div id="welcome-status-card-body" style="display:none;">
           <h3 class="welcome-progress-title" id="welcome-status-title">🎉 Welcome Reward</h3>
           <div class="welcome-status-badge" id="welcome-status-badge">🎁 Ready to Claim</div>
           <p class="welcome-status-message" id="welcome-status-message">Your Welcome Reward has been unlocked.</p>
           <p class="welcome-status-issued" id="welcome-status-issued" style="display:none;"></p>
-          <button id="welcome-view-reward-btn" type="button" class="btn btn-primary">View Reward ↑</button>
+          <button id="welcome-view-reward-btn" type="button" class="btn btn-primary welcome-cta">View Reward ↑</button>
         </div>
       </div>
     </div>
@@ -3190,12 +3266,38 @@
       el.style.display = "block";
     }
 
+    function renderWelcomeTimeline(container, required, completed) {
+      if (!container) return;
+      container.innerHTML = "";
+      const currentStep = Math.min(required, completed + 1);
+      for (let day = 1; day <= required; day++) {
+        if (day > 1) {
+          const line = document.createElement("div");
+          line.className = "welcome-timeline-line" + (day - 1 <= completed ? " is-filled" : "");
+          container.appendChild(line);
+        }
+        const step = document.createElement("div");
+        const state = day <= completed ? "is-done" : (day === currentStep ? "is-current" : "is-future");
+        step.className = `welcome-timeline-step ${state}`;
+        const circle = document.createElement("div");
+        circle.className = "welcome-timeline-circle";
+        circle.textContent = day <= completed ? "✓" : String(day);
+        const label = document.createElement("div");
+        label.className = "welcome-timeline-day";
+        label.textContent = `Day ${day}`;
+        step.appendChild(circle);
+        step.appendChild(label);
+        container.appendChild(step);
+      }
+    }
+
     function renderWelcomeProgress(data = {}) {
       const section = document.getElementById("welcome-progress-section");
       const body = document.getElementById("welcome-progress-body");
       const statusBody = document.getElementById("welcome-status-card-body");
       const titleEl = document.getElementById("welcome-progress-title");
       const squaresEl = document.getElementById("welcome-progress-squares");
+      const stepLabelEl = document.getElementById("welcome-step-label");
       const expiryEl = document.getElementById("welcome-progress-expiry");
       const nextActionEl = document.getElementById("welcome-progress-next-action");
       const countdownEl = document.getElementById("welcome-progress-countdown");
@@ -3219,11 +3321,9 @@
       statusBody.style.display = "none";
       body.style.display = "";
       titleEl.textContent = t("welcome_voucher_progress");
-      const dayLabels = [];
-      for (let day = 1; day <= required; day++) {
-        dayLabels.push(`Day ${day} ${day <= completed ? "✅" : "⬜"}`);
-      }
-      squaresEl.textContent = `${dayLabels.join(" / ")} → Welcome Reward`;
+      const currentStep = Math.min(required, completed + 1);
+      if (stepLabelEl) stepLabelEl.textContent = `Step ${currentStep} of ${required}`;
+      renderWelcomeTimeline(squaresEl, required, completed);
       checkinBtn.style.display = "none";
       countdownEl.style.display = "none";
       nextActionEl.textContent = "";
@@ -3252,12 +3352,13 @@
       }
 
       // Default: in-progress states (State 1–3)
+      const remaining = required - completed;
       if (completed === 0) {
-        nextActionEl.textContent = "Complete 3 check-ins within 7 days to unlock your reward.";
-      } else if (completed === required - 1) {
-        nextActionEl.textContent = "Just one more check-in to unlock your reward.";
+        nextActionEl.textContent = `Complete ${remaining} check-ins within 7 days to unlock your reward.`;
+      } else if (remaining === 1) {
+        nextActionEl.textContent = "Complete 1 more check-in to unlock your reward.";
       } else {
-        nextActionEl.textContent = `Complete Day ${completed + 1} check-in to unlock your reward.`;
+        nextActionEl.textContent = `Complete ${remaining} more check-ins to unlock your reward.`;
       }
 
       const countdown = formatWelcomeCountdown(data.next_checkin_at);
