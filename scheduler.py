@@ -18,6 +18,22 @@ from affiliate_group_access import maybe_unlock_affiliate_group
 
 from telegram_utils import send_telegram_http_message
 
+try:
+    from settings_service import get_setting as _get_setting
+except Exception:  # pragma: no cover
+    _get_setting = None
+
+
+def _journey_setting(field: str, fallback):
+    if _get_setting is None:
+        return fallback
+    try:
+        value = _get_setting("welcome_journey", field)
+        return value if value is not None else fallback
+    except Exception:
+        return fallback
+
+
 WELCOME_REMINDER_AFTER_HOURS = int(os.getenv("WELCOME_REMINDER_AFTER_HOURS", "12"))
 WELCOME_FINAL_WARNING_HOURS = int(os.getenv("WELCOME_FINAL_WARNING_HOURS", "36"))
 WELCOME_EXPIRY_HOURS = int(os.getenv("WELCOME_EXPIRY_HOURS", "48"))
@@ -25,18 +41,42 @@ WELCOME_REMINDER_BATCH_LIMIT = int(os.getenv("WELCOME_REMINDER_BATCH_LIMIT", "20
 WELCOME_REMINDER_LINK = os.getenv("WELCOME_REMINDER_LINK", "https://apreferralv1.fly.dev/miniapp")
 
 
+def _welcome_reminder_link() -> str:
+    try:
+        from settings_service import get_setting as _gs
+        link = _gs("urls", "miniapp_url")
+        if link:
+            return link
+    except Exception:
+        pass
+    return WELCOME_REMINDER_LINK
+
+
 def _welcome_reminder_text(*, final_warning: bool) -> str:
+    link = _welcome_reminder_link()
     if final_warning:
-        return (
+        try:
+            from settings_service import get_setting as _gs
+            template = _gs("message_templates", "day3_reminder")
+        except Exception:
+            template = None
+        template = template or (
             "⏳ Last chance!\n\n"
             "Your AdvantPlay Welcome Voucher is about to expire — don't miss out.\n"
-            f"{WELCOME_REMINDER_LINK}"
+            "{link}"
         )
-    return (
+        return template.format(link=link)
+    try:
+        from settings_service import get_setting as _gs
+        template = _gs("message_templates", "checkin_reminder")
+    except Exception:
+        template = None
+    template = template or (
         "🎁 Your AdvantPlay Welcome Voucher is waiting.\n\n"
         "Finish your check-ins to claim it before it expires.\n"
-        f"{WELCOME_REMINDER_LINK}"
+        "{link}"
     )
+    return template.format(link=link)
 
 
 def process_welcome_voucher_lifecycle(*, now_ref: datetime | None = None, batch_limit: int | None = None, db_ref=None, send_fn=None, bot_send_fn=None) -> dict:
@@ -51,6 +91,9 @@ def process_welcome_voucher_lifecycle(*, now_ref: datetime | None = None, batch_
     send_fn = send_fn or send_telegram_http_message
     now_ts = _coerce_utc(now_ref) or now_utc()
     limit = int(batch_limit or WELCOME_REMINDER_BATCH_LIMIT)
+    expiry_hours = int(_journey_setting("welcome_window_hours", WELCOME_EXPIRY_HOURS))
+    final_warning_hours = int(_journey_setting("final_reminder_hours", WELCOME_FINAL_WARNING_HOURS))
+    reminder_after_hours = int(_journey_setting("reminder_after_hours", WELCOME_REMINDER_AFTER_HOURS))
     scanned = reminder_sent = final_warning_sent = expired = send_failed = 0
 
     cursor = db_ref.welcome_eligibility.find(
@@ -69,10 +112,10 @@ def process_welcome_voucher_lifecycle(*, now_ref: datetime | None = None, batch_
 
         first_seen = _coerce_utc(doc.get("first_seen_at"))
         eligible_until = _coerce_utc(doc.get("eligible_until"))
-        created_ref = first_seen or (eligible_until - timedelta(hours=WELCOME_EXPIRY_HOURS) if eligible_until else None)
+        created_ref = first_seen or (eligible_until - timedelta(hours=expiry_hours) if eligible_until else None)
         if not created_ref:
             continue
-        expiry_at = eligible_until or (created_ref + timedelta(hours=WELCOME_EXPIRY_HOURS))
+        expiry_at = eligible_until or (created_ref + timedelta(hours=expiry_hours))
 
         if now_ts >= expiry_at:
             claim_doc = db_ref.new_joiner_claims.find_one({"uid": int(uid)}, {"_id": 1})
@@ -100,8 +143,8 @@ def process_welcome_voucher_lifecycle(*, now_ref: datetime | None = None, batch_
             continue
 
         age_hours = (now_ts - created_ref).total_seconds() / 3600.0
-        needs_final = age_hours >= WELCOME_FINAL_WARNING_HOURS and not doc.get("final_warning_sent_at")
-        needs_reminder = age_hours >= WELCOME_REMINDER_AFTER_HOURS and not doc.get("reminder_sent_at") and not needs_final
+        needs_final = age_hours >= final_warning_hours and not doc.get("final_warning_sent_at")
+        needs_reminder = age_hours >= reminder_after_hours and not doc.get("reminder_sent_at") and not needs_final
 
         if not (needs_reminder or needs_final):
             continue
@@ -877,7 +920,14 @@ def run_invitee_subscription_audit(now_utc_ts=None, db_ref=None) -> dict:
     db_ref = db_ref or db
     now_utc_ts = now_utc_ts or now_utc()
     started = time.monotonic()
-    if not INVITEE_SUB_AUDIT_ENABLED:
+    audit_enabled = INVITEE_SUB_AUDIT_ENABLED
+    try:
+        job_cfg = _get_setting("scheduler", "invite_subscription_audit") if _get_setting else None
+        if isinstance(job_cfg, dict) and "enabled" in job_cfg:
+            audit_enabled = bool(job_cfg["enabled"])
+    except Exception:
+        pass
+    if not audit_enabled:
         logger.info("[SUB_AUDIT] disabled")
         return {"disabled": True}
     if OFFICIAL_CHANNEL_ID is None:

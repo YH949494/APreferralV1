@@ -126,9 +126,35 @@ def normalize_for_bot_segment(raw: Any) -> str:
     return "unclassified"
 
 
+# Settings-service field name -> bot-segment key. Only segments exposed on the
+# Admin Dashboard's "Public Pool Distribution" section are override-able; any
+# segment not listed here keeps using BOT_SEGMENT_PROBABILITY_MAP unchanged.
+_POOL_PROBABILITY_SETTINGS_FIELD_BY_SEGMENT = {
+    "new_user": "new_user",
+    "new_joiner": "new_joiner",
+    "normal_actual": "normal_player",
+    "high_value": "high_value",
+    "ghost": "ghost",
+    "low_value": "low_value",
+    "voucher_hunter": "voucher_hunter",
+    "welcome_abuse": "abuse",
+}
+
+
 def public_pool_probability_for_bot_segment(raw: Any) -> float:
     normalized = normalize_for_bot_segment(raw)
-    return float(BOT_SEGMENT_PROBABILITY_MAP.get(normalized, BOT_SEGMENT_DEFAULT_PROBABILITY))
+    default = float(BOT_SEGMENT_PROBABILITY_MAP.get(normalized, BOT_SEGMENT_DEFAULT_PROBABILITY))
+    field = _POOL_PROBABILITY_SETTINGS_FIELD_BY_SEGMENT.get(normalized)
+    if not field:
+        return default
+    try:
+        from settings_service import get_setting
+        pct = get_setting("pool_probabilities", field)
+        if pct is None:
+            return default
+        return max(0.0, min(1.0, float(pct) / 100.0))
+    except Exception:
+        return default
 
 
 def is_new_user_segment(raw_or_normalized: Any) -> bool:
