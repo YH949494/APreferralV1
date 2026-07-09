@@ -121,7 +121,10 @@ class ReactivationJourneyIndexIntegrationTests(unittest.TestCase):
         voucher_pools_col = MagicMock()
         voucher_pools_col.name = "voucher_pools"
         voucher_pools_col.list_indexes.return_value = [
-            _index_doc("uniq_pool_code", [("pool_id", 1), ("code", 1)], unique=True)
+            _index_doc("uniq_pool_code", [("pool_id", 1), ("code", 1)], unique=True),
+            # Reproduces the production crash: same (pool_id, status) key
+            # spec as ix_voucher_pool_status, but under a different name.
+            _index_doc("pool_status", [("pool_id", 1), ("status", 1)]),
         ]
 
         fake_db = {
@@ -130,19 +133,17 @@ class ReactivationJourneyIndexIntegrationTests(unittest.TestCase):
         }
 
         # Should not raise even though the code asks for uq_voucher_pool_code
-        # and the collection already enforces the same key/uniqueness under
-        # a different name.
+        # / ix_voucher_pool_status and the collection already enforces the
+        # same keys under different names (uniq_pool_code, pool_status).
         journey.ensure_reactivation_journey_indexes(fake_db)
 
-        voucher_pools_col.create_index.assert_any_call(
-            [("pool_id", 1), ("status", 1)], name="ix_voucher_pool_status"
-        )
-        # The unique (pool_id, code) index must never be (re)created or dropped.
+        # Both pre-existing indexes must be reused, not recreated or dropped.
         for call in voucher_pools_col.create_index.call_args_list:
             args = call.args[0] if call.args else call.kwargs.get("keys")
-            self.assertNotEqual(
-                args, [("pool_id", 1), ("code", 1)],
-                "must reuse existing uniq_pool_code, not attempt to create a duplicate",
+            self.assertNotIn(
+                args,
+                ([("pool_id", 1), ("code", 1)], [("pool_id", 1), ("status", 1)]),
+                "must reuse existing uniq_pool_code/pool_status, not attempt to create a duplicate",
             )
         voucher_pools_col.drop_index.assert_not_called()
 
