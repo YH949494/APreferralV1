@@ -1106,8 +1106,35 @@ def record_welcome_checkin_progress(user_id, *, now: datetime | None = None) -> 
     return progress
 
 
-def _welcome_claim_drop_id(now_ref: datetime | None = None, uid: int | None = None) -> str | None:
+def _welcome_drop_gate_reason(drop: dict, *, uid: int | None, user_doc: dict | None) -> str | None:
+    """Audience / region / allowlist / eligibility.mode gate for a new-joiner drop.
+
+    This wraps the exact same ``is_drop_allowed`` + ``is_user_eligible_for_drop``
+    checks that ``/vouchers/visible`` and ``/vouchers/claim`` enforce, so
+    ``/api/welcome-progress`` never reports a drop as claimable that those two
+    endpoints would reject. Returns ``None`` when the gate passes, or a
+    canonical reason code when it doesn't.
+    """
+    user_region = (user_doc or {}).get("region") or ""
+    user_ctx = {"region": user_region, "status": (user_doc or {}).get("status") or ""}
+    tg_user = {"id": uid} if uid is not None else {}
+
+    if is_drop_allowed(drop, uid, "", user_ctx) and is_user_eligible_for_drop(user_doc, tg_user, drop):
+        return None
+
+    audience = drop.get("audience") or {}
+    regions = audience.get("regions") or []
+    if regions and user_region not in regions:
+        return "REGION_MISMATCH"
+    mode = (drop.get("eligibility") or {}).get("mode") or "public"
+    if mode != "public":
+        return "ELIGIBILITY_FAILED"
+    return "AUDIENCE_MISMATCH"
+
+
+def _welcome_claim_drop_id(now_ref: datetime | None = None, uid: int | None = None, user_doc: dict | None = None) -> str | None:
     ref = _as_aware_utc(now_ref) or now_utc()
+    user_region = (user_doc or {}).get("region")
     try:
         for drop in get_active_drops(ref):
             audience_type = _drop_audience_type(drop)
@@ -1125,19 +1152,21 @@ def _welcome_claim_drop_id(now_ref: datetime | None = None, uid: int | None = No
             drop_id = str(drop.get("_id") or drop.get("dropId") or "")
             if not drop_id:
                 continue
+            if _welcome_drop_gate_reason(drop, uid=uid, user_doc=user_doc):
+                continue
             try:
                 state = _pooled_claimability_state(
                     drop=drop,
                     drop_id=drop_id,
-                    user_region=None,
+                    user_region=user_region,
                     uid=uid,
-                    is_my_user=False,
+                    is_my_user=_is_my_region(user_region),
                     ref=ref,
                 )
                 if not state.get("claimable"):
                     continue
             except Exception:
-                pass
+                continue
             return drop_id
     except Exception:
         _safe_log("warning", "[WELCOME_PROGRESS_API] claim_drop_lookup_failed")
@@ -1170,9 +1199,10 @@ _WELCOME_POOL_REASON_MAP = {
 }
 
 
-def _welcome_claim_drop_reason(now_ref: datetime | None = None, uid: int | None = None) -> str:
+def _welcome_claim_drop_reason(now_ref: datetime | None = None, uid: int | None = None, user_doc: dict | None = None) -> str:
     """Return a stable reason code explaining why no welcome claim drop is available."""
     ref = _as_aware_utc(now_ref) or now_utc()
+    user_region = (user_doc or {}).get("region")
     reason = "NO_ACTIVE_DROP"
     found_drop = False
     try:
@@ -1183,6 +1213,12 @@ def _welcome_claim_drop_reason(now_ref: datetime | None = None, uid: int | None 
             if not drop_id:
                 continue
             found_drop = True
+
+            gate_reason = _welcome_drop_gate_reason(drop, uid=uid, user_doc=user_doc)
+            if gate_reason:
+                reason = gate_reason
+                break
+
             starts_at = _as_aware_utc(drop.get("startsAt"))
             if starts_at and ref < starts_at:
                 reason = "DROP_NOT_LIVE_YET"
@@ -1191,9 +1227,9 @@ def _welcome_claim_drop_reason(now_ref: datetime | None = None, uid: int | None 
                 state = _pooled_claimability_state(
                     drop=drop,
                     drop_id=drop_id,
-                    user_region=None,
+                    user_region=user_region,
                     uid=uid,
-                    is_my_user=False,
+                    is_my_user=_is_my_region(user_region),
                     ref=ref,
                 )
                 if state.get("claimable"):
@@ -1226,6 +1262,7 @@ def classify_welcome_pending_reason(
     progress: dict,
     now_ref: datetime | None = None,
     uid: int | None = None,
+    user_doc: dict | None = None,
 ) -> str:
     """Classify why a user with completed_days >= 3 has no claim_drop_id."""
     channel_joined = bool(progress.get("channel_joined"))
@@ -1248,13 +1285,14 @@ def classify_welcome_pending_reason(
             return "REGION_MISMATCH"
         return "ELIGIBILITY_FAILED"
 
-    return _welcome_claim_drop_reason(now_ref, uid)
+    return _welcome_claim_drop_reason(now_ref, uid, user_doc=user_doc)
 
 
 def build_welcome_progress_response(user_id: int, *, now: datetime | None = None) -> dict:
     """Read-only miniapp payload for the Welcome Voucher progress card."""
     now_ref = _as_aware_kl(now) or now_kl()
     progress = get_welcome_reward_progress(user_id, now=now_ref)
+    user_doc = users_collection.find_one({"user_id": user_id}, {"region": 1, "status": 1})
     completed_days = max(0, min(int(progress.get("checkins_completed") or 0), WELCOME_REWARD_CHECKINS_REQUIRED))
     required_days = WELCOME_REWARD_CHECKINS_REQUIRED
     remaining_days = max(0, required_days - completed_days)
@@ -1294,7 +1332,7 @@ def build_welcome_progress_response(user_id: int, *, now: datetime | None = None
 
     claim_drop_id = None
     if status == "unlocked":
-        claim_drop_id = _welcome_claim_drop_id(now_ref, uid=user_id)
+        claim_drop_id = _welcome_claim_drop_id(now_ref, uid=user_id, user_doc=user_doc)
         if not claim_drop_id:
             _safe_log(
                 "warning",
@@ -1310,7 +1348,7 @@ def build_welcome_progress_response(user_id: int, *, now: datetime | None = None
     if claim_drop_id:
         _safe_log("info", f"[WELCOME_PROGRESS][CLAIM_READY] uid={user_id} drop_id={claim_drop_id}")
     elif completed_days >= required_days:
-        welcome_pending_reason = classify_welcome_pending_reason(progress, now_ref, uid=user_id)
+        welcome_pending_reason = classify_welcome_pending_reason(progress, now_ref, uid=user_id, user_doc=user_doc)
         hide_welcome_card = welcome_pending_reason in _WELCOME_PERMANENT_REASONS
         if hide_welcome_card:
             _safe_log("info", f"[WELCOME_PROGRESS][HIDE_CARD] uid={user_id} reason={welcome_pending_reason}")
@@ -2595,99 +2633,8 @@ def _has_profile_photo(uid: int, *, force_refresh: bool = False):
     )
     return has_photo
 
-def _profile_photo_cache_status(uid: int) -> tuple[bool | None, bool]:
-    if uid is None:
-        return None, True
-    try:
-        cached = profile_photo_cache_col.find_one({"uid": uid})
-    except Exception:
-        return None, True
-    if not cached:
-        return None, True
-    exp = (cached or {}).get("expiresAt")
-    exp_aware = _as_aware_kl(exp) or _as_aware_utc(exp)
-    if not exp_aware or exp_aware <= now_kl():
-        return None, True
-    return bool(cached.get("hasPhoto")), False
- 
-def enqueue_verification(*, user_id: int, verify_type: str, payload: dict | None = None) -> tuple[bool, str | None]:
-    """
-    Enqueue verification task safely.
-    Returns (ok, error_reason).
-    """
-    if user_id is None or not verify_type:
-        current_app.logger.warning(
-            "[VERIFY_QUEUE] enqueue skipped: missing user_id/type user_id=%s type=%s",
-            user_id,
-            verify_type,
-        )
-        return False, "missing_fields"
-    try:
-        user_id = int(user_id)
-    except (TypeError, ValueError):
-        current_app.logger.warning(
-            "[VERIFY_QUEUE] enqueue skipped: invalid user_id=%s type=%s",
-            user_id,
-            verify_type,
-        )
-        return False, "invalid_user_id"
-
-    now = now_utc()
-    verify_type = str(verify_type).strip().lower()
-    update_doc = {
-        "user_id": user_id,
-        "type": verify_type,
-        "status": "queued",
-        "created_at": now,
-        "updated_at": now,
-        "attempts": 0,
-        "last_error": None,
-    }
-    if payload is not None:
-        update_doc["payload"] = payload
-    try:
-        existing = tg_verification_queue_col.find_one(
-            {"user_id": user_id, "type": verify_type, "status": {"$in": ["queued", "processing"]}},
-            {"_id": 1},
-        )
-        if existing:
-            current_app.logger.info(
-                "[VERIFY_QUEUE] skip duplicate enqueue user_id=%s type=%s",
-                user_id,
-                verify_type,
-            )
-            return True, "already_queued"
-
-        tg_verification_queue_col.update_one(
-            {"user_id": user_id, "type": verify_type},
-            {"$set": update_doc},
-            upsert=True,
-        )
-        current_app.logger.info(
-            "[VERIFY_QUEUE] enqueued user_id=%s type=%s",
-            user_id,
-            verify_type,
-        )
-        return True, None
-    except OperationFailure as e:
-        current_app.logger.exception(
-            "[VERIFY_QUEUE] enqueue failed user_id=%s type=%s err_class=%s collection=%s err=%s",
-            user_id,
-            verify_type,
-            e.__class__.__name__,
-            tg_verification_queue_col.name,         
-            e,
-        )
-    except PyMongoError as e:
-        current_app.logger.exception(
-            "[VERIFY_QUEUE] enqueue failed user_id=%s type=%s err_class=%s collection=%s err=%s",
-            user_id,
-            verify_type,
-            e.__class__.__name__,
-            tg_verification_queue_col.name,         
-            e,
-        )
-    return False, "db_error"
+## NOTE: _profile_photo_cache_status() and enqueue_verification() were removed —
+## the Welcome Voucher claim flow no longer requires a Telegram profile photo.
 
 def _verification_backoff_seconds(attempts: int) -> int:
     if attempts <= 0:
@@ -6131,49 +6078,6 @@ def api_claim():
                 "progress": progress,
             }), 403
         current_app.logger.info("[WELCOME_V2][CLAIM_ALLOWED] uid=%s drop_id=%s progress=%s", uid, drop_id, progress)
-        cache_has_photo, cache_stale = _profile_photo_cache_status(uid)
-        if cache_stale:
-            ok, _err = enqueue_verification(
-                user_id=uid,
-                verify_type="pic",
-                payload={"source": "welcome_claim"},
-            )
-            if not ok:
-                return jsonify({
-                    "ok": False,
-                    "reason": "verify_enqueue_failed",
-                    "message": "Verification temporarily unavailable. Please try again later.",
-                }), 503
-            return jsonify({
-                "ok": True,
-                "status": "verification_in_progress",
-                "reason": "verify_pic",
-            }), 202
-        if not cache_has_photo:
-            logger.info(
-                "[CLAIM_BLOCK] reason=%s drop_id=%s uid=%s username=%s",
-                "not_eligible",
-                drop_id,
-                user_id_str,
-                username,
-            )
-            current_app.logger.info(
-                "[claim] uid=%s drop_id=%s dtype=%s audience=%s decision=blocked reason=missing_profile_photo",
-                uid,
-                drop_id,
-                drop_type,
-                audience_type,
-            )
-            return jsonify({
-               "status": "error",
-               "ok": False,
-               "code": "not_eligible",
-               "eligible": False,             
-               "reason": "missing_profile_photo",
-               "checks_key": "pic",             
-               "error_code": "NO_PROFILE_PIC",
-               "message": "Please set a Telegram profile picture to claim the Welcome Bonus."
-            }), 403         
         current_app.logger.info("[WELCOME] claim_attempt uid=%s drop_id=%s", uid, drop_id)
 
         if new_joiner_claims_col.find_one({"uid": uid}):

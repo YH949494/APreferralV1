@@ -4761,16 +4761,6 @@ Active players win more.`;
         };
       }
 
-      if (code === "blocked" && reason === "missing_profile_photo") {
-        return {
-          title: t("profile_photo_required"),
-          message: t("set_profile_photo"),
-          ctaText: t("set_profile_photo_btn"),
-          ctaAction: "profile_photo",
-          severity: "warn"
-        };
-      }
-
       if (code === "not_subscribed") {
         return {
           title: t("subscribe_required"),

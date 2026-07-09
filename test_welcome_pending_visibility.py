@@ -66,7 +66,7 @@ def _build(monkeypatch, *, subscribed=True, allowed=True, eligibility_reason="ok
     monkeypatch.setattr(m, "welcome_eligibility",
                         lambda _uid, ref=None: (allowed, eligibility_reason, {}))
     monkeypatch.setattr(m, "_welcome_claim_drop_id",
-                        lambda now_ref=None, uid=None: claim_drop_id)
+                        lambda now_ref=None, uid=None, user_doc=None: claim_drop_id)
     monkeypatch.setattr(m, "_get_welcome_ticket",
                         lambda uid: {"status": ticket_status})
     monkeypatch.setattr(m, "_get_welcome_eligibility",
@@ -116,7 +116,7 @@ def test_already_claimed_hides_card(monkeypatch):
 # ── Test 6: NO_FREE_CODES card visible, no claim button ─────────────────────
 def test_no_free_codes_card_visible_no_claim(monkeypatch):
     monkeypatch.setattr(m, "_welcome_claim_drop_reason",
-                        lambda now_ref=None, uid=None: "NO_FREE_CODES")
+                        lambda now_ref=None, uid=None, user_doc=None: "NO_FREE_CODES")
     data = _build(monkeypatch, subscribed=True, allowed=True, eligibility_reason="ok",
                   claim_drop_id=None)
     assert data["hide_welcome_card"] is False
@@ -142,7 +142,7 @@ def test_incomplete_checkins_card_visible_no_pending_reason(monkeypatch):
     monkeypatch.setattr(m, "welcome_eligibility",
                         lambda _uid, ref=None: (True, "ok", {}))
     monkeypatch.setattr(m, "_welcome_claim_drop_id",
-                        lambda now_ref=None, uid=None: None)
+                        lambda now_ref=None, uid=None, user_doc=None: None)
     monkeypatch.setattr(m, "_get_welcome_ticket",
                         lambda uid: {"status": "active"})
     monkeypatch.setattr(m, "_get_welcome_eligibility", lambda uid: {})
