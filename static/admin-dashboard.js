@@ -767,14 +767,63 @@
       });
   }
 
+  var JOURNEY_STATUS_META = {
+    disabled: { label: "DISABLED", pill: "neutral" },
+    test_only: { label: "TEST ONLY", pill: "pending" },
+    live: { label: "LIVE", pill: "active" },
+    scheduled: { label: "SCHEDULED", pill: "upcoming" },
+    expired: { label: "EXPIRED", pill: "expired" },
+    config_error: { label: "CONFIG ERROR", pill: "rejected" },
+  };
+
   function loadReactivationJourneyConfig() {
     var host = $("#reactivation-journey-config");
     if (!host) return;
     host.innerHTML = '<div class="note">Loading rollout config...</div>';
     fetch("/api/admin/reactivation/journey/config", { credentials: "same-origin", headers: { Accept: "application/json" } })
       .then(function (r) { return r.json().then(function (j) { if (!r.ok) throw new Error(j.message || "HTTP " + r.status); return j; }); })
-      .then(function (j) { renderReactivationJourneyConfig(j.config || {}); })
-      .catch(function (e) { host.innerHTML = '<div class="banner error">Failed to load config: ' + esc(e.message) + "</div>"; });
+      .then(function (j) {
+        renderReactivationJourneyStatus(j.config || {});
+        renderReactivationJourneyConfig(j.config || {});
+      })
+      .catch(function (e) {
+        host.innerHTML = '<div class="banner error">Failed to load config: ' + esc(e.message) + "</div>";
+        var statusHost = $("#reactivation-journey-status");
+        if (statusHost) statusHost.innerHTML = '<div class="banner error">Failed to load journey status: ' + esc(e.message) + "</div>";
+      });
+  }
+
+  function renderReactivationJourneyStatus(cfg) {
+    var host = $("#reactivation-journey-status");
+    if (!host) return;
+    var meta = JOURNEY_STATUS_META[cfg.computed_status] || { label: (cfg.computed_status || "UNKNOWN").toUpperCase(), pill: "neutral" };
+    var t1 = cfg.tier1 || {}, t2 = cfg.tier2 || {}, t3 = cfg.tier3 || {};
+    function tierSummary(t) { return t.pool_enabled === false ? "Off" : "On"; }
+    var liveNote = cfg.computed_status === "live" || cfg.computed_status === "test_only"
+      ? ""
+      : '<div class="note" style="margin-top:6px;">Journey rewards are NOT live for real users right now.</div>';
+    host.innerHTML =
+      '<h4 style="margin-top:0;">Reactivation Journey Status <span class="pill ' + esc(meta.pill) + '" style="margin-left:8px;">' + esc(meta.label) + '</span></h4>' +
+      '<div class="detail-grid">' +
+      kvBlock("Rollout", [
+        ["Mode", cfg.mode || "—"],
+        ["Reward Type", cfg.reward_type || "—"],
+        ["Test Users", (cfg.test_user_ids || []).length],
+      ]) +
+      kvBlock("Campaign Window", [
+        ["Campaign Start", dt(cfg.campaign_start_at)],
+        ["Campaign End", dt(cfg.campaign_end_at)],
+        ["Server Time (KL)", cfg.server_now_kl ? new Date(cfg.server_now_kl).toLocaleString() : "—"],
+      ]) +
+      kvBlock("Tiers Enabled", [
+        ["Tier 1", tierSummary(t1)],
+        ["Tier 2", tierSummary(t2)],
+        ["Tier 3", tierSummary(t3)],
+      ]) +
+      kvBlock("Config", [
+        ["Last Updated", dt(cfg.updated_at)],
+      ]) +
+      "</div>" + liveNote;
   }
 
   function renderReactivationJourneyConfig(cfg) {
@@ -822,8 +871,10 @@
       '<div class="controls" style="margin-top:8px;"><button class="btn primary" id="rjc-save-btn">Save Rollout Config</button><span class="note" id="rjc-save-status"></span></div>';
 
     $("#rjc-save-btn").addEventListener("click", function () {
+      var btn = this;
       var status = $("#rjc-save-status");
-      status.textContent = "Saving...";
+      if (!btnStart(btn, "Saving...")) return;
+      status.textContent = "";
       var payload = {
         mode: $("#rjc-mode").value,
         reward_type: $("#rjc-reward-type").value,
@@ -852,10 +903,16 @@
       }).then(function (r) {
         return r.json().then(function (j) { if (!r.ok) throw new Error(j.reason || j.message || "HTTP " + r.status); return j; });
       }).then(function (j) {
+        toast("✅ Rollout config saved", "success");
         status.textContent = "Saved.";
-        renderReactivationJourneyConfig(j.config || payload);
+        // Refresh from the server rather than trusting the local payload, so
+        // the status card reflects the authoritative computed_status/updated_at.
+        loadReactivationJourneyConfig();
       }).catch(function (e) {
+        toast("❌ Failed to save rollout config: " + e.message, "error");
         status.textContent = "Failed: " + e.message;
+      }).finally(function () {
+        btnStop(btn);
       });
     });
   }
