@@ -356,6 +356,22 @@ def admin_channel_reactivation_summary():
     payload.setdefault("window", "all")
     payload.setdefault("window_label", "all time")
     payload.setdefault("window_start", None)
+    try:
+        from reactivation_journey import journey_summary
+        from database import db
+        journey = journey_summary(db)
+        payload.update({
+            "tier1_completed": journey.get("tier1_completed", 0),
+            "tier1_issued": journey.get("tier1_issued", 0),
+            "tier2_completed": journey.get("tier2_completed", 0),
+            "tier2_issued": journey.get("tier2_issued", 0),
+            "tier3_completed": journey.get("tier3_completed", 0),
+            "tier3_issued": journey.get("tier3_issued", 0),
+            "out_of_stock_by_tier": journey.get("out_of_stock_by_tier", {}),
+            "reactivation_pools": journey.get("pools", []),
+        })
+    except Exception:
+        logger.exception("[REACT_JOURNEY][ERROR] reason=summary_failed")
     return jsonify(payload)
 
 

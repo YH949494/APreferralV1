@@ -738,14 +738,25 @@
           kpiCard("Eligible Users", d.eligible_users) +
           kpiCard("Messages Sent", d.messages_sent, fmt(d.messages_sent_today) + " today") +
           kpiCard("Successful Verifications", d.successful_verifications) +
-          kpiCard("XP Awarded", d.xp_awarded) +
-          kpiCard("Send Failures", d.send_failures) +
-          kpiCard("Skipped Subscribed", d.skipped_already_subscribed);
+          kpiCard("Tier 1 Completed", d.tier1_completed || 0) +
+          kpiCard("Tier 1 Issued", d.tier1_issued || 0) +
+          kpiCard("Tier 2 Completed", d.tier2_completed || 0) +
+          kpiCard("Tier 2 Issued", d.tier2_issued || 0) +
+          kpiCard("Tier 3 Completed", d.tier3_completed || 0) +
+          kpiCard("Tier 3 Issued", d.tier3_issued || 0) +
+          kpiCard("Out of Stock", ((d.out_of_stock_by_tier || {}).tier1 || 0) + ((d.out_of_stock_by_tier || {}).tier2 || 0) + ((d.out_of_stock_by_tier || {}).tier3 || 0));
+        var pools = (d.reactivation_pools || []).map(function (p) {
+          return '<tr><td>' + esc(p.pool_id) + '</td><td class="num">' + fmt(p.available) + '</td><td class="num">' + fmt(p.issued) + '</td></tr>';
+        }).join("") || '<tr><td colspan="3">No pool rows.</td></tr>';
         $("#reactivation-body").innerHTML =
           '<div class="detail-grid">' +
           kvBlock("Safety Limits", [["Daily Send Limit", d.daily_limit], ["Messages Sent Today", d.messages_sent_today], ["Per-Minute Limit", d.minute_limit]]) +
           kvBlock("Campaign", [["Campaign ID", d.campaign_id], ["Status", d.active ? "Active" : "Paused"], ["Updated", dt(d.updated_at)]]) +
-          "</div>";
+          kvBlock("Out of Stock", [["Tier 1", (d.out_of_stock_by_tier || {}).tier1 || 0], ["Tier 2", (d.out_of_stock_by_tier || {}).tier2 || 0], ["Tier 3", (d.out_of_stock_by_tier || {}).tier3 || 0]]) +
+          '</div>' +
+          '<div class="detail-block" style="margin-top:12px;"><h4>Reactivation Voucher Pools</h4><table class="mini-table"><thead><tr><th>Pool</th><th class="num">Available</th><th class="num">Issued</th></tr></thead><tbody>' + pools + '</tbody></table></div>' +
+          '<div class="detail-block" style="margin-top:12px;"><h4>Upload Reactivation Codes</h4><div class="filters"><select id="reactivation-upload-pool" class="filter-input"><option>COMEBACK_T1</option><option>COMEBACK_T2</option><option>COMEBACK_T3</option></select><textarea id="reactivation-upload-codes" class="filter-input" rows="5" placeholder="code\nABC123\nABC456" style="min-width:260px;"></textarea><button class="btn" id="reactivation-upload-btn">Upload Codes</button></div><div class="note" id="reactivation-upload-status"></div></div>';
+        bindReactivationUpload();
       })
       .catch(function (e) {
         if (e.message !== "unauthorized") {
@@ -756,6 +767,117 @@
       });
   }
 
+  function loadReactivationJourneyConfig() {
+    var host = $("#reactivation-journey-config");
+    if (!host) return;
+    host.innerHTML = '<div class="note">Loading rollout config...</div>';
+    fetch("/api/admin/reactivation/journey/config", { credentials: "same-origin", headers: { Accept: "application/json" } })
+      .then(function (r) { return r.json().then(function (j) { if (!r.ok) throw new Error(j.message || "HTTP " + r.status); return j; }); })
+      .then(function (j) { renderReactivationJourneyConfig(j.config || {}); })
+      .catch(function (e) { host.innerHTML = '<div class="banner error">Failed to load config: ' + esc(e.message) + "</div>"; });
+  }
+
+  function renderReactivationJourneyConfig(cfg) {
+    var host = $("#reactivation-journey-config");
+    if (!host) return;
+    var modes = ["disabled", "test_users_only", "enabled"];
+    var rewardTypes = ["disabled", "xp_only", "tiered_vouchers", "xp_plus_tiered_vouchers"];
+    function opts(list, current) {
+      return list.map(function (v) { return '<option value="' + v + '"' + (v === current ? " selected" : "") + ">" + v + "</option>"; }).join("");
+    }
+    function isoLocal(v) {
+      if (!v) return "";
+      var d = new Date(v);
+      if (isNaN(d.getTime())) return "";
+      var pad = function (n) { return (n < 10 ? "0" : "") + n; };
+      return d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()) + "T" + pad(d.getHours()) + ":" + pad(d.getMinutes());
+    }
+    var t1 = cfg.tier1 || {}, t2 = cfg.tier2 || {}, t3 = cfg.tier3 || {};
+    host.innerHTML =
+      '<div class="filters">' +
+      '<label>Mode<br/><select id="rjc-mode" class="filter-input">' + opts(modes, cfg.mode) + "</select></label>" +
+      '<label>Reward Type<br/><select id="rjc-reward-type" class="filter-input">' + opts(rewardTypes, cfg.reward_type) + "</select></label>" +
+      "</div>" +
+      '<div class="filters"><label style="flex:1;">Test User IDs (comma/newline separated)<br/><textarea id="rjc-test-users" class="filter-input" rows="2" style="width:100%;">' + esc((cfg.test_user_ids || []).join(", ")) + "</textarea></label></div>" +
+      '<div class="filters">' +
+      '<label>Campaign Start<br/><input type="datetime-local" id="rjc-start" class="filter-input" value="' + isoLocal(cfg.campaign_start_at) + '"/></label>' +
+      '<label>Campaign End<br/><input type="datetime-local" id="rjc-end" class="filter-input" value="' + isoLocal(cfg.campaign_end_at) + '"/></label>' +
+      "</div>" +
+      [1, 2, 3].map(function (tier) {
+        var t = tier === 1 ? t1 : tier === 2 ? t2 : t3;
+        var extra = tier === 1 ? "" :
+          '<label>Days Required<br/><input type="number" min="1" id="rjc-t' + tier + '-days" class="filter-input" value="' + (t.threshold_days != null ? t.threshold_days : "") + '"/></label>' +
+          '<label>Window (days)<br/><input type="number" min="1" id="rjc-t' + tier + '-window" class="filter-input" value="' + (t.window_days != null ? t.window_days : "") + '"/></label>';
+        return '<div class="filters"><strong style="align-self:center;">Tier ' + tier + '</strong>' +
+          '<label>Voucher Pool Enabled<br/><select id="rjc-t' + tier + '-pool" class="filter-input"><option value="true"' + (t.pool_enabled !== false ? " selected" : "") + '>Yes</option><option value="false"' + (t.pool_enabled === false ? " selected" : "") + '>No</option></select></label>' +
+          extra +
+          '<label>XP Amount<br/><input type="number" min="0" id="rjc-t' + tier + '-xp" class="filter-input" value="' + (t.xp_amount || 0) + '"/></label></div>';
+      }).join("") +
+      '<div class="controls" style="margin-top:8px;"><button class="btn primary" id="rjc-save-btn">Save Rollout Config</button><span class="note" id="rjc-save-status"></span></div>';
+
+    $("#rjc-save-btn").addEventListener("click", function () {
+      var status = $("#rjc-save-status");
+      status.textContent = "Saving...";
+      var payload = {
+        mode: $("#rjc-mode").value,
+        reward_type: $("#rjc-reward-type").value,
+        test_user_ids: ($("#rjc-test-users").value || "").split(/[,\n]/).map(function (x) { return x.trim(); }).filter(Boolean),
+        campaign_start_at: $("#rjc-start").value ? new Date($("#rjc-start").value).toISOString() : null,
+        campaign_end_at: $("#rjc-end").value ? new Date($("#rjc-end").value).toISOString() : null,
+        tier1: { pool_enabled: $("#rjc-t1-pool").value === "true", xp_amount: parseInt($("#rjc-t1-xp").value, 10) || 0 },
+        tier2: {
+          pool_enabled: $("#rjc-t2-pool").value === "true",
+          threshold_days: parseInt($("#rjc-t2-days").value, 10) || 5,
+          window_days: parseInt($("#rjc-t2-window").value, 10) || 7,
+          xp_amount: parseInt($("#rjc-t2-xp").value, 10) || 0,
+        },
+        tier3: {
+          pool_enabled: $("#rjc-t3-pool").value === "true",
+          threshold_days: parseInt($("#rjc-t3-days").value, 10) || 20,
+          window_days: parseInt($("#rjc-t3-window").value, 10) || 30,
+          xp_amount: parseInt($("#rjc-t3-xp").value, 10) || 0,
+        },
+      };
+      fetch("/api/admin/reactivation/journey/config", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Accept": "application/json", "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      }).then(function (r) {
+        return r.json().then(function (j) { if (!r.ok) throw new Error(j.reason || j.message || "HTTP " + r.status); return j; });
+      }).then(function (j) {
+        status.textContent = "Saved.";
+        renderReactivationJourneyConfig(j.config || payload);
+      }).catch(function (e) {
+        status.textContent = "Failed: " + e.message;
+      });
+    });
+  }
+
+  function bindReactivationUpload() {
+    var btn = $("#reactivation-upload-btn");
+    if (!btn) return;
+    btn.addEventListener("click", function () {
+      var pool = $("#reactivation-upload-pool").value;
+      var codesText = $("#reactivation-upload-codes").value || "";
+      var codes = codesText.replace(/\r/g, "\n").split("\n").map(function (x) { return x.trim(); }).filter(Boolean);
+      var status = $("#reactivation-upload-status");
+      status.textContent = "Uploading...";
+      fetch("/api/admin/reactivation/journey/pools/upload", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Accept": "application/json", "Content-Type": "application/json" },
+        body: JSON.stringify({ pool_id: pool, codes: codes })
+      }).then(function (r) {
+        return r.json().then(function (j) { if (!r.ok) throw new Error(j.message || j.reason || ("HTTP " + r.status)); return j; });
+      }).then(function (j) {
+        status.textContent = "Inserted " + fmt(j.inserted) + " codes; duplicates " + fmt(j.duplicates || 0) + ".";
+        loadReactivation(true);
+      }).catch(function (e) {
+        status.textContent = "Failed: " + e.message;
+      });
+    });
+  }
   function setReactivation(active, btn) {
     var path = active ? "/api/admin/channel-reactivation/start" : "/api/admin/channel-reactivation/pause";
     if (btn) btnStart(btn, active ? "⏳ Starting..." : "⏳ Pausing...");
@@ -4562,7 +4684,7 @@
     else if (state.view === "affiliate") loadAffiliate(force);
     else if (state.view === "affiliatePools") loadAffiliatePools(force);
     else if (state.view === "affiliatePending") loadAffiliatePending(force);
-    else if (state.view === "reactivation") loadReactivation(force);
+    else if (state.view === "reactivation") { loadReactivation(force); loadReactivationJourneyConfig(); }
     else if (state.view === "audit") loadAudit(force);
     else if (state.view === "segmentProbabilityConfig") loadSegmentProbabilityConfig(force);
     else if (state.view === "segmentRoi") loadSegmentRoi(force);
