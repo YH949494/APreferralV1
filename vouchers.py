@@ -21,7 +21,7 @@ from config import (
 import hmac, hashlib, urllib.parse, os, json
 import config as _cfg 
  
-from database import db, users_collection
+from database import db, users_collection, _ensure_equivalent_index
 from time_utils import as_aware_utc
 from onboarding import record_onboarding_start, record_visible_ping
 from affiliate_rewards import (
@@ -650,7 +650,8 @@ def ensure_voucher_indexes():
         partialFilterExpression={"type": {"$in": list(PERSONALISED_TYPE_ALIASES)}}
     )
     try:
-        voucher_claims_col.create_index(
+        _ensure_equivalent_index(
+            voucher_claims_col,
             [("drop_id", ASCENDING), ("user_id", ASCENDING)],
             unique=True,
             name="uq_claim_drop_user",

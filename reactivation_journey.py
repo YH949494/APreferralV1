@@ -27,6 +27,11 @@ except Exception:  # pragma: no cover
     send_telegram_http_message = None
 
 try:
+    from database import _ensure_equivalent_index
+except Exception:  # pragma: no cover
+    _ensure_equivalent_index = None
+
+try:
     from xp import grant_xp
 except Exception:  # pragma: no cover
     grant_xp = None
@@ -269,8 +274,17 @@ def ensure_reactivation_journey_indexes(db_ref) -> None:
     journeys.create_index([("reactivated_at", ASCENDING)], name="ix_reactivation_journey_reactivated")
     for field in ("tier1_completed_at", "tier2_completed_at", "tier3_completed_at"):
         journeys.create_index([(field, ASCENDING)], name=f"ix_reactivation_journey_{field}")
-    _voucher_pools(db_ref).create_index([("pool_id", ASCENDING), ("code", ASCENDING)], unique=True, name="uq_voucher_pool_code")
-    _voucher_pools(db_ref).create_index([("pool_id", ASCENDING), ("status", ASCENDING)], name="ix_voucher_pool_status")
+    voucher_pools = _voucher_pools(db_ref)
+    if _ensure_equivalent_index is not None:
+        _ensure_equivalent_index(
+            voucher_pools,
+            [("pool_id", ASCENDING), ("code", ASCENDING)],
+            unique=True,
+            name="uq_voucher_pool_code",
+        )
+    else:  # pragma: no cover - database helper unavailable (e.g. stub env)
+        voucher_pools.create_index([("pool_id", ASCENDING), ("code", ASCENDING)], unique=True, name="uq_voucher_pool_code")
+    voucher_pools.create_index([("pool_id", ASCENDING), ("status", ASCENDING)], name="ix_voucher_pool_status")
 
 
 def _is_blocked_user(user_doc: dict | None) -> tuple[bool, str | None]:
