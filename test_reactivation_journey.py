@@ -323,6 +323,43 @@ class ReactivationJourneyTests(unittest.TestCase):
         self.assertEqual(stats["tier2_issued"], 0)
         self.assertEqual(self.db.voucher_pools.count_documents({"status": "issued"}), 0)
 
+    def test_config_rejects_invalid_mode_and_reward_type(self):
+        bad_mode = journey.update_journey_config(self.db, {"mode": "super_enabled"}, now_ref=self.now)
+        bad_reward = journey.update_journey_config(self.db, {"reward_type": "gold"}, now_ref=self.now)
+
+        self.assertFalse(bad_mode["success"])
+        self.assertEqual(bad_mode["reason"], "bad_mode")
+        self.assertFalse(bad_reward["success"])
+        self.assertEqual(bad_reward["reason"], "bad_reward_type")
+        self.assertEqual(journey.get_journey_config(self.db)["mode"], "enabled")
+
+    def test_config_rejects_out_of_bounds_and_unknown_tier_fields(self):
+        negative = journey.update_journey_config(self.db, {"tier2": {"threshold_days": -5}}, now_ref=self.now)
+        non_numeric = journey.update_journey_config(self.db, {"tier2": {"xp_amount": "lots"}}, now_ref=self.now)
+        unknown_key = journey.update_journey_config(self.db, {"tier2": {"evil_key": "x"}}, now_ref=self.now)
+
+        self.assertFalse(negative["success"])
+        self.assertFalse(non_numeric["success"])
+        self.assertFalse(unknown_key["success"])
+        self.assertEqual(journey.get_journey_config(self.db)["tier2"]["threshold_days"], 5)
+
+    def test_config_rejects_unparseable_and_inverted_campaign_window(self):
+        bad_date = journey.update_journey_config(self.db, {"campaign_start_at": "not-a-date"}, now_ref=self.now)
+        inverted = journey.update_journey_config(
+            self.db,
+            {"campaign_start_at": "2026-06-01T00:00:00Z", "campaign_end_at": "2026-05-01T00:00:00Z"},
+            now_ref=self.now,
+        )
+        valid = journey.update_journey_config(
+            self.db,
+            {"campaign_start_at": "2026-05-01T00:00:00Z", "campaign_end_at": "2026-06-01T00:00:00Z"},
+            now_ref=self.now,
+        )
+
+        self.assertFalse(bad_date["success"])
+        self.assertFalse(inverted["success"])
+        self.assertTrue(valid["success"])
+
 
 if __name__ == "__main__":
     unittest.main()

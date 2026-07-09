@@ -96,6 +96,37 @@ def get_journey_config(db_ref) -> dict:
     return cfg
 
 
+TIER_FIELD_BOUNDS = {
+    "pool_enabled": bool,
+    "threshold_days": (1, 3650),
+    "window_days": (1, 3650),
+    "xp_amount": (0, 1_000_000),
+}
+
+
+def _validate_tier_cfg(tier_key: str, raw: dict) -> tuple[dict | None, str | None]:
+    unknown = set(raw.keys()) - set(TIER_FIELD_BOUNDS.keys())
+    if unknown:
+        return None, f"bad_{tier_key}_field:{','.join(sorted(unknown))}"
+    cleaned = {}
+    for field, value in raw.items():
+        bound = TIER_FIELD_BOUNDS[field]
+        if bound is bool:
+            if not isinstance(value, bool):
+                return None, f"bad_{tier_key}_{field}"
+            cleaned[field] = value
+            continue
+        lo, hi = bound
+        try:
+            num = int(value)
+        except (TypeError, ValueError):
+            return None, f"bad_{tier_key}_{field}"
+        if isinstance(value, bool) or not (lo <= num <= hi):
+            return None, f"bad_{tier_key}_{field}"
+        cleaned[field] = num
+    return cleaned, None
+
+
 def update_journey_config(db_ref, updates: dict, *, now_ref: datetime | None = None) -> dict:
     ts = _coerce_utc(now_ref) or now_utc()
     allowed = {"mode", "reward_type", "test_user_ids", "tier1", "tier2", "tier3", "campaign_start_at", "campaign_end_at"}
@@ -113,14 +144,31 @@ def update_journey_config(db_ref, updates: dict, *, now_ref: datetime | None = N
             try:
                 cleaned.append(int(x))
             except (TypeError, ValueError):
-                continue
+                return {"success": False, "reason": "bad_test_user_ids"}
         changes["test_user_ids"] = cleaned
     for tier_key in ("tier1", "tier2", "tier3"):
-        if tier_key in changes and not isinstance(changes[tier_key], dict):
-            del changes[tier_key]
+        if tier_key not in changes:
+            continue
+        if not isinstance(changes[tier_key], dict):
+            return {"success": False, "reason": f"bad_{tier_key}"}
+        cleaned_tier, err = _validate_tier_cfg(tier_key, changes[tier_key])
+        if err:
+            return {"success": False, "reason": err}
+        changes[tier_key] = cleaned_tier
     for dt_key in ("campaign_start_at", "campaign_end_at"):
-        if dt_key in changes:
-            changes[dt_key] = _coerce_utc(changes[dt_key]) if changes[dt_key] else None
+        if dt_key not in changes:
+            continue
+        if changes[dt_key] in (None, ""):
+            changes[dt_key] = None
+            continue
+        coerced = _coerce_utc(changes[dt_key])
+        if coerced is None:
+            return {"success": False, "reason": f"bad_{dt_key}"}
+        changes[dt_key] = coerced
+    if "campaign_start_at" in changes and "campaign_end_at" in changes:
+        start, end = changes["campaign_start_at"], changes["campaign_end_at"]
+        if start and end and start >= end:
+            return {"success": False, "reason": "bad_campaign_window"}
     changes["updated_at"] = ts
     _config_col(db_ref).update_one({"_id": CONFIG_ID}, {"$set": changes}, upsert=True)
     return {"success": True, "config": get_journey_config(db_ref)}
