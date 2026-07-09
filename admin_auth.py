@@ -372,6 +372,13 @@ def admin_channel_reactivation_summary():
         })
     except Exception:
         logger.exception("[REACT_JOURNEY][ERROR] reason=summary_failed")
+    if request.args.get("funnel"):
+        try:
+            from channel_reactivation import eligibility_funnel
+            from database import db
+            payload["eligibility_funnel"] = eligibility_funnel(db)
+        except Exception:
+            logger.exception("[REACT_FUNNEL][ERROR] reason=funnel_failed")
     return jsonify(payload)
 
 
