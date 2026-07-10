@@ -4058,6 +4058,17 @@ def _build_roi_trend(snapshots_col, *, now: datetime, months: int = 3) -> list[d
     return [{"month": m, "segments": by_month[m]} for m in sorted(by_month)]
 
 
+def _live_feature_flag(flag_name: str, env: Mapping, env_name: str, env_default: str):
+    try:
+        from settings_service import get_setting as _live_setting
+        value = _live_setting("feature_flags", flag_name)
+        if value is not None:
+            return "1" if value else "0"
+    except Exception:
+        pass
+    return _env(env, env_name, env_default)
+
+
 def build_settings_panel(env: Mapping | None = None, *, constants: Mapping | None = None) -> dict:
     import os
 
@@ -4076,8 +4087,18 @@ def build_settings_panel(env: Mapping | None = None, *, constants: Mapping | Non
         "eligibility_modes": ["public", "tier", "user_id", "admin_only"],
     }
 
+    try:
+        from settings_service import get_setting as _live_setting
+        _live_qualify_hold_hours = _live_setting("referral_config", "qualify_hold_hours")
+    except Exception:
+        _live_qualify_hold_hours = None
+
     referral_settings = {
-        "qualify_hold_hours": _env(env, "REFERRAL_QUALIFY_HOURS", _env(env, "REFERRAL_HOLD_HOURS", "48")),
+        "qualify_hold_hours": (
+            _live_qualify_hold_hours
+            if _live_qualify_hold_hours is not None
+            else _env(env, "REFERRAL_QUALIFY_HOURS", _env(env, "REFERRAL_HOLD_HOURS", "48"))
+        ),
         "hourly_limit": _env(env, "REFERRAL_HOURLY_LIMIT", "20"),
         "daily_limit": _env(env, "REFERRAL_DAILY_LIMIT", "200"),
         "qualified_statuses": _QUALIFIED_STATUSES,
@@ -4120,9 +4141,9 @@ def build_settings_panel(env: Mapping | None = None, *, constants: Mapping | Non
         "channel_username": c.get("CHANNEL_USERNAME"),
         "miniapp_version": c.get("MINIAPP_VERSION"),
         "feature_flags": {
-            "growth_leaderboard_enabled": _env(env, "GROWTH_LEADERBOARD_ENABLED", "0"),
+            "growth_leaderboard_enabled": _live_feature_flag("growth_leaderboard", env, "GROWTH_LEADERBOARD_ENABLED", "0"),
             "affiliate_group_dm_enabled": _env(env, "AFFILIATE_GROUP_DM_ENABLED", "1"),
-            "admin_web_login_enabled": _env(env, "ADMIN_WEB_LOGIN_ENABLED", "1"),
+            "admin_web_login_enabled": _live_feature_flag("admin_web_login", env, "ADMIN_WEB_LOGIN_ENABLED", "1"),
         },
         "scheduler": {
             "growth_leaderboard_cron_day": _env(env, "GROWTH_LEADERBOARD_CRON_DAY", "SUN"),

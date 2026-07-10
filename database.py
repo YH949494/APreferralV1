@@ -302,6 +302,8 @@ def ensure_indexes() -> None:
     safe_create_index(db_ref["uim_import_batches"], [("batch_id", ASCENDING)], name="batch_id_unique", unique=True)
     safe_create_index(db_ref["uim_import_batches"], [("committed_at", -1)], name="committed_at_desc")
 
+    safe_create_index(db_ref["app_settings_audit"], [("group", ASCENDING), ("created_at", -1)], name="group_created_at_desc")
+
     _indexes_initialized = True
 
 
