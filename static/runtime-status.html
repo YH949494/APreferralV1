@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="robots" content="noindex, nofollow" />
+  <title>APReferral · Runtime Status</title>
+  <link rel="stylesheet" href="/static/admin-dashboard.css" />
+  <style>
+    .rs-status-pill {
+      display: inline-block;
+      padding: 3px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 600;
+      white-space: nowrap;
+      background: var(--panel-2);
+    }
+    .rs-note { font-size: 12px; color: var(--muted); }
+    .rs-summary-row {
+      display: flex;
+      gap: 16px;
+      flex-wrap: wrap;
+      margin-bottom: 20px;
+    }
+    .rs-summary-card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 14px 18px;
+      min-width: 150px;
+    }
+    .rs-summary-card .label {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.4px;
+      color: var(--muted);
+      margin-bottom: 6px;
+    }
+    .rs-summary-card .value { font-size: 20px; font-weight: 700; color: var(--text); }
+    .rs-summary-card .value.ok { color: #51cf66; }
+    .rs-summary-card .value.bad { color: #ff6b6b; }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <nav class="sidebar">
+      <div class="brand">APReferral Admin</div>
+      <a href="/static/admin-dashboard.html" class="nav-item" style="text-decoration:none;">← Admin Dashboard</a>
+      <button class="nav-item active" data-section="overview">Feature Overview</button>
+      <button class="nav-item" data-section="scheduler">Scheduler Health</button>
+      <button class="nav-item" data-section="pm">PM Automation</button>
+      <button class="nav-item" data-section="queues">Queue Status</button>
+      <button class="nav-item" data-section="worker">Worker Health</button>
+    </nav>
+
+    <main class="main">
+      <div class="topbar">
+        <div>
+          <h1>Runtime Status</h1>
+          <div class="note" id="dashboard-meta">Loading…</div>
+        </div>
+        <div class="right">
+          <span class="admin-chip" id="admin-chip"></span>
+          <button class="btn" id="refresh-btn">↻ Refresh</button>
+        </div>
+      </div>
+
+      <div id="global-banner"></div>
+
+      <!-- ==================================================
+           SECTION 1: Feature Overview
+      =================================================== -->
+      <div id="section-overview" class="section">
+        <div class="section-header">
+          <div class="section-icon blue">🧭</div>
+          <div class="section-title-lg">Feature Overview — what's actually running</div>
+        </div>
+        <div class="rs-summary-row" id="overview-summary"></div>
+        <div style="overflow-x:auto;">
+          <table class="data-table" id="overview-table">
+            <thead>
+              <tr>
+                <th>Feature</th><th>Status</th><th>Trigger</th>
+                <th>Last Run</th><th>Next Run</th><th>Last Success</th><th>Notes</th>
+              </tr>
+            </thead>
+            <tbody><tr><td colspan="7" class="loading">Loading…</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- ==================================================
+           SECTION 2: Scheduler Health
+      =================================================== -->
+      <div id="section-scheduler" class="section">
+        <div class="section-header">
+          <div class="section-icon orange">⏱️</div>
+          <div class="section-title-lg">Scheduler Health</div>
+        </div>
+        <div style="overflow-x:auto;">
+          <table class="data-table" id="scheduler-table">
+            <thead>
+              <tr>
+                <th>Job Name</th><th>Cron</th><th>Enabled</th><th>Worker Only</th>
+                <th>Last Run</th><th>Status</th><th>Notes</th>
+              </tr>
+            </thead>
+            <tbody><tr><td colspan="7" class="loading">Loading…</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- ==================================================
+           SECTION 3: PM Automation
+      =================================================== -->
+      <div id="section-pm" class="section">
+        <div class="section-header">
+          <div class="section-icon green">✉️</div>
+          <div class="section-title-lg">PM Automation</div>
+        </div>
+        <div style="overflow-x:auto;">
+          <table class="data-table" id="pm-table">
+            <thead>
+              <tr>
+                <th>PM / Journey</th><th>Enabled</th><th>Last Sent</th><th>Sent Today</th>
+                <th>Failed Today</th><th>Queue Size</th><th>Trigger</th><th>Status</th><th>Notes</th>
+              </tr>
+            </thead>
+            <tbody><tr><td colspan="9" class="loading">Loading…</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- ==================================================
+           SECTION 4: Queue Status
+      =================================================== -->
+      <div id="section-queues" class="section">
+        <div class="section-header">
+          <div class="section-icon red">📥</div>
+          <div class="section-title-lg">Queue Status</div>
+        </div>
+        <div class="rs-summary-row" id="queues-summary"></div>
+      </div>
+
+      <!-- ==================================================
+           SECTION 5: Worker Health
+      =================================================== -->
+      <div id="section-worker" class="section">
+        <div class="section-header">
+          <div class="section-icon blue">🖥️</div>
+          <div class="section-title-lg">Worker Health</div>
+        </div>
+        <div class="rs-summary-row" id="worker-summary"></div>
+      </div>
+
+    </main>
+  </div>
+  <script src="/static/runtime-status.js"></script>
+</body>
+</html>
