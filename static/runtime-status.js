@@ -152,7 +152,7 @@
 
   function loadDashboard(forceRefresh) {
     $("#dashboard-meta").textContent = "Loading…";
-    api("/api/admin/dashboard/runtime-status" + (forceRefresh ? "?refresh=1" : "?refresh=1"))
+    api("/api/admin/dashboard/runtime-status" + (forceRefresh ? "?refresh=1" : ""))
       .then(function (d) {
         $("#dashboard-meta").textContent = "Generated at " + fmtTime(d.generated_at);
         $("#global-banner").innerHTML = "";

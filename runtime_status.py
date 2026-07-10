@@ -380,17 +380,20 @@ def build_pm_automation(
 # 3) Queue Status
 # ---------------------------------------------------------------------------
 
+# Real pending statuses used by the affiliate ledger (dashboard_panels.py:733).
+_AFFILIATE_PENDING_STATUSES = ["PENDING_REVIEW", "PENDING_MANUAL", "PENDING_EOM", "SIMULATED_PENDING"]
+
 QUEUE_REGISTRY: list[dict[str, Any]] = [
     dict(key="verification_queue", label="Verification Queue", col_key="tg_verification_queue",
          pending_filter={"status": "queued"}),
     dict(key="voucher_queue", label="Voucher Queue (pending affiliate ledger entries)", col_key="affiliate_ledger",
-         pending_filter={"status": "pending"}),
+         pending_filter={"status": {"$in": _AFFILIATE_PENDING_STATUSES}}),
     dict(key="pm_queue", label="PM Queue (onboarding due, not yet sent)", col_key="users",
          pending_filter=None),  # computed specially below using the request-time "now"
     dict(key="reactivation_queue", label="Reactivation Queue (active journeys)", col_key="reactivation_journey",
          pending_filter={"status": "active"}),
     dict(key="affiliate_queue", label="Affiliate Queue (pending settlements)", col_key="affiliate_ledger",
-         pending_filter={"status": "pending"}),
+         pending_filter={"status": {"$in": _AFFILIATE_PENDING_STATUSES}}),
 ]
 
 
@@ -406,8 +409,12 @@ def build_queue_status(collections: Mapping[str, Any], now: datetime) -> list[di
         def _q(col=col, key=q["key"], pending_filter=q["pending_filter"]):
             if key == "pm_queue":
                 return int(col.count_documents({
-                    "pm1_due_at_utc": {"$lte": now},
-                    "pm1_sent_at_utc": {"$exists": False},
+                    "$or": [
+                        {"pm1_due_at_utc": {"$lte": now}, "pm1_sent_at_utc": {"$exists": False}},
+                        {"pm2_due_at_utc": {"$lte": now}, "pm2_sent_at_utc": {"$exists": False}},
+                        {"pm3_due_at_utc": {"$lte": now}, "pm3_sent_at_utc": {"$exists": False}},
+                        {"pm4_due_at_utc": {"$lte": now}, "pm4_sent_at_utc": {"$exists": False}},
+                    ],
                 }))
             return int(col.count_documents(pending_filter))
 

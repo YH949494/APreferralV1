@@ -27,6 +27,10 @@ class _FakeCollection:
 
     def _matches(self, doc, filt):
         for key, cond in filt.items():
+            if key == "$or":
+                if not any(self._matches(doc, sub) for sub in cond):
+                    return False
+                continue
             val = self._get_path(doc, key)
             if isinstance(cond, dict):
                 if "$exists" in cond:
@@ -39,6 +43,8 @@ class _FakeCollection:
                 if "$gte" in cond and (val is None or val < cond["$gte"]):
                     return False
                 if "$lte" in cond and (val is None or val > cond["$lte"]):
+                    return False
+                if "$in" in cond and val not in cond["$in"]:
                     return False
             else:
                 if val != cond:
@@ -185,6 +191,35 @@ class BuildQueueStatusTests(unittest.TestCase):
         row = next(r for r in rows if r["key"] == "verification_queue")
         self.assertIsNone(row["size"])
         self.assertEqual(row["status"], rs.WAITING)
+
+    def test_affiliate_queues_use_real_ledger_statuses(self):
+        collections = {
+            "affiliate_ledger": _FakeCollection([
+                {"status": "PENDING_REVIEW"},
+                {"status": "PENDING_MANUAL"},
+                {"status": "PENDING_EOM"},
+                {"status": "SIMULATED_PENDING"},
+                {"status": "ISSUED"},
+                {"status": "pending"},  # legacy lowercase value should NOT be double-counted
+            ]),
+        }
+        rows = rs.build_queue_status(collections, NOW)
+        voucher_row = next(r for r in rows if r["key"] == "voucher_queue")
+        affiliate_row = next(r for r in rows if r["key"] == "affiliate_queue")
+        self.assertEqual(voucher_row["size"], 4)
+        self.assertEqual(affiliate_row["size"], 4)
+
+    def test_pm_queue_counts_pm2_through_pm4(self):
+        collections = {
+            "users": _FakeCollection([
+                {"_id": 1, "pm2_due_at_utc": NOW - timedelta(minutes=5)},  # PM1 already sent, PM2 due & unsent
+                {"_id": 2, "pm4_due_at_utc": NOW - timedelta(minutes=5)},  # PM4 due & unsent
+                {"_id": 3, "pm1_due_at_utc": NOW - timedelta(minutes=5), "pm1_sent_at_utc": NOW},  # fully sent
+            ]),
+        }
+        rows = rs.build_queue_status(collections, NOW)
+        pm_row = next(r for r in rows if r["key"] == "pm_queue")
+        self.assertEqual(pm_row["size"], 2)
 
 
 class BuildWorkerHealthTests(unittest.TestCase):
