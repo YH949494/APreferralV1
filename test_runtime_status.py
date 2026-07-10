@@ -257,25 +257,52 @@ class BuildFeatureOverviewTests(unittest.TestCase):
 
 
 class BuildWelcomeJourneyRuntimeTests(unittest.TestCase):
-    def _collections(self, lock_doc):
-        return {"scheduler_locks": _FakeCollection([lock_doc])}
+    """Heartbeat/status comes from ``scheduler_locks``; run stats/history are
+    persisted to ``admin_cache`` (doc "welcome_run_stats:<job>") specifically
+    because ``scheduler_locks`` has a TTL index and would silently drop this
+    history whenever a job stops running long enough for its lock to expire."""
+
+    def _collections(self, lock_doc=None, stats_doc=None):
+        locks = [lock_doc] if lock_doc else []
+        cache = [stats_doc] if stats_doc else []
+        return {
+            "scheduler_locks": _FakeCollection(locks),
+            "admin_cache": _FakeCollection(cache),
+        }
 
     def test_scheduler_block_uses_persisted_duration(self):
         lock_doc = {
             "_id": "welcome_progress_reminders",
             "updatedAt": NOW - timedelta(minutes=10),
+        }
+        stats_doc = {
+            "_id": "welcome_run_stats:welcome_progress_reminders",
             "lastRunDurationS": 2.1,
         }
-        collections = self._collections(lock_doc)
+        collections = self._collections(lock_doc, stats_doc)
         scheduler_rows = rs.build_scheduler_health(collections, {}, {}, NOW)
         block = rs.build_welcome_journey_scheduler(collections, scheduler_rows, NOW)
         self.assertEqual(block["reminders"]["status"], rs.ONLINE)
         self.assertEqual(block["reminders"]["last_run_duration_s"], 2.1)
         self.assertIsNotNone(block["reminders"]["next_run"])
 
-    def test_last_run_reads_persisted_stats(self):
+    def test_scheduler_status_survives_stats_doc_eviction(self):
+        # Even if the admin_cache stats doc were somehow missing, the
+        # heartbeat-derived status (from scheduler_locks) must still work —
+        # this is the exact TTL-eviction scenario the fix guards against.
         lock_doc = {
             "_id": "welcome_progress_reminders",
+            "updatedAt": NOW - timedelta(minutes=10),
+        }
+        collections = self._collections(lock_doc, stats_doc=None)
+        scheduler_rows = rs.build_scheduler_health(collections, {}, {}, NOW)
+        block = rs.build_welcome_journey_scheduler(collections, scheduler_rows, NOW)
+        self.assertEqual(block["reminders"]["status"], rs.ONLINE)
+        self.assertIsNone(block["reminders"]["last_run_duration_s"])
+
+    def test_last_run_reads_persisted_stats(self):
+        stats_doc = {
+            "_id": "welcome_run_stats:welcome_progress_reminders",
             "lastRunAt": NOW,
             "lastRunDurationS": 2.1,
             "lastRunStats": {
@@ -288,7 +315,7 @@ class BuildWelcomeJourneyRuntimeTests(unittest.TestCase):
                 "skip_breakdown": {"already_claimed": 2, "bot_blocked": 1},
             },
         }
-        last_run = rs.build_welcome_journey_last_run(self._collections(lock_doc))
+        last_run = rs.build_welcome_journey_last_run(self._collections(stats_doc=stats_doc))
         self.assertEqual(last_run["users_scanned"], 100)
         self.assertEqual(last_run["reminders_20h_sent"], 9)
         self.assertEqual(last_run["telegram_failed"], 1)
@@ -297,7 +324,7 @@ class BuildWelcomeJourneyRuntimeTests(unittest.TestCase):
         self.assertEqual(last_run["skipped_users"]["total"], 3)
 
     def test_last_run_defaults_when_no_run_yet(self):
-        last_run = rs.build_welcome_journey_last_run({"scheduler_locks": _FakeCollection([])})
+        last_run = rs.build_welcome_journey_last_run(self._collections())
         self.assertEqual(last_run["users_scanned"], 0)
         self.assertIsNone(last_run["at"])
 
@@ -305,8 +332,8 @@ class BuildWelcomeJourneyRuntimeTests(unittest.TestCase):
         # $push with $slice:-20 appends in chronological order, so index 0 is
         # oldest and the last element is the most recent run.
         runs = [{"at": NOW - timedelta(hours=24 - i), "duration_s": 1.0, "stats": {"scanned": i}} for i in range(25)]
-        lock_doc = {"_id": "welcome_progress_reminders", "recentRuns": runs}
-        rows = rs.build_welcome_journey_recent_runs(self._collections(lock_doc))
+        stats_doc = {"_id": "welcome_run_stats:welcome_progress_reminders", "recentRuns": runs}
+        rows = rs.build_welcome_journey_recent_runs(self._collections(stats_doc=stats_doc))
         self.assertEqual(len(rows), 20)
         self.assertEqual(rows[0]["users_scanned"], 24)
 

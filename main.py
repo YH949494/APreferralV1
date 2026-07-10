@@ -973,18 +973,23 @@ def process_verification_queue_scheduled(batch_limit: int | None = None) -> None
 
 
 def _record_welcome_run_stats(job_name: str, stats: dict, duration_s: float, now: datetime) -> None:
-    """Persist the per-run stats dict onto the job's existing scheduler_locks
-    doc so the Welcome Journey Runtime dashboard has real numbers instead of
-    just a heartbeat timestamp. Purely additive observability — never read by
-    ``acquire_scheduler_lock`` and never touches reminder/voucher logic."""
+    """Persist the per-run stats dict so the Welcome Journey Runtime dashboard
+    has real numbers instead of just a heartbeat timestamp. Written to
+    ``admin_cache`` (not ``scheduler_locks``) because ``scheduler_locks`` has
+    a TTL index on ``expireAt`` (main.py's ``create_index(..., expireAfterSeconds=0)``)
+    and ``acquire_scheduler_lock`` lets that field pass once a job stops
+    running — Mongo would then delete the whole lock doc, wiping this history
+    right when the dashboard most needs to show it. Purely additive
+    observability; never touches reminder/voucher logic."""
     try:
         run_record = {"at": now, "duration_s": round(duration_s, 3), "stats": stats}
-        scheduler_locks_collection.update_one(
-            {"_id": job_name},
+        admin_cache_col.update_one(
+            {"_id": f"welcome_run_stats:{job_name}"},
             {
                 "$set": {"lastRunStats": stats, "lastRunAt": now, "lastRunDurationS": round(duration_s, 3)},
                 "$push": {"recentRuns": {"$each": [run_record], "$slice": -20}},
             },
+            upsert=True,
         )
     except Exception:
         logger.exception("[WELCOME_RUNTIME] failed to persist run stats job=%s", job_name)
@@ -4531,6 +4536,7 @@ def dashboard_welcome_journey_runtime():
     def _build():
         collections = {
             "scheduler_locks": scheduler_locks_collection,
+            "admin_cache": admin_cache_col,
         }
         scheduler_settings = settings_service.get_settings("scheduler")
         feature_flags = settings_service.get_settings("feature_flags")

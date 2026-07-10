@@ -568,8 +568,14 @@ def build_feature_overview(
 
 
 # ---------------------------------------------------------------------------
-# 6) Welcome Journey Runtime (observability only — reuses SCHEDULER_JOBS +
-#    scheduler_locks; never re-derives or alters reminder/eligibility logic)
+# 6) Welcome Journey Runtime (observability only — reuses SCHEDULER_JOBS for
+#    the heartbeat/status verdict; never re-derives or alters reminder/
+#    eligibility logic). Run history/stats are read from ``admin_cache``
+#    (doc "welcome_run_stats:<job>"), NOT ``scheduler_locks`` — the latter has
+#    a TTL index on ``expireAt`` (see main.py's create_index(...,
+#    expireAfterSeconds=0)) and would silently delete this history the moment
+#    a job stops running for longer than its lock TTL, which is exactly the
+#    failure this dashboard needs to keep showing.
 # ---------------------------------------------------------------------------
 
 _WELCOME_JOBS_BY_KEY = {"reminders": "welcome_progress_reminders", "lifecycle": "welcome_voucher_lifecycle"}
@@ -580,6 +586,13 @@ def _welcome_scheduler_row(scheduler_rows: list[dict[str, Any]], job_key: str) -
         if row.get("key") == job_key:
             return row
     return {}
+
+
+def _welcome_run_stats_doc(collections: Mapping[str, Any], job_key: str) -> dict[str, Any]:
+    col = collections.get("admin_cache")
+    if col is None:
+        return {}
+    return _safe_get(lambda: col.find_one({"_id": f"welcome_run_stats:{job_key}"})) or {}
 
 
 def build_welcome_journey_scheduler(
@@ -597,7 +610,7 @@ def build_welcome_journey_scheduler(
         last_run = _aware(_lookup_lock_ts(collections, job.get("lock_source")))
         interval = job.get("interval_seconds")
         next_run = last_run + timedelta(seconds=interval) if (last_run and interval) else None
-        lock_doc = _safe_get(lambda: collections.get("scheduler_locks").find_one({"_id": job_key}) or {}) or {}
+        stats_doc = _welcome_run_stats_doc(collections, job_key)
         out[ui_key] = {
             "job_name": job.get("label"),
             "status": row.get("status", WAITING),
@@ -605,17 +618,17 @@ def build_welcome_journey_scheduler(
             "cron": job.get("cron"),
             "last_run": _fmt_ts(last_run),
             "next_run": _fmt_ts(next_run),
-            "last_run_duration_s": lock_doc.get("lastRunDurationS"),
+            "last_run_duration_s": stats_doc.get("lastRunDurationS"),
         }
     return out
 
 
 def build_welcome_journey_last_run(collections: Mapping[str, Any]) -> dict[str, Any]:
-    """Latest ``process_welcome_reminders`` run stats, persisted onto the
-    existing ``scheduler_locks`` doc by ``main._record_welcome_run_stats``.
-    Returns an empty/zeroed shape (not an error) if no run has landed yet."""
-    col = collections.get("scheduler_locks")
-    doc = (_safe_get(lambda: col.find_one({"_id": "welcome_progress_reminders"})) or {}) if col is not None else {}
+    """Latest ``process_welcome_reminders`` run stats, persisted onto
+    ``admin_cache`` (doc "welcome_run_stats:welcome_progress_reminders") by
+    ``main._record_welcome_run_stats``. Returns an empty/zeroed shape (not an
+    error) if no run has landed yet."""
+    doc = _welcome_run_stats_doc(collections, "welcome_progress_reminders")
     stats = doc.get("lastRunStats") or {}
     skip = stats.get("skip_breakdown") or {}
     return {
@@ -646,10 +659,10 @@ def build_welcome_journey_last_run(collections: Mapping[str, Any]) -> dict[str, 
 
 def build_welcome_journey_recent_runs(collections: Mapping[str, Any], limit: int = 20) -> list[dict[str, Any]]:
     """Last N reminder-job runs, latest first. Sourced from the capped
-    ``recentRuns`` array already maintained on the ``scheduler_locks`` doc
-    (no new collection, no extra scans)."""
-    col = collections.get("scheduler_locks")
-    doc = (_safe_get(lambda: col.find_one({"_id": "welcome_progress_reminders"})) or {}) if col is not None else {}
+    ``recentRuns`` array maintained on the ``admin_cache`` doc (not
+    ``scheduler_locks`` — see the module-level note above on its TTL index).
+    No new collection, no extra scans."""
+    doc = _welcome_run_stats_doc(collections, "welcome_progress_reminders")
     runs = doc.get("recentRuns") or []
     rows = []
     for run in reversed(runs[-limit:]):
