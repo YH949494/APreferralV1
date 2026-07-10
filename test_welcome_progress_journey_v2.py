@@ -178,7 +178,66 @@ def test_process_welcome_reminders_skips_claimed_users(monkeypatch):
 
     result = scheduler.process_welcome_reminders(now_ref=now, db_ref=fake_db, send_fn=fake_send)
     assert result["skipped_abuse"] == 1
+    assert result["skip_breakdown"]["already_claimed"] == 1
     assert sent == []
+
+
+def test_process_welcome_reminders_tallies_eligible_and_missing_data(monkeypatch):
+    now = datetime(2026, 1, 2, 12, 0, tzinfo=timezone.utc)
+    eligible_doc = {
+        "_id": "r5",
+        "user_id": 45,
+        "day1_at": now - timedelta(hours=21),
+        "reminder_20h_sent": False,
+        "reminder_28h_sent": False,
+        "day2_reminder_sent": False,
+    }
+    missing_uid_doc = {
+        "_id": "r6",
+        "user_id": None,
+        "reminder_20h_sent": False,
+        "reminder_28h_sent": False,
+        "day2_reminder_sent": False,
+    }
+    fake_db = FakeReminderDb([eligible_doc, missing_uid_doc])
+
+    def fake_send(uid, text):
+        return True, None, False
+
+    monkeypatch.setattr(m, "get_welcome_progress", lambda uid, now=None: {"completed": 1, "claimed": False, "expired": False})
+
+    result = scheduler.process_welcome_reminders(now_ref=now, db_ref=fake_db, send_fn=fake_send)
+    assert result["scanned"] == 2
+    assert result["eligible_20h"] == 1
+    assert result["reminder_20h_sent"] == 1
+    assert result["skip_breakdown"]["missing_data"] == 1
+
+
+def test_process_welcome_reminders_bot_blocked_counts_as_blocked_users(monkeypatch):
+    now = datetime(2026, 1, 2, 12, 0, tzinfo=timezone.utc)
+    doc = {
+        "_id": "r7",
+        "user_id": 46,
+        "day1_at": now - timedelta(hours=21),
+        "reminder_20h_sent": False,
+        "reminder_28h_sent": False,
+        "day2_reminder_sent": False,
+    }
+    fake_db = FakeReminderDb([doc])
+
+    def fake_send(uid, text):
+        return True, None, False
+
+    monkeypatch.setattr(m, "get_welcome_progress", lambda uid, now=None: {"completed": 1, "claimed": False, "expired": False})
+    monkeypatch.setattr(
+        scheduler,
+        "_welcome_reminder_anti_abuse_blocked",
+        lambda uid, db_ref, progress: "telegram_blocked",
+    )
+
+    result = scheduler.process_welcome_reminders(now_ref=now, db_ref=fake_db, send_fn=fake_send)
+    assert result["skip_breakdown"]["bot_blocked"] == 1
+    assert result["blocked_users"] == 1
 
 
 def test_process_welcome_reminders_day2_uses_bot_send_fn_when_available(monkeypatch):

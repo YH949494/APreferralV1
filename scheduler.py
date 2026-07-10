@@ -279,6 +279,26 @@ def process_welcome_reminders(*, now_ref: datetime | None = None, batch_limit: i
     limit = int(batch_limit or WELCOME_PROGRESS_REMINDER_BATCH_LIMIT)
 
     scanned = reminder_20h_sent = reminder_28h_sent = day2_reminder_sent = skipped_abuse = send_failed = 0
+    eligible_20h = eligible_28h = eligible_day3 = 0
+    skip_breakdown = {
+        "already_claimed": 0,
+        "expired": 0,
+        "bot_blocked": 0,
+        "risk_blocked": 0,
+        "multi_account": 0,
+        "welcome_abuse": 0,
+        "left_channel": 0,
+        "missing_data": 0,
+    }
+    _SKIP_REASON_BUCKET = {
+        "welcome_claimed": "already_claimed",
+        "welcome_expired": "expired",
+        "telegram_blocked": "bot_blocked",
+        "risk_blocked": "risk_blocked",
+        "multi_account": "multi_account",
+        "welcome_abuse": "welcome_abuse",
+        "user_left_channel": "left_channel",
+    }
 
     cursor = db_ref.welcome_reminders.find(
         {
@@ -294,6 +314,7 @@ def process_welcome_reminders(*, now_ref: datetime | None = None, batch_limit: i
         scanned += 1
         uid = doc.get("user_id")
         if not uid:
+            skip_breakdown["missing_data"] += 1
             continue
         uid = int(uid)
 
@@ -301,6 +322,7 @@ def process_welcome_reminders(*, now_ref: datetime | None = None, batch_limit: i
         blocked_reason = _welcome_reminder_anti_abuse_blocked(uid, db_ref=db_ref, progress=progress)
         if blocked_reason:
             skipped_abuse += 1
+            skip_breakdown[_SKIP_REASON_BUCKET.get(blocked_reason, "missing_data")] += 1
             logger.info("[WELCOME_PROGRESS_REMINDER] skip uid=%s reason=%s", uid, blocked_reason)
             continue
 
@@ -315,6 +337,7 @@ def process_welcome_reminders(*, now_ref: datetime | None = None, batch_limit: i
             and not doc.get("reminder_20h_sent")
             and (now_ts - day1_at) >= timedelta(hours=20)
         ):
+            eligible_20h += 1
             ok, err = _send_welcome_reminder(uid, _WELCOME_PROGRESS_REMINDER_20H, send_fn=send_fn, bot_send_fn=bot_send_fn, stage="20h")
             if ok:
                 db_ref.welcome_reminders.update_one({"_id": doc["_id"]}, {"$set": {"reminder_20h_sent": True, "updated_at": now_ts}})
@@ -331,6 +354,7 @@ def process_welcome_reminders(*, now_ref: datetime | None = None, batch_limit: i
             and not doc.get("reminder_28h_sent")
             and (now_ts - day1_at) >= timedelta(hours=28)
         ):
+            eligible_28h += 1
             ok, err = _send_welcome_reminder(uid, _WELCOME_PROGRESS_REMINDER_28H, send_fn=send_fn, bot_send_fn=bot_send_fn, stage="28h")
             if ok:
                 db_ref.welcome_reminders.update_one({"_id": doc["_id"]}, {"$set": {"reminder_28h_sent": True, "updated_at": now_ts}})
@@ -347,6 +371,7 @@ def process_welcome_reminders(*, now_ref: datetime | None = None, batch_limit: i
             and not doc.get("day2_reminder_sent")
             and (now_ts - day2_at) >= timedelta(hours=20)
         ):
+            eligible_day3 += 1
             ok, err = _send_welcome_reminder(uid, _WELCOME_PROGRESS_REMINDER_DAY2, send_fn=send_fn, bot_send_fn=bot_send_fn, stage="day2")
             if ok:
                 db_ref.welcome_reminders.update_one({"_id": doc["_id"]}, {"$set": {"day2_reminder_sent": True, "updated_at": now_ts}})
@@ -356,12 +381,19 @@ def process_welcome_reminders(*, now_ref: datetime | None = None, batch_limit: i
                 send_failed += 1
                 logger.warning("[WELCOME_PROGRESS_REMINDER] send_failed uid=%s stage=day2 err=%s", uid, err)
 
+    blocked_users = skip_breakdown["bot_blocked"] + skip_breakdown["risk_blocked"]
+
     return {
         "scanned": scanned,
+        "eligible_20h": eligible_20h,
+        "eligible_28h": eligible_28h,
+        "eligible_day3": eligible_day3,
         "reminder_20h_sent": reminder_20h_sent,
         "reminder_28h_sent": reminder_28h_sent,
         "day2_reminder_sent": day2_reminder_sent,
         "skipped_abuse": skipped_abuse,
+        "skip_breakdown": skip_breakdown,
+        "blocked_users": blocked_users,
         "send_failed": send_failed,
     }
 

@@ -256,5 +256,111 @@ class BuildFeatureOverviewTests(unittest.TestCase):
         self.assertEqual(tournament_row["status"], rs.OFFLINE)
 
 
+class BuildWelcomeJourneyRuntimeTests(unittest.TestCase):
+    """Heartbeat/status comes from ``scheduler_locks``; run stats/history are
+    persisted to ``admin_cache`` (doc "welcome_run_stats:<job>") specifically
+    because ``scheduler_locks`` has a TTL index and would silently drop this
+    history whenever a job stops running long enough for its lock to expire."""
+
+    def _collections(self, lock_doc=None, stats_doc=None):
+        locks = [lock_doc] if lock_doc else []
+        cache = [stats_doc] if stats_doc else []
+        return {
+            "scheduler_locks": _FakeCollection(locks),
+            "admin_cache": _FakeCollection(cache),
+        }
+
+    def test_scheduler_block_uses_persisted_duration(self):
+        lock_doc = {
+            "_id": "welcome_progress_reminders",
+            "updatedAt": NOW - timedelta(minutes=10),
+        }
+        stats_doc = {
+            "_id": "welcome_run_stats:welcome_progress_reminders",
+            "lastRunDurationS": 2.1,
+        }
+        collections = self._collections(lock_doc, stats_doc)
+        scheduler_rows = rs.build_scheduler_health(collections, {}, {}, NOW)
+        block = rs.build_welcome_journey_scheduler(collections, scheduler_rows, NOW)
+        self.assertEqual(block["reminders"]["status"], rs.ONLINE)
+        self.assertEqual(block["reminders"]["last_run_duration_s"], 2.1)
+        self.assertIsNotNone(block["reminders"]["next_run"])
+
+    def test_scheduler_status_survives_stats_doc_eviction(self):
+        # Even if the admin_cache stats doc were somehow missing, the
+        # heartbeat-derived status (from scheduler_locks) must still work —
+        # this is the exact TTL-eviction scenario the fix guards against.
+        lock_doc = {
+            "_id": "welcome_progress_reminders",
+            "updatedAt": NOW - timedelta(minutes=10),
+        }
+        collections = self._collections(lock_doc, stats_doc=None)
+        scheduler_rows = rs.build_scheduler_health(collections, {}, {}, NOW)
+        block = rs.build_welcome_journey_scheduler(collections, scheduler_rows, NOW)
+        self.assertEqual(block["reminders"]["status"], rs.ONLINE)
+        self.assertIsNone(block["reminders"]["last_run_duration_s"])
+
+    def test_last_run_reads_persisted_stats(self):
+        stats_doc = {
+            "_id": "welcome_run_stats:welcome_progress_reminders",
+            "lastRunAt": NOW,
+            "lastRunDurationS": 2.1,
+            "lastRunStats": {
+                "scanned": 100,
+                "eligible_20h": 10,
+                "reminder_20h_sent": 9,
+                "send_failed": 1,
+                "blocked_users": 2,
+                "skipped_abuse": 3,
+                "skip_breakdown": {"already_claimed": 2, "bot_blocked": 1},
+            },
+        }
+        last_run = rs.build_welcome_journey_last_run(self._collections(stats_doc=stats_doc))
+        self.assertEqual(last_run["users_scanned"], 100)
+        self.assertEqual(last_run["reminders_20h_sent"], 9)
+        self.assertEqual(last_run["telegram_failed"], 1)
+        self.assertEqual(last_run["skipped_users"]["already_claimed"], 2)
+        self.assertEqual(last_run["skipped_users"]["bot_blocked"], 1)
+        self.assertEqual(last_run["skipped_users"]["total"], 3)
+
+    def test_last_run_defaults_when_no_run_yet(self):
+        last_run = rs.build_welcome_journey_last_run(self._collections())
+        self.assertEqual(last_run["users_scanned"], 0)
+        self.assertIsNone(last_run["at"])
+
+    def test_recent_runs_latest_first_capped(self):
+        # $push with $slice:-20 appends in chronological order, so index 0 is
+        # oldest and the last element is the most recent run.
+        runs = [{"at": NOW - timedelta(hours=24 - i), "duration_s": 1.0, "stats": {"scanned": i}} for i in range(25)]
+        stats_doc = {"_id": "welcome_run_stats:welcome_progress_reminders", "recentRuns": runs}
+        rows = rs.build_welcome_journey_recent_runs(self._collections(stats_doc=stats_doc))
+        self.assertEqual(len(rows), 20)
+        self.assertEqual(rows[0]["users_scanned"], 24)
+
+    def test_alerts_fire_when_scheduler_stale(self):
+        scheduler = {"reminders": {"status": rs.WARNING, "last_run": (NOW - timedelta(hours=3)).isoformat()}}
+        last_run = {"users_scanned": 0, "eligible_20h": 0, "eligible_28h": 0, "eligible_day3": 0,
+                    "reminders_20h_sent": 0, "reminders_28h_sent": 0, "day3_reminders_sent": 0,
+                    "telegram_failed": 0, "blocked_users": 0}
+        alerts = rs.build_welcome_journey_alerts(NOW, scheduler=scheduler, last_run=last_run, funnel_summary=None)
+        self.assertTrue(any("has not run" in a["message"] for a in alerts))
+
+    def test_alerts_fire_when_eligible_but_none_sent(self):
+        scheduler = {"reminders": {"status": rs.ONLINE, "last_run": NOW.isoformat()}}
+        last_run = {"users_scanned": 10, "eligible_20h": 5, "eligible_28h": 0, "eligible_day3": 0,
+                    "reminders_20h_sent": 0, "reminders_28h_sent": 0, "day3_reminders_sent": 0,
+                    "telegram_failed": 0, "blocked_users": 0}
+        alerts = rs.build_welcome_journey_alerts(NOW, scheduler=scheduler, last_run=last_run, funnel_summary=None)
+        self.assertTrue(any("reminders sent = 0" in a["message"] for a in alerts))
+
+    def test_no_alerts_when_healthy(self):
+        scheduler = {"reminders": {"status": rs.ONLINE, "last_run": NOW.isoformat()}}
+        last_run = {"users_scanned": 10, "eligible_20h": 5, "eligible_28h": 0, "eligible_day3": 0,
+                    "reminders_20h_sent": 5, "reminders_28h_sent": 0, "day3_reminders_sent": 0,
+                    "telegram_failed": 0, "blocked_users": 0}
+        alerts = rs.build_welcome_journey_alerts(NOW, scheduler=scheduler, last_run=last_run, funnel_summary=None)
+        self.assertEqual(alerts, [])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -565,3 +565,164 @@ def build_feature_overview(
         "runs via long-polling in a separate worker dyno; the web dyno cannot observe the poll loop directly, so this infers liveness from the shared tick_5min lock")
 
     return rows
+
+
+# ---------------------------------------------------------------------------
+# 6) Welcome Journey Runtime (observability only — reuses SCHEDULER_JOBS for
+#    the heartbeat/status verdict; never re-derives or alters reminder/
+#    eligibility logic). Run history/stats are read from ``admin_cache``
+#    (doc "welcome_run_stats:<job>"), NOT ``scheduler_locks`` — the latter has
+#    a TTL index on ``expireAt`` (see main.py's create_index(...,
+#    expireAfterSeconds=0)) and would silently delete this history the moment
+#    a job stops running for longer than its lock TTL, which is exactly the
+#    failure this dashboard needs to keep showing.
+# ---------------------------------------------------------------------------
+
+_WELCOME_JOBS_BY_KEY = {"reminders": "welcome_progress_reminders", "lifecycle": "welcome_voucher_lifecycle"}
+
+
+def _welcome_scheduler_row(scheduler_rows: list[dict[str, Any]], job_key: str) -> dict[str, Any]:
+    for row in scheduler_rows:
+        if row.get("key") == job_key:
+            return row
+    return {}
+
+
+def _welcome_run_stats_doc(collections: Mapping[str, Any], job_key: str) -> dict[str, Any]:
+    col = collections.get("admin_cache")
+    if col is None:
+        return {}
+    return _safe_get(lambda: col.find_one({"_id": f"welcome_run_stats:{job_key}"})) or {}
+
+
+def build_welcome_journey_scheduler(
+    collections: Mapping[str, Any],
+    scheduler_rows: list[dict[str, Any]],
+    now: datetime,
+) -> dict[str, Any]:
+    """Scheduler-health block for the Welcome Journey Runtime card. Reuses the
+    same ``job_runtime_status`` verdicts already computed in
+    ``build_scheduler_health`` — this never re-derives Online/Offline."""
+    out: dict[str, Any] = {}
+    for ui_key, job_key in _WELCOME_JOBS_BY_KEY.items():
+        row = _welcome_scheduler_row(scheduler_rows, job_key)
+        job = next((j for j in SCHEDULER_JOBS if j["key"] == job_key), {})
+        last_run = _aware(_lookup_lock_ts(collections, job.get("lock_source")))
+        interval = job.get("interval_seconds")
+        next_run = last_run + timedelta(seconds=interval) if (last_run and interval) else None
+        stats_doc = _welcome_run_stats_doc(collections, job_key)
+        out[ui_key] = {
+            "job_name": job.get("label"),
+            "status": row.get("status", WAITING),
+            "notes": row.get("notes"),
+            "cron": job.get("cron"),
+            "last_run": _fmt_ts(last_run),
+            "next_run": _fmt_ts(next_run),
+            "last_run_duration_s": stats_doc.get("lastRunDurationS"),
+        }
+    return out
+
+
+def build_welcome_journey_last_run(collections: Mapping[str, Any]) -> dict[str, Any]:
+    """Latest ``process_welcome_reminders`` run stats, persisted onto
+    ``admin_cache`` (doc "welcome_run_stats:welcome_progress_reminders") by
+    ``main._record_welcome_run_stats``. Returns an empty/zeroed shape (not an
+    error) if no run has landed yet."""
+    doc = _welcome_run_stats_doc(collections, "welcome_progress_reminders")
+    stats = doc.get("lastRunStats") or {}
+    skip = stats.get("skip_breakdown") or {}
+    return {
+        "at": _fmt_ts(doc.get("lastRunAt")),
+        "duration_s": doc.get("lastRunDurationS"),
+        "users_scanned": stats.get("scanned", 0),
+        "eligible_20h": stats.get("eligible_20h", 0),
+        "eligible_28h": stats.get("eligible_28h", 0),
+        "eligible_day3": stats.get("eligible_day3", 0),
+        "reminders_20h_sent": stats.get("reminder_20h_sent", 0),
+        "reminders_28h_sent": stats.get("reminder_28h_sent", 0),
+        "day3_reminders_sent": stats.get("day2_reminder_sent", 0),
+        "telegram_failed": stats.get("send_failed", 0),
+        "blocked_users": stats.get("blocked_users", 0),
+        "skipped_users": {
+            "total": stats.get("skipped_abuse", 0),
+            "already_claimed": skip.get("already_claimed", 0),
+            "expired": skip.get("expired", 0),
+            "already_sent": skip.get("already_sent", 0),
+            "risk_blocked": skip.get("risk_blocked", 0),
+            "multi_account": skip.get("multi_account", 0),
+            "left_channel": skip.get("left_channel", 0),
+            "bot_blocked": skip.get("bot_blocked", 0),
+            "missing_data": skip.get("missing_data", 0),
+        },
+    }
+
+
+def build_welcome_journey_recent_runs(collections: Mapping[str, Any], limit: int = 20) -> list[dict[str, Any]]:
+    """Last N reminder-job runs, latest first. Sourced from the capped
+    ``recentRuns`` array maintained on the ``admin_cache`` doc (not
+    ``scheduler_locks`` — see the module-level note above on its TTL index).
+    No new collection, no extra scans."""
+    doc = _welcome_run_stats_doc(collections, "welcome_progress_reminders")
+    runs = doc.get("recentRuns") or []
+    rows = []
+    for run in reversed(runs[-limit:]):
+        stats = run.get("stats") or {}
+        rows.append({
+            "time": _fmt_ts(run.get("at")),
+            "users_scanned": stats.get("scanned", 0),
+            "sent_20h": stats.get("reminder_20h_sent", 0),
+            "sent_28h": stats.get("reminder_28h_sent", 0),
+            "sent_day3": stats.get("day2_reminder_sent", 0),
+            "failed": stats.get("send_failed", 0),
+            "duration_s": run.get("duration_s"),
+        })
+    return rows
+
+
+def build_welcome_journey_alerts(
+    now: datetime,
+    *,
+    scheduler: dict[str, Any],
+    last_run: dict[str, Any],
+    funnel_summary: Mapping[str, Any] | None,
+) -> list[dict[str, str]]:
+    """Automatic warnings for the Welcome Journey Runtime card. Purely a read
+    of already-computed scheduler/stats/funnel values — adds no new queries
+    and never changes reminder timing, eligibility or voucher rules."""
+    alerts: list[dict[str, str]] = []
+    reminders = scheduler.get("reminders", {})
+
+    last_run_at = None
+    try:
+        if reminders.get("last_run"):
+            last_run_at = datetime.fromisoformat(reminders["last_run"])
+    except Exception:
+        last_run_at = None
+    age_h = _age_seconds(now, last_run_at)
+    if age_h is not None and age_h > 2 * 3600:
+        alerts.append({"level": "critical", "message": f"Scheduler has not run for {int(age_h // 3600)} hour(s)."})
+    if reminders.get("status") == OFFLINE:
+        alerts.append({"level": "critical", "message": "Scheduler failed."})
+
+    eligible_total = (last_run.get("eligible_20h", 0) + last_run.get("eligible_28h", 0) + last_run.get("eligible_day3", 0))
+    sent_total = (last_run.get("reminders_20h_sent", 0) + last_run.get("reminders_28h_sent", 0) + last_run.get("day3_reminders_sent", 0))
+    if eligible_total > 0 and sent_total == 0:
+        alerts.append({"level": "warning", "message": "Eligible users > 0 but reminders sent = 0."})
+
+    failed = last_run.get("telegram_failed", 0)
+    attempted = sent_total + failed
+    if attempted > 0 and (failed / attempted) > 0.05:
+        alerts.append({"level": "warning", "message": f"Telegram failure rate {round(failed / attempted * 100, 1)}% (> 5%)."})
+
+    if last_run.get("blocked_users", 0) > max(5, int(0.1 * max(last_run.get("users_scanned", 0), 1))):
+        alerts.append({"level": "warning", "message": "Blocked users unusually high."})
+
+    if funnel_summary:
+        d2_rate = (funnel_summary.get("welcome_d2_rate_pct") or {}).get("value")
+        if isinstance(d2_rate, (int, float)) and d2_rate < 40:
+            alerts.append({"level": "warning", "message": f"Day 2 completion rate is low ({d2_rate}%)."})
+        claim_rate = (funnel_summary.get("welcome_claim_rate_pct") or {}).get("value")
+        if isinstance(claim_rate, (int, float)) and claim_rate < 50:
+            alerts.append({"level": "warning", "message": f"Welcome claim conversion below threshold ({claim_rate}%)."})
+
+    return alerts
