@@ -3416,6 +3416,106 @@ def dashboard_validation():
     return _panel_cached("panel:validation", _build)
 
 
+# ---------------------------------------------------------------------------
+# Runtime Status dashboard (read-only). Answers "is this feature actually
+# running in production right now" — derived from live scheduler locks,
+# feature-flag settings, and counts of recently-written tracking fields.
+# Never writes to the database and never touches bot business logic.
+# ---------------------------------------------------------------------------
+import runtime_status as _runtime_status  # noqa: E402
+
+_RUNTIME_STATUS_TELEGRAM_CACHE: dict[str, Any] = {"ok": None, "checked_at": None}
+
+
+def _runtime_status_mongo_ping() -> bool:
+    db.command("ping")
+    return True
+
+
+def _runtime_status_telegram_ping() -> bool:
+    now = _utc_now()
+    cached_at = _RUNTIME_STATUS_TELEGRAM_CACHE.get("checked_at")
+    if cached_at and (now - cached_at).total_seconds() < 60:
+        return bool(_RUNTIME_STATUS_TELEGRAM_CACHE.get("ok"))
+    ok = False
+    try:
+        resp = requests.get(f"{API_BASE}/getMe", timeout=5)
+        ok = bool(resp.ok and (resp.json() or {}).get("ok"))
+    except Exception:
+        ok = False
+    _RUNTIME_STATUS_TELEGRAM_CACHE["ok"] = ok
+    _RUNTIME_STATUS_TELEGRAM_CACHE["checked_at"] = now
+    return ok
+
+
+def _runtime_status_git_commit() -> str | None:
+    return (
+        os.getenv("GITHUB_SHA")
+        or os.getenv("FLY_IMAGE_REF")
+        or os.getenv("FLY_MACHINE_VERSION")
+        or None
+    )
+
+
+@admin_bp.get("/api/admin/dashboard/runtime-status")
+def dashboard_runtime_status():
+    """Phase: Runtime Status. Read-only rollup of what is actually executing
+    in production right now — scheduler jobs, PM automation, queues, and
+    worker/infra health — reusing existing settings/lock/heartbeat state.
+    Every status is computed at request time; nothing here is hardcoded."""
+    ok, err = require_admin_from_query()
+    if not ok:
+        msg, code = err
+        return jsonify({"success": False, "message": msg}), code
+
+    now = _utc_now()
+
+    def _build():
+        collections = {
+            "scheduler_locks": scheduler_locks_collection,
+            "audit_events": audit_events_collection,
+            "admin_cache": admin_cache_col,
+            "users": users_collection,
+            "referral_notifications": referral_notifications_collection,
+            "welcome_eligibility": welcome_eligibility_collection,
+            "reactivation_journey": db["reactivation_journey"],
+            "tg_verification_queue": tg_verification_queue_collection,
+            "affiliate_ledger": affiliate_ledger_collection,
+        }
+        scheduler_settings = settings_service.get_settings("scheduler")
+        feature_flags = settings_service.get_settings("feature_flags")
+        referral_config = settings_service.get_settings("referral_config")
+
+        scheduler_rows = _runtime_status.build_scheduler_health(
+            collections, scheduler_settings, feature_flags, now
+        )
+        pm_rows = _runtime_status.build_pm_automation(
+            collections, feature_flags, referral_config, now
+        )
+        queue_rows = _runtime_status.build_queue_status(collections, now)
+        worker_health = _runtime_status.build_worker_health(
+            collections,
+            now,
+            mongo_ping=_runtime_status_mongo_ping,
+            telegram_get_me=_runtime_status_telegram_ping,
+            deployment_version=getattr(_cfg, "MINIAPP_VERSION", None),
+            git_commit=_runtime_status_git_commit(),
+        )
+        feature_rows = _runtime_status.build_feature_overview(
+            scheduler_rows, pm_rows, queue_rows, worker_health, now
+        )
+        return {
+            "generated_at": now.isoformat(),
+            "features": feature_rows,
+            "scheduler": scheduler_rows,
+            "pm_automation": pm_rows,
+            "queues": queue_rows,
+            "worker_health": worker_health,
+        }
+
+    return _panel_cached("panel:runtime_status", _build)
+
+
 @admin_bp.get("/api/admin/dashboard/backend-segment-engine")
 def dashboard_backend_segment_engine():
     """Phase 6A: read-only summary of the shadow-mode backend segment engine.
