@@ -260,7 +260,12 @@ class VoucherAntiHunterTests(unittest.TestCase):
         fake = FakeRateLimitCollection()
         original = vouchers_module.claim_rate_limits_col
         original_subnet_hard_block = vouchers_module.PUBLIC_POOL_SUBNET_HARD_BLOCK
+        original_get_setting = vouchers_module._get_setting
         vouchers_module.claim_rate_limits_col = fake
+        # This test exercises the raw module constants directly; disable the
+        # settings-service lookup so PUBLIC_POOL_SUBNET_HARD_BLOCK mutations
+        # below take effect regardless of Mongo/settings availability.
+        vouchers_module._get_setting = None
         try:
             vouchers_module.PUBLIC_POOL_SUBNET_HARD_BLOCK = False
             now = datetime.now(timezone.utc)
@@ -286,6 +291,7 @@ class VoucherAntiHunterTests(unittest.TestCase):
         finally:
             vouchers_module.claim_rate_limits_col = original
             vouchers_module.PUBLIC_POOL_SUBNET_HARD_BLOCK = original_subnet_hard_block
+            vouchers_module._get_setting = original_get_setting
 
     def test_public_pool_unknown_ip_does_not_hard_block(self):
         ok, _, _ = _check_public_pool_campaign_cap("drop-3", {"ip_hash": "", "subnet": "unknown"}, now=datetime.now(timezone.utc))

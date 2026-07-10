@@ -212,6 +212,34 @@ WELCOME_UNCLAIMED_WINDOW_DAYS = int(getattr(_cfg, "WELCOME_UNCLAIMED_WINDOW_DAYS
 WELCOME_CLAIMED_VISIBLE_DAYS = int(getattr(_cfg, "WELCOME_CLAIMED_VISIBLE_DAYS", os.getenv("WELCOME_CLAIMED_VISIBLE_DAYS", "3")))
 WELCOME_REWARD_CHECKINS_REQUIRED = 3
 PROFILE_PHOTO_CACHE_TTL_SECONDS = 60
+try:
+    from settings_service import get_setting as _get_setting
+except Exception:  # pragma: no cover
+    _get_setting = None
+
+
+def _abuse_setting(field: str, fallback):
+    """Live-read an abuse-protection setting from the settings service, falling
+    back to the pre-existing env-var/hardcoded default if unavailable."""
+    if _get_setting is None:
+        return fallback
+    try:
+        value = _get_setting("abuse_protection", field)
+        return value if value is not None else fallback
+    except Exception:
+        return fallback
+
+
+def _verify_setting(field: str, fallback):
+    if _get_setting is None:
+        return fallback
+    try:
+        value = _get_setting("verification_queue", field)
+        return value if value is not None else fallback
+    except Exception:
+        return fallback
+
+
 VERIFY_QUEUE_MAX_ATTEMPTS = int(os.getenv("VERIFY_QUEUE_MAX_ATTEMPTS", "3"))
 VERIFY_QUEUE_BACKOFF_BASE_SECONDS = int(os.getenv("VERIFY_QUEUE_BACKOFF_BASE_SECONDS", "30"))
 VERIFY_QUEUE_BACKOFF_MAX_SECONDS = int(os.getenv("VERIFY_QUEUE_BACKOFF_MAX_SECONDS", "300"))
@@ -234,6 +262,26 @@ PUBLIC_POOL_SUBNET_MAX_SUCCESS = int(os.getenv("PUBLIC_POOL_SUBNET_MAX_SUCCESS",
 PUBLIC_POOL_IP_WINDOW_SECONDS = int(os.getenv("PUBLIC_POOL_IP_WINDOW_SECONDS", "86400"))
 PUBLIC_POOL_IP_BLOCK_SECONDS = int(os.getenv("PUBLIC_POOL_IP_BLOCK_SECONDS", "86400"))
 PUBLIC_POOL_SUBNET_HARD_BLOCK = os.getenv("PUBLIC_POOL_SUBNET_HARD_BLOCK", "0").lower() in ("1", "true", "yes", "on")
+
+
+def _public_pool_ip_max_success() -> int:
+    return int(_abuse_setting("public_pool_ip_max_success", PUBLIC_POOL_IP_MAX_SUCCESS))
+
+
+def _public_pool_subnet_max_success() -> int:
+    return int(_abuse_setting("public_pool_subnet_max_success", PUBLIC_POOL_SUBNET_MAX_SUCCESS))
+
+
+def _public_pool_ip_window_seconds() -> int:
+    return int(_abuse_setting("public_pool_ip_window_seconds", PUBLIC_POOL_IP_WINDOW_SECONDS))
+
+
+def _public_pool_ip_block_seconds() -> int:
+    return int(_abuse_setting("public_pool_ip_block_seconds", PUBLIC_POOL_IP_BLOCK_SECONDS))
+
+
+def _public_pool_subnet_hard_block() -> bool:
+    return bool(_abuse_setting("public_pool_subnet_hard_block", PUBLIC_POOL_SUBNET_HARD_BLOCK))
 
 _RAW_OFFICIAL_CHANNEL_ID = getattr(_cfg, "OFFICIAL_CHANNEL_ID", os.getenv("OFFICIAL_CHANNEL_ID"))
 try:
@@ -1678,6 +1726,11 @@ def _check_public_pool_campaign_cap(drop_id, fingerprint, now=None) -> tuple[boo
     blocked_seconds = 0
     ip_hash = (fingerprint or {}).get("ip_hash") or ""
     subnet = (fingerprint or {}).get("subnet") or "unknown"
+    ip_window_seconds = _public_pool_ip_window_seconds()
+    ip_max_success = _public_pool_ip_max_success()
+    ip_block_seconds = _public_pool_ip_block_seconds()
+    subnet_max_success = _public_pool_subnet_max_success()
+    subnet_hard_block = _public_pool_subnet_hard_block()
 
     if not ip_hash or _is_unknown_subnet(subnet):
         _safe_log("warning", "[PUBLIC_POOL_ABUSE][IP_UNKNOWN] drop=%s", str(drop_id))
@@ -1690,19 +1743,19 @@ def _check_public_pool_campaign_cap(drop_id, fingerprint, now=None) -> tuple[boo
         return False, "ip_rate_limited", _seconds_until(ip_blocked_until, now)
     ip_first_at = _as_aware_utc(ip_doc.get("firstAt"))
     ip_count = int(ip_doc.get("count", 0) or 0)
-    if ip_first_at and (now - ip_first_at).total_seconds() <= PUBLIC_POOL_IP_WINDOW_SECONDS and ip_count >= PUBLIC_POOL_IP_MAX_SUCCESS:
-        return False, "ip_rate_limited", PUBLIC_POOL_IP_BLOCK_SECONDS
+    if ip_first_at and (now - ip_first_at).total_seconds() <= ip_window_seconds and ip_count >= ip_max_success:
+        return False, "ip_rate_limited", ip_block_seconds
 
     subnet_key = _rate_limit_key("ppool", "drop", drop_id, "subnet", subnet)
     subnet_doc = claim_rate_limits_col.find_one({"key": subnet_key}) or {}
     subnet_blocked_until = _as_aware_utc(subnet_doc.get("blockedUntil"))
-    if subnet_blocked_until and subnet_blocked_until > now and PUBLIC_POOL_SUBNET_HARD_BLOCK:
+    if subnet_blocked_until and subnet_blocked_until > now and subnet_hard_block:
         return False, "subnet_rate_limited", _seconds_until(subnet_blocked_until, now)
     subnet_first_at = _as_aware_utc(subnet_doc.get("firstAt"))
     subnet_count = int(subnet_doc.get("count", 0) or 0)
-    if subnet_first_at and (now - subnet_first_at).total_seconds() <= PUBLIC_POOL_IP_WINDOW_SECONDS and subnet_count >= PUBLIC_POOL_SUBNET_MAX_SUCCESS:
-        if PUBLIC_POOL_SUBNET_HARD_BLOCK:
-            return False, "subnet_rate_limited", PUBLIC_POOL_IP_BLOCK_SECONDS
+    if subnet_first_at and (now - subnet_first_at).total_seconds() <= ip_window_seconds and subnet_count >= subnet_max_success:
+        if subnet_hard_block:
+            return False, "subnet_rate_limited", ip_block_seconds
         return True, "subnet_pressure", 0
     return True, None, blocked_seconds
 
@@ -1711,6 +1764,8 @@ def _apply_public_pool_campaign_success(drop_id, fingerprint, now=None) -> None:
     now = now or now_utc()
     ip_hash = (fingerprint or {}).get("ip_hash") or ""
     subnet = (fingerprint or {}).get("subnet") or "unknown"
+    ip_window_seconds = _public_pool_ip_window_seconds()
+    ip_block_seconds = _public_pool_ip_block_seconds()
     if not ip_hash or _is_unknown_subnet(subnet):
         return
 
@@ -1720,11 +1775,11 @@ def _apply_public_pool_campaign_success(drop_id, fingerprint, now=None) -> None:
         doc = claim_rate_limits_col.find_one({"key": key}) or {}
         first_at = _as_aware_utc(doc.get("firstAt"))
         count = int(doc.get("count", 0) or 0)
-        in_window = bool(first_at and (now - first_at).total_seconds() <= PUBLIC_POOL_IP_WINDOW_SECONDS)
+        in_window = bool(first_at and (now - first_at).total_seconds() <= ip_window_seconds)
         next_count = (count + 1) if in_window else 1
         next_first = first_at if in_window else now
-        blocked_until = now + timedelta(seconds=PUBLIC_POOL_IP_BLOCK_SECONDS) if next_count > max_success else None
-        expires_at = now + timedelta(seconds=PUBLIC_POOL_IP_BLOCK_SECONDS if blocked_until else PUBLIC_POOL_IP_WINDOW_SECONDS)
+        blocked_until = now + timedelta(seconds=ip_block_seconds) if next_count > max_success else None
+        expires_at = now + timedelta(seconds=ip_block_seconds if blocked_until else ip_window_seconds)
         update = {
             "$set": {
                 "key": key,
@@ -1745,8 +1800,8 @@ def _apply_public_pool_campaign_success(drop_id, fingerprint, now=None) -> None:
             update["$unset"] = {"blockedUntil": ""}
         claim_rate_limits_col.update_one({"key": key}, update, upsert=True)
 
-    _inc("public_pool_ip", ip_hash, PUBLIC_POOL_IP_MAX_SUCCESS)
-    _inc("public_pool_subnet", subnet, PUBLIC_POOL_SUBNET_MAX_SUCCESS)
+    _inc("public_pool_ip", ip_hash, _public_pool_ip_max_success())
+    _inc("public_pool_subnet", subnet, _public_pool_subnet_max_success())
 
 
 def _should_enforce_session_cooldown(subnet: str | None, ip: str | None) -> bool:
@@ -1786,11 +1841,13 @@ def _set_session_cooldown(
     session_key: str,
     now: datetime | None = None,
     rate_limits_col=claim_rate_limits_col,
-    cooldown_seconds: int = SESSION_COOLDOWN_SEC,
+    cooldown_seconds: int | None = None,
 ):
     if not session_key:
         return
     now = now or now_utc()
+    if cooldown_seconds is None:
+        cooldown_seconds = _abuse_setting("session_cooldown_seconds", SESSION_COOLDOWN_SEC)
     expires_at = now + timedelta(seconds=cooldown_seconds)
     key = _rate_limit_key("cooldown", "session", session_key)
     rate_limits_col.update_one(
@@ -2052,14 +2109,22 @@ def _apply_kill_success(
     subnet: str,
     now: datetime | None = None,
     rate_limits_col=claim_rate_limits_col,
-    ip_threshold: int = IP_KILL_MAX_SUCCESSES,
-    subnet_threshold: int = SUBNET_KILL_MAX_SUCCESSES,
-    window_seconds: int = IP_KILL_WINDOW_SECONDS,
-    block_seconds: int = KILL_BLOCK_SECONDS,
+    ip_threshold: int | None = None,
+    subnet_threshold: int | None = None,
+    window_seconds: int | None = None,
+    block_seconds: int | None = None,
 ):
     now = now or now_utc()
     ip_value = ip or "unknown"
     subnet_value = subnet or "unknown"
+    if ip_threshold is None:
+        ip_threshold = _abuse_setting("ip_kill_max_successes", IP_KILL_MAX_SUCCESSES)
+    if subnet_threshold is None:
+        subnet_threshold = _abuse_setting("subnet_kill_max_successes", SUBNET_KILL_MAX_SUCCESSES)
+    if window_seconds is None:
+        window_seconds = _abuse_setting("ip_kill_window_seconds", IP_KILL_WINDOW_SECONDS)
+    if block_seconds is None:
+        block_seconds = _abuse_setting("kill_block_seconds", KILL_BLOCK_SECONDS)
     _apply_kill_counter(
         scope="kill_ip",
         key=_rate_limit_key("kill", "ip", ip_value),
@@ -2161,9 +2226,11 @@ def _set_cooldown(
     uid: str | int | None = None,
     now: datetime | None = None,
     rate_limits_col=claim_rate_limits_col,
-    cooldown_seconds: int = CLAIM_COOLDOWN_SECONDS,
+    cooldown_seconds: int | None = None,
 ):
     now = now or now_utc()
+    if cooldown_seconds is None:
+        cooldown_seconds = _abuse_setting("claim_cooldown_seconds", CLAIM_COOLDOWN_SECONDS)
     ip_value = ip or "unknown"
     subnet_value = subnet or "unknown"
     expires_at = now + timedelta(seconds=cooldown_seconds)
@@ -2637,12 +2704,16 @@ def _has_profile_photo(uid: int, *, force_refresh: bool = False):
 ## the Welcome Voucher claim flow no longer requires a Telegram profile photo.
 
 def _verification_backoff_seconds(attempts: int) -> int:
+    base = int(_verify_setting("base_retry_delay_seconds", VERIFY_QUEUE_BACKOFF_BASE_SECONDS))
+    max_delay = int(_verify_setting("max_retry_delay_seconds", VERIFY_QUEUE_BACKOFF_MAX_SECONDS))
     if attempts <= 0:
-        return VERIFY_QUEUE_BACKOFF_BASE_SECONDS
-    backoff = VERIFY_QUEUE_BACKOFF_BASE_SECONDS * (2 ** (attempts - 1))
-    return min(backoff, VERIFY_QUEUE_BACKOFF_MAX_SECONDS)
+        return base
+    backoff = base * (2 ** (attempts - 1))
+    return min(backoff, max_delay)
 
-def process_verification_queue(batch_limit: int = 50) -> None:
+def process_verification_queue(batch_limit: int | None = None) -> None:
+    if batch_limit is None:
+        batch_limit = int(_verify_setting("batch_size", 50))
     scanned = dequeued = processed = failed = errors = 0
     now = now_utc()
 
@@ -2746,7 +2817,8 @@ def process_verification_queue(batch_limit: int = 50) -> None:
             now = now_utc()
             errors += 1
             attempts = int(claimed_doc.get("attempts", 1))
-            if attempts >= VERIFY_QUEUE_MAX_ATTEMPTS:
+            max_attempts = int(_verify_setting("max_retry_attempts", VERIFY_QUEUE_MAX_ATTEMPTS))
+            if attempts >= max_attempts:
                 update = {
                     "$set": {
                         "status": "failed",

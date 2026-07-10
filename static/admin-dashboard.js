@@ -3030,9 +3030,162 @@
     });
   }
 
+  // ---------- Managed Settings (schema-driven, editable, MongoDB-backed) ----------
+  var managedSettingsState = { schema: {}, values: {} };
+
+  function msFieldId(group, name, sub) {
+    return "ms-" + group + "-" + name + (sub ? "-" + sub : "");
+  }
+
+  function msRenderField(group, name, def, value) {
+    var id = msFieldId(group, name);
+    var label = '<label for="' + id + '">' + esc(def.label || name) + "</label>";
+    if (def.type === "bool") {
+      return '<div class="ms-field ms-bool-field"><input type="checkbox" id="' + id + '"' + (value ? " checked" : "") + "/>" + label + "</div>";
+    }
+    if (def.type === "list") {
+      var joined = Array.isArray(value) ? value.join(", ") : (value || "");
+      return '<div class="ms-field">' + label + '<textarea class="filter-input" id="' + id + '" rows="2">' + esc(joined) + "</textarea></div>";
+    }
+    if (def.type === "str" && Array.isArray(def.choices)) {
+      var opts = def.choices.map(function (c) {
+        return '<option value="' + esc(c) + '"' + (c === value ? " selected" : "") + ">" + esc(c) + "</option>";
+      }).join("");
+      return '<div class="ms-field">' + label + '<select class="filter-input" id="' + id + '">' + opts + "</select></div>";
+    }
+    if (def.type === "str" && def.multiline) {
+      return '<div class="ms-field">' + label + '<textarea class="filter-input" id="' + id + '" rows="3">' + esc(value || "") + "</textarea></div>";
+    }
+    if (def.type === "str") {
+      return '<div class="ms-field">' + label + '<input class="filter-input" type="text" id="' + id + '" value="' + esc(value || "") + '"/></div>';
+    }
+    if (def.type === "int" || def.type === "float") {
+      var attrs = "";
+      if (def.min !== undefined && def.min !== null) attrs += ' min="' + def.min + '"';
+      if (def.max !== undefined && def.max !== null) attrs += ' max="' + def.max + '"';
+      if (def.type === "float") attrs += ' step="0.1"';
+      return '<div class="ms-field">' + label + '<input class="filter-input" type="number"' + attrs + ' id="' + id + '" value="' + (value === null || value === undefined ? "" : value) + '"/></div>';
+    }
+    return "";
+  }
+
+  function msRenderJobField(group, name, def, value) {
+    value = value || {};
+    var enabledId = msFieldId(group, name, "enabled");
+    var rows = '<div class="ms-field ms-bool-field"><input type="checkbox" id="' + enabledId + '"' + (value.enabled !== false ? " checked" : "") + '/><label for="' + enabledId + '">Enabled</label></div>';
+    Object.keys(value).forEach(function (key) {
+      if (key === "enabled") return;
+      var fid = msFieldId(group, name, key);
+      var v = value[key];
+      var niceLabel = key === "cron" ? "Cron" : key.replace(/_/g, " ").replace(/\b\w/g, function (c) { return c.toUpperCase(); });
+      if (key === "cron") {
+        rows += '<div class="ms-field"><label for="' + fid + '">' + niceLabel + ' <span style="font-weight:400;">(5-field crontab, blank = unchanged)</span></label><input class="filter-input" type="text" id="' + fid + '" value="' + esc(v || "") + '" placeholder="*/5 * * * *"/></div>';
+      } else {
+        rows += '<div class="ms-field"><label for="' + fid + '">' + niceLabel + "</label><input class=\"filter-input\" type=\"number\" id=\"" + fid + '" value="' + (v === null || v === undefined ? "" : v) + '"/></div>';
+      }
+    });
+    return '<div class="ms-job-card"><h5>' + esc(def.label || name) + '</h5><div class="ms-grid">' + rows + "</div></div>";
+  }
+
+  function msCollectField(group, name, def, oldValue) {
+    var id = msFieldId(group, name);
+    if (def.type === "job") {
+      var out = { enabled: !!$("#" + msFieldId(group, name, "enabled")).checked };
+      Object.keys(oldValue || {}).forEach(function (key) {
+        if (key === "enabled") return;
+        var el = $("#" + msFieldId(group, name, key));
+        if (!el) return;
+        if (key === "cron") {
+          var raw = (el.value || "").trim();
+          out.cron = raw ? raw : (oldValue[key] || null);
+        } else {
+          var num = parseInt(el.value, 10);
+          out[key] = isNaN(num) ? oldValue[key] : num;
+        }
+      });
+      return out;
+    }
+    var el = $("#" + id);
+    if (!el) return oldValue;
+    if (def.type === "bool") return !!el.checked;
+    if (def.type === "list") return (el.value || "").split(",").map(function (s) { return s.trim(); }).filter(Boolean);
+    if (def.type === "int") { var n = parseInt(el.value, 10); return isNaN(n) ? oldValue : n; }
+    if (def.type === "float") { var f = parseFloat(el.value); return isNaN(f) ? oldValue : f; }
+    return el.value;
+  }
+
+  function msSaveGroup(group) {
+    var schema = managedSettingsState.schema[group];
+    var values = managedSettingsState.values[group] || {};
+    var btn = $("#ms-save-" + group);
+    var statusEl = $("#ms-status-" + group);
+    if (!schema || !btn) return;
+    if (!btnStart(btn, "Saving...")) return;
+    var payload = {};
+    Object.keys(schema.fields).forEach(function (name) {
+      payload[name] = msCollectField(group, name, schema.fields[name], values[name]);
+    });
+    fetch("/api/admin/settings/" + encodeURIComponent(group), {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Accept": "application/json", "Content-Type": "application/json" },
+      body: JSON.stringify({ settings: payload }),
+    }).then(function (r) {
+      return r.json().then(function (j) { if (!r.ok || !j.success) throw new Error(j.reason || j.message || "HTTP " + r.status); return j; });
+    }).then(function (j) {
+      managedSettingsState.values[group] = j.settings || payload;
+      toast("✅ " + (schema.label || group) + " settings saved", "success");
+      if (statusEl) statusEl.textContent = "Saved.";
+    }).catch(function (e) {
+      toast("❌ Failed to save " + (schema.label || group) + ": " + e.message, "error");
+      if (statusEl) statusEl.textContent = "Failed: " + e.message;
+    }).finally(function () {
+      btnStop(btn);
+    });
+  }
+
+  function msRenderGroup(group, schema, values) {
+    var fieldsHtml = Object.keys(schema.fields).map(function (name) {
+      var def = schema.fields[name];
+      var value = values[name];
+      return def.type === "job" ? msRenderJobField(group, name, def, value) : msRenderField(group, name, def, value);
+    }).join("");
+    return (
+      '<details class="ms-group" id="ms-group-' + group + '">' +
+      "<summary>" + esc(schema.label || group) + "</summary>" +
+      (schema.description ? '<div class="ms-desc">' + esc(schema.description) + "</div>" : "") +
+      '<div class="ms-body"><div class="ms-grid">' + fieldsHtml + "</div>" +
+      '<div class="ms-actions"><button class="btn primary" id="ms-save-' + group + '">Save ' + esc(schema.label || group) + '</button><span class="ms-status" id="ms-status-' + group + '"></span></div>' +
+      "</div></details>"
+    );
+  }
+
+  function loadManagedSettings() {
+    statePanel("managed-settings-body", "loading", "Loading settings…");
+    return api("/api/admin/settings")
+      .then(function (d) {
+        managedSettingsState.schema = d.schema || {};
+        managedSettingsState.values = d.settings || {};
+        var groups = Object.keys(managedSettingsState.schema);
+        $("#managed-settings-body").innerHTML = groups.map(function (group) {
+          return msRenderGroup(group, managedSettingsState.schema[group], managedSettingsState.values[group] || {});
+        }).join("");
+        groups.forEach(function (group) {
+          var btn = $("#ms-save-" + group);
+          if (btn) btn.addEventListener("click", function () { msSaveGroup(group); });
+        });
+      })
+      .catch(function (e) {
+        if (e.message !== "unauthorized") {
+          statePanel("managed-settings-body", "banner error", "Failed to load settings: " + e.message);
+        }
+      });
+  }
+
   function loadSettings(refresh) {
     setMeta("Loading…");
     statePanel("settings-body", "loading", "Loading configuration…");
+    loadManagedSettings();
     loadRejoinBufferSettings();
     api("/api/admin/dashboard/settings" + (refresh ? "?refresh=1" : ""))
       .then(function (d) {

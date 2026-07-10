@@ -98,6 +98,8 @@ import httpx
 import pytz
 import json
 from database import init_db, db, safe_create_index
+import settings_service
+from settings_service import get_settings as get_app_settings, get_setting as get_app_setting, update_settings as update_app_settings, list_schema as list_settings_schema, all_settings as get_all_app_settings
 
 FIRST_CHECKIN_BONUS_XP = int(os.getenv("FIRST_CHECKIN_BONUS_XP", "200"))
 WELCOME_BONUS_XP = int(os.getenv("WELCOME_BONUS_XP", "20"))
@@ -954,7 +956,7 @@ def affiliate_current_week_issue_scheduled() -> None:
     logger.info("[JOB][AFFILIATE_CURRENT_WEEK] done result=%s", result)
 
 
-def process_verification_queue_scheduled(batch_limit: int = 50) -> None:
+def process_verification_queue_scheduled(batch_limit: int | None = None) -> None:
     acquired, _lock_doc = acquire_scheduler_lock("verification_queue", ttl_seconds=300)
     if not acquired:
         logger.info("[SCHEDULER][VERIFY] lock_not_acquired")
@@ -4504,6 +4506,72 @@ def dashboard_settings():
     return jsonify(_panels.build_settings_panel(os.environ, constants=constants))
 
 
+def _admin_identity_for_settings() -> str:
+    try:
+        from admin_auth import session_admin
+        admin = session_admin()
+        if admin:
+            return admin.get("username") or str(admin.get("id") or "admin")
+    except Exception:
+        pass
+    return "admin"
+
+
+@admin_bp.get("/api/admin/settings/schema")
+def admin_settings_schema():
+    """Field-level schema (labels/types/defaults/bounds) for every managed
+    settings group — drives the auto-generated Settings UI."""
+    ok, err = require_admin_from_query()
+    if not ok:
+        msg, code = err
+        return jsonify({"success": False, "message": msg}), code
+    return jsonify({"success": True, "schema": list_settings_schema()})
+
+
+@admin_bp.get("/api/admin/settings")
+def admin_settings_all():
+    """Current values (Mongo -> env -> default, cached) for every managed
+    settings group, alongside the schema, for the dashboard Settings page."""
+    ok, err = require_admin_from_query()
+    if not ok:
+        msg, code = err
+        return jsonify({"success": False, "message": msg}), code
+    return jsonify({
+        "success": True,
+        "schema": list_settings_schema(),
+        "settings": get_all_app_settings(),
+    })
+
+
+@admin_bp.get("/api/admin/settings/<group>")
+def admin_settings_get(group: str):
+    ok, err = require_admin_from_query()
+    if not ok:
+        msg, code = err
+        return jsonify({"success": False, "message": msg}), code
+    if group not in list_settings_schema():
+        return jsonify({"success": False, "message": "unknown_group"}), 404
+    return jsonify({"success": True, "group": group, "settings": get_app_settings(group)})
+
+
+@admin_bp.post("/api/admin/settings/<group>")
+def admin_settings_update(group: str):
+    ok, err = require_admin_from_query()
+    if not ok:
+        msg, code = err
+        return jsonify({"success": False, "message": msg}), code
+    if group not in list_settings_schema():
+        return jsonify({"success": False, "message": "unknown_group"}), 404
+    payload = request.get_json(silent=True) or {}
+    updates = payload.get("settings") if isinstance(payload.get("settings"), dict) else payload
+    if not isinstance(updates, dict):
+        return jsonify({"success": False, "message": "bad_payload"}), 400
+    result = update_app_settings(group, updates, updated_by=_admin_identity_for_settings())
+    if not result.get("success"):
+        return jsonify(result), 400
+    return jsonify(result)
+
+
 @admin_bp.get("/api/admin/dashboard/segment-probability-config")
 def dashboard_segment_probability_config():
     """Read-only panel: segment probability configuration.
@@ -7472,9 +7540,71 @@ def run_worker():
                 exc.__class__.__name__ if exc else None,
                 str(exc) if exc else None,
             )
-    scheduler.add_listener(_log_scheduler_event, EVENT_JOB_MISSED | EVENT_JOB_ERROR)    
+    scheduler.add_listener(_log_scheduler_event, EVENT_JOB_MISSED | EVENT_JOB_ERROR)
+
+    def _scheduler_job_enabled(job_key: str, default: bool = True) -> bool:
+        """Live-checked 'Enabled' toggle for a scheduler job, sourced from the
+        Admin Dashboard Scheduler settings (falls back to enabled=True)."""
+        try:
+            job_cfg = get_app_setting("scheduler", job_key)
+            if isinstance(job_cfg, dict) and "enabled" in job_cfg:
+                return bool(job_cfg["enabled"])
+        except Exception:
+            logger.exception("[SETTINGS_SCHEDULER] failed to read enabled flag for job_key=%s", job_key)
+        return default
+
+    def _guarded_job(job_key: str, fn, *, default: bool = True):
+        """Wrap a scheduler job callable so it no-ops when disabled from Settings,
+        without needing to unregister/re-register the underlying APScheduler job."""
+        def _wrapped(*args, **kwargs):
+            if not _scheduler_job_enabled(job_key, default):
+                logger.info("[SETTINGS_SCHEDULER] skip job_key=%s reason=disabled", job_key)
+                return None
+            return fn(*args, **kwargs)
+        _wrapped.__name__ = getattr(fn, "__name__", job_key)
+        return _wrapped
+
+    def _sync_scheduler_cron_from_settings() -> None:
+        """Every minute, pick up cron changes saved from the Admin Dashboard and
+        reschedule the matching APScheduler job(s) — no redeploy required."""
+        job_id_map = {
+            "xp_snapshot": ["weekly_reset"],
+            "pending_referral_settlement": ["tick_5min"],
+            "verification_queue": ["process_verification_queue"],
+            "welcome_reminder": ["welcome_voucher_lifecycle", "welcome_progress_reminders"],
+            "reactivation_journey": ["reactivation_journey_evaluate"],
+            "affiliate_monthly_settlement": ["affiliate_monthly_settle"],
+            "bot_segment_sheet_sync": ["bot_segment_sheet_sync"],
+            "growth_leaderboard_weekly": ["growth_leaderboard_weekly"],
+        }
+        try:
+            scheduler_cfg = settings_service.get_settings("scheduler", force_refresh=True)
+        except Exception:
+            logger.exception("[SETTINGS_SCHEDULER] failed to load scheduler settings for cron sync")
+            return
+        for job_key, job_ids in job_id_map.items():
+            job_cfg = scheduler_cfg.get(job_key) or {}
+            cron = job_cfg.get("cron")
+            if not cron:
+                continue
+            try:
+                new_trigger = CronTrigger.from_crontab(cron, timezone=KL_TZ)
+            except Exception:
+                logger.warning("[SETTINGS_SCHEDULER] invalid cron job_key=%s cron=%s", job_key, cron)
+                continue
+            for job_id in job_ids:
+                job = scheduler.get_job(job_id)
+                if not job:
+                    continue
+                if str(job.trigger) != str(new_trigger):
+                    try:
+                        scheduler.reschedule_job(job_id, trigger=new_trigger)
+                        logger.info("[SETTINGS_SCHEDULER] rescheduled job=%s cron=%s", job_id, cron)
+                    except Exception:
+                        logger.exception("[SETTINGS_SCHEDULER] failed to reschedule job=%s cron=%s", job_id, cron)
+
     scheduler.add_job(
-        reset_weekly_xp,
+        _guarded_job("xp_snapshot", reset_weekly_xp),
         trigger=CronTrigger(day_of_week="mon", hour=0, minute=0, timezone=KL_TZ),
         id="weekly_reset",
         name="Weekly XP Reset",
@@ -7488,7 +7618,7 @@ def run_worker():
         replace_existing=True,
     )
     scheduler.add_job(
-        affiliate_monthly_settle_scheduled,
+        _guarded_job("affiliate_monthly_settlement", affiliate_monthly_settle_scheduled),
         trigger=CronTrigger(day=1, hour=0, minute=10, timezone=KL_TZ),
         id="affiliate_monthly_settle",
         name="Affiliate Monthly Settle (Prev Month)",
@@ -7509,20 +7639,20 @@ def run_worker():
         replace_existing=True,
     )
     scheduler.add_job(
-        tick_5min,
+        _guarded_job("pending_referral_settlement", tick_5min),
         trigger=CronTrigger(minute="*/5", timezone=KL_TZ),
         id="tick_5min",
         name="Tick 5min (Settlement)",
         replace_existing=True,
     )
     scheduler.add_job(
-        process_verification_queue_scheduled,
+        _guarded_job("verification_queue", process_verification_queue_scheduled),
         trigger=CronTrigger(minute="*/2", timezone=KL_TZ),
         id="process_verification_queue",
         name="Process Verification Queue",
         replace_existing=True,
-        kwargs={"batch_limit": 50},
-    )    
+        kwargs={"batch_limit": None},
+    )
     scheduler.add_job(
         onboarding_due_tick,
         trigger=CronTrigger(minute="*/1", timezone=KL_TZ),
@@ -7531,7 +7661,7 @@ def run_worker():
         replace_existing=True,
     )
     scheduler.add_job(
-        process_welcome_voucher_lifecycle,
+        _guarded_job("welcome_reminder", process_welcome_voucher_lifecycle),
         trigger=CronTrigger(minute="*/30", timezone=KL_TZ),
         id="welcome_voucher_lifecycle",
         name="Welcome Voucher Lifecycle",
@@ -7539,7 +7669,7 @@ def run_worker():
         kwargs={"bot_send_fn": _send_welcome_reminder_via_bot},
     )
     scheduler.add_job(
-        process_welcome_reminders,
+        _guarded_job("welcome_reminder", process_welcome_reminders),
         trigger=CronTrigger(minute=0, timezone=KL_TZ),
         id="welcome_progress_reminders",
         name="Welcome Voucher Progress Reminders",
@@ -7547,7 +7677,7 @@ def run_worker():
         kwargs={"bot_send_fn": _send_welcome_reminder_via_bot},
     )
     scheduler.add_job(
-        lambda: evaluate_pending_journeys(db, membership_checker=check_official_channel_subscribed, now_ref=datetime.now(timezone.utc), batch_limit=300),
+        _guarded_job("reactivation_journey", lambda: evaluate_pending_journeys(db, membership_checker=check_official_channel_subscribed, now_ref=datetime.now(timezone.utc), batch_limit=int((get_app_setting("scheduler", "reactivation_journey") or {}).get("batch_size") or 300))),
         trigger=CronTrigger(minute="*/30", timezone=KL_TZ),
         id="reactivation_journey_evaluate",
         name="Reactivation Journey Evaluate",
@@ -7599,53 +7729,47 @@ def run_worker():
         replace_existing=True,
     )
 
-    if os.getenv("BOT_SEGMENT_SYNC_ENABLED", "1") == "1":
-        scheduler.add_job(
-            bot_segment_sheet_sync_scheduled,
-            trigger=CronTrigger(
-                day_of_week=os.getenv("BOT_SEGMENT_SYNC_DAY_OF_WEEK", "wed"),
-                hour=int(os.getenv("BOT_SEGMENT_SYNC_HOUR", "9")),
-                minute=int(os.getenv("BOT_SEGMENT_SYNC_MINUTE", "30")),
-                timezone=KL_TZ,
-            ),
-            id="bot_segment_sheet_sync",
-            name="Bot Segment Sheet Sync",
-            replace_existing=True,
-        )
+    # Always registered; "Enabled" + cron are live-controlled from Settings ->
+    # Scheduler so toggling/rescheduling this job never requires a redeploy.
+    scheduler.add_job(
+        _guarded_job("bot_segment_sheet_sync", bot_segment_sheet_sync_scheduled, default=os.getenv("BOT_SEGMENT_SYNC_ENABLED", "1") == "1"),
+        trigger=CronTrigger(
+            day_of_week=os.getenv("BOT_SEGMENT_SYNC_DAY_OF_WEEK", "wed"),
+            hour=int(os.getenv("BOT_SEGMENT_SYNC_HOUR", "9")),
+            minute=int(os.getenv("BOT_SEGMENT_SYNC_MINUTE", "30")),
+            timezone=KL_TZ,
+        ),
+        id="bot_segment_sheet_sync",
+        name="Bot Segment Sheet Sync",
+        replace_existing=True,
+    )
 
-    if GROWTH_LEADERBOARD_ENABLED:
+    def _guarded_growth_leaderboard():
         if not GROWTH_LEADERBOARD_CHANNEL_ID:
             logger.warning("[GROWTH_LEADERBOARD] enabled but missing GROWTH_LEADERBOARD_CHANNEL_ID")
-        else:
-            growth_tz = pytz.timezone(GROWTH_LEADERBOARD_TIMEZONE)
-            scheduler.add_job(
-                post_growth_leaderboard_weekly,
-                trigger=CronTrigger(
-                    day_of_week=GROWTH_LEADERBOARD_CRON_DAY.lower(),
-                    hour=GROWTH_LEADERBOARD_CRON_HOUR,
-                    minute=GROWTH_LEADERBOARD_CRON_MINUTE,
-                    timezone=growth_tz,
-                ),
-                id="growth_leaderboard_weekly",
-                name="Growth Leaderboard Weekly",
-                replace_existing=True,
-            )
-            job = scheduler.get_job("growth_leaderboard_weekly")
-            logger.info(
-                "[GROWTH_LEADERBOARD] scheduled enabled=1 day=%s hour=%s minute=%s timezone=%s next_run=%s",
-                GROWTH_LEADERBOARD_CRON_DAY,
-                GROWTH_LEADERBOARD_CRON_HOUR,
-                GROWTH_LEADERBOARD_CRON_MINUTE,
-                GROWTH_LEADERBOARD_TIMEZONE,
-                getattr(job, "next_run_time", None),
-            )
+            return None
+        return post_growth_leaderboard_weekly()
+
+    growth_tz = pytz.timezone(GROWTH_LEADERBOARD_TIMEZONE)
+    scheduler.add_job(
+        _guarded_job("growth_leaderboard_weekly", _guarded_growth_leaderboard, default=GROWTH_LEADERBOARD_ENABLED),
+        trigger=CronTrigger(
+            day_of_week=GROWTH_LEADERBOARD_CRON_DAY.lower(),
+            hour=GROWTH_LEADERBOARD_CRON_HOUR,
+            minute=GROWTH_LEADERBOARD_CRON_MINUTE,
+            timezone=growth_tz,
+        ),
+        id="growth_leaderboard_weekly",
+        name="Growth Leaderboard Weekly",
+        replace_existing=True,
+    )
     # Telegram member counts: refreshed only in the worker (where the bot loop
     # exists) and cached in admin_cache for the dashboard to read. First run is
     # delayed so app_bot.run_polling has started its loop; then on an interval.
-    tg_refresh_minutes = int(os.getenv("TELEGRAM_COUNT_REFRESH_MINUTES", "60"))
+    tg_refresh_minutes = int((get_app_setting("scheduler", "telegram_member_counts_refresh") or {}).get("interval_minutes") or os.getenv("TELEGRAM_COUNT_REFRESH_MINUTES", "60"))
     tg_first_run_at = datetime.now(timezone.utc) + timedelta(seconds=60)
     scheduler.add_job(
-        refresh_telegram_member_counts,
+        _guarded_job("telegram_member_counts_refresh", refresh_telegram_member_counts),
         trigger="interval",
         minutes=tg_refresh_minutes,
         next_run_time=tg_first_run_at,
@@ -7680,13 +7804,14 @@ def run_worker():
 
     def autoscale_web_for_drop() -> None:
         try:
-            autoscale_enabled = os.getenv("AUTOSCALE_ENABLED", "1")
+            autoscale_job_cfg = get_app_setting("scheduler", "autoscale_web_for_drop") or {}
+            autoscale_enabled = bool(autoscale_job_cfg.get("enabled", os.getenv("AUTOSCALE_ENABLED", "1") == "1"))
             autoscale_lead_minutes = int(os.getenv("AUTOSCALE_LEAD_MINUTES", "2"))
             autoscale_duration_minutes = int(os.getenv("AUTOSCALE_DURATION_MINUTES", "10"))
             autoscale_peak_web = int(os.getenv("AUTOSCALE_PEAK_WEB", "5"))
             autoscale_base_web = int(os.getenv("AUTOSCALE_BASE_WEB", "1"))
             fly_app_name = os.getenv("FLY_APP_NAME", "apreferralv1")
-            if autoscale_enabled != "1":
+            if not autoscale_enabled:
                 return
 
             now = datetime.now(timezone.utc)
@@ -7741,17 +7866,27 @@ def run_worker():
         except Exception:
             logger.exception("[AUTOSCALE] autoscale_web_for_drop failed")
 
-    autoscale_interval_seconds = int(os.getenv("AUTOSCALE_INTERVAL_SECONDS", "30"))
-    if os.getenv("AUTOSCALE_ENABLED", "1") == "1":
-        scheduler.add_job(
-            autoscale_web_for_drop,
-            trigger="interval",
-            seconds=autoscale_interval_seconds,
-            id="autoscale_web_for_drop",
-            replace_existing=True,
-            max_instances=1,
-            coalesce=True,
-        )
+    autoscale_interval_seconds = int((get_app_setting("scheduler", "autoscale_web_for_drop") or {}).get("interval_seconds") or os.getenv("AUTOSCALE_INTERVAL_SECONDS", "30"))
+    scheduler.add_job(
+        autoscale_web_for_drop,
+        trigger="interval",
+        seconds=autoscale_interval_seconds,
+        id="autoscale_web_for_drop",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
+
+    scheduler.add_job(
+        _sync_scheduler_cron_from_settings,
+        trigger="interval",
+        minutes=1,
+        id="settings_scheduler_sync",
+        name="Settings Scheduler Sync",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
 
     # 5) Background jobs on the bot's job_queue
     app_bot.job_queue.run_once(refresh_admin_ids, when=0)

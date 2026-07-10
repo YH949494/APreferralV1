@@ -1295,7 +1295,14 @@
           <div id="rb-result" style="margin-top:10px;font-size:12px;"></div>
         </div>
 
-        <div style="margin-bottom:16px;"><span class="tag heuristic" style="font-size:12px;padding:4px 12px;">READ ONLY — everything below this line</span></div>
+        <div class="section-title" style="margin-bottom:8px;">Managed Settings</div>
+        <div style="font-size:12px;color:var(--muted);margin-bottom:12px;">
+          Everything below is stored in MongoDB and editable without a redeploy. Untouched fields keep working exactly
+          as before (env-var / hardcoded defaults still apply until you save an override).
+        </div>
+        <div id="managed-settings-body"></div>
+
+        <div style="margin:20px 0 16px;"><span class="tag heuristic" style="font-size:12px;padding:4px 12px;">READ ONLY — everything below this line</span></div>
         <div id="settings-body"></div>
       </section>
     </main>

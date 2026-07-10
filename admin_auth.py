@@ -40,6 +40,18 @@ ADMIN_WEB_LOGIN_ENABLED = os.getenv("ADMIN_WEB_LOGIN_ENABLED", "1") == "1"
 ADMIN_SESSION_TTL_S = int(os.getenv("ADMIN_SESSION_TTL_S", "43200"))  # 12h
 ADMIN_LOGIN_MAX_AGE_S = int(os.getenv("ADMIN_LOGIN_MAX_AGE_S", "300"))
 
+
+def _admin_web_login_enabled() -> bool:
+    """Live-checked toggle, sourced from Settings -> Feature Flags -> Admin Web Login."""
+    try:
+        from settings_service import get_setting
+        value = get_setting("feature_flags", "admin_web_login")
+        if value is not None:
+            return bool(value)
+    except Exception:
+        pass
+    return ADMIN_WEB_LOGIN_ENABLED
+
 # Sessions signed with a guessable key are forgeable, so login stays disabled
 # until FLASK_SECRET_KEY is set to a real value.
 _WEAK_SECRETS = {None, "", "dev-secret"}
@@ -232,7 +244,7 @@ def admin_panel():
             send_from_directory(current_app.static_folder or "static", "admin-dashboard.html")
         )
         return _no_store(resp)
-    if not ADMIN_WEB_LOGIN_ENABLED:
+    if not _admin_web_login_enabled():
         return _login_page(notice="Admin web login is currently disabled.")
     if not _secret_ok():
         return _login_page(notice="Admin web login is not configured on the server.")
@@ -249,7 +261,7 @@ def telegram_login():
             return redirect(f"/admin?login_error={code}")
         return jsonify({"success": False, "code": code}), http_status
 
-    if not ADMIN_WEB_LOGIN_ENABLED or not _secret_ok():
+    if not _admin_web_login_enabled() or not _secret_ok():
         _audit("login_disabled", reason="disabled_or_weak_secret")
         return fail("disabled", 503)
 
