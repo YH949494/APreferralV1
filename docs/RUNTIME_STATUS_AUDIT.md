@@ -157,8 +157,8 @@ Flags · Validation panel.
 | tick_5min (Retention KPIs, Referral/XP Snapshot Settlement, Affiliate Snapshot) | */5min | `scheduler_locks["tick_5min"]` |
 | process_verification_queue | */2min | `scheduler_locks["verification_queue"]` |
 | onboarding_due_tick | */1min | none |
-| welcome_voucher_lifecycle | */30min | none (flag `welcome_reward`) |
-| welcome_progress_reminders | hourly | none (flag `welcome_journey`) |
+| welcome_voucher_lifecycle | */30min | `scheduler_locks["welcome_voucher_lifecycle"]` (flag `welcome_reward`) |
+| welcome_progress_reminders | hourly | `scheduler_locks["welcome_progress_reminders"]` (flag `welcome_journey`) |
 | reactivation_journey_evaluate | */30min | none (flag `reactivation`) |
 | drop_status_reconcile | */1min | none |
 | batch_release_tick | */1min | none |

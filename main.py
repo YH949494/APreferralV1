@@ -970,6 +970,22 @@ def process_verification_queue_scheduled(batch_limit: int | None = None) -> None
         time.time() - start_time,
     )
 
+
+def welcome_voucher_lifecycle_scheduled(**kwargs) -> None:
+    acquired, _lock_doc = acquire_scheduler_lock("welcome_voucher_lifecycle", ttl_seconds=1800)
+    if not acquired:
+        logger.info("[SCHEDULER][WELCOME_LIFECYCLE] lock_not_acquired")
+        return
+    process_welcome_voucher_lifecycle(**kwargs)
+
+
+def welcome_progress_reminders_scheduled(**kwargs) -> None:
+    acquired, _lock_doc = acquire_scheduler_lock("welcome_progress_reminders", ttl_seconds=3600)
+    if not acquired:
+        logger.info("[SCHEDULER][WELCOME_PROGRESS] lock_not_acquired")
+        return
+    process_welcome_reminders(**kwargs)
+
 # ----------------------------
 # MongoDB Setup
 # ----------------------------
@@ -7810,7 +7826,7 @@ def run_worker():
         replace_existing=True,
     )
     scheduler.add_job(
-        _guarded_job("welcome_reminder", process_welcome_voucher_lifecycle, feature_flag="welcome_reward"),
+        _guarded_job("welcome_reminder", welcome_voucher_lifecycle_scheduled, feature_flag="welcome_reward"),
         trigger=CronTrigger(minute="*/30", timezone=KL_TZ),
         id="welcome_voucher_lifecycle",
         name="Welcome Voucher Lifecycle",
@@ -7818,7 +7834,7 @@ def run_worker():
         kwargs={"bot_send_fn": _send_welcome_reminder_via_bot},
     )
     scheduler.add_job(
-        _guarded_job("welcome_reminder", process_welcome_reminders, feature_flag="welcome_journey"),
+        _guarded_job("welcome_reminder", welcome_progress_reminders_scheduled, feature_flag="welcome_journey"),
         trigger=CronTrigger(minute=0, timezone=KL_TZ),
         id="welcome_progress_reminders",
         name="Welcome Voucher Progress Reminders",
