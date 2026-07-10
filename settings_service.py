@@ -153,7 +153,7 @@ SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
             "official_channel_username": {"type": "str", "label": "Official Channel Username", "default": "advantplayofficial", "env": "OFFICIAL_CHANNEL_USERNAME"},
             "official_channel_id": {"type": "str", "label": "Official Channel ID", "default": "", "env": "OFFICIAL_CHANNEL_ID"},
             "main_group_id": {"type": "str", "label": "Main Group ID", "default": "-1002304653063", "env": "MAIN_GROUP_ID"},
-            "community_chat_id": {"type": "str", "label": "Community Chat ID", "default": "0", "env": "MYWIN_CHAT_ID"},
+            "community_chat_id": {"type": "str", "label": "#mywin Chat ID", "default": "0", "env": "MYWIN_CHAT_ID"},
             "miniapp_version": {"type": "str", "label": "MiniApp Version", "default": "", "env": "MINIAPP_VERSION"},
             "timezone": {"type": "str", "label": "Timezone", "default": "Asia/Kuala_Lumpur", "env": "SCHEDULER_CRON_TIMEZONE"},
         },
