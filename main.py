@@ -59,6 +59,7 @@ from vouchers import (
     welcome_eligibility,
     build_welcome_progress_response,
     get_rejoin_buffer_settings,
+    record_welcome_checkin_progress,
 )
 from admin_auth import admin_auth_bp, configure_admin_session
 from referral_rules import calc_referral_progress, REFERRAL_XP_PER_SUCCESS, REFERRAL_BONUS_INTERVAL, REFERRAL_BONUS_XP, build_public_referral_status
@@ -5296,6 +5297,11 @@ async def process_checkin(user_id, username, region, update=None):
     checkin_key = f"checkin:{today_kl.strftime('%Y%m%d')}"
     grant_xp(db, user_id, "checkin", checkin_key, base_xp + bonus_xp)
     record_first_checkin(int(user_id), ref=now_utc_ts)
+
+    try:
+        record_welcome_checkin_progress(int(user_id), now=now_utc_ts)
+    except Exception:
+        logger.exception("[WELCOME_PROGRESS] record_failed uid=%s", user_id)
 
     try:
         check_channel_subscribed(int(user_id))
