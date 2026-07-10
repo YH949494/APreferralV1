@@ -972,12 +972,32 @@ def process_verification_queue_scheduled(batch_limit: int | None = None) -> None
     )
 
 
+def _record_welcome_run_stats(job_name: str, stats: dict, duration_s: float, now: datetime) -> None:
+    """Persist the per-run stats dict onto the job's existing scheduler_locks
+    doc so the Welcome Journey Runtime dashboard has real numbers instead of
+    just a heartbeat timestamp. Purely additive observability — never read by
+    ``acquire_scheduler_lock`` and never touches reminder/voucher logic."""
+    try:
+        run_record = {"at": now, "duration_s": round(duration_s, 3), "stats": stats}
+        scheduler_locks_collection.update_one(
+            {"_id": job_name},
+            {
+                "$set": {"lastRunStats": stats, "lastRunAt": now, "lastRunDurationS": round(duration_s, 3)},
+                "$push": {"recentRuns": {"$each": [run_record], "$slice": -20}},
+            },
+        )
+    except Exception:
+        logger.exception("[WELCOME_RUNTIME] failed to persist run stats job=%s", job_name)
+
+
 def welcome_voucher_lifecycle_scheduled(**kwargs) -> None:
     acquired, _lock_doc = acquire_scheduler_lock("welcome_voucher_lifecycle", ttl_seconds=1800)
     if not acquired:
         logger.info("[SCHEDULER][WELCOME_LIFECYCLE] lock_not_acquired")
         return
-    process_welcome_voucher_lifecycle(**kwargs)
+    with JobTimer() as timer:
+        stats = process_welcome_voucher_lifecycle(**kwargs)
+    _record_welcome_run_stats("welcome_voucher_lifecycle", stats or {}, timer.elapsed_s, datetime.now(timezone.utc))
 
 
 def welcome_progress_reminders_scheduled(**kwargs) -> None:
@@ -985,7 +1005,9 @@ def welcome_progress_reminders_scheduled(**kwargs) -> None:
     if not acquired:
         logger.info("[SCHEDULER][WELCOME_PROGRESS] lock_not_acquired")
         return
-    process_welcome_reminders(**kwargs)
+    with JobTimer() as timer:
+        stats = process_welcome_reminders(**kwargs)
+    _record_welcome_run_stats("welcome_progress_reminders", stats or {}, timer.elapsed_s, datetime.now(timezone.utc))
 
 # ----------------------------
 # MongoDB Setup
@@ -4490,6 +4512,55 @@ def dashboard_welcome_journey():
             window=window,
         ),
     )
+
+
+@admin_bp.get("/api/admin/dashboard/welcome-journey-runtime")
+def dashboard_welcome_journey_runtime():
+    """Welcome Journey Runtime (observability only). Rolls up scheduler
+    health (reusing Runtime Status' scheduler-health builder), the latest
+    persisted reminder-run stats, recent runs, the existing Welcome Journey
+    funnel panel, and derived alerts. Read-only; never touches reminder
+    timing, eligibility, voucher rules, XP or scheduler behaviour."""
+    ok, err = require_admin_from_query()
+    if not ok:
+        msg, code = err
+        return jsonify({"success": False, "message": msg}), code
+    window = _panels._normalize_dashboard_window(request.args.get("window"))
+    now = _utc_now()
+
+    def _build():
+        collections = {
+            "scheduler_locks": scheduler_locks_collection,
+        }
+        scheduler_settings = settings_service.get_settings("scheduler")
+        feature_flags = settings_service.get_settings("feature_flags")
+        scheduler_rows = _runtime_status.build_scheduler_health(collections, scheduler_settings, feature_flags, now)
+        scheduler = _runtime_status.build_welcome_journey_scheduler(collections, scheduler_rows, now)
+        last_run = _runtime_status.build_welcome_journey_last_run(collections)
+        recent_runs = _runtime_status.build_welcome_journey_recent_runs(collections)
+
+        funnel_panel = _panels.build_welcome_journey_panel(
+            welcome_eligibility_col=welcome_eligibility_collection,
+            welcome_analytics_events_col=db["welcome_analytics_events"],
+            now=now,
+            window=window,
+        )
+        funnel_summary = funnel_panel.get("summary", {})
+
+        alerts = _runtime_status.build_welcome_journey_alerts(
+            now, scheduler=scheduler, last_run=last_run, funnel_summary=funnel_summary,
+        )
+
+        return {
+            "generated_at": now.isoformat(),
+            "scheduler": scheduler,
+            "last_run": last_run,
+            "recent_runs": recent_runs,
+            "funnel": funnel_panel,
+            "alerts": alerts,
+        }
+
+    return _panel_cached(f"panel:welcome_journey_runtime:{window}", _build)
 
 
 @admin_bp.get("/api/admin/dashboard/referrals")

@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="robots" content="noindex, nofollow" />
+  <title>APReferral · Welcome Journey Runtime</title>
+  <link rel="stylesheet" href="/static/admin-dashboard.css" />
+  <style>
+    .rs-status-pill {
+      display: inline-block;
+      padding: 3px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 600;
+      white-space: nowrap;
+      background: var(--panel-2);
+    }
+    .rs-note { font-size: 12px; color: var(--muted); }
+    .rs-summary-row {
+      display: flex;
+      gap: 16px;
+      flex-wrap: wrap;
+      margin-bottom: 20px;
+    }
+    .rs-summary-card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 14px 18px;
+      min-width: 150px;
+    }
+    .rs-summary-card .label {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.4px;
+      color: var(--muted);
+      margin-bottom: 6px;
+    }
+    .rs-summary-card .value { font-size: 20px; font-weight: 700; color: var(--text); }
+    .rs-summary-card .value.ok { color: #51cf66; }
+    .rs-summary-card .value.bad { color: #ff6b6b; }
+    .wj-alert {
+      border-radius: var(--radius);
+      padding: 10px 14px;
+      margin-bottom: 8px;
+      font-size: 13px;
+      border: 1px solid var(--border);
+    }
+    .wj-alert.critical { background: rgba(255, 107, 107, 0.12); border-color: #ff6b6b; }
+    .wj-alert.warning { background: rgba(255, 169, 77, 0.12); border-color: #ffa94d; }
+    .wj-funnel {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .wj-funnel-step {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 10px 16px;
+    }
+    .wj-funnel-step .name { flex: 1; font-weight: 600; }
+    .wj-funnel-step .count { font-size: 18px; font-weight: 700; }
+    .wj-funnel-step .conv { color: var(--muted); font-size: 12px; min-width: 80px; text-align: right; }
+    .wj-funnel-arrow { text-align: center; color: var(--muted); font-size: 12px; }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <nav class="sidebar">
+      <div class="brand">APReferral Admin</div>
+      <a href="/static/admin-dashboard.html" class="nav-item" style="text-decoration:none;">← Admin Dashboard</a>
+      <button class="nav-item active" data-section="alerts">Runtime Alerts</button>
+      <button class="nav-item" data-section="scheduler">Scheduler Health</button>
+      <button class="nav-item" data-section="lastrun">Reminder Processing (Latest Run)</button>
+      <button class="nav-item" data-section="funnel">Welcome Journey Funnel</button>
+      <button class="nav-item" data-section="recent">Recent Scheduler Runs</button>
+      <button class="nav-item" data-section="drilldown">Drill-down</button>
+    </nav>
+
+    <main class="main">
+      <div class="topbar">
+        <div>
+          <h1>Welcome Journey Runtime</h1>
+          <div class="note" id="dashboard-meta">Loading…</div>
+        </div>
+        <div class="right">
+          <span class="admin-chip" id="admin-chip"></span>
+          <button class="btn" id="refresh-btn">↻ Refresh</button>
+        </div>
+      </div>
+
+      <div id="global-banner"></div>
+
+      <!-- ==================================================
+           SECTION: Runtime Alerts
+      =================================================== -->
+      <div id="section-alerts" class="section">
+        <div class="section-header">
+          <div class="section-icon red">🚨</div>
+          <div class="section-title-lg">Runtime Alerts</div>
+        </div>
+        <div id="alerts-list"><div class="rs-note">Loading…</div></div>
+      </div>
+
+      <!-- ==================================================
+           SECTION: Scheduler Health
+      =================================================== -->
+      <div id="section-scheduler" class="section">
+        <div class="section-header">
+          <div class="section-icon orange">⏱️</div>
+          <div class="section-title-lg">Scheduler Health</div>
+        </div>
+        <div class="rs-summary-row" id="scheduler-summary"></div>
+      </div>
+
+      <!-- ==================================================
+           SECTION: Reminder Processing Statistics (Latest Run)
+      =================================================== -->
+      <div id="section-lastrun" class="section">
+        <div class="section-header">
+          <div class="section-icon green">📊</div>
+          <div class="section-title-lg">Reminder Processing Statistics — Latest Run</div>
+        </div>
+        <div class="note" id="lastrun-meta"></div>
+        <div class="rs-summary-row" id="lastrun-summary"></div>
+        <h3>Skipped Users Breakdown</h3>
+        <div class="rs-summary-row" id="skipped-summary"></div>
+      </div>
+
+      <!-- ==================================================
+           SECTION: Welcome Journey Funnel
+      =================================================== -->
+      <div id="section-funnel" class="section">
+        <div class="section-header">
+          <div class="section-icon blue">🔻</div>
+          <div class="section-title-lg">Welcome Journey Funnel</div>
+        </div>
+        <div class="note" id="funnel-meta"></div>
+        <div class="wj-funnel" id="funnel-list"></div>
+      </div>
+
+      <!-- ==================================================
+           SECTION: Recent Scheduler Runs
+      =================================================== -->
+      <div id="section-recent" class="section">
+        <div class="section-header">
+          <div class="section-icon orange">🕒</div>
+          <div class="section-title-lg">Recent Scheduler Runs (latest first, up to 20)</div>
+        </div>
+        <div style="overflow-x:auto;">
+          <table class="data-table" id="recent-table">
+            <thead>
+              <tr>
+                <th>Time</th><th>Users Scanned</th><th>20h Sent</th><th>28h Sent</th>
+                <th>Day3 Sent</th><th>Failed</th><th>Duration</th>
+              </tr>
+            </thead>
+            <tbody><tr><td colspan="7" class="loading">Loading…</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- ==================================================
+           SECTION: Drill-down
+      =================================================== -->
+      <div id="section-drilldown" class="section">
+        <div class="section-header">
+          <div class="section-icon blue">🔍</div>
+          <div class="section-title-lg">Drill-down</div>
+        </div>
+        <p class="rs-note">Latest scheduler run, reminder/failure breakdown and recent reminder events. Raw application logs are worker-process only and are not queryable from this web dashboard.</p>
+        <pre id="drilldown-json" style="background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);padding:14px;overflow:auto;font-size:12px;"></pre>
+      </div>
+
+    </main>
+  </div>
+  <script src="/static/welcome-journey-runtime.js"></script>
+</body>
+</html>
