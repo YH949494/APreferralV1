@@ -34,6 +34,16 @@ def _journey_setting(field: str, fallback):
         return fallback
 
 
+def _referral_setting(field: str, fallback):
+    if _get_setting is None:
+        return fallback
+    try:
+        value = _get_setting("referral_config", field)
+        return value if value is not None else fallback
+    except Exception:
+        return fallback
+
+
 WELCOME_REMINDER_AFTER_HOURS = int(os.getenv("WELCOME_REMINDER_AFTER_HOURS", "12"))
 WELCOME_FINAL_WARNING_HOURS = int(os.getenv("WELCOME_FINAL_WARNING_HOURS", "36"))
 WELCOME_EXPIRY_HOURS = int(os.getenv("WELCOME_EXPIRY_HOURS", "48"))
@@ -368,6 +378,10 @@ except (TypeError, ValueError):
     OFFICIAL_CHANNEL_ID = -1002396761021
 API_BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"
 REFERRAL_HOLD_HOURS = int(os.getenv("REFERRAL_QUALIFY_HOURS", "48"))
+
+
+def _referral_hold_hours() -> int:
+    return int(_referral_setting("qualify_hold_hours", REFERRAL_HOLD_HOURS))
 
 AFFILIATE_CONGRATS_CHANNEL_ID = int(os.getenv("AFFILIATE_CONGRATS_CHANNEL_ID", "-1003820861717"))
 REFERRAL_CONGRATS_TIERS = [
@@ -1877,7 +1891,7 @@ def _maybe_send_referral_qualified_dm(
 
 def settle_pending_referrals(batch_limit: int = 200) -> None:
     now_utc_ts = now_utc()
-    cutoff = now_utc_ts - timedelta(hours=REFERRAL_HOLD_HOURS)
+    cutoff = now_utc_ts - timedelta(hours=_referral_hold_hours())
     recovered = _recover_stale_processing(now_utc_ts)
     if recovered:
         logger.info("[SCHED][REFERRAL] recovered_stale_processing=%s", recovered)
@@ -2212,7 +2226,7 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
                 "[SCHED][REFERRAL] awarded inviter=%s invitee=%s qualify_hours=%s checks=official_channel+engagement_score",
                 inviter_user_id,
                 invitee_user_id,
-                REFERRAL_HOLD_HOURS,
+                _referral_hold_hours(),
             )
             logger.info(
                 "[SCHED][REFERRAL] award_ok inviter=%s invitee=%s ref_total=%s xp_added=%s bonus_added=%s hold_hours=%s users_counter_update_attempted=%s",
@@ -2221,7 +2235,7 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
                 ref_total,
                 actual_xp_added,
                 actual_bonus_added,
-                REFERRAL_HOLD_HOURS,
+                _referral_hold_hours(),
                 False,
             )
         except Exception as exc:

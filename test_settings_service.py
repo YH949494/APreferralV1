@@ -8,6 +8,7 @@ import settings_service as svc
 class _FakeCollection:
     def __init__(self):
         self.docs = {}
+        self.inserted = []
 
     def find_one(self, filt):
         return self.docs.get(filt.get("_id"))
@@ -17,6 +18,9 @@ class _FakeCollection:
         doc = self.docs.get(_id, {"_id": _id})
         doc.update(update.get("$set", {}))
         self.docs[_id] = doc
+
+    def insert_one(self, doc):
+        self.inserted.append(doc)
 
 
 class _FakeDb(dict):
@@ -88,6 +92,34 @@ class SettingsServiceTests(unittest.TestCase):
     def test_unknown_group_raises(self):
         with self.assertRaises(KeyError):
             svc.get_settings("not_a_group", db_ref=self.db)
+
+    def test_requirements_group_default(self):
+        settings = svc.get_settings("requirements", db_ref=self.db)
+        self.assertEqual(settings["welcome_reward_checkins_required"], 3)
+
+    def test_update_writes_audit_log_with_old_and_new_values(self):
+        svc.update_settings(
+            "requirements", {"welcome_reward_checkins_required": 5},
+            updated_by="admin1", db_ref=self.db,
+        )
+        entries = self.db[svc.AUDIT_COLLECTION_NAME].inserted
+        self.assertEqual(len(entries), 1)
+        entry = entries[0]
+        self.assertEqual(entry["group"], "requirements")
+        self.assertEqual(entry["admin"], "admin1")
+        self.assertEqual(
+            entry["changes"]["welcome_reward_checkins_required"],
+            {"old": 3, "new": 5},
+        )
+        self.assertIn("created_at", entry)
+
+    def test_update_with_no_actual_change_skips_audit_log(self):
+        svc.update_settings(
+            "requirements", {"welcome_reward_checkins_required": 3},
+            updated_by="admin1", db_ref=self.db,
+        )
+        entries = self.db[svc.AUDIT_COLLECTION_NAME].inserted
+        self.assertEqual(len(entries), 0)
 
 
 if __name__ == "__main__":

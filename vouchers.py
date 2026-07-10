@@ -210,7 +210,7 @@ WELCOME_WINDOW_HOURS = int(getattr(_cfg, "WELCOME_WINDOW_HOURS", os.getenv("WELC
 WELCOME_WINDOW_DAYS = 7
 WELCOME_UNCLAIMED_WINDOW_DAYS = int(getattr(_cfg, "WELCOME_UNCLAIMED_WINDOW_DAYS", os.getenv("WELCOME_UNCLAIMED_WINDOW_DAYS", "7")))
 WELCOME_CLAIMED_VISIBLE_DAYS = int(getattr(_cfg, "WELCOME_CLAIMED_VISIBLE_DAYS", os.getenv("WELCOME_CLAIMED_VISIBLE_DAYS", "3")))
-WELCOME_REWARD_CHECKINS_REQUIRED = 3
+WELCOME_REWARD_CHECKINS_REQUIRED = 3  # fallback default; live value read via _checkins_required()
 PROFILE_PHOTO_CACHE_TTL_SECONDS = 60
 try:
     from settings_service import get_setting as _get_setting
@@ -228,6 +228,22 @@ def _abuse_setting(field: str, fallback):
         return value if value is not None else fallback
     except Exception:
         return fallback
+
+
+def _requirements_setting(field: str, fallback):
+    """Live-read a requirements setting from the settings service, falling
+    back to the pre-existing hardcoded default if unavailable."""
+    if _get_setting is None:
+        return fallback
+    try:
+        value = _get_setting("requirements", field)
+        return value if value is not None else fallback
+    except Exception:
+        return fallback
+
+
+def _checkins_required():
+    return int(_requirements_setting("welcome_reward_checkins_required", WELCOME_REWARD_CHECKINS_REQUIRED))
 
 
 def _verify_setting(field: str, fallback):
@@ -913,7 +929,7 @@ def _empty_welcome_progress(*, eligible=False, expired=False, hide=True, reason=
         "hide": bool(hide),
         "channel_joined": False,
         "checkins_completed": 0,
-        "checkins_required": WELCOME_REWARD_CHECKINS_REQUIRED,
+        "checkins_required": _checkins_required(),
         "eligible_until": None,
         "days_remaining": 0,
     }
@@ -949,13 +965,13 @@ def _count_welcome_checkin_days(uid: int, joined_main_at: datetime, eligible_unt
                 )
                 for event in cursor:
                     add_day(event.get("created_at"))
-                    if len(days) >= WELCOME_REWARD_CHECKINS_REQUIRED:
+                    if len(days) >= _checkins_required():
                         return len(days)
             except Exception:
                 _welcome_progress_log(
                     "[WELCOME_V2][PROGRESS]",
                     uid,
-                    {"checkins_completed": len(days), "checkins_required": WELCOME_REWARD_CHECKINS_REQUIRED},
+                    {"checkins_completed": len(days), "checkins_required": _checkins_required()},
                     f"{collection_name}_{field}_count_failed",
                 )
 
@@ -992,16 +1008,16 @@ def get_welcome_reward_progress(uid, now=None) -> dict:
 
     allowed, reason, _ticket = welcome_eligibility(uid, ref=now_ref)
     eligible = bool(allowed)
-    unlocked = bool(eligible and channel_joined and checkins_completed >= WELCOME_REWARD_CHECKINS_REQUIRED)
-    hide = bool((expired and checkins_completed < WELCOME_REWARD_CHECKINS_REQUIRED) or (not eligible and reason != "ticket_claimed"))
+    unlocked = bool(eligible and channel_joined and checkins_completed >= _checkins_required())
+    hide = bool((expired and checkins_completed < _checkins_required()) or (not eligible and reason != "ticket_claimed"))
     progress = {
         "eligible": eligible,
         "unlocked": unlocked,
         "expired": expired,
         "hide": hide,
         "channel_joined": bool(channel_joined),
-        "checkins_completed": min(int(checkins_completed), WELCOME_REWARD_CHECKINS_REQUIRED),
-        "checkins_required": WELCOME_REWARD_CHECKINS_REQUIRED,
+        "checkins_completed": min(int(checkins_completed), _checkins_required()),
+        "checkins_required": _checkins_required(),
         "eligible_until": eligible_until.isoformat() if eligible_until else None,
         "days_remaining": days_remaining,
         "eligibility_reason": reason,
@@ -1014,7 +1030,7 @@ def get_welcome_reward_progress(uid, now=None) -> dict:
 
 def _welcome_progress_pct(completed_days: int) -> int:
     pct_by_days = {0: 0, 1: 33, 2: 67, 3: 100}
-    safe_days = max(0, min(int(completed_days or 0), WELCOME_REWARD_CHECKINS_REQUIRED))
+    safe_days = max(0, min(int(completed_days or 0), _checkins_required()))
     return pct_by_days.get(safe_days, 100)
 
 
@@ -1077,7 +1093,7 @@ def get_welcome_progress(user_id, now: datetime | None = None) -> dict:
             "claimed": False,
             "expired": False,
             "completed": 0,
-            "required": WELCOME_REWARD_CHECKINS_REQUIRED,
+            "required": _checkins_required(),
             "progress_pct": 0,
             "next_required_day": 1,
             "next_checkin_at": None,
@@ -1088,7 +1104,7 @@ def get_welcome_progress(user_id, now: datetime | None = None) -> dict:
     now_ref = _as_aware_kl(now) or now_kl()
     progress = get_welcome_reward_progress(uid, now=now_ref)
     completed = int(progress.get("checkins_completed") or 0)
-    required = int(progress.get("checkins_required") or WELCOME_REWARD_CHECKINS_REQUIRED)
+    required = int(progress.get("checkins_required") or _checkins_required())
     reason = str(progress.get("eligibility_reason") or "").lower()
     claimed = "claimed" in reason
 
@@ -1341,8 +1357,8 @@ def build_welcome_progress_response(user_id: int, *, now: datetime | None = None
     now_ref = _as_aware_kl(now) or now_kl()
     progress = get_welcome_reward_progress(user_id, now=now_ref)
     user_doc = users_collection.find_one({"user_id": user_id}, {"region": 1, "status": 1})
-    completed_days = max(0, min(int(progress.get("checkins_completed") or 0), WELCOME_REWARD_CHECKINS_REQUIRED))
-    required_days = WELCOME_REWARD_CHECKINS_REQUIRED
+    completed_days = max(0, min(int(progress.get("checkins_completed") or 0), _checkins_required()))
+    required_days = _checkins_required()
     remaining_days = max(0, required_days - completed_days)
     eligible_until = progress.get("eligible_until")
     status = "in_progress"
@@ -5076,8 +5092,10 @@ def api_visible():
     - Normal users: only ACTIVE drops they’re eligible to see
     Always returns JSON (401/200/500).
     """
+    if _get_setting and _get_setting("feature_flags", "voucher_drops") is False:
+        return jsonify({"status": "disabled", "drops": []}), 200
     ref = now_utc()
-    user_id = None 
+    user_id = None
     try:
         init_data = extract_raw_init_data_from_query(request)
 

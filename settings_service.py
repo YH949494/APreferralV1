@@ -217,6 +217,13 @@ SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
             "reactivation_reminder": {"type": "str", "label": "Reactivation Reminder", "default": "🎁 Welcome back! Your Comeback Voucher is ready.", "env": None, "multiline": True},
         },
     },
+    "requirements": {
+        "label": "Requirements",
+        "description": "Eligibility requirements gating claims and rewards.",
+        "fields": {
+            "welcome_reward_checkins_required": {"type": "int", "label": "Welcome Reward Check-ins Required", "default": 3, "env": None, "min": 1, "max": 30},
+        },
+    },
     "urls": {
         "label": "Copy / URLs",
         "description": "Editable links referenced by bot copy and the Mini App.",
@@ -375,12 +382,35 @@ def _validate_field(group: str, name: str, field_def: dict, value: Any) -> tuple
     return value, None
 
 
+AUDIT_COLLECTION_NAME = "app_settings_audit"
+
+
+def _write_audit_log(group: str, changed: dict, *, updated_by: str | None, db_ref=None) -> None:
+    """Best-effort audit trail entry: who changed what, from what, to what, when.
+
+    ``changed`` maps field name -> {"old": ..., "new": ...} for fields whose
+    value actually changed. Never raises — audit logging must not block a save.
+    """
+    if not changed:
+        return
+    try:
+        (db_ref if db_ref is not None else db)[AUDIT_COLLECTION_NAME].insert_one({
+            "group": group,
+            "admin": updated_by,
+            "changes": changed,
+            "created_at": now_utc(),
+        })
+    except Exception:
+        logger.exception("[SETTINGS] failed to write audit log for group=%s", group)
+
+
 def update_settings(group: str, updates: dict, *, updated_by: str | None = None, db_ref=None) -> dict:
     """Validate and persist a partial update for a settings group."""
     if group not in SETTINGS_SCHEMA:
         return {"success": False, "reason": "unknown_group"}
 
     schema = SETTINGS_SCHEMA[group]
+    before = get_settings(group, db_ref=db_ref, force_refresh=True)
     changes = {}
     for name, value in (updates or {}).items():
         field_def = schema["fields"].get(name)
@@ -394,10 +424,17 @@ def update_settings(group: str, updates: dict, *, updated_by: str | None = None,
     if not changes:
         return {"success": True, "settings": get_settings(group, db_ref=db_ref)}
 
+    changed_fields = {
+        name: {"old": before.get(name), "new": value}
+        for name, value in changes.items()
+        if before.get(name) != value
+    }
+
     doc_updates = {f"{k}": v for k, v in changes.items()}
     doc_updates["updated_at"] = now_utc()
     doc_updates["updated_by"] = updated_by
     _col(db_ref).update_one({"_id": group}, {"$set": doc_updates}, upsert=True)
+    _write_audit_log(group, changed_fields, updated_by=updated_by, db_ref=db_ref)
     invalidate_cache(group)
     return {"success": True, "settings": get_settings(group, db_ref=db_ref, force_refresh=True)}
 

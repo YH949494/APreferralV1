@@ -1012,6 +1012,14 @@ REFERRAL_HOLD_HOURS = int(os.getenv("REFERRAL_QUALIFY_HOURS", os.getenv("REFERRA
 REFERRAL_HOURLY_LIMIT = int(os.getenv("REFERRAL_HOURLY_LIMIT", "20"))
 REFERRAL_DAILY_LIMIT = int(os.getenv("REFERRAL_DAILY_LIMIT", "200"))
 
+
+def _referral_hold_hours() -> int:
+    try:
+        value = get_app_setting("referral_config", "qualify_hold_hours")
+        return int(value) if value is not None else REFERRAL_HOLD_HOURS
+    except Exception:
+        return REFERRAL_HOLD_HOURS
+
 REFERRAL_INCREMENT_GUARD_FIELDS = {
     "weekly_referrals",
     "monthly_referrals",
@@ -1742,7 +1750,7 @@ def _confirm_referral_on_main_join(
                 referrer_id,
                 invitee_user_id,
                 invite_link_log,
-                REFERRAL_HOLD_HOURS,
+                _referral_hold_hours(),
             )
             _maybe_send_referral_join_ack_dm(
                 int(referrer_id),
@@ -4572,6 +4580,33 @@ def admin_settings_update(group: str):
     return jsonify(result)
 
 
+@admin_bp.get("/api/admin/settings/audit-log")
+def admin_settings_audit_log():
+    """Recent settings change history: admin, group, changed fields, old/new
+    values, timestamp. Read-only."""
+    ok, err = require_admin_from_query()
+    if not ok:
+        msg, code = err
+        return jsonify({"success": False, "message": msg}), code
+    group = request.args.get("group")
+    try:
+        limit = min(int(request.args.get("limit", 50)), 200)
+    except (TypeError, ValueError):
+        limit = 50
+    query = {"group": group} if group else {}
+    entries = list(
+        db[settings_service.AUDIT_COLLECTION_NAME]
+        .find(query)
+        .sort("created_at", -1)
+        .limit(limit)
+    )
+    for entry in entries:
+        entry["_id"] = str(entry["_id"])
+        if entry.get("created_at"):
+            entry["created_at"] = entry["created_at"].isoformat()
+    return jsonify({"success": True, "entries": entries})
+
+
 @admin_bp.get("/api/admin/dashboard/segment-probability-config")
 def dashboard_segment_probability_config():
     """Read-only panel: segment probability configuration.
@@ -4993,7 +5028,7 @@ def _build_referral_status_payload(user_id: int, now_utc: datetime):
         age_hours = 0
         if created_at is not None:
             age_hours = max(0, int((now_utc - created_at).total_seconds() // 3600))
-        remaining_hold_hours = max(0, REFERRAL_HOLD_HOURS - age_hours) if status == "pending" else 0
+        remaining_hold_hours = max(0, _referral_hold_hours() - age_hours) if status == "pending" else 0
         public_status = build_public_referral_status({"status": status, "revoked_reason": row.get("revoked_reason")}, logger=logger)
         label = build_public_referral_user_label(row)
         referrals.append(
@@ -5020,7 +5055,7 @@ def _build_referral_status_payload(user_id: int, now_utc: datetime):
     stats = resolved.get("stats") or {}
     total_referrals = int(stats.get("total_referrals", 0))
     progress = calc_referral_progress(total_referrals, milestone_size=REFERRAL_BONUS_INTERVAL)
-    payload = {"ok": True, "hold_hours": REFERRAL_HOLD_HOURS, "referrals": referrals}
+    payload = {"ok": True, "hold_hours": _referral_hold_hours(), "referrals": referrals}
     payload.update(
         {
             "total_referrals": total_referrals,
@@ -5288,6 +5323,8 @@ def api_daily_game():
 @app.route("/api/set-region/<int:user_id>", methods=["POST"])
 def api_set_region(user_id):
     """Set region only if not already set"""
+    if get_app_setting("feature_flags", "region_selection") is False:
+        return jsonify({"success": False, "error": "feature_disabled"}), 200
     data = request.json
     region = data.get("region")
 
@@ -5478,6 +5515,8 @@ def _affiliate_user_identity_map(user_ids: list[int]) -> dict[str, dict]:
 @app.route("/api/leaderboard")
 def get_leaderboard():
     try:
+        if get_app_setting("feature_flags", "leaderboard") is False:
+            return jsonify({"leaderboard": {"checkin": [], "referral": []}, "disabled": True})
         raw_user_id = request.args.get("user_id")
         try:
             current_user_id = int(raw_user_id) if raw_user_id not in (None, "", "undefined") else 0
@@ -5732,6 +5771,8 @@ def api_share_rank_caption():
 
 @app.route("/api/affiliate/leaderboard", methods=["GET"])
 def get_affiliate_leaderboard_week():
+    if get_app_setting("feature_flags", "affiliate") is False:
+        return jsonify({"success": False, "error": "feature_disabled"}), 200
     window = (request.args.get("window") or "week").strip().lower()
     if window != "week":
         return jsonify({"success": False, "error": "unsupported_window"}), 400
@@ -7553,12 +7594,19 @@ def run_worker():
             logger.exception("[SETTINGS_SCHEDULER] failed to read enabled flag for job_key=%s", job_key)
         return default
 
-    def _guarded_job(job_key: str, fn, *, default: bool = True):
+    def _guarded_job(job_key: str, fn, *, default: bool = True, feature_flag: str | None = None):
         """Wrap a scheduler job callable so it no-ops when disabled from Settings,
-        without needing to unregister/re-register the underlying APScheduler job."""
+        without needing to unregister/re-register the underlying APScheduler job.
+
+        If ``feature_flag`` is given, the job also no-ops when that
+        feature_flags.<flag> setting is off (in addition to its own
+        scheduler.<job_key>.enabled toggle)."""
         def _wrapped(*args, **kwargs):
             if not _scheduler_job_enabled(job_key, default):
                 logger.info("[SETTINGS_SCHEDULER] skip job_key=%s reason=disabled", job_key)
+                return None
+            if feature_flag and get_app_setting("feature_flags", feature_flag) is False:
+                logger.info("[SETTINGS_SCHEDULER] skip job_key=%s reason=feature_flag_off flag=%s", job_key, feature_flag)
                 return None
             return fn(*args, **kwargs)
         _wrapped.__name__ = getattr(fn, "__name__", job_key)
@@ -7661,7 +7709,7 @@ def run_worker():
         replace_existing=True,
     )
     scheduler.add_job(
-        _guarded_job("welcome_reminder", process_welcome_voucher_lifecycle),
+        _guarded_job("welcome_reminder", process_welcome_voucher_lifecycle, feature_flag="welcome_reward"),
         trigger=CronTrigger(minute="*/30", timezone=KL_TZ),
         id="welcome_voucher_lifecycle",
         name="Welcome Voucher Lifecycle",
@@ -7669,7 +7717,7 @@ def run_worker():
         kwargs={"bot_send_fn": _send_welcome_reminder_via_bot},
     )
     scheduler.add_job(
-        _guarded_job("welcome_reminder", process_welcome_reminders),
+        _guarded_job("welcome_reminder", process_welcome_reminders, feature_flag="welcome_journey"),
         trigger=CronTrigger(minute=0, timezone=KL_TZ),
         id="welcome_progress_reminders",
         name="Welcome Voucher Progress Reminders",
@@ -7677,7 +7725,7 @@ def run_worker():
         kwargs={"bot_send_fn": _send_welcome_reminder_via_bot},
     )
     scheduler.add_job(
-        _guarded_job("reactivation_journey", lambda: evaluate_pending_journeys(db, membership_checker=check_official_channel_subscribed, now_ref=datetime.now(timezone.utc), batch_limit=int((get_app_setting("scheduler", "reactivation_journey") or {}).get("batch_size") or 300))),
+        _guarded_job("reactivation_journey", lambda: evaluate_pending_journeys(db, membership_checker=check_official_channel_subscribed, now_ref=datetime.now(timezone.utc), batch_limit=int((get_app_setting("scheduler", "reactivation_journey") or {}).get("batch_size") or 300)), feature_flag="reactivation"),
         trigger=CronTrigger(minute="*/30", timezone=KL_TZ),
         id="reactivation_journey_evaluate",
         name="Reactivation Journey Evaluate",
@@ -7752,7 +7800,7 @@ def run_worker():
 
     growth_tz = pytz.timezone(GROWTH_LEADERBOARD_TIMEZONE)
     scheduler.add_job(
-        _guarded_job("growth_leaderboard_weekly", _guarded_growth_leaderboard, default=GROWTH_LEADERBOARD_ENABLED),
+        _guarded_job("growth_leaderboard_weekly", _guarded_growth_leaderboard, default=GROWTH_LEADERBOARD_ENABLED, feature_flag="growth_leaderboard"),
         trigger=CronTrigger(
             day_of_week=GROWTH_LEADERBOARD_CRON_DAY.lower(),
             hour=GROWTH_LEADERBOARD_CRON_HOUR,
