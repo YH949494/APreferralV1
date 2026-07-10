@@ -16,6 +16,7 @@ from telegram.request import HTTPXRequest
 from datetime import datetime, timedelta, timezone
 from werkzeug.exceptions import HTTPException
 from urllib.parse import urlencode
+from typing import Any
 
 from config import (
     KL_TZ,
@@ -3498,7 +3499,7 @@ def dashboard_runtime_status():
             now,
             mongo_ping=_runtime_status_mongo_ping,
             telegram_get_me=_runtime_status_telegram_ping,
-            deployment_version=getattr(_cfg, "MINIAPP_VERSION", None),
+            deployment_version=MINIAPP_VERSION,
             git_commit=_runtime_status_git_commit(),
         )
         feature_rows = _runtime_status.build_feature_overview(
