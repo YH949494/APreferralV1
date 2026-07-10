@@ -461,8 +461,7 @@
   // shown (e.g. "No active campaigns" shown on Overview, but the create
   // wizard lives under Create Campaign) — navigate there first, then click.
   window.goToViewAndClick = function (view, btnId) {
-    var navBtn = document.querySelector('.nav-item[data-view="' + view + '"]');
-    if (navBtn) navBtn.click();
+    switchView(view);
     setTimeout(function () {
       var b = document.getElementById(btnId);
       if (b) b.click();
@@ -4846,16 +4845,280 @@
     });
   }
 
-  var VIEWS =["summary", "funnel", "abuse", "campaignBuilder", "campaignPerformance", "campaignIntelligence", "activeCampaigns", "draftCampaigns", "compiledDrops", "campaigns", "vouchers", "drops", "referrals", "affiliate", "affiliatePools", "affiliatePending", "reactivation", "audit", "segmentProbabilityConfig", "segmentRoi", "segments", "validation", "backendSegmentEngine", "voucherHunterAudit", "unclassifiedAudit", "segmentRuleSimulator", "voucherHunterQuality", "voucherHunterFalsePositive", "voucherHunterRuleSimulator", "vhPriorityImpact", "uploadPlayerPerformance", "uploadHistory", "rawExplorer", "users", "joinRequests", "xpAdjust", "settings"];
+  var VIEWS =["summary", "moduleOverview", "placeholder", "funnel", "abuse", "campaignBuilder", "campaignPerformance", "campaignIntelligence", "activeCampaigns", "draftCampaigns", "compiledDrops", "campaigns", "vouchers", "drops", "referrals", "affiliate", "affiliatePools", "affiliatePending", "reactivation", "audit", "segmentProbabilityConfig", "segmentRoi", "segments", "validation", "backendSegmentEngine", "voucherHunterAudit", "unclassifiedAudit", "segmentRuleSimulator", "voucherHunterQuality", "voucherHunterFalsePositive", "voucherHunterRuleSimulator", "vhPriorityImpact", "uploadPlayerPerformance", "uploadHistory", "rawExplorer", "users", "joinRequests", "xpAdjust", "settings"];
+
+  // ---------------------------------------------------------------------
+  // Information architecture: sidebar Business Modules, each with its own
+  // row of top tabs. Every tab points at an existing "view" id (unchanged
+  // DOM section + loader function) so no JS logic below this config needs
+  // to change. `live: true` marks a tab that mutates production data.
+  // `overviewKey` selects which existing summary card-grid (if any) the
+  // generic Module Overview clones into its KPI row.
+  // ---------------------------------------------------------------------
+  var MODULES = [
+    { key: "dashboard", icon: "🏠", label: "Dashboard", tabs: [
+      { label: "Overview", view: "summary" },
+      { label: "Live Activity", view: "audit" },
+      { label: "Alerts", view: "abuse" },
+      { label: "System Health", external: "/static/runtime-status.html" }
+    ]},
+    { key: "campaign", icon: "🎯", label: "Campaign Centre", tabs: [
+      { label: "Overview", view: "moduleOverview", overviewKey: "campaign" },
+      { label: "Running", view: "activeCampaigns" },
+      { label: "Scheduled", view: "campaigns" },
+      { label: "Drafts", view: "draftCampaigns" },
+      { label: "Templates", view: "campaignBuilder", live: true },
+      { label: "Performance", view: "campaignPerformance" },
+      { label: "Intelligence", view: "campaignIntelligence" }
+    ]},
+    { key: "voucher", icon: "🎟", label: "Voucher Centre", tabs: [
+      { label: "Overview", view: "moduleOverview", overviewKey: "voucher" },
+      { label: "Active Drops", view: "drops", live: true },
+      { label: "Voucher Pools", view: "compiledDrops" },
+      { label: "Voucher Codes", view: "vouchers" },
+      { label: "Settings", view: "settings" }
+    ]},
+    { key: "community", icon: "👥", label: "Community Centre", tabs: [
+      { label: "Overview", view: "moduleOverview", overviewKey: "community" },
+      { label: "Members", view: "placeholder", ph: { title: "Members", desc: "Community member directory is not yet wired to an admin data source." } },
+      { label: "Growth", view: "placeholder", ph: { title: "Growth", desc: "Join / leave growth analytics is not yet wired to an admin data source." } },
+      { label: "Check-in", view: "placeholder", ph: { title: "Check-in", desc: "Check-in operations are not yet wired to an admin data source." } },
+      { label: "Engagement", view: "placeholder", ph: { title: "Engagement", desc: "Engagement analytics is not yet wired to an admin data source." } },
+      { label: "Leaderboard", external: "/static/index.html#admin-panel" },
+      { label: "Broadcast", view: "placeholder", ph: { title: "Broadcast", desc: "Broadcast tools are not yet wired to an admin data source." } }
+    ]},
+    { key: "affiliate", icon: "🤝", label: "Affiliate Centre", tabs: [
+      { label: "Overview", view: "affiliate" },
+      { label: "Pending Approval", view: "affiliatePending", live: true },
+      { label: "Voucher Pools", view: "affiliatePools", live: true },
+      { label: "Rewards", view: "placeholder", ph: { title: "Rewards", desc: "Affiliate reward ledger is not yet wired to an admin data source." } },
+      { label: "Payouts", view: "placeholder", ph: { title: "Payouts", desc: "Payout batches are not yet wired to an admin data source." } },
+      { label: "Analytics", view: "placeholder", ph: { title: "Analytics", desc: "Affiliate analytics is not yet wired to an admin data source." } }
+    ]},
+    { key: "referral", icon: "🔗", label: "Referral Centre", tabs: [
+      { label: "Overview", view: "moduleOverview", overviewKey: "referral" },
+      { label: "Performance", view: "referrals" },
+      { label: "Pending", view: "placeholder", ph: { title: "Pending", desc: "Pending referral qualification queue is not yet wired to an admin data source." } },
+      { label: "Rewards", view: "placeholder", ph: { title: "Rewards", desc: "Referral reward ledger is not yet wired to an admin data source." } },
+      { label: "Leaderboard", view: "placeholder", ph: { title: "Leaderboard", desc: "Referral leaderboard is not yet wired to an admin data source." } },
+      { label: "Analytics", view: "placeholder", ph: { title: "Analytics", desc: "Referral analytics is not yet wired to an admin data source." } }
+    ]},
+    { key: "welcome", icon: "🎁", label: "Welcome Journey", tabs: [
+      { label: "Overview", view: "moduleOverview", overviewKey: "welcome" },
+      { label: "Journey", external: "/static/welcome-journey-runtime.html" },
+      { label: "Rewards", view: "placeholder", ph: { title: "Rewards", desc: "Welcome reward ledger is not yet wired to an admin data source." } },
+      { label: "Funnel", view: "funnel" },
+      { label: "Drop-off", view: "placeholder", ph: { title: "Drop-off", desc: "Drop-off analysis is not yet wired to an admin data source." } },
+      { label: "Analytics", view: "placeholder", ph: { title: "Analytics", desc: "Welcome journey analytics is not yet wired to an admin data source." } }
+    ]},
+    { key: "reactivation", icon: "🔄", label: "Reactivation Centre", tabs: [
+      { label: "Overview", view: "moduleOverview", overviewKey: "reactivation" },
+      { label: "Campaigns", view: "reactivation", live: true },
+      { label: "Eligible Users", view: "placeholder", ph: { title: "Eligible Users", desc: "Eligible-user queue is not yet wired to an admin data source." } },
+      { label: "Queue", view: "placeholder", ph: { title: "Queue", desc: "Reactivation send queue is not yet wired to an admin data source." } },
+      { label: "Rewards", view: "placeholder", ph: { title: "Rewards", desc: "Reactivation reward ledger is not yet wired to an admin data source." } },
+      { label: "Performance", view: "placeholder", ph: { title: "Performance", desc: "Reactivation performance analytics is not yet wired to an admin data source." } }
+    ]},
+    { key: "segments", icon: "👤", label: "Segments", tabs: [
+      { label: "Overview", view: "segments" },
+      { label: "All Players", view: "users" },
+      { label: "High Value", view: "placeholder", ph: { title: "High Value", desc: "Per-segment drilldown is not yet wired to an admin data source — see Overview for distribution." } },
+      { label: "Low Value", view: "placeholder", ph: { title: "Low Value", desc: "Per-segment drilldown is not yet wired to an admin data source — see Overview for distribution." } },
+      { label: "Active Community", view: "placeholder", ph: { title: "Active Community", desc: "Per-segment drilldown is not yet wired to an admin data source — see Overview for distribution." } },
+      { label: "Ghost", view: "placeholder", ph: { title: "Ghost", desc: "Per-segment drilldown is not yet wired to an admin data source — see Overview for distribution." } },
+      { label: "Simulator", view: "segmentRuleSimulator" },
+      { label: "VH: Mismatch Audit", view: "voucherHunterAudit" },
+      { label: "VH: Unclassified", view: "unclassifiedAudit" },
+      { label: "VH: Rule Quality", view: "voucherHunterQuality" },
+      { label: "VH: False Positive", view: "voucherHunterFalsePositive" },
+      { label: "VH: Rule Simulator", view: "voucherHunterRuleSimulator" },
+      { label: "VH: Priority Impact", view: "vhPriorityImpact" },
+      { label: "Probability Config", view: "segmentProbabilityConfig" }
+    ]},
+    { key: "analytics", icon: "📊", label: "Analytics", tabs: [
+      { label: "Executive", view: "summary" },
+      { label: "Funnels", view: "funnel" },
+      { label: "Revenue", view: "placeholder", ph: { title: "Revenue", desc: "Revenue analytics is not yet wired to an admin data source." } },
+      { label: "Retention", view: "placeholder", ph: { title: "Retention", desc: "Retention analytics is not yet wired to an admin data source." } },
+      { label: "Campaign", view: "campaignPerformance" },
+      { label: "ROI", view: "segmentRoi" },
+      { label: "Cohorts", view: "backendSegmentEngine" },
+      { label: "Data Validation", view: "validation" }
+    ]},
+    { key: "automation", icon: "🤖", label: "Automation", tabs: [
+      { label: "Scheduler", view: "placeholder", ph: { title: "Scheduler", desc: "Scheduler control panel is not yet wired to an admin data source." } },
+      { label: "Queue", view: "placeholder", ph: { title: "Queue", desc: "Job queue view is not yet wired to an admin data source." } },
+      { label: "Notifications", view: "placeholder", ph: { title: "Notifications", desc: "Notification log is not yet wired to an admin data source." } },
+      { label: "Retry Jobs", view: "placeholder", ph: { title: "Retry Jobs", desc: "Retry job view is not yet wired to an admin data source." } },
+      { label: "Logs", view: "uploadHistory" },
+      { label: "Health", external: "/static/runtime-status.html" },
+      { label: "Upload Data", view: "uploadPlayerPerformance", live: true },
+      { label: "Raw Explorer", view: "rawExplorer" },
+      { label: "Join Requests", view: "joinRequests" }
+    ]},
+    { key: "settings", icon: "⚙", label: "Settings", tabs: [
+      { label: "General", view: "settings" },
+      { label: "Feature Flags", view: "settings" },
+      { label: "XP", view: "xpAdjust", live: true },
+      { label: "Rewards", view: "settings" },
+      { label: "Voucher Rules", view: "settings" },
+      { label: "Referral", view: "settings" },
+      { label: "Affiliate", view: "settings" },
+      { label: "Welcome Journey", view: "settings" },
+      { label: "Reactivation", view: "settings" },
+      { label: "Security", view: "settings" },
+      { label: "Integrations", view: "settings" },
+      { label: "Segment Probability", view: "segmentProbabilityConfig" }
+    ]}
+  ];
+
+  var currentModuleKey = null;
+  var currentTabIndex = 0;
+
+  function moduleByKey(key) {
+    for (var i = 0; i < MODULES.length; i++) if (MODULES[i].key === key) return MODULES[i];
+    return null;
+  }
+
+  // Reverse-lookup so any direct switchView(viewId) call (from empty-state
+  // CTAs, cross-links, etc.) still highlights the right module/tab chrome.
+  // moduleOverview/placeholder are ambiguous (shared by many tabs) and are
+  // intentionally excluded — those are always entered via activateTab().
+  function findTabForView(view) {
+    if (view === "moduleOverview" || view === "placeholder") return null;
+    for (var i = 0; i < MODULES.length; i++) {
+      var mod = MODULES[i];
+      for (var j = 0; j < mod.tabs.length; j++) {
+        if (mod.tabs[j].view === view) return { moduleKey: mod.key, tabIndex: j };
+      }
+    }
+    return null;
+  }
+
+  function renderSidebar() {
+    var el = $("#nav-modules");
+    if (!el) return;
+    var html = "";
+    MODULES.forEach(function (m) {
+      html += '<button class="module-btn" data-module="' + m.key + '">' +
+        '<span class="module-icon">' + m.icon + '</span><span class="module-label">' + esc(m.label) + '</span></button>';
+    });
+    el.innerHTML = html;
+  }
+
+  function renderSidebarActive(moduleKey) {
+    $all(".module-btn").forEach(function (b) { b.classList.toggle("active", b.dataset.module === moduleKey); });
+  }
+
+  function renderTabBar(moduleKey, activeIndex) {
+    var mod = moduleByKey(moduleKey);
+    var bar = $("#tab-bar");
+    if (!mod || !bar) return;
+    var html = "";
+    mod.tabs.forEach(function (t, idx) {
+      var liveDot = t.live ? '<span class="tab-live-dot" title="Live Control — mutates production data">●</span>' : "";
+      if (t.external) {
+        html += '<a class="tab-btn tab-btn-external" href="' + t.external + '" target="_blank" rel="noopener">' + esc(t.label) + ' ↗</a>';
+      } else {
+        html += '<button class="tab-btn' + (idx === activeIndex ? " active" : "") + '" data-tab-idx="' + idx + '">' + esc(t.label) + liveDot + '</button>';
+      }
+    });
+    bar.innerHTML = html;
+  }
+
+  function updateBreadcrumb(moduleKey, tabIndex) {
+    var mod = moduleByKey(moduleKey);
+    var tab = mod && mod.tabs[tabIndex];
+    if (!mod || !tab) return;
+    var bc = $("#breadcrumb");
+    if (bc) bc.textContent = mod.icon + " " + mod.label + "  /  " + tab.label;
+    $("#view-title").textContent = tab.label;
+  }
+
+  // Several view ids are legitimately reused by more than one tab (e.g.
+  // "summary" backs both Dashboard/Overview and Analytics/Executive,
+  // "settings" backs both Voucher Centre/Settings and Settings/General).
+  // findTabForView() only returns the first config match, so while an
+  // explicit activateTab() navigation is in flight we suppress switchView's
+  // own auto-sync to avoid it clobbering the module/tab the user actually
+  // picked with that first match.
+  var inActivateTab = false;
+
+  function activateTab(moduleKey, tabIndex) {
+    var mod = moduleByKey(moduleKey);
+    if (!mod) return;
+    var tab = mod.tabs[tabIndex];
+    if (!tab) return;
+    currentModuleKey = moduleKey;
+    currentTabIndex = tabIndex;
+    renderSidebarActive(moduleKey);
+    renderTabBar(moduleKey, tabIndex);
+    updateBreadcrumb(moduleKey, tabIndex);
+    if (tab.external) { window.open(tab.external, "_blank", "noopener"); return; }
+    if (tab.view === "placeholder" && tab.ph) {
+      $("#placeholder-heading").textContent = tab.ph.title;
+      $("#placeholder-desc").textContent = tab.ph.desc;
+    }
+    inActivateTab = true;
+    switchView(tab.view);
+    inActivateTab = false;
+    if (tab.view === "moduleOverview") renderModuleOverview(moduleKey);
+  }
+
+  function selectModule(moduleKey) {
+    activateTab(moduleKey, 0);
+  }
+
+  // Existing summary card-grid a generated Module Overview can safely reuse
+  // (cloned as-is; the source grid is kept populated by loadSummary()).
+  var OVERVIEW_CLONE_SOURCE = {
+    voucher: "cards-vouchers",
+    community: "cards-community",
+    referral: "cards-referrals",
+    welcome: "cards-community"
+  };
+
+  function renderModuleOverview(moduleKey) {
+    var mod = moduleByKey(moduleKey);
+    if (!mod) return;
+    var kpiEl = $("#mod-ov-kpis");
+    var qaEl = $("#mod-ov-quick-actions");
+    var cloneSrc = OVERVIEW_CLONE_SOURCE[moduleKey];
+    if (kpiEl) {
+      if (cloneSrc) {
+        loadSummary(false);
+        setTimeout(function () {
+          var src = $("#" + cloneSrc);
+          kpiEl.innerHTML = (src && src.innerHTML) ? src.innerHTML : emptyState("No summary data yet.");
+        }, 150);
+      } else {
+        kpiEl.innerHTML = emptyState(mod.label + " does not have aggregate KPIs wired yet — use the tabs below for live data.");
+      }
+    }
+    if (qaEl) {
+      var html = "";
+      mod.tabs.forEach(function (t, idx) {
+        if (t.view === "moduleOverview") return;
+        html += '<button class="btn qa-btn" data-qa-idx="' + idx + '">' + esc(t.label) + (t.external ? " ↗" : "") + '</button>';
+      });
+      qaEl.innerHTML = html;
+    }
+  }
+
   function switchView(view) {
     state.view = view;
-    $all(".nav-item").forEach(function (b) { b.classList.toggle("active", b.dataset.view === view); });
     VIEWS.forEach(function (v) { $("#view-" + v).classList.toggle("hidden", v !== view); });
-    var activeBtn = document.querySelector('.nav-item[data-view="' + view + '"]');
-    var activeGroup = activeBtn && activeBtn.closest(".nav-group");
-    if (activeGroup) activeGroup.classList.remove("collapsed");
+    var found = inActivateTab ? null : findTabForView(view);
+    if (found) {
+      currentModuleKey = found.moduleKey;
+      currentTabIndex = found.tabIndex;
+      renderSidebarActive(found.moduleKey);
+      renderTabBar(found.moduleKey, found.tabIndex);
+      updateBreadcrumb(found.moduleKey, found.tabIndex);
+    }
     var titles = {
-      summary: "Executive Summary", funnel: "Activation Funnel", abuse: "Abuse Overview",
+      summary: "Executive Summary", moduleOverview: "Overview", placeholder: "Coming Soon",
+      funnel: "Activation Funnel", abuse: "Abuse Overview",
       campaignBuilder: "Campaign Builder (P2)", campaignPerformance: "Campaign Performance (P4)",
       campaignIntelligence: "Campaign Intelligence (P5)", activeCampaigns: "Active Campaigns",
       draftCampaigns: "Draft Campaigns", compiledDrops: "Compiled Voucher Drops",
@@ -4878,7 +5141,7 @@
       users: "User Drilldown", joinRequests: "Join Requests", xpAdjust: "Add / Reduce XP",
       settings: "Settings"
     };
-    $("#view-title").textContent = titles[view] || view;
+    if (!found && !inActivateTab) $("#view-title").textContent = titles[view] || view;
     banner(null);
     refreshCurrent(false);
   }
@@ -4932,14 +5195,19 @@
   }
 
   function bind() {
-    $all(".nav-item[data-view]").forEach(function (b) {
-      b.addEventListener("click", function () { switchView(b.dataset.view); });
+    renderSidebar();
+    $all(".module-btn").forEach(function (b) {
+      b.addEventListener("click", function () { selectModule(b.dataset.module); });
     });
-    $all(".nav-group-header").forEach(function (h) {
-      h.addEventListener("click", function () {
-        var group = h.closest(".nav-group");
-        if (group) group.classList.toggle("collapsed");
-      });
+    $("#tab-bar").addEventListener("click", function (e) {
+      var btn = e.target.closest(".tab-btn[data-tab-idx]");
+      if (!btn || !currentModuleKey) return;
+      activateTab(currentModuleKey, parseInt(btn.dataset.tabIdx, 10));
+    });
+    $("#mod-ov-quick-actions").addEventListener("click", function (e) {
+      var btn = e.target.closest(".qa-btn[data-qa-idx]");
+      if (!btn || !currentModuleKey) return;
+      activateTab(currentModuleKey, parseInt(btn.dataset.qaIdx, 10));
     });
     $("#refresh-btn").addEventListener("click", function () {
       var btn = this;
@@ -5122,7 +5390,7 @@
       var a = d.admin || {};
       $("#admin-chip").textContent = "@" + (a.username || a.id);
       bind();
-      switchView("summary");
+      selectModule("dashboard");
     })
     .catch(function () { /* api() already redirects on 401 */ });
 })();

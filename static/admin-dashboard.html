@@ -12,99 +12,22 @@
     <nav class="sidebar">
       <div class="brand">APReferral Admin</div>
 
-      <div class="nav-legend">
-        <span class="badge badge-live" title="Mutates production data immediately">Live Control</span>
-        <span class="badge badge-readonly" title="Read-only view, no mutation">Read Only</span>
-        <span class="badge badge-legacy" title="Old standalone page, kept until decommission">Legacy</span>
-        <span class="badge badge-hidden" title="Advanced/internal tool, not part of daily workflow">Hidden Tool</span>
+      <div class="nav-modules" id="nav-modules">
+        <!-- Rendered by JS from the MODULES config: one button per business module. -->
       </div>
 
-      <!-- 1. HOME -->
-      <div class="nav-group" data-group="home">
-        <button class="nav-group-header" data-group-toggle="home">🏠 Home</button>
-        <div class="nav-group-body">
-          <button class="nav-item active" data-view="summary">Executive Summary <span class="badge badge-readonly">Read Only</span></button>
-        </div>
-      </div>
-
-      <!-- 2. CAMPAIGN CENTER -->
-      <div class="nav-group" data-group="campaign-center">
-        <button class="nav-group-header" data-group-toggle="campaign-center">🚀 Campaign Center</button>
-        <div class="nav-group-body">
-          <button class="nav-item" data-view="activeCampaigns">Overview — Running <span class="badge badge-readonly">Read Only</span></button>
-          <button class="nav-item" data-view="campaignBuilder">Create Campaign <span class="badge badge-live">Live Control</span></button>
-          <button class="nav-item" data-view="draftCampaigns">Drafts <span class="badge badge-readonly">Read Only</span></button>
-          <button class="nav-item" data-view="campaignPerformance">Performance <span class="badge badge-readonly">Read Only</span></button>
-          <button class="nav-item" data-view="campaignIntelligence">Intelligence <span class="badge badge-readonly">Read Only</span></button>
-          <button class="nav-item" data-view="compiledDrops">Compiled Voucher Drops <span class="badge badge-readonly">Read Only</span></button>
-          <button class="nav-item" data-view="campaigns">Advanced ▾ Legacy Targeting <span class="badge badge-live">Live Control</span></button>
-          <button class="nav-item" data-view="vouchers">Advanced ▾ Vouchers Overview <span class="badge badge-readonly">Read Only</span></button>
-        </div>
-      </div>
-
-      <!-- 3. AFFILIATE CENTER -->
-      <div class="nav-group" data-group="affiliate-center">
-        <button class="nav-group-header" data-group-toggle="affiliate-center">💰 Affiliate Center</button>
-        <div class="nav-group-body">
-          <button class="nav-item" data-view="affiliate">Overview <span class="badge badge-readonly">Read Only</span></button>
-          <button class="nav-item" data-view="affiliatePending">Pending Approvals <span class="badge badge-live">Live Control</span></button>
-          <button class="nav-item" data-view="affiliatePools">Voucher Pools <span class="badge badge-live">Live Control</span></button>
-        </div>
-      </div>
-
-      <!-- 4. REACTIVATION CENTER -->
-      <div class="nav-group" data-group="reactivation-center">
-        <button class="nav-group-header" data-group-toggle="reactivation-center">♻ Reactivation Center</button>
-        <div class="nav-group-body">
-          <button class="nav-item" data-view="reactivation">Channel Reactivation <span class="badge badge-live">Live Control</span></button>
-        </div>
-      </div>
-
-      <!-- 5. USER INTELLIGENCE -->
-      <div class="nav-group" data-group="user-intelligence">
-        <button class="nav-group-header" data-group-toggle="user-intelligence">👤 User Intelligence</button>
-        <div class="nav-group-body">
-          <button class="nav-item" data-view="segments">Segments <span class="badge badge-readonly">Read Only</span></button>
-          <button class="nav-item" data-view="users">Search User <span class="badge badge-readonly">Read Only</span></button>
-          <button class="nav-item" data-view="segmentRoi">Segment ROI <span class="badge badge-readonly">Read Only</span></button>
-          <button class="nav-item" data-view="segmentProbabilityConfig">Segment Probability Config <span class="badge badge-readonly">Read Only</span></button>
-        </div>
-      </div>
-
-      <!-- 6. ADMIN TOOLS -->
-      <div class="nav-group" data-group="admin-tools">
-        <button class="nav-group-header" data-group-toggle="admin-tools">🛠 Admin Tools</button>
-        <div class="nav-group-body">
-          <button class="nav-item" data-view="xpAdjust">Add / Reduce XP <span class="badge badge-live">Live Control</span></button>
-        </div>
-      </div>
-
-      <!-- 7. OPERATIONS -->
-      <div class="nav-group" data-group="operations">
-        <button class="nav-group-header" data-group-toggle="operations">⚙ Operations</button>
-        <div class="nav-group-body">
-          <button class="nav-item" data-view="drops">Voucher Drop Manager <span class="badge badge-live">Live Control</span></button>
-          <button class="nav-item" data-view="settings">Settings</button>
-          <a href="/static/index.html#admin-panel" class="nav-item nav-item-external" target="_blank" rel="noopener">
-            Legacy MiniApp Admin ↗ <span class="badge badge-legacy">Legacy</span>
-          </a>
-          <a href="/static/funnel-dashboard.html" class="nav-item nav-item-external" target="_blank" rel="noopener">
-            Funnel Dashboard (standalone) ↗ <span class="badge badge-legacy">Legacy</span>
-          </a>
-          <a href="/static/runtime-status.html" class="nav-item nav-item-external" target="_blank" rel="noopener">
-            Runtime Status (standalone) ↗ <span class="badge badge-readonly">Read Only</span>
-          </a>
-          <a href="/static/welcome-journey-runtime.html" class="nav-item nav-item-external" target="_blank" rel="noopener">
-            Welcome Journey Runtime (standalone) ↗ <span class="badge badge-readonly">Read Only</span>
-          </a>
-        </div>
+      <div class="sidebar-footer">
+        <div class="sidebar-footer-label">Legacy Tools</div>
+        <a href="/static/index.html#admin-panel" class="nav-item-external" target="_blank" rel="noopener">Legacy MiniApp Admin ↗</a>
+        <a href="/static/funnel-dashboard.html" class="nav-item-external" target="_blank" rel="noopener">Funnel Dashboard (standalone) ↗</a>
       </div>
     </nav>
 
     <main class="main">
       <div class="topbar">
         <div>
-          <h1 id="view-title">Executive Summary</h1>
+          <div class="breadcrumb" id="breadcrumb">🏠 Dashboard / Overview</div>
+          <h1 id="view-title">Overview</h1>
           <div class="note" id="dashboard-meta"></div>
         </div>
         <div class="right">
@@ -118,6 +41,10 @@
           <button class="btn" id="refresh-btn">↻ Refresh</button>
           <button class="btn" id="logout-btn">Logout</button>
         </div>
+      </div>
+
+      <div class="tab-bar" id="tab-bar">
+        <!-- Rendered by JS: the active module's Overview | Tab | Tab | Tab row. -->
       </div>
 
       <div id="global-banner"></div>
@@ -154,6 +81,29 @@
         <div class="section">
           <div class="section-title">System Health</div>
           <div class="card-grid" id="cards-system"></div>
+        </div>
+      </section>
+
+      <!-- GENERIC MODULE OVERVIEW (reused by every module's Overview tab that has
+           no dedicated view of its own; populated by renderModuleOverview()) -->
+      <section id="view-moduleOverview" class="hidden">
+        <div class="section">
+          <div class="section-title">Key Metrics</div>
+          <div class="card-grid" id="mod-ov-kpis"></div>
+        </div>
+        <div class="section">
+          <div class="section-title">Quick Actions</div>
+          <div class="qa-grid" id="mod-ov-quick-actions"></div>
+        </div>
+      </section>
+
+      <!-- GENERIC PLACEHOLDER (reused by tabs whose feature has no admin data
+           source yet; content set by activateTab() before switchView()) -->
+      <section id="view-placeholder" class="hidden">
+        <div class="placeholder-panel">
+          <div class="placeholder-icon">🧩</div>
+          <h3 id="placeholder-heading">Coming Soon</h3>
+          <p id="placeholder-desc">This feature is not yet wired to a data source.</p>
         </div>
       </section>
 

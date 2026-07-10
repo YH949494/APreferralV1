@@ -44,12 +44,13 @@ html, body {
   border-bottom: 1px solid var(--border);
   margin-bottom: 12px;
 }
-.nav-item {
+/* Sidebar: one button per business module (max 12, per IA spec) */
+.nav-modules { display: flex; flex-direction: column; gap: 2px; padding: 4px 10px; flex: 1; overflow-y: auto; }
+.module-btn {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 9px 20px;
+  gap: 10px;
+  padding: 10px 12px;
   color: var(--muted);
   cursor: pointer;
   border: none;
@@ -57,43 +58,19 @@ html, body {
   width: 100%;
   text-align: left;
   font-size: 13px;
+  font-weight: 600;
+  border-radius: 8px;
+  transition: background 0.12s ease, color 0.12s ease;
 }
-.nav-item:hover { background: var(--panel-2); color: var(--text); }
-.nav-item.active { color: var(--accent); border-left: 3px solid var(--accent); background: var(--panel-2); }
-.nav-item.disabled { opacity: 0.4; cursor: not-allowed; }
-.nav-item.disabled::after { content: " · soon"; font-size: 11px; }
-.nav-item-external { text-decoration: none; }
+.module-btn:hover { background: var(--panel-2); color: var(--text); }
+.module-btn.active { color: var(--accent); background: var(--panel-2); box-shadow: inset 3px 0 0 var(--accent); }
+.module-icon { font-size: 15px; }
+.module-label { flex: 1; }
 
-/* Unified nav: legend + collapsible section groups */
-.nav-legend {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  padding: 0 20px 14px;
-  margin-bottom: 8px;
-  border-bottom: 1px solid var(--border);
-}
-.nav-group { border-bottom: 1px solid var(--border); }
-.nav-group:last-child { border-bottom: none; }
-.nav-group-header {
-  display: flex;
-  align-items: center;
-  width: 100%;
-  text-align: left;
-  background: none;
-  border: none;
-  color: var(--text);
-  font-size: 12px;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.4px;
-  padding: 12px 20px 8px;
-  cursor: pointer;
-}
-.nav-group-header::before { content: "▾ "; color: var(--muted); }
-.nav-group.collapsed .nav-group-header::before { content: "▸ "; }
-.nav-group.collapsed .nav-group-body { display: none; }
-.nav-group-body { padding-bottom: 4px; }
+.sidebar-footer { padding: 12px 20px 4px; border-top: 1px solid var(--border); margin-top: 8px; }
+.sidebar-footer-label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.4px; margin-bottom: 6px; }
+.nav-item-external { display: block; color: var(--muted); font-size: 12px; text-decoration: none; padding: 4px 0; }
+.nav-item-external:hover { color: var(--accent-2); }
 
 .badge {
   display: inline-block;
@@ -111,18 +88,72 @@ html, body {
 .badge-hidden { background: rgba(255,212,59,0.14); color: var(--warn); }
 
 /* Main */
-.main { flex: 1; padding: 24px 28px; overflow-x: hidden; }
+.main { flex: 1; padding: 0 28px 28px; overflow-x: hidden; }
 .topbar {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 20px;
   gap: 12px;
   flex-wrap: wrap;
+  padding: 20px 0 12px;
+  position: sticky;
+  top: 0;
+  background: var(--bg);
+  z-index: 5;
 }
+.breadcrumb { color: var(--muted); font-size: 12px; margin-bottom: 4px; }
 .topbar h1 { font-size: 20px; margin: 0; }
 .topbar .right { display: flex; align-items: center; gap: 12px; }
 .admin-chip { color: var(--muted); font-size: 13px; }
+
+/* Second-level top tabs: Overview | Tab | Tab | Tab, per business module */
+.tab-bar {
+  display: flex;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  gap: 4px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 20px;
+  position: sticky;
+  top: 64px;
+  background: var(--bg);
+  z-index: 4;
+  padding-bottom: 1px;
+}
+.tab-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+  background: none;
+  border: none;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 600;
+  padding: 10px 14px;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+}
+.tab-btn:hover { color: var(--text); }
+.tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); }
+.tab-btn-external { text-decoration: none; color: var(--accent-2); }
+.tab-btn-external:hover { color: var(--text); }
+.tab-live-dot { color: var(--bad); font-size: 8px; line-height: 1; }
+
+/* Generic Module Overview + placeholder tab content */
+.qa-grid { display: flex; flex-wrap: wrap; gap: 8px; }
+.qa-btn { border-radius: 999px; }
+.placeholder-panel {
+  text-align: center;
+  padding: 64px 24px;
+  color: var(--muted);
+  background: var(--panel);
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+}
+.placeholder-icon { font-size: 32px; margin-bottom: 12px; }
+.placeholder-panel h3 { color: var(--text); margin: 0 0 8px; font-size: 16px; }
+.placeholder-panel p { margin: 0; font-size: 13px; max-width: 420px; margin: 0 auto; }
 
 .controls { display: flex; gap: 6px; align-items: center; }
 .btn {
@@ -175,7 +206,10 @@ html, body {
   border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 16px;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.18);
+  transition: border-color 0.12s ease, transform 0.12s ease;
 }
+.kpi:hover { border-color: var(--accent-2); transform: translateY(-1px); }
 .kpi .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.4px; }
 .kpi .value { font-size: 28px; font-weight: 700; margin-top: 6px; }
 .kpi .sub { color: var(--muted); font-size: 12px; margin-top: 4px; }
@@ -187,7 +221,14 @@ html, body {
 .kpi-secondary .label { color: var(--accent-2); }
 
 .section-title { font-size: 15px; font-weight: 600; margin: 8px 0 12px; color: var(--text); }
-.section { margin-bottom: 28px; }
+.section {
+  margin-bottom: 28px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 18px 20px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.14);
+}
 
 /* Funnel */
 .funnel-table { width: 100%; border-collapse: collapse; background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
@@ -227,7 +268,10 @@ html, body {
   .app { flex-direction: column; }
   .sidebar { width: 100%; flex-direction: row; overflow-x: auto; padding: 8px; }
   .sidebar .brand { display: none; }
-  .nav-item.active { border-left: none; border-bottom: 3px solid var(--accent); }
+  .nav-modules { flex-direction: row; overflow-x: auto; }
+  .sidebar-footer { display: none; }
+  .module-btn.active { box-shadow: inset 0 -3px 0 var(--accent); }
+  .topbar, .tab-bar { position: static; }
 }
 
 /* ---- Phase C panels: data tables, expandable rows, filters ---- */
