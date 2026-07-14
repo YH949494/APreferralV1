@@ -2068,6 +2068,15 @@ def ensure_indexes():
         name="referral_audit_inviter_created_idx",
         partialFilterExpression={"inviter_user_id": {"$exists": True}},
     )
+    # Supports is_user_blocked_for_self_invite's find_one({"invitee_user_id": ...}),
+    # which previously ran as an unindexed find({}) full-collection scan on every
+    # welcome-bonus eligibility check (see docs/xp_snapshot_incremental.md).
+    safe_create_index(
+        db.referral_audit,
+        [("invitee_user_id", ASCENDING)],
+        name="referral_audit_invitee_user_id_idx",
+        partialFilterExpression={"invitee_user_id": {"$exists": True}},
+    )
     safe_create_index(db.miniapp_sessions_daily, [("date_utc", ASCENDING)], name="miniapp_sessions_daily_date_utc_idx")
     safe_create_index(db.miniapp_sessions_daily, [("date", ASCENDING)], name="miniapp_sessions_daily_date_idx")
     safe_create_index(

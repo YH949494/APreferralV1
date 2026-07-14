@@ -811,21 +811,17 @@ def is_user_blocked_for_self_invite(db, user_id: int) -> bool:
     """
     uid = int(user_id)
     try:
-        docs = db.referral_audit.find({"invitee_user_id": uid})
+        doc = db.referral_audit.find_one(
+            {
+                "invitee_user_id": uid,
+                "$or": [{"inviter_user_id": uid}, {"reason": "self_invite"}],
+            },
+            {"_id": 1},
+        )
     except Exception:
         logger.exception("[WELCOME_BLOCKED_SELF_INVITE] lookup_failed user_id=%s", uid)
         return False
-    for doc in docs:
-        inviter_user_id = doc.get("inviter_user_id")
-        reason = doc.get("reason")
-        status = doc.get("status")
-        if inviter_user_id is not None and inviter_user_id == uid:
-            return True
-        if reason == "self_invite":
-            return True
-        if status == "skipped" and reason == "self_invite":
-            return True
-    return False
+    return doc is not None
 
 
 def issue_welcome_bonus_if_eligible(db, *, user_id: int, is_new_user: bool, blocked: bool = False, now_utc: datetime | None = None):
