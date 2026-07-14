@@ -1251,9 +1251,31 @@ def _write_snapshot_heartbeat(source: str, now_utc_ts: datetime) -> None:
         logger.exception("[SNAPSHOT][HEARTBEAT] failed type=%s", source)
         
 def settle_xp_snapshots() -> None:
+    """Entry point used by tick_5min. Dispatches to the incremental settler
+    (default) or the legacy full-history rebuild (rollback path via
+    XP_SNAPSHOT_INCREMENTAL=0).
+
+    See xp_snapshot.py for the incremental implementation and
+    docs/xp_snapshot_incremental.md for the design rationale.
+    """
+    if os.getenv("XP_SNAPSHOT_INCREMENTAL", "1") == "1":
+        from xp_snapshot import settle_xp_snapshots_incremental
+
+        settle_xp_snapshots_incremental(db)
+    else:
+        _settle_xp_snapshots_full_rebuild()
+
+
+def _settle_xp_snapshots_full_rebuild(now_utc_ts: datetime | None = None) -> None:
+    """Legacy behavior: re-aggregate the entire xp_events history every run.
+
+    Kept only as the migration bootstrap step (xp_snapshot.py runs this
+    exactly once to establish known-correct totals before the incremental
+    cursor takes over) and as a manual rollback path.
+    """
     run_started = time.monotonic()
     verbose_snapshot_logs = os.getenv("SNAPSHOT_VERBOSE_LOGS", "").strip() == "1"
-    now_utc_ts = now_utc()
+    now_utc_ts = now_utc_ts or now_utc()
     week_start_utc, week_end_utc = _week_window_utc(now_utc_ts)
     month_start_utc, month_end_utc = _month_window_utc(now_utc_ts)
     logger.info(

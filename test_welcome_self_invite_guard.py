@@ -13,6 +13,17 @@ class FakeReferralAuditCollection:
         uid = (filt or {}).get("invitee_user_id")
         return [d for d in self.docs if d.get("invitee_user_id") == uid]
 
+    def find_one(self, filt, projection=None):
+        uid = (filt or {}).get("invitee_user_id")
+        or_clauses = (filt or {}).get("$or") or []
+        for d in self.docs:
+            if d.get("invitee_user_id") != uid:
+                continue
+            for clause in or_clauses:
+                if all(d.get(k) == v for k, v in clause.items()):
+                    return d
+        return None
+
 
 class FakeDb:
     def __init__(self, referral_audit_docs):
