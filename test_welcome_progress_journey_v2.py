@@ -305,6 +305,148 @@ def test_process_welcome_reminders_day2_falls_back_to_http_when_bot_send_fails(m
     assert http_sent == [(45, scheduler._WELCOME_PROGRESS_REMINDER_DAY2)]
 
 
+def test_process_welcome_reminders_sends_28h_reminder_with_button(monkeypatch):
+    now = datetime(2026, 1, 3, 12, 0, tzinfo=timezone.utc)
+    day1_at = now - timedelta(hours=29)
+    doc = {
+        "_id": "r28",
+        "user_id": 46,
+        "day1_at": day1_at,
+        "reminder_20h_sent": True,
+        "reminder_28h_sent": False,
+        "day2_reminder_sent": False,
+    }
+    fake_db = FakeReminderDb([doc])
+    bot_sent = []
+
+    def fake_bot_send(uid, text):
+        bot_sent.append((uid, text))
+        return True
+
+    monkeypatch.setattr(m, "get_welcome_progress", lambda uid, now=None: {"completed": 1, "claimed": False, "expired": False})
+
+    result = scheduler.process_welcome_reminders(now_ref=now, db_ref=fake_db, bot_send_fn=fake_bot_send)
+
+    assert result["reminder_28h_sent"] == 1
+    assert doc["reminder_28h_sent"] is True
+    assert bot_sent == [(46, scheduler._WELCOME_PROGRESS_REMINDER_28H)]
+
+
+def test_process_welcome_reminders_20h_not_sent_before_threshold(monkeypatch):
+    now = datetime(2026, 1, 2, 12, 0, tzinfo=timezone.utc)
+    day1_at = now - timedelta(hours=19)  # under the 20h threshold
+    doc = {
+        "_id": "r_early",
+        "user_id": 47,
+        "day1_at": day1_at,
+        "reminder_20h_sent": False,
+        "reminder_28h_sent": False,
+        "day2_reminder_sent": False,
+    }
+    fake_db = FakeReminderDb([doc])
+    sent = []
+
+    def fake_send(uid, text):
+        sent.append((uid, text))
+        return True, None, False
+
+    monkeypatch.setattr(m, "get_welcome_progress", lambda uid, now=None: {"completed": 1, "claimed": False, "expired": False})
+
+    result = scheduler.process_welcome_reminders(now_ref=now, db_ref=fake_db, send_fn=fake_send)
+
+    assert result["reminder_20h_sent"] == 0
+    assert result["eligible_20h"] == 0
+    assert sent == []
+    assert doc["reminder_20h_sent"] is False
+
+
+def test_process_welcome_reminders_progress_advanced_suppresses_20h_and_28h(monkeypatch):
+    """A user who already reached 2/3 must not receive the 1/3-stage nudges,
+    even though the raw day1_at age would otherwise qualify for both."""
+    now = datetime(2026, 1, 3, 12, 0, tzinfo=timezone.utc)
+    doc = {
+        "_id": "r_advanced",
+        "user_id": 48,
+        "day1_at": now - timedelta(hours=30),
+        "day2_at": now - timedelta(hours=21),
+        "reminder_20h_sent": False,
+        "reminder_28h_sent": False,
+        "day2_reminder_sent": False,
+    }
+    fake_db = FakeReminderDb([doc])
+    sent = []
+
+    def fake_bot_send(uid, text):
+        sent.append((uid, text))
+        return True
+
+    monkeypatch.setattr(m, "get_welcome_progress", lambda uid, now=None: {"completed": 2, "claimed": False, "expired": False})
+
+    result = scheduler.process_welcome_reminders(now_ref=now, db_ref=fake_db, bot_send_fn=fake_bot_send)
+
+    assert result["reminder_20h_sent"] == 0
+    assert result["reminder_28h_sent"] == 0
+    assert result["day2_reminder_sent"] == 1
+    assert sent == [(48, scheduler._WELCOME_PROGRESS_REMINDER_DAY2)]
+
+
+def test_welcome_http_send_fn_includes_miniapp_button(monkeypatch):
+    """Regression test for the HTTP-fallback path silently stripping the
+    Mini-App button: the default send_fn used when bot_send_fn is absent or
+    fails must still carry a reply_markup with a web_app button."""
+    captured = {}
+
+    def fake_send_telegram_http_message(uid, text, *, reply_markup=None, **kwargs):  # noqa: ARG001
+        captured["uid"] = uid
+        captured["text"] = text
+        captured["reply_markup"] = reply_markup
+        return True, None, False
+
+    monkeypatch.setattr(scheduler, "send_telegram_http_message", fake_send_telegram_http_message)
+
+    ok, err, blocked = scheduler._welcome_http_send_fn(49, "hello")
+
+    assert ok is True
+    assert err is None
+    assert blocked is False
+    markup = captured["reply_markup"]
+    assert markup is not None
+    button = markup["inline_keyboard"][0][0]
+    assert "web_app" in button
+    assert button["web_app"]["url"].startswith("https://")
+
+
+def test_process_welcome_reminders_uses_button_http_fallback_when_bot_send_absent(monkeypatch):
+    """End-to-end: when no bot_send_fn is supplied at all, the reminder must
+    still go out with a working Mini-App button via the HTTP fallback."""
+    now = datetime(2026, 1, 2, 12, 0, tzinfo=timezone.utc)
+    day1_at = now - timedelta(hours=21)
+    doc = {
+        "_id": "r_fallback",
+        "user_id": 50,
+        "day1_at": day1_at,
+        "reminder_20h_sent": False,
+        "reminder_28h_sent": False,
+        "day2_reminder_sent": False,
+    }
+    fake_db = FakeReminderDb([doc])
+    captured = {}
+
+    def fake_send_telegram_http_message(uid, text, *, reply_markup=None, **kwargs):  # noqa: ARG001
+        captured["reply_markup"] = reply_markup
+        return True, None, False
+
+    monkeypatch.setattr(scheduler, "send_telegram_http_message", fake_send_telegram_http_message)
+    monkeypatch.setattr(m, "get_welcome_progress", lambda uid, now=None: {"completed": 1, "claimed": False, "expired": False})
+
+    result = scheduler.process_welcome_reminders(now_ref=now, db_ref=fake_db)
+
+    assert result["reminder_20h_sent"] == 1
+    assert doc["reminder_20h_sent"] is True
+    assert captured["reply_markup"] is not None
+    assert "web_app" in captured["reply_markup"]["inline_keyboard"][0][0]
+
+
 class FakeAnalyticsCollection:
     """Minimal stand-in for ``welcome_analytics_events_col`` supporting both
     plain appends (``insert_one``) and the dedup upsert path used for skip
