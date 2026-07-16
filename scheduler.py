@@ -329,6 +329,8 @@ def process_welcome_reminders(*, now_ref: datetime | None = None, batch_limit: i
 
     scanned = reminder_20h_sent = reminder_28h_sent = day2_reminder_sent = skipped_abuse = send_failed = 0
     eligible_20h = eligible_28h = eligible_day3 = 0
+    failed_count = 0
+    failed_users: list[dict] = []
     skip_breakdown = {
         "already_claimed": 0,
         "expired": 0,
@@ -366,91 +368,123 @@ def process_welcome_reminders(*, now_ref: datetime | None = None, batch_limit: i
             skip_breakdown["missing_data"] += 1
             continue
         uid = int(uid)
+        current_stage = None
 
-        progress = get_welcome_progress(uid, now=now_ts)
-        completed = int(progress.get("completed") or 0)
-        day1_at = _coerce_utc(doc.get("day1_at"))
-        day2_at = _coerce_utc(doc.get("day2_at"))
+        # Per-user isolation: a single user's malformed data or a transient
+        # failure in progress lookup / send / bookkeeping must not abort the
+        # rest of the hourly batch (and, with it, the run-wrapper's stats
+        # write that keeps the dashboard heartbeat alive). Errors raised
+        # while iterating ``cursor`` itself (e.g. a lost DB connection) are
+        # NOT caught here and are left to propagate, since those are global
+        # failures the run should surface rather than silently continue.
+        try:
+            progress = get_welcome_progress(uid, now=now_ts)
+            completed = int(progress.get("completed") or 0)
+            day1_at = _coerce_utc(doc.get("day1_at"))
+            day2_at = _coerce_utc(doc.get("day2_at"))
 
-        blocked_reason = _welcome_reminder_anti_abuse_blocked(uid, db_ref=db_ref, progress=progress)
-        if blocked_reason:
-            skipped_abuse += 1
-            skip_breakdown[_SKIP_REASON_BUCKET.get(blocked_reason, "missing_data")] += 1
-            logger.info("[WELCOME_PROGRESS_REMINDER] skip uid=%s reason=%s", uid, blocked_reason)
-            candidate_stages = _welcome_reminder_candidate_stages(
-                completed=completed, day1_at=day1_at, day2_at=day2_at, doc=doc, now_ts=now_ts,
+            blocked_reason = _welcome_reminder_anti_abuse_blocked(uid, db_ref=db_ref, progress=progress)
+            if blocked_reason:
+                skipped_abuse += 1
+                skip_breakdown[_SKIP_REASON_BUCKET.get(blocked_reason, "missing_data")] += 1
+                logger.info("[WELCOME_PROGRESS_REMINDER] skip uid=%s reason=%s", uid, blocked_reason)
+                candidate_stages = _welcome_reminder_candidate_stages(
+                    completed=completed, day1_at=day1_at, day2_at=day2_at, doc=doc, now_ts=now_ts,
+                )
+                for internal_stage in (candidate_stages or [None]):
+                    normalized_stage = _STAGE_NORMALIZED.get(internal_stage) if internal_stage else None
+                    log_welcome_event(
+                        "welcome_reminder_skipped", uid, {"reason": blocked_reason},
+                        stage=normalized_stage, status="skipped", reason=blocked_reason,
+                        run_id=run_id, dedupe=True, now=now_ts,
+                    )
+                continue
+
+            # Reminder #1: completed == 1, 20h elapsed since Day 1, not yet sent.
+            if (
+                completed == 1
+                and day1_at
+                and not doc.get("reminder_20h_sent")
+                and (now_ts - day1_at) >= timedelta(hours=20)
+            ):
+                current_stage = "20h"
+                eligible_20h += 1
+                ok, err = _send_welcome_reminder(uid, _WELCOME_PROGRESS_REMINDER_20H, send_fn=send_fn, bot_send_fn=bot_send_fn, stage="20h")
+                if ok:
+                    db_ref.welcome_reminders.update_one({"_id": doc["_id"]}, {"$set": {"reminder_20h_sent": True, "updated_at": now_ts}})
+                    log_welcome_event("welcome_reminder_20h_sent", uid, stage="20h", status="sent", run_id=run_id, now=now_ts)
+                    reminder_20h_sent += 1
+                else:
+                    send_failed += 1
+                    logger.warning("[WELCOME_PROGRESS_REMINDER] send_failed uid=%s stage=20h err=%s", uid, err)
+                    log_welcome_event(
+                        "welcome_reminder_failed", uid, {"err": str(err)},
+                        stage="20h", status="failed", reason=str(err), run_id=run_id, now=now_ts,
+                    )
+
+            # Reminder #2: completed == 1, 28h elapsed since Day 1, still stuck, not yet sent.
+            if (
+                completed == 1
+                and day1_at
+                and not doc.get("reminder_28h_sent")
+                and (now_ts - day1_at) >= timedelta(hours=28)
+            ):
+                current_stage = "28h"
+                eligible_28h += 1
+                ok, err = _send_welcome_reminder(uid, _WELCOME_PROGRESS_REMINDER_28H, send_fn=send_fn, bot_send_fn=bot_send_fn, stage="28h")
+                if ok:
+                    db_ref.welcome_reminders.update_one({"_id": doc["_id"]}, {"$set": {"reminder_28h_sent": True, "updated_at": now_ts}})
+                    log_welcome_event("welcome_reminder_28h_sent", uid, stage="28h", status="sent", run_id=run_id, now=now_ts)
+                    reminder_28h_sent += 1
+                else:
+                    send_failed += 1
+                    logger.warning("[WELCOME_PROGRESS_REMINDER] send_failed uid=%s stage=28h err=%s", uid, err)
+                    log_welcome_event(
+                        "welcome_reminder_failed", uid, {"err": str(err)},
+                        stage="28h", status="failed", reason=str(err), run_id=run_id, now=now_ts,
+                    )
+
+            # Reminder #3: completed == 2, 20h elapsed since Day 2, not yet sent.
+            if (
+                completed == 2
+                and day2_at
+                and not doc.get("day2_reminder_sent")
+                and (now_ts - day2_at) >= timedelta(hours=20)
+            ):
+                current_stage = "day2"
+                eligible_day3 += 1
+                ok, err = _send_welcome_reminder(uid, _WELCOME_PROGRESS_REMINDER_DAY2, send_fn=send_fn, bot_send_fn=bot_send_fn, stage="day2")
+                if ok:
+                    db_ref.welcome_reminders.update_one({"_id": doc["_id"]}, {"$set": {"day2_reminder_sent": True, "updated_at": now_ts}})
+                    log_welcome_event("welcome_reminder_day2_sent", uid, stage="day3", status="sent", run_id=run_id, now=now_ts)
+                    day2_reminder_sent += 1
+                else:
+                    send_failed += 1
+                    logger.warning("[WELCOME_PROGRESS_REMINDER] send_failed uid=%s stage=day2 err=%s", uid, err)
+                    log_welcome_event(
+                        "welcome_reminder_failed", uid, {"err": str(err)},
+                        stage="day3", status="failed", reason=str(err), run_id=run_id, now=now_ts,
+                    )
+        except Exception as exc:  # noqa: BLE001 - per-user isolation, see docstring above
+            failed_count += 1
+            failed_users.append({
+                "user_id": uid,
+                "stage": current_stage,
+                "run_id": run_id,
+                "error": f"{type(exc).__name__}: {exc}",
+            })
+            logger.exception(
+                "[WELCOME_PROGRESS_REMINDER] user_processing_failed uid=%s stage=%s run_id=%s",
+                uid, current_stage, run_id,
             )
-            for internal_stage in (candidate_stages or [None]):
-                normalized_stage = _STAGE_NORMALIZED.get(internal_stage) if internal_stage else None
-                log_welcome_event(
-                    "welcome_reminder_skipped", uid, {"reason": blocked_reason},
-                    stage=normalized_stage, status="skipped", reason=blocked_reason,
-                    run_id=run_id, dedupe=True, now=now_ts,
-                )
+            log_welcome_event(
+                "welcome_reminder_failed", uid, {"err": f"{type(exc).__name__}: {exc}"},
+                stage=_STAGE_NORMALIZED.get(current_stage) if current_stage else None,
+                status="failed", reason="exception", run_id=run_id, now=now_ts,
+            )
+            # Nothing on this user was marked sent, so the next hourly run
+            # will pick them back up from the same query — retryable.
             continue
-
-        # Reminder #1: completed == 1, 20h elapsed since Day 1, not yet sent.
-        if (
-            completed == 1
-            and day1_at
-            and not doc.get("reminder_20h_sent")
-            and (now_ts - day1_at) >= timedelta(hours=20)
-        ):
-            eligible_20h += 1
-            ok, err = _send_welcome_reminder(uid, _WELCOME_PROGRESS_REMINDER_20H, send_fn=send_fn, bot_send_fn=bot_send_fn, stage="20h")
-            if ok:
-                db_ref.welcome_reminders.update_one({"_id": doc["_id"]}, {"$set": {"reminder_20h_sent": True, "updated_at": now_ts}})
-                log_welcome_event("welcome_reminder_20h_sent", uid, stage="20h", status="sent", run_id=run_id, now=now_ts)
-                reminder_20h_sent += 1
-            else:
-                send_failed += 1
-                logger.warning("[WELCOME_PROGRESS_REMINDER] send_failed uid=%s stage=20h err=%s", uid, err)
-                log_welcome_event(
-                    "welcome_reminder_failed", uid, {"err": str(err)},
-                    stage="20h", status="failed", reason=str(err), run_id=run_id, now=now_ts,
-                )
-
-        # Reminder #2: completed == 1, 28h elapsed since Day 1, still stuck, not yet sent.
-        if (
-            completed == 1
-            and day1_at
-            and not doc.get("reminder_28h_sent")
-            and (now_ts - day1_at) >= timedelta(hours=28)
-        ):
-            eligible_28h += 1
-            ok, err = _send_welcome_reminder(uid, _WELCOME_PROGRESS_REMINDER_28H, send_fn=send_fn, bot_send_fn=bot_send_fn, stage="28h")
-            if ok:
-                db_ref.welcome_reminders.update_one({"_id": doc["_id"]}, {"$set": {"reminder_28h_sent": True, "updated_at": now_ts}})
-                log_welcome_event("welcome_reminder_28h_sent", uid, stage="28h", status="sent", run_id=run_id, now=now_ts)
-                reminder_28h_sent += 1
-            else:
-                send_failed += 1
-                logger.warning("[WELCOME_PROGRESS_REMINDER] send_failed uid=%s stage=28h err=%s", uid, err)
-                log_welcome_event(
-                    "welcome_reminder_failed", uid, {"err": str(err)},
-                    stage="28h", status="failed", reason=str(err), run_id=run_id, now=now_ts,
-                )
-
-        # Reminder #3: completed == 2, 20h elapsed since Day 2, not yet sent.
-        if (
-            completed == 2
-            and day2_at
-            and not doc.get("day2_reminder_sent")
-            and (now_ts - day2_at) >= timedelta(hours=20)
-        ):
-            eligible_day3 += 1
-            ok, err = _send_welcome_reminder(uid, _WELCOME_PROGRESS_REMINDER_DAY2, send_fn=send_fn, bot_send_fn=bot_send_fn, stage="day2")
-            if ok:
-                db_ref.welcome_reminders.update_one({"_id": doc["_id"]}, {"$set": {"day2_reminder_sent": True, "updated_at": now_ts}})
-                log_welcome_event("welcome_reminder_day2_sent", uid, stage="day3", status="sent", run_id=run_id, now=now_ts)
-                day2_reminder_sent += 1
-            else:
-                send_failed += 1
-                logger.warning("[WELCOME_PROGRESS_REMINDER] send_failed uid=%s stage=day2 err=%s", uid, err)
-                log_welcome_event(
-                    "welcome_reminder_failed", uid, {"err": str(err)},
-                    stage="day3", status="failed", reason=str(err), run_id=run_id, now=now_ts,
-                )
 
     blocked_users = skip_breakdown["bot_blocked"] + skip_breakdown["risk_blocked"]
 
@@ -467,6 +501,9 @@ def process_welcome_reminders(*, now_ref: datetime | None = None, batch_limit: i
         "skip_breakdown": skip_breakdown,
         "blocked_users": blocked_users,
         "send_failed": send_failed,
+        "failed_count": failed_count,
+        "failed_users": failed_users,
+        "status": "partial_failure" if failed_count else "ok",
     }
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")

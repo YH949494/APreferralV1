@@ -421,6 +421,7 @@ class BuildWelcomeJourneyRuntimeTests(unittest.TestCase):
             "_id": "welcome_run_stats:welcome_progress_reminders",
             "lastRunAt": NOW,
             "lastRunDurationS": 2.1,
+            "status": "ok",
             "lastRunStats": {
                 "scanned": 100,
                 "eligible_20h": 10,
@@ -438,11 +439,38 @@ class BuildWelcomeJourneyRuntimeTests(unittest.TestCase):
         self.assertEqual(last_run["skipped_users"]["already_claimed"], 2)
         self.assertEqual(last_run["skipped_users"]["bot_blocked"], 1)
         self.assertEqual(last_run["skipped_users"]["total"], 3)
+        self.assertEqual(last_run["status"], "ok")
+        self.assertEqual(last_run["failed_users_count"], 0)
+
+    def test_last_run_surfaces_partial_failure_status_and_failed_count(self):
+        """A run where one user's malformed data raised an isolated
+        exception (per-user isolation) must not look identical to a clean
+        run on the dashboard: status and failed_users must reflect it even
+        though send_failed (Telegram-specific) stays 0."""
+        stats_doc = {
+            "_id": "welcome_run_stats:welcome_progress_reminders",
+            "lastRunAt": NOW,
+            "lastRunDurationS": 1.0,
+            "status": "partial_failure",
+            "lastRunStats": {
+                "scanned": 2,
+                "reminder_20h_sent": 1,
+                "send_failed": 0,
+                "failed_count": 1,
+                "failed_users": [{"user_id": 91, "stage": None, "run_id": "r1", "error": "TypeError: boom"}],
+            },
+        }
+        last_run = rs.build_welcome_journey_last_run(self._collections(stats_doc=stats_doc))
+        self.assertEqual(last_run["status"], "partial_failure")
+        self.assertEqual(last_run["failed_users_count"], 1)
+        self.assertEqual(last_run["telegram_failed"], 0)
 
     def test_last_run_defaults_when_no_run_yet(self):
         last_run = rs.build_welcome_journey_last_run(self._collections())
         self.assertEqual(last_run["users_scanned"], 0)
         self.assertIsNone(last_run["at"])
+        self.assertEqual(last_run["status"], "ok")
+        self.assertEqual(last_run["failed_users_count"], 0)
 
     def test_recent_runs_latest_first_capped(self):
         # $push with $slice:-20 appends in chronological order, so index 0 is

@@ -1000,7 +1000,7 @@ def _record_welcome_run_stats(job_name: str, stats: dict, duration_s: float, now
                     "lastRunAt": now,
                     "updatedAt": now,
                     "lastRunDurationS": duration_s,
-                    "status": "ok",
+                    "status": stats.get("status") or "ok",
                     "run_id": stats.get("run_id"),
                 },
             },

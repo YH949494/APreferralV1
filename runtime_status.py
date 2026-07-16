@@ -772,6 +772,8 @@ def build_welcome_journey_last_run(collections: Mapping[str, Any]) -> dict[str, 
     return {
         "at": _fmt_ts(doc.get("lastRunAt")),
         "duration_s": doc.get("lastRunDurationS"),
+        "status": doc.get("status", "ok"),
+        "failed_users_count": stats.get("failed_count", 0),
         "users_scanned": stats.get("scanned", 0),
         "eligible_20h": stats.get("eligible_20h", 0),
         "eligible_28h": stats.get("eligible_28h", 0),
