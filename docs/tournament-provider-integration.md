@@ -40,6 +40,16 @@ for Phase 1 — the Telegram UID in the URL is the whole handoff. It is your
 website's responsibility to map that UID to your own player account, prevent
 duplicate registrations, and maintain your own session.
 
+You may generate your own `player_id` and a random public `display_name` for
+your leaderboard UI (e.g. so real names/usernames never need to appear on a
+public leaderboard) — that's entirely your data model. The one hard
+requirement on your side is that you **retain the `telegram_user_id ->
+player_id` mapping** internally, because the leaderboard submission you send
+back to AP (below) must include the real `telegram_user_id` for every
+winner — AP has no way to resolve a reward to a Telegram account from a
+`player_id` or `display_name` alone, and rewards are delivered keyed
+strictly by `telegram_user_id`.
+
 ## Submitting the final leaderboard
 
 ```

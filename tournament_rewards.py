@@ -415,6 +415,9 @@ def list_reward_pools():
     out = []
     for p in pools:
         p.pop("_id", None)
+        for k in ("created_at", "updated_at"):
+            if isinstance(p.get(k), datetime):
+                p[k] = p[k].isoformat()
         p["stock"] = voucher_pool_service.pool_stock(p["pool_id"])
         out.append(p)
     return jsonify({"status": "ok", "pools": out})
@@ -434,12 +437,15 @@ def create_reward_pool():
     if pool_type not in voucher_pool_service.POOL_TYPES:
         return jsonify({"status": "error", "code": "invalid_pool_type"}), 400
 
-    voucher_pool_service.register_pool(
-        pool_id, name=name, pool_type=pool_type,
-        campaign_id=body.get("campaign_id") or "",
-        reward_usage=body.get("reward_usage") or "",
-        reward_metadata=body.get("reward_metadata") or {},
-    )
+    try:
+        voucher_pool_service.register_pool(
+            pool_id, name=name, pool_type=pool_type,
+            campaign_id=body.get("campaign_id") or "",
+            reward_usage=body.get("reward_usage") or "",
+            reward_metadata=body.get("reward_metadata") or {},
+        )
+    except voucher_pool_service.ReservedPoolIdError:
+        return jsonify({"status": "error", "code": "reserved_pool_id"}), 400
     _log_audit("reward_pool_registered", admin, pool_id)
     return jsonify({"status": "ok", "pool_id": pool_id}), 201
 
@@ -456,12 +462,15 @@ def upload_reward_pool_codes(pool_id: str):
     if not isinstance(codes, list) or not codes:
         return jsonify({"status": "error", "code": "missing_codes"}), 400
 
-    result = voucher_pool_service.upload_codes(
-        pool_id, codes,
-        display_label=body.get("display_label") or "",
-        value_hint=body.get("value_hint") or "",
-        currency=body.get("currency") or "",
-    )
+    try:
+        result = voucher_pool_service.upload_codes(
+            pool_id, codes,
+            display_label=body.get("display_label") or "",
+            value_hint=body.get("value_hint") or "",
+            currency=body.get("currency") or "",
+        )
+    except voucher_pool_service.ReservedPoolIdError:
+        return jsonify({"status": "error", "code": "reserved_pool_id"}), 400
     _log_audit("reward_pool_codes_uploaded", admin, pool_id, result)
     return jsonify({"status": "ok", **result})
 

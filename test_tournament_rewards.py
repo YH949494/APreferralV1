@@ -64,7 +64,7 @@ def _reward(**overrides):
 
 def test_atomic_allocation_assigns_one_code(fake_db):
     now = datetime.now(timezone.utc)
-    fake_db["voucher_pools"].insert_one({"pool_id": "gold", "code": "CODE-A", "status": "available", "created_at": now})
+    fake_db["voucher_pools"].insert_one({"pool_id": "gold", "code": "CODE-A", "status": "available", "created_at": now, "pool_source": "campaign_centre"})
     fake_db["campaign_rewards"].insert_one(_reward())
 
     result = tr._atomic_allocate_voucher("gold", _reward())
@@ -78,7 +78,7 @@ def test_atomic_allocation_assigns_one_code(fake_db):
 
 def test_two_concurrent_allocators_cannot_assign_same_voucher(fake_db):
     now = datetime.now(timezone.utc)
-    fake_db["voucher_pools"].insert_one({"pool_id": "gold", "code": "CODE-A", "status": "available", "created_at": now})
+    fake_db["voucher_pools"].insert_one({"pool_id": "gold", "code": "CODE-A", "status": "available", "created_at": now, "pool_source": "campaign_centre"})
     fake_db["campaign_rewards"].insert_one(_reward(reward_id="rw_1", telegram_user_id=111))
     fake_db["campaign_rewards"].insert_one(_reward(reward_id="rw_2", telegram_user_id=222))
 
@@ -92,8 +92,8 @@ def test_two_concurrent_allocators_cannot_assign_same_voucher(fake_db):
 
 def test_retry_does_not_assign_second_voucher(fake_db):
     now = datetime.now(timezone.utc)
-    fake_db["voucher_pools"].insert_one({"pool_id": "gold", "code": "CODE-A", "status": "available", "created_at": now})
-    fake_db["voucher_pools"].insert_one({"pool_id": "gold", "code": "CODE-B", "status": "available", "created_at": now})
+    fake_db["voucher_pools"].insert_one({"pool_id": "gold", "code": "CODE-A", "status": "available", "created_at": now, "pool_source": "campaign_centre"})
+    fake_db["voucher_pools"].insert_one({"pool_id": "gold", "code": "CODE-B", "status": "available", "created_at": now, "pool_source": "campaign_centre"})
     fake_db["campaign_rewards"].insert_one(_reward())
 
     first = tr._atomic_allocate_voucher("gold", _reward())
@@ -113,7 +113,7 @@ def test_out_of_stock_when_pool_empty(fake_db):
 
 def test_assigned_voucher_remains_assigned_after_repeated_calls(fake_db):
     now = datetime.now(timezone.utc)
-    fake_db["voucher_pools"].insert_one({"pool_id": "gold", "code": "CODE-A", "status": "available", "created_at": now})
+    fake_db["voucher_pools"].insert_one({"pool_id": "gold", "code": "CODE-A", "status": "available", "created_at": now, "pool_source": "campaign_centre"})
     fake_db["campaign_rewards"].insert_one(_reward())
 
     tr._atomic_allocate_voucher("gold", _reward())
@@ -127,7 +127,7 @@ def test_assigned_voucher_remains_assigned_after_repeated_calls(fake_db):
 def test_provider_cannot_access_voucher_code_via_pool_service(fake_db):
     # voucher_pool_service exposes stock counts only, never codes.
     now = datetime.now(timezone.utc)
-    fake_db["voucher_pools"].insert_one({"pool_id": "gold", "code": "SECRET-CODE", "status": "available", "created_at": now})
+    fake_db["voucher_pools"].insert_one({"pool_id": "gold", "code": "SECRET-CODE", "status": "available", "created_at": now, "pool_source": "campaign_centre"})
     stock = vps.pool_stock("gold")
     assert stock == {"available": 1, "issued": 0}
     assert "SECRET-CODE" not in str(stock)
@@ -159,7 +159,7 @@ def _app():
 def test_approval_double_click_is_idempotent(fake_db, monkeypatch):
     now = datetime.now(timezone.utc)
     vps.register_pool("gold", name="Gold", pool_type="tournament_reward", campaign_id="july-tournament-2026")
-    fake_db["voucher_pools"].insert_one({"pool_id": "gold", "code": "CODE-A", "status": "available", "created_at": now})
+    fake_db["voucher_pools"].insert_one({"pool_id": "gold", "code": "CODE-A", "status": "available", "created_at": now, "pool_source": "campaign_centre"})
     fake_db["gc_campaigns"].insert_one(_campaign())
     fake_db["gc_providers"].insert_one({"provider_id": "mywin-tournament", "active": True})
     fake_db["tournament_results"].insert_one(_submission())
@@ -188,7 +188,7 @@ def test_approval_double_click_is_idempotent(fake_db, monkeypatch):
 def test_result_correction_never_silently_replaces_assigned_voucher(fake_db, monkeypatch):
     now = datetime.now(timezone.utc)
     vps.register_pool("gold", name="Gold", pool_type="tournament_reward", campaign_id="july-tournament-2026")
-    fake_db["voucher_pools"].insert_one({"pool_id": "gold", "code": "CODE-A", "status": "available", "created_at": now})
+    fake_db["voucher_pools"].insert_one({"pool_id": "gold", "code": "CODE-A", "status": "available", "created_at": now, "pool_source": "campaign_centre"})
     fake_db["gc_campaigns"].insert_one(_campaign())
     fake_db["gc_providers"].insert_one({"provider_id": "mywin-tournament", "active": True})
     fake_db["tournament_results"].insert_one(_submission())
@@ -227,3 +227,17 @@ def test_reward_pool_endpoints_reuse_shared_inventory(fake_db, monkeypatch):
     assert fake_db["voucher_pools"].count_documents({"pool_id": "silver", "status": "available"}) == 2
     # And no parallel "campaign_voucher_codes" collection was ever touched.
     assert "campaign_voucher_codes" not in fake_db._collections
+
+
+def test_list_reward_pools_reconciles_stock_and_serializes_dates(fake_db, monkeypatch):
+    monkeypatch.setattr("vouchers.require_admin", lambda: ({"id": 1, "usernameLower": "admin"}, None))
+    client = _app().test_client()
+    client.post("/api/admin/reward-pools", json={"pool_id": "bronze", "name": "Bronze"})
+    client.post("/api/admin/reward-pools/bronze/upload-codes", json={"codes": ["B1", "B2", "B3"]})
+
+    resp = client.get("/api/admin/reward-pools")
+    pool = next(p for p in resp.get_json()["pools"] if p["pool_id"] == "bronze")
+    assert pool["stock"] == {"available": 3, "issued": 0}
+    assert isinstance(pool["created_at"], str)
+    from datetime import datetime as _dt
+    _dt.fromisoformat(pool["created_at"])  # must be ISO 8601, not an HTTP-date string

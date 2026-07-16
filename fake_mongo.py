@@ -161,3 +161,11 @@ class FakeDb:
         if name not in self._collections:
             self._collections[name] = FakeCollection(self._unique_keys_by_collection.get(name))
         return self._collections[name]
+
+    def __getattr__(self, name: str) -> FakeCollection:
+        # Mirrors database.DatabaseProxy, which supports both db["x"] and
+        # db.x (attribute access) — real production code (e.g.
+        # affiliate_rewards.py) uses the attribute form.
+        if name.startswith("_"):
+            raise AttributeError(name)
+        return self[name]

@@ -296,15 +296,23 @@ def _validate_body(body: dict, *, partial: bool = False) -> tuple[dict | None, s
 
 
 def _serialize(doc: dict) -> dict:
+    """Returns a JSON-safe copy for the API response. Must never mutate
+    ``doc`` itself — ``dict(doc)`` is a shallow copy, so nested dicts (like
+    ``schedule``) are shared with the caller's original object; callers
+    that still need the original datetime values (e.g. to also compute
+    ``visibility_explanation``) would otherwise see them silently replaced
+    with ISO strings."""
     out = dict(doc)
     out["id"] = str(out.pop("_id"))
     for k in ("created_at", "updated_at"):
         if out.get(k):
             out[k] = out[k].isoformat()
-    schedule = out.get("schedule") or {}
-    for k in ("starts_at", "ends_at"):
-        if schedule.get(k):
-            schedule[k] = schedule[k].isoformat()
+    if out.get("schedule"):
+        schedule = dict(out["schedule"])
+        for k in ("starts_at", "ends_at"):
+            if schedule.get(k):
+                schedule[k] = schedule[k].isoformat()
+        out["schedule"] = schedule
     return out
 
 

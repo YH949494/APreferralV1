@@ -69,6 +69,19 @@ def test_archived_campaign_absent():
     assert cc.is_publicly_active(c, _provider()) is False
 
 
+def test_status_scheduled_absent_even_with_past_starts_at():
+    # status="scheduled" (not "live") must be excluded regardless of timing.
+    c = _campaign(status="scheduled")
+    assert cc.is_publicly_active(c, _provider()) is False
+
+
+def test_status_ended_absent_even_within_schedule_window():
+    # status="ended" (not "live") must be excluded even if starts_at/ends_at
+    # would otherwise be "in window" — status is checked first.
+    c = _campaign(status="ended")
+    assert cc.is_publicly_active(c, _provider()) is False
+
+
 def test_destination_not_ready_absent():
     c = _campaign()
     c["destination"]["ready"] = False
@@ -231,3 +244,89 @@ def test_active_endpoint_never_returns_internal_fields(fake_db):
     assert "reward_config" not in card
     assert "destination" not in card
     assert "created_by" not in card
+
+
+def test_active_endpoint_excludes_every_non_public_state_in_one_sweep(fake_db):
+    fake_db["gc_providers"].insert_one(_provider())
+    fake_db["gc_providers"].insert_one(_provider(provider_id="inactive-provider", active=False))
+    now = datetime.now(timezone.utc)
+
+    fake_db["gc_campaigns"].insert_one(_campaign(campaign_id="c-draft", status="draft"))
+    fake_db["gc_campaigns"].insert_one(_campaign(
+        campaign_id="c-scheduled-future", status="live",
+        schedule={"starts_at": now + timedelta(days=1), "ends_at": None}))
+    fake_db["gc_campaigns"].insert_one(_campaign(campaign_id="c-paused", status="paused"))
+    fake_db["gc_campaigns"].insert_one(_campaign(
+        campaign_id="c-ended", status="live",
+        schedule={"starts_at": now - timedelta(days=2), "ends_at": now - timedelta(hours=1)}))
+    fake_db["gc_campaigns"].insert_one(_campaign(campaign_id="c-archived", status="archived"))
+    fake_db["gc_campaigns"].insert_one(_campaign(
+        campaign_id="c-provider-inactive", status="live",
+        destination={"provider_id": "inactive-provider", "open_mode": "telegram_web_app", "path": "/x", "ready": True}))
+    dest_not_ready = _campaign(campaign_id="c-dest-not-ready")
+    dest_not_ready["destination"]["ready"] = False
+    fake_db["gc_campaigns"].insert_one(dest_not_ready)
+    fake_db["gc_campaigns"].insert_one(_campaign(campaign_id="c-fully-active", status="live"))
+
+    client = _app().test_client()
+    resp = client.get("/api/campaigns/active")
+    ids = [c["campaign_id"] for c in resp.get_json()["campaigns"]]
+    assert ids == ["c-fully-active"]
+
+
+def test_admin_list_still_shows_non_public_campaigns(fake_db):
+    """Admins must be able to see draft/paused/archived/destination-not-ready
+    campaigns — only the public endpoint filters them out."""
+    from unittest.mock import patch
+
+    fake_db["gc_providers"].insert_one(_provider())
+    for status in ("draft", "paused", "archived"):
+        fake_db["gc_campaigns"].insert_one(_campaign(campaign_id=f"c-{status}", status=status))
+    dest_not_ready = _campaign(campaign_id="c-not-ready")
+    dest_not_ready["destination"]["ready"] = False
+    fake_db["gc_campaigns"].insert_one(dest_not_ready)
+
+    admin_app = Flask(__name__)
+    admin_app.register_blueprint(cc.campaign_centre_bp)
+    with patch("vouchers.require_admin", return_value=({"id": 1}, None)):
+        resp = admin_app.test_client().get("/api/admin/gc-campaigns")
+    assert resp.status_code == 200
+    ids = {c["campaign_id"] for c in resp.get_json()["campaigns"]}
+    assert {"c-draft", "c-paused", "c-archived", "c-not-ready"}.issubset(ids)
+
+
+def test_admin_get_single_campaign_does_not_500(fake_db):
+    """Regression test: _serialize() must not mutate the shared schedule
+    dict before visibility_explanation() reads it (previously caused a
+    TypeError: '>' not supported between str and datetime, a 500 on every
+    GET /api/admin/gc-campaigns and /api/admin/gc-campaigns/{id} call)."""
+    from unittest.mock import patch
+
+    fake_db["gc_providers"].insert_one(_provider())
+    fake_db["gc_campaigns"].insert_one(_campaign(campaign_id="c1", status="draft"))
+
+    admin_app = Flask(__name__)
+    admin_app.register_blueprint(cc.campaign_centre_bp)
+    with patch("vouchers.require_admin", return_value=({"id": 1}, None)):
+        resp = admin_app.test_client().get("/api/admin/gc-campaigns/c1")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["campaign"]["campaign_id"] == "c1"
+    assert isinstance(body["campaign"]["schedule"]["starts_at"], str)
+    assert body["campaign"]["effective_visibility"]["publicly_visible"] is False
+
+
+def test_serialize_never_mutates_the_original_document(fake_db):
+    """Direct unit-level guard for the same class of bug: calling
+    _serialize() must leave the source document's schedule datetimes
+    intact for any code that reads it afterward."""
+    campaign = _campaign(campaign_id="mutation-guard")
+    fake_db["gc_campaigns"].insert_one(campaign)
+    stored = fake_db["gc_campaigns"].find_one({"campaign_id": "mutation-guard"})
+    original_starts_at = stored["schedule"]["starts_at"]
+    assert isinstance(original_starts_at, datetime)
+
+    cc._serialize(stored)
+
+    assert isinstance(stored["schedule"]["starts_at"], datetime)
+    assert stored["schedule"]["starts_at"] == original_starts_at

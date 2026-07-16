@@ -38,6 +38,32 @@ logger = logging.getLogger(__name__)
 POOL_TYPES = ["welcome", "voucher_drop", "tournament_reward", "referral", "vip", "cashback"]
 CODE_STATUSES = ["available", "issued"]
 
+# Pool IDs already owned by the legacy affiliate/welcome-tier flow
+# (vouchers.py admin_pools_upload_v2 / affiliate_rewards.py). Registering or
+# uploading into one of these from Campaign Centre is refused outright so a
+# reward pool can never accidentally share a pool_id with — and therefore
+# never contend for stock with — an existing affiliate/welcome tier.
+RESERVED_LEGACY_POOL_IDS = frozenset({"WELCOME", "T1", "T2", "T3", "T4", "T5"})
+
+# Marker written onto every code row this module inserts. allocate_voucher()
+# requires this marker on the filter side too, so even in the hypothetical
+# case of a pool_id collision, Campaign Centre allocation can never match
+# (and therefore never consume) a code row that a legacy flow inserted
+# without this marker, and vice versa the legacy flows' own filters never
+# check for it so they keep working unchanged either way.
+_POOL_SOURCE = "campaign_centre"
+
+
+class ReservedPoolIdError(ValueError):
+    pass
+
+
+def _reject_reserved_pool_id(pool_id: str) -> None:
+    if str(pool_id).strip().upper() in RESERVED_LEGACY_POOL_IDS:
+        raise ReservedPoolIdError(
+            f"pool_id {pool_id!r} is reserved for the legacy affiliate/welcome voucher flow"
+        )
+
 
 def _ensure_indexes() -> None:
     try:
@@ -63,6 +89,7 @@ def register_pool(
 ) -> dict:
     """Create or update the catalog entry for a pool_id. Never touches the
     code inventory itself."""
+    _reject_reserved_pool_id(pool_id)
     now = datetime.now(timezone.utc)
     update = {
         "$set": {
@@ -104,15 +131,24 @@ def pool_is_active(pool_id: str) -> bool:
 
 
 def pool_stock(pool_id: str) -> dict:
-    available = database.db["voucher_pools"].count_documents({"pool_id": pool_id, "status": "available"})
-    issued = database.db["voucher_pools"].count_documents({"pool_id": pool_id, "status": "issued"})
+    """Counts are scoped to pool_source="campaign_centre" so a stock report
+    can never be inflated by an unrelated legacy row that happened to share
+    a pool_id (which registration/upload already refuse for reserved ids;
+    this is defense in depth for the read side too)."""
+    base = {"pool_id": pool_id, "pool_source": _POOL_SOURCE}
+    available = database.db["voucher_pools"].count_documents({**base, "status": "available"})
+    issued = database.db["voucher_pools"].count_documents({**base, "status": "issued"})
     return {"available": available, "issued": issued}
 
 
 def upload_codes(pool_id: str, codes: list[str], *, display_label: str = "", value_hint: str = "", currency: str = "") -> dict:
     """Insert codes into the shared Voucher Centre inventory table
     (``db.voucher_pools``) — the exact same collection/shape the existing
-    affiliate voucher-pool upload flow writes to."""
+    affiliate voucher-pool upload flow writes to, tagged with
+    ``pool_source: "campaign_centre"`` so allocate_voucher() can never pick
+    up a legacy-inserted row (which never carries that field) even if a
+    pool_id were ever reused."""
+    _reject_reserved_pool_id(pool_id)
     now = datetime.now(timezone.utc)
     inserted, skipped = 0, 0
     for raw_code in codes:
@@ -131,6 +167,7 @@ def upload_codes(pool_id: str, codes: list[str], *, display_label: str = "", val
                 "value_hint": value_hint or None,
                 "currency": currency or None,
                 "created_at": now,
+                "pool_source": _POOL_SOURCE,
             })
             inserted += 1
         except Exception as exc:
@@ -146,12 +183,17 @@ def allocate_voucher(pool_id: str, *, reward_id: str, telegram_user_id: int, now
     reward. Mirrors affiliate_rewards._claim_voucher_from_pool's atomic
     find_one_and_update pattern against the same collection, keyed by
     ``issued_for_reward_id`` instead of ``issued_for_ledger_id`` so the two
-    consumers never contend over each other's field semantics."""
+    consumers never contend over each other's field semantics. The filter
+    additionally requires ``pool_source: "campaign_centre"`` (set by
+    upload_codes above), so this can only ever claim a code this module
+    itself uploaded — never a legacy affiliate/welcome-tier row, even in the
+    hypothetical case of a pool_id collision."""
     now = now or datetime.now(timezone.utc)
     return database.db["voucher_pools"].find_one_and_update(
         {
             "pool_id": pool_id,
             "status": "available",
+            "pool_source": _POOL_SOURCE,
             "$or": [
                 {"issued_for_reward_id": {"$exists": False}},
                 {"issued_for_reward_id": None},
@@ -172,4 +214,6 @@ def allocate_voucher(pool_id: str, *, reward_id: str, telegram_user_id: int, now
 
 
 def voucher_already_allocated_for_reward(reward_id: str) -> dict | None:
-    return database.db["voucher_pools"].find_one({"issued_for_reward_id": reward_id, "status": "issued"})
+    return database.db["voucher_pools"].find_one(
+        {"issued_for_reward_id": reward_id, "status": "issued", "pool_source": _POOL_SOURCE}
+    )
