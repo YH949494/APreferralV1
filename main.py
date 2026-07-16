@@ -2343,6 +2343,28 @@ app.register_blueprint(campaign_performance_bp)
 from campaign_intelligence import campaign_intelligence_bp
 app.register_blueprint(campaign_intelligence_bp)
 
+# Campaign Centre / Tournament Reward Integration — Telegram campaign gateway
+# (namespaced under /api/admin/campaign-centre/... to avoid colliding with
+# the pre-existing segment-audience campaigns_bp at /api/admin/campaigns).
+from campaign_providers import campaign_providers_bp
+app.register_blueprint(campaign_providers_bp)
+
+from campaign_centre import campaign_centre_bp, campaign_public_bp
+app.register_blueprint(campaign_centre_bp)
+app.register_blueprint(campaign_public_bp)
+
+from subscription_verification_api import subscription_verification_bp
+app.register_blueprint(subscription_verification_bp)
+
+from tournament_integration import tournament_integration_bp
+app.register_blueprint(tournament_integration_bp)
+
+from tournament_rewards import tournament_rewards_bp
+app.register_blueprint(tournament_rewards_bp)
+
+from campaign_rewards_api import campaign_rewards_bp
+app.register_blueprint(campaign_rewards_bp)
+
 admin_bp = Blueprint("admin", __name__)
 
 
