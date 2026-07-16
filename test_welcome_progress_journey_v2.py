@@ -305,6 +305,145 @@ def test_process_welcome_reminders_day2_falls_back_to_http_when_bot_send_fails(m
     assert http_sent == [(45, scheduler._WELCOME_PROGRESS_REMINDER_DAY2)]
 
 
+class FakeAnalyticsCollection:
+    """Minimal stand-in for ``welcome_analytics_events_col`` supporting both
+    plain appends (``insert_one``) and the dedup upsert path used for skip
+    events (``update_one`` with ``$setOnInsert`` + ``upsert=True``)."""
+
+    def __init__(self):
+        self.docs = []
+
+    def insert_one(self, doc):
+        self.docs.append(dict(doc))
+
+    def update_one(self, filt, update, upsert=False):
+        for doc in self.docs:
+            if all(doc.get(k) == v for k, v in filt.items()):
+                return
+        if upsert and "$setOnInsert" in update:
+            self.docs.append(dict(update["$setOnInsert"]))
+
+
+def test_process_welcome_reminders_records_stage_and_status_on_send_failure(monkeypatch):
+    now = datetime(2026, 1, 2, 12, 0, tzinfo=timezone.utc)
+    doc = {
+        "_id": "r8",
+        "user_id": 47,
+        "day1_at": now - timedelta(hours=21),
+        "reminder_20h_sent": False,
+        "reminder_28h_sent": False,
+        "day2_reminder_sent": False,
+    }
+    fake_db = FakeReminderDb([doc])
+    fake_events = FakeAnalyticsCollection()
+    monkeypatch.setattr(m, "welcome_analytics_events_col", fake_events)
+    monkeypatch.setattr(m, "get_welcome_progress", lambda uid, now=None: {"completed": 1, "claimed": False, "expired": False})
+
+    def fake_send(uid, text):
+        return False, "boom", False
+
+    result = scheduler.process_welcome_reminders(now_ref=now, db_ref=fake_db, send_fn=fake_send)
+
+    assert result["send_failed"] == 1
+    failed_events = [e for e in fake_events.docs if e["event"] == "welcome_reminder_failed"]
+    assert len(failed_events) == 1
+    assert failed_events[0]["stage"] == "20h"
+    assert failed_events[0]["status"] == "failed"
+    assert failed_events[0]["reason"] == "boom"
+    assert failed_events[0]["run_id"] == result["run_id"]
+
+
+def test_process_welcome_reminders_success_events_carry_stage_and_run_id(monkeypatch):
+    now = datetime(2026, 1, 2, 12, 0, tzinfo=timezone.utc)
+    doc = {
+        "_id": "r9",
+        "user_id": 48,
+        "day1_at": now - timedelta(hours=21),
+        "reminder_20h_sent": False,
+        "reminder_28h_sent": False,
+        "day2_reminder_sent": False,
+    }
+    fake_db = FakeReminderDb([doc])
+    fake_events = FakeAnalyticsCollection()
+    monkeypatch.setattr(m, "welcome_analytics_events_col", fake_events)
+    monkeypatch.setattr(m, "get_welcome_progress", lambda uid, now=None: {"completed": 1, "claimed": False, "expired": False})
+
+    result = scheduler.process_welcome_reminders(now_ref=now, db_ref=fake_db, send_fn=lambda uid, text: (True, None, False))
+
+    sent_events = [e for e in fake_events.docs if e["event"] == "welcome_reminder_20h_sent"]
+    assert len(sent_events) == 1
+    assert sent_events[0]["stage"] == "20h"
+    assert sent_events[0]["status"] == "sent"
+    assert sent_events[0]["run_id"] == result["run_id"]
+    assert result["run_id"]
+
+
+def test_process_welcome_reminders_skip_event_stage_matches_candidate_stage(monkeypatch):
+    now = datetime(2026, 1, 2, 12, 0, tzinfo=timezone.utc)
+    doc = {
+        "_id": "r10",
+        "user_id": 49,
+        "day1_at": now - timedelta(hours=21),
+        "reminder_20h_sent": False,
+        "reminder_28h_sent": False,
+        "day2_reminder_sent": False,
+    }
+    fake_db = FakeReminderDb([doc])
+    fake_events = FakeAnalyticsCollection()
+    monkeypatch.setattr(m, "welcome_analytics_events_col", fake_events)
+    monkeypatch.setattr(m, "get_welcome_progress", lambda uid, now=None: {"completed": 1, "claimed": False, "expired": False})
+    monkeypatch.setattr(scheduler, "_welcome_reminder_anti_abuse_blocked", lambda uid, db_ref, progress: "multi_account")
+
+    scheduler.process_welcome_reminders(now_ref=now, db_ref=fake_db, send_fn=lambda uid, text: (True, None, False))
+
+    skip_events = [e for e in fake_events.docs if e["event"] == "welcome_reminder_skipped"]
+    assert len(skip_events) == 1
+    assert skip_events[0]["stage"] == "20h"
+    assert skip_events[0]["status"] == "skipped"
+    assert skip_events[0]["reason"] == "multi_account"
+
+
+def test_process_welcome_reminders_skip_events_dedupe_within_same_day(monkeypatch):
+    """The hourly job re-evaluates the same permanently-blocked user every
+    run; the skip event must not accumulate one row per hour."""
+    now = datetime(2026, 1, 2, 12, 0, tzinfo=timezone.utc)
+    doc = {
+        "_id": "r11",
+        "user_id": 50,
+        "day1_at": now - timedelta(hours=21),
+        "reminder_20h_sent": False,
+        "reminder_28h_sent": False,
+        "day2_reminder_sent": False,
+    }
+    fake_db = FakeReminderDb([doc])
+    fake_events = FakeAnalyticsCollection()
+    monkeypatch.setattr(m, "welcome_analytics_events_col", fake_events)
+    monkeypatch.setattr(m, "get_welcome_progress", lambda uid, now=None: {"completed": 1, "claimed": False, "expired": False})
+    monkeypatch.setattr(scheduler, "_welcome_reminder_anti_abuse_blocked", lambda uid, db_ref, progress: "multi_account")
+
+    # All three runs land in the same KL calendar day and stay under the 28h
+    # threshold (21h, 22h, 23h since day1_at), so only the "20h" stage is
+    # ever a candidate — isolating this test to dedup behavior alone.
+    scheduler.process_welcome_reminders(now_ref=now, db_ref=fake_db, send_fn=lambda uid, text: (True, None, False))
+    scheduler.process_welcome_reminders(now_ref=now + timedelta(hours=1), db_ref=fake_db, send_fn=lambda uid, text: (True, None, False))
+    scheduler.process_welcome_reminders(now_ref=now + timedelta(hours=2), db_ref=fake_db, send_fn=lambda uid, text: (True, None, False))
+
+    skip_events = [e for e in fake_events.docs if e["event"] == "welcome_reminder_skipped"]
+    assert len(skip_events) == 1
+
+    # A skip on a later *local* calendar day must still be recorded (not
+    # permanently suppressed) — the dedup key includes the KL day bucket.
+    # +5h keeps elapsed time (26h) under the 28h threshold so "20h" is still
+    # the only candidate stage, while crossing the KL midnight boundary.
+    scheduler.process_welcome_reminders(now_ref=now + timedelta(hours=5), db_ref=fake_db, send_fn=lambda uid, text: (True, None, False))
+    skip_events_after_next_day = [e for e in fake_events.docs if e["event"] == "welcome_reminder_skipped"]
+    assert len(skip_events_after_next_day) == 2
+
+
+def test_log_welcome_event_stage_values_are_normalized():
+    assert set(m.WELCOME_REMINDER_STAGES) == {"20h", "28h", "day3", "completed"}
+
+
 class FakeDistinctCollection:
     def __init__(self, docs):
         self.docs = docs

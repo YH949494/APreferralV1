@@ -776,6 +776,35 @@ def ensure_voucher_indexes():
     welcome_reminders_col.create_index([("updated_at", ASCENDING)])
     welcome_analytics_events_col.create_index([("user_id", ASCENDING), ("event", ASCENDING)])
     welcome_analytics_events_col.create_index([("created_at", ASCENDING)])
+    welcome_analytics_events_col.create_index([("event", ASCENDING), ("created_at", DESCENDING)])
+    welcome_analytics_events_col.create_index([("stage", ASCENDING), ("status", ASCENDING), ("created_at", DESCENDING)])
+    try:
+        welcome_analytics_events_col.create_index([("dedup_key", ASCENDING)], unique=True, sparse=True)
+    except Exception:
+        logger.warning("[WELCOME_V2][ANALYTICS] dedup_key index creation failed (non-fatal)")
+    # Retention for pure observability events only (reminder sent/failed/skipped
+    # telemetry) — never the underlying business record types (welcome_claimed,
+    # welcome_checkin_d1/d2/d3, welcome_completed, welcome_abandoned,
+    # welcome_progress_view), which are excluded via partialFilterExpression
+    # and kept indefinitely. 90 days is enough for operational triage without
+    # keeping unbounded hourly-job telemetry forever.
+    try:
+        welcome_analytics_events_col.create_index(
+            [("created_at", ASCENDING)],
+            name="welcome_reminder_telemetry_ttl",
+            expireAfterSeconds=90 * 86400,
+            partialFilterExpression={
+                "event": {"$in": [
+                    "welcome_reminder_20h_sent",
+                    "welcome_reminder_28h_sent",
+                    "welcome_reminder_day2_sent",
+                    "welcome_reminder_failed",
+                    "welcome_reminder_skipped",
+                ]},
+            },
+        )
+    except Exception:
+        logger.warning("[WELCOME_V2][ANALYTICS] telemetry TTL index creation failed (non-fatal)")
     subscription_cache_col.create_index([("expireAt", ASCENDING)], expireAfterSeconds=0)
     try:
         for legacy_name in ("uniq_user_checks", "uniq_tg_verify_user_id", "uq_tg_verif_user_id_sparse"):
@@ -1034,12 +1063,44 @@ def _welcome_progress_pct(completed_days: int) -> int:
     return pct_by_days.get(safe_days, 100)
 
 
-def log_welcome_event(event: str, uid, meta: dict | None = None, *, now: datetime | None = None) -> None:
-    """Append-only analytics event for the Welcome Voucher Progress journey (V2)."""
+# Normalized stage identifiers used across all Welcome reminder analytics
+# events (success/failure/skip) so dashboard code never has to parse a stage
+# out of the ``event`` string. "completed" marks the 3/3 unlock celebration.
+WELCOME_REMINDER_STAGES = ("20h", "28h", "day3", "completed")
+
+
+def log_welcome_event(
+    event: str,
+    uid,
+    meta: dict | None = None,
+    *,
+    stage: str | None = None,
+    status: str | None = None,
+    reason: str | None = None,
+    run_id: str | None = None,
+    dedupe: bool = False,
+    now: datetime | None = None,
+) -> None:
+    """Append-only analytics event for the Welcome Voucher Progress journey (V2).
+
+    ``stage``/``status``/``reason``/``run_id`` are optional structured fields
+    (on top of the free-form ``meta``) so dashboard queries can filter on
+    them directly instead of parsing the ``event`` name. ``stage`` must be
+    one of ``WELCOME_REMINDER_STAGES`` when set.
+
+    ``dedupe=True`` collapses repeats of the same (event, uid, stage) into a
+    single document per local (Asia/Kuala_Lumpur) calendar day via an upsert
+    on a unique ``dedup_key`` — used for anti-abuse skip events, which would
+    otherwise be re-logged every hour for a permanently-blocked user. Do not
+    set it on failure events: a real failure on a later day must still be
+    recorded even if the same (event, uid, stage) failed earlier today.
+    """
     try:
         uid_int = int(uid)
     except (TypeError, ValueError):
         return
+    if stage is not None and stage not in WELCOME_REMINDER_STAGES:
+        _safe_log("warning", "[WELCOME_V2][ANALYTICS] unknown stage=%s event=%s uid=%s", stage, event, uid_int)
     now_ref = _as_aware_utc(now) or now_utc()
     doc = {
         "event": str(event),
@@ -1047,8 +1108,26 @@ def log_welcome_event(event: str, uid, meta: dict | None = None, *, now: datetim
         "meta": meta or {},
         "created_at": now_ref,
     }
+    if stage is not None:
+        doc["stage"] = stage
+    if status is not None:
+        doc["status"] = status
+    if reason is not None:
+        doc["reason"] = reason
+    if run_id is not None:
+        doc["run_id"] = run_id
     try:
-        welcome_analytics_events_col.insert_one(doc)
+        if dedupe:
+            day_bucket = (_as_aware_kl(now_ref) or now_kl()).strftime("%Y-%m-%d")
+            dedup_key = f"{event}:{uid_int}:{stage or '-'}:{day_bucket}"
+            doc["dedup_key"] = dedup_key
+            welcome_analytics_events_col.update_one(
+                {"dedup_key": dedup_key},
+                {"$setOnInsert": doc},
+                upsert=True,
+            )
+        else:
+            welcome_analytics_events_col.insert_one(doc)
     except Exception:
         _safe_log("warning", "[WELCOME_V2][ANALYTICS] failed to record event=%s uid=%s", event, uid_int)
 
@@ -1154,7 +1233,7 @@ def record_welcome_checkin_progress(user_id, *, now: datetime | None = None) -> 
         log_welcome_event("welcome_checkin_d2", uid, now=now_ref)
     if completed >= 3:
         log_welcome_event("welcome_checkin_d3", uid, now=now_ref)
-        log_welcome_event("welcome_completed", uid, now=now_ref)
+        log_welcome_event("welcome_completed", uid, stage="completed", status="sent", now=now_ref)
 
     if updates:
         welcome_reminders_col.update_one(

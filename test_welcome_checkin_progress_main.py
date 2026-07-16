@@ -126,7 +126,7 @@ def test_third_qualifying_checkin_completes_welcome_progress():
 
         with (
             mock.patch.object(vouchers, "get_welcome_progress", lambda u, now=None: {"eligible": True, "completed": 3}),
-            mock.patch.object(vouchers, "log_welcome_event", lambda event, u, meta=None, now=None: events.append(event)),
+            mock.patch.object(vouchers, "log_welcome_event", lambda event, u, meta=None, **kw: events.append(event)),
         ):
             vouchers.record_welcome_checkin_progress(uid, now=joined + timedelta(days=2))
 

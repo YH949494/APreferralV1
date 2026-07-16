@@ -25,6 +25,24 @@ class _FakeCollection:
     def count_documents(self, filt):
         return len([d for d in self.docs if self._matches(d, filt)])
 
+    def aggregate(self, pipeline):
+        docs = self.docs
+        for stage in pipeline:
+            if "$match" in stage:
+                filt = stage["$match"]
+                docs = [d for d in docs if self._matches(d, filt)]
+            elif "$group" in stage:
+                group = stage["$group"]
+                key_field = group["_id"]
+                assert isinstance(key_field, str) and key_field.startswith("$")
+                key_field = key_field[1:]
+                counts: dict = {}
+                for d in docs:
+                    key = self._get_path(d, key_field)
+                    counts[key] = counts.get(key, 0) + 1
+                docs = [{"_id": k, "count": v} for k, v in counts.items()]
+        return docs
+
     def _matches(self, doc, filt):
         for key, cond in filt.items():
             if key == "$or":
@@ -166,6 +184,104 @@ class BuildPmAutomationTests(unittest.TestCase):
         row = next(r for r in rows if r["key"] == "referral_near_miss")
         self.assertEqual(row["status"], rs.OFFLINE)
         self.assertIn("never invoked", row["notes"])
+
+
+class WelcomeCheckinStageRowTests(unittest.TestCase):
+    """The 4 new PM Automation rows (Welcome Check-in D2/D2-followup/D3 +
+    Unlock Celebration) must derive last_run_age_s from persisted runtime
+    data (admin_cache run-stats, not the TTL'd scheduler_locks doc alone),
+    attribute failed/skipped counts to the correct normalized ``stage``, and
+    never report Online purely because the job is registered."""
+
+    FLAGS = {"welcome_journey": True}
+
+    def _collections(self, *, admin_cache_doc=None, lock_doc=None, events=None):
+        return {
+            "admin_cache": _FakeCollection([admin_cache_doc] if admin_cache_doc else []),
+            "scheduler_locks": _FakeCollection([lock_doc] if lock_doc else []),
+            "welcome_analytics_events": _FakeCollection(events or []),
+        }
+
+    def test_stale_heartbeat_is_offline(self):
+        collections = self._collections(
+            lock_doc={"_id": "welcome_progress_reminders", "updatedAt": NOW - timedelta(hours=5)},
+        )
+        rows = rs.build_pm_automation(collections, self.FLAGS, {}, NOW)
+        row = next(r for r in rows if r["key"] == "welcome_checkin_d2")
+        self.assertEqual(row["status"], rs.OFFLINE)
+
+    def test_recent_run_zero_eligible_is_waiting(self):
+        collections = self._collections(
+            admin_cache_doc={"_id": "welcome_run_stats:welcome_progress_reminders", "lastRunAt": NOW - timedelta(minutes=5)},
+        )
+        rows = rs.build_pm_automation(collections, self.FLAGS, {}, NOW)
+        row = next(r for r in rows if r["key"] == "welcome_checkin_d2")
+        self.assertEqual(row["status"], rs.WAITING)
+        self.assertEqual(row["sent_today"], 0)
+        self.assertIsNotNone(row["last_run_age_s"])
+
+    def test_recent_run_with_failures_is_degraded(self):
+        collections = self._collections(
+            admin_cache_doc={"_id": "welcome_run_stats:welcome_progress_reminders", "lastRunAt": NOW - timedelta(minutes=5)},
+            events=[
+                {"event": "welcome_reminder_failed", "stage": "20h", "status": "failed", "reason": "timeout", "created_at": NOW},
+            ],
+        )
+        rows = rs.build_pm_automation(collections, self.FLAGS, {}, NOW)
+        row = next(r for r in rows if r["key"] == "welcome_checkin_d2")
+        self.assertEqual(row["status"], rs.WARNING)
+        self.assertEqual(row["failed_today"], 1)
+
+    def test_recent_run_with_send_is_online(self):
+        collections = self._collections(
+            admin_cache_doc={"_id": "welcome_run_stats:welcome_progress_reminders", "lastRunAt": NOW - timedelta(minutes=5)},
+            events=[
+                {"event": "welcome_reminder_20h_sent", "stage": "20h", "status": "sent", "created_at": NOW},
+            ],
+        )
+        rows = rs.build_pm_automation(collections, self.FLAGS, {}, NOW)
+        row = next(r for r in rows if r["key"] == "welcome_checkin_d2")
+        self.assertEqual(row["status"], rs.ONLINE)
+        self.assertEqual(row["sent_today"], 1)
+
+    def test_last_run_age_survives_expired_scheduler_lock(self):
+        # scheduler_locks doc has a 3600s TTL (acquire_scheduler_lock) and
+        # can be reaped by Mongo; admin_cache run-stats are retained
+        # separately and must be preferred.
+        collections = self._collections(
+            admin_cache_doc={"_id": "welcome_run_stats:welcome_progress_reminders", "lastRunAt": NOW - timedelta(minutes=5)},
+            lock_doc=None,
+        )
+        rows = rs.build_pm_automation(collections, self.FLAGS, {}, NOW)
+        row = next(r for r in rows if r["key"] == "welcome_checkin_d2")
+        self.assertAlmostEqual(row["last_run_age_s"], 300, delta=2)
+
+    def test_skip_event_only_attributed_to_its_own_stage(self):
+        collections = self._collections(
+            admin_cache_doc={"_id": "welcome_run_stats:welcome_progress_reminders", "lastRunAt": NOW - timedelta(minutes=5)},
+            events=[
+                {"event": "welcome_reminder_skipped", "stage": "20h", "status": "skipped", "reason": "multi_account", "created_at": NOW},
+            ],
+        )
+        rows = rs.build_pm_automation(collections, self.FLAGS, {}, NOW)
+        d2_row = next(r for r in rows if r["key"] == "welcome_checkin_d2")
+        followup_row = next(r for r in rows if r["key"] == "welcome_checkin_d2_followup")
+        d3_row = next(r for r in rows if r["key"] == "welcome_checkin_d3")
+        self.assertEqual(d2_row["skipped_today"], 1)
+        self.assertEqual(d2_row["skip_breakdown"], {"multi_account": 1})
+        self.assertEqual(followup_row["skipped_today"], 0)
+        self.assertEqual(d3_row["skipped_today"], 0)
+
+    def test_unlock_celebration_row_uses_completed_event(self):
+        collections = self._collections(
+            events=[
+                {"event": "welcome_completed", "stage": "completed", "status": "sent", "created_at": NOW - timedelta(minutes=10)},
+            ],
+        )
+        rows = rs.build_pm_automation(collections, self.FLAGS, {}, NOW)
+        row = next(r for r in rows if r["key"] == "welcome_checkin_unlock")
+        self.assertEqual(row["sent_today"], 1)
+        self.assertIsNotNone(row["last_sent"])
 
 
 class BuildQueueStatusTests(unittest.TestCase):
