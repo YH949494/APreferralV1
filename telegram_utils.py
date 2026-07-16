@@ -28,6 +28,7 @@ def send_telegram_http_message(
     text: str,
     *,
     parse_mode: str | None = None,
+    reply_markup: dict | None = None,
     token: str | None = None,
     timeout: int = 10,
     log: logging.Logger = logger,
@@ -38,6 +39,8 @@ def send_telegram_http_message(
     payload = {"chat_id": chat_id, "text": text}
     if parse_mode:
         payload["parse_mode"] = parse_mode
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
     max_attempts = 3
     transient_statuses = {429, 502, 503, 504}

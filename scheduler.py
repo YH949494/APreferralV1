@@ -62,6 +62,23 @@ def _welcome_reminder_link() -> str:
     return WELCOME_REMINDER_LINK
 
 
+def _welcome_reminder_markup() -> dict:
+    """Raw Telegram Bot API ``reply_markup`` JSON for the Mini-App check-in
+    button, used by the plain-HTTP send path so the button survives even
+    when the live-bot (python-telegram-bot) send path is unavailable."""
+    return {
+        "inline_keyboard": [[
+            {"text": "🎁 Open Mini-App", "web_app": {"url": _welcome_reminder_link()}},
+        ]]
+    }
+
+
+def _welcome_http_send_fn(uid: int, text: str) -> tuple[bool, str | None, bool]:
+    """Default HTTP fallback for Welcome reminders — includes the Mini-App
+    button so a failed/absent live-bot send does not silently strip it."""
+    return send_telegram_http_message(uid, text, reply_markup=_welcome_reminder_markup())
+
+
 def _welcome_reminder_text(*, final_warning: bool) -> str:
     link = _welcome_reminder_link()
     if final_warning:
@@ -98,7 +115,7 @@ def process_welcome_voucher_lifecycle(*, now_ref: datetime | None = None, batch_
     falsy result, the reminder falls back to plain-text ``send_fn`` (HTTP).
     """
     db_ref = db_ref or db
-    send_fn = send_fn or send_telegram_http_message
+    send_fn = send_fn or _welcome_http_send_fn
     now_ts = _coerce_utc(now_ref) or now_utc()
     limit = int(batch_limit or WELCOME_REMINDER_BATCH_LIMIT)
     expiry_hours = int(_journey_setting("welcome_window_hours", WELCOME_EXPIRY_HOURS))
@@ -305,7 +322,7 @@ def process_welcome_reminders(*, now_ref: datetime | None = None, batch_limit: i
     from vouchers import get_welcome_progress, log_welcome_event
 
     db_ref = db_ref or db
-    send_fn = send_fn or send_telegram_http_message
+    send_fn = send_fn or _welcome_http_send_fn
     now_ts = _coerce_utc(now_ref) or now_utc()
     limit = int(batch_limit or WELCOME_PROGRESS_REMINDER_BATCH_LIMIT)
     run_id = uuid.uuid4().hex
