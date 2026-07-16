@@ -981,18 +981,42 @@ def _record_welcome_run_stats(job_name: str, stats: dict, duration_s: float, now
     running — Mongo would then delete the whole lock doc, wiping this history
     right when the dashboard most needs to show it. Purely additive
     observability; never touches reminder/voucher logic."""
+    doc_id = f"welcome_run_stats:{job_name}"
+    duration_s = round(duration_s, 3)
+    # The heartbeat ($set) and history append ($push) are two separate
+    # update_one calls on purpose: if they were combined into one update
+    # document and $push ever hit a doc where recentRuns had drifted to a
+    # non-array shape (stale/legacy data), Mongo rejects the *whole* update
+    # atomically — silently freezing lastRunAt/status even though this run
+    # actually completed, since the failure is only visible in a log line.
+    # Writing the heartbeat first, on its own, means a corrupt history array
+    # can never take the dashboard offline.
     try:
-        run_record = {"at": now, "duration_s": round(duration_s, 3), "stats": stats}
         admin_cache_col.update_one(
-            {"_id": f"welcome_run_stats:{job_name}"},
+            {"_id": doc_id},
             {
-                "$set": {"lastRunStats": stats, "lastRunAt": now, "lastRunDurationS": round(duration_s, 3)},
-                "$push": {"recentRuns": {"$each": [run_record], "$slice": -20}},
+                "$set": {
+                    "lastRunStats": stats,
+                    "lastRunAt": now,
+                    "updatedAt": now,
+                    "lastRunDurationS": duration_s,
+                    "status": "ok",
+                    "run_id": stats.get("run_id"),
+                },
             },
             upsert=True,
         )
     except Exception:
-        logger.exception("[WELCOME_RUNTIME] failed to persist run stats job=%s", job_name)
+        logger.exception("[WELCOME_RUNTIME] failed to persist heartbeat job=%s", job_name)
+        return
+    try:
+        run_record = {"at": now, "duration_s": duration_s, "stats": stats}
+        admin_cache_col.update_one(
+            {"_id": doc_id},
+            {"$push": {"recentRuns": {"$each": [run_record], "$slice": -20}}},
+        )
+    except Exception:
+        logger.exception("[WELCOME_RUNTIME] failed to append recentRuns job=%s", job_name)
 
 
 def welcome_voucher_lifecycle_scheduled(**kwargs) -> None:
