@@ -1223,6 +1223,143 @@
       </section>
 
       <!-- SETTINGS VIEW -->
+      <section id="view-gcCampaigns" class="hidden">
+        <div class="section" style="margin-bottom:16px;">
+          <div class="section-title">Create Campaign</div>
+          <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:8px;">
+            <input class="filter-input" id="gc-c-id" placeholder="campaign_id (slug)" style="margin:0;" />
+            <input class="filter-input" id="gc-c-name" placeholder="Name" style="margin:0;" />
+            <select class="filter-input" id="gc-c-type" style="margin:0;">
+              <option value="tournament">tournament</option>
+              <option value="external_subscription_verification">external_subscription_verification</option>
+              <option value="external_website">external_website</option>
+            </select>
+            <input class="filter-input" id="gc-c-provider" placeholder="provider_id" style="margin:0;" />
+            <input class="filter-input" id="gc-c-path" placeholder="destination path e.g. /july-tournament" style="margin:0;" />
+            <input class="filter-input" id="gc-c-channel" placeholder="channel_username" style="margin:0;" />
+            <input class="filter-input" id="gc-c-starts" type="datetime-local" style="margin:0;" />
+            <input class="filter-input" id="gc-c-ends" type="datetime-local" style="margin:0;" />
+          </div>
+          <button class="btn primary" id="gc-create-campaign-btn" style="margin-top:10px;">Create draft</button>
+          <div class="sub" style="margin-top:6px;">New campaigns always start as <b>draft</b> and stay admin-only until published — see Providers tab to mark a destination ready.</div>
+        </div>
+        <div class="section-title" style="margin-bottom:8px;">Campaigns</div>
+        <div id="gc-campaigns-body"></div>
+      </section>
+
+      <section id="view-gcProviders" class="hidden">
+        <div class="section" style="margin-bottom:16px;">
+          <div class="section-title">Create Provider</div>
+          <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:8px;">
+            <input class="filter-input" id="gc-p-id" placeholder="provider_id" style="margin:0;" />
+            <input class="filter-input" id="gc-p-name" placeholder="Name" style="margin:0;" />
+            <select class="filter-input" id="gc-p-type" style="margin:0;">
+              <option value="tournament">tournament</option>
+              <option value="external_subscription_verification">external_subscription_verification</option>
+              <option value="external_website">external_website</option>
+            </select>
+            <input class="filter-input" id="gc-p-base-url" placeholder="https://tournament.example.com" style="margin:0;" />
+            <select class="filter-input" id="gc-p-url-mode" style="margin:0;">
+              <option value="query_parameter">Query Parameter (?uid=)</option>
+              <option value="path_parameter">Path Parameter (/uid)</option>
+              <option value="custom_template">Custom Template</option>
+            </select>
+            <input class="filter-input" id="gc-p-secret-env" placeholder="CAMPAIGN_PROVIDER_SECRET_XXX" style="margin:0;" />
+          </div>
+          <button class="btn primary" id="gc-create-provider-btn" style="margin-top:10px;">Create (inactive)</button>
+        </div>
+        <div class="section-title" style="margin-bottom:8px;">Providers</div>
+        <div id="gc-providers-body"></div>
+      </section>
+
+      <section id="view-gcResults" class="hidden">
+        <div class="section-title" style="margin-bottom:8px;">Tournament Results</div>
+        <div id="gc-results-body"></div>
+      </section>
+
+      <section id="view-gcRewards" class="hidden">
+        <div class="section" style="margin-bottom:16px;">
+          <div class="section-title">Reward Pools <span class="sub">(references the existing Voucher Centre inventory — no separate upload workflow)</span></div>
+          <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:8px;">
+            <input class="filter-input" id="gc-pool-id" placeholder="pool_id" style="margin:0;" />
+            <input class="filter-input" id="gc-pool-name" placeholder="Name" style="margin:0;" />
+            <select class="filter-input" id="gc-pool-type" style="margin:0;">
+              <option value="tournament_reward">tournament_reward</option>
+              <option value="affiliate">affiliate</option>
+              <option value="welcome">welcome</option>
+              <option value="voucher_drop">voucher_drop</option>
+              <option value="referral">referral</option>
+              <option value="vip">vip</option>
+              <option value="cashback">cashback</option>
+              <option value="other">other</option>
+            </select>
+            <select class="filter-input" id="gc-pool-scope" style="margin:0;">
+              <option value="campaign_rewards">campaign_rewards (default)</option>
+              <option value="affiliate_rewards">affiliate_rewards</option>
+              <option value="welcome_rewards">welcome_rewards</option>
+              <option value="voucher_drops">voucher_drops</option>
+              <option value="referral_rewards">referral_rewards</option>
+              <option value="shared">shared — allocatable by multiple subsystems</option>
+            </select>
+            <input class="filter-input" id="gc-pool-campaign" placeholder="campaign_id" style="margin:0;" />
+          </div>
+          <button class="btn primary" id="gc-create-pool-btn" style="margin-top:10px;">Register pool</button>
+          <div class="sub" style="margin-top:4px;">Allocation scope controls which subsystem may allocate codes from this pool — it cannot be changed later once codes exist, except via an explicit migration operation.</div>
+          <div id="gc-pools-body" style="margin-top:10px;"></div>
+        </div>
+        <div class="section-title" style="margin-bottom:8px;">Reward Allocations</div>
+        <div class="controls" style="margin-bottom:12px;">
+          <input class="filter-input" id="gc-rewards-filter-uid" placeholder="Telegram user ID" style="margin:0;max-width:180px;" />
+          <select class="filter-input" id="gc-rewards-filter-status" style="margin:0;max-width:180px;">
+            <option value="">any status</option>
+            <option>pending_review</option><option>approved</option><option>allocating</option>
+            <option>assigned</option><option>out_of_stock</option><option>rejected</option><option>expired</option>
+          </select>
+          <button class="btn" id="gc-rewards-filter-btn">Filter</button>
+        </div>
+        <div id="gc-rewards-body"></div>
+      </section>
+
+      <section id="view-gcVerification" class="hidden">
+        <div class="section-title" style="margin-bottom:8px;">Provider Integration Status</div>
+        <div class="sub" style="margin-bottom:10px;">Secrets are never displayed — only whether one is configured.</div>
+        <div id="gc-verification-body"></div>
+      </section>
+
+      <section id="view-gcActivity" class="hidden">
+        <div class="section" style="margin-bottom:16px;">
+          <div class="section-title">Campaign Analytics Summary</div>
+          <div class="controls" style="margin-bottom:10px;">
+            <input class="filter-input" id="gc-analytics-campaign-id" placeholder="campaign_id" style="margin:0;max-width:220px;" />
+            <button class="btn" id="gc-analytics-load-btn">Load Summary</button>
+          </div>
+          <div id="gc-analytics-summary-body"></div>
+        </div>
+        <div class="section-title" style="margin-bottom:8px;">Activity Log</div>
+        <div class="controls" style="margin-bottom:10px;">
+          <input class="filter-input" id="gc-events-campaign-id" placeholder="campaign_id (optional)" style="margin:0;max-width:200px;" />
+          <select class="filter-input" id="gc-events-type" style="margin:0;max-width:200px;">
+            <option value="">any event type</option>
+            <option value="campaign_published">campaign_published</option>
+            <option value="campaign_view">campaign_view</option>
+            <option value="campaign_click">campaign_click</option>
+            <option value="subscription_pass">subscription_pass</option>
+            <option value="subscription_fail">subscription_fail</option>
+            <option value="destination_open">destination_open</option>
+            <option value="leaderboard_received">leaderboard_received</option>
+            <option value="leaderboard_approved">leaderboard_approved</option>
+            <option value="reward_created">reward_created</option>
+            <option value="voucher_assigned">voucher_assigned</option>
+            <option value="voucher_out_of_stock">voucher_out_of_stock</option>
+            <option value="provider_signature_failed">provider_signature_failed</option>
+            <option value="provider_nonce_replay">provider_nonce_replay</option>
+          </select>
+          <button class="btn" id="gc-events-filter-btn">Filter</button>
+        </div>
+        <div id="gc-events-body"></div>
+        <div id="gc-events-pagination" style="margin-top:10px;"></div>
+      </section>
+
       <section id="view-settings" class="hidden">
         <div class="section" style="max-width:520px;margin-bottom:20px;">
           <div class="section-title">Rejoin Buffer</div>

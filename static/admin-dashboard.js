@@ -56,6 +56,28 @@
       });
   }
 
+  function apiPostJson(path, body) {
+    return fetch(path, {
+      method: "POST", credentials: "same-origin",
+      headers: { "Accept": "application/json", "Content-Type": "application/json" },
+      body: JSON.stringify(body || {}),
+    }).then(function (r) {
+      if (r.status === 401) { window.location.href = "/static/admin-login.html"; throw new Error("unauthorized"); }
+      return r.json().then(function (j) { return { ok: r.ok, status: r.status, d: j }; });
+    });
+  }
+
+  function apiPutJson(path, body) {
+    return fetch(path, {
+      method: "PUT", credentials: "same-origin",
+      headers: { "Accept": "application/json", "Content-Type": "application/json" },
+      body: JSON.stringify(body || {}),
+    }).then(function (r) {
+      if (r.status === 401) { window.location.href = "/static/admin-login.html"; throw new Error("unauthorized"); }
+      return r.json().then(function (j) { return { ok: r.ok, status: r.status, d: j }; });
+    });
+  }
+
   function banner(msg, kind) {
     var el = $("#global-banner");
     if (!msg) { el.innerHTML = ""; return; }
@@ -4645,6 +4667,326 @@
   }
 
   // ---------- Affiliate Voucher Pools (migrated from legacy MiniApp admin panel) ----------
+  // ---------- Player Campaigns (Campaign Centre / tournament reward integration) ----------
+
+  function gcPill(status) {
+    var known = { live: "approved", draft: "neutral", scheduled: "pending", paused: "pending",
+      ended: "neutral", archived: "neutral", active: "approved", inactive: "neutral",
+      assigned: "approved", out_of_stock: "rejected", rejected: "rejected", pending_review: "pending" };
+    return '<span class="pill ' + (known[status] || "neutral") + '">' + esc(status || "—") + '</span>';
+  }
+
+  function loadGcCampaigns(force) {
+    statePanel("gc-campaigns-body", "loading", "Loading campaigns…");
+    api("/api/admin/gc-campaigns").then(function (data) {
+      var items = data.campaigns || [];
+      if (!items.length) { $("#gc-campaigns-body").innerHTML = emptyState("No campaigns yet — create one above."); return; }
+      var rows = items.map(function (c) {
+        var vis = c.effective_visibility || {};
+        var visBadge = vis.publicly_visible ? '<span class="pill approved">public</span>' : '<span class="pill pending">admin-only</span>';
+        var reasons = (vis.reasons || []).map(function (r) { return '<div class="sub">' + esc(r) + '</div>'; }).join("");
+        return '<tr><td>' + esc(c.name || "") + '<div class="sub">' + esc(c.campaign_id) + '</div></td>' +
+          '<td>' + esc(c.type || "") + '</td>' +
+          '<td>' + gcPill(c.status) + '</td>' +
+          '<td>' + visBadge + reasons + '</td>' +
+          '<td>' +
+          '<button class="btn" data-gc-action="publish" data-id="' + esc(c.campaign_id) + '">Publish</button> ' +
+          '<button class="btn" data-gc-action="pause" data-id="' + esc(c.campaign_id) + '">Pause</button> ' +
+          '<button class="btn" data-gc-action="archive" data-id="' + esc(c.campaign_id) + '">Archive</button> ' +
+          '<button class="btn" data-gc-action="preview" data-id="' + esc(c.campaign_id) + '">Preview</button>' +
+          '</td></tr>';
+      }).join("");
+      $("#gc-campaigns-body").innerHTML = '<table class="data-table"><thead><tr><th>Campaign</th><th>Type</th><th>Status</th><th>Visibility</th><th>Actions</th></tr></thead><tbody>' + rows + '</tbody></table>';
+    }).catch(function (e) { statePanel("gc-campaigns-body", "error", "Failed to load campaigns: " + e.message); });
+  }
+
+  function bindGcCampaigns() {
+    var createBtn = $("#gc-create-campaign-btn");
+    if (createBtn) {
+      createBtn.addEventListener("click", function () {
+        var body = {
+          campaign_id: ($("#gc-c-id").value || "").trim(),
+          name: ($("#gc-c-name").value || "").trim(),
+          type: $("#gc-c-type").value,
+          schedule: {
+            starts_at: $("#gc-c-starts").value ? new Date($("#gc-c-starts").value).toISOString() : null,
+            ends_at: $("#gc-c-ends").value ? new Date($("#gc-c-ends").value).toISOString() : null,
+          },
+          telegram: { channel_username: ($("#gc-c-channel").value || "").trim() },
+          destination: { provider_id: ($("#gc-c-provider").value || "").trim(), path: ($("#gc-c-path").value || "").trim(), open_mode: "telegram_web_app", ready: false },
+        };
+        apiPostJson("/api/admin/gc-campaigns", body).then(function (res) {
+          if (!res.ok || res.d.status !== "ok") { toast("❌ " + (res.d && res.d.code || "create_failed"), "error"); return; }
+          toast("✅ Campaign created as draft", "success");
+          loadGcCampaigns(true);
+        });
+      });
+    }
+    document.addEventListener("click", function (e) {
+      var btn = e.target && e.target.closest && e.target.closest("[data-gc-action]");
+      if (!btn) return;
+      var action = btn.dataset.gcAction, id = btn.dataset.id;
+      if (action === "publish") apiPost("/api/admin/gc-campaigns/" + id + "/publish").then(function (r) { if (r.status !== "ok") toast("❌ " + r.code, "error"); loadGcCampaigns(true); });
+      else if (action === "pause") apiPost("/api/admin/gc-campaigns/" + id + "/pause").then(function () { loadGcCampaigns(true); });
+      else if (action === "archive") apiPost("/api/admin/gc-campaigns/" + id + "/archive").then(function () { loadGcCampaigns(true); });
+      else if (action === "preview") api("/api/admin/gc-campaigns/" + id + "/preview").then(function (r) {
+        alert("Card: " + JSON.stringify(r.card, null, 2) + "\n\nBadges: " + (r.admin_badges || []).join(", ") + "\n\nVisibility: " + JSON.stringify(r.effective_visibility));
+      });
+    });
+  }
+
+  function loadGcProviders(force) {
+    statePanel("gc-providers-body", "loading", "Loading providers…");
+    api("/api/admin/providers").then(function (data) {
+      var items = data.providers || [];
+      if (!items.length) { $("#gc-providers-body").innerHTML = emptyState("No providers yet — create one above."); return; }
+      var rows = items.map(function (p) {
+        return '<tr><td>' + esc(p.name) + '<div class="sub">' + esc(p.provider_id) + '</div><div class="sub">' + esc(p.base_url || "") + '</div></td>' +
+          '<td>' + esc(p.type || "") + '</td>' +
+          '<td>' + gcPill(p.active ? "active" : "inactive") + '</td>' +
+          '<td>' + (p.secret_configured ? '<span class="pill approved">configured</span>' : '<span class="pill rejected">missing</span>') + '</td>' +
+          '<td>' + fmt(p.linked_campaign_count || 0) + '</td>' +
+          '<td><button class="btn" data-gcp-action="activate" data-id="' + esc(p.provider_id) + '">Activate</button> ' +
+          '<button class="btn" data-gcp-action="deactivate" data-id="' + esc(p.provider_id) + '">Deactivate</button></td></tr>';
+      }).join("");
+      $("#gc-providers-body").innerHTML = '<table class="data-table"><thead><tr><th>Provider</th><th>Type</th><th>Active</th><th>Secret</th><th>Linked</th><th>Actions</th></tr></thead><tbody>' + rows + '</tbody></table>';
+    }).catch(function (e) { statePanel("gc-providers-body", "error", "Failed to load providers: " + e.message); });
+  }
+
+  function bindGcProviders() {
+    var createBtn = $("#gc-create-provider-btn");
+    if (createBtn) {
+      createBtn.addEventListener("click", function () {
+        var body = {
+          provider_id: ($("#gc-p-id").value || "").trim(),
+          name: ($("#gc-p-name").value || "").trim(),
+          type: $("#gc-p-type").value,
+          base_url: ($("#gc-p-base-url").value || "").trim(),
+          url_mode: $("#gc-p-url-mode").value,
+          secret_env_var: ($("#gc-p-secret-env").value || "").trim(),
+        };
+        body.allowed_campaign_types = [body.type];
+        apiPostJson("/api/admin/providers", body).then(function (res) {
+          if (!res.ok || res.d.status !== "ok") { toast("❌ " + (res.d && res.d.code || "create_failed"), "error"); return; }
+          toast("✅ Provider created (inactive)", "success");
+          loadGcProviders(true);
+        });
+      });
+    }
+    document.addEventListener("click", function (e) {
+      var btn = e.target && e.target.closest && e.target.closest("[data-gcp-action]");
+      if (!btn) return;
+      var action = btn.dataset.gcpAction, id = btn.dataset.id;
+      apiPost("/api/admin/providers/" + id + "/" + action).then(function (r) { if (r.status !== "ok") toast("❌ " + r.code, "error"); loadGcProviders(true); });
+    });
+  }
+
+  function loadGcResults(force) {
+    statePanel("gc-results-body", "loading", "Loading tournament results…");
+    api("/api/admin/tournament-results").then(function (data) {
+      var items = data.results || [];
+      if (!items.length) { $("#gc-results-body").innerHTML = emptyState("No tournament result submissions yet."); return; }
+      var rows = items.map(function (r) {
+        return '<tr><td>' + esc(r.submission_id) + '</td><td>' + esc(r.campaign_id) + '</td>' +
+          '<td>' + gcPill(r.status) + '</td><td>' + fmt(r.winner_count) + '</td>' +
+          '<td>' + fmt(r.matched_users) + '/' + fmt(r.winner_count) + '</td>' +
+          '<td class="sub">' + esc(r.received_at || "") + '</td>' +
+          '<td><button class="btn" data-gcr-action="approve" data-id="' + esc(r.submission_id) + '">Approve</button> ' +
+          '<button class="btn" data-gcr-action="reject" data-id="' + esc(r.submission_id) + '">Reject</button> ' +
+          '<button class="btn" data-gcr-action="retry-allocation" data-id="' + esc(r.submission_id) + '">Retry</button></td></tr>';
+      }).join("");
+      $("#gc-results-body").innerHTML = '<table class="data-table"><thead><tr><th>Submission</th><th>Campaign</th><th>Status</th><th>Winners</th><th>Matched</th><th>Received</th><th>Actions</th></tr></thead><tbody>' + rows + '</tbody></table>';
+    }).catch(function (e) { statePanel("gc-results-body", "error", "Failed to load results: " + e.message); });
+  }
+
+  function bindGcResults() {
+    document.addEventListener("click", function (e) {
+      var btn = e.target && e.target.closest && e.target.closest("[data-gcr-action]");
+      if (!btn) return;
+      var action = btn.dataset.gcrAction, id = btn.dataset.id;
+      if (action === "reject") {
+        var reason = prompt("Rejection reason:") || "";
+        apiPostJson("/api/admin/tournament-results/" + id + "/reject", { reason: reason }).then(function () { loadGcResults(true); });
+      } else {
+        apiPost("/api/admin/tournament-results/" + id + "/" + action).then(function (r) {
+          toast(r.status === "ok" ? "✅ Done" : "❌ " + (r.code || "failed"), r.status === "ok" ? "success" : "error");
+          loadGcResults(true);
+        });
+      }
+    });
+  }
+
+  function gcPoolWarnings(p) {
+    var warnings = [];
+    if (p.status !== "active") warnings.push("inactive pool");
+    if (p.allocation_scope === "shared") warnings.push("shared scope — allocatable by multiple subsystems");
+    if (p.pool_type === "tournament_reward" && !p.campaign_id) warnings.push("no campaign linked");
+    return warnings;
+  }
+
+  function loadGcRewards(force) {
+    statePanel("gc-rewards-body", "loading", "Loading reward pools…");
+    api("/api/admin/reward-pools").then(function (data) {
+      var pools = data.pools || [];
+      if (!pools.length) { $("#gc-pools-body").innerHTML = emptyState("No reward pools registered yet."); return; }
+      var rows = pools.map(function (p) {
+        var s = p.stock || {};
+        var warnings = gcPoolWarnings(p);
+        var warnHtml = warnings.length ? '<div class="sub" style="color:var(--warn);">⚠ ' + esc(warnings.join("; ")) + '</div>' : "";
+        return '<tr><td>' + esc(p.name || "") + '<div class="sub">' + esc(p.pool_id) + '</div>' + warnHtml + '</td>' +
+          '<td>' + esc(p.pool_type || "") + '</td>' +
+          '<td>' + esc(p.allocation_scope || "") + '</td>' +
+          '<td>' + esc(p.campaign_id || "—") + '</td>' +
+          '<td>' + gcPill(p.status) + '</td>' +
+          '<td>' + fmt(s.available || 0) + '</td>' +
+          '<td>' + fmt(s.issued || 0) + '</td>' +
+          '<td>campaign_centre</td>' +
+          '<td><button class="btn" data-gc-upload-pool="' + esc(p.pool_id) + '">Upload codes</button></td></tr>';
+      }).join("");
+      $("#gc-pools-body").innerHTML = '<table class="data-table"><thead><tr><th>Pool</th><th>Type</th><th>Allocation Scope</th>' +
+        '<th>Campaign</th><th>Status</th><th>Available</th><th>Assigned</th><th>Source</th><th>Actions</th></tr></thead><tbody>' + rows + '</tbody></table>' +
+        '<div class="sub" style="margin-top:6px;">"Reserved" has no separate persisted state in this model — allocation is a single atomic available→assigned transition.</div>';
+    }).catch(function (e) { statePanel("gc-pools-body", "error", "Failed to load pools: " + e.message); });
+
+    api("/api/admin/rewards").then(function (data) {
+      var items = data.rewards || [];
+      if (!items.length) { $("#gc-rewards-body").innerHTML = emptyState("No rewards allocated yet."); return; }
+      var rows = items.map(function (r) {
+        return '<tr><td>' + esc(r.reward_id) + '</td><td>' + esc(r.category || "tournament") + '</td>' +
+          '<td>' + fmt(r.telegram_user_id) + '</td><td>' + fmt(r.rank) + '</td>' +
+          '<td>' + esc(r.pool_id || "") + '</td><td>' + gcPill(r.status) + '</td><td>' + esc(r.voucher_code || "—") + '</td></tr>';
+      }).join("");
+      $("#gc-rewards-body").innerHTML = '<table class="data-table"><thead><tr><th>Reward</th><th>Category</th><th>User</th><th>Rank</th><th>Pool</th><th>Status</th><th>Code</th></tr></thead><tbody>' + rows + '</tbody></table>';
+    }).catch(function (e) { statePanel("gc-rewards-body", "error", "Failed to load rewards: " + e.message); });
+  }
+
+  function bindGcRewards() {
+    var createPoolBtn = $("#gc-create-pool-btn");
+    if (createPoolBtn) {
+      createPoolBtn.addEventListener("click", function () {
+        var body = {
+          pool_id: ($("#gc-pool-id").value || "").trim(),
+          name: ($("#gc-pool-name").value || "").trim(),
+          pool_type: $("#gc-pool-type").value,
+          allocation_scope: $("#gc-pool-scope") ? $("#gc-pool-scope").value : "campaign_rewards",
+          campaign_id: ($("#gc-pool-campaign").value || "").trim(),
+        };
+        apiPostJson("/api/admin/reward-pools", body).then(function (res) {
+          if (!res.ok || res.d.status !== "ok") { toast("❌ " + (res.d && res.d.code || "create_failed"), "error"); return; }
+          toast("✅ Pool registered", "success");
+          loadGcRewards(true);
+        });
+      });
+    }
+    var filterBtn = $("#gc-rewards-filter-btn");
+    if (filterBtn) {
+      filterBtn.addEventListener("click", function () {
+        var params = [];
+        var uid = ($("#gc-rewards-filter-uid").value || "").trim();
+        var status = $("#gc-rewards-filter-status").value;
+        if (uid) params.push("telegram_user_id=" + encodeURIComponent(uid));
+        if (status) params.push("status=" + encodeURIComponent(status));
+        statePanel("gc-rewards-body", "loading", "Loading…");
+        api("/api/admin/rewards" + (params.length ? "?" + params.join("&") : "")).then(function (data) {
+          var items = data.rewards || [];
+          if (!items.length) { $("#gc-rewards-body").innerHTML = emptyState("No matching rewards."); return; }
+          var rows = items.map(function (r) {
+            return '<tr><td>' + esc(r.reward_id) + '</td><td>' + esc(r.category || "tournament") + '</td>' +
+              '<td>' + fmt(r.telegram_user_id) + '</td><td>' + fmt(r.rank) + '</td>' +
+              '<td>' + esc(r.pool_id || "") + '</td><td>' + gcPill(r.status) + '</td><td>' + esc(r.voucher_code || "—") + '</td></tr>';
+          }).join("");
+          $("#gc-rewards-body").innerHTML = '<table class="data-table"><thead><tr><th>Reward</th><th>Category</th><th>User</th><th>Rank</th><th>Pool</th><th>Status</th><th>Code</th></tr></thead><tbody>' + rows + '</tbody></table>';
+        });
+      });
+    }
+    document.addEventListener("click", function (e) {
+      var btn = e.target && e.target.closest && e.target.closest("[data-gc-upload-pool]");
+      if (!btn) return;
+      var poolId = btn.dataset.gcUploadPool;
+      var raw = prompt("Paste voucher codes, one per line:");
+      if (!raw) return;
+      var codes = raw.split("\n").map(function (s) { return s.trim(); }).filter(Boolean);
+      apiPostJson("/api/admin/reward-pools/" + poolId + "/upload-codes", { codes: codes }).then(function (res) {
+        toast(res.ok ? "✅ Inserted " + res.d.inserted + "/" + codes.length : "❌ upload failed", res.ok ? "success" : "error");
+        loadGcRewards(true);
+      });
+    });
+  }
+
+  var gcEventsPage = 1;
+
+  function loadGcEvents(page) {
+    gcEventsPage = page || 1;
+    var params = ["page=" + gcEventsPage, "page_size=25"];
+    var campaignId = ($("#gc-events-campaign-id") && $("#gc-events-campaign-id").value || "").trim();
+    var eventType = $("#gc-events-type") && $("#gc-events-type").value;
+    if (campaignId) params.push("campaign_id=" + encodeURIComponent(campaignId));
+    if (eventType) params.push("event_type=" + encodeURIComponent(eventType));
+    statePanel("gc-events-body", "loading", "Loading activity log…");
+    api("/api/admin/campaign-events?" + params.join("&")).then(function (data) {
+      var items = data.events || [];
+      if (!items.length) { $("#gc-events-body").innerHTML = emptyState("No matching activity yet."); $("#gc-events-pagination").innerHTML = ""; return; }
+      var rows = items.map(function (e) {
+        return '<tr><td>' + esc(e.event_type) + '</td><td>' + esc(e.campaign_id || "—") + '</td>' +
+          '<td>' + fmt(e.telegram_user_id || "") + '</td><td>' + gcPill(e.status) + '</td>' +
+          '<td>' + esc(e.reason || "") + '</td><td class="sub">' + esc(e.occurred_at || "") + '</td></tr>';
+      }).join("");
+      $("#gc-events-body").innerHTML = '<table class="data-table"><thead><tr><th>Event</th><th>Campaign</th><th>User</th><th>Status</th><th>Reason</th><th>Occurred</th></tr></thead><tbody>' + rows + '</tbody></table>';
+      var totalPages = Math.max(1, Math.ceil((data.total || 0) / (data.page_size || 25)));
+      $("#gc-events-pagination").innerHTML =
+        '<button class="btn" id="gc-events-prev"' + (gcEventsPage <= 1 ? " disabled" : "") + '>← Prev</button> ' +
+        '<span class="sub">Page ' + gcEventsPage + ' of ' + totalPages + ' (' + fmt(data.total || 0) + ' total)</span> ' +
+        '<button class="btn" id="gc-events-next"' + (gcEventsPage >= totalPages ? " disabled" : "") + '>Next →</button>';
+      var prevBtn = $("#gc-events-prev"), nextBtn = $("#gc-events-next");
+      if (prevBtn) prevBtn.addEventListener("click", function () { loadGcEvents(gcEventsPage - 1); });
+      if (nextBtn) nextBtn.addEventListener("click", function () { loadGcEvents(gcEventsPage + 1); });
+    }).catch(function (e) { statePanel("gc-events-body", "error", "Failed to load activity log: " + e.message); });
+  }
+
+  function loadGcAnalyticsSummary(campaignId) {
+    if (!campaignId) { $("#gc-analytics-summary-body").innerHTML = emptyState("Enter a campaign_id and click Load Summary."); return; }
+    statePanel("gc-analytics-summary-body", "loading", "Loading summary…");
+    api("/api/admin/campaign-analytics/summary?campaign_id=" + encodeURIComponent(campaignId)).then(function (data) {
+      var pct = function (v) { return Math.round((v || 0) * 100) + "%"; };
+      $("#gc-analytics-summary-body").innerHTML = '<div class="card-grid">' + [
+        ["Views", fmt(data.views)], ["Clicks", fmt(data.clicks)], ["CTR", pct(data.click_through_rate)],
+        ["Sub. Checks", fmt(data.subscription_checks)], ["Sub. Pass Rate", pct(data.subscription_pass_rate)],
+        ["Destination Opens", fmt(data.destination_opens)], ["Dest. Conversion", pct(data.destination_conversion_rate)],
+        ["Results Received", fmt(data.leaderboards_received)], ["Rewards Assigned", fmt(data.rewards_assigned)],
+        ["Reward Views", fmt(data.rewards_viewed)], ["Voucher Copies", fmt(data.voucher_copies)],
+        ["Out of Stock", fmt(data.out_of_stock)],
+      ].map(function (kv) {
+        return '<div class="kpi"><div class="label">' + esc(kv[0]) + '</div><div class="value">' + kv[1] + '</div></div>';
+      }).join("") + '</div>';
+    }).catch(function (e) { statePanel("gc-analytics-summary-body", "error", "Failed to load summary: " + e.message); });
+  }
+
+  function bindGcActivity() {
+    var filterBtn = $("#gc-events-filter-btn");
+    if (filterBtn) filterBtn.addEventListener("click", function () { loadGcEvents(1); });
+    var summaryBtn = $("#gc-analytics-load-btn");
+    if (summaryBtn) {
+      summaryBtn.addEventListener("click", function () {
+        loadGcAnalyticsSummary(($("#gc-analytics-campaign-id").value || "").trim());
+      });
+    }
+  }
+
+  function loadGcVerification(force) {
+    statePanel("gc-verification-body", "loading", "Loading provider integration status…");
+    api("/api/admin/providers").then(function (data) {
+      var items = data.providers || [];
+      if (!items.length) { $("#gc-verification-body").innerHTML = emptyState("No providers yet."); return; }
+      var rows = items.map(function (p) {
+        return '<tr><td>' + esc(p.provider_id) + '</td>' +
+          '<td>' + (p.secret_configured ? '<span class="pill approved">configured</span>' : '<span class="pill rejected">missing</span>') + '</td>' +
+          '<td>' + gcPill(p.active ? "active" : "inactive") + '</td></tr>';
+      }).join("");
+      $("#gc-verification-body").innerHTML = '<table class="data-table"><thead><tr><th>Provider</th><th>Secret</th><th>Status</th></tr></thead><tbody>' + rows + '</tbody></table>' +
+        '<div class="sub" style="margin-top:8px;">Signature failures / nonce replay counters are recorded per provider in campaign_provider_integration_status and surfaced here once a provider has activity.</div>';
+    }).catch(function (e) { statePanel("gc-verification-body", "error", "Failed to load verification status: " + e.message); });
+  }
+
   function loadAffiliatePools(force) {
     statePanel("affiliate-pools-summary-body", "loading", "Loading pool summary…");
     fetch("/v2/miniapp/admin/pools/summary", { credentials: "same-origin", headers: { "Accept": "application/json" } })
@@ -4845,7 +5187,7 @@
     });
   }
 
-  var VIEWS =["summary", "moduleOverview", "placeholder", "funnel", "abuse", "campaignBuilder", "campaignPerformance", "campaignIntelligence", "activeCampaigns", "draftCampaigns", "compiledDrops", "campaigns", "vouchers", "drops", "referrals", "affiliate", "affiliatePools", "affiliatePending", "reactivation", "audit", "segmentProbabilityConfig", "segmentRoi", "segments", "validation", "backendSegmentEngine", "voucherHunterAudit", "unclassifiedAudit", "segmentRuleSimulator", "voucherHunterQuality", "voucherHunterFalsePositive", "voucherHunterRuleSimulator", "vhPriorityImpact", "uploadPlayerPerformance", "uploadHistory", "rawExplorer", "users", "joinRequests", "xpAdjust", "settings"];
+  var VIEWS =["summary", "moduleOverview", "placeholder", "funnel", "abuse", "campaignBuilder", "campaignPerformance", "campaignIntelligence", "activeCampaigns", "draftCampaigns", "compiledDrops", "campaigns", "gcCampaigns", "gcProviders", "gcResults", "gcRewards", "gcVerification", "gcActivity", "vouchers", "drops", "referrals", "affiliate", "affiliatePools", "affiliatePending", "reactivation", "audit", "segmentProbabilityConfig", "segmentRoi", "segments", "validation", "backendSegmentEngine", "voucherHunterAudit", "unclassifiedAudit", "segmentRuleSimulator", "voucherHunterQuality", "voucherHunterFalsePositive", "voucherHunterRuleSimulator", "vhPriorityImpact", "uploadPlayerPerformance", "uploadHistory", "rawExplorer", "users", "joinRequests", "xpAdjust", "settings"];
 
   // ---------------------------------------------------------------------
   // Information architecture: sidebar Business Modules, each with its own
@@ -4870,6 +5212,14 @@
       { label: "Templates", view: "campaignBuilder", live: true },
       { label: "Performance", view: "campaignPerformance" },
       { label: "Intelligence", view: "campaignIntelligence" }
+    ]},
+    { key: "growth", icon: "🕹", label: "Player Campaigns", tabs: [
+      { label: "Campaigns", view: "gcCampaigns" },
+      { label: "Providers", view: "gcProviders" },
+      { label: "Tournament Results", view: "gcResults" },
+      { label: "Rewards", view: "gcRewards" },
+      { label: "Verification", view: "gcVerification" },
+      { label: "Activity Log", view: "gcActivity" }
     ]},
     { key: "voucher", icon: "🎟", label: "Voucher Centre", tabs: [
       { label: "Overview", view: "moduleOverview", overviewKey: "voucher" },
@@ -5123,6 +5473,8 @@
       campaignIntelligence: "Campaign Intelligence (P5)", activeCampaigns: "Active Campaigns",
       draftCampaigns: "Draft Campaigns", compiledDrops: "Compiled Voucher Drops",
       campaigns: "Campaigns (Legacy Targeting)",
+      gcCampaigns: "Player Campaigns", gcProviders: "Providers", gcResults: "Tournament Results",
+      gcRewards: "Rewards", gcVerification: "Verification Integrations", gcActivity: "Activity Log",
       vouchers: "Vouchers", drops: "Voucher Drops", referrals: "Referrals", affiliate: "Affiliate",
       affiliatePools: "Affiliate Voucher Pools", affiliatePending: "Pending Affiliate Rewards", reactivation: "Reactivation",
       audit: "Audit", segmentProbabilityConfig: "Segment Probability Configuration (Read Only)",
@@ -5157,6 +5509,12 @@
     else if (state.view === "draftCampaigns") loadDraftCampaigns(force);
     else if (state.view === "compiledDrops") loadCompiledDrops(force);
     else if (state.view === "campaigns") loadCampaigns(force);
+    else if (state.view === "gcCampaigns") loadGcCampaigns(force);
+    else if (state.view === "gcProviders") loadGcProviders(force);
+    else if (state.view === "gcResults") loadGcResults(force);
+    else if (state.view === "gcRewards") loadGcRewards(force);
+    else if (state.view === "gcVerification") loadGcVerification(force);
+    else if (state.view === "gcActivity") loadGcEvents(1);
     else if (state.view === "vouchers") loadVouchers(force);
     else if (state.view === "drops") loadDrops(force);
     else if (state.view === "referrals") loadReferrals(force);
@@ -5225,6 +5583,11 @@
     bindDrops();
     bindAffiliatePools();
     bindAffiliatePending();
+    bindGcCampaigns();
+    bindGcProviders();
+    bindGcResults();
+    bindGcRewards();
+    bindGcActivity();
     bindJoinRequests();
     bindXpAdjust();
     bindRejoinBufferSettings();
