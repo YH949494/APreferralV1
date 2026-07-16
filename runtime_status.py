@@ -294,6 +294,30 @@ def _last_value(collections: Mapping[str, Any], col_key: str, field: str, extra_
     return _safe_get(_q)
 
 
+def _skip_reason_breakdown_today(
+    collections: Mapping[str, Any], col_key: str, event: str, now: datetime,
+) -> dict[str, int] | None:
+    """Group today's skip-tracking events by ``meta.reason``. Returns None
+    (not zeros) when the source collection is unavailable, so callers can
+    tell "no data source" apart from "zero skips today"."""
+    col = collections.get(col_key)
+    if col is None:
+        return None
+    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    def _q():
+        pipeline = [
+            {"$match": {"event": event, "created_at": {"$gte": day_start}}},
+            {"$group": {"_id": "$meta.reason", "count": {"$sum": 1}}},
+        ]
+        out: dict[str, int] = {}
+        for doc in col.aggregate(pipeline):
+            out[str(doc.get("_id") or "unknown")] = int(doc.get("count", 0))
+        return out
+
+    return _safe_get(_q)
+
+
 PM_REGISTRY: list[dict[str, Any]] = [
     dict(key="pm0", label="PM0 Welcome", trigger="/start command (event-driven)",
          users_field="pm_sent.pm0_welcome"),
@@ -316,6 +340,34 @@ PM_REGISTRY: list[dict[str, Any]] = [
          col_key="referral_notifications", ts_field="created_at", type_filter={"type": "ref_qualified"}),
     dict(key="welcome_unlock", label="Welcome Unlock (VIP1)", trigger="event (check-in progress)",
          users_field="pm_sent.pm_vip_unlocked"),
+    # NOTE: "welcome_unlock" above is the monthly-deposit VIP1 tier-unlock PM
+    # (onboarding.send_vip_unlock_if_needed / PM4_VIP_UNLOCK_TEXT) — a
+    # different feature that happens to share the word "unlock". It is NOT
+    # the Welcome Voucher check-in journey's unlock celebration; see
+    # "welcome_checkin_unlock" below for that.
+    dict(key="welcome_checkin_d2", label="Welcome Check-in D2 Reminder",
+         trigger="scheduler (welcome_progress_reminders, hourly) — fires ~20h after Day-1 check-in if still 1/3",
+         col_key="welcome_analytics_events", ts_field="created_at",
+         type_filter={"event": "welcome_reminder_20h_sent"},
+         failed_event="welcome_reminder_20h_failed", skip_event="welcome_reminder_skipped",
+         job_key="welcome_progress_reminders", flag_field="welcome_journey"),
+    dict(key="welcome_checkin_d2_followup", label="Welcome Check-in D2 Follow-up",
+         trigger="scheduler (welcome_progress_reminders, hourly) — fires ~28h after Day-1 check-in if still 1/3",
+         col_key="welcome_analytics_events", ts_field="created_at",
+         type_filter={"event": "welcome_reminder_28h_sent"},
+         failed_event="welcome_reminder_28h_failed", skip_event="welcome_reminder_skipped",
+         job_key="welcome_progress_reminders", flag_field="welcome_journey"),
+    dict(key="welcome_checkin_d3", label="Welcome Check-in D3 Reminder",
+         trigger="scheduler (welcome_progress_reminders, hourly) — fires ~20h after Day-2 check-in if still 2/3 "
+                 "(final reminder before the welcome window ends)",
+         col_key="welcome_analytics_events", ts_field="created_at",
+         type_filter={"event": "welcome_reminder_day2_sent"},
+         failed_event="welcome_reminder_day2_failed", skip_event="welcome_reminder_skipped",
+         job_key="welcome_progress_reminders", flag_field="welcome_journey"),
+    dict(key="welcome_checkin_unlock", label="Welcome Unlock Celebration",
+         trigger="event (check-in flow) — fires in the /checkin response when 3/3 check-ins are completed",
+         col_key="welcome_analytics_events", ts_field="created_at",
+         type_filter={"event": "welcome_completed"}, flag_field="welcome_journey"),
     dict(key="welcome_expiry", label="Welcome Expiry", trigger="scheduler (welcome_voucher_lifecycle, */30min)",
          col_key="welcome_eligibility", ts_field="final_warning_sent_at"),
     dict(key="reactivation", label="Reactivation", trigger="scheduler (reactivation_journey_evaluate, */30min)",
@@ -340,6 +392,7 @@ def build_pm_automation(
             rows.append({
                 "key": pm["key"], "name": pm["label"], "enabled": False,
                 "last_sent": None, "sent_today": 0, "failed_today": None,
+                "skipped_today": None, "skip_breakdown": None, "last_run_age_s": None,
                 "queue_size": None, "trigger": pm["trigger"],
                 "status": OFFLINE, "notes": "no implementing code found anywhere in the codebase",
             })
@@ -355,6 +408,32 @@ def build_pm_automation(
             last_sent = _last_value(collections, col_key, pm["ts_field"], extra_filter=filt)
             sent_today = _count_today(collections, col_key, pm["ts_field"], now, extra_filter=filt)
 
+        # Optional richer counters — only populated for rows whose registry
+        # entry declares a persisted failure/skip event and/or a scheduler
+        # job to derive "last run age" from (currently the Welcome Check-in
+        # D2/D2-followup/D3 reminder rows). Everything else keeps reporting
+        # None, same as before, rather than a fabricated 0.
+        failed_today = None
+        if pm.get("failed_event"):
+            failed_today = _count_today(
+                collections, "welcome_analytics_events", "created_at", now,
+                extra_filter={"event": pm["failed_event"]},
+            )
+        skipped_today = None
+        skip_breakdown = None
+        if pm.get("skip_event"):
+            skip_breakdown = _skip_reason_breakdown_today(
+                collections, "welcome_analytics_events", pm["skip_event"], now,
+            )
+            if skip_breakdown is not None:
+                skipped_today = sum(skip_breakdown.values())
+        last_run_age_s = None
+        if pm.get("job_key"):
+            job = next((j for j in SCHEDULER_JOBS if j["key"] == pm["job_key"]), None)
+            if job:
+                job_last_run = _lookup_lock_ts(collections, job.get("lock_source"))
+                last_run_age_s = _age_seconds(now, job_last_run)
+
         if pm.get("unwired"):
             status, note = unwired_status(last_sent)
         else:
@@ -369,7 +448,10 @@ def build_pm_automation(
             "enabled": (feature_flags or {}).get(pm.get("flag_field")) if pm.get("flag_field") else True,
             "last_sent": _fmt_ts(last_sent),
             "sent_today": sent_today,
-            "failed_today": None,  # no failure-tracking field exists in the codebase today
+            "failed_today": failed_today,
+            "skipped_today": skipped_today,
+            "skip_breakdown": skip_breakdown,
+            "last_run_age_s": last_run_age_s,
             "queue_size": None,
             "trigger": pm["trigger"],
             "status": status,

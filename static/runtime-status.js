@@ -114,6 +114,24 @@
     ]);
   }
 
+  function fmtAge(seconds) {
+    if (seconds === null || seconds === undefined) return "—";
+    var s = Math.max(0, Math.floor(seconds));
+    if (s < 60) return s + "s ago";
+    if (s < 3600) return Math.floor(s / 60) + "m ago";
+    if (s < 86400) return Math.floor(s / 3600) + "h ago";
+    return Math.floor(s / 86400) + "d ago";
+  }
+
+  function fmtSkipBreakdown(breakdown) {
+    if (!breakdown || typeof breakdown !== "object") return "—";
+    var parts = Object.keys(breakdown)
+      .filter(function (k) { return breakdown[k]; })
+      .sort(function (a, b) { return breakdown[b] - breakdown[a]; })
+      .map(function (k) { return esc(k) + ": " + breakdown[k]; });
+    return parts.length ? parts.join(", ") : "none today";
+  }
+
   function renderPm(d) {
     renderTable("#pm-table tbody", d.pm_automation, [
       { key: "name" },
@@ -121,6 +139,9 @@
       { render: function (r) { return fmtTime(r.last_sent); } },
       { render: function (r) { return fmt(r.sent_today); } },
       { render: function (r) { return fmt(r.failed_today); } },
+      { render: function (r) { return fmt(r.skipped_today); } },
+      { render: function (r) { return fmtAge(r.last_run_age_s); } },
+      { render: function (r) { return '<span class="rs-note">' + fmtSkipBreakdown(r.skip_breakdown) + "</span>"; } },
       { render: function (r) { return fmt(r.queue_size); } },
       { key: "trigger" },
       { render: function (r) { return statusPill(r.status); } },

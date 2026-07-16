@@ -776,6 +776,7 @@ def ensure_voucher_indexes():
     welcome_reminders_col.create_index([("updated_at", ASCENDING)])
     welcome_analytics_events_col.create_index([("user_id", ASCENDING), ("event", ASCENDING)])
     welcome_analytics_events_col.create_index([("created_at", ASCENDING)])
+    welcome_analytics_events_col.create_index([("event", ASCENDING), ("created_at", ASCENDING)])
     subscription_cache_col.create_index([("expireAt", ASCENDING)], expireAfterSeconds=0)
     try:
         for legacy_name in ("uniq_user_checks", "uniq_tg_verify_user_id", "uq_tg_verif_user_id_sparse"):

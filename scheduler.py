@@ -324,6 +324,7 @@ def process_welcome_reminders(*, now_ref: datetime | None = None, batch_limit: i
             skipped_abuse += 1
             skip_breakdown[_SKIP_REASON_BUCKET.get(blocked_reason, "missing_data")] += 1
             logger.info("[WELCOME_PROGRESS_REMINDER] skip uid=%s reason=%s", uid, blocked_reason)
+            log_welcome_event("welcome_reminder_skipped", uid, {"reason": blocked_reason}, now=now_ts)
             continue
 
         completed = int(progress.get("completed") or 0)
@@ -346,6 +347,7 @@ def process_welcome_reminders(*, now_ref: datetime | None = None, batch_limit: i
             else:
                 send_failed += 1
                 logger.warning("[WELCOME_PROGRESS_REMINDER] send_failed uid=%s stage=20h err=%s", uid, err)
+                log_welcome_event("welcome_reminder_20h_failed", uid, {"err": str(err)}, now=now_ts)
 
         # Reminder #2: completed == 1, 28h elapsed since Day 1, still stuck, not yet sent.
         if (
@@ -363,6 +365,7 @@ def process_welcome_reminders(*, now_ref: datetime | None = None, batch_limit: i
             else:
                 send_failed += 1
                 logger.warning("[WELCOME_PROGRESS_REMINDER] send_failed uid=%s stage=28h err=%s", uid, err)
+                log_welcome_event("welcome_reminder_28h_failed", uid, {"err": str(err)}, now=now_ts)
 
         # Reminder #3: completed == 2, 20h elapsed since Day 2, not yet sent.
         if (
@@ -380,6 +383,7 @@ def process_welcome_reminders(*, now_ref: datetime | None = None, batch_limit: i
             else:
                 send_failed += 1
                 logger.warning("[WELCOME_PROGRESS_REMINDER] send_failed uid=%s stage=day2 err=%s", uid, err)
+                log_welcome_event("welcome_reminder_day2_failed", uid, {"err": str(err)}, now=now_ts)
 
     blocked_users = skip_breakdown["bot_blocked"] + skip_breakdown["risk_blocked"]
 

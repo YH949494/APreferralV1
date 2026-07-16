@@ -3560,6 +3560,7 @@ def dashboard_runtime_status():
             "users": users_collection,
             "referral_notifications": referral_notifications_collection,
             "welcome_eligibility": welcome_eligibility_collection,
+            "welcome_analytics_events": db["welcome_analytics_events"],
             "reactivation_journey": db["reactivation_journey"],
             "tg_verification_queue": tg_verification_queue_collection,
             "affiliate_ledger": affiliate_ledger_collection,
