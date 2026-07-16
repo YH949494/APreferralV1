@@ -1,0 +1,438 @@
+/**
+ * Pure, DOM-free logic for the Voucher Drops "Preview Drop" confirmation flow.
+ * Shared by static/index.html (browser) and voucher_drop_preview.test.js (Node).
+ *
+ * Nothing in this file touches the DOM, network, or globals — it only
+ * transforms plain values so it can be unit tested without a browser.
+ */
+(function (root, factory) {
+  const mod = factory();
+  if (typeof module === "object" && module.exports) {
+    module.exports = mod;
+  } else {
+    root.VoucherDropPreview = mod;
+  }
+})(typeof self !== "undefined" ? self : this, function () {
+  "use strict";
+
+  const KL_OFFSET_MS = 8 * 60 * 60 * 1000; // Asia/Kuala_Lumpur is fixed UTC+08:00, no DST
+  const SMALL_INVENTORY_THRESHOLD = 5;
+  const END_TIME_SOON_MS = 60 * 60 * 1000; // 1 hour
+
+  function splitList(text) {
+    return (text || "").split(/[\s,;]+/).map((x) => x.trim()).filter(Boolean);
+  }
+
+  // Mirrors backend norm_username()/norm_uname() in vouchers.py: strip, drop a
+  // leading "@", lowercase. Used only for duplicate detection — the original
+  // username (with casing/@) is still what gets sent to the API.
+  function normalizeUsername(u) {
+    let s = (u || "").trim();
+    if (s.startsWith("@")) s = s.slice(1);
+    return s.toLowerCase();
+  }
+
+  // Mirrors backend _normalize_codes() in vouchers.py: strip whitespace, then
+  // strip leading/trailing commas. Applied to pooled codes only, matching the
+  // backend, which normalizes pooled codes but not personalised codes.
+  function normalizeCode(raw) {
+    return (raw || "").trim().replace(/^,+/, "").replace(/,+$/, "");
+  }
+
+  // "YYYY-MM-DDTHH:MM" (datetime-local value) -> "YYYY-MM-DD HH:MM:SS", or "" if invalid.
+  function nativeDatetimeToKLString(value) {
+    if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(value || "")) return "";
+    const [d, t] = value.split("T");
+    return `${d} ${t}:00`;
+  }
+
+  // "YYYY-MM-DD HH:MM:SS" wall-clock in Asia/Kuala_Lumpur -> UTC Date instance.
+  function klLocalStringToUtcDate(klStr) {
+    const m = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})$/.exec(klStr || "");
+    if (!m) return null;
+    const [, y, mo, d, h, mi, s] = m.map(Number);
+    const utcMillis = Date.UTC(y, mo - 1, d, h, mi, s) - KL_OFFSET_MS;
+    return new Date(utcMillis);
+  }
+
+  function formatKLDisplayFromLocal(klStr) {
+    const m = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})$/.exec(klStr || "");
+    if (!m) return "";
+    const [, y, mo, d, h, mi] = m;
+    const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    let hourNum = Number(h);
+    const ampm = hourNum >= 12 ? "PM" : "AM";
+    hourNum = hourNum % 12;
+    if (hourNum === 0) hourNum = 12;
+    return `${Number(d)} ${monthNames[Number(mo) - 1]} ${y}, ${hourNum}:${mi} ${ampm} (KL)`;
+  }
+
+  function formatDuration(ms) {
+    if (!Number.isFinite(ms) || ms <= 0) return "0m";
+    const totalMinutes = Math.round(ms / 60000);
+    const days = Math.floor(totalMinutes / 1440);
+    const hours = Math.floor((totalMinutes % 1440) / 60);
+    const minutes = totalMinutes % 60;
+    const parts = [];
+    if (days) parts.push(`${days}d`);
+    if (hours) parts.push(`${hours}h`);
+    if (minutes || !parts.length) parts.push(`${minutes}m`);
+    return parts.join(" ");
+  }
+
+  /**
+   * Parse "username,code" (or tab-separated) lines.
+   * - Malformed rows (missing username or code) are collected, not silently dropped.
+   * - Exact duplicate rows (same username AND same code) are silently deduped and counted.
+   * - Duplicate usernames / duplicate codes among the remaining unique rows are reported
+   *   so callers can treat them as blocking errors.
+   */
+  function parsePersonalisedInput(text) {
+    const rawLines = (text || "").split(/\r?\n/);
+    const seenPairKey = new Set();
+    const usernameCount = new Map();
+    const codeCount = new Map();
+    const entries = [];
+    const malformed = [];
+    let duplicateRowsRemoved = 0;
+
+    rawLines.forEach((rawLine) => {
+      const line = rawLine.trim();
+      if (!line) return;
+      const parts = line.split(/[,\t]/).map((s) => (s || "").trim());
+      const username = parts[0] || "";
+      const code = parts[1] || "";
+      if (!username || !code) {
+        malformed.push(line);
+        return;
+      }
+      const usernameKey = normalizeUsername(username);
+      const key = `${usernameKey}|${code}`;
+      if (seenPairKey.has(key)) {
+        duplicateRowsRemoved++;
+        return;
+      }
+      seenPairKey.add(key);
+      entries.push({ username, code });
+      usernameCount.set(usernameKey, (usernameCount.get(usernameKey) || 0) + 1);
+      codeCount.set(code, (codeCount.get(code) || 0) + 1);
+    });
+
+    const duplicateUsernames = [...usernameCount.entries()].filter(([, c]) => c > 1).map(([u]) => u);
+    const duplicateCodes = [...codeCount.entries()].filter(([, c]) => c > 1).map(([c]) => c);
+
+    return { entries, malformed, duplicateUsernames, duplicateCodes, duplicateRowsRemoved };
+  }
+
+  /**
+   * Parse one-voucher-code-per-line input.
+   * - Whitespace-only (non-blank) lines are reported as empty entries rather than silently dropped.
+   * - Any code that repeats is reported as a duplicate (blocking) — unlike personalised rows,
+   *   a repeated code has no second field to make the repeat ambiguous, so it is never
+   *   silently deduped.
+   */
+  function parsePooledCodesInput(text) {
+    const rawLines = (text || "").split(/\r?\n/);
+    const codes = [];
+    let emptyEntries = 0;
+
+    rawLines.forEach((rawLine) => {
+      const line = rawLine.trim();
+      if (!line) {
+        if (rawLine.length > 0) emptyEntries++;
+        return;
+      }
+      // Match backend _normalize_codes(): strip whitespace, then strip
+      // leading/trailing commas, so "CODE1" and "CODE1," aren't counted
+      // as two distinct (non-duplicate) codes.
+      const normalized = normalizeCode(line);
+      if (!normalized) {
+        emptyEntries++;
+        return;
+      }
+      codes.push(normalized);
+    });
+
+    const codeCount = new Map();
+    codes.forEach((c) => codeCount.set(c, (codeCount.get(c) || 0) + 1));
+    const duplicateCodes = [...codeCount.entries()].filter(([, c]) => c > 1).map(([c]) => c);
+
+    return { codes, emptyEntries, duplicateCodes };
+  }
+
+  /**
+   * Build the full create-drop payload + preview summary from raw form values,
+   * collecting ALL blocking errors and non-blocking warnings (rather than
+   * stopping at the first problem). Never calls the create API.
+   *
+   * @param {object} input - raw form values (all strings unless noted)
+   * @param {object} [opts] - { now: Date } for deterministic testing
+   */
+  function buildDropPreview(input, opts) {
+    const now = (opts && opts.now) || new Date();
+    const errors = [];
+    const warnings = [];
+
+    const type = input.type === "pooled" ? "pooled" : "personalised";
+    const name = (input.name || "").trim();
+    if (!name) errors.push("Campaign name is required.");
+
+    let priority = 100;
+    const priorityRaw = (input.priority || "").trim();
+    if (priorityRaw !== "") {
+      priority = Number(priorityRaw);
+      if (!Number.isFinite(priority) || !Number.isInteger(priority)) {
+        errors.push("Priority must be a valid whole number.");
+        priority = 100;
+      }
+    }
+
+    const startsAtLocal = nativeDatetimeToKLString((input.startsNative || "").trim());
+    if (!(input.startsNative || "").trim() || !startsAtLocal) {
+      errors.push("A valid start date/time is required.");
+    }
+
+    let endsAtLocal = "";
+    const endsNativeTrimmed = (input.endsNative || "").trim();
+    if (endsNativeTrimmed) {
+      endsAtLocal = nativeDatetimeToKLString(endsNativeTrimmed);
+      if (!endsAtLocal) errors.push("End date/time is invalid.");
+    }
+
+    const startsAtDate = startsAtLocal ? klLocalStringToUtcDate(startsAtLocal) : null;
+    const endsAtDate = endsAtLocal ? klLocalStringToUtcDate(endsAtLocal) : null;
+    if (startsAtDate && endsAtDate && endsAtDate.getTime() <= startsAtDate.getTime()) {
+      errors.push("End time must be later than start time.");
+    }
+
+    const eligMode = input.eligMode || "public";
+    const eligibility = { mode: eligMode };
+    let eligValuesDisplay = [];
+    if (eligMode === "tier" || eligMode === "user_id") {
+      const parts = (input.eligValuesRaw || "").split(/[\n,]/).map((x) => x.trim()).filter(Boolean);
+      if (!parts.length) {
+        errors.push(`Eligibility values are required for "${eligMode}" mode.`);
+      } else if (eligMode === "tier") {
+        eligibility.allow = parts;
+        eligValuesDisplay = parts;
+      } else {
+        const ids = parts.map(Number).filter((n) => Number.isFinite(n));
+        if (!ids.length) {
+          errors.push("Please provide numeric user IDs for eligibility.");
+        } else {
+          eligibility.allow = ids;
+          eligValuesDisplay = ids.map(String);
+        }
+      }
+    }
+
+    const regions = Array.isArray(input.regions) ? input.regions.filter(Boolean) : [];
+
+    let effectiveType = type;
+    let audience = null;
+    let campaignType = null;
+    if (eligMode === "new_joiner") {
+      effectiveType = "pooled";
+      audience = { type: "new_joiner" };
+      campaignType = "welcome_voucher";
+    }
+    if (regions.length) {
+      audience = Object.assign({}, audience || {}, { regions });
+    }
+
+    const heroTitle = (input.heroTitle || "").trim();
+    const heroSubtitle = (input.heroSubtitle || "").trim();
+    const heroImage = (input.heroImage || "").trim();
+
+    let assignments = null;
+    let codes = null;
+    let pool = null;
+    let whitelistUsernames = [];
+    let totalCount = 0;
+    let sampleEntries = [];
+
+    if (effectiveType === "personalised") {
+      const parsed = parsePersonalisedInput(input.pairsText || "");
+      if (parsed.malformed.length) {
+        const shown = parsed.malformed.slice(0, 5).join(" | ");
+        const more = parsed.malformed.length > 5 ? ` (+${parsed.malformed.length - 5} more)` : "";
+        errors.push(`Malformed personalised rows (expected "username,code"): ${shown}${more}`);
+      }
+      if (!parsed.entries.length) {
+        errors.push("Personalised drop has no valid username/code pairs.");
+      }
+      if (parsed.duplicateUsernames.length) {
+        errors.push(`Duplicate usernames within this personalised drop: ${parsed.duplicateUsernames.join(", ")}`);
+      }
+      if (parsed.duplicateCodes.length) {
+        errors.push(`Duplicate voucher codes within the submitted input: ${parsed.duplicateCodes.join(", ")}`);
+      }
+      if (parsed.duplicateRowsRemoved > 0) {
+        warnings.push(`${parsed.duplicateRowsRemoved} duplicate row(s) were removed during parsing.`);
+      }
+      assignments = parsed.entries;
+      totalCount = assignments.length;
+      sampleEntries = assignments.slice(0, 5).map((a) => `${a.username} → ${a.code}`);
+    } else {
+      const parsed = parsePooledCodesInput(input.codesText || "");
+      if (parsed.emptyEntries > 0) {
+        errors.push(`Found ${parsed.emptyEntries} empty voucher code entr${parsed.emptyEntries === 1 ? "y" : "ies"}.`);
+      }
+      if (!parsed.codes.length) {
+        errors.push("Pooled drop has no voucher codes.");
+      }
+      if (parsed.duplicateCodes.length) {
+        errors.push(`Duplicate voucher codes within the submitted input: ${parsed.duplicateCodes.join(", ")}`);
+      }
+      codes = parsed.codes;
+      pool = input.poolSelect === "my" ? "my" : "public";
+      whitelistUsernames = splitList(input.whitelistText || "");
+      totalCount = codes.length;
+      sampleEntries = codes.slice(0, 5);
+    }
+
+    if (startsAtDate && startsAtDate.getTime() < now.getTime()) {
+      warnings.push("Start time is already in the past.");
+    }
+
+    const effectiveEndsAtDate = endsAtDate || (startsAtDate ? new Date(startsAtDate.getTime() + 24 * 60 * 60 * 1000) : null);
+    let calculatedState = "";
+    let durationText = "";
+    if (effectiveEndsAtDate) {
+      const msToEnd = effectiveEndsAtDate.getTime() - now.getTime();
+      if (msToEnd > 0 && msToEnd < END_TIME_SOON_MS) {
+        warnings.push("End time is very close (less than 1 hour away).");
+      }
+      if (startsAtDate) {
+        if (now.getTime() >= effectiveEndsAtDate.getTime()) calculatedState = "Already Expired";
+        else if (now.getTime() >= startsAtDate.getTime()) calculatedState = "Live Now";
+        else calculatedState = "Scheduled";
+        durationText = formatDuration(effectiveEndsAtDate.getTime() - startsAtDate.getTime());
+      }
+    }
+
+    if (!regions.length) {
+      warnings.push("No region restriction — this drop is visible to all regions.");
+    }
+    if (effectiveType === "pooled" && eligMode === "public" && whitelistUsernames.length === 0) {
+      warnings.push("Public pooled drop with no whitelist — any eligible user can claim.");
+    }
+    if (totalCount > 0 && totalCount < SMALL_INVENTORY_THRESHOLD) {
+      const noun = effectiveType === "personalised" ? "assignment" : "code";
+      warnings.push(`Very small voucher inventory (${totalCount} ${noun}${totalCount === 1 ? "" : "s"}).`);
+    }
+
+    const payload = { type: effectiveType, name, startsAtLocal, priority };
+    if (endsAtLocal) payload.endsAtLocal = endsAtLocal;
+    if (eligibility.mode !== "public" || (eligibility.allow && eligibility.allow.length)) payload.eligibility = eligibility;
+    if (audience) payload.audience = audience;
+    if (campaignType) payload.campaign_type = campaignType;
+    if (heroTitle) payload.hero_title = heroTitle;
+    if (heroSubtitle) payload.hero_subtitle = heroSubtitle;
+    if (heroImage) payload.hero_image = heroImage;
+    if (effectiveType === "personalised") {
+      payload.assignments = assignments;
+    } else {
+      payload.codes = codes;
+      payload.pool = pool;
+      if (whitelistUsernames.length) payload.whitelistUsernames = whitelistUsernames;
+    }
+
+    return {
+      errors,
+      warnings,
+      payload,
+      summary: {
+        name,
+        type: effectiveType,
+        pool,
+        priority,
+        startsAtLocal,
+        endsAtLocal,
+        calculatedState,
+        durationText,
+        eligMode,
+        eligValuesDisplay,
+        regions,
+        totalCount,
+        whitelistCount: whitelistUsernames.length,
+        sampleEntries,
+        remainingCount: Math.max(0, totalCount - 5),
+      },
+    };
+  }
+
+  function generateIdempotencyKey(prefix) {
+    const rand = Math.random().toString(36).slice(2, 10);
+    return `${prefix || "admdrop"}:${Date.now()}:${rand}`;
+  }
+
+  /**
+   * Dependency-injected controller for the "Confirm & Create" click.
+   * Kept DOM-free so double-submit / failure / success-clearing behavior can
+   * be unit tested without a browser. Real DOM wiring (button element,
+   * modal open/close, form fields) lives in static/index.html.
+   */
+  class DropSubmissionController {
+    constructor({ submitFn, onSuccess, onError, setDisabled, setLabel } = {}) {
+      this.submitFn = submitFn;
+      this.onSuccess = onSuccess || (() => {});
+      this.onError = onError || (() => {});
+      this.setDisabled = setDisabled || (() => {});
+      this.setLabel = setLabel || (() => {});
+      this.pendingPayload = null;
+      this.pendingIdempotencyKey = null;
+      this.inFlight = false;
+    }
+
+    stagePayload(payload, idempotencyKeyPrefix) {
+      this.pendingPayload = payload;
+      this.pendingIdempotencyKey = generateIdempotencyKey(idempotencyKeyPrefix);
+    }
+
+    clearPending() {
+      this.pendingPayload = null;
+      this.pendingIdempotencyKey = null;
+    }
+
+    async confirm() {
+      if (this.inFlight || !this.pendingPayload) return;
+      this.inFlight = true;
+      this.setDisabled(true);
+      this.setLabel("Creating…");
+      const payload = Object.assign({}, this.pendingPayload, {
+        idempotency_key: this.pendingIdempotencyKey,
+      });
+      try {
+        const data = await this.submitFn(payload);
+        // Success: caller's onSuccess is responsible for closing the modal and
+        // clearing the form exactly once (only on the success path).
+        this.clearPending();
+        this.onSuccess(data);
+      } catch (err) {
+        // Failure: keep pendingPayload so the form/modal state is preserved.
+        this.onError(err);
+      } finally {
+        this.inFlight = false;
+        this.setDisabled(false);
+        this.setLabel("Confirm & Create");
+      }
+    }
+  }
+
+  return {
+    KL_OFFSET_MS,
+    splitList,
+    normalizeUsername,
+    normalizeCode,
+    nativeDatetimeToKLString,
+    klLocalStringToUtcDate,
+    formatKLDisplayFromLocal,
+    formatDuration,
+    parsePersonalisedInput,
+    parsePooledCodesInput,
+    buildDropPreview,
+    generateIdempotencyKey,
+    DropSubmissionController,
+  };
+});

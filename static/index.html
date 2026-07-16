@@ -6,6 +6,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <script src="/static/i18n.js"></script>
+  <script src="/static/js/voucher_drop_preview.js"></script>
   <script>
     window.UI_VERSION = new URLSearchParams(window.location.search).get("v") || "unknown";
     console.info("UI_VERSION", window.UI_VERSION);
@@ -1804,7 +1805,8 @@
                   </div>
                   <textarea id="adm_wl_text" rows="3" placeholder="Whitelist usernames (optional)" style="width:100%; margin-top:8px; padding:8px; border-radius:6px; border:1px solid #ccc; font-family:monospace;"></textarea>
                 </div>
-                <button id="adm_create_btn" type="button" style="margin-top:12px;">Create Drop</button>
+                <div id="adm_preview_errors" style="display:none; margin-top:12px; background:#fef2f2; border:1px solid #fecaca; color:#991b1b; border-radius:8px; padding:10px 12px; font-size:13px;"></div>
+                <button id="adm_create_btn" type="button" style="margin-top:12px;">Preview Drop</button>
               </div>
               <div style="background:#fff; border:1px solid #ddd; border-radius:8px; padding:12px; margin-bottom:16px;">
                 <h5 style="margin:0 0 10px 0;">📥 Add to Existing Drop</h5>
@@ -1937,6 +1939,21 @@
       <div style="display:flex;gap:8px;">
         <button id="adm_edit_dates_save" style="flex:1;padding:9px;border-radius:6px;background:#3b82f6;color:#fff;border:none;cursor:pointer;font-size:13px;font-weight:600;">Save</button>
         <button id="adm_edit_dates_cancel" style="flex:1;padding:9px;border-radius:6px;background:#475569;color:#fff;border:none;cursor:pointer;font-size:13px;">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- CREATE DROP PREVIEW / CONFIRMATION MODAL -->
+  <div id="adm_preview_drop_modal" style="display:none;position:fixed;z-index:2100;left:0;top:0;width:100%;height:100%;background:rgba(0,0,0,0.65);align-items:center;justify-content:center;padding:16px;box-sizing:border-box;">
+    <div style="background:#1e293b;color:#fff;border-radius:12px;width:100%;max-width:440px;max-height:90vh;display:flex;flex-direction:column;box-shadow:0 8px 32px rgba(0,0,0,0.5);">
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:16px 16px 8px;">
+        <h3 style="margin:0;font-size:16px;">Confirm Voucher Drop</h3>
+        <button id="adm_preview_close_btn" type="button" aria-label="Close" style="background:none;border:none;color:#94a3b8;font-size:20px;line-height:1;cursor:pointer;padding:4px 8px;">×</button>
+      </div>
+      <div id="adm_preview_body" style="padding:0 16px 12px;overflow-y:auto;flex:1 1 auto;"></div>
+      <div style="display:flex;gap:8px;padding:12px 16px;border-top:1px solid #334155;">
+        <button id="adm_preview_back_btn" type="button" style="flex:1;padding:10px;border-radius:6px;background:#475569;color:#fff;border:none;cursor:pointer;font-size:13px;">Back to Edit</button>
+        <button id="adm_preview_confirm_btn" type="button" style="flex:1;padding:10px;border-radius:6px;background:#16a34a;color:#fff;border:none;cursor:pointer;font-size:13px;font-weight:600;">Confirm &amp; Create</button>
       </div>
     </div>
   </div>
@@ -2747,7 +2764,7 @@
     }
 
     const admCreateBtn = document.getElementById("adm_create_btn");
-    if (admCreateBtn) admCreateBtn.onclick = adm_create;
+    if (admCreateBtn) admCreateBtn.onclick = adm_preview;
 
     const admEligMode = document.getElementById("adm_elig_mode");
     if (admEligMode) {
@@ -2783,103 +2800,182 @@
       }
     }
 
-    async function adm_create() {
-      const typeEl = document.querySelector("#adm_type");
-      if (!typeEl) return;
-      const type = typeEl.value;
-      const payload = {
-        type,
-        name: document.querySelector("#adm_name").value.trim(),
-        startsAtLocal: toKLStringFromNative(document.querySelector("#adm_starts").value.trim()),
-        priority: Number(document.querySelector("#adm_pri").value || 100),
+    // ---------- Create Drop: Preview + Confirm flow ----------
+    // Client-side validation/parsing lives in /static/js/voucher_drop_preview.js
+    // (window.VoucherDropPreview) so it can be unit tested without a browser.
+    // Nothing in this block calls the create-drop API until "Confirm & Create"
+    // is clicked inside the modal.
+
+    function admReadDropFormValues() {
+      return {
+        type: document.querySelector("#adm_type")?.value || "personalised",
+        name: document.querySelector("#adm_name")?.value || "",
+        priority: document.querySelector("#adm_pri")?.value || "",
+        startsNative: document.querySelector("#adm_starts")?.value || "",
+        endsNative: document.querySelector("#adm_ends")?.value || "",
+        eligMode: document.querySelector("#adm_elig_mode")?.value || "public",
+        eligValuesRaw: document.querySelector("#adm_elig_values")?.value || "",
+        regions: (() => {
+          const sel = document.getElementById("adm_regions");
+          return sel ? Array.from(sel.selectedOptions).map(o => o.value).filter(Boolean) : [];
+        })(),
+        heroTitle: document.querySelector("#adm_hero_title")?.value || "",
+        heroSubtitle: document.querySelector("#adm_hero_subtitle")?.value || "",
+        heroImage: document.querySelector("#adm_hero_image")?.value || "",
+        pairsText: document.querySelector("#adm_pairs_text")?.value || "",
+        codesText: document.querySelector("#adm_codes_text")?.value || "",
+        poolSelect: document.querySelector("#adm_create_pool")?.value || "public",
+        whitelistText: document.querySelector("#adm_wl_text")?.value || "",
       };
+    }
 
-      const eligMode = document.querySelector("#adm_elig_mode")?.value || "public";
-      const eligValues = document.querySelector("#adm_elig_values")?.value || "";
-      const eligibility = { mode: eligMode };
-
-      if (eligMode === "tier" || eligMode === "user_id") {
-        const parts = eligValues.split(/[\n,]/).map(x => x.trim()).filter(Boolean);
-        if (!parts.length) {
-          tgAlert("Please provide eligibility values."); return;
-        }
-        if (eligMode === "tier") {
-          eligibility.allow = parts;
-        } else {
-          const ids = parts.map(Number).filter(n => Number.isFinite(n));
-          if (!ids.length) { tgAlert("Please provide numeric user IDs."); return; }
-          eligibility.allow = ids;
-        }
-      }
-
-      if (eligibility.mode !== "public" || eligibility.allow?.length) {
-        payload.eligibility = eligibility;
-      }
-
+    function admClearCreateDropForm() {
+      ["#adm_name", "#adm_pri", "#adm_starts", "#adm_ends", "#adm_elig_values",
+       "#adm_hero_title", "#adm_hero_subtitle", "#adm_hero_image",
+       "#adm_pairs_text", "#adm_codes_text", "#adm_wl_text"].forEach(sel => {
+        const el = document.querySelector(sel);
+        if (el) el.value = "";
+      });
       const regionSel = document.getElementById("adm_regions");
-      const regions = regionSel ? Array.from(regionSel.selectedOptions).map(o => o.value).filter(Boolean) : [];
-      if (regions.length) {
-        payload.audience = { regions };
+      if (regionSel) Array.from(regionSel.options).forEach(o => { o.selected = false; });
+      const eligModeEl = document.getElementById("adm_elig_mode");
+      if (eligModeEl) { eligModeEl.value = "public"; toggleAdmEligValues(); }
+      const typeEl = document.getElementById("adm_type");
+      if (typeEl && !typeEl.disabled) { typeEl.value = "personalised"; typeEl.dispatchEvent(new Event("change")); }
+      const errBox = document.getElementById("adm_preview_errors");
+      if (errBox) { errBox.style.display = "none"; errBox.innerHTML = ""; }
+    }
+
+    let _admPendingSummaryCount = 0;
+
+    function admRenderPreviewErrors(errors) {
+      const errBox = document.getElementById("adm_preview_errors");
+      if (!errBox) return;
+      if (!errors.length) { errBox.style.display = "none"; errBox.innerHTML = ""; return; }
+      errBox.style.display = "block";
+      errBox.innerHTML = `<strong>Please fix the following before previewing:</strong>` +
+        `<ul style="margin:6px 0 0 18px; padding:0;">${errors.map(e => `<li>${escapeHtml(e)}</li>`).join("")}</ul>`;
+    }
+
+    function admRenderPreviewModal(result) {
+      const { summary, warnings } = result;
+      const V = window.VoucherDropPreview;
+      _admPendingSummaryCount = summary.totalCount;
+
+      const rows = [];
+      rows.push(["Campaign name", escapeHtml(summary.name)]);
+      rows.push(["Type", summary.type === "pooled" ? "Pooled" : "Personalised"]);
+      if (summary.type === "pooled") {
+        rows.push(["Pool", summary.pool === "my" ? "MY Reserve" : "Public"]);
+      }
+      rows.push(["Priority", escapeHtml(String(summary.priority))]);
+      rows.push(["Start time (KL)", escapeHtml(V.formatKLDisplayFromLocal(summary.startsAtLocal) || "—")]);
+      rows.push(["End time (KL)", summary.endsAtLocal ? escapeHtml(V.formatKLDisplayFromLocal(summary.endsAtLocal)) : "Defaults to 24h after start"]);
+      rows.push(["Calculated state", escapeHtml(summary.calculatedState || "—")]);
+      rows.push(["Campaign duration", escapeHtml(summary.durationText || "—")]);
+      rows.push(["Eligibility mode", escapeHtml(summary.eligMode)]);
+      if (summary.eligValuesDisplay.length) {
+        rows.push(["Eligibility values", escapeHtml(summary.eligValuesDisplay.join(", "))]);
+      }
+      rows.push(["Allowed regions", summary.regions.length ? escapeHtml(summary.regions.join(", ")) : "All regions"]);
+      rows.push([summary.type === "pooled" ? "Total voucher codes" : "Total personalised assignments", escapeHtml(String(summary.totalCount))]);
+      if (summary.type === "pooled") {
+        rows.push(["Whitelist count", escapeHtml(String(summary.whitelistCount))]);
       }
 
-      if (eligMode === "new_joiner") {
-        payload.type = "pooled";
-        payload.audience = { ...(payload.audience || {}), type: "new_joiner" };
-        payload.campaign_type = "welcome_voucher";
-      }
+      const rowsHtml = rows.map(([label, value]) => `
+        <div style="display:flex; justify-content:space-between; gap:12px; padding:6px 0; border-bottom:1px solid #334155; font-size:13px;">
+          <span style="color:#94a3b8;">${escapeHtml(label)}</span>
+          <span style="color:#fff; text-align:right; word-break:break-word;">${value}</span>
+        </div>`).join("");
 
-      const endsValue = (document.querySelector("#adm_ends")?.value || "").trim();
-      const endsAtLocal = toKLStringFromNative(endsValue);
-      if (endsAtLocal) {
-        payload.endsAtLocal = endsAtLocal;
-      }
+      const sampleHtml = summary.sampleEntries.length
+        ? `<div style="margin-top:10px;">
+             <p style="margin:0 0 4px; font-size:12px; color:#94a3b8;">Sample (first ${summary.sampleEntries.length}):</p>
+             <ul style="margin:0; padding-left:18px; font-size:12px; font-family:monospace; color:#e2e8f0;">
+               ${summary.sampleEntries.map(e => `<li>${escapeHtml(e)}</li>`).join("")}
+             </ul>
+             ${summary.remainingCount > 0 ? `<p style="margin:6px 0 0; font-size:12px; color:#94a3b8;">+ ${summary.remainingCount} more entr${summary.remainingCount === 1 ? "y" : "ies"} not shown.</p>` : ""}
+           </div>`
+        : "";
 
-      const heroTitle = (document.querySelector("#adm_hero_title")?.value || "").trim();
-      const heroSubtitle = (document.querySelector("#adm_hero_subtitle")?.value || "").trim();
-      const heroImage = (document.querySelector("#adm_hero_image")?.value || "").trim();
-      if (heroTitle) payload.hero_title = heroTitle;
-      if (heroSubtitle) payload.hero_subtitle = heroSubtitle;
-      if (heroImage) payload.hero_image = heroImage;
+      const warningsHtml = warnings.length
+        ? `<div style="background:#78350f; border:1px solid #f59e0b; color:#fef3c7; border-radius:8px; padding:10px; margin-bottom:12px; font-size:12px;">
+             <strong>⚠️ Warnings</strong>
+             <ul style="margin:6px 0 0 18px; padding:0;">${warnings.map(w => `<li>${escapeHtml(w)}</li>`).join("")}</ul>
+           </div>`
+        : "";
 
-      if (!payload.name || !payload.startsAtLocal) {
-        tgAlert("Name and Start Time are required."); return;
-      }
+      const body = document.getElementById("adm_preview_body");
+      if (body) body.innerHTML = `${warningsHtml}${rowsHtml}${sampleHtml}`;
 
-      if (type === "personalised") {
-        const lines = (document.querySelector("#adm_pairs_text").value || "")
-          .split(/\r?\n/).map(x => x.trim()).filter(Boolean);
-        const assignments = lines.map(line => {
-          const [u, c] = line.split(/[,\t]/).map(s => s?.trim());
-          return u && c ? { username: u, code: c } : null;
-        }).filter(Boolean);
-        if (!assignments.length) { tgAlert("Please provide username,code pairs."); return; }
-        payload.assignments = assignments;
-      } else {
-        const codes = (document.querySelector("#adm_codes_text").value || "")
-          .split(/\r?\n/).map(x => x.trim()).filter(Boolean);
-        if (!codes.length) { tgAlert("Please provide codes."); return; }
-        payload.codes = codes;
-        payload.pool = document.querySelector("#adm_create_pool")?.value || "public";        
-        const wl = splitList(document.querySelector("#adm_wl_text").value);
-        if (wl.length) payload.whitelistUsernames = wl;
-      }
+      const modal = document.getElementById("adm_preview_drop_modal");
+      if (modal) modal.style.display = "flex";
+    }
 
-      try {
+    function admClosePreviewModal() {
+      const modal = document.getElementById("adm_preview_drop_modal");
+      if (modal) modal.style.display = "none";
+    }
+
+    const _admDropSubmission = new (window.VoucherDropPreview.DropSubmissionController)({
+      submitFn: async (payload) => {
         const userId = getAdminUserId();
-        if (!userId) { tgAlert("Missing admin user id. Open via Telegram to continue."); return; }
+        if (!userId) throw new Error("Missing admin user id. Open via Telegram to continue.");
         const tail = buildAdminQueryTail();
         const res = await v2Fetch(`${API_V2}/admin/drops${tail}`, {
           method: "POST",
           body: JSON.stringify(payload)
         });
-
         const data = await res.json();
-        if (!res.ok || data.status !== "ok") throw new Error(JSON.stringify(data));
-        tgAlert(`Created drop: ${data.dropId}`);
+        if (!res.ok || data.status !== "ok") {
+          throw new Error(data?.message || data?.error || JSON.stringify(data));
+        }
+        return data;
+      },
+      setDisabled: (disabled) => {
+        const btn = document.getElementById("adm_preview_confirm_btn");
+        if (btn) btn.disabled = disabled;
+      },
+      setLabel: (label) => {
+        const btn = document.getElementById("adm_preview_confirm_btn");
+        if (btn) btn.textContent = label;
+      },
+      onSuccess: (data) => {
+        admClosePreviewModal();
+        admClearCreateDropForm();
+        tgAlert(`Drop created successfully\nDrop ID: ${data.dropId}\nEntries: ${_admPendingSummaryCount}`);
         adm_list();
-      } catch (e) {
-        tgAlert(`Create failed: ${e.message}`);
+      },
+      onError: (err) => {
+        tgAlert(`Create failed: ${err.message}`);
+      },
+    });
+
+    function adm_preview() {
+      const result = window.VoucherDropPreview.buildDropPreview(admReadDropFormValues());
+      if (result.errors.length) {
+        admRenderPreviewErrors(result.errors);
+        tgAlert(result.errors[0]);
+        return;
       }
+      admRenderPreviewErrors([]);
+      _admDropSubmission.stagePayload(result.payload, "admdrop");
+      admRenderPreviewModal(result);
+    }
+
+    {
+      const backBtn = document.getElementById("adm_preview_back_btn");
+      const closeBtn = document.getElementById("adm_preview_close_btn");
+      const confirmBtn = document.getElementById("adm_preview_confirm_btn");
+      const modal = document.getElementById("adm_preview_drop_modal");
+      if (backBtn) backBtn.addEventListener("click", admClosePreviewModal);
+      if (closeBtn) closeBtn.addEventListener("click", admClosePreviewModal);
+      if (modal) modal.addEventListener("click", (e) => { if (e.target === modal) admClosePreviewModal(); });
+      if (confirmBtn) confirmBtn.addEventListener("click", () => _admDropSubmission.confirm());
+      document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape" && modal && modal.style.display !== "none") admClosePreviewModal();
+      });
     }
 
     const admAddParseBtn = document.getElementById("adm_add_parse_btn");
