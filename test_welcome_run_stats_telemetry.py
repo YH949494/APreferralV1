@@ -149,6 +149,37 @@ def test_scheduled_wrapper_persists_heartbeat_end_to_end():
     assert doc["run_id"] == "run-e2e"
 
 
+def test_partial_failure_run_still_refreshes_heartbeat_with_partial_status():
+    """Regression test for the incident where one user's malformed data
+    raised out of ``process_welcome_reminders`` entirely: the run wrapper
+    never reached ``_record_welcome_run_stats``, so lastRunAt/status froze
+    even though the worker process itself was alive. Per-user isolation
+    means ``process_welcome_reminders`` now returns normally with a
+    ``status``/``failed_count`` describing the partial failure, and the
+    scheduled wrapper must persist that (not raise, not silently drop it)."""
+    now_before = datetime.now(timezone.utc)
+    stats = {
+        "run_id": "run-partial",
+        "scanned": 2,
+        "reminder_20h_sent": 1,
+        "failed_count": 1,
+        "failed_users": [
+            {"user_id": 91, "stage": None, "run_id": "run-partial", "error": "TypeError: boom"}
+        ],
+        "status": "partial_failure",
+    }
+    with mock.patch.object(main, "process_welcome_reminders", return_value=stats):
+        main.welcome_progress_reminders_scheduled()
+
+    doc = _read_heartbeat()
+    assert doc is not None
+    assert doc["lastRunAt"] >= _bson_round(now_before)
+    assert doc["status"] == "partial_failure"
+    assert doc["lastRunStats"]["failed_count"] == 1
+    assert doc["lastRunStats"]["failed_users"][0]["user_id"] == 91
+    assert len(doc["recentRuns"]) == 1
+
+
 def test_dashboard_reads_same_canonical_job_key_as_writer():
     """Writer key (admin_cache._id) and reader key (runtime_status lookup)
     must be identical character-for-character."""

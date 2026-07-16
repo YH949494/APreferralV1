@@ -586,6 +586,143 @@ def test_log_welcome_event_stage_values_are_normalized():
     assert set(m.WELCOME_REMINDER_STAGES) == {"20h", "28h", "day3", "completed"}
 
 
+def test_process_welcome_reminders_isolates_malformed_user_and_processes_rest(monkeypatch):
+    """Reproduces the production incident: one user's progress lookup
+    raises (e.g. malformed/legacy check-in data reaching
+    ``get_welcome_reward_progress`` via ``get_welcome_progress``). That
+    single failure must not abort the batch — later, valid users must
+    still be scanned and reminded, and the run must report the failure
+    instead of raising out of ``process_welcome_reminders`` entirely."""
+    now = datetime(2026, 1, 2, 12, 0, tzinfo=timezone.utc)
+    broken_doc = {
+        "_id": "r-broken",
+        "user_id": 91,
+        "day1_at": now - timedelta(hours=21),
+        "reminder_20h_sent": False,
+        "reminder_28h_sent": False,
+        "day2_reminder_sent": False,
+    }
+    healthy_doc = {
+        "_id": "r-healthy",
+        "user_id": 92,
+        "day1_at": now - timedelta(hours=21),
+        "reminder_20h_sent": False,
+        "reminder_28h_sent": False,
+        "day2_reminder_sent": False,
+    }
+    fake_db = FakeReminderDb([broken_doc, healthy_doc])
+    sent = []
+
+    def fake_send(uid, text):
+        sent.append(uid)
+        return True, None, False
+
+    def fake_get_welcome_progress(uid, now=None):
+        if uid == 91:
+            # Stand-in for the production exception: a malformed legacy
+            # check-in timestamp blowing up deep inside
+            # get_welcome_reward_progress, surfaced through get_welcome_progress.
+            raise TypeError(
+                "get_welcome_reward_progress() got an unexpected keyword argument 'now'"
+            )
+        return {"completed": 1, "claimed": False, "expired": False}
+
+    monkeypatch.setattr(m, "get_welcome_progress", fake_get_welcome_progress)
+
+    result = scheduler.process_welcome_reminders(now_ref=now, db_ref=fake_db, send_fn=fake_send)
+
+    # The batch did not abort: the run completed and returned normally.
+    assert result["scanned"] == 2
+    assert result["failed_count"] == 1
+    assert result["status"] == "partial_failure"
+    assert result["failed_users"][0]["user_id"] == 91
+    assert result["failed_users"][0]["run_id"] == result["run_id"]
+    assert "TypeError" in result["failed_users"][0]["error"]
+
+    # The later, valid user was still processed and reminded.
+    assert sent == [92]
+    assert healthy_doc["reminder_20h_sent"] is True
+    assert result["reminder_20h_sent"] == 1
+
+    # The broken user was never marked sent, so it remains retryable.
+    assert broken_doc["reminder_20h_sent"] is False
+
+
+def test_process_welcome_reminders_failed_user_is_retried_next_run_without_duplicating_others(monkeypatch):
+    now = datetime(2026, 1, 2, 12, 0, tzinfo=timezone.utc)
+    broken_doc = {
+        "_id": "r-broken2",
+        "user_id": 93,
+        "day1_at": now - timedelta(hours=21),
+        "reminder_20h_sent": False,
+        "reminder_28h_sent": False,
+        "day2_reminder_sent": False,
+    }
+    healthy_doc = {
+        "_id": "r-healthy2",
+        "user_id": 94,
+        "day1_at": now - timedelta(hours=21),
+        "reminder_20h_sent": False,
+        "reminder_28h_sent": False,
+        "day2_reminder_sent": False,
+    }
+    fake_db = FakeReminderDb([broken_doc, healthy_doc])
+    sent = []
+
+    def fake_send(uid, text):
+        sent.append(uid)
+        return True, None, False
+
+    calls = {"n": 0}
+
+    def fake_get_welcome_progress(uid, now=None):
+        if uid == 93 and calls["n"] == 0:
+            raise ValueError("malformed check-in timestamp")
+        return {"completed": 1, "claimed": False, "expired": False}
+
+    monkeypatch.setattr(m, "get_welcome_progress", fake_get_welcome_progress)
+
+    result1 = scheduler.process_welcome_reminders(now_ref=now, db_ref=fake_db, send_fn=fake_send)
+    assert result1["failed_count"] == 1
+    assert sent == [94]
+    assert healthy_doc["reminder_20h_sent"] is True
+
+    # Second hourly run: the transient condition has cleared, and the
+    # previously-healthy user must not receive a duplicate reminder.
+    calls["n"] = 1
+    sent.clear()
+    result2 = scheduler.process_welcome_reminders(now_ref=now + timedelta(hours=1), db_ref=fake_db, send_fn=fake_send)
+    assert result2["failed_count"] == 0
+    assert sent == [93]
+    assert broken_doc["reminder_20h_sent"] is True
+
+
+def test_process_welcome_reminders_send_failure_mid_stage_is_isolated_with_stage_recorded(monkeypatch):
+    """Exercises isolation for a failure raised mid-processing (during
+    send) rather than during the progress lookup, confirming the
+    recorded ``stage`` reflects where the failure occurred."""
+    now = datetime(2026, 1, 2, 12, 0, tzinfo=timezone.utc)
+    doc = {
+        "_id": "r-send-crash",
+        "user_id": 95,
+        "day1_at": now - timedelta(hours=21),
+        "reminder_20h_sent": False,
+        "reminder_28h_sent": False,
+        "day2_reminder_sent": False,
+    }
+    fake_db = FakeReminderDb([doc])
+    monkeypatch.setattr(m, "get_welcome_progress", lambda uid, now=None: {"completed": 1, "claimed": False, "expired": False})
+
+    def crashing_send(uid, text):
+        raise ConnectionError("telegram api unreachable")
+
+    result = scheduler.process_welcome_reminders(now_ref=now, db_ref=fake_db, send_fn=crashing_send)
+
+    assert result["failed_count"] == 1
+    assert result["failed_users"][0]["stage"] == "20h"
+    assert doc["reminder_20h_sent"] is False
+
+
 class FakeDistinctCollection:
     def __init__(self, docs):
         self.docs = docs
