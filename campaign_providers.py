@@ -223,6 +223,8 @@ def create_provider():
         return jsonify({"status": "error", "code": "internal_error"}), 500
 
     _log_audit("provider_created", admin, provider_id, {"type": updates.get("type")})
+    from campaign_events import emit_campaign_event
+    emit_campaign_event(event_type="provider_created", provider_id=provider_id, source="admin")
     return jsonify({"status": "ok", "id": str(result.inserted_id), "provider_id": provider_id}), 201
 
 
@@ -256,6 +258,8 @@ def update_provider(provider_id: str):
 
     database.db["gc_providers"].update_one({"provider_id": provider_id}, {"$set": updates})
     _log_audit("provider_updated", admin, provider_id, {"fields": list(updates.keys())})
+    from campaign_events import emit_campaign_event
+    emit_campaign_event(event_type="provider_updated", provider_id=provider_id, source="admin")
     return jsonify({"status": "ok"})
 
 
@@ -274,6 +278,8 @@ def activate_provider(provider_id: str):
         {"$set": {"active": True, "updated_at": datetime.now(timezone.utc)}},
     )
     _log_audit("provider_activated", admin, provider_id)
+    from campaign_events import emit_campaign_event
+    emit_campaign_event(event_type="provider_activated", provider_id=provider_id, source="admin")
     return jsonify({"status": "ok"})
 
 
@@ -290,6 +296,8 @@ def deactivate_provider(provider_id: str):
         {"$set": {"active": False, "updated_at": datetime.now(timezone.utc)}},
     )
     _log_audit("provider_deactivated", admin, provider_id)
+    from campaign_events import emit_campaign_event
+    emit_campaign_event(event_type="provider_deactivated", provider_id=provider_id, source="admin")
     return jsonify({"status": "ok"})
 
 

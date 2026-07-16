@@ -100,17 +100,28 @@ def _log_audit(action: str, admin: dict, campaign_id: str, details: dict | None 
         logger.warning("[CAMPAIGN_CENTRE] audit_write_failed", exc_info=True)
 
 
+_EVENT_TOP_LEVEL_FIELDS = frozenset({
+    "campaign_type", "provider_id", "submission_id", "reward_id", "pool_id",
+    "source", "status", "reason", "event_id", "occurred_at",
+})
+
+
 def log_funnel_event(event: str, *, campaign_id: str, user_id: int | None = None, **extra) -> None:
-    try:
-        database.db["campaign_events"].insert_one({
-            "event": event,
-            "campaign_id": campaign_id,
-            "user_id": user_id,
-            "at": datetime.now(timezone.utc),
-            **extra,
-        })
-    except Exception:
-        logger.warning("[CAMPAIGN_CENTRE] event_log_failed event=%s", event, exc_info=True)
+    """Thin, call-site-compatible wrapper around the canonical
+    campaign_events writer (campaign_events.emit_campaign_event) — every
+    Campaign Centre module writes through this one function (or the writer
+    directly), so campaign_events is the single ledger, not a per-module
+    ad-hoc insert."""
+    from campaign_events import emit_campaign_event
+
+    top_level = {k: extra.pop(k) for k in list(extra) if k in _EVENT_TOP_LEVEL_FIELDS}
+    emit_campaign_event(
+        event_type=event,
+        campaign_id=campaign_id,
+        telegram_user_id=user_id,
+        metadata=extra or None,
+        **top_level,
+    )
 
 
 def get_campaign(campaign_id: str) -> dict | None:
@@ -384,6 +395,7 @@ def create_campaign():
         return jsonify({"status": "error", "code": "internal_error"}), 500
 
     _log_audit("campaign_created", admin, campaign_id, {"type": doc.get("type")})
+    log_funnel_event("campaign_created", campaign_id=campaign_id, campaign_type=doc.get("type"), source="admin")
     return jsonify({"status": "ok", "id": str(result.inserted_id), "campaign_id": campaign_id}), 201
 
 
@@ -431,6 +443,7 @@ def update_campaign(campaign_id: str):
 
     database.db["gc_campaigns"].update_one({"campaign_id": campaign_id}, {"$set": updates})
     _log_audit("campaign_updated", admin, campaign_id, {"fields": list(updates.keys())})
+    log_funnel_event("campaign_updated", campaign_id=campaign_id, campaign_type=doc.get("type"), source="admin")
     return jsonify({"status": "ok"})
 
 
@@ -453,6 +466,7 @@ def _transition(campaign_id: str, admin: dict, new_status: str, action: str):
         {"$set": {"status": new_status, "updated_at": datetime.now(timezone.utc)}},
     )
     _log_audit(action, admin, campaign_id, {"new_status": new_status})
+    log_funnel_event(action, campaign_id=campaign_id, campaign_type=doc.get("type"), source="admin")
     return jsonify({"status": "ok", "campaign_status": new_status})
 
 
@@ -544,6 +558,7 @@ def preview_campaign(campaign_id: str):
     if provider and not provider_is_usable_for_results(provider):
         badges.append("provider_inactive")
 
+    log_funnel_event("campaign_previewed", campaign_id=campaign_id, campaign_type=doc.get("type"), source="admin")
     return jsonify({
         "status": "ok",
         "card": card,
@@ -587,6 +602,14 @@ def list_active_campaigns():
         provider = get_provider((d.get("destination") or {}).get("provider_id") or "")
         if is_publicly_active(d, provider, now):
             active.append(_public_card(d))
+            # This endpoint is intentionally unauthenticated (public
+            # visibility must not require identity), so campaign_view is
+            # recorded without a telegram_user_id. The natural call
+            # frequency is bounded by Mini App opens — the widget fetches
+            # this once per load, never on a poll loop — so no additional
+            # dedup/rate-limiting is needed to avoid event spam here.
+            log_funnel_event("campaign_view", campaign_id=d["campaign_id"],
+                              campaign_type=d.get("type"), source="miniapp")
 
     return jsonify({"status": "ok", "campaigns": active})
 
@@ -607,12 +630,14 @@ def play_campaign(campaign_id: str):
 
     doc = get_campaign(campaign_id)
     provider = get_provider((doc or {}).get("destination", {}).get("provider_id") or "") if doc else None
+    campaign_type = doc.get("type") if doc else None
+
+    log_funnel_event("campaign_click", campaign_id=campaign_id, user_id=uid, campaign_type=campaign_type, source="miniapp")
 
     if not doc or not is_publicly_active(doc, provider, datetime.now(timezone.utc)):
-        log_funnel_event("play_click", campaign_id=campaign_id, user_id=uid, result="unavailable")
+        log_funnel_event("destination_blocked", campaign_id=campaign_id, user_id=uid, campaign_type=campaign_type,
+                          source="miniapp", status="fail", reason="campaign_unavailable")
         return jsonify({"status": "error", "code": "campaign_unavailable"}), 404
-
-    log_funnel_event("play_click", campaign_id=campaign_id, user_id=uid, result="attempt")
 
     telegram_cfg = doc.get("telegram") or {}
     if telegram_cfg.get("require_subscription", True):
@@ -622,6 +647,8 @@ def play_campaign(campaign_id: str):
         gate = verify_campaign_subscription(doc, uid, force_refresh=force_refresh)
         if not gate.get("subscribed"):
             log_funnel_event("subscription_fail", campaign_id=campaign_id, user_id=uid, reason=gate.get("reason"))
+            log_funnel_event("destination_blocked", campaign_id=campaign_id, user_id=uid, campaign_type=campaign_type,
+                              source="miniapp", status="fail", reason="subscription_required")
             return jsonify({
                 "status": "error",
                 "code": "subscription_required",
@@ -633,9 +660,11 @@ def play_campaign(campaign_id: str):
 
     destination_url = build_effective_url(provider, doc, uid) if provider else None
     if not destination_url:
+        log_funnel_event("destination_blocked", campaign_id=campaign_id, user_id=uid, campaign_type=campaign_type,
+                          source="miniapp", status="fail", reason="no_destination_url")
         return jsonify({"status": "error", "code": "campaign_unavailable"}), 404
 
-    log_funnel_event("destination_open", campaign_id=campaign_id, user_id=uid)
+    log_funnel_event("destination_open", campaign_id=campaign_id, user_id=uid, campaign_type=campaign_type, source="miniapp")
     return jsonify({
         "status": "ok",
         "open_mode": (doc.get("destination") or {}).get("open_mode", "telegram_web_app"),

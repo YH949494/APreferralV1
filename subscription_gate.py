@@ -75,20 +75,17 @@ def _cache_set(channel_id, user_id: int, subscribed: bool, ttl_s: int) -> None:
 
 def _log_event(*, campaign_id: str, user_id: int, channel_id, result: str, tg_status: str | None,
                 source: str, latency_ms: int, error: str | None = None) -> None:
-    try:
-        database.db["campaign_events"].insert_one({
-            "event": f"subscription_{result}",
-            "campaign_id": campaign_id,
-            "user_id": user_id,
-            "channel_id": str(channel_id),
-            "telegram_status": tg_status,
-            "source": source,
-            "latency_ms": latency_ms,
-            "error": error,
-            "at": datetime.now(timezone.utc),
-        })
-    except Exception:
-        logger.warning("[SUBSCRIPTION_GATE] event_log_failed", exc_info=True)
+    from campaign_events import emit_campaign_event
+
+    emit_campaign_event(
+        event_type=f"subscription_{result}",
+        campaign_id=campaign_id,
+        telegram_user_id=user_id,
+        source=source,
+        status="success" if result == "pass" else "fail",
+        reason=error,
+        metadata={"channel_id": str(channel_id), "telegram_status": tg_status, "latency_ms": latency_ms},
+    )
 
 
 def _get_chat_member(channel_id, user_id: int) -> tuple[str | None, str | None]:

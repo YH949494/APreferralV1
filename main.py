@@ -2368,6 +2368,9 @@ app.register_blueprint(tournament_rewards_bp)
 from campaign_rewards_api import campaign_rewards_bp
 app.register_blueprint(campaign_rewards_bp)
 
+from campaign_events import campaign_events_bp
+app.register_blueprint(campaign_events_bp)
+
 admin_bp = Blueprint("admin", __name__)
 
 

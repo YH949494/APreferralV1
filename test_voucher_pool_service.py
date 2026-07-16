@@ -43,14 +43,14 @@ def test_upload_codes_writes_into_shared_voucher_pools_collection(fake_db):
 
 def test_pool_stock_counts_available_and_issued(fake_db):
     now = datetime.now(timezone.utc)
-    fake_db["voucher_pools"].insert_one({"pool_id": "gold", "code": "A1", "status": "available", "created_at": now, "pool_source": "campaign_centre"})
-    fake_db["voucher_pools"].insert_one({"pool_id": "gold", "code": "A2", "status": "issued", "created_at": now, "pool_source": "campaign_centre"})
+    fake_db["voucher_pools"].insert_one({"pool_id": "gold", "code": "A1", "status": "available", "created_at": now, "pool_source": "campaign_centre", "allocation_scope": "campaign_rewards"})
+    fake_db["voucher_pools"].insert_one({"pool_id": "gold", "code": "A2", "status": "issued", "created_at": now, "pool_source": "campaign_centre", "allocation_scope": "campaign_rewards"})
     assert vps.pool_stock("gold") == {"available": 1, "issued": 1}
 
 
 def test_allocate_voucher_is_atomic_and_idempotent(fake_db):
     now = datetime.now(timezone.utc)
-    fake_db["voucher_pools"].insert_one({"pool_id": "gold", "code": "A1", "status": "available", "created_at": now, "pool_source": "campaign_centre"})
+    fake_db["voucher_pools"].insert_one({"pool_id": "gold", "code": "A1", "status": "available", "created_at": now, "pool_source": "campaign_centre", "allocation_scope": "campaign_rewards"})
     first = vps.allocate_voucher("gold", reward_id="rw_1", telegram_user_id=111)
     assert first["status"] == "issued"
     assert first["issued_to_user_id"] == 111
@@ -119,31 +119,58 @@ def test_campaign_allocation_never_claims_a_legacy_style_row(fake_db):
     assert legacy_row["status"] == "available"
 
 
-def test_affiliate_allocation_never_claims_a_campaign_centre_row(fake_db):
-    """The reverse direction: affiliate_rewards._claim_voucher_from_pool
-    filters only on pool_id/status/issued_for_ledger_id — it was never
-    changed by this feature — so prove a campaign_centre-tagged row is
-    indistinguishable to it only in the sense that it COULD match; this
-    test documents that real safety comes from pool_id separation
-    (enforced by the reserved-id guard), not from affiliate code being
-    pool_source-aware. It still must not silently corrupt the reward
-    linkage on the campaign side."""
+def test_affiliate_allocation_rejects_explicit_campaign_rewards_scope(fake_db):
+    """The reverse direction: affiliate_rewards._claim_voucher_from_pool now
+    carries a minimal additive guard (Part 1.4) that rejects any row whose
+    allocation_scope is explicitly "campaign_rewards" (or any other
+    non-affiliate scope) — the explicit scope model is now the primary
+    isolation control, not pool_id separation alone."""
     now = datetime.now(timezone.utc)
     fake_db["voucher_pools"].insert_one({
         "pool_id": "shared-pool-id", "code": "CAMPAIGN-CODE", "status": "available", "created_at": now,
-        "pool_source": "campaign_centre",
+        "pool_source": "campaign_centre", "allocation_scope": "campaign_rewards",
     })
     claimed = affiliate_rewards._claim_voucher_from_pool(
         fake_db, pool_id="shared-pool-id", ledger_id="ledger-1", user_id=999, now_utc=now,
     )
-    # affiliate_rewards' own filter has no pool_source awareness, so it CAN
-    # claim a campaign_centre row if the two ever shared a pool_id — this is
-    # exactly why register_pool()/upload_codes() refuse reserved ids and why
-    # admins must never reuse a pool_id across the two systems. Documented
-    # here as the real control boundary (operational, enforced at write
-    # time) rather than a runtime filter on the affiliate side.
+    assert claimed is None
+    row = fake_db["voucher_pools"].find_one({"code": "CAMPAIGN-CODE"})
+    assert row["status"] == "available"
+
+
+def test_affiliate_allocation_still_claims_legacy_rows_with_no_scope(fake_db):
+    """Backward compatibility: rows written before this feature existed
+    (no allocation_scope field at all) must keep working in affiliate flows
+    exactly as before."""
+    now = datetime.now(timezone.utc)
+    fake_db["voucher_pools"].insert_one({
+        "pool_id": "T1", "code": "LEGACY-AFF-1", "status": "available", "created_at": now,
+    })
+    claimed = affiliate_rewards._claim_voucher_from_pool(
+        fake_db, pool_id="T1", ledger_id="ledger-1", user_id=555, now_utc=now,
+    )
     assert claimed is not None
-    assert claimed["status"] == "issued"
+    assert claimed["code"] == "LEGACY-AFF-1"
+
+
+def test_affiliate_allocation_claims_rows_explicitly_scoped_affiliate_or_shared(fake_db):
+    now = datetime.now(timezone.utc)
+    fake_db["voucher_pools"].insert_one({
+        "pool_id": "T2", "code": "AFF-SCOPED", "status": "available", "created_at": now,
+        "allocation_scope": "affiliate_rewards",
+    })
+    fake_db["voucher_pools"].insert_one({
+        "pool_id": "T3", "code": "SHARED-SCOPED", "status": "available", "created_at": now,
+        "allocation_scope": "shared",
+    })
+    claimed_affiliate = affiliate_rewards._claim_voucher_from_pool(
+        fake_db, pool_id="T2", ledger_id="ledger-1", user_id=1, now_utc=now,
+    )
+    claimed_shared = affiliate_rewards._claim_voucher_from_pool(
+        fake_db, pool_id="T3", ledger_id="ledger-2", user_id=2, now_utc=now,
+    )
+    assert claimed_affiliate["code"] == "AFF-SCOPED"
+    assert claimed_shared["code"] == "SHARED-SCOPED"
 
 
 def test_concurrent_affiliate_and_campaign_allocation_on_different_pools_are_independent(fake_db):
@@ -151,7 +178,7 @@ def test_concurrent_affiliate_and_campaign_allocation_on_different_pools_are_ind
     fake_db["voucher_pools"].insert_one({"pool_id": "T1", "code": "AFF-1", "status": "available", "created_at": now})
     fake_db["voucher_pools"].insert_one({
         "pool_id": "tourney-gold", "code": "TOUR-1", "status": "available", "created_at": now,
-        "pool_source": "campaign_centre",
+        "pool_source": "campaign_centre", "allocation_scope": "campaign_rewards",
     })
 
     affiliate_claim = affiliate_rewards._claim_voucher_from_pool(
@@ -174,7 +201,7 @@ def test_concurrent_double_allocation_on_same_campaign_pool_never_double_issues(
     now = datetime.now(timezone.utc)
     fake_db["voucher_pools"].insert_one({
         "pool_id": "tourney-gold", "code": "TOUR-ONLY", "status": "available", "created_at": now,
-        "pool_source": "campaign_centre",
+        "pool_source": "campaign_centre", "allocation_scope": "campaign_rewards",
     })
     first = vps.allocate_voucher("tourney-gold", reward_id="rw_1", telegram_user_id=111, now=now)
     second = vps.allocate_voucher("tourney-gold", reward_id="rw_2", telegram_user_id=222, now=now)

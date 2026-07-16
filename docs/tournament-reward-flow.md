@@ -94,9 +94,11 @@ the Admin Dashboard's Rewards tab — never hidden or partially masked.
 
 A thin **pool registry** (`voucher_pool_registry` collection, via
 `voucher_pool_service.register_pool`) tags a `pool_id` with `pool_type`
-(`welcome` / `voucher_drop` / `tournament_reward` / `referral` / `vip` /
-`cashback`), `campaign_id`, `reward_usage`, and `reward_metadata` — this is
-catalog metadata only, never a copy of the code inventory.
+(`tournament_reward` / `affiliate` / `welcome` / `vip` / `voucher_drop` /
+`referral` / `cashback` / `other`), `allocation_scope` (see below),
+`campaign_id`, `reward_usage`, and `reward_metadata` — this is catalog
+metadata only, never a copy of the code inventory. See
+`docs/voucher-pool-allocation-scope.md` for the full isolation model.
 
 ## 6. Delivery — no Telegram DM, ever
 

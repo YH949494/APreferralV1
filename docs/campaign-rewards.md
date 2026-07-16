@@ -4,6 +4,31 @@ A **generic reward centre** inside the Mini App — where users retrieve any
 campaign-issued voucher, not only tournament prizes. No Telegram DM delivery
 exists for this feature — the Mini App is the only retrieval path.
 
+## Two separate identity flows — do not conflate them
+
+1. **Tournament website entry (Phase 1, no initData).** AP authenticates
+   the Telegram user internally, then builds a provider URL containing the
+   real Telegram UID (`https://provider.com/play?uid={telegram_user_id}` or
+   another configured template). The tournament website receives that UID,
+   creates its own `player_id` and a random public `display_name`
+   (`{"telegram_user_id": 123456789, "player_id": "plr_a83f91",
+   "display_name": "Tiger8472"}`), and shows `Tiger8472` on its public
+   leaderboard. It never needs Telegram initData, a signed token, or the
+   Login Widget for this — see `docs/tournament-provider-integration.md`.
+   The website must retain the `telegram_user_id` mapping and send the real
+   `telegram_user_id` back in the leaderboard submission — AP cannot
+   resolve a reward to a Telegram account from a `player_id` or
+   `display_name` alone.
+2. **AP Campaign Rewards (this document).** Retrieving a reward inside the
+   AP Mini App still requires AP's own verified Mini App identity
+   (`miniapp_identity.resolve_authenticated_telegram_user_id()`) — this is
+   unrelated to, and not weakened by, the UID-URL handoff in flow 1. The
+   URL UID the tournament website receives is only an *integration
+   identifier* for that website's own player mapping; it is never a
+   substitute for AP's own reward-ownership check. A raw `uid`/`user_id`
+   query parameter can never retrieve a reward through this API, regardless
+   of where that value came from.
+
 ## Generic by design
 
 Reward instances live in one collection, `campaign_rewards`, with a

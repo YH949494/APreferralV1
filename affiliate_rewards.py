@@ -232,6 +232,13 @@ def _mark_missing_pool_config(db, *, ledger_id, now_utc: datetime):
 
 
 def _claim_voucher_from_pool(db, *, pool_id: str, ledger_id, user_id: int, now_utc: datetime):
+    # Minimal cross-consumption guard (Campaign Centre voucher_pool_service
+    # writes an explicit "allocation_scope" onto every row it inserts): a
+    # row is claimable here only if it has no allocation_scope at all
+    # (every pre-existing legacy affiliate row — untouched, still works
+    # exactly as before) or is explicitly "affiliate_rewards"/"shared".
+    # Rows scoped "campaign_rewards"/"welcome_rewards"/etc. are never
+    # matched, even if a pool_id were ever accidentally shared.
     return db.voucher_pools.find_one_and_update(
         {
             "pool_id": pool_id,
@@ -240,6 +247,13 @@ def _claim_voucher_from_pool(db, *, pool_id: str, ledger_id, user_id: int, now_u
                 {"issued_for_ledger_id": {"$exists": False}},
                 {"issued_for_ledger_id": None},
             ],
+            # $nin naturally matches documents where the field is absent
+            # (every pre-existing legacy affiliate row — untouched, still
+            # works exactly as before) as well as "affiliate_rewards"/
+            # "shared" rows. Only rows explicitly scoped to another
+            # subsystem (campaign_rewards/welcome_rewards/...) are excluded
+            # — even if a pool_id were ever accidentally shared.
+            "allocation_scope": {"$nin": ["campaign_rewards", "welcome_rewards", "voucher_drops", "referral_rewards"]},
         },
         {
             "$set": {

@@ -14,8 +14,7 @@ from datetime import datetime, timezone
 
 from flask import Blueprint, jsonify, request
 
-import database
-from campaign_centre import get_campaign, is_publicly_active, log_funnel_event
+from campaign_centre import get_campaign, is_publicly_active
 from campaign_providers import get_provider
 
 logger = logging.getLogger(__name__)
@@ -81,21 +80,15 @@ def verify_subscription_campaign():
     gate = verify_campaign_subscription(campaign, telegram_user_id)
     checked_at = datetime.now(timezone.utc)
 
-    try:
-        database.db["campaign_events"].insert_one({
-            "event": "external_subscription_verify",
-            "campaign_id": campaign_id,
-            "user_id": telegram_user_id,
-            "subscribed": gate.get("subscribed", False),
-            "at": checked_at,
-            "source_ip": _client_ip(),
-        })
-    except Exception:
-        logger.warning("[SUBSCRIPTION_VERIFICATION] log_failed", exc_info=True)
+    from campaign_events import emit_campaign_event
 
-    log_funnel_event(
-        "subscription_pass" if gate.get("subscribed") else "subscription_fail",
-        campaign_id=campaign_id, user_id=telegram_user_id,
+    emit_campaign_event(
+        event_type="subscription_pass" if gate.get("subscribed") else "subscription_fail",
+        campaign_id=campaign_id,
+        campaign_type=campaign.get("type"),
+        telegram_user_id=telegram_user_id,
+        source="external_subscription_verify",
+        status="success" if gate.get("subscribed") else "fail",
     )
 
     return jsonify({

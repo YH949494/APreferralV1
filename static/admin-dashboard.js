@@ -4816,16 +4816,36 @@
     });
   }
 
+  function gcPoolWarnings(p) {
+    var warnings = [];
+    if (p.status !== "active") warnings.push("inactive pool");
+    if (p.allocation_scope === "shared") warnings.push("shared scope — allocatable by multiple subsystems");
+    if (p.pool_type === "tournament_reward" && !p.campaign_id) warnings.push("no campaign linked");
+    return warnings;
+  }
+
   function loadGcRewards(force) {
     statePanel("gc-rewards-body", "loading", "Loading reward pools…");
     api("/api/admin/reward-pools").then(function (data) {
       var pools = data.pools || [];
-      $("#gc-pools-body").innerHTML = pools.length ? pools.map(function (p) {
+      if (!pools.length) { $("#gc-pools-body").innerHTML = emptyState("No reward pools registered yet."); return; }
+      var rows = pools.map(function (p) {
         var s = p.stock || {};
-        return '<div class="sub">' + esc(p.pool_id) + ' (' + esc(p.campaign_id || "unassigned") + ', ' + esc(p.pool_type) + ') — available: ' +
-          fmt(s.available || 0) + ', issued: ' + fmt(s.issued || 0) +
-          ' <button class="btn" data-gc-upload-pool="' + esc(p.pool_id) + '">Upload codes</button></div>';
-      }).join("") : emptyState("No reward pools registered yet.");
+        var warnings = gcPoolWarnings(p);
+        var warnHtml = warnings.length ? '<div class="sub" style="color:var(--warn);">⚠ ' + esc(warnings.join("; ")) + '</div>' : "";
+        return '<tr><td>' + esc(p.name || "") + '<div class="sub">' + esc(p.pool_id) + '</div>' + warnHtml + '</td>' +
+          '<td>' + esc(p.pool_type || "") + '</td>' +
+          '<td>' + esc(p.allocation_scope || "") + '</td>' +
+          '<td>' + esc(p.campaign_id || "—") + '</td>' +
+          '<td>' + gcPill(p.status) + '</td>' +
+          '<td>' + fmt(s.available || 0) + '</td>' +
+          '<td>' + fmt(s.issued || 0) + '</td>' +
+          '<td>campaign_centre</td>' +
+          '<td><button class="btn" data-gc-upload-pool="' + esc(p.pool_id) + '">Upload codes</button></td></tr>';
+      }).join("");
+      $("#gc-pools-body").innerHTML = '<table class="data-table"><thead><tr><th>Pool</th><th>Type</th><th>Allocation Scope</th>' +
+        '<th>Campaign</th><th>Status</th><th>Available</th><th>Assigned</th><th>Source</th><th>Actions</th></tr></thead><tbody>' + rows + '</tbody></table>' +
+        '<div class="sub" style="margin-top:6px;">"Reserved" has no separate persisted state in this model — allocation is a single atomic available→assigned transition.</div>';
     }).catch(function (e) { statePanel("gc-pools-body", "error", "Failed to load pools: " + e.message); });
 
     api("/api/admin/rewards").then(function (data) {
@@ -4848,6 +4868,7 @@
           pool_id: ($("#gc-pool-id").value || "").trim(),
           name: ($("#gc-pool-name").value || "").trim(),
           pool_type: $("#gc-pool-type").value,
+          allocation_scope: $("#gc-pool-scope") ? $("#gc-pool-scope").value : "campaign_rewards",
           campaign_id: ($("#gc-pool-campaign").value || "").trim(),
         };
         apiPostJson("/api/admin/reward-pools", body).then(function (res) {
@@ -4890,6 +4911,65 @@
         loadGcRewards(true);
       });
     });
+  }
+
+  var gcEventsPage = 1;
+
+  function loadGcEvents(page) {
+    gcEventsPage = page || 1;
+    var params = ["page=" + gcEventsPage, "page_size=25"];
+    var campaignId = ($("#gc-events-campaign-id") && $("#gc-events-campaign-id").value || "").trim();
+    var eventType = $("#gc-events-type") && $("#gc-events-type").value;
+    if (campaignId) params.push("campaign_id=" + encodeURIComponent(campaignId));
+    if (eventType) params.push("event_type=" + encodeURIComponent(eventType));
+    statePanel("gc-events-body", "loading", "Loading activity log…");
+    api("/api/admin/campaign-events?" + params.join("&")).then(function (data) {
+      var items = data.events || [];
+      if (!items.length) { $("#gc-events-body").innerHTML = emptyState("No matching activity yet."); $("#gc-events-pagination").innerHTML = ""; return; }
+      var rows = items.map(function (e) {
+        return '<tr><td>' + esc(e.event_type) + '</td><td>' + esc(e.campaign_id || "—") + '</td>' +
+          '<td>' + fmt(e.telegram_user_id || "") + '</td><td>' + gcPill(e.status) + '</td>' +
+          '<td>' + esc(e.reason || "") + '</td><td class="sub">' + esc(e.occurred_at || "") + '</td></tr>';
+      }).join("");
+      $("#gc-events-body").innerHTML = '<table class="data-table"><thead><tr><th>Event</th><th>Campaign</th><th>User</th><th>Status</th><th>Reason</th><th>Occurred</th></tr></thead><tbody>' + rows + '</tbody></table>';
+      var totalPages = Math.max(1, Math.ceil((data.total || 0) / (data.page_size || 25)));
+      $("#gc-events-pagination").innerHTML =
+        '<button class="btn" id="gc-events-prev"' + (gcEventsPage <= 1 ? " disabled" : "") + '>← Prev</button> ' +
+        '<span class="sub">Page ' + gcEventsPage + ' of ' + totalPages + ' (' + fmt(data.total || 0) + ' total)</span> ' +
+        '<button class="btn" id="gc-events-next"' + (gcEventsPage >= totalPages ? " disabled" : "") + '>Next →</button>';
+      var prevBtn = $("#gc-events-prev"), nextBtn = $("#gc-events-next");
+      if (prevBtn) prevBtn.addEventListener("click", function () { loadGcEvents(gcEventsPage - 1); });
+      if (nextBtn) nextBtn.addEventListener("click", function () { loadGcEvents(gcEventsPage + 1); });
+    }).catch(function (e) { statePanel("gc-events-body", "error", "Failed to load activity log: " + e.message); });
+  }
+
+  function loadGcAnalyticsSummary(campaignId) {
+    if (!campaignId) { $("#gc-analytics-summary-body").innerHTML = emptyState("Enter a campaign_id and click Load Summary."); return; }
+    statePanel("gc-analytics-summary-body", "loading", "Loading summary…");
+    api("/api/admin/campaign-analytics/summary?campaign_id=" + encodeURIComponent(campaignId)).then(function (data) {
+      var pct = function (v) { return Math.round((v || 0) * 100) + "%"; };
+      $("#gc-analytics-summary-body").innerHTML = '<div class="card-grid">' + [
+        ["Views", fmt(data.views)], ["Clicks", fmt(data.clicks)], ["CTR", pct(data.click_through_rate)],
+        ["Sub. Checks", fmt(data.subscription_checks)], ["Sub. Pass Rate", pct(data.subscription_pass_rate)],
+        ["Destination Opens", fmt(data.destination_opens)], ["Dest. Conversion", pct(data.destination_conversion_rate)],
+        ["Results Received", fmt(data.leaderboards_received)], ["Rewards Assigned", fmt(data.rewards_assigned)],
+        ["Reward Views", fmt(data.rewards_viewed)], ["Voucher Copies", fmt(data.voucher_copies)],
+        ["Out of Stock", fmt(data.out_of_stock)],
+      ].map(function (kv) {
+        return '<div class="kpi"><div class="label">' + esc(kv[0]) + '</div><div class="value">' + kv[1] + '</div></div>';
+      }).join("") + '</div>';
+    }).catch(function (e) { statePanel("gc-analytics-summary-body", "error", "Failed to load summary: " + e.message); });
+  }
+
+  function bindGcActivity() {
+    var filterBtn = $("#gc-events-filter-btn");
+    if (filterBtn) filterBtn.addEventListener("click", function () { loadGcEvents(1); });
+    var summaryBtn = $("#gc-analytics-load-btn");
+    if (summaryBtn) {
+      summaryBtn.addEventListener("click", function () {
+        loadGcAnalyticsSummary(($("#gc-analytics-campaign-id").value || "").trim());
+      });
+    }
   }
 
   function loadGcVerification(force) {
@@ -5434,7 +5514,7 @@
     else if (state.view === "gcResults") loadGcResults(force);
     else if (state.view === "gcRewards") loadGcRewards(force);
     else if (state.view === "gcVerification") loadGcVerification(force);
-    else if (state.view === "gcActivity") { /* activity log is documented, not yet wired to a bounded endpoint */ }
+    else if (state.view === "gcActivity") loadGcEvents(1);
     else if (state.view === "vouchers") loadVouchers(force);
     else if (state.view === "drops") loadDrops(force);
     else if (state.view === "referrals") loadReferrals(force);
@@ -5507,6 +5587,7 @@
     bindGcProviders();
     bindGcResults();
     bindGcRewards();
+    bindGcActivity();
     bindJoinRequests();
     bindXpAdjust();
     bindRejoinBufferSettings();

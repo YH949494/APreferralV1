@@ -38,6 +38,8 @@ def _matches(doc: dict, query: dict) -> bool:
             for op, target in cond.items():
                 if op == "$in" and val not in target:
                     return False
+                if op == "$nin" and val in target:
+                    return False
                 if op == "$ne" and val == target:
                     return False
                 if op == "$gt" and not (val is not None and val > target):
@@ -105,13 +107,15 @@ class FakeCollection:
                 return deepcopy(doc)
         return None
 
-    def find(self, query: dict | None = None, sort=None, limit=None, projection=None):
+    def find(self, query: dict | None = None, sort=None, limit=None, skip=None, projection=None):
         query = query or {}
         results = [deepcopy(d) for d in self._docs if _matches(d, query)]
         if sort:
             for field, direction in reversed(sort):
                 results.sort(key=lambda d, f=field: d.get(f) if d.get(f) is not None else 0,
                              reverse=(direction < 0))
+        if skip:
+            results = results[skip:]
         if limit:
             results = results[:limit]
         return results

@@ -23,6 +23,7 @@ import database
 import reward_engine
 import voucher_pool_service
 from campaign_centre import get_campaign, log_funnel_event
+from campaign_events import deterministic_event_id
 
 logger = logging.getLogger(__name__)
 
@@ -108,30 +109,40 @@ def _create_or_confirm_rewards(submission: dict, campaign: dict) -> list[dict]:
     created = []
     for w in submission["winners"]:
         rank = int(w["rank"])
+        telegram_user_id = int(w["telegram_user_id"])
         context = {"rank": rank, "score": w.get("score")}
         rule = reward_engine.match_rule(rules, context)
         if not rule:
+            log_funnel_event("reward_rule_unmatched", campaign_id=submission["campaign_id"],
+                              user_id=telegram_user_id, submission_id=submission["submission_id"],
+                              status="fail", metadata={"rank": rank})
             continue
+        log_funnel_event("reward_rule_matched", campaign_id=submission["campaign_id"],
+                          user_id=telegram_user_id, submission_id=submission["submission_id"],
+                          metadata={"rule_id": rule["rule_id"], "pool_id": rule["pool_id"]})
+
         existing = database.db["campaign_rewards"].find_one({
             "tournament_id": submission["tournament_id"],
-            "telegram_user_id": int(w["telegram_user_id"]),
+            "telegram_user_id": telegram_user_id,
         })
         if existing:
             created.append(existing)
             continue
         now = datetime.now(timezone.utc)
+        reward_id = _reward_id()
         doc = {
-            "reward_id": _reward_id(),
+            "reward_id": reward_id,
             "category": "tournament",
             "submission_id": submission["submission_id"],
             "campaign_id": submission["campaign_id"],
             "tournament_id": submission["tournament_id"],
-            "telegram_user_id": int(w["telegram_user_id"]),
+            "telegram_user_id": telegram_user_id,
             "rank": rank,
             "score": w.get("score"),
             "reward_rule_id": rule["rule_id"],
             "reward_label": rule.get("reward_label", ""),
             "pool_id": rule["pool_id"],
+            "pool_type": rule.get("pool_type", "tournament_reward"),
             "voucher_code": None,
             "status": "pending_review",
             "assigned_at": None,
@@ -142,14 +153,15 @@ def _create_or_confirm_rewards(submission: dict, campaign: dict) -> list[dict]:
         }
         try:
             database.db["campaign_rewards"].insert_one(doc)
-            log_funnel_event("reward_created", campaign_id=submission["campaign_id"], user_id=doc["telegram_user_id"],
-                              reward_id=doc["reward_id"])
+            log_funnel_event("reward_created", campaign_id=submission["campaign_id"], user_id=telegram_user_id,
+                              reward_id=reward_id, pool_id=rule["pool_id"],
+                              event_id=deterministic_event_id("reward_created", reward_id))
             created.append(doc)
         except Exception as exc:
             if "duplicate" in str(exc).lower():
                 created.append(database.db["campaign_rewards"].find_one({
                     "tournament_id": submission["tournament_id"],
-                    "telegram_user_id": int(w["telegram_user_id"]),
+                    "telegram_user_id": telegram_user_id,
                 }))
             else:
                 raise
@@ -168,7 +180,10 @@ def _atomic_allocate_voucher(pool_id: str, reward: dict) -> dict:
         return already
 
     now = datetime.now(timezone.utc)
-    code_doc = voucher_pool_service.allocate_voucher(pool_id, reward_id=reward_id, telegram_user_id=reward["telegram_user_id"], now=now)
+    code_doc = voucher_pool_service.allocate_voucher(
+        pool_id, reward_id=reward_id, telegram_user_id=reward["telegram_user_id"],
+        expected_pool_type=reward.get("pool_type"), now=now,
+    )
 
     if not code_doc:
         database.db["campaign_rewards"].update_one(
@@ -187,7 +202,8 @@ def _atomic_allocate_voucher(pool_id: str, reward: dict) -> dict:
         {"$set": {"voucher_code": code_doc["code"], "status": "assigned", "assigned_at": now, "updated_at": now}},
     )
     log_funnel_event("voucher_assigned", campaign_id=reward["campaign_id"], user_id=reward["telegram_user_id"],
-                      reward_id=reward_id, pool_id=pool_id)
+                      reward_id=reward_id, pool_id=pool_id,
+                      event_id=deterministic_event_id("voucher_assigned", reward_id))
     return database.db["campaign_rewards"].find_one({"reward_id": reward_id})
 
 
@@ -257,7 +273,9 @@ def approve_submission(submission_id: str, admin: dict) -> tuple[dict | None, st
         {"$set": {"status": final_status, "reviewed_by": (admin or {}).get("usernameLower") or str((admin or {}).get("id", "")),
                   "reviewed_at": datetime.now(timezone.utc)}},
     )
-    log_funnel_event("result_approved", campaign_id=locked["campaign_id"], submission_id=submission_id)
+    log_funnel_event("leaderboard_approved", campaign_id=locked["campaign_id"], submission_id=submission_id,
+                      source="admin", metadata={"final_status": final_status},
+                      event_id=deterministic_event_id("leaderboard_approved", submission_id))
     _log_audit("result_approved", admin, submission_id, {"final_status": final_status})
 
     result = database.db["tournament_results"].find_one({"submission_id": submission_id})
@@ -344,7 +362,8 @@ def reject_tournament_result(submission_id: str):
     )
     if not result:
         return jsonify({"status": "error", "code": "not_pending_review"}), 409
-    log_funnel_event("result_rejected", campaign_id=result["campaign_id"], submission_id=submission_id, reason=reason)
+    log_funnel_event("leaderboard_rejected", campaign_id=result["campaign_id"], submission_id=submission_id,
+                      source="admin", status="fail", reason=reason)
     _log_audit("result_rejected", admin, submission_id, {"reason": reason})
     return jsonify({"status": "ok", "result": _serialize_result(result)})
 
@@ -365,7 +384,8 @@ def request_correction(submission_id: str):
         {"$set": {"status": "corrected", "reviewed_by": (admin or {}).get("usernameLower") or str((admin or {}).get("id", "")),
                   "reviewed_at": datetime.now(timezone.utc)}},
     )
-    log_funnel_event("result_corrected", campaign_id=doc["campaign_id"], submission_id=submission_id)
+    log_funnel_event("leaderboard_correction_requested", campaign_id=doc["campaign_id"], submission_id=submission_id,
+                      source="admin", metadata={"had_assigned_rewards": has_assigned})
     _log_audit("result_correction_requested", admin, submission_id, {"had_assigned_rewards": has_assigned})
     return jsonify({"status": "ok", "requires_manual_review": has_assigned})
 
@@ -423,6 +443,14 @@ def list_reward_pools():
     return jsonify({"status": "ok", "pools": out})
 
 
+def _voucher_pool_error_status(code: str) -> int:
+    return {
+        "reserved_pool_id": 400, "invalid_pool_type": 400, "invalid_allocation_scope": 400,
+        "pool_scope_conflict": 409, "pool_has_inventory": 409, "pool_not_found": 404,
+        "pool_inactive": 400,
+    }.get(code, 400)
+
+
 @tournament_rewards_bp.post("/api/admin/reward-pools")
 def create_reward_pool():
     admin, err = _require_admin()
@@ -433,21 +461,51 @@ def create_reward_pool():
     name = (body.get("name") or "").strip()
     if not pool_id or not name:
         return jsonify({"status": "error", "code": "missing_fields"}), 400
+    # Defaults match the tournament campaign flow this admin surface is
+    # primarily used for today; callers may override for other reward
+    # categories as long as the values are valid.
     pool_type = body.get("pool_type") or "tournament_reward"
-    if pool_type not in voucher_pool_service.POOL_TYPES:
-        return jsonify({"status": "error", "code": "invalid_pool_type"}), 400
+    allocation_scope = body.get("allocation_scope") or "campaign_rewards"
 
     try:
         voucher_pool_service.register_pool(
-            pool_id, name=name, pool_type=pool_type,
+            pool_id, name=name, pool_type=pool_type, allocation_scope=allocation_scope,
             campaign_id=body.get("campaign_id") or "",
             reward_usage=body.get("reward_usage") or "",
             reward_metadata=body.get("reward_metadata") or {},
         )
-    except voucher_pool_service.ReservedPoolIdError:
-        return jsonify({"status": "error", "code": "reserved_pool_id"}), 400
-    _log_audit("reward_pool_registered", admin, pool_id)
+    except voucher_pool_service.VoucherPoolError as exc:
+        log_funnel_event("reward_pool_scope_rejected", campaign_id=body.get("campaign_id") or "",
+                          pool_id=pool_id, source="admin", status="fail", reason=exc.code)
+        return jsonify({"status": "error", "code": exc.code}), _voucher_pool_error_status(exc.code)
+    _log_audit("reward_pool_registered", admin, pool_id, {"pool_type": pool_type, "allocation_scope": allocation_scope})
+    log_funnel_event("reward_pool_created", campaign_id=body.get("campaign_id") or "", pool_id=pool_id,
+                      source="admin", metadata={"pool_type": pool_type, "allocation_scope": allocation_scope})
     return jsonify({"status": "ok", "pool_id": pool_id}), 201
+
+
+@tournament_rewards_bp.post("/api/admin/reward-pools/<pool_id>/migrate-scope")
+def migrate_reward_pool_scope(pool_id: str):
+    """Explicit admin migration operation — the only way to change an
+    existing pool's pool_type/allocation_scope. Always blocked if the pool
+    already has any code rows."""
+    admin, err = _require_admin()
+    if err:
+        return err
+    body = request.get_json(force=True, silent=True) or {}
+    pool_type = body.get("pool_type") or None
+    allocation_scope = body.get("allocation_scope") or None
+    if not pool_type and not allocation_scope:
+        return jsonify({"status": "error", "code": "missing_fields"}), 400
+
+    try:
+        pool = voucher_pool_service.migrate_pool_scope(pool_id, pool_type=pool_type, allocation_scope=allocation_scope)
+    except voucher_pool_service.VoucherPoolError as exc:
+        return jsonify({"status": "error", "code": exc.code}), _voucher_pool_error_status(exc.code)
+    _log_audit("reward_pool_updated", admin, pool_id, {"pool_type": pool_type, "allocation_scope": allocation_scope})
+    log_funnel_event("reward_pool_updated", campaign_id=pool.get("campaign_id") or "", pool_id=pool_id,
+                      source="admin", metadata={"pool_type": pool.get("pool_type"), "allocation_scope": pool.get("allocation_scope")})
+    return jsonify({"status": "ok", "pool_id": pool_id})
 
 
 @tournament_rewards_bp.post("/api/admin/reward-pools/<pool_id>/upload-codes")
@@ -455,9 +513,15 @@ def upload_reward_pool_codes(pool_id: str):
     admin, err = _require_admin()
     if err:
         return err
-    if not voucher_pool_service.get_pool(pool_id):
+    pool = voucher_pool_service.get_pool(pool_id)
+    if not pool:
         return jsonify({"status": "error", "code": "pool_not_found"}), 404
     body = request.get_json(force=True, silent=True) or {}
+    # Ownership metadata (pool_type/allocation_scope) always comes from the
+    # canonical registry record, stamped server-side — a caller attempting
+    # to pass either here is rejected outright rather than silently ignored.
+    if "pool_type" in body or "allocation_scope" in body:
+        return jsonify({"status": "error", "code": "override_not_allowed"}), 400
     codes = body.get("codes") or []
     if not isinstance(codes, list) or not codes:
         return jsonify({"status": "error", "code": "missing_codes"}), 400
@@ -469,9 +533,13 @@ def upload_reward_pool_codes(pool_id: str):
             value_hint=body.get("value_hint") or "",
             currency=body.get("currency") or "",
         )
-    except voucher_pool_service.ReservedPoolIdError:
-        return jsonify({"status": "error", "code": "reserved_pool_id"}), 400
+    except voucher_pool_service.VoucherPoolError as exc:
+        log_funnel_event("reward_pool_scope_rejected", campaign_id=pool.get("campaign_id") or "",
+                          pool_id=pool_id, source="admin", status="fail", reason=exc.code)
+        return jsonify({"status": "error", "code": exc.code}), _voucher_pool_error_status(exc.code)
     _log_audit("reward_pool_codes_uploaded", admin, pool_id, result)
+    log_funnel_event("reward_pool_upload", campaign_id=pool.get("campaign_id") or "", pool_id=pool_id,
+                      source="admin", metadata=result)
     return jsonify({"status": "ok", **result})
 
 

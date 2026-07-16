@@ -20,6 +20,7 @@ from flask import Blueprint, jsonify, request
 import database
 import reward_engine
 from campaign_centre import get_campaign, log_funnel_event
+from campaign_events import deterministic_event_id
 from campaign_providers import get_provider, provider_is_usable_for_results, provider_secret
 
 logger = logging.getLogger(__name__)
@@ -119,6 +120,7 @@ def _record_signature_failure(provider_id: str) -> None:
         )
     except Exception:
         logger.warning("[TOURNAMENT_INTEGRATION] status_write_failed", exc_info=True)
+    log_funnel_event("provider_signature_failed", campaign_id="", provider_id=provider_id, source="provider", status="fail")
 
 
 def _record_nonce_replay(provider_id: str) -> None:
@@ -130,6 +132,7 @@ def _record_nonce_replay(provider_id: str) -> None:
         )
     except Exception:
         logger.warning("[TOURNAMENT_INTEGRATION] status_write_failed", exc_info=True)
+    log_funnel_event("provider_nonce_replay", campaign_id="", provider_id=provider_id, source="provider", status="fail")
 
 
 def _record_success(provider_id: str) -> None:
@@ -218,7 +221,8 @@ def submit_tournament_results():
 
     validation_error = _validate_payload(body, campaign, provider_id)
     if validation_error:
-        log_funnel_event("result_rejected", campaign_id=campaign_id, reason=validation_error)
+        log_funnel_event("leaderboard_rejected", campaign_id=campaign_id, provider_id=provider_id,
+                          campaign_type=campaign.get("type"), source="provider", status="fail", reason=validation_error)
         return jsonify({"status": "error", "code": validation_error}), 400
 
     payload_hash = hashlib.sha256(raw_body).hexdigest()
@@ -232,7 +236,9 @@ def submit_tournament_results():
     })
     if existing:
         if existing.get("payload_hash") == payload_hash:
-            log_funnel_event("result_duplicate", campaign_id=campaign_id, submission_id=existing["submission_id"])
+            log_funnel_event("leaderboard_duplicate", campaign_id=campaign_id, provider_id=provider_id,
+                              submission_id=existing["submission_id"], source="provider",
+                              event_id=deterministic_event_id("leaderboard_duplicate", existing['submission_id']))
             _record_success(provider_id)
             return jsonify({
                 "status": "ok",
@@ -249,6 +255,8 @@ def submit_tournament_results():
         {"provider_id": provider_id, "tournament_id": tournament_id, "result_version": {"$gt": result_version}}
     )
     if higher_existing:
+        log_funnel_event("leaderboard_version_conflict", campaign_id=campaign_id, provider_id=provider_id,
+                          source="provider", status="fail", reason="lower_result_version_rejected")
         return jsonify({"status": "error", "code": "lower_result_version_rejected"}), 409
 
     winners = body["winners"]
@@ -279,7 +287,9 @@ def submit_tournament_results():
     }
     database.db["tournament_results"].insert_one(doc)
     _record_success(provider_id)
-    log_funnel_event("result_received", campaign_id=campaign_id, submission_id=submission_id, winner_count=len(winners))
+    log_funnel_event("leaderboard_received", campaign_id=campaign_id, provider_id=provider_id,
+                      campaign_type=campaign.get("type"), submission_id=submission_id, source="provider",
+                      event_id=deterministic_event_id("leaderboard_received", submission_id), winner_count=len(winners))
 
     return jsonify({
         "status": "ok",
