@@ -1,18 +1,13 @@
-"""Tournament reward allocation, admin approval, and AP-owned voucher pools
-for Campaign Rewards (Phases 8, 11, 12, 13).
+"""Tournament result review, rule-based reward allocation, and admin
+approval (Phases 8, 11, 12, 13).
 
-Voucher pools/codes here are new collections rather than an extension of the
-existing ``voucher_pools``/``vouchers`` collections in vouchers.py: those are
-tightly coupled to the public/my-region drop-claim system (personalised
-assignment by username, region pools, claim ledgers) and are not safe to
-repurpose for rank-based tournament rewards without risking the existing
-claim flows. The new collections follow the same production pattern (atomic
-``find_one_and_update`` allocation, explicit status machine) under the
-Campaign Centre's own namespace, and the Admin Dashboard exposes them as an
-extension of the Voucher Centre concept scoped to tournament rewards.
-
-Collections: ``campaign_voucher_pools``, ``campaign_voucher_codes``,
-``tournament_rewards``.
+Reward *instances* live in the generic ``campaign_rewards`` collection (see
+module docstring on ``campaign_rewards_api.py`` for why it's generic, not
+tournament-only) — this module is the tournament-specific glue that turns a
+reviewed leaderboard submission into reward rows via ``reward_engine`` (rule
+matching) and allocates a voucher for each via ``voucher_pool_service``
+(atomic claim against the *existing* Voucher Centre inventory table,
+``db.voucher_pools`` — no second inventory collection).
 """
 
 from __future__ import annotations
@@ -25,6 +20,8 @@ from flask import Blueprint, jsonify, request
 from pymongo import ReturnDocument
 
 import database
+import reward_engine
+import voucher_pool_service
 from campaign_centre import get_campaign, log_funnel_event
 
 logger = logging.getLogger(__name__)
@@ -35,7 +32,13 @@ REWARD_STATUSES = [
     "pending_review", "approved", "allocating", "assigned",
     "out_of_stock", "rejected", "expired",
 ]
-VOUCHER_CODE_STATUSES = ["available", "reserved", "assigned", "expired", "disabled"]
+
+# Reward categories the generic campaign_rewards collection is structured to
+# hold. Only "tournament" is populated by real logic today; the others are
+# reserved so future campaign types (referral contests, lucky draws,
+# missions, cashback, welcome, ...) reuse the same collection/API without a
+# schema change.
+REWARD_CATEGORIES = ["tournament", "referral", "lucky_draw", "mission", "cashback", "welcome", "other"]
 
 
 def _require_admin():
@@ -46,24 +49,19 @@ def _require_admin():
 
 def _ensure_indexes() -> None:
     try:
-        pools = database.db["campaign_voucher_pools"]
-        pools.create_index([("pool_id", 1)], name="ux_campaign_voucher_pools_pool_id", unique=True)
-        pools.create_index([("campaign_id", 1)], name="ix_campaign_voucher_pools_campaign")
-
-        codes = database.db["campaign_voucher_codes"]
-        codes.create_index([("pool_id", 1), ("code", 1)], name="ux_campaign_voucher_codes_pool_code", unique=True)
-        codes.create_index([("pool_id", 1), ("status", 1)], name="ix_campaign_voucher_codes_pool_status")
-        codes.create_index([("assigned_to_user_id", 1)], name="ix_campaign_voucher_codes_assigned_user")
-
-        rewards = database.db["tournament_rewards"]
+        rewards = database.db["campaign_rewards"]
         rewards.create_index(
-            [("tournament_id", 1), ("telegram_user_id", 1)], name="ux_tournament_rewards_identity", unique=True
+            [("tournament_id", 1), ("telegram_user_id", 1)],
+            name="ux_campaign_rewards_tournament_identity",
+            unique=True,
+            partialFilterExpression={"category": "tournament"},
         )
-        rewards.create_index([("submission_id", 1)], name="ix_tournament_rewards_submission")
-        rewards.create_index([("status", 1)], name="ix_tournament_rewards_status")
-        rewards.create_index([("campaign_id", 1)], name="ix_tournament_rewards_campaign")
-        rewards.create_index([("pool_id", 1)], name="ix_tournament_rewards_pool")
-        rewards.create_index([("telegram_user_id", 1)], name="ix_tournament_rewards_user")
+        rewards.create_index([("submission_id", 1)], name="ix_campaign_rewards_submission")
+        rewards.create_index([("status", 1)], name="ix_campaign_rewards_status")
+        rewards.create_index([("category", 1)], name="ix_campaign_rewards_category")
+        rewards.create_index([("campaign_id", 1)], name="ix_campaign_rewards_campaign")
+        rewards.create_index([("pool_id", 1)], name="ix_campaign_rewards_pool")
+        rewards.create_index([("telegram_user_id", 1)], name="ix_campaign_rewards_user")
     except Exception:
         logger.warning("[TOURNAMENT_REWARDS] index creation failed", exc_info=True)
 
@@ -85,23 +83,14 @@ def _log_audit(action: str, admin: dict, entity_id: str, details: dict | None = 
         logger.warning("[TOURNAMENT_REWARDS] audit_write_failed", exc_info=True)
 
 
-def _rank_to_rule(campaign: dict, rank: int) -> dict | None:
-    rules = (campaign.get("reward_config") or {}).get("rules") or []
-    for rule in rules:
-        if int(rule["min_rank"]) <= rank <= int(rule["max_rank"]):
-            return rule
-    return None
-
-
 def _stock_by_pool(pool_ids: set) -> dict:
     out = {}
     for pool_id in pool_ids:
-        pool = database.db["campaign_voucher_pools"].find_one({"pool_id": pool_id})
-        available = database.db["campaign_voucher_codes"].count_documents({"pool_id": pool_id, "status": "available"})
+        stock = voucher_pool_service.pool_stock(pool_id)
         out[pool_id] = {
-            "available": available,
-            "pool_active": bool(pool and pool.get("status") == "active"),
-            "pool_exists": bool(pool),
+            "available": stock["available"],
+            "pool_active": voucher_pool_service.pool_is_active(pool_id),
+            "pool_exists": bool(voucher_pool_service.get_pool(pool_id)),
         }
     return out
 
@@ -112,15 +101,18 @@ def _reward_id() -> str:
 
 def _create_or_confirm_rewards(submission: dict, campaign: dict) -> list[dict]:
     """Idempotently create pending_review reward rows for a submission's
-    winners. Unique index on (tournament_id, telegram_user_id) makes this
-    safe to call repeatedly (result replay / re-approval)."""
+    winners, matched against the campaign's rule-based reward engine.
+    Unique index on (tournament_id, telegram_user_id) makes this safe to
+    call repeatedly (result replay / re-approval)."""
+    rules = (campaign.get("reward_config") or {}).get("rules") or []
     created = []
     for w in submission["winners"]:
         rank = int(w["rank"])
-        rule = _rank_to_rule(campaign, rank)
+        context = {"rank": rank, "score": w.get("score")}
+        rule = reward_engine.match_rule(rules, context)
         if not rule:
             continue
-        existing = database.db["tournament_rewards"].find_one({
+        existing = database.db["campaign_rewards"].find_one({
             "tournament_id": submission["tournament_id"],
             "telegram_user_id": int(w["telegram_user_id"]),
         })
@@ -130,6 +122,7 @@ def _create_or_confirm_rewards(submission: dict, campaign: dict) -> list[dict]:
         now = datetime.now(timezone.utc)
         doc = {
             "reward_id": _reward_id(),
+            "category": "tournament",
             "submission_id": submission["submission_id"],
             "campaign_id": submission["campaign_id"],
             "tournament_id": submission["tournament_id"],
@@ -148,13 +141,13 @@ def _create_or_confirm_rewards(submission: dict, campaign: dict) -> list[dict]:
             "updated_at": now,
         }
         try:
-            database.db["tournament_rewards"].insert_one(doc)
+            database.db["campaign_rewards"].insert_one(doc)
             log_funnel_event("reward_created", campaign_id=submission["campaign_id"], user_id=doc["telegram_user_id"],
                               reward_id=doc["reward_id"])
             created.append(doc)
         except Exception as exc:
             if "duplicate" in str(exc).lower():
-                created.append(database.db["tournament_rewards"].find_one({
+                created.append(database.db["campaign_rewards"].find_one({
                     "tournament_id": submission["tournament_id"],
                     "telegram_user_id": int(w["telegram_user_id"]),
                 }))
@@ -164,49 +157,38 @@ def _create_or_confirm_rewards(submission: dict, campaign: dict) -> list[dict]:
 
 
 def _atomic_allocate_voucher(pool_id: str, reward: dict) -> dict:
-    """Atomically reserve+assign one available code from a pool to a reward.
-    Idempotent: if the reward already has an assigned code, returns it
-    unchanged rather than allocating a second one."""
+    """Atomically claim one code from the shared Voucher Centre inventory
+    (voucher_pool_service.allocate_voucher -> db.voucher_pools) for a
+    reward. Idempotent: if the reward already has an assigned code, returns
+    it unchanged rather than allocating a second one."""
     reward_id = reward["reward_id"]
 
-    already = database.db["tournament_rewards"].find_one({"reward_id": reward_id, "status": "assigned"})
+    already = database.db["campaign_rewards"].find_one({"reward_id": reward_id, "status": "assigned"})
     if already:
         return already
 
-    code_doc = database.db["campaign_voucher_codes"].find_one_and_update(
-        {"pool_id": pool_id, "status": "available"},
-        {"$set": {
-            "status": "reserved",
-            "reserved_for_reward_id": reward_id,
-            "updated_at": datetime.now(timezone.utc),
-        }},
-        sort=[("created_at", 1), ("_id", 1)],
-        return_document=ReturnDocument.AFTER,
-    )
+    now = datetime.now(timezone.utc)
+    code_doc = voucher_pool_service.allocate_voucher(pool_id, reward_id=reward_id, telegram_user_id=reward["telegram_user_id"], now=now)
+
     if not code_doc:
-        database.db["tournament_rewards"].update_one(
+        database.db["campaign_rewards"].update_one(
             {"reward_id": reward_id, "status": {"$in": ["pending_review", "approved", "allocating"]}},
-            {"$set": {"status": "out_of_stock", "updated_at": datetime.now(timezone.utc)}},
+            {"$set": {"status": "out_of_stock", "updated_at": now}},
         )
         log_funnel_event("voucher_out_of_stock", campaign_id=reward["campaign_id"], user_id=reward["telegram_user_id"],
                           reward_id=reward_id, pool_id=pool_id)
-        return database.db["tournament_rewards"].find_one({"reward_id": reward_id})
+        return database.db["campaign_rewards"].find_one({"reward_id": reward_id})
 
     log_funnel_event("voucher_reserved", campaign_id=reward["campaign_id"], user_id=reward["telegram_user_id"],
                       reward_id=reward_id, pool_id=pool_id)
 
-    now = datetime.now(timezone.utc)
-    database.db["campaign_voucher_codes"].update_one(
-        {"_id": code_doc["_id"], "status": "reserved", "reserved_for_reward_id": reward_id},
-        {"$set": {"status": "assigned", "assigned_to_user_id": reward["telegram_user_id"], "assigned_at": now}},
-    )
-    database.db["tournament_rewards"].update_one(
+    database.db["campaign_rewards"].update_one(
         {"reward_id": reward_id, "status": {"$in": ["pending_review", "approved", "allocating"]}},
         {"$set": {"voucher_code": code_doc["code"], "status": "assigned", "assigned_at": now, "updated_at": now}},
     )
     log_funnel_event("voucher_assigned", campaign_id=reward["campaign_id"], user_id=reward["telegram_user_id"],
                       reward_id=reward_id, pool_id=pool_id)
-    return database.db["tournament_rewards"].find_one({"reward_id": reward_id})
+    return database.db["campaign_rewards"].find_one({"reward_id": reward_id})
 
 
 def approve_submission(submission_id: str, admin: dict) -> tuple[dict | None, str | None]:
@@ -257,13 +239,13 @@ def approve_submission(submission_id: str, admin: dict) -> tuple[dict | None, st
 
     for r in rewards:
         if r.get("status") in ("pending_review",):
-            database.db["tournament_rewards"].update_one(
+            database.db["campaign_rewards"].update_one(
                 {"reward_id": r["reward_id"]}, {"$set": {"status": "approved", "updated_at": datetime.now(timezone.utc)}}
             )
 
     final_rewards = []
     for r in rewards:
-        r = database.db["tournament_rewards"].find_one({"reward_id": r["reward_id"]})
+        r = database.db["campaign_rewards"].find_one({"reward_id": r["reward_id"]})
         if r.get("status") in ("approved",):
             r = _atomic_allocate_voucher(r["pool_id"], r)
         final_rewards.append(r)
@@ -321,7 +303,7 @@ def get_tournament_result(submission_id: str):
     doc = database.db["tournament_results"].find_one({"submission_id": submission_id})
     if not doc:
         return jsonify({"status": "error", "code": "not_found"}), 404
-    rewards = list(database.db["tournament_rewards"].find({"submission_id": submission_id}))
+    rewards = list(database.db["campaign_rewards"].find({"submission_id": submission_id}))
     for r in rewards:
         r.pop("_id", None)
     pool_ids = {r["pool_id"] for r in rewards}
@@ -375,7 +357,7 @@ def request_correction(submission_id: str):
     doc = database.db["tournament_results"].find_one({"submission_id": submission_id})
     if not doc:
         return jsonify({"status": "error", "code": "not_found"}), 404
-    has_assigned = database.db["tournament_rewards"].count_documents(
+    has_assigned = database.db["campaign_rewards"].count_documents(
         {"submission_id": submission_id, "status": "assigned"}
     ) > 0
     database.db["tournament_results"].update_one(
@@ -399,16 +381,16 @@ def retry_allocation(submission_id: str):
     if doc.get("status") not in ("out_of_stock", "approved", "allocating"):
         return jsonify({"status": "error", "code": "invalid_state_for_retry"}), 409
 
-    rewards = list(database.db["tournament_rewards"].find(
+    rewards = list(database.db["campaign_rewards"].find(
         {"submission_id": submission_id, "status": {"$in": ["approved", "out_of_stock"]}}
     ))
     for r in rewards:
         if r.get("status") == "out_of_stock":
-            database.db["tournament_rewards"].update_one({"reward_id": r["reward_id"]}, {"$set": {"status": "approved"}})
+            database.db["campaign_rewards"].update_one({"reward_id": r["reward_id"]}, {"$set": {"status": "approved"}})
             r["status"] = "approved"
         _atomic_allocate_voucher(r["pool_id"], r)
 
-    final_rewards = list(database.db["tournament_rewards"].find({"submission_id": submission_id}))
+    final_rewards = list(database.db["campaign_rewards"].find({"submission_id": submission_id}))
     any_out_of_stock = any(r.get("status") == "out_of_stock" for r in final_rewards)
     final_status = "out_of_stock" if any_out_of_stock else "assigned"
     database.db["tournament_results"].update_one({"submission_id": submission_id}, {"$set": {"status": final_status}})
@@ -417,32 +399,29 @@ def retry_allocation(submission_id: str):
 
 
 # ---------------------------------------------------------------------------
-# Admin: campaign-scoped voucher pools (Voucher Centre extension)
+# Admin: reward pools — thin registry over the shared Voucher Centre
+# inventory (voucher_pool_service / db.voucher_pools). No second inventory,
+# no second upload workflow: this just tags a pool_id with campaign
+# metadata and writes codes into the same table the Voucher Centre owns.
 # ---------------------------------------------------------------------------
 
-@tournament_rewards_bp.get("/api/admin/campaign-centre/voucher-pools")
-def list_voucher_pools():
+@tournament_rewards_bp.get("/api/admin/reward-pools")
+def list_reward_pools():
     _, err = _require_admin()
     if err:
         return err
     campaign_id = request.args.get("campaign_id")
-    query = {"campaign_id": campaign_id} if campaign_id else {}
-    pools = list(database.db["campaign_voucher_pools"].find(query, sort=[("created_at", -1)], limit=200))
+    pools = voucher_pool_service.list_pools(campaign_id=campaign_id)
     out = []
     for p in pools:
         p.pop("_id", None)
-        counts = {}
-        for status in VOUCHER_CODE_STATUSES:
-            counts[status] = database.db["campaign_voucher_codes"].count_documents(
-                {"pool_id": p["pool_id"], "status": status}
-            )
-        p["counts"] = counts
+        p["stock"] = voucher_pool_service.pool_stock(p["pool_id"])
         out.append(p)
     return jsonify({"status": "ok", "pools": out})
 
 
-@tournament_rewards_bp.post("/api/admin/campaign-centre/voucher-pools")
-def create_voucher_pool():
+@tournament_rewards_bp.post("/api/admin/reward-pools")
+def create_reward_pool():
     admin, err = _require_admin()
     if err:
         return err
@@ -451,79 +430,53 @@ def create_voucher_pool():
     name = (body.get("name") or "").strip()
     if not pool_id or not name:
         return jsonify({"status": "error", "code": "missing_fields"}), 400
-    now = datetime.now(timezone.utc)
-    doc = {
-        "pool_id": pool_id,
-        "name": name,
-        "pool_type": body.get("pool_type") or "tournament_reward",
-        "campaign_id": body.get("campaign_id") or "",
-        "status": "active",
-        "created_at": now,
-        "updated_at": now,
-    }
-    try:
-        database.db["campaign_voucher_pools"].insert_one(doc)
-    except Exception as exc:
-        if "duplicate" in str(exc).lower():
-            return jsonify({"status": "error", "code": "duplicate_pool_id"}), 409
-        raise
-    _log_audit("voucher_pool_created", admin, pool_id)
+    pool_type = body.get("pool_type") or "tournament_reward"
+    if pool_type not in voucher_pool_service.POOL_TYPES:
+        return jsonify({"status": "error", "code": "invalid_pool_type"}), 400
+
+    voucher_pool_service.register_pool(
+        pool_id, name=name, pool_type=pool_type,
+        campaign_id=body.get("campaign_id") or "",
+        reward_usage=body.get("reward_usage") or "",
+        reward_metadata=body.get("reward_metadata") or {},
+    )
+    _log_audit("reward_pool_registered", admin, pool_id)
     return jsonify({"status": "ok", "pool_id": pool_id}), 201
 
 
-@tournament_rewards_bp.post("/api/admin/campaign-centre/voucher-pools/<pool_id>/upload-codes")
-def upload_voucher_codes(pool_id: str):
+@tournament_rewards_bp.post("/api/admin/reward-pools/<pool_id>/upload-codes")
+def upload_reward_pool_codes(pool_id: str):
     admin, err = _require_admin()
     if err:
         return err
-    pool = database.db["campaign_voucher_pools"].find_one({"pool_id": pool_id})
-    if not pool:
+    if not voucher_pool_service.get_pool(pool_id):
         return jsonify({"status": "error", "code": "pool_not_found"}), 404
     body = request.get_json(force=True, silent=True) or {}
     codes = body.get("codes") or []
     if not isinstance(codes, list) or not codes:
         return jsonify({"status": "error", "code": "missing_codes"}), 400
 
-    now = datetime.now(timezone.utc)
-    inserted, skipped = 0, 0
-    for raw_code in codes:
-        code = str(raw_code).strip()
-        if not code:
-            continue
-        try:
-            database.db["campaign_voucher_codes"].insert_one({
-                "pool_id": pool_id,
-                "code": code,
-                "status": "available",
-                "reserved_for_reward_id": None,
-                "assigned_to_user_id": None,
-                "assigned_at": None,
-                "first_viewed_at": None,
-                "copied_at": None,
-                "created_at": now,
-                "updated_at": now,
-            })
-            inserted += 1
-        except Exception as exc:
-            if "duplicate" in str(exc).lower():
-                skipped += 1
-            else:
-                raise
-    _log_audit("voucher_codes_uploaded", admin, pool_id, {"inserted": inserted, "skipped": skipped})
-    return jsonify({"status": "ok", "inserted": inserted, "skipped_duplicates": skipped})
+    result = voucher_pool_service.upload_codes(
+        pool_id, codes,
+        display_label=body.get("display_label") or "",
+        value_hint=body.get("value_hint") or "",
+        currency=body.get("currency") or "",
+    )
+    _log_audit("reward_pool_codes_uploaded", admin, pool_id, result)
+    return jsonify({"status": "ok", **result})
 
 
 # ---------------------------------------------------------------------------
 # Admin: reward allocations list (Phase 18 tab)
 # ---------------------------------------------------------------------------
 
-@tournament_rewards_bp.get("/api/admin/reward-allocations")
-def list_reward_allocations():
+@tournament_rewards_bp.get("/api/admin/rewards")
+def list_rewards():
     _, err = _require_admin()
     if err:
         return err
     query: dict = {}
-    for field in ("campaign_id", "tournament_id", "status", "pool_id"):
+    for field in ("campaign_id", "tournament_id", "status", "pool_id", "category"):
         val = request.args.get(field)
         if val:
             query[field] = val
@@ -535,7 +488,7 @@ def list_reward_allocations():
             return jsonify({"status": "error", "code": "invalid_telegram_user_id"}), 400
 
     limit = min(int(request.args.get("limit", 50) or 50), 200)
-    docs = list(database.db["tournament_rewards"].find(query, sort=[("created_at", -1)], limit=limit))
+    docs = list(database.db["campaign_rewards"].find(query, sort=[("created_at", -1)], limit=limit))
     for d in docs:
         d.pop("_id", None)
         for k in ("assigned_at", "first_viewed_at", "copied_at", "created_at", "updated_at"):

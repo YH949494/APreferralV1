@@ -18,8 +18,10 @@ you.**
 
 When a user taps "Play Tournament" in the Mini App, AP:
 
-1. Derives the Telegram user id from the **verified Mini App initData** of
-   the user tapping the button (never from a client-supplied `uid`).
+1. Derives the Telegram user id from the **authenticated Mini App session**
+   of the user tapping the button (never from a client-supplied `uid`) via
+   the shared `miniapp_identity.resolve_authenticated_telegram_user_id()`
+   resolver.
 2. Re-confirms the campaign is publicly active and the user is subscribed to
    the configured official channel (if required).
 3. Builds your destination URL using your provider's configured `url_mode`

@@ -176,7 +176,7 @@ def _validate_body(body: dict, *, partial: bool = False) -> tuple[dict | None, s
     return updates, None
 
 
-@campaign_providers_bp.get("/api/admin/campaign-centre/providers")
+@campaign_providers_bp.get("/api/admin/providers")
 def list_providers():
     _, err = _require_admin()
     if err:
@@ -192,7 +192,7 @@ def list_providers():
     return jsonify({"status": "ok", "providers": providers})
 
 
-@campaign_providers_bp.post("/api/admin/campaign-centre/providers")
+@campaign_providers_bp.post("/api/admin/providers")
 def create_provider():
     admin, err = _require_admin()
     if err:
@@ -226,7 +226,7 @@ def create_provider():
     return jsonify({"status": "ok", "id": str(result.inserted_id), "provider_id": provider_id}), 201
 
 
-@campaign_providers_bp.get("/api/admin/campaign-centre/providers/<provider_id>")
+@campaign_providers_bp.get("/api/admin/providers/<provider_id>")
 def get_provider_route(provider_id: str):
     _, err = _require_admin()
     if err:
@@ -239,7 +239,7 @@ def get_provider_route(provider_id: str):
     return jsonify({"status": "ok", "provider": out})
 
 
-@campaign_providers_bp.put("/api/admin/campaign-centre/providers/<provider_id>")
+@campaign_providers_bp.put("/api/admin/providers/<provider_id>")
 def update_provider(provider_id: str):
     admin, err = _require_admin()
     if err:
@@ -259,7 +259,7 @@ def update_provider(provider_id: str):
     return jsonify({"status": "ok"})
 
 
-@campaign_providers_bp.post("/api/admin/campaign-centre/providers/<provider_id>/activate")
+@campaign_providers_bp.post("/api/admin/providers/<provider_id>/activate")
 def activate_provider(provider_id: str):
     admin, err = _require_admin()
     if err:
@@ -277,7 +277,7 @@ def activate_provider(provider_id: str):
     return jsonify({"status": "ok"})
 
 
-@campaign_providers_bp.post("/api/admin/campaign-centre/providers/<provider_id>/deactivate")
+@campaign_providers_bp.post("/api/admin/providers/<provider_id>/deactivate")
 def deactivate_provider(provider_id: str):
     admin, err = _require_admin()
     if err:
@@ -293,7 +293,7 @@ def deactivate_provider(provider_id: str):
     return jsonify({"status": "ok"})
 
 
-@campaign_providers_bp.get("/api/admin/campaign-centre/providers/<provider_id>/preview")
+@campaign_providers_bp.get("/api/admin/providers/<provider_id>/preview")
 def preview_provider_destination(provider_id: str):
     _, err = _require_admin()
     if err:

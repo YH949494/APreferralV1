@@ -6,7 +6,9 @@ switch-over once it is.
 
 ## 1. Create a provider
 
-Admin Dashboard → Campaign Centre → Providers → Create Provider.
+Admin Dashboard → **Player Campaigns** (sidebar module; the pre-existing
+"Campaign Centre" module is the unrelated segment-audience marketing tool)
+→ Providers → Create Provider.
 
 - `provider_id`: short slug, e.g. `mywin-tournament`.
 - `type`: `tournament`.
@@ -23,35 +25,42 @@ website is ready.
 
 ## 2. Create a campaign
 
-Campaign Centre → Campaigns → Create Campaign. It starts as `draft`.
+Player Campaigns → Campaigns → Create Campaign. It starts as `draft`.
 
 Fill in `type: tournament`, the linked `provider_id`, a `destination.path`,
 and the official channel (`telegram.channel_username`). Leave
 `destination.ready = false` while the site is still being built.
 
-## 3. Create voucher pools
+## 3. Register reward pools
 
-Campaign Centre → Reward Allocations → Voucher Pools → Create Pool, one per
-reward tier (e.g. `july-tournament-gold`, `-silver`, `-standard`), each
-linked to the `campaign_id`.
+Player Campaigns → Rewards → Register Pool, one per reward tier (e.g.
+`july-tournament-gold`, `-silver`, `-standard`), each linked to the
+`campaign_id`. This does **not** create a new voucher inventory — it tags a
+`pool_id` with catalog metadata (`pool_type`, `campaign_id`) in a small
+registry; the codes themselves live in the same `db.voucher_pools`
+collection the Voucher Centre already owns.
 
 ## 4. Upload voucher codes
 
 Pool → Upload Codes (paste one code per line). Duplicate codes within a pool
-are silently skipped and reported back (`skipped_duplicates`).
+are silently skipped and reported back (`skipped_duplicates`). These rows
+land directly in the shared Voucher Centre inventory table.
 
-## 5. Configure rank-to-pool rules
+## 5. Configure reward rules
 
-On the campaign, set `reward_config.rules`, e.g.:
+On the campaign, set `reward_config.rules` — a rule-based reward engine, not
+hardcoded rank logic, so this also supports non-rank triggers
+(`participation`, `score_threshold`, `referral_count`, `first_play`, `vip`,
+`campaign_tag`) without any backend change:
 
 ```json
 [
-  {"rule_id": "rank-1", "min_rank": 1, "max_rank": 1, "pool_id": "july-tournament-gold", "reward_label": "Champion Reward"},
-  {"rule_id": "rank-2-3", "min_rank": 2, "max_rank": 3, "pool_id": "july-tournament-silver", "reward_label": "Top 3 Reward"}
+  {"rule_id": "rank-1", "condition_type": "rank", "params": {"min_rank": 1, "max_rank": 1}, "pool_id": "july-tournament-gold", "reward_label": "Champion Reward"},
+  {"rule_id": "rank-2-3", "condition_type": "rank", "params": {"min_rank": 2, "max_rank": 3}, "pool_id": "july-tournament-silver", "reward_label": "Top 3 Reward"}
 ]
 ```
-Ranges must not overlap; every `pool_id` must exist. Required before the
-campaign can be published.
+`rank` ranges must not overlap; every `pool_id` must exist. At least one
+rule is required before the campaign can be published.
 
 ## 6. Keep the campaign admin-only before the website is ready
 
@@ -93,7 +102,7 @@ intentional business call for this run.
 
 ## 11. Handle out of stock
 
-Reward Allocations tab shows `out_of_stock` rewards clearly. Upload more
+Rewards tab shows `out_of_stock` rewards clearly. Upload more
 codes to the relevant pool, then **Retry Allocation** on the submission —
 this only touches `out_of_stock`/`approved` rewards, never ones already
 `assigned`.
@@ -132,6 +141,6 @@ rejected once `archived`.
 
 ## 16. Reconcile reward records
 
-Reward Allocations tab supports filtering by campaign/tournament/status/pool
+Rewards tab supports filtering by campaign/tournament/status/pool
 and searching by Telegram user id, showing rank, reward rule, assigned
 voucher, and viewed/copied telemetry for manual reconciliation.

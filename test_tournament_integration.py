@@ -32,7 +32,7 @@ def _campaign(**overrides):
         "type": "tournament",
         "status": "live",
         "destination": {"provider_id": PROVIDER_ID, "ready": True},
-        "reward_config": {"rules": [{"rule_id": "rank-1", "min_rank": 1, "max_rank": 1, "pool_id": "pool-gold"}]},
+        "reward_config": {"rules": [{"rule_id": "rank-1", "condition_type": "rank", "params": {"min_rank": 1, "max_rank": 1}, "pool_id": "pool-gold"}]},
     }
     base.update(overrides)
     return base
@@ -192,8 +192,8 @@ def test_duplicate_telegram_uid_rejected(fake_db):
     payload["reward_config"] = None
     fake_db["gc_campaigns"].update_one({"campaign_id": "july-tournament-2026"}, {"$set": {
         "reward_config": {"rules": [
-            {"rule_id": "r1", "min_rank": 1, "max_rank": 1, "pool_id": "p1"},
-            {"rule_id": "r2", "min_rank": 2, "max_rank": 2, "pool_id": "p2"},
+            {"rule_id": "r1", "condition_type": "rank", "params": {"min_rank": 1, "max_rank": 1}, "pool_id": "p1"},
+            {"rule_id": "r2", "condition_type": "rank", "params": {"min_rank": 2, "max_rank": 2}, "pool_id": "p2"},
         ]}
     }})
     body = json.dumps(payload).encode()
@@ -243,7 +243,7 @@ def test_too_many_winners_rejected(fake_db, monkeypatch):
     payload = _payload()
     payload["winners"] = [{"rank": 1, "telegram_user_id": i, "score": 1} for i in range(5)]
     fake_db["gc_campaigns"].update_one({"campaign_id": "july-tournament-2026"}, {"$set": {
-        "reward_config": {"rules": [{"rule_id": "r1", "min_rank": 1, "max_rank": 1, "pool_id": "p1"}]}
+        "reward_config": {"rules": [{"rule_id": "r1", "condition_type": "rank", "params": {"min_rank": 1, "max_rank": 1}, "pool_id": "p1"}]}
     }})
     body = json.dumps(payload).encode()
     resp = _app().test_client().post("/api/integrations/tournaments/results", data=body, headers=_headers(body))

@@ -2343,9 +2343,12 @@ app.register_blueprint(campaign_performance_bp)
 from campaign_intelligence import campaign_intelligence_bp
 app.register_blueprint(campaign_intelligence_bp)
 
-# Campaign Centre / Tournament Reward Integration — Telegram campaign gateway
-# (namespaced under /api/admin/campaign-centre/... to avoid colliding with
-# the pre-existing segment-audience campaigns_bp at /api/admin/campaigns).
+# Campaign Centre — generic marketing-campaign gateway (tournament,
+# external subscription verification, external website, ... future types).
+# Admin campaign CRUD lives at /api/admin/gc-campaigns (not /api/admin/
+# campaigns) because that flat path is already taken by the pre-existing
+# segment-audience campaigns_bp; providers/rewards/results use flat paths
+# since those don't collide with anything existing.
 from campaign_providers import campaign_providers_bp
 app.register_blueprint(campaign_providers_bp)
 

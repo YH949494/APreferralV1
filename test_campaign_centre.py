@@ -125,33 +125,41 @@ def test_visibility_explanation_clean_for_active_campaign():
 # Reward rule validation
 # ---------------------------------------------------------------------------
 
+def _rank_rule(rule_id, min_rank, max_rank, pool_id):
+    return {"rule_id": rule_id, "condition_type": "rank", "params": {"min_rank": min_rank, "max_rank": max_rank}, "pool_id": pool_id}
+
+
 def test_reward_rules_overlap_rejected():
-    rules = [
-        {"rule_id": "a", "min_rank": 1, "max_rank": 3, "pool_id": "p1"},
-        {"rule_id": "b", "min_rank": 3, "max_rank": 5, "pool_id": "p2"},
-    ]
+    rules = [_rank_rule("a", 1, 3, "p1"), _rank_rule("b", 3, 5, "p2")]
     assert cc._validate_reward_rules(rules) == "overlapping_rank_ranges"
 
 
 def test_reward_rules_non_overlapping_ok():
-    rules = [
-        {"rule_id": "a", "min_rank": 1, "max_rank": 1, "pool_id": "p1"},
-        {"rule_id": "b", "min_rank": 2, "max_rank": 3, "pool_id": "p2"},
-    ]
+    rules = [_rank_rule("a", 1, 1, "p1"), _rank_rule("b", 2, 3, "p2")]
     assert cc._validate_reward_rules(rules) is None
 
 
 def test_reward_rules_missing_pool_rejected():
-    rules = [{"rule_id": "a", "min_rank": 1, "max_rank": 1}]
+    rules = [{"rule_id": "a", "condition_type": "rank", "params": {"min_rank": 1, "max_rank": 1}}]
     assert cc._validate_reward_rules(rules) == "missing_pool_id"
 
 
 def test_reward_rules_duplicate_rule_id_rejected():
-    rules = [
-        {"rule_id": "a", "min_rank": 1, "max_rank": 1, "pool_id": "p1"},
-        {"rule_id": "a", "min_rank": 2, "max_rank": 2, "pool_id": "p2"},
-    ]
+    rules = [_rank_rule("a", 1, 1, "p1"), _rank_rule("a", 2, 2, "p2")]
     assert cc._validate_reward_rules(rules) == "duplicate_or_missing_rule_id"
+
+
+def test_reward_rules_non_rank_condition_types_supported():
+    rules = [
+        {"rule_id": "participation", "condition_type": "participation", "params": {}, "pool_id": "p1"},
+        {"rule_id": "vip", "condition_type": "vip", "params": {}, "pool_id": "p2"},
+    ]
+    assert cc._validate_reward_rules(rules) is None
+
+
+def test_reward_rules_invalid_condition_type_rejected():
+    rules = [{"rule_id": "a", "condition_type": "not_a_real_type", "params": {}, "pool_id": "p1"}]
+    assert cc._validate_reward_rules(rules) == "invalid_condition_type"
 
 
 # ---------------------------------------------------------------------------

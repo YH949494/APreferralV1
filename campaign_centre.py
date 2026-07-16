@@ -1,13 +1,22 @@
-"""Campaign Centre — AP-owned campaign gateway (tournaments, external
-subscription-verification campaigns, external website campaigns).
+"""Campaign Centre — a generic marketing-campaign gateway for the Mini App.
+
+Ships today with three campaign types (tournament, external subscription
+verification, external website) but nothing here — collection name, module
+name, route names, reward-rule engine — is tournament-specific. Future types
+(lucky draw, referral contest, cashback, mission, survey, seasonal event,
+partner campaign, VIP event, ...) are added by extending ``CAMPAIGN_TYPES``
+and, if they need a new reward condition, ``reward_engine.CONDITION_TYPES`` —
+not by redesigning this module.
 
 This is intentionally a separate collection/namespace from the pre-existing
 ``campaigns`` collection (see campaigns.py / campaign_engine.py), which is an
 unrelated segment-audience marketing/voucher-targeting tool. Reusing that
 collection or its ``/api/admin/campaigns`` routes would collide with a
 production feature, so the Campaign Centre admin API is namespaced under
-``/api/admin/campaign-centre/...``. Public and integration endpoints use the
-exact paths from the spec since those do not collide with anything existing.
+``/api/admin/gc-campaigns`` (kept short and flat like every other admin API
+here — the extra segment only exists because ``/api/admin/campaigns`` is
+already taken). Public and integration endpoints use the exact paths from
+the spec since those do not collide with anything existing.
 
 Collection: ``gc_campaigns``
 """
@@ -20,6 +29,7 @@ from datetime import datetime, timezone
 from flask import Blueprint, jsonify, request
 
 import database
+import reward_engine
 from campaign_providers import get_provider, provider_is_usable_for_results
 
 logger = logging.getLogger(__name__)
@@ -30,6 +40,11 @@ campaign_public_bp = Blueprint("campaign_public", __name__)
 CAMPAIGN_TYPES = ["tournament", "external_subscription_verification", "external_website"]
 CAMPAIGN_STATUSES = ["draft", "scheduled", "live", "paused", "ended", "archived"]
 OPEN_MODES = ["telegram_web_app", "external_url"]
+
+# Campaign types whose publish gate requires at least one reward rule before
+# going live. Extend this set (not the publish logic) when a new reward-
+# driven campaign type is added.
+_REWARD_DRIVEN_TYPES = {"tournament"}
 
 # Which open modes are valid for which campaign type.
 _ALLOWED_OPEN_MODES_BY_TYPE = {
@@ -178,31 +193,9 @@ def _validate_schedule(schedule: dict) -> str | None:
 
 
 def _validate_reward_rules(rules: list) -> str | None:
-    if not isinstance(rules, list):
-        return "invalid_rules"
-    seen_ids = set()
-    ranges = []
-    for rule in rules:
-        rule_id = rule.get("rule_id")
-        if not rule_id or rule_id in seen_ids:
-            return "duplicate_or_missing_rule_id"
-        seen_ids.add(rule_id)
-        try:
-            min_rank = int(rule["min_rank"])
-            max_rank = int(rule["max_rank"])
-        except (KeyError, TypeError, ValueError):
-            return "invalid_rank_range"
-        if min_rank < 1 or max_rank < min_rank:
-            return "invalid_rank_range"
-        if not rule.get("pool_id"):
-            return "missing_pool_id"
-        ranges.append((min_rank, max_rank))
-
-    ranges.sort()
-    for i in range(1, len(ranges)):
-        if ranges[i][0] <= ranges[i - 1][1]:
-            return "overlapping_rank_ranges"
-    return None
+    """Structural validation delegates to reward_engine so every campaign
+    type shares one rule-based reward engine instead of a rank-only check."""
+    return reward_engine.validate_reward_rules(rules)
 
 
 def _parse_dt(value) -> datetime | None:
@@ -319,7 +312,7 @@ def _serialize(doc: dict) -> dict:
 # Admin CRUD
 # ---------------------------------------------------------------------------
 
-@campaign_centre_bp.get("/api/admin/campaign-centre/campaigns")
+@campaign_centre_bp.get("/api/admin/gc-campaigns")
 def list_campaigns():
     _, err = _require_admin()
     if err:
@@ -349,7 +342,7 @@ def list_campaigns():
     return jsonify({"status": "ok", "campaigns": out})
 
 
-@campaign_centre_bp.post("/api/admin/campaign-centre/campaigns")
+@campaign_centre_bp.post("/api/admin/gc-campaigns")
 def create_campaign():
     admin, err = _require_admin()
     if err:
@@ -386,7 +379,7 @@ def create_campaign():
     return jsonify({"status": "ok", "id": str(result.inserted_id), "campaign_id": campaign_id}), 201
 
 
-@campaign_centre_bp.get("/api/admin/campaign-centre/campaigns/<campaign_id>")
+@campaign_centre_bp.get("/api/admin/gc-campaigns/<campaign_id>")
 def get_campaign_route(campaign_id: str):
     _, err = _require_admin()
     if err:
@@ -400,7 +393,7 @@ def get_campaign_route(campaign_id: str):
     return jsonify({"status": "ok", "campaign": out})
 
 
-@campaign_centre_bp.put("/api/admin/campaign-centre/campaigns/<campaign_id>")
+@campaign_centre_bp.put("/api/admin/gc-campaigns/<campaign_id>")
 def update_campaign(campaign_id: str):
     admin, err = _require_admin()
     if err:
@@ -441,7 +434,7 @@ def _transition(campaign_id: str, admin: dict, new_status: str, action: str):
         return jsonify({"status": "error", "code": "invalid_status_transition"}), 400
     if new_status == "live":
         provider = get_provider((doc.get("destination") or {}).get("provider_id") or "")
-        if doc.get("type") == "tournament" and not (doc.get("reward_config") or {}).get("rules"):
+        if doc.get("type") in _REWARD_DRIVEN_TYPES and not (doc.get("reward_config") or {}).get("rules"):
             return jsonify({"status": "error", "code": "reward_rules_required"}), 400
         if not (doc.get("destination") or {}).get("ready"):
             return jsonify({"status": "error", "code": "destination_not_ready"}), 400
@@ -455,7 +448,7 @@ def _transition(campaign_id: str, admin: dict, new_status: str, action: str):
     return jsonify({"status": "ok", "campaign_status": new_status})
 
 
-@campaign_centre_bp.post("/api/admin/campaign-centre/campaigns/<campaign_id>/publish")
+@campaign_centre_bp.post("/api/admin/gc-campaigns/<campaign_id>/publish")
 def publish_campaign(campaign_id: str):
     admin, err = _require_admin()
     if err:
@@ -463,7 +456,7 @@ def publish_campaign(campaign_id: str):
     return _transition(campaign_id, admin, "live", "campaign_published")
 
 
-@campaign_centre_bp.post("/api/admin/campaign-centre/campaigns/<campaign_id>/pause")
+@campaign_centre_bp.post("/api/admin/gc-campaigns/<campaign_id>/pause")
 def pause_campaign(campaign_id: str):
     admin, err = _require_admin()
     if err:
@@ -471,7 +464,7 @@ def pause_campaign(campaign_id: str):
     return _transition(campaign_id, admin, "paused", "campaign_paused")
 
 
-@campaign_centre_bp.post("/api/admin/campaign-centre/campaigns/<campaign_id>/archive")
+@campaign_centre_bp.post("/api/admin/gc-campaigns/<campaign_id>/archive")
 def archive_campaign(campaign_id: str):
     admin, err = _require_admin()
     if err:
@@ -479,7 +472,7 @@ def archive_campaign(campaign_id: str):
     return _transition(campaign_id, admin, "archived", "campaign_archived")
 
 
-@campaign_centre_bp.post("/api/admin/campaign-centre/campaigns/<campaign_id>/duplicate")
+@campaign_centre_bp.post("/api/admin/gc-campaigns/<campaign_id>/duplicate")
 def duplicate_campaign(campaign_id: str):
     admin, err = _require_admin()
     if err:
@@ -513,7 +506,7 @@ def duplicate_campaign(campaign_id: str):
     return jsonify({"status": "ok", "id": str(result.inserted_id), "campaign_id": new_campaign_id}), 201
 
 
-@campaign_centre_bp.get("/api/admin/campaign-centre/campaigns/<campaign_id>/preview")
+@campaign_centre_bp.get("/api/admin/gc-campaigns/<campaign_id>/preview")
 def preview_campaign(campaign_id: str):
     """Admin-only preview. Never changes campaign visibility."""
     _, err = _require_admin()
@@ -590,33 +583,17 @@ def list_active_campaigns():
     return jsonify({"status": "ok", "campaigns": active})
 
 
-def _verified_telegram_user_id() -> tuple[int | None, tuple | None]:
-    """Derive the caller's Telegram user id from verified Mini App initData.
-    Never trust a raw uid/user_id query or body parameter."""
-    import json as _json
-
-    from vouchers import extract_raw_init_data_from_query, verify_telegram_init_data
-
-    init_data_raw = extract_raw_init_data_from_query(request) or (request.get_json(silent=True) or {}).get("init_data", "")
-    if not init_data_raw:
-        return None, (jsonify({"status": "error", "code": "missing_init_data"}), 400)
-    ok, data, reason = verify_telegram_init_data(init_data_raw)
-    if not ok:
-        return None, (jsonify({"status": "error", "code": f"init_data_invalid:{reason}"}), 401)
-    try:
-        user_json = _json.loads(data.get("user", "{}"))
-        uid = int(user_json.get("id"))
-    except Exception:
-        return None, (jsonify({"status": "error", "code": "invalid_user"}), 401)
-    return uid, None
-
-
 @campaign_public_bp.post("/api/campaigns/<campaign_id>/play")
 def play_campaign(campaign_id: str):
-    """Tournament button flow: verifies identity + subscription server-side,
-    then returns the destination URL to open. No raw UID URLs are accepted
-    from the client — the Telegram user id is derived from verified initData."""
-    uid, err = _verified_telegram_user_id()
+    """Play/open button flow: resolves the caller against the authenticated
+    Mini App session, verifies subscription server-side if required, then
+    returns the destination URL to open. No raw UID/user_id from the client
+    is ever trusted for identity — see miniapp_identity.py. For a tournament
+    campaign the destination URL is the Phase-1 UID deep link; the tournament
+    website never receives Telegram initData from this flow."""
+    from miniapp_identity import resolve_authenticated_telegram_user_id
+
+    uid, err = resolve_authenticated_telegram_user_id()
     if err:
         return err
 
@@ -660,7 +637,9 @@ def play_campaign(campaign_id: str):
 
 @campaign_public_bp.post("/api/campaigns/<campaign_id>/subscribe-check")
 def subscribe_check(campaign_id: str):
-    uid, err = _verified_telegram_user_id()
+    from miniapp_identity import resolve_authenticated_telegram_user_id
+
+    uid, err = resolve_authenticated_telegram_user_id()
     if err:
         return err
     doc = get_campaign(campaign_id)

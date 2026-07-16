@@ -25,6 +25,14 @@ def _get_dotted(doc: dict, dotted_key: str):
 
 def _matches(doc: dict, query: dict) -> bool:
     for key, cond in query.items():
+        if key == "$or":
+            if not any(_matches(doc, sub) for sub in cond):
+                return False
+            continue
+        if key == "$and":
+            if not all(_matches(doc, sub) for sub in cond):
+                return False
+            continue
         val = _get_dotted(doc, key)
         if isinstance(cond, dict) and any(k.startswith("$") for k in cond):
             for op, target in cond.items():
@@ -52,16 +60,17 @@ def _set_dotted(doc: dict, dotted_key: str, value) -> None:
     cursor[parts[-1]] = value
 
 
-def _apply_update(doc: dict, update: dict) -> dict:
+def _apply_update(doc: dict, update: dict, *, is_insert: bool = False) -> dict:
     new_doc = deepcopy(doc)
+    if is_insert and "$setOnInsert" in update:
+        for key, value in deepcopy(update["$setOnInsert"]).items():
+            _set_dotted(new_doc, key, value)
     if "$set" in update:
         for key, value in deepcopy(update["$set"]).items():
             _set_dotted(new_doc, key, value)
     if "$inc" in update:
         for k, v in update["$inc"].items():
             new_doc[k] = new_doc.get(k, 0) + v
-    if "$setOnInsert" in update and doc is None:
-        new_doc.update(deepcopy(update["$setOnInsert"]))
     return new_doc
 
 
@@ -116,7 +125,8 @@ class FakeCollection:
                 self._docs[i] = _apply_update(doc, update)
                 return type("Result", (), {"matched_count": 1, "modified_count": 1})()
         if upsert:
-            new_doc = _apply_update(query, update)
+            base = {k: v for k, v in query.items() if not k.startswith("$")}
+            new_doc = _apply_update(base, update, is_insert=True)
             new_doc.setdefault("_id", self._next_id())
             self._docs.append(new_doc)
             return type("Result", (), {"matched_count": 0, "modified_count": 0, "upserted_id": new_doc["_id"]})()

@@ -18,6 +18,7 @@ from datetime import datetime, timedelta, timezone
 from flask import Blueprint, jsonify, request
 
 import database
+import reward_engine
 from campaign_centre import get_campaign, log_funnel_event
 from campaign_providers import get_provider, provider_is_usable_for_results, provider_secret
 
@@ -174,9 +175,7 @@ def _validate_payload(body: dict, campaign: dict, provider_id: str) -> str | Non
     rules = (campaign.get("reward_config") or {}).get("rules") or []
     if not rules:
         return "reward_rules_not_configured"
-    allowed_ranks = set()
-    for rule in rules:
-        allowed_ranks.update(range(int(rule["min_rank"]), int(rule["max_rank"]) + 1))
+    allowed_ranks = reward_engine.rank_ranges(rules)
 
     seen_uids = set()
     seen_ranks = set()
@@ -304,7 +303,7 @@ def tournament_result_status(submission_id: str):
     if not doc or doc.get("provider_id") != provider["provider_id"]:
         return jsonify({"status": "error", "code": "not_found"}), 404
 
-    rewards = list(database.db["tournament_rewards"].find({"submission_id": submission_id}))
+    rewards = list(database.db["campaign_rewards"].find({"submission_id": submission_id}))
     assigned_count = sum(1 for r in rewards if r.get("status") == "assigned")
     out_of_stock_count = sum(1 for r in rewards if r.get("status") == "out_of_stock")
     pending_count = sum(1 for r in rewards if r.get("status") in ("pending_review", "approved", "allocating"))
