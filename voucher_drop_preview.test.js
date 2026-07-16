@@ -97,6 +97,30 @@ test("invalid date range: missing start time is a blocking error", () => {
   assert.ok(result.errors.some((e) => e.includes("start date/time is required")));
 });
 
+test("pooled codes are normalized like the backend's _normalize_codes() before duplicate detection and counting", () => {
+  const result = buildDropPreview(
+    baseInput({
+      type: "pooled",
+      pairsText: "",
+      codesText: "CODE1\nCODE1,\nCODE2\nCODE3\nCODE4",
+    }),
+    { now: FIXED_NOW }
+  );
+  assert.ok(result.errors.some((e) => e.includes("Duplicate voucher codes") && e.includes("CODE1")));
+});
+
+test("pooled codes that normalize to nothing (e.g. a bare comma) are reported as empty entries", () => {
+  const result = buildDropPreview(
+    baseInput({
+      type: "pooled",
+      pairsText: "",
+      codesText: "CODE1\n,\nCODE2\nCODE3\nCODE4",
+    }),
+    { now: FIXED_NOW }
+  );
+  assert.ok(result.errors.some((e) => e.includes("empty voucher code")));
+});
+
 test("duplicate codes: pooled drop with a repeated code is blocked, not silently deduped", () => {
   const result = buildDropPreview(
     baseInput({
@@ -126,7 +150,29 @@ test("personalised drop with a repeated username is blocked", () => {
     }),
     { now: FIXED_NOW }
   );
-  assert.ok(result.errors.some((e) => e.includes("Duplicate usernames") && e.includes("@alice")));
+  assert.ok(result.errors.some((e) => e.includes("Duplicate usernames") && e.includes("alice")));
+});
+
+test("personalised duplicate usernames are detected case-insensitively and with/without a leading @, matching the backend's norm_username()", () => {
+  const result = buildDropPreview(
+    baseInput({
+      pairsText: "@Alice,CODE1\nalice,CODE2\n@bob,CODE3\n@carol,CODE4\n@dave,CODE5",
+    }),
+    { now: FIXED_NOW }
+  );
+  assert.ok(result.errors.some((e) => e.includes("Duplicate usernames") && e.includes("alice")));
+});
+
+test("personalised exact duplicate rows dedupe across username casing/@ variants", () => {
+  const result = buildDropPreview(
+    baseInput({
+      pairsText: "@Alice,CODE1\nalice,CODE1\n@bob,CODE2\n@carol,CODE3\n@dave,CODE4\n@eve,CODE5",
+    }),
+    { now: FIXED_NOW }
+  );
+  assert.deepEqual(result.errors, []);
+  assert.ok(result.warnings.some((w) => w.includes("duplicate row")));
+  assert.equal(result.summary.totalCount, 5);
 });
 
 test("exact duplicate personalised rows are silently deduped and reported as a warning, not an error", () => {
