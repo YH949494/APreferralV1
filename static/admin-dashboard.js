@@ -5237,30 +5237,6 @@
       { label: "Leaderboard", external: "/static/index.html#admin-panel" },
       { label: "Broadcast", view: "placeholder", ph: { title: "Broadcast", desc: "Broadcast tools are not yet wired to an admin data source." } }
     ]},
-    { key: "affiliate", icon: "🤝", label: "Affiliate Centre", tabs: [
-      { label: "Overview", view: "affiliate" },
-      { label: "Pending Approval", view: "affiliatePending", live: true },
-      { label: "Voucher Pools", view: "affiliatePools", live: true },
-      { label: "Rewards", view: "placeholder", ph: { title: "Rewards", desc: "Affiliate reward ledger is not yet wired to an admin data source." } },
-      { label: "Payouts", view: "placeholder", ph: { title: "Payouts", desc: "Payout batches are not yet wired to an admin data source." } },
-      { label: "Analytics", view: "placeholder", ph: { title: "Analytics", desc: "Affiliate analytics is not yet wired to an admin data source." } }
-    ]},
-    { key: "referral", icon: "🔗", label: "Referral Centre", tabs: [
-      { label: "Overview", view: "moduleOverview", overviewKey: "referral" },
-      { label: "Performance", view: "referrals" },
-      { label: "Pending", view: "placeholder", ph: { title: "Pending", desc: "Pending referral qualification queue is not yet wired to an admin data source." } },
-      { label: "Rewards", view: "placeholder", ph: { title: "Rewards", desc: "Referral reward ledger is not yet wired to an admin data source." } },
-      { label: "Leaderboard", view: "placeholder", ph: { title: "Leaderboard", desc: "Referral leaderboard is not yet wired to an admin data source." } },
-      { label: "Analytics", view: "placeholder", ph: { title: "Analytics", desc: "Referral analytics is not yet wired to an admin data source." } }
-    ]},
-    { key: "welcome", icon: "🎁", label: "Welcome Journey", tabs: [
-      { label: "Overview", view: "moduleOverview", overviewKey: "welcome" },
-      { label: "Journey", external: "/static/welcome-journey-runtime.html" },
-      { label: "Rewards", view: "placeholder", ph: { title: "Rewards", desc: "Welcome reward ledger is not yet wired to an admin data source." } },
-      { label: "Funnel", view: "funnel" },
-      { label: "Drop-off", view: "placeholder", ph: { title: "Drop-off", desc: "Drop-off analysis is not yet wired to an admin data source." } },
-      { label: "Analytics", view: "placeholder", ph: { title: "Analytics", desc: "Welcome journey analytics is not yet wired to an admin data source." } }
-    ]},
     { key: "reactivation", icon: "🔄", label: "Reactivation Centre", tabs: [
       { label: "Overview", view: "moduleOverview", overviewKey: "reactivation" },
       { label: "Campaigns", view: "reactivation", live: true },
@@ -5312,9 +5288,6 @@
       { label: "XP", view: "xpAdjust", live: true },
       { label: "Rewards", view: "settings" },
       { label: "Voucher Rules", view: "settings" },
-      { label: "Referral", view: "settings" },
-      { label: "Affiliate", view: "settings" },
-      { label: "Welcome Journey", view: "settings" },
       { label: "Reactivation", view: "settings" },
       { label: "Security", view: "settings" },
       { label: "Integrations", view: "settings" },
