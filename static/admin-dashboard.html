@@ -107,6 +107,14 @@
         </div>
       </section>
 
+      <!-- GENERIC DATA VIEW (reused by tabs that need a KPI row + table backed
+           by a real /api/admin/* endpoint; config lives in DATA_VIEWS in JS) -->
+      <section id="view-dataView" class="hidden">
+        <div class="controls" id="dataview-controls" style="margin-bottom:16px;"></div>
+        <div class="card-grid" id="dataview-cards"></div>
+        <div id="dataview-body" style="margin-top:12px;"></div>
+      </section>
+
       <!-- FUNNEL VIEW -->
       <section id="view-funnel" class="hidden">
         <div class="controls" style="margin-bottom:16px;">

@@ -90,7 +90,7 @@ from affiliate_rewards import (
     catch_up_missing_current_month_affiliate_ledgers,
 )
 from telegram_utils import safe_reply_text, safe_send_message
-from channel_reactivation import set_campaign_active, campaign_summary as channel_reactivation_summary, process_reactivation_campaign, verify_reactivation_claim, check_official_channel_subscribed, VERIFY_CALLBACK_DATA
+from channel_reactivation import set_campaign_active, campaign_summary as channel_reactivation_summary, eligibility_funnel as channel_reactivation_eligibility_funnel, process_reactivation_campaign, verify_reactivation_claim, check_official_channel_subscribed, VERIFY_CALLBACK_DATA, CAMPAIGN_ID as CHANNEL_REACTIVATION_CAMPAIGN_ID
 from reactivation_journey import ensure_reactivation_journey_indexes, evaluate_pending_journeys, handle_successful_checkin, journey_summary, journey_users, upload_pool_codes, get_journey_config, update_journey_config, compute_journey_status, now_utc as journey_now_utc
 
 from pymongo import DESCENDING, ASCENDING, ReturnDocument  # keep if used elsewhere
@@ -2487,6 +2487,36 @@ def api_admin_reactivation_journey_pools_upload():
     return jsonify(result), status_code
 
 
+@admin_bp.get("/api/admin/reactivation/eligibility")
+def api_admin_reactivation_eligibility():
+    ok, err = require_admin_from_query()
+    if not ok:
+        return _admin_error_response(err)
+    return jsonify({"success": True, "funnel": channel_reactivation_eligibility_funnel(db)})
+
+
+@admin_bp.get("/api/admin/reactivation/rewards")
+def api_admin_reactivation_rewards():
+    ok, err = require_admin_from_query()
+    if not ok:
+        return _admin_error_response(err)
+    limit = request.args.get("limit", default=100, type=int)
+    status = request.args.get("status")
+    query = {"campaign_id": CHANNEL_REACTIVATION_CAMPAIGN_ID}
+    if status:
+        query["status"] = status
+    rows = list(
+        db.channel_reactivation_rewards.find(query, {"_id": 0})
+        .sort("rewarded_at", -1)
+        .limit(max(1, min(limit, 500)))
+    )
+    return jsonify({
+        "success": True,
+        "summary": channel_reactivation_summary(db),
+        "items": rows,
+    })
+
+
 @admin_bp.get("/api/admin/joins/daily")
 def joins_daily():
     ok, err = require_admin_from_query()
@@ -2496,7 +2526,7 @@ def joins_daily():
 
     chat_id = request.args.get("chat_id", type=int)
     if chat_id is None:
-        return jsonify({"success": False, "message": "Missing chat_id"}), 400
+        chat_id = GROUP_ID
 
     days = request.args.get("days", default=14, type=int)
     if days is None or days <= 0:
@@ -2548,6 +2578,76 @@ def joins_export():
         },
     )
     return jsonify(list(cur))
+
+
+@admin_bp.get("/api/admin/community/members")
+def api_admin_community_members():
+    ok, err = require_admin_from_query()
+    if not ok:
+        return _admin_error_response(err)
+    search = (request.args.get("search") or "").strip()
+    limit = max(1, min(request.args.get("limit", default=100, type=int), 500))
+    query = {}
+    if search:
+        or_clauses = [{"username": {"$regex": search, "$options": "i"}}]
+        try:
+            or_clauses.append({"user_id": int(search)})
+        except ValueError:
+            pass
+        query = {"$or": or_clauses}
+    cur = users_collection.find(
+        query,
+        {
+            "_id": 0, "user_id": 1, "username": 1, "first_name": 1,
+            "last_checkin": 1, "streak": 1, "for_bot_segment": 1, "bot_segment": 1,
+            "has_ever_claimed_public_pool": 1,
+        },
+    ).sort("last_checkin", -1).limit(limit)
+    return jsonify({"success": True, "items": list(cur)})
+
+
+@admin_bp.get("/api/admin/community/checkins")
+def api_admin_community_checkins():
+    ok, err = require_admin_from_query()
+    if not ok:
+        return _admin_error_response(err)
+    limit = max(1, min(request.args.get("limit", default=100, type=int), 500))
+    cur = users_collection.find(
+        {"last_checkin": {"$exists": True, "$ne": None}},
+        {
+            "_id": 0, "user_id": 1, "username": 1, "first_name": 1,
+            "last_checkin": 1, "streak": 1, "streak_freeze_tokens": 1, "first_checkin_at": 1,
+        },
+    ).sort("last_checkin", -1).limit(limit)
+    return jsonify({"success": True, "items": list(cur)})
+
+
+@admin_bp.get("/api/admin/community/engagement")
+def api_admin_community_engagement():
+    ok, err = require_admin_from_query()
+    if not ok:
+        return _admin_error_response(err)
+    days = request.args.get("days", default=7, type=int) or 7
+    days = max(1, min(days, 90))
+    since = datetime.now(timezone.utc) - timedelta(days=days)
+    pipeline = [
+        {"$match": {"created_at": {"$gte": since}, "user_id": {"$ne": None}}},
+        {"$group": {"_id": "$user_id", "xp": {"$sum": "$xp"}, "events": {"$sum": 1}}},
+        {"$sort": {"xp": -1}},
+        {"$limit": 50},
+    ]
+    rows = list(xp_events_collection.aggregate(pipeline))
+    user_ids = [r["_id"] for r in rows if r.get("_id") is not None]
+    users_by_id = {
+        u.get("user_id"): u
+        for u in users_collection.find({"user_id": {"$in": user_ids}}, {"_id": 0, "user_id": 1, "username": 1, "first_name": 1})
+    }
+    for r in rows:
+        u = users_by_id.get(r["_id"]) or {}
+        r["user_id"] = r.pop("_id")
+        r["username"] = u.get("username")
+        r["first_name"] = u.get("first_name")
+    return jsonify({"success": True, "days": days, "items": rows})
 
 
 @admin_bp.get("/api/admin/retention-kpis")
@@ -3496,6 +3596,53 @@ def dashboard_segments():
     )
 
 
+@admin_bp.get("/api/admin/segments/users")
+def api_admin_segment_users():
+    """Per-segment user drilldown — lists users whose normalized for_bot_segment
+    / bot_segment matches the requested segment. Scans the users collection
+    (no dedicated index on the computed segment), same trade-off already
+    accepted by the Voucher Hunter audit views for this admin tool."""
+    ok, err = require_admin_from_query()
+    if not ok:
+        return _admin_error_response(err)
+    from config import normalize_for_bot_segment
+
+    segment = (request.args.get("segment") or "").strip()
+    if not segment:
+        return jsonify({"success": False, "message": "segment is required"}), 400
+    search = (request.args.get("search") or "").strip().lower()
+    limit = max(1, min(request.args.get("limit", default=100, type=int), 500))
+
+    items = []
+    scanned = 0
+    cursor = users_collection.find(
+        {},
+        {
+            "_id": 0, "user_id": 1, "username": 1, "first_name": 1,
+            "for_bot_segment": 1, "bot_segment": 1, "last_checkin": 1,
+            "streak": 1, "bot_segment_synced_at": 1,
+        },
+    )
+    for doc in cursor:
+        scanned += 1
+        raw = doc.get("for_bot_segment") or doc.get("bot_segment")
+        if normalize_for_bot_segment(raw) != segment:
+            continue
+        if search and search not in str(doc.get("username") or "").lower() and search not in str(doc.get("user_id") or "").lower():
+            continue
+        items.append(doc)
+        if len(items) >= limit:
+            break
+
+    return jsonify({
+        "success": True,
+        "segment": segment,
+        "items": items,
+        "scanned": scanned,
+        "truncated": len(items) >= limit,
+    })
+
+
 @admin_bp.get("/api/admin/dashboard/validation")
 def dashboard_validation():
     """Phase 5: read-only UIM (Google Sheet) vs backend KPI comparison.
@@ -3621,6 +3768,55 @@ def dashboard_runtime_status():
         }
 
     return _panel_cached("panel:runtime_status", _build)
+
+
+@admin_bp.get("/api/admin/automation/notifications")
+def api_admin_automation_notifications():
+    """Recent referral-acknowledgement notification log — the only unified
+    notification-send collection in the codebase today."""
+    ok, err = require_admin_from_query()
+    if not ok:
+        return _admin_error_response(err)
+    limit = max(1, min(request.args.get("limit", default=100, type=int), 500))
+    rows = list(
+        referral_notifications_collection.find({}, {"_id": 0})
+        .sort("created_at", -1)
+        .limit(limit)
+    )
+    return jsonify({"success": True, "items": rows})
+
+
+@admin_bp.get("/api/admin/automation/retry-jobs")
+def api_admin_automation_retry_jobs():
+    """Aggregates the domain-specific failure trackers that exist today
+    (voucher claim failures, reactivation DM send failures) into one feed.
+    There is no single cross-cutting retry-job queue in the codebase."""
+    ok, err = require_admin_from_query()
+    if not ok:
+        return _admin_error_response(err)
+    limit = max(1, min(request.args.get("limit", default=100, type=int), 500))
+
+    claim_rows = list(
+        db["voucher_claims"].find(
+            {"status": "failed"},
+            {"_id": 0, "user_id": 1, "drop_id": 1, "status": 1, "error": 1, "created_at": 1},
+        ).sort("created_at", -1).limit(limit)
+    )
+    for r in claim_rows:
+        r["source"] = "voucher_claim"
+
+    message_rows = list(
+        db.channel_reactivation_messages.find(
+            {"status": {"$in": ["failed", "failed_blocked"]}},
+            {"_id": 0, "user_id": 1, "status": 1, "error": 1, "created_at": 1, "sent_day": 1},
+        ).sort("created_at", -1).limit(limit)
+    )
+    for r in message_rows:
+        r["source"] = "reactivation_message"
+
+    combined = claim_rows + message_rows
+    combined.sort(key=lambda r: r.get("created_at") or "", reverse=True)
+    return jsonify({"success": True, "items": combined[:limit]})
 
 
 @admin_bp.get("/api/admin/dashboard/backend-segment-engine")
