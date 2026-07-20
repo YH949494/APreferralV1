@@ -5226,6 +5226,8 @@
       { label: "Active Drops", view: "drops", live: true },
       { label: "Voucher Pools", view: "compiledDrops" },
       { label: "Voucher Codes", view: "vouchers" },
+      { label: "Affiliate Pools", view: "affiliatePools", live: true },
+      { label: "Pending Rewards", view: "affiliatePending", live: true },
       { label: "Settings", view: "settings" }
     ]},
     { key: "community", icon: "👥", label: "Community Centre", tabs: [
