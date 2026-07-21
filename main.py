@@ -305,6 +305,7 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 MONGO_URL = os.environ.get("MONGO_URL")
 BASE_WEBAPP_URL = "https://apreferralv1.fly.dev/miniapp"
 WEBAPP_URL = f"{BASE_WEBAPP_URL}?v={MINIAPP_VERSION}"
+REFERRAL_WEBAPP_URL = f"{WEBAPP_URL}&action=generate_referral"
 GROUP_ID = -1002304653063
 API_BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
@@ -7436,11 +7437,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         welcome_keyboard = [
             [InlineKeyboardButton("📣 Join Channel", url="https://t.me/+Zy3UGGkE17kyNDA9")],
             [InlineKeyboardButton("🚀 Open AdvantPlay Mini-App", web_app=WebAppInfo(url=WEBAPP_URL))],
+            [InlineKeyboardButton("🔗 Generate My Referral Link", web_app=WebAppInfo(url=REFERRAL_WEBAPP_URL))],
         ]
         normal_keyboard = [
             [InlineKeyboardButton("📣 Join Channel", url="https://t.me/+Zy3UGGkE17kyNDA9")],
             [InlineKeyboardButton("🚀 Open AdvantPlay Mini-App", web_app=WebAppInfo(url=WEBAPP_URL))],
-        ]        
+            [InlineKeyboardButton("🔗 Generate My Referral Link", web_app=WebAppInfo(url=REFERRAL_WEBAPP_URL))],
+        ]
+        logger.info("[START][REFERRAL_BUTTON_SHOWN] uid=%s", user_id)
         if message:
             if first_time_pm0:
                 sent = await safe_reply_text(
