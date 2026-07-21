@@ -24,12 +24,27 @@ class _UsersCollection:
 
 
 def _load_start_func():
+    """Extract start() plus the helper functions it now delegates to
+    (_ensure_user_registered, ensure_user_initialized_for_referral,
+    send_referral_link_with_share_button, _generate_referral_link_for_user)
+    from main.py via AST, so the routing added at the top of start() has all
+    the names it calls available in the isolated exec environment.
+    """
     source = Path("main.py").read_text(encoding="utf-8")
     module = ast.parse(source)
-    fn_node = next(
-        node for node in module.body if isinstance(node, ast.AsyncFunctionDef) and node.name == "start"
-    )
-    isolated = ast.Module(body=[fn_node], type_ignores=[])
+    wanted = {
+        "start",
+        "_ensure_user_registered",
+        "ensure_user_initialized_for_referral",
+        "send_referral_link_with_share_button",
+        "_generate_referral_link_for_user",
+    }
+    fn_nodes = [
+        node
+        for node in module.body
+        if isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef)) and node.name in wanted
+    ]
+    isolated = ast.Module(body=fn_nodes, type_ignores=[])
     ast.fix_missing_locations(isolated)
     env = {
         "Update": Update,
@@ -39,7 +54,7 @@ def _load_start_func():
         "WebAppInfo": WebAppInfo,
     }
     exec(compile(isolated, filename="main.py", mode="exec"), env)  # noqa: S102
-    return env["start"]
+    return env
 
 
 class _FakeUser:
@@ -65,19 +80,41 @@ class _FakeUpdate:
         self.message = _FakeMessage()
 
 
+class _FakeContext:
+    def __init__(self, args=None):
+        self.args = args or []
+
+
 @pytest.fixture
-def start_fn():
-    fn = _load_start_func()
+def start_env():
+    env = _load_start_func()
+    fn = env["start"]
     logger = _Logger()
     captured = {}
+    referral_calls = {"generate": 0}
 
     async def fake_safe_reply_text(message, text, reply_markup=None, **kwargs):  # noqa: ARG001
+        captured.setdefault("replies", []).append({"text": text, "reply_markup": reply_markup, **kwargs})
         captured["reply_markup"] = reply_markup
         captured["text"] = text
         return True
 
     async def fake_send_welcome_unclaimed_reminder_if_needed(*args, **kwargs):  # noqa: ARG001
         return None
+
+    def fake_get_or_create(user_id, username=""):  # noqa: ARG001
+        referral_calls["generate"] += 1
+        return "https://t.me/+shouldNotBeCalled"
+
+    class _InviteLinkMapCollection:
+        def find_one(self, filt, sort=None):  # noqa: ARG002
+            return None
+
+    async def fake_to_thread(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    class _FakeAsyncioModule:
+        to_thread = staticmethod(fake_to_thread)
 
     fn.__globals__.update(
         {
@@ -89,12 +126,17 @@ def start_fn():
             "safe_reply_text": fake_safe_reply_text,
             "now_utc": lambda: None,
             "WEBAPP_URL": "https://apreferralv1.fly.dev/miniapp?v=test",
-            "REFERRAL_WEBAPP_URL": "https://apreferralv1.fly.dev/miniapp?v=test&action=generate_referral",
+            "OFFICIAL_CHANNEL_URL": "https://t.me/+Zy3UGGkE17kyNDA9",
             "_send_welcome_unclaimed_reminder_if_needed": fake_send_welcome_unclaimed_reminder_if_needed,
+            "asyncio": _FakeAsyncioModule(),
+            "get_or_create_referral_invite_link_sync": fake_get_or_create,
+            "invite_link_map_collection": _InviteLinkMapCollection(),
+            "GROUP_ID": -100999,
         }
     )
     fn._logger = logger
     fn._captured = captured
+    fn._referral_calls = referral_calls
     return fn
 
 
@@ -102,28 +144,59 @@ def _button_rows(reply_markup):
     return [[b for b in row] for row in reply_markup.inline_keyboard]
 
 
-def test_start_contains_referral_button_and_keeps_miniapp_button(start_fn):
+def test_plain_start_shows_welcome_message(start_env):
     update = _FakeUpdate(user_id=42)
-    asyncio.run(start_fn(update, context=None))
+    asyncio.run(start_env(update, _FakeContext()))
 
-    rows = _button_rows(start_fn._captured["reply_markup"])
+    assert start_env._captured.get("text")
+
+
+def test_plain_start_has_join_official_channel_button(start_env):
+    update = _FakeUpdate(user_id=42)
+    asyncio.run(start_env(update, _FakeContext()))
+
+    rows = _button_rows(start_env._captured["reply_markup"])
     flat = [btn for row in rows for btn in row]
-
-    miniapp_btns = [b for b in flat if "Mini-App" in b.text]
-    referral_btns = [b for b in flat if b.text == "🔗 Generate My Referral Link"]
-
-    assert len(miniapp_btns) == 1
-    assert miniapp_btns[0].web_app.url == "https://apreferralv1.fly.dev/miniapp?v=test"
-
-    assert len(referral_btns) == 1
-    assert referral_btns[0].callback_data == "generate_referral_link"
-    assert referral_btns[0].web_app is None
+    join_btns = [b for b in flat if b.text == "📢 Join Official Channel"]
+    assert len(join_btns) == 1
+    assert join_btns[0].url == "https://t.me/+Zy3UGGkE17kyNDA9"
 
 
-def test_start_logs_referral_button_shown(start_fn):
-    update = _FakeUpdate(user_id=99)
-    asyncio.run(start_fn(update, context=None))
+def test_plain_start_has_claim_welcome_reward_button(start_env):
+    update = _FakeUpdate(user_id=42)
+    asyncio.run(start_env(update, _FakeContext()))
 
-    logged = [args for args in start_fn._logger.infos if args and args[0] == "[START][REFERRAL_BUTTON_SHOWN] uid=%s"]
-    assert logged
-    assert logged[-1][1] == 99
+    rows = _button_rows(start_env._captured["reply_markup"])
+    flat = [btn for row in rows for btn in row]
+    claim_btns = [b for b in flat if b.text == "🎁 Claim Welcome Reward"]
+    assert len(claim_btns) == 1
+    assert claim_btns[0].web_app.url == "https://apreferralv1.fly.dev/miniapp?v=test"
+
+
+def test_plain_start_has_exactly_two_buttons_no_referral_button(start_env):
+    update = _FakeUpdate(user_id=42)
+    asyncio.run(start_env(update, _FakeContext()))
+
+    rows = _button_rows(start_env._captured["reply_markup"])
+    flat = [btn for row in rows for btn in row]
+    assert len(flat) == 2
+
+    referral_btns = [b for b in flat if "Referral" in b.text or "referral" in (b.callback_data or "")]
+    assert not referral_btns
+
+
+def test_plain_start_does_not_call_referral_generator(start_env):
+    update = _FakeUpdate(user_id=42)
+    asyncio.run(start_env(update, _FakeContext()))
+
+    assert start_env._referral_calls["generate"] == 0
+
+
+def test_plain_start_with_empty_args_list_behaves_like_no_payload(start_env):
+    update = _FakeUpdate(user_id=43)
+    asyncio.run(start_env(update, _FakeContext(args=[])))
+
+    rows = _button_rows(start_env._captured["reply_markup"])
+    flat = [btn for row in rows for btn in row]
+    assert len(flat) == 2
+    assert start_env._referral_calls["generate"] == 0

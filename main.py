@@ -15,7 +15,7 @@ from telegram.error import BadRequest, Forbidden, NetworkError
 from telegram.request import HTTPXRequest
 from datetime import datetime, timedelta, timezone
 from werkzeug.exceptions import HTTPException
-from urllib.parse import urlencode
+from urllib.parse import urlencode, quote
 from typing import Any
 
 from config import (
@@ -306,6 +306,7 @@ MONGO_URL = os.environ.get("MONGO_URL")
 BASE_WEBAPP_URL = "https://apreferralv1.fly.dev/miniapp"
 WEBAPP_URL = f"{BASE_WEBAPP_URL}?v={MINIAPP_VERSION}"
 REFERRAL_WEBAPP_URL = f"{WEBAPP_URL}&action=generate_referral"
+OFFICIAL_CHANNEL_URL = "https://t.me/+Zy3UGGkE17kyNDA9"
 GROUP_ID = -1002304653063
 API_BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
@@ -7402,6 +7403,101 @@ def _send_welcome_reminder_via_bot(uid: int, text: str) -> bool:
     return bool(ok)
 
 
+def _ensure_user_registered(user) -> None:
+    """Minimum user registration/upsert shared by the normal /start flow and
+    the referral deep-link route. Idempotent: $setOnInsert is a no-op for a
+    user who already exists.
+    """
+    user_id = user.id
+    _mark_private_interaction(user_id, user.username)
+    _users_update_one(
+        {"user_id": user_id},
+        {"$setOnInsert": {
+            "username": user.username,
+            "last_checkin": None,
+            "status": "Normal",
+        }},
+        upsert=True,
+        context="start_user_insert",
+    )
+
+
+async def ensure_user_initialized_for_referral(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Registers the user (if missing) before the /start?start=referral deep
+    link generates a referral link. Reuses the same upsert logic as the
+    normal /start flow; safe to call for existing users.
+    """
+    user = update.effective_user
+    if not user:
+        return
+    _ensure_user_registered(user)
+
+
+async def _generate_referral_link_for_user(uid: int, username: str) -> tuple[str, bool]:
+    """Canonical referral-link lookup/generation shared by the /start
+    referral deep link and the '🔗 Generate My Referral Link' callback.
+    Delegates all business logic (expiry, reuse, invite_link_map writes) to
+    get_or_create_referral_invite_link_sync.
+    """
+    def _lookup_and_generate():
+        existing_doc = invite_link_map_collection.find_one(
+            {"chat_id": GROUP_ID, "inviter_id": uid, "is_active": True},
+            sort=[("created_at", -1)],
+        )
+        reused = bool(existing_doc and existing_doc.get("invite_link"))
+        link = get_or_create_referral_invite_link_sync(uid, username)
+        return link, reused
+
+    return await asyncio.to_thread(_lookup_and_generate)
+
+
+async def send_referral_link_with_share_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Sends the user's unique referral link with a single Share button.
+    Used exclusively by the /start?start=referral deep-link route; does not
+    send the normal /start welcome message or keyboard.
+    """
+    user = update.effective_user
+    uid = user.id
+    username = user.username or ""
+
+    try:
+        referral_link, reused = await _generate_referral_link_for_user(uid, username)
+
+        share_text = "Join our Telegram community using my referral link:"
+        share_url = (
+            "https://t.me/share/url"
+            f"?url={quote(referral_link, safe='')}"
+            f"&text={quote(share_text, safe='')}"
+        )
+        keyboard = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("📤 Share Referral Link", url=share_url)]]
+        )
+
+        await safe_reply_text(
+            update.effective_message,
+            (
+                "🔗 Your unique referral link:\n\n"
+                f"<blockquote>{html_escape(referral_link)}</blockquote>"
+            ),
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True,
+            reply_markup=keyboard,
+            uid=uid,
+            send_type="referral_deep_link",
+            raise_on_non_transient=False,
+        )
+        logger.info("[REFERRAL][DEEPLINK_OK] uid=%s reused=%s", uid, reused)
+    except Exception:
+        logger.exception("[REFERRAL][DEEPLINK_FAILED] uid=%s", uid)
+        await safe_reply_text(
+            update.effective_message,
+            "Unable to generate your referral link right now. Please try again.",
+            uid=uid,
+            send_type="referral_deep_link_error",
+            raise_on_non_transient=False,
+        )
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_private_chat(update):
         logger.info(
@@ -7412,10 +7508,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             update.effective_user.id if update.effective_user else "",
         )
         return
-    
+
+    payload = context.args[0] if context.args else None
+    if payload == "referral":
+        await ensure_user_initialized_for_referral(update, context)
+        await send_referral_link_with_share_button(update, context)
+        return
+
     user = update.effective_user
     message = update.effective_message
-    
+
     if user:
         user_id = user.id
         user_doc_before = users_collection.find_one(
@@ -7424,34 +7526,22 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ) or {}
         first_time_pm0 = not (user_doc_before.get("pm_sent") or {}).get("pm0_welcome")
 
-        _mark_private_interaction(user_id, user.username)
-        _users_update_one(
-            {"user_id": user_id},
-            {"$setOnInsert": {
-                "username": user.username,
-                "last_checkin": None,
-                "status": "Normal",
-            }},
-            upsert=True,
-            context="start_user_insert",
-        )
+        _ensure_user_registered(user)
         user_doc = users_collection.find_one({"user_id": user_id}, {"joined_main_at": 1})
         if not (user_doc or {}).get("joined_main_at"):
             logger.info(
                 "[WELCOME][JOIN_BACKFILL_DISABLED] uid=%s joined_main_at_missing",
                 user_id,
-            ) 
+            )
         welcome_keyboard = [
-            [InlineKeyboardButton("📣 Join Channel", url="https://t.me/+Zy3UGGkE17kyNDA9")],
-            [InlineKeyboardButton("🚀 Open AdvantPlay Mini-App", web_app=WebAppInfo(url=WEBAPP_URL))],
-            [InlineKeyboardButton("🔗 Generate My Referral Link", callback_data="generate_referral_link")],
+            [InlineKeyboardButton("📢 Join Official Channel", url=OFFICIAL_CHANNEL_URL)],
+            [InlineKeyboardButton("🎁 Claim Welcome Reward", web_app=WebAppInfo(url=WEBAPP_URL))],
         ]
         normal_keyboard = [
-            [InlineKeyboardButton("📣 Join Channel", url="https://t.me/+Zy3UGGkE17kyNDA9")],
-            [InlineKeyboardButton("🚀 Open AdvantPlay Mini-App", web_app=WebAppInfo(url=WEBAPP_URL))],
-            [InlineKeyboardButton("🔗 Generate My Referral Link", callback_data="generate_referral_link")],
+            [InlineKeyboardButton("📢 Join Official Channel", url=OFFICIAL_CHANNEL_URL)],
+            [InlineKeyboardButton("🎁 Claim Welcome Reward", web_app=WebAppInfo(url=WEBAPP_URL))],
         ]
-        logger.info("[START][REFERRAL_BUTTON_SHOWN] uid=%s", user_id)
+        logger.info("[START][NORMAL_KEYBOARD_SHOWN] uid=%s", user_id)
         if message:
             if first_time_pm0:
                 sent = await safe_reply_text(
@@ -7822,18 +7912,7 @@ async def generate_referral_link_callback(update: Update, context: ContextTypes.
     _referral_link_generation_last_attempt[uid] = now
 
     try:
-        def _lookup_and_generate():
-            # Read-only pre-check mirroring the canonical lookup, only to report
-            # reuse status in logs; does not alter link creation/reuse behavior.
-            existing_doc = invite_link_map_collection.find_one(
-                {"chat_id": GROUP_ID, "inviter_id": uid, "is_active": True},
-                sort=[("created_at", -1)],
-            )
-            reused = bool(existing_doc and existing_doc.get("invite_link"))
-            link = get_or_create_referral_invite_link_sync(uid, username)
-            return link, reused
-
-        referral_link, reused = await asyncio.to_thread(_lookup_and_generate)
+        referral_link, reused = await _generate_referral_link_for_user(uid, username)
 
         share_params = urlencode({"url": referral_link, "text": "Join me on AdvantPlay!"})
         share_keyboard = InlineKeyboardMarkup(
