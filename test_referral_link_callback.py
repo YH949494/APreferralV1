@@ -59,13 +59,14 @@ def _load_callback_func():
         and isinstance(node.targets[0], ast.Name)
         and node.targets[0].id in wanted_assign_names
     ]
-    fn_node = next(
+    wanted_fn_names = {"generate_referral_link_callback", "_generate_referral_link_for_user"}
+    fn_nodes = [
         node
         for node in module.body
-        if isinstance(node, ast.AsyncFunctionDef) and node.name == "generate_referral_link_callback"
-    )
+        if isinstance(node, ast.AsyncFunctionDef) and node.name in wanted_fn_names
+    ]
 
-    isolated = ast.Module(body=[*assign_nodes, fn_node], type_ignores=[])
+    isolated = ast.Module(body=[*assign_nodes, *fn_nodes], type_ignores=[])
     ast.fix_missing_locations(isolated)
     env = {
         "Update": Update,
