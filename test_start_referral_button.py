@@ -116,10 +116,8 @@ def test_start_contains_referral_button_and_keeps_miniapp_button(start_fn):
     assert miniapp_btns[0].web_app.url == "https://apreferralv1.fly.dev/miniapp?v=test"
 
     assert len(referral_btns) == 1
-    assert referral_btns[0].web_app.url == (
-        "https://apreferralv1.fly.dev/miniapp?v=test&action=generate_referral"
-    )
-    assert "action=generate_referral" in referral_btns[0].web_app.url
+    assert referral_btns[0].callback_data == "generate_referral_link"
+    assert referral_btns[0].web_app is None
 
 
 def test_start_logs_referral_button_shown(start_fn):

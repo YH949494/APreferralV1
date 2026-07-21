@@ -7444,12 +7444,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         welcome_keyboard = [
             [InlineKeyboardButton("📣 Join Channel", url="https://t.me/+Zy3UGGkE17kyNDA9")],
             [InlineKeyboardButton("🚀 Open AdvantPlay Mini-App", web_app=WebAppInfo(url=WEBAPP_URL))],
-            [InlineKeyboardButton("🔗 Generate My Referral Link", web_app=WebAppInfo(url=REFERRAL_WEBAPP_URL))],
+            [InlineKeyboardButton("🔗 Generate My Referral Link", callback_data="generate_referral_link")],
         ]
         normal_keyboard = [
             [InlineKeyboardButton("📣 Join Channel", url="https://t.me/+Zy3UGGkE17kyNDA9")],
             [InlineKeyboardButton("🚀 Open AdvantPlay Mini-App", web_app=WebAppInfo(url=WEBAPP_URL))],
-            [InlineKeyboardButton("🔗 Generate My Referral Link", web_app=WebAppInfo(url=REFERRAL_WEBAPP_URL))],
+            [InlineKeyboardButton("🔗 Generate My Referral Link", callback_data="generate_referral_link")],
         ]
         logger.info("[START][REFERRAL_BUTTON_SHOWN] uid=%s", user_id)
         if message:
@@ -7788,6 +7788,86 @@ async def button_handler(update, context):
         )
         await query.edit_message_text(f"👥 Your referral link:\n{link}")
 
+
+_referral_link_generation_last_attempt: dict[int, float] = {}
+_REFERRAL_LINK_GENERATION_COOLDOWN_SECONDS = 5
+
+
+async def generate_referral_link_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles the '🔗 Generate My Referral Link' button on /start: replies in-chat
+    with the user's real Telegram group invite link instead of opening the Mini-App.
+    """
+    query = update.callback_query
+    await query.answer()
+
+    user = query.from_user
+    uid = user.id
+    username = user.username or ""
+
+    logger.info("[REFERRAL][START_CALLBACK] uid=%s", uid)
+
+    now = time.monotonic()
+    last_attempt = _referral_link_generation_last_attempt.get(uid)
+    if last_attempt is not None and (now - last_attempt) < _REFERRAL_LINK_GENERATION_COOLDOWN_SECONDS:
+        logger.info("[REFERRAL][START_CALLBACK_RATE_LIMITED] uid=%s", uid)
+        await safe_send_message(
+            context.bot,
+            chat_id=uid,
+            text="⏳ Your referral link is being prepared. Please try again in a moment.",
+            uid=uid,
+            send_type="referral_link_rate_limited",
+            raise_on_non_transient=False,
+        )
+        return
+    _referral_link_generation_last_attempt[uid] = now
+
+    try:
+        # Read-only pre-check mirroring the canonical lookup, only to report
+        # reuse status in logs; does not alter link creation/reuse behavior.
+        existing_doc = invite_link_map_collection.find_one(
+            {"chat_id": GROUP_ID, "inviter_id": uid, "is_active": True},
+            sort=[("created_at", -1)],
+        )
+        reused = bool(existing_doc and existing_doc.get("invite_link"))
+
+        referral_link = await asyncio.to_thread(
+            get_or_create_referral_invite_link_sync, uid, username
+        )
+
+        share_params = urlencode({"url": referral_link, "text": "Join me on AdvantPlay!"})
+        share_keyboard = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("📤 Share Referral Link", url=f"https://t.me/share/url?{share_params}")]]
+        )
+
+        await safe_send_message(
+            context.bot,
+            chat_id=uid,
+            text=(
+                "🔗 Your unique referral link:\n\n"
+                f"{referral_link}\n\n"
+                "⏳ Valid for 24 hours.\n"
+                "Share this link with your friends."
+            ),
+            reply_markup=share_keyboard,
+            uid=uid,
+            send_type="referral_link",
+            raise_on_non_transient=False,
+        )
+        logger.info("[REFERRAL][START_CALLBACK_OK] uid=%s reused=%s", uid, reused)
+    except Exception as e:
+        logger.error("[REFERRAL][START_CALLBACK_FAILED] uid=%s error=%s", uid, type(e).__name__)
+        await safe_send_message(
+            context.bot,
+            chat_id=uid,
+            text=(
+                "❌ We couldn’t generate your referral link right now.\n\n"
+                "Please tap the button again shortly."
+            ),
+            uid=uid,
+            send_type="referral_link_failed",
+            raise_on_non_transient=False,
+        )
+
 # ----------------------------
 # Run Bot + Flask + Scheduler
 # ----------------------------
@@ -7828,6 +7908,7 @@ def run_worker():
     app_bot.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, new_chat_members_handler))   
     app_bot.add_handler(MessageHandler(filters.Chat(MYWIN_CHAT_ID), mywin_message_handler))    
     app_bot.add_handler(MessageHandler(filters.ChatType.PRIVATE & ~filters.COMMAND, private_message_handler))
+    app_bot.add_handler(CallbackQueryHandler(generate_referral_link_callback, pattern=r"^generate_referral_link$"))
     app_bot.add_handler(CallbackQueryHandler(button_handler))
 
     # 4) Scheduler (KL time for human-facing schedules)
