@@ -3908,12 +3908,14 @@
       const action = new URLSearchParams(location.search).get("action");
       if (action !== "generate_referral") return;
       if (!userId) return;
+      if (typeof getReferral !== "function") return;
+      const step = document.getElementById("ap-referral-step");
+      if (!step) return;
 
       referralEntryActionHandled = true;
       console.log(`[MINIAPP][ENTRY_ACTION] action=generate_referral uid=${userId}`);
 
-      const step = document.getElementById("ap-referral-step");
-      if (step && step.scrollIntoView) {
+      if (step.scrollIntoView) {
         step.scrollIntoView({ behavior: "smooth", block: "center" });
       }
 
@@ -3965,7 +3967,7 @@
           if (inlineText) { inlineText.textContent = link; }
           if (inlineWrap) { inlineWrap.style.display = "block"; }
           loadReferralProgress();
-          return true;
+          return data.success !== false;
         } else {
           showInlineError("❌ Failed to get link.");
           return false;
