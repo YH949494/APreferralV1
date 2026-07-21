@@ -7463,7 +7463,26 @@ async def send_referral_link_with_share_button(update: Update, context: ContextT
     try:
         referral_link, reused = await _generate_referral_link_for_user(uid, username)
 
-        share_text = "Join our Telegram community using my referral link:"
+        caption = (
+            "Join AdvantPlay 👇\n"
+            "✔️ Daily XP rewards\n"
+            "✔️ Surprise voucher drops\n"
+            "✔️ Weekly bonus for Top 10\n\n"
+            "Active players win more.\n"
+            f"👉 {referral_link}"
+        )
+        # Telegram's share/url composes the prefilled message as
+        # "{url}\n{text}" (url first, then text) -- not the other way
+        # around. So the link goes only in the url param, and text carries
+        # the caption *without* a trailing arrow/link line, otherwise the
+        # arrow would dangle with nothing after it.
+        share_text = (
+            "Join AdvantPlay 👇\n"
+            "✔️ Daily XP rewards\n"
+            "✔️ Surprise voucher drops\n"
+            "✔️ Weekly bonus for Top 10\n\n"
+            "Active players win more."
+        )
         share_url = (
             "https://t.me/share/url"
             f"?url={quote(referral_link, safe='')}"
@@ -7475,10 +7494,7 @@ async def send_referral_link_with_share_button(update: Update, context: ContextT
 
         await safe_reply_text(
             update.effective_message,
-            (
-                "🔗 Your unique referral link:\n\n"
-                f"<blockquote>{html_escape(referral_link)}</blockquote>"
-            ),
+            f"<blockquote>{html_escape(caption)}</blockquote>",
             parse_mode=ParseMode.HTML,
             disable_web_page_preview=True,
             reply_markup=keyboard,
@@ -7535,11 +7551,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         welcome_keyboard = [
             [InlineKeyboardButton("📢 Join Official Channel", url=OFFICIAL_CHANNEL_URL)],
-            [InlineKeyboardButton("🎁 Claim Welcome Reward", web_app=WebAppInfo(url=WEBAPP_URL))],
+            [InlineKeyboardButton("🚀 Open AdvantPlay Mini-App", web_app=WebAppInfo(url=WEBAPP_URL))],
         ]
         normal_keyboard = [
             [InlineKeyboardButton("📢 Join Official Channel", url=OFFICIAL_CHANNEL_URL)],
-            [InlineKeyboardButton("🎁 Claim Welcome Reward", web_app=WebAppInfo(url=WEBAPP_URL))],
+            [InlineKeyboardButton("🚀 Open AdvantPlay Mini-App", web_app=WebAppInfo(url=WEBAPP_URL))],
         ]
         logger.info("[START][NORMAL_KEYBOARD_SHOWN] uid=%s", user_id)
         if message:
