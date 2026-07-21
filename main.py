@@ -7840,14 +7840,17 @@ async def generate_referral_link_callback(update: Update, context: ContextTypes.
             [[InlineKeyboardButton("📤 Share Referral Link", url=f"https://t.me/share/url?{share_params}")]]
         )
 
+        escaped_link = html_escape(referral_link)
         await safe_send_message(
             context.bot,
             chat_id=uid,
             text=(
                 "🔗 Your unique referral link:\n\n"
-                f"{referral_link}\n\n"
-                "Share this link with your friends."
+                f"<blockquote>{escaped_link}</blockquote>\n\n"
+                "Tap and hold the link to copy it, or use the Share button below."
             ),
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True,
             reply_markup=share_keyboard,
             uid=uid,
             send_type="referral_link",

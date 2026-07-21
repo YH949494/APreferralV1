@@ -1,10 +1,12 @@
 import ast
 import asyncio
+import html
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 import pytest
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 
 
@@ -70,6 +72,8 @@ def _load_callback_func():
         "ContextTypes": ContextTypes,
         "InlineKeyboardButton": InlineKeyboardButton,
         "InlineKeyboardMarkup": InlineKeyboardMarkup,
+        "html_escape": html.escape,
+        "ParseMode": ParseMode,
     }
     exec(compile(isolated, filename="main.py", mode="exec"), env)  # noqa: S102
     return env["generate_referral_link_callback"]
@@ -170,6 +174,31 @@ def test_callback_success_replies_with_real_invite_link(callback_env):
     assert "https://t.me/+abcDEF123" in msg["text"]
     assert "24 hours" not in msg["text"]
     assert msg["chat_id"] == 102
+
+
+def test_callback_success_uses_html_blockquote_for_link(callback_env):
+    callback_env._state["link"] = "https://t.me/+abcDEF123?x=1&y=2"
+    _run(callback_env, uid=110)
+
+    msg = callback_env._sent[0]
+    escaped_link = html.escape("https://t.me/+abcDEF123?x=1&y=2")
+
+    assert msg.get("parse_mode") == ParseMode.HTML
+    assert "<blockquote>" in msg["text"]
+    assert f"<blockquote>{escaped_link}</blockquote>" in msg["text"]
+    assert msg.get("disable_web_page_preview") is True
+
+
+def test_callback_share_button_uses_unescaped_link(callback_env):
+    callback_env._state["link"] = "https://t.me/+abcDEF123?x=1&y=2"
+    _run(callback_env, uid=111)
+
+    msg = callback_env._sent[0]
+    reply_markup = msg["reply_markup"]
+    share_btn = next(b for row in reply_markup.inline_keyboard for b in row if b.text == "📤 Share Referral Link")
+
+    params = parse_qs(urlparse(share_btn.url).query)
+    assert params["url"] == ["https://t.me/+abcDEF123?x=1&y=2"]
 
 
 def test_callback_success_includes_share_button(callback_env):
