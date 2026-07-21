@@ -7822,17 +7822,18 @@ async def generate_referral_link_callback(update: Update, context: ContextTypes.
     _referral_link_generation_last_attempt[uid] = now
 
     try:
-        # Read-only pre-check mirroring the canonical lookup, only to report
-        # reuse status in logs; does not alter link creation/reuse behavior.
-        existing_doc = invite_link_map_collection.find_one(
-            {"chat_id": GROUP_ID, "inviter_id": uid, "is_active": True},
-            sort=[("created_at", -1)],
-        )
-        reused = bool(existing_doc and existing_doc.get("invite_link"))
+        def _lookup_and_generate():
+            # Read-only pre-check mirroring the canonical lookup, only to report
+            # reuse status in logs; does not alter link creation/reuse behavior.
+            existing_doc = invite_link_map_collection.find_one(
+                {"chat_id": GROUP_ID, "inviter_id": uid, "is_active": True},
+                sort=[("created_at", -1)],
+            )
+            reused = bool(existing_doc and existing_doc.get("invite_link"))
+            link = get_or_create_referral_invite_link_sync(uid, username)
+            return link, reused
 
-        referral_link = await asyncio.to_thread(
-            get_or_create_referral_invite_link_sync, uid, username
-        )
+        referral_link, reused = await asyncio.to_thread(_lookup_and_generate)
 
         share_params = urlencode({"url": referral_link, "text": "Join me on AdvantPlay!"})
         share_keyboard = InlineKeyboardMarkup(
@@ -7845,7 +7846,6 @@ async def generate_referral_link_callback(update: Update, context: ContextTypes.
             text=(
                 "🔗 Your unique referral link:\n\n"
                 f"{referral_link}\n\n"
-                "⏳ Valid for 24 hours.\n"
                 "Share this link with your friends."
             ),
             reply_markup=share_keyboard,

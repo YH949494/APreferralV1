@@ -168,7 +168,7 @@ def test_callback_success_replies_with_real_invite_link(callback_env):
     assert len(callback_env._sent) == 1
     msg = callback_env._sent[0]
     assert "https://t.me/+abcDEF123" in msg["text"]
-    assert "Valid for 24 hours" in msg["text"]
+    assert "24 hours" not in msg["text"]
     assert msg["chat_id"] == 102
 
 
