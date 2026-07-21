@@ -162,15 +162,18 @@ def test_plain_start_has_join_official_channel_button(start_env):
     assert join_btns[0].url == "https://t.me/+Zy3UGGkE17kyNDA9"
 
 
-def test_plain_start_has_claim_welcome_reward_button(start_env):
+def test_plain_start_has_open_miniapp_button(start_env):
     update = _FakeUpdate(user_id=42)
     asyncio.run(start_env(update, _FakeContext()))
 
     rows = _button_rows(start_env._captured["reply_markup"])
     flat = [btn for row in rows for btn in row]
+    miniapp_btns = [b for b in flat if b.text == "🚀 Open AdvantPlay Mini-App"]
+    assert len(miniapp_btns) == 1
+    assert miniapp_btns[0].web_app.url == "https://apreferralv1.fly.dev/miniapp?v=test"
+
     claim_btns = [b for b in flat if b.text == "🎁 Claim Welcome Reward"]
-    assert len(claim_btns) == 1
-    assert claim_btns[0].web_app.url == "https://apreferralv1.fly.dev/miniapp?v=test"
+    assert not claim_btns
 
 
 def test_plain_start_has_exactly_two_buttons_no_referral_button(start_env):

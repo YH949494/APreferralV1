@@ -193,6 +193,15 @@ def test_new_user_referral_deeplink_calls_canonical_generator(deeplink_env):
     assert deeplink_env._calls["generate"] == 1
 
 
+_CAPTION_LINES = [
+    "Join AdvantPlay 👇",
+    "✔️ Daily XP rewards",
+    "✔️ Surprise voucher drops",
+    "✔️ Weekly bonus for Top 10",
+    "Active players win more.",
+]
+
+
 def test_new_user_referral_deeplink_returns_unique_link_and_share_button(deeplink_env):
     deeplink_env._state["link"] = "https://t.me/+brandNewHash"
     update = _FakeUpdate(user_id=203)
@@ -201,7 +210,11 @@ def test_new_user_referral_deeplink_returns_unique_link_and_share_button(deeplin
     assert len(deeplink_env._replies) == 1
     reply = deeplink_env._replies[0]
     assert "https://t.me/+brandNewHash" in reply["text"]
-    assert "<blockquote>https://t.me/+brandNewHash</blockquote>" in reply["text"]
+    for line in _CAPTION_LINES:
+        assert line in reply["text"]
+    assert reply["text"].startswith("<blockquote>")
+    assert reply["text"].endswith("</blockquote>")
+    assert "👉 https://t.me/+brandNewHash" in reply["text"]
 
     buttons = _flat_buttons(reply["reply_markup"])
     share_btns = [b for b in buttons if b.text == "📤 Share Referral Link"]
@@ -217,7 +230,7 @@ def test_new_user_referral_deeplink_does_not_send_normal_welcome_keyboard(deepli
     buttons = _flat_buttons(deeplink_env._replies[0]["reply_markup"])
     button_texts = {b.text for b in buttons}
     assert "📢 Join Official Channel" not in button_texts
-    assert "🎁 Claim Welcome Reward" not in button_texts
+    assert "🚀 Open AdvantPlay Mini-App" not in button_texts
     assert len(buttons) == 1  # only the Share button
 
 
@@ -239,6 +252,26 @@ def test_existing_user_referral_deeplink_returns_link_and_share_button(deeplink_
     share_btn = next(b for b in buttons if b.text == "📤 Share Referral Link")
     params = parse_qs(urlparse(share_btn.url).query)
     assert params["url"] == ["https://t.me/+existingUserHash"]
+
+
+def test_referral_deeplink_share_button_encodes_full_caption(deeplink_env):
+    deeplink_env._state["link"] = "https://t.me/+shareCaptionHash"
+    update = _FakeUpdate(user_id=215)
+    asyncio.run(deeplink_env(update, _FakeContext()))
+
+    reply = deeplink_env._replies[0]
+    buttons = _flat_buttons(reply["reply_markup"])
+    share_btn = next(b for b in buttons if b.text == "📤 Share Referral Link")
+    params = parse_qs(urlparse(share_btn.url).query)
+
+    for line in _CAPTION_LINES:
+        assert line in params["text"][0]
+    assert params["url"] == ["https://t.me/+shareCaptionHash"]
+
+    # The link must not appear inside the "text" param -- Telegram's
+    # share/url endpoint already appends the "url" param on its own, so
+    # duplicating it in "text" would show the link twice in the share sheet.
+    assert "https://t.me/+shareCaptionHash" not in params["text"][0]
 
 
 def test_existing_user_referral_deeplink_no_normal_start_keyboard(deeplink_env):
@@ -367,4 +400,4 @@ def test_non_referral_payload_falls_through_to_normal_start(deeplink_env):
     buttons = _flat_buttons(deeplink_env._replies[0]["reply_markup"])
     button_texts = {b.text for b in buttons}
     assert "📢 Join Official Channel" in button_texts
-    assert "🎁 Claim Welcome Reward" in button_texts
+    assert "🚀 Open AdvantPlay Mini-App" in button_texts
