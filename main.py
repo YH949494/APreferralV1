@@ -305,6 +305,7 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 MONGO_URL = os.environ.get("MONGO_URL")
 BASE_WEBAPP_URL = "https://apreferralv1.fly.dev/miniapp"
 WEBAPP_URL = f"{BASE_WEBAPP_URL}?v={MINIAPP_VERSION}"
+REFERRAL_WEBAPP_URL = f"{WEBAPP_URL}&action=generate_referral"
 GROUP_ID = -1002304653063
 API_BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
@@ -2256,11 +2257,13 @@ def get_or_create_referral_invite_link_sync(user_id: int, username: str = "") ->
     r = requests.post(f"{API_BASE}/createChatInviteLink", json=payload, timeout=10)
     data = r.json()
     if not data.get("ok"):
-        # Fallback: if creation fails (permissions, etc.), return deep-link so flow still works
+        # No functional fallback exists: a t.me/<bot>?start=ref<uid> deep-link is not
+        # parsed by the /start handler and never reaches attribution, so it is only
+        # included here for ops visibility in logs, not as a link to hand to callers.
         bot_username = os.environ.get("BOT_USERNAME", "")
         deeplink = f"https://t.me/{bot_username}?start=ref{user_id}" if bot_username else ""
         raise RuntimeError(f"createChatInviteLink failed: {data.get('description','unknown')}\n"
-                           f"Fallback deeplink: {deeplink}")
+                           f"Non-functional fallback deeplink (for ops reference only): {deeplink}")
 
     invite = data["result"]
     invite_link = invite["invite_link"]
@@ -5674,17 +5677,23 @@ def api_referral():
     
     success = True
     link = None
+    mode = None
     error = None
     stats = {"total_referrals": 0, "weekly_referrals": 0, "monthly_referrals": 0}
-    
+
     try:
         link = get_or_create_referral_invite_link_sync(user_id, username)
-        logger.info("[api_referral] link_generated uid=%s", user_id)        
+        mode = "invite_link"
+        logger.info("[api_referral] link_generated uid=%s", user_id)
     except Exception as e:
+        # No usable fallback: a bot /start deep-link (e.g. t.me/<bot>?start=ref<uid>)
+        # is not parsed anywhere and never reaches the group-join attribution
+        # pipeline (_confirm_referral_on_main_join keys off invite_link_map, which
+        # is only populated for real createChatInviteLink results). Returning it as
+        # referral_link would silently hand users a broken, unattributed link.
         success = False
+        link = None
         error = str(e)
-        bot_username = os.environ.get("BOT_USERNAME", "")
-        link = f"https://t.me/{bot_username}?start=ref{user_id}" if bot_username else None
         logger.warning("[api_referral] link_generation_failed uid=%s error=%s", user_id, e)
 
     snapshot, snapshot_ts, snapshot_age_sec = _get_user_snapshot(user_id)
@@ -5696,6 +5705,7 @@ def api_referral():
         }
     payload = {
         "success": success,
+        "mode": mode,
         "referral_link": link,
         "snapshot_ts": snapshot_ts,
         "snapshot_age_sec": snapshot_age_sec,
@@ -5703,8 +5713,6 @@ def api_referral():
     }
     if error:
         payload["error"] = error
-    if not link:
-        payload["referral_link"] = None
 
     return jsonify(payload), 200
 
@@ -7436,11 +7444,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         welcome_keyboard = [
             [InlineKeyboardButton("📣 Join Channel", url="https://t.me/+Zy3UGGkE17kyNDA9")],
             [InlineKeyboardButton("🚀 Open AdvantPlay Mini-App", web_app=WebAppInfo(url=WEBAPP_URL))],
+            [InlineKeyboardButton("🔗 Generate My Referral Link", web_app=WebAppInfo(url=REFERRAL_WEBAPP_URL))],
         ]
         normal_keyboard = [
             [InlineKeyboardButton("📣 Join Channel", url="https://t.me/+Zy3UGGkE17kyNDA9")],
             [InlineKeyboardButton("🚀 Open AdvantPlay Mini-App", web_app=WebAppInfo(url=WEBAPP_URL))],
-        ]        
+            [InlineKeyboardButton("🔗 Generate My Referral Link", web_app=WebAppInfo(url=REFERRAL_WEBAPP_URL))],
+        ]
+        logger.info("[START][REFERRAL_BUTTON_SHOWN] uid=%s", user_id)
         if message:
             if first_time_pm0:
                 sent = await safe_reply_text(

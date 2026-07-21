@@ -1575,7 +1575,7 @@
       </div>
 
       <!-- Step 2: Invite friends -->
-      <div class="ap-journey-step">
+      <div class="ap-journey-step" id="ap-referral-step">
         <div class="ap-step-dot" id="ap-step-2-dot">2</div>
         <div class="ap-step-body">
           <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
@@ -2247,6 +2247,7 @@
     let referralProgressAutoLoaded = false;
     let referralStatusAutoLoaded = false;
     let leaderboardAutoLoaded = false;
+    let referralEntryActionHandled = false;
     const DAILY_GAME_CACHE_PREFIX = "miniapp_daily_game_v1_";
 
     function getLatestInitData(candidate = "") {
@@ -3123,6 +3124,7 @@
     const username = user.username || user.first_name || "";
     let regionMsg = "";
     let latestReferralLink = "";
+    let latestReferralMode = "";
 
     if (!userId && !getAdminSecret()) {
       const warn = document.createElement('div');
@@ -3902,6 +3904,34 @@
       }
     }
     
+    async function handleReferralEntryAction() {
+      if (referralEntryActionHandled) return;
+      const action = new URLSearchParams(location.search).get("action");
+      if (action !== "generate_referral") return;
+      if (!userId) return;
+      if (typeof getReferral !== "function") return;
+      const step = document.getElementById("ap-referral-step");
+      if (!step) return;
+
+      referralEntryActionHandled = true;
+      console.log(`[MINIAPP][ENTRY_ACTION] action=generate_referral uid=${userId}`);
+
+      if (step.scrollIntoView) {
+        step.scrollIntoView({ behavior: "smooth", block: "center" });
+      }
+
+      try {
+        const ok = await getReferral();
+        if (ok) {
+          console.log(`[MINIAPP][ENTRY_ACTION_DONE] action=generate_referral uid=${userId} mode=${latestReferralMode || "unknown"}`);
+        } else {
+          console.log(`[MINIAPP][ENTRY_ACTION_FAILED] action=generate_referral uid=${userId} error=generation_failed`);
+        }
+      } catch (err) {
+        console.log(`[MINIAPP][ENTRY_ACTION_FAILED] action=generate_referral uid=${userId} error=${err?.message || err}`);
+      }
+    }
+
     async function getReferral() {
       const display = document.getElementById("referral-link");
       const btn = document.getElementById("get-referral-btn");
@@ -3927,22 +3957,28 @@
           data = JSON.parse(rawText);
         } catch {
           showInlineError("❌ Invalid server response.");
-          return;
+          return false;
         }
 
         const link = data.referral_link;
-        if (link) {
+        const isSuccess = data.success !== false;
+        if (link && isSuccess) {
           latestReferralLink = link;
+          latestReferralMode = data.mode || "";
           hapticNotify("success");
           if (display) { display.innerText = link + "\n👆 Tap 'Copy to Clipboard' to copy"; }
           if (inlineText) { inlineText.textContent = link; }
           if (inlineWrap) { inlineWrap.style.display = "block"; }
           loadReferralProgress();
+          return true;
         } else {
+          latestReferralMode = "";
           showInlineError("❌ Failed to get link.");
+          return false;
         }
       } catch {
         showInlineError("❌ Error connecting to server.");
+        return false;
       } finally {
         allBtns.forEach((b, i) => { b.disabled = false; b.removeAttribute("aria-busy"); b.textContent = originalLabels[i]; });
       }
@@ -6649,6 +6685,7 @@ ${referral}`;
       await checkRegionStatus();
       handleAdminAndVoucher();
       loadIdentityCard();
+      handleReferralEntryAction();
       await loadCheckinStatus();
       loadWelcomeProgress();
       loadVouchers();
