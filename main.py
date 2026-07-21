@@ -7471,13 +7471,17 @@ async def send_referral_link_with_share_button(update: Update, context: ContextT
             "Active players win more.\n"
             f"👉 {referral_link}"
         )
+        # Telegram's share/url composes the prefilled message as
+        # "{url}\n{text}" (url first, then text) -- not the other way
+        # around. So the link goes only in the url param, and text carries
+        # the caption *without* a trailing arrow/link line, otherwise the
+        # arrow would dangle with nothing after it.
         share_text = (
             "Join AdvantPlay 👇\n"
             "✔️ Daily XP rewards\n"
             "✔️ Surprise voucher drops\n"
             "✔️ Weekly bonus for Top 10\n\n"
-            "Active players win more.\n"
-            "👉"
+            "Active players win more."
         )
         share_url = (
             "https://t.me/share/url"
