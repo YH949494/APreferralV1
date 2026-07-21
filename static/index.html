@@ -3124,6 +3124,7 @@
     const username = user.username || user.first_name || "";
     let regionMsg = "";
     let latestReferralLink = "";
+    let latestReferralMode = "";
 
     if (!userId && !getAdminSecret()) {
       const warn = document.createElement('div');
@@ -3922,7 +3923,7 @@
       try {
         const ok = await getReferral();
         if (ok) {
-          console.log(`[MINIAPP][ENTRY_ACTION_DONE] action=generate_referral uid=${userId}`);
+          console.log(`[MINIAPP][ENTRY_ACTION_DONE] action=generate_referral uid=${userId} mode=${latestReferralMode || "unknown"}`);
         } else {
           console.log(`[MINIAPP][ENTRY_ACTION_FAILED] action=generate_referral uid=${userId} error=generation_failed`);
         }
@@ -3960,15 +3961,18 @@
         }
 
         const link = data.referral_link;
-        if (link) {
+        const isSuccess = data.success !== false;
+        if (link && isSuccess) {
           latestReferralLink = link;
+          latestReferralMode = data.mode || "";
           hapticNotify("success");
           if (display) { display.innerText = link + "\n👆 Tap 'Copy to Clipboard' to copy"; }
           if (inlineText) { inlineText.textContent = link; }
           if (inlineWrap) { inlineWrap.style.display = "block"; }
           loadReferralProgress();
-          return data.success !== false;
+          return true;
         } else {
+          latestReferralMode = "";
           showInlineError("❌ Failed to get link.");
           return false;
         }

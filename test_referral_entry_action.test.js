@@ -71,6 +71,7 @@ function makeContext({ elementIds, userId = 555, search = "", fetchImpl } = {}) 
     username: "tester",
     API_BASE: "https://api.example.test",
     latestReferralLink: "",
+    latestReferralMode: "",
     referralEntryActionHandled: false,
     t: (key) => key,
     hapticNotify: (kind) => calls.hapticNotify.push(kind),
@@ -161,9 +162,12 @@ test("getReferral(): network/fetch rejection returns false", async () => {
   assert.equal(ok, false);
 });
 
-test("getReferral(): backend success=false with a fallback link still displays it but does not report success", async () => {
-  // Mirrors main.py's api_referral() fallback: link creation failed but a
-  // t.me deep-link fallback is still returned alongside success:false.
+test("getReferral(): success=false with a stray link present is never displayed or treated as success", async () => {
+  // The backend no longer sends a usable link alongside success:false (a bot
+  // /start deep-link is not parsed anywhere and never reaches referral
+  // attribution), but the frontend must not trust a link value on its own —
+  // success:false must always win, defense-in-depth against any legacy/
+  // malformed response.
   const { context, elements } = makeContext({
     elementIds: HAPPY_ELEMENTS,
     fetchImpl: async () => ({
@@ -178,25 +182,47 @@ test("getReferral(): backend success=false with a fallback link still displays i
 
   const ok = await context.getReferral();
 
-  assert.equal(ok, false, "backend-reported failure must not be surfaced as success even with a fallback link");
-  assert.match(elements["referral-link"].innerText, /ref555/, "fallback link is still shown to the user");
+  assert.equal(ok, false, "backend-reported failure must not be surfaced as success");
+  assert.doesNotMatch(
+    elements["referral-link"].innerText,
+    /ref555/,
+    "a link paired with success:false must never be displayed as a usable referral link"
+  );
+  assert.equal(context.latestReferralLink, "", "latestReferralLink must not be set on failure");
 });
 
-test("handleReferralEntryAction: action=generate_referral calls getReferral exactly once and logs DONE on success", async () => {
-  const calls = { fetch: 0 };
-  const { context, elements } = makeContext({
+test("getReferral(): success mode is captured for logging without exposing the link itself", async () => {
+  const { context } = makeContext({
+    elementIds: HAPPY_ELEMENTS,
+    fetchImpl: async () => ({
+      text: async () => JSON.stringify({ success: true, mode: "invite_link", referral_link: "https://t.me/+abc" }),
+    }),
+  });
+
+  const ok = await context.getReferral();
+
+  assert.equal(ok, true);
+  assert.equal(context.latestReferralMode, "invite_link");
+});
+
+test("handleReferralEntryAction: action=generate_referral calls getReferral exactly once and logs DONE with mode, not the link", async () => {
+  const { context, elements, calls } = makeContext({
     elementIds: HAPPY_ELEMENTS,
     search: "?v=42&action=generate_referral",
-    fetchImpl: countingFetch(calls, async () => ({
-      text: async () => JSON.stringify({ success: true, referral_link: "https://t.me/+xyz" }),
-    })),
+    fetchImpl: async () => ({
+      text: async () => JSON.stringify({ success: true, mode: "invite_link", referral_link: "https://t.me/+xyz" }),
+    }),
   });
 
   await context.handleReferralEntryAction();
 
-  assert.equal(calls.fetch, 1);
   assert.equal(elements["ap-referral-step"].scrollCalls, 1);
   assert.equal(context.referralEntryActionHandled, true);
+
+  const doneLog = calls.consoleLogs.find((l) => l.includes("ENTRY_ACTION_DONE"));
+  assert.ok(doneLog, "expected an ENTRY_ACTION_DONE log line");
+  assert.match(doneLog, /mode=invite_link/);
+  assert.doesNotMatch(doneLog, /t\.me\/\+xyz/, "the actual referral link must never be logged");
 });
 
 test("handleReferralEntryAction: calling it twice (simulating double init) only triggers one API call", async () => {
