@@ -7436,76 +7436,20 @@ async def ensure_user_initialized_for_referral(update: Update, context: ContextT
     _ensure_user_registered(user)
 
 
-async def _generate_referral_link_for_user(uid: int, username: str) -> tuple[str, bool]:
-    """Canonical referral-link lookup/generation shared by the /start
-    referral deep link and the '🔗 Generate My Referral Link' callback.
-    Delegates all business logic (expiry, reuse, invite_link_map writes) to
-    get_or_create_referral_invite_link_sync.
-    """
-    def _lookup_and_generate():
-        existing_doc = invite_link_map_collection.find_one(
-            {"chat_id": GROUP_ID, "inviter_id": uid, "is_active": True},
-            sort=[("created_at", -1)],
-        )
-        reused = bool(existing_doc and existing_doc.get("invite_link"))
-        link = get_or_create_referral_invite_link_sync(uid, username)
-        return link, reused
-
-    return await asyncio.to_thread(_lookup_and_generate)
-
-
 async def send_referral_link_with_share_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Sends the user's unique referral link with a single Share button.
-    Used exclusively by the /start?start=referral deep-link route; does not
-    send the normal /start welcome message or keyboard.
+    """Sends the user's Share Content package (caption hook + playback URL +
+    canonical invite link) with a single Share button. Used exclusively by
+    the /start?start=referral deep-link route; does not send the normal
+    /start welcome message or keyboard.
     """
     user = update.effective_user
     uid = user.id
     username = user.username or ""
 
+    from referral_share_content import generate_share_package
+
     try:
-        referral_link, reused = await _generate_referral_link_for_user(uid, username)
-
-        caption = (
-            "Join AdvantPlay 👇\n"
-            "✔️ Daily XP rewards\n"
-            "✔️ Surprise voucher drops\n"
-            "✔️ Weekly bonus for Top 10\n\n"
-            "Active players win more.\n"
-            f"👉 {referral_link}"
-        )
-        # Telegram's share/url composes the prefilled message as
-        # "{url}\n{text}" (url first, then text) -- not the other way
-        # around. So the link goes only in the url param, and text carries
-        # the caption *without* a trailing arrow/link line, otherwise the
-        # arrow would dangle with nothing after it.
-        share_text = (
-            "Join AdvantPlay 👇\n"
-            "✔️ Daily XP rewards\n"
-            "✔️ Surprise voucher drops\n"
-            "✔️ Weekly bonus for Top 10\n\n"
-            "Active players win more."
-        )
-        share_url = (
-            "https://t.me/share/url"
-            f"?url={quote(referral_link, safe='')}"
-            f"&text={quote(share_text, safe='')}"
-        )
-        keyboard = InlineKeyboardMarkup(
-            [[InlineKeyboardButton("📤 Share Referral Link", url=share_url)]]
-        )
-
-        await safe_reply_text(
-            update.effective_message,
-            f"<blockquote>{html_escape(caption)}</blockquote>",
-            parse_mode=ParseMode.HTML,
-            disable_web_page_preview=True,
-            reply_markup=keyboard,
-            uid=uid,
-            send_type="referral_deep_link",
-            raise_on_non_transient=False,
-        )
-        logger.info("[REFERRAL][DEEPLINK_OK] uid=%s reused=%s", uid, reused)
+        result = await asyncio.to_thread(generate_share_package, uid, username)
     except Exception:
         logger.exception("[REFERRAL][DEEPLINK_FAILED] uid=%s", uid)
         await safe_reply_text(
@@ -7515,6 +7459,53 @@ async def send_referral_link_with_share_button(update: Update, context: ContextT
             send_type="referral_deep_link_error",
             raise_on_non_transient=False,
         )
+        return
+
+    if not result.get("ok"):
+        code = result.get("code")
+        if code == "no_active_playback":
+            text = "No playback is currently available. Please try again later."
+        else:
+            text = "Unable to generate your referral link right now. Please try again."
+        logger.error("[REFERRAL][DEEPLINK_FAILED] uid=%s code=%s", uid, code)
+        await safe_reply_text(
+            update.effective_message,
+            text,
+            uid=uid,
+            send_type="referral_deep_link_error",
+            raise_on_non_transient=False,
+        )
+        return
+
+    invite_link = result["invite_link"]
+    caption = result["message"]
+
+    # Telegram's share/url composes the prefilled message as
+    # "{url}\n{text}" (url first, then text) -- not the other way around.
+    # So the link goes only in the url param, and text carries the hook +
+    # playback URL *without* the trailing arrow/link line, otherwise the
+    # invite link would appear twice in the share sheet.
+    share_text = f"{result['hook_text']}\n{result['playback_url']}\n\nMore player replays and rewards inside AdvantPlay:"
+    share_url = (
+        "https://t.me/share/url"
+        f"?url={quote(invite_link, safe='')}"
+        f"&text={quote(share_text, safe='')}"
+    )
+    keyboard = InlineKeyboardMarkup(
+        [[InlineKeyboardButton("📤 Share Referral Link", url=share_url)]]
+    )
+
+    await safe_reply_text(
+        update.effective_message,
+        f"<blockquote>{html_escape(caption)}</blockquote>",
+        parse_mode=ParseMode.HTML,
+        disable_web_page_preview=True,
+        reply_markup=keyboard,
+        uid=uid,
+        send_type="referral_deep_link",
+        raise_on_non_transient=False,
+    )
+    logger.info("[REFERRAL][DEEPLINK_OK] uid=%s", uid)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):

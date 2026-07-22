@@ -37,7 +37,6 @@ def _load_start_func():
         "_ensure_user_registered",
         "ensure_user_initialized_for_referral",
         "send_referral_link_with_share_button",
-        "_generate_referral_link_for_user",
     }
     fn_nodes = [
         node
