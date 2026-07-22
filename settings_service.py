@@ -77,6 +77,31 @@ def _coerce(value: Any, field_type: str, fallback: Any):
 
 
 # ---------------------------------------------------------------------------
+# Settings UI categories: the canonical list of Admin Dashboard Settings tabs.
+# Every group below carries a "category" (the tab it renders under). Groups
+# whose fields span more than one tab (e.g. message_templates, urls) instead
+# carry a "field_categories" override dict mapping field name -> category,
+# taking priority over the group-level category for that field. This is the
+# single source of truth the Settings UI filters against — a given field
+# belongs to exactly one category.
+# ---------------------------------------------------------------------------
+
+SETTINGS_CATEGORIES: list[str] = [
+    "general",
+    "feature_flags",
+    "xp",
+    "rewards",
+    "voucher_rules",
+    "referral",
+    "affiliate",
+    "welcome_journey",
+    "reactivation",
+    "security",
+    "integrations",
+    "segment_probability",
+]
+
+# ---------------------------------------------------------------------------
 # Schema: one entry per settings group. Each field carries its type, label,
 # default, optional env var (for backward compatibility) and optional numeric
 # bounds used for both server-side validation and the auto-generated admin UI.
@@ -86,6 +111,7 @@ SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
     "abuse_protection": {
         "label": "Abuse Protection",
         "description": "Cooldowns and kill-switch thresholds that protect claim/referral flows from abuse.",
+        "category": "security",
         "fields": {
             "claim_cooldown_seconds": {"type": "int", "label": "Claim Cooldown (seconds)", "default": 180, "env": "CLAIM_COOLDOWN_SECONDS", "min": 0, "max": 86400},
             "session_cooldown_seconds": {"type": "int", "label": "Session Cooldown (seconds)", "default": 30, "env": "SESSION_COOLDOWN_SEC", "min": 0, "max": 86400},
@@ -103,6 +129,7 @@ SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
     "verification_queue": {
         "label": "Verification Queue",
         "description": "Retry/backoff behaviour for the Telegram membership verification queue sweep.",
+        "category": "integrations",
         "fields": {
             "max_retry_attempts": {"type": "int", "label": "Max Retry Attempts", "default": 3, "env": "VERIFY_QUEUE_MAX_ATTEMPTS", "min": 1, "max": 50},
             "base_retry_delay_seconds": {"type": "int", "label": "Base Retry Delay (seconds)", "default": 30, "env": "VERIFY_QUEUE_BACKOFF_BASE_SECONDS", "min": 1, "max": 86400},
@@ -114,6 +141,7 @@ SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
     "scheduler": {
         "label": "Scheduler",
         "description": "Enable/disable and tune each APScheduler job without a redeploy.",
+        "category": "general",
         "fields": {
             "xp_snapshot": {"type": "job", "label": "XP Snapshot", "default": {"enabled": True, "cron": "0 0 * * 1", "batch_size": None}},
             "referral_snapshot": {"type": "job", "label": "Referral Snapshot", "default": {"enabled": True, "cron": "0 0 1 * *", "batch_size": None}},
@@ -132,6 +160,7 @@ SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
     "feature_flags": {
         "label": "Feature Flags",
         "description": "Boolean switches for major product features. Off means the feature is fully disabled.",
+        "category": "feature_flags",
         "fields": {
             "welcome_journey": {"type": "bool", "label": "Welcome Journey", "default": True, "env": None},
             "welcome_reward": {"type": "bool", "label": "Welcome Reward", "default": True, "env": None},
@@ -148,6 +177,7 @@ SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
     "telegram_config": {
         "label": "Telegram Configuration",
         "description": "Non-secret Telegram configuration. BOT_TOKEN always stays in environment variables.",
+        "category": "integrations",
         "fields": {
             "bot_username": {"type": "str", "label": "Bot Username", "default": "", "env": "BOT_USERNAME"},
             "official_channel_username": {"type": "str", "label": "Official Channel Username", "default": "advantplayofficial", "env": "OFFICIAL_CHANNEL_USERNAME"},
@@ -161,6 +191,7 @@ SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
     "welcome_journey": {
         "label": "Welcome Journey",
         "description": "Onboarding window, check-in requirements and reminder cadence for new users.",
+        "category": "welcome_journey",
         "fields": {
             "checkin_days_required": {"type": "int", "label": "Check-in Days Required", "default": 3, "env": None, "min": 1, "max": 90},
             "welcome_window_hours": {"type": "int", "label": "Welcome Window (hours)", "default": 48, "env": "WELCOME_WINDOW_HOURS", "min": 1, "max": 8760},
@@ -175,6 +206,7 @@ SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
     "pool_probabilities": {
         "label": "Public Pool Distribution",
         "description": "Segment probabilities (0-100%) for public voucher pool access, plus the reserved pool percentage.",
+        "category": "segment_probability",
         "fields": {
             "new_user": {"type": "float", "label": "New User", "default": 70.0, "env": None, "min": 0, "max": 100},
             "new_joiner": {"type": "float", "label": "New Joiner", "default": 70.0, "env": None, "min": 0, "max": 100},
@@ -190,6 +222,7 @@ SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
     "referral_config": {
         "label": "Referral Configuration",
         "description": "XP rewards, holds and status classification for the referral program.",
+        "category": "referral",
         "fields": {
             "xp_per_referral": {"type": "int", "label": "XP Per Referral", "default": 60, "env": None, "min": 0, "max": 1000000},
             "bonus_xp": {"type": "int", "label": "Bonus XP", "default": 400, "env": None, "min": 0, "max": 1000000},
@@ -206,6 +239,18 @@ SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
     "message_templates": {
         "label": "Notification Templates",
         "description": "Editable copy for outbound Telegram notifications.",
+        # This group spans several product domains, so each field is
+        # categorised individually rather than the group as a whole.
+        "field_categories": {
+            "welcome_success": "welcome_journey",
+            "checkin_reminder": "welcome_journey",
+            "day2_reminder": "welcome_journey",
+            "day3_reminder": "welcome_journey",
+            "voucher_claimed": "voucher_rules",
+            "referral_near_miss": "referral",
+            "affiliate_unlock": "affiliate",
+            "reactivation_reminder": "reactivation",
+        },
         "fields": {
             "welcome_success": {"type": "str", "label": "Welcome Success", "default": "🎉 Welcome! Your account is verified.", "env": None, "multiline": True},
             "checkin_reminder": {"type": "str", "label": "Check-in Reminder", "default": "🎁 Your AdvantPlay Welcome Voucher is waiting.\n\nFinish your check-ins to claim it before it expires.\n{link}", "env": None, "multiline": True},
@@ -220,6 +265,7 @@ SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
     "requirements": {
         "label": "Requirements",
         "description": "Eligibility requirements gating claims and rewards.",
+        "category": "welcome_journey",
         "fields": {
             "welcome_reward_checkins_required": {"type": "int", "label": "Welcome Reward Check-ins Required", "default": 3, "env": None, "min": 1, "max": 30},
         },
@@ -227,6 +273,7 @@ SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
     "share_content": {
         "label": "Referral Share Content",
         "description": "Fallback copy used by Referral Centre -> Share Content when no active caption hook exists.",
+        "category": "referral",
         "fields": {
             "fallback_hook_text": {"type": "str", "label": "Fallback Hook Text", "default": "🎬 Fresh replays just dropped!", "env": None},
         },
@@ -234,6 +281,12 @@ SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
     "urls": {
         "label": "Copy / URLs",
         "description": "Editable links referenced by bot copy and the Mini App.",
+        # Most links are general site/bot copy; the affiliate invite link
+        # belongs to the Affiliate category instead.
+        "category": "general",
+        "field_categories": {
+            "affiliate_group_invite_url": "affiliate",
+        },
         "fields": {
             "official_channel_url": {"type": "str", "label": "Official Channel URL", "default": "", "env": "OFFICIAL_CHANNEL_URL"},
             "community_url": {"type": "str", "label": "Community URL", "default": "https://t.me/advantplaychat", "env": None},
@@ -444,6 +497,29 @@ def update_settings(group: str, updates: dict, *, updated_by: str | None = None,
     _write_audit_log(group, changed_fields, updated_by=updated_by, db_ref=db_ref)
     invalidate_cache(group)
     return {"success": True, "settings": get_settings(group, db_ref=db_ref, force_refresh=True)}
+
+
+def field_category(group: str, field: str) -> str | None:
+    """Resolve the Settings-UI category a given (group, field) belongs to.
+
+    A per-field override in ``field_categories`` wins; otherwise the group's
+    own ``category`` applies. Returns None if neither is set (i.e. the group
+    was added without categorising it).
+    """
+    schema = SETTINGS_SCHEMA[group]
+    overrides = schema.get("field_categories") or {}
+    if field in overrides:
+        return overrides[field]
+    return schema.get("category")
+
+
+def category_map() -> dict[str, str]:
+    """Map every "group.field" key to its resolved Settings-UI category."""
+    out: dict[str, str] = {}
+    for group, schema in SETTINGS_SCHEMA.items():
+        for field in schema["fields"]:
+            out[f"{group}.{field}"] = field_category(group, field)
+    return out
 
 
 def list_schema() -> dict:

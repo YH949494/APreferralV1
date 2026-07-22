@@ -1423,42 +1423,11 @@
       </section>
 
       <section id="view-settings" class="hidden">
-        <div class="section" style="max-width:520px;margin-bottom:20px;">
-          <div class="section-title">Rejoin Buffer</div>
-          <div style="font-size:12px;color:var(--muted);margin-bottom:12px;">
-            Delays public/pooled voucher claims for users who leave and rejoin @AdvantPlayOfficial.
-            Never applies to Welcome Reward, personalised vouchers, or affiliate rewards.
-          </div>
-          <div style="margin-bottom:10px;">
-            <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">Mode</label>
-            <select class="filter-input" id="rb-mode" style="width:100%;box-sizing:border-box;">
-              <option value="disabled">Disabled</option>
-              <option value="test_users_only">Test Users Only</option>
-              <option value="enabled">Enabled</option>
-            </select>
-          </div>
-          <div style="margin-bottom:10px;">
-            <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">Buffer hours</label>
-            <input class="filter-input" id="rb-hours" type="number" min="1" step="1" style="width:100%;box-sizing:border-box;" />
-          </div>
-          <div style="margin-bottom:12px;">
-            <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">Test user IDs <span style="font-weight:400;color:var(--muted);">(one per line or comma-separated; used only in Test Users Only mode)</span></label>
-            <textarea id="rb-test-user-ids" rows="4" style="width:100%;box-sizing:border-box;padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--card-bg);color:var(--text);resize:vertical;" placeholder="123456789&#10;987654321"></textarea>
-          </div>
-          <button class="btn primary" id="rb-save-btn">Save</button>
-          <span class="admin-chip" id="rb-status" style="margin-left:8px;">…</span>
-          <div id="rb-result" style="margin-top:10px;font-size:12px;"></div>
-        </div>
-
-        <div class="section-title" style="margin-bottom:8px;">Managed Settings</div>
-        <div style="font-size:12px;color:var(--muted);margin-bottom:12px;">
-          Everything below is stored in MongoDB and editable without a redeploy. Untouched fields keep working exactly
-          as before (env-var / hardcoded defaults still apply until you save an override).
-        </div>
-        <div id="managed-settings-body"></div>
-
-        <div style="margin:20px 0 16px;"><span class="tag heuristic" style="font-size:12px;padding:4px 12px;">READ ONLY — everything below this line</span></div>
-        <div id="settings-body"></div>
+        <!-- Content is rendered per-tab by renderSettingsShell() in admin-dashboard.js,
+             filtered to the active tab's settingsCategory. Nothing here is shared
+             markup for multiple categories — see settings_service.SETTINGS_SCHEMA
+             category/field_categories metadata for the source of truth. -->
+        <div id="settings-category-body"></div>
       </section>
     </main>
   </div>
