@@ -224,6 +224,13 @@ SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
             "welcome_reward_checkins_required": {"type": "int", "label": "Welcome Reward Check-ins Required", "default": 3, "env": None, "min": 1, "max": 30},
         },
     },
+    "share_content": {
+        "label": "Referral Share Content",
+        "description": "Fallback copy used by Referral Centre -> Share Content when no active caption hook exists.",
+        "fields": {
+            "fallback_hook_text": {"type": "str", "label": "Fallback Hook Text", "default": "🎬 Fresh replays just dropped!", "env": None},
+        },
+    },
     "urls": {
         "label": "Copy / URLs",
         "description": "Editable links referenced by bot copy and the Mini App.",
