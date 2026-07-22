@@ -114,7 +114,14 @@ def parse_playback_url(raw) -> str | None:
         return None
     if parsed.username or parsed.password:
         return None
-    if parsed.port is not None:
+    try:
+        # .port raises ValueError (not returns None) for a malformed port,
+        # e.g. "https://rx.apreplay.com:bad/Abc123" — treat that as rejected
+        # input rather than letting it 500 the create/update/bulk-import APIs.
+        has_port = parsed.port is not None
+    except ValueError:
+        return None
+    if has_port:
         return None
     if (parsed.hostname or "").lower() != PLAYBACK_HOST:
         return None

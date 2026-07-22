@@ -95,6 +95,13 @@ class TestPlaybackValidation:
     def test_parse_rejects_custom_port(self):
         assert rsc.parse_playback_url("https://rx.apreplay.com:8443/AbC123") is None
 
+    def test_parse_rejects_malformed_port_without_crashing(self):
+        # A non-numeric/out-of-range port makes urlparse's `.port` property
+        # raise ValueError rather than returning a value — must be treated
+        # as invalid input, not bubble up as a 500.
+        assert rsc.parse_playback_url("https://rx.apreplay.com:bad/AbC123") is None
+        assert rsc.parse_playback_url("https://rx.apreplay.com:999999/AbC123") is None
+
     def test_parse_rejects_query_string(self):
         assert rsc.parse_playback_url("https://rx.apreplay.com/AbC123?x=1") is None
 

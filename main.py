@@ -7974,7 +7974,12 @@ async def generate_referral_link_callback(update: Update, context: ContextTypes.
     message = result["message"]
     invite_link = result["invite_link"]
 
-    share_params = urlencode({"url": invite_link, "text": message})
+    # Telegram's share/url composes the prefilled message as "{url}\n{text}"
+    # (url first, then text) — so the link goes only in the url param, and
+    # text carries the hook + playback URL *without* the trailing arrow/link
+    # line, otherwise the invite link would appear twice in the share sheet.
+    share_text = f"{result['hook_text']}\n{result['playback_url']}\n\nMore player replays and rewards inside AdvantPlay:"
+    share_params = urlencode({"url": invite_link, "text": share_text})
     share_keyboard = InlineKeyboardMarkup(
         [[InlineKeyboardButton("📤 Share Referral Link", url=f"https://t.me/share/url?{share_params}")]]
     )

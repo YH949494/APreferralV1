@@ -223,7 +223,11 @@ def test_callback_share_button_prefilled_with_complete_package(callback_env):
 
     params = parse_qs(parsed.query)
     assert params["url"] == ["https://t.me/+abcDEF123?x=1&y=2"]
-    assert params["text"] == [message]
+    # Telegram composes "{url}\n{text}" in the share sheet, so `text` must
+    # NOT repeat the invite link that's already in `url` — only the hook +
+    # playback URL, with no dangling arrow/link line.
+    assert params["text"] == ["Hook\nhttps://rx.apreplay.com/Xyz00001\n\nMore player replays and rewards inside AdvantPlay:"]
+    assert "https://t.me/+abcDEF123?x=1&y=2" not in params["text"][0]
 
 
 def test_callback_success_includes_share_button(callback_env):
