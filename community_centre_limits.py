@@ -33,9 +33,17 @@ POLL_OPTIONS_MAX = 10
 QUIZ_EXPLANATION_MAX_LEN = 200
 
 POLL_OPEN_PERIOD_MIN_SECONDS = 5
-POLL_OPEN_PERIOD_MAX_SECONDS = 600000  # ~6 days 23h, Telegram's documented ceiling
+# Telegram's native open_period/close_date parameters only accept 5-600
+# seconds (Poll.MAX_OPEN_PERIOD in PTB 20.8) — NOT 600000. Anything the
+# admin configures above TELEGRAM_NATIVE_POLL_DURATION_MAX_SECONDS is still
+# accepted here (product-level cap below), but is sent to Telegram as an
+# open-ended poll and auto-stopped by the restart-safe worker at the
+# configured time instead of via Telegram's native parameter — see
+# community_centre.py's run_due_poll_closures / _do_send.
+TELEGRAM_NATIVE_POLL_DURATION_MAX_SECONDS = 600
+POLL_OPEN_PERIOD_MAX_SECONDS = 2592000  # 30 days — our own scheduling ceiling, not Telegram's
 POLL_CLOSE_DATE_MIN_LEAD_SECONDS = 5
-POLL_CLOSE_DATE_MAX_LEAD_SECONDS = 600000
+POLL_CLOSE_DATE_MAX_LEAD_SECONDS = 2592000
 
 MEDIA_GROUP_MIN_ITEMS = 2
 MEDIA_GROUP_MAX_ITEMS = 10
@@ -259,6 +267,7 @@ def limits_payload() -> dict:
         "quiz_explanation_max_len": QUIZ_EXPLANATION_MAX_LEN,
         "poll_open_period_min_seconds": POLL_OPEN_PERIOD_MIN_SECONDS,
         "poll_open_period_max_seconds": POLL_OPEN_PERIOD_MAX_SECONDS,
+        "telegram_native_poll_duration_max_seconds": TELEGRAM_NATIVE_POLL_DURATION_MAX_SECONDS,
         "media_group_min_items": MEDIA_GROUP_MIN_ITEMS,
         "media_group_max_items": MEDIA_GROUP_MAX_ITEMS,
         "media_max_size_bytes": MEDIA_MAX_SIZE_BYTES,

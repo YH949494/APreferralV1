@@ -768,6 +768,22 @@ def _run_key(post_id, scheduled_for_utc: datetime) -> str:
     return f"community_post:{post_id}:{scheduled_for_utc.strftime('%Y%m%dT%H%M%S.%f')}"
 
 
+def _validate_poll_close_vs_publish(poll: dict | None, scheduled_at_utc: datetime) -> str | None:
+    """Shared by schedule_post and reschedule_post — a fixed poll close date
+    must stay in the future, after the (possibly new) publish time, and
+    within our own scheduling ceiling."""
+    if not poll or poll.get("close_mode") != "date" or not poll.get("close_at_utc"):
+        return None
+    if poll["close_at_utc"] <= now_utc():
+        return "poll_close_date_in_past"
+    if poll["close_at_utc"] <= scheduled_at_utc:
+        return "poll_closes_before_publish"
+    lead = (poll["close_at_utc"] - scheduled_at_utc).total_seconds()
+    if not (limits.POLL_CLOSE_DATE_MIN_LEAD_SECONDS <= lead <= limits.POLL_CLOSE_DATE_MAX_LEAD_SECONDS):
+        return "poll_close_date_out_of_range"
+    return None
+
+
 def schedule_post(post_id, *, actor_id, scheduled_at_utc: datetime) -> tuple[dict | None, str | None]:
     post = _posts().find_one({"_id": post_id})
     if not post:
@@ -779,15 +795,9 @@ def schedule_post(post_id, *, actor_id, scheduled_at_utc: datetime) -> tuple[dic
     if scheduled_at_utc <= now_utc():
         return None, "schedule_in_past"
 
-    poll = post.get("poll")
-    if poll and poll.get("close_mode") == "date" and poll.get("close_at_utc"):
-        if poll["close_at_utc"] <= scheduled_at_utc:
-            return None, "poll_closes_before_publish"
-        lead = (poll["close_at_utc"] - scheduled_at_utc).total_seconds()
-        if not (limits.POLL_CLOSE_DATE_MIN_LEAD_SECONDS <= lead <= limits.POLL_CLOSE_DATE_MAX_LEAD_SECONDS):
-            return None, "poll_close_date_out_of_range"
-    if poll and poll.get("close_mode") == "date" and poll.get("close_at_utc") and poll["close_at_utc"] <= now_utc():
-        return None, "poll_close_date_in_past"
+    err = _validate_poll_close_vs_publish(post.get("poll"), scheduled_at_utc)
+    if err:
+        return None, err
 
     ts = now_utc()
     set_fields = {
@@ -812,6 +822,9 @@ def reschedule_post(post_id, *, actor_id, scheduled_at_utc: datetime) -> tuple[d
         return None, "not_scheduled"
     if scheduled_at_utc <= now_utc():
         return None, "schedule_in_past"
+    err = _validate_poll_close_vs_publish(post.get("poll"), scheduled_at_utc)
+    if err:
+        return None, err
     before = _public_view(post)
     ts = now_utc()
     _posts().update_one({"_id": post_id}, {"$set": {
@@ -1018,10 +1031,25 @@ async def _do_send(post: dict) -> dict:
                 group.append(InputMediaVideo(media=source, **kwargs))
         messages = await bot.send_media_group(chat_id=chat_id, media=group, **common)
         message_ids = [m.message_id for m in messages]
+        buttons_failed = False
+        buttons_error = None
         if reply_markup:
-            follow_up = await bot.send_message(chat_id=chat_id, text="·", reply_markup=reply_markup, **common)
-            message_ids.append(follow_up.message_id)
-        return {"message_ids": message_ids, "poll_id": None, "poll_message_id": None}
+            # The album itself is already delivered at this point. If the
+            # follow-up keyboard message fails, we must not lose the album's
+            # message_ids by letting the exception propagate — that would
+            # make _execute_publish treat the whole occurrence as failed and
+            # resend the entire album on retry, duplicating already-live
+            # content. Report the partial failure instead.
+            try:
+                follow_up = await bot.send_message(chat_id=chat_id, text="·", reply_markup=reply_markup, **common)
+                message_ids.append(follow_up.message_id)
+            except Exception as exc:
+                buttons_failed = True
+                buttons_error = str(exc)
+        return {
+            "message_ids": message_ids, "poll_id": None, "poll_message_id": None,
+            "buttons_failed": buttons_failed, "buttons_error": buttons_error,
+        }
 
     if content_type in ("poll", "quiz"):
         poll = post["poll"]
@@ -1039,10 +1067,21 @@ async def _do_send(post: dict) -> dict:
             if poll.get("explanation"):
                 kwargs["explanation"] = poll["explanation"]
                 kwargs["explanation_parse_mode"] = poll.get("explanation_parse_mode") or "HTML"
+        # Telegram's native open_period/close_date parameters only accept a
+        # 5-600 second window (Poll.MAX_OPEN_PERIOD in PTB 20.8). Configured
+        # durations/dates within that range are passed straight through so
+        # Telegram closes the poll itself; anything longer is sent as an
+        # open-ended poll and closed by the worker's soft-close tick
+        # (run_due_poll_closures) once poll.close_at_utc arrives instead —
+        # see _execute_publish, which backfills that field after send.
+        native_cap = limits.TELEGRAM_NATIVE_POLL_DURATION_MAX_SECONDS
         if poll.get("close_mode") == "duration" and poll.get("open_period_seconds"):
-            kwargs["open_period"] = poll["open_period_seconds"]
+            if poll["open_period_seconds"] <= native_cap:
+                kwargs["open_period"] = poll["open_period_seconds"]
         elif poll.get("close_mode") == "date" and poll.get("close_at_utc"):
-            kwargs["close_date"] = poll["close_at_utc"]
+            lead = (poll["close_at_utc"] - now_utc()).total_seconds()
+            if limits.POLL_CLOSE_DATE_MIN_LEAD_SECONDS <= lead <= native_cap:
+                kwargs["close_date"] = poll["close_at_utc"]
         if reply_markup:
             kwargs["reply_markup"] = reply_markup
         msg = await bot.send_poll(**kwargs)
@@ -1096,34 +1135,79 @@ def _claim_next_due_post(*, only_post_id=None):
     )
 
 
+def _claim_or_reuse_run(post_id, run_key: str, scheduled_for: datetime) -> tuple[str, dict | None]:
+    """Claim the run-ledger row for (post_id, run_key) — the hard idempotency
+    boundary for this specific occurrence.
+
+    Returns (outcome, existing_run):
+      "claimed"            — safe to proceed and send.
+      "already_processing" — another attempt currently owns this occurrence
+                              (or a crashed one hasn't been recovered yet);
+                              do NOT send.
+      "already_done"       — this occurrence already published; do NOT
+                              re-send (caller should reconcile from the run).
+
+    Unlike a blind insert, an existing row in a terminal-but-retryable state
+    (e.g. "failed" after recover_stale_processing marked a crashed attempt)
+    is reclaimed via update rather than rejected — recover_stale_processing
+    preserves the post's original next_run_at_utc specifically so a retry
+    lands on this SAME run_key instead of manufacturing a new one, which
+    would otherwise risk sending the content to Telegram a second time.
+    """
+    runs_col = _runs()
+    now = now_utc()
+    existing = runs_col.find_one({"community_post_id": post_id, "run_key": run_key})
+    if existing is None:
+        try:
+            runs_col.insert_one({
+                "community_post_id": post_id,
+                "run_key": run_key,
+                "scheduled_for_utc": scheduled_for,
+                "status": "processing",
+                "processing_owner": INSTANCE_ID,
+                "processing_started_at_utc": now,
+                "attempt_count": 1,
+                "telegram_message_ids": [],
+                "telegram_poll_id": None,
+                "error_code": None,
+                "error_message": None,
+                "started_at_utc": now,
+                "completed_at_utc": None,
+                "created_at_utc": now,
+                "updated_at_utc": now,
+            })
+            return "claimed", None
+        except DuplicateKeyError:
+            existing = runs_col.find_one({"community_post_id": post_id, "run_key": run_key})
+    if existing is None:
+        return "already_processing", None
+    if existing["status"] in ("published", "partially_published"):
+        return "already_done", existing
+    if existing["status"] == "processing":
+        return "already_processing", existing
+    # "failed" (including a recovered stale crash) — retry this same
+    # occurrence rather than starting a fresh one.
+    runs_col.update_one({"_id": existing["_id"]}, {"$set": {
+        "status": "processing", "processing_owner": INSTANCE_ID,
+        "processing_started_at_utc": now, "updated_at_utc": now,
+        "error_code": None, "error_message": None,
+    }, "$inc": {"attempt_count": 1}})
+    return "claimed", None
+
+
 def _execute_publish(post: dict) -> None:
     post_id = post["_id"]
     scheduled_for = post.get("next_run_at_utc") or post.get("scheduled_at_utc") or now_utc()
     run_key = _run_key(post_id, scheduled_for)
 
-    try:
-        _runs().insert_one({
-            "community_post_id": post_id,
-            "run_key": run_key,
-            "scheduled_for_utc": scheduled_for,
-            "status": "processing",
-            "processing_owner": INSTANCE_ID,
-            "processing_started_at_utc": now_utc(),
-            "attempt_count": 1,
-            "telegram_message_ids": [],
-            "telegram_poll_id": None,
-            "error_code": None,
-            "error_message": None,
-            "started_at_utc": now_utc(),
-            "completed_at_utc": None,
-            "created_at_utc": now_utc(),
-            "updated_at_utc": now_utc(),
-        })
-    except DuplicateKeyError:
-        # This exact occurrence was already claimed/sent by another worker —
-        # idempotency boundary. Reconcile the post's status from the run.
-        existing_run = _runs().find_one({"community_post_id": post_id, "run_key": run_key})
+    outcome, existing_run = _claim_or_reuse_run(post_id, run_key, scheduled_for)
+    if outcome == "already_done":
         _reconcile_post_from_run(post, existing_run)
+        return
+    if outcome == "already_processing":
+        # Another attempt currently owns this occurrence. Leave the post in
+        # "processing" — recover_stale_processing() will reclaim it (and
+        # this run row) if it's genuinely stuck past the timeout.
         return
 
     record_audit(post_id, "worker_claim", actor_type="worker", actor_id=INSTANCE_ID, run_key=run_key)
@@ -1138,6 +1222,7 @@ def _execute_publish(post: dict) -> None:
 
     message_ids = result["message_ids"]
     poll_id = result.get("poll_id")
+    buttons_failed = bool(result.get("buttons_failed"))
     ts = now_utc()
 
     pin_ok = None
@@ -1150,7 +1235,14 @@ def _execute_publish(post: dict) -> None:
             logger.exception("[COMMUNITY_CENTRE] pin failed post_id=%s", post_id)
             pin_ok = False
 
-    status = "published" if pin_ok is not False else "partially_published"
+    status = "partially_published" if (pin_ok is False or buttons_failed) else "published"
+    partial_reason = None
+    if buttons_failed and pin_ok is False:
+        partial_reason = "Album published; button keyboard and pin both failed."
+    elif buttons_failed:
+        partial_reason = "Album published; the button keyboard follow-up message failed to send."
+    elif pin_ok is False:
+        partial_reason = "Published; pin failed."
 
     _runs().update_one({"community_post_id": post_id, "run_key": run_key}, {"$set": {
         "status": status,
@@ -1168,8 +1260,8 @@ def _execute_publish(post: dict) -> None:
         "published_at": ts,
         "last_run_at_utc": ts,
         "updated_at": ts,
-        "last_error_code": None,
-        "last_error_message": None,
+        "last_error_code": "partial_delivery" if partial_reason else None,
+        "last_error_message": partial_reason,
     }
 
     if post.get("schedule_type") == "recurring" and post.get("recurrence"):
@@ -1182,6 +1274,16 @@ def _execute_publish(post: dict) -> None:
             post_updates["next_run_at_utc"] = None
     else:
         post_updates["next_run_at_utc"] = None
+
+    if poll_id and post.get("poll", {}).get("close_mode") == "duration":
+        open_period = post["poll"].get("open_period_seconds")
+        if open_period and open_period > limits.TELEGRAM_NATIVE_POLL_DURATION_MAX_SECONDS:
+            # Exceeds Telegram's native ceiling — recalculated relative to
+            # *this* occurrence's actual publish time, so recurring polls
+            # each get their own correct absolute deadline (spec: "Relative
+            # poll durations should be recalculated from each occurrence's
+            # publish time"). run_due_poll_closures() stops it at this time.
+            post_updates["poll.close_at_utc"] = ts + timedelta(seconds=open_period)
 
     if poll_id:
         try:
@@ -1206,7 +1308,7 @@ def _execute_publish(post: dict) -> None:
         post_id,
         "publish_success" if status == "published" else "partial_publish",
         actor_type="worker", actor_id=INSTANCE_ID, run_key=run_key,
-        after={"telegram_message_ids": message_ids, "telegram_poll_id": poll_id, "pin_ok": pin_ok},
+        after={"telegram_message_ids": message_ids, "telegram_poll_id": poll_id, "pin_ok": pin_ok, "buttons_failed": buttons_failed},
     )
 
 
@@ -1280,9 +1382,28 @@ def recover_stale_processing() -> int:
     for post in stale:
         attempt_count = post.get("attempt_count", 1)
         ts = now_utc()
+        # Mark the corresponding stale run-ledger row "failed" so a retry of
+        # this SAME occurrence can reclaim it via _claim_or_reuse_run. Left
+        # untouched, that row would stay "processing" forever and every
+        # future retry would be refused as "already_processing" — the post
+        # could never reach a terminal state (deadlock).
+        _runs().update_one(
+            {"community_post_id": post["_id"], "status": "processing", "processing_started_at_utc": {"$lte": cutoff}},
+            {"$set": {
+                "status": "failed", "error_code": "processing_timeout",
+                "error_message": "Worker stopped responding while publishing.",
+                "completed_at_utc": ts, "updated_at_utc": ts,
+            }},
+        )
         if attempt_count < limits.MAX_ATTEMPTS:
+            # Deliberately do NOT bump next_run_at_utc to "now" — preserving
+            # the original value keeps run_key identical on retry (see
+            # _run_key), so the retry reclaims the same run-ledger row above
+            # instead of manufacturing a new occurrence and risking a
+            # duplicate Telegram send if the crashed attempt actually
+            # succeeded before it could record that fact.
             _posts().update_one({"_id": post["_id"]}, {"$set": {
-                "status": "scheduled", "next_run_at_utc": ts, "updated_at": ts,
+                "status": "scheduled", "updated_at": ts,
                 "processing_owner": None, "processing_started_at_utc": None,
             }})
         else:
@@ -1320,9 +1441,59 @@ def run_due_unpins() -> int:
     return count
 
 
+def run_due_poll_closures() -> int:
+    """Auto-stop polls whose configured close time has arrived but which
+    Telegram itself isn't closing natively — either a fixed close_at_utc
+    further out than Telegram's native close_date range, or a "duration"
+    poll whose open_period exceeded Telegram's native open_period ceiling
+    (see _do_send / _execute_publish, which backfills poll.close_at_utc for
+    that case). Polls Telegram closes natively are excluded automatically:
+    their poll_status already flips to "closed" via handle_poll_update
+    before this query would match them."""
+    due = list(_posts().find({
+        "poll_status": "open",
+        "poll.close_mode": {"$in": ["date", "duration"]},
+        "poll.close_at_utc": {"$lte": now_utc()},
+    }))
+    count = 0
+    for post in due:
+        if not post.get("telegram_message_ids"):
+            continue
+        message_id = post["telegram_message_ids"][0]
+        try:
+            final_poll = _run_coro(_do_stop_poll(post["destination_chat_id"], message_id))
+        except Exception:
+            logger.exception("[COMMUNITY_CENTRE] auto poll-close failed post_id=%s", post["_id"])
+            continue
+        ts = now_utc()
+        _posts().update_one({"_id": post["_id"]}, {"$set": {
+            "poll_status": "closed", "poll_closed_at_utc": ts, "updated_at": ts,
+        }})
+        try:
+            options = getattr(final_poll, "options", None) or []
+            poll_ids = post.get("telegram_poll_ids") or []
+            if poll_ids:
+                _poll_snapshots().update_one(
+                    {"poll_id": poll_ids[0]},
+                    {"$set": {
+                        "total_voter_count": getattr(final_poll, "total_voter_count", 0),
+                        "is_closed": True,
+                        "options": [{"option_id": i, "text": o.text, "voter_count": o.voter_count} for i, o in enumerate(options)],
+                        "updated_at_utc": ts,
+                    }},
+                    upsert=True,
+                )
+        except Exception:
+            logger.exception("[COMMUNITY_CENTRE] auto poll-close snapshot save failed post_id=%s", post["_id"])
+        record_audit(post["_id"], "auto_close_poll", actor_type="worker", actor_id=INSTANCE_ID)
+        count += 1
+    return count
+
+
 def community_centre_tick() -> None:
     """Single APScheduler entry point: publish due posts, recover stale
-    processing, run auto-unpins. Called on a short interval (see main.py)."""
+    processing, auto-close due polls, run auto-unpins. Called on a short
+    interval (see main.py)."""
     try:
         run_due_posts(limit=20)
     except Exception:
@@ -1331,6 +1502,10 @@ def community_centre_tick() -> None:
         recover_stale_processing()
     except Exception:
         logger.exception("[COMMUNITY_CENTRE] recover_stale_processing tick failed")
+    try:
+        run_due_poll_closures()
+    except Exception:
+        logger.exception("[COMMUNITY_CENTRE] run_due_poll_closures tick failed")
     try:
         run_due_unpins()
     except Exception:
@@ -1579,7 +1754,7 @@ def calendar_entries(start_utc: datetime, end_utc: datetime) -> list[dict]:
         })
     closing = _posts().find({
         "poll_status": "open",
-        "poll.close_mode": "date",
+        "poll.close_mode": {"$in": ["date", "duration"]},
         "poll.close_at_utc": {"$gte": start_utc, "$lte": end_utc},
     })
     for post in closing:

@@ -709,8 +709,9 @@
             <option value="date">Close at a specific time (Kuala Lumpur)</option>
           </select>
           <div id="cc-poll-duration-wrap" class="hidden" style="margin-top:8px;">
-            <input class="filter-input" id="cc-poll-duration-seconds" type="number" placeholder="Open period in seconds (min 5, max 600000)" style="max-width:260px;" />
+            <input class="filter-input" id="cc-poll-duration-seconds" type="number" placeholder="Open period in seconds" style="max-width:260px;" />
             <div class="sub">Presets: <button class="btn" type="button" data-cc-duration="300">5m</button> <button class="btn" type="button" data-cc-duration="600">10m</button> <button class="btn" type="button" data-cc-duration="1800">30m</button> <button class="btn" type="button" data-cc-duration="3600">1h</button></div>
+            <div class="sub">Telegram closes polls of 10 minutes or less itself. Longer durations are closed automatically by this dashboard's scheduler at the right time instead.</div>
           </div>
           <div id="cc-poll-date-wrap" class="hidden" style="margin-top:8px;">
             <input class="filter-input" id="cc-poll-close-at" type="datetime-local" style="max-width:260px;" />

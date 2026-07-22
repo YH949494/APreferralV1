@@ -6483,7 +6483,14 @@
       if (preview.media && preview.media.length) {
         html += '<div class="sub">[' + preview.media.length + " media item(s): " + preview.media.map(function (m) { return m.type; }).join(", ") + "]</div>";
       }
-      html += '<div class="cc-preview-caption">' + (preview.text || "<em>(no text)</em>") + "</div>";
+      // Only HTML parse_mode content is sanitized to a safe tag allowlist
+      // server-side (see community_centre_limits.sanitize_telegram_html) —
+      // MarkdownV2 text is stored verbatim and MUST be escaped before ever
+      // touching innerHTML, or a saved draft could run script in this
+      // admin-only preview modal.
+      var isHtmlContent = preview.parse_mode === "HTML";
+      var captionHtml = preview.text ? (isHtmlContent ? preview.text : esc(preview.text)) : "<em>(no text)</em>";
+      html += '<div class="cc-preview-caption">' + captionHtml + "</div>";
     }
     if (preview.buttons && preview.buttons.length) {
       var rows = {};

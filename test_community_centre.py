@@ -762,3 +762,201 @@ def test_arbitrary_chat_id_not_accepted_via_api(fake_db, monkeypatch):
     resp = client.post("/api/admin/community/posts", json=payload)
     assert resp.status_code == 400
     assert resp.get_json()["code"] == "invalid_destination"
+
+
+# ---------------------------------------------------------------------------
+# Poll duration beyond Telegram's native ceiling (codex review fix)
+# ---------------------------------------------------------------------------
+
+def test_telegram_native_poll_duration_cap_is_600_seconds():
+    # Regression guard for the 600 vs 600000 mixup: PTB 20.8's Poll.MAX_OPEN_PERIOD.
+    from telegram import Poll
+    assert cc.limits.TELEGRAM_NATIVE_POLL_DURATION_MAX_SECONDS == Poll.MAX_OPEN_PERIOD == 600
+
+
+def test_poll_duration_within_native_cap_passed_to_telegram(fake_db, monkeypatch):
+    captured = {}
+
+    async def fake_send_poll(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(message_id=1, poll=SimpleNamespace(id="poll_xyz"))
+
+    monkeypatch.setattr(cc, "_bot", lambda: SimpleNamespace(send_poll=fake_send_poll))
+
+    def sync_run(coro, timeout=20):
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(coro)
+        finally:
+            loop.close()
+
+    monkeypatch.setattr(cc, "_run_coro", sync_run)
+
+    _make_destination()
+    payload = _poll_payload()
+    payload["poll"]["close_mode"] = "duration"
+    payload["poll"]["open_period_seconds"] = 300
+    post, err = cc.create_post(payload, actor_id=1)
+    assert err is None, err
+    result = sync_run(cc._do_send(post))
+    assert captured.get("open_period") == 300
+    assert result["poll_id"] == "poll_xyz"
+
+
+def test_poll_duration_beyond_native_cap_not_sent_to_telegram_and_soft_closed(fake_db, monkeypatch):
+    """Durations Telegram itself can't accept (>600s) must never be passed as
+    open_period (Telegram would reject the whole send) — instead the poll is
+    sent open-ended and the worker's soft-close tick stops it later."""
+    captured = {}
+
+    async def fake_send_poll(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(message_id=1, poll=SimpleNamespace(id="poll_soft"))
+
+    monkeypatch.setattr(cc, "_bot", lambda: SimpleNamespace(send_poll=fake_send_poll))
+
+    def sync_run(coro, timeout=20):
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(coro)
+        finally:
+            loop.close()
+
+    monkeypatch.setattr(cc, "_run_coro", sync_run)
+
+    payload = _poll_payload()
+    payload["poll"]["close_mode"] = "duration"
+    payload["poll"]["open_period_seconds"] = 1800  # 30 minutes — exceeds Telegram's 600s ceiling
+    post = _schedule_due_post(payload)
+
+    processed = cc.run_due_posts(limit=5)
+    assert processed == 1
+    assert "open_period" not in captured
+
+    fresh = cc.get_post(post["_id"])
+    assert fresh["status"] == "published"
+    assert fresh["poll"]["close_at_utc"] is not None
+    assert fresh["poll_status"] == "open"
+
+
+def test_run_due_poll_closures_stops_soft_close_poll(fake_db, monkeypatch):
+    post = _published_poll_post()
+    database.db["community_posts"].update_one({"_id": post["_id"]}, {"$set": {
+        "poll.close_mode": "duration",
+        "poll.close_at_utc": datetime.now(timezone.utc) - timedelta(seconds=5),
+    }})
+
+    fake_final_poll = SimpleNamespace(options=[SimpleNamespace(text="Voucher", voter_count=1)], total_voter_count=1)
+
+    async def fake_stop(chat_id, message_id):
+        return fake_final_poll
+
+    def sync_run(coro, timeout=20):
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(coro)
+        finally:
+            loop.close()
+
+    monkeypatch.setattr(cc, "_do_stop_poll", fake_stop)
+    monkeypatch.setattr(cc, "_run_coro", sync_run)
+
+    closed = cc.run_due_poll_closures()
+    assert closed == 1
+    fresh = cc.get_post(post["_id"])
+    assert fresh["poll_status"] == "closed"
+
+
+# ---------------------------------------------------------------------------
+# Stale-processing recovery must not deadlock or duplicate-send (codex review fix)
+# ---------------------------------------------------------------------------
+
+def test_stale_recovery_preserves_run_key_for_safe_retry(fake_db, monkeypatch):
+    """A worker that crashes mid-send must, on retry, reclaim the SAME
+    run_key (not manufacture a new occurrence) — otherwise a genuinely
+    successful-but-uncommitted send would be repeated to Telegram."""
+    post = _schedule_due_post()
+    original_next_run = post["next_run_at_utc"]
+
+    claimed = cc._claim_next_due_post()
+    assert claimed["status"] == "processing"
+    run_key = cc._run_key(claimed["_id"], claimed["next_run_at_utc"])
+    # Simulate _execute_publish having inserted the run row, then crashing
+    # before it could be marked complete.
+    outcome, _ = cc._claim_or_reuse_run(claimed["_id"], run_key, claimed["next_run_at_utc"])
+    assert outcome == "claimed"
+
+    stale_time = datetime.now(timezone.utc) - timedelta(seconds=cc.limits.PROCESSING_TIMEOUT_SECONDS + 10)
+    fake_db["community_posts"].update_one({"_id": post["_id"]}, {"$set": {"processing_started_at_utc": stale_time}})
+    fake_db["community_post_runs"].update_one({"community_post_id": post["_id"], "run_key": run_key}, {"$set": {"processing_started_at_utc": stale_time}})
+
+    recovered = cc.recover_stale_processing()
+    assert recovered == 1
+
+    fresh = cc.get_post(post["_id"])
+    assert fresh["status"] == "scheduled"
+    # next_run_at_utc must be unchanged so the retry's run_key matches.
+    assert fresh["next_run_at_utc"] == original_next_run
+
+    stale_run = fake_db["community_post_runs"].find_one({"community_post_id": post["_id"], "run_key": run_key})
+    assert stale_run["status"] == "failed"
+
+    # Retry now succeeds instead of deadlocking as "already_processing".
+    _fake_run_coro(monkeypatch)
+    processed = cc.run_due_posts(limit=5)
+    assert processed == 1
+    final = cc.get_post(post["_id"])
+    assert final["status"] == "published"
+
+
+def test_media_group_button_followup_failure_is_partial_not_lost(fake_db, monkeypatch):
+    """The album itself already sent successfully — a failing follow-up
+    button message must not discard those message_ids or make the whole
+    occurrence retry (which would resend the live album)."""
+    _make_destination()
+    payload = {
+        "title": "Album",
+        "content_type": "media_group",
+        "destination_key": "official_channel",
+        "media": [
+            {"type": "photo", "source_url": "https://example.com/1.jpg"},
+            {"type": "photo", "source_url": "https://example.com/2.jpg"},
+        ],
+        "buttons": [{"row": 0, "position": 0, "text": "Info", "type": "url", "value": "https://example.com"}],
+    }
+
+    async def fake_send(post):
+        return {"message_ids": [10, 11], "poll_id": None, "poll_message_id": None, "buttons_failed": True}
+
+    def sync_run(coro, timeout=20):
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(coro)
+        finally:
+            loop.close()
+
+    monkeypatch.setattr(cc, "_do_send", fake_send)
+    monkeypatch.setattr(cc, "_run_coro", sync_run)
+
+    post = _schedule_due_post(payload)
+    cc.run_due_posts(limit=5)
+    fresh = cc.get_post(post["_id"])
+    assert fresh["status"] == "partially_published"
+    assert fresh["telegram_message_ids"] == [10, 11]
+
+
+def test_reschedule_revalidates_poll_close_date(fake_db):
+    _make_destination()
+    payload = _poll_payload()
+    payload["poll"]["close_mode"] = "date"
+    close_at = datetime.now(timezone.utc) + timedelta(hours=2)
+    payload["poll"]["close_at_utc"] = close_at.isoformat()
+    post, _ = cc.create_post(payload, actor_id=1)
+    ok_time = datetime.now(timezone.utc) + timedelta(hours=1)
+    scheduled, err = cc.schedule_post(post["_id"], actor_id=1, scheduled_at_utc=ok_time)
+    assert err is None
+
+    # Reschedule to publish AFTER the poll's fixed close time — must be rejected.
+    bad_time = close_at + timedelta(hours=1)
+    _, err = cc.reschedule_post(post["_id"], actor_id=1, scheduled_at_utc=bad_time)
+    assert err == "poll_closes_before_publish"
