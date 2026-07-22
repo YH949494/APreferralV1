@@ -14,6 +14,7 @@
     segmentsMonth: "",
     segmentsFilter: "",
     roiMonth: "",
+    dataKey: "",
   };
 
   function $(sel, root) { return (root || document).querySelector(sel); }
@@ -5187,7 +5188,255 @@
     });
   }
 
-  var VIEWS =["summary", "moduleOverview", "placeholder", "funnel", "abuse", "campaignBuilder", "campaignPerformance", "campaignIntelligence", "activeCampaigns", "draftCampaigns", "compiledDrops", "campaigns", "gcCampaigns", "gcProviders", "gcResults", "gcRewards", "gcVerification", "gcActivity", "vouchers", "drops", "referrals", "affiliate", "affiliatePools", "affiliatePending", "reactivation", "audit", "segmentProbabilityConfig", "segmentRoi", "segments", "validation", "backendSegmentEngine", "voucherHunterAudit", "unclassifiedAudit", "segmentRuleSimulator", "voucherHunterQuality", "voucherHunterFalsePositive", "voucherHunterRuleSimulator", "vhPriorityImpact", "uploadPlayerPerformance", "uploadHistory", "rawExplorer", "users", "joinRequests", "xpAdjust", "settings"];
+  // ---------------------------------------------------------------------
+  // Generic "data view" — a KPI row + table backed by a single admin API
+  // endpoint, shared by tabs whose whole job is "list/summarize records
+  // from a real collection". Config-driven so wiring a new tab is one
+  // registry entry instead of a bespoke HTML section + loader function.
+  // ---------------------------------------------------------------------
+  function simpleTable(headers, rows) {
+    if (!rows.length) return emptyState("No records for this view yet.");
+    var head = "<thead><tr>" + headers.map(function (h) {
+      return '<th' + (h.num ? ' class="num"' : "") + ">" + esc(h.label) + "</th>";
+    }).join("") + "</tr></thead>";
+    var body = rows.map(function (cells) {
+      return "<tr>" + cells.map(function (c) {
+        var isObj = c && typeof c === "object";
+        var num = isObj && c.num;
+        var content = isObj ? (c.html !== undefined ? c.html : esc(fmt(c.text))) : esc(c);
+        return '<td' + (num ? ' class="num"' : "") + ">" + content + "</td>";
+      }).join("") + "</tr>";
+    }).join("");
+    return '<table class="data-table">' + head + "<tbody>" + body + "</tbody></table>";
+  }
+
+  var DATA_VIEWS = {
+    communityMembers: {
+      endpoint: function () { return "/api/admin/community/members?limit=100"; },
+      render: function (d) {
+        var rows = (d.items || []).map(function (u) {
+          return [
+            userLink(u.user_id, u.username ? "@" + u.username : u.user_id),
+            u.first_name || "—",
+            u.for_bot_segment || u.bot_segment || "—",
+            dt(u.last_checkin),
+            fmt(u.streak || 0),
+          ];
+        });
+        return '<div class="controls" style="margin-bottom:12px;"><input id="dataview-search" class="filter-input" placeholder="Search username or user id..." /></div>' +
+          simpleTable(
+            [{ label: "User" }, { label: "Name" }, { label: "Segment" }, { label: "Last Check-in" }, { label: "Streak", num: true }],
+            rows
+          );
+      },
+      bind: function () {
+        var input = $("#dataview-search");
+        if (!input) return;
+        var timer = null;
+        input.addEventListener("input", function () {
+          clearTimeout(timer);
+          var q = input.value;
+          timer = setTimeout(function () {
+            api("/api/admin/community/members?limit=100" + (q ? "&search=" + encodeURIComponent(q) : ""))
+              .then(function (d) { $("#dataview-body").innerHTML = DATA_VIEWS.communityMembers.render(d); DATA_VIEWS.communityMembers.bind(); })
+              .catch(function () {});
+          }, 300);
+        });
+      },
+    },
+    communityGrowth: {
+      endpoint: function () { return "/api/admin/joins/daily?days=30"; },
+      render: function (d) {
+        var rows = (d.data || []).map(function (r) { return [r._id, { text: r.count, num: true }]; });
+        return simpleTable([{ label: "Date" }, { label: "Joins", num: true }], rows);
+      },
+    },
+    communityCheckin: {
+      endpoint: function () { return "/api/admin/community/checkins?limit=100"; },
+      render: function (d) {
+        var rows = (d.items || []).map(function (u) {
+          return [
+            userLink(u.user_id, u.username ? "@" + u.username : u.user_id),
+            dt(u.last_checkin),
+            { text: u.streak || 0, num: true },
+            { text: u.streak_freeze_tokens || 0, num: true },
+            dt(u.first_checkin_at),
+          ];
+        });
+        return simpleTable(
+          [{ label: "User" }, { label: "Last Check-in" }, { label: "Streak", num: true }, { label: "Freeze Tokens", num: true }, { label: "First Check-in" }],
+          rows
+        );
+      },
+    },
+    communityEngagement: {
+      endpoint: function () { return "/api/admin/community/engagement?days=7"; },
+      render: function (d) {
+        var rows = (d.items || []).map(function (r) {
+          return [
+            userLink(r.user_id, r.username ? "@" + r.username : r.user_id),
+            r.first_name || "—",
+            { text: r.xp || 0, num: true },
+            { text: r.events || 0, num: true },
+          ];
+        });
+        return '<div class="note" style="margin-bottom:12px;">Top XP earners, last ' + (d.days || 7) + ' days.</div>' +
+          simpleTable([{ label: "User" }, { label: "Name" }, { label: "XP Earned", num: true }, { label: "Events", num: true }], rows);
+      },
+    },
+    reactivationEligible: {
+      endpoint: function () { return "/api/admin/reactivation/eligibility"; },
+      render: function (d) {
+        var f = d.funnel || {};
+        var order = ["total_users", "registered", "started_bot", "not_blocked_or_banned", "not_already_verified", "not_failed_blocked", "not_in_cooldown", "not_campaign_excluded"];
+        var labels = {
+          total_users: "Total Users", registered: "Registered", started_bot: "Started Bot",
+          not_blocked_or_banned: "Not Blocked/Banned", not_already_verified: "Not Already Verified",
+          not_failed_blocked: "Not Failed/Blocked", not_in_cooldown: "Not In Cooldown",
+          not_campaign_excluded: "Eligible (final)",
+        };
+        return '<div class="note" style="margin-bottom:12px;">Eligibility funnel — each stage is a strict subset of the one before it. The last row is the live eligible-user count.</div>' +
+          simpleTable([{ label: "Stage" }, { label: "Users", num: true }], order.map(function (k) {
+            return [labels[k] || k, { text: f[k], num: true }];
+          }));
+      },
+    },
+    reactivationQueue: {
+      endpoint: function () { return "/api/admin/reactivation/journey/users?status=pending&limit=100"; },
+      render: function (d) {
+        var rows = (d.items || []).map(function (r) {
+          return [userLink(r.user_id, r.user_id), r.status || "—", r.tier1_voucher_status || "—", r.tier2_voucher_status || "—", r.tier3_voucher_status || "—", dt(r.updated_at)];
+        });
+        return simpleTable(
+          [{ label: "User" }, { label: "Status" }, { label: "Tier 1" }, { label: "Tier 2" }, { label: "Tier 3" }, { label: "Updated" }],
+          rows
+        );
+      },
+    },
+    reactivationRewards: {
+      endpoint: function () { return "/api/admin/reactivation/rewards?limit=100"; },
+      render: function (d) {
+        var s = d.summary || {};
+        var rows = (d.items || []).map(function (r) {
+          return [userLink(r.user_id, r.user_id), r.status || "—", { text: r.xp_awarded || 0, num: true }, dt(r.rewarded_at)];
+        });
+        return '<div class="card-grid" style="margin-bottom:12px;">' +
+          kpiCard("Pending", s.pending_rewards) + kpiCard("Rewarded", s.rewarded) +
+          kpiCard("Cancelled", s.cancelled_rewards) + kpiCard("Total XP Awarded", s.xp_awarded) +
+          '</div>' +
+          simpleTable([{ label: "User" }, { label: "Status" }, { label: "XP Awarded", num: true }, { label: "Rewarded At" }], rows);
+      },
+    },
+    reactivationPerformance: {
+      endpoint: function () { return "/api/admin/reactivation/journey/summary"; },
+      render: function (d) {
+        var oos = d.out_of_stock_by_tier || {};
+        return '<div class="card-grid">' +
+          kpiCard("Tier 1 Completed", d.tier1_completed) + kpiCard("Tier 1 Issued", d.tier1_issued) +
+          kpiCard("Tier 2 Completed", d.tier2_completed) + kpiCard("Tier 2 Issued", d.tier2_issued) +
+          kpiCard("Tier 3 Completed", d.tier3_completed) + kpiCard("Tier 3 Issued", d.tier3_issued) +
+          kpiCard("Out of Stock (T1/T2/T3)", (oos.tier1 || 0) + "/" + (oos.tier2 || 0) + "/" + (oos.tier3 || 0)) +
+          '</div>';
+      },
+    },
+    analyticsRetention: {
+      endpoint: function () { return "/api/admin/retention-kpis?months=12"; },
+      render: function (d) {
+        function pctFrac(v) { return (v === null || v === undefined) ? "—" : Math.round(v * 1000) / 10 + "%"; }
+        var rows = (d.data || []).map(function (r) {
+          return [
+            r.cohort_month, { text: r.cohort_size, num: true },
+            { text: pctFrac(r.d7_retention_rate), num: true }, { text: pctFrac(r.d14_retention_rate), num: true }, { text: pctFrac(r.d30_retention_rate), num: true },
+            { text: pctFrac(r.d30_claim_retention_rate), num: true },
+          ];
+        });
+        return simpleTable(
+          [{ label: "Cohort" }, { label: "Cohort Size", num: true }, { label: "D7 Retention", num: true }, { label: "D14 Retention", num: true }, { label: "D30 Retention", num: true }, { label: "D30 Claim Retention", num: true }],
+          rows
+        );
+      },
+    },
+    automationScheduler: {
+      endpoint: function () { return "/api/admin/dashboard/runtime-status"; },
+      render: function (d) {
+        var rows = (d.scheduler || []).map(function (r) {
+          return [r.job_name || r.key, r.cron || "—", r.enabled ? "Yes" : "No", r.status || "—", dt(r.last_run), r.notes || ""];
+        });
+        return simpleTable(
+          [{ label: "Job" }, { label: "Cron" }, { label: "Enabled" }, { label: "Status" }, { label: "Last Run" }, { label: "Notes" }],
+          rows
+        );
+      },
+    },
+    automationQueue: {
+      endpoint: function () { return "/api/admin/dashboard/runtime-status"; },
+      render: function (d) {
+        var rows = (d.queues || []).map(function (r) {
+          return [r.name || r.key, { text: r.pending, num: true }, r.status || "—"];
+        });
+        return simpleTable([{ label: "Queue" }, { label: "Pending", num: true }, { label: "Status" }], rows);
+      },
+    },
+    automationNotifications: {
+      endpoint: function () { return "/api/admin/automation/notifications?limit=100"; },
+      render: function (d) {
+        var rows = (d.items || []).map(function (r) {
+          return [r.type || "—", userLink(r.inviter_user_id, r.inviter_user_id), userLink(r.invitee_user_id, r.invitee_username || r.invitee_user_id), r.suppressed ? "Suppressed (" + (r.suppressed_reason || "—") + ")" : "Sent", dt(r.created_at)];
+        });
+        return simpleTable([{ label: "Type" }, { label: "Inviter" }, { label: "Invitee" }, { label: "Status" }, { label: "Created" }], rows);
+      },
+    },
+    automationRetryJobs: {
+      endpoint: function () { return "/api/admin/automation/retry-jobs?limit=100"; },
+      render: function (d) {
+        var rows = (d.items || []).map(function (r) {
+          return [r.source, userLink(r.user_id, r.user_id), r.status || "—", r.error || "—", dt(r.created_at)];
+        });
+        return '<div class="note" style="margin-bottom:12px;">Combined feed of failed voucher claims and failed reactivation DM sends — there is no single unified retry queue in the backend.</div>' +
+          simpleTable([{ label: "Source" }, { label: "User" }, { label: "Status" }, { label: "Error" }, { label: "Created" }], rows);
+      },
+    },
+  };
+
+  // Segments per-segment drilldown shares one endpoint parameterized by
+  // segment key, so it's generated rather than hand-written four times.
+  [
+    ["segmentHighValue", "high_value"],
+    ["segmentLowValue", "low_value"],
+    ["segmentActiveCommunity", "active_community_player"],
+    ["segmentGhost", "ghost"],
+  ].forEach(function (pair) {
+    var key = pair[0], segment = pair[1];
+    DATA_VIEWS[key] = {
+      endpoint: function () { return "/api/admin/segments/users?segment=" + segment + "&limit=200"; },
+      render: function (d) {
+        var rows = (d.items || []).map(function (u) {
+          return [userLink(u.user_id, u.username ? "@" + u.username : u.user_id), u.first_name || "—", dt(u.last_checkin), { text: u.streak || 0, num: true }, dt(u.bot_segment_synced_at)];
+        });
+        var note = d.truncated ? '<div class="note" style="margin-bottom:12px;">Showing first ' + (d.items || []).length + ' matches (scanned ' + fmt(d.scanned) + ' users).</div>' : "";
+        return note + simpleTable([{ label: "User" }, { label: "Name" }, { label: "Last Check-in" }, { label: "Streak", num: true }, { label: "Segment Synced" }], rows);
+      },
+    };
+  });
+
+  function loadDataView(key, force) {
+    var cfg = DATA_VIEWS[key];
+    var host = $("#dataview-body");
+    var cardsHost = $("#dataview-cards");
+    if (!cfg || !host) return;
+    if (cardsHost) cardsHost.innerHTML = "";
+    host.innerHTML = emptyState("Loading...");
+    api(cfg.endpoint() + (force ? (cfg.endpoint().indexOf("?") >= 0 ? "&" : "?") + "refresh=1" : ""))
+      .then(function (d) {
+        host.innerHTML = cfg.render(d);
+        if (cfg.bind) cfg.bind();
+      })
+      .catch(function (e) {
+        if (e.message !== "unauthorized") host.innerHTML = '<div class="banner error">Failed: ' + esc(e.message) + "</div>";
+      });
+  }
+
+  var VIEWS =["summary", "moduleOverview", "placeholder", "dataView", "funnel", "abuse", "campaignBuilder", "campaignPerformance", "campaignIntelligence", "activeCampaigns", "draftCampaigns", "compiledDrops", "campaigns", "gcCampaigns", "gcProviders", "gcResults", "gcRewards", "gcVerification", "gcActivity", "vouchers", "drops", "referrals", "affiliate", "affiliatePools", "affiliatePending", "reactivation", "audit", "segmentProbabilityConfig", "segmentRoi", "segments", "validation", "backendSegmentEngine", "voucherHunterAudit", "unclassifiedAudit", "segmentRuleSimulator", "voucherHunterQuality", "voucherHunterFalsePositive", "voucherHunterRuleSimulator", "vhPriorityImpact", "uploadPlayerPerformance", "uploadHistory", "rawExplorer", "users", "joinRequests", "xpAdjust", "settings"];
 
   // ---------------------------------------------------------------------
   // Information architecture: sidebar Business Modules, each with its own
@@ -5226,56 +5475,34 @@
       { label: "Active Drops", view: "drops", live: true },
       { label: "Voucher Pools", view: "compiledDrops" },
       { label: "Voucher Codes", view: "vouchers" },
+      { label: "Affiliate Pools", view: "affiliatePools", live: true },
+      { label: "Pending Rewards", view: "affiliatePending", live: true },
       { label: "Settings", view: "settings" }
     ]},
     { key: "community", icon: "👥", label: "Community Centre", tabs: [
       { label: "Overview", view: "moduleOverview", overviewKey: "community" },
-      { label: "Members", view: "placeholder", ph: { title: "Members", desc: "Community member directory is not yet wired to an admin data source." } },
-      { label: "Growth", view: "placeholder", ph: { title: "Growth", desc: "Join / leave growth analytics is not yet wired to an admin data source." } },
-      { label: "Check-in", view: "placeholder", ph: { title: "Check-in", desc: "Check-in operations are not yet wired to an admin data source." } },
-      { label: "Engagement", view: "placeholder", ph: { title: "Engagement", desc: "Engagement analytics is not yet wired to an admin data source." } },
+      { label: "Members", view: "dataView", dataKey: "communityMembers" },
+      { label: "Growth", view: "dataView", dataKey: "communityGrowth" },
+      { label: "Check-in", view: "dataView", dataKey: "communityCheckin" },
+      { label: "Engagement", view: "dataView", dataKey: "communityEngagement" },
       { label: "Leaderboard", external: "/static/index.html#admin-panel" },
-      { label: "Broadcast", view: "placeholder", ph: { title: "Broadcast", desc: "Broadcast tools are not yet wired to an admin data source." } }
-    ]},
-    { key: "affiliate", icon: "🤝", label: "Affiliate Centre", tabs: [
-      { label: "Overview", view: "affiliate" },
-      { label: "Pending Approval", view: "affiliatePending", live: true },
-      { label: "Voucher Pools", view: "affiliatePools", live: true },
-      { label: "Rewards", view: "placeholder", ph: { title: "Rewards", desc: "Affiliate reward ledger is not yet wired to an admin data source." } },
-      { label: "Payouts", view: "placeholder", ph: { title: "Payouts", desc: "Payout batches are not yet wired to an admin data source." } },
-      { label: "Analytics", view: "placeholder", ph: { title: "Analytics", desc: "Affiliate analytics is not yet wired to an admin data source." } }
-    ]},
-    { key: "referral", icon: "🔗", label: "Referral Centre", tabs: [
-      { label: "Overview", view: "moduleOverview", overviewKey: "referral" },
-      { label: "Performance", view: "referrals" },
-      { label: "Pending", view: "placeholder", ph: { title: "Pending", desc: "Pending referral qualification queue is not yet wired to an admin data source." } },
-      { label: "Rewards", view: "placeholder", ph: { title: "Rewards", desc: "Referral reward ledger is not yet wired to an admin data source." } },
-      { label: "Leaderboard", view: "placeholder", ph: { title: "Leaderboard", desc: "Referral leaderboard is not yet wired to an admin data source." } },
-      { label: "Analytics", view: "placeholder", ph: { title: "Analytics", desc: "Referral analytics is not yet wired to an admin data source." } }
-    ]},
-    { key: "welcome", icon: "🎁", label: "Welcome Journey", tabs: [
-      { label: "Overview", view: "moduleOverview", overviewKey: "welcome" },
-      { label: "Journey", external: "/static/welcome-journey-runtime.html" },
-      { label: "Rewards", view: "placeholder", ph: { title: "Rewards", desc: "Welcome reward ledger is not yet wired to an admin data source." } },
-      { label: "Funnel", view: "funnel" },
-      { label: "Drop-off", view: "placeholder", ph: { title: "Drop-off", desc: "Drop-off analysis is not yet wired to an admin data source." } },
-      { label: "Analytics", view: "placeholder", ph: { title: "Analytics", desc: "Welcome journey analytics is not yet wired to an admin data source." } }
+      { label: "Broadcast", view: "placeholder", ph: { title: "Broadcast", desc: "Sending a message to all community members is a production action with real blast radius (rate limits, spam risk to real Telegram users) — it needs an explicit go-ahead before being wired up live." } }
     ]},
     { key: "reactivation", icon: "🔄", label: "Reactivation Centre", tabs: [
       { label: "Overview", view: "moduleOverview", overviewKey: "reactivation" },
       { label: "Campaigns", view: "reactivation", live: true },
-      { label: "Eligible Users", view: "placeholder", ph: { title: "Eligible Users", desc: "Eligible-user queue is not yet wired to an admin data source." } },
-      { label: "Queue", view: "placeholder", ph: { title: "Queue", desc: "Reactivation send queue is not yet wired to an admin data source." } },
-      { label: "Rewards", view: "placeholder", ph: { title: "Rewards", desc: "Reactivation reward ledger is not yet wired to an admin data source." } },
-      { label: "Performance", view: "placeholder", ph: { title: "Performance", desc: "Reactivation performance analytics is not yet wired to an admin data source." } }
+      { label: "Eligible Users", view: "dataView", dataKey: "reactivationEligible" },
+      { label: "Queue", view: "dataView", dataKey: "reactivationQueue" },
+      { label: "Rewards", view: "dataView", dataKey: "reactivationRewards" },
+      { label: "Performance", view: "dataView", dataKey: "reactivationPerformance" }
     ]},
     { key: "segments", icon: "👤", label: "Segments", tabs: [
       { label: "Overview", view: "segments" },
       { label: "All Players", view: "users" },
-      { label: "High Value", view: "placeholder", ph: { title: "High Value", desc: "Per-segment drilldown is not yet wired to an admin data source — see Overview for distribution." } },
-      { label: "Low Value", view: "placeholder", ph: { title: "Low Value", desc: "Per-segment drilldown is not yet wired to an admin data source — see Overview for distribution." } },
-      { label: "Active Community", view: "placeholder", ph: { title: "Active Community", desc: "Per-segment drilldown is not yet wired to an admin data source — see Overview for distribution." } },
-      { label: "Ghost", view: "placeholder", ph: { title: "Ghost", desc: "Per-segment drilldown is not yet wired to an admin data source — see Overview for distribution." } },
+      { label: "High Value", view: "dataView", dataKey: "segmentHighValue" },
+      { label: "Low Value", view: "dataView", dataKey: "segmentLowValue" },
+      { label: "Active Community", view: "dataView", dataKey: "segmentActiveCommunity" },
+      { label: "Ghost", view: "dataView", dataKey: "segmentGhost" },
       { label: "Simulator", view: "segmentRuleSimulator" },
       { label: "VH: Mismatch Audit", view: "voucherHunterAudit" },
       { label: "VH: Unclassified", view: "unclassifiedAudit" },
@@ -5288,18 +5515,18 @@
     { key: "analytics", icon: "📊", label: "Analytics", tabs: [
       { label: "Executive", view: "summary" },
       { label: "Funnels", view: "funnel" },
-      { label: "Revenue", view: "placeholder", ph: { title: "Revenue", desc: "Revenue analytics is not yet wired to an admin data source." } },
-      { label: "Retention", view: "placeholder", ph: { title: "Retention", desc: "Retention analytics is not yet wired to an admin data source." } },
+      { label: "Revenue", view: "placeholder", ph: { title: "Revenue", desc: "No revenue field exists anywhere in the data model — only turnover (total bet amount) is tracked. Needs a decision on whether to surface turnover as a labeled proxy or leave this pending a real revenue data source." } },
+      { label: "Retention", view: "dataView", dataKey: "analyticsRetention" },
       { label: "Campaign", view: "campaignPerformance" },
       { label: "ROI", view: "segmentRoi" },
       { label: "Cohorts", view: "backendSegmentEngine" },
       { label: "Data Validation", view: "validation" }
     ]},
     { key: "automation", icon: "🤖", label: "Automation", tabs: [
-      { label: "Scheduler", view: "placeholder", ph: { title: "Scheduler", desc: "Scheduler control panel is not yet wired to an admin data source." } },
-      { label: "Queue", view: "placeholder", ph: { title: "Queue", desc: "Job queue view is not yet wired to an admin data source." } },
-      { label: "Notifications", view: "placeholder", ph: { title: "Notifications", desc: "Notification log is not yet wired to an admin data source." } },
-      { label: "Retry Jobs", view: "placeholder", ph: { title: "Retry Jobs", desc: "Retry job view is not yet wired to an admin data source." } },
+      { label: "Scheduler", view: "dataView", dataKey: "automationScheduler" },
+      { label: "Queue", view: "dataView", dataKey: "automationQueue" },
+      { label: "Notifications", view: "dataView", dataKey: "automationNotifications" },
+      { label: "Retry Jobs", view: "dataView", dataKey: "automationRetryJobs" },
       { label: "Logs", view: "uploadHistory" },
       { label: "Health", external: "/static/runtime-status.html" },
       { label: "Upload Data", view: "uploadPlayerPerformance", live: true },
@@ -5312,9 +5539,6 @@
       { label: "XP", view: "xpAdjust", live: true },
       { label: "Rewards", view: "settings" },
       { label: "Voucher Rules", view: "settings" },
-      { label: "Referral", view: "settings" },
-      { label: "Affiliate", view: "settings" },
-      { label: "Welcome Journey", view: "settings" },
       { label: "Reactivation", view: "settings" },
       { label: "Security", view: "settings" },
       { label: "Integrations", view: "settings" },
@@ -5409,6 +5633,9 @@
       $("#placeholder-heading").textContent = tab.ph.title;
       $("#placeholder-desc").textContent = tab.ph.desc;
     }
+    if (tab.view === "dataView" && tab.dataKey) {
+      state.dataKey = tab.dataKey;
+    }
     inActivateTab = true;
     switchView(tab.view);
     inActivateTab = false;
@@ -5467,7 +5694,7 @@
       updateBreadcrumb(found.moduleKey, found.tabIndex);
     }
     var titles = {
-      summary: "Executive Summary", moduleOverview: "Overview", placeholder: "Coming Soon",
+      summary: "Executive Summary", moduleOverview: "Overview", placeholder: "Coming Soon", dataView: "Data",
       funnel: "Activation Funnel", abuse: "Abuse Overview",
       campaignBuilder: "Campaign Builder (P2)", campaignPerformance: "Campaign Performance (P4)",
       campaignIntelligence: "Campaign Intelligence (P5)", activeCampaigns: "Active Campaigns",
@@ -5522,6 +5749,7 @@
     else if (state.view === "affiliatePools") loadAffiliatePools(force);
     else if (state.view === "affiliatePending") loadAffiliatePending(force);
     else if (state.view === "reactivation") { loadReactivation(force); loadReactivationJourneyConfig(); }
+    else if (state.view === "dataView") loadDataView(state.dataKey, force);
     else if (state.view === "audit") loadAudit(force);
     else if (state.view === "segmentProbabilityConfig") loadSegmentProbabilityConfig(force);
     else if (state.view === "segmentRoi") loadSegmentRoi(force);
