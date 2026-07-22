@@ -7,7 +7,10 @@ count_documents for the write patterns used in this codebase.
 from __future__ import annotations
 
 import itertools
+import re
 from copy import deepcopy
+
+from bson import ObjectId
 
 
 class DuplicateKeyError(Exception):
@@ -48,10 +51,23 @@ def _matches(doc: dict, query: dict) -> bool:
                     return False
                 if op == "$exists" and (val is not None) != bool(target):
                     return False
+                if op == "$regex":
+                    flags = re.IGNORECASE if "i" in (cond.get("$options") or "") else 0
+                    if val is None or not re.search(target, val, flags):
+                        return False
         else:
             if val != cond:
                 return False
     return True
+
+
+def _sort_key(value):
+    """Sort key that mirrors MongoDB's ascending order (missing/None sorts
+    first) without erroring when a field mixes ``None`` and typed values
+    (e.g. ``last_selected_at`` before/after first use) — plain values of
+    different types aren't directly comparable in Python.
+    """
+    return (0, None) if value is None else (1, value)
 
 
 def _set_dotted(doc: dict, dotted_key: str, value) -> None:
@@ -83,7 +99,10 @@ class FakeCollection:
         self._unique_keys = unique_keys or []
 
     def _next_id(self):
-        return f"fakeid{next(self._id_counter)}"
+        # A real bson.ObjectId (not a lookalike string) so routes that do
+        # ObjectId(url_param) and compare against a stored `_id` behave
+        # exactly as they would against a real MongoDB collection.
+        return ObjectId(format(next(self._id_counter), "024x"))
 
     def _check_unique(self, doc: dict, exclude=None):
         for keyset in self._unique_keys:
@@ -100,19 +119,16 @@ class FakeCollection:
         self._docs.append(doc)
         return type("Result", (), {"inserted_id": doc["_id"]})()
 
-    def find_one(self, query: dict | None = None, projection=None):
-        query = query or {}
-        for doc in self._docs:
-            if _matches(doc, query):
-                return deepcopy(doc)
-        return None
+    def find_one(self, query: dict | None = None, projection=None, sort=None):
+        results = self.find(query, sort=sort, limit=1)
+        return results[0] if results else None
 
     def find(self, query: dict | None = None, sort=None, limit=None, skip=None, projection=None):
         query = query or {}
         results = [deepcopy(d) for d in self._docs if _matches(d, query)]
         if sort:
             for field, direction in reversed(sort):
-                results.sort(key=lambda d, f=field: d.get(f) if d.get(f) is not None else 0,
+                results.sort(key=lambda d, f=field: _sort_key(d.get(f)),
                              reverse=(direction < 0))
         if skip:
             results = results[skip:]
@@ -122,6 +138,13 @@ class FakeCollection:
 
     def count_documents(self, query: dict | None = None) -> int:
         return len(self.find(query))
+
+    def delete_one(self, query: dict):
+        for i, doc in enumerate(self._docs):
+            if _matches(doc, query):
+                del self._docs[i]
+                return type("Result", (), {"deleted_count": 1})()
+        return type("Result", (), {"deleted_count": 0})()
 
     def update_one(self, query: dict, update: dict, upsert=False):
         for i, doc in enumerate(self._docs):
@@ -140,7 +163,7 @@ class FakeCollection:
         candidates = [d for d in self._docs if _matches(d, query)]
         if sort:
             for field, direction in reversed(sort):
-                candidates.sort(key=lambda d, f=field: d.get(f) if d.get(f) is not None else 0,
+                candidates.sort(key=lambda d, f=field: _sort_key(d.get(f)),
                                  reverse=(direction < 0))
         if not candidates:
             return None

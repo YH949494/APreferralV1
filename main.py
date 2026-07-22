@@ -2399,6 +2399,9 @@ app.register_blueprint(campaign_rewards_bp)
 from campaign_events import campaign_events_bp
 app.register_blueprint(campaign_events_bp)
 
+from referral_share_content import referral_share_content_bp
+app.register_blueprint(referral_share_content_bp)
+
 admin_bp = Blueprint("admin", __name__)
 
 
@@ -7900,8 +7903,10 @@ _REFERRAL_LINK_GENERATION_COOLDOWN_SECONDS = 5
 
 
 async def generate_referral_link_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles the '🔗 Generate My Referral Link' button on /start: replies in-chat
-    with the user's real Telegram group invite link instead of opening the Mini-App.
+    """Handles the '🔗 Generate My Referral Link' / Copy-Share button on /start:
+    assembles the Share Content package (caption hook + playback URL + the
+    user's canonical referral invite link) and replies in-chat with the
+    exact copyable message, plus a Share button prefilled with that message.
     """
     query = update.callback_query
     await query.answer()
@@ -7927,31 +7932,10 @@ async def generate_referral_link_callback(update: Update, context: ContextTypes.
         return
     _referral_link_generation_last_attempt[uid] = now
 
+    from referral_share_content import generate_share_package
+
     try:
-        referral_link, reused = await _generate_referral_link_for_user(uid, username)
-
-        share_params = urlencode({"url": referral_link, "text": "Join me on AdvantPlay!"})
-        share_keyboard = InlineKeyboardMarkup(
-            [[InlineKeyboardButton("📤 Share Referral Link", url=f"https://t.me/share/url?{share_params}")]]
-        )
-
-        escaped_link = html_escape(referral_link)
-        await safe_send_message(
-            context.bot,
-            chat_id=uid,
-            text=(
-                "🔗 Your unique referral link:\n\n"
-                f"<blockquote>{escaped_link}</blockquote>\n\n"
-                "Tap and hold the link to copy it, or use the Share button below."
-            ),
-            parse_mode=ParseMode.HTML,
-            disable_web_page_preview=True,
-            reply_markup=share_keyboard,
-            uid=uid,
-            send_type="referral_link",
-            raise_on_non_transient=False,
-        )
-        logger.info("[REFERRAL][START_CALLBACK_OK] uid=%s reused=%s", uid, reused)
+        result = await asyncio.to_thread(generate_share_package, uid, username)
     except Exception as e:
         logger.error("[REFERRAL][START_CALLBACK_FAILED] uid=%s error=%s", uid, type(e).__name__)
         await safe_send_message(
@@ -7965,6 +7949,47 @@ async def generate_referral_link_callback(update: Update, context: ContextTypes.
             send_type="referral_link_failed",
             raise_on_non_transient=False,
         )
+        return
+
+    if not result.get("ok"):
+        code = result.get("code")
+        if code == "no_active_playback":
+            text = "⏳ No playback is currently available. Please try again later."
+        else:
+            text = (
+                "❌ We couldn’t generate your referral link right now.\n\n"
+                "Please tap the button again shortly."
+            )
+        logger.error("[REFERRAL][START_CALLBACK_FAILED] uid=%s code=%s", uid, code)
+        await safe_send_message(
+            context.bot,
+            chat_id=uid,
+            text=text,
+            uid=uid,
+            send_type="referral_link_failed",
+            raise_on_non_transient=False,
+        )
+        return
+
+    message = result["message"]
+    invite_link = result["invite_link"]
+
+    share_params = urlencode({"url": invite_link, "text": message})
+    share_keyboard = InlineKeyboardMarkup(
+        [[InlineKeyboardButton("📤 Share Referral Link", url=f"https://t.me/share/url?{share_params}")]]
+    )
+
+    await safe_send_message(
+        context.bot,
+        chat_id=uid,
+        text=message,
+        disable_web_page_preview=True,
+        reply_markup=share_keyboard,
+        uid=uid,
+        send_type="referral_link",
+        raise_on_non_transient=False,
+    )
+    logger.info("[REFERRAL][START_CALLBACK_OK] uid=%s", uid)
 
 # ----------------------------
 # Run Bot + Flask + Scheduler

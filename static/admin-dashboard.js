@@ -78,6 +78,14 @@
     });
   }
 
+  function apiDelete(path) {
+    return fetch(path, { method: "DELETE", credentials: "same-origin", headers: { "Accept": "application/json" } })
+      .then(function (r) {
+        if (r.status === 401) { window.location.href = "/static/admin-login.html"; throw new Error("unauthorized"); }
+        return r.json().then(function (j) { return { ok: r.ok, status: r.status, d: j }; });
+      });
+  }
+
   function banner(msg, kind) {
     var el = $("#global-banner");
     if (!msg) { el.innerHTML = ""; return; }
@@ -4972,6 +4980,219 @@
     }
   }
 
+  // ---------------------------------------------------------------------
+  // Referral Centre -> Share Content (Caption Hooks / Playback Pool)
+  // ---------------------------------------------------------------------
+  var rsc = { subtab: "hooks" };
+
+  function rscStatusPill(status) {
+    return '<span class="pill ' + (status === "active" ? "approved" : "neutral") + '">' + esc(status || "—") + '</span>';
+  }
+
+  function rscStatusFilter(id) {
+    var activeBtn = $("#" + id + " .active");
+    return activeBtn ? (activeBtn.dataset.status || "") : "";
+  }
+
+  function rscQuery(searchId, filterId) {
+    var q = ($("#" + searchId) && $("#" + searchId).value || "").trim();
+    var status = rscStatusFilter(filterId);
+    var params = [];
+    if (q) params.push("q=" + encodeURIComponent(q));
+    if (status) params.push("status=" + encodeURIComponent(status));
+    return params.length ? "?" + params.join("&") : "";
+  }
+
+  function loadReferralShareContent(force) {
+    $("#rsc-subtab-hooks").classList.toggle("active", rsc.subtab === "hooks");
+    $("#rsc-subtab-playback").classList.toggle("active", rsc.subtab === "playback");
+    $("#rsc-hooks-panel").classList.toggle("hidden", rsc.subtab !== "hooks");
+    $("#rsc-playback-panel").classList.toggle("hidden", rsc.subtab !== "playback");
+    if (rsc.subtab === "hooks") loadShareHooks(force);
+    else loadSharePlayback(force);
+  }
+
+  function loadShareHooks() {
+    statePanel("rsc-hooks-body", "loading", "Loading caption hooks…");
+    api("/api/admin/referral/share-content/hooks" + rscQuery("rsc-hooks-search", "rsc-hooks-status-filter")).then(function (data) {
+      var items = data.hooks || [];
+      if (!items.length) { $("#rsc-hooks-body").innerHTML = emptyState("No caption hooks yet — add one above."); return; }
+      var rows = items.map(function (h) {
+        return '<tr><td>' + esc(h.text) + '</td>' +
+          '<td>' + rscStatusPill(h.status) + '</td>' +
+          '<td>' + fmt(h.times_selected || 0) + '</td>' +
+          '<td class="sub">' + (h.last_selected_at ? new Date(h.last_selected_at).toLocaleString() : "—") + '</td>' +
+          '<td class="sub">' + (h.created_at ? new Date(h.created_at).toLocaleString() : "—") + '</td>' +
+          '<td>' +
+          '<button class="btn" data-rsc-hook-action="edit" data-id="' + esc(h.id) + '" data-text="' + esc(h.text) + '">Edit</button> ' +
+          '<button class="btn" data-rsc-hook-action="' + (h.status === "active" ? "deactivate" : "activate") + '" data-id="' + esc(h.id) + '">' +
+          (h.status === "active" ? "Deactivate" : "Activate") + '</button> ' +
+          '<button class="btn danger" data-rsc-hook-action="delete" data-id="' + esc(h.id) + '">Delete</button>' +
+          '</td></tr>';
+      }).join("");
+      $("#rsc-hooks-body").innerHTML = '<table class="data-table"><thead><tr><th>Hook</th><th>Status</th><th>Times Selected</th>' +
+        '<th>Last Selected</th><th>Created</th><th>Actions</th></tr></thead><tbody>' + rows + '</tbody></table>';
+    }).catch(function (e) { statePanel("rsc-hooks-body", "error", "Failed to load caption hooks: " + e.message); });
+  }
+
+  function rscRenderBulkResult(elId, body) {
+    var el = $(elId);
+    if (!el) return;
+    var lines = (body.results || []).map(function (r) {
+      var tag = r.status === "inserted" ? "approved" : (r.status === "rejected" ? "rejected" : "neutral");
+      return '<div><span class="pill ' + tag + '">' + esc(r.status) + '</span> ' + esc(r.line) + (r.reason ? ' <span class="sub">(' + esc(r.reason) + ')</span>' : '') + '</div>';
+    }).join("");
+    el.innerHTML = '<div class="sub" style="margin:6px 0;">Inserted: ' + fmt(body.inserted) + ' · Skipped: ' + fmt(body.skipped) + ' · Rejected: ' + fmt(body.rejected) + '</div>' + lines;
+  }
+
+  function bindReferralShareContent() {
+    $("#rsc-subtab-hooks").addEventListener("click", function () { rsc.subtab = "hooks"; loadReferralShareContent(true); });
+    $("#rsc-subtab-playback").addEventListener("click", function () { rsc.subtab = "playback"; loadReferralShareContent(true); });
+
+    $("#rsc-hooks-search-btn").addEventListener("click", function () { loadShareHooks(true); });
+    $all("#rsc-hooks-status-filter button").forEach(function (b) {
+      b.addEventListener("click", function () {
+        $all("#rsc-hooks-status-filter button").forEach(function (x) { x.classList.toggle("active", x === b); });
+        loadShareHooks(true);
+      });
+    });
+    $("#rsc-hook-add-btn").addEventListener("click", function () {
+      var text = ($("#rsc-hook-text").value || "").trim();
+      if (!text) { toast("❌ Hook text is required", "error"); return; }
+      apiPostJson("/api/admin/referral/share-content/hooks", { text: text }).then(function (res) {
+        if (!res.ok || res.d.status !== "ok") { toast("❌ " + (res.d && res.d.code || "create_failed"), "error"); return; }
+        toast("✅ Hook added", "success");
+        $("#rsc-hook-text").value = "";
+        loadShareHooks(true);
+      });
+    });
+    $("#rsc-hooks-bulk-btn").addEventListener("click", function () {
+      var lines = $("#rsc-hooks-bulk-text").value || "";
+      apiPostJson("/api/admin/referral/share-content/hooks/bulk-import", { lines: lines }).then(function (res) {
+        if (!res.ok) { toast("❌ Bulk import failed", "error"); return; }
+        rscRenderBulkResult("#rsc-hooks-bulk-result", res.d);
+        toast("✅ Bulk import done (" + res.d.inserted + " inserted)", "success");
+        $("#rsc-hooks-bulk-text").value = "";
+        loadShareHooks(true);
+      });
+    });
+    document.addEventListener("click", function (e) {
+      var btn = e.target && e.target.closest && e.target.closest("[data-rsc-hook-action]");
+      if (!btn) return;
+      var action = btn.dataset.rscHookAction, id = btn.dataset.id;
+      if (action === "edit") {
+        var newText = prompt("Edit hook text:", btn.dataset.text || "");
+        if (newText === null) return;
+        newText = newText.trim();
+        if (!newText) { toast("❌ Hook text is required", "error"); return; }
+        apiPutJson("/api/admin/referral/share-content/hooks/" + id, { text: newText }).then(function (res) {
+          if (!res.ok || res.d.status !== "ok") { toast("❌ " + (res.d && res.d.code || "update_failed"), "error"); return; }
+          toast("✅ Hook updated", "success");
+          loadShareHooks(true);
+        });
+      } else if (action === "activate" || action === "deactivate") {
+        apiPost("/api/admin/referral/share-content/hooks/" + id + "/" + action).then(function (r) {
+          if (r.status !== "ok") toast("❌ " + r.code, "error");
+          loadShareHooks(true);
+        });
+      } else if (action === "delete") {
+        if (!confirm("Delete this caption hook? This cannot be undone.")) return;
+        apiDelete("/api/admin/referral/share-content/hooks/" + id).then(function (res) {
+          if (!res.ok || res.d.status !== "ok") { toast("❌ " + (res.d && res.d.code || "delete_failed"), "error"); return; }
+          toast("✅ Hook deleted", "success");
+          loadShareHooks(true);
+        });
+      }
+    });
+
+    $("#rsc-playback-search-btn").addEventListener("click", function () { loadSharePlayback(true); });
+    $all("#rsc-playback-status-filter button").forEach(function (b) {
+      b.addEventListener("click", function () {
+        $all("#rsc-playback-status-filter button").forEach(function (x) { x.classList.toggle("active", x === b); });
+        loadSharePlayback(true);
+      });
+    });
+    $("#rsc-playback-add-btn").addEventListener("click", function () {
+      var url = ($("#rsc-playback-url").value || "").trim();
+      var gameName = ($("#rsc-playback-game-name").value || "").trim();
+      if (!url) { toast("❌ Playback URL or ID is required", "error"); return; }
+      apiPostJson("/api/admin/referral/share-content/playback", { url: url, game_name: gameName }).then(function (res) {
+        if (!res.ok || res.d.status !== "ok") { toast("❌ " + (res.d && res.d.code || "create_failed"), "error"); return; }
+        toast("✅ Playback record added", "success");
+        $("#rsc-playback-url").value = "";
+        $("#rsc-playback-game-name").value = "";
+        loadSharePlayback(true);
+      });
+    });
+    $("#rsc-playback-bulk-btn").addEventListener("click", function () {
+      var lines = $("#rsc-playback-bulk-text").value || "";
+      apiPostJson("/api/admin/referral/share-content/playback/bulk-import", { lines: lines }).then(function (res) {
+        if (!res.ok) { toast("❌ Bulk import failed", "error"); return; }
+        rscRenderBulkResult("#rsc-playback-bulk-result", res.d);
+        toast("✅ Bulk import done (" + res.d.inserted + " inserted)", "success");
+        $("#rsc-playback-bulk-text").value = "";
+        loadSharePlayback(true);
+      });
+    });
+    document.addEventListener("click", function (e) {
+      var btn = e.target && e.target.closest && e.target.closest("[data-rsc-playback-action]");
+      if (!btn) return;
+      var action = btn.dataset.rscPlaybackAction, id = btn.dataset.id;
+      if (action === "edit") {
+        var newUrl = prompt("Edit playback URL or ID:", btn.dataset.playbackId || "");
+        if (newUrl === null) return;
+        newUrl = newUrl.trim();
+        var newGameName = prompt("Edit game name:", btn.dataset.gameName || "");
+        if (newGameName === null) return;
+        var body = {};
+        if (newUrl) body.url = newUrl;
+        body.game_name = newGameName.trim();
+        apiPutJson("/api/admin/referral/share-content/playback/" + id, body).then(function (res) {
+          if (!res.ok || res.d.status !== "ok") { toast("❌ " + (res.d && res.d.code || "update_failed"), "error"); return; }
+          toast("✅ Playback record updated", "success");
+          loadSharePlayback(true);
+        });
+      } else if (action === "activate" || action === "deactivate") {
+        apiPost("/api/admin/referral/share-content/playback/" + id + "/" + action).then(function (r) {
+          if (r.status !== "ok") toast("❌ " + r.code, "error");
+          loadSharePlayback(true);
+        });
+      } else if (action === "delete") {
+        if (!confirm("Delete this playback record? This cannot be undone.")) return;
+        apiDelete("/api/admin/referral/share-content/playback/" + id).then(function (res) {
+          if (!res.ok || res.d.status !== "ok") { toast("❌ " + (res.d && res.d.code || "delete_failed"), "error"); return; }
+          toast("✅ Playback record deleted", "success");
+          loadSharePlayback(true);
+        });
+      }
+    });
+  }
+
+  function loadSharePlayback() {
+    statePanel("rsc-playback-body", "loading", "Loading playback pool…");
+    api("/api/admin/referral/share-content/playback" + rscQuery("rsc-playback-search", "rsc-playback-status-filter")).then(function (data) {
+      var items = data.playback || [];
+      if (!items.length) { $("#rsc-playback-body").innerHTML = emptyState("No playback records yet — add one above."); return; }
+      var rows = items.map(function (p) {
+        return '<tr><td>' + esc(p.playback_url) + '</td>' +
+          '<td class="sub">' + esc(p.playback_id) + '</td>' +
+          '<td>' + esc(p.game_name || "—") + '</td>' +
+          '<td>' + rscStatusPill(p.status) + '</td>' +
+          '<td>' + fmt(p.times_selected || 0) + '</td>' +
+          '<td class="sub">' + (p.last_selected_at ? new Date(p.last_selected_at).toLocaleString() : "—") + '</td>' +
+          '<td class="sub">' + (p.created_at ? new Date(p.created_at).toLocaleString() : "—") + '</td>' +
+          '<td>' +
+          '<button class="btn" data-rsc-playback-action="edit" data-id="' + esc(p.id) + '" data-playback-id="' + esc(p.playback_id) + '" data-game-name="' + esc(p.game_name || "") + '">Edit</button> ' +
+          '<button class="btn" data-rsc-playback-action="' + (p.status === "active" ? "deactivate" : "activate") + '" data-id="' + esc(p.id) + '">' +
+          (p.status === "active" ? "Deactivate" : "Activate") + '</button> ' +
+          '<button class="btn danger" data-rsc-playback-action="delete" data-id="' + esc(p.id) + '">Delete</button>' +
+          '</td></tr>';
+      }).join("");
+      $("#rsc-playback-body").innerHTML = '<table class="data-table"><thead><tr><th>Playback URL</th><th>Playback ID</th><th>Game</th><th>Status</th>' +
+        '<th>Times Selected</th><th>Last Selected</th><th>Created</th><th>Actions</th></tr></thead><tbody>' + rows + '</tbody></table>';
+    }).catch(function (e) { statePanel("rsc-playback-body", "error", "Failed to load playback pool: " + e.message); });
+  }
+
   function loadGcVerification(force) {
     statePanel("gc-verification-body", "loading", "Loading provider integration status…");
     api("/api/admin/providers").then(function (data) {
@@ -5187,7 +5408,7 @@
     });
   }
 
-  var VIEWS =["summary", "moduleOverview", "placeholder", "funnel", "abuse", "campaignBuilder", "campaignPerformance", "campaignIntelligence", "activeCampaigns", "draftCampaigns", "compiledDrops", "campaigns", "gcCampaigns", "gcProviders", "gcResults", "gcRewards", "gcVerification", "gcActivity", "vouchers", "drops", "referrals", "affiliate", "affiliatePools", "affiliatePending", "reactivation", "audit", "segmentProbabilityConfig", "segmentRoi", "segments", "validation", "backendSegmentEngine", "voucherHunterAudit", "unclassifiedAudit", "segmentRuleSimulator", "voucherHunterQuality", "voucherHunterFalsePositive", "voucherHunterRuleSimulator", "vhPriorityImpact", "uploadPlayerPerformance", "uploadHistory", "rawExplorer", "users", "joinRequests", "xpAdjust", "settings"];
+  var VIEWS =["summary", "moduleOverview", "placeholder", "funnel", "abuse", "campaignBuilder", "campaignPerformance", "campaignIntelligence", "activeCampaigns", "draftCampaigns", "compiledDrops", "campaigns", "gcCampaigns", "gcProviders", "gcResults", "gcRewards", "gcVerification", "gcActivity", "vouchers", "drops", "referrals", "affiliate", "affiliatePools", "affiliatePending", "reactivation", "audit", "segmentProbabilityConfig", "segmentRoi", "segments", "validation", "backendSegmentEngine", "voucherHunterAudit", "unclassifiedAudit", "segmentRuleSimulator", "voucherHunterQuality", "voucherHunterFalsePositive", "voucherHunterRuleSimulator", "vhPriorityImpact", "uploadPlayerPerformance", "uploadHistory", "rawExplorer", "users", "joinRequests", "xpAdjust", "settings", "referralShareContent"];
 
   // ---------------------------------------------------------------------
   // Information architecture: sidebar Business Modules, each with its own
@@ -5248,6 +5469,7 @@
     { key: "referral", icon: "🔗", label: "Referral Centre", tabs: [
       { label: "Overview", view: "moduleOverview", overviewKey: "referral" },
       { label: "Performance", view: "referrals" },
+      { label: "Share Content", view: "referralShareContent", live: true },
       { label: "Pending", view: "placeholder", ph: { title: "Pending", desc: "Pending referral qualification queue is not yet wired to an admin data source." } },
       { label: "Rewards", view: "placeholder", ph: { title: "Rewards", desc: "Referral reward ledger is not yet wired to an admin data source." } },
       { label: "Leaderboard", view: "placeholder", ph: { title: "Leaderboard", desc: "Referral leaderboard is not yet wired to an admin data source." } },
@@ -5491,7 +5713,7 @@
       uploadPlayerPerformance: "Data → Upload Player Performance", uploadHistory: "Data → Upload History",
       rawExplorer: "Data → Raw Data Explorer",
       users: "User Drilldown", joinRequests: "Join Requests", xpAdjust: "Add / Reduce XP",
-      settings: "Settings"
+      settings: "Settings", referralShareContent: "Referral Centre — Share Content"
     };
     if (!found && !inActivateTab) $("#view-title").textContent = titles[view] || view;
     banner(null);
@@ -5515,6 +5737,7 @@
     else if (state.view === "gcRewards") loadGcRewards(force);
     else if (state.view === "gcVerification") loadGcVerification(force);
     else if (state.view === "gcActivity") loadGcEvents(1);
+    else if (state.view === "referralShareContent") loadReferralShareContent(force);
     else if (state.view === "vouchers") loadVouchers(force);
     else if (state.view === "drops") loadDrops(force);
     else if (state.view === "referrals") loadReferrals(force);
@@ -5588,6 +5811,7 @@
     bindGcResults();
     bindGcRewards();
     bindGcActivity();
+    bindReferralShareContent();
     bindJoinRequests();
     bindXpAdjust();
     bindRejoinBufferSettings();

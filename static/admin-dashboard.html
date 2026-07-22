@@ -574,6 +574,68 @@
         <div id="referrals-body"></div>
       </section>
 
+      <section id="view-referralShareContent" class="hidden">
+        <div class="seg" style="margin-bottom:16px;">
+          <button id="rsc-subtab-hooks" class="active">Caption Hooks</button>
+          <button id="rsc-subtab-playback">Playback Pool</button>
+        </div>
+
+        <div id="rsc-hooks-panel">
+          <div class="section" style="margin-bottom:16px;">
+            <div class="section-title">Add Caption Hook</div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;">
+              <input class="filter-input" id="rsc-hook-text" placeholder="Hook text, e.g. 🔥 Big wins today!" style="flex:1;min-width:220px;margin:0;" />
+              <button class="btn primary" id="rsc-hook-add-btn">Add Hook</button>
+            </div>
+          </div>
+          <div class="section" style="margin-bottom:16px;">
+            <div class="section-title">Bulk Import <span class="sub">(one hook per non-empty line)</span></div>
+            <textarea id="rsc-hooks-bulk-text" rows="4" class="filter-input" style="width:100%;box-sizing:border-box;" placeholder="Hook one&#10;Hook two&#10;Hook three"></textarea>
+            <button class="btn" id="rsc-hooks-bulk-btn" style="margin-top:8px;">Import</button>
+            <div id="rsc-hooks-bulk-result"></div>
+          </div>
+          <div class="controls" style="margin-bottom:12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+            <input class="filter-input" id="rsc-hooks-search" placeholder="Search hook text…" style="margin:0;max-width:260px;" />
+            <button class="btn" id="rsc-hooks-search-btn">Search</button>
+            <div class="seg" id="rsc-hooks-status-filter">
+              <button data-status="" class="active">All</button>
+              <button data-status="active">Active</button>
+              <button data-status="inactive">Inactive</button>
+            </div>
+          </div>
+          <div class="section-title" style="margin-bottom:8px;">Caption Hooks</div>
+          <div id="rsc-hooks-body"></div>
+        </div>
+
+        <div id="rsc-playback-panel" class="hidden">
+          <div class="section" style="margin-bottom:16px;">
+            <div class="section-title">Add Playback Record</div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;">
+              <input class="filter-input" id="rsc-playback-url" placeholder="https://rx.apreplay.com/{playback_id} or bare playback_id" style="flex:1;min-width:260px;margin:0;" />
+              <input class="filter-input" id="rsc-playback-game-name" placeholder="Game name (optional)" style="min-width:160px;margin:0;" />
+              <button class="btn primary" id="rsc-playback-add-btn">Add</button>
+            </div>
+          </div>
+          <div class="section" style="margin-bottom:16px;">
+            <div class="section-title">Bulk Import <span class="sub">(one URL or playback_id per non-empty line)</span></div>
+            <textarea id="rsc-playback-bulk-text" rows="4" class="filter-input" style="width:100%;box-sizing:border-box;" placeholder="https://rx.apreplay.com/Abc12345&#10;Xyz98765"></textarea>
+            <button class="btn" id="rsc-playback-bulk-btn" style="margin-top:8px;">Import</button>
+            <div id="rsc-playback-bulk-result"></div>
+          </div>
+          <div class="controls" style="margin-bottom:12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+            <input class="filter-input" id="rsc-playback-search" placeholder="Search URL / ID / game name…" style="margin:0;max-width:260px;" />
+            <button class="btn" id="rsc-playback-search-btn">Search</button>
+            <div class="seg" id="rsc-playback-status-filter">
+              <button data-status="" class="active">All</button>
+              <button data-status="active">Active</button>
+              <button data-status="inactive">Inactive</button>
+            </div>
+          </div>
+          <div class="section-title" style="margin-bottom:8px;">Playback Pool</div>
+          <div id="rsc-playback-body"></div>
+        </div>
+      </section>
+
       <!-- AFFILIATE VIEW -->
       <section id="view-affiliate" class="hidden">
         <div class="card-grid" id="cards-affiliate-summary"></div>
