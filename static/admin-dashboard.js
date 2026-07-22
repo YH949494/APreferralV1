@@ -78,6 +78,17 @@
     });
   }
 
+  function apiPatchJson(path, body) {
+    return fetch(path, {
+      method: "PATCH", credentials: "same-origin",
+      headers: { "Accept": "application/json", "Content-Type": "application/json" },
+      body: JSON.stringify(body || {}),
+    }).then(function (r) {
+      if (r.status === 401) { window.location.href = "/static/admin-login.html"; throw new Error("unauthorized"); }
+      return r.json().then(function (j) { return { ok: r.ok, status: r.status, d: j }; });
+    });
+  }
+
   function apiDelete(path) {
     return fetch(path, { method: "DELETE", credentials: "same-origin", headers: { "Accept": "application/json" } })
       .then(function (r) {
@@ -164,6 +175,27 @@
         if (e.key === "Enter") done((input.value || "").trim() === word);
         if (e.key === "Escape") done(false);
       });
+    });
+  }
+
+  // ---------- Plain Yes/No confirmation modal (non-typed) ----------
+  function confirmSimple(title, message) {
+    return new Promise(function (resolve) {
+      var overlay = document.createElement("div");
+      overlay.className = "modal-overlay";
+      overlay.innerHTML =
+        '<div class="modal-box">' +
+        '<h3>' + esc(title) + '</h3>' +
+        '<p>' + esc(message) + '</p>' +
+        '<div class="modal-actions">' +
+        '<button class="btn" id="confirm-simple-cancel">Cancel</button>' +
+        '<button class="btn primary" id="confirm-simple-ok">Confirm</button>' +
+        '</div></div>';
+      document.body.appendChild(overlay);
+      function done(result) { overlay.remove(); resolve(result); }
+      overlay.querySelector("#confirm-simple-cancel").addEventListener("click", function () { done(false); });
+      overlay.querySelector("#confirm-simple-ok").addEventListener("click", function () { done(true); });
+      overlay.addEventListener("click", function (e) { if (e.target === overlay) done(false); });
     });
   }
 
@@ -5488,7 +5520,7 @@
     });
   }
 
-  var VIEWS =["summary", "moduleOverview", "placeholder", "funnel", "abuse", "campaignBuilder", "campaignPerformance", "campaignIntelligence", "activeCampaigns", "draftCampaigns", "compiledDrops", "campaigns", "gcCampaigns", "gcProviders", "gcResults", "gcRewards", "gcVerification", "gcActivity", "vouchers", "drops", "referrals", "affiliate", "affiliatePools", "affiliatePending", "reactivation", "audit", "segmentProbabilityConfig", "segmentRoi", "segments", "validation", "backendSegmentEngine", "voucherHunterAudit", "unclassifiedAudit", "segmentRuleSimulator", "voucherHunterQuality", "voucherHunterFalsePositive", "voucherHunterRuleSimulator", "vhPriorityImpact", "uploadPlayerPerformance", "uploadHistory", "rawExplorer", "users", "joinRequests", "xpAdjust", "settings", "referralShareContent"];
+  var VIEWS =["summary", "moduleOverview", "placeholder", "funnel", "abuse", "campaignBuilder", "campaignPerformance", "campaignIntelligence", "activeCampaigns", "draftCampaigns", "compiledDrops", "campaigns", "gcCampaigns", "gcProviders", "gcResults", "gcRewards", "gcVerification", "gcActivity", "vouchers", "drops", "referrals", "affiliate", "affiliatePools", "affiliatePending", "reactivation", "audit", "segmentProbabilityConfig", "segmentRoi", "segments", "validation", "backendSegmentEngine", "voucherHunterAudit", "unclassifiedAudit", "segmentRuleSimulator", "voucherHunterQuality", "voucherHunterFalsePositive", "voucherHunterRuleSimulator", "vhPriorityImpact", "uploadPlayerPerformance", "uploadHistory", "rawExplorer", "users", "joinRequests", "xpAdjust", "settings", "referralShareContent", "ccComposer", "ccCalendar", "ccBoard"];
 
   // ---------------------------------------------------------------------
   // Information architecture: sidebar Business Modules, each with its own
@@ -5530,13 +5562,16 @@
       { label: "Settings", view: "settings", settingsCategory: "voucher_rules" }
     ]},
     { key: "community", icon: "👥", label: "Community Centre", tabs: [
-      { label: "Overview", view: "moduleOverview", overviewKey: "community" },
+      { label: "Composer", view: "ccComposer", live: true },
+      { label: "Calendar", view: "ccCalendar" },
+      { label: "Scheduled", view: "ccBoard", ccBoard: "scheduled" },
+      { label: "Drafts", view: "ccBoard", ccBoard: "draft" },
+      { label: "Pending Approval", view: "ccBoard", ccBoard: "pending_approval" },
+      { label: "Published", view: "ccBoard", ccBoard: "published" },
+      { label: "Poll Results", view: "ccBoard", ccBoard: "poll_results" },
+      { label: "Failed", view: "ccBoard", ccBoard: "failed" },
       { label: "Members", view: "placeholder", ph: { title: "Members", desc: "Community member directory is not yet wired to an admin data source." } },
-      { label: "Growth", view: "placeholder", ph: { title: "Growth", desc: "Join / leave growth analytics is not yet wired to an admin data source." } },
-      { label: "Check-in", view: "placeholder", ph: { title: "Check-in", desc: "Check-in operations are not yet wired to an admin data source." } },
-      { label: "Engagement", view: "placeholder", ph: { title: "Engagement", desc: "Engagement analytics is not yet wired to an admin data source." } },
-      { label: "Leaderboard", external: "/static/index.html#admin-panel" },
-      { label: "Broadcast", view: "placeholder", ph: { title: "Broadcast", desc: "Broadcast tools are not yet wired to an admin data source." } }
+      { label: "Leaderboard", external: "/static/index.html#admin-panel" }
     ]},
     { key: "affiliate", icon: "🤝", label: "Affiliate Centre", tabs: [
       { label: "Overview", view: "affiliate" },
@@ -5627,6 +5662,7 @@
   var currentModuleKey = null;
   var currentTabIndex = 0;
   var currentSettingsCategory = null;
+  var currentCcBoard = null;
 
   function moduleByKey(key) {
     for (var i = 0; i < MODULES.length; i++) if (MODULES[i].key === key) return MODULES[i];
@@ -5638,7 +5674,7 @@
   // moduleOverview/placeholder are ambiguous (shared by many tabs) and are
   // intentionally excluded — those are always entered via activateTab().
   function findTabForView(view) {
-    if (view === "moduleOverview" || view === "placeholder") return null;
+    if (view === "moduleOverview" || view === "placeholder" || view === "ccBoard") return null;
     for (var i = 0; i < MODULES.length; i++) {
       var mod = MODULES[i];
       for (var j = 0; j < mod.tabs.length; j++) {
@@ -5705,6 +5741,7 @@
     currentModuleKey = moduleKey;
     currentTabIndex = tabIndex;
     currentSettingsCategory = tab.settingsCategory || null;
+    currentCcBoard = tab.ccBoard || null;
     renderSidebarActive(moduleKey);
     renderTabBar(moduleKey, tabIndex);
     updateBreadcrumb(moduleKey, tabIndex);
@@ -5797,7 +5834,9 @@
       uploadPlayerPerformance: "Data → Upload Player Performance", uploadHistory: "Data → Upload History",
       rawExplorer: "Data → Raw Data Explorer",
       users: "User Drilldown", joinRequests: "Join Requests", xpAdjust: "Add / Reduce XP",
-      settings: "Settings", referralShareContent: "Referral Centre — Share Content"
+      settings: "Settings", referralShareContent: "Referral Centre — Share Content",
+      ccComposer: "Community Centre — Composer", ccCalendar: "Community Centre — Calendar",
+      ccBoard: "Community Centre"
     };
     if (!found && !inActivateTab) $("#view-title").textContent = titles[view] || view;
     banner(null);
@@ -5857,6 +5896,9 @@
     else if (state.view === "joinRequests") { /* loads on Load Join Requests click */ }
     else if (state.view === "xpAdjust") { /* form submit only, no load */ }
     else if (state.view === "settings") loadSettings(force);
+    else if (state.view === "ccComposer") loadCcComposer(force);
+    else if (state.view === "ccCalendar") loadCcCalendar(force);
+    else if (state.view === "ccBoard") loadCcBoard(force);
   }
 
   function bind() {
@@ -5896,6 +5938,7 @@
     bindGcRewards();
     bindGcActivity();
     bindReferralShareContent();
+    bindCommunityCentre();
     bindJoinRequests();
     bindXpAdjust();
     $("#reactivation-start-btn").addEventListener("click", function () { setReactivation(true, this); });
@@ -6053,6 +6096,792 @@
     function doUserSearch() { loadUser((us.value || "").trim()); }
     if (ub) ub.addEventListener("click", doUserSearch);
     if (us) us.addEventListener("keydown", function (e) { if (e.key === "Enter") doUserSearch(); });
+  }
+
+  // =========================================================================
+  // COMMUNITY CENTRE — Composer / Calendar / Scheduled / Drafts / Pending
+  // Approval / Published / Poll Results / Failed
+  // =========================================================================
+
+  var cc = {
+    limits: null,
+    destinations: null,
+    media: [],
+    buttons: [],
+    pollOptions: [{ text: "" }, { text: "" }],
+    quizCorrect: 0,
+    editingId: null,
+    editingUpdatedAt: null,
+    calendarStart: null,
+  };
+
+  function ccPad2(n) { return (n < 10 ? "0" : "") + n; }
+
+  // Asia/Kuala_Lumpur is UTC+8 year-round (no DST) — fixed-offset conversion
+  // is exact, no timezone library needed.
+  function ccKlInputToUtcIso(val) {
+    if (!val) return null;
+    var m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/.exec(val);
+    if (!m) return null;
+    var ms = Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5]) - 8 * 3600 * 1000;
+    return new Date(ms).toISOString();
+  }
+
+  function ccUtcToKlInputValue(iso) {
+    if (!iso) return "";
+    var d = new Date(iso);
+    if (isNaN(d.getTime())) return "";
+    var kl = new Date(d.getTime() + 8 * 3600 * 1000);
+    return kl.getUTCFullYear() + "-" + ccPad2(kl.getUTCMonth() + 1) + "-" + ccPad2(kl.getUTCDate()) +
+      "T" + ccPad2(kl.getUTCHours()) + ":" + ccPad2(kl.getUTCMinutes());
+  }
+
+  function ccUtcToKlDisplay(iso) {
+    if (!iso) return "—";
+    var d = new Date(iso);
+    if (isNaN(d.getTime())) return "—";
+    var kl = new Date(d.getTime() + 8 * 3600 * 1000);
+    return kl.getUTCFullYear() + "-" + ccPad2(kl.getUTCMonth() + 1) + "-" + ccPad2(kl.getUTCDate()) +
+      " " + ccPad2(kl.getUTCHours()) + ":" + ccPad2(kl.getUTCMinutes()) + " KL";
+  }
+
+  var CC_CONTENT_ICON = { text: "📝", photo: "🖼", animation: "🎞", video: "🎬", media_group: "🗂", poll: "📊", quiz: "🧠" };
+
+  function ccEnsureMeta() {
+    var tasks = [];
+    if (!cc.limits) tasks.push(api("/api/admin/community/limits").then(function (d) { cc.limits = d.limits; }));
+    if (!cc.destinations) tasks.push(api("/api/admin/community/destinations").then(function (d) { cc.destinations = d.destinations || []; }));
+    return Promise.all(tasks);
+  }
+
+  function ccRenderDestinationSelect() {
+    var sel = $("#cc-destination");
+    if (!sel) return;
+    var prev = sel.value;
+    var enabled = (cc.destinations || []).filter(function (d) { return d.enabled; });
+    sel.innerHTML = enabled.length
+      ? enabled.map(function (d) { return '<option value="' + esc(d.key) + '"' + (d.key === prev ? " selected" : "") + '>' + esc(d.name) + "</option>"; }).join("")
+      : '<option value="">No destinations configured — add one in Settings → Integrations</option>';
+  }
+
+  // ---------- Composer: content-type-driven field visibility ----------
+  function ccUpdateContentTypeVisibility() {
+    var ct = $("#cc-content-type").value;
+    var isTextish = ct === "text" || ct === "photo" || ct === "animation" || ct === "video" || ct === "media_group";
+    var isMedia = ct === "photo" || ct === "animation" || ct === "video" || ct === "media_group";
+    var isPoll = ct === "poll" || ct === "quiz";
+    $("#cc-text-fields").classList.toggle("hidden", !isTextish);
+    $("#cc-media-fields").classList.toggle("hidden", !isMedia);
+    $("#cc-poll-fields").classList.toggle("hidden", !isPoll);
+    $("#cc-quiz-fields").classList.toggle("hidden", ct !== "quiz");
+    $("#cc-poll-multi-wrap").classList.toggle("hidden", ct === "quiz");
+    $("#cc-link-preview-wrap").classList.toggle("hidden", ct !== "text");
+    if (isMedia && ct !== "media_group" && cc.media.length > 1) cc.media = cc.media.slice(0, 1);
+    if (isMedia && cc.media.length === 0) {
+      cc.media.push({ type: ct === "media_group" ? "photo" : ct, source_url: "", telegram_file_id: "" });
+    }
+    if (!isMedia) cc.media = [];
+    ccRenderMedia();
+    var maxLen = ct === "text" ? ((cc.limits && cc.limits.text_max_len) || 4096) : ((cc.limits && cc.limits.caption_max_len) || 1024);
+    $("#cc-text").maxLength = maxLen;
+    ccUpdateTextCounter();
+  }
+
+  function ccUpdateTextCounter() {
+    var el = $("#cc-text-counter");
+    if (!el) return;
+    var ct = $("#cc-content-type").value;
+    var maxLen = ct === "text" ? ((cc.limits && cc.limits.text_max_len) || 4096) : ((cc.limits && cc.limits.caption_max_len) || 1024);
+    el.textContent = ($("#cc-text").value || "").length + " / " + maxLen + " characters";
+  }
+
+  // ---------- Composer: media list ----------
+  function ccRenderMedia() {
+    var ct = $("#cc-content-type").value;
+    var wrap = $("#cc-media-list");
+    if (!wrap) return;
+    var isGroup = ct === "media_group";
+    wrap.innerHTML = cc.media.map(function (m, i) {
+      var typeSel = isGroup
+        ? '<select class="filter-input cc-media-type" data-idx="' + i + '" style="max-width:110px;">' +
+          '<option value="photo"' + (m.type === "photo" ? " selected" : "") + '>Image</option>' +
+          '<option value="video"' + (m.type === "video" ? " selected" : "") + '>Video</option></select>'
+        : '<span class="pill neutral">' + esc(ct) + '</span>';
+      return '<div class="cc-media-row" data-idx="' + i + '">' + typeSel +
+        '<input class="filter-input cc-media-url" data-idx="' + i + '" placeholder="https://... media URL" value="' + esc(m.source_url || "") + '" style="flex:1;min-width:220px;" />' +
+        '<input class="filter-input cc-media-fileid" data-idx="' + i + '" placeholder="or Telegram file_id" value="' + esc(m.telegram_file_id || "") + '" style="min-width:160px;" />' +
+        (isGroup
+          ? '<button class="btn" data-cc-media-up="' + i + '" type="button">&uarr;</button>' +
+            '<button class="btn" data-cc-media-down="' + i + '" type="button">&darr;</button>' +
+            '<button class="btn danger" data-cc-media-remove="' + i + '" type="button">Remove</button>'
+          : "") +
+        "</div>";
+    }).join("");
+    var addBtn = $("#cc-media-add-btn");
+    if (addBtn) addBtn.classList.toggle("hidden", !isGroup);
+  }
+
+  function ccSyncMediaFromDom() {
+    $all("#cc-media-list .cc-media-row").forEach(function (row) {
+      var i = +row.dataset.idx;
+      if (!cc.media[i]) return;
+      var typeSel = row.querySelector(".cc-media-type");
+      if (typeSel) cc.media[i].type = typeSel.value;
+      cc.media[i].source_url = (row.querySelector(".cc-media-url").value || "").trim();
+      cc.media[i].telegram_file_id = (row.querySelector(".cc-media-fileid").value || "").trim();
+    });
+  }
+
+  // ---------- Composer: poll / quiz options ----------
+  function ccRenderPollOptions() {
+    var ct = $("#cc-content-type").value;
+    var isQuiz = ct === "quiz";
+    var wrap = $("#cc-poll-options");
+    if (!wrap) return;
+    wrap.innerHTML = cc.pollOptions.map(function (o, i) {
+      var radio = isQuiz
+        ? '<input type="radio" name="cc-quiz-correct" data-idx="' + i + '" ' + (cc.quizCorrect === i ? "checked" : "") + ' title="Correct answer" />'
+        : "";
+      return '<div class="cc-poll-option-row" data-idx="' + i + '">' + radio +
+        '<input class="filter-input cc-poll-option-text" data-idx="' + i + '" value="' + esc(o.text) + '" placeholder="Option text" style="flex:1;" />' +
+        '<button class="btn" data-cc-opt-up="' + i + '" type="button">&uarr;</button>' +
+        '<button class="btn" data-cc-opt-down="' + i + '" type="button">&darr;</button>' +
+        '<button class="btn danger" data-cc-opt-remove="' + i + '" type="button">Remove</button></div>';
+    }).join("");
+    var max = (cc.limits && cc.limits.poll_options_max) || 10;
+    var min = (cc.limits && cc.limits.poll_options_min) || 2;
+    $("#cc-poll-options-counter").textContent = cc.pollOptions.length + " / " + max + " options (minimum " + min + ")";
+  }
+
+  function ccSyncPollOptionsFromDom() {
+    $all("#cc-poll-options .cc-poll-option-row").forEach(function (row) {
+      var i = +row.dataset.idx;
+      if (!cc.pollOptions[i]) return;
+      cc.pollOptions[i].text = (row.querySelector(".cc-poll-option-text").value || "").trim();
+    });
+    var checked = document.querySelector("input[name='cc-quiz-correct']:checked");
+    if (checked) cc.quizCorrect = +checked.dataset.idx;
+  }
+
+  // ---------- Composer: inline buttons ----------
+  function ccRenderButtons() {
+    var wrap = $("#cc-buttons-list");
+    if (!wrap) return;
+    var allowedCallbacks = (cc.limits && cc.limits.allowed_callback_actions) || ["noop"];
+    wrap.innerHTML = cc.buttons.map(function (b, i) {
+      var typeOpts = (cc.limits && cc.limits.button_types || ["url", "telegram_link", "webapp", "callback"]).map(function (t) {
+        return '<option value="' + t + '"' + (b.type === t ? " selected" : "") + '>' + t + "</option>";
+      }).join("");
+      var valueField = b.type === "callback"
+        ? '<select class="filter-input cc-btn-value" data-idx="' + i + '">' +
+          allowedCallbacks.map(function (a) { return '<option value="' + esc(a) + '"' + (b.value === a ? " selected" : "") + '>' + esc(a) + "</option>"; }).join("") +
+          "</select>"
+        : '<input class="filter-input cc-btn-value" data-idx="' + i + '" placeholder="https://..." value="' + esc(b.value || "") + '" style="flex:1;min-width:200px;" />';
+      return '<div class="cc-button-row" data-idx="' + i + '">' +
+        '<input class="filter-input cc-btn-text" data-idx="' + i + '" placeholder="Button text" value="' + esc(b.text || "") + '" style="max-width:160px;" />' +
+        '<select class="filter-input cc-btn-type" data-idx="' + i + '">' + typeOpts + "</select>" +
+        valueField +
+        '<input class="filter-input cc-btn-row" data-idx="' + i + '" type="number" min="0" max="7" value="' + (b.row || 0) + '" style="max-width:70px;" title="Row" />' +
+        '<button class="btn danger" data-cc-btn-remove="' + i + '" type="button">Remove</button></div>';
+    }).join("");
+  }
+
+  function ccSyncButtonsFromDom() {
+    $all("#cc-buttons-list .cc-button-row").forEach(function (row) {
+      var i = +row.dataset.idx;
+      if (!cc.buttons[i]) return;
+      cc.buttons[i].text = (row.querySelector(".cc-btn-text").value || "").trim();
+      cc.buttons[i].type = row.querySelector(".cc-btn-type").value;
+      cc.buttons[i].value = (row.querySelector(".cc-btn-value").value || "").trim();
+      cc.buttons[i].row = parseInt(row.querySelector(".cc-btn-row").value, 10) || 0;
+    });
+  }
+
+  function ccResetComposer() {
+    cc.editingId = null;
+    cc.editingUpdatedAt = null;
+    cc.media = [];
+    cc.buttons = [];
+    cc.pollOptions = [{ text: "" }, { text: "" }];
+    cc.quizCorrect = 0;
+    $("#cc-title").value = "";
+    $("#cc-content-type").value = "text";
+    $("#cc-text").value = "";
+    $("#cc-parse-mode").value = "HTML";
+    $("#cc-disable-preview").checked = false;
+    $("#cc-poll-question").value = "";
+    $("#cc-poll-anonymous").checked = true;
+    $("#cc-poll-multiple").checked = false;
+    $("#cc-poll-members-only").checked = false;
+    $("#cc-quiz-explanation").value = "";
+    $("#cc-poll-close-mode").value = "manual";
+    $("#cc-poll-duration-seconds").value = "";
+    $("#cc-poll-close-at").value = "";
+    $("#cc-disable-notification").checked = false;
+    $("#cc-protect-content").checked = false;
+    $("#cc-pin-after-send").checked = false;
+    $("#cc-unpin-at").value = "";
+    $("#cc-campaign-tags").value = "";
+    $("#cc-internal-notes").value = "";
+    $("#cc-scheduled-at").value = "";
+    $("#cc-recurrence-type").value = "daily";
+    $all("#cc-recurrence-weekdays input").forEach(function (x) { x.checked = false; });
+    $all("#cc-schedule-type button").forEach(function (b) { b.classList.toggle("active", b.dataset.value === "once"); });
+    $("#cc-schedule-once").classList.remove("hidden");
+    $("#cc-schedule-recurring").classList.add("hidden");
+    $("#cc-poll-duration-wrap").classList.add("hidden");
+    $("#cc-poll-date-wrap").classList.add("hidden");
+    $("#cc-unpin-wrap").classList.add("hidden");
+    $("#cc-composer-banner").innerHTML = "";
+    ccUpdateContentTypeVisibility();
+    ccRenderPollOptions();
+    ccRenderButtons();
+  }
+
+  function ccLoadPostIntoForm(post) {
+    ccResetComposer();
+    cc.editingId = post._id;
+    cc.editingUpdatedAt = post.updated_at;
+    $("#cc-title").value = post.title || "";
+    $("#cc-content-type").value = post.content_type;
+    $("#cc-destination").value = post.destination_key || "";
+    $("#cc-text").value = post.text || "";
+    $("#cc-parse-mode").value = post.parse_mode || "HTML";
+    $("#cc-disable-preview").checked = !!post.disable_web_page_preview;
+    cc.media = (post.media || []).map(function (m) {
+      return { type: m.type, source_url: m.storage_key || "", telegram_file_id: m.telegram_file_id || "" };
+    });
+    if (post.poll) {
+      $("#cc-poll-question").value = post.poll.question || "";
+      cc.pollOptions = (post.poll.options || []).map(function (o) { return { text: o.text }; });
+      cc.quizCorrect = post.poll.correct_option_id || 0;
+      $("#cc-poll-anonymous").checked = !!post.poll.is_anonymous;
+      $("#cc-poll-multiple").checked = !!post.poll.allows_multiple_answers;
+      $("#cc-poll-members-only").checked = !!post.poll.members_only;
+      $("#cc-quiz-explanation").value = post.poll.explanation || "";
+      $("#cc-poll-close-mode").value = post.poll.close_mode || "manual";
+      $("#cc-poll-duration-seconds").value = post.poll.open_period_seconds || "";
+      $("#cc-poll-close-at").value = ccUtcToKlInputValue(post.poll.close_at_utc);
+    }
+    cc.buttons = (post.buttons || []).map(function (b) { return { row: b.row, position: b.position, text: b.text, type: b.type, value: b.value }; });
+    $("#cc-disable-notification").checked = !!post.disable_notification;
+    $("#cc-protect-content").checked = !!post.protect_content;
+    $("#cc-pin-after-send").checked = !!post.pin_after_send;
+    $("#cc-unpin-at").value = ccUtcToKlInputValue(post.unpin_at_utc);
+    $("#cc-campaign-tags").value = (post.campaign_tags || []).join(", ");
+    $("#cc-internal-notes").value = post.internal_notes || "";
+    if (post.scheduled_at_utc) $("#cc-scheduled-at").value = ccUtcToKlInputValue(post.scheduled_at_utc);
+    if (post.schedule_type === "recurring" && post.recurrence) {
+      $all("#cc-schedule-type button").forEach(function (b) { b.classList.toggle("active", b.dataset.value === "recurring"); });
+      $("#cc-schedule-once").classList.add("hidden");
+      $("#cc-schedule-recurring").classList.remove("hidden");
+      $("#cc-recurrence-type").value = post.recurrence.type || "daily";
+      var weekdayKeys = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
+      var recWeekdays = post.recurrence.weekdays || [];
+      $all("#cc-recurrence-weekdays input").forEach(function (x) { x.checked = recWeekdays.indexOf(weekdayKeys.indexOf(x.value)) !== -1; });
+    }
+    ccUpdateContentTypeVisibility();
+    ccRenderPollOptions();
+    ccRenderButtons();
+    $("#cc-poll-duration-wrap").classList.toggle("hidden", $("#cc-poll-close-mode").value !== "duration");
+    $("#cc-poll-date-wrap").classList.toggle("hidden", $("#cc-poll-close-mode").value !== "date");
+    $("#cc-unpin-wrap").classList.toggle("hidden", !$("#cc-pin-after-send").checked);
+    $("#cc-composer-banner").innerHTML = '<div class="banner ok">Editing "' + esc(post.title) + '" (' + esc(post.status) + ')</div>';
+  }
+
+  function ccBuildPayload() {
+    ccSyncMediaFromDom();
+    ccSyncPollOptionsFromDom();
+    ccSyncButtonsFromDom();
+    var ct = $("#cc-content-type").value;
+    var scheduleType = ($("#cc-schedule-type .active") || {}).dataset ? $("#cc-schedule-type .active").dataset.value : "once";
+    var payload = {
+      title: ($("#cc-title").value || "").trim(),
+      content_type: ct,
+      destination_key: $("#cc-destination").value,
+      parse_mode: $("#cc-parse-mode").value,
+      disable_web_page_preview: $("#cc-disable-preview").checked,
+      disable_notification: $("#cc-disable-notification").checked,
+      protect_content: $("#cc-protect-content").checked,
+      pin_after_send: $("#cc-pin-after-send").checked,
+      unpin_at_utc: $("#cc-pin-after-send").checked ? ccKlInputToUtcIso($("#cc-unpin-at").value) : null,
+      campaign_tags: ($("#cc-campaign-tags").value || "").split(",").map(function (s) { return s.trim(); }).filter(Boolean),
+      internal_notes: ($("#cc-internal-notes").value || "").trim() || null,
+      schedule_type: scheduleType,
+      buttons: cc.buttons.map(function (b, i) { return { row: b.row || 0, position: i, text: b.text, type: b.type, value: b.value }; }),
+    };
+    if (ct === "text" || ct === "photo" || ct === "animation" || ct === "video" || ct === "media_group") {
+      payload.text = $("#cc-text").value || "";
+    }
+    if (ct === "photo" || ct === "animation" || ct === "video" || ct === "media_group") {
+      payload.media = cc.media.map(function (m, i) {
+        return { type: (ct === "media_group" ? m.type : ct), source_url: m.source_url, telegram_file_id: m.telegram_file_id || null, position: i };
+      });
+    }
+    if (ct === "poll" || ct === "quiz") {
+      var closeMode = $("#cc-poll-close-mode").value;
+      payload.poll = {
+        question: $("#cc-poll-question").value || "",
+        options: cc.pollOptions.map(function (o) { return { text: o.text }; }),
+        is_anonymous: $("#cc-poll-anonymous").checked,
+        allows_multiple_answers: ct === "quiz" ? false : $("#cc-poll-multiple").checked,
+        members_only: $("#cc-poll-members-only").checked,
+        close_mode: closeMode,
+        open_period_seconds: closeMode === "duration" ? (parseInt($("#cc-poll-duration-seconds").value, 10) || null) : null,
+        close_at_utc: closeMode === "date" ? ccKlInputToUtcIso($("#cc-poll-close-at").value) : null,
+      };
+      if (ct === "quiz") {
+        payload.poll.correct_option_id = cc.quizCorrect;
+        payload.poll.explanation = $("#cc-quiz-explanation").value || null;
+      }
+    }
+    if (scheduleType === "recurring") {
+      var weekdayKeys = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
+      var weekdays = $all("#cc-recurrence-weekdays input:checked").map(function (x) { return x.value; });
+      payload.recurrence = { type: $("#cc-recurrence-type").value, weekdays: weekdays };
+    }
+    return payload;
+  }
+
+  function ccSaveDraft(showToast) {
+    var payload = ccBuildPayload();
+    var req = cc.editingId
+      ? apiPatchJson("/api/admin/community/posts/" + cc.editingId, payload)
+      : apiPostJson("/api/admin/community/posts", payload);
+    return req.then(function (res) {
+      if (!res.ok || !res.d.success) {
+        toast("❌ " + (res.d && res.d.code || "save_failed"), "error");
+        return null;
+      }
+      cc.editingId = res.d.post._id;
+      cc.editingUpdatedAt = res.d.post.updated_at;
+      if (showToast) toast("✅ Saved as draft", "success");
+      return res.d.post;
+    });
+  }
+
+  function ccPreviewBubbleHtml(preview) {
+    var html = '<div class="cc-preview-bubble">';
+    if (preview.is_poll) {
+      html += "<strong>" + esc(preview.poll.question) + "</strong>";
+      html += '<div class="sub">' + (preview.poll.type === "quiz" ? "Quiz" : "Regular Poll") +
+        " · " + (preview.poll.is_anonymous ? "Anonymous" : "Non-anonymous") +
+        " · " + (preview.poll.allows_multiple_answers ? "Multiple answers" : "Single answer") +
+        (preview.poll.members_only ? " · Members-only" : "") + "</div>";
+      preview.poll.options.forEach(function (o, i) {
+        var mark = (preview.poll.type === "quiz" && i === preview.poll.correct_option_id) ? " ✅ (admin-only: correct answer)" : "";
+        html += '<div style="margin-top:4px;">◻ ' + esc(o.text) + mark + "</div>";
+      });
+      if (preview.poll.type === "quiz" && preview.poll.explanation) {
+        html += '<div class="sub" style="margin-top:6px;">Explanation shown after answering: ' + preview.poll.explanation + "</div>";
+      }
+      var closing = preview.poll.close_mode === "duration" ? ("Closes " + preview.poll.open_period_seconds + "s after publish")
+        : preview.poll.close_mode === "date" ? ("Closes at " + ccUtcToKlDisplay(preview.poll.close_at_utc))
+        : "Open until manually stopped";
+      html += '<div class="sub" style="margin-top:6px;">' + closing + "</div>";
+    } else {
+      if (preview.media && preview.media.length) {
+        html += '<div class="sub">[' + preview.media.length + " media item(s): " + preview.media.map(function (m) { return m.type; }).join(", ") + "]</div>";
+      }
+      html += '<div class="cc-preview-caption">' + (preview.text || "<em>(no text)</em>") + "</div>";
+    }
+    if (preview.buttons && preview.buttons.length) {
+      var rows = {};
+      preview.buttons.forEach(function (b) { (rows[b.row] = rows[b.row] || []).push(b); });
+      Object.keys(rows).sort(function (a, b) { return a - b; }).forEach(function (r) {
+        html += '<div class="cc-preview-row">' + rows[r].map(function (b) { return '<span class="cc-preview-btn">' + esc(b.text) + "</span>"; }).join("") + "</div>";
+      });
+      html += '<div class="sub" style="margin-top:6px;">' + esc(preview.button_style_note) + "</div>";
+    }
+    html += "</div>";
+    return html;
+  }
+
+  function ccOpenPreviewModal(post) {
+    apiPost("/api/admin/community/posts/" + post._id + "/preview").then(function (res) {
+      var preview = res.preview;
+      var overlay = document.createElement("div");
+      overlay.className = "modal-overlay";
+      var scheduledAtVal = post.scheduled_at_utc ? ccUtcToKlInputValue(post.scheduled_at_utc) : ($("#cc-scheduled-at") ? $("#cc-scheduled-at").value : "");
+      overlay.innerHTML =
+        '<div class="modal-box" style="max-width:520px;">' +
+        "<h3>Preview — " + esc(preview.title) + "</h3>" +
+        '<p class="sub">Destination: ' + esc(preview.destination_name) + " · Silent: " + (preview.disable_notification ? "Yes" : "No") +
+        " · Pin: " + (preview.pin_after_send ? "Yes" : "No") + "</p>" +
+        ccPreviewBubbleHtml(preview) +
+        '<div style="margin-top:14px;">Publish: <select id="cc-preview-mode" class="filter-input" style="max-width:200px;display:inline-block;">' +
+        '<option value="now">Now</option><option value="schedule"' + (scheduledAtVal ? " selected" : "") + ">Scheduled time</option></select></div>" +
+        '<div class="modal-actions">' +
+        '<button class="btn" id="cc-preview-cancel">Back to edit</button>' +
+        '<button class="btn primary" id="cc-preview-confirm">Confirm Publish / Schedule</button>' +
+        "</div></div>";
+      document.body.appendChild(overlay);
+      function done() { overlay.remove(); }
+      overlay.querySelector("#cc-preview-cancel").addEventListener("click", done);
+      overlay.addEventListener("click", function (e) { if (e.target === overlay) done(); });
+      overlay.querySelector("#cc-preview-confirm").addEventListener("click", function () {
+        var mode = overlay.querySelector("#cc-preview-mode").value;
+        var action;
+        if (mode === "now") {
+          action = apiPost("/api/admin/community/posts/" + post._id + "/publish-now");
+        } else {
+          var iso = ccKlInputToUtcIso(scheduledAtVal);
+          if (!iso) { toast("❌ Choose a scheduled time first", "error"); return; }
+          action = apiPostJson("/api/admin/community/posts/" + post._id + "/schedule", { scheduled_at: iso });
+        }
+        action.then(function (r) {
+          var body = r && r.d !== undefined ? r.d : r;
+          if (!body || !body.success) { toast("❌ " + ((body && body.code) || "publish_failed"), "error"); return; }
+          toast(mode === "now" ? "✅ Queued for immediate publish" : "✅ Scheduled", "success");
+          done();
+          ccResetComposer();
+          if (currentModuleKey === "community") loadCcBoard(true);
+        });
+      });
+    }).catch(function () { toast("❌ Failed to build preview", "error"); });
+  }
+
+  function loadCcComposer() {
+    ccEnsureMeta().then(function () {
+      ccRenderDestinationSelect();
+      if (!$("#cc-destination").value && cc.destinations && cc.destinations.length) {
+        var enabled = cc.destinations.filter(function (d) { return d.enabled; });
+        if (enabled.length) $("#cc-destination").value = enabled[0].key;
+      }
+      ccUpdateContentTypeVisibility();
+    });
+  }
+
+  // ---------- Calendar ----------
+  function ccStartOfDay(d) { var x = new Date(d); x.setUTCHours(0, 0, 0, 0); return x; }
+
+  function loadCcCalendar() {
+    if (!cc.calendarStart) cc.calendarStart = ccStartOfDay(new Date(Date.now() - 86400000));
+    var start = cc.calendarStart;
+    var end = new Date(start.getTime() + 31 * 86400000);
+    statePanel("cc-calendar-body", "loading", "Loading calendar…");
+    api("/api/admin/community/calendar?start=" + start.toISOString() + "&end=" + end.toISOString()).then(function (d) {
+      var entries = d.entries || [];
+      if (!entries.length) { $("#cc-calendar-body").innerHTML = emptyState("Nothing scheduled in this window."); return; }
+      entries.sort(function (a, b) { return new Date(a.at_utc) - new Date(b.at_utc); });
+      var byDay = {};
+      entries.forEach(function (e) {
+        var day = ccUtcToKlDisplay(e.at_utc).slice(0, 10);
+        (byDay[day] = byDay[day] || []).push(e);
+      });
+      var html = "";
+      Object.keys(byDay).sort().forEach(function (day) {
+        html += '<div class="section-title" style="margin-top:14px;">' + day + "</div>";
+        byDay[day].forEach(function (e) {
+          var kindLabel = e.kind === "scheduled_post" ? "Publish" : e.kind === "poll_closing" ? "Poll closes" : "Auto-unpin";
+          html += '<div class="attention-item sev-yellow" data-cc-calendar-open="' + e.id + '" style="cursor:pointer;">' +
+            '<span class="attention-dot"></span><div class="attention-text"><strong>' + (CC_CONTENT_ICON[e.content_type] || "•") + " " + esc(e.title) + "</strong>" +
+            '<span>' + kindLabel + " · " + ccUtcToKlDisplay(e.at_utc) + " · " + esc(e.destination_name || "") + "</span></div></div>";
+        });
+      });
+      $("#cc-calendar-body").innerHTML = html;
+    }).catch(function (e) { statePanel("cc-calendar-body", "error", "Failed to load calendar: " + e.message); });
+  }
+
+  // ---------- Shared board (Scheduled / Drafts / Pending Approval / Published / Poll Results / Failed) ----------
+  var CC_BOARD_QUERY = {
+    scheduled: { status: "scheduled" },
+    draft: { status: "draft" },
+    pending_approval: { status: "pending_approval" },
+    published: { statuses: "published,partially_published" },
+    failed: { status: "failed" },
+  };
+
+  function ccStatusPill(status) {
+    var cls = status === "published" ? "approved" : status === "failed" ? "rejected" : status === "scheduled" || status === "processing" ? "neutral" : "neutral";
+    return '<span class="pill ' + cls + '">' + esc(status) + "</span>";
+  }
+
+  function ccPostActionsHtml(post) {
+    var acts = [];
+    acts.push('<button class="btn" data-cc-post-action="preview" data-id="' + post._id + '">Preview</button>');
+    if (post.status === "draft" || post.status === "scheduled" || post.status === "pending_approval") {
+      acts.push('<button class="btn" data-cc-post-action="edit" data-id="' + post._id + '">Edit</button>');
+    }
+    acts.push('<button class="btn" data-cc-post-action="duplicate" data-id="' + post._id + '">Duplicate</button>');
+    if (post.status === "draft" || post.status === "approved") {
+      acts.push('<button class="btn primary" data-cc-post-action="publish-now" data-id="' + post._id + '">Publish Now</button>');
+    }
+    if (post.status === "pending_approval") {
+      acts.push('<button class="btn primary" data-cc-post-action="approve" data-id="' + post._id + '">Approve</button>');
+      acts.push('<button class="btn danger" data-cc-post-action="reject" data-id="' + post._id + '">Reject</button>');
+    }
+    if (["draft", "pending_approval", "approved", "scheduled", "failed"].indexOf(post.status) !== -1) {
+      acts.push('<button class="btn danger" data-cc-post-action="cancel" data-id="' + post._id + '">Cancel</button>');
+    }
+    if (post.status === "failed") {
+      acts.push('<button class="btn" data-cc-post-action="retry" data-id="' + post._id + '">Retry</button>');
+    }
+    if ((post.content_type === "poll" || post.content_type === "quiz") && post.poll_status === "open") {
+      acts.push('<button class="btn danger" data-cc-post-action="stop-poll" data-id="' + post._id + '">Stop Poll</button>');
+    }
+    if ((post.content_type === "poll" || post.content_type === "quiz") && post.telegram_poll_ids && post.telegram_poll_ids.length) {
+      acts.push('<button class="btn" data-cc-post-action="view-results" data-id="' + post._id + '">View Results</button>');
+    }
+    if ((post.status === "published" || post.status === "partially_published") && post.pin_after_send && !post.unpinned_at_utc) {
+      acts.push('<button class="btn" data-cc-post-action="unpin" data-id="' + post._id + '">Unpin</button>');
+    }
+    return acts.join(" ");
+  }
+
+  function ccRenderPostsTable(posts) {
+    if (!posts.length) return emptyState("Nothing here yet.");
+    var rows = posts.map(function (p) {
+      var pollClose = p.poll ? (p.poll.close_mode === "date" ? ccUtcToKlDisplay(p.poll.close_at_utc) : p.poll.close_mode === "duration" ? (p.poll.open_period_seconds + "s after publish") : "Manual") : "—";
+      return "<tr>" +
+        "<td>" + (CC_CONTENT_ICON[p.content_type] || "") + " " + esc(p.title) + "</td>" +
+        "<td>" + esc(p.destination_name || "") + "</td>" +
+        "<td>" + esc(p.content_type) + "</td>" +
+        "<td>" + ccStatusPill(p.status) + (p.poll_status && p.poll_status !== "not_applicable" ? " " + ccStatusPill(p.poll_status) : "") + "</td>" +
+        "<td>" + esc(p.schedule_type === "recurring" ? (p.recurrence ? p.recurrence.type : "recurring") : "one-time") + "</td>" +
+        "<td>" + pollClose + "</td>" +
+        "<td>" + ccUtcToKlDisplay(p.next_run_at_utc || p.scheduled_at_utc || p.published_at || p.updated_at) + "</td>" +
+        "<td>" + esc(p.created_by_username || p.created_by || "") + "</td>" +
+        "<td>" + ccPostActionsHtml(p) + "</td>" +
+        "</tr>";
+    }).join("");
+    return '<table class="data-table"><thead><tr><th>Title</th><th>Destination</th><th>Type</th><th>Status</th>' +
+      "<th>Recurrence</th><th>Poll Closing</th><th>Time (KL)</th><th>Created By</th><th>Actions</th></tr></thead><tbody>" + rows + "</tbody></table>";
+  }
+
+  function ccRenderPollResultsTable(posts) {
+    if (!posts.length) return emptyState("No polls yet.");
+    var rows = posts.map(function (p) {
+      return "<tr>" +
+        "<td>" + (CC_CONTENT_ICON[p.content_type] || "") + " " + esc((p.poll && p.poll.question) || p.title) + "</td>" +
+        "<td>" + esc(p.destination_name || "") + "</td>" +
+        "<td>" + ccUtcToKlDisplay(p.published_at) + "</td>" +
+        "<td>" + ccStatusPill(p.poll_status) + "</td>" +
+        "<td>" + esc(p.content_type === "quiz" ? "Quiz" : "Regular") + (p.poll && p.poll.is_anonymous ? " · Anonymous" : " · Non-anonymous") + "</td>" +
+        "<td>" + ccPostActionsHtml(p) + "</td>" +
+        "</tr>";
+    }).join("");
+    return '<table class="data-table"><thead><tr><th>Question</th><th>Destination</th><th>Published</th><th>Status</th><th>Type</th><th>Actions</th></tr></thead><tbody>' + rows + "</tbody></table>";
+  }
+
+  function loadCcBoard() {
+    var board = currentCcBoard || "scheduled";
+    statePanel("cc-board-body", "loading", "Loading…");
+    if (board === "poll_results") {
+      api("/api/admin/community/polls?limit=100").then(function (d) {
+        $("#cc-board-body").innerHTML = ccRenderPollResultsTable(d.posts || []);
+      }).catch(function (e) { statePanel("cc-board-body", "error", "Failed to load: " + e.message); });
+      return;
+    }
+    var q = CC_BOARD_QUERY[board] || CC_BOARD_QUERY.scheduled;
+    var qs = Object.keys(q).map(function (k) { return k + "=" + encodeURIComponent(q[k]); }).join("&");
+    api("/api/admin/community/posts?limit=100&" + qs).then(function (d) {
+      $("#cc-board-body").innerHTML = ccRenderPostsTable(d.posts || []);
+    }).catch(function (e) { statePanel("cc-board-body", "error", "Failed to load: " + e.message); });
+  }
+
+  function ccShowPollResultsModal(postId) {
+    api("/api/admin/community/polls/" + postId + "/results").then(function (d) {
+      var r = d.results;
+      var overlay = document.createElement("div");
+      overlay.className = "modal-overlay";
+      var optRows = (r.options || []).map(function (o) {
+        var correct = r.correct_option_id === o.option_id ? " ✅" : "";
+        return "<div>" + esc(o.text) + correct + " — " + fmt(o.voter_count) + " votes (" + o.percentage + "%)</div>";
+      }).join("");
+      overlay.innerHTML = '<div class="modal-box" style="max-width:480px;">' +
+        "<h3>" + esc(r.question || "Poll results") + "</h3>" +
+        '<p class="sub">' + esc(r.destination_name || "") + " · " + ccStatusPill(r.poll_status) + " · " +
+        (r.is_anonymous ? "Anonymous" : "Non-anonymous") + " · " + (r.allows_multiple_answers ? "Multiple answers" : "Single answer") + "</p>" +
+        "<p>Total voters: " + fmt(r.total_voters) + "</p>" + optRows +
+        (r.correct_answer_rate !== null && r.correct_answer_rate !== undefined ? "<p style=\"margin-top:8px;\">Correct-answer rate: " + r.correct_answer_rate + "%</p>" : "") +
+        '<div class="modal-actions"><button class="btn primary" id="cc-results-close">Close</button></div></div>';
+      document.body.appendChild(overlay);
+      function done() { overlay.remove(); }
+      overlay.querySelector("#cc-results-close").addEventListener("click", done);
+      overlay.addEventListener("click", function (e) { if (e.target === overlay) done(); });
+    }).catch(function () { toast("❌ Failed to load poll results", "error"); });
+  }
+
+  function ccHandlePostAction(action, id) {
+    if (action === "preview") {
+      api("/api/admin/community/posts/" + id).then(function (d) { ccOpenPreviewModal(d.post); });
+      return;
+    }
+    if (action === "edit") {
+      Promise.all([api("/api/admin/community/posts/" + id), ccEnsureMeta()]).then(function (results) {
+        var d = results[0];
+        activateTab("community", 0);
+        ccRenderDestinationSelect();
+        ccLoadPostIntoForm(d.post);
+      });
+      return;
+    }
+    if (action === "view-results") { ccShowPollResultsModal(id); return; }
+    if (action === "reject") {
+      var reason = prompt("Reason for rejection (optional):", "") || "";
+      apiPostJson("/api/admin/community/posts/" + id + "/reject", { reason: reason }).then(function (r) {
+        if (!r.ok) { toast("❌ " + (r.d && r.d.code || "reject_failed"), "error"); return; }
+        toast("✅ Returned to draft", "success");
+        loadCcBoard(true);
+      });
+      return;
+    }
+    if (action === "stop-poll") {
+      confirmSimple("Stop this poll?", "Stop this poll now? Users will no longer be able to vote. This action cannot reopen the same poll.").then(function (ok) {
+        if (!ok) return;
+        apiPost("/api/admin/community/posts/" + id + "/stop-poll").then(function (r) {
+          if (!r.success) { toast("❌ " + (r.code || "stop_poll_failed"), "error"); return; }
+          toast("✅ Poll stopped", "success");
+          loadCcBoard(true);
+        }).catch(function () { toast("❌ Failed to stop poll", "error"); });
+      });
+      return;
+    }
+    if (action === "cancel") {
+      confirmSimple("Cancel this post?", "This post will be moved to Cancelled and will not be published.").then(function (ok) {
+        if (!ok) return;
+        apiPost("/api/admin/community/posts/" + id + "/cancel")
+          .then(function () { toast("✅ Cancelled", "success"); loadCcBoard(true); })
+          .catch(function () { toast("❌ Cancel failed", "error"); });
+      });
+      return;
+    }
+    // Simple one-call actions: duplicate, publish-now, approve, retry, unpin
+    apiPost("/api/admin/community/posts/" + id + "/" + action).then(function (r) {
+      if (!r.success) { toast("❌ " + (r.code || (action + "_failed")), "error"); return; }
+      toast("✅ Done", "success");
+      loadCcBoard(true);
+    }).catch(function () { toast("❌ Action failed", "error"); });
+  }
+
+  function bindCommunityCentre() {
+    $("#cc-content-type").addEventListener("change", ccUpdateContentTypeVisibility);
+    $("#cc-text").addEventListener("input", ccUpdateTextCounter);
+
+    $("#cc-media-add-btn").addEventListener("click", function () {
+      ccSyncMediaFromDom();
+      var ct = $("#cc-content-type").value;
+      cc.media.push({ type: ct === "media_group" ? "photo" : ct, source_url: "", telegram_file_id: "" });
+      ccRenderMedia();
+    });
+    $("#cc-media-list").addEventListener("click", function (e) {
+      var t = e.target;
+      if (t.dataset.ccMediaRemove !== undefined) {
+        ccSyncMediaFromDom();
+        cc.media.splice(+t.dataset.ccMediaRemove, 1);
+        ccRenderMedia();
+      } else if (t.dataset.ccMediaUp !== undefined) {
+        ccSyncMediaFromDom();
+        var i = +t.dataset.ccMediaUp;
+        if (i > 0) { var tmp = cc.media[i - 1]; cc.media[i - 1] = cc.media[i]; cc.media[i] = tmp; }
+        ccRenderMedia();
+      } else if (t.dataset.ccMediaDown !== undefined) {
+        ccSyncMediaFromDom();
+        var j = +t.dataset.ccMediaDown;
+        if (j < cc.media.length - 1) { var tmp2 = cc.media[j + 1]; cc.media[j + 1] = cc.media[j]; cc.media[j] = tmp2; }
+        ccRenderMedia();
+      }
+    });
+
+    $("#cc-poll-option-add-btn").addEventListener("click", function () {
+      ccSyncPollOptionsFromDom();
+      var max = (cc.limits && cc.limits.poll_options_max) || 10;
+      if (cc.pollOptions.length >= max) { toast("❌ Maximum " + max + " options", "error"); return; }
+      cc.pollOptions.push({ text: "" });
+      ccRenderPollOptions();
+    });
+    $("#cc-poll-options").addEventListener("click", function (e) {
+      var t = e.target;
+      var min = (cc.limits && cc.limits.poll_options_min) || 2;
+      if (t.dataset.ccOptRemove !== undefined) {
+        ccSyncPollOptionsFromDom();
+        if (cc.pollOptions.length <= min) { toast("❌ Minimum " + min + " options required", "error"); return; }
+        cc.pollOptions.splice(+t.dataset.ccOptRemove, 1);
+        ccRenderPollOptions();
+      } else if (t.dataset.ccOptUp !== undefined) {
+        ccSyncPollOptionsFromDom();
+        var i = +t.dataset.ccOptUp;
+        if (i > 0) { var tmp = cc.pollOptions[i - 1]; cc.pollOptions[i - 1] = cc.pollOptions[i]; cc.pollOptions[i] = tmp; }
+        ccRenderPollOptions();
+      } else if (t.dataset.ccOptDown !== undefined) {
+        ccSyncPollOptionsFromDom();
+        var j = +t.dataset.ccOptDown;
+        if (j < cc.pollOptions.length - 1) { var tmp2 = cc.pollOptions[j + 1]; cc.pollOptions[j + 1] = cc.pollOptions[j]; cc.pollOptions[j] = tmp2; }
+        ccRenderPollOptions();
+      }
+    });
+
+    $("#cc-poll-close-mode").addEventListener("change", function () {
+      $("#cc-poll-duration-wrap").classList.toggle("hidden", this.value !== "duration");
+      $("#cc-poll-date-wrap").classList.toggle("hidden", this.value !== "date");
+    });
+    $("#cc-poll-fields").addEventListener("click", function (e) {
+      var dur = e.target.dataset.ccDuration;
+      if (dur) $("#cc-poll-duration-seconds").value = dur;
+    });
+
+    $("#cc-button-add-btn").addEventListener("click", function () {
+      ccSyncButtonsFromDom();
+      var maxTotal = (cc.limits && cc.limits.button_max_total) || 20;
+      if (cc.buttons.length >= maxTotal) { toast("❌ Maximum " + maxTotal + " buttons", "error"); return; }
+      cc.buttons.push({ row: 0, position: cc.buttons.length, text: "", type: "url", value: "" });
+      ccRenderButtons();
+    });
+    $("#cc-buttons-list").addEventListener("click", function (e) {
+      if (e.target.dataset.ccBtnRemove !== undefined) {
+        ccSyncButtonsFromDom();
+        cc.buttons.splice(+e.target.dataset.ccBtnRemove, 1);
+        ccRenderButtons();
+      }
+    });
+    $("#cc-buttons-list").addEventListener("change", function (e) {
+      if (e.target.classList.contains("cc-btn-type")) { ccSyncButtonsFromDom(); ccRenderButtons(); }
+    });
+
+    $("#cc-pin-after-send").addEventListener("change", function () { $("#cc-unpin-wrap").classList.toggle("hidden", !this.checked); });
+
+    $("#cc-schedule-type").addEventListener("click", function (e) {
+      var btn = e.target.closest("button");
+      if (!btn) return;
+      $all("#cc-schedule-type button").forEach(function (b) { b.classList.toggle("active", b === btn); });
+      $("#cc-schedule-once").classList.toggle("hidden", btn.dataset.value !== "once");
+      $("#cc-schedule-recurring").classList.toggle("hidden", btn.dataset.value !== "recurring");
+    });
+    $("#cc-recurrence-type").addEventListener("change", function () {
+      $("#cc-recurrence-weekdays").classList.toggle("hidden", this.value !== "weekly");
+    });
+
+    $("#cc-save-draft-btn").addEventListener("click", function () { ccSaveDraft(true); });
+    $("#cc-clear-btn").addEventListener("click", function () { ccResetComposer(); });
+    $("#cc-preview-btn").addEventListener("click", function () {
+      var title = ($("#cc-title").value || "").trim();
+      var dest = $("#cc-destination").value;
+      if (!title) { toast("❌ Internal title is required", "error"); return; }
+      if (!dest) { toast("❌ Choose a destination first", "error"); return; }
+      ccSaveDraft(false).then(function (post) { if (post) ccOpenPreviewModal(post); });
+    });
+
+    $("#cc-calendar-prev").addEventListener("click", function () {
+      cc.calendarStart = new Date((cc.calendarStart || ccStartOfDay(new Date())).getTime() - 31 * 86400000);
+      loadCcCalendar(true);
+    });
+    $("#cc-calendar-next").addEventListener("click", function () {
+      cc.calendarStart = new Date((cc.calendarStart || ccStartOfDay(new Date())).getTime() + 31 * 86400000);
+      loadCcCalendar(true);
+    });
+    $("#cc-calendar-body").addEventListener("click", function (e) {
+      var id = e.target.closest && e.target.closest("[data-cc-calendar-open]");
+      if (id) ccHandlePostAction("preview", id.dataset.ccCalendarOpen);
+    });
+
+    $("#cc-board-body").addEventListener("click", function (e) {
+      var btn = e.target.closest && e.target.closest("[data-cc-post-action]");
+      if (!btn) return;
+      ccHandlePostAction(btn.dataset.ccPostAction, btn.dataset.id);
+    });
+
+    ccResetComposer();
   }
 
   api("/api/admin/auth/me")

@@ -636,6 +636,162 @@
         </div>
       </section>
 
+      <!-- COMMUNITY CENTRE: COMPOSER -->
+      <section id="view-ccComposer" class="hidden">
+        <div id="cc-composer-banner"></div>
+        <div class="section" style="margin-bottom:16px;">
+          <div class="section-title">1. Content</div>
+          <div class="cc-grid">
+            <label>Internal Title <span class="sub">(never sent to Telegram)</span>
+              <input class="filter-input" id="cc-title" placeholder="e.g. Weekend Voucher Drop Announcement" style="width:100%;box-sizing:border-box;" />
+            </label>
+            <label>Content Type
+              <select class="filter-input" id="cc-content-type" style="width:100%;">
+                <option value="text">Text</option>
+                <option value="photo">Image</option>
+                <option value="animation">GIF / Animation</option>
+                <option value="video">Video</option>
+                <option value="media_group">Media Album</option>
+                <option value="poll">Regular Poll</option>
+                <option value="quiz">Quiz</option>
+              </select>
+            </label>
+            <label>Destination
+              <select class="filter-input" id="cc-destination" style="width:100%;"></select>
+            </label>
+          </div>
+        </div>
+
+        <div class="section" id="cc-text-fields" style="margin-bottom:16px;">
+          <div class="section-title">Message</div>
+          <textarea id="cc-text" rows="6" class="filter-input" style="width:100%;box-sizing:border-box;" placeholder="Message text / caption. Telegram HTML formatting supported (&lt;b&gt;, &lt;i&gt;, &lt;a href&gt;, ...)"></textarea>
+          <div class="cc-grid" style="margin-top:8px;">
+            <label>Parse Mode
+              <select class="filter-input" id="cc-parse-mode" style="width:100%;">
+                <option value="HTML">HTML</option>
+                <option value="MarkdownV2">MarkdownV2</option>
+              </select>
+            </label>
+            <label id="cc-link-preview-wrap"><input type="checkbox" id="cc-disable-preview" /> Disable link preview</label>
+          </div>
+          <div class="sub" id="cc-text-counter" style="margin-top:4px;"></div>
+        </div>
+
+        <div class="section hidden" id="cc-media-fields" style="margin-bottom:16px;">
+          <div class="section-title">Media</div>
+          <div id="cc-media-list"></div>
+          <button class="btn" id="cc-media-add-btn" type="button">Add Media Item</button>
+          <div class="sub" style="margin-top:6px;">Provide an HTTPS URL Telegram can fetch, or a previously-obtained Telegram <code>file_id</code> (preferred when duplicating/reusing content — no re-upload needed). This deployment has no binary media-upload storage layer; see PR notes.</div>
+        </div>
+
+        <div class="section hidden" id="cc-poll-fields" style="margin-bottom:16px;">
+          <div class="section-title">Poll</div>
+          <textarea id="cc-poll-question" rows="2" class="filter-input" style="width:100%;box-sizing:border-box;" placeholder="Poll question"></textarea>
+          <div id="cc-poll-options" style="margin-top:8px;"></div>
+          <button class="btn" id="cc-poll-option-add-btn" type="button">Add Option</button>
+          <div class="sub" id="cc-poll-options-counter"></div>
+
+          <div class="cc-grid" style="margin-top:12px;">
+            <label><input type="checkbox" id="cc-poll-anonymous" checked /> Anonymous voting</label>
+            <label id="cc-poll-multi-wrap"><input type="checkbox" id="cc-poll-multiple" /> Allow multiple answers</label>
+            <label><input type="checkbox" id="cc-poll-members-only" /> Members-only (where supported)</label>
+          </div>
+
+          <div id="cc-quiz-fields" class="hidden" style="margin-top:8px;">
+            <div class="sub">Correct answer is selected via the radio button next to each option above.</div>
+            <textarea id="cc-quiz-explanation" rows="2" class="filter-input" style="width:100%;box-sizing:border-box;margin-top:6px;" placeholder="Explanation shown after answering (optional, HTML supported, max 200 chars)"></textarea>
+          </div>
+
+          <div class="section-title" style="margin-top:12px;">Closing</div>
+          <select class="filter-input" id="cc-poll-close-mode" style="width:100%;max-width:260px;">
+            <option value="manual">Open until manually stopped</option>
+            <option value="duration">Open for a duration</option>
+            <option value="date">Close at a specific time (Kuala Lumpur)</option>
+          </select>
+          <div id="cc-poll-duration-wrap" class="hidden" style="margin-top:8px;">
+            <input class="filter-input" id="cc-poll-duration-seconds" type="number" placeholder="Open period in seconds (min 5, max 600000)" style="max-width:260px;" />
+            <div class="sub">Presets: <button class="btn" type="button" data-cc-duration="300">5m</button> <button class="btn" type="button" data-cc-duration="600">10m</button> <button class="btn" type="button" data-cc-duration="1800">30m</button> <button class="btn" type="button" data-cc-duration="3600">1h</button></div>
+          </div>
+          <div id="cc-poll-date-wrap" class="hidden" style="margin-top:8px;">
+            <input class="filter-input" id="cc-poll-close-at" type="datetime-local" style="max-width:260px;" />
+            <div class="sub">Kuala Lumpur time.</div>
+          </div>
+        </div>
+
+        <div class="section" style="margin-bottom:16px;">
+          <div class="section-title">Inline Buttons <span class="sub">(preview style only — Telegram controls actual button colour)</span></div>
+          <div id="cc-buttons-list"></div>
+          <button class="btn" id="cc-button-add-btn" type="button">Add Button</button>
+        </div>
+
+        <div class="section" style="margin-bottom:16px;">
+          <div class="section-title">Delivery Options</div>
+          <div class="cc-grid">
+            <label><input type="checkbox" id="cc-disable-notification" /> Silent notification</label>
+            <label><input type="checkbox" id="cc-protect-content" /> Protect content</label>
+            <label><input type="checkbox" id="cc-pin-after-send" /> Pin after publishing</label>
+          </div>
+          <div id="cc-unpin-wrap" class="hidden" style="margin-top:8px;">
+            <label>Auto-unpin at (Kuala Lumpur time)
+              <input class="filter-input" id="cc-unpin-at" type="datetime-local" style="max-width:260px;" />
+            </label>
+          </div>
+        </div>
+
+        <div class="section" style="margin-bottom:16px;">
+          <div class="section-title">Campaign &amp; Notes <span class="sub">(internal only, never sent to Telegram)</span></div>
+          <input class="filter-input" id="cc-campaign-tags" placeholder="Campaign tags, comma separated" style="width:100%;box-sizing:border-box;" />
+          <textarea id="cc-internal-notes" rows="2" class="filter-input" style="width:100%;box-sizing:border-box;margin-top:8px;" placeholder="Internal notes"></textarea>
+        </div>
+
+        <div class="section" style="margin-bottom:16px;">
+          <div class="section-title">Scheduling <span class="sub">(Asia/Kuala_Lumpur)</span></div>
+          <div class="seg" id="cc-schedule-type">
+            <button data-value="once" class="active">One-time</button>
+            <button data-value="recurring">Recurring</button>
+          </div>
+          <div id="cc-schedule-once" style="margin-top:8px;">
+            <input class="filter-input" id="cc-scheduled-at" type="datetime-local" style="max-width:260px;" />
+          </div>
+          <div id="cc-schedule-recurring" class="hidden" style="margin-top:8px;">
+            <select class="filter-input" id="cc-recurrence-type" style="max-width:200px;">
+              <option value="daily">Daily</option>
+              <option value="weekly">Weekly</option>
+            </select>
+            <div id="cc-recurrence-weekdays" class="hidden" style="margin-top:8px;">
+              <label><input type="checkbox" value="mon" /> Mon</label>
+              <label><input type="checkbox" value="tue" /> Tue</label>
+              <label><input type="checkbox" value="wed" /> Wed</label>
+              <label><input type="checkbox" value="thu" /> Thu</label>
+              <label><input type="checkbox" value="fri" /> Fri</label>
+              <label><input type="checkbox" value="sat" /> Sat</label>
+              <label><input type="checkbox" value="sun" /> Sun</label>
+            </div>
+          </div>
+        </div>
+
+        <div class="modal-actions" style="justify-content:flex-start;">
+          <button class="btn" id="cc-save-draft-btn" type="button">Save as Draft</button>
+          <button class="btn primary" id="cc-preview-btn" type="button">Preview</button>
+          <button class="btn" id="cc-clear-btn" type="button">Clear / New Post</button>
+        </div>
+      </section>
+
+      <!-- COMMUNITY CENTRE: CALENDAR -->
+      <section id="view-ccCalendar" class="hidden">
+        <div class="controls" style="margin-bottom:12px;">
+          <button class="btn" id="cc-calendar-prev">&larr; Previous 31 days</button>
+          <button class="btn" id="cc-calendar-next">Next 31 days &rarr;</button>
+        </div>
+        <div id="cc-calendar-body"></div>
+      </section>
+
+      <!-- COMMUNITY CENTRE: SHARED BOARD (Scheduled / Drafts / Pending Approval / Published / Poll Results / Failed) -->
+      <section id="view-ccBoard" class="hidden">
+        <div class="card-grid" id="cc-board-summary"></div>
+        <div id="cc-board-body"></div>
+      </section>
+
       <!-- AFFILIATE VIEW -->
       <section id="view-affiliate" class="hidden">
         <div class="card-grid" id="cards-affiliate-summary"></div>

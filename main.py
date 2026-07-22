@@ -2402,6 +2402,13 @@ app.register_blueprint(campaign_events_bp)
 from referral_share_content import referral_share_content_bp
 app.register_blueprint(referral_share_content_bp)
 
+from community_centre import community_centre_bp, ensure_community_centre_indexes
+app.register_blueprint(community_centre_bp)
+try:
+    ensure_community_centre_indexes()
+except Exception:
+    logger.exception("[COMMUNITY_CENTRE] index setup failed at startup")
+
 admin_bp = Blueprint("admin", __name__)
 
 
@@ -8078,6 +8085,8 @@ def run_worker():
     app_bot.add_handler(MessageHandler(filters.ChatType.PRIVATE & ~filters.COMMAND, private_message_handler))
     app_bot.add_handler(CallbackQueryHandler(generate_referral_link_callback, pattern=r"^generate_referral_link$"))
     app_bot.add_handler(CallbackQueryHandler(button_handler))
+    from community_centre import register_handlers as _register_community_centre_handlers
+    _register_community_centre_handlers(app_bot)
 
     # 4) Scheduler (KL time for human-facing schedules)
     scheduler = BackgroundScheduler(
@@ -8356,6 +8365,24 @@ def run_worker():
         f"community_chat_id={_COMMUNITY_CHAT_ID}\n"
         f"interval_minutes={tg_refresh_minutes}\n"
         f"first_run_at={tg_first_run_at.isoformat()}"
+    )
+
+    # Community Centre: restart-safe worker tick — publishes due posts via an
+    # atomic Mongo claim (safe across multiple instances), recovers stale
+    # "processing" posts, and runs auto-unpins. Mongo is the scheduling
+    # source of truth, not this in-memory job — a missed/late tick just
+    # means a due post waits for the next one.
+    from community_centre import community_centre_tick
+    scheduler.add_job(
+        _guarded_job("community_centre_tick", community_centre_tick),
+        trigger="interval",
+        seconds=20,
+        next_run_time=datetime.now(timezone.utc) + timedelta(seconds=30),
+        id="community_centre_tick",
+        name="Community Centre Tick",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
     )
 
     # subscription audit disabled — subscription_cache refreshed via claim + check-in events

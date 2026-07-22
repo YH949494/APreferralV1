@@ -49,6 +49,10 @@ def _matches(doc: dict, query: dict) -> bool:
                     return False
                 if op == "$gte" and not (val is not None and val >= target):
                     return False
+                if op == "$lt" and not (val is not None and val < target):
+                    return False
+                if op == "$lte" and not (val is not None and val <= target):
+                    return False
                 if op == "$exists" and (val is not None) != bool(target):
                     return False
                 if op == "$regex":
@@ -57,7 +61,11 @@ def _matches(doc: dict, query: dict) -> bool:
                         return False
         else:
             if val != cond:
-                return False
+                # Mongo equality against an array field also matches when
+                # the array *contains* the scalar (e.g. querying
+                # {"telegram_poll_ids": "abc"} against a stored list).
+                if not (isinstance(val, list) and cond in val):
+                    return False
     return True
 
 
