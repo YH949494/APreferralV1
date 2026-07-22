@@ -122,7 +122,18 @@ def destination_type_for_chat_id(chat_id: int | None) -> str:
     Used to derive destination metadata for events/chats that were not
     generated through :func:`get_referral_destination` (e.g. legacy rows,
     or an event chat id read straight off a Telegram update).
+
+    Also recognizes the *currently live* resolved destination so a
+    REFERRAL_DESTINATION_CHAT_ID override (a channel id that differs from
+    OFFICIAL_CHANNEL_ID) is classified as "official_channel" rather than
+    falling through to "community_group".
     """
     if chat_id == OFFICIAL_CHANNEL_ID:
+        return OFFICIAL_CHANNEL
+    try:
+        live_chat_id, live_type = get_referral_destination()
+    except Exception:
+        return COMMUNITY_GROUP
+    if live_type == OFFICIAL_CHANNEL and chat_id == live_chat_id:
         return OFFICIAL_CHANNEL
     return COMMUNITY_GROUP

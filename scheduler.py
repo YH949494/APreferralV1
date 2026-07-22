@@ -579,14 +579,20 @@ def _get_chat_member_status(user_id: int) -> str | None:
     return (data.get("result") or {}).get("status")
 
 
-def _get_official_channel_member_status(user_id: int) -> str | None:
+def _get_official_channel_member_status(user_id: int, chat_id: int | None = None) -> str | None:
     if not BOT_TOKEN:
         raise RuntimeError("missing_bot_token")
-    if OFFICIAL_CHANNEL_ID is None:
+    # Defaults to OFFICIAL_CHANNEL_ID, but a caller settling a channel-origin
+    # pending row created under a REFERRAL_DESTINATION_CHAT_ID override
+    # passes that row's own destination_chat_id, so membership is checked
+    # against the chat the invitee actually joined rather than always the
+    # static official channel id.
+    target_chat_id = chat_id if chat_id is not None else OFFICIAL_CHANNEL_ID
+    if target_chat_id is None:
         raise RuntimeError("official_channel_unset")
     resp = requests.get(
         f"{API_BASE}/getChatMember",
-        params={"chat_id": OFFICIAL_CHANNEL_ID, "user_id": user_id},
+        params={"chat_id": target_chat_id, "user_id": user_id},
         timeout=10,
     )
     if resp.status_code == 429:
@@ -2145,7 +2151,10 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
 
             step = "check_channel"
             try:
-                status = _get_official_channel_member_status(invitee_user_id)
+                membership_chat_id = (
+                    destination_chat_id if destination_type == OFFICIAL_CHANNEL else None
+                )
+                status = _get_official_channel_member_status(invitee_user_id, membership_chat_id)
             except ReferralRetryableError as exc:
                 retry_after = exc.retry_after
                 backoff = (
@@ -2339,6 +2348,54 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
             # same invitee cannot be awarded twice across a group-origin and a
             # channel-origin referral (P0-4: cross-destination duplicate XP).
             award_key = f"ref:{invitee_user_id}"
+
+            # Guard against a pre-migration award under the legacy
+            # destination-scoped key format ("ref:<group_id>:<invitee_id>"),
+            # which would not collide with the new invitee-scoped award_key
+            # and is not covered by referral_invitee_locks (that collection
+            # did not exist before this migration, so historical invitees
+            # have no lock row). Any prior award row for this invitee — old
+            # key format or new — means XP was already granted; recover
+            # qualification without granting XP again.
+            existing_award = db.referral_award_events.find_one(
+                {"invitee_user_id": invitee_user_id}, {"award_key": 1}
+            )
+            if existing_award:
+                recovered_award_key = existing_award.get("award_key") or award_key
+                mark_invitee_qualified(
+                    db,
+                    invitee_id=invitee_user_id,
+                    referrer_id=inviter_user_id,
+                    now_utc=now_utc_ts,
+                )
+                _maybe_send_referral_qualified_dm(
+                    inviter_user_id,
+                    invitee_user_id,
+                    (invitee_doc or {}).get("username"),
+                )
+                db.pending_referrals.update_one(
+                    {"_id": pending_id},
+                    {
+                        "$set": {
+                            "status": "awarded",
+                            "awarded_at_utc": now_utc_ts,
+                            "awarded_at_kl": now_kl().isoformat(),
+                            "award_key": recovered_award_key,
+                        },
+                        "$unset": {"processing_by": "", "processing_at_utc": "", "processing_at": ""},
+                    },
+                )
+                referral_invitee_lock.release(
+                    db, invitee_user_id=invitee_user_id, status="awarded", now_utc_ts=now_utc_ts
+                )
+                logger.info(
+                    "[SCHED][REFERRAL] duplicate_award_legacy_key inviter=%s invitee=%s existing_award_key=%s",
+                    inviter_user_id,
+                    invitee_user_id,
+                    recovered_award_key,
+                )
+                continue
+
             award_doc = {
                 "award_key": award_key,
                 "group_id": destination_chat_id,

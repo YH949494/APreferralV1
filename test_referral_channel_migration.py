@@ -93,6 +93,21 @@ def test_invalid_mode_falls_back_to_community_group_with_error_log(monkeypatch, 
     assert any("invalid_destination_mode" in r.message for r in caplog.records)
 
 
+def test_destination_type_for_chat_id_honors_live_override(monkeypatch):
+    mod = _reload_referral_destination(
+        monkeypatch,
+        REFERRAL_DESTINATION_MODE="official_channel",
+        OFFICIAL_CHANNEL_ID="-1009999",
+        REFERRAL_DESTINATION_CHAT_ID="-1008888",
+    )
+    # The override chat id (-1008888) must classify as official_channel even
+    # though it differs from OFFICIAL_CHANNEL_ID, since get_referral_destination()
+    # currently resolves to it.
+    assert mod.destination_type_for_chat_id(-1008888) == "official_channel"
+    assert mod.destination_type_for_chat_id(-1009999) == "official_channel"
+    assert mod.destination_type_for_chat_id(mod.COMMUNITY_GROUP_ID) == "community_group"
+
+
 def test_rollback_to_community_group_via_env_only(monkeypatch):
     mod = _reload_referral_destination(monkeypatch, REFERRAL_DESTINATION_MODE="official_channel")
     chat_id, destination_type = mod.get_referral_destination()
@@ -109,15 +124,17 @@ def test_rollback_to_community_group_via_env_only(monkeypatch):
 # resolved destination, and reuses only chat_id-scoped active links.
 # ---------------------------------------------------------------------------
 
-def _load_main_function(name: str):
+def _load_main_function(name: str, extra_globals: dict | None = None):
     source = Path("main.py").read_text(encoding="utf-8")
     module = ast.parse(source)
     fn_node = next(
-        node for node in module.body if isinstance(node, ast.FunctionDef) and node.name == name
+        node
+        for node in module.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name
     )
     isolated = ast.Module(body=[fn_node], type_ignores=[])
     ast.fix_missing_locations(isolated)
-    env = {}
+    env = dict(extra_globals or {})
     exec(compile(isolated, filename="main.py", mode="exec"), env)  # noqa: S102
     return env[name]
 
@@ -604,6 +621,12 @@ class _AwardEvents:
     def __init__(self):
         self.docs = []
 
+    def find_one(self, filt, projection=None):
+        for doc in self.docs:
+            if all(doc.get(k) == v for k, v in filt.items()):
+                return doc
+        return None
+
     def insert_one(self, doc):
         self.docs.append(dict(doc))
 
@@ -646,7 +669,7 @@ def scheduler_mod():
     fixed_now = datetime(2025, 1, 10, tzinfo=timezone.utc)
     scheduler.now_utc = lambda: fixed_now
     scheduler.now_kl = lambda: fixed_now
-    scheduler._get_official_channel_member_status = lambda uid: "member"
+    scheduler._get_official_channel_member_status = lambda uid, chat_id=None: "member"
     scheduler._record_referral_event = lambda *a, **kw: True
     scheduler.grant_xp = lambda *a, **kw: True
     scheduler.calc_referral_award = lambda total: (10, 0)
@@ -797,12 +820,41 @@ def test_award_key_is_invitee_scoped_not_destination_scoped(scheduler_mod):
     assert scheduler.db.referral_award_events.docs[0]["award_key"] == "ref:22"
 
 
+def test_settlement_recovers_pre_migration_legacy_award_key_without_double_xp(scheduler_mod):
+    # An invitee already awarded before this migration under the legacy
+    # "ref:<group_id>:<invitee_id>" key format (and with no
+    # referral_invitee_locks row at all, since that collection is new) must
+    # not receive XP a second time when a fresh channel-origin pending row
+    # for the same invitee reaches settlement.
+    scheduler, fixed_now, qualified_calls = scheduler_mod
+    grant_calls = []
+    scheduler.grant_xp = lambda *a, **kw: grant_calls.append(a) or True
+
+    doc = _channel_pending(fixed_now)
+    user_docs = {22: {"user_id": 22}}
+    fake_db = _FakeSchedulerDB([doc], user_docs)
+    fake_db.referral_award_events.docs.append(
+        {"award_key": f"ref:{scheduler.GROUP_ID}:22", "invitee_user_id": 22, "inviter_user_id": 99}
+    )
+    scheduler.db = fake_db
+
+    scheduler.settle_pending_referrals(batch_limit=1)
+
+    assert doc["status"] == "awarded"
+    assert doc["award_key"] == f"ref:{scheduler.GROUP_ID}:22"  # recovered legacy key, not overwritten
+    assert grant_calls == []  # no new award row inserted -> grant_xp never called
+    assert len(qualified_calls) == 1
+
+
 def test_xp_granted_exactly_once_across_duplicate_award_recovery(scheduler_mod):
     scheduler, fixed_now, qualified_calls = scheduler_mod
 
     class _DupAwardEvents:
         def __init__(self):
             self.insert_calls = 0
+
+        def find_one(self, filt, projection=None):
+            return None
 
         def insert_one(self, doc):
             self.insert_calls += 1
@@ -827,7 +879,7 @@ def test_xp_granted_exactly_once_across_duplicate_award_recovery(scheduler_mod):
 def test_channel_settlement_checks_official_channel_membership(scheduler_mod):
     scheduler, fixed_now, _ = scheduler_mod
     calls = []
-    scheduler._get_official_channel_member_status = lambda uid: calls.append(uid) or "left"
+    scheduler._get_official_channel_member_status = lambda uid, chat_id=None: calls.append(uid) or "left"
     doc = _channel_pending(fixed_now)
     user_docs = {22: {"user_id": 22}}
     scheduler.db = _FakeSchedulerDB([doc], user_docs)
@@ -868,7 +920,7 @@ def test_group_leave_revoke_query_scoped_to_group_id():
 
 def test_channel_leave_branch_does_not_touch_pending_referrals():
     source = Path("main.py").read_text(encoding="utf-8")
-    start = source.index("if left_group and chat_id == OFFICIAL_CHANNEL_ID")
+    start = source.index("if left_group and is_channel_chat_id")
     end = source.index("if not became_member:", start)
     channel_leave_block = source[start:end]
     assert "pending_referrals_collection" not in channel_leave_block
@@ -876,7 +928,11 @@ def test_channel_leave_branch_does_not_touch_pending_referrals():
 
 def test_restricted_to_member_is_not_treated_as_a_new_join():
     source = Path("main.py").read_text(encoding="utf-8")
-    assert 'present_statuses = {"member", "administrator", "creator", "restricted"}' in source
+    assert (
+        'was_present = old_status in {"member", "administrator", "creator"} or (\n'
+        '        old_status == "restricted" and old_is_member is True\n'
+        "    )"
+    ) in source
 
 
 # ---------------------------------------------------------------------------
@@ -889,6 +945,76 @@ def test_channel_branch_never_calls_handle_user_join():
     end = source.index("\ndef _is_mywin_message", start)
     handler_source = source[start:end]
     assert "if chat_id == GROUP_ID:\n        try:\n            await handle_user_join(" in handler_source
+
+
+# ---------------------------------------------------------------------------
+# member_update_handler: immediate group-leave revocation must release the
+# cross-destination invitee lock (Codex P2 finding), not just mark the
+# pending row revoked, or the invitee is blocked from every future referral.
+# ---------------------------------------------------------------------------
+
+def test_group_leave_before_hold_releases_invitee_lock():
+    import asyncio
+    from types import SimpleNamespace
+
+    from telegram import Update
+    from telegram.ext import ContextTypes
+
+    import referral_invitee_lock
+
+    db = _fresh_db()
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    invitee_id = 22
+    db.pending_referrals.insert_one(
+        {
+            "group_id": GROUP_CHAT_ID,
+            "invitee_user_id": invitee_id,
+            "inviter_user_id": 11,
+            "status": "pending",
+        }
+    )
+    referral_invitee_lock.claim(
+        db, invitee_user_id=invitee_id, inviter_user_id=11, chat_id=GROUP_CHAT_ID,
+        destination_type="community_group", now_utc_ts=now,
+    )
+    # Sanity: the lock is blocking before the leave event.
+    assert referral_invitee_lock.claim(
+        db, invitee_user_id=invitee_id, inviter_user_id=99, chat_id=CHANNEL_CHAT_ID,
+        destination_type="official_channel", now_utc_ts=now,
+    ) is False
+
+    fn = _load_main_function(
+        "member_update_handler",
+        extra_globals={
+            "Update": Update,
+            "ContextTypes": ContextTypes,
+            "GROUP_ID": GROUP_CHAT_ID,
+            "OFFICIAL_CHANNEL_ID": CHANNEL_CHAT_ID,
+            "get_referral_destination": lambda: (GROUP_CHAT_ID, "community_group"),
+            "pending_referrals_collection": db.pending_referrals,
+            "now_utc": lambda: now,
+            "logger": _RecordingLogger(),
+            "db": db,
+            "ReturnDocument": ReturnDocument,
+            "users_collection": db.users,
+        },
+    )
+
+    fake_user = SimpleNamespace(id=invitee_id, is_bot=False, username="u22")
+    fake_old = SimpleNamespace(status="member", is_member=True)
+    fake_new = SimpleNamespace(status="left", user=fake_user)
+    fake_member = SimpleNamespace(chat=SimpleNamespace(id=GROUP_CHAT_ID), old_chat_member=fake_old, new_chat_member=fake_new)
+    fake_update = SimpleNamespace(chat_member=fake_member, my_chat_member=None)
+
+    asyncio.run(fn(fake_update, None))
+
+    pending = db.pending_referrals.find_one({"invitee_user_id": invitee_id})
+    assert pending["status"] == "revoked"
+    # The lock must now allow a fresh referral attempt for this invitee.
+    assert referral_invitee_lock.claim(
+        db, invitee_user_id=invitee_id, inviter_user_id=99, chat_id=CHANNEL_CHAT_ID,
+        destination_type="official_channel", now_utc_ts=now,
+    ) is True
 
 
 # ---------------------------------------------------------------------------

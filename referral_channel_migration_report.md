@@ -7,6 +7,19 @@
 > reading `main.py`, `scheduler.py`, `vouchers.py`, `funnel_dashboard.py`, and their
 > test suites, not from a pre-existing document.
 
+## 0. Post-review fixes (Codex automated review, PR #348)
+
+Four issues were flagged by an automated Codex review after the initial implementation and have been addressed:
+
+| Severity | Finding | Fix |
+|---|---|---|
+| P1 | `REFERRAL_DESTINATION_CHAT_ID` override generated usable links, but `member_update_handler` only attributed/bookkept events for `chat_id == GROUP_ID` or `== OFFICIAL_CHANNEL_ID`, and settlement's membership check always queried `OFFICIAL_CHANNEL_ID` — an override chat's joins were never attributed or settleable. | `destination_type_for_chat_id()` and `member_update_handler` now also resolve the *live* `get_referral_destination()` result each event, so an override chat id is treated as `official_channel` for attribution, subscription bookkeeping, and leave handling. `_get_official_channel_member_status()` now accepts an optional `chat_id` and settlement passes the pending row's own `destination_chat_id` when checking membership, instead of always the static `OFFICIAL_CHANNEL_ID`. |
+| P1 | A pre-migration award under the legacy `ref:<group_id>:<invitee_id>` key format doesn't collide with the new invitee-scoped `ref:<invitee_id>` key (different string), and `referral_invitee_locks` is a brand-new collection with no row for that invitee — so a post-deployment channel referral for the same invitee could grant XP a second time. | `settle_pending_referrals` now looks up *any* prior `referral_award_events` row for the invitee (any key format) before awarding; if one exists, it recovers qualification without granting XP again, regardless of key format. Backed by a new isolated index `idx_referral_award_events_invitee`. |
+| P2 | When a referred user leaves the community group before the hold expires, `member_update_handler` revokes the pending row directly and returns — the scheduler never processes that row, so `referral_invitee_lock.release()` was never called, leaving the invitee's lock stuck in blocking `pending` status forever. | The immediate group-leave revocation path now calls `referral_invitee_lock.release(..., status="revoked", ...)`. The `_confirm_referral_on_main_join` exception path (pending-row creation failing after the lock was already claimed) now releases the lock too. |
+| P2 | Every `restricted` old-status was treated as "present" (not a new join), but Telegram's `ChatMemberRestricted.is_member` can be `False` (restricted-and-not-currently-a-member) — that case is a real join and was being suppressed. | `member_update_handler` now only treats `restricted` as present when `old_chat_member.is_member is True`; `restricted(is_member=False) → member` is correctly counted as `became_member`. |
+
+Regression sweep after these fixes: full suite re-run at **1359 passed / 62 failed** (38 tests in `test_referral_channel_migration.py`, up from 35 — three new tests added for the override-routing, legacy-award-key, and lock-release-on-leave fixes), same 62 pre-existing baseline failures, zero new regressions.
+
 ## 1. Root causes fixed
 
 | ID | Blocker | Fix |
@@ -75,8 +88,8 @@ Full suite (`python -m pytest -q`, excluding `test_ugc_growth_referral.py` which
 
 | | Before (baseline) | After (this change) |
 |---|---|---|
-| Tests run | 1321 passed + 62 failed + 20 subtests passed | 1356 passed + 62 failed + 20 subtests passed |
-| New tests added | — | 35 (all passing) |
+| Tests run | 1321 passed + 62 failed + 20 subtests passed | 1359 passed + 62 failed + 20 subtests passed |
+| New tests added | — | 38 (all passing) |
 | Baseline failures | 62 (listed below) | same 62, unchanged |
 | New regressions | — | **0** |
 | Collection errors | `test_uim_comparison.py::test` (1, pre-existing, unrelated) | same, unchanged |

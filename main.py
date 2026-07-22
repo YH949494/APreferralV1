@@ -1916,6 +1916,12 @@ def _confirm_referral_on_main_join(
             )
 
     except Exception as e:
+        # The invitee lock was already claimed above (fail-open on its own
+        # errors); since no pending row was actually created, release it so
+        # this invitee is not blocked from every future referral attempt.
+        referral_invitee_lock.release(
+            db, invitee_user_id=invitee_user_id, status="revoked", now_utc_ts=created_at_utc
+        )
         _write_referral_audit(
             status="failed",
             reason="error",
@@ -2098,6 +2104,19 @@ def ensure_indexes():
         unique=True,
         name="uniq_referral_award_key",
     )
+    try:
+        # Backs settle_pending_referrals' any-prior-award lookup by invitee,
+        # which catches a pre-migration award under the legacy
+        # destination-scoped award_key format that the new invitee-scoped
+        # key (and referral_invitee_locks, a new collection) cannot see on
+        # its own. Isolated so a failure here cannot block any index
+        # created after it.
+        referral_award_events_collection.create_index(
+            [("invitee_user_id", 1)],
+            name="idx_referral_award_events_invitee",
+        )
+    except Exception as e:
+        print("⚠️ ensure_indexes error (idx_referral_award_events_invitee):", e)
     referral_events_collection.create_index(
         [("event", 1), ("inviter_id", 1), ("invitee_id", 1)],
         unique=True,
@@ -7790,15 +7809,31 @@ async def member_update_handler(update: Update, context: ContextTypes.DEFAULT_TY
     allowed_statuses = {"member", "administrator", "creator"}
     left_group = old_status in allowed_statuses and new_status in ("left", "kicked")
 
-    # A user already present in the chat in some capacity (including
-    # "restricted", i.e. a muted/limited member) is not a brand-new join when
-    # their status is later lifted to "member" — only count a transition into
-    # allowed_statuses as a real join when the user was previously absent
-    # (never joined, or had left/been kicked).
-    present_statuses = {"member", "administrator", "creator", "restricted"}
-    was_absent = old_status not in present_statuses
+    # A user already present in the chat in some capacity is not a brand-new
+    # join when their status is later lifted to "member". "restricted" is
+    # only "present" when Telegram's own is_member flag says so — a
+    # restricted member with is_member=False is NOT currently in the chat
+    # (e.g. banned-with-restrictions), so restricted(is_member=False) ->
+    # member is a real join and must not be suppressed.
+    old_is_member = getattr(member.old_chat_member, "is_member", None)
+    was_present = old_status in {"member", "administrator", "creator"} or (
+        old_status == "restricted" and old_is_member is True
+    )
+    was_absent = not was_present
     # 只处理 “变成成员” 的事件
     became_member = (new_status in allowed_statuses) and was_absent
+
+    # The chat id currently configured as the referral destination — lets a
+    # REFERRAL_DESTINATION_CHAT_ID override (a channel id different from
+    # OFFICIAL_CHANNEL_ID) be treated the same as the official channel for
+    # attribution, subscription bookkeeping, and leave handling.
+    try:
+        live_dest_chat_id, live_dest_type = get_referral_destination()
+    except Exception:
+        live_dest_chat_id, live_dest_type = None, None
+    is_channel_chat_id = chat_id == OFFICIAL_CHANNEL_ID or (
+        live_dest_type == "official_channel" and chat_id == live_dest_chat_id
+    )
 
     user = member.new_chat_member.user
     if not user or user.is_bot:
@@ -7826,9 +7861,14 @@ async def member_update_handler(update: Update, context: ContextTypes.DEFAULT_TY
                 user.id,
                 pending_doc.get("inviter_user_id"),
             )
+            import referral_invitee_lock
+
+            referral_invitee_lock.release(
+                db, invitee_user_id=user.id, status="revoked", now_utc_ts=now
+            )
         return
 
-    if left_group and chat_id == OFFICIAL_CHANNEL_ID and isinstance(user.id, int):
+    if left_group and is_channel_chat_id and isinstance(user.id, int):
         now = now_utc()
         users_collection.update_one(
             {"user_id": user.id},
@@ -7864,8 +7904,9 @@ async def member_update_handler(update: Update, context: ContextTypes.DEFAULT_TY
             chat_id=member.chat.id,
         )
 
-    elif chat_id == OFFICIAL_CHANNEL_ID and isinstance(user.id, int):
-        # Official-channel joins: run referral attribution when the exact
+    elif is_channel_chat_id and isinstance(user.id, int):
+        # Official-channel joins (including a REFERRAL_DESTINATION_CHAT_ID
+        # override chat): run referral attribution when the exact
         # mapped invite link is present, then update channel-subscription
         # bookkeeping. handle_user_join() is intentionally never called for
         # channel events — it is (and must remain) group-only onboarding.
