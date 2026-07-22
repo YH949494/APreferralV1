@@ -3007,7 +3007,27 @@
       });
   }
 
-  // ---------- Rejoin Buffer admin toggle ----------
+  // ---------- Rejoin Buffer admin toggle (belongs to the Voucher Rules settings category) ----------
+  var REJOIN_BUFFER_HTML =
+    '<div class="section" style="max-width:520px;margin-bottom:20px;">' +
+    '<div class="section-title">Rejoin Buffer</div>' +
+    '<div style="font-size:12px;color:var(--muted);margin-bottom:12px;">' +
+    'Delays public/pooled voucher claims for users who leave and rejoin @AdvantPlayOfficial. ' +
+    'Never applies to Welcome Reward, personalised vouchers, or affiliate rewards.</div>' +
+    '<div style="margin-bottom:10px;"><label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">Mode</label>' +
+    '<select class="filter-input" id="rb-mode" style="width:100%;box-sizing:border-box;">' +
+    '<option value="disabled">Disabled</option><option value="test_users_only">Test Users Only</option><option value="enabled">Enabled</option>' +
+    '</select></div>' +
+    '<div style="margin-bottom:10px;"><label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">Buffer hours</label>' +
+    '<input class="filter-input" id="rb-hours" type="number" min="1" step="1" style="width:100%;box-sizing:border-box;" /></div>' +
+    '<div style="margin-bottom:12px;"><label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">Test user IDs ' +
+    '<span style="font-weight:400;color:var(--muted);">(one per line or comma-separated; used only in Test Users Only mode)</span></label>' +
+    '<textarea id="rb-test-user-ids" rows="4" style="width:100%;box-sizing:border-box;padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--card-bg);color:var(--text);resize:vertical;" placeholder="123456789&#10;987654321"></textarea></div>' +
+    '<button class="btn primary" id="rb-save-btn">Save</button>' +
+    '<span class="admin-chip" id="rb-status" style="margin-left:8px;">…</span>' +
+    '<div id="rb-result" style="margin-top:10px;font-size:12px;"></div>' +
+    '</div>';
+
   function loadRejoinBufferSettings() {
     var statusEl = $("#rb-status");
     if (statusEl) statusEl.textContent = "Loading…";
@@ -3173,14 +3193,26 @@
     });
   }
 
-  function msRenderGroup(group, schema, values) {
-    var fieldsHtml = Object.keys(schema.fields).map(function (name) {
+  // Resolve the Settings-UI category a schema field belongs to. Mirrors
+  // settings_service.field_category() — a per-field override in
+  // schema.field_categories wins, otherwise the group's own schema.category
+  // applies. The schema (and this metadata) comes straight from the backend
+  // via /api/admin/settings, so there is exactly one source of truth.
+  function msFieldCategory(schema, name) {
+    var overrides = schema.field_categories || {};
+    if (Object.prototype.hasOwnProperty.call(overrides, name)) return overrides[name];
+    return schema.category || null;
+  }
+
+  function msRenderGroup(group, schema, values, fieldNames) {
+    var names = fieldNames || Object.keys(schema.fields);
+    var fieldsHtml = names.map(function (name) {
       var def = schema.fields[name];
       var value = values[name];
       return def.type === "job" ? msRenderJobField(group, name, def, value) : msRenderField(group, name, def, value);
     }).join("");
     return (
-      '<details class="ms-group" id="ms-group-' + group + '">' +
+      '<details class="ms-group" id="ms-group-' + group + '" open>' +
       "<summary>" + esc(schema.label || group) + "</summary>" +
       (schema.description ? '<div class="ms-desc">' + esc(schema.description) + "</div>" : "") +
       '<div class="ms-body"><div class="ms-grid">' + fieldsHtml + "</div>" +
@@ -3189,17 +3221,33 @@
     );
   }
 
-  function loadManagedSettings() {
+  // Loads the full schema/values (single source of truth), then filters to
+  // only the fields whose resolved category matches the active Settings tab
+  // before rendering — the complete schema is never rendered and CSS-hidden.
+  function loadManagedSettings(category) {
     statePanel("managed-settings-body", "loading", "Loading settings…");
     return api("/api/admin/settings")
       .then(function (d) {
         managedSettingsState.schema = d.schema || {};
         managedSettingsState.values = d.settings || {};
         var groups = Object.keys(managedSettingsState.schema);
-        $("#managed-settings-body").innerHTML = groups.map(function (group) {
-          return msRenderGroup(group, managedSettingsState.schema[group], managedSettingsState.values[group] || {});
-        }).join("");
+        var html = "";
+        var matchedGroups = [];
         groups.forEach(function (group) {
+          var schema = managedSettingsState.schema[group];
+          var fieldNames = Object.keys(schema.fields).filter(function (name) {
+            return msFieldCategory(schema, name) === category;
+          });
+          if (!fieldNames.length) return;
+          matchedGroups.push(group);
+          html += msRenderGroup(group, schema, managedSettingsState.values[group] || {}, fieldNames);
+        });
+        if (!matchedGroups.length && category !== "voucher_rules") {
+          $("#managed-settings-body").innerHTML = emptyState("No configurable settings are available in this category yet.");
+          return;
+        }
+        $("#managed-settings-body").innerHTML = html;
+        matchedGroups.forEach(function (group) {
           var btn = $("#ms-save-" + group);
           if (btn) btn.addEventListener("click", function () { msSaveGroup(group); });
         });
@@ -3211,11 +3259,42 @@
       });
   }
 
+  // Legacy read-only settings aggregate (env-derived, not part of
+  // SETTINGS_SCHEMA). Sections map to the same Settings-UI categories so
+  // they only ever appear once, under the matching tab.
+  var LEGACY_SETTINGS_SECTION_CATEGORY = {
+    voucher_settings: "voucher_rules",
+    referral_settings: "referral",
+    affiliate_settings: "affiliate",
+    xp_checkin_settings: "xp",
+    bot_settings: "integrations",
+    security: "security"
+  };
+  var LEGACY_SETTINGS_SECTION_TITLES = {
+    voucher_settings: "Voucher Settings", referral_settings: "Referral Settings",
+    affiliate_settings: "Affiliate Settings", xp_checkin_settings: "XP & Check-in",
+    bot_settings: "Bot Settings", security: "Security"
+  };
+
+  function renderSettingsShell(category) {
+    var html = "";
+    if (category === "voucher_rules") html += REJOIN_BUFFER_HTML;
+    html += '<div class="section-title" style="margin-bottom:8px;">Managed Settings</div>' +
+      '<div style="font-size:12px;color:var(--muted);margin-bottom:12px;">' +
+      'Everything below is stored in MongoDB and editable without a redeploy. Untouched fields keep working exactly ' +
+      'as before (env-var / hardcoded defaults still apply until you save an override).</div>' +
+      '<div id="managed-settings-body"></div>' +
+      '<div id="settings-legacy-readonly"></div>';
+    $("#settings-category-body").innerHTML = html;
+    if (category === "voucher_rules") bindRejoinBufferSettings();
+  }
+
   function loadSettings(refresh) {
+    var category = currentSettingsCategory;
     setMeta("Loading…");
-    statePanel("settings-body", "loading", "Loading configuration…");
-    loadManagedSettings();
-    loadRejoinBufferSettings();
+    renderSettingsShell(category);
+    loadManagedSettings(category);
+    if (category === "voucher_rules") loadRejoinBufferSettings();
     api("/api/admin/dashboard/settings" + (refresh ? "?refresh=1" : ""))
       .then(function (d) {
         renderMeta(d, "all time");
@@ -3234,20 +3313,21 @@
               (isObj ? "" : render(val)) + "</span></div>" + (isObj ? '<div style="margin-left:14px;">' + render(val) + "</div>" : "");
           }).join("");
         }
-        var titles = {
-          voucher_settings: "Voucher Settings", referral_settings: "Referral Settings",
-          affiliate_settings: "Affiliate Settings", xp_checkin_settings: "XP & Check-in",
-          bot_settings: "Bot Settings", security: "Security"
-        };
-        $("#settings-body").innerHTML = Object.keys(sec).map(function (k) {
-          return '<div class="settings-section"><div class="section-title">' + esc(titles[k] || k) +
-            "</div><div class=\"detail-block\">" + render(sec[k]) + "</div></div>";
-        }).join("");
+        var matchedKeys = Object.keys(sec).filter(function (k) {
+          return LEGACY_SETTINGS_SECTION_CATEGORY[k] === category;
+        });
+        var el = $("#settings-legacy-readonly");
+        if (!el) return;
+        if (!matchedKeys.length) { el.innerHTML = ""; return; }
+        el.innerHTML = '<div style="margin:20px 0 16px;"><span class="tag heuristic" style="font-size:12px;padding:4px 12px;">READ ONLY — reference only</span></div>' +
+          matchedKeys.map(function (k) {
+            return '<div class="settings-section"><div class="section-title">' + esc(LEGACY_SETTINGS_SECTION_TITLES[k] || k) +
+              "</div><div class=\"detail-block\">" + render(sec[k]) + "</div></div>";
+          }).join("");
       })
       .catch(function (e) {
         if (e.message !== "unauthorized") {
           setMeta("Failed to update");
-          statePanel("settings-body", "banner error", "Failed: " + e.message);
         }
       });
   }
@@ -5447,7 +5527,7 @@
       { label: "Active Drops", view: "drops", live: true },
       { label: "Voucher Pools", view: "compiledDrops" },
       { label: "Voucher Codes", view: "vouchers" },
-      { label: "Settings", view: "settings" }
+      { label: "Settings", view: "settings", settingsCategory: "voucher_rules" }
     ]},
     { key: "community", icon: "👥", label: "Community Centre", tabs: [
       { label: "Overview", view: "moduleOverview", overviewKey: "community" },
@@ -5529,23 +5609,24 @@
       { label: "Join Requests", view: "joinRequests" }
     ]},
     { key: "settings", icon: "⚙", label: "Settings", tabs: [
-      { label: "General", view: "settings" },
-      { label: "Feature Flags", view: "settings" },
+      { label: "General", view: "settings", settingsCategory: "general" },
+      { label: "Feature Flags", view: "settings", settingsCategory: "feature_flags" },
       { label: "XP", view: "xpAdjust", live: true },
-      { label: "Rewards", view: "settings" },
-      { label: "Voucher Rules", view: "settings" },
-      { label: "Referral", view: "settings" },
-      { label: "Affiliate", view: "settings" },
-      { label: "Welcome Journey", view: "settings" },
-      { label: "Reactivation", view: "settings" },
-      { label: "Security", view: "settings" },
-      { label: "Integrations", view: "settings" },
-      { label: "Segment Probability", view: "segmentProbabilityConfig" }
+      { label: "Rewards", view: "settings", settingsCategory: "rewards" },
+      { label: "Voucher Rules", view: "settings", settingsCategory: "voucher_rules" },
+      { label: "Referral", view: "settings", settingsCategory: "referral" },
+      { label: "Affiliate", view: "settings", settingsCategory: "affiliate" },
+      { label: "Welcome Journey", view: "settings", settingsCategory: "welcome_journey" },
+      { label: "Reactivation", view: "settings", settingsCategory: "reactivation" },
+      { label: "Security", view: "settings", settingsCategory: "security" },
+      { label: "Integrations", view: "settings", settingsCategory: "integrations" },
+      { label: "Segment Probability", view: "settings", settingsCategory: "segment_probability" }
     ]}
   ];
 
   var currentModuleKey = null;
   var currentTabIndex = 0;
+  var currentSettingsCategory = null;
 
   function moduleByKey(key) {
     for (var i = 0; i < MODULES.length; i++) if (MODULES[i].key === key) return MODULES[i];
@@ -5623,6 +5704,7 @@
     if (!tab) return;
     currentModuleKey = moduleKey;
     currentTabIndex = tabIndex;
+    currentSettingsCategory = tab.settingsCategory || null;
     renderSidebarActive(moduleKey);
     renderTabBar(moduleKey, tabIndex);
     updateBreadcrumb(moduleKey, tabIndex);
@@ -5684,6 +5766,8 @@
     if (found) {
       currentModuleKey = found.moduleKey;
       currentTabIndex = found.tabIndex;
+      var foundTab = moduleByKey(found.moduleKey).tabs[found.tabIndex];
+      currentSettingsCategory = (foundTab && foundTab.settingsCategory) || null;
       renderSidebarActive(found.moduleKey);
       renderTabBar(found.moduleKey, found.tabIndex);
       updateBreadcrumb(found.moduleKey, found.tabIndex);
@@ -5814,7 +5898,6 @@
     bindReferralShareContent();
     bindJoinRequests();
     bindXpAdjust();
-    bindRejoinBufferSettings();
     $("#reactivation-start-btn").addEventListener("click", function () { setReactivation(true, this); });
     $("#reactivation-pause-btn").addEventListener("click", function () { setReactivation(false, this); });
     $all("#funnel-window button").forEach(function (b) {
