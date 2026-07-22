@@ -15,6 +15,7 @@ from referral_rules import calc_referral_award
 from xp import grant_xp, now_utc, now_kl
 from affiliate_rewards import mark_invitee_qualified
 from affiliate_group_access import maybe_unlock_affiliate_group
+import referral_invitee_lock
 
 from telegram_utils import send_telegram_http_message
 
@@ -507,16 +508,14 @@ def process_welcome_reminders(*, now_ref: datetime | None = None, batch_limit: i
     }
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
-_RAW_GROUP_ID = os.environ.get("MAIN_GROUP_ID") or os.environ.get("GROUP_ID") or "-1002304653063"
-try:
-    GROUP_ID = int(_RAW_GROUP_ID)
-except (TypeError, ValueError):
-    GROUP_ID = -1002304653063
-_RAW_OFFICIAL_CHANNEL_ID = os.environ.get("OFFICIAL_CHANNEL_ID")
-try:
-    OFFICIAL_CHANNEL_ID = int(_RAW_OFFICIAL_CHANNEL_ID) if _RAW_OFFICIAL_CHANNEL_ID not in (None, "") else -1002396761021
-except (TypeError, ValueError):
-    OFFICIAL_CHANNEL_ID = -1002396761021
+# GROUP_ID / OFFICIAL_CHANNEL_ID are resolved once in referral_destination.py so
+# main.py and scheduler.py can never disagree on chat identity.
+from referral_destination import (
+    COMMUNITY_GROUP_ID as GROUP_ID,
+    OFFICIAL_CHANNEL_ID,
+    COMMUNITY_GROUP,
+    OFFICIAL_CHANNEL,
+)
 API_BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"
 REFERRAL_HOLD_HOURS = int(os.getenv("REFERRAL_QUALIFY_HOURS", "48"))
 
@@ -2091,6 +2090,19 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
         inviter_user_id = pending.get("inviter_user_id")
         step = "validate"
         retry_count = pending.get("retry_count", 0) or 0
+        destination_chat_id = (
+            pending.get("destination_chat_id")
+            or pending.get("group_id")
+            or GROUP_ID
+        )
+        destination_type = (
+            pending.get("destination_type")
+            or (
+                OFFICIAL_CHANNEL
+                if destination_chat_id == OFFICIAL_CHANNEL_ID
+                else COMMUNITY_GROUP
+            )
+        )
         try:
             if not invitee_user_id or not inviter_user_id:
                 step = "validate_ids"
@@ -2105,7 +2117,10 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
                         "$unset": {"processing_by": "", "processing_at_utc": "", "processing_at": ""},
                     },
                 )
-                _record_referral_event(inviter_user_id, invitee_user_id, "referral_revoked", now_utc_ts)                
+                _record_referral_event(inviter_user_id, invitee_user_id, "referral_revoked", now_utc_ts)
+                referral_invitee_lock.release(
+                    db, invitee_user_id=invitee_user_id, status="revoked", now_utc_ts=now_utc_ts
+                )                
                 revoked += 1
                 continue
             if invitee_user_id == inviter_user_id:
@@ -2121,7 +2136,10 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
                         "$unset": {"processing_by": "", "processing_at_utc": "", "processing_at": ""},
                     },
                 )
-                _record_referral_event(inviter_user_id, invitee_user_id, "referral_revoked", now_utc_ts)                
+                _record_referral_event(inviter_user_id, invitee_user_id, "referral_revoked", now_utc_ts)
+                referral_invitee_lock.release(
+                    db, invitee_user_id=invitee_user_id, status="revoked", now_utc_ts=now_utc_ts
+                )                
                 revoked += 1
                 continue
 
@@ -2165,7 +2183,10 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
                         "$unset": {"processing_by": "", "processing_at_utc": "", "processing_at": ""},
                     },
                 )
-                _record_referral_event(inviter_user_id, invitee_user_id, "referral_revoked", now_utc_ts)                
+                _record_referral_event(inviter_user_id, invitee_user_id, "referral_revoked", now_utc_ts)
+                referral_invitee_lock.release(
+                    db, invitee_user_id=invitee_user_id, status="revoked", now_utc_ts=now_utc_ts
+                )                
                 revoked += 1
                 logger.info(
                     "[SCHED][REFERRAL] revoked inviter=%s invitee=%s reason=not_in_official_channel",
@@ -2191,44 +2212,83 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
                         "$unset": {"processing_by": "", "processing_at_utc": "", "processing_at": ""},
                     },
                 )
-                _record_referral_event(inviter_user_id, invitee_user_id, "referral_revoked", now_utc_ts)                
+                _record_referral_event(inviter_user_id, invitee_user_id, "referral_revoked", now_utc_ts)
+                referral_invitee_lock.release(
+                    db, invitee_user_id=invitee_user_id, status="revoked", now_utc_ts=now_utc_ts
+                )                
                 revoked += 1
                 continue
             join_seen = pending.get("created_at_utc")
             join_seen_utc = _coerce_utc(join_seen)
-            joined_main_at = _coerce_utc(invitee_doc.get("joined_main_at"))
-            created_at = _coerce_utc(invitee_doc.get("created_at"))
-            reference_time = joined_main_at or created_at
-            if not reference_time or not join_seen_utc:
-                db.pending_referrals.update_one(
-                    {"_id": pending_id},
-                    {
-                        "$set": {
-                            "status": "revoked",
-                            "revoked_reason": "missing_join_time",
-                            "revoked_at": now_utc_ts,
+
+            if destination_type == OFFICIAL_CHANNEL:
+                # Channel-origin referrals: the canonical join-time is the
+                # attribution event itself (referral_join_seen_at_utc, falling
+                # back to the pending row's own created_at_utc). Do NOT require
+                # users.joined_main_at (channel joins never set it — that field
+                # is group-only) and do NOT reject merely because the invitee
+                # already has a users doc: existing bot users / existing
+                # chatroom users can still be genuinely new channel subscribers.
+                referral_join_seen_at_utc = _coerce_utc(pending.get("referral_join_seen_at_utc"))
+                reference_time = referral_join_seen_at_utc or join_seen_utc
+                if not reference_time:
+                    db.pending_referrals.update_one(
+                        {"_id": pending_id},
+                        {
+                            "$set": {
+                                "status": "revoked",
+                                "revoked_reason": "missing_join_time",
+                                "revoked_at": now_utc_ts,
+                            },
+                            "$unset": {"processing_by": "", "processing_at_utc": "", "processing_at": ""},
                         },
-                        "$unset": {"processing_by": "", "processing_at_utc": "", "processing_at": ""},
-                    },
-                )
-                _record_referral_event(inviter_user_id, invitee_user_id, "referral_revoked", now_utc_ts)                
-                revoked += 1
-                continue
-            if reference_time < (join_seen_utc - timedelta(minutes=10)):
-                db.pending_referrals.update_one(
-                    {"_id": pending_id},
-                    {
-                        "$set": {
-                            "status": "revoked",
-                            "revoked_reason": "already_in_db",
-                            "revoked_at": now_utc_ts,
+                    )
+                    _record_referral_event(inviter_user_id, invitee_user_id, "referral_revoked", now_utc_ts)
+                    referral_invitee_lock.release(
+                        db, invitee_user_id=invitee_user_id, status="revoked", now_utc_ts=now_utc_ts
+                    )
+                    revoked += 1
+                    continue
+            else:
+                joined_main_at = _coerce_utc(invitee_doc.get("joined_main_at"))
+                created_at = _coerce_utc(invitee_doc.get("created_at"))
+                reference_time = joined_main_at or created_at
+                if not reference_time or not join_seen_utc:
+                    db.pending_referrals.update_one(
+                        {"_id": pending_id},
+                        {
+                            "$set": {
+                                "status": "revoked",
+                                "revoked_reason": "missing_join_time",
+                                "revoked_at": now_utc_ts,
+                            },
+                            "$unset": {"processing_by": "", "processing_at_utc": "", "processing_at": ""},
                         },
-                        "$unset": {"processing_by": "", "processing_at_utc": "", "processing_at": ""},
-                    },
-                )
-                _record_referral_event(inviter_user_id, invitee_user_id, "referral_revoked", now_utc_ts)                
-                revoked += 1
-                continue
+                    )
+                    _record_referral_event(inviter_user_id, invitee_user_id, "referral_revoked", now_utc_ts)
+                    referral_invitee_lock.release(
+                        db, invitee_user_id=invitee_user_id, status="revoked", now_utc_ts=now_utc_ts
+                    )
+                    revoked += 1
+                    continue
+                if reference_time < (join_seen_utc - timedelta(minutes=10)):
+                    db.pending_referrals.update_one(
+                        {"_id": pending_id},
+                        {
+                            "$set": {
+                                "status": "revoked",
+                                "revoked_reason": "already_in_db",
+                                "revoked_at": now_utc_ts,
+                            },
+                            "$unset": {"processing_by": "", "processing_at_utc": "", "processing_at": ""},
+                        },
+                    )
+                    _record_referral_event(inviter_user_id, invitee_user_id, "referral_revoked", now_utc_ts)
+                    referral_invitee_lock.release(
+                        db, invitee_user_id=invitee_user_id, status="revoked", now_utc_ts=now_utc_ts
+                    )
+                    revoked += 1
+                    continue
 
             step = "check_engagement"
             engagement = evaluate_referral_engagement(
@@ -2258,6 +2318,9 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
                     },
                 )
                 _record_referral_event(inviter_user_id, invitee_user_id, "referral_revoked", now_utc_ts)
+                referral_invitee_lock.release(
+                    db, invitee_user_id=invitee_user_id, status="revoked", now_utc_ts=now_utc_ts
+                )
                 revoked += 1
                 logger.info(
                     "[SCHED][REFERRAL][ENGAGEMENT] revoked inviter=%s invitee=%s reason=insufficient_engagement score=%s signals=%s points=%s window_start=%s window_end=%s",
@@ -2272,11 +2335,15 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
                 continue
 
             step = "award"
-            group_id = pending.get("group_id") or GROUP_ID
-            award_key = f"ref:{group_id}:{invitee_user_id}"
+            # Award key is invitee-scoped (not group_id/chat_id-scoped) so the
+            # same invitee cannot be awarded twice across a group-origin and a
+            # channel-origin referral (P0-4: cross-destination duplicate XP).
+            award_key = f"ref:{invitee_user_id}"
             award_doc = {
                 "award_key": award_key,
-                "group_id": group_id,
+                "group_id": destination_chat_id,
+                "destination_chat_id": destination_chat_id,
+                "destination_type": destination_type,
                 "inviter_user_id": inviter_user_id,
                 "invitee_user_id": invitee_user_id,
                 "pending_id": pending_id,
@@ -2309,6 +2376,9 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
                         },
                         "$unset": {"processing_by": "", "processing_at_utc": "", "processing_at": ""},
                     },
+                )
+                referral_invitee_lock.release(
+                    db, invitee_user_id=invitee_user_id, status="awarded", now_utc_ts=now_utc_ts
                 )
                 logger.info(
                     "[SCHED][REFERRAL] duplicate_award inviter=%s invitee=%s award_key=%s",
@@ -2383,6 +2453,9 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
                     },
                     "$unset": {"processing_by": "", "processing_at_utc": "", "processing_at": ""},
                 },
+            )
+            referral_invitee_lock.release(
+                db, invitee_user_id=invitee_user_id, status="awarded", now_utc_ts=now_utc_ts
             )
             awarded += 1
             logger.info(

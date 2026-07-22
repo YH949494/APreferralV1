@@ -307,19 +307,21 @@ BASE_WEBAPP_URL = "https://apreferralv1.fly.dev/miniapp"
 WEBAPP_URL = f"{BASE_WEBAPP_URL}?v={MINIAPP_VERSION}"
 REFERRAL_WEBAPP_URL = f"{WEBAPP_URL}&action=generate_referral"
 OFFICIAL_CHANNEL_URL = "https://t.me/+Zy3UGGkE17kyNDA9"
-GROUP_ID = -1002304653063
 API_BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 # ----------------------------
 # Channel config
 # ----------------------------
 CHANNEL_USERNAME = "@advantplayofficial"
-CHANNEL_ID = -1002396761021
-_RAW_OFFICIAL_CHANNEL_ID = os.getenv("OFFICIAL_CHANNEL_ID")
-try:
-    OFFICIAL_CHANNEL_ID = int(_RAW_OFFICIAL_CHANNEL_ID) if _RAW_OFFICIAL_CHANNEL_ID not in (None, "") else CHANNEL_ID
-except (TypeError, ValueError):
-    OFFICIAL_CHANNEL_ID = CHANNEL_ID
+# GROUP_ID / OFFICIAL_CHANNEL_ID are resolved once in referral_destination.py so
+# main.py and scheduler.py can never disagree on chat identity. CHANNEL_ID is
+# kept as an alias for backward compatibility with any external references.
+from referral_destination import (
+    COMMUNITY_GROUP_ID as GROUP_ID,
+    OFFICIAL_CHANNEL_ID,
+    get_referral_destination,
+)
+CHANNEL_ID = OFFICIAL_CHANNEL_ID
 
 # Rejoin buffer applied to public/pooled voucher claims after a user leaves and
 # rejoins the official channel. The buffer duration is admin-editable (see
@@ -1630,18 +1632,29 @@ async def handle_user_join(
 def _confirm_referral_on_main_join(
     invitee_user_id: int,
     *,
-    invitee_username: str | None = None,    
+    invitee_username: str | None = None,
     invite_link=None,
     chat_id: int | None = None,
 ):
+    # Local imports (not module globals) so this function stays fully
+    # self-contained: it is exercised standalone (isolated exec of just this
+    # function's AST) by test_main_referral_error.py, which does not provide
+    # these names in its fake globals dict.
+    from referral_destination import destination_type_for_chat_id
+    import referral_invitee_lock
+
+    event_chat_id = chat_id or GROUP_ID
+    destination_type = destination_type_for_chat_id(event_chat_id)
+
     if not isinstance(invitee_user_id, int):
         logger.info(
-            "[REFERRAL][SKIP] reason=invalid_uid invitee=%s chat_id=%s",
+            "[REFERRAL][SKIP] reason=invalid_uid invitee=%s chat_id=%s destination_type=%s",
             invitee_user_id,
-            chat_id or GROUP_ID,
+            event_chat_id,
+            destination_type,
         )
         return
-    
+
     if isinstance(invite_link, str):
         invite_link_url = invite_link
     else:
@@ -1652,32 +1665,44 @@ def _confirm_referral_on_main_join(
         _write_referral_audit(
             status="skipped",
             reason="no_invite_link",
-            chat_id=chat_id or GROUP_ID,
+            chat_id=event_chat_id,
             invitee_user_id=invitee_user_id,
             invitee_username=invitee_username,
             invite_link=None,
-        )        
+        )
         logger.info(
-            "[REFERRAL][SKIP] reason=no_invite_link invitee=%s chat_id=%s",
+            "[REFERRAL][NO_INVITE_LINK] invitee=%s chat_id=%s destination_type=%s",
             invitee_user_id,
-            chat_id or GROUP_ID,            
+            event_chat_id,
+            destination_type,
         )
         return
 
+    # Exact lookup preserved: invite_link + event chat_id + is_active != False.
+    # chat_id comes straight off the Telegram event, so this naturally works
+    # for both community-group and official-channel joins without change.
     mapping = invite_link_map_collection.find_one(
         {
             "invite_link": invite_link_url,
-            "chat_id": chat_id or GROUP_ID,
+            "chat_id": event_chat_id,
             "is_active": {"$ne": False},
         },
         {"inviter_id": 1},
     )
     referrer_id = (mapping or {}).get("inviter_id")
+    logger.info(
+        "[REFERRAL][LINK_RESOLVED] invitee=%s chat_id=%s destination_type=%s invite_link=%s resolved=%s",
+        invitee_user_id,
+        event_chat_id,
+        destination_type,
+        invite_link_log,
+        bool(referrer_id),
+    )
     if not referrer_id:
         _write_referral_audit(
             status="skipped",
             reason="unknown_invite_link",
-            chat_id=chat_id or GROUP_ID,
+            chat_id=event_chat_id,
             invitee_user_id=invitee_user_id,
             invitee_username=invitee_username,
             invite_link=invite_link_url,
@@ -1686,7 +1711,8 @@ def _confirm_referral_on_main_join(
             unknown_invite_audit_collection.insert_one(
                 {
                     "ts_utc": datetime.now(timezone.utc),
-                    "chat_id": chat_id or GROUP_ID,
+                    "chat_id": event_chat_id,
+                    "destination_type": destination_type,
                     "invitee_user_id": invitee_user_id,
                     "invitee_username": invitee_username,
                     "invite_link": invite_link_url,
@@ -1699,10 +1725,12 @@ def _confirm_referral_on_main_join(
                 "[REFERRAL][ERROR] unknown_link_audit_failed invitee=%s invite_link=%s",
                 invitee_user_id,
                 invite_link_log,
-            )        
+            )
         logger.info(
-            "[REFERRAL][UNKNOWN_LINK] reason=unknown_invite_link invitee=%s invite_link=%s",
+            "[REFERRAL][LINK_UNKNOWN] reason=unknown_invite_link invitee=%s chat_id=%s destination_type=%s invite_link=%s",
             invitee_user_id,
+            event_chat_id,
+            destination_type,
             invite_link_log,
         )
         return
@@ -1711,16 +1739,18 @@ def _confirm_referral_on_main_join(
         _write_referral_audit(
             status="skipped",
             reason="self_invite",
-            chat_id=chat_id or GROUP_ID,
+            chat_id=event_chat_id,
             invitee_user_id=invitee_user_id,
             invitee_username=invitee_username,
             invite_link=invite_link_url,
             inviter_user_id=referrer_id,
-        )        
+        )
         logger.info(
-            "[REFERRAL][SKIP] reason=self_invite inviter=%s invitee=%s",
+            "[REFERRAL][SKIP] reason=self_invite inviter=%s invitee=%s chat_id=%s destination_type=%s",
             referrer_id,
             invitee_user_id,
+            event_chat_id,
+            destination_type,
         )
         return
 
@@ -1745,7 +1775,7 @@ def _confirm_referral_on_main_join(
         _write_referral_audit(
             status="skipped",
             reason=blocked_reason,
-            chat_id=chat_id or GROUP_ID,
+            chat_id=event_chat_id,
             invitee_user_id=invitee_user_id,
             invitee_username=invitee_username,
             invite_link=invite_link_url,
@@ -1760,21 +1790,67 @@ def _confirm_referral_on_main_join(
         )
         return
 
+    # Cross-destination duplicate guard (P0-4): one invitee must never carry
+    # more than one active/awarded referral across the group and channel
+    # destinations at once. This is an atomic claim (unique index + upsert
+    # with a non-blocking-status filter), not a pre-check + separate insert.
+    created_at_utc = limiter_now_utc
+    try:
+        lock_claimed = referral_invitee_lock.claim(
+            db,
+            invitee_user_id=invitee_user_id,
+            inviter_user_id=referrer_id,
+            chat_id=event_chat_id,
+            destination_type=destination_type,
+            now_utc_ts=created_at_utc,
+        )
+    except Exception:
+        # Fail-open: a lock-collection outage must not block all referral
+        # attribution. Falls back to the pre-existing pending_referrals
+        # uniqueness (group_id, invitee_user_id) for same-destination dedup.
+        logger.exception(
+            "[REFERRAL][ERROR] step=invitee_lock_claim inviter=%s invitee=%s",
+            referrer_id,
+            invitee_user_id,
+        )
+        lock_claimed = True
+    if not lock_claimed:
+        _write_referral_audit(
+            status="skipped",
+            reason="cross_destination_duplicate",
+            chat_id=event_chat_id,
+            invitee_user_id=invitee_user_id,
+            invitee_username=invitee_username,
+            invite_link=invite_link_url,
+            inviter_user_id=referrer_id,
+        )
+        logger.info(
+            "[REFERRAL][PENDING_DUPLICATE] inviter=%s invitee=%s chat_id=%s destination_type=%s invite_link=%s reason=cross_destination_duplicate",
+            referrer_id,
+            invitee_user_id,
+            event_chat_id,
+            destination_type,
+            invite_link_log,
+        )
+        return
 
     try:
-        created_at_utc = limiter_now_utc
         created_at_kl = created_at_utc.astimezone(KL_TZ).isoformat()
         result = pending_referrals_collection.update_one(
-            {"group_id": chat_id or GROUP_ID, "invitee_user_id": invitee_user_id},
+            {"group_id": event_chat_id, "invitee_user_id": invitee_user_id},
             {
                 "$setOnInsert": {
-                    "group_id": chat_id or GROUP_ID,
+                    "group_id": event_chat_id,
+                    "destination_chat_id": event_chat_id,
+                    "destination_type": destination_type,
+                    "referral_join_seen_at_utc": created_at_utc,
+                    "schema_version": 2,
                     "invitee_user_id": invitee_user_id,
                     "inviter_user_id": referrer_id,
                     "invite_link": invite_link_url,
                     "created_at_utc": created_at_utc,
                     "created_at_kl": created_at_kl,
-                    "status": "pending",               
+                    "status": "pending",
                 }
             },
             upsert=True,
@@ -1788,7 +1864,7 @@ def _confirm_referral_on_main_join(
                     referrer_id=int(referrer_id),
                     invitee_id=int(invitee_user_id),
                     ts_utc=created_at_utc,
-                    meta={"chat_id": chat_id or GROUP_ID},
+                    meta={"chat_id": event_chat_id},
                     idempotency_key=f"rf|join|{int(referrer_id)}|{int(invitee_user_id)}|{created_at_utc.strftime('%Y-%m-%d')}",
                 )
                 counted, reason = should_count_referral_join(db, int(referrer_id), created_at_utc)
@@ -1799,7 +1875,7 @@ def _confirm_referral_on_main_join(
                         referrer_id=int(referrer_id),
                         invitee_id=int(invitee_user_id),
                         ts_utc=created_at_utc,
-                        meta={"chat_id": chat_id or GROUP_ID},
+                        meta={"chat_id": event_chat_id},
                         idempotency_key=f"rf|join_counted|{int(referrer_id)}|{int(invitee_user_id)}|{created_at_utc.strftime('%Y-%m-%d')}",
                     )
                     logger.info("[AFFILIATE][JOIN_COUNT] inviter=%s invitee=%s counted=1", referrer_id, invitee_user_id)
@@ -1810,16 +1886,18 @@ def _confirm_referral_on_main_join(
                         referrer_id=int(referrer_id),
                         invitee_id=int(invitee_user_id),
                         ts_utc=created_at_utc,
-                        meta={"chat_id": chat_id or GROUP_ID, "reason": reason or "cooldown"},
+                        meta={"chat_id": event_chat_id, "reason": reason or "cooldown"},
                         idempotency_key=f"rf|join_ignored|{int(referrer_id)}|{int(invitee_user_id)}|{created_at_utc.strftime('%Y-%m-%d')}",
                     )
                     logger.info("[AFFILIATE][JOIN_COUNT] inviter=%s invitee=%s counted=0 reason=%s", referrer_id, invitee_user_id, reason or "cooldown")
             except Exception:
                 logger.exception("[AFFILIATE][JOIN_COUNT] audit_failed inviter=%s invitee=%s", referrer_id, invitee_user_id)
             logger.info(
-                "[REFERRAL][PENDING] inviter=%s invitee=%s invite_link=%s hold_hours=%s",
+                "[REFERRAL][PENDING_CREATED] inviter=%s invitee=%s chat_id=%s destination_type=%s invite_link=%s hold_hours=%s",
                 referrer_id,
                 invitee_user_id,
+                event_chat_id,
+                destination_type,
                 invite_link_log,
                 _referral_hold_hours(),
             )
@@ -1828,24 +1906,26 @@ def _confirm_referral_on_main_join(
                 int(invitee_user_id),
                 invitee_username=invitee_username,
             )
-        else:            
+        else:
             logger.info(
-                "[REFERRAL][PENDING_SKIP] reason=exists inviter=%s invitee=%s",
+                "[REFERRAL][PENDING_DUPLICATE] inviter=%s invitee=%s chat_id=%s destination_type=%s reason=exists",
                 referrer_id,
                 invitee_user_id,
+                event_chat_id,
+                destination_type,
             )
 
     except Exception as e:
         _write_referral_audit(
             status="failed",
             reason="error",
-            chat_id=chat_id or GROUP_ID,
+            chat_id=event_chat_id,
             invitee_user_id=invitee_user_id,
             invitee_username=invitee_username,
             invite_link=invite_link_url,
             inviter_user_id=referrer_id,
             error=str(e),
-        )        
+        )
         logger.exception(
             "[REFERRAL][ERROR] step=create_pending inviter=%s invitee=%s err=%s",
             referrer_id,
@@ -1853,6 +1933,27 @@ def _confirm_referral_on_main_join(
             e,
         )
     return
+
+
+def _confirm_referral_join(
+    invitee_user_id: int,
+    *,
+    invitee_username: str | None = None,
+    invite_link=None,
+    chat_id: int | None = None,
+):
+    """Destination-neutral alias for _confirm_referral_on_main_join.
+
+    Preferred name for new call sites (Phase 3 of the referral-channel
+    migration); the original name is kept as the primary implementation
+    because test_main_referral_error.py extracts it by name via AST.
+    """
+    return _confirm_referral_on_main_join(
+        invitee_user_id,
+        invitee_username=invitee_username,
+        invite_link=invite_link,
+        chat_id=chat_id,
+    )
 
 def ensure_indexes():
     """
@@ -1974,7 +2075,19 @@ def ensure_indexes():
     invite_link_map_collection.create_index(
         [("invite_link", 1)],
         name="idx_invite_link",
-    )            
+    )
+    # Note: the {chat_id, inviter_id, is_active, created_at} lookup this
+    # destination-scoped generator relies on is already covered by
+    # invite_link_map_chat_inviter_active_created_desc_idx below via
+    # safe_create_index (added for the mongo_query_targeting_2026_05 pass) —
+    # no new index needed here.
+    try:
+        # Cross-destination duplicate-referral guard (P0-4). Isolated so a
+        # failure here cannot block any index created after it.
+        import referral_invitee_lock
+        referral_invitee_lock.ensure_indexes(db)
+    except Exception as e:
+        print("⚠️ ensure_indexes error (referral_invitee_lock):", e)
     unknown_invite_links_collection.create_index(
         [("chat_id", 1), ("invite_link", 1), ("invitee_id", 1)],
         unique=True,
@@ -2216,48 +2329,63 @@ _cleanup_welcome_null_uid()
 
 def get_or_create_referral_invite_link_sync(user_id: int, username: str = "") -> str:
     """
-    Create (or reuse) a unique Telegram chat invite link for this user.
+    Create (or reuse) a unique Telegram chat invite link for this user,
+    pointing at whichever chat get_referral_destination() currently
+    resolves to (community group by default, or the official channel when
+    REFERRAL_DESTINATION_MODE=official_channel).
     Uses Telegram HTTP API (sync), so no asyncio/event loop issues.
     Caches the link in Mongo to avoid rate limits.
     """
-    # 1) Reuse latest active invite link from DB if available
+    dest_chat_id, destination_type = get_referral_destination()
+
+    # 1) Reuse latest active invite link for this destination from DB if available.
+    #    Scoping by chat_id means a destination-mode switch never reuses a link
+    #    generated for the previous destination.
     if QUERY_TELEMETRY_LOGS:
         with JobTimer() as invite_query_timer:
             logger.info("[QUERY][invite_link_lookup] collection=invite_link_map filter_fields=chat_id,inviter_id,is_active sort_fields=created_at limit=1")
             latest_link_doc = invite_link_map_collection.find_one(
-                {"chat_id": GROUP_ID, "inviter_id": user_id, "is_active": True},
+                {"chat_id": dest_chat_id, "inviter_id": user_id, "is_active": True},
                 sort=[("created_at", -1)],
             )
         logger.info("[QUERY][invite_link_lookup] duration_ms=%s returned=%s", invite_query_timer.ms, 1 if latest_link_doc else 0)
     else:
         latest_link_doc = invite_link_map_collection.find_one(
-            {"chat_id": GROUP_ID, "inviter_id": user_id, "is_active": True},
+            {"chat_id": dest_chat_id, "inviter_id": user_id, "is_active": True},
             sort=[("created_at", -1)],
         )
     if latest_link_doc and latest_link_doc.get("invite_link"):
         invite_link = latest_link_doc["invite_link"]
         logger.info(
-            "[REFERRAL][LINK_REUSE] inviter=%s chat_id=%s invite_link=%s db=hit",
+            "[REFERRAL][LINK_REUSED] inviter_id=%s chat_id=%s destination_type=%s invite_link=%s",
             user_id,
-            GROUP_ID,
+            dest_chat_id,
+            destination_type,
             _short_invite_link(invite_link),
         )
         return invite_link
 
     # 2) Create a named invite link: name="ref-<user_id>"
-    #    Bot MUST be admin in GROUP_ID with "Invite users via link" permission
+    #    Bot MUST be admin in the destination chat with "Invite users via link" permission
     name = f"ref-{user_id}"
     payload = {
-        "chat_id": GROUP_ID,
+        "chat_id": dest_chat_id,
         "name": name,
+        "creates_join_request": False,
         # optional controls:
         # "expire_date": int(time.time()) + 30*24*3600,  # 30d expiry
         # "member_limit": 0,  # 0 = unlimited
-        # "creates_join_request": False
     }
     r = requests.post(f"{API_BASE}/createChatInviteLink", json=payload, timeout=10)
     data = r.json()
     if not data.get("ok"):
+        logger.error(
+            "[REFERRAL][LINK_CREATE_FAILED] inviter_id=%s chat_id=%s destination_type=%s reason=%s",
+            user_id,
+            dest_chat_id,
+            destination_type,
+            data.get("description", "unknown"),
+        )
         # No functional fallback exists: a t.me/<bot>?start=ref<uid> deep-link is not
         # parsed by the /start handler and never reaches attribution, so it is only
         # included here for ops visibility in logs, not as a link to hand to callers.
@@ -2273,31 +2401,35 @@ def get_or_create_referral_invite_link_sync(user_id: int, username: str = "") ->
         invite_link_map_collection.insert_one(
             {
                 "inviter_id": user_id,
-                "chat_id": GROUP_ID,
+                "chat_id": dest_chat_id,
+                "destination_type": destination_type,
                 "invite_link": invite_link,
                 "is_active": True,
                 "created_at": datetime.now(KL_TZ),
+                "schema_version": 2,
             }
         )
         logger.info(
-            "[REFERRAL][LINK_CREATE_OK] inviter=%s chat_id=%s invite_link=%s db=ok",
+            "[REFERRAL][LINK_CREATED] inviter_id=%s chat_id=%s destination_type=%s invite_link=%s",
             user_id,
-            GROUP_ID,
+            dest_chat_id,
+            destination_type,
             _short_invite_link(invite_link),
         )
     except DuplicateKeyError:
         logger.info(
-            "[REFERRAL][LINK_REUSE] inviter=%s chat_id=%s invite_link=%s db=duplicate",
+            "[REFERRAL][LINK_REUSED] inviter_id=%s chat_id=%s destination_type=%s invite_link=%s reason=duplicate_key",
             user_id,
-            GROUP_ID,
+            dest_chat_id,
+            destination_type,
             _short_invite_link(invite_link),
         )
     except Exception as e:
         logger.exception(
-            "[REFERRAL][LINK_CREATE_DB_FAIL] inviter=%s chat_id=%s invite_link=%s err=%s",
+            "[REFERRAL][LINK_CREATE_FAILED] inviter_id=%s chat_id=%s destination_type=%s reason=db_write_failed err=%s",
             user_id,
-            GROUP_ID,
-            _short_invite_link(invite_link),
+            dest_chat_id,
+            destination_type,
             e,
         )
     return invite_link
@@ -7657,11 +7789,16 @@ async def member_update_handler(update: Update, context: ContextTypes.DEFAULT_TY
     new_status = getattr(member.new_chat_member, "status", None)
     allowed_statuses = {"member", "administrator", "creator"}
     left_group = old_status in allowed_statuses and new_status in ("left", "kicked")
-    
+
+    # A user already present in the chat in some capacity (including
+    # "restricted", i.e. a muted/limited member) is not a brand-new join when
+    # their status is later lifted to "member" — only count a transition into
+    # allowed_statuses as a real join when the user was previously absent
+    # (never joined, or had left/been kicked).
+    present_statuses = {"member", "administrator", "creator", "restricted"}
+    was_absent = old_status not in present_statuses
     # 只处理 “变成成员” 的事件
-    became_member = (new_status in allowed_statuses) and (
-        old_status not in allowed_statuses
-    )
+    became_member = (new_status in allowed_statuses) and was_absent
 
     user = member.new_chat_member.user
     if not user or user.is_bot:
@@ -7709,15 +7846,35 @@ async def member_update_handler(update: Update, context: ContextTypes.DEFAULT_TY
     if not became_member:
         return
 
+    logger.info(
+        "[REFERRAL][JOIN_UPDATE] invitee=%s chat_id=%s old_status=%s new_status=%s",
+        user.id,
+        chat_id,
+        old_status,
+        new_status,
+    )
+
     if chat_id == GROUP_ID:
-        _confirm_referral_on_main_join(
+        # Group joins: run referral attribution, then the existing
+        # group-only welcome/onboarding join handling below.
+        _confirm_referral_join(
             user.id,
             invitee_username=user.username,
             invite_link=getattr(member, "invite_link", None),
             chat_id=member.chat.id,
         )
 
-    if chat_id == OFFICIAL_CHANNEL_ID and isinstance(user.id, int):
+    elif chat_id == OFFICIAL_CHANNEL_ID and isinstance(user.id, int):
+        # Official-channel joins: run referral attribution when the exact
+        # mapped invite link is present, then update channel-subscription
+        # bookkeeping. handle_user_join() is intentionally never called for
+        # channel events — it is (and must remain) group-only onboarding.
+        _confirm_referral_join(
+            user.id,
+            invitee_username=user.username,
+            invite_link=getattr(member, "invite_link", None),
+            chat_id=member.chat.id,
+        )
         now = now_utc()
         existing_user_doc = users_collection.find_one(
             {"user_id": user.id},
@@ -7755,19 +7912,23 @@ async def member_update_handler(update: Update, context: ContextTypes.DEFAULT_TY
             logger.info("[CHANNEL][FIRST_JOIN] uid=%s chat_id=%s", user.id, chat_id)
 
     # 1) 先记录 join（保持你原本逻辑：哪个 chat 触发就记录哪个 chat）
-    try:
-        await handle_user_join(
-            user.id,
-            user.username,
-            chat_id,
-            source="chat_member",
-            invite_link=getattr(member, "invite_link", None),
-            old_status=old_status,
-            new_status=new_status,
-            context=context,
-        )
-    except Exception:
-        logger.exception("[join] chat_member error uid=%s chat_id=%s", user.id, chat_id)
+    # handle_user_join() is group-only (it early-returns for any other
+    # chat_id anyway) — the explicit guard here keeps the official-channel
+    # path from ever calling it, per the referral-channel migration rules.
+    if chat_id == GROUP_ID:
+        try:
+            await handle_user_join(
+                user.id,
+                user.username,
+                chat_id,
+                source="chat_member",
+                invite_link=getattr(member, "invite_link", None),
+                old_status=old_status,
+                new_status=new_status,
+                context=context,
+            )
+        except Exception:
+            logger.exception("[join] chat_member error uid=%s chat_id=%s", user.id, chat_id)
 
 def _is_mywin_message(message) -> bool:
     if not message:

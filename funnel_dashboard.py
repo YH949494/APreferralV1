@@ -1,7 +1,10 @@
 """Activation Funnel Dashboard — backend computation module.
 
 Stages:
-  1.  Join Channel       — joined_main_at in window
+  1.  Join Community Chat — joined_main_at in window (community-group join;
+      this stage id/label were previously "Join Channel", which was
+      misleading since joined_main_at is only ever set by the group join
+      handler, never by an official-channel subscription event)
   2.  Start Bot          — first_private_interaction_at
   3.  First Check-in     — ≥1 distinct check-in day
   4.  Welcome Progress 1/3 — ≥1 distinct check-in day (alias of 3)
@@ -454,7 +457,7 @@ def compute_funnel(
     # ---- Assemble stages ----
     # Sequence: join → start_bot → checkin(1/3) → 2/3 → 3/3 → unlock → claim → first_bet
     ordered: list[dict] = [
-        _build_stage("join_channel", "Join Channel", join_count, join_count, None,
+        _build_stage("join_channel", "Join Community Chat", join_count, join_count, None,
                      data_quality="exact"),
         _build_stage("start_bot", "Start Bot", start_bot_count, join_count, join_count,
                      data_quality="exact",
@@ -593,7 +596,7 @@ def compute_funnel(
         sub_bet = len(first_bet_uids & sub_uids) if first_bet_uids else None
 
         return [
-            _build_stage("join_channel", "Join Channel", sub_n, sub_n, None),
+            _build_stage("join_channel", "Join Community Chat", sub_n, sub_n, None),
             _build_stage("start_bot", "Start Bot", sub_bot, sub_n, sub_n),
             _build_stage("first_checkin", "First Check-in", sub_p1, sub_n, sub_bot),
             _build_stage("progress_2_3", "Progress 2/3", sub_p2, sub_n, sub_p1),
