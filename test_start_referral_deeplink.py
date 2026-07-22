@@ -9,6 +9,8 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, WebAppI
 from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 
+import referral_share_content as rsc
+
 
 class _Logger:
     def __init__(self):
@@ -37,7 +39,6 @@ def _load_env():
         "_ensure_user_registered",
         "ensure_user_initialized_for_referral",
         "send_referral_link_with_share_button",
-        "_generate_referral_link_for_user",
     }
     fn_nodes = [
         node
@@ -99,16 +100,8 @@ class _UsersCollection:
         return {}
 
 
-class _InviteLinkMapCollection:
-    def __init__(self, existing_doc=None):
-        self._existing_doc = existing_doc
-
-    def find_one(self, filt, sort=None):  # noqa: ARG002
-        return self._existing_doc
-
-
 @pytest.fixture
-def deeplink_env():
+def deeplink_env(monkeypatch):
     env = _load_env()
     fn = env["start"]
     logger = _Logger()
@@ -128,13 +121,24 @@ def deeplink_env():
     def fake_users_update_one(*a, **k):  # noqa: ARG001
         calls["upsert"] += 1
 
-    state = {"link": "https://t.me/+uniqueReferralHash", "raise_error": None}
+    state = {
+        "result": {
+            "ok": True,
+            "message": "🎬 Fresh replays just dropped!\nhttps://cdn.example.com/playback/abc\n\nMore player replays and rewards inside AdvantPlay:\n👉 https://t.me/+uniqueReferralHash",
+            "invite_link": "https://t.me/+uniqueReferralHash",
+            "playback_url": "https://cdn.example.com/playback/abc",
+            "hook_text": "🎬 Fresh replays just dropped!",
+        },
+        "raise_error": None,
+    }
 
-    def fake_get_or_create(user_id, username=""):  # noqa: ARG001
+    def fake_generate_share_package(user_id, username=""):  # noqa: ARG001
         calls["generate"] += 1
         if state["raise_error"] is not None:
             raise state["raise_error"]
-        return state["link"]
+        return state["result"]
+
+    monkeypatch.setattr(rsc, "generate_share_package", fake_generate_share_package)
 
     async def fake_to_thread(func, *args, **kwargs):
         return func(*args, **kwargs)
@@ -155,8 +159,6 @@ def deeplink_env():
             "OFFICIAL_CHANNEL_URL": "https://t.me/+Zy3UGGkE17kyNDA9",
             "_send_welcome_unclaimed_reminder_if_needed": fake_send_welcome_unclaimed_reminder_if_needed,
             "asyncio": _FakeAsyncioModule(),
-            "get_or_create_referral_invite_link_sync": fake_get_or_create,
-            "invite_link_map_collection": _InviteLinkMapCollection(),
             "GROUP_ID": -100999,
         }
     )
@@ -186,35 +188,37 @@ def test_new_user_referral_deeplink_initializes_user(deeplink_env):
     assert deeplink_env._calls["mark_interaction"] == 1
 
 
-def test_new_user_referral_deeplink_calls_canonical_generator(deeplink_env):
+def test_new_user_referral_deeplink_calls_share_package_generator(deeplink_env):
     update = _FakeUpdate(user_id=202)
     asyncio.run(deeplink_env(update, _FakeContext()))
 
     assert deeplink_env._calls["generate"] == 1
 
 
-_CAPTION_LINES = [
-    "Join AdvantPlay 👇",
-    "✔️ Daily XP rewards",
-    "✔️ Surprise voucher drops",
-    "✔️ Weekly bonus for Top 10",
-    "Active players win more.",
-]
-
-
-def test_new_user_referral_deeplink_returns_unique_link_and_share_button(deeplink_env):
-    deeplink_env._state["link"] = "https://t.me/+brandNewHash"
+def test_new_user_referral_deeplink_returns_share_package_and_share_button(deeplink_env):
+    deeplink_env._state["result"] = {
+        "ok": True,
+        "message": "🎬 New hook!\nhttps://cdn.example.com/playback/xyz\n\nMore player replays and rewards inside AdvantPlay:\n👉 https://t.me/+brandNewHash",
+        "invite_link": "https://t.me/+brandNewHash",
+        "playback_url": "https://cdn.example.com/playback/xyz",
+        "hook_text": "🎬 New hook!",
+    }
     update = _FakeUpdate(user_id=203)
     asyncio.run(deeplink_env(update, _FakeContext()))
 
     assert len(deeplink_env._replies) == 1
     reply = deeplink_env._replies[0]
     assert "https://t.me/+brandNewHash" in reply["text"]
-    for line in _CAPTION_LINES:
-        assert line in reply["text"]
+    assert "🎬 New hook!" in reply["text"]
+    assert "https://cdn.example.com/playback/xyz" in reply["text"]
     assert reply["text"].startswith("<blockquote>")
     assert reply["text"].endswith("</blockquote>")
     assert "👉 https://t.me/+brandNewHash" in reply["text"]
+
+    # Old hard-coded caption must never appear.
+    assert "Join AdvantPlay" not in reply["text"]
+    assert "Daily XP rewards" not in reply["text"]
+    assert "Active players win more" not in reply["text"]
 
     buttons = _flat_buttons(reply["reply_markup"])
     share_btns = [b for b in buttons if b.text == "📤 Share Referral Link"]
@@ -240,7 +244,13 @@ def test_new_user_referral_deeplink_does_not_send_normal_welcome_keyboard(deepli
 
 def test_existing_user_referral_deeplink_returns_link_and_share_button(deeplink_env):
     deeplink_env.__globals__["users_collection"] = _UsersCollection(existing_user_ids={205})
-    deeplink_env._state["link"] = "https://t.me/+existingUserHash"
+    deeplink_env._state["result"] = {
+        "ok": True,
+        "message": "hook\nurl\n\nMore player replays and rewards inside AdvantPlay:\n👉 https://t.me/+existingUserHash",
+        "invite_link": "https://t.me/+existingUserHash",
+        "playback_url": "url",
+        "hook_text": "hook",
+    }
     update = _FakeUpdate(user_id=205)
     asyncio.run(deeplink_env(update, _FakeContext()))
 
@@ -254,8 +264,14 @@ def test_existing_user_referral_deeplink_returns_link_and_share_button(deeplink_
     assert params["url"] == ["https://t.me/+existingUserHash"]
 
 
-def test_referral_deeplink_share_button_encodes_full_caption(deeplink_env):
-    deeplink_env._state["link"] = "https://t.me/+shareCaptionHash"
+def test_referral_deeplink_share_button_encodes_hook_and_playback(deeplink_env):
+    deeplink_env._state["result"] = {
+        "ok": True,
+        "message": "hook-text\nhttps://cdn.example.com/pb\n\nMore player replays and rewards inside AdvantPlay:\n👉 https://t.me/+shareCaptionHash",
+        "invite_link": "https://t.me/+shareCaptionHash",
+        "playback_url": "https://cdn.example.com/pb",
+        "hook_text": "hook-text",
+    }
     update = _FakeUpdate(user_id=215)
     asyncio.run(deeplink_env(update, _FakeContext()))
 
@@ -264,8 +280,8 @@ def test_referral_deeplink_share_button_encodes_full_caption(deeplink_env):
     share_btn = next(b for b in buttons if b.text == "📤 Share Referral Link")
     params = parse_qs(urlparse(share_btn.url).query)
 
-    for line in _CAPTION_LINES:
-        assert line in params["text"][0]
+    assert "hook-text" in params["text"][0]
+    assert "https://cdn.example.com/pb" in params["text"][0]
     assert params["url"] == ["https://t.me/+shareCaptionHash"]
 
     # The link must not appear inside the "text" param -- Telegram's
@@ -284,46 +300,13 @@ def test_existing_user_referral_deeplink_no_normal_start_keyboard(deeplink_env):
 
 
 # ---------------------------------------------------------------------------
-# Existing valid link is reused / expired link regenerated
-# (business logic lives in get_or_create_referral_invite_link_sync; here we
-# only assert the deep-link route delegates to it rather than duplicating
-# reuse/expiry logic itself.)
-# ---------------------------------------------------------------------------
-
-def test_referral_deeplink_reuses_existing_active_link_via_canonical_generator(deeplink_env):
-    deeplink_env.__globals__["invite_link_map_collection"] = _InviteLinkMapCollection(
-        existing_doc={"invite_link": "https://t.me/+reusedHash"}
-    )
-    deeplink_env._state["link"] = "https://t.me/+reusedHash"
-    update = _FakeUpdate(user_id=207)
-    asyncio.run(deeplink_env(update, _FakeContext()))
-
-    assert deeplink_env._calls["generate"] == 1
-    logged_ok = [a for a in deeplink_env._logger.infos if a and a[0].startswith("[REFERRAL][DEEPLINK_OK]")]
-    assert logged_ok
-    assert "reused=True" in (logged_ok[-1][0] % logged_ok[-1][1:])
-
-
-def test_referral_deeplink_creates_new_link_when_missing(deeplink_env):
-    deeplink_env.__globals__["invite_link_map_collection"] = _InviteLinkMapCollection(existing_doc=None)
-    deeplink_env._state["link"] = "https://t.me/+freshlyCreatedHash"
-    update = _FakeUpdate(user_id=208)
-    asyncio.run(deeplink_env(update, _FakeContext()))
-
-    reply = deeplink_env._replies[0]
-    assert "https://t.me/+freshlyCreatedHash" in reply["text"]
-    logged_ok = [a for a in deeplink_env._logger.infos if a and a[0].startswith("[REFERRAL][DEEPLINK_OK]")]
-    assert "reused=False" in (logged_ok[-1][0] % logged_ok[-1][1:])
-
-
-# ---------------------------------------------------------------------------
 # Repeated deep-link clicks: no duplicate mapping records / business events.
 # The canonical generator itself owns dedup (invite_link_map upserts); the
 # deep-link route must call it exactly once per click without side effects
 # of its own that could double-create a mapping.
 # ---------------------------------------------------------------------------
 
-def test_repeated_referral_deeplink_clicks_call_generator_once_per_click_no_extra_writes(deeplink_env):
+def test_repeated_referral_deeplink_clicks_call_generator_once_per_click(deeplink_env):
     update1 = _FakeUpdate(user_id=209)
     asyncio.run(deeplink_env(update1, _FakeContext()))
     update2 = _FakeUpdate(user_id=209)
@@ -331,8 +314,8 @@ def test_repeated_referral_deeplink_clicks_call_generator_once_per_click_no_extr
 
     assert deeplink_env._calls["generate"] == 2  # one canonical-generator call per click
     assert len(deeplink_env._replies) == 2
-    # Both replies carry the same canonical link (generator fake always
-    # returns the fixed state["link"]) -- the route does not mint its own.
+    # Both replies carry the same canonical package (generator fake always
+    # returns the fixed state["result"]) -- the route does not mint its own.
     assert deeplink_env._replies[0]["text"] == deeplink_env._replies[1]["text"]
 
 
@@ -349,6 +332,7 @@ def test_referral_deeplink_generation_failure_sends_retryable_error(deeplink_env
     reply = deeplink_env._replies[0]
     assert "try again" in reply["text"].lower()
     assert "t.me/+" not in reply["text"]
+    assert "Join AdvantPlay" not in reply["text"]
 
 
 def test_referral_deeplink_generation_failure_sends_no_normal_keyboard(deeplink_env):
@@ -368,6 +352,17 @@ def test_referral_deeplink_generation_failure_logs_exception(deeplink_env):
     logged_failed = [a for a in deeplink_env._logger.errors if a and a[0] == "[REFERRAL][DEEPLINK_FAILED] uid=%s"]
     assert logged_failed
     assert logged_failed[-1][1] == 212
+
+
+def test_referral_deeplink_no_active_playback_returns_retryable_error_not_old_caption(deeplink_env):
+    deeplink_env._state["result"] = {"ok": False, "code": "no_active_playback"}
+    update = _FakeUpdate(user_id=216)
+    asyncio.run(deeplink_env(update, _FakeContext()))
+
+    reply = deeplink_env._replies[0]
+    assert reply["text"] == "No playback is currently available. Please try again later."
+    assert "Join AdvantPlay" not in reply["text"]
+    assert reply["reply_markup"] is None
 
 
 # ---------------------------------------------------------------------------
