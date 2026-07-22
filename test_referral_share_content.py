@@ -123,6 +123,28 @@ class TestPlaybackValidation:
         assert rsc.parse_playback_url("") is None
         assert rsc.parse_playback_url(None) is None
 
+    def test_parse_rejects_embedded_whitespace_and_control_chars(self):
+        # Bare-ID path: internal whitespace/control chars fail the charset regex directly.
+        assert rsc.parse_playback_url("Abc\t12345") is None
+        assert rsc.parse_playback_url("Abc 12345") is None
+        assert rsc.parse_playback_url("Abc\n12345") is None
+        # Full-URL path: urlparse silently strips embedded tab/newline/CR from
+        # anywhere in the string, so without an explicit up-front check this
+        # would otherwise resolve to a different, seemingly-valid ID instead
+        # of being rejected.
+        assert rsc.parse_playback_url("https://rx.apreplay.com/Ab\tc12345") is None
+        assert rsc.parse_playback_url("https://rx.apreplay.com/Ab\nc12345") is None
+        assert rsc.parse_playback_url("https://rx.apreplay.com/Ab c12345") is None
+
+    def test_parse_rejects_explicit_default_port_443(self):
+        assert rsc.parse_playback_url("https://rx.apreplay.com:443/AbC123") is None
+
+    def test_parse_rejects_encoded_slash_in_path(self):
+        assert rsc.parse_playback_url("https://rx.apreplay.com/Abc%2F123") is None
+
+    def test_parse_rejects_backslash_in_path(self):
+        assert rsc.parse_playback_url("https://rx.apreplay.com/Abc\\123") is None
+
 
 # ---------------------------------------------------------------------------
 # Caption Hooks CRUD
@@ -153,11 +175,37 @@ class TestHookCrud:
         assert r.status_code == 400
         assert r.get_json()["code"] == "missing_text"
 
+    def test_create_text_too_long_rejected(self, client):
+        r = client.post("/api/admin/referral/share-content/hooks", json={"text": "x" * 501})
+        assert r.status_code == 400
+        assert r.get_json()["code"] == "text_too_long"
+
     def test_edit_hook(self, client, fake_db):
         hook_id = _hook(fake_db, "Old text")
         r = client.put(f"/api/admin/referral/share-content/hooks/{hook_id}", json={"text": "New text"})
         assert r.status_code == 200
         assert fake_db["caption_hooks"].find_one({"_id": hook_id})["text"] == "New text"
+
+    def test_edit_text_too_long_rejected(self, client, fake_db):
+        hook_id = _hook(fake_db, "Old text")
+        r = client.put(f"/api/admin/referral/share-content/hooks/{hook_id}", json={"text": "x" * 501})
+        assert r.status_code == 400
+        assert r.get_json()["code"] == "text_too_long"
+
+    def test_edit_preserves_created_at_and_updates_updated_at(self, client, fake_db):
+        hook_id = _hook(fake_db, "Old text")
+        before = fake_db["caption_hooks"].find_one({"_id": hook_id})
+        client.put(f"/api/admin/referral/share-content/hooks/{hook_id}", json={"text": "New text"})
+        after = fake_db["caption_hooks"].find_one({"_id": hook_id})
+        assert after["created_at"] == before["created_at"]
+        assert after["updated_at"] >= before["updated_at"]
+
+    def test_activate_deactivate_does_not_reset_counters(self, client, fake_db):
+        hook_id = _hook(fake_db, "A", status="active")
+        fake_db["caption_hooks"].update_one({"_id": hook_id}, {"$set": {"times_selected": 7}})
+        client.post(f"/api/admin/referral/share-content/hooks/{hook_id}/deactivate")
+        client.post(f"/api/admin/referral/share-content/hooks/{hook_id}/activate")
+        assert fake_db["caption_hooks"].find_one({"_id": hook_id})["times_selected"] == 7
 
     def test_activate_deactivate(self, client, fake_db):
         hook_id = _hook(fake_db, "A", status="active")
@@ -206,6 +254,30 @@ class TestHookBulkImport:
         body = r.get_json()
         assert body["rejected"] == 1
         assert body["results"][0]["reason"] == "too_long"
+
+    def test_bulk_import_reconciles_totals_with_per_line_results(self, client, fake_db):
+        _hook(fake_db, "Existing hook")
+        blob = "Existing hook\nNew hook one\nNew hook one\n" + "y" * 501 + "\nNew hook two"
+        r = client.post("/api/admin/referral/share-content/hooks/bulk-import", json={"lines": blob})
+        body = r.get_json()
+        assert len(body["results"]) == 5
+        assert body["inserted"] + body["skipped"] + body["rejected"] == len(body["results"])
+        assert body["inserted"] == 2
+        assert body["skipped"] == 2
+        assert body["rejected"] == 1
+
+    def test_bulk_import_over_line_cap_rejected_before_processing(self, client, fake_db):
+        blob = "\n".join(f"hook {i}" for i in range(rsc.MAX_BULK_IMPORT_LINES + 1))
+        r = client.post("/api/admin/referral/share-content/hooks/bulk-import", json={"lines": blob})
+        assert r.status_code == 400
+        assert r.get_json()["code"] == "too_many_lines"
+        assert fake_db["caption_hooks"].count_documents({}) == 0
+
+    def test_bulk_import_at_line_cap_is_allowed(self, client, fake_db):
+        blob = "\n".join(f"hook {i}" for i in range(rsc.MAX_BULK_IMPORT_LINES))
+        r = client.post("/api/admin/referral/share-content/hooks/bulk-import", json={"lines": blob})
+        assert r.status_code == 200
+        assert r.get_json()["inserted"] == rsc.MAX_BULK_IMPORT_LINES
 
 
 # ---------------------------------------------------------------------------
@@ -269,6 +341,36 @@ class TestPlaybackCrud:
         r = client.get("/api/admin/referral/share-content/playback?q=mines")
         assert len(r.get_json()["playback"]) == 1
 
+    def test_edit_game_name_too_long_rejected(self, client, fake_db):
+        pid = _playback(fake_db, "Gname0001")
+        r = client.put(f"/api/admin/referral/share-content/playback/{pid}", json={"game_name": "x" * 201})
+        assert r.status_code == 400
+        assert r.get_json()["code"] == "game_name_too_long"
+
+    def test_create_game_name_too_long_rejected(self, client):
+        r = client.post(
+            "/api/admin/referral/share-content/playback",
+            json={"url": "GnameCreate1", "game_name": "x" * 201},
+        )
+        assert r.status_code == 400
+        assert r.get_json()["code"] == "game_name_too_long"
+
+    def test_edit_race_past_precheck_returns_409_not_500(self, client, fake_db, monkeypatch):
+        # Simulate a race where the pre-check find_one misses a concurrent
+        # conflicting write, but the real unique index still rejects the
+        # update at the database layer — must surface as 409, not a 500.
+        import pymongo.errors
+
+        pid = _playback(fake_db, "RaceEdit1")
+
+        def _raise_duplicate(*args, **kwargs):
+            raise pymongo.errors.DuplicateKeyError("duplicate key")
+
+        monkeypatch.setattr(fake_db["playback_pool"], "update_one", _raise_duplicate)
+        r = client.put(f"/api/admin/referral/share-content/playback/{pid}", json={"url": "SomeNewId1"})
+        assert r.status_code == 409
+        assert r.get_json()["code"] == "duplicate_playback"
+
 
 class TestPlaybackBulkImport:
     def test_bulk_import_one_per_line(self, client, fake_db):
@@ -299,6 +401,38 @@ class TestPlaybackBulkImport:
         assert body["inserted"] == 1
         assert body["skipped"] == 1
 
+    def test_bulk_import_reconciles_totals_with_per_line_results(self, client, fake_db):
+        _playback(fake_db, "Existing1")
+        blob = "Existing1\nNewOne0001\nNewOne0001\nnot valid!!\nNewTwo0001"
+        r = client.post("/api/admin/referral/share-content/playback/bulk-import", json={"lines": blob})
+        body = r.get_json()
+        assert len(body["results"]) == 5
+        assert body["inserted"] + body["skipped"] + body["rejected"] == len(body["results"])
+        assert body["inserted"] == 2
+        assert body["skipped"] == 2
+        assert body["rejected"] == 1
+
+    def test_bulk_import_over_line_cap_rejected_before_processing(self, client, fake_db):
+        blob = "\n".join(f"Pool{i:07d}" for i in range(rsc.MAX_BULK_IMPORT_LINES + 1))
+        r = client.post("/api/admin/referral/share-content/playback/bulk-import", json={"lines": blob})
+        assert r.status_code == 400
+        assert r.get_json()["code"] == "too_many_lines"
+        assert fake_db["playback_pool"].count_documents({}) == 0
+
+    def test_edit_preserves_created_at_and_updates_updated_at(self, client, fake_db):
+        pid = _playback(fake_db, "Preserve1")
+        before = fake_db["playback_pool"].find_one({"_id": pid})
+        client.put(f"/api/admin/referral/share-content/playback/{pid}", json={"game_name": "New Name"})
+        after = fake_db["playback_pool"].find_one({"_id": pid})
+        assert after["created_at"] == before["created_at"]
+        assert after["updated_at"] >= before["updated_at"]
+
+    def test_activate_deactivate_does_not_reset_counters(self, client, fake_db):
+        pid = _playback(fake_db, "Counter01", status="active", times_selected=9)
+        client.post(f"/api/admin/referral/share-content/playback/{pid}/deactivate")
+        client.post(f"/api/admin/referral/share-content/playback/{pid}/activate")
+        assert fake_db["playback_pool"].find_one({"_id": pid})["times_selected"] == 9
+
 
 # ---------------------------------------------------------------------------
 # Admin authorization
@@ -320,6 +454,41 @@ class TestAdminAuthorization:
         assert r.status_code == 401
         r = client.post("/api/admin/referral/share-content/playback", json={"url": "Abcde123"})
         assert r.status_code == 401
+
+    def test_every_registered_route_requires_admin(self, fake_db, monkeypatch):
+        # Exhaustively walk every route this blueprint registers (create,
+        # edit, status, delete, bulk-import, and both list/read endpoints)
+        # and confirm none of them are reachable without the admin guard.
+        from flask import jsonify as flask_jsonify
+        monkeypatch.setattr(
+            rsc, "_require_admin", lambda: (None, (flask_jsonify({"status": "error", "code": "auth_failed"}), 401))
+        )
+        flask_app = Flask(__name__)
+        flask_app.register_blueprint(rsc.referral_share_content_bp)
+        client = flask_app.test_client()
+
+        placeholder_id = "000000000000000000000000"
+        checked = 0
+        for rule in flask_app.url_map.iter_rules():
+            if not rule.rule.startswith("/api/admin/referral/share-content"):
+                continue
+            path = rule.rule
+            for arg in rule.arguments:
+                path = path.replace(f"<{arg}>", placeholder_id)
+            for method in rule.methods - {"HEAD", "OPTIONS"}:
+                if method == "GET":
+                    resp = client.get(path)
+                elif method == "POST":
+                    resp = client.post(path, json={})
+                elif method == "PUT":
+                    resp = client.put(path, json={})
+                elif method == "DELETE":
+                    resp = client.delete(path)
+                else:
+                    continue
+                assert resp.status_code == 401, f"{method} {path} did not enforce admin auth (got {resp.status_code})"
+                checked += 1
+        assert checked >= 14  # sanity: make sure the walk actually found all the routes
 
 
 # ---------------------------------------------------------------------------

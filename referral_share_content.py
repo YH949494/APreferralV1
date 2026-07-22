@@ -40,6 +40,8 @@ referral_share_content_bp = Blueprint("referral_share_content", __name__)
 PLAYBACK_HOST = "rx.apreplay.com"
 PLAYBACK_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{5,100}$")
 MAX_HOOK_TEXT_LEN = 500
+MAX_GAME_NAME_LEN = 200
+MAX_BULK_IMPORT_LINES = 2000
 DEFAULT_FALLBACK_HOOK_TEXT = "🎬 Fresh replays just dropped!"
 
 
@@ -50,20 +52,34 @@ def _require_admin():
 
 
 def _ensure_indexes() -> None:
+    # Each index is created via database.safe_create_index so one failure
+    # (e.g. pre-existing duplicate data blocking a unique index build) logs
+    # and moves on instead of a single raised exception silently skipping
+    # every index after it — the outer try/except below only guards against
+    # database.db not being initialized yet (e.g. at import time in tests).
     try:
-        col = database.db["caption_hooks"]
-        col.create_index([("status", 1)], name="ix_caption_hooks_status")
+        database.safe_create_index(
+            database.db["caption_hooks"], [("status", 1)], name="ix_caption_hooks_status"
+        )
 
-        col = database.db["playback_pool"]
-        col.create_index([("playback_id", 1)], name="ux_playback_pool_playback_id", unique=True)
-        col.create_index([("playback_url", 1)], name="ux_playback_pool_playback_url", unique=True)
-        col.create_index(
+        playback_col = database.db["playback_pool"]
+        database.safe_create_index(
+            playback_col, [("playback_id", 1)], name="ux_playback_pool_playback_id", unique=True
+        )
+        database.safe_create_index(
+            playback_col, [("playback_url", 1)], name="ux_playback_pool_playback_url", unique=True
+        )
+        database.safe_create_index(
+            playback_col,
             [("status", 1), ("times_selected", 1), ("last_selected_at", 1)],
             name="ix_playback_pool_selection",
         )
 
-        col = database.db["share_generations"]
-        col.create_index([("user_id", 1), ("generated_at", -1)], name="ix_share_generations_user_generated")
+        database.safe_create_index(
+            database.db["share_generations"],
+            [("user_id", 1), ("generated_at", -1)],
+            name="ix_share_generations_user_generated",
+        )
     except Exception:
         logger.warning("[SHARE_CONTENT] index creation failed", exc_info=True)
 
@@ -104,6 +120,14 @@ def parse_playback_url(raw) -> str | None:
         return None
     candidate = raw.strip()
     if not candidate:
+        return None
+    # urlparse silently drops embedded tab/newline/CR characters anywhere in
+    # the string (browser-style leniency), which would otherwise let a URL
+    # containing control/whitespace chars quietly resolve to a *different*,
+    # seemingly-valid playback_id instead of being rejected. Reject any
+    # whitespace/control character up front so both input forms (bare ID and
+    # full URL) apply the exact same charset rule.
+    if any(ch.isspace() or ord(ch) < 0x20 or ord(ch) == 0x7f for ch in candidate):
         return None
 
     if "://" not in candidate:
@@ -535,6 +559,10 @@ def delete_hook(hook_id: str):
     return jsonify({"status": "ok"})
 
 
+def _bulk_import_line_count(blob: str) -> int:
+    return sum(1 for line in (blob or "").splitlines() if line.strip())
+
+
 @referral_share_content_bp.post("/api/admin/referral/share-content/hooks/bulk-import")
 def bulk_import_hooks_route():
     admin, err = _require_admin()
@@ -542,6 +570,8 @@ def bulk_import_hooks_route():
         return err
     body = request.get_json(force=True, silent=True) or {}
     blob = body.get("lines") or ""
+    if _bulk_import_line_count(blob) > MAX_BULK_IMPORT_LINES:
+        return jsonify({"status": "error", "code": "too_many_lines", "max_lines": MAX_BULK_IMPORT_LINES}), 400
     result = bulk_import_hooks(blob, created_by=(admin or {}).get("id"))
     return jsonify({"status": "ok", **result})
 
@@ -581,6 +611,8 @@ def create_playback():
     if database.db["playback_pool"].find_one({"$or": [{"playback_id": playback_id}, {"playback_url": url}]}):
         return jsonify({"status": "error", "code": "duplicate_playback"}), 409
     game_name = (body.get("game_name") or "").strip()
+    if len(game_name) > MAX_GAME_NAME_LEN:
+        return jsonify({"status": "error", "code": "game_name_too_long"}), 400
     status_val = body.get("status") if body.get("status") in ("active", "inactive") else "active"
     now = now_utc()
     doc = {
@@ -630,13 +662,23 @@ def update_playback(playback_id: str):
         updates["playback_id"] = new_playback_id
         updates["playback_url"] = new_url
     if "game_name" in body:
-        updates["game_name"] = (body.get("game_name") or "").strip()
+        new_game_name = (body.get("game_name") or "").strip()
+        if len(new_game_name) > MAX_GAME_NAME_LEN:
+            return jsonify({"status": "error", "code": "game_name_too_long"}), 400
+        updates["game_name"] = new_game_name
     if "status" in body and body["status"] in ("active", "inactive"):
         updates["status"] = body["status"]
     if not updates:
         return jsonify({"status": "error", "code": "no_changes"}), 400
     updates["updated_at"] = now_utc()
-    database.db["playback_pool"].update_one({"_id": oid}, {"$set": updates})
+    try:
+        database.db["playback_pool"].update_one({"_id": oid}, {"$set": updates})
+    except DuplicateKeyError:
+        # The pre-check above has a race window between two concurrent
+        # renames to the same playback_id/URL; the unique index is the real
+        # guard, so a rare race that slips past the pre-check must still
+        # surface as a clean 409, not an unhandled 500.
+        return jsonify({"status": "error", "code": "duplicate_playback"}), 409
     return jsonify({"status": "ok"})
 
 
@@ -686,5 +728,7 @@ def bulk_import_playback_route():
         return err
     body = request.get_json(force=True, silent=True) or {}
     blob = body.get("lines") or ""
+    if _bulk_import_line_count(blob) > MAX_BULK_IMPORT_LINES:
+        return jsonify({"status": "error", "code": "too_many_lines", "max_lines": MAX_BULK_IMPORT_LINES}), 400
     result = bulk_import_playback(blob, created_by=(admin or {}).get("id"))
     return jsonify({"status": "ok", **result})
