@@ -4050,46 +4050,47 @@
       }
     }
 
-    const REFERRAL_SHARE_TEXT = `Join AdvantPlay 👇
-✔ Daily XP rewards
-✔ Surprise voucher drops
-✔ Weekly bonus for Top 10
-
-Active players win more.`;
-
-    function buildReferralCaption(link) {
-      return `${REFERRAL_SHARE_TEXT}
-👉 ${link}`;
+    async function fetchReferralShareContent() {
+      const res = await v2Fetch(`${API_BASE}/api/referral/share-content`, { method: "POST", body: "{}" });
+      let data = {};
+      try {
+        data = await res.json();
+      } catch (_) {
+        data = {};
+      }
+      if (!res.ok || data?.ok !== true || typeof data?.message !== "string" || !data.message.trim()) {
+        throw new Error(data?.error || `share_content_${res.status}`);
+      }
+      return data;
     }
 
     async function copyReferral() {
-      if (!latestReferralLink) {
-        tgAlert(t("please_generate_link"));
-        return;
-      }
-
       try {
-        await copyTextToClipboard(buildReferralCaption(latestReferralLink));
+        const data = await fetchReferralShareContent();
+        await copyTextToClipboard(data.message);
         flashButtonLabel(document.getElementById("copy-referral-btn"), "✓ Copied");
         flashButtonLabel(document.getElementById("copy-referral-btn-inline"), "✓ Copied");
         showCopySuccessToast();
-      } catch {
+      } catch (err) {
+        console.warn("[COPY_REFERRAL][FAIL]", err);
         hapticNotify("error");
         tgAlert(t("copy_failed"));
       }
     }
 
     async function shareReferralViaTelegram() {
-      if (!latestReferralLink) {
-        await getReferral();
-      }
-      if (!latestReferralLink) {
+      let data;
+      try {
+        data = await fetchReferralShareContent();
+      } catch (err) {
+        console.warn("[SHARE_REFERRAL][FAIL]", err);
         tgAlert(t("could_not_get_link"));
         return;
       }
 
       hapticImpact("light");
-      const shareUrl = `https://t.me/share/url?url=${encodeURIComponent(latestReferralLink)}&text=${encodeURIComponent(REFERRAL_SHARE_TEXT)}`;
+      const shareText = `${data.hook_text}\n${data.playback_url}\n\nMore player replays and rewards inside AdvantPlay:`;
+      const shareUrl = `https://t.me/share/url?url=${encodeURIComponent(data.invite_link)}&text=${encodeURIComponent(shareText)}`;
       openTelegramSafeLink(shareUrl);
     }
 

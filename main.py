@@ -6043,6 +6043,55 @@ def api_share_rank_caption():
         logger.exception("[SHARE_RANK][FAIL] stage=unexpected uid=%s", user_id)
         return jsonify({"ok": False, "error": "Unable to create rank caption"}), 500
 
+@app.route("/api/referral/share-content", methods=["POST"])
+def api_referral_share_content():
+    user_id = None
+    try:
+        init_data = extract_raw_init_data_from_query(request)
+        if not init_data:
+            return jsonify({"ok": False, "error": "Missing init_data"}), 400
+        ok, parsed, _ = verify_telegram_init_data(init_data)
+        if not ok:
+            return jsonify({"ok": False, "error": "Unauthorized"}), 403
+        user_payload = (parsed or {}).get("user", {})
+        if isinstance(user_payload, str):
+            try:
+                user_payload = json.loads(user_payload)
+            except Exception:
+                user_payload = {}
+        try:
+            user_id = int((user_payload or {}).get("id"))
+        except (TypeError, ValueError):
+            user_id = None
+        if not user_id:
+            return jsonify({"ok": False, "error": "Unauthorized"}), 403
+        username = (user_payload or {}).get("username") or ""
+
+        from referral_share_content import generate_share_package
+
+        result = generate_share_package(user_id, username, generated_by="miniapp")
+        if not result.get("ok"):
+            code = result.get("code")
+            if code == "no_active_playback":
+                return jsonify({"ok": False, "error": "No playback is currently available. Please try again later."}), 503
+            logger.error("[SHARE_CONTENT][API_FAIL] uid=%s code=%s", user_id, code)
+            return jsonify({"ok": False, "error": "Unable to generate your referral link right now."}), 500
+
+        logger.info("[SHARE_CONTENT][API_OK] uid=%s", user_id)
+        return jsonify(
+            {
+                "ok": True,
+                "message": result["message"],
+                "invite_link": result["invite_link"],
+                "playback_url": result["playback_url"],
+                "hook_text": result["hook_text"],
+            }
+        )
+    except Exception:
+        logger.exception("[SHARE_CONTENT][API_FAIL] stage=unexpected uid=%s", user_id)
+        return jsonify({"ok": False, "error": "Unable to generate your referral link right now."}), 500
+
+
 @app.route("/api/affiliate/leaderboard", methods=["GET"])
 def get_affiliate_leaderboard_week():
     if get_app_setting("feature_flags", "affiliate") is False:
