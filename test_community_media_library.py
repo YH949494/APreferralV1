@@ -368,7 +368,7 @@ def test_successful_publish_increments_usage_count(fake_db, monkeypatch):
     post, err = cc.create_post(payload, actor_id=1)
     assert err is None
 
-    async def fake_send(_post):
+    async def fake_send(_post, _step=None):
         return {"message_ids": [123], "poll_id": None, "poll_message_id": None}
 
     monkeypatch.setattr(cc, "_do_send", fake_send)
@@ -387,7 +387,7 @@ def test_failed_publish_does_not_increment_usage_count(fake_db, monkeypatch):
     post, err = cc.create_post(payload, actor_id=1)
     assert err is None
 
-    async def fake_send(_post):
+    async def fake_send(_post, _step=None):
         raise RuntimeError("network_timeout")
 
     monkeypatch.setattr(cc, "_do_send", fake_send)

@@ -429,7 +429,7 @@ def _schedule_due_post(payload=None):
 
 
 def _fake_run_coro(monkeypatch, send_result=None, side_effect=None):
-    async def fake_send(post):
+    async def fake_send(post, _step=None):
         if side_effect:
             raise side_effect
         return send_result or {"message_ids": [111], "poll_id": None, "poll_message_id": None}
@@ -461,7 +461,7 @@ def test_worker_claim_is_idempotent_across_concurrent_workers(fake_db, monkeypat
     and the second worker's run-ledger insert hits the unique index."""
     send_calls = {"n": 0}
 
-    async def fake_send(post):
+    async def fake_send(post, _step=None):
         send_calls["n"] += 1
         return {"message_ids": [222], "poll_id": None, "poll_message_id": None}
 
@@ -749,6 +749,80 @@ def test_unknown_error_categorization_does_not_claim_telegram_failure():
     assert code == "unknown_error"
     assert "contacting telegram" not in message.lower()
     assert code not in cc.limits.RETRYABLE_ERROR_CODES
+
+
+def test_local_type_error_categorization_preserves_real_message():
+    """A TypeError raised before/without a Telegram response (e.g. an
+    unsupported bot.send_message kwarg for the pinned python-telegram-bot
+    version) must keep its real message instead of collapsing into the
+    opaque unknown_error copy — that's the whole point of local_type_error."""
+    exc = TypeError("Bot.send_message() got an unexpected keyword argument 'foo'")
+    code, message = cc.categorize_telegram_error(exc)
+    assert code == "local_type_error"
+    assert "unexpected keyword argument 'foo'" in message
+    assert code not in cc.limits.RETRYABLE_ERROR_CODES
+    assert code in cc.limits.PERMANENT_ERROR_CODES
+
+
+def test_local_failure_persists_failed_step_and_real_message(fake_db, monkeypatch):
+    _fake_run_coro(monkeypatch, side_effect=TypeError("send_message() got an unexpected keyword argument 'style'"))
+    post = _schedule_due_post()
+    cc.run_due_posts(limit=5)
+    fresh = cc.get_post(post["_id"])
+    assert fresh["status"] == "failed"
+    assert fresh["last_error_code"] == "local_type_error"
+    assert "unexpected keyword argument 'style'" in fresh["last_error_message"]
+    assert fresh["last_exception_class"] == "TypeError"
+    assert fresh["retryable"] is False
+    run = database.db["community_post_runs"].find_one({"community_post_id": fresh["_id"]})
+    assert run["error_code"] == "local_type_error"
+    assert run["failed_step"]
+
+
+def test_bot_not_ready_failure_persists_bot_loop_not_running_step(fake_db, monkeypatch):
+    async def fake_send(post, _step=None):
+        if _step is not None:
+            _step["name"] = "get_bot"
+        raise RuntimeError("bot_not_ready")
+
+    def sync_run(coro, timeout=20):
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(coro)
+        finally:
+            loop.close()
+
+    monkeypatch.setattr(cc, "_do_send", fake_send)
+    monkeypatch.setattr(cc, "_run_coro", sync_run)
+    post = _schedule_due_post()
+    cc.run_due_posts(limit=5)
+    fresh = cc.get_post(post["_id"])
+    assert fresh["status"] == "failed"
+    assert fresh["last_error_code"] == "bot_loop_not_running"
+    assert fresh["last_exception_class"] == "RuntimeError"
+    assert fresh["last_failed_step"] == "get_bot"
+    assert fresh["retryable"] is False
+
+
+def test_do_send_reports_telegram_call_step_on_send_failure(fake_db, monkeypatch):
+    """The step tracker must reach telegram_call (not stall at build_payload/
+    get_bot/build_keyboard) once the real Telegram call is attempted — proves
+    a Telegram-side rejection is distinguishable from a purely local one."""
+    async def fake_send_message(**kwargs):
+        raise TypeError("send_message() got an unexpected keyword argument 'bogus'")
+
+    monkeypatch.setattr(cc, "_bot", lambda: SimpleNamespace(send_message=fake_send_message))
+    _make_destination()
+    post, err = cc.create_post(_text_payload(), actor_id=1)
+    assert err is None, err
+    step = {}
+    loop = asyncio.new_event_loop()
+    try:
+        with pytest.raises(TypeError):
+            loop.run_until_complete(cc._do_send(post, step))
+    finally:
+        loop.close()
+    assert step["name"] == "telegram_call"
 
 
 def test_permanent_failure_persists_full_failure_detail(fake_db, monkeypatch):
@@ -1238,7 +1312,7 @@ def test_media_group_button_followup_failure_is_partial_not_lost(fake_db, monkey
         "buttons": [{"row": 0, "position": 0, "text": "Info", "type": "url", "value": "https://example.com"}],
     }
 
-    async def fake_send(post):
+    async def fake_send(post, _step=None):
         return {"message_ids": [10, 11], "poll_id": None, "poll_message_id": None, "buttons_failed": True}
 
     def sync_run(coro, timeout=20):

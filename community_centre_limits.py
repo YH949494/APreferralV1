@@ -117,6 +117,7 @@ PERMANENT_ERROR_CODES = {
     "message_too_long",
     "chat_not_found",
     "bot_loop_not_running",
+    "local_type_error",
     "unknown_error",
 }
 

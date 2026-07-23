@@ -169,3 +169,18 @@ test("missing error fields fall back to the internal-error copy with run referen
   assert.match(built.html, /Internal publish error\. Check worker logs using reference: 67ab91cd\./);
   assert.doesNotMatch(built.html, /Unexpected error contacting Telegram/);
 });
+
+test("local_type_error shows the real exception message, step and class instead of a generic fallback", () => {
+  const ctx = makeContext();
+  const built = ctx.__ccBuildRetryModalContent(basePost({
+    last_error_code: "local_type_error",
+    last_error_message: "Local error before Telegram was contacted: send_message() got an unexpected keyword argument 'style'",
+    last_failed_step: "telegram_call",
+    last_exception_class: "TypeError",
+    retryable: false,
+  }));
+  assert.equal(built.retryable, false);
+  assert.match(built.html, /unexpected keyword argument &#39;style&#39;/);
+  assert.match(built.html, /Step: telegram_call/);
+  assert.match(built.html, /Exception: TypeError/);
+});

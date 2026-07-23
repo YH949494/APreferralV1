@@ -1151,6 +1151,13 @@ def categorize_telegram_error(exc: Exception) -> tuple[str, str]:
 
     if isinstance(exc, RuntimeError) and str(exc) == "bot_not_ready":
         return "bot_loop_not_running", "The publishing worker process is not currently running."
+    # TypeError here almost always means a keyword argument passed to a
+    # bot.send_* call isn't supported by the pinned python-telegram-bot
+    # version — preserve the real message (never secrets/tokens, this is a
+    # local Python error, not a Telegram payload) instead of collapsing it
+    # into the generic unknown_error copy.
+    if isinstance(exc, TypeError):
+        return "local_type_error", f"Local error before Telegram was contacted: {str(exc)[:300]}"
     if RetryAfter and isinstance(exc, RetryAfter):
         return "telegram_rate_limited", "Rate limited by Telegram; will retry."
     if Forbidden and isinstance(exc, Forbidden):
@@ -1306,11 +1313,26 @@ def _bump_media_library_usage(post: dict) -> None:
             logger.exception("[COMMUNITY_CENTRE] usage_count increment failed media_id=%s", lib_id)
 
 
-async def _do_send(post: dict) -> dict:
+def _log_send_kwargs(post_id, kwargs: dict) -> None:
+    logger.info("[COMMUNITY_PUBLISH][SEND_MESSAGE_ARGS] post_id=%s keys=%s", post_id, sorted(kwargs.keys()))
+
+
+async def _do_send(post: dict, _step: dict | None = None) -> dict:
     """Send `post` to its destination and return
-    {"message_ids": [...], "poll_id": str|None, "poll_message_id": int|None}."""
+    {"message_ids": [...], "poll_id": str|None, "poll_message_id": None}.
+
+    `_step` (optional) is a mutable dict the caller can inspect after a
+    failure to learn how far publishing got before raising — see
+    _execute_publish's except block, which persists it as
+    last_failed_step so a failure that never reaches Telegram (bad bot
+    context, unsupported kwarg, malformed keyboard, ...) is diagnosable
+    from the run ledger instead of collapsing into a single opaque
+    "unknown_error"."""
+    step = _step if _step is not None else {}
+    step["name"] = "get_bot"
     bot = _bot()
     chat_id = post["destination_chat_id"]
+    step["name"] = "build_keyboard"
     reply_markup = build_reply_markup(post.get("buttons") or [])
     content_type = post["content_type"]
     common = {}
@@ -1320,6 +1342,7 @@ async def _do_send(post: dict) -> dict:
         common["protect_content"] = True
 
     if content_type == "text":
+        step["name"] = "build_payload"
         kwargs = {"chat_id": chat_id, "text": post["text"], **common}
         if post.get("parse_mode"):
             kwargs["parse_mode"] = post["parse_mode"]
@@ -1327,10 +1350,14 @@ async def _do_send(post: dict) -> dict:
             kwargs["disable_web_page_preview"] = True
         if reply_markup:
             kwargs["reply_markup"] = reply_markup
+        _log_send_kwargs(post["_id"], kwargs)
+        step["name"] = "telegram_call"
         msg = await bot.send_message(**kwargs)
+        step["name"] = "telegram_call_returned"
         return {"message_ids": [msg.message_id], "poll_id": None, "poll_message_id": None}
 
     if content_type in ("photo", "animation", "video"):
+        step["name"] = "build_payload"
         media_item = post["media"][0]
         source = _media_source(media_item)
         kwargs = {"chat_id": chat_id, **common}
@@ -1340,16 +1367,20 @@ async def _do_send(post: dict) -> dict:
                 kwargs["parse_mode"] = post["parse_mode"]
         if reply_markup:
             kwargs["reply_markup"] = reply_markup
+        _log_send_kwargs(post["_id"], kwargs)
+        step["name"] = "telegram_call"
         if content_type == "photo":
             msg = await bot.send_photo(photo=source, **kwargs)
         elif content_type == "animation":
             msg = await bot.send_animation(animation=source, **kwargs)
         else:
             msg = await bot.send_video(video=source, **kwargs)
+        step["name"] = "telegram_call_returned"
         return {"message_ids": [msg.message_id], "poll_id": None, "poll_message_id": None}
 
     if content_type == "media_group":
         from telegram import InputMediaPhoto, InputMediaVideo
+        step["name"] = "build_payload"
         group = []
         for idx, item in enumerate(post["media"]):
             source = _media_source(item)
@@ -1362,7 +1393,10 @@ async def _do_send(post: dict) -> dict:
                 group.append(InputMediaPhoto(media=source, **kwargs))
             else:
                 group.append(InputMediaVideo(media=source, **kwargs))
+        _log_send_kwargs(post["_id"], {"chat_id": chat_id, "media": group, **common})
+        step["name"] = "telegram_call"
         messages = await bot.send_media_group(chat_id=chat_id, media=group, **common)
+        step["name"] = "telegram_call_returned"
         message_ids = [m.message_id for m in messages]
         buttons_failed = False
         buttons_error = None
@@ -1385,6 +1419,7 @@ async def _do_send(post: dict) -> dict:
         }
 
     if content_type in ("poll", "quiz"):
+        step["name"] = "build_payload"
         poll = post["poll"]
         kwargs = {
             "chat_id": chat_id,
@@ -1417,7 +1452,10 @@ async def _do_send(post: dict) -> dict:
                 kwargs["close_date"] = poll["close_at_utc"]
         if reply_markup:
             kwargs["reply_markup"] = reply_markup
+        _log_send_kwargs(post["_id"], kwargs)
+        step["name"] = "telegram_call"
         msg = await bot.send_poll(**kwargs)
+        step["name"] = "telegram_call_returned"
         return {
             "message_ids": [msg.message_id],
             "poll_id": msg.poll.id if msg.poll else None,
@@ -1545,12 +1583,21 @@ def _execute_publish(post: dict) -> None:
 
     record_audit(post_id, "worker_claim", actor_type="worker", actor_id=INSTANCE_ID, run_key=run_key)
 
+    step = {"name": "start"}
     try:
-        result = _run_coro(_do_send(post))
+        result = _run_coro(_do_send(post, step))
     except Exception as exc:
         error_code, error_message = categorize_telegram_error(exc)
-        logger.warning("[COMMUNITY_CENTRE] publish failed post_id=%s error_code=%s", post_id, error_code)
-        _fail_run(post, run_key, error_code, error_message, exc.__class__.__name__)
+        # logger.exception (not .warning) so the full traceback lands in
+        # worker logs — a failure at step != "telegram_call"/
+        # "telegram_call_returned" happened locally, before/without a
+        # Telegram response, and the traceback is the only way to see
+        # exactly where.
+        logger.exception(
+            "[COMMUNITY_CENTRE][LOCAL_FAILURE] post_id=%s run_id=%s step=%s error_code=%s exception_class=%s message=%s",
+            post_id, run_key, step["name"], error_code, exc.__class__.__name__, str(exc)[:300],
+        )
+        _fail_run(post, run_key, error_code, error_message, exc.__class__.__name__, step["name"])
         return
 
     message_ids = result["message_ids"]
@@ -1665,6 +1712,7 @@ def _reconcile_post_from_run(post: dict, run: dict | None) -> None:
             "status": "failed", "last_error_code": error_code,
             "last_error_message": run.get("error_message"),
             "last_exception_class": run.get("error_class"),
+            "last_failed_step": run.get("failed_step"),
             "retryable": (error_code in limits.RETRYABLE_ERROR_CODES) if error_code else None,
             "last_attempt_at_utc": run.get("completed_at_utc") or now_utc(),
             "latest_run_id": str(run["_id"]),
@@ -1673,12 +1721,12 @@ def _reconcile_post_from_run(post: dict, run: dict | None) -> None:
         }})
 
 
-def _fail_run(post: dict, run_key: str, error_code: str, error_message: str, error_class: str = "") -> None:
+def _fail_run(post: dict, run_key: str, error_code: str, error_message: str, error_class: str = "", failed_step: str = "") -> None:
     ts = now_utc()
     run = _runs().find_one({"community_post_id": post["_id"], "run_key": run_key}, {"_id": 1})
     _runs().update_one({"community_post_id": post["_id"], "run_key": run_key}, {"$set": {
         "status": "failed", "error_code": error_code, "error_message": error_message,
-        "error_class": error_class, "completed_at_utc": ts, "updated_at_utc": ts,
+        "error_class": error_class, "failed_step": failed_step, "completed_at_utc": ts, "updated_at_utc": ts,
     }})
     is_retryable = error_code in limits.RETRYABLE_ERROR_CODES
     attempt_count = post.get("attempt_count", 1)
@@ -1686,6 +1734,7 @@ def _fail_run(post: dict, run_key: str, error_code: str, error_message: str, err
         "last_error_code": error_code,
         "last_error_message": error_message,
         "last_exception_class": error_class,
+        "last_failed_step": failed_step,
         "retryable": is_retryable,
         "last_attempt_at_utc": ts,
         "latest_run_id": str(run["_id"]) if run else post.get("latest_run_id"),
@@ -1724,7 +1773,7 @@ def run_due_posts(*, limit: int = 10, only_post_id=None) -> int:
             _fail_run(
                 post, _run_key(post["_id"], post.get("next_run_at_utc") or now_utc()),
                 "unknown_error", "Internal publish error before a Telegram response was received.",
-                exc.__class__.__name__,
+                exc.__class__.__name__, "before_execute_publish",
             )
         processed += 1
         if only_post_id is not None:
