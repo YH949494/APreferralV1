@@ -550,6 +550,157 @@ def test_retry_after_failure_requeues(fake_db, monkeypatch):
     retried, err = cc.retry_post(post["_id"], actor_id=1)
     assert err is None
     assert retried["status"] == "scheduled"
+    # Original scheduled_at_utc is preserved for history; only next_run_at_utc
+    # (which drives the run_key) moves — this retry gets a fresh run identity.
+    assert retried["scheduled_at_utc"] == failed["scheduled_at_utc"]
+    assert retried["next_run_at_utc"] > datetime.now(timezone.utc)
+    assert retried["next_run_at_utc"] != failed.get("next_run_at_utc")
+    assert retried["retry_count"] == 1
+    # The worker claims it like any other due post once next_run_at_utc arrives.
+    database.db["community_posts"].update_one({"_id": post["_id"]}, {"$set": {
+        "next_run_at_utc": datetime.now(timezone.utc) - timedelta(seconds=1),
+    }})
+    _fake_run_coro(monkeypatch, send_result={"message_ids": [999], "poll_id": None, "poll_message_id": None})
+    processed = cc.run_due_posts(limit=5)
+    assert processed == 1
+    assert cc.get_post(post["_id"])["status"] == "published"
+
+
+# ---------------------------------------------------------------------------
+# Retry state machine: valid transitions, conflict codes, duplicate-send guard
+# ---------------------------------------------------------------------------
+
+def _failed_post(monkeypatch, error_side_effect=None):
+    from telegram.error import Forbidden
+    _fake_run_coro(monkeypatch, side_effect=error_side_effect or Forbidden("bot was blocked"))
+    post = _schedule_due_post()
+    cc.run_due_posts(limit=5)
+    failed = cc.get_post(post["_id"])
+    assert failed["status"] == "failed"
+    return failed
+
+
+def test_retry_post_not_found_returns_specific_code(fake_db):
+    from bson import ObjectId
+    post, err = cc.retry_post(ObjectId(), actor_id=1)
+    assert post is None
+    assert err == "post_not_found"
+
+
+def test_retry_non_failed_post_rejected(fake_db):
+    _make_destination()
+    post, _ = cc.create_post(_text_payload(), actor_id=1)
+    result, err = cc.retry_post(post["_id"], actor_id=1)
+    assert result is None
+    assert err == "not_failed"
+
+
+def test_retry_published_post_rejected(fake_db, monkeypatch):
+    _fake_run_coro(monkeypatch)
+    post = _schedule_due_post()
+    cc.run_due_posts(limit=5)
+    published = cc.get_post(post["_id"])
+    assert published["status"] == "published"
+    result, err = cc.retry_post(post["_id"], actor_id=1)
+    assert result is None
+    assert err == "already_published"
+
+
+def test_retry_active_processing_post_rejected(fake_db, monkeypatch):
+    failed = _failed_post(monkeypatch)
+    database.db["community_posts"].update_one({"_id": failed["_id"]}, {"$set": {
+        "processing_owner": "other-worker",
+        "processing_started_at_utc": datetime.now(timezone.utc),
+    }})
+    result, err = cc.retry_post(failed["_id"], actor_id=1)
+    assert result is None
+    assert err == "already_processing"
+
+
+def test_retry_stale_processing_failed_post_succeeds(fake_db, monkeypatch):
+    failed = _failed_post(monkeypatch)
+    stale = datetime.now(timezone.utc) - timedelta(seconds=cc.limits.PROCESSING_TIMEOUT_SECONDS + 30)
+    database.db["community_posts"].update_one({"_id": failed["_id"]}, {"$set": {
+        "processing_owner": "crashed-worker",
+        "processing_started_at_utc": stale,
+    }})
+    retried, err = cc.retry_post(failed["_id"], actor_id=1)
+    assert err is None
+    assert retried["status"] == "scheduled"
+    assert retried["processing_owner"] is None
+    assert retried["processing_started_at_utc"] is None
+
+
+def test_retry_limit_enforced(fake_db, monkeypatch):
+    failed = _failed_post(monkeypatch)
+    database.db["community_posts"].update_one({"_id": failed["_id"]}, {"$set": {
+        "attempt_count": cc.limits.MAX_ATTEMPTS,
+    }})
+    result, err = cc.retry_post(failed["_id"], actor_id=1)
+    assert result is None
+    assert err == "retry_limit_reached"
+    # An explicit admin force bypasses the limit.
+    forced, err2 = cc.retry_post(failed["_id"], actor_id=1, force=True)
+    assert err2 is None
+    assert forced["status"] == "scheduled"
+
+
+def test_retry_destination_disabled_after_failure_rejected(fake_db, monkeypatch):
+    failed = _failed_post(monkeypatch)
+    _make_destination(enabled=False)
+    result, err = cc.retry_post(failed["_id"], actor_id=1)
+    assert result is None
+    assert err == "invalid_destination"
+
+
+def test_retry_existing_telegram_message_id_prevents_duplicate_resend(fake_db, monkeypatch):
+    """Simulates a send that actually succeeded but crashed before the post
+    document was finalised as published — the run-ledger row already shows
+    delivered content, so retry must reconcile, not resend."""
+    failed = _failed_post(monkeypatch)
+    run = database.db["community_post_runs"].find_one({"community_post_id": failed["_id"]})
+    assert run is not None
+    database.db["community_post_runs"].update_one({"_id": run["_id"]}, {"$set": {
+        "status": "published", "telegram_message_ids": [555],
+    }})
+    result, err = cc.retry_post(failed["_id"], actor_id=1)
+    assert result is None
+    assert err == "already_published"
+    reconciled = cc.get_post(failed["_id"])
+    assert reconciled["status"] == "published"
+    assert reconciled["telegram_message_ids"] == [555]
+
+
+def test_double_click_retry_only_one_succeeds(fake_db, monkeypatch):
+    failed = _failed_post(monkeypatch)
+    first, err1 = cc.retry_post(failed["_id"], actor_id=1)
+    second, err2 = cc.retry_post(failed["_id"], actor_id=1)
+    assert err1 is None
+    assert first["status"] == "scheduled"
+    assert second is None
+    assert err2 == "not_failed"
+
+
+def test_retry_api_returns_specific_conflict_codes(fake_db):
+    """Exercises the HTTP layer directly to guard against the historical bug
+    where every retry rejection collapsed into schedule_post's generic
+    "not_schedulable" code."""
+    app = Flask(__name__)
+    app.register_blueprint(cc.community_centre_bp)
+    app.config["TESTING"] = True
+
+    def fake_require_admin():
+        return {"id": 1, "username": "admin"}, None
+
+    cc._require_admin = fake_require_admin
+    _make_destination()
+    post, _ = cc.create_post(_text_payload(), actor_id=1)
+    client = app.test_client()
+    resp = client.post(f"/api/admin/community/posts/{post['_id']}/retry")
+    body = resp.get_json()
+    assert resp.status_code == 400
+    assert body["code"] == "not_failed"
+    assert body["code"] != "not_schedulable"
 
 
 # ---------------------------------------------------------------------------

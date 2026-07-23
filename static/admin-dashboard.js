@@ -6738,47 +6738,71 @@
     return html;
   }
 
+  // publish-now/schedule are only valid transitions from draft/approved
+  // (see schedule_post/publish_now in community_centre.py) — showing those
+  // controls for every status let an admin "Preview" a failed/scheduled
+  // post and hit Confirm, which called /schedule with the post's stale
+  // original scheduled_at_utc and surfaced schedule_post's "not_schedulable"
+  // conflict code as if it were a Retry failure. Gate the controls on status.
+  var CC_PREVIEW_PUBLISHABLE_STATUSES = ["draft", "approved"];
+
   function ccOpenPreviewModal(post) {
     apiPost("/api/admin/community/posts/" + post._id + "/preview").then(function (res) {
       var preview = res.preview;
       var overlay = document.createElement("div");
       overlay.className = "modal-overlay";
+      var canPublish = CC_PREVIEW_PUBLISHABLE_STATUSES.indexOf(post.status) !== -1;
       var scheduledAtVal = post.scheduled_at_utc ? ccUtcToKlInputValue(post.scheduled_at_utc) : ($("#cc-scheduled-at") ? $("#cc-scheduled-at").value : "");
+      var actionsHtml;
+      if (canPublish) {
+        actionsHtml =
+          '<div style="margin-top:14px;">Publish: <select id="cc-preview-mode" class="filter-input" style="max-width:200px;display:inline-block;">' +
+          '<option value="now">Now</option><option value="schedule"' + (scheduledAtVal ? " selected" : "") + ">Scheduled time</option></select></div>" +
+          '<div class="modal-actions">' +
+          '<button class="btn" id="cc-preview-cancel">Back to edit</button>' +
+          '<button class="btn primary" id="cc-preview-confirm">Confirm Publish / Schedule</button>' +
+          "</div>";
+      } else {
+        var statusNote = post.status === "failed"
+          ? "This post failed — use Retry from the Failed list to requeue it."
+          : "This post is " + esc(post.status) + " and cannot be published/scheduled from here.";
+        actionsHtml =
+          '<p class="sub" style="margin-top:14px;">' + statusNote + "</p>" +
+          '<div class="modal-actions"><button class="btn primary" id="cc-preview-cancel">Close</button></div>';
+      }
       overlay.innerHTML =
         '<div class="modal-box" style="max-width:520px;">' +
         "<h3>Preview — " + esc(preview.title) + "</h3>" +
         '<p class="sub">Destination: ' + esc(preview.destination_name) + " · Silent: " + (preview.disable_notification ? "Yes" : "No") +
         " · Pin: " + (preview.pin_after_send ? "Yes" : "No") + "</p>" +
         ccPreviewBubbleHtml(preview) +
-        '<div style="margin-top:14px;">Publish: <select id="cc-preview-mode" class="filter-input" style="max-width:200px;display:inline-block;">' +
-        '<option value="now">Now</option><option value="schedule"' + (scheduledAtVal ? " selected" : "") + ">Scheduled time</option></select></div>" +
-        '<div class="modal-actions">' +
-        '<button class="btn" id="cc-preview-cancel">Back to edit</button>' +
-        '<button class="btn primary" id="cc-preview-confirm">Confirm Publish / Schedule</button>' +
-        "</div></div>";
+        actionsHtml +
+        "</div>";
       document.body.appendChild(overlay);
       function done() { overlay.remove(); }
       overlay.querySelector("#cc-preview-cancel").addEventListener("click", done);
       overlay.addEventListener("click", function (e) { if (e.target === overlay) done(); });
-      overlay.querySelector("#cc-preview-confirm").addEventListener("click", function () {
-        var mode = overlay.querySelector("#cc-preview-mode").value;
-        var action;
-        if (mode === "now") {
-          action = apiPost("/api/admin/community/posts/" + post._id + "/publish-now");
-        } else {
-          var iso = ccKlInputToUtcIso(scheduledAtVal);
-          if (!iso) { toast("❌ Choose a scheduled time first", "error"); return; }
-          action = apiPostJson("/api/admin/community/posts/" + post._id + "/schedule", { scheduled_at: iso });
-        }
-        action.then(function (r) {
-          var body = r && r.d !== undefined ? r.d : r;
-          if (!body || !body.success) { toast("❌ " + ((body && body.code) || "publish_failed"), "error"); return; }
-          toast(mode === "now" ? "✅ Queued for immediate publish" : "✅ Scheduled", "success");
-          done();
-          ccResetComposer();
-          if (currentModuleKey === "community") loadCcBoard(true);
+      if (canPublish) {
+        overlay.querySelector("#cc-preview-confirm").addEventListener("click", function () {
+          var mode = overlay.querySelector("#cc-preview-mode").value;
+          var action;
+          if (mode === "now") {
+            action = apiPost("/api/admin/community/posts/" + post._id + "/publish-now");
+          } else {
+            var iso = ccKlInputToUtcIso(scheduledAtVal);
+            if (!iso) { toast("❌ Choose a scheduled time first", "error"); return; }
+            action = apiPostJson("/api/admin/community/posts/" + post._id + "/schedule", { scheduled_at: iso });
+          }
+          action.then(function (r) {
+            var body = r && r.d !== undefined ? r.d : r;
+            if (!body || !body.success) { toast("❌ " + ((body && body.code) || "publish_failed"), "error"); return; }
+            toast(mode === "now" ? "✅ Queued for immediate publish" : "✅ Scheduled", "success");
+            done();
+            ccResetComposer();
+            if (currentModuleKey === "community") loadCcBoard(true);
+          });
         });
-      });
+      }
     }).catch(function () { toast("❌ Failed to build preview", "error"); });
   }
 
@@ -6870,10 +6894,21 @@
     return acts.join(" ");
   }
 
-  function ccRenderPostsTable(posts) {
+  function ccRenderPostsTable(posts, opts) {
     if (!posts.length) return emptyState("Nothing here yet.");
+    var showError = !!(opts && opts.showError);
     var rows = posts.map(function (p) {
       var pollClose = p.poll ? (p.poll.close_mode === "date" ? ccUtcToKlDisplay(p.poll.close_at_utc) : p.poll.close_mode === "duration" ? (p.poll.open_period_seconds + "s after publish") : "Manual") : "—";
+      var errorCell = "";
+      if (showError) {
+        if (p.last_error_code) {
+          var codeHtml = '<span class="pill rejected" title="' + esc(p.last_error_message || "") + '">' + esc(p.last_error_code) + "</span>";
+          var attemptsHtml = '<div class="sub">Attempts: ' + fmt(p.attempt_count || 0) + " · Last: " + ccUtcToKlDisplay(p.updated_at) + "</div>";
+          errorCell = "<td>" + codeHtml + attemptsHtml + "</td>";
+        } else {
+          errorCell = "<td>—</td>";
+        }
+      }
       return "<tr>" +
         "<td>" + (CC_CONTENT_ICON[p.content_type] || "") + " " + esc(p.title) + "</td>" +
         "<td>" + esc(p.destination_name || "") + "</td>" +
@@ -6883,11 +6918,13 @@
         "<td>" + pollClose + "</td>" +
         "<td>" + ccUtcToKlDisplay(p.next_run_at_utc || p.scheduled_at_utc || p.published_at || p.updated_at) + "</td>" +
         "<td>" + esc(p.created_by_username || p.created_by || "") + "</td>" +
+        errorCell +
         "<td>" + ccPostActionsHtml(p) + "</td>" +
         "</tr>";
     }).join("");
+    var errorHeader = showError ? "<th>Error</th>" : "";
     return '<table class="data-table"><thead><tr><th>Title</th><th>Destination</th><th>Type</th><th>Status</th>' +
-      "<th>Recurrence</th><th>Poll Closing</th><th>Time (KL)</th><th>Created By</th><th>Actions</th></tr></thead><tbody>" + rows + "</tbody></table>";
+      "<th>Recurrence</th><th>Poll Closing</th><th>Time (KL)</th><th>Created By</th>" + errorHeader + "<th>Actions</th></tr></thead><tbody>" + rows + "</tbody></table>";
   }
 
   function ccRenderPollResultsTable(posts) {
@@ -6917,7 +6954,7 @@
     var q = CC_BOARD_QUERY[board] || CC_BOARD_QUERY.scheduled;
     var qs = Object.keys(q).map(function (k) { return k + "=" + encodeURIComponent(q[k]); }).join("&");
     api("/api/admin/community/posts?limit=100&" + qs).then(function (d) {
-      $("#cc-board-body").innerHTML = ccRenderPostsTable(d.posts || []);
+      $("#cc-board-body").innerHTML = ccRenderPostsTable(d.posts || [], { showError: board === "failed" });
     }).catch(function (e) { statePanel("cc-board-body", "error", "Failed to load: " + e.message); });
   }
 
@@ -6944,7 +6981,45 @@
     }).catch(function () { toast("❌ Failed to load poll results", "error"); });
   }
 
-  function ccHandlePostAction(action, id) {
+  var CC_RETRY_ERROR_MESSAGES = {
+    post_not_found: "This post no longer exists.",
+    already_published: "This post already published successfully — refreshing lists.",
+    already_processing: "Another attempt is currently processing this post. Try again shortly.",
+    retry_limit_reached: "Maximum retry attempts reached for this post.",
+    not_failed: "This post is no longer in a failed state.",
+    invalid_destination: "The destination is disabled or no longer available.",
+  };
+
+  function ccHandlePostAction(action, id, btnEl) {
+    if (action === "retry") {
+      api("/api/admin/community/posts/" + id).then(function (d) {
+        var post = d.post || {};
+        var lastFailure = post.last_error_message || post.last_error_code || "Unknown error";
+        var msg = "Last failure: " + lastFailure + "\n\nRetry this post now?";
+        confirmSimple("Retry failed post?", msg).then(function (ok) {
+          if (!ok) return;
+          if (btnEl) btnEl.disabled = true;
+          apiPost("/api/admin/community/posts/" + id + "/retry").then(function (r) {
+            if (!r.success) {
+              var code = r.code || "retry_failed";
+              toast("❌ " + (CC_RETRY_ERROR_MESSAGES[code] || code), "error");
+              // "already_published" means the content actually delivered —
+              // the row belongs in Published now, not Failed, so refresh
+              // even though the retry call itself reported a conflict.
+              if (code === "already_published") loadCcBoard(true);
+              return;
+            }
+            toast("✅ Post queued for retry", "success");
+            loadCcBoard(true);
+          }).catch(function () {
+            toast("❌ Retry failed", "error");
+          }).finally(function () {
+            if (btnEl) btnEl.disabled = false;
+          });
+        });
+      }).catch(function () { toast("❌ Failed to load post", "error"); });
+      return;
+    }
     if (action === "preview") {
       api("/api/admin/community/posts/" + id).then(function (d) { ccOpenPreviewModal(d.post); });
       return;
@@ -7147,7 +7222,7 @@
     $("#cc-board-body").addEventListener("click", function (e) {
       var btn = e.target.closest && e.target.closest("[data-cc-post-action]");
       if (!btn) return;
-      ccHandlePostAction(btn.dataset.ccPostAction, btn.dataset.id);
+      ccHandlePostAction(btn.dataset.ccPostAction, btn.dataset.id, btn);
     });
 
     ccResetComposer();
