@@ -342,7 +342,7 @@
       "</tr></thead>" +
       "<tbody>" + rows + "</tbody>" +
       "</table>" +
-      '<div class="note" style="margin-top:10px">Conv/Drop "from Top" = relative to Join Channel count. "from Prev" = relative to the immediately preceding stage.</div>';
+      '<div class="note" style="margin-top:10px">Conv/Drop "from Top" = relative to Join Community Chat count. "from Prev" = relative to the immediately preceding stage.</div>';
   }
 
   // ---- Section 3: Drop-off Analysis ----

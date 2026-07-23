@@ -5399,8 +5399,20 @@ def api_referral_progress():
     link_expires_in_seconds = None
     latest_link_doc = None
     if inviter_id is not None:
+        # Scope to the currently-configured referral destination + active
+        # links only: a stale/inactive link (e.g. left over from before a
+        # community_group <-> official_channel mode switch) must not drive
+        # the expiry countdown for the destination in effect today.
+        try:
+            from referral_destination import get_referral_destination
+            _dest_chat_id, _ = get_referral_destination()
+        except Exception:
+            _dest_chat_id = None
+        link_filter = {"inviter_id": inviter_id, "is_active": True}
+        if _dest_chat_id is not None:
+            link_filter["chat_id"] = _dest_chat_id
         latest_link_doc = invite_link_map_collection.find_one(
-            {"inviter_id": inviter_id},
+            link_filter,
             sort=[("created_at", -1)],
         )
 
