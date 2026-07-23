@@ -30,6 +30,8 @@ AFFILIATE_REWARD_BUNDLES = {
 }
 AFFILIATE_TIER_ICONS = {"T1": "🎉", "T2": "⭐", "T3": "🔥", "T4": "💎", "T5": "👑"}
 
+WELCOME_REWARD_VISIBLE_DAYS = 3
+
 T1_THRESHOLD = int(os.getenv("AFF_T1_THRESHOLD", "10"))
 T2_THRESHOLD = int(os.getenv("AFF_T2_THRESHOLD", "25"))
 T3_THRESHOLD = int(os.getenv("AFF_T3_THRESHOLD", "50"))
@@ -382,6 +384,59 @@ def _no_voucher_filter():
     return {"$or": [{"voucher_code": None}, {"voucher_code": {"$exists": False}}]}
 
 
+def _as_aware_utc(value):
+    if value is None or not hasattr(value, "tzinfo"):
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def welcome_reward_visibility(row: dict, *, now_utc: datetime | None = None) -> dict:
+    """Compute display visibility for an affiliate_ledger WELCOME row.
+
+    Issued WELCOME voucher codes must only remain visible for
+    WELCOME_REWARD_VISIBLE_DAYS after issuance. This never mutates or
+    deletes the ledger row — it only decides whether the caller should
+    render it. issued_at is preferred; for legacy rows lacking it,
+    updated_at is used only when the row is already ISSUED (updated_at is
+    stamped at the same moment status flips to ISSUED), otherwise
+    created_at is used as a conservative fallback.
+    """
+    now_utc = now_utc or datetime.now(timezone.utc)
+    if now_utc.tzinfo is None:
+        now_utc = now_utc.replace(tzinfo=timezone.utc)
+
+    issued_at = _as_aware_utc(row.get("issued_at"))
+    source = "issued_at"
+    if issued_at is None:
+        updated_at = _as_aware_utc(row.get("updated_at"))
+        if updated_at is not None and row.get("status") == "ISSUED":
+            issued_at, source = updated_at, "updated_at_fallback"
+        else:
+            issued_at, source = _as_aware_utc(row.get("created_at")), "created_at_fallback"
+
+    if issued_at is None:
+        return {"visible": False, "visible_until": None, "timestamp_source": source, "issued_at": None}
+
+    if issued_at > now_utc:
+        # Malformed/future issued_at must never keep a card visible indefinitely — fail closed.
+        return {
+            "visible": False,
+            "visible_until": issued_at,
+            "timestamp_source": f"{source}_malformed_future",
+            "issued_at": issued_at,
+        }
+
+    visible_until = issued_at + timedelta(days=WELCOME_REWARD_VISIBLE_DAYS)
+    return {
+        "visible": now_utc < visible_until,
+        "visible_until": visible_until,
+        "timestamp_source": source,
+        "issued_at": issued_at,
+    }
+
+
 def _finalize_issued_if_voucher_exists(db, *, ledger, now_utc: datetime):
     if not ledger:
         return None
@@ -399,7 +454,7 @@ def _finalize_issued_if_voucher_exists(db, *, ledger, now_utc: datetime):
     if ledger.get("status") != "ISSUED":
         db.affiliate_ledger.update_one(
             {"_id": ledger["_id"], "voucher_code": voucher_code, "status": {"$ne": "ISSUED"}},
-            {"$set": {"status": "ISSUED", "updated_at": now_utc}},
+            {"$set": {"status": "ISSUED", "updated_at": now_utc, "issued_at": now_utc}},
         )
         return db.affiliate_ledger.find_one({"_id": ledger["_id"]})
     return ledger
@@ -427,7 +482,7 @@ def _reconcile_ledger_from_issued_pool(db, *, ledger_id, now_utc: datetime):
             "status": {"$in": ["PENDING_MANUAL", "PENDING_REVIEW", "APPROVED", SETTLING_STATUS]},
             **_no_voucher_filter(),
         },
-        {"$set": {"status": "ISSUED", "voucher_code": pool_row.get("code"), "updated_at": now_utc}},
+        {"$set": {"status": "ISSUED", "voucher_code": pool_row.get("code"), "updated_at": now_utc, "issued_at": now_utc}},
     )
     if issue_claim.modified_count == 0:
         latest = db.affiliate_ledger.find_one({"_id": ledger_id})
@@ -910,7 +965,7 @@ def issue_welcome_bonus_if_eligible(db, *, user_id: int, is_new_user: bool, bloc
     if voucher:
         db.affiliate_ledger.update_one(
             {"_id": ledger["_id"], "status": SETTLING_STATUS, **_no_voucher_filter()},
-            {"$set": {"status": "ISSUED", "voucher_code": voucher.get("code"), "updated_at": now_utc}},
+            {"$set": {"status": "ISSUED", "voucher_code": voucher.get("code"), "updated_at": now_utc, "issued_at": now_utc}},
         )
         return {"created": True, "status": "ISSUED", "voucher_code": voucher.get("code")}
 

@@ -88,6 +88,7 @@ from affiliate_rewards import (
     issue_previous_week_affiliate_rewards,
     retry_current_month_pending_manual_ledgers,
     catch_up_missing_current_month_affiliate_ledgers,
+    welcome_reward_visibility,
 )
 from telegram_utils import safe_reply_text, safe_send_message
 from channel_reactivation import set_campaign_active, campaign_summary as channel_reactivation_summary, process_reactivation_campaign, verify_reactivation_claim, check_official_channel_subscribed, VERIFY_CALLBACK_DATA
@@ -6800,6 +6801,7 @@ def get_affiliate_bonus_vouchers():
             ).sort([("updated_at", DESCENDING), ("created_at", DESCENDING), ("_id", DESCENDING)])
         )
 
+        now_utc = datetime.now(timezone.utc)
         rewards = []
         seen = set()
         for row in rows:
@@ -6807,6 +6809,27 @@ def get_affiliate_bonus_vouchers():
             if not code:
                 continue
             tier = row.get("tier") or row.get("reward_tier") or ""
+            ledger_type = str(row.get("ledger_type") or "").strip().upper()
+            ledger_id = row.get("_id")
+
+            # The 3-day hiding rule applies only to affiliate-ledger WELCOME
+            # rewards (issue_welcome_bonus_if_eligible). T1-T4/T5 tier rewards
+            # are not governed by this rule and pass through unaffected.
+            if ledger_type == "WELCOME":
+                visibility = welcome_reward_visibility(row, now_utc=now_utc)
+                if not visibility["visible"]:
+                    logger.info(
+                        "[AFF_WELCOME][HIDDEN_EXPIRED] uid=%s ledger_id=%s issued_at=%s visible_until=%s timestamp_source=%s timestamp=%s",
+                        user_id, ledger_id, visibility["issued_at"], visibility["visible_until"],
+                        visibility["timestamp_source"], now_utc.isoformat(),
+                    )
+                    continue
+                logger.info(
+                    "[AFF_WELCOME][VISIBLE] uid=%s ledger_id=%s issued_at=%s visible_until=%s timestamp_source=%s timestamp=%s",
+                    user_id, ledger_id, visibility["issued_at"], visibility["visible_until"],
+                    visibility["timestamp_source"], now_utc.isoformat(),
+                )
+
             dedup_key = (str(tier), code)
             if dedup_key in seen:
                 continue
@@ -6816,6 +6839,8 @@ def get_affiliate_bonus_vouchers():
             item = {"tier": str(tier) if tier else "", "code": code}
             if issued_at is not None:
                 item["issued_at"] = issued_at.isoformat() if hasattr(issued_at, "isoformat") else str(issued_at)
+            if ledger_type == "WELCOME" and visibility.get("visible_until") is not None:
+                item["expires_at"] = visibility["visible_until"].isoformat()
             rewards.append(item)
             logger.info(
                 "[BONUS][AFFILIATE_HISTORY_ITEM] user_id=%s tier=%s code=%s",
@@ -6824,10 +6849,14 @@ def get_affiliate_bonus_vouchers():
                 _mask_voucher_code(code),
             )
 
-        return jsonify({"rewards": rewards})
+        resp = jsonify({"rewards": rewards})
+        _apply_no_store_headers(resp)
+        return resp
     except Exception as e:
         logger.exception("[BONUS_VOUCHER][AFFILIATE_HISTORY_ERROR] %s", e)
-        return jsonify({"rewards": [], "error": str(e)}), 500
+        resp = jsonify({"rewards": [], "error": str(e)})
+        _apply_no_store_headers(resp)
+        return resp, 500
 
 
 @app.route("/api/campaign_bonus_voucher", methods=["GET"])
