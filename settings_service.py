@@ -155,6 +155,7 @@ SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
             "growth_leaderboard_weekly": {"type": "job", "label": "Growth Leaderboard Weekly", "default": {"enabled": False, "cron": "0 21 * * 0", "batch_size": None}},
             "telegram_member_counts_refresh": {"type": "job", "label": "Telegram Member Counts Refresh", "default": {"enabled": True, "cron": None, "batch_size": None, "interval_minutes": 60}},
             "autoscale_web_for_drop": {"type": "job", "label": "Autoscale Web For Drop", "default": {"enabled": True, "cron": None, "batch_size": None, "interval_seconds": 30}},
+            "community_centre_tick": {"type": "job", "label": "Community Centre Tick", "default": {"enabled": True, "cron": None, "batch_size": None, "interval_seconds": 20}},
         },
     },
     "feature_flags": {
@@ -172,6 +173,8 @@ SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
             "region_selection": {"type": "bool", "label": "Region Selection", "default": False, "env": None},
             "growth_leaderboard": {"type": "bool", "label": "Growth Leaderboard", "default": False, "env": "GROWTH_LEADERBOARD_ENABLED"},
             "admin_web_login": {"type": "bool", "label": "Admin Web Login", "default": True, "env": "ADMIN_WEB_LOGIN_ENABLED"},
+            "community_post_approval_enabled": {"type": "bool", "label": "Community Post Approval Required", "default": False, "env": None},
+            "community_post_self_approval_allowed": {"type": "bool", "label": "Community Post Self-Approval Allowed", "default": False, "env": None},
         },
     },
     "telegram_config": {
