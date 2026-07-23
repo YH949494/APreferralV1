@@ -106,15 +106,18 @@ RETRYABLE_ERROR_CODES = {
 }
 
 PERMANENT_ERROR_CODES = {
-    "bot_removed",
+    "telegram_forbidden",
     "bot_lacks_permission",
     "bot_lacks_pin_permission",
     "invalid_chat_id",
     "invalid_media",
+    "invalid_media_file_id",
     "invalid_poll",
     "invalid_url",
     "message_too_long",
     "chat_not_found",
+    "bot_loop_not_running",
+    "unknown_error",
 }
 
 MAX_ATTEMPTS = 5
