@@ -258,7 +258,14 @@ def _merge_destinations(builtins: list[dict], custom: list[dict]) -> list[dict]:
 
 
 def list_destinations(*, enabled_only: bool = False) -> list[dict]:
-    builtins = resolve_community_destinations(settings_service.get_settings("telegram_config"))
+    # force_refresh: this deployment runs multiple workers (fly.toml), and
+    # settings_service's in-process cache is only invalidated on the worker
+    # that handled the Telegram Configuration save. Without this, a
+    # different worker could keep serving a stale chat id off its own
+    # 45s-old cache for a post-save Composer load. Destination lookups are
+    # low-frequency (admin dashboard only), so paying for a fresh read here
+    # is worth the correctness guarantee.
+    builtins = resolve_community_destinations(settings_service.get_settings("telegram_config", force_refresh=True))
     custom = list(_destinations().find({}, sort=[("name", 1)]))
     merged = [_normalize_destination(d) for d in _merge_destinations(builtins, custom)]
     if enabled_only:
@@ -1068,8 +1075,22 @@ async def _do_test_destination(chat_id: int) -> dict:
     member = await bot.get_chat_member(chat_id, bot.id)
     status = getattr(member, "status", None)
     is_admin = status in ("administrator", "creator")
-    can_post = is_admin and (status == "creator" or bool(getattr(member, "can_post_messages", True)))
-    can_pin = is_admin and (status == "creator" or bool(getattr(member, "can_pin_messages", False)))
+    # ChatMemberAdministrator's can_post_messages/can_edit_messages are
+    # channel-only (None in groups/supergroups) and can_pin_messages is
+    # groups/supergroups-only (None in channels) — a channel admin's pin
+    # right is represented by can_edit_messages instead. Branch on the
+    # actual chat type rather than reading fields that don't apply to it.
+    is_channel = getattr(chat, "type", None) == "channel"
+    if status == "creator":
+        can_post, can_pin = True, True
+    elif is_admin and is_channel:
+        can_post = bool(getattr(member, "can_post_messages", False))
+        can_pin = bool(getattr(member, "can_edit_messages", False))
+    elif is_admin:
+        can_post = True  # group/supergroup admins can always post
+        can_pin = bool(getattr(member, "can_pin_messages", False))
+    else:
+        can_post, can_pin = False, False
     return {
         "reachable": True,
         "chat_title": getattr(chat, "title", None) or getattr(chat, "username", None),
@@ -1088,9 +1109,13 @@ def test_destination(key: str, *, force_refresh: bool = False) -> tuple[dict | N
     if not dest:
         return None, "not_found"
 
+    # Key by (key, chat_id): if the admin repoints this destination's chat id
+    # in Telegram Configuration, that's a different cache entry, not a stale
+    # hit for the chat that used to live under this key.
+    cache_key = (key, dest["chat_id"])
     now = time.monotonic()
     if not force_refresh:
-        cached = _dest_test_cache.get(key)
+        cached = _dest_test_cache.get(cache_key)
         if cached and (now - cached[0]) < _DEST_TEST_CACHE_TTL_SECONDS:
             return cached[1], None
 
@@ -1106,7 +1131,7 @@ def test_destination(key: str, *, force_refresh: bool = False) -> tuple[dict | N
             "can_pin_messages": False,
             "error": msg,
         }
-    _dest_test_cache[key] = (now, result)
+    _dest_test_cache[cache_key] = (now, result)
     return result, None
 
 
