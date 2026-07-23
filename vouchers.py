@@ -5145,7 +5145,7 @@ def _rollback_pooled_voucher_claim(*, drop_id: str, code: str, claim_key: str) -
     if not code:
         return False
     try:
-        res = db.vouchers.update_one(
+        doc = db.vouchers.find_one_and_update(
             {
                 "type": "pooled",
                 "dropId": {"$in": _drop_id_variants(drop_id)},
@@ -5158,7 +5158,12 @@ def _rollback_pooled_voucher_claim(*, drop_id: str, code: str, claim_key: str) -
                 "$unset": {"claimedBy": "", "claimedByKey": "", "claimedAt": ""},
             },
         )
-        return bool(res.modified_count == 1)
+        if not doc:
+            return False
+        pool = str(doc.get("pool") or "public").strip().lower()
+        remaining_field = "public_remaining" if pool == "public" else f"{pool}_remaining"
+        db.drops.update_one({"_id": _coerce_id(drop_id)}, {"$inc": {remaining_field: 1}})
+        return True
     except Exception:
         return False
  
