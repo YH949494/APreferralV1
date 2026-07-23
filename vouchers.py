@@ -6609,6 +6609,28 @@ def api_claim():
                 user_id_str,
                 username,
             )
+            rollback_ok = _rollback_pooled_voucher_claim(
+                drop_id=str(drop_id),
+                code=str(result.get("code") or ""),
+                claim_key=pooled_claim_key,
+            ) if is_pool_drop else False
+            current_app.logger.warning(
+                "[VOUCHER][LIFETIME_DEDUPE_ROLLBACK] dropId=%s user_id=%s code=%s rollback_ok=%s",
+                drop_id,
+                user_id,
+                result.get("code"),
+                rollback_ok,
+            )
+            try:
+                _release_claim_ownership(
+                    claim_doc_id=claim_doc_id,
+                    drop_id=claim_drop_id,
+                    user_id=claim_user_id,
+                    status="failed",
+                    reason="already_claimed_lifetime",
+                )
+            except Exception:
+                pass
             return jsonify({
                 "status": "error",
                 "code": "not_eligible",
