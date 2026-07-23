@@ -1790,11 +1790,50 @@ def _confirm_referral_on_main_join(
         )
         return
 
+    # Historical-success guard: block a new referral outright if this
+    # invitee has ANY prior successful-referral evidence, across every
+    # collection/key format that has ever recorded one (qualified_events,
+    # settled referral_events, structured/legacy/new referral_award_events
+    # keys) — not just qualified_events. This catches invitees who were
+    # qualified/settled/awarded before the referral_invitee_locks
+    # collection existed, so they have no lock row for claim() to see.
+    created_at_utc = limiter_now_utc
+    try:
+        historical_success = referral_invitee_lock.has_historical_success(
+            db, invitee_user_id=invitee_user_id
+        )
+    except Exception:
+        # Fail-open: a lookup outage must not block all referral attribution.
+        logger.exception(
+            "[REFERRAL][ERROR] step=historical_success_guard inviter=%s invitee=%s",
+            referrer_id,
+            invitee_user_id,
+        )
+        historical_success = False
+    if historical_success:
+        _write_referral_audit(
+            status="skipped",
+            reason="historical_success_guard",
+            chat_id=event_chat_id,
+            invitee_user_id=invitee_user_id,
+            invitee_username=invitee_username,
+            invite_link=invite_link_url,
+            inviter_user_id=referrer_id,
+        )
+        logger.info(
+            "[REFERRAL][PENDING_DUPLICATE] inviter=%s invitee=%s chat_id=%s destination_type=%s invite_link=%s reason=historical_success_guard",
+            referrer_id,
+            invitee_user_id,
+            event_chat_id,
+            destination_type,
+            invite_link_log,
+        )
+        return
+
     # Cross-destination duplicate guard (P0-4): one invitee must never carry
     # more than one active/awarded referral across the group and channel
     # destinations at once. This is an atomic claim (unique index + upsert
     # with a non-blocking-status filter), not a pre-check + separate insert.
-    created_at_utc = limiter_now_utc
     try:
         lock_claimed = referral_invitee_lock.claim(
             db,

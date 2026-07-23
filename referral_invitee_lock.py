@@ -19,6 +19,7 @@ working exactly as it does today.
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime
 
 from pymongo import ReturnDocument
@@ -33,6 +34,52 @@ COLLECTION_NAME = "referral_invitee_locks"
 # other collections (qualified_events, referral_events) rather than
 # pending_referrals statuses, so they are intentionally not listed here.
 BLOCKING_STATUSES = ("pending", "pending_channel", "processing", "awarded")
+
+
+def has_historical_success(db, *, invitee_user_id: int) -> bool:
+    """Return True if this invitee has ANY prior evidence of a successful
+    referral, checked across every collection/key format that has ever
+    recorded one — not just ``qualified_events``.
+
+    ``referral_invitee_locks`` only exists going forward (created by this
+    migration), so an invitee who was qualified/settled/awarded before the
+    lock collection existed has no lock row and ``claim()`` alone would let
+    a brand-new referral through for them. This check closes that gap by
+    consulting every historical source directly:
+
+      1. ``qualified_events.invitee_id``
+      2. ``referral_events`` with ``event="referral_settled"`` for this invitee
+      3. ``referral_award_events`` with a structured ``invitee_user_id`` field
+      4. legacy destination-scoped award key ``ref:<chat_id>:<invitee_id>``
+      5. new invitee-scoped award key ``ref:<invitee_id>``
+
+    (4) and (5) are matched on the ``award_key`` string itself, independent
+    of (3), because pre-migration award rows are not guaranteed to carry a
+    structured ``invitee_user_id`` field.
+    """
+    invitee = int(invitee_user_id)
+
+    if db.qualified_events.find_one({"invitee_id": invitee}, {"_id": 1}):
+        return True
+
+    if db.referral_events.find_one(
+        {"event": "referral_settled", "invitee_id": invitee}, {"_id": 1}
+    ):
+        return True
+
+    if db.referral_award_events.find_one({"invitee_user_id": invitee}, {"_id": 1}):
+        return True
+
+    legacy_key_re = re.compile(rf"^ref:-?\d+:{invitee}$")
+    if db.referral_award_events.find_one(
+        {"award_key": {"$regex": legacy_key_re}}, {"_id": 1}
+    ):
+        return True
+
+    if db.referral_award_events.find_one({"award_key": f"ref:{invitee}"}, {"_id": 1}):
+        return True
+
+    return False
 
 
 def claim(

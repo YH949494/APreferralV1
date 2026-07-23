@@ -540,6 +540,147 @@ def test_lock_release_allows_future_claim():
 
 
 # ---------------------------------------------------------------------------
+# referral_invitee_lock.has_historical_success — must not rely only on
+# qualified_events. Regression coverage for each of the 5 historical-success
+# sources it is required to check, in isolation.
+# ---------------------------------------------------------------------------
+
+def test_historical_success_false_when_no_history_exists():
+    import referral_invitee_lock
+
+    db = _fresh_db()
+    assert referral_invitee_lock.has_historical_success(db, invitee_user_id=1) is False
+
+
+def test_historical_success_detects_qualified_events_row():
+    import referral_invitee_lock
+
+    db = _fresh_db()
+    db.qualified_events.insert_one({"invitee_id": 1, "referrer_id": 10, "qualified_at": datetime.now(timezone.utc)})
+    assert referral_invitee_lock.has_historical_success(db, invitee_user_id=1) is True
+
+
+def test_historical_success_detects_settled_referral_event_with_no_qualified_events_row():
+    """The exact production gap the migration audit found: 1,310 rows in
+    referral_events with event="referral_settled" that have no matching
+    qualified_events row. A guard that only checks qualified_events would
+    wrongly let a new referral through for these invitees.
+    """
+    import referral_invitee_lock
+
+    db = _fresh_db()
+    db.referral_events.insert_one(
+        {
+            "inviter_id": 10,
+            "invitee_id": 1,
+            "event": "referral_settled",
+            "created_at_utc": datetime.now(timezone.utc),
+        }
+    )
+    assert db.qualified_events.count_documents({"invitee_id": 1}) == 0
+    assert referral_invitee_lock.has_historical_success(db, invitee_user_id=1) is True
+
+
+def test_historical_success_ignores_non_settled_referral_events():
+    import referral_invitee_lock
+
+    db = _fresh_db()
+    db.referral_events.insert_one(
+        {"inviter_id": 10, "invitee_id": 1, "event": "referral_revoked", "created_at_utc": datetime.now(timezone.utc)}
+    )
+    assert referral_invitee_lock.has_historical_success(db, invitee_user_id=1) is False
+
+
+def test_historical_success_detects_structured_award_event():
+    import referral_invitee_lock
+
+    db = _fresh_db()
+    db.referral_award_events.insert_one(
+        {
+            "award_key": "ref:some_other_key_format",
+            "inviter_user_id": 10,
+            "invitee_user_id": 1,
+            "awarded_at_utc": datetime.now(timezone.utc),
+        }
+    )
+    assert referral_invitee_lock.has_historical_success(db, invitee_user_id=1) is True
+
+
+def test_historical_success_detects_legacy_destination_scoped_award_key():
+    import referral_invitee_lock
+
+    db = _fresh_db()
+    # Pre-migration award row: legacy "ref:<chat_id>:<invitee_id>" key, no
+    # structured invitee_user_id field (the exact shape the migration audit
+    # found 5,000 of).
+    db.referral_award_events.insert_one(
+        {"award_key": f"ref:{GROUP_CHAT_ID}:1", "awarded_at_utc": datetime.now(timezone.utc)}
+    )
+    assert referral_invitee_lock.has_historical_success(db, invitee_user_id=1) is True
+
+
+def test_historical_success_detects_new_invitee_scoped_award_key():
+    import referral_invitee_lock
+
+    db = _fresh_db()
+    db.referral_award_events.insert_one(
+        {"award_key": "ref:1", "awarded_at_utc": datetime.now(timezone.utc)}
+    )
+    assert referral_invitee_lock.has_historical_success(db, invitee_user_id=1) is True
+
+
+def test_historical_success_does_not_match_unrelated_invitee():
+    import referral_invitee_lock
+
+    db = _fresh_db()
+    db.qualified_events.insert_one({"invitee_id": 2, "referrer_id": 10, "qualified_at": datetime.now(timezone.utc)})
+    db.referral_events.insert_one(
+        {"inviter_id": 10, "invitee_id": 2, "event": "referral_settled", "created_at_utc": datetime.now(timezone.utc)}
+    )
+    db.referral_award_events.insert_one({"award_key": "ref:2", "invitee_user_id": 2})
+    assert referral_invitee_lock.has_historical_success(db, invitee_user_id=1) is False
+
+
+# ---------------------------------------------------------------------------
+# _confirm_referral_on_main_join — end-to-end: the historical-success guard
+# must block creation of a new pending referral even when the only evidence
+# is a settled referral_events row with no matching qualified_events row.
+# ---------------------------------------------------------------------------
+
+def test_confirm_join_blocks_new_referral_for_settled_invitee_without_qualified_event():
+    db = _fresh_db()
+    db.invite_link_map.insert_one(
+        {
+            "inviter_id": 999,
+            "chat_id": GROUP_CHAT_ID,
+            "destination_type": "community_group",
+            "invite_link": "https://t.me/+new_attempt",
+            "is_active": True,
+        }
+    )
+    # Historical evidence of success for invitee 200: a settled referral_events
+    # row, but deliberately no qualified_events row (the production audit's
+    # 1,310-row gap) and no referral_invitee_locks row (pre-dates that
+    # collection), so claim() alone would not catch this.
+    db.referral_events.insert_one(
+        {
+            "inviter_id": 111,
+            "invitee_id": 200,
+            "event": "referral_settled",
+            "created_at_utc": datetime(2025, 1, 1, tzinfo=timezone.utc),
+        }
+    )
+    assert db.qualified_events.count_documents({"invitee_id": 200}) == 0
+    assert db.referral_invitee_locks.count_documents({"invitee_user_id": 200}) == 0
+
+    fn, audits, logger = _make_confirm_join_env(db)
+    fn(200, invitee_username="u200", invite_link="https://t.me/+new_attempt", chat_id=GROUP_CHAT_ID)
+
+    assert db.pending_referrals.count_documents({}) == 0
+    assert audits[-1]["reason"] == "historical_success_guard"
+
+
+# ---------------------------------------------------------------------------
 # Phase 6 / 15-19, 32: settle_pending_referrals destination-aware validation
 # ---------------------------------------------------------------------------
 
