@@ -6,9 +6,13 @@ from pathlib import Path
 class _Logger:
     def __init__(self):
         self.exceptions = []
+        self.errors = []
 
     def info(self, *args, **kwargs):
         return None
+
+    def error(self, *args, **kwargs):
+        self.errors.append((args, kwargs))
 
     def exception(self, *args, **kwargs):
         self.exceptions.append((args, kwargs))
@@ -22,6 +26,58 @@ class _InviteMapCollection:
 class _PendingReferralsCollection:
     def update_one(self, *args, **kwargs):  # noqa: ARG002
         raise RuntimeError("forced_create_pending_error")
+
+
+class _EmptyLookupCollection:
+    """Always reports no historical row, never raises."""
+
+    def find_one(self, *args, **kwargs):  # noqa: ARG002
+        return None
+
+
+class _FakeLockCollection:
+    """Minimal stand-in for the real ``referral_invitee_locks`` collection,
+    just enough to let referral_invitee_lock.claim()/release() succeed so
+    the test can reach the pending-referral-creation failure path."""
+
+    def __init__(self):
+        self.docs = {}
+
+    def find_one_and_update(self, filt, update, upsert=False, return_document=None):  # noqa: ARG002
+        from pymongo.errors import DuplicateKeyError
+
+        invitee = filt["invitee_user_id"]
+        existing = self.docs.get(invitee)
+        if existing is not None:
+            raise DuplicateKeyError("duplicate")
+        doc = dict(update.get("$set", {}))
+        doc.update(update.get("$setOnInsert", {}))
+        self.docs[invitee] = doc
+        return doc
+
+    def update_one(self, filt, update):
+        invitee = filt.get("invitee_user_id")
+        doc = self.docs.get(invitee)
+        if doc is None:
+            return
+        if "inviter_user_id" in filt and doc.get("inviter_user_id") != filt["inviter_user_id"]:
+            return
+        doc.update(update.get("$set", {}))
+
+
+class _FakeDb:
+    """Fake ``db`` exposing both attribute-style access (for the
+    historical-success lookups) and dict-style access (for
+    referral_invitee_lock, which indexes collections by name)."""
+
+    def __init__(self):
+        self.qualified_events = _EmptyLookupCollection()
+        self.referral_events = _EmptyLookupCollection()
+        self.referral_award_events = _EmptyLookupCollection()
+        self._collections = {"referral_invitee_locks": _FakeLockCollection()}
+
+    def __getitem__(self, name):
+        return self._collections[name]
 
 
 def _load_confirm_referral_func():
@@ -56,7 +112,7 @@ def test_confirm_referral_exception_path_does_not_reference_undefined_step():
             "now_utc": lambda: datetime(2026, 1, 1, tzinfo=timezone.utc),
             "KL_TZ": timezone.utc,
             "pending_referrals_collection": _PendingReferralsCollection(),
-            "db": object(),
+            "db": _FakeDb(),
             "datetime": datetime,
             "timezone": timezone,
         }

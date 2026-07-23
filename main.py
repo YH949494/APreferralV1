@@ -1790,30 +1790,85 @@ def _confirm_referral_on_main_join(
         )
         return
 
+    # Historical-success guard: an invitee who already has a prior
+    # successful referral on record (either destination, ever) must never
+    # get a new pending referral. This runs before the invitee-lock claim
+    # so a lookup failure here fails closed instead of racing on to claim
+    # the lock for an invitee who may already be permanently settled.
+    from referral_historical_success import HistoricalSuccessResult, has_historical_success
+
+    history_result = has_historical_success(db, invitee_user_id=invitee_user_id)
+    if history_result is HistoricalSuccessResult.FOUND:
+        _write_referral_audit(
+            status="skipped",
+            reason="historical_success_guard",
+            chat_id=event_chat_id,
+            invitee_user_id=invitee_user_id,
+            invitee_username=invitee_username,
+            invite_link=invite_link_url,
+            inviter_user_id=referrer_id,
+        )
+        logger.info(
+            "[REFERRAL][SKIP] reason=historical_success_guard inviter=%s invitee=%s chat_id=%s destination_type=%s",
+            referrer_id,
+            invitee_user_id,
+            event_chat_id,
+            destination_type,
+        )
+        return
+    if history_result is HistoricalSuccessResult.LOOKUP_FAILED:
+        _write_referral_audit(
+            status="failed",
+            reason="historical_success_lookup_failed",
+            chat_id=event_chat_id,
+            invitee_user_id=invitee_user_id,
+            invitee_username=invitee_username,
+            invite_link=invite_link_url,
+            inviter_user_id=referrer_id,
+        )
+        logger.error(
+            "[REFERRAL][ERROR] reason=historical_success_lookup_failed inviter_id=%s invitee_id=%s chat_id=%s destination_type=%s",
+            referrer_id,
+            invitee_user_id,
+            event_chat_id,
+            destination_type,
+        )
+        return
+
     # Cross-destination duplicate guard (P0-4): one invitee must never carry
     # more than one active/awarded referral across the group and channel
     # destinations at once. This is an atomic claim (unique index + upsert
     # with a non-blocking-status filter), not a pre-check + separate insert.
     created_at_utc = limiter_now_utc
-    try:
-        lock_claimed = referral_invitee_lock.claim(
-            db,
-            invitee_user_id=invitee_user_id,
-            inviter_user_id=referrer_id,
+    lock_claimed = referral_invitee_lock.claim(
+        db,
+        invitee_user_id=invitee_user_id,
+        inviter_user_id=referrer_id,
+        chat_id=event_chat_id,
+        destination_type=destination_type,
+        now_utc_ts=created_at_utc,
+    )
+    if lock_claimed == referral_invitee_lock.LOCK_ERROR:
+        # Fail closed: ownership of the cross-destination lock could not be
+        # proven, so do not create a pending referral and do not treat the
+        # lock as claimed (nothing to release — the claim itself failed).
+        _write_referral_audit(
+            status="failed",
+            reason="invitee_lock_lookup_failed",
             chat_id=event_chat_id,
-            destination_type=destination_type,
-            now_utc_ts=created_at_utc,
+            invitee_user_id=invitee_user_id,
+            invitee_username=invitee_username,
+            invite_link=invite_link_url,
+            inviter_user_id=referrer_id,
         )
-    except Exception:
-        # Fail-open: a lock-collection outage must not block all referral
-        # attribution. Falls back to the pre-existing pending_referrals
-        # uniqueness (group_id, invitee_user_id) for same-destination dedup.
-        logger.exception(
-            "[REFERRAL][ERROR] step=invitee_lock_claim inviter=%s invitee=%s",
+        logger.error(
+            "[REFERRAL][ERROR] step=invitee_lock_claim reason=invitee_lock_lookup_failed inviter_id=%s invitee_id=%s chat_id=%s destination_type=%s",
             referrer_id,
             invitee_user_id,
+            event_chat_id,
+            destination_type,
         )
-        lock_claimed = True
+        return
     if not lock_claimed:
         _write_referral_audit(
             status="skipped",
@@ -1916,11 +1971,18 @@ def _confirm_referral_on_main_join(
             )
 
     except Exception as e:
-        # The invitee lock was already claimed above (fail-open on its own
-        # errors); since no pending row was actually created, release it so
-        # this invitee is not blocked from every future referral attempt.
+        # The invitee lock was already claimed above by this attempt; since
+        # no pending row was actually created, release it so this invitee
+        # is not blocked from every future referral attempt. Scoped to this
+        # attempt's own inviter_user_id (ownership-token check) so this
+        # cleanup can never release a lock a different, newer attempt has
+        # since legitimately claimed for the same invitee.
         referral_invitee_lock.release(
-            db, invitee_user_id=invitee_user_id, status="revoked", now_utc_ts=created_at_utc
+            db,
+            invitee_user_id=invitee_user_id,
+            status="revoked",
+            now_utc_ts=created_at_utc,
+            expected_inviter_user_id=int(referrer_id),
         )
         _write_referral_audit(
             status="failed",
