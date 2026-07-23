@@ -8791,6 +8791,7 @@ def run_worker():
         max_instances=1,
         coalesce=True,
     )
+    logger.info("[COMMUNITY_POSTS][SCHEDULER_REGISTERED] interval_seconds=20")
 
     # subscription audit disabled — subscription_cache refreshed via claim + check-in events
     try:

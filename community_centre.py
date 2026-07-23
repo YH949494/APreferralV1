@@ -1016,19 +1016,88 @@ def cancel_post(post_id, *, actor_id) -> tuple[dict | None, str | None]:
     return post, None
 
 
-def retry_post(post_id, *, actor_id) -> tuple[dict | None, str | None]:
+_RETRY_DELAY_SECONDS = 3
+
+
+def retry_post(post_id, *, actor_id, force: bool = False) -> tuple[dict | None, str | None]:
+    """Requeue a failed one-time/recurring post for immediate (re)delivery.
+
+    Returns a specific conflict code instead of a generic failure so the
+    admin UI can explain *why* — never a bare "not schedulable" (that code
+    belongs to schedule_post's draft/approved transition, not this one).
+    """
     post = _posts().find_one({"_id": post_id})
     if not post:
-        return None, "not_found"
+        return None, "post_not_found"
+    if post["status"] in ("published", "partially_published"):
+        return None, "already_published"
     if post["status"] != "failed":
         return None, "not_failed"
-    ts = now_utc()
-    _posts().update_one({"_id": post_id}, {"$set": {
-        "status": "scheduled", "scheduled_at_utc": ts, "next_run_at_utc": ts, "updated_at": ts,
-    }})
-    post = _posts().find_one({"_id": post_id})
-    record_audit(post_id, "retry", actor_id=actor_id, after=_public_view(post))
-    return post, None
+
+    attempt_count = post.get("attempt_count", 0)
+    if not force and attempt_count >= limits.MAX_ATTEMPTS:
+        return None, "retry_limit_reached"
+
+    destination = get_destination(post.get("destination_key"))
+    if not destination or not destination.get("enabled"):
+        return None, "invalid_destination"
+
+    # Duplicate-send protection: if the most recent run for this post
+    # actually delivered to Telegram (send succeeded but post-side
+    # finalisation crashed before flipping status), reconcile instead of
+    # blindly resending the content a second time.
+    last_run = _runs().find_one({"community_post_id": post_id}, sort=[("created_at_utc", -1)])
+    if last_run and last_run.get("status") in ("published", "partially_published"):
+        _reconcile_post_from_run(post, last_run)
+        return None, "already_published"
+
+    now = now_utc()
+    stale_cutoff = now - timedelta(seconds=limits.PROCESSING_TIMEOUT_SECONDS)
+    updated = _posts().find_one_and_update(
+        {
+            "_id": post_id,
+            "status": "failed",
+            "$or": [
+                {"processing_started_at_utc": {"$exists": False}},
+                {"processing_started_at_utc": None},
+                {"processing_started_at_utc": {"$lte": stale_cutoff}},
+            ],
+        },
+        {
+            "$set": {
+                "status": "scheduled",
+                # Original scheduled_at_utc is left untouched — it stays as
+                # the audit/history record of when this occurrence was first
+                # due. next_run_at_utc (a different timestamp) is what
+                # _run_key() hashes, so this retry gets a fresh run identity
+                # rather than reclaiming the terminal failed run.
+                "next_run_at_utc": now + timedelta(seconds=_RETRY_DELAY_SECONDS),
+                "processing_owner": None,
+                "processing_started_at_utc": None,
+                "last_error_code": None,
+                "last_error_message": None,
+                "updated_at": now,
+            },
+            "$inc": {"retry_count": 1},
+        },
+        return_document=ReturnDocument.AFTER,
+    )
+    if not updated:
+        current = _posts().find_one({"_id": post_id})
+        if not current:
+            return None, "post_not_found"
+        if current["status"] in ("published", "partially_published"):
+            return None, "already_published"
+        if current["status"] == "processing":
+            return None, "already_processing"
+        if current["status"] != "failed":
+            return None, "not_failed"
+        # Still "failed" but the staleness $or didn't match — a live
+        # (non-stale) processing run owns this occurrence.
+        return None, "already_processing"
+
+    record_audit(post_id, "retry", actor_id=actor_id, after=_public_view(updated))
+    return updated, None
 
 
 def _public_view(post: dict) -> dict:
@@ -1571,6 +1640,7 @@ def _reconcile_post_from_run(post: dict, run: dict | None) -> None:
         _posts().update_one({"_id": post["_id"]}, {"$set": {
             "status": "failed", "last_error_code": run.get("error_code"),
             "last_error_message": run.get("error_message"), "updated_at": now_utc(),
+            "processing_owner": None, "processing_started_at_utc": None,
         }})
 
 
@@ -1588,11 +1658,13 @@ def _fail_run(post: dict, run_key: str, error_code: str, error_message: str) -> 
         _posts().update_one({"_id": post["_id"]}, {"$set": {
             "status": "scheduled", "next_run_at_utc": next_try, "updated_at": ts,
             "last_error_code": error_code, "last_error_message": error_message,
+            "processing_owner": None, "processing_started_at_utc": None,
         }})
     else:
         _posts().update_one({"_id": post["_id"]}, {"$set": {
             "status": "failed", "next_run_at_utc": None, "updated_at": ts,
             "last_error_code": error_code, "last_error_message": error_message,
+            "processing_owner": None, "processing_started_at_utc": None,
         }})
     record_audit(post["_id"], "publish_failure", actor_type="worker", actor_id=INSTANCE_ID, run_key=run_key,
                  after={"error_code": error_code, "retryable": is_retryable})
@@ -1607,6 +1679,7 @@ def run_due_posts(*, limit: int = 10, only_post_id=None) -> int:
         post = _claim_next_due_post(only_post_id=only_post_id)
         if not post:
             break
+        logger.info("[COMMUNITY_POSTS][DUE_POST_CLAIMED] post_id=%s attempt_count=%s", post.get("_id"), post.get("attempt_count"))
         try:
             _execute_publish(post)
         except Exception:
@@ -1737,6 +1810,7 @@ def community_centre_tick() -> None:
     """Single APScheduler entry point: publish due posts, recover stale
     processing, auto-close due polls, run auto-unpins. Called on a short
     interval (see main.py)."""
+    logger.debug("[COMMUNITY_POSTS][SCHEDULER_HEARTBEAT] instance=%s", INSTANCE_ID)
     try:
         run_due_posts(limit=20)
     except Exception:
@@ -2226,6 +2300,31 @@ def cc_preview_post(post_id):
     return _ok({"preview": build_preview(post)})
 
 
+_RETRY_ERROR_STATUS = {
+    "post_not_found": 404,
+    "already_published": 409,
+    "already_processing": 409,
+    "retry_limit_reached": 409,
+    "not_failed": 400,
+    "invalid_destination": 400,
+}
+
+
+@community_centre_bp.post("/api/admin/community/posts/<post_id>/retry")
+def cc_retry_post(post_id):
+    payload, err = _require_admin()
+    if err:
+        return err
+    oid, err_resp = _resolve_post_id(post_id)
+    if err_resp:
+        return err_resp
+    body = request.get_json(silent=True) or {}
+    post, code = retry_post(oid, actor_id=_actor_id(payload), force=bool(body.get("force")))
+    if code:
+        return _err(code, _RETRY_ERROR_STATUS.get(code, 400))
+    return _ok({"post": post})
+
+
 def _simple_action(fn):
     def handler(post_id):
         payload, err = _require_admin()
@@ -2258,7 +2357,6 @@ _register_action("approve", "approve", lambda oid, actor_id: approve_post(oid, a
 _register_action("publish_now", "publish-now", lambda oid, actor_id: publish_now(oid, actor_id=actor_id))
 _register_action("duplicate", "duplicate", lambda oid, actor_id: duplicate_post(oid, actor_id=actor_id))
 _register_action("cancel", "cancel", lambda oid, actor_id: cancel_post(oid, actor_id=actor_id))
-_register_action("retry", "retry", lambda oid, actor_id: retry_post(oid, actor_id=actor_id))
 _register_action("stop_poll", "stop-poll", lambda oid, actor_id: stop_poll_action(oid, actor_id=actor_id))
 _register_action("pin", "pin", lambda oid, actor_id: pin_action(oid, actor_id=actor_id))
 _register_action("unpin", "unpin", lambda oid, actor_id: unpin_action(oid, actor_id=actor_id))
