@@ -306,6 +306,7 @@ MONGO_URL = os.environ.get("MONGO_URL")
 BASE_WEBAPP_URL = "https://apreferralv1.fly.dev/miniapp"
 WEBAPP_URL = f"{BASE_WEBAPP_URL}?v={MINIAPP_VERSION}"
 REFERRAL_WEBAPP_URL = f"{WEBAPP_URL}&action=generate_referral"
+ADMIN_DASHBOARD_URL = BASE_WEBAPP_URL.rsplit("/miniapp", 1)[0] + "/admin"
 OFFICIAL_CHANNEL_URL = "https://t.me/+Zy3UGGkE17kyNDA9"
 API_BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
@@ -2621,6 +2622,13 @@ try:
     ensure_community_centre_indexes()
 except Exception:
     logger.exception("[COMMUNITY_CENTRE] index setup failed at startup")
+
+from community_media_library import community_media_bp, ensure_community_media_library_indexes
+app.register_blueprint(community_media_bp)
+try:
+    ensure_community_media_library_indexes()
+except Exception:
+    logger.exception("[COMMUNITY_MEDIA] index setup failed at startup")
 
 admin_bp = Blueprint("admin", __name__)
 
@@ -8058,8 +8066,125 @@ async def private_message_handler(update: Update, context: ContextTypes.DEFAULT_
     user = update.effective_user
     if not user or user.is_bot:
         return
+
+    message = update.effective_message
+    pending_rename_id = (context.user_data or {}).get("cml_pending_rename")
+    if pending_rename_id and message is not None and message.text:
+        from vouchers import _is_cached_admin
+        is_admin, _source = _is_cached_admin({"id": user.id, "username": user.username or ""})
+        if is_admin:
+            context.user_data.pop("cml_pending_rename", None)
+            new_name = message.text.strip()
+            if new_name.lower() == "cancel":
+                await message.reply_text("Cancelled.")
+            else:
+                from community_media_library import update_media
+                doc, err = update_media(pending_rename_id, {"internal_name": new_name}, actor_id=user.id)
+                if err:
+                    await message.reply_text(f"❌ Could not rename media ({err}).")
+                else:
+                    logger.info("[COMMUNITY_MEDIA] action=rename media_id=%s actor=%s via=bot_chat", pending_rename_id, user.id)
+                    await message.reply_text(f'✅ Renamed to "{doc["internal_name"]}".')
+            return
+
     _mark_private_interaction(user.id, user.username)
     await _send_welcome_unclaimed_reminder_if_needed(context, user.id)
+
+
+_ADMIN_MEDIA_TYPE_LABEL = {"photo": "Photo", "animation": "GIF", "video": "Video", "document": "Document"}
+
+
+async def admin_media_upload_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Private-chat admin media capture -> Community Centre Media Library.
+
+    Registered ahead of private_message_handler so it sees photo/GIF/video/
+    approved-document messages first, but it always delegates to
+    private_message_handler (preserving welcome-reminder/rename-capture
+    behaviour for every private-chat sender, admin or not) before doing
+    anything Community-Centre-specific, and it does nothing at all for
+    non-admins or non-private chats — regular users' media is never treated
+    as a library upload.
+    """
+    if not _is_private_chat(update):
+        return
+    message = update.effective_message
+    user = update.effective_user
+    if not message or not user or user.is_bot:
+        return
+
+    await private_message_handler(update, context)
+
+    from vouchers import _is_cached_admin
+    is_admin, _source = _is_cached_admin({"id": user.id, "username": user.username or ""})
+    if not is_admin:
+        return
+
+    from community_media_library import extract_media_from_message, save_media
+
+    extracted, err = extract_media_from_message(message)
+    if err in ("unsupported_media_type", "unsupported_mime"):
+        await message.reply_text("❌ Unsupported media type.\n\nSupported:\n• Image\n• GIF\n• Video")
+        return
+    if err == "too_large":
+        await message.reply_text("❌ Media too large to save to the Community Centre Media Library.")
+        return
+    if err or not extracted:
+        await message.reply_text("❌ Unsupported media type.\n\nSupported:\n• Image\n• GIF\n• Video")
+        return
+
+    try:
+        doc, created = save_media(
+            extracted,
+            uploaded_by=user.id,
+            source_chat_id=message.chat_id,
+            source_message_id=message.message_id,
+            caption=message.caption,
+        )
+    except Exception:
+        logger.exception("[COMMUNITY_MEDIA] save failed uid=%s", user.id)
+        await message.reply_text("❌ Could not save media. Please try again.")
+        return
+
+    logger.info(
+        "[COMMUNITY_MEDIA] action=%s media_id=%s media_type=%s uid=%s",
+        "upload" if created else "reupload", doc["_id"], doc["media_type"], user.id,
+    )
+
+    label = _ADMIN_MEDIA_TYPE_LABEL.get(doc["media_type"], doc["media_type"].title())
+    name = doc.get("internal_name") or "Untitled"
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("Open Community Centre", url=ADMIN_DASHBOARD_URL)],
+        [InlineKeyboardButton("Rename Media", callback_data=f"cml_rename:{doc['_id']}")],
+    ])
+    await message.reply_text(
+        "✅ Media saved to Community Centre\n\n"
+        f"Type: {label}\n"
+        f"Name: {name}\n\n"
+        "Open Admin Dashboard → Community Centre → Media Library to use it.",
+        reply_markup=keyboard,
+    )
+
+
+async def admin_media_rename_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not query or not query.data:
+        return
+    user = update.effective_user
+    if not user:
+        await query.answer()
+        return
+
+    from vouchers import _is_cached_admin
+    is_admin, _source = _is_cached_admin({"id": user.id, "username": user.username or ""})
+    if not is_admin:
+        await query.answer("Admins only", show_alert=True)
+        return
+
+    media_id = query.data.split(":", 1)[1]
+    context.user_data["cml_pending_rename"] = media_id
+    await query.answer()
+    if query.message:
+        await query.message.reply_text('Send the new name for this media (or type "cancel").')
 
 
 async def mywin_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -8345,9 +8470,27 @@ def run_worker():
     app_bot.add_handler(ChatMemberHandler(member_update_handler, ChatMemberHandler.CHAT_MEMBER))
     app_bot.add_handler(ChatMemberHandler(member_update_handler, ChatMemberHandler.MY_CHAT_MEMBER))
     app_bot.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, new_chat_members_handler))   
-    app_bot.add_handler(MessageHandler(filters.Chat(MYWIN_CHAT_ID), mywin_message_handler))    
+    app_bot.add_handler(MessageHandler(filters.Chat(MYWIN_CHAT_ID), mywin_message_handler))
+    # Registered before the catch-all private handler: narrow media-type
+    # filter, admin-gated inside the handler, and it always delegates to
+    # private_message_handler itself so non-admin/group behaviour is
+    # unaffected (see admin_media_upload_handler docstring).
+    app_bot.add_handler(
+        MessageHandler(
+            filters.ChatType.PRIVATE
+            & (
+                filters.PHOTO
+                | filters.ANIMATION
+                | filters.VIDEO
+                | filters.Document.IMAGE
+                | filters.Document.VIDEO
+            ),
+            admin_media_upload_handler,
+        )
+    )
     app_bot.add_handler(MessageHandler(filters.ChatType.PRIVATE & ~filters.COMMAND, private_message_handler))
     app_bot.add_handler(CallbackQueryHandler(generate_referral_link_callback, pattern=r"^generate_referral_link$"))
+    app_bot.add_handler(CallbackQueryHandler(admin_media_rename_callback, pattern=r"^cml_rename:"))
     app_bot.add_handler(CallbackQueryHandler(button_handler))
     from community_centre import register_handlers as _register_community_centre_handlers
     _register_community_centre_handlers(app_bot)

@@ -297,6 +297,9 @@ html, body {
 .cc-preview-bubble .cc-preview-btn { display: block; text-align: center; border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; margin-top: 6px; font-size: 13px; color: var(--accent); }
 .cc-preview-row { display: flex; gap: 6px; }
 .cc-preview-row .cc-preview-btn { flex: 1; }
+.cc-media-advanced { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; width: 100%; }
+.cc-media-advanced .filter-input { margin: 0; }
+#cml-results .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; }
 
 .data-table {
   width: 100%;
