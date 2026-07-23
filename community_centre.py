@@ -46,6 +46,7 @@ from pymongo.errors import DuplicateKeyError
 
 import database
 import community_centre_limits as limits
+import community_media_library
 import settings_service
 
 logger = logging.getLogger(__name__)
@@ -359,8 +360,34 @@ def _clean_media(raw_media, content_type: str) -> tuple[list[dict], str | None]:
         mtype = item.get("type")
         if mtype not in allowed_types:
             return [], "bad_media_type"
+
+        media_library_id = str(item.get("media_library_id") or "").strip() or None
         source_url = (item.get("source_url") or "").strip()
         file_id = (item.get("telegram_file_id") or "").strip() or None
+
+        if media_library_id:
+            # Priority 1: media_library_id. A client-supplied file_id/URL
+            # riding along on the same item is display-only and is never
+            # trusted — the sendable file_id is always resolved server-side.
+            lib_doc, lib_err = community_media_library.resolve_for_publish(
+                media_library_id, expected_media_type=mtype
+            )
+            if lib_err:
+                return [], lib_err
+            cleaned.append({
+                "type": mtype,
+                "storage_key": None,
+                "telegram_file_id": lib_doc["file_id"],
+                "media_library_id": str(lib_doc["_id"]),
+                "filename": lib_doc.get("filename"),
+                "mime_type": lib_doc.get("mime_type"),
+                "size_bytes": lib_doc.get("file_size"),
+                "position": idx,
+            })
+            continue
+
+        if source_url and file_id:
+            return [], "ambiguous_media_source"
         if not source_url and not file_id:
             return [], "missing_media_source"
         if source_url:
@@ -372,6 +399,7 @@ def _clean_media(raw_media, content_type: str) -> tuple[list[dict], str | None]:
             "type": mtype,
             "storage_key": source_url or None,
             "telegram_file_id": file_id,
+            "media_library_id": None,
             "filename": item.get("filename"),
             "mime_type": item.get("mime_type"),
             "size_bytes": item.get("size_bytes"),
@@ -1160,7 +1188,30 @@ def build_reply_markup(buttons: list[dict]):
 
 
 def _media_source(item: dict):
+    lib_id = item.get("media_library_id")
+    if lib_id:
+        # Re-resolve at send time so a reupload's refreshed file_id is
+        # always used, never a possibly-stale snapshot from when the post
+        # was drafted/scheduled. If the library entry has since been
+        # archived/deleted, fall back to the file_id captured at
+        # draft/schedule time rather than failing an already-approved post.
+        lib_doc, lib_err = community_media_library.resolve_for_publish(lib_id, expected_media_type=item.get("type"))
+        if lib_doc:
+            return lib_doc["file_id"]
+        logger.warning(
+            "[COMMUNITY_CENTRE] media_library re-resolve failed at publish media_id=%s error=%s — using cached file_id",
+            lib_id, lib_err,
+        )
     return item.get("telegram_file_id") or item.get("storage_key")
+
+
+def _bump_media_library_usage(post: dict) -> None:
+    lib_ids = {m.get("media_library_id") for m in (post.get("media") or []) if m.get("media_library_id")}
+    for lib_id in lib_ids:
+        try:
+            community_media_library.increment_usage(lib_id)
+        except Exception:
+            logger.exception("[COMMUNITY_CENTRE] usage_count increment failed media_id=%s", lib_id)
 
 
 async def _do_send(post: dict) -> dict:
@@ -1414,6 +1465,8 @@ def _execute_publish(post: dict) -> None:
     poll_id = result.get("poll_id")
     buttons_failed = bool(result.get("buttons_failed"))
     ts = now_utc()
+
+    _bump_media_library_usage(post)
 
     pin_ok = None
     if post.get("pin_after_send") and message_ids:

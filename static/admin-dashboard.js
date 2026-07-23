@@ -67,6 +67,17 @@
     });
   }
 
+  function apiPatchJson(path, body) {
+    return fetch(path, {
+      method: "PATCH", credentials: "same-origin",
+      headers: { "Accept": "application/json", "Content-Type": "application/json" },
+      body: JSON.stringify(body || {}),
+    }).then(function (r) {
+      if (r.status === 401) { window.location.href = "/static/admin-login.html"; throw new Error("unauthorized"); }
+      return r.json().then(function (j) { return { ok: r.ok, status: r.status, d: j }; });
+    });
+  }
+
   function apiPutJson(path, body) {
     return fetch(path, {
       method: "PUT", credentials: "same-origin",
@@ -6191,7 +6202,7 @@
     $("#cc-link-preview-wrap").classList.toggle("hidden", ct !== "text");
     if (isMedia && ct !== "media_group" && cc.media.length > 1) cc.media = cc.media.slice(0, 1);
     if (isMedia && cc.media.length === 0) {
-      cc.media.push({ type: ct === "media_group" ? "photo" : ct, source_url: "", telegram_file_id: "" });
+      cc.media.push({ type: ct === "media_group" ? "photo" : ct, media_library_id: "", source_url: "", telegram_file_id: "" });
     }
     if (!isMedia) cc.media = [];
     ccRenderMedia();
@@ -6209,6 +6220,8 @@
   }
 
   // ---------- Composer: media list ----------
+  var CC_MEDIA_TYPE_ICON = { photo: "🖼", animation: "🎞", video: "🎬", document: "📄" };
+
   function ccRenderMedia() {
     var ct = $("#cc-content-type").value;
     var wrap = $("#cc-media-list");
@@ -6220,15 +6233,28 @@
           '<option value="photo"' + (m.type === "photo" ? " selected" : "") + '>Image</option>' +
           '<option value="video"' + (m.type === "video" ? " selected" : "") + '>Video</option></select>'
         : '<span class="pill neutral">' + esc(ct) + '</span>';
-      return '<div class="cc-media-row" data-idx="' + i + '">' + typeSel +
+
+      var librarySummary = m.media_library_id
+        ? '<span class="pill ok">' + (CC_MEDIA_TYPE_ICON[m.type] || "📎") + " " + esc(m._libraryLabel || "Media Library item") + '</span>' +
+          '<button class="btn" data-cc-media-pick="' + i + '" type="button">Change</button>' +
+          '<button class="btn" data-cc-media-clear="' + i + '" type="button">Remove selection</button>'
+        : '<button class="btn primary" data-cc-media-pick="' + i + '" type="button">Select from Media Library</button>';
+
+      var advancedOpen = !!m._advancedOpen || (!m.media_library_id && (m.source_url || m.telegram_file_id));
+      var advanced = '<div class="cc-media-advanced' + (advancedOpen ? "" : " hidden") + '" data-idx="' + i + '">' +
         '<input class="filter-input cc-media-url" data-idx="' + i + '" placeholder="https://... media URL" value="' + esc(m.source_url || "") + '" style="flex:1;min-width:220px;" />' +
         '<input class="filter-input cc-media-fileid" data-idx="' + i + '" placeholder="or Telegram file_id" value="' + esc(m.telegram_file_id || "") + '" style="min-width:160px;" />' +
+        "</div>";
+
+      return '<div class="cc-media-row" data-idx="' + i + '" style="flex-direction:column;align-items:flex-start;">' +
+        '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;width:100%;">' + typeSel + librarySummary +
         (isGroup
           ? '<button class="btn" data-cc-media-up="' + i + '" type="button">&uarr;</button>' +
             '<button class="btn" data-cc-media-down="' + i + '" type="button">&darr;</button>' +
             '<button class="btn danger" data-cc-media-remove="' + i + '" type="button">Remove</button>'
           : "") +
-        "</div>";
+        '<button class="btn" data-cc-media-advanced-toggle="' + i + '" type="button" style="margin-left:auto;">Advanced ▾</button>' +
+        "</div>" + advanced + "</div>";
     }).join("");
     var addBtn = $("#cc-media-add-btn");
     if (addBtn) addBtn.classList.toggle("hidden", !isGroup);
@@ -6240,9 +6266,191 @@
       if (!cc.media[i]) return;
       var typeSel = row.querySelector(".cc-media-type");
       if (typeSel) cc.media[i].type = typeSel.value;
-      cc.media[i].source_url = (row.querySelector(".cc-media-url").value || "").trim();
-      cc.media[i].telegram_file_id = (row.querySelector(".cc-media-fileid").value || "").trim();
+      var urlInput = row.querySelector(".cc-media-url");
+      var fileIdInput = row.querySelector(".cc-media-fileid");
+      if (urlInput) cc.media[i].source_url = (urlInput.value || "").trim();
+      if (fileIdInput) cc.media[i].telegram_file_id = (fileIdInput.value || "").trim();
     });
+  }
+
+  function ccMediaFormatBytes(n) {
+    if (!n && n !== 0) return "—";
+    if (n < 1024) return n + " B";
+    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KB";
+    return (n / (1024 * 1024)).toFixed(1) + " MB";
+  }
+
+  function ccMediaFormatDuration(sec) {
+    if (!sec && sec !== 0) return "";
+    var m = Math.floor(sec / 60), s = Math.floor(sec % 60);
+    return m + ":" + (s < 10 ? "0" : "") + s;
+  }
+
+  // ---------- Media Library modal (select / rename / archive / restore) ----------
+  function ccOpenMediaLibraryModal(opts) {
+    opts = opts || {};
+    var filterType = opts.filterType || "";
+    var onSelect = opts.onSelect;
+    var overlay = document.createElement("div");
+    overlay.className = "modal-overlay";
+    overlay.innerHTML =
+      '<div class="modal-box" style="max-width:820px;">' +
+      "<h3>Community Centre — Media Library</h3>" +
+      '<p class="sub">Send media to <strong>@APreferralV1_bot</strong> in a private chat to add it here.</p>' +
+      '<div class="cc-grid" style="margin-bottom:8px;">' +
+      '<input class="filter-input" id="cml-search" placeholder="Search internal name / filename / caption" />' +
+      '<select class="filter-input" id="cml-type-filter"><option value="">All types</option>' +
+      '<option value="photo">Photo</option><option value="animation">GIF</option>' +
+      '<option value="video">Video</option><option value="document">Document</option></select>' +
+      '<select class="filter-input" id="cml-status-filter"><option value="active">Active</option><option value="all">All</option><option value="archived">Archived</option></select>' +
+      "</div>" +
+      '<div class="seg" id="cml-view-toggle"><button data-value="grid" class="active">Grid</button><button data-value="list">List</button></div>' +
+      '<div id="cml-results" style="margin-top:10px;max-height:420px;overflow:auto;"></div>' +
+      '<div class="modal-actions"><button class="btn" id="cml-close">Close</button></div>' +
+      "</div>";
+    document.body.appendChild(overlay);
+    if (filterType) overlay.querySelector("#cml-type-filter").value = filterType;
+
+    function done() { overlay.remove(); }
+    overlay.querySelector("#cml-close").addEventListener("click", done);
+    overlay.addEventListener("click", function (e) { if (e.target === overlay) done(); });
+
+    var view = "grid";
+    function load() {
+      var status = overlay.querySelector("#cml-status-filter").value;
+      var mtype = overlay.querySelector("#cml-type-filter").value;
+      var search = overlay.querySelector("#cml-search").value || "";
+      var qs = "status=" + encodeURIComponent(status) +
+        (mtype ? "&media_type=" + encodeURIComponent(mtype) : "") +
+        (search ? "&search=" + encodeURIComponent(search) : "");
+      var results = overlay.querySelector("#cml-results");
+      results.innerHTML = '<div class="sub">Loading…</div>';
+      api("/api/admin/community/media?" + qs).then(function (d) {
+        renderResults(d.media || []);
+      }).catch(function () {
+        results.innerHTML = '<div class="banner error">Failed to load media library.</div>';
+      });
+    }
+
+    function itemMeta(m) {
+      var bits = [];
+      bits.push(esc(m.media_type));
+      if (m.filename) bits.push(esc(m.filename));
+      if (m.file_size) bits.push(ccMediaFormatBytes(m.file_size));
+      if (m.duration) bits.push(ccMediaFormatDuration(m.duration));
+      bits.push("Uploaded " + ccUtcToKlDisplay(m.uploaded_at_utc));
+      bits.push("by " + esc(m.uploaded_by));
+      bits.push("used " + (m.usage_count || 0) + "x");
+      return bits.join(" · ");
+    }
+
+    function renderResults(items) {
+      var results = overlay.querySelector("#cml-results");
+      if (!items.length) {
+        results.innerHTML = '<div class="sub">No media yet. Send a photo, GIF, or video to @APreferralV1_bot to add one.</div>';
+        return;
+      }
+      if (view === "grid") {
+        results.className = "cc-grid";
+        results.innerHTML = items.map(function (m) {
+          return '<div class="card" data-id="' + esc(m.id) + '" style="padding:10px;">' +
+            '<div style="font-size:28px;">' + (CC_MEDIA_TYPE_ICON[m.media_type] || "📎") + "</div>" +
+            '<div style="font-weight:600;word-break:break-word;">' + esc(m.internal_name || "Untitled") + "</div>" +
+            '<div class="sub" style="font-size:11px;">' + itemMeta(m) + "</div>" +
+            (m.status === "archived" ? '<span class="pill neutral">Archived</span>' : "") +
+            ccMediaItemActions(m) +
+            "</div>";
+        }).join("");
+      } else {
+        results.className = "";
+        results.innerHTML = '<table class="data-table"><thead><tr><th>Name</th><th>Type</th><th>Filename</th><th>Uploaded</th><th>By</th><th>Size</th><th>Used</th><th>Actions</th></tr></thead><tbody>' +
+          items.map(function (m) {
+            return "<tr data-id=\"" + esc(m.id) + "\"><td>" + esc(m.internal_name || "Untitled") + (m.status === "archived" ? ' <span class="pill neutral">Archived</span>' : "") + "</td>" +
+              "<td>" + (CC_MEDIA_TYPE_ICON[m.media_type] || "") + " " + esc(m.media_type) + "</td>" +
+              "<td>" + esc(m.filename || "—") + "</td>" +
+              "<td>" + ccUtcToKlDisplay(m.uploaded_at_utc) + "</td>" +
+              "<td>" + esc(m.uploaded_by) + "</td>" +
+              "<td>" + ccMediaFormatBytes(m.file_size) + "</td>" +
+              "<td>" + (m.usage_count || 0) + "</td>" +
+              "<td>" + ccMediaItemActions(m) + "</td></tr>";
+          }).join("") + "</tbody></table>";
+      }
+      wireItemActions(items);
+    }
+
+    function ccMediaItemActions(m) {
+      var actions = [];
+      if (onSelect && m.status === "active") actions.push('<button class="btn primary" data-cml-select="' + esc(m.id) + '" type="button">Select</button>');
+      actions.push('<button class="btn" data-cml-rename="' + esc(m.id) + '" type="button">Rename</button>');
+      actions.push(m.status === "archived"
+        ? '<button class="btn" data-cml-restore="' + esc(m.id) + '" type="button">Restore</button>'
+        : '<button class="btn danger" data-cml-archive="' + esc(m.id) + '" type="button">Archive</button>');
+      actions.push('<button class="btn" data-cml-advanced="' + esc(m.id) + '" type="button">Advanced</button>');
+      return '<div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap;">' + actions.join("") + "</div>";
+    }
+
+    function wireItemActions(items) {
+      var byId = {};
+      items.forEach(function (m) { byId[m.id] = m; });
+      $all("[data-cml-select]", overlay).forEach(function (btn) {
+        btn.addEventListener("click", function () {
+          var m = byId[btn.dataset.cmlSelect];
+          if (m && onSelect) onSelect(m);
+          done();
+        });
+      });
+      $all("[data-cml-rename]", overlay).forEach(function (btn) {
+        btn.addEventListener("click", function () {
+          var m = byId[btn.dataset.cmlRename];
+          var name = window.prompt("Rename media", m.internal_name || "");
+          if (name === null) return;
+          name = name.trim();
+          if (!name) { toast("❌ Name cannot be empty", "error"); return; }
+          apiPatchJson("/api/admin/community/media/" + m.id, { internal_name: name }).then(function (r) {
+            if (!r.ok) { toast("❌ " + ((r.d && r.d.code) || "rename_failed"), "error"); return; }
+            toast("✅ Renamed", "success");
+            load();
+          });
+        });
+      });
+      $all("[data-cml-archive]", overlay).forEach(function (btn) {
+        btn.addEventListener("click", function () {
+          apiPost("/api/admin/community/media/" + btn.dataset.cmlArchive + "/archive").then(function () {
+            toast("✅ Archived", "success"); load();
+          });
+        });
+      });
+      $all("[data-cml-restore]", overlay).forEach(function (btn) {
+        btn.addEventListener("click", function () {
+          apiPost("/api/admin/community/media/" + btn.dataset.cmlRestore + "/restore").then(function () {
+            toast("✅ Restored", "success"); load();
+          });
+        });
+      });
+      $all("[data-cml-advanced]", overlay).forEach(function (btn) {
+        btn.addEventListener("click", function () {
+          var m = byId[btn.dataset.cmlAdvanced];
+          window.prompt("Telegram file_id (advanced — copy manually)", m.file_id || "");
+        });
+      });
+    }
+
+    var searchTimer = null;
+    overlay.querySelector("#cml-search").addEventListener("input", function () {
+      clearTimeout(searchTimer);
+      searchTimer = setTimeout(load, 300);
+    });
+    overlay.querySelector("#cml-type-filter").addEventListener("change", load);
+    overlay.querySelector("#cml-status-filter").addEventListener("change", load);
+    overlay.querySelector("#cml-view-toggle").addEventListener("click", function (e) {
+      var btn = e.target.closest("button[data-value]");
+      if (!btn) return;
+      view = btn.dataset.value;
+      $all("#cml-view-toggle button", overlay).forEach(function (b) { b.classList.toggle("active", b === btn); });
+      load();
+    });
+
+    load();
   }
 
   // ---------- Composer: poll / quiz options ----------
@@ -6362,7 +6570,13 @@
     $("#cc-parse-mode").value = post.parse_mode || "HTML";
     $("#cc-disable-preview").checked = !!post.disable_web_page_preview;
     cc.media = (post.media || []).map(function (m) {
-      return { type: m.type, source_url: m.storage_key || "", telegram_file_id: m.telegram_file_id || "" };
+      return {
+        type: m.type,
+        media_library_id: m.media_library_id || "",
+        source_url: m.storage_key || "",
+        telegram_file_id: m.telegram_file_id || "",
+        _libraryLabel: m.media_library_id ? (m.filename || "Media Library item") : "",
+      };
     });
     if (post.poll) {
       $("#cc-poll-question").value = post.poll.question || "";
@@ -6428,7 +6642,14 @@
     }
     if (ct === "photo" || ct === "animation" || ct === "video" || ct === "media_group") {
       payload.media = cc.media.map(function (m, i) {
-        return { type: (ct === "media_group" ? m.type : ct), source_url: m.source_url, telegram_file_id: m.telegram_file_id || null, position: i };
+        var item = { type: (ct === "media_group" ? m.type : ct), position: i };
+        if (m.media_library_id) {
+          item.media_library_id = m.media_library_id;
+        } else {
+          item.source_url = m.source_url;
+          item.telegram_file_id = m.telegram_file_id || null;
+        }
+        return item;
       });
     }
     if (ct === "poll" || ct === "quiz") {
@@ -6782,7 +7003,7 @@
     $("#cc-media-add-btn").addEventListener("click", function () {
       ccSyncMediaFromDom();
       var ct = $("#cc-content-type").value;
-      cc.media.push({ type: ct === "media_group" ? "photo" : ct, source_url: "", telegram_file_id: "" });
+      cc.media.push({ type: ct === "media_group" ? "photo" : ct, media_library_id: "", source_url: "", telegram_file_id: "" });
       ccRenderMedia();
     });
     $("#cc-media-list").addEventListener("click", function (e) {
@@ -6800,6 +7021,32 @@
         ccSyncMediaFromDom();
         var j = +t.dataset.ccMediaDown;
         if (j < cc.media.length - 1) { var tmp2 = cc.media[j + 1]; cc.media[j + 1] = cc.media[j]; cc.media[j] = tmp2; }
+        ccRenderMedia();
+      } else if (t.dataset.ccMediaPick !== undefined) {
+        ccSyncMediaFromDom();
+        var pickIdx = +t.dataset.ccMediaPick;
+        var ct = $("#cc-content-type").value;
+        var wantType = ct === "media_group" ? cc.media[pickIdx].type : ct;
+        ccOpenMediaLibraryModal({
+          filterType: wantType,
+          onSelect: function (m) {
+            cc.media[pickIdx].media_library_id = m.id;
+            cc.media[pickIdx].telegram_file_id = m.file_id;
+            cc.media[pickIdx].source_url = "";
+            cc.media[pickIdx]._libraryLabel = m.internal_name || m.filename || "Untitled";
+            ccRenderMedia();
+          },
+        });
+      } else if (t.dataset.ccMediaClear !== undefined) {
+        ccSyncMediaFromDom();
+        var clearIdx = +t.dataset.ccMediaClear;
+        cc.media[clearIdx].media_library_id = "";
+        cc.media[clearIdx]._libraryLabel = "";
+        ccRenderMedia();
+      } else if (t.dataset.ccMediaAdvancedToggle !== undefined) {
+        ccSyncMediaFromDom();
+        var advIdx = +t.dataset.ccMediaAdvancedToggle;
+        cc.media[advIdx]._advancedOpen = !cc.media[advIdx]._advancedOpen;
         ccRenderMedia();
       }
     });
