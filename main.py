@@ -2161,6 +2161,14 @@ def ensure_indexes():
         unique=True,
         name="uniq_referral_event",
     )
+    # Targets referral_invitee_lock.has_historical_success()'s
+    # (event="referral_settled", invitee_id=...) lookup on the join hot
+    # path — uniq_referral_event above is keyed by inviter_id first, so it
+    # cannot seek directly to an invitee without a known inviter.
+    referral_events_collection.create_index(
+        [("event", 1), ("invitee_id", 1)],
+        name="referral_events_by_event_invitee",
+    )
     referral_events_collection.create_index(
         [("inviter_id", 1), ("occurred_at", 1)],
         name="referral_events_by_inviter_time",

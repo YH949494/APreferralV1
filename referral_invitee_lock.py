@@ -19,13 +19,34 @@ working exactly as it does today.
 from __future__ import annotations
 
 import logging
-import re
 from datetime import datetime
 
 from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
+import referral_destination
+
 logger = logging.getLogger(__name__)
+
+# Chat ids a legacy destination-scoped award key ("ref:<chat_id>:<invitee_id>")
+# could plausibly have been minted under: the currently configured community
+# group / official channel ids, plus their historical hardcoded defaults (in
+# case an env var override post-dates the legacy rows). Kept as a fixed,
+# known set rather than scanning every award_key with a regex, since that
+# regex can only use the "ref:" index prefix and would degrade to a full
+# collection scan as referral_award_events grows.
+_LEGACY_AWARD_KEY_CHAT_IDS = tuple(
+    {
+        chat_id
+        for chat_id in (
+            referral_destination.COMMUNITY_GROUP_ID,
+            referral_destination.OFFICIAL_CHANNEL_ID,
+            referral_destination._DEFAULT_COMMUNITY_GROUP_ID,
+            referral_destination._DEFAULT_OFFICIAL_CHANNEL_ID,
+        )
+        if chat_id is not None
+    }
+)
 
 COLLECTION_NAME = "referral_invitee_locks"
 
@@ -55,7 +76,11 @@ def has_historical_success(db, *, invitee_user_id: int) -> bool:
 
     (4) and (5) are matched on the ``award_key`` string itself, independent
     of (3), because pre-migration award rows are not guaranteed to carry a
-    structured ``invitee_user_id`` field.
+    structured ``invitee_user_id`` field. (4) is matched by exact equality
+    against ``award_key`` for every known destination chat id (see
+    ``_LEGACY_AWARD_KEY_CHAT_IDS``) rather than a regex scan, so the lookup
+    stays an index seek instead of degrading into a full collection scan as
+    ``referral_award_events`` grows.
     """
     invitee = int(invitee_user_id)
 
@@ -70,13 +95,15 @@ def has_historical_success(db, *, invitee_user_id: int) -> bool:
     if db.referral_award_events.find_one({"invitee_user_id": invitee}, {"_id": 1}):
         return True
 
-    legacy_key_re = re.compile(rf"^ref:-?\d+:{invitee}$")
+    # Exact-match candidate keys (new format + legacy format under every
+    # known destination chat id) so this hits the unique award_key index
+    # instead of scanning every award row.
+    candidate_keys = [f"ref:{invitee}"] + [
+        f"ref:{chat_id}:{invitee}" for chat_id in _LEGACY_AWARD_KEY_CHAT_IDS
+    ]
     if db.referral_award_events.find_one(
-        {"award_key": {"$regex": legacy_key_re}}, {"_id": 1}
+        {"award_key": {"$in": candidate_keys}}, {"_id": 1}
     ):
-        return True
-
-    if db.referral_award_events.find_one({"award_key": f"ref:{invitee}"}, {"_id": 1}):
         return True
 
     return False
