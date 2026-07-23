@@ -318,6 +318,9 @@ class _RecordingLogger:
     def exception(self, fmt, *args):
         self.lines.append(fmt % args if args else fmt)
 
+    def error(self, fmt, *args):
+        self.lines.append(fmt % args if args else fmt)
+
     def has(self, substr):
         return any(substr in line for line in self.lines)
 
