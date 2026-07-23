@@ -527,7 +527,9 @@ def test_permanent_failure_marks_failed(fake_db, monkeypatch):
     cc.run_due_posts(limit=5)
     fresh = cc.get_post(post["_id"])
     assert fresh["status"] == "failed"
-    assert fresh["last_error_code"] == "bot_removed"
+    assert fresh["last_error_code"] == "telegram_forbidden"
+    assert fresh["retryable"] is False
+    assert fresh["last_exception_class"] == "Forbidden"
 
 
 def test_max_attempts_stops_retrying(fake_db, monkeypatch):
@@ -541,13 +543,15 @@ def test_max_attempts_stops_retrying(fake_db, monkeypatch):
 
 
 def test_retry_after_failure_requeues(fake_db, monkeypatch):
-    from telegram.error import Forbidden
-    _fake_run_coro(monkeypatch, side_effect=Forbidden("bot was blocked"))
+    from telegram.error import TimedOut
+    _fake_run_coro(monkeypatch, side_effect=TimedOut())
     post = _schedule_due_post()
+    fake_db["community_posts"].update_one({"_id": post["_id"]}, {"$set": {"attempt_count": cc.limits.MAX_ATTEMPTS - 1}})
     cc.run_due_posts(limit=5)
     failed = cc.get_post(post["_id"])
     assert failed["status"] == "failed"
-    retried, err = cc.retry_post(post["_id"], actor_id=1)
+    assert failed["retryable"] is True
+    retried, err = cc.retry_post(post["_id"], actor_id=1, force=True)
     assert err is None
     assert retried["status"] == "scheduled"
     # Original scheduled_at_utc is preserved for history; only next_run_at_utc
@@ -571,13 +575,22 @@ def test_retry_after_failure_requeues(fake_db, monkeypatch):
 # ---------------------------------------------------------------------------
 
 def _failed_post(monkeypatch, error_side_effect=None):
-    from telegram.error import Forbidden
-    _fake_run_coro(monkeypatch, side_effect=error_side_effect or Forbidden("bot was blocked"))
+    """Produces a post in a terminal "failed" state for retry-state-machine
+    tests. Defaults to a *retryable* error (network_timeout) so retry_post's
+    server-computed `retryable` gate doesn't itself reject the retry — a
+    single retryable failure normally reschedules rather than failing
+    outright, so the status is forced to "failed" afterwards to simulate a
+    terminal occurrence without needing to exhaust MAX_ATTEMPTS."""
+    from telegram.error import TimedOut
+    _fake_run_coro(monkeypatch, side_effect=error_side_effect or TimedOut())
     post = _schedule_due_post()
     cc.run_due_posts(limit=5)
-    failed = cc.get_post(post["_id"])
-    assert failed["status"] == "failed"
-    return failed
+    result = cc.get_post(post["_id"])
+    if result["status"] != "failed":
+        database.db["community_posts"].update_one({"_id": post["_id"]}, {"$set": {"status": "failed"}})
+        result = cc.get_post(post["_id"])
+    assert result["status"] == "failed"
+    return result
 
 
 def test_retry_post_not_found_returns_specific_code(fake_db):
@@ -701,6 +714,137 @@ def test_retry_api_returns_specific_conflict_codes(fake_db):
     assert resp.status_code == 400
     assert body["code"] == "not_failed"
     assert body["code"] != "not_schedulable"
+
+
+# ---------------------------------------------------------------------------
+# Retry modal: persisted failure detail fields + retryable enforcement
+# (Community Centre -> Retry failed post modal)
+# ---------------------------------------------------------------------------
+
+def test_telegram_forbidden_categorization_is_sanitized_and_non_retryable():
+    from telegram.error import Forbidden
+    code, message = cc.categorize_telegram_error(Forbidden("bot was blocked"))
+    assert code == "telegram_forbidden"
+    assert "Bot is not allowed to post" in message
+    assert code not in cc.limits.RETRYABLE_ERROR_CODES
+
+
+def test_invalid_media_file_id_categorization_is_media_specific():
+    from telegram.error import BadRequest
+    code, message = cc.categorize_telegram_error(BadRequest("Wrong file identifier/HTTP URL specified"))
+    assert code == "invalid_media_file_id"
+    assert "media" in message.lower()
+    assert code not in cc.limits.RETRYABLE_ERROR_CODES
+
+
+def test_bot_loop_not_running_categorization_does_not_blame_telegram():
+    code, message = cc.categorize_telegram_error(RuntimeError("bot_not_ready"))
+    assert code == "bot_loop_not_running"
+    assert "telegram" not in message.lower()
+    assert code not in cc.limits.RETRYABLE_ERROR_CODES
+
+
+def test_unknown_error_categorization_does_not_claim_telegram_failure():
+    code, message = cc.categorize_telegram_error(ValueError("boom"))
+    assert code == "unknown_error"
+    assert "contacting telegram" not in message.lower()
+    assert code not in cc.limits.RETRYABLE_ERROR_CODES
+
+
+def test_permanent_failure_persists_full_failure_detail(fake_db, monkeypatch):
+    from telegram.error import Forbidden
+    _fake_run_coro(monkeypatch, side_effect=Forbidden("bot was blocked"))
+    post = _schedule_due_post()
+    cc.run_due_posts(limit=5)
+    fresh = cc.get_post(post["_id"])
+    assert fresh["status"] == "failed"
+    assert fresh["last_error_code"] == "telegram_forbidden"
+    assert fresh["last_error_message"]
+    assert "was blocked" not in fresh["last_error_message"]  # never the raw Telegram payload
+    assert fresh["last_exception_class"] == "Forbidden"
+    assert fresh["retryable"] is False
+    assert fresh["attempt_count"] == 1
+    assert fresh["last_attempt_at_utc"] is not None
+    assert fresh["latest_run_id"]
+    run = database.db["community_post_runs"].find_one({"community_post_id": fresh["_id"]})
+    assert fresh["latest_run_id"] == str(run["_id"])
+
+
+def test_retryable_failure_persists_retryable_true(fake_db, monkeypatch):
+    from telegram.error import TimedOut
+    _fake_run_coro(monkeypatch, side_effect=TimedOut())
+    post = _schedule_due_post()
+    cc.run_due_posts(limit=5)
+    fresh = cc.get_post(post["_id"])
+    assert fresh["last_error_code"] == "network_timeout"
+    assert fresh["retryable"] is True
+
+
+def test_retry_endpoint_rejects_non_retryable_post(fake_db, monkeypatch):
+    from telegram.error import Forbidden
+    _fake_run_coro(monkeypatch, side_effect=Forbidden("bot was blocked"))
+    post = _schedule_due_post()
+    cc.run_due_posts(limit=5)
+    failed = cc.get_post(post["_id"])
+    assert failed["retryable"] is False
+    result, err = cc.retry_post(failed["_id"], actor_id=1)
+    assert result is None
+    assert err == "non_retryable_failure"
+
+
+def test_retry_endpoint_force_cannot_override_non_retryable(fake_db, monkeypatch):
+    """The frontend must never be able to override a server-computed
+    non-retryable verdict — `force` only bypasses the MAX_ATTEMPTS ceiling."""
+    from telegram.error import Forbidden
+    _fake_run_coro(monkeypatch, side_effect=Forbidden("bot was blocked"))
+    post = _schedule_due_post()
+    cc.run_due_posts(limit=5)
+    failed = cc.get_post(post["_id"])
+    result, err = cc.retry_post(failed["_id"], actor_id=1, force=True)
+    assert result is None
+    assert err == "non_retryable_failure"
+
+
+def test_retry_api_returns_409_for_non_retryable_failure(fake_db, monkeypatch):
+    from telegram.error import Forbidden
+    _fake_run_coro(monkeypatch, side_effect=Forbidden("bot was blocked"))
+    app = Flask(__name__)
+    app.register_blueprint(cc.community_centre_bp)
+    app.config["TESTING"] = True
+
+    def fake_require_admin():
+        return {"id": 1, "username": "admin"}, None
+
+    cc._require_admin = fake_require_admin
+    post = _schedule_due_post()
+    cc.run_due_posts(limit=5)
+    client = app.test_client()
+    resp = client.post(f"/api/admin/community/posts/{post['_id']}/retry")
+    body = resp.get_json()
+    assert resp.status_code == 409
+    assert body["code"] == "non_retryable_failure"
+
+
+def test_get_post_api_exposes_kl_formatted_last_attempt(fake_db, monkeypatch):
+    from telegram.error import Forbidden
+    _fake_run_coro(monkeypatch, side_effect=Forbidden("bot was blocked"))
+    app = Flask(__name__)
+    app.register_blueprint(cc.community_centre_bp)
+    app.config["TESTING"] = True
+
+    def fake_require_admin():
+        return {"id": 1, "username": "admin"}, None
+
+    cc._require_admin = fake_require_admin
+    post = _schedule_due_post()
+    cc.run_due_posts(limit=5)
+    client = app.test_client()
+    resp = client.get(f"/api/admin/community/posts/{post['_id']}")
+    body = resp.get_json()["post"]
+    assert body["last_attempt_at_kl"] is not None
+    assert body["last_attempt_at_kl"].endswith("+08:00")
+    assert body["latest_run_id"]
+    assert body["retryable"] is False
 
 
 # ---------------------------------------------------------------------------

@@ -690,6 +690,10 @@ def create_post(payload: dict, *, actor_id, actor_username: str = "") -> tuple[d
         "attempt_count": 0,
         "last_error_code": None,
         "last_error_message": None,
+        "last_exception_class": None,
+        "retryable": None,
+        "last_attempt_at_utc": None,
+        "latest_run_id": None,
         "created_by": actor_id,
         "created_by_username": actor_username,
         "approved_by": None,
@@ -1033,6 +1037,10 @@ def retry_post(post_id, *, actor_id, force: bool = False) -> tuple[dict | None, 
         return None, "already_published"
     if post["status"] != "failed":
         return None, "not_failed"
+    # retryable is server-computed at failure time and cannot be overridden
+    # by the caller — force only bypasses the MAX_ATTEMPTS ceiling below.
+    if post.get("retryable") is False:
+        return None, "non_retryable_failure"
 
     attempt_count = post.get("attempt_count", 0)
     if not force and attempt_count >= limits.MAX_ATTEMPTS:
@@ -1076,6 +1084,8 @@ def retry_post(post_id, *, actor_id, force: bool = False) -> tuple[dict | None, 
                 "processing_started_at_utc": None,
                 "last_error_code": None,
                 "last_error_message": None,
+                "last_exception_class": None,
+                "retryable": None,
                 "updated_at": now,
             },
             "$inc": {"retry_count": 1},
@@ -1127,18 +1137,27 @@ def _run_coro(coro, timeout: int = 20):
 
 
 def categorize_telegram_error(exc: Exception) -> tuple[str, str]:
-    """Map a raised exception to (error_code, sanitized_admin_message)."""
+    """Map a raised exception to (error_code, sanitized_admin_message).
+
+    Never returns a raw Telegram payload, token, or stack trace — only the
+    fixed, sanitized messages below. `unknown_error` must never claim the
+    failure was Telegram's fault; it means something failed on our side
+    before/without a classifiable Telegram response.
+    """
     try:
         from telegram.error import BadRequest, Forbidden, TimedOut, NetworkError, RetryAfter
     except Exception:
         BadRequest = Forbidden = TimedOut = NetworkError = RetryAfter = ()  # type: ignore
 
+    if isinstance(exc, RuntimeError) and str(exc) == "bot_not_ready":
+        return "bot_loop_not_running", "The publishing worker process is not currently running."
     if RetryAfter and isinstance(exc, RetryAfter):
         return "telegram_rate_limited", "Rate limited by Telegram; will retry."
-    if (TimedOut, NetworkError) and isinstance(exc, (TimedOut, NetworkError)):
-        return "network_timeout", "Network timeout contacting Telegram."
     if Forbidden and isinstance(exc, Forbidden):
-        return "bot_removed", "Bot cannot post to this destination (removed or blocked)."
+        return "telegram_forbidden", "Bot is not allowed to post in this destination."
+    # BadRequest subclasses NetworkError in python-telegram-bot — check it
+    # before the generic TimedOut/NetworkError branch or every BadRequest
+    # would misclassify as a transient network_timeout.
     if BadRequest and isinstance(exc, BadRequest):
         msg = str(exc).lower()
         if "chat not found" in msg:
@@ -1149,12 +1168,16 @@ def categorize_telegram_error(exc: Exception) -> tuple[str, str]:
             return "message_too_long", "Content exceeds Telegram's length limit."
         if "poll" in msg:
             return "invalid_poll", "Poll configuration was rejected by Telegram."
+        if "file identifier" in msg or "file_id" in msg:
+            return "invalid_media_file_id", "Saved media reference is no longer valid on Telegram."
         if "wrong file" in msg or "photo" in msg or "video" in msg or "animation" in msg:
             return "invalid_media", "Media could not be sent."
         if "wrong parameter" in msg or "url" in msg:
             return "invalid_url", "A button URL was rejected by Telegram."
         return "invalid_request", "Telegram rejected the request."
-    return "unknown_error", "Unexpected error contacting Telegram."
+    if (TimedOut, NetworkError) and isinstance(exc, (TimedOut, NetworkError)):
+        return "network_timeout", "Network timeout contacting Telegram."
+    return "unknown_error", "Internal publish error before a Telegram response was received."
 
 
 # ---------------------------------------------------------------------------
@@ -1527,7 +1550,7 @@ def _execute_publish(post: dict) -> None:
     except Exception as exc:
         error_code, error_message = categorize_telegram_error(exc)
         logger.warning("[COMMUNITY_CENTRE] publish failed post_id=%s error_code=%s", post_id, error_code)
-        _fail_run(post, run_key, error_code, error_message)
+        _fail_run(post, run_key, error_code, error_message, exc.__class__.__name__)
         return
 
     message_ids = result["message_ids"]
@@ -1637,34 +1660,48 @@ def _reconcile_post_from_run(post: dict, run: dict | None) -> None:
             "updated_at": now_utc(),
         }})
     elif run["status"] == "failed":
+        error_code = run.get("error_code")
         _posts().update_one({"_id": post["_id"]}, {"$set": {
-            "status": "failed", "last_error_code": run.get("error_code"),
-            "last_error_message": run.get("error_message"), "updated_at": now_utc(),
+            "status": "failed", "last_error_code": error_code,
+            "last_error_message": run.get("error_message"),
+            "last_exception_class": run.get("error_class"),
+            "retryable": (error_code in limits.RETRYABLE_ERROR_CODES) if error_code else None,
+            "last_attempt_at_utc": run.get("completed_at_utc") or now_utc(),
+            "latest_run_id": str(run["_id"]),
+            "updated_at": now_utc(),
             "processing_owner": None, "processing_started_at_utc": None,
         }})
 
 
-def _fail_run(post: dict, run_key: str, error_code: str, error_message: str) -> None:
+def _fail_run(post: dict, run_key: str, error_code: str, error_message: str, error_class: str = "") -> None:
     ts = now_utc()
+    run = _runs().find_one({"community_post_id": post["_id"], "run_key": run_key}, {"_id": 1})
     _runs().update_one({"community_post_id": post["_id"], "run_key": run_key}, {"$set": {
         "status": "failed", "error_code": error_code, "error_message": error_message,
-        "completed_at_utc": ts, "updated_at_utc": ts,
+        "error_class": error_class, "completed_at_utc": ts, "updated_at_utc": ts,
     }})
     is_retryable = error_code in limits.RETRYABLE_ERROR_CODES
     attempt_count = post.get("attempt_count", 1)
+    common_fields = {
+        "last_error_code": error_code,
+        "last_error_message": error_message,
+        "last_exception_class": error_class,
+        "retryable": is_retryable,
+        "last_attempt_at_utc": ts,
+        "latest_run_id": str(run["_id"]) if run else post.get("latest_run_id"),
+        "updated_at": ts,
+        "processing_owner": None,
+        "processing_started_at_utc": None,
+    }
     if is_retryable and attempt_count < limits.MAX_ATTEMPTS:
         backoff = limits.compute_backoff_seconds(attempt_count)
         next_try = ts + timedelta(seconds=backoff)
         _posts().update_one({"_id": post["_id"]}, {"$set": {
-            "status": "scheduled", "next_run_at_utc": next_try, "updated_at": ts,
-            "last_error_code": error_code, "last_error_message": error_message,
-            "processing_owner": None, "processing_started_at_utc": None,
+            **common_fields, "status": "scheduled", "next_run_at_utc": next_try,
         }})
     else:
         _posts().update_one({"_id": post["_id"]}, {"$set": {
-            "status": "failed", "next_run_at_utc": None, "updated_at": ts,
-            "last_error_code": error_code, "last_error_message": error_message,
-            "processing_owner": None, "processing_started_at_utc": None,
+            **common_fields, "status": "failed", "next_run_at_utc": None,
         }})
     record_audit(post["_id"], "publish_failure", actor_type="worker", actor_id=INSTANCE_ID, run_key=run_key,
                  after={"error_code": error_code, "retryable": is_retryable})
@@ -1682,9 +1719,13 @@ def run_due_posts(*, limit: int = 10, only_post_id=None) -> int:
         logger.info("[COMMUNITY_POSTS][DUE_POST_CLAIMED] post_id=%s attempt_count=%s", post.get("_id"), post.get("attempt_count"))
         try:
             _execute_publish(post)
-        except Exception:
+        except Exception as exc:
             logger.exception("[COMMUNITY_CENTRE] unhandled error executing post_id=%s", post.get("_id"))
-            _fail_run(post, _run_key(post["_id"], post.get("next_run_at_utc") or now_utc()), "unknown_error", "Unexpected error.")
+            _fail_run(
+                post, _run_key(post["_id"], post.get("next_run_at_utc") or now_utc()),
+                "unknown_error", "Internal publish error before a Telegram response was received.",
+                exc.__class__.__name__,
+            )
         processed += 1
         if only_post_id is not None:
             break
@@ -2126,6 +2167,20 @@ def _actor_username(payload: dict) -> str:
     return payload.get("usernameLower") or payload.get("username") or ""
 
 
+def _serialize_post_for_admin(post: dict) -> dict:
+    """Adds a KL-local rendering of the last failure timestamp for the admin
+    dashboard's retry modal — never mutates the stored document."""
+    view = dict(post)
+    attempt_at = view.get("last_attempt_at_utc")
+    if attempt_at:
+        if attempt_at.tzinfo is None:
+            attempt_at = attempt_at.replace(tzinfo=timezone.utc)
+        view["last_attempt_at_kl"] = attempt_at.astimezone(KL_TZ).isoformat()
+    else:
+        view["last_attempt_at_kl"] = None
+    return view
+
+
 def _json_default(value):
     if isinstance(value, datetime):
         return value.isoformat()
@@ -2238,7 +2293,7 @@ def cc_list_posts():
         limit=limit,
         skip=skip,
     )
-    return _ok({"posts": posts})
+    return _ok({"posts": [_serialize_post_for_admin(p) for p in posts]})
 
 
 @community_centre_bp.get("/api/admin/community/posts/<post_id>")
@@ -2252,7 +2307,7 @@ def cc_get_post(post_id):
     post = get_post(oid)
     if not post:
         return _err("not_found", 404)
-    return _ok({"post": post})
+    return _ok({"post": _serialize_post_for_admin(post)})
 
 
 @community_centre_bp.patch("/api/admin/community/posts/<post_id>")
@@ -2305,6 +2360,7 @@ _RETRY_ERROR_STATUS = {
     "already_published": 409,
     "already_processing": 409,
     "retry_limit_reached": 409,
+    "non_retryable_failure": 409,
     "not_failed": 400,
     "invalid_destination": 400,
 }
@@ -2322,7 +2378,7 @@ def cc_retry_post(post_id):
     post, code = retry_post(oid, actor_id=_actor_id(payload), force=bool(body.get("force")))
     if code:
         return _err(code, _RETRY_ERROR_STATUS.get(code, 400))
-    return _ok({"post": post})
+    return _ok({"post": _serialize_post_for_admin(post)})
 
 
 def _simple_action(fn):

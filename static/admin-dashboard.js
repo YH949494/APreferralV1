@@ -6986,17 +6986,115 @@
     already_published: "This post already published successfully — refreshing lists.",
     already_processing: "Another attempt is currently processing this post. Try again shortly.",
     retry_limit_reached: "Maximum retry attempts reached for this post.",
+    non_retryable_failure: "This failure isn't retryable — fix the underlying issue first, then use Edit Post or Duplicate Post.",
     not_failed: "This post is no longer in a failed state.",
     invalid_destination: "The destination is disabled or no longer available.",
   };
+
+  // Per-error-code corrective action shown in the retry modal when a
+  // failure is not retryable. `action` maps to an existing post action
+  // (ccHandlePostAction) triggered after the modal closes.
+  var CC_ERROR_GUIDANCE = {
+    telegram_forbidden: { label: "Fix Permissions", hint: "Re-add the bot to the destination with permission to post, then retry.", action: "edit" },
+    bot_lacks_permission: { label: "Fix Permissions", hint: "Grant the bot posting rights in this destination, then retry.", action: "edit" },
+    bot_lacks_pin_permission: { label: "Fix Permissions", hint: "Grant the bot pin rights in this destination, then retry.", action: "edit" },
+    chat_not_found: { label: "Test Destination", hint: "Confirm the destination still exists and the bot can reach it.", action: "edit" },
+    invalid_chat_id: { label: "Test Destination", hint: "The destination chat ID looks invalid — verify it.", action: "edit" },
+    invalid_media: { label: "Replace Media", hint: "Re-upload the media on this post, then retry.", action: "edit" },
+    invalid_media_file_id: { label: "Replace Media", hint: "The saved media reference is stale on Telegram — re-upload the media, then retry.", action: "edit" },
+    invalid_poll: { label: "Edit Post", hint: "Telegram rejected the poll configuration — review the poll options.", action: "edit" },
+    invalid_url: { label: "Edit Post", hint: "A button URL was rejected by Telegram — review the post's buttons.", action: "edit" },
+    message_too_long: { label: "Edit Post", hint: "Content exceeds Telegram's length limit — shorten it.", action: "edit" },
+    invalid_request: { label: "Edit Post", hint: "Telegram rejected this request — review the post content.", action: "edit" },
+    bot_loop_not_running: { label: "Duplicate Post", hint: "The publishing worker process is not currently running — contact an administrator.", action: "duplicate" },
+  };
+
+  // "23 Jul 2026, 4:03 AM" — the source string is already KL wall-clock
+  // time with a +08:00 offset (see _serialize_post_for_admin on the
+  // backend), so this parses the components directly instead of routing
+  // through Date's UTC accessors, which would re-convert it.
+  function ccFormatKlLong(iso) {
+    if (!iso) return "—";
+    var m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/.exec(iso);
+    if (!m) return "—";
+    var months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    var day = parseInt(m[3], 10);
+    var month = months[parseInt(m[2], 10) - 1];
+    var hour = parseInt(m[4], 10);
+    var ampm = hour >= 12 ? "PM" : "AM";
+    var h12 = hour % 12; if (h12 === 0) h12 = 12;
+    return day + " " + month + " " + m[1] + ", " + h12 + ":" + m[5] + " " + ampm;
+  }
+
+  // Builds the retry modal's inner HTML from the post's real persisted
+  // failure fields — never a generic "Unexpected error contacting
+  // Telegram." Falls back to the internal-error copy only when the
+  // backend didn't persist a code/message (e.g. legacy data).
+  function ccBuildRetryModalContent(post) {
+    var code = post.last_error_code || "unknown_error";
+    var runRef = (post.latest_run_id || "").slice(0, 8) || "—";
+    var fallback = "Internal publish error. Check worker logs using reference: " + runRef + ".";
+    var message = (code === "unknown_error" || !post.last_error_message) ? fallback : post.last_error_message;
+    var retryable = post.retryable === true;
+    var guidance = CC_ERROR_GUIDANCE[code];
+    var footerHtml;
+    if (retryable) {
+      footerHtml = '<p class="sub">This will queue a new attempt now.</p>';
+    } else if (guidance) {
+      footerHtml = '<p class="sub">' + esc(guidance.hint) + '</p>' +
+        '<button type="button" class="btn" id="cc-retry-corrective" data-cc-corrective-action="' + esc(guidance.action) + '">' + esc(guidance.label) + '</button>';
+    } else {
+      footerHtml = '<p class="sub">Fix the underlying issue before retrying.</p>';
+    }
+    var html = "<h3>Retry failed post?</h3>" +
+      '<p><strong>Error:</strong><br>' + esc(code) + '</p>' +
+      '<p>' + esc(message) + '</p>' +
+      '<p class="sub">Attempts: ' + fmt(post.attempt_count || 0) + '<br>' +
+      'Last attempt: ' + esc(ccFormatKlLong(post.last_attempt_at_kl || post.updated_at)) + '<br>' +
+      'Retryable: ' + (retryable ? "Yes" : "No") + '<br>' +
+      'Reference: ' + esc(runRef) + '</p>' +
+      footerHtml;
+    return { html: html, retryable: retryable, guidance: guidance };
+  }
+
+  // ---------- Retry failed post modal: shows the real persisted failure
+  // detail (never a generic "Unexpected error contacting Telegram") and
+  // disables Confirm for non-retryable failures. ----------
+  function ccOpenRetryModal(post) {
+    return new Promise(function (resolve) {
+      var built = ccBuildRetryModalContent(post);
+      var overlay = document.createElement("div");
+      overlay.className = "modal-overlay";
+      overlay.innerHTML =
+        '<div class="modal-box">' + built.html +
+        '<div class="modal-actions">' +
+        '<button type="button" class="btn" id="cc-retry-cancel">Cancel</button>' +
+        '<button type="button" class="btn primary" id="cc-retry-confirm"' + (built.retryable ? "" : " disabled") + '>' +
+        (built.retryable ? "Confirm" : "Cannot Retry") + '</button>' +
+        '</div></div>';
+      document.body.appendChild(overlay);
+      function done(result) { overlay.remove(); resolve(result); }
+      overlay.querySelector("#cc-retry-cancel").addEventListener("click", function () { done(false); });
+      overlay.querySelector("#cc-retry-confirm").addEventListener("click", function () {
+        if (built.retryable) done(true);
+      });
+      overlay.addEventListener("click", function (e) { if (e.target === overlay) done(false); });
+      var corrective = overlay.querySelector("#cc-retry-corrective");
+      if (corrective) {
+        corrective.addEventListener("click", function () {
+          var actionName = corrective.getAttribute("data-cc-corrective-action");
+          done(false);
+          if (actionName) ccHandlePostAction(actionName, post._id);
+        });
+      }
+    });
+  }
 
   function ccHandlePostAction(action, id, btnEl) {
     if (action === "retry") {
       api("/api/admin/community/posts/" + id).then(function (d) {
         var post = d.post || {};
-        var lastFailure = post.last_error_message || post.last_error_code || "Unknown error";
-        var msg = "Last failure: " + lastFailure + "\n\nRetry this post now?";
-        confirmSimple("Retry failed post?", msg).then(function (ok) {
+        ccOpenRetryModal(post).then(function (ok) {
           if (!ok) return;
           if (btnEl) btnEl.disabled = true;
           apiPost("/api/admin/community/posts/" + id + "/retry").then(function (r) {
