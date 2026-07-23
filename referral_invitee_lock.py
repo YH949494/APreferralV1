@@ -24,7 +24,29 @@ from datetime import datetime
 from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
+import referral_destination
+
 logger = logging.getLogger(__name__)
+
+# Chat ids a legacy destination-scoped award key ("ref:<chat_id>:<invitee_id>")
+# could plausibly have been minted under: the currently configured community
+# group / official channel ids, plus their historical hardcoded defaults (in
+# case an env var override post-dates the legacy rows). Kept as a fixed,
+# known set rather than scanning every award_key with a regex, since that
+# regex can only use the "ref:" index prefix and would degrade to a full
+# collection scan as referral_award_events grows.
+_LEGACY_AWARD_KEY_CHAT_IDS = tuple(
+    {
+        chat_id
+        for chat_id in (
+            referral_destination.COMMUNITY_GROUP_ID,
+            referral_destination.OFFICIAL_CHANNEL_ID,
+            referral_destination._DEFAULT_COMMUNITY_GROUP_ID,
+            referral_destination._DEFAULT_OFFICIAL_CHANNEL_ID,
+        )
+        if chat_id is not None
+    }
+)
 
 COLLECTION_NAME = "referral_invitee_locks"
 
@@ -33,6 +55,58 @@ COLLECTION_NAME = "referral_invitee_locks"
 # other collections (qualified_events, referral_events) rather than
 # pending_referrals statuses, so they are intentionally not listed here.
 BLOCKING_STATUSES = ("pending", "pending_channel", "processing", "awarded")
+
+
+def has_historical_success(db, *, invitee_user_id: int) -> bool:
+    """Return True if this invitee has ANY prior evidence of a successful
+    referral, checked across every collection/key format that has ever
+    recorded one — not just ``qualified_events``.
+
+    ``referral_invitee_locks`` only exists going forward (created by this
+    migration), so an invitee who was qualified/settled/awarded before the
+    lock collection existed has no lock row and ``claim()`` alone would let
+    a brand-new referral through for them. This check closes that gap by
+    consulting every historical source directly:
+
+      1. ``qualified_events.invitee_id``
+      2. ``referral_events`` with ``event="referral_settled"`` for this invitee
+      3. ``referral_award_events`` with a structured ``invitee_user_id`` field
+      4. legacy destination-scoped award key ``ref:<chat_id>:<invitee_id>``
+      5. new invitee-scoped award key ``ref:<invitee_id>``
+
+    (4) and (5) are matched on the ``award_key`` string itself, independent
+    of (3), because pre-migration award rows are not guaranteed to carry a
+    structured ``invitee_user_id`` field. (4) is matched by exact equality
+    against ``award_key`` for every known destination chat id (see
+    ``_LEGACY_AWARD_KEY_CHAT_IDS``) rather than a regex scan, so the lookup
+    stays an index seek instead of degrading into a full collection scan as
+    ``referral_award_events`` grows.
+    """
+    invitee = int(invitee_user_id)
+
+    if db.qualified_events.find_one({"invitee_id": invitee}, {"_id": 1}):
+        return True
+
+    if db.referral_events.find_one(
+        {"event": "referral_settled", "invitee_id": invitee}, {"_id": 1}
+    ):
+        return True
+
+    if db.referral_award_events.find_one({"invitee_user_id": invitee}, {"_id": 1}):
+        return True
+
+    # Exact-match candidate keys (new format + legacy format under every
+    # known destination chat id) so this hits the unique award_key index
+    # instead of scanning every award row.
+    candidate_keys = [f"ref:{invitee}"] + [
+        f"ref:{chat_id}:{invitee}" for chat_id in _LEGACY_AWARD_KEY_CHAT_IDS
+    ]
+    if db.referral_award_events.find_one(
+        {"award_key": {"$in": candidate_keys}}, {"_id": 1}
+    ):
+        return True
+
+    return False
 
 
 def claim(
