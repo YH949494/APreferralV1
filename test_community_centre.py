@@ -23,6 +23,20 @@ import community_centre as cc
 from fake_mongo import FakeDb
 
 
+# Telegram Configuration settings-doc shape with every builtin-destination
+# field unset/invalid, so tests that don't care about the Telegram
+# Configuration -> Community Centre resolver see exactly the custom
+# destinations they create via _make_destination(), same as before that
+# resolver existed. Tests that DO care override settings_service.get_settings
+# themselves (see the resolver tests below).
+NO_BUILTIN_TELEGRAM_CONFIG = {
+    "official_channel_id": "",
+    "official_channel_username": "",
+    "main_group_id": "0",
+    "community_chat_id": "0",
+}
+
+
 @pytest.fixture
 def fake_db(monkeypatch):
     fdb = FakeDb(unique_keys_by_collection={
@@ -35,6 +49,10 @@ def fake_db(monkeypatch):
     # community_centre.py catches pymongo's DuplicateKeyError specifically;
     # make fake_mongo's raise the real class so the except clause matches.
     monkeypatch.setattr("fake_mongo.DuplicateKeyError", RealDuplicateKeyError, raising=False)
+    # Isolate from the real app_settings collection / DatabaseProxy (which
+    # settings_service binds at import time via `from database import db`,
+    # so patching database.db above does not reach it).
+    monkeypatch.setattr(cc.settings_service, "get_settings", lambda group, **kw: dict(NO_BUILTIN_TELEGRAM_CONFIG))
     return fdb
 
 
@@ -960,3 +978,217 @@ def test_reschedule_revalidates_poll_close_date(fake_db):
     bad_time = close_at + timedelta(hours=1)
     _, err = cc.reschedule_post(post["_id"], actor_id=1, scheduled_at_utc=bad_time)
     assert err == "poll_closes_before_publish"
+
+
+# ---------------------------------------------------------------------------
+# Destination resolver: Telegram Configuration -> Community Centre
+# destinations (Admin Dashboard bug fix — Composer must read the existing
+# Settings -> Integrations -> Telegram Configuration fields instead of a
+# separate, never-populated destination list).
+# ---------------------------------------------------------------------------
+
+FULL_TELEGRAM_CONFIG = {
+    "official_channel_id": "-1002396761021",
+    "official_channel_username": "advantplayofficial",
+    "main_group_id": "-1002304653063",
+    "community_chat_id": "-1002743212540",
+}
+
+
+def test_resolve_creates_all_three_builtin_destinations():
+    dests = cc.resolve_community_destinations(FULL_TELEGRAM_CONFIG)
+    keys = [d["key"] for d in dests]
+    assert keys == ["official_channel", "main_group", "mywin_group"]
+
+
+def test_resolve_official_channel_id():
+    dests = cc.resolve_community_destinations(FULL_TELEGRAM_CONFIG)
+    official = next(d for d in dests if d["key"] == "official_channel")
+    assert official["chat_id"] == -1002396761021
+    assert official["username"] == "advantplayofficial"
+    assert official["chat_type"] == "channel"
+    assert official["enabled"] is True
+    assert official["allow_posts"] and official["allow_polls"] and official["allow_pin"]
+
+
+def test_resolve_main_group_id():
+    dests = cc.resolve_community_destinations(FULL_TELEGRAM_CONFIG)
+    main_group = next(d for d in dests if d["key"] == "main_group")
+    assert main_group["chat_id"] == -1002304653063
+    assert main_group["name"] == "Community Group"
+    assert main_group["chat_type"] == "supergroup"
+
+
+def test_resolve_mywin_chat_id():
+    dests = cc.resolve_community_destinations(FULL_TELEGRAM_CONFIG)
+    mywin = next(d for d in dests if d["key"] == "mywin_group")
+    assert mywin["chat_id"] == -1002743212540
+    assert mywin["name"] == "#mywin Group"
+
+
+def test_resolve_invalid_and_zero_ids_excluded():
+    dests = cc.resolve_community_destinations({
+        "official_channel_id": "",       # unset
+        "main_group_id": "0",            # zero
+        "community_chat_id": "not_a_number",  # garbage
+    })
+    assert dests == []
+
+
+def test_resolve_positive_chat_id_excluded():
+    # Telegram groups/channels are always negative ids; a positive id is
+    # never a valid destination even if it happens to be non-zero.
+    dests = cc.resolve_community_destinations({"official_channel_id": "12345"})
+    assert dests == []
+
+
+def test_resolve_mongo_override_takes_precedence(monkeypatch):
+    import settings_service as ss
+
+    monkeypatch.setattr(ss, "_cache", {})  # isolate from the process-global settings cache
+    stored = {"official_channel_id": "-1009999999999"}
+    fake_settings_col_data = {"_id": "telegram_config", **stored}
+
+    class _FakeCol:
+        def find_one(self, query):
+            return dict(fake_settings_col_data) if query.get("_id") == "telegram_config" else None
+
+    class _FakeDbRef:
+        def __getitem__(self, name):
+            return _FakeCol()
+
+    monkeypatch.setenv("OFFICIAL_CHANNEL_ID", "-1008888888888")
+    merged = ss.get_settings("telegram_config", db_ref=_FakeDbRef(), force_refresh=True)
+    assert merged["official_channel_id"] == "-1009999999999"  # Mongo wins over env
+    dests = cc.resolve_community_destinations(merged)
+    official = next(d for d in dests if d["key"] == "official_channel")
+    assert official["chat_id"] == -1009999999999
+
+
+def test_resolve_env_fallback_when_no_mongo_override(monkeypatch):
+    import settings_service as ss
+
+    monkeypatch.setattr(ss, "_cache", {})
+
+    class _FakeCol:
+        def find_one(self, query):
+            return None  # nothing saved in Mongo yet
+
+    class _FakeDbRef:
+        def __getitem__(self, name):
+            return _FakeCol()
+
+    monkeypatch.setenv("OFFICIAL_CHANNEL_ID", "-1007777777777")
+    merged = ss.get_settings("telegram_config", db_ref=_FakeDbRef(), force_refresh=True)
+    assert merged["official_channel_id"] == "-1007777777777"
+    dests = cc.resolve_community_destinations(merged)
+    official = next(d for d in dests if d["key"] == "official_channel")
+    assert official["chat_id"] == -1007777777777
+
+
+def test_resolve_application_default_fallback_when_untouched(monkeypatch):
+    import settings_service as ss
+
+    monkeypatch.setattr(ss, "_cache", {})
+
+    class _FakeCol:
+        def find_one(self, query):
+            return None
+
+    class _FakeDbRef:
+        def __getitem__(self, name):
+            return _FakeCol()
+
+    monkeypatch.delenv("MAIN_GROUP_ID", raising=False)
+    merged = ss.get_settings("telegram_config", db_ref=_FakeDbRef(), force_refresh=True)
+    # Untouched deployment: falls all the way to the hardcoded application
+    # default that shipped before this feature existed.
+    assert merged["main_group_id"] == "-1002304653063"
+    dests = cc.resolve_community_destinations(merged)
+    main_group = next(d for d in dests if d["key"] == "main_group")
+    assert main_group["chat_id"] == -1002304653063
+
+
+def test_builtin_and_custom_destinations_merge(fake_db, monkeypatch):
+    monkeypatch.setattr(cc.settings_service, "get_settings", lambda group, **kw: FULL_TELEGRAM_CONFIG)
+    _make_destination(key="vip_lounge", chat_id=-1005550001111, name="VIP Lounge")
+    dests = cc.list_destinations()
+    keys = {d["key"] for d in dests}
+    assert keys == {"official_channel", "main_group", "mywin_group", "vip_lounge"}
+
+
+def test_merge_dedupes_by_chat_id(fake_db, monkeypatch):
+    monkeypatch.setattr(cc.settings_service, "get_settings", lambda group, **kw: FULL_TELEGRAM_CONFIG)
+    # A custom destination pointing at the same chat as the builtin official
+    # channel must not produce a duplicate entry; the builtin wins.
+    _make_destination(key="dup_by_chat_id", chat_id=-1002396761021, name="Duplicate")
+    dests = cc.list_destinations()
+    matching_chat = [d for d in dests if d["chat_id"] == -1002396761021]
+    assert len(matching_chat) == 1
+    assert matching_chat[0]["key"] == "official_channel"
+
+
+def test_merge_dedupes_by_key(fake_db, monkeypatch):
+    monkeypatch.setattr(cc.settings_service, "get_settings", lambda group, **kw: FULL_TELEGRAM_CONFIG)
+    # A custom destination reusing a builtin's key (e.g. stale legacy data)
+    # must not shadow or duplicate the canonical builtin.
+    _make_destination(key="official_channel", chat_id=-1009990009990, name="Legacy Official")
+    dests = cc.list_destinations()
+    matching_key = [d for d in dests if d["key"] == "official_channel"]
+    assert len(matching_key) == 1
+    assert matching_key[0]["chat_id"] == -1002396761021
+
+
+def test_official_channel_is_first_when_configured(fake_db, monkeypatch):
+    monkeypatch.setattr(cc.settings_service, "get_settings", lambda group, **kw: FULL_TELEGRAM_CONFIG)
+    dests = cc.list_destinations(enabled_only=True)
+    assert dests[0]["key"] == "official_channel"
+
+
+def test_empty_destination_state_has_no_valid_destination(fake_db):
+    # NO_BUILTIN_TELEGRAM_CONFIG (from the fixture) + no custom destinations
+    # created -> nothing for the Composer to select, matching the disabled
+    # "No valid Telegram destination configured" placeholder state.
+    assert cc.list_destinations(enabled_only=True) == []
+    post, err = cc.create_post(_text_payload(destination_key="official_channel"), actor_id=1)
+    assert post is None
+    assert err == "invalid_destination"
+
+
+def test_settings_update_reflected_without_duplicating_config(fake_db, monkeypatch):
+    # Simulates saving Settings -> Integrations -> Telegram Configuration:
+    # Community Centre must pick up the new values immediately, with no
+    # separate community_destinations document ever written for it.
+    monkeypatch.setattr(cc.settings_service, "get_settings", lambda group, **kw: NO_BUILTIN_TELEGRAM_CONFIG)
+    assert cc.get_destination("official_channel") is None
+
+    monkeypatch.setattr(cc.settings_service, "get_settings", lambda group, **kw: FULL_TELEGRAM_CONFIG)
+    official = cc.get_destination("official_channel")
+    assert official is not None
+    assert official["chat_id"] == -1002396761021
+    assert cc._destinations().find_one({"key": "official_channel"}) is None
+
+
+def test_arbitrary_frontend_chat_id_is_ignored(fake_db, monkeypatch):
+    monkeypatch.setattr(cc.settings_service, "get_settings", lambda group, **kw: FULL_TELEGRAM_CONFIG)
+    payload = _text_payload(destination_key="official_channel")
+    payload["destination_chat_id"] = -1  # client-supplied; must never be trusted
+    post, err = cc.create_post(payload, actor_id=1)
+    assert err is None
+    assert post["destination_chat_id"] == -1002396761021
+
+
+def test_disabled_custom_destination_cannot_publish(fake_db, monkeypatch):
+    monkeypatch.setattr(cc.settings_service, "get_settings", lambda group, **kw: NO_BUILTIN_TELEGRAM_CONFIG)
+    _make_destination(key="paused_channel", enabled=False)
+    post, err = cc.create_post(_text_payload(destination_key="paused_channel"), actor_id=1)
+    assert post is None
+    assert err == "invalid_destination"
+
+
+def test_poll_permission_validation_via_resolved_destination(fake_db, monkeypatch):
+    monkeypatch.setattr(cc.settings_service, "get_settings", lambda group, **kw: NO_BUILTIN_TELEGRAM_CONFIG)
+    _make_destination(allow_polls=False)
+    post, err = cc.create_post(_poll_payload(), actor_id=1)
+    assert post is None
+    assert err == "destination_disallows_polls"

@@ -33,6 +33,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -45,6 +46,7 @@ from pymongo.errors import DuplicateKeyError
 
 import database
 import community_centre_limits as limits
+import settings_service
 
 logger = logging.getLogger(__name__)
 
@@ -154,15 +156,121 @@ def record_audit(
 
 # ---------------------------------------------------------------------------
 # Destinations registry (Admin Settings -> approved posting destinations)
+#
+# Built-in destinations are derived, at read time, from the "Telegram
+# Configuration" settings group (settings_service already resolves each
+# field as Mongo override -> env var -> hardcoded default, so this stays
+# backward-compatible with untouched deployments). Additional destinations
+# created through the community_destinations collection are merged on top,
+# so admins never have to re-enter the Official Channel / Main Group /
+# #mywin IDs a second time in a separate section.
 # ---------------------------------------------------------------------------
 
+_DEST_OUTPUT_FIELDS = ("key", "name", "chat_id", "chat_type", "enabled", "allow_posts", "allow_polls", "allow_pin")
+
+
+def _normalize_destination(dest: dict) -> dict:
+    out = {field: dest.get(field) for field in _DEST_OUTPUT_FIELDS}
+    if dest.get("username"):
+        out["username"] = dest["username"]
+    return out
+
+
+def _valid_chat_id(raw: Any) -> int | None:
+    """Only a valid, non-zero, negative Telegram chat id counts (Telegram
+    groups/channels always use negative ids; 0/unset means unconfigured)."""
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if value < 0 else None
+
+
+def resolve_community_destinations(settings_doc: dict) -> list[dict]:
+    """Return the built-in Community Centre destinations derived from the
+    Telegram Configuration settings document (as returned by
+    ``settings_service.get_settings("telegram_config")``)."""
+    out: list[dict] = []
+
+    official_chat_id = _valid_chat_id(settings_doc.get("official_channel_id"))
+    if official_chat_id is not None:
+        out.append({
+            "key": "official_channel",
+            "name": "Official Channel",
+            "chat_id": official_chat_id,
+            "username": settings_doc.get("official_channel_username") or None,
+            "chat_type": "channel",
+            "enabled": True,
+            "allow_posts": True,
+            "allow_polls": True,
+            "allow_pin": True,
+        })
+
+    main_group_chat_id = _valid_chat_id(settings_doc.get("main_group_id"))
+    if main_group_chat_id is not None:
+        out.append({
+            "key": "main_group",
+            "name": "Community Group",
+            "chat_id": main_group_chat_id,
+            "chat_type": "supergroup",
+            "enabled": True,
+            "allow_posts": True,
+            "allow_polls": True,
+            "allow_pin": True,
+        })
+
+    mywin_chat_id = _valid_chat_id(settings_doc.get("community_chat_id"))
+    if mywin_chat_id is not None:
+        out.append({
+            "key": "mywin_group",
+            "name": "#mywin Group",
+            "chat_id": mywin_chat_id,
+            "chat_type": "supergroup",
+            "enabled": True,
+            "allow_posts": True,
+            "allow_polls": True,
+            "allow_pin": True,
+        })
+
+    return out
+
+
+def _merge_destinations(builtins: list[dict], custom: list[dict]) -> list[dict]:
+    """Merge built-in destinations with admin-created custom ones,
+    deduplicating by chat_id first, then by key. Built-in entries always win
+    a collision since they mirror the canonical Telegram Configuration."""
+    merged: list[dict] = []
+    seen_chat_ids: set = set()
+    seen_keys: set = set()
+    for dest in builtins:
+        merged.append(dest)
+        seen_chat_ids.add(dest["chat_id"])
+        seen_keys.add(dest["key"])
+    for dest in custom:
+        chat_id = dest.get("chat_id")
+        key = dest.get("key")
+        if chat_id in seen_chat_ids or key in seen_keys:
+            continue
+        merged.append(dest)
+        seen_chat_ids.add(chat_id)
+        seen_keys.add(key)
+    return merged
+
+
 def list_destinations(*, enabled_only: bool = False) -> list[dict]:
-    query = {"enabled": True} if enabled_only else {}
-    return list(_destinations().find(query, sort=[("name", 1)]))
+    builtins = resolve_community_destinations(settings_service.get_settings("telegram_config"))
+    custom = list(_destinations().find({}, sort=[("name", 1)]))
+    merged = [_normalize_destination(d) for d in _merge_destinations(builtins, custom)]
+    if enabled_only:
+        merged = [d for d in merged if d.get("enabled")]
+    return merged
 
 
 def get_destination(key: str) -> dict | None:
-    return _destinations().find_one({"key": key})
+    for dest in list_destinations():
+        if dest.get("key") == key:
+            return dest
+    return None
 
 
 def upsert_destination(payload: dict, *, actor_id=None) -> tuple[dict | None, str | None]:
@@ -943,6 +1051,63 @@ def categorize_telegram_error(exc: Exception) -> tuple[str, str]:
             return "invalid_url", "A button URL was rejected by Telegram."
         return "invalid_request", "Telegram rejected the request."
     return "unknown_error", "Unexpected error contacting Telegram."
+
+
+# ---------------------------------------------------------------------------
+# Optional "Test destination" permission check (getChat / getChatMember).
+# Manually triggered / cached — never run implicitly on Composer load.
+# ---------------------------------------------------------------------------
+
+_DEST_TEST_CACHE_TTL_SECONDS = 300
+_dest_test_cache: dict[str, tuple[float, dict]] = {}
+
+
+async def _do_test_destination(chat_id: int) -> dict:
+    bot = _bot()
+    chat = await bot.get_chat(chat_id)
+    member = await bot.get_chat_member(chat_id, bot.id)
+    status = getattr(member, "status", None)
+    is_admin = status in ("administrator", "creator")
+    can_post = is_admin and (status == "creator" or bool(getattr(member, "can_post_messages", True)))
+    can_pin = is_admin and (status == "creator" or bool(getattr(member, "can_pin_messages", False)))
+    return {
+        "reachable": True,
+        "chat_title": getattr(chat, "title", None) or getattr(chat, "username", None),
+        "is_admin": bool(is_admin),
+        "can_post_messages": bool(can_post),
+        "can_post_polls": bool(can_post),
+        "can_pin_messages": bool(can_pin),
+    }
+
+
+def test_destination(key: str, *, force_refresh: bool = False) -> tuple[dict | None, str | None]:
+    """Non-blocking permission probe for a destination. Cached for
+    _DEST_TEST_CACHE_TTL_SECONDS so the Composer never triggers a live
+    Telegram call just by loading."""
+    dest = get_destination(key)
+    if not dest:
+        return None, "not_found"
+
+    now = time.monotonic()
+    if not force_refresh:
+        cached = _dest_test_cache.get(key)
+        if cached and (now - cached[0]) < _DEST_TEST_CACHE_TTL_SECONDS:
+            return cached[1], None
+
+    try:
+        result = _run_coro(_do_test_destination(dest["chat_id"]))
+    except Exception as exc:
+        _, msg = categorize_telegram_error(exc)
+        result = {
+            "reachable": False,
+            "is_admin": False,
+            "can_post_messages": False,
+            "can_post_polls": False,
+            "can_pin_messages": False,
+            "error": msg,
+        }
+    _dest_test_cache[key] = (now, result)
+    return result, None
 
 
 def build_reply_markup(buttons: list[dict]):
@@ -1874,6 +2039,18 @@ def cc_delete_destination(key):
     if not ok:
         return _err("not_found", 404)
     return _ok({})
+
+
+@community_centre_bp.post("/api/admin/community/destinations/<key>/test")
+def cc_test_destination(key):
+    payload, err = _require_admin()
+    if err:
+        return err
+    body = request.get_json(silent=True) or {}
+    result, code = test_destination(key, force_refresh=bool(body.get("force_refresh")))
+    if code:
+        return _err(code, 404)
+    return _ok({"result": result})
 
 
 @community_centre_bp.post("/api/admin/community/posts")
