@@ -3215,6 +3215,7 @@
       return r.json().then(function (j) { if (!r.ok || !j.success) throw new Error(j.reason || j.message || "HTTP " + r.status); return j; });
     }).then(function (j) {
       managedSettingsState.values[group] = j.settings || payload;
+      if (group === "telegram_config") cc.destinations = null;
       toast("✅ " + (schema.label || group) + " settings saved", "success");
       if (statusEl) statusEl.textContent = "Saved.";
     }).catch(function (e) {
@@ -6154,14 +6155,26 @@
     return Promise.all(tasks);
   }
 
+  function ccOpenTelegramSettings() {
+    var mod = moduleByKey("settings");
+    var idx = mod ? mod.tabs.findIndex(function (t) { return t.settingsCategory === "integrations"; }) : -1;
+    if (idx >= 0) activateTab("settings", idx);
+  }
+
   function ccRenderDestinationSelect() {
     var sel = $("#cc-destination");
     if (!sel) return;
     var prev = sel.value;
     var enabled = (cc.destinations || []).filter(function (d) { return d.enabled; });
-    sel.innerHTML = enabled.length
+    var hasValid = enabled.length > 0;
+    sel.innerHTML = hasValid
       ? enabled.map(function (d) { return '<option value="' + esc(d.key) + '"' + (d.key === prev ? " selected" : "") + '>' + esc(d.name) + "</option>"; }).join("")
-      : '<option value="">No destinations configured — add one in Settings → Integrations</option>';
+      : '<option value="" disabled selected>No valid Telegram destination configured</option>';
+    sel.disabled = !hasValid;
+    var warning = $("#cc-destination-warning");
+    if (warning) warning.classList.toggle("hidden", hasValid);
+    var previewBtn = $("#cc-preview-btn");
+    if (previewBtn) previewBtn.disabled = !hasValid;
   }
 
   // ---------- Composer: content-type-driven field visibility ----------
@@ -6865,9 +6878,11 @@
       var title = ($("#cc-title").value || "").trim();
       var dest = $("#cc-destination").value;
       if (!title) { toast("❌ Internal title is required", "error"); return; }
-      if (!dest) { toast("❌ Choose a destination first", "error"); return; }
+      if (!dest) { toast("❌ Choose a valid destination first", "error"); return; }
       ccSaveDraft(false).then(function (post) { if (post) ccOpenPreviewModal(post); });
     });
+    var ccOpenTelegramSettingsBtn = $("#cc-open-telegram-settings-btn");
+    if (ccOpenTelegramSettingsBtn) ccOpenTelegramSettingsBtn.addEventListener("click", ccOpenTelegramSettings);
 
     $("#cc-calendar-prev").addEventListener("click", function () {
       cc.calendarStart = new Date((cc.calendarStart || ccStartOfDay(new Date())).getTime() - 31 * 86400000);
