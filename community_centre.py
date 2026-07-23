@@ -1817,6 +1817,12 @@ def recover_stale_processing() -> int:
                 "status": "failed", "next_run_at_utc": None, "updated_at": ts,
                 "processing_owner": None, "processing_started_at_utc": None,
                 "last_error_code": "processing_timeout", "last_error_message": "Worker stopped responding while publishing.",
+                # A prior attempt on this same post may have left stale
+                # last_exception_class/last_failed_step/retryable behind —
+                # clear them so the retry modal doesn't attribute this
+                # timeout to a previous attempt's local exception/step.
+                "last_exception_class": "", "last_failed_step": "",
+                "retryable": False,
             }})
         record_audit(post["_id"], "worker_claim", actor_type="system", after={"recovered_from": "stale_processing"})
         recovered += 1

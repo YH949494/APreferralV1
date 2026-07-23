@@ -509,6 +509,35 @@ def test_stale_processing_is_recovered(fake_db, monkeypatch):
     assert fresh["status"] == "scheduled"
 
 
+def test_stale_processing_terminal_recovery_clears_prior_attempt_detail(fake_db, monkeypatch):
+    """A post whose previous attempt left behind last_exception_class/
+    last_failed_step/retryable from a local_type_error must not show that
+    stale detail once a later attempt times out and hits MAX_ATTEMPTS —
+    the retry modal would otherwise blame this processing_timeout on a
+    prior attempt's unrelated exception/step."""
+    post = _schedule_due_post()
+    database.db["community_posts"].update_one({"_id": post["_id"]}, {"$set": {
+        "last_error_code": "local_type_error",
+        "last_error_message": "Local error before Telegram was contacted: boom",
+        "last_exception_class": "TypeError",
+        "last_failed_step": "telegram_call",
+        "retryable": False,
+        "attempt_count": cc.limits.MAX_ATTEMPTS,
+    }})
+    claimed = cc._claim_next_due_post()
+    assert claimed["status"] == "processing"
+    stale_time = datetime.now(timezone.utc) - timedelta(seconds=cc.limits.PROCESSING_TIMEOUT_SECONDS + 10)
+    fake_db["community_posts"].update_one({"_id": post["_id"]}, {"$set": {"processing_started_at_utc": stale_time}})
+    recovered = cc.recover_stale_processing()
+    assert recovered == 1
+    fresh = cc.get_post(post["_id"])
+    assert fresh["status"] == "failed"
+    assert fresh["last_error_code"] == "processing_timeout"
+    assert not fresh["last_exception_class"]
+    assert not fresh["last_failed_step"]
+    assert fresh["retryable"] is False
+
+
 def test_retryable_failure_reschedules_with_backoff(fake_db, monkeypatch):
     from telegram.error import TimedOut
     _fake_run_coro(monkeypatch, side_effect=TimedOut())
