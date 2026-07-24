@@ -29,6 +29,7 @@ import logging
 import random
 import re
 from datetime import datetime, timezone
+from html import escape as html_escape
 from urllib.parse import urlparse
 
 from bson import ObjectId
@@ -268,12 +269,16 @@ def select_playback_for_user(user_id: int, now: datetime | None = None) -> dict 
 # this function so they can never drift out of format with each other.
 # ---------------------------------------------------------------------------
 
+_FORMAT_MODES = ("plain", "telegram_html")
+
+
 def build_referral_share_caption(
     *,
     hook_text: str,
-    playback_url: str,
-    referral_url: str,
+    playback_url: str | None,
+    referral_url: str | None,
     include_referral_link: bool = True,
+    format_mode: str = "plain",
 ) -> str:
     """Assemble the referral-share caption from its three parts.
 
@@ -288,7 +293,21 @@ def build_referral_share_caption(
     trailing link line, for surfaces (Telegram's ``share/url`` button) that
     pass the link via a separate ``url`` query param — including it in both
     places would show the link twice in the share sheet.
+
+    ``format_mode`` selects the output rendering:
+      - ``"plain"`` (default): plain text, for surfaces that cannot carry
+        Telegram message entities (clipboard copy, the Mini App / API
+        ``share_text``, Telegram's prefilled share-sheet text).
+      - ``"telegram_html"``: HTML for bot-sent messages using
+        ``parse_mode="HTML"``. Only the AdvantPlay benefits section is
+        wrapped in ``<blockquote>`` — the hook, playback link, referral CTA,
+        and referral URL are never inside the quote block. All dynamic
+        values are HTML-escaped; the static ``<blockquote>``/``<b>`` tags
+        are not.
     """
+    if format_mode not in _FORMAT_MODES:
+        raise ValueError(f"build_referral_share_caption: unsupported format_mode {format_mode!r}")
+
     referral_url = (referral_url or "").strip()
     if not referral_url:
         raise ValueError("build_referral_share_caption requires a non-empty referral_url")
@@ -298,24 +317,42 @@ def build_referral_share_caption(
     if not playback_url:
         logger.warning("[SHARE_CONTENT][CAPTION] missing playback_url; building referral-only caption")
 
-    lines = [hook]
-    if playback_url:
-        lines.append(playback_url)
+    if format_mode == "telegram_html":
+        hook_out = html_escape(hook)
+        playback_out = html_escape(playback_url) if playback_url else ""
+        referral_out = html_escape(referral_url)
+        benefits = (
+            "<blockquote><b>Join AdvantPlay for 👇</b>\n"
+            "⚡️ Daily voucher drops\n"
+            "🎁 Exclusive reward campaigns\n"
+            "🏆 Weekly ranking rewards\n"
+            "👑 VIP updates and opportunities</blockquote>"
+        )
+    else:
+        hook_out = hook
+        playback_out = playback_url
+        referral_out = referral_url
+        benefits = (
+            "Join AdvantPlay for 👇\n\n"
+            "⚡️ Daily voucher drops\n"
+            "🎁 Exclusive reward campaigns\n"
+            "🏆 Weekly ranking rewards\n"
+            "👑 VIP updates and opportunities"
+        )
+
+    lines = [hook_out]
+    if playback_out:
+        lines.append(playback_out)
     lines.extend([
         "",
         "Want more replays like this—and rewards too?",
         "",
-        "Join AdvantPlay for 👇",
-        "",
-        "⚡️ Daily voucher drops",
-        "🎁 Exclusive reward campaigns",
-        "🏆 Weekly ranking rewards",
-        "👑 VIP updates and opportunities",
+        benefits,
         "",
         "Start here 👇",
     ])
     if include_referral_link:
-        lines.append(referral_url)
+        lines.append(referral_out)
 
     return "\n".join(lines)
 

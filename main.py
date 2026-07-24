@@ -7802,7 +7802,6 @@ async def send_referral_link_with_share_button(update: Update, context: ContextT
         return
 
     invite_link = result["invite_link"]
-    caption = result["message"]
 
     # Telegram's share/url composes the prefilled message as
     # "{url}\n{text}" (url first, then text) -- not the other way around.
@@ -7826,11 +7825,17 @@ async def send_referral_link_with_share_button(update: Update, context: ContextT
         [[InlineKeyboardButton("📤 Share Referral Link", url=share_url)]]
     )
 
+    caption_html = build_referral_share_caption(
+        hook_text=result["hook_text"],
+        playback_url=result["playback_url"],
+        referral_url=invite_link,
+        format_mode="telegram_html",
+    )
+
     await safe_reply_text(
         update.effective_message,
-        f"<blockquote>{html_escape(caption)}</blockquote>",
+        caption_html,
         parse_mode=ParseMode.HTML,
-        disable_web_page_preview=True,
         reply_markup=keyboard,
         uid=uid,
         send_type="referral_deep_link",
@@ -8461,7 +8466,6 @@ async def generate_referral_link_callback(update: Update, context: ContextTypes.
         )
         return
 
-    message = result["message"]
     invite_link = result["invite_link"]
 
     # Telegram's share/url composes the prefilled message as "{url}\n{text}"
@@ -8481,11 +8485,18 @@ async def generate_referral_link_callback(update: Update, context: ContextTypes.
         [[InlineKeyboardButton("📤 Share Referral Link", url=f"https://t.me/share/url?{share_params}")]]
     )
 
+    message_html = build_referral_share_caption(
+        hook_text=result["hook_text"],
+        playback_url=result["playback_url"],
+        referral_url=invite_link,
+        format_mode="telegram_html",
+    )
+
     await safe_send_message(
         context.bot,
         chat_id=uid,
-        text=message,
-        disable_web_page_preview=True,
+        text=message_html,
+        parse_mode=ParseMode.HTML,
         reply_markup=share_keyboard,
         uid=uid,
         send_type="referral_link",

@@ -803,6 +803,15 @@ class TestBuildReferralShareCaption:
         assert result.count("https://t.me/+ref") == 0
         assert result.endswith("Start here 👇")
 
+    def test_invalid_format_mode_raises(self):
+        with pytest.raises(ValueError):
+            rsc.build_referral_share_caption(
+                hook_text="Hook",
+                playback_url="https://rx.apreplay.com/Abc12345",
+                referral_url="https://t.me/+ref",
+                format_mode="bogus",
+            )
+
     def test_pool_selection_still_returns_only_active_entries(self, fake_db):
         _hook(fake_db, "Active hook", status="active")
         _hook(fake_db, "Inactive hook", status="inactive")
@@ -815,3 +824,133 @@ class TestBuildReferralShareCaption:
         for i in range(20):
             picked = rsc.select_playback_for_user(user_id=9000 + i)
             assert picked["playback_id"] == "ActivePB01"
+
+
+EXPECTED_HTML_BLOCKQUOTE = (
+    "<blockquote><b>Join AdvantPlay for 👇</b>\n"
+    "⚡️ Daily voucher drops\n"
+    "🎁 Exclusive reward campaigns\n"
+    "🏆 Weekly ranking rewards\n"
+    "👑 VIP updates and opportunities</blockquote>"
+)
+
+
+class TestBuildReferralShareCaptionTelegramHtml:
+    def test_exact_html_payload(self):
+        result = rsc.build_referral_share_caption(
+            hook_text="Walao, wait for the ending 👀",
+            playback_url="https://rx.apreplay.com/87FWMgJ5kL",
+            referral_url="https://t.me/+y7BPw5Sv7KJhODc1",
+            format_mode="telegram_html",
+        )
+        expected = (
+            "Walao, wait for the ending 👀\n"
+            "https://rx.apreplay.com/87FWMgJ5kL\n\n"
+            "Want more replays like this—and rewards too?\n\n"
+            f"{EXPECTED_HTML_BLOCKQUOTE}\n\n"
+            "Start here 👇\n"
+            "https://t.me/+y7BPw5Sv7KJhODc1"
+        )
+        assert result == expected
+
+    def test_contains_exactly_one_blockquote(self):
+        result = rsc.build_referral_share_caption(
+            hook_text="Hook",
+            playback_url="https://rx.apreplay.com/Abc12345",
+            referral_url="https://t.me/+ref",
+            format_mode="telegram_html",
+        )
+        assert result.count("<blockquote>") == 1
+        assert result.count("</blockquote>") == 1
+
+    def test_benefits_are_inside_blockquote(self):
+        result = rsc.build_referral_share_caption(
+            hook_text="Hook",
+            playback_url="https://rx.apreplay.com/Abc12345",
+            referral_url="https://t.me/+ref",
+            format_mode="telegram_html",
+        )
+        start = result.index("<blockquote>")
+        end = result.index("</blockquote>") + len("</blockquote>")
+        quoted = result[start:end]
+        assert "Join AdvantPlay for 👇" in quoted
+        assert "⚡️ Daily voucher drops" in quoted
+        assert "🎁 Exclusive reward campaigns" in quoted
+        assert "🏆 Weekly ranking rewards" in quoted
+        assert "👑 VIP updates and opportunities" in quoted
+
+    def test_hook_and_playback_are_outside_blockquote(self):
+        result = rsc.build_referral_share_caption(
+            hook_text="Hook",
+            playback_url="https://rx.apreplay.com/Abc12345",
+            referral_url="https://t.me/+ref",
+            format_mode="telegram_html",
+        )
+        start = result.index("<blockquote>")
+        end = result.index("</blockquote>") + len("</blockquote>")
+        assert "Hook" in result[:start]
+        assert "https://rx.apreplay.com/Abc12345" in result[:start]
+        assert "Hook" not in result[start:end]
+        assert "https://rx.apreplay.com/Abc12345" not in result[start:end]
+
+    def test_referral_cta_and_url_are_outside_blockquote(self):
+        result = rsc.build_referral_share_caption(
+            hook_text="Hook",
+            playback_url="https://rx.apreplay.com/Abc12345",
+            referral_url="https://t.me/+ref",
+            format_mode="telegram_html",
+        )
+        start = result.index("<blockquote>")
+        end = result.index("</blockquote>") + len("</blockquote>")
+        assert "Start here 👇" in result[end:]
+        assert "https://t.me/+ref" in result[end:]
+        assert "Start here" not in result[start:end]
+        assert "https://t.me/+ref" not in result[start:end]
+
+    def test_dynamic_values_are_html_escaped(self):
+        result = rsc.build_referral_share_caption(
+            hook_text='<script>alert("x")</script> & win!',
+            playback_url="https://rx.apreplay.com/Abc12345?a=1&b=2",
+            referral_url="https://t.me/+ref?x=1&y=2",
+            format_mode="telegram_html",
+        )
+        assert "<script>" not in result
+        assert "&lt;script&gt;" in result
+        assert "&amp;" in result
+        # Static tags remain unescaped.
+        assert "<blockquote><b>Join AdvantPlay for 👇</b>" in result
+        assert result.count("<blockquote>") == 1
+
+    def test_missing_hook_fallback_in_html_mode(self):
+        result = rsc.build_referral_share_caption(
+            hook_text="", playback_url="https://rx.apreplay.com/Abc12345",
+            referral_url="https://t.me/+ref", format_mode="telegram_html",
+        )
+        assert result.startswith("Wait for the ending 👀\n")
+
+    def test_missing_playback_omits_line_but_stays_valid_html(self):
+        result = rsc.build_referral_share_caption(
+            hook_text="Hook", playback_url="", referral_url="https://t.me/+ref",
+            format_mode="telegram_html",
+        )
+        assert "https://rx.apreplay.com" not in result
+        assert result.count("<blockquote>") == 1
+        assert "\n\n\n" not in result
+
+    def test_missing_referral_url_raises_in_html_mode(self):
+        with pytest.raises(ValueError):
+            rsc.build_referral_share_caption(
+                hook_text="Hook",
+                playback_url="https://rx.apreplay.com/Abc12345",
+                referral_url="",
+                format_mode="telegram_html",
+            )
+
+    def test_plain_mode_default_produces_no_html_tags(self):
+        result = rsc.build_referral_share_caption(
+            hook_text="Hook",
+            playback_url="https://rx.apreplay.com/Abc12345",
+            referral_url="https://t.me/+ref",
+        )
+        assert "<blockquote>" not in result
+        assert "<b>" not in result
