@@ -16,6 +16,7 @@ from xp import grant_xp, now_utc, now_kl
 from affiliate_rewards import mark_invitee_qualified
 from affiliate_group_access import maybe_unlock_affiliate_group
 import referral_invitee_lock
+from referral_ledger import with_not_invalidated
 
 from telegram_utils import send_telegram_http_message
 
@@ -1328,6 +1329,91 @@ def _record_referral_event(inviter_id: int, invitee_id: int, event: str, occurre
     return True
 
 
+def revoke_settled_referral(
+    db,
+    *,
+    inviter_id: int,
+    invitee_id: int,
+    reason: str,
+    occurred_at: datetime,
+) -> bool:
+    """Reverse a *previously settled* referral.
+
+    This is the only path that may write a referral_revoked event. It
+    requires a matching referral_settled event for the same inviter/invitee
+    pair to already exist, so a referral that never settled can never be
+    driven negative by a revocation. Returns True only when a new
+    revocation event was written; False (with no ledger change) if there
+    was no prior settlement, or a revocation for this pair already exists.
+    """
+    if inviter_id is None or invitee_id is None:
+        return False
+    inviter_id = int(inviter_id)
+    invitee_id = int(invitee_id)
+
+    settled_event = db.referral_events.find_one(
+        {"inviter_id": inviter_id, "invitee_id": invitee_id, "event": "referral_settled"}
+    )
+    if not settled_event:
+        logger.warning(
+            "[SCHED][REFERRAL_LEDGER][REVOKE_WITHOUT_SETTLEMENT] inviter=%s invitee=%s reason=%s",
+            inviter_id,
+            invitee_id,
+            reason,
+        )
+        return False
+
+    existing_revoke = db.referral_events.find_one(
+        {"inviter_id": inviter_id, "invitee_id": invitee_id, "event": "referral_revoked"}
+    )
+    if existing_revoke:
+        logger.info(
+            "[SCHED][REFERRAL_LEDGER][REVOKE_ALREADY_APPLIED] inviter=%s invitee=%s reason=%s",
+            inviter_id,
+            invitee_id,
+            reason,
+        )
+        return False
+
+    event_doc = _referral_event_doc(inviter_id, invitee_id, "referral_revoked", occurred_at)
+    event_doc["reason"] = reason
+    event_doc["reverses_settled_at"] = settled_event.get("occurred_at")
+    try:
+        db.referral_events.insert_one(event_doc)
+    except DuplicateKeyError:
+        logger.info(
+            "[SCHED][REFERRAL_LEDGER] duplicate inviter=%s invitee=%s action=referral_revoked",
+            inviter_id,
+            invitee_id,
+        )
+        return False
+
+    logger.info(
+        "[SCHED][REFERRAL_LEDGER] inviter=%s invitee=%s action=revoked reason=%s",
+        inviter_id,
+        invitee_id,
+        reason,
+    )
+    try:
+        from affiliate_leaderboard import emit_referral_flow_event
+        emit_referral_flow_event(
+            db,
+            event="referral_revoked",
+            referrer_id=inviter_id,
+            invitee_id=invitee_id,
+            ts_utc=occurred_at,
+            meta={"reason": reason},
+            idempotency_key=f"rf|referral_revoked|{inviter_id}|{invitee_id}|{occurred_at.isoformat()}",
+        )
+    except Exception:
+        logger.exception(
+            "[SCHED][REFERRAL_LEDGER] flow_event_emit_failed inviter=%s invitee=%s event=referral_revoked",
+            inviter_id,
+            invitee_id,
+        )
+    return True
+
+
 def maybe_handle_first_referral(uid: int, old_total: int, new_total: int, now_utc_ts: datetime) -> None:
     if old_total != 0 or new_total < 1:
         return
@@ -1570,10 +1656,12 @@ def settle_referral_snapshots() -> None:
 
     pipeline = [
         {
-            "$match": {
-                "inviter_id": {"$ne": None},
-                "event": {"$in": ["referral_settled", "referral_revoked"]},
-            }
+            "$match": with_not_invalidated(
+                {
+                    "inviter_id": {"$ne": None},
+                    "event": {"$in": ["referral_settled", "referral_revoked"]},
+                }
+            )
         },
         {
             "$group": {
@@ -1972,11 +2060,15 @@ def maybe_shout_referral_congrats(inviter_user_id: int, now_utc_ts: datetime) ->
         "event": "referral_settled",
         "month_key": month_key,
     })
-    revoked = db.referral_events.count_documents({
-        "inviter_id": inviter_user_id,
-        "event": "referral_revoked",
-        "month_key": month_key,
-    })
+    revoked = db.referral_events.count_documents(
+        with_not_invalidated(
+            {
+                "inviter_id": inviter_user_id,
+                "event": "referral_revoked",
+                "month_key": month_key,
+            }
+        )
+    )
     monthly_count = settled - revoked
 
     hit_tier = None
@@ -2182,7 +2274,6 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
                         "$unset": {"processing_by": "", "processing_at_utc": "", "processing_at": ""},
                     },
                 )
-                _record_referral_event(inviter_user_id, invitee_user_id, "referral_revoked", now_utc_ts)
                 referral_invitee_lock.release(
                     db, invitee_user_id=invitee_user_id, status="revoked", now_utc_ts=now_utc_ts
                 )                
@@ -2201,7 +2292,6 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
                         "$unset": {"processing_by": "", "processing_at_utc": "", "processing_at": ""},
                     },
                 )
-                _record_referral_event(inviter_user_id, invitee_user_id, "referral_revoked", now_utc_ts)
                 referral_invitee_lock.release(
                     db, invitee_user_id=invitee_user_id, status="revoked", now_utc_ts=now_utc_ts
                 )                
@@ -2251,7 +2341,6 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
                         "$unset": {"processing_by": "", "processing_at_utc": "", "processing_at": ""},
                     },
                 )
-                _record_referral_event(inviter_user_id, invitee_user_id, "referral_revoked", now_utc_ts)
                 referral_invitee_lock.release(
                     db, invitee_user_id=invitee_user_id, status="revoked", now_utc_ts=now_utc_ts
                 )                
@@ -2280,7 +2369,6 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
                         "$unset": {"processing_by": "", "processing_at_utc": "", "processing_at": ""},
                     },
                 )
-                _record_referral_event(inviter_user_id, invitee_user_id, "referral_revoked", now_utc_ts)
                 referral_invitee_lock.release(
                     db, invitee_user_id=invitee_user_id, status="revoked", now_utc_ts=now_utc_ts
                 )                
@@ -2311,7 +2399,6 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
                             "$unset": {"processing_by": "", "processing_at_utc": "", "processing_at": ""},
                         },
                     )
-                    _record_referral_event(inviter_user_id, invitee_user_id, "referral_revoked", now_utc_ts)
                     referral_invitee_lock.release(
                         db, invitee_user_id=invitee_user_id, status="revoked", now_utc_ts=now_utc_ts
                     )
@@ -2333,7 +2420,6 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
                             "$unset": {"processing_by": "", "processing_at_utc": "", "processing_at": ""},
                         },
                     )
-                    _record_referral_event(inviter_user_id, invitee_user_id, "referral_revoked", now_utc_ts)
                     referral_invitee_lock.release(
                         db, invitee_user_id=invitee_user_id, status="revoked", now_utc_ts=now_utc_ts
                     )
@@ -2351,7 +2437,6 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
                             "$unset": {"processing_by": "", "processing_at_utc": "", "processing_at": ""},
                         },
                     )
-                    _record_referral_event(inviter_user_id, invitee_user_id, "referral_revoked", now_utc_ts)
                     referral_invitee_lock.release(
                         db, invitee_user_id=invitee_user_id, status="revoked", now_utc_ts=now_utc_ts
                     )
@@ -2385,7 +2470,6 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
                         "$unset": {"processing_by": "", "processing_at_utc": "", "processing_at": ""},
                     },
                 )
-                _record_referral_event(inviter_user_id, invitee_user_id, "referral_revoked", now_utc_ts)
                 referral_invitee_lock.release(
                     db, invitee_user_id=invitee_user_id, status="revoked", now_utc_ts=now_utc_ts
                 )
@@ -2513,10 +2597,12 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
 
             total_pipeline = [
                 {
-                    "$match": {
-                        "inviter_id": inviter_user_id,
-                        "event": {"$in": ["referral_settled", "referral_revoked"]},
-                    }
+                    "$match": with_not_invalidated(
+                        {
+                            "inviter_id": inviter_user_id,
+                            "event": {"$in": ["referral_settled", "referral_revoked"]},
+                        }
+                    )
                 },
                 {"$group": {"_id": None, "total": {"$sum": _referral_sign_expr()}}},
             ]

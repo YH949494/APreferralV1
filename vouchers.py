@@ -18,6 +18,7 @@ from config import (
     backend_segment_probability,
     SEGMENT_PROBABILITY_CONFIG,
 )
+from referral_ledger import with_not_invalidated
 import hmac, hashlib, urllib.parse, os, json
 import config as _cfg 
  
@@ -101,7 +102,11 @@ def _ledger_referral_counts(referral_events_col, inviter_id: int, now_ref: datet
     week_key = _week_key_kl(now_ref)
     month_key = _month_key_kl(now_ref)
     settled_total = int(referral_events_col.count_documents({"inviter_id": inviter_id, "event": "referral_settled"}))
-    revoked_total = int(referral_events_col.count_documents({"inviter_id": inviter_id, "event": "referral_revoked"}))
+    revoked_total = int(
+        referral_events_col.count_documents(
+            with_not_invalidated({"inviter_id": inviter_id, "event": "referral_revoked"})
+        )
+    )
     settled_week = int(
         referral_events_col.count_documents(
             {"inviter_id": inviter_id, "event": "referral_settled", "week_key": week_key}
@@ -109,7 +114,7 @@ def _ledger_referral_counts(referral_events_col, inviter_id: int, now_ref: datet
     )
     revoked_week = int(
         referral_events_col.count_documents(
-            {"inviter_id": inviter_id, "event": "referral_revoked", "week_key": week_key}
+            with_not_invalidated({"inviter_id": inviter_id, "event": "referral_revoked", "week_key": week_key})
         )
     )
     settled_month = int(
@@ -119,7 +124,7 @@ def _ledger_referral_counts(referral_events_col, inviter_id: int, now_ref: datet
     )
     revoked_month = int(
         referral_events_col.count_documents(
-            {"inviter_id": inviter_id, "event": "referral_revoked", "month_key": month_key}
+            with_not_invalidated({"inviter_id": inviter_id, "event": "referral_revoked", "month_key": month_key})
         )
     )
     return {
@@ -156,7 +161,11 @@ def resolve_referral_counts_with_snapshot_fallback(inviter_id: int | None, user_
             ledger_total = max(
                 0,
                 int(referral_events_col.count_documents({"inviter_id": inviter_id, "event": "referral_settled"}))
-                - int(referral_events_col.count_documents({"inviter_id": inviter_id, "event": "referral_revoked"})),
+                - int(
+                    referral_events_col.count_documents(
+                        with_not_invalidated({"inviter_id": inviter_id, "event": "referral_revoked"})
+                    )
+                ),
             )
             if ledger_total != snapshot_total:
                 source = "ledger"
@@ -5508,7 +5517,9 @@ def api_referral_progress():
         revoked_pairs = {
             (int(d.get("inviter_id")), int(d.get("invitee_id")))
             for d in db.referral_events.find(
-                {"inviter_id": int(inviter_id), "invitee_id": {"$in": invitee_ids}, "event": "referral_revoked"},
+                with_not_invalidated(
+                    {"inviter_id": int(inviter_id), "invitee_id": {"$in": invitee_ids}, "event": "referral_revoked"}
+                ),
                 {"_id": 0, "inviter_id": 1, "invitee_id": 1},
             )
             if d.get("inviter_id") is not None and d.get("invitee_id") is not None

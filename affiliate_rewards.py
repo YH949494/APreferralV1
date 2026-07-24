@@ -13,6 +13,7 @@ from config import (
     AFFILIATE_GROUP_INVITE_URL,
     AFFILIATE_GROUP_TRIGGER_WEEKLY_VALID_REFERRALS,
 )
+from referral_ledger import with_not_invalidated
 
 KL_TZ = pytz.timezone("Asia/Kuala_Lumpur")
 
@@ -737,7 +738,9 @@ def _weekly_valid_referral_count_for_referrer(db, *, referrer_id: int, week_key:
     )
     revoked = int(
         db.referral_events.count_documents(
-            {"inviter_id": int(referrer_id), "event": "referral_revoked", "week_key": week_key}
+            with_not_invalidated(
+                {"inviter_id": int(referrer_id), "event": "referral_revoked", "week_key": week_key}
+            )
         )
     )
     return max(0, settled - revoked)
