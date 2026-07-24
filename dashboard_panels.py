@@ -3637,6 +3637,112 @@ def build_segment_rule_simulator(
 # 5. User drilldown
 # ---------------------------------------------------------------------------
 
+def _build_segment_observability(
+    *,
+    user: dict,
+    backend_segment_snapshots_col=None,
+) -> dict:
+    """P0 observability block for the user drilldown (read-only, additive).
+
+    Does not change which segment value is used for voucher probability or
+    campaign targeting — those remain governed by vouchers.py /
+    campaign_engine.py exactly as before. This only reports, honestly,
+    where the *displayed* segment came from and whether a real classifier
+    result exists for the current period, so "no data this period" is never
+    silently rendered identical to "classified as unclassified".
+    """
+    fallback_fields_used: list[str] = []
+
+    raw_for_bot_segment = user.get("for_bot_segment")
+    raw_bot_segment = user.get("bot_segment")
+    raw_backend_segment = user.get("backend_segment")
+
+    if raw_for_bot_segment not in (None, ""):
+        segment_source = "users.for_bot_segment"
+        segment_raw_value = raw_for_bot_segment
+    elif raw_bot_segment not in (None, ""):
+        segment_source = "users.bot_segment"
+        segment_raw_value = raw_bot_segment
+        fallback_fields_used.append("bot_segment (legacy alias — for_bot_segment was blank/missing)")
+    else:
+        segment_source = "none"
+        segment_raw_value = None
+        fallback_fields_used.append("for_bot_segment and bot_segment both blank/missing")
+
+    try:
+        from config import normalize_for_bot_segment
+        segment_normalized_value = normalize_for_bot_segment(segment_raw_value)
+    except Exception:
+        segment_normalized_value = None
+
+    # Latest backend_segment_snapshots doc for this user, if the caller wired
+    # the collection in. Never written to; lookup only.
+    snapshot = None
+    if backend_segment_snapshots_col is not None:
+        uid = user.get("user_id")
+        try:
+            cursor = backend_segment_snapshots_col.find({"telegram_user_id": uid})
+            cursor = cursor.sort("calculated_at", -1).limit(1)
+            for doc in cursor:
+                snapshot = doc
+                break
+        except Exception:
+            snapshot = None
+
+    snapshot_exists = snapshot is not None
+    segment_snapshot_at = _iso(snapshot.get("calculated_at")) if snapshot else None
+    segment_reason = snapshot.get("segment_reason") if snapshot else None
+    backend_segment_value = snapshot.get("backend_segment") if snapshot else raw_backend_segment
+
+    # data_status distinguishes "no snapshot to evaluate" from "evaluated,
+    # classifier explicitly returned unclassified" from "have a real segment".
+    if snapshot_exists:
+        if backend_segment_value == "unclassified":
+            data_status = "classified_unclassified"
+        elif backend_segment_value:
+            data_status = "classified"
+        else:
+            data_status = "snapshot_missing_segment_field"
+    elif segment_source != "none":
+        data_status = "legacy_only_no_backend_snapshot"
+    else:
+        data_status = "no_data"
+
+    # Turnover/withdrawal in metrics_snapshot are period-tagged marketing
+    # upload values, never a computed rolling window — see
+    # backend_segment_engine.py:483-504 (_row_period) and the Part 2 audit.
+    # There is no 7-day rolling aggregation anywhere in this codebase, so we
+    # never label this "7D" — only "imported period" with the real period tag.
+    turnover_window = None
+    if snapshot is not None:
+        turnover_window = {
+            "kind": "imported_period",
+            "snapshot_week": snapshot.get("snapshot_week"),
+            "snapshot_month": snapshot.get("snapshot_month"),
+            "period_source": snapshot.get("snapshot_period_source"),
+            "note": "Not a rolling 7-day calculation. This is the period tag of the "
+                    "marketing_raw_data row last imported for this account.",
+        }
+        fallback_fields_used.append(
+            "metrics_snapshot.after_total_bet_amount/withdraw_amount are the last "
+            "imported marketing period's values, not a live rolling window"
+        )
+
+    return {
+        "segment_source": segment_source,
+        "segment_raw_value": segment_raw_value,
+        "segment_normalized_value": segment_normalized_value,
+        "segment_snapshot_at": segment_snapshot_at,
+        "segment_reason": segment_reason,
+        "snapshot_exists": snapshot_exists,
+        "data_status": data_status,
+        "turnover_window": turnover_window,
+        "fallback_fields_used": fallback_fields_used,
+        # Kept for the audit trail; not authoritative for voucher/campaign logic.
+        "backend_segment_snapshot_value": backend_segment_value,
+    }
+
+
 def build_user_drilldown(
     *,
     query: str,
@@ -3646,6 +3752,7 @@ def build_user_drilldown(
     affiliate_ledger_col,
     pending_referrals_col,
     qualified_events_col,
+    backend_segment_snapshots_col=None,
     now: datetime | None = None,
 ) -> dict:
     now = now or _utc_now()
@@ -3742,6 +3849,10 @@ def build_user_drilldown(
             if tag not in risk_flags:
                 risk_flags.append(tag)
 
+    segment_observability = _build_segment_observability(
+        user=user, backend_segment_snapshots_col=backend_segment_snapshots_col
+    )
+
     return {
         "success": True,
         "as_of": now.isoformat(),
@@ -3756,6 +3867,7 @@ def build_user_drilldown(
             "last_checkin": _iso(user.get("last_checkin")),
         },
         "segment": user.get("for_bot_segment") or user.get("bot_segment"),
+        "segment_observability": segment_observability,
         "xp": {
             "total_xp": user.get("total_xp"),
             "weekly_xp": user.get("weekly_xp"),

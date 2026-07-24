@@ -4986,6 +4986,7 @@ def dashboard_user_drilldown():
             affiliate_ledger_col=affiliate_ledger_collection,
             pending_referrals_col=pending_referrals_collection,
             qualified_events_col=qualified_events_collection,
+            backend_segment_snapshots_col=db["backend_segment_snapshots"],
             now=_utc_now(),
         )
     )

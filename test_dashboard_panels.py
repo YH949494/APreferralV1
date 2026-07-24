@@ -494,6 +494,64 @@ def test_user_drilldown_by_id_and_username():
     assert missing["success"] is False and missing["data_quality"] == "missing"
 
 
+def test_user_drilldown_segment_observability_no_snapshot():
+    """P0 observability: legacy-only user (no backend_segment_snapshots doc)."""
+    users = FakeCollection([
+        {"user_id": 42, "username": "Neo", "for_bot_segment": "unclassified"},
+    ])
+    empty = FakeCollection([])
+    snapshots = FakeCollection([])  # no backend snapshot at all for this user
+
+    out = dp.build_user_drilldown(
+        query="42", users_col=users, welcome_eligibility_col=empty,
+        voucher_claims_col=empty, affiliate_ledger_col=empty,
+        pending_referrals_col=empty, qualified_events_col=empty,
+        backend_segment_snapshots_col=snapshots, now=NOW,
+    )
+    obs = out["segment_observability"]
+    assert obs["segment_source"] == "users.for_bot_segment"
+    assert obs["segment_raw_value"] == "unclassified"
+    assert obs["snapshot_exists"] is False
+    # No snapshot exists -> must NOT be reported as a real classifier result.
+    assert obs["data_status"] == "legacy_only_no_backend_snapshot"
+    assert obs["turnover_window"] is None
+
+
+def test_user_drilldown_segment_observability_with_snapshot():
+    """P0 observability: a real backend_segment_snapshots doc exists."""
+    users = FakeCollection([
+        {"user_id": 42, "username": "Neo", "for_bot_segment": "ghost"},
+    ])
+    empty = FakeCollection([])
+    snapshots = FakeCollection([
+        {
+            "telegram_user_id": 42,
+            "backend_segment": "unclassified",
+            "segment_reason": "no play, no claims, no clear inactivity signal",
+            "snapshot_week": "2026-W24",
+            "snapshot_month": "2026-06",
+            "snapshot_period_source": "coupon_redeem_time",
+            "calculated_at": NOW,
+        }
+    ])
+
+    out = dp.build_user_drilldown(
+        query="42", users_col=users, welcome_eligibility_col=empty,
+        voucher_claims_col=empty, affiliate_ledger_col=empty,
+        pending_referrals_col=empty, qualified_events_col=empty,
+        backend_segment_snapshots_col=snapshots, now=NOW,
+    )
+    obs = out["segment_observability"]
+    assert obs["snapshot_exists"] is True
+    # A real classifier run produced "unclassified" -> this is the only case
+    # where showing "Unclassified" (rather than "No segment snapshot") is honest.
+    assert obs["data_status"] == "classified_unclassified"
+    assert obs["segment_reason"] == "no play, no claims, no clear inactivity signal"
+    assert obs["turnover_window"]["kind"] == "imported_period"
+    assert obs["turnover_window"]["snapshot_week"] == "2026-W24"
+    assert "Not a rolling 7-day calculation" in obs["turnover_window"]["note"]
+
+
 # ---------------------------------------------------------------------------
 # Settings
 # ---------------------------------------------------------------------------
