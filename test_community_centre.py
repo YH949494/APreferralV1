@@ -766,11 +766,40 @@ def test_invalid_media_file_id_categorization_is_media_specific():
     assert code not in cc.limits.RETRYABLE_ERROR_CODES
 
 
-def test_bot_loop_not_running_categorization_does_not_blame_telegram():
-    code, message = cc.categorize_telegram_error(RuntimeError("bot_not_ready"))
+def test_bot_loop_not_running_categorization_is_retryable():
+    code, message = cc.categorize_telegram_error(RuntimeError("Bot loop not running yet"))
     assert code == "bot_loop_not_running"
-    assert "telegram" not in message.lower()
+    assert code in cc.limits.RETRYABLE_ERROR_CODES
+
+
+def test_bot_not_ready_typed_exception_categorization_is_retryable():
+    code, message = cc.categorize_telegram_error(cc.BotNotReadyError("Bot not ready: missing bot instance"))
+    assert code == "bot_not_ready"
+    assert code in cc.limits.RETRYABLE_ERROR_CODES
+
+
+def test_generic_runtime_error_categorization_preserves_message():
+    code, message = cc.categorize_telegram_error(RuntimeError("division context missing for post 123"))
+    assert code == "local_runtime_error"
+    assert "division context missing" in message
     assert code not in cc.limits.RETRYABLE_ERROR_CODES
+    assert code in cc.limits.PERMANENT_ERROR_CODES
+
+
+def test_runtime_error_message_redacts_secret_like_values():
+    exc = RuntimeError("failed talking to mongodb+srv://user:pass@cluster0.mongodb.net/db api_key=sk-abcdef1234567890")
+    code, message = cc.categorize_telegram_error(exc)
+    assert code == "local_runtime_error"
+    assert "mongodb+srv://" not in message
+    assert "sk-abcdef1234567890" not in message
+    assert "[REDACTED]" in message
+
+
+def test_worker_context_error_categorization_is_permanent():
+    code, message = cc.categorize_telegram_error(cc.WorkerContextError("Community posts must be published by the worker process."))
+    assert code == "worker_context_error"
+    assert code not in cc.limits.RETRYABLE_ERROR_CODES
+    assert "worker process" in message
 
 
 def test_unknown_error_categorization_does_not_claim_telegram_failure():
@@ -811,8 +840,8 @@ def test_local_failure_persists_failed_step_and_real_message(fake_db, monkeypatc
 def test_bot_not_ready_failure_persists_bot_loop_not_running_step(fake_db, monkeypatch):
     async def fake_send(post, _step=None):
         if _step is not None:
-            _step["name"] = "get_bot"
-        raise RuntimeError("bot_not_ready")
+            _step["value"] = "get_bot"
+        raise RuntimeError("Bot loop not running yet")
 
     def sync_run(coro, timeout=20):
         loop = asyncio.new_event_loop()
@@ -826,10 +855,44 @@ def test_bot_not_ready_failure_persists_bot_loop_not_running_step(fake_db, monke
     post = _schedule_due_post()
     cc.run_due_posts(limit=5)
     fresh = cc.get_post(post["_id"])
-    assert fresh["status"] == "failed"
+    # bot_loop_not_running is transient/retryable — a scheduled retry, not a
+    # terminal "failed" post — but the failure detail must still be visible.
+    assert fresh["status"] == "scheduled"
     assert fresh["last_error_code"] == "bot_loop_not_running"
     assert fresh["last_exception_class"] == "RuntimeError"
     assert fresh["last_failed_step"] == "get_bot"
+    assert fresh["retryable"] is True
+
+
+def test_runtime_error_before_do_send_records_precise_step(fake_db, monkeypatch):
+    """A RuntimeError raised while resolving the destination (before
+    _do_send is ever entered) must be recorded with that exact step, not
+    the coarse "start"/"enter_do_send" step that swallowed this class of
+    failure before granular step tracking was added."""
+    post = _schedule_due_post()
+    database.db["community_posts"].update_one({"_id": post["_id"]}, {"$set": {"destination_chat_id": None}})
+    cc.run_due_posts(limit=5)
+    fresh = cc.get_post(post["_id"])
+    assert fresh["status"] == "failed"
+    assert fresh["last_error_code"] == "destination_resolution_error"
+    assert fresh["last_exception_class"] == "DestinationResolutionError"
+    assert fresh["last_failed_step"] == "resolve_destination"
+    assert fresh["retryable"] is False
+
+
+def test_web_process_publish_attempt_is_worker_context_error(fake_db, monkeypatch):
+    from app_context import set_runner_mode
+    monkeypatch.setattr(cc, "_run_coro", lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not reach _do_send")))
+    set_runner_mode("web")
+    try:
+        post = _schedule_due_post()
+        cc.run_due_posts(limit=5)
+    finally:
+        set_runner_mode("worker")
+    fresh = cc.get_post(post["_id"])
+    assert fresh["status"] == "failed"
+    assert fresh["last_error_code"] == "worker_context_error"
+    assert fresh["last_exception_class"] == "WorkerContextError"
     assert fresh["retryable"] is False
 
 
@@ -851,7 +914,7 @@ def test_do_send_reports_telegram_call_step_on_send_failure(fake_db, monkeypatch
             loop.run_until_complete(cc._do_send(post, step))
     finally:
         loop.close()
-    assert step["name"] == "telegram_call"
+    assert step["value"] == "telegram_call"
 
 
 def test_permanent_failure_persists_full_failure_detail(fake_db, monkeypatch):

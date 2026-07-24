@@ -118,15 +118,25 @@ test("invalid_media_file_id displays media-specific corrective guidance", () => 
   assert.match(built.html, /re-upload the media/i);
 });
 
-test("bot_loop_not_running displays worker-specific guidance, not Telegram blame", () => {
+test("bot_loop_not_running displays the fixed worker-not-ready copy, not Telegram blame", () => {
   const ctx = makeContext();
   const built = ctx.__ccBuildRetryModalContent(basePost({
     last_error_code: "bot_loop_not_running",
-    last_error_message: "The publishing worker process is not currently running.",
-    retryable: false,
+    last_error_message: "Telegram bot loop is not running in the worker.",
+    retryable: true,
   }));
-  assert.match(built.html, /publishing worker process/);
-  assert.match(built.html, /Duplicate Post/);
+  assert.match(built.html, /Telegram worker is not ready\. Check worker startup and bot-loop status\./);
+  assert.doesNotMatch(built.html, /contacting Telegram/);
+});
+
+test("bot_not_ready displays the fixed worker-not-ready copy", () => {
+  const ctx = makeContext();
+  const built = ctx.__ccBuildRetryModalContent(basePost({
+    last_error_code: "bot_not_ready",
+    last_error_message: "Telegram bot is not ready in the worker.",
+    retryable: true,
+  }));
+  assert.match(built.html, /Telegram worker is not ready\. Check worker startup and bot-loop status\./);
 });
 
 test("unknown_error does not claim a Telegram failure and cites the run reference", () => {
@@ -183,4 +193,22 @@ test("local_type_error shows the real exception message, step and class instead 
   assert.match(built.html, /unexpected keyword argument &#39;style&#39;/);
   assert.match(built.html, /Step: telegram_call/);
   assert.match(built.html, /Exception: TypeError/);
+});
+
+test("local_runtime_error shows the real sanitised RuntimeError message, step and class", () => {
+  const ctx = makeContext();
+  const built = ctx.__ccBuildRetryModalContent(basePost({
+    last_error_code: "local_runtime_error",
+    last_error_message: "Post has no resolved destination_chat_id",
+    last_failed_step: "resolve_destination",
+    last_exception_class: "DestinationResolutionError",
+    retryable: false,
+    latest_run_id: "6a62ce1300000000000000ff",
+  }));
+  assert.equal(built.retryable, false);
+  assert.match(built.html, /Post has no resolved destination_chat_id/);
+  assert.match(built.html, /Step: resolve_destination/);
+  assert.match(built.html, /Exception: DestinationResolutionError/);
+  assert.match(built.html, /Reference: 6a62ce13/);
+  assert.doesNotMatch(built.html, /Internal publish error\. Check worker logs/);
 });

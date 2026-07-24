@@ -10,6 +10,8 @@ _bot = None
 _scheduler = None
 _reactivation_handler_registered = False
 _reactivation_job_registered = False
+_running_loop = None
+_runner_mode = None
 logger = logging.getLogger(__name__)
 
 
@@ -40,6 +42,29 @@ def set_scheduler(scheduler) -> None:
 
 def get_scheduler():
     return _scheduler
+
+
+def set_running_loop(loop) -> None:
+    """Record the asyncio loop the Telegram bot Application is actually
+    running on (captured from Application.post_init, which PTB awaits on
+    that loop before run_polling()/run_webhook() start it forever). This is
+    the only reliable source for it — Application has no public/private
+    attribute that already exposes it."""
+    global _running_loop
+    _running_loop = loop
+
+
+def get_running_loop():
+    return _running_loop
+
+
+def set_runner_mode(mode: str | None) -> None:
+    global _runner_mode
+    _runner_mode = mode
+
+
+def get_runner_mode() -> str | None:
+    return _runner_mode
 
 
 def _register_reactivation_callback(app_bot) -> None:
@@ -105,8 +130,7 @@ def _register_reactivation_job(scheduler) -> None:
 
 
 def run_bot_coroutine(coro, *, timeout: int = 15) -> Any:
-    app_bot = get_app_bot()
-    loop = getattr(app_bot, "_running_loop", None) if app_bot else None
+    loop = get_running_loop()
     if loop is None:
         raise RuntimeError("Bot loop not running yet")
     fut = asyncio.run_coroutine_threadsafe(coro, loop)

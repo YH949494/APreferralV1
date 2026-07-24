@@ -6766,7 +6766,8 @@
         var pvRunRef = (post.latest_run_id || "").slice(0, 8) || "—";
         var pvFallback = "Internal publish error. Check worker logs using reference: " + pvRunRef + ".";
         var pvCode = post.last_error_code || "unknown_error";
-        var pvMessage = (pvCode === "unknown_error" || !post.last_error_message) ? pvFallback : post.last_error_message;
+        var pvMessage = CC_BOT_NOT_READY_CODES[pvCode] ? CC_BOT_NOT_READY_MESSAGE :
+          ((pvCode === "unknown_error" || !post.last_error_message) ? pvFallback : post.last_error_message);
         var statusNote =
           "Status: Failed<br>" +
           "Error: " + esc(pvCode) + "<br>" +
@@ -7023,7 +7024,15 @@
     message_too_long: { label: "Edit Post", hint: "Content exceeds Telegram's length limit — shorten it.", action: "edit" },
     invalid_request: { label: "Edit Post", hint: "Telegram rejected this request — review the post content.", action: "edit" },
     bot_loop_not_running: { label: "Duplicate Post", hint: "The publishing worker process is not currently running — contact an administrator.", action: "duplicate" },
+    bot_not_ready: { label: "Duplicate Post", hint: "The worker's Telegram bot is not ready yet — contact an administrator.", action: "duplicate" },
   };
+
+  // bot_loop_not_running / bot_not_ready both mean the worker's Telegram
+  // bot hasn't finished starting up — always show this fixed copy instead
+  // of the persisted message, since "Check worker startup and bot-loop
+  // status" is more actionable for an admin than the raw local text.
+  var CC_BOT_NOT_READY_CODES = { bot_loop_not_running: true, bot_not_ready: true };
+  var CC_BOT_NOT_READY_MESSAGE = "Telegram worker is not ready. Check worker startup and bot-loop status.";
 
   // "23 Jul 2026, 4:03 AM" — the source string is already KL wall-clock
   // time with a +08:00 offset (see _serialize_post_for_admin on the
@@ -7050,7 +7059,8 @@
     var code = post.last_error_code || "unknown_error";
     var runRef = (post.latest_run_id || "").slice(0, 8) || "—";
     var fallback = "Internal publish error. Check worker logs using reference: " + runRef + ".";
-    var message = (code === "unknown_error" || !post.last_error_message) ? fallback : post.last_error_message;
+    var message = CC_BOT_NOT_READY_CODES[code] ? CC_BOT_NOT_READY_MESSAGE :
+      ((code === "unknown_error" || !post.last_error_message) ? fallback : post.last_error_message);
     var retryable = post.retryable === true;
     var guidance = CC_ERROR_GUIDANCE[code];
     var footerHtml;
