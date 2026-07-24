@@ -1534,6 +1534,7 @@ def _referral_sign_expr():
     }
 
 def settle_referral_snapshots() -> None:
+    start_perf = time.perf_counter()
     now_utc_ts = now_utc()
     week_start_utc, week_end_utc = _week_window_utc(now_utc_ts)
     month_start_utc, month_end_utc = _month_window_utc(now_utc_ts)
@@ -1584,15 +1585,56 @@ def settle_referral_snapshots() -> None:
         },
     ]
     results = list(db.referral_events.aggregate(pipeline))
+
+    scanned = 0
+    updated = 0
+    unchanged = 0
+    errors = 0
+    negative_rows = 0
+    negative_examples_logged = 0
+    weekly_sum = 0
+    monthly_sum = 0
+    total_sum = 0
+    min_weekly = 0
+    min_monthly = 0
+    min_total = 0
+    MAX_NEGATIVE_EXAMPLES = 20
+
     if results:
         updates = []
         for row in results:
+            scanned += 1
             uid = row.get("_id")
             if uid is None:
+                errors += 1
+                logger.warning(
+                    "[SCHED][REFERRAL_SNAPSHOT][MALFORMED] row=%r",
+                    row,
+                )
                 continue
             total_referrals = int(row.get("total_referrals", 0))
             weekly_referrals = int(row.get("weekly_referrals", 0))
             monthly_referrals = int(row.get("monthly_referrals", 0))
+
+            weekly_sum += weekly_referrals
+            monthly_sum += monthly_referrals
+            total_sum += total_referrals
+            min_weekly = min(min_weekly, weekly_referrals)
+            min_monthly = min(min_monthly, monthly_referrals)
+            min_total = min(min_total, total_referrals)
+
+            if weekly_referrals < 0 or monthly_referrals < 0 or total_referrals < 0:
+                negative_rows += 1
+                if negative_examples_logged < MAX_NEGATIVE_EXAMPLES:
+                    negative_examples_logged += 1
+                    logger.warning(
+                        "[SCHED][REFERRAL_SNAPSHOT][NEGATIVE] uid=%s weekly=%s monthly=%s total=%s",
+                        uid,
+                        weekly_referrals,
+                        monthly_referrals,
+                        total_referrals,
+                    )
+
             updates.append(
                 UpdateOne(
                     {"user_id": uid},
@@ -1607,7 +1649,16 @@ def settle_referral_snapshots() -> None:
                 )
             )
         if updates:
-            db.users.bulk_write(updates, ordered=False)
+            try:
+                db.users.bulk_write(updates, ordered=False)
+                updated = len(updates)
+            except Exception:
+                errors += len(updates)
+                updated = 0
+                logger.exception(
+                    "[SCHED][REFERRAL_SNAPSHOT][WRITE_FAILED] batch_size=%s",
+                    len(updates),
+                )
 
     publish_result = db.users.update_many(
         {},
@@ -1618,29 +1669,38 @@ def settle_referral_snapshots() -> None:
                     "monthly_referrals": "$monthly_referrals_next",
                     "total_referrals": "$total_referrals_next",
                     "snapshot_published_at": now_utc_ts,
-                    "snapshot_updated_at": now_utc_ts,                    
+                    "snapshot_updated_at": now_utc_ts,
                 }
             }
         ],
     )
-    db.users.update_many({}, {"$inc": {"snapshot_version": 1}})
+    version_result = db.users.update_many({}, {"$inc": {"snapshot_version": 1}})
     logger.info(
         "[SNAPSHOT] publish_done users=%s version_inc=1",
         publish_result.modified_count,
-    )    
-    _write_snapshot_heartbeat("referral", now_utc_ts)    
-    for row in results:
-        uid = row.get("_id")
-        if uid is None:
-            continue
+    )
+    _write_snapshot_heartbeat("referral", now_utc_ts)
 
-        logger.info(
-            "[SCHED][REFERRAL_SNAPSHOT] uid=%s weekly=%s monthly=%s total=%s",
-            uid,
-            int(row.get("weekly_referrals", 0)),
-            int(row.get("monthly_referrals", 0)),
-            int(row.get("total_referrals", 0)),
-        )
+    duration_ms = int((time.perf_counter() - start_perf) * 1000)
+    logger.info(
+        "[SCHED][REFERRAL_SNAPSHOT][DONE] scanned=%s updated=%s unchanged=%s errors=%s "
+        "negative_rows=%s negative_examples_logged=%s weekly_sum=%s monthly_sum=%s total_sum=%s "
+        "min_weekly=%s min_monthly=%s min_total=%s duration_ms=%s version_inc=%s",
+        scanned,
+        updated,
+        unchanged,
+        errors,
+        negative_rows,
+        negative_examples_logged,
+        weekly_sum,
+        monthly_sum,
+        total_sum,
+        min_weekly,
+        min_monthly,
+        min_total,
+        duration_ms,
+        version_result.modified_count,
+    )
 
 def _recover_stale_processing(now_utc_ts: datetime) -> int:
     cutoff = now_utc_ts - PROCESSING_TIMEOUT

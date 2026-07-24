@@ -116,6 +116,7 @@ QUERY_TELEMETRY_LOGS = os.getenv("QUERY_TELEMETRY_LOGS", "0") == "1"
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+logging.getLogger("apscheduler.executors.default").setLevel(logging.WARNING)
 INSTANCE_ID = (os.getenv("FLY_MACHINE_ID") or os.getenv("FLY_ALLOC_ID") or f"{socket.gethostname()}:{os.getpid()}")
 
 LEADERBOARD_CACHE = {}  # key -> {"ts": epoch_seconds, "payload": dict}
