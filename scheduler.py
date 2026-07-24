@@ -16,6 +16,7 @@ from xp import grant_xp, now_utc, now_kl
 from affiliate_rewards import mark_invitee_qualified
 from affiliate_group_access import maybe_unlock_affiliate_group
 import referral_invitee_lock
+from referral_ledger import with_not_invalidated
 
 from telegram_utils import send_telegram_http_message
 
@@ -1328,6 +1329,91 @@ def _record_referral_event(inviter_id: int, invitee_id: int, event: str, occurre
     return True
 
 
+def revoke_settled_referral(
+    db,
+    *,
+    inviter_id: int,
+    invitee_id: int,
+    reason: str,
+    occurred_at: datetime,
+) -> bool:
+    """Reverse a *previously settled* referral.
+
+    This is the only path that may write a referral_revoked event. It
+    requires a matching referral_settled event for the same inviter/invitee
+    pair to already exist, so a referral that never settled can never be
+    driven negative by a revocation. Returns True only when a new
+    revocation event was written; False (with no ledger change) if there
+    was no prior settlement, or a revocation for this pair already exists.
+    """
+    if inviter_id is None or invitee_id is None:
+        return False
+    inviter_id = int(inviter_id)
+    invitee_id = int(invitee_id)
+
+    settled_event = db.referral_events.find_one(
+        {"inviter_id": inviter_id, "invitee_id": invitee_id, "event": "referral_settled"}
+    )
+    if not settled_event:
+        logger.warning(
+            "[SCHED][REFERRAL_LEDGER][REVOKE_WITHOUT_SETTLEMENT] inviter=%s invitee=%s reason=%s",
+            inviter_id,
+            invitee_id,
+            reason,
+        )
+        return False
+
+    existing_revoke = db.referral_events.find_one(
+        {"inviter_id": inviter_id, "invitee_id": invitee_id, "event": "referral_revoked"}
+    )
+    if existing_revoke:
+        logger.info(
+            "[SCHED][REFERRAL_LEDGER][REVOKE_ALREADY_APPLIED] inviter=%s invitee=%s reason=%s",
+            inviter_id,
+            invitee_id,
+            reason,
+        )
+        return False
+
+    event_doc = _referral_event_doc(inviter_id, invitee_id, "referral_revoked", occurred_at)
+    event_doc["reason"] = reason
+    event_doc["reverses_settled_at"] = settled_event.get("occurred_at")
+    try:
+        db.referral_events.insert_one(event_doc)
+    except DuplicateKeyError:
+        logger.info(
+            "[SCHED][REFERRAL_LEDGER] duplicate inviter=%s invitee=%s action=referral_revoked",
+            inviter_id,
+            invitee_id,
+        )
+        return False
+
+    logger.info(
+        "[SCHED][REFERRAL_LEDGER] inviter=%s invitee=%s action=revoked reason=%s",
+        inviter_id,
+        invitee_id,
+        reason,
+    )
+    try:
+        from affiliate_leaderboard import emit_referral_flow_event
+        emit_referral_flow_event(
+            db,
+            event="referral_revoked",
+            referrer_id=inviter_id,
+            invitee_id=invitee_id,
+            ts_utc=occurred_at,
+            meta={"reason": reason},
+            idempotency_key=f"rf|referral_revoked|{inviter_id}|{invitee_id}|{occurred_at.isoformat()}",
+        )
+    except Exception:
+        logger.exception(
+            "[SCHED][REFERRAL_LEDGER] flow_event_emit_failed inviter=%s invitee=%s event=referral_revoked",
+            inviter_id,
+            invitee_id,
+        )
+    return True
+
+
 def maybe_handle_first_referral(uid: int, old_total: int, new_total: int, now_utc_ts: datetime) -> None:
     if old_total != 0 or new_total < 1:
         return
@@ -1534,6 +1620,7 @@ def _referral_sign_expr():
     }
 
 def settle_referral_snapshots() -> None:
+    start_perf = time.perf_counter()
     now_utc_ts = now_utc()
     week_start_utc, week_end_utc = _week_window_utc(now_utc_ts)
     month_start_utc, month_end_utc = _month_window_utc(now_utc_ts)
@@ -1569,10 +1656,12 @@ def settle_referral_snapshots() -> None:
 
     pipeline = [
         {
-            "$match": {
-                "inviter_id": {"$ne": None},
-                "event": {"$in": ["referral_settled", "referral_revoked"]},
-            }
+            "$match": with_not_invalidated(
+                {
+                    "inviter_id": {"$ne": None},
+                    "event": {"$in": ["referral_settled", "referral_revoked"]},
+                }
+            )
         },
         {
             "$group": {
@@ -1584,15 +1673,56 @@ def settle_referral_snapshots() -> None:
         },
     ]
     results = list(db.referral_events.aggregate(pipeline))
+
+    scanned = 0
+    updated = 0
+    unchanged = 0
+    errors = 0
+    negative_rows = 0
+    negative_examples_logged = 0
+    weekly_sum = 0
+    monthly_sum = 0
+    total_sum = 0
+    min_weekly = 0
+    min_monthly = 0
+    min_total = 0
+    MAX_NEGATIVE_EXAMPLES = 20
+
     if results:
         updates = []
         for row in results:
+            scanned += 1
             uid = row.get("_id")
             if uid is None:
+                errors += 1
+                logger.warning(
+                    "[SCHED][REFERRAL_SNAPSHOT][MALFORMED] row=%r",
+                    row,
+                )
                 continue
             total_referrals = int(row.get("total_referrals", 0))
             weekly_referrals = int(row.get("weekly_referrals", 0))
             monthly_referrals = int(row.get("monthly_referrals", 0))
+
+            weekly_sum += weekly_referrals
+            monthly_sum += monthly_referrals
+            total_sum += total_referrals
+            min_weekly = min(min_weekly, weekly_referrals)
+            min_monthly = min(min_monthly, monthly_referrals)
+            min_total = min(min_total, total_referrals)
+
+            if weekly_referrals < 0 or monthly_referrals < 0 or total_referrals < 0:
+                negative_rows += 1
+                if negative_examples_logged < MAX_NEGATIVE_EXAMPLES:
+                    negative_examples_logged += 1
+                    logger.warning(
+                        "[SCHED][REFERRAL_SNAPSHOT][NEGATIVE] uid=%s weekly=%s monthly=%s total=%s",
+                        uid,
+                        weekly_referrals,
+                        monthly_referrals,
+                        total_referrals,
+                    )
+
             updates.append(
                 UpdateOne(
                     {"user_id": uid},
@@ -1607,7 +1737,15 @@ def settle_referral_snapshots() -> None:
                 )
             )
         if updates:
-            db.users.bulk_write(updates, ordered=False)
+            try:
+                db.users.bulk_write(updates, ordered=False)
+                updated = len(updates)
+            except Exception:
+                logger.exception(
+                    "[SCHED][REFERRAL_SNAPSHOT][WRITE_FAILED] batch_size=%s aborting_publish=true",
+                    len(updates),
+                )
+                raise
 
     publish_result = db.users.update_many(
         {},
@@ -1618,29 +1756,38 @@ def settle_referral_snapshots() -> None:
                     "monthly_referrals": "$monthly_referrals_next",
                     "total_referrals": "$total_referrals_next",
                     "snapshot_published_at": now_utc_ts,
-                    "snapshot_updated_at": now_utc_ts,                    
+                    "snapshot_updated_at": now_utc_ts,
                 }
             }
         ],
     )
-    db.users.update_many({}, {"$inc": {"snapshot_version": 1}})
+    version_result = db.users.update_many({}, {"$inc": {"snapshot_version": 1}})
     logger.info(
         "[SNAPSHOT] publish_done users=%s version_inc=1",
         publish_result.modified_count,
-    )    
-    _write_snapshot_heartbeat("referral", now_utc_ts)    
-    for row in results:
-        uid = row.get("_id")
-        if uid is None:
-            continue
+    )
+    _write_snapshot_heartbeat("referral", now_utc_ts)
 
-        logger.info(
-            "[SCHED][REFERRAL_SNAPSHOT] uid=%s weekly=%s monthly=%s total=%s",
-            uid,
-            int(row.get("weekly_referrals", 0)),
-            int(row.get("monthly_referrals", 0)),
-            int(row.get("total_referrals", 0)),
-        )
+    duration_ms = int((time.perf_counter() - start_perf) * 1000)
+    logger.info(
+        "[SCHED][REFERRAL_SNAPSHOT][DONE] scanned=%s updated=%s unchanged=%s errors=%s "
+        "negative_rows=%s negative_examples_logged=%s weekly_sum=%s monthly_sum=%s total_sum=%s "
+        "min_weekly=%s min_monthly=%s min_total=%s duration_ms=%s version_inc=%s",
+        scanned,
+        updated,
+        unchanged,
+        errors,
+        negative_rows,
+        negative_examples_logged,
+        weekly_sum,
+        monthly_sum,
+        total_sum,
+        min_weekly,
+        min_monthly,
+        min_total,
+        duration_ms,
+        version_result.modified_count,
+    )
 
 def _recover_stale_processing(now_utc_ts: datetime) -> int:
     cutoff = now_utc_ts - PROCESSING_TIMEOUT
@@ -1913,11 +2060,15 @@ def maybe_shout_referral_congrats(inviter_user_id: int, now_utc_ts: datetime) ->
         "event": "referral_settled",
         "month_key": month_key,
     })
-    revoked = db.referral_events.count_documents({
-        "inviter_id": inviter_user_id,
-        "event": "referral_revoked",
-        "month_key": month_key,
-    })
+    revoked = db.referral_events.count_documents(
+        with_not_invalidated(
+            {
+                "inviter_id": inviter_user_id,
+                "event": "referral_revoked",
+                "month_key": month_key,
+            }
+        )
+    )
     monthly_count = settled - revoked
 
     hit_tier = None
@@ -2123,7 +2274,6 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
                         "$unset": {"processing_by": "", "processing_at_utc": "", "processing_at": ""},
                     },
                 )
-                _record_referral_event(inviter_user_id, invitee_user_id, "referral_revoked", now_utc_ts)
                 referral_invitee_lock.release(
                     db, invitee_user_id=invitee_user_id, status="revoked", now_utc_ts=now_utc_ts
                 )                
@@ -2142,7 +2292,6 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
                         "$unset": {"processing_by": "", "processing_at_utc": "", "processing_at": ""},
                     },
                 )
-                _record_referral_event(inviter_user_id, invitee_user_id, "referral_revoked", now_utc_ts)
                 referral_invitee_lock.release(
                     db, invitee_user_id=invitee_user_id, status="revoked", now_utc_ts=now_utc_ts
                 )                
@@ -2192,7 +2341,6 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
                         "$unset": {"processing_by": "", "processing_at_utc": "", "processing_at": ""},
                     },
                 )
-                _record_referral_event(inviter_user_id, invitee_user_id, "referral_revoked", now_utc_ts)
                 referral_invitee_lock.release(
                     db, invitee_user_id=invitee_user_id, status="revoked", now_utc_ts=now_utc_ts
                 )                
@@ -2221,7 +2369,6 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
                         "$unset": {"processing_by": "", "processing_at_utc": "", "processing_at": ""},
                     },
                 )
-                _record_referral_event(inviter_user_id, invitee_user_id, "referral_revoked", now_utc_ts)
                 referral_invitee_lock.release(
                     db, invitee_user_id=invitee_user_id, status="revoked", now_utc_ts=now_utc_ts
                 )                
@@ -2252,7 +2399,6 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
                             "$unset": {"processing_by": "", "processing_at_utc": "", "processing_at": ""},
                         },
                     )
-                    _record_referral_event(inviter_user_id, invitee_user_id, "referral_revoked", now_utc_ts)
                     referral_invitee_lock.release(
                         db, invitee_user_id=invitee_user_id, status="revoked", now_utc_ts=now_utc_ts
                     )
@@ -2274,7 +2420,6 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
                             "$unset": {"processing_by": "", "processing_at_utc": "", "processing_at": ""},
                         },
                     )
-                    _record_referral_event(inviter_user_id, invitee_user_id, "referral_revoked", now_utc_ts)
                     referral_invitee_lock.release(
                         db, invitee_user_id=invitee_user_id, status="revoked", now_utc_ts=now_utc_ts
                     )
@@ -2292,7 +2437,6 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
                             "$unset": {"processing_by": "", "processing_at_utc": "", "processing_at": ""},
                         },
                     )
-                    _record_referral_event(inviter_user_id, invitee_user_id, "referral_revoked", now_utc_ts)
                     referral_invitee_lock.release(
                         db, invitee_user_id=invitee_user_id, status="revoked", now_utc_ts=now_utc_ts
                     )
@@ -2326,7 +2470,6 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
                         "$unset": {"processing_by": "", "processing_at_utc": "", "processing_at": ""},
                     },
                 )
-                _record_referral_event(inviter_user_id, invitee_user_id, "referral_revoked", now_utc_ts)
                 referral_invitee_lock.release(
                     db, invitee_user_id=invitee_user_id, status="revoked", now_utc_ts=now_utc_ts
                 )
@@ -2454,10 +2597,12 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
 
             total_pipeline = [
                 {
-                    "$match": {
-                        "inviter_id": inviter_user_id,
-                        "event": {"$in": ["referral_settled", "referral_revoked"]},
-                    }
+                    "$match": with_not_invalidated(
+                        {
+                            "inviter_id": inviter_user_id,
+                            "event": {"$in": ["referral_settled", "referral_revoked"]},
+                        }
+                    )
                 },
                 {"$group": {"_id": None, "total": {"$sum": _referral_sign_expr()}}},
             ]

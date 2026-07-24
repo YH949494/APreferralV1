@@ -63,6 +63,7 @@ from vouchers import (
 )
 from admin_auth import admin_auth_bp, configure_admin_session
 from referral_rules import calc_referral_progress, REFERRAL_XP_PER_SUCCESS, REFERRAL_BONUS_INTERVAL, REFERRAL_BONUS_XP, build_public_referral_status
+from referral_ledger import with_not_invalidated
 from scheduler import settle_pending_referrals, settle_referral_snapshots, settle_xp_snapshots, evaluate_affiliate_simulated_ledgers, compute_affiliate_daily_kpi_yesterday, run_invitee_subscription_audit, reconcile_drop_statuses, post_growth_leaderboard_weekly, process_welcome_voucher_lifecycle, process_welcome_reminders
 from affiliate_dashboard_export import run_affiliate_dashboard_export_monthly_scheduled
 from referral_rate_limit import consume_referral_rate_limits
@@ -116,6 +117,7 @@ QUERY_TELEMETRY_LOGS = os.getenv("QUERY_TELEMETRY_LOGS", "0") == "1"
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+logging.getLogger("apscheduler.executors.default").setLevel(logging.WARNING)
 INSTANCE_ID = (os.getenv("FLY_MACHINE_ID") or os.getenv("FLY_ALLOC_ID") or f"{socket.gethostname()}:{os.getpid()}")
 
 LEADERBOARD_CACHE = {}  # key -> {"ts": epoch_seconds, "payload": dict}
@@ -399,9 +401,12 @@ def compute_referral_stats(user_id: int, window=None):
         {"total_referrals": 1, "weekly_referrals": 1, "monthly_referrals": 1},
     ) or {}
     _warn_if_deprecated_referral_fields(user_doc, "compute_referral_stats")
-    total = int(user_doc.get("total_referrals", 0))
-    weekly = int(user_doc.get("weekly_referrals", 0))
-    monthly = int(user_doc.get("monthly_referrals", 0))
+    # User-facing counters must never show negative values, even if the
+    # underlying ledger has a correctness bug — clamp at this API boundary
+    # only; internal diagnostics/repair tooling read the raw fields directly.
+    total = _safe_non_negative_int(user_doc.get("total_referrals", 0))
+    weekly = _safe_non_negative_int(user_doc.get("weekly_referrals", 0))
+    monthly = _safe_non_negative_int(user_doc.get("monthly_referrals", 0))
     return {"total_referrals": total, "weekly_referrals": weekly, "monthly_referrals": monthly}
 
 def _normalize_snapshot_updated_at(updated_at: datetime | None) -> datetime | None:
@@ -449,9 +454,12 @@ def _get_user_snapshot(user_id: int) -> tuple[dict | None, str | None, int | Non
         "weekly_xp": int(user_doc.get("weekly_xp", 0)),
         "monthly_xp": int(user_doc.get("monthly_xp", 0)),
         "total_xp": int(user_doc.get("total_xp", user_doc.get("xp", 0))),
-        "weekly_referrals": int(user_doc.get("weekly_referrals", 0)),
-        "monthly_referrals": int(user_doc.get("monthly_referrals", 0)),
-        "total_referrals": int(user_doc.get("total_referrals", 0)),
+        # User-facing counters must never show negative values, even if the
+        # underlying ledger has a correctness bug — clamp at this API
+        # boundary only; internal diagnostics read the raw fields directly.
+        "weekly_referrals": _safe_non_negative_int(user_doc.get("weekly_referrals", 0)),
+        "monthly_referrals": _safe_non_negative_int(user_doc.get("monthly_referrals", 0)),
+        "total_referrals": _safe_non_negative_int(user_doc.get("total_referrals", 0)),
         "vip_tier": user_doc.get("vip_tier") or user_doc.get("status"),
         "vip_month": user_doc.get("vip_month"),
     }
@@ -5503,7 +5511,9 @@ def _build_referral_status_payload(user_id: int, now_utc: datetime):
     revoked_pairs = {
         (int(d.get("inviter_id")), int(d.get("invitee_id")))
         for d in referral_events_collection.find(
-            {"inviter_id": int(user_id), "invitee_id": {"$in": invitee_ids}, "event": "referral_revoked"},
+            with_not_invalidated(
+                {"inviter_id": int(user_id), "invitee_id": {"$in": invitee_ids}, "event": "referral_revoked"}
+            ),
             {"_id": 0, "inviter_id": 1, "invitee_id": 1},
         )
         if d.get("inviter_id") is not None and d.get("invitee_id") is not None

@@ -12,6 +12,8 @@ from heapq import nlargest
 
 from pymongo import MongoClient, UpdateOne
 
+from referral_ledger import with_not_invalidated
+
 def _flush_bulk(users_collection, ops, dry_run: bool) -> int:
     if dry_run or not ops:
         return 0
@@ -48,10 +50,12 @@ def sync_referral_counts(db, batch_size: int, dry_run: bool) -> dict:
         if user_ids:
             pipeline = [
                 {
-                    "$match": {
-                        "inviter_id": {"$in": user_ids},
-                        "event": {"$in": ["referral_settled", "referral_revoked"]},
-                    }
+                    "$match": with_not_invalidated(
+                        {
+                            "inviter_id": {"$in": user_ids},
+                            "event": {"$in": ["referral_settled", "referral_revoked"]},
+                        }
+                    )
                 },
                 {
                     "$group": {
