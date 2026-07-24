@@ -112,6 +112,15 @@ test("spoiler (span.tg-spoiler) supported", () => {
   );
 });
 
+test("spoiler (standalone <tg-spoiler> tag) preserved on draft load, not stripped", () => {
+  // Telegram's HTML dialect supports <tg-spoiler>...</tg-spoiler> as its own
+  // tag (community_centre_limits.py's backend allowlist includes it
+  // alongside span.tg-spoiler) — an existing draft using this form must
+  // round-trip through the client sanitizer unchanged, not lose its
+  // spoiler formatting on load/save.
+  assert.equal(sanitize("<tg-spoiler>hidden</tg-spoiler>"), "<tg-spoiler>hidden</tg-spoiler>");
+});
+
 test("clear formatting — plain text passes through untouched", () => {
   assert.equal(sanitize("Big reward tonight"), "Big reward tonight");
   // Simulates the editor's clear-formatting result: tags removed, text kept.
@@ -244,6 +253,23 @@ test("visible character count decodes entities to single characters", () => {
   assert.equal(toPlainText("Terms &amp; Conditions").length, "Terms & Conditions".length);
 });
 
+test("raw sanitized-HTML length differs from visible length near Telegram limits", () => {
+  // community_centre.py's validate_post_payload validates
+  // limits.validate_text_len(raw_text, TEXT_MAX_LEN/CAPTION_MAX_LEN) on the
+  // *raw HTML string it receives* (our already-sanitized payload) before
+  // re-sanitizing — not on the tag-stripped visible text. A submit-time
+  // limit check based on visible length alone can therefore pass locally
+  // while the backend rejects the same payload as too_long; the composer's
+  // pre-submit check (ccRteValidateLimits) must compare against this raw
+  // canonical-HTML length, not toPlainText's length, to match the backend.
+  const captionMaxLen = 1024;
+  const visibleBody = "x".repeat(1020);
+  const html = sanitize("<b>" + visibleBody + "</b>");
+  assert.equal(toPlainText(html).length, 1020);
+  assert.ok(toPlainText(html).length <= captionMaxLen, "visible length alone would report this as within the limit");
+  assert.ok(html.length > captionMaxLen, "raw sanitized HTML exceeds the limit the backend actually enforces");
+});
+
 // ---------------------------------------------------------------------
 // Nested quote prevention / empty selection / quote toggle decision
 // ---------------------------------------------------------------------
@@ -268,7 +294,7 @@ test("empty selection behaviour — toolbar actions are a no-op", () => {
 // ---------------------------------------------------------------------
 
 test("client sanitizer output stays within the backend allowlist tag set", () => {
-  const BACKEND_ALLOWED = ["b", "i", "u", "s", "code", "pre", "blockquote", "a", "span"];
+  const BACKEND_ALLOWED = ["b", "i", "u", "s", "code", "pre", "blockquote", "a", "span", "tg-spoiler"];
   const out = sanitize('<b>b</b><i>i</i><u>u</u><s>s</s><code>c</code><blockquote>q</blockquote>' +
     '<a href="https://x.com">a</a><span class="tg-spoiler">sp</span><script>bad()</script><div>d</div>');
   const tagsFound = Array.from(new Set((out.match(/<\/?([a-z]+)/g) || []).map((t) => t.replace(/[<\/]/g, ""))));

@@ -327,7 +327,7 @@ html, body {
 .cc-rte-editor code { background: var(--panel-2); border-radius: 4px; padding: 1px 4px; font-family: monospace; }
 .cc-rte-editor pre { background: var(--panel-2); border-radius: 6px; padding: 8px; font-family: monospace; overflow-x: auto; }
 .cc-rte-editor blockquote { margin: 4px 0; padding: 4px 10px; border-left: 3px solid var(--accent); color: var(--muted); }
-.cc-rte-editor span.tg-spoiler { background: var(--panel-2); color: transparent; border-radius: 3px; }
+.cc-rte-editor span.tg-spoiler, .cc-rte-editor tg-spoiler { background: var(--panel-2); color: transparent; border-radius: 3px; }
 .cc-rte-editor a { color: var(--accent-2); }
 #cml-results .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; }
 

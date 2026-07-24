@@ -6122,7 +6122,11 @@
   // re-sanitizes on every save regardless — these helpers exist purely so
   // the client can show the same canonical result before submitting.
   var CC_RTE_TAG_ALIASES = { strong: "b", em: "i", ins: "u", strike: "s", del: "s" };
-  var CC_RTE_ALLOWED_TAGS = ["b", "i", "u", "s", "code", "pre", "blockquote", "a", "span"];
+  // "tg-spoiler" is its own standalone tag in Telegram's HTML dialect
+  // (equivalent to, but distinct from, <span class="tg-spoiler">) — kept
+  // as-is rather than aliased so existing drafts using it round-trip
+  // instead of losing their spoiler formatting.
+  var CC_RTE_ALLOWED_TAGS = ["b", "i", "u", "s", "code", "pre", "blockquote", "a", "span", "tg-spoiler"];
   var CC_RTE_ALLOWED_ATTRS = { a: ["href"], span: ["class"], blockquote: ["expandable"], code: ["class"] };
   var CC_RTE_NAMED_ENTITIES = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " " };
 
@@ -6406,7 +6410,13 @@
     if (!el) return;
     var ct = $("#cc-content-type").value;
     var maxLen = ct === "text" ? ((cc.limits && cc.limits.text_max_len) || 4096) : ((cc.limits && cc.limits.caption_max_len) || 1024);
-    var visibleLen = ccRteHtmlToPlainText($("#cc-text").value || "").length;
+    var raw = $("#cc-text").value || "";
+    var parseModeEl = $("#cc-parse-mode");
+    var parseMode = parseModeEl ? parseModeEl.value : "HTML";
+    // Only HTML parse_mode content has markup to strip for the "visible
+    // characters" count — MarkdownV2 is stored/sent verbatim, and stripping
+    // "<...>"-shaped substrings out of literal Markdown text would miscount.
+    var visibleLen = parseMode === "HTML" ? ccRteHtmlToPlainText(raw).length : raw.length;
     el.textContent = visibleLen + " / " + maxLen + " characters";
   }
 
@@ -6642,7 +6652,14 @@
   // Called before Preview / Save Draft / Publish / Schedule: converts the
   // visual editor content into canonical Telegram HTML and re-sanitizes
   // whatever's in the (possibly hand-edited) Advanced HTML field too.
+  // MarkdownV2 is stored/sent verbatim (see ccPreviewBubbleHtml) — the
+  // HTML editor/sanitizer never touches it, or a MarkdownV2 draft's text
+  // would be overwritten by the (unrelated, possibly empty) rich-text
+  // editor content.
   function ccRteFinalizeBeforeSubmit() {
+    var parseModeEl = $("#cc-parse-mode");
+    var parseMode = parseModeEl ? parseModeEl.value : "HTML";
+    if (parseMode !== "HTML") return;
     var editor = ccRteEditor();
     if (editor && cc.textMode !== "html") {
       ccRteSyncFromEditor();
@@ -6659,8 +6676,14 @@
     var textish = ct === "text" || ct === "photo" || ct === "animation" || ct === "video" || ct === "media_group";
     if (!textish) return null;
     var maxLen = ct === "text" ? ((cc.limits && cc.limits.text_max_len) || 4096) : ((cc.limits && cc.limits.caption_max_len) || 1024);
-    var visibleLen = ccRteHtmlToPlainText($("#cc-text").value || "").length;
-    if (visibleLen > maxLen) return "Message is too long: " + visibleLen + " / " + maxLen + " characters.";
+    // The backend (validate_post_payload in community_centre.py) validates
+    // length on the raw HTML string it receives — i.e. our already-
+    // sanitized canonical payload — *before* re-sanitizing, not on the
+    // visible/tag-stripped text. Mirror that exactly here so the composer
+    // never reports "OK" on something the backend will reject as
+    // too_long.
+    var rawLen = ($("#cc-text").value || "").length;
+    if (rawLen > maxLen) return "Message is too long: " + rawLen + " / " + maxLen + " characters.";
     return null;
   }
 
