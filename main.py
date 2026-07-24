@@ -8885,18 +8885,25 @@ def run_worker():
         # schedule work onto from the APScheduler background thread.
         # Application has no attribute that already exposes this loop, so
         # it must be captured here and stashed explicitly.
+        #
+        # Deliberately does NOT gate scheduler.start() — this scheduler also
+        # runs plenty of jobs with no Telegram dependency (referral
+        # settlement, KPI snapshots, settings sync, web autoscaling...), and
+        # post_init only fires after Application.initialize() has already
+        # succeeded in reaching Telegram. Gating scheduler.start() on it
+        # would stall all of those unrelated jobs for as long as Telegram
+        # startup is failing. Community Centre's own loop-readiness gap is
+        # already covered without that: get_running_loop() returning None
+        # classifies as the retryable bot_loop_not_running error code (see
+        # categorize_telegram_error), so a tick that fires before this
+        # callback just retries on the next 20s tick instead of failing hard.
         set_running_loop(asyncio.get_running_loop())
         logger.info("[COMMUNITY_WORKER][BOT_LOOP_READY]")
-        # Starting the scheduler here — instead of before run_polling() —
-        # guarantees no scheduled job (including community_centre_tick) can
-        # attempt a Telegram-loop call before the loop it depends on exists.
-        # Guarded because run_polling() re-invokes post_init on every
-        # reconnect attempt in the transient-error retry loop below.
-        if not scheduler.running:
-            scheduler.start()
-            logger.info("[COMMUNITY_WORKER][SCHEDULER_STARTED]")
 
     app_bot.post_init = _on_bot_loop_ready
+
+    scheduler.start()
+    logger.info("[COMMUNITY_WORKER][SCHEDULER_STARTED]")
 
     autoscale_state = {"last_target": None}
 

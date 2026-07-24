@@ -1158,9 +1158,16 @@ _SECRET_PATTERNS = [
     # Mongo connection strings (mongodb:// and mongodb+srv://), which embed
     # credentials in the authority component.
     re.compile(r"mongodb(?:\+srv)?://\S+", re.IGNORECASE),
-    # key=value / key: value style secrets embedded in a stringified object.
+    # "Bearer <token>" — matched before the generic key=value pattern below,
+    # which would otherwise only redact the word "Bearer" itself (matching
+    # its own "bearer" keyword) and leave the token that follows exposed.
+    re.compile(r"(?i)\bbearer\s+[^\s'\",}]+"),
+    # key: value / key=value / key: 'value' / key = "value" — with or
+    # without the quotes a stringified dict or header line would wrap the
+    # key and/or value in (e.g. "{'api_key': 'sk-...'}" or
+    # "Authorization: Bearer ...").
     re.compile(
-        r"(?i)\b(authorization|bearer|token|api[_-]?key|secret|password|passwd)\b\s*[:=]\s*\S+"
+        r"(?i)['\"]?\b(authorization|token|api[_-]?key|secret|password|passwd)\b['\"]?\s*[:=]\s*['\"]?[^\s'\",}]+['\"]?"
     ),
     # URLs carrying a credential-shaped query parameter.
     re.compile(r"https?://\S*[?&](?:token|key|password|secret)=\S+", re.IGNORECASE),

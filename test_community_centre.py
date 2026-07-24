@@ -795,6 +795,22 @@ def test_runtime_error_message_redacts_secret_like_values():
     assert "[REDACTED]" in message
 
 
+def test_runtime_error_message_redacts_bearer_token_after_authorization_header():
+    exc = RuntimeError("request failed Authorization: Bearer sk-supersecret status=401")
+    code, message = cc.categorize_telegram_error(exc)
+    assert code == "local_runtime_error"
+    assert "sk-supersecret" not in message
+    assert "[REDACTED]" in message
+
+
+def test_runtime_error_message_redacts_quoted_dict_style_secret():
+    exc = RuntimeError("request failed headers={'Authorization': 'Bearer sk-supersecret', 'api_key': 'sk-anothersecret'}")
+    code, message = cc.categorize_telegram_error(exc)
+    assert code == "local_runtime_error"
+    assert "sk-supersecret" not in message
+    assert "sk-anothersecret" not in message
+
+
 def test_worker_context_error_categorization_is_permanent():
     code, message = cc.categorize_telegram_error(cc.WorkerContextError("Community posts must be published by the worker process."))
     assert code == "worker_context_error"
