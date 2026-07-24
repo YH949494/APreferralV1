@@ -7,8 +7,10 @@ import os
 import sys
 import time
 import types
+from unittest.mock import patch
 
 import pytest
+from flask import Flask
 
 
 def build_init_data(token: str, payload: dict) -> str:
@@ -69,6 +71,28 @@ def test_initdata_success_no_verbose_logs_by_default(vouchers_module, monkeypatc
     assert "[initdata] raw_len=" not in logs
     assert "[initdata] decoded_len=" not in logs
     assert "[initdata] hash_check" not in logs
+    # Routine successful verification must not appear at INFO (or above) level.
+    assert "[initdata] verify_ok" not in logs
+
+
+def test_initdata_success_verify_ok_logs_at_debug(vouchers_module, monkeypatch, caplog):
+    monkeypatch.delenv("DEBUG_INITDATA", raising=False)
+    monkeypatch.setenv("BOT_TOKEN", "123:ABC")
+    vouchers = importlib.reload(vouchers_module)
+
+    payload = {"auth_date": str(int(time.time())), "user": json.dumps({"id": 42})}
+    init_data = build_init_data("123:ABC", payload)
+
+    with caplog.at_level(logging.DEBUG):
+        ok, _, _ = vouchers.verify_telegram_init_data(init_data)
+
+    assert ok is True
+    debug_records = [rec for rec in caplog.records if rec.levelno == logging.DEBUG]
+    debug_logs = "\n".join(rec.getMessage() for rec in debug_records)
+    assert "[initdata] verify_ok" in debug_logs
+    # Never leak the raw init_data, signature, or hash in the success log line.
+    assert init_data not in debug_logs
+    assert payload["user"] not in debug_logs
 
 
 def test_initdata_success_verbose_logs_when_debug_enabled(vouchers_module, monkeypatch, caplog):
@@ -87,6 +111,32 @@ def test_initdata_success_verbose_logs_when_debug_enabled(vouchers_module, monke
     assert "[initdata] raw_len=" in logs
     assert "[initdata] decoded_len=" in logs
     assert "[initdata] hash_check" in logs
+
+
+def test_user_ctx_or_preview_reuses_precomputed_verification(vouchers_module, monkeypatch):
+    """A route that already verified init_data and passes the result through
+    must not trigger a second verify_telegram_init_data call (and therefore a
+    second round of verification logging) inside _user_ctx_or_preview."""
+    monkeypatch.delenv("DEBUG_INITDATA", raising=False)
+    monkeypatch.setenv("BOT_TOKEN", "123:ABC")
+    vouchers = importlib.reload(vouchers_module)
+
+    payload = {"auth_date": str(int(time.time())), "user": json.dumps({"id": 42})}
+    init_data = build_init_data("123:ABC", payload)
+
+    app = Flask(__name__)
+    verification = vouchers.verify_telegram_init_data(init_data)
+    assert verification[0] is True
+
+    with patch.object(vouchers, "verify_telegram_init_data") as mock_verify:
+        with app.test_request_context(f"/vouchers/visible?init_data={init_data}"):
+            ctx, admin_preview = vouchers._user_ctx_or_preview(
+                vouchers.request, init_data_raw=init_data, verification=verification
+            )
+
+    mock_verify.assert_not_called()
+    assert admin_preview is False
+    assert ctx == verification[1]
 
 
 def test_initdata_invalid_hash_logs_failure_reason(vouchers_module, monkeypatch, caplog):

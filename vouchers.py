@@ -417,11 +417,11 @@ def _is_cached_admin(user_json: dict):
 
     return False, None
 
-def _payload_for_admin_query(req) -> dict | None:
+def _payload_for_admin_query(req, verification: tuple | None = None) -> dict | None:
     init_data_raw = extract_raw_init_data_from_query(req)
     if not init_data_raw:
         return None
-    ok, parsed, _ = verify_telegram_init_data(init_data_raw)
+    ok, parsed, _ = verification if verification is not None else verify_telegram_init_data(init_data_raw)
     if not ok:
         return None
     try:
@@ -510,7 +510,7 @@ def _user_ctx_or_preview(req, *, init_data_raw: str, verification: tuple | None 
     if _admin_secret_ok(secret):
         return ({"user_id": 0, "username": "admin-preview"}, True)
 
-    payload = _payload_for_admin_query(req)
+    payload = _payload_for_admin_query(req, verification=verification)
     if payload:
         return (payload, True)
   
@@ -4232,8 +4232,7 @@ def verify_telegram_init_data(init_data_raw: str):
         pass
 
     data["user"] = json.dumps(user)
-    if not DEBUG_INITDATA:
-        logger.info("[initdata] verify_ok uid=%s auth_age_s=%s", user.get("id"), auth_age_s)
+    logger.debug("[initdata] verify_ok uid=%s auth_age_s=%s", user.get("id"), auth_age_s)
     return True, data, "ok"
  
 def _require_admin_via_query():
@@ -5183,11 +5182,13 @@ def api_visible():
     try:
         init_data = extract_raw_init_data_from_query(request)
 
-        init_hash = hashlib.sha256(init_data.encode("utf-8")).hexdigest()[:8] if init_data else "none"     
-        print(
-            "[initdata] source=query_string_raw "
-            f"len={len(init_data)} sha={init_hash}"
-        )
+        if current_app.logger.isEnabledFor(logging.DEBUG):
+            init_hash = hashlib.sha256(init_data.encode("utf-8")).hexdigest()[:8] if init_data else "none"
+            current_app.logger.debug(
+                "[initdata] source=query_string_raw len=%s sha=%s",
+                len(init_data),
+                init_hash,
+            )
 
         if not init_data:
             return jsonify({"status": "error", "code": "missing_init_data"}), 400

@@ -18,6 +18,8 @@ from pymongo.errors import DuplicateKeyError
 logger = logging.getLogger(__name__)
 onboarding_events = get_collection("onboarding_events")
 
+PERMANENT_SEND_ERRORS = {"bot_blocked", "chat_not_found", "user_deactivated"}
+
 MYWIN_CHAT_ID = -1002743212540
 MYWIN_INVITE_LINK = "https://t.me/+HBNmk5aV_M0xMzVl"
 
@@ -703,7 +705,7 @@ def onboarding_due_tick() -> None:
                 )
                 continue
             update = {"$set": {err_field: err or "unknown_error", err_ts_field: now}}
-            if err == "bot_blocked":
+            if err in PERMANENT_SEND_ERRORS:
                 update["$set"]["onboarding_pm_blocked"] = True
                 update["$set"][disabled_field] = True
                 if pm_name in {"mywin7", "mywin14"}:

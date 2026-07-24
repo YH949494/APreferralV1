@@ -361,7 +361,82 @@ class OnboardingTests(unittest.TestCase):
         user_doc = self.users.find_one({"user_id": uid})
         self.assertEqual(user_doc.get("pm1_sent_at_utc"), fixed_now)
         self.assertNotIn("pm1_last_error", user_doc)
-    
+
+    def test_onboarding_due_tick_mywin14_permanent_failure_disables_retry(self):
+        uid = 223
+        fixed_now = datetime(2024, 2, 2, tzinfo=timezone.utc)
+        self.users.insert_one(
+            {
+                "user_id": uid,
+                "mywin14_due_at_utc": fixed_now - timedelta(minutes=1),
+            }
+        )
+        with (
+            patch.object(onboarding, "now_utc", return_value=fixed_now),
+            patch.object(onboarding, "_acquire_onboarding_lock", return_value=(True, None)),
+            patch.object(
+                onboarding,
+                "send_mywin14_if_needed",
+                return_value=(False, "chat_not_found", None),
+            ),
+        ):
+            onboarding.onboarding_due_tick()
+        user_doc = self.users.find_one({"user_id": uid})
+        self.assertNotIn("mywin14_sent_at_utc", user_doc)
+        self.assertEqual(user_doc.get("mywin14_last_error"), "chat_not_found")
+        self.assertTrue(user_doc.get("mywin14_disabled"))
+        self.assertTrue(user_doc.get("onboarding_pm_blocked"))
+
+        # A second tick must not attempt to send again: the due filter excludes
+        # users with mywin14_disabled/onboarding_pm_blocked set.
+        with (
+            patch.object(onboarding, "now_utc", return_value=fixed_now),
+            patch.object(onboarding, "_acquire_onboarding_lock", return_value=(True, None)),
+            patch.object(onboarding, "send_mywin14_if_needed") as mock_send,
+        ):
+            onboarding.onboarding_due_tick()
+        mock_send.assert_not_called()
+
+    def test_onboarding_due_tick_mywin14_transient_failure_stays_retryable(self):
+        uid = 224
+        fixed_now = datetime(2024, 2, 2, tzinfo=timezone.utc)
+        self.users.insert_one(
+            {
+                "user_id": uid,
+                "mywin14_due_at_utc": fixed_now - timedelta(minutes=1),
+            }
+        )
+        with (
+            patch.object(onboarding, "now_utc", return_value=fixed_now),
+            patch.object(onboarding, "_acquire_onboarding_lock", return_value=(True, None)),
+            patch.object(
+                onboarding,
+                "send_mywin14_if_needed",
+                return_value=(False, "NetworkError: timeout", None),
+            ),
+        ):
+            onboarding.onboarding_due_tick()
+        user_doc = self.users.find_one({"user_id": uid})
+        self.assertNotIn("mywin14_sent_at_utc", user_doc)
+        self.assertEqual(user_doc.get("mywin14_last_error"), "NetworkError: timeout")
+        self.assertFalse(user_doc.get("mywin14_disabled"))
+        self.assertFalse(user_doc.get("onboarding_pm_blocked"))
+
+        # Still due on the next tick, so a transient failure remains retryable.
+        with (
+            patch.object(onboarding, "now_utc", return_value=fixed_now),
+            patch.object(onboarding, "_acquire_onboarding_lock", return_value=(True, None)),
+            patch.object(
+                onboarding,
+                "send_mywin14_if_needed",
+                return_value=(True, None, None),
+            ) as mock_send,
+        ):
+            onboarding.onboarding_due_tick()
+        mock_send.assert_called_once()
+        user_doc = self.users.find_one({"user_id": uid})
+        self.assertEqual(user_doc.get("mywin14_sent_at_utc"), fixed_now)
+
     def test_e3_handler_filters(self):
         called = []
 

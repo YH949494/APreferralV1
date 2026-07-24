@@ -91,6 +91,11 @@ def send_telegram_http_message(
     description = data.get("description") if isinstance(data, dict) else None
     if resp.status_code == 429 or error_code == 429:
         return False, "rate_limited", False
+    description_lower = (description or "").lower()
+    if "chat not found" in description_lower:
+        return False, "chat_not_found", False
+    if "user is deactivated" in description_lower:
+        return False, "user_deactivated", False
     err = description or f"telegram_http_{resp.status_code}"
     return False, err, False
 
@@ -169,7 +174,7 @@ async def safe_reply_text(message, text: str, **kwargs) -> bool:
             if raise_on_non_transient:
                 raise
             if return_error:
-                err = "bot_blocked" if _is_bot_blocked_error(exc) else f"{exc.__class__.__name__}: {exc}"
+                err = _classify_permanent_telegram_error(exc) or f"{exc.__class__.__name__}: {exc}"
                 return False, err                
             return False
         except TRANSIENT_EXCEPTIONS as exc:
@@ -220,6 +225,23 @@ def _is_bot_blocked_error(exc: Exception) -> bool:
         return True
     message = str(exc).lower()
     return "bot was blocked" in message or "forbidden" in message
+
+
+def _classify_permanent_telegram_error(exc: Exception) -> str | None:
+    """Return a stable error code for permanent (non-retryable) Telegram delivery
+    failures, or None if the error isn't recognized as permanent. Permanent
+    errors mean the recipient can never receive a message again (blocked the
+    bot, deleted their account, or the chat no longer exists) and should stop
+    further send attempts. Transient errors (network issues, rate limits) are
+    not covered here and remain retryable."""
+    if _is_bot_blocked_error(exc):
+        return "bot_blocked"
+    message = str(exc).lower()
+    if "chat not found" in message:
+        return "chat_not_found"
+    if "user is deactivated" in message:
+        return "user_deactivated"
+    return None
 
 
 async def safe_send_message(
@@ -282,7 +304,7 @@ async def safe_send_message(
             if raise_on_non_transient:
                 raise
             if return_error:
-                err = "bot_blocked" if _is_bot_blocked_error(exc) else f"{exc.__class__.__name__}: {exc}"
+                err = _classify_permanent_telegram_error(exc) or f"{exc.__class__.__name__}: {exc}"
                 return False, err                
             return False
         except TRANSIENT_EXCEPTIONS as exc:
@@ -323,7 +345,7 @@ async def safe_send_message(
             if raise_on_non_transient:
                 raise
             if return_error:
-                err = "bot_blocked" if _is_bot_blocked_error(exc) else f"{exc.__class__.__name__}: {exc}"
+                err = _classify_permanent_telegram_error(exc) or f"{exc.__class__.__name__}: {exc}"
                 return False, err
             if return_error:
                 return False, f"{exc.__class__.__name__}: {exc}"                
