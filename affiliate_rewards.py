@@ -452,9 +452,16 @@ def _finalize_issued_if_voucher_exists(db, *, ledger, now_utc: datetime):
     if not voucher_code:
         return ledger
     if ledger.get("status") != "ISSUED":
+        # Prefer the pool row's own issued_at (the moment the voucher was
+        # actually allocated) over now_utc, so a delayed reconciliation
+        # retry can't restart the 3-day visibility window.
+        pool_row = db.voucher_pools.find_one(
+            {"status": "issued", "code": voucher_code, **_pool_ledger_filter(ledger["_id"])}
+        )
+        issued_at = (pool_row or {}).get("issued_at") or now_utc
         db.affiliate_ledger.update_one(
             {"_id": ledger["_id"], "voucher_code": voucher_code, "status": {"$ne": "ISSUED"}},
-            {"$set": {"status": "ISSUED", "updated_at": now_utc, "issued_at": now_utc}},
+            {"$set": {"status": "ISSUED", "updated_at": now_utc, "issued_at": issued_at}},
         )
         return db.affiliate_ledger.find_one({"_id": ledger["_id"]})
     return ledger
@@ -476,13 +483,17 @@ def _reconcile_ledger_from_issued_pool(db, *, ledger_id, now_utc: datetime):
     if not pool_row or not pool_row.get("code"):
         return None
 
+    # Prefer the pool row's own issued_at (the moment the voucher was
+    # actually allocated) over now_utc, so a delayed reconciliation retry
+    # can't restart the 3-day visibility window.
+    issued_at = pool_row.get("issued_at") or now_utc
     issue_claim = db.affiliate_ledger.update_one(
         {
             "_id": ledger_id,
             "status": {"$in": ["PENDING_MANUAL", "PENDING_REVIEW", "APPROVED", SETTLING_STATUS]},
             **_no_voucher_filter(),
         },
-        {"$set": {"status": "ISSUED", "voucher_code": pool_row.get("code"), "updated_at": now_utc, "issued_at": now_utc}},
+        {"$set": {"status": "ISSUED", "voucher_code": pool_row.get("code"), "updated_at": now_utc, "issued_at": issued_at}},
     )
     if issue_claim.modified_count == 0:
         latest = db.affiliate_ledger.find_one({"_id": ledger_id})

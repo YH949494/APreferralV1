@@ -517,6 +517,31 @@ def test_affiliate_history_shows_welcome_reward_within_3_days():
     assert any("[AFF_WELCOME][VISIBLE]" in c[0] for c in logger.info_calls)
 
 
+def test_affiliate_history_hides_legacy_welcome_row_missing_ledger_type():
+    """Legacy WELCOME rows classified only via tier/pool_id (no ledger_type)
+    must not bypass the expiry check, matching the classification used by
+    _welcome_bonus_claimed in main.py."""
+    now = datetime.now(timezone.utc)
+    fn, logger = _build_affiliate_history_globals(
+        users={1001: {"user_id": 1001}},
+        affiliate_rows=[
+            {
+                "_id": 1,
+                "user_id": 1001,
+                "status": "ISSUED",
+                "tier": "WELCOME",
+                "voucher_code": "OLD-LEGACY-WELCOME",
+                "issued_at": now - timedelta(days=20),
+                "updated_at": now - timedelta(days=20),
+            }
+        ],
+        request_user_id=1001,
+    )
+    payload = fn()
+    assert payload["rewards"] == []
+    assert any("[AFF_WELCOME][HIDDEN_EXPIRED]" in c[0] for c in logger.info_calls)
+
+
 def test_affiliate_history_t1_t4_unaffected_by_welcome_expiry_rule():
     now = datetime.now(timezone.utc)
     fn, _ = _build_affiliate_history_globals(

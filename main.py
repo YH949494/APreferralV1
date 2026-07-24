@@ -6809,13 +6809,20 @@ def get_affiliate_bonus_vouchers():
             if not code:
                 continue
             tier = row.get("tier") or row.get("reward_tier") or ""
-            ledger_type = str(row.get("ledger_type") or "").strip().upper()
             ledger_id = row.get("_id")
+            # Same WELCOME classification used by _welcome_bonus_claimed: legacy
+            # rows may carry the WELCOME marker on tier/pool_id instead of
+            # ledger_type, and must not bypass the expiry check because of it.
+            is_welcome_row = "WELCOME" in (
+                str(row.get("ledger_type") or "").strip().upper(),
+                str(row.get("tier") or "").strip().upper(),
+                str(row.get("pool_id") or "").strip().upper(),
+            )
 
             # The 3-day hiding rule applies only to affiliate-ledger WELCOME
             # rewards (issue_welcome_bonus_if_eligible). T1-T4/T5 tier rewards
             # are not governed by this rule and pass through unaffected.
-            if ledger_type == "WELCOME":
+            if is_welcome_row:
                 visibility = welcome_reward_visibility(row, now_utc=now_utc)
                 if not visibility["visible"]:
                     logger.info(
@@ -6839,7 +6846,7 @@ def get_affiliate_bonus_vouchers():
             item = {"tier": str(tier) if tier else "", "code": code}
             if issued_at is not None:
                 item["issued_at"] = issued_at.isoformat() if hasattr(issued_at, "isoformat") else str(issued_at)
-            if ledger_type == "WELCOME" and visibility.get("visible_until") is not None:
+            if is_welcome_row and visibility.get("visible_until") is not None:
                 item["expires_at"] = visibility["visible_until"].isoformat()
             rewards.append(item)
             logger.info(
