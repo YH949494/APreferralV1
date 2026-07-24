@@ -42,7 +42,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_MISSED
 
-from app_context import set_app_bot, set_bot, set_scheduler
+from app_context import set_app_bot, set_bot, set_scheduler, set_running_loop, get_running_loop, set_runner_mode
 from onboarding import MYWIN_CHAT_ID, onboarding_due_tick, record_first_mywin, record_first_checkin
 from retention_kpis import RETENTION_COLLECTION, compute_retention_kpis, ensure_retention_indexes
 from funnel_dashboard import compute_funnel
@@ -298,6 +298,7 @@ def _ensure_index_if_missing(col, name, keys, **kwargs):
 RUNNER_MODE = os.getenv("RUNNER_MODE")
 if not RUNNER_MODE:
     RUNNER_MODE = "web" if _running_under_gunicorn() else "worker"
+set_runner_mode(RUNNER_MODE)
 
 # ----------------------------
 # Config
@@ -1149,7 +1150,7 @@ def _users_update_many(filter_doc: dict, update_doc: dict, *, context: str, **kw
     return users_collection.update_many(filter_doc, update_doc, **kwargs)
 
 def call_bot_in_loop(coro, timeout=15):
-    loop = getattr(app_bot, "_running_loop", None)
+    loop = get_running_loop()
     if loop is None:
         raise RuntimeError("Bot loop not running yet")
     fut = asyncio.run_coroutine_threadsafe(coro, loop)
@@ -8529,7 +8530,8 @@ def run_worker():
         raise
     set_app_bot(app_bot)
     set_bot(app_bot.bot)
-    
+    logger.info("[COMMUNITY_WORKER][BOT_OBJECT_READY]")
+
     # 2) Catch up maintenance before bot handlers start
     try:
         run_boot_catchup()
@@ -8864,6 +8866,7 @@ def run_worker():
         coalesce=True,
     )
     logger.info("[COMMUNITY_POSTS][SCHEDULER_REGISTERED] interval_seconds=20")
+    logger.info("[COMMUNITY_WORKER][PUBLISHER_REGISTERED]")
 
     # subscription audit disabled — subscription_cache refreshed via claim + check-in events
     try:
@@ -8875,7 +8878,32 @@ def run_worker():
             exc.__class__.__name__,
             str(exc),
         )
+    async def _on_bot_loop_ready(application) -> None:
+        # PTB awaits post_init on the loop it is about to run_forever() on
+        # (see Application.__run), so asyncio.get_running_loop() here is
+        # exactly the loop run_bot_coroutine()/call_bot_in_loop() need to
+        # schedule work onto from the APScheduler background thread.
+        # Application has no attribute that already exposes this loop, so
+        # it must be captured here and stashed explicitly.
+        #
+        # Deliberately does NOT gate scheduler.start() — this scheduler also
+        # runs plenty of jobs with no Telegram dependency (referral
+        # settlement, KPI snapshots, settings sync, web autoscaling...), and
+        # post_init only fires after Application.initialize() has already
+        # succeeded in reaching Telegram. Gating scheduler.start() on it
+        # would stall all of those unrelated jobs for as long as Telegram
+        # startup is failing. Community Centre's own loop-readiness gap is
+        # already covered without that: get_running_loop() returning None
+        # classifies as the retryable bot_loop_not_running error code (see
+        # categorize_telegram_error), so a tick that fires before this
+        # callback just retries on the next 20s tick instead of failing hard.
+        set_running_loop(asyncio.get_running_loop())
+        logger.info("[COMMUNITY_WORKER][BOT_LOOP_READY]")
+
+    app_bot.post_init = _on_bot_loop_ready
+
     scheduler.start()
+    logger.info("[COMMUNITY_WORKER][SCHEDULER_STARTED]")
 
     autoscale_state = {"last_target": None}
 
@@ -9007,7 +9035,8 @@ def run_worker():
                 )
                 raise
     finally:
-        scheduler.shutdown(wait=False)
+        if scheduler.running:
+            scheduler.shutdown(wait=False)
 
 
 def run_web():

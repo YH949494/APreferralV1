@@ -1123,11 +1123,27 @@ def _public_view(post: dict) -> dict:
 # Telegram gateway — the one place that talks HTTP to Telegram.
 # ---------------------------------------------------------------------------
 
+class BotNotReadyError(RuntimeError):
+    """The worker process has no initialized Telegram bot instance yet."""
+
+
+class DestinationResolutionError(RuntimeError):
+    """A post's destination could not be resolved to a chat to send to."""
+
+
+class InvalidPostStateError(RuntimeError):
+    """A post is not in a state that can be published right now."""
+
+
+class WorkerContextError(RuntimeError):
+    """Publishing was attempted outside the Fly `worker` process group."""
+
+
 def _bot():
     from app_context import get_app_bot
     app_bot = get_app_bot()
     if app_bot is None or app_bot.bot is None:
-        raise RuntimeError("bot_not_ready")
+        raise BotNotReadyError("Bot not ready: missing bot instance in this worker process")
     return app_bot.bot
 
 
@@ -1136,28 +1152,92 @@ def _run_coro(coro, timeout: int = 20):
     return run_bot_coroutine(coro, timeout=timeout)
 
 
+_SECRET_PATTERNS = [
+    # Telegram bot tokens: <digits>:<35-char secret>
+    re.compile(r"\d{6,}:[A-Za-z0-9_-]{30,}"),
+    # Mongo connection strings (mongodb:// and mongodb+srv://), which embed
+    # credentials in the authority component.
+    re.compile(r"mongodb(?:\+srv)?://\S+", re.IGNORECASE),
+    # "Bearer <token>" — matched before the generic key=value pattern below,
+    # which would otherwise only redact the word "Bearer" itself (matching
+    # its own "bearer" keyword) and leave the token that follows exposed.
+    re.compile(r"(?i)\bbearer\s+[^\s'\",}]+"),
+    # key: value / key=value / key: 'value' / key = "value" — with or
+    # without the quotes a stringified dict or header line would wrap the
+    # key and/or value in (e.g. "{'api_key': 'sk-...'}" or
+    # "Authorization: Bearer ...").
+    re.compile(
+        r"(?i)['\"]?\b(authorization|token|api[_-]?key|secret|password|passwd)\b['\"]?\s*[:=]\s*['\"]?[^\s'\",}]+['\"]?"
+    ),
+    # URLs carrying a credential-shaped query parameter.
+    re.compile(r"https?://\S*[?&](?:token|key|password|secret)=\S+", re.IGNORECASE),
+]
+
+
+def sanitise_exception_message(message: str, *, max_length: int = 300) -> str:
+    """Redact anything that looks like a token, credential, or connection
+    string from a *local* exception message before it is persisted or shown
+    to admins. Community Centre RuntimeErrors/TypeErrors raised here are
+    always local Python errors (never a raw Telegram payload) — but a
+    stringified object or URL embedded in one could still carry a secret,
+    so this is a defensive pass, not a guarantee the input was safe."""
+    text = (message or "").strip()
+    for pattern in _SECRET_PATTERNS:
+        text = pattern.sub("[REDACTED]", text)
+    return text[:max_length]
+
+
 def categorize_telegram_error(exc: Exception) -> tuple[str, str]:
     """Map a raised exception to (error_code, sanitized_admin_message).
 
     Never returns a raw Telegram payload, token, or stack trace — only the
-    fixed, sanitized messages below. `unknown_error` must never claim the
+    fixed, sanitized messages below, or a locally-sanitised version of a
+    local exception's own message. `unknown_error` must never claim the
     failure was Telegram's fault; it means something failed on our side
-    before/without a classifiable Telegram response.
+    before/without a classifiable Telegram response — and now only covers
+    exception types this function doesn't otherwise recognise, since every
+    RuntimeError (the common local-failure case) gets its own code below
+    instead of collapsing into `unknown_error`.
     """
     try:
         from telegram.error import BadRequest, Forbidden, TimedOut, NetworkError, RetryAfter
     except Exception:
         BadRequest = Forbidden = TimedOut = NetworkError = RetryAfter = ()  # type: ignore
 
-    if isinstance(exc, RuntimeError) and str(exc) == "bot_not_ready":
-        return "bot_loop_not_running", "The publishing worker process is not currently running."
     # TypeError here almost always means a keyword argument passed to a
     # bot.send_* call isn't supported by the pinned python-telegram-bot
     # version — preserve the real message (never secrets/tokens, this is a
     # local Python error, not a Telegram payload) instead of collapsing it
     # into the generic unknown_error copy.
     if isinstance(exc, TypeError):
-        return "local_type_error", f"Local error before Telegram was contacted: {str(exc)[:300]}"
+        message = str(exc).strip()
+        return "local_type_error", sanitise_exception_message(f"Local error before Telegram was contacted: {message}")
+
+    # Typed local-failure exceptions (all RuntimeError subclasses) must be
+    # checked before the generic RuntimeError branch below, or they'd be
+    # caught by it instead and lose their specific code.
+    if isinstance(exc, WorkerContextError):
+        return "worker_context_error", "Community posts must be published by the worker process."
+    if isinstance(exc, BotNotReadyError):
+        return "bot_not_ready", "Telegram bot is not ready in the worker."
+    if isinstance(exc, DestinationResolutionError):
+        return "destination_resolution_error", sanitise_exception_message(str(exc)) or "Could not resolve the destination for this post."
+    if isinstance(exc, InvalidPostStateError):
+        return "invalid_post_state", sanitise_exception_message(str(exc)) or "Post is not in a valid state to publish."
+
+    if isinstance(exc, RuntimeError):
+        message = str(exc).strip()
+        lowered = message.lower()
+        if "bot loop not running yet" in lowered:
+            return "bot_loop_not_running", "Telegram bot loop is not running in the worker."
+        if "bot not ready" in lowered or "missing bot" in lowered:
+            return "bot_not_ready", "Telegram bot is not ready in the worker."
+        # Any other RuntimeError is a local failure (not a Telegram
+        # response) — preserve its real message instead of discarding it
+        # into "Internal publish error...". Never returned as retryable by
+        # default; see PERMANENT_ERROR_CODES.
+        return "local_runtime_error", sanitise_exception_message(message)
+
     if RetryAfter and isinstance(exc, RetryAfter):
         return "telegram_rate_limited", "Rate limited by Telegram; will retry."
     if Forbidden and isinstance(exc, Forbidden):
@@ -1329,10 +1409,10 @@ async def _do_send(post: dict, _step: dict | None = None) -> dict:
     from the run ledger instead of collapsing into a single opaque
     "unknown_error"."""
     step = _step if _step is not None else {}
-    step["name"] = "get_bot"
+    step["value"] = "get_bot"
     bot = _bot()
     chat_id = post["destination_chat_id"]
-    step["name"] = "build_keyboard"
+    step["value"] = "build_keyboard"
     reply_markup = build_reply_markup(post.get("buttons") or [])
     content_type = post["content_type"]
     common = {}
@@ -1342,7 +1422,7 @@ async def _do_send(post: dict, _step: dict | None = None) -> dict:
         common["protect_content"] = True
 
     if content_type == "text":
-        step["name"] = "build_payload"
+        step["value"] = "build_payload"
         kwargs = {"chat_id": chat_id, "text": post["text"], **common}
         if post.get("parse_mode"):
             kwargs["parse_mode"] = post["parse_mode"]
@@ -1351,13 +1431,13 @@ async def _do_send(post: dict, _step: dict | None = None) -> dict:
         if reply_markup:
             kwargs["reply_markup"] = reply_markup
         _log_send_kwargs(post["_id"], kwargs)
-        step["name"] = "telegram_call"
+        step["value"] = "telegram_call"
         msg = await bot.send_message(**kwargs)
-        step["name"] = "telegram_call_returned"
+        step["value"] = "telegram_call_returned"
         return {"message_ids": [msg.message_id], "poll_id": None, "poll_message_id": None}
 
     if content_type in ("photo", "animation", "video"):
-        step["name"] = "build_payload"
+        step["value"] = "build_payload"
         media_item = post["media"][0]
         source = _media_source(media_item)
         kwargs = {"chat_id": chat_id, **common}
@@ -1368,19 +1448,19 @@ async def _do_send(post: dict, _step: dict | None = None) -> dict:
         if reply_markup:
             kwargs["reply_markup"] = reply_markup
         _log_send_kwargs(post["_id"], kwargs)
-        step["name"] = "telegram_call"
+        step["value"] = "telegram_call"
         if content_type == "photo":
             msg = await bot.send_photo(photo=source, **kwargs)
         elif content_type == "animation":
             msg = await bot.send_animation(animation=source, **kwargs)
         else:
             msg = await bot.send_video(video=source, **kwargs)
-        step["name"] = "telegram_call_returned"
+        step["value"] = "telegram_call_returned"
         return {"message_ids": [msg.message_id], "poll_id": None, "poll_message_id": None}
 
     if content_type == "media_group":
         from telegram import InputMediaPhoto, InputMediaVideo
-        step["name"] = "build_payload"
+        step["value"] = "build_payload"
         group = []
         for idx, item in enumerate(post["media"]):
             source = _media_source(item)
@@ -1394,9 +1474,9 @@ async def _do_send(post: dict, _step: dict | None = None) -> dict:
             else:
                 group.append(InputMediaVideo(media=source, **kwargs))
         _log_send_kwargs(post["_id"], {"chat_id": chat_id, "media": group, **common})
-        step["name"] = "telegram_call"
+        step["value"] = "telegram_call"
         messages = await bot.send_media_group(chat_id=chat_id, media=group, **common)
-        step["name"] = "telegram_call_returned"
+        step["value"] = "telegram_call_returned"
         message_ids = [m.message_id for m in messages]
         buttons_failed = False
         buttons_error = None
@@ -1419,7 +1499,7 @@ async def _do_send(post: dict, _step: dict | None = None) -> dict:
         }
 
     if content_type in ("poll", "quiz"):
-        step["name"] = "build_payload"
+        step["value"] = "build_payload"
         poll = post["poll"]
         kwargs = {
             "chat_id": chat_id,
@@ -1453,9 +1533,9 @@ async def _do_send(post: dict, _step: dict | None = None) -> dict:
         if reply_markup:
             kwargs["reply_markup"] = reply_markup
         _log_send_kwargs(post["_id"], kwargs)
-        step["name"] = "telegram_call"
+        step["value"] = "telegram_call"
         msg = await bot.send_poll(**kwargs)
-        step["name"] = "telegram_call_returned"
+        step["value"] = "telegram_call_returned"
         return {
             "message_ids": [msg.message_id],
             "poll_id": msg.poll.id if msg.poll else None,
@@ -1568,9 +1648,13 @@ def _claim_or_reuse_run(post_id, run_key: str, scheduled_for: datetime) -> tuple
 
 def _execute_publish(post: dict) -> None:
     post_id = post["_id"]
+    step = {"value": "load_post"}
+
+    step["value"] = "build_run_context"
     scheduled_for = post.get("next_run_at_utc") or post.get("scheduled_at_utc") or now_utc()
     run_key = _run_key(post_id, scheduled_for)
 
+    step["value"] = "load_run"
     outcome, existing_run = _claim_or_reuse_run(post_id, run_key, scheduled_for)
     if outcome == "already_done":
         _reconcile_post_from_run(post, existing_run)
@@ -1583,8 +1667,30 @@ def _execute_publish(post: dict) -> None:
 
     record_audit(post_id, "worker_claim", actor_type="worker", actor_id=INSTANCE_ID, run_key=run_key)
 
-    step = {"name": "start"}
     try:
+        from app_context import get_runner_mode
+        runner_mode = get_runner_mode()
+        # None only in contexts that never called set_runner_mode() (unit
+        # tests) — production always sets it at boot (main.py), so a real
+        # web-process publish attempt is always a non-None mismatch here.
+        if runner_mode is not None and runner_mode != "worker":
+            raise WorkerContextError("Community posts must be published by the worker process.")
+
+        step["value"] = "validate_post_state"
+        content_type = post.get("content_type")
+        if content_type in ("photo", "animation", "video", "media_group") and not post.get("media"):
+            raise InvalidPostStateError("Post is missing media for a media content type")
+
+        step["value"] = "resolve_destination"
+        if not post.get("destination_chat_id"):
+            raise DestinationResolutionError("Post has no resolved destination_chat_id")
+
+        # Media file_ids are re-resolved per-item inside _do_send/_media_source
+        # at send time (so a reuploaded file_id is always used) — this step
+        # only marks that we're about to enter that phase.
+        step["value"] = "resolve_media"
+
+        step["value"] = "enter_do_send"
         result = _run_coro(_do_send(post, step))
     except Exception as exc:
         error_code, error_message = categorize_telegram_error(exc)
@@ -1595,11 +1701,12 @@ def _execute_publish(post: dict) -> None:
         # exactly where.
         logger.exception(
             "[COMMUNITY_CENTRE][LOCAL_FAILURE] post_id=%s run_id=%s step=%s error_code=%s exception_class=%s message=%s",
-            post_id, run_key, step["name"], error_code, exc.__class__.__name__, str(exc)[:300],
+            post_id, run_key, step["value"], error_code, exc.__class__.__name__, str(exc)[:300],
         )
-        _fail_run(post, run_key, error_code, error_message, exc.__class__.__name__, step["name"])
+        _fail_run(post, run_key, error_code, error_message, exc.__class__.__name__, step["value"])
         return
 
+    step["value"] = "persist_message_id"
     message_ids = result["message_ids"]
     poll_id = result.get("poll_id")
     buttons_failed = bool(result.get("buttons_failed"))
@@ -1626,6 +1733,7 @@ def _execute_publish(post: dict) -> None:
     elif pin_ok is False:
         partial_reason = "Published; pin failed."
 
+    step["value"] = "finalise_run"
     _runs().update_one({"community_post_id": post_id, "run_key": run_key}, {"$set": {
         "status": status,
         "telegram_message_ids": message_ids,
@@ -1634,6 +1742,7 @@ def _execute_publish(post: dict) -> None:
         "updated_at_utc": ts,
     }})
 
+    step["value"] = "finalise_post"
     post_updates = {
         "status": status,
         "poll_status": "open" if post["content_type"] in ("poll", "quiz") else post.get("poll_status", "not_applicable"),
@@ -1769,11 +1878,19 @@ def run_due_posts(*, limit: int = 10, only_post_id=None) -> int:
         try:
             _execute_publish(post)
         except Exception as exc:
-            logger.exception("[COMMUNITY_CENTRE] unhandled error executing post_id=%s", post.get("_id"))
+            # _execute_publish handles its own failures internally; reaching
+            # here means it raised before/around claiming the run row
+            # (e.g. _claim_or_reuse_run itself failed). Still classify via
+            # categorize_telegram_error rather than a blanket unknown_error
+            # so a known exception class isn't hidden.
+            error_code, error_message = categorize_telegram_error(exc)
+            logger.exception(
+                "[COMMUNITY_CENTRE] unhandled error executing post_id=%s error_code=%s exception_class=%s",
+                post.get("_id"), error_code, exc.__class__.__name__,
+            )
             _fail_run(
                 post, _run_key(post["_id"], post.get("next_run_at_utc") or now_utc()),
-                "unknown_error", "Internal publish error before a Telegram response was received.",
-                exc.__class__.__name__, "before_execute_publish",
+                error_code, error_message, exc.__class__.__name__, "before_execute_publish",
             )
         processed += 1
         if only_post_id is not None:

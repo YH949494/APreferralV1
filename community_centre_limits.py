@@ -103,6 +103,10 @@ RETRYABLE_ERROR_CODES = {
     "telegram_rate_limited",
     "telegram_server_error",
     "dns_failure",
+    # Both mean the worker's Telegram bot/loop hasn't finished starting up
+    # yet — transient by nature, the next scheduler tick should retry.
+    "bot_loop_not_running",
+    "bot_not_ready",
 }
 
 PERMANENT_ERROR_CODES = {
@@ -116,8 +120,11 @@ PERMANENT_ERROR_CODES = {
     "invalid_url",
     "message_too_long",
     "chat_not_found",
-    "bot_loop_not_running",
     "local_type_error",
+    "local_runtime_error",
+    "destination_resolution_error",
+    "invalid_post_state",
+    "worker_context_error",
     "unknown_error",
 }
 
