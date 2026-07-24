@@ -2,6 +2,8 @@ import ast
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from affiliate_rewards import welcome_reward_visibility
+
 
 def _load_get_bonus_voucher():
     source = Path("main.py").read_text(encoding="utf-8")
@@ -140,6 +142,23 @@ def _jsonify(payload):
     return payload
 
 
+class _FakeJsonResponse(dict):
+    """dict subclass so existing `fn() == {...}` assertions keep working,
+    while still exposing a mutable .headers attribute like a real Flask
+    Response, so no-store header behavior can be asserted."""
+
+    def __init__(self, payload):
+        super().__init__(payload)
+        self.headers = {}
+
+
+def _fake_apply_no_store_headers(resp):
+    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    resp.headers["Pragma"] = "no-cache"
+    resp.headers["Expires"] = "0"
+    return resp
+
+
 class _RequestArgs:
     def __init__(self, args):
         self._args = args
@@ -208,7 +227,7 @@ def _build_affiliate_history_globals(*, users, affiliate_rows, request_user_id, 
     fn.__globals__.update(
         {
             "request": _Request({"user_id": str(request_user_id)}),
-            "jsonify": _jsonify,
+            "jsonify": lambda payload: _FakeJsonResponse(payload),
             "users_collection": _UsersCollection(users),
             "affiliate_ledger_collection": _AffiliateLedgerCollection(affiliate_rows),
             "logger": logger,
@@ -221,6 +240,8 @@ def _build_affiliate_history_globals(*, users, affiliate_rows, request_user_id, 
             "_get_admin_secret": lambda req: req.args.get("admin_secret"),
             "_admin_secret_ok": lambda secret: bool(secret_ok and secret),
             "json": __import__("json"),
+            "welcome_reward_visibility": welcome_reward_visibility,
+            "_apply_no_store_headers": _fake_apply_no_store_headers,
         }
     )
     return fn, logger
@@ -403,3 +424,180 @@ def test_affiliate_history_dedup_keeps_latest_same_tier_and_code():
     )
     payload = fn()
     assert [item["code"] for item in payload["rewards"]] == ["DUP", "UNIQ"]
+
+
+def test_welcome_reward_visible_within_3_days():
+    now = datetime.now(timezone.utc)
+    row = {"status": "ISSUED", "issued_at": now - timedelta(days=2, hours=23)}
+    result = welcome_reward_visibility(row, now_utc=now)
+    assert result["visible"] is True
+    assert result["timestamp_source"] == "issued_at"
+
+
+def test_welcome_reward_hidden_exactly_3_days():
+    now = datetime.now(timezone.utc)
+    row = {"status": "ISSUED", "issued_at": now - timedelta(days=3)}
+    assert welcome_reward_visibility(row, now_utc=now)["visible"] is False
+
+
+def test_welcome_reward_hidden_more_than_3_days():
+    now = datetime.now(timezone.utc)
+    row = {"status": "ISSUED", "issued_at": now - timedelta(days=10)}
+    assert welcome_reward_visibility(row, now_utc=now)["visible"] is False
+
+
+def test_welcome_reward_future_malformed_issued_at_hidden_not_indefinite():
+    now = datetime.now(timezone.utc)
+    row = {"status": "ISSUED", "issued_at": now + timedelta(days=999)}
+    result = welcome_reward_visibility(row, now_utc=now)
+    assert result["visible"] is False
+    assert "malformed_future" in result["timestamp_source"]
+
+
+def test_welcome_reward_missing_issued_at_falls_back_to_updated_at_when_issued():
+    now = datetime.now(timezone.utc)
+    row = {"status": "ISSUED", "updated_at": now - timedelta(days=1), "created_at": now - timedelta(days=5)}
+    result = welcome_reward_visibility(row, now_utc=now)
+    assert result["visible"] is True
+    assert result["timestamp_source"] == "updated_at_fallback"
+
+
+def test_welcome_reward_missing_issued_at_and_not_issued_uses_created_at():
+    now = datetime.now(timezone.utc)
+    row = {"status": "SETTLING", "updated_at": now - timedelta(days=1), "created_at": now - timedelta(days=5)}
+    result = welcome_reward_visibility(row, now_utc=now)
+    assert result["visible"] is False
+    assert result["timestamp_source"] == "created_at_fallback"
+
+
+def test_affiliate_history_hides_expired_welcome_reward():
+    now = datetime.now(timezone.utc)
+    fn, logger = _build_affiliate_history_globals(
+        users={1001: {"user_id": 1001}},
+        affiliate_rows=[
+            {
+                "_id": 1,
+                "user_id": 1001,
+                "status": "ISSUED",
+                "ledger_type": "WELCOME",
+                "tier": "WELCOME",
+                "voucher_code": "OLD-WELCOME",
+                "issued_at": now - timedelta(days=20),
+                "updated_at": now - timedelta(days=20),
+            }
+        ],
+        request_user_id=1001,
+    )
+    payload = fn()
+    assert payload["rewards"] == []
+    assert any("[AFF_WELCOME][HIDDEN_EXPIRED]" in c[0] for c in logger.info_calls)
+
+
+def test_affiliate_history_shows_welcome_reward_within_3_days():
+    now = datetime.now(timezone.utc)
+    fn, logger = _build_affiliate_history_globals(
+        users={1001: {"user_id": 1001}},
+        affiliate_rows=[
+            {
+                "_id": 1,
+                "user_id": 1001,
+                "status": "ISSUED",
+                "ledger_type": "WELCOME",
+                "tier": "WELCOME",
+                "voucher_code": "RECENT-WELCOME",
+                "issued_at": now - timedelta(days=1),
+                "updated_at": now - timedelta(days=1),
+            }
+        ],
+        request_user_id=1001,
+    )
+    payload = fn()
+    assert [item["code"] for item in payload["rewards"]] == ["RECENT-WELCOME"]
+    assert "expires_at" in payload["rewards"][0]
+    assert any("[AFF_WELCOME][VISIBLE]" in c[0] for c in logger.info_calls)
+
+
+def test_affiliate_history_hides_legacy_welcome_row_missing_ledger_type():
+    """Legacy WELCOME rows classified only via tier/pool_id (no ledger_type)
+    must not bypass the expiry check, matching the classification used by
+    _welcome_bonus_claimed in main.py."""
+    now = datetime.now(timezone.utc)
+    fn, logger = _build_affiliate_history_globals(
+        users={1001: {"user_id": 1001}},
+        affiliate_rows=[
+            {
+                "_id": 1,
+                "user_id": 1001,
+                "status": "ISSUED",
+                "tier": "WELCOME",
+                "voucher_code": "OLD-LEGACY-WELCOME",
+                "issued_at": now - timedelta(days=20),
+                "updated_at": now - timedelta(days=20),
+            }
+        ],
+        request_user_id=1001,
+    )
+    payload = fn()
+    assert payload["rewards"] == []
+    assert any("[AFF_WELCOME][HIDDEN_EXPIRED]" in c[0] for c in logger.info_calls)
+
+
+def test_affiliate_history_t1_t4_unaffected_by_welcome_expiry_rule():
+    now = datetime.now(timezone.utc)
+    fn, _ = _build_affiliate_history_globals(
+        users={1001: {"user_id": 1001}},
+        affiliate_rows=[
+            {
+                "_id": 1,
+                "user_id": 1001,
+                "status": "ISSUED",
+                "ledger_type": "AFFILIATE_MONTHLY",
+                "tier": "T1",
+                "voucher_code": "OLD-T1",
+                "issued_at": now - timedelta(days=365),
+                "updated_at": now - timedelta(days=365),
+            }
+        ],
+        request_user_id=1001,
+    )
+    payload = fn()
+    assert [item["code"] for item in payload["rewards"]] == ["OLD-T1"]
+    assert "expires_at" not in payload["rewards"][0]
+
+
+def test_affiliate_history_response_has_no_store_headers():
+    fn, _ = _build_affiliate_history_globals(
+        users={1001: {"user_id": 1001}},
+        affiliate_rows=[
+            {"_id": 1, "user_id": 1001, "status": "ISSUED", "tier": "T1", "voucher_code": "CODE-1", "updated_at": datetime.now(timezone.utc)},
+        ],
+        request_user_id=1001,
+    )
+    resp = fn()
+    assert resp.headers.get("Cache-Control") == "no-store, no-cache, must-revalidate, max-age=0"
+
+
+def test_affiliate_history_expired_welcome_ledger_not_mutated_or_deleted():
+    """The endpoint must only hide expired WELCOME rows from the response,
+    never write to or remove them from affiliate_ledger."""
+    now = datetime.now(timezone.utc)
+    row = {
+        "_id": 1,
+        "user_id": 1001,
+        "status": "ISSUED",
+        "ledger_type": "WELCOME",
+        "tier": "WELCOME",
+        "voucher_code": "OLD-WELCOME",
+        "issued_at": now - timedelta(days=20),
+        "updated_at": now - timedelta(days=20),
+    }
+    rows = [row]
+    fn, _ = _build_affiliate_history_globals(
+        users={1001: {"user_id": 1001}},
+        affiliate_rows=rows,
+        request_user_id=1001,
+    )
+    # _AffiliateLedgerCollection intentionally has no update_one/delete_one methods,
+    # so any attempt by the endpoint to mutate the ledger would raise AttributeError.
+    fn()
+    assert rows[0] == row

@@ -4182,6 +4182,13 @@
         const codeText = (reward && reward.code ? String(reward.code) : "").trim();
         if (!codeText) return;
 
+        // Defensive client-side check: the backend is authoritative on visibility,
+        // but never render a card past its expires_at even on a stale/malformed payload.
+        if (reward && reward.expires_at) {
+          const expiresMs = Date.parse(reward.expires_at);
+          if (!Number.isNaN(expiresMs) && Date.now() >= expiresMs) return;
+        }
+
         const card = document.createElement("div");
         card.className = "campaign-card";
 
