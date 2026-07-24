@@ -4089,8 +4089,7 @@
       }
 
       hapticImpact("light");
-      const shareText = `${data.hook_text}\n${data.playback_url}\n\nMore player replays and rewards inside AdvantPlay:`;
-      const shareUrl = `https://t.me/share/url?url=${encodeURIComponent(data.invite_link)}&text=${encodeURIComponent(shareText)}`;
+      const shareUrl = `https://t.me/share/url?url=${encodeURIComponent(data.invite_link)}&text=${encodeURIComponent(data.share_text || "")}`;
       openTelegramSafeLink(shareUrl);
     }
 

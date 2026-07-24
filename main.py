@@ -6296,7 +6296,7 @@ def api_referral_share_content():
             return jsonify({"ok": False, "error": "Unauthorized"}), 403
         username = (user_payload or {}).get("username") or ""
 
-        from referral_share_content import generate_share_package
+        from referral_share_content import build_referral_share_caption, generate_share_package
 
         result = generate_share_package(user_id, username, generated_by="miniapp")
         if not result.get("ok"):
@@ -6306,11 +6306,22 @@ def api_referral_share_content():
             logger.error("[SHARE_CONTENT][API_FAIL] uid=%s code=%s", user_id, code)
             return jsonify({"ok": False, "error": "Unable to generate your referral link right now."}), 500
 
+        # share_text mirrors "message" minus the trailing link line, for
+        # surfaces (Telegram's share/url button) that pass the link via a
+        # separate url param -- see build_referral_share_caption().
+        share_text = build_referral_share_caption(
+            hook_text=result["hook_text"],
+            playback_url=result["playback_url"],
+            referral_url=result["invite_link"],
+            include_referral_link=False,
+        )
+
         logger.info("[SHARE_CONTENT][API_OK] uid=%s", user_id)
         return jsonify(
             {
                 "ok": True,
                 "message": result["message"],
+                "share_text": share_text,
                 "invite_link": result["invite_link"],
                 "playback_url": result["playback_url"],
                 "hook_text": result["hook_text"],
@@ -7795,10 +7806,17 @@ async def send_referral_link_with_share_button(update: Update, context: ContextT
 
     # Telegram's share/url composes the prefilled message as
     # "{url}\n{text}" (url first, then text) -- not the other way around.
-    # So the link goes only in the url param, and text carries the hook +
-    # playback URL *without* the trailing arrow/link line, otherwise the
+    # So the link goes only in the url param, and text carries the same
+    # shared caption template *without* the trailing link line, otherwise the
     # invite link would appear twice in the share sheet.
-    share_text = f"{result['hook_text']}\n{result['playback_url']}\n\nMore player replays and rewards inside AdvantPlay:"
+    from referral_share_content import build_referral_share_caption
+
+    share_text = build_referral_share_caption(
+        hook_text=result["hook_text"],
+        playback_url=result["playback_url"],
+        referral_url=invite_link,
+        include_referral_link=False,
+    )
     share_url = (
         "https://t.me/share/url"
         f"?url={quote(invite_link, safe='')}"
@@ -8448,9 +8466,16 @@ async def generate_referral_link_callback(update: Update, context: ContextTypes.
 
     # Telegram's share/url composes the prefilled message as "{url}\n{text}"
     # (url first, then text) — so the link goes only in the url param, and
-    # text carries the hook + playback URL *without* the trailing arrow/link
-    # line, otherwise the invite link would appear twice in the share sheet.
-    share_text = f"{result['hook_text']}\n{result['playback_url']}\n\nMore player replays and rewards inside AdvantPlay:"
+    # text carries the same shared caption template *without* the trailing
+    # link line, otherwise the invite link would appear twice in the share sheet.
+    from referral_share_content import build_referral_share_caption
+
+    share_text = build_referral_share_caption(
+        hook_text=result["hook_text"],
+        playback_url=result["playback_url"],
+        referral_url=invite_link,
+        include_referral_link=False,
+    )
     share_params = urlencode({"url": invite_link, "text": share_text})
     share_keyboard = InlineKeyboardMarkup(
         [[InlineKeyboardButton("📤 Share Referral Link", url=f"https://t.me/share/url?{share_params}")]]

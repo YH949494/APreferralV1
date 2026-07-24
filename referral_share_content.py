@@ -1,11 +1,17 @@
 """Referral Centre — Share Content.
 
-Assembles the bot's Copy/Share caption from three parts:
+Assembles the bot's Copy/Share caption from three parts (see
+``build_referral_share_caption`` for the exact template):
   {random_active_hook}
   {selected_active_playback_url}
 
-  More player replays and rewards inside AdvantPlay:
-  👉 {user_canonical_invite_link}
+  Want more replays like this—and rewards too?
+
+  Join AdvantPlay for 👇
+  ...benefits...
+
+  Start here 👇
+  {user_canonical_invite_link}
 
 Collections: ``caption_hooks``, ``playback_pool``, ``share_generations``.
 
@@ -43,6 +49,14 @@ MAX_HOOK_TEXT_LEN = 500
 MAX_GAME_NAME_LEN = 200
 MAX_BULK_IMPORT_LINES = 2000
 DEFAULT_FALLBACK_HOOK_TEXT = "🎬 Fresh replays just dropped!"
+
+# Last-resort hook line used only inside build_referral_share_caption() when
+# it is called directly with a blank hook_text. The normal generation path
+# (generate_share_package -> _default_hook_text) already fills in the
+# Settings-configurable DEFAULT_FALLBACK_HOOK_TEXT before the builder ever
+# sees an empty string, so this constant is a defensive fallback, not the
+# one admins configure.
+CAPTION_FALLBACK_HOOK_TEXT = "Wait for the ending 👀"
 
 
 def _require_admin():
@@ -247,6 +261,65 @@ def select_playback_for_user(user_id: int, now: datetime | None = None) -> dict 
     )
 
 
+# ---------------------------------------------------------------------------
+# Shared caption template — the single source of truth for the referral
+# share caption's text. Every active surface (bot deep-link reply, Telegram
+# share-button prefill, Mini App copy/share) must render its caption through
+# this function so they can never drift out of format with each other.
+# ---------------------------------------------------------------------------
+
+def build_referral_share_caption(
+    *,
+    hook_text: str,
+    playback_url: str,
+    referral_url: str,
+    include_referral_link: bool = True,
+) -> str:
+    """Assemble the referral-share caption from its three parts.
+
+    ``hook_text`` and ``playback_url`` are expected to already be the result
+    of the existing pool selection (``select_hook`` / ``select_playback_for_user``)
+    — this function does not pick or filter them, it only renders the text.
+    ``referral_url`` is the user's canonical Telegram invite link and is
+    always required: a caption is never built (or shared) with an empty
+    referral URL.
+
+    Set ``include_referral_link=False`` to render everything except the
+    trailing link line, for surfaces (Telegram's ``share/url`` button) that
+    pass the link via a separate ``url`` query param — including it in both
+    places would show the link twice in the share sheet.
+    """
+    referral_url = (referral_url or "").strip()
+    if not referral_url:
+        raise ValueError("build_referral_share_caption requires a non-empty referral_url")
+
+    hook = (hook_text or "").strip() or CAPTION_FALLBACK_HOOK_TEXT
+    playback_url = (playback_url or "").strip()
+    if not playback_url:
+        logger.warning("[SHARE_CONTENT][CAPTION] missing playback_url; building referral-only caption")
+
+    lines = [hook]
+    if playback_url:
+        lines.append(playback_url)
+    lines.extend([
+        "",
+        "Want more replays like this—and rewards too?",
+        "",
+        "Join AdvantPlay for 👇",
+        "",
+        "⚡️ Daily voucher drops",
+        "🎁 Exclusive reward campaigns",
+        "🏆 Weekly ranking rewards",
+        "👑 VIP updates and opportunities",
+        "",
+        "Start here 👇",
+    ])
+    if include_referral_link:
+        lines.append(referral_url)
+
+    return "\n".join(lines)
+
+
 def generate_share_package(
     user_id: int,
     username: str = "",
@@ -299,11 +372,10 @@ def generate_share_package(
         return {"ok": False, "code": "invite_link_failed"}
 
     playback_url = playback_doc["playback_url"]
-    message = (
-        f"{hook_text}\n"
-        f"{playback_url}\n\n"
-        "More player replays and rewards inside AdvantPlay:\n"
-        f"👉 {invite_link}"
+    message = build_referral_share_caption(
+        hook_text=hook_text,
+        playback_url=playback_url,
+        referral_url=invite_link,
     )
 
     doc = {
