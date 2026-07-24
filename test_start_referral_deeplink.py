@@ -211,12 +211,26 @@ def test_new_user_referral_deeplink_returns_share_package_and_share_button(deepl
     assert "https://t.me/+brandNewHash" in reply["text"]
     assert "🎬 New hook!" in reply["text"]
     assert "https://cdn.example.com/playback/xyz" in reply["text"]
-    assert reply["text"].startswith("<blockquote>")
-    assert reply["text"].endswith("</blockquote>")
-    assert "👉 https://t.me/+brandNewHash" in reply["text"]
+
+    # Only the benefits section is wrapped in a blockquote; hook, playback
+    # link, and the trailing referral CTA/URL must sit outside it.
+    assert reply["text"].count("<blockquote>") == 1
+    assert reply["text"].count("</blockquote>") == 1
+    quote_start = reply["text"].index("<blockquote>")
+    quote_end = reply["text"].index("</blockquote>") + len("</blockquote>")
+    quoted = reply["text"][quote_start:quote_end]
+    assert "Join AdvantPlay for" in quoted
+    assert "⚡️ Daily voucher drops" in quoted
+    assert "🎬 New hook!" not in quoted
+    assert "https://cdn.example.com/playback/xyz" not in quoted
+    assert "https://t.me/+brandNewHash" not in quoted
+    assert "🎬 New hook!" in reply["text"][:quote_start]
+    assert "https://t.me/+brandNewHash" in reply["text"][quote_end:]
+
+    assert reply.get("parse_mode") == ParseMode.HTML
+    assert reply.get("disable_web_page_preview") is not True
 
     # Old hard-coded caption must never appear.
-    assert "Join AdvantPlay" not in reply["text"]
     assert "Daily XP rewards" not in reply["text"]
     assert "Active players win more" not in reply["text"]
 

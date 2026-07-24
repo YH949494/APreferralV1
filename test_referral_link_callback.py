@@ -5,6 +5,7 @@ from urllib.parse import parse_qs, urlparse
 
 import pytest
 from telegram import Update
+from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 
 import referral_share_content as rsc
@@ -70,6 +71,7 @@ def _load_callback_func():
         "InlineKeyboardButton": __import__("telegram", fromlist=["InlineKeyboardButton"]).InlineKeyboardButton,
         "InlineKeyboardMarkup": __import__("telegram", fromlist=["InlineKeyboardMarkup"]).InlineKeyboardMarkup,
         "urlencode": __import__("urllib.parse", fromlist=["urlencode"]).urlencode,
+        "ParseMode": ParseMode,
     }
     exec(compile(isolated, filename="main.py", mode="exec"), env)  # noqa: S102
     return env["generate_referral_link_callback"]
@@ -189,12 +191,18 @@ def test_callback_success_sends_exact_generated_message(callback_env):
     assert msg["text"] == (
         "🔥 Big wins today!\n"
         "https://rx.apreplay.com/Play00001\n\n"
-        "More player replays and rewards inside AdvantPlay:\n"
-        "👉 https://t.me/+abcDEF123"
+        "Want more replays like this—and rewards too?\n\n"
+        "<blockquote><b>Join AdvantPlay for 👇</b>\n"
+        "⚡️ Daily voucher drops\n"
+        "🎁 Exclusive reward campaigns\n"
+        "🏆 Weekly ranking rewards\n"
+        "👑 VIP updates and opportunities</blockquote>\n\n"
+        "Start here 👇\n"
+        "https://t.me/+abcDEF123"
     )
     assert msg["chat_id"] == 102
-    assert msg.get("disable_web_page_preview") is True
-    assert "parse_mode" not in msg or msg.get("parse_mode") is None
+    assert msg.get("disable_web_page_preview") is not True
+    assert msg.get("parse_mode") == ParseMode.HTML
 
 
 def test_callback_share_button_prefilled_with_complete_package(callback_env):
