@@ -3029,10 +3029,35 @@
         var ah = (d.affiliate_history || []).map(function (a) {
           return "<tr><td>" + esc(a.ledger_type) + "</td><td>" + esc(a.tier || "—") + '</td><td><span class="pill ' + esc((a.status || "neutral").toLowerCase()) + '">' + esc(a.status) + "</span></td><td>" + esc(a.year_month || "—") + "</td><td>" + dt(a.updated_at) + "</td></tr>";
         }).join("") || '<tr><td colspan="5">No affiliate history.</td></tr>';
+        var so = d.segment_observability || {};
+        // Distinguish "no real classifier result exists" from "classifier ran
+        // and explicitly returned unclassified" — the exact ambiguity a raw
+        // `d.segment` display collapses. See dashboard_panels.py:_build_segment_observability.
+        var DATA_STATUS_LABEL = {
+          classified: "Classified",
+          classified_unclassified: "Unclassified (classifier ran)",
+          stale_snapshot: "Stale snapshot",
+          snapshot_missing_segment_field: "Snapshot missing segment field",
+          legacy_only_no_backend_snapshot: "No segment snapshot",
+          snapshot_lookup_failed: "Snapshot lookup failed",
+          no_data: "No data"
+        };
+        var dataStatusText = DATA_STATUS_LABEL[so.data_status] || so.data_status || "—";
+        var turnoverLabel = so.turnover_window
+          ? "Imported Turnover (" + esc(so.turnover_window.snapshot_week || so.turnover_window.snapshot_month || "period unknown") + ")"
+          : "—";
         $("#user-body").innerHTML =
           '<div class="detail-grid">' +
           kvBlock("Profile", [["User ID", p.user_id], ["Username", p.username ? "@" + p.username : "—"], ["Name", p.first_name], ["Status", p.status], ["VIP Tier", p.vip_tier], ["Joined Main", dt(p.joined_main_at)]]) +
           kvBlock("Segment & XP", [["Segment", d.segment], ["Total XP", x.total_xp], ["Weekly XP", x.weekly_xp], ["Monthly XP", x.monthly_xp]]) +
+          kvBlock("Segment Data Status", [
+            ["Status", dataStatusText],
+            ["Source", so.segment_source || "—"],
+            ["Snapshot Exists", so.snapshot_exists ? "Yes" : "No"],
+            ["Snapshot At", dt(so.segment_snapshot_at)],
+            ["Reason", so.segment_reason || "—"],
+            [turnoverLabel, so.turnover_window ? (so.turnover_window.note || "") : "No snapshot to read from"]
+          ]) +
           kvBlock("Check-in", [["Streak", ci.streak], ["Freeze Tokens", ci.streak_freeze_tokens], ["First Check-in", dt(ci.first_checkin_at)], ["Last Check-in", dt(ci.last_checkin)]]) +
           kvBlock("Referrals", [["Snapshot Total", rs.total_referrals_snapshot], ["Made", rs.referrals_made], ["Qualified", rs.referrals_qualified], ["Was Referred", rs.was_referred]]) +
           kvBlock("Welcome", [["Eligible", ws.eligible], ["Claimed", ws.claimed], ["Lifecycle", ws.lifecycle_state], ["Claimed At", dt(ws.claimed_at)]]) +

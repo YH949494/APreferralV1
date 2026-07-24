@@ -25,10 +25,19 @@ Traces exactly what Part 1-2 of the segmentation audit proved:
 """
 from __future__ import annotations
 
+import os
 import sys
 from datetime import datetime, timedelta, timezone
 
-import database
+# Ensure the repository root is on sys.path regardless of working directory —
+# `python3 scripts/diagnose_segment.py` puts scripts/, not the repo root, on
+# sys.path[0], so a plain `import database` fails outside PYTHONPATH tricks.
+# Mirrors scripts/backfill_public_pool_claim_state.py's bootstrap.
+_APP_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _APP_ROOT not in sys.path:
+    sys.path.insert(0, _APP_ROOT)
+
+import database  # noqa: E402 – must come after sys.path fix
 
 
 def _iso(dt):
@@ -120,13 +129,17 @@ def diagnose(user_id: int, gaming_account: str | None = None) -> None:
     print("claims_7d (printed for comparison only — no classifier reads this):", claims_7d)
     print("claims_30d (printed for comparison only — no classifier reads this):", claims_30d)
 
-    recent_claim_docs = list(
+    # The real engine's join (backend_segment_engine.py:688-702) matches
+    # marketing_raw_data.coupon_code against ALL of a user's voucher_codes,
+    # not just the most recent — so this diagnostic queries the complete
+    # claim-code set here to reproduce that mapping behavior accurately.
+    # (A capped preview is still printed separately for readability.)
+    all_claim_docs = list(
         claims_col.find({"user_id": user_id}, {"_id": 0, "voucher_code": 1, "status": 1, "created_at": 1})
         .sort("created_at", -1)
-        .limit(10)
     )
-    voucher_codes = [d.get("voucher_code") for d in recent_claim_docs if d.get("voucher_code")]
-    print("most recent voucher_codes claimed (used as System B's coupon join key):", voucher_codes[:10])
+    voucher_codes = [d.get("voucher_code") for d in all_claim_docs if d.get("voucher_code")]
+    print(f"total voucher_codes claimed ({len(voucher_codes)}), most recent 10 shown:", voucher_codes[:10])
 
     # -----------------------------------------------------------------
     # 3. Identity mapping chain (Telegram user_id <-> coupon_code <-> account)
@@ -216,6 +229,28 @@ def diagnose(user_id: int, gaming_account: str | None = None) -> None:
         turnover_source = "none (no snapshot to read from)"
         turnover_window_proven = "N/A — no snapshot exists"
 
+    # Apply the documented fallback for real: users.claim_risk_level (System A)
+    # first, else the latest snapshot's claim_risk_level (System B) — matching
+    # the claim_risk_source text below, which previously described this
+    # fallback without the code actually performing it.
+    users_claim_risk = (user or {}).get("claim_risk_level")
+    if users_claim_risk not in (None, ""):
+        claim_risk_displayed_value = users_claim_risk
+        claim_risk_source_used = "users.claim_risk_level (System A, external sheet pass-through)"
+    elif snapshot and snapshot.get("claim_risk_level") not in (None, ""):
+        claim_risk_displayed_value = snapshot.get("claim_risk_level")
+        claim_risk_source_used = (
+            "backend_segment_snapshots.claim_risk_level (System B, "
+            "classify_claim_risk(lifetime claim_count))"
+        )
+        fallback_fields_used.append(
+            "claim_risk_displayed_value fell back to the backend snapshot because "
+            "users.claim_risk_level was blank/missing"
+        )
+    else:
+        claim_risk_displayed_value = None
+        claim_risk_source_used = "none (neither users.claim_risk_level nor a snapshot value present)"
+
     print("\n--- SUMMARY (fields requested for the diagnostic contract) ---")
     summary = {
         "displayed_segment": segment_raw_value,
@@ -232,10 +267,8 @@ def diagnose(user_id: int, gaming_account: str | None = None) -> None:
         "users_bot_segment": raw_bot_segment,
         "users_backend_segment": raw_backend_segment_on_user,
         "backend_segment_snapshots_value": snapshot.get("backend_segment") if snapshot else None,
-        "claim_risk_displayed_value": (user or {}).get("claim_risk_level") if user else None,
-        "claim_risk_source": "users.claim_risk_level (System A, external sheet pass-through) "
-                              "if present, else backend_segment_snapshots.claim_risk_level "
-                              "(System B, classify_claim_risk(lifetime claim_count))",
+        "claim_risk_displayed_value": claim_risk_displayed_value,
+        "claim_risk_source": claim_risk_source_used,
         "claims_lifetime": claims_lifetime,
         "claims_7d": claims_7d,
         "claims_30d": claims_30d,

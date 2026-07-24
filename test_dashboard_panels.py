@@ -552,6 +552,65 @@ def test_user_drilldown_segment_observability_with_snapshot():
     assert "Not a rolling 7-day calculation" in obs["turnover_window"]["note"]
 
 
+def test_user_drilldown_segment_observability_stale_snapshot():
+    """A snapshot from a prior ISO week must not read as a current classification."""
+    users = FakeCollection([
+        {"user_id": 42, "username": "Neo", "for_bot_segment": "ghost"},
+    ])
+    empty = FakeCollection([])
+    snapshots = FakeCollection([
+        {
+            "telegram_user_id": 42,
+            "backend_segment": "voucher_hunter",
+            "segment_reason": "high_claim_low_play: ...",
+            "snapshot_week": "2026-W15",  # months before NOW's 2026-W24
+            "snapshot_month": "2026-04",
+            "calculated_at": datetime(2026, 4, 10, tzinfo=timezone.utc),
+        }
+    ])
+
+    out = dp.build_user_drilldown(
+        query="42", users_col=users, welcome_eligibility_col=empty,
+        voucher_claims_col=empty, affiliate_ledger_col=empty,
+        pending_referrals_col=empty, qualified_events_col=empty,
+        backend_segment_snapshots_col=snapshots, now=NOW,
+    )
+    obs = out["segment_observability"]
+    assert obs["snapshot_exists"] is True
+    assert obs["is_stale_snapshot"] is True
+    # Must not be reported as a fresh "classified"/"classified_unclassified" result.
+    assert obs["data_status"] == "stale_snapshot"
+
+
+class _RaisingCollection:
+    """Fake collection whose find() blows up, to exercise lookup-error handling."""
+
+    def find(self, *args, **kwargs):
+        raise RuntimeError("simulated Mongo timeout")
+
+
+def test_user_drilldown_segment_observability_lookup_error_not_silent():
+    """A snapshot lookup failure must not be indistinguishable from 'no data'."""
+    users = FakeCollection([
+        {"user_id": 42, "username": "Neo", "for_bot_segment": "ghost"},
+    ])
+    empty = FakeCollection([])
+
+    out = dp.build_user_drilldown(
+        query="42", users_col=users, welcome_eligibility_col=empty,
+        voucher_claims_col=empty, affiliate_ledger_col=empty,
+        pending_referrals_col=empty, qualified_events_col=empty,
+        backend_segment_snapshots_col=_RaisingCollection(), now=NOW,
+    )
+    obs = out["segment_observability"]
+    assert obs["snapshot_exists"] is False
+    assert obs["data_status"] == "snapshot_lookup_failed"
+    assert obs["snapshot_lookup_error"] is not None
+    # The failure must surface in the drilldown's existing error collector too.
+    assert out["partial_errors"] is not None
+    assert any("backend_segment_snapshot_lookup" in e for e in out["partial_errors"])
+
+
 # ---------------------------------------------------------------------------
 # Settings
 # ---------------------------------------------------------------------------

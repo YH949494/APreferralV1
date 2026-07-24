@@ -3637,10 +3637,16 @@ def build_segment_rule_simulator(
 # 5. User drilldown
 # ---------------------------------------------------------------------------
 
+def _current_snapshot_week_key(now: datetime) -> str:
+    iso_year, iso_week, _ = now.isocalendar()
+    return f"{iso_year:04d}-W{iso_week:02d}"
+
+
 def _build_segment_observability(
     *,
     user: dict,
     backend_segment_snapshots_col=None,
+    now: datetime | None = None,
 ) -> dict:
     """P0 observability block for the user drilldown (read-only, additive).
 
@@ -3651,7 +3657,9 @@ def _build_segment_observability(
     result exists for the current period, so "no data this period" is never
     silently rendered identical to "classified as unclassified".
     """
+    now = now or _utc_now()
     fallback_fields_used: list[str] = []
+    snapshot_lookup_error: str | None = None
 
     raw_for_bot_segment = user.get("for_bot_segment")
     raw_bot_segment = user.get("bot_segment")
@@ -3686,17 +3694,34 @@ def _build_segment_observability(
             for doc in cursor:
                 snapshot = doc
                 break
-        except Exception:
+        except Exception as exc:  # noqa: BLE001
+            # A lookup failure (Mongo timeout/rejection) must not read as
+            # "no data exists" — that's a false absence signal during exactly
+            # the operational failures this block exists to diagnose.
             snapshot = None
+            snapshot_lookup_error = str(exc)
 
     snapshot_exists = snapshot is not None
     segment_snapshot_at = _iso(snapshot.get("calculated_at")) if snapshot else None
     segment_reason = snapshot.get("segment_reason") if snapshot else None
     backend_segment_value = snapshot.get("backend_segment") if snapshot else raw_backend_segment
 
-    # data_status distinguishes "no snapshot to evaluate" from "evaluated,
-    # classifier explicitly returned unclassified" from "have a real segment".
-    if snapshot_exists:
+    # A snapshot outside the current ISO week is stale: still returned for
+    # context, but must not be reported as if it were a current classification
+    # (a months-old "unclassified"/"ghost" read as fresh during an incident
+    # is exactly the failure mode this block exists to prevent).
+    current_week = _current_snapshot_week_key(now)
+    snapshot_week = snapshot.get("snapshot_week") if snapshot else None
+    is_stale_snapshot = bool(snapshot_exists and snapshot_week and snapshot_week != current_week)
+
+    # data_status distinguishes "lookup failed" / "no snapshot to evaluate" /
+    # "snapshot is stale" / "evaluated, classifier explicitly returned
+    # unclassified" from "have a real, current segment".
+    if snapshot_lookup_error is not None:
+        data_status = "snapshot_lookup_failed"
+    elif snapshot_exists and is_stale_snapshot:
+        data_status = "stale_snapshot"
+    elif snapshot_exists:
         if backend_segment_value == "unclassified":
             data_status = "classified_unclassified"
         elif backend_segment_value:
@@ -3735,9 +3760,12 @@ def _build_segment_observability(
         "segment_snapshot_at": segment_snapshot_at,
         "segment_reason": segment_reason,
         "snapshot_exists": snapshot_exists,
+        "snapshot_week": snapshot_week,
+        "is_stale_snapshot": is_stale_snapshot,
         "data_status": data_status,
         "turnover_window": turnover_window,
         "fallback_fields_used": fallback_fields_used,
+        "snapshot_lookup_error": snapshot_lookup_error,
         # Kept for the audit trail; not authoritative for voucher/campaign logic.
         "backend_segment_snapshot_value": backend_segment_value,
     }
@@ -3850,8 +3878,12 @@ def build_user_drilldown(
                 risk_flags.append(tag)
 
     segment_observability = _build_segment_observability(
-        user=user, backend_segment_snapshots_col=backend_segment_snapshots_col
+        user=user, backend_segment_snapshots_col=backend_segment_snapshots_col, now=now
     )
+    if segment_observability.get("snapshot_lookup_error"):
+        errors.append(
+            f"backend_segment_snapshot_lookup: {segment_observability['snapshot_lookup_error']}"
+        )
 
     return {
         "success": True,
