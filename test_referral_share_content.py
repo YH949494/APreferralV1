@@ -611,8 +611,14 @@ class TestGenerateSharePackage:
         expected = (
             "🔥 Big wins today!\n"
             "https://rx.apreplay.com/Play00001\n\n"
-            "More player replays and rewards inside AdvantPlay:\n"
-            "👉 https://t.me/+abc123"
+            "Want more replays like this—and rewards too?\n\n"
+            "Join AdvantPlay for 👇\n\n"
+            "⚡️ Daily voucher drops\n"
+            "🎁 Exclusive reward campaigns\n"
+            "🏆 Weekly ranking rewards\n"
+            "👑 VIP updates and opportunities\n\n"
+            "Start here 👇\n"
+            "https://t.me/+abc123"
         )
         assert result["message"] == expected
 
@@ -672,3 +678,140 @@ class TestGenerateSharePackage:
         result = rsc.generate_share_package(5, "user5")
         assert "invite_link" not in result
         assert "message" not in result
+
+
+# ---------------------------------------------------------------------------
+# build_referral_share_caption — shared template used by every active
+# caption-generation surface (bot reply, share-button prefill, Mini App).
+# ---------------------------------------------------------------------------
+
+EXPECTED_BENEFITS_BLOCK = (
+    "Want more replays like this—and rewards too?\n\n"
+    "Join AdvantPlay for 👇\n\n"
+    "⚡️ Daily voucher drops\n"
+    "🎁 Exclusive reward campaigns\n"
+    "🏆 Weekly ranking rewards\n"
+    "👑 VIP updates and opportunities\n\n"
+    "Start here 👇"
+)
+
+
+class TestBuildReferralShareCaption:
+    def test_normal_hook_playback_and_referral_url(self):
+        result = rsc.build_referral_share_caption(
+            hook_text="Walao, wait for the ending 👀",
+            playback_url="https://rx.apreplay.com/87FWMgJ5kL",
+            referral_url="https://t.me/+y7BPw5Sv7KJhODc1",
+        )
+        expected = (
+            "Walao, wait for the ending 👀\n"
+            "https://rx.apreplay.com/87FWMgJ5kL\n\n"
+            f"{EXPECTED_BENEFITS_BLOCK}\n"
+            "https://t.me/+y7BPw5Sv7KJhODc1"
+        )
+        assert result == expected
+
+    def test_exact_line_breaks_and_ordering(self):
+        result = rsc.build_referral_share_caption(
+            hook_text="Hook",
+            playback_url="https://rx.apreplay.com/Abc12345",
+            referral_url="https://t.me/+ref",
+        )
+        lines = result.split("\n")
+        assert lines == [
+            "Hook",
+            "https://rx.apreplay.com/Abc12345",
+            "",
+            "Want more replays like this—and rewards too?",
+            "",
+            "Join AdvantPlay for 👇",
+            "",
+            "⚡️ Daily voucher drops",
+            "🎁 Exclusive reward campaigns",
+            "🏆 Weekly ranking rewards",
+            "👑 VIP updates and opportunities",
+            "",
+            "Start here 👇",
+            "https://t.me/+ref",
+        ]
+
+    def test_referral_url_is_the_final_line(self):
+        result = rsc.build_referral_share_caption(
+            hook_text="Hook", playback_url="https://rx.apreplay.com/Abc12345", referral_url="https://t.me/+ref"
+        )
+        assert result.split("\n")[-1] == "https://t.me/+ref"
+
+    def test_trims_surrounding_whitespace_from_dynamic_values(self):
+        result = rsc.build_referral_share_caption(
+            hook_text="  Hook  \n",
+            playback_url="  https://rx.apreplay.com/Abc12345  ",
+            referral_url="  https://t.me/+ref  ",
+        )
+        assert result.startswith("Hook\nhttps://rx.apreplay.com/Abc12345\n\n")
+        assert result.endswith("https://t.me/+ref")
+        assert "  " not in result.split("\n")[0]
+
+    def test_missing_hook_falls_back_to_default_line(self):
+        result = rsc.build_referral_share_caption(
+            hook_text="", playback_url="https://rx.apreplay.com/Abc12345", referral_url="https://t.me/+ref"
+        )
+        assert result.startswith("Wait for the ending 👀\n")
+
+        result_none = rsc.build_referral_share_caption(
+            hook_text=None, playback_url="https://rx.apreplay.com/Abc12345", referral_url="https://t.me/+ref"
+        )
+        assert result_none.startswith("Wait for the ending 👀\n")
+
+    def test_missing_playback_produces_referral_only_caption_no_blank_line(self, caplog):
+        result = rsc.build_referral_share_caption(hook_text="Hook", playback_url="", referral_url="https://t.me/+ref")
+        expected = f"Hook\n\n{EXPECTED_BENEFITS_BLOCK}\nhttps://t.me/+ref"
+        assert result == expected
+        assert "https://rx.apreplay.com" not in result
+        # No blank/malformed URL line: exactly one blank line separates the
+        # hook from the benefits block, not two.
+        assert "\n\n\n" not in result
+
+    def test_missing_referral_url_raises(self):
+        with pytest.raises(ValueError):
+            rsc.build_referral_share_caption(hook_text="Hook", playback_url="https://rx.apreplay.com/Abc12345", referral_url="")
+
+        with pytest.raises(ValueError):
+            rsc.build_referral_share_caption(hook_text="Hook", playback_url="https://rx.apreplay.com/Abc12345", referral_url=None)
+
+    def test_unicode_emoji_and_punctuation_preserved(self):
+        result = rsc.build_referral_share_caption(
+            hook_text="It's 🔥 today's biggest win!",
+            playback_url="https://rx.apreplay.com/Abc12345",
+            referral_url="https://t.me/+ref",
+        )
+        assert "It's 🔥 today's biggest win!" in result
+        assert "⚡️" in result and "🎁" in result and "🏆" in result and "👑" in result
+        assert "👇" in result
+
+    def test_output_never_contains_none_or_undefined(self):
+        result = rsc.build_referral_share_caption(hook_text=None, playback_url=None, referral_url="https://t.me/+ref")
+        assert "None" not in result
+        assert "undefined" not in result
+
+    def test_no_duplicate_referral_url_when_link_excluded(self):
+        result = rsc.build_referral_share_caption(
+            hook_text="Hook",
+            playback_url="https://rx.apreplay.com/Abc12345",
+            referral_url="https://t.me/+ref",
+            include_referral_link=False,
+        )
+        assert result.count("https://t.me/+ref") == 0
+        assert result.endswith("Start here 👇")
+
+    def test_pool_selection_still_returns_only_active_entries(self, fake_db):
+        _hook(fake_db, "Active hook", status="active")
+        _hook(fake_db, "Inactive hook", status="inactive")
+        for _ in range(20):
+            picked = rsc.select_hook()
+            assert picked["text"] == "Active hook"
+
+        _playback(fake_db, "ActivePB01", status="active")
+        _playback(fake_db, "InactivePB", status="inactive")
+        for i in range(20):
+            picked = rsc.select_playback_for_user(user_id=9000 + i)
+            assert picked["playback_id"] == "ActivePB01"

@@ -200,8 +200,14 @@ def test_callback_success_sends_exact_generated_message(callback_env):
 def test_callback_share_button_prefilled_with_complete_package(callback_env):
     message = (
         "Hook\nhttps://rx.apreplay.com/Xyz00001\n\n"
-        "More player replays and rewards inside AdvantPlay:\n"
-        "👉 https://t.me/+abcDEF123?x=1&y=2"
+        "Want more replays like this—and rewards too?\n\n"
+        "Join AdvantPlay for 👇\n\n"
+        "⚡️ Daily voucher drops\n"
+        "🎁 Exclusive reward campaigns\n"
+        "🏆 Weekly ranking rewards\n"
+        "👑 VIP updates and opportunities\n\n"
+        "Start here 👇\n"
+        "https://t.me/+abcDEF123?x=1&y=2"
     )
     callback_env._state["result"] = {
         "ok": True,
@@ -224,9 +230,18 @@ def test_callback_share_button_prefilled_with_complete_package(callback_env):
     params = parse_qs(parsed.query)
     assert params["url"] == ["https://t.me/+abcDEF123?x=1&y=2"]
     # Telegram composes "{url}\n{text}" in the share sheet, so `text` must
-    # NOT repeat the invite link that's already in `url` — only the hook +
-    # playback URL, with no dangling arrow/link line.
-    assert params["text"] == ["Hook\nhttps://rx.apreplay.com/Xyz00001\n\nMore player replays and rewards inside AdvantPlay:"]
+    # NOT repeat the invite link that's already in `url` — only the shared
+    # caption template with the trailing link line omitted.
+    assert params["text"] == [
+        "Hook\nhttps://rx.apreplay.com/Xyz00001\n\n"
+        "Want more replays like this—and rewards too?\n\n"
+        "Join AdvantPlay for 👇\n\n"
+        "⚡️ Daily voucher drops\n"
+        "🎁 Exclusive reward campaigns\n"
+        "🏆 Weekly ranking rewards\n"
+        "👑 VIP updates and opportunities\n\n"
+        "Start here 👇"
+    ]
     assert "https://t.me/+abcDEF123?x=1&y=2" not in params["text"][0]
 
 
