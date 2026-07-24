@@ -6762,12 +6762,28 @@
           '<button class="btn" id="cc-preview-cancel">Back to edit</button>' +
           '<button class="btn primary" id="cc-preview-confirm">Confirm Publish / Schedule</button>' +
           "</div>";
-      } else {
-        var statusNote = post.status === "failed"
-          ? "This post failed — use Retry from the Failed list to requeue it."
-          : "This post is " + esc(post.status) + " and cannot be published/scheduled from here.";
+      } else if (post.status === "failed") {
+        var pvRunRef = (post.latest_run_id || "").slice(0, 8) || "—";
+        var pvFallback = "Internal publish error. Check worker logs using reference: " + pvRunRef + ".";
+        var pvCode = post.last_error_code || "unknown_error";
+        var pvMessage = (pvCode === "unknown_error" || !post.last_error_message) ? pvFallback : post.last_error_message;
+        var statusNote =
+          "Status: Failed<br>" +
+          "Error: " + esc(pvCode) + "<br>" +
+          (post.last_failed_step ? "Step: " + esc(post.last_failed_step) + "<br>" : "") +
+          "Message: " + esc(pvMessage) + "<br>" +
+          "Attempts: " + fmt(post.attempt_count || 0) + "<br>" +
+          "Reference: " + esc(pvRunRef) + "<br>" +
+          (post.retryable === true
+            ? "Use Retry from the Failed list to requeue it."
+            : "Not retryable — fix the underlying issue, then Edit Post or Duplicate Post.");
         actionsHtml =
           '<p class="sub" style="margin-top:14px;">' + statusNote + "</p>" +
+          '<div class="modal-actions"><button class="btn primary" id="cc-preview-cancel">Close</button></div>';
+      } else {
+        var statusNote2 = "This post is " + esc(post.status) + " and cannot be published/scheduled from here.";
+        actionsHtml =
+          '<p class="sub" style="margin-top:14px;">' + statusNote2 + "</p>" +
           '<div class="modal-actions"><button class="btn primary" id="cc-preview-cancel">Close</button></div>';
       }
       overlay.innerHTML =
@@ -7046,10 +7062,14 @@
     } else {
       footerHtml = '<p class="sub">Fix the underlying issue before retrying.</p>';
     }
+    var detailLines = "";
+    if (post.last_failed_step) detailLines += "Step: " + esc(post.last_failed_step) + "<br>";
+    if (post.last_exception_class) detailLines += "Exception: " + esc(post.last_exception_class) + "<br>";
     var html = "<h3>Retry failed post?</h3>" +
       '<p><strong>Error:</strong><br>' + esc(code) + '</p>' +
       '<p>' + esc(message) + '</p>' +
-      '<p class="sub">Attempts: ' + fmt(post.attempt_count || 0) + '<br>' +
+      '<p class="sub">' + detailLines +
+      'Attempts: ' + fmt(post.attempt_count || 0) + '<br>' +
       'Last attempt: ' + esc(ccFormatKlLong(post.last_attempt_at_kl || post.updated_at)) + '<br>' +
       'Retryable: ' + (retryable ? "Yes" : "No") + '<br>' +
       'Reference: ' + esc(runRef) + '</p>' +
