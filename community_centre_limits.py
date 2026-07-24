@@ -309,15 +309,35 @@ _ALLOWED_ATTRS = {
     "code": {"class"},
 }
 
+# Equivalent-tag normalisation (spec: strong->b, em->i, ins->u, strike/del->s)
+# so the sanitized output always uses Telegram's canonical short tag names,
+# regardless of which alias a rich-text editor (browser execCommand output,
+# pasted Word/Docs markup, ...) happened to emit.
+_TAG_ALIASES = {
+    "strong": "b",
+    "em": "i",
+    "ins": "u",
+    "strike": "s",
+    "del": "s",
+}
+
 
 class _TelegramHTMLSanitizer(HTMLParser):
     def __init__(self):
         super().__init__(convert_charrefs=False)
         self.out: list[str] = []
-        self._stack: list[str] = []
+        # Each stack entry is (tag, emitted) — "emitted" is False for a
+        # blockquote opened while already inside another blockquote, so we
+        # can silently swallow the nested wrapper (and its matching close
+        # tag) without ever emitting nested <blockquote> markup.
+        self._stack: list[tuple[str, bool]] = []
 
     def handle_starttag(self, tag, attrs):
+        tag = _TAG_ALIASES.get(tag, tag)
         if tag not in _ALLOWED_TAGS:
+            return
+        if tag == "blockquote" and any(t == "blockquote" for t, _ in self._stack):
+            self._stack.append((tag, False))
             return
         allowed_attrs = _ALLOWED_ATTRS.get(tag, set())
         kept = []
@@ -331,21 +351,37 @@ class _TelegramHTMLSanitizer(HTMLParser):
                     continue
                 if not (low.startswith("https://") or low.startswith("tg://") or low.startswith("http://")):
                     continue
+            if tag == "span" and name == "class" and (value or "").strip() != "tg-spoiler":
+                # Only the Telegram spoiler class is a supported span variant —
+                # arbitrary classes (Word/Docs paste debris, etc.) are dropped.
+                continue
             kept.append(f'{name}="{value}"' if value is not None else name)
+        if tag == "span" and not kept:
+            # A span with no (or a stripped) tg-spoiler class carries no
+            # Telegram-supported meaning — unwrap it rather than emit inert
+            # markup, while still tracking it on the stack so its matching
+            # close tag doesn't accidentally close an outer element.
+            self._stack.append((tag, False))
+            return
         attr_str = (" " + " ".join(kept)) if kept else ""
         self.out.append(f"<{tag}{attr_str}>")
-        self._stack.append(tag)
+        self._stack.append((tag, True))
 
     def handle_endtag(self, tag):
+        tag = _TAG_ALIASES.get(tag, tag)
         if tag not in _ALLOWED_TAGS:
             return
-        if tag in self._stack:
-            # Close any accidentally-unclosed inner tags first (best effort).
-            while self._stack and self._stack[-1] != tag:
-                self.out.append(f"</{self._stack.pop()}>")
-            if self._stack:
-                self._stack.pop()
-            self.out.append(f"</{tag}>")
+        if not any(t == tag for t, _ in self._stack):
+            return
+        # Close any accidentally-unclosed inner tags first (best effort).
+        while self._stack and self._stack[-1][0] != tag:
+            inner_tag, emitted = self._stack.pop()
+            if emitted:
+                self.out.append(f"</{inner_tag}>")
+        if self._stack:
+            _, emitted = self._stack.pop()
+            if emitted:
+                self.out.append(f"</{tag}>")
 
     def handle_data(self, data):
         self.out.append(
@@ -360,7 +396,9 @@ class _TelegramHTMLSanitizer(HTMLParser):
 
     def close_all(self):
         while self._stack:
-            self.out.append(f"</{self._stack.pop()}>")
+            tag, emitted = self._stack.pop()
+            if emitted:
+                self.out.append(f"</{tag}>")
 
     def result(self) -> str:
         return "".join(self.out)
