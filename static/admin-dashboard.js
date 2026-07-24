@@ -6115,6 +6115,194 @@
   // Approval / Published / Poll Results / Failed
   // =========================================================================
 
+  // ---- Rich-text editor: pure HTML helpers (no DOM dependency) ----------
+  // Mirrors the allowlist/normalisation in community_centre_limits.py so the
+  // Composer's visual editor never displays or round-trips markup that the
+  // authoritative backend sanitizer would silently strip. The backend
+  // re-sanitizes on every save regardless — these helpers exist purely so
+  // the client can show the same canonical result before submitting.
+  var CC_RTE_TAG_ALIASES = { strong: "b", em: "i", ins: "u", strike: "s", del: "s" };
+  var CC_RTE_ALLOWED_TAGS = ["b", "i", "u", "s", "code", "pre", "blockquote", "a", "span"];
+  var CC_RTE_ALLOWED_ATTRS = { a: ["href"], span: ["class"], blockquote: ["expandable"], code: ["class"] };
+  var CC_RTE_NAMED_ENTITIES = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " " };
+
+  function ccRteDecodeEntities(text) {
+    return String(text || "").replace(/&(#x?[0-9a-fA-F]+|[a-zA-Z][a-zA-Z0-9]*);/g, function (m, ent) {
+      if (ent.charAt(0) === "#") {
+        var isHex = ent.charAt(1) === "x" || ent.charAt(1) === "X";
+        var code = isHex ? parseInt(ent.slice(2), 16) : parseInt(ent.slice(1), 10);
+        if (isNaN(code)) return m;
+        try { return String.fromCodePoint(code); } catch (e) { return m; }
+      }
+      return CC_RTE_NAMED_ENTITIES.hasOwnProperty(ent) ? CC_RTE_NAMED_ENTITIES[ent] : m;
+    });
+  }
+
+  function ccRteEscapeText(text) {
+    return String(text || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
+
+  function ccRteEscapeAttr(v) {
+    return String(v || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  }
+
+  function ccRteIsSafeHref(href) {
+    var v = String(href || "").trim();
+    var low = v.toLowerCase();
+    if (!v) return false;
+    if (low.indexOf("javascript:") === 0 || low.indexOf("data:") === 0) return false;
+    return low.indexOf("https://") === 0 || low.indexOf("http://") === 0 || low.indexOf("tg://") === 0;
+  }
+
+  // Validates a URL for the Link toolbar action. Returns null when valid,
+  // otherwise a short user-facing error string.
+  function ccRteValidateUrl(url) {
+    var v = String(url || "").trim();
+    if (!v) return "URL is required.";
+    var low = v.toLowerCase();
+    if (low.indexOf("javascript:") === 0) return "javascript: links are not allowed.";
+    if (low.indexOf("data:") === 0) return "data: links are not allowed.";
+    if (/^tg:\/\/(resolve|join|user)(\/|\?|$)/i.test(v)) return null;
+    if (low.indexOf("https://") === 0 || low.indexOf("http://") === 0) {
+      try {
+        var u = new URL(v);
+        if (u.protocol !== "https:" && u.protocol !== "http:") return "Only https:// links are allowed.";
+        if (!u.hostname) return "Enter a valid URL.";
+        return null;
+      } catch (e) {
+        return "Enter a valid URL.";
+      }
+    }
+    return "Enter a valid https:// URL or an approved tg:// link.";
+  }
+
+  function ccRteParseAttrs(attrString) {
+    var attrs = {};
+    if (!attrString) return attrs;
+    var re = /([a-zA-Z_:][-a-zA-Z0-9_:.]*)\s*(?:=\s*("([^"]*)"|'([^']*)'|[^\s"'=<>`]+))?/g;
+    var m;
+    while ((m = re.exec(attrString))) {
+      var name = m[1].toLowerCase();
+      var value = m[3] !== undefined ? m[3] : (m[4] !== undefined ? m[4] : (m[2] !== undefined ? m[2] : ""));
+      attrs[name] = ccRteDecodeEntities(value);
+    }
+    return attrs;
+  }
+
+  // Sanitizes/normalizes raw HTML (visual-editor innerHTML, pasted markup,
+  // or hand-typed Advanced-mode HTML) down to the canonical Telegram-HTML
+  // allowlist: b/i/u/s/code/pre/blockquote/a[href]/span[class=tg-spoiler].
+  // <div>/<p>/<br> are converted to literal newlines since Telegram has no
+  // block-level line-break tags. Nested <blockquote> is flattened, not
+  // rejected. This is a client-side mirror of
+  // community_centre_limits.sanitize_telegram_html — the backend remains
+  // authoritative and re-sanitizes independently on every save.
+  function ccRteSanitizeHtml(raw) {
+    var input = String(raw == null ? "" : raw);
+    var TAG_RE = /<(\/?)([a-zA-Z][a-zA-Z0-9-]*)((?:[^>"']|"[^"]*"|'[^']*')*)>/g;
+    var out = [];
+    var stack = []; // { tag, emitted }
+    var lastIndex = 0;
+    var m;
+
+    function inBlockquote() {
+      for (var i = 0; i < stack.length; i++) if (stack[i].tag === "blockquote") return true;
+      return false;
+    }
+    function endsWithNewline() {
+      return !out.length || /\n$/.test(out[out.length - 1]);
+    }
+    function emitText(text) {
+      if (!text) return;
+      out.push(ccRteEscapeText(ccRteDecodeEntities(text)));
+    }
+    function emitLineBreak() {
+      if (!endsWithNewline()) out.push("\n");
+    }
+
+    while ((m = TAG_RE.exec(input))) {
+      emitText(input.slice(lastIndex, m.index));
+      lastIndex = TAG_RE.lastIndex;
+      var closing = m[1] === "/";
+      var rawTag = m[2].toLowerCase();
+
+      if (rawTag === "br") { emitLineBreak(); continue; }
+      if (rawTag === "div" || rawTag === "p") { emitLineBreak(); continue; }
+      // script/style content is dropped entirely below via the disallowed-
+      // tag path (content is still emitted as text) — that's intentional
+      // for style, but script content must never reach the output even as
+      // text, so strip it out explicitly.
+      if (rawTag === "script" || rawTag === "style") {
+        if (!closing) {
+          var closeRe = new RegExp("</" + rawTag + "\\s*>", "i");
+          var closeMatch = closeRe.exec(input.slice(lastIndex));
+          lastIndex = closeMatch ? lastIndex + closeMatch.index + closeMatch[0].length : input.length;
+        }
+        continue;
+      }
+
+      var tag = CC_RTE_TAG_ALIASES[rawTag] || rawTag;
+      if (CC_RTE_ALLOWED_TAGS.indexOf(tag) === -1) continue;
+
+      if (!closing) {
+        if (tag === "blockquote" && inBlockquote()) {
+          stack.push({ tag: tag, emitted: false });
+          continue;
+        }
+        var attrs = ccRteParseAttrs(m[3]);
+        var allowedAttrNames = CC_RTE_ALLOWED_ATTRS[tag] || [];
+        var kept = [];
+        allowedAttrNames.forEach(function (name) {
+          if (!(name in attrs)) return;
+          var value = attrs[name];
+          if (tag === "a" && name === "href" && !ccRteIsSafeHref(value)) return;
+          if (tag === "span" && name === "class" && value.trim() !== "tg-spoiler") return;
+          kept.push(name + '="' + ccRteEscapeAttr(value) + '"');
+        });
+        if (tag === "span" && !kept.length) {
+          stack.push({ tag: tag, emitted: false });
+          continue;
+        }
+        out.push("<" + tag + (kept.length ? " " + kept.join(" ") : "") + ">");
+        stack.push({ tag: tag, emitted: true });
+      } else {
+        var idx = -1;
+        for (var i = stack.length - 1; i >= 0; i--) { if (stack[i].tag === tag) { idx = i; break; } }
+        if (idx === -1) continue;
+        while (stack.length > idx) {
+          var top = stack.pop();
+          if (top.emitted) out.push("</" + top.tag + ">");
+        }
+      }
+    }
+    emitText(input.slice(lastIndex));
+    while (stack.length) {
+      var rest = stack.pop();
+      if (rest.emitted) out.push("</" + rest.tag + ">");
+    }
+    return out.join("").replace(/\n{3,}/g, "\n\n").replace(/^\n+/, "").replace(/\n+$/, "");
+  }
+
+  // Visible (rendered) text of a canonical/sanitized Telegram-HTML string,
+  // for character counting — Telegram limits are on visible text, not raw
+  // markup length.
+  function ccRteHtmlToPlainText(html) {
+    return ccRteDecodeEntities(String(html || "").replace(/<[^>]+>/g, ""));
+  }
+
+  // Whether a toolbar action should apply to the current selection — a
+  // no-op on a collapsed/empty selection rather than silently mutating
+  // nothing or throwing.
+  function ccRteShouldApplyToSelection(selectionText) {
+    return !!(selectionText && selectionText.length > 0);
+  }
+
+  // Pure decision for the Quote toggle: clicking Quote while already inside
+  // a quote removes it instead of nesting another one.
+  function ccRteQuoteAction(insideBlockquote) {
+    return insideBlockquote ? "unwrap" : "wrap";
+  }
+
   var cc = {
     limits: null,
     destinations: null,
@@ -6125,6 +6313,7 @@
     editingId: null,
     editingUpdatedAt: null,
     calendarStart: null,
+    textMode: "rich", // "rich" | "html" — Composer message editor mode
   };
 
   function ccPad2(n) { return (n < 10 ? "0" : "") + n; }
@@ -6208,6 +6397,7 @@
     ccRenderMedia();
     var maxLen = ct === "text" ? ((cc.limits && cc.limits.text_max_len) || 4096) : ((cc.limits && cc.limits.caption_max_len) || 1024);
     $("#cc-text").maxLength = maxLen;
+    ccRteUpdateVisibility();
     ccUpdateTextCounter();
   }
 
@@ -6216,7 +6406,262 @@
     if (!el) return;
     var ct = $("#cc-content-type").value;
     var maxLen = ct === "text" ? ((cc.limits && cc.limits.text_max_len) || 4096) : ((cc.limits && cc.limits.caption_max_len) || 1024);
-    el.textContent = ($("#cc-text").value || "").length + " / " + maxLen + " characters";
+    var visibleLen = ccRteHtmlToPlainText($("#cc-text").value || "").length;
+    el.textContent = visibleLen + " / " + maxLen + " characters";
+  }
+
+  // ---------- Composer: rich-text editor (DOM-facing) ----------
+  function ccRteEditor() { return $("#cc-rte-editor"); }
+
+  function ccRteUpdateVisibility() {
+    var toolbar = $("#cc-rte-toolbar");
+    var editor = ccRteEditor();
+    var source = $("#cc-text");
+    var toggleBtn = $("#cc-rte-source-toggle");
+    if (!toolbar || !editor || !source) return;
+    var parseModeEl = $("#cc-parse-mode");
+    var parseMode = parseModeEl ? parseModeEl.value : "HTML";
+    if (parseMode !== "HTML") {
+      // MarkdownV2 is stored/sent verbatim (see ccPreviewBubbleHtml) — the
+      // Telegram-HTML rich-text toolbar doesn't apply to it.
+      toolbar.classList.add("hidden");
+      editor.classList.add("hidden");
+      source.classList.remove("hidden");
+      if (toggleBtn) toggleBtn.classList.add("hidden");
+      return;
+    }
+    if (toggleBtn) toggleBtn.classList.remove("hidden");
+    if (cc.textMode === "html") {
+      toolbar.classList.add("hidden");
+      editor.classList.add("hidden");
+      source.classList.remove("hidden");
+      if (toggleBtn) toggleBtn.textContent = "Back to Rich Text";
+    } else {
+      toolbar.classList.remove("hidden");
+      editor.classList.remove("hidden");
+      source.classList.add("hidden");
+      if (toggleBtn) toggleBtn.textContent = "Advanced: Edit Telegram HTML";
+    }
+  }
+
+  // Recomputes the canonical/sanitized Telegram HTML from the visual
+  // editor's current contents into the hidden #cc-text field.
+  function ccRteSyncFromEditor() {
+    var editor = ccRteEditor();
+    if (!editor) return;
+    $("#cc-text").value = ccRteSanitizeHtml(editor.innerHTML);
+    ccUpdateTextCounter();
+  }
+
+  function ccRteCurrentSelectionInsideEditor(editor) {
+    var sel = window.getSelection && window.getSelection();
+    if (!sel || sel.rangeCount === 0) return false;
+    var node = sel.getRangeAt(0).commonAncestorContainer;
+    return editor.contains(node.nodeType === 1 ? node : node.parentNode);
+  }
+
+  function ccRteAncestorTag(node, tag, editor) {
+    while (node && node !== editor) {
+      if (node.nodeType === 1 && node.tagName.toLowerCase() === tag) return node;
+      node = node.parentNode;
+    }
+    return null;
+  }
+
+  function ccRteExec(cmd) { document.execCommand(cmd, false, null); }
+
+  // Toggles an inline wrapper (code / spoiler) around the current selection.
+  function ccRteToggleInline(editor, tag, className) {
+    var sel = window.getSelection();
+    if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return;
+    if (!ccRteShouldApplyToSelection(sel.toString())) return;
+    if (!ccRteCurrentSelectionInsideEditor(editor)) return;
+    var range = sel.getRangeAt(0);
+    var container = range.commonAncestorContainer;
+    var existing = ccRteAncestorTag(container.nodeType === 1 ? container : container.parentNode, tag, editor);
+    if (existing && (!className || existing.className === className)) {
+      var frag = document.createDocumentFragment();
+      while (existing.firstChild) frag.appendChild(existing.firstChild);
+      existing.parentNode.replaceChild(frag, existing);
+    } else {
+      var contents = range.extractContents();
+      var wrapper = document.createElement(tag);
+      if (className) wrapper.className = className;
+      wrapper.appendChild(contents);
+      range.insertNode(wrapper);
+      sel.removeAllRanges();
+      var r2 = document.createRange();
+      r2.selectNodeContents(wrapper);
+      sel.addRange(r2);
+    }
+    ccRteSyncFromEditor();
+  }
+
+  function ccRteBlockAncestor(node, editor) {
+    if (!node) return null;
+    while (node.parentNode && node.parentNode !== editor) node = node.parentNode;
+    return node.parentNode === editor ? node : null;
+  }
+
+  // Toggles a <blockquote> around the block(s) covering the current
+  // selection. If the selection is already inside a quote, unwraps it
+  // instead of nesting — never produces nested <blockquote>.
+  function ccRteToggleQuote(editor) {
+    var sel = window.getSelection();
+    if (!sel || sel.rangeCount === 0) return;
+    if (!ccRteCurrentSelectionInsideEditor(editor)) return;
+    var range = sel.getRangeAt(0);
+    var container = range.commonAncestorContainer;
+    var insideQuote = ccRteAncestorTag(container.nodeType === 1 ? container : container.parentNode, "blockquote", editor);
+    if (ccRteQuoteAction(!!insideQuote) === "unwrap") {
+      var frag = document.createDocumentFragment();
+      while (insideQuote.firstChild) frag.appendChild(insideQuote.firstChild);
+      insideQuote.parentNode.replaceChild(frag, insideQuote);
+      ccRteSyncFromEditor();
+      return;
+    }
+    var startBlock = ccRteBlockAncestor(range.startContainer, editor) || editor.firstChild;
+    var endBlock = ccRteBlockAncestor(range.endContainer, editor) || editor.lastChild;
+    if (!startBlock) return;
+    var nodes = [];
+    var child = editor.firstChild;
+    var collecting = false;
+    while (child) {
+      if (child === startBlock) collecting = true;
+      if (collecting) nodes.push(child);
+      if (child === endBlock) break;
+      child = child.nextSibling;
+    }
+    if (!nodes.length) nodes = [startBlock];
+    var wrapper = document.createElement("blockquote");
+    nodes[0].parentNode.insertBefore(wrapper, nodes[0]);
+    nodes.forEach(function (n) { wrapper.appendChild(n); });
+    ccRteSyncFromEditor();
+  }
+
+  // Strips all formatting from the selection, leaving plain text.
+  function ccRteClearFormatting(editor) {
+    var sel = window.getSelection();
+    if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return;
+    if (!ccRteCurrentSelectionInsideEditor(editor)) return;
+    var range = sel.getRangeAt(0);
+    var text = range.toString();
+    range.deleteContents();
+    var textNode = document.createTextNode(text);
+    range.insertNode(textNode);
+    sel.removeAllRanges();
+    var r2 = document.createRange();
+    r2.setStartAfter(textNode);
+    r2.collapse(true);
+    sel.addRange(r2);
+    ccRteSyncFromEditor();
+  }
+
+  function ccRtePromptLinkUrl() {
+    return new Promise(function (resolve) {
+      var overlay = document.createElement("div");
+      overlay.className = "modal-overlay";
+      overlay.innerHTML =
+        '<div class="modal-box" style="max-width:420px;">' +
+        "<h3>Insert Link</h3>" +
+        '<input class="filter-input" id="cc-rte-link-input" placeholder="https://example.com" autocomplete="off" />' +
+        '<div class="sub" id="cc-rte-link-error" style="color:var(--bad);min-height:16px;"></div>' +
+        '<div class="modal-actions">' +
+        '<button class="btn" id="cc-rte-link-cancel">Cancel</button>' +
+        '<button class="btn primary" id="cc-rte-link-ok">Insert</button>' +
+        "</div></div>";
+      document.body.appendChild(overlay);
+      var input = overlay.querySelector("#cc-rte-link-input");
+      input.focus();
+      function done(url) { overlay.remove(); resolve(url); }
+      overlay.querySelector("#cc-rte-link-cancel").addEventListener("click", function () { done(null); });
+      overlay.addEventListener("click", function (e) { if (e.target === overlay) done(null); });
+      function tryOk() {
+        var err = ccRteValidateUrl(input.value);
+        if (err) { overlay.querySelector("#cc-rte-link-error").textContent = err; return; }
+        done(input.value.trim());
+      }
+      overlay.querySelector("#cc-rte-link-ok").addEventListener("click", tryOk);
+      input.addEventListener("keydown", function (e) {
+        if (e.key === "Enter") { e.preventDefault(); tryOk(); }
+        if (e.key === "Escape") done(null);
+      });
+    });
+  }
+
+  function ccRteApplyLink(editor) {
+    var sel = window.getSelection();
+    if (!sel || sel.rangeCount === 0 || sel.isCollapsed || !ccRteShouldApplyToSelection(sel.toString())) {
+      toast("❌ Select text first", "error");
+      return;
+    }
+    if (!ccRteCurrentSelectionInsideEditor(editor)) return;
+    var range = sel.getRangeAt(0).cloneRange();
+    ccRtePromptLinkUrl().then(function (url) {
+      if (!url) return;
+      sel.removeAllRanges();
+      sel.addRange(range);
+      var contents = range.extractContents();
+      var a = document.createElement("a");
+      a.setAttribute("href", url);
+      a.appendChild(contents);
+      range.insertNode(a);
+      sel.removeAllRanges();
+      var r2 = document.createRange();
+      r2.selectNodeContents(a);
+      sel.addRange(r2);
+      ccRteSyncFromEditor();
+    });
+  }
+
+  // Sanitizes pasted content (Word/Docs/websites → strip fonts, colours,
+  // classes, inline CSS, scripts; keep only the Telegram-supported subset).
+  // Plain-text clipboard data stays plain text; line breaks are preserved
+  // as visible <br> while the canonical value stores them as "\n".
+  function ccRtePasteHandler(e) {
+    e.preventDefault();
+    var cd = e.clipboardData || window.clipboardData;
+    var html = cd && cd.getData && cd.getData("text/html");
+    var text = cd && cd.getData && cd.getData("text/plain");
+    var canonical = html ? ccRteSanitizeHtml(html) : ccRteEscapeText(String(text || ""));
+    var displayHtml = canonical.replace(/\n/g, "<br>");
+    document.execCommand("insertHTML", false, displayHtml);
+    ccRteSyncFromEditor();
+  }
+
+  // Ctrl/Cmd+B/I/U only — everything else is left to the browser.
+  function ccRteKeydown(e) {
+    var meta = e.ctrlKey || e.metaKey;
+    if (!meta) return;
+    var key = (e.key || "").toLowerCase();
+    if (key === "b") { e.preventDefault(); ccRteExec("bold"); ccRteSyncFromEditor(); }
+    else if (key === "i") { e.preventDefault(); ccRteExec("italic"); ccRteSyncFromEditor(); }
+    else if (key === "u") { e.preventDefault(); ccRteExec("underline"); ccRteSyncFromEditor(); }
+  }
+
+  // Called before Preview / Save Draft / Publish / Schedule: converts the
+  // visual editor content into canonical Telegram HTML and re-sanitizes
+  // whatever's in the (possibly hand-edited) Advanced HTML field too.
+  function ccRteFinalizeBeforeSubmit() {
+    var editor = ccRteEditor();
+    if (editor && cc.textMode !== "html") {
+      ccRteSyncFromEditor();
+    } else {
+      $("#cc-text").value = ccRteSanitizeHtml($("#cc-text").value || "");
+    }
+  }
+
+  function ccRteValidateLimits() {
+    var ct = $("#cc-content-type").value;
+    var parseModeEl = $("#cc-parse-mode");
+    var parseMode = parseModeEl ? parseModeEl.value : "HTML";
+    if (parseMode !== "HTML") return null;
+    var textish = ct === "text" || ct === "photo" || ct === "animation" || ct === "video" || ct === "media_group";
+    if (!textish) return null;
+    var maxLen = ct === "text" ? ((cc.limits && cc.limits.text_max_len) || 4096) : ((cc.limits && cc.limits.caption_max_len) || 1024);
+    var visibleLen = ccRteHtmlToPlainText($("#cc-text").value || "").length;
+    if (visibleLen > maxLen) return "Message is too long: " + visibleLen + " / " + maxLen + " characters.";
+    return null;
   }
 
   // ---------- Composer: media list ----------
@@ -6528,6 +6973,8 @@
     $("#cc-title").value = "";
     $("#cc-content-type").value = "text";
     $("#cc-text").value = "";
+    cc.textMode = "rich";
+    if (ccRteEditor()) ccRteEditor().innerHTML = "";
     $("#cc-parse-mode").value = "HTML";
     $("#cc-disable-preview").checked = false;
     $("#cc-poll-question").value = "";
@@ -6567,6 +7014,8 @@
     $("#cc-content-type").value = post.content_type;
     $("#cc-destination").value = post.destination_key || "";
     $("#cc-text").value = post.text || "";
+    cc.textMode = "rich";
+    if (ccRteEditor()) ccRteEditor().innerHTML = ccRteSanitizeHtml(post.text || "");
     $("#cc-parse-mode").value = post.parse_mode || "HTML";
     $("#cc-disable-preview").checked = !!post.disable_web_page_preview;
     cc.media = (post.media || []).map(function (m) {
@@ -6617,6 +7066,7 @@
   }
 
   function ccBuildPayload() {
+    ccRteFinalizeBeforeSubmit();
     ccSyncMediaFromDom();
     ccSyncPollOptionsFromDom();
     ccSyncButtonsFromDom();
@@ -6678,6 +7128,9 @@
   }
 
   function ccSaveDraft(showToast) {
+    ccRteFinalizeBeforeSubmit();
+    var limitErr = ccRteValidateLimits();
+    if (limitErr) { toast("❌ " + limitErr, "error"); return Promise.resolve(null); }
     var payload = ccBuildPayload();
     var req = cc.editingId
       ? apiPatchJson("/api/admin/community/posts/" + cc.editingId, payload)
@@ -6793,6 +7246,7 @@
         '<p class="sub">Destination: ' + esc(preview.destination_name) + " · Silent: " + (preview.disable_notification ? "Yes" : "No") +
         " · Pin: " + (preview.pin_after_send ? "Yes" : "No") + "</p>" +
         ccPreviewBubbleHtml(preview) +
+        '<p class="sub" style="margin-top:8px;">Formatting preview may differ slightly from the Telegram app.</p>' +
         actionsHtml +
         "</div>";
       document.body.appendChild(overlay);
@@ -7202,6 +7656,49 @@
   function bindCommunityCentre() {
     $("#cc-content-type").addEventListener("change", ccUpdateContentTypeVisibility);
     $("#cc-text").addEventListener("input", ccUpdateTextCounter);
+    $("#cc-parse-mode").addEventListener("change", ccRteUpdateVisibility);
+
+    var rteToolbar = $("#cc-rte-toolbar");
+    var rteEditorEl = $("#cc-rte-editor");
+    if (rteToolbar && rteEditorEl) {
+      try { document.execCommand("styleWithCSS", false, false); } catch (e) { /* unsupported in some browsers — harmless */ }
+      rteToolbar.addEventListener("click", function (e) {
+        var btn = e.target.closest("button[data-cc-rte-cmd]");
+        if (!btn) return;
+        var cmd = btn.dataset.ccRteCmd;
+        rteEditorEl.focus();
+        if (cmd === "bold") { ccRteExec("bold"); ccRteSyncFromEditor(); }
+        else if (cmd === "italic") { ccRteExec("italic"); ccRteSyncFromEditor(); }
+        else if (cmd === "underline") { ccRteExec("underline"); ccRteSyncFromEditor(); }
+        else if (cmd === "strike") { ccRteExec("strikeThrough"); ccRteSyncFromEditor(); }
+        else if (cmd === "code") { ccRteToggleInline(rteEditorEl, "code"); }
+        else if (cmd === "spoiler") { ccRteToggleInline(rteEditorEl, "span", "tg-spoiler"); }
+        else if (cmd === "quote") { ccRteToggleQuote(rteEditorEl); }
+        else if (cmd === "link") { ccRteApplyLink(rteEditorEl); }
+        else if (cmd === "clear") { ccRteClearFormatting(rteEditorEl); }
+      });
+      rteEditorEl.addEventListener("input", ccRteSyncFromEditor);
+      rteEditorEl.addEventListener("paste", ccRtePasteHandler);
+      rteEditorEl.addEventListener("keydown", ccRteKeydown);
+    }
+    var rteSourceToggle = $("#cc-rte-source-toggle");
+    if (rteSourceToggle) {
+      rteSourceToggle.addEventListener("click", function () {
+        if (cc.textMode === "html") {
+          // HTML -> Rich Text: parse only supported Telegram tags.
+          var sanitized = ccRteSanitizeHtml($("#cc-text").value || "");
+          $("#cc-text").value = sanitized;
+          if (rteEditorEl) rteEditorEl.innerHTML = sanitized;
+          cc.textMode = "rich";
+        } else {
+          // Rich Text -> HTML: show canonical sanitized HTML.
+          ccRteSyncFromEditor();
+          cc.textMode = "html";
+        }
+        ccRteUpdateVisibility();
+        ccUpdateTextCounter();
+      });
+    }
 
     $("#cc-media-add-btn").addEventListener("click", function () {
       ccSyncMediaFromDom();

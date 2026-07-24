@@ -668,7 +668,22 @@
 
         <div class="section" id="cc-text-fields" style="margin-bottom:16px;">
           <div class="section-title">Message</div>
-          <textarea id="cc-text" rows="6" class="filter-input" style="width:100%;box-sizing:border-box;" placeholder="Message text / caption. Telegram HTML formatting supported (&lt;b&gt;, &lt;i&gt;, &lt;a href&gt;, ...)"></textarea>
+          <div class="sub" style="margin-bottom:6px;">Format your message using the toolbar. Advanced users can switch to Telegram HTML.</div>
+          <div id="cc-rte-toolbar" class="cc-rte-toolbar">
+            <button type="button" class="cc-rte-btn" data-cc-rte-cmd="bold" title="Bold (Ctrl/Cmd+B)"><b>B</b></button>
+            <button type="button" class="cc-rte-btn" data-cc-rte-cmd="italic" title="Italic (Ctrl/Cmd+I)"><i>I</i></button>
+            <button type="button" class="cc-rte-btn" data-cc-rte-cmd="underline" title="Underline (Ctrl/Cmd+U)"><u>U</u></button>
+            <button type="button" class="cc-rte-btn" data-cc-rte-cmd="strike" title="Strikethrough"><s>S</s></button>
+            <button type="button" class="cc-rte-btn" data-cc-rte-cmd="code" title="Inline code">&lt;/&gt;</button>
+            <button type="button" class="cc-rte-btn" data-cc-rte-cmd="quote" title="Quote">&ldquo;&rdquo;</button>
+            <button type="button" class="cc-rte-btn" data-cc-rte-cmd="spoiler" title="Spoiler">&bull;&bull;&bull;</button>
+            <button type="button" class="cc-rte-btn" data-cc-rte-cmd="link" title="Link">&#128279;</button>
+            <button type="button" class="cc-rte-btn" data-cc-rte-cmd="clear" title="Clear formatting">Tx</button>
+            <span style="flex:1;"></span>
+            <button type="button" class="btn" id="cc-rte-source-toggle">Advanced: Edit Telegram HTML</button>
+          </div>
+          <div id="cc-rte-editor" class="filter-input cc-rte-editor" contenteditable="true" data-placeholder="Message text / caption"></div>
+          <textarea id="cc-text" rows="6" class="filter-input hidden" style="width:100%;box-sizing:border-box;" placeholder="Telegram HTML, e.g. &lt;b&gt;bold&lt;/b&gt;"></textarea>
           <div class="cc-grid" style="margin-top:8px;">
             <label>Parse Mode
               <select class="filter-input" id="cc-parse-mode" style="width:100%;">
