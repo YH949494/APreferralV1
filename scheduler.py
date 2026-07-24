@@ -1653,12 +1653,11 @@ def settle_referral_snapshots() -> None:
                 db.users.bulk_write(updates, ordered=False)
                 updated = len(updates)
             except Exception:
-                errors += len(updates)
-                updated = 0
                 logger.exception(
-                    "[SCHED][REFERRAL_SNAPSHOT][WRITE_FAILED] batch_size=%s",
+                    "[SCHED][REFERRAL_SNAPSHOT][WRITE_FAILED] batch_size=%s aborting_publish=true",
                     len(updates),
                 )
+                raise
 
     publish_result = db.users.update_many(
         {},

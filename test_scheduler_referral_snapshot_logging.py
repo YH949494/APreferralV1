@@ -145,21 +145,39 @@ class NegativeRowLoggingTests(_SnapshotLoggingTestBase):
 
 
 class DatabaseFailureLoggingTests(_SnapshotLoggingTestBase):
-    def test_bulk_write_failure_logs_error_and_summary_reports_errors(self):
+    def test_bulk_write_failure_logs_error_and_aborts_before_publish(self):
+        # A batch-write failure must not fall through to publish: every
+        # user's *_referrals_next field was already reset to 0 before the
+        # write, so publishing after a failed write would wipe out valid
+        # referral counts. The function should log ERROR and re-raise,
+        # leaving the live snapshot fields untouched.
         rows = [_row(uid, weekly=1, monthly=1, total=1) for uid in range(1, 4)]
         fake_db = _FakeDB(rows, bulk_write_error=RuntimeError("write failed"))
-        output = self._run_with_db(fake_db)
+
+        original_db = scheduler.db
+        original_heartbeat = scheduler._write_snapshot_heartbeat
+        scheduler.db = fake_db
+        scheduler._write_snapshot_heartbeat = lambda source, ts: None
+        try:
+            with self.assertLogs("scheduler", level="DEBUG") as captured:
+                with self.assertRaises(RuntimeError):
+                    scheduler.settle_referral_snapshots()
+        finally:
+            scheduler.db = original_db
+            scheduler._write_snapshot_heartbeat = original_heartbeat
 
         error_lines = [
-            line for line in output
+            line for line in captured.output
             if line.startswith("ERROR") and "[SCHED][REFERRAL_SNAPSHOT][WRITE_FAILED]" in line
         ]
         self.assertEqual(len(error_lines), 1)
 
-        done_lines = [line for line in output if "[SCHED][REFERRAL_SNAPSHOT][DONE]" in line]
-        self.assertEqual(len(done_lines), 1)
-        self.assertIn("errors=3", done_lines[0])
-        self.assertIn("updated=0", done_lines[0])
+        # publish never ran: no [DONE] summary, and live referral fields
+        # were never overwritten with the reset-to-zero "next" values.
+        done_lines = [line for line in captured.output if "[SCHED][REFERRAL_SNAPSHOT][DONE]" in line]
+        self.assertEqual(done_lines, [])
+        for doc in fake_db.users.docs.values():
+            self.assertNotIn("weekly_referrals", doc)
 
 
 class SnapshotCalculationUnchangedTests(_SnapshotLoggingTestBase):
