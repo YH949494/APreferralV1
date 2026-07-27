@@ -612,11 +612,13 @@ class TestGenerateSharePackage:
             "🔥 Big wins today!\n"
             "https://rx.apreplay.com/Play00001\n\n"
             "Want more replays like this—and rewards too?\n\n"
-            "Join AdvantPlay for 👇\n\n"
+            "👋 Welcome to AdvantPlay Community!\n\n"
+            "Join our channel to get 👇\n\n"
+            "🎟️ FREE Welcome Voucher — No deposit required\n"
             "⚡️ Daily voucher drops\n"
-            "🎁 Exclusive reward campaigns\n"
-            "🏆 Weekly ranking rewards\n"
-            "👑 VIP updates and opportunities\n\n"
+            "🎁 Bonus campaigns\n"
+            "👑 VIP-only announcements\n"
+            "🏆 Weekly ranking rewards\n\n"
             "Start here 👇\n"
             "https://t.me/+abc123"
         )
@@ -688,11 +690,13 @@ class TestGenerateSharePackage:
         assert result["playback_url"] is None
         assert result["invite_link"] == "https://t.me/+abc123"
         expected = (
-            "Join AdvantPlay for 👇\n\n"
+            "👋 Welcome to AdvantPlay Community!\n\n"
+            "Join our channel to get 👇\n\n"
+            "🎟️ FREE Welcome Voucher — No deposit required\n"
             "⚡️ Daily voucher drops\n"
-            "🎁 Exclusive reward campaigns\n"
-            "🏆 Weekly ranking rewards\n"
-            "👑 VIP updates and opportunities\n\n"
+            "🎁 Bonus campaigns\n"
+            "👑 VIP-only announcements\n"
+            "🏆 Weekly ranking rewards\n\n"
             "Start here 👇\n"
             "https://t.me/+abc123"
         )
@@ -784,11 +788,13 @@ class TestDefaultHookTextSetting:
 
 EXPECTED_BENEFITS_BLOCK = (
     "Want more replays like this—and rewards too?\n\n"
-    "Join AdvantPlay for 👇\n\n"
+    "👋 Welcome to AdvantPlay Community!\n\n"
+    "Join our channel to get 👇\n\n"
+    "🎟️ FREE Welcome Voucher — No deposit required\n"
     "⚡️ Daily voucher drops\n"
-    "🎁 Exclusive reward campaigns\n"
-    "🏆 Weekly ranking rewards\n"
-    "👑 VIP updates and opportunities\n\n"
+    "🎁 Bonus campaigns\n"
+    "👑 VIP-only announcements\n"
+    "🏆 Weekly ranking rewards\n\n"
     "Start here 👇"
 )
 
@@ -821,12 +827,15 @@ class TestBuildReferralShareCaption:
             "",
             "Want more replays like this—and rewards too?",
             "",
-            "Join AdvantPlay for 👇",
+            "👋 Welcome to AdvantPlay Community!",
             "",
+            "Join our channel to get 👇",
+            "",
+            "🎟️ FREE Welcome Voucher — No deposit required",
             "⚡️ Daily voucher drops",
-            "🎁 Exclusive reward campaigns",
+            "🎁 Bonus campaigns",
+            "👑 VIP-only announcements",
             "🏆 Weekly ranking rewards",
-            "👑 VIP updates and opportunities",
             "",
             "Start here 👇",
             "https://t.me/+ref",
@@ -877,11 +886,13 @@ class TestBuildReferralShareCaption:
         no leading blank line, and no placeholder/"None" text."""
         result = rsc.build_referral_share_caption(hook_text=None, playback_url=None, referral_url="https://t.me/+ref")
         expected = (
-            "Join AdvantPlay for 👇\n\n"
+            "👋 Welcome to AdvantPlay Community!\n\n"
+            "Join our channel to get 👇\n\n"
+            "🎟️ FREE Welcome Voucher — No deposit required\n"
             "⚡️ Daily voucher drops\n"
-            "🎁 Exclusive reward campaigns\n"
-            "🏆 Weekly ranking rewards\n"
-            "👑 VIP updates and opportunities\n\n"
+            "🎁 Bonus campaigns\n"
+            "👑 VIP-only announcements\n"
+            "🏆 Weekly ranking rewards\n\n"
             "Start here 👇\n"
             "https://t.me/+ref"
         )
@@ -959,11 +970,13 @@ class TestBuildReferralShareCaption:
 
 
 EXPECTED_HTML_BLOCKQUOTE = (
-    "<blockquote><b>Join AdvantPlay for 👇</b>\n"
+    "<blockquote><b>👋 Welcome to AdvantPlay Community!</b>\n"
+    "Join our channel to get 👇\n\n"
+    "🎟️ FREE Welcome Voucher — No deposit required\n"
     "⚡️ Daily voucher drops\n"
-    "🎁 Exclusive reward campaigns\n"
-    "🏆 Weekly ranking rewards\n"
-    "👑 VIP updates and opportunities</blockquote>"
+    "🎁 Bonus campaigns\n"
+    "👑 VIP-only announcements\n"
+    "🏆 Weekly ranking rewards</blockquote>"
 )
 
 
@@ -1005,11 +1018,14 @@ class TestBuildReferralShareCaptionTelegramHtml:
         start = result.index("<blockquote>")
         end = result.index("</blockquote>") + len("</blockquote>")
         quoted = result[start:end]
-        assert "Join AdvantPlay for 👇" in quoted
+        assert "👋 Welcome to AdvantPlay Community!" in quoted
+        assert "Join our channel to get 👇" in quoted
+        assert "🎟️ FREE Welcome Voucher — No deposit required" in quoted
         assert "⚡️ Daily voucher drops" in quoted
-        assert "🎁 Exclusive reward campaigns" in quoted
+        assert "🎁 Bonus campaigns" in quoted
         assert "🏆 Weekly ranking rewards" in quoted
-        assert "👑 VIP updates and opportunities" in quoted
+        assert "👑 VIP-only announcements" in quoted
+        assert quoted.index("FREE Welcome Voucher") < quoted.index("Daily voucher drops")
 
     def test_hook_and_playback_are_outside_blockquote(self):
         result = rsc.build_referral_share_caption(
@@ -1050,7 +1066,7 @@ class TestBuildReferralShareCaptionTelegramHtml:
         assert "&lt;script&gt;" in result
         assert "&amp;" in result
         # Static tags remain unescaped.
-        assert "<blockquote><b>Join AdvantPlay for 👇</b>" in result
+        assert "<blockquote><b>👋 Welcome to AdvantPlay Community!</b>" in result
         assert result.count("<blockquote>") == 1
 
     def test_missing_hook_is_omitted_in_html_mode(self):
