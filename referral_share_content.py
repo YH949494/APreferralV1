@@ -1,17 +1,23 @@
 """Referral Centre — Share Content.
 
-Assembles the bot's Copy/Share caption from three parts (see
+Assembles the bot's Copy/Share caption from up to four parts (see
 ``build_referral_share_caption`` for the exact template):
-  {random_active_hook}
-  {selected_active_playback_url}
+  {random_active_hook}               <- omitted entirely if no hook is active
+  {selected_active_playback_url}     <- omitted entirely if no playback is active
 
-  Want more replays like this—and rewards too?
+  Want more replays like this—and rewards too?   <- omitted if neither above is present
 
   Join AdvantPlay for 👇
-  ...benefits...
+  ...benefits...   (always present — static)
 
   Start here 👇
-  {user_canonical_invite_link}
+  {user_canonical_invite_link}       <- always present
+
+The benefits block + referral link are the only parts guaranteed to always
+render: with no active hook and no active playback link, the caption is
+still valid — never empty, never a lone separator, never "None". Missing
+hook/playback is never silently papered over with substitute text; the
+section is simply left out.
 
 Collections: ``caption_hooks``, ``playback_pool``, ``share_generations``.
 
@@ -50,14 +56,6 @@ MAX_HOOK_TEXT_LEN = 500
 MAX_GAME_NAME_LEN = 200
 MAX_BULK_IMPORT_LINES = 2000
 DEFAULT_FALLBACK_HOOK_TEXT = "🎬 Fresh replays just dropped!"
-
-# Last-resort hook line used only inside build_referral_share_caption() when
-# it is called directly with a blank hook_text. The normal generation path
-# (generate_share_package -> _default_hook_text) already fills in the
-# Settings-configurable DEFAULT_FALLBACK_HOOK_TEXT before the builder ever
-# sees an empty string, so this constant is a defensive fallback, not the
-# one admins configure.
-CAPTION_FALLBACK_HOOK_TEXT = "Wait for the ending 👀"
 
 
 def _require_admin():
@@ -180,6 +178,18 @@ def parse_playback_url(raw) -> str | None:
 # ---------------------------------------------------------------------------
 
 def _default_hook_text() -> str:
+    """Read the admin-configurable ``share_content.fallback_hook_text`` setting.
+
+    NOT called anywhere in the normal generation path anymore.
+    Historically ``generate_share_package`` called this to substitute a
+    hook line whenever no caption hook was active, but that silently
+    replaced "no active hook" with placeholder marketing copy — which is
+    exactly the empty-state bug this module now guards against ("no active
+    hook" must omit the hook section, not fabricate one). Kept only as a
+    read accessor for the setting value (e.g. for an admin preview UI);
+    it is not, by itself, empty-state protection — see
+    ``build_referral_share_caption``.
+    """
     try:
         from settings_service import get_setting
 
@@ -274,17 +284,23 @@ _FORMAT_MODES = ("plain", "telegram_html")
 
 def build_referral_share_caption(
     *,
-    hook_text: str,
+    hook_text: str | None,
     playback_url: str | None,
     referral_url: str | None,
     include_referral_link: bool = True,
     format_mode: str = "plain",
 ) -> str:
-    """Assemble the referral-share caption from its three parts.
+    """Assemble the referral-share caption from its parts.
 
     ``hook_text`` and ``playback_url`` are expected to already be the result
     of the existing pool selection (``select_hook`` / ``select_playback_for_user``)
     — this function does not pick or filter them, it only renders the text.
+    Pass ``None``/``""`` for either one when there is no active hook and/or
+    no active playback link; that section is then **omitted entirely**
+    (no placeholder text, no orphan blank line, no stray separator). The
+    static benefits block and the referral link always render, so the
+    caption is never empty even when both are missing.
+
     ``referral_url`` is the user's canonical Telegram invite link and is
     always required: a caption is never built (or shared) with an empty
     referral URL.
@@ -312,13 +328,11 @@ def build_referral_share_caption(
     if not referral_url:
         raise ValueError("build_referral_share_caption requires a non-empty referral_url")
 
-    hook = (hook_text or "").strip() or CAPTION_FALLBACK_HOOK_TEXT
+    hook = (hook_text or "").strip()
     playback_url = (playback_url or "").strip()
-    if not playback_url:
-        logger.warning("[SHARE_CONTENT][CAPTION] missing playback_url; building referral-only caption")
 
     if format_mode == "telegram_html":
-        hook_out = html_escape(hook)
+        hook_out = html_escape(hook) if hook else ""
         playback_out = html_escape(playback_url) if playback_url else ""
         referral_out = html_escape(referral_url)
         benefits = (
@@ -340,17 +354,18 @@ def build_referral_share_caption(
             "👑 VIP updates and opportunities"
         )
 
-    lines = [hook_out]
-    if playback_out:
-        lines.append(playback_out)
-    lines.extend([
-        "",
-        "Want more replays like this—and rewards too?",
-        "",
-        benefits,
-        "",
-        "Start here 👇",
-    ])
+    # Hook and playback are each optional and independently omitted. The
+    # "Want more replays..." transition only makes sense when there is
+    # something above it to transition from, so it's skipped too when both
+    # are absent -- otherwise the caption would start with an orphan blank
+    # line / dangling question with nothing above it.
+    hook_and_playback = [line for line in (hook_out, playback_out) if line]
+
+    lines = list(hook_and_playback)
+    if hook_and_playback:
+        lines.extend(["", "Want more replays like this—and rewards too?", ""])
+    lines.append(benefits)
+    lines.extend(["", "Start here 👇"])
     if include_referral_link:
         lines.append(referral_out)
 
@@ -364,27 +379,26 @@ def generate_share_package(
     generated_by: str = "bot",
     requested_by_admin: int | None = None,
 ) -> dict:
-    """Assemble the 3-part share package for ``user_id``.
+    """Assemble the share package for ``user_id``.
 
-    Writes ``share_generations`` only after all three components (hook,
-    playback URL, canonical invite link) are valid. Never sends/returns a
-    partial caption. See module docstring + Phase 1 report for the full
-    failure/rollback behaviour discussion.
+    The hook and the playback link are each optional: when either pool has
+    no active record, that part of the package is simply omitted (``None``)
+    rather than substituted or treated as a hard failure — the referral
+    link is always generated and the caption always renders (static
+    benefits + link, at minimum; see ``build_referral_share_caption``).
+    Only a canonical-invite-link failure is a hard failure, since a caption
+    is never sent without one. Writes ``share_generations`` only after that
+    invite link is obtained. See module docstring + Phase 1 report for the
+    full failure/rollback behaviour discussion.
     """
     now = now_utc()
 
     hook_doc = select_hook(now)
     hook_id = hook_doc["_id"] if hook_doc else None
-    hook_text = hook_doc["text"] if hook_doc else _default_hook_text()
+    hook_text = hook_doc["text"] if hook_doc else None
 
     playback_doc = select_playback_for_user(user_id, now)
-    if not playback_doc:
-        logger.info(
-            "[SHARE_CONTENT][GENERATE_FAIL] reason=no_active_playback user_id=%s hook_counter_incremented=%s",
-            user_id,
-            hook_id is not None,
-        )
-        return {"ok": False, "code": "no_active_playback"}
+    playback_url = playback_doc["playback_url"] if playback_doc else None
 
     try:
         from main import get_or_create_referral_invite_link_sync
@@ -400,15 +414,15 @@ def generate_share_package(
         # The discrepancy is logged explicitly for visibility/audit.
         logger.error(
             "[SHARE_CONTENT][GENERATE_FAIL] reason=invite_link_failed user_id=%s "
-            "playback_record_id=%s playback_counter_incremented=true hook_counter_incremented=%s error=%s",
+            "playback_record_id=%s playback_counter_incremented=%s hook_counter_incremented=%s error=%s",
             user_id,
-            playback_doc["_id"],
+            playback_doc["_id"] if playback_doc else None,
+            playback_doc is not None,
             hook_id is not None,
             exc,
         )
         return {"ok": False, "code": "invite_link_failed"}
 
-    playback_url = playback_doc["playback_url"]
     message = build_referral_share_caption(
         hook_text=hook_text,
         playback_url=playback_url,
@@ -419,8 +433,8 @@ def generate_share_package(
         "user_id": user_id,
         "hook_id": hook_id,
         "hook_text": hook_text,
-        "playback_record_id": playback_doc["_id"],
-        "playback_id": playback_doc["playback_id"],
+        "playback_record_id": playback_doc["_id"] if playback_doc else None,
+        "playback_id": playback_doc["playback_id"] if playback_doc else None,
         "playback_url": playback_url,
         "invite_link": invite_link,
         "generated_at": now,
@@ -431,7 +445,7 @@ def generate_share_package(
     logger.info(
         "[SHARE_CONTENT][GENERATE_OK] user_id=%s playback_record_id=%s hook_id=%s",
         user_id,
-        playback_doc["_id"],
+        playback_doc["_id"] if playback_doc else None,
         hook_id,
     )
     return {

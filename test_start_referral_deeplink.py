@@ -369,6 +369,13 @@ def test_referral_deeplink_generation_failure_logs_exception(deeplink_env):
 
 
 def test_referral_deeplink_no_active_playback_returns_retryable_error_not_old_caption(deeplink_env):
+    # generate_share_package no longer returns this code (no active playback
+    # is now an omitted section, not a hard failure -- see
+    # referral_share_content.generate_share_package). This branch in
+    # send_referral_link_with_share_button is kept as defensive handling for
+    # an unexpected/legacy error code; this test locks in that if it were
+    # ever hit, it still degrades safely rather than sending a malformed
+    # caption.
     deeplink_env._state["result"] = {"ok": False, "code": "no_active_playback"}
     update = _FakeUpdate(user_id=216)
     asyncio.run(deeplink_env(update, _FakeContext()))
@@ -377,6 +384,45 @@ def test_referral_deeplink_no_active_playback_returns_retryable_error_not_old_ca
     assert reply["text"] == "No playback is currently available. Please try again later."
     assert "Join AdvantPlay" not in reply["text"]
     assert reply["reply_markup"] is None
+
+
+def test_referral_deeplink_no_hook_no_playback_sends_static_fallback_caption(deeplink_env):
+    """Entry point #2 (/start?start=referral): with no active hook and no
+    active playback link, generate_share_package now returns ok=True with
+    both omitted -- the deep-link route must still send a valid, non-empty
+    caption (static benefits + referral link) and a working Share button,
+    never an error message."""
+    deeplink_env._state["result"] = {
+        "ok": True,
+        "message": (
+            "Join AdvantPlay for 👇\n\n"
+            "⚡️ Daily voucher drops\n"
+            "🎁 Exclusive reward campaigns\n"
+            "🏆 Weekly ranking rewards\n"
+            "👑 VIP updates and opportunities\n\n"
+            "Start here 👇\n"
+            "https://t.me/+fallbackOnlyHash"
+        ),
+        "invite_link": "https://t.me/+fallbackOnlyHash",
+        "playback_url": None,
+        "hook_text": None,
+    }
+    update = _FakeUpdate(user_id=217)
+    asyncio.run(deeplink_env(update, _FakeContext()))
+
+    reply = deeplink_env._replies[0]
+    assert "https://t.me/+fallbackOnlyHash" in reply["text"]
+    assert "Join AdvantPlay for" in reply["text"]
+    assert "None" not in reply["text"]
+    assert "\n\n\n" not in reply["text"]
+    assert reply.get("parse_mode") == ParseMode.HTML
+
+    buttons = _flat_buttons(reply["reply_markup"])
+    share_btns = [b for b in buttons if b.text == "📤 Share Referral Link"]
+    assert len(share_btns) == 1
+    params = parse_qs(urlparse(share_btns[0].url).query)
+    assert params["url"] == ["https://t.me/+fallbackOnlyHash"]
+    assert "None" not in params["text"][0]
 
 
 # ---------------------------------------------------------------------------

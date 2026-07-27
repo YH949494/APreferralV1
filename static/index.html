@@ -1914,6 +1914,9 @@
       <button id="copy-referral-btn" class="btn btn-ghost" onclick="copyReferral()" data-i18n="copy_to_clipboard">📋 Copy to clipboard</button>
     </div>
     <p id="referral-link">Click the button to get your link</p>
+    <div id="referral-caption-manual" class="code-block" style="display:none;">
+      <div class="code-text" id="referral-caption-manual-text" style="white-space:pre-wrap;"></div>
+    </div>
     <div class="referral-status-card" aria-live="polite">
       <h4 data-i18n="referral_progress">Referral Progress</h4>
       <div id="referral-status-list" class="referral-status-list" data-i18n="loading">Loading...</div>
@@ -3984,10 +3987,18 @@
       }
     }
 
+    // Returns true/false rather than throwing on total failure -- callers
+    // that already have valid text in hand (e.g. copyReferral) must never
+    // report "copy failed" as if nothing were available; they fall back to
+    // showing the text for manual selection instead. See showManualCopyCaption().
     async function copyTextToClipboard(text) {
       if (navigator.clipboard && window.isSecureContext) {
-        await navigator.clipboard.writeText(text);
-        return;
+        try {
+          await navigator.clipboard.writeText(text);
+          return true;
+        } catch (err) {
+          console.warn("[COPY][CLIPBOARD_API_FAILED]", err);
+        }
       }
 
       const textArea = document.createElement("textarea");
@@ -3999,12 +4010,40 @@
       document.body.appendChild(textArea);
       textArea.focus();
       textArea.select();
+      let execSuccess = false;
       try {
-        if (!document.execCommand("copy")) {
-          throw new Error("copy_command_failed");
-        }
+        execSuccess = document.execCommand("copy");
+      } catch (err) {
+        console.warn("[COPY][EXEC_COMMAND_FAILED]", err);
+        execSuccess = false;
       } finally {
         document.body.removeChild(textArea);
+      }
+      return execSuccess;
+    }
+
+    // Last-resort fallback when neither the Clipboard API nor execCommand
+    // worked: show the caption inline, selected, so the user can still copy
+    // it manually (long-press / Ctrl+C). Never a dead end.
+    function showManualCopyCaption(text) {
+      const container = document.getElementById("referral-caption-manual");
+      const textEl = document.getElementById("referral-caption-manual-text");
+      if (!container || !textEl) {
+        tgAlert(text);
+        return;
+      }
+      textEl.textContent = text;
+      container.style.display = "flex";
+      container.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      try {
+        const range = document.createRange();
+        range.selectNodeContents(textEl);
+        const sel = window.getSelection();
+        sel.removeAllRanges();
+        sel.addRange(range);
+      } catch (_) {
+        // Selection API unsupported -- the text is still visible and
+        // long-press-selectable, which is all this fallback promises.
       }
     }
 
@@ -4065,17 +4104,33 @@
     }
 
     async function copyReferral() {
+      let data;
       try {
-        const data = await fetchReferralShareContent();
-        await copyTextToClipboard(data.message);
+        data = await fetchReferralShareContent();
+      } catch (err) {
+        // The caption itself couldn't be fetched -- nothing to copy or show,
+        // so this is a genuine failure.
+        console.warn("[COPY_REFERRAL][FETCH_FAILED]", err);
+        hapticNotify("error");
+        tgAlert(t("copy_failed"));
+        return;
+      }
+
+      const copied = await copyTextToClipboard(data.message);
+      if (copied) {
         flashButtonLabel(document.getElementById("copy-referral-btn"), "✓ Copied");
         flashButtonLabel(document.getElementById("copy-referral-btn-inline"), "✓ Copied");
         showCopySuccessToast();
-      } catch (err) {
-        console.warn("[COPY_REFERRAL][FAIL]", err);
-        hapticNotify("error");
-        tgAlert(t("copy_failed"));
+        return;
       }
+
+      // We DO have a valid caption -- both copy mechanisms just failed
+      // (e.g. no clipboard permission, execCommand blocked). Never claim
+      // "copy failed" when the text is right here and can be selected
+      // manually; show it instead.
+      console.warn("[COPY_REFERRAL][CLIPBOARD_UNAVAILABLE] falling back to manual selection");
+      hapticNotify("warning");
+      showManualCopyCaption(data.message);
     }
 
     async function shareReferralViaTelegram() {
