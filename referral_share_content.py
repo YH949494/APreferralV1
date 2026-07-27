@@ -7,7 +7,9 @@ Assembles the bot's Copy/Share caption from up to four parts (see
 
   Want more replays like this—and rewards too?   <- omitted if neither above is present
 
-  Join AdvantPlay for 👇
+  👋 Welcome to AdvantPlay Community!
+  Join our channel to get 👇
+  🎟️ FREE Welcome Voucher — No deposit required
   ...benefits...   (always present — static)
 
   Start here 👇
@@ -336,22 +338,26 @@ def build_referral_share_caption(
         playback_out = html_escape(playback_url) if playback_url else ""
         referral_out = html_escape(referral_url)
         benefits = (
-            "<blockquote><b>Join AdvantPlay for 👇</b>\n"
+            "<blockquote><b>👋 Welcome to AdvantPlay Community!</b>\n"
+            "Join our channel to get 👇\n\n"
+            "🎟️ FREE Welcome Voucher — No deposit required\n"
             "⚡️ Daily voucher drops\n"
-            "🎁 Exclusive reward campaigns\n"
-            "🏆 Weekly ranking rewards\n"
-            "👑 VIP updates and opportunities</blockquote>"
+            "🎁 Bonus campaigns\n"
+            "👑 VIP-only announcements\n"
+            "🏆 Weekly ranking rewards</blockquote>"
         )
     else:
         hook_out = hook
         playback_out = playback_url
         referral_out = referral_url
         benefits = (
-            "Join AdvantPlay for 👇\n\n"
+            "👋 Welcome to AdvantPlay Community!\n\n"
+            "Join our channel to get 👇\n\n"
+            "🎟️ FREE Welcome Voucher — No deposit required\n"
             "⚡️ Daily voucher drops\n"
-            "🎁 Exclusive reward campaigns\n"
-            "🏆 Weekly ranking rewards\n"
-            "👑 VIP updates and opportunities"
+            "🎁 Bonus campaigns\n"
+            "👑 VIP-only announcements\n"
+            "🏆 Weekly ranking rewards"
         )
 
     # Hook and playback are each optional and independently omitted. The

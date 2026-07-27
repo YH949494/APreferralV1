@@ -137,7 +137,7 @@ test("getReferral(): missing link in response returns false and shows inline err
   const ok = await context.getReferral();
 
   assert.equal(ok, false);
-  assert.match(elements["referral-link-inline-text"].textContent, /Failed to get link/);
+  assert.match(elements["referral-link-inline-text"].textContent, /referral_generate_error/);
 });
 
 test("getReferral(): malformed (non-JSON) response returns false", async () => {
@@ -328,7 +328,7 @@ test("handleReferralEntryAction: an automatic failure logs ENTRY_ACTION_FAILED a
   });
 
   await context.handleReferralEntryAction();
-  assert.match(elements["referral-link-inline-text"].textContent, /Failed to get link/);
+  assert.match(elements["referral-link-inline-text"].textContent, /referral_generate_error/);
   assert.equal(context.latestReferralLink, "");
 
   // Manual retry: user presses the normal Generate Link button, which just calls getReferral() again.

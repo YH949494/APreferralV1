@@ -219,8 +219,10 @@ def test_new_user_referral_deeplink_returns_share_package_and_share_button(deepl
     quote_start = reply["text"].index("<blockquote>")
     quote_end = reply["text"].index("</blockquote>") + len("</blockquote>")
     quoted = reply["text"][quote_start:quote_end]
-    assert "Join AdvantPlay for" in quoted
+    assert "Join our channel to get" in quoted
+    assert "🎟️ FREE Welcome Voucher — No deposit required" in quoted
     assert "⚡️ Daily voucher drops" in quoted
+    assert quoted.index("FREE Welcome Voucher") < quoted.index("Daily voucher drops")
     assert "🎬 New hook!" not in quoted
     assert "https://cdn.example.com/playback/xyz" not in quoted
     assert "https://t.me/+brandNewHash" not in quoted
@@ -346,7 +348,7 @@ def test_referral_deeplink_generation_failure_sends_retryable_error(deeplink_env
     reply = deeplink_env._replies[0]
     assert "try again" in reply["text"].lower()
     assert "t.me/+" not in reply["text"]
-    assert "Join AdvantPlay" not in reply["text"]
+    assert "Join our channel" not in reply["text"]
 
 
 def test_referral_deeplink_generation_failure_sends_no_normal_keyboard(deeplink_env):
@@ -382,7 +384,7 @@ def test_referral_deeplink_no_active_playback_returns_retryable_error_not_old_ca
 
     reply = deeplink_env._replies[0]
     assert reply["text"] == "No playback is currently available. Please try again later."
-    assert "Join AdvantPlay" not in reply["text"]
+    assert "Join our channel" not in reply["text"]
     assert reply["reply_markup"] is None
 
 
@@ -395,11 +397,13 @@ def test_referral_deeplink_no_hook_no_playback_sends_static_fallback_caption(dee
     deeplink_env._state["result"] = {
         "ok": True,
         "message": (
-            "Join AdvantPlay for 👇\n\n"
+            "👋 Welcome to AdvantPlay Community!\n\n"
+            "Join our channel to get 👇\n\n"
+            "🎟️ FREE Welcome Voucher — No deposit required\n"
             "⚡️ Daily voucher drops\n"
-            "🎁 Exclusive reward campaigns\n"
-            "🏆 Weekly ranking rewards\n"
-            "👑 VIP updates and opportunities\n\n"
+            "🎁 Bonus campaigns\n"
+            "👑 VIP-only announcements\n"
+            "🏆 Weekly ranking rewards\n\n"
             "Start here 👇\n"
             "https://t.me/+fallbackOnlyHash"
         ),
@@ -412,7 +416,7 @@ def test_referral_deeplink_no_hook_no_playback_sends_static_fallback_caption(dee
 
     reply = deeplink_env._replies[0]
     assert "https://t.me/+fallbackOnlyHash" in reply["text"]
-    assert "Join AdvantPlay for" in reply["text"]
+    assert "Join our channel to get" in reply["text"]
     assert "None" not in reply["text"]
     assert "\n\n\n" not in reply["text"]
     assert reply.get("parse_mode") == ParseMode.HTML

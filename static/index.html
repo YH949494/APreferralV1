@@ -3960,7 +3960,7 @@
         try {
           data = JSON.parse(rawText);
         } catch {
-          showInlineError("❌ Invalid server response.");
+          showInlineError(t("referral_generate_error"));
           return false;
         }
 
@@ -3977,11 +3977,11 @@
           return true;
         } else {
           latestReferralMode = "";
-          showInlineError("❌ Failed to get link.");
+          showInlineError(t("referral_generate_error"));
           return false;
         }
       } catch {
-        showInlineError("❌ Error connecting to server.");
+        showInlineError(t("referral_generate_error"));
         return false;
       } finally {
         allBtns.forEach((b, i) => { b.disabled = false; b.removeAttribute("aria-busy"); b.textContent = originalLabels[i]; });
@@ -4084,37 +4084,81 @@
       }
     }
 
-    // Copies `link` and flashes the Get-link/Copy-link button with success
-    // feedback. Falls back to highlighting the link for manual copy if both
-    // the Clipboard API and execCommand fail -- a clipboard failure is never
-    // treated as a referral-link generation failure.
-    async function copyReferralLinkAndFlash(link) {
-      const copied = await copyTextToClipboard(link);
+    // Approved static caption (see referral_share_content.py's
+    // build_referral_share_caption for the canonical backend version this
+    // mirrors) used ONLY when /api/referral/share-content cannot be reached --
+    // never as a second independent source of truth for the copy itself.
+    function buildFallbackReferralCaption(link) {
+      return [
+        "👋 Welcome to AdvantPlay Community!",
+        "",
+        "Join our channel to get 👇",
+        "",
+        "🎟️ FREE Welcome Voucher — No deposit required",
+        "⚡️ Daily voucher drops",
+        "🎁 Bonus campaigns",
+        "👑 VIP-only announcements",
+        "🏆 Weekly ranking rewards",
+        "",
+        "Start here 👇",
+        link,
+      ].join("\n");
+    }
+
+    // Fetches the canonical share caption for `link` from
+    // /api/referral/share-content. Falls back to the approved static caption
+    // (plus the already-generated link) if that fetch fails -- a
+    // share-content failure never blanks the already-generated referral link
+    // and is never reported as a link-generation failure.
+    async function getReferralCaption(link) {
+      trackReferralEvent("referral_share_content_requested");
+      try {
+        const data = await fetchReferralShareContent();
+        return data.message;
+      } catch (err) {
+        console.warn("[REFERRAL][SHARE_CONTENT_FALLBACK] reason=" + (err?.message || err));
+        return buildFallbackReferralCaption(link);
+      }
+    }
+
+    // Copies the full caption (backend caption + referral URL, or the
+    // fallback caption) for `link` and flashes the Get-link button with
+    // success feedback. Falls back to showing the caption for manual
+    // selection if both the Clipboard API and execCommand fail -- a
+    // clipboard failure is never treated as a referral-link generation
+    // failure, and "Copied" is only ever shown once copying genuinely
+    // succeeded.
+    async function copyReferralCaptionAndFlash(link) {
+      const caption = await getReferralCaption(link);
+      const copied = await copyTextToClipboard(caption);
       if (copied) {
-        trackReferralEvent("referral_link_copied");
+        trackReferralEvent("referral_caption_copied");
         hapticNotify("success");
         showCopySuccessToast();
         setReferralLinkButtonLabel(t("copied_check"));
-        setTimeout(() => setReferralLinkButtonLabel(t("copy_link")), 2000);
+        setTimeout(() => setReferralLinkButtonLabel(t("copy_caption_link")), 2000);
         return;
       }
 
-      trackReferralEvent("referral_link_copy_failed");
+      trackReferralEvent("referral_caption_copy_failed");
       hapticNotify("warning");
-      highlightReferralLinkText();
+      showManualCopyCaption(caption);
       showReferralLinkError(t("referral_manual_copy"));
-      setReferralLinkButtonLabel(t("copy_link"));
+      setReferralLinkButtonLabel(t("copy_caption_link"));
     }
 
     // One-click handler bound to #ap-get-referral-btn: generates the link on
-    // first use, then copies the already-loaded link on every click after
+    // first use, then reuses the already-loaded link on every click after
     // that (never re-generating or requesting a new Telegram invite link).
+    // The share caption is (re-)fetched on every click so the copied text
+    // always carries the latest active caption, even when the link itself
+    // is reused.
     async function handleReferralLinkClick() {
       if (referralLinkRequestInFlight) return;
 
       if (latestReferralLink) {
         trackReferralEvent("referral_link_requested", { reused: true });
-        await copyReferralLinkAndFlash(latestReferralLink);
+        await copyReferralCaptionAndFlash(latestReferralLink);
         return;
       }
 
@@ -4125,7 +4169,7 @@
         const ok = await getReferral();
         if (ok) {
           trackReferralEvent("referral_link_generated");
-          await copyReferralLinkAndFlash(latestReferralLink);
+          await copyReferralCaptionAndFlash(latestReferralLink);
         } else {
           setReferralLinkButtonLabel(t("try_again"));
           showReferralLinkError(t("referral_generate_error"));
