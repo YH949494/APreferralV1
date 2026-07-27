@@ -1589,13 +1589,13 @@
                 <div class="ap-ref-bar" id="ap-ref-bar-3"></div>
               </div>
             </div>
-            <button onclick="getReferral()" class="ap-step-btn ap-step-btn-ghost" id="ap-get-referral-btn" data-i18n="get_link">Get link</button>
+            <button onclick="handleReferralLinkClick()" class="ap-step-btn ap-step-btn-ghost" id="ap-get-referral-btn" data-i18n="get_link" data-i18n-dynamic>Get link</button>
           </div>
           <!-- Inline referral link output (visible in new UI) -->
           <div id="referral-link-inline" style="display:none;margin-top:10px;">
             <div style="font-family:monospace;font-size:12px;color:#a39e95;word-break:break-all;padding:8px 10px;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.1);border-radius:8px;" id="referral-link-inline-text"></div>
+            <div id="referral-link-error" style="display:none;margin-top:6px;font-size:11px;color:#e0a94f;"></div>
             <div style="display:flex;gap:8px;margin-top:8px;">
-              <button onclick="copyReferral()" class="ap-step-btn ap-step-btn-ghost" style="flex:1;font-size:12px;padding:7px 10px;" id="copy-referral-btn-inline" data-i18n="copy">📋 Copy</button>
               <button onclick="shareReferralViaTelegram()" class="ap-step-btn" style="flex:1;font-size:12px;padding:7px 10px;" data-i18n="share">📤 Share</button>
             </div>
           </div>
@@ -3128,6 +3128,7 @@
     let regionMsg = "";
     let latestReferralLink = "";
     let latestReferralMode = "";
+    let referralLinkRequestInFlight = false;
 
     if (!userId && !getAdminSecret()) {
       const warn = document.createElement('div');
@@ -3944,7 +3945,7 @@
 
       const allBtns = [btn, inlineBtn].filter(Boolean);
       const originalLabels = allBtns.map(b => b.textContent);
-      allBtns.forEach(b => { b.disabled = true; b.setAttribute("aria-busy", "true"); b.textContent = t("getting"); });
+      allBtns.forEach(b => { b.disabled = true; b.setAttribute("aria-busy", "true"); b.textContent = t("generating"); });
 
       function showInlineError(msg) {
         if (inlineText) { inlineText.textContent = msg; }
@@ -4044,6 +4045,93 @@
       } catch (_) {
         // Selection API unsupported -- the text is still visible and
         // long-press-selectable, which is all this fallback promises.
+      }
+    }
+
+    // Lightweight breadcrumb "analytics" for the referral one-click flow,
+    // consistent with the [MINIAPP][ENTRY_ACTION] console-log convention
+    // used elsewhere in this file (there is no dedicated analytics SDK).
+    function trackReferralEvent(event, meta) {
+      try {
+        console.info(`[ANALYTICS][REFERRAL] event=${event}${meta ? " " + JSON.stringify(meta) : ""}`);
+      } catch (_) {}
+    }
+
+    function setReferralLinkButtonLabel(label) {
+      const btn = document.getElementById("ap-get-referral-btn");
+      if (btn) btn.textContent = label;
+    }
+
+    function showReferralLinkError(msg) {
+      const el = document.getElementById("referral-link-error");
+      if (!el) return;
+      el.textContent = msg || "";
+      el.style.display = msg ? "block" : "none";
+    }
+
+    function highlightReferralLinkText() {
+      const el = document.getElementById("referral-link-inline-text");
+      if (!el) return;
+      try {
+        const range = document.createRange();
+        range.selectNodeContents(el);
+        const sel = window.getSelection();
+        sel.removeAllRanges();
+        sel.addRange(range);
+      } catch (_) {
+        // Selection API unsupported -- the link stays visible and
+        // long-press-selectable either way.
+      }
+    }
+
+    // Copies `link` and flashes the Get-link/Copy-link button with success
+    // feedback. Falls back to highlighting the link for manual copy if both
+    // the Clipboard API and execCommand fail -- a clipboard failure is never
+    // treated as a referral-link generation failure.
+    async function copyReferralLinkAndFlash(link) {
+      const copied = await copyTextToClipboard(link);
+      if (copied) {
+        trackReferralEvent("referral_link_copied");
+        hapticNotify("success");
+        showCopySuccessToast();
+        setReferralLinkButtonLabel(t("copied_check"));
+        setTimeout(() => setReferralLinkButtonLabel(t("copy_link")), 2000);
+        return;
+      }
+
+      trackReferralEvent("referral_link_copy_failed");
+      hapticNotify("warning");
+      highlightReferralLinkText();
+      showReferralLinkError(t("referral_manual_copy"));
+      setReferralLinkButtonLabel(t("copy_link"));
+    }
+
+    // One-click handler bound to #ap-get-referral-btn: generates the link on
+    // first use, then copies the already-loaded link on every click after
+    // that (never re-generating or requesting a new Telegram invite link).
+    async function handleReferralLinkClick() {
+      if (referralLinkRequestInFlight) return;
+
+      if (latestReferralLink) {
+        trackReferralEvent("referral_link_requested", { reused: true });
+        await copyReferralLinkAndFlash(latestReferralLink);
+        return;
+      }
+
+      referralLinkRequestInFlight = true;
+      showReferralLinkError("");
+      trackReferralEvent("referral_link_requested", { reused: false });
+      try {
+        const ok = await getReferral();
+        if (ok) {
+          trackReferralEvent("referral_link_generated");
+          await copyReferralLinkAndFlash(latestReferralLink);
+        } else {
+          setReferralLinkButtonLabel(t("try_again"));
+          showReferralLinkError(t("referral_generate_error"));
+        }
+      } finally {
+        referralLinkRequestInFlight = false;
       }
     }
 
