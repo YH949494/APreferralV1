@@ -638,24 +638,88 @@ class TestGenerateSharePackage:
         assert row["hook_text"] == "Hook text"
         assert row["generated_at"] is not None
 
-    def test_default_hook_used_when_none_active_and_hook_id_null(self, fake_db, monkeypatch):
+    def test_no_active_hook_is_omitted_not_substituted(self, fake_db, monkeypatch):
+        """No active hook -> hook section is omitted entirely; the
+        admin-configurable fallback_hook_text is NOT silently substituted
+        (that was the old behavior and violated the empty-state contract)."""
         self._patch_invite_link(monkeypatch, link="https://t.me/+abc123")
         _playback(fake_db, "Play00003")
 
         result = rsc.generate_share_package(2, "user2")
         assert result["ok"] is True
-        assert result["hook_text"] == rsc.DEFAULT_FALLBACK_HOOK_TEXT
+        assert result["hook_text"] is None
+        assert rsc.DEFAULT_FALLBACK_HOOK_TEXT not in result["message"]
+        assert result["message"].startswith("https://rx.apreplay.com/Play00003")
         row = fake_db["share_generations"].find_one({"user_id": 2})
         assert row["hook_id"] is None
+        assert row["hook_text"] is None
 
-    def test_no_active_playback_returns_retryable_error_and_no_history(self, fake_db, monkeypatch):
+    def test_no_active_playback_still_succeeds_with_playback_omitted(self, fake_db, monkeypatch):
+        """No active playback link is no longer a hard failure -- the
+        playback section is simply omitted and the referral link is still
+        generated, tracked, and returned normally."""
         self._patch_invite_link(monkeypatch, link="https://t.me/+abc123")
         _hook(fake_db, "Hook text")
         # no playback records at all
 
         result = rsc.generate_share_package(3, "user3")
-        assert result == {"ok": False, "code": "no_active_playback"}
-        assert fake_db["share_generations"].count_documents({}) == 0
+        assert result["ok"] is True
+        assert result["playback_url"] is None
+        assert result["invite_link"] == "https://t.me/+abc123"
+        assert "https://rx.apreplay.com" not in result["message"]
+        row = fake_db["share_generations"].find_one({"user_id": 3})
+        assert row is not None
+        assert row["playback_record_id"] is None
+        assert row["playback_id"] is None
+        assert row["playback_url"] is None
+        assert row["invite_link"] == "https://t.me/+abc123"
+
+    def test_all_records_inactive_returns_static_benefits_and_link_only(self, fake_db, monkeypatch):
+        """No active hook AND no active playback: still a valid, non-empty
+        caption -- static benefits section + the user's referral link,
+        never an error, never 'None', never an orphan separator."""
+        self._patch_invite_link(monkeypatch, link="https://t.me/+abc123")
+        _hook(fake_db, "Inactive hook", status="inactive")
+        _playback(fake_db, "InactivePB", status="inactive")
+
+        result = rsc.generate_share_package(6, "user6")
+        assert result["ok"] is True
+        assert result["hook_text"] is None
+        assert result["playback_url"] is None
+        assert result["invite_link"] == "https://t.me/+abc123"
+        expected = (
+            "Join AdvantPlay for 👇\n\n"
+            "⚡️ Daily voucher drops\n"
+            "🎁 Exclusive reward campaigns\n"
+            "🏆 Weekly ranking rewards\n"
+            "👑 VIP updates and opportunities\n\n"
+            "Start here 👇\n"
+            "https://t.me/+abc123"
+        )
+        assert result["message"] == expected
+        assert "None" not in result["message"]
+        assert "\n\n\n" not in result["message"]
+        assert not result["message"].startswith("\n")
+
+    def test_no_active_hook_ignores_configured_fallback_hook_text(self, fake_db, monkeypatch):
+        """Even when share_content.fallback_hook_text IS configured, no
+        active hook must still omit the hook section -- the setting is not
+        the empty-state protection (build_referral_share_caption's own
+        omit-when-blank logic is), so it must never leak into the caption
+        just because an admin configured it."""
+        import settings_service
+
+        monkeypatch.setattr(
+            settings_service, "get_setting",
+            lambda category, key: "🎬 Configured hook copy!" if (category, key) == ("share_content", "fallback_hook_text") else None,
+        )
+        self._patch_invite_link(monkeypatch, link="https://t.me/+abc123")
+        _playback(fake_db, "Play00006")
+
+        result = rsc.generate_share_package(7, "user7")
+        assert result["ok"] is True
+        assert result["hook_text"] is None
+        assert "Configured hook copy" not in result["message"]
 
     def test_invite_link_failure_returns_retryable_error_and_no_history(self, fake_db, monkeypatch):
         self._patch_invite_link(monkeypatch, raise_error=RuntimeError("createChatInviteLink failed"))
@@ -678,6 +742,39 @@ class TestGenerateSharePackage:
         result = rsc.generate_share_package(5, "user5")
         assert "invite_link" not in result
         assert "message" not in result
+
+
+# ---------------------------------------------------------------------------
+# _default_hook_text() / share_content.fallback_hook_text — documents the
+# setting's current (read-only) behavior now that generate_share_package no
+# longer calls it to substitute a missing hook. Kept as an accessor only;
+# see the docstring on _default_hook_text for the audit rationale.
+# ---------------------------------------------------------------------------
+
+class TestDefaultHookTextSetting:
+    def test_empty_fallback_hook_text_uses_hardcoded_default(self, monkeypatch):
+        import settings_service
+
+        monkeypatch.setattr(settings_service, "get_setting", lambda category, key: "")
+        assert rsc._default_hook_text() == rsc.DEFAULT_FALLBACK_HOOK_TEXT
+
+    def test_configured_fallback_hook_text_is_returned_verbatim(self, monkeypatch):
+        import settings_service
+
+        monkeypatch.setattr(
+            settings_service, "get_setting",
+            lambda category, key: "🎬 Custom copy" if (category, key) == ("share_content", "fallback_hook_text") else None,
+        )
+        assert rsc._default_hook_text() == "🎬 Custom copy"
+
+    def test_settings_lookup_failure_falls_back_to_hardcoded_default(self, monkeypatch):
+        import settings_service
+
+        def _boom(category, key):
+            raise RuntimeError("db unavailable")
+
+        monkeypatch.setattr(settings_service, "get_setting", _boom)
+        assert rsc._default_hook_text() == rsc.DEFAULT_FALLBACK_HOOK_TEXT
 
 
 # ---------------------------------------------------------------------------
@@ -751,16 +848,18 @@ class TestBuildReferralShareCaption:
         assert result.endswith("https://t.me/+ref")
         assert "  " not in result.split("\n")[0]
 
-    def test_missing_hook_falls_back_to_default_line(self):
+    def test_missing_hook_is_omitted_not_substituted(self):
         result = rsc.build_referral_share_caption(
             hook_text="", playback_url="https://rx.apreplay.com/Abc12345", referral_url="https://t.me/+ref"
         )
-        assert result.startswith("Wait for the ending 👀\n")
+        assert result.startswith("https://rx.apreplay.com/Abc12345\n\n")
+        assert "Wait for the ending" not in result
 
         result_none = rsc.build_referral_share_caption(
             hook_text=None, playback_url="https://rx.apreplay.com/Abc12345", referral_url="https://t.me/+ref"
         )
-        assert result_none.startswith("Wait for the ending 👀\n")
+        assert result_none.startswith("https://rx.apreplay.com/Abc12345\n\n")
+        assert "Wait for the ending" not in result_none
 
     def test_missing_playback_produces_referral_only_caption_no_blank_line(self, caplog):
         result = rsc.build_referral_share_caption(hook_text="Hook", playback_url="", referral_url="https://t.me/+ref")
@@ -770,6 +869,39 @@ class TestBuildReferralShareCaption:
         # No blank/malformed URL line: exactly one blank line separates the
         # hook from the benefits block, not two.
         assert "\n\n\n" not in result
+
+    def test_no_hook_and_no_playback_returns_static_benefits_and_link_only(self):
+        """The core empty-state fix: no active hook AND no active playback
+        link must still produce a valid, non-empty caption -- the static
+        benefits section plus the referral link, with no orphan separators,
+        no leading blank line, and no placeholder/"None" text."""
+        result = rsc.build_referral_share_caption(hook_text=None, playback_url=None, referral_url="https://t.me/+ref")
+        expected = (
+            "Join AdvantPlay for 👇\n\n"
+            "⚡️ Daily voucher drops\n"
+            "🎁 Exclusive reward campaigns\n"
+            "🏆 Weekly ranking rewards\n"
+            "👑 VIP updates and opportunities\n\n"
+            "Start here 👇\n"
+            "https://t.me/+ref"
+        )
+        assert result == expected
+        assert not result.startswith("\n")
+        assert not result.startswith("=")
+        assert "\n\n\n" not in result
+        assert "None" not in result
+        assert result.strip() != ""
+
+    def test_no_hook_and_no_playback_in_html_mode_is_still_valid_markup(self):
+        result = rsc.build_referral_share_caption(
+            hook_text="", playback_url="", referral_url="https://t.me/+ref", format_mode="telegram_html",
+        )
+        assert result.count("<blockquote>") == 1
+        assert result.count("</blockquote>") == 1
+        assert not result.startswith("\n")
+        assert "\n\n\n" not in result
+        assert "None" not in result
+        assert result.strip() != ""
 
     def test_missing_referral_url_raises(self):
         with pytest.raises(ValueError):
@@ -921,12 +1053,13 @@ class TestBuildReferralShareCaptionTelegramHtml:
         assert "<blockquote><b>Join AdvantPlay for 👇</b>" in result
         assert result.count("<blockquote>") == 1
 
-    def test_missing_hook_fallback_in_html_mode(self):
+    def test_missing_hook_is_omitted_in_html_mode(self):
         result = rsc.build_referral_share_caption(
             hook_text="", playback_url="https://rx.apreplay.com/Abc12345",
             referral_url="https://t.me/+ref", format_mode="telegram_html",
         )
-        assert result.startswith("Wait for the ending 👀\n")
+        assert result.startswith("https://rx.apreplay.com/Abc12345\n\n")
+        assert "Wait for the ending" not in result
 
     def test_missing_playback_omits_line_but_stays_valid_html(self):
         result = rsc.build_referral_share_caption(
