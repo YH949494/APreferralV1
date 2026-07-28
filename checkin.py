@@ -207,7 +207,7 @@ def handle_checkin():
     if freeze_used:
         payload["message"] += " 🧊 Streak Freeze used! Your streak continues."
 
-    from vouchers import get_welcome_reward_progress, record_welcome_checkin_progress
+    from vouchers import get_welcome_reward_progress, record_welcome_checkin_progress, resolve_welcome_display_name
 
     record_welcome_checkin_progress(user_id, now=now)
     welcome_progress = get_welcome_reward_progress(user_id, now=now)
@@ -216,6 +216,10 @@ def handle_checkin():
         required = int(welcome_progress.get("checkins_required") or 3)
         payload["welcome_progress"] = welcome_progress
         remaining = max(0, required - completed)
+        # Personalized when a first name is on file; gracefully falls back to
+        # the generic greeting-less copy otherwise.
+        first_name = resolve_welcome_display_name(user_id, user_doc=user or {})
+        greeting = f"Hi {first_name} 👋\n\n" if first_name else ""
         if welcome_progress.get("unlocked") or completed >= required:
             payload["welcome_celebration"] = "unlock"
             payload["welcome_message"] = (
@@ -228,10 +232,11 @@ def handle_checkin():
             plural = "check-ins" if remaining != 1 else "check-in"
             payload["welcome_celebration"] = "day1"
             payload["welcome_message"] = (
+                f"{greeting}"
                 "🎉 Great start!\n\n"
                 "Day 1 completed.\n\n"
                 f"Only {remaining} more daily {plural} remain.\n\n"
-                "Come back tomorrow to continue your Welcome Reward journey."
+                "Your Welcome Voucher is waiting."
             )
         else:
             plural = "check-ins" if remaining != 1 else "check-in"

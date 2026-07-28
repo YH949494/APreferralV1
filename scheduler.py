@@ -1,3 +1,4 @@
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 import logging
 import os
@@ -45,6 +46,44 @@ def _referral_setting(field: str, fallback):
     except Exception:
         return fallback
 
+
+# ---------------------------------------------------------------------------
+# Welcome reminder flow (consolidated, Phase 2)
+#
+# Single source of truth per lifecycle stage, split across two cron jobs that
+# never nudge the same user for the same thing:
+#
+#   1. process_welcome_voucher_lifecycle (*/30 min) - Day-0 safety net only.
+#      Owns users who joined but have not completed a single check-in yet
+#      (no "welcome_reminders" doc exists for them, since that doc is only
+#      created on first check-in - see vouchers.record_welcome_checkin_progress).
+#      Sends the generic "voucher waiting" / "last chance" nudge and performs
+#      the hard expiry/final-warning bookkeeping on `welcome_eligibility`.
+#      As soon as a user has any check-in, this job stops sending them
+#      reminders (see the `welcome_reminders` ownership guard below) so it
+#      never overlaps with job #2's check-in-aware copy.
+#
+#   2. process_welcome_reminders (hourly) - Owns every user who has started
+#      checking in (i.e. has a `welcome_reminders` doc). Reads live progress
+#      from vouchers.get_welcome_progress and sends, at most once each:
+#        - reminder_20h  (stuck on 1/3, ~20h after Day 1)
+#        - reminder_28h  (stuck on 1/3, ~28h after Day 1 - more urgency)
+#        - day2_reminder (stuck on 2/3, ~20h after Day 2)
+#        - recovery      (Smart Recovery Journey: still stuck well past the
+#          normal nudge window - one last "still waiting" message before the
+#          7-day Welcome window lapses)
+#      All four stages share the same anti-abuse gate
+#      (_welcome_reminder_anti_abuse_blocked), are personalized with the
+#      user's first name when available (vouchers.resolve_welcome_display_name)
+#      with a graceful generic fallback, are localized via
+#      vouchers.resolve_welcome_locale, and use lightweight adaptive timing
+#      (_preferred_send_hour_kl) to land close to the user's usual check-in
+#      hour instead of firing the instant the elapsed-time threshold is hit.
+#
+# Both jobs write to `welcome_analytics_events` via vouchers.log_welcome_event
+# so the funnel dashboard (dashboard_panels.build_welcome_journey_panel) can
+# report reminder volume without a separate tracking system.
+# ---------------------------------------------------------------------------
 
 WELCOME_REMINDER_AFTER_HOURS = int(os.getenv("WELCOME_REMINDER_AFTER_HOURS", "12"))
 WELCOME_FINAL_WARNING_HOURS = int(os.getenv("WELCOME_FINAL_WARNING_HOURS", "36"))
@@ -178,6 +217,18 @@ def process_welcome_voucher_lifecycle(*, now_ref: datetime | None = None, batch_
         if not (needs_reminder or needs_final):
             continue
 
+        # Ownership handoff: once a user has completed at least one check-in,
+        # process_welcome_reminders (V2) owns their reminders end-to-end. Skip
+        # here to avoid sending a duplicate/generic nudge on top of the V2
+        # check-in-aware copy. This is the only change needed to consolidate
+        # the two pipelines into a single source of truth per user.
+        try:
+            owned_by_v2 = bool(db_ref.welcome_reminders.find_one({"user_id": int(uid)}, {"_id": 1}))
+        except Exception:  # noqa: BLE001
+            owned_by_v2 = False
+        if owned_by_v2:
+            continue
+
         text = _welcome_reminder_text(final_warning=needs_final)
         ok, err = False, None
         if bot_send_fn is not None:
@@ -214,27 +265,158 @@ def process_welcome_voucher_lifecycle(*, now_ref: datetime | None = None, batch_
 
 
 WELCOME_PROGRESS_REMINDER_BATCH_LIMIT = int(os.getenv("WELCOME_PROGRESS_REMINDER_BATCH_LIMIT", "500"))
+WELCOME_RECOVERY_AFTER_HOURS = int(os.getenv("WELCOME_RECOVERY_AFTER_HOURS", "48"))
+WELCOME_ADAPTIVE_MAX_DELAY_HOURS = int(os.getenv("WELCOME_ADAPTIVE_MAX_DELAY_HOURS", "6"))
+WELCOME_ADAPTIVE_MIN_HISTORY = int(os.getenv("WELCOME_ADAPTIVE_MIN_HISTORY", "3"))
 
-# Reminder 1 (friendly): a gentle nudge shortly after Day 1.
-_WELCOME_PROGRESS_REMINDER_20H = (
-    "🎁 Nice one on Day 1!\n\n"
-    "🟩⬜⬜ 1/3\n\n"
-    "Come back for your Day 2 check-in to keep your Welcome Voucher journey going.\n\n"
-    "Takes less than 10 seconds."
-)
-# Reminder 2 (more urgency): still stuck on 1/3, reward window closing in.
-_WELCOME_PROGRESS_REMINDER_28H = (
-    "⚠️ Don't lose your Welcome Voucher\n\n"
-    "🟩⬜⬜ 1/3\n\n"
-    "Your Day 2 check-in is still waiting — complete it now to stay eligible.\n\n"
-    "Your reward expires 7 days after joining."
-)
-# Reminder 3 (high excitement): one check-in away from unlocking.
-_WELCOME_PROGRESS_REMINDER_DAY2 = (
-    "🔥 So close! Just 1 check-in left\n\n"
-    "🟩🟩⬜ 2/3\n\n"
-    "Complete Day 3 today and your FREE Welcome Voucher is yours to claim."
-)
+# Personalized, localized Welcome reminder copy (Phase 2). ``{greeting}`` is
+# rendered as "Hi <first name> \U0001F44B\n\n" when a first name is on file,
+# and collapses to "" otherwise (graceful fallback - see
+# _welcome_reminder_greeting). Locale falls back to "en" whenever no
+# recognized language field is present on the user doc (see
+# vouchers.resolve_welcome_locale) - today that is effectively everyone, since
+# no write path populates a language field yet, but the templates and
+# selection logic are ready for when one does.
+_WELCOME_REMINDER_TEMPLATES = {
+    "en": {
+        # Stage 1 (friendly): a gentle nudge shortly after Day 1.
+        "day1_20h": (
+            "{greeting}Great job completing Day 1!\n\n"
+            "Only TWO more check-ins remain.\n\n"
+            "Your Welcome Voucher is waiting."
+        ),
+        # Stage 2 (more urgency): still stuck on 1/3, reward window closing in.
+        "day1_28h": (
+            "⚠️ Don't lose your Welcome Voucher\n\n"
+            "🟩⬜⬜ 1/3\n\n"
+            "Your Day 2 check-in is still waiting — complete it now to stay eligible.\n\n"
+            "Your reward expires 7 days after joining."
+        ),
+        # Stage 3 (high excitement): one check-in away from unlocking.
+        "day2_20h": (
+            "🔥 You're almost there!\n\n"
+            "Just ONE more check-in unlocks your FREE Welcome Voucher.\n\n"
+            "Don't stop now."
+        ),
+        # Stage 4 (Smart Recovery Journey): well past the normal nudge window.
+        "recovery": (
+            "{greeting}Still waiting 👀\n\n"
+            "You're only one step away from unlocking your reward."
+        ),
+    },
+    "th": {
+        "day1_20h": (
+            "{greeting}เยี่ยมมากที่เช็คอินวันที่ 1 สำเร็จ!\n\n"
+            "เหลืออีกแค่ 2 ครั้งเท่านั้น\n\n"
+            "บัตรกำนัลต้อนรับของคุณรออยู่แล้ว"
+        ),
+        "day1_28h": (
+            "⚠️ อย่าพลาดบัตรกำนัลต้อนรับ\n\n"
+            "🟩⬜⬜ 1/3\n\n"
+            "การเช็คอินวันที่ 2 ของคุณยังรออยู่ — ทำตอนนี้เพื่อรักษาสิทธิ์\n\n"
+            "รางวัลของคุณหมดอายุภายใน 7 วันหลังจากเข้าร่วม"
+        ),
+        "day2_20h": (
+            "🔥 ใกล้จะสำเร็จแล้ว!\n\n"
+            "อีกแค่ 1 ครั้งเท่านั้นก็จะได้บัตรกำนัลต้อนรับฟรี\n\n"
+            "อย่าเพิ่งหยุดตอนนี้"
+        ),
+        "recovery": (
+            "{greeting}ยังรออยู่นะ 👀\n\n"
+            "คุณเหลืออีกแค่ก้าวเดียวก็จะปลดล็อกรางวัลได้แล้ว"
+        ),
+    },
+    "id": {
+        "day1_20h": (
+            "{greeting}Kerja bagus menyelesaikan Hari 1!\n\n"
+            "Tinggal DUA check-in lagi.\n\n"
+            "Voucher Selamat Datang kamu sudah menunggu."
+        ),
+        "day1_28h": (
+            "⚠️ Jangan lewatkan Voucher Selamat Datang kamu\n\n"
+            "🟩⬜⬜ 1/3\n\n"
+            "Check-in Hari 2 kamu masih menunggu — selesaikan sekarang agar tetap memenuhi syarat.\n\n"
+            "Hadiah kamu berakhir 7 hari setelah bergabung."
+        ),
+        "day2_20h": (
+            "🔥 Sedikit lagi!\n\n"
+            "Tinggal SATU check-in lagi untuk membuka Voucher Selamat Datang GRATIS kamu.\n\n"
+            "Jangan berhenti sekarang."
+        ),
+        "recovery": (
+            "{greeting}Masih menunggu 👀\n\n"
+            "Kamu tinggal satu langkah lagi untuk membuka hadiahmu."
+        ),
+    },
+}
+
+
+def _welcome_reminder_greeting(display_name: str | None) -> str:
+    return f"Hi {display_name} 👋\n\n" if display_name else ""
+
+
+def _render_welcome_reminder(stage: str, *, display_name: str | None, locale: str = "en") -> str:
+    templates = _WELCOME_REMINDER_TEMPLATES.get(locale) or _WELCOME_REMINDER_TEMPLATES["en"]
+    template = templates.get(stage) or _WELCOME_REMINDER_TEMPLATES["en"][stage]
+    return template.format(greeting=_welcome_reminder_greeting(display_name))
+
+
+# Backward-compatible module-level aliases: the generic (no first name, "en")
+# rendering of each stage - kept so existing callers/tests that reference
+# these constants directly keep working. process_welcome_reminders below
+# renders the personalized/localized text per-user instead of using these.
+_WELCOME_PROGRESS_REMINDER_20H = _render_welcome_reminder("day1_20h", display_name=None, locale="en")
+_WELCOME_PROGRESS_REMINDER_28H = _render_welcome_reminder("day1_28h", display_name=None, locale="en")
+_WELCOME_PROGRESS_REMINDER_DAY2 = _render_welcome_reminder("day2_20h", display_name=None, locale="en")
+_WELCOME_PROGRESS_REMINDER_RECOVERY = _render_welcome_reminder("recovery", display_name=None, locale="en")
+
+
+def _preferred_send_hour_kl(uid: int, *, db_ref) -> int | None:
+    """Lightweight heuristic: the user's most common local check-in hour.
+
+    Reuses the existing ``xp_events`` check-in ledger (no new tracking, no
+    ML) - looks at the last 14 check-ins and returns the most frequent local
+    hour. Returns ``None`` when there isn't enough history yet, in which case
+    callers must fall back to the fixed elapsed-time schedule.
+    """
+    try:
+        docs = list(
+            db_ref.xp_events.find({"user_id": uid, "type": "checkin"}, {"created_at": 1})
+            .sort("created_at", -1)
+            .limit(14)
+        )
+    except Exception:  # noqa: BLE001
+        return None
+    hours = []
+    for entry in docs:
+        ts = entry.get("created_at")
+        if not isinstance(ts, datetime):
+            continue
+        aware = ts if ts.tzinfo else KL_TZ.localize(ts)
+        hours.append(aware.astimezone(KL_TZ).hour)
+    if len(hours) < WELCOME_ADAPTIVE_MIN_HISTORY:
+        return None
+    return Counter(hours).most_common(1)[0][0]
+
+
+def _welcome_adaptive_send_ready(uid: int, *, db_ref, now_ts: datetime, elapsed: timedelta, threshold_hours: int) -> bool:
+    """Decide whether *now* is a good time to send, once the elapsed-time gate is met.
+
+    Sends immediately when there isn't enough check-in history (fixed
+    schedule, unchanged behaviour). Otherwise waits for the hour window
+    ending at the user's usual check-in hour (e.g. usual check-in ~8PM ->
+    send between 7-8PM), bounded by ``WELCOME_ADAPTIVE_MAX_DELAY_HOURS`` so a
+    reminder is never silently skipped - this keeps volume flat (still one
+    send per stage) while nudging delivery closer to when the user is
+    actually likely to check in.
+    """
+    preferred_hour = _preferred_send_hour_kl(uid, db_ref=db_ref)
+    if preferred_hour is None:
+        return True
+    if elapsed >= timedelta(hours=threshold_hours + WELCOME_ADAPTIVE_MAX_DELAY_HOURS):
+        return True
+    now_hour_kl = now_ts.astimezone(KL_TZ).hour
+    return now_hour_kl in (preferred_hour, (preferred_hour - 1) % 24)
 
 
 def _send_welcome_reminder(uid: int, text: str, *, send_fn, bot_send_fn, stage: str) -> tuple[bool, str | None]:
@@ -280,7 +462,7 @@ def _welcome_reminder_anti_abuse_blocked(uid: int, *, db_ref, progress: dict) ->
 # Internal stage code -> normalized stage identifier persisted on analytics
 # events. Only "day2" differs (the D3/final reminder, keyed internally off
 # ``day2_at`` since it fires 20h after the Day-2 check-in).
-_STAGE_NORMALIZED = {"20h": "20h", "28h": "28h", "day2": "day3"}
+_STAGE_NORMALIZED = {"20h": "20h", "28h": "28h", "day2": "day3", "recovery": "recovery"}
 
 
 def _welcome_reminder_candidate_stages(*, completed: int, day1_at, day2_at, doc: dict, now_ts: datetime) -> list[str]:
@@ -303,25 +485,45 @@ def _welcome_reminder_candidate_stages(*, completed: int, day1_at, day2_at, doc:
         and (now_ts - day2_at) >= timedelta(hours=20)
     ):
         stages.append("day2")
+    if not doc.get("recovery_sent"):
+        recovery_anchor = None
+        if completed == 1 and day1_at and doc.get("reminder_28h_sent"):
+            recovery_anchor = day1_at
+        elif completed == 2 and day2_at and doc.get("day2_reminder_sent"):
+            recovery_anchor = day2_at
+        if recovery_anchor and (now_ts - recovery_anchor) >= timedelta(hours=WELCOME_RECOVERY_AFTER_HOURS):
+            stages.append("recovery")
     return stages
 
 
 def process_welcome_reminders(*, now_ref: datetime | None = None, batch_limit: int | None = None, db_ref=None, send_fn=None, bot_send_fn=None) -> dict:
     """Hourly reminder job for the Welcome Voucher Progress journey (V2).
 
-    Sends the three check-in nudges defined by the spec (20h after Day 1,
-    28h after Day 1 if still stuck on 1/3, and 20h after Day 2). Reads
-    progress from ``vouchers.get_welcome_progress`` and tracks send state on
-    the ``welcome_reminders`` collection so each reminder fires at most once.
+    Sends four check-in nudges, each at most once (state tracked on the
+    ``welcome_reminders`` collection):
+      - 20h after Day 1 (stuck on 1/3)
+      - 28h after Day 1 (still stuck on 1/3, more urgency)
+      - 20h after Day 2 (stuck on 2/3)
+      - Smart Recovery: well past the above (``WELCOME_RECOVERY_AFTER_HOURS``,
+        default 48h since the last relevant check-in), one final nudge before
+        the 7-day Welcome window lapses.
+
+    Each stage is personalized with the user's first name when available
+    (falls back to generic copy otherwise), localized via
+    ``vouchers.resolve_welcome_locale``, and adaptively timed to land close to
+    the user's usual check-in hour (``_welcome_adaptive_send_ready`` - falls
+    back to sending as soon as the elapsed-time threshold is hit when there
+    isn't enough check-in history).
 
     ``bot_send_fn(uid, text) -> bool`` is an optional hook used only for the
-    Day 2 reminder so it can include a Mini-App button via the live bot
-    (InlineKeyboardButton/WebAppInfo). When it is absent, raises, or returns a
-    falsy result, the reminder falls back to plain-text ``send_fn`` (HTTP).
+    Day 2 and recovery reminders so they can include a Mini-App button via the
+    live bot (InlineKeyboardButton/WebAppInfo). When it is absent, raises, or
+    returns a falsy result, the reminder falls back to plain-text ``send_fn``
+    (HTTP).
     """
     import uuid
 
-    from vouchers import get_welcome_progress, log_welcome_event
+    from vouchers import get_welcome_progress, log_welcome_event, resolve_welcome_display_name, resolve_welcome_locale
 
     db_ref = db_ref or db
     send_fn = send_fn or _welcome_http_send_fn
@@ -329,8 +531,8 @@ def process_welcome_reminders(*, now_ref: datetime | None = None, batch_limit: i
     limit = int(batch_limit or WELCOME_PROGRESS_REMINDER_BATCH_LIMIT)
     run_id = uuid.uuid4().hex
 
-    scanned = reminder_20h_sent = reminder_28h_sent = day2_reminder_sent = skipped_abuse = send_failed = 0
-    eligible_20h = eligible_28h = eligible_day3 = 0
+    scanned = reminder_20h_sent = reminder_28h_sent = day2_reminder_sent = recovery_sent = skipped_abuse = send_failed = 0
+    eligible_20h = eligible_28h = eligible_day3 = eligible_recovery = 0
     failed_count = 0
     failed_users: list[dict] = []
     skip_breakdown = {
@@ -359,6 +561,7 @@ def process_welcome_reminders(*, now_ref: datetime | None = None, batch_limit: i
                 {"reminder_20h_sent": {"$ne": True}},
                 {"reminder_28h_sent": {"$ne": True}},
                 {"day2_reminder_sent": {"$ne": True}},
+                {"recovery_sent": {"$ne": True}},
             ]
         }
     ).limit(limit)
@@ -402,71 +605,106 @@ def process_welcome_reminders(*, now_ref: datetime | None = None, batch_limit: i
                     )
                 continue
 
-            # Reminder #1: completed == 1, 20h elapsed since Day 1, not yet sent.
-            if (
-                completed == 1
-                and day1_at
-                and not doc.get("reminder_20h_sent")
-                and (now_ts - day1_at) >= timedelta(hours=20)
-            ):
-                current_stage = "20h"
-                eligible_20h += 1
-                ok, err = _send_welcome_reminder(uid, _WELCOME_PROGRESS_REMINDER_20H, send_fn=send_fn, bot_send_fn=bot_send_fn, stage="20h")
-                if ok:
-                    db_ref.welcome_reminders.update_one({"_id": doc["_id"]}, {"$set": {"reminder_20h_sent": True, "updated_at": now_ts}})
-                    log_welcome_event("welcome_reminder_20h_sent", uid, stage="20h", status="sent", run_id=run_id, now=now_ts)
-                    reminder_20h_sent += 1
-                else:
-                    send_failed += 1
-                    logger.warning("[WELCOME_PROGRESS_REMINDER] send_failed uid=%s stage=20h err=%s", uid, err)
-                    log_welcome_event(
-                        "welcome_reminder_failed", uid, {"err": str(err)},
-                        stage="20h", status="failed", reason=str(err), run_id=run_id, now=now_ts,
-                    )
+            user_doc = db_ref.users.find_one(
+                {"user_id": uid}, {"first_name": 1, "display_name": 1, "name": 1, "username": 1, "language_code": 1, "locale": 1, "lang": 1}
+            ) or {}
+            display_name = resolve_welcome_display_name(uid, user_doc=user_doc)
+            locale = resolve_welcome_locale(user_doc)
 
-            # Reminder #2: completed == 1, 28h elapsed since Day 1, still stuck, not yet sent.
-            if (
-                completed == 1
-                and day1_at
-                and not doc.get("reminder_28h_sent")
-                and (now_ts - day1_at) >= timedelta(hours=28)
-            ):
-                current_stage = "28h"
-                eligible_28h += 1
-                ok, err = _send_welcome_reminder(uid, _WELCOME_PROGRESS_REMINDER_28H, send_fn=send_fn, bot_send_fn=bot_send_fn, stage="28h")
-                if ok:
-                    db_ref.welcome_reminders.update_one({"_id": doc["_id"]}, {"$set": {"reminder_28h_sent": True, "updated_at": now_ts}})
-                    log_welcome_event("welcome_reminder_28h_sent", uid, stage="28h", status="sent", run_id=run_id, now=now_ts)
-                    reminder_28h_sent += 1
-                else:
-                    send_failed += 1
-                    logger.warning("[WELCOME_PROGRESS_REMINDER] send_failed uid=%s stage=28h err=%s", uid, err)
-                    log_welcome_event(
-                        "welcome_reminder_failed", uid, {"err": str(err)},
-                        stage="28h", status="failed", reason=str(err), run_id=run_id, now=now_ts,
-                    )
+            # Reminder #1: completed == 1, ~20h elapsed since Day 1, not yet sent.
+            if completed == 1 and day1_at and not doc.get("reminder_20h_sent"):
+                elapsed = now_ts - day1_at
+                if elapsed >= timedelta(hours=20):
+                    current_stage = "20h"
+                    eligible_20h += 1
+                    if _welcome_adaptive_send_ready(uid, db_ref=db_ref, now_ts=now_ts, elapsed=elapsed, threshold_hours=20):
+                        text = _render_welcome_reminder("day1_20h", display_name=display_name, locale=locale)
+                        ok, err = _send_welcome_reminder(uid, text, send_fn=send_fn, bot_send_fn=bot_send_fn, stage="20h")
+                        if ok:
+                            db_ref.welcome_reminders.update_one({"_id": doc["_id"]}, {"$set": {"reminder_20h_sent": True, "updated_at": now_ts}})
+                            log_welcome_event("welcome_reminder_20h_sent", uid, stage="20h", status="sent", run_id=run_id, now=now_ts)
+                            reminder_20h_sent += 1
+                        else:
+                            send_failed += 1
+                            logger.warning("[WELCOME_PROGRESS_REMINDER] send_failed uid=%s stage=20h err=%s", uid, err)
+                            log_welcome_event(
+                                "welcome_reminder_failed", uid, {"err": str(err)},
+                                stage="20h", status="failed", reason=str(err), run_id=run_id, now=now_ts,
+                            )
 
-            # Reminder #3: completed == 2, 20h elapsed since Day 2, not yet sent.
-            if (
-                completed == 2
-                and day2_at
-                and not doc.get("day2_reminder_sent")
-                and (now_ts - day2_at) >= timedelta(hours=20)
-            ):
-                current_stage = "day2"
-                eligible_day3 += 1
-                ok, err = _send_welcome_reminder(uid, _WELCOME_PROGRESS_REMINDER_DAY2, send_fn=send_fn, bot_send_fn=bot_send_fn, stage="day2")
-                if ok:
-                    db_ref.welcome_reminders.update_one({"_id": doc["_id"]}, {"$set": {"day2_reminder_sent": True, "updated_at": now_ts}})
-                    log_welcome_event("welcome_reminder_day2_sent", uid, stage="day3", status="sent", run_id=run_id, now=now_ts)
-                    day2_reminder_sent += 1
-                else:
-                    send_failed += 1
-                    logger.warning("[WELCOME_PROGRESS_REMINDER] send_failed uid=%s stage=day2 err=%s", uid, err)
-                    log_welcome_event(
-                        "welcome_reminder_failed", uid, {"err": str(err)},
-                        stage="day3", status="failed", reason=str(err), run_id=run_id, now=now_ts,
-                    )
+            # Reminder #2: completed == 1, ~28h elapsed since Day 1, still stuck, not yet sent.
+            if completed == 1 and day1_at and not doc.get("reminder_28h_sent"):
+                elapsed = now_ts - day1_at
+                if elapsed >= timedelta(hours=28):
+                    current_stage = "28h"
+                    eligible_28h += 1
+                    if _welcome_adaptive_send_ready(uid, db_ref=db_ref, now_ts=now_ts, elapsed=elapsed, threshold_hours=28):
+                        text = _render_welcome_reminder("day1_28h", display_name=display_name, locale=locale)
+                        ok, err = _send_welcome_reminder(uid, text, send_fn=send_fn, bot_send_fn=bot_send_fn, stage="28h")
+                        if ok:
+                            db_ref.welcome_reminders.update_one({"_id": doc["_id"]}, {"$set": {"reminder_28h_sent": True, "updated_at": now_ts}})
+                            log_welcome_event("welcome_reminder_28h_sent", uid, stage="28h", status="sent", run_id=run_id, now=now_ts)
+                            reminder_28h_sent += 1
+                        else:
+                            send_failed += 1
+                            logger.warning("[WELCOME_PROGRESS_REMINDER] send_failed uid=%s stage=28h err=%s", uid, err)
+                            log_welcome_event(
+                                "welcome_reminder_failed", uid, {"err": str(err)},
+                                stage="28h", status="failed", reason=str(err), run_id=run_id, now=now_ts,
+                            )
+
+            # Reminder #3: completed == 2, ~20h elapsed since Day 2, not yet sent.
+            if completed == 2 and day2_at and not doc.get("day2_reminder_sent"):
+                elapsed = now_ts - day2_at
+                if elapsed >= timedelta(hours=20):
+                    current_stage = "day2"
+                    eligible_day3 += 1
+                    if _welcome_adaptive_send_ready(uid, db_ref=db_ref, now_ts=now_ts, elapsed=elapsed, threshold_hours=20):
+                        text = _render_welcome_reminder("day2_20h", display_name=display_name, locale=locale)
+                        ok, err = _send_welcome_reminder(uid, text, send_fn=send_fn, bot_send_fn=bot_send_fn, stage="day2")
+                        if ok:
+                            db_ref.welcome_reminders.update_one({"_id": doc["_id"]}, {"$set": {"day2_reminder_sent": True, "updated_at": now_ts}})
+                            log_welcome_event("welcome_reminder_day2_sent", uid, stage="day3", status="sent", run_id=run_id, now=now_ts)
+                            day2_reminder_sent += 1
+                        else:
+                            send_failed += 1
+                            logger.warning("[WELCOME_PROGRESS_REMINDER] send_failed uid=%s stage=day2 err=%s", uid, err)
+                            log_welcome_event(
+                                "welcome_reminder_failed", uid, {"err": str(err)},
+                                stage="day3", status="failed", reason=str(err), run_id=run_id, now=now_ts,
+                            )
+
+            # Reminder #4 (Smart Recovery Journey): user stalled on Day 1 or Day 2
+            # well past the normal nudge window - one last "still waiting" message,
+            # gated on the earlier stage reminder already having fired so this
+            # never overtakes/duplicates reminders #1-3. Recovery timing is
+            # anchored on the last relevant check-in, so it can never fire
+            # after the user has already unlocked/claimed (both cases are
+            # already filtered out above by the anti-abuse gate) and never
+            # exceeds the 7-day Welcome window since the anchor timestamps
+            # themselves are bounded by that window.
+            if not doc.get("recovery_sent"):
+                recovery_anchor = None
+                if completed == 1 and day1_at and doc.get("reminder_28h_sent"):
+                    recovery_anchor = day1_at
+                elif completed == 2 and day2_at and doc.get("day2_reminder_sent"):
+                    recovery_anchor = day2_at
+                if recovery_anchor and (now_ts - recovery_anchor) >= timedelta(hours=WELCOME_RECOVERY_AFTER_HOURS):
+                    current_stage = "recovery"
+                    eligible_recovery += 1
+                    text = _render_welcome_reminder("recovery", display_name=display_name, locale=locale)
+                    ok, err = _send_welcome_reminder(uid, text, send_fn=send_fn, bot_send_fn=bot_send_fn, stage="recovery")
+                    if ok:
+                        db_ref.welcome_reminders.update_one({"_id": doc["_id"]}, {"$set": {"recovery_sent": True, "updated_at": now_ts}})
+                        log_welcome_event("welcome_recovery_sent", uid, stage="recovery", status="sent", run_id=run_id, now=now_ts)
+                        recovery_sent += 1
+                    else:
+                        send_failed += 1
+                        logger.warning("[WELCOME_PROGRESS_REMINDER] send_failed uid=%s stage=recovery err=%s", uid, err)
+                        log_welcome_event(
+                            "welcome_reminder_failed", uid, {"err": str(err)},
+                            stage="recovery", status="failed", reason=str(err), run_id=run_id, now=now_ts,
+                        )
         except Exception as exc:  # noqa: BLE001 - per-user isolation, see docstring above
             failed_count += 1
             failed_users.append({
@@ -496,9 +734,11 @@ def process_welcome_reminders(*, now_ref: datetime | None = None, batch_limit: i
         "eligible_20h": eligible_20h,
         "eligible_28h": eligible_28h,
         "eligible_day3": eligible_day3,
+        "eligible_recovery": eligible_recovery,
         "reminder_20h_sent": reminder_20h_sent,
         "reminder_28h_sent": reminder_28h_sent,
         "day2_reminder_sent": day2_reminder_sent,
+        "recovery_sent": recovery_sent,
         "skipped_abuse": skipped_abuse,
         "skip_breakdown": skip_breakdown,
         "blocked_users": blocked_users,
