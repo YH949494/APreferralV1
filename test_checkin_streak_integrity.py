@@ -20,7 +20,6 @@ os.environ.setdefault("FLASK_SECRET_KEY", "test-secret")
 
 import mongomock
 import pytest
-from pymongo.errors import DuplicateKeyError
 
 import database
 
@@ -154,54 +153,54 @@ def test_two_concurrent_requests_only_one_wins_the_atomic_claim():
     """Simulates two Gunicorn workers racing on the same user+day.
 
     Both requests read the same pre-checkin state before either commits.
-    The second to reach the checkin_events insert must lose (DuplicateKeyError)
-    and must not mutate streak/last_checkin or grant XP a second time — this
-    is the atomicity guarantee that a plain find_one-then-update_one cannot
-    provide.
+    The claim and the streak/last_checkin mutation are the same compare-
+    and-swap update (filtered on the exact last_checkin value each request
+    read), so the second request to reach that update simply fails to
+    match (matched_count == 0) — it must not mutate streak/last_checkin or
+    grant XP a second time, and — unlike a separate claim-then-mutate
+    design — there is no window where a crash between "claim" and "mutate"
+    could strand the day as claimed-but-never-applied.
     """
     uid = _next_uid()
     yesterday_kl = datetime.now(KL_TZ).date() - timedelta(days=1)
     yesterday_utc = datetime.combine(yesterday_kl, datetime.min.time(), tzinfo=KL_TZ).astimezone(timezone.utc)
     _set_user_state(uid, streak=3, last_checkin=yesterday_utc, longest_streak=3)
 
-    today_kl = datetime.now(KL_TZ).date()
-    event_id = f"{uid}:{today_kl.isoformat()}"
-
-    # Pretend a concurrent request already won the claim, but hasn't yet
-    # written streak/last_checkin to `users` (the true race window).
-    main.db.checkin_events.insert_one({
-        "_id": event_id,
-        "user_id": uid,
-        "checkin_date_kl": today_kl.isoformat(),
-        "checked_in_at_utc": datetime.now(timezone.utc),
-        "previous_last_checkin": yesterday_utc,
-        "previous_streak": 3,
-        "new_streak": 4,
-        "reset_reason": "consecutive_day",
-        "source": "miniapp",
-        "request_id": "winner-request",
-        "app_instance": "worker-a:1",
-    })
+    # Pretend a concurrent request already won the race and applied its
+    # mutation (advanced last_checkin to "now") before this request's CAS
+    # update runs — the true race window in a find-then-update design.
+    main.users_collection.update_one(
+        {"user_id": uid},
+        {"$set": {"streak": 4, "last_checkin": datetime.now(timezone.utc)}, "$max": {"longest_streak": 4}},
+    )
 
     result = _checkin(uid)
 
     assert result["success"] is False
-    # The loser must not have touched users.streak/last_checkin.
+    # The loser must not have re-mutated streak/last_checkin/longest_streak
+    # beyond what the winner already applied.
     doc = main.users_collection.find_one({"user_id": uid})
-    assert doc["streak"] == 3
-    # mongomock (like real pymongo without tz_aware=True) returns naive UTC
-    # datetimes on read, so compare wall-clock value rather than tzinfo.
-    assert doc["last_checkin"].replace(tzinfo=None) == yesterday_utc.replace(tzinfo=None)
+    assert doc["streak"] == 4
+    assert doc["longest_streak"] == 4
     assert len(_checkin_xp_events(uid)) == 0
 
 
-def test_checkin_events_insert_is_the_atomic_guard_not_just_last_checkin():
+def test_cas_filter_rejects_a_stale_last_checkin_read():
+    """Direct unit check of the CAS mechanism itself: an update_one filtered
+    on a last_checkin value that no longer matches the stored document must
+    not modify anything.
+    """
     uid = _next_uid()
-    today_kl = datetime.now(KL_TZ).date()
-    event_id = f"{uid}:{today_kl.isoformat()}"
-    with pytest.raises(DuplicateKeyError):
-        main.db.checkin_events.insert_one({"_id": event_id, "user_id": uid})
-        main.db.checkin_events.insert_one({"_id": event_id, "user_id": uid})
+    now = datetime.now(timezone.utc)
+    _set_user_state(uid, streak=1, last_checkin=now, longest_streak=1)
+
+    stale_value = now - timedelta(days=1)
+    result = main.users_collection.update_one(
+        {"user_id": uid, "last_checkin": stale_value},
+        {"$set": {"streak": 99}},
+    )
+    assert result.matched_count == 0
+    assert main.users_collection.find_one({"user_id": uid})["streak"] == 1
 
 
 # ---------------------------------------------------------------------------

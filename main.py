@@ -5631,13 +5631,22 @@ def streak_progress_bar(streak: int) -> str:
 async def process_checkin(user_id, username, region, update=None, source="miniapp", request_id=None):
     """Daily check-in with repeatable milestones. Day boundary = KL time.
 
-    Same-day protection is enforced by an atomic ``checkin_events`` insert
-    keyed on ``user_id`` + KL calendar date (_id is unique), not just by
-    comparing ``last_checkin``. Two concurrent requests (double-click, retry,
-    duplicate Gunicorn-worker delivery) racing on a find-then-update of
-    ``users`` could otherwise both pass the same-day guard before either
-    write committed; only one insert can win, so only one request ever
-    mutates streak/last_checkin or grants XP for a given user+day.
+    Same-day protection is a single atomic compare-and-swap on ``users``:
+    the update filter requires ``last_checkin`` to still equal the exact
+    value this call read, so the streak/last_checkin mutation and the
+    per-user/per-KL-day claim are the same operation, not two separate
+    steps. Two concurrent requests (double-click, retry, duplicate
+    Gunicorn-worker delivery) racing on the same read can both compute the
+    same next streak, but only one ``update_one`` call can match and apply
+    it; the loser's filter no longer matches and it aborts without granting
+    XP twice. This also means a crash/exception between "claim" and
+    "mutate" is impossible by construction — there is no such window, so a
+    failed request never leaves a permanently-claimed day with a
+    never-advanced streak (unlike a separate claim-then-mutate design,
+    where a crash in between would strand the user with no way to check in
+    again until the next KL day, and — worse — trick the *next* real
+    check-in into miscounting the gap since last_checkin was never
+    updated).
     """
     now_kl = datetime.now(KL_TZ)
     today_kl = now_kl.date()
@@ -5650,7 +5659,7 @@ async def process_checkin(user_id, username, region, update=None, source="miniap
 
     last_kl_date = _to_kl_date(last)
 
-    # Same-day guard (fast path; the checkin_events insert below is the
+    # Same-day guard (fast path only; the CAS update below is the
     # authoritative atomic guard for races within the same instant).
     if last_kl_date == today_kl:
         msg = f"⚠️ Already checked in today. 🔥 Streak: {streak} days."
@@ -5673,14 +5682,54 @@ async def process_checkin(user_id, username, region, update=None, source="miniap
     bonus_xp = STREAK_MILESTONES.get(streak, 0)
     now_utc_ts = now_utc()
 
-    # Atomic per-user/per-KL-day claim + immutable audit record. _id enforces
-    # uniqueness on (user_id, checkin_date_kl); only the first writer for a
-    # given user+day can insert, so a losing concurrent request aborts here
-    # without ever touching streak/last_checkin or granting XP twice.
-    event_id = f"{user_id}:{today_kl.isoformat()}"
+    set_fields = {
+        "username": username,
+        "last_checkin": now_utc_ts,
+        "streak": streak,
+    }
+    if region:
+        set_fields["region"] = region
+    update_doc = {
+        "$set": set_fields,
+        "$max": {"longest_streak": streak},
+        "$setOnInsert": {
+            "status": "Normal",
+        },
+    }
+
+    # Compare-and-swap on the exact last_checkin value this call read (None
+    # for a user with no doc, or no prior check-in). Only applies if nothing
+    # else changed it first, so a concurrent winner makes this a no-op
+    # (matched_count == 0) instead of a second mutation. For a genuinely new
+    # user the filter can't match an existing doc, so this becomes a plain
+    # insert guarded by the existing unique index on users.user_id — a
+    # concurrent duplicate insert raises DuplicateKeyError instead of
+    # silently overwriting the winner.
+    try:
+        cas_result = _users_update_one(
+            {"user_id": user_id, "last_checkin": last},
+            update_doc,
+            upsert=True,
+            context="checkin_update",
+        )
+        won_claim = bool(getattr(cas_result, "matched_count", 0) or getattr(cas_result, "upserted_id", None))
+    except DuplicateKeyError:
+        won_claim = False
+
+    if not won_claim:
+        refreshed = users_collection.find_one({"user_id": user_id}) or {}
+        msg = f"⚠️ Already checked in today. 🔥 Streak: {int(refreshed.get('streak', previous_streak))} days."
+        if update and getattr(update, "message", None):
+            await update.message.reply_text(msg)
+        return {"success": False, "message": msg}
+
+    # Immutable audit record. Written after the CAS above has already
+    # committed the real state change, so this is best-effort logging, not
+    # part of the atomicity guarantee — a failure here must not roll back or
+    # block a check-in that has already succeeded.
     try:
         db.checkin_events.insert_one({
-            "_id": event_id,
+            "_id": f"{user_id}:{today_kl.isoformat()}",
             "user_id": int(user_id),
             "checkin_date_kl": today_kl.isoformat(),
             "checked_in_at_utc": now_utc_ts,
@@ -5693,31 +5742,9 @@ async def process_checkin(user_id, username, region, update=None, source="miniap
             "app_instance": APP_INSTANCE_ID,
         })
     except DuplicateKeyError:
-        refreshed = users_collection.find_one({"user_id": user_id}) or {}
-        msg = f"⚠️ Already checked in today. 🔥 Streak: {int(refreshed.get('streak', previous_streak))} days."
-        if update and getattr(update, "message", None):
-            await update.message.reply_text(msg)
-        return {"success": False, "message": msg}
-
-    set_fields = {
-        "username": username,
-        "last_checkin": now_utc_ts,
-        "streak": streak,
-    }
-    if region:
-        set_fields["region"] = region
-    _users_update_one(
-        {"user_id": user_id},
-        {
-            "$set": set_fields,
-            "$max": {"longest_streak": streak},
-            "$setOnInsert": {
-                "status": "Normal",
-            },
-        },
-        upsert=True,
-        context="checkin_update",
-    )
+        logger.warning("[CHECKIN][AUDIT] duplicate checkin_events insert uid=%s date=%s (harmless)", user_id, today_kl.isoformat())
+    except Exception:
+        logger.exception("[CHECKIN][AUDIT] failed to record checkin_events uid=%s date=%s", user_id, today_kl.isoformat())
 
     checkin_key = f"checkin:{today_kl.strftime('%Y%m%d')}"
     grant_xp(db, user_id, "checkin", checkin_key, base_xp + bonus_xp)
