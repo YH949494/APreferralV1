@@ -3141,6 +3141,12 @@
     // re-generating the referral link -- see shareReferralViaTelegram().
     let latestSharePackage = null;
     let shareRequestInFlight = false;
+    // Dedups concurrent /api/referral/share-content requests -- Get Link's
+    // copy step and the Share button can otherwise both observe an empty
+    // latestSharePackage and race two independent fetches (which would also
+    // burn two randomized playback/share-generation records and could cache
+    // two different captions). See fetchAndCacheShareContent().
+    let shareContentRequestInFlight = null;
 
     if (!userId && !getAdminSecret()) {
       const warn = document.createElement('div');
@@ -4125,17 +4131,34 @@
     async function getReferralCaption(link) {
       trackReferralEvent("referral_share_content_requested");
       try {
-        const data = await fetchReferralShareContent();
-        cacheSharePackage({
-          referral_link: link,
-          caption: data.message,
-          share_text: data.share_text || "",
-        });
+        const data = await fetchAndCacheShareContent(link);
         return data.message;
       } catch (err) {
         console.warn("[REFERRAL][SHARE_CONTENT_FALLBACK] reason=" + (err?.message || err));
         return buildFallbackReferralCaption(link);
       }
+    }
+
+    // Dedups concurrent share-content requests: if a fetch is already
+    // in-flight (e.g. Get Link's copy step is mid-request when Share is
+    // pressed), every caller awaits that same request/promise instead of
+    // firing a second one -- this is the one canonical fetch, and every
+    // caller caches from its single resolved result so Get Link and Share
+    // can never end up with two different captions for the same link.
+    function fetchAndCacheShareContent(link) {
+      if (!shareContentRequestInFlight) {
+        shareContentRequestInFlight = fetchReferralShareContent().finally(() => {
+          shareContentRequestInFlight = null;
+        });
+      }
+      return shareContentRequestInFlight.then((data) => {
+        cacheSharePackage({
+          referral_link: link || data.invite_link || latestReferralLink,
+          caption: data.message,
+          share_text: data.share_text || "",
+        });
+        return data;
+      });
     }
 
     // Stores the one canonical in-memory referral share package. `share_url`
@@ -4345,8 +4368,7 @@
           // fixed default caption + the link we already have.
           console.info("[REFERRAL_SHARE][FETCH_START]");
           try {
-            const data = await fetchReferralShareContent();
-            cacheSharePackage({ referral_link: referralLink, caption: data.message, share_text: data.share_text || "" });
+            const data = await fetchAndCacheShareContent(referralLink);
             shareText = data.share_text || "";
           } catch (err) {
             console.warn(`[REFERRAL_SHARE][FETCH_FAIL] status=${err?.status ?? "n/a"} code=${err?.code || err?.message || err}`);
@@ -4358,10 +4380,9 @@
           // Share may generate a link, and it does so at most once.
           console.info("[REFERRAL_SHARE][FETCH_START]");
           try {
-            const data = await fetchReferralShareContent();
+            const data = await fetchAndCacheShareContent(null);
             referralLink = data.invite_link;
             latestReferralLink = referralLink;
-            cacheSharePackage({ referral_link: referralLink, caption: data.message, share_text: data.share_text || "" });
             shareText = data.share_text || "";
           } catch (err) {
             console.warn(`[REFERRAL_SHARE][FETCH_FAIL] status=${err?.status ?? "n/a"} code=${err?.code || err?.message || err}`);

@@ -129,6 +129,7 @@ function makeContext({
     latestSharePackage,
     referralLinkRequestInFlight: false,
     shareRequestInFlight: false,
+    shareContentRequestInFlight: null,
     referralEntryActionHandled: false,
     t: (key) => key,
     hapticNotify: (kind) => calls.hapticNotify.push(kind),
@@ -292,4 +293,41 @@ test("7. share button is re-enabled and label restored after success and after f
   await failCtx.context.shareReferralViaTelegram(failCtx.shareBtn);
   assert.equal(failCtx.shareBtn.disabled, false);
   assert.equal(failCtx.shareBtn.textContent, "📤 Share");
+});
+
+test("8. Share pressed while Get Link's own share-content fetch is still in-flight reuses that single request", async () => {
+  let resolveFetch;
+  const pending = new Promise((resolve) => {
+    resolveFetch = resolve;
+  });
+  const { context, calls, shareBtn } = makeContext({
+    latestReferralLink: "https://t.me/+shared",
+    latestSharePackage: null, // Get Link generated the link but hasn't cached a caption yet
+    v2FetchImpl: () =>
+      pending.then(() => ({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          ok: true,
+          message: "one true caption\nhttps://t.me/+shared",
+          share_text: "one true caption",
+          invite_link: "https://t.me/+shared",
+        }),
+      })),
+  });
+
+  // Get Link's copy step is mid-request (getReferralCaption -> fetchAndCacheShareContent)...
+  const getLinkCaption = context.getReferralCaption("https://t.me/+shared");
+  // ...when the user presses Share before it resolves.
+  const share = context.shareReferralViaTelegram(shareBtn);
+  resolveFetch();
+  const [caption] = await Promise.all([getLinkCaption, share]);
+
+  assert.equal(calls.v2Fetch, 1, "Share must reuse Get Link's in-flight request, not fire a second one");
+  assert.equal(caption, "one true caption\nhttps://t.me/+shared");
+  assert.equal(calls.opened.length, 1);
+  assert.ok(
+    calls.opened[0].includes(encodeURIComponent("one true caption")),
+    "Share's payload must use the same resolved caption Get Link cached, not a divergent one"
+  );
 });

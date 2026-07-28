@@ -145,6 +145,7 @@ function makeContext({
     referralEntryActionHandled: false,
     referralLinkRequestInFlight: false,
     shareRequestInFlight: false,
+    shareContentRequestInFlight: null,
     t: (key) => key,
     hapticNotify: (kind) => calls.hapticNotify.push(kind),
     loadReferralProgress: () => {},
@@ -496,6 +497,7 @@ test("9. Share button still works and uses the same canonical caption", async ()
     latestReferralLink: "",
     latestSharePackage: null,
     shareRequestInFlight: false,
+    shareContentRequestInFlight: null,
   };
   const context = vm.createContext(sandbox);
   vm.runInContext(source, context, { filename: "index.html-extract-share.js" });
