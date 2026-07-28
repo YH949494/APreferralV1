@@ -516,6 +516,7 @@ from referral_destination import (
     OFFICIAL_CHANNEL_ID,
     COMMUNITY_GROUP,
     OFFICIAL_CHANNEL,
+    VALID_DESTINATION_TYPES,
 )
 API_BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"
 REFERRAL_HOLD_HOURS = int(os.getenv("REFERRAL_QUALIFY_HOURS", "48"))
@@ -2208,6 +2209,47 @@ def _maybe_send_referral_qualified_dm(
             invitee_user_id,
         )
 
+def _resolve_pending_destination(pending: dict) -> tuple[int, str, str]:
+    """Resolve (destination_chat_id, destination_type, resolution_source)
+    for a pending_referrals row, in order of authority:
+
+      1. the row's own explicit destination_type (schema_version >= 2 rows
+         always have this — it is never guessed at)
+      2. destination_chat_id/group_id matched against the known chat ids
+      3. the row's stored invite_link resolved through invite_link_map,
+         for legacy rows whose chat id alone doesn't disambiguate (e.g. a
+         REFERRAL_DESTINATION_CHAT_ID override that has since changed)
+      4. a safe legacy fallback of community_group — a row with no
+         evidence pointing at official_channel is never guessed into the
+         no-checkin-required rule.
+    """
+    destination_chat_id = (
+        pending.get("destination_chat_id")
+        or pending.get("group_id")
+        or GROUP_ID
+    )
+
+    explicit_type = pending.get("destination_type")
+    if explicit_type in VALID_DESTINATION_TYPES:
+        return destination_chat_id, explicit_type, "explicit_field"
+
+    if destination_chat_id == OFFICIAL_CHANNEL_ID:
+        return destination_chat_id, OFFICIAL_CHANNEL, "chat_id_match"
+    if destination_chat_id == GROUP_ID:
+        return destination_chat_id, COMMUNITY_GROUP, "chat_id_match"
+
+    invite_link = pending.get("invite_link")
+    if invite_link:
+        mapping = db.invite_link_map.find_one(
+            {"invite_link": invite_link}, {"destination_type": 1, "chat_id": 1}
+        )
+        mapped_type = (mapping or {}).get("destination_type")
+        if mapped_type in VALID_DESTINATION_TYPES:
+            return (mapping.get("chat_id") or destination_chat_id, mapped_type, "invite_link_map")
+
+    return destination_chat_id, COMMUNITY_GROUP, "legacy_fallback"
+
+
 def settle_pending_referrals(batch_limit: int = 200) -> None:
     now_utc_ts = now_utc()
     cutoff = now_utc_ts - timedelta(hours=_referral_hold_hours())
@@ -2247,18 +2289,14 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
         inviter_user_id = pending.get("inviter_user_id")
         step = "validate"
         retry_count = pending.get("retry_count", 0) or 0
-        destination_chat_id = (
-            pending.get("destination_chat_id")
-            or pending.get("group_id")
-            or GROUP_ID
+        destination_chat_id, destination_type, destination_resolution_source = (
+            _resolve_pending_destination(pending)
         )
-        destination_type = (
-            pending.get("destination_type")
-            or (
-                OFFICIAL_CHANNEL
-                if destination_chat_id == OFFICIAL_CHANNEL_ID
-                else COMMUNITY_GROUP
-            )
+        logger.info(
+            "[SCHED][REFERRAL][DESTINATION] pending_id=%s destination_type_resolved=%s destination_resolution_source=%s",
+            pending_id,
+            destination_type,
+            destination_resolution_source,
         )
         try:
             if not invitee_user_id or not inviter_user_id:
@@ -2355,7 +2393,13 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
             step = "check_new_user"
             invitee_doc = db.users.find_one(
                 {"user_id": invitee_user_id},
-                {"created_at": 1, "joined_main_at": 1, "first_checkin_at": 1, "last_visible_at": 1},
+                {
+                    "created_at": 1,
+                    "joined_main_at": 1,
+                    "first_checkin_at": 1,
+                    "last_visible_at": 1,
+                    "left_official_channel_at": 1,
+                },
             )
             if not invitee_doc:
                 db.pending_referrals.update_one(
@@ -2445,14 +2489,67 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
 
             step = "check_qualification"
             # official_channel referrals qualify on retained channel
-            # subscription through the hold period alone (membership was
-            # already re-verified fresh, above, at settlement time) — a
-            # channel subscriber may legitimately never start the bot, open
-            # the Mini App, or check in, so first_checkin/engagement scoring
-            # must not gate settlement for this destination. community_group
-            # referrals keep the existing engagement/check-in requirement.
+            # subscription through the hold period (membership was already
+            # re-verified fresh, above, at settlement time) — a channel
+            # subscriber may legitimately never start the bot, open the Mini
+            # App, or check in, so first_checkin/engagement scoring must not
+            # gate settlement for this destination. community_group referrals
+            # keep the existing engagement/check-in requirement.
+            #
+            # "Retained through the hold" means continuously subscribed, not
+            # just subscribed-right-now: main.py's member_update_handler
+            # already stamps left_official_channel_at on every channel-leave
+            # event (independent of this referral), so a leave-then-rejoin
+            # inside the hold window would otherwise pass the fresh
+            # getChatMember check above and settle despite the gap.
             qualification_metadata = {}
             if destination_type == OFFICIAL_CHANNEL:
+                # Scoped to the actual hold window (join .. join+hold_hours),
+                # not "any leave before this settlement run" — a leave that
+                # happens long after the hold already completed (e.g. right
+                # before a delayed retry, or when a historical row is
+                # reopened for re-settlement much later) is unrelated to
+                # whether this referral was retained through its own hold,
+                # and is already covered by the fresh subscription check
+                # above if the invitee is still gone at settlement time.
+                left_at = _coerce_utc((invitee_doc or {}).get("left_official_channel_at"))
+                hold_end = (
+                    reference_time + timedelta(hours=_referral_hold_hours())
+                    if reference_time is not None
+                    else None
+                )
+                left_during_hold = bool(
+                    left_at is not None
+                    and reference_time is not None
+                    and hold_end is not None
+                    and reference_time <= left_at <= hold_end
+                )
+                if left_during_hold:
+                    db.pending_referrals.update_one(
+                        {"_id": pending_id},
+                        {
+                            "$set": {
+                                "status": "revoked",
+                                "revoked_reason": "left_before_hold",
+                                "revoked_at": now_utc_ts,
+                            },
+                            "$unset": {"processing_by": "", "processing_at_utc": "", "processing_at": ""},
+                        },
+                    )
+                    referral_invitee_lock.release(
+                        db, invitee_user_id=invitee_user_id, status="revoked", now_utc_ts=now_utc_ts
+                    )
+                    revoked += 1
+                    logger.info(
+                        "[REFERRAL][QUALIFY_RULE] pending_id=%s invitee=%s inviter=%s destination_type=%s "
+                        "rule=official_channel_retained hold_elapsed=true subscription_status=%s decision=revoke reason=left_before_hold",
+                        pending_id,
+                        invitee_user_id,
+                        inviter_user_id,
+                        destination_type,
+                        status,
+                    )
+                    continue
                 qualification_metadata = {
                     "qualification_rule": "official_channel_retained",
                     "subscription_status": status,

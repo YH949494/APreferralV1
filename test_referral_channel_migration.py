@@ -639,13 +639,25 @@ class _ReferralEvents:
         return []
 
 
+class _InviteLinkMap:
+    def __init__(self, docs=None):
+        self.docs = docs or []
+
+    def find_one(self, filt, projection=None):
+        for doc in self.docs:
+            if all(doc.get(k) == v for k, v in filt.items()):
+                return doc
+        return None
+
+
 class _FakeSchedulerDB:
-    def __init__(self, pending_docs, user_docs):
+    def __init__(self, pending_docs, user_docs, invite_link_map_docs=None):
         self.pending_referrals = _PendingCollection(pending_docs)
         self.users = _UsersCollection(user_docs)
         self.referral_award_events = _AwardEvents()
         self.referral_events = _ReferralEvents()
         self.referral_invitee_locks = mongomock.MongoClient().db.referral_invitee_locks
+        self.invite_link_map = _InviteLinkMap(invite_link_map_docs)
 
 
 @pytest.fixture
@@ -1236,6 +1248,143 @@ def test_community_group_satisfying_engagement_rule_still_settles(scheduler_mod)
 
     assert doc["status"] == "awarded"
     assert "qualification_rule" not in doc
+    assert len(qualified_calls) == 1
+
+
+def test_missing_destination_type_but_chat_id_matches_official_channel_uses_retained_rule(scheduler_mod):
+    # Legacy row with no destination_type field at all, but its
+    # destination_chat_id already equals OFFICIAL_CHANNEL_ID — must resolve
+    # to official_channel via the chat-id match, not the community_group
+    # legacy fallback, so no check-in is required.
+    scheduler, fixed_now, qualified_calls = scheduler_mod
+    scheduler.evaluate_referral_engagement = _forbid_engagement_check
+    doc = _channel_pending(fixed_now)
+    del doc["destination_type"]
+    user_docs = {22: {"user_id": 22}}
+    scheduler.db = _FakeSchedulerDB([doc], user_docs)
+
+    scheduler.settle_pending_referrals(batch_limit=1)
+
+    assert doc["status"] == "awarded"
+    assert doc["qualification_rule"] == "official_channel_retained"
+    assert len(qualified_calls) == 1
+
+
+def test_missing_destination_type_resolved_via_invite_link_map_uses_retained_rule(scheduler_mod):
+    # Legacy row with no destination_type AND a destination_chat_id that no
+    # longer matches the live OFFICIAL_CHANNEL_ID (e.g. a
+    # REFERRAL_DESTINATION_CHAT_ID override that has since been rotated) —
+    # must fall back to resolving through invite_link_map rather than
+    # guessing community_group.
+    scheduler, fixed_now, qualified_calls = scheduler_mod
+    scheduler.evaluate_referral_engagement = _forbid_engagement_check
+    stale_override_chat_id = -100777
+    doc = _channel_pending(fixed_now, destination_chat_id=stale_override_chat_id)
+    del doc["destination_type"]
+    doc["invite_link"] = "https://t.me/+stale_override_link"
+    user_docs = {22: {"user_id": 22}}
+    scheduler.db = _FakeSchedulerDB(
+        [doc],
+        user_docs,
+        invite_link_map_docs=[
+            {
+                "invite_link": "https://t.me/+stale_override_link",
+                "destination_type": "official_channel",
+                "chat_id": stale_override_chat_id,
+            }
+        ],
+    )
+
+    scheduler.settle_pending_referrals(batch_limit=1)
+
+    assert doc["status"] == "awarded"
+    assert doc["qualification_rule"] == "official_channel_retained"
+    assert len(qualified_calls) == 1
+
+
+def test_fully_unresolved_legacy_row_keeps_community_group_behavior(scheduler_mod):
+    # No destination_type, chat id matches neither known chat, and no
+    # invite_link_map row to resolve it — must fall back to the existing
+    # legacy (community_group / engagement) behavior rather than guessing
+    # official_channel qualification.
+    scheduler, fixed_now, _ = scheduler_mod
+    scheduler.evaluate_referral_engagement = lambda **kw: {
+        "qualified": False,
+        "score": 0,
+        "signals": {},
+        "points": {},
+        "window_start": fixed_now - timedelta(hours=1),
+        "window_end": fixed_now,
+    }
+    unresolvable_chat_id = -100888
+    doc = _channel_pending(fixed_now, destination_chat_id=unresolvable_chat_id)
+    del doc["destination_type"]
+    user_docs = {
+        22: {
+            "user_id": 22,
+            "joined_main_at": fixed_now - timedelta(hours=99),
+            "created_at": fixed_now - timedelta(hours=99),
+        }
+    }
+    scheduler.db = _FakeSchedulerDB([doc], user_docs)
+
+    scheduler.settle_pending_referrals(batch_limit=1)
+
+    assert doc["status"] == "revoked"
+    assert doc["revoked_reason"] == "insufficient_engagement"
+
+
+def test_official_channel_leave_then_rejoin_before_settlement_does_not_qualify(scheduler_mod):
+    # Invitee joins via the referral, leaves the channel partway through the
+    # hold (main.py's member_update_handler stamps left_official_channel_at
+    # on the user doc for this, independent of the pending row), then
+    # rejoins before settlement runs. A fresh getChatMember check alone would
+    # see "member" and settle — but "retained through the hold" means
+    # continuously subscribed, not merely subscribed right now, so this must
+    # not settle.
+    scheduler, fixed_now, qualified_calls = scheduler_mod
+    scheduler.evaluate_referral_engagement = _forbid_engagement_check
+    grant_calls = []
+    scheduler.grant_xp = lambda *a, **kw: grant_calls.append(a) or True
+    scheduler._get_official_channel_member_status = lambda uid, chat_id=None: "member"
+
+    doc = _channel_pending(fixed_now)  # joined 100h ago, hold is 48h
+    user_docs = {
+        22: {
+            "user_id": 22,
+            "left_official_channel_at": fixed_now - timedelta(hours=80),  # left during the hold
+        }
+    }
+    scheduler.db = _FakeSchedulerDB([doc], user_docs)
+
+    scheduler.settle_pending_referrals(batch_limit=1)
+
+    assert doc["status"] == "revoked"
+    assert doc["revoked_reason"] == "left_before_hold"
+    assert grant_calls == []
+    assert qualified_calls == []
+
+
+def test_official_channel_left_before_this_referral_join_does_not_block(scheduler_mod):
+    # left_official_channel_at predates this referral's own join time (e.g.
+    # the invitee left the channel long ago, for an unrelated prior stint,
+    # then joined fresh via this referral link and stayed subscribed) — that
+    # historical timestamp must not block settlement.
+    scheduler, fixed_now, qualified_calls = scheduler_mod
+    scheduler._get_official_channel_member_status = lambda uid, chat_id=None: "member"
+
+    doc = _channel_pending(fixed_now)  # joined 100h ago
+    user_docs = {
+        22: {
+            "user_id": 22,
+            "left_official_channel_at": fixed_now - timedelta(hours=200),  # before this join
+        }
+    }
+    scheduler.db = _FakeSchedulerDB([doc], user_docs)
+
+    scheduler.settle_pending_referrals(batch_limit=1)
+
+    assert doc["status"] == "awarded"
     assert len(qualified_calls) == 1
 
 
