@@ -244,6 +244,42 @@ def test_retry_after_incomplete_checkin_heals_first_checkin_bonus_too():
     assert len(_first_checkin_xp_events(uid)) == 1
 
 
+def test_retry_heals_bonus_after_first_checkin_marker_committed():
+    """Narrower crash window than the test above: first_checkin_at was
+    already committed by record_first_checkin() on a prior attempt (so
+    record_first_checkin() now returns False, since its atomic $set only
+    fires the one time), but the process crashed before the following
+    grant_xp("first_checkin", ...) call. The healing path must not depend
+    on record_first_checkin()'s return value — it must grant the bonus
+    based on the authoritative state (first_checkin_at exists, and no
+    first_checkin XP event exists yet), not on being told "I just set it".
+    """
+    uid = _next_uid()
+    now = datetime.now(timezone.utc)
+    # Streak CAS committed, first_checkin_at committed (as record_first_checkin
+    # would have left it), but grant_xp("checkin", ...) and
+    # grant_xp("first_checkin", ...) never ran — the crash happened between
+    # steps 3 and 4 of the documented operation order.
+    _set_user_state(uid, streak=1, last_checkin=now, longest_streak=1, first_checkin_at=now)
+    assert len(_checkin_xp_events(uid)) == 0
+    assert len(_first_checkin_xp_events(uid)) == 0
+
+    # Sanity-check the premise: record_first_checkin() really does return
+    # False here, since first_checkin_at already exists.
+    assert main.record_first_checkin(uid, ref=now) is False
+
+    result = _checkin(uid)
+
+    assert result["success"] is False  # streak already applied; not re-applied
+    assert len(_checkin_xp_events(uid)) == 1
+    assert len(_first_checkin_xp_events(uid)) == 1  # healed despite record_first_checkin() -> False
+
+    # A further retry must not grant it a second time.
+    _checkin(uid)
+    assert len(_checkin_xp_events(uid)) == 1
+    assert len(_first_checkin_xp_events(uid)) == 1
+
+
 def test_healing_does_not_grant_xp_for_unrelated_stale_state():
     """The CAS-loss healing path must only fire when the committed
     last_checkin is actually today's KL date — never for some other change
@@ -314,6 +350,69 @@ def test_cas_filter_rejects_a_stale_last_checkin_read():
     )
     assert result.matched_count == 0
     assert main.users_collection.find_one({"user_id": uid})["streak"] == 1
+
+
+def test_concurrent_brand_new_user_race_does_not_500():
+    """Two requests for the same never-seen-before user_id both read "no
+    user" and both attempt the CAS as an upsert. Only one insert can win;
+    the other must hit DuplicateKeyError on the unique users.user_id index,
+    catch it, reload the now-committed user, and run the same-day healing
+    path — not let the exception propagate into a 500.
+
+    Reproduces the read-before-either-commits ordering (which a
+    single-threaded test can't otherwise arrange against a live
+    find-then-update) the same way test_healing_does_not_grant_xp_for_...
+    does: mock the *first* find_one call to report "no user found" while a
+    real competing insert has already landed.
+    """
+    # Same fixture gap as test_healing_does_not_grant_xp_for_unrelated_stale_state:
+    # ensure_indexes()'s "already ran" guard means this test's fresh
+    # mongomock db doesn't otherwise get the unique index this scenario
+    # depends on.
+    main.users_collection.create_index([("user_id", 1)], unique=True)
+
+    uid = _next_uid()
+
+    real_find_one = main.users_collection.find_one
+    call_count = {"n": 0}
+
+    def _find_one_first_call_missing(*args, **kwargs):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            # Simulate: process_checkin's own read finds nothing, because the
+            # winning concurrent request's insert hasn't landed yet from this
+            # request's point of view.
+            return None
+        return real_find_one(*args, **kwargs)
+
+    # Perform the "winning" concurrent request's own insert (streak=1,
+    # last_checkin=now, first_checkin_at + first_checkin XP granted — a
+    # fully completed competing check-in) before this request's CAS attempt
+    # runs; the mock above makes this request's own read report "no user"
+    # regardless, reproducing the race ordering.
+    winner_now = datetime.now(timezone.utc)
+    main.users_collection.insert_one({
+        "user_id": uid, "streak": 1, "last_checkin": winner_now, "longest_streak": 1,
+        "first_checkin_at": winner_now,
+    })
+    main.db.xp_events.insert_one({"user_id": uid, "unique_key": f"checkin:{datetime.now(KL_TZ).strftime('%Y%m%d')}", "type": "checkin", "xp": XP_BASE_PER_CHECKIN, "created_at": winner_now})
+    main.db.xp_ledger.insert_one({"user_id": uid, "source": "checkin", "source_id": f"checkin:{datetime.now(KL_TZ).strftime('%Y%m%d')}", "amount": XP_BASE_PER_CHECKIN, "created_at": winner_now})
+
+    with mock.patch.object(main.users_collection, "find_one", side_effect=_find_one_first_call_missing):
+        client = main.app.test_client()
+        response = client.post("/api/checkin", json={"user_id": uid, "username": "bob"})
+
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["success"] is False
+
+    # The loser's process_checkin call must have caught the DuplicateKeyError
+    # (not propagated it) and healed against the committed winner state: the
+    # winner already had XP granted, so no duplicate grant.
+    assert len(_checkin_xp_events(uid)) == 1
+    assert len(_first_checkin_xp_events(uid)) == 1
+    doc = main.users_collection.find_one({"user_id": uid})
+    assert doc["streak"] == 1  # untouched by the loser
 
 
 # ---------------------------------------------------------------------------

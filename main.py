@@ -5644,15 +5644,28 @@ def _grant_checkin_xp_idempotent(user_id, streak, today_kl, now_utc_ts):
     checkin_key = f"checkin:{today_kl.strftime('%Y%m%d')}"
     grant_xp(db, user_id, "checkin", checkin_key, XP_BASE_PER_CHECKIN + bonus_xp)
 
-    # Grant the first-checkin bonus only for a user's actual first lifetime
-    # check-in — record_first_checkin's $set filters on first_checkin_at not
-    # existing, so it is atomic and returns True exactly once per user, ever.
-    # (Previously this bonus was mistakenly re-granted whenever a streak
-    # reset to 1 after a missed day; grant_xp's own dedup on the
-    # "first_checkin" unique_key papered over that in normal operation, but
-    # the intent — and any future non-idempotent use of this signal — was
-    # wrong.)
-    if record_first_checkin(int(user_id), ref=now_utc_ts):
+    # Set the first-checkin marker — record_first_checkin's $set filters on
+    # first_checkin_at not existing, so it is atomic and applies at most once
+    # per user, ever. (Previously the bonus grant below was gated on a
+    # streak reset instead of a true lifetime-first check-in; grant_xp's own
+    # dedup papered over the double-grant in normal operation, but the
+    # intent was wrong.)
+    #
+    # Deliberately NOT gating the grant below on this call's return value.
+    # record_first_checkin() returns True only the one time it actually sets
+    # first_checkin_at — if a prior request already set it but crashed
+    # before reaching grant_xp(), every retry after that would see False
+    # forever and the bonus would never be granted. The authoritative
+    # question is "does first_checkin_at exist at all" (this user has ever
+    # had a first check-in — set only from this accepted-check-in code
+    # path) combined with grant_xp's own idempotent check of whether the
+    # "first_checkin" XP event already exists; the in-process return value
+    # of record_first_checkin() is not that authority.
+    record_first_checkin(int(user_id), ref=now_utc_ts)
+    has_first_checkin_marker = users_collection.find_one(
+        {"user_id": user_id, "first_checkin_at": {"$exists": True}}, {"_id": 1}
+    )
+    if has_first_checkin_marker:
         grant_xp(db, user_id, "first_checkin", "first_checkin", FIRST_CHECKIN_BONUS_XP)
 
 
