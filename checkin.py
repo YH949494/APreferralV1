@@ -1,3 +1,14 @@
+# DEPRECATED / UNUSED IN PRODUCTION.
+#
+# handle_checkin() below is not registered as a Flask route anywhere in
+# main.py (grep for "checkin.handle_checkin" — only test_checkin_streaks.py
+# wires it up, against an in-memory mongomock db). The live Mini App and
+# Telegram check-in path is main.process_checkin() / the "/api/checkin"
+# route in main.py. This module's own timezone handling also disagrees with
+# main.py's: _to_aware_utc() below treats a naive datetime as KL-local time,
+# while main.py's _to_kl_date() treats a naive datetime as UTC. Do not wire
+# this module into the live app without first reconciling that difference
+# and merging its streak-freeze-token logic into the canonical path.
 import logging
 from datetime import datetime, timedelta, time, timezone
 

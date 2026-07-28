@@ -106,6 +106,9 @@ import settings_service
 from settings_service import get_settings as get_app_settings, get_setting as get_app_setting, update_settings as update_app_settings, list_schema as list_settings_schema, all_settings as get_all_app_settings
 
 FIRST_CHECKIN_BONUS_XP = int(os.getenv("FIRST_CHECKIN_BONUS_XP", "200"))
+# Identifies which Gunicorn worker/process handled a given check-in, for audit
+# trails when diagnosing cross-worker race conditions.
+APP_INSTANCE_ID = f"{socket.gethostname()}:{os.getpid()}"
 WELCOME_BONUS_XP = int(os.getenv("WELCOME_BONUS_XP", "20"))
 WELCOME_WINDOW_HOURS = int(os.getenv("WELCOME_WINDOW_HOURS", "48"))
 WELCOME_WINDOW_DAYS = 7
@@ -1457,9 +1460,6 @@ def maybe_shout_milestones(user_id: int):
             # Optional: keep a lightweight log to spot suppressed sends in logs
             print(f"[Milestone] Suppressed (throttle) user_id={user_id} "
                   f"xp_hit={xp_hit} ref_hit={ref_hit}")
-
-def maybe_give_first_checkin_bonus(user_id: int):
-    grant_xp(db, user_id, "first_checkin", "first_checkin", FIRST_CHECKIN_BONUS_XP)
 
 def _resolve_referrer_id_from_invite_link(invite_link) -> int | None:
     if not invite_link:
@@ -5628,38 +5628,115 @@ def streak_progress_bar(streak: int) -> str:
     boxes = int((filled / next_m) * 10)
     return f"[{'■'*boxes}{'□'*(10-boxes)}] {filled}/{next_m} days ➜ next: {next_m}d"
 
-async def process_checkin(user_id, username, region, update=None):
-    """Daily check-in with repeatable milestones. Day boundary = KL time."""
+def _grant_checkin_xp_idempotent(user_id, streak, today_kl, now_utc_ts):
+    """Grant today's check-in XP and (if applicable) the first-checkin bonus.
+
+    Both underlying grants are idempotent — grant_xp() dedupes on
+    (user_id, unique_key) and record_first_checkin() atomically sets
+    first_checkin_at at most once — so this is safe to call more than once
+    for the same user+day. That is the point: it is called both right after
+    a check-in's streak mutation commits, and again (as a catch-up) on any
+    later request that hits the same-day guard, so a crash between the
+    streak CAS and this grant does not permanently strand a user without
+    their XP for a day they genuinely checked in on.
+    """
+    bonus_xp = STREAK_MILESTONES.get(streak, 0)
+    checkin_key = f"checkin:{today_kl.strftime('%Y%m%d')}"
+    grant_xp(db, user_id, "checkin", checkin_key, XP_BASE_PER_CHECKIN + bonus_xp)
+
+    # Set the first-checkin marker — record_first_checkin's $set filters on
+    # first_checkin_at not existing, so it is atomic and applies at most once
+    # per user, ever. (Previously the bonus grant below was gated on a
+    # streak reset instead of a true lifetime-first check-in; grant_xp's own
+    # dedup papered over the double-grant in normal operation, but the
+    # intent was wrong.)
+    #
+    # Deliberately NOT gating the grant below on this call's return value.
+    # record_first_checkin() returns True only the one time it actually sets
+    # first_checkin_at — if a prior request already set it but crashed
+    # before reaching grant_xp(), every retry after that would see False
+    # forever and the bonus would never be granted. The authoritative
+    # question is "does first_checkin_at exist at all" (this user has ever
+    # had a first check-in — set only from this accepted-check-in code
+    # path) combined with grant_xp's own idempotent check of whether the
+    # "first_checkin" XP event already exists; the in-process return value
+    # of record_first_checkin() is not that authority.
+    record_first_checkin(int(user_id), ref=now_utc_ts)
+    has_first_checkin_marker = users_collection.find_one(
+        {"user_id": user_id, "first_checkin_at": {"$exists": True}}, {"_id": 1}
+    )
+    if has_first_checkin_marker:
+        grant_xp(db, user_id, "first_checkin", "first_checkin", FIRST_CHECKIN_BONUS_XP)
+
+
+async def process_checkin(user_id, username, region, update=None, source="miniapp", request_id=None):
+    """Daily check-in with repeatable milestones. Day boundary = KL time.
+
+    Same-day protection is a single atomic compare-and-swap on ``users``:
+    the update filter requires ``last_checkin`` to still equal the exact
+    value this call read, so the streak/last_checkin mutation and the
+    per-user/per-KL-day claim are the same operation, not two separate
+    steps. Two concurrent requests (double-click, retry, duplicate
+    Gunicorn-worker delivery) racing on the same read can both compute the
+    same next streak, but only one ``update_one`` call can match and apply
+    it; the loser's filter no longer matches and it aborts without granting
+    XP twice. This also means a crash/exception between "claim" and
+    "mutate" is impossible by construction — there is no such window, so a
+    failed request never leaves a permanently-claimed day with a
+    never-advanced streak (unlike a separate claim-then-mutate design,
+    where a crash in between would strand the user with no way to check in
+    again until the next KL day, and — worse — trick the *next* real
+    check-in into miscounting the gap since last_checkin was never
+    updated).
+    """
     now_kl = datetime.now(KL_TZ)
     today_kl = now_kl.date()
+    request_id = request_id or str(uuid.uuid4())
 
     user = users_collection.find_one({"user_id": user_id}) or {}
-    is_new_user = not bool(user)
     last = user.get("last_checkin")
-    streak = int(user.get("streak", 0))
+    previous_streak = int(user.get("streak", 0))
+    streak = previous_streak
 
     last_kl_date = _to_kl_date(last)
 
-    # Same-day guard
+    # Same-day guard (fast path only; the CAS update below is the
+    # authoritative atomic guard for races within the same instant).
+    #
+    # The streak mutation for today is already committed at this point (that
+    # is what makes last_kl_date == today_kl true), but the downstream XP
+    # grant for today's check-in is a *separate*, non-transactional write
+    # that happens later in this function and is not wrapped in try/except.
+    # If a worker crashed or Mongo raised between the streak CAS committing
+    # and that grant running, the user's streak is correct but their XP for
+    # today never landed — and without this catch-up call, no future request
+    # could ever reach the grant again, because every retry stops here. Both
+    # grant_xp() and record_first_checkin() are idempotent (unique_key /
+    # first_checkin_at gates), so re-attempting them on every "already
+    # checked in" hit is a safe no-op once they've actually succeeded, and a
+    # real repair the one time they haven't.
     if last_kl_date == today_kl:
+        _grant_checkin_xp_idempotent(user_id, streak, today_kl, now_utc())
         msg = f"⚠️ Already checked in today. 🔥 Streak: {streak} days."
         if update and getattr(update, "message", None):
             await update.message.reply_text(msg)
         return {"success": False, "message": msg}
 
-    # Advance/reset streak
-    if last_kl_date == (today_kl - timedelta(days=1)):
+    # Determine streak progression from the previous successful KL check-in date.
+    if last_kl_date is None:
+        streak = 1
+        reset_reason = "first_checkin"
+    elif last_kl_date == (today_kl - timedelta(days=1)):
         streak += 1
+        reset_reason = "consecutive_day"
     else:
         streak = 1
-
-        maybe_give_first_checkin_bonus(int(user_id))
-
+        reset_reason = "missed_day"
 
     base_xp = XP_BASE_PER_CHECKIN
     bonus_xp = STREAK_MILESTONES.get(streak, 0)
-
     now_utc_ts = now_utc()
+
     set_fields = {
         "username": username,
         "last_checkin": now_utc_ts,
@@ -5667,22 +5744,74 @@ async def process_checkin(user_id, username, region, update=None):
     }
     if region:
         set_fields["region"] = region
-    _users_update_one(
-        {"user_id": user_id},
-        {
-            "$set": set_fields,
-            "$max": {"longest_streak": streak},
-            "$setOnInsert": {
-                "status": "Normal",
-            },
+    update_doc = {
+        "$set": set_fields,
+        "$max": {"longest_streak": streak},
+        "$setOnInsert": {
+            "status": "Normal",
         },
-        upsert=True,
-        context="checkin_update",
-    )
+    }
 
-    checkin_key = f"checkin:{today_kl.strftime('%Y%m%d')}"
-    grant_xp(db, user_id, "checkin", checkin_key, base_xp + bonus_xp)
-    record_first_checkin(int(user_id), ref=now_utc_ts)
+    # Compare-and-swap on the exact last_checkin value this call read (None
+    # for a user with no doc, or no prior check-in). Only applies if nothing
+    # else changed it first, so a concurrent winner makes this a no-op
+    # (matched_count == 0) instead of a second mutation. For a genuinely new
+    # user the filter can't match an existing doc, so this becomes a plain
+    # insert guarded by the existing unique index on users.user_id — a
+    # concurrent duplicate insert raises DuplicateKeyError instead of
+    # silently overwriting the winner.
+    try:
+        cas_result = _users_update_one(
+            {"user_id": user_id, "last_checkin": last},
+            update_doc,
+            upsert=True,
+            context="checkin_update",
+        )
+        won_claim = bool(getattr(cas_result, "matched_count", 0) or getattr(cas_result, "upserted_id", None))
+    except DuplicateKeyError:
+        won_claim = False
+
+    if not won_claim:
+        refreshed = users_collection.find_one({"user_id": user_id}) or {}
+        refreshed_streak = int(refreshed.get("streak", previous_streak))
+        # The CAS lost because someone else's request already advanced
+        # last_checkin/streak for today — heal any XP that winner's own
+        # process might not have gotten to (see _grant_checkin_xp_idempotent).
+        # Only when the committed state is actually today's: an unrelated
+        # concurrent write to the user doc (e.g. username/region) between our
+        # read and this CAS would also land here, and must not be treated as
+        # a check-in.
+        if _to_kl_date(refreshed.get("last_checkin")) == today_kl:
+            _grant_checkin_xp_idempotent(user_id, refreshed_streak, today_kl, now_utc())
+        msg = f"⚠️ Already checked in today. 🔥 Streak: {refreshed_streak} days."
+        if update and getattr(update, "message", None):
+            await update.message.reply_text(msg)
+        return {"success": False, "message": msg}
+
+    # Immutable audit record. Written after the CAS above has already
+    # committed the real state change, so this is best-effort logging, not
+    # part of the atomicity guarantee — a failure here must not roll back or
+    # block a check-in that has already succeeded.
+    try:
+        db.checkin_events.insert_one({
+            "_id": f"{user_id}:{today_kl.isoformat()}",
+            "user_id": int(user_id),
+            "checkin_date_kl": today_kl.isoformat(),
+            "checked_in_at_utc": now_utc_ts,
+            "previous_last_checkin": last,
+            "previous_streak": previous_streak,
+            "new_streak": streak,
+            "reset_reason": reset_reason,
+            "source": source,
+            "request_id": request_id,
+            "app_instance": APP_INSTANCE_ID,
+        })
+    except DuplicateKeyError:
+        logger.warning("[CHECKIN][AUDIT] duplicate checkin_events insert uid=%s date=%s (harmless)", user_id, today_kl.isoformat())
+    except Exception:
+        logger.exception("[CHECKIN][AUDIT] failed to record checkin_events uid=%s date=%s", user_id, today_kl.isoformat())
+
+    _grant_checkin_xp_idempotent(user_id, streak, today_kl, now_utc_ts)
 
     try:
         record_welcome_checkin_progress(int(user_id), now=now_utc_ts)
@@ -5750,6 +5879,7 @@ def api_checkin():
         data = request.get_json(silent=True) or {}
         user_id = data.get("user_id")
         username = data.get("username", "unknown")
+        request_id = data.get("request_id") or request.headers.get("X-Request-Id")
 
         if not user_id:
             return jsonify({"success": False, "error": "Missing user_id"}), 400
@@ -5766,7 +5896,7 @@ def api_checkin():
 
         # ✅ Call check-in logic — process_checkin upserts, region is optional
         result = asyncio.run(
-            process_checkin(int(user_id), username, user.get("region"))
+            process_checkin(int(user_id), username, user.get("region"), source="miniapp", request_id=request_id)
         )
 
         # ✅ Always calculate next reset time (12AM UTC+8)
