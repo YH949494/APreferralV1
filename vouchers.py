@@ -1087,7 +1087,7 @@ def _welcome_progress_pct(completed_days: int) -> int:
 # Normalized stage identifiers used across all Welcome reminder analytics
 # events (success/failure/skip) so dashboard code never has to parse a stage
 # out of the ``event`` string. "completed" marks the 3/3 unlock celebration.
-WELCOME_REMINDER_STAGES = ("20h", "28h", "day3", "completed")
+WELCOME_REMINDER_STAGES = ("20h", "28h", "day3", "recovery", "completed")
 
 
 def log_welcome_event(
@@ -1264,6 +1264,7 @@ def record_welcome_checkin_progress(user_id, *, now: datetime | None = None) -> 
                 "reminder_20h_sent": False,
                 "reminder_28h_sent": False,
                 "day2_reminder_sent": False,
+                "recovery_sent": False,
             }},
             upsert=True,
         )
@@ -2452,16 +2453,68 @@ def _build_idempotent_claim_response(existing_claim: dict | None, *, enforce_wel
     }
 
 
+WELCOME_PLAY_NOW_URL = os.getenv("WELCOME_PLAY_NOW_URL", "https://advantplay.com")
+WELCOME_COMMUNITY_URL = os.getenv("WELCOME_COMMUNITY_URL", "https://t.me/advantplaychat")
+
+
 def _welcome_claim_guide_payload(audience_type: str):
+    """Post-claim journey payload (Voucher Claimed -> Celebrate -> Copy Code ->
+    Redeem Guide -> Play Now -> Community CTA). All steps are surfaced in a
+    single popup by the frontend; none of them are additional required clicks.
+    """
     if not _is_new_joiner_audience(audience_type):
         return None
     return {
         "type": "welcome_voucher",
-        "title": "How to use your welcome voucher",
+        "title": "🎉 Your Welcome Voucher is ready!",
         "message": "Your welcome voucher code is ready. Follow the guide to redeem it. If you need help, comment in the chatroom for help.",
         "guide_url": "https://t.me/advantplayofficial/714",
         "help_url": "https://t.me/advantplaychat",
+        "play_url": WELCOME_PLAY_NOW_URL,
+        "community_url": WELCOME_COMMUNITY_URL,
     }
+
+
+def resolve_welcome_display_name(uid, user_doc: dict | None = None) -> str | None:
+    """Best-effort first name for personalizing Welcome journey copy.
+
+    Reuses the same fallback chain as the referral display-name resolver
+    (first_name -> display_name -> name -> username). Returns ``None`` when
+    nothing usable is on file so callers can fall back to generic copy.
+    """
+    if user_doc is None:
+        try:
+            user_doc = users_collection.find_one(
+                {"user_id": int(uid)},
+                {"first_name": 1, "display_name": 1, "name": 1, "username": 1},
+            ) or {}
+        except (TypeError, ValueError):
+            return None
+    for key in ("first_name", "display_name", "name", "username"):
+        value = (user_doc or {}).get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+_WELCOME_SUPPORTED_LOCALES = ("en", "th", "id")
+
+
+def resolve_welcome_locale(user_doc: dict | None) -> str:
+    """Best-effort locale for Welcome reminder copy.
+
+    No current write path populates a per-user language field, so this
+    reads any of the common candidate field names on a best-effort basis
+    and otherwise falls back to "en". Ready to light up automatically the
+    moment a language field is captured elsewhere (e.g. Telegram initData).
+    """
+    for key in ("language_code", "locale", "lang"):
+        value = (user_doc or {}).get(key)
+        if isinstance(value, str):
+            code = value.strip().lower()[:2]
+            if code in _WELCOME_SUPPORTED_LOCALES:
+                return code
+    return "en"
 
 
 def _normalize_claim_identity(*, drop_id, telegram_uid):
