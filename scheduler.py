@@ -558,6 +558,86 @@ class ReferralRetryableError(RuntimeError):
         super().__init__(message)
         self.retry_after = retry_after
 
+
+class ReferralTelegramError(RuntimeError):
+    """A parsed, non-2xx/non-429/non-5xx getChatMember response that is
+    NOT a definitive membership verdict (definitive verdicts — member,
+    left, kicked, restricted — are returned as a normal status string, not
+    raised).
+
+    ``kind`` is "config" for a permanent configuration/permission problem
+    (wrong chat id, bot not an admin/not a member of the chat, bad/expired
+    bot token) that will fail identically for every invitee until an
+    operator fixes it, "malformed" for a non-JSON/unparseable body, or
+    "user" for a response that is specific to the target invitee (e.g. an
+    unknown/invalid user id). All three are operational uncertainty, not
+    proof of anything about the invitee's membership — callers must never
+    treat any of them as a confirmed negative verdict.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        error_code: int | None = None,
+        description: str | None = None,
+        kind: str = "user",
+    ):
+        super().__init__(message)
+        self.status_code = status_code
+        self.error_code = error_code
+        self.description = description
+        self.kind = kind
+
+
+# Substrings (lowercased) of Telegram's getChatMember error descriptions
+# that indicate a permanent destination/permission misconfiguration rather
+# than anything specific to the invitee being checked.
+_TELEGRAM_CONFIG_ERROR_MARKERS = (
+    "chat not found",
+    "not enough rights",
+    "have no rights",
+    "chat_admin_required",
+    "member list is inaccessible",
+    "bot is not a member",
+    "kicked from",
+    "bot was kicked",
+    "bot was blocked",
+    "group chat was upgraded",
+    "unauthorized",
+    "forbidden",
+)
+
+# HTTP status codes that are always a configuration/permission problem
+# (bad/expired bot token, bot forbidden from the chat) regardless of what
+# Telegram's description text says — these must never fall through to the
+# generic "user-specific" bucket, which would eventually terminate as a
+# per-invitee failure for what is actually a global outage.
+_TELEGRAM_CONFIG_ERROR_STATUS_CODES = (401, 403)
+
+
+def _classify_telegram_getchatmember_error(status_code: int | None, description: str | None) -> str:
+    if status_code in _TELEGRAM_CONFIG_ERROR_STATUS_CODES:
+        return "config"
+    text = (description or "").lower()
+    for marker in _TELEGRAM_CONFIG_ERROR_MARKERS:
+        if marker in text:
+            return "config"
+    return "user"
+
+
+# Both "config" (permanent, affects every invitee) and "user" (ambiguous,
+# invitee-specific) 400s are operational uncertainty, not a confirmed
+# negative membership verdict — neither may ever revoke a referral. Both
+# retry with bounded attempts and then land on the same terminal
+# status="error" operational state; only the retry budget/backoff differs
+# (config errors get a longer backoff since retrying sooner cannot help).
+MAX_TELEGRAM_CONFIG_RETRIES = int(os.getenv("MAX_TELEGRAM_CONFIG_RETRIES", "5"))
+MAX_TELEGRAM_USER_RETRIES = int(os.getenv("MAX_TELEGRAM_USER_RETRIES", "3"))
+TELEGRAM_CONFIG_ERROR_BACKOFF_SEC = int(os.getenv("TELEGRAM_CONFIG_ERROR_BACKOFF_SEC", "1800"))
+
+
 def _get_chat_member_status(user_id: int) -> str | None:
     if not BOT_TOKEN:
         raise RuntimeError("missing_bot_token")
@@ -595,21 +675,47 @@ def _get_official_channel_member_status(user_id: int, chat_id: int | None = None
     resp = requests.get(
         f"{API_BASE}/getChatMember",
         params={"chat_id": target_chat_id, "user_id": user_id},
-        timeout=10,
+        timeout=TG_GETCHATMEMBER_TIMEOUT_SEC,
     )
-    if resp.status_code == 429:
+    try:
+        data = resp.json()
+        parse_failed = False
+    except ValueError:
+        data = {}
+        parse_failed = True
+    error_code = data.get("error_code") if isinstance(data, dict) else None
+    if resp.status_code == 429 or error_code == 429:
         retry_after = None
         try:
-            payload = resp.json()
-            retry_after = (payload.get("parameters") or {}).get("retry_after")
+            retry_after = (data.get("parameters") or {}).get("retry_after")
         except Exception:
             retry_after = None
         raise ReferralRetryableError("telegram_rate_limited", retry_after=retry_after)
-    resp.raise_for_status()
-    data = resp.json()
-    if not data.get("ok"):
-        raise RuntimeError(f"getChatMember_not_ok:{data.get('description')}")
-    return (data.get("result") or {}).get("status")
+    if resp.status_code >= 500:
+        raise ReferralRetryableError(f"telegram_server_error_{resp.status_code}")
+    if parse_failed:
+        # Malformed/transient body: never a definitive verdict, and never
+        # attributable to this specific invitee -- treat like any other
+        # transient Telegram hiccup.
+        raise ReferralRetryableError(f"telegram_malformed_response_{resp.status_code}")
+    if not (isinstance(data, dict) and data.get("ok")):
+        description = data.get("description") if isinstance(data, dict) else None
+        raise ReferralTelegramError(
+            "getChatMember_not_ok",
+            status_code=resp.status_code,
+            error_code=error_code,
+            description=description,
+            kind=_classify_telegram_getchatmember_error(resp.status_code, description),
+        )
+    result = data.get("result") or {}
+    status = result.get("status")
+    if status == "restricted":
+        # A restricted supergroup member can still be a member in good
+        # standing (Telegram sets is_member=true and only limits specific
+        # permissions) -- only a restricted row with is_member explicitly
+        # not true is a definitive "not a member" verdict.
+        return "member" if result.get("is_member") is True else "kicked"
+    return status
 
 
 def _check_official_channel_subscribed_sync(uid: int) -> tuple[bool, str]:
@@ -1620,7 +1726,7 @@ def _referral_sign_expr():
         ]
     }
 
-def settle_referral_snapshots() -> None:
+def settle_referral_snapshots() -> dict:
     start_perf = time.perf_counter()
     now_utc_ts = now_utc()
     week_start_utc, week_end_utc = _week_window_utc(now_utc_ts)
@@ -1670,6 +1776,12 @@ def settle_referral_snapshots() -> None:
                 "total_referrals": {"$sum": _referral_sign_expr()},
                 "weekly_referrals": {"$sum": {"$cond": [week_cond, _referral_sign_expr(), 0]}},
                 "monthly_referrals": {"$sum": {"$cond": [month_cond, _referral_sign_expr(), 0]}},
+                "settled_total": {
+                    "$sum": {"$cond": [{"$eq": ["$event", "referral_settled"]}, 1, 0]}
+                },
+                "revoked_total": {
+                    "$sum": {"$cond": [{"$eq": ["$event", "referral_revoked"]}, 1, 0]}
+                },
             }
         },
     ]
@@ -1687,6 +1799,11 @@ def settle_referral_snapshots() -> None:
     min_weekly = 0
     min_monthly = 0
     min_total = 0
+    weekly_negative_count = 0
+    monthly_negative_count = 0
+    total_negative_count = 0
+    invariant_examples_logged = 0
+    top_affected_inviters: list[dict] = []
     MAX_NEGATIVE_EXAMPLES = 20
 
     if results:
@@ -1704,6 +1821,8 @@ def settle_referral_snapshots() -> None:
             total_referrals = int(row.get("total_referrals", 0))
             weekly_referrals = int(row.get("weekly_referrals", 0))
             monthly_referrals = int(row.get("monthly_referrals", 0))
+            settled_total = int(row.get("settled_total", 0))
+            revoked_total = int(row.get("revoked_total", 0))
 
             weekly_sum += weekly_referrals
             monthly_sum += monthly_referrals
@@ -1712,26 +1831,84 @@ def settle_referral_snapshots() -> None:
             min_monthly = min(min_monthly, monthly_referrals)
             min_total = min(min_total, total_referrals)
 
+            # Final invariant guard: a referral count must never be negative.
+            # The not-invalidated filter above should already prevent this,
+            # but corrupted legacy events (revocations without a prior valid
+            # settlement, not yet repaired by repair_referral_ledger.py) can
+            # still net negative here. Clamp what is written, and report the
+            # clamp with the underlying settled/revoked counts rather than
+            # silently swallowing it.
+            clamped_weekly = max(0, weekly_referrals)
+            clamped_monthly = max(0, monthly_referrals)
+            clamped_total = max(0, total_referrals)
+
             if weekly_referrals < 0 or monthly_referrals < 0 or total_referrals < 0:
                 negative_rows += 1
+                if weekly_referrals < 0:
+                    weekly_negative_count += 1
+                if monthly_referrals < 0:
+                    monthly_negative_count += 1
+                if total_referrals < 0:
+                    total_negative_count += 1
+                top_affected_inviters.append(
+                    {
+                        "inviter_id": uid,
+                        "weekly": weekly_referrals,
+                        "monthly": monthly_referrals,
+                        "total": total_referrals,
+                        "settled_total": settled_total,
+                        "revoked_total": revoked_total,
+                    }
+                )
                 if negative_examples_logged < MAX_NEGATIVE_EXAMPLES:
                     negative_examples_logged += 1
                     logger.warning(
-                        "[SCHED][REFERRAL_SNAPSHOT][NEGATIVE] uid=%s weekly=%s monthly=%s total=%s",
+                        "[SCHED][REFERRAL_SNAPSHOT][NEGATIVE] uid=%s weekly=%s monthly=%s total=%s "
+                        "settled_total=%s revoked_total=%s clamped_to=weekly=%s,monthly=%s,total=%s",
                         uid,
                         weekly_referrals,
                         monthly_referrals,
                         total_referrals,
+                        settled_total,
+                        revoked_total,
+                        clamped_weekly,
+                        clamped_monthly,
+                        clamped_total,
                     )
+                # A distinct, explicitly-named invariant-violation log (in
+                # addition to the [NEGATIVE] line above) with one line per
+                # negative window, so an operator grepping for this exact
+                # tag sees the full settled/revoked/raw_net context per
+                # window without having to parse the combined line. Clamping
+                # to zero is a safety guard, not a fix -- this line exists so
+                # the underlying corruption is reported, never hidden.
+                if invariant_examples_logged < MAX_NEGATIVE_EXAMPLES:
+                    for window, raw_net in (
+                        ("weekly", weekly_referrals),
+                        ("monthly", monthly_referrals),
+                        ("total", total_referrals),
+                    ):
+                        if raw_net >= 0:
+                            continue
+                        invariant_examples_logged += 1
+                        logger.warning(
+                            "[REFERRAL][LEDGER_INVARIANT_VIOLATION] inviter=%s window=%s "
+                            "settled=%s revoked=%s raw_net=%s stored_net=0",
+                            uid,
+                            window,
+                            settled_total,
+                            revoked_total,
+                            raw_net,
+                        )
 
             updates.append(
                 UpdateOne(
                     {"user_id": uid},
                     {
                         "$set": {
-                            "weekly_referrals_next": weekly_referrals,
-                            "monthly_referrals_next": monthly_referrals,
-                            "total_referrals_next": total_referrals,
+                            "weekly_referrals_next": clamped_weekly,
+                            "monthly_referrals_next": clamped_monthly,
+                            "total_referrals_next": clamped_total,
                         }
                     },
                     upsert=True,
@@ -1789,6 +1966,20 @@ def settle_referral_snapshots() -> None:
         duration_ms,
         version_result.modified_count,
     )
+
+    top_affected_inviters.sort(key=lambda r: abs(r["total"]) + abs(r["weekly"]) + abs(r["monthly"]), reverse=True)
+
+    return {
+        "users_scanned": scanned,
+        "users_modified": updated,
+        "negative_raw_totals_detected": weekly_negative_count + monthly_negative_count + total_negative_count,
+        "negative_users_clamped": negative_rows,
+        "weekly_negative_count": weekly_negative_count,
+        "monthly_negative_count": monthly_negative_count,
+        "total_negative_count": total_negative_count,
+        "top_affected_inviters": top_affected_inviters[:20],
+        "duration_seconds": round((time.perf_counter() - start_perf), 3),
+    }
 
 def _recover_stale_processing(now_utc_ts: datetime) -> int:
     cutoff = now_utc_ts - PROCESSING_TIMEOUT
@@ -2338,10 +2529,12 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
 
             step = "check_channel"
             try:
-                membership_chat_id = (
-                    destination_chat_id if destination_type == OFFICIAL_CHANNEL else None
-                )
-                status = _get_official_channel_member_status(invitee_user_id, membership_chat_id)
+                # destination_chat_id is already the correctly resolved chat
+                # for this row's destination_type (community_group -> GROUP_ID,
+                # official_channel -> OFFICIAL_CHANNEL_ID / override) — always
+                # pass it through rather than defaulting to OFFICIAL_CHANNEL_ID
+                # for non-channel rows.
+                status = _get_official_channel_member_status(invitee_user_id, destination_chat_id)
             except ReferralRetryableError as exc:
                 retry_after = exc.retry_after
                 backoff = (
@@ -2357,6 +2550,76 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
                 )
                 _release_for_retry(pending_id, now_utc_ts, backoff, "telegram_429")
                 continue
+            except ReferralTelegramError as exc:
+                # Neither "config" nor "user" is a definitive Telegram
+                # membership verdict -- an unresolved check is operational
+                # uncertainty, never proof the invitee left or was never
+                # subscribed, so this can only ever retry (bounded) or land
+                # on the terminal operational status="error" state. It must
+                # never write status="revoked" -- no XP, no referral_settled,
+                # no referral_revoked ledger event either way.
+                is_config = exc.kind == "config"
+                max_retries = MAX_TELEGRAM_CONFIG_RETRIES if is_config else MAX_TELEGRAM_USER_RETRIES
+                backoff = (
+                    TELEGRAM_CONFIG_ERROR_BACKOFF_SEC
+                    if is_config
+                    else _compute_backoff_seconds(retry_count, base=30, cap=300)
+                )
+                attempt = retry_count + 1
+                decision = "error_terminal" if retry_count >= max_retries else "retry_bounded"
+                logger.error(
+                    "[REFERRAL][MEMBERSHIP_CHECK_ERROR] pending_id=%s invitee=%s inviter=%s "
+                    "destination_type=%s destination_chat_id=%s http_status=%s tg_error_code=%s "
+                    "tg_description=%s error_kind=%s attempt=%s decision=%s",
+                    pending_id,
+                    invitee_user_id,
+                    inviter_user_id,
+                    destination_type,
+                    destination_chat_id,
+                    exc.status_code,
+                    exc.error_code,
+                    exc.description,
+                    exc.kind,
+                    attempt,
+                    decision,
+                )
+                if decision == "error_terminal":
+                    db.pending_referrals.update_one(
+                        {"_id": pending_id},
+                        {
+                            "$set": {
+                                "status": "error",
+                                "error_reason": "membership_check_unresolvable",
+                                "tg_error_code": exc.error_code,
+                                "tg_description": exc.description,
+                                "membership_check_attempts": attempt,
+                                "membership_last_checked_at": now_utc_ts,
+                                "destination_type": destination_type,
+                                "destination_chat_id": destination_chat_id,
+                                "error_at_utc": now_utc_ts,
+                            },
+                            "$unset": {"processing_by": "", "processing_at_utc": "", "processing_at": ""},
+                        },
+                    )
+                    referral_invitee_lock.release(
+                        db, invitee_user_id=invitee_user_id, status="error", now_utc_ts=now_utc_ts
+                    )
+                    logger.error(
+                        "[REFERRAL][OPERATIONAL_ERROR] pending_id=%s reason=membership_check_unresolvable "
+                        "attempts=%s destination_type=%s destination_chat_id=%s",
+                        pending_id,
+                        attempt,
+                        destination_type,
+                        destination_chat_id,
+                    )
+                else:
+                    _release_for_retry(
+                        pending_id,
+                        now_utc_ts,
+                        backoff,
+                        "telegram_config_error" if is_config else "telegram_bad_request",
+                    )
+                continue
             except RequestException as exc:
                 backoff = _compute_backoff_seconds(retry_count, base=30, cap=120)
                 logger.warning(
@@ -2365,7 +2628,7 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
                     invitee_user_id,
                     exc,
                 )
-                _release_for_retry(pending_id, now_utc_ts, backoff, "telegram_request_failed")        
+                _release_for_retry(pending_id, now_utc_ts, backoff, "telegram_request_failed")
                 continue
             if status not in {"member", "administrator", "creator"}:
                 db.pending_referrals.update_one(
@@ -2749,7 +3012,11 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
                 {"$group": {"_id": None, "total": {"$sum": _referral_sign_expr()}}},
             ]
             total_rows = list(db.referral_events.aggregate(total_pipeline))
-            current_ref_total = int((total_rows[0]["total"] if total_rows else 0) or 0)
+            # Clamp: a referral count must never be negative. Corrupted
+            # legacy ledger rows (not yet repaired by
+            # repair_referral_ledger.py) could otherwise depress the tier
+            # calculation below the inviter's true settled count.
+            current_ref_total = max(0, int((total_rows[0]["total"] if total_rows else 0) or 0))
             new_ref_total = current_ref_total + 1
             xp_added, bonus_added = calc_referral_award(new_ref_total)
             xp_granted = grant_xp(db, inviter_user_id, "referral_award", award_key, xp_added)

@@ -181,6 +181,18 @@ def resolve_referral_counts_with_snapshot_fallback(inviter_id: int | None, user_
     if source == "ledger" and inviter_id is not None:
         stats = _ledger_referral_counts(referral_events_col, int(inviter_id), now_ref)
     else:
+        if snapshot_total < 0 or snapshot_weekly < 0 or snapshot_monthly < 0:
+            # Presentation-only guard: the underlying snapshot in db.users
+            # is corrupt (should have been clamped by
+            # scheduler.settle_referral_snapshots()). Report it rather than
+            # silently hiding it — the next snapshot rebuild self-heals it.
+            current_app.logger.warning(
+                "[REF_PROGRESS][SNAPSHOT_NEGATIVE] uid=%s weekly=%s monthly=%s total=%s",
+                inviter_id,
+                snapshot_weekly,
+                snapshot_monthly,
+                snapshot_total,
+            )
         stats = {
             "total_referrals": max(0, snapshot_total),
             "weekly_referrals": max(0, snapshot_weekly),
