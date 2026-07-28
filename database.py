@@ -304,6 +304,11 @@ def ensure_indexes() -> None:
 
     safe_create_index(db_ref["app_settings_audit"], [("group", ASCENDING), ("created_at", -1)], name="group_created_at_desc")
 
+    # Immutable check-in audit trail. _id = "{user_id}:{checkin_date_kl}" is
+    # the atomic per-user/per-KL-day claim key (see main.process_checkin);
+    # this secondary index supports per-user reconstruction lookups.
+    safe_create_index(db_ref["checkin_events"], [("user_id", ASCENDING), ("checkin_date_kl", ASCENDING)], name="user_id_checkin_date_kl")
+
     _indexes_initialized = True
 
 
@@ -361,6 +366,12 @@ def init_user(user_id, username):
     )
 
 # === CHECK-IN LOGIC ===
+# DEPRECATED / UNUSED IN PRODUCTION. Nothing in this repo calls can_checkin()
+# or checkin_user() outside of tests. The live check-in path is
+# main.process_checkin() (routed via "/api/checkin" in main.py), which owns
+# streak/longest_streak/last_checkin and the atomic per-day claim. Do not
+# call these from new code — they bypass streak bookkeeping entirely and
+# would silently desync users.streak from users.last_checkin if wired up.
 def can_checkin(user_id):
     user = users_collection.find_one({"user_id": user_id})
     now = datetime.datetime.now(timezone.utc)

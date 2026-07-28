@@ -106,6 +106,9 @@ import settings_service
 from settings_service import get_settings as get_app_settings, get_setting as get_app_setting, update_settings as update_app_settings, list_schema as list_settings_schema, all_settings as get_all_app_settings
 
 FIRST_CHECKIN_BONUS_XP = int(os.getenv("FIRST_CHECKIN_BONUS_XP", "200"))
+# Identifies which Gunicorn worker/process handled a given check-in, for audit
+# trails when diagnosing cross-worker race conditions.
+APP_INSTANCE_ID = f"{socket.gethostname()}:{os.getpid()}"
 WELCOME_BONUS_XP = int(os.getenv("WELCOME_BONUS_XP", "20"))
 WELCOME_WINDOW_HOURS = int(os.getenv("WELCOME_WINDOW_HOURS", "48"))
 WELCOME_WINDOW_DAYS = 7
@@ -1457,9 +1460,6 @@ def maybe_shout_milestones(user_id: int):
             # Optional: keep a lightweight log to spot suppressed sends in logs
             print(f"[Milestone] Suppressed (throttle) user_id={user_id} "
                   f"xp_hit={xp_hit} ref_hit={ref_hit}")
-
-def maybe_give_first_checkin_bonus(user_id: int):
-    grant_xp(db, user_id, "first_checkin", "first_checkin", FIRST_CHECKIN_BONUS_XP)
 
 def _resolve_referrer_id_from_invite_link(invite_link) -> int | None:
     if not invite_link:
@@ -5628,38 +5628,77 @@ def streak_progress_bar(streak: int) -> str:
     boxes = int((filled / next_m) * 10)
     return f"[{'■'*boxes}{'□'*(10-boxes)}] {filled}/{next_m} days ➜ next: {next_m}d"
 
-async def process_checkin(user_id, username, region, update=None):
-    """Daily check-in with repeatable milestones. Day boundary = KL time."""
+async def process_checkin(user_id, username, region, update=None, source="miniapp", request_id=None):
+    """Daily check-in with repeatable milestones. Day boundary = KL time.
+
+    Same-day protection is enforced by an atomic ``checkin_events`` insert
+    keyed on ``user_id`` + KL calendar date (_id is unique), not just by
+    comparing ``last_checkin``. Two concurrent requests (double-click, retry,
+    duplicate Gunicorn-worker delivery) racing on a find-then-update of
+    ``users`` could otherwise both pass the same-day guard before either
+    write committed; only one insert can win, so only one request ever
+    mutates streak/last_checkin or grants XP for a given user+day.
+    """
     now_kl = datetime.now(KL_TZ)
     today_kl = now_kl.date()
+    request_id = request_id or str(uuid.uuid4())
 
     user = users_collection.find_one({"user_id": user_id}) or {}
-    is_new_user = not bool(user)
     last = user.get("last_checkin")
-    streak = int(user.get("streak", 0))
+    previous_streak = int(user.get("streak", 0))
+    streak = previous_streak
 
     last_kl_date = _to_kl_date(last)
 
-    # Same-day guard
+    # Same-day guard (fast path; the checkin_events insert below is the
+    # authoritative atomic guard for races within the same instant).
     if last_kl_date == today_kl:
         msg = f"⚠️ Already checked in today. 🔥 Streak: {streak} days."
         if update and getattr(update, "message", None):
             await update.message.reply_text(msg)
         return {"success": False, "message": msg}
 
-    # Advance/reset streak
-    if last_kl_date == (today_kl - timedelta(days=1)):
+    # Determine streak progression from the previous successful KL check-in date.
+    if last_kl_date is None:
+        streak = 1
+        reset_reason = "first_checkin"
+    elif last_kl_date == (today_kl - timedelta(days=1)):
         streak += 1
+        reset_reason = "consecutive_day"
     else:
         streak = 1
-
-        maybe_give_first_checkin_bonus(int(user_id))
-
+        reset_reason = "missed_day"
 
     base_xp = XP_BASE_PER_CHECKIN
     bonus_xp = STREAK_MILESTONES.get(streak, 0)
-
     now_utc_ts = now_utc()
+
+    # Atomic per-user/per-KL-day claim + immutable audit record. _id enforces
+    # uniqueness on (user_id, checkin_date_kl); only the first writer for a
+    # given user+day can insert, so a losing concurrent request aborts here
+    # without ever touching streak/last_checkin or granting XP twice.
+    event_id = f"{user_id}:{today_kl.isoformat()}"
+    try:
+        db.checkin_events.insert_one({
+            "_id": event_id,
+            "user_id": int(user_id),
+            "checkin_date_kl": today_kl.isoformat(),
+            "checked_in_at_utc": now_utc_ts,
+            "previous_last_checkin": last,
+            "previous_streak": previous_streak,
+            "new_streak": streak,
+            "reset_reason": reset_reason,
+            "source": source,
+            "request_id": request_id,
+            "app_instance": APP_INSTANCE_ID,
+        })
+    except DuplicateKeyError:
+        refreshed = users_collection.find_one({"user_id": user_id}) or {}
+        msg = f"⚠️ Already checked in today. 🔥 Streak: {int(refreshed.get('streak', previous_streak))} days."
+        if update and getattr(update, "message", None):
+            await update.message.reply_text(msg)
+        return {"success": False, "message": msg}
+
     set_fields = {
         "username": username,
         "last_checkin": now_utc_ts,
@@ -5682,7 +5721,17 @@ async def process_checkin(user_id, username, region, update=None):
 
     checkin_key = f"checkin:{today_kl.strftime('%Y%m%d')}"
     grant_xp(db, user_id, "checkin", checkin_key, base_xp + bonus_xp)
-    record_first_checkin(int(user_id), ref=now_utc_ts)
+
+    # Grant the first-checkin bonus only for a user's actual first lifetime
+    # check-in — record_first_checkin's $set filters on first_checkin_at not
+    # existing, so it is atomic and returns True exactly once per user, ever.
+    # (Previously this bonus was mistakenly re-granted whenever a streak
+    # reset to 1 after a missed day; grant_xp's own dedup on the
+    # "first_checkin" unique_key papered over that in normal operation, but
+    # the intent — and any future non-idempotent use of this signal — was
+    # wrong.)
+    if record_first_checkin(int(user_id), ref=now_utc_ts):
+        grant_xp(db, user_id, "first_checkin", "first_checkin", FIRST_CHECKIN_BONUS_XP)
 
     try:
         record_welcome_checkin_progress(int(user_id), now=now_utc_ts)
@@ -5750,6 +5799,7 @@ def api_checkin():
         data = request.get_json(silent=True) or {}
         user_id = data.get("user_id")
         username = data.get("username", "unknown")
+        request_id = data.get("request_id") or request.headers.get("X-Request-Id")
 
         if not user_id:
             return jsonify({"success": False, "error": "Missing user_id"}), 400
@@ -5766,7 +5816,7 @@ def api_checkin():
 
         # ✅ Call check-in logic — process_checkin upserts, region is optional
         result = asyncio.run(
-            process_checkin(int(user_id), username, user.get("region"))
+            process_checkin(int(user_id), username, user.get("region"), source="miniapp", request_id=request_id)
         )
 
         # ✅ Always calculate next reset time (12AM UTC+8)
