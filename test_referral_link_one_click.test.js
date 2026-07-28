@@ -141,8 +141,10 @@ function makeContext({
     API_BASE: "https://api.example.test",
     latestReferralLink: "",
     latestReferralMode: "",
+    latestSharePackage: null,
     referralEntryActionHandled: false,
     referralLinkRequestInFlight: false,
+    shareRequestInFlight: false,
     t: (key) => key,
     hapticNotify: (kind) => calls.hapticNotify.push(kind),
     loadReferralProgress: () => {},
@@ -462,10 +464,10 @@ test("double-click (concurrent calls) does not create duplicate requests", async
 
 test("9. Share button still works and uses the same canonical caption", async () => {
   const html = fs.readFileSync(path.join(__dirname, "static", "index.html"), "utf8");
-  const shareStart = html.indexOf("async function shareReferralViaTelegram() {");
+  const shareStart = html.indexOf("async function shareReferralViaTelegram(btn) {");
   const shareEnd = html.indexOf('if (typeof isThaiUiLanguage !== "function") {');
   assert.ok(shareStart !== -1 && shareEnd !== -1, "shareReferralViaTelegram bounds not found");
-  const fetchContentStart = html.indexOf("async function fetchReferralShareContent() {");
+  const fetchContentStart = html.indexOf("function buildFallbackReferralCaption(link) {");
   assert.ok(fetchContentStart !== -1 && fetchContentStart < shareStart);
   const source = html.slice(fetchContentStart, shareEnd);
 
@@ -482,11 +484,18 @@ test("9. Share button still works and uses the same canonical caption", async ()
           share_text: "SAME_CANONICAL_CAPTION",
         }),
       }),
-    openTelegramSafeLink: (url) => openedUrls.push(url),
+    openTelegramSafeLink: (url) => {
+      openedUrls.push(url);
+      return true;
+    },
     hapticImpact: () => {},
+    hapticNotify: () => {},
     tgAlert: () => {},
     t: (key) => key,
     API_BASE: "https://api.example.test",
+    latestReferralLink: "",
+    latestSharePackage: null,
+    shareRequestInFlight: false,
   };
   const context = vm.createContext(sandbox);
   vm.runInContext(source, context, { filename: "index.html-extract-share.js" });

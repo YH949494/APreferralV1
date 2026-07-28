@@ -1596,7 +1596,7 @@
             <div style="font-family:monospace;font-size:12px;color:#a39e95;word-break:break-all;padding:8px 10px;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.1);border-radius:8px;" id="referral-link-inline-text"></div>
             <div id="referral-link-error" style="display:none;margin-top:6px;font-size:11px;color:#e0a94f;"></div>
             <div style="display:flex;gap:8px;margin-top:8px;">
-              <button onclick="shareReferralViaTelegram()" class="ap-step-btn" style="flex:1;font-size:12px;padding:7px 10px;" data-i18n="share">📤 Share</button>
+              <button onclick="shareReferralViaTelegram(this)" class="ap-step-btn" style="flex:1;font-size:12px;padding:7px 10px;" data-i18n="share">📤 Share</button>
             </div>
           </div>
           <!-- Hidden referral progress elements required by JS -->
@@ -1910,7 +1910,7 @@
   <div id="referral-section">
     <div class="referral-cta-group">
       <button id="get-referral-btn" class="btn btn-primary" onclick="getReferral()">Invite Friends / Get Referral Link</button>
-      <button id="share-referral-btn" class="btn btn-ghost" onclick="shareReferralViaTelegram()">📤 Share via Telegram</button>
+      <button id="share-referral-btn" class="btn btn-ghost" onclick="shareReferralViaTelegram(this)">📤 Share via Telegram</button>
       <button id="copy-referral-btn" class="btn btn-ghost" onclick="copyReferral()" data-i18n="copy_to_clipboard">📋 Copy to clipboard</button>
     </div>
     <p id="referral-link">Click the button to get your link</p>
@@ -2526,15 +2526,21 @@
       }
     }
 
+    // Returns true when the link was handed off successfully, false when the
+    // fallback window.open() was blocked (e.g. popup blocker) -- callers that
+    // care about distinguishing a blocked popup from a successful open (see
+    // shareReferralViaTelegram's OPEN_OK/OPEN_FAIL breadcrumbs) can check the
+    // return value; existing callers that ignore it keep working unchanged.
     function openTelegramSafeLink(url) {
       const target = String(url || "").trim();
-      if (!target) return;
+      if (!target) return false;
       const tgOpen = window.Telegram?.WebApp?.openTelegramLink;
       if (typeof tgOpen === "function" && /^https?:\/\/t\.me\//i.test(target)) {
         tgOpen(target);
-        return;
+        return true;
       }
-      window.open(target, "_blank", "noopener,noreferrer");
+      const win = window.open(target, "_blank", "noopener,noreferrer");
+      return !!win;
     }
 
     function showWelcomeVoucherGuidePopup(claimGuide) {
@@ -3129,6 +3135,12 @@
     let latestReferralLink = "";
     let latestReferralMode = "";
     let referralLinkRequestInFlight = false;
+    // Canonical cached share package populated by a successful Get-Link /
+    // share-content fetch: { referral_link, caption, share_text, share_url }.
+    // Share must reuse this instead of independently re-fetching or
+    // re-generating the referral link -- see shareReferralViaTelegram().
+    let latestSharePackage = null;
+    let shareRequestInFlight = false;
 
     if (!userId && !getAdminSecret()) {
       const warn = document.createElement('div');
@@ -4114,11 +4126,29 @@
       trackReferralEvent("referral_share_content_requested");
       try {
         const data = await fetchReferralShareContent();
+        cacheSharePackage({
+          referral_link: link,
+          caption: data.message,
+          share_text: data.share_text || "",
+        });
         return data.message;
       } catch (err) {
         console.warn("[REFERRAL][SHARE_CONTENT_FALLBACK] reason=" + (err?.message || err));
         return buildFallbackReferralCaption(link);
       }
+    }
+
+    // Stores the one canonical in-memory referral share package. `share_url`
+    // is derived lazily at share time (it depends on how the message is
+    // split for the t.me/share/url `text` param), so it is only populated
+    // here when already known.
+    function cacheSharePackage({ referral_link, caption, share_text, share_url }) {
+      latestSharePackage = {
+        referral_link: referral_link || latestReferralLink,
+        caption: caption || (latestSharePackage && latestSharePackage.caption) || "",
+        share_text: share_text || (latestSharePackage && latestSharePackage.share_text) || "",
+        share_url: share_url || (latestSharePackage && latestSharePackage.share_url) || "",
+      };
     }
 
     // Copies the full caption (backend caption + referral URL, or the
@@ -4230,7 +4260,10 @@
         data = {};
       }
       if (!res.ok || data?.ok !== true || typeof data?.message !== "string" || !data.message.trim()) {
-        throw new Error(data?.error || `share_content_${res.status}`);
+        const err = new Error(data?.error || `share_content_${res.status}`);
+        err.status = res.status;
+        err.code = data?.error || null;
+        throw err;
       }
       return data;
     }
@@ -4265,19 +4298,100 @@
       showManualCopyCaption(data.message);
     }
 
-    async function shareReferralViaTelegram() {
-      let data;
-      try {
-        data = await fetchReferralShareContent();
-      } catch (err) {
-        console.warn("[SHARE_REFERRAL][FAIL]", err);
-        tgAlert(t("could_not_get_link"));
-        return;
-      }
+    // Fixed default share TEXT (no trailing link line) used only as the
+    // t.me/share/url `text` param when /api/referral/share-content is
+    // unreachable. The link itself is passed separately via the `url` param
+    // (see shareReferralViaTelegram) -- this must never also embed the link,
+    // or it would appear twice in the resulting Telegram share sheet.
+    function buildDefaultShareText() {
+      return [
+        "👋 Welcome to AdvantPlay Community!",
+        "",
+        "Join our channel to get 👇",
+        "",
+        "🎟️ FREE Welcome Voucher — No deposit required",
+        "⚡️ Daily voucher drops",
+        "🎁 Bonus campaigns",
+        "👑 VIP-only announcements",
+        "🏆 Weekly ranking rewards",
+      ].join("\n");
+    }
 
-      hapticImpact("light");
-      const shareUrl = `https://t.me/share/url?url=${encodeURIComponent(data.invite_link)}&text=${encodeURIComponent(data.share_text || "")}`;
-      openTelegramSafeLink(shareUrl);
+    // Share handler bound to the orange "📤 Share" button. Reuses the
+    // canonical in-memory share package (latestSharePackage / latestReferralLink)
+    // populated by Get Link -- it must NEVER independently regenerate or
+    // refetch the referral link merely because Share was pressed, and must
+    // never show "Could not get your referral link" while a valid link is
+    // already visible on screen. See module-level docs on latestSharePackage.
+    async function shareReferralViaTelegram(btn) {
+      console.info("[REFERRAL_SHARE][CLICK]");
+      if (shareRequestInFlight) return;
+      shareRequestInFlight = true;
+
+      const originalLabel = btn ? btn.textContent : null;
+      if (btn) { btn.disabled = true; btn.setAttribute("aria-busy", "true"); }
+
+      try {
+        let referralLink = latestReferralLink || (latestSharePackage && latestSharePackage.referral_link) || "";
+        let shareText = "";
+
+        if (referralLink && latestSharePackage && latestSharePackage.referral_link === referralLink && latestSharePackage.caption) {
+          console.info("[REFERRAL_SHARE][CACHE_HIT]");
+          shareText = latestSharePackage.share_text || "";
+        } else if (referralLink) {
+          // Link already exists but we have no cached share content yet
+          // (e.g. user never pressed Get Link's copy step) -- fetch it once.
+          // A failure here is NEVER a missing-link error: fall back to the
+          // fixed default caption + the link we already have.
+          console.info("[REFERRAL_SHARE][FETCH_START]");
+          try {
+            const data = await fetchReferralShareContent();
+            cacheSharePackage({ referral_link: referralLink, caption: data.message, share_text: data.share_text || "" });
+            shareText = data.share_text || "";
+          } catch (err) {
+            console.warn(`[REFERRAL_SHARE][FETCH_FAIL] status=${err?.status ?? "n/a"} code=${err?.code || err?.message || err}`);
+            console.info("[REFERRAL_SHARE][FALLBACK]");
+            shareText = buildDefaultShareText();
+          }
+        } else {
+          // No cached link anywhere -- this is the one legitimate case where
+          // Share may generate a link, and it does so at most once.
+          console.info("[REFERRAL_SHARE][FETCH_START]");
+          try {
+            const data = await fetchReferralShareContent();
+            referralLink = data.invite_link;
+            latestReferralLink = referralLink;
+            cacheSharePackage({ referral_link: referralLink, caption: data.message, share_text: data.share_text || "" });
+            shareText = data.share_text || "";
+          } catch (err) {
+            console.warn(`[REFERRAL_SHARE][FETCH_FAIL] status=${err?.status ?? "n/a"} code=${err?.code || err?.message || err}`);
+          }
+        }
+
+        if (!referralLink) {
+          hapticNotify("error");
+          tgAlert(t("could_not_get_link"));
+          return;
+        }
+
+        hapticImpact("light");
+        const shareUrl = `https://t.me/share/url?url=${encodeURIComponent(referralLink)}&text=${encodeURIComponent(shareText)}`;
+        cacheSharePackage({ referral_link: referralLink, share_url: shareUrl });
+
+        try {
+          const opened = openTelegramSafeLink(shareUrl);
+          if (opened) {
+            console.info("[REFERRAL_SHARE][OPEN_OK]");
+          } else {
+            console.warn("[REFERRAL_SHARE][OPEN_FAIL] reason=popup_blocked");
+          }
+        } catch (err) {
+          console.warn("[REFERRAL_SHARE][OPEN_FAIL] reason=" + (err?.message || err));
+        }
+      } finally {
+        shareRequestInFlight = false;
+        if (btn) { btn.disabled = false; btn.removeAttribute("aria-busy"); if (originalLabel !== null) btn.textContent = originalLabel; }
+      }
     }
 
 
