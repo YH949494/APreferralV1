@@ -5628,6 +5628,34 @@ def streak_progress_bar(streak: int) -> str:
     boxes = int((filled / next_m) * 10)
     return f"[{'■'*boxes}{'□'*(10-boxes)}] {filled}/{next_m} days ➜ next: {next_m}d"
 
+def _grant_checkin_xp_idempotent(user_id, streak, today_kl, now_utc_ts):
+    """Grant today's check-in XP and (if applicable) the first-checkin bonus.
+
+    Both underlying grants are idempotent — grant_xp() dedupes on
+    (user_id, unique_key) and record_first_checkin() atomically sets
+    first_checkin_at at most once — so this is safe to call more than once
+    for the same user+day. That is the point: it is called both right after
+    a check-in's streak mutation commits, and again (as a catch-up) on any
+    later request that hits the same-day guard, so a crash between the
+    streak CAS and this grant does not permanently strand a user without
+    their XP for a day they genuinely checked in on.
+    """
+    bonus_xp = STREAK_MILESTONES.get(streak, 0)
+    checkin_key = f"checkin:{today_kl.strftime('%Y%m%d')}"
+    grant_xp(db, user_id, "checkin", checkin_key, XP_BASE_PER_CHECKIN + bonus_xp)
+
+    # Grant the first-checkin bonus only for a user's actual first lifetime
+    # check-in — record_first_checkin's $set filters on first_checkin_at not
+    # existing, so it is atomic and returns True exactly once per user, ever.
+    # (Previously this bonus was mistakenly re-granted whenever a streak
+    # reset to 1 after a missed day; grant_xp's own dedup on the
+    # "first_checkin" unique_key papered over that in normal operation, but
+    # the intent — and any future non-idempotent use of this signal — was
+    # wrong.)
+    if record_first_checkin(int(user_id), ref=now_utc_ts):
+        grant_xp(db, user_id, "first_checkin", "first_checkin", FIRST_CHECKIN_BONUS_XP)
+
+
 async def process_checkin(user_id, username, region, update=None, source="miniapp", request_id=None):
     """Daily check-in with repeatable milestones. Day boundary = KL time.
 
@@ -5661,7 +5689,21 @@ async def process_checkin(user_id, username, region, update=None, source="miniap
 
     # Same-day guard (fast path only; the CAS update below is the
     # authoritative atomic guard for races within the same instant).
+    #
+    # The streak mutation for today is already committed at this point (that
+    # is what makes last_kl_date == today_kl true), but the downstream XP
+    # grant for today's check-in is a *separate*, non-transactional write
+    # that happens later in this function and is not wrapped in try/except.
+    # If a worker crashed or Mongo raised between the streak CAS committing
+    # and that grant running, the user's streak is correct but their XP for
+    # today never landed — and without this catch-up call, no future request
+    # could ever reach the grant again, because every retry stops here. Both
+    # grant_xp() and record_first_checkin() are idempotent (unique_key /
+    # first_checkin_at gates), so re-attempting them on every "already
+    # checked in" hit is a safe no-op once they've actually succeeded, and a
+    # real repair the one time they haven't.
     if last_kl_date == today_kl:
+        _grant_checkin_xp_idempotent(user_id, streak, today_kl, now_utc())
         msg = f"⚠️ Already checked in today. 🔥 Streak: {streak} days."
         if update and getattr(update, "message", None):
             await update.message.reply_text(msg)
@@ -5718,7 +5760,17 @@ async def process_checkin(user_id, username, region, update=None, source="miniap
 
     if not won_claim:
         refreshed = users_collection.find_one({"user_id": user_id}) or {}
-        msg = f"⚠️ Already checked in today. 🔥 Streak: {int(refreshed.get('streak', previous_streak))} days."
+        refreshed_streak = int(refreshed.get("streak", previous_streak))
+        # The CAS lost because someone else's request already advanced
+        # last_checkin/streak for today — heal any XP that winner's own
+        # process might not have gotten to (see _grant_checkin_xp_idempotent).
+        # Only when the committed state is actually today's: an unrelated
+        # concurrent write to the user doc (e.g. username/region) between our
+        # read and this CAS would also land here, and must not be treated as
+        # a check-in.
+        if _to_kl_date(refreshed.get("last_checkin")) == today_kl:
+            _grant_checkin_xp_idempotent(user_id, refreshed_streak, today_kl, now_utc())
+        msg = f"⚠️ Already checked in today. 🔥 Streak: {refreshed_streak} days."
         if update and getattr(update, "message", None):
             await update.message.reply_text(msg)
         return {"success": False, "message": msg}
@@ -5746,19 +5798,7 @@ async def process_checkin(user_id, username, region, update=None, source="miniap
     except Exception:
         logger.exception("[CHECKIN][AUDIT] failed to record checkin_events uid=%s date=%s", user_id, today_kl.isoformat())
 
-    checkin_key = f"checkin:{today_kl.strftime('%Y%m%d')}"
-    grant_xp(db, user_id, "checkin", checkin_key, base_xp + bonus_xp)
-
-    # Grant the first-checkin bonus only for a user's actual first lifetime
-    # check-in — record_first_checkin's $set filters on first_checkin_at not
-    # existing, so it is atomic and returns True exactly once per user, ever.
-    # (Previously this bonus was mistakenly re-granted whenever a streak
-    # reset to 1 after a missed day; grant_xp's own dedup on the
-    # "first_checkin" unique_key papered over that in normal operation, but
-    # the intent — and any future non-idempotent use of this signal — was
-    # wrong.)
-    if record_first_checkin(int(user_id), ref=now_utc_ts):
-        grant_xp(db, user_id, "first_checkin", "first_checkin", FIRST_CHECKIN_BONUS_XP)
+    _grant_checkin_xp_idempotent(user_id, streak, today_kl, now_utc_ts)
 
     try:
         record_welcome_checkin_progress(int(user_id), now=now_utc_ts)

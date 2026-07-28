@@ -108,8 +108,26 @@ def _collect_checkin_events(user_id: int) -> list[dict]:
             "raw": doc,
         })
 
+    # checkin_events is written by main.process_checkin() strictly *after*
+    # the atomic streak/last_checkin compare-and-swap on `users` has already
+    # committed (see process_checkin's docstring) — there is no pending or
+    # in-flight state for this collection to be in. Every row here reflects
+    # already-committed streak state, never an intended-but-not-yet-applied
+    # one. A row missing new_streak/reset_reason would indicate a schema
+    # anomaly (e.g. a manually inserted or corrupted record), not a normal
+    # in-progress claim, so flag rather than silently trust it.
     checkin_events_col = get_collection("checkin_events")
     for doc in checkin_events_col.find({"user_id": user_id}):
+        if "new_streak" not in doc or "reset_reason" not in doc:
+            result_note = f"checkin_events doc {doc.get('_id')!r} missing new_streak/reset_reason — anomalous row, not a normal committed check-in; excluded from reconstruction."
+            events.append({
+                "source": "checkin_events",
+                "unique_key": doc.get("_id"),
+                "created_at": None,  # excluded: see note above
+                "raw": doc,
+                "anomaly_note": result_note,
+            })
+            continue
         events.append({
             "source": "checkin_events",
             "unique_key": doc.get("_id"),
@@ -151,7 +169,8 @@ def reconstruct(user_id: int) -> Reconstruction:
             })
         d = _kl_date_of(created_at)
         if d is None:
-            result.notes.append(f"Unparseable timestamp in {ev['source']} unique_key={ev['unique_key']!r}")
+            note = ev.get("anomaly_note") or f"Unparseable timestamp in {ev['source']} unique_key={ev['unique_key']!r}"
+            result.notes.append(note)
             continue
         seen_by_date.setdefault(d, []).append(ev)
 

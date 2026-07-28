@@ -149,40 +149,153 @@ def test_frontend_or_network_retry_does_not_double_grant_xp():
 # Concurrency / atomicity
 # ---------------------------------------------------------------------------
 
-def test_two_concurrent_requests_only_one_wins_the_atomic_claim():
+def test_two_concurrent_requests_only_one_wins_the_streak_mutation():
     """Simulates two Gunicorn workers racing on the same user+day.
 
     Both requests read the same pre-checkin state before either commits.
     The claim and the streak/last_checkin mutation are the same compare-
     and-swap update (filtered on the exact last_checkin value each request
     read), so the second request to reach that update simply fails to
-    match (matched_count == 0) — it must not mutate streak/last_checkin or
-    grant XP a second time, and — unlike a separate claim-then-mutate
-    design — there is no window where a crash between "claim" and "mutate"
-    could strand the day as claimed-but-never-applied.
+    match (matched_count == 0) — it must not re-mutate streak/last_checkin/
+    longest_streak beyond what the winner already applied, even though (see
+    test_losing_racer_heals_winners_missing_xp_grant below) it may still
+    grant XP as a idempotent catch-up.
     """
     uid = _next_uid()
     yesterday_kl = datetime.now(KL_TZ).date() - timedelta(days=1)
     yesterday_utc = datetime.combine(yesterday_kl, datetime.min.time(), tzinfo=KL_TZ).astimezone(timezone.utc)
     _set_user_state(uid, streak=3, last_checkin=yesterday_utc, longest_streak=3)
 
-    # Pretend a concurrent request already won the race and applied its
-    # mutation (advanced last_checkin to "now") before this request's CAS
-    # update runs — the true race window in a find-then-update design.
+    # Pretend a concurrent request already won the race, applied its streak
+    # mutation, AND successfully granted XP (the common case) before this
+    # request's CAS update runs.
+    winner_now = datetime.now(timezone.utc)
     main.users_collection.update_one(
         {"user_id": uid},
-        {"$set": {"streak": 4, "last_checkin": datetime.now(timezone.utc)}, "$max": {"longest_streak": 4}},
+        {"$set": {"streak": 4, "last_checkin": winner_now}, "$max": {"longest_streak": 4}},
     )
+    main.db.xp_events.insert_one({"user_id": uid, "unique_key": "checkin:" + datetime.now(KL_TZ).strftime("%Y%m%d"), "type": "checkin", "xp": XP_BASE_PER_CHECKIN, "created_at": winner_now})
+    main.db.xp_ledger.insert_one({"user_id": uid, "source": "checkin", "source_id": "checkin:" + datetime.now(KL_TZ).strftime("%Y%m%d"), "amount": XP_BASE_PER_CHECKIN, "created_at": winner_now})
 
     result = _checkin(uid)
 
     assert result["success"] is False
-    # The loser must not have re-mutated streak/last_checkin/longest_streak
-    # beyond what the winner already applied.
     doc = main.users_collection.find_one({"user_id": uid})
     assert doc["streak"] == 4
     assert doc["longest_streak"] == 4
+    # Already granted by the "winner" above — the loser's idempotent
+    # catch-up call must not create a second XP event.
+    assert len(_checkin_xp_events(uid)) == 1
+
+
+def test_losing_racer_heals_winners_missing_xp_grant():
+    """Recovery scenario: the request that wins the streak CAS crashes (or
+    Mongo raises) before it reaches grant_xp(). Streak/last_checkin are
+    correctly committed, but XP for today is missing. A second request for
+    the same user+day (a losing racer, or simply a frontend retry) must
+    heal the missing XP rather than silently accept "already checked in"
+    with the grant lost forever.
+    """
+    uid = _next_uid()
+    yesterday_kl = datetime.now(KL_TZ).date() - timedelta(days=1)
+    yesterday_utc = datetime.combine(yesterday_kl, datetime.min.time(), tzinfo=KL_TZ).astimezone(timezone.utc)
+    _set_user_state(uid, streak=3, last_checkin=yesterday_utc, longest_streak=3)
+
+    # Simulate the winner's streak CAS having committed, but its process
+    # dying before grant_xp("checkin", ...) ran.
+    main.users_collection.update_one(
+        {"user_id": uid},
+        {"$set": {"streak": 4, "last_checkin": datetime.now(timezone.utc)}, "$max": {"longest_streak": 4}},
+    )
+    assert len(_checkin_xp_events(uid)) == 0  # confirm the simulated partial failure
+
+    result = _checkin(uid)
+
+    assert result["success"] is False  # streak already advanced; not re-applied
+    doc = main.users_collection.find_one({"user_id": uid})
+    assert doc["streak"] == 4  # untouched by the healing call
+    events = _checkin_xp_events(uid)
+    assert len(events) == 1  # healed, exactly once
+    assert events[0]["xp"] == XP_BASE_PER_CHECKIN
+
+    # A third request (another retry) must not grant it again.
+    _checkin(uid)
+    assert len(_checkin_xp_events(uid)) == 1
+
+
+def test_retry_after_incomplete_checkin_heals_first_checkin_bonus_too():
+    """Same recovery scenario as above, but for a user's very first check-in
+    ever — both the base check-in XP and the first-checkin bonus must be
+    healed by a retry, and neither is granted twice by a subsequent one.
+    """
+    uid = _next_uid()
+    # Simulate: streak CAS for a brand-new user's first check-in committed,
+    # but grant_xp/record_first_checkin never ran.
+    _set_user_state(uid, streak=1, last_checkin=datetime.now(timezone.utc), longest_streak=1)
+
+    result = _checkin(uid)
+
+    assert result["success"] is False
+    assert len(_checkin_xp_events(uid)) == 1
+    assert len(_first_checkin_xp_events(uid)) == 1
+
+    _checkin(uid)
+    assert len(_checkin_xp_events(uid)) == 1
+    assert len(_first_checkin_xp_events(uid)) == 1
+
+
+def test_healing_does_not_grant_xp_for_unrelated_stale_state():
+    """The CAS-loss healing path must only fire when the committed
+    last_checkin is actually today's KL date — never for some other change
+    that merely happens to break our CAS filter's equality match.
+
+    Uses a mocked find_one to force process_checkin to *read* a stale
+    snapshot while the real stored document has already moved on to a
+    still-not-today value — reproducing the ordering a genuine concurrent
+    write would need (something no single-threaded test can otherwise
+    arrange against a live find-then-update).
+    """
+    # database.ensure_indexes() is guarded by a module-level "already ran"
+    # flag and so does not re-create the unique index on users.user_id
+    # against this test's fresh per-test mongomock db (see
+    # _fresh_mongomock_db above) — create it explicitly, since this test's
+    # CAS-loses-via-stale-read scenario depends on that index to correctly
+    # reject the resulting phantom "insert" rather than silently create a
+    # second document for the same user_id.
+    main.users_collection.create_index([("user_id", 1)], unique=True)
+
+    uid = _next_uid()
+    yesterday_kl = datetime.now(KL_TZ).date() - timedelta(days=1)
+    yesterday_utc = datetime.combine(yesterday_kl, datetime.min.time(), tzinfo=KL_TZ).astimezone(timezone.utc)
+    _set_user_state(uid, streak=3, last_checkin=yesterday_utc, longest_streak=3)
+
+    stale_snapshot = main.users_collection.find_one({"user_id": uid})
+
+    # After process_checkin's initial read, but before its CAS runs, some
+    # other change lands — moving last_checkin to a *different* value that
+    # is still not today's KL date.
+    other_stale_value = yesterday_utc - timedelta(days=3)
+    main.users_collection.update_one({"user_id": uid}, {"$set": {"last_checkin": other_stale_value}})
+
+    real_find_one = main.users_collection.find_one
+    call_count = {"n": 0}
+
+    def _find_one_once_stale(*args, **kwargs):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            return stale_snapshot
+        return real_find_one(*args, **kwargs)
+
+    with mock.patch.object(main.users_collection, "find_one", side_effect=_find_one_once_stale):
+        result = _checkin(uid)
+
+    # The CAS filter (built from the stale read) no longer matches, so this
+    # request loses the race — and since the actually-committed last_checkin
+    # still isn't today, the healing call must not fire.
     assert len(_checkin_xp_events(uid)) == 0
+    assert result["success"] is False
+    doc = main.users_collection.find_one({"user_id": uid})
+    assert doc["streak"] == 3
 
 
 def test_cas_filter_rejects_a_stale_last_checkin_read():
