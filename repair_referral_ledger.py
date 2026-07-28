@@ -35,12 +35,24 @@ referral_ledger.with_not_invalidated) ignores it going forward.
 
 Usage
 -----
-    python3 repair_referral_ledger.py --mongo-url "$MONGO_URL" [--mongo-db referral_bot]
-    python3 repair_referral_ledger.py --mongo-url "$MONGO_URL" --commit
-    python3 repair_referral_ledger.py --mongo-url "$MONGO_URL" --commit --rebuild-snapshots
+Ledger invalidation and snapshot rebuild are separate operator actions with
+separate checkpoints -- --commit and --rebuild-snapshots cannot be combined
+in one run (the CLI rejects that combination with a clear error), so a
+human reviews the invalidation report before triggering a rebuild:
+
+    # 1. Dry-run report only (no writes)
+    python3 repair_referral_ledger.py --mongo-url "$MONGO_URL" --mongo-db referral_bot
+
+    # 2. Invalidate unambiguous corrupt ledger rows only (no snapshot rebuild)
+    python3 repair_referral_ledger.py --mongo-url "$MONGO_URL" --mongo-db referral_bot --commit
+
+    # 3. Rebuild snapshots only -- does NOT require --commit, and can be run
+    #    any time (e.g. on its own schedule, or right after step 2 once its
+    #    report has been reviewed)
+    python3 repair_referral_ledger.py --mongo-url "$MONGO_URL" --mongo-db referral_bot --rebuild-snapshots
 
 Safe to re-run: events already marked invalidated are excluded from the
-scan, so a second run finds zero additional invalid events.
+scan, so a second run of --commit finds zero additional invalid events.
 """
 
 from __future__ import annotations
@@ -96,12 +108,21 @@ def _find_invalid_revocations(db) -> list[dict]:
 
 
 def _find_duplicate_revocations(db) -> list[dict]:
-    """Extra referral_revoked rows beyond the first for the same (inviter,
-    invitee) pair. New writes can't produce these — revoke_settled_referral
-    checks for an existing revocation, and the uniq_referral_event index
-    ((event, inviter_id, invitee_id), unique) enforces it at the database
-    level — but rows written before that guard/index existed may still have
-    them, and each extra one double-subtracts from snapshot aggregation.
+    """Extra referral_revoked rows beyond the first *valid* one for the
+    same (inviter, invitee) pair. New writes can't produce these —
+    revoke_settled_referral checks for an existing revocation, and the
+    uniq_referral_event index ((event, inviter_id, invitee_id), unique)
+    enforces it at the database level — but rows written before that
+    guard/index existed may still have them, and each extra one
+    double-subtracts from snapshot aggregation.
+
+    Only revocations at or after their pair's earliest matching settlement
+    are considered here — a revocation timestamped *before* its settlement
+    is corrupt/out-of-order data (``revocation_predates_settlement``,
+    handled separately and review-only, never auto-invalidated) and must
+    never be picked as the "valid" survivor just because it happens to be
+    the earliest by clock time. A pair with no matching settlement at all
+    belongs to ``_find_invalid_revocations`` instead, not here.
     """
     pipeline = [
         {
@@ -112,6 +133,37 @@ def _find_duplicate_revocations(db) -> list[dict]:
                 "invitee_id": {"$ne": None},
             }
         },
+        {
+            "$lookup": {
+                "from": "referral_events",
+                "let": {"inviter": "$inviter_id", "invitee": "$invitee_id"},
+                "pipeline": [
+                    {
+                        "$match": {
+                            "$expr": {
+                                "$and": [
+                                    {"$eq": ["$inviter_id", "$$inviter"]},
+                                    {"$eq": ["$invitee_id", "$$invitee"]},
+                                    {"$eq": ["$event", "referral_settled"]},
+                                ]
+                            }
+                        }
+                    },
+                    {"$sort": {"occurred_at": 1}},
+                    {"$limit": 1},
+                ],
+                "as": "matching_settlement",
+            }
+        },
+        {"$match": {"matching_settlement": {"$ne": []}}},
+        {
+            "$match": {
+                "$expr": {
+                    "$gte": ["$occurred_at", {"$arrayElemAt": ["$matching_settlement.occurred_at", 0]}]
+                }
+            }
+        },
+        {"$project": {"matching_settlement": 0}},
         {"$sort": {"occurred_at": 1, "_id": 1}},
         {
             "$group": {
@@ -124,8 +176,9 @@ def _find_duplicate_revocations(db) -> list[dict]:
     ]
     duplicates = []
     for group in db.referral_events.aggregate(pipeline, allowDiskUse=True):
-        # Keep the earliest revocation (the one revoke_settled_referral's
-        # existing_revoke check would have found); invalidate the rest.
+        # Keep the earliest *valid* (post-settlement) revocation -- the one
+        # revoke_settled_referral's existing_revoke check would have found;
+        # invalidate the rest.
         for doc in (group.get("docs") or [])[1:]:
             doc["invalid_reason"] = "duplicate_revocation"
             duplicates.append(doc)
@@ -315,19 +368,39 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Repair invalid referral_revoked events (dry-run by default)")
     parser.add_argument("--mongo-url", default=os.getenv("MONGO_URL"), help="Mongo connection URI")
     parser.add_argument("--mongo-db", default=os.getenv("MONGO_DB", "referral_bot"), help="Mongo database name")
-    parser.add_argument("--commit", action="store_true", help="Apply changes (default: dry-run, report only)")
+    parser.add_argument("--commit", action="store_true", help="Invalidate unambiguous corrupt ledger rows (default: dry-run, report only)")
     parser.add_argument(
         "--rebuild-snapshots",
         action="store_true",
-        help="After a successful --commit, rebuild referral snapshots (settle_referral_snapshots)",
+        help="Rebuild referral snapshots (settle_referral_snapshots) as its own standalone action. "
+        "Does not require --commit, and cannot be combined with --commit in the same run.",
     )
     args = parser.parse_args()
 
     if not args.mongo_url:
         raise SystemExit("--mongo-url or MONGO_URL is required")
 
+    # Ledger invalidation and snapshot rebuild are deliberately separate
+    # operator actions/checkpoints -- rejecting the combination (rather than
+    # silently running both) forces a human to look at the invalidation
+    # report before triggering a rebuild that depends on it.
+    if args.commit and args.rebuild_snapshots:
+        raise SystemExit(
+            "--commit and --rebuild-snapshots cannot be combined in one run. "
+            "Run --commit first, review its report, then run --rebuild-snapshots separately."
+        )
+
     client = MongoClient(args.mongo_url)
     db = client[args.mongo_db]
+
+    if args.rebuild_snapshots:
+        import database
+        import scheduler
+
+        database.init_db(args.mongo_url, args.mongo_db)
+        summary = scheduler.settle_referral_snapshots()
+        print(summary)
+        return 0
 
     now_ref = datetime.now(timezone.utc)
 
@@ -377,13 +450,12 @@ def main() -> int:
 
     print(report)
 
-    if args.commit and args.rebuild_snapshots:
-        import database
-        import scheduler
-
-        database.init_db(args.mongo_url, args.mongo_db)
-        scheduler.settle_referral_snapshots()
-        print("snapshot rebuild triggered via scheduler.settle_referral_snapshots()")
+    if args.commit:
+        print(
+            "Ledger invalidation complete. Snapshots were NOT rebuilt -- run "
+            "with --rebuild-snapshots (on its own, no --commit) once you have "
+            "reviewed this report."
+        )
 
     return 0
 

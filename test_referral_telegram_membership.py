@@ -328,7 +328,8 @@ class ReferralTelegramMembershipTests(unittest.TestCase):
         scheduler.settle_pending_referrals(batch_limit=1)
 
         self.assertEqual(doc["status"], "error")
-        self.assertEqual(doc["error_reason"], "telegram_config_error")
+        self.assertEqual(doc["error_reason"], "membership_check_unresolvable")
+        self.assertEqual(doc["tg_description"], "Bad Request: chat not found")
 
     def test_400_config_error_retries_before_terminal(self):
         self._mock_get(
@@ -343,7 +344,11 @@ class ReferralTelegramMembershipTests(unittest.TestCase):
         self.assertEqual(doc["retry_last_reason"], "telegram_config_error")
         self.assertEqual(doc["next_retry_at_utc"], self.fixed_now + timedelta(seconds=scheduler.TELEGRAM_CONFIG_ERROR_BACKOFF_SEC))
 
-    def test_400_user_specific_bounded_then_terminal_revoke(self):
+    def test_400_user_specific_bounded_then_terminal_error_not_revoked(self):
+        # An unresolved Telegram check is operational uncertainty, never
+        # proof the invitee left/was never subscribed -- it must terminate
+        # as status="error", not "revoked". No XP, no referral_settled, no
+        # referral_revoked ledger event either way.
         self._mock_get(
             lambda params: _FakeResponse(400, {"ok": False, "error_code": 400, "description": "Bad Request: user not found"})
         )
@@ -352,8 +357,123 @@ class ReferralTelegramMembershipTests(unittest.TestCase):
 
         scheduler.settle_pending_referrals(batch_limit=1)
 
+        self.assertEqual(doc["status"], "error")
+        self.assertEqual(doc["error_reason"], "membership_check_unresolvable")
+        self.assertNotIn("xp_added", doc)
+        self.assertNotIn("revoked_reason", doc)
+
+    def test_401_unauthorized_classified_as_config_not_user(self):
+        # A bad/expired bot token is a global outage, not anything specific
+        # to this invitee -- must be classified/bounded like other config
+        # errors (long backoff), never treated as a per-invitee 400.
+        self._mock_get(
+            lambda params: _FakeResponse(401, {"ok": False, "error_code": 401, "description": "Unauthorized"})
+        )
+        doc = self._base_pending("community_group", retry_count=0)
+        scheduler.db = _FakeSchedulerDB([doc], self._user_doc())
+
+        scheduler.settle_pending_referrals(batch_limit=1)
+
+        self.assertEqual(doc["status"], "pending")
+        self.assertEqual(doc["retry_last_reason"], "telegram_config_error")
+        self.assertEqual(
+            doc["next_retry_at_utc"], self.fixed_now + timedelta(seconds=scheduler.TELEGRAM_CONFIG_ERROR_BACKOFF_SEC)
+        )
+
+    def test_malformed_json_body_retryable_not_user_specific(self):
+        class _BadJsonResponse:
+            status_code = 200
+
+            def json(self):
+                raise ValueError("not json")
+
+        scheduler.requests.get = lambda url, params=None, timeout=None: _BadJsonResponse()
+        doc = self._base_pending("community_group")
+        scheduler.db = _FakeSchedulerDB([doc], self._user_doc())
+
+        scheduler.settle_pending_referrals(batch_limit=1)
+
+        self.assertEqual(doc["status"], "pending")
+        # Malformed/transient body is treated like any other transient
+        # Telegram hiccup -- unconditionally retryable, never a per-invitee
+        # bounded-then-terminal classification.
+        self.assertNotEqual(doc.get("status"), "error")
+        self.assertNotEqual(doc.get("status"), "revoked")
+
+    # 8. Definitive "kicked" membership result still revokes correctly.
+    def test_200_kicked_revokes_with_confirmed_reason(self):
+        self._mock_get(lambda params: _FakeResponse(200, {"ok": True, "result": {"status": "kicked"}}))
+        doc = self._base_pending("community_group")
+        scheduler.db = _FakeSchedulerDB([doc], self._user_doc())
+
+        scheduler.settle_pending_referrals(batch_limit=1)
+
         self.assertEqual(doc["status"], "revoked")
-        self.assertEqual(doc["revoked_reason"], "membership_check_unresolvable")
+        self.assertEqual(doc["revoked_reason"], "not_in_official_channel")
+
+    # Restricted-but-still-a-member (is_member=True) must settle normally,
+    # not be treated as a definitive negative verdict.
+    def test_restricted_with_is_member_true_settles_normally(self):
+        self._mock_get(
+            lambda params: _FakeResponse(
+                200, {"ok": True, "result": {"status": "restricted", "is_member": True}}
+            )
+        )
+        doc = self._base_pending("community_group")
+        scheduler.db = _FakeSchedulerDB([doc], self._user_doc())
+
+        scheduler.settle_pending_referrals(batch_limit=1)
+
+        self.assertEqual(doc["status"], "awarded")
+
+    # Restricted with is_member explicitly not true IS a definitive
+    # negative verdict and must revoke with the existing confirmed reason.
+    def test_restricted_with_is_member_false_revokes(self):
+        self._mock_get(
+            lambda params: _FakeResponse(
+                200, {"ok": True, "result": {"status": "restricted", "is_member": False}}
+            )
+        )
+        doc = self._base_pending("community_group")
+        scheduler.db = _FakeSchedulerDB([doc], self._user_doc())
+
+        scheduler.settle_pending_referrals(batch_limit=1)
+
+        self.assertEqual(doc["status"], "revoked")
+        self.assertEqual(doc["revoked_reason"], "not_in_official_channel")
+
+    def test_operational_error_produces_no_xp_no_settlement_no_revocation(self):
+        record_calls = []
+        scheduler._record_referral_event = lambda *a, **kw: record_calls.append(a) or True
+        grant_calls = []
+        scheduler.grant_xp = lambda *a, **kw: grant_calls.append(a) or True
+
+        self._mock_get(
+            lambda params: _FakeResponse(400, {"ok": False, "error_code": 400, "description": "Bad Request: chat not found"})
+        )
+        doc = self._base_pending("community_group", retry_count=scheduler.MAX_TELEGRAM_CONFIG_RETRIES)
+        scheduler.db = _FakeSchedulerDB([doc], self._user_doc())
+
+        scheduler.settle_pending_referrals(batch_limit=1)
+
+        self.assertEqual(doc["status"], "error")
+        self.assertEqual(record_calls, [])
+        self.assertEqual(grant_calls, [])
+        # Raw status is still visible to operators via the pending_referrals
+        # row itself, even though it isn't "awarded" or a confirmed failure.
+        self.assertNotIn(doc["status"], {"awarded", "revoked"})
+
+        # main.py's _map_referral_status() must keep falling back to
+        # "pending" for this new, unmapped raw status -- checked via source
+        # inspection rather than importing main.py, which has heavy
+        # import-time side effects (real Mongo connection/index creation)
+        # that make it unsafe to import in a unit test.
+        with open("main.py", "r", encoding="utf-8") as fh:
+            source = fh.read()
+        start = source.index("def _map_referral_status(")
+        body = source[start : source.index("\ndef ", start + 1)]
+        self.assertNotIn('"error"', body)
+        self.assertIn('return "pending"', body)
 
     # 8. Telegram response description is logged without exposing the bot token.
     def test_error_logged_without_bot_token_or_full_url(self):

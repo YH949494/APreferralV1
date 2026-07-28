@@ -109,6 +109,57 @@ class SnapshotWriterNeverPersistsNegativeTests(unittest.TestCase):
         self.assertIn("total=-2", negative_lines[0])
         self.assertIn("clamped_to=weekly=0,monthly=0,total=0", negative_lines[0])
 
+    def test_negative_net_logs_ledger_invariant_violation(self):
+        events = self._corrupted_events()
+        users = _fake_users()
+        users.docs[1] = {"user_id": 1}
+        scheduler.db = type("DB", (), {"referral_events": events, "users": users})()
+
+        with self.assertLogs("scheduler", level="WARNING") as captured:
+            scheduler.settle_referral_snapshots()
+
+        violation_lines = [line for line in captured.output if "LEDGER_INVARIANT_VIOLATION" in line]
+        # total_referrals and monthly_referrals are both negative for this
+        # inviter (both corrupted events occurred within the current
+        # month); weekly is unaffected -- one violation line per negative
+        # window.
+        self.assertEqual(len(violation_lines), 2)
+        windows_seen = {line.split("window=")[1].split(" ")[0] for line in violation_lines}
+        self.assertEqual(windows_seen, {"monthly", "total"})
+        for line in violation_lines:
+            self.assertIn("inviter=1", line)
+            self.assertIn("settled=0", line)
+            self.assertIn("revoked=2", line)
+            self.assertIn("raw_net=-2", line)
+            self.assertIn("stored_net=0", line)
+
+    def test_returns_summary_dict_with_required_counters(self):
+        events = self._corrupted_events()
+        users = _fake_users()
+        users.docs[1] = {"user_id": 1}
+        scheduler.db = type("DB", (), {"referral_events": events, "users": users})()
+
+        summary = scheduler.settle_referral_snapshots()
+
+        for key in (
+            "users_scanned",
+            "users_modified",
+            "negative_raw_totals_detected",
+            "negative_users_clamped",
+            "weekly_negative_count",
+            "monthly_negative_count",
+            "total_negative_count",
+            "top_affected_inviters",
+            "duration_seconds",
+        ):
+            self.assertIn(key, summary)
+        self.assertEqual(summary["users_scanned"], 1)
+        self.assertEqual(summary["negative_users_clamped"], 1)
+        self.assertEqual(summary["total_negative_count"], 1)
+        self.assertEqual(summary["weekly_negative_count"], 0)
+        self.assertEqual(summary["monthly_negative_count"], 1)
+        self.assertEqual(summary["top_affected_inviters"][0]["inviter_id"], 1)
+
     def test_legitimate_zero_referrals_does_not_log_negative(self):
         events = _FakeReferralEvents()
         events.insert_one(_settled_doc(1, 2, NOW - timedelta(days=2)))
