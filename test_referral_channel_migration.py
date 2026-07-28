@@ -1063,3 +1063,190 @@ def test_migration_audit_detects_cross_destination_duplicate(monkeypatch):
     report = referral_migration_audit.build_report(db)
     assert len(report["cross_destination_duplicate_invitees"]) == 1
     assert report["cross_destination_duplicate_invitees"][0]["invitee_user_id"] == 5
+
+
+# ---------------------------------------------------------------------------
+# Policy change: official_channel referrals must qualify on retained channel
+# subscription through the hold period alone — first_checkin/engagement
+# scoring must no longer gate settlement for this destination. community_group
+# keeps the existing engagement/check-in requirement unchanged.
+# ---------------------------------------------------------------------------
+
+def _group_pending(fixed_now, **overrides):
+    doc = {
+        "_id": 1,
+        "group_id": GROUP_CHAT_ID,
+        "status": "pending",
+        "inviter_user_id": 11,
+        "invitee_user_id": 22,
+        "created_at_utc": fixed_now - timedelta(hours=100),
+    }
+    doc.update(overrides)
+    return doc
+
+
+def _forbid_engagement_check(*args, **kwargs):
+    raise AssertionError("evaluate_referral_engagement must not be called for official_channel referrals")
+
+
+def test_official_channel_no_first_checkin_settles_once(scheduler_mod):
+    scheduler, fixed_now, qualified_calls = scheduler_mod
+    scheduler.evaluate_referral_engagement = _forbid_engagement_check
+    grant_calls = []
+    scheduler.grant_xp = lambda *a, **kw: grant_calls.append(a) or True
+    settled_events = []
+    scheduler._record_referral_event = lambda *a, **kw: settled_events.append(a) or True
+
+    doc = _channel_pending(fixed_now)
+    user_docs = {22: {"user_id": 22}}  # no first_checkin_at at all
+    scheduler.db = _FakeSchedulerDB([doc], user_docs)
+
+    scheduler.settle_pending_referrals(batch_limit=1)
+
+    assert doc["status"] == "awarded"
+    assert doc["qualification_rule"] == "official_channel_retained"
+    assert len(grant_calls) == 1
+    assert len(settled_events) == 1
+    assert settled_events[0][2] == "referral_settled"
+    assert len(qualified_calls) == 1
+
+
+def test_official_channel_checked_in_still_settles_exactly_once(scheduler_mod):
+    scheduler, fixed_now, qualified_calls = scheduler_mod
+    scheduler.evaluate_referral_engagement = _forbid_engagement_check
+    grant_calls = []
+    scheduler.grant_xp = lambda *a, **kw: grant_calls.append(a) or True
+
+    doc = _channel_pending(fixed_now)
+    user_docs = {22: {"user_id": 22, "first_checkin_at": fixed_now - timedelta(hours=90)}}
+    scheduler.db = _FakeSchedulerDB([doc], user_docs)
+
+    scheduler.settle_pending_referrals(batch_limit=1)
+
+    assert doc["status"] == "awarded"
+    assert len(grant_calls) == 1
+    assert len(qualified_calls) == 1
+
+
+def test_official_channel_left_before_hold_does_not_settle_no_xp(scheduler_mod):
+    scheduler, fixed_now, _ = scheduler_mod
+    scheduler._get_official_channel_member_status = lambda uid, chat_id=None: "left"
+    grant_calls = []
+    scheduler.grant_xp = lambda *a, **kw: grant_calls.append(a) or True
+
+    doc = _channel_pending(fixed_now)
+    user_docs = {22: {"user_id": 22}}
+    scheduler.db = _FakeSchedulerDB([doc], user_docs)
+
+    scheduler.settle_pending_referrals(batch_limit=1)
+
+    assert doc["status"] == "revoked"
+    assert doc["revoked_reason"] == "not_in_official_channel"
+    assert grant_calls == []
+
+
+def test_official_channel_membership_transient_error_stays_retryable(scheduler_mod):
+    scheduler, fixed_now, _ = scheduler_mod
+
+    def _raise_retryable(uid, chat_id=None):
+        raise scheduler.ReferralRetryableError("telegram_rate_limited", retry_after=5)
+
+    scheduler._get_official_channel_member_status = _raise_retryable
+    grant_calls = []
+    scheduler.grant_xp = lambda *a, **kw: grant_calls.append(a) or True
+
+    doc = _channel_pending(fixed_now)
+    user_docs = {22: {"user_id": 22}}
+    scheduler.db = _FakeSchedulerDB([doc], user_docs)
+
+    scheduler.settle_pending_referrals(batch_limit=1)
+
+    assert doc["status"] == "pending"
+    assert doc["retry_last_reason"] == "telegram_429"
+    assert grant_calls == []
+
+
+def test_official_channel_already_settled_historically_no_duplicate_xp(scheduler_mod):
+    scheduler, fixed_now, qualified_calls = scheduler_mod
+    scheduler.evaluate_referral_engagement = _forbid_engagement_check
+    grant_calls = []
+    scheduler.grant_xp = lambda *a, **kw: grant_calls.append(a) or True
+
+    doc = _channel_pending(fixed_now)
+    user_docs = {22: {"user_id": 22}}
+    fake_db = _FakeSchedulerDB([doc], user_docs)
+    fake_db.referral_award_events.docs.append(
+        {"award_key": "ref:22", "invitee_user_id": 22, "inviter_user_id": 11}
+    )
+    scheduler.db = fake_db
+
+    scheduler.settle_pending_referrals(batch_limit=1)
+
+    assert doc["status"] == "awarded"
+    assert grant_calls == []
+    assert len(qualified_calls) == 1
+
+
+def test_community_group_no_first_checkin_still_revoked_insufficient_engagement(scheduler_mod):
+    scheduler, fixed_now, _ = scheduler_mod
+    scheduler.evaluate_referral_engagement = lambda **kw: {
+        "qualified": False,
+        "score": 1,
+        "signals": {"first_checkin": False, "miniapp_open": True, "claim_attempt": False},
+        "points": {},
+        "window_start": fixed_now - timedelta(hours=1),
+        "window_end": fixed_now,
+    }
+    grant_calls = []
+    scheduler.grant_xp = lambda *a, **kw: grant_calls.append(a) or True
+
+    doc = _group_pending(fixed_now)
+    user_docs = {
+        22: {
+            "user_id": 22,
+            "joined_main_at": fixed_now - timedelta(hours=99),
+            "created_at": fixed_now - timedelta(hours=99),
+        }
+    }
+    scheduler.db = _FakeSchedulerDB([doc], user_docs)
+
+    scheduler.settle_pending_referrals(batch_limit=1)
+
+    assert doc["status"] == "revoked"
+    assert doc["revoked_reason"] == "insufficient_engagement"
+    assert grant_calls == []
+
+
+def test_community_group_satisfying_engagement_rule_still_settles(scheduler_mod):
+    scheduler, fixed_now, qualified_calls = scheduler_mod
+    # scheduler_mod's default evaluate_referral_engagement mock already
+    # returns qualified=True, matching an invitee who checked in.
+    doc = _group_pending(fixed_now)
+    user_docs = {
+        22: {
+            "user_id": 22,
+            "joined_main_at": fixed_now - timedelta(hours=99),
+            "created_at": fixed_now - timedelta(hours=99),
+            "first_checkin_at": fixed_now - timedelta(hours=98),
+        }
+    }
+    scheduler.db = _FakeSchedulerDB([doc], user_docs)
+
+    scheduler.settle_pending_referrals(batch_limit=1)
+
+    assert doc["status"] == "awarded"
+    assert "qualification_rule" not in doc
+    assert len(qualified_calls) == 1
+
+
+def test_official_channel_settlement_does_not_touch_affiliate_join_caps():
+    # official_channel referral qualification must not call or depend on
+    # the affiliate leaderboard's 10 joins/day cap or 120-second cooldown —
+    # those live entirely in affiliate_leaderboard.py and must never be
+    # imported or referenced by the settlement path.
+    source = Path("scheduler.py").read_text(encoding="utf-8")
+    start = source.index("def settle_pending_referrals(")
+    settle_source = source[start:]
+    assert "join_counted" not in settle_source
+    assert "affiliate_referral_cooldown" not in settle_source
+    assert "affiliate_leaderboard" not in settle_source

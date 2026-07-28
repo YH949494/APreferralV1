@@ -2443,48 +2443,90 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
                     revoked += 1
                     continue
 
-            step = "check_engagement"
-            engagement = evaluate_referral_engagement(
-                invitee_user_id=invitee_user_id,
-                invitee_doc=invitee_doc,
-                window_start=join_seen_utc,
-                window_end=now_utc_ts,
-                db_ref=db,
-            )
-            if not engagement.get("qualified"):
-                db.pending_referrals.update_one(
-                    {"_id": pending_id},
-                    {
-                        "$set": {
-                            "status": "revoked",
-                            "revoked_reason": "insufficient_engagement",
-                            "qualification_failure_reason": "insufficient_engagement",
-                            "engagement_score": int(engagement.get("score", 0) or 0),
-                            "engagement_signals": engagement.get("signals") or {},
-                            "engagement_points": engagement.get("points") or {},
-                            "engagement_window_start_utc": engagement.get("window_start"),
-                            "engagement_window_end_utc": engagement.get("window_end"),
-                            "engagement_evaluated_at_utc": now_utc_ts,
-                            "revoked_at": now_utc_ts,
-                        },
-                        "$unset": {"processing_by": "", "processing_at_utc": "", "processing_at": ""},
-                    },
-                )
-                referral_invitee_lock.release(
-                    db, invitee_user_id=invitee_user_id, status="revoked", now_utc_ts=now_utc_ts
-                )
-                revoked += 1
+            step = "check_qualification"
+            # official_channel referrals qualify on retained channel
+            # subscription through the hold period alone (membership was
+            # already re-verified fresh, above, at settlement time) — a
+            # channel subscriber may legitimately never start the bot, open
+            # the Mini App, or check in, so first_checkin/engagement scoring
+            # must not gate settlement for this destination. community_group
+            # referrals keep the existing engagement/check-in requirement.
+            qualification_metadata = {}
+            if destination_type == OFFICIAL_CHANNEL:
+                qualification_metadata = {
+                    "qualification_rule": "official_channel_retained",
+                    "subscription_status": status,
+                    "subscription_checked_at": now_utc_ts,
+                    "hold_hours": _referral_hold_hours(),
+                }
                 logger.info(
-                    "[SCHED][REFERRAL][ENGAGEMENT] revoked inviter=%s invitee=%s reason=insufficient_engagement score=%s signals=%s points=%s window_start=%s window_end=%s",
-                    inviter_user_id,
+                    "[REFERRAL][QUALIFY_RULE] pending_id=%s invitee=%s inviter=%s destination_type=%s "
+                    "rule=official_channel_retained hold_elapsed=true subscription_status=%s decision=qualify reason=",
+                    pending_id,
                     invitee_user_id,
-                    engagement.get("score"),
-                    engagement.get("signals"),
-                    engagement.get("points"),
-                    engagement.get("window_start"),
-                    engagement.get("window_end"),
+                    inviter_user_id,
+                    destination_type,
+                    status,
                 )
-                continue
+            else:
+                step = "check_engagement"
+                engagement = evaluate_referral_engagement(
+                    invitee_user_id=invitee_user_id,
+                    invitee_doc=invitee_doc,
+                    window_start=join_seen_utc,
+                    window_end=now_utc_ts,
+                    db_ref=db,
+                )
+                if not engagement.get("qualified"):
+                    db.pending_referrals.update_one(
+                        {"_id": pending_id},
+                        {
+                            "$set": {
+                                "status": "revoked",
+                                "revoked_reason": "insufficient_engagement",
+                                "qualification_failure_reason": "insufficient_engagement",
+                                "engagement_score": int(engagement.get("score", 0) or 0),
+                                "engagement_signals": engagement.get("signals") or {},
+                                "engagement_points": engagement.get("points") or {},
+                                "engagement_window_start_utc": engagement.get("window_start"),
+                                "engagement_window_end_utc": engagement.get("window_end"),
+                                "engagement_evaluated_at_utc": now_utc_ts,
+                                "revoked_at": now_utc_ts,
+                            },
+                            "$unset": {"processing_by": "", "processing_at_utc": "", "processing_at": ""},
+                        },
+                    )
+                    referral_invitee_lock.release(
+                        db, invitee_user_id=invitee_user_id, status="revoked", now_utc_ts=now_utc_ts
+                    )
+                    revoked += 1
+                    logger.info(
+                        "[SCHED][REFERRAL][ENGAGEMENT] revoked inviter=%s invitee=%s reason=insufficient_engagement score=%s signals=%s points=%s window_start=%s window_end=%s",
+                        inviter_user_id,
+                        invitee_user_id,
+                        engagement.get("score"),
+                        engagement.get("signals"),
+                        engagement.get("points"),
+                        engagement.get("window_start"),
+                        engagement.get("window_end"),
+                    )
+                    logger.info(
+                        "[REFERRAL][QUALIFY_RULE] pending_id=%s invitee=%s inviter=%s destination_type=%s "
+                        "rule=engagement_score hold_elapsed=true subscription_status= decision=revoke reason=insufficient_engagement",
+                        pending_id,
+                        invitee_user_id,
+                        inviter_user_id,
+                        destination_type,
+                    )
+                    continue
+                logger.info(
+                    "[REFERRAL][QUALIFY_RULE] pending_id=%s invitee=%s inviter=%s destination_type=%s "
+                    "rule=engagement_score hold_elapsed=true subscription_status= decision=qualify reason=",
+                    pending_id,
+                    invitee_user_id,
+                    inviter_user_id,
+                    destination_type,
+                )
 
             step = "award"
             # Award key is invitee-scoped (not group_id/chat_id-scoped) so the
@@ -2524,6 +2566,7 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
                             "awarded_at_utc": now_utc_ts,
                             "awarded_at_kl": now_kl().isoformat(),
                             "award_key": recovered_award_key,
+                            **qualification_metadata,
                         },
                         "$unset": {"processing_by": "", "processing_at_utc": "", "processing_at": ""},
                     },
@@ -2550,6 +2593,7 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
                 "created_at_utc": now_utc_ts,
                 "awarded_at_utc": now_utc_ts,
                 "status": "awarded",
+                **qualification_metadata,
             }
             try:
                 db.referral_award_events.insert_one(award_doc)
@@ -2573,6 +2617,7 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
                             "awarded_at_utc": now_utc_ts,
                             "awarded_at_kl": now_kl().isoformat(),
                             "award_key": award_key,
+                            **qualification_metadata,
                         },
                         "$unset": {"processing_by": "", "processing_at_utc": "", "processing_at": ""},
                     },
@@ -2652,6 +2697,7 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
                         "bonus_added": actual_bonus_added,
                         "total_referrals_after": ref_total,
                         "award_key": award_key,
+                        **qualification_metadata,
                     },
                     "$unset": {"processing_by": "", "processing_at_utc": "", "processing_at": ""},
                 },
@@ -2661,10 +2707,12 @@ def settle_pending_referrals(batch_limit: int = 200) -> None:
             )
             awarded += 1
             logger.info(
-                "[SCHED][REFERRAL] awarded inviter=%s invitee=%s qualify_hours=%s checks=official_channel+engagement_score",
+                "[SCHED][REFERRAL] awarded inviter=%s invitee=%s qualify_hours=%s destination_type=%s rule=%s",
                 inviter_user_id,
                 invitee_user_id,
                 _referral_hold_hours(),
+                destination_type,
+                qualification_metadata.get("qualification_rule", "engagement_score"),
             )
             logger.info(
                 "[SCHED][REFERRAL] award_ok inviter=%s invitee=%s ref_total=%s xp_added=%s bonus_added=%s hold_hours=%s users_counter_update_attempted=%s",
