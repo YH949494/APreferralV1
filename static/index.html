@@ -4836,6 +4836,9 @@
       if (res.status === 403 && data?.code === "not_subscribed") {
         return { subscribed: false, message: data?.message };
       }
+      if (data?.code === "rejoin_buffer_active" || data?.reason === "rejoin_buffer_active") {
+        return { subscribed: true, claimBlocked: data };
+      }
       if (!res.ok) {
         throw new Error(data?.error || data?.code || `HTTP ${res.status}`);
       }
@@ -5255,6 +5258,14 @@
       return Math.ceil(num);
     }
 
+    function formatClaimCountdown(totalSeconds) {
+      const seconds = Math.max(0, Math.ceil(Number(totalSeconds) || 0));
+      const hh = String(Math.floor(seconds / 3600)).padStart(2, "0");
+      const mm = String(Math.floor((seconds % 3600) / 60)).padStart(2, "0");
+      const ss = String(seconds % 60).padStart(2, "0");
+      return `${hh}:${mm}:${ss}`;
+    }
+
     function claimErrorToUi(payload = {}, status) {
       const code = payload?.code || "";
       const reason = payload?.reason || payload?.checks_key || "";
@@ -5262,6 +5273,16 @@
       const retryAfterSec = normalizeRetryAfterSec(payload?.retry_after_sec);
 
       if (displayState === "claimable") return null;
+      if (code === "rejoin_buffer_active" || reason === "rejoin_buffer_active") {
+        return {
+          title: "Please stay subscribed",
+          message: "You recently rejoined the official channel. You can claim after the waiting period.",
+          retryAfterSec,
+          bufferUntil: payload?.buffer_until || null,
+          isRejoinBuffer: true,
+          severity: "warn"
+        };
+      }
       if (displayState === "fully_redeemed" || code === "sold_out") {
         return {
           title: payload?.display_title || "🎟️ All rewards have been claimed.",
@@ -5404,17 +5425,36 @@
         if (uiModel.retryAfterSec) {
           let remaining = uiModel.retryAfterSec;
           retryBtn.setAttribute("disabled", "disabled");
-          countdown.textContent = t("retry_available_in", { n: remaining });
-          claimErrorCountdownTimer = setInterval(() => {
+          const updateCountdown = () => {
+            countdown.textContent = uiModel.isRejoinBuffer
+              ? `Try again in ${formatClaimCountdown(remaining)}`
+              : t("retry_available_in", { n: remaining });
+          };
+          updateCountdown();
+          claimErrorCountdownTimer = setInterval(async () => {
             remaining -= 1;
             if (remaining <= 0) {
               clearInterval(claimErrorCountdownTimer);
               claimErrorCountdownTimer = null;
+              if (uiModel.isRejoinBuffer && typeof options.preflightHandler === "function") {
+                countdown.textContent = "Checking eligibility…";
+                try {
+                  const nextModel = await options.preflightHandler();
+                  if (nextModel) {
+                    renderClaimError(nextModel, options);
+                    return;
+                  }
+                } catch (err) {
+                  console.warn("Rejoin buffer preflight failed", err);
+                  countdown.textContent = t("please_try_again");
+                  return;
+                }
+              }
               retryBtn.removeAttribute("disabled");
               countdown.textContent = t("you_can_retry");
               return;
             }
-            countdown.textContent = t("retry_available_in", { n: remaining });
+            updateCountdown();
           }, 1000);
         }
       }
@@ -5752,7 +5792,18 @@
           const uiModel = claimErrorToUi(payload, res.status);
           delete claimBtn.dataset.mode;
           delete claimBtn.dataset.copyCode;
-          renderClaimError(uiModel);
+          if (uiModel?.isRejoinBuffer) {
+            console.info(
+              `[CLAIM_UI][REJOIN_BUFFER] uid=${userId} drop_id=${dropId} retry_after_sec=${uiModel.retryAfterSec || 0} buffer_until=${uiModel.bufferUntil || ""}`
+            );
+          }
+          renderClaimError(uiModel, {
+            retryHandler: () => claimBtn.click(),
+            preflightHandler: async () => {
+              const state = await checkChannelSubscription(dropId);
+              return state?.claimBlocked ? claimErrorToUi(state.claimBlocked, 403) : null;
+            }
+          });
           return;
         }
 

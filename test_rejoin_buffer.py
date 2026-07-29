@@ -144,6 +144,7 @@ class RejoinBufferHelperTests(RejoinBufferSettingsMixin, unittest.TestCase):
         self.assertEqual(result["reason"], "rejoin_buffer_active")
         self.assertGreater(result["retry_after_sec"], 0)
         self.assertLessEqual(result["retry_after_sec"], 5 * 3600)
+        self.assertEqual(result["buffer_until"], (now + timedelta(hours=5)).isoformat())
         self.assertIn("rejoined @AdvantPlayOfficial", result["message"])
 
     def test_mode_test_users_only_blocks_listed_user(self):

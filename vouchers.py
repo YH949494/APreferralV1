@@ -3383,6 +3383,7 @@ def check_rejoin_buffer_for_pooled_claim(uid: int | None, now: datetime | None =
         "code": "rejoin_buffer_active",
         "reason": "rejoin_buffer_active",
         "retry_after_sec": retry_after_sec,
+        "buffer_until": buffer_until.isoformat(),
         "message": (
             f"You recently rejoined @AdvantPlayOfficial. Please stay subscribed for "
             f"{hours_left} more hours before claiming public voucher drops."
@@ -6078,16 +6079,6 @@ def api_claim():
                 "message": "Please subscribe to @advantplayofficial to claim this voucher."
             }), 403
 
-    if check_only:
-        logger.info(
-            "[CLAIM_BLOCK] reason=%s drop_id=%s uid=%s username=%s",
-            "check_only_block",
-            drop_id,
-            user_id_str,
-            username,
-        )
-        return jsonify({"status": "ok", "check_only": True, "subscribed": True}), 200
-
     if is_public_pool(voucher):
         rejoin_check = check_rejoin_buffer_for_pooled_claim(uid, now_ref)
         if not rejoin_check.get("ok"):
@@ -6098,16 +6089,36 @@ def api_claim():
                 user_id_str,
                 username,
             )
+            retry_after_sec = int(rejoin_check.get("retry_after_sec") or 0)
+            buffer_until = rejoin_check.get("buffer_until")
+            logger.info(
+                "[CLAIM_UI][REJOIN_BUFFER] uid=%s drop_id=%s retry_after_sec=%s buffer_until=%s",
+                uid,
+                drop_id,
+                retry_after_sec,
+                buffer_until,
+            )
             payload = {
-                "status": "error",
-                "code": rejoin_check.get("code"),
+                "status": "blocked",
+                "code": "rejoin_buffer_active",
                 "ok": False,
                 "eligible": False,
-                "reason": rejoin_check.get("reason"),
-                "retry_after_sec": rejoin_check.get("retry_after_sec"),
+                "reason": "rejoin_buffer_active",
+                "retry_after_sec": retry_after_sec,
+                "buffer_until": buffer_until,
                 "message": rejoin_check.get("message"),
             }
             return jsonify(payload), 403
+
+    if check_only:
+        logger.info(
+            "[CLAIM_BLOCK] reason=%s drop_id=%s uid=%s username=%s",
+            "check_only_block",
+            drop_id,
+            user_id_str,
+            username,
+        )
+        return jsonify({"status": "ok", "check_only": True, "subscribed": True}), 200
 
     if is_pool_drop:
         claimability = _pooled_claimability_state(
