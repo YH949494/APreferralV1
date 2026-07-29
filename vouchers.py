@@ -3383,6 +3383,7 @@ def check_rejoin_buffer_for_pooled_claim(uid: int | None, now: datetime | None =
         "code": "rejoin_buffer_active",
         "reason": "rejoin_buffer_active",
         "retry_after_sec": retry_after_sec,
+        "buffer_until": buffer_until.isoformat(),
         "message": (
             f"You recently rejoined @AdvantPlayOfficial. Please stay subscribed for "
             f"{hours_left} more hours before claiming public voucher drops."
@@ -6099,12 +6100,13 @@ def api_claim():
                 username,
             )
             payload = {
-                "status": "error",
+                "status": "blocked",
                 "code": rejoin_check.get("code"),
                 "ok": False,
                 "eligible": False,
                 "reason": rejoin_check.get("reason"),
                 "retry_after_sec": rejoin_check.get("retry_after_sec"),
+                "buffer_until": rejoin_check.get("buffer_until"),
                 "message": rejoin_check.get("message"),
             }
             return jsonify(payload), 403

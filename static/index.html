@@ -5255,6 +5255,14 @@
       return Math.ceil(num);
     }
 
+    function formatHms(totalSeconds) {
+      const s = Math.max(0, Math.floor(totalSeconds));
+      const hh = String(Math.floor(s / 3600)).padStart(2, "0");
+      const mm = String(Math.floor((s % 3600) / 60)).padStart(2, "0");
+      const ss = String(s % 60).padStart(2, "0");
+      return `${hh}:${mm}:${ss}`;
+    }
+
     function claimErrorToUi(payload = {}, status) {
       const code = payload?.code || "";
       const reason = payload?.reason || payload?.checks_key || "";
@@ -5311,6 +5319,17 @@
           ctaText: t("join_official_channel_btn"),
           ctaAction: "join_channel",
           severity: "warn"
+        };
+      }
+
+      if (code === "rejoin_buffer_active" || reason === "rejoin_buffer_active") {
+        return {
+          title: "Please stay subscribed",
+          message: "You recently rejoined the official channel. You can claim after the waiting period.",
+          retryAfterSec,
+          bufferUntil: payload?.buffer_until || null,
+          severity: "warn",
+          isRejoinBuffer: true
         };
       }
 
@@ -5401,7 +5420,22 @@
         countdown.className = "claim-error-countdown";
         actions.appendChild(countdown);
 
-        if (uiModel.retryAfterSec) {
+        if (uiModel.retryAfterSec && uiModel.isRejoinBuffer) {
+          let remaining = uiModel.retryAfterSec;
+          retryBtn.setAttribute("disabled", "disabled");
+          countdown.textContent = `Try again in ${formatHms(remaining)}`;
+          claimErrorCountdownTimer = setInterval(async () => {
+            remaining -= 1;
+            if (remaining <= 0) {
+              clearInterval(claimErrorCountdownTimer);
+              claimErrorCountdownTimer = null;
+              countdown.textContent = "Checking…";
+              await recheckAfterRejoinBuffer(options.dropId, retryBtn, countdown);
+              return;
+            }
+            countdown.textContent = `Try again in ${formatHms(remaining)}`;
+          }, 1000);
+        } else if (uiModel.retryAfterSec) {
           let remaining = uiModel.retryAfterSec;
           retryBtn.setAttribute("disabled", "disabled");
           countdown.textContent = t("retry_available_in", { n: remaining });
@@ -5422,7 +5456,44 @@
       card.appendChild(actions);
       container.appendChild(card);
     }
-    
+
+    async function recheckAfterRejoinBuffer(dropId, retryBtn, countdown) {
+      if (!dropId) {
+        if (retryBtn) retryBtn.removeAttribute("disabled");
+        if (countdown) countdown.textContent = t("you_can_retry");
+        return;
+      }
+      try {
+        const res = await v2Fetch(`${API_V2}/vouchers/claim`, {
+          method: "POST",
+          body: JSON.stringify({
+            dropId,
+            check_only: true,
+            init_data: getLatestInitData() || (tg?.initData || "")
+          })
+        });
+        let data = null;
+        try { data = await res.json(); } catch { /* ignore */ }
+
+        if (res.ok && (data?.status === "ok" || data?.check_only)) {
+          clearClaimError();
+          return;
+        }
+
+        if (data?.code === "rejoin_buffer_active" || data?.reason === "rejoin_buffer_active") {
+          renderClaimError(claimErrorToUi(data, res.status), { dropId });
+          return;
+        }
+
+        if (retryBtn) retryBtn.removeAttribute("disabled");
+        if (countdown) countdown.textContent = t("you_can_retry");
+      } catch (e) {
+        console.warn("Rejoin buffer recheck failed", e);
+        if (retryBtn) retryBtn.removeAttribute("disabled");
+        if (countdown) countdown.textContent = t("you_can_retry");
+      }
+    }
+
     async function loadVouchers() {
       const section = document.getElementById("voucher-section");
       const messageEl = document.getElementById("campaign-voucher-message");
@@ -5752,7 +5823,12 @@
           const uiModel = claimErrorToUi(payload, res.status);
           delete claimBtn.dataset.mode;
           delete claimBtn.dataset.copyCode;
-          renderClaimError(uiModel);
+          if (uiModel?.isRejoinBuffer) {
+            console.log(
+              `[CLAIM_UI][REJOIN_BUFFER] uid=${userId} drop_id=${dropId} retry_after_sec=${payload?.retry_after_sec} buffer_until=${payload?.buffer_until}`
+            );
+          }
+          renderClaimError(uiModel, { dropId });
           return;
         }
 

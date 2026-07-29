@@ -2391,3 +2391,85 @@ class ClaimDisplayStateTests(unittest.TestCase):
             m.reconcile_pooled_remaining = orig_reconcile
             m._persist_reconciled_pooled_remaining = orig_persist
             m._effective_public_visible_remaining = orig_effective_visible
+
+
+class RejoinBufferClaimEndpointTests(unittest.TestCase):
+    """api_claim() must surface rejoin-buffer blocks as a stable, machine-readable
+    payload (status="blocked", code/reason="rejoin_buffer_active", retry_after_sec,
+    buffer_until) instead of a generic error, without altering the HTTP status or
+    the underlying rejoin-buffer business rule."""
+
+    def test_public_pool_claim_blocked_by_rejoin_buffer_returns_structured_payload(self):
+        import vouchers as m
+
+        app = Flask(__name__)
+        now = datetime.now(timezone.utc)
+        drop_id = "drop-public-rejoin"
+        drop = {
+            "_id": drop_id,
+            "name": "Public Drop",
+            "type": "pooled",
+            "audience": "public",
+            "eligibility": {"mode": "public"},
+            "status": "active",
+            "startsAt": now - timedelta(minutes=5),
+            "endsAt": now + timedelta(minutes=5),
+        }
+        buffer_until = now + timedelta(hours=3)
+
+        orig_extract = m.extract_raw_init_data_from_query
+        orig_verify = m.verify_telegram_init_data
+        orig_db = m.db
+        orig_users = m.users_collection
+        orig_load_user_context = m.load_user_context
+        orig_is_drop_allowed = m.is_drop_allowed
+        orig_is_user_eligible = m.is_user_eligible_for_drop
+        orig_subscribed = m.check_channel_subscribed
+        orig_dedup = m._acquire_request_dedup_lock
+        orig_rejoin_check = m.check_rejoin_buffer_for_pooled_claim
+
+        try:
+            m.extract_raw_init_data_from_query = lambda req: "ok"
+            m.verify_telegram_init_data = lambda init_data: (True, {"user": '{"id": 8413241236, "username": "u8413241236"}'}, "ok")
+            m.db = FakeDb([drop], [])
+            m.users_collection = FakeSimpleCollection([{"user_id": 8413241236, "usernameLower": "u8413241236", "region": "th"}])
+            m.load_user_context = lambda **kwargs: {}
+            m.is_drop_allowed = lambda *args, **kwargs: True
+            m.is_user_eligible_for_drop = lambda *args, **kwargs: True
+            m.check_channel_subscribed = lambda uid: True
+            m._acquire_request_dedup_lock = lambda **kwargs: True
+            m.check_rejoin_buffer_for_pooled_claim = lambda uid, now_ref: {
+                "ok": False,
+                "code": "rejoin_buffer_active",
+                "reason": "rejoin_buffer_active",
+                "retry_after_sec": 10800,
+                "buffer_until": buffer_until.isoformat(),
+                "message": "You recently rejoined @AdvantPlayOfficial. Please stay subscribed for 3 more hours before claiming public voucher drops.",
+            }
+
+            with app.test_request_context(
+                "/vouchers/claim?init_data=ok",
+                method="POST",
+                json={"dropId": drop_id},
+            ):
+                resp, status = m.api_claim()
+                payload = resp.get_json()
+
+            # HTTP status is unchanged by this patch.
+            self.assertEqual(status, 403)
+            self.assertEqual(payload.get("status"), "blocked")
+            self.assertEqual(payload.get("code"), "rejoin_buffer_active")
+            self.assertEqual(payload.get("reason"), "rejoin_buffer_active")
+            self.assertEqual(payload.get("retry_after_sec"), 10800)
+            self.assertEqual(payload.get("buffer_until"), buffer_until.isoformat())
+        finally:
+            m.extract_raw_init_data_from_query = orig_extract
+            m.verify_telegram_init_data = orig_verify
+            m.db = orig_db
+            m.users_collection = orig_users
+            m.load_user_context = orig_load_user_context
+            m.is_drop_allowed = orig_is_drop_allowed
+            m.is_user_eligible_for_drop = orig_is_user_eligible
+            m.check_channel_subscribed = orig_subscribed
+            m._acquire_request_dedup_lock = orig_dedup
+            m.check_rejoin_buffer_for_pooled_claim = orig_rejoin_check

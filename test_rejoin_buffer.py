@@ -135,8 +135,9 @@ class RejoinBufferHelperTests(RejoinBufferSettingsMixin, unittest.TestCase):
     def test_mode_enabled_active_buffer_blocks_claim(self):
         now = datetime.now(timezone.utc)
         self._set_settings(mode="enabled")
+        buffer_until = now + timedelta(hours=5)
         vouchers_module.users_collection = FakeUsersCollection([
-            {"user_id": 3, "rejoin_buffer_until": now + timedelta(hours=5)},
+            {"user_id": 3, "rejoin_buffer_until": buffer_until},
         ])
         result = check_rejoin_buffer_for_pooled_claim(3, now)
         self.assertFalse(result["ok"])
@@ -145,6 +146,7 @@ class RejoinBufferHelperTests(RejoinBufferSettingsMixin, unittest.TestCase):
         self.assertGreater(result["retry_after_sec"], 0)
         self.assertLessEqual(result["retry_after_sec"], 5 * 3600)
         self.assertIn("rejoined @AdvantPlayOfficial", result["message"])
+        self.assertEqual(result["buffer_until"], buffer_until.isoformat())
 
     def test_mode_test_users_only_blocks_listed_user(self):
         now = datetime.now(timezone.utc)
