@@ -74,7 +74,26 @@ function buildSandbox({ fetchImpl } = {}) {
     you_can_retry: "You can retry now",
   };
 
+  // Countdown must be derived from wall-clock time (Date.now() vs. the
+  // server-supplied deadline), not from counting interval callbacks, so it
+  // stays correct even if the Mini App is backgrounded/throttled. Give tests
+  // a controllable clock instead of waiting on real timers.
+  const clock = { now: Date.now() };
+  class ControlledDate extends Date {
+    constructor(...args) {
+      if (args.length === 0) {
+        super(clock.now);
+      } else {
+        super(...args);
+      }
+    }
+    static now() {
+      return clock.now;
+    }
+  }
+
   const sandbox = {
+    Date: ControlledDate,
     document: {
       getElementById(id) {
         if (id === "claim-error") return container;
@@ -114,7 +133,8 @@ function buildSandbox({ fetchImpl } = {}) {
 
   sandbox.globalThis = sandbox;
   vm.createContext(sandbox);
-  return { sandbox, container, intervals };
+
+  return { sandbox, container, intervals, clock };
 }
 
 function run(sandbox, extraSource) {
@@ -216,13 +236,37 @@ test("renderClaimError shows an HH:MM:SS countdown and disables Retry while retr
   assert.equal(activeIntervalCount(intervals), 1, "exactly one countdown timer should be running");
 });
 
+test("renderClaimError derives the countdown deadline from buffer_until, not just retry_after_sec", () => {
+  const { sandbox, intervals, clock } = buildSandbox();
+  run(sandbox);
+
+  // retry_after_sec is stale/rounded, but buffer_until is the authoritative deadline.
+  const bufferUntil = new Date(clock.now + 10000).toISOString();
+  const uiModel = sandbox.claimErrorToUi(
+    { code: "rejoin_buffer_active", retry_after_sec: 3600, buffer_until: bufferUntil },
+    403
+  );
+  sandbox.renderClaimError(uiModel, { dropId: "drop1" });
+
+  const card = sandbox.document.getElementById("claim-error").children[0];
+  const actions = card.children.find((c) => c.children && c.children.length >= 2);
+  const countdown = actions.children.find((c) => c.textContent && c.textContent.startsWith("Try again"));
+
+  assert.equal(countdown.textContent, "Try again in 00:00:10");
+
+  const [, entry] = [...intervals.entries()][0];
+  clock.now += 10000;
+  entry.fn();
+  assert.equal(activeIntervalCount(intervals), 0, "countdown must end once the real deadline passes");
+});
+
 test("countdown expiry re-enables Retry after a passing eligibility recheck", async () => {
   const fetchImpl = async () => ({
     ok: true,
     status: 200,
     json: async () => ({ status: "ok", check_only: true, subscribed: true }),
   });
-  const { sandbox, intervals } = buildSandbox({ fetchImpl });
+  const { sandbox, intervals, clock } = buildSandbox({ fetchImpl });
   run(sandbox);
 
   const uiModel = sandbox.claimErrorToUi({ code: "rejoin_buffer_active", retry_after_sec: 2 }, 403);
@@ -235,11 +279,34 @@ test("countdown expiry re-enables Retry after a passing eligibility recheck", as
   assert.ok(retryBtn.disabled);
 
   const [id, entry] = [...intervals.entries()][0];
+  clock.now += 1000;
   await entry.fn(); // tick 1 -> remaining=1
+  clock.now += 1000;
   await entry.fn(); // tick 2 -> remaining=0 -> triggers recheck
 
   assert.equal(activeIntervalCount(intervals), 0, "timer must be cleared once countdown ends");
   assert.equal(sandbox.document.getElementById("claim-error").style.display, "none", "error card cleared once eligible");
+});
+
+test("countdown survives a stalled/throttled timer by deriving remaining from the deadline, not tick count", async () => {
+  const fetchImpl = async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({ status: "ok", check_only: true, subscribed: true }),
+  });
+  const { sandbox, intervals, clock } = buildSandbox({ fetchImpl });
+  run(sandbox);
+
+  const uiModel = sandbox.claimErrorToUi({ code: "rejoin_buffer_active", retry_after_sec: 5 }, 403);
+  sandbox.renderClaimError(uiModel, { dropId: "drop1" });
+
+  // Simulate the Mini App being backgrounded: the interval callback only
+  // fires once, well after the deadline has actually passed.
+  const [, entry] = [...intervals.entries()][0];
+  clock.now += 30000;
+  await entry.fn();
+
+  assert.equal(activeIntervalCount(intervals), 0, "a single late tick past the deadline must still resolve the countdown");
 });
 
 test("countdown expiry re-renders the block when the rejoin buffer is still active", async () => {
@@ -254,13 +321,14 @@ test("countdown expiry re-renders the block when the rejoin buffer is still acti
       buffer_until: "2026-07-29T19:00:00Z",
     }),
   });
-  const { sandbox, intervals } = buildSandbox({ fetchImpl });
+  const { sandbox, intervals, clock } = buildSandbox({ fetchImpl });
   run(sandbox);
 
   const uiModel = sandbox.claimErrorToUi({ code: "rejoin_buffer_active", retry_after_sec: 1 }, 403);
   sandbox.renderClaimError(uiModel, { dropId: "drop1" });
 
   const [, firstEntry] = [...intervals.entries()][0];
+  clock.now += 1000;
   await firstEntry.fn(); // remaining=0 -> recheck -> still blocked -> re-render
 
   // Exactly one live interval after the re-render (the old one cleared, one new one started).

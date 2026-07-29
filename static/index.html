@@ -5421,11 +5421,13 @@
         actions.appendChild(countdown);
 
         if (uiModel.retryAfterSec && uiModel.isRejoinBuffer) {
-          let remaining = uiModel.retryAfterSec;
+          const parsedDeadline = uiModel.bufferUntil ? new Date(uiModel.bufferUntil).getTime() : NaN;
+          const deadlineMs = Number.isFinite(parsedDeadline)
+            ? parsedDeadline
+            : Date.now() + uiModel.retryAfterSec * 1000;
           retryBtn.setAttribute("disabled", "disabled");
-          countdown.textContent = `Try again in ${formatHms(remaining)}`;
-          claimErrorCountdownTimer = setInterval(async () => {
-            remaining -= 1;
+          const tick = async () => {
+            const remaining = Math.max(0, Math.round((deadlineMs - Date.now()) / 1000));
             if (remaining <= 0) {
               clearInterval(claimErrorCountdownTimer);
               claimErrorCountdownTimer = null;
@@ -5434,7 +5436,9 @@
               return;
             }
             countdown.textContent = `Try again in ${formatHms(remaining)}`;
-          }, 1000);
+          };
+          tick();
+          claimErrorCountdownTimer = setInterval(tick, 1000);
         } else if (uiModel.retryAfterSec) {
           let remaining = uiModel.retryAfterSec;
           retryBtn.setAttribute("disabled", "disabled");

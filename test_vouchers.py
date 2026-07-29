@@ -2473,3 +2473,142 @@ class RejoinBufferClaimEndpointTests(unittest.TestCase):
             m.check_channel_subscribed = orig_subscribed
             m._acquire_request_dedup_lock = orig_dedup
             m.check_rejoin_buffer_for_pooled_claim = orig_rejoin_check
+
+    def test_check_only_preflight_also_surfaces_rejoin_buffer_block(self):
+        # check_only used to short-circuit with a blanket "ok" response before
+        # the rejoin-buffer gate ran, so the Mini App's post-countdown
+        # eligibility recheck could never detect a still-active (or renewed)
+        # buffer. The gate must run before the check_only early return.
+        import vouchers as m
+
+        app = Flask(__name__)
+        now = datetime.now(timezone.utc)
+        drop_id = "drop-public-rejoin-checkonly"
+        drop = {
+            "_id": drop_id,
+            "name": "Public Drop",
+            "type": "pooled",
+            "audience": "public",
+            "eligibility": {"mode": "public"},
+            "status": "active",
+            "startsAt": now - timedelta(minutes=5),
+            "endsAt": now + timedelta(minutes=5),
+        }
+        buffer_until = now + timedelta(hours=1)
+
+        orig_extract = m.extract_raw_init_data_from_query
+        orig_verify = m.verify_telegram_init_data
+        orig_db = m.db
+        orig_users = m.users_collection
+        orig_load_user_context = m.load_user_context
+        orig_is_drop_allowed = m.is_drop_allowed
+        orig_is_user_eligible = m.is_user_eligible_for_drop
+        orig_subscribed = m.check_channel_subscribed
+        orig_dedup = m._acquire_request_dedup_lock
+        orig_rejoin_check = m.check_rejoin_buffer_for_pooled_claim
+
+        try:
+            m.extract_raw_init_data_from_query = lambda req: "ok"
+            m.verify_telegram_init_data = lambda init_data: (True, {"user": '{"id": 8413241236, "username": "u8413241236"}'}, "ok")
+            m.db = FakeDb([drop], [])
+            m.users_collection = FakeSimpleCollection([{"user_id": 8413241236, "usernameLower": "u8413241236", "region": "th"}])
+            m.load_user_context = lambda **kwargs: {}
+            m.is_drop_allowed = lambda *args, **kwargs: True
+            m.is_user_eligible_for_drop = lambda *args, **kwargs: True
+            m.check_channel_subscribed = lambda uid: True
+            m._acquire_request_dedup_lock = lambda **kwargs: True
+            m.check_rejoin_buffer_for_pooled_claim = lambda uid, now_ref: {
+                "ok": False,
+                "code": "rejoin_buffer_active",
+                "reason": "rejoin_buffer_active",
+                "retry_after_sec": 3600,
+                "buffer_until": buffer_until.isoformat(),
+                "message": "still buffered",
+            }
+
+            with app.test_request_context(
+                "/vouchers/claim?init_data=ok",
+                method="POST",
+                json={"dropId": drop_id, "check_only": True},
+            ):
+                resp, status = m.api_claim()
+                payload = resp.get_json()
+
+            self.assertEqual(status, 403)
+            self.assertEqual(payload.get("status"), "blocked")
+            self.assertEqual(payload.get("code"), "rejoin_buffer_active")
+            self.assertEqual(payload.get("buffer_until"), buffer_until.isoformat())
+        finally:
+            m.extract_raw_init_data_from_query = orig_extract
+            m.verify_telegram_init_data = orig_verify
+            m.db = orig_db
+            m.users_collection = orig_users
+            m.load_user_context = orig_load_user_context
+            m.is_drop_allowed = orig_is_drop_allowed
+            m.is_user_eligible_for_drop = orig_is_user_eligible
+            m.check_channel_subscribed = orig_subscribed
+            m._acquire_request_dedup_lock = orig_dedup
+            m.check_rejoin_buffer_for_pooled_claim = orig_rejoin_check
+
+    def test_check_only_preflight_still_ok_when_buffer_not_active(self):
+        import vouchers as m
+
+        app = Flask(__name__)
+        now = datetime.now(timezone.utc)
+        drop_id = "drop-public-checkonly-ok"
+        drop = {
+            "_id": drop_id,
+            "name": "Public Drop",
+            "type": "pooled",
+            "audience": "public",
+            "eligibility": {"mode": "public"},
+            "status": "active",
+            "startsAt": now - timedelta(minutes=5),
+            "endsAt": now + timedelta(minutes=5),
+        }
+
+        orig_extract = m.extract_raw_init_data_from_query
+        orig_verify = m.verify_telegram_init_data
+        orig_db = m.db
+        orig_users = m.users_collection
+        orig_load_user_context = m.load_user_context
+        orig_is_drop_allowed = m.is_drop_allowed
+        orig_is_user_eligible = m.is_user_eligible_for_drop
+        orig_subscribed = m.check_channel_subscribed
+        orig_dedup = m._acquire_request_dedup_lock
+        orig_rejoin_check = m.check_rejoin_buffer_for_pooled_claim
+
+        try:
+            m.extract_raw_init_data_from_query = lambda req: "ok"
+            m.verify_telegram_init_data = lambda init_data: (True, {"user": '{"id": 42, "username": "u42"}'}, "ok")
+            m.db = FakeDb([drop], [])
+            m.users_collection = FakeSimpleCollection([{"user_id": 42, "usernameLower": "u42", "region": "th"}])
+            m.load_user_context = lambda **kwargs: {}
+            m.is_drop_allowed = lambda *args, **kwargs: True
+            m.is_user_eligible_for_drop = lambda *args, **kwargs: True
+            m.check_channel_subscribed = lambda uid: True
+            m._acquire_request_dedup_lock = lambda **kwargs: True
+            m.check_rejoin_buffer_for_pooled_claim = lambda uid, now_ref: {"ok": True}
+
+            with app.test_request_context(
+                "/vouchers/claim?init_data=ok",
+                method="POST",
+                json={"dropId": drop_id, "check_only": True},
+            ):
+                resp, status = m.api_claim()
+                payload = resp.get_json()
+
+            self.assertEqual(status, 200)
+            self.assertEqual(payload.get("status"), "ok")
+            self.assertTrue(payload.get("check_only"))
+        finally:
+            m.extract_raw_init_data_from_query = orig_extract
+            m.verify_telegram_init_data = orig_verify
+            m.db = orig_db
+            m.users_collection = orig_users
+            m.load_user_context = orig_load_user_context
+            m.is_drop_allowed = orig_is_drop_allowed
+            m.is_user_eligible_for_drop = orig_is_user_eligible
+            m.check_channel_subscribed = orig_subscribed
+            m._acquire_request_dedup_lock = orig_dedup
+            m.check_rejoin_buffer_for_pooled_claim = orig_rejoin_check

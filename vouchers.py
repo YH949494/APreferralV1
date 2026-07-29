@@ -6079,16 +6079,6 @@ def api_claim():
                 "message": "Please subscribe to @advantplayofficial to claim this voucher."
             }), 403
 
-    if check_only:
-        logger.info(
-            "[CLAIM_BLOCK] reason=%s drop_id=%s uid=%s username=%s",
-            "check_only_block",
-            drop_id,
-            user_id_str,
-            username,
-        )
-        return jsonify({"status": "ok", "check_only": True, "subscribed": True}), 200
-
     if is_public_pool(voucher):
         rejoin_check = check_rejoin_buffer_for_pooled_claim(uid, now_ref)
         if not rejoin_check.get("ok"):
@@ -6110,6 +6100,16 @@ def api_claim():
                 "message": rejoin_check.get("message"),
             }
             return jsonify(payload), 403
+
+    if check_only:
+        logger.info(
+            "[CLAIM_BLOCK] reason=%s drop_id=%s uid=%s username=%s",
+            "check_only_block",
+            drop_id,
+            user_id_str,
+            username,
+        )
+        return jsonify({"status": "ok", "check_only": True, "subscribed": True}), 200
 
     if is_pool_drop:
         claimability = _pooled_claimability_state(
