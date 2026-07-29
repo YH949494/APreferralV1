@@ -3723,9 +3723,13 @@
 
     async function checkIn() {
       try {
-        const res = await fetch(`${API_BASE}/api/checkin`, {
+        // /api/checkin derives the acting user from signed initData, so the
+        // request must carry it. user_id stays in the body only as a legacy
+        // field; the backend ignores it for identity.
+        const checkinInitData = await waitForInitData();
+        const res = await fetch(withInitDataInQuery(`${API_BASE}/api/checkin`, checkinInitData), {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: v2Headers({ "Content-Type": "application/json" }, checkinInitData),
           body: JSON.stringify({ user_id: userId, username })
         });
 
@@ -6704,9 +6708,10 @@ ${referral}`;
                 const guessData = await guessRes.json();
                 const guessedRegion = guessData?.region || "";
                 if (guessedRegion) {
-                  const lockRes = await fetch(`${API_BASE}/api/set-region/${userId}`, {
+                  const lockInitData = await waitForInitData();
+                  const lockRes = await fetch(withInitDataInQuery(`${API_BASE}/api/set-region/${userId}`, lockInitData), {
                     method: "POST",
-                    headers: { "Content-Type": "application/json" },
+                    headers: v2Headers({ "Content-Type": "application/json" }, lockInitData),
                     body: JSON.stringify({ user_id: userId, region: guessedRegion })
                   });
                   const lockData = await lockRes.json();
@@ -6736,9 +6741,10 @@ ${referral}`;
       if (!region) { tgAlert("Please select a region."); return; }
 
       try {
-        const res = await fetch(`${API_BASE}/api/set-region/${userId}`, {
+        const regionInitData = await waitForInitData();
+        const res = await fetch(withInitDataInQuery(`${API_BASE}/api/set-region/${userId}`, regionInitData), {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: v2Headers({ "Content-Type": "application/json" }, regionInitData),
           body: JSON.stringify({ user_id: userId, region })
         });
         const data = await res.json();

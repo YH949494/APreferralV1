@@ -73,15 +73,46 @@ def grant_xp(
         upsert=True,
     )
 
-    if not getattr(ledger_res, "upserted_id", None):
-        logger.info(
-            "[XP] Duplicate ledger insert ignored uid=%s key=%s type=%s",
+    ledger_inserted = bool(getattr(ledger_res, "upserted_id", None))
+
+    if not ledger_inserted:
+        # The ledger row already existed. Two very different situations look
+        # identical here, and they must not be treated the same:
+        #
+        #   1. A concurrent grant_xp() for the same (uid, unique_key) won the
+        #      ledger upsert microseconds ago. That caller owns the grant, so
+        #      this one must return False without granting.
+        #   2. An *earlier* attempt inserted the ledger row and then died
+        #      before reaching the xp_events insert below (worker killed,
+        #      gunicorn timeout, transient Mongo error). xp_events is the
+        #      canonical source for users.total_xp/weekly_xp/monthly_xp
+        #      (see xp_snapshot.settle_xp_snapshots_incremental), so that XP
+        #      was never actually credited — and returning False here made
+        #      the loss permanent: the xp_events gate above keeps passing,
+        #      this gate keeps failing, and no retry can ever heal it.
+        #
+        # Re-read xp_events to tell them apart. If the event now exists the
+        # grant genuinely landed (case 1, or a plain duplicate) and we stop.
+        # If it still doesn't, fall through and let the xp_events upsert
+        # below be the authority — it is guarded by the unique index on
+        # (user_id, unique_key), so a racing pair still produces exactly one
+        # insert and one `upserted_id`.
+        if db.xp_events.find_one({"user_id": uid, "unique_key": unique_key}):
+            logger.info(
+                "[XP] Duplicate ledger insert ignored uid=%s key=%s type=%s",
+                uid,
+                unique_key,
+                event_type,
+            )
+            return False
+        logger.warning(
+            "[XP] Orphaned ledger row without xp_event uid=%s key=%s type=%s; "
+            "completing the interrupted grant instead of dropping it",
             uid,
             unique_key,
             event_type,
         )
-        return False
-    
+
     res = db.xp_events.update_one(
         {"user_id": uid, "unique_key": unique_key},
         {
@@ -97,13 +128,28 @@ def grant_xp(
     )
 
     if not getattr(res, "upserted_id", None):
-        logger.warning(
-            "[XP] Ledger inserted but xp_event already existed uid=%s key=%s type=%s; rolling back ledger",
-            uid,
-            unique_key,
-            event_type,
-        )
-        db.xp_ledger.delete_one({"user_id": uid, "source": event_type, "source_id": unique_key})       
+        # Only roll back a ledger row this call actually created. In the
+        # orphaned-ledger repair path above the row belongs to an earlier
+        # attempt (or to the concurrent winner that just inserted the
+        # xp_event), and deleting it here would destroy a ledger entry whose
+        # xp_event is live — turning a recoverable inconsistency into real
+        # ledger corruption.
+        if ledger_inserted:
+            logger.warning(
+                "[XP] Ledger inserted but xp_event already existed uid=%s key=%s type=%s; rolling back ledger",
+                uid,
+                unique_key,
+                event_type,
+            )
+            db.xp_ledger.delete_one({"user_id": uid, "source": event_type, "source_id": unique_key})
+        else:
+            logger.info(
+                "[XP] Orphaned-ledger repair lost the xp_event race uid=%s key=%s type=%s; "
+                "ledger left intact for the winning grant",
+                uid,
+                unique_key,
+                event_type,
+            )
         return False
 
     return True

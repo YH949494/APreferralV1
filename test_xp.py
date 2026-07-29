@@ -187,3 +187,88 @@ class AdminXPTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GrantXPPartialFailureTests(unittest.TestCase):
+    """Regression tests for the orphaned-ledger XP-loss defect.
+
+    xp_events is the canonical source the snapshot worker sums into
+    users.total_xp/weekly_xp/monthly_xp (xp_snapshot.settle_xp_snapshots_
+    incremental). grant_xp() writes xp_ledger first and xp_events second, so
+    a crash between the two leaves a ledger row with no event: the XP was
+    never actually credited. Before the fix, every retry returned False on
+    the "ledger already exists" check and the XP was lost forever.
+    """
+
+    def test_retry_after_crash_between_ledger_and_event_completes_the_grant(self):
+        db = FakeDB()
+
+        # Simulate the interrupted attempt: ledger row written, process died
+        # before the xp_events insert.
+        db.xp_ledger.update_one(
+            {"user_id": 7, "source": "first_checkin", "source_id": "first_checkin"},
+            {"$setOnInsert": {"amount": 200}},
+            upsert=True,
+        )
+        self.assertEqual(len(db.xp_ledger.store), 1)
+        self.assertEqual(len(db.xp_events.store), 0)
+
+        granted = grant_xp(db, 7, "first_checkin", "first_checkin", 200)
+
+        self.assertTrue(granted, "retry must complete the interrupted grant, not drop it")
+        self.assertEqual(len(db.xp_events.store), 1)
+        self.assertEqual(len(db.xp_ledger.store), 1, "the pre-existing ledger row must survive")
+        event = db.xp_events.store[(7, "first_checkin")]
+        self.assertEqual(event["xp"], 200)
+
+    def test_repair_path_is_still_idempotent(self):
+        db = FakeDB()
+        db.xp_ledger.update_one(
+            {"user_id": 7, "source": "checkin", "source_id": "checkin:20250101"},
+            {"$setOnInsert": {"amount": 20}},
+            upsert=True,
+        )
+
+        first = grant_xp(db, 7, "checkin", "checkin:20250101", 20)
+        second = grant_xp(db, 7, "checkin", "checkin:20250101", 20)
+        third = grant_xp(db, 7, "checkin", "checkin:20250101", 20)
+
+        self.assertTrue(first)
+        self.assertFalse(second)
+        self.assertFalse(third)
+        self.assertEqual(len(db.xp_events.store), 1)
+        self.assertEqual(len(db.xp_ledger.store), 1)
+
+    def test_concurrent_loser_does_not_delete_the_winners_ledger_row(self):
+        """The repair path must not roll back a ledger row it did not create.
+
+        Models the race: this call finds no xp_event and no free ledger slot
+        (the winner took it), then loses the xp_events upsert too. It must
+        return False and leave the winner's ledger row intact.
+        """
+        db = FakeDB()
+
+        # Winner's completed grant.
+        self.assertTrue(grant_xp(db, 9, "referral_award", "ref:9:123", 50))
+        self.assertEqual(len(db.xp_ledger.store), 1)
+
+        # Loser re-enters with a stale view: pretend the xp_event gate had not
+        # yet observed the winner's event when it passed.
+        real_find_one = db.xp_events.find_one
+        calls = {"n": 0}
+
+        def flaky_find_one(filt, projection=None):
+            calls["n"] += 1
+            if calls["n"] == 1:  # the initial duplicate gate only
+                return None
+            return real_find_one(filt, projection)
+
+        db.xp_events.find_one = flaky_find_one
+        granted = grant_xp(db, 9, "referral_award", "ref:9:123", 50)
+        db.xp_events.find_one = real_find_one
+
+        self.assertFalse(granted)
+        self.assertEqual(len(db.xp_events.store), 1)
+        self.assertEqual(
+            len(db.xp_ledger.store), 1, "winner's ledger row must not be rolled back by the loser"
+        )
