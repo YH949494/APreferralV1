@@ -74,6 +74,8 @@ def grant_xp(
     )
 
     ledger_inserted = bool(getattr(ledger_res, "upserted_id", None))
+    event_amount = amount
+    event_created_at = now_kl()
 
     if not ledger_inserted:
         # The ledger row already existed. Two very different situations look
@@ -105,12 +107,36 @@ def grant_xp(
                 event_type,
             )
             return False
+        # Reconstruct the event from the ledger row the interrupted attempt
+        # already committed, rather than minting a fresh grant with this
+        # retry's parameters. This is completing *that* grant, so it must
+        # carry that grant's amount and timestamp:
+        #   * settle_xp_snapshots_incremental buckets weekly/monthly XP by the
+        #     event's created_at, so a repair that lands after a week/month
+        #     boundary would otherwise credit last period's XP to this one.
+        #   * the caller's `amount` can legitimately differ between attempts
+        #     (streak-dependent check-in bonuses, a changed
+        #     FIRST_CHECKIN_BONUS_XP), which would leave the canonical event
+        #     disagreeing with the ledger.
+        # Fall back to this call's values only if the legacy ledger row is
+        # missing those fields.
+        existing_ledger = (
+            db.xp_ledger.find_one(
+                {"user_id": uid, "source": event_type, "source_id": unique_key}
+            )
+            or {}
+        )
+        if existing_ledger.get("amount") is not None:
+            event_amount = int(existing_ledger["amount"])
+        if existing_ledger.get("created_at") is not None:
+            event_created_at = existing_ledger["created_at"]
         logger.warning(
-            "[XP] Orphaned ledger row without xp_event uid=%s key=%s type=%s; "
+            "[XP] Orphaned ledger row without xp_event uid=%s key=%s type=%s amount=%s; "
             "completing the interrupted grant instead of dropping it",
             uid,
             unique_key,
             event_type,
+            event_amount,
         )
 
     res = db.xp_events.update_one(
@@ -120,36 +146,38 @@ def grant_xp(
                 "user_id": uid,
                 "unique_key": unique_key,
                 "type": event_type,
-                "xp": amount,
-                "created_at": now_kl(),
+                "xp": event_amount,
+                "created_at": event_created_at,
             }
         },
         upsert=True,
     )
 
     if not getattr(res, "upserted_id", None):
-        # Only roll back a ledger row this call actually created. In the
-        # orphaned-ledger repair path above the row belongs to an earlier
-        # attempt (or to the concurrent winner that just inserted the
-        # xp_event), and deleting it here would destroy a ledger entry whose
-        # xp_event is live — turning a recoverable inconsistency into real
-        # ledger corruption.
-        if ledger_inserted:
-            logger.warning(
-                "[XP] Ledger inserted but xp_event already existed uid=%s key=%s type=%s; rolling back ledger",
-                uid,
-                unique_key,
-                event_type,
-            )
-            db.xp_ledger.delete_one({"user_id": uid, "source": event_type, "source_id": unique_key})
-        else:
-            logger.info(
-                "[XP] Orphaned-ledger repair lost the xp_event race uid=%s key=%s type=%s; "
-                "ledger left intact for the winning grant",
-                uid,
-                unique_key,
-                event_type,
-            )
+        # The upsert matched instead of inserting, so an xp_event for this key
+        # is live and the XP is credited exactly once. This call must not
+        # grant again — but it must also NOT delete the ledger row, even the
+        # one it inserted itself.
+        #
+        # With the repair path above, the winning event may have been
+        # completed by a *different* concurrent call that did not insert its
+        # own ledger row (it found this one already there and reconstructed
+        # the event from it). This row is then that live event's only ledger
+        # entry, and deleting it would strip the audit/rollback/reconstruction
+        # trail from a real grant — the mirror image of the orphan this
+        # function exists to repair. Owning the original insert does not make
+        # deletion safe once someone else's event is live.
+        #
+        # Leaving the row is strictly the safer failure mode: a redundant
+        # ledger row is reconcilable audit noise, a missing one is lost history.
+        logger.warning(
+            "[XP] xp_event already existed for uid=%s key=%s type=%s "
+            "(ledger_inserted_by_this_call=%s); ledger row left intact for the live event",
+            uid,
+            unique_key,
+            event_type,
+            ledger_inserted,
+        )
         return False
 
     return True

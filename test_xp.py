@@ -70,6 +70,10 @@ class FakeLedger:
         self.store[key] = doc
         return FakeResult(self.counter)
 
+    def find_one(self, filt, projection=None):  # noqa: ARG002 - projection unused
+        key = (filt.get("user_id"), filt.get("source"), filt.get("source_id"))
+        return self.store.get(key)
+
     def delete_one(self, filt):  # noqa: ARG002 - filt unused in stub
         key = (filt.get("user_id"), filt.get("source"), filt.get("source_id"))
         self.store.pop(key, None)
@@ -271,4 +275,104 @@ class GrantXPPartialFailureTests(unittest.TestCase):
         self.assertEqual(len(db.xp_events.store), 1)
         self.assertEqual(
             len(db.xp_ledger.store), 1, "winner's ledger row must not be rolled back by the loser"
+        )
+
+
+class GrantXPRepairFidelityTests(unittest.TestCase):
+    """The repair path must complete the *original* grant, not mint a new one.
+
+    settle_xp_snapshots_incremental buckets weekly/monthly XP by the event's
+    created_at, so a repair landing after a period boundary must not move XP
+    into the current period; and the caller's `amount` can legitimately differ
+    between attempts (streak-dependent bonuses, changed env config).
+    """
+
+    def test_repair_uses_ledger_amount_and_timestamp_not_the_retrys(self):
+        from datetime import datetime, timedelta, timezone
+
+        db = FakeDB()
+        original_ts = datetime(2025, 1, 5, 23, 59, tzinfo=timezone.utc)  # prior week
+
+        db.xp_ledger.store[(7, "checkin", "checkin:20250105")] = {
+            "user_id": 7,
+            "source": "checkin",
+            "source_id": "checkin:20250105",
+            "amount": 120,          # original: base + a streak milestone bonus
+            "created_at": original_ts,
+            "_id": 1,
+        }
+
+        # Retry computes a different amount (streak recalculated) and runs
+        # days later, after the weekly boundary.
+        granted = grant_xp(db, 7, "checkin", "checkin:20250105", 20)
+
+        self.assertTrue(granted)
+        event = db.xp_events.store[(7, "checkin:20250105")]
+        self.assertEqual(event["xp"], 120, "event must carry the ledger's amount, not the retry's")
+        self.assertEqual(
+            event["created_at"],
+            original_ts,
+            "event must carry the ledger's timestamp so period bucketing stays correct",
+        )
+
+    def test_repair_falls_back_when_legacy_ledger_row_lacks_fields(self):
+        db = FakeDB()
+        db.xp_ledger.store[(8, "checkin", "checkin:20250105")] = {
+            "user_id": 8,
+            "source": "checkin",
+            "source_id": "checkin:20250105",
+            "_id": 1,
+        }
+
+        granted = grant_xp(db, 8, "checkin", "checkin:20250105", 20)
+
+        self.assertTrue(granted)
+        event = db.xp_events.store[(8, "checkin:20250105")]
+        self.assertEqual(event["xp"], 20)
+        self.assertIsNotNone(event["created_at"])
+
+    def test_losing_the_event_race_never_deletes_the_live_events_ledger_row(self):
+        """Regression: the repair path made this interleaving reachable.
+
+        Call A inserts the ledger row then stalls. Call B takes the repair
+        path, reconstructs the event from A's ledger row and wins the upsert.
+        A then resumes with ledger_inserted=True and must NOT delete the row —
+        it is now B's live event's only ledger entry.
+        """
+        db = FakeDB()
+
+        # Call A: passes the event gate, wins the ledger insert, then stalls.
+        # Model A's resumption by making its event upsert lose.
+        db.xp_ledger.update_one(
+            {"user_id": 9, "source": "referral_award", "source_id": "ref:9:123"},
+            {"$setOnInsert": {"amount": 50}},
+            upsert=True,
+        )
+        # Call B completes the grant from A's ledger row.
+        self.assertTrue(grant_xp(db, 9, "referral_award", "ref:9:123", 50))
+        self.assertEqual(len(db.xp_events.store), 1)
+
+        # Call A resumes: its own event gate was passed long ago, and it
+        # believes it owns the ledger row.
+        real_find_one = db.xp_events.find_one
+        calls = {"n": 0}
+
+        def stale_gate(filt, projection=None):
+            calls["n"] += 1
+            if calls["n"] == 1:  # A's original, now-stale duplicate gate
+                return None
+            return real_find_one(filt, projection)
+
+        db.xp_events.find_one = stale_gate
+        # Force A down the ledger_inserted=True branch.
+        db.xp_ledger.store.pop((9, "referral_award", "ref:9:123"))
+        granted_a = grant_xp(db, 9, "referral_award", "ref:9:123", 50)
+        db.xp_events.find_one = real_find_one
+
+        self.assertFalse(granted_a, "A must not double-grant")
+        self.assertEqual(len(db.xp_events.store), 1)
+        self.assertEqual(
+            len(db.xp_ledger.store),
+            1,
+            "the live event's ledger row must survive A's rollback attempt",
         )
