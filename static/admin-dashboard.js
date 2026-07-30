@@ -5416,6 +5416,8 @@
     unauthorized: "Your admin session has expired. Please log in again.",
     batch_not_found: "This batch could not be found — it may have been removed.",
     active_batch_edit_restricted: "This batch already has issued vouchers, so its schedule can no longer be changed. You can still rename it, edit notes, or disable distribution.",
+    upload_failed: "The upload failed partway through and was marked Failed for review. Use Reconcile to check for any inserted codes, or re-upload.",
+    target_batch_failed_cannot_enable: "This batch failed to upload and cannot be re-enabled. Use Reconcile or re-upload instead.",
   };
 
   function abErrorMessage(d) {
@@ -5575,6 +5577,17 @@
       .catch(function (e) { toast("❌ " + e.message, "error"); });
   }
 
+  function abReconcileBatch(batchId) {
+    apiPostJson("/api/admin/affiliate-voucher-batches/" + encodeURIComponent(batchId) + "/reconcile", {})
+      .then(function (res) {
+        if (!res.ok || res.d.ok === false) { toast("❌ " + abErrorMessage(res.d), "error"); return; }
+        var newStatus = res.d.batch && res.d.batch.status;
+        toast("✅ Reconciled — now " + (newStatus || "updated"), "success");
+        loadAffiliateBatches(true);
+      })
+      .catch(function (e) { toast("❌ " + e.message, "error"); });
+  }
+
   function abViewBatch(batchId) {
     var existing = $("#ab-detail-" + batchId);
     if (existing) { existing.remove(); return; }
@@ -5600,7 +5613,10 @@
   }
 
   function abStatusPillClass(status) {
-    return { active: "active", scheduled: "upcoming", exhausted: "paused", expired: "expired", disabled: "rejected", legacy_unbounded: "neutral" }[status] || "neutral";
+    return {
+      active: "active", scheduled: "upcoming", exhausted: "paused", expired: "expired",
+      disabled: "rejected", uploading: "pending", failed: "rejected", legacy_unbounded: "neutral",
+    }[status] || "neutral";
   }
 
   function abFormatDuration(ms) {
@@ -5631,13 +5647,27 @@
     var items = data.items || [];
     var nowIso = data.server_now_utc;
     var legacy = data.legacy_summary || [];
+    var legacyFallback = data.legacy_fallback || [];
     var legacyEl = $("#ab-legacy-summary");
+
+    var fallbackByPool = {};
+    legacyFallback.forEach(function (f) { fallbackByPool[f.pool_id] = f; });
+    var fallbackHtml = legacyFallback.length
+      ? '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;">' + legacyFallback.map(function (f) {
+          return f.entered_scheduled_mode
+            ? '<span class="pill rejected">' + esc(f.pool_id) + ': legacy fallback permanently OFF (scheduled-batch mode active)</span>'
+            : '<span class="pill active">' + esc(f.pool_id) + ': legacy fallback allowed (transitional)</span>';
+        }).join("") + '</div>'
+      : "";
+
     if (!legacy.length) {
-      legacyEl.innerHTML = emptyState("No legacy undated voucher codes for this filter.");
+      legacyEl.innerHTML = fallbackHtml + emptyState("No legacy undated voucher codes for this filter.");
     } else {
-      legacyEl.innerHTML = '<div class="card-grid">' + legacy.map(function (l) {
-        return '<div class="kpi"><div class="label">' + esc(l.pool_id) + ' <span class="pill neutral">legacy</span></div>' +
-          '<div class="value">' + fmt(l.available) + '</div><div class="sub">available (always-active, undated) · ' + fmt(l.issued) + ' issued</div></div>';
+      legacyEl.innerHTML = fallbackHtml + '<div class="card-grid">' + legacy.map(function (l) {
+        var blocked = fallbackByPool[l.pool_id] && fallbackByPool[l.pool_id].entered_scheduled_mode;
+        return '<div class="kpi"><div class="label">' + esc(l.pool_id) + ' <span class="pill ' + (blocked ? "rejected" : "neutral") + '">' + (blocked ? "legacy blocked" : "legacy") + '</span></div>' +
+          '<div class="value">' + fmt(l.available) + '</div><div class="sub">available (undated) · ' + fmt(l.issued) + ' issued' +
+          (blocked ? ' · <b>not distributable — scheduled batch mode active</b>' : '') + '</div></div>';
       }).join("") + '</div>';
     }
 
@@ -5649,8 +5679,17 @@
       return;
     }
     var rows = items.map(function (item) {
+      var needsReconcile = item.status === "uploading" || item.status === "failed";
+      var failureDetail = item.status === "failed"
+        ? '<div class="sub" style="color:var(--bad);margin-top:4px;">Submitted ' + fmt(item.submitted_count) + ' · Inserted ' + fmt(item.inserted_count) +
+          ' · Duplicates ' + fmt(item.duplicate_count) + ' · Invalid ' + fmt(item.invalid_count) +
+          (item.upload_error_code ? ' · Reason: ' + esc(item.upload_error_code) : '') + '</div>'
+        : "";
       return '<tr id="ab-row-' + esc(item.batch_id) + '">' +
-        '<td>' + esc(item.batch_name) + (item.notes ? '<div class="sub">' + esc(item.notes) + '</div>' : '') + '</td>' +
+        '<td>' + esc(item.batch_name) + (item.notes ? '<div class="sub">' + esc(item.notes) + '</div>' : '') +
+          (item.entitlement_month ? '<div class="sub">Entitlement month: ' + esc(item.entitlement_month) + '</div>' : '') +
+          failureDetail +
+        '</td>' +
         '<td>' + esc(item.pool_id) + '</td>' +
         '<td>' + esc((item.starts_at_kl || "").replace("T", " ").slice(0, 16)) + '</td>' +
         '<td>' + esc((item.ends_at_kl || "").replace("T", " ").slice(0, 16)) + '</td>' +
@@ -5662,9 +5701,12 @@
         '<td>' +
           '<button class="btn" data-ab-view="' + esc(item.batch_id) + '">View</button> ' +
           '<button class="btn" data-ab-edit="' + esc(item.batch_id) + '">Edit schedule</button> ' +
-          (item.distribution_disabled
-            ? '<button class="btn" data-ab-enable="' + esc(item.batch_id) + '">Re-enable</button>'
-            : '<button class="btn" data-ab-disable="' + esc(item.batch_id) + '">Disable</button>') +
+          (needsReconcile ? '<button class="btn" data-ab-reconcile="' + esc(item.batch_id) + '">Reconcile</button> ' : '') +
+          (item.status === "failed"
+            ? ""
+            : (item.distribution_disabled
+                ? '<button class="btn" data-ab-enable="' + esc(item.batch_id) + '">Re-enable</button>'
+                : '<button class="btn" data-ab-disable="' + esc(item.batch_id) + '">Disable</button>')) +
         '</td>' +
         '</tr>';
     }).join("");
@@ -5722,6 +5764,8 @@
       if (disableBtn) { abSetDisabled(disableBtn.dataset.abDisable, true); return; }
       var enableBtn = e.target.closest("[data-ab-enable]");
       if (enableBtn) { abSetDisabled(enableBtn.dataset.abEnable, false); return; }
+      var reconcileBtn = e.target.closest("[data-ab-reconcile]");
+      if (reconcileBtn) { abReconcileBatch(reconcileBtn.dataset.abReconcile); return; }
     });
   }
 

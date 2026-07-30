@@ -246,28 +246,114 @@ def _mask_voucher_code(code) -> str:
     return code[:2] + "*" * (len(code) - 4) + code[-2:]
 
 
-def _row_in_active_window(row: dict, now_utc: datetime) -> bool:
-    """Rows without a ``batch_id`` are legacy_unbounded and stay claimable
-    exactly as before (backward compatibility). Rows created by an
-    affiliate voucher batch upload always carry ``batch_id`` +
-    ``starts_at``/``ends_at`` together, so once ``batch_id`` is present the
-    row is only claimable inside its active window: inclusive start,
-    exclusive end.
+def _find_active_batch(db, *, pool_id: str, now_utc: datetime) -> dict | None:
+    """The one batch whose schedule window currently covers ``now_utc`` for
+    this tier — any ``upload_status``/``distribution_disabled`` state; the
+    caller decides what to do with that. Batches never overlap for the same
+    ``pool_id`` (enforced at creation), so at most one can match.
     """
-    if row.get("batch_id") is None:
-        return True
-    # database.py opens MongoClient without tz_aware=True, so a real
-    # MongoDB hands back naive datetimes here while now_utc stays aware —
-    # normalize before comparing or this raises TypeError.
-    starts_at = _as_aware_utc(row.get("starts_at"))
-    ends_at = _as_aware_utc(row.get("ends_at"))
-    if starts_at is None or ends_at is None:
+    for row in db.affiliate_voucher_batches.find({"pool_id": pool_id}):
+        starts_at = _as_aware_utc(row.get("starts_at"))
+        ends_at = _as_aware_utc(row.get("ends_at"))
+        if starts_at is None or ends_at is None:
+            continue
+        if starts_at <= now_utc < ends_at:
+            return row
+    return None
+
+
+def _tier_entered_scheduled_mode(db, *, pool_id: str, reference_utc: datetime) -> bool:
+    """True once the earliest batch ever created for this tier (regardless
+    of its current status — active, exhausted, disabled, or expired) had
+    already started as of ``reference_utc``. This is a permanent, one-way
+    cutover for legacy (undated) voucher fallback: it is evaluated against
+    the *earliest* start, so uploading next month's batch early does not
+    retroactively block this month's legacy stock, and it never flips back
+    once tripped, even after that batch later exhausts/expires/is disabled.
+    """
+    starts = [
+        _as_aware_utc(row.get("starts_at"))
+        for row in db.affiliate_voucher_batches.find({"pool_id": pool_id})
+    ]
+    starts = [s for s in starts if s is not None]
+    if not starts:
         return False
-    now_utc = _as_aware_utc(now_utc) or now_utc
-    return starts_at <= now_utc < ends_at
+    return min(starts) <= reference_utc
 
 
-def _claim_voucher_from_pool(db, *, pool_id: str, ledger_id, user_id: int, now_utc: datetime):
+def _batch_claimable_available_count(db, batch: dict) -> int:
+    if batch.get("upload_status") not in (None, "ready"):
+        return 0
+    if bool(batch.get("distribution_disabled")):
+        return 0
+    return int(db.voucher_pools.count_documents({"batch_id": batch.get("_id"), "status": "available"}))
+
+
+def _claim_from_target_batch(db, *, batch_id, pool_id: str, ledger_id, user_id: int, now_utc: datetime):
+    """Two-step authoritative claim: the batch document — not any
+    denormalized field on the voucher row — is the source of truth for
+    ``upload_status``/``distribution_disabled``/schedule window. It is
+    re-fetched fresh here and checked *before* ever looking at
+    ``voucher_pools``, so a stale/incorrect row-level flag can never grant
+    a claim the batch document itself would refuse. The final claim is
+    still a single atomic ``find_one_and_update`` keyed on ``batch_id`` +
+    ``status``, so two workers can never win the same code.
+    Returns ``(voucher_or_None, reason_or_None)``.
+    """
+    batch = db.affiliate_voucher_batches.find_one({"_id": batch_id})
+    if not batch:
+        return None, "no_batch_for_entitlement_period"
+    if batch.get("upload_status") not in (None, "ready"):
+        return None, "target_batch_not_ready"
+    if bool(batch.get("distribution_disabled")):
+        return None, "target_batch_disabled"
+    starts_at = _as_aware_utc(batch.get("starts_at"))
+    ends_at = _as_aware_utc(batch.get("ends_at"))
+    if starts_at is None or ends_at is None:
+        return None, "target_batch_not_ready"
+    if now_utc >= ends_at:
+        return None, "target_batch_expired_unissued"
+    if now_utc < starts_at:
+        return None, "target_batch_scheduled"
+
+    voucher = db.voucher_pools.find_one_and_update(
+        {
+            "batch_id": batch_id,
+            "pool_id": pool_id,
+            "status": "available",
+            "$or": [
+                {"issued_for_ledger_id": {"$exists": False}},
+                {"issued_for_ledger_id": None},
+            ],
+        },
+        {
+            "$set": {
+                "status": "issued",
+                "issued_to": user_id,
+                "issued_to_user_id": user_id,
+                "issued_at": now_utc,
+                "ledger_id": ledger_id,
+                "issued_for_ledger_id": str(ledger_id),
+            }
+        },
+        sort=[("_id", 1)],
+        return_document=ReturnDocument.AFTER,
+    )
+    if voucher:
+        logger.info(
+            "[AFF_VOUCHER][CLAIM_SELECTED] pool_id=%s ledger_id=%s user_id=%s batch_id=%s code=%s",
+            pool_id, ledger_id, user_id, batch_id, _mask_voucher_code(voucher.get("code")),
+        )
+        return voucher, None
+    return None, "target_batch_empty"
+
+
+def _claim_legacy_voucher(db, *, pool_id: str, ledger_id, user_id: int, now_utc: datetime):
+    """Claim from legacy_unbounded rows only (no ``batch_id``) — the
+    pre-existing always-claimable behaviour, untouched. Never considers any
+    dated batch, even one that happens to be currently active; callers
+    decide when legacy is policy-eligible before calling this.
+    """
     # Minimal cross-consumption guard (Campaign Centre voucher_pool_service
     # writes an explicit "allocation_scope" onto every row it inserts): a
     # row is claimable here only if it has no allocation_scope at all
@@ -275,42 +361,24 @@ def _claim_voucher_from_pool(db, *, pool_id: str, ledger_id, user_id: int, now_u
     # exactly as before) or is explicitly "affiliate_rewards"/"shared".
     # Rows scoped "campaign_rewards"/"welcome_rewards"/etc. are never
     # matched, even if a pool_id were ever accidentally shared.
-    #
-    # The active-window check happens in Python (not the Mongo filter)
-    # because it needs to stay a plain single-level query — several
-    # lightweight test doubles across this codebase only understand a
-    # single top-level "$or" — while each *claim attempt* is still a single
-    # atomic find_one_and_update keyed on ``_id`` + ``status``, so two
-    # workers can never win the same row.
     candidates = list(
         db.voucher_pools.find(
             {
                 "pool_id": pool_id,
                 "status": "available",
+                "batch_id": {"$exists": False},
                 "distribution_disabled": {"$ne": True},
                 "$or": [
                     {"issued_for_ledger_id": {"$exists": False}},
                     {"issued_for_ledger_id": None},
                 ],
-                # $nin naturally matches documents where the field is absent
-                # (every pre-existing legacy affiliate row — untouched, still
-                # works exactly as before) as well as "affiliate_rewards"/
-                # "shared" rows. Only rows explicitly scoped to another
-                # subsystem (campaign_rewards/welcome_rewards/...) are excluded
-                # — even if a pool_id were ever accidentally shared.
                 "allocation_scope": {"$nin": ["campaign_rewards", "welcome_rewards", "voucher_drops", "referral_rewards"]},
             }
         )
     )
     candidates.sort(key=lambda row: row.get("_id"))
     for candidate in candidates:
-        if not _row_in_active_window(candidate, now_utc):
-            continue
         voucher = db.voucher_pools.find_one_and_update(
-            # Recheck distribution_disabled here too: an admin's emergency
-            # stop can land between the candidate read above and this
-            # claim, and a stale candidate must not be issuable just
-            # because it looked fine a moment ago.
             {"_id": candidate["_id"], "status": "available", "distribution_disabled": {"$ne": True}},
             {
                 "$set": {
@@ -326,38 +394,74 @@ def _claim_voucher_from_pool(db, *, pool_id: str, ledger_id, user_id: int, now_u
         )
         if voucher:
             logger.info(
-                "[AFF_VOUCHER][CLAIM_SELECTED] pool_id=%s ledger_id=%s user_id=%s batch_id=%s code=%s",
-                pool_id, ledger_id, user_id, voucher.get("batch_id"), _mask_voucher_code(voucher.get("code")),
+                "[AFF_VOUCHER][LEGACY_FALLBACK_USED] pool_id=%s ledger_id=%s user_id=%s code=%s",
+                pool_id, ledger_id, user_id, _mask_voucher_code(voucher.get("code")),
             )
             return voucher
     return None
 
 
-def _log_pool_claim_miss(db, *, pool_id: str, ledger_id, user_id: int, now_utc: datetime):
-    """Distinguish a true stockout from codes existing but not yet (or no
-    longer) inside an active batch window — never mutates anything.
+def _claim_voucher_from_pool(db, *, pool_id: str, ledger_id, user_id: int, now_utc: datetime, legacy_only: bool = False):
+    """Policy (legacy-fallback control): once a tier is on scheduled T1-T4
+    batches, an old undated legacy code must never quietly substitute for a
+    missing/exhausted/disabled scheduled batch.
+      - ``legacy_only=True`` (a ledger permanently pinned to the legacy
+        pool): claim only legacy_unbounded rows, regardless of any batch's
+        current state.
+      - Otherwise: resolve the batch currently active for this tier.
+          * If one exists, claim ONLY from it — an active-but-empty,
+            disabled, or still-uploading batch never falls through to
+            legacy; that's a pool-empty/manual-review outcome.
+          * If none exists (no batch's window currently covers ``now_utc``),
+            allow the transitional legacy pool unless this tier has already
+            permanently entered scheduled-batch mode.
     """
-    available_rows = list(
-        db.voucher_pools.find({"pool_id": pool_id, "status": "available", "distribution_disabled": {"$ne": True}})
+    if not legacy_only:
+        active_batch = _find_active_batch(db, pool_id=pool_id, now_utc=now_utc)
+        if active_batch is not None:
+            voucher, reason = _claim_from_target_batch(
+                db, batch_id=active_batch["_id"], pool_id=pool_id, ledger_id=ledger_id, user_id=user_id, now_utc=now_utc,
+            )
+            if voucher:
+                return voucher
+            logger.warning(
+                "[AFF_VOUCHER][ACTIVE_BATCH_EMPTY] pool_id=%s ledger_id=%s user_id=%s batch_id=%s policy_reason=%s",
+                pool_id, ledger_id, user_id, active_batch["_id"], reason,
+            )
+            return None
+        if _tier_entered_scheduled_mode(db, pool_id=pool_id, reference_utc=now_utc):
+            logger.warning(
+                "[AFF_VOUCHER][LEGACY_FALLBACK_BLOCKED] pool_id=%s ledger_id=%s user_id=%s policy_reason=scheduled_mode_entered",
+                pool_id, ledger_id, user_id,
+            )
+            return None
+
+    return _claim_legacy_voucher(db, pool_id=pool_id, ledger_id=ledger_id, user_id=user_id, now_utc=now_utc)
+
+
+def _log_pool_claim_miss(db, *, pool_id: str, ledger_id, user_id: int, now_utc: datetime, legacy_only: bool = False):
+    """Mirrors ``_claim_voucher_from_pool``'s policy branches purely for
+    logging when an upfront inventory count already shows the claim can't
+    be fulfilled — never mutates anything.
+    """
+    if not legacy_only:
+        active_batch = _find_active_batch(db, pool_id=pool_id, now_utc=now_utc)
+        if active_batch is not None:
+            logger.warning(
+                "[AFF_VOUCHER][ACTIVE_BATCH_EMPTY] pool_id=%s ledger_id=%s user_id=%s batch_id=%s",
+                pool_id, ledger_id, user_id, active_batch["_id"],
+            )
+            return
+        if _tier_entered_scheduled_mode(db, pool_id=pool_id, reference_utc=now_utc):
+            logger.warning(
+                "[AFF_VOUCHER][LEGACY_FALLBACK_BLOCKED] pool_id=%s ledger_id=%s user_id=%s policy_reason=scheduled_mode_entered",
+                pool_id, ledger_id, user_id,
+            )
+            return
+    logger.warning(
+        "[AFF_VOUCHER][OUT_OF_STOCK] pool_id=%s ledger_id=%s user_id=%s reason=legacy_pool_empty",
+        pool_id, ledger_id, user_id,
     )
-    any_in_window = any(_row_in_active_window(row, now_utc) for row in available_rows)
-    if any_in_window:
-        logger.warning(
-            "[AFF_VOUCHER][OUT_OF_STOCK] pool_id=%s ledger_id=%s user_id=%s reason=race_condition",
-            pool_id, ledger_id, user_id,
-        )
-        return
-    any_available_ignoring_window = db.voucher_pools.count_documents({"pool_id": pool_id, "status": "available"})
-    if any_available_ignoring_window:
-        logger.warning(
-            "[AFF_VOUCHER][NO_ACTIVE_BATCH] pool_id=%s ledger_id=%s user_id=%s",
-            pool_id, ledger_id, user_id,
-        )
-    else:
-        logger.warning(
-            "[AFF_VOUCHER][OUT_OF_STOCK] pool_id=%s ledger_id=%s user_id=%s",
-            pool_id, ledger_id, user_id,
-        )
 
 
 def _pool_ledger_filter(ledger_id):
@@ -432,31 +536,39 @@ def _guarded_rollback_attempt_vouchers(db, *, vouchers: list[dict], ledger_id, r
     return db.affiliate_ledger.find_one({"_id": ledger_id})
 
 
-def _available_pool_count(db, *, pool_id: str, now_utc: datetime | None = None) -> int:
+def _available_pool_count(db, *, pool_id: str, now_utc: datetime | None = None, legacy_only: bool = False) -> int:
     now_utc = now_utc or datetime.now(timezone.utc)
-    rows = db.voucher_pools.find(
-        {
-            "pool_id": pool_id,
-            "status": "available",
-            "distribution_disabled": {"$ne": True},
-            "$or": [
-                {"issued_for_ledger_id": {"$exists": False}},
-                {"issued_for_ledger_id": None},
-            ],
-        }
+    if not legacy_only:
+        active_batch = _find_active_batch(db, pool_id=pool_id, now_utc=now_utc)
+        if active_batch is not None:
+            return _batch_claimable_available_count(db, active_batch)
+        if _tier_entered_scheduled_mode(db, pool_id=pool_id, reference_utc=now_utc):
+            return 0
+    return int(
+        db.voucher_pools.count_documents(
+            {
+                "pool_id": pool_id,
+                "status": "available",
+                "batch_id": {"$exists": False},
+                "distribution_disabled": {"$ne": True},
+                "$or": [
+                    {"issued_for_ledger_id": {"$exists": False}},
+                    {"issued_for_ledger_id": None},
+                ],
+            }
+        )
     )
-    return sum(1 for row in rows if _row_in_active_window(row, now_utc))
 
 
-def _claim_affiliate_bundle_from_pool(db, *, pool_id: str, ledger_id, user_id: int, now_utc: datetime, voucher_count: int):
+def _claim_affiliate_bundle_from_pool(db, *, pool_id: str, ledger_id, user_id: int, now_utc: datetime, voucher_count: int, legacy_only: bool = False):
     needed = max(1, int(voucher_count))
-    if _available_pool_count(db, pool_id=pool_id, now_utc=now_utc) < needed:
-        _log_pool_claim_miss(db, pool_id=pool_id, ledger_id=ledger_id, user_id=user_id, now_utc=now_utc)
+    if _available_pool_count(db, pool_id=pool_id, now_utc=now_utc, legacy_only=legacy_only) < needed:
+        _log_pool_claim_miss(db, pool_id=pool_id, ledger_id=ledger_id, user_id=user_id, now_utc=now_utc, legacy_only=legacy_only)
         return None
 
     claimed = []
     for _ in range(needed):
-        voucher = _claim_voucher_from_pool(db, pool_id=pool_id, ledger_id=ledger_id, user_id=user_id, now_utc=now_utc)
+        voucher = _claim_voucher_from_pool(db, pool_id=pool_id, ledger_id=ledger_id, user_id=user_id, now_utc=now_utc, legacy_only=legacy_only)
         if not voucher:
             _guarded_rollback_attempt_vouchers(
                 db,
@@ -468,6 +580,139 @@ def _claim_affiliate_bundle_from_pool(db, *, pool_id: str, ledger_id, user_id: i
             return None
         claimed.append(voucher)
     return claimed
+
+
+def _claim_affiliate_bundle_from_target_batch(db, *, batch_id, pool_id: str, ledger_id, user_id: int, now_utc: datetime, voucher_count: int):
+    """Same bundle-claim shape as ``_claim_affiliate_bundle_from_pool``, but
+    pinned to one specific batch (an AFFILIATE_MONTHLY ledger's resolved
+    ``target_batch_id``) — never substitutes a different batch or the
+    legacy pool. Returns ``(vouchers_or_None, reason_or_None)``.
+    """
+    needed = max(1, int(voucher_count))
+    batch = db.affiliate_voucher_batches.find_one({"_id": batch_id})
+    if not batch:
+        return None, "no_batch_for_entitlement_period"
+    if batch.get("upload_status") not in (None, "ready"):
+        return None, "target_batch_not_ready"
+    if bool(batch.get("distribution_disabled")):
+        return None, "target_batch_disabled"
+    starts_at = _as_aware_utc(batch.get("starts_at"))
+    ends_at = _as_aware_utc(batch.get("ends_at"))
+    if starts_at is None or ends_at is None:
+        return None, "target_batch_not_ready"
+    if now_utc >= ends_at:
+        return None, "target_batch_expired_unissued"
+    if now_utc < starts_at:
+        return None, "target_batch_scheduled"
+    if _batch_claimable_available_count(db, batch) < needed:
+        return None, "target_batch_empty"
+
+    claimed = []
+    for _ in range(needed):
+        voucher, reason = _claim_from_target_batch(
+            db, batch_id=batch_id, pool_id=pool_id, ledger_id=ledger_id, user_id=user_id, now_utc=now_utc,
+        )
+        if not voucher:
+            if claimed:
+                _guarded_rollback_attempt_vouchers(
+                    db,
+                    vouchers=claimed,
+                    ledger_id=ledger_id,
+                    reason="affiliate_bundle_partial_claim",
+                    now_utc=now_utc,
+                )
+            return None, reason
+        claimed.append(voucher)
+    return claimed, None
+
+
+def _month_window_from_yyyymm(yyyymm) -> tuple[datetime | None, datetime | None]:
+    """KL-calendar-month window [start, end) in UTC for an explicit
+    ``"YYYYMM"`` entitlement period — unlike ``_month_window_utc``, this
+    resolves the period itself, not "the month containing now".
+    """
+    yyyymm = str(yyyymm or "").strip()
+    if len(yyyymm) != 6 or not yyyymm.isdigit():
+        return None, None
+    year, month = int(yyyymm[:4]), int(yyyymm[4:6])
+    if not (1 <= month <= 12):
+        return None, None
+    start_kl = KL_TZ.localize(datetime(year, month, 1))
+    if month == 12:
+        end_kl = KL_TZ.localize(datetime(year + 1, 1, 1))
+    else:
+        end_kl = KL_TZ.localize(datetime(year, month + 1, 1))
+    return start_kl.astimezone(timezone.utc), end_kl.astimezone(timezone.utc)
+
+
+def _find_batch_for_period(db, *, pool_id: str, period_start_utc: datetime) -> dict | None:
+    """The batch whose schedule window covers the first instant of an
+    entitlement period — i.e. "the batch for this month", independent of
+    what other batches exist for other months.
+    """
+    for row in db.affiliate_voucher_batches.find({"pool_id": pool_id}):
+        starts_at = _as_aware_utc(row.get("starts_at"))
+        ends_at = _as_aware_utc(row.get("ends_at"))
+        if starts_at is None or ends_at is None:
+            continue
+        if starts_at <= period_start_utc < ends_at:
+            return row
+    return None
+
+
+def _resolve_monthly_ledger_target(db, ledger: dict, *, now_utc: datetime) -> dict:
+    """Pin an AFFILIATE_MONTHLY ledger to exactly one voucher source — a
+    specific batch, or (transitionally) the legacy undated pool — the first
+    time it becomes issuable, and persist that choice forever. This is what
+    prevents a pending July entitlement from silently drifting onto an
+    August batch: once resolved, ``target_mode``/``target_batch_id`` never
+    change again, regardless of what batches exist later.
+    """
+    if ledger.get("target_mode") in ("batch", "legacy"):
+        return ledger  # already resolved — never re-resolve or switch
+
+    ledger_id = ledger["_id"]
+    tier = str(ledger.get("tier") or "").strip().upper()
+    period_start_utc, _period_end_utc = _month_window_from_yyyymm(ledger.get("year_month"))
+    if period_start_utc is None:
+        # Malformed/missing year_month — leave unresolved; the caller's
+        # pool-empty/manual-review path handles it, never legacy or a
+        # guessed batch.
+        return ledger
+
+    batch = _find_batch_for_period(db, pool_id=tier, period_start_utc=period_start_utc)
+    if batch:
+        update = {
+            "target_mode": "batch",
+            "target_batch_id": batch["_id"],
+            "target_batch_window_start": batch.get("starts_at"),
+            "target_batch_window_end": batch.get("ends_at"),
+            "target_resolved_at": now_utc,
+        }
+    elif _tier_entered_scheduled_mode(db, pool_id=tier, reference_utc=period_start_utc):
+        # Scheduled-batch mode had already begun for this tier by this
+        # entitlement's month, but no batch matches this exact month — a
+        # real gap, not a legacy-eligible ledger. Leave unresolved so the
+        # caller routes to manual review; retried later in case the
+        # missing batch gets uploaded (resolution is idempotent).
+        return ledger
+    else:
+        update = {
+            "target_mode": "legacy",
+            "target_batch_id": None,
+            "target_resolved_at": now_utc,
+        }
+
+    res = db.affiliate_ledger.update_one(
+        {"_id": ledger_id, "target_mode": {"$exists": False}},
+        {"$set": update},
+    )
+    if getattr(res, "modified_count", 0) == 1:
+        logger.info(
+            "[AFF_VOUCHER][TARGET_RESOLVED] ledger_id=%s tier=%s year_month=%s mode=%s batch_id=%s",
+            ledger_id, tier, ledger.get("year_month"), update["target_mode"], update.get("target_batch_id"),
+        )
+    return db.affiliate_ledger.find_one({"_id": ledger_id}) or ledger
 
 
 def _no_voucher_filter():
@@ -665,7 +910,8 @@ def _issue_affiliate_ledger_from_pool(db, ledger, now_utc: datetime):
         return db.affiliate_ledger.find_one({"_id": ledger_id})
     if _ledger_has_affiliate_bundle(ledger):
         return _finalize_issued_if_voucher_exists(db, ledger=ledger, now_utc=now_utc)
-    if (ledger.get("ledger_type") or "").strip().upper() == "AFFILIATE_MONTHLY":
+    ledger_type = (ledger.get("ledger_type") or "").strip().upper()
+    if ledger_type == "AFFILIATE_MONTHLY":
         duplicate = db.affiliate_ledger.find_one(
             {
                 "_id": {"$ne": ledger_id},
@@ -745,14 +991,45 @@ def _issue_affiliate_ledger_from_pool(db, ledger, now_utc: datetime):
             return latest
 
     required_count = int(bundle_spec["voucher_count"])
-    vouchers = _claim_affiliate_bundle_from_pool(
-        db,
-        pool_id=pool_id,
-        ledger_id=ledger_id,
-        user_id=int(user_id),
-        now_utc=now_utc,
-        voucher_count=required_count,
-    )
+    claim_reason = None
+    if ledger_type == "AFFILIATE_MONTHLY":
+        # Pin this entitlement to exactly one voucher source (a specific
+        # batch, or transitionally the legacy pool) the first time it's
+        # issuable, and never let it drift onto a later batch.
+        ledger = _resolve_monthly_ledger_target(db, ledger, now_utc=now_utc)
+        target_mode = ledger.get("target_mode")
+        if target_mode == "batch":
+            vouchers, claim_reason = _claim_affiliate_bundle_from_target_batch(
+                db,
+                batch_id=ledger.get("target_batch_id"),
+                pool_id=pool_id,
+                ledger_id=ledger_id,
+                user_id=int(user_id),
+                now_utc=now_utc,
+                voucher_count=required_count,
+            )
+        elif target_mode == "legacy":
+            vouchers = _claim_affiliate_bundle_from_pool(
+                db,
+                pool_id=pool_id,
+                ledger_id=ledger_id,
+                user_id=int(user_id),
+                now_utc=now_utc,
+                voucher_count=required_count,
+                legacy_only=True,
+            )
+        else:
+            vouchers = None
+            claim_reason = "no_batch_for_entitlement_period"
+    else:
+        vouchers = _claim_affiliate_bundle_from_pool(
+            db,
+            pool_id=pool_id,
+            ledger_id=ledger_id,
+            user_id=int(user_id),
+            now_utc=now_utc,
+            voucher_count=required_count,
+        )
     if vouchers:
         issued = _store_affiliate_bundle_on_ledger(
             db,
@@ -789,16 +1066,18 @@ def _issue_affiliate_ledger_from_pool(db, ledger, now_utc: datetime):
     if _has_issued_pool_voucher_for_ledger(db, ledger_id=ledger_id):
         return latest
 
+    risk_flag = claim_reason or "pool_empty"
     db.affiliate_ledger.update_one(
         {"_id": ledger_id, "status": SETTLING_STATUS, **_no_voucher_filter()},
-        {"$set": {"status": "PENDING_MANUAL", "updated_at": now_utc}, "$addToSet": {"risk_flags": "pool_empty"}},
+        {"$set": {"status": "PENDING_MANUAL", "updated_at": now_utc}, "$addToSet": {"risk_flags": risk_flag}},
     )
     logger.info(
-        "[AFFILIATE][ISSUE_SKIP] ledger_id=%s user_id=%s tier=%s pool_id=%s reason=pool_empty",
+        "[AFFILIATE][ISSUE_SKIP] ledger_id=%s user_id=%s tier=%s pool_id=%s reason=%s",
         ledger_id,
         int(user_id),
         tier,
         pool_id,
+        risk_flag,
     )
     return db.affiliate_ledger.find_one({"_id": ledger_id})
 

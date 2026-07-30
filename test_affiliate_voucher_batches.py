@@ -476,6 +476,7 @@ class TestFrontendErrorMapping:
             "batch_window_overlap", "invalid_start_at", "invalid_end_at", "end_before_start",
             "invalid_pool_id", "no_codes", "duplicate_codes", "unauthorized",
             "batch_not_found", "active_batch_edit_restricted",
+            "upload_failed", "target_batch_failed_cannot_enable",
         ]
         for code in required_codes:
             assert code in block, f"missing frontend mapping for {code}"
@@ -560,31 +561,51 @@ class TestNaiveDatetimeFromRealMongo:
 
 
 class TestDisableRaceInAtomicClaim:
-    def test_disable_landing_between_candidate_read_and_claim_is_rechecked(self):
+    def test_stale_row_flag_is_never_trusted_when_batch_doc_is_disabled(self):
+        """The batch document, not the denormalized voucher-row field, is
+        authoritative for distribution_disabled. Even if a row incorrectly
+        still says distribution_disabled=False (e.g. a missed/partial
+        denormalization write), it must not be claimable once the batch
+        document itself is disabled.
+        """
         db = _db()
         res = _create(db, codes=["ONLYCODE"])
         during_window = datetime(2026, 8, 15, tzinfo=timezone.utc)
 
-        real_find = db.voucher_pools.find
+        # Disable only the batch document directly — deliberately bypassing
+        # set_batch_distribution_disabled() so the voucher_pools row keeps
+        # its stale distribution_disabled=False.
+        db.affiliate_voucher_batches.update_one(
+            {"_id": avb._as_object_id(res["batch"]["batch_id"])},
+            {"$set": {"distribution_disabled": True}},
+        )
+        row = db.voucher_pools.find_one({"code": "ONLYCODE"})
+        assert row["distribution_disabled"] is False
 
-        def find_then_disable(*args, **kwargs):
-            results = real_find(*args, **kwargs)
-            # Simulate an admin's emergency-stop PATCH completing in the
-            # instant between this candidate read and the atomic claim
-            # below — the row looked fine when read, but shouldn't be
-            # issuable anymore.
-            db.voucher_pools.update_one({"code": "ONLYCODE"}, {"$set": {"distribution_disabled": True}})
-            return results
-
-        db.voucher_pools.find = find_then_disable
-        try:
-            voucher = ar._claim_voucher_from_pool(db, pool_id="T1", ledger_id="L1", user_id=1, now_utc=during_window)
-        finally:
-            db.voucher_pools.find = real_find
+        voucher = ar._claim_voucher_from_pool(db, pool_id="T1", ledger_id="L1", user_id=1, now_utc=during_window)
 
         assert voucher is None
         row = db.voucher_pools.find_one({"code": "ONLYCODE"})
         assert row["status"] == "available"  # never flipped to issued
+
+    def test_two_workers_still_cannot_claim_same_code_via_target_batch(self):
+        db = _db()
+        _create(db, codes=["ONLYCODE"])
+        during_window = datetime(2026, 8, 15, tzinfo=timezone.utc)
+        first = ar._claim_voucher_from_pool(db, pool_id="T1", ledger_id="L1", user_id=1, now_utc=during_window)
+        second = ar._claim_voucher_from_pool(db, pool_id="T1", ledger_id="L2", user_id=2, now_utc=during_window)
+        assert first is not None
+        assert second is None
+
+    def test_reenable_restores_eligibility_through_batch_document(self):
+        db = _db()
+        res = _create(db, codes=["ONLYCODE"])
+        during_window = datetime(2026, 8, 15, tzinfo=timezone.utc)
+        avb.set_batch_distribution_disabled(db, res["batch"]["batch_id"], admin_identity="admin1", disabled=True, now_utc=during_window)
+        assert ar._claim_voucher_from_pool(db, pool_id="T1", ledger_id="L1", user_id=1, now_utc=during_window) is None
+        avb.set_batch_distribution_disabled(db, res["batch"]["batch_id"], admin_identity="admin1", disabled=False, now_utc=during_window)
+        voucher = ar._claim_voucher_from_pool(db, pool_id="T1", ledger_id="L1", user_id=1, now_utc=during_window)
+        assert voucher is not None
 
 
 class TestOverlapCreateRace:
@@ -621,7 +642,12 @@ class TestOverlapCreateRace:
 
 
 class TestPartialUploadFailureCleansUpRows:
-    def test_non_duplicate_insert_error_removes_already_inserted_rows(self):
+    def test_non_duplicate_insert_error_marks_batch_failed_and_keeps_rows_non_claimable(self):
+        """Risk 3: an interrupted upload (or a process crash resuming mid-
+        insert) must be recoverable and auditable, not silently deleted —
+        but the partially-inserted rows must never be claimable while the
+        batch is in this state.
+        """
         db = _db()
         real_insert_one = db.voucher_pools.insert_one
         call_count = {"n": 0}
@@ -634,16 +660,23 @@ class TestPartialUploadFailureCleansUpRows:
 
         db.voucher_pools.insert_one = flaky_insert_one
         try:
-            with pytest.raises(RuntimeError):
-                _create(db, codes=["A1", "A2", "A3"])
+            result = _create(db, codes=["A1", "A2", "A3"])
         finally:
             db.voucher_pools.insert_one = real_insert_one
 
-        # "A1" was inserted before the simulated failure on "A2" — it must
-        # not survive as an orphaned, still-claimable row once the batch
-        # document itself is rolled back.
-        assert db.voucher_pools.count_documents({"code": "A1"}) == 0
-        assert db.affiliate_voucher_batches.count_documents({}) == 0
+        assert result["ok"] is False
+        assert result["code"] == "upload_failed"
+
+        # "A1" survives (audit trail) but the batch — and therefore "A1" —
+        # must never be claimable.
+        assert db.voucher_pools.count_documents({"code": "A1"}) == 1
+        batch = db.affiliate_voucher_batches.find_one({})
+        assert batch["upload_status"] == "failed"
+        assert avb.derive_batch_status(batch) == "failed"
+
+        during_window = datetime(2026, 8, 15, tzinfo=timezone.utc)
+        voucher = ar._claim_voucher_from_pool(db, pool_id="T1", ledger_id="L1", user_id=1, now_utc=during_window)
+        assert voucher is None
 
 
 if __name__ == "__main__":

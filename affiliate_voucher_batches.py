@@ -156,10 +156,19 @@ def normalize_voucher_codes(codes) -> tuple[list, int, int]:
 
 
 def derive_batch_status(batch: dict, now_utc: datetime | None = None) -> str:
-    """Status derived from time + inventory + emergency controls —
-    never trust a manually maintained status field as the source of truth.
+    """Status derived from time + inventory + emergency controls + upload
+    lifecycle — never trust a manually maintained status field as the
+    source of truth. Priority (highest first): failed, uploading
+    (staging), disabled, scheduled, active, exhausted, expired. A
+    ``staging``/``failed`` batch can never appear as Active regardless of
+    its schedule window or inventory.
     """
     now_utc = _as_aware_utc(now_utc) or datetime.now(timezone.utc)
+    upload_status = batch.get("upload_status")
+    if upload_status == "failed":
+        return "failed"
+    if upload_status == "staging":
+        return "uploading"
     if bool(batch.get("distribution_disabled")):
         return "disabled"
     starts_at = _as_aware_utc(batch.get("starts_at"))
@@ -173,7 +182,10 @@ def derive_batch_status(batch: dict, now_utc: datetime | None = None) -> str:
     return "exhausted"
 
 
-_STATUS_ORDER = {"active": 0, "scheduled": 1, "exhausted": 2, "expired": 3, "disabled": 4}
+_STATUS_ORDER = {
+    "active": 0, "scheduled": 1, "exhausted": 2, "expired": 3, "disabled": 4,
+    "uploading": 5, "failed": 6,
+}
 
 
 def _sort_key(batch: dict, status: str):
@@ -187,6 +199,17 @@ def _sort_key(batch: dict, status: str):
     else:
         secondary = 0.0
     return (order, secondary)
+
+
+def _entitlement_month_for_batch(batch: dict) -> str | None:
+    """Best-effort "YYYYMM" label (KL calendar) for the batch's starts_at —
+    purely informational, so the dashboard can show which entitlement
+    month a batch is presumed to correspond to.
+    """
+    starts_at = _as_aware_utc(batch.get("starts_at"))
+    if starts_at is None:
+        return None
+    return starts_at.astimezone(KL_TZ).strftime("%Y%m")
 
 
 def _serialize_batch(batch: dict, *, now_utc: datetime | None = None) -> dict:
@@ -203,6 +226,7 @@ def _serialize_batch(batch: dict, *, now_utc: datetime | None = None) -> dict:
         "ends_at_utc": _to_utc_iso(batch.get("ends_at")),
         "starts_at_kl": _to_kl_iso(batch.get("starts_at")),
         "ends_at_kl": _to_kl_iso(batch.get("ends_at")),
+        "entitlement_month": _entitlement_month_for_batch(batch),
         "status": status,
         "uploaded_count": uploaded,
         "available_count": available,
@@ -211,6 +235,15 @@ def _serialize_batch(batch: dict, *, now_utc: datetime | None = None) -> dict:
         "created_at": _to_utc_iso(batch.get("created_at")),
         "created_by": batch.get("created_by"),
         "notes": batch.get("notes"),
+        "upload_status": batch.get("upload_status") or "ready",
+        "submitted_count": int(batch.get("submitted_count") or 0),
+        "inserted_count": int(batch.get("inserted_count") or 0),
+        "duplicate_count": int(batch.get("duplicate_count") or 0),
+        "invalid_count": int(batch.get("invalid_count") or 0),
+        "upload_started_at": _to_utc_iso(batch.get("upload_started_at")),
+        "upload_completed_at": _to_utc_iso(batch.get("upload_completed_at")),
+        "upload_failed_at": _to_utc_iso(batch.get("upload_failed_at")),
+        "upload_error_code": batch.get("upload_error_code"),
     }
     if status in ("exhausted", "expired"):
         out["exhausted_count"] = max(0, uploaded - available)
@@ -395,9 +428,25 @@ def create_batch(
         "created_by": admin_identity,
         "notes": notes or None,
         "distribution_disabled": False,
-        "provisional": True,
+        # Upload lifecycle (Risk 3): a batch is never claimable until it
+        # reaches "ready" — a process crash mid-upload leaves it stuck at
+        # "staging" (non-claimable, auditable, repairable via reconcile_batch),
+        # never silently exposed as Active.
+        "upload_status": "staging",
+        "submitted_count": submitted,
+        "inserted_count": 0,
+        "duplicate_count": 0,
+        "invalid_count": invalid_count,
+        "upload_started_at": now_utc,
+        "upload_completed_at": None,
+        "upload_failed_at": None,
+        "upload_error_code": None,
     }
     batch_id = db.affiliate_voucher_batches.insert_one(batch_doc).inserted_id
+    logger.info(
+        "[AFF_VOUCHER_BATCH][UPLOAD_START] admin=%s batch_id=%s pool_id=%s submitted=%s",
+        admin_identity, batch_id, pool_id, submitted,
+    )
 
     inserted = 0
     duplicate_in_db = 0
@@ -420,18 +469,41 @@ def create_batch(
             if _is_duplicate_key_error(exc):
                 duplicate_in_db += 1
                 continue
-            # Anything else is a genuine write failure — never leave a
-            # provisional batch document *or* its already-inserted voucher
-            # rows behind: an orphaned row would still carry its own active
-            # window and be claimable even though the batch is invisible to
-            # the dashboard and no longer participates in overlap checks.
-            _bulk_delete_rows(db.voucher_pools, {"batch_id": batch_id})
-            db.affiliate_voucher_batches.delete_one({"_id": batch_id})
-            logger.error(
-                "[AFF_VOUCHER_BATCH][CREATE_FAIL] admin=%s pool_id=%s batch_id=%s reason=insert_error err=%s",
-                admin_identity, pool_id, batch_id, exc,
+            # A genuine write failure (or a process crash resuming here on
+            # retry) must never leave a batch that looks claimable. Mark it
+            # "failed" with a safe summary and *keep* it — and whatever rows
+            # made it in — for audit/reconciliation instead of silently
+            # deleting evidence; upload_status != "ready" already keeps
+            # every row non-claimable regardless of the schedule window.
+            error_code = exc.__class__.__name__
+            db.affiliate_voucher_batches.update_one(
+                {"_id": batch_id},
+                {
+                    "$set": {
+                        "upload_status": "failed",
+                        "available_count": inserted,
+                        "uploaded_count": inserted,
+                        "inserted_count": inserted,
+                        "duplicate_count": duplicate_in_upload + duplicate_in_db,
+                        "upload_failed_at": now_utc,
+                        "upload_error_code": error_code,
+                    }
+                },
             )
-            raise
+            logger.error(
+                "[AFF_VOUCHER_BATCH][UPLOAD_FAILED] admin=%s pool_id=%s batch_id=%s inserted_so_far=%s reason=insert_error err=%s",
+                admin_identity, pool_id, batch_id, inserted, error_code,
+            )
+            return {
+                "ok": False,
+                "code": "upload_failed",
+                "batch_id": str(batch_id),
+                "message": "The upload failed partway through and was marked Failed for review. No codes from this batch can be distributed; use Reconcile/Retry from the dashboard.",
+                "submitted": submitted,
+                "inserted": inserted,
+                "duplicates": duplicate_in_upload + duplicate_in_db,
+                "invalid": invalid_count,
+            }
 
     total_duplicates = duplicate_in_upload + duplicate_in_db
 
@@ -478,12 +550,25 @@ def create_batch(
 
     db.affiliate_voucher_batches.update_one(
         {"_id": batch_id},
-        {"$set": {"available_count": inserted, "uploaded_count": inserted, "provisional": False}},
+        {
+            "$set": {
+                "available_count": inserted,
+                "uploaded_count": inserted,
+                "upload_status": "ready",
+                "inserted_count": inserted,
+                "duplicate_count": total_duplicates,
+                "upload_completed_at": now_utc,
+            }
+        },
     )
     logger.info(
         "[AFF_VOUCHER_BATCH][CREATE_OK] admin=%s batch_id=%s pool_id=%s starts_at=%s ends_at=%s submitted=%s inserted=%s duplicates=%s invalid=%s",
         admin_identity, batch_id, pool_id, starts_at_utc.isoformat(), ends_at_utc.isoformat(),
         submitted, inserted, total_duplicates, invalid_count,
+    )
+    logger.info(
+        "[AFF_VOUCHER_BATCH][UPLOAD_READY] admin=%s batch_id=%s pool_id=%s inserted=%s",
+        admin_identity, batch_id, pool_id, inserted,
     )
     batch = db.affiliate_voucher_batches.find_one({"_id": batch_id})
     return {
@@ -499,6 +584,35 @@ def create_batch(
     }
 
 
+def _tier_entered_scheduled_mode(db, *, pool_id: str, reference_utc: datetime) -> bool:
+    """True once the earliest batch ever created for this tier (any
+    status) had already started as of ``reference_utc`` — the same
+    permanent, one-way legacy-fallback cutover used by the claim path in
+    ``affiliate_rewards.py``, kept here too so the dashboard can show it.
+    """
+    starts = [
+        _as_aware_utc(row.get("starts_at"))
+        for row in db.affiliate_voucher_batches.find({"pool_id": pool_id})
+    ]
+    starts = [s for s in starts if s is not None]
+    if not starts:
+        return False
+    return min(starts) <= reference_utc
+
+
+def _legacy_fallback_status(db, *, pool_id: str | None, now_utc: datetime) -> list:
+    pools = [str(pool_id).strip().upper()] if pool_id else list(BATCH_POOL_IDS)
+    out = []
+    for pid in pools:
+        entered = _tier_entered_scheduled_mode(db, pool_id=pid, reference_utc=now_utc)
+        out.append({
+            "pool_id": pid,
+            "entered_scheduled_mode": entered,
+            "legacy_fallback_allowed": not entered,
+        })
+    return out
+
+
 def list_batches(db, *, pool_id=None, status=None, month=None, include_expired=False, now_utc: datetime | None = None) -> dict:
     now_utc = now_utc or datetime.now(timezone.utc)
     query = {}
@@ -510,7 +624,7 @@ def list_batches(db, *, pool_id=None, status=None, month=None, include_expired=F
         doc = _hydrate_live_counts(db, raw_doc)
         derived = derive_batch_status(doc, now_utc)
         if month:
-            starts_at = doc.get("starts_at")
+            starts_at = _as_aware_utc(doc.get("starts_at"))
             if not starts_at or starts_at.astimezone(KL_TZ).strftime("%Y-%m") != str(month).strip():
                 continue
         if derived == "expired" and not include_expired and status != "expired":
@@ -525,6 +639,7 @@ def list_batches(db, *, pool_id=None, status=None, month=None, include_expired=F
         "ok": True,
         "items": items,
         "legacy_summary": _legacy_unbounded_summary(db, pool_id=pool_id),
+        "legacy_fallback": _legacy_fallback_status(db, pool_id=pool_id, now_utc=now_utc),
         "server_now_utc": now_utc.isoformat(),
     }
 
@@ -639,6 +754,12 @@ def set_batch_distribution_disabled(db, batch_id, *, admin_identity: str, disabl
     if not batch:
         return _fail("batch_not_found", "Batch not found.")
 
+    if not disabled and batch.get("upload_status") == "failed":
+        return _fail(
+            "target_batch_failed_cannot_enable",
+            "This batch failed to upload and cannot be re-enabled. Use Reconcile or re-upload instead.",
+        )
+
     db.affiliate_voucher_batches.update_one(
         {"_id": oid}, {"$set": {"distribution_disabled": bool(disabled), "updated_at": now_utc}}
     )
@@ -653,6 +774,52 @@ def set_batch_distribution_disabled(db, batch_id, *, admin_identity: str, disabl
     )
     updated = db.affiliate_voucher_batches.find_one({"_id": oid})
     return {"ok": True, "batch": _serialize_batch(_hydrate_live_counts(db, updated), now_utc=now_utc)}
+
+
+def reconcile_batch(db, batch_id, *, admin_identity: str | None = None, now_utc: datetime | None = None) -> dict:
+    """Recount ``voucher_pools`` rows for this batch and repair its upload
+    lifecycle:
+      - recomputes available/issued/uploaded counts from the actual rows
+        (the authoritative source — never trusted from the cached fields)
+      - a ``staging`` batch with any rows found becomes ``ready`` (the
+        crash-after-partial-insert recovery case)
+      - a ``staging`` batch with zero rows becomes ``failed`` (nothing to
+        distribute, not recoverable)
+      - ``ready``/``failed``/``disabled`` batches just get their counts
+        refreshed — this is always safe to call, including repeatedly.
+    """
+    now_utc = now_utc or datetime.now(timezone.utc)
+    oid = _as_object_id(batch_id)
+    if oid is None:
+        return _fail("batch_not_found", "Batch not found.")
+    batch = db.affiliate_voucher_batches.find_one({"_id": oid})
+    if not batch:
+        return _fail("batch_not_found", "Batch not found.")
+
+    available = int(db.voucher_pools.count_documents({"batch_id": oid, "status": "available"}))
+    issued = int(db.voucher_pools.count_documents({"batch_id": oid, "status": "issued"}))
+    total = available + issued
+
+    update = {"available_count": available, "issued_count": issued, "uploaded_count": total}
+    new_status = batch.get("upload_status")
+    if new_status == "staging":
+        if total > 0:
+            new_status = "ready"
+            update["upload_status"] = "ready"
+            update["upload_completed_at"] = now_utc
+        else:
+            new_status = "failed"
+            update["upload_status"] = "failed"
+            update["upload_failed_at"] = now_utc
+            update["upload_error_code"] = batch.get("upload_error_code") or "no_rows_found_on_reconcile"
+
+    db.affiliate_voucher_batches.update_one({"_id": oid}, {"$set": update})
+    logger.info(
+        "[AFF_VOUCHER_BATCH][RECONCILE] admin=%s batch_id=%s pool_id=%s available=%s issued=%s upload_status=%s",
+        admin_identity, oid, batch.get("pool_id"), available, issued, new_status,
+    )
+    updated = db.affiliate_voucher_batches.find_one({"_id": oid})
+    return {"ok": True, "batch": _serialize_batch(updated, now_utc=now_utc)}
 
 
 # ---------------------------------------------------------------------------
@@ -740,6 +907,15 @@ def register_routes(require_admin_from_query, admin_identity_fn, db_ref):
             )
             return _status_response(result)
         result = update_batch(db_ref(), batch_id, admin_identity=admin_identity_fn(), updates=data)
+        return _status_response(result)
+
+    @affiliate_voucher_batches_bp.post("/api/admin/affiliate-voucher-batches/<batch_id>/reconcile")
+    def api_reconcile_affiliate_voucher_batch(batch_id):
+        ok, err = require_admin_from_query()
+        if not ok:
+            msg, code = err
+            return jsonify({"ok": False, "code": "unauthorized", "message": msg}), code
+        result = reconcile_batch(db_ref(), batch_id, admin_identity=admin_identity_fn())
         return _status_response(result)
 
     return affiliate_voucher_batches_bp
