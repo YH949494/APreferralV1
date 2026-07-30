@@ -256,10 +256,14 @@ def _row_in_active_window(row: dict, now_utc: datetime) -> bool:
     """
     if row.get("batch_id") is None:
         return True
-    starts_at = row.get("starts_at")
-    ends_at = row.get("ends_at")
+    # database.py opens MongoClient without tz_aware=True, so a real
+    # MongoDB hands back naive datetimes here while now_utc stays aware —
+    # normalize before comparing or this raises TypeError.
+    starts_at = _as_aware_utc(row.get("starts_at"))
+    ends_at = _as_aware_utc(row.get("ends_at"))
     if starts_at is None or ends_at is None:
         return False
+    now_utc = _as_aware_utc(now_utc) or now_utc
     return starts_at <= now_utc < ends_at
 
 
@@ -303,7 +307,11 @@ def _claim_voucher_from_pool(db, *, pool_id: str, ledger_id, user_id: int, now_u
         if not _row_in_active_window(candidate, now_utc):
             continue
         voucher = db.voucher_pools.find_one_and_update(
-            {"_id": candidate["_id"], "status": "available"},
+            # Recheck distribution_disabled here too: an admin's emergency
+            # stop can land between the candidate read above and this
+            # claim, and a stale candidate must not be issuable just
+            # because it looked fine a moment ago.
+            {"_id": candidate["_id"], "status": "available", "distribution_disabled": {"$ne": True}},
             {
                 "$set": {
                     "status": "issued",

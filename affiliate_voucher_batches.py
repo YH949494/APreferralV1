@@ -84,16 +84,35 @@ def parse_kl_local_to_utc(local_str: str, tz_name: str | None = None) -> datetim
     return localized.astimezone(timezone.utc)
 
 
+def _as_aware_utc(dt: datetime | None) -> datetime | None:
+    """``database.py`` opens ``MongoClient`` without ``tz_aware=True``, so a
+    datetime read back from a real MongoDB is naive (but always a UTC
+    instant). Every value fetched from ``voucher_pools``/
+    ``affiliate_voucher_batches`` must pass through here before it's
+    compared against (aware) ``now_utc`` or converted with
+    ``.astimezone()`` — otherwise a naive-vs-aware comparison raises
+    ``TypeError``, and ``.astimezone()`` on a naive value would wrongly
+    treat it as local time instead of UTC.
+    """
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
 def _to_kl_iso(dt: datetime | None) -> str | None:
+    dt = _as_aware_utc(dt)
     if dt is None:
         return None
     return dt.astimezone(KL_TZ).isoformat()
 
 
 def _to_utc_iso(dt: datetime | None) -> str | None:
+    dt = _as_aware_utc(dt)
     if dt is None:
         return None
-    return dt.astimezone(timezone.utc).isoformat()
+    return dt.isoformat()
 
 
 def _fail(code: str, message: str) -> dict:
@@ -140,11 +159,11 @@ def derive_batch_status(batch: dict, now_utc: datetime | None = None) -> str:
     """Status derived from time + inventory + emergency controls —
     never trust a manually maintained status field as the source of truth.
     """
-    now_utc = now_utc or datetime.now(timezone.utc)
+    now_utc = _as_aware_utc(now_utc) or datetime.now(timezone.utc)
     if bool(batch.get("distribution_disabled")):
         return "disabled"
-    starts_at = batch.get("starts_at")
-    ends_at = batch.get("ends_at")
+    starts_at = _as_aware_utc(batch.get("starts_at"))
+    ends_at = _as_aware_utc(batch.get("ends_at"))
     if starts_at and now_utc < starts_at:
         return "scheduled"
     if ends_at and now_utc >= ends_at:
@@ -159,8 +178,8 @@ _STATUS_ORDER = {"active": 0, "scheduled": 1, "exhausted": 2, "expired": 3, "dis
 
 def _sort_key(batch: dict, status: str):
     order = _STATUS_ORDER.get(status, 5)
-    starts_at = batch.get("starts_at")
-    ends_at = batch.get("ends_at")
+    starts_at = _as_aware_utc(batch.get("starts_at"))
+    ends_at = _as_aware_utc(batch.get("ends_at"))
     if status == "expired" and ends_at:
         secondary = -ends_at.timestamp()
     elif starts_at:
@@ -237,6 +256,20 @@ def _bulk_update_rows(collection, query: dict, update: dict):
     count = 0
     for row in collection.find(query, projection={"_id": 1}):
         collection.update_one({"_id": row["_id"]}, update)
+        count += 1
+    return count
+
+
+def _bulk_delete_rows(collection, query: dict) -> int:
+    """delete_many when the driver supports it (real MongoDB); otherwise a
+    find + delete_one loop for the lightweight FakeCollection test doubles.
+    """
+    if hasattr(collection, "delete_many"):
+        result = collection.delete_many(query)
+        return int(getattr(result, "deleted_count", 0) or 0)
+    count = 0
+    for row in list(collection.find(query, projection={"_id": 1})):
+        collection.delete_one({"_id": row["_id"]})
         count += 1
     return count
 
@@ -388,7 +421,11 @@ def create_batch(
                 duplicate_in_db += 1
                 continue
             # Anything else is a genuine write failure — never leave a
-            # provisional batch document with a broken/partial upload.
+            # provisional batch document *or* its already-inserted voucher
+            # rows behind: an orphaned row would still carry its own active
+            # window and be claimable even though the batch is invisible to
+            # the dashboard and no longer participates in overlap checks.
+            _bulk_delete_rows(db.voucher_pools, {"batch_id": batch_id})
             db.affiliate_voucher_batches.delete_one({"_id": batch_id})
             logger.error(
                 "[AFF_VOUCHER_BATCH][CREATE_FAIL] admin=%s pool_id=%s batch_id=%s reason=insert_error err=%s",
@@ -413,6 +450,30 @@ def create_batch(
             "duplicates": total_duplicates,
             "invalid": invalid_count,
             "total_batch_inventory": 0,
+        }
+
+    # Close the race between two concurrent same-tier create requests that
+    # both passed the pre-insert overlap check before either had committed:
+    # re-check for an overlapping batch now that this one is fully visible.
+    # Deterministic tie-break so exactly one side survives — the batch
+    # created later (the larger _id) is the one that self-aborts, and the
+    # earlier batch's own post-check will simply find nothing (its insert
+    # already happened first) and proceed normally.
+    post_overlap = _find_overlapping_batch(
+        db, pool_id=pool_id, starts_at_utc=starts_at_utc, ends_at_utc=ends_at_utc, exclude_batch_id=batch_id
+    )
+    if post_overlap and post_overlap.get("_id") < batch_id:
+        _bulk_delete_rows(db.voucher_pools, {"batch_id": batch_id, "status": "available"})
+        db.affiliate_voucher_batches.delete_one({"_id": batch_id})
+        logger.warning(
+            "[AFF_VOUCHER_BATCH][OVERLAP_BLOCK] admin=%s pool_id=%s batch_id=%s conflicting_batch_id=%s reason=post_commit_race",
+            admin_identity, pool_id, batch_id, post_overlap.get("_id"),
+        )
+        return {
+            "ok": False,
+            "code": "batch_window_overlap",
+            "conflicting_batch_id": str(post_overlap.get("_id")),
+            "message": f"This {pool_id} batch overlaps an existing scheduled or active batch.",
         }
 
     db.affiliate_voucher_batches.update_one(
@@ -509,8 +570,8 @@ def update_batch(db, batch_id, *, admin_identity: str, updates: dict, now_utc: d
         set_fields["notes"] = updates.get("notes")
 
     wants_date_change = "starts_at_local" in updates or "ends_at_local" in updates
-    new_starts_at = batch.get("starts_at")
-    new_ends_at = batch.get("ends_at")
+    new_starts_at = _as_aware_utc(batch.get("starts_at"))
+    new_ends_at = _as_aware_utc(batch.get("ends_at"))
     if wants_date_change:
         live_issued_count = int(_hydrate_live_counts(db, batch).get("issued_count") or 0)
         if live_issued_count > 0:

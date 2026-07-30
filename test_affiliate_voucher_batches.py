@@ -501,6 +501,151 @@ class TestFrontendErrorMapping:
         assert "btnStop(btn)" in submit_body
 
 
+# ---------------------------------------------------------------------------
+# Regression coverage for code-review findings
+# ---------------------------------------------------------------------------
+
+class TestNaiveDatetimeFromRealMongo:
+    """``database.py`` opens ``MongoClient`` without ``tz_aware=True``, so a
+    real (non-fake) MongoDB hands back naive datetimes for every stored
+    field while ``now_utc`` stays aware. Every comparison/conversion must
+    survive that without raising ``TypeError: can't compare offset-naive
+    and offset-aware datetimes``.
+    """
+
+    def _naive(self, dt):
+        return dt.replace(tzinfo=None)
+
+    def test_derive_batch_status_handles_naive_stored_datetimes(self):
+        aware_now = datetime(2026, 8, 15, tzinfo=timezone.utc)
+        batch = {
+            "starts_at": self._naive(datetime(2026, 8, 1, tzinfo=timezone.utc)),
+            "ends_at": self._naive(datetime(2026, 9, 1, tzinfo=timezone.utc)),
+            "available_count": 3,
+        }
+        assert avb.derive_batch_status(batch, aware_now) == "active"
+
+    def test_claim_handles_naive_stored_window_fields(self):
+        db = _db()
+        res = _create(db, codes=["A1"])
+        # Simulate what a real (non-tz_aware) MongoClient round-trip would
+        # hand back: naive datetimes on the stored row.
+        db.voucher_pools.update_one(
+            {"pool_id": "T1", "code": "A1"},
+            {"$set": {
+                "starts_at": self._naive(avb.parse_kl_local_to_utc("2026-08-01 00:00:00")),
+                "ends_at": self._naive(avb.parse_kl_local_to_utc("2026-09-01 00:00:00")),
+            }},
+        )
+        during_window = datetime(2026, 8, 15, tzinfo=timezone.utc)
+        voucher = ar._claim_voucher_from_pool(db, pool_id="T1", ledger_id="L1", user_id=1, now_utc=during_window)
+        assert voucher is not None
+        assert voucher["code"] == "A1"
+
+    def test_kl_iso_conversion_treats_naive_value_as_utc(self):
+        naive = self._naive(datetime(2026, 8, 1, tzinfo=timezone.utc))
+        assert avb._to_kl_iso(naive) == "2026-08-01T08:00:00+08:00"
+        assert avb._to_utc_iso(naive) == "2026-08-01T00:00:00+00:00"
+
+    def test_list_batches_survives_naive_datetimes(self):
+        db = _db()
+        _create(db)
+        for doc in db.affiliate_voucher_batches.find({}):
+            db.affiliate_voucher_batches.update_one(
+                {"_id": doc["_id"]},
+                {"$set": {"starts_at": self._naive(doc["starts_at"]), "ends_at": self._naive(doc["ends_at"])}},
+            )
+        result = avb.list_batches(db, now_utc=datetime(2026, 8, 15, tzinfo=timezone.utc))
+        assert result["ok"] is True
+
+
+class TestDisableRaceInAtomicClaim:
+    def test_disable_landing_between_candidate_read_and_claim_is_rechecked(self):
+        db = _db()
+        res = _create(db, codes=["ONLYCODE"])
+        during_window = datetime(2026, 8, 15, tzinfo=timezone.utc)
+
+        real_find = db.voucher_pools.find
+
+        def find_then_disable(*args, **kwargs):
+            results = real_find(*args, **kwargs)
+            # Simulate an admin's emergency-stop PATCH completing in the
+            # instant between this candidate read and the atomic claim
+            # below — the row looked fine when read, but shouldn't be
+            # issuable anymore.
+            db.voucher_pools.update_one({"code": "ONLYCODE"}, {"$set": {"distribution_disabled": True}})
+            return results
+
+        db.voucher_pools.find = find_then_disable
+        try:
+            voucher = ar._claim_voucher_from_pool(db, pool_id="T1", ledger_id="L1", user_id=1, now_utc=during_window)
+        finally:
+            db.voucher_pools.find = real_find
+
+        assert voucher is None
+        row = db.voucher_pools.find_one({"code": "ONLYCODE"})
+        assert row["status"] == "available"  # never flipped to issued
+
+
+class TestOverlapCreateRace:
+    def test_concurrent_creates_deterministically_resolve_to_one_winner(self):
+        db = _db()
+        real_find_overlap = avb._find_overlapping_batch
+        call_count = {"n": 0}
+
+        def racy_find_overlap(*args, **kwargs):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                # The pre-insert overlap check for the *second* racing
+                # request runs before the first request's batch is visible.
+                return None
+            return real_find_overlap(*args, **kwargs)
+
+        first = _create(db, name="Winner", starts="2026-08-01 00:00:00", ends="2026-09-01 00:00:00", codes=["A1"])
+        assert first["ok"] is True
+
+        avb._find_overlapping_batch = racy_find_overlap
+        try:
+            second = _create(db, name="Loser", starts="2026-08-15 00:00:00", ends="2026-09-15 00:00:00", codes=["B1"])
+        finally:
+            avb._find_overlapping_batch = real_find_overlap
+
+        assert second["ok"] is False
+        assert second["code"] == "batch_window_overlap"
+        # The loser's batch document and voucher rows must both be gone —
+        # no orphaned batch, no orphaned (still-claimable) codes.
+        assert db.affiliate_voucher_batches.count_documents({"batch_name": "Loser"}) == 0
+        assert db.voucher_pools.count_documents({"code": "B1"}) == 0
+        # The winner is untouched.
+        assert db.affiliate_voucher_batches.count_documents({"batch_name": "Winner"}) == 1
+
+
+class TestPartialUploadFailureCleansUpRows:
+    def test_non_duplicate_insert_error_removes_already_inserted_rows(self):
+        db = _db()
+        real_insert_one = db.voucher_pools.insert_one
+        call_count = {"n": 0}
+
+        def flaky_insert_one(doc):
+            call_count["n"] += 1
+            if call_count["n"] == 2:
+                raise RuntimeError("simulated transient write failure")
+            return real_insert_one(doc)
+
+        db.voucher_pools.insert_one = flaky_insert_one
+        try:
+            with pytest.raises(RuntimeError):
+                _create(db, codes=["A1", "A2", "A3"])
+        finally:
+            db.voucher_pools.insert_one = real_insert_one
+
+        # "A1" was inserted before the simulated failure on "A2" — it must
+        # not survive as an orphaned, still-claimable row once the batch
+        # document itself is rolled back.
+        assert db.voucher_pools.count_documents({"code": "A1"}) == 0
+        assert db.affiliate_voucher_batches.count_documents({}) == 0
+
+
 if __name__ == "__main__":
     import sys
     sys.exit(pytest.main([__file__, "-v"]))
