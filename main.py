@@ -8671,6 +8671,24 @@ async def generate_referral_link_callback(update: Update, context: ContextTypes.
     )
     logger.info("[REFERRAL][START_CALLBACK_OK] uid=%s", uid)
 
+def resolve_weekly_referral_post_legacy_guard(growth_leaderboard_enabled, weekly_ref_post_chat_id: str) -> dict:
+    """Decide whether the deprecated growth_leaderboard_weekly job may
+    register alongside the authoritative weekly_referral_post job.
+
+    weekly_referral_post is always registered and is the only job that
+    should ever publish the public Sunday "Top 5 Growth Leaders" post. This
+    helper is pure (no scheduler/env access) so the conflict/deprecation
+    logic can be unit tested without booting run_worker().
+    """
+    weekly_ref_post_configured = bool((weekly_ref_post_chat_id or "").strip())
+    conflict = bool(growth_leaderboard_enabled) and weekly_ref_post_configured
+    return {
+        "weekly_ref_post_configured": weekly_ref_post_configured,
+        "conflict": conflict,
+        "register_legacy": bool(growth_leaderboard_enabled) and not conflict,
+    }
+
+
 # ----------------------------
 # Run Bot + Flask + Scheduler
 # ----------------------------
@@ -8970,25 +8988,49 @@ def run_worker():
         replace_existing=True,
     )
 
-    def _guarded_growth_leaderboard():
-        if not GROWTH_LEADERBOARD_CHANNEL_ID:
-            logger.warning("[GROWTH_LEADERBOARD] enabled but missing GROWTH_LEADERBOARD_CHANNEL_ID")
-            return None
-        return post_growth_leaderboard_weekly()
-
-    growth_tz = pytz.timezone(GROWTH_LEADERBOARD_TIMEZONE)
-    scheduler.add_job(
-        _guarded_job("growth_leaderboard_weekly", _guarded_growth_leaderboard, default=GROWTH_LEADERBOARD_ENABLED, feature_flag="growth_leaderboard"),
-        trigger=CronTrigger(
-            day_of_week=GROWTH_LEADERBOARD_CRON_DAY.lower(),
-            hour=GROWTH_LEADERBOARD_CRON_HOUR,
-            minute=GROWTH_LEADERBOARD_CRON_MINUTE,
-            timezone=growth_tz,
-        ),
-        id="growth_leaderboard_weekly",
-        name="Growth Leaderboard Weekly",
-        replace_existing=True,
+    # --- Legacy growth_leaderboard_weekly vs. authoritative weekly_referral_post ---
+    # growth_leaderboard_weekly is deprecated (see scheduler.post_growth_leaderboard_weekly
+    # docstring/comment): it ranks by qualified_events, not the authoritative
+    # users.weekly_referrals snapshot. weekly_referral_post below is the only
+    # job that should ever publish the public Sunday "Top 5 Growth Leaders" post.
+    # If both are configured, refuse to register the legacy job so only one
+    # Sunday leaderboard job (and one Telegram send path) can ever fire.
+    _legacy_guard = resolve_weekly_referral_post_legacy_guard(
+        GROWTH_LEADERBOARD_ENABLED, os.getenv("WEEKLY_REF_POST_CHAT_ID", "")
     )
+    if _legacy_guard["conflict"]:
+        logger.warning(
+            "[WEEKLY_REF_POST][LEGACY_CONFLICT] growth_leaderboard_enabled=%s weekly_ref_post_chat_id_configured=%s action=legacy_job_not_registered",
+            GROWTH_LEADERBOARD_ENABLED,
+            _legacy_guard["weekly_ref_post_configured"],
+        )
+    elif GROWTH_LEADERBOARD_ENABLED:
+        logger.warning(
+            "[GROWTH_LEADERBOARD][DEPRECATED] growth_leaderboard_weekly is deprecated and ranks by qualified_events, "
+            "which may not match the authoritative users.weekly_referrals snapshot used by weekly_referral_post; "
+            "configure WEEKLY_REF_POST_CHAT_ID and migrate off this job."
+        )
+
+    if _legacy_guard["register_legacy"]:
+        def _guarded_growth_leaderboard():
+            if not GROWTH_LEADERBOARD_CHANNEL_ID:
+                logger.warning("[GROWTH_LEADERBOARD] enabled but missing GROWTH_LEADERBOARD_CHANNEL_ID")
+                return None
+            return post_growth_leaderboard_weekly()
+
+        growth_tz = pytz.timezone(GROWTH_LEADERBOARD_TIMEZONE)
+        scheduler.add_job(
+            _guarded_job("growth_leaderboard_weekly", _guarded_growth_leaderboard, default=GROWTH_LEADERBOARD_ENABLED, feature_flag="growth_leaderboard"),
+            trigger=CronTrigger(
+                day_of_week=GROWTH_LEADERBOARD_CRON_DAY.lower(),
+                hour=GROWTH_LEADERBOARD_CRON_HOUR,
+                minute=GROWTH_LEADERBOARD_CRON_MINUTE,
+                timezone=growth_tz,
+            ),
+            id="growth_leaderboard_weekly",
+            name="Growth Leaderboard Weekly",
+            replace_existing=True,
+        )
 
     def _guarded_weekly_referral_post():
         if not (os.getenv("WEEKLY_REF_POST_CHAT_ID", "") or "").strip():

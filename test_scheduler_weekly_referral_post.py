@@ -40,6 +40,34 @@ class _FakeUsersCollection:
         return _FakeCursor(matched)
 
 
+def _match_clause(doc, key, cond):
+    value = doc.get(key)
+    if isinstance(cond, dict):
+        if "$in" in cond and value not in cond["$in"]:
+            return False
+        if "$lt" in cond and not (value is not None and value < cond["$lt"]):
+            return False
+        return True
+    return value == cond
+
+
+def _match_filter(doc, filt):
+    for key, cond in filt.items():
+        if key == "$or":
+            if not any(_match_filter(doc, sub) for sub in cond):
+                return False
+            continue
+        if not _match_clause(doc, key, cond):
+            return False
+    return True
+
+
+class _UpdateResult:
+    def __init__(self, modified_count):
+        self.modified_count = modified_count
+        self.matched_count = modified_count
+
+
 class _FakePostsCollection:
     def __init__(self):
         self.docs = {}
@@ -55,8 +83,11 @@ class _FakePostsCollection:
 
     def update_one(self, filt, update, upsert=False):
         _id = filt.get("_id")
-        if _id in self.docs:
-            self.docs[_id].update(update.get("$set", {}))
+        d = self.docs.get(_id)
+        if d is None or not _match_filter(d, filt):
+            return _UpdateResult(0)
+        d.update(update.get("$set", {}))
+        return _UpdateResult(1)
 
 
 class _FakeHistoryCollection:
@@ -207,6 +238,44 @@ def test_frozen_ranking_unchanged_between_retries():
     assert [e["user_id"] for e in second["entries"]] == [1]
     text = post_mock.call_args.kwargs["json"]["text"]
     assert "new" not in text
+
+
+def test_concurrent_claim_only_one_worker_sends():
+    # Two workers both read the same "frozen" doc before either attempts
+    # delivery (the race Codex flagged: an unconditional status="sending"
+    # write lets both proceed to call Telegram). The claim update must be
+    # conditioned on the doc still being frozen/failed so only one worker's
+    # update_one actually flips status - the other must observe
+    # modified_count == 0 and back off without sending.
+    fake_db = _FakeDb(users_docs=[{"user_id": 1, "username": "a", "weekly_referrals": 5}])
+    with _env():
+        scheduler.publish_weekly_referral_post(
+            db_ref=fake_db, now_utc_ts=NOW, week_key="2026-07-20", dry_run=True
+        )
+    doc_id = "weekly_referral_post:2026-07-20"
+    assert fake_db.weekly_referral_posts.docs[doc_id]["status"] == "frozen"
+
+    claim_filter = {
+        "_id": doc_id,
+        "$or": [
+            {"status": {"$in": ["frozen", "failed"]}},
+            {"status": "sending", "attempted_at": {"$lt": NOW}},
+        ],
+    }
+    claim_update = {"$set": {"status": "sending", "attempted_at": NOW}}
+
+    worker_a = fake_db.weekly_referral_posts.update_one(claim_filter, claim_update)
+    worker_b = fake_db.weekly_referral_posts.update_one(claim_filter, claim_update)
+
+    assert worker_a.modified_count == 1  # worker A wins the claim
+    assert worker_b.modified_count == 0  # worker B must not also claim it
+
+    with _env(), patch.object(scheduler.requests, "post", return_value=_OkResp()) as post_mock:
+        result = scheduler.publish_weekly_referral_post(db_ref=fake_db, now_utc_ts=NOW, week_key="2026-07-20")
+    # doc is already "sending" (claimed) from worker A above and not stale,
+    # so a fresh call must not steal the claim or send again.
+    assert result["status"] == "sending"
+    post_mock.assert_not_called()
 
 
 def test_duplicate_invocation_does_not_duplicate_post():

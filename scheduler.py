@@ -1305,6 +1305,14 @@ def compute_affiliate_daily_kpi(day_utc: str, *, db_ref=None, now_utc_ts: dateti
     return payload
 
 
+# DEPRECATED: this legacy publisher ranks by a raw `qualified_events`
+# aggregation, not the authoritative `users.weekly_referrals` settlement-ledger
+# snapshot. It must NOT be used for the public Sunday "Top 5 Growth Leaders"
+# channel post — `publish_weekly_referral_post()` (job id `weekly_referral_post`)
+# is the authoritative implementation for that post. Kept only for backward
+# compatibility where GROWTH_LEADERBOARD_ENABLED was already relied on and
+# WEEKLY_REF_POST_CHAT_ID is not configured; see the startup conflict guard in
+# main.py's run_worker() scheduler registration.
 def post_growth_leaderboard_weekly(*, db_ref=None, now_utc_ts: datetime | None = None) -> bool:
     db_ref = db_ref or db
     now_utc_ts = now_utc_ts or now_utc()
@@ -1626,10 +1634,33 @@ def publish_weekly_referral_post(
         )
         return db_ref.weekly_referral_posts.find_one({"_id": doc_id})
 
-    db_ref.weekly_referral_posts.update_one(
-        {"_id": doc_id},
+    # Atomically claim the send slot: only an invocation that actually flips
+    # status frozen/failed -> sending is allowed to call Telegram. This is what
+    # prevents a concurrent scheduler retry, worker restart, or manual repair
+    # run from double-posting even though max_instances=1 only serializes
+    # executions within a single APScheduler instance. A "sending" claim older
+    # than the lease window is treated as abandoned (crashed mid-send) and can
+    # be reclaimed by a later retry.
+    claim_lease_cutoff = now_utc_ts - timedelta(minutes=10)
+    claim = db_ref.weekly_referral_posts.update_one(
+        {
+            "_id": doc_id,
+            "$or": [
+                {"status": {"$in": ["frozen", "failed"]}},
+                {"status": "sending", "attempted_at": {"$lt": claim_lease_cutoff}},
+            ],
+        },
         {"$set": {"status": "sending", "attempted_at": now_utc_ts}},
     )
+    if getattr(claim, "modified_count", 0) != 1:
+        current = db_ref.weekly_referral_posts.find_one({"_id": doc_id})
+        logger.info(
+            "[WEEKLY_REF_POST][SKIP_ALREADY_SENT] week_key=%s status=%s run_id=%s reason=claim_lost",
+            resolved_week_key,
+            (current or {}).get("status"),
+            run_id,
+        )
+        return current
 
     try:
         resp = requests.post(

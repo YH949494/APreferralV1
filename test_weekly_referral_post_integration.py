@@ -74,3 +74,42 @@ def test_sunday_2100_scheduler_job_registered_in_source():
     assert "hour=21" in block
     assert "minute=0" in block
     assert "timezone=KL_TZ" in block
+
+
+# --- Legacy growth_leaderboard_weekly vs. authoritative weekly_referral_post ---
+
+def test_legacy_disabled_new_configured_only_new_registers():
+    guard = main.resolve_weekly_referral_post_legacy_guard(False, "-100999")
+    assert guard["register_legacy"] is False
+    assert guard["conflict"] is False
+
+
+def test_legacy_enabled_new_configured_new_registers_legacy_does_not():
+    guard = main.resolve_weekly_referral_post_legacy_guard(True, "-100999")
+    assert guard["register_legacy"] is False
+    assert guard["conflict"] is True
+
+
+def test_legacy_enabled_without_new_configuration_preserves_legacy_backcompat():
+    guard = main.resolve_weekly_referral_post_legacy_guard(True, "")
+    assert guard["register_legacy"] is True
+    assert guard["conflict"] is False
+
+
+def test_legacy_disabled_without_new_configuration_neither_conflict_nor_register():
+    guard = main.resolve_weekly_referral_post_legacy_guard(False, "")
+    assert guard["register_legacy"] is False
+    assert guard["conflict"] is False
+
+
+def test_only_one_sunday_public_leaderboard_job_registers_when_conflicting():
+    src = open(os.path.join(os.path.dirname(main.__file__), "main.py"), encoding="utf-8").read()
+    # The legacy add_job call must be gated behind register_legacy, so a
+    # conflict (both legacy enabled and new configured) yields exactly one
+    # active Sunday leaderboard job: weekly_referral_post.
+    assert 'if _legacy_guard["register_legacy"]:' in src
+    legacy_block = re.search(
+        r'if _legacy_guard\["register_legacy"\]:\n(?:.*\n)*?\s*id="growth_leaderboard_weekly"',
+        src,
+    )
+    assert legacy_block, "growth_leaderboard_weekly add_job must be nested under the register_legacy guard"
