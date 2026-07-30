@@ -263,6 +263,172 @@ class TestEntitlementBatchAlignment:
 
 
 # ---------------------------------------------------------------------------
+# Final pre-deploy verification: a July entitlement must match only a batch
+# that fully contains July — never a batch that merely overlaps part of it.
+# ---------------------------------------------------------------------------
+
+JULY_START, JULY_END = ar._month_window_from_yyyymm("202607")
+
+
+class TestFullMonthContainmentMatching:
+    def test_exact_full_month_batch_matches(self):
+        db = _db()
+        july = _create(db, name="July T1", starts="2026-07-01 00:00:00", ends="2026-08-01 00:00:00", codes=["JUL1"])
+        matches = ar._find_batches_for_period(db, pool_id="T1", period_start_utc=JULY_START, period_end_utc=JULY_END)
+        assert len(matches) == 1
+        assert str(matches[0]["_id"]) == july["batch"]["batch_id"]
+
+    def test_wider_batch_covering_full_month_matches(self):
+        db = _db()
+        wide = _create(db, name="Wide", starts="2026-06-30 00:00:00", ends="2026-08-02 00:00:00", codes=["W1"])
+        matches = ar._find_batches_for_period(db, pool_id="T1", period_start_utc=JULY_START, period_end_utc=JULY_END)
+        assert len(matches) == 1
+        assert str(matches[0]["_id"]) == wide["batch"]["batch_id"]
+
+    def test_batch_starting_after_month_start_does_not_match(self):
+        db = _db()
+        _create(db, name="Late start", starts="2026-07-15 00:00:00", ends="2026-08-20 00:00:00", codes=["LS1"])
+        matches = ar._find_batches_for_period(db, pool_id="T1", period_start_utc=JULY_START, period_end_utc=JULY_END)
+        assert matches == []
+
+    def test_batch_ending_before_month_end_does_not_match(self):
+        db = _db()
+        _create(db, name="Early end", starts="2026-07-01 00:00:00", ends="2026-07-25 00:00:00", codes=["EE1"])
+        matches = ar._find_batches_for_period(db, pool_id="T1", period_start_utc=JULY_START, period_end_utc=JULY_END)
+        assert matches == []
+
+    def test_partial_cross_month_overlap_does_not_match(self):
+        db = _db()
+        _create(db, name="Cross-month", starts="2026-07-20 00:00:00", ends="2026-08-20 00:00:00", codes=["CM1"])
+        matches = ar._find_batches_for_period(db, pool_id="T1", period_start_utc=JULY_START, period_end_utc=JULY_END)
+        assert matches == []
+
+    def test_adjacent_next_month_batch_does_not_match_prior_month(self):
+        db = _db()
+        _create(db, name="August T1", starts="2026-08-01 00:00:00", ends="2026-09-01 00:00:00", codes=["AUG1"])
+        matches = ar._find_batches_for_period(db, pool_id="T1", period_start_utc=JULY_START, period_end_utc=JULY_END)
+        assert matches == []
+
+    def test_july_entitlement_cannot_receive_august_batch_via_resolution(self):
+        db = _db()
+        _create(db, name="August T1", starts="2026-08-01 00:00:00", ends="2026-09-01 00:00:00", codes=["AUG1"])
+        ledger = _monthly_ledger(db, year_month="202607")
+        resolved = ar._resolve_monthly_ledger_target(db, ledger, now_utc=datetime(2026, 8, 15, tzinfo=timezone.utc))
+        # No July-covering batch exists and the tier had not entered
+        # scheduled mode as of July (August batch starts after July) —
+        # this is the legitimate transitional-legacy case, never August.
+        assert resolved.get("target_mode") in (None, "legacy")
+        if resolved.get("target_batch_id") is not None:
+            pytest.fail("must never resolve to the August batch")
+
+    def test_missing_valid_july_batch_returns_unresolved_when_scheduled_mode_active(self):
+        db = _db()
+        _create(db, name="June T1", starts="2026-06-01 00:00:00", ends="2026-07-01 00:00:00", codes=["JUN1"])
+        _create(db, name="August T1", starts="2026-08-01 00:00:00", ends="2026-09-01 00:00:00", codes=["AUG1"])
+        ledger = _monthly_ledger(db, year_month="202607")
+        resolved = ar._resolve_monthly_ledger_target(db, ledger, now_utc=datetime(2026, 8, 15, tzinfo=timezone.utc))
+        assert resolved.get("target_mode") is None
+        assert resolved.get("target_batch_id") is None
+
+    def test_two_full_containment_matches_return_ambiguous_manual_review(self, caplog):
+        db = _db()
+        # Overlap protection at creation time should prevent this in
+        # practice; simulate it directly at the data layer to prove the
+        # resolver never guesses between conflicting matches.
+        first = _create(db, name="First", starts="2026-06-01 00:00:00", ends="2026-09-01 00:00:00", codes=["F1"])
+        db.affiliate_voucher_batches.insert_one({
+            "batch_name": "Second",
+            "pool_id": "T1",
+            "starts_at": datetime(2026, 6, 15, tzinfo=timezone.utc),
+            "ends_at": datetime(2026, 8, 15, tzinfo=timezone.utc),
+            "uploaded_count": 1,
+            "available_count": 1,
+            "issued_count": 0,
+            "distribution_disabled": False,
+            "upload_status": "ready",
+        })
+        ledger = _monthly_ledger(db, year_month="202607")
+        with caplog.at_level("ERROR"):
+            resolved = ar._resolve_monthly_ledger_target(db, ledger, now_utc=datetime(2026, 7, 15, tzinfo=timezone.utc))
+        assert resolved.get("target_mode") is None
+        assert resolved.get("target_batch_id") is None
+        assert any("TARGET_BATCH_AMBIGUOUS" in rec.message for rec in caplog.records)
+
+    def test_disabled_valid_july_batch_remains_target_no_fallthrough(self):
+        db = _db()
+        july = _create(db, name="July T1", starts="2026-07-01 00:00:00", ends="2026-08-01 00:00:00", codes=["JUL1"])
+        _create(db, name="August T1", starts="2026-08-01 00:00:00", ends="2026-09-01 00:00:00", codes=["AUG1"])
+        ledger = _monthly_ledger(db, year_month="202607")
+        now_utc = datetime(2026, 7, 5, tzinfo=timezone.utc)
+        resolved = ar._resolve_monthly_ledger_target(db, ledger, now_utc=now_utc)
+        avb.set_batch_distribution_disabled(db, july["batch"]["batch_id"], admin_identity="admin1", disabled=True, now_utc=now_utc)
+
+        # Re-resolving later (even after August is active) must not move
+        # off the disabled July target.
+        re_resolved = ar._resolve_monthly_ledger_target(
+            db, db.affiliate_ledger.find_one({"_id": ledger["_id"]}), now_utc=datetime(2026, 8, 15, tzinfo=timezone.utc)
+        )
+        assert re_resolved["target_batch_id"] == resolved["target_batch_id"]
+
+        vouchers, reason = ar._claim_affiliate_bundle_from_target_batch(
+            db, batch_id=re_resolved["target_batch_id"], pool_id="T1", ledger_id=ledger["_id"],
+            user_id=1, now_utc=datetime(2026, 8, 15, tzinfo=timezone.utc), voucher_count=1,
+        )
+        assert vouchers is None
+        assert reason == "target_batch_disabled"
+        assert db.voucher_pools.find_one({"code": "AUG1"})["status"] == "available"
+
+    def test_exhausted_valid_july_batch_remains_target_no_fallthrough(self):
+        db = _db()
+        july = _create(db, name="July T1", starts="2026-07-01 00:00:00", ends="2026-08-01 00:00:00", codes=["JUL1"])
+        _create(db, name="August T1", starts="2026-08-01 00:00:00", ends="2026-09-01 00:00:00", codes=["AUG1"])
+        ledger = _monthly_ledger(db, year_month="202607")
+        now_utc = datetime(2026, 7, 5, tzinfo=timezone.utc)
+        resolved = ar._resolve_monthly_ledger_target(db, ledger, now_utc=now_utc)
+        # Exhaust July's only code via another ledger.
+        ar._claim_voucher_from_pool(db, pool_id="T1", ledger_id="OTHER", user_id=99, now_utc=now_utc)
+
+        vouchers, reason = ar._claim_affiliate_bundle_from_target_batch(
+            db, batch_id=resolved["target_batch_id"], pool_id="T1", ledger_id=ledger["_id"],
+            user_id=1, now_utc=datetime(2026, 7, 25, tzinfo=timezone.utc), voucher_count=1,
+        )
+        assert vouchers is None
+        assert reason == "target_batch_empty"
+        assert db.voucher_pools.find_one({"code": "AUG1"})["status"] == "available"
+
+    def test_persisted_target_batch_id_never_replaced_on_retry(self):
+        db = _db()
+        july = _create(db, name="July T1", starts="2026-07-01 00:00:00", ends="2026-08-01 00:00:00", codes=["JUL1"])
+        ledger = _monthly_ledger(db, year_month="202607")
+        first = ar._resolve_monthly_ledger_target(db, ledger, now_utc=datetime(2026, 7, 5, tzinfo=timezone.utc))
+        # A wider "better" match shows up later — must never switch to it.
+        _create(db, name="Wider replacement attempt", pool_id="T2", starts="2026-06-01 00:00:00", ends="2026-09-01 00:00:00", codes=["WIDE1"])
+        second = ar._resolve_monthly_ledger_target(
+            db, db.affiliate_ledger.find_one({"_id": ledger["_id"]}), now_utc=datetime(2026, 7, 20, tzinfo=timezone.utc)
+        )
+        assert second["target_batch_id"] == first["target_batch_id"]
+        assert str(second["target_batch_id"]) == july["batch"]["batch_id"]
+
+    def test_kl_month_boundaries_convert_correctly_to_utc(self):
+        start_utc, end_utc = ar._month_window_from_yyyymm("202607")
+        assert start_utc == datetime(2026, 6, 30, 16, 0, tzinfo=timezone.utc)  # 2026-07-01 00:00 KL
+        assert end_utc == datetime(2026, 7, 31, 16, 0, tzinfo=timezone.utc)    # 2026-08-01 00:00 KL
+
+    def test_already_issued_ledger_unaffected_by_containment_fix(self):
+        db = _db()
+        _create(db, name="July T1", starts="2026-07-01 00:00:00", ends="2026-08-01 00:00:00", codes=["JUL1"])
+        ledger = _monthly_ledger(db, year_month="202607")
+        now_utc = datetime(2026, 7, 5, tzinfo=timezone.utc)
+        resolved = ar._resolve_monthly_ledger_target(db, ledger, now_utc=now_utc)
+        db.affiliate_ledger.update_one(
+            {"_id": ledger["_id"]}, {"$set": {"status": "ISSUED", "voucher_code": "JUL1"}},
+        )
+        issued = db.affiliate_ledger.find_one({"_id": ledger["_id"]})
+        re_resolved = ar._resolve_monthly_ledger_target(db, issued, now_utc=datetime(2026, 9, 1, tzinfo=timezone.utc))
+        assert re_resolved == issued  # untouched, byte-for-byte
+
+
+# ---------------------------------------------------------------------------
 # Risk 3: upload lifecycle
 # ---------------------------------------------------------------------------
 

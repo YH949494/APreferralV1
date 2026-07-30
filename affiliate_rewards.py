@@ -645,19 +645,28 @@ def _month_window_from_yyyymm(yyyymm) -> tuple[datetime | None, datetime | None]
     return start_kl.astimezone(timezone.utc), end_kl.astimezone(timezone.utc)
 
 
-def _find_batch_for_period(db, *, pool_id: str, period_start_utc: datetime) -> dict | None:
-    """The batch whose schedule window covers the first instant of an
-    entitlement period — i.e. "the batch for this month", independent of
-    what other batches exist for other months.
+def _find_batches_for_period(db, *, pool_id: str, period_start_utc: datetime, period_end_utc: datetime) -> list[dict]:
+    """All batches whose schedule window *fully contains* an entitlement
+    month — ``starts_at <= period_start_utc`` and ``ends_at >= period_end_utc``.
+
+    Deliberately full containment, not overlap: a batch that only
+    intersects part of the month (e.g. starts mid-month, or ends before
+    month-end) must never be treated as "the batch for this month" — that
+    is exactly the entitlement-to-batch drift this pinning exists to
+    prevent. Same-tier batches can never legitimately overlap (enforced at
+    creation/update), so more than one full-containment match should be
+    structurally impossible in normal operation; the caller treats it as
+    an ambiguous, unsafe-to-guess result rather than picking one.
     """
+    matches = []
     for row in db.affiliate_voucher_batches.find({"pool_id": pool_id}):
         starts_at = _as_aware_utc(row.get("starts_at"))
         ends_at = _as_aware_utc(row.get("ends_at"))
         if starts_at is None or ends_at is None:
             continue
-        if starts_at <= period_start_utc < ends_at:
-            return row
-    return None
+        if starts_at <= period_start_utc and ends_at >= period_end_utc:
+            matches.append(row)
+    return matches
 
 
 def _resolve_monthly_ledger_target(db, ledger: dict, *, now_utc: datetime) -> dict:
@@ -672,15 +681,30 @@ def _resolve_monthly_ledger_target(db, ledger: dict, *, now_utc: datetime) -> di
         return ledger  # already resolved — never re-resolve or switch
 
     ledger_id = ledger["_id"]
+    user_id = ledger.get("user_id")
     tier = str(ledger.get("tier") or "").strip().upper()
-    period_start_utc, _period_end_utc = _month_window_from_yyyymm(ledger.get("year_month"))
-    if period_start_utc is None:
+    year_month = ledger.get("year_month")
+    period_start_utc, period_end_utc = _month_window_from_yyyymm(year_month)
+    if period_start_utc is None or period_end_utc is None:
         # Malformed/missing year_month — leave unresolved; the caller's
         # pool-empty/manual-review path handles it, never legacy or a
         # guessed batch.
         return ledger
 
-    batch = _find_batch_for_period(db, pool_id=tier, period_start_utc=period_start_utc)
+    matches = _find_batches_for_period(db, pool_id=tier, period_start_utc=period_start_utc, period_end_utc=period_end_utc)
+    if len(matches) > 1:
+        # Same-tier batches can't legitimately overlap, so this should be
+        # structurally impossible — but never guess between them if it
+        # somehow happens. Stay unresolved; manual review, every time.
+        logger.error(
+            "[AFF_VOUCHER][TARGET_BATCH_AMBIGUOUS] ledger_id=%s user_id=%s pool_id=%s year_month=%s "
+            "month_start_utc=%s month_end_utc=%s conflicting_batch_ids=%s",
+            ledger_id, user_id, tier, year_month, period_start_utc.isoformat(), period_end_utc.isoformat(),
+            [str(m.get("_id")) for m in matches],
+        )
+        return ledger
+
+    batch = matches[0] if matches else None
     if batch:
         update = {
             "target_mode": "batch",
@@ -691,10 +715,15 @@ def _resolve_monthly_ledger_target(db, ledger: dict, *, now_utc: datetime) -> di
         }
     elif _tier_entered_scheduled_mode(db, pool_id=tier, reference_utc=period_start_utc):
         # Scheduled-batch mode had already begun for this tier by this
-        # entitlement's month, but no batch matches this exact month — a
+        # entitlement's month, but no batch fully covers this month — a
         # real gap, not a legacy-eligible ledger. Leave unresolved so the
         # caller routes to manual review; retried later in case the
         # missing batch gets uploaded (resolution is idempotent).
+        logger.warning(
+            "[AFF_VOUCHER][TARGET_BATCH_NOT_FOUND] ledger_id=%s user_id=%s pool_id=%s year_month=%s "
+            "month_start_utc=%s month_end_utc=%s",
+            ledger_id, user_id, tier, year_month, period_start_utc.isoformat(), period_end_utc.isoformat(),
+        )
         return ledger
     else:
         update = {
@@ -709,8 +738,10 @@ def _resolve_monthly_ledger_target(db, ledger: dict, *, now_utc: datetime) -> di
     )
     if getattr(res, "modified_count", 0) == 1:
         logger.info(
-            "[AFF_VOUCHER][TARGET_RESOLVED] ledger_id=%s tier=%s year_month=%s mode=%s batch_id=%s",
-            ledger_id, tier, ledger.get("year_month"), update["target_mode"], update.get("target_batch_id"),
+            "[AFF_VOUCHER][TARGET_BATCH_RESOLVED] ledger_id=%s user_id=%s pool_id=%s year_month=%s "
+            "month_start_utc=%s month_end_utc=%s mode=%s target_batch_id=%s",
+            ledger_id, user_id, tier, year_month, period_start_utc.isoformat(), period_end_utc.isoformat(),
+            update["target_mode"], update.get("target_batch_id"),
         )
     return db.affiliate_ledger.find_one({"_id": ledger_id}) or ledger
 
