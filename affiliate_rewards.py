@@ -746,6 +746,111 @@ def _resolve_monthly_ledger_target(db, ledger: dict, *, now_utc: datetime) -> di
     return db.affiliate_ledger.find_one({"_id": ledger_id}) or ledger
 
 
+_WELCOME_TARGET_REASON_MAP = {
+    "no_batch_for_entitlement_period": "no_welcome_batch_for_entitlement_time",
+    "target_batch_not_ready": "welcome_target_batch_not_ready",
+    "target_batch_disabled": "welcome_target_batch_disabled",
+    "target_batch_expired_unissued": "welcome_target_batch_expired_unissued",
+    "target_batch_scheduled": "welcome_target_batch_not_ready",
+    "target_batch_empty": "welcome_target_batch_empty",
+}
+
+
+def _find_batches_covering_instant(db, *, pool_id: str, instant_utc: datetime) -> list[dict]:
+    """All batches for ``pool_id`` whose schedule window covers a single
+    instant — ``starts_at <= instant_utc < ends_at``. Same-pool batches
+    can never legitimately overlap (enforced at creation/update), so more
+    than one match should be structurally impossible; callers treat that
+    as an ambiguous, unsafe-to-guess result rather than picking one.
+    """
+    matches = []
+    for row in db.affiliate_voucher_batches.find({"pool_id": pool_id}):
+        starts_at = _as_aware_utc(row.get("starts_at"))
+        ends_at = _as_aware_utc(row.get("ends_at"))
+        if starts_at is None or ends_at is None:
+            continue
+        if starts_at <= instant_utc < ends_at:
+            matches.append(row)
+    return matches
+
+
+def _resolve_welcome_ledger_target(db, ledger: dict, *, now_utc: datetime) -> dict:
+    """Pin a WELCOME ledger to exactly one voucher source — a specific
+    batch, or (transitionally) the legacy undated pool — the first time
+    it becomes issuable, and persist that choice forever.
+
+    Source of truth for "when the user earned this entitlement": the
+    ledger's own ``created_at`` (stamped once, on first eligibility
+    check, via ``$setOnInsert`` in ``issue_welcome_bonus_if_eligible``).
+    Resolving against that reference time — not whatever "now" a later
+    retry happens to run at — is what prevents an entitlement earned on
+    August 31st from silently drifting onto a September batch if the
+    retry lands after the rollover. Once resolved, ``target_mode``/
+    ``target_batch_id`` never change again, regardless of what batches
+    exist later.
+    """
+    if ledger.get("target_mode") in ("batch", "legacy"):
+        return ledger  # already resolved — never re-resolve or switch
+
+    ledger_id = ledger["_id"]
+    user_id = ledger.get("user_id")
+    reference_utc = _as_aware_utc(ledger.get("created_at"))
+    if reference_utc is None:
+        # No usable entitlement-time reference — leave unresolved; the
+        # caller's pool-empty/manual-review path handles it, never legacy
+        # or a guessed batch.
+        return ledger
+
+    matches = _find_batches_covering_instant(db, pool_id="WELCOME", instant_utc=reference_utc)
+    if len(matches) > 1:
+        logger.error(
+            "[WELCOME_VOUCHER][TARGET_BATCH_AMBIGUOUS] ledger_id=%s user_id=%s pool_id=WELCOME "
+            "entitlement_reference_utc=%s conflicting_batch_ids=%s",
+            ledger_id, user_id, reference_utc.isoformat(), [str(m.get("_id")) for m in matches],
+        )
+        return ledger
+
+    batch = matches[0] if matches else None
+    if batch:
+        update = {
+            "target_mode": "batch",
+            "target_batch_id": batch["_id"],
+            "target_batch_window_start": batch.get("starts_at"),
+            "target_batch_window_end": batch.get("ends_at"),
+            "target_resolved_at": now_utc,
+        }
+    elif _tier_entered_scheduled_mode(db, pool_id="WELCOME", reference_utc=reference_utc):
+        # WELCOME had already entered scheduled-batch mode by this
+        # entitlement's reference time, but no batch's window covers it —
+        # a real gap, not a legacy-eligible ledger. Leave unresolved so
+        # the caller routes to its existing pool-empty outcome; retried
+        # later in case the missing batch gets uploaded (idempotent).
+        logger.warning(
+            "[WELCOME_VOUCHER][TARGET_BATCH_NOT_FOUND] ledger_id=%s user_id=%s pool_id=WELCOME "
+            "entitlement_reference_utc=%s reason=no_welcome_batch_for_entitlement_time",
+            ledger_id, user_id, reference_utc.isoformat(),
+        )
+        return ledger
+    else:
+        update = {
+            "target_mode": "legacy",
+            "target_batch_id": None,
+            "target_resolved_at": now_utc,
+        }
+
+    res = db.affiliate_ledger.update_one(
+        {"_id": ledger_id, "target_mode": {"$exists": False}},
+        {"$set": update},
+    )
+    if getattr(res, "modified_count", 0) == 1:
+        logger.info(
+            "[WELCOME_VOUCHER][TARGET_BATCH_RESOLVED] ledger_id=%s user_id=%s pool_id=WELCOME "
+            "entitlement_reference_utc=%s mode=%s target_batch_id=%s",
+            ledger_id, user_id, reference_utc.isoformat(), update["target_mode"], update.get("target_batch_id"),
+        )
+    return db.affiliate_ledger.find_one({"_id": ledger_id}) or ledger
+
+
 def _no_voucher_filter():
     return {"$or": [{"voucher_code": None}, {"voucher_code": {"$exists": False}}]}
 
@@ -1374,7 +1479,28 @@ def issue_welcome_bonus_if_eligible(db, *, user_id: int, is_new_user: bool, bloc
         if latest and latest.get("status") == "ISSUED":
             return {"created": False, "status": "ISSUED", "voucher_code": latest.get("voucher_code")}
 
-    voucher = _claim_voucher_from_pool(db, pool_id="WELCOME", ledger_id=ledger.get("_id"), user_id=int(user_id), now_utc=now_utc)
+    # Resolve (once, permanently) exactly which WELCOME source this
+    # entitlement draws from — a specific scheduled batch pinned to the
+    # ledger's own created_at, or (transitionally) the legacy undated pool
+    # — using the same authoritative batch resolution as T1-T4, so a claim
+    # retry can never silently drift onto a later batch than the one the
+    # user actually earned into. See ``_resolve_welcome_ledger_target``.
+    ledger = _resolve_welcome_ledger_target(db, ledger, now_utc=now_utc)
+    target_mode = ledger.get("target_mode")
+    claim_reason = None
+    if target_mode == "batch":
+        voucher, claim_reason = _claim_from_target_batch(
+            db, batch_id=ledger.get("target_batch_id"), pool_id="WELCOME",
+            ledger_id=ledger.get("_id"), user_id=int(user_id), now_utc=now_utc,
+        )
+    elif target_mode == "legacy":
+        voucher = _claim_voucher_from_pool(
+            db, pool_id="WELCOME", ledger_id=ledger.get("_id"), user_id=int(user_id), now_utc=now_utc, legacy_only=True,
+        )
+    else:
+        voucher = None
+        claim_reason = "no_batch_for_entitlement_period"
+
     if voucher:
         db.affiliate_ledger.update_one(
             {"_id": ledger["_id"], "status": SETTLING_STATUS, **_no_voucher_filter()},
@@ -1382,10 +1508,20 @@ def issue_welcome_bonus_if_eligible(db, *, user_id: int, is_new_user: bool, bloc
         )
         return {"created": True, "status": "ISSUED", "voucher_code": voucher.get("code")}
 
-    _log_pool_claim_miss(db, pool_id="WELCOME", ledger_id=ledger.get("_id"), user_id=int(user_id), now_utc=now_utc)
+    welcome_reason = _WELCOME_TARGET_REASON_MAP.get(claim_reason, "no_welcome_batch_for_entitlement_time")
+    if target_mode == "legacy":
+        _log_pool_claim_miss(db, pool_id="WELCOME", ledger_id=ledger.get("_id"), user_id=int(user_id), now_utc=now_utc, legacy_only=True)
+    else:
+        logger.warning(
+            "[WELCOME_VOUCHER][TARGET_BATCH_%s] ledger_id=%s user_id=%s pool_id=WELCOME target_batch_id=%s reason=%s",
+            "DISABLED" if welcome_reason == "welcome_target_batch_disabled"
+            else "EMPTY" if welcome_reason == "welcome_target_batch_empty"
+            else "NOT_FOUND",
+            ledger.get("_id"), user_id, ledger.get("target_batch_id"), welcome_reason,
+        )
     oos_claim = db.affiliate_ledger.update_one(
         {"_id": ledger["_id"], "status": SETTLING_STATUS, **_no_voucher_filter()},
-        {"$set": {"status": "OUT_OF_STOCK", "updated_at": now_utc}},
+        {"$set": {"status": "OUT_OF_STOCK", "updated_at": now_utc}, "$addToSet": {"risk_flags": welcome_reason}},
     )
     if oos_claim.modified_count == 0:
         latest = db.affiliate_ledger.find_one({"_id": ledger["_id"]}) or {}
