@@ -64,7 +64,7 @@ from vouchers import (
 from admin_auth import admin_auth_bp, configure_admin_session
 from referral_rules import calc_referral_progress, REFERRAL_XP_PER_SUCCESS, REFERRAL_BONUS_INTERVAL, REFERRAL_BONUS_XP, build_public_referral_status
 from referral_ledger import with_not_invalidated
-from scheduler import settle_pending_referrals, settle_referral_snapshots, settle_xp_snapshots, evaluate_affiliate_simulated_ledgers, compute_affiliate_daily_kpi_yesterday, run_invitee_subscription_audit, reconcile_drop_statuses, post_growth_leaderboard_weekly, process_welcome_voucher_lifecycle, process_welcome_reminders
+from scheduler import settle_pending_referrals, settle_referral_snapshots, settle_xp_snapshots, evaluate_affiliate_simulated_ledgers, compute_affiliate_daily_kpi_yesterday, run_invitee_subscription_audit, reconcile_drop_statuses, post_growth_leaderboard_weekly, publish_weekly_referral_post, process_welcome_voucher_lifecycle, process_welcome_reminders
 from affiliate_dashboard_export import run_affiliate_dashboard_export_monthly_scheduled
 from referral_rate_limit import consume_referral_rate_limits
 from affiliate_leaderboard import (
@@ -7289,6 +7289,22 @@ def reset_weekly_xp(run_id: str | None = None):
                 "archived_at": datetime.now(timezone.utc)
             })
 
+            # Guard: the Sunday weekly_referral_post for the week just ending
+            # must have already fired (or been skipped as empty) before we
+            # zero weekly_referrals below. Never delete/recreate that record
+            # here — just log its status so a missed Sunday post is visible.
+            weekly_post_doc = db["weekly_referral_posts"].find_one(
+                {"_id": f"weekly_referral_post:{week_start_date.isoformat()}"},
+                {"status": 1, "message_id": 1},
+            )
+            logger.info(
+                "[WEEKLY_REF_POST][MONDAY_RESET_GUARD] week_key=%s status=%s message_id=%s run_id=%s",
+                week_start_date.isoformat(),
+                (weekly_post_doc or {}).get("status", "missing"),
+                (weekly_post_doc or {}).get("message_id"),
+                run_id,
+            )
+
             _users_update_many(
                 {},
                 {
@@ -8971,6 +8987,20 @@ def run_worker():
         ),
         id="growth_leaderboard_weekly",
         name="Growth Leaderboard Weekly",
+        replace_existing=True,
+    )
+
+    def _guarded_weekly_referral_post():
+        if not (os.getenv("WEEKLY_REF_POST_CHAT_ID", "") or "").strip():
+            logger.warning("[WEEKLY_REF_POST][FAILED] reason=missing_chat_id_env run_id=scheduler_guard")
+            return None
+        return publish_weekly_referral_post()
+
+    scheduler.add_job(
+        _guarded_job("weekly_referral_post", _guarded_weekly_referral_post),
+        trigger=CronTrigger(day_of_week="sun", hour=21, minute=0, timezone=KL_TZ),
+        id="weekly_referral_post",
+        name="Weekly Referral Top 5 Post",
         replace_existing=True,
     )
     # Telegram member counts: refreshed only in the worker (where the bot loop
