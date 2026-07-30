@@ -1,0 +1,381 @@
+"""Event Banner — a single, reusable, dynamic image-only promotional banner
+rendered above the Campaign Rewards section in the Telegram Mini App.
+
+Collection: ``event_banners``. Deliberately a separate, lightweight
+collection rather than being folded into Campaign Centre's ``gc_campaigns``
+(campaign_centre.py) — that engine models reward-driven campaigns (reward
+rules, verification providers, subscription gates) that an image-only
+banner has no use for. It reuses the same conventions as the rest of the
+app instead of inventing new ones: admin auth via ``vouchers.require_admin``,
+Telegram identity via ``miniapp_identity.resolve_authenticated_telegram_user_id``,
+region via the existing ``users.region`` field, and analytics via the
+existing ``campaign_events.emit_campaign_event`` ledger.
+"""
+
+from __future__ import annotations
+
+import logging
+from datetime import datetime, timezone
+from urllib.parse import urlparse
+
+from flask import Blueprint, jsonify, request
+
+import database
+from miniapp_identity import resolve_authenticated_telegram_user_id
+
+logger = logging.getLogger(__name__)
+
+event_banner_admin_bp = Blueprint("event_banner_admin", __name__)
+event_banner_public_bp = Blueprint("event_banner_public", __name__)
+
+STATUSES = ("active", "inactive")
+
+DEFAULT_ALT_TEXT = "Current event promotion"
+
+
+def _require_admin():
+    from vouchers import require_admin
+
+    return require_admin()
+
+
+def _ensure_indexes() -> None:
+    try:
+        col = database.db["event_banners"]
+        col.create_index([("event_id", 1)], name="ux_event_banners_event_id", unique=True)
+        col.create_index([("status", 1), ("priority", -1)], name="ix_event_banners_status_priority")
+        col.create_index([("starts_at", 1), ("ends_at", 1)], name="ix_event_banners_window")
+    except Exception:
+        logger.warning("[EVENT_BANNER] index_creation_failed", exc_info=True)
+
+
+_ensure_indexes()
+
+
+def _validate_url(url: str) -> bool:
+    """Only https:// URLs and tg:// deep links are accepted destinations/
+    images — no javascript:, data:, or other executable schemes."""
+    if not isinstance(url, str) or not url.strip():
+        return False
+    url = url.strip()
+    lowered = url.lower()
+    if lowered.startswith("javascript:") or lowered.startswith("data:"):
+        return False
+    if any(ch in url for ch in ("\r", "\n", "\t")):
+        return False
+    parsed = urlparse(url)
+    if parsed.scheme == "https":
+        return bool(parsed.netloc)
+    if parsed.scheme == "tg":
+        return True
+    return False
+
+
+def _parse_dt(value) -> datetime | None:
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    try:
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def _validate_body(body: dict, *, partial: bool = False, existing_id=None) -> tuple[dict | None, str | None]:
+    """Validates and normalizes an admin-supplied event banner payload.
+    ``existing_id`` is the ``_id`` of the doc being updated (excluded from
+    the event_id-uniqueness check); leave None when creating."""
+    updates: dict = {}
+
+    if not partial or "event_id" in body:
+        event_id = (body.get("event_id") or "").strip()
+        if not event_id:
+            return None, "missing_event_id"
+        clash = database.db["event_banners"].find_one({"event_id": event_id})
+        if clash and clash.get("_id") != existing_id:
+            return None, "event_id_not_unique"
+        updates["event_id"] = event_id
+
+    if not partial or "image_url" in body:
+        image_url = (body.get("image_url") or "").strip()
+        if not _validate_url(image_url):
+            return None, "invalid_image_url"
+        updates["image_url"] = image_url
+
+    if not partial or "destination_url" in body:
+        destination_url = (body.get("destination_url") or "").strip()
+        if not _validate_url(destination_url):
+            return None, "invalid_destination_url"
+        updates["destination_url"] = destination_url
+
+    if not partial or "alt_text" in body:
+        updates["alt_text"] = (body.get("alt_text") or "").strip() or DEFAULT_ALT_TEXT
+
+    if not partial or "starts_at" in body or "ends_at" in body:
+        starts_at = _parse_dt(body.get("starts_at"))
+        ends_at = _parse_dt(body.get("ends_at"))
+        if not starts_at:
+            return None, "missing_starts_at"
+        if not ends_at:
+            return None, "missing_ends_at"
+        if ends_at <= starts_at:
+            return None, "ends_at_before_starts_at"
+        updates["starts_at"] = starts_at
+        updates["ends_at"] = ends_at
+
+    if not partial or "status" in body:
+        status = (body.get("status") or "inactive").strip()
+        if status not in STATUSES:
+            return None, "invalid_status"
+        updates["status"] = status
+
+    if not partial or "priority" in body:
+        try:
+            updates["priority"] = int(body.get("priority", 0))
+        except (TypeError, ValueError):
+            return None, "invalid_priority"
+
+    if not partial or "regions" in body:
+        regions = body.get("regions") or []
+        if not isinstance(regions, list) or not all(isinstance(r, str) for r in regions):
+            return None, "invalid_regions"
+        updates["regions"] = [r.strip() for r in regions if r.strip()]
+
+    return updates, None
+
+
+def _serialize(doc: dict) -> dict:
+    out = dict(doc)
+    out["id"] = str(out.pop("_id"))
+    for k in ("starts_at", "ends_at", "created_at", "updated_at"):
+        if out.get(k):
+            out[k] = out[k].isoformat()
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Admin CRUD
+# ---------------------------------------------------------------------------
+
+
+@event_banner_admin_bp.get("/api/admin/event-banners")
+def list_event_banners():
+    _, err = _require_admin()
+    if err:
+        return err
+    docs = list(database.db["event_banners"].find({}, sort=[("priority", -1), ("created_at", -1)], limit=200))
+    return jsonify({"status": "ok", "banners": [_serialize(d) for d in docs]})
+
+
+@event_banner_admin_bp.post("/api/admin/event-banners")
+def create_event_banner():
+    admin, err = _require_admin()
+    if err:
+        return err
+    body = request.get_json(silent=True) or {}
+    updates, code = _validate_body(body, partial=False)
+    if code:
+        logger.warning("[EVENT_BANNER][INVALID_CONFIG] reason=%s event_id=%s", code, body.get("event_id"))
+        return jsonify({"status": "error", "code": code}), 400
+
+    now = datetime.now(timezone.utc)
+    doc = {
+        **updates,
+        "created_at": now,
+        "updated_at": now,
+        "created_by": (admin or {}).get("usernameLower") or str((admin or {}).get("id", "")),
+    }
+    try:
+        result = database.db["event_banners"].insert_one(doc)
+    except Exception as exc:
+        if "duplicate" in str(exc).lower():
+            return jsonify({"status": "error", "code": "event_id_not_unique"}), 409
+        logger.exception("[EVENT_BANNER] create_failed")
+        return jsonify({"status": "error", "code": "internal_error"}), 500
+
+    doc["_id"] = result.inserted_id
+    return jsonify({"status": "ok", "banner": _serialize(doc)}), 201
+
+
+@event_banner_admin_bp.get("/api/admin/event-banners/<event_id>")
+def get_event_banner(event_id: str):
+    _, err = _require_admin()
+    if err:
+        return err
+    doc = database.db["event_banners"].find_one({"event_id": event_id})
+    if not doc:
+        return jsonify({"status": "error", "code": "not_found"}), 404
+    return jsonify({"status": "ok", "banner": _serialize(doc)})
+
+
+@event_banner_admin_bp.patch("/api/admin/event-banners/<event_id>")
+def update_event_banner(event_id: str):
+    admin, err = _require_admin()
+    if err:
+        return err
+    doc = database.db["event_banners"].find_one({"event_id": event_id})
+    if not doc:
+        return jsonify({"status": "error", "code": "not_found"}), 404
+
+    body = request.get_json(silent=True) or {}
+    updates, code = _validate_body(body, partial=True, existing_id=doc.get("_id"))
+    if code:
+        logger.warning("[EVENT_BANNER][INVALID_CONFIG] reason=%s event_id=%s", code, event_id)
+        return jsonify({"status": "error", "code": code}), 400
+
+    updates["updated_at"] = datetime.now(timezone.utc)
+    updates["updated_by"] = (admin or {}).get("usernameLower") or str((admin or {}).get("id", ""))
+    database.db["event_banners"].update_one({"_id": doc["_id"]}, {"$set": updates})
+    doc = database.db["event_banners"].find_one({"_id": doc["_id"]})
+    return jsonify({"status": "ok", "banner": _serialize(doc)})
+
+
+@event_banner_admin_bp.delete("/api/admin/event-banners/<event_id>")
+def delete_event_banner(event_id: str):
+    _, err = _require_admin()
+    if err:
+        return err
+    database.db["event_banners"].delete_one({"event_id": event_id})
+    return jsonify({"status": "ok"})
+
+
+# ---------------------------------------------------------------------------
+# Public resolution + analytics
+# ---------------------------------------------------------------------------
+
+
+def _window_active(doc: dict, now: datetime) -> bool:
+    starts_at = doc.get("starts_at")
+    ends_at = doc.get("ends_at")
+    if not starts_at or not ends_at:
+        return False
+    if starts_at.tzinfo is None:
+        starts_at = starts_at.replace(tzinfo=timezone.utc)
+    if ends_at.tzinfo is None:
+        ends_at = ends_at.replace(tzinfo=timezone.utc)
+    return starts_at <= now < ends_at
+
+
+def _region_eligible(doc: dict, region: str | None) -> bool:
+    regions = doc.get("regions") or []
+    if not regions:
+        return True
+    return bool(region) and region in regions
+
+
+def pick_eligible_banner(candidates: list, *, now: datetime, region: str | None) -> dict | None:
+    """Candidates must already be sorted by priority desc; returns the
+    first (highest-priority) doc that passes every visibility rule, or
+    None. Never raises on a single malformed doc — it just skips it."""
+    for doc in candidates:
+        try:
+            if doc.get("status") != "active":
+                continue
+            if not _window_active(doc, now):
+                continue
+            if not _region_eligible(doc, region):
+                continue
+            if not _validate_url(doc.get("image_url", "")) or not _validate_url(doc.get("destination_url", "")):
+                logger.warning("[EVENT_BANNER][INVALID_CONFIG] event_id=%s", doc.get("event_id"))
+                continue
+            return doc
+        except Exception:
+            logger.warning("[EVENT_BANNER][INVALID_CONFIG] event_id=%s", doc.get("event_id"), exc_info=True)
+            continue
+    return None
+
+
+@event_banner_public_bp.get("/api/event-banner")
+def get_public_event_banner():
+    uid = None
+    try:
+        resolved_uid, auth_err = resolve_authenticated_telegram_user_id()
+        if not auth_err:
+            uid = resolved_uid
+    except Exception:
+        uid = None
+
+    region = None
+    if uid is not None:
+        try:
+            user = database.db["users"].find_one({"user_id": uid})
+            region = (user or {}).get("region")
+        except Exception:
+            region = None
+
+    logger.info("[EVENT_BANNER][RESOLVE] user_id=%s region=%s", uid, region)
+
+    resp_payload = {"status": "ok", "banner": None}
+    try:
+        now = datetime.now(timezone.utc)
+        candidates = list(
+            database.db["event_banners"].find(
+                {"status": "active"}, sort=[("priority", -1)], limit=50
+            )
+        )
+        banner = pick_eligible_banner(candidates, now=now, region=region)
+        if banner:
+            logger.info("[EVENT_BANNER][SHOW] event_id=%s user_id=%s", banner.get("event_id"), uid)
+            resp_payload["banner"] = {
+                "event_id": banner.get("event_id"),
+                "image_url": banner.get("image_url"),
+                "destination_url": banner.get("destination_url"),
+                "alt_text": banner.get("alt_text") or DEFAULT_ALT_TEXT,
+            }
+        else:
+            logger.info("[EVENT_BANNER][NONE] user_id=%s region=%s", uid, region)
+    except Exception:
+        logger.warning("[EVENT_BANNER][API_ERROR] user_id=%s", uid, exc_info=True)
+        resp_payload = {"status": "ok", "banner": None}
+
+    resp = jsonify(resp_payload)
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+_TRACK_EVENT_TYPES = {
+    "impression": "event_banner_impression",
+    "click": "event_banner_click",
+    "image_error": "event_banner_image_error",
+}
+
+
+@event_banner_public_bp.post("/api/event-banner/track")
+def track_event_banner():
+    """Best-effort analytics write — never blocks or fails the caller.
+    Always returns 200 so a frontend `sendBeacon`/`fetch` never has to
+    branch on the response before continuing navigation."""
+    uid = None
+    try:
+        resolved_uid, auth_err = resolve_authenticated_telegram_user_id()
+        if not auth_err:
+            uid = resolved_uid
+    except Exception:
+        uid = None
+
+    body = request.get_json(silent=True) or {}
+    event_id = (body.get("event_id") or "").strip()
+    kind = (body.get("type") or "").strip()
+    event_type = _TRACK_EVENT_TYPES.get(kind)
+
+    if event_id and event_type:
+        try:
+            from campaign_events import emit_campaign_event
+
+            emit_campaign_event(
+                event_type=event_type,
+                campaign_id=event_id,
+                telegram_user_id=uid,
+                source="miniapp_top",
+                metadata={
+                    "region": body.get("region"),
+                    "placement": "miniapp_top",
+                    "ui_version": body.get("ui_version"),
+                },
+            )
+        except Exception:
+            logger.warning("[EVENT_BANNER] analytics_write_failed", exc_info=True)
+
+    return jsonify({"status": "ok"})

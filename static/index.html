@@ -482,6 +482,37 @@
       transition: width .4s ease;
     }
 
+    /* ===== EVENT BANNER (image-only, dynamic — see event_banner.py) ===== */
+    .ap-event-banner {
+      display: block;
+      width: 100%;
+      box-sizing: border-box;
+      aspect-ratio: 16 / 7;
+      border-radius: var(--radius-md);
+      overflow: hidden;
+      margin-bottom: 14px;
+      background: var(--bg-card);
+      border: 0;
+      padding: 0;
+      cursor: pointer;
+      -webkit-tap-highlight-color: transparent;
+      transition: transform .12s ease, opacity .12s ease;
+    }
+    .ap-event-banner:active {
+      transform: scale(0.98);
+      opacity: 0.92;
+    }
+    .ap-event-banner img {
+      width: 100%;
+      height: 100%;
+      display: block;
+      object-fit: contain;
+      background: var(--bg-card);
+    }
+    @media (prefers-color-scheme: light) {
+      .ap-event-banner { border: 1px solid var(--border-light); }
+    }
+
     /* ===== CAMPAIGN HERO CARD ===== */
     #voucher-section {
       position: relative;
@@ -1462,6 +1493,11 @@
         <div id="strip-progress-fill"></div>
       </div>
     </div>
+
+    <!-- EVENT BANNER (image-only, dynamic — see event_banner.py) -->
+    <button type="button" id="ap-event-banner" class="ap-event-banner" style="display:none;" aria-label="">
+      <img id="ap-event-banner-img" src="" alt="" decoding="async" loading="eager">
+    </button>
 
     <!-- CAMPAIGN HERO CARD (#voucher-section) -->
     <div id="campaign-centre-root"></div>
@@ -7255,6 +7291,114 @@ ${referral}`;
         initInfoHub();
       });
       window.addEventListener("load", initInfoHub);
+    })();
+  </script>
+
+  <script>
+    // ===== EVENT BANNER (image-only, dynamic — see event_banner.py) =====
+    // Self-contained: fetches its own data independently of the rest of the
+    // Mini App and fails silently on any error so a banner outage never
+    // blocks check-in, vouchers, referrals, or anything else on this page.
+    (function eventBannerFeature() {
+      let impressionFired = false;
+
+      function currentRegion() {
+        try { return localStorage.getItem("region") || null; } catch (_) { return null; }
+      }
+
+      function trackEventBanner(eventId, kind) {
+        try {
+          const initDataRaw = (typeof getLatestInitData === "function" && getLatestInitData()) ||
+            (typeof tg !== "undefined" && typeof tg?.initData === "string" ? tg.initData : "") || "";
+          const payload = {
+            event_id: eventId,
+            type: kind,
+            region: currentRegion(),
+            ui_version: (typeof UI_VERSION !== "undefined" ? UI_VERSION : "unknown"),
+          };
+          if (initDataRaw) payload.init_data = initDataRaw;
+          fetch(`${API_BASE}/api/event-banner/track`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+            keepalive: true,
+          }).catch(function () {});
+        } catch (_) {
+          // Analytics must never block navigation or rendering.
+        }
+      }
+
+      function openEventBannerDestination(url) {
+        const target = String(url || "").trim();
+        if (!target) return;
+        if (/^tg:\/\//i.test(target) || /^https?:\/\/(t\.me|telegram\.me)\//i.test(target)) {
+          if (typeof openTelegramSafeLink === "function") { openTelegramSafeLink(target); return; }
+        }
+        const waApp = window.Telegram?.WebApp;
+        if (waApp && typeof waApp.openLink === "function") {
+          try { waApp.openLink(target); return; } catch (_) {}
+        }
+        window.open(target, "_blank", "noopener,noreferrer");
+      }
+
+      function hideEventBanner() {
+        const btn = document.getElementById("ap-event-banner");
+        if (btn) btn.style.display = "none";
+      }
+
+      async function loadEventBanner() {
+        const btn = document.getElementById("ap-event-banner");
+        const img = document.getElementById("ap-event-banner-img");
+        if (!btn || !img) return;
+
+        try {
+          let initDataRaw = "";
+          try {
+            initDataRaw = typeof waitForInitData === "function" ? await waitForInitData(3000) : "";
+          } catch (_) {
+            initDataRaw = (typeof getLatestInitData === "function" && getLatestInitData()) || "";
+          }
+          const path = `${API_BASE}/api/event-banner`;
+          const url = typeof withInitDataInQuery === "function" ? withInitDataInQuery(path, initDataRaw) : path;
+
+          const controller = new AbortController();
+          const timeoutId = setTimeout(function () { controller.abort(); }, 5000);
+          let res;
+          try {
+            res = await fetch(url, { signal: controller.signal });
+          } finally {
+            clearTimeout(timeoutId);
+          }
+          if (!res.ok) { hideEventBanner(); return; }
+
+          const data = await res.json();
+          const banner = data && data.banner;
+          if (!banner || !banner.image_url || !banner.destination_url) { hideEventBanner(); return; }
+
+          img.onerror = function () {
+            hideEventBanner();
+            trackEventBanner(banner.event_id, "image_error");
+          };
+          img.onload = function () {
+            btn.style.display = "block";
+            if (!impressionFired) {
+              impressionFired = true;
+              trackEventBanner(banner.event_id, "impression");
+            }
+          };
+          img.alt = banner.alt_text || "Current event promotion";
+          btn.setAttribute("aria-label", banner.alt_text || "Current event promotion");
+          btn.onclick = function () {
+            trackEventBanner(banner.event_id, "click");
+            openEventBannerDestination(banner.destination_url);
+          };
+          img.src = banner.image_url;
+        } catch (_) {
+          hideEventBanner();
+        }
+      }
+
+      loadEventBanner();
     })();
   </script>
 
