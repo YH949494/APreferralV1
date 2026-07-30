@@ -146,6 +146,59 @@ def test_update_event_banner_status(fake_db):
     assert resp.get_json()["banner"]["status"] == "active"
 
 
+def test_patch_with_only_starts_at_preserves_existing_ends_at(fake_db):
+    doc = _banner_doc()
+    fake_db["event_banners"].insert_one(doc)
+    new_starts = (doc["starts_at"] + timedelta(minutes=10)).isoformat()
+    app = _app()
+    client = app.test_client()
+    with _mock_admin():
+        resp = client.patch(
+            "/api/admin/event-banners/weekend_tournament_202608", json={"starts_at": new_starts}
+        )
+    assert resp.status_code == 200
+    body = resp.get_json()["banner"]
+    assert body["starts_at"] == new_starts
+    assert body["ends_at"] == doc["ends_at"].isoformat()
+
+
+def test_patch_with_only_ends_at_preserves_existing_starts_at(fake_db):
+    doc = _banner_doc()
+    fake_db["event_banners"].insert_one(doc)
+    new_ends = (doc["ends_at"] + timedelta(hours=5)).isoformat()
+    app = _app()
+    client = app.test_client()
+    with _mock_admin():
+        resp = client.patch(
+            "/api/admin/event-banners/weekend_tournament_202608", json={"ends_at": new_ends}
+        )
+    assert resp.status_code == 200
+    body = resp.get_json()["banner"]
+    assert body["starts_at"] == doc["starts_at"].isoformat()
+    assert body["ends_at"] == new_ends
+
+
+def test_create_event_banner_tg_image_url_rejected(fake_db):
+    body = _banner_serialized()
+    body["image_url"] = "tg://resolve?domain=advantplay"
+    app = _app()
+    client = app.test_client()
+    with _mock_admin():
+        resp = client.post("/api/admin/event-banners", json=body)
+    assert resp.status_code == 400
+    assert resp.get_json()["code"] == "invalid_image_url"
+
+
+def test_create_event_banner_tg_destination_url_accepted(fake_db):
+    body = _banner_serialized()
+    body["destination_url"] = "tg://resolve?domain=advantplay"
+    app = _app()
+    client = app.test_client()
+    with _mock_admin():
+        resp = client.post("/api/admin/event-banners", json=body)
+    assert resp.status_code == 201
+
+
 # ---------------------------------------------------------------------------
 # Public resolution — visibility rules
 # ---------------------------------------------------------------------------
@@ -252,6 +305,30 @@ def test_unauthenticated_context_is_handled_safely(fake_db):
     assert body["banner"]["event_id"] == "weekend_tournament_202608"
 
 
+def test_eligible_low_priority_banner_not_hidden_by_expired_high_priority_ones(fake_db):
+    now = datetime.now(timezone.utc)
+    # 60 expired/high-priority banners that should never be candidates, all
+    # ranked above the one genuinely-eligible low-priority banner — proves
+    # the query filters status/window itself instead of truncating a
+    # priority-sorted fetch before eligibility is applied.
+    for i in range(60):
+        fake_db["event_banners"].insert_one(
+            _banner_doc(
+                event_id=f"expired_{i}",
+                priority=1000 - i,
+                starts_at=now - timedelta(days=2),
+                ends_at=now - timedelta(days=1),
+            )
+        )
+    fake_db["event_banners"].insert_one(_banner_doc(event_id="eligible_low_prio", priority=1))
+
+    app = _app()
+    client = app.test_client()
+    with _mock_verified_user(111):
+        resp = client.get("/api/event-banner?init_data=x")
+    assert resp.get_json()["banner"]["event_id"] == "eligible_low_prio"
+
+
 def test_no_banner_response_returns_banner_null(fake_db):
     app = _app()
     client = app.test_client()
@@ -271,6 +348,22 @@ def test_track_endpoint_never_fails_on_bad_input(fake_db):
     resp = client.post("/api/event-banner/track", json={})
     assert resp.status_code == 200
     assert resp.get_json() == {"status": "ok"}
+
+
+def test_track_endpoint_discards_unauthenticated_event(fake_db, monkeypatch):
+    import campaign_events
+
+    monkeypatch.setattr(campaign_events, "database", database)
+    app = _app()
+    client = app.test_client()
+    with patch("vouchers.verify_telegram_init_data", return_value=(False, {}, "bad_signature")):
+        resp = client.post(
+            "/api/event-banner/track",
+            json={"event_id": "weekend_tournament_202608", "type": "impression"},
+        )
+    assert resp.status_code == 200
+    assert resp.get_json() == {"status": "ok"}
+    assert list(fake_db["campaign_events"].find({})) == []
 
 
 def test_track_endpoint_writes_campaign_event(fake_db, monkeypatch):

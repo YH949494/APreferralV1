@@ -52,9 +52,11 @@ def _ensure_indexes() -> None:
 _ensure_indexes()
 
 
-def _validate_url(url: str) -> bool:
-    """Only https:// URLs and tg:// deep links are accepted destinations/
-    images — no javascript:, data:, or other executable schemes."""
+def _validate_url(url: str, *, allow_tg: bool = True) -> bool:
+    """https:// URLs are always accepted; tg:// deep links are accepted
+    only when ``allow_tg`` is set (destinations, not images — a browser
+    <img> cannot load a tg:// deep link). Never javascript:/data:/other
+    executable schemes."""
     if not isinstance(url, str) or not url.strip():
         return False
     url = url.strip()
@@ -66,9 +68,13 @@ def _validate_url(url: str) -> bool:
     parsed = urlparse(url)
     if parsed.scheme == "https":
         return bool(parsed.netloc)
-    if parsed.scheme == "tg":
+    if allow_tg and parsed.scheme == "tg":
         return True
     return False
+
+
+def _validate_image_url(url: str) -> bool:
+    return _validate_url(url, allow_tg=False)
 
 
 def _parse_dt(value) -> datetime | None:
@@ -83,11 +89,13 @@ def _parse_dt(value) -> datetime | None:
         return None
 
 
-def _validate_body(body: dict, *, partial: bool = False, existing_id=None) -> tuple[dict | None, str | None]:
+def _validate_body(body: dict, *, partial: bool = False, existing: dict | None = None) -> tuple[dict | None, str | None]:
     """Validates and normalizes an admin-supplied event banner payload.
-    ``existing_id`` is the ``_id`` of the doc being updated (excluded from
-    the event_id-uniqueness check); leave None when creating."""
+    ``existing`` is the full doc being updated (used to exclude itself from
+    the event_id-uniqueness check, and to fill in a window boundary omitted
+    from a partial update); leave None when creating."""
     updates: dict = {}
+    existing_id = (existing or {}).get("_id")
 
     if not partial or "event_id" in body:
         event_id = (body.get("event_id") or "").strip()
@@ -100,7 +108,7 @@ def _validate_body(body: dict, *, partial: bool = False, existing_id=None) -> tu
 
     if not partial or "image_url" in body:
         image_url = (body.get("image_url") or "").strip()
-        if not _validate_url(image_url):
+        if not _validate_image_url(image_url):
             return None, "invalid_image_url"
         updates["image_url"] = image_url
 
@@ -114,8 +122,8 @@ def _validate_body(body: dict, *, partial: bool = False, existing_id=None) -> tu
         updates["alt_text"] = (body.get("alt_text") or "").strip() or DEFAULT_ALT_TEXT
 
     if not partial or "starts_at" in body or "ends_at" in body:
-        starts_at = _parse_dt(body.get("starts_at"))
-        ends_at = _parse_dt(body.get("ends_at"))
+        starts_at = _parse_dt(body.get("starts_at")) if "starts_at" in body else (existing or {}).get("starts_at")
+        ends_at = _parse_dt(body.get("ends_at")) if "ends_at" in body else (existing or {}).get("ends_at")
         if not starts_at:
             return None, "missing_starts_at"
         if not ends_at:
@@ -220,7 +228,7 @@ def update_event_banner(event_id: str):
         return jsonify({"status": "error", "code": "not_found"}), 404
 
     body = request.get_json(silent=True) or {}
-    updates, code = _validate_body(body, partial=True, existing_id=doc.get("_id"))
+    updates, code = _validate_body(body, partial=True, existing=doc)
     if code:
         logger.warning("[EVENT_BANNER][INVALID_CONFIG] reason=%s event_id=%s", code, event_id)
         return jsonify({"status": "error", "code": code}), 400
@@ -277,7 +285,7 @@ def pick_eligible_banner(candidates: list, *, now: datetime, region: str | None)
                 continue
             if not _region_eligible(doc, region):
                 continue
-            if not _validate_url(doc.get("image_url", "")) or not _validate_url(doc.get("destination_url", "")):
+            if not _validate_image_url(doc.get("image_url", "")) or not _validate_url(doc.get("destination_url", "")):
                 logger.warning("[EVENT_BANNER][INVALID_CONFIG] event_id=%s", doc.get("event_id"))
                 continue
             return doc
@@ -310,10 +318,21 @@ def get_public_event_banner():
     resp_payload = {"status": "ok", "banner": None}
     try:
         now = datetime.now(timezone.utc)
+        # Filter status/window/region in the query itself rather than after
+        # a truncated fetch — otherwise a page of higher-priority but
+        # expired/scheduled/other-region banners could push a genuinely
+        # eligible lower-priority banner past the fetch limit.
+        region_clause = [{"regions": []}, {"regions": {"$exists": False}}]
+        if region:
+            region_clause.append({"regions": region})
+        query = {
+            "status": "active",
+            "starts_at": {"$lte": now},
+            "ends_at": {"$gt": now},
+            "$or": region_clause,
+        }
         candidates = list(
-            database.db["event_banners"].find(
-                {"status": "active"}, sort=[("priority", -1)], limit=50
-            )
+            database.db["event_banners"].find(query, sort=[("priority", -1)], limit=200)
         )
         banner = pick_eligible_banner(candidates, now=now, region=region)
         if banner:
@@ -346,21 +365,26 @@ _TRACK_EVENT_TYPES = {
 def track_event_banner():
     """Best-effort analytics write — never blocks or fails the caller.
     Always returns 200 so a frontend `sendBeacon`/`fetch` never has to
-    branch on the response before continuing navigation."""
+    branch on the response before continuing navigation. An unverified
+    caller (missing/invalid Telegram initData) never reaches the ledger —
+    without that, anyone could POST arbitrary event_ids and inflate
+    impression/click counts indefinitely."""
     uid = None
+    authenticated = False
     try:
         resolved_uid, auth_err = resolve_authenticated_telegram_user_id()
         if not auth_err:
             uid = resolved_uid
+            authenticated = True
     except Exception:
-        uid = None
+        authenticated = False
 
     body = request.get_json(silent=True) or {}
     event_id = (body.get("event_id") or "").strip()
     kind = (body.get("type") or "").strip()
     event_type = _TRACK_EVENT_TYPES.get(kind)
 
-    if event_id and event_type:
+    if authenticated and event_id and event_type:
         try:
             from campaign_events import emit_campaign_event
 
