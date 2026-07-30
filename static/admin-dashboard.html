@@ -869,7 +869,7 @@
 
       <!-- AFFILIATE VOUCHER BATCHES VIEW -->
       <section id="view-affiliateBatches" class="hidden">
-        <div style="margin-bottom:16px;"><span class="tag heuristic" style="font-size:12px;padding:4px 12px;">Schedule future T1-T4 affiliate voucher batches with a start/end window. Expired batches stay stored for audit — never deleted automatically.</span></div>
+        <div style="margin-bottom:16px;"><span class="tag heuristic" style="font-size:12px;padding:4px 12px;">Schedule future T1-T4 affiliate and WELCOME voucher batches with a start/end window. Expired batches stay stored for audit — never deleted automatically.</span></div>
 
         <div class="section" style="max-width:720px;">
           <div class="section-title" id="ab-form-title">Create Batch</div>
@@ -880,12 +880,13 @@
               <input class="filter-input" id="ab-batch-name" placeholder="e.g. Affiliate August 2026 - T1" style="width:100%;box-sizing:border-box;" />
             </div>
             <div>
-              <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">Affiliate Tier *</label>
+              <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">Pool *</label>
               <select id="ab-pool-id" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--card-bg);color:var(--text);">
                 <option value="T1">T1</option>
                 <option value="T2">T2</option>
                 <option value="T3">T3</option>
                 <option value="T4">T4</option>
+                <option value="WELCOME">WELCOME — New User Voucher</option>
               </select>
             </div>
           </div>
@@ -919,11 +920,12 @@
         <div class="section-title">Scheduled &amp; Active Batches</div>
         <div class="controls" style="margin-bottom:12px;">
           <select id="ab-filter-pool" style="padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--card-bg);color:var(--text);">
-            <option value="">All tiers</option>
+            <option value="">All pools</option>
             <option value="T1">T1</option>
             <option value="T2">T2</option>
             <option value="T3">T3</option>
             <option value="T4">T4</option>
+            <option value="WELCOME">WELCOME — New User Voucher</option>
           </select>
           <select id="ab-filter-status" style="padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--card-bg);color:var(--text);">
             <option value="">All statuses</option>

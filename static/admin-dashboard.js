@@ -5400,16 +5400,16 @@
     });
   }
 
-  // ---------- Affiliate Voucher Batches (monthly scheduled T1-T4 pools) ----------
+  // ---------- Voucher Batches (scheduled T1-T4 affiliate + WELCOME pools) ----------
   var abItemsCache = {};
   state.abEditingBatchId = null;
 
   var AFF_BATCH_ERROR_MESSAGES = {
-    batch_window_overlap: "This batch's window overlaps an existing scheduled or active batch for this tier. Adjust the start/end time, or edit/disable the conflicting batch first.",
+    batch_window_overlap: "This batch's window overlaps an existing scheduled or active batch for this pool. Adjust the start/end time, or edit/disable the conflicting batch first.",
     invalid_start_at: "Start date/time could not be parsed. Please use the date/time picker.",
     invalid_end_at: "End date/time could not be parsed. Please use the date/time picker.",
     end_before_start: "End time must be after the start time.",
-    invalid_pool_id: "Choose a valid affiliate tier (T1-T4).",
+    invalid_pool_id: "Choose a valid pool (T1-T4 or WELCOME).",
     invalid_batch_name: "Batch name is required.",
     no_codes: "No valid voucher codes were provided. Paste at least one code.",
     duplicate_codes: "All submitted codes were already in the system — no new codes were inserted.",
@@ -5685,9 +5685,10 @@
           ' · Duplicates ' + fmt(item.duplicate_count) + ' · Invalid ' + fmt(item.invalid_count) +
           (item.upload_error_code ? ' · Reason: ' + esc(item.upload_error_code) : '') + '</div>'
         : "";
+      var entitlementLabel = item.pool_id === "WELCOME" ? "Entitlement reference: Welcome eligibility time" : "Entitlement month: " + esc(item.entitlement_month || "—");
       return '<tr id="ab-row-' + esc(item.batch_id) + '">' +
         '<td>' + esc(item.batch_name) + (item.notes ? '<div class="sub">' + esc(item.notes) + '</div>' : '') +
-          (item.entitlement_month ? '<div class="sub">Entitlement month: ' + esc(item.entitlement_month) + '</div>' : '') +
+          (item.entitlement_month || item.pool_id === "WELCOME" ? '<div class="sub">' + entitlementLabel + '</div>' : '') +
           failureDetail +
         '</td>' +
         '<td>' + esc(item.pool_id) + '</td>' +
@@ -5711,7 +5712,7 @@
         '</tr>';
     }).join("");
     $("#ab-body").innerHTML = '<table class="data-table"><thead><tr>' +
-      '<th>Batch</th><th>Tier</th><th>Start (KL)</th><th>End (KL)</th><th>Status</th><th class="num">Uploaded</th><th class="num">Available</th><th class="num">Issued</th><th>Remaining</th><th>Actions</th>' +
+      '<th>Batch</th><th>Pool</th><th>Start (KL)</th><th>End (KL)</th><th>Status</th><th class="num">Uploaded</th><th class="num">Available</th><th class="num">Issued</th><th>Remaining</th><th>Actions</th>' +
       '</tr></thead><tbody>' + rows + '</tbody></table>';
   }
 

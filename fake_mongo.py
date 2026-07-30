@@ -97,6 +97,17 @@ def _apply_update(doc: dict, update: dict, *, is_insert: bool = False) -> dict:
     if "$inc" in update:
         for k, v in update["$inc"].items():
             new_doc[k] = new_doc.get(k, 0) + v
+    if "$addToSet" in update:
+        for key, value in deepcopy(update["$addToSet"]).items():
+            existing = new_doc.get(key)
+            if not isinstance(existing, list):
+                existing = []
+            if value not in existing:
+                existing.append(value)
+            new_doc[key] = existing
+    if "$unset" in update:
+        for key in update["$unset"]:
+            new_doc.pop(key, None)
     return new_doc
 
 

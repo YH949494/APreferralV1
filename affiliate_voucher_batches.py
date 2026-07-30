@@ -1,9 +1,9 @@
-"""Monthly scheduled affiliate voucher batches.
+"""Scheduled voucher batches for T1-T4 affiliate tiers and the WELCOME pool.
 
 Adds a first-class ``affiliate_voucher_batches`` collection so admins can
-upload a future T1-T4 affiliate voucher pool with an explicit KL start/end
+upload a future T1-T4/WELCOME voucher pool with an explicit KL start/end
 window, ahead of time, without touching the existing reward tiers,
-qualification rules, ledger dedup keys or monthly settlement logic in
+qualification rules, ledger dedup keys or settlement/eligibility logic in
 ``affiliate_rewards.py``.
 
 Each uploaded voucher code becomes its own ``voucher_pools`` row carrying a
@@ -31,10 +31,10 @@ from flask import Blueprint, jsonify, request
 
 KL_TZ = pytz.timezone("Asia/Kuala_Lumpur")
 
-# Only T1-T4 are schedulable through this feature (matches the Admin
-# Dashboard tier dropdown). WELCOME/T5 pools keep using plain, undated
-# voucher_pools uploads exactly as before.
-BATCH_POOL_IDS = ("T1", "T2", "T3", "T4")
+# T1-T4 and WELCOME are schedulable through this feature (matches the Admin
+# Dashboard pool dropdown). T5 keeps using plain, undated voucher_pools
+# uploads exactly as before.
+BATCH_POOL_IDS = ("T1", "T2", "T3", "T4", "WELCOME")
 
 logger = logging.getLogger(__name__)
 
@@ -320,7 +320,7 @@ def _find_overlapping_batch(db, *, pool_id: str, starts_at_utc: datetime, ends_a
 
 def _legacy_unbounded_summary(db, *, pool_id: str | None = None) -> list:
     match = {"batch_id": {"$exists": False}}
-    match["pool_id"] = str(pool_id).strip().upper() if pool_id else {"$in": list(BATCH_POOL_IDS) + ["WELCOME", "T5"]}
+    match["pool_id"] = str(pool_id).strip().upper() if pool_id else {"$in": list(BATCH_POOL_IDS) + ["T5"]}
     buckets: dict = {}
     for row in db.voucher_pools.find(match, projection={"pool_id": 1, "status": 1}):
         pid = row.get("pool_id")
@@ -385,7 +385,7 @@ def create_batch(
     )
 
     if pool_id not in BATCH_POOL_IDS:
-        return _fail("invalid_pool_id", f"'{pool_id}' is not a schedulable affiliate voucher pool (T1-T4 only).")
+        return _fail("invalid_pool_id", f"'{pool_id}' is not a schedulable voucher pool (T1-T4 or WELCOME only).")
     if not batch_name:
         return _fail("invalid_batch_name", "Batch name is required.")
 
@@ -584,11 +584,11 @@ def create_batch(
     }
 
 
-def _tier_entered_scheduled_mode(db, *, pool_id: str, reference_utc: datetime) -> bool:
-    """True once the earliest batch ever created for this tier (any
-    status) had already started as of ``reference_utc`` — the same
-    permanent, one-way legacy-fallback cutover used by the claim path in
-    ``affiliate_rewards.py``, kept here too so the dashboard can show it.
+def _pool_entered_scheduled_mode(db, *, pool_id: str, reference_utc: datetime) -> bool:
+    """True once the earliest batch ever created for this pool (T1-T4 or
+    WELCOME, any status) had already started as of ``reference_utc`` — the
+    same permanent, one-way legacy-fallback cutover used by the claim path
+    in ``affiliate_rewards.py``, kept here too so the dashboard can show it.
     """
     starts = [
         _as_aware_utc(row.get("starts_at"))
@@ -604,7 +604,7 @@ def _legacy_fallback_status(db, *, pool_id: str | None, now_utc: datetime) -> li
     pools = [str(pool_id).strip().upper()] if pool_id else list(BATCH_POOL_IDS)
     out = []
     for pid in pools:
-        entered = _tier_entered_scheduled_mode(db, pool_id=pid, reference_utc=now_utc)
+        entered = _pool_entered_scheduled_mode(db, pool_id=pid, reference_utc=now_utc)
         out.append({
             "pool_id": pid,
             "entered_scheduled_mode": entered,
