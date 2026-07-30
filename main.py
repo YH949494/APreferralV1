@@ -64,7 +64,7 @@ from vouchers import (
 from admin_auth import admin_auth_bp, configure_admin_session
 from referral_rules import calc_referral_progress, REFERRAL_XP_PER_SUCCESS, REFERRAL_BONUS_INTERVAL, REFERRAL_BONUS_XP, build_public_referral_status
 from referral_ledger import with_not_invalidated
-from scheduler import settle_pending_referrals, settle_referral_snapshots, settle_xp_snapshots, evaluate_affiliate_simulated_ledgers, compute_affiliate_daily_kpi_yesterday, run_invitee_subscription_audit, reconcile_drop_statuses, post_growth_leaderboard_weekly, process_welcome_voucher_lifecycle, process_welcome_reminders
+from scheduler import settle_pending_referrals, settle_referral_snapshots, settle_xp_snapshots, evaluate_affiliate_simulated_ledgers, compute_affiliate_daily_kpi_yesterday, run_invitee_subscription_audit, reconcile_drop_statuses, post_growth_leaderboard_weekly, publish_weekly_referral_post, process_welcome_voucher_lifecycle, process_welcome_reminders
 from affiliate_dashboard_export import run_affiliate_dashboard_export_monthly_scheduled
 from referral_rate_limit import consume_referral_rate_limits
 from affiliate_leaderboard import (
@@ -7289,6 +7289,22 @@ def reset_weekly_xp(run_id: str | None = None):
                 "archived_at": datetime.now(timezone.utc)
             })
 
+            # Guard: the Sunday weekly_referral_post for the week just ending
+            # must have already fired (or been skipped as empty) before we
+            # zero weekly_referrals below. Never delete/recreate that record
+            # here — just log its status so a missed Sunday post is visible.
+            weekly_post_doc = db["weekly_referral_posts"].find_one(
+                {"_id": f"weekly_referral_post:{week_start_date.isoformat()}"},
+                {"status": 1, "message_id": 1},
+            )
+            logger.info(
+                "[WEEKLY_REF_POST][MONDAY_RESET_GUARD] week_key=%s status=%s message_id=%s run_id=%s",
+                week_start_date.isoformat(),
+                (weekly_post_doc or {}).get("status", "missing"),
+                (weekly_post_doc or {}).get("message_id"),
+                run_id,
+            )
+
             _users_update_many(
                 {},
                 {
@@ -8655,6 +8671,24 @@ async def generate_referral_link_callback(update: Update, context: ContextTypes.
     )
     logger.info("[REFERRAL][START_CALLBACK_OK] uid=%s", uid)
 
+def resolve_weekly_referral_post_legacy_guard(growth_leaderboard_enabled, weekly_ref_post_chat_id: str) -> dict:
+    """Decide whether the deprecated growth_leaderboard_weekly job may
+    register alongside the authoritative weekly_referral_post job.
+
+    weekly_referral_post is always registered and is the only job that
+    should ever publish the public Sunday "Top 5 Growth Leaders" post. This
+    helper is pure (no scheduler/env access) so the conflict/deprecation
+    logic can be unit tested without booting run_worker().
+    """
+    weekly_ref_post_configured = bool((weekly_ref_post_chat_id or "").strip())
+    conflict = bool(growth_leaderboard_enabled) and weekly_ref_post_configured
+    return {
+        "weekly_ref_post_configured": weekly_ref_post_configured,
+        "conflict": conflict,
+        "register_legacy": bool(growth_leaderboard_enabled) and not conflict,
+    }
+
+
 # ----------------------------
 # Run Bot + Flask + Scheduler
 # ----------------------------
@@ -8954,23 +8988,61 @@ def run_worker():
         replace_existing=True,
     )
 
-    def _guarded_growth_leaderboard():
-        if not GROWTH_LEADERBOARD_CHANNEL_ID:
-            logger.warning("[GROWTH_LEADERBOARD] enabled but missing GROWTH_LEADERBOARD_CHANNEL_ID")
-            return None
-        return post_growth_leaderboard_weekly()
+    # --- Legacy growth_leaderboard_weekly vs. authoritative weekly_referral_post ---
+    # growth_leaderboard_weekly is deprecated (see scheduler.post_growth_leaderboard_weekly
+    # docstring/comment): it ranks by qualified_events, not the authoritative
+    # users.weekly_referrals snapshot. weekly_referral_post below is the only
+    # job that should ever publish the public Sunday "Top 5 Growth Leaders" post.
+    # If both are configured, refuse to register the legacy job so only one
+    # Sunday leaderboard job (and one Telegram send path) can ever fire.
+    _legacy_guard = resolve_weekly_referral_post_legacy_guard(
+        GROWTH_LEADERBOARD_ENABLED, os.getenv("WEEKLY_REF_POST_CHAT_ID", "")
+    )
+    if _legacy_guard["conflict"]:
+        logger.warning(
+            "[WEEKLY_REF_POST][LEGACY_CONFLICT] growth_leaderboard_enabled=%s weekly_ref_post_chat_id_configured=%s action=legacy_job_not_registered",
+            GROWTH_LEADERBOARD_ENABLED,
+            _legacy_guard["weekly_ref_post_configured"],
+        )
+    elif GROWTH_LEADERBOARD_ENABLED:
+        logger.warning(
+            "[GROWTH_LEADERBOARD][DEPRECATED] growth_leaderboard_weekly is deprecated and ranks by qualified_events, "
+            "which may not match the authoritative users.weekly_referrals snapshot used by weekly_referral_post; "
+            "configure WEEKLY_REF_POST_CHAT_ID and migrate off this job."
+        )
 
-    growth_tz = pytz.timezone(GROWTH_LEADERBOARD_TIMEZONE)
+    if _legacy_guard["register_legacy"]:
+        def _guarded_growth_leaderboard():
+            if not GROWTH_LEADERBOARD_CHANNEL_ID:
+                logger.warning("[GROWTH_LEADERBOARD] enabled but missing GROWTH_LEADERBOARD_CHANNEL_ID")
+                return None
+            return post_growth_leaderboard_weekly()
+
+        growth_tz = pytz.timezone(GROWTH_LEADERBOARD_TIMEZONE)
+        scheduler.add_job(
+            _guarded_job("growth_leaderboard_weekly", _guarded_growth_leaderboard, default=GROWTH_LEADERBOARD_ENABLED, feature_flag="growth_leaderboard"),
+            trigger=CronTrigger(
+                day_of_week=GROWTH_LEADERBOARD_CRON_DAY.lower(),
+                hour=GROWTH_LEADERBOARD_CRON_HOUR,
+                minute=GROWTH_LEADERBOARD_CRON_MINUTE,
+                timezone=growth_tz,
+            ),
+            id="growth_leaderboard_weekly",
+            name="Growth Leaderboard Weekly",
+            replace_existing=True,
+        )
+
+    def _guarded_weekly_referral_post():
+        if not (os.getenv("WEEKLY_REF_POST_CHAT_ID", "") or "").strip():
+            logger.warning("[WEEKLY_REF_POST][FAILED] reason=missing_chat_id_env run_id=scheduler_guard")
+            return None
+        return publish_weekly_referral_post()
+
     scheduler.add_job(
-        _guarded_job("growth_leaderboard_weekly", _guarded_growth_leaderboard, default=GROWTH_LEADERBOARD_ENABLED, feature_flag="growth_leaderboard"),
-        trigger=CronTrigger(
-            day_of_week=GROWTH_LEADERBOARD_CRON_DAY.lower(),
-            hour=GROWTH_LEADERBOARD_CRON_HOUR,
-            minute=GROWTH_LEADERBOARD_CRON_MINUTE,
-            timezone=growth_tz,
-        ),
-        id="growth_leaderboard_weekly",
-        name="Growth Leaderboard Weekly",
+        _guarded_job("weekly_referral_post", _guarded_weekly_referral_post),
+        trigger=CronTrigger(day_of_week="sun", hour=21, minute=0, timezone=KL_TZ),
+        id="weekly_referral_post",
+        name="Weekly Referral Top 5 Post",
         replace_existing=True,
     )
     # Telegram member counts: refreshed only in the worker (where the bot loop

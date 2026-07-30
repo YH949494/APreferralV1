@@ -1305,6 +1305,14 @@ def compute_affiliate_daily_kpi(day_utc: str, *, db_ref=None, now_utc_ts: dateti
     return payload
 
 
+# DEPRECATED: this legacy publisher ranks by a raw `qualified_events`
+# aggregation, not the authoritative `users.weekly_referrals` settlement-ledger
+# snapshot. It must NOT be used for the public Sunday "Top 5 Growth Leaders"
+# channel post — `publish_weekly_referral_post()` (job id `weekly_referral_post`)
+# is the authoritative implementation for that post. Kept only for backward
+# compatibility where GROWTH_LEADERBOARD_ENABLED was already relied on and
+# WEEKLY_REF_POST_CHAT_ID is not configured; see the startup conflict guard in
+# main.py's run_worker() scheduler registration.
 def post_growth_leaderboard_weekly(*, db_ref=None, now_utc_ts: datetime | None = None) -> bool:
     db_ref = db_ref or db
     now_utc_ts = now_utc_ts or now_utc()
@@ -1404,6 +1412,299 @@ def post_growth_leaderboard_weekly(*, db_ref=None, now_utc_ts: datetime | None =
     )
     logger.info("[GROWTH_LEADERBOARD] posted week_key=%s message_id=%s", week_key, message_id)
     return True
+
+
+# ---------------------------------------------------------------------------
+# Sunday weekly "Top 5 Growth Leaders" referral post.
+#
+# Ranking source is the authoritative users.weekly_referrals snapshot (kept
+# in sync with the referral settlement ledger) — NOT a raw join, NOT pending
+# referrals, and NOT the affiliate raw-invite aggregation used elsewhere.
+# The ranking is frozen into `weekly_referral_posts` (idempotency key
+# "weekly_referral_post:{week_start_local}") before any Telegram delivery is
+# attempted, so retries/reruns always resend the same frozen entries and never
+# duplicate the channel post once a message_id is recorded.
+# ---------------------------------------------------------------------------
+WEEKLY_REF_POST_TZ = pytz.timezone("Asia/Kuala_Lumpur")
+
+
+def _weekly_referral_post_week_bounds(week_key: str | None, now_utc_ts: datetime):
+    if week_key:
+        week_start_local = WEEKLY_REF_POST_TZ.localize(datetime.strptime(week_key, "%Y-%m-%d"))
+    else:
+        now_local = now_utc_ts.astimezone(WEEKLY_REF_POST_TZ)
+        week_start_local = now_local.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(
+            days=now_local.weekday()
+        )
+    week_end_local = week_start_local + timedelta(days=7)
+    return week_start_local, week_end_local
+
+
+def _weekly_referral_display_name(user_id: int, username: str | None, first_name: str | None) -> str:
+    if username:
+        cleaned = str(username).lstrip("@").strip()
+        if cleaned:
+            return f"@{cleaned}"
+    if first_name and str(first_name).strip():
+        return str(first_name).strip()
+    return f"Member #{str(int(user_id))[-4:]}"
+
+
+def _weekly_referral_entries_from_users(db_ref) -> list[dict]:
+    """Authoritative source: current users.weekly_referrals snapshot."""
+    proj = {"user_id": 1, "username": 1, "first_name": 1, "weekly_referrals": 1}
+    rows = db_ref.users.find({"weekly_referrals": {"$gt": 0}}, proj).sort(
+        [("weekly_referrals", -1), ("user_id", 1)]
+    ).limit(5)
+    entries = []
+    for row in rows:
+        uid = int(row["user_id"])
+        entries.append(
+            {
+                "user_id": uid,
+                "display_name": _weekly_referral_display_name(uid, row.get("username"), row.get("first_name")),
+                "weekly_referrals": int(row.get("weekly_referrals", 0) or 0),
+            }
+        )
+    return entries
+
+
+def weekly_referral_entries_from_history_archive(db_ref, week_start_local: datetime) -> list[dict]:
+    """Fallback source for a completed (already-reset) week: the pre-reset
+    archive written by reset_weekly_xp() into weekly_leaderboard_history."""
+    week_start_date = week_start_local.date().isoformat()
+    archive = db_ref.weekly_leaderboard_history.find_one({"week_start": week_start_date})
+    if not archive:
+        return []
+    rows = archive.get("referral_leaderboard") or []
+    filtered = [r for r in rows if int(r.get("weekly_referrals", 0) or 0) > 0]
+    filtered.sort(key=lambda r: (-int(r.get("weekly_referrals", 0) or 0), int(r.get("user_id"))))
+    entries = []
+    for row in filtered[:5]:
+        uid = int(row["user_id"])
+        entries.append(
+            {
+                "user_id": uid,
+                "display_name": _weekly_referral_display_name(uid, row.get("username"), None),
+                "weekly_referrals": int(row.get("weekly_referrals", 0) or 0),
+            }
+        )
+    return entries
+
+
+def render_weekly_referral_post_text(entries: list[dict]) -> str:
+    medals = ["🥇", "🥈", "🥉"]
+    lines = ["<b>🏆 Top 5 Growth Leaders This Week</b>", ""]
+    for idx, entry in enumerate(entries, start=1):
+        prefix = medals[idx - 1] if idx <= 3 else f"#{idx}"
+        name = html_escape(str(entry["display_name"]))
+        count = int(entry["weekly_referrals"])
+        lines.append(f"{prefix} {name} — {count} qualified invites")
+    lines.extend(
+        [
+            "",
+            "Invite more qualified members, join our affiliate program, and earn up to <b>$450/month</b>.",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def publish_weekly_referral_post(
+    *,
+    db_ref=None,
+    now_utc_ts: datetime | None = None,
+    run_id: str | None = None,
+    week_key: str | None = None,
+    entries_override: list[dict] | None = None,
+    dry_run: bool = False,
+    source: str = "live",
+) -> dict:
+    """Freeze (or reuse) the Top-5 weekly_referrals ranking and deliver the
+    historical "Top 5 Growth Leaders This Week" post to WEEKLY_REF_POST_CHAT_ID.
+
+    Idempotent on `weekly_referral_post:{week_start_local}`. Safe to call
+    repeatedly (scheduler retry, worker restart, manual rerun, or the
+    `scripts.publish_weekly_referral_post` repair script) — a frozen ranking
+    is only computed once per week and a channel post only sent once a
+    Telegram message_id has not already been recorded.
+    """
+    db_ref = db_ref or db
+    now_utc_ts = now_utc_ts or now_utc()
+    run_id = run_id or f"wrp_{int(now_utc_ts.timestamp() * 1000)}"
+
+    week_start_local, week_end_local = _weekly_referral_post_week_bounds(week_key, now_utc_ts)
+    resolved_week_key = week_start_local.date().isoformat()
+    doc_id = f"weekly_referral_post:{resolved_week_key}"
+
+    logger.info("[WEEKLY_REF_POST][START] week_key=%s run_id=%s", resolved_week_key, run_id)
+
+    doc = db_ref.weekly_referral_posts.find_one({"_id": doc_id})
+
+    if doc is None:
+        if entries_override is not None:
+            entries = entries_override
+        elif source == "archive":
+            # Historical/manual repair of a completed week: pull from the
+            # pre-reset archive, never from the live (already-reset) counters.
+            entries = weekly_referral_entries_from_history_archive(db_ref, week_start_local)
+        else:
+            entries = _weekly_referral_entries_from_users(db_ref)
+
+        new_doc = {
+            "_id": doc_id,
+            "week_key": resolved_week_key,
+            "week_start_local": week_start_local.isoformat(),
+            "week_end_local": week_end_local.isoformat(),
+            "entries": entries,
+            "status": "frozen" if entries else "empty",
+            "attempted_at": None,
+            "sent_at": None,
+            "message_id": None,
+            "failure_reason": None,
+            "created_at": now_utc_ts,
+            "run_id": run_id,
+        }
+        try:
+            db_ref.weekly_referral_posts.insert_one(new_doc)
+            doc = new_doc
+        except DuplicateKeyError:
+            doc = db_ref.weekly_referral_posts.find_one({"_id": doc_id})
+        logger.info(
+            "[WEEKLY_REF_POST][FROZEN] week_key=%s entry_count=%s run_id=%s",
+            resolved_week_key,
+            len(doc.get("entries") or []),
+            run_id,
+        )
+
+    entries = doc.get("entries") or []
+
+    if doc.get("status") == "sent":
+        logger.info(
+            "[WEEKLY_REF_POST][SKIP_ALREADY_SENT] week_key=%s message_id=%s run_id=%s",
+            resolved_week_key,
+            doc.get("message_id"),
+            run_id,
+        )
+        return doc
+
+    if not entries:
+        logger.info("[WEEKLY_REF_POST][SKIP_EMPTY] week_key=%s run_id=%s", resolved_week_key, run_id)
+        return doc
+
+    text = render_weekly_referral_post_text(entries)
+
+    if dry_run:
+        return {**doc, "preview_text": text}
+
+    if doc.get("status") == "failed":
+        logger.info(
+            "[WEEKLY_REF_POST][RETRY] week_key=%s entry_count=%s run_id=%s prior_error=%s",
+            resolved_week_key,
+            len(entries),
+            run_id,
+            doc.get("failure_reason"),
+        )
+
+    chat_id_raw = (os.getenv("WEEKLY_REF_POST_CHAT_ID", "") or "").strip()
+    if not chat_id_raw:
+        logger.error(
+            "[WEEKLY_REF_POST][FAILED] week_key=%s entry_count=%s run_id=%s error=missing_chat_id",
+            resolved_week_key,
+            len(entries),
+            run_id,
+        )
+        db_ref.weekly_referral_posts.update_one(
+            {"_id": doc_id},
+            {"$set": {"status": "failed", "failure_reason": "missing_chat_id", "attempted_at": now_utc_ts}},
+        )
+        return db_ref.weekly_referral_posts.find_one({"_id": doc_id})
+
+    try:
+        chat_id = int(chat_id_raw)
+    except (TypeError, ValueError):
+        logger.error(
+            "[WEEKLY_REF_POST][FAILED] week_key=%s run_id=%s error=invalid_chat_id chat_id=%s",
+            resolved_week_key,
+            run_id,
+            chat_id_raw,
+        )
+        db_ref.weekly_referral_posts.update_one(
+            {"_id": doc_id},
+            {"$set": {"status": "failed", "failure_reason": "invalid_chat_id", "attempted_at": now_utc_ts}},
+        )
+        return db_ref.weekly_referral_posts.find_one({"_id": doc_id})
+
+    # Atomically claim the send slot: only an invocation that actually flips
+    # status frozen/failed -> sending is allowed to call Telegram. This is what
+    # prevents a concurrent scheduler retry, worker restart, or manual repair
+    # run from double-posting even though max_instances=1 only serializes
+    # executions within a single APScheduler instance. A "sending" claim older
+    # than the lease window is treated as abandoned (crashed mid-send) and can
+    # be reclaimed by a later retry.
+    claim_lease_cutoff = now_utc_ts - timedelta(minutes=10)
+    claim = db_ref.weekly_referral_posts.update_one(
+        {
+            "_id": doc_id,
+            "$or": [
+                {"status": {"$in": ["frozen", "failed"]}},
+                {"status": "sending", "attempted_at": {"$lt": claim_lease_cutoff}},
+            ],
+        },
+        {"$set": {"status": "sending", "attempted_at": now_utc_ts}},
+    )
+    if getattr(claim, "modified_count", 0) != 1:
+        current = db_ref.weekly_referral_posts.find_one({"_id": doc_id})
+        logger.info(
+            "[WEEKLY_REF_POST][SKIP_ALREADY_SENT] week_key=%s status=%s run_id=%s reason=claim_lost",
+            resolved_week_key,
+            (current or {}).get("status"),
+            run_id,
+        )
+        return current
+
+    try:
+        resp = requests.post(
+            f"{API_BASE}/sendMessage",
+            json={
+                "chat_id": chat_id,
+                "text": text,
+                "parse_mode": "HTML",
+                "disable_web_page_preview": True,
+            },
+            timeout=10,
+        )
+        resp.raise_for_status()
+        payload = resp.json() if resp.content else {}
+        if not payload.get("ok"):
+            raise RuntimeError(payload.get("description") or "telegram_not_ok")
+        message_id = (payload.get("result") or {}).get("message_id")
+    except Exception as exc:
+        logger.error(
+            "[WEEKLY_REF_POST][FAILED] week_key=%s chat_id=%s run_id=%s error=%s",
+            resolved_week_key,
+            chat_id,
+            run_id,
+            exc,
+        )
+        db_ref.weekly_referral_posts.update_one(
+            {"_id": doc_id},
+            {"$set": {"status": "failed", "failure_reason": f"{exc.__class__.__name__}: {exc}"}},
+        )
+        return db_ref.weekly_referral_posts.find_one({"_id": doc_id})
+
+    db_ref.weekly_referral_posts.update_one(
+        {"_id": doc_id},
+        {"$set": {"status": "sent", "sent_at": now_utc_ts, "message_id": message_id, "failure_reason": None}},
+    )
+    logger.info(
+        "[WEEKLY_REF_POST][SENT] week_key=%s entry_count=%s chat_id=%s message_id=%s run_id=%s",
+        resolved_week_key,
+        len(entries),
+        chat_id,
+        message_id,
+        run_id,
+    )
+    return db_ref.weekly_referral_posts.find_one({"_id": doc_id})
 
 
 def compute_affiliate_daily_kpi_yesterday() -> dict:
