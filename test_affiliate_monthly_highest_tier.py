@@ -109,6 +109,7 @@ class FakeDb:
         self.qualified_events = FakeCollection(unique_fields=[("invitee_id",)])
         self.affiliate_ledger = FakeCollection(unique_fields=[("dedup_key",)])
         self.voucher_pools = FakeCollection(unique_fields=[("pool_id", "code")])
+        self.affiliate_voucher_batches = FakeCollection()
         self.referral_audit = FakeCollection()
 
 
