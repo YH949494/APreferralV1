@@ -867,6 +867,79 @@
         <div id="affiliate-pools-summary-body"></div>
       </section>
 
+      <!-- AFFILIATE VOUCHER BATCHES VIEW -->
+      <section id="view-affiliateBatches" class="hidden">
+        <div style="margin-bottom:16px;"><span class="tag heuristic" style="font-size:12px;padding:4px 12px;">Schedule future T1-T4 affiliate voucher batches with a start/end window. Expired batches stay stored for audit — never deleted automatically.</span></div>
+
+        <div class="section" style="max-width:720px;">
+          <div class="section-title" id="ab-form-title">Create Batch</div>
+          <div style="font-size:12px;color:var(--warn);margin-bottom:10px;">All times use Kuala Lumpur time (UTC+08:00). Start is inclusive and end is exclusive.</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:10px;">
+            <div>
+              <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">Batch Name *</label>
+              <input class="filter-input" id="ab-batch-name" placeholder="e.g. Affiliate August 2026 - T1" style="width:100%;box-sizing:border-box;" />
+            </div>
+            <div>
+              <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">Affiliate Tier *</label>
+              <select id="ab-pool-id" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--card-bg);color:var(--text);">
+                <option value="T1">T1</option>
+                <option value="T2">T2</option>
+                <option value="T3">T3</option>
+                <option value="T4">T4</option>
+              </select>
+            </div>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:10px;">
+            <div>
+              <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">Start (KL) *</label>
+              <input type="datetime-local" class="filter-input" id="ab-starts-at" style="width:100%;box-sizing:border-box;" />
+            </div>
+            <div>
+              <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">End (KL) *</label>
+              <input type="datetime-local" class="filter-input" id="ab-ends-at" style="width:100%;box-sizing:border-box;" />
+            </div>
+          </div>
+          <div style="margin-bottom:10px;">
+            <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">Voucher Codes *</label>
+            <textarea id="ab-codes" rows="6" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--card-bg);color:var(--text);box-sizing:border-box;resize:vertical;font-family:monospace;" placeholder="One code per line, or comma-separated / pasted CSV column"></textarea>
+          </div>
+          <div style="margin-bottom:10px;">
+            <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">Notes</label>
+            <input class="filter-input" id="ab-notes" placeholder="Optional" style="width:100%;box-sizing:border-box;" />
+          </div>
+          <div id="ab-preview" style="display:none;background:var(--panel-2);border:1px solid var(--border);border-radius:8px;padding:10px 12px;font-size:12px;margin-bottom:10px;"></div>
+          <div id="ab-form-error" style="display:none;background:rgba(255,107,107,0.12);border:1px solid var(--bad);color:var(--bad);border-radius:8px;padding:8px 12px;font-size:12px;margin-bottom:10px;"></div>
+          <button class="btn" id="ab-cancel-edit-btn" style="display:none;margin-right:8px;">Cancel Edit</button>
+          <button class="btn primary" id="ab-create-btn">Create Batch</button>
+        </div>
+
+        <div class="section-title" style="margin-top:24px;">Legacy Undated Codes (pre-batch uploads)</div>
+        <div id="ab-legacy-summary" style="margin-bottom:16px;"></div>
+
+        <div class="section-title">Scheduled &amp; Active Batches</div>
+        <div class="controls" style="margin-bottom:12px;">
+          <select id="ab-filter-pool" style="padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--card-bg);color:var(--text);">
+            <option value="">All tiers</option>
+            <option value="T1">T1</option>
+            <option value="T2">T2</option>
+            <option value="T3">T3</option>
+            <option value="T4">T4</option>
+          </select>
+          <select id="ab-filter-status" style="padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--card-bg);color:var(--text);">
+            <option value="">All statuses</option>
+            <option value="active">Active</option>
+            <option value="scheduled">Scheduled</option>
+            <option value="exhausted">Exhausted</option>
+            <option value="expired">Expired</option>
+            <option value="disabled">Disabled</option>
+          </select>
+          <input class="filter-input" id="ab-filter-month" placeholder="Month (YYYY-MM)" style="max-width:140px;" />
+          <label style="font-size:12px;display:flex;align-items:center;gap:6px;"><input type="checkbox" id="ab-filter-include-expired" /> Include expired</label>
+          <button class="btn" id="ab-refresh-btn">Refresh</button>
+        </div>
+        <div id="ab-body"></div>
+      </section>
+
       <!-- PENDING AFFILIATE REWARDS VIEW -->
       <section id="view-affiliatePending" class="hidden">
         <div style="margin-bottom:16px;"><span class="tag heuristic" style="font-size:12px;padding:4px 12px;">LIVE CONTROL — approve/reject issues or blocks affiliate reward vouchers immediately. Migrated from legacy MiniApp admin panel; same backend endpoints.</span></div>

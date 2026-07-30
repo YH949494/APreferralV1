@@ -80,6 +80,10 @@ from affiliate_leaderboard import (
     serialize_affiliate_snapshot_entries_for_viewer,
     week_window_utc,
 )
+from affiliate_voucher_batches import (
+    ensure_affiliate_voucher_batch_indexes,
+    register_routes as register_affiliate_voucher_batch_routes,
+)
 from affiliate_rewards import (
     ensure_affiliate_indexes,
     issue_welcome_bonus_if_eligible,
@@ -2377,6 +2381,7 @@ def ensure_indexes():
         print("⚠️ ensure_indexes error:", e)
 
     ensure_affiliate_indexes(db)
+    ensure_affiliate_voucher_batch_indexes(db)
     _ensure_index_if_missing(
         db["ad_attribution"],
         "uq_ad_attribution_token",
@@ -4689,6 +4694,11 @@ def _current_admin_identity() -> str:
     except Exception:
         pass
     return "admin"
+
+
+app.register_blueprint(
+    register_affiliate_voucher_batch_routes(require_admin_from_query, _current_admin_identity, lambda: db)
+)
 
 
 @admin_bp.post("/api/admin/data/upload-player-performance")

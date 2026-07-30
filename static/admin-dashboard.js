@@ -5400,6 +5400,331 @@
     });
   }
 
+  // ---------- Affiliate Voucher Batches (monthly scheduled T1-T4 pools) ----------
+  var abItemsCache = {};
+  state.abEditingBatchId = null;
+
+  var AFF_BATCH_ERROR_MESSAGES = {
+    batch_window_overlap: "This batch's window overlaps an existing scheduled or active batch for this tier. Adjust the start/end time, or edit/disable the conflicting batch first.",
+    invalid_start_at: "Start date/time could not be parsed. Please use the date/time picker.",
+    invalid_end_at: "End date/time could not be parsed. Please use the date/time picker.",
+    end_before_start: "End time must be after the start time.",
+    invalid_pool_id: "Choose a valid affiliate tier (T1-T4).",
+    invalid_batch_name: "Batch name is required.",
+    no_codes: "No valid voucher codes were provided. Paste at least one code.",
+    duplicate_codes: "All submitted codes were already in the system — no new codes were inserted.",
+    unauthorized: "Your admin session has expired. Please log in again.",
+    batch_not_found: "This batch could not be found — it may have been removed.",
+    active_batch_edit_restricted: "This batch already has issued vouchers, so its schedule can no longer be changed. You can still rename it, edit notes, or disable distribution.",
+  };
+
+  function abErrorMessage(d) {
+    var code = d && d.code;
+    return (code && AFF_BATCH_ERROR_MESSAGES[code]) || (d && d.message) || "Something went wrong. Please try again.";
+  }
+
+  function abParseCodesPreview(text) {
+    var raw = String(text || "").split(/[\r\n,]+/);
+    var seen = {};
+    var unique = [];
+    var duplicates = 0;
+    var invalid = 0;
+    raw.forEach(function (item) {
+      var code = item.trim();
+      if (!code) return;
+      if (/\s/.test(code)) { invalid++; return; }
+      if (seen[code]) { duplicates++; return; }
+      seen[code] = true;
+      unique.push(code);
+    });
+    return { unique: unique, duplicates: duplicates, invalid: invalid };
+  }
+
+  function abLocalInputToKlString(value) {
+    if (!value) return "";
+    return value.replace("T", " ") + ":00";
+  }
+
+  function abUpdatePreview() {
+    var el = $("#ab-preview");
+    if (!el) return;
+    var codesText = $("#ab-codes").value || "";
+    var parsed = abParseCodesPreview(codesText);
+    var tier = $("#ab-pool-id").value;
+    var startsRaw = $("#ab-starts-at").value;
+    var endsRaw = $("#ab-ends-at").value;
+    if (!codesText.trim() && !startsRaw && !endsRaw) { el.style.display = "none"; return; }
+    el.style.display = "block";
+    el.innerHTML =
+      "<b>Preview:</b> Tier " + esc(tier) +
+      " · Start " + esc(startsRaw ? startsRaw.replace("T", " ") : "—") + " KL" +
+      " · End " + esc(endsRaw ? endsRaw.replace("T", " ") : "—") + " KL" +
+      " · " + parsed.unique.length + " unique code(s)" +
+      (parsed.duplicates ? " · " + parsed.duplicates + " duplicate code(s) in pasted input" : "") +
+      (parsed.invalid ? " · " + parsed.invalid + " invalid token(s) will be ignored" : "");
+  }
+
+  function abShowFormError(msg) {
+    var el = $("#ab-form-error");
+    el.textContent = msg;
+    el.style.display = "block";
+  }
+
+  function abResetForm() {
+    state.abEditingBatchId = null;
+    $("#ab-form-title").textContent = "Create Batch";
+    $("#ab-create-btn").textContent = "Create Batch";
+    $("#ab-cancel-edit-btn").style.display = "none";
+    $("#ab-batch-name").value = "";
+    $("#ab-pool-id").value = "T1";
+    $("#ab-pool-id").disabled = false;
+    $("#ab-starts-at").value = "";
+    $("#ab-ends-at").value = "";
+    $("#ab-codes").value = "";
+    $("#ab-codes").disabled = false;
+    $("#ab-notes").value = "";
+    $("#ab-form-error").style.display = "none";
+    $("#ab-preview").style.display = "none";
+  }
+
+  function abFillFormForEdit(item) {
+    state.abEditingBatchId = item.batch_id;
+    $("#ab-form-title").textContent = "Edit Batch Schedule — " + item.batch_name;
+    $("#ab-create-btn").textContent = "Save Changes";
+    $("#ab-cancel-edit-btn").style.display = "inline-block";
+    $("#ab-batch-name").value = item.batch_name || "";
+    $("#ab-pool-id").value = item.pool_id;
+    $("#ab-pool-id").disabled = true;
+    $("#ab-starts-at").value = item.starts_at_kl ? item.starts_at_kl.slice(0, 16) : "";
+    $("#ab-ends-at").value = item.ends_at_kl ? item.ends_at_kl.slice(0, 16) : "";
+    $("#ab-codes").value = "";
+    $("#ab-codes").disabled = true;
+    $("#ab-notes").value = item.notes || "";
+    $("#ab-form-error").style.display = "none";
+    $("#ab-preview").style.display = "none";
+    var section = $("#view-affiliateBatches");
+    if (section) section.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  function abSubmit() {
+    var btn = $("#ab-create-btn");
+    var isEdit = !!state.abEditingBatchId;
+    var name = ($("#ab-batch-name").value || "").trim();
+    var poolId = $("#ab-pool-id").value;
+    var startsRaw = $("#ab-starts-at").value;
+    var endsRaw = $("#ab-ends-at").value;
+    var codesText = $("#ab-codes").value || "";
+    var notes = ($("#ab-notes").value || "").trim();
+
+    $("#ab-form-error").style.display = "none";
+
+    if (!name) { abShowFormError("Batch name is required."); return; }
+    if (!startsRaw || !endsRaw) { abShowFormError("Start and end date/time are required."); return; }
+    if (!isEdit) {
+      var parsed = abParseCodesPreview(codesText);
+      if (!parsed.unique.length) { abShowFormError("No valid voucher codes were provided. Paste at least one code."); return; }
+    }
+
+    var payload = {
+      batch_name: name,
+      pool_id: poolId,
+      starts_at_local: abLocalInputToKlString(startsRaw),
+      ends_at_local: abLocalInputToKlString(endsRaw),
+      timezone: "Asia/Kuala_Lumpur",
+      notes: notes || null,
+    };
+    if (!isEdit) payload.codes = codesText;
+
+    var doSubmit = function () {
+      if (!btnStart(btn, isEdit ? "Saving…" : "Uploading…")) return;
+      var req = isEdit
+        ? apiPatchJson("/api/admin/affiliate-voucher-batches/" + encodeURIComponent(state.abEditingBatchId), payload)
+        : apiPostJson("/api/admin/affiliate-voucher-batches", payload);
+      req.then(function (res) {
+        btnStop(btn);
+        if (!res.ok || res.d.ok === false) {
+          abShowFormError(abErrorMessage(res.d));
+          return;
+        }
+        toast(isEdit ? "✅ Batch schedule updated" : "✅ Batch created (" + ((res.d.counts && res.d.counts.inserted) || 0) + " code(s) inserted)", "success");
+        abResetForm();
+        loadAffiliateBatches(true);
+      }).catch(function (e) {
+        btnStop(btn);
+        abShowFormError("Network error: " + e.message + " — your form entries have been kept, please retry.");
+      });
+    };
+
+    // Editing an existing batch's schedule is the one case that gets an
+    // explicit extra confirmation, per the "dangerous overlap / editing an
+    // active batch" carve-out — everything else submits on one click.
+    if (isEdit) {
+      if (!window.confirm("Save changes to this batch's schedule/details?")) return;
+    }
+    doSubmit();
+  }
+
+  function abSetDisabled(batchId, disabled) {
+    if (disabled && !window.confirm("Disable distribution for this batch? No further vouchers will be issued from it until re-enabled.")) return;
+    apiPatchJson("/api/admin/affiliate-voucher-batches/" + encodeURIComponent(batchId), { distribution_disabled: disabled })
+      .then(function (res) {
+        if (!res.ok || res.d.ok === false) { toast("❌ " + abErrorMessage(res.d), "error"); return; }
+        toast(disabled ? "✅ Distribution disabled" : "✅ Distribution re-enabled", "success");
+        loadAffiliateBatches(true);
+      })
+      .catch(function (e) { toast("❌ " + e.message, "error"); });
+  }
+
+  function abViewBatch(batchId) {
+    var existing = $("#ab-detail-" + batchId);
+    if (existing) { existing.remove(); return; }
+    fetch("/api/admin/affiliate-voucher-batches/" + encodeURIComponent(batchId), { credentials: "same-origin", headers: { "Accept": "application/json" } })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (!d.ok) { toast("❌ " + abErrorMessage(d), "error"); return; }
+        var row = $("#ab-row-" + batchId);
+        if (!row) return;
+        var detail = document.createElement("tr");
+        detail.id = "ab-detail-" + batchId;
+        detail.className = "row-detail";
+        var vouchers = (d.batch && d.batch.vouchers) || [];
+        var codesHtml = vouchers.map(function (v) {
+          return '<span class="pill ' + (v.status === "issued" ? "issued" : "ok") + '" style="margin:2px;">' + esc(v.code) + (v.status === "issued" ? " (issued)" : "") + '</span>';
+        }).join("") || "No codes on this page.";
+        detail.innerHTML = '<td colspan="10"><div style="padding:10px;">' +
+          '<div style="margin-bottom:6px;font-size:12px;color:var(--muted);">Showing ' + vouchers.length + ' of ' + fmt(d.batch.vouchers_total) + ' code(s) · created by ' + esc(d.batch.created_by) + ' at ' + dt(d.batch.created_at) + '</div>' +
+          codesHtml + '</div></td>';
+        row.parentNode.insertBefore(detail, row.nextSibling);
+      })
+      .catch(function (e) { toast("❌ " + e.message, "error"); });
+  }
+
+  function abStatusPillClass(status) {
+    return { active: "active", scheduled: "upcoming", exhausted: "paused", expired: "expired", disabled: "rejected", legacy_unbounded: "neutral" }[status] || "neutral";
+  }
+
+  function abFormatDuration(ms) {
+    if (ms <= 0) return "0m";
+    var mins = Math.floor(ms / 60000);
+    var days = Math.floor(mins / 1440); mins -= days * 1440;
+    var hours = Math.floor(mins / 60); mins -= hours * 60;
+    var parts = [];
+    if (days) parts.push(days + "d");
+    if (hours) parts.push(hours + "h");
+    if (!days && mins) parts.push(mins + "m");
+    return parts.length ? parts.join(" ") : "0m";
+  }
+
+  function abTimeRemaining(item, nowIso) {
+    var now = nowIso ? new Date(nowIso) : new Date();
+    if (item.status === "scheduled" && item.starts_at_utc) {
+      return "Starts in " + abFormatDuration(new Date(item.starts_at_utc) - now);
+    }
+    if ((item.status === "active" || item.status === "exhausted") && item.ends_at_utc) {
+      return "Ends in " + abFormatDuration(new Date(item.ends_at_utc) - now);
+    }
+    if (item.status === "expired") return "Ended";
+    return "—";
+  }
+
+  function renderAffiliateBatches(data) {
+    var items = data.items || [];
+    var nowIso = data.server_now_utc;
+    var legacy = data.legacy_summary || [];
+    var legacyEl = $("#ab-legacy-summary");
+    if (!legacy.length) {
+      legacyEl.innerHTML = emptyState("No legacy undated voucher codes for this filter.");
+    } else {
+      legacyEl.innerHTML = '<div class="card-grid">' + legacy.map(function (l) {
+        return '<div class="kpi"><div class="label">' + esc(l.pool_id) + ' <span class="pill neutral">legacy</span></div>' +
+          '<div class="value">' + fmt(l.available) + '</div><div class="sub">available (always-active, undated) · ' + fmt(l.issued) + ' issued</div></div>';
+      }).join("") + '</div>';
+    }
+
+    abItemsCache = {};
+    items.forEach(function (item) { abItemsCache[item.batch_id] = item; });
+
+    if (!items.length) {
+      $("#ab-body").innerHTML = emptyState("No batches match these filters.");
+      return;
+    }
+    var rows = items.map(function (item) {
+      return '<tr id="ab-row-' + esc(item.batch_id) + '">' +
+        '<td>' + esc(item.batch_name) + (item.notes ? '<div class="sub">' + esc(item.notes) + '</div>' : '') + '</td>' +
+        '<td>' + esc(item.pool_id) + '</td>' +
+        '<td>' + esc((item.starts_at_kl || "").replace("T", " ").slice(0, 16)) + '</td>' +
+        '<td>' + esc((item.ends_at_kl || "").replace("T", " ").slice(0, 16)) + '</td>' +
+        '<td><span class="pill ' + abStatusPillClass(item.status) + '">' + esc(item.status) + '</span></td>' +
+        '<td class="num">' + fmt(item.uploaded_count) + '</td>' +
+        '<td class="num">' + fmt(item.available_count) + '</td>' +
+        '<td class="num">' + fmt(item.issued_count) + '</td>' +
+        '<td>' + esc(abTimeRemaining(item, nowIso)) + '</td>' +
+        '<td>' +
+          '<button class="btn" data-ab-view="' + esc(item.batch_id) + '">View</button> ' +
+          '<button class="btn" data-ab-edit="' + esc(item.batch_id) + '">Edit schedule</button> ' +
+          (item.distribution_disabled
+            ? '<button class="btn" data-ab-enable="' + esc(item.batch_id) + '">Re-enable</button>'
+            : '<button class="btn" data-ab-disable="' + esc(item.batch_id) + '">Disable</button>') +
+        '</td>' +
+        '</tr>';
+    }).join("");
+    $("#ab-body").innerHTML = '<table class="data-table"><thead><tr>' +
+      '<th>Batch</th><th>Tier</th><th>Start (KL)</th><th>End (KL)</th><th>Status</th><th class="num">Uploaded</th><th class="num">Available</th><th class="num">Issued</th><th>Remaining</th><th>Actions</th>' +
+      '</tr></thead><tbody>' + rows + '</tbody></table>';
+  }
+
+  function loadAffiliateBatches(force) {
+    var qs = new URLSearchParams();
+    var poolId = $("#ab-filter-pool") ? $("#ab-filter-pool").value : "";
+    var status = $("#ab-filter-status") ? $("#ab-filter-status").value : "";
+    var month = $("#ab-filter-month") ? ($("#ab-filter-month").value || "").trim() : "";
+    var includeExpired = $("#ab-filter-include-expired") ? $("#ab-filter-include-expired").checked : false;
+    if (poolId) qs.set("pool_id", poolId);
+    if (status) qs.set("status", status);
+    if (month) qs.set("month", month);
+    if (includeExpired) qs.set("include_expired", "1");
+    statePanel("ab-body", "loading", "Loading affiliate voucher batches…");
+    fetch("/api/admin/affiliate-voucher-batches" + (qs.toString() ? "?" + qs.toString() : ""), {
+      credentials: "same-origin", headers: { "Accept": "application/json" },
+    })
+      .then(function (r) {
+        if (r.status === 401) { window.location.href = "/static/admin-login.html"; throw new Error("unauthorized"); }
+        return r.json();
+      })
+      .then(function (data) {
+        if (!data.ok) { statePanel("ab-body", "error", abErrorMessage(data)); return; }
+        renderAffiliateBatches(data);
+      })
+      .catch(function (e) { statePanel("ab-body", "error", "Failed to load batches: " + e.message); });
+  }
+
+  function bindAffiliateBatches() {
+    var createBtn = $("#ab-create-btn");
+    if (!createBtn) return;
+    createBtn.addEventListener("click", abSubmit);
+    $("#ab-cancel-edit-btn").addEventListener("click", abResetForm);
+    ["#ab-codes", "#ab-starts-at", "#ab-ends-at", "#ab-pool-id"].forEach(function (sel) {
+      var el = $(sel);
+      if (el) el.addEventListener("input", abUpdatePreview);
+    });
+    $("#ab-refresh-btn").addEventListener("click", function () { loadAffiliateBatches(true); });
+    ["#ab-filter-pool", "#ab-filter-status", "#ab-filter-include-expired"].forEach(function (sel) {
+      var el = $(sel);
+      if (el) el.addEventListener("change", function () { loadAffiliateBatches(true); });
+    });
+    $("#ab-filter-month").addEventListener("change", function () { loadAffiliateBatches(true); });
+    $("#ab-body").addEventListener("click", function (e) {
+      var viewBtn = e.target.closest("[data-ab-view]");
+      if (viewBtn) { abViewBatch(viewBtn.dataset.abView); return; }
+      var editBtn = e.target.closest("[data-ab-edit]");
+      if (editBtn) { var item = abItemsCache[editBtn.dataset.abEdit]; if (item) abFillFormForEdit(item); return; }
+      var disableBtn = e.target.closest("[data-ab-disable]");
+      if (disableBtn) { abSetDisabled(disableBtn.dataset.abDisable, true); return; }
+      var enableBtn = e.target.closest("[data-ab-enable]");
+      if (enableBtn) { abSetDisabled(enableBtn.dataset.abEnable, false); return; }
+    });
+  }
+
   // ---------- Pending Affiliate Rewards (migrated from legacy MiniApp admin panel) ----------
   function loadAffiliatePending(force) {
     var activeBtn = $("#affp-status-filter .active");
@@ -5532,7 +5857,7 @@
     });
   }
 
-  var VIEWS =["summary", "moduleOverview", "placeholder", "funnel", "abuse", "campaignBuilder", "campaignPerformance", "campaignIntelligence", "activeCampaigns", "draftCampaigns", "compiledDrops", "campaigns", "gcCampaigns", "gcProviders", "gcResults", "gcRewards", "gcVerification", "gcActivity", "vouchers", "drops", "referrals", "affiliate", "affiliatePools", "affiliatePending", "reactivation", "audit", "segmentProbabilityConfig", "segmentRoi", "segments", "validation", "backendSegmentEngine", "voucherHunterAudit", "unclassifiedAudit", "segmentRuleSimulator", "voucherHunterQuality", "voucherHunterFalsePositive", "voucherHunterRuleSimulator", "vhPriorityImpact", "uploadPlayerPerformance", "uploadHistory", "rawExplorer", "users", "joinRequests", "xpAdjust", "settings", "referralShareContent", "ccComposer", "ccCalendar", "ccBoard"];
+  var VIEWS =["summary", "moduleOverview", "placeholder", "funnel", "abuse", "campaignBuilder", "campaignPerformance", "campaignIntelligence", "activeCampaigns", "draftCampaigns", "compiledDrops", "campaigns", "gcCampaigns", "gcProviders", "gcResults", "gcRewards", "gcVerification", "gcActivity", "vouchers", "drops", "referrals", "affiliate", "affiliatePools", "affiliateBatches", "affiliatePending", "reactivation", "audit", "segmentProbabilityConfig", "segmentRoi", "segments", "validation", "backendSegmentEngine", "voucherHunterAudit", "unclassifiedAudit", "segmentRuleSimulator", "voucherHunterQuality", "voucherHunterFalsePositive", "voucherHunterRuleSimulator", "vhPriorityImpact", "uploadPlayerPerformance", "uploadHistory", "rawExplorer", "users", "joinRequests", "xpAdjust", "settings", "referralShareContent", "ccComposer", "ccCalendar", "ccBoard"];
 
   // ---------------------------------------------------------------------
   // Information architecture: sidebar Business Modules, each with its own
@@ -5589,6 +5914,7 @@
       { label: "Overview", view: "affiliate" },
       { label: "Pending Approval", view: "affiliatePending", live: true },
       { label: "Voucher Pools", view: "affiliatePools", live: true },
+      { label: "Voucher Batches", view: "affiliateBatches", live: true },
       { label: "Rewards", view: "placeholder", ph: { title: "Rewards", desc: "Affiliate reward ledger is not yet wired to an admin data source." } },
       { label: "Payouts", view: "placeholder", ph: { title: "Payouts", desc: "Payout batches are not yet wired to an admin data source." } },
       { label: "Analytics", view: "placeholder", ph: { title: "Analytics", desc: "Affiliate analytics is not yet wired to an admin data source." } }
@@ -5831,7 +6157,7 @@
       gcCampaigns: "Player Campaigns", gcProviders: "Providers", gcResults: "Tournament Results",
       gcRewards: "Rewards", gcVerification: "Verification Integrations", gcActivity: "Activity Log",
       vouchers: "Vouchers", drops: "Voucher Drops", referrals: "Referrals", affiliate: "Affiliate",
-      affiliatePools: "Affiliate Voucher Pools", affiliatePending: "Pending Affiliate Rewards", reactivation: "Reactivation",
+      affiliatePools: "Affiliate Voucher Pools", affiliateBatches: "Affiliate Voucher Batches", affiliatePending: "Pending Affiliate Rewards", reactivation: "Reactivation",
       audit: "Audit", segmentProbabilityConfig: "Segment Probability Configuration (Read Only)",
       segmentRoi: "Segment ROI Dashboard",
       segments: "Segment Overview", validation: "Data → Validation / UIM Compare",
@@ -5878,6 +6204,7 @@
     else if (state.view === "referrals") loadReferrals(force);
     else if (state.view === "affiliate") loadAffiliate(force);
     else if (state.view === "affiliatePools") loadAffiliatePools(force);
+    else if (state.view === "affiliateBatches") loadAffiliateBatches(force);
     else if (state.view === "affiliatePending") loadAffiliatePending(force);
     else if (state.view === "reactivation") { loadReactivation(force); loadReactivationJourneyConfig(); }
     else if (state.view === "audit") loadAudit(force);
@@ -5943,6 +6270,7 @@
     bindCampaignBuilder();
     bindDrops();
     bindAffiliatePools();
+    bindAffiliateBatches();
     bindAffiliatePending();
     bindGcCampaigns();
     bindGcProviders();

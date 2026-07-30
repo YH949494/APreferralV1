@@ -1,0 +1,684 @@
+"""Monthly scheduled affiliate voucher batches.
+
+Adds a first-class ``affiliate_voucher_batches`` collection so admins can
+upload a future T1-T4 affiliate voucher pool with an explicit KL start/end
+window, ahead of time, without touching the existing reward tiers,
+qualification rules, ledger dedup keys or monthly settlement logic in
+``affiliate_rewards.py``.
+
+Each uploaded voucher code becomes its own ``voucher_pools`` row carrying a
+denormalized copy of ``batch_id``/``batch_name``/``starts_at``/``ends_at``
+so the hot claim path in ``affiliate_rewards._claim_voucher_from_pool`` can
+stay a single ``find_one_and_update`` without joining back to this
+collection.
+
+Legacy ``voucher_pools`` rows that predate this feature (no ``batch_id``)
+are treated as ``legacy_unbounded``: they keep their pre-existing
+always-claimable behaviour until an admin explicitly migrates them into a
+batch. Nothing here deletes or mutates those rows automatically.
+"""
+
+from __future__ import annotations
+
+import logging
+import re
+from datetime import datetime, timezone
+
+import pytz
+from bson import ObjectId
+from bson.errors import InvalidId
+from flask import Blueprint, jsonify, request
+
+KL_TZ = pytz.timezone("Asia/Kuala_Lumpur")
+
+# Only T1-T4 are schedulable through this feature (matches the Admin
+# Dashboard tier dropdown). WELCOME/T5 pools keep using plain, undated
+# voucher_pools uploads exactly as before.
+BATCH_POOL_IDS = ("T1", "T2", "T3", "T4")
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Small helpers
+# ---------------------------------------------------------------------------
+
+def _mask_code(code) -> str:
+    code = str(code or "")
+    if len(code) <= 4:
+        return "*" * len(code)
+    return code[:2] + "*" * (len(code) - 4) + code[-2:]
+
+
+def _is_duplicate_key_error(exc: Exception) -> bool:
+    # Works against both pymongo.errors.DuplicateKeyError (production,
+    # real MongoDB) and any test double that names its exception the same
+    # way, without requiring tests to depend on pymongo internals.
+    return exc.__class__.__name__ == "DuplicateKeyError"
+
+
+def parse_kl_local_to_utc(local_str: str, tz_name: str | None = None) -> datetime | None:
+    """Parse an admin-entered local ("YYYY-MM-DD HH:MM:SS") datetime string
+    in the given IANA timezone (default Asia/Kuala_Lumpur) into an aware
+    UTC datetime. Returns None on any parse failure.
+    """
+    if not local_str or not str(local_str).strip():
+        return None
+    try:
+        tz = pytz.timezone(str(tz_name).strip()) if tz_name else KL_TZ
+    except Exception:
+        return None
+    raw = str(local_str).strip().replace("T", " ")
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+        try:
+            naive = datetime.strptime(raw, fmt)
+            break
+        except ValueError:
+            naive = None
+    if naive is None:
+        return None
+    try:
+        localized = tz.localize(naive)
+    except Exception:
+        return None
+    return localized.astimezone(timezone.utc)
+
+
+def _to_kl_iso(dt: datetime | None) -> str | None:
+    if dt is None:
+        return None
+    return dt.astimezone(KL_TZ).isoformat()
+
+
+def _to_utc_iso(dt: datetime | None) -> str | None:
+    if dt is None:
+        return None
+    return dt.astimezone(timezone.utc).isoformat()
+
+
+def _fail(code: str, message: str) -> dict:
+    return {"ok": False, "code": code, "message": message}
+
+
+def normalize_voucher_codes(codes) -> tuple[list, int, int]:
+    """Split/trim/dedupe voucher codes.
+
+    Accepts either a list of strings (one code per item, possibly still
+    comma/CSV-joined) or a single string blob. Returns
+    ``(unique_codes_in_order, duplicates_in_upload, invalid_count)``.
+    ``invalid`` counts trimmed tokens that contain internal whitespace
+    (malformed codes) — plain blank lines from newline-splitting are
+    dropped silently, not counted as invalid.
+    """
+    if isinstance(codes, str):
+        raw_items = re.split(r"[\r\n,]+", codes)
+    else:
+        raw_items = []
+        for item in codes or []:
+            raw_items.extend(re.split(r"[\r\n,]+", str(item)))
+
+    seen = set()
+    unique = []
+    duplicates = 0
+    invalid = 0
+    for raw in raw_items:
+        code = raw.strip()
+        if not code:
+            continue
+        if re.search(r"\s", code):
+            invalid += 1
+            continue
+        if code in seen:
+            duplicates += 1
+            continue
+        seen.add(code)
+        unique.append(code)
+    return unique, duplicates, invalid
+
+
+def derive_batch_status(batch: dict, now_utc: datetime | None = None) -> str:
+    """Status derived from time + inventory + emergency controls —
+    never trust a manually maintained status field as the source of truth.
+    """
+    now_utc = now_utc or datetime.now(timezone.utc)
+    if bool(batch.get("distribution_disabled")):
+        return "disabled"
+    starts_at = batch.get("starts_at")
+    ends_at = batch.get("ends_at")
+    if starts_at and now_utc < starts_at:
+        return "scheduled"
+    if ends_at and now_utc >= ends_at:
+        return "expired"
+    if int(batch.get("available_count") or 0) > 0:
+        return "active"
+    return "exhausted"
+
+
+_STATUS_ORDER = {"active": 0, "scheduled": 1, "exhausted": 2, "expired": 3, "disabled": 4}
+
+
+def _sort_key(batch: dict, status: str):
+    order = _STATUS_ORDER.get(status, 5)
+    starts_at = batch.get("starts_at")
+    ends_at = batch.get("ends_at")
+    if status == "expired" and ends_at:
+        secondary = -ends_at.timestamp()
+    elif starts_at:
+        secondary = starts_at.timestamp()
+    else:
+        secondary = 0.0
+    return (order, secondary)
+
+
+def _serialize_batch(batch: dict, *, now_utc: datetime | None = None) -> dict:
+    now_utc = now_utc or datetime.now(timezone.utc)
+    status = derive_batch_status(batch, now_utc)
+    uploaded = int(batch.get("uploaded_count") or 0)
+    available = int(batch.get("available_count") or 0)
+    issued = int(batch.get("issued_count") or 0)
+    out = {
+        "batch_id": str(batch.get("_id")),
+        "batch_name": batch.get("batch_name"),
+        "pool_id": batch.get("pool_id"),
+        "starts_at_utc": _to_utc_iso(batch.get("starts_at")),
+        "ends_at_utc": _to_utc_iso(batch.get("ends_at")),
+        "starts_at_kl": _to_kl_iso(batch.get("starts_at")),
+        "ends_at_kl": _to_kl_iso(batch.get("ends_at")),
+        "status": status,
+        "uploaded_count": uploaded,
+        "available_count": available,
+        "issued_count": issued,
+        "distribution_disabled": bool(batch.get("distribution_disabled")),
+        "created_at": _to_utc_iso(batch.get("created_at")),
+        "created_by": batch.get("created_by"),
+        "notes": batch.get("notes"),
+    }
+    if status in ("exhausted", "expired"):
+        out["exhausted_count"] = max(0, uploaded - available)
+    return out
+
+
+def _hydrate_live_counts(db, batch: dict) -> dict:
+    """``available_count``/``issued_count`` are cached on the batch document
+    for the initial upload, but the claim path (a single
+    ``find_one_and_update`` on ``voucher_pools`` for atomicity) never writes
+    back to this collection. Re-derive both counts from the actual
+    ``voucher_pools`` rows so status derivation and the
+    ``active_batch_edit_restricted`` check are always correct, never stale.
+    """
+    batch_id = batch.get("_id")
+    if batch_id is None:
+        return batch
+    available = db.voucher_pools.count_documents({"batch_id": batch_id, "status": "available"})
+    issued = db.voucher_pools.count_documents({"batch_id": batch_id, "status": "issued"})
+    out = dict(batch)
+    out["available_count"] = int(available)
+    out["issued_count"] = int(issued)
+    return out
+
+
+def _serialize_voucher_row(row: dict) -> dict:
+    return {
+        "code": row.get("code"),
+        "status": row.get("status"),
+        "issued_to_user_id": row.get("issued_to_user_id"),
+        "issued_at": _to_utc_iso(row.get("issued_at")),
+        "created_at": _to_utc_iso(row.get("created_at")),
+    }
+
+
+def _bulk_update_rows(collection, query: dict, update: dict):
+    """update_many when the driver supports it (real MongoDB); otherwise a
+    find + update_one loop so this also works against the lightweight
+    FakeCollection test doubles used across this codebase's test suite.
+    """
+    if hasattr(collection, "update_many"):
+        return collection.update_many(query, update)
+    count = 0
+    for row in collection.find(query, projection={"_id": 1}):
+        collection.update_one({"_id": row["_id"]}, update)
+        count += 1
+    return count
+
+
+def _find_overlapping_batch(db, *, pool_id: str, starts_at_utc: datetime, ends_at_utc: datetime, exclude_batch_id=None):
+    query = {
+        "pool_id": pool_id,
+        "starts_at": {"$lt": ends_at_utc},
+        "ends_at": {"$gt": starts_at_utc},
+    }
+    if exclude_batch_id is not None:
+        query["_id"] = {"$ne": exclude_batch_id}
+    return db.affiliate_voucher_batches.find_one(query)
+
+
+def _legacy_unbounded_summary(db, *, pool_id: str | None = None) -> list:
+    match = {"batch_id": {"$exists": False}}
+    match["pool_id"] = str(pool_id).strip().upper() if pool_id else {"$in": list(BATCH_POOL_IDS) + ["WELCOME", "T5"]}
+    buckets: dict = {}
+    for row in db.voucher_pools.find(match, projection={"pool_id": 1, "status": 1}):
+        pid = row.get("pool_id")
+        bucket = buckets.setdefault(pid, {"pool_id": pid, "available": 0, "issued": 0, "total": 0})
+        bucket["total"] += 1
+        if row.get("status") == "available":
+            bucket["available"] += 1
+        elif row.get("status") == "issued":
+            bucket["issued"] += 1
+    return sorted(buckets.values(), key=lambda b: b["pool_id"])
+
+
+def _as_object_id(batch_id) -> ObjectId | None:
+    try:
+        return ObjectId(str(batch_id))
+    except (InvalidId, TypeError):
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Indexes
+# ---------------------------------------------------------------------------
+
+def ensure_affiliate_voucher_batch_indexes(db):
+    db.affiliate_voucher_batches.create_index(
+        [("pool_id", 1), ("starts_at", 1), ("ends_at", 1)], name="batch_pool_window"
+    )
+    db.affiliate_voucher_batches.create_index([("ends_at", 1)], name="batch_ends_at")
+    db.affiliate_voucher_batches.create_index(
+        [("distribution_disabled", 1)], name="batch_distribution_disabled"
+    )
+    # voucher_pools (pool_id, status, starts_at, ends_at) and (batch_id,
+    # status) are created in affiliate_rewards.ensure_affiliate_indexes
+    # alongside the pre-existing uniq_pool_code/pool_status indexes so all
+    # voucher_pools index management stays in one place.
+
+
+# ---------------------------------------------------------------------------
+# Core operations
+# ---------------------------------------------------------------------------
+
+def create_batch(
+    db,
+    *,
+    admin_identity: str,
+    batch_name: str,
+    pool_id: str,
+    starts_at_local: str,
+    ends_at_local: str,
+    timezone_name: str | None,
+    codes,
+    notes=None,
+    now_utc: datetime | None = None,
+) -> dict:
+    now_utc = now_utc or datetime.now(timezone.utc)
+    pool_id = str(pool_id or "").strip().upper()
+    batch_name = str(batch_name or "").strip()
+
+    logger.info(
+        "[AFF_VOUCHER_BATCH][CREATE] admin=%s pool_id=%s batch_name=%s",
+        admin_identity, pool_id, batch_name,
+    )
+
+    if pool_id not in BATCH_POOL_IDS:
+        return _fail("invalid_pool_id", f"'{pool_id}' is not a schedulable affiliate voucher pool (T1-T4 only).")
+    if not batch_name:
+        return _fail("invalid_batch_name", "Batch name is required.")
+
+    starts_at_utc = parse_kl_local_to_utc(starts_at_local, timezone_name)
+    if starts_at_utc is None:
+        return _fail("invalid_start_at", "Start date/time could not be parsed.")
+    ends_at_utc = parse_kl_local_to_utc(ends_at_local, timezone_name)
+    if ends_at_utc is None:
+        return _fail("invalid_end_at", "End date/time could not be parsed.")
+    if ends_at_utc <= starts_at_utc:
+        return _fail("end_before_start", "End time must be after start time.")
+
+    overlap = _find_overlapping_batch(db, pool_id=pool_id, starts_at_utc=starts_at_utc, ends_at_utc=ends_at_utc)
+    if overlap:
+        logger.warning(
+            "[AFF_VOUCHER_BATCH][OVERLAP_BLOCK] admin=%s pool_id=%s starts_at=%s ends_at=%s conflicting_batch_id=%s",
+            admin_identity, pool_id, starts_at_utc.isoformat(), ends_at_utc.isoformat(), overlap.get("_id"),
+        )
+        return {
+            "ok": False,
+            "code": "batch_window_overlap",
+            "conflicting_batch_id": str(overlap.get("_id")),
+            "message": f"This {pool_id} batch overlaps an existing scheduled or active batch.",
+        }
+
+    unique_codes, duplicate_in_upload, invalid_count = normalize_voucher_codes(codes)
+    submitted = len(unique_codes) + duplicate_in_upload + invalid_count
+    if not unique_codes:
+        return _fail("no_codes", "No valid voucher codes were provided.")
+
+    batch_doc = {
+        "batch_name": batch_name,
+        "pool_id": pool_id,
+        "starts_at": starts_at_utc,
+        "ends_at": ends_at_utc,
+        "uploaded_count": len(unique_codes),
+        "available_count": 0,
+        "issued_count": 0,
+        "created_at": now_utc,
+        "created_by": admin_identity,
+        "notes": notes or None,
+        "distribution_disabled": False,
+        "provisional": True,
+    }
+    batch_id = db.affiliate_voucher_batches.insert_one(batch_doc).inserted_id
+
+    inserted = 0
+    duplicate_in_db = 0
+    for code in unique_codes:
+        row = {
+            "pool_id": pool_id,
+            "code": code,
+            "batch_id": batch_id,
+            "batch_name": batch_name,
+            "starts_at": starts_at_utc,
+            "ends_at": ends_at_utc,
+            "status": "available",
+            "created_at": now_utc,
+            "distribution_disabled": False,
+        }
+        try:
+            db.voucher_pools.insert_one(row)
+            inserted += 1
+        except Exception as exc:
+            if _is_duplicate_key_error(exc):
+                duplicate_in_db += 1
+                continue
+            # Anything else is a genuine write failure — never leave a
+            # provisional batch document with a broken/partial upload.
+            db.affiliate_voucher_batches.delete_one({"_id": batch_id})
+            logger.error(
+                "[AFF_VOUCHER_BATCH][CREATE_FAIL] admin=%s pool_id=%s batch_id=%s reason=insert_error err=%s",
+                admin_identity, pool_id, batch_id, exc,
+            )
+            raise
+
+    total_duplicates = duplicate_in_upload + duplicate_in_db
+
+    if inserted == 0:
+        db.affiliate_voucher_batches.delete_one({"_id": batch_id})
+        logger.warning(
+            "[AFF_VOUCHER_BATCH][CREATE_FAIL] admin=%s pool_id=%s submitted=%s duplicates=%s invalid=%s reason=zero_inserted",
+            admin_identity, pool_id, submitted, total_duplicates, invalid_count,
+        )
+        return {
+            "ok": False,
+            "code": "duplicate_codes" if total_duplicates and not invalid_count else "no_codes",
+            "message": "No new voucher codes were inserted — all submitted codes were duplicates or invalid.",
+            "submitted": submitted,
+            "inserted": 0,
+            "duplicates": total_duplicates,
+            "invalid": invalid_count,
+            "total_batch_inventory": 0,
+        }
+
+    db.affiliate_voucher_batches.update_one(
+        {"_id": batch_id},
+        {"$set": {"available_count": inserted, "uploaded_count": inserted, "provisional": False}},
+    )
+    logger.info(
+        "[AFF_VOUCHER_BATCH][CREATE_OK] admin=%s batch_id=%s pool_id=%s starts_at=%s ends_at=%s submitted=%s inserted=%s duplicates=%s invalid=%s",
+        admin_identity, batch_id, pool_id, starts_at_utc.isoformat(), ends_at_utc.isoformat(),
+        submitted, inserted, total_duplicates, invalid_count,
+    )
+    batch = db.affiliate_voucher_batches.find_one({"_id": batch_id})
+    return {
+        "ok": True,
+        "batch": _serialize_batch(batch, now_utc=now_utc),
+        "counts": {
+            "submitted": submitted,
+            "inserted": inserted,
+            "duplicates": total_duplicates,
+            "invalid": invalid_count,
+            "total_batch_inventory": inserted,
+        },
+    }
+
+
+def list_batches(db, *, pool_id=None, status=None, month=None, include_expired=False, now_utc: datetime | None = None) -> dict:
+    now_utc = now_utc or datetime.now(timezone.utc)
+    query = {}
+    if pool_id:
+        query["pool_id"] = str(pool_id).strip().upper()
+
+    entries = []
+    for raw_doc in db.affiliate_voucher_batches.find(query):
+        doc = _hydrate_live_counts(db, raw_doc)
+        derived = derive_batch_status(doc, now_utc)
+        if month:
+            starts_at = doc.get("starts_at")
+            if not starts_at or starts_at.astimezone(KL_TZ).strftime("%Y-%m") != str(month).strip():
+                continue
+        if derived == "expired" and not include_expired and status != "expired":
+            continue
+        if status and str(status).strip().lower() != derived:
+            continue
+        entries.append((doc, derived))
+
+    entries.sort(key=lambda pair: _sort_key(pair[0], pair[1]))
+    items = [_serialize_batch(doc, now_utc=now_utc) for doc, _status in entries]
+    return {
+        "ok": True,
+        "items": items,
+        "legacy_summary": _legacy_unbounded_summary(db, pool_id=pool_id),
+        "server_now_utc": now_utc.isoformat(),
+    }
+
+
+def get_batch_detail(db, batch_id, *, page: int = 1, page_size: int = 50, now_utc: datetime | None = None) -> dict | None:
+    now_utc = now_utc or datetime.now(timezone.utc)
+    oid = _as_object_id(batch_id)
+    if oid is None:
+        return None
+    batch = db.affiliate_voucher_batches.find_one({"_id": oid})
+    if not batch:
+        return None
+    page = max(1, int(page or 1))
+    page_size = max(1, min(int(page_size or 50), 200))
+    skip = (page - 1) * page_size
+    rows = db.voucher_pools.find({"batch_id": oid}, sort=[("_id", 1)], skip=skip, limit=page_size)
+    total_rows = db.voucher_pools.count_documents({"batch_id": oid})
+
+    out = _serialize_batch(_hydrate_live_counts(db, batch), now_utc=now_utc)
+    out["vouchers"] = [_serialize_voucher_row(r) for r in rows]
+    out["vouchers_page"] = page
+    out["vouchers_page_size"] = page_size
+    out["vouchers_total"] = total_rows
+    return out
+
+
+def update_batch(db, batch_id, *, admin_identity: str, updates: dict, now_utc: datetime | None = None) -> dict:
+    now_utc = now_utc or datetime.now(timezone.utc)
+    oid = _as_object_id(batch_id)
+    if oid is None:
+        return _fail("batch_not_found", "Batch not found.")
+    batch = db.affiliate_voucher_batches.find_one({"_id": oid})
+    if not batch:
+        return _fail("batch_not_found", "Batch not found.")
+
+    set_fields = {}
+    if "batch_name" in updates:
+        name = str(updates.get("batch_name") or "").strip()
+        if not name:
+            return _fail("invalid_batch_name", "Batch name cannot be blank.")
+        set_fields["batch_name"] = name
+    if "notes" in updates:
+        set_fields["notes"] = updates.get("notes")
+
+    wants_date_change = "starts_at_local" in updates or "ends_at_local" in updates
+    new_starts_at = batch.get("starts_at")
+    new_ends_at = batch.get("ends_at")
+    if wants_date_change:
+        live_issued_count = int(_hydrate_live_counts(db, batch).get("issued_count") or 0)
+        if live_issued_count > 0:
+            return _fail(
+                "active_batch_edit_restricted",
+                "This batch already has issued vouchers; its schedule can no longer be changed.",
+            )
+        tz_name = updates.get("timezone") or "Asia/Kuala_Lumpur"
+        if "starts_at_local" in updates:
+            new_starts_at = parse_kl_local_to_utc(updates.get("starts_at_local"), tz_name)
+            if new_starts_at is None:
+                return _fail("invalid_start_at", "Start date/time could not be parsed.")
+        if "ends_at_local" in updates:
+            new_ends_at = parse_kl_local_to_utc(updates.get("ends_at_local"), tz_name)
+            if new_ends_at is None:
+                return _fail("invalid_end_at", "End date/time could not be parsed.")
+        if new_ends_at <= new_starts_at:
+            return _fail("end_before_start", "End time must be after start time.")
+        overlap = _find_overlapping_batch(
+            db, pool_id=batch["pool_id"], starts_at_utc=new_starts_at, ends_at_utc=new_ends_at, exclude_batch_id=oid
+        )
+        if overlap:
+            logger.warning(
+                "[AFF_VOUCHER_BATCH][OVERLAP_BLOCK] admin=%s pool_id=%s batch_id=%s conflicting_batch_id=%s",
+                admin_identity, batch["pool_id"], oid, overlap.get("_id"),
+            )
+            return {
+                "ok": False,
+                "code": "batch_window_overlap",
+                "conflicting_batch_id": str(overlap.get("_id")),
+                "message": f"This {batch['pool_id']} batch overlaps an existing scheduled or active batch.",
+            }
+        set_fields["starts_at"] = new_starts_at
+        set_fields["ends_at"] = new_ends_at
+
+    if not set_fields:
+        return {"ok": True, "batch": _serialize_batch(_hydrate_live_counts(db, batch), now_utc=now_utc)}
+
+    db.affiliate_voucher_batches.update_one({"_id": oid}, {"$set": set_fields})
+
+    row_set = {}
+    if "starts_at" in set_fields:
+        row_set["starts_at"] = set_fields["starts_at"]
+    if "ends_at" in set_fields:
+        row_set["ends_at"] = set_fields["ends_at"]
+    if "batch_name" in set_fields:
+        row_set["batch_name"] = set_fields["batch_name"]
+    if row_set:
+        _bulk_update_rows(db.voucher_pools, {"batch_id": oid}, {"$set": row_set})
+
+    logger.info(
+        "[AFF_VOUCHER_BATCH][UPDATE_OK] admin=%s batch_id=%s fields=%s",
+        admin_identity, oid, sorted(set_fields.keys()),
+    )
+    updated = db.affiliate_voucher_batches.find_one({"_id": oid})
+    return {"ok": True, "batch": _serialize_batch(_hydrate_live_counts(db, updated), now_utc=now_utc)}
+
+
+def set_batch_distribution_disabled(db, batch_id, *, admin_identity: str, disabled: bool, now_utc: datetime | None = None) -> dict:
+    now_utc = now_utc or datetime.now(timezone.utc)
+    oid = _as_object_id(batch_id)
+    if oid is None:
+        return _fail("batch_not_found", "Batch not found.")
+    batch = db.affiliate_voucher_batches.find_one({"_id": oid})
+    if not batch:
+        return _fail("batch_not_found", "Batch not found.")
+
+    db.affiliate_voucher_batches.update_one(
+        {"_id": oid}, {"$set": {"distribution_disabled": bool(disabled), "updated_at": now_utc}}
+    )
+    _bulk_update_rows(
+        db.voucher_pools,
+        {"batch_id": oid, "status": "available"},
+        {"$set": {"distribution_disabled": bool(disabled)}},
+    )
+    logger.info(
+        "[AFF_VOUCHER_BATCH][%s] admin=%s batch_id=%s pool_id=%s",
+        "DISABLE" if disabled else "ENABLE", admin_identity, oid, batch.get("pool_id"),
+    )
+    updated = db.affiliate_voucher_batches.find_one({"_id": oid})
+    return {"ok": True, "batch": _serialize_batch(_hydrate_live_counts(db, updated), now_utc=now_utc)}
+
+
+# ---------------------------------------------------------------------------
+# Admin API
+# ---------------------------------------------------------------------------
+
+def _status_response(result: dict):
+    if result.get("ok"):
+        return jsonify(result), 200
+    code = str(result.get("code") or "")
+    status_code = 404 if code == "batch_not_found" else 409 if code == "batch_window_overlap" else 400
+    return jsonify(result), status_code
+
+
+def register_routes(require_admin_from_query, admin_identity_fn, db_ref):
+    """Build a fresh Blueprint wired against this app's auth/db and return
+    it for the caller to register. A brand new Blueprint per call (rather
+    than decorating one shared module-level instance) is what lets tests
+    build multiple independent Flask apps against this module without
+    Flask's "blueprint already registered" guard tripping.
+    """
+    affiliate_voucher_batches_bp = Blueprint("affiliate_voucher_batches", __name__)
+
+    @affiliate_voucher_batches_bp.get("/api/admin/affiliate-voucher-batches")
+    def api_list_affiliate_voucher_batches():
+        ok, err = require_admin_from_query()
+        if not ok:
+            msg, code = err
+            return jsonify({"ok": False, "code": "unauthorized", "message": msg}), code
+        result = list_batches(
+            db_ref(),
+            pool_id=request.args.get("pool_id"),
+            status=request.args.get("status"),
+            month=request.args.get("month"),
+            include_expired=str(request.args.get("include_expired") or "").strip().lower() in ("1", "true", "yes"),
+        )
+        return jsonify(result), 200
+
+    @affiliate_voucher_batches_bp.post("/api/admin/affiliate-voucher-batches")
+    def api_create_affiliate_voucher_batch():
+        ok, err = require_admin_from_query()
+        if not ok:
+            msg, code = err
+            return jsonify({"ok": False, "code": "unauthorized", "message": msg}), code
+        data = request.get_json(silent=True) or {}
+        result = create_batch(
+            db_ref(),
+            admin_identity=admin_identity_fn(),
+            batch_name=data.get("batch_name"),
+            pool_id=data.get("pool_id"),
+            starts_at_local=data.get("starts_at_local"),
+            ends_at_local=data.get("ends_at_local"),
+            timezone_name=data.get("timezone"),
+            codes=data.get("codes"),
+            notes=data.get("notes"),
+        )
+        return _status_response(result)
+
+    @affiliate_voucher_batches_bp.get("/api/admin/affiliate-voucher-batches/<batch_id>")
+    def api_get_affiliate_voucher_batch(batch_id):
+        ok, err = require_admin_from_query()
+        if not ok:
+            msg, code = err
+            return jsonify({"ok": False, "code": "unauthorized", "message": msg}), code
+        detail = get_batch_detail(
+            db_ref(),
+            batch_id,
+            page=request.args.get("page", default=1, type=int),
+            page_size=request.args.get("page_size", default=50, type=int),
+        )
+        if detail is None:
+            return jsonify(_fail("batch_not_found", "Batch not found.")), 404
+        return jsonify({"ok": True, "batch": detail}), 200
+
+    @affiliate_voucher_batches_bp.patch("/api/admin/affiliate-voucher-batches/<batch_id>")
+    def api_update_affiliate_voucher_batch(batch_id):
+        ok, err = require_admin_from_query()
+        if not ok:
+            msg, code = err
+            return jsonify({"ok": False, "code": "unauthorized", "message": msg}), code
+        data = request.get_json(silent=True) or {}
+        if "distribution_disabled" in data:
+            result = set_batch_distribution_disabled(
+                db_ref(), batch_id, admin_identity=admin_identity_fn(), disabled=bool(data.get("distribution_disabled"))
+            )
+            return _status_response(result)
+        result = update_batch(db_ref(), batch_id, admin_identity=admin_identity_fn(), updates=data)
+        return _status_response(result)
+
+    return affiliate_voucher_batches_bp
