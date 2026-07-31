@@ -35,9 +35,9 @@ Every `/api/creator/...` request requires, in order:
    verified payload — a `user_id` in the JSON body or query string is never
    trusted.
 2. An `creator_members` record for that `user_id` with `status == "active"`.
-3. If `membership_check_enabled` is true (see **Creator Group Access
+3. If `membership_check_enabled` is true (see **Creator Access Chat
    settings** below), a live (short-cached) Telegram membership check
-   against the configured group.
+   against the configured chat.
 
 ### `creator_members` schema
 
@@ -69,13 +69,19 @@ Indexes: unique `user_id`, `status`, and `(source_group_id, status)`.
 | `creator_group_not_configured` | `membership_check_enabled=true` but no valid group is configured (HTTP 503) — fails closed |
 | `creator_generation_rate_limited` | Hit the 20/hour generation cap (HTTP 429) |
 
-## Creator Group Access settings (admin-configurable)
+## Creator Access Chat settings (admin-configurable)
 
 `CREATOR_GROUP_CHAT_ID` is no longer read directly from the environment by
 creator access checks. It is now amendable from the Admin Dashboard
-(Referral Centre → Share Content → Creator Access → **Creator Group
-Access**) and stored in MongoDB, so it can be changed without a Fly.io
+(Referral Centre → Share Content → Creator Access → **Creator Access
+Chat**) and stored in MongoDB, so it can be changed without a Fly.io
 secret update or redeploy.
+
+Supported Telegram chat types: `group`, `supergroup`, or `channel`. The
+setting's internal key (`creator_group_access`) and the `creator_group_*`
+field/env-var names are unchanged for backward compatibility — only the
+admin-facing labels reflect that a channel is now a valid choice, so admins
+aren't misled into thinking a selected channel is invalid.
 
 ### Storage: `app_settings` / `creator_group_access`
 
@@ -158,7 +164,8 @@ itself is shown unmasked (it's an identifier, not a secret).
   because the real validation is the Telegram call, not the prefix.
 - Verification calls Telegram `getChat` (existence + chat type), then the
   bot's own `getChatMember` (via `getMe` to resolve the bot's own user ID).
-  Only `group`/`supergroup` chat types are accepted for this creator group.
+  `group`, `supergroup`, and `channel` chat types are all accepted; any other
+  type (e.g. a private chat) is rejected with `creator_group_wrong_chat_type`.
 - Stable codes: `invalid_creator_group_chat_id`, `creator_group_not_found`,
   `creator_group_bot_access_denied`, `creator_group_wrong_chat_type`,
   `creator_group_verification_failed`.
@@ -273,10 +280,10 @@ user ID or username, approve / suspend / activate / remove, and bulk import
 go through the existing `vouchers.require_admin()` — same session-cookie
 auth as the rest of the admin dashboard, unrelated to creator membership.
 
-The Creator Group Access chat ID itself is edited directly in the browser
-(it's an identifier, not a secret — see **Creator Group Access settings**
-above); only the bot token stays environment-only and is never returned to
-the browser. Fly.io secrets/env vars are never written from the browser —
+The Creator Access Chat ID itself is edited directly in the browser (it's
+an identifier, not a secret — see **Creator Access Chat settings** above);
+only the bot token stays environment-only and is never returned to the
+browser. Fly.io secrets/env vars are never written from the browser —
 `CREATOR_GROUP_CHAT_ID` remains a fallback only, used before any explicit
 database setting has ever been saved.
 
@@ -310,13 +317,13 @@ No new Fly.io app, no new database, no fly.toml changes. Web (`gunicorn
 main:app`) and worker processes are unchanged.
 
 `CREATOR_GROUP_CHAT_ID` as a Fly.io secret is now **optional** — it only
-matters as a fallback before any group has ever been configured from the
-Admin Dashboard. It is not required for this deployment; the group is set
+matters as a fallback before any chat has ever been configured from the
+Admin Dashboard. It is not required for this deployment; the chat is set
 through Admin Dashboard → Referral Centre → Share Content → Creator Access
-→ Creator Group Access instead:
+→ Creator Access Chat instead:
 
 ```
-# Optional fallback only — the Admin Dashboard "Creator Group Access" panel
+# Optional fallback only — the Admin Dashboard "Creator Access Chat" panel
 # is the primary, no-redeploy way to configure/change this.
 fly secrets set CREATOR_GROUP_CHAT_ID="<numeric-chat-id>" -a apreferralv1
 fly deploy -a apreferralv1
