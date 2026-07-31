@@ -1481,13 +1481,39 @@ def build_welcome_progress_response(user_id: int, *, now: datetime | None = None
             status = "in_progress"
             welcome_pending_reason = "CHANNEL_NOT_JOINED"
             message = "Join the official channel to unlock your Welcome Voucher."
+        elif state == "NO_FREE_CODES":
+            # Reason-specific copy so a real stockout is distinguishable from
+            # SETTLING/NO_ACTIVE_WELCOME_BATCH/ERROR instead of always
+            # rendering the same generic "being prepared" string.
+            status = state
+            welcome_pending_reason = state
+            message = "Check-ins completed, but voucher codes are out of stock right now. Please check again later."
+            _safe_log("info", "[WELCOME_PROGRESS][PENDING] uid=%s reason=%s", user_id, state)
         else:
-            # SETTLING / NO_ACTIVE_WELCOME_BATCH / NO_FREE_CODES / ERROR: card
-            # stays visible, claim not permanently denied, retry on next poll.
+            # SETTLING / NO_ACTIVE_WELCOME_BATCH / ERROR: card stays visible,
+            # claim not permanently denied, retry on next poll.
             status = state
             welcome_pending_reason = state
             message = "Check-ins completed. Your voucher is being prepared — please check again shortly."
             _safe_log("info", "[WELCOME_PROGRESS][PENDING] uid=%s reason=%s", user_id, state)
+
+    # Temporary diagnostic logging for the Welcome Voucher progress-card
+    # investigation. Does not log voucher codes, tokens, or init data.
+    logger.info(
+        "[WELCOME_DIAG] uid=%s eligible=%s claimable=%s "
+        "checkins=%s window_end=%s "
+        "existing_claim=%s "
+        "ledger_status=%s blocked=%s reason=%s",
+        user_id,
+        eligible,
+        status == "issued",
+        f"{completed_days}/{required_days}",
+        eligible_until,
+        claimed,
+        (welcome_ledger or {}).get("status"),
+        not visible,
+        welcome_pending_reason or status,
+    )
 
     can_checkin, next_checkin_at = _welcome_next_checkin_estimate(user_id, completed_days, now_ref)
     payload = {
