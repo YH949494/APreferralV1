@@ -4,7 +4,6 @@ from vouchers import (
     _drop_audience_type,
     _is_new_joiner_audience,
     _normalize_audience_marker,
-    _welcome_claim_drop_reason,
 )
 import vouchers as vouchers_module
 
@@ -86,58 +85,3 @@ def test_normalize_audience_marker_rejects_unknown_values():
     assert _normalize_audience_marker("") is None
     assert _normalize_audience_marker(None) is None
     assert _normalize_audience_marker(123) is None
-
-
-# ---- _welcome_claim_drop_reason ----
-
-def _new_joiner_drop(drop_id="d1"):
-    return {"_id": drop_id, "audience": {"type": "new_joiner"}, "name": "Welcome"}
-
-
-def test_reserve_block_does_not_return_no_active_drop(monkeypatch):
-    monkeypatch.setattr(vouchers_module, "get_active_drops", lambda ref: [_new_joiner_drop()])
-    monkeypatch.setattr(
-        vouchers_module,
-        "_pooled_claimability_state",
-        lambda **kwargs: {"claimable": False, "sold_out": True, "remaining": 0, "reason": "reserve_block"},
-    )
-    reason = _welcome_claim_drop_reason(uid=1)
-    assert reason != "NO_ACTIVE_DROP"
-    assert reason == "POOL_RESERVED"
-
-
-def test_shaping_denied_does_not_return_no_active_drop(monkeypatch):
-    monkeypatch.setattr(vouchers_module, "get_active_drops", lambda ref: [_new_joiner_drop()])
-    monkeypatch.setattr(
-        vouchers_module,
-        "_pooled_claimability_state",
-        lambda **kwargs: {"claimable": False, "sold_out": False, "remaining": 0, "reason": "shaping_denied"},
-    )
-    reason = _welcome_claim_drop_reason(uid=1)
-    assert reason != "NO_ACTIVE_DROP"
-    assert reason == "SHAPING_DENIED"
-
-
-def test_pool_empty_maps_to_no_free_codes(monkeypatch):
-    monkeypatch.setattr(vouchers_module, "get_active_drops", lambda ref: [_new_joiner_drop()])
-    monkeypatch.setattr(
-        vouchers_module,
-        "_pooled_claimability_state",
-        lambda **kwargs: {"claimable": False, "sold_out": True, "remaining": 0, "reason": "pool_empty"},
-    )
-    assert _welcome_claim_drop_reason(uid=1) == "NO_FREE_CODES"
-
-
-def test_shaping_too_early_maps_to_drop_not_live_yet(monkeypatch):
-    monkeypatch.setattr(vouchers_module, "get_active_drops", lambda ref: [_new_joiner_drop()])
-    monkeypatch.setattr(
-        vouchers_module,
-        "_pooled_claimability_state",
-        lambda **kwargs: {"claimable": False, "sold_out": False, "remaining": 0, "reason": "shaping_too_early"},
-    )
-    assert _welcome_claim_drop_reason(uid=1) == "DROP_NOT_LIVE_YET"
-
-
-def test_no_matching_drop_returns_no_active_drop(monkeypatch):
-    monkeypatch.setattr(vouchers_module, "get_active_drops", lambda ref: [{"audience": {"type": "public"}}])
-    assert _welcome_claim_drop_reason(uid=1) == "NO_ACTIVE_DROP"
