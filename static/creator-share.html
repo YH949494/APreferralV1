@@ -1,0 +1,354 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>AdvantPlay Creator Share Centre</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #0e0f13;
+    --card: #17181f;
+    --card-border: #262834;
+    --text: #f2f3f6;
+    --muted: #9296a6;
+    --accent: #4f7dff;
+    --accent-text: #ffffff;
+    --danger: #e5484d;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    -webkit-tap-highlight-color: transparent;
+  }
+  .wrap { max-width: 480px; margin: 0 auto; padding: 20px 16px 40px; }
+  h1 {
+    font-size: 20px;
+    font-weight: 700;
+    margin: 4px 0 20px;
+    text-align: center;
+  }
+  .btn {
+    display: block;
+    width: 100%;
+    border: none;
+    border-radius: 14px;
+    padding: 14px 16px;
+    font-size: 16px;
+    font-weight: 600;
+    cursor: pointer;
+    text-align: center;
+  }
+  .btn-primary { background: var(--accent); color: var(--accent-text); }
+  .btn-primary:disabled { opacity: 0.55; cursor: default; }
+  .btn-secondary {
+    background: transparent;
+    color: var(--text);
+    border: 1px solid var(--card-border);
+    margin-top: 10px;
+  }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--card-border);
+    border-radius: 16px;
+    padding: 16px;
+    margin-top: 18px;
+    display: none;
+  }
+  .card.visible { display: block; }
+  .card-text {
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-size: 14px;
+    line-height: 1.5;
+    margin: 0 0 14px;
+  }
+  .toast {
+    margin-top: 10px;
+    font-size: 13px;
+    color: #59d67c;
+    min-height: 16px;
+  }
+  .status {
+    margin-top: 14px;
+    text-align: center;
+    color: var(--muted);
+    font-size: 14px;
+  }
+  .status.error { color: var(--danger); }
+  .results {
+    margin-top: 22px;
+    display: none;
+  }
+  .results.visible { display: block; }
+  .results h2 {
+    font-size: 13px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--muted);
+    margin: 0 0 8px;
+    font-weight: 600;
+  }
+  .results-row {
+    display: flex;
+    gap: 10px;
+  }
+  .stat {
+    flex: 1;
+    background: var(--card);
+    border: 1px solid var(--card-border);
+    border-radius: 12px;
+    padding: 12px;
+    text-align: center;
+  }
+  .stat .num { font-size: 22px; font-weight: 700; }
+  .stat .label { font-size: 12px; color: var(--muted); margin-top: 2px; }
+  #hidden-shell { display: none; }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>AdvantPlay Creator</h1>
+
+    <div id="access-denied" class="status hidden"></div>
+
+    <div id="app-shell" class="hidden">
+      <button id="btn-generate" class="btn btn-primary">Generate Share Post</button>
+      <div id="generate-status" class="status" role="status"></div>
+
+      <div id="package-card" class="card">
+        <p id="package-text" class="card-text"></p>
+        <button id="btn-copy" class="btn btn-primary">Copy All</button>
+        <button id="btn-generate-another" class="btn btn-secondary">Generate Another</button>
+        <button id="btn-telegram-share" class="btn btn-secondary">Share to Telegram</button>
+        <div id="copy-toast" class="toast" aria-live="polite"></div>
+      </div>
+
+      <div id="results" class="results">
+        <h2>This Week</h2>
+        <div class="results-row">
+          <div class="stat">
+            <div class="num" id="stat-referrals">–</div>
+            <div class="label">Referrals</div>
+          </div>
+          <div class="stat">
+            <div class="num" id="stat-qualified">–</div>
+            <div class="label">Qualified</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+<script>
+(function () {
+  "use strict";
+
+  var tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
+  if (tg && tg.ready) { try { tg.ready(); tg.expand(); } catch (e) {} }
+
+  function getInitData() {
+    if (tg && typeof tg.initData === "string" && tg.initData.length) return tg.initData;
+    return "";
+  }
+
+  function withInitData(path) {
+    var initData = getInitData();
+    if (!initData) return path;
+    var sep = path.indexOf("?") === -1 ? "?" : "&";
+    return path + sep + "init_data=" + encodeURIComponent(initData);
+  }
+
+  function apiGet(path) {
+    return fetch(withInitData(path), { headers: { Accept: "application/json" } }).then(function (r) {
+      return r.json().then(function (body) { return { ok: r.ok, status: r.status, body: body }; });
+    });
+  }
+
+  function apiPost(path, payload) {
+    return fetch(withInitData(path), {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify(payload || {}),
+    }).then(function (r) {
+      return r.json().then(function (body) { return { ok: r.ok, status: r.status, body: body }; });
+    });
+  }
+
+  var els = {
+    accessDenied: document.getElementById("access-denied"),
+    appShell: document.getElementById("app-shell"),
+    btnGenerate: document.getElementById("btn-generate"),
+    generateStatus: document.getElementById("generate-status"),
+    packageCard: document.getElementById("package-card"),
+    packageText: document.getElementById("package-text"),
+    btnCopy: document.getElementById("btn-copy"),
+    btnGenerateAnother: document.getElementById("btn-generate-another"),
+    btnTelegramShare: document.getElementById("btn-telegram-share"),
+    copyToast: document.getElementById("copy-toast"),
+    results: document.getElementById("results"),
+    statReferrals: document.getElementById("stat-referrals"),
+    statQualified: document.getElementById("stat-qualified"),
+  };
+
+  var ACCESS_DENIED_MESSAGES = {
+    creator_not_authorized: "This Creator Share Centre is for approved creators only.",
+    creator_suspended: "Your creator access is currently suspended.",
+    creator_membership_required: "Join the creator group to keep your access active.",
+    creator_membership_unresolvable: "Couldn't verify your membership right now. Please try again shortly.",
+    invalid_telegram_auth: "Please open this page from inside Telegram.",
+  };
+
+  function showAccessDenied(code) {
+    els.appShell.classList.add("hidden");
+    els.accessDenied.classList.remove("hidden");
+    els.accessDenied.classList.add("error");
+    els.accessDenied.textContent = ACCESS_DENIED_MESSAGES[code] || "Access denied.";
+  }
+
+  var currentPackage = null; // { package_id, share_text }
+  var generating = false;
+
+  function detectPlatform() {
+    return "generic";
+  }
+
+  function renderPackage(pkg) {
+    currentPackage = pkg;
+    els.packageText.textContent = pkg.share_text;
+    els.packageCard.classList.add("visible");
+    els.copyToast.textContent = "";
+  }
+
+  function setGenerating(isGenerating) {
+    generating = isGenerating;
+    els.btnGenerate.disabled = isGenerating;
+    els.btnGenerateAnother.disabled = isGenerating;
+    els.generateStatus.classList.remove("error");
+    els.generateStatus.textContent = isGenerating ? "Generating…" : "";
+  }
+
+  function generatePackage() {
+    if (generating) return;
+    setGenerating(true);
+    apiPost("/api/creator/share/generate", { platform: detectPlatform() })
+      .then(function (res) {
+        setGenerating(false);
+        if (!res.ok || res.body.status !== "ok") {
+          if (res.status === 429) {
+            els.generateStatus.classList.add("error");
+            els.generateStatus.textContent = "You've hit the generation limit for now. Try again later.";
+            return;
+          }
+          if (res.body && ACCESS_DENIED_MESSAGES[res.body.code]) {
+            showAccessDenied(res.body.code);
+            return;
+          }
+          els.generateStatus.classList.add("error");
+          els.generateStatus.textContent = "Couldn't generate a post. Please try again.";
+          return;
+        }
+        renderPackage(res.body);
+        loadResults();
+      })
+      .catch(function () {
+        setGenerating(false);
+        els.generateStatus.classList.add("error");
+        els.generateStatus.textContent = "Network error. Please try again.";
+      });
+  }
+
+  function fallbackCopy(text) {
+    var textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.style.position = "fixed";
+    textarea.style.opacity = "0";
+    document.body.appendChild(textarea);
+    textarea.focus();
+    textarea.select();
+    var ok = false;
+    try { ok = document.execCommand("copy"); } catch (e) { ok = false; }
+    document.body.removeChild(textarea);
+    return ok;
+  }
+
+  function copyAll() {
+    if (!currentPackage) return;
+    var text = currentPackage.share_text;
+
+    var copyPromise;
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      copyPromise = navigator.clipboard.writeText(text).then(function () { return true; }).catch(function () {
+        return fallbackCopy(text);
+      });
+    } else {
+      copyPromise = Promise.resolve(fallbackCopy(text));
+    }
+
+    copyPromise.then(function (copied) {
+      if (!copied) {
+        els.copyToast.textContent = "Couldn't copy automatically — please select and copy the text above.";
+        return;
+      }
+      els.copyToast.textContent = "Copied — paste it into WhatsApp, Facebook or X.";
+      apiPost("/api/creator/share/" + encodeURIComponent(currentPackage.package_id) + "/copied", {
+        platform: detectPlatform(),
+      }).catch(function () {});
+    });
+  }
+
+  function telegramShare() {
+    if (!currentPackage) return;
+    apiPost("/api/creator/share/" + encodeURIComponent(currentPackage.package_id) + "/share-clicked", {
+      platform: "telegram",
+    }).catch(function () {});
+
+    // The referral link is already embedded in share_text, so it is passed
+    // only via the "text" segment of Telegram's share/url composer — never
+    // duplicated into a separate "url" param.
+    var shareUrl = "https://t.me/share/url?text=" + encodeURIComponent(currentPackage.share_text);
+    if (tg && typeof tg.openTelegramLink === "function") {
+      tg.openTelegramLink(shareUrl);
+    } else {
+      window.open(shareUrl, "_blank");
+    }
+  }
+
+  function loadResults() {
+    apiGet("/api/creator/share/results").then(function (res) {
+      if (!res.ok || res.body.status !== "ok") return;
+      var r = res.body.results;
+      els.statReferrals.textContent = r.current_week_referrals;
+      els.statQualified.textContent = r.current_week_qualified;
+      els.results.classList.add("visible");
+    }).catch(function () {});
+  }
+
+  function init() {
+    apiGet("/api/creator/share/status").then(function (res) {
+      if (!res.ok || res.body.status !== "ok" || !(res.body.creator && res.body.creator.access)) {
+        showAccessDenied(res.body && res.body.code);
+        return;
+      }
+      els.appShell.classList.remove("hidden");
+      loadResults();
+    }).catch(function () {
+      showAccessDenied("invalid_telegram_auth");
+    });
+  }
+
+  els.btnGenerate.addEventListener("click", generatePackage);
+  els.btnGenerateAnother.addEventListener("click", generatePackage);
+  els.btnCopy.addEventListener("click", copyAll);
+  els.btnTelegramShare.addEventListener("click", telegramShare);
+
+  init();
+})();
+</script>
+</body>
+</html>

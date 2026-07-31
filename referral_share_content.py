@@ -36,6 +36,7 @@ from __future__ import annotations
 import logging
 import random
 import re
+import secrets
 from datetime import datetime, timezone
 from html import escape as html_escape
 from urllib.parse import urlparse
@@ -378,12 +379,47 @@ def build_referral_share_caption(
     return "\n".join(lines)
 
 
+def build_creator_share_text(
+    *, hook_text: str | None, playback_url: str | None, referral_link: str | None
+) -> str:
+    """Assemble the Creator Share Centre's copy-ready plain text.
+
+    Fixed V1 format::
+
+        {hook_text}
+        {playback_url}
+
+        More player replays and rewards inside AdvantPlay:
+        {canonical_referral_link}
+
+    ``hook_text``/``playback_url`` are each independently omitted (no
+    "None", no orphan blank line) when absent, mirroring
+    ``build_referral_share_caption``'s empty-state handling. The CTA line
+    and the referral link always render; ``referral_link`` is required.
+    """
+    referral_link = (referral_link or "").strip()
+    if not referral_link:
+        raise ValueError("build_creator_share_text requires a non-empty referral_link")
+
+    hook = (hook_text or "").strip()
+    playback = (playback_url or "").strip()
+    top = [line for line in (hook, playback) if line]
+
+    lines = list(top)
+    if top:
+        lines.append("")
+    lines.append("More player replays and rewards inside AdvantPlay:")
+    lines.append(referral_link)
+    return "\n".join(lines)
+
+
 def generate_share_package(
     user_id: int,
     username: str = "",
     *,
     generated_by: str = "bot",
     requested_by_admin: int | None = None,
+    platform: str | None = None,
 ) -> dict:
     """Assemble the share package for ``user_id``.
 
@@ -396,6 +432,10 @@ def generate_share_package(
     is never sent without one. Writes ``share_generations`` only after that
     invite link is obtained. See module docstring + Phase 1 report for the
     full failure/rollback behaviour discussion.
+
+    ``platform`` is an optional caller-supplied label (e.g. the Creator
+    Share Centre's target platform) stored alongside the generation record;
+    it never affects hook/playback selection or the invite link.
     """
     now = now_utc()
 
@@ -435,24 +475,33 @@ def generate_share_package(
         referral_url=invite_link,
     )
 
+    playback_record_id = playback_doc["_id"] if playback_doc else None
+    package_id = secrets.token_urlsafe(16)
     doc = {
         "user_id": user_id,
         "hook_id": hook_id,
         "hook_text": hook_text,
-        "playback_record_id": playback_doc["_id"] if playback_doc else None,
+        "playback_record_id": playback_record_id,
         "playback_id": playback_doc["playback_id"] if playback_doc else None,
         "playback_url": playback_url,
         "invite_link": invite_link,
         "generated_at": now,
         "generated_by": generated_by,
         "requested_by_admin": requested_by_admin,
+        "platform": platform,
+        "package_id": package_id,
+        "copied_at": None,
+        "copy_count": 0,
+        "share_clicked_at": None,
+        "share_click_count": 0,
     }
     database.db["share_generations"].insert_one(doc)
     logger.info(
-        "[SHARE_CONTENT][GENERATE_OK] user_id=%s playback_record_id=%s hook_id=%s",
+        "[SHARE_CONTENT][GENERATE_OK] user_id=%s playback_record_id=%s hook_id=%s package_id=%s",
         user_id,
-        playback_doc["_id"] if playback_doc else None,
+        playback_record_id,
         hook_id,
+        package_id,
     )
     return {
         "ok": True,
@@ -460,6 +509,9 @@ def generate_share_package(
         "invite_link": invite_link,
         "playback_url": playback_url,
         "hook_text": hook_text,
+        "hook_id": hook_id,
+        "playback_record_id": playback_record_id,
+        "package_id": package_id,
     }
 
 

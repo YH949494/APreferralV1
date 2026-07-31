@@ -5200,10 +5200,39 @@
   function loadReferralShareContent(force) {
     $("#rsc-subtab-hooks").classList.toggle("active", rsc.subtab === "hooks");
     $("#rsc-subtab-playback").classList.toggle("active", rsc.subtab === "playback");
+    $("#rsc-subtab-creators").classList.toggle("active", rsc.subtab === "creators");
     $("#rsc-hooks-panel").classList.toggle("hidden", rsc.subtab !== "hooks");
     $("#rsc-playback-panel").classList.toggle("hidden", rsc.subtab !== "playback");
+    $("#rsc-creators-panel").classList.toggle("hidden", rsc.subtab !== "creators");
     if (rsc.subtab === "hooks") loadShareHooks(force);
-    else loadSharePlayback(force);
+    else if (rsc.subtab === "playback") loadSharePlayback(force);
+    else loadCreatorAccess(force);
+  }
+
+  function loadCreatorAccess() {
+    statePanel("rsc-creators-body", "loading", "Loading creators…");
+    api("/api/admin/referral/creators" + rscQuery("rsc-creators-search", "rsc-creators-status-filter")).then(function (data) {
+      $("#rsc-creators-summary").textContent = "Active creators: " + fmt(data.active_count || 0);
+      $("#rsc-creators-group-status").textContent = "Creator group: " + (data.creator_group_configured ? "configured" : "not configured");
+      var items = data.creators || [];
+      if (!items.length) { $("#rsc-creators-body").innerHTML = emptyState("No creators yet — approve one above."); return; }
+      var rows = items.map(function (c) {
+        var actions = '<button class="btn danger" data-rsc-creator-action="remove" data-id="' + esc(c.user_id) + '">Remove</button>';
+        if (c.status === "active") {
+          actions = '<button class="btn" data-rsc-creator-action="suspend" data-id="' + esc(c.user_id) + '">Suspend</button> ' + actions;
+        } else {
+          actions = '<button class="btn" data-rsc-creator-action="activate" data-id="' + esc(c.user_id) + '">Activate</button> ' + actions;
+        }
+        return '<tr><td>' + esc(c.user_id) + '</td>' +
+          '<td>' + esc(c.username || "—") + '</td>' +
+          '<td>' + esc(c.creator_tier || "—") + '</td>' +
+          '<td>' + rscStatusPill(c.status) + '</td>' +
+          '<td class="sub">' + (c.approved_at ? new Date(c.approved_at).toLocaleString() : "—") + '</td>' +
+          '<td>' + actions + '</td></tr>';
+      }).join("");
+      $("#rsc-creators-body").innerHTML = '<table class="data-table"><thead><tr><th>User ID</th><th>Username</th><th>Tier</th>' +
+        '<th>Status</th><th>Approved</th><th>Actions</th></tr></thead><tbody>' + rows + '</tbody></table>';
+    }).catch(function (e) { statePanel("rsc-creators-body", "error", "Failed to load creators: " + e.message); });
   }
 
   function loadShareHooks() {
@@ -5242,6 +5271,57 @@
   function bindReferralShareContent() {
     $("#rsc-subtab-hooks").addEventListener("click", function () { rsc.subtab = "hooks"; loadReferralShareContent(true); });
     $("#rsc-subtab-playback").addEventListener("click", function () { rsc.subtab = "playback"; loadReferralShareContent(true); });
+    $("#rsc-subtab-creators").addEventListener("click", function () { rsc.subtab = "creators"; loadReferralShareContent(true); });
+
+    $("#rsc-creators-search-btn").addEventListener("click", function () { loadCreatorAccess(true); });
+    $all("#rsc-creators-status-filter button").forEach(function (b) {
+      b.addEventListener("click", function () {
+        $all("#rsc-creators-status-filter button").forEach(function (x) { x.classList.toggle("active", x === b); });
+        loadCreatorAccess(true);
+      });
+    });
+    $("#rsc-creator-add-btn").addEventListener("click", function () {
+      var userId = ($("#rsc-creator-user-id").value || "").trim();
+      var username = ($("#rsc-creator-username").value || "").trim();
+      var tier = ($("#rsc-creator-tier").value || "").trim();
+      if (!userId) { toast("❌ Telegram user ID is required", "error"); return; }
+      apiPostJson("/api/admin/referral/creators", { user_id: userId, username: username, creator_tier: tier || undefined }).then(function (res) {
+        if (!res.ok || res.d.status !== "ok") { toast("❌ " + (res.d && res.d.code || "create_failed"), "error"); return; }
+        toast("✅ Creator approved", "success");
+        $("#rsc-creator-user-id").value = "";
+        $("#rsc-creator-username").value = "";
+        $("#rsc-creator-tier").value = "";
+        loadCreatorAccess(true);
+      });
+    });
+    $("#rsc-creators-bulk-btn").addEventListener("click", function () {
+      var lines = $("#rsc-creators-bulk-text").value || "";
+      apiPostJson("/api/admin/referral/creators/bulk", { user_ids: lines }).then(function (res) {
+        if (!res.ok) { toast("❌ Bulk import failed", "error"); return; }
+        rscRenderBulkResult("#rsc-creators-bulk-result", res.d);
+        toast("✅ Bulk import done (" + res.d.inserted + " inserted)", "success");
+        $("#rsc-creators-bulk-text").value = "";
+        loadCreatorAccess(true);
+      });
+    });
+    document.addEventListener("click", function (e) {
+      var btn = e.target && e.target.closest && e.target.closest("[data-rsc-creator-action]");
+      if (!btn) return;
+      var action = btn.dataset.rscCreatorAction, id = btn.dataset.id;
+      if (action === "suspend" || action === "activate") {
+        apiPost("/api/admin/referral/creators/" + id + "/" + action).then(function (r) {
+          if (r.status !== "ok") toast("❌ " + r.code, "error");
+          loadCreatorAccess(true);
+        });
+      } else if (action === "remove") {
+        if (!confirm("Remove this creator's access?")) return;
+        apiDelete("/api/admin/referral/creators/" + id).then(function (res) {
+          if (!res.ok || res.d.status !== "ok") { toast("❌ " + (res.d && res.d.code || "remove_failed"), "error"); return; }
+          toast("✅ Creator removed", "success");
+          loadCreatorAccess(true);
+        });
+      }
+    });
 
     $("#rsc-hooks-search-btn").addEventListener("click", function () { loadShareHooks(true); });
     $all("#rsc-hooks-status-filter button").forEach(function (b) {

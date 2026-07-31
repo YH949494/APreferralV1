@@ -578,6 +578,7 @@
         <div class="seg" style="margin-bottom:16px;">
           <button id="rsc-subtab-hooks" class="active">Caption Hooks</button>
           <button id="rsc-subtab-playback">Playback Pool</button>
+          <button id="rsc-subtab-creators">Creator Access</button>
         </div>
 
         <div id="rsc-hooks-panel">
@@ -633,6 +634,41 @@
           </div>
           <div class="section-title" style="margin-bottom:8px;">Playback Pool</div>
           <div id="rsc-playback-body"></div>
+        </div>
+
+        <div id="rsc-creators-panel" class="hidden">
+          <div class="section" style="margin-bottom:16px;">
+            <div class="section-title">Creator Access</div>
+            <div class="sub" id="rsc-creators-summary" style="margin-bottom:8px;">Active creators: —</div>
+            <div class="sub" id="rsc-creators-group-status">Creator group: —</div>
+          </div>
+          <div class="section" style="margin-bottom:16px;">
+            <div class="section-title">Approve Creator</div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;">
+              <input class="filter-input" id="rsc-creator-user-id" placeholder="Telegram user ID" style="min-width:180px;margin:0;" />
+              <input class="filter-input" id="rsc-creator-username" placeholder="Username (optional)" style="min-width:160px;margin:0;" />
+              <input class="filter-input" id="rsc-creator-tier" placeholder="Tier (default: pilot)" style="min-width:140px;margin:0;" />
+              <button class="btn primary" id="rsc-creator-add-btn">Approve</button>
+            </div>
+          </div>
+          <div class="section" style="margin-bottom:16px;">
+            <div class="section-title">Bulk Import <span class="sub">(one Telegram user ID per non-empty line)</span></div>
+            <textarea id="rsc-creators-bulk-text" rows="4" class="filter-input" style="width:100%;box-sizing:border-box;" placeholder="123456789&#10;987654321"></textarea>
+            <button class="btn" id="rsc-creators-bulk-btn" style="margin-top:8px;">Import</button>
+            <div id="rsc-creators-bulk-result"></div>
+          </div>
+          <div class="controls" style="margin-bottom:12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+            <input class="filter-input" id="rsc-creators-search" placeholder="Search by user ID or username…" style="margin:0;max-width:260px;" />
+            <button class="btn" id="rsc-creators-search-btn">Search</button>
+            <div class="seg" id="rsc-creators-status-filter">
+              <button data-status="" class="active">All</button>
+              <button data-status="active">Active</button>
+              <button data-status="suspended">Suspended</button>
+              <button data-status="removed">Removed</button>
+            </div>
+          </div>
+          <div class="section-title" style="margin-bottom:8px;">Creators</div>
+          <div id="rsc-creators-body"></div>
         </div>
       </section>
 
