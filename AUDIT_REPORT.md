@@ -15,7 +15,7 @@
 1. **[SEC-01] Unauthenticated user-ID substitution on 7+ endpoints**, including one (`/api/welcome-progress/<user_id>`) that can be used to read and even *trigger issuance of* another user's real voucher code, with zero auth and wildcard CORS amplifying the blast radius to any third-party web page.
 2. **[WELCOME-01] Two parallel welcome-reward inventories** (the new `affiliate_ledger`/`voucher_pools` v2 ledger vs. the legacy `db.drops`/`db.vouchers` claim system the frontend actually uses to reveal a code) are not cross-linked — a user can be marked `ISSUED` server-side with no way to ever see their code if the legacy campaign card isn't also kept alive.
 3. **[WELCOME-02] Welcome vouchers that hit `OUT_OF_STOCK` are permanently stuck** — no retry/backfill path exists to reissue after restock, unlike the equivalent (and correctly self-healing) `PENDING_MANUAL` path used by affiliate T1–T4 tiers.
-4. **[SCHED-01] Scheduler locks are never explicitly released** and at least one job's worst-case runtime (`tick_5min`, ~33 min under Telegram degradation) can exceed its own lock TTL (15 min), opening a real double-execution window.
+4. **[SCHED-01] Scheduler locks are never explicitly released**, and the lock TTL for `tick_5min` (900s) is already 3× its own cron interval (`*/5`, 300s) — meaning under **normal, healthy operation** a fast run at minute 0 holds the lock until minute 15, silently no-opping the minute-5 and minute-10 ticks and throttling referral/XP snapshot freshness to ~15 minutes instead of the intended 5. Under additional Telegram API degradation, worst-case runtime (~33 min) can exceed even that, opening a real double-execution window.
 5. **[REF-01] A referral notification helper (`_maybe_send_referral_join_ack_dm`) references an unimported name (`pm_allowed`)** — currently masked as a no-op by a second, independently-wrong guard, meaning the feature has never actually sent a DM in production, and fixing the obviously-wrong guard without also fixing the missing import will immediately start raising `NameError` inside the referral-join critical section, incorrectly revoking a just-created invitee lock on every referral.
 
 **Is reward integrity trustworthy?** *Mostly, with two carve-outs.* Referral settlement, XP grants, and voucher-pool/affiliate-tier allocation are all backed by atomic MongoDB CAS operations and unique-index idempotency (no read-then-write races found in the core paths). The two exceptions are the welcome-voucher inventory split (**WELCOME-01/02**) and a metadata-only rate-limiter quirk (**REF-04**) — neither corrupts core counters, but WELCOME-01/02 can silently deny/delay a real reward.
@@ -148,23 +148,25 @@ Findings are ordered by severity. "Confidence: Confirmed" means I traced the exa
 
 ---
 
-### [SCHED-01] Scheduler locks are never explicitly released; at least one job's worst-case runtime can exceed its own TTL
+### [SCHED-01] Scheduler locks are never explicitly released — `tick_5min`'s lock TTL already exceeds its own cron interval, throttling referral/XP settlement cadence even under healthy operation, and can also cause true double-execution under Telegram degradation
 
 - **Severity:** High
 - **Confidence:** Confirmed
 - **Category:** concurrency / scheduler safety
-- **Files/functions:** `main.py:729-751` (`acquire_scheduler_lock`), `main.py:781-856` (`tick_5min`, ttl=900s), `scheduler.py:3078` / `scheduler.py:884-890` (`getChatMember`, `timeout=10` per row), `scheduler.py:2997-3015` (claim batch, `batch_limit=200` in `settle_pending_referrals`).
-- **Trigger:** a period of Telegram API slowness/degradation coinciding with a `tick_5min` run that has to check membership for close to its full 200-row batch limit.
-- **Root cause:** `acquire_scheduler_lock` sets an expiry at acquisition time and there is no corresponding "release" call anywhere in the codebase (grepped clean) — the lock is held for its full TTL regardless of how quickly the job actually finishes, and conversely there is no shortening if the job is fast, meaning the *only* protection against a legitimately-still-running job overrunning is the TTL being sized larger than any realistic run. For `tick_5min`: 200 rows × up to 10s each ≈ 2000s (33 min) worst case, against a 900s (15 min) TTL.
-- **Exact failure scenario:** Telegram API degradation causes a `tick_5min` run to take >15 minutes; the lock expires while the original run is still in progress; the next scheduled tick (or the same job on a hypothetically scaled-out second worker instance) acquires the lock and begins a second concurrent `settle_pending_referrals`/`settle_xp_snapshots`/`settle_referral_snapshots` pass.
-- **User/business impact:** the settlement logic underneath is independently idempotent (atomic claim-then-process, unique award keys) so this is unlikely to double-grant rewards, but it does risk redundant Telegram API load precisely during an already-degraded window, and defeats the intended purpose of the lock (serializing snapshot rebuilds so readers never see a mid-rebuild state, per `scheduler.py:2469-2483`'s two-phase compute-then-publish design).
-- **Data affected:** `pending_referrals`, `scheduler_locks`; indirectly `users` snapshot fields during a rare overlapping rebuild.
-- **Abuse potential:** none — this is an availability/correctness-under-load concern, not exploitable.
-- **Existing protections:** the atomic CAS lock itself (good), plus downstream idempotency in the settlement functions (good) — these are why the practical impact is "redundant work / risk of overlap" rather than "double reward."
-- **Why those protections are insufficient:** the lock's entire purpose (serialize snapshot publication) is defeated exactly in the failure mode where serialization matters most (a slow, degraded run).
-- **Minimal safe remediation:** (1) add an explicit lock-release on successful completion so fast runs don't hold the slot needlessly; (2) either raise `tick_5min`'s TTL to comfortably exceed the true worst case, or reduce the per-run Telegram-call budget (lower `batch_limit`, or a wall-clock cutoff inside the loop) so 900s is a genuine ceiling.
-- **Tests required:** a test simulating a run exceeding its TTL and asserting the reclaim path doesn't double-process the same `pending_referrals` rows already claimed by the first run (should already hold via the `processing` status guard, but not currently asserted for the lock-expiry-during-run case specifically).
-- **Production verification:** check scheduler/job logs for `tick_5min` runs with `elapsed_s` approaching or exceeding 900s.
+- **Files/functions:** `main.py:729-751` (`acquire_scheduler_lock`), `main.py:781-856` (`tick_5min`, ttl=900s, registered on cron `*/5` i.e. every 300s — `main.py:8953-8959`), `scheduler.py:3078` / `scheduler.py:884-890` (`getChatMember`, `timeout=10` per row), `scheduler.py:2997-3015` (claim batch, `batch_limit=200` in `settle_pending_referrals`).
+- **Trigger — everyday case, no degradation needed:** `acquire_scheduler_lock`'s TTL (900s = 15 min) is 3× `tick_5min`'s own cron interval (300s = 5 min), and the lock is never explicitly released on completion. A normal, fast run that finishes in seconds still holds the lock until its 15-minute TTL expires. Concretely: a run starting at minute 0 (however long it actually takes) holds the lock through minute 15; the ticks scheduled for minute 5 and minute 10 both find the lock still held and silently no-op (`main.py:757-763`-style "lock_not_acquired" log, no error). The *effective* settlement cadence is therefore ~15 minutes under completely normal operation, not the intended 5 — this is not a hypothetical edge case, it is the steady-state behavior of the current TTL/cron combination.
+- **Trigger — additional, worse case:** a period of Telegram API slowness/degradation coinciding with a run that has to check membership for close to its full 200-row batch limit can push actual runtime *past* the 15-minute TTL itself (200 rows × up to 10s each ≈ 2000s / 33 min worst case), at which point a genuinely-still-running job's lock can be re-acquired by the next tick, opening a true concurrent-execution window (not just a throttled cadence).
+- **Root cause:** no corresponding lock-release call exists anywhere in the codebase (grepped clean) — TTL is the only release mechanism, and it was sized without accounting for its relationship to the job's own cron interval.
+- **Exact failure scenario (routine):** referral settlement, XP snapshot rebuild, and referral snapshot rebuild (all invoked from within `tick_5min`) run roughly every 15 minutes in practice, not every 5 — meaning newly-settled referrals/XP/leaderboard positions can lag reality by up to 15 minutes even with Telegram fully healthy, directly affecting `_clear_leaderboard_cache`-driven UI freshness (`main.py:916`) and any downstream logic that assumes 5-minute freshness.
+- **Exact failure scenario (degraded):** as previously described — Telegram slowness pushes a run past 15 minutes, the lock expires mid-run, and a second concurrent pass can begin.
+- **User/business impact:** the settlement logic underneath is independently idempotent (atomic claim-then-process, unique award keys) so double-grants are unlikely even in the degraded case, but (a) referral/XP/leaderboard staleness is a real, everyday UX and support-ticket generator, not just a rare-degradation risk, and (b) the lock's purpose of serializing snapshot rebuilds (`scheduler.py:2469-2483`'s two-phase compute-then-publish design) is defeated exactly when serialization matters most.
+- **Data affected:** `pending_referrals`, `scheduler_locks`; `users` snapshot fields (staleness in the routine case, rare overlapping-rebuild risk in the degraded case).
+- **Abuse potential:** none — availability/freshness concern, not exploitable.
+- **Existing protections:** the atomic CAS lock itself (good), plus downstream idempotency in the settlement functions (good) — these bound the degraded-case impact to "redundant work" rather than "double reward," but do nothing for the routine-case staleness, which isn't a race at all, just a mis-sized TTL.
+- **Why those protections are insufficient:** idempotency protects against double-processing; it does not address the far more common problem that the job simply doesn't run as often as its cron schedule implies.
+- **Minimal safe remediation:** (1) add an explicit lock-release on successful completion so a fast run frees the slot immediately for the next scheduled tick; (2) independently, either lower the TTL to something realistic for the *typical* run (with release-on-success handling the normal case) while keeping a higher ceiling as a dead-worker safety net, or reduce the per-run Telegram-call budget (lower `batch_limit`, or a wall-clock cutoff inside the loop) so the TTL is sized against a true worst case rather than 3× the intended cadence.
+- **Tests required:** (1) a test asserting that a fast, successful `tick_5min` run releases its lock such that the very next scheduled invocation can acquire it immediately, not 15 minutes later; (2) a test simulating a run exceeding its TTL, asserting the reclaim path doesn't double-process the same `pending_referrals` rows already claimed by the first run (should already hold via the `processing` status guard, but not currently asserted for the lock-expiry-during-run case specifically).
+- **Production verification:** check scheduler/job logs for the actual gap between consecutive successful `tick_5min` completions (expect ~15 min, not ~5 min, confirming the routine-case throttling) and for any runs with `elapsed_s` approaching or exceeding 900s (confirming exposure to the degraded-case double-execution window).
 - **Rollback considerations:** low risk, additive.
 
 ---
@@ -397,10 +399,10 @@ Findings are ordered by severity. "Confidence: Confirmed" means I traced the exa
   - `pymongo==4.6.1` — PYSEC-2026-1826. Fix: 4.6.3.
   - `flask==3.0.3` — PYSEC-2026-2151. Fix: 3.1.3.
 - **User/business impact:** the gunicorn request-smuggling CVE is particularly relevant given this app sits behind Fly's proxy — request smuggling could in principle be used to reach endpoints intended to be restricted at a proxy layer, compounding the missing-auth issues in SEC-01.
-- **Minimal safe remediation:** bump `flask-cors` to ≥4.0.2 (ideally 6.0.0), `gunicorn` to ≥22.0.0, `pymongo` to ≥4.6.3, `flask` to ≥3.1.3; re-run the full test suite after each bump given Flask/Werkzeug version coupling (see TEST-04).
+- **Minimal safe remediation:** bump `flask-cors` to ≥4.0.2 (ideally 6.0.0), `gunicorn` to ≥22.0.0, `pymongo` to ≥4.6.3, `flask` to ≥3.1.3; re-run the full test suite after each bump (fix TEST-04's missing `app.app_context()` wrappers first so that pass gives a clean signal).
 - **Tests required:** full regression pass after the bump.
 - **Production verification:** not applicable — this is a static dependency fact.
-- **Rollback considerations:** Flask 3.0→3.1 and gunicorn 21→22 are typically safe minor/major bumps but should go through staging first given the app's Werkzeug-version sensitivity (see TEST-04).
+- **Rollback considerations:** Flask 3.0→3.1 and gunicorn 21→22 are typically safe minor/major bumps but should go through staging first.
 
 ---
 
@@ -477,16 +479,16 @@ Findings are ordered by severity. "Confidence: Confirmed" means I traced the exa
 
 ---
 
-### [TEST-04] `requirements.txt` under-pins transitive dependencies (e.g. Werkzeug), causing real test failures in a clean environment unrelated to actual code bugs
+### [TEST-04] A cluster of `test_vouchers.py` tests omit `app.app_context()` and fail outside a fresh install; `requirements.txt` also lacks a full transitive-dependency lockfile
 
 - **Severity:** Low
-- **Confidence:** Confirmed (reproduced live)
+- **Confidence:** Confirmed (reproduced live; root cause corrected after review — see note below)
 - **Category:** test infrastructure
-- **Evidence:** `requirements.txt` pins `Flask==3.0.3` but not `Werkzeug`; a fresh install pulled `Werkzeug==3.1.8`, and several tests calling Flask view functions directly outside of a request context then fail with `RuntimeError: Working outside of application context` (e.g. `test_vouchers.py::VoucherAntiHunterTests::test_claim_pooled_prefers_my_pool_then_public`), because `current_app` proxy resolution behavior is sensitive to the exact Werkzeug version paired with Flask 3.0.3. No `conftest.py`/`pytest.ini` exists to normalize this.
-- **User/business impact:** ~70 of ~2029 collected tests fail in a strictly fresh environment following only the committed `requirements.txt` — some of these are genuine version-skew artifacts (like this one), not real production bugs; without a pinned/locked environment, it's hard for a new contributor or CI runner to distinguish "real regression" from "environment drift."
-- **Minimal safe remediation:** pin `Werkzeug` explicitly (matching whatever version this app was actually validated against), and add a `constraints.txt`/lockfile for the full transitive dependency set.
-- **Tests required:** re-run the full suite after pinning to confirm the ~70 failures resolve to a much smaller, genuinely-actionable set.
-- **Production verification:** confirm what Werkzeug version is actually running in the deployed Fly containers (`pip freeze` inside the container) to know which version is "real."
+- **Evidence:** `_atomic_claim_pooled_voucher` (`vouchers.py:5030`) calls `current_app.logger.info(...)` unconditionally. Several `VoucherAntiHunterTests` methods that exercise this path — e.g. `test_claim_pooled_prefers_my_pool_then_public`, `test_claim_internal_drop_without_ledger_rejected`, `test_claim_new_joiner_drop_requires_subscription`, `test_claim_pooled_my_pool_decrements_when_available`, `test_claim_pooled_non_my_uses_public_only` — call `claim_pooled(...)` directly with **no** `app.app_context()`/`Flask(__name__).app_context()` wrapper, unlike sibling tests in the very same file that correctly do (`test_vouchers.py:415,460,519,571,899,947,995,...`). `current_app` requires an active Flask application context by design, regardless of Flask/Werkzeug version — so these specific tests fail with `RuntimeError: Working outside of application context` purely because of an inconsistent test setup, not a dependency-version issue. *(An earlier draft of this finding incorrectly attributed this failure to an unpinned `Werkzeug` version; that attribution was wrong and has been corrected here — the failure reproduces identically regardless of Werkzeug version, since `current_app`'s app-context requirement is fundamental Flask behavior.)*
+- **User/business impact:** these specific tests provide no real coverage of `claim_pooled`'s atomic-claim path in a fresh environment (they error before any assertion runs) — a narrower version of the same "did we actually run this test" concern raised elsewhere in this audit's TEST section. Separately, `requirements.txt` still has no full lockfile for transitive dependencies, so other environment-drift-induced failures (distinct from this specific `current_app` case) remain possible and shouldn't be assumed to be real regressions without individual triage.
+- **Minimal safe remediation:** add the missing `app.app_context()` wrapper to the affected test methods (matching their siblings in the same file); separately, and independently of this specific bug, add a lockfile/constraints file for the full transitive dependency set so future triage can distinguish real regressions from environment drift for *other* failures.
+- **Tests required:** the fix itself (wrap the affected tests in `app.app_context()`); confirm they then exercise and assert on the real `_atomic_claim_pooled_voucher` behavior.
+- **Production verification:** not applicable — this is a test-only defect, not a production code or runtime issue.
 
 ---
 
@@ -582,10 +584,26 @@ db.xp_events.aggregate([
 ]);
 
 // 7. xp_ledger / xp_events mismatch (an xp_ledger row with no corresponding xp_events row, or vice versa)
+// Must match on the full (user_id, source/type, source_id/unique_key) identity, not just user_id,
+// and must check both directions independently.
 db.xp_ledger.aggregate([
   { $lookup: { from: "xp_events", let: { uid: "$user_id", src: "$source", sid: "$source_id" },
-      pipeline: [ { $match: { $expr: { $eq: ["$user_id", "$$uid"] } } } ], as: "ev" } },
+      pipeline: [ { $match: { $expr: { $and: [
+          { $eq: ["$user_id", "$$uid"] },
+          { $eq: ["$type", "$$src"] },
+          { $eq: ["$unique_key", "$$sid"] }
+      ] } } } ], as: "ev" } },
   { $match: { ev: { $size: 0 } } },
+  { $limit: 200 }
+]);
+db.xp_events.aggregate([
+  { $lookup: { from: "xp_ledger", let: { uid: "$user_id", typ: "$type", ukey: "$unique_key" },
+      pipeline: [ { $match: { $expr: { $and: [
+          { $eq: ["$user_id", "$$uid"] },
+          { $eq: ["$source", "$$typ"] },
+          { $eq: ["$source_id", "$$ukey"] }
+      ] } } } ], as: "led" } },
+  { $match: { led: { $size: 0 } } },
   { $limit: 200 }
 ]);
 
@@ -602,21 +620,33 @@ db.vouchers.aggregate([
   { $match: { n: { $gt: 1 } } }
 ]);
 
-// 11. Welcome rewards issued to ineligible users (issued without official-channel subscription evidence on record)
+// 11. Welcome rewards issued to ineligible users
+// NOTE: issue_welcome_bonus_if_eligible() (affiliate_rewards.py) verifies channel membership by
+// calling Telegram's getChatMember directly (_is_official_channel_subscribed) and does NOT write to
+// channel_subscription_cache (that collection is populated by a different, dormant subscription-audit
+// path) or to vouchers.py's separate subscription_cache_col. Neither cache is evidence of what the
+// issuance path actually checked, so a query keyed on either cache produces false positives (flags
+// legitimately-issued rewards en masse) rather than a reliable signal. Treat any output as an
+// INCONCLUSIVE candidate list requiring a live getChatMember spot-check per user, not a confirmed
+// violation list:
 db.affiliate_ledger.aggregate([
   { $match: { ledger_type: "WELCOME", status: "ISSUED" } },
-  { $lookup: { from: "channel_subscription_cache", localField: "user_id", foreignField: "user_id", as: "sub" } },
+  { $lookup: { from: "subscription_cache", localField: "user_id", foreignField: "user_id", as: "sub" } },
   { $match: { sub: { $size: 0 } } }
 ]);
+// Prefer, if available, cross-checking against referral_audit / self-invite flags
+// (is_user_blocked_for_self_invite) and the WELCOME dedup_key's own created_at vs. the user's
+// joined_main_at window, which are the actual gates issue_welcome_bonus_if_eligible enforces.
 
-// 12. Expired batch inventory still being issued from (cross-check issued_at against the batch window)
+// 12. Expired batch inventory still being issued from (cross-check issued_at against the batch window;
+// affiliate_voucher_batches documents store starts_at/ends_at, NOT window_start/window_end)
 db.voucher_pools.aggregate([
   { $match: { status: "issued" } },
   { $lookup: { from: "affiliate_voucher_batches", localField: "batch_id", foreignField: "_id", as: "batch" } },
   { $unwind: "$batch" },
   { $match: { $expr: { $or: [
-      { $lt: ["$batch.window_end", "$issued_at"] },
-      { $gt: ["$batch.window_start", "$issued_at"] }
+      { $lt: ["$batch.ends_at", "$issued_at"] },
+      { $gt: ["$batch.starts_at", "$issued_at"] }
   ] } } }
 ]);
 
@@ -681,10 +711,10 @@ A companion read-only Python script pattern (for any of the above requiring pagi
 | 11 | **SCHED-02** — delete or harden the legacy `post_growth_leaderboard_weekly` job's error handling | Medium | Low (delete) / Medium (harden) | Low | confirm it's genuinely unused in prod config first |
 | 12 | **SCHED-03** — explicitly set `RUNNER_MODE=web` in `fly.toml`'s `web` process command | Medium | Trivial | Low | none |
 | 13 | **SEC-03** — scope CORS away from wildcard for user-data routes | Medium | Medium (needs to enumerate the real Mini App origin(s)) | Medium if the Mini App is ever loaded from an origin not on the allowlist | do after SEC-01, since it's an amplifier not the root cause |
-| 14 | **DEP-01** — bump `flask-cors`, `gunicorn`, `pymongo`, `flask` to patched versions | Medium | Low-Medium | Medium (full regression pass needed, see TEST-04) | fix TEST-04 first so the regression pass is meaningful |
+| 14 | **DEP-01** — bump `flask-cors`, `gunicorn`, `pymongo`, `flask` to patched versions | Medium | Low-Medium | Medium (full regression pass needed) | fix TEST-04's missing app-context wrappers first so the regression pass is meaningful |
 | 15 | **XP-01** — namespace `xp_events.unique_key` by event type | Medium | Medium (index/migration) | Medium | none |
 | 16 | **TEST-01** — add an import-level smoke test / `ruff --select=F821` CI gate | Medium (prevents recurrence of REF-01-class bugs) | Trivial | None | none |
-| 17 | **TEST-02** — add `requirements-dev.txt` with `mongomock`, pin `Werkzeug` (**TEST-04**) | Low-Medium | Trivial | None | none |
+| 17 | **TEST-02/TEST-04** — add `requirements-dev.txt` with `mongomock`; fix the missing `app.app_context()` wrappers in the affected `test_vouchers.py` tests | Low-Medium | Trivial | None | none |
 | 18 | **TEST-03** — fix or delete `test_ugc_growth_referral.py` | Low | Trivial | None | none |
 
 ### P2 — Improve later (maintainability, performance, lower-impact UX)
@@ -711,4 +741,4 @@ A companion read-only Python script pattern (for any of the above requiring pagi
 7. **MONGO-02** — Route all `ensure_indexes()` calls through the existing safe-index-creation helper to close off a startup-crash class that has already occurred once in production.
 8. **SEC-02** — Switch the admin-secret comparison to `hmac.compare_digest`.
 9. **MONGO-01** — Verify and, if needed, enforce `users.username` uniqueness before trusting username-only admin XP lookups.
-10. **TEST-01/TEST-02/TEST-04** — Add an import-level smoke test / static-analysis CI gate and a proper test-dependency/lockfile setup, so the next `pm_allowed`-class bug and the next environment-drift-induced false test failure are both caught automatically instead of by manual audit.
+10. **TEST-01/TEST-02/TEST-04** — Add an import-level smoke test / static-analysis CI gate, a proper test-dependency setup (`mongomock`), and fix the missing `app.app_context()` wrappers in the affected `test_vouchers.py` tests, so the next `pm_allowed`-class bug and the next silently-not-running test are both caught automatically instead of by manual audit.
