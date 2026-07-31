@@ -5200,10 +5200,52 @@
   function loadReferralShareContent(force) {
     $("#rsc-subtab-hooks").classList.toggle("active", rsc.subtab === "hooks");
     $("#rsc-subtab-playback").classList.toggle("active", rsc.subtab === "playback");
+    $("#rsc-subtab-creators").classList.toggle("active", rsc.subtab === "creators");
     $("#rsc-hooks-panel").classList.toggle("hidden", rsc.subtab !== "hooks");
     $("#rsc-playback-panel").classList.toggle("hidden", rsc.subtab !== "playback");
+    $("#rsc-creators-panel").classList.toggle("hidden", rsc.subtab !== "creators");
     if (rsc.subtab === "hooks") loadShareHooks(force);
-    else loadSharePlayback(force);
+    else if (rsc.subtab === "playback") loadSharePlayback(force);
+    else { loadCreatorAccess(force); loadCreatorGroupSettings(force); }
+  }
+
+  function loadCreatorGroupSettings() {
+    api("/api/admin/referral/creator-settings").then(function (data) {
+      var s = data.settings || {};
+      $("#rsc-creator-group-chat-id").value = s.creator_group_chat_id != null ? String(s.creator_group_chat_id) : "";
+      $("#rsc-creator-group-check-enabled").checked = !!s.membership_check_enabled;
+      $("#rsc-creator-group-chat-title").textContent = s.chat_title || "—";
+      $("#rsc-creator-group-chat-type").textContent = s.chat_type || "—";
+      $("#rsc-creator-group-bot-status").textContent = s.bot_membership_status || "—";
+      $("#rsc-creator-group-verified-at").textContent = s.verified_at ? new Date(s.verified_at).toLocaleString() : "—";
+      $("#rsc-creator-group-source").textContent = s.source || "—";
+      $("#rsc-creator-group-version").textContent = s.config_version != null ? String(s.config_version) : "—";
+    }).catch(function (e) { toast("❌ Failed to load creator group settings: " + e.message, "error"); });
+  }
+
+  function loadCreatorAccess() {
+    statePanel("rsc-creators-body", "loading", "Loading creators…");
+    api("/api/admin/referral/creators" + rscQuery("rsc-creators-search", "rsc-creators-status-filter")).then(function (data) {
+      $("#rsc-creators-summary").textContent = "Active creators: " + fmt(data.active_count || 0);
+      var items = data.creators || [];
+      if (!items.length) { $("#rsc-creators-body").innerHTML = emptyState("No creators yet — approve one above."); return; }
+      var rows = items.map(function (c) {
+        var actions = '<button class="btn danger" data-rsc-creator-action="remove" data-id="' + esc(c.user_id) + '">Remove</button>';
+        if (c.status === "active") {
+          actions = '<button class="btn" data-rsc-creator-action="suspend" data-id="' + esc(c.user_id) + '">Suspend</button> ' + actions;
+        } else {
+          actions = '<button class="btn" data-rsc-creator-action="activate" data-id="' + esc(c.user_id) + '">Activate</button> ' + actions;
+        }
+        return '<tr><td>' + esc(c.user_id) + '</td>' +
+          '<td>' + esc(c.username || "—") + '</td>' +
+          '<td>' + esc(c.creator_tier || "—") + '</td>' +
+          '<td>' + rscStatusPill(c.status) + '</td>' +
+          '<td class="sub">' + (c.approved_at ? new Date(c.approved_at).toLocaleString() : "—") + '</td>' +
+          '<td>' + actions + '</td></tr>';
+      }).join("");
+      $("#rsc-creators-body").innerHTML = '<table class="data-table"><thead><tr><th>User ID</th><th>Username</th><th>Tier</th>' +
+        '<th>Status</th><th>Approved</th><th>Actions</th></tr></thead><tbody>' + rows + '</tbody></table>';
+    }).catch(function (e) { statePanel("rsc-creators-body", "error", "Failed to load creators: " + e.message); });
   }
 
   function loadShareHooks() {
@@ -5242,6 +5284,88 @@
   function bindReferralShareContent() {
     $("#rsc-subtab-hooks").addEventListener("click", function () { rsc.subtab = "hooks"; loadReferralShareContent(true); });
     $("#rsc-subtab-playback").addEventListener("click", function () { rsc.subtab = "playback"; loadReferralShareContent(true); });
+    $("#rsc-subtab-creators").addEventListener("click", function () { rsc.subtab = "creators"; loadReferralShareContent(true); });
+
+    $("#rsc-creator-group-verify-btn").addEventListener("click", function () {
+      var raw = ($("#rsc-creator-group-chat-id").value || "").trim();
+      if (!raw) { toast("❌ Enter a group chat ID first", "error"); return; }
+      $("#rsc-creator-group-verify-result").textContent = "Verifying…";
+      apiPostJson("/api/admin/referral/creator-settings/verify-group", { creator_group_chat_id: raw }).then(function (res) {
+        if (!res.ok || res.d.status !== "ok") {
+          $("#rsc-creator-group-verify-result").textContent = "❌ " + (res.d && res.d.code || "verification_failed");
+          return;
+        }
+        var warn = res.d.warning ? " (warning: chat ID doesn't start with -100)" : "";
+        $("#rsc-creator-group-verify-result").textContent =
+          "✅ Verified: " + (res.d.chat_title || "—") + " [" + res.d.chat_type + "], bot status: " + res.d.bot_membership_status + warn;
+      });
+    });
+
+    $("#rsc-creator-group-save-btn").addEventListener("click", function () {
+      var raw = ($("#rsc-creator-group-chat-id").value || "").trim();
+      var body = {
+        creator_group_chat_id: raw || null,
+        membership_check_enabled: $("#rsc-creator-group-check-enabled").checked,
+        force_save: $("#rsc-creator-group-force-save").checked,
+      };
+      apiPutJson("/api/admin/referral/creator-settings", body).then(function (res) {
+        if (!res.ok || res.d.status !== "ok") { toast("❌ " + (res.d && res.d.code || "save_failed"), "error"); return; }
+        toast("✅ Creator group settings saved", "success");
+        $("#rsc-creator-group-verify-result").textContent = "";
+        loadCreatorGroupSettings(true);
+        loadCreatorAccess(true);
+      });
+    });
+
+    $("#rsc-creators-search-btn").addEventListener("click", function () { loadCreatorAccess(true); });
+    $all("#rsc-creators-status-filter button").forEach(function (b) {
+      b.addEventListener("click", function () {
+        $all("#rsc-creators-status-filter button").forEach(function (x) { x.classList.toggle("active", x === b); });
+        loadCreatorAccess(true);
+      });
+    });
+    $("#rsc-creator-add-btn").addEventListener("click", function () {
+      var userId = ($("#rsc-creator-user-id").value || "").trim();
+      var username = ($("#rsc-creator-username").value || "").trim();
+      var tier = ($("#rsc-creator-tier").value || "").trim();
+      if (!userId) { toast("❌ Telegram user ID is required", "error"); return; }
+      apiPostJson("/api/admin/referral/creators", { user_id: userId, username: username, creator_tier: tier || undefined }).then(function (res) {
+        if (!res.ok || res.d.status !== "ok") { toast("❌ " + (res.d && res.d.code || "create_failed"), "error"); return; }
+        toast("✅ Creator approved", "success");
+        $("#rsc-creator-user-id").value = "";
+        $("#rsc-creator-username").value = "";
+        $("#rsc-creator-tier").value = "";
+        loadCreatorAccess(true);
+      });
+    });
+    $("#rsc-creators-bulk-btn").addEventListener("click", function () {
+      var lines = $("#rsc-creators-bulk-text").value || "";
+      apiPostJson("/api/admin/referral/creators/bulk", { user_ids: lines }).then(function (res) {
+        if (!res.ok) { toast("❌ Bulk import failed", "error"); return; }
+        rscRenderBulkResult("#rsc-creators-bulk-result", res.d);
+        toast("✅ Bulk import done (" + res.d.inserted + " inserted)", "success");
+        $("#rsc-creators-bulk-text").value = "";
+        loadCreatorAccess(true);
+      });
+    });
+    document.addEventListener("click", function (e) {
+      var btn = e.target && e.target.closest && e.target.closest("[data-rsc-creator-action]");
+      if (!btn) return;
+      var action = btn.dataset.rscCreatorAction, id = btn.dataset.id;
+      if (action === "suspend" || action === "activate") {
+        apiPost("/api/admin/referral/creators/" + id + "/" + action).then(function (r) {
+          if (r.status !== "ok") toast("❌ " + r.code, "error");
+          loadCreatorAccess(true);
+        });
+      } else if (action === "remove") {
+        if (!confirm("Remove this creator's access?")) return;
+        apiDelete("/api/admin/referral/creators/" + id).then(function (res) {
+          if (!res.ok || res.d.status !== "ok") { toast("❌ " + (res.d && res.d.code || "remove_failed"), "error"); return; }
+          toast("✅ Creator removed", "success");
+          loadCreatorAccess(true);
+        });
+      }
+    });
 
     $("#rsc-hooks-search-btn").addEventListener("click", function () { loadShareHooks(true); });
     $all("#rsc-hooks-status-filter button").forEach(function (b) {
