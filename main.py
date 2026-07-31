@@ -8063,11 +8063,11 @@ async def send_creator_share_entry_point(update: Update, context: ContextTypes.D
 
     logger.info("[CREATOR_SHARE][ACCESS_GRANTED] user_id=%s", uid)
     keyboard = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("🎬 Creator Share Centre", web_app=WebAppInfo(url=CREATOR_SHARE_WEBAPP_URL))]]
+        [[InlineKeyboardButton("💰 Turn Shares Into Cash", web_app=WebAppInfo(url=CREATOR_SHARE_WEBAPP_URL))]]
     )
     await safe_reply_text(
         update.effective_message,
-        "Open your Creator Share Centre 👇",
+        "Your next referral could be worth cash. Start sharing 👇",
         reply_markup=keyboard,
         uid=uid,
         send_type="creator_share_entry",
