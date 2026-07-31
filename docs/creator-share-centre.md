@@ -415,7 +415,7 @@ by `creator_members.status`.
 - An unauthorized creator API call returns the expected denial code.
 - An approved creator can generate a package containing the canonical
   invite link.
-- Copy All works inside Telegram.
+- Copy Post works inside Telegram.
 - The existing admin Share Content page and the general Mini App still work
   unchanged.
 - Web and worker machines remain healthy; no duplicate scheduler/polling
