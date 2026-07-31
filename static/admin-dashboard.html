@@ -578,6 +578,7 @@
         <div class="seg" style="margin-bottom:16px;">
           <button id="rsc-subtab-hooks" class="active">Caption Hooks</button>
           <button id="rsc-subtab-playback">Playback Pool</button>
+          <button id="rsc-subtab-creators">Creator Access</button>
         </div>
 
         <div id="rsc-hooks-panel">
@@ -633,6 +634,67 @@
           </div>
           <div class="section-title" style="margin-bottom:8px;">Playback Pool</div>
           <div id="rsc-playback-body"></div>
+        </div>
+
+        <div id="rsc-creators-panel" class="hidden">
+          <div class="section" style="margin-bottom:16px;">
+            <div class="section-title">Creator Access</div>
+            <div class="sub" id="rsc-creators-summary" style="margin-bottom:8px;">Active creators: —</div>
+          </div>
+
+          <div class="section" style="margin-bottom:16px;">
+            <div class="section-title">Creator Group Access</div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px;">
+              <input class="filter-input" id="rsc-creator-group-chat-id" placeholder="Group chat ID, e.g. -1001234567890" style="min-width:240px;margin:0;" />
+              <label class="sub" style="display:flex;align-items:center;gap:6px;">
+                <input type="checkbox" id="rsc-creator-group-check-enabled" />
+                Membership verification enabled
+              </label>
+            </div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;">
+              <button class="btn" id="rsc-creator-group-verify-btn">Verify Group</button>
+              <button class="btn primary" id="rsc-creator-group-save-btn">Save Changes</button>
+              <label class="sub" style="display:flex;align-items:center;gap:6px;">
+                <input type="checkbox" id="rsc-creator-group-force-save" />
+                Force save without verification
+              </label>
+            </div>
+            <div id="rsc-creator-group-verify-result" class="sub" style="margin-top:8px;"></div>
+            <div class="sub" style="margin-top:10px;">
+              Chat: <span id="rsc-creator-group-chat-title">—</span> (<span id="rsc-creator-group-chat-type">—</span>)
+            </div>
+            <div class="sub">Bot membership status: <span id="rsc-creator-group-bot-status">—</span></div>
+            <div class="sub">Last verified: <span id="rsc-creator-group-verified-at">—</span></div>
+            <div class="sub">Source: <span id="rsc-creator-group-source">—</span> · Config version: <span id="rsc-creator-group-version">—</span></div>
+          </div>
+
+          <div class="section" style="margin-bottom:16px;">
+            <div class="section-title">Approve Creator</div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;">
+              <input class="filter-input" id="rsc-creator-user-id" placeholder="Telegram user ID" style="min-width:180px;margin:0;" />
+              <input class="filter-input" id="rsc-creator-username" placeholder="Username (optional)" style="min-width:160px;margin:0;" />
+              <input class="filter-input" id="rsc-creator-tier" placeholder="Tier (default: pilot)" style="min-width:140px;margin:0;" />
+              <button class="btn primary" id="rsc-creator-add-btn">Approve</button>
+            </div>
+          </div>
+          <div class="section" style="margin-bottom:16px;">
+            <div class="section-title">Bulk Import <span class="sub">(one Telegram user ID per non-empty line)</span></div>
+            <textarea id="rsc-creators-bulk-text" rows="4" class="filter-input" style="width:100%;box-sizing:border-box;" placeholder="123456789&#10;987654321"></textarea>
+            <button class="btn" id="rsc-creators-bulk-btn" style="margin-top:8px;">Import</button>
+            <div id="rsc-creators-bulk-result"></div>
+          </div>
+          <div class="controls" style="margin-bottom:12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+            <input class="filter-input" id="rsc-creators-search" placeholder="Search by user ID or username…" style="margin:0;max-width:260px;" />
+            <button class="btn" id="rsc-creators-search-btn">Search</button>
+            <div class="seg" id="rsc-creators-status-filter">
+              <button data-status="" class="active">All</button>
+              <button data-status="active">Active</button>
+              <button data-status="suspended">Suspended</button>
+              <button data-status="removed">Removed</button>
+            </div>
+          </div>
+          <div class="section-title" style="margin-bottom:8px;">Creators</div>
+          <div id="rsc-creators-body"></div>
         </div>
       </section>
 

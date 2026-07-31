@@ -2633,6 +2633,9 @@ app.register_blueprint(campaign_events_bp)
 from referral_share_content import referral_share_content_bp
 app.register_blueprint(referral_share_content_bp)
 
+from creator_share_centre import creator_share_bp
+app.register_blueprint(creator_share_bp)
+
 from community_centre import community_centre_bp, ensure_community_centre_indexes
 app.register_blueprint(community_centre_bp)
 try:
@@ -6050,6 +6053,16 @@ def serve_mini_app():
     logger.info("[MINIAPP] served static/index.html v=%s", MINIAPP_VERSION)
     return response
 
+
+@app.route("/creator-share")
+def serve_creator_share():
+    # The HTML shell itself carries no creator data — every
+    # /api/creator/... call it makes is separately authenticated/authorized
+    # via Telegram initData + creator_members (see creator_share_centre.py).
+    response = make_response(send_from_directory("static", "creator-share.html"))
+    _apply_no_store_headers(response)
+    return response
+
 @app.route("/api/referral")
 def api_referral():
     user_id_raw = request.args.get("user_id")
@@ -8013,6 +8026,46 @@ async def send_referral_link_with_share_button(update: Update, context: ContextT
     logger.info("[REFERRAL][DEEPLINK_OK] uid=%s", uid)
 
 
+CREATOR_SHARE_WEBAPP_URL = "https://apreferralv1.fly.dev/creator-share"
+
+
+async def send_creator_share_entry_point(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles both the ``/creator`` command and the ``/start creator`` deep
+    link. Only ``creator_members`` records with ``status == "active"`` get
+    the Web App button — this never touches the general user Mini App menu
+    and grants nothing based on a group ID appearing in the URL/payload.
+    """
+    user = update.effective_user
+    if not user:
+        return
+    uid = user.id
+
+    record = db["creator_members"].find_one({"user_id": uid})
+    if not record or record.get("status") != "active":
+        logger.info("[CREATOR_SHARE][ACCESS_DENIED] user_id=%s reason_code=creator_not_authorized", uid)
+        await safe_reply_text(
+            update.effective_message,
+            "This entry point is for approved AdvantPlay creators only.",
+            uid=uid,
+            send_type="creator_share_denied",
+            raise_on_non_transient=False,
+        )
+        return
+
+    logger.info("[CREATOR_SHARE][ACCESS_GRANTED] user_id=%s", uid)
+    keyboard = InlineKeyboardMarkup(
+        [[InlineKeyboardButton("🎬 Creator Share Centre", web_app=WebAppInfo(url=CREATOR_SHARE_WEBAPP_URL))]]
+    )
+    await safe_reply_text(
+        update.effective_message,
+        "Open your Creator Share Centre 👇",
+        reply_markup=keyboard,
+        uid=uid,
+        send_type="creator_share_entry",
+        raise_on_non_transient=False,
+    )
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_private_chat(update):
         logger.info(
@@ -8028,6 +8081,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if payload == "referral":
         await ensure_user_initialized_for_referral(update, context)
         await send_referral_link_with_share_button(update, context)
+        return
+    if payload == "creator":
+        await send_creator_share_entry_point(update, context)
         return
 
     user = update.effective_user
@@ -8726,6 +8782,7 @@ def run_worker():
 
     # 3) Telegram handlers
     app_bot.add_handler(CommandHandler("start", start))
+    app_bot.add_handler(CommandHandler("creator", send_creator_share_entry_point))
     app_bot.add_handler(ChatJoinRequestHandler(join_request_handler))    
     app_bot.add_handler(ChatMemberHandler(member_update_handler, ChatMemberHandler.CHAT_MEMBER))
     app_bot.add_handler(ChatMemberHandler(member_update_handler, ChatMemberHandler.MY_CHAT_MEMBER))
