@@ -8031,18 +8031,23 @@ CREATOR_SHARE_WEBAPP_URL = "https://apreferralv1.fly.dev/creator-share"
 
 async def send_creator_share_entry_point(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handles both the ``/creator`` command and the ``/start creator`` deep
-    link. Only ``creator_members`` records with ``status == "active"`` get
-    the Web App button — this never touches the general user Mini App menu
-    and grants nothing based on a group ID appearing in the URL/payload.
+    link. Uses the same access model as the Creator Share Centre Mini App
+    (``creator_share_centre._verify_creator_access``): confirmed membership
+    in the configured Creator Access Chat grants access (lazily creating a
+    creator profile on first success), an existing ``suspended``/``removed``
+    record always denies, and this never touches the general user Mini App
+    menu or grants anything based on a group ID appearing in the URL/payload.
     """
     user = update.effective_user
     if not user:
         return
     uid = user.id
 
-    record = db["creator_members"].find_one({"user_id": uid})
-    if not record or record.get("status") != "active":
-        logger.info("[CREATOR_SHARE][ACCESS_DENIED] user_id=%s reason_code=creator_not_authorized", uid)
+    from creator_share_centre import _verify_creator_access
+
+    _record, access_err = _verify_creator_access(uid, user.username or "")
+    if access_err:
+        logger.info("[CREATOR_SHARE][ACCESS_DENIED] user_id=%s reason_code=%s", uid, access_err[0])
         await safe_reply_text(
             update.effective_message,
             "This entry point is for approved AdvantPlay creators only.",

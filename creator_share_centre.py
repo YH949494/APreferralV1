@@ -15,11 +15,19 @@ Adds:
     general referral/XP system.
 
 Access control: every ``/api/creator/...`` route requires (1) valid
-Telegram Mini App initData, (2) an ``active`` ``creator_members`` record for
-the authenticated user_id, and (3) — when ``CREATOR_GROUP_CHAT_ID`` is
-configured — a live (short-cached) Telegram membership check against that
-group. user_id is always derived from verified initData; a ``user_id`` sent
-in the request body/query is never trusted.
+Telegram Mini App initData, and (2) confirmed membership in the configured
+Creator Access Chat (verified live, short-cached, against Telegram). A
+``creator_members`` record is no longer a mandatory allowlist — it is an
+override/profile collection: ``suspended``/``removed`` always denies (even
+for a current chat member), an existing ``active`` record is honoured, and a
+chat member with no record at all is granted access and gets one lazily
+created (``status="active"``, ``approval_source="creator_access_chat_membership"``).
+When membership verification is explicitly disabled by an admin
+(``membership_check_enabled=false``), access falls back to requiring an
+existing ``creator_members.status == "active"`` record — disabling
+verification never opens access to users without a creator record. user_id
+is always derived from verified initData; a ``user_id`` sent in the request
+body/query is never trusted.
 """
 
 from __future__ import annotations
@@ -36,6 +44,7 @@ from datetime import datetime, timezone
 import requests
 from flask import Blueprint, jsonify, request
 from pymongo import ReturnDocument
+from pymongo.errors import DuplicateKeyError
 
 import database
 from referral_rate_limit import consume_referral_rate_limits
@@ -434,38 +443,101 @@ def _verify_live_membership(record: dict, chat_id, config_version: int) -> bool 
     return None
 
 
-def _verify_creator_access(user_id: int):
-    """Returns (creator_doc, error) where error is (code, http_status) or None."""
+def _lazy_ensure_creator_profile(user_id: int, username: str, chat_id, existing_record: dict | None) -> dict:
+    """Called only after a *confirmed* Creator Access Chat membership check.
+
+    If ``existing_record`` is already present (it can only be an ``active``
+    record here — ``suspended``/``removed`` are filtered out earlier), it is
+    returned unchanged. Otherwise an ``active`` creator profile is created via
+    ``$setOnInsert`` so concurrent first-access requests for the same user
+    never race into duplicate documents (the unique index on ``user_id`` is
+    the actual duplicate guard; ``$setOnInsert`` on an upsert just avoids a
+    redundant write when the insert loses the race).
+    """
+    if existing_record is not None:
+        return existing_record
+
+    now = now_utc()
+    try:
+        database.db["creator_members"].update_one(
+            {"user_id": user_id},
+            {
+                "$setOnInsert": {
+                    "user_id": user_id,
+                    "username": username or "",
+                    "status": "active",
+                    "creator_tier": "pilot",
+                    "source_group_id": chat_id,
+                    "approved_at": now,
+                    "approval_source": "creator_access_chat_membership",
+                    "created_at": now,
+                    "updated_at": now,
+                    "last_membership_verified_at": now,
+                }
+            },
+            upsert=True,
+        )
+    except DuplicateKeyError:
+        # A concurrent request won the insert race first; either way,
+        # re-reading below returns the single surviving document.
+        logger.info("[CREATOR_SHARE] lazy creator profile upsert raced for user_id=%s", user_id)
+
+    return database.db["creator_members"].find_one({"user_id": user_id})
+
+
+def _verify_creator_access(user_id: int, username: str = ""):
+    """Returns (creator_doc, error) where error is (code, http_status) or None.
+
+    See the module docstring for the full access model. In order:
+      1. An existing ``suspended``/``removed`` ``creator_members`` record
+         always denies, even if the user is still in the configured chat.
+      2. When membership verification is enabled, a confirmed Creator Access
+         Chat membership grants access — creating an ``active`` profile
+         lazily if none exists yet.
+      3. When membership verification is disabled, only an existing
+         ``active`` record is honoured; a user with no record stays denied.
+    """
     record = database.db["creator_members"].find_one({"user_id": user_id})
-    if not record:
-        return None, ("creator_not_authorized", 403)
-    if record.get("status") == "suspended":
-        return None, ("creator_suspended", 403)
-    if record.get("status") != "active":
-        return None, ("creator_not_authorized", 403)
+    if record and record.get("status") in ("suspended", "removed"):
+        code = "creator_suspended" if record["status"] == "suspended" else "creator_not_authorized"
+        return None, (code, 403)
 
     settings = get_creator_group_access_settings()
     if settings["membership_check_enabled"]:
         chat_id = settings["creator_group_chat_id"]
         if not chat_id:
             return None, ("creator_group_not_configured", 503)
-        verdict = _verify_live_membership(record, chat_id, settings["config_version"])
+
+        if record:
+            verdict = _verify_live_membership(record, chat_id, settings["config_version"])
+        else:
+            verdict = _check_group_membership(user_id, chat_id)
+
         if verdict is False:
-            database.db["creator_members"].update_one(
-                {"_id": record["_id"]}, {"$set": {"status": "removed", "updated_at": now_utc()}}
-            )
+            if record:
+                database.db["creator_members"].update_one(
+                    {"_id": record["_id"]}, {"$set": {"status": "removed", "updated_at": now_utc()}}
+                )
             return None, ("creator_membership_required", 403)
         if verdict is None:
             return None, ("creator_membership_unresolvable", 503)
 
-    return record, None
+        record = _lazy_ensure_creator_profile(user_id, username, chat_id, record)
+        return record, None
+
+    # Membership verification explicitly disabled: fall back to requiring an
+    # existing active creator_members record. This never opens access to a
+    # user with no record — that would defeat the point of the toggle.
+    if record and record.get("status") == "active":
+        return record, None
+    return None, ("creator_not_authorized", 403)
 
 
 def _authenticate_and_authorize():
     user_id, username, auth_err = _extract_authenticated_user()
     if auth_err:
         return None, None, None, auth_err
-    record, access_err = _verify_creator_access(user_id)
+    record, access_err = _verify_creator_access(user_id, username)
     if access_err:
         logger.info("[CREATOR_SHARE][ACCESS_DENIED] user_id=%s reason_code=%s", user_id, access_err[0])
         return user_id, username, None, access_err
@@ -750,6 +822,7 @@ def admin_create_creator():
                     "source_group_id": source_group_id,
                     "approved_at": now,
                     "approved_by": admin_id,
+                    "approval_source": "manual",
                     "updated_at": now,
                 }
             },
@@ -764,6 +837,7 @@ def admin_create_creator():
         "creator_tier": creator_tier,
         "approved_at": now,
         "approved_by": admin_id,
+        "approval_source": "manual",
         "last_membership_verified_at": None,
         "created_at": now,
         "updated_at": now,
@@ -811,7 +885,15 @@ def admin_bulk_creators():
         if existing:
             database.db["creator_members"].update_one(
                 {"user_id": uid},
-                {"$set": {"status": "active", "approved_at": now, "approved_by": admin_id, "updated_at": now}},
+                {
+                    "$set": {
+                        "status": "active",
+                        "approved_at": now,
+                        "approved_by": admin_id,
+                        "approval_source": "bulk_import",
+                        "updated_at": now,
+                    }
+                },
             )
             results.append({"line": raw_line, "status": "reactivated"})
             reactivated += 1
@@ -826,6 +908,7 @@ def admin_bulk_creators():
                 "creator_tier": "pilot",
                 "approved_at": now,
                 "approved_by": admin_id,
+                "approval_source": "bulk_import",
                 "last_membership_verified_at": None,
                 "created_at": now,
                 "updated_at": now,

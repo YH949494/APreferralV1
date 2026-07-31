@@ -201,6 +201,123 @@ class TestAccess:
         assert calls["n"] == 1
 
 
+class TestChatMembershipGrantsAccessAutomatically:
+    """creator_members is no longer a mandatory allowlist: confirmed
+    membership in the configured Creator Access Chat grants access on its
+    own, lazily creating an active creator profile on first success."""
+
+    def test_chat_member_without_record_allowed(self, fake_db, monkeypatch, client):
+        _fake_vouchers_module(monkeypatch, user_id=777)
+        monkeypatch.setenv("CREATOR_GROUP_CHAT_ID", "-1001234567890")
+        monkeypatch.setattr(csc, "_check_group_membership", lambda uid, chat_id: True)
+
+        resp = client.get("/api/creator/share/status?init_data=ok")
+        assert resp.status_code == 200
+        assert resp.get_json()["creator"]["access"] is True
+
+    def test_first_access_lazily_creates_active_creator_profile(self, fake_db, monkeypatch, client):
+        _fake_vouchers_module(monkeypatch, user_id=777, username="newcreator")
+        monkeypatch.setenv("CREATOR_GROUP_CHAT_ID", "-1001234567890")
+        monkeypatch.setattr(csc, "_check_group_membership", lambda uid, chat_id: True)
+
+        resp = client.get("/api/creator/share/status?init_data=ok")
+        assert resp.status_code == 200
+
+        record = fake_db["creator_members"].find_one({"user_id": 777})
+        assert record is not None
+        assert record["status"] == "active"
+        assert record["creator_tier"] == "pilot"
+        assert record["approval_source"] == "creator_access_chat_membership"
+        assert record["source_group_id"] == -1001234567890
+        assert record["username"] == "newcreator"
+
+    def test_subsequent_access_reuses_same_record(self, fake_db, monkeypatch, client):
+        _fake_vouchers_module(monkeypatch, user_id=777)
+        monkeypatch.setenv("CREATOR_GROUP_CHAT_ID", "-1001234567890")
+        monkeypatch.setattr(csc, "_check_group_membership", lambda uid, chat_id: True)
+
+        client.get("/api/creator/share/status?init_data=ok")
+        first = fake_db["creator_members"].find_one({"user_id": 777})
+
+        client.get("/api/creator/share/status?init_data=ok")
+        second = fake_db["creator_members"].find_one({"user_id": 777})
+
+        assert first["_id"] == second["_id"]
+        assert fake_db["creator_members"].count_documents({"user_id": 777}) == 1
+
+    def test_concurrent_first_access_does_not_duplicate_records(self, fake_db, monkeypatch):
+        # Simulates two requests racing to lazily create the same profile:
+        # both see no existing record before either write lands.
+        csc._lazy_ensure_creator_profile(777, "racer", -1001234567890, None)
+        csc._lazy_ensure_creator_profile(777, "racer", -1001234567890, None)
+        assert fake_db["creator_members"].count_documents({"user_id": 777}) == 1
+
+    def test_suspended_creator_denied_even_if_still_in_chat(self, fake_db, monkeypatch, client):
+        _fake_vouchers_module(monkeypatch, user_id=555)
+        _creator(fake_db, 555, status="suspended")
+        monkeypatch.setenv("CREATOR_GROUP_CHAT_ID", "-1001234567890")
+        monkeypatch.setattr(csc, "_check_group_membership", lambda uid, chat_id: True)
+
+        resp = client.get("/api/creator/share/status?init_data=ok")
+        assert resp.status_code == 403
+        assert resp.get_json()["code"] == "creator_suspended"
+
+    def test_removed_creator_denied_even_if_still_in_chat(self, fake_db, monkeypatch, client):
+        _fake_vouchers_module(monkeypatch, user_id=555)
+        _creator(fake_db, 555, status="removed")
+        monkeypatch.setenv("CREATOR_GROUP_CHAT_ID", "-1001234567890")
+        monkeypatch.setattr(csc, "_check_group_membership", lambda uid, chat_id: True)
+
+        resp = client.get("/api/creator/share/status?init_data=ok")
+        assert resp.status_code == 403
+        assert resp.get_json()["code"] == "creator_not_authorized"
+
+    def test_disabled_verification_denies_user_without_record(self, fake_db, monkeypatch, client):
+        _fake_vouchers_module(monkeypatch, user_id=888)
+        fake_db["app_settings"].insert_one(
+            {
+                "_id": "creator_group_access",
+                "creator_group_chat_id": -1001234567890,
+                "membership_check_enabled": False,
+                "chat_title": "Creators HQ",
+                "chat_type": "supergroup",
+                "bot_membership_status": "administrator",
+                "verified_at": csc.now_utc(),
+                "updated_at": csc.now_utc(),
+                "updated_by": 1,
+                "config_version": 1,
+            }
+        )
+
+        resp = client.get("/api/creator/share/status?init_data=ok")
+        assert resp.status_code == 403
+        assert resp.get_json()["code"] == "creator_not_authorized"
+
+    def test_disabled_verification_still_allows_manually_approved_active_record(
+        self, fake_db, monkeypatch, client
+    ):
+        _fake_vouchers_module(monkeypatch, user_id=555)
+        _creator(fake_db, 555, status="active", approval_source="manual")
+        fake_db["app_settings"].insert_one(
+            {
+                "_id": "creator_group_access",
+                "creator_group_chat_id": -1001234567890,
+                "membership_check_enabled": False,
+                "chat_title": "Creators HQ",
+                "chat_type": "supergroup",
+                "bot_membership_status": "administrator",
+                "verified_at": csc.now_utc(),
+                "updated_at": csc.now_utc(),
+                "updated_by": 1,
+                "config_version": 1,
+            }
+        )
+
+        resp = client.get("/api/creator/share/status?init_data=ok")
+        assert resp.status_code == 200
+        assert resp.get_json()["creator"]["access"] is True
+
+
 class _FakeMemberResp:
     def __init__(self, status_code, payload):
         self.status_code = status_code

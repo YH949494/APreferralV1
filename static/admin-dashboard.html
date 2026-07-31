@@ -639,6 +639,12 @@
         <div id="rsc-creators-panel" class="hidden">
           <div class="section" style="margin-bottom:16px;">
             <div class="section-title">Creator Access</div>
+            <div class="sub" style="margin-bottom:8px;">
+              Members of the configured Creator Access Chat receive access automatically. This table is used to view
+              profiles and suspend or remove access. It does not list every channel member — the Telegram Bot API has
+              no reliable endpoint to enumerate all members of a group, supergroup, or channel; rows appear here once
+              a member has opened the Creator Centre, or when added manually below.
+            </div>
             <div class="sub" id="rsc-creators-summary" style="margin-bottom:8px;">Active creators: —</div>
           </div>
 
@@ -670,7 +676,7 @@
           </div>
 
           <div class="section" style="margin-bottom:16px;">
-            <div class="section-title">Approve Creator</div>
+            <div class="section-title">Approve Creator <span class="sub">(optional manual override — for use when membership verification is disabled, or for testing)</span></div>
             <div style="display:flex;gap:8px;flex-wrap:wrap;">
               <input class="filter-input" id="rsc-creator-user-id" placeholder="Telegram user ID" style="min-width:180px;margin:0;" />
               <input class="filter-input" id="rsc-creator-username" placeholder="Username (optional)" style="min-width:160px;margin:0;" />
@@ -679,7 +685,7 @@
             </div>
           </div>
           <div class="section" style="margin-bottom:16px;">
-            <div class="section-title">Bulk Import <span class="sub">(one Telegram user ID per non-empty line)</span></div>
+            <div class="section-title">Bulk Import <span class="sub">(optional manual override — one Telegram user ID per non-empty line)</span></div>
             <textarea id="rsc-creators-bulk-text" rows="4" class="filter-input" style="width:100%;box-sizing:border-box;" placeholder="123456789&#10;987654321"></textarea>
             <button class="btn" id="rsc-creators-bulk-btn" style="margin-top:8px;">Import</button>
             <div id="rsc-creators-bulk-result"></div>
