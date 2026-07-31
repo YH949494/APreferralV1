@@ -5223,12 +5223,19 @@
     }).catch(function (e) { toast("❌ Failed to load creator group settings: " + e.message, "error"); });
   }
 
+  function rscApprovalSourceLabel(source) {
+    if (source === "creator_access_chat_membership") return "Chat membership";
+    if (source === "bulk_import") return "Bulk import";
+    if (source === "manual") return "Manual";
+    return "—";
+  }
+
   function loadCreatorAccess() {
     statePanel("rsc-creators-body", "loading", "Loading creators…");
     api("/api/admin/referral/creators" + rscQuery("rsc-creators-search", "rsc-creators-status-filter")).then(function (data) {
       $("#rsc-creators-summary").textContent = "Active creators: " + fmt(data.active_count || 0);
       var items = data.creators || [];
-      if (!items.length) { $("#rsc-creators-body").innerHTML = emptyState("No creators yet — approve one above."); return; }
+      if (!items.length) { $("#rsc-creators-body").innerHTML = emptyState("No creators yet — chat members appear here after opening the Creator Centre, or approve one manually above."); return; }
       var rows = items.map(function (c) {
         var actions = '<button class="btn danger" data-rsc-creator-action="remove" data-id="' + esc(c.user_id) + '">Remove</button>';
         if (c.status === "active") {
@@ -5240,11 +5247,12 @@
           '<td>' + esc(c.username || "—") + '</td>' +
           '<td>' + esc(c.creator_tier || "—") + '</td>' +
           '<td>' + rscStatusPill(c.status) + '</td>' +
+          '<td>' + esc(rscApprovalSourceLabel(c.approval_source)) + '</td>' +
           '<td class="sub">' + (c.approved_at ? new Date(c.approved_at).toLocaleString() : "—") + '</td>' +
           '<td>' + actions + '</td></tr>';
       }).join("");
       $("#rsc-creators-body").innerHTML = '<table class="data-table"><thead><tr><th>User ID</th><th>Username</th><th>Tier</th>' +
-        '<th>Status</th><th>Approved</th><th>Actions</th></tr></thead><tbody>' + rows + '</tbody></table>';
+        '<th>Status</th><th>Approval Source</th><th>Approved</th><th>Actions</th></tr></thead><tbody>' + rows + '</tbody></table>';
     }).catch(function (e) { statePanel("rsc-creators-body", "error", "Failed to load creators: " + e.message); });
   }
 

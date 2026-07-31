@@ -33,11 +33,53 @@ Every `/api/creator/...` request requires, in order:
 1. Valid Telegram Mini App `initData` (verified server-side via
    `vouchers.verify_telegram_init_data`). `user_id` is always taken from the
    verified payload — a `user_id` in the JSON body or query string is never
-   trusted.
-2. An `creator_members` record for that `user_id` with `status == "active"`.
-3. If `membership_check_enabled` is true (see **Creator Access Chat
-   settings** below), a live (short-cached) Telegram membership check
-   against the configured chat.
+   trusted. This is still mandatory, unconditionally.
+2. **Confirmed membership in the configured Creator Access Chat grants
+   access automatically.** `creator_members` is no longer a mandatory
+   allowlist — it is an override/profile collection:
+   - An existing record with `status == "suspended"` or `status == "removed"`
+     always denies, *even if the user is still in the chat*.
+   - An existing record with `status == "active"` is honoured once chat
+     membership is confirmed.
+   - No record at all: access is granted once chat membership is confirmed,
+     and an `active` creator profile is **lazily created** (see below) —
+     concurrent first requests never create duplicates.
+   - A user who is **not** in the configured chat remains denied regardless
+     of any `creator_members` record.
+3. If membership verification is explicitly **disabled** by an admin
+   (`membership_check_enabled == false`), access falls back to requiring an
+   existing `creator_members.status == "active"` record — a user with no
+   record stays denied (`creator_not_authorized`). This is intentional:
+   disabling verification must never open access broadly to anyone who's
+   never been recorded.
+
+### Lazy creator profile creation
+
+On a creator's first successful access via confirmed Creator Access Chat
+membership, if no `creator_members` record exists yet, one is upserted with
+`$setOnInsert` (so a race between concurrent first requests for the same
+user can never create two documents — the unique index on `user_id` is the
+actual guard):
+
+```json
+{
+  "user_id": 123456789,
+  "username": "somecreator",
+  "status": "active",
+  "creator_tier": "pilot",
+  "source_group_id": -1001234567890,
+  "approved_at": "ISODate",
+  "approval_source": "creator_access_chat_membership",
+  "created_at": "ISODate",
+  "updated_at": "ISODate",
+  "last_membership_verified_at": "ISODate"
+}
+```
+
+An existing `suspended`/`removed` record is never touched by this path —
+lazy creation only ever runs when no record exists at all, so a previously
+suspended/removed creator can never be silently reactivated by rejoining
+the chat.
 
 ### `creator_members` schema
 
@@ -47,6 +89,7 @@ Every `/api/creator/...` request requires, in order:
   "status": "active",           // active | suspended | removed
   "source_group_id": -1001234567890,
   "creator_tier": "pilot",
+  "approval_source": "creator_access_chat_membership",  // creator_access_chat_membership | manual | bulk_import
   "approved_at": "ISODate",
   "approved_by": 987654321,
   "last_membership_verified_at": "ISODate",
@@ -62,9 +105,9 @@ Indexes: unique `user_id`, `status`, and `(source_group_id, status)`.
 | Code | Meaning |
 |---|---|
 | `invalid_telegram_auth` | Missing/invalid Telegram initData |
-| `creator_not_authorized` | No active `creator_members` record |
+| `creator_not_authorized` | No `creator_members` record, and either not a confirmed chat member or membership verification is disabled |
 | `creator_suspended` | Record exists but `status == "suspended"` |
-| `creator_membership_required` | Telegram confirmed the user left/was kicked from the creator group; record is marked `removed` |
+| `creator_membership_required` | Telegram confirmed the user left/was kicked from the creator group; an existing record is marked `removed` |
 | `creator_membership_unresolvable` | Telegram membership lookup temporarily unavailable (HTTP 503) |
 | `creator_group_not_configured` | `membership_check_enabled=true` but no valid group is configured (HTTP 503) — fails closed |
 | `creator_generation_rate_limited` | Hit the 20/hour generation cap (HTTP 429) |
@@ -205,6 +248,10 @@ Never the bot token, never a full Telegram API response body.
   requests inside the 120s grace window never each pay the (up to 8s) HTTP
   timeout — only the first request after an outage begins, and the first
   one after the window expires, actually call Telegram.
+- A chat member with **no** `creator_members` record yet has nothing to
+  cache a verdict on: each request calls Telegram directly until the first
+  confirmed membership creates the lazy profile, after which the normal
+  cache above applies.
 
 ## Creator API
 
@@ -274,11 +321,25 @@ general referral rate limiter). Exceeding it returns HTTP 429 with
 ## Admin controls
 
 Under Referral Centre → Share Content → **Creator Access** (in
-`static/admin-dashboard.html`): active creator count, search by Telegram
-user ID or username, approve / suspend / activate / remove, and bulk import
-(newline/comma-separated Telegram user IDs, deduplicated). All admin routes
-go through the existing `vouchers.require_admin()` — same session-cookie
-auth as the rest of the admin dashboard, unrelated to creator membership.
+`static/admin-dashboard.html`): "Members of the configured Creator Access
+Chat receive access automatically. This table is used to view profiles and
+suspend or remove access." — active creator count (this includes creators
+who were lazily created by opening the Creator Centre, not just manually
+approved ones), search by Telegram user ID or username, an **Approval
+Source** column (`Chat membership` / `Manual` / `Bulk import`), and
+suspend / activate / remove controls. Approve Creator and Bulk Import
+remain available as **optional manual overrides** — for use when membership
+verification is disabled, or for testing — not as the primary way creators
+get access. All admin routes go through the existing
+`vouchers.require_admin()` — same session-cookie auth as the rest of the
+admin dashboard, unrelated to creator membership.
+
+**Important limitation**: this table does **not**, and cannot, list every
+member of the configured Creator Access Chat. The Telegram Bot API has no
+reliable endpoint to enumerate all members of a group, supergroup, or
+channel, so there is no bulk sync/import of chat members — rows appear only
+for users who have actually opened `/creator` or the Creator Share Centre
+(lazily created), or who were added manually.
 
 The Creator Access Chat ID itself is edited directly in the browser (it's
 an identifier, not a secret — see **Creator Access Chat settings** above);
@@ -305,11 +366,14 @@ PUT    /api/admin/referral/creator-settings
 ## Telegram entry point
 
 - `/creator` bot command, and `/start creator` deep link — both handled by
-  `main.send_creator_share_entry_point()`.
-- Only `creator_members` records with `status == "active"` get the
-  "🎬 Creator Share Centre" Web App button
-  (`https://apreferralv1.fly.dev/creator-share`); everyone else gets a short
-  denial message. The general `/start` welcome menu is unchanged.
+  `main.send_creator_share_entry_point()`, which calls the same
+  `creator_share_centre._verify_creator_access()` used by the Mini App API
+  (minus the initData check, since the bot command already knows the
+  authenticated Telegram user). Confirmed Creator Access Chat membership
+  gets the "🎬 Creator Share Centre" Web App button
+  (`https://apreferralv1.fly.dev/creator-share`), lazily creating a profile
+  on first success exactly as the Mini App path does; everyone else gets a
+  short denial message. The general `/start` welcome menu is unchanged.
 
 ## Deployment
 
