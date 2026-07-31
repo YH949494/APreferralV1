@@ -377,7 +377,7 @@ PUT    /api/admin/referral/creator-settings
   `creator_share_centre._verify_creator_access()` used by the Mini App API
   (minus the initData check, since the bot command already knows the
   authenticated Telegram user). Confirmed Creator Access Chat membership
-  gets the "🎬 Creator Share Centre" Web App button
+  gets the "💰 Turn Shares Into Cash" Web App button
   (`https://apreferralv1.fly.dev/creator-share`), lazily creating a profile
   on first success exactly as the Mini App path does; everyone else gets a
   short denial message. The general `/start` welcome menu is unchanged.
