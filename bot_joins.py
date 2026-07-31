@@ -8,6 +8,15 @@ from telegram import ChatMemberUpdated
 from database import db, init_db
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+# LEGACY/DEAD: this module (a standalone python-telegram-bot poller) is not
+# started by any live process (no Procfile/fly.toml/Dockerfile entry runs
+# `python bot_joins.py`) and WELCOME_DROP_ID is not referenced anywhere else
+# in the codebase. The authoritative WELCOME join/eligibility path is
+# main.py's handle_user_join -> _ensure_welcome_eligibility / welcome_tickets,
+# and the authoritative WELCOME issuance path is
+# affiliate_rewards.issue_welcome_bonus_if_eligible (pool_id="WELCOME"),
+# invoked from vouchers.build_welcome_progress_response. Do not wire this
+# module or WELCOME_DROP_ID into any new Welcome flow.
 WELCOME_DROP_ID = os.environ.get("WELCOME_DROP_ID")
 ELIGIBILITY_TTL_HOURS = int(os.environ.get("WELCOME_ELIG_TTL_HOURS", "72"))
 

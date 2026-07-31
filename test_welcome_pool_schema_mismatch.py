@@ -1,9 +1,16 @@
-"""Regression tests for _pooled_claimability_state / _welcome_claim_drop_id
-against the exact db.vouchers filter shape used at claim time
+"""Regression tests for _pooled_claimability_state against the exact
+db.vouchers filter shape used at claim time
 (_build_atomic_pooled_voucher_filter). These exercise the real counting
 query (not a mocked reason), so a schema mismatch between how codes are
 uploaded and how they are counted/allocated shows up as a test failure
 instead of only in production.
+
+Note: the Welcome Voucher Progress card no longer allocates from db.drops/
+db.vouchers via this function (see build_welcome_progress_response /
+_issue_or_get_welcome_voucher, which now issue from voucher_pools
+pool_id="WELCOME"). _pooled_claimability_state is still the allocator for
+other (non-Welcome) pooled/public voucher drops, so this coverage remains
+relevant there.
 """
 from datetime import datetime, timedelta, timezone
 
@@ -118,20 +125,11 @@ def test_pool_field_mismatch_excludes_public_count(monkeypatch):
     assert state["reason"] == "pool_empty"
 
 
-def test_end_to_end_claim_drop_id_none_when_schema_mismatched(monkeypatch):
-    """Full path: an active new_joiner drop with mismatched inventory must
-    resolve to no claimable drop_id, which is what makes
-    build_welcome_progress_response fall back to status=unlocked_pending."""
+def test_public_pooled_drop_with_stale_dropid_inventory_is_sold_out(monkeypatch):
+    """A public/pooled drop (non-Welcome) whose inventory rows reference a
+    stale/different dropId — e.g. left over from a recreated drop — must be
+    reported sold out for the currently active drop, not silently claimable."""
     rows = [{"type": "pooled", "dropId": "stale-drop-id", "status": "free", "code": "W1"}]
-    monkeypatch.setattr(m, "db", FakeDb(rows))
-    monkeypatch.setattr(m, "get_active_drops", lambda ref: [_drop()])
-    monkeypatch.setattr(m, "is_drop_allowed", lambda drop, uid, uname, ctx: True)
-    monkeypatch.setattr(m, "is_user_eligible_for_drop", lambda user_doc, tg_user, drop: True)
-    monkeypatch.setattr(m, "is_retained_3d", lambda user: False)
-    monkeypatch.setattr(m, "_has_current_subscription_evidence", lambda _uid: True)
-
-    drop_id = m._welcome_claim_drop_id(NOW, uid=1, user_doc={"region": "my"})
-    assert drop_id is None
-
-    reason = m._welcome_claim_drop_reason(NOW, uid=1, user_doc={"region": "my"})
-    assert reason == "NO_FREE_CODES"
+    state = _claimable(monkeypatch, rows, user_region="my")
+    assert state["claimable"] is False
+    assert state["reason"] == "pool_empty"

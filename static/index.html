@@ -3431,8 +3431,8 @@
 
       const status = String(data.status || "in_progress");
 
-      if (status === "unlocked" && data.claim_drop_id) {
-        showWelcomeStatusCard("ready", null);
+      if (status === "issued") {
+        showWelcomeStatusCard("claimed", null);
         return;
       }
 
@@ -3554,14 +3554,13 @@
         return;
       }
 
-      // Operational pending: temporary system/drop unavailability. Must mirror
-      // backend's _WELCOME_OPERATIONAL_REASONS (vouchers.py) exactly, or a
-      // reason missing here silently falls through to the generic status
-      // fallback below with no distinct copy.
-      const operationalReasons = [
-        "NO_ACTIVE_DROP", "NO_FREE_CODES", "COUNTER_MISMATCH",
-        "DROP_NOT_LIVE_YET", "POOL_RESERVED", "SHAPING_DENIED",
-      ];
+      // Operational pending: temporary WELCOME pool/batch unavailability
+      // (voucher_pools pool_id="WELCOME" has no active batch / no stock, or
+      // the ledger is still SETTLING) — never permanent, retried on next poll.
+      // Must mirror backend's _WELCOME_OPERATIONAL_REASONS (vouchers.py)
+      // exactly, or a reason missing here silently falls through to the
+      // generic status fallback below with no distinct copy.
+      const operationalReasons = ["NO_ACTIVE_WELCOME_BATCH", "NO_FREE_CODES", "SETTLING", "ERROR"];
       if (operationalReasons.includes(pendingReason)) {
         nextActionEl.textContent = pendingReason === "NO_FREE_CODES"
           ? t("voucher_out_of_stock")
@@ -3569,9 +3568,9 @@
         return;
       }
 
-      // "unlocked"/"unlocked_pending" are handled upstream by syncWelcomeStatusCard();
-      // this is a defensive fallback in case it's ever reached directly.
-      if (data.status === "unlocked" || data.status === "unlocked_pending") {
+      // "issued" is handled upstream by syncWelcomeStatusCard(); this is a
+      // defensive fallback in case it's ever reached directly.
+      if (data.status === "issued") {
         nextActionEl.textContent = t("voucher_temporarily_unavailable");
         return;
       }

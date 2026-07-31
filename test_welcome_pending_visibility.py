@@ -1,5 +1,11 @@
-"""Tests for hide_welcome_card / welcome_pending_reason logic in build_welcome_progress_response."""
-from datetime import datetime, timedelta, timezone
+"""Tests for build_welcome_progress_response's pool/ledger-backed WELCOME issuance.
+
+Covers the Welcome Voucher Progress -> voucher_pools/affiliate_ledger
+(pool_id="WELCOME") migration: hide_welcome_card / welcome_pending_reason
+plus the issued/claimed/NO_ACTIVE_WELCOME_BATCH/NO_FREE_CODES/SETTLING states
+returned once check-ins are complete.
+"""
+from datetime import datetime, timedelta
 from flask import Flask
 
 import vouchers as m
@@ -40,10 +46,19 @@ class FakeEvents:
         return out
 
 
+class FakeLedgerCol:
+    def __init__(self, doc=None):
+        self.doc = doc
+
+    def find_one(self, filt, projection=None):
+        return dict(self.doc) if self.doc else None
+
+
 class FakeDb:
-    def __init__(self, events):
+    def __init__(self, events, ledger_doc=None):
         self.xp_events = FakeEvents(events)
         self.xp_ledger = FakeEvents([])
+        self.affiliate_ledger = FakeLedgerCol(ledger_doc)
 
 
 def _checkin(day_offset):
@@ -57,130 +72,143 @@ def _checkin(day_offset):
 THREE_CHECKINS = [_checkin(0), _checkin(1), _checkin(2)]
 
 
+def _no_find_claims_col():
+    return type("C", (), {"find_one": staticmethod(lambda filt, proj=None: None)})()
+
+
 def _build(monkeypatch, *, subscribed=True, allowed=True, eligibility_reason="ok",
-           claim_drop_id=None, ticket_status="active", claimed_doc=False):
+           issue_result=None, ticket_status="active", claimed_doc=False,
+           checkins=THREE_CHECKINS, ledger_doc=None, claims_col=None):
     app = Flask(__name__)
     monkeypatch.setattr(m, "users_collection", FakeUsers())
-    monkeypatch.setattr(m, "db", FakeDb(THREE_CHECKINS))
+    monkeypatch.setattr(m, "db", FakeDb(checkins, ledger_doc=ledger_doc))
     monkeypatch.setattr(m, "_has_current_subscription_evidence", lambda _uid: subscribed)
     monkeypatch.setattr(m, "welcome_eligibility",
-                        lambda _uid, ref=None: (allowed, eligibility_reason, {}))
-    monkeypatch.setattr(m, "_welcome_claim_drop_id",
-                        lambda now_ref=None, uid=None, user_doc=None: claim_drop_id)
-    monkeypatch.setattr(m, "_get_welcome_ticket",
-                        lambda uid: {"status": ticket_status})
-    monkeypatch.setattr(m, "_get_welcome_eligibility",
-                        lambda uid: {"claimed": claimed_doc})
-    monkeypatch.setattr(m, "new_joiner_claims_col",
-                        type("C", (), {"find_one": staticmethod(lambda filt, proj=None: None)})())
+                         lambda _uid, ref=None: (allowed, eligibility_reason, {}))
+    if issue_result is not None:
+        monkeypatch.setattr(
+            m, "issue_welcome_bonus_if_eligible",
+            lambda db, *, user_id, is_new_user, blocked=False, now_utc=None: issue_result,
+        )
+    monkeypatch.setattr(m, "_get_welcome_ticket", lambda uid: {"status": ticket_status})
+    monkeypatch.setattr(m, "_get_welcome_eligibility", lambda uid: {"claimed": claimed_doc})
+    monkeypatch.setattr(m, "new_joiner_claims_col", claims_col or _no_find_claims_col())
     with app.app_context():
         return m.build_welcome_progress_response(UID, now=NOW)
 
 
-# ── Test 1: CHANNEL_NOT_JOINED ──────────────────────────────────────────────
-def test_channel_not_joined_card_visible_no_claim_btn(monkeypatch):
+# ── CHANNEL_NOT_JOINED (not yet subscribed) ─────────────────────────────────
+def test_channel_not_joined_card_visible_no_issuance(monkeypatch):
     data = _build(monkeypatch, subscribed=False, allowed=True, eligibility_reason="ok")
     assert data["hide_welcome_card"] is False
     assert data["welcome_pending_reason"] == "CHANNEL_NOT_JOINED"
-    assert data.get("claim_drop_id") is None
+    assert data["status"] == "in_progress"
 
 
-# ── Test 2: ELIGIBILITY_FAILED hides card ───────────────────────────────────
+# ── ELIGIBILITY_FAILED / AUDIENCE_MISMATCH / WINDOW_EXPIRED / ALREADY_CLAIMED / self-invite ──
 def test_eligibility_failed_hides_card(monkeypatch):
-    data = _build(monkeypatch, subscribed=True, allowed=False, eligibility_reason="blocked")
+    data = _build(monkeypatch, subscribed=True, allowed=False, eligibility_reason="no_ticket")
     assert data["hide_welcome_card"] is True
     assert data["welcome_pending_reason"] == "ELIGIBILITY_FAILED"
 
 
-# ── Test 3: AUDIENCE_MISMATCH hides card ────────────────────────────────────
 def test_audience_mismatch_hides_card(monkeypatch):
     data = _build(monkeypatch, subscribed=True, allowed=False, eligibility_reason="audience_mismatch")
     assert data["hide_welcome_card"] is True
     assert data["welcome_pending_reason"] == "AUDIENCE_MISMATCH"
 
 
-# ── Test 4: WINDOW_EXPIRED hides card ───────────────────────────────────────
 def test_window_expired_hides_card(monkeypatch):
     data = _build(monkeypatch, subscribed=True, allowed=False, eligibility_reason="ticket_expired")
     assert data["hide_welcome_card"] is True
     assert data["welcome_pending_reason"] == "WINDOW_EXPIRED"
 
 
-# ── Test 5: ALREADY_CLAIMED hides card ──────────────────────────────────────
 def test_already_claimed_hides_card(monkeypatch):
     data = _build(monkeypatch, subscribed=True, allowed=False, eligibility_reason="ticket_claimed")
     assert data["hide_welcome_card"] is True
     assert data["welcome_pending_reason"] == "ALREADY_CLAIMED"
 
 
-# ── Test 6: NO_FREE_CODES card visible, no claim button ─────────────────────
-def test_no_free_codes_card_visible_no_claim(monkeypatch):
-    monkeypatch.setattr(m, "_welcome_claim_drop_reason",
-                        lambda now_ref=None, uid=None, user_doc=None: "NO_FREE_CODES")
-    data = _build(monkeypatch, subscribed=True, allowed=True, eligibility_reason="ok",
-                  claim_drop_id=None)
+def test_self_invite_blocked_hides_card(monkeypatch):
+    data = _build(monkeypatch, subscribed=True, allowed=False, eligibility_reason="self_invite_blocked")
+    assert data["hide_welcome_card"] is True
+    assert data["welcome_pending_reason"] == "RISK_BLOCKED"
+
+
+# ── completed + eligible + subscribed: pool/ledger issuance path ───────────
+def test_issued_shows_ready_state_with_voucher_code(monkeypatch):
+    data = _build(
+        monkeypatch, subscribed=True, allowed=True,
+        issue_result={"created": True, "status": "ISSUED", "voucher_code": "WELC-ABC123"},
+    )
+    assert data["status"] == "issued"
     assert data["hide_welcome_card"] is False
-    assert data["welcome_pending_reason"] == "NO_FREE_CODES"
-    assert data.get("claim_drop_id") is None
-    # Real zero-stock must produce an explicit out-of-stock message, not the
-    # same generic copy used for every other operational reason.
-    assert "out of stock" in data["message"].lower()
+    assert data["voucher_code"] == "WELC-ABC123"
 
 
-# ── Test 7: valid claim_drop_id — card visible, claim button shown ───────────
-def test_valid_claim_drop_id_card_visible(monkeypatch):
-    data = _build(monkeypatch, subscribed=True, allowed=True, eligibility_reason="ok",
-                  claim_drop_id="drop123")
+def test_no_active_batch_stays_visible_not_hidden(monkeypatch):
+    data = _build(
+        monkeypatch, subscribed=True, allowed=True,
+        issue_result={"created": True, "status": "OUT_OF_STOCK"},
+        ledger_doc={"status": "OUT_OF_STOCK", "risk_flags": ["no_welcome_batch_for_entitlement_time"]},
+    )
+    assert data["status"] == "NO_ACTIVE_WELCOME_BATCH"
     assert data["hide_welcome_card"] is False
-    assert data["welcome_pending_reason"] is None
-    assert data["claim_drop_id"] == "drop123"
-    assert data["status"] == "unlocked"
-    assert data["remaining_days"] == 0
+    assert data.get("voucher_code") is None
 
 
-# ── Test 9: already claimed (ticket + new_joiner_claims) — claimed state ────
-def test_already_issued_shows_claimed_state(monkeypatch):
-    monkeypatch.setattr(m, "_welcome_claim_drop_id",
-                        lambda now_ref=None, uid=None, user_doc=None: None)
-    data = _build(monkeypatch, subscribed=True, allowed=True, eligibility_reason="ok",
-                  ticket_status="claimed")
+def test_no_stock_maps_to_no_free_codes(monkeypatch):
+    data = _build(
+        monkeypatch, subscribed=True, allowed=True,
+        issue_result={"created": True, "status": "OUT_OF_STOCK"},
+        ledger_doc={"status": "OUT_OF_STOCK", "risk_flags": []},
+    )
+    assert data["status"] == "NO_FREE_CODES"
+    assert data["hide_welcome_card"] is False
+
+
+def test_settling_reported_as_settling(monkeypatch):
+    data = _build(
+        monkeypatch, subscribed=True, allowed=True,
+        issue_result={"created": False, "status": "SETTLING"},
+    )
+    assert data["status"] == "SETTLING"
+    assert data["hide_welcome_card"] is False
+
+
+# ── existing issued WELCOME ledger short-circuits before calling the allocator ──
+def test_existing_issued_ledger_returns_claimed_without_calling_allocator(monkeypatch):
+    def _boom(*a, **k):
+        raise AssertionError("issue_welcome_bonus_if_eligible must not be called for an already-ISSUED ledger")
+
+    monkeypatch.setattr(m, "issue_welcome_bonus_if_eligible", _boom)
+    data = _build(
+        monkeypatch, subscribed=True, allowed=True,
+        ledger_doc={"status": "ISSUED", "voucher_code": "WELC-XYZ999"},
+    )
     assert data["status"] == "claimed"
-    assert data["visible"] is False
-    assert data["remaining_days"] == 0
+    assert data["voucher_code"] == "WELC-XYZ999"
 
 
-# ── Test 10: unknown/unrecognized operational reason still logs, doesn't
-#    silently disappear — the frontend's generic fallback must still be hit
-#    intentionally (see index.html renderWelcomeProgress), and the backend
-#    payload must carry the raw reason for diagnostics rather than swallowing
-#    it.
-def test_unrecognized_reason_is_still_surfaced_in_payload(monkeypatch):
-    monkeypatch.setattr(m, "_welcome_claim_drop_reason",
-                        lambda now_ref=None, uid=None, user_doc=None: "COUNTER_MISMATCH")
-    data = _build(monkeypatch, subscribed=True, allowed=True, eligibility_reason="ok",
-                  claim_drop_id=None)
-    assert data["hide_welcome_card"] is False
-    assert data["welcome_pending_reason"] == "COUNTER_MISMATCH"
-    assert data["status"] == "unlocked_pending"
+# ── existing legacy new_joiner_claims blocks a second issuance ─────────────
+def test_legacy_new_joiner_claim_blocks_reissuance(monkeypatch):
+    def _boom(*a, **k):
+        raise AssertionError("must not attempt issuance when a legacy claim already exists")
+
+    monkeypatch.setattr(m, "issue_welcome_bonus_if_eligible", _boom)
+    claims_col = type("C", (), {"find_one": staticmethod(lambda filt, proj=None: {"_id": 1})})()
+    data = _build(monkeypatch, subscribed=True, allowed=True, claims_col=claims_col)
+    assert data["status"] == "claimed"
 
 
-# ── Test 8: completed_days < 3 — progress card visible, no pending reason ───
+# ── incomplete check-ins: never attempts issuance ───────────────────────────
 def test_incomplete_checkins_card_visible_no_pending_reason(monkeypatch):
-    app = Flask(__name__)
-    monkeypatch.setattr(m, "users_collection", FakeUsers())
-    monkeypatch.setattr(m, "db", FakeDb([_checkin(0), _checkin(1)]))  # only 2 check-ins
-    monkeypatch.setattr(m, "_has_current_subscription_evidence", lambda _uid: True)
-    monkeypatch.setattr(m, "welcome_eligibility",
-                        lambda _uid, ref=None: (True, "ok", {}))
-    monkeypatch.setattr(m, "_welcome_claim_drop_id",
-                        lambda now_ref=None, uid=None, user_doc=None: None)
-    monkeypatch.setattr(m, "_get_welcome_ticket",
-                        lambda uid: {"status": "active"})
-    monkeypatch.setattr(m, "_get_welcome_eligibility", lambda uid: {})
-    monkeypatch.setattr(m, "new_joiner_claims_col",
-                        type("C", (), {"find_one": staticmethod(lambda filt, proj=None: None)})())
-    with app.app_context():
-        data = m.build_welcome_progress_response(UID, now=NOW)
+    def _boom(*a, **k):
+        raise AssertionError("must not attempt issuance before check-ins are complete")
+
+    monkeypatch.setattr(m, "issue_welcome_bonus_if_eligible", _boom)
+    data = _build(monkeypatch, subscribed=True, allowed=True, checkins=[_checkin(0), _checkin(1)])
     assert data["hide_welcome_card"] is False
     assert data["welcome_pending_reason"] is None
     assert data["completed_days"] == 2

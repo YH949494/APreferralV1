@@ -86,7 +86,6 @@ from affiliate_voucher_batches import (
 )
 from affiliate_rewards import (
     ensure_affiliate_indexes,
-    issue_welcome_bonus_if_eligible,
     record_user_last_seen,
     settle_previous_month_affiliate_rewards,
     issue_current_week_affiliate_rewards,
@@ -1632,12 +1631,11 @@ async def handle_user_join(
         context="join_main_at",        
     )
     _ensure_welcome_eligibility(uid)
-    try:
-        blocked = (users_collection.find_one({"user_id": uid}, {"blocked": 1}) or {}).get("blocked", False)
-        wb_result = issue_welcome_bonus_if_eligible(db, user_id=uid, is_new_user=True, blocked=bool(blocked))
-        logger.info("[WELCOME] bonus_issued uid=%s result=%s", uid, wb_result)
-    except Exception:
-        logger.exception("[WELCOME] bonus_issue_failed uid=%s", uid)
+    # WELCOME voucher issuance (issue_welcome_bonus_if_eligible, pool_id="WELCOME")
+    # is no longer triggered here at raw join time. It must not fire before the
+    # Welcome Voucher Progress check-in gate is satisfied, so it is now called
+    # from build_welcome_progress_response() (vouchers.py) once check-ins are
+    # complete, the user is subscribed, and eligibility passes.
     logger.info(
         "[WELCOME] join_recorded uid=%s joined_main_at=%s",
         uid,

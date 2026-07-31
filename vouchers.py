@@ -31,6 +31,7 @@ from affiliate_rewards import (
     reject_affiliate_ledger,
     issue_current_month_affiliate_rewards,
     is_user_blocked_for_self_invite,
+    issue_welcome_bonus_if_eligible,
 )
 from conversion_tracking import send_meta_event, send_tiktok_event
 from referral_rules import build_public_referral_status
@@ -1271,170 +1272,25 @@ def record_welcome_checkin_progress(user_id, *, now: datetime | None = None) -> 
     return progress
 
 
-def _welcome_drop_gate_reason(drop: dict, *, uid: int | None, user_doc: dict | None) -> str | None:
-    """Audience / region / allowlist / eligibility.mode gate for a new-joiner drop.
-
-    This wraps the exact same ``is_drop_allowed`` + ``is_user_eligible_for_drop``
-    checks that ``/vouchers/visible`` and ``/vouchers/claim`` enforce, so
-    ``/api/welcome-progress`` never reports a drop as claimable that those two
-    endpoints would reject. Returns ``None`` when the gate passes, or a
-    canonical reason code when it doesn't.
-    """
-    user_region = (user_doc or {}).get("region") or ""
-    user_ctx = {"region": user_region, "status": (user_doc or {}).get("status") or ""}
-    tg_user = {"id": uid} if uid is not None else {}
-
-    if is_drop_allowed(drop, uid, "", user_ctx) and is_user_eligible_for_drop(user_doc, tg_user, drop):
-        return None
-
-    audience = drop.get("audience") or {}
-    regions = audience.get("regions") or []
-    if regions and user_region not in regions:
-        return "REGION_MISMATCH"
-    mode = (drop.get("eligibility") or {}).get("mode") or "public"
-    if mode != "public":
-        return "ELIGIBILITY_FAILED"
-    return "AUDIENCE_MISMATCH"
-
-
-def _welcome_claim_drop_id(now_ref: datetime | None = None, uid: int | None = None, user_doc: dict | None = None) -> str | None:
-    ref = _as_aware_utc(now_ref) or now_utc()
-    user_region = (user_doc or {}).get("region")
-    try:
-        for drop in get_active_drops(ref):
-            audience_type = _drop_audience_type(drop)
-            if not _is_new_joiner_audience(audience_type):
-                if _is_pool_drop(drop, audience_type):
-                    _safe_log(
-                        "warning",
-                        "[WELCOME][DROP_SKIP] drop_id=%s name=%s reason=audience_not_new_joiner audience=%s campaign_type=%s",
-                        str(drop.get("_id") or drop.get("dropId") or ""),
-                        drop.get("name"),
-                        drop.get("audience"),
-                        drop.get("campaign_type") or drop.get("campaignType"),
-                    )
-                continue
-            drop_id = str(drop.get("_id") or drop.get("dropId") or "")
-            if not drop_id:
-                continue
-            if _welcome_drop_gate_reason(drop, uid=uid, user_doc=user_doc):
-                continue
-            try:
-                state = _pooled_claimability_state(
-                    drop=drop,
-                    drop_id=drop_id,
-                    user_region=user_region,
-                    uid=uid,
-                    is_my_user=_is_my_region(user_region),
-                    ref=ref,
-                )
-                if not state.get("claimable"):
-                    continue
-            except Exception:
-                continue
-            return drop_id
-    except Exception:
-        _safe_log("warning", "[WELCOME_PROGRESS_API] claim_drop_lookup_failed")
-    return None
-
-
-def _has_active_new_joiner_drop(now_ref: datetime | None = None) -> bool:
-    """Whether an active new_joiner drop exists at all, independent of
-    claimability — used for diagnostics so "no claim slot" (stock/schema
-    issue) isn't logged as if there were no active drop."""
-    ref = _as_aware_utc(now_ref) or now_utc()
-    try:
-        for drop in get_active_drops(ref):
-            if _is_new_joiner_audience(_drop_audience_type(drop)):
-                return True
-    except Exception:
-        pass
-    return False
-
-
 _WELCOME_PERMANENT_REASONS = frozenset(
     {"ELIGIBILITY_FAILED", "AUDIENCE_MISMATCH", "WINDOW_EXPIRED", "ALREADY_CLAIMED", "REGION_MISMATCH", "RISK_BLOCKED"}
 )
-_WELCOME_OPERATIONAL_REASONS = frozenset(
+
+# Ledger/pool outcomes that leave the WELCOME card visible with an operational
+# (temporary, non-permanent) pending reason rather than hiding it.
+_WELCOME_OPERATIONAL_REASONS = frozenset({"NO_ACTIVE_WELCOME_BATCH", "NO_FREE_CODES", "SETTLING", "ERROR"})
+
+# risk_flags written by ``_resolve_welcome_ledger_target``/``issue_welcome_bonus_if_eligible``
+# that indicate "no batch currently covers this entitlement" as opposed to "a batch exists but
+# has zero stock" (NO_FREE_CODES).
+_WELCOME_NO_BATCH_RISK_FLAGS = frozenset(
     {
-        "NO_ACTIVE_DROP",
-        "NO_FREE_CODES",
-        "COUNTER_MISMATCH",
-        "DROP_NOT_LIVE_YET",
-        "POOL_RESERVED",
-        "SHAPING_DENIED",
+        "no_welcome_batch_for_entitlement_time",
+        "welcome_target_batch_not_ready",
+        "welcome_target_batch_disabled",
+        "welcome_target_batch_expired_unissued",
     }
 )
-
-# Maps _pooled_claimability_state() "reason" values to the stable welcome pending-reason
-# codes surfaced to clients. Every operational failure must map to something other than
-# NO_ACTIVE_DROP once a matching new_joiner drop was actually found.
-_WELCOME_POOL_REASON_MAP = {
-    "pool_empty": "NO_FREE_CODES",
-    "shaping_too_early": "DROP_NOT_LIVE_YET",
-    "shaping_denied": "SHAPING_DENIED",
-    "reserve_block": "POOL_RESERVED",
-    "counter_mismatch": "COUNTER_MISMATCH",
-}
-
-
-def _welcome_claim_drop_reason(now_ref: datetime | None = None, uid: int | None = None, user_doc: dict | None = None) -> str:
-    """Return a stable reason code explaining why no welcome claim drop is available."""
-    ref = _as_aware_utc(now_ref) or now_utc()
-    user_region = (user_doc or {}).get("region")
-    reason = "NO_ACTIVE_DROP"
-    found_drop = False
-    try:
-        for drop in get_active_drops(ref):
-            if not _is_new_joiner_audience(_drop_audience_type(drop)):
-                continue
-            drop_id = str(drop.get("_id") or drop.get("dropId") or "")
-            if not drop_id:
-                continue
-            found_drop = True
-
-            gate_reason = _welcome_drop_gate_reason(drop, uid=uid, user_doc=user_doc)
-            if gate_reason:
-                reason = gate_reason
-                break
-
-            starts_at = _as_aware_utc(drop.get("startsAt"))
-            if starts_at and ref < starts_at:
-                reason = "DROP_NOT_LIVE_YET"
-                break
-            try:
-                state = _pooled_claimability_state(
-                    drop=drop,
-                    drop_id=drop_id,
-                    user_region=user_region,
-                    uid=uid,
-                    is_my_user=_is_my_region(user_region),
-                    ref=ref,
-                )
-                if state.get("claimable"):
-                    # This drop is actually claimable; _welcome_claim_drop_id should have
-                    # returned it. Keep scanning rather than reporting an operational
-                    # failure for a drop that isn't actually blocked.
-                    continue
-                pool_reason = state.get("reason", "")
-                reason = _WELCOME_POOL_REASON_MAP.get(pool_reason, "COUNTER_MISMATCH")
-            except Exception:
-                reason = "COUNTER_MISMATCH"
-            break
-        if found_drop and reason == "NO_ACTIVE_DROP":
-            # A matching new_joiner drop exists but no specific operational failure was
-            # detected; never report NO_ACTIVE_DROP when a drop was actually found.
-            reason = "COUNTER_MISMATCH"
-    except Exception:
-        reason = "NO_ACTIVE_DROP"
-
-    if reason != "NO_ACTIVE_DROP" or found_drop:
-        _safe_log(
-            "info",
-            "[WELCOME][PENDING_REASON] uid=%s reason=%s found_drop=%s",
-            uid, reason, found_drop,
-        )
-    return reason
 
 
 def classify_welcome_pending_reason(
@@ -1443,7 +1299,14 @@ def classify_welcome_pending_reason(
     uid: int | None = None,
     user_doc: dict | None = None,
 ) -> str:
-    """Classify why a user with completed_days >= 3 has no claim_drop_id."""
+    """Classify why a completed_days >= required user isn't eligible to be issued a voucher.
+
+    Used only for the not-eligible/not-subscribed branches of
+    ``build_welcome_progress_response`` — once a user is eligible, subscribed
+    and unlocked, the actual WELCOME pool/ledger outcome (issued /
+    NO_ACTIVE_WELCOME_BATCH / NO_FREE_CODES / SETTLING) is authoritative and
+    this classifier is not consulted.
+    """
     channel_joined = bool(progress.get("channel_joined"))
     eligible = bool(progress.get("eligible"))
 
@@ -1456,7 +1319,7 @@ def classify_welcome_pending_reason(
             return "ALREADY_CLAIMED"
         if "expired" in r or "window" in r:
             return "WINDOW_EXPIRED"
-        if "risk" in r or "blocked" in r:
+        if "self_invite" in r or "risk" in r or "blocked" in r:
             return "RISK_BLOCKED"
         if "audience" in r or "mismatch" in r:
             return "AUDIENCE_MISMATCH"
@@ -1464,101 +1327,190 @@ def classify_welcome_pending_reason(
             return "REGION_MISMATCH"
         return "ELIGIBILITY_FAILED"
 
-    return _welcome_claim_drop_reason(now_ref, uid, user_doc=user_doc)
+    return "ELIGIBILITY_FAILED"
+
+
+def _welcome_ledger_dedup_key(user_id: int) -> str:
+    return f"WELCOME:{int(user_id)}"
+
+
+def _get_welcome_ledger(user_id: int) -> dict | None:
+    """The single authoritative WELCOME entitlement row for this user.
+
+    Same ``affiliate_ledger`` collection / ``dedup_key`` used by
+    ``issue_welcome_bonus_if_eligible`` (the T1-T4 issuance system's WELCOME
+    path) — this is the "one WELCOME entitlement per user" row, backed by
+    ``voucher_pools`` (``pool_id="WELCOME"``) once issued.
+    """
+    try:
+        return db.affiliate_ledger.find_one({"dedup_key": _welcome_ledger_dedup_key(user_id)})
+    except Exception:
+        _safe_log("warning", "[WELCOME_PROGRESS][LEDGER_LOOKUP_FAILED] uid=%s", user_id)
+        return None
+
+
+def _welcome_pool_pending_reason(ledger: dict | None) -> str:
+    """Map an OUT_OF_STOCK WELCOME ledger's risk_flags to a stable reason code."""
+    risk_flags = set((ledger or {}).get("risk_flags") or [])
+    if risk_flags & _WELCOME_NO_BATCH_RISK_FLAGS:
+        return "NO_ACTIVE_WELCOME_BATCH"
+    return "NO_FREE_CODES"
+
+
+def _issue_or_get_welcome_voucher(user_id: int, *, user_doc: dict | None, now_ref: datetime) -> dict:
+    """Authoritative WELCOME issuance for the Welcome Voucher Progress journey.
+
+    Delegates entirely to ``issue_welcome_bonus_if_eligible`` — the exact
+    same ``affiliate_ledger``/``voucher_pools`` (``pool_id="WELCOME"``)
+    allocator, idempotency key (``dedup_key=f"WELCOME:{uid}"``) and
+    batch-resolution logic used by the T1-T4 affiliate reward system. This
+    function must only be called once the caller has already confirmed the
+    check-in progress is complete, the user is subscribed, and
+    ``welcome_eligibility`` passed — ``issue_welcome_bonus_if_eligible`` does
+    not itself know about check-in progress.
+
+    Returns ``{"state": ...}`` where state is one of: "issued", "SETTLING",
+    "self_invite_blocked", "CHANNEL_NOT_JOINED", "NO_ACTIVE_WELCOME_BATCH",
+    "NO_FREE_CODES", "ERROR".
+    """
+    blocked = bool((user_doc or {}).get("blocked"))
+    now_utc_ref = now_ref.astimezone(timezone.utc)
+    try:
+        result = issue_welcome_bonus_if_eligible(
+            db, user_id=user_id, is_new_user=True, blocked=blocked, now_utc=now_utc_ref,
+        )
+    except Exception:
+        _safe_log("warning", "[WELCOME_PROGRESS][ISSUANCE_FAILED] uid=%s", user_id)
+        return {"state": "ERROR"}
+
+    status = str(result.get("status") or "")
+    if status in ("ISSUED", "SIMULATED_PENDING"):
+        return {"state": "issued", "voucher_code": result.get("voucher_code")}
+    if status == "SETTLING":
+        return {"state": "SETTLING"}
+    if status == "BLOCKED_SELF_INVITE":
+        return {"state": "self_invite_blocked"}
+    if status == "NOT_SUBSCRIBED":
+        return {"state": "CHANNEL_NOT_JOINED"}
+    if status == "OUT_OF_STOCK":
+        ledger = _get_welcome_ledger(user_id)
+        return {"state": _welcome_pool_pending_reason(ledger)}
+    return {"state": "ERROR"}
 
 
 def build_welcome_progress_response(user_id: int, *, now: datetime | None = None) -> dict:
-    """Read-only miniapp payload for the Welcome Voucher progress card."""
+    """Read-only miniapp payload for the Welcome Voucher progress card.
+
+    Once check-ins are complete and the user is eligible/subscribed, this
+    issues (or reuses) the user's single WELCOME entitlement from the same
+    ``voucher_pools``/``affiliate_ledger`` (``pool_id="WELCOME"``) inventory
+    used by the rest of the WELCOME/T1-T4 reward system — see
+    ``_issue_or_get_welcome_voucher``. There is no separate Welcome Progress
+    allocator and no dependency on ``db.drops``/``db.vouchers``.
+    """
     now_ref = _as_aware_kl(now) or now_kl()
     progress = get_welcome_reward_progress(user_id, now=now_ref)
-    user_doc = users_collection.find_one({"user_id": user_id}, {"region": 1, "status": 1})
+    user_doc = users_collection.find_one({"user_id": user_id}, {"region": 1, "status": 1, "blocked": 1})
     completed_days = max(0, min(int(progress.get("checkins_completed") or 0), _checkins_required()))
     required_days = _checkins_required()
     remaining_days = max(0, required_days - completed_days)
     eligible_until = progress.get("eligible_until")
-    status = "in_progress"
-    visible = bool(progress.get("eligible") and not progress.get("hide"))
+    eligible = bool(progress.get("eligible"))
+    channel_joined = bool(progress.get("channel_joined"))
+    unlocked = bool(progress.get("unlocked"))
 
     ticket = _get_welcome_ticket(user_id)
     ticket_status = str((ticket or {}).get("status") or "").strip().lower()
     eligibility_doc = _get_welcome_eligibility(user_id) or {}
-    claimed = bool(
-        ticket_status == "claimed"
-        or eligibility_doc.get("claimed")
-        or new_joiner_claims_col.find_one({"uid": user_id}, {"_id": 1})
-    )
+    welcome_ledger = _get_welcome_ledger(user_id)
+    voucher_code = (welcome_ledger or {}).get("voucher_code")
+    # Precedence for "already claimed": (1) an issued WELCOME ledger row —
+    # the authoritative pool/ledger source — (2) the legacy new_joiner_claims
+    # claim, (3) the welcome_tickets/welcome_eligibility claimed markers.
+    # Any one of these permanently blocks a second issuance.
+    already_issued = str((welcome_ledger or {}).get("status") or "") == "ISSUED"
+    legacy_claimed = bool(new_joiner_claims_col.find_one({"uid": user_id}, {"_id": 1}))
+    claimed = bool(already_issued or legacy_claimed or ticket_status == "claimed" or eligibility_doc.get("claimed"))
     expired = bool(ticket_status == "expired" or progress.get("expired"))
+
+    status = "in_progress"
+    visible = True
+    hide_welcome_card = False
+    welcome_pending_reason = None
 
     if claimed:
         status = "claimed"
-        visible = False
         message = "Your Welcome Voucher has already been claimed."
     elif expired:
         status = "expired"
         visible = False
         message = "Your welcome voucher window has expired."
-    elif not visible:
+    elif not eligible:
         status = "not_eligible"
+        welcome_pending_reason = classify_welcome_pending_reason(progress, now_ref, uid=user_id, user_doc=user_doc)
+        hide_welcome_card = welcome_pending_reason in _WELCOME_PERMANENT_REASONS
+        visible = not hide_welcome_card
         message = "Welcome Voucher is not available for this account."
-    elif progress.get("unlocked"):
-        status = "unlocked"
-        message = "Your Welcome Voucher is ready."
-    else:
+    elif not channel_joined:
+        status = "in_progress"
+        welcome_pending_reason = "CHANNEL_NOT_JOINED"
+        message = "Join the official channel to unlock your Welcome Voucher."
+    elif not unlocked:
+        status = "in_progress"
         if remaining_days == 1:
             message = "1 more day to go."
         else:
             message = f"Complete {remaining_days} more check-ins to unlock your voucher."
-
-    claim_drop_id = None
-    if status == "unlocked":
-        claim_drop_id = _welcome_claim_drop_id(now_ref, uid=user_id, user_doc=user_doc)
-        if not claim_drop_id:
-            _safe_log(
-                "warning",
-                f"[WELCOME_PROGRESS][NO_CLAIM_DROP] uid={user_id} completed_days={completed_days}",
-            )
-            status = "unlocked_pending"
-
-    # Determine hide_welcome_card and welcome_pending_reason
-    hide_welcome_card = False
-    welcome_pending_reason = None
-
-    if claim_drop_id:
-        _safe_log("info", f"[WELCOME_PROGRESS][CLAIM_READY] uid={user_id} drop_id={claim_drop_id}")
-    elif completed_days >= required_days:
-        welcome_pending_reason = classify_welcome_pending_reason(progress, now_ref, uid=user_id, user_doc=user_doc)
-        hide_welcome_card = welcome_pending_reason in _WELCOME_PERMANENT_REASONS
-        if hide_welcome_card:
-            _safe_log("info", f"[WELCOME_PROGRESS][HIDE_CARD] uid={user_id} reason={welcome_pending_reason}")
-        else:
-            _safe_log("info", f"[WELCOME_PROGRESS][PENDING_VISIBLE] uid={user_id} reason={welcome_pending_reason}")
-
-    if status == "unlocked_pending" and not hide_welcome_card:
-        # Reason-specific copy so a real stockout is distinguishable from other
-        # operational gates instead of always rendering the same generic string
-        # (see _WELCOME_OPERATIONAL_REASONS / classify_welcome_pending_reason).
-        if welcome_pending_reason == "NO_FREE_CODES":
+    else:
+        # Check-ins complete, eligible, subscribed: run the single authoritative
+        # WELCOME issuance path instead of scanning db.drops.
+        outcome = _issue_or_get_welcome_voucher(user_id, user_doc=user_doc, now_ref=now_ref)
+        state = outcome["state"]
+        if state == "issued":
+            status = "issued"
+            voucher_code = outcome.get("voucher_code") or voucher_code
+            message = "Your Welcome Voucher is ready."
+            _safe_log("info", "[WELCOME_PROGRESS][ISSUED] uid=%s", user_id)
+        elif state == "self_invite_blocked":
+            status = "not_eligible"
+            welcome_pending_reason = "RISK_BLOCKED"
+            hide_welcome_card = True
+            visible = False
+            message = "Welcome Voucher is not available for this account."
+        elif state == "CHANNEL_NOT_JOINED":
+            status = "in_progress"
+            welcome_pending_reason = "CHANNEL_NOT_JOINED"
+            message = "Join the official channel to unlock your Welcome Voucher."
+        elif state == "NO_FREE_CODES":
+            # Reason-specific copy so a real stockout is distinguishable from
+            # SETTLING/NO_ACTIVE_WELCOME_BATCH/ERROR instead of always
+            # rendering the same generic "being prepared" string.
+            status = state
+            welcome_pending_reason = state
             message = "Check-ins completed, but voucher codes are out of stock right now. Please check again later."
+            _safe_log("info", "[WELCOME_PROGRESS][PENDING] uid=%s reason=%s", user_id, state)
         else:
-            message = "Check-ins completed. Claim slot is not available yet. Please check again later."
+            # SETTLING / NO_ACTIVE_WELCOME_BATCH / ERROR: card stays visible,
+            # claim not permanently denied, retry on next poll.
+            status = state
+            welcome_pending_reason = state
+            message = "Check-ins completed. Your voucher is being prepared — please check again shortly."
+            _safe_log("info", "[WELCOME_PROGRESS][PENDING] uid=%s reason=%s", user_id, state)
 
     # Temporary diagnostic logging for the Welcome Voucher progress-card
     # investigation. Does not log voucher codes, tokens, or init data.
     logger.info(
         "[WELCOME_DIAG] uid=%s eligible=%s claimable=%s "
         "checkins=%s window_end=%s "
-        "drop_id=%s drop_active=%s "
         "existing_claim=%s "
         "ledger_status=%s blocked=%s reason=%s",
         user_id,
-        progress.get("eligible"),
-        bool(claim_drop_id),
+        eligible,
+        status == "issued",
         f"{completed_days}/{required_days}",
         eligible_until,
-        claim_drop_id,
-        _has_active_new_joiner_drop(now_ref),
         claimed,
-        ticket_status or None,
+        (welcome_ledger or {}).get("status"),
         not visible,
         welcome_pending_reason or status,
     )
@@ -1579,8 +1531,8 @@ def build_welcome_progress_response(user_id: int, *, now: datetime | None = None
         "can_checkin": bool(can_checkin) and status not in ("claimed", "expired", "not_eligible"),
         "next_checkin_at": next_checkin_at.astimezone(timezone.utc).isoformat() if next_checkin_at else None,
     }
-    if claim_drop_id:
-        payload["claim_drop_id"] = claim_drop_id
+    if voucher_code and status in ("issued", "claimed"):
+        payload["voucher_code"] = voucher_code
     if bool(visible) and not hide_welcome_card:
         log_welcome_event("welcome_progress_view", user_id, {"status": status, "completed_days": completed_days}, now=now_ref)
     return payload
