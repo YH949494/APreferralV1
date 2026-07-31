@@ -122,18 +122,33 @@ def test_window_expired_hides_card(monkeypatch):
     data = _build(monkeypatch, subscribed=True, allowed=False, eligibility_reason="ticket_expired")
     assert data["hide_welcome_card"] is True
     assert data["welcome_pending_reason"] == "WINDOW_EXPIRED"
+    assert data["visible"] is False
+    assert data["eligible"] is False
+    assert data["reason_code"] == "welcome_expired"
+
+
+def test_outside_join_window_hides_card_as_not_new_user(monkeypatch):
+    data = _build(monkeypatch, subscribed=True, allowed=False, eligibility_reason="not_in_welcome_window")
+    assert data["hide_welcome_card"] is True
+    assert data["welcome_pending_reason"] == "WINDOW_EXPIRED"
+    assert data["visible"] is False
+    assert data["reason_code"] == "welcome_not_new_user"
 
 
 def test_already_claimed_hides_card(monkeypatch):
     data = _build(monkeypatch, subscribed=True, allowed=False, eligibility_reason="ticket_claimed")
     assert data["hide_welcome_card"] is True
     assert data["welcome_pending_reason"] == "ALREADY_CLAIMED"
+    assert data["visible"] is False
+    assert data["reason_code"] == "welcome_already_claimed"
 
 
 def test_self_invite_blocked_hides_card(monkeypatch):
     data = _build(monkeypatch, subscribed=True, allowed=False, eligibility_reason="self_invite_blocked")
     assert data["hide_welcome_card"] is True
     assert data["welcome_pending_reason"] == "RISK_BLOCKED"
+    assert data["visible"] is False
+    assert data["reason_code"] == "welcome_blocked"
 
 
 # ── completed + eligible + subscribed: pool/ledger issuance path ───────────
@@ -189,6 +204,10 @@ def test_existing_issued_ledger_returns_claimed_without_calling_allocator(monkey
     )
     assert data["status"] == "claimed"
     assert data["voucher_code"] == "WELC-XYZ999"
+    assert data["visible"] is False
+    assert data["eligible"] is False
+    assert data["hide_welcome_card"] is True
+    assert data["reason_code"] == "welcome_already_issued"
 
 
 # ── existing legacy new_joiner_claims blocks a second issuance ─────────────
@@ -199,6 +218,71 @@ def test_legacy_new_joiner_claim_blocks_reissuance(monkeypatch):
     monkeypatch.setattr(m, "issue_welcome_bonus_if_eligible", _boom)
     claims_col = type("C", (), {"find_one": staticmethod(lambda filt, proj=None: {"_id": 1})})()
     data = _build(monkeypatch, subscribed=True, allowed=True, claims_col=claims_col)
+    assert data["status"] == "claimed"
+    assert data["visible"] is False
+    assert data["eligible"] is False
+    assert data["hide_welcome_card"] is True
+    assert data["reason_code"] == "welcome_already_processed"
+
+
+# ── welcome_tickets status=claimed hides the card (not just status="claimed") ──
+def test_ticket_status_claimed_hides_card(monkeypatch):
+    data = _build(monkeypatch, subscribed=True, allowed=True, ticket_status="claimed")
+    assert data["status"] == "claimed"
+    assert data["visible"] is False
+    assert data["eligible"] is False
+    assert data["hide_welcome_card"] is True
+    assert data["reason_code"] == "welcome_already_claimed"
+
+
+# ── welcome_eligibility doc claimed=True hides the card ─────────────────────
+def test_eligibility_doc_claimed_hides_card(monkeypatch):
+    data = _build(monkeypatch, subscribed=True, allowed=True, claimed_doc=True)
+    assert data["status"] == "claimed"
+    assert data["visible"] is False
+    assert data["eligible"] is False
+    assert data["hide_welcome_card"] is True
+
+
+# ── eligible + in-progress: visible=True and eligible=True (frontend double-gate) ──
+def test_in_progress_reports_visible_and_eligible_true(monkeypatch):
+    data = _build(monkeypatch, subscribed=True, allowed=True, checkins=[_checkin(0)])
+    assert data["visible"] is True
+    assert data["eligible"] is True
+    assert data["reason_code"] == "welcome_eligible"
+
+
+# ── a canonical ISSUED ledger overrides a legacy welcome_eligibility that
+# still looks "active" -- canonical WELCOME ledger status is authoritative ──
+def test_canonical_ledger_issued_overrides_legacy_active_eligibility_doc(monkeypatch):
+    data = _build(
+        monkeypatch, subscribed=True, allowed=True,
+        ledger_doc={"status": "ISSUED", "voucher_code": "WELC-LEGACY"},
+        claimed_doc=False,  # legacy doc still looks "active"/unclaimed
+        ticket_status="active",
+    )
+    assert data["visible"] is False
+    assert data["eligible"] is False
+    assert data["hide_welcome_card"] is True
+
+
+# ── claimed users never touch welcome_eligibility()/get_welcome_reward_progress
+# (which upsert welcome_eligibility/welcome_tickets) -- a read-only progress
+# poll for an already-claimed user must not create/refresh eligibility state ──
+def test_claimed_user_never_calls_welcome_eligibility(monkeypatch):
+    def _boom(*a, **k):
+        raise AssertionError("must not call welcome_eligibility for an already-claimed user")
+
+    app = Flask(__name__)
+    monkeypatch.setattr(m, "users_collection", FakeUsers())
+    monkeypatch.setattr(m, "db", FakeDb(THREE_CHECKINS, ledger_doc={"status": "ISSUED", "voucher_code": "WELC-1"}))
+    monkeypatch.setattr(m, "welcome_eligibility", _boom)
+    monkeypatch.setattr(m, "_get_welcome_ticket", lambda uid: {"status": "active"})
+    monkeypatch.setattr(m, "_get_welcome_eligibility", lambda uid: {"claimed": False})
+    monkeypatch.setattr(m, "new_joiner_claims_col", _no_find_claims_col())
+    with app.app_context():
+        data = m.build_welcome_progress_response(UID, now=NOW)
+    assert data["visible"] is False
     assert data["status"] == "claimed"
 
 

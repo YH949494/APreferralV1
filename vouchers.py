@@ -1407,10 +1407,87 @@ def build_welcome_progress_response(user_id: int, *, now: datetime | None = None
     used by the rest of the WELCOME/T1-T4 reward system — see
     ``_issue_or_get_welcome_voucher``. There is no separate Welcome Progress
     allocator and no dependency on ``db.drops``/``db.vouchers``.
+
+    Canonical WELCOME entitlement/claim records (``affiliate_ledger``
+    dedup_key=f"WELCOME:{uid}", ``new_joiner_claims``, and the
+    ``welcome_tickets``/``welcome_eligibility`` claimed markers) are checked
+    *before* anything else. If any of them show this user's WELCOME
+    entitlement already processed, the response is built and returned
+    immediately — ``get_welcome_reward_progress``/``welcome_eligibility``
+    (which upsert ``welcome_eligibility``/``welcome_tickets`` documents) are
+    never called, so a read-only progress poll never creates new eligibility
+    state for a user who has already claimed.
     """
     now_ref = _as_aware_kl(now) or now_kl()
+    user_doc = users_collection.find_one(
+        {"user_id": user_id}, {"region": 1, "status": 1, "blocked": 1, "joined_main_at": 1, "created_at": 1}
+    )
+    joined_main_at = (user_doc or {}).get("joined_main_at") or (user_doc or {}).get("created_at")
+
+    ticket = _get_welcome_ticket(user_id)
+    ticket_status = str((ticket or {}).get("status") or "").strip().lower()
+    eligibility_doc = _get_welcome_eligibility(user_id) or {}
+    welcome_ledger = _get_welcome_ledger(user_id)
+    ledger_status = str((welcome_ledger or {}).get("status") or "")
+    voucher_code = (welcome_ledger or {}).get("voucher_code")
+    legacy_claimed = bool(new_joiner_claims_col.find_one({"uid": user_id}, {"_id": 1}))
+    # Precedence for "already claimed": (1) an issued WELCOME ledger row —
+    # the authoritative pool/ledger source — (2) the legacy new_joiner_claims
+    # claim, (3) the welcome_tickets/welcome_eligibility claimed markers.
+    # Any one of these permanently blocks a second issuance.
+    already_issued = ledger_status == "ISSUED"
+    claimed = bool(already_issued or legacy_claimed or ticket_status == "claimed" or eligibility_doc.get("claimed"))
+
+    if welcome_ledger:
+        _safe_log(
+            "info",
+            "[WELCOME_PROGRESS][CANONICAL_LEDGER_FOUND] uid=%s ledger_status=%s has_voucher_code=%s has_previous_claim=%s",
+            user_id, ledger_status, bool(voucher_code), legacy_claimed,
+        )
+
+    if claimed:
+        if ticket_status not in ("claimed", "expired") or eligibility_doc.get("lifecycle_state") == "eligible":
+            _safe_log(
+                "info",
+                "[WELCOME_PROGRESS][LEGACY_STATE_IGNORED] uid=%s ticket_status=%s eligibility_lifecycle=%s "
+                "canonical_source=%s",
+                user_id, ticket_status, eligibility_doc.get("lifecycle_state"),
+                "ledger" if already_issued else ("new_joiner_claims" if legacy_claimed else "ticket_or_eligibility"),
+            )
+        reason_code = (
+            "welcome_already_issued" if (already_issued or voucher_code)
+            else "welcome_already_processed" if legacy_claimed
+            else "welcome_already_claimed"
+        )
+        _safe_log(
+            "info",
+            "[WELCOME_PROGRESS][HIDDEN] uid=%s visible=False eligible=False reason=%s ledger_status=%s "
+            "has_voucher_code=%s has_previous_claim=%s joined_main_at=%s window_end=%s checkin_count=%s",
+            user_id, reason_code, ledger_status or None, bool(voucher_code), True, joined_main_at, None, None,
+        )
+        _safe_log("info", "[WELCOME_PROGRESS][NO_ELIGIBILITY_RECORD_CREATED] uid=%s reason=%s", user_id, reason_code)
+        payload = {
+            "visible": False,
+            "eligible": False,
+            "status": "claimed",
+            "required_days": _checkins_required(),
+            "completed_days": _checkins_required(),
+            "remaining_days": 0,
+            "progress_pct": 100,
+            "reward_value": "$1",
+            "eligible_until": None,
+            "message": "Your Welcome Voucher has already been claimed.",
+            "hide_welcome_card": True,
+            "welcome_pending_reason": "ALREADY_CLAIMED",
+            "reason_code": reason_code,
+            "can_checkin": False,
+            "next_checkin_at": None,
+        }
+        if voucher_code:
+            payload["voucher_code"] = voucher_code
+        return payload
+
     progress = get_welcome_reward_progress(user_id, now=now_ref)
-    user_doc = users_collection.find_one({"user_id": user_id}, {"region": 1, "status": 1, "blocked": 1})
     completed_days = max(0, min(int(progress.get("checkins_completed") or 0), _checkins_required()))
     required_days = _checkins_required()
     remaining_days = max(0, required_days - completed_days)
@@ -1418,32 +1495,19 @@ def build_welcome_progress_response(user_id: int, *, now: datetime | None = None
     eligible = bool(progress.get("eligible"))
     channel_joined = bool(progress.get("channel_joined"))
     unlocked = bool(progress.get("unlocked"))
-
-    ticket = _get_welcome_ticket(user_id)
-    ticket_status = str((ticket or {}).get("status") or "").strip().lower()
-    eligibility_doc = _get_welcome_eligibility(user_id) or {}
-    welcome_ledger = _get_welcome_ledger(user_id)
-    voucher_code = (welcome_ledger or {}).get("voucher_code")
-    # Precedence for "already claimed": (1) an issued WELCOME ledger row —
-    # the authoritative pool/ledger source — (2) the legacy new_joiner_claims
-    # claim, (3) the welcome_tickets/welcome_eligibility claimed markers.
-    # Any one of these permanently blocks a second issuance.
-    already_issued = str((welcome_ledger or {}).get("status") or "") == "ISSUED"
-    legacy_claimed = bool(new_joiner_claims_col.find_one({"uid": user_id}, {"_id": 1}))
-    claimed = bool(already_issued or legacy_claimed or ticket_status == "claimed" or eligibility_doc.get("claimed"))
     expired = bool(ticket_status == "expired" or progress.get("expired"))
 
     status = "in_progress"
     visible = True
     hide_welcome_card = False
     welcome_pending_reason = None
+    reason_code = "welcome_eligible"
 
-    if claimed:
-        status = "claimed"
-        message = "Your Welcome Voucher has already been claimed."
-    elif expired:
+    if expired:
         status = "expired"
         visible = False
+        hide_welcome_card = True
+        reason_code = "welcome_expired"
         message = "Your welcome voucher window has expired."
     elif not eligible:
         status = "not_eligible"
@@ -1451,6 +1515,19 @@ def build_welcome_progress_response(user_id: int, *, now: datetime | None = None
         hide_welcome_card = welcome_pending_reason in _WELCOME_PERMANENT_REASONS
         visible = not hide_welcome_card
         message = "Welcome Voucher is not available for this account."
+        eligibility_reason = str(progress.get("eligibility_reason") or "").lower()
+        if welcome_pending_reason == "ALREADY_CLAIMED":
+            reason_code = "welcome_already_claimed"
+        elif welcome_pending_reason == "RISK_BLOCKED":
+            reason_code = "welcome_blocked"
+        elif welcome_pending_reason == "WINDOW_EXPIRED":
+            reason_code = "welcome_expired" if "ticket_expired" in eligibility_reason else "welcome_not_new_user"
+        elif welcome_pending_reason in ("AUDIENCE_MISMATCH", "REGION_MISMATCH"):
+            reason_code = "welcome_not_new_user"
+        elif hide_welcome_card:
+            reason_code = "welcome_ineligible"
+        else:
+            reason_code = "welcome_eligible"
     elif not channel_joined:
         status = "in_progress"
         welcome_pending_reason = "CHANNEL_NOT_JOINED"
@@ -1476,6 +1553,7 @@ def build_welcome_progress_response(user_id: int, *, now: datetime | None = None
             welcome_pending_reason = "RISK_BLOCKED"
             hide_welcome_card = True
             visible = False
+            reason_code = "welcome_blocked"
             message = "Welcome Voucher is not available for this account."
         elif state == "CHANNEL_NOT_JOINED":
             status = "in_progress"
@@ -1487,6 +1565,7 @@ def build_welcome_progress_response(user_id: int, *, now: datetime | None = None
             # rendering the same generic "being prepared" string.
             status = state
             welcome_pending_reason = state
+            reason_code = "welcome_no_active_entitlement"
             message = "Check-ins completed, but voucher codes are out of stock right now. Please check again later."
             _safe_log("info", "[WELCOME_PROGRESS][PENDING] uid=%s reason=%s", user_id, state)
         else:
@@ -1494,6 +1573,7 @@ def build_welcome_progress_response(user_id: int, *, now: datetime | None = None
             # claim not permanently denied, retry on next poll.
             status = state
             welcome_pending_reason = state
+            reason_code = "welcome_no_active_entitlement" if state == "NO_ACTIVE_WELCOME_BATCH" else "welcome_eligible"
             message = "Check-ins completed. Your voucher is being prepared — please check again shortly."
             _safe_log("info", "[WELCOME_PROGRESS][PENDING] uid=%s reason=%s", user_id, state)
 
@@ -1516,8 +1596,10 @@ def build_welcome_progress_response(user_id: int, *, now: datetime | None = None
     )
 
     can_checkin, next_checkin_at = _welcome_next_checkin_estimate(user_id, completed_days, now_ref)
+    final_visible = bool(visible) and not hide_welcome_card
     payload = {
-        "visible": bool(visible) and not hide_welcome_card,
+        "visible": final_visible,
+        "eligible": final_visible,
         "status": status,
         "required_days": required_days,
         "completed_days": completed_days,
@@ -1528,12 +1610,23 @@ def build_welcome_progress_response(user_id: int, *, now: datetime | None = None
         "message": message,
         "hide_welcome_card": hide_welcome_card,
         "welcome_pending_reason": welcome_pending_reason,
+        "reason_code": reason_code,
         "can_checkin": bool(can_checkin) and status not in ("claimed", "expired", "not_eligible"),
         "next_checkin_at": next_checkin_at.astimezone(timezone.utc).isoformat() if next_checkin_at else None,
     }
     if voucher_code and status in ("issued", "claimed"):
         payload["voucher_code"] = voucher_code
-    if bool(visible) and not hide_welcome_card:
+
+    _safe_log(
+        "info",
+        "[WELCOME_PROGRESS][%s] uid=%s visible=%s eligible=%s reason=%s ledger_status=%s has_voucher_code=%s "
+        "has_previous_claim=%s joined_main_at=%s window_end=%s checkin_count=%s",
+        "VISIBLE" if final_visible else "HIDDEN",
+        user_id, final_visible, final_visible, reason_code, ledger_status or None, bool(voucher_code),
+        claimed, joined_main_at, eligible_until, f"{completed_days}/{required_days}",
+    )
+
+    if final_visible:
         log_welcome_event("welcome_progress_view", user_id, {"status": status, "completed_days": completed_days}, now=now_ref)
     return payload
 
