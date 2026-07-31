@@ -230,6 +230,30 @@ class TestChatMembershipGrantsAccessAutomatically:
         assert record["approval_source"] == "creator_access_chat_membership"
         assert record["source_group_id"] == -1001234567890
         assert record["username"] == "newcreator"
+        # config_version must be stamped at creation time, not left unset --
+        # otherwise the very next request's cache check (keyed on
+        # config_version) misses and pays for a redundant Telegram call.
+        assert record["last_membership_verified_config_version"] == 0
+
+    def test_lazily_created_profile_reuses_cache_on_next_request(self, fake_db, monkeypatch, client):
+        _fake_vouchers_module(monkeypatch, user_id=777)
+        monkeypatch.setenv("CREATOR_GROUP_CHAT_ID", "-1001234567890")
+
+        calls = {"n": 0}
+
+        def _check(uid, chat_id):
+            calls["n"] += 1
+            return True
+
+        monkeypatch.setattr(csc, "_check_group_membership", _check)
+
+        resp1 = client.get("/api/creator/share/status?init_data=ok")
+        assert resp1.status_code == 200
+        resp2 = client.get("/api/creator/share/status?init_data=ok")
+        assert resp2.status_code == 200
+        # The request right after lazy creation must reuse the cached
+        # verification instead of calling Telegram again.
+        assert calls["n"] == 1
 
     def test_subsequent_access_reuses_same_record(self, fake_db, monkeypatch, client):
         _fake_vouchers_module(monkeypatch, user_id=777)
@@ -248,8 +272,8 @@ class TestChatMembershipGrantsAccessAutomatically:
     def test_concurrent_first_access_does_not_duplicate_records(self, fake_db, monkeypatch):
         # Simulates two requests racing to lazily create the same profile:
         # both see no existing record before either write lands.
-        csc._lazy_ensure_creator_profile(777, "racer", -1001234567890, None)
-        csc._lazy_ensure_creator_profile(777, "racer", -1001234567890, None)
+        csc._lazy_ensure_creator_profile(777, "racer", -1001234567890, None, 1)
+        csc._lazy_ensure_creator_profile(777, "racer", -1001234567890, None, 1)
         assert fake_db["creator_members"].count_documents({"user_id": 777}) == 1
 
     def test_suspended_creator_denied_even_if_still_in_chat(self, fake_db, monkeypatch, client):

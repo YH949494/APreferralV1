@@ -8045,7 +8045,11 @@ async def send_creator_share_entry_point(update: Update, context: ContextTypes.D
 
     from creator_share_centre import _verify_creator_access
 
-    _record, access_err = _verify_creator_access(uid, user.username or "")
+    # _verify_creator_access() can perform a synchronous Telegram getChatMember
+    # HTTP call (up to an 8s timeout) whenever the membership cache is cold;
+    # run it off the shared polling event loop so a slow/failing Telegram
+    # response never stalls every other bot update in the meantime.
+    _record, access_err = await asyncio.to_thread(_verify_creator_access, uid, user.username or "")
     if access_err:
         logger.info("[CREATOR_SHARE][ACCESS_DENIED] user_id=%s reason_code=%s", uid, access_err[0])
         await safe_reply_text(
