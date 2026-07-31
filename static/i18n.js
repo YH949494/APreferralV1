@@ -109,6 +109,7 @@
       voucher_unlocked: "🎉 Voucher Unlocked",
       voucher_ready: "Your Welcome Voucher is ready.",
       voucher_temporarily_unavailable: "You've completed all requirements. Voucher distribution is temporarily unavailable. Please check again later.",
+      voucher_out_of_stock: "You've completed all requirements, but voucher codes are out of stock right now. Please check again later.",
       one_more_day: "1 more day to go.",
 
       /* Info Hub */
@@ -302,6 +303,7 @@
       voucher_unlocked: "🎉 ปลดล็อคคูปองแล้ว",
       voucher_ready: "คูปองต้อนรับของคุณพร้อมแล้ว",
       voucher_temporarily_unavailable: "คุณได้ทำตามเงื่อนไขครบแล้ว การแจกคูปองหยุดให้บริการชั่วคราว กรุณาตรวจสอบอีกครั้งในภายหลัง",
+      voucher_out_of_stock: "คุณได้ทำตามเงื่อนไขครบแล้ว แต่คูปองหมดชั่วคราว กรุณาตรวจสอบอีกครั้งในภายหลัง",
       one_more_day: "อีก 1 วัน",
 
       info_hub_title: "ℹ️ คลังข้อมูล",
@@ -487,6 +489,7 @@
       voucher_unlocked: "🎉 Voucher Terbuka",
       voucher_ready: "Voucher Selamat Datang Anda siap.",
       voucher_temporarily_unavailable: "Anda telah memenuhi semua syarat. Distribusi voucher sementara tidak tersedia. Silakan coba lagi nanti.",
+      voucher_out_of_stock: "Anda telah memenuhi semua syarat, tetapi kode voucher sedang habis. Silakan coba lagi nanti.",
       one_more_day: "1 hari lagi.",
 
       info_hub_title: "ℹ️ Info Hub",

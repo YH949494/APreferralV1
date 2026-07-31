@@ -3554,10 +3554,18 @@
         return;
       }
 
-      // Operational pending: temporary system/drop unavailability
-      const operationalReasons = ["NO_ACTIVE_DROP", "NO_FREE_CODES", "COUNTER_MISMATCH", "DROP_NOT_LIVE_YET"];
+      // Operational pending: temporary system/drop unavailability. Must mirror
+      // backend's _WELCOME_OPERATIONAL_REASONS (vouchers.py) exactly, or a
+      // reason missing here silently falls through to the generic status
+      // fallback below with no distinct copy.
+      const operationalReasons = [
+        "NO_ACTIVE_DROP", "NO_FREE_CODES", "COUNTER_MISMATCH",
+        "DROP_NOT_LIVE_YET", "POOL_RESERVED", "SHAPING_DENIED",
+      ];
       if (operationalReasons.includes(pendingReason)) {
-        nextActionEl.textContent = t("voucher_temporarily_unavailable");
+        nextActionEl.textContent = pendingReason === "NO_FREE_CODES"
+          ? t("voucher_out_of_stock")
+          : t("voucher_temporarily_unavailable");
         return;
       }
 
@@ -3601,6 +3609,15 @@
         }
         const data = await res.json();
         _welcomeProgressData = data || {};
+        console.info("[WELCOME_UI][STATUS]", {
+          status: data.status,
+          welcome_pending_reason: data.welcome_pending_reason,
+          hide_welcome_card: data.hide_welcome_card,
+          completed_days: data.completed_days,
+          required_days: data.required_days,
+          remaining_days: data.remaining_days,
+          claim_drop_id: data.claim_drop_id || null,
+        });
         syncWelcomeStatusCard();
       } catch (_) {
         hideWelcomeProgress();
@@ -5061,11 +5078,20 @@
         const required = Number(welcomeProgress?.checkins_required ?? 3);
         const daysRemaining = Number(welcomeProgress?.days_remaining ?? 0);
         message.innerHTML = `Channel: ${welcomeProgress?.channel_joined ? "✅" : "⬜"}<br>Check-ins: ${completed}/${required}`;
-        if (daysRemaining > 0) {
+        // Only show the welcome-window countdown while check-ins are still
+        // incomplete. Once completed >= required, "days_remaining" reflects
+        // the eligibility window (not remaining check-ins) and showing it
+        // here reads as "N days remaining" on an otherwise-completed card.
+        if (daysRemaining > 0 && completed < required) {
           const expiresMeta = document.createElement("p");
           expiresMeta.className = "campaign-meta";
           expiresMeta.textContent = `Expires in ${daysRemaining} day${daysRemaining === 1 ? "" : "s"}`;
           card.appendChild(expiresMeta);
+        } else if (completed >= required) {
+          const pendingMeta = document.createElement("p");
+          pendingMeta.className = "campaign-meta";
+          pendingMeta.textContent = "Check-ins complete — finishing eligibility check.";
+          card.appendChild(pendingMeta);
         }
         btn.textContent = t("unlock_after_checkins");
         btn.setAttribute("disabled", "disabled");

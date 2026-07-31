@@ -1504,7 +1504,6 @@ def build_welcome_progress_response(user_id: int, *, now: datetime | None = None
                 f"[WELCOME_PROGRESS][NO_CLAIM_DROP] uid={user_id} completed_days={completed_days}",
             )
             status = "unlocked_pending"
-            message = "Check-ins completed. Claim slot is not available yet. Please check again later."
 
     # Determine hide_welcome_card and welcome_pending_reason
     hide_welcome_card = False
@@ -1519,6 +1518,36 @@ def build_welcome_progress_response(user_id: int, *, now: datetime | None = None
             _safe_log("info", f"[WELCOME_PROGRESS][HIDE_CARD] uid={user_id} reason={welcome_pending_reason}")
         else:
             _safe_log("info", f"[WELCOME_PROGRESS][PENDING_VISIBLE] uid={user_id} reason={welcome_pending_reason}")
+
+    if status == "unlocked_pending" and not hide_welcome_card:
+        # Reason-specific copy so a real stockout is distinguishable from other
+        # operational gates instead of always rendering the same generic string
+        # (see _WELCOME_OPERATIONAL_REASONS / classify_welcome_pending_reason).
+        if welcome_pending_reason == "NO_FREE_CODES":
+            message = "Check-ins completed, but voucher codes are out of stock right now. Please check again later."
+        else:
+            message = "Check-ins completed. Claim slot is not available yet. Please check again later."
+
+    # Temporary diagnostic logging for the Welcome Voucher progress-card
+    # investigation. Does not log voucher codes, tokens, or init data.
+    logger.info(
+        "[WELCOME_DIAG] uid=%s eligible=%s claimable=%s "
+        "checkins=%s window_end=%s "
+        "drop_id=%s drop_active=%s "
+        "existing_claim=%s "
+        "ledger_status=%s blocked=%s reason=%s",
+        user_id,
+        progress.get("eligible"),
+        bool(claim_drop_id),
+        f"{completed_days}/{required_days}",
+        eligible_until,
+        claim_drop_id,
+        bool(claim_drop_id),
+        claimed,
+        ticket_status or None,
+        not visible,
+        welcome_pending_reason or status,
+    )
 
     can_checkin, next_checkin_at = _welcome_next_checkin_estimate(user_id, completed_days, now_ref)
     payload = {

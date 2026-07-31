@@ -122,6 +122,9 @@ def test_no_free_codes_card_visible_no_claim(monkeypatch):
     assert data["hide_welcome_card"] is False
     assert data["welcome_pending_reason"] == "NO_FREE_CODES"
     assert data.get("claim_drop_id") is None
+    # Real zero-stock must produce an explicit out-of-stock message, not the
+    # same generic copy used for every other operational reason.
+    assert "out of stock" in data["message"].lower()
 
 
 # ── Test 7: valid claim_drop_id — card visible, claim button shown ───────────
@@ -131,6 +134,34 @@ def test_valid_claim_drop_id_card_visible(monkeypatch):
     assert data["hide_welcome_card"] is False
     assert data["welcome_pending_reason"] is None
     assert data["claim_drop_id"] == "drop123"
+    assert data["status"] == "unlocked"
+    assert data["remaining_days"] == 0
+
+
+# ── Test 9: already claimed (ticket + new_joiner_claims) — claimed state ────
+def test_already_issued_shows_claimed_state(monkeypatch):
+    monkeypatch.setattr(m, "_welcome_claim_drop_id",
+                        lambda now_ref=None, uid=None, user_doc=None: None)
+    data = _build(monkeypatch, subscribed=True, allowed=True, eligibility_reason="ok",
+                  ticket_status="claimed")
+    assert data["status"] == "claimed"
+    assert data["visible"] is False
+    assert data["remaining_days"] == 0
+
+
+# ── Test 10: unknown/unrecognized operational reason still logs, doesn't
+#    silently disappear — the frontend's generic fallback must still be hit
+#    intentionally (see index.html renderWelcomeProgress), and the backend
+#    payload must carry the raw reason for diagnostics rather than swallowing
+#    it.
+def test_unrecognized_reason_is_still_surfaced_in_payload(monkeypatch):
+    monkeypatch.setattr(m, "_welcome_claim_drop_reason",
+                        lambda now_ref=None, uid=None, user_doc=None: "COUNTER_MISMATCH")
+    data = _build(monkeypatch, subscribed=True, allowed=True, eligibility_reason="ok",
+                  claim_drop_id=None)
+    assert data["hide_welcome_card"] is False
+    assert data["welcome_pending_reason"] == "COUNTER_MISMATCH"
+    assert data["status"] == "unlocked_pending"
 
 
 # ── Test 8: completed_days < 3 — progress card visible, no pending reason ───
