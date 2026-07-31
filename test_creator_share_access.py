@@ -201,6 +201,121 @@ class TestAccess:
         assert calls["n"] == 1
 
 
+class _FakeMemberResp:
+    def __init__(self, status_code, payload):
+        self.status_code = status_code
+        self._payload = payload
+
+    def json(self):
+        return self._payload
+
+
+class TestCheckGroupMembershipStatuses:
+    """_check_group_membership() drives creator authorization for group,
+    supergroup, and channel chats alike -- Telegram's getChatMember response
+    shape (status / is_member) is identical across all three chat types, so
+    a single status-parsing test surface covers them all."""
+
+    def _mock_status(self, monkeypatch, status, is_member=None):
+        result = {"status": status}
+        if is_member is not None:
+            result["is_member"] = is_member
+
+        def _get(url, params=None, timeout=None):
+            return _FakeMemberResp(200, {"ok": True, "result": result})
+
+        monkeypatch.setattr(csc.requests, "get", _get)
+
+    def test_member_allowed(self, fake_db, monkeypatch):
+        monkeypatch.setenv("BOT_TOKEN", "test-bot-token")
+        self._mock_status(monkeypatch, "member")
+        assert csc._check_group_membership(555, -1003820861717) is True
+
+    def test_administrator_allowed(self, fake_db, monkeypatch):
+        monkeypatch.setenv("BOT_TOKEN", "test-bot-token")
+        self._mock_status(monkeypatch, "administrator")
+        assert csc._check_group_membership(555, -1003820861717) is True
+
+    def test_creator_allowed(self, fake_db, monkeypatch):
+        monkeypatch.setenv("BOT_TOKEN", "test-bot-token")
+        self._mock_status(monkeypatch, "creator")
+        assert csc._check_group_membership(555, -1003820861717) is True
+
+    def test_left_denied(self, fake_db, monkeypatch):
+        monkeypatch.setenv("BOT_TOKEN", "test-bot-token")
+        self._mock_status(monkeypatch, "left")
+        assert csc._check_group_membership(555, -1003820861717) is False
+
+    def test_kicked_denied(self, fake_db, monkeypatch):
+        monkeypatch.setenv("BOT_TOKEN", "test-bot-token")
+        self._mock_status(monkeypatch, "kicked")
+        assert csc._check_group_membership(555, -1003820861717) is False
+
+    def test_restricted_with_is_member_true_allowed(self, fake_db, monkeypatch):
+        monkeypatch.setenv("BOT_TOKEN", "test-bot-token")
+        self._mock_status(monkeypatch, "restricted", is_member=True)
+        assert csc._check_group_membership(555, -1003820861717) is True
+
+    def test_restricted_with_is_member_false_denied(self, fake_db, monkeypatch):
+        monkeypatch.setenv("BOT_TOKEN", "test-bot-token")
+        self._mock_status(monkeypatch, "restricted", is_member=False)
+        assert csc._check_group_membership(555, -1003820861717) is False
+
+
+class TestChannelCreatorMembershipEndToEnd:
+    """Creator membership checks against a configured *channel* behave
+    exactly like group/supergroup: allowed while a live member/admin/creator,
+    denied once Telegram reports left/kicked."""
+
+    def test_channel_member_allowed_end_to_end(self, fake_db, monkeypatch, client):
+        _fake_vouchers_module(monkeypatch, user_id=555)
+        _creator(fake_db, 555)
+        fake_db["app_settings"].insert_one(
+            {
+                "_id": "creator_group_access",
+                "creator_group_chat_id": -1003820861717,
+                "membership_check_enabled": True,
+                "chat_title": "AdvantPlay Channel",
+                "chat_type": "channel",
+                "bot_membership_status": "administrator",
+                "verified_at": csc.now_utc(),
+                "updated_at": csc.now_utc(),
+                "updated_by": 1,
+                "config_version": 1,
+            }
+        )
+        monkeypatch.setattr(csc, "_check_group_membership", lambda uid, chat_id: True)
+
+        resp = client.get("/api/creator/share/status?init_data=ok")
+        assert resp.status_code == 200
+        assert resp.get_json()["creator"]["access"] is True
+
+    def test_channel_left_creator_denied_end_to_end(self, fake_db, monkeypatch, client):
+        _fake_vouchers_module(monkeypatch, user_id=555)
+        _creator(fake_db, 555)
+        fake_db["app_settings"].insert_one(
+            {
+                "_id": "creator_group_access",
+                "creator_group_chat_id": -1003820861717,
+                "membership_check_enabled": True,
+                "chat_title": "AdvantPlay Channel",
+                "chat_type": "channel",
+                "bot_membership_status": "administrator",
+                "verified_at": csc.now_utc(),
+                "updated_at": csc.now_utc(),
+                "updated_by": 1,
+                "config_version": 1,
+            }
+        )
+        monkeypatch.setattr(csc, "_check_group_membership", lambda uid, chat_id: False)
+
+        resp = client.get("/api/creator/share/status?init_data=ok")
+        assert resp.status_code == 403
+        assert resp.get_json()["code"] == "creator_membership_required"
+        record = fake_db["creator_members"].find_one({"user_id": 555})
+        assert record["status"] == "removed"
+
+
 class TestAdminAuthNotCreatorAuth:
     def test_admin_routes_require_admin_not_creator_membership(self, fake_db, monkeypatch, app):
         fake_vouchers = types.ModuleType("vouchers")

@@ -218,12 +218,13 @@ test("Creator Access sub-tab is always present in the Share Content view (no rel
   assert.match(section, /<button id="rsc-subtab-creators">Creator Access<\/button>/);
 });
 
-test("Creator Access panel renders both Creator Group Access and Creator Members sections", () => {
+test("Creator Access panel renders both Creator Access Chat and Creator Members sections", () => {
   const section = shareContentSectionHtml();
   const panelStart = section.indexOf('id="rsc-creators-panel"');
   assert.ok(panelStart !== -1, "rsc-creators-panel not found");
   const panel = section.slice(panelStart);
-  assert.match(panel, /Creator Group Access/);
+  assert.match(panel, /Creator Access Chat/);
+  assert.match(panel, /Supported types: group, supergroup, or channel\./);
   assert.match(panel, /id="rsc-creator-group-chat-id"/);
   assert.match(panel, /id="rsc-creator-group-check-enabled"/);
   assert.match(panel, /id="rsc-creator-group-verify-btn"/);
@@ -244,7 +245,7 @@ test("Creator Access panel renders both Creator Group Access and Creator Members
   assert.match(panel, /id="rsc-creators-body"/);
 });
 
-test("Creator Group Chat ID is never masked and the bot token is never rendered anywhere on the page", () => {
+test("Creator Access Chat ID is never masked and the bot token is never rendered anywhere on the page", () => {
   assert.doesNotMatch(dashboardHtml, /bot_token/i);
   assert.doesNotMatch(dashboardHtml, /BOT_TOKEN/);
   // The chat-id input must be a plain text field, not password/masked.
@@ -254,7 +255,7 @@ test("Creator Group Chat ID is never masked and the bot token is never rendered 
   assert.doesNotMatch(inputMatch[0], /type="password"/);
 });
 
-test("general Settings → Telegram Configuration section does not contain the Creator Group Chat ID field", () => {
+test("general Settings → Telegram Configuration section does not contain the Creator Access Chat ID field", () => {
   // Locate the general Telegram Configuration block by its heading and scan
   // only that block (not the whole file) so this assertion can't accidentally
   // pass just because the id happens to live elsewhere on the page.
@@ -265,7 +266,7 @@ test("general Settings → Telegram Configuration section does not contain the C
   const sectionEnd = dashboardHtml.indexOf("</section>", headingIdx);
   const telegramConfigBlock = dashboardHtml.slice(sectionStart, sectionEnd);
   assert.doesNotMatch(telegramConfigBlock, /rsc-creator-group-chat-id/);
-  assert.doesNotMatch(telegramConfigBlock, /Creator Group Chat ID/i);
+  assert.doesNotMatch(telegramConfigBlock, /Creator Access Chat ID/i);
 });
 
 // ---------------------------------------------------------------------

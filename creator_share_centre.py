@@ -251,7 +251,7 @@ def _verify_telegram_group(chat_id: int) -> tuple[dict | None, str | None]:
         "chat_type": chat_result.get("type"),
         "bot_membership_status": None,
     }
-    if info["chat_type"] not in ("group", "supergroup"):
+    if info["chat_type"] not in ("group", "supergroup", "channel"):
         return info, "creator_group_wrong_chat_type"
 
     try:
@@ -880,7 +880,9 @@ def admin_remove_creator(user_id):
 
 
 # ---------------------------------------------------------------------------
-# Admin API — Creator Group Access settings
+# Admin API — Creator Access Chat settings (internal key/route names remain
+# "creator_group_*" / "creator-settings" for backward compatibility; only the
+# admin-facing labels changed to reflect that a channel is now supported).
 # ---------------------------------------------------------------------------
 
 @creator_share_bp.get("/api/admin/referral/creator-settings")

@@ -106,7 +106,33 @@ def _telegram_bot_access_denied():
 def _telegram_wrong_type():
     def _get(url, params=None, timeout=None):
         if url.endswith("/getChat"):
-            return _FakeResp(200, {"ok": True, "result": {"id": -1001234567890, "title": "Announcements", "type": "channel"}})
+            return _FakeResp(200, {"ok": True, "result": {"id": -1001234567890, "title": "Private DM", "type": "private"}})
+        raise AssertionError("unexpected telegram call: " + url)
+
+    return _get
+
+
+def _telegram_channel_ok(bot_id=999, bot_status="administrator", chat_title="AdvantPlay Channel", chat_id=-1003820861717):
+    def _get(url, params=None, timeout=None):
+        if url.endswith("/getChat"):
+            return _FakeResp(200, {"ok": True, "result": {"id": params["chat_id"], "title": chat_title, "type": "channel"}})
+        if url.endswith("/getMe"):
+            return _FakeResp(200, {"ok": True, "result": {"id": bot_id}})
+        if url.endswith("/getChatMember"):
+            return _FakeResp(200, {"ok": True, "result": {"status": bot_status}})
+        raise AssertionError("unexpected telegram call: " + url)
+
+    return _get
+
+
+def _telegram_channel_bot_access_denied(chat_id=-1003820861717):
+    def _get(url, params=None, timeout=None):
+        if url.endswith("/getChat"):
+            return _FakeResp(200, {"ok": True, "result": {"id": params["chat_id"], "title": "AdvantPlay Channel", "type": "channel"}})
+        if url.endswith("/getMe"):
+            return _FakeResp(200, {"ok": True, "result": {"id": 999}})
+        if url.endswith("/getChatMember"):
+            return _FakeResp(400, {"ok": False, "description": "Forbidden: bot is not a member"})
         raise AssertionError("unexpected telegram call: " + url)
 
     return _get
@@ -258,6 +284,80 @@ class TestVerifyAndSave:
         assert audit["force_save"] is True
         assert audit["unverified"] is True
         assert audit["verify_error"] == "creator_group_not_found"
+
+
+class TestChatTypeSupport:
+    """group / supergroup / channel are all accepted chat types for the
+    Creator Access Chat; only unsupported types (e.g. private) are rejected
+    with creator_group_wrong_chat_type."""
+
+    def test_group_accepted(self, fake_db, monkeypatch, client):
+        _fake_vouchers_module(monkeypatch, admin=True)
+        monkeypatch.setattr(csc.requests, "get", _telegram_ok(chat_type="group"))
+        resp = client.put(
+            "/api/admin/referral/creator-settings",
+            json={"creator_group_chat_id": "-1001234567890", "membership_check_enabled": True},
+        )
+        assert resp.status_code == 200
+        assert resp.get_json()["settings"]["chat_type"] == "group"
+
+    def test_supergroup_accepted(self, fake_db, monkeypatch, client):
+        _fake_vouchers_module(monkeypatch, admin=True)
+        monkeypatch.setattr(csc.requests, "get", _telegram_ok(chat_type="supergroup"))
+        resp = client.put(
+            "/api/admin/referral/creator-settings",
+            json={"creator_group_chat_id": "-1001234567890", "membership_check_enabled": True},
+        )
+        assert resp.status_code == 200
+        assert resp.get_json()["settings"]["chat_type"] == "supergroup"
+
+    def test_channel_accepted(self, fake_db, monkeypatch, client):
+        _fake_vouchers_module(monkeypatch, admin=True)
+        monkeypatch.setattr(csc.requests, "get", _telegram_ok(chat_type="channel"))
+        resp = client.put(
+            "/api/admin/referral/creator-settings",
+            json={"creator_group_chat_id": "-1001234567890", "membership_check_enabled": True},
+        )
+        assert resp.status_code == 200
+        body = resp.get_json()
+        assert body["settings"]["chat_type"] == "channel"
+        assert body["settings"]["creator_group_chat_id"] == -1001234567890
+
+    def test_private_chat_rejected(self, fake_db, monkeypatch, client):
+        _fake_vouchers_module(monkeypatch, admin=True)
+        monkeypatch.setattr(csc.requests, "get", _telegram_wrong_type())
+        resp = client.put(
+            "/api/admin/referral/creator-settings",
+            json={"creator_group_chat_id": "-1001234567890", "membership_check_enabled": True},
+        )
+        assert resp.status_code == 400
+        assert resp.get_json()["code"] == "creator_group_wrong_chat_type"
+
+    def test_specific_channel_verifies_successfully_when_bot_is_administrator(self, fake_db, monkeypatch, client):
+        # The real channel referenced in the Creator Access Chat rollout:
+        # -1003820861717, type=channel, bot is an administrator there.
+        _fake_vouchers_module(monkeypatch, admin=True)
+        monkeypatch.setattr(csc.requests, "get", _telegram_channel_ok(chat_id=-1003820861717))
+        resp = client.put(
+            "/api/admin/referral/creator-settings",
+            json={"creator_group_chat_id": "-1003820861717", "membership_check_enabled": True},
+        )
+        assert resp.status_code == 200
+        body = resp.get_json()
+        assert body["settings"]["creator_group_chat_id"] == -1003820861717
+        assert body["settings"]["chat_type"] == "channel"
+        assert body["settings"]["bot_membership_status"] == "administrator"
+        assert body["settings"]["verified_at"] is not None
+
+    def test_channel_bot_without_access_rejected(self, fake_db, monkeypatch, client):
+        _fake_vouchers_module(monkeypatch, admin=True)
+        monkeypatch.setattr(csc.requests, "get", _telegram_channel_bot_access_denied(chat_id=-1003820861717))
+        resp = client.put(
+            "/api/admin/referral/creator-settings",
+            json={"creator_group_chat_id": "-1003820861717", "membership_check_enabled": True},
+        )
+        assert resp.status_code == 400
+        assert resp.get_json()["code"] == "creator_group_bot_access_denied"
 
 
 class TestResolutionOrder:
