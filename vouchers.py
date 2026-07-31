@@ -1338,6 +1338,20 @@ def _welcome_claim_drop_id(now_ref: datetime | None = None, uid: int | None = No
     return None
 
 
+def _has_active_new_joiner_drop(now_ref: datetime | None = None) -> bool:
+    """Whether an active new_joiner drop exists at all, independent of
+    claimability — used for diagnostics so "no claim slot" (stock/schema
+    issue) isn't logged as if there were no active drop."""
+    ref = _as_aware_utc(now_ref) or now_utc()
+    try:
+        for drop in get_active_drops(ref):
+            if _is_new_joiner_audience(_drop_audience_type(drop)):
+                return True
+    except Exception:
+        pass
+    return False
+
+
 _WELCOME_PERMANENT_REASONS = frozenset(
     {"ELIGIBILITY_FAILED", "AUDIENCE_MISMATCH", "WINDOW_EXPIRED", "ALREADY_CLAIMED", "REGION_MISMATCH", "RISK_BLOCKED"}
 )
@@ -1542,7 +1556,7 @@ def build_welcome_progress_response(user_id: int, *, now: datetime | None = None
         f"{completed_days}/{required_days}",
         eligible_until,
         claim_drop_id,
-        bool(claim_drop_id),
+        _has_active_new_joiner_drop(now_ref),
         claimed,
         ticket_status or None,
         not visible,
