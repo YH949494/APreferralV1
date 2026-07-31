@@ -3376,6 +3376,25 @@
       if (section) section.style.display = "none";
       const rewardsJourney = document.getElementById("progress-section");
       if (rewardsJourney) rewardsJourney.style.display = "";
+
+      // Clear stale content so a hidden card never flashes a previous
+      // user's/poll's step count, message, or voucher code if it is ever
+      // shown again (e.g. after a login/user-id switch).
+      const stepLabelEl = document.getElementById("welcome-step-label");
+      if (stepLabelEl) stepLabelEl.textContent = "";
+      const squaresEl = document.getElementById("welcome-progress-squares");
+      if (squaresEl) squaresEl.innerHTML = "";
+      const nextActionEl = document.getElementById("welcome-progress-next-action");
+      if (nextActionEl) nextActionEl.textContent = "";
+      const countdownEl = document.getElementById("welcome-progress-countdown");
+      if (countdownEl) { countdownEl.textContent = ""; countdownEl.style.display = "none"; }
+      const expiryEl = document.getElementById("welcome-progress-expiry");
+      if (expiryEl) { expiryEl.textContent = ""; expiryEl.style.display = "none"; }
+      const channelReminder = document.getElementById("welcome-channel-reminder");
+      if (channelReminder) channelReminder.style.display = "none";
+      const checkinBtn = document.getElementById("welcome-checkin-btn");
+      if (checkinBtn) checkinBtn.style.display = "none";
+      _welcomeProgressData = null;
     }
 
     function highlightWelcomeRewardCard() {
@@ -3522,8 +3541,10 @@
       const channelReminder = document.getElementById("welcome-channel-reminder");
       if (!section || !body || !statusBody || !titleEl || !squaresEl || !nextActionEl || !countdownEl || !checkinBtn) return;
 
-      // hide_welcome_card is the authoritative gate for permanent ineligibility
-      if (data?.hide_welcome_card === true || !data?.visible) {
+      // Backend is authoritative: only render when both visible and eligible
+      // are explicitly true. hide_welcome_card remains an extra permanent-
+      // ineligibility gate on top of that.
+      if (data?.hide_welcome_card === true || data?.visible !== true || data?.eligible !== true) {
         hideWelcomeProgress();
         return;
       }
