@@ -13,7 +13,8 @@
     --card-border: #262834;
     --text: #f2f3f6;
     --muted: #9296a6;
-    --accent: #4f7dff;
+    --ap-orange: #FF5A00;
+    --ap-orange-pressed: #E64F00;
     --accent-text: #ffffff;
     --danger: #e5484d;
   }
@@ -25,12 +26,27 @@
     color: var(--text);
     -webkit-tap-highlight-color: transparent;
   }
-  .wrap { max-width: 480px; margin: 0 auto; padding: 20px 16px 40px; }
+  .wrap { max-width: 430px; min-width: 0; margin: 0 auto; padding: 16px 16px 40px; }
+  header { text-align: center; margin: 4px 0 14px; }
   h1 {
-    font-size: 20px;
-    font-weight: 700;
-    margin: 4px 0 20px;
-    text-align: center;
+    font-size: 21px;
+    font-weight: 800;
+    letter-spacing: 0.01em;
+    text-transform: uppercase;
+    margin: 0;
+    line-height: 1.25;
+  }
+  h1 .hl { color: var(--ap-orange); }
+  .subtitle {
+    font-size: 13px;
+    color: var(--muted);
+    margin: 6px 0 0;
+    line-height: 1.4;
+  }
+  .support-line {
+    font-size: 12px;
+    color: var(--muted);
+    margin: 6px 0 0;
   }
   .btn {
     display: block;
@@ -43,34 +59,51 @@
     cursor: pointer;
     text-align: center;
   }
-  .btn-primary { background: var(--accent); color: var(--accent-text); }
+  .btn-primary { background: var(--ap-orange); color: var(--accent-text); }
+  .btn-primary:hover, .btn-primary:active { background: var(--ap-orange-pressed); }
   .btn-primary:disabled { opacity: 0.55; cursor: default; }
   .btn-secondary {
-    background: transparent;
+    background: #1b1c24;
     color: var(--text);
-    border: 1px solid var(--card-border);
+    border: 1px solid var(--ap-orange);
     margin-top: 10px;
+  }
+  .btn-secondary:hover, .btn-secondary:active { border-color: var(--ap-orange-pressed); }
+  .btn-tertiary {
+    background: transparent;
+    color: var(--muted);
+    border: none;
+    margin-top: 10px;
+    font-weight: 500;
+    text-decoration: underline;
+    padding: 8px;
   }
   .card {
     background: var(--card);
     border: 1px solid var(--card-border);
     border-radius: 16px;
-    padding: 16px;
-    margin-top: 18px;
-    display: none;
+    padding: 14px;
+    margin-top: 14px;
   }
-  .card.visible { display: block; }
-  .card-text {
-    white-space: pre-wrap;
-    word-break: break-word;
-    font-size: 14px;
-    line-height: 1.5;
-    margin: 0 0 14px;
+  .hidden { display: none !important; }
+  .card-label {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--muted);
+    font-weight: 700;
+    margin: 0 0 10px;
+  }
+  .card-note {
+    font-size: 12px;
+    color: var(--muted);
+    margin: 10px 0 0;
+    text-align: center;
   }
   .toast {
     margin-top: 10px;
     font-size: 13px;
-    color: #59d67c;
+    color: var(--danger);
     min-height: 16px;
   }
   .status {
@@ -80,67 +113,95 @@
     font-size: 14px;
   }
   .status.error { color: var(--danger); }
-  .results {
-    margin-top: 22px;
-    display: none;
-  }
-  .results.visible { display: block; }
-  .results h2 {
-    font-size: 13px;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    color: var(--muted);
+
+  /* Generated post preview: caption / playback / CTA / referral link kept
+     visually distinct instead of one raw text block, without changing the
+     underlying share_text that gets copied/shared. */
+  .preview-row {
+    font-size: 14px;
+    line-height: 1.45;
     margin: 0 0 8px;
-    font-weight: 600;
+    word-break: break-word;
   }
-  .results-row {
-    display: flex;
-    gap: 10px;
-  }
-  .stat {
-    flex: 1;
-    background: var(--card);
+  .preview-row:last-child { margin-bottom: 0; }
+  .preview-cta { color: var(--muted); font-size: 13px; }
+  .preview-link { color: var(--ap-orange); font-weight: 600; }
+
+  /* Reward ladder — informational only, no progress/highlighting. */
+  #btn-toggle-rewards {
+    display: block;
+    width: 100%;
+    background: transparent;
+    color: var(--ap-orange);
     border: 1px solid var(--card-border);
     border-radius: 12px;
-    padding: 12px;
-    text-align: center;
+    padding: 10px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
   }
-  .stat .num { font-size: 22px; font-weight: 700; }
-  .stat .label { font-size: 12px; color: var(--muted); margin-top: 2px; }
-  #hidden-shell { display: none; }
-  .hidden { display: none !important; }
+  #rewards-section { margin-top: 10px; }
+  #rewards-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .reward-item {
+    padding: 8px 10px;
+    border-radius: 10px;
+    font-size: 13px;
+    color: var(--text);
+    background: #1b1c24;
+  }
+  #rewards-note {
+    font-size: 12px;
+    color: var(--muted);
+    margin: 10px 0 0;
+  }
 </style>
 </head>
 <body>
   <div class="wrap">
-    <h1>AdvantPlay Creator</h1>
+    <header>
+      <h1>Turn Shares Into <span class="hl">Cash</span></h1>
+      <p class="subtitle">We give you the content. You bring the referrals. You collect the rewards.</p>
+      <p class="support-line">Your personal referral link is included automatically.</p>
+    </header>
 
+    <div id="initial-loading" class="status">Loading…</div>
     <div id="access-denied" class="status hidden"></div>
 
     <div id="app-shell" class="hidden">
-      <button id="btn-generate" class="btn btn-primary">Generate Share Post</button>
-      <div id="generate-status" class="status" role="status"></div>
-
-      <div id="package-card" class="card">
-        <p id="package-text" class="card-text"></p>
-        <button id="btn-copy" class="btn btn-primary">Copy All</button>
-        <button id="btn-generate-another" class="btn btn-secondary">Generate Another</button>
-        <button id="btn-telegram-share" class="btn btn-secondary">Share to Telegram</button>
-        <div id="copy-toast" class="toast" aria-live="polite"></div>
+      <div class="card">
+        <button id="btn-toggle-rewards" type="button">See Referral Rewards</button>
+        <div id="rewards-section" class="hidden">
+          <div id="rewards-list">
+            <div class="reward-item">10 qualified referrals &rarr; $10</div>
+            <div class="reward-item">25 qualified referrals &rarr; $15</div>
+            <div class="reward-item">50 qualified referrals &rarr; $50</div>
+            <div class="reward-item">150 qualified referrals &rarr; $125</div>
+            <div class="reward-item">250 qualified referrals &rarr; $250</div>
+          </div>
+          <p id="rewards-note">Referral totals reset on the 1st of every month. Only qualified referrals count.</p>
+        </div>
       </div>
 
-      <div id="results" class="results">
-        <h2>This Week</h2>
-        <div class="results-row">
-          <div class="stat">
-            <div class="num" id="stat-referrals">–</div>
-            <div class="label">Referrals</div>
-          </div>
-          <div class="stat">
-            <div class="num" id="stat-qualified">–</div>
-            <div class="label">Qualified</div>
-          </div>
-        </div>
+      <button id="btn-generate" class="btn btn-primary" style="margin-top: 14px;">Get My Share Post</button>
+      <div id="generate-status" class="status" role="status"></div>
+
+      <div id="package-card" class="card hidden">
+        <p class="card-label">Your Ready-to-Share Post</p>
+        <p id="package-caption" class="preview-row hidden"></p>
+        <p id="package-playback" class="preview-row hidden"></p>
+        <p id="package-cta" class="preview-row preview-cta"></p>
+        <p id="package-link" class="preview-row preview-link"></p>
+        <p class="card-note">Your personal referral link is already included.</p>
+
+        <button id="btn-copy" class="btn btn-primary">Copy Post</button>
+        <button id="btn-telegram-share" class="btn btn-secondary">Share to Telegram</button>
+        <button id="btn-try-another" class="btn btn-tertiary">Give Me Another Post</button>
+        <div id="copy-toast" class="toast" aria-live="polite"></div>
+        <div id="share-status" class="toast" aria-live="polite"></div>
       </div>
     </div>
   </div>
@@ -181,19 +242,23 @@
   }
 
   var els = {
+    initialLoading: document.getElementById("initial-loading"),
     accessDenied: document.getElementById("access-denied"),
     appShell: document.getElementById("app-shell"),
     btnGenerate: document.getElementById("btn-generate"),
     generateStatus: document.getElementById("generate-status"),
     packageCard: document.getElementById("package-card"),
-    packageText: document.getElementById("package-text"),
+    packageCaption: document.getElementById("package-caption"),
+    packagePlayback: document.getElementById("package-playback"),
+    packageCta: document.getElementById("package-cta"),
+    packageLink: document.getElementById("package-link"),
     btnCopy: document.getElementById("btn-copy"),
-    btnGenerateAnother: document.getElementById("btn-generate-another"),
+    btnTryAnother: document.getElementById("btn-try-another"),
     btnTelegramShare: document.getElementById("btn-telegram-share"),
     copyToast: document.getElementById("copy-toast"),
-    results: document.getElementById("results"),
-    statReferrals: document.getElementById("stat-referrals"),
-    statQualified: document.getElementById("stat-qualified"),
+    shareStatus: document.getElementById("share-status"),
+    btnToggleRewards: document.getElementById("btn-toggle-rewards"),
+    rewardsSection: document.getElementById("rewards-section"),
   };
 
   var ACCESS_DENIED_MESSAGES = {
@@ -205,6 +270,11 @@
     invalid_telegram_auth: "Please open this page from inside Telegram.",
   };
 
+  // Fixed V1 CTA line from referral_share_content.build_creator_share_text().
+  // Not returned as its own API field (it's baked into share_text), but it
+  // never varies, so it is safe to mirror here purely for display layout.
+  var FIXED_CTA_TEXT = "More player replays and rewards inside AdvantPlay:";
+
   function showAccessDenied(code) {
     els.appShell.classList.add("hidden");
     els.accessDenied.classList.remove("hidden");
@@ -212,24 +282,44 @@
     els.accessDenied.textContent = ACCESS_DENIED_MESSAGES[code] || "Access denied.";
   }
 
-  var currentPackage = null; // { package_id, share_text }
+  var currentPackage = null; // { package_id, share_text, hook_text, playback_url, referral_link }
   var generating = false;
+  var copyResetTimer = null;
+
+  var COPY_LABEL_DEFAULT = "Copy Post";
+  var COPY_LABEL_SUCCESS = "✓ Copied — Go Share It";
 
   function detectPlatform() {
     return "generic";
   }
 
+  function setRow(el, text) {
+    if (text) {
+      el.textContent = text;
+      el.classList.remove("hidden");
+    } else {
+      el.textContent = "";
+      el.classList.add("hidden");
+    }
+  }
+
   function renderPackage(pkg) {
     currentPackage = pkg;
-    els.packageText.textContent = pkg.share_text;
-    els.packageCard.classList.add("visible");
+    setRow(els.packageCaption, pkg.hook_text);
+    setRow(els.packagePlayback, pkg.playback_url);
+    els.packageCta.textContent = FIXED_CTA_TEXT;
+    els.packageLink.textContent = pkg.referral_link;
+    els.packageCard.classList.remove("hidden");
+    els.btnGenerate.classList.add("hidden");
     els.copyToast.textContent = "";
+    els.shareStatus.textContent = "";
+    resetCopyButtonLabel();
   }
 
   function setGenerating(isGenerating) {
     generating = isGenerating;
     els.btnGenerate.disabled = isGenerating;
-    els.btnGenerateAnother.disabled = isGenerating;
+    els.btnTryAnother.disabled = isGenerating;
     els.generateStatus.classList.remove("error");
     els.generateStatus.textContent = isGenerating ? "Generating…" : "";
   }
@@ -255,7 +345,6 @@
           return;
         }
         renderPackage(res.body);
-        loadResults();
       })
       .catch(function () {
         setGenerating(false);
@@ -278,6 +367,10 @@
     return ok;
   }
 
+  function resetCopyButtonLabel() {
+    els.btnCopy.textContent = COPY_LABEL_DEFAULT;
+  }
+
   function copyAll() {
     if (!currentPackage) return;
     var text = currentPackage.share_text;
@@ -296,7 +389,10 @@
         els.copyToast.textContent = "Couldn't copy automatically — please select and copy the text above.";
         return;
       }
-      els.copyToast.textContent = "Copied — paste it into WhatsApp, Facebook or X.";
+      els.copyToast.textContent = "";
+      els.btnCopy.textContent = COPY_LABEL_SUCCESS;
+      if (copyResetTimer) clearTimeout(copyResetTimer);
+      copyResetTimer = setTimeout(resetCopyButtonLabel, 2000);
       apiPost("/api/creator/share/" + encodeURIComponent(currentPackage.package_id) + "/copied", {
         platform: detectPlatform(),
       }).catch(function () {});
@@ -309,44 +405,55 @@
       platform: "telegram",
     }).catch(function () {});
 
+    els.shareStatus.textContent = "";
     // The referral link is already embedded in share_text, so it is passed
     // only via the "text" segment of Telegram's share/url composer — never
     // duplicated into a separate "url" param.
     var shareUrl = "https://t.me/share/url?text=" + encodeURIComponent(currentPackage.share_text);
-    if (tg && typeof tg.openTelegramLink === "function") {
-      tg.openTelegramLink(shareUrl);
-    } else {
-      window.open(shareUrl, "_blank");
+    try {
+      if (tg && typeof tg.openTelegramLink === "function") {
+        tg.openTelegramLink(shareUrl);
+      } else {
+        var opened = window.open(shareUrl, "_blank");
+        if (!opened) throw new Error("popup_blocked");
+      }
+    } catch (e) {
+      els.shareStatus.textContent = "Couldn't open Telegram. Please try again.";
     }
   }
 
-  function loadResults() {
-    apiGet("/api/creator/share/results").then(function (res) {
-      if (!res.ok || res.body.status !== "ok") return;
-      var r = res.body.results;
-      els.statReferrals.textContent = r.current_week_referrals;
-      els.statQualified.textContent = r.current_week_qualified;
-      els.results.classList.add("visible");
-    }).catch(function () {});
+  function toggleRewards() {
+    var isOpen = els.rewardsSection.classList.contains("open");
+    if (isOpen) {
+      els.rewardsSection.classList.remove("open");
+      els.rewardsSection.classList.add("hidden");
+      els.btnToggleRewards.textContent = "See Referral Rewards";
+    } else {
+      els.rewardsSection.classList.add("open");
+      els.rewardsSection.classList.remove("hidden");
+      els.btnToggleRewards.textContent = "Hide Referral Rewards";
+    }
   }
 
   function init() {
     apiGet("/api/creator/share/status").then(function (res) {
+      els.initialLoading.classList.add("hidden");
       if (!res.ok || res.body.status !== "ok" || !(res.body.creator && res.body.creator.access)) {
         showAccessDenied(res.body && res.body.code);
         return;
       }
       els.appShell.classList.remove("hidden");
-      loadResults();
     }).catch(function () {
+      els.initialLoading.classList.add("hidden");
       showAccessDenied("invalid_telegram_auth");
     });
   }
 
   els.btnGenerate.addEventListener("click", generatePackage);
-  els.btnGenerateAnother.addEventListener("click", generatePackage);
+  els.btnTryAnother.addEventListener("click", generatePackage);
   els.btnCopy.addEventListener("click", copyAll);
   els.btnTelegramShare.addEventListener("click", telegramShare);
+  els.btnToggleRewards.addEventListener("click", toggleRewards);
 
   init();
 })();

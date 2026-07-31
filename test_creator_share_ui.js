@@ -60,6 +60,7 @@ function makeElement(id) {
     classList: new ClassList(),
     _text: "",
     disabled: false,
+    style: {},
     get textContent() {
       return this._text;
     },
@@ -77,25 +78,35 @@ function makeElement(id) {
 }
 
 const ELEMENT_IDS = [
+  "initial-loading",
   "access-denied",
   "app-shell",
   "btn-generate",
   "generate-status",
   "package-card",
-  "package-text",
+  "package-caption",
+  "package-playback",
+  "package-cta",
+  "package-link",
   "btn-copy",
-  "btn-generate-another",
+  "btn-try-another",
   "btn-telegram-share",
   "copy-toast",
-  "results",
-  "stat-referrals",
-  "stat-qualified",
+  "share-status",
+  "btn-toggle-rewards",
+  "rewards-section",
 ];
 
-function buildSandbox({ initData = "tg_init_data_ok", fetchImpl, clipboardWriteText, execCommandResult = true, openTelegramLink } = {}) {
+// Mirrors the `class="... hidden"` markup already present in
+// static/creator-share.html, since the lightweight element stubs below don't
+// parse the real HTML/CSS -- only classes the inline script itself toggles.
+const INITIALLY_HIDDEN_IDS = ["access-denied", "app-shell", "package-card", "package-caption", "package-playback", "rewards-section"];
+
+function buildSandbox({ initData = "tg_init_data_ok", fetchImpl, clipboardWriteText, execCommandResult = true, openTelegramLink, windowOpenResult } = {}) {
   const elements = {};
   ELEMENT_IDS.forEach((id) => {
     elements[id] = makeElement(id);
+    if (INITIALLY_HIDDEN_IDS.includes(id)) elements[id].classList.add("hidden");
   });
 
   const createdTextareas = [];
@@ -137,12 +148,7 @@ function buildSandbox({ initData = "tg_init_data_ok", fetchImpl, clipboardWriteT
     return fetchFn(url, opts);
   };
 
-  const telegramWebApp = {
-    initData,
-    ready() {},
-    expand() {},
-    openTelegramLink: openTelegramLink || (() => {}),
-  };
+  const telegramWebApp = { initData, ready() {}, expand() {}, openTelegramLink };
 
   const navigatorStub = {
     clipboard:
@@ -153,13 +159,22 @@ function buildSandbox({ initData = "tg_init_data_ok", fetchImpl, clipboardWriteT
         : { writeText: clipboardWriteText },
   };
 
+  const windowOpenCalls = [];
   const sandbox = {
-    window: { Telegram: { WebApp: telegramWebApp } },
+    window: {
+      Telegram: { WebApp: telegramWebApp },
+      open: (url, target) => {
+        windowOpenCalls.push(url);
+        return windowOpenResult === undefined ? {} : windowOpenResult;
+      },
+    },
     document: documentStub,
     fetch: wrappedFetch,
     navigator: navigatorStub,
     encodeURIComponent,
     setImmediate,
+    setTimeout,
+    clearTimeout,
     console,
     execCommandResult,
   };
@@ -169,40 +184,105 @@ function buildSandbox({ initData = "tg_init_data_ok", fetchImpl, clipboardWriteT
   vm.createContext(sandbox);
   vm.runInContext(loadScriptSource(), sandbox);
 
-  return { sandbox, elements, fetchCalls, createdTextareas };
+  return { sandbox, elements, fetchCalls, createdTextareas, windowOpenCalls };
 }
 
-test("Generate renders complete package", async () => {
-  const shareText = "Hook line\nhttps://rx.apreplay.com/Abc123\n\nMore player replays and rewards inside AdvantPlay:\nhttps://t.me/+abc";
+function statusOkResponse() {
+  return Promise.resolve({
+    ok: true,
+    status: 200,
+    json: () => Promise.resolve({ status: "ok", creator: { user_id: 1, access: true, creator_tier: "pilot" } }),
+  });
+}
+
+function generateOkResponse(overrides) {
+  return Promise.resolve({
+    ok: true,
+    status: 200,
+    json: () =>
+      Promise.resolve(
+        Object.assign(
+          {
+            status: "ok",
+            package_id: "pkg_1",
+            hook_text: "Hook line",
+            playback_url: "https://rx.apreplay.com/Abc123",
+            referral_link: "https://t.me/+abc",
+            share_text:
+              "Hook line\nhttps://rx.apreplay.com/Abc123\n\nMore player replays and rewards inside AdvantPlay:\nhttps://t.me/+abc",
+          },
+          overrides || {}
+        )
+      ),
+  });
+}
+
+test("initial loading state clears once status resolves", async () => {
+  const { elements } = buildSandbox({
+    fetchImpl: (url) => {
+      if (url.includes("/api/creator/share/status")) return statusOkResponse();
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ status: "ok" }) });
+    },
+  });
+
+  assert.equal(elements["initial-loading"].classList.contains("hidden"), false);
+  await flush();
+  await flush();
+  assert.equal(elements["initial-loading"].classList.contains("hidden"), true);
+  assert.equal(elements["app-shell"].classList.contains("hidden"), false);
+});
+
+test("no post generated: only Get My Share Post is shown", async () => {
+  const { elements } = buildSandbox({
+    fetchImpl: (url) => {
+      if (url.includes("/api/creator/share/status")) return statusOkResponse();
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ status: "ok" }) });
+    },
+  });
+
+  await flush();
+  await flush();
+
+  assert.equal(elements["btn-generate"].classList.contains("hidden"), false);
+  assert.equal(elements["package-card"].classList.contains("hidden"), true);
+});
+
+test("Generate renders the post split into caption/playback/CTA/link and hides Get My Share Post", async () => {
   const { elements, fetchCalls } = buildSandbox({
     fetchImpl: (url) => {
-      if (url.includes("/api/creator/share/status")) {
-        return Promise.resolve({
-          ok: true,
-          status: 200,
-          json: () => Promise.resolve({ status: "ok", creator: { user_id: 1, access: true, creator_tier: "pilot" } }),
-        });
-      }
-      if (url.includes("/api/creator/share/results")) {
-        return Promise.resolve({
-          ok: true,
-          status: 200,
-          json: () => Promise.resolve({ status: "ok", results: { current_week_referrals: 3, current_week_qualified: 1 } }),
-        });
-      }
+      if (url.includes("/api/creator/share/status")) return statusOkResponse();
+      if (url.includes("/api/creator/share/generate")) return generateOkResponse();
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ status: "ok" }) });
+    },
+  });
+
+  await flush();
+  elements["btn-generate"]._trigger("click");
+  await flush();
+  await flush();
+
+  assert.equal(elements["package-caption"].textContent, "Hook line");
+  assert.equal(elements["package-playback"].textContent, "https://rx.apreplay.com/Abc123");
+  assert.equal(elements["package-cta"].textContent, "More player replays and rewards inside AdvantPlay:");
+  assert.equal(elements["package-link"].textContent, "https://t.me/+abc");
+  assert.equal(elements["package-card"].classList.contains("hidden"), false);
+  assert.equal(elements["btn-generate"].classList.contains("hidden"), true, "Get My Share Post is replaced once a post exists");
+
+  const generateCall = fetchCalls.find((c) => c.url.includes("/api/creator/share/generate"));
+  assert.ok(generateCall, "generate endpoint was called");
+  assert.equal(JSON.parse(generateCall.opts.body).platform, "generic");
+});
+
+test("empty caption/playback rows are hidden without showing the literal word None", async () => {
+  const { elements } = buildSandbox({
+    fetchImpl: (url) => {
+      if (url.includes("/api/creator/share/status")) return statusOkResponse();
       if (url.includes("/api/creator/share/generate")) {
-        return Promise.resolve({
-          ok: true,
-          status: 200,
-          json: () =>
-            Promise.resolve({
-              status: "ok",
-              package_id: "pkg_1",
-              hook_text: "Hook line",
-              playback_url: "https://rx.apreplay.com/Abc123",
-              referral_link: "https://t.me/+abc",
-              share_text: shareText,
-            }),
+        return generateOkResponse({
+          hook_text: null,
+          playback_url: null,
+          referral_link: "https://t.me/+bare",
+          share_text: "More player replays and rewards inside AdvantPlay:\nhttps://t.me/+bare",
         });
       }
       return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ status: "ok" }) });
@@ -210,20 +290,17 @@ test("Generate renders complete package", async () => {
   });
 
   await flush();
-  assert.equal(elements["app-shell"].classList.contains("hidden"), false);
-
   elements["btn-generate"]._trigger("click");
   await flush();
   await flush();
 
-  assert.equal(elements["package-text"].textContent, shareText);
-  assert.equal(elements["package-card"].classList.contains("visible"), true);
-  const generateCall = fetchCalls.find((c) => c.url.includes("/api/creator/share/generate"));
-  assert.ok(generateCall, "generate endpoint was called");
-  assert.equal(JSON.parse(generateCall.opts.body).platform, "generic");
+  assert.equal(elements["package-caption"].classList.contains("hidden"), true);
+  assert.equal(elements["package-caption"].textContent, "");
+  assert.equal(elements["package-playback"].classList.contains("hidden"), true);
+  assert.equal(elements["package-link"].textContent, "https://t.me/+bare");
 });
 
-test("Copy All copies exact share_text and copied endpoint called only after successful clipboard copy", async () => {
+test("Copy Post copies the exact unmodified share_text, shows confirmation, then reverts after ~2s", async () => {
   const shareText = "Only hook\n\nMore player replays and rewards inside AdvantPlay:\nhttps://t.me/+xyz";
   let writeTextArg = null;
   const { elements, fetchCalls } = buildSandbox({
@@ -232,23 +309,9 @@ test("Copy All copies exact share_text and copied endpoint called only after suc
       return Promise.resolve();
     },
     fetchImpl: (url) => {
-      if (url.includes("/api/creator/share/status")) {
-        return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ status: "ok", creator: { access: true } }) });
-      }
+      if (url.includes("/api/creator/share/status")) return statusOkResponse();
       if (url.includes("/api/creator/share/generate")) {
-        return Promise.resolve({
-          ok: true,
-          status: 200,
-          json: () =>
-            Promise.resolve({
-              status: "ok",
-              package_id: "pkg_42",
-              hook_text: "Only hook",
-              playback_url: null,
-              referral_link: "https://t.me/+xyz",
-              share_text: shareText,
-            }),
-        });
+        return generateOkResponse({ package_id: "pkg_42", hook_text: "Only hook", playback_url: null, referral_link: "https://t.me/+xyz", share_text: shareText });
       }
       return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ status: "ok" }) });
     },
@@ -259,41 +322,30 @@ test("Copy All copies exact share_text and copied endpoint called only after suc
   await flush();
   await flush();
 
+  assert.equal(elements["btn-copy"].textContent, "Copy Post");
+
   elements["btn-copy"]._trigger("click");
   await flush();
   await flush();
 
-  assert.equal(writeTextArg, shareText, "clipboard.writeText must receive the exact share_text");
-  assert.equal(elements["copy-toast"].textContent, "Copied — paste it into WhatsApp, Facebook or X.");
+  assert.equal(writeTextArg, shareText, "clipboard.writeText must receive the exact, unaltered share_text");
+  assert.equal(elements["btn-copy"].textContent, "✓ Copied — Go Share It");
 
   const copiedCall = fetchCalls.find((c) => c.url.includes("/copied"));
   assert.ok(copiedCall, "copied endpoint should be called after a successful clipboard copy");
   assert.ok(copiedCall.url.includes("pkg_42"));
+
+  await new Promise((resolve) => setTimeout(resolve, 2100));
+  assert.equal(elements["btn-copy"].textContent, "Copy Post", "button label reverts to Copy Post after ~2s");
 });
 
-test("copied endpoint is NOT called when clipboard copy fails", async () => {
+test("clipboard failure shows an inline error and never a fake success state", async () => {
   const { elements, fetchCalls } = buildSandbox({
     clipboardWriteText: () => Promise.reject(new Error("denied")),
     execCommandResult: false,
     fetchImpl: (url) => {
-      if (url.includes("/api/creator/share/status")) {
-        return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ status: "ok", creator: { access: true } }) });
-      }
-      if (url.includes("/api/creator/share/generate")) {
-        return Promise.resolve({
-          ok: true,
-          status: 200,
-          json: () =>
-            Promise.resolve({
-              status: "ok",
-              package_id: "pkg_fail",
-              hook_text: null,
-              playback_url: null,
-              referral_link: "https://t.me/+fail",
-              share_text: "More player replays and rewards inside AdvantPlay:\nhttps://t.me/+fail",
-            }),
-        });
-      }
+      if (url.includes("/api/creator/share/status")) return statusOkResponse();
+      if (url.includes("/api/creator/share/generate")) return generateOkResponse({ package_id: "pkg_fail" });
       return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ status: "ok" }) });
     },
   });
@@ -309,31 +361,17 @@ test("copied endpoint is NOT called when clipboard copy fails", async () => {
 
   const copiedCall = fetchCalls.find((c) => c.url.includes("/copied"));
   assert.equal(copiedCall, undefined, "copied endpoint must not be called when the copy itself failed");
+  assert.equal(elements["btn-copy"].textContent, "Copy Post", "must not flip to the success label on failure");
+  assert.match(elements["copy-toast"].textContent, /couldn't copy/i);
 });
 
 test("clipboard fallback (execCommand) works when navigator.clipboard is unavailable", async () => {
   const { elements, fetchCalls, createdTextareas } = buildSandbox({
-    clipboardWriteText: null, // simulates navigator.clipboard being undefined
+    clipboardWriteText: null,
     execCommandResult: true,
     fetchImpl: (url) => {
-      if (url.includes("/api/creator/share/status")) {
-        return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ status: "ok", creator: { access: true } }) });
-      }
-      if (url.includes("/api/creator/share/generate")) {
-        return Promise.resolve({
-          ok: true,
-          status: 200,
-          json: () =>
-            Promise.resolve({
-              status: "ok",
-              package_id: "pkg_fallback",
-              hook_text: null,
-              playback_url: null,
-              referral_link: "https://t.me/+fb",
-              share_text: "More player replays and rewards inside AdvantPlay:\nhttps://t.me/+fb",
-            }),
-        });
-      }
+      if (url.includes("/api/creator/share/status")) return statusOkResponse();
+      if (url.includes("/api/creator/share/generate")) return generateOkResponse({ package_id: "pkg_fallback" });
       return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ status: "ok" }) });
     },
   });
@@ -352,7 +390,60 @@ test("clipboard fallback (execCommand) works when navigator.clipboard is unavail
   assert.ok(copiedCall, "fallback copy success should still record the copied event");
 });
 
-test("Generate Another disables the buttons during the request", async () => {
+test("Telegram share success clears any prior error and records the share-clicked event", async () => {
+  let openedUrl = null;
+  const { elements, fetchCalls } = buildSandbox({
+    openTelegramLink: (url) => {
+      openedUrl = url;
+    },
+    fetchImpl: (url) => {
+      if (url.includes("/api/creator/share/status")) return statusOkResponse();
+      if (url.includes("/api/creator/share/generate")) return generateOkResponse();
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ status: "ok" }) });
+    },
+  });
+
+  await flush();
+  elements["btn-generate"]._trigger("click");
+  await flush();
+  await flush();
+
+  elements["btn-telegram-share"]._trigger("click");
+  await flush();
+
+  assert.ok(openedUrl, "openTelegramLink should have been called");
+  assert.ok(!openedUrl.includes("&url="), "share URL must not carry a separate url= param");
+  const occurrences = openedUrl.split("t.me%2F%2Babc").length - 1;
+  assert.equal(occurrences, 1, "the referral link must appear exactly once in the composed share URL");
+  assert.equal(elements["share-status"].textContent, "");
+
+  const clickCall = fetchCalls.find((c) => c.url.includes("/share-clicked"));
+  assert.ok(clickCall, "share-clicked should be recorded before/around opening the Telegram share action");
+});
+
+test("Telegram share failure (no WebApp bridge, popup blocked) shows an inline error", async () => {
+  const { elements } = buildSandbox({
+    openTelegramLink: undefined,
+    windowOpenResult: null, // simulates a blocked popup
+    fetchImpl: (url) => {
+      if (url.includes("/api/creator/share/status")) return statusOkResponse();
+      if (url.includes("/api/creator/share/generate")) return generateOkResponse();
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ status: "ok" }) });
+    },
+  });
+
+  await flush();
+  elements["btn-generate"]._trigger("click");
+  await flush();
+  await flush();
+
+  elements["btn-telegram-share"]._trigger("click");
+  await flush();
+
+  assert.match(elements["share-status"].textContent, /couldn't open telegram/i);
+});
+
+test("Give Me Another Post disables the buttons during the request", async () => {
   let resolveGenerate;
   const generatePromise = new Promise((resolve) => {
     resolveGenerate = resolve;
@@ -360,12 +451,8 @@ test("Generate Another disables the buttons during the request", async () => {
 
   const { elements } = buildSandbox({
     fetchImpl: (url) => {
-      if (url.includes("/api/creator/share/status")) {
-        return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ status: "ok", creator: { access: true } }) });
-      }
-      if (url.includes("/api/creator/share/generate")) {
-        return generatePromise;
-      }
+      if (url.includes("/api/creator/share/status")) return statusOkResponse();
+      if (url.includes("/api/creator/share/generate")) return generatePromise;
       return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ status: "ok" }) });
     },
   });
@@ -375,7 +462,7 @@ test("Generate Another disables the buttons during the request", async () => {
   await flush();
 
   assert.equal(elements["btn-generate"].disabled, true);
-  assert.equal(elements["btn-generate-another"].disabled, true);
+  assert.equal(elements["btn-try-another"].disabled, true);
 
   resolveGenerate({
     ok: true,
@@ -396,53 +483,12 @@ test("Generate Another disables the buttons during the request", async () => {
   assert.equal(elements["btn-generate"].disabled, false);
 });
 
-test("unauthorized response renders the access-denied state without admin controls", async () => {
+test("content generation failure shows an inline error, not a silent no-op", async () => {
   const { elements } = buildSandbox({
     fetchImpl: (url) => {
-      if (url.includes("/api/creator/share/status")) {
-        return Promise.resolve({
-          ok: false,
-          status: 403,
-          json: () => Promise.resolve({ status: "error", code: "creator_not_authorized" }),
-        });
-      }
-      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ status: "ok" }) });
-    },
-  });
-
-  await flush();
-  await flush();
-
-  assert.equal(elements["app-shell"].classList.contains("hidden"), true);
-  assert.equal(elements["access-denied"].classList.contains("hidden"), false);
-  assert.match(elements["access-denied"].textContent, /approved creators only/i);
-});
-
-test("Telegram share does not duplicate the referral URL between text and url params", async () => {
-  let openedUrl = null;
-  const shareText = "Hook\nhttps://rx.apreplay.com/Xyz\n\nMore player replays and rewards inside AdvantPlay:\nhttps://t.me/+onlyonce";
-  const { elements, fetchCalls } = buildSandbox({
-    openTelegramLink: (url) => {
-      openedUrl = url;
-    },
-    fetchImpl: (url) => {
-      if (url.includes("/api/creator/share/status")) {
-        return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ status: "ok", creator: { access: true } }) });
-      }
+      if (url.includes("/api/creator/share/status")) return statusOkResponse();
       if (url.includes("/api/creator/share/generate")) {
-        return Promise.resolve({
-          ok: true,
-          status: 200,
-          json: () =>
-            Promise.resolve({
-              status: "ok",
-              package_id: "pkg_tg",
-              hook_text: "Hook",
-              playback_url: "https://rx.apreplay.com/Xyz",
-              referral_link: "https://t.me/+onlyonce",
-              share_text: shareText,
-            }),
-        });
+        return Promise.resolve({ ok: false, status: 502, json: () => Promise.resolve({ status: "error", code: "generation_failed" }) });
       }
       return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ status: "ok" }) });
     },
@@ -453,35 +499,132 @@ test("Telegram share does not duplicate the referral URL between text and url pa
   await flush();
   await flush();
 
-  elements["btn-telegram-share"]._trigger("click");
+  assert.match(elements["generate-status"].textContent, /couldn't generate/i);
+  assert.equal(elements["package-card"].classList.contains("hidden"), true, "no package should render on failure");
+});
+
+test("access denied: not an approved creator", async () => {
+  const { elements } = buildSandbox({
+    fetchImpl: (url) => {
+      if (url.includes("/api/creator/share/status")) {
+        return Promise.resolve({ ok: false, status: 403, json: () => Promise.resolve({ status: "error", code: "creator_not_authorized" }) });
+      }
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ status: "ok" }) });
+    },
+  });
+
+  await flush();
   await flush();
 
-  assert.ok(openedUrl, "openTelegramLink should have been called");
-  assert.ok(!openedUrl.includes("&url="), "share URL must not carry a separate url= param");
-  const occurrences = openedUrl.split("t.me%2F%2Bonlyonce").length - 1;
-  assert.equal(occurrences, 1, "the referral link must appear exactly once in the composed share URL");
+  assert.equal(elements["app-shell"].classList.contains("hidden"), true);
+  assert.match(elements["access-denied"].textContent, /approved creators only/i);
+});
 
-  const clickCall = fetchCalls.find((c) => c.url.includes("/share-clicked"));
-  assert.ok(clickCall, "share-clicked should be recorded before/around opening the Telegram share action");
+test("access denied: creator suspended", async () => {
+  const { elements } = buildSandbox({
+    fetchImpl: (url) => {
+      if (url.includes("/api/creator/share/status")) {
+        return Promise.resolve({ ok: false, status: 403, json: () => Promise.resolve({ status: "error", code: "creator_suspended" }) });
+      }
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ status: "ok" }) });
+    },
+  });
+
+  await flush();
+  await flush();
+
+  assert.equal(elements["app-shell"].classList.contains("hidden"), true);
+  assert.match(elements["access-denied"].textContent, /suspended/i);
+});
+
+test("network error on status fetch clears loading and renders an error state", async () => {
+  const { elements } = buildSandbox({
+    fetchImpl: (url) => {
+      if (url.includes("/api/creator/share/status")) return Promise.reject(new Error("network down"));
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ status: "ok" }) });
+    },
+  });
+
+  await flush();
+  await flush();
+
+  assert.equal(elements["initial-loading"].classList.contains("hidden"), true);
+  assert.equal(elements["access-denied"].classList.contains("hidden"), false);
+});
+
+test("reward ladder: collapsed by default, expands and collapses on toggle, no progress data shown", async () => {
+  const { elements } = buildSandbox({
+    fetchImpl: (url) => {
+      if (url.includes("/api/creator/share/status")) return statusOkResponse();
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ status: "ok" }) });
+    },
+  });
+
+  await flush();
+  await flush();
+
+  assert.equal(elements["rewards-section"].classList.contains("hidden"), true);
+
+  elements["btn-toggle-rewards"]._trigger("click");
+  assert.equal(elements["rewards-section"].classList.contains("hidden"), false);
+  assert.equal(elements["btn-toggle-rewards"].textContent, "Hide Referral Rewards");
+
+  elements["btn-toggle-rewards"]._trigger("click");
+  assert.equal(elements["rewards-section"].classList.contains("hidden"), true);
+  assert.equal(elements["btn-toggle-rewards"].textContent, "See Referral Rewards");
+});
+
+test("reward ladder markup lists the five static tiers and the monthly reset note, with no dynamic highlighting", () => {
+  const html = fs.readFileSync(path.join(__dirname, "static", "creator-share.html"), "utf8");
+  assert.match(html, /10 qualified referrals.*\$10/);
+  assert.match(html, /25 qualified referrals.*\$15/);
+  assert.match(html, /50 qualified referrals.*\$50/);
+  assert.match(html, /150 qualified referrals.*\$125/);
+  assert.match(html, /250 qualified referrals.*\$250/);
+  assert.match(html, /reset on the 1st of every month/i);
+  assert.match(html, /Only qualified referrals count/i);
+});
+
+test("no monthly progress card, milestone bar, or results-endpoint call remains on this page", () => {
+  const html = fs.readFileSync(path.join(__dirname, "static", "creator-share.html"), "utf8");
+  const source = loadScriptSource();
+  assert.ok(!/THIS WEEK/i.test(html), "weekly performance section must be removed");
+  assert.ok(!/THIS MONTH/i.test(html), "no monthly progress card may be added on this page");
+  assert.ok(!source.includes("/api/creator/share/results"), "this page must not call the results/leaderboard endpoint");
+  assert.ok(!/progress-bar|progress-track|milestone/i.test(html), "no progress bar or milestone-tracking markup");
 });
 
 test("no admin controls are present in the creator page markup", () => {
   const html = fs.readFileSync(path.join(__dirname, "static", "creator-share.html"), "utf8");
-  const forbidden = [
-    "rsc-hooks",
-    "rsc-playback",
-    "bulk-import",
-    "admin-dashboard",
-    "Caption Hook",
-    "Playback Pool",
-  ];
+  const forbidden = ["rsc-hooks", "rsc-playback", "bulk-import", "admin-dashboard", "Caption Hook", "Playback Pool"];
   forbidden.forEach((needle) => {
     assert.ok(!html.includes(needle), `creator-share.html must not contain admin markup: "${needle}"`);
   });
 });
 
-test("dynamic package text is rendered via textContent, never innerHTML, so it is always HTML-escaped", () => {
+test("no blue primary buttons remain: accent color is AdvantPlay orange", () => {
+  const html = fs.readFileSync(path.join(__dirname, "static", "creator-share.html"), "utf8");
+  assert.ok(!/#4f7dff/i.test(html), "old blue accent color must be fully removed");
+  assert.ok(html.includes("--ap-orange: #FF5A00;"), "primary accent must be AdvantPlay orange");
+  assert.ok(html.includes("--ap-orange-pressed: #E64F00;"), "pressed state must be the darker orange");
+});
+
+test("no guaranteed-income style claims are present in the copy", () => {
+  const html = fs.readFileSync(path.join(__dirname, "static", "creator-share.html"), "utf8");
+  const banned = ["guaranteed income", "easy money", "passive income", "instant cash", "become rich", "financial freedom"];
+  banned.forEach((phrase) => {
+    assert.ok(!html.toLowerCase().includes(phrase), `must not use banned phrase: "${phrase}"`);
+  });
+});
+
+test("layout stays within a narrow mobile viewport (360-430px)", () => {
+  const html = fs.readFileSync(path.join(__dirname, "static", "creator-share.html"), "utf8");
+  assert.match(html, /name="viewport" content="width=device-width/);
+  assert.match(html, /max-width:\s*430px/);
+});
+
+test("dynamic package fields are rendered via textContent, never innerHTML, so they are always HTML-escaped", () => {
   const source = loadScriptSource();
-  assert.ok(source.includes("els.packageText.textContent = pkg.share_text"));
-  assert.ok(!/packageText\.innerHTML/.test(source));
+  assert.ok(source.includes("el.textContent = text;"));
+  assert.ok(!/package(Caption|Playback|Cta|Link)\.innerHTML/.test(source));
 });
