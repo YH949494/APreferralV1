@@ -29,8 +29,11 @@ import logging
 import os
 import re
 import secrets
-from datetime import datetime, timedelta, timezone
+import threading
+import time
+from datetime import datetime, timezone
 
+import requests
 from flask import Blueprint, jsonify, request
 from pymongo import ReturnDocument
 
@@ -57,6 +60,23 @@ MEMBERSHIP_UNRESOLVABLE_GRACE_SEC = 120
 
 _TELEGRAM_MEMBER_STATUSES = {"member", "administrator", "creator"}
 _TELEGRAM_NONMEMBER_STATUSES = {"left", "kicked"}
+
+# ---------------------------------------------------------------------------
+# Creator group access settings — reuses the existing app_settings collection
+# (the same one settings_service.py writes to) via one canonical document,
+# rather than reading os.environ directly. See get_creator_group_access_settings().
+# ---------------------------------------------------------------------------
+
+APP_SETTINGS_COLLECTION = "app_settings"
+APP_SETTINGS_AUDIT_COLLECTION = "app_settings_audit"
+CREATOR_GROUP_SETTINGS_KEY = "creator_group_access"
+
+# Short TTL on the in-process settings read so a save on one process becomes
+# visible to others (web/worker) without a redeploy, bounded by this window.
+CREATOR_GROUP_SETTINGS_CACHE_TTL_SEC = 30
+
+_settings_cache_lock = threading.Lock()
+_settings_cache: dict = {"doc": None, "loaded_at": None}
 
 
 def _require_admin():
@@ -85,17 +105,187 @@ def _ensure_indexes() -> None:
             partialFilterExpression={"package_id": {"$exists": True}},
         )
 
+        rate_limit_col = database.db["creator_generation_rate_limits"]
         database.safe_create_index(
-            database.db["creator_generation_rate_limits"],
-            [("key", 1)],
-            name="ux_creator_gen_rate_limit_key",
-            unique=True,
+            rate_limit_col, [("key", 1)], name="ux_creator_gen_rate_limit_key", unique=True
         )
+        # consume_referral_rate_limits() writes an "expireAt" on every bucket
+        # (see referral_rate_limit.py) but never creates its own TTL index —
+        # callers are expected to, same as the shared referral_rate_limits
+        # collection does. Without this, every active creator accumulates up
+        # to 24 hour-buckets/day forever.
+        try:
+            rate_limit_col.create_index([("expireAt", 1)], name="ttl_creator_gen_rate_limit", expireAfterSeconds=0)
+        except Exception:
+            logger.warning("[CREATOR_SHARE] rate limit TTL index creation failed", exc_info=True)
     except Exception:
         logger.warning("[CREATOR_SHARE] index creation failed", exc_info=True)
 
 
 _ensure_indexes()
+
+
+# ---------------------------------------------------------------------------
+# get_creator_group_access_settings() — the single canonical reader. Creator
+# access checks (and the admin settings API) must go through this, never
+# os.environ directly, so the resolution order (DB setting -> env fallback ->
+# unconfigured) and the short-TTL cross-process refresh stay in one place.
+# ---------------------------------------------------------------------------
+
+def _load_creator_group_doc(*, force_refresh: bool = False) -> dict | None:
+    if not force_refresh:
+        with _settings_cache_lock:
+            loaded_at = _settings_cache["loaded_at"]
+            if loaded_at is not None and (time.monotonic() - loaded_at) < CREATOR_GROUP_SETTINGS_CACHE_TTL_SEC:
+                return _settings_cache["doc"]
+    try:
+        doc = database.db[APP_SETTINGS_COLLECTION].find_one({"_id": CREATOR_GROUP_SETTINGS_KEY})
+    except Exception:
+        logger.warning("[CREATOR_SHARE] failed to load creator_group_access setting", exc_info=True)
+        doc = None
+    with _settings_cache_lock:
+        _settings_cache["doc"] = doc
+        _settings_cache["loaded_at"] = time.monotonic()
+    return doc
+
+
+def invalidate_creator_group_settings_cache() -> None:
+    """Called on every settings save. Also the mechanism by which a changed
+    group takes effect quickly across the web/worker processes that share
+    this Mongo-backed setting (each re-reads on its own TTL)."""
+    with _settings_cache_lock:
+        _settings_cache["doc"] = None
+        _settings_cache["loaded_at"] = None
+
+
+def get_creator_group_access_settings(*, force_refresh: bool = False) -> dict:
+    """Resolution order: (1) an explicit MongoDB ``creator_group_access``
+    document — once saved, authoritative even if it clears the chat ID back
+    to ``null``; (2) the ``CREATOR_GROUP_CHAT_ID`` env var, only when no DB
+    document has ever been saved; (3) unconfigured."""
+    doc = _load_creator_group_doc(force_refresh=force_refresh)
+    if doc is not None:
+        chat_id = doc.get("creator_group_chat_id")
+        membership_check_enabled = bool(doc.get("membership_check_enabled", False))
+        source = "database"
+    else:
+        env_val = (os.environ.get("CREATOR_GROUP_CHAT_ID") or "").strip()
+        try:
+            chat_id = int(env_val) if env_val else None
+        except ValueError:
+            chat_id = None
+        membership_check_enabled = chat_id is not None
+        source = "env" if chat_id is not None else "unconfigured"
+
+    return {
+        "creator_group_chat_id": chat_id,
+        "membership_check_enabled": membership_check_enabled,
+        "chat_title": (doc or {}).get("chat_title"),
+        "chat_type": (doc or {}).get("chat_type"),
+        "bot_membership_status": (doc or {}).get("bot_membership_status"),
+        "verified_at": (doc or {}).get("verified_at"),
+        "updated_at": (doc or {}).get("updated_at"),
+        "updated_by": (doc or {}).get("updated_by"),
+        "config_version": int((doc or {}).get("config_version", 0) or 0),
+        "source": source,
+    }
+
+
+def _serialize_creator_group_settings(settings: dict) -> dict:
+    out = dict(settings)
+    for key in ("verified_at", "updated_at"):
+        if out.get(key):
+            out[key] = out[key].isoformat()
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Telegram verification of a candidate creator group (getChat + the bot's
+# own getChatMember) — used by both the "Verify Group" preview endpoint and
+# the save endpoint. Never logs the bot token or full API responses.
+# ---------------------------------------------------------------------------
+
+def _validate_creator_group_chat_id(raw) -> tuple[int | None, str | None, bool]:
+    """Returns (chat_id, error_code, prefix_warning). Only rejects zero/positive
+    values outright; a negative ID not starting with "-100" is *not* rejected
+    here (that's a soft warning) — real validation is the Telegram call."""
+    try:
+        chat_id = int(raw)
+    except (TypeError, ValueError):
+        return None, "invalid_creator_group_chat_id", False
+    if isinstance(raw, bool) or chat_id >= 0:
+        return None, "invalid_creator_group_chat_id", False
+    prefix_warning = not str(chat_id).startswith("-100")
+    return chat_id, None, prefix_warning
+
+
+def _verify_telegram_group(chat_id: int) -> tuple[dict | None, str | None]:
+    """Returns (info, error_code). ``info`` (when present) carries whatever
+    was learned before a failure: chat_title/chat_type always once getChat
+    succeeds, bot_membership_status only once getChatMember succeeds."""
+    token = os.environ.get("BOT_TOKEN", "")
+    if not token:
+        return None, "creator_group_verification_failed"
+
+    try:
+        chat_resp = requests.get(
+            f"https://api.telegram.org/bot{token}/getChat", params={"chat_id": chat_id}, timeout=8
+        )
+    except requests.RequestException:
+        return None, "creator_group_verification_failed"
+
+    if chat_resp.status_code == 400 or chat_resp.status_code == 404:
+        return None, "creator_group_not_found"
+    if chat_resp.status_code != 200:
+        return None, "creator_group_verification_failed"
+    try:
+        chat_data = chat_resp.json()
+    except ValueError:
+        return None, "creator_group_verification_failed"
+    if not chat_data.get("ok"):
+        return None, "creator_group_not_found"
+
+    chat_result = chat_data.get("result") or {}
+    info = {
+        "chat_title": chat_result.get("title"),
+        "chat_type": chat_result.get("type"),
+        "bot_membership_status": None,
+    }
+    if info["chat_type"] not in ("group", "supergroup"):
+        return info, "creator_group_wrong_chat_type"
+
+    try:
+        me_resp = requests.get(f"https://api.telegram.org/bot{token}/getMe", timeout=8)
+        me_data = me_resp.json() if me_resp.status_code == 200 else {}
+        bot_id = (me_data.get("result") or {}).get("id")
+    except (requests.RequestException, ValueError):
+        bot_id = None
+    if not bot_id:
+        return info, "creator_group_verification_failed"
+
+    try:
+        member_resp = requests.get(
+            f"https://api.telegram.org/bot{token}/getChatMember",
+            params={"chat_id": chat_id, "user_id": bot_id},
+            timeout=8,
+        )
+    except requests.RequestException:
+        return info, "creator_group_verification_failed"
+    if member_resp.status_code != 200:
+        return info, "creator_group_bot_access_denied"
+    try:
+        member_data = member_resp.json()
+    except ValueError:
+        return info, "creator_group_verification_failed"
+    if not member_data.get("ok"):
+        return info, "creator_group_bot_access_denied"
+
+    bot_status = str((member_data.get("result") or {}).get("status") or "")
+    info["bot_membership_status"] = bot_status
+    if bot_status not in _TELEGRAM_MEMBER_STATUSES:
+        return info, "creator_group_bot_access_denied"
+
+    return info, None
 
 
 # ---------------------------------------------------------------------------
@@ -138,11 +328,6 @@ def _extract_authenticated_user():
 # Creator authorization
 # ---------------------------------------------------------------------------
 
-def _creator_group_chat_id() -> str | None:
-    value = (os.environ.get("CREATOR_GROUP_CHAT_ID") or "").strip()
-    return value or None
-
-
 def _as_aware_utc(value: datetime | None) -> datetime | None:
     if value is None:
         return None
@@ -151,12 +336,10 @@ def _as_aware_utc(value: datetime | None) -> datetime | None:
     return value.astimezone(timezone.utc)
 
 
-def _check_group_membership(user_id: int, chat_id: str) -> bool | None:
+def _check_group_membership(user_id: int, chat_id) -> bool | None:
     """Return True/False for a definitive verdict, or None when Telegram is
     temporarily unavailable / the response is ambiguous (never treated as a
     confirmed "not a member" — see module docstring)."""
-    import requests
-
     token = os.environ.get("BOT_TOKEN", "")
     if not token:
         return None
@@ -188,30 +371,65 @@ def _check_group_membership(user_id: int, chat_id: str) -> bool | None:
     return None
 
 
-def _verify_live_membership(record: dict, chat_id: str) -> bool | None:
+def _verify_live_membership(record: dict, chat_id, config_version: int) -> bool | None:
     """True = confirmed member, False = confirmed left/kicked, None = keep
-    the existing access (temporarily unresolvable, within the grace window)."""
+    the existing access (temporarily unresolvable, within the grace window).
+
+    Every cached verdict (confirmed-member and unresolvable alike) is keyed
+    to ``config_version``: a group change bumps the version, which
+    immediately invalidates *all* previously cached verdicts for every
+    creator — no stale access survives a group switch, and no request keeps
+    re-querying Telegram inside the outage grace window either.
+    """
     now = now_utc()
+
     last_verified = _as_aware_utc(record.get("last_membership_verified_at"))
-    if last_verified and (now - last_verified).total_seconds() < MEMBERSHIP_VERIFY_CACHE_SEC:
+    last_verified_version = record.get("last_membership_verified_config_version")
+    if (
+        last_verified
+        and last_verified_version == config_version
+        and (now - last_verified).total_seconds() < MEMBERSHIP_VERIFY_CACHE_SEC
+    ):
         return True
 
+    # Check the outage cache *before* hitting Telegram, so repeated requests
+    # inside the grace window never each pay the (up to 8s) HTTP timeout.
     last_unresolvable = _as_aware_utc(record.get("last_membership_unresolvable_at"))
+    last_unresolvable_version = record.get("last_membership_unresolvable_config_version")
+    if (
+        last_unresolvable
+        and last_unresolvable_version == config_version
+        and (now - last_unresolvable).total_seconds() < MEMBERSHIP_UNRESOLVABLE_GRACE_SEC
+    ):
+        return None
+
     verdict = _check_group_membership(record["user_id"], chat_id)
     if verdict is True:
         database.db["creator_members"].update_one(
             {"_id": record["_id"]},
-            {"$set": {"last_membership_verified_at": now, "updated_at": now}, "$unset": {"last_membership_unresolvable_at": ""}},
+            {
+                "$set": {
+                    "last_membership_verified_at": now,
+                    "last_membership_verified_config_version": config_version,
+                    "updated_at": now,
+                },
+                "$unset": {"last_membership_unresolvable_at": "", "last_membership_unresolvable_config_version": ""},
+            },
         )
         return True
     if verdict is False:
         return False
     # Telegram lookup temporarily unavailable: use the short cache instead of
     # permanently removing the creator.
-    if last_unresolvable and (now - last_unresolvable).total_seconds() < MEMBERSHIP_UNRESOLVABLE_GRACE_SEC:
-        return None
     database.db["creator_members"].update_one(
-        {"_id": record["_id"]}, {"$set": {"last_membership_unresolvable_at": now, "updated_at": now}}
+        {"_id": record["_id"]},
+        {
+            "$set": {
+                "last_membership_unresolvable_at": now,
+                "last_membership_unresolvable_config_version": config_version,
+                "updated_at": now,
+            }
+        },
     )
     return None
 
@@ -226,9 +444,12 @@ def _verify_creator_access(user_id: int):
     if record.get("status") != "active":
         return None, ("creator_not_authorized", 403)
 
-    chat_id = _creator_group_chat_id()
-    if chat_id:
-        verdict = _verify_live_membership(record, chat_id)
+    settings = get_creator_group_access_settings()
+    if settings["membership_check_enabled"]:
+        chat_id = settings["creator_group_chat_id"]
+        if not chat_id:
+            return None, ("creator_group_not_configured", 503)
+        verdict = _verify_live_membership(record, chat_id, settings["config_version"])
         if verdict is False:
             database.db["creator_members"].update_one(
                 {"_id": record["_id"]}, {"$set": {"status": "removed", "updated_at": now_utc()}}
@@ -275,8 +496,15 @@ def creator_share_status():
 
 
 def _current_week_start_utc(now: datetime) -> datetime:
-    monday = now - timedelta(days=now.weekday())
-    return monday.replace(hour=0, minute=0, second=0, microsecond=0)
+    # Reuses the same Monday-00:00-Asia/Kuala_Lumpur weekly boundary as the
+    # rest of the referral/affiliate system (affiliate_leaderboard.py), so
+    # "This Week" here always agrees with every other weekly referral metric
+    # instead of drifting during the 00:00-08:00 KL gap a naive UTC-Monday
+    # boundary would create.
+    from affiliate_leaderboard import affiliate_week_window_utc_from_reference
+
+    week_start_utc, _week_end_utc, _week_start_local = affiliate_week_window_utc_from_reference(now)
+    return week_start_utc
 
 
 @creator_share_bp.post("/api/creator/share/generate")
@@ -490,7 +718,7 @@ def admin_list_creators():
             "status": "ok",
             "creators": [_serialize_creator(d) for d in docs],
             "active_count": active_count,
-            "creator_group_configured": bool(_creator_group_chat_id()),
+            "creator_group_configured": bool(get_creator_group_access_settings()["creator_group_chat_id"]),
         }
     )
 
@@ -649,3 +877,146 @@ def admin_remove_creator(user_id):
     # the action is reversible via the activate endpoint and history/audit
     # fields (approved_by/approved_at) are preserved.
     return _set_creator_status(user_id, "removed")
+
+
+# ---------------------------------------------------------------------------
+# Admin API — Creator Group Access settings
+# ---------------------------------------------------------------------------
+
+@creator_share_bp.get("/api/admin/referral/creator-settings")
+def admin_get_creator_settings():
+    _, err = _require_admin()
+    if err:
+        return err
+    settings = get_creator_group_access_settings(force_refresh=True)
+    return jsonify({"status": "ok", "settings": _serialize_creator_group_settings(settings)})
+
+
+@creator_share_bp.post("/api/admin/referral/creator-settings/verify-group")
+def admin_verify_creator_group():
+    admin, err = _require_admin()
+    if err:
+        return err
+    admin_id = (admin or {}).get("id")
+
+    body = request.get_json(force=True, silent=True) or {}
+    chat_id, code, prefix_warning = _validate_creator_group_chat_id(body.get("creator_group_chat_id"))
+    if code:
+        return jsonify({"status": "error", "code": code}), 400
+
+    info, verify_err = _verify_telegram_group(chat_id)
+    if verify_err:
+        logger.warning(
+            "[CREATOR_GROUP_SETTINGS][VERIFY_FAILED] admin_id=%s chat_id=%s reason_code=%s",
+            admin_id, chat_id, verify_err,
+        )
+        return jsonify({"status": "error", "code": verify_err, **(info or {})}), 400
+
+    logger.info("[CREATOR_GROUP_SETTINGS][VERIFIED] admin_id=%s chat_id=%s", admin_id, chat_id)
+    return jsonify(
+        {
+            "status": "ok",
+            "chat_title": info.get("chat_title"),
+            "chat_type": info.get("chat_type"),
+            "bot_membership_status": info.get("bot_membership_status"),
+            "warning": "chat_id_prefix_unusual" if prefix_warning else None,
+        }
+    )
+
+
+@creator_share_bp.put("/api/admin/referral/creator-settings")
+def admin_update_creator_settings():
+    admin, err = _require_admin()
+    if err:
+        return err
+    admin_id = (admin or {}).get("id")
+
+    body = request.get_json(force=True, silent=True) or {}
+    membership_check_enabled = body.get("membership_check_enabled")
+    if not isinstance(membership_check_enabled, bool):
+        return jsonify({"status": "error", "code": "invalid_membership_check_enabled"}), 400
+    force_save = bool(body.get("force_save"))
+
+    prior_doc = database.db[APP_SETTINGS_COLLECTION].find_one({"_id": CREATOR_GROUP_SETTINGS_KEY}) or {}
+    prior_chat_id = prior_doc.get("creator_group_chat_id")
+    prior_version = int(prior_doc.get("config_version", 0) or 0)
+
+    raw_chat_id = body.get("creator_group_chat_id")
+    verify_err = None
+    if raw_chat_id in (None, ""):
+        chat_id = None
+        chat_title = chat_type = bot_membership_status = None
+        verified_at = None
+    else:
+        chat_id, code, _prefix_warning = _validate_creator_group_chat_id(raw_chat_id)
+        if code:
+            return jsonify({"status": "error", "code": code}), 400
+
+        info, verify_err = _verify_telegram_group(chat_id)
+        if verify_err and not force_save:
+            # Verification failure never overwrites the last valid, already-saved
+            # setting — return before any write happens.
+            logger.warning(
+                "[CREATOR_GROUP_SETTINGS][VERIFY_FAILED] admin_id=%s old_chat_id=%s new_chat_id=%s "
+                "config_version=%s reason_code=%s",
+                admin_id, prior_chat_id, chat_id, prior_version, verify_err,
+            )
+            return jsonify({"status": "error", "code": verify_err}), 400
+
+        chat_title = (info or {}).get("chat_title")
+        chat_type = (info or {}).get("chat_type")
+        bot_membership_status = (info or {}).get("bot_membership_status")
+        verified_at = None if verify_err else now_utc()
+        if verify_err:
+            logger.warning(
+                "[CREATOR_GROUP_SETTINGS][VERIFY_FAILED] admin_id=%s old_chat_id=%s new_chat_id=%s "
+                "config_version=%s reason_code=%s force_save=true",
+                admin_id, prior_chat_id, chat_id, prior_version, verify_err,
+            )
+        else:
+            logger.info("[CREATOR_GROUP_SETTINGS][VERIFIED] admin_id=%s chat_id=%s", admin_id, chat_id)
+
+    now = now_utc()
+    new_version = prior_version + 1
+    doc = {
+        "_id": CREATOR_GROUP_SETTINGS_KEY,
+        "creator_group_chat_id": chat_id,
+        "membership_check_enabled": membership_check_enabled,
+        "chat_title": chat_title,
+        "chat_type": chat_type,
+        "bot_membership_status": bot_membership_status,
+        "verified_at": verified_at,
+        "updated_at": now,
+        "updated_by": admin_id,
+        "config_version": new_version,
+    }
+    database.db[APP_SETTINGS_COLLECTION].update_one({"_id": CREATOR_GROUP_SETTINGS_KEY}, {"$set": doc}, upsert=True)
+    # Config-version bump (above) + cache clear (below) together ensure no
+    # cached membership verdict from the old group can grant access after
+    # this point — see _verify_live_membership's config_version comparison.
+    invalidate_creator_group_settings_cache()
+
+    audit_doc = {
+        "group": CREATOR_GROUP_SETTINGS_KEY,
+        "admin": admin_id,
+        "old_chat_id": prior_chat_id,
+        "new_chat_id": chat_id,
+        "config_version": new_version,
+        "force_save": force_save,
+        "unverified": bool(verify_err),
+        "verify_error": verify_err,
+        "created_at": now,
+    }
+    try:
+        database.db[APP_SETTINGS_AUDIT_COLLECTION].insert_one(audit_doc)
+    except Exception:
+        logger.warning("[CREATOR_SHARE] failed to write creator group settings audit log", exc_info=True)
+
+    logger.info(
+        "[CREATOR_GROUP_SETTINGS][UPDATED] admin_id=%s old_chat_id=%s new_chat_id=%s config_version=%s "
+        "force_save=%s unverified=%s",
+        admin_id, prior_chat_id, chat_id, new_version, force_save, bool(verify_err),
+    )
+    return jsonify(
+        {"status": "ok", "settings": _serialize_creator_group_settings(get_creator_group_access_settings(force_refresh=True))}
+    )

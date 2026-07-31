@@ -17,6 +17,10 @@ from fake_mongo import FakeDb
 
 @pytest.fixture
 def fake_db(monkeypatch):
+    # The module caches the creator_group_access Mongo doc in-process for a
+    # short TTL; without resetting it, a doc cached by an earlier test's
+    # (now-discarded) FakeDb instance would leak into this test.
+    csc.invalidate_creator_group_settings_cache()
     fdb = FakeDb()
     monkeypatch.setattr(database, "db", fdb)
     return fdb

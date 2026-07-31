@@ -18,6 +18,7 @@ from fake_mongo import FakeDb
 
 @pytest.fixture
 def fake_db(monkeypatch):
+    csc.invalidate_creator_group_settings_cache()
     fdb = FakeDb()
     monkeypatch.setattr(database, "db", fdb)
     return fdb

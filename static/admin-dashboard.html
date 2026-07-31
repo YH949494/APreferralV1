@@ -640,8 +640,34 @@
           <div class="section" style="margin-bottom:16px;">
             <div class="section-title">Creator Access</div>
             <div class="sub" id="rsc-creators-summary" style="margin-bottom:8px;">Active creators: —</div>
-            <div class="sub" id="rsc-creators-group-status">Creator group: —</div>
           </div>
+
+          <div class="section" style="margin-bottom:16px;">
+            <div class="section-title">Creator Group Access</div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px;">
+              <input class="filter-input" id="rsc-creator-group-chat-id" placeholder="Group chat ID, e.g. -1001234567890" style="min-width:240px;margin:0;" />
+              <label class="sub" style="display:flex;align-items:center;gap:6px;">
+                <input type="checkbox" id="rsc-creator-group-check-enabled" />
+                Membership verification enabled
+              </label>
+            </div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;">
+              <button class="btn" id="rsc-creator-group-verify-btn">Verify Group</button>
+              <button class="btn primary" id="rsc-creator-group-save-btn">Save Changes</button>
+              <label class="sub" style="display:flex;align-items:center;gap:6px;">
+                <input type="checkbox" id="rsc-creator-group-force-save" />
+                Force save without verification
+              </label>
+            </div>
+            <div id="rsc-creator-group-verify-result" class="sub" style="margin-top:8px;"></div>
+            <div class="sub" style="margin-top:10px;">
+              Chat: <span id="rsc-creator-group-chat-title">—</span> (<span id="rsc-creator-group-chat-type">—</span>)
+            </div>
+            <div class="sub">Bot membership status: <span id="rsc-creator-group-bot-status">—</span></div>
+            <div class="sub">Last verified: <span id="rsc-creator-group-verified-at">—</span></div>
+            <div class="sub">Source: <span id="rsc-creator-group-source">—</span> · Config version: <span id="rsc-creator-group-version">—</span></div>
+          </div>
+
           <div class="section" style="margin-bottom:16px;">
             <div class="section-title">Approve Creator</div>
             <div style="display:flex;gap:8px;flex-wrap:wrap;">

@@ -5206,14 +5206,27 @@
     $("#rsc-creators-panel").classList.toggle("hidden", rsc.subtab !== "creators");
     if (rsc.subtab === "hooks") loadShareHooks(force);
     else if (rsc.subtab === "playback") loadSharePlayback(force);
-    else loadCreatorAccess(force);
+    else { loadCreatorAccess(force); loadCreatorGroupSettings(force); }
+  }
+
+  function loadCreatorGroupSettings() {
+    api("/api/admin/referral/creator-settings").then(function (data) {
+      var s = data.settings || {};
+      $("#rsc-creator-group-chat-id").value = s.creator_group_chat_id != null ? String(s.creator_group_chat_id) : "";
+      $("#rsc-creator-group-check-enabled").checked = !!s.membership_check_enabled;
+      $("#rsc-creator-group-chat-title").textContent = s.chat_title || "—";
+      $("#rsc-creator-group-chat-type").textContent = s.chat_type || "—";
+      $("#rsc-creator-group-bot-status").textContent = s.bot_membership_status || "—";
+      $("#rsc-creator-group-verified-at").textContent = s.verified_at ? new Date(s.verified_at).toLocaleString() : "—";
+      $("#rsc-creator-group-source").textContent = s.source || "—";
+      $("#rsc-creator-group-version").textContent = s.config_version != null ? String(s.config_version) : "—";
+    }).catch(function (e) { toast("❌ Failed to load creator group settings: " + e.message, "error"); });
   }
 
   function loadCreatorAccess() {
     statePanel("rsc-creators-body", "loading", "Loading creators…");
     api("/api/admin/referral/creators" + rscQuery("rsc-creators-search", "rsc-creators-status-filter")).then(function (data) {
       $("#rsc-creators-summary").textContent = "Active creators: " + fmt(data.active_count || 0);
-      $("#rsc-creators-group-status").textContent = "Creator group: " + (data.creator_group_configured ? "configured" : "not configured");
       var items = data.creators || [];
       if (!items.length) { $("#rsc-creators-body").innerHTML = emptyState("No creators yet — approve one above."); return; }
       var rows = items.map(function (c) {
@@ -5272,6 +5285,37 @@
     $("#rsc-subtab-hooks").addEventListener("click", function () { rsc.subtab = "hooks"; loadReferralShareContent(true); });
     $("#rsc-subtab-playback").addEventListener("click", function () { rsc.subtab = "playback"; loadReferralShareContent(true); });
     $("#rsc-subtab-creators").addEventListener("click", function () { rsc.subtab = "creators"; loadReferralShareContent(true); });
+
+    $("#rsc-creator-group-verify-btn").addEventListener("click", function () {
+      var raw = ($("#rsc-creator-group-chat-id").value || "").trim();
+      if (!raw) { toast("❌ Enter a group chat ID first", "error"); return; }
+      $("#rsc-creator-group-verify-result").textContent = "Verifying…";
+      apiPostJson("/api/admin/referral/creator-settings/verify-group", { creator_group_chat_id: raw }).then(function (res) {
+        if (!res.ok || res.d.status !== "ok") {
+          $("#rsc-creator-group-verify-result").textContent = "❌ " + (res.d && res.d.code || "verification_failed");
+          return;
+        }
+        var warn = res.d.warning ? " (warning: chat ID doesn't start with -100)" : "";
+        $("#rsc-creator-group-verify-result").textContent =
+          "✅ Verified: " + (res.d.chat_title || "—") + " [" + res.d.chat_type + "], bot status: " + res.d.bot_membership_status + warn;
+      });
+    });
+
+    $("#rsc-creator-group-save-btn").addEventListener("click", function () {
+      var raw = ($("#rsc-creator-group-chat-id").value || "").trim();
+      var body = {
+        creator_group_chat_id: raw || null,
+        membership_check_enabled: $("#rsc-creator-group-check-enabled").checked,
+        force_save: $("#rsc-creator-group-force-save").checked,
+      };
+      apiPutJson("/api/admin/referral/creator-settings", body).then(function (res) {
+        if (!res.ok || res.d.status !== "ok") { toast("❌ " + (res.d && res.d.code || "save_failed"), "error"); return; }
+        toast("✅ Creator group settings saved", "success");
+        $("#rsc-creator-group-verify-result").textContent = "";
+        loadCreatorGroupSettings(true);
+        loadCreatorAccess(true);
+      });
+    });
 
     $("#rsc-creators-search-btn").addEventListener("click", function () { loadCreatorAccess(true); });
     $all("#rsc-creators-status-filter button").forEach(function (b) {

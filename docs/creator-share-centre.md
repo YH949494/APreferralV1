@@ -35,8 +35,9 @@ Every `/api/creator/...` request requires, in order:
    verified payload — a `user_id` in the JSON body or query string is never
    trusted.
 2. An `creator_members` record for that `user_id` with `status == "active"`.
-3. If `CREATOR_GROUP_CHAT_ID` is configured, a live (short-cached) Telegram
-   membership check against that group.
+3. If `membership_check_enabled` is true (see **Creator Group Access
+   settings** below), a live (short-cached) Telegram membership check
+   against the configured group.
 
 ### `creator_members` schema
 
@@ -65,7 +66,118 @@ Indexes: unique `user_id`, `status`, and `(source_group_id, status)`.
 | `creator_suspended` | Record exists but `status == "suspended"` |
 | `creator_membership_required` | Telegram confirmed the user left/was kicked from the creator group; record is marked `removed` |
 | `creator_membership_unresolvable` | Telegram membership lookup temporarily unavailable (HTTP 503) |
+| `creator_group_not_configured` | `membership_check_enabled=true` but no valid group is configured (HTTP 503) — fails closed |
 | `creator_generation_rate_limited` | Hit the 20/hour generation cap (HTTP 429) |
+
+## Creator Group Access settings (admin-configurable)
+
+`CREATOR_GROUP_CHAT_ID` is no longer read directly from the environment by
+creator access checks. It is now amendable from the Admin Dashboard
+(Referral Centre → Share Content → Creator Access → **Creator Group
+Access**) and stored in MongoDB, so it can be changed without a Fly.io
+secret update or redeploy.
+
+### Storage: `app_settings` / `creator_group_access`
+
+One canonical document, in the same `app_settings` collection
+`settings_service.py` already writes to (`_id: "creator_group_access"`):
+
+```json
+{
+  "_id": "creator_group_access",
+  "creator_group_chat_id": -1001234567890,
+  "membership_check_enabled": true,
+  "chat_title": "AdvantPlay Creators",
+  "chat_type": "supergroup",
+  "bot_membership_status": "administrator",
+  "verified_at": "ISODate",
+  "updated_at": "ISODate",
+  "updated_by": 987654321,
+  "config_version": 3
+}
+```
+
+Config changes are also written to `app_settings_audit` (admin ID, old/new
+chat ID, `config_version`, `force_save`, and — when unverified —
+`verify_error`); this reuses the same collection `settings_service.py`'s
+own audit log writes to.
+
+### Canonical reader: `get_creator_group_access_settings()`
+
+Creator access checks call this — never `os.getenv("CREATOR_GROUP_CHAT_ID")`
+directly. Resolution order:
+
+1. **Explicit MongoDB setting** — once a `creator_group_access` document has
+   been saved (even one that clears the chat ID back to `null`), it is
+   authoritative. The env var never "wins back" after that.
+2. **`CREATOR_GROUP_CHAT_ID` environment fallback** — only used when no DB
+   document has ever been saved.
+3. **Unconfigured** — `membership_check_enabled=false`, `creator_group_chat_id=None`.
+
+If `membership_check_enabled=true` but there is no valid configured group,
+access checks fail closed with `creator_group_not_configured` (HTTP 503)
+rather than silently skipping the check. If `membership_check_enabled=false`,
+access is gated by `creator_members.status` alone.
+
+The reader is cached in-process for 30s (`CREATOR_GROUP_SETTINGS_CACHE_TTL_SEC`)
+so a save on one process (web or worker) becomes visible on the others
+without a redeploy, bounded by that TTL; a save also calls
+`invalidate_creator_group_settings_cache()` immediately on the process that
+made it.
+
+### Cache invalidation on group change
+
+Every membership verdict cached on a `creator_members` record (both a
+confirmed check and an "unresolvable" outage placeholder) is stamped with
+the `config_version` that produced it. A save always increments
+`config_version`, which immediately invalidates every previously cached
+verdict for every creator — a change of group can never leave a stale
+"confirmed member" verdict from the old group still granting access, and a
+creator who was in the old group but isn't in the new one is re-checked
+(and denied) on their very next request.
+
+### Admin API
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/api/admin/referral/creator-settings` | Read current resolved settings |
+| POST | `/api/admin/referral/creator-settings/verify-group` | Verify a candidate chat ID against Telegram without saving |
+| PUT | `/api/admin/referral/creator-settings` | Save (verifies by default; `force_save: true` to override) |
+
+All three are gated by the existing `vouchers.require_admin()` — same
+session-cookie auth as every other admin route, unrelated to creator
+membership. The bot token is never returned to the browser; the chat ID
+itself is shown unmasked (it's an identifier, not a secret).
+
+### Validation
+
+- The chat ID is parsed as an integer; zero and any positive value are
+  rejected outright (`invalid_creator_group_chat_id`).
+- A negative ID that doesn't start with `-100` is *not* rejected — it only
+  produces a `chat_id_prefix_unusual` warning in the verify response —
+  because the real validation is the Telegram call, not the prefix.
+- Verification calls Telegram `getChat` (existence + chat type), then the
+  bot's own `getChatMember` (via `getMe` to resolve the bot's own user ID).
+  Only `group`/`supergroup` chat types are accepted for this creator group.
+- Stable codes: `invalid_creator_group_chat_id`, `creator_group_not_found`,
+  `creator_group_bot_access_denied`, `creator_group_wrong_chat_type`,
+  `creator_group_verification_failed`.
+- An unverified group is never saved by default — a verification failure
+  returns the error and leaves the last valid, already-saved setting
+  untouched. `force_save: true` (admin-only, since it's gated by the same
+  `require_admin()` as every other field here) saves anyway, with
+  `verified_at` left `null` and a clear `unverified: true` /
+  `verify_error: "<code>"` entry in the audit log.
+
+### Structured logs
+
+```
+[CREATOR_GROUP_SETTINGS][VERIFIED]      admin_id=... chat_id=...
+[CREATOR_GROUP_SETTINGS][UPDATED]       admin_id=... old_chat_id=... new_chat_id=... config_version=... force_save=... unverified=...
+[CREATOR_GROUP_SETTINGS][VERIFY_FAILED] admin_id=... old_chat_id=... new_chat_id=... config_version=... reason_code=...
+```
+
+Never the bot token, never a full Telegram API response body.
 
 ### Membership verification caching
 
@@ -78,6 +190,14 @@ Indexes: unique `user_id`, `status`, and `(source_group_id, status)`.
   is made on the next request.
 - Only a **definitive** Telegram verdict (`status` in `left`/`kicked`) marks
   the creator `removed`.
+- Both the confirmed and the unresolvable cache are additionally keyed to
+  `config_version`, so a group change invalidates them immediately (see
+  **Cache invalidation on group change** above) — a config change is never
+  masked by an in-flight cache window.
+- The outage cache is checked *before* calling Telegram, so repeated
+  requests inside the 120s grace window never each pay the (up to 8s) HTTP
+  timeout — only the first request after an outage begins, and the first
+  one after the window expires, actually call Telegram.
 
 ## Creator API
 
@@ -153,8 +273,12 @@ user ID or username, approve / suspend / activate / remove, and bulk import
 go through the existing `vouchers.require_admin()` — same session-cookie
 auth as the rest of the admin dashboard, unrelated to creator membership.
 
-`CREATOR_GROUP_CHAT_ID` is shown to admins only as a configured/not-configured
-status flag — never as an editable value in the browser.
+The Creator Group Access chat ID itself is edited directly in the browser
+(it's an identifier, not a secret — see **Creator Group Access settings**
+above); only the bot token stays environment-only and is never returned to
+the browser. Fly.io secrets/env vars are never written from the browser —
+`CREATOR_GROUP_CHAT_ID` remains a fallback only, used before any explicit
+database setting has ever been saved.
 
 Admin endpoints:
 
@@ -165,6 +289,10 @@ POST   /api/admin/referral/creators/bulk
 POST   /api/admin/referral/creators/<user_id>/suspend
 POST   /api/admin/referral/creators/<user_id>/activate
 DELETE /api/admin/referral/creators/<user_id>   (soft: sets status="removed")
+
+GET    /api/admin/referral/creator-settings
+POST   /api/admin/referral/creator-settings/verify-group
+PUT    /api/admin/referral/creator-settings
 ```
 
 ## Telegram entry point
@@ -181,15 +309,22 @@ DELETE /api/admin/referral/creators/<user_id>   (soft: sets status="removed")
 No new Fly.io app, no new database, no fly.toml changes. Web (`gunicorn
 main:app`) and worker processes are unchanged.
 
-One new secret is required:
+`CREATOR_GROUP_CHAT_ID` as a Fly.io secret is now **optional** — it only
+matters as a fallback before any group has ever been configured from the
+Admin Dashboard. It is not required for this deployment; the group is set
+through Admin Dashboard → Referral Centre → Share Content → Creator Access
+→ Creator Group Access instead:
 
 ```
+# Optional fallback only — the Admin Dashboard "Creator Group Access" panel
+# is the primary, no-redeploy way to configure/change this.
 fly secrets set CREATOR_GROUP_CHAT_ID="<numeric-chat-id>" -a apreferralv1
 fly deploy -a apreferralv1
 ```
 
-If `CREATOR_GROUP_CHAT_ID` is left unset, live membership verification is
-simply skipped — access is still gated entirely by `creator_members.status`.
+If neither the DB setting nor `CREATOR_GROUP_CHAT_ID` is configured,
+`membership_check_enabled` resolves to `false` and access is gated entirely
+by `creator_members.status`.
 
 ### Post-deployment checks
 
