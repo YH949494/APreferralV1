@@ -3448,6 +3448,15 @@
       const data = _welcomeProgressData;
       if (!data) return;
 
+      // Backend is authoritative: this gate must run before any status
+      // branch below, so a "claimed"/"issued" status (or a userClaimed
+      // retained drop) can never override visible=false or eligible=false.
+      // Mirrors the identical gate in renderWelcomeProgress().
+      if (data?.hide_welcome_card === true || data?.visible !== true || data?.eligible !== true) {
+        hideWelcomeProgress();
+        return;
+      }
+
       const status = String(data.status || "in_progress");
 
       if (status === "issued") {
