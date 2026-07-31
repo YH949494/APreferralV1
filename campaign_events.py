@@ -46,6 +46,8 @@ EVENT_TYPES = frozenset({
     # Pool operations
     "reward_pool_created", "reward_pool_updated", "reward_pool_upload",
     "reward_pool_scope_rejected", "reward_pool_allocation_rejected",
+    # Event banner (event_banner.py — image-only Mini App top banner)
+    "event_banner_impression", "event_banner_click", "event_banner_image_error",
 })
 
 # Fields that must never be persisted, wherever they appear in metadata.

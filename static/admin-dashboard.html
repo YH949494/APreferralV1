@@ -1562,6 +1562,31 @@
         <div id="gc-campaigns-body"></div>
       </section>
 
+      <!-- EVENT BANNER VIEW (image-only Mini App top banner, event_banner.py) -->
+      <section id="view-eventBanners" class="hidden">
+        <div class="section" style="margin-bottom:16px;">
+          <div class="section-title">Create Event Banner</div>
+          <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:8px;">
+            <input class="filter-input" id="eb-event-id" placeholder="event_id (unique slug)" style="margin:0;" />
+            <input class="filter-input" id="eb-image-url" placeholder="Image URL (https://...)" style="margin:0;" />
+            <input class="filter-input" id="eb-destination-url" placeholder="Destination URL (https:// or tg://)" style="margin:0;" />
+            <input class="filter-input" id="eb-alt-text" placeholder="Alt text (optional)" style="margin:0;" />
+            <input class="filter-input" id="eb-starts" type="datetime-local" style="margin:0;" />
+            <input class="filter-input" id="eb-ends" type="datetime-local" style="margin:0;" />
+            <input class="filter-input" id="eb-priority" type="number" placeholder="Priority (higher wins)" value="100" style="margin:0;" />
+            <select class="filter-input" id="eb-status" style="margin:0;">
+              <option value="inactive">inactive</option>
+              <option value="active">active</option>
+            </select>
+            <input class="filter-input" id="eb-regions" placeholder="Regions, comma-separated (blank = all)" style="margin:0;" />
+          </div>
+          <button class="btn primary" id="eb-create-btn" style="margin-top:10px;">Create banner</button>
+          <div class="sub" style="margin-top:6px;">Only one banner shows at a time in the Mini App — the highest-priority <b>active</b> banner whose window and region match the current user, evaluated on Kuala Lumpur time.</div>
+        </div>
+        <div class="section-title" style="margin-bottom:8px;">Event Banners</div>
+        <div id="eb-body"></div>
+      </section>
+
       <section id="view-gcProviders" class="hidden">
         <div class="section" style="margin-bottom:16px;">
           <div class="section-title">Create Provider</div>

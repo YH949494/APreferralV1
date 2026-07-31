@@ -4867,6 +4867,76 @@
     });
   }
 
+  // ---------- Event Banner (image-only Mini App top banner, event_banner.py) ----------
+
+  function loadEventBanners(force) {
+    statePanel("eb-body", "loading", "Loading event banners…");
+    api("/api/admin/event-banners").then(function (data) {
+      var items = data.banners || [];
+      if (!items.length) { $("#eb-body").innerHTML = emptyState("No event banners yet — create one above."); return; }
+      var rows = items.map(function (b) {
+        var regions = (b.regions || []).length ? esc((b.regions || []).join(", ")) : "All regions";
+        return '<tr><td>' + esc(b.event_id) + '<div class="sub">' + esc(b.alt_text || "") + '</div></td>' +
+          '<td><img src="' + esc(b.image_url || "") + '" alt="" style="max-width:80px;max-height:36px;object-fit:contain;" /></td>' +
+          '<td>' + gcPill(b.status) + '</td>' +
+          '<td>' + esc(b.priority != null ? String(b.priority) : "") + '</td>' +
+          '<td class="sub">' + esc((b.starts_at || "").slice(0, 16).replace("T", " ")) + ' → ' + esc((b.ends_at || "").slice(0, 16).replace("T", " ")) + '</td>' +
+          '<td class="sub">' + regions + '</td>' +
+          '<td>' +
+          '<button class="btn" data-eb-action="toggle" data-id="' + esc(b.event_id) + '" data-status="' + esc(b.status) + '">' + (b.status === "active" ? "Deactivate" : "Activate") + '</button> ' +
+          '<button class="btn" data-eb-action="delete" data-id="' + esc(b.event_id) + '">Delete</button>' +
+          '</td></tr>';
+      }).join("");
+      $("#eb-body").innerHTML = '<table class="data-table"><thead><tr><th>Event</th><th>Image</th><th>Status</th><th>Priority</th><th>Window (UTC)</th><th>Regions</th><th>Actions</th></tr></thead><tbody>' + rows + '</tbody></table>';
+    }).catch(function (e) { statePanel("eb-body", "error", "Failed to load event banners: " + e.message); });
+  }
+
+  function bindEventBanners() {
+    var createBtn = $("#eb-create-btn");
+    if (createBtn) {
+      createBtn.addEventListener("click", function () {
+        var regionsRaw = ($("#eb-regions").value || "").trim();
+        var body = {
+          event_id: ($("#eb-event-id").value || "").trim(),
+          image_url: ($("#eb-image-url").value || "").trim(),
+          destination_url: ($("#eb-destination-url").value || "").trim(),
+          alt_text: ($("#eb-alt-text").value || "").trim(),
+          starts_at: $("#eb-starts").value ? new Date($("#eb-starts").value).toISOString() : null,
+          ends_at: $("#eb-ends").value ? new Date($("#eb-ends").value).toISOString() : null,
+          priority: Number($("#eb-priority").value || 100),
+          status: $("#eb-status").value,
+          regions: regionsRaw ? regionsRaw.split(",").map(function (r) { return r.trim(); }).filter(Boolean) : [],
+        };
+        apiPostJson("/api/admin/event-banners", body).then(function (res) {
+          if (!res.ok || res.d.status !== "ok") { toast("❌ " + (res.d && res.d.code || "create_failed"), "error"); return; }
+          toast("✅ Event banner created", "success");
+          $("#eb-event-id").value = ""; $("#eb-image-url").value = ""; $("#eb-destination-url").value = "";
+          $("#eb-alt-text").value = ""; $("#eb-regions").value = "";
+          loadEventBanners(true);
+        });
+      });
+    }
+    document.addEventListener("click", function (e) {
+      var btn = e.target && e.target.closest && e.target.closest("[data-eb-action]");
+      if (!btn) return;
+      var action = btn.dataset.ebAction, id = btn.dataset.id;
+      if (action === "toggle") {
+        var nextStatus = btn.dataset.status === "active" ? "inactive" : "active";
+        apiPatchJson("/api/admin/event-banners/" + encodeURIComponent(id), { status: nextStatus }).then(function (res) {
+          if (!res.ok || res.d.status !== "ok") { toast("❌ " + (res.d && res.d.code || "update_failed"), "error"); return; }
+          loadEventBanners(true);
+        });
+      } else if (action === "delete") {
+        if (!confirm("Delete event banner \"" + id + "\"?")) return;
+        apiDelete("/api/admin/event-banners/" + encodeURIComponent(id)).then(function (res) {
+          if (!res.ok || res.d.status !== "ok") { toast("❌ " + (res.d && res.d.code || "delete_failed"), "error"); return; }
+          toast("✅ Event banner deleted", "success");
+          loadEventBanners(true);
+        });
+      }
+    });
+  }
+
   function loadGcProviders(force) {
     statePanel("gc-providers-body", "loading", "Loading providers…");
     api("/api/admin/providers").then(function (data) {
@@ -5902,7 +5972,7 @@
     });
   }
 
-  var VIEWS =["summary", "moduleOverview", "placeholder", "funnel", "abuse", "campaignBuilder", "campaignPerformance", "campaignIntelligence", "activeCampaigns", "draftCampaigns", "compiledDrops", "campaigns", "gcCampaigns", "gcProviders", "gcResults", "gcRewards", "gcVerification", "gcActivity", "vouchers", "drops", "referrals", "affiliate", "affiliatePools", "affiliateBatches", "affiliatePending", "reactivation", "audit", "segmentProbabilityConfig", "segmentRoi", "segments", "validation", "backendSegmentEngine", "voucherHunterAudit", "unclassifiedAudit", "segmentRuleSimulator", "voucherHunterQuality", "voucherHunterFalsePositive", "voucherHunterRuleSimulator", "vhPriorityImpact", "uploadPlayerPerformance", "uploadHistory", "rawExplorer", "users", "joinRequests", "xpAdjust", "settings", "referralShareContent", "ccComposer", "ccCalendar", "ccBoard"];
+  var VIEWS =["summary", "moduleOverview", "placeholder", "funnel", "abuse", "campaignBuilder", "campaignPerformance", "campaignIntelligence", "activeCampaigns", "draftCampaigns", "compiledDrops", "campaigns", "gcCampaigns", "gcProviders", "gcResults", "gcRewards", "gcVerification", "gcActivity", "eventBanners", "vouchers", "drops", "referrals", "affiliate", "affiliatePools", "affiliateBatches", "affiliatePending", "reactivation", "audit", "segmentProbabilityConfig", "segmentRoi", "segments", "validation", "backendSegmentEngine", "voucherHunterAudit", "unclassifiedAudit", "segmentRuleSimulator", "voucherHunterQuality", "voucherHunterFalsePositive", "voucherHunterRuleSimulator", "vhPriorityImpact", "uploadPlayerPerformance", "uploadHistory", "rawExplorer", "users", "joinRequests", "xpAdjust", "settings", "referralShareContent", "ccComposer", "ccCalendar", "ccBoard"];
 
   // ---------------------------------------------------------------------
   // Information architecture: sidebar Business Modules, each with its own
@@ -5934,7 +6004,8 @@
       { label: "Tournament Results", view: "gcResults" },
       { label: "Rewards", view: "gcRewards" },
       { label: "Verification", view: "gcVerification" },
-      { label: "Activity Log", view: "gcActivity" }
+      { label: "Activity Log", view: "gcActivity" },
+      { label: "Event Banner", view: "eventBanners" }
     ]},
     { key: "voucher", icon: "🎟", label: "Voucher Centre", tabs: [
       { label: "Overview", view: "moduleOverview", overviewKey: "voucher" },
@@ -6201,6 +6272,7 @@
       campaigns: "Campaigns (Legacy Targeting)",
       gcCampaigns: "Player Campaigns", gcProviders: "Providers", gcResults: "Tournament Results",
       gcRewards: "Rewards", gcVerification: "Verification Integrations", gcActivity: "Activity Log",
+      eventBanners: "Event Banner",
       vouchers: "Vouchers", drops: "Voucher Drops", referrals: "Referrals", affiliate: "Affiliate",
       affiliatePools: "Affiliate Voucher Pools", affiliateBatches: "Affiliate Voucher Batches", affiliatePending: "Pending Affiliate Rewards", reactivation: "Reactivation",
       audit: "Audit", segmentProbabilityConfig: "Segment Probability Configuration (Read Only)",
@@ -6243,6 +6315,7 @@
     else if (state.view === "gcRewards") loadGcRewards(force);
     else if (state.view === "gcVerification") loadGcVerification(force);
     else if (state.view === "gcActivity") loadGcEvents(1);
+    else if (state.view === "eventBanners") loadEventBanners(force);
     else if (state.view === "referralShareContent") loadReferralShareContent(force);
     else if (state.view === "vouchers") loadVouchers(force);
     else if (state.view === "drops") loadDrops(force);
@@ -6318,6 +6391,7 @@
     bindAffiliateBatches();
     bindAffiliatePending();
     bindGcCampaigns();
+    bindEventBanners();
     bindGcProviders();
     bindGcResults();
     bindGcRewards();
