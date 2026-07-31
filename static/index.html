@@ -1561,6 +1561,35 @@
       <div id="ap-campaigns-list" style="display:flex;flex-direction:column;gap:10px;"></div>
     </div>
 
+    <!-- WELCOME PROGRESS (hidden, managed by JS) -->
+    <div class="section" id="welcome-progress-section" style="display:none;">
+      <div class="welcome-progress-card" aria-live="polite">
+        <div id="welcome-progress-body">
+          <h3 class="welcome-progress-title" id="welcome-progress-title" data-i18n="welcome_voucher_progress">🎁 Welcome Voucher Progress</h3>
+          <div class="welcome-progress-expiry" id="welcome-progress-expiry" style="display:none;"></div>
+          <div class="welcome-step-label" id="welcome-step-label">Step 1 of 3</div>
+          <div class="welcome-timeline" id="welcome-progress-squares"></div>
+          <div id="welcome-progress-countdown" class="welcome-progress-countdown" style="display:none;"></div>
+          <div id="welcome-progress-next-action" class="welcome-progress-next-action"></div>
+          <div id="welcome-channel-reminder" style="display:none;">
+            <p style="font-size:13px;color:var(--text-muted);margin:4px 0 8px;text-align:center;" data-i18n="join_channel_to_unlock">Join the channel to unlock your Welcome Voucher.</p>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;">
+              <a href="https://t.me/advantplayofficial" target="_blank" rel="noopener" class="btn btn-primary welcome-cta" style="text-decoration:none;" data-i18n="join_channel">Join Channel</a>
+              <button id="welcome-verify-sub-btn" type="button" class="btn btn-ghost welcome-cta" data-i18n="verify_subscription">Verify Subscription</button>
+            </div>
+          </div>
+          <button id="welcome-checkin-btn" type="button" class="btn btn-primary welcome-cta" style="display:none;" data-i18n="check_in">Check In</button>
+        </div>
+        <div id="welcome-status-card-body" style="display:none;">
+          <h3 class="welcome-progress-title" id="welcome-status-title">🎉 Welcome Reward</h3>
+          <div class="welcome-status-badge" id="welcome-status-badge">🎁 Ready to Claim</div>
+          <p class="welcome-status-message" id="welcome-status-message">Your Welcome Reward has been unlocked.</p>
+          <p class="welcome-status-issued" id="welcome-status-issued" style="display:none;"></p>
+          <button id="welcome-view-reward-btn" type="button" class="btn btn-primary welcome-cta">🎟️ Claim Now</button>
+        </div>
+      </div>
+    </div>
+
     <!-- IDENTITY MODAL -->
     <div id="identity-modal" class="identity-modal">
       <div class="identity-modal-body">
@@ -1725,35 +1754,6 @@
       <div id="leaderboard-output" data-i18n="click_to_load" data-i18n-dynamic>Click to load latest rankings...</div>
       <div id="affiliate-leaderboard-output" style="display:none; margin-top:12px;" data-i18n="click_to_load_affiliate" data-i18n-dynamic>Click to load latest affiliate rankings...</div>
       <button id="leaderboard-retry" type="button" class="btn btn-ghost" style="display:none;margin-top:8px;" data-i18n="retry">Retry</button>
-    </div>
-
-    <!-- WELCOME PROGRESS (hidden, managed by JS) -->
-    <div class="section" id="welcome-progress-section" style="display:none;">
-      <div class="welcome-progress-card" aria-live="polite">
-        <div id="welcome-progress-body">
-          <h3 class="welcome-progress-title" id="welcome-progress-title" data-i18n="welcome_voucher_progress">🎁 Welcome Voucher Progress</h3>
-          <div class="welcome-progress-expiry" id="welcome-progress-expiry" style="display:none;"></div>
-          <div class="welcome-step-label" id="welcome-step-label">Step 1 of 3</div>
-          <div class="welcome-timeline" id="welcome-progress-squares"></div>
-          <div id="welcome-progress-countdown" class="welcome-progress-countdown" style="display:none;"></div>
-          <div id="welcome-progress-next-action" class="welcome-progress-next-action"></div>
-          <div id="welcome-channel-reminder" style="display:none;">
-            <p style="font-size:13px;color:var(--text-muted);margin:4px 0 8px;text-align:center;" data-i18n="join_channel_to_unlock">Join the channel to unlock your Welcome Voucher.</p>
-            <div style="display:flex;gap:8px;flex-wrap:wrap;">
-              <a href="https://t.me/advantplayofficial" target="_blank" rel="noopener" class="btn btn-primary welcome-cta" style="text-decoration:none;" data-i18n="join_channel">Join Channel</a>
-              <button id="welcome-verify-sub-btn" type="button" class="btn btn-ghost welcome-cta" data-i18n="verify_subscription">Verify Subscription</button>
-            </div>
-          </div>
-          <button id="welcome-checkin-btn" type="button" class="btn btn-primary welcome-cta" style="display:none;" data-i18n="check_in">Check In</button>
-        </div>
-        <div id="welcome-status-card-body" style="display:none;">
-          <h3 class="welcome-progress-title" id="welcome-status-title">🎉 Welcome Reward</h3>
-          <div class="welcome-status-badge" id="welcome-status-badge">🎁 Ready to Claim</div>
-          <p class="welcome-status-message" id="welcome-status-message">Your Welcome Reward has been unlocked.</p>
-          <p class="welcome-status-issued" id="welcome-status-issued" style="display:none;"></p>
-          <button id="welcome-view-reward-btn" type="button" class="btn btn-primary welcome-cta">🎟️ Claim Now</button>
-        </div>
-      </div>
     </div>
 
     <!-- MORE / ADMIN SECTION (hidden, revealed on admin auth) -->
