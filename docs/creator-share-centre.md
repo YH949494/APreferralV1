@@ -72,9 +72,16 @@ actual guard):
   "approval_source": "creator_access_chat_membership",
   "created_at": "ISODate",
   "updated_at": "ISODate",
-  "last_membership_verified_at": "ISODate"
+  "last_membership_verified_at": "ISODate",
+  "last_membership_verified_config_version": 3
 }
 ```
+
+`last_membership_verified_config_version` is stamped at creation time (not
+left unset) so the very next request's membership cache check — which is
+keyed on `config_version`, see **Cache invalidation on group change** below
+— hits immediately instead of every lazily-created profile paying for one
+redundant Telegram call right after creation.
 
 An existing `suspended`/`removed` record is never touched by this path —
 lazy creation only ever runs when no record exists at all, so a previously
@@ -374,6 +381,11 @@ PUT    /api/admin/referral/creator-settings
   (`https://apreferralv1.fly.dev/creator-share`), lazily creating a profile
   on first success exactly as the Mini App path does; everyone else gets a
   short denial message. The general `/start` welcome menu is unchanged.
+- `_verify_creator_access()` is dispatched via `asyncio.to_thread()` from
+  this handler, since it can perform a synchronous Telegram `getChatMember`
+  HTTP call (up to an 8s timeout) whenever the membership cache is cold —
+  running it inline would stall the bot's shared polling event loop, and
+  therefore every other update, for up to that long.
 
 ## Deployment
 

@@ -443,7 +443,9 @@ def _verify_live_membership(record: dict, chat_id, config_version: int) -> bool 
     return None
 
 
-def _lazy_ensure_creator_profile(user_id: int, username: str, chat_id, existing_record: dict | None) -> dict:
+def _lazy_ensure_creator_profile(
+    user_id: int, username: str, chat_id, existing_record: dict | None, config_version: int
+) -> dict:
     """Called only after a *confirmed* Creator Access Chat membership check.
 
     If ``existing_record`` is already present (it can only be an ``active``
@@ -453,6 +455,13 @@ def _lazy_ensure_creator_profile(user_id: int, username: str, chat_id, existing_
     never race into duplicate documents (the unique index on ``user_id`` is
     the actual duplicate guard; ``$setOnInsert`` on an upsert just avoids a
     redundant write when the insert loses the race).
+
+    ``last_membership_verified_config_version`` is stamped alongside
+    ``last_membership_verified_at`` so the very next request reuses
+    ``_verify_live_membership()``'s cache immediately, instead of every
+    lazily-created profile paying for one extra, redundant Telegram call
+    (and its failure mode, ``creator_membership_unresolvable``) on the
+    request right after creation.
     """
     if existing_record is not None:
         return existing_record
@@ -473,6 +482,7 @@ def _lazy_ensure_creator_profile(user_id: int, username: str, chat_id, existing_
                     "created_at": now,
                     "updated_at": now,
                     "last_membership_verified_at": now,
+                    "last_membership_verified_config_version": config_version,
                 }
             },
             upsert=True,
@@ -522,7 +532,7 @@ def _verify_creator_access(user_id: int, username: str = ""):
         if verdict is None:
             return None, ("creator_membership_unresolvable", 503)
 
-        record = _lazy_ensure_creator_profile(user_id, username, chat_id, record)
+        record = _lazy_ensure_creator_profile(user_id, username, chat_id, record, settings["config_version"])
         return record, None
 
     # Membership verification explicitly disabled: fall back to requiring an
