@@ -6721,20 +6721,43 @@ function setLeaderboardMeta(ts, { isStale = false } = {}) {
   
     async function loadPreviousLeaderboard() {
       try {
-        const weeksRes = await fetch(`${API_BASE}/api/leaderboard/history/weeks`);
+        const weeksRes = await fetch(`${API_BASE}/api/leaderboard/history/weeks`, { cache: "no-store" });
+        if (!weeksRes.ok) {
+          throw new Error(`weeks request failed (HTTP ${weeksRes.status})`);
+        }
         const weeksData = await weeksRes.json();
 
-        if (!weeksData.success || weeksData.weeks.length === 0) {
+        const isValidWeekStart = (v) => typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v);
+
+        const rawWeeks = Array.isArray(weeksData.weeks) ? weeksData.weeks : [];
+        // Defense in depth: never trust ordering/uniqueness from the API alone.
+        // Drop malformed week_start values, dedupe by week_start, then sort
+        // newest-first ourselves (ISO date strings sort lexicographically).
+        const seen = new Set();
+        const weeks = rawWeeks
+          .filter((w) => isValidWeekStart(w && w.week_start))
+          .filter((w) => {
+            if (seen.has(w.week_start)) return false;
+            seen.add(w.week_start);
+            return true;
+          })
+          .sort((a, b) => (a.week_start < b.week_start ? 1 : a.week_start > b.week_start ? -1 : 0));
+
+        if (!weeksData.success || weeks.length === 0) {
           document.getElementById("leaderboard-output").innerText =
             "❌ No history available.";
           return;
         }
 
-        const lastWeek = weeksData.weeks[0];
+        const lastWeek = weeks[0];
 
         const res = await fetch(
-          `${API_BASE}/api/leaderboard/history/week/${lastWeek.week_start}`
+          `${API_BASE}/api/leaderboard/history/week/${lastWeek.week_start}`,
+          { cache: "no-store" }
         );
+        if (!res.ok) {
+          throw new Error(`week request failed (HTTP ${res.status})`);
+        }
         const data = await res.json();
 
         if (!data.success || !data.history)

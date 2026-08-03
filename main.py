@@ -13,7 +13,7 @@ from telegram.ext import (
 )
 from telegram.error import BadRequest, Forbidden, NetworkError
 from telegram.request import HTTPXRequest
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, date
 from werkzeug.exceptions import HTTPException
 from urllib.parse import urlencode, quote
 from typing import Any
@@ -33,7 +33,7 @@ from config import (
     GROWTH_LEADERBOARD_CRON_MINUTE,
     GROWTH_LEADERBOARD_TIMEZONE,
 )
-from time_utils import expires_in_seconds, tz_name
+from time_utils import expires_in_seconds, tz_name, as_aware_utc
 
 from bson.json_util import dumps
 from xp import ensure_xp_indexes, grant_xp, now_utc
@@ -2387,7 +2387,34 @@ def ensure_indexes():
         unique=True,
         sparse=True,
     )
-        
+
+    # weekly_leaderboard_history: report (never delete) duplicate week_start
+    # values before attempting the unique index — a pre-existing duplicate
+    # would otherwise make index creation fail every boot. safe_create_index
+    # itself never raises on failure, so this is a diagnostic step only.
+    try:
+        dup_weeks = list(
+            history_collection.aggregate([
+                {"$group": {"_id": "$week_start", "count": {"$sum": 1}}},
+                {"$match": {"count": {"$gt": 1}}},
+            ])
+        )
+        if dup_weeks:
+            print(
+                f"⚠️ weekly_leaderboard_history has {len(dup_weeks)} duplicate week_start value(s): "
+                f"{[d['_id'] for d in dup_weeks]} — uniq_weekly_history_week_start index will not be created "
+                "until these are manually deduplicated."
+            )
+    except Exception as e:
+        print("⚠️ weekly_leaderboard_history duplicate check failed:", e)
+
+    safe_create_index(
+        history_collection,
+        [("week_start", ASCENDING)],
+        name="uniq_weekly_history_week_start",
+        unique=True,
+    )
+
 ensure_indexes()
 
 def _cleanup_tg_verification_queue_bad_docs():
@@ -6819,18 +6846,37 @@ def welcome_progress_api(user_id):
     return resp
 
 
+def _no_store(resp):
+    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    resp.headers["Pragma"] = "no-cache"
+    resp.headers["Expires"] = "0"
+    return resp
+
+
 @app.route("/api/leaderboard/history/weeks", methods=["GET"])
 def get_all_weeks():
-    """Return list of archived weeks available."""
-    try:
-        weeks = history_collection.find(
-            {}, {"week_start": 1, "week_end": 1, "_id": 0}
-        ).sort("archived_at", DESCENDING)
+    """Return list of archived weeks available, newest first.
 
-        return jsonify({
+    Sorted by week_start (an ISO "YYYY-MM-DD" string, so lexicographic order
+    equals chronological order) rather than archived_at: archived_at can be
+    missing on old records, malformed, or reflect a late/out-of-order
+    backfill (e.g. an admin rebuild of a historical week), any of which
+    would make archived_at ordering pick a stale week as "newest".
+    """
+    try:
+        weeks = list(
+            history_collection.find(
+                {}, {"week_start": 1, "week_end": 1, "_id": 0}
+            )
+        )
+        weeks = [w for w in weeks if isinstance(w.get("week_start"), str) and w["week_start"]]
+        weeks.sort(key=lambda w: w["week_start"], reverse=True)
+
+        resp = jsonify({
             "success": True,
-            "weeks": list(weeks)
-        }), 200
+            "weeks": weeks
+        })
+        return _no_store(resp), 200
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -6865,7 +6911,7 @@ def get_week_history(week_start):
             for u in referral_data
         ]
 
-        return jsonify({
+        resp = jsonify({
             "success": True,
             "history": {
                 "week_start": doc.get("week_start"),
@@ -6873,11 +6919,39 @@ def get_week_history(week_start):
                 "checkin": checkin,
                 "referral": referral
             }
-        }), 200
+        })
+        return _no_store(resp), 200
     except Exception as e:
         import traceback
         traceback.print_exc()
         return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/api/admin/leaderboard/history/rebuild", methods=["POST"])
+def api_admin_rebuild_leaderboard_history():
+    """Rebuild a completed week's leaderboard archive from the immutable
+    xp_events / referral_events ledgers. Admin-only. Defaults to a dry run.
+
+    Never touches users.weekly_xp / weekly_referrals — safe to call for any
+    past completed week without affecting the current week's live counters.
+    """
+    ok, err = require_admin_from_query()
+    if not ok:
+        msg, code = err
+        return jsonify({"success": False, "message": msg}), code
+
+    data = request.get_json(silent=True) or {}
+    week_start = data.get("week_start") or request.args.get("week_start")
+    if not week_start:
+        return jsonify({"success": False, "message": "week_start is required (YYYY-MM-DD, a Monday)."}), 400
+
+    dry_run_raw = data.get("dry_run", request.args.get("dry_run", True))
+    dry_run = str(dry_run_raw).strip().lower() not in ("0", "false", "no")
+
+    result = rebuild_week_from_ledger(week_start, dry_run=dry_run)
+    status_code = 200 if result.get("status") != "failed" else 400
+    return jsonify({"success": result.get("status") != "failed", **result}), status_code
+
 
 @app.route("/api/bonus_voucher", methods=["GET"])
 def get_bonus_voucher():
@@ -7268,80 +7342,330 @@ def api_admin_backfill_status():
 # ----------------------------
 # Weekly XP Reset Job
 # ----------------------------
+def previous_completed_week_window_kl(reference: datetime | None = None) -> dict:
+    """Return the most recently completed Mon 00:00 -> Sun 23:59:59 week in KL time.
+
+    Deterministic given ``reference`` (defaults to now): depends only on the
+    calendar date/time, not on any archive/scheduler state. Used both by the
+    Monday cron job and by boot catch-up so they always agree on which week
+    is "the previous completed week" regardless of when either one runs.
+    """
+    ref_local = reference.astimezone(KL_TZ) if reference else datetime.now(KL_TZ)
+    this_week_start_local = (ref_local - timedelta(days=ref_local.weekday())).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    week_start_local_dt = this_week_start_local - timedelta(days=7)
+    week_end_local_dt = this_week_start_local  # exclusive upper bound (next Monday 00:00)
+
+    week_start_date = week_start_local_dt.date()
+    week_end_date = (week_end_local_dt - timedelta(days=1)).date()  # Sunday
+
+    return {
+        "week_start_local": week_start_date,
+        "week_end_local": week_end_date,
+        "week_start_utc": week_start_local_dt.astimezone(timezone.utc),
+        "week_end_utc": week_end_local_dt.astimezone(timezone.utc),
+        "week_key": week_start_date.isoformat(),
+    }
+
+
+def _archive_week_upsert(
+    week_start_date,
+    week_end_date,
+    checkin_leaderboard: list,
+    referral_leaderboard: list,
+    *,
+    source: str,
+) -> dict:
+    """Idempotently insert a weekly_leaderboard_history record.
+
+    Uses $setOnInsert on a upsert keyed by week_start so a retry, a boot
+    catch-up re-running the same week, or two racing worker instances can
+    never duplicate or overwrite an existing archive.
+    """
+    week_start_str = week_start_date.isoformat()
+    week_end_str = week_end_date.isoformat()
+    try:
+        result = history_collection.update_one(
+            {"week_start": week_start_str},
+            {
+                "$setOnInsert": {
+                    "week_start": week_start_str,
+                    "week_end": week_end_str,
+                    "checkin_leaderboard": checkin_leaderboard,
+                    "referral_leaderboard": referral_leaderboard,
+                    "archived_at": datetime.now(timezone.utc),
+                    "source": source,
+                }
+            },
+            upsert=True,
+        )
+        created = bool(getattr(result, "upserted_id", None) is not None)
+    except DuplicateKeyError:
+        # Another instance won the race on the unique week_start index.
+        created = False
+
+    return {
+        "status": "created" if created else "already_exists",
+        "week_start": week_start_str,
+        "week_end": week_end_str,
+        "entry_counts": {
+            "checkin": len(checkin_leaderboard),
+            "referral": len(referral_leaderboard),
+        },
+    }
+
+
+def _reconstruct_checkin_leaderboard_from_ledger(week_start_utc, week_end_utc, limit: int = 100) -> list:
+    """Rebuild the check-in leaderboard for a historical week from the
+    immutable xp_events ledger — never from users.weekly_xp, which only
+    reflects the *current* week once counters have moved on."""
+    rows = recompute_xp_totals(week_start_utc, week_end_utc, limit=limit)
+    entries = []
+    for row in rows:
+        uid = row.get("_id")
+        if uid is None:
+            continue
+        user = users_collection.find_one({"user_id": uid}, {"username": 1})
+        entries.append({
+            "user_id": uid,
+            "username": (user or {}).get("username", "unknown"),
+            "weekly_xp": int(row.get("xp", 0)),
+        })
+    return entries
+
+
+def _reconstruct_referral_leaderboard_from_ledger(week_key: str, limit: int = 100) -> list:
+    """Rebuild the referral leaderboard for a historical week from the
+    immutable referral_events ledger, using its week_key field (same Monday
+    KL date convention as previous_completed_week_window_kl)."""
+    settled_pipeline = [
+        {"$match": {"event": "referral_settled", "week_key": week_key}},
+        {"$group": {"_id": "$inviter_id", "settled": {"$sum": 1}}},
+    ]
+    settled_rows = {
+        row["_id"]: row["settled"]
+        for row in referral_events_collection.aggregate(settled_pipeline)
+        if row.get("_id") is not None
+    }
+
+    revoked_pipeline = [
+        {"$match": with_not_invalidated({"event": "referral_revoked", "week_key": week_key})},
+        {"$group": {"_id": "$inviter_id", "revoked": {"$sum": 1}}},
+    ]
+    revoked_rows = {
+        row["_id"]: row["revoked"]
+        for row in referral_events_collection.aggregate(revoked_pipeline)
+        if row.get("_id") is not None
+    }
+
+    counts = []
+    for inviter_id, settled in settled_rows.items():
+        net = settled - revoked_rows.get(inviter_id, 0)
+        if net > 0:
+            counts.append((inviter_id, net))
+    counts.sort(key=lambda item: item[1], reverse=True)
+    counts = counts[:limit]
+
+    entries = []
+    for inviter_id, net in counts:
+        user = users_collection.find_one({"user_id": inviter_id}, {"username": 1})
+        entries.append({
+            "user_id": inviter_id,
+            "username": (user or {}).get("username", "unknown"),
+            "weekly_referrals": net,
+        })
+    return entries
+
+
+def rebuild_week_from_ledger(week_start: str, dry_run: bool = True) -> dict:
+    """Rebuild a completed week's leaderboard archive from the immutable
+    xp_events / referral_events ledgers.
+
+    Deliberately never reads or writes users.weekly_xp / weekly_referrals:
+    those live counters may already contain activity from a later week by
+    the time this runs (boot catch-up, or an admin-triggered late repair),
+    so using them here would silently mix weeks together. ``week_start``
+    must be an ISO Monday date, e.g. "2026-07-27".
+    """
+    try:
+        week_start_date = date.fromisoformat(week_start)
+    except (TypeError, ValueError):
+        return {"status": "failed", "error": "invalid_date", "week_start": week_start}
+
+    if week_start_date.weekday() != 0:
+        return {"status": "failed", "error": "not_a_monday", "week_start": week_start}
+
+    week_start_local = datetime(
+        week_start_date.year, week_start_date.month, week_start_date.day, tzinfo=KL_TZ
+    )
+    week_end_local = week_start_local + timedelta(days=7)
+    week_end_date = (week_end_local - timedelta(days=1)).date()
+    week_start_utc = week_start_local.astimezone(timezone.utc)
+    week_end_utc = week_end_local.astimezone(timezone.utc)
+    week_key = week_start_date.isoformat()
+
+    if week_end_local > datetime.now(KL_TZ):
+        return {"status": "failed", "error": "week_not_completed", "week_start": week_key}
+
+    existing = history_collection.find_one({"week_start": week_key})
+    if existing:
+        return {
+            "status": "already_exists",
+            "week_start": week_key,
+            "week_end": existing.get("week_end", week_end_date.isoformat()),
+            "entry_counts": {
+                "checkin": len(existing.get("checkin_leaderboard", [])),
+                "referral": len(existing.get("referral_leaderboard", [])),
+            },
+        }
+
+    earliest_xp = xp_events_collection.find_one({}, sort=[("created_at", ASCENDING)])
+    earliest_xp_ts = as_aware_utc((earliest_xp or {}).get("created_at")) if earliest_xp else None
+    if earliest_xp_ts and earliest_xp_ts > week_end_utc:
+        return {"status": "failed", "error": "ledger_no_coverage_for_week", "week_start": week_key}
+
+    checkin_leaderboard = _reconstruct_checkin_leaderboard_from_ledger(week_start_utc, week_end_utc)
+    referral_leaderboard = _reconstruct_referral_leaderboard_from_ledger(week_key)
+
+    if dry_run:
+        return {
+            "status": "dry_run",
+            "week_start": week_key,
+            "week_end": week_end_date.isoformat(),
+            "entry_counts": {
+                "checkin": len(checkin_leaderboard),
+                "referral": len(referral_leaderboard),
+            },
+        }
+
+    return _archive_week_upsert(
+        week_start_date,
+        week_end_date,
+        checkin_leaderboard,
+        referral_leaderboard,
+        source="ledger_rebuild",
+    )
+
+
+weekly_reset_markers_collection = db["weekly_reset_markers"]
+
+
 def reset_weekly_xp(run_id: str | None = None):
     run_id = run_id or _new_run_id()
-    now = datetime.now(KL_TZ)
+    window = previous_completed_week_window_kl()
+    week_start_date = window["week_start_local"]
+    week_end_date = window["week_end_local"]
+    week_key = window["week_key"]
 
-    # Last full week [Mon..Sun], assuming this runs every Monday 00:00 KL
-    week_end_date = (now - timedelta(days=1)).date()      # Sunday
-    week_start_date = week_end_date - timedelta(days=6)   # Monday
     logger.info(
-        "[JOB][WEEKLY] start week_start=%s week_end=%s run_id=%s instance=%s tz=%s",
+        "[JOB][WEEKLY][START] week_start=%s week_end=%s run_id=%s instance=%s tz=%s",
         week_start_date.isoformat(),
         week_end_date.isoformat(),
         run_id,
         INSTANCE_ID,
         tz_name(KL_TZ),
     )
+
+    acquired, lock_doc = acquire_scheduler_lock("weekly_reset", ttl_seconds=1800)
+    if not acquired:
+        logger.info(
+            "[JOB][WEEKLY] lock_not_acquired week_key=%s owner=%s expires_in_s=%s run_id=%s",
+            week_key,
+            (lock_doc or {}).get("owner"),
+            expires_in_seconds((lock_doc or {}).get("expireAt")),
+            run_id,
+        )
+        return {
+            "status": "skipped_lock",
+            "week_start": week_start_date.isoformat(),
+            "week_end": week_end_date.isoformat(),
+            "entry_counts": {},
+        }
+
     try:
         with JobTimer() as timer:
             proj = {"user_id": 1, "username": 1, "weekly_xp": 1, "weekly_referrals": 1}
             top_checkin = list(users_collection.find({}, proj).sort("weekly_xp", DESCENDING).limit(100))
             top_referrals = list(users_collection.find({}, proj).sort("weekly_referrals", DESCENDING).limit(100))
 
-            history_collection.insert_one({
-                "week_start": week_start_date.isoformat(),
-                "week_end":   week_end_date.isoformat(),
-                "checkin_leaderboard": [
-                    {"user_id": u["user_id"], "username": u.get("username", "unknown"), "weekly_xp": u.get("weekly_xp", 0)}
-                    for u in top_checkin
-                ],
-                "referral_leaderboard": [
-                    {"user_id": u["user_id"], "username": u.get("username", "unknown"), "weekly_referrals": u.get("weekly_referrals", 0)}
-                    for u in top_referrals
-                ],
-                # store as UTC so later math is safe
-                "archived_at": datetime.now(timezone.utc)
-            })
+            checkin_leaderboard = [
+                {"user_id": u["user_id"], "username": u.get("username", "unknown"), "weekly_xp": u.get("weekly_xp", 0)}
+                for u in top_checkin
+            ]
+            referral_leaderboard = [
+                {"user_id": u["user_id"], "username": u.get("username", "unknown"), "weekly_referrals": u.get("weekly_referrals", 0)}
+                for u in top_referrals
+            ]
 
-            # Guard: the Sunday weekly_referral_post for the week just ending
-            # must have already fired (or been skipped as empty) before we
-            # zero weekly_referrals below. Never delete/recreate that record
-            # here — just log its status so a missed Sunday post is visible.
-            weekly_post_doc = db["weekly_referral_posts"].find_one(
-                {"_id": f"weekly_referral_post:{week_start_date.isoformat()}"},
-                {"status": 1, "message_id": 1},
+            archive_result = _archive_week_upsert(
+                week_start_date, week_end_date, checkin_leaderboard, referral_leaderboard, source="live_counters"
             )
-            logger.info(
-                "[WEEKLY_REF_POST][MONDAY_RESET_GUARD] week_key=%s status=%s message_id=%s run_id=%s",
-                week_start_date.isoformat(),
-                (weekly_post_doc or {}).get("status", "missing"),
-                (weekly_post_doc or {}).get("message_id"),
-                run_id,
-            )
+            if archive_result["status"] == "created":
+                logger.info("[JOB][WEEKLY][ARCHIVE_CREATED] week_key=%s run_id=%s", week_key, run_id)
+            else:
+                logger.info("[JOB][WEEKLY][ALREADY_EXISTS] week_key=%s run_id=%s", week_key, run_id)
 
-            _users_update_many(
-                {},
-                {
-                    "$set": {
-                        "weekly_xp": 0,
-                        "weekly_referrals": 0,
-                        "xp_weekly_milestone_bucket": 0,
-                        "ref_weekly_milestone_bucket": 0,
-                    }
-                },
-                context="weekly_reset",
+            # Counter reset is claimed independently of archive creation so
+            # that whichever path archived the week first (this cron job, or
+            # boot catch-up's ledger rebuild — which never resets counters)
+            # can never cause the reset to be silently skipped or doubled.
+            reset_claim = weekly_reset_markers_collection.update_one(
+                {"_id": f"weekly_reset_done:{week_key}"},
+                {"$setOnInsert": {"done_at": datetime.now(timezone.utc), "run_id": run_id, "instance": INSTANCE_ID}},
+                upsert=True,
             )
+            reset_status = "done" if getattr(reset_claim, "upserted_id", None) is not None else "already_done"
+
+            if reset_status == "done":
+                # Guard: the Sunday weekly_referral_post for the week just ending
+                # must have already fired (or been skipped as empty) before we
+                # zero weekly_referrals below. Never delete/recreate that record
+                # here — just log its status so a missed Sunday post is visible.
+                weekly_post_doc = db["weekly_referral_posts"].find_one(
+                    {"_id": f"weekly_referral_post:{week_key}"},
+                    {"status": 1, "message_id": 1},
+                )
+                logger.info(
+                    "[WEEKLY_REF_POST][MONDAY_RESET_GUARD] week_key=%s status=%s message_id=%s run_id=%s",
+                    week_key,
+                    (weekly_post_doc or {}).get("status", "missing"),
+                    (weekly_post_doc or {}).get("message_id"),
+                    run_id,
+                )
+
+                _users_update_many(
+                    {},
+                    {
+                        "$set": {
+                            "weekly_xp": 0,
+                            "weekly_referrals": 0,
+                            "xp_weekly_milestone_bucket": 0,
+                            "ref_weekly_milestone_bucket": 0,
+                        }
+                    },
+                    context="weekly_reset",
+                )
+                logger.info("[JOB][WEEKLY][RESET_DONE] week_key=%s run_id=%s", week_key, run_id)
+            else:
+                logger.info(
+                    "[JOB][WEEKLY] reset_already_claimed week_key=%s run_id=%s — counters left untouched",
+                    week_key,
+                    run_id,
+                )
 
         logger.info(
-            "[JOB][WEEKLY] done processed=%s elapsed_s=%.2f run_id=%s",
+            "[JOB][WEEKLY] done archive_status=%s reset_status=%s processed=%s elapsed_s=%.2f run_id=%s",
+            archive_result["status"],
+            reset_status,
             len(top_checkin),
             timer.elapsed_s,
             run_id,
         )
+        return {**archive_result, "reset_status": reset_status}
     except Exception as exc:
         logger.error(
-            "[JOB][WEEKLY] failed run_id=%s instance=%s err=%s msg=%s",
+            "[JOB][WEEKLY][FAILED] run_id=%s instance=%s err=%s msg=%s",
             run_id,
             INSTANCE_ID,
             exc.__class__.__name__,
@@ -7385,32 +7709,39 @@ def run_boot_catchup():
         INSTANCE_ID,
         tz_name(KL_TZ),
     )
-    # weekly catch-up (only on Monday)
-    last_history = history_collection.find_one(sort=[("archived_at", DESCENDING)])
-    if last_history:
-        last_raw = last_history["archived_at"]
-        if last_raw.tzinfo is None:
-            last_reset = last_raw.replace(tzinfo=pytz.UTC).astimezone(KL_TZ)
-        else:
-            last_reset = last_raw.astimezone(KL_TZ)
-        days_since = (now - last_reset).days
+    # Weekly catch-up runs on EVERY boot, any weekday — not just Monday.
+    # It checks the exact expected previous-week key rather than inferring
+    # from archived_at age, so a worker that was down across more than one
+    # week boundary (e.g. down Monday, restarts Tuesday+) still recovers the
+    # missing week instead of it being permanently skipped.
+    window = previous_completed_week_window_kl(now)
+    expected_week_key = window["week_key"]
+    existing_week = history_collection.find_one({"week_start": expected_week_key})
+    if existing_week:
+        logger.info(
+            "[BOOT][CATCHUP][WEEKLY_OK] week_key=%s run_id=%s",
+            expected_week_key,
+            run_id,
+        )
     else:
-        last_reset = None
-        days_since = 999
-
-    week_start = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
-    if now.weekday() == 0 and days_since >= 6:
         logger.warning(
-            "[BOOT][CATCHUP] missed_weekly expected=%s last_run=%s",
-            week_start.isoformat(),
-            last_reset.isoformat() if last_reset else None,
+            "[BOOT][CATCHUP][WEEKLY_MISSING] week_key=%s run_id=%s",
+            expected_week_key,
+            run_id,
         )
         logger.info("[BOOT][CATCHUP] running job=weekly run_id=%s", run_id)
         try:
+            # Ledger-only recovery: this NEVER reads or resets
+            # users.weekly_xp / weekly_referrals. By the time a worker boots
+            # up to recover a missed week, those live counters may already
+            # reflect the current (later) week's activity, so using them
+            # here would archive mixed-week data and/or wrongly zero
+            # in-progress current-week progress.
             with JobTimer() as timer:
-                reset_weekly_xp(run_id=run_id)
+                result = rebuild_week_from_ledger(expected_week_key, dry_run=False)
             logger.info(
-                "[BOOT][CATCHUP] done job=weekly result=ok elapsed_s=%.2f run_id=%s",
+                "[BOOT][CATCHUP] done job=weekly result=%s elapsed_s=%.2f run_id=%s",
+                result.get("status"),
                 timer.elapsed_s,
                 run_id,
             )
@@ -7421,9 +7752,6 @@ def run_boot_catchup():
                 str(exc),
                 run_id,
             )
-    else:
-        reason = "not_monday" if now.weekday() != 0 else "already_ran"
-        logger.info("[BOOT][CATCHUP] skipped job=weekly reason=%s run_id=%s", reason, run_id)
 
     # monthly catch-up (only on the 1st)
     sample_user = users_collection.find_one(
