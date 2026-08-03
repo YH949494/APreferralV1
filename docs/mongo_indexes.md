@@ -40,3 +40,14 @@ Current scope: this protection is applied to the remediation indexes added in th
 
 ## Warning
 Do **not** blindly accept all Atlas index suggestions; only add indexes proven by production query shapes.
+
+## weekly_leaderboard_history.week_start (2026-08 Past Leaderboard audit)
+- `uniq_weekly_history_week_start` on `weekly_leaderboard_history({week_start:1})`, unique.
+- Added because `reset_weekly_xp` previously used an unconditional `insert_one`, so any
+  retry (misfire replay, boot catch-up, a second worker) could duplicate a week's archive
+  or race on the reset step. The archive write is now an idempotent upsert keyed by
+  `week_start`; this index makes that guarantee durable at the storage layer too.
+- Created via `safe_create_index` (never raises), preceded by a duplicate-`week_start`
+  diagnostic (`ensure_indexes()` in `main.py`) that only **logs** — it does not delete
+  any existing duplicate records. If duplicates are ever reported, they must be reviewed
+  and merged manually before the index will actually take effect.
