@@ -60,6 +60,13 @@ MAX_GAME_NAME_LEN = 200
 MAX_BULK_IMPORT_LINES = 2000
 DEFAULT_FALLBACK_HOOK_TEXT = "🎬 Fresh replays just dropped!"
 
+# Admin bulk-management (Hooks / Playback Links) — resource_type is always
+# whitelisted against this map; the client can never supply a raw collection
+# name. Hooks and playback links are always acted on independently: every
+# bulk route below is scoped to exactly one of these two collections.
+RESOURCE_COLLECTIONS = {"hook": "caption_hooks", "playback_link": "playback_pool"}
+BULK_ACTIONS = ("activate_all", "deactivate_all", "delete_selected")
+
 
 def _require_admin():
     from vouchers import require_admin
@@ -496,6 +503,22 @@ def generate_share_package(
         "share_click_count": 0,
     }
     database.db["share_generations"].insert_one(doc)
+    if hook_doc is None or playback_doc is None:
+        # Admin-facing visibility only -- generation itself still succeeds
+        # (see module docstring): an empty pool is never a hard failure, it
+        # just omits that section of the caption. This is a deliberate
+        # product decision, not an oversight: referral sharing must stay
+        # available even with BOTH pools empty (still a valid post -- link
+        # + benefits/CTA, never "undefined"/blank/malformed), because
+        # disabling the whole Creator Centre over one missing optional
+        # content component has more business impact than the post simply
+        # omitting that component. Logged at WARNING, identifying each pool
+        # independently, so an empty pool is easy to spot/alert on before it
+        # drains completely -- without blocking generation.
+        logger.warning(
+            "[SHARE_CONTENT][POOL_EMPTY] user_id=%s hook_pool_empty=%s playback_pool_empty=%s package_id=%s",
+            user_id, hook_doc is None, playback_doc is None, package_id,
+        )
     logger.info(
         "[SHARE_CONTENT][GENERATE_OK] user_id=%s playback_record_id=%s hook_id=%s package_id=%s",
         user_id,
@@ -626,6 +649,114 @@ def _parse_object_id(raw: str) -> ObjectId | None:
 
 
 # ---------------------------------------------------------------------------
+# Admin bulk-management — shared validation, deletion service, audit logging
+# ---------------------------------------------------------------------------
+
+def _collection_for(resource_type: str):
+    name = RESOURCE_COLLECTIONS.get(resource_type)
+    return database.db[name] if name else None
+
+
+def _status_counts(collection) -> tuple[int, int]:
+    """(active_count, total_count) for the given collection, independent of
+    any list-endpoint pagination cap so the admin UI's "Active: X / Y"
+    summary is always exact."""
+    return collection.count_documents({"status": "active"}), collection.count_documents({})
+
+
+def _audit_log(
+    *, admin, resource_type: str, action: str, requested_ids=None, requested_count=None,
+    matched_count: int = 0, result_count: int = 0, success: bool, reason: str | None = None,
+) -> None:
+    """Structured audit trail for every bulk/individual mutating admin action
+    on hooks/playback links. Never logs tokens/credentials -- only the admin
+    id, the action taken, and the ids/counts involved."""
+    log_fn = logger.info if success else logger.warning
+    log_fn(
+        "[SHARE_CONTENT][ADMIN_ACTION] admin_id=%s resource_type=%s action=%s "
+        "requested_count=%s requested_ids=%s matched_count=%s result_count=%s success=%s reason=%s ts=%s",
+        (admin or {}).get("id"),
+        resource_type,
+        action,
+        requested_count if requested_count is not None else len(requested_ids or []),
+        requested_ids,
+        matched_count,
+        result_count,
+        success,
+        reason or "",
+        now_utc().isoformat(),
+    )
+
+
+def _validate_selected_ids(collection, raw_ids) -> tuple[list[ObjectId] | None, str | None]:
+    """Server-side validation of a client-supplied id selection. Never
+    trusts frontend-reported ids/counts: every id is re-parsed and its
+    existence in the *correct* (already resource-type-scoped) collection is
+    re-checked here. Returns (parsed_ids, None) on success, or
+    (None, error_code) on any of: empty selection, malformed id, duplicate
+    id, or an id that doesn't exist in this collection (covers both unknown
+    and cross-section ids, since the query is always scoped to one
+    collection). No partial validation -- the first problem found aborts
+    the whole request before any write happens.
+    """
+    if not isinstance(raw_ids, list) or not raw_ids:
+        return None, "empty_selection"
+    str_ids = []
+    parsed: list[ObjectId] = []
+    for raw in raw_ids:
+        if not isinstance(raw, str):
+            return None, "malformed_ids"
+        str_ids.append(raw)
+        oid = _parse_object_id(raw)
+        if not oid:
+            return None, "malformed_ids"
+        parsed.append(oid)
+    if len(set(str_ids)) != len(str_ids):
+        return None, "duplicate_ids"
+    existing = collection.count_documents({"_id": {"$in": parsed}})
+    if existing != len(parsed):
+        return None, "unknown_ids"
+    return parsed, None
+
+
+def delete_resource_ids(resource_type: str, raw_ids, *, admin) -> tuple[dict, int]:
+    """Shared deletion service used by BOTH the bulk "delete selected" route
+    and every individual delete route -- there is exactly one code path that
+    ever calls delete_many on caption_hooks/playback_pool, so validation and
+    deletion can never drift apart between the two surfaces.
+
+    Performs one set-based delete_many (never a per-id loop). Any validation
+    failure aborts before touching the database, so an invalid selection is
+    never partially deleted.
+    """
+    collection = _collection_for(resource_type)
+    requested_ids = [str(x) for x in raw_ids] if isinstance(raw_ids, list) else raw_ids
+    parsed, error = _validate_selected_ids(collection, raw_ids)
+    if error:
+        _audit_log(
+            admin=admin, resource_type=resource_type, action="delete_selected",
+            requested_ids=requested_ids, matched_count=0, result_count=0,
+            success=False, reason=error,
+        )
+        return {"status": "error", "code": error}, 400
+
+    result = collection.delete_many({"_id": {"$in": parsed}})
+    active_count, total_count = _status_counts(collection)
+    _audit_log(
+        admin=admin, resource_type=resource_type, action="delete_selected",
+        requested_ids=requested_ids, matched_count=len(parsed), result_count=result.deleted_count,
+        success=True,
+    )
+    return {
+        "status": "ok",
+        "matched_count": len(parsed),
+        "deleted_count": result.deleted_count,
+        "active_count": active_count,
+        "total_count": total_count,
+    }, 200
+
+
+# ---------------------------------------------------------------------------
 # Admin API — Caption Hooks
 # ---------------------------------------------------------------------------
 
@@ -642,7 +773,11 @@ def list_hooks():
     if q:
         filt["text"] = {"$regex": re.escape(q), "$options": "i"}
     docs = list(database.db["caption_hooks"].find(filt, sort=[("created_at", -1)], limit=500))
-    return jsonify({"status": "ok", "hooks": [_serialize(d) for d in docs]})
+    active_count, total_count = _status_counts(database.db["caption_hooks"])
+    return jsonify({
+        "status": "ok", "hooks": [_serialize(d) for d in docs],
+        "active_count": active_count, "total_count": total_count,
+    })
 
 
 @referral_share_content_bp.post("/api/admin/referral/share-content/hooks")
@@ -728,15 +863,19 @@ def _set_hook_status(hook_id: str, status_val: str):
 
 @referral_share_content_bp.delete("/api/admin/referral/share-content/hooks/<hook_id>")
 def delete_hook(hook_id: str):
-    _, err = _require_admin()
+    admin, err = _require_admin()
     if err:
         return err
-    oid = _parse_object_id(hook_id)
-    if not oid:
-        return jsonify({"status": "error", "code": "invalid_id"}), 400
-    result = database.db["caption_hooks"].delete_one({"_id": oid})
-    if result.deleted_count == 0:
-        return jsonify({"status": "error", "code": "not_found"}), 404
+    payload, status_code = delete_resource_ids("hook", [hook_id], admin=admin)
+    if status_code != 200:
+        # Preserve this route's pre-existing contract: a malformed id is a
+        # 400 invalid_id, a well-formed but nonexistent id is a 404 not_found.
+        code = payload.get("code")
+        if code == "unknown_ids":
+            return jsonify({"status": "error", "code": "not_found"}), 404
+        if code == "malformed_ids":
+            return jsonify({"status": "error", "code": "invalid_id"}), 400
+        return jsonify(payload), status_code
     return jsonify({"status": "ok"})
 
 
@@ -775,7 +914,11 @@ def list_playback():
         rx = {"$regex": re.escape(q), "$options": "i"}
         filt["$or"] = [{"playback_id": rx}, {"playback_url": rx}, {"game_name": rx}]
     docs = list(database.db["playback_pool"].find(filt, sort=[("created_at", -1)], limit=500))
-    return jsonify({"status": "ok", "playback": [_serialize(d) for d in docs]})
+    active_count, total_count = _status_counts(database.db["playback_pool"])
+    return jsonify({
+        "status": "ok", "playback": [_serialize(d) for d in docs],
+        "active_count": active_count, "total_count": total_count,
+    })
 
 
 @referral_share_content_bp.post("/api/admin/referral/share-content/playback")
@@ -890,15 +1033,17 @@ def _set_playback_status(playback_id: str, status_val: str):
 
 @referral_share_content_bp.delete("/api/admin/referral/share-content/playback/<playback_id>")
 def delete_playback(playback_id: str):
-    _, err = _require_admin()
+    admin, err = _require_admin()
     if err:
         return err
-    oid = _parse_object_id(playback_id)
-    if not oid:
-        return jsonify({"status": "error", "code": "invalid_id"}), 400
-    result = database.db["playback_pool"].delete_one({"_id": oid})
-    if result.deleted_count == 0:
-        return jsonify({"status": "error", "code": "not_found"}), 404
+    payload, status_code = delete_resource_ids("playback_link", [playback_id], admin=admin)
+    if status_code != 200:
+        code = payload.get("code")
+        if code == "unknown_ids":
+            return jsonify({"status": "error", "code": "not_found"}), 404
+        if code == "malformed_ids":
+            return jsonify({"status": "error", "code": "invalid_id"}), 400
+        return jsonify(payload), status_code
     return jsonify({"status": "ok"})
 
 
@@ -913,3 +1058,64 @@ def bulk_import_playback_route():
         return jsonify({"status": "error", "code": "too_many_lines", "max_lines": MAX_BULK_IMPORT_LINES}), 400
     result = bulk_import_playback(blob, created_by=(admin or {}).get("id"))
     return jsonify({"status": "ok", **result})
+
+
+# ---------------------------------------------------------------------------
+# Admin API — Bulk management (Hooks / Playback Links)
+#
+# One strictly-validated endpoint shared by both resource types. resource_type
+# and action are each whitelisted against a fixed map/tuple -- the client
+# never supplies (and this route never derives from client input) a raw
+# collection name. Every operation is scoped to exactly one collection, so
+# hooks and playback links can never be updated together in a single request.
+# ---------------------------------------------------------------------------
+
+@referral_share_content_bp.post("/api/admin/referral/share-content/bulk-action")
+def share_content_bulk_action():
+    admin, err = _require_admin()
+    if err:
+        return err
+    body = request.get_json(force=True, silent=True) or {}
+    resource_type = body.get("resource_type")
+    action = body.get("action")
+
+    if resource_type not in RESOURCE_COLLECTIONS:
+        return jsonify({"status": "error", "code": "invalid_resource_type"}), 400
+    if action not in BULK_ACTIONS:
+        return jsonify({"status": "error", "code": "invalid_action"}), 400
+
+    if action == "delete_selected":
+        payload, status_code = delete_resource_ids(resource_type, body.get("selected_ids"), admin=admin)
+        payload["resource_type"] = resource_type
+        payload["action"] = action
+        return jsonify(payload), status_code
+
+    # activate_all / deactivate_all: a single set-based update_many scoped to
+    # this resource type's collection only, and filtered to records that are
+    # NOT already at the target status. Filtering the query itself (rather
+    # than updating every document and relying on MongoDB's modified_count)
+    # is what makes this idempotent: a record already at the target status
+    # is never matched, so its updated_at is never touched, and a repeated
+    # identical request always reports matched_count == modified_count == 0.
+    collection = _collection_for(resource_type)
+    target_status = "active" if action == "activate_all" else "inactive"
+    total_count = collection.count_documents({})
+    result = collection.update_many(
+        {"status": {"$ne": target_status}}, {"$set": {"status": target_status, "updated_at": now_utc()}}
+    )
+    active_count, _total_count_after = _status_counts(collection)
+    _audit_log(
+        admin=admin, resource_type=resource_type, action=action,
+        requested_count=total_count, matched_count=result.matched_count,
+        result_count=result.modified_count, success=True,
+    )
+    return jsonify({
+        "status": "ok",
+        "resource_type": resource_type,
+        "action": action,
+        "total_count": total_count,
+        "matched_count": result.matched_count,
+        "eligible_count": result.matched_count,
+        "modified_count": result.modified_count,
+        "active_count": active_count,
+    })

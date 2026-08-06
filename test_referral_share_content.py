@@ -492,8 +492,454 @@ class TestAdminAuthorization:
 
 
 # ---------------------------------------------------------------------------
-# Selection algorithm
+# Bulk management (Hooks / Playback Links) -- activate_all / deactivate_all /
+# delete_selected, and the shared deletion service backing individual delete.
 # ---------------------------------------------------------------------------
+
+class TestBulkActivateDeactivate:
+    def test_activate_all_hooks_does_not_affect_playback(self, client, fake_db):
+        _hook(fake_db, "A", status="inactive")
+        _hook(fake_db, "B", status="inactive")
+        _playback(fake_db, "Playback01", status="inactive")
+
+        r = client.post("/api/admin/referral/share-content/bulk-action",
+                         json={"resource_type": "hook", "action": "activate_all"})
+        assert r.status_code == 200
+        body = r.get_json()
+        assert body["total_count"] == 2
+        assert body["matched_count"] == 2
+        assert body["eligible_count"] == 2
+        assert body["modified_count"] == 2
+        assert body["active_count"] == 2
+
+        assert all(h["status"] == "active" for h in fake_db["caption_hooks"].find({}))
+        # Playback pool is a completely separate collection -- untouched.
+        assert fake_db["playback_pool"].find_one({"playback_id": "Playback01"})["status"] == "inactive"
+
+    def test_activate_all_playback_does_not_affect_hooks(self, client, fake_db):
+        _hook(fake_db, "A", status="inactive")
+        _playback(fake_db, "Playback01", status="inactive")
+        _playback(fake_db, "Playback02", status="inactive")
+
+        r = client.post("/api/admin/referral/share-content/bulk-action",
+                         json={"resource_type": "playback_link", "action": "activate_all"})
+        assert r.status_code == 200
+        body = r.get_json()
+        assert body["matched_count"] == 2
+        assert body["modified_count"] == 2
+
+        assert all(p["status"] == "active" for p in fake_db["playback_pool"].find({}))
+        assert fake_db["caption_hooks"].find_one({"text": "A"})["status"] == "inactive"
+
+    def test_activate_all_only_matches_records_not_already_active(self, client, fake_db):
+        # Query itself is filtered to status != target -- an already-active
+        # record's updated_at must never be touched by activate_all.
+        already_active_id = _hook(fake_db, "A", status="active")
+        _hook(fake_db, "B", status="inactive")
+        before = fake_db["caption_hooks"].find_one({"_id": already_active_id})["updated_at"]
+
+        r = client.post("/api/admin/referral/share-content/bulk-action",
+                         json={"resource_type": "hook", "action": "activate_all"})
+        body = r.get_json()
+        assert body["total_count"] == 2
+        assert body["matched_count"] == 1  # only B was eligible
+        assert body["modified_count"] == 1
+        assert body["active_count"] == 2
+
+        after = fake_db["caption_hooks"].find_one({"_id": already_active_id})["updated_at"]
+        assert after == before, "already-active record's updated_at must not change"
+
+    def test_repeated_activate_all_call_performs_no_further_mutation(self, client, fake_db):
+        _hook(fake_db, "A", status="active")
+        _hook(fake_db, "B", status="inactive")
+        r1 = client.post("/api/admin/referral/share-content/bulk-action",
+                          json={"resource_type": "hook", "action": "activate_all"})
+        assert r1.get_json()["modified_count"] == 1
+        assert r1.get_json()["active_count"] == 2
+
+        snapshot = {d["_id"]: dict(d) for d in fake_db["caption_hooks"].find({})}
+
+        r2 = client.post("/api/admin/referral/share-content/bulk-action",
+                          json={"resource_type": "hook", "action": "activate_all"})
+        body2 = r2.get_json()
+        assert body2["matched_count"] == 0
+        assert body2["modified_count"] == 0
+        assert body2["active_count"] == 2
+        assert body2["total_count"] == 2
+
+        after = {d["_id"]: dict(d) for d in fake_db["caption_hooks"].find({})}
+        assert after == snapshot, "a repeated identical request must not mutate any document"
+
+    def test_repeated_deactivate_all_call_performs_no_further_mutation(self, client, fake_db):
+        _hook(fake_db, "A", status="active")
+        _hook(fake_db, "B", status="inactive")
+        r1 = client.post("/api/admin/referral/share-content/bulk-action",
+                          json={"resource_type": "hook", "action": "deactivate_all"})
+        assert r1.get_json()["modified_count"] == 1
+        assert r1.get_json()["active_count"] == 0
+
+        snapshot = {d["_id"]: dict(d) for d in fake_db["caption_hooks"].find({})}
+
+        r2 = client.post("/api/admin/referral/share-content/bulk-action",
+                          json={"resource_type": "hook", "action": "deactivate_all"})
+        body2 = r2.get_json()
+        assert body2["matched_count"] == 0
+        assert body2["modified_count"] == 0
+        assert body2["active_count"] == 0
+
+        after = {d["_id"]: dict(d) for d in fake_db["caption_hooks"].find({})}
+        assert after == snapshot, "a repeated identical request must not mutate any document"
+
+    def test_repeated_activate_all_playback_performs_no_further_mutation(self, client, fake_db):
+        _playback(fake_db, "Playback01", status="inactive")
+        _playback(fake_db, "Playback02", status="active")
+        r1 = client.post("/api/admin/referral/share-content/bulk-action",
+                          json={"resource_type": "playback_link", "action": "activate_all"})
+        assert r1.get_json()["modified_count"] == 1
+        r2 = client.post("/api/admin/referral/share-content/bulk-action",
+                          json={"resource_type": "playback_link", "action": "activate_all"})
+        body2 = r2.get_json()
+        assert body2["matched_count"] == 0
+        assert body2["modified_count"] == 0
+        assert body2["active_count"] == 2
+
+    def test_deactivate_all_hooks_returns_matched_and_modified_counts(self, client, fake_db):
+        _hook(fake_db, "A", status="active")
+        _hook(fake_db, "B", status="active")
+        _hook(fake_db, "C", status="inactive")
+        r = client.post("/api/admin/referral/share-content/bulk-action",
+                         json={"resource_type": "hook", "action": "deactivate_all"})
+        body = r.get_json()
+        assert body["total_count"] == 3
+        assert body["matched_count"] == 2  # only the two active ones were eligible
+        assert body["modified_count"] == 2
+        assert body["active_count"] == 0
+        assert all(h["status"] == "inactive" for h in fake_db["caption_hooks"].find({}))
+
+    def test_deactivate_all_playback_scoped_to_playback_only(self, client, fake_db):
+        _hook(fake_db, "A", status="active")
+        _playback(fake_db, "Playback01", status="active")
+        r = client.post("/api/admin/referral/share-content/bulk-action",
+                         json={"resource_type": "playback_link", "action": "deactivate_all"})
+        body = r.get_json()
+        assert body["matched_count"] == 1
+        assert body["active_count"] == 0
+        assert fake_db["caption_hooks"].find_one({"text": "A"})["status"] == "active"
+
+    def test_invalid_resource_type_rejected(self, client, fake_db):
+        r = client.post("/api/admin/referral/share-content/bulk-action",
+                         json={"resource_type": "share_generations", "action": "activate_all"})
+        assert r.status_code == 400
+        assert r.get_json()["code"] == "invalid_resource_type"
+        # No collection-name injection: the whitelisted map is the only route in.
+        assert "share_generations" not in rsc.RESOURCE_COLLECTIONS
+
+    def test_invalid_action_rejected(self, client, fake_db):
+        r = client.post("/api/admin/referral/share-content/bulk-action",
+                         json={"resource_type": "hook", "action": "delete_all"})
+        assert r.status_code == 400
+        assert r.get_json()["code"] == "invalid_action"
+
+    def test_unauthenticated_bulk_action_rejected(self, fake_db, monkeypatch):
+        from flask import jsonify as flask_jsonify
+        monkeypatch.setattr(
+            rsc, "_require_admin", lambda: (None, (flask_jsonify({"status": "error", "code": "auth_failed"}), 401))
+        )
+        flask_app = Flask(__name__)
+        flask_app.register_blueprint(rsc.referral_share_content_bp)
+        client = flask_app.test_client()
+        r = client.post("/api/admin/referral/share-content/bulk-action",
+                         json={"resource_type": "hook", "action": "activate_all"})
+        assert r.status_code == 401
+
+
+class TestBulkDeleteSelected:
+    def test_delete_selected_valid_ids(self, client, fake_db):
+        id1 = _hook(fake_db, "A")
+        id2 = _hook(fake_db, "B")
+        id3 = _hook(fake_db, "C")
+        r = client.post("/api/admin/referral/share-content/bulk-action", json={
+            "resource_type": "hook", "action": "delete_selected",
+            "selected_ids": [str(id1), str(id2)],
+        })
+        assert r.status_code == 200
+        body = r.get_json()
+        assert body["matched_count"] == 2
+        assert body["deleted_count"] == 2
+        assert fake_db["caption_hooks"].count_documents({}) == 1
+        assert fake_db["caption_hooks"].find_one({"_id": id3}) is not None
+
+    def test_delete_selected_playback_valid_ids(self, client, fake_db):
+        id1 = _playback(fake_db, "Playback01")
+        id2 = _playback(fake_db, "Playback02")
+        r = client.post("/api/admin/referral/share-content/bulk-action", json={
+            "resource_type": "playback_link", "action": "delete_selected",
+            "selected_ids": [str(id1), str(id2)],
+        })
+        body = r.get_json()
+        assert body["deleted_count"] == 2
+        assert fake_db["playback_pool"].count_documents({}) == 0
+
+    def test_empty_selection_rejected(self, client, fake_db):
+        r = client.post("/api/admin/referral/share-content/bulk-action", json={
+            "resource_type": "hook", "action": "delete_selected", "selected_ids": [],
+        })
+        assert r.status_code == 400
+        assert r.get_json()["code"] == "empty_selection"
+
+    def test_missing_selected_ids_rejected(self, client, fake_db):
+        r = client.post("/api/admin/referral/share-content/bulk-action", json={
+            "resource_type": "hook", "action": "delete_selected",
+        })
+        assert r.status_code == 400
+        assert r.get_json()["code"] == "empty_selection"
+
+    def test_malformed_id_rejected_no_partial_delete(self, client, fake_db):
+        id1 = _hook(fake_db, "A")
+        r = client.post("/api/admin/referral/share-content/bulk-action", json={
+            "resource_type": "hook", "action": "delete_selected",
+            "selected_ids": [str(id1), "not-an-object-id"],
+        })
+        assert r.status_code == 400
+        assert r.get_json()["code"] == "malformed_ids"
+        # The valid id in the same batch must NOT have been deleted.
+        assert fake_db["caption_hooks"].find_one({"_id": id1}) is not None
+
+    def test_duplicate_ids_rejected_no_partial_delete(self, client, fake_db):
+        id1 = _hook(fake_db, "A")
+        r = client.post("/api/admin/referral/share-content/bulk-action", json={
+            "resource_type": "hook", "action": "delete_selected",
+            "selected_ids": [str(id1), str(id1)],
+        })
+        assert r.status_code == 400
+        assert r.get_json()["code"] == "duplicate_ids"
+        assert fake_db["caption_hooks"].find_one({"_id": id1}) is not None
+
+    def test_unknown_id_rejected_no_partial_delete(self, client, fake_db):
+        id1 = _hook(fake_db, "A")
+        unknown = "0" * 24
+        r = client.post("/api/admin/referral/share-content/bulk-action", json={
+            "resource_type": "hook", "action": "delete_selected",
+            "selected_ids": [str(id1), unknown],
+        })
+        assert r.status_code == 400
+        assert r.get_json()["code"] == "unknown_ids"
+        # Nothing deleted -- including the one valid id in the batch.
+        assert fake_db["caption_hooks"].find_one({"_id": id1}) is not None
+
+    def test_cross_resource_id_rejected(self, client, fake_db):
+        # FakeCollection ids are per-collection sequential counters starting
+        # at 1, so a hook and a playback record can coincidentally get the
+        # *same* ObjectId value (harmless in prod against real Mongo, where
+        # ids are globally unique). Insert a throwaway playback record first
+        # so the id under test is guaranteed to not already coincide with
+        # any id in the hooks collection.
+        hook_id = _hook(fake_db, "A")
+        _playback(fake_db, "filler")
+        playback_id = _playback(fake_db, "Playback01")
+        assert hook_id != playback_id
+        assert fake_db["caption_hooks"].find_one({"_id": playback_id}) is None
+        # A real, existing id -- but from the *other* collection.
+        r = client.post("/api/admin/referral/share-content/bulk-action", json={
+            "resource_type": "hook", "action": "delete_selected",
+            "selected_ids": [str(hook_id), str(playback_id)],
+        })
+        assert r.status_code == 400
+        assert r.get_json()["code"] == "unknown_ids"
+        assert fake_db["caption_hooks"].find_one({"_id": hook_id}) is not None
+        assert fake_db["playback_pool"].find_one({"_id": playback_id}) is not None
+
+    def test_delete_selected_uses_single_bulk_operation(self, client, fake_db, monkeypatch):
+        id1 = _hook(fake_db, "A")
+        id2 = _hook(fake_db, "B")
+        calls = []
+        orig_delete_many = fake_db["caption_hooks"].delete_many
+        def spy(query):
+            calls.append(query)
+            return orig_delete_many(query)
+        monkeypatch.setattr(fake_db["caption_hooks"], "delete_many", spy)
+        r = client.post("/api/admin/referral/share-content/bulk-action", json={
+            "resource_type": "hook", "action": "delete_selected",
+            "selected_ids": [str(id1), str(id2)],
+        })
+        assert r.status_code == 200
+        assert len(calls) == 1  # one delete_many call, never a per-id loop
+
+
+class TestIndividualDeleteSharesBulkService:
+    def test_individual_hook_delete_uses_shared_service(self, client, fake_db, monkeypatch):
+        hook_id = _hook(fake_db, "A")
+        calls = []
+        orig = rsc.delete_resource_ids
+        def spy(resource_type, raw_ids, *, admin):
+            calls.append((resource_type, raw_ids))
+            return orig(resource_type, raw_ids, admin=admin)
+        monkeypatch.setattr(rsc, "delete_resource_ids", spy)
+        r = client.delete(f"/api/admin/referral/share-content/hooks/{hook_id}")
+        assert r.status_code == 200
+        assert calls == [("hook", [str(hook_id)])]
+
+    def test_individual_playback_delete_uses_shared_service(self, client, fake_db, monkeypatch):
+        pid = _playback(fake_db, "Playback01")
+        calls = []
+        orig = rsc.delete_resource_ids
+        def spy(resource_type, raw_ids, *, admin):
+            calls.append((resource_type, raw_ids))
+            return orig(resource_type, raw_ids, admin=admin)
+        monkeypatch.setattr(rsc, "delete_resource_ids", spy)
+        r = client.delete(f"/api/admin/referral/share-content/playback/{pid}")
+        assert r.status_code == 200
+        assert calls == [("playback_link", [str(pid)])]
+
+    def test_individual_delete_malformed_id_still_400(self, client, fake_db):
+        r = client.delete("/api/admin/referral/share-content/hooks/not-an-id")
+        assert r.status_code == 400
+        assert r.get_json()["code"] == "invalid_id"
+
+    def test_individual_delete_missing_id_still_404(self, client, fake_db):
+        r = client.delete("/api/admin/referral/share-content/hooks/" + "0" * 24)
+        assert r.status_code == 404
+        assert r.get_json()["code"] == "not_found"
+
+    def test_individual_activate_deactivate_still_work(self, client, fake_db):
+        # Existing individual controls must keep working unmodified by this change.
+        hook_id = _hook(fake_db, "A", status="active")
+        r = client.post(f"/api/admin/referral/share-content/hooks/{hook_id}/deactivate")
+        assert r.status_code == 200
+        assert fake_db["caption_hooks"].find_one({"_id": hook_id})["status"] == "inactive"
+        pid = _playback(fake_db, "Playback01", status="active")
+        r = client.post(f"/api/admin/referral/share-content/playback/{pid}/deactivate")
+        assert r.status_code == 200
+        assert fake_db["playback_pool"].find_one({"_id": pid})["status"] == "inactive"
+
+
+class TestBulkActionAuditLogging:
+    def test_delete_selected_success_logged(self, client, fake_db, caplog):
+        import logging
+        id1 = _hook(fake_db, "A")
+        with caplog.at_level(logging.INFO, logger="referral_share_content"):
+            client.post("/api/admin/referral/share-content/bulk-action", json={
+                "resource_type": "hook", "action": "delete_selected", "selected_ids": [str(id1)],
+            })
+        messages = [r.message for r in caplog.records]
+        assert any("[SHARE_CONTENT][ADMIN_ACTION]" in m and "action=delete_selected" in m and "success=True" in m
+                   for m in messages)
+
+    def test_delete_selected_failure_logged_with_reason(self, client, fake_db, caplog):
+        import logging
+        with caplog.at_level(logging.WARNING, logger="referral_share_content"):
+            client.post("/api/admin/referral/share-content/bulk-action", json={
+                "resource_type": "hook", "action": "delete_selected", "selected_ids": [],
+            })
+        messages = [r.message for r in caplog.records]
+        assert any("success=False" in m and "reason=empty_selection" in m for m in messages)
+
+    def test_deactivate_all_logged_with_counts(self, client, fake_db, caplog):
+        import logging
+        _hook(fake_db, "A", status="active")
+        _hook(fake_db, "B", status="active")
+        with caplog.at_level(logging.INFO, logger="referral_share_content"):
+            client.post("/api/admin/referral/share-content/bulk-action",
+                         json={"resource_type": "hook", "action": "deactivate_all"})
+        messages = [r.message for r in caplog.records]
+        assert any("action=deactivate_all" in m and "result_count=2" in m for m in messages)
+
+
+class TestPoolEmptyAdminLogging:
+    def _patch_invite_link(self, monkeypatch, link="https://t.me/+canonicalHash"):
+        import types
+        import sys
+        fake_main = types.ModuleType("main")
+        fake_main.get_or_create_referral_invite_link_sync = lambda user_id, username="": link
+        monkeypatch.setitem(sys.modules, "main", fake_main)
+
+    def test_generate_logs_hook_pool_empty(self, fake_db, monkeypatch, caplog):
+        import logging
+        self._patch_invite_link(monkeypatch)
+        _playback(fake_db, "Playback01", status="active")
+        with caplog.at_level(logging.WARNING, logger="referral_share_content"):
+            result = rsc.generate_share_package(123, "user")
+        assert result["ok"] is True
+        assert result["hook_text"] is None
+        messages = [r.message for r in caplog.records]
+        assert any("[SHARE_CONTENT][POOL_EMPTY]" in m and "hook_pool_empty=True" in m and "playback_pool_empty=False" in m
+                   for m in messages)
+
+    def test_generate_logs_playback_pool_empty(self, fake_db, monkeypatch, caplog):
+        import logging
+        self._patch_invite_link(monkeypatch)
+        _hook(fake_db, "A", status="active")
+        with caplog.at_level(logging.WARNING, logger="referral_share_content"):
+            result = rsc.generate_share_package(456, "user2")
+        assert result["ok"] is True
+        assert result["playback_url"] is None
+        messages = [r.message for r in caplog.records]
+        assert any("[SHARE_CONTENT][POOL_EMPTY]" in m and "playback_pool_empty=True" in m and "hook_pool_empty=False" in m
+                   for m in messages)
+
+    def test_generate_does_not_log_pool_empty_when_both_pools_populated(self, fake_db, monkeypatch, caplog):
+        import logging
+        self._patch_invite_link(monkeypatch)
+        _hook(fake_db, "A", status="active")
+        _playback(fake_db, "Playback01", status="active")
+        with caplog.at_level(logging.WARNING, logger="referral_share_content"):
+            result = rsc.generate_share_package(789, "user3")
+        assert result["ok"] is True
+        messages = [r.message for r in caplog.records]
+        assert not any("[SHARE_CONTENT][POOL_EMPTY]" in m for m in messages)
+
+    def test_generate_logs_both_pools_empty_independently_and_still_succeeds(self, fake_db, monkeypatch, caplog):
+        # Explicit product decision (superseding an earlier draft requirement
+        # to hard-fail generation when a pool is empty): referral sharing
+        # must stay available even with *both* pools empty, because
+        # disabling the whole Creator Centre has more business impact than
+        # omitting one optional content component. Generation still
+        # succeeds; the admin gets a WARNING identifying each empty pool
+        # independently, not a single generic flag.
+        import logging
+        self._patch_invite_link(monkeypatch, link="https://t.me/+abc123")
+        with caplog.at_level(logging.WARNING, logger="referral_share_content"):
+            result = rsc.generate_share_package(999, "user4")
+        assert result["ok"] is True
+        assert result["hook_text"] is None
+        assert result["playback_url"] is None
+        assert result["invite_link"] == "https://t.me/+abc123"
+        messages = [r.message for r in caplog.records]
+        assert any("[SHARE_CONTENT][POOL_EMPTY]" in m and "hook_pool_empty=True" in m and "playback_pool_empty=True" in m
+                   for m in messages)
+
+    def test_generate_message_is_well_formed_when_both_pools_empty(self, fake_db, monkeypatch):
+        # The referral-share caption (built the same way for every surface)
+        # must always be a clean, valid post -- never crash, never contain
+        # literal "undefined"/"null" text, never a duplicated referral link,
+        # and never a dangling blank-line placeholder where the omitted
+        # hook/playback section used to be.
+        self._patch_invite_link(monkeypatch, link="https://t.me/+abc123")
+        result = rsc.generate_share_package(1000, "user5")
+        assert result["ok"] is True
+        message = result["message"]
+        assert "undefined" not in message.lower()
+        assert "null" not in message.lower()
+        assert message.count("https://t.me/+abc123") == 1
+        assert "\n\n\n" not in message  # no orphan double-blank-line gap
+        assert not message.startswith("\n")
+        assert message.strip() == message
+        assert message.endswith("https://t.me/+abc123")
+
+    def test_creator_share_text_is_well_formed_when_both_pools_empty(self, fake_db, monkeypatch):
+        # Same well-formedness guarantee for the Creator Share Centre's
+        # copy-ready text (build_creator_share_text), which independently
+        # omits hook/playback exactly like build_referral_share_caption.
+        share_text = rsc.build_creator_share_text(
+            hook_text=None, playback_url=None, referral_link="https://t.me/+abc123",
+        )
+        assert "undefined" not in share_text.lower()
+        assert "null" not in share_text.lower()
+        assert share_text.count("https://t.me/+abc123") == 1
+        assert "\n\n\n" not in share_text
+        assert share_text.strip() == share_text
+        assert share_text.endswith("https://t.me/+abc123")
+
 
 class TestHookSelection:
     def test_only_active_hooks_selected(self, fake_db):

@@ -604,8 +604,27 @@
               <button data-status="inactive">Inactive</button>
             </div>
           </div>
-          <div class="section-title" style="margin-bottom:8px;">Caption Hooks</div>
-          <div id="rsc-hooks-body"></div>
+          <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:center;justify-content:space-between;margin-bottom:8px;">
+            <div class="section-title" style="margin-bottom:0;">Caption Hooks</div>
+            <div class="sub" id="rsc-hooks-active-summary">Active: — / —</div>
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px;">
+            <label class="sub" style="display:flex;align-items:center;gap:6px;">
+              <input type="checkbox" id="rsc-hooks-select-all" />
+              Select all
+            </label>
+            <select class="filter-input" id="rsc-hooks-bulk-select" style="margin:0;max-width:200px;">
+              <option value="">Bulk Actions…</option>
+              <option value="activate_all">Activate all</option>
+              <option value="deactivate_all">Deactivate all</option>
+              <option value="delete_selected">Delete selected</option>
+            </select>
+            <button class="btn primary" id="rsc-hooks-bulk-apply-btn" disabled>Apply</button>
+            <span class="sub" id="rsc-hooks-selected-count"></span>
+          </div>
+          <div style="overflow-x:auto;">
+            <div id="rsc-hooks-body"></div>
+          </div>
         </div>
 
         <div id="rsc-playback-panel" class="hidden">
@@ -632,8 +651,27 @@
               <button data-status="inactive">Inactive</button>
             </div>
           </div>
-          <div class="section-title" style="margin-bottom:8px;">Playback Pool</div>
-          <div id="rsc-playback-body"></div>
+          <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:center;justify-content:space-between;margin-bottom:8px;">
+            <div class="section-title" style="margin-bottom:0;">Playback Pool</div>
+            <div class="sub" id="rsc-playback-active-summary">Active: — / —</div>
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px;">
+            <label class="sub" style="display:flex;align-items:center;gap:6px;">
+              <input type="checkbox" id="rsc-playback-select-all" />
+              Select all
+            </label>
+            <select class="filter-input" id="rsc-playback-bulk-select" style="margin:0;max-width:200px;">
+              <option value="">Bulk Actions…</option>
+              <option value="activate_all">Activate all</option>
+              <option value="deactivate_all">Deactivate all</option>
+              <option value="delete_selected">Delete selected</option>
+            </select>
+            <button class="btn primary" id="rsc-playback-bulk-apply-btn" disabled>Apply</button>
+            <span class="sub" id="rsc-playback-selected-count"></span>
+          </div>
+          <div style="overflow-x:auto;">
+            <div id="rsc-playback-body"></div>
+          </div>
         </div>
 
         <div id="rsc-creators-panel" class="hidden">

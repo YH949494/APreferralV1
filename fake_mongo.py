@@ -165,6 +165,27 @@ class FakeCollection:
                 return type("Result", (), {"deleted_count": 1})()
         return type("Result", (), {"deleted_count": 0})()
 
+    def delete_many(self, query: dict):
+        query = query or {}
+        keep = [d for d in self._docs if not _matches(d, query)]
+        deleted = len(self._docs) - len(keep)
+        self._docs = keep
+        return type("Result", (), {"deleted_count": deleted})()
+
+    def update_many(self, query: dict, update: dict):
+        query = query or {}
+        matched = 0
+        modified = 0
+        for i, doc in enumerate(self._docs):
+            if not _matches(doc, query):
+                continue
+            matched += 1
+            new_doc = _apply_update(doc, update)
+            if new_doc != doc:
+                modified += 1
+            self._docs[i] = new_doc
+        return type("Result", (), {"matched_count": matched, "modified_count": modified})()
+
     def update_one(self, query: dict, update: dict, upsert=False):
         for i, doc in enumerate(self._docs):
             if _matches(doc, query):
