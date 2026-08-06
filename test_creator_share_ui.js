@@ -61,18 +61,33 @@ function makeElement(id) {
     _text: "",
     disabled: false,
     style: {},
+    scrollIntoViewCalls: [],
     get textContent() {
       return this._text;
     },
     set textContent(v) {
       this._text = v;
     },
+    scrollIntoView(opts) {
+      this.scrollIntoViewCalls.push(opts);
+    },
     addEventListener(event, handler) {
       listeners[event] = listeners[event] || [];
       listeners[event].push(handler);
     },
+    // Real click events carry a real preventDefault(); tests track whether
+    // it was called via `_lastEvent.defaultPrevented`.
     _trigger(event) {
-      (listeners[event] || []).forEach((h) => h({ target: this }));
+      const evt = {
+        target: this,
+        defaultPrevented: false,
+        preventDefault() {
+          this.defaultPrevented = true;
+        },
+      };
+      this._lastEvent = evt;
+      (listeners[event] || []).forEach((h) => h(evt));
+      return evt;
     },
   };
 }
@@ -163,8 +178,8 @@ function buildSandbox({ initData = "tg_init_data_ok", fetchImpl, clipboardWriteT
   const sandbox = {
     window: {
       Telegram: { WebApp: telegramWebApp },
-      open: (url, target) => {
-        windowOpenCalls.push(url);
+      open: (url, target, features) => {
+        windowOpenCalls.push({ url, target, features });
         return windowOpenResult === undefined ? {} : windowOpenResult;
       },
     },
@@ -271,6 +286,136 @@ test("Generate renders the post split into caption/playback/CTA/link and hides G
   const generateCall = fetchCalls.find((c) => c.url.includes("/api/creator/share/generate"));
   assert.ok(generateCall, "generate endpoint was called");
   assert.equal(JSON.parse(generateCall.opts.body).platform, "generic");
+});
+
+test("Get My Share Post reveals the card, smooth-scrolls it into view, copies share_text exactly once, and shows the copied confirmation", async () => {
+  let writeTextCalls = [];
+  const { elements, fetchCalls } = buildSandbox({
+    clipboardWriteText: (text) => {
+      writeTextCalls.push(text);
+      return Promise.resolve();
+    },
+    fetchImpl: (url) => {
+      if (url.includes("/api/creator/share/status")) return statusOkResponse();
+      if (url.includes("/api/creator/share/generate")) return generateOkResponse();
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ status: "ok" }) });
+    },
+  });
+
+  await flush();
+  assert.equal(elements["package-card"].classList.contains("hidden"), true, "card starts hidden");
+
+  elements["btn-generate"]._trigger("click");
+  await flush();
+  await flush();
+
+  assert.equal(elements["package-card"].classList.contains("hidden"), false, "card must be revealed immediately after generation");
+  assert.equal(
+    elements["package-card"].scrollIntoViewCalls.length,
+    1,
+    "the generated card must be smooth-scrolled into view exactly once"
+  );
+  assert.equal(elements["package-card"].scrollIntoViewCalls[0].behavior, "smooth");
+
+  assert.equal(writeTextCalls.length, 1, "successful generation must trigger exactly one clipboard write");
+  assert.equal(
+    writeTextCalls[0],
+    "Hook line\nhttps://rx.apreplay.com/Abc123\n\nMore player replays and rewards inside AdvantPlay:\nhttps://t.me/+abc",
+    "clipboard write must carry the complete generated share_text"
+  );
+
+  assert.equal(elements["generate-status"].textContent, "✓ Post Copied");
+  assert.equal(elements["generate-status"].classList.contains("error"), false);
+
+  const copiedCall = fetchCalls.find((c) => c.url.includes("/copied"));
+  assert.ok(copiedCall, "the automatic copy should record the copied event, same as a manual copy");
+});
+
+test("clipboard failure on auto-copy still reveals the post and keeps the manual Copy Post button functional", async () => {
+  let attempt = 0;
+  const { elements, fetchCalls } = buildSandbox({
+    clipboardWriteText: (text) => {
+      attempt += 1;
+      // First (automatic) attempt fails; a later manual retry succeeds.
+      return attempt === 1 ? Promise.reject(new Error("denied")) : Promise.resolve();
+    },
+    execCommandResult: false,
+    fetchImpl: (url) => {
+      if (url.includes("/api/creator/share/status")) return statusOkResponse();
+      if (url.includes("/api/creator/share/generate")) return generateOkResponse({ package_id: "pkg_retry" });
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ status: "ok" }) });
+    },
+  });
+
+  await flush();
+  elements["btn-generate"]._trigger("click");
+  await flush();
+  await flush();
+
+  assert.equal(elements["package-card"].classList.contains("hidden"), false, "post must still be shown even though the auto-copy failed");
+  assert.notEqual(
+    elements["generate-status"].textContent,
+    "✓ Post Copied",
+    "must never claim success when the automatic copy failed"
+  );
+  assert.equal(elements["btn-copy"].textContent, "Copy Post", "manual Copy Post button must remain available");
+
+  elements["btn-copy"]._trigger("click");
+  await flush();
+  await flush();
+
+  assert.equal(elements["btn-copy"].textContent, "✓ Copied — Go Share It", "manual retry via Copy Post must still work");
+  const copiedCall = fetchCalls.find((c) => c.url.includes("/copied"));
+  assert.ok(copiedCall, "the successful manual retry should record the copied event");
+});
+
+test("repeated clicks on Get My Share Post while a request is in flight do not send duplicate generation requests", async () => {
+  let resolveGenerate;
+  const generatePromise = new Promise((resolve) => {
+    resolveGenerate = resolve;
+  });
+
+  const { elements, fetchCalls } = buildSandbox({
+    fetchImpl: (url) => {
+      if (url.includes("/api/creator/share/status")) return statusOkResponse();
+      if (url.includes("/api/creator/share/generate")) return generatePromise;
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ status: "ok" }) });
+    },
+  });
+
+  await flush();
+  elements["btn-generate"]._trigger("click");
+  elements["btn-generate"]._trigger("click");
+  elements["btn-generate"]._trigger("click");
+  await flush();
+  await flush();
+
+  const generateCallsWhileInFlight = fetchCalls.filter((c) => c.url.includes("/api/creator/share/generate"));
+  assert.equal(generateCallsWhileInFlight.length, 1, "clicking Get My Share Post repeatedly must not fire duplicate generate requests");
+
+  resolveGenerate({
+    ok: true,
+    status: 200,
+    json: () =>
+      Promise.resolve({
+        status: "ok",
+        package_id: "pkg_once",
+        hook_text: null,
+        playback_url: null,
+        referral_link: "https://t.me/+once",
+        share_text: "More player replays and rewards inside AdvantPlay:\nhttps://t.me/+once",
+      }),
+  });
+  await flush();
+  await flush();
+
+  // A further click after the first request has resolved is a new, legitimate request.
+  elements["btn-try-another"]._trigger("click");
+  await flush();
+  await flush();
+
+  const allGenerateCalls = fetchCalls.filter((c) => c.url.includes("/api/creator/share/generate"));
+  assert.equal(allGenerateCalls.length, 2, "a click after the in-flight request settles is a separate, legitimate request");
 });
 
 test("empty caption/playback rows are hidden without showing the literal word None", async () => {
@@ -381,16 +526,19 @@ test("clipboard fallback (execCommand) works when navigator.clipboard is unavail
   await flush();
   await flush();
 
+  // Generation already triggered one automatic copy via the fallback path.
+  assert.equal(createdTextareas.length, 1, "auto-copy after generation must use the fallback textarea path");
+
   elements["btn-copy"]._trigger("click");
   await flush();
   await flush();
 
-  assert.equal(createdTextareas.length, 1, "fallback path must create a temporary textarea");
+  assert.equal(createdTextareas.length, 2, "manual Copy Post must also use the fallback textarea path");
   const copiedCall = fetchCalls.find((c) => c.url.includes("/copied"));
   assert.ok(copiedCall, "fallback copy success should still record the copied event");
 });
 
-test("Telegram share success clears any prior error and records the share-clicked event", async () => {
+test("Telegram share inside Telegram WebApp uses openTelegramLink, with the referral link only in url= and never duplicated", async () => {
   let openedUrl = null;
   const { elements, fetchCalls } = buildSandbox({
     openTelegramLink: (url) => {
@@ -412,16 +560,47 @@ test("Telegram share success clears any prior error and records the share-clicke
   await flush();
 
   assert.ok(openedUrl, "openTelegramLink should have been called");
-  assert.ok(!openedUrl.includes("&url="), "share URL must not carry a separate url= param");
-  const occurrences = openedUrl.split("t.me%2F%2Babc").length - 1;
-  assert.equal(occurrences, 1, "the referral link must appear exactly once in the composed share URL");
+  assert.ok(openedUrl.startsWith("https://t.me/share/url?"), "must use the t.me/share/url composer");
+
+  const encodedLink = encodeURIComponent("https://t.me/+abc");
+  assert.ok(openedUrl.includes("url=" + encodedLink), "the personal referral link must be carried in the url= param");
+  assert.ok(!openedUrl.includes("text=" + encodeURIComponent("https://t.me/+abc")), "the referral link must not also be embedded inside text=");
+
+  const occurrences = openedUrl.split(encodedLink).length - 1;
+  assert.equal(occurrences, 1, "the referral link must appear exactly once in the composed share URL (no duplication)");
   assert.equal(elements["share-status"].textContent, "");
 
   const clickCall = fetchCalls.find((c) => c.url.includes("/share-clicked"));
   assert.ok(clickCall, "share-clicked should be recorded before/around opening the Telegram share action");
 });
 
-test("Telegram share failure (no WebApp bridge, popup blocked) shows an inline error", async () => {
+test("Telegram share outside Telegram (ordinary browser) falls back to window.open with noopener,noreferrer", async () => {
+  const { elements, windowOpenCalls } = buildSandbox({
+    openTelegramLink: undefined, // no Telegram bridge => ordinary browser path
+    windowOpenResult: { closed: false }, // simulates a successful popup
+    fetchImpl: (url) => {
+      if (url.includes("/api/creator/share/status")) return statusOkResponse();
+      if (url.includes("/api/creator/share/generate")) return generateOkResponse();
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ status: "ok" }) });
+    },
+  });
+
+  await flush();
+  elements["btn-generate"]._trigger("click");
+  await flush();
+  await flush();
+
+  elements["btn-telegram-share"]._trigger("click");
+  await flush();
+
+  assert.equal(windowOpenCalls.length, 1, "window.open must be used when no Telegram WebApp bridge is present");
+  assert.ok(windowOpenCalls[0].url.startsWith("https://t.me/share/url?"));
+  assert.equal(windowOpenCalls[0].target, "_blank");
+  assert.equal(windowOpenCalls[0].features, "noopener,noreferrer");
+  assert.equal(elements["share-status"].textContent, "", "no fallback error when the popup opens successfully");
+});
+
+test("Telegram share failure (no WebApp bridge, popup blocked) shows a visible fallback message", async () => {
   const { elements } = buildSandbox({
     openTelegramLink: undefined,
     windowOpenResult: null, // simulates a blocked popup
@@ -441,6 +620,77 @@ test("Telegram share failure (no WebApp bridge, popup blocked) shows an inline e
   await flush();
 
   assert.match(elements["share-status"].textContent, /couldn't open telegram/i);
+});
+
+test("Telegram share click handler calls preventDefault so it can't submit a form or reload the Mini App", async () => {
+  const { elements } = buildSandbox({
+    openTelegramLink: (url) => {},
+    fetchImpl: (url) => {
+      if (url.includes("/api/creator/share/status")) return statusOkResponse();
+      if (url.includes("/api/creator/share/generate")) return generateOkResponse();
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ status: "ok" }) });
+    },
+  });
+
+  await flush();
+  elements["btn-generate"]._trigger("click");
+  await flush();
+  await flush();
+
+  const evt = elements["btn-telegram-share"]._trigger("click");
+  await flush();
+
+  assert.equal(evt.defaultPrevented, true, "telegramShare must call event.preventDefault()");
+});
+
+test("Telegram share caption and referral link are fully URL-encoded, including special characters", async () => {
+  let openedUrl = null;
+  const { elements } = buildSandbox({
+    openTelegramLink: (url) => {
+      openedUrl = url;
+    },
+    fetchImpl: (url) => {
+      if (url.includes("/api/creator/share/status")) return statusOkResponse();
+      if (url.includes("/api/creator/share/generate")) {
+        return generateOkResponse({
+          hook_text: "Big win & huge payout?! 100% real 🎉",
+          playback_url: "https://rx.apreplay.com/Abc 123?x=y&z=1",
+          referral_link: "https://t.me/+abc?start=ref&x=1",
+          share_text: "irrelevant for this test",
+        });
+      }
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ status: "ok" }) });
+    },
+  });
+
+  await flush();
+  elements["btn-generate"]._trigger("click");
+  await flush();
+  await flush();
+
+  elements["btn-telegram-share"]._trigger("click");
+  await flush();
+
+  assert.ok(openedUrl, "openTelegramLink should have been called");
+  assert.match(openedUrl, /^https:\/\/t\.me\/share\/url\?url=[^&]*&text=.*$/, "exactly one url= param and one text= param");
+
+  // Split into the two encoded param VALUES (each value is opaque to
+  // encodeURIComponent, so a literal "&" only ever appears as the one
+  // separator between url= and text=).
+  const queryString = openedUrl.slice(openedUrl.indexOf("?") + 1);
+  const urlValue = queryString.slice("url=".length, queryString.indexOf("&text="));
+  const textValue = queryString.slice(queryString.indexOf("&text=") + "&text=".length);
+
+  // Note: encodeURIComponent intentionally leaves "!" unescaped (RFC3986
+  // unreserved set), so it is not checked here.
+  ["&", "?", " ", "🎉", "="].forEach((raw) => {
+    assert.ok(!urlValue.includes(raw), `raw "${raw}" must not leak unescaped into the encoded url= value`);
+    assert.ok(!textValue.includes(raw), `raw "${raw}" must not leak unescaped into the encoded text= value`);
+  });
+
+  assert.ok(openedUrl.includes("url=" + encodeURIComponent("https://t.me/+abc?start=ref&x=1")));
+  assert.ok(openedUrl.includes(encodeURIComponent("Big win & huge payout?! 100% real 🎉")));
+  assert.ok(openedUrl.includes(encodeURIComponent("https://rx.apreplay.com/Abc 123?x=y&z=1")));
 });
 
 test("Give Me Another Post disables the buttons during the request", async () => {
