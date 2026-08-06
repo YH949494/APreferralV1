@@ -801,7 +801,7 @@ def ensure_voucher_indexes():
     welcome_analytics_events_col.create_index([("created_at", ASCENDING)])
     welcome_analytics_events_col.create_index([("event", ASCENDING), ("created_at", DESCENDING)])
     welcome_analytics_events_col.create_index([("stage", ASCENDING), ("status", ASCENDING), ("created_at", DESCENDING)])
-    db["drop_deletion_audit"].create_index([("drop_id", ASCENDING), ("at", DESCENDING)])
+    db["drop_deletion_audit"].create_index([("drop_id", ASCENDING)], unique=True, name="uniq_drop_deletion_audit_drop_id")
     try:
         welcome_analytics_events_col.create_index([("dedup_key", ASCENDING)], unique=True, sparse=True)
     except Exception:
@@ -5972,6 +5972,10 @@ def api_claim():
     if not drop:
         return jsonify({"status": "error", "code": "drop_not_found", "reason": "drop_not_found"}), 404
 
+    deletion_guard = _drop_deletion_guard(drop)
+    if deletion_guard:
+        return deletion_guard
+
     now_ref = now_utc()
     starts_at = _as_aware_utc(drop.get("startsAt"))
     ends_at = _as_aware_utc(drop.get("endsAt"))
@@ -7202,6 +7206,8 @@ def _admin_drop_summary(doc: dict, *, ref=None, skip_expired=False):
         "startsAt": starts.isoformat() if starts else None,
         "endsAt": ends.isoformat() if ends else None,
     }
+    if doc.get("deletion_status"):
+        summary["deletionStatus"] = doc.get("deletion_status")
 
     audience_type = _drop_audience_type(doc)
     if audience_type and audience_type != "public":
@@ -7662,6 +7668,9 @@ def admin_add_codes(drop_id):
     drop = db.drops.find_one({"_id": _coerce_id(drop_id)})
     if not drop:
         return jsonify({"status": "error", "code": "not_found"}), 404
+    guard = _drop_deletion_guard(drop)
+    if guard:
+        return guard
     dtype = _normalize_drop_type(drop.get("type", "pooled"))
     if dtype != "pooled":
         return jsonify({"status": "error", "code": "bad_request", "reason": "bad_type"}), 400
@@ -7724,7 +7733,18 @@ def admin_drop_actions(drop_id):
     op = data.get("op")
     drop = db.drops.find_one({"_id": _coerce_id(drop_id)})
     if not drop:
+        if op == "delete":
+            # The drops document is gone but a previous delete attempt may have died
+            # after removing some/all vouchers but before we know that for sure -
+            # recover any orphaned rows still sitting under this immutable id instead
+            # of just reporting not_found and leaving them stuck in the unique index.
+            return _admin_recover_orphan_vouchers(drop_id, user, data)
         return jsonify({"status": "error", "code": "not_found"}), 404
+
+    if op != "delete":
+        guard = _drop_deletion_guard(drop)
+        if guard:
+            return guard
 
     if op == "start_now":
         now = now_utc()
@@ -7771,6 +7791,24 @@ def admin_drop_actions(drop_id):
 
 
 _DELETE_UNSAFE_STATUSES = ["claimed", "reserved", "allocated"]
+DROP_DELETING_STATUS = "deleting"
+
+
+def _drop_deletion_guard(drop: dict):
+    """Central guard: reject write/claim/allocation ops while a drop is mid-deletion.
+
+    Returns a (response, status) tuple to short-circuit the caller, or None if the
+    drop isn't currently being deleted. Every op except "delete" itself must call
+    this right after loading the drop doc - deletion itself is exempt so a retry can
+    continue an in-progress cleanup instead of being blocked by its own flag.
+    """
+    if (drop or {}).get("deletion_status") == DROP_DELETING_STATUS:
+        return jsonify({
+            "ok": False,
+            "code": "drop_deleting",
+            "message": "This drop is currently being deleted.",
+        }), 409
+    return None
 
 
 def _drop_delete_unsafe_query(drop_id_variants):
@@ -7792,37 +7830,125 @@ def _drop_delete_unsafe_query(drop_id_variants):
     }
 
 
-def _admin_delete_drop(drop: dict, user: dict, data: dict):
-    """Delete a drop and its unclaimed voucher-code inventory.
+def _drop_delete_safe_query(drop_id_variants):
+    """Exact logical negation of _drop_delete_unsafe_query's $or, expressed as a
+    plain AND so it works the same in Mongo and stays trivially testable."""
+    return {
+        "dropId": {"$in": drop_id_variants},
+        "status": {"$nin": _DELETE_UNSAFE_STATUSES},
+        "claimedBy": None,
+        "type": {"$nin": list(PERSONALISED_TYPE_ALIASES)},
+    }
 
-    Only allowed when the authoritative claimed/reserved/attached count (recomputed
-    here from db.vouchers + voucher_claims_col, never trusting the caller) is zero.
 
-    No mongo replica-set transactions are used anywhere else in this codebase (see
-    ensure_voucher_indexes/claim paths), so this can't rely on one either. Two things
-    protect it instead:
-
-    1. Ordering: vouchers are deleted first, the drop second. If the process dies
-       between the two steps, the drop still exists with (some of) its vouchers gone -
-       a harmless, retriable state (re-running the delete just finishes the job) rather
-       than an orphan that keeps codes locked out of the global-unique `code` index.
-    2. The pre-check and the delete_many use the *same* unsafe-code predicate, so a
-       voucher that gets claimed in the gap between the check and the delete is
-       excluded from delete_many by the query itself (not just the earlier count) and
-       can never be removed by this request. After deleting, we re-count: if any
-       vouchers for this drop are still present, that gap-claim happened, and we abort
-       *before* touching the drop - the safe codes already removed stay removed (fine,
-       they were free inventory), but the drop is left in place so the admin can see
-       what happened and retry.
-    """
-    drop_id_variants = _drop_id_variants(drop["_id"])
+def _count_unsafe_and_reserved(drop_id_variants):
     unsafe_query = _drop_delete_unsafe_query(drop_id_variants)
-
     attached_codes = db.vouchers.count_documents(unsafe_query)
     reserved_locks = voucher_claims_col.count_documents({
         "drop_id": {"$in": drop_id_variants},
         "status": {"$in": ["claimed", "claimed_pending_code"]},
     })
+    return attached_codes, reserved_locks
+
+
+def _write_deletion_audit_once(*, drop_id: str, drop_name, admin: dict, request_id: str, codes_removed: int, event: str = "drop_deleted"):
+    """Idempotent audit write, deduped on the immutable drop_id (a drop can only
+    ever be deleted once, so drop_id is a stable, always-available dedup key - more
+    robust than relying on the caller to reuse the same request_id on every retry).
+    Never stores raw voucher codes, only the count removed.
+    """
+    try:
+        db["drop_deletion_audit"].update_one(
+            {"drop_id": drop_id},
+            {"$setOnInsert": {
+                "event": event,
+                "admin_id": (admin or {}).get("id"),
+                "admin_username": (admin or {}).get("usernameLower") or (admin or {}).get("username"),
+                "drop_id": drop_id,
+                "drop_name": drop_name,
+                "codes_removed": codes_removed,
+                "request_id": request_id,
+                "at": now_utc(),
+            }},
+            upsert=True,
+        )
+    except Exception:
+        try:
+            current_app.logger.exception("[admin][drops] delete_audit_failed drop_id=%s", drop_id)
+        except Exception:
+            print("[admin][drops] delete_audit_failed")
+
+
+def _continue_drop_deletion(drop: dict, drop_id_variants: list, *, request_id: str):
+    """Finish (or retry-finish) a deletion once the drop is marked deleting_status.
+
+    Deletes eligible vouchers using the same predicate that gated entry into this
+    state (so anything that slipped into an unsafe state is left untouched), then
+    only deletes the drop once verified zero vouchers remain for it. Safe to call
+    repeatedly: delete_many matches nothing once vouchers are already gone, and
+    delete_one on an already-gone drop just reports deleted_count == 0.
+    """
+    drop_id = drop["_id"]
+    vouchers_res = db.vouchers.delete_many(_drop_delete_safe_query(drop_id_variants))
+
+    remaining = db.vouchers.count_documents({"dropId": {"$in": drop_id_variants}})
+    if remaining > 0:
+        # Something became unsafe after we started deleting (the deletion guard on
+        # the claim path should prevent this, but stay defensive) - leave the drop
+        # in "deleting" state (not deleted) so nothing attached is destroyed and the
+        # situation stays visible/retriable rather than silently losing data.
+        return jsonify({
+            "status": "error",
+            "code": "codes_claimed",
+            "message": "A code is attached while deletion is in progress; drop was not deleted",
+            "claimedCount": remaining,
+            "codesRemoved": vouchers_res.deleted_count,
+        }), 409
+
+    delete_res = db.drops.delete_one({"_id": drop_id})
+    if delete_res.deleted_count == 0:
+        # Already removed by a concurrent/duplicate request finishing first.
+        return jsonify({"status": "ok", "code": "already_deleted", "codesRemoved": 0}), 200
+
+    return jsonify({
+        "status": "ok",
+        "dropId": str(drop_id),
+        "codesRemoved": vouchers_res.deleted_count,
+        "requestId": request_id,
+    }), 200
+
+
+def _admin_delete_drop(drop: dict, user: dict, data: dict):
+    """Delete a drop and its unclaimed voucher-code inventory - retryable and
+    failure-safe without Mongo transactions (none are used anywhere else in this
+    codebase; see ensure_voucher_indexes/claim paths).
+
+    State machine on the `drops` document:
+      (no deletion_status) -> validate zero claims -> mark deletion_status="deleting"
+      (atomically, so two concurrent requests can't both start a fresh flow) ->
+      delete eligible vouchers -> verify none remain -> delete the drops document.
+
+    Marking "deleting" first (before any vouchers are touched) is what makes this
+    retryable: if the process dies at any point after that flag is set, the next
+    call for the same drop_id sees deletion_status="deleting" and simply resumes
+    cleanup from _continue_drop_deletion instead of re-validating (a fresh claim
+    can't have landed in the meantime - see _drop_deletion_guard, wired into the
+    claim/allocation/start/pause/end/edit-dates paths) or leaving the drop stuck.
+    """
+    drop_id = drop["_id"]
+    drop_id_variants = _drop_id_variants(drop_id)
+    request_id = str(data.get("requestId") or "").strip() or uuid.uuid4().hex
+
+    if drop.get("deletion_status") == DROP_DELETING_STATUS:
+        # Retry of an in-progress deletion: skip straight to cleanup. Re-validating
+        # here would be wrong - the whole point of the guard on other endpoints is
+        # that nothing new can have become attached since deletion started.
+        return _continue_drop_deletion(
+            drop, drop_id_variants,
+            request_id=drop.get("deletion_request_id") or request_id,
+        )
+
+    attached_codes, reserved_locks = _count_unsafe_and_reserved(drop_id_variants)
     if attached_codes > 0 or reserved_locks > 0:
         return jsonify({
             "status": "error",
@@ -7833,56 +7959,92 @@ def _admin_delete_drop(drop: dict, user: dict, data: dict):
         }), 409
 
     total_codes = db.vouchers.count_documents({"dropId": {"$in": drop_id_variants}})
-    request_id = str(data.get("requestId") or "").strip() or uuid.uuid4().hex
+    _write_deletion_audit_once(
+        drop_id=str(drop_id),
+        drop_name=drop.get("name"),
+        admin=user,
+        request_id=request_id,
+        codes_removed=total_codes,
+    )
 
-    audit_doc = {
-        "event": "drop_deleted",
-        "admin_id": (user or {}).get("id"),
-        "admin_username": (user or {}).get("usernameLower") or (user or {}).get("username"),
-        "drop_id": str(drop["_id"]),
-        "drop_name": drop.get("name"),
-        "codes_removed": total_codes,
-        "request_id": request_id,
-        "at": now_utc(),
-    }
-    try:
-        db["drop_deletion_audit"].insert_one(audit_doc)
-    except Exception:
-        try:
-            current_app.logger.exception("[admin][drops] delete_audit_failed drop_id=%s", drop["_id"])
-        except Exception:
-            print("[admin][drops] delete_audit_failed")
+    # Conditional update: only the request that actually flips deletion_status may
+    # proceed as the "starter"; a concurrent request loses the race here and falls
+    # back to re-reading the drop and continuing the winner's in-progress cleanup.
+    mark_res = db.drops.update_one(
+        {"_id": drop_id, "deletion_status": {"$ne": DROP_DELETING_STATUS}},
+        {"$set": {
+            "deletion_status": DROP_DELETING_STATUS,
+            "deletion_started_at": now_utc(),
+            "deletion_admin_id": (user or {}).get("id"),
+            "deletion_request_id": request_id,
+        }},
+    )
+    if getattr(mark_res, "modified_count", 0) == 0:
+        current = db.drops.find_one({"_id": drop_id}) or {}
+        if current.get("deletion_status") == DROP_DELETING_STATUS:
+            return _continue_drop_deletion(
+                current, drop_id_variants,
+                request_id=current.get("deletion_request_id") or request_id,
+            )
+        # Drop vanished between our find_one and the mark attempt.
+        return jsonify({"status": "ok", "code": "already_deleted", "codesRemoved": 0}), 200
 
-    # Exact logical negation of unsafe_query's $or, expressed as a plain AND so it
-    # works the same in Mongo and stays trivially testable.
-    safe_delete_query = {
-        "dropId": {"$in": drop_id_variants},
-        "status": {"$nin": _DELETE_UNSAFE_STATUSES},
-        "claimedBy": None,
-        "type": {"$nin": list(PERSONALISED_TYPE_ALIASES)},
-    }
-    vouchers_res = db.vouchers.delete_many(safe_delete_query)
+    drop = dict(drop)
+    drop["deletion_status"] = DROP_DELETING_STATUS
+    return _continue_drop_deletion(drop, drop_id_variants, request_id=request_id)
 
-    remaining = db.vouchers.count_documents({"dropId": {"$in": drop_id_variants}})
-    if remaining > 0:
-        # A code became claimed/reserved/assigned in the gap between the check above
-        # and this delete - leave the drop intact so nothing attached is lost.
+
+def _admin_recover_orphan_vouchers(drop_id, user: dict, data: dict):
+    """Recovery path when the `drops` document is already gone but voucher rows
+    for its immutable id still exist - e.g. a previous delete died after marking
+    deletion_status but before (or partway through) removing vouchers, or after
+    removing vouchers but before removing the drops doc left nothing to resume
+    (that case is already handled by the normal retryable flow finding the drop).
+
+    Never uses the display name - only the immutable id passed in the URL, run
+    through the same _drop_id_variants() helper as every other lookup here.
+    """
+    drop_id_variants = _drop_id_variants(_coerce_id(drop_id))
+    total_codes = db.vouchers.count_documents({"dropId": {"$in": drop_id_variants}})
+    if total_codes == 0:
+        # Nothing orphaned - this id is simply already fully deleted.
+        return jsonify({"status": "ok", "code": "already_deleted", "codesRemoved": 0}), 200
+
+    attached_codes, reserved_locks = _count_unsafe_and_reserved(drop_id_variants)
+    if attached_codes > 0 or reserved_locks > 0:
         return jsonify({
             "status": "error",
             "code": "codes_claimed",
-            "message": "A code was claimed while deletion was in progress; drop was not deleted",
+            "message": "Orphaned codes for this drop are claimed, reserved, allocated, or assigned and cannot be deleted",
+            "claimedCount": attached_codes,
+            "reservedCount": reserved_locks,
+        }), 409
+
+    request_id = str(data.get("requestId") or "").strip() or uuid.uuid4().hex
+    _write_deletion_audit_once(
+        drop_id=str(_coerce_id(drop_id)),
+        drop_name=None,
+        admin=user,
+        request_id=request_id,
+        codes_removed=total_codes,
+        event="drop_orphan_recovered",
+    )
+
+    vouchers_res = db.vouchers.delete_many(_drop_delete_safe_query(drop_id_variants))
+    remaining = db.vouchers.count_documents({"dropId": {"$in": drop_id_variants}})
+    if remaining > 0:
+        return jsonify({
+            "status": "error",
+            "code": "codes_claimed",
+            "message": "A code became attached during orphan cleanup; some rows were not deleted",
             "claimedCount": remaining,
             "codesRemoved": vouchers_res.deleted_count,
         }), 409
 
-    delete_res = db.drops.delete_one({"_id": drop["_id"]})
-    if delete_res.deleted_count == 0:
-        # Already removed by a concurrent/duplicate request - idempotent no-op.
-        return jsonify({"status": "ok", "code": "already_deleted", "codesRemoved": 0}), 200
-
     return jsonify({
         "status": "ok",
-        "dropId": str(drop["_id"]),
+        "code": "orphan_recovered",
+        "dropId": str(_coerce_id(drop_id)),
         "codesRemoved": vouchers_res.deleted_count,
     }), 200
 

@@ -2867,21 +2867,23 @@
             : `${d.claimed}/${d.assigned} claimed`;
           const totalCodes = d.type === "pooled" ? (d.codesTotal || 0) : (d.assigned || 0);
           const claimedCodes = d.type === "pooled" ? Math.max(0, (d.codesTotal || 0) - (d.codesFree || 0)) : (d.claimed || 0);
+          const isDeleting = d.deletionStatus === "deleting";
+          const dis = isDeleting ? "disabled" : "";
 
           const tr = document.createElement("tr");
           tr.innerHTML = `
             <td style="text-align:left; padding:6px;">${d.name} <span style="font-size:12px;color:#666;">[${d.priority}]</span></td>
             <td>${d.type}</td>
-            <td>${d.status}</td>
+            <td>${isDeleting ? "deleting…" : d.status}</td>
             <td>${fmtKL(d.startsAt)} → ${fmtKL(d.endsAt)}</td>
             <td>${stats}</td>
             <td>
-              <button data-op="start_now" data-id="${id}">Start</button>
-              <button data-op="pause"     data-id="${id}">Pause</button>
-              <button data-op="end_now"   data-id="${id}">End</button>
-              <button type="button" class="btn btn-secondary adm-edit-dates-btn" data-id="${id}" data-name="${escapeHtml(d.name || "")}" data-starts="${escapeHtml(d.startsAt || "")}" data-ends="${escapeHtml(d.endsAt || "")}">🖊 Edit</button>
+              <button data-op="start_now" data-id="${id}" ${dis}>Start</button>
+              <button data-op="pause"     data-id="${id}" ${dis}>Pause</button>
+              <button data-op="end_now"   data-id="${id}" ${dis}>End</button>
+              <button type="button" class="btn btn-secondary adm-edit-dates-btn" data-id="${id}" data-name="${escapeHtml(d.name || "")}" data-starts="${escapeHtml(d.startsAt || "")}" data-ends="${escapeHtml(d.endsAt || "")}" ${dis}>🖊 Edit</button>
               <button type="button" class="btn btn-secondary copy-drop-id-btn" data-copy-dropid="${id}">📋 Copy ID</button>
-              <button type="button" class="btn btn-danger adm-delete-drop-btn" data-id="${id}" data-name="${escapeHtml(d.name || "")}" data-total="${totalCodes}" data-claimed="${claimedCodes}" style="background:#dc2626;color:#fff;border:none;border-radius:6px;padding:6px 10px;cursor:pointer;">🗑 Delete</button>
+              <button type="button" class="btn btn-danger adm-delete-drop-btn" data-id="${id}" data-name="${escapeHtml(d.name || "")}" data-total="${totalCodes}" data-claimed="${claimedCodes}" data-deleting="${isDeleting ? "1" : ""}" style="background:#dc2626;color:#fff;border:none;border-radius:6px;padding:6px 10px;cursor:pointer;">${isDeleting ? "⏳ Retry delete" : "🗑 Delete"}</button>
             </td>`;
           tbody.appendChild(tr);
         });
@@ -5716,8 +5718,8 @@
           tgAlert("Not authorized (401). Please set your Telegram username");
           return;
         }
-        if (!res.ok || (payload && payload.status !== "ok")) {
-          throw new Error(payload?.error || `HTTP ${res.status}`);
+        if (!res.ok || (payload && payload.status !== "ok" && payload.ok !== true)) {
+          throw new Error(payload?.message || payload?.error || `HTTP ${res.status}`);
         }
         adm_list && adm_list();
       } catch (err) {
@@ -5796,6 +5798,7 @@
       const confirmInput = document.getElementById("adm_delete_confirm_input");
       const confirmBtn = document.getElementById("adm_delete_drop_confirm");
       const cancelBtn = document.getElementById("adm_delete_drop_cancel");
+      const _deleteInFlight = new Set(); // prevents double-submission per dropId
 
       function closeDeleteModal() {
         modal.style.display = "none";
@@ -5806,10 +5809,77 @@
         confirmBtn.style.cursor = "not-allowed";
       }
 
+      async function performDelete(dropId, triggerBtn) {
+        if (_deleteInFlight.has(dropId)) return; // already submitting - ignore repeat clicks
+        _deleteInFlight.add(dropId);
+        const originalLabel = triggerBtn ? triggerBtn.textContent : null;
+        if (triggerBtn) {
+          triggerBtn.disabled = true;
+          triggerBtn.textContent = "⏳ Deleting…";
+        }
+        try {
+          const userId = getAdminUserId();
+          if (!userId) { tgAlert("Missing admin user id. Open via Telegram to continue."); return; }
+          const tail = buildAdminQueryTail();
+          const res = await v2Fetch(`${API_V2}/admin/drops/${dropId}/actions${tail}`, {
+            method: "POST",
+            body: JSON.stringify({ op: "delete" })
+          });
+          let payload = null;
+          try { payload = await res.json(); } catch {}
+
+          if (res.status === 401) {
+            tgAlert("Not authorized (401). Please set your Telegram username");
+            return;
+          }
+          if (res.status === 409) {
+            if (payload?.code === "codes_claimed" && (payload?.codesRemoved || 0) > 0) {
+              // Partial cleanup happened but the drop is still mid-deletion and
+              // retriable - refresh so the row shows the "Retry delete" state.
+              tgAlert(`Deletion paused: a code became claimed/reserved during cleanup (${payload.claimedCount} remaining). The drop was not deleted - you can retry.`);
+              adm_list && adm_list();
+              return;
+            }
+            tgAlert(`Cannot delete: this drop has ${payload?.claimedCount ?? "some"} claimed/reserved/assigned code(s). Refresh and check the drop before retrying.`);
+            return;
+          }
+          if (!res.ok || (payload && payload.status !== "ok")) {
+            throw new Error(payload?.message || payload?.error || `HTTP ${res.status}`);
+          }
+          const removed = payload?.codesRemoved ?? 0;
+          if (payload?.code === "orphan_recovered") {
+            tgAlert(`Recovered ${removed} orphaned voucher code(s) for this drop.`);
+          } else if (payload?.code === "already_deleted") {
+            tgAlert("This drop was already deleted.");
+          } else {
+            tgAlert(`Drop deleted. ${removed} voucher code(s) removed.`);
+          }
+          adm_list && adm_list();
+        } catch (err) {
+          tgAlert(`Delete failed: ${err.message}`);
+        } finally {
+          _deleteInFlight.delete(dropId);
+          if (triggerBtn) {
+            triggerBtn.disabled = false;
+            triggerBtn.textContent = originalLabel;
+          }
+        }
+      }
+
       document.addEventListener("click", (e) => {
         const btn = e.target.closest(".adm-delete-drop-btn");
         if (!btn) return;
-        _deleteDropId = btn.getAttribute("data-id");
+        const dropId = btn.getAttribute("data-id");
+
+        // Row is already mid-deletion (server-confirmed retryable state): skip the
+        // confirmation modal entirely and just resume cleanup - re-typing DELETE
+        // to retry a deletion that was already confirmed once adds no safety.
+        if (btn.getAttribute("data-deleting") === "1") {
+          performDelete(dropId, btn);
+          return;
+        }
+
+        _deleteDropId = dropId;
         document.getElementById("adm_delete_name").textContent = btn.getAttribute("data-name") || "";
         document.getElementById("adm_delete_id").textContent = _deleteDropId || "";
         document.getElementById("adm_delete_total").textContent = btn.getAttribute("data-total") || "0";
@@ -5837,45 +5907,8 @@
       confirmBtn.addEventListener("click", async () => {
         if (!_deleteDropId || confirmInput.value.trim() !== "DELETE") return;
         const dropId = _deleteDropId;
-        try {
-          const userId = getAdminUserId();
-          if (!userId) { tgAlert("Missing admin user id. Open via Telegram to continue."); return; }
-          const tail = buildAdminQueryTail();
-          confirmBtn.disabled = true;
-          confirmBtn.textContent = "Deleting…";
-          const res = await v2Fetch(`${API_V2}/admin/drops/${dropId}/actions${tail}`, {
-            method: "POST",
-            body: JSON.stringify({ op: "delete" })
-          });
-          let payload = null;
-          try { payload = await res.json(); } catch {}
-
-          if (res.status === 401) {
-            tgAlert("Not authorized (401). Please set your Telegram username");
-            return;
-          }
-          if (res.status === 409) {
-            tgAlert(`Cannot delete: this drop has ${payload?.claimedCount ?? "some"} claimed/reserved code(s). Refresh and check the drop before retrying.`);
-            return;
-          }
-          if (res.status === 404) {
-            // Already deleted (idempotent double-click) - just refresh.
-            closeDeleteModal();
-            adm_list && adm_list();
-            return;
-          }
-          if (!res.ok || (payload && payload.status !== "ok")) {
-            throw new Error(payload?.message || payload?.error || `HTTP ${res.status}`);
-          }
-          closeDeleteModal();
-          const removed = payload?.codesRemoved ?? 0;
-          tgAlert(`Drop deleted. ${removed} voucher code(s) removed.`);
-          adm_list && adm_list();
-        } catch (err) {
-          tgAlert(`Delete failed: ${err.message}`);
-        } finally {
-          confirmBtn.textContent = "Delete";
-        }
+        closeDeleteModal();
+        await performDelete(dropId, null);
       });
     }
 

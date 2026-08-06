@@ -278,6 +278,13 @@ class FakeDropsCollection:
             if isinstance(value, dict) and "$gt" in value:
                 if not doc.get(key, 0) > value["$gt"]:
                     return FakeUpdateResult(0)
+                continue
+            if isinstance(value, dict) and "$ne" in value:
+                if doc.get(key) == value["$ne"]:
+                    return FakeUpdateResult(0)
+                continue
+            if doc.get(key) != value:
+                return FakeUpdateResult(0)
         for key, value in update.get("$set", {}).items():
             doc[key] = value
         for key, value in update.get("$inc", {}).items():
@@ -2840,6 +2847,11 @@ class AdminDeleteDropTests(unittest.TestCase):
             restore()
 
     def test_repeated_deletion_is_idempotent_and_safe(self):
+        """A second delete request after the drop is fully gone (no drop doc, no
+        orphan vouchers left) must be a safe no-op, not an error - the orphan-
+        recovery path on a not-found drop with zero remaining vouchers reports
+        already_deleted with 200 rather than a bare 404.
+        """
         import vouchers as m
 
         drop = {"_id": "drop-del-7", "name": "Twice", "type": "pooled", "status": "active"}
@@ -2855,8 +2867,14 @@ class AdminDeleteDropTests(unittest.TestCase):
 
             second_resp, second_status = self._call_delete("drop-del-7")
             payload = second_resp.get_json()
-            self.assertEqual(second_status, 404)
-            self.assertEqual(payload.get("code"), "not_found")
+            self.assertEqual(second_status, 200)
+            self.assertEqual(payload.get("code"), "already_deleted")
+            self.assertEqual(payload.get("codesRemoved"), 0)
+
+            # Only one audit record was ever created for this drop_id, even though
+            # the delete was requested twice.
+            audit_docs = [d for d in db["drop_deletion_audit"].docs if d.get("drop_id") == "drop-del-7"]
+            self.assertEqual(len(audit_docs), 1)
         finally:
             restore()
 
@@ -2960,3 +2978,317 @@ class AdminDeleteDropTests(unittest.TestCase):
             self.assertNotIn("G1", remaining_codes)
         finally:
             restore()
+
+    def test_concurrent_delete_requests_both_converge_safely(self):
+        """Two requests racing to start deletion on the same drop: only one may
+        flip deletion_status via the conditional update; the other must lose the
+        race and fall back to continuing the winner's in-progress cleanup rather
+        than starting a second, duplicate deletion flow.
+        """
+        import vouchers as m
+
+        drop = {"_id": "drop-del-11", "name": "Race Start", "type": "pooled", "status": "active"}
+        vouchers = [
+            {"dropId": "drop-del-11", "type": "pooled", "status": "free", "claimedBy": None, "code": "H1"},
+        ]
+        db = FakeDb([drop], vouchers)
+        orig_update_one = db.drops.update_one
+        calls = {"n": 0}
+
+        def racing_update_one(filt, update):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                # Simulate a concurrent request winning the flip just before ours.
+                db.drops.docs["drop-del-11"]["deletion_status"] = "deleting"
+                db.drops.docs["drop-del-11"]["deletion_request_id"] = "other-request"
+                return FakeUpdateResult(0)
+            return orig_update_one(filt, update)
+        db.drops.update_one = racing_update_one
+
+        restore = self._patch(m, db=db)
+        try:
+            resp, status = self._call_delete("drop-del-11")
+            payload = resp.get_json()
+            self.assertEqual(status, 200)
+            self.assertEqual(payload.get("status"), "ok")
+            self.assertEqual(payload.get("codesRemoved"), 1)
+            self.assertNotIn("drop-del-11", db.drops.docs)
+            self.assertEqual(len(db.vouchers.docs), 0)
+        finally:
+            restore()
+
+    def test_retry_from_deleting_state_completes_cleanup(self):
+        """A drop already flagged deletion_status="deleting" (e.g. a resumed
+        request) should skip straight to cleanup, not re-run validation.
+        """
+        import vouchers as m
+
+        drop = {
+            "_id": "drop-del-12",
+            "name": "Resume",
+            "type": "pooled",
+            "status": "active",
+            "deletion_status": "deleting",
+            "deletion_started_at": datetime.now(timezone.utc),
+            "deletion_admin_id": 7,
+            "deletion_request_id": "req-resume-1",
+        }
+        vouchers = [
+            {"dropId": "drop-del-12", "type": "pooled", "status": "free", "claimedBy": None, "code": "I1"},
+        ]
+        db = FakeDb([drop], vouchers)
+        restore = self._patch(m, db=db)
+        try:
+            resp, status = self._call_delete("drop-del-12")
+            payload = resp.get_json()
+            self.assertEqual(status, 200)
+            self.assertEqual(payload.get("codesRemoved"), 1)
+            self.assertNotIn("drop-del-12", db.drops.docs)
+            self.assertEqual(len(db.vouchers.docs), 0)
+        finally:
+            restore()
+
+    def test_failure_after_voucher_cleanup_before_drop_deletion_is_retriable(self):
+        """If db.drops.delete_one throws after vouchers are already gone, the
+        drop must still be present, flagged deletion_status="deleting" (so a
+        retry resumes instead of re-validating), and a subsequent call must
+        finish the deletion cleanly with no duplicate audit record.
+        """
+        import vouchers as m
+
+        drop = {"_id": "drop-del-13", "name": "Fail Then Retry", "type": "pooled", "status": "active"}
+        vouchers = [
+            {"dropId": "drop-del-13", "type": "pooled", "status": "free", "claimedBy": None, "code": "J1"},
+        ]
+        db = FakeDb([drop], vouchers)
+        orig_delete_one = db.drops.delete_one
+        calls = {"n": 0}
+
+        def flaky_delete_one(filt):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("simulated drops.delete_one failure")
+            return orig_delete_one(filt)
+        db.drops.delete_one = flaky_delete_one
+
+        restore = self._patch(m, db=db)
+        try:
+            with self.assertRaises(RuntimeError):
+                self._call_delete("drop-del-13")
+            stuck = db.drops.docs.get("drop-del-13")
+            self.assertIsNotNone(stuck)
+            self.assertEqual(stuck.get("deletion_status"), "deleting")
+            self.assertEqual(len(db.vouchers.docs), 0)
+
+            resp, status = self._call_delete("drop-del-13")
+            payload = resp.get_json()
+            self.assertEqual(status, 200)
+            self.assertNotIn("drop-del-13", db.drops.docs)
+
+            audit_docs = [d for d in db["drop_deletion_audit"].docs if d.get("drop_id") == "drop-del-13"]
+            self.assertEqual(len(audit_docs), 1)
+        finally:
+            restore()
+
+    def test_voucher_deletion_failure_leaves_drop_in_deleting_state(self):
+        """If delete_many itself throws (mid voucher cleanup), the drop must be
+        left marked deletion_status="deleting" with its vouchers untouched -
+        visible and retriable, never silently lost or half-applied.
+        """
+        import vouchers as m
+
+        drop = {"_id": "drop-del-14", "name": "Voucher Delete Fails", "type": "pooled", "status": "active"}
+        vouchers = [
+            {"dropId": "drop-del-14", "type": "pooled", "status": "free", "claimedBy": None, "code": "K1"},
+        ]
+        db = FakeDb([drop], vouchers)
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("simulated vouchers.delete_many failure")
+        db.vouchers.delete_many = boom
+
+        restore = self._patch(m, db=db)
+        try:
+            with self.assertRaises(RuntimeError):
+                self._call_delete("drop-del-14")
+            stuck = db.drops.docs.get("drop-del-14")
+            self.assertIsNotNone(stuck)
+            self.assertEqual(stuck.get("deletion_status"), "deleting")
+            self.assertEqual(len(db.vouchers.docs), 1)
+            self.assertEqual(db.vouchers.docs[0]["code"], "K1")
+        finally:
+            restore()
+
+    def test_orphan_recovery_deletes_safe_orphaned_vouchers(self):
+        """Drop document already absent but voucher rows for its immutable id
+        still exist and are all safe (unclaimed pooled codes): the delete
+        endpoint should recover by removing them and reporting success.
+        """
+        import vouchers as m
+
+        vouchers = [
+            {"dropId": "drop-del-15", "type": "pooled", "status": "free", "claimedBy": None, "code": "L1"},
+            {"dropId": "drop-del-15", "type": "pooled", "status": "free", "claimedBy": None, "code": "L2"},
+        ]
+        db = FakeDb([], vouchers)
+        restore = self._patch(m, db=db)
+        try:
+            resp, status = self._call_delete("drop-del-15")
+            payload = resp.get_json()
+            self.assertEqual(status, 200)
+            self.assertEqual(payload.get("code"), "orphan_recovered")
+            self.assertEqual(payload.get("codesRemoved"), 2)
+            self.assertEqual(len(db.vouchers.docs), 0)
+
+            # The recovered codes can be re-uploaded immediately.
+            res = db.vouchers.insert_many([
+                {"dropId": "drop-new", "type": "pooled", "status": "free", "claimedBy": None, "code": "L1"},
+            ], ordered=False)
+            self.assertEqual(len(res.inserted_ids), 1)
+        finally:
+            restore()
+
+    def test_orphan_recovery_blocks_on_claimed_or_allocated_vouchers(self):
+        """Orphaned voucher rows that are claimed/reserved/allocated/assigned
+        must never be deleted, even though the parent drop document is gone -
+        recovery must reject with 409 and make no changes.
+        """
+        import vouchers as m
+
+        vouchers = [
+            {"dropId": "drop-del-16", "type": "pooled", "status": "claimed", "claimedBy": "u9", "code": "M1"},
+            {"dropId": "drop-del-16", "type": "pooled", "status": "free", "claimedBy": None, "code": "M2"},
+        ]
+        db = FakeDb([], vouchers)
+        restore = self._patch(m, db=db)
+        try:
+            resp, status = self._call_delete("drop-del-16")
+            payload = resp.get_json()
+            self.assertEqual(status, 409)
+            self.assertEqual(payload.get("code"), "codes_claimed")
+            self.assertEqual(payload.get("claimedCount"), 1)
+            self.assertEqual(len(db.vouchers.docs), 2)
+        finally:
+            restore()
+
+    def test_start_rejected_while_drop_deleting(self):
+        import vouchers as m
+        from flask import Flask
+
+        app = Flask(__name__)
+        now = datetime.now(timezone.utc)
+        drop = {
+            "_id": "drop-del-17",
+            "type": "pooled",
+            "status": "paused",
+            "startsAt": now + timedelta(hours=1),
+            "endsAt": now + timedelta(hours=2),
+            "deletion_status": "deleting",
+        }
+        orig_db = m.db
+        orig_require_admin = m.require_admin
+        try:
+            m.db = FakeDb([drop], [])
+            m.require_admin = lambda: ({"id": 1}, None)
+            with app.test_request_context(
+                "/v2/miniapp/admin/drops/drop-del-17/actions",
+                method="POST",
+                json={"op": "start_now"},
+            ):
+                resp = admin_drop_actions("drop-del-17")
+            self.assertEqual(resp[1], 409)
+            payload = resp[0].get_json()
+            self.assertEqual(payload.get("code"), "drop_deleting")
+            # Untouched.
+            self.assertEqual(m.db.drops.docs["drop-del-17"]["status"], "paused")
+        finally:
+            m.db = orig_db
+            m.require_admin = orig_require_admin
+
+    def test_edit_dates_rejected_while_drop_deleting(self):
+        import vouchers as m
+        from flask import Flask
+
+        app = Flask(__name__)
+        drop = {
+            "_id": "drop-del-18",
+            "type": "pooled",
+            "status": "active",
+            "name": "Original Name",
+            "deletion_status": "deleting",
+        }
+        orig_db = m.db
+        orig_require_admin = m.require_admin
+        try:
+            m.db = FakeDb([drop], [])
+            m.require_admin = lambda: ({"id": 1}, None)
+            with app.test_request_context(
+                "/v2/miniapp/admin/drops/drop-del-18/actions",
+                method="POST",
+                json={"op": "set_dates", "startsAt": "2026-04-15 08:00:00", "endsAt": "2026-04-16 08:00:00"},
+            ):
+                resp = admin_drop_actions("drop-del-18")
+            self.assertEqual(resp[1], 409)
+            payload = resp[0].get_json()
+            self.assertEqual(payload.get("code"), "drop_deleting")
+            self.assertEqual(m.db.drops.docs["drop-del-18"]["name"], "Original Name")
+        finally:
+            m.db = orig_db
+            m.require_admin = orig_require_admin
+
+    def test_claim_rejected_while_drop_deleting(self):
+        import vouchers as m
+        from flask import Flask
+
+        app = Flask(__name__)
+        now = datetime.now(timezone.utc)
+        drop = {
+            "_id": "drop-del-19",
+            "type": "pooled",
+            "status": "active",
+            "startsAt": now - timedelta(minutes=5),
+            "endsAt": now + timedelta(minutes=5),
+            "deletion_status": "deleting",
+        }
+        orig_extract = m.extract_raw_init_data_from_query
+        orig_verify = m.verify_telegram_init_data
+        orig_db = m.db
+        try:
+            m.extract_raw_init_data_from_query = lambda req: "ok"
+            m.verify_telegram_init_data = lambda init_data: (True, {"user": '{"id": 42, "username": "u42"}'}, "ok")
+            m.db = FakeDb([drop], [])
+            with app.test_request_context("/vouchers/claim?init_data=ok", method="POST", json={"dropId": "drop-del-19"}):
+                resp, status = m.api_claim()
+                payload = resp.get_json()
+            self.assertEqual(status, 409)
+            self.assertEqual(payload.get("code"), "drop_deleting")
+        finally:
+            m.extract_raw_init_data_from_query = orig_extract
+            m.verify_telegram_init_data = orig_verify
+            m.db = orig_db
+
+    def test_allocation_rejected_while_drop_deleting(self):
+        import vouchers as m
+        from flask import Flask
+
+        app = Flask(__name__)
+        drop = {"_id": "drop-del-20", "type": "pooled", "status": "active", "deletion_status": "deleting"}
+        orig_db = m.db
+        orig_require_admin = m.require_admin
+        try:
+            m.db = FakeDb([drop], [])
+            m.require_admin = lambda: ({"id": 1}, None)
+            with app.test_request_context(
+                "/v2/miniapp/admin/drops/drop-del-20/codes",
+                method="POST",
+                json={"codes": ["N1", "N2"], "pool": "public"},
+            ):
+                resp = m.admin_add_codes("drop-del-20")
+            status = resp[1] if isinstance(resp, tuple) else resp.status_code
+            payload = resp[0].get_json() if isinstance(resp, tuple) else resp.get_json()
+            self.assertEqual(status, 409)
+            self.assertEqual(payload.get("code"), "drop_deleting")
+            self.assertEqual(len(m.db.vouchers.docs), 0)
+        finally:
+            m.db = orig_db
+            m.require_admin = orig_require_admin
