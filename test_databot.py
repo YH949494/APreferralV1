@@ -340,3 +340,23 @@ class TestDatabotConfig:
         # Timeout must be a positive integer
         assert isinstance(DATABOT_TIMEOUT_SECONDS, int)
         assert DATABOT_TIMEOUT_SECONDS > 0
+
+    def test_timeout_invalid_env_uses_default(self, monkeypatch):
+        """Empty or non-numeric DATABOT_TIMEOUT_SECONDS must not crash at import."""
+        import importlib
+        import config as cfg
+        monkeypatch.setenv("DATABOT_TIMEOUT_SECONDS", "")
+        result = cfg._parse_int_env("DATABOT_TIMEOUT_SECONDS", 5)
+        assert result == 5
+
+    def test_timeout_non_numeric_env_uses_default(self, monkeypatch):
+        import config as cfg
+        monkeypatch.setenv("DATABOT_TIMEOUT_SECONDS", "banana")
+        result = cfg._parse_int_env("DATABOT_TIMEOUT_SECONDS", 5)
+        assert result == 5
+
+    def test_timeout_valid_env_is_respected(self, monkeypatch):
+        import config as cfg
+        monkeypatch.setenv("DATABOT_TIMEOUT_SECONDS", "12")
+        result = cfg._parse_int_env("DATABOT_TIMEOUT_SECONDS", 5)
+        assert result == 12
