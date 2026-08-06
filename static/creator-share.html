@@ -186,7 +186,7 @@
         </div>
       </div>
 
-      <button id="btn-generate" class="btn btn-primary" style="margin-top: 14px;">Get My Share Post</button>
+      <button id="btn-generate" class="btn btn-primary" type="button" style="margin-top: 14px;">Get My Share Post</button>
       <div id="generate-status" class="status" role="status"></div>
 
       <div id="package-card" class="card hidden">
@@ -197,9 +197,9 @@
         <p id="package-link" class="preview-row preview-link"></p>
         <p class="card-note">Your personal referral link is already included.</p>
 
-        <button id="btn-copy" class="btn btn-primary">Copy Post</button>
-        <button id="btn-telegram-share" class="btn btn-secondary">Share to Telegram</button>
-        <button id="btn-try-another" class="btn btn-tertiary">Give Me Another Post</button>
+        <button id="btn-copy" class="btn btn-primary" type="button">Copy Post</button>
+        <button id="btn-telegram-share" class="btn btn-secondary" type="button">Share to Telegram</button>
+        <button id="btn-try-another" class="btn btn-tertiary" type="button">Give Me Another Post</button>
         <div id="copy-toast" class="toast" aria-live="polite"></div>
         <div id="share-status" class="toast" aria-live="polite"></div>
       </div>
@@ -288,6 +288,7 @@
 
   var COPY_LABEL_DEFAULT = "Copy Post";
   var COPY_LABEL_SUCCESS = "✓ Copied — Go Share It";
+  var GENERATE_COPIED_MESSAGE = "✓ Post Copied";
 
   function detectPlatform() {
     return "generic";
@@ -324,6 +325,12 @@
     els.generateStatus.textContent = isGenerating ? "Generating…" : "";
   }
 
+  function scrollPackageIntoView() {
+    if (els.packageCard && typeof els.packageCard.scrollIntoView === "function") {
+      try { els.packageCard.scrollIntoView({ behavior: "smooth", block: "start" }); } catch (e) {}
+    }
+  }
+
   function generatePackage() {
     if (generating) return;
     setGenerating(true);
@@ -345,6 +352,13 @@
           return;
         }
         renderPackage(res.body);
+        scrollPackageIntoView();
+        performCopy(res.body).then(function (copied) {
+          if (copied) {
+            els.generateStatus.classList.remove("error");
+            els.generateStatus.textContent = GENERATE_COPIED_MESSAGE;
+          }
+        });
       })
       .catch(function () {
         setGenerating(false);
@@ -371,9 +385,23 @@
     els.btnCopy.textContent = COPY_LABEL_DEFAULT;
   }
 
-  function copyAll() {
-    if (!currentPackage) return;
-    var text = currentPackage.share_text;
+  // Shared clipboard-copy primitive used both by the manual "Copy Post"
+  // button and by the automatic copy triggered right after generation.
+  // Resolves to whether the copy succeeded *for the currently-displayed
+  // package*, so callers never report success on failure.
+  //
+  // Takes an explicit target package (falling back to currentPackage at
+  // call time) and re-checks identity once the async copy settles: if the
+  // user has since generated a new post (e.g. clicked "Give Me Another
+  // Post" while this copy was still in flight), currentPackage will have
+  // moved on. The /copied tracking call still fires for the package that
+  // was actually copied, but UI updates (toast, button label, status
+  // message) are suppressed so a stale completion can't stomp on the
+  // newer package's state.
+  function performCopy(pkg) {
+    var targetPkg = pkg || currentPackage;
+    if (!targetPkg) return Promise.resolve(false);
+    var text = targetPkg.share_text;
 
     var copyPromise;
     if (navigator.clipboard && navigator.clipboard.writeText) {
@@ -384,40 +412,80 @@
       copyPromise = Promise.resolve(fallbackCopy(text));
     }
 
-    copyPromise.then(function (copied) {
+    return copyPromise.then(function (copied) {
+      var isCurrent = currentPackage === targetPkg;
       if (!copied) {
-        els.copyToast.textContent = "Couldn't copy automatically — please select and copy the text above.";
-        return;
+        if (isCurrent) {
+          els.copyToast.textContent = "Couldn't copy automatically — please select and copy the text above.";
+        }
+        return false;
       }
-      els.copyToast.textContent = "";
-      els.btnCopy.textContent = COPY_LABEL_SUCCESS;
-      if (copyResetTimer) clearTimeout(copyResetTimer);
-      copyResetTimer = setTimeout(resetCopyButtonLabel, 2000);
-      apiPost("/api/creator/share/" + encodeURIComponent(currentPackage.package_id) + "/copied", {
+      if (isCurrent) {
+        els.copyToast.textContent = "";
+      }
+      apiPost("/api/creator/share/" + encodeURIComponent(targetPkg.package_id) + "/copied", {
         platform: detectPlatform(),
       }).catch(function () {});
+      return isCurrent;
     });
   }
 
-  function telegramShare() {
+  function copyAll() {
+    performCopy().then(function (copied) {
+      if (!copied) return;
+      els.btnCopy.textContent = COPY_LABEL_SUCCESS;
+      if (copyResetTimer) clearTimeout(copyResetTimer);
+      copyResetTimer = setTimeout(resetCopyButtonLabel, 2000);
+    });
+  }
+
+  // Mirrors build_creator_share_text()'s caption assembly (hook + playback,
+  // then the fixed CTA line) but omits the trailing referral link, since
+  // Telegram's share/url composer carries the link separately via its own
+  // "url" param -- putting it in both places would show it twice.
+  function buildTelegramCaptionText(pkg) {
+    var hook = (pkg.hook_text || "").trim();
+    var playback = (pkg.playback_url || "").trim();
+    var top = [hook, playback].filter(function (line) { return line; });
+    var lines = top.slice();
+    if (top.length) lines.push("");
+    lines.push(FIXED_CTA_TEXT);
+    return lines.join("\n");
+  }
+
+  function telegramShare(event) {
+    if (event && typeof event.preventDefault === "function") event.preventDefault();
     if (!currentPackage) return;
     apiPost("/api/creator/share/" + encodeURIComponent(currentPackage.package_id) + "/share-clicked", {
       platform: "telegram",
     }).catch(function () {});
 
     els.shareStatus.textContent = "";
-    // The referral link is already embedded in share_text, so it is passed
-    // only via the "text" segment of Telegram's share/url composer — never
-    // duplicated into a separate "url" param.
-    var shareUrl = "https://t.me/share/url?text=" + encodeURIComponent(currentPackage.share_text);
+    var captionText = buildTelegramCaptionText(currentPackage);
+    var shareUrl =
+      "https://t.me/share/url?url=" + encodeURIComponent(currentPackage.referral_link) +
+      "&text=" + encodeURIComponent(captionText);
+
+    // window.open's return value can't be used to detect a blocked popup
+    // here: with "noopener" set, browsers intentionally return null even
+    // when the window opened successfully (there is no reference to hand
+    // back), which is indistinguishable from a blocked popup's null return.
+    // So a call that doesn't throw is treated as opened; only an actual
+    // thrown error (e.g. a sandboxed context refusing the call) counts as
+    // failure.
+    var opened = false;
     try {
       if (tg && typeof tg.openTelegramLink === "function") {
         tg.openTelegramLink(shareUrl);
       } else {
-        var opened = window.open(shareUrl, "_blank");
-        if (!opened) throw new Error("popup_blocked");
+        window.open(shareUrl, "_blank", "noopener,noreferrer");
       }
+      opened = true;
     } catch (e) {
+      opened = false;
+    }
+
+    if (!opened) {
       els.shareStatus.textContent = "Couldn't open Telegram. Please try again.";
     }
   }
