@@ -186,6 +186,10 @@ class FakeVouchersCollection:
                 if doc.get(key) not in value["$in"]:
                     return False
                 continue
+            if isinstance(value, dict) and "$nin" in value:
+                if doc.get(key) in value["$nin"]:
+                    return False
+                continue
             if isinstance(value, dict) and "$ne" in value:
                 if doc.get(key) == value["$ne"]:
                     return False
@@ -2856,13 +2860,15 @@ class AdminDeleteDropTests(unittest.TestCase):
         finally:
             restore()
 
-    def test_partial_failure_after_drop_removed_leaves_documented_orphan_state(self):
+    def test_partial_failure_after_vouchers_removed_leaves_drop_retriable(self):
         """No multi-doc transactions are used anywhere in this codebase (see
-        ensure_voucher_indexes/claim paths), so the drop delete is the commit
-        point: if the follow-up voucher cleanup throws, the drop is already
-        gone (so the operation is not silently retried/duplicated) but the
-        vouchers become orphans pointing at a deleted drop until a
-        reconciliation sweep purges them - this test documents that behaviour.
+        ensure_voucher_indexes/claim paths). Vouchers are deleted before the
+        drop precisely so a crash between the two steps is safe: if the
+        drop-delete step throws after vouchers are already gone, the drop
+        document still exists (now with zero codes) instead of leaving
+        orphaned vouchers stuck in the global-unique code index. A retry of
+        the same delete call would simply find zero vouchers left and finish
+        by removing the drop - this test documents that behaviour.
         """
         import vouchers as m
 
@@ -2873,15 +2879,84 @@ class AdminDeleteDropTests(unittest.TestCase):
         db = FakeDb([drop], vouchers)
 
         def boom(*args, **kwargs):
-            raise RuntimeError("simulated vouchers.delete_many failure")
-        db.vouchers.delete_many = boom
+            raise RuntimeError("simulated drops.delete_one failure")
+        db.drops.delete_one = boom
 
         restore = self._patch(m, db=db)
         try:
             with self.assertRaises(RuntimeError):
                 self._call_delete("drop-del-8")
-            self.assertNotIn("drop-del-8", db.drops.docs)
+            # Drop is still present (delete_one never completed)...
+            self.assertIn("drop-del-8", db.drops.docs)
+            # ...but its vouchers are already gone - not lost, just freed early.
+            self.assertEqual(len(db.vouchers.docs), 0)
+        finally:
+            restore()
+
+    def test_personalised_assignment_blocks_deletion_even_when_unclaimed(self):
+        """Personalised vouchers carry a specific usernameLower from creation
+        (create_drop_from_spec), so they're promised to a named user even
+        before that user claims them - deletion must treat that the same as
+        an already-claimed code, not silently destroy it because status is
+        still "unclaimed".
+        """
+        import vouchers as m
+
+        drop = {"_id": "drop-del-10", "name": "Personalised", "type": "personalised", "status": "active"}
+        vouchers = [
+            {"dropId": "drop-del-10", "type": "personalised", "usernameLower": "alice", "code": "P1", "status": "unclaimed", "claimedBy": None},
+        ]
+        db = FakeDb([drop], vouchers)
+        restore = self._patch(m, db=db)
+        try:
+            resp, status = self._call_delete("drop-del-10")
+            payload = resp.get_json()
+            self.assertEqual(status, 409)
+            self.assertEqual(payload.get("code"), "codes_claimed")
+            self.assertEqual(payload.get("claimedCount"), 1)
+            self.assertIn("drop-del-10", db.drops.docs)
             self.assertEqual(len(db.vouchers.docs), 1)
-            self.assertEqual(db.vouchers.docs[0]["code"], "F1")
+        finally:
+            restore()
+
+    def test_concurrent_claim_during_deletion_is_not_lost(self):
+        """The pre-check and the delete_many share the same unsafe-code
+        predicate, so a voucher that gets claimed in the gap between the
+        check and the delete is excluded from delete_many by the query
+        itself - this simulates that race by flipping a voucher to claimed
+        right as delete_many runs, and asserts it survives untouched and the
+        drop is left in place (not deleted) instead of losing the claim.
+        """
+        import vouchers as m
+
+        drop = {"_id": "drop-del-9", "name": "Race", "type": "pooled", "status": "active"}
+        vouchers = [
+            {"dropId": "drop-del-9", "type": "pooled", "status": "free", "claimedBy": None, "code": "G1"},
+            {"dropId": "drop-del-9", "type": "pooled", "status": "free", "claimedBy": None, "code": "G2"},
+        ]
+        db = FakeDb([drop], vouchers)
+        orig_delete_many = db.vouchers.delete_many
+
+        def racing_delete_many(filt):
+            for d in db.vouchers.docs:
+                if d.get("code") == "G2":
+                    d["status"] = "claimed"
+                    d["claimedBy"] = "raced_user"
+            return orig_delete_many(filt)
+        db.vouchers.delete_many = racing_delete_many
+
+        restore = self._patch(m, db=db)
+        try:
+            resp, status = self._call_delete("drop-del-9")
+            payload = resp.get_json()
+            self.assertEqual(status, 409)
+            self.assertEqual(payload.get("code"), "codes_claimed")
+            self.assertEqual(payload.get("claimedCount"), 1)
+            # Drop untouched; the raced/claimed code survives; the genuinely
+            # free code was still safely removed.
+            self.assertIn("drop-del-9", db.drops.docs)
+            remaining_codes = {d["code"] for d in db.vouchers.docs}
+            self.assertIn("G2", remaining_codes)
+            self.assertNotIn("G1", remaining_codes)
         finally:
             restore()
