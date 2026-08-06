@@ -289,6 +289,8 @@ class FakeDropsCollection:
             doc[key] = value
         for key, value in update.get("$inc", {}).items():
             doc[key] = doc.get(key, 0) + value
+        for key in update.get("$unset", {}).keys():
+            doc.pop(key, None)
         return FakeUpdateResult(1)
 
     def delete_one(self, filt):
@@ -299,6 +301,24 @@ class FakeDropsCollection:
         class R:
             deleted_count = 1 if existed else 0
         return R()
+
+    def find(self, filt=None):
+        filt = filt or {}
+        out = []
+        for doc in self.docs.values():
+            match = True
+            for key, value in filt.items():
+                if isinstance(value, dict) and "$in" in value:
+                    if doc.get(key) not in value["$in"]:
+                        match = False
+                        break
+                    continue
+                if doc.get(key) != value:
+                    match = False
+                    break
+            if match:
+                out.append(dict(doc))
+        return out
 
 
 class FakeDb:
@@ -2775,6 +2795,12 @@ class AdminDeleteDropTests(unittest.TestCase):
             self.assertEqual(payload.get("claimedCount"), 1)
             self.assertIn("drop-del-3", db.drops.docs)
             self.assertEqual(len(db.vouchers.docs), 2)
+            # The gate was acquired then rolled back - the drop must be restored
+            # to exactly its pre-deletion state, not left "deleting".
+            self.assertNotIn("deletion_status", db.drops.docs["drop-del-3"])
+            self.assertNotIn("deletion_request_id", db.drops.docs["drop-del-3"])
+            audit = next(d for d in db["drop_deletion_audit"].docs if d.get("drop_id") == "drop-del-3")
+            self.assertEqual(audit.get("outcome"), "failed")
         finally:
             restore()
 
@@ -2797,8 +2823,150 @@ class AdminDeleteDropTests(unittest.TestCase):
             self.assertEqual(payload.get("reservedCount"), 1)
             self.assertIn("drop-del-4", db.drops.docs)
             self.assertEqual(len(db.vouchers.docs), 1)
+            self.assertNotIn("deletion_status", db.drops.docs["drop-del-4"])
         finally:
             restore()
+
+    def test_reservation_created_between_gate_and_recheck_blocks_and_restores(self):
+        """A claim lock (voucher_claims_col) that appears *after* the gate is
+        acquired but is caught by the mandatory post-gate recompute (requirement
+        4/5) must abort the deletion and fully restore the drop, exactly like a
+        pre-existing reservation would - the gate closing off *new* claims does
+        not retroactively invalidate one that was already in flight.
+        """
+        import vouchers as m
+
+        drop = {"_id": "drop-del-21", "name": "Race Reservation", "type": "pooled", "status": "active"}
+        vouchers = [
+            {"dropId": "drop-del-21", "type": "pooled", "status": "free", "claimedBy": None, "code": "O1"},
+        ]
+        db = FakeDb([drop], vouchers)
+        claims = FakeClaimsCollection()
+        orig_update_one = db.drops.update_one
+        calls = {"n": 0}
+
+        def gate_then_inject_reservation(filt, update):
+            res = orig_update_one(filt, update)
+            calls["n"] += 1
+            if calls["n"] == 1 and getattr(res, "modified_count", 0) == 1:
+                # Simulate a claim lock landing right as the gate closes.
+                claims.insert_one({"drop_id": "drop-del-21", "user_id": 55, "status": "claimed_pending_code"})
+            return res
+        db.drops.update_one = gate_then_inject_reservation
+
+        restore = self._patch(m, db=db, claims=claims)
+        try:
+            resp, status = self._call_delete("drop-del-21")
+            payload = resp.get_json()
+            self.assertEqual(status, 409)
+            self.assertEqual(payload.get("code"), "codes_claimed")
+            self.assertEqual(payload.get("reservedCount"), 1)
+            self.assertIn("drop-del-21", db.drops.docs)
+            self.assertNotIn("deletion_status", db.drops.docs["drop-del-21"])
+            self.assertEqual(len(db.vouchers.docs), 1)
+            audit = next(d for d in db["drop_deletion_audit"].docs if d.get("drop_id") == "drop-del-21")
+            self.assertEqual(audit.get("outcome"), "failed")
+        finally:
+            restore()
+
+    def test_reconcile_stuck_drop_deletions_resumes_and_completes(self):
+        """The explicit reconciliation function (not just a documented future
+        sweep) must find drops stuck in deletion_status="deleting" and drive them
+        to completion using the same resume path a manual retry would take.
+        """
+        import vouchers as m
+
+        drop = {
+            "_id": "drop-del-22",
+            "name": "Stuck",
+            "type": "pooled",
+            "status": "active",
+            "deletion_status": "deleting",
+            "deletion_started_at": datetime.now(timezone.utc) - timedelta(minutes=10),
+            "deletion_admin_id": 3,
+            "deletion_request_id": "req-stuck-1",
+        }
+        vouchers = [
+            {"dropId": "drop-del-22", "type": "pooled", "status": "free", "claimedBy": None, "code": "P1"},
+        ]
+        db = FakeDb([drop], vouchers)
+        restore = self._patch(m, db=db)
+        app = self._app()
+        try:
+            with app.test_request_context("/admin/drops/reconcile-deletions", method="POST"):
+                results = m.reconcile_stuck_drop_deletions()
+            self.assertEqual(len(results), 1)
+            self.assertEqual(results[0]["dropId"], "drop-del-22")
+            self.assertEqual(results[0]["httpStatus"], 200)
+            self.assertEqual(results[0]["result"].get("codesRemoved"), 1)
+            self.assertNotIn("drop-del-22", db.drops.docs)
+            self.assertEqual(len(db.vouchers.docs), 0)
+            audit = next(d for d in db["drop_deletion_audit"].docs if d.get("drop_id") == "drop-del-22")
+            self.assertEqual(audit.get("outcome"), "completed")
+        finally:
+            restore()
+
+    def test_reconcile_stuck_drop_deletions_respects_min_age(self):
+        """A minAgeSeconds filter must skip drops that only just started
+        deleting, so a normal in-flight admin request isn't raced by a sweep.
+        """
+        import vouchers as m
+
+        drop = {
+            "_id": "drop-del-23",
+            "name": "Just Started",
+            "type": "pooled",
+            "status": "active",
+            "deletion_status": "deleting",
+            "deletion_started_at": datetime.now(timezone.utc),
+            "deletion_request_id": "req-fresh-1",
+        }
+        vouchers = [
+            {"dropId": "drop-del-23", "type": "pooled", "status": "free", "claimedBy": None, "code": "Q1"},
+        ]
+        db = FakeDb([drop], vouchers)
+        restore = self._patch(m, db=db)
+        try:
+            results = m.reconcile_stuck_drop_deletions(min_age_seconds=3600)
+            self.assertEqual(results, [])
+            self.assertIn("drop-del-23", db.drops.docs)
+            self.assertEqual(len(db.vouchers.docs), 1)
+        finally:
+            restore()
+
+    def test_audit_outcome_reflects_true_final_state_across_lifecycle(self):
+        """A single audit row per drop must accurately track started -> completed
+        (success) or started -> failed (aborted), never lingering on "started" in
+        a way that could be misread as a successful deletion.
+        """
+        import vouchers as m
+
+        drop_ok = {"_id": "drop-del-24", "name": "Ok", "type": "pooled", "status": "active"}
+        vouchers_ok = [
+            {"dropId": "drop-del-24", "type": "pooled", "status": "free", "claimedBy": None, "code": "R1"},
+        ]
+        db = FakeDb([drop_ok], vouchers_ok)
+        restore = self._patch(m, db=db)
+        try:
+            self._call_delete("drop-del-24")
+            audit_ok = next(d for d in db["drop_deletion_audit"].docs if d.get("drop_id") == "drop-del-24")
+            self.assertEqual(audit_ok.get("outcome"), "completed")
+            self.assertEqual(audit_ok.get("codes_removed"), 1)
+        finally:
+            restore()
+
+        drop_bad = {"_id": "drop-del-25", "name": "Bad", "type": "pooled", "status": "active"}
+        vouchers_bad = [
+            {"dropId": "drop-del-25", "type": "pooled", "status": "claimed", "claimedBy": "u1", "code": "S1"},
+        ]
+        db2 = FakeDb([drop_bad], vouchers_bad)
+        restore2 = self._patch(m, db=db2)
+        try:
+            self._call_delete("drop-del-25")
+            audit_bad = next(d for d in db2["drop_deletion_audit"].docs if d.get("drop_id") == "drop-del-25")
+            self.assertEqual(audit_bad.get("outcome"), "failed")
+        finally:
+            restore2()
 
     def test_related_voucher_records_are_cleaned_up(self):
         import vouchers as m
