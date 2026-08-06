@@ -35,7 +35,11 @@ function loadFunctionsSource() {
   const helpers = slice(js, "  function $(sel, root)", "  function banner(msg, kind) {");
   const toastBlock = slice(js, "  function toastStack() {", "  // ---------- Reusable button loading-state feedback ----------");
   const stateHelpers = slice(js, "  function statePanel(elId, kind, msg) {", "  function expandTable(headers, rows) {");
-  const rscBlock = slice(js, '  var rsc = { subtab: "hooks" };', "  function loadSharePlayback() {");
+  // confirmSimple/confirmTyped are NOT included here -- they build real DOM
+  // via innerHTML, which this hand-rolled FakeNode doesn't parse (see
+  // buildSandbox: confirmSimple is stubbed on the sandbox instead, same
+  // pattern as the pre-existing `confirm` stub).
+  const rscBlock = slice(js, "  var rsc = {", "  function loadSharePlayback() {");
   return [helpers, toastBlock, stateHelpers, rscBlock].join("\n");
 }
 
@@ -46,6 +50,19 @@ function loadFunctionsSource() {
 
 function toCamel(attr) {
   return attr.replace(/-([a-z])/g, (_, c) => c.toUpperCase());
+}
+
+// Supports single tag tokens ("button", "select") and one bracket attribute
+// predicate ("input[type=checkbox]") -- just enough for rscSetBusy's
+// "button, select, input[type=checkbox]" scoped disable-while-busy query.
+function fakeNodeMatchesToken(node, token) {
+  const attrMatch = /^([a-z0-9-]+)\[([a-z-]+)=([a-z0-9]+)\]$/i.exec(token);
+  if (attrMatch) {
+    const [, tag, attr, value] = attrMatch;
+    if (node.tagName !== tag.toUpperCase()) return false;
+    return String(node[attr] || node.dataset[toCamel(attr)] || "") === value;
+  }
+  return node.tagName === token.toUpperCase();
 }
 
 class FakeNode {
@@ -82,6 +99,18 @@ class FakeNode {
   remove() { if (this.parent) this.parent.children = this.parent.children.filter((c) => c !== this); }
   addEventListener(evt, fn) { (this._listeners[evt] = this._listeners[evt] || []).push(fn); }
   _trigger(evt, evtObj) { (this._listeners[evt] || []).forEach((fn) => fn(evtObj || { target: this })); }
+  querySelectorAll(sel) {
+    const tokens = sel.split(",").map((t) => t.trim());
+    const matches = [];
+    (function walk(node) {
+      node.children.forEach((c) => {
+        if (tokens.some((t) => fakeNodeMatchesToken(c, t))) matches.push(c);
+        walk(c);
+      });
+    })(this);
+    return matches;
+  }
+  querySelector(sel) { return this.querySelectorAll(sel)[0] || null; }
   closest(sel) {
     const m = /^\[data-([a-z-]+)\]$/.exec(sel);
     let node = this;
@@ -153,13 +182,20 @@ function buildDom() {
   return { getOrCreate, documentStub, registry };
 }
 
-function buildSandbox({ fetchImpl } = {}) {
+function buildSandbox({ fetchImpl, confirmQueue } = {}) {
   const { getOrCreate, documentStub } = buildDom();
   const sandbox = {
     document: documentStub,
     window: { location: { href: "" } },
     fetch: fetchImpl,
     confirm: () => true,
+    // confirmSimple normally builds real modal DOM via innerHTML (which this
+    // hand-rolled FakeNode doesn't parse) -- stubbed here the same way
+    // `confirm` above is, resolving each call from a queue of canned
+    // answers (defaults to always-confirm when no queue is supplied).
+    confirmSimple: (title, message) => Promise.resolve(
+      confirmQueue && confirmQueue.length ? confirmQueue.shift() : true
+    ),
     setTimeout: (fn) => setImmediate(fn),
     clearTimeout: () => {},
     console,
@@ -169,8 +205,12 @@ function buildSandbox({ fetchImpl } = {}) {
     "\nthis.__loadReferralShareContent = loadReferralShareContent;" +
     "\nthis.__loadCreatorGroupSettings = loadCreatorGroupSettings;" +
     "\nthis.__loadCreatorAccess = loadCreatorAccess;" +
+    "\nthis.__loadShareHooks = loadShareHooks;" +
     "\nthis.__bindReferralShareContent = bindReferralShareContent;" +
-    "\nthis.__rsc = rsc;";
+    "\nthis.__rsc = rsc;" +
+    "\nthis.__rscHookCfg = rscHookCfg;" +
+    "\nthis.__rscPlaybackCfg = rscPlaybackCfg;" +
+    "\nthis.__rscPerformBulkAction = rscPerformBulkAction;";
   vm.runInContext(src, sandbox);
   return { sandbox, getOrCreate };
 }
@@ -479,4 +519,185 @@ test("Activate/Suspend/Remove actions call the correct per-creator endpoints", a
   assert.ok(calls.some((c) => c.url === "/api/admin/referral/creators/111/suspend" && c.method === "POST"));
   assert.ok(calls.some((c) => c.url === "/api/admin/referral/creators/222/activate" && c.method === "POST"));
   assert.ok(calls.some((c) => c.url === "/api/admin/referral/creators/333" && c.method === "DELETE"));
+});
+
+// ---------------------------------------------------------------------
+// 6. Bulk management (Hooks / Playback Links): Active summary, checkboxes,
+//    Bulk Actions dropdown (activate_all / deactivate_all / delete_selected)
+// ---------------------------------------------------------------------
+
+test("Hooks and Playback panels each render an Active summary, a Select all checkbox, and a Bulk Actions dropdown", () => {
+  const section = shareContentSectionHtml();
+  const hooksPanelStart = section.indexOf('id="rsc-hooks-panel"');
+  const hooksPanel = section.slice(hooksPanelStart, section.indexOf('id="rsc-playback-panel"'));
+  assert.match(hooksPanel, /id="rsc-hooks-active-summary"/);
+  assert.match(hooksPanel, /id="rsc-hooks-select-all"/);
+  assert.match(hooksPanel, /id="rsc-hooks-bulk-select"/);
+  assert.match(hooksPanel, />Activate all</);
+  assert.match(hooksPanel, />Deactivate all</);
+  assert.match(hooksPanel, />Delete selected</);
+  assert.doesNotMatch(hooksPanel, />Delete all</);
+  assert.match(hooksPanel, /id="rsc-hooks-bulk-apply-btn"[^>]*disabled/);
+
+  const playbackPanelStart = section.indexOf('id="rsc-playback-panel"');
+  const playbackPanel = section.slice(playbackPanelStart, section.indexOf('id="rsc-creators-panel"'));
+  assert.match(playbackPanel, /id="rsc-playback-active-summary"/);
+  assert.match(playbackPanel, /id="rsc-playback-select-all"/);
+  assert.match(playbackPanel, /id="rsc-playback-bulk-select"/);
+  assert.doesNotMatch(playbackPanel, />Delete all</);
+});
+
+test("loadShareHooks renders the exact Active: X / Y summary from active_count/total_count and a checkbox per row", async () => {
+  const { sandbox, getOrCreate } = buildSandbox({
+    fetchImpl: () => jsonResponse(200, {
+      active_count: 3, total_count: 5,
+      hooks: [
+        { id: "h1", text: "Hook one", status: "active", times_selected: 0 },
+        { id: "h2", text: "Hook two", status: "inactive", times_selected: 0 },
+      ],
+    }),
+  });
+  sandbox.__loadShareHooks();
+  await flush();
+  assert.equal(getOrCreate("rsc-hooks-active-summary").textContent, "Active: 3 / 5");
+  const body = getOrCreate("rsc-hooks-body").innerHTML;
+  assert.match(body, /class="rsc-row-check" data-id="h1"/);
+  assert.match(body, /class="rsc-row-check" data-id="h2"/);
+  assert.match(body, /data-rsc-hook-action="delete" data-id="h1" data-text="Hook one"/);
+  // Plain key/value checks instead of assert.deepEqual: the object was built
+  // inside the vm sandbox's separate realm, and Node's assert.deepEqual can
+  // report cross-realm plain objects as "not reference-equal" despite
+  // matching structurally.
+  assert.equal(sandbox.__rsc.rowStatus.hook.h1, "active");
+  assert.equal(sandbox.__rsc.rowStatus.hook.h2, "inactive");
+  assert.equal(sandbox.__rsc.rowLabel.hook.h1, "Hook one");
+  assert.equal(sandbox.__rsc.rowLabel.hook.h2, "Hook two");
+});
+
+test("Apply button is disabled for delete_selected with an empty selection, and rscPerformBulkAction refuses to call the API", async () => {
+  const calls = [];
+  const { sandbox, getOrCreate } = buildSandbox({
+    fetchImpl: (url, opts) => { calls.push({ url, opts }); return jsonResponse(200, { status: "ok" }); },
+  });
+  sandbox.__rsc.counts.hook = { active: 2, total: 2 };
+  sandbox.__rsc.selected.hook = new Set();
+  getOrCreate("rsc-hooks-bulk-select").value = "delete_selected";
+  sandbox.__rscPerformBulkAction(sandbox.__rscHookCfg);
+  await flush();
+  assert.equal(calls.length, 0, "no bulk-action request should fire for an empty selection");
+});
+
+test("activate_all POSTs resource_type=hook and never touches playback -- no confirmation needed below the large-bulk threshold", async () => {
+  const calls = [];
+  const { sandbox, getOrCreate } = buildSandbox({
+    fetchImpl: (url, opts) => { calls.push({ url, method: opts.method, body: JSON.parse(opts.body) }); return jsonResponse(200, { status: "ok", matched_count: 2, modified_count: 2, active_count: 2, total_count: 2 }); },
+    confirmQueue: [], // must never be consulted -- small batch, no confirmation
+  });
+  sandbox.__rsc.counts.hook = { active: 0, total: 2 };
+  getOrCreate("rsc-hooks-bulk-select").value = "activate_all";
+  sandbox.__rscPerformBulkAction(sandbox.__rscHookCfg);
+  await flush();
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, "/api/admin/referral/share-content/bulk-action");
+  assert.equal(calls[0].body.resource_type, "hook");
+  assert.equal(calls[0].body.action, "activate_all");
+  assert.equal(calls[0].body.selected_ids, undefined);
+});
+
+test("activate_all above the large-bulk threshold requires confirmation; declining sends no request", async () => {
+  const calls = [];
+  const { sandbox, getOrCreate } = buildSandbox({
+    fetchImpl: (url, opts) => { calls.push({ url, opts }); return jsonResponse(200, { status: "ok" }); },
+    confirmQueue: [false],
+  });
+  sandbox.__rsc.counts.playback_link = { active: 0, total: 100 }; // 100 inactive > threshold
+  getOrCreate("rsc-playback-bulk-select").value = "activate_all";
+  sandbox.__rscPerformBulkAction(sandbox.__rscPlaybackCfg);
+  await flush();
+  assert.equal(calls.length, 0, "declining the large-bulk confirmation must not call the API");
+});
+
+test("deactivate_all always requires confirmation and requests deactivate_all for playback_link only", async () => {
+  const calls = [];
+  const { sandbox, getOrCreate } = buildSandbox({
+    fetchImpl: (url, opts) => { calls.push({ url, method: opts.method, body: JSON.parse(opts.body) }); return jsonResponse(200, { status: "ok", matched_count: 2, modified_count: 2, active_count: 0, total_count: 2 }); },
+    confirmQueue: [true, true], // first confirm (count+warning), second confirm (zero-active warning)
+  });
+  sandbox.__rsc.counts.playback_link = { active: 2, total: 2 };
+  getOrCreate("rsc-playback-bulk-select").value = "deactivate_all";
+  sandbox.__rscPerformBulkAction(sandbox.__rscPlaybackCfg);
+  await flush();
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].body.resource_type, "playback_link");
+  assert.equal(calls[0].body.action, "deactivate_all");
+});
+
+test("deactivate_all: declining the zero-active second confirmation sends no request", async () => {
+  const calls = [];
+  const { sandbox, getOrCreate } = buildSandbox({
+    fetchImpl: (url, opts) => { calls.push({ url, opts }); return jsonResponse(200, { status: "ok" }); },
+    confirmQueue: [true, false], // confirms the warning, then declines the zero-active second confirmation
+  });
+  sandbox.__rsc.counts.hook = { active: 2, total: 2 };
+  getOrCreate("rsc-hooks-bulk-select").value = "deactivate_all";
+  sandbox.__rscPerformBulkAction(sandbox.__rscHookCfg);
+  await flush();
+  assert.equal(calls.length, 0);
+});
+
+test("delete_selected sends the selected ids for hooks only and shows the deleted-count toast on success", async () => {
+  const calls = [];
+  const toasts = [];
+  const { sandbox, getOrCreate } = buildSandbox({
+    fetchImpl: (url, opts) => { calls.push({ url, method: opts.method, body: JSON.parse(opts.body) }); return jsonResponse(200, { status: "ok", matched_count: 2, deleted_count: 2, active_count: 1, total_count: 1 }); },
+    confirmQueue: [true],
+  });
+  sandbox.window.toast = (msg) => toasts.push(msg);
+  sandbox.toast = (msg) => toasts.push(msg);
+  sandbox.__rsc.counts.hook = { active: 3, total: 3 };
+  sandbox.__rsc.selected.hook = new Set(["h1", "h2"]);
+  sandbox.__rsc.rowStatus.hook = { h1: "active", h2: "inactive", h3: "active" };
+  sandbox.__rsc.rowLabel.hook = { h1: "Hook one", h2: "Hook two" };
+  getOrCreate("rsc-hooks-bulk-select").value = "delete_selected";
+  sandbox.__rscPerformBulkAction(sandbox.__rscHookCfg);
+  await flush();
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].body.resource_type, "hook");
+  assert.equal(calls[0].body.action, "delete_selected");
+  assert.deepEqual(calls[0].body.selected_ids, ["h1", "h2"]);
+  assert.ok(toasts.some((m) => /2 selected hooks deleted/.test(m)));
+  assert.equal(sandbox.__rsc.selected.hook.size, 0, "selection is cleared after a successful delete");
+});
+
+test("delete_selected requiring last-active-item protection asks a second confirmation before deleting", async () => {
+  const calls = [];
+  const { sandbox, getOrCreate } = buildSandbox({
+    fetchImpl: (url, opts) => { calls.push({ url, opts }); return jsonResponse(200, { status: "ok", matched_count: 1, deleted_count: 1, active_count: 0, total_count: 1 }); },
+    confirmQueue: [true, false], // confirms the delete itself, declines the zero-active warning
+  });
+  sandbox.__rsc.counts.hook = { active: 1, total: 2 };
+  sandbox.__rsc.selected.hook = new Set(["h1"]);
+  sandbox.__rsc.rowStatus.hook = { h1: "active" };
+  sandbox.__rsc.rowLabel.hook = { h1: "Only Active Hook" };
+  getOrCreate("rsc-hooks-bulk-select").value = "delete_selected";
+  sandbox.__rscPerformBulkAction(sandbox.__rscHookCfg);
+  await flush();
+  assert.equal(calls.length, 0, "declining the last-active-item warning must not call the API");
+});
+
+test("on backend failure the selection is preserved and an error toast is shown", async () => {
+  const toasts = [];
+  const { sandbox, getOrCreate } = buildSandbox({
+    fetchImpl: () => jsonResponse(400, { status: "error", code: "unknown_ids" }),
+    confirmQueue: [true],
+  });
+  sandbox.toast = (msg) => toasts.push(msg);
+  sandbox.__rsc.counts.hook = { active: 3, total: 3 };
+  sandbox.__rsc.selected.hook = new Set(["h1", "h2"]);
+  sandbox.__rsc.rowStatus.hook = { h1: "active", h2: "active" };
+  sandbox.__rsc.rowLabel.hook = { h1: "Hook one", h2: "Hook two" };
+  getOrCreate("rsc-hooks-bulk-select").value = "delete_selected";
+  sandbox.__rscPerformBulkAction(sandbox.__rscHookCfg);
+  await flush();
+  assert.equal(sandbox.__rsc.selected.hook.size, 2, "selection must be preserved on failure");
 });

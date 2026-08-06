@@ -5177,7 +5177,169 @@
   // ---------------------------------------------------------------------
   // Referral Centre -> Share Content (Caption Hooks / Playback Pool)
   // ---------------------------------------------------------------------
-  var rsc = { subtab: "hooks" };
+  var rsc = {
+    subtab: "hooks",
+    selected: { hook: new Set(), playback_link: new Set() },
+    counts: { hook: { active: 0, total: 0 }, playback_link: { active: 0, total: 0 } },
+    rowStatus: { hook: {}, playback_link: {} },
+    rowLabel: { hook: {}, playback_link: {} },
+    busy: { hook: false, playback_link: false },
+  };
+
+  var RSC_LARGE_BULK_THRESHOLD = 50;
+
+  var rscHookCfg = {
+    resourceType: "hook", prefix: "rsc-hooks", label: "hook", labelPlural: "hooks",
+    titlePlural: "Hooks", rowActionAttr: "data-rsc-hook-action", reload: function () { loadShareHooks(true); },
+  };
+  var rscPlaybackCfg = {
+    resourceType: "playback_link", prefix: "rsc-playback", label: "playback link", labelPlural: "playback links",
+    titlePlural: "Playback Links", rowActionAttr: "data-rsc-playback-action", reload: function () { loadSharePlayback(true); },
+  };
+
+  function rscSummaryText(counts) {
+    return "Active: " + fmt(counts.active) + " / " + fmt(counts.total);
+  }
+
+  // Keeps the section-level "select all" checkbox + Apply button + selected
+  // count in sync with the current selection Set and busy state. Called
+  // after every render and every checkbox toggle.
+  function rscUpdateBulkControls(cfg) {
+    var selected = rsc.selected[cfg.resourceType];
+    var actionSel = $("#" + cfg.prefix + "-bulk-select");
+    var applyBtn = $("#" + cfg.prefix + "-bulk-apply-btn");
+    var countEl = $("#" + cfg.prefix + "-selected-count");
+    var action = actionSel ? actionSel.value : "";
+    var busy = rsc.busy[cfg.resourceType];
+    if (countEl) countEl.textContent = selected.size ? (fmt(selected.size) + " selected") : "";
+    if (applyBtn) applyBtn.disabled = busy || !action || (action === "delete_selected" && selected.size === 0);
+    var selectAll = $("#" + cfg.prefix + "-select-all");
+    var rowBoxes = $all("#" + cfg.prefix + "-body .rsc-row-check");
+    if (selectAll) {
+      var total = rowBoxes.length;
+      var checked = rowBoxes.filter(function (b) { return b.checked; }).length;
+      selectAll.disabled = busy;
+      selectAll.checked = total > 0 && checked === total;
+      selectAll.indeterminate = checked > 0 && checked < total;
+    }
+  }
+
+  // Disables every control in a section (checkboxes, bulk controls, and
+  // individual row action buttons) while a request for that resource type
+  // is in flight, to prevent duplicate/overlapping requests.
+  function rscSetBusy(cfg, busy) {
+    rsc.busy[cfg.resourceType] = busy;
+    var scope = $("#" + cfg.prefix + "-panel");
+    if (scope) {
+      $all("button, select, input[type=checkbox]", scope).forEach(function (el) { el.disabled = busy; });
+    }
+    rscUpdateBulkControls(cfg);
+  }
+
+  function rscPerformBulkAction(cfg) {
+    var actionSel = $("#" + cfg.prefix + "-bulk-select");
+    var action = actionSel.value;
+    if (!action || rsc.busy[cfg.resourceType]) return;
+
+    var counts = rsc.counts[cfg.resourceType];
+    var selectedIds = Array.from(rsc.selected[cfg.resourceType]);
+    var proceed;
+
+    if (action === "activate_all") {
+      var inactiveCount = Math.max(0, counts.total - counts.active);
+      proceed = inactiveCount > RSC_LARGE_BULK_THRESHOLD
+        ? confirmSimple("Activate All " + cfg.titlePlural,
+            "This will activate " + fmt(inactiveCount) + " " + cfg.labelPlural + ". Continue?")
+        : Promise.resolve(true);
+    } else if (action === "deactivate_all") {
+      proceed = confirmSimple("Deactivate All " + cfg.titlePlural,
+        "This will deactivate " + fmt(counts.active) + " active " + cfg.labelPlural + ". " +
+        "Creator post generation may become unavailable if no active items remain.")
+        .then(function (ok) {
+          if (!ok) return false;
+          if (counts.active === 0) return true;
+          return confirmSimple("Warning: Zero Active " + cfg.titlePlural,
+            "This will leave zero active " + cfg.labelPlural + ". Confirm again to proceed.");
+        });
+    } else if (action === "delete_selected") {
+      if (!selectedIds.length) { toast("❌ Select at least one item first", "error"); return; }
+      var labels = rsc.rowLabel[cfg.resourceType];
+      var names = selectedIds.slice(0, 10).map(function (id) { return labels[id] || id; });
+      var namesText = names.join(", ") + (selectedIds.length > 10 ? ", …" : "");
+      var activeSelected = selectedIds.filter(function (id) { return rsc.rowStatus[cfg.resourceType][id] === "active"; }).length;
+      proceed = confirmSimple(
+        "Delete " + fmt(selectedIds.length) + " " + (selectedIds.length === 1 ? cfg.label : cfg.labelPlural),
+        "This permanently deletes: " + namesText + ". This cannot be undone."
+      ).then(function (ok) {
+        if (!ok) return false;
+        if (activeSelected > 0 && activeSelected >= counts.active) {
+          return confirmSimple("Warning: Zero Active " + cfg.titlePlural,
+            "Deleting this selection will leave zero active " + cfg.labelPlural + ". Confirm again to proceed.");
+        }
+        return true;
+      });
+    } else {
+      return;
+    }
+
+    proceed.then(function (ok) {
+      if (!ok) return;
+      rscSetBusy(cfg, true);
+      var body = { resource_type: cfg.resourceType, action: action };
+      if (action === "delete_selected") body.selected_ids = selectedIds;
+      apiPostJson("/api/admin/referral/share-content/bulk-action", body).then(function (res) {
+        rscSetBusy(cfg, false);
+        if (!res.ok || res.d.status !== "ok") {
+          toast("❌ " + (res.d && res.d.code || "bulk_action_failed"), "error");
+          return; // preserve selection on failure
+        }
+        var d = res.d;
+        var msg;
+        if (action === "delete_selected") {
+          msg = fmt(d.deleted_count) + " selected " + (d.deleted_count === 1 ? cfg.label : cfg.labelPlural) + " deleted.";
+          rsc.selected[cfg.resourceType].clear();
+        } else if (action === "activate_all") {
+          msg = fmt(d.modified_count) + " " + cfg.labelPlural + " activated.";
+        } else {
+          msg = fmt(d.modified_count) + " " + cfg.labelPlural + " deactivated.";
+        }
+        toast("✅ " + msg, "success");
+        actionSel.value = "";
+        cfg.reload();
+      }).catch(function (e) {
+        rscSetBusy(cfg, false);
+        toast("❌ " + e.message, "error"); // preserve selection on failure
+      });
+    });
+  }
+
+  function rscBindBulkControls(cfg) {
+    var selectAll = $("#" + cfg.prefix + "-select-all");
+    if (selectAll) {
+      selectAll.addEventListener("change", function () {
+        var checked = selectAll.checked;
+        $all("#" + cfg.prefix + "-body .rsc-row-check").forEach(function (box) {
+          box.checked = checked;
+          if (checked) rsc.selected[cfg.resourceType].add(box.dataset.id);
+          else rsc.selected[cfg.resourceType].delete(box.dataset.id);
+        });
+        rscUpdateBulkControls(cfg);
+      });
+    }
+    var bulkSelect = $("#" + cfg.prefix + "-bulk-select");
+    if (bulkSelect) bulkSelect.addEventListener("change", function () { rscUpdateBulkControls(cfg); });
+    var applyBtn = $("#" + cfg.prefix + "-bulk-apply-btn");
+    if (applyBtn) applyBtn.addEventListener("click", function () { rscPerformBulkAction(cfg); });
+
+    document.addEventListener("change", function (e) {
+      var box = e.target;
+      if (!box.classList || !box.classList.contains("rsc-row-check")) return;
+      if (box.closest("#" + cfg.prefix + "-body") === null) return;
+      if (box.checked) rsc.selected[cfg.resourceType].add(box.dataset.id);
+      else rsc.selected[cfg.resourceType].delete(box.dataset.id);
+      rscUpdateBulkControls(cfg);
+    });
+  }
 
   function rscStatusPill(status) {
     return '<span class="pill ' + (status === "active" ? "approved" : "neutral") + '">' + esc(status || "—") + '</span>';
@@ -5260,9 +5422,19 @@
     statePanel("rsc-hooks-body", "loading", "Loading caption hooks…");
     api("/api/admin/referral/share-content/hooks" + rscQuery("rsc-hooks-search", "rsc-hooks-status-filter")).then(function (data) {
       var items = data.hooks || [];
-      if (!items.length) { $("#rsc-hooks-body").innerHTML = emptyState("No caption hooks yet — add one above."); return; }
+      rsc.counts.hook = { active: data.active_count || 0, total: data.total_count || 0 };
+      var summaryEl = $("#rsc-hooks-active-summary");
+      if (summaryEl) summaryEl.textContent = rscSummaryText(rsc.counts.hook);
+      rsc.rowStatus.hook = {};
+      rsc.rowLabel.hook = {};
+      items.forEach(function (h) { rsc.rowStatus.hook[h.id] = h.status; rsc.rowLabel.hook[h.id] = h.text; });
+      var known = {};
+      items.forEach(function (h) { known[h.id] = true; });
+      rsc.selected.hook.forEach(function (id) { if (!known[id]) rsc.selected.hook.delete(id); });
+      if (!items.length) { $("#rsc-hooks-body").innerHTML = emptyState("No caption hooks yet — add one above."); rscUpdateBulkControls(rscHookCfg); return; }
       var rows = items.map(function (h) {
-        return '<tr><td>' + esc(h.text) + '</td>' +
+        var checked = rsc.selected.hook.has(h.id) ? "checked" : "";
+        return '<tr><td><input type="checkbox" class="rsc-row-check" data-id="' + esc(h.id) + '" ' + checked + ' /></td><td>' + esc(h.text) + '</td>' +
           '<td>' + rscStatusPill(h.status) + '</td>' +
           '<td>' + fmt(h.times_selected || 0) + '</td>' +
           '<td class="sub">' + (h.last_selected_at ? new Date(h.last_selected_at).toLocaleString() : "—") + '</td>' +
@@ -5271,11 +5443,12 @@
           '<button class="btn" data-rsc-hook-action="edit" data-id="' + esc(h.id) + '" data-text="' + esc(h.text) + '">Edit</button> ' +
           '<button class="btn" data-rsc-hook-action="' + (h.status === "active" ? "deactivate" : "activate") + '" data-id="' + esc(h.id) + '">' +
           (h.status === "active" ? "Deactivate" : "Activate") + '</button> ' +
-          '<button class="btn danger" data-rsc-hook-action="delete" data-id="' + esc(h.id) + '">Delete</button>' +
+          '<button class="btn danger" data-rsc-hook-action="delete" data-id="' + esc(h.id) + '" data-text="' + esc(h.text) + '">Delete</button>' +
           '</td></tr>';
       }).join("");
-      $("#rsc-hooks-body").innerHTML = '<table class="data-table"><thead><tr><th>Hook</th><th>Status</th><th>Times Selected</th>' +
+      $("#rsc-hooks-body").innerHTML = '<table class="data-table"><thead><tr><th></th><th>Hook</th><th>Status</th><th>Times Selected</th>' +
         '<th>Last Selected</th><th>Created</th><th>Actions</th></tr></thead><tbody>' + rows + '</tbody></table>';
+      rscUpdateBulkControls(rscHookCfg);
     }).catch(function (e) { statePanel("rsc-hooks-body", "error", "Failed to load caption hooks: " + e.message); });
   }
 
@@ -5417,19 +5590,29 @@
           loadShareHooks(true);
         });
       } else if (action === "activate" || action === "deactivate") {
+        if (!btnStart(btn, "Working...")) return;
         apiPost("/api/admin/referral/share-content/hooks/" + id + "/" + action).then(function (r) {
+          btnStop(btn);
           if (r.status !== "ok") toast("❌ " + r.code, "error");
           loadShareHooks(true);
         });
       } else if (action === "delete") {
-        if (!confirm("Delete this caption hook? This cannot be undone.")) return;
-        apiDelete("/api/admin/referral/share-content/hooks/" + id).then(function (res) {
-          if (!res.ok || res.d.status !== "ok") { toast("❌ " + (res.d && res.d.code || "delete_failed"), "error"); return; }
-          toast("✅ Hook deleted", "success");
-          loadShareHooks(true);
+        var hookText = btn.dataset.text || id;
+        confirmSimple("Delete Caption Hook",
+          'Permanently delete hook "' + hookText + '"? This cannot be undone.').then(function (ok) {
+          if (!ok) return;
+          if (!btnStart(btn, "Deleting...")) return;
+          apiDelete("/api/admin/referral/share-content/hooks/" + id).then(function (res) {
+            btnStop(btn);
+            if (!res.ok || res.d.status !== "ok") { toast("❌ " + (res.d && res.d.code || "delete_failed"), "error"); return; }
+            toast("✅ Hook deleted", "success");
+            loadShareHooks(true);
+          });
         });
       }
     });
+
+    rscBindBulkControls(rscHookCfg);
 
     $("#rsc-playback-search-btn").addEventListener("click", function () { loadSharePlayback(true); });
     $all("#rsc-playback-status-filter button").forEach(function (b) {
@@ -5479,28 +5662,48 @@
           loadSharePlayback(true);
         });
       } else if (action === "activate" || action === "deactivate") {
+        if (!btnStart(btn, "Working...")) return;
         apiPost("/api/admin/referral/share-content/playback/" + id + "/" + action).then(function (r) {
+          btnStop(btn);
           if (r.status !== "ok") toast("❌ " + r.code, "error");
           loadSharePlayback(true);
         });
       } else if (action === "delete") {
-        if (!confirm("Delete this playback record? This cannot be undone.")) return;
-        apiDelete("/api/admin/referral/share-content/playback/" + id).then(function (res) {
-          if (!res.ok || res.d.status !== "ok") { toast("❌ " + (res.d && res.d.code || "delete_failed"), "error"); return; }
-          toast("✅ Playback record deleted", "success");
-          loadSharePlayback(true);
+        var playbackLabel = btn.dataset.playbackId || id;
+        confirmSimple("Delete Playback Record",
+          'Permanently delete playback record "' + playbackLabel + '"? This cannot be undone.').then(function (ok) {
+          if (!ok) return;
+          if (!btnStart(btn, "Deleting...")) return;
+          apiDelete("/api/admin/referral/share-content/playback/" + id).then(function (res) {
+            btnStop(btn);
+            if (!res.ok || res.d.status !== "ok") { toast("❌ " + (res.d && res.d.code || "delete_failed"), "error"); return; }
+            toast("✅ Playback record deleted", "success");
+            loadSharePlayback(true);
+          });
         });
       }
     });
+
+    rscBindBulkControls(rscPlaybackCfg);
   }
 
   function loadSharePlayback() {
     statePanel("rsc-playback-body", "loading", "Loading playback pool…");
     api("/api/admin/referral/share-content/playback" + rscQuery("rsc-playback-search", "rsc-playback-status-filter")).then(function (data) {
       var items = data.playback || [];
-      if (!items.length) { $("#rsc-playback-body").innerHTML = emptyState("No playback records yet — add one above."); return; }
+      rsc.counts.playback_link = { active: data.active_count || 0, total: data.total_count || 0 };
+      var summaryEl = $("#rsc-playback-active-summary");
+      if (summaryEl) summaryEl.textContent = rscSummaryText(rsc.counts.playback_link);
+      rsc.rowStatus.playback_link = {};
+      rsc.rowLabel.playback_link = {};
+      items.forEach(function (p) { rsc.rowStatus.playback_link[p.id] = p.status; rsc.rowLabel.playback_link[p.id] = p.playback_id; });
+      var known = {};
+      items.forEach(function (p) { known[p.id] = true; });
+      rsc.selected.playback_link.forEach(function (id) { if (!known[id]) rsc.selected.playback_link.delete(id); });
+      if (!items.length) { $("#rsc-playback-body").innerHTML = emptyState("No playback records yet — add one above."); rscUpdateBulkControls(rscPlaybackCfg); return; }
       var rows = items.map(function (p) {
-        return '<tr><td>' + esc(p.playback_url) + '</td>' +
+        var checked = rsc.selected.playback_link.has(p.id) ? "checked" : "";
+        return '<tr><td><input type="checkbox" class="rsc-row-check" data-id="' + esc(p.id) + '" ' + checked + ' /></td><td>' + esc(p.playback_url) + '</td>' +
           '<td class="sub">' + esc(p.playback_id) + '</td>' +
           '<td>' + esc(p.game_name || "—") + '</td>' +
           '<td>' + rscStatusPill(p.status) + '</td>' +
@@ -5511,11 +5714,12 @@
           '<button class="btn" data-rsc-playback-action="edit" data-id="' + esc(p.id) + '" data-playback-id="' + esc(p.playback_id) + '" data-game-name="' + esc(p.game_name || "") + '">Edit</button> ' +
           '<button class="btn" data-rsc-playback-action="' + (p.status === "active" ? "deactivate" : "activate") + '" data-id="' + esc(p.id) + '">' +
           (p.status === "active" ? "Deactivate" : "Activate") + '</button> ' +
-          '<button class="btn danger" data-rsc-playback-action="delete" data-id="' + esc(p.id) + '">Delete</button>' +
+          '<button class="btn danger" data-rsc-playback-action="delete" data-id="' + esc(p.id) + '" data-playback-id="' + esc(p.playback_id) + '">Delete</button>' +
           '</td></tr>';
       }).join("");
-      $("#rsc-playback-body").innerHTML = '<table class="data-table"><thead><tr><th>Playback URL</th><th>Playback ID</th><th>Game</th><th>Status</th>' +
+      $("#rsc-playback-body").innerHTML = '<table class="data-table"><thead><tr><th></th><th>Playback URL</th><th>Playback ID</th><th>Game</th><th>Status</th>' +
         '<th>Times Selected</th><th>Last Selected</th><th>Created</th><th>Actions</th></tr></thead><tbody>' + rows + '</tbody></table>';
+      rscUpdateBulkControls(rscPlaybackCfg);
     }).catch(function (e) { statePanel("rsc-playback-body", "error", "Failed to load playback pool: " + e.message); });
   }
 
