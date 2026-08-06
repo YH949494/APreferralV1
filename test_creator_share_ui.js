@@ -117,7 +117,7 @@ const ELEMENT_IDS = [
 // parse the real HTML/CSS -- only classes the inline script itself toggles.
 const INITIALLY_HIDDEN_IDS = ["access-denied", "app-shell", "package-card", "package-caption", "package-playback", "rewards-section"];
 
-function buildSandbox({ initData = "tg_init_data_ok", fetchImpl, clipboardWriteText, execCommandResult = true, openTelegramLink, windowOpenResult } = {}) {
+function buildSandbox({ initData = "tg_init_data_ok", fetchImpl, clipboardWriteText, execCommandResult = true, openTelegramLink, windowOpenResult, windowOpenThrows } = {}) {
   const elements = {};
   ELEMENT_IDS.forEach((id) => {
     elements[id] = makeElement(id);
@@ -180,7 +180,10 @@ function buildSandbox({ initData = "tg_init_data_ok", fetchImpl, clipboardWriteT
       Telegram: { WebApp: telegramWebApp },
       open: (url, target, features) => {
         windowOpenCalls.push({ url, target, features });
-        return windowOpenResult === undefined ? {} : windowOpenResult;
+        if (windowOpenThrows) throw new Error("window.open blocked");
+        // With "noopener" a real browser returns null even on a successful
+        // open, so tests must not treat this return value as success/failure.
+        return windowOpenResult === undefined ? null : windowOpenResult;
       },
     },
     document: documentStub,
@@ -418,6 +421,64 @@ test("repeated clicks on Get My Share Post while a request is in flight do not s
   assert.equal(allGenerateCalls.length, 2, "a click after the in-flight request settles is a separate, legitimate request");
 });
 
+test("a stale auto-copy completion (from a package superseded by 'Give Me Another Post') does not overwrite the newer package's UI, but still credits the right package for /copied", async () => {
+  const resolvers = [];
+  let generateCallCount = 0;
+  const { elements, fetchCalls } = buildSandbox({
+    clipboardWriteText: () => new Promise((resolve) => { resolvers.push(resolve); }),
+    fetchImpl: (url) => {
+      if (url.includes("/api/creator/share/status")) return statusOkResponse();
+      if (url.includes("/api/creator/share/generate")) {
+        generateCallCount += 1;
+        return generateCallCount === 1
+          ? generateOkResponse({ package_id: "pkg_A", hook_text: "Hook A", share_text: "TEXT_A" })
+          : generateOkResponse({ package_id: "pkg_B", hook_text: "Hook B", share_text: "TEXT_B" });
+      }
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ status: "ok" }) });
+    },
+  });
+
+  await flush();
+  elements["btn-generate"]._trigger("click");
+  await flush();
+  await flush();
+  assert.equal(elements["package-caption"].textContent, "Hook A");
+
+  // pkg_A's automatic clipboard write is still in flight (resolvers[0] pending)
+  // when the user regenerates -- pkg_B becomes current before A's copy settles.
+  elements["btn-try-another"]._trigger("click");
+  await flush();
+  await flush();
+  assert.equal(elements["package-caption"].textContent, "Hook B");
+  assert.equal(elements["generate-status"].textContent, "", "pkg_B's own auto-copy hasn't settled yet");
+
+  // Now let pkg_A's stale copy resolve.
+  resolvers[0]();
+  await flush();
+  await flush();
+
+  assert.notEqual(
+    elements["generate-status"].textContent,
+    "✓ Post Copied",
+    "a stale copy completion for the superseded package must not claim success on the current (pkg_B) status line"
+  );
+  assert.equal(elements["package-caption"].textContent, "Hook B", "current package's rendered content must be untouched by the stale completion");
+
+  let copiedCalls = fetchCalls.filter((c) => c.url.includes("/copied"));
+  assert.equal(copiedCalls.length, 1, "the stale completion must still be tracked");
+  assert.ok(copiedCalls[0].url.includes("pkg_A"), "tracking must credit the package that was actually copied (pkg_A), not the now-current pkg_B");
+
+  // Finally resolve pkg_B's own (still-current) auto-copy.
+  resolvers[1]();
+  await flush();
+  await flush();
+
+  assert.equal(elements["generate-status"].textContent, "✓ Post Copied", "pkg_B's own copy completing while still current must update the status line");
+  copiedCalls = fetchCalls.filter((c) => c.url.includes("/copied"));
+  assert.equal(copiedCalls.length, 2);
+  assert.ok(copiedCalls[1].url.includes("pkg_B"));
+});
+
 test("empty caption/playback rows are hidden without showing the literal word None", async () => {
   const { elements } = buildSandbox({
     fetchImpl: (url) => {
@@ -600,10 +661,36 @@ test("Telegram share outside Telegram (ordinary browser) falls back to window.op
   assert.equal(elements["share-status"].textContent, "", "no fallback error when the popup opens successfully");
 });
 
-test("Telegram share failure (no WebApp bridge, popup blocked) shows a visible fallback message", async () => {
+test("window.open's null return (the normal, expected result when noopener is set) must NOT be treated as a blocked popup", async () => {
+  // With "noopener", real browsers intentionally return null even when the
+  // window opened successfully -- there is no reference to hand back. A
+  // naive `!!win` success check would misreport this as failure every time.
+  const { elements, windowOpenCalls } = buildSandbox({
+    openTelegramLink: undefined,
+    windowOpenResult: null, // the real-world return value for a successful noopener open
+    fetchImpl: (url) => {
+      if (url.includes("/api/creator/share/status")) return statusOkResponse();
+      if (url.includes("/api/creator/share/generate")) return generateOkResponse();
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ status: "ok" }) });
+    },
+  });
+
+  await flush();
+  elements["btn-generate"]._trigger("click");
+  await flush();
+  await flush();
+
+  elements["btn-telegram-share"]._trigger("click");
+  await flush();
+
+  assert.equal(windowOpenCalls.length, 1);
+  assert.equal(elements["share-status"].textContent, "", "a null return from window.open must not trigger the fallback error message");
+});
+
+test("Telegram share failure (window.open throws, e.g. a genuinely blocked popup) shows a visible fallback message", async () => {
   const { elements } = buildSandbox({
     openTelegramLink: undefined,
-    windowOpenResult: null, // simulates a blocked popup
+    windowOpenThrows: true, // simulates the browser actually refusing to open the popup
     fetchImpl: (url) => {
       if (url.includes("/api/creator/share/status")) return statusOkResponse();
       if (url.includes("/api/creator/share/generate")) return generateOkResponse();

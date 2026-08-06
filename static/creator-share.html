@@ -353,7 +353,7 @@
         }
         renderPackage(res.body);
         scrollPackageIntoView();
-        performCopy().then(function (copied) {
+        performCopy(res.body).then(function (copied) {
           if (copied) {
             els.generateStatus.classList.remove("error");
             els.generateStatus.textContent = GENERATE_COPIED_MESSAGE;
@@ -387,11 +387,21 @@
 
   // Shared clipboard-copy primitive used both by the manual "Copy Post"
   // button and by the automatic copy triggered right after generation.
-  // Resolves to whether the copy actually succeeded so callers never report
-  // success on failure.
-  function performCopy() {
-    if (!currentPackage) return Promise.resolve(false);
-    var text = currentPackage.share_text;
+  // Resolves to whether the copy succeeded *for the currently-displayed
+  // package*, so callers never report success on failure.
+  //
+  // Takes an explicit target package (falling back to currentPackage at
+  // call time) and re-checks identity once the async copy settles: if the
+  // user has since generated a new post (e.g. clicked "Give Me Another
+  // Post" while this copy was still in flight), currentPackage will have
+  // moved on. The /copied tracking call still fires for the package that
+  // was actually copied, but UI updates (toast, button label, status
+  // message) are suppressed so a stale completion can't stomp on the
+  // newer package's state.
+  function performCopy(pkg) {
+    var targetPkg = pkg || currentPackage;
+    if (!targetPkg) return Promise.resolve(false);
+    var text = targetPkg.share_text;
 
     var copyPromise;
     if (navigator.clipboard && navigator.clipboard.writeText) {
@@ -403,15 +413,20 @@
     }
 
     return copyPromise.then(function (copied) {
+      var isCurrent = currentPackage === targetPkg;
       if (!copied) {
-        els.copyToast.textContent = "Couldn't copy automatically — please select and copy the text above.";
+        if (isCurrent) {
+          els.copyToast.textContent = "Couldn't copy automatically — please select and copy the text above.";
+        }
         return false;
       }
-      els.copyToast.textContent = "";
-      apiPost("/api/creator/share/" + encodeURIComponent(currentPackage.package_id) + "/copied", {
+      if (isCurrent) {
+        els.copyToast.textContent = "";
+      }
+      apiPost("/api/creator/share/" + encodeURIComponent(targetPkg.package_id) + "/copied", {
         platform: detectPlatform(),
       }).catch(function () {});
-      return true;
+      return isCurrent;
     });
   }
 
@@ -451,15 +466,21 @@
       "https://t.me/share/url?url=" + encodeURIComponent(currentPackage.referral_link) +
       "&text=" + encodeURIComponent(captionText);
 
+    // window.open's return value can't be used to detect a blocked popup
+    // here: with "noopener" set, browsers intentionally return null even
+    // when the window opened successfully (there is no reference to hand
+    // back), which is indistinguishable from a blocked popup's null return.
+    // So a call that doesn't throw is treated as opened; only an actual
+    // thrown error (e.g. a sandboxed context refusing the call) counts as
+    // failure.
     var opened = false;
     try {
       if (tg && typeof tg.openTelegramLink === "function") {
         tg.openTelegramLink(shareUrl);
-        opened = true;
       } else {
-        var win = window.open(shareUrl, "_blank", "noopener,noreferrer");
-        opened = !!win;
+        window.open(shareUrl, "_blank", "noopener,noreferrer");
       }
+      opened = true;
     } catch (e) {
       opened = false;
     }
