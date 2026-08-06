@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "mongodb": {
+      "command": "npx",
+      "args": ["-y", "mongodb-mcp-server@1"],
+      "env": {
+        "MDB_MCP_CONNECTION_STRING": "${MONGO_URL}"
+      }
+    }
+  }
+}
