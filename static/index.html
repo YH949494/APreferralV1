@@ -1982,6 +1982,28 @@
     </div>
   </div>
 
+  <!-- DELETE DROP CONFIRMATION MODAL -->
+  <div id="adm_delete_drop_modal" style="display:none;position:fixed;z-index:2000;left:0;top:0;width:100%;height:100%;background:rgba(0,0,0,0.6);">
+    <div style="background:#1e293b;color:#fff;margin:12% auto;padding:20px;border-radius:12px;width:90%;max-width:380px;box-shadow:0 8px 32px rgba(0,0,0,0.5);">
+      <h3 style="margin:0 0 12px;font-size:16px;color:#f87171;">⚠️ Delete Drop</h3>
+      <p style="font-size:13px;color:#e2e8f0;margin:0 0 4px;">This permanently deletes the drop and all its unclaimed voucher codes. This cannot be undone.</p>
+      <div style="font-size:13px;background:#0f172a;border-radius:8px;padding:10px;margin:12px 0;line-height:1.6;">
+        <div>Name: <strong id="adm_delete_name"></strong></div>
+        <div>Drop ID: <code id="adm_delete_id" style="font-size:12px;word-break:break-all;"></code></div>
+        <div>Total uploaded codes: <strong id="adm_delete_total"></strong></div>
+        <div>Claimed codes: <strong id="adm_delete_claimed"></strong></div>
+      </div>
+      <label style="display:block;margin-bottom:16px;font-size:13px;">
+        Type <strong>DELETE</strong> to confirm
+        <input type="text" id="adm_delete_confirm_input" autocomplete="off" style="display:block;width:100%;margin-top:4px;padding:7px;border-radius:6px;border:1px solid #334155;background:#0f172a;color:#fff;font-size:13px;box-sizing:border-box;">
+      </label>
+      <div style="display:flex;gap:8px;">
+        <button id="adm_delete_drop_confirm" disabled style="flex:1;padding:9px;border-radius:6px;background:#dc2626;color:#fff;border:none;cursor:not-allowed;font-size:13px;font-weight:600;opacity:0.5;">Delete</button>
+        <button id="adm_delete_drop_cancel" style="flex:1;padding:9px;border-radius:6px;background:#475569;color:#fff;border:none;cursor:pointer;font-size:13px;">Cancel</button>
+      </div>
+    </div>
+  </div>
+
   <!-- CREATE DROP PREVIEW / CONFIRMATION MODAL -->
   <div id="adm_preview_drop_modal" style="display:none;position:fixed;z-index:2100;left:0;top:0;width:100%;height:100%;background:rgba(0,0,0,0.65);align-items:center;justify-content:center;padding:16px;box-sizing:border-box;">
     <div style="background:#1e293b;color:#fff;border-radius:12px;width:100%;max-width:440px;max-height:90vh;display:flex;flex-direction:column;box-shadow:0 8px 32px rgba(0,0,0,0.5);">
@@ -2843,6 +2865,8 @@
           const stats = d.type === "pooled"
             ? `${d.codesFree}/${d.codesTotal} free`
             : `${d.claimed}/${d.assigned} claimed`;
+          const totalCodes = d.type === "pooled" ? (d.codesTotal || 0) : (d.assigned || 0);
+          const claimedCodes = d.type === "pooled" ? Math.max(0, (d.codesTotal || 0) - (d.codesFree || 0)) : (d.claimed || 0);
 
           const tr = document.createElement("tr");
           tr.innerHTML = `
@@ -2857,6 +2881,7 @@
               <button data-op="end_now"   data-id="${id}">End</button>
               <button type="button" class="btn btn-secondary adm-edit-dates-btn" data-id="${id}" data-name="${escapeHtml(d.name || "")}" data-starts="${escapeHtml(d.startsAt || "")}" data-ends="${escapeHtml(d.endsAt || "")}">🖊 Edit</button>
               <button type="button" class="btn btn-secondary copy-drop-id-btn" data-copy-dropid="${id}">📋 Copy ID</button>
+              <button type="button" class="btn btn-danger adm-delete-drop-btn" data-id="${id}" data-name="${escapeHtml(d.name || "")}" data-total="${totalCodes}" data-claimed="${claimedCodes}" style="background:#dc2626;color:#fff;border:none;border-radius:6px;padding:6px 10px;cursor:pointer;">🗑 Delete</button>
             </td>`;
           tbody.appendChild(tr);
         });
@@ -5760,6 +5785,96 @@
         } finally {
           const saveBtn = document.getElementById("adm_edit_dates_save");
           if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = "Save"; }
+        }
+      });
+    }
+
+    // Delete Drop modal logic
+    {
+      let _deleteDropId = null;
+      const modal = document.getElementById("adm_delete_drop_modal");
+      const confirmInput = document.getElementById("adm_delete_confirm_input");
+      const confirmBtn = document.getElementById("adm_delete_drop_confirm");
+      const cancelBtn = document.getElementById("adm_delete_drop_cancel");
+
+      function closeDeleteModal() {
+        modal.style.display = "none";
+        _deleteDropId = null;
+        confirmInput.value = "";
+        confirmBtn.disabled = true;
+        confirmBtn.style.opacity = "0.5";
+        confirmBtn.style.cursor = "not-allowed";
+      }
+
+      document.addEventListener("click", (e) => {
+        const btn = e.target.closest(".adm-delete-drop-btn");
+        if (!btn) return;
+        _deleteDropId = btn.getAttribute("data-id");
+        document.getElementById("adm_delete_name").textContent = btn.getAttribute("data-name") || "";
+        document.getElementById("adm_delete_id").textContent = _deleteDropId || "";
+        document.getElementById("adm_delete_total").textContent = btn.getAttribute("data-total") || "0";
+        document.getElementById("adm_delete_claimed").textContent = btn.getAttribute("data-claimed") || "0";
+        confirmInput.value = "";
+        confirmBtn.disabled = true;
+        confirmBtn.style.opacity = "0.5";
+        confirmBtn.style.cursor = "not-allowed";
+        modal.style.display = "block";
+      });
+
+      cancelBtn.addEventListener("click", closeDeleteModal);
+
+      modal.addEventListener("click", (e) => {
+        if (e.target === modal) closeDeleteModal();
+      });
+
+      confirmInput.addEventListener("input", () => {
+        const ok = confirmInput.value.trim() === "DELETE";
+        confirmBtn.disabled = !ok;
+        confirmBtn.style.opacity = ok ? "1" : "0.5";
+        confirmBtn.style.cursor = ok ? "pointer" : "not-allowed";
+      });
+
+      confirmBtn.addEventListener("click", async () => {
+        if (!_deleteDropId || confirmInput.value.trim() !== "DELETE") return;
+        const dropId = _deleteDropId;
+        try {
+          const userId = getAdminUserId();
+          if (!userId) { tgAlert("Missing admin user id. Open via Telegram to continue."); return; }
+          const tail = buildAdminQueryTail();
+          confirmBtn.disabled = true;
+          confirmBtn.textContent = "Deleting…";
+          const res = await v2Fetch(`${API_V2}/admin/drops/${dropId}/actions${tail}`, {
+            method: "POST",
+            body: JSON.stringify({ op: "delete" })
+          });
+          let payload = null;
+          try { payload = await res.json(); } catch {}
+
+          if (res.status === 401) {
+            tgAlert("Not authorized (401). Please set your Telegram username");
+            return;
+          }
+          if (res.status === 409) {
+            tgAlert(`Cannot delete: this drop has ${payload?.claimedCount ?? "some"} claimed/reserved code(s). Refresh and check the drop before retrying.`);
+            return;
+          }
+          if (res.status === 404) {
+            // Already deleted (idempotent double-click) - just refresh.
+            closeDeleteModal();
+            adm_list && adm_list();
+            return;
+          }
+          if (!res.ok || (payload && payload.status !== "ok")) {
+            throw new Error(payload?.message || payload?.error || `HTTP ${res.status}`);
+          }
+          closeDeleteModal();
+          const removed = payload?.codesRemoved ?? 0;
+          tgAlert(`Drop deleted. ${removed} voucher code(s) removed.`);
+          adm_list && adm_list();
+        } catch (err) {
+          tgAlert(`Delete failed: ${err.message}`);
+        } finally {
+          confirmBtn.textContent = "Delete";
         }
       });
     }

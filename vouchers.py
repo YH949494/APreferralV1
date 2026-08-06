@@ -9,6 +9,7 @@ import threading
 import random
 import requests
 import time
+import uuid
 from config import (
     KL_TZ,
     normalize_for_bot_segment,
@@ -800,6 +801,7 @@ def ensure_voucher_indexes():
     welcome_analytics_events_col.create_index([("created_at", ASCENDING)])
     welcome_analytics_events_col.create_index([("event", ASCENDING), ("created_at", DESCENDING)])
     welcome_analytics_events_col.create_index([("stage", ASCENDING), ("status", ASCENDING), ("created_at", DESCENDING)])
+    db["drop_deletion_audit"].create_index([("drop_id", ASCENDING), ("at", DESCENDING)])
     try:
         welcome_analytics_events_col.create_index([("dedup_key", ASCENDING)], unique=True, sparse=True)
     except Exception:
@@ -7760,10 +7762,83 @@ def admin_drop_actions(drop_id):
         if name is not None:
             update_doc["name"] = name.strip()
         db.drops.update_one({"_id": drop["_id"]}, {"$set": update_doc})
+    elif op == "delete":
+        return _admin_delete_drop(drop, user, data)
     else:
         return jsonify({"status": "error", "code": "bad_request"}), 400
 
     return jsonify({"status": "ok"})
+
+
+def _admin_delete_drop(drop: dict, user: dict, data: dict):
+    """Delete a drop and its unclaimed voucher-code inventory.
+
+    Only allowed when the authoritative claimed/reserved count (recomputed here from
+    db.vouchers, never trusting the caller) is zero. No mongo replica-set transactions
+    are used anywhere else in this codebase (see ensure_voucher_indexes/claim paths),
+    so this follows the same convention: delete the `drops` document first (that delete
+    is the single source of truth for "is this drop gone?"), then delete its vouchers.
+    If the process dies between those two steps, the drop is already gone and the
+    leftover `vouchers` rows become orphans (dropId pointing at a deleted drop) - they
+    no longer come back from any listing endpoint, but they DO still hold the codes'
+    slots in the global-unique `code` index. Reconciliation: periodically sweep
+    `db.vouchers` for dropId values with no matching `db.drops._id` and purge them
+    (safe, since a missing drop can never have real claims to protect).
+    """
+    drop_id_variants = _drop_id_variants(drop["_id"])
+
+    attached_codes = db.vouchers.count_documents({
+        "dropId": {"$in": drop_id_variants},
+        "$or": [
+            {"status": {"$in": ["claimed", "reserved", "allocated"]}},
+            {"claimedBy": {"$ne": None}},
+        ],
+    })
+    reserved_locks = voucher_claims_col.count_documents({
+        "drop_id": {"$in": drop_id_variants},
+        "status": {"$in": ["claimed", "claimed_pending_code"]},
+    })
+    if attached_codes > 0 or reserved_locks > 0:
+        return jsonify({
+            "status": "error",
+            "code": "codes_claimed",
+            "message": "Drop has claimed, reserved, or allocated codes and cannot be deleted",
+            "claimedCount": attached_codes,
+            "reservedCount": reserved_locks,
+        }), 409
+
+    total_codes = db.vouchers.count_documents({"dropId": {"$in": drop_id_variants}})
+    request_id = str(data.get("requestId") or "").strip() or uuid.uuid4().hex
+
+    audit_doc = {
+        "event": "drop_deleted",
+        "admin_id": (user or {}).get("id"),
+        "admin_username": (user or {}).get("usernameLower") or (user or {}).get("username"),
+        "drop_id": str(drop["_id"]),
+        "drop_name": drop.get("name"),
+        "codes_removed": total_codes,
+        "request_id": request_id,
+        "at": now_utc(),
+    }
+    try:
+        db["drop_deletion_audit"].insert_one(audit_doc)
+    except Exception:
+        try:
+            current_app.logger.exception("[admin][drops] delete_audit_failed drop_id=%s", drop["_id"])
+        except Exception:
+            print("[admin][drops] delete_audit_failed")
+
+    delete_res = db.drops.delete_one({"_id": drop["_id"]})
+    if delete_res.deleted_count == 0:
+        # Already removed by a concurrent/duplicate request - idempotent no-op.
+        return jsonify({"status": "ok", "code": "already_deleted", "codesRemoved": 0}), 200
+
+    vouchers_res = db.vouchers.delete_many({"dropId": {"$in": drop_id_variants}})
+    return jsonify({
+        "status": "ok",
+        "dropId": str(drop["_id"]),
+        "codesRemoved": vouchers_res.deleted_count,
+    }), 200
 
 @vouchers_bp.route("/admin/drops", methods=["GET"])
 def admin_list_drops():
