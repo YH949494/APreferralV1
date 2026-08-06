@@ -506,10 +506,11 @@ class TestBulkActivateDeactivate:
                          json={"resource_type": "hook", "action": "activate_all"})
         assert r.status_code == 200
         body = r.get_json()
+        assert body["total_count"] == 2
         assert body["matched_count"] == 2
+        assert body["eligible_count"] == 2
         assert body["modified_count"] == 2
         assert body["active_count"] == 2
-        assert body["total_count"] == 2
 
         assert all(h["status"] == "active" for h in fake_db["caption_hooks"].find({}))
         # Playback pool is a completely separate collection -- untouched.
@@ -530,22 +531,77 @@ class TestBulkActivateDeactivate:
         assert all(p["status"] == "active" for p in fake_db["playback_pool"].find({}))
         assert fake_db["caption_hooks"].find_one({"text": "A"})["status"] == "inactive"
 
-    def test_activate_all_is_idempotent(self, client, fake_db):
-        # Idempotent means re-running never changes the *end state* or errors
-        # out -- not that MongoDB reports zero modified docs (updated_at is
-        # always bumped, so real modified_count reflects that timestamp
-        # touch even when `status` itself was already "active").
+    def test_activate_all_only_matches_records_not_already_active(self, client, fake_db):
+        # Query itself is filtered to status != target -- an already-active
+        # record's updated_at must never be touched by activate_all.
+        already_active_id = _hook(fake_db, "A", status="active")
+        _hook(fake_db, "B", status="inactive")
+        before = fake_db["caption_hooks"].find_one({"_id": already_active_id})["updated_at"]
+
+        r = client.post("/api/admin/referral/share-content/bulk-action",
+                         json={"resource_type": "hook", "action": "activate_all"})
+        body = r.get_json()
+        assert body["total_count"] == 2
+        assert body["matched_count"] == 1  # only B was eligible
+        assert body["modified_count"] == 1
+        assert body["active_count"] == 2
+
+        after = fake_db["caption_hooks"].find_one({"_id": already_active_id})["updated_at"]
+        assert after == before, "already-active record's updated_at must not change"
+
+    def test_repeated_activate_all_call_performs_no_further_mutation(self, client, fake_db):
         _hook(fake_db, "A", status="active")
         _hook(fake_db, "B", status="inactive")
         r1 = client.post("/api/admin/referral/share-content/bulk-action",
                           json={"resource_type": "hook", "action": "activate_all"})
+        assert r1.get_json()["modified_count"] == 1
         assert r1.get_json()["active_count"] == 2
+
+        snapshot = {d["_id"]: dict(d) for d in fake_db["caption_hooks"].find({})}
+
         r2 = client.post("/api/admin/referral/share-content/bulk-action",
                           json={"resource_type": "hook", "action": "activate_all"})
         body2 = r2.get_json()
-        assert body2["matched_count"] == 2
+        assert body2["matched_count"] == 0
+        assert body2["modified_count"] == 0
         assert body2["active_count"] == 2
-        assert all(h["status"] == "active" for h in fake_db["caption_hooks"].find({}))
+        assert body2["total_count"] == 2
+
+        after = {d["_id"]: dict(d) for d in fake_db["caption_hooks"].find({})}
+        assert after == snapshot, "a repeated identical request must not mutate any document"
+
+    def test_repeated_deactivate_all_call_performs_no_further_mutation(self, client, fake_db):
+        _hook(fake_db, "A", status="active")
+        _hook(fake_db, "B", status="inactive")
+        r1 = client.post("/api/admin/referral/share-content/bulk-action",
+                          json={"resource_type": "hook", "action": "deactivate_all"})
+        assert r1.get_json()["modified_count"] == 1
+        assert r1.get_json()["active_count"] == 0
+
+        snapshot = {d["_id"]: dict(d) for d in fake_db["caption_hooks"].find({})}
+
+        r2 = client.post("/api/admin/referral/share-content/bulk-action",
+                          json={"resource_type": "hook", "action": "deactivate_all"})
+        body2 = r2.get_json()
+        assert body2["matched_count"] == 0
+        assert body2["modified_count"] == 0
+        assert body2["active_count"] == 0
+
+        after = {d["_id"]: dict(d) for d in fake_db["caption_hooks"].find({})}
+        assert after == snapshot, "a repeated identical request must not mutate any document"
+
+    def test_repeated_activate_all_playback_performs_no_further_mutation(self, client, fake_db):
+        _playback(fake_db, "Playback01", status="inactive")
+        _playback(fake_db, "Playback02", status="active")
+        r1 = client.post("/api/admin/referral/share-content/bulk-action",
+                          json={"resource_type": "playback_link", "action": "activate_all"})
+        assert r1.get_json()["modified_count"] == 1
+        r2 = client.post("/api/admin/referral/share-content/bulk-action",
+                          json={"resource_type": "playback_link", "action": "activate_all"})
+        body2 = r2.get_json()
+        assert body2["matched_count"] == 0
+        assert body2["modified_count"] == 0
+        assert body2["active_count"] == 2
 
     def test_deactivate_all_hooks_returns_matched_and_modified_counts(self, client, fake_db):
         _hook(fake_db, "A", status="active")
@@ -554,10 +610,10 @@ class TestBulkActivateDeactivate:
         r = client.post("/api/admin/referral/share-content/bulk-action",
                          json={"resource_type": "hook", "action": "deactivate_all"})
         body = r.get_json()
-        assert body["matched_count"] == 3
-        assert body["modified_count"] >= 2  # at least the two that changed status
-        assert body["active_count"] == 0
         assert body["total_count"] == 3
+        assert body["matched_count"] == 2  # only the two active ones were eligible
+        assert body["modified_count"] == 2
+        assert body["active_count"] == 0
         assert all(h["status"] == "inactive" for h in fake_db["caption_hooks"].find({}))
 
     def test_deactivate_all_playback_scoped_to_playback_only(self, client, fake_db):
@@ -831,6 +887,58 @@ class TestPoolEmptyAdminLogging:
         assert result["ok"] is True
         messages = [r.message for r in caplog.records]
         assert not any("[SHARE_CONTENT][POOL_EMPTY]" in m for m in messages)
+
+    def test_generate_logs_both_pools_empty_independently_and_still_succeeds(self, fake_db, monkeypatch, caplog):
+        # Explicit product decision (superseding an earlier draft requirement
+        # to hard-fail generation when a pool is empty): referral sharing
+        # must stay available even with *both* pools empty, because
+        # disabling the whole Creator Centre has more business impact than
+        # omitting one optional content component. Generation still
+        # succeeds; the admin gets a WARNING identifying each empty pool
+        # independently, not a single generic flag.
+        import logging
+        self._patch_invite_link(monkeypatch, link="https://t.me/+abc123")
+        with caplog.at_level(logging.WARNING, logger="referral_share_content"):
+            result = rsc.generate_share_package(999, "user4")
+        assert result["ok"] is True
+        assert result["hook_text"] is None
+        assert result["playback_url"] is None
+        assert result["invite_link"] == "https://t.me/+abc123"
+        messages = [r.message for r in caplog.records]
+        assert any("[SHARE_CONTENT][POOL_EMPTY]" in m and "hook_pool_empty=True" in m and "playback_pool_empty=True" in m
+                   for m in messages)
+
+    def test_generate_message_is_well_formed_when_both_pools_empty(self, fake_db, monkeypatch):
+        # The referral-share caption (built the same way for every surface)
+        # must always be a clean, valid post -- never crash, never contain
+        # literal "undefined"/"null" text, never a duplicated referral link,
+        # and never a dangling blank-line placeholder where the omitted
+        # hook/playback section used to be.
+        self._patch_invite_link(monkeypatch, link="https://t.me/+abc123")
+        result = rsc.generate_share_package(1000, "user5")
+        assert result["ok"] is True
+        message = result["message"]
+        assert "undefined" not in message.lower()
+        assert "null" not in message.lower()
+        assert message.count("https://t.me/+abc123") == 1
+        assert "\n\n\n" not in message  # no orphan double-blank-line gap
+        assert not message.startswith("\n")
+        assert message.strip() == message
+        assert message.endswith("https://t.me/+abc123")
+
+    def test_creator_share_text_is_well_formed_when_both_pools_empty(self, fake_db, monkeypatch):
+        # Same well-formedness guarantee for the Creator Share Centre's
+        # copy-ready text (build_creator_share_text), which independently
+        # omits hook/playback exactly like build_referral_share_caption.
+        share_text = rsc.build_creator_share_text(
+            hook_text=None, playback_url=None, referral_link="https://t.me/+abc123",
+        )
+        assert "undefined" not in share_text.lower()
+        assert "null" not in share_text.lower()
+        assert share_text.count("https://t.me/+abc123") == 1
+        assert "\n\n\n" not in share_text
+        assert share_text.strip() == share_text
+        assert share_text.endswith("https://t.me/+abc123")
 
 
 class TestHookSelection:

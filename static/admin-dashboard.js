@@ -5190,11 +5190,11 @@
 
   var rscHookCfg = {
     resourceType: "hook", prefix: "rsc-hooks", label: "hook", labelPlural: "hooks",
-    titlePlural: "Hooks", rowActionAttr: "data-rsc-hook-action", reload: function () { loadShareHooks(true); },
+    titlePlural: "Hooks", rowActionAttr: "data-rsc-hook-action", reload: function () { return loadShareHooks(true); },
   };
   var rscPlaybackCfg = {
     resourceType: "playback_link", prefix: "rsc-playback", label: "playback link", labelPlural: "playback links",
-    titlePlural: "Playback Links", rowActionAttr: "data-rsc-playback-action", reload: function () { loadSharePlayback(true); },
+    titlePlural: "Playback Links", rowActionAttr: "data-rsc-playback-action", reload: function () { return loadSharePlayback(true); },
   };
 
   function rscSummaryText(counts) {
@@ -5240,76 +5240,99 @@
     var actionSel = $("#" + cfg.prefix + "-bulk-select");
     var action = actionSel.value;
     if (!action || rsc.busy[cfg.resourceType]) return;
-
-    var counts = rsc.counts[cfg.resourceType];
-    var selectedIds = Array.from(rsc.selected[cfg.resourceType]);
-    var proceed;
-
-    if (action === "activate_all") {
-      var inactiveCount = Math.max(0, counts.total - counts.active);
-      proceed = inactiveCount > RSC_LARGE_BULK_THRESHOLD
-        ? confirmSimple("Activate All " + cfg.titlePlural,
-            "This will activate " + fmt(inactiveCount) + " " + cfg.labelPlural + ". Continue?")
-        : Promise.resolve(true);
-    } else if (action === "deactivate_all") {
-      proceed = confirmSimple("Deactivate All " + cfg.titlePlural,
-        "This will deactivate " + fmt(counts.active) + " active " + cfg.labelPlural + ". " +
-        "Creator post generation may become unavailable if no active items remain.")
-        .then(function (ok) {
-          if (!ok) return false;
-          if (counts.active === 0) return true;
-          return confirmSimple("Warning: Zero Active " + cfg.titlePlural,
-            "This will leave zero active " + cfg.labelPlural + ". Confirm again to proceed.");
-        });
-    } else if (action === "delete_selected") {
-      if (!selectedIds.length) { toast("❌ Select at least one item first", "error"); return; }
-      var labels = rsc.rowLabel[cfg.resourceType];
-      var names = selectedIds.slice(0, 10).map(function (id) { return labels[id] || id; });
-      var namesText = names.join(", ") + (selectedIds.length > 10 ? ", …" : "");
-      var activeSelected = selectedIds.filter(function (id) { return rsc.rowStatus[cfg.resourceType][id] === "active"; }).length;
-      proceed = confirmSimple(
-        "Delete " + fmt(selectedIds.length) + " " + (selectedIds.length === 1 ? cfg.label : cfg.labelPlural),
-        "This permanently deletes: " + namesText + ". This cannot be undone."
-      ).then(function (ok) {
-        if (!ok) return false;
-        if (activeSelected > 0 && activeSelected >= counts.active) {
-          return confirmSimple("Warning: Zero Active " + cfg.titlePlural,
-            "Deleting this selection will leave zero active " + cfg.labelPlural + ". Confirm again to proceed.");
-        }
-        return true;
-      });
-    } else {
+    if (action === "delete_selected" && !rsc.selected[cfg.resourceType].size) {
+      toast("❌ Select at least one item first", "error");
       return;
     }
 
-    proceed.then(function (ok) {
-      if (!ok) return;
-      rscSetBusy(cfg, true);
-      var body = { resource_type: cfg.resourceType, action: action };
-      if (action === "delete_selected") body.selected_ids = selectedIds;
-      apiPostJson("/api/admin/referral/share-content/bulk-action", body).then(function (res) {
+    // The last-active-item warning (and the large-batch threshold) must be
+    // judged against *current* server state, not whatever was on screen
+    // when the page/list was last loaded -- so refresh counts/status first,
+    // and only then build the confirmation copy from the fresh values.
+    rscSetBusy(cfg, true);
+    cfg.reload().then(function () {
+      var counts = rsc.counts[cfg.resourceType];
+      var selectedIds = Array.from(rsc.selected[cfg.resourceType]);
+
+      if (action === "delete_selected" && !selectedIds.length) {
         rscSetBusy(cfg, false);
-        if (!res.ok || res.d.status !== "ok") {
-          toast("❌ " + (res.d && res.d.code || "bulk_action_failed"), "error");
-          return; // preserve selection on failure
-        }
-        var d = res.d;
-        var msg;
-        if (action === "delete_selected") {
-          msg = fmt(d.deleted_count) + " selected " + (d.deleted_count === 1 ? cfg.label : cfg.labelPlural) + " deleted.";
-          rsc.selected[cfg.resourceType].clear();
-        } else if (action === "activate_all") {
-          msg = fmt(d.modified_count) + " " + cfg.labelPlural + " activated.";
-        } else {
-          msg = fmt(d.modified_count) + " " + cfg.labelPlural + " deactivated.";
-        }
-        toast("✅ " + msg, "success");
-        actionSel.value = "";
-        cfg.reload();
-      }).catch(function (e) {
+        toast("❌ Selection is no longer valid -- the item(s) may have already been removed", "error");
+        return;
+      }
+
+      var proceed;
+      if (action === "activate_all") {
+        var inactiveCount = Math.max(0, counts.total - counts.active);
+        proceed = inactiveCount > RSC_LARGE_BULK_THRESHOLD
+          ? confirmSimple("Activate All " + cfg.titlePlural,
+              "This will activate " + fmt(inactiveCount) + " " + cfg.labelPlural + ". Continue?")
+          : Promise.resolve(true);
+      } else if (action === "deactivate_all") {
+        proceed = confirmSimple("Deactivate All " + cfg.titlePlural,
+          "This will deactivate " + fmt(counts.active) + " active " + cfg.labelPlural + ". " +
+          "Creator post generation may become unavailable if no active items remain.")
+          .then(function (ok) {
+            if (!ok) return false;
+            if (counts.active === 0) return true;
+            return confirmSimple("Warning: Zero Active " + cfg.titlePlural,
+              "This will leave zero active " + cfg.labelPlural + ". Confirm again to proceed.");
+          });
+      } else if (action === "delete_selected") {
+        var labels = rsc.rowLabel[cfg.resourceType];
+        var names = selectedIds.slice(0, 10).map(function (id) { return labels[id] || id; });
+        var namesText = names.join(", ") + (selectedIds.length > 10 ? ", …" : "");
+        var activeSelected = selectedIds.filter(function (id) { return rsc.rowStatus[cfg.resourceType][id] === "active"; }).length;
+        proceed = confirmSimple(
+          "Delete " + fmt(selectedIds.length) + " " + (selectedIds.length === 1 ? cfg.label : cfg.labelPlural),
+          "This permanently deletes: " + namesText + ". This cannot be undone."
+        ).then(function (ok) {
+          if (!ok) return false;
+          if (activeSelected > 0 && activeSelected >= counts.active) {
+            return confirmSimple("Warning: Zero Active " + cfg.titlePlural,
+              "Deleting this selection will leave zero active " + cfg.labelPlural + ". Confirm again to proceed.");
+          }
+          return true;
+        });
+      } else {
         rscSetBusy(cfg, false);
-        toast("❌ " + e.message, "error"); // preserve selection on failure
+        return;
+      }
+
+      proceed.then(function (ok) {
+        if (!ok) { rscSetBusy(cfg, false); return; }
+        // The backend re-validates every id and computes every count
+        // independently regardless of what the client just confirmed --
+        // this refresh only makes the confirmation *copy* accurate, it is
+        // not a substitute for server-side validation.
+        var body = { resource_type: cfg.resourceType, action: action };
+        if (action === "delete_selected") body.selected_ids = selectedIds;
+        apiPostJson("/api/admin/referral/share-content/bulk-action", body).then(function (res) {
+          rscSetBusy(cfg, false);
+          if (!res.ok || res.d.status !== "ok") {
+            toast("❌ " + (res.d && res.d.code || "bulk_action_failed"), "error");
+            return; // preserve selection on failure
+          }
+          var d = res.d;
+          var msg;
+          if (action === "delete_selected") {
+            msg = fmt(d.deleted_count) + " selected " + (d.deleted_count === 1 ? cfg.label : cfg.labelPlural) + " deleted.";
+            rsc.selected[cfg.resourceType].clear();
+          } else if (action === "activate_all") {
+            msg = fmt(d.modified_count) + " " + cfg.labelPlural + " activated.";
+          } else {
+            msg = fmt(d.modified_count) + " " + cfg.labelPlural + " deactivated.";
+          }
+          toast("✅ " + msg, "success");
+          actionSel.value = "";
+          cfg.reload();
+        }).catch(function (e) {
+          rscSetBusy(cfg, false);
+          toast("❌ " + e.message, "error"); // preserve selection on failure
+        });
       });
+    }).catch(function (e) {
+      rscSetBusy(cfg, false);
+      toast("❌ Failed to refresh before confirming: " + e.message, "error");
     });
   }
 
@@ -5420,7 +5443,7 @@
 
   function loadShareHooks() {
     statePanel("rsc-hooks-body", "loading", "Loading caption hooks…");
-    api("/api/admin/referral/share-content/hooks" + rscQuery("rsc-hooks-search", "rsc-hooks-status-filter")).then(function (data) {
+    return api("/api/admin/referral/share-content/hooks" + rscQuery("rsc-hooks-search", "rsc-hooks-status-filter")).then(function (data) {
       var items = data.hooks || [];
       rsc.counts.hook = { active: data.active_count || 0, total: data.total_count || 0 };
       var summaryEl = $("#rsc-hooks-active-summary");
@@ -5595,6 +5618,9 @@
           btnStop(btn);
           if (r.status !== "ok") toast("❌ " + r.code, "error");
           loadShareHooks(true);
+        }).catch(function (e) {
+          btnStop(btn);
+          toast("❌ " + e.message, "error");
         });
       } else if (action === "delete") {
         var hookText = btn.dataset.text || id;
@@ -5607,6 +5633,9 @@
             if (!res.ok || res.d.status !== "ok") { toast("❌ " + (res.d && res.d.code || "delete_failed"), "error"); return; }
             toast("✅ Hook deleted", "success");
             loadShareHooks(true);
+          }).catch(function (e) {
+            btnStop(btn);
+            toast("❌ " + e.message, "error");
           });
         });
       }
@@ -5667,6 +5696,9 @@
           btnStop(btn);
           if (r.status !== "ok") toast("❌ " + r.code, "error");
           loadSharePlayback(true);
+        }).catch(function (e) {
+          btnStop(btn);
+          toast("❌ " + e.message, "error");
         });
       } else if (action === "delete") {
         var playbackLabel = btn.dataset.playbackId || id;
@@ -5679,6 +5711,9 @@
             if (!res.ok || res.d.status !== "ok") { toast("❌ " + (res.d && res.d.code || "delete_failed"), "error"); return; }
             toast("✅ Playback record deleted", "success");
             loadSharePlayback(true);
+          }).catch(function (e) {
+            btnStop(btn);
+            toast("❌ " + e.message, "error");
           });
         });
       }
@@ -5689,7 +5724,7 @@
 
   function loadSharePlayback() {
     statePanel("rsc-playback-body", "loading", "Loading playback pool…");
-    api("/api/admin/referral/share-content/playback" + rscQuery("rsc-playback-search", "rsc-playback-status-filter")).then(function (data) {
+    return api("/api/admin/referral/share-content/playback" + rscQuery("rsc-playback-search", "rsc-playback-status-filter")).then(function (data) {
       var items = data.playback || [];
       rsc.counts.playback_link = { active: data.active_count || 0, total: data.total_count || 0 };
       var summaryEl = $("#rsc-playback-active-summary");

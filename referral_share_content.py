@@ -506,8 +506,15 @@ def generate_share_package(
     if hook_doc is None or playback_doc is None:
         # Admin-facing visibility only -- generation itself still succeeds
         # (see module docstring): an empty pool is never a hard failure, it
-        # just omits that section of the caption. Logged at WARNING so an
-        # empty pool is easy to spot/alert on before it drains completely.
+        # just omits that section of the caption. This is a deliberate
+        # product decision, not an oversight: referral sharing must stay
+        # available even with BOTH pools empty (still a valid post -- link
+        # + benefits/CTA, never "undefined"/blank/malformed), because
+        # disabling the whole Creator Centre over one missing optional
+        # content component has more business impact than the post simply
+        # omitting that component. Logged at WARNING, identifying each pool
+        # independently, so an empty pool is easy to spot/alert on before it
+        # drains completely -- without blocking generation.
         logger.warning(
             "[SHARE_CONTENT][POOL_EMPTY] user_id=%s hook_pool_empty=%s playback_pool_empty=%s package_id=%s",
             user_id, hook_doc is None, playback_doc is None, package_id,
@@ -1084,13 +1091,19 @@ def share_content_bulk_action():
         return jsonify(payload), status_code
 
     # activate_all / deactivate_all: a single set-based update_many scoped to
-    # this resource type's collection only. $set on a doc already at the
-    # target status is a no-op in MongoDB (modified_count excludes it), so
-    # this is naturally idempotent -- re-running it changes nothing further.
+    # this resource type's collection only, and filtered to records that are
+    # NOT already at the target status. Filtering the query itself (rather
+    # than updating every document and relying on MongoDB's modified_count)
+    # is what makes this idempotent: a record already at the target status
+    # is never matched, so its updated_at is never touched, and a repeated
+    # identical request always reports matched_count == modified_count == 0.
     collection = _collection_for(resource_type)
     target_status = "active" if action == "activate_all" else "inactive"
-    result = collection.update_many({}, {"$set": {"status": target_status, "updated_at": now_utc()}})
-    active_count, total_count = _status_counts(collection)
+    total_count = collection.count_documents({})
+    result = collection.update_many(
+        {"status": {"$ne": target_status}}, {"$set": {"status": target_status, "updated_at": now_utc()}}
+    )
+    active_count, _total_count_after = _status_counts(collection)
     _audit_log(
         admin=admin, resource_type=resource_type, action=action,
         requested_count=total_count, matched_count=result.matched_count,
@@ -1100,8 +1113,9 @@ def share_content_bulk_action():
         "status": "ok",
         "resource_type": resource_type,
         "action": action,
+        "total_count": total_count,
         "matched_count": result.matched_count,
+        "eligible_count": result.matched_count,
         "modified_count": result.modified_count,
         "active_count": active_count,
-        "total_count": total_count,
     })

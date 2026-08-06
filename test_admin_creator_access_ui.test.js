@@ -39,7 +39,7 @@ function loadFunctionsSource() {
   // via innerHTML, which this hand-rolled FakeNode doesn't parse (see
   // buildSandbox: confirmSimple is stubbed on the sandbox instead, same
   // pattern as the pre-existing `confirm` stub).
-  const rscBlock = slice(js, "  var rsc = {", "  function loadSharePlayback() {");
+  const rscBlock = slice(js, "  var rsc = {", "  function loadGcVerification(force) {");
   return [helpers, toastBlock, stateHelpers, rscBlock].join("\n");
 }
 
@@ -206,6 +206,7 @@ function buildSandbox({ fetchImpl, confirmQueue } = {}) {
     "\nthis.__loadCreatorGroupSettings = loadCreatorGroupSettings;" +
     "\nthis.__loadCreatorAccess = loadCreatorAccess;" +
     "\nthis.__loadShareHooks = loadShareHooks;" +
+    "\nthis.__loadSharePlayback = loadSharePlayback;" +
     "\nthis.__bindReferralShareContent = bindReferralShareContent;" +
     "\nthis.__rsc = rsc;" +
     "\nthis.__rscHookCfg = rscHookCfg;" +
@@ -587,13 +588,31 @@ test("Apply button is disabled for delete_selected with an empty selection, and 
   assert.equal(calls.length, 0, "no bulk-action request should fire for an empty selection");
 });
 
+// Bulk actions now refresh counts/rowStatus from the server (a GET to the
+// list endpoint) immediately before building any confirmation copy -- so
+// each fetchImpl below must branch on the request: GET calls simulate
+// "fresh" server state, and only the POST to /bulk-action is the actual
+// mutating request under test.
+function bulkActionFetchImpl({ getResponse, postResponse, calls }) {
+  return (url, opts) => {
+    if (url.indexOf("/bulk-action") !== -1) {
+      calls.push({ url, method: opts.method, body: JSON.parse(opts.body) });
+      return jsonResponse(200, postResponse || { status: "ok" });
+    }
+    return jsonResponse(200, getResponse);
+  };
+}
+
 test("activate_all POSTs resource_type=hook and never touches playback -- no confirmation needed below the large-bulk threshold", async () => {
   const calls = [];
   const { sandbox, getOrCreate } = buildSandbox({
-    fetchImpl: (url, opts) => { calls.push({ url, method: opts.method, body: JSON.parse(opts.body) }); return jsonResponse(200, { status: "ok", matched_count: 2, modified_count: 2, active_count: 2, total_count: 2 }); },
+    fetchImpl: bulkActionFetchImpl({
+      getResponse: { active_count: 0, total_count: 2, hooks: [] }, // 2 inactive, below threshold
+      postResponse: { status: "ok", total_count: 2, matched_count: 2, modified_count: 2, active_count: 2 },
+      calls,
+    }),
     confirmQueue: [], // must never be consulted -- small batch, no confirmation
   });
-  sandbox.__rsc.counts.hook = { active: 0, total: 2 };
   getOrCreate("rsc-hooks-bulk-select").value = "activate_all";
   sandbox.__rscPerformBulkAction(sandbox.__rscHookCfg);
   await flush();
@@ -607,10 +626,12 @@ test("activate_all POSTs resource_type=hook and never touches playback -- no con
 test("activate_all above the large-bulk threshold requires confirmation; declining sends no request", async () => {
   const calls = [];
   const { sandbox, getOrCreate } = buildSandbox({
-    fetchImpl: (url, opts) => { calls.push({ url, opts }); return jsonResponse(200, { status: "ok" }); },
+    fetchImpl: bulkActionFetchImpl({
+      getResponse: { active_count: 0, total_count: 100, playback: [] }, // 100 inactive > threshold
+      calls,
+    }),
     confirmQueue: [false],
   });
-  sandbox.__rsc.counts.playback_link = { active: 0, total: 100 }; // 100 inactive > threshold
   getOrCreate("rsc-playback-bulk-select").value = "activate_all";
   sandbox.__rscPerformBulkAction(sandbox.__rscPlaybackCfg);
   await flush();
@@ -620,10 +641,13 @@ test("activate_all above the large-bulk threshold requires confirmation; declini
 test("deactivate_all always requires confirmation and requests deactivate_all for playback_link only", async () => {
   const calls = [];
   const { sandbox, getOrCreate } = buildSandbox({
-    fetchImpl: (url, opts) => { calls.push({ url, method: opts.method, body: JSON.parse(opts.body) }); return jsonResponse(200, { status: "ok", matched_count: 2, modified_count: 2, active_count: 0, total_count: 2 }); },
+    fetchImpl: bulkActionFetchImpl({
+      getResponse: { active_count: 2, total_count: 2, playback: [] },
+      postResponse: { status: "ok", total_count: 2, matched_count: 2, modified_count: 2, active_count: 0 },
+      calls,
+    }),
     confirmQueue: [true, true], // first confirm (count+warning), second confirm (zero-active warning)
   });
-  sandbox.__rsc.counts.playback_link = { active: 2, total: 2 };
   getOrCreate("rsc-playback-bulk-select").value = "deactivate_all";
   sandbox.__rscPerformBulkAction(sandbox.__rscPlaybackCfg);
   await flush();
@@ -635,10 +659,12 @@ test("deactivate_all always requires confirmation and requests deactivate_all fo
 test("deactivate_all: declining the zero-active second confirmation sends no request", async () => {
   const calls = [];
   const { sandbox, getOrCreate } = buildSandbox({
-    fetchImpl: (url, opts) => { calls.push({ url, opts }); return jsonResponse(200, { status: "ok" }); },
+    fetchImpl: bulkActionFetchImpl({
+      getResponse: { active_count: 2, total_count: 2, hooks: [] },
+      calls,
+    }),
     confirmQueue: [true, false], // confirms the warning, then declines the zero-active second confirmation
   });
-  sandbox.__rsc.counts.hook = { active: 2, total: 2 };
   getOrCreate("rsc-hooks-bulk-select").value = "deactivate_all";
   sandbox.__rscPerformBulkAction(sandbox.__rscHookCfg);
   await flush();
@@ -649,15 +675,22 @@ test("delete_selected sends the selected ids for hooks only and shows the delete
   const calls = [];
   const toasts = [];
   const { sandbox, getOrCreate } = buildSandbox({
-    fetchImpl: (url, opts) => { calls.push({ url, method: opts.method, body: JSON.parse(opts.body) }); return jsonResponse(200, { status: "ok", matched_count: 2, deleted_count: 2, active_count: 1, total_count: 1 }); },
+    fetchImpl: bulkActionFetchImpl({
+      getResponse: {
+        active_count: 3, total_count: 3,
+        hooks: [
+          { id: "h1", text: "Hook one", status: "active" },
+          { id: "h2", text: "Hook two", status: "inactive" },
+          { id: "h3", text: "Hook three", status: "active" },
+        ],
+      },
+      postResponse: { status: "ok", matched_count: 2, deleted_count: 2, active_count: 1, total_count: 1 },
+      calls,
+    }),
     confirmQueue: [true],
   });
-  sandbox.window.toast = (msg) => toasts.push(msg);
   sandbox.toast = (msg) => toasts.push(msg);
-  sandbox.__rsc.counts.hook = { active: 3, total: 3 };
   sandbox.__rsc.selected.hook = new Set(["h1", "h2"]);
-  sandbox.__rsc.rowStatus.hook = { h1: "active", h2: "inactive", h3: "active" };
-  sandbox.__rsc.rowLabel.hook = { h1: "Hook one", h2: "Hook two" };
   getOrCreate("rsc-hooks-bulk-select").value = "delete_selected";
   sandbox.__rscPerformBulkAction(sandbox.__rscHookCfg);
   await flush();
@@ -672,17 +705,57 @@ test("delete_selected sends the selected ids for hooks only and shows the delete
 test("delete_selected requiring last-active-item protection asks a second confirmation before deleting", async () => {
   const calls = [];
   const { sandbox, getOrCreate } = buildSandbox({
-    fetchImpl: (url, opts) => { calls.push({ url, opts }); return jsonResponse(200, { status: "ok", matched_count: 1, deleted_count: 1, active_count: 0, total_count: 1 }); },
+    fetchImpl: bulkActionFetchImpl({
+      getResponse: {
+        active_count: 1, total_count: 2,
+        hooks: [
+          { id: "h1", text: "Only Active Hook", status: "active" },
+          { id: "h2", text: "Other Hook", status: "inactive" },
+        ],
+      },
+      calls,
+    }),
     confirmQueue: [true, false], // confirms the delete itself, declines the zero-active warning
   });
-  sandbox.__rsc.counts.hook = { active: 1, total: 2 };
   sandbox.__rsc.selected.hook = new Set(["h1"]);
-  sandbox.__rsc.rowStatus.hook = { h1: "active" };
-  sandbox.__rsc.rowLabel.hook = { h1: "Only Active Hook" };
   getOrCreate("rsc-hooks-bulk-select").value = "delete_selected";
   sandbox.__rscPerformBulkAction(sandbox.__rscHookCfg);
   await flush();
   assert.equal(calls.length, 0, "declining the last-active-item warning must not call the API");
+});
+
+test("last-active-item warning uses fresh counts, not stale page-load counts: a stale-low active_count no longer over-warns once the refresh shows healthy headroom", async () => {
+  const calls = [];
+  const { sandbox, getOrCreate } = buildSandbox({
+    fetchImpl: bulkActionFetchImpl({
+      // Stale client-side count would have been active:1 (as if page-load
+      // data was never refreshed) -- the fresh GET shows 5 active, so
+      // deleting one selected active hook must NOT trigger the zero-active
+      // second confirmation.
+      getResponse: {
+        active_count: 5, total_count: 5,
+        hooks: [
+          { id: "h1", text: "Hook one", status: "active" },
+          { id: "h2", text: "Hook two", status: "active" },
+          { id: "h3", text: "Hook three", status: "active" },
+          { id: "h4", text: "Hook four", status: "active" },
+          { id: "h5", text: "Hook five", status: "active" },
+        ],
+      },
+      postResponse: { status: "ok", matched_count: 1, deleted_count: 1, active_count: 4, total_count: 4 },
+      calls,
+    }),
+    confirmQueue: [true], // only ONE confirmation should be needed
+  });
+  // Stale counts captured at a prior page load -- must be overwritten by
+  // the pre-confirmation refresh, not used to decide the warning.
+  sandbox.__rsc.counts.hook = { active: 1, total: 1 };
+  sandbox.__rsc.rowStatus.hook = { h1: "active" };
+  sandbox.__rsc.selected.hook = new Set(["h1"]);
+  getOrCreate("rsc-hooks-bulk-select").value = "delete_selected";
+  sandbox.__rscPerformBulkAction(sandbox.__rscHookCfg);
+  await flush();
+  assert.equal(calls.length, 1, "fresh data shows headroom -- only one confirmation, and the request proceeds");
 });
 
 test("on backend failure the selection is preserved and an error toast is shown", async () => {
