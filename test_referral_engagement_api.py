@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import sys
 import types
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from flask import Flask, jsonify
@@ -50,12 +50,12 @@ def _fake_vouchers_module(monkeypatch, *, user_id=555, username="user1", admin_o
 def _fake_creator_share_centre_module(monkeypatch, *, user_id=777, err=None):
     fake_csc = types.ModuleType("creator_share_centre")
 
-    def _extract_authenticated_user():
+    def _authenticate_and_authorize():
         if err:
-            return None, None, err
-        return user_id, "creator1", None
+            return None, None, None, err
+        return user_id, "creator1", {"status": "active"}, None
 
-    fake_csc._extract_authenticated_user = _extract_authenticated_user
+    fake_csc._authenticate_and_authorize = _authenticate_and_authorize
     monkeypatch.setitem(sys.modules, "creator_share_centre", fake_csc)
 
 
@@ -123,6 +123,20 @@ def test_creator_centre_auth_failure_rejected(client, fake_db, monkeypatch):
     _fake_creator_share_centre_module(monkeypatch, err=("invalid_telegram_auth", 401))
     resp = _post(client, {"event": "referral_cta_clicked", "source": "creator_centre", "surface": "share_package"})
     assert resp.status_code == 401
+    assert fake_db["referral_engagement_events"].count_documents({}) == 0
+
+
+def test_creator_centre_requires_creator_authorization_not_just_telegram_auth(client, fake_db, monkeypatch):
+    # A user can have perfectly valid Telegram initData but not be an
+    # approved/active creator (never joined, suspended, removed) -- the
+    # tracking endpoint must reuse the full creator auth gate
+    # (_authenticate_and_authorize, which checks Creator Access Chat
+    # membership / creator_members status), not just initData verification.
+    _fake_vouchers_module(monkeypatch)
+    _fake_creator_share_centre_module(monkeypatch, err=("creator_suspended", 403))
+    resp = _post(client, {"event": "referral_cta_clicked", "source": "creator_centre", "surface": "share_package"})
+    assert resp.status_code == 403
+    assert resp.get_json()["error"] == "creator_suspended"
     assert fake_db["referral_engagement_events"].count_documents({}) == 0
 
 
@@ -209,6 +223,28 @@ def test_link_generated_dedup_by_referral_link_id(client, fake_db, monkeypatch):
     _post(client, body)
     _post(client, body)
     assert fake_db["referral_engagement_events"].count_documents({}) == 1
+
+
+def test_link_generated_dedup_does_not_suppress_forever_across_time_buckets():
+    # get_or_create_referral_invite_link_sync deliberately returns the same
+    # active invite link on every visit, so the referral_link_id alone must
+    # never be the entire dedup key -- otherwise a returning user's second
+    # (later) generation would be silently dropped for the lifetime of that
+    # link. The time bucket must still vary the key across buckets even when
+    # the link id is identical.
+    from datetime import datetime, timedelta, timezone
+
+    t1 = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    t2 = t1 + timedelta(days=3)
+    key1 = re_mod._dedup_event_id(
+        user_id=1, event="referral_link_generated", source="miniapp", surface="s",
+        session_id=None, referral_link_id="https://t.me/+same", occurred_at=t1,
+    )
+    key2 = re_mod._dedup_event_id(
+        user_id=1, event="referral_link_generated", source="miniapp", surface="s",
+        session_id=None, referral_link_id="https://t.me/+same", occurred_at=t2,
+    )
+    assert key1 != key2
 
 
 def test_successful_generation_tracked(client, fake_db, monkeypatch):
@@ -394,7 +430,11 @@ def test_source_breakdown_in_admin_response(admin_client, fake_db, monkeypatch):
 def test_assisted_conversion_is_referrer_level_not_direct_attribution(admin_client, fake_db, monkeypatch):
     _fake_vouchers_module(monkeypatch, admin_ok=True)
     re_mod.record_event(event="referral_link_generated", user_id=42, source="miniapp", surface="s", referral_link_id="l42")
-    fake_db["pending_referrals"].insert_one({"inviter_user_id": 42, "invitee_user_id": 100, "status": "qualified"})
+    engaged_at = fake_db["referral_engagement_events"].find({"user_id": 42})[0]["occurred_at"]
+    fake_db["pending_referrals"].insert_one({
+        "inviter_user_id": 42, "invitee_user_id": 100, "status": "qualified",
+        "created_at_utc": engaged_at + timedelta(minutes=5),
+    })
 
     resp = admin_client.get("/api/admin/referral-engagement?start_date=2000-01-01&end_date=2100-01-01")
     data = resp.get_json()
@@ -405,3 +445,33 @@ def test_assisted_conversion_is_referrer_level_not_direct_attribution(admin_clie
     assert ac["engaged_referrers_with_join"] == 1
     assert ac["engaged_referrers_with_qualified_referral"] == 1
     assert ac["engagement_to_qualified_rate"] == 1.0
+
+
+def test_assisted_conversion_excludes_referrals_that_predate_engagement(admin_client, fake_db, monkeypatch):
+    # An established referrer who already had joins/qualified referrals
+    # *before* this period's link generation must not have those pre-existing
+    # rows counted as "assisted" by today's engagement -- only referrals
+    # created on/after the engagement timestamp count.
+    _fake_vouchers_module(monkeypatch, admin_ok=True)
+    re_mod.record_event(event="referral_link_generated", user_id=42, source="miniapp", surface="s", referral_link_id="l42")
+    engaged_at = fake_db["referral_engagement_events"].find({"user_id": 42})[0]["occurred_at"]
+    fake_db["pending_referrals"].insert_one({
+        "inviter_user_id": 42, "invitee_user_id": 999, "status": "qualified",
+        "created_at_utc": engaged_at - timedelta(days=30),
+    })
+
+    resp = admin_client.get("/api/admin/referral-engagement?start_date=2000-01-01&end_date=2100-01-01")
+    data = resp.get_json()
+    ac = data["assisted_conversion"]
+    assert ac["engaged_referrers"] == 1
+    assert ac["engaged_referrers_with_join"] == 0
+    assert ac["engaged_referrers_with_qualified_referral"] == 0
+
+
+def test_has_data_respects_source_filter(admin_client, fake_db, monkeypatch):
+    _fake_vouchers_module(monkeypatch, admin_ok=True)
+    re_mod.record_event(event="referral_section_viewed", user_id=1, source="miniapp", surface="s", session_id="a")
+    resp = admin_client.get("/api/admin/referral-engagement?start_date=2000-01-01&end_date=2100-01-01&source=creator_centre")
+    data = resp.get_json()
+    assert data["has_data"] is False
+    assert data["totals"]["unique_section_viewers"] == 0

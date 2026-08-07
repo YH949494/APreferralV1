@@ -70,6 +70,13 @@ DEDUP_WINDOW_SECONDS: dict[str, int | None] = {
 # defaults to "now" the first time this module is imported in a process that
 # has no override configured, so a fresh deploy never claims to have
 # retroactive coverage.
+# Fixed literal (not datetime.now() at import time): this feature shipped
+# 2026-08-07. A computed "now" would reset on every Gunicorn worker spawn /
+# deploy restart -- since fly.toml does not set the env override below, that
+# would make the dashboard's "Tracking available from" banner drift forward
+# on every deploy and disagree between workers serving the same request.
+_DEFAULT_TRACKING_STARTED_AT = datetime(2026, 8, 7, tzinfo=timezone.utc)
+
 _TRACKING_STARTED_AT_ENV = os.environ.get("REFERRAL_ENGAGEMENT_TRACKING_STARTED_AT_UTC")
 if _TRACKING_STARTED_AT_ENV:
     try:
@@ -77,9 +84,9 @@ if _TRACKING_STARTED_AT_ENV:
         if TRACKING_STARTED_AT.tzinfo is None:
             TRACKING_STARTED_AT = TRACKING_STARTED_AT.replace(tzinfo=timezone.utc)
     except ValueError:
-        TRACKING_STARTED_AT = datetime.now(timezone.utc)
+        TRACKING_STARTED_AT = _DEFAULT_TRACKING_STARTED_AT
 else:
-    TRACKING_STARTED_AT = datetime.now(timezone.utc)
+    TRACKING_STARTED_AT = _DEFAULT_TRACKING_STARTED_AT
 
 
 def _require_admin():
@@ -143,12 +150,18 @@ def _dedup_event_id(
     if event == "referral_section_viewed":
         # Once per user/source/surface/session -- no time bucket.
         parts.append(session_id or "")
-    elif event == "referral_link_generated" and referral_link_id:
-        # A concrete link id dedups a specific generation regardless of timing.
-        parts.append(referral_link_id)
     elif window:
         bucket = int(occurred_at.timestamp() // window)
         parts.append(str(bucket))
+        if event == "referral_link_generated" and referral_link_id:
+            # Mini App invite links are stable/reused across visits
+            # (get_or_create_referral_invite_link_sync returns the same
+            # active link every time), so the link id alone must never be
+            # the *entire* dedup key -- that would suppress every
+            # generation after the first for the lifetime of the link. It
+            # is only mixed in on top of the time bucket, to disambiguate
+            # concurrent generations of different links within one bucket.
+            parts.append(referral_link_id)
     raw = "|".join(parts)
     return "evt_" + hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
@@ -217,9 +230,14 @@ def _authenticate(source: str) -> tuple[int | None, tuple[str, int] | None]:
     sync with that module if its auth logic changes.
     """
     if source == "creator_centre":
-        from creator_share_centre import _extract_authenticated_user
+        # Reuses the *full* creator auth gate (initData + live Creator
+        # Access Chat membership / creator_members record), not just
+        # initData verification -- otherwise any Telegram-authenticated
+        # user (including suspended/removed creators) could submit
+        # creator_centre events and corrupt that source's funnel.
+        from creator_share_centre import _authenticate_and_authorize
 
-        user_id, _username, err = _extract_authenticated_user()
+        user_id, _username, _record, err = _authenticate_and_authorize()
         if err:
             return None, err
         return user_id, None
@@ -331,11 +349,32 @@ def _distinct_users(col, match: dict, event: str | list[str]) -> set:
     return set(col.distinct("user_id", {**match, **ev_match}))
 
 
-def _assisted_conversion(engaged_user_ids: set) -> dict:
-    from dashboard_panels import _QUALIFIED_STATUSES
+def _first_engagement_at(col, match: dict) -> dict:
+    """Earliest ``occurred_at`` per ``user_id`` matching ``match``. Used as
+    each engaged referrer's cohort-entry timestamp so assisted-conversion
+    joins/qualifications can be bounded to referrals created on/after it."""
+    first_at: dict = {}
+    for doc in col.find(match):
+        uid = doc.get("user_id")
+        at = doc.get("occurred_at")
+        if uid is None or at is None:
+            continue
+        if uid not in first_at or at < first_at[uid]:
+            first_at[uid] = at
+    return first_at
 
-    engaged_user_ids = [uid for uid in engaged_user_ids if uid is not None]
-    engaged = len(engaged_user_ids)
+
+def _assisted_conversion(engagement_at: dict) -> dict:
+    """``engagement_at`` maps user_id -> the timestamp they first generated
+    a referral link in the queried period. Only counts a referrer's joins /
+    qualified referrals as "assisted" if they were created on/after that
+    timestamp -- an established referrer's pre-existing pipeline must never
+    be attributed to a link they generated just now."""
+    from dashboard_panels import _QUALIFIED_STATUSES
+    from time_utils import as_aware_utc
+
+    engagement_at = {uid: at for uid, at in engagement_at.items() if uid is not None and at is not None}
+    engaged = len(engagement_at)
     if not engaged:
         return {
             "attribution_level": "referrer_level_assisted_conversion",
@@ -346,13 +385,21 @@ def _assisted_conversion(engaged_user_ids: set) -> dict:
             "engagement_to_qualified_rate": 0,
         }
     pending_col = database.db["pending_referrals"]
-    with_join = len(pending_col.distinct("inviter_user_id", {"inviter_user_id": {"$in": engaged_user_ids}}))
-    with_qualified = len(
-        pending_col.distinct(
-            "inviter_user_id",
-            {"inviter_user_id": {"$in": engaged_user_ids}, "status": {"$in": _QUALIFIED_STATUSES}},
-        )
-    )
+    with_join_users: set = set()
+    with_qualified_users: set = set()
+    for doc in pending_col.find({"inviter_user_id": {"$in": list(engagement_at.keys())}}):
+        uid = doc.get("inviter_user_id")
+        engaged_at = engagement_at.get(uid)
+        if engaged_at is None:
+            continue
+        created_at = as_aware_utc(doc.get("created_at_utc"))
+        if created_at is None or created_at < engaged_at:
+            continue
+        with_join_users.add(uid)
+        if doc.get("status") in _QUALIFIED_STATUSES:
+            with_qualified_users.add(uid)
+    with_join = len(with_join_users)
+    with_qualified = len(with_qualified_users)
     return {
         "attribution_level": "referrer_level_assisted_conversion",
         "engaged_referrers": engaged,
@@ -367,10 +414,10 @@ def _source_breakdown(col, base_match: dict, src: str) -> dict:
     m = {**base_match, "source": src}
     viewers = _distinct_users(col, m, "referral_section_viewed")
     clickers = _distinct_users(col, m, "referral_cta_clicked")
-    generators = _distinct_users(col, m, "referral_link_generated")
+    generators_at = _first_engagement_at(col, {**m, "event": "referral_link_generated"})
     copy_share_users = _distinct_users(col, m, COPY_OR_SHARE_EVENTS)
     generated_count = col.count_documents({**m, "event": "referral_link_generated"})
-    assisted = _assisted_conversion(generators)
+    assisted = _assisted_conversion(generators_at)
     return {
         "source": src,
         "viewers": len(viewers),
@@ -472,11 +519,12 @@ def admin_referral_engagement():
     if source_param != "all":
         totals_match["source"] = source_param
 
-    has_data = col.count_documents(base_match) > 0 if hasattr(col, "count_documents") else False
+    has_data = col.count_documents(totals_match) > 0
 
     viewers = _distinct_users(col, totals_match, "referral_section_viewed")
     clickers = _distinct_users(col, totals_match, "referral_cta_clicked")
-    generators = _distinct_users(col, totals_match, "referral_link_generated")
+    generators_at = _first_engagement_at(col, {**totals_match, "event": "referral_link_generated"})
+    generators = set(generators_at.keys())
     copiers = _distinct_users(col, totals_match, "referral_copy_clicked")
     sharers = _distinct_users(col, totals_match, "referral_share_clicked")
     copy_or_share_users = _distinct_users(col, totals_match, COPY_OR_SHARE_EVENTS)
@@ -499,7 +547,7 @@ def admin_referral_engagement():
         "section_to_copy_or_share": _safe_rate(len(copy_or_share_users), len(viewers)),
     }
 
-    assisted_conversion = _assisted_conversion(generators)
+    assisted_conversion = _assisted_conversion(generators_at)
     by_source = [_source_breakdown(col, base_match, src) for src in ("miniapp", "creator_centre")]
     daily = _daily_series(col, totals_match, start, end)
     top_users = _top_users(col, totals_match)
