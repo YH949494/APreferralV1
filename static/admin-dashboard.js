@@ -5177,6 +5177,12 @@
   // ---------------------------------------------------------------------
   // Referral Centre -> Share Content (Caption Hooks / Playback Pool)
   // ---------------------------------------------------------------------
+  var rse = {
+    startDate: "",
+    endDate: "",
+    source: "all",
+  };
+
   var rsc = {
     subtab: "hooks",
     selected: { hook: new Set(), playback_link: new Set() },
@@ -5483,6 +5489,129 @@
       return '<div><span class="pill ' + tag + '">' + esc(r.status) + '</span> ' + esc(r.line) + (r.reason ? ' <span class="sub">(' + esc(r.reason) + ')</span>' : '') + '</div>';
     }).join("");
     el.innerHTML = '<div class="sub" style="margin:6px 0;">Inserted: ' + fmt(body.inserted) + ' · Skipped: ' + fmt(body.skipped) + ' · Rejected: ' + fmt(body.rejected) + '</div>' + lines;
+  }
+
+  // ---------- Referral Centre → Share Engagement ----------
+  function rsePct(rate) {
+    return Math.round((rate || 0) * 1000) / 10 + "%";
+  }
+
+  function rseQuery() {
+    var qs = [];
+    if (rse.startDate) qs.push("start_date=" + encodeURIComponent(rse.startDate));
+    if (rse.endDate) qs.push("end_date=" + encodeURIComponent(rse.endDate));
+    qs.push("source=" + encodeURIComponent(rse.source || "all"));
+    return qs.length ? "?" + qs.join("&") : "";
+  }
+
+  function rseFunnelStep(label, value, assisted) {
+    return '<div class="kpi" style="min-width:150px;"><div class="label">' + esc(label) +
+      (assisted ? ' <span class="sub" style="color:#c98a2c;">(assisted)</span>' : '') + '</div>' +
+      '<div class="value">' + fmt(value) + '</div></div>';
+  }
+
+  function loadReferralShareEngagement(force) {
+    var startEl = $("#rse-start-date"), endEl = $("#rse-end-date");
+    skeletonGrid($("#rse-kpis"), 6);
+    api("/api/admin/referral-engagement" + rseQuery()).then(function (data) {
+      if (startEl && !startEl.value) startEl.value = data.period.start_date;
+      if (endEl && !endEl.value) endEl.value = data.period.end_date;
+
+      var trackingStartedAt = data.period.tracking_started_at ? new Date(data.period.tracking_started_at) : null;
+      $("#rse-tracking-banner").innerHTML = trackingStartedAt
+        ? '<div class="banner" style="background:rgba(255,122,0,.08);border:1px solid rgba(255,122,0,.25);">' +
+          'Tracking available from ' + esc(trackingStartedAt.toLocaleDateString()) +
+          '. Periods before this date have no tracking data and are not "0% performance" — they were simply not measured.</div>'
+        : '';
+
+      if (!data.has_data) {
+        $("#rse-content").classList.add("hidden");
+        $("#rse-empty-state").innerHTML = emptyState({
+          icon: "📭",
+          title: "No tracking data is available for this period.",
+          sub: "Try widening the date range, or check back after tracking has been running for a few days.",
+        });
+        return;
+      }
+      $("#rse-empty-state").innerHTML = "";
+      $("#rse-content").classList.remove("hidden");
+
+      var t = data.totals, r = data.rates, ac = data.assisted_conversion;
+      $("#rse-kpis").innerHTML =
+        kpiCard("Referral Section Viewers", t.unique_section_viewers) +
+        kpiCard("CTA Clickers", t.unique_cta_clickers) +
+        kpiCard("Referral CTA CTR", rsePct(r.section_to_click)) +
+        kpiCard("Links Generated", t.links_generated) +
+        kpiCard("Copy/Share Users", t.unique_copy_or_share_users,
+          "Copiers: " + fmt(t.unique_copiers) + " · Sharers: " + fmt(t.unique_sharers)) +
+        kpiCard("Engagement → Qualified Referrer Rate", rsePct(ac.engagement_to_qualified_rate), "Referrer-level assisted conversion");
+
+      $("#rse-funnel").innerHTML =
+        '<div class="card-grid">' +
+        rseFunnelStep("Section Viewed", t.unique_section_viewers) +
+        rseFunnelStep("CTA Clicked", t.unique_cta_clickers) +
+        rseFunnelStep("Link Generated", t.unique_link_generators) +
+        rseFunnelStep("Copied or Shared", t.unique_copy_or_share_users) +
+        rseFunnelStep("Referrer Produced Join", ac.engaged_referrers_with_join, true) +
+        rseFunnelStep("Referrer Produced Qualified Referral", ac.engaged_referrers_with_qualified_referral, true) +
+        '</div>' +
+        '<div class="sub" style="margin-top:8px;">Section→Click ' + rsePct(r.section_to_click) +
+        ' · Click→Generate ' + rsePct(r.click_to_generate) +
+        ' · Generate→Copy/Share ' + rsePct(r.generate_to_copy_or_share) +
+        ' · Section→Copy/Share ' + rsePct(r.section_to_copy_or_share) + '</div>' +
+        '<div class="sub" style="margin-top:4px;color:#c98a2c;">' +
+        '"Referrer Produced Join / Qualified Referral" are referrer-level assisted conversion metrics — ' +
+        'they show whether an engaged referrer\'s account later produced a join/qualified referral, ' +
+        'not that a specific click caused a specific invite.</div>';
+
+      var bySource = data.by_source || [];
+      $("#rse-source-comparison").innerHTML = '<table class="data-table"><thead><tr>' +
+        '<th>Source</th><th>Viewers</th><th>Clickers</th><th>CTR</th><th>Generated</th>' +
+        '<th>Copy/Share Users</th><th>Assisted Joins</th><th>Assisted Qualified</th></tr></thead><tbody>' +
+        bySource.map(function (s) {
+          return '<tr><td>' + esc(s.source === "miniapp" ? "Mini App" : "Creator Centre") + '</td>' +
+            '<td>' + fmt(s.viewers) + '</td><td>' + fmt(s.clickers) + '</td><td>' + rsePct(s.ctr) + '</td>' +
+            '<td>' + fmt(s.generated) + '</td><td>' + fmt(s.copy_share_users) + '</td>' +
+            '<td>' + fmt(s.assisted_joins) + '</td><td>' + fmt(s.assisted_qualified_referrals) + '</td></tr>';
+        }).join("") + '</tbody></table>';
+
+      var daily = data.daily || [];
+      $("#rse-daily-trend").innerHTML = !daily.length ? emptyState("No daily data for this period.") :
+        '<table class="data-table"><thead><tr><th>Date</th><th>Section Viewed</th><th>CTA Clicked</th>' +
+        '<th>Link Generated</th><th>Copied/Shared</th></tr></thead><tbody>' +
+        daily.map(function (d) {
+          return '<tr><td>' + esc(d.date) + '</td><td>' + fmt(d.section_viewed) + '</td>' +
+            '<td>' + fmt(d.cta_clicked) + '</td><td>' + fmt(d.link_generated) + '</td>' +
+            '<td>' + fmt(d.copy_or_share) + '</td></tr>';
+        }).join("") + '</tbody></table>';
+
+      var topUsers = data.top_users || [];
+      $("#rse-top-users").innerHTML = !topUsers.length ? emptyState("No engaged users in this period.") :
+        '<table class="data-table"><thead><tr><th>User ID</th><th>Events</th><th>Links Generated</th>' +
+        '<th>Copies</th><th>Shares</th></tr></thead><tbody>' +
+        topUsers.map(function (u) {
+          return '<tr><td>' + fmt(u.user_id) + '</td><td>' + fmt(u.events) + '</td>' +
+            '<td>' + fmt(u.links_generated) + '</td><td>' + fmt(u.copies) + '</td><td>' + fmt(u.shares) + '</td></tr>';
+        }).join("") + '</tbody></table>';
+    }).catch(function (e) {
+      $("#rse-empty-state").innerHTML = '<div class="banner error">Failed to load Share Engagement data: ' + esc(e.message) + '</div>';
+      $("#rse-content").classList.add("hidden");
+    });
+  }
+
+  function bindReferralShareEngagement() {
+    $("#rse-apply-btn").addEventListener("click", function () {
+      rse.startDate = ($("#rse-start-date").value || "").trim();
+      rse.endDate = ($("#rse-end-date").value || "").trim();
+      loadReferralShareEngagement(true);
+    });
+    $all("#rse-source-filter button").forEach(function (b) {
+      b.addEventListener("click", function () {
+        rse.source = b.dataset.source;
+        $all("#rse-source-filter button").forEach(function (x) { x.classList.toggle("active", x === b); });
+        loadReferralShareEngagement(true);
+      });
+    });
   }
 
   function bindReferralShareContent() {
@@ -6343,7 +6472,7 @@
     });
   }
 
-  var VIEWS =["summary", "moduleOverview", "placeholder", "funnel", "abuse", "campaignBuilder", "campaignPerformance", "campaignIntelligence", "activeCampaigns", "draftCampaigns", "compiledDrops", "campaigns", "gcCampaigns", "gcProviders", "gcResults", "gcRewards", "gcVerification", "gcActivity", "eventBanners", "vouchers", "drops", "referrals", "affiliate", "affiliatePools", "affiliateBatches", "affiliatePending", "reactivation", "audit", "segmentProbabilityConfig", "segmentRoi", "segments", "validation", "backendSegmentEngine", "voucherHunterAudit", "unclassifiedAudit", "segmentRuleSimulator", "voucherHunterQuality", "voucherHunterFalsePositive", "voucherHunterRuleSimulator", "vhPriorityImpact", "uploadPlayerPerformance", "uploadHistory", "rawExplorer", "users", "joinRequests", "xpAdjust", "settings", "referralShareContent", "ccComposer", "ccCalendar", "ccBoard"];
+  var VIEWS =["summary", "moduleOverview", "placeholder", "funnel", "abuse", "campaignBuilder", "campaignPerformance", "campaignIntelligence", "activeCampaigns", "draftCampaigns", "compiledDrops", "campaigns", "gcCampaigns", "gcProviders", "gcResults", "gcRewards", "gcVerification", "gcActivity", "eventBanners", "vouchers", "drops", "referrals", "affiliate", "affiliatePools", "affiliateBatches", "affiliatePending", "reactivation", "audit", "segmentProbabilityConfig", "segmentRoi", "segments", "validation", "backendSegmentEngine", "voucherHunterAudit", "unclassifiedAudit", "segmentRuleSimulator", "voucherHunterQuality", "voucherHunterFalsePositive", "voucherHunterRuleSimulator", "vhPriorityImpact", "uploadPlayerPerformance", "uploadHistory", "rawExplorer", "users", "joinRequests", "xpAdjust", "settings", "referralShareContent", "referralShareEngagement", "ccComposer", "ccCalendar", "ccBoard"];
 
   // ---------------------------------------------------------------------
   // Information architecture: sidebar Business Modules, each with its own
@@ -6410,6 +6539,7 @@
       { label: "Overview", view: "moduleOverview", overviewKey: "referral" },
       { label: "Performance", view: "referrals" },
       { label: "Share Content", view: "referralShareContent", live: true },
+      { label: "Share Engagement", view: "referralShareEngagement", live: true },
       { label: "Pending", view: "placeholder", ph: { title: "Pending", desc: "Pending referral qualification queue is not yet wired to an admin data source." } },
       { label: "Rewards", view: "placeholder", ph: { title: "Rewards", desc: "Referral reward ledger is not yet wired to an admin data source." } },
       { label: "Leaderboard", view: "placeholder", ph: { title: "Leaderboard", desc: "Referral leaderboard is not yet wired to an admin data source." } },
@@ -6661,6 +6791,7 @@
       rawExplorer: "Data → Raw Data Explorer",
       users: "User Drilldown", joinRequests: "Join Requests", xpAdjust: "Add / Reduce XP",
       settings: "Settings", referralShareContent: "Referral Centre — Share Content",
+      referralShareEngagement: "Referral Centre — Share Engagement",
       ccComposer: "Community Centre — Composer", ccCalendar: "Community Centre — Calendar",
       ccBoard: "Community Centre"
     };
@@ -6688,6 +6819,7 @@
     else if (state.view === "gcActivity") loadGcEvents(1);
     else if (state.view === "eventBanners") loadEventBanners(force);
     else if (state.view === "referralShareContent") loadReferralShareContent(force);
+    else if (state.view === "referralShareEngagement") loadReferralShareEngagement(force);
     else if (state.view === "vouchers") loadVouchers(force);
     else if (state.view === "drops") loadDrops(force);
     else if (state.view === "referrals") loadReferrals(force);
@@ -6768,6 +6900,7 @@
     bindGcRewards();
     bindGcActivity();
     bindReferralShareContent();
+    bindReferralShareEngagement();
     bindCommunityCentre();
     bindJoinRequests();
     bindXpAdjust();

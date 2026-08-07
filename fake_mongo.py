@@ -11,10 +11,12 @@ import re
 from copy import deepcopy
 
 from bson import ObjectId
+from pymongo.errors import DuplicateKeyError as _PymongoDuplicateKeyError
 
 
-class DuplicateKeyError(Exception):
-    pass
+class DuplicateKeyError(_PymongoDuplicateKeyError):
+    """Subclasses pymongo's DuplicateKeyError so production code that catches
+    pymongo.errors.DuplicateKeyError also catches this fake's version."""
 
 
 def _get_dotted(doc: dict, dotted_key: str):
@@ -157,6 +159,84 @@ class FakeCollection:
 
     def count_documents(self, query: dict | None = None) -> int:
         return len(self.find(query))
+
+    def distinct(self, field: str, query: dict | None = None) -> list:
+        seen = []
+        seen_set = set()
+        for doc in self.find(query):
+            val = _get_dotted(doc, field)
+            if val is None:
+                continue
+            key = val
+            try:
+                hash(key)
+            except TypeError:
+                key = repr(val)
+            if key not in seen_set:
+                seen_set.add(key)
+                seen.append(val)
+        return seen
+
+    def aggregate(self, pipeline: list):
+        """Minimal $match/$group/$sort/$limit support -- just enough for the
+        admin analytics aggregations in this codebase. $group supports a
+        dict/string/None `_id` and `$sum` accumulators (literal 1 or a
+        `$cond` of `$eq`/`$in`)."""
+        docs = [deepcopy(d) for d in self._docs]
+
+        def resolve(doc, expr):
+            if isinstance(expr, str) and expr.startswith("$"):
+                return _get_dotted(doc, expr[1:])
+            return expr
+
+        def eval_group_id(doc, id_spec):
+            if id_spec is None:
+                return None
+            if isinstance(id_spec, dict):
+                return {k: resolve(doc, v) for k, v in id_spec.items()}
+            return resolve(doc, id_spec)
+
+        def eval_cond(doc, cond_expr):
+            if_, then_, else_ = cond_expr["$cond"]
+            if "$eq" in if_:
+                a, b = if_["$eq"]
+                truthy = resolve(doc, a) == resolve(doc, b)
+            elif "$in" in if_:
+                a, b = if_["$in"]
+                truthy = resolve(doc, a) in resolve(doc, b)
+            else:
+                truthy = False
+            return resolve(doc, then_) if truthy else resolve(doc, else_)
+
+        for stage in pipeline:
+            if "$match" in stage:
+                docs = [d for d in docs if _matches(d, stage["$match"])]
+            elif "$group" in stage:
+                spec = stage["$group"]
+                id_spec = spec.get("_id")
+                buckets: dict = {}
+                order: list = []
+                for doc in docs:
+                    key_val = eval_group_id(doc, id_spec)
+                    key = repr(key_val)
+                    if key not in buckets:
+                        buckets[key] = {"_id": key_val}
+                        order.append(key)
+                    bucket = buckets[key]
+                    for out_field, accum in spec.items():
+                        if out_field == "_id":
+                            continue
+                        if "$sum" in accum:
+                            expr = accum["$sum"]
+                            add = eval_cond(doc, expr) if isinstance(expr, dict) and "$cond" in expr else resolve(doc, expr)
+                            bucket[out_field] = (bucket.get(out_field) or 0) + (add or 0)
+                docs = [buckets[k] for k in order]
+            elif "$sort" in stage:
+                for field, direction in reversed(list(stage["$sort"].items())):
+                    docs.sort(key=lambda d, f=field: _sort_key(d.get(f)), reverse=(direction < 0))
+            elif "$limit" in stage:
+                docs = docs[: stage["$limit"]]
+        return docs
 
     def delete_one(self, query: dict):
         for i, doc in enumerate(self._docs):

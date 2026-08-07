@@ -574,6 +574,38 @@
         <div id="referrals-body"></div>
       </section>
 
+      <section id="view-referralShareEngagement" class="hidden">
+        <div id="rse-tracking-banner" class="sub" style="margin-bottom:10px;"></div>
+        <div class="controls" style="margin-bottom:16px;display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+          <label class="sub">From <input type="date" class="filter-input" id="rse-start-date" style="margin:0;" /></label>
+          <label class="sub">To <input type="date" class="filter-input" id="rse-end-date" style="margin:0;" /></label>
+          <div class="seg" id="rse-source-filter">
+            <button data-source="all" class="active">All Sources</button>
+            <button data-source="miniapp">Mini App</button>
+            <button data-source="creator_centre">Creator Centre</button>
+          </div>
+          <button class="btn primary" id="rse-apply-btn">Apply</button>
+        </div>
+
+        <div id="rse-empty-state"></div>
+
+        <div id="rse-content" class="hidden">
+          <div class="card-grid" id="rse-kpis"></div>
+
+          <div class="section-title">Funnel</div>
+          <div id="rse-funnel"></div>
+
+          <div class="section-title">Source Comparison — Mini App vs Creator Centre</div>
+          <div style="overflow-x:auto;"><div id="rse-source-comparison"></div></div>
+
+          <div class="section-title">Daily Trend (unique users)</div>
+          <div style="overflow-x:auto;"><div id="rse-daily-trend"></div></div>
+
+          <div class="section-title">Top Engaged Users</div>
+          <div style="overflow-x:auto;"><div id="rse-top-users"></div></div>
+        </div>
+      </section>
+
       <section id="view-referralShareContent" class="hidden">
         <div class="seg" style="margin-bottom:16px;">
           <button id="rsc-subtab-hooks" class="active">Caption Hooks</button>

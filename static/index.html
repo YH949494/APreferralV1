@@ -3271,6 +3271,55 @@
     // two different captions). See fetchAndCacheShareContent().
     let shareContentRequestInFlight = null;
 
+    // Share Engagement tracking (referral_engagement.py). Best-effort,
+    // fire-and-forget: a tracking failure must never block or delay the
+    // underlying referral action (link generation, copy, share).
+    const ENGAGEMENT_SESSION_KEY = "referral_engagement_session_id";
+    function getEngagementSessionId() {
+      let sid = ssGet(ENGAGEMENT_SESSION_KEY);
+      if (!sid) {
+        sid = (crypto?.randomUUID && crypto.randomUUID()) ||
+          `sess_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+        ssSet(ENGAGEMENT_SESSION_KEY, sid);
+      }
+      return sid;
+    }
+
+    function trackEngagementEvent(event, { surface, referralLinkId, metadata } = {}) {
+      try {
+        v2Fetch(`${API_BASE}/api/referral-engagement/events`, {
+          method: "POST",
+          body: JSON.stringify({
+            event,
+            source: "miniapp",
+            surface: surface || "referral_section",
+            session_id: getEngagementSessionId(),
+            referral_link_id: referralLinkId || null,
+            metadata: metadata || {},
+          }),
+        }).catch((err) => console.warn("[REFERRAL_ENGAGEMENT][SEND_FAILED]", err));
+      } catch (err) {
+        console.warn("[REFERRAL_ENGAGEMENT][SEND_FAILED]", err);
+      }
+    }
+
+    function setupReferralSectionViewTracking() {
+      const el = document.getElementById("ap-referral-step");
+      if (!el || typeof IntersectionObserver !== "function") return;
+      let fired = false;
+      const observer = new IntersectionObserver((entries) => {
+        for (const entry of entries) {
+          if (entry.isIntersecting && !fired) {
+            fired = true;
+            trackEngagementEvent("referral_section_viewed", { surface: "referral_step_card" });
+            observer.disconnect();
+            break;
+          }
+        }
+      }, { threshold: 0.5 });
+      observer.observe(el);
+    }
+
     if (!userId && !getAdminSecret()) {
       const warn = document.createElement('div');
       warn.style.cssText = "margin:10px 0;padding:10px;background:#fff3f3;border:1px solid #ffd6d6;border-radius:8px;color:#900;";
@@ -4192,6 +4241,7 @@
         if (link && isSuccess) {
           latestReferralLink = link;
           latestReferralMode = data.mode || "";
+          trackEngagementEvent("referral_link_generated", { surface: "referral_step_cta", referralLinkId: link });
           hapticNotify("success");
           if (display) { display.innerText = link + "\n👆 Tap 'Copy to Clipboard' to copy"; }
           if (inlineText) { inlineText.textContent = link; }
@@ -4391,6 +4441,7 @@
       const copied = await copyTextToClipboard(caption);
       if (copied) {
         trackReferralEvent("referral_caption_copied");
+        trackEngagementEvent("referral_copy_clicked", { surface: "referral_step_cta", referralLinkId: link });
         hapticNotify("success");
         showCopySuccessToast();
         setReferralLinkButtonLabel(t("copied_check"));
@@ -4413,6 +4464,7 @@
     // is reused.
     async function handleReferralLinkClick() {
       if (referralLinkRequestInFlight) return;
+      trackEngagementEvent("referral_cta_clicked", { surface: "referral_step_cta" });
 
       if (latestReferralLink) {
         trackReferralEvent("referral_link_requested", { reused: true });
@@ -4513,6 +4565,7 @@
       if (copied) {
         flashButtonLabel(document.getElementById("copy-referral-btn"), "✓ Copied");
         flashButtonLabel(document.getElementById("copy-referral-btn-inline"), "✓ Copied");
+        trackEngagementEvent("referral_copy_clicked", { surface: "referral_legacy_copy", referralLinkId: latestReferralLink || null });
         showCopySuccessToast();
         return;
       }
@@ -4608,6 +4661,7 @@
           const opened = openTelegramSafeLink(shareUrl);
           if (opened) {
             console.info("[REFERRAL_SHARE][OPEN_OK]");
+            trackEngagementEvent("referral_share_clicked", { surface: "referral_step_share", referralLinkId: referralLink });
           } else {
             console.warn("[REFERRAL_SHARE][OPEN_FAIL] reason=popup_blocked");
           }
@@ -7453,6 +7507,7 @@ ${referral}`;
       handleAdminAndVoucher();
       loadIdentityCard();
       handleReferralEntryAction();
+      setupReferralSectionViewTracking();
       await loadCheckinStatus();
       loadWelcomeProgress();
       loadVouchers();
