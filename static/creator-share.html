@@ -194,6 +194,8 @@
         <p id="package-caption" class="preview-row hidden"></p>
         <p id="package-playback" class="preview-row hidden"></p>
         <p id="package-cta" class="preview-row preview-cta"></p>
+        <p id="package-benefits" class="preview-row preview-cta"></p>
+        <p id="package-starter" class="preview-row preview-cta"></p>
         <p id="package-link" class="preview-row preview-link"></p>
         <p class="card-note">Your personal referral link is already included.</p>
 
@@ -251,6 +253,8 @@
     packageCaption: document.getElementById("package-caption"),
     packagePlayback: document.getElementById("package-playback"),
     packageCta: document.getElementById("package-cta"),
+    packageBenefits: document.getElementById("package-benefits"),
+    packageStarter: document.getElementById("package-starter"),
     packageLink: document.getElementById("package-link"),
     btnCopy: document.getElementById("btn-copy"),
     btnTryAnother: document.getElementById("btn-try-another"),
@@ -270,10 +274,17 @@
     invalid_telegram_auth: "Please open this page from inside Telegram.",
   };
 
-  // Fixed V1 CTA line from referral_share_content.build_creator_share_text().
-  // Not returned as its own API field (it's baked into share_text), but it
-  // never varies, so it is safe to mirror here purely for display layout.
-  var FIXED_CTA_TEXT = "More player replays and rewards inside AdvantPlay:";
+  // Fixed transition line + compressed three-benefit block + starter line
+  // from referral_share_content.build_creator_share_text() /
+  // CREATOR_SHARE_TRANSITION_LINE / CREATOR_SHARE_BENEFIT_LINES. Not
+  // returned as their own API fields (they're baked into share_text), but
+  // they never vary, so they're safe to mirror here purely for display
+  // layout. Intentionally the compressed three-line block, never the Mini
+  // App's full five-benefit list.
+  var FIXED_CTA_TEXT = "Want more replays like this—and rewards too?";
+  var FIXED_BENEFIT_HEADER = "Join AdvantPlay for:";
+  var FIXED_BENEFIT_LINES = ["🎟️ Free welcome voucher", "⚡️ Daily voucher drops", "🏆 Weekly rewards"];
+  var FIXED_STARTER_TEXT = "Start here 👇";
 
   function showAccessDenied(code) {
     els.appShell.classList.add("hidden");
@@ -309,6 +320,8 @@
     setRow(els.packageCaption, pkg.hook_text);
     setRow(els.packagePlayback, pkg.playback_url);
     els.packageCta.textContent = FIXED_CTA_TEXT;
+    els.packageBenefits.textContent = FIXED_BENEFIT_HEADER + " " + FIXED_BENEFIT_LINES.join(" · ");
+    els.packageStarter.textContent = FIXED_STARTER_TEXT;
     els.packageLink.textContent = pkg.referral_link;
     els.packageCard.classList.remove("hidden");
     els.btnGenerate.classList.add("hidden");
@@ -440,9 +453,10 @@
   }
 
   // Mirrors build_creator_share_text()'s caption assembly (hook + playback,
-  // then the fixed CTA line) but omits the trailing referral link, since
-  // Telegram's share/url composer carries the link separately via its own
-  // "url" param -- putting it in both places would show it twice.
+  // then the fixed transition line + three-benefit block) but omits the
+  // trailing referral link, since Telegram's share/url composer carries the
+  // link separately via its own "url" param -- putting it in both places
+  // would show it twice.
   function buildTelegramCaptionText(pkg) {
     var hook = (pkg.hook_text || "").trim();
     var playback = (pkg.playback_url || "").trim();
@@ -450,6 +464,8 @@
     var lines = top.slice();
     if (top.length) lines.push("");
     lines.push(FIXED_CTA_TEXT);
+    lines.push(FIXED_BENEFIT_HEADER);
+    lines = lines.concat(FIXED_BENEFIT_LINES);
     return lines.join("\n");
   }
 

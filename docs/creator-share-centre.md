@@ -15,7 +15,10 @@ database, referral, XP, or invite-link system.
   — the Creator Share Centre never creates a second/alternate invite link.
 - **Generation + persistence**: `referral_share_content.generate_share_package()`
   writes to the existing `share_generations` collection, with
-  `generated_by="creator_share_centre"`.
+  `generated_by="creator_generated_share"` (analytics-metadata only; historical
+  documents written before the Mini App / Creator Share Centre content split
+  used `generated_by="creator_share_centre"` and are still matched by
+  `creator_share_results()` for backward compatibility).
 - **Referral qualification/results**: the existing `pending_referrals`
   collection and the same status buckets used by the admin Referrals panel
   (`dashboard_panels._QUALIFIED_STATUSES` / `_PENDING_STATUSES` /
@@ -276,21 +279,30 @@ endpoints are ownership-checked (`package.user_id == authenticated user_id`);
 a non-owner or a nonexistent `package_id` both return the same
 `404 not_found`, so package existence is never leaked.
 
-### Share text format (V1, fixed)
+### Share text format (fixed)
 
 ```
 {hook_text}
 {playback_url}
 
-More player replays and rewards inside AdvantPlay:
+Want more replays like this—and rewards too?
+Join AdvantPlay for:
+🎟️ Free welcome voucher
+⚡️ Daily voucher drops
+🏆 Weekly rewards
+
+Start here 👇
 {canonical_referral_link}
 ```
 
 - `hook_text` and `playback_url` are each independently omitted (no line,
   no orphan blank line, never the literal string `"None"`) when no active
   hook/playback exists.
-- The CTA line is always exactly `More player replays and rewards inside
-  AdvantPlay:`.
+- The transition line, the three fixed benefits, and the referral link
+  always render. This is intentionally the *compressed* three-benefit
+  block (voucher / daily drops / weekly rewards) — never the Mini App's
+  full five-benefit block (`bonus campaigns` / `VIP-only announcements` are
+  Mini-App-only and never appear here).
 - The canonical referral link is always present; if it cannot be produced,
   generation fails outright (HTTP 502) and no `share_generations` document
   is written for that attempt.

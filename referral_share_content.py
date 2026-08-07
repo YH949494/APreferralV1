@@ -60,6 +60,23 @@ MAX_GAME_NAME_LEN = 200
 MAX_BULK_IMPORT_LINES = 2000
 DEFAULT_FALLBACK_HOOK_TEXT = "🎬 Fresh replays just dropped!"
 
+# Analytics-metadata-only source labels written to share_generations.generated_by.
+# Purely descriptive of which surface generated the package -- never read by
+# referral attribution, qualification, settlement, reward, or abuse logic
+# (those all key off pending_referrals / invite_link_map, not this field).
+MINIAPP_SHARE_SOURCE = "miniapp_general_share"
+CREATOR_SHARE_SOURCE = "creator_generated_share"
+
+# Creator Share Centre's fixed, compressed value-proposition block: three
+# highest-priority benefits only (never the Mini App's full five-benefit
+# block) -- see build_creator_share_text().
+CREATOR_SHARE_TRANSITION_LINE = "Want more replays like this—and rewards too?"
+CREATOR_SHARE_BENEFIT_LINES = (
+    "🎟️ Free welcome voucher",
+    "⚡️ Daily voucher drops",
+    "🏆 Weekly rewards",
+)
+
 # Admin bulk-management (Hooks / Playback Links) — resource_type is always
 # whitelisted against this map; the client can never supply a raw collection
 # name. Hooks and playback links are always acted on independently: every
@@ -239,8 +256,17 @@ def select_hook(now: datetime | None = None) -> dict | None:
 
 
 def _last_playback_record_id_for_user(user_id: int):
+    """Most recent playback_record_id this user was actually given.
+
+    Excludes generations with no playback_record_id at all -- e.g. the Mini
+    App's include_content_pools=False path, which never selects a playback
+    record and always writes playback_record_id=None. Without this filter,
+    a Mini App generation sandwiched between two Creator Share Centre
+    generations would look like "no last playback", so the no-immediate-
+    repeat exclusion below would silently stop applying.
+    """
     last = database.db["share_generations"].find_one(
-        {"user_id": user_id},
+        {"user_id": user_id, "playback_record_id": {"$ne": None}},
         sort=[("generated_at", -1)],
         projection={"playback_record_id": 1},
     )
@@ -391,18 +417,30 @@ def build_creator_share_text(
 ) -> str:
     """Assemble the Creator Share Centre's copy-ready plain text.
 
-    Fixed V1 format::
+    Fixed structure::
 
         {hook_text}
         {playback_url}
 
-        More player replays and rewards inside AdvantPlay:
+        Want more replays like this—and rewards too?
+        Join AdvantPlay for:
+        🎟️ Free welcome voucher
+        ⚡️ Daily voucher drops
+        🏆 Weekly rewards
+
+        Start here 👇
         {canonical_referral_link}
 
     ``hook_text``/``playback_url`` are each independently omitted (no
     "None", no orphan blank line) when absent, mirroring
-    ``build_referral_share_caption``'s empty-state handling. The CTA line
-    and the referral link always render; ``referral_link`` is required.
+    ``build_referral_share_caption``'s empty-state handling. The transition
+    line, the three fixed benefits, and the referral link always render, so
+    a post is never a bare link with no value proposition.
+
+    This is intentionally the *compressed* three-benefit block (voucher /
+    daily drops / weekly rewards), not the Mini App's full five-benefit
+    block (``build_referral_share_caption``) -- the two surfaces must never
+    share the same benefits list. ``referral_link`` is required.
     """
     referral_link = (referral_link or "").strip()
     if not referral_link:
@@ -415,7 +453,11 @@ def build_creator_share_text(
     lines = list(top)
     if top:
         lines.append("")
-    lines.append("More player replays and rewards inside AdvantPlay:")
+    lines.append(CREATOR_SHARE_TRANSITION_LINE)
+    lines.append("Join AdvantPlay for:")
+    lines.extend(CREATOR_SHARE_BENEFIT_LINES)
+    lines.append("")
+    lines.append("Start here 👇")
     lines.append(referral_link)
     return "\n".join(lines)
 
@@ -427,6 +469,7 @@ def generate_share_package(
     generated_by: str = "bot",
     requested_by_admin: int | None = None,
     platform: str | None = None,
+    include_content_pools: bool = True,
 ) -> dict:
     """Assemble the share package for ``user_id``.
 
@@ -443,15 +486,29 @@ def generate_share_package(
     ``platform`` is an optional caller-supplied label (e.g. the Creator
     Share Centre's target platform) stored alongside the generation record;
     it never affects hook/playback selection or the invite link.
+
+    Set ``include_content_pools=False`` for surfaces that must never draw
+    from the caption-hook / playback-link pools at all (the Mini App's
+    general referral caption) -- hook/playback are then always ``None``
+    without ever calling ``select_hook``/``select_playback_for_user``, so a
+    Mini App generation never consumes a Creator Share Centre pool record
+    or perturbs its least-used rotation.
     """
     now = now_utc()
 
-    hook_doc = select_hook(now)
-    hook_id = hook_doc["_id"] if hook_doc else None
-    hook_text = hook_doc["text"] if hook_doc else None
+    if include_content_pools:
+        hook_doc = select_hook(now)
+        hook_id = hook_doc["_id"] if hook_doc else None
+        hook_text = hook_doc["text"] if hook_doc else None
 
-    playback_doc = select_playback_for_user(user_id, now)
-    playback_url = playback_doc["playback_url"] if playback_doc else None
+        playback_doc = select_playback_for_user(user_id, now)
+        playback_url = playback_doc["playback_url"] if playback_doc else None
+    else:
+        hook_doc = None
+        hook_id = None
+        hook_text = None
+        playback_doc = None
+        playback_url = None
 
     try:
         from main import get_or_create_referral_invite_link_sync
@@ -503,7 +560,7 @@ def generate_share_package(
         "share_click_count": 0,
     }
     database.db["share_generations"].insert_one(doc)
-    if hook_doc is None or playback_doc is None:
+    if include_content_pools and (hook_doc is None or playback_doc is None):
         # Admin-facing visibility only -- generation itself still succeeds
         # (see module docstring): an empty pool is never a hard failure, it
         # just omits that section of the caption. This is a deliberate
