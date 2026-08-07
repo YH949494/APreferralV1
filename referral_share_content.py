@@ -256,8 +256,17 @@ def select_hook(now: datetime | None = None) -> dict | None:
 
 
 def _last_playback_record_id_for_user(user_id: int):
+    """Most recent playback_record_id this user was actually given.
+
+    Excludes generations with no playback_record_id at all -- e.g. the Mini
+    App's include_content_pools=False path, which never selects a playback
+    record and always writes playback_record_id=None. Without this filter,
+    a Mini App generation sandwiched between two Creator Share Centre
+    generations would look like "no last playback", so the no-immediate-
+    repeat exclusion below would silently stop applying.
+    """
     last = database.db["share_generations"].find_one(
-        {"user_id": user_id},
+        {"user_id": user_id, "playback_record_id": {"$ne": None}},
         sort=[("generated_at", -1)],
         projection={"playback_record_id": 1},
     )
