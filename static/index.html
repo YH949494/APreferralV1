@@ -3702,6 +3702,14 @@
         // existing claim button/handler instead of only scrolling to it.
         viewRewardBtn.addEventListener("click", () => claimWelcomeRewardOneTap());
       }
+      // The card's timeline/step/progress/status text is built with t() at
+      // render time, not via data-i18n attributes, so applyTranslations()
+      // (triggered by setLang()) never touches it. Re-render from the last
+      // fetched data on language switch so it doesn't stay stuck in the
+      // previous language.
+      window.addEventListener("ap:langchange", () => {
+        if (_welcomeProgressData) syncWelcomeStatusCard();
+      });
     })();
 
     function applyRegionGate(regionValue = null) {
