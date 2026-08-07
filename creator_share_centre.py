@@ -48,7 +48,18 @@ from pymongo.errors import DuplicateKeyError
 
 import database
 from referral_rate_limit import consume_referral_rate_limits
-from referral_share_content import build_creator_share_text, generate_share_package, now_utc
+from referral_share_content import (
+    CREATOR_SHARE_SOURCE,
+    build_creator_share_text,
+    generate_share_package,
+    now_utc,
+)
+
+# Legacy generated_by value written before the Mini App / Creator Share
+# Centre content split -- kept only so historical share_generations
+# documents stay visible in results()/creator_filter below; never written
+# by new generations (see CREATOR_SHARE_SOURCE).
+_LEGACY_CREATOR_SHARE_SOURCE = "creator_share_centre"
 
 logger = logging.getLogger(__name__)
 
@@ -613,7 +624,7 @@ def creator_share_generate():
         return jsonify({"status": "error", "code": "creator_generation_rate_limited"}), 429
 
     result = generate_share_package(
-        user_id, username, generated_by="creator_share_centre", platform=platform
+        user_id, username, generated_by=CREATOR_SHARE_SOURCE, platform=platform
     )
     if not result.get("ok"):
         logger.warning(
@@ -730,7 +741,10 @@ def creator_share_results():
     )
 
     share_col = database.db["share_generations"]
-    creator_filter = {"user_id": user_id, "generated_by": "creator_share_centre"}
+    creator_filter = {
+        "user_id": user_id,
+        "generated_by": {"$in": [CREATOR_SHARE_SOURCE, _LEGACY_CREATOR_SHARE_SOURCE]},
+    }
     latest_doc = share_col.find_one(
         creator_filter, sort=[("generated_at", -1)], projection={"generated_at": 1}
     )
