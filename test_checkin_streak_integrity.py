@@ -398,7 +398,12 @@ def test_concurrent_brand_new_user_race_does_not_500():
     main.db.xp_events.insert_one({"user_id": uid, "unique_key": f"checkin:{datetime.now(KL_TZ).strftime('%Y%m%d')}", "type": "checkin", "xp": XP_BASE_PER_CHECKIN, "created_at": winner_now})
     main.db.xp_ledger.insert_one({"user_id": uid, "source": "checkin", "source_id": f"checkin:{datetime.now(KL_TZ).strftime('%Y%m%d')}", "amount": XP_BASE_PER_CHECKIN, "created_at": winner_now})
 
-    with mock.patch.object(main.users_collection, "find_one", side_effect=_find_one_first_call_missing):
+    # /api/checkin takes its identity from verified Telegram initData, so the
+    # request must be authenticated as `uid`. This is orthogonal to the race
+    # being exercised here (the auth step does not touch users_collection, so
+    # the find_one call ordering the mock depends on is unchanged).
+    with mock.patch.object(main.users_collection, "find_one", side_effect=_find_one_first_call_missing), \
+         mock.patch.object(main, "_extract_verified_telegram_user_id", return_value=(uid, None)):
         client = main.app.test_client()
         response = client.post("/api/checkin", json={"user_id": uid, "username": "bob"})
 

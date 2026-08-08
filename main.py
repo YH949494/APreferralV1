@@ -5916,15 +5916,25 @@ def api_streak(user_id):
 # -------------------------------
 @app.route("/api/checkin", methods=["POST"])
 def api_checkin():
-    """Mini-app triggers check-in (region is optional)"""
+    """Mini-app triggers check-in (region is optional).
+
+    The acting user is taken from the signed Telegram initData only. The
+    request body's ``user_id`` is never trusted for identity: this endpoint
+    grants XP, advances streaks and upserts ``users`` documents, so an
+    attacker-supplied id let anyone write reward ledgers for arbitrary
+    Telegram ids (and mint ``users`` rows for ids that never existed).
+    ``username`` is still read from the body because it is display data the
+    client already knows, not identity.
+    """
     try:
         data = request.get_json(silent=True) or {}
-        user_id = data.get("user_id")
         username = data.get("username", "unknown")
         request_id = data.get("request_id") or request.headers.get("X-Request-Id")
 
-        if not user_id:
-            return jsonify({"success": False, "error": "Missing user_id"}), 400
+        user_id, auth_error = _extract_verified_telegram_user_id()
+        if auth_error:
+            payload, status = auth_error
+            return jsonify({"success": False, "error": payload.get("error", "Unauthorized")}), status
 
         user = users_collection.find_one({"user_id": int(user_id)}) or {}
 
@@ -6003,10 +6013,26 @@ def api_daily_game():
 
 @app.route("/api/set-region/<int:user_id>", methods=["POST"])
 def api_set_region(user_id):
-    """Set region only if not already set"""
+    """Set region only if not already set.
+
+    Region is write-once (the "already set" guard below is permanent), so an
+    unauthenticated caller could irreversibly lock any user's region to a
+    wrong value. The path parameter is kept for URL compatibility with
+    existing clients but is only honoured when it matches the signed
+    initData identity.
+    """
     if get_app_setting("feature_flags", "region_selection") is False:
         return jsonify({"success": False, "error": "feature_disabled"}), 200
-    data = request.json
+
+    verified_user_id, auth_error = _extract_verified_telegram_user_id()
+    if auth_error:
+        payload, status = auth_error
+        return jsonify({"success": False, "error": payload.get("error", "Unauthorized")}), status
+    if int(verified_user_id) != int(user_id):
+        return jsonify({"success": False, "error": "Unauthorized"}), 403
+    user_id = int(verified_user_id)
+
+    data = request.get_json(silent=True) or {}
     region = data.get("region")
 
     if not region:
