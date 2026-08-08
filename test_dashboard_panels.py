@@ -494,6 +494,123 @@ def test_user_drilldown_by_id_and_username():
     assert missing["success"] is False and missing["data_quality"] == "missing"
 
 
+def test_user_drilldown_segment_observability_no_snapshot():
+    """P0 observability: legacy-only user (no backend_segment_snapshots doc)."""
+    users = FakeCollection([
+        {"user_id": 42, "username": "Neo", "for_bot_segment": "unclassified"},
+    ])
+    empty = FakeCollection([])
+    snapshots = FakeCollection([])  # no backend snapshot at all for this user
+
+    out = dp.build_user_drilldown(
+        query="42", users_col=users, welcome_eligibility_col=empty,
+        voucher_claims_col=empty, affiliate_ledger_col=empty,
+        pending_referrals_col=empty, qualified_events_col=empty,
+        backend_segment_snapshots_col=snapshots, now=NOW,
+    )
+    obs = out["segment_observability"]
+    assert obs["segment_source"] == "users.for_bot_segment"
+    assert obs["segment_raw_value"] == "unclassified"
+    assert obs["snapshot_exists"] is False
+    # No snapshot exists -> must NOT be reported as a real classifier result.
+    assert obs["data_status"] == "legacy_only_no_backend_snapshot"
+    assert obs["turnover_window"] is None
+
+
+def test_user_drilldown_segment_observability_with_snapshot():
+    """P0 observability: a real backend_segment_snapshots doc exists."""
+    users = FakeCollection([
+        {"user_id": 42, "username": "Neo", "for_bot_segment": "ghost"},
+    ])
+    empty = FakeCollection([])
+    snapshots = FakeCollection([
+        {
+            "telegram_user_id": 42,
+            "backend_segment": "unclassified",
+            "segment_reason": "no play, no claims, no clear inactivity signal",
+            "snapshot_week": "2026-W24",
+            "snapshot_month": "2026-06",
+            "snapshot_period_source": "coupon_redeem_time",
+            "calculated_at": NOW,
+        }
+    ])
+
+    out = dp.build_user_drilldown(
+        query="42", users_col=users, welcome_eligibility_col=empty,
+        voucher_claims_col=empty, affiliate_ledger_col=empty,
+        pending_referrals_col=empty, qualified_events_col=empty,
+        backend_segment_snapshots_col=snapshots, now=NOW,
+    )
+    obs = out["segment_observability"]
+    assert obs["snapshot_exists"] is True
+    # A real classifier run produced "unclassified" -> this is the only case
+    # where showing "Unclassified" (rather than "No segment snapshot") is honest.
+    assert obs["data_status"] == "classified_unclassified"
+    assert obs["segment_reason"] == "no play, no claims, no clear inactivity signal"
+    assert obs["turnover_window"]["kind"] == "imported_period"
+    assert obs["turnover_window"]["snapshot_week"] == "2026-W24"
+    assert "Not a rolling 7-day calculation" in obs["turnover_window"]["note"]
+
+
+def test_user_drilldown_segment_observability_stale_snapshot():
+    """A snapshot from a prior ISO week must not read as a current classification."""
+    users = FakeCollection([
+        {"user_id": 42, "username": "Neo", "for_bot_segment": "ghost"},
+    ])
+    empty = FakeCollection([])
+    snapshots = FakeCollection([
+        {
+            "telegram_user_id": 42,
+            "backend_segment": "voucher_hunter",
+            "segment_reason": "high_claim_low_play: ...",
+            "snapshot_week": "2026-W15",  # months before NOW's 2026-W24
+            "snapshot_month": "2026-04",
+            "calculated_at": datetime(2026, 4, 10, tzinfo=timezone.utc),
+        }
+    ])
+
+    out = dp.build_user_drilldown(
+        query="42", users_col=users, welcome_eligibility_col=empty,
+        voucher_claims_col=empty, affiliate_ledger_col=empty,
+        pending_referrals_col=empty, qualified_events_col=empty,
+        backend_segment_snapshots_col=snapshots, now=NOW,
+    )
+    obs = out["segment_observability"]
+    assert obs["snapshot_exists"] is True
+    assert obs["is_stale_snapshot"] is True
+    # Must not be reported as a fresh "classified"/"classified_unclassified" result.
+    assert obs["data_status"] == "stale_snapshot"
+
+
+class _RaisingCollection:
+    """Fake collection whose find() blows up, to exercise lookup-error handling."""
+
+    def find(self, *args, **kwargs):
+        raise RuntimeError("simulated Mongo timeout")
+
+
+def test_user_drilldown_segment_observability_lookup_error_not_silent():
+    """A snapshot lookup failure must not be indistinguishable from 'no data'."""
+    users = FakeCollection([
+        {"user_id": 42, "username": "Neo", "for_bot_segment": "ghost"},
+    ])
+    empty = FakeCollection([])
+
+    out = dp.build_user_drilldown(
+        query="42", users_col=users, welcome_eligibility_col=empty,
+        voucher_claims_col=empty, affiliate_ledger_col=empty,
+        pending_referrals_col=empty, qualified_events_col=empty,
+        backend_segment_snapshots_col=_RaisingCollection(), now=NOW,
+    )
+    obs = out["segment_observability"]
+    assert obs["snapshot_exists"] is False
+    assert obs["data_status"] == "snapshot_lookup_failed"
+    assert obs["snapshot_lookup_error"] is not None
+    # The failure must surface in the drilldown's existing error collector too.
+    assert out["partial_errors"] is not None
+    assert any("backend_segment_snapshot_lookup" in e for e in out["partial_errors"])
+
+
 # ---------------------------------------------------------------------------
 # Settings
 # ---------------------------------------------------------------------------
