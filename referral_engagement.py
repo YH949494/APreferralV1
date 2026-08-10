@@ -146,6 +146,7 @@ def _dedup_event_id(
     session_id: str | None,
     referral_link_id: str | None,
     occurred_at: datetime,
+    metadata: dict | None = None,
 ) -> str:
     window = DEDUP_WINDOW_SECONDS.get(event)
     parts = [str(user_id), event, source, surface or ""]
@@ -166,6 +167,16 @@ def _dedup_event_id(
             # is only mixed in on top of the time bucket, to disambiguate
             # concurrent generations of different links within one bucket.
             parts.append(referral_link_id)
+        if event == "referral_copy_clicked":
+            # The automatic post-generation copy and a manual Copy Post
+            # click can both land in the same 2s dedup bucket (auto-copy
+            # fires immediately after generation, and a fast manual click
+            # would otherwise collide with it). Mixing copy_method into the
+            # key keeps auto vs. manual as distinct events instead of the
+            # manual click being silently deduped away.
+            copy_method = (metadata or {}).get("copy_method")
+            if isinstance(copy_method, str):
+                parts.append(copy_method)
     raw = "|".join(parts)
     return "evt_" + hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
@@ -194,6 +205,7 @@ def record_event(
         session_id=session_id,
         referral_link_id=referral_link_id,
         occurred_at=now,
+        metadata=metadata,
     )
     doc = {
         "event_id": event_id,
@@ -289,6 +301,14 @@ def track_referral_engagement_event():
         return jsonify({"ok": False, "error": "unknown_event"}), 400
     if source not in ALLOWED_SOURCES:
         return jsonify({"ok": False, "error": "unknown_source"}), 400
+    if event == "creator_centre_opened" and source != "creator_centre":
+        # This is the canonical denominator for Creator Centre activation --
+        # it must only ever be recordable through the full creator auth gate
+        # (_authenticate below routes "creator_centre" through
+        # _authenticate_and_authorize). Any other source would let a merely
+        # Telegram-authenticated user record an "open" without ever passing
+        # Creator Centre access checks.
+        return jsonify({"ok": False, "error": "invalid_source_for_event"}), 400
     if not isinstance(surface, str) or not surface.strip() or len(surface) > MAX_SURFACE_LEN:
         return jsonify({"ok": False, "error": "invalid_surface"}), 400
     if session_id is not None and (not isinstance(session_id, str) or len(session_id) > MAX_SESSION_ID_LEN):

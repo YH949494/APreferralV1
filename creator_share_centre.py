@@ -679,8 +679,11 @@ def creator_share_copied(package_id):
     body = request.get_json(force=True, silent=True) or {}
     platform = body.get("platform") if body.get("platform") in ALLOWED_PLATFORMS else "generic"
     # Optional -- historical/older clients never send this, so existing
-    # copy_count/copied_at semantics must keep working without it.
-    copy_method = body.get("copy_method") if body.get("copy_method") in ALLOWED_COPY_METHODS else None
+    # copy_count/copied_at semantics must keep working without it. Guard
+    # with isinstance first: an unhashable value (dict/list) would raise on
+    # the "in ALLOWED_COPY_METHODS" membership test below.
+    raw_copy_method = body.get("copy_method")
+    copy_method = raw_copy_method if isinstance(raw_copy_method, str) and raw_copy_method in ALLOWED_COPY_METHODS else None
 
     set_fields = {"copied_at": now_utc(), "latest_copy_platform": platform}
     if copy_method:

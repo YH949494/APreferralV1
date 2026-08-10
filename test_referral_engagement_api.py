@@ -527,3 +527,38 @@ def test_creator_centre_opened_access_denied_not_recorded(client, fake_db, monke
     })
     assert resp.status_code == 403
     assert fake_db["referral_engagement_events"].count_documents({}) == 0
+
+
+def test_creator_centre_opened_rejected_with_miniapp_source(client, fake_db, monkeypatch):
+    # creator_centre_opened must only ever go through the full creator auth
+    # gate (source="creator_centre" -> _authenticate_and_authorize). Pairing
+    # it with source="miniapp" would route through the weaker bare-initData
+    # auth path and let a non-creator record a "successful open".
+    _fake_vouchers_module(monkeypatch, user_id=555)
+    resp = _post(client, {"event": "creator_centre_opened", "source": "miniapp", "surface": "app_shell"})
+    assert resp.status_code == 400
+    assert resp.get_json()["error"] == "invalid_source_for_event"
+    assert fake_db["referral_engagement_events"].count_documents({}) == 0
+
+
+def test_copy_clicked_not_deduped_when_copy_method_differs(client, fake_db, monkeypatch):
+    # Auto-copy (fired immediately after generation) and a fast manual Copy
+    # Post click can land in the same 2s dedup bucket. copy_method must be
+    # mixed into the dedup identity so the manual click isn't silently
+    # dropped as a duplicate of the auto-copy.
+    _fake_vouchers_module(monkeypatch)
+    _fake_creator_share_centre_module(monkeypatch, user_id=555)
+    base = {"event": "referral_copy_clicked", "source": "creator_centre", "surface": "copy_post"}
+    _post(client, {**base, "metadata": {"copy_method": "auto"}})
+    _post(client, {**base, "metadata": {"copy_method": "manual"}})
+    assert fake_db["referral_engagement_events"].count_documents({}) == 2
+
+
+def test_copy_clicked_still_deduped_when_copy_method_same(client, fake_db, monkeypatch):
+    _fake_vouchers_module(monkeypatch)
+    _fake_creator_share_centre_module(monkeypatch, user_id=555)
+    base = {"event": "referral_copy_clicked", "source": "creator_centre", "surface": "copy_post",
+            "metadata": {"copy_method": "manual"}}
+    _post(client, base)
+    _post(client, base)
+    assert fake_db["referral_engagement_events"].count_documents({}) == 1

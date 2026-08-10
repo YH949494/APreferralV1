@@ -390,6 +390,19 @@ class TestCopyAndShareEvents:
         doc = fake_db["share_generations"].find_one({"package_id": package_id})
         assert "latest_copy_method" not in doc
 
+    def test_non_string_copy_method_ignored_without_500(self, fake_db, monkeypatch, client):
+        # An unhashable copy_method (dict/list) must be silently ignored,
+        # not raise TypeError from the ALLOWED_COPY_METHODS membership check.
+        package_id = self._generate(fake_db, monkeypatch, client)
+        resp = client.post(
+            f"/api/creator/share/{package_id}/copied?init_data=ok",
+            json={"copy_method": {"nested": "object"}},
+        )
+        assert resp.status_code == 200
+        doc = fake_db["share_generations"].find_one({"package_id": package_id})
+        assert "latest_copy_method" not in doc
+        assert doc["copy_count"] == 1
+
     def test_non_owner_receives_404_without_leaking_existence(self, fake_db, monkeypatch, client):
         package_id = self._generate(fake_db, monkeypatch, client, user_id=555)
 
