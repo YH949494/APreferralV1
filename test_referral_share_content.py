@@ -995,6 +995,24 @@ class TestPlaybackSelection:
         doc = rsc.select_playback_for_user(user_id=42)
         assert doc["_id"] == second
 
+    def test_pool_free_generation_does_not_reset_last_playback(self, fake_db):
+        # A Creator Share Centre generation picks `first`, then the same
+        # user generates a Mini App caption (include_content_pools=False,
+        # so its share_generations doc has playback_record_id=None and is
+        # newer). The next Creator Centre generation must still avoid
+        # repeating `first` -- the pool-free doc must not look like "no
+        # last playback".
+        first = _playback(fake_db, "First0002")
+        second = _playback(fake_db, "Second002")
+        fake_db["share_generations"].insert_one({
+            "user_id": 43, "playback_record_id": first, "generated_at": rsc.now_utc(),
+        })
+        fake_db["share_generations"].insert_one({
+            "user_id": 43, "playback_record_id": None, "generated_at": rsc.now_utc(),
+        })
+        doc = rsc.select_playback_for_user(user_id=43)
+        assert doc["_id"] == second
+
     def test_single_playback_reused_when_it_is_the_last_one(self, fake_db):
         only = _playback(fake_db, "Only00001")
         fake_db["share_generations"].insert_one({

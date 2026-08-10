@@ -102,6 +102,8 @@ const ELEMENT_IDS = [
   "package-caption",
   "package-playback",
   "package-cta",
+  "package-benefits",
+  "package-starter",
   "package-link",
   "btn-copy",
   "btn-try-another",
@@ -227,7 +229,7 @@ function generateOkResponse(overrides) {
             playback_url: "https://rx.apreplay.com/Abc123",
             referral_link: "https://t.me/+abc",
             share_text:
-              "Hook line\nhttps://rx.apreplay.com/Abc123\n\nMore player replays and rewards inside AdvantPlay:\nhttps://t.me/+abc",
+              "Hook line\nhttps://rx.apreplay.com/Abc123\n\nWant more replays like this—and rewards too?\nJoin AdvantPlay for:\n🎟️ Free welcome voucher\n⚡️ Daily voucher drops\n🏆 Weekly rewards\n\nStart here 👇\nhttps://t.me/+abc",
           },
           overrides || {}
         )
@@ -281,7 +283,9 @@ test("Generate renders the post split into caption/playback/CTA/link and hides G
 
   assert.equal(elements["package-caption"].textContent, "Hook line");
   assert.equal(elements["package-playback"].textContent, "https://rx.apreplay.com/Abc123");
-  assert.equal(elements["package-cta"].textContent, "More player replays and rewards inside AdvantPlay:");
+  assert.equal(elements["package-cta"].textContent, "Want more replays like this—and rewards too?");
+  assert.equal(elements["package-benefits"].textContent, "Join AdvantPlay for: 🎟️ Free welcome voucher · ⚡️ Daily voucher drops · 🏆 Weekly rewards");
+  assert.equal(elements["package-starter"].textContent, "Start here 👇");
   assert.equal(elements["package-link"].textContent, "https://t.me/+abc");
   assert.equal(elements["package-card"].classList.contains("hidden"), false);
   assert.equal(elements["btn-generate"].classList.contains("hidden"), true, "Get My Share Post is replaced once a post exists");
@@ -323,7 +327,7 @@ test("Get My Share Post reveals the card, smooth-scrolls it into view, copies sh
   assert.equal(writeTextCalls.length, 1, "successful generation must trigger exactly one clipboard write");
   assert.equal(
     writeTextCalls[0],
-    "Hook line\nhttps://rx.apreplay.com/Abc123\n\nMore player replays and rewards inside AdvantPlay:\nhttps://t.me/+abc",
+    "Hook line\nhttps://rx.apreplay.com/Abc123\n\nWant more replays like this—and rewards too?\nJoin AdvantPlay for:\n🎟️ Free welcome voucher\n⚡️ Daily voucher drops\n🏆 Weekly rewards\n\nStart here 👇\nhttps://t.me/+abc",
     "clipboard write must carry the complete generated share_text"
   );
 
@@ -406,7 +410,7 @@ test("repeated clicks on Get My Share Post while a request is in flight do not s
         hook_text: null,
         playback_url: null,
         referral_link: "https://t.me/+once",
-        share_text: "More player replays and rewards inside AdvantPlay:\nhttps://t.me/+once",
+        share_text: "Want more replays like this—and rewards too?\nJoin AdvantPlay for:\n🎟️ Free welcome voucher\n⚡️ Daily voucher drops\n🏆 Weekly rewards\n\nStart here 👇\nhttps://t.me/+once",
       }),
   });
   await flush();
@@ -488,7 +492,7 @@ test("empty caption/playback rows are hidden without showing the literal word No
           hook_text: null,
           playback_url: null,
           referral_link: "https://t.me/+bare",
-          share_text: "More player replays and rewards inside AdvantPlay:\nhttps://t.me/+bare",
+          share_text: "Want more replays like this—and rewards too?\nJoin AdvantPlay for:\n🎟️ Free welcome voucher\n⚡️ Daily voucher drops\n🏆 Weekly rewards\n\nStart here 👇\nhttps://t.me/+bare",
         });
       }
       return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ status: "ok" }) });
@@ -507,7 +511,7 @@ test("empty caption/playback rows are hidden without showing the literal word No
 });
 
 test("Copy Post copies the exact unmodified share_text, shows confirmation, then reverts after ~2s", async () => {
-  const shareText = "Only hook\n\nMore player replays and rewards inside AdvantPlay:\nhttps://t.me/+xyz";
+  const shareText = "Only hook\n\nWant more replays like this—and rewards too?\nJoin AdvantPlay for:\n🎟️ Free welcome voucher\n⚡️ Daily voucher drops\n🏆 Weekly rewards\n\nStart here 👇\nhttps://t.me/+xyz";
   let writeTextArg = null;
   const { elements, fetchCalls } = buildSandbox({
     clipboardWriteText: (text) => {
@@ -811,7 +815,7 @@ test("Give Me Another Post disables the buttons during the request", async () =>
         hook_text: null,
         playback_url: null,
         referral_link: "https://t.me/+x",
-        share_text: "More player replays and rewards inside AdvantPlay:\nhttps://t.me/+x",
+        share_text: "Want more replays like this—and rewards too?\nJoin AdvantPlay for:\n🎟️ Free welcome voucher\n⚡️ Daily voucher drops\n🏆 Weekly rewards\n\nStart here 👇\nhttps://t.me/+x",
       }),
   });
   await flush();

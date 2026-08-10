@@ -6489,9 +6489,22 @@ def api_referral_share_content():
             return jsonify({"ok": False, "error": "Unauthorized"}), 403
         username = (user_payload or {}).get("username") or ""
 
-        from referral_share_content import build_referral_share_caption, generate_share_package
+        from referral_share_content import (
+            MINIAPP_SHARE_SOURCE,
+            build_referral_share_caption,
+            generate_share_package,
+        )
 
-        result = generate_share_package(user_id, username, generated_by="miniapp")
+        # include_content_pools=False: the Mini App is a plain referral tool
+        # for normal users -- it never draws from (or exposes) the Creator
+        # Share Centre's rotating hook/playback pools. Only the fixed
+        # five-benefit caption + the user's canonical referral link.
+        result = generate_share_package(
+            user_id,
+            username,
+            generated_by=MINIAPP_SHARE_SOURCE,
+            include_content_pools=False,
+        )
         if not result.get("ok"):
             code = result.get("code")
             if code == "no_active_playback":
@@ -6503,8 +6516,8 @@ def api_referral_share_content():
         # surfaces (Telegram's share/url button) that pass the link via a
         # separate url param -- see build_referral_share_caption().
         share_text = build_referral_share_caption(
-            hook_text=result["hook_text"],
-            playback_url=result["playback_url"],
+            hook_text=None,
+            playback_url=None,
             referral_url=result["invite_link"],
             include_referral_link=False,
         )
@@ -6516,8 +6529,6 @@ def api_referral_share_content():
                 "message": result["message"],
                 "share_text": share_text,
                 "invite_link": result["invite_link"],
-                "playback_url": result["playback_url"],
-                "hook_text": result["hook_text"],
             }
         )
     except Exception:

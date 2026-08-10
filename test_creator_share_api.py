@@ -125,7 +125,7 @@ class TestGenerate:
 
         doc = fake_db["share_generations"].find_one({"package_id": body["package_id"]})
         assert doc is not None
-        assert doc["generated_by"] == "creator_share_centre"
+        assert doc["generated_by"] == "creator_generated_share"
         assert doc["platform"] == "whatsapp"
         assert doc["user_id"] == 555
 
@@ -195,10 +195,17 @@ class TestGenerate:
         body = resp.get_json()
         assert body["status"] == "ok"
         assert body["share_text"] == (
-            "More player replays and rewards inside AdvantPlay:\nhttps://t.me/+bare"
+            "Want more replays like this—and rewards too?\n"
+            "Join AdvantPlay for:\n"
+            "🎟️ Free welcome voucher\n"
+            "⚡️ Daily voucher drops\n"
+            "🏆 Weekly rewards\n"
+            "\n"
+            "Start here 👇\n"
+            "https://t.me/+bare"
         )
 
-    def test_fixed_cta_is_exact(self, fake_db, monkeypatch, client):
+    def test_fixed_cta_and_three_benefits_are_exact(self, fake_db, monkeypatch, client):
         _fake_vouchers_module(monkeypatch)
         _creator(fake_db)
         monkeypatch.delenv("CREATOR_GROUP_CHAT_ID", raising=False)
@@ -208,7 +215,15 @@ class TestGenerate:
 
         resp = client.post("/api/creator/share/generate?init_data=ok", json={"platform": "generic"})
         body = resp.get_json()
-        assert "More player replays and rewards inside AdvantPlay:" in body["share_text"]
+        assert "Want more replays like this—and rewards too?" in body["share_text"]
+        assert "🎟️ Free welcome voucher" in body["share_text"]
+        assert "⚡️ Daily voucher drops" in body["share_text"]
+        assert "🏆 Weekly rewards" in body["share_text"]
+        # The Mini App's lower-priority benefits must never appear here.
+        assert "Bonus campaigns" not in body["share_text"]
+        assert "VIP-only announcements" not in body["share_text"]
+        # And never the Mini App's full five-benefit block wholesale.
+        assert "👋 Welcome to AdvantPlay Community!" not in body["share_text"]
 
     def test_missing_referral_link_fails_without_partial_package(self, fake_db, monkeypatch, client):
         _fake_vouchers_module(monkeypatch)
@@ -413,5 +428,30 @@ class TestBuildCreatorShareText:
 
     def test_omits_missing_sections_without_orphan_separators(self):
         text = rsc.build_creator_share_text(hook_text=None, playback_url=None, referral_link="https://t.me/+abc")
-        assert text == "More player replays and rewards inside AdvantPlay:\nhttps://t.me/+abc"
+        assert text == (
+            "Want more replays like this—and rewards too?\n"
+            "Join AdvantPlay for:\n"
+            "🎟️ Free welcome voucher\n"
+            "⚡️ Daily voucher drops\n"
+            "🏆 Weekly rewards\n"
+            "\n"
+            "Start here 👇\n"
+            "https://t.me/+abc"
+        )
         assert "\n\n\n" not in text
+
+    def test_includes_hook_and_playback_and_three_fixed_benefits(self):
+        text = rsc.build_creator_share_text(
+            hook_text="Thought it was done already 👀",
+            playback_url="https://rx.apreplay.com/Abc123",
+            referral_link="https://t.me/+abc",
+        )
+        assert text.startswith("Thought it was done already 👀\nhttps://rx.apreplay.com/Abc123\n\n")
+        assert text.endswith("https://t.me/+abc")
+        assert "🎟️ Free welcome voucher" in text
+        assert "⚡️ Daily voucher drops" in text
+        assert "🏆 Weekly rewards" in text
+        assert text.count("https://t.me/+abc") == 1
+        assert "Bonus campaigns" not in text
+        assert "VIP-only announcements" not in text
+        assert "👋 Welcome to AdvantPlay Community!" not in text

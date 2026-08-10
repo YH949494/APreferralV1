@@ -5,6 +5,12 @@ test_share_rank_caption.py) and drives it against the real
 referral_share_content.generate_share_package with a fake DB, monkeypatching
 only the canonical invite-link creator -- referral attribution/XP/etc. are
 untouched by this endpoint and out of scope here.
+
+The Mini App is a plain referral tool: regardless of what's active in the
+caption-hook / playback-link pools (Creator Share Centre content), its
+output is always the fixed five-benefit caption + the user's canonical
+referral link -- never a hook, never a playback URL. See
+referral_share_content.generate_share_package(include_content_pools=False).
 """
 import ast
 import json as json_module
@@ -100,8 +106,29 @@ def _load_endpoint(monkeypatch, *, invite_link="https://t.me/+minAppHash", user_
     return env["api_referral_share_content"]
 
 
+FIXED_CAPTION_LINES = (
+    "👋 Welcome to AdvantPlay Community!",
+    "Join our channel to get 👇",
+    "🎟️ FREE Welcome Voucher — No deposit required",
+    "Daily voucher drops",
+    "🎁 Bonus campaigns",
+    "👑 VIP-only announcements",
+    "🏆 Weekly ranking rewards",
+    "Start here 👇",
+)
+
+
 class TestApiReferralShareContent:
-    def test_active_hook_and_active_playback(self, fake_db, monkeypatch):
+    def _assert_fixed_caption(self, message, invite_link):
+        for line in FIXED_CAPTION_LINES:
+            assert line in message
+        assert message.endswith(invite_link)
+        assert message.count(invite_link) == 1
+
+    def test_active_hook_and_active_playback_never_leak_into_miniapp_output(self, fake_db, monkeypatch):
+        """Even when the Creator Share Centre pools have active content, the
+        Mini App's output must never include it -- entirely separate
+        content surfaces."""
         _hook(fake_db, "Hook!")
         _playback(fake_db, "Play00001")
         fn = _load_endpoint(monkeypatch, invite_link="https://t.me/+bothActiveHash")
@@ -109,18 +136,18 @@ class TestApiReferralShareContent:
         result = fn()
         payload = result[0] if isinstance(result, tuple) else result
         assert payload["ok"] is True
-        assert payload["hook_text"] == "Hook!"
-        assert payload["playback_url"] == rsc.canonical_playback_url("Play00001")
         assert payload["invite_link"] == "https://t.me/+bothActiveHash"
-        assert payload["message"].endswith("https://t.me/+bothActiveHash")
+        assert "hook_text" not in payload
+        assert "playback_url" not in payload
+        assert "Hook!" not in payload["message"]
+        assert "rx.apreplay.com" not in payload["message"]
+        self._assert_fixed_caption(payload["message"], "https://t.me/+bothActiveHash")
 
-    def test_no_active_hook_no_active_playback_returns_static_fallback(self, fake_db, monkeypatch):
-        """Entry point #4: all hooks and playback links deactivated in the
-        Admin Dashboard -- the endpoint must still return ok:True with a
-        valid, non-empty message (never the 503 'no playback available'
-        error this bug used to trigger)."""
-        _hook(fake_db, "Inactive", status="inactive")
-        _playback(fake_db, "InactivePB", status="inactive")
+    def test_empty_pools_still_return_fixed_caption(self, fake_db, monkeypatch):
+        """Entry point #4: no active hooks/playback links in the Admin
+        Dashboard -- the endpoint must still return ok:True with the fixed
+        caption (never the 503 'no playback available' error this bug used
+        to trigger)."""
         fn = _load_endpoint(monkeypatch, invite_link="https://t.me/+onlyLinkHash")
 
         result = fn()
@@ -129,33 +156,43 @@ class TestApiReferralShareContent:
         assert payload["message"].strip() != ""
         assert "None" not in payload["message"]
         assert "\n\n\n" not in payload["message"]
-        assert payload["message"].endswith("https://t.me/+onlyLinkHash")
         assert payload["invite_link"] == "https://t.me/+onlyLinkHash"
-        assert payload["hook_text"] is None
-        assert payload["playback_url"] is None
+        self._assert_fixed_caption(payload["message"], "https://t.me/+onlyLinkHash")
         # share_text (used for the Telegram share/url button) must also be
-        # non-empty and consistent with the same builder.
+        # non-empty, consistent, and never carry the link a second time.
         assert payload["share_text"].strip() != ""
         assert "https://t.me/+onlyLinkHash" not in payload["share_text"]
 
-    def test_no_active_playback_only_omits_playback_section(self, fake_db, monkeypatch):
-        _hook(fake_db, "Hook only")
-        fn = _load_endpoint(monkeypatch, invite_link="https://t.me/+hookOnlyHash")
+    def test_generation_never_consumes_hook_or_playback_pool_counters(self, fake_db, monkeypatch):
+        """The Mini App must never draw from the Creator Share Centre's
+        rotating pools -- not even silently in the background -- so their
+        usage counters/selection state stay untouched by Mini App traffic."""
+        hook_id = _hook(fake_db, "Hook!")
+        playback_id = _playback(fake_db, "Play00001")
+        fn = _load_endpoint(monkeypatch, invite_link="https://t.me/+counterHash")
 
-        result = fn()
-        payload = result[0] if isinstance(result, tuple) else result
-        assert payload["ok"] is True
-        assert payload["hook_text"] == "Hook only"
-        assert payload["playback_url"] is None
-        assert "rx.apreplay.com" not in payload["message"]
+        fn()
 
-    def test_no_active_hook_only_omits_hook_section(self, fake_db, monkeypatch):
-        _playback(fake_db, "Play00002")
-        fn = _load_endpoint(monkeypatch, invite_link="https://t.me/+pbOnlyHash")
+        hook_doc = fake_db["caption_hooks"].find_one({"_id": hook_id})
+        playback_doc = fake_db["playback_pool"].find_one({"_id": playback_id})
+        assert hook_doc["times_selected"] == 0
+        assert hook_doc["last_selected_at"] is None
+        assert playback_doc["times_selected"] == 0
+        assert playback_doc["last_selected_at"] is None
 
-        result = fn()
-        payload = result[0] if isinstance(result, tuple) else result
-        assert payload["ok"] is True
-        assert payload["hook_text"] is None
-        assert payload["playback_url"] == rsc.canonical_playback_url("Play00002")
-        assert payload["message"].startswith(rsc.canonical_playback_url("Play00002"))
+    def test_share_generations_record_tagged_with_miniapp_source(self, fake_db, monkeypatch):
+        fn = _load_endpoint(monkeypatch, invite_link="https://t.me/+sourceHash")
+        fn()
+
+        doc = fake_db["share_generations"].find_one({"invite_link": "https://t.me/+sourceHash"})
+        assert doc is not None
+        assert doc["generated_by"] == "miniapp_general_share"
+        assert doc["hook_id"] is None
+        assert doc["playback_record_id"] is None
+
+    def test_no_hardcoded_referral_url_in_module(self):
+        """The Mini App output must always be the backend-provided
+        referral_url -- never a hardcoded/example link substituted in."""
+        source = Path("referral_share_content.py").read_text(encoding="utf-8")
+        assert "t.me/+" not in source
+        assert "https://t.me/joinchat" not in source
