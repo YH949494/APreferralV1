@@ -2663,6 +2663,9 @@ app.register_blueprint(referral_share_content_bp)
 from creator_share_centre import creator_share_bp
 app.register_blueprint(creator_share_bp)
 
+from referral_engagement import referral_engagement_bp
+app.register_blueprint(referral_engagement_bp)
+
 from community_centre import community_centre_bp, ensure_community_centre_indexes
 app.register_blueprint(community_centre_bp)
 try:

@@ -243,6 +243,55 @@
     });
   }
 
+  // Share Engagement tracking (referral_engagement.py). Best-effort,
+  // fire-and-forget: a tracking failure must never block or delay the
+  // underlying creator action (generate/copy/share).
+  var ENGAGEMENT_SESSION_KEY = "referral_engagement_session_id";
+  function getEngagementSessionId() {
+    var sid = null;
+    try { sid = sessionStorage.getItem(ENGAGEMENT_SESSION_KEY); } catch (e) {}
+    if (!sid) {
+      sid = (window.crypto && window.crypto.randomUUID && window.crypto.randomUUID()) ||
+        ("sess_" + Date.now() + "_" + Math.random().toString(36).slice(2));
+      try { sessionStorage.setItem(ENGAGEMENT_SESSION_KEY, sid); } catch (e) {}
+    }
+    return sid;
+  }
+
+  function trackEngagementEvent(event, opts) {
+    opts = opts || {};
+    try {
+      apiPost("/api/referral-engagement/events", {
+        event: event,
+        source: "creator_centre",
+        surface: opts.surface || "share_package",
+        session_id: getEngagementSessionId(),
+        referral_link_id: opts.referralLinkId || null,
+        metadata: opts.metadata || {},
+      }).catch(function (err) { console.warn("[REFERRAL_ENGAGEMENT][SEND_FAILED]", err); });
+    } catch (e) {
+      console.warn("[REFERRAL_ENGAGEMENT][SEND_FAILED]", e);
+    }
+  }
+
+  var referralSectionViewTracked = false;
+  function setupReferralSectionViewTracking() {
+    if (typeof IntersectionObserver !== "function") return;
+    var el = els.appShell;
+    if (!el) return;
+    var observer = new IntersectionObserver(function (entries) {
+      for (var i = 0; i < entries.length; i++) {
+        if (entries[i].isIntersecting && !referralSectionViewTracked) {
+          referralSectionViewTracked = true;
+          trackEngagementEvent("referral_section_viewed", { surface: "share_package" });
+          observer.disconnect();
+          break;
+        }
+      }
+    }, { threshold: 0.5 });
+    observer.observe(el);
+  }
+
   var els = {
     initialLoading: document.getElementById("initial-loading"),
     accessDenied: document.getElementById("access-denied"),
@@ -346,6 +395,7 @@
 
   function generatePackage() {
     if (generating) return;
+    trackEngagementEvent("referral_cta_clicked", { surface: "share_package" });
     setGenerating(true);
     apiPost("/api/creator/share/generate", { platform: detectPlatform() })
       .then(function (res) {
@@ -365,6 +415,10 @@
           return;
         }
         renderPackage(res.body);
+        trackEngagementEvent("referral_link_generated", {
+          surface: "generated_post",
+          referralLinkId: res.body.package_id || null,
+        });
         scrollPackageIntoView();
         performCopy(res.body).then(function (copied) {
           if (copied) {
@@ -439,6 +493,10 @@
       apiPost("/api/creator/share/" + encodeURIComponent(targetPkg.package_id) + "/copied", {
         platform: detectPlatform(),
       }).catch(function () {});
+      trackEngagementEvent("referral_copy_clicked", {
+        surface: "copy_post",
+        referralLinkId: targetPkg.package_id || null,
+      });
       return isCurrent;
     });
   }
@@ -501,7 +559,12 @@
       opened = false;
     }
 
-    if (!opened) {
+    if (opened) {
+      trackEngagementEvent("referral_share_clicked", {
+        surface: "share_telegram",
+        referralLinkId: currentPackage.package_id || null,
+      });
+    } else {
       els.shareStatus.textContent = "Couldn't open Telegram. Please try again.";
     }
   }
@@ -527,6 +590,7 @@
         return;
       }
       els.appShell.classList.remove("hidden");
+      setupReferralSectionViewTracking();
     }).catch(function () {
       els.initialLoading.classList.add("hidden");
       showAccessDenied("invalid_telegram_auth");
