@@ -6494,7 +6494,7 @@ def api_referral_share_content():
 
         from referral_share_content import (
             MINIAPP_SHARE_SOURCE,
-            build_referral_share_caption,
+            build_miniapp_referral_text,
             generate_share_package,
         )
 
@@ -6517,10 +6517,8 @@ def api_referral_share_content():
 
         # share_text mirrors "message" minus the trailing link line, for
         # surfaces (Telegram's share/url button) that pass the link via a
-        # separate url param -- see build_referral_share_caption().
-        share_text = build_referral_share_caption(
-            hook_text=None,
-            playback_url=None,
+        # separate url param -- see build_miniapp_referral_text().
+        share_text = build_miniapp_referral_text(
             referral_url=result["invite_link"],
             include_referral_link=False,
         )
@@ -6532,6 +6530,8 @@ def api_referral_share_content():
                 "message": result["message"],
                 "share_text": share_text,
                 "invite_link": result["invite_link"],
+                "referral_link": result["invite_link"],
+                "generated_by": MINIAPP_SHARE_SOURCE,
             }
         )
     except Exception:
@@ -8285,19 +8285,31 @@ async def ensure_user_initialized_for_referral(update: Update, context: ContextT
 
 
 async def send_referral_link_with_share_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Sends the user's Share Content package (caption hook + playback URL +
-    canonical invite link) with a single Share button. Used exclusively by
-    the /start?start=referral deep-link route; does not send the normal
-    /start welcome message or keyboard.
+    """Sends the user's Mini App referral package (fixed five-benefit
+    caption + canonical invite link) with a single Share button. Used
+    exclusively by the /start?start=referral deep-link route; does not send
+    the normal /start welcome message or keyboard.
+
+    This is a Mini App surface, not Creator Share Centre: it must never
+    draw from the hook/playback content pools (include_content_pools=False)
+    and must render through the canonical build_miniapp_referral_text() --
+    never build_referral_share_caption() with real hook/playback values,
+    which would leak Creator-style content into this plain referral reply.
     """
     user = update.effective_user
     uid = user.id
     username = user.username or ""
 
-    from referral_share_content import generate_share_package
+    from referral_share_content import MINIAPP_SHARE_SOURCE, generate_share_package
 
     try:
-        result = await asyncio.to_thread(generate_share_package, uid, username)
+        result = await asyncio.to_thread(
+            generate_share_package,
+            uid,
+            username,
+            generated_by=MINIAPP_SHARE_SOURCE,
+            include_content_pools=False,
+        )
     except Exception:
         logger.exception("[REFERRAL][DEEPLINK_FAILED] uid=%s", uid)
         await safe_reply_text(
@@ -8332,11 +8344,9 @@ async def send_referral_link_with_share_button(update: Update, context: ContextT
     # So the link goes only in the url param, and text carries the same
     # shared caption template *without* the trailing link line, otherwise the
     # invite link would appear twice in the share sheet.
-    from referral_share_content import build_referral_share_caption
+    from referral_share_content import build_miniapp_referral_text
 
-    share_text = build_referral_share_caption(
-        hook_text=result["hook_text"],
-        playback_url=result["playback_url"],
+    share_text = build_miniapp_referral_text(
         referral_url=invite_link,
         include_referral_link=False,
     )
@@ -8349,9 +8359,7 @@ async def send_referral_link_with_share_button(update: Update, context: ContextT
         [[InlineKeyboardButton("📤 Share Referral Link", url=share_url)]]
     )
 
-    caption_html = build_referral_share_caption(
-        hook_text=result["hook_text"],
-        playback_url=result["playback_url"],
+    caption_html = build_miniapp_referral_text(
         referral_url=invite_link,
         format_mode="telegram_html",
     )
@@ -8975,9 +8983,13 @@ _REFERRAL_LINK_GENERATION_COOLDOWN_SECONDS = 5
 
 async def generate_referral_link_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handles the '🔗 Generate My Referral Link' / Copy-Share button on /start:
-    assembles the Share Content package (caption hook + playback URL + the
-    user's canonical referral invite link) and replies in-chat with the
+    assembles the Mini App referral package (fixed five-benefit caption +
+    the user's canonical referral invite link) and replies in-chat with the
     exact copyable message, plus a Share button prefilled with that message.
+
+    This is a Mini App surface, not Creator Share Centre: it must never
+    draw from the hook/playback content pools (include_content_pools=False)
+    and must render through the canonical build_miniapp_referral_text().
     """
     query = update.callback_query
     await query.answer()
@@ -9003,10 +9015,16 @@ async def generate_referral_link_callback(update: Update, context: ContextTypes.
         return
     _referral_link_generation_last_attempt[uid] = now
 
-    from referral_share_content import generate_share_package
+    from referral_share_content import MINIAPP_SHARE_SOURCE, generate_share_package
 
     try:
-        result = await asyncio.to_thread(generate_share_package, uid, username)
+        result = await asyncio.to_thread(
+            generate_share_package,
+            uid,
+            username,
+            generated_by=MINIAPP_SHARE_SOURCE,
+            include_content_pools=False,
+        )
     except Exception as e:
         logger.error("[REFERRAL][START_CALLBACK_FAILED] uid=%s error=%s", uid, type(e).__name__)
         await safe_send_message(
@@ -9048,11 +9066,9 @@ async def generate_referral_link_callback(update: Update, context: ContextTypes.
     # (url first, then text) — so the link goes only in the url param, and
     # text carries the same shared caption template *without* the trailing
     # link line, otherwise the invite link would appear twice in the share sheet.
-    from referral_share_content import build_referral_share_caption
+    from referral_share_content import build_miniapp_referral_text
 
-    share_text = build_referral_share_caption(
-        hook_text=result["hook_text"],
-        playback_url=result["playback_url"],
+    share_text = build_miniapp_referral_text(
         referral_url=invite_link,
         include_referral_link=False,
     )
@@ -9061,9 +9077,7 @@ async def generate_referral_link_callback(update: Update, context: ContextTypes.
         [[InlineKeyboardButton("📤 Share Referral Link", url=f"https://t.me/share/url?{share_params}")]]
     )
 
-    message_html = build_referral_share_caption(
-        hook_text=result["hook_text"],
-        playback_url=result["playback_url"],
+    message_html = build_miniapp_referral_text(
         referral_url=invite_link,
         format_mode="telegram_html",
     )

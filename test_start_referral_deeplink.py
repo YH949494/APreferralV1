@@ -124,16 +124,18 @@ def deeplink_env(monkeypatch):
     state = {
         "result": {
             "ok": True,
-            "message": "🎬 Fresh replays just dropped!\nhttps://cdn.example.com/playback/abc\n\nMore player replays and rewards inside AdvantPlay:\n👉 https://t.me/+uniqueReferralHash",
+            "message": "irrelevant -- the deep-link route renders through build_miniapp_referral_text(), not this field",
             "invite_link": "https://t.me/+uniqueReferralHash",
-            "playback_url": "https://cdn.example.com/playback/abc",
-            "hook_text": "🎬 Fresh replays just dropped!",
+            "playback_url": None,
+            "hook_text": None,
         },
         "raise_error": None,
     }
+    generate_calls = []
 
-    def fake_generate_share_package(user_id, username=""):  # noqa: ARG001
+    def fake_generate_share_package(user_id, username="", **kwargs):
         calls["generate"] += 1
+        generate_calls.append({"user_id": user_id, "username": username, **kwargs})
         if state["raise_error"] is not None:
             raise state["raise_error"]
         return state["result"]
@@ -167,6 +169,7 @@ def deeplink_env(monkeypatch):
     fn._replies = replies
     fn._state = state
     fn._env = env
+    fn._generate_calls = generate_calls
     return fn
 
 
@@ -196,9 +199,13 @@ def test_new_user_referral_deeplink_calls_share_package_generator(deeplink_env):
 
 
 def test_new_user_referral_deeplink_returns_share_package_and_share_button(deeplink_env):
+    # Hook/playback populated on the (mocked) share package -- as they would
+    # be with live content pools -- must never leak into this Mini App
+    # surface. See test_referral_deeplink_never_renders_hook_or_playback for
+    # the direct regression check.
     deeplink_env._state["result"] = {
         "ok": True,
-        "message": "🎬 New hook!\nhttps://cdn.example.com/playback/xyz\n\nMore player replays and rewards inside AdvantPlay:\n👉 https://t.me/+brandNewHash",
+        "message": "irrelevant -- rendered via build_miniapp_referral_text(), not this field",
         "invite_link": "https://t.me/+brandNewHash",
         "playback_url": "https://cdn.example.com/playback/xyz",
         "hook_text": "🎬 New hook!",
@@ -209,11 +216,10 @@ def test_new_user_referral_deeplink_returns_share_package_and_share_button(deepl
     assert len(deeplink_env._replies) == 1
     reply = deeplink_env._replies[0]
     assert "https://t.me/+brandNewHash" in reply["text"]
-    assert "🎬 New hook!" in reply["text"]
-    assert "https://cdn.example.com/playback/xyz" in reply["text"]
+    assert "🎬 New hook!" not in reply["text"]
+    assert "https://cdn.example.com/playback/xyz" not in reply["text"]
 
-    # Only the benefits section is wrapped in a blockquote; hook, playback
-    # link, and the trailing referral CTA/URL must sit outside it.
+    # Only the benefits section is wrapped in a blockquote.
     assert reply["text"].count("<blockquote>") == 1
     assert reply["text"].count("</blockquote>") == 1
     quote_start = reply["text"].index("<blockquote>")
@@ -223,11 +229,9 @@ def test_new_user_referral_deeplink_returns_share_package_and_share_button(deepl
     assert "🎟️ FREE Welcome Voucher — No deposit required" in quoted
     assert "⚡️ Daily voucher drops" in quoted
     assert quoted.index("FREE Welcome Voucher") < quoted.index("Daily voucher drops")
-    assert "🎬 New hook!" not in quoted
-    assert "https://cdn.example.com/playback/xyz" not in quoted
-    assert "https://t.me/+brandNewHash" not in quoted
-    assert "🎬 New hook!" in reply["text"][:quote_start]
     assert "https://t.me/+brandNewHash" in reply["text"][quote_end:]
+    # Nothing precedes the blockquote -- no hook/playback/CTA line above it.
+    assert reply["text"][:quote_start] == ""
 
     assert reply.get("parse_mode") == ParseMode.HTML
     assert reply.get("disable_web_page_preview") is not True
@@ -235,6 +239,7 @@ def test_new_user_referral_deeplink_returns_share_package_and_share_button(deepl
     # Old hard-coded caption must never appear.
     assert "Daily XP rewards" not in reply["text"]
     assert "Active players win more" not in reply["text"]
+    assert "Want more replays like this—and rewards too?" not in reply["text"]
 
     buttons = _flat_buttons(reply["reply_markup"])
     share_btns = [b for b in buttons if b.text == "📤 Share Referral Link"]
@@ -280,10 +285,10 @@ def test_existing_user_referral_deeplink_returns_link_and_share_button(deeplink_
     assert params["url"] == ["https://t.me/+existingUserHash"]
 
 
-def test_referral_deeplink_share_button_encodes_hook_and_playback(deeplink_env):
+def test_referral_deeplink_share_button_never_encodes_hook_or_playback(deeplink_env):
     deeplink_env._state["result"] = {
         "ok": True,
-        "message": "hook-text\nhttps://cdn.example.com/pb\n\nMore player replays and rewards inside AdvantPlay:\n👉 https://t.me/+shareCaptionHash",
+        "message": "irrelevant -- rendered via build_miniapp_referral_text(), not this field",
         "invite_link": "https://t.me/+shareCaptionHash",
         "playback_url": "https://cdn.example.com/pb",
         "hook_text": "hook-text",
@@ -296,9 +301,10 @@ def test_referral_deeplink_share_button_encodes_hook_and_playback(deeplink_env):
     share_btn = next(b for b in buttons if b.text == "📤 Share Referral Link")
     params = parse_qs(urlparse(share_btn.url).query)
 
-    assert "hook-text" in params["text"][0]
-    assert "https://cdn.example.com/pb" in params["text"][0]
+    assert "hook-text" not in params["text"][0]
+    assert "https://cdn.example.com/pb" not in params["text"][0]
     assert params["url"] == ["https://t.me/+shareCaptionHash"]
+    assert "👋 Welcome to AdvantPlay Community!" in params["text"][0]
 
     # The link must not appear inside the "text" param -- Telegram's
     # share/url endpoint already appends the "url" param on its own, so
@@ -460,3 +466,54 @@ def test_non_referral_payload_falls_through_to_normal_start(deeplink_env):
     button_texts = {b.text for b in buttons}
     assert "📢 Join Official Channel" in button_texts
     assert "🚀 Open AdvantPlay Mini-App" in button_texts
+
+
+# ---------------------------------------------------------------------------
+# Regression: production bug where /start referral rendered Creator-style
+# content (hook + playback URL + "Want more replays like this—and rewards
+# too?") glued onto the Mini App's five-benefit block. Reproduces the bug by
+# having the (mocked) share package return active hook/playback content --
+# exactly like it would with live hook/playback pools populated -- and
+# asserts none of it reaches the sent message or the Telegram Share button.
+# ---------------------------------------------------------------------------
+
+def test_referral_deeplink_never_renders_hook_or_playback(deeplink_env):
+    deeplink_env._state["result"] = {
+        "ok": True,
+        "message": "Don't skip the ending 👇\nhttps://rx.apreplay.com/Abc12345\n\n"
+        "Want more replays like this—and rewards too?\n[full Mini App benefit caption]\n"
+        "https://t.me/+regressionHash",
+        "invite_link": "https://t.me/+regressionHash",
+        "playback_url": "https://rx.apreplay.com/Abc12345",
+        "hook_text": "Don't skip the ending 👇",
+    }
+    update = _FakeUpdate(user_id=220)
+    asyncio.run(deeplink_env(update, _FakeContext()))
+
+    reply = deeplink_env._replies[0]
+    buttons = _flat_buttons(reply["reply_markup"])
+    share_btn = next(b for b in buttons if b.text == "📤 Share Referral Link")
+    share_text = parse_qs(urlparse(share_btn.url).query)["text"][0]
+
+    for surface_text in (reply["text"], share_text):
+        assert "Don't skip the ending" not in surface_text
+        assert "rx.apreplay.com" not in surface_text
+        assert "Want more replays like this—and rewards too?" not in surface_text
+
+    assert "👋 Welcome to AdvantPlay Community!" in reply["text"]
+    assert "🎟️ FREE Welcome Voucher — No deposit required" in reply["text"]
+    assert "⚡️ Daily voucher drops" in reply["text"]
+    assert "🎁 Bonus campaigns" in reply["text"]
+    assert "👑 VIP-only announcements" in reply["text"]
+    assert "🏆 Weekly ranking rewards" in reply["text"]
+    assert reply["text"].count("https://t.me/+regressionHash") == 1
+
+
+def test_referral_deeplink_requests_share_package_without_creator_content_pools(deeplink_env):
+    update = _FakeUpdate(user_id=221)
+    asyncio.run(deeplink_env(update, _FakeContext()))
+
+    assert len(deeplink_env._generate_calls) == 1
+    call = deeplink_env._generate_calls[0]
+    assert call["include_content_pools"] is False
+    assert call["generated_by"] == rsc.MINIAPP_SHARE_SOURCE
