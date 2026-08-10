@@ -584,6 +584,166 @@ def create_batch(
     }
 
 
+def add_codes_to_batch(db, batch_id, *, admin_identity: str, codes, now_utc: datetime | None = None) -> dict:
+    """Top up an existing batch with additional voucher codes without
+    touching its schedule, pool, or previously-inserted rows. Reuses the
+    exact same normalize/insert/duplicate-handling path as ``create_batch``
+    so this never becomes a parallel voucher-writing implementation.
+    """
+    now_utc = now_utc or datetime.now(timezone.utc)
+    oid = _as_object_id(batch_id)
+    if oid is None:
+        return _fail("batch_not_found", "Batch not found.")
+    batch = db.affiliate_voucher_batches.find_one({"_id": oid})
+    if not batch:
+        return _fail("batch_not_found", "Batch not found.")
+
+    if bool(batch.get("distribution_disabled")):
+        return _fail("batch_disabled", "This batch is disabled. Re-enable it before adding codes.")
+    upload_status = batch.get("upload_status") or "ready"
+    if upload_status != "ready":
+        return _fail(
+            "batch_not_ready",
+            f"This batch is currently '{upload_status}' and cannot accept new codes. Reconcile or wait for the upload to finish first.",
+        )
+
+    unique_codes, duplicate_in_upload, invalid_count = normalize_voucher_codes(codes)
+    submitted = len(unique_codes) + duplicate_in_upload + invalid_count
+    if submitted == 0:
+        return _fail("no_codes", "No voucher codes were provided.")
+    if not unique_codes:
+        return _fail("no_codes", "No valid voucher codes were provided.")
+
+    pool_id = batch["pool_id"]
+    batch_name = batch["batch_name"]
+    starts_at = batch["starts_at"]
+    ends_at = batch["ends_at"]
+
+    logger.info(
+        "[AFF_VOUCHER_BATCH][ADD_CODES_START] admin=%s batch_id=%s pool_id=%s submitted=%s",
+        admin_identity, oid, pool_id, submitted,
+    )
+
+    inserted = 0
+    duplicate_in_db = 0
+    for code in unique_codes:
+        row = {
+            "pool_id": pool_id,
+            "code": code,
+            "batch_id": oid,
+            "batch_name": batch_name,
+            "starts_at": starts_at,
+            "ends_at": ends_at,
+            "status": "available",
+            "created_at": now_utc,
+            "distribution_disabled": False,
+        }
+        try:
+            db.voucher_pools.insert_one(row)
+            inserted += 1
+        except Exception as exc:
+            if _is_duplicate_key_error(exc):
+                duplicate_in_db += 1
+                continue
+            # A genuine write failure partway through the top-up: stop here,
+            # keep whatever already-inserted rows exist (never overwritten or
+            # rolled back — they're valid, committed vouchers on this same
+            # batch), and refresh the batch's cached counts to the
+            # authoritative DB state before reporting the failure.
+            error_code = exc.__class__.__name__
+            live = _hydrate_live_counts(db, batch)
+            db.affiliate_voucher_batches.update_one(
+                {"_id": oid},
+                {
+                    "$set": {
+                        "available_count": live["available_count"],
+                        "issued_count": live["issued_count"],
+                        "uploaded_count": live["available_count"] + live["issued_count"],
+                    },
+                    "$inc": {
+                        "submitted_count": submitted,
+                        "inserted_count": inserted,
+                        "duplicate_count": duplicate_in_upload + duplicate_in_db,
+                        "invalid_count": invalid_count,
+                    },
+                },
+            )
+            logger.error(
+                "[AFF_VOUCHER_BATCH][ADD_CODES_FAILED] admin=%s batch_id=%s pool_id=%s inserted_so_far=%s reason=insert_error err=%s",
+                admin_identity, oid, pool_id, inserted, error_code,
+            )
+            return {
+                "ok": False,
+                "code": "database_error",
+                "message": "A database error occurred while adding codes. Codes already inserted before the failure remain saved; please retry with the remaining codes.",
+                "submitted_count": submitted,
+                "inserted_count": inserted,
+                "duplicate_count": duplicate_in_upload + duplicate_in_db,
+                "invalid_count": invalid_count,
+            }
+
+    total_duplicates = duplicate_in_upload + duplicate_in_db
+
+    # Authoritative counts, never a blindly-incremented frontend number: the
+    # same live-recount used by list/detail/reconcile, re-derived from the
+    # actual voucher_pools rows for this batch after the inserts above.
+    live = _hydrate_live_counts(db, batch)
+    available_count = int(live["available_count"])
+    issued_count = int(live["issued_count"])
+    uploaded_count = available_count + issued_count
+
+    db.affiliate_voucher_batches.update_one(
+        {"_id": oid},
+        {
+            "$set": {
+                "available_count": available_count,
+                "issued_count": issued_count,
+                "uploaded_count": uploaded_count,
+            },
+            "$inc": {
+                "submitted_count": submitted,
+                "inserted_count": inserted,
+                "duplicate_count": total_duplicates,
+                "invalid_count": invalid_count,
+            },
+        },
+    )
+
+    if inserted == 0:
+        logger.warning(
+            "[AFF_VOUCHER_BATCH][ADD_CODES_ZERO] admin=%s batch_id=%s pool_id=%s submitted=%s duplicates=%s invalid=%s",
+            admin_identity, oid, pool_id, submitted, total_duplicates, invalid_count,
+        )
+        return {
+            "ok": False,
+            "code": "duplicate_codes" if total_duplicates and not invalid_count else "no_codes",
+            "message": f"No new codes added. All {submitted} submitted codes already exist." if total_duplicates
+                       else "No new voucher codes were inserted — all submitted codes were invalid.",
+            "submitted_count": submitted,
+            "inserted_count": 0,
+            "duplicate_count": total_duplicates,
+            "invalid_count": invalid_count,
+            "available_count": available_count,
+            "uploaded_count": uploaded_count,
+        }
+
+    logger.info(
+        "[AFF_VOUCHER_BATCH][ADD_CODES_OK] admin=%s batch_id=%s pool_id=%s submitted=%s inserted=%s duplicates=%s invalid=%s",
+        admin_identity, oid, pool_id, submitted, inserted, total_duplicates, invalid_count,
+    )
+    updated = db.affiliate_voucher_batches.find_one({"_id": oid})
+    return {
+        "ok": True,
+        "submitted_count": submitted,
+        "inserted_count": inserted,
+        "duplicate_count": total_duplicates,
+        "invalid_count": invalid_count,
+        "available_count": available_count,
+        "uploaded_count": uploaded_count,
+        "batch": _serialize_batch(updated, now_utc=now_utc),
+    }
+
+
 def _pool_entered_scheduled_mode(db, *, pool_id: str, reference_utc: datetime) -> bool:
     """True once the earliest batch ever created for this pool (T1-T4 or
     WELCOME, any status) had already started as of ``reference_utc`` — the
@@ -830,7 +990,14 @@ def _status_response(result: dict):
     if result.get("ok"):
         return jsonify(result), 200
     code = str(result.get("code") or "")
-    status_code = 404 if code == "batch_not_found" else 409 if code == "batch_window_overlap" else 400
+    if code == "batch_not_found":
+        status_code = 404
+    elif code in ("batch_window_overlap", "batch_disabled", "batch_not_ready"):
+        status_code = 409
+    elif code == "database_error":
+        status_code = 500
+    else:
+        status_code = 400
     return jsonify(result), status_code
 
 
@@ -907,6 +1074,18 @@ def register_routes(require_admin_from_query, admin_identity_fn, db_ref):
             )
             return _status_response(result)
         result = update_batch(db_ref(), batch_id, admin_identity=admin_identity_fn(), updates=data)
+        return _status_response(result)
+
+    @affiliate_voucher_batches_bp.post("/api/admin/affiliate-voucher-batches/<batch_id>/add-codes")
+    def api_add_codes_to_affiliate_voucher_batch(batch_id):
+        ok, err = require_admin_from_query()
+        if not ok:
+            msg, code = err
+            return jsonify({"ok": False, "code": "unauthorized", "message": msg}), code
+        data = request.get_json(silent=True) or {}
+        result = add_codes_to_batch(
+            db_ref(), batch_id, admin_identity=admin_identity_fn(), codes=data.get("codes")
+        )
         return _status_response(result)
 
     @affiliate_voucher_batches_bp.post("/api/admin/affiliate-voucher-batches/<batch_id>/reconcile")

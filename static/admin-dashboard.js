@@ -5988,6 +5988,9 @@
     active_batch_edit_restricted: "This batch already has issued vouchers, so its schedule can no longer be changed. You can still rename it, edit notes, or disable distribution.",
     upload_failed: "The upload failed partway through and was marked Failed for review. Use Reconcile to check for any inserted codes, or re-upload.",
     target_batch_failed_cannot_enable: "This batch failed to upload and cannot be re-enabled. Use Reconcile or re-upload instead.",
+    batch_disabled: "This batch is disabled. Re-enable it before adding codes.",
+    batch_not_ready: "This batch is not ready to accept new codes yet (still uploading or failed). Reconcile it first.",
+    database_error: "A database error occurred while adding codes. Codes already inserted before the failure remain saved; please retry with the remaining codes.",
   };
 
   function abErrorMessage(d) {
@@ -6182,6 +6185,55 @@
       .catch(function (e) { toast("❌ " + e.message, "error"); });
   }
 
+  function abOpenAddCodesModal(batchId) {
+    var item = abItemsCache[batchId];
+    if (!item) return;
+    var overlay = document.createElement("div");
+    overlay.className = "modal-overlay";
+    overlay.innerHTML =
+      '<div class="modal-box" style="max-width:520px;">' +
+      "<h3>+ Add Codes — " + esc(item.batch_name) + "</h3>" +
+      '<p class="sub">Pool: ' + esc(item.pool_id) + " · Available: " + fmt(item.available_count) + " · Uploaded: " + fmt(item.uploaded_count) + "</p>" +
+      '<label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">Voucher Codes</label>' +
+      '<textarea id="ab-addcodes-codes" rows="8" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--card-bg);color:var(--text);box-sizing:border-box;resize:vertical;font-family:monospace;"></textarea>' +
+      '<p class="sub" style="margin-top:4px;">One code per line, comma-separated, or pasted CSV column</p>' +
+      '<div id="ab-addcodes-error" style="display:none;background:rgba(255,107,107,0.12);border:1px solid var(--bad);color:var(--bad);border-radius:8px;padding:8px 12px;font-size:12px;margin-top:8px;"></div>' +
+      '<div class="modal-actions">' +
+      '<button class="btn" id="ab-addcodes-cancel">Cancel</button>' +
+      '<button class="btn primary" id="ab-addcodes-submit">Add Codes</button>' +
+      "</div></div>";
+    document.body.appendChild(overlay);
+    function done() { overlay.remove(); }
+    overlay.querySelector("#ab-addcodes-cancel").addEventListener("click", done);
+    overlay.addEventListener("click", function (e) { if (e.target === overlay) done(); });
+
+    var errEl = overlay.querySelector("#ab-addcodes-error");
+    function showError(msg) { errEl.textContent = msg; errEl.style.display = "block"; }
+
+    var submitBtn = overlay.querySelector("#ab-addcodes-submit");
+    submitBtn.addEventListener("click", function () {
+      var codesText = overlay.querySelector("#ab-addcodes-codes").value || "";
+      var parsed = abParseCodesPreview(codesText);
+      if (!parsed.unique.length) { showError("No valid voucher codes were provided. Paste at least one code."); return; }
+      errEl.style.display = "none";
+      if (!btnStart(submitBtn, "Adding…")) return;
+      apiPostJson("/api/admin/affiliate-voucher-batches/" + encodeURIComponent(batchId) + "/add-codes", { codes: codesText })
+        .then(function (res) {
+          btnStop(submitBtn);
+          if (!res.ok || res.d.ok === false) { showError(abErrorMessage(res.d)); return; }
+          var d = res.d;
+          done();
+          toast(
+            "✅ " + fmt(d.inserted_count) + " codes added to " + item.batch_name + "." +
+            (d.duplicate_count ? " " + fmt(d.duplicate_count) + " duplicates skipped." : ""),
+            "success"
+          );
+          loadAffiliateBatches(true);
+        })
+        .catch(function (e) { btnStop(submitBtn); showError("Network error: " + e.message + " — please retry."); });
+    });
+  }
+
   function abStatusPillClass(status) {
     return {
       active: "active", scheduled: "upcoming", exhausted: "paused", expired: "expired",
@@ -6271,6 +6323,7 @@
         '<td>' + esc(abTimeRemaining(item, nowIso)) + '</td>' +
         '<td>' +
           '<button class="btn" data-ab-view="' + esc(item.batch_id) + '">View</button> ' +
+          '<button class="btn" data-ab-addcodes="' + esc(item.batch_id) + '">+ Add Codes</button> ' +
           '<button class="btn" data-ab-edit="' + esc(item.batch_id) + '">Edit schedule</button> ' +
           (needsReconcile ? '<button class="btn" data-ab-reconcile="' + esc(item.batch_id) + '">Reconcile</button> ' : '') +
           (item.status === "failed"
@@ -6329,6 +6382,8 @@
     $("#ab-body").addEventListener("click", function (e) {
       var viewBtn = e.target.closest("[data-ab-view]");
       if (viewBtn) { abViewBatch(viewBtn.dataset.abView); return; }
+      var addCodesBtn = e.target.closest("[data-ab-addcodes]");
+      if (addCodesBtn) { abOpenAddCodesModal(addCodesBtn.dataset.abAddcodes); return; }
       var editBtn = e.target.closest("[data-ab-edit]");
       if (editBtn) { var item = abItemsCache[editBtn.dataset.abEdit]; if (item) abFillFormForEdit(item); return; }
       var disableBtn = e.target.closest("[data-ab-disable]");
