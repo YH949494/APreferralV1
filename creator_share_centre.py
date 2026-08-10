@@ -66,6 +66,7 @@ logger = logging.getLogger(__name__)
 creator_share_bp = Blueprint("creator_share_centre", __name__)
 
 ALLOWED_PLATFORMS = {"generic", "whatsapp", "facebook", "x", "telegram"}
+ALLOWED_COPY_METHODS = {"auto", "manual"}
 CREATOR_STATUSES = {"active", "suspended", "removed"}
 
 GENERATE_HOURLY_LIMIT = 20
@@ -677,15 +678,28 @@ def creator_share_copied(package_id):
 
     body = request.get_json(force=True, silent=True) or {}
     platform = body.get("platform") if body.get("platform") in ALLOWED_PLATFORMS else "generic"
+    # Optional -- historical/older clients never send this, so existing
+    # copy_count/copied_at semantics must keep working without it. Guard
+    # with isinstance first: an unhashable value (dict/list) would raise on
+    # the "in ALLOWED_COPY_METHODS" membership test below.
+    raw_copy_method = body.get("copy_method")
+    copy_method = raw_copy_method if isinstance(raw_copy_method, str) and raw_copy_method in ALLOWED_COPY_METHODS else None
+
+    set_fields = {"copied_at": now_utc(), "latest_copy_platform": platform}
+    if copy_method:
+        set_fields["latest_copy_method"] = copy_method
 
     updated = _mutate_owned_package(
         package_id,
         user_id,
-        {"$set": {"copied_at": now_utc(), "latest_copy_platform": platform}, "$inc": {"copy_count": 1}},
+        {"$set": set_fields, "$inc": {"copy_count": 1}},
     )
     if not updated:
         return jsonify({"status": "error", "code": "not_found"}), 404
-    logger.info("[CREATOR_SHARE][COPIED] user_id=%s package_id=%s platform=%s", user_id, package_id, platform)
+    logger.info(
+        "[CREATOR_SHARE][COPIED] user_id=%s package_id=%s platform=%s copy_method=%s",
+        user_id, package_id, platform, copy_method or "unknown",
+    )
     return jsonify({"status": "ok"})
 
 

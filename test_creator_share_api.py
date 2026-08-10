@@ -346,6 +346,63 @@ class TestCopyAndShareEvents:
         assert doc["share_click_count"] == 2
         assert doc["share_clicked_at"] is not None
 
+    def test_copy_method_auto_recorded(self, fake_db, monkeypatch, client):
+        package_id = self._generate(fake_db, monkeypatch, client)
+        resp = client.post(
+            f"/api/creator/share/{package_id}/copied?init_data=ok",
+            json={"platform": "generic", "copy_method": "auto"},
+        )
+        assert resp.status_code == 200
+        doc = fake_db["share_generations"].find_one({"package_id": package_id})
+        assert doc["latest_copy_method"] == "auto"
+        assert doc["copy_count"] == 1
+
+    def test_copy_method_manual_recorded(self, fake_db, monkeypatch, client):
+        package_id = self._generate(fake_db, monkeypatch, client)
+        resp = client.post(
+            f"/api/creator/share/{package_id}/copied?init_data=ok",
+            json={"platform": "generic", "copy_method": "manual"},
+        )
+        assert resp.status_code == 200
+        doc = fake_db["share_generations"].find_one({"package_id": package_id})
+        assert doc["latest_copy_method"] == "manual"
+
+    def test_missing_copy_method_stays_valid_and_does_not_break_existing_fields(self, fake_db, monkeypatch, client):
+        # Historical/older clients never send copy_method -- copy_count and
+        # copied_at must keep working exactly as before, with no
+        # latest_copy_method field written at all (never defaulted to
+        # "manual" or any other guessed value).
+        package_id = self._generate(fake_db, monkeypatch, client)
+        resp = client.post(f"/api/creator/share/{package_id}/copied?init_data=ok", json={"platform": "whatsapp"})
+        assert resp.status_code == 200
+        doc = fake_db["share_generations"].find_one({"package_id": package_id})
+        assert doc["copy_count"] == 1
+        assert doc["copied_at"] is not None
+        assert "latest_copy_method" not in doc
+
+    def test_invalid_copy_method_ignored(self, fake_db, monkeypatch, client):
+        package_id = self._generate(fake_db, monkeypatch, client)
+        resp = client.post(
+            f"/api/creator/share/{package_id}/copied?init_data=ok",
+            json={"copy_method": "bogus"},
+        )
+        assert resp.status_code == 200
+        doc = fake_db["share_generations"].find_one({"package_id": package_id})
+        assert "latest_copy_method" not in doc
+
+    def test_non_string_copy_method_ignored_without_500(self, fake_db, monkeypatch, client):
+        # An unhashable copy_method (dict/list) must be silently ignored,
+        # not raise TypeError from the ALLOWED_COPY_METHODS membership check.
+        package_id = self._generate(fake_db, monkeypatch, client)
+        resp = client.post(
+            f"/api/creator/share/{package_id}/copied?init_data=ok",
+            json={"copy_method": {"nested": "object"}},
+        )
+        assert resp.status_code == 200
+        doc = fake_db["share_generations"].find_one({"package_id": package_id})
+        assert "latest_copy_method" not in doc
+        assert doc["copy_count"] == 1
+
     def test_non_owner_receives_404_without_leaking_existence(self, fake_db, monkeypatch, client):
         package_id = self._generate(fake_db, monkeypatch, client, user_id=555)
 
