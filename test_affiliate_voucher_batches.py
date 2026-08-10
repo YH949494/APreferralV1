@@ -9,6 +9,7 @@ conversion, the admin HTTP layer (including auth), and frontend error-code
 mapping / form-state preservation on failure.
 """
 
+import threading
 from datetime import datetime, timezone
 
 import pytest
@@ -477,6 +478,7 @@ class TestFrontendErrorMapping:
             "invalid_pool_id", "no_codes", "duplicate_codes", "unauthorized",
             "batch_not_found", "active_batch_edit_restricted",
             "upload_failed", "target_batch_failed_cannot_enable",
+            "batch_disabled", "batch_not_ready", "database_error", "batch_expired",
         ]
         for code in required_codes:
             assert code in block, f"missing frontend mapping for {code}"
@@ -677,6 +679,374 @@ class TestPartialUploadFailureCleansUpRows:
         during_window = datetime(2026, 8, 15, tzinfo=timezone.utc)
         voucher = ar._claim_voucher_from_pool(db, pool_id="T1", ledger_id="L1", user_id=1, now_utc=during_window)
         assert voucher is None
+
+
+class TestAddCodesToBatch:
+    """+ Add Codes: top up an existing batch without creating a new one,
+    touching its schedule/pool, or resetting existing vouchers.
+    """
+
+    def test_add_unique_codes_to_active_batch(self):
+        db = _db()
+        res = _create(db, codes=["A1", "A2"])
+        batch_id = res["batch"]["batch_id"]
+        result = avb.add_codes_to_batch(db, batch_id, admin_identity="admin1", codes="B1\nB2\nB3")
+        assert result["ok"] is True
+        assert result["submitted_count"] == 3
+        assert result["inserted_count"] == 3
+        assert result["duplicate_count"] == 0
+        assert result["invalid_count"] == 0
+        assert result["available_count"] == 5
+        assert result["uploaded_count"] == 5
+
+    def test_existing_codes_remain_untouched(self):
+        db = _db()
+        res = _create(db, codes=["A1", "A2"])
+        batch_id = res["batch"]["batch_id"]
+        avb.add_codes_to_batch(db, batch_id, admin_identity="admin1", codes="B1")
+        original = db.voucher_pools.find_one({"code": "A1"})
+        assert original is not None
+        assert original["status"] == "available"
+        assert original["batch_id"] == avb._as_object_id(batch_id)
+
+    def test_codes_attach_to_same_batch_id_and_no_new_batch_created(self):
+        db = _db()
+        res = _create(db, codes=["A1"])
+        batch_id = res["batch"]["batch_id"]
+        assert db.affiliate_voucher_batches.count_documents({}) == 1
+        avb.add_codes_to_batch(db, batch_id, admin_identity="admin1", codes="B1,B2")
+        assert db.affiliate_voucher_batches.count_documents({}) == 1
+        new_row = db.voucher_pools.find_one({"code": "B1"})
+        assert new_row["batch_id"] == avb._as_object_id(batch_id)
+        assert new_row["batch_name"] == res["batch"]["batch_name"]
+
+    def test_added_codes_do_not_appear_as_legacy_undated_inventory(self):
+        db = _db()
+        res = _create(db, codes=["A1"])
+        batch_id = res["batch"]["batch_id"]
+        avb.add_codes_to_batch(db, batch_id, admin_identity="admin1", codes="B1")
+        legacy = avb._legacy_unbounded_summary(db, pool_id="T1")
+        assert legacy == [] or all(l["pool_id"] != "T1" for l in legacy)
+        row = db.voucher_pools.find_one({"code": "B1"})
+        assert row.get("batch_id") is not None
+
+    def test_mixed_new_and_duplicate_codes_partial_success(self):
+        db = _db()
+        res = _create(db, codes=["A1", "A2"])
+        batch_id = res["batch"]["batch_id"]
+        result = avb.add_codes_to_batch(db, batch_id, admin_identity="admin1", codes="A1\nB1\nB2")
+        assert result["ok"] is True
+        assert result["submitted_count"] == 3
+        assert result["inserted_count"] == 2
+        assert result["duplicate_count"] == 1
+
+    def test_all_duplicates_inserts_zero(self):
+        db = _db()
+        res = _create(db, codes=["A1", "A2"])
+        batch_id = res["batch"]["batch_id"]
+        result = avb.add_codes_to_batch(db, batch_id, admin_identity="admin1", codes="A1\nA2")
+        assert result["ok"] is False
+        assert result["code"] == "duplicate_codes"
+        assert "already exist" in result["message"]
+        assert result["inserted_count"] == 0
+
+    def test_duplicate_entries_within_submitted_payload_handled_safely(self):
+        db = _db()
+        res = _create(db, codes=["A1"])
+        batch_id = res["batch"]["batch_id"]
+        result = avb.add_codes_to_batch(db, batch_id, admin_identity="admin1", codes="B1\nB1\nB2")
+        assert result["ok"] is True
+        assert result["submitted_count"] == 3
+        assert result["inserted_count"] == 2
+        assert result["duplicate_count"] == 1
+        assert db.voucher_pools.count_documents({"code": "B1"}) == 1
+
+    def test_empty_input_rejected(self):
+        db = _db()
+        res = _create(db, codes=["A1"])
+        batch_id = res["batch"]["batch_id"]
+        result = avb.add_codes_to_batch(db, batch_id, admin_identity="admin1", codes="   \n  ")
+        assert result["ok"] is False
+        assert result["code"] == "no_codes"
+
+    def test_missing_batch_returns_batch_not_found(self):
+        db = _db()
+        result = avb.add_codes_to_batch(db, "000000000000000000000000", admin_identity="admin1", codes="A1")
+        assert result["ok"] is False
+        assert result["code"] == "batch_not_found"
+
+    def test_disabled_batch_cannot_be_topped_up(self):
+        db = _db()
+        res = _create(db, codes=["A1"])
+        batch_id = res["batch"]["batch_id"]
+        avb.set_batch_distribution_disabled(db, batch_id, admin_identity="admin1", disabled=True)
+        result = avb.add_codes_to_batch(db, batch_id, admin_identity="admin1", codes="B1")
+        assert result["ok"] is False
+        assert result["code"] == "batch_disabled"
+        assert db.voucher_pools.count_documents({"code": "B1"}) == 0
+
+    def test_two_sequential_topups_cannot_create_duplicate_voucher_rows(self):
+        """Simulates two concurrent admins racing to top up the same batch
+        with an overlapping code — the DB unique index is the final
+        arbiter, so the second submission must see the code as a duplicate
+        rather than inserting a second row.
+        """
+        db = _db()
+        res = _create(db, codes=["A1"])
+        batch_id = res["batch"]["batch_id"]
+        first = avb.add_codes_to_batch(db, batch_id, admin_identity="admin1", codes="RACE1")
+        second = avb.add_codes_to_batch(db, batch_id, admin_identity="admin2", codes="RACE1")
+        assert first["ok"] is True
+        assert first["inserted_count"] == 1
+        assert second["ok"] is False
+        assert second["duplicate_count"] == 1
+        assert db.voucher_pools.count_documents({"code": "RACE1"}) == 1
+
+    def test_uploaded_and_available_counts_correct_after_topup(self):
+        db = _db()
+        res = _create(db, codes=["A1", "A2"])
+        batch_id = res["batch"]["batch_id"]
+        during_window = datetime(2026, 8, 15, tzinfo=timezone.utc)
+        ar._claim_voucher_from_pool(db, pool_id="T1", ledger_id="L1", user_id=1, now_utc=during_window)
+        result = avb.add_codes_to_batch(db, batch_id, admin_identity="admin1", codes="B1\nB2\nB3", now_utc=during_window)
+        assert result["ok"] is True
+        # 1 issued + (1 remaining original + 3 new) available = 4 available, 5 uploaded total
+        assert result["available_count"] == 4
+        assert result["uploaded_count"] == 5
+        detail = avb.get_batch_detail(db, batch_id, now_utc=during_window)
+        assert detail["available_count"] == 4
+        assert detail["uploaded_count"] == 5
+
+    def test_expired_batch_cannot_be_topped_up(self):
+        db = _db()
+        res = _create(db, codes=["A1"], starts="2026-08-01 00:00:00", ends="2026-08-02 00:00:00")
+        batch_id = res["batch"]["batch_id"]
+        after_window = datetime(2026, 8, 3, tzinfo=timezone.utc)
+        result = avb.add_codes_to_batch(db, batch_id, admin_identity="admin1", codes="B1", now_utc=after_window)
+        assert result["ok"] is False
+        assert result["code"] == "batch_expired"
+        assert db.voucher_pools.count_documents({"code": "B1"}) == 0
+
+    def test_database_error_reports_partial_inserted_count_and_keeps_rows(self):
+        """A genuine mid-loop write failure (not a duplicate-key conflict)
+        must report how many codes landed before the failure — the caller
+        must not treat this as a total no-op — and must never roll back or
+        reset the codes that already made it in.
+        """
+        db = _db()
+        res = _create(db, codes=["A1"])
+        batch_id = res["batch"]["batch_id"]
+        real_insert_one = db.voucher_pools.insert_one
+        call_count = {"n": 0}
+
+        def flaky_insert_one(doc):
+            call_count["n"] += 1
+            if call_count["n"] == 2:
+                raise RuntimeError("simulated transient write failure")
+            return real_insert_one(doc)
+
+        db.voucher_pools.insert_one = flaky_insert_one
+        try:
+            result = avb.add_codes_to_batch(db, batch_id, admin_identity="admin1", codes="B1\nB2\nB3")
+        finally:
+            db.voucher_pools.insert_one = real_insert_one
+
+        assert result["ok"] is False
+        assert result["code"] == "database_error"
+        assert result["inserted_count"] == 1
+        assert db.voucher_pools.count_documents({"code": "B1"}) == 1
+        assert db.voucher_pools.count_documents({"code": "B2"}) == 0
+        assert db.voucher_pools.count_documents({"code": "B3"}) == 0
+        # Original code untouched, no second batch created.
+        assert db.voucher_pools.find_one({"code": "A1"})["status"] == "available"
+        assert db.affiliate_voucher_batches.count_documents({}) == 1
+
+    def test_true_concurrent_threads_race_same_code_exactly_one_wins(self):
+        """Genuine multi-threaded race (not a sequential simulation): two
+        threads call add_codes_to_batch for the same batch with the same
+        new code at (as close to) the same instant, synchronized with a
+        barrier. The unique (pool_id, code) index must guarantee exactly
+        one insert wins; the loser must report the code as a duplicate,
+        no second batch may be created, and the final authoritative counts
+        (re-derived from voucher_pools, not either thread's local view)
+        must reflect exactly one new row.
+        """
+        db = _db()
+        res = _create(db, codes=["A1"])
+        batch_id = res["batch"]["batch_id"]
+        barrier = threading.Barrier(2)
+        results = [None, None]
+        errors = []
+
+        def worker(idx, admin_identity):
+            try:
+                barrier.wait(timeout=5)
+                results[idx] = avb.add_codes_to_batch(
+                    db, batch_id, admin_identity=admin_identity, codes="RACE-CONC"
+                )
+            except Exception as exc:  # pragma: no cover - surfaced via assertion below
+                errors.append(exc)
+
+        t1 = threading.Thread(target=worker, args=(0, "admin1"))
+        t2 = threading.Thread(target=worker, args=(1, "admin2"))
+        t1.start()
+        t2.start()
+        t1.join(timeout=10)
+        t2.join(timeout=10)
+
+        assert not errors, f"worker thread(s) raised: {errors}"
+        assert results[0] is not None and results[1] is not None
+
+        winners = [r for r in results if r["ok"] is True]
+        losers = [r for r in results if r["ok"] is False]
+        assert len(winners) == 1, f"expected exactly one winner, got results={results}"
+        assert len(losers) == 1
+        assert winners[0]["inserted_count"] == 1
+        assert losers[0]["code"] == "duplicate_codes"
+        assert losers[0]["duplicate_count"] == 1
+        assert losers[0]["inserted_count"] == 0
+
+        # Exactly one voucher row exists for the raced code.
+        assert db.voucher_pools.count_documents({"code": "RACE-CONC"}) == 1
+        # No second batch was created by either request.
+        assert db.affiliate_voucher_batches.count_documents({}) == 1
+        # Final counts come from live voucher_pools state, not either
+        # thread's locally-computed number.
+        final = avb.get_batch_detail(db, batch_id)
+        assert final["available_count"] == 2  # original A1 + the one RACE-CONC winner
+        assert final["uploaded_count"] == 2
+
+
+class TestAddCodesAdminHttpLayer:
+    def test_unauthenticated_request_rejected(self):
+        db = _db()
+        res = _create(db, codes=["A1"])
+        batch_id = res["batch"]["batch_id"]
+        app = _app_with_auth(db, authorized=False)
+        client = app.test_client()
+        resp = client.post(f"/api/admin/affiliate-voucher-batches/{batch_id}/add-codes", json={"codes": "B1"})
+        assert resp.status_code == 403
+        assert resp.get_json()["code"] == "unauthorized"
+
+    def test_add_codes_round_trip_returns_required_fields(self):
+        db = _db()
+        res = _create(db, codes=["A1", "A2"])
+        batch_id = res["batch"]["batch_id"]
+        app = _app_with_auth(db)
+        client = app.test_client()
+        resp = client.post(
+            f"/api/admin/affiliate-voucher-batches/{batch_id}/add-codes",
+            json={"codes": "B1\nB2\nB3"},
+        )
+        assert resp.status_code == 200
+        body = resp.get_json()
+        assert body["ok"] is True
+        assert body["submitted_count"] == 3
+        assert body["inserted_count"] == 3
+        assert body["duplicate_count"] == 0
+        assert body["invalid_count"] == 0
+        assert body["available_count"] == 5
+        assert body["uploaded_count"] == 5
+
+        detail = client.get(f"/api/admin/affiliate-voucher-batches/{batch_id}").get_json()
+        assert detail["batch"]["available_count"] == 5
+        assert detail["batch"]["uploaded_count"] == 5
+
+    def test_missing_batch_returns_404(self):
+        db = _db()
+        app = _app_with_auth(db)
+        client = app.test_client()
+        resp = client.post(
+            "/api/admin/affiliate-voucher-batches/000000000000000000000000/add-codes",
+            json={"codes": "A1"},
+        )
+        assert resp.status_code == 404
+        assert resp.get_json()["code"] == "batch_not_found"
+
+    def test_disabled_batch_returns_409(self):
+        db = _db()
+        res = _create(db, codes=["A1"])
+        batch_id = res["batch"]["batch_id"]
+        app = _app_with_auth(db)
+        client = app.test_client()
+        client.patch(f"/api/admin/affiliate-voucher-batches/{batch_id}", json={"distribution_disabled": True})
+        resp = client.post(f"/api/admin/affiliate-voucher-batches/{batch_id}/add-codes", json={"codes": "B1"})
+        assert resp.status_code == 409
+        assert resp.get_json()["code"] == "batch_disabled"
+
+    def test_empty_codes_returns_400(self):
+        db = _db()
+        res = _create(db, codes=["A1"])
+        batch_id = res["batch"]["batch_id"]
+        app = _app_with_auth(db)
+        client = app.test_client()
+        resp = client.post(f"/api/admin/affiliate-voucher-batches/{batch_id}/add-codes", json={"codes": ""})
+        assert resp.status_code == 400
+        assert resp.get_json()["code"] == "no_codes"
+
+    def test_expired_batch_returns_409(self):
+        db = _db()
+        res = _create(db, codes=["A1"], starts="2020-01-01 00:00:00", ends="2020-02-01 00:00:00")
+        batch_id = res["batch"]["batch_id"]
+        app = _app_with_auth(db)
+        client = app.test_client()
+        resp = client.post(f"/api/admin/affiliate-voucher-batches/{batch_id}/add-codes", json={"codes": "B1"})
+        assert resp.status_code == 409
+        assert resp.get_json()["code"] == "batch_expired"
+
+    def test_database_error_returns_500_with_partial_inserted_count(self):
+        db = _db()
+        res = _create(db, codes=["A1"])
+        batch_id = res["batch"]["batch_id"]
+        app = _app_with_auth(db)
+        client = app.test_client()
+        real_insert_one = db.voucher_pools.insert_one
+        call_count = {"n": 0}
+
+        def flaky_insert_one(doc):
+            call_count["n"] += 1
+            if call_count["n"] == 2:
+                raise RuntimeError("simulated transient write failure")
+            return real_insert_one(doc)
+
+        db.voucher_pools.insert_one = flaky_insert_one
+        try:
+            resp = client.post(f"/api/admin/affiliate-voucher-batches/{batch_id}/add-codes", json={"codes": "B1\nB2"})
+        finally:
+            db.voucher_pools.insert_one = real_insert_one
+
+        assert resp.status_code == 500
+        body = resp.get_json()
+        assert body["code"] == "database_error"
+        assert body["inserted_count"] == 1
+
+
+class TestAddCodesButtonGating:
+    """The dashboard must not let an admin open the Add Codes modal for a
+    batch the backend will reject anyway — disabled/uploading/failed/
+    expired batches gate add_codes_to_batch server-side (see
+    TestAddCodesToBatch / TestAddCodesAdminHttpLayer), so the button must
+    be disabled with an explanatory reason for exactly those statuses.
+    """
+
+    @staticmethod
+    def _source():
+        with open("static/admin-dashboard.js", encoding="utf-8") as fh:
+            return fh.read()
+
+    def test_block_reasons_cover_every_backend_guard_status(self):
+        src = self._source()
+        start = src.index("var AB_ADD_CODES_BLOCK_REASON = {")
+        end = src.index("};", start)
+        block = src[start:end]
+        for status in ("disabled", "uploading", "failed", "expired"):
+            assert status in block, f"+ Add Codes button not gated for status={status}"
+
+    def test_button_rendered_disabled_when_blocked(self):
+        src = self._source()
+        assert 'addCodesBlockReason' in src
+        assert 'disabled title="' in src
+        assert 'data-ab-addcodes=' in src
 
 
 if __name__ == "__main__":
