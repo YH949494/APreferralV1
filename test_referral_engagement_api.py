@@ -475,3 +475,55 @@ def test_has_data_respects_source_filter(admin_client, fake_db, monkeypatch):
     data = resp.get_json()
     assert data["has_data"] is False
     assert data["totals"]["unique_section_viewers"] == 0
+
+
+# ---------------------------------------------------------------------------
+# creator_centre_opened
+# ---------------------------------------------------------------------------
+
+def test_creator_centre_opened_accepted_and_recorded(client, fake_db, monkeypatch):
+    _fake_vouchers_module(monkeypatch)
+    _fake_creator_share_centre_module(monkeypatch, user_id=888)
+    resp = _post(client, {
+        "event": "creator_centre_opened", "source": "creator_centre", "surface": "app_shell",
+        "session_id": "sess-open-1",
+    })
+    assert resp.status_code == 200
+    docs = fake_db["referral_engagement_events"].find({})
+    assert len(docs) == 1
+    assert docs[0]["user_id"] == 888
+    assert docs[0]["event"] == "creator_centre_opened"
+    assert docs[0]["source"] == "creator_centre"
+
+
+def test_creator_centre_opened_deduped_within_same_session(client, fake_db, monkeypatch):
+    # Repeated frontend initialization (e.g. remounting the page) within the
+    # same sessionStorage session_id must not produce a second open.
+    _fake_vouchers_module(monkeypatch)
+    _fake_creator_share_centre_module(monkeypatch, user_id=888)
+    body = {"event": "creator_centre_opened", "source": "creator_centre", "surface": "app_shell", "session_id": "sess-open-1"}
+    r1 = _post(client, body)
+    r2 = _post(client, body)
+    assert r1.status_code == 200 and r2.status_code == 200
+    assert r2.get_json()["recorded"] == "deduped"
+    assert fake_db["referral_engagement_events"].count_documents({}) == 1
+
+
+def test_creator_centre_opened_not_deduped_across_sessions(client, fake_db, monkeypatch):
+    _fake_vouchers_module(monkeypatch)
+    _fake_creator_share_centre_module(monkeypatch, user_id=888)
+    base = {"event": "creator_centre_opened", "source": "creator_centre", "surface": "app_shell"}
+    _post(client, {**base, "session_id": "sess-a"})
+    _post(client, {**base, "session_id": "sess-b"})
+    assert fake_db["referral_engagement_events"].count_documents({}) == 2
+
+
+def test_creator_centre_opened_access_denied_not_recorded(client, fake_db, monkeypatch):
+    _fake_vouchers_module(monkeypatch)
+    _fake_creator_share_centre_module(monkeypatch, err=("creator_not_authorized", 403))
+    resp = _post(client, {
+        "event": "creator_centre_opened", "source": "creator_centre", "surface": "app_shell",
+        "session_id": "sess-denied",
+    })
+    assert resp.status_code == 403
+    assert fake_db["referral_engagement_events"].count_documents({}) == 0

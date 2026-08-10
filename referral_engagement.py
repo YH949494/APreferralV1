@@ -45,6 +45,7 @@ ALLOWED_EVENTS = {
     "referral_link_generated",
     "referral_copy_clicked",
     "referral_share_clicked",
+    "creator_centre_opened",
 }
 ALLOWED_SOURCES = {"miniapp", "creator_centre"}
 COPY_OR_SHARE_EVENTS = ["referral_copy_clicked", "referral_share_clicked"]
@@ -63,6 +64,7 @@ DEDUP_WINDOW_SECONDS: dict[str, int | None] = {
     "referral_link_generated": 1,
     "referral_copy_clicked": 2,
     "referral_share_clicked": 2,
+    "creator_centre_opened": None,
 }
 
 # Tracking rollout marker -- the dashboard must never treat periods before
@@ -147,8 +149,10 @@ def _dedup_event_id(
 ) -> str:
     window = DEDUP_WINDOW_SECONDS.get(event)
     parts = [str(user_id), event, source, surface or ""]
-    if event == "referral_section_viewed":
-        # Once per user/source/surface/session -- no time bucket.
+    if event in ("referral_section_viewed", "creator_centre_opened"):
+        # Once per user/source/surface/session -- no time bucket. Repeated
+        # frontend initialization within the same session_id therefore
+        # produces the same event_id and is silently deduped below.
         parts.append(session_id or "")
     elif window:
         bucket = int(occurred_at.timestamp() // window)

@@ -420,7 +420,7 @@
           referralLinkId: res.body.package_id || null,
         });
         scrollPackageIntoView();
-        performCopy(res.body).then(function (copied) {
+        performCopy(res.body, "auto").then(function (copied) {
           if (copied) {
             els.generateStatus.classList.remove("error");
             els.generateStatus.textContent = GENERATE_COPIED_MESSAGE;
@@ -465,8 +465,9 @@
   // was actually copied, but UI updates (toast, button label, status
   // message) are suppressed so a stale completion can't stomp on the
   // newer package's state.
-  function performCopy(pkg) {
+  function performCopy(pkg, copyMethod) {
     var targetPkg = pkg || currentPackage;
+    var method = copyMethod === "auto" ? "auto" : "manual";
     if (!targetPkg) return Promise.resolve(false);
     var text = targetPkg.share_text;
 
@@ -492,10 +493,12 @@
       }
       apiPost("/api/creator/share/" + encodeURIComponent(targetPkg.package_id) + "/copied", {
         platform: detectPlatform(),
+        copy_method: method,
       }).catch(function () {});
       trackEngagementEvent("referral_copy_clicked", {
         surface: "copy_post",
         referralLinkId: targetPkg.package_id || null,
+        metadata: { copy_method: method },
       });
       return isCurrent;
     });
@@ -590,6 +593,12 @@
         return;
       }
       els.appShell.classList.remove("hidden");
+      // Canonical "Creator Centre opened" signal for the activation funnel:
+      // fires immediately once /api/creator/share/status confirms access,
+      // independent of scrolling/viewport/IntersectionObserver. Dedup is
+      // session-scoped server-side, so repeated init() calls within the
+      // same sessionStorage session_id never produce a second open.
+      trackEngagementEvent("creator_centre_opened", { surface: "app_shell" });
       setupReferralSectionViewTracking();
     }).catch(function () {
       els.initialLoading.classList.add("hidden");
