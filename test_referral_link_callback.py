@@ -119,17 +119,17 @@ def callback_env(monkeypatch):
     state = {
         "result": {
             "ok": True,
-            "message": "Hook line\nhttps://rx.apreplay.com/Abc12345\n\n"
-            "More player replays and rewards inside AdvantPlay:\n"
-            "👉 https://t.me/+realinvitehash",
+            "message": rsc.build_miniapp_referral_text(referral_url="https://t.me/+realinvitehash"),
             "invite_link": "https://t.me/+realinvitehash",
-            "playback_url": "https://rx.apreplay.com/Abc12345",
-            "hook_text": "Hook line",
+            "playback_url": None,
+            "hook_text": None,
         },
         "raise_error": None,
     }
+    generate_calls = []
 
-    def fake_generate_share_package(user_id, username=""):  # noqa: ARG001
+    def fake_generate_share_package(user_id, username="", **kwargs):
+        generate_calls.append({"user_id": user_id, "username": username, **kwargs})
         if state["raise_error"] is not None:
             raise state["raise_error"]
         return state["result"]
@@ -156,6 +156,7 @@ def callback_env(monkeypatch):
     fn._logger = logger
     fn._sent = sent_messages
     fn._state = state
+    fn._generate_calls = generate_calls
     return fn
 
 
@@ -172,26 +173,24 @@ def test_callback_answers_immediately(callback_env):
 
 
 def test_callback_success_sends_exact_generated_message(callback_env):
+    # Even if the (mocked) share package somehow carried hook/playback
+    # values, the callback must never render them -- it always renders
+    # through build_miniapp_referral_text(), which structurally has no
+    # hook_text/playback_url parameters at all. See
+    # test_callback_never_renders_hook_or_playback_even_if_present below for
+    # the direct regression check.
     callback_env._state["result"] = {
         "ok": True,
-        "message": (
-            "🔥 Big wins today!\n"
-            "https://rx.apreplay.com/Play00001\n\n"
-            "More player replays and rewards inside AdvantPlay:\n"
-            "👉 https://t.me/+abcDEF123"
-        ),
+        "message": "irrelevant -- message field is not used for the sent text",
         "invite_link": "https://t.me/+abcDEF123",
-        "playback_url": "https://rx.apreplay.com/Play00001",
-        "hook_text": "🔥 Big wins today!",
+        "playback_url": None,
+        "hook_text": None,
     }
     _run(callback_env, uid=102)
 
     assert len(callback_env._sent) == 1
     msg = callback_env._sent[0]
     assert msg["text"] == (
-        "🔥 Big wins today!\n"
-        "https://rx.apreplay.com/Play00001\n\n"
-        "Want more replays like this—and rewards too?\n\n"
         "<blockquote><b>👋 Welcome to AdvantPlay Community!</b>\n"
         "Join our channel to get 👇\n\n"
         "🎟️ FREE Welcome Voucher — No deposit required\n"
@@ -207,26 +206,13 @@ def test_callback_success_sends_exact_generated_message(callback_env):
     assert msg.get("parse_mode") == ParseMode.HTML
 
 
-def test_callback_share_button_prefilled_with_complete_package(callback_env):
-    message = (
-        "Hook\nhttps://rx.apreplay.com/Xyz00001\n\n"
-        "Want more replays like this—and rewards too?\n\n"
-        "👋 Welcome to AdvantPlay Community!\n\n"
-        "Join our channel to get 👇\n\n"
-        "🎟️ FREE Welcome Voucher — No deposit required\n"
-        "⚡️ Daily voucher drops\n"
-        "🎁 Bonus campaigns\n"
-        "👑 VIP-only announcements\n"
-        "🏆 Weekly ranking rewards\n\n"
-        "Start here 👇\n"
-        "https://t.me/+abcDEF123?x=1&y=2"
-    )
+def test_callback_share_button_prefilled_with_miniapp_text_only(callback_env):
     callback_env._state["result"] = {
         "ok": True,
-        "message": message,
+        "message": "irrelevant -- message field is not used for the sent text",
         "invite_link": "https://t.me/+abcDEF123?x=1&y=2",
-        "playback_url": "https://rx.apreplay.com/Xyz00001",
-        "hook_text": "Hook",
+        "playback_url": None,
+        "hook_text": None,
     }
     _run(callback_env, uid=111)
 
@@ -245,8 +231,6 @@ def test_callback_share_button_prefilled_with_complete_package(callback_env):
     # NOT repeat the invite link that's already in `url` — only the shared
     # caption template with the trailing link line omitted.
     assert params["text"] == [
-        "Hook\nhttps://rx.apreplay.com/Xyz00001\n\n"
-        "Want more replays like this—and rewards too?\n\n"
         "👋 Welcome to AdvantPlay Community!\n\n"
         "Join our channel to get 👇\n\n"
         "🎟️ FREE Welcome Voucher — No deposit required\n"
@@ -257,6 +241,56 @@ def test_callback_share_button_prefilled_with_complete_package(callback_env):
         "Start here 👇"
     ]
     assert "https://t.me/+abcDEF123?x=1&y=2" not in params["text"][0]
+
+
+# ---------------------------------------------------------------------------
+# Regression: production bug where this callback rendered Creator-style
+# content (hook + playback URL + "Want more replays like this—and rewards
+# too?") glued onto the Mini App's five-benefit block. Reproduces the bug by
+# having the (mocked) share package return active hook/playback content --
+# exactly like it would with live hook/playback pools populated -- and
+# asserts none of it reaches the sent message or the Telegram Share button.
+# ---------------------------------------------------------------------------
+
+def test_callback_never_renders_hook_or_playback_even_if_present(callback_env):
+    callback_env._state["result"] = {
+        "ok": True,
+        "message": "Don't skip the ending 👇\nhttps://rx.apreplay.com/Abc12345\n\n"
+        "Want more replays like this—and rewards too?\n[full Mini App benefit caption]\n"
+        "https://t.me/+regressionHash",
+        "invite_link": "https://t.me/+regressionHash",
+        "playback_url": "https://rx.apreplay.com/Abc12345",
+        "hook_text": "Don't skip the ending 👇",
+    }
+    _run(callback_env, uid=120)
+
+    msg = callback_env._sent[0]
+    share_btn = next(
+        b for row in msg["reply_markup"].inline_keyboard for b in row if b.text == "📤 Share Referral Link"
+    )
+    share_text = parse_qs(urlparse(share_btn.url).query)["text"][0]
+
+    for surface_text in (msg["text"], share_text):
+        assert "Don't skip the ending" not in surface_text
+        assert "rx.apreplay.com" not in surface_text
+        assert "Want more replays like this—and rewards too?" not in surface_text
+
+    assert "👋 Welcome to AdvantPlay Community!" in msg["text"]
+    assert "🎟️ FREE Welcome Voucher — No deposit required" in msg["text"]
+    assert "⚡️ Daily voucher drops" in msg["text"]
+    assert "🎁 Bonus campaigns" in msg["text"]
+    assert "👑 VIP-only announcements" in msg["text"]
+    assert "🏆 Weekly ranking rewards" in msg["text"]
+    assert msg["text"].count("https://t.me/+regressionHash") == 1
+
+
+def test_callback_requests_share_package_without_creator_content_pools(callback_env):
+    _run(callback_env, uid=121)
+
+    assert len(callback_env._generate_calls) == 1
+    call = callback_env._generate_calls[0]
+    assert call["include_content_pools"] is False
+    assert call["generated_by"] == rsc.MINIAPP_SHARE_SOURCE
 
 
 def test_callback_success_includes_share_button(callback_env):

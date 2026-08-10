@@ -412,6 +412,35 @@ def build_referral_share_caption(
     return "\n".join(lines)
 
 
+def build_miniapp_referral_text(
+    *,
+    referral_url: str | None,
+    include_referral_link: bool = True,
+    format_mode: str = "plain",
+) -> str:
+    """The one canonical Mini App referral share text.
+
+    Fixed five-benefit caption + the user's canonical referral link, and
+    *nothing else* — no hook, no playback URL, no Creator CTA. Unlike
+    ``build_referral_share_caption`` this function has no ``hook_text``/
+    ``playback_url`` parameters at all, so it is structurally impossible for
+    a Mini App caller to accidentally (or otherwise) pull Creator Share
+    Centre content into a Mini App payload. Every Mini App surface — the
+    ``/api/referral/share-content`` API, Copy Invite, Telegram Share,
+    browser/native Share, the referral banner, and the ``/start referral``
+    /``generate_referral_link`` bot replies — must render its caption
+    through this one function so none of them can independently drift into
+    Creator-style output.
+    """
+    return build_referral_share_caption(
+        hook_text=None,
+        playback_url=None,
+        referral_url=referral_url,
+        include_referral_link=include_referral_link,
+        format_mode=format_mode,
+    )
+
+
 def build_creator_share_text(
     *, hook_text: str | None, playback_url: str | None, referral_link: str | None
 ) -> str:
@@ -533,11 +562,18 @@ def generate_share_package(
         )
         return {"ok": False, "code": "invite_link_failed"}
 
-    message = build_referral_share_caption(
-        hook_text=hook_text,
-        playback_url=playback_url,
-        referral_url=invite_link,
-    )
+    if include_content_pools:
+        message = build_referral_share_caption(
+            hook_text=hook_text,
+            playback_url=playback_url,
+            referral_url=invite_link,
+        )
+    else:
+        # Mini App path: never render through the hook/playback-capable
+        # template, even though hook_text/playback_url are already None
+        # here -- this call site itself must be structurally incapable of
+        # emitting Creator content.
+        message = build_miniapp_referral_text(referral_url=invite_link)
 
     playback_record_id = playback_doc["_id"] if playback_doc else None
     package_id = secrets.token_urlsafe(16)
