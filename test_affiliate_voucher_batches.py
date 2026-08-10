@@ -9,6 +9,7 @@ conversion, the admin HTTP layer (including auth), and frontend error-code
 mapping / form-state preservation on failure.
 """
 
+import threading
 from datetime import datetime, timezone
 
 import pytest
@@ -477,7 +478,7 @@ class TestFrontendErrorMapping:
             "invalid_pool_id", "no_codes", "duplicate_codes", "unauthorized",
             "batch_not_found", "active_batch_edit_restricted",
             "upload_failed", "target_batch_failed_cannot_enable",
-            "batch_disabled", "batch_not_ready", "database_error",
+            "batch_disabled", "batch_not_ready", "database_error", "batch_expired",
         ]
         for code in required_codes:
             assert code in block, f"missing frontend mapping for {code}"
@@ -816,6 +817,105 @@ class TestAddCodesToBatch:
         assert detail["available_count"] == 4
         assert detail["uploaded_count"] == 5
 
+    def test_expired_batch_cannot_be_topped_up(self):
+        db = _db()
+        res = _create(db, codes=["A1"], starts="2026-08-01 00:00:00", ends="2026-08-02 00:00:00")
+        batch_id = res["batch"]["batch_id"]
+        after_window = datetime(2026, 8, 3, tzinfo=timezone.utc)
+        result = avb.add_codes_to_batch(db, batch_id, admin_identity="admin1", codes="B1", now_utc=after_window)
+        assert result["ok"] is False
+        assert result["code"] == "batch_expired"
+        assert db.voucher_pools.count_documents({"code": "B1"}) == 0
+
+    def test_database_error_reports_partial_inserted_count_and_keeps_rows(self):
+        """A genuine mid-loop write failure (not a duplicate-key conflict)
+        must report how many codes landed before the failure — the caller
+        must not treat this as a total no-op — and must never roll back or
+        reset the codes that already made it in.
+        """
+        db = _db()
+        res = _create(db, codes=["A1"])
+        batch_id = res["batch"]["batch_id"]
+        real_insert_one = db.voucher_pools.insert_one
+        call_count = {"n": 0}
+
+        def flaky_insert_one(doc):
+            call_count["n"] += 1
+            if call_count["n"] == 2:
+                raise RuntimeError("simulated transient write failure")
+            return real_insert_one(doc)
+
+        db.voucher_pools.insert_one = flaky_insert_one
+        try:
+            result = avb.add_codes_to_batch(db, batch_id, admin_identity="admin1", codes="B1\nB2\nB3")
+        finally:
+            db.voucher_pools.insert_one = real_insert_one
+
+        assert result["ok"] is False
+        assert result["code"] == "database_error"
+        assert result["inserted_count"] == 1
+        assert db.voucher_pools.count_documents({"code": "B1"}) == 1
+        assert db.voucher_pools.count_documents({"code": "B2"}) == 0
+        assert db.voucher_pools.count_documents({"code": "B3"}) == 0
+        # Original code untouched, no second batch created.
+        assert db.voucher_pools.find_one({"code": "A1"})["status"] == "available"
+        assert db.affiliate_voucher_batches.count_documents({}) == 1
+
+    def test_true_concurrent_threads_race_same_code_exactly_one_wins(self):
+        """Genuine multi-threaded race (not a sequential simulation): two
+        threads call add_codes_to_batch for the same batch with the same
+        new code at (as close to) the same instant, synchronized with a
+        barrier. The unique (pool_id, code) index must guarantee exactly
+        one insert wins; the loser must report the code as a duplicate,
+        no second batch may be created, and the final authoritative counts
+        (re-derived from voucher_pools, not either thread's local view)
+        must reflect exactly one new row.
+        """
+        db = _db()
+        res = _create(db, codes=["A1"])
+        batch_id = res["batch"]["batch_id"]
+        barrier = threading.Barrier(2)
+        results = [None, None]
+        errors = []
+
+        def worker(idx, admin_identity):
+            try:
+                barrier.wait(timeout=5)
+                results[idx] = avb.add_codes_to_batch(
+                    db, batch_id, admin_identity=admin_identity, codes="RACE-CONC"
+                )
+            except Exception as exc:  # pragma: no cover - surfaced via assertion below
+                errors.append(exc)
+
+        t1 = threading.Thread(target=worker, args=(0, "admin1"))
+        t2 = threading.Thread(target=worker, args=(1, "admin2"))
+        t1.start()
+        t2.start()
+        t1.join(timeout=10)
+        t2.join(timeout=10)
+
+        assert not errors, f"worker thread(s) raised: {errors}"
+        assert results[0] is not None and results[1] is not None
+
+        winners = [r for r in results if r["ok"] is True]
+        losers = [r for r in results if r["ok"] is False]
+        assert len(winners) == 1, f"expected exactly one winner, got results={results}"
+        assert len(losers) == 1
+        assert winners[0]["inserted_count"] == 1
+        assert losers[0]["code"] == "duplicate_codes"
+        assert losers[0]["duplicate_count"] == 1
+        assert losers[0]["inserted_count"] == 0
+
+        # Exactly one voucher row exists for the raced code.
+        assert db.voucher_pools.count_documents({"code": "RACE-CONC"}) == 1
+        # No second batch was created by either request.
+        assert db.affiliate_voucher_batches.count_documents({}) == 1
+        # Final counts come from live voucher_pools state, not either
+        # thread's locally-computed number.
+        final = avb.get_batch_detail(db, batch_id)
+        assert final["available_count"] == 2  # original A1 + the one RACE-CONC winner
+        assert final["uploaded_count"] == 2
+
 
 class TestAddCodesAdminHttpLayer:
     def test_unauthenticated_request_rejected(self):
@@ -883,6 +983,70 @@ class TestAddCodesAdminHttpLayer:
         resp = client.post(f"/api/admin/affiliate-voucher-batches/{batch_id}/add-codes", json={"codes": ""})
         assert resp.status_code == 400
         assert resp.get_json()["code"] == "no_codes"
+
+    def test_expired_batch_returns_409(self):
+        db = _db()
+        res = _create(db, codes=["A1"], starts="2020-01-01 00:00:00", ends="2020-02-01 00:00:00")
+        batch_id = res["batch"]["batch_id"]
+        app = _app_with_auth(db)
+        client = app.test_client()
+        resp = client.post(f"/api/admin/affiliate-voucher-batches/{batch_id}/add-codes", json={"codes": "B1"})
+        assert resp.status_code == 409
+        assert resp.get_json()["code"] == "batch_expired"
+
+    def test_database_error_returns_500_with_partial_inserted_count(self):
+        db = _db()
+        res = _create(db, codes=["A1"])
+        batch_id = res["batch"]["batch_id"]
+        app = _app_with_auth(db)
+        client = app.test_client()
+        real_insert_one = db.voucher_pools.insert_one
+        call_count = {"n": 0}
+
+        def flaky_insert_one(doc):
+            call_count["n"] += 1
+            if call_count["n"] == 2:
+                raise RuntimeError("simulated transient write failure")
+            return real_insert_one(doc)
+
+        db.voucher_pools.insert_one = flaky_insert_one
+        try:
+            resp = client.post(f"/api/admin/affiliate-voucher-batches/{batch_id}/add-codes", json={"codes": "B1\nB2"})
+        finally:
+            db.voucher_pools.insert_one = real_insert_one
+
+        assert resp.status_code == 500
+        body = resp.get_json()
+        assert body["code"] == "database_error"
+        assert body["inserted_count"] == 1
+
+
+class TestAddCodesButtonGating:
+    """The dashboard must not let an admin open the Add Codes modal for a
+    batch the backend will reject anyway — disabled/uploading/failed/
+    expired batches gate add_codes_to_batch server-side (see
+    TestAddCodesToBatch / TestAddCodesAdminHttpLayer), so the button must
+    be disabled with an explanatory reason for exactly those statuses.
+    """
+
+    @staticmethod
+    def _source():
+        with open("static/admin-dashboard.js", encoding="utf-8") as fh:
+            return fh.read()
+
+    def test_block_reasons_cover_every_backend_guard_status(self):
+        src = self._source()
+        start = src.index("var AB_ADD_CODES_BLOCK_REASON = {")
+        end = src.index("};", start)
+        block = src[start:end]
+        for status in ("disabled", "uploading", "failed", "expired"):
+            assert status in block, f"+ Add Codes button not gated for status={status}"
+
+    def test_button_rendered_disabled_when_blocked(self):
+        src = self._source()
+        assert 'addCodesBlockReason' in src
+        assert 'disabled title="' in src
+        assert 'data-ab-addcodes=' in src
 
 
 if __name__ == "__main__":

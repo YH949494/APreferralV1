@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import itertools
 import re
+import threading
 from copy import deepcopy
 
 from bson import ObjectId
@@ -118,6 +119,11 @@ class FakeCollection:
         self._docs: list[dict] = []
         self._id_counter = itertools.count(1)
         self._unique_keys = unique_keys or []
+        # Real MongoDB enforces a unique index atomically; guard the
+        # check-then-append below with a lock so multi-threaded tests that
+        # race two inserts of the same key against this fake get the same
+        # "exactly one wins" guarantee instead of a check-then-append race.
+        self._insert_lock = threading.Lock()
 
     def _next_id(self):
         # A real bson.ObjectId (not a lookalike string) so routes that do
@@ -136,8 +142,9 @@ class FakeCollection:
     def insert_one(self, doc: dict):
         doc = deepcopy(doc)
         doc.setdefault("_id", self._next_id())
-        self._check_unique(doc)
-        self._docs.append(doc)
+        with self._insert_lock:
+            self._check_unique(doc)
+            self._docs.append(doc)
         return type("Result", (), {"inserted_id": doc["_id"]})()
 
     def find_one(self, query: dict | None = None, projection=None, sort=None):

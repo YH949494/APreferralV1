@@ -606,6 +606,15 @@ def add_codes_to_batch(db, batch_id, *, admin_identity: str, codes, now_utc: dat
             "batch_not_ready",
             f"This batch is currently '{upload_status}' and cannot accept new codes. Reconcile or wait for the upload to finish first.",
         )
+    # A batch whose window has already ended can never distribute again (the
+    # claim path rejects it past ends_at), its schedule can't be moved once
+    # any voucher was issued, and the unique (pool_id, code) index means
+    # freshly-added codes couldn't be reused in a new batch either — so
+    # newly inserted codes here would be permanently stranded. Block it
+    # before insert rather than after.
+    ends_at = _as_aware_utc(batch.get("ends_at"))
+    if ends_at and now_utc >= ends_at:
+        return _fail("batch_expired", "This batch's schedule window has already ended and can no longer accept new codes.")
 
     unique_codes, duplicate_in_upload, invalid_count = normalize_voucher_codes(codes)
     submitted = len(unique_codes) + duplicate_in_upload + invalid_count
@@ -992,7 +1001,7 @@ def _status_response(result: dict):
     code = str(result.get("code") or "")
     if code == "batch_not_found":
         status_code = 404
-    elif code in ("batch_window_overlap", "batch_disabled", "batch_not_ready"):
+    elif code in ("batch_window_overlap", "batch_disabled", "batch_not_ready", "batch_expired"):
         status_code = 409
     elif code == "database_error":
         status_code = 500

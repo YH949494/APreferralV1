@@ -5990,6 +5990,7 @@
     target_batch_failed_cannot_enable: "This batch failed to upload and cannot be re-enabled. Use Reconcile or re-upload instead.",
     batch_disabled: "This batch is disabled. Re-enable it before adding codes.",
     batch_not_ready: "This batch is not ready to accept new codes yet (still uploading or failed). Reconcile it first.",
+    batch_expired: "This batch's schedule window has already ended and can no longer accept new codes.",
     database_error: "A database error occurred while adding codes. Codes already inserted before the failure remain saved; please retry with the remaining codes.",
   };
 
@@ -6220,8 +6221,17 @@
       apiPostJson("/api/admin/affiliate-voucher-batches/" + encodeURIComponent(batchId) + "/add-codes", { codes: codesText })
         .then(function (res) {
           btnStop(submitBtn);
-          if (!res.ok || res.d.ok === false) { showError(abErrorMessage(res.d)); return; }
-          var d = res.d;
+          var d = res.d || {};
+          if (!res.ok || d.ok === false) {
+            // A mid-loop DB failure (code: database_error) still inserted
+            // some codes before it hit the error — surface that count so
+            // the admin doesn't assume the whole submission was a no-op,
+            // and refresh the table since inventory already changed.
+            var partial = d.inserted_count > 0;
+            showError(abErrorMessage(d) + (partial ? " (" + fmt(d.inserted_count) + " code(s) were already inserted before the failure.)" : ""));
+            if (partial) loadAffiliateBatches(true);
+            return;
+          }
           done();
           toast(
             "✅ " + fmt(d.inserted_count) + " codes added to " + item.batch_name + "." +
@@ -6302,6 +6312,17 @@
     }
     var rows = items.map(function (item) {
       var needsReconcile = item.status === "uploading" || item.status === "failed";
+      // Mirror the backend's add_codes_to_batch guards exactly: disabled,
+      // still-uploading, failed, and expired batches all reject a top-up
+      // server-side, so gate the button here instead of letting the admin
+      // open the modal only to have submission fail.
+      var AB_ADD_CODES_BLOCK_REASON = {
+        disabled: "Re-enable this batch before adding codes.",
+        uploading: "This batch is still uploading.",
+        failed: "This batch failed to upload — reconcile it first.",
+        expired: "This batch's window has ended and can no longer accept codes.",
+      };
+      var addCodesBlockReason = AB_ADD_CODES_BLOCK_REASON[item.status];
       var failureDetail = item.status === "failed"
         ? '<div class="sub" style="color:var(--bad);margin-top:4px;">Submitted ' + fmt(item.submitted_count) + ' · Inserted ' + fmt(item.inserted_count) +
           ' · Duplicates ' + fmt(item.duplicate_count) + ' · Invalid ' + fmt(item.invalid_count) +
@@ -6323,7 +6344,9 @@
         '<td>' + esc(abTimeRemaining(item, nowIso)) + '</td>' +
         '<td>' +
           '<button class="btn" data-ab-view="' + esc(item.batch_id) + '">View</button> ' +
-          '<button class="btn" data-ab-addcodes="' + esc(item.batch_id) + '">+ Add Codes</button> ' +
+          (addCodesBlockReason
+            ? '<button class="btn" disabled title="' + esc(addCodesBlockReason) + '">+ Add Codes</button> '
+            : '<button class="btn" data-ab-addcodes="' + esc(item.batch_id) + '">+ Add Codes</button> ') +
           '<button class="btn" data-ab-edit="' + esc(item.batch_id) + '">Edit schedule</button> ' +
           (needsReconcile ? '<button class="btn" data-ab-reconcile="' + esc(item.batch_id) + '">Reconcile</button> ' : '') +
           (item.status === "failed"
