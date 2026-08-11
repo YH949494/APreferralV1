@@ -72,6 +72,26 @@ CREATOR_STATUSES = {"active", "suspended", "removed"}
 GENERATE_HOURLY_LIMIT = 20
 MAX_BULK_CREATOR_IMPORT = 2000
 
+
+def _next_reward_tier(qualified_count: int) -> dict | None:
+    """Returns the next unreached tier as {"qualified_needed", "reward_amount"},
+    or None once the highest tier has been reached.
+
+    ``qualified_count`` must be the same current-reward-month count
+    ``scheduler.maybe_shout_referral_congrats`` evaluates against
+    ``REFERRAL_CONGRATS_TIERS`` (see
+    ``scheduler.current_month_qualified_referral_count``) -- reward totals
+    reset monthly (per the "See Referral Rewards" card copy), so a lifetime
+    count would let this promise progress the actual reward workflow
+    already reset past.
+    """
+    from scheduler import REFERRAL_CONGRATS_TIERS
+
+    for threshold, amount in REFERRAL_CONGRATS_TIERS:
+        if qualified_count < threshold:
+            return {"qualified_needed": threshold - qualified_count, "reward_amount": amount}
+    return None
+
 # Short cache period for a *confirmed* live membership check, and a shorter
 # grace window used only when Telegram is temporarily unavailable (so a
 # transient outage never immediately removes an otherwise-active creator —
@@ -737,13 +757,20 @@ def creator_share_results():
         return jsonify({"status": "error", "code": code}), http_status
 
     from dashboard_panels import _PENDING_STATUSES, _QUALIFIED_STATUSES, _REVOKED_STATUSES
+    from scheduler import current_month_qualified_referral_count, current_month_window_utc
 
     pending_col = database.db["pending_referrals"]
     now = now_utc()
     week_start = _current_week_start_utc(now)
+    month_start_utc, month_end_utc = current_month_window_utc(now)
 
     base_filter = {"inviter_user_id": user_id}
     week_filter = {**base_filter, "created_at_utc": {"$gte": week_start}}
+    # "created_at_utc" is the same join timestamp field pending_referrals
+    # docs are written with (main.py referral-join handler) and the same
+    # field affiliate_leaderboard.py windows its own weekly "joins" count
+    # on -- reused here, not a new/guessed timestamp field.
+    month_filter = {**base_filter, "created_at_utc": {"$gte": month_start_utc, "$lt": month_end_utc}}
 
     total_referral_joins = pending_col.count_documents(base_filter)
     qualified_referrals = pending_col.count_documents({**base_filter, "status": {"$in": _QUALIFIED_STATUSES}})
@@ -753,6 +780,7 @@ def creator_share_results():
     current_week_qualified = pending_col.count_documents(
         {**week_filter, "status": {"$in": _QUALIFIED_STATUSES}}
     )
+    current_month_referrals = pending_col.count_documents(month_filter)
 
     share_col = database.db["share_generations"]
     creator_filter = {
@@ -766,6 +794,7 @@ def creator_share_results():
         latest_doc["generated_at"].isoformat() if latest_doc and latest_doc.get("generated_at") else None
     )
     total_packages_generated = share_col.count_documents(creator_filter)
+    current_month_qualified = current_month_qualified_referral_count(user_id, now)
 
     return jsonify(
         {
@@ -777,8 +806,17 @@ def creator_share_results():
                 "revoked_referrals": int(revoked_referrals),
                 "current_week_referrals": int(current_week_referrals),
                 "current_week_qualified": int(current_week_qualified),
+                # Current-reward-month figures (Asia/Kuala_Lumpur calendar
+                # month) -- what the Money Room UI displays as "Invited" /
+                # "Qualified". current_month_qualified is the exact same
+                # value passed into next_reward_tier below, so the
+                # displayed Qualified count and the reward-progress message
+                # can never disagree.
+                "current_month_referrals": int(current_month_referrals),
+                "current_month_qualified": int(current_month_qualified),
                 "latest_generated_at": latest_generated_at,
                 "total_packages_generated": int(total_packages_generated),
+                "next_reward_tier": _next_reward_tier(current_month_qualified),
             },
         }
     )

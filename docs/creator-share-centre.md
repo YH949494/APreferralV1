@@ -24,6 +24,40 @@ database, referral, XP, or invite-link system.
   (`dashboard_panels._QUALIFIED_STATUSES` / `_PENDING_STATUSES` /
   `_REVOKED_STATUSES`) — qualified vs. pending vs. revoked classification is
   never redefined here.
+- **Reward tier ladder**: `scheduler.REFERRAL_CONGRATS_TIERS` is the single
+  source of truth for tier thresholds — the same ladder
+  `scheduler.maybe_shout_referral_congrats()` evaluates to post the "X valid
+  referrals this month" congrats message, and it mirrors the static list
+  already shown in the "See Referral Rewards" card. `creator_share_results()`
+  imports it directly (via `_next_reward_tier()`) rather than keeping a
+  second copy.
+- **Reward-tier progress count**: reward totals reset monthly (see the
+  "Referral totals reset on the 1st of every month" note already on the
+  rewards card), so `_next_reward_tier()` is evaluated against
+  `scheduler.current_month_qualified_referral_count()` — net
+  `referral_settled` minus `referral_revoked` `referral_events` for the
+  current Asia/Kuala_Lumpur calendar month — not the lifetime
+  `qualified_referrals` figure. This is the exact same helper/query
+  `maybe_shout_referral_congrats()` itself now calls, so the Money Room's
+  progress message can never promise a tier the reward workflow has already
+  reset past. It does not grant rewards or alter payout qualification
+  rules, which remain wherever rewards are actually paid out.
+- **Money Room "This Month" Invited/Qualified stats**: both figures shown on
+  the page (`current_month_referrals` / `current_month_qualified` in the
+  `/api/creator/share/results` response) are scoped to the same current
+  Asia/Kuala_Lumpur calendar month as the reward-tier progress line beneath
+  them, via `scheduler.current_month_window_utc()` (a thin public wrapper
+  around the same private `_month_window_utc()` boundary
+  `current_month_qualified_referral_count()` and other scheduler jobs
+  already use). `current_month_referrals` filters `pending_referrals` on
+  `created_at_utc` — the same join-timestamp field the collection is
+  written with and the same field `affiliate_leaderboard.py` windows its
+  own weekly joins count on — inside `[month_start_utc, month_end_utc)`.
+  `current_month_qualified` is exactly the same value passed into
+  `_next_reward_tier()`, so the displayed "Qualified" number and the
+  "N more qualified referrals to unlock $X" message can never disagree.
+  The lifetime `total_referral_joins`/`qualified_referrals` fields remain
+  in the response (unused by this page's UI) for backward compatibility.
 
 What's new is access control (`creator_members`), a creator-facing UI
 (`static/creator-share.html`), a small set of `/api/creator/...` endpoints,
@@ -271,7 +305,7 @@ Never the bot token, never a full Telegram API response body.
 | POST | `/api/creator/share/generate` | Generate a share package (`{"platform": "generic\|whatsapp\|facebook\|x\|telegram"}`) |
 | POST | `/api/creator/share/<package_id>/copied` | Record a successful clipboard copy (interaction only) |
 | POST | `/api/creator/share/<package_id>/share-clicked` | Record a share action was initiated (interaction only) |
-| GET | `/api/creator/share/results` | Creator's own referral results |
+| GET | `/api/creator/share/results` | Creator's own referral results (also drives the compact Invited/Qualified stats + next-tier progress message on the Money Room page) |
 
 `copied`/`share-clicked` are **interaction telemetry only** — they never
 grant referral rewards, XP, or otherwise touch qualification state, and both
