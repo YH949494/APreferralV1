@@ -100,6 +100,7 @@ function makeContext({
     toasts: [],
     analytics: [],
     execCommand: 0,
+    trackEngagementEvent: [],
   };
 
   const sandbox = {
@@ -150,6 +151,14 @@ function makeContext({
     hapticNotify: (kind) => calls.hapticNotify.push(kind),
     loadReferralProgress: () => {},
     showCopySuccessToast: () => calls.toasts.push("copied"),
+    // Real trackEngagementEvent (static/index.html) never throws -- it
+    // swallows its own errors internally. Mirroring that "never throws"
+    // contract here matters: handleReferralLinkClick() /
+    // copyReferralCaptionAndFlash() must not have their real (non-tracking)
+    // behavior altered by a tracking call.
+    trackEngagementEvent: (event, opts) => {
+      calls.trackEngagementEvent.push({ event, ...opts });
+    },
     fetch:
       fetchImpl ||
       (() => {
@@ -226,6 +235,19 @@ test("1. first click generates the link and copies the full caption + referral U
   assert.ok(calls.analytics.some((l) => l.includes("referral_share_content_requested")));
   assert.ok(calls.analytics.some((l) => l.includes("referral_caption_copied")));
   assert.ok(!calls.analytics.some((l) => l.includes("referral_link_copied")), "old referral_link_copied event must not fire for a full-caption copy");
+
+  // The single click that drove this whole flow must produce exactly the
+  // engagement-tracking events the admin dashboard's Referral Engagement
+  // panel aggregates on: a CTA click (fired first, before generation even
+  // starts), then a link-generated, then a copy-clicked once the caption
+  // lands in the clipboard.
+  const trackedEventNames = calls.trackEngagementEvent.map((c) => c.event);
+  assert.deepEqual(trackedEventNames, [
+    "referral_cta_clicked",
+    "referral_link_generated",
+    "referral_copy_clicked",
+  ]);
+  assert.ok(calls.trackEngagementEvent.every((c) => c.surface === "referral_step_cta"));
 });
 
 test("2. copied content contains all four benefit lines", async () => {
@@ -473,6 +495,7 @@ test("9. Share button still works and uses the same canonical caption", async ()
   const source = html.slice(fetchContentStart, shareEnd);
 
   const openedUrls = [];
+  const trackedEvents = [];
   const sandbox = {
     console: { log() {}, warn() {}, error() {}, info() {} },
     v2Fetch: async () =>
@@ -498,6 +521,9 @@ test("9. Share button still works and uses the same canonical caption", async ()
     latestSharePackage: null,
     shareRequestInFlight: false,
     shareContentRequestInFlight: null,
+    trackEngagementEvent: (event, opts) => {
+      trackedEvents.push({ event, ...opts });
+    },
   };
   const context = vm.createContext(sandbox);
   vm.runInContext(source, context, { filename: "index.html-extract-share.js" });
@@ -507,6 +533,13 @@ test("9. Share button still works and uses the same canonical caption", async ()
   assert.equal(openedUrls.length, 1);
   assert.ok(openedUrls[0].includes(encodeURIComponent("https://t.me/+share-correct-link")));
   assert.ok(openedUrls[0].includes(encodeURIComponent("SAME_CANONICAL_CAPTION")));
+
+  // A successfully opened share must be tracked as referral_share_clicked --
+  // this is the Mini App source's denominator for Copy/Share Users on the
+  // admin engagement dashboard.
+  assert.equal(trackedEvents.length, 1);
+  assert.equal(trackedEvents[0].event, "referral_share_clicked");
+  assert.equal(trackedEvents[0].referralLinkId, "https://t.me/+share-correct-link");
 });
 
 test("10. Thai/Indonesian button-state translations stay distinct while the copied caption is unaffected by UI language", async () => {

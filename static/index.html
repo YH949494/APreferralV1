@@ -1703,7 +1703,7 @@
       </div>
 
       <!-- Invite & Earn tile -->
-      <div class="ap-tile ap-tile-orange" onclick="getReferral()">
+      <div class="ap-tile ap-tile-orange" onclick="handleReferralLinkClick()">
         <div class="ap-tile-icon">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M19 8v6M22 11h-6"/></svg>
         </div>
@@ -4191,6 +4191,13 @@
 
       referralEntryActionHandled = true;
       console.log(`[MINIAPP][ENTRY_ACTION] action=generate_referral uid=${userId}`);
+
+      // The bot deep-link button that opens the Mini App with
+      // ?action=generate_referral *is* the referral CTA -- the tap happened
+      // in Telegram before this page ever loaded. Without this, every
+      // deep-link-driven generation was invisible to CTA-click analytics
+      // even though a link was actually generated (see referral_engagement.py).
+      trackEngagementEvent("referral_cta_clicked", { surface: "referral_entry_deeplink" });
 
       if (step.scrollIntoView) {
         step.scrollIntoView({ behavior: "smooth", block: "center" });

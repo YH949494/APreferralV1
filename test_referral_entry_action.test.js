@@ -54,7 +54,7 @@ function makeContext({ elementIds, userId = 555, search = "", fetchImpl } = {}) 
     elements[id] = makeElementStub(id);
   });
 
-  const calls = { fetch: 0, loadReferralProgress: 0, hapticNotify: [], consoleLogs: [] };
+  const calls = { fetch: 0, loadReferralProgress: 0, hapticNotify: [], consoleLogs: [], trackEngagementEvent: [] };
 
   const sandbox = {
     URLSearchParams,
@@ -75,6 +75,14 @@ function makeContext({ elementIds, userId = 555, search = "", fetchImpl } = {}) 
     referralEntryActionHandled: false,
     t: (key) => key,
     hapticNotify: (kind) => calls.hapticNotify.push(kind),
+    // Real trackEngagementEvent (static/index.html) never throws -- it
+    // swallows its own errors internally (see referral_engagement.py's
+    // frontend counterpart). Mirroring that "never throws" contract here is
+    // what matters for these tests: getReferral()'s success path must not be
+    // able to be turned into a reported failure by a tracking call.
+    trackEngagementEvent: (event, opts) => {
+      calls.trackEngagementEvent.push({ event, ...opts });
+    },
     loadReferralProgress: () => {
       calls.loadReferralProgress++;
     },
@@ -110,10 +118,10 @@ const HAPPY_ELEMENTS = [
 ];
 
 test("getReferral(): returns true and displays link on a well-formed success response", async () => {
-  const calls = { fetch: 0 };
-  const { context, elements } = makeContext({
+  const fetchCalls = { fetch: 0 };
+  const { context, elements, calls } = makeContext({
     elementIds: HAPPY_ELEMENTS,
-    fetchImpl: countingFetch(calls, async () => ({
+    fetchImpl: countingFetch(fetchCalls, async () => ({
       text: async () => JSON.stringify({ success: true, referral_link: "https://t.me/+abc123" }),
     })),
   });
@@ -121,9 +129,16 @@ test("getReferral(): returns true and displays link on a well-formed success res
   const ok = await context.getReferral();
 
   assert.equal(ok, true);
-  assert.equal(calls.fetch, 1);
+  assert.equal(fetchCalls.fetch, 1);
   assert.equal(context.latestReferralLink, "https://t.me/+abc123");
   assert.match(elements["referral-link"].innerText, /https:\/\/t\.me\/\+abc123/);
+
+  // getReferral() must fire referral_link_generated on every successful
+  // generation regardless of which entry point called it -- this is the
+  // shared denominator for Links Generated in the admin engagement dashboard.
+  assert.equal(calls.trackEngagementEvent.length, 1);
+  assert.equal(calls.trackEngagementEvent[0].event, "referral_link_generated");
+  assert.equal(calls.trackEngagementEvent[0].referralLinkId, "https://t.me/+abc123");
 });
 
 test("getReferral(): missing link in response returns false and shows inline error", async () => {
@@ -223,6 +238,42 @@ test("handleReferralEntryAction: action=generate_referral calls getReferral exac
   assert.ok(doneLog, "expected an ENTRY_ACTION_DONE log line");
   assert.match(doneLog, /mode=invite_link/);
   assert.doesNotMatch(doneLog, /t\.me\/\+xyz/, "the actual referral link must never be logged");
+});
+
+test("handleReferralEntryAction: the deep-link open itself counts as a CTA click", async () => {
+  // A bot button that opens the Mini App with ?action=generate_referral is a
+  // referral CTA -- the tap happened in Telegram before this page loaded.
+  // Without an explicit track call here, every deep-link-driven generation
+  // was invisible to CTA-click analytics (Referral CTA Clickers stayed 0
+  // even while links were actually being generated through this path).
+  const { context, calls } = makeContext({
+    elementIds: HAPPY_ELEMENTS,
+    search: "?action=generate_referral",
+    fetchImpl: async () => ({
+      text: async () => JSON.stringify({ success: true, referral_link: "https://t.me/+xyz" }),
+    }),
+  });
+
+  await context.handleReferralEntryAction();
+
+  const ctaClick = calls.trackEngagementEvent.find((c) => c.event === "referral_cta_clicked");
+  assert.ok(ctaClick, "expected a referral_cta_clicked track call");
+  assert.equal(ctaClick.surface, "referral_entry_deeplink");
+
+  const linkGenerated = calls.trackEngagementEvent.find((c) => c.event === "referral_link_generated");
+  assert.ok(linkGenerated, "the underlying getReferral() success must still fire referral_link_generated");
+});
+
+test("handleReferralEntryAction: guard-clause bailouts never fire a CTA click", async () => {
+  const { calls, context } = makeContext({
+    elementIds: HAPPY_ELEMENTS,
+    search: "?v=42",
+    fetchImpl: async () => ({ text: async () => "{}" }),
+  });
+
+  await context.handleReferralEntryAction();
+
+  assert.equal(calls.trackEngagementEvent.length, 0);
 });
 
 test("handleReferralEntryAction: calling it twice (simulating double init) only triggers one API call", async () => {
@@ -337,4 +388,29 @@ test("handleReferralEntryAction: an automatic failure logs ENTRY_ACTION_FAILED a
   assert.equal(retryOk, true);
   assert.equal(context.latestReferralLink, "https://t.me/+retry-ok");
   assert.match(elements["referral-link"].innerText, /retry-ok/);
+});
+
+// ---------------------------------------------------------------------------
+// Multiple referral entry points: the "Invite & Earn" quick tile
+// ---------------------------------------------------------------------------
+//
+// static/index.html has more than one referral CTA in the live UI: the
+// in-journey-card "Get link" button (#ap-get-referral-btn, wired to
+// handleReferralLinkClick(), which tracks referral_cta_clicked before doing
+// anything else) and the "Invite & earn" quick tile in the action-tiles
+// grid. The tile used to call getReferral() directly, generating a link
+// (and, on success, firing referral_link_generated) without ever firing
+// referral_cta_clicked -- undercounting CTA Clickers for every user who
+// engaged via the tile instead of the journey-card button. This is a plain
+// text/DOM assertion (not a vm-executed one) since the tile's onclick is a
+// static HTML attribute, not a function under test.
+test("Invite & Earn tile routes through the tracked CTA flow, not a bare getReferral() call", () => {
+  const html = fs.readFileSync(path.join(__dirname, "static", "index.html"), "utf8");
+  const tileMatch = html.match(/<div class="ap-tile ap-tile-orange" onclick="([^"]+)">/);
+  assert.ok(tileMatch, "Invite & Earn tile markup not found");
+  assert.equal(
+    tileMatch[1],
+    "handleReferralLinkClick()",
+    "the tile must go through handleReferralLinkClick() so the click is tracked as referral_cta_clicked"
+  );
 });
