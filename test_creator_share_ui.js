@@ -946,12 +946,14 @@ function resultsOkResponse(overrides) {
           {
             status: "ok",
             results: {
-              total_referral_joins: 12,
-              qualified_referrals: 7,
+              total_referral_joins: 40,
+              qualified_referrals: 25,
               pending_referrals: 5,
               revoked_referrals: 0,
               current_week_referrals: 2,
               current_week_qualified: 1,
+              current_month_referrals: 12,
+              current_month_qualified: 7,
               latest_generated_at: null,
               total_packages_generated: 0,
               next_reward_tier: { qualified_needed: 3, reward_amount: 10 },
@@ -963,7 +965,7 @@ function resultsOkResponse(overrides) {
   });
 }
 
-test("compact stats section: shows Total Invited/Total Qualified counts and the this-month tier progress message", async () => {
+test("compact stats section: shows current-month Invited/Qualified counts and tier progress message, under a This Month label", async () => {
   const { elements, fetchCalls } = buildSandbox({
     fetchImpl: (url) => {
       if (url.includes("/api/creator/share/status")) return statusOkResponse();
@@ -976,9 +978,12 @@ test("compact stats section: shows Total Invited/Total Qualified counts and the 
   await flush();
   await flush();
 
+  // These are the current-month fields (12/7), not the lifetime
+  // total_referral_joins/qualified_referrals fields (40/25) also present
+  // in the response.
   assert.equal(elements["stat-invited-value"].textContent, 12);
   assert.equal(elements["stat-qualified-value"].textContent, 7);
-  assert.equal(elements["stat-tier-message"].textContent, "This Month: 3 more qualified referrals to unlock $10");
+  assert.equal(elements["stat-tier-message"].textContent, "3 more qualified referrals to unlock $10");
   assert.equal(elements["stat-tier-message"].classList.contains("hidden"), false);
   assert.equal(elements["stats-card"].classList.contains("hidden"), false);
 
@@ -986,19 +991,20 @@ test("compact stats section: shows Total Invited/Total Qualified counts and the 
   assert.ok(resultsCall, "the results endpoint is called to populate the compact stats section");
 });
 
-test("stat labels are scope-qualified: Total Invited / Total Qualified are lifetime, distinct from the this-month tier message", () => {
+test("stats card is labeled This Month, and uses the bare Invited/Qualified labels", () => {
   const html = fs.readFileSync(path.join(__dirname, "static", "creator-share.html"), "utf8");
-  assert.match(html, /Total Invited/);
-  assert.match(html, /Total Qualified/);
-  assert.doesNotMatch(html, />Invited</, "bare \"Invited\" label must not remain -- only \"Total Invited\"");
-  assert.doesNotMatch(html, />Qualified</, "bare \"Qualified\" label must not remain -- only \"Total Qualified\"");
+  assert.match(html, /class="stats-scope-label">This Month</, "stats card must carry a visible \"This Month\" scope label");
+  assert.match(html, />Invited</);
+  assert.match(html, />Qualified</);
+  assert.doesNotMatch(html, /Total Invited/, "labels must be the bare current-month \"Invited\"/\"Qualified\", not \"Total Invited\"/\"Total Qualified\"");
+  assert.doesNotMatch(html, /Total Qualified/);
 });
 
-test("compact stats section: highest tier reached shows the this-month max-tier message", async () => {
+test("compact stats section: highest tier reached shows the max-tier message without repeating the month scope", async () => {
   const { elements } = buildSandbox({
     fetchImpl: (url) => {
       if (url.includes("/api/creator/share/status")) return statusOkResponse();
-      if (url.includes("/api/creator/share/results")) return resultsOkResponse({ results: { total_referral_joins: 300, qualified_referrals: 300, next_reward_tier: null } });
+      if (url.includes("/api/creator/share/results")) return resultsOkResponse({ results: { current_month_referrals: 300, current_month_qualified: 300, next_reward_tier: null } });
       return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ status: "ok" }) });
     },
   });
@@ -1007,7 +1013,7 @@ test("compact stats section: highest tier reached shows the this-month max-tier 
   await flush();
   await flush();
 
-  assert.equal(elements["stat-tier-message"].textContent, "This Month: Highest reward tier reached");
+  assert.equal(elements["stat-tier-message"].textContent, "Highest reward tier reached");
 });
 
 test("compact stats section: failed results fetch hides the section without blocking Get My Share Post", async () => {

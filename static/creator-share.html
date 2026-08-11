@@ -161,6 +161,15 @@
 
   /* Compact referral performance stats -- two equal-width cards, no
      analytics/dashboard styling. */
+  .stats-scope-label {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--muted);
+    font-weight: 700;
+    margin: 0 0 8px;
+    text-align: center;
+  }
   .stats-row {
     display: flex;
     gap: 10px;
@@ -217,14 +226,15 @@
 
     <div id="app-shell" class="hidden">
       <div id="stats-card" class="card">
+        <p class="stats-scope-label">This Month</p>
         <div class="stats-row">
           <div class="stat-box">
             <div id="stat-invited-value" class="stat-value">–</div>
-            <div class="stat-label">Total Invited</div>
+            <div class="stat-label">Invited</div>
           </div>
           <div class="stat-box">
             <div id="stat-qualified-value" class="stat-value">–</div>
-            <div class="stat-label">Total Qualified</div>
+            <div class="stat-label">Qualified</div>
           </div>
         </div>
         <p id="stat-tier-message" class="stat-tier-message hidden"></p>
@@ -647,15 +657,13 @@
     }
   }
 
-  // Reward-tier progress is scoped to the current calendar month (reward
-  // totals reset on the 1st -- see the rewards card note), unlike the
-  // lifetime Total Invited / Total Qualified figures above it, so the
-  // "This Month:" prefix is required to avoid the two being read as the
-  // same scope.
+  // Invited/Qualified above and this progress message are now both scoped
+  // to the current reward month (the "This Month" label on the stats card
+  // covers it), so the message itself no longer repeats the scope.
   function tierMessage(nextTier) {
-    if (!nextTier) return "This Month: Highest reward tier reached";
+    if (!nextTier) return "Highest reward tier reached";
     var n = nextTier.qualified_needed;
-    return "This Month: " + n + " more qualified referral" + (n === 1 ? "" : "s") + " to unlock $" + nextTier.reward_amount;
+    return n + " more qualified referral" + (n === 1 ? "" : "s") + " to unlock $" + nextTier.reward_amount;
   }
 
   function hideStats() {
@@ -673,8 +681,8 @@
       var results = res.body.results;
       els.statInvitedValue.classList.remove("skeleton");
       els.statQualifiedValue.classList.remove("skeleton");
-      els.statInvitedValue.textContent = results.total_referral_joins;
-      els.statQualifiedValue.textContent = results.qualified_referrals;
+      els.statInvitedValue.textContent = results.current_month_referrals;
+      els.statQualifiedValue.textContent = results.current_month_qualified;
       els.statTierMessage.textContent = tierMessage(results.next_reward_tier);
       els.statTierMessage.classList.remove("hidden");
     }).catch(function () {

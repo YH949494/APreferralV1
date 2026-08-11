@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import sys
 import types
+from datetime import timedelta
 
 import pytest
 from flask import Flask
@@ -524,7 +525,72 @@ class TestResults:
 
         _set_qualified_count(250)
         resp = client.get("/api/creator/share/results?init_data=ok")
-        assert resp.get_json()["results"]["next_reward_tier"] is None
+        results = resp.get_json()["results"]
+        assert results["next_reward_tier"] is None
+        assert results["current_month_qualified"] == 250
+
+    def test_current_month_invited_excludes_previous_month_referrals(self, fake_db, monkeypatch, client):
+        _fake_vouchers_module(monkeypatch)
+        _creator(fake_db)
+        monkeypatch.delenv("CREATOR_GROUP_CHAT_ID", raising=False)
+        now = rsc.now_utc()
+        month_start_utc, _month_end_utc = scheduler.current_month_window_utc(now)
+
+        in_month_ts = month_start_utc + timedelta(seconds=1)
+        prev_month_ts = month_start_utc - timedelta(seconds=1)
+
+        for doc in (
+            {"inviter_user_id": 555, "invitee_user_id": 1, "status": "pending", "created_at_utc": in_month_ts},
+            {"inviter_user_id": 555, "invitee_user_id": 2, "status": "pending", "created_at_utc": prev_month_ts},
+            # Different inviter -- must never leak into this creator's count either.
+            {"inviter_user_id": 999, "invitee_user_id": 3, "status": "pending", "created_at_utc": in_month_ts},
+        ):
+            fake_db["pending_referrals"].insert_one(doc)
+
+        resp = client.get("/api/creator/share/results?init_data=ok")
+        results = resp.get_json()["results"]
+        assert results["current_month_referrals"] == 1
+        # Lifetime total_referral_joins is unaffected by the month window.
+        assert results["total_referral_joins"] == 2
+
+    def test_month_window_is_kl_calendar_month_inclusive_start_exclusive_end(self, fake_db, monkeypatch, client):
+        _fake_vouchers_module(monkeypatch)
+        _creator(fake_db)
+        monkeypatch.delenv("CREATOR_GROUP_CHAT_ID", raising=False)
+        now = rsc.now_utc()
+        month_start_utc, month_end_utc = scheduler.current_month_window_utc(now)
+
+        fake_db["pending_referrals"].insert_one(
+            {"inviter_user_id": 555, "invitee_user_id": 1, "status": "pending", "created_at_utc": month_start_utc}
+        )
+        fake_db["pending_referrals"].insert_one(
+            {"inviter_user_id": 555, "invitee_user_id": 2, "status": "pending", "created_at_utc": month_end_utc}
+        )
+
+        resp = client.get("/api/creator/share/results?init_data=ok")
+        results = resp.get_json()["results"]
+        assert results["current_month_referrals"] == 1
+
+    def test_current_month_qualified_matches_canonical_helper_and_reward_progress_shares_it(
+        self, fake_db, monkeypatch, client
+    ):
+        _fake_vouchers_module(monkeypatch)
+        _creator(fake_db)
+        monkeypatch.delenv("CREATOR_GROUP_CHAT_ID", raising=False)
+        now = rsc.now_utc()
+        self._set_month_settled_count(fake_db, now, 7)
+
+        resp = client.get("/api/creator/share/results?init_data=ok")
+        results = resp.get_json()["results"]
+
+        expected = scheduler.current_month_qualified_referral_count(555, now)
+        assert expected == 7
+        assert results["current_month_qualified"] == expected
+        # Consistency requirement: the displayed Qualified figure and the
+        # reward-progress calculation must come from the same value -- no
+        # scenario where the UI shows N qualified but computes progress
+        # from a different number.
+        assert results["next_reward_tier"]["qualified_needed"] == 10 - results["current_month_qualified"]
 
     def test_total_packages_generated_and_latest_generated_at(self, fake_db, monkeypatch, client):
         _fake_vouchers_module(monkeypatch)

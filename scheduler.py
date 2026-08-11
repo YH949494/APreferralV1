@@ -2785,6 +2785,15 @@ def confirm_qualified_invitees(batch_limit: int = 200) -> int:
     logger.info("[SCHED][QUALIFIED] skipped reason=mark_invitee_qualified_is_source_of_truth")
     return 0
 
+def current_month_window_utc(now_utc_ts: datetime | None = None) -> tuple[datetime, datetime]:
+    """UTC [start, end) bounds of the current reward month (Asia/Kuala_Lumpur
+    calendar month) -- the same boundary current_month_qualified_referral_count()
+    and REFERRAL_CONGRATS_TIERS evaluation use, exposed for callers that need
+    a datetime range instead of a month_key string (e.g. windowing a
+    collection that has no month_key field, like pending_referrals)."""
+    return _month_window_utc(now_utc_ts or now_utc())
+
+
 def current_month_qualified_referral_count(inviter_user_id: int, now_utc_ts: datetime | None = None) -> int:
     """Net qualified (settled minus revoked) referral_events for
     inviter_user_id within the current reward month (Asia/Kuala_Lumpur

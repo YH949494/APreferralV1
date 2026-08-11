@@ -42,6 +42,22 @@ database, referral, XP, or invite-link system.
   progress message can never promise a tier the reward workflow has already
   reset past. It does not grant rewards or alter payout qualification
   rules, which remain wherever rewards are actually paid out.
+- **Money Room "This Month" Invited/Qualified stats**: both figures shown on
+  the page (`current_month_referrals` / `current_month_qualified` in the
+  `/api/creator/share/results` response) are scoped to the same current
+  Asia/Kuala_Lumpur calendar month as the reward-tier progress line beneath
+  them, via `scheduler.current_month_window_utc()` (a thin public wrapper
+  around the same private `_month_window_utc()` boundary
+  `current_month_qualified_referral_count()` and other scheduler jobs
+  already use). `current_month_referrals` filters `pending_referrals` on
+  `created_at_utc` — the same join-timestamp field the collection is
+  written with and the same field `affiliate_leaderboard.py` windows its
+  own weekly joins count on — inside `[month_start_utc, month_end_utc)`.
+  `current_month_qualified` is exactly the same value passed into
+  `_next_reward_tier()`, so the displayed "Qualified" number and the
+  "N more qualified referrals to unlock $X" message can never disagree.
+  The lifetime `total_referral_joins`/`qualified_referrals` fields remain
+  in the response (unused by this page's UI) for backward compatibility.
 
 What's new is access control (`creator_members`), a creator-facing UI
 (`static/creator-share.html`), a small set of `/api/creator/...` endpoints,
