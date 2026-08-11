@@ -24,6 +24,12 @@ database, referral, XP, or invite-link system.
   (`dashboard_panels._QUALIFIED_STATUSES` / `_PENDING_STATUSES` /
   `_REVOKED_STATUSES`) — qualified vs. pending vs. revoked classification is
   never redefined here.
+- **Reward tier ladder**: `creator_share_centre.CREATOR_REWARD_TIERS` is the
+  single source of truth for tier thresholds, mirroring the static list
+  already shown in the "See Referral Rewards" card. `creator_share_results()`
+  uses it (via `_next_reward_tier()`) only to compute *progress toward* the
+  next tier for display — it does not grant rewards or alter payout
+  qualification rules, which remain wherever rewards are actually paid out.
 
 What's new is access control (`creator_members`), a creator-facing UI
 (`static/creator-share.html`), a small set of `/api/creator/...` endpoints,
@@ -271,7 +277,7 @@ Never the bot token, never a full Telegram API response body.
 | POST | `/api/creator/share/generate` | Generate a share package (`{"platform": "generic\|whatsapp\|facebook\|x\|telegram"}`) |
 | POST | `/api/creator/share/<package_id>/copied` | Record a successful clipboard copy (interaction only) |
 | POST | `/api/creator/share/<package_id>/share-clicked` | Record a share action was initiated (interaction only) |
-| GET | `/api/creator/share/results` | Creator's own referral results |
+| GET | `/api/creator/share/results` | Creator's own referral results (also drives the compact Invited/Qualified stats + next-tier progress message on the Money Room page) |
 
 `copied`/`share-clicked` are **interaction telemetry only** — they never
 grant referral rewards, XP, or otherwise touch qualification state, and both

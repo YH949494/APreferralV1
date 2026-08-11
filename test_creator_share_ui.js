@@ -112,12 +112,16 @@ const ELEMENT_IDS = [
   "share-status",
   "btn-toggle-rewards",
   "rewards-section",
+  "stats-card",
+  "stat-invited-value",
+  "stat-qualified-value",
+  "stat-tier-message",
 ];
 
 // Mirrors the `class="... hidden"` markup already present in
 // static/creator-share.html, since the lightweight element stubs below don't
 // parse the real HTML/CSS -- only classes the inline script itself toggles.
-const INITIALLY_HIDDEN_IDS = ["access-denied", "app-shell", "package-card", "package-caption", "package-playback", "rewards-section"];
+const INITIALLY_HIDDEN_IDS = ["access-denied", "app-shell", "package-card", "package-caption", "package-playback", "rewards-section", "stat-tier-message"];
 
 function buildSandbox({ initData = "tg_init_data_ok", fetchImpl, clipboardWriteText, execCommandResult = true, openTelegramLink, windowOpenResult, windowOpenThrows } = {}) {
   const elements = {};
@@ -926,13 +930,94 @@ test("reward ladder markup lists the five static tiers and the monthly reset not
   assert.match(html, /Only qualified referrals count/i);
 });
 
-test("no monthly progress card, milestone bar, or results-endpoint call remains on this page", () => {
+test("no monthly progress card or milestone bar remains on this page", () => {
   const html = fs.readFileSync(path.join(__dirname, "static", "creator-share.html"), "utf8");
-  const source = loadScriptSource();
   assert.ok(!/THIS WEEK/i.test(html), "weekly performance section must be removed");
   assert.ok(!/THIS MONTH/i.test(html), "no monthly progress card may be added on this page");
-  assert.ok(!source.includes("/api/creator/share/results"), "this page must not call the results/leaderboard endpoint");
   assert.ok(!/progress-bar|progress-track|milestone/i.test(html), "no progress bar or milestone-tracking markup");
+});
+
+function resultsOkResponse(overrides) {
+  return Promise.resolve({
+    ok: true,
+    status: 200,
+    json: () =>
+      Promise.resolve(
+        Object.assign(
+          {
+            status: "ok",
+            results: {
+              total_referral_joins: 12,
+              qualified_referrals: 7,
+              pending_referrals: 5,
+              revoked_referrals: 0,
+              current_week_referrals: 2,
+              current_week_qualified: 1,
+              latest_generated_at: null,
+              total_packages_generated: 0,
+              next_reward_tier: { qualified_needed: 3, reward_amount: 10 },
+            },
+          },
+          overrides || {}
+        )
+      ),
+  });
+}
+
+test("compact stats section: shows Invited/Qualified counts and next-tier progress message", async () => {
+  const { elements, fetchCalls } = buildSandbox({
+    fetchImpl: (url) => {
+      if (url.includes("/api/creator/share/status")) return statusOkResponse();
+      if (url.includes("/api/creator/share/results")) return resultsOkResponse();
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ status: "ok" }) });
+    },
+  });
+
+  await flush();
+  await flush();
+  await flush();
+
+  assert.equal(elements["stat-invited-value"].textContent, 12);
+  assert.equal(elements["stat-qualified-value"].textContent, 7);
+  assert.equal(elements["stat-tier-message"].textContent, "3 more qualified referrals to unlock $10");
+  assert.equal(elements["stat-tier-message"].classList.contains("hidden"), false);
+  assert.equal(elements["stats-card"].classList.contains("hidden"), false);
+
+  const resultsCall = fetchCalls.find((c) => c.url.includes("/api/creator/share/results"));
+  assert.ok(resultsCall, "the results endpoint is called to populate the compact stats section");
+});
+
+test("compact stats section: highest tier reached shows the max-tier message", async () => {
+  const { elements } = buildSandbox({
+    fetchImpl: (url) => {
+      if (url.includes("/api/creator/share/status")) return statusOkResponse();
+      if (url.includes("/api/creator/share/results")) return resultsOkResponse({ results: { total_referral_joins: 300, qualified_referrals: 300, next_reward_tier: null } });
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ status: "ok" }) });
+    },
+  });
+
+  await flush();
+  await flush();
+  await flush();
+
+  assert.equal(elements["stat-tier-message"].textContent, "Highest referral reward reached");
+});
+
+test("compact stats section: failed results fetch hides the section without blocking Get My Share Post", async () => {
+  const { elements } = buildSandbox({
+    fetchImpl: (url) => {
+      if (url.includes("/api/creator/share/status")) return statusOkResponse();
+      if (url.includes("/api/creator/share/results")) return Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve({ status: "error" }) });
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ status: "ok" }) });
+    },
+  });
+
+  await flush();
+  await flush();
+  await flush();
+
+  assert.equal(elements["stats-card"].classList.contains("hidden"), true);
+  assert.equal(elements["btn-generate"].classList.contains("hidden"), false, "Get My Share Post must remain usable");
 });
 
 test("no admin controls are present in the creator page markup", () => {

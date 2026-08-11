@@ -158,6 +158,50 @@
     color: var(--muted);
     margin: 10px 0 0;
   }
+
+  /* Compact referral performance stats -- two equal-width cards, no
+     analytics/dashboard styling. */
+  .stats-row {
+    display: flex;
+    gap: 10px;
+  }
+  .stat-box {
+    flex: 1 1 0;
+    min-width: 0;
+    text-align: center;
+    background: #1b1c24;
+    border-radius: 12px;
+    padding: 10px 8px;
+  }
+  .stat-value {
+    font-size: 22px;
+    font-weight: 800;
+    line-height: 1.2;
+  }
+  .stat-value.skeleton {
+    color: transparent;
+    background: linear-gradient(90deg, #23242e 25%, #2c2e3a 37%, #23242e 63%);
+    background-size: 400% 100%;
+    border-radius: 6px;
+    animation: stat-skeleton 1.4s ease infinite;
+  }
+  @keyframes stat-skeleton {
+    0% { background-position: 100% 50%; }
+    100% { background-position: 0 50%; }
+  }
+  .stat-label {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--muted);
+    margin-top: 2px;
+  }
+  .stat-tier-message {
+    font-size: 12px;
+    color: var(--muted);
+    text-align: center;
+    margin: 10px 0 0;
+  }
 </style>
 </head>
 <body>
@@ -172,6 +216,20 @@
     <div id="access-denied" class="status hidden"></div>
 
     <div id="app-shell" class="hidden">
+      <div id="stats-card" class="card">
+        <div class="stats-row">
+          <div class="stat-box">
+            <div id="stat-invited-value" class="stat-value">–</div>
+            <div class="stat-label">Invited</div>
+          </div>
+          <div class="stat-box">
+            <div id="stat-qualified-value" class="stat-value">–</div>
+            <div class="stat-label">Qualified</div>
+          </div>
+        </div>
+        <p id="stat-tier-message" class="stat-tier-message hidden"></p>
+      </div>
+
       <div class="card">
         <button id="btn-toggle-rewards" type="button">See Referral Rewards</button>
         <div id="rewards-section" class="hidden">
@@ -312,6 +370,10 @@
     shareStatus: document.getElementById("share-status"),
     btnToggleRewards: document.getElementById("btn-toggle-rewards"),
     rewardsSection: document.getElementById("rewards-section"),
+    statsCard: document.getElementById("stats-card"),
+    statInvitedValue: document.getElementById("stat-invited-value"),
+    statQualifiedValue: document.getElementById("stat-qualified-value"),
+    statTierMessage: document.getElementById("stat-tier-message"),
   };
 
   var ACCESS_DENIED_MESSAGES = {
@@ -585,6 +647,36 @@
     }
   }
 
+  function tierMessage(nextTier) {
+    if (!nextTier) return "Highest referral reward reached";
+    var n = nextTier.qualified_needed;
+    return n + " more qualified referral" + (n === 1 ? "" : "s") + " to unlock $" + nextTier.reward_amount;
+  }
+
+  function hideStats() {
+    els.statsCard.classList.add("hidden");
+  }
+
+  function loadStats() {
+    els.statInvitedValue.classList.add("skeleton");
+    els.statQualifiedValue.classList.add("skeleton");
+    apiGet("/api/creator/share/results").then(function (res) {
+      if (!res.ok || res.body.status !== "ok" || !res.body.results) {
+        hideStats();
+        return;
+      }
+      var results = res.body.results;
+      els.statInvitedValue.classList.remove("skeleton");
+      els.statQualifiedValue.classList.remove("skeleton");
+      els.statInvitedValue.textContent = results.total_referral_joins;
+      els.statQualifiedValue.textContent = results.qualified_referrals;
+      els.statTierMessage.textContent = tierMessage(results.next_reward_tier);
+      els.statTierMessage.classList.remove("hidden");
+    }).catch(function () {
+      hideStats();
+    });
+  }
+
   function init() {
     apiGet("/api/creator/share/status").then(function (res) {
       els.initialLoading.classList.add("hidden");
@@ -600,6 +692,7 @@
       // same sessionStorage session_id never produce a second open.
       trackEngagementEvent("creator_centre_opened", { surface: "app_shell" });
       setupReferralSectionViewTracking();
+      loadStats();
     }).catch(function () {
       els.initialLoading.classList.add("hidden");
       showAccessDenied("invalid_telegram_auth");

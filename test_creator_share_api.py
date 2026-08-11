@@ -460,6 +460,29 @@ class TestResults:
         assert results["qualified_referrals"] == 1
         assert results["pending_referrals"] == 1
         assert results["revoked_referrals"] == 1
+        # 1 qualified referral -> 9 more needed to reach the first tier (10 -> $10).
+        assert results["next_reward_tier"] == {"qualified_needed": 9, "reward_amount": 10}
+
+    def test_next_reward_tier_progresses_through_the_ladder_and_caps_at_highest(self, fake_db, monkeypatch, client):
+        _fake_vouchers_module(monkeypatch)
+        _creator(fake_db)
+        monkeypatch.delenv("CREATOR_GROUP_CHAT_ID", raising=False)
+        now = rsc.now_utc()
+
+        def _set_qualified_count(count):
+            fake_db["pending_referrals"].delete_many({})
+            for i in range(count):
+                fake_db["pending_referrals"].insert_one(
+                    {"inviter_user_id": 555, "invitee_user_id": i, "status": "qualified", "created_at_utc": now}
+                )
+
+        _set_qualified_count(10)
+        resp = client.get("/api/creator/share/results?init_data=ok")
+        assert resp.get_json()["results"]["next_reward_tier"] == {"qualified_needed": 15, "reward_amount": 15}
+
+        _set_qualified_count(250)
+        resp = client.get("/api/creator/share/results?init_data=ok")
+        assert resp.get_json()["results"]["next_reward_tier"] is None
 
     def test_total_packages_generated_and_latest_generated_at(self, fake_db, monkeypatch, client):
         _fake_vouchers_module(monkeypatch)
