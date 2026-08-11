@@ -2247,6 +2247,15 @@ def ensure_indexes():
         unique=True,
         name="uniq_referral_tier_congrats",
     )
+    # Backs GET /api/creator/recent-win's "latest displayable achievement"
+    # query (creator_share_centre.creator_recent_win): sort by sent_at desc
+    # among docs that carry the display fields. Partial so it only indexes
+    # documents recent-win actually reads, not the full dedup-guard history.
+    db.referral_tier_congrats.create_index(
+        [("sent_at", -1)],
+        name="referral_tier_congrats_recent_win",
+        partialFilterExpression={"reward_amount": {"$exists": True}},
+    )
     referral_rate_limits_collection.create_index(
         [("key", 1)],
         unique=True,
