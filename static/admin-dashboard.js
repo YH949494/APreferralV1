@@ -5426,7 +5426,7 @@
     api("/api/admin/referral/creators" + rscQuery("rsc-creators-search", "rsc-creators-status-filter")).then(function (data) {
       $("#rsc-creators-summary").textContent = "Active creators: " + fmt(data.active_count || 0);
       var items = data.creators || [];
-      if (!items.length) { $("#rsc-creators-body").innerHTML = emptyState("No creators yet — chat members appear here after opening the Creator Centre, or approve one manually above."); return; }
+      if (!items.length) { $("#rsc-creators-body").innerHTML = emptyState("No creators yet — chat members appear here after opening The Money Room, or approve one manually above."); return; }
       var rows = items.map(function (c) {
         var actions = '<button class="btn danger" data-rsc-creator-action="remove" data-id="' + esc(c.user_id) + '">Remove</button>';
         if (c.status === "active") {
@@ -5569,7 +5569,7 @@
         '<th>Source</th><th>Viewers</th><th>Clickers</th><th>CTR</th><th>Generated</th>' +
         '<th>Copy/Share Users</th><th>Assisted Joins</th><th>Assisted Qualified</th></tr></thead><tbody>' +
         bySource.map(function (s) {
-          return '<tr><td>' + esc(s.source === "miniapp" ? "Mini App" : "Creator Centre") + '</td>' +
+          return '<tr><td>' + esc(s.source === "miniapp" ? "Mini App" : "The Money Room") + '</td>' +
             '<td>' + fmt(s.viewers) + '</td><td>' + fmt(s.clickers) + '</td><td>' + rsePct(s.ctr) + '</td>' +
             '<td>' + fmt(s.generated) + '</td><td>' + fmt(s.copy_share_users) + '</td>' +
             '<td>' + fmt(s.assisted_joins) + '</td><td>' + fmt(s.assisted_qualified_referrals) + '</td></tr>';
