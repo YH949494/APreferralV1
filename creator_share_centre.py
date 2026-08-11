@@ -822,6 +822,63 @@ def creator_share_results():
     )
 
 
+def _mask_display_name(name: str) -> str:
+    """First 2-3 chars + '***', e.g. "TheJone9" -> "The***". Matches the
+    Money Room "Recent Win" card's privacy requirement -- distinct from
+    main.mask_username's front4/last2 scheme, which is for a different
+    (admin-visible leaderboard) surface."""
+    cleaned = str(name or "").lstrip("@").strip()
+    if not cleaned:
+        return "Someone"
+    keep = min(3, max(2, len(cleaned) - 1)) if len(cleaned) > 3 else min(2, len(cleaned))
+    return cleaned[:keep] + "***"
+
+
+@creator_share_bp.get("/api/creator/recent-win")
+def creator_recent_win():
+    """Latest genuine referral-reward tier unlock, for the Money Room's
+    "Recent Win" social-proof card. Reads the same referral_tier_congrats
+    collection scheduler.maybe_shout_referral_congrats already writes as its
+    Telegram-announcement dedup guard -- no separate reward computation or
+    new collection. Returns win=None (empty state) when nothing has been
+    unlocked yet; never fabricates a placeholder."""
+    _user_id, _username, _record, err = _authenticate_and_authorize()
+    if err:
+        code, http_status = err
+        return jsonify({"status": "error", "code": code}), http_status
+
+    doc = database.db["referral_tier_congrats"].find_one(
+        # reward_amount only exists on docs written after this field was
+        # added -- older docs (dedup-only, no display data) are skipped
+        # rather than shown with missing fields.
+        {"reward_amount": {"$exists": True}},
+        sort=[("sent_at", -1)],
+        projection={
+            "display_name": 1,
+            "username": 1,
+            "qualified_referrals": 1,
+            "reward_amount": 1,
+            "sent_at": 1,
+        },
+    )
+    if not doc:
+        return jsonify({"status": "ok", "win": None})
+
+    raw_name = doc.get("display_name") or doc.get("username")
+    sent_at = doc.get("sent_at")
+    return jsonify(
+        {
+            "status": "ok",
+            "win": {
+                "display_name": _mask_display_name(raw_name),
+                "qualified_referrals": doc.get("qualified_referrals"),
+                "reward_amount": doc.get("reward_amount"),
+                "achieved_at": sent_at.isoformat() if sent_at else None,
+            },
+        }
+    )
+
+
 # ---------------------------------------------------------------------------
 # Admin API — Creator Access
 # ---------------------------------------------------------------------------

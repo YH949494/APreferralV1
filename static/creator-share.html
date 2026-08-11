@@ -211,6 +211,21 @@
     text-align: center;
     margin: 10px 0 0;
   }
+  .recent-win-card {
+    padding: 10px 12px;
+  }
+  .recent-win-title {
+    margin: 0 0 2px;
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--ap-orange);
+  }
+  .recent-win-text {
+    margin: 0;
+    font-size: 13px;
+    color: var(--text);
+    line-height: 1.4;
+  }
 </style>
 </head>
 <body>
@@ -238,6 +253,11 @@
           </div>
         </div>
         <p id="stat-tier-message" class="stat-tier-message hidden"></p>
+      </div>
+
+      <div id="recent-win-card" class="card recent-win-card hidden">
+        <p class="recent-win-title">🔥 Recent Win</p>
+        <p id="recent-win-text" class="recent-win-text"></p>
       </div>
 
       <div class="card">
@@ -384,6 +404,8 @@
     statInvitedValue: document.getElementById("stat-invited-value"),
     statQualifiedValue: document.getElementById("stat-qualified-value"),
     statTierMessage: document.getElementById("stat-tier-message"),
+    recentWinCard: document.getElementById("recent-win-card"),
+    recentWinText: document.getElementById("recent-win-text"),
   };
 
   var ACCESS_DENIED_MESSAGES = {
@@ -690,6 +712,33 @@
     });
   }
 
+  function hideRecentWin() {
+    els.recentWinCard.classList.add("hidden");
+  }
+
+  function loadRecentWin() {
+    apiGet("/api/creator/recent-win").then(function (res) {
+      if (!res.ok || res.body.status !== "ok" || !res.body.win) {
+        hideRecentWin();
+        return;
+      }
+      var win = res.body.win;
+      els.recentWinText.textContent =
+        win.display_name + " earned $" + win.reward_amount + " from " + win.qualified_referrals + " qualified referrals.";
+      els.recentWinCard.classList.remove("hidden");
+    }).catch(function () {
+      hideRecentWin();
+    });
+  }
+
+  var RECENT_WIN_REFRESH_MS = 45000;
+  function startRecentWinRefresh() {
+    // Plain polling, no WebSocket/realtime infra -- matches the rest of
+    // this Mini App page. Only runs while the tab/app is open; the interval
+    // is never persisted or restarted elsewhere.
+    setInterval(loadRecentWin, RECENT_WIN_REFRESH_MS);
+  }
+
   function init() {
     apiGet("/api/creator/share/status").then(function (res) {
       els.initialLoading.classList.add("hidden");
@@ -706,6 +755,8 @@
       trackEngagementEvent("creator_centre_opened", { surface: "app_shell" });
       setupReferralSectionViewTracking();
       loadStats();
+      loadRecentWin();
+      startRecentWinRefresh();
     }).catch(function () {
       els.initialLoading.classList.add("hidden");
       showAccessDenied("invalid_telegram_auth");

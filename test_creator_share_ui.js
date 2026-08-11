@@ -116,12 +116,14 @@ const ELEMENT_IDS = [
   "stat-invited-value",
   "stat-qualified-value",
   "stat-tier-message",
+  "recent-win-card",
+  "recent-win-text",
 ];
 
 // Mirrors the `class="... hidden"` markup already present in
 // static/creator-share.html, since the lightweight element stubs below don't
 // parse the real HTML/CSS -- only classes the inline script itself toggles.
-const INITIALLY_HIDDEN_IDS = ["access-denied", "app-shell", "package-card", "package-caption", "package-playback", "rewards-section", "stat-tier-message"];
+const INITIALLY_HIDDEN_IDS = ["access-denied", "app-shell", "package-card", "package-caption", "package-playback", "rewards-section", "stat-tier-message", "recent-win-card"];
 
 function buildSandbox({ initData = "tg_init_data_ok", fetchImpl, clipboardWriteText, execCommandResult = true, openTelegramLink, windowOpenResult, windowOpenThrows } = {}) {
   const elements = {};
@@ -180,6 +182,14 @@ function buildSandbox({ initData = "tg_init_data_ok", fetchImpl, clipboardWriteT
         : { writeText: clipboardWriteText },
   };
 
+  // setInterval is captured rather than run for real: startRecentWinRefresh()
+  // schedules a real 45s poll in the browser, but tests must be able to
+  // trigger that tick deterministically (and must never leave a live
+  // 45-second timer as an open handle keeping the test process alive).
+  const intervalCalls = [];
+  let intervalIdCounter = 0;
+  const clearedIntervalIds = new Set();
+
   const windowOpenCalls = [];
   const sandbox = {
     window: {
@@ -199,6 +209,14 @@ function buildSandbox({ initData = "tg_init_data_ok", fetchImpl, clipboardWriteT
     setImmediate,
     setTimeout,
     clearTimeout,
+    setInterval: (fn, ms) => {
+      const id = ++intervalIdCounter;
+      intervalCalls.push({ id, fn, ms });
+      return id;
+    },
+    clearInterval: (id) => {
+      clearedIntervalIds.add(id);
+    },
     console,
     execCommandResult,
   };
@@ -208,7 +226,20 @@ function buildSandbox({ initData = "tg_init_data_ok", fetchImpl, clipboardWriteT
   vm.createContext(sandbox);
   vm.runInContext(loadScriptSource(), sandbox);
 
-  return { sandbox, elements, fetchCalls, createdTextareas, windowOpenCalls };
+  return {
+    sandbox,
+    elements,
+    fetchCalls,
+    createdTextareas,
+    windowOpenCalls,
+    intervalCalls,
+    clearedIntervalIds,
+    triggerIntervals() {
+      intervalCalls.forEach((c) => {
+        if (!clearedIntervalIds.has(c.id)) c.fn();
+      });
+    },
+  };
 }
 
 function statusOkResponse() {
@@ -1031,6 +1062,104 @@ test("compact stats section: failed results fetch hides the section without bloc
 
   assert.equal(elements["stats-card"].classList.contains("hidden"), true);
   assert.equal(elements["btn-generate"].classList.contains("hidden"), false, "Get My Share Post must remain usable");
+});
+
+function recentWinOkResponse(win) {
+  return Promise.resolve({
+    ok: true,
+    status: 200,
+    json: () => Promise.resolve({ status: "ok", win: win === undefined ? { display_name: "The***", qualified_referrals: 25, reward_amount: 15, achieved_at: "2026-08-01T00:00:00+00:00" } : win }),
+  });
+}
+
+test("Recent Win card: renders a single masked achievement line on load and stays hidden until then", async () => {
+  const { elements } = buildSandbox({
+    fetchImpl: (url) => {
+      if (url.includes("/api/creator/share/status")) return statusOkResponse();
+      if (url.includes("/api/creator/share/results")) return resultsOkResponse();
+      if (url.includes("/api/creator/recent-win")) return recentWinOkResponse();
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ status: "ok" }) });
+    },
+  });
+
+  assert.equal(elements["recent-win-card"].classList.contains("hidden"), true, "card starts hidden until the endpoint responds");
+
+  await flush();
+  await flush();
+  await flush();
+
+  assert.equal(elements["recent-win-card"].classList.contains("hidden"), false);
+  assert.equal(elements["recent-win-text"].textContent, "The*** earned $15 from 25 qualified referrals.");
+});
+
+test("Recent Win card: empty state (win: null) hides the block entirely, no placeholder text", async () => {
+  const { elements } = buildSandbox({
+    fetchImpl: (url) => {
+      if (url.includes("/api/creator/share/status")) return statusOkResponse();
+      if (url.includes("/api/creator/share/results")) return resultsOkResponse();
+      if (url.includes("/api/creator/recent-win")) return recentWinOkResponse(null);
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ status: "ok" }) });
+    },
+  });
+
+  await flush();
+  await flush();
+  await flush();
+
+  assert.equal(elements["recent-win-card"].classList.contains("hidden"), true);
+  assert.equal(elements["recent-win-text"].textContent, "");
+});
+
+test("Recent Win card: failed fetch hides the block without blocking Get My Share Post", async () => {
+  const { elements } = buildSandbox({
+    fetchImpl: (url) => {
+      if (url.includes("/api/creator/share/status")) return statusOkResponse();
+      if (url.includes("/api/creator/share/results")) return resultsOkResponse();
+      if (url.includes("/api/creator/recent-win")) return Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve({ status: "error" }) });
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ status: "ok" }) });
+    },
+  });
+
+  await flush();
+  await flush();
+  await flush();
+
+  assert.equal(elements["recent-win-card"].classList.contains("hidden"), true);
+  assert.equal(elements["btn-generate"].classList.contains("hidden"), false, "Get My Share Post must remain usable");
+});
+
+test("Recent Win card: only ever shows one achievement, and a poll tick replaces it with the newest one (no realtime infra, plain interval)", async () => {
+  let recentWinCallCount = 0;
+  const { elements, intervalCalls } = buildSandbox({
+    fetchImpl: (url) => {
+      if (url.includes("/api/creator/share/status")) return statusOkResponse();
+      if (url.includes("/api/creator/share/results")) return resultsOkResponse();
+      if (url.includes("/api/creator/recent-win")) {
+        recentWinCallCount += 1;
+        if (recentWinCallCount === 1) {
+          return recentWinOkResponse({ display_name: "Old***", qualified_referrals: 10, reward_amount: 10, achieved_at: "2026-07-01T00:00:00+00:00" });
+        }
+        return recentWinOkResponse({ display_name: "New***", qualified_referrals: 50, reward_amount: 50, achieved_at: "2026-08-01T00:00:00+00:00" });
+      }
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ status: "ok" }) });
+    },
+  });
+
+  await flush();
+  await flush();
+  await flush();
+
+  assert.equal(elements["recent-win-text"].textContent, "Old*** earned $10 from 10 qualified referrals.");
+  assert.equal(intervalCalls.length, 1, "a single poll interval is registered, no WebSocket/realtime infra");
+  assert.ok(intervalCalls[0].ms >= 30000 && intervalCalls[0].ms <= 60000, "poll interval must be within the 30-60s refresh window");
+
+  intervalCalls[0].fn();
+  await flush();
+  await flush();
+  await flush();
+
+  // The newest achievement replaces the previous one; still exactly one line shown.
+  assert.equal(elements["recent-win-text"].textContent, "New*** earned $50 from 50 qualified referrals.");
 });
 
 test("no admin controls are present in the creator page markup", () => {
