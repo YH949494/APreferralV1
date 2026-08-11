@@ -116,7 +116,7 @@ def test_creator_share_entry_point_sends_updated_copy_and_button(creator_env):
 
     buttons = _flat_buttons(reply["reply_markup"])
     assert len(buttons) == 1
-    assert buttons[0].text == "💰 Turn Shares Into Cash"
+    assert buttons[0].text == "💰 Enter The Money Room"
     assert buttons[0].web_app.url == "https://apreferralv1.fly.dev/creator-share"
 
 

@@ -8413,7 +8413,7 @@ async def send_creator_share_entry_point(update: Update, context: ContextTypes.D
 
     logger.info("[CREATOR_SHARE][ACCESS_GRANTED] user_id=%s", uid)
     keyboard = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("💰 Turn Shares Into Cash", web_app=WebAppInfo(url=CREATOR_SHARE_WEBAPP_URL))]]
+        [[InlineKeyboardButton("💰 Enter The Money Room", web_app=WebAppInfo(url=CREATOR_SHARE_WEBAPP_URL))]]
     )
     await safe_reply_text(
         update.effective_message,
