@@ -24,12 +24,24 @@ database, referral, XP, or invite-link system.
   (`dashboard_panels._QUALIFIED_STATUSES` / `_PENDING_STATUSES` /
   `_REVOKED_STATUSES`) — qualified vs. pending vs. revoked classification is
   never redefined here.
-- **Reward tier ladder**: `creator_share_centre.CREATOR_REWARD_TIERS` is the
-  single source of truth for tier thresholds, mirroring the static list
+- **Reward tier ladder**: `scheduler.REFERRAL_CONGRATS_TIERS` is the single
+  source of truth for tier thresholds — the same ladder
+  `scheduler.maybe_shout_referral_congrats()` evaluates to post the "X valid
+  referrals this month" congrats message, and it mirrors the static list
   already shown in the "See Referral Rewards" card. `creator_share_results()`
-  uses it (via `_next_reward_tier()`) only to compute *progress toward* the
-  next tier for display — it does not grant rewards or alter payout
-  qualification rules, which remain wherever rewards are actually paid out.
+  imports it directly (via `_next_reward_tier()`) rather than keeping a
+  second copy.
+- **Reward-tier progress count**: reward totals reset monthly (see the
+  "Referral totals reset on the 1st of every month" note already on the
+  rewards card), so `_next_reward_tier()` is evaluated against
+  `scheduler.current_month_qualified_referral_count()` — net
+  `referral_settled` minus `referral_revoked` `referral_events` for the
+  current Asia/Kuala_Lumpur calendar month — not the lifetime
+  `qualified_referrals` figure. This is the exact same helper/query
+  `maybe_shout_referral_congrats()` itself now calls, so the Money Room's
+  progress message can never promise a tier the reward workflow has already
+  reset past. It does not grant rewards or alter payout qualification
+  rules, which remain wherever rewards are actually paid out.
 
 What's new is access control (`creator_members`), a creator-facing UI
 (`static/creator-share.html`), a small set of `/api/creator/...` endpoints,

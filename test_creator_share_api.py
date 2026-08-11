@@ -13,6 +13,7 @@ from flask import Flask
 import creator_share_centre as csc
 import database
 import referral_share_content as rsc
+import scheduler
 from fake_mongo import FakeDb
 
 
@@ -21,6 +22,11 @@ def fake_db(monkeypatch):
     csc.invalidate_creator_group_settings_cache()
     fdb = FakeDb()
     monkeypatch.setattr(database, "db", fdb)
+    # scheduler.py binds `db` via `from database import db`, so patching
+    # database.db alone does not reach it -- current_month_qualified_referral_count()
+    # (used by creator_share_results() for reward-tier progress) reads
+    # scheduler.db directly and must see the same fake collections.
+    monkeypatch.setattr(scheduler, "db", fdb)
     return fdb
 
 
@@ -460,8 +466,48 @@ class TestResults:
         assert results["qualified_referrals"] == 1
         assert results["pending_referrals"] == 1
         assert results["revoked_referrals"] == 1
-        # 1 qualified referral -> 9 more needed to reach the first tier (10 -> $10).
-        assert results["next_reward_tier"] == {"qualified_needed": 9, "reward_amount": 10}
+        # next_reward_tier is intentionally NOT derived from qualified_referrals
+        # (lifetime pending_referrals) -- it mirrors the current-reward-month
+        # ledger scheduler.maybe_shout_referral_congrats() actually evaluates
+        # REFERRAL_CONGRATS_TIERS against. No referral_events settlements were
+        # seeded this month, so 10 more are needed for the first tier.
+        assert results["next_reward_tier"] == {"qualified_needed": 10, "reward_amount": 10}
+
+    def _set_month_settled_count(self, fake_db, now, count, inviter_user_id=555):
+        month_key = scheduler._month_start_kl(now).date().isoformat()
+        fake_db["referral_events"].delete_many({})
+        for i in range(count):
+            fake_db["referral_events"].insert_one(
+                {
+                    "inviter_id": inviter_user_id,
+                    "invitee_id": i,
+                    "event": "referral_settled",
+                    "occurred_at": now,
+                    "month_key": month_key,
+                }
+            )
+
+    def test_next_reward_tier_uses_current_month_settled_ledger_not_lifetime_pending_referrals(
+        self, fake_db, monkeypatch, client
+    ):
+        _fake_vouchers_module(monkeypatch)
+        _creator(fake_db)
+        monkeypatch.delenv("CREATOR_GROUP_CHAT_ID", raising=False)
+        now = rsc.now_utc()
+
+        # 40 lifetime qualified referrals in pending_referrals (would suggest
+        # the 50-tier is close), but only 3 settled this reward month --
+        # next_reward_tier must follow the monthly ledger, not this lifetime count.
+        for i in range(40):
+            fake_db["pending_referrals"].insert_one(
+                {"inviter_user_id": 555, "invitee_user_id": i, "status": "qualified", "created_at_utc": now}
+            )
+        self._set_month_settled_count(fake_db, now, 3)
+
+        resp = client.get("/api/creator/share/results?init_data=ok")
+        results = resp.get_json()["results"]
+        assert results["qualified_referrals"] == 40
+        assert results["next_reward_tier"] == {"qualified_needed": 7, "reward_amount": 10}
 
     def test_next_reward_tier_progresses_through_the_ladder_and_caps_at_highest(self, fake_db, monkeypatch, client):
         _fake_vouchers_module(monkeypatch)
@@ -470,11 +516,7 @@ class TestResults:
         now = rsc.now_utc()
 
         def _set_qualified_count(count):
-            fake_db["pending_referrals"].delete_many({})
-            for i in range(count):
-                fake_db["pending_referrals"].insert_one(
-                    {"inviter_user_id": 555, "invitee_user_id": i, "status": "qualified", "created_at_utc": now}
-                )
+            self._set_month_settled_count(fake_db, now, count)
 
         _set_qualified_count(10)
         resp = client.get("/api/creator/share/results?init_data=ok")

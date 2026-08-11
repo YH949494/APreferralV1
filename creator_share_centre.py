@@ -72,27 +72,22 @@ CREATOR_STATUSES = {"active", "suspended", "removed"}
 GENERATE_HOURLY_LIMIT = 20
 MAX_BULK_CREATOR_IMPORT = 2000
 
-# Creator referral reward ladder -- the single source of truth for reward
-# tier thresholds. Mirrors the tier list displayed verbatim in the
-# "See Referral Rewards" card in static/creator-share.html (kept as static
-# markup there since it never changes); this constant exists only so
-# creator_share_results() can compute progress toward the next tier without
-# a second, possibly-conflicting definition of the ladder. Does not touch
-# payout/reward qualification rules -- those remain wherever rewards are
-# actually granted.
-CREATOR_REWARD_TIERS = (
-    (10, 10),
-    (25, 15),
-    (50, 50),
-    (150, 125),
-    (250, 250),
-)
-
 
 def _next_reward_tier(qualified_count: int) -> dict | None:
     """Returns the next unreached tier as {"qualified_needed", "reward_amount"},
-    or None once the highest tier has been reached."""
-    for threshold, amount in CREATOR_REWARD_TIERS:
+    or None once the highest tier has been reached.
+
+    ``qualified_count`` must be the same current-reward-month count
+    ``scheduler.maybe_shout_referral_congrats`` evaluates against
+    ``REFERRAL_CONGRATS_TIERS`` (see
+    ``scheduler.current_month_qualified_referral_count``) -- reward totals
+    reset monthly (per the "See Referral Rewards" card copy), so a lifetime
+    count would let this promise progress the actual reward workflow
+    already reset past.
+    """
+    from scheduler import REFERRAL_CONGRATS_TIERS
+
+    for threshold, amount in REFERRAL_CONGRATS_TIERS:
         if qualified_count < threshold:
             return {"qualified_needed": threshold - qualified_count, "reward_amount": amount}
     return None
@@ -762,6 +757,7 @@ def creator_share_results():
         return jsonify({"status": "error", "code": code}), http_status
 
     from dashboard_panels import _PENDING_STATUSES, _QUALIFIED_STATUSES, _REVOKED_STATUSES
+    from scheduler import current_month_qualified_referral_count
 
     pending_col = database.db["pending_referrals"]
     now = now_utc()
@@ -791,6 +787,7 @@ def creator_share_results():
         latest_doc["generated_at"].isoformat() if latest_doc and latest_doc.get("generated_at") else None
     )
     total_packages_generated = share_col.count_documents(creator_filter)
+    current_month_qualified = current_month_qualified_referral_count(user_id, now)
 
     return jsonify(
         {
@@ -804,7 +801,7 @@ def creator_share_results():
                 "current_week_qualified": int(current_week_qualified),
                 "latest_generated_at": latest_generated_at,
                 "total_packages_generated": int(total_packages_generated),
-                "next_reward_tier": _next_reward_tier(int(qualified_referrals)),
+                "next_reward_tier": _next_reward_tier(current_month_qualified),
             },
         }
     )
