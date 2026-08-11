@@ -220,11 +220,11 @@
         <div class="stats-row">
           <div class="stat-box">
             <div id="stat-invited-value" class="stat-value">–</div>
-            <div class="stat-label">Invited</div>
+            <div class="stat-label">Total Invited</div>
           </div>
           <div class="stat-box">
             <div id="stat-qualified-value" class="stat-value">–</div>
-            <div class="stat-label">Qualified</div>
+            <div class="stat-label">Total Qualified</div>
           </div>
         </div>
         <p id="stat-tier-message" class="stat-tier-message hidden"></p>
@@ -647,10 +647,15 @@
     }
   }
 
+  // Reward-tier progress is scoped to the current calendar month (reward
+  // totals reset on the 1st -- see the rewards card note), unlike the
+  // lifetime Total Invited / Total Qualified figures above it, so the
+  // "This Month:" prefix is required to avoid the two being read as the
+  // same scope.
   function tierMessage(nextTier) {
-    if (!nextTier) return "Highest referral reward reached";
+    if (!nextTier) return "This Month: Highest reward tier reached";
     var n = nextTier.qualified_needed;
-    return n + " more qualified referral" + (n === 1 ? "" : "s") + " to unlock $" + nextTier.reward_amount;
+    return "This Month: " + n + " more qualified referral" + (n === 1 ? "" : "s") + " to unlock $" + nextTier.reward_amount;
   }
 
   function hideStats() {
