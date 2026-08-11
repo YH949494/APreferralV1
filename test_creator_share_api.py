@@ -609,6 +609,166 @@ class TestResults:
         assert results["latest_generated_at"] is not None
 
 
+class TestRecentWin:
+    """GET /api/creator/recent-win reads the same referral_tier_congrats
+    collection scheduler.maybe_shout_referral_congrats() writes as its
+    Telegram-announcement dedup guard -- these tests cover the read side
+    (endpoint) and, separately, that the write side (congrats/dedup/mask)
+    still behaves as documented."""
+
+    def _congrats_doc(self, fake_db, *, user_id=555, tier=25, amount=15, username="TheJone9", sent_at=None):
+        now = sent_at or csc.now_utc()
+        fake_db["referral_tier_congrats"].insert_one(
+            {
+                "user_id": user_id,
+                "month_key": scheduler._month_start_kl(now).date().isoformat(),
+                "tier": tier,
+                "sent_at": now,
+                "username": username,
+                "display_name": username,
+                "qualified_referrals": tier,
+                "reward_amount": amount,
+            }
+        )
+
+    def test_empty_state_hides_block_when_no_achievement_exists(self, fake_db, monkeypatch, client):
+        _fake_vouchers_module(monkeypatch)
+        _creator(fake_db)
+        monkeypatch.delenv("CREATOR_GROUP_CHAT_ID", raising=False)
+
+        resp = client.get("/api/creator/recent-win?init_data=ok")
+        assert resp.status_code == 200
+        assert resp.get_json() == {"status": "ok", "win": None}
+
+    def test_empty_state_ignores_legacy_docs_missing_display_fields(self, fake_db, monkeypatch, client):
+        _fake_vouchers_module(monkeypatch)
+        _creator(fake_db)
+        monkeypatch.delenv("CREATOR_GROUP_CHAT_ID", raising=False)
+        now = csc.now_utc()
+        # Pre-migration dedup-only doc (no username/display_name/reward_amount).
+        fake_db["referral_tier_congrats"].insert_one(
+            {
+                "user_id": 999,
+                "month_key": scheduler._month_start_kl(now).date().isoformat(),
+                "tier": 10,
+                "sent_at": now,
+            }
+        )
+
+        resp = client.get("/api/creator/recent-win?init_data=ok")
+        assert resp.get_json() == {"status": "ok", "win": None}
+
+    def test_returns_latest_achievement_with_masked_identity(self, fake_db, monkeypatch, client):
+        _fake_vouchers_module(monkeypatch)
+        _creator(fake_db)
+        monkeypatch.delenv("CREATOR_GROUP_CHAT_ID", raising=False)
+        now = csc.now_utc()
+        self._congrats_doc(fake_db, user_id=111, tier=10, amount=10, username="OlderWin", sent_at=now - timedelta(hours=2))
+        self._congrats_doc(fake_db, user_id=222, tier=25, amount=15, username="TheJone9", sent_at=now)
+
+        resp = client.get("/api/creator/recent-win?init_data=ok")
+        win = resp.get_json()["win"]
+        assert win["display_name"] == "The***"
+        assert win["qualified_referrals"] == 25
+        assert win["reward_amount"] == 15
+        assert win["achieved_at"] is not None
+
+    def test_username_masking_keeps_two_to_three_leading_chars(self):
+        assert csc._mask_display_name("TheJone9") == "The***"
+        assert csc._mask_display_name("As_Offline") == "As_***"
+        assert csc._mask_display_name("Al") == "Al***"
+        assert csc._mask_display_name("") == "Someone"
+        assert csc._mask_display_name(None) == "Someone"
+
+    def test_duplicate_reward_unlock_does_not_duplicate_social_proof_event(self, fake_db, monkeypatch):
+        """maybe_shout_referral_congrats() is idempotent per (user_id, month_key,
+        tier) via the existing unique index -- calling it twice for the same
+        settled tier must not create a second referral_tier_congrats doc, so
+        the recent-win endpoint never has duplicate rows to pick from."""
+        fake_db["referral_tier_congrats"]._unique_keys = [("user_id", "month_key", "tier")]
+        fake_db["users"].insert_one({"user_id": 555, "username": "TheJone9", "first_name": "The"})
+        now = csc.now_utc()
+        month_key = scheduler._month_start_kl(now).date().isoformat()
+        for i in range(25):
+            fake_db["referral_events"].insert_one(
+                {"inviter_id": 555, "invitee_id": i, "event": "referral_settled", "occurred_at": now, "month_key": month_key}
+            )
+
+        sent = {"count": 0}
+
+        class _Resp:
+            ok = True
+            status_code = 200
+            text = ""
+
+        def _fake_post(*args, **kwargs):
+            sent["count"] += 1
+            return _Resp()
+
+        monkeypatch.setattr(scheduler.requests, "post", _fake_post)
+
+        scheduler.maybe_shout_referral_congrats(555, now)
+        scheduler.maybe_shout_referral_congrats(555, now)
+
+        assert sent["count"] == 1
+        assert fake_db["referral_tier_congrats"].count_documents({"user_id": 555, "month_key": month_key, "tier": 25}) == 1
+
+    def test_congrats_write_persists_display_fields_for_recent_win(self, fake_db, monkeypatch):
+        fake_db["users"].insert_one({"user_id": 555, "username": "TheJone9", "first_name": "The"})
+        now = csc.now_utc()
+        month_key = scheduler._month_start_kl(now).date().isoformat()
+        for i in range(25):
+            fake_db["referral_events"].insert_one(
+                {"inviter_id": 555, "invitee_id": i, "event": "referral_settled", "occurred_at": now, "month_key": month_key}
+            )
+
+        class _Resp:
+            ok = True
+            status_code = 200
+            text = ""
+
+        monkeypatch.setattr(scheduler.requests, "post", lambda *a, **kw: _Resp())
+
+        scheduler.maybe_shout_referral_congrats(555, now)
+
+        doc = fake_db["referral_tier_congrats"].find_one({"user_id": 555, "tier": 25})
+        assert doc["username"] == "TheJone9"
+        assert doc["display_name"] == "TheJone9"
+        assert doc["qualified_referrals"] == 25
+        assert doc["reward_amount"] == 15
+
+    def test_telegram_announcement_text_unchanged(self, fake_db, monkeypatch):
+        """The existing Telegram unlock announcement text/format is untouched
+        by the new persistence fields."""
+        fake_db["users"].insert_one({"user_id": 555, "username": "TheJone9", "first_name": "The"})
+        now = csc.now_utc()
+        month_key = scheduler._month_start_kl(now).date().isoformat()
+        for i in range(25):
+            fake_db["referral_events"].insert_one(
+                {"inviter_id": 555, "invitee_id": i, "event": "referral_settled", "occurred_at": now, "month_key": month_key}
+            )
+
+        captured = {}
+
+        class _Resp:
+            ok = True
+            status_code = 200
+            text = ""
+
+        def _fake_post(url, json=None, timeout=None):
+            captured["json"] = json
+            return _Resp()
+
+        monkeypatch.setattr(scheduler.requests, "post", _fake_post)
+
+        scheduler.maybe_shout_referral_congrats(555, now)
+
+        text = captured["json"]["text"]
+        assert "just hit <b>25 valid referrals</b> this month" in text
+        assert "<b>$15 voucher</b> unlocked!" in text
+        assert "Next: 50 refs = $50!" in text
+
+
 class TestBuildCreatorShareText:
     def test_requires_referral_link(self):
         with pytest.raises(ValueError):

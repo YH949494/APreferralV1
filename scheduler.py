@@ -2884,13 +2884,22 @@ def maybe_shout_referral_congrats(inviter_user_id: int, now_utc_ts: datetime) ->
         logger.exception("[REFERRAL][CONGRATS] send_error inviter=%s tier=%s", inviter_user_id, threshold)
         return
 
-    # Record dedup only after confirmed send to keep the tier retryable on failure
+    # Record dedup only after confirmed send to keep the tier retryable on failure.
+    # username/first_name/reward_amount are stored alongside the existing
+    # dedup key purely for display (e.g. the Money Room "Recent Win" card) --
+    # they don't change the dedup semantics, which remain the unique index
+    # on (user_id, month_key, tier).
+    display_name = (user_doc or {}).get("username") or (user_doc or {}).get("first_name")
     try:
         db.referral_tier_congrats.insert_one({
             "user_id": inviter_user_id,
             "month_key": month_key,
             "tier": threshold,
             "sent_at": now_utc_ts,
+            "username": (user_doc or {}).get("username"),
+            "display_name": display_name,
+            "qualified_referrals": threshold,
+            "reward_amount": voucher,
         })
     except DuplicateKeyError:
         pass
