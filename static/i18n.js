@@ -232,9 +232,11 @@
       platform_finder_step2_text: "Look for the official platform.",
       platform_finder_step3_label: "Step 3",
       platform_finder_step3_text: "Log in → Voucher → enter your voucher code.",
+      platform_finder_google_btn: "🔎 Search on Google",
       platform_finder_copy_btn: "📋 Copy \"AdvantPlay Slots\"",
       platform_finder_help_btn: "❓ Can't Find It?",
       platform_finder_fallback: "Search \"AdvantPlay Slots\" on Google and look for the official platform.",
+      platform_finder_close_label: "Close",
     },
 
     th: {
@@ -443,9 +445,11 @@
       platform_finder_step2_text: "มองหาแพลตฟอร์มทางการ",
       platform_finder_step3_label: "ขั้นตอนที่ 3",
       platform_finder_step3_text: "เข้าสู่ระบบ → Voucher → ใส่โค้ดคูปองของคุณ",
+      platform_finder_google_btn: "🔎 ค้นหาบน Google",
       platform_finder_copy_btn: "📋 คัดลอก \"AdvantPlay Slots\"",
       platform_finder_help_btn: "❓ หาไม่เจอ?",
       platform_finder_fallback: "ค้นหา \"AdvantPlay Slots\" บน Google และมองหาแพลตฟอร์มทางการ",
+      platform_finder_close_label: "ปิด",
     },
 
     id: {
@@ -654,9 +658,11 @@
       platform_finder_step2_text: "Pilih platform resminya.",
       platform_finder_step3_label: "Langkah 3",
       platform_finder_step3_text: "Login → Voucher → masukkan kode voucher Anda.",
+      platform_finder_google_btn: "🔎 Cari di Google",
       platform_finder_copy_btn: "📋 Salin \"AdvantPlay Slots\"",
       platform_finder_help_btn: "❓ Tidak Ketemu?",
       platform_finder_fallback: "Cari \"AdvantPlay Slots\" di Google dan pilih platform resminya.",
+      platform_finder_close_label: "Tutup",
     }
   };
 

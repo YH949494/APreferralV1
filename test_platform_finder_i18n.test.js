@@ -71,9 +71,11 @@ test("platform_finder_* keys exist for en/th/id and are reachable via tFor()", (
     "platform_finder_step2_text",
     "platform_finder_step3_label",
     "platform_finder_step3_text",
+    "platform_finder_google_btn",
     "platform_finder_copy_btn",
     "platform_finder_help_btn",
     "platform_finder_fallback",
+    "platform_finder_close_label",
   ];
   for (const lang of ["en", "th", "id"]) {
     for (const key of keys) {
@@ -97,6 +99,13 @@ test('"AdvantPlay Slots" search term is never translated across languages', () =
     assert.match(ctx.window.tFor(lang, "platform_finder_copy_btn"), /AdvantPlay Slots/);
     assert.doesNotMatch(ctx.window.tFor(lang, "platform_finder_step1_text"), /AdvantPlay\s+(Slot Mesin|สล็อต|slot)\b/i);
   }
+});
+
+test("platform_finder_google_btn is localized per language and carries the search emoji CTA", () => {
+  const ctx = loadI18nContext();
+  assert.equal(ctx.window.tFor("en", "platform_finder_google_btn"), "🔎 Search on Google");
+  assert.equal(ctx.window.tFor("th", "platform_finder_google_btn"), "🔎 ค้นหาบน Google");
+  assert.equal(ctx.window.tFor("id", "platform_finder_google_btn"), "🔎 Cari di Google");
 });
 
 test("tFor(lang, key) ignores window.currentLanguage (pins to the caller's language)", () => {

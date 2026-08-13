@@ -1096,7 +1096,11 @@
 
     /* ===== MODALS ===== */
     .modal { display: none; position: fixed; z-index: 1000; left: 0; top: 0; width: 100%; height: 100%; background: rgba(6,6,8,.72); justify-content: center; align-items: center; padding: 16px; }
-    .modal-content { background: var(--bg-card); padding: 20px; border-radius: var(--radius-md); border: 1px solid var(--border-light); text-align: center; width: min(320px, 100%); box-shadow: var(--shadow-soft); }
+    .modal-content { position: relative; background: var(--bg-card); padding: 20px; border-radius: var(--radius-md); border: 1px solid var(--border-light); text-align: center; width: min(320px, 100%); box-shadow: var(--shadow-soft); }
+    .modal-content .modal-close-icon { position: absolute; top: 8px; right: 8px; background: none; border: none; color: var(--text-main); opacity: .6; font-size: 20px; line-height: 1; cursor: pointer; padding: 4px 8px; }
+    .modal-content .modal-close-icon:hover { opacity: 1; }
+    .modal-content .pf-actions { display: flex; flex-direction: column; gap: 10px; margin-top: 14px; }
+    .modal-content .pf-actions .btn { width: 100%; }
     .modal-content h3 { font-family: var(--font-display); color: var(--text-main); }
     .code-block { margin-top: 8px; padding: 10px; border: 1px solid var(--border-light); background: rgba(255,255,255,.03); border-radius: var(--radius-sm); display: flex; flex-direction: column; align-items: stretch; gap: 8px; text-align: left; }
     .code-block .code-text { font-family: "Courier New", monospace; font-size: 14px; word-break: break-all; flex: 1; color: #ffd4bd; }
@@ -2739,6 +2743,8 @@
       }
     }
 
+    var PLATFORM_FINDER_GOOGLE_URL = "https://www.google.com/search?q=AdvantPlay+Slots";
+
     function showPlatformFinderModal(platformFinder, claimCtx = {}) {
       try {
         const existing = document.getElementById("platform-finder-modal");
@@ -2754,6 +2760,26 @@
 
         const content = document.createElement("div");
         content.className = "modal-content";
+
+        // Single dismissal path: X icon, backdrop click, or Escape all route
+        // through this closer so there is exactly one place cleanup happens
+        // (no second visible "Close" button per product spec).
+        function closeModal() {
+          document.removeEventListener("keydown", onKeydown);
+          overlay.remove();
+        }
+        function onKeydown(evt) {
+          if (evt.key === "Escape") closeModal();
+        }
+        document.addEventListener("keydown", onKeydown);
+
+        const closeIcon = document.createElement("button");
+        closeIcon.type = "button";
+        closeIcon.className = "modal-close-icon";
+        closeIcon.setAttribute("aria-label", tFor(lang, "platform_finder_close_label"));
+        closeIcon.textContent = "×";
+        closeIcon.addEventListener("click", closeModal);
+        content.appendChild(closeIcon);
 
         const title = document.createElement("h3");
         title.textContent = tFor(lang, "platform_finder_title");
@@ -2773,10 +2799,22 @@
           content.appendChild(stepEl);
         });
 
+        const actions = document.createElement("div");
+        actions.className = "pf-actions";
+
+        const googleBtn = document.createElement("button");
+        googleBtn.type = "button";
+        googleBtn.className = "btn btn-primary";
+        googleBtn.textContent = tFor(lang, "platform_finder_google_btn");
+        googleBtn.addEventListener("click", () => {
+          platformFinderPostEvent("google-clicked", claimCtx);
+          openTelegramSafeLink(PLATFORM_FINDER_GOOGLE_URL);
+        });
+        actions.appendChild(googleBtn);
+
         const copyBtn = document.createElement("button");
         copyBtn.type = "button";
-        copyBtn.className = "btn btn-primary";
-        copyBtn.style.marginTop = "10px";
+        copyBtn.className = "btn btn-ghost";
         copyBtn.textContent = tFor(lang, "platform_finder_copy_btn");
         copyBtn.addEventListener("click", async () => {
           const copied = await copyTextToClipboard(searchTerm);
@@ -2787,12 +2825,11 @@
             tgAlert(t("unable_to_copy") + searchTerm);
           }
         });
-        content.appendChild(copyBtn);
+        actions.appendChild(copyBtn);
 
         const helpBtn = document.createElement("button");
         helpBtn.type = "button";
         helpBtn.className = "btn btn-ghost";
-        helpBtn.style.marginTop = "10px";
         helpBtn.textContent = tFor(lang, "platform_finder_help_btn");
         helpBtn.addEventListener("click", async () => {
           try {
@@ -2812,19 +2849,13 @@
             tgAlert(tFor(lang, "platform_finder_fallback"));
           }
         });
-        content.appendChild(helpBtn);
+        actions.appendChild(helpBtn);
 
-        const closeBtn = document.createElement("button");
-        closeBtn.type = "button";
-        closeBtn.className = "btn";
-        closeBtn.style.marginTop = "10px";
-        closeBtn.textContent = "Close";
-        closeBtn.addEventListener("click", () => overlay.remove());
-        content.appendChild(closeBtn);
+        content.appendChild(actions);
 
         overlay.appendChild(content);
         overlay.addEventListener("click", (evt) => {
-          if (evt.target === overlay) overlay.remove();
+          if (evt.target === overlay) closeModal();
         });
         document.body.appendChild(overlay);
       } catch (err) {

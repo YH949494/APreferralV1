@@ -7034,6 +7034,14 @@ def api_platform_finder_search_copied():
     return jsonify({"status": "ok"})
 
 
+@vouchers_bp.route("/vouchers/platform-finder/google-clicked", methods=["POST"])
+def api_platform_finder_google_clicked():
+    _language, err = _platform_finder_event_endpoint("platform_search_google_clicked")
+    if err:
+        return err
+    return jsonify({"status": "ok"})
+
+
 @vouchers_bp.route("/vouchers/platform-finder/help-clicked", methods=["POST"])
 def api_platform_finder_help_clicked():
     language, err = _platform_finder_event_endpoint("platform_finder_help_clicked")

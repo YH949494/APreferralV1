@@ -71,6 +71,7 @@ class PlatformFinderEventTypesTests(unittest.TestCase):
             "platform_finder_opened",
             "platform_search_copied",
             "platform_finder_help_clicked",
+            "platform_search_google_clicked",
         ):
             self.assertIn(event_type, EVENT_TYPES)
 
