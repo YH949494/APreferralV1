@@ -2608,6 +2608,65 @@ def resolve_welcome_locale(user_doc: dict | None) -> str:
     return "en"
 
 
+# ---- Platform Finder (post-claim "Find Where To Play" flow) ----
+# Localized instructions shown right after a successful voucher claim so
+# claimants who don't know where the platform lives can find it.
+#
+# Language source of truth for this feature is users_collection.region
+# (MY->en, TH->th, ID->id, unmapped/missing->en) -- deliberately NOT the
+# Mini App's general window.currentLanguage (static/i18n.js), which is
+# driven by a manual switcher / Telegram locale and can disagree with the
+# user's market. The actual copy strings live in I18N in static/i18n.js
+# (platform_finder_* keys) so there is a single place UI strings are
+# maintained; the backend only ships {language, search_term, cta_label}
+# and the frontend renders the copy via t(key, {}, language).
+PLATFORM_FINDER_SEARCH_TERM = "AdvantPlay Slots"
+PLATFORM_FINDER_CTA_LABEL = "🔎 Find Where To Play"
+
+_PLATFORM_FINDER_REGION_LANGUAGE = {
+    "my": "en", "malaysia": "en",
+    "th": "th", "thailand": "th",
+    "id": "id", "indonesia": "id",
+}
+
+
+def resolve_market_language(region: str | None) -> str:
+    """Map a user's market/region (users_collection.region) to the
+    Platform Finder's supported language (MY->en, TH->th, ID->id).
+    Falls back to English when the region is missing/unmapped."""
+    normalized = _normalize_region(region)
+    return _PLATFORM_FINDER_REGION_LANGUAGE.get(normalized, "en")
+
+
+def _platform_finder_payload(region: str | None) -> dict:
+    return {
+        "cta_label": PLATFORM_FINDER_CTA_LABEL,
+        "language": resolve_market_language(region),
+        "search_term": PLATFORM_FINDER_SEARCH_TERM,
+    }
+
+
+def _emit_platform_finder_event(event_type: str, *, uid, region, language, drop_id=None, voucher_code=None, source="claim_success"):
+    """Best-effort analytics for the Platform Finder funnel. Never raises
+    (log_funnel_event/emit_campaign_event already swallow errors) and never
+    persists the raw voucher code — only a masked suffix."""
+    try:
+        from campaign_centre import log_funnel_event
+        from campaign_events import mask_code_suffix
+
+        log_funnel_event(
+            event_type,
+            campaign_id=str(drop_id) if drop_id else "",
+            user_id=uid,
+            source=source,
+            region=region,
+            language=language,
+            voucher_code_suffix=mask_code_suffix(voucher_code),
+        )
+    except Exception:
+        logger.warning("[PLATFORM_FINDER] event_emit_failed event_type=%s", event_type, exc_info=True)
+
+
 def _normalize_claim_identity(*, drop_id, telegram_uid):
     normalized_drop_id = _coerce_id(drop_id)
     normalized_uid = None
@@ -6259,6 +6318,7 @@ def api_claim():
         guide_payload = _welcome_claim_guide_payload(audience_type)
         if guide_payload:
             idempotent_payload["claim_guide"] = guide_payload
+        idempotent_payload["platform_finder"] = _platform_finder_payload(user_region)
         current_app.logger.info(
             "[claim][IDEMPOTENT_RETURN] drop=%s uid=%s code=%s",
             drop_id,
@@ -6577,6 +6637,7 @@ def api_claim():
             guide_payload = _welcome_claim_guide_payload(audience_type)
             if guide_payload:
                 idempotent_payload["claim_guide"] = guide_payload
+            idempotent_payload["platform_finder"] = _platform_finder_payload(user_region)
             current_app.logger.info(
                 "[claim][IDEMPOTENT_RETURN] drop=%s uid=%s code=%s",
                 drop_id,
@@ -6616,6 +6677,7 @@ def api_claim():
             guide_payload = _welcome_claim_guide_payload(audience_type)
             if guide_payload:
                 idempotent_payload["claim_guide"] = guide_payload
+            idempotent_payload["platform_finder"] = _platform_finder_payload(user_region)
             return jsonify(idempotent_payload), 200
         logger.info(
             "[CLAIM_BLOCK] reason=%s drop_id=%s uid=%s username=%s",
@@ -6889,6 +6951,16 @@ def api_claim():
     guide_payload = _welcome_claim_guide_payload(audience_type)
     if guide_payload:
         response_payload["claim_guide"] = guide_payload
+    platform_finder_language = resolve_market_language(user_region)
+    response_payload["platform_finder"] = _platform_finder_payload(user_region)
+    _emit_platform_finder_event(
+        "platform_finder_shown",
+        uid=uid,
+        region=user_region,
+        language=platform_finder_language,
+        drop_id=drop_id,
+        voucher_code=result.get("code"),
+    )
     if _is_new_joiner_audience(audience_type):
         _append_retention_message(response_payload, WELCOME_BONUS_RETENTION_MESSAGE)
     elif is_pool_drop:
@@ -6904,7 +6976,75 @@ def api_claim():
             audience_type,
         )     
     return jsonify(response_payload), 200
- 
+
+
+def _resolve_platform_finder_user():
+    """Lightweight Mini App auth for the Platform Finder event endpoints —
+    reuses the same initData verification api_claim() performs above."""
+    init_data_raw = extract_raw_init_data_from_query(request)
+    if not init_data_raw:
+        return None, None, (jsonify({"status": "error", "code": "missing_init_data"}), 400)
+    ok, data, why = verify_telegram_init_data(init_data_raw)
+    if not ok:
+        return None, None, (jsonify({"status": "error", "code": "auth_failed", "why": str(why)}), 401)
+    try:
+        user_raw = json.loads(data.get("user", "{}"))
+    except Exception:
+        user_raw = {}
+    try:
+        uid = int(user_raw.get("id"))
+    except (TypeError, ValueError):
+        return None, None, (jsonify({"status": "error", "code": "missing_uid"}), 400)
+    user_doc = users_collection.find_one({"user_id": uid}, {"region": 1}) or {}
+    return uid, user_doc.get("region"), None
+
+
+def _platform_finder_event_endpoint(event_type: str):
+    """Returns (language, error_response). error_response is None on success."""
+    uid, region, err = _resolve_platform_finder_user()
+    if err:
+        return None, err
+    body = request.get_json(silent=True) or {}
+    language = resolve_market_language(region)
+    _emit_platform_finder_event(
+        event_type,
+        uid=uid,
+        region=region,
+        language=language,
+        drop_id=body.get("dropId") or body.get("drop_id"),
+        voucher_code=body.get("voucherCode") or body.get("voucher_code"),
+        source=body.get("source") or "claim_success",
+    )
+    return language, None
+
+
+@vouchers_bp.route("/vouchers/platform-finder/opened", methods=["POST"])
+def api_platform_finder_opened():
+    _language, err = _platform_finder_event_endpoint("platform_finder_opened")
+    if err:
+        return err
+    return jsonify({"status": "ok"})
+
+
+@vouchers_bp.route("/vouchers/platform-finder/search-copied", methods=["POST"])
+def api_platform_finder_search_copied():
+    _language, err = _platform_finder_event_endpoint("platform_search_copied")
+    if err:
+        return err
+    return jsonify({"status": "ok"})
+
+
+@vouchers_bp.route("/vouchers/platform-finder/help-clicked", methods=["POST"])
+def api_platform_finder_help_clicked():
+    language, err = _platform_finder_event_endpoint("platform_finder_help_clicked")
+    if err:
+        return err
+    # No help flow exists beyond the community chat used elsewhere
+    # (WELCOME_COMMUNITY_URL); the frontend renders the fallback troubleshooting
+    # message itself via I18N when this link can't be opened.
+    return jsonify({"status": "ok", "help_url": WELCOME_COMMUNITY_URL, "language": language})
+
+
 # ---- Admin endpoints ----
 def _coerce_id(x):
     if isinstance(x, ObjectId):
