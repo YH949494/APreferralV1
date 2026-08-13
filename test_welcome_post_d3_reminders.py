@@ -103,6 +103,32 @@ def test_d1_checkin_returns_one_of_three_progress_copy():
     assert "2 check-ins left" in result["welcome_message"]
 
 
+def test_process_checkin_fetches_welcome_progress_once_per_request():
+    """Review fix: build_welcome_checkin_copy and trigger_welcome_unlock_push
+    must share ONE get_welcome_progress() read rather than each fetching
+    their own — that call can fall through to a live Telegram getChatMember
+    lookup on a subscription cache miss, so a redundant fetch would double
+    that cost on every check-in. record_welcome_checkin_progress (existing,
+    unrelated code — it needs its own read to detect the day1/day2/day3
+    transitions) accounts for the other call, so the total is 2, not 3."""
+    uid = _next_uid()
+    joined = datetime.now(KL_TZ)
+    _make_eligible_user(uid, joined=joined)
+    calls = []
+    real_get_welcome_progress = vouchers.get_welcome_progress
+
+    def counting_get_welcome_progress(u, now=None):
+        calls.append(u)
+        return real_get_welcome_progress(u, now=now)
+
+    p1, p2 = _eligible_patches()
+    with p1, p2, mock.patch.object(vouchers, "get_welcome_progress", counting_get_welcome_progress):
+        result = asyncio.run(main.process_checkin(uid, "alice", None))
+
+    assert result["success"] is True
+    assert calls == [uid, uid]
+
+
 def test_d2_checkin_returns_two_of_three_progress_copy():
     """Exercises main.build_welcome_checkin_copy directly (the function
     process_checkin calls for Patch 1/5 copy) rather than driving process_checkin
@@ -111,10 +137,8 @@ def test_d2_checkin_returns_two_of_three_progress_copy():
     test_welcome_checkin_progress_main.py, which uses the same
     direct-progress-write pattern for day2/day3 for the same reason."""
     uid = _next_uid()
-    with mock.patch.object(vouchers, "get_welcome_progress", lambda u, now=None: {
-        "eligible": True, "claimed": False, "expired": False, "completed": 2, "required": 3, "channel_joined": True,
-    }):
-        result = main.build_welcome_checkin_copy(uid, user_doc={}, now_ref=datetime.now(timezone.utc))
+    progress = {"eligible": True, "claimed": False, "expired": False, "completed": 2, "required": 3, "channel_joined": True}
+    result = main.build_welcome_checkin_copy(uid, user_doc={}, progress=progress)
 
     assert result["welcome_celebration"] == "day2"
     assert result["welcome_progress"]["completed"] == 2
@@ -124,10 +148,8 @@ def test_d2_checkin_returns_two_of_three_progress_copy():
 
 def test_d3_checkin_returns_unlock_copy_when_channel_joined():
     uid = _next_uid()
-    with mock.patch.object(vouchers, "get_welcome_progress", lambda u, now=None: {
-        "eligible": True, "claimed": False, "expired": False, "completed": 3, "required": 3, "channel_joined": True,
-    }):
-        result = main.build_welcome_checkin_copy(uid, user_doc={}, now_ref=datetime.now(timezone.utc))
+    progress = {"eligible": True, "claimed": False, "expired": False, "completed": 3, "required": 3, "channel_joined": True}
+    result = main.build_welcome_checkin_copy(uid, user_doc={}, progress=progress)
 
     assert result["welcome_celebration"] == "unlock"
     assert result["welcome_progress"]["completed"] == 3
@@ -139,10 +161,8 @@ def test_d3_checkin_channel_missing_does_not_claim_unlockable():
     """3/3 check-ins done but channel subscription still missing must never
     say "claim it now" — Patch 1's explicit anti-false-positive requirement."""
     uid = _next_uid()
-    with mock.patch.object(vouchers, "get_welcome_progress", lambda u, now=None: {
-        "eligible": True, "claimed": False, "expired": False, "completed": 3, "required": 3, "channel_joined": False,
-    }):
-        result = main.build_welcome_checkin_copy(uid, user_doc={}, now_ref=datetime.now(timezone.utc))
+    progress = {"eligible": True, "claimed": False, "expired": False, "completed": 3, "required": 3, "channel_joined": False}
+    result = main.build_welcome_checkin_copy(uid, user_doc={}, progress=progress)
 
     assert result["welcome_progress"]["completed"] == 3
     assert result["welcome_celebration"] == "unlock_pending_channel"
@@ -303,10 +323,88 @@ def test_claimed_user_does_not_receive_unclaimed_reminder():
             now_ref=now, db_ref=database.db, claim_send_fn=lambda u, text: (sent.append(u), (True, None, False))[-1],
         )
 
+    # No message is ever sent to a claimed user...
     assert result["unclaimed_reminder_sent"] == 0
     assert sent == []
+    # ...but the terminal-exit fix (see test_terminal_claimed_user_leaves_the_
+    # reminder_cursor) still stamps the field so this permanently-claimed doc
+    # leaves the hourly cursor instead of being rescanned forever.
     doc = vouchers.welcome_reminders_col.find_one({"user_id": uid})
-    assert doc.get("unclaimed_reminder_sent_at") is None
+    assert doc.get("unclaimed_reminder_sent_at") is not None
+
+
+def test_terminal_claimed_user_leaves_the_reminder_cursor():
+    """Review fix: a permanently-claimed user must not keep matching the
+    hourly cursor's $or-of-not-yet-sent-flags forever (it's unsorted and
+    limit()-capped, so terminal users would otherwise crowd out users who
+    still need a reminder)."""
+    uid = _next_uid()
+    now = datetime.now(timezone.utc)
+    vouchers.welcome_reminders_col.insert_one({
+        "user_id": uid, "completed_at": now - timedelta(hours=5),
+        "reminder_20h_sent": True, "reminder_28h_sent": True, "day2_reminder_sent": True,
+    })
+
+    with mock.patch.object(vouchers, "get_welcome_progress", lambda u, now=None: {
+        "completed": 3, "required": 3, "claimed": True, "expired": False, "channel_joined": True, "eligible_until": None,
+    }):
+        result1 = scheduler.process_welcome_reminders(now_ref=now, db_ref=database.db)
+        result2 = scheduler.process_welcome_reminders(now_ref=now, db_ref=database.db)
+
+    assert result1["scanned"] == 1
+    assert result2["scanned"] == 0
+    doc = vouchers.welcome_reminders_col.find_one({"user_id": uid})
+    assert doc.get("unlock_push_sent_at") is not None
+    assert doc.get("unclaimed_reminder_sent_at") is not None
+    assert doc.get("expiry_warning_sent_at") is not None
+
+
+def test_stale_unlock_push_claim_is_reclaimed():
+    """Review fix: a claim left behind by a worker that died between the
+    atomic claim and the finally-release (hard kill/OOM, not an exception)
+    must not wedge the stage forever — it becomes reclaimable once older
+    than WELCOME_CLAIM_STALE_MINUTES."""
+    uid = _next_uid()
+    now = datetime.now(timezone.utc)
+    stale_claim_at = now - timedelta(minutes=scheduler.WELCOME_CLAIM_STALE_MINUTES + 1)
+    vouchers.welcome_reminders_col.insert_one({
+        "user_id": uid, "completed_at": now - timedelta(hours=1), "unlock_push_claimed_at": stale_claim_at,
+    })
+    sent = []
+
+    with mock.patch.object(vouchers, "get_welcome_progress", lambda u, now=None: {
+        "completed": 3, "required": 3, "claimed": False, "expired": False, "channel_joined": True, "eligible_until": None,
+    }):
+        result = scheduler.trigger_welcome_unlock_push(
+            uid, now_ref=now, db_ref=database.db, bot_send_fn=lambda u, text: (sent.append(u), True)[-1],
+        )
+
+    assert result["status"] == "sent"
+    assert sent == [uid]
+    doc = vouchers.welcome_reminders_col.find_one({"user_id": uid})
+    assert doc.get("unlock_push_sent_at") is not None
+
+
+def test_fresh_unlock_push_claim_is_not_reclaimed_by_a_racer():
+    """The flip side of the stale-claim test: a claim younger than
+    WELCOME_CLAIM_STALE_MINUTES must still block a concurrent racer."""
+    uid = _next_uid()
+    now = datetime.now(timezone.utc)
+    fresh_claim_at = now - timedelta(minutes=1)
+    vouchers.welcome_reminders_col.insert_one({
+        "user_id": uid, "completed_at": now - timedelta(hours=1), "unlock_push_claimed_at": fresh_claim_at,
+    })
+    sent = []
+
+    with mock.patch.object(vouchers, "get_welcome_progress", lambda u, now=None: {
+        "completed": 3, "required": 3, "claimed": False, "expired": False, "channel_joined": True, "eligible_until": None,
+    }):
+        result = scheduler.trigger_welcome_unlock_push(
+            uid, now_ref=now, db_ref=database.db, bot_send_fn=lambda u, text: (sent.append(u), True)[-1],
+        )
+
+    assert result["status"] == "not_claimed"
+    assert sent == []
 
 
 def test_expiry_warning_sends_once():

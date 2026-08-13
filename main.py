@@ -5724,29 +5724,34 @@ def _grant_checkin_xp_idempotent(user_id, streak, today_kl, now_utc_ts):
         grant_xp(db, user_id, "first_checkin", "first_checkin", FIRST_CHECKIN_BONUS_XP)
 
 
-def build_welcome_checkin_copy(user_id: int, *, user_doc: dict | None, now_ref) -> dict:
+def build_welcome_checkin_copy(user_id: int, *, user_doc: dict | None, progress: dict | None) -> dict:
     """Patch 1/5: immediate Welcome Voucher progress copy for a successful
-    check-in response, sourced from the authoritative get_welcome_progress()
-    count — never users.streak, which resets on a missed day while Welcome
-    only counts distinct calendar days and must not reset with it.
+    check-in response, sourced from an already-fetched, authoritative
+    get_welcome_progress() count — never users.streak, which resets on a
+    missed day while Welcome only counts distinct calendar days and must
+    not reset with it.
+
+    Takes ``progress`` (a get_welcome_progress() result) rather than
+    fetching it itself: the caller (process_checkin) already needs one
+    fresh read for this and for trigger_welcome_unlock_push, and
+    get_welcome_progress is not free (it can fall through to a live
+    Telegram getChatMember lookup on a channel-subscription cache miss) —
+    fetching it twice per check-in would double that cost for every user on
+    the journey.
 
     Returns a dict meant to be merged into the check-in response payload:
-    ``{}`` for users outside the Welcome journey (not eligible / already
-    claimed / expired — the generic check-in response is left untouched),
-    otherwise ``welcome_progress`` (the raw progress dict, for any frontend
-    surface that wants the numbers) plus ``welcome_celebration`` / ``welcome_message``
+    ``{}`` when there's no progress to show (fetch failed upstream, or the
+    user is outside the Welcome journey / already claimed / expired — the
+    generic check-in response is left untouched), otherwise
+    ``welcome_progress`` (the raw progress dict, for any frontend surface
+    that wants the numbers) plus ``welcome_celebration`` / ``welcome_message``
     for the stage-specific toast/modal copy. Split out from process_checkin
-    as a standalone function so it can be unit-tested per stage without
-    needing to drive the full multi-day check-in state machine.
+    as a standalone, pure function so it can be unit-tested per stage
+    without needing to drive the full multi-day check-in state machine.
     """
-    from vouchers import get_welcome_progress, resolve_welcome_display_name
+    from vouchers import resolve_welcome_display_name
 
-    try:
-        welcome_progress = get_welcome_progress(user_id, now=now_ref)
-    except Exception:
-        logger.exception("[WELCOME_PROGRESS] payload_build_failed uid=%s", user_id)
-        return {}
-
+    welcome_progress = progress or {}
     if not welcome_progress.get("eligible") or welcome_progress.get("claimed") or welcome_progress.get("expired"):
         return {}
 
@@ -5931,19 +5936,34 @@ async def process_checkin(user_id, username, region, update=None, source="miniap
     except Exception:
         pass
 
-    # Patch 1/5: immediate success copy for the Welcome Voucher journey.
-    # Computed after check_channel_subscribed() above so channel_joined
-    # reflects the freshly-verified subscription state, never a stale cache.
-    welcome_extra = build_welcome_checkin_copy(int(user_id), user_doc=user, now_ref=now_utc_ts)
+    # Single Welcome progress read shared by Patch 1/5's copy and Patch 2's
+    # unlock push below — get_welcome_progress can fall through to a live
+    # Telegram getChatMember lookup on a channel-subscription cache miss, so
+    # fetching it twice per check-in would double that cost for every user
+    # on the journey. Computed after check_channel_subscribed() above so
+    # channel_joined reflects the freshly-verified subscription state.
+    welcome_progress = None
+    try:
+        from vouchers import get_welcome_progress
+
+        welcome_progress = get_welcome_progress(int(user_id), now=now_utc_ts)
+    except Exception:
+        logger.exception("[WELCOME_PROGRESS] progress_fetch_failed uid=%s", user_id)
+
+    welcome_extra = build_welcome_checkin_copy(int(user_id), user_doc=user, progress=welcome_progress)
 
     # Patch 2: eager immediate push on a genuine unlock. Best-effort — a
     # failure/skip here is picked back up by the hourly
     # process_welcome_reminders sweep (same atomic claim), so this must never
-    # affect the check-in response either way.
-    try:
-        trigger_welcome_unlock_push(int(user_id), now_ref=now_utc_ts, bot_send_fn=_send_welcome_claim_cta_via_bot)
-    except Exception:
-        logger.exception("[WELCOME_UNLOCK_PUSH] trigger_failed uid=%s", user_id)
+    # affect the check-in response either way. Skipped outright if the
+    # progress fetch above failed rather than re-fetching here.
+    if welcome_progress is not None:
+        try:
+            trigger_welcome_unlock_push(
+                int(user_id), now_ref=now_utc_ts, progress=welcome_progress, bot_send_fn=_send_welcome_claim_cta_via_bot,
+            )
+        except Exception:
+            logger.exception("[WELCOME_UNLOCK_PUSH] trigger_failed uid=%s", user_id)
 
     maybe_shout_milestones(int(user_id))
 

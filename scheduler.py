@@ -292,6 +292,10 @@ WELCOME_ADAPTIVE_MIN_HISTORY = int(os.getenv("WELCOME_ADAPTIVE_MIN_HISTORY", "3"
 # stages above.
 WELCOME_UNCLAIMED_REMINDER_AFTER_HOURS = int(os.getenv("WELCOME_UNCLAIMED_REMINDER_AFTER_HOURS", "4"))
 WELCOME_EXPIRY_WARNING_BEFORE_HOURS = int(os.getenv("WELCOME_EXPIRY_WARNING_BEFORE_HOURS", "24"))
+# How long a post-D3 send claim (see _welcome_reminder_claim_stage) is honored
+# before it's treated as abandoned (worker died mid-send) and reclaimable by
+# the next attempt. Comfortably longer than any single send attempt.
+WELCOME_CLAIM_STALE_MINUTES = int(os.getenv("WELCOME_CLAIM_STALE_MINUTES", "60"))
 
 # Personalized, localized Welcome reminder copy (Phase 2). ``{greeting}`` is
 # rendered as "Hi <first name> \U0001F44B\n\n" when a first name is on file,
@@ -572,12 +576,28 @@ def _welcome_reminder_claim_stage(db_ref, uid: int, *, claimed_field: str, sent_
     push racing the hourly sweep, two overlapping scheduler workers, a
     Telegram-retry re-entry) from double-sending: the filter requires BOTH
     the terminal ``sent_field`` and the ephemeral ``claimed_field`` to be
-    absent, and the ``update_one`` that sets ``claimed_field`` is a single
-    atomic Mongo operation — a losing racer's filter simply won't match, so
-    ``modified_count`` (or an upsert) tells the caller whether it won.
+    absent (or the claim to be stale — see below), and the ``update_one``
+    that sets ``claimed_field`` is a single atomic Mongo operation — a
+    losing racer's filter simply won't match, so ``modified_count`` (or an
+    upsert) tells the caller whether it won.
+
+    A claim is treated as abandoned, and therefore reclaimable, once it is
+    older than ``WELCOME_CLAIM_STALE_MINUTES``: the only way ``claimed_field``
+    is set without ``sent_field`` ever following is a worker dying between
+    the claim and the ``finally`` release in ``_attempt_welcome_post_d3_stage``
+    (a hard kill/OOM, not an exception — those are already caught). Without
+    this, such a lease would wedge the stage for that user forever.
     """
+    stale_before = now_ts - timedelta(minutes=WELCOME_CLAIM_STALE_MINUTES)
     res = db_ref.welcome_reminders.update_one(
-        {"user_id": uid, sent_field: {"$exists": False}, claimed_field: {"$exists": False}},
+        {
+            "user_id": uid,
+            sent_field: {"$exists": False},
+            "$or": [
+                {claimed_field: {"$exists": False}},
+                {claimed_field: {"$lt": stale_before}},
+            ],
+        },
         {"$set": {claimed_field: now_ts}},
     )
     return bool(getattr(res, "modified_count", 0)) or bool(getattr(res, "upserted_id", None))
@@ -803,6 +823,26 @@ def process_welcome_reminders(
                         stage=normalized_stage, status="skipped", reason=blocked_reason,
                         run_id=run_id, dedupe=True, now=now_ts,
                     )
+                # Permanently-terminal users (claimed / expired — never
+                # transitions back) must leave the cursor's $or of
+                # not-yet-sent flags for good, or they accumulate in this
+                # unsorted, limit()-capped scan forever and can crowd out
+                # users who still need a reminder. Reversible blocks (bot
+                # blocked, risk flag, etc.) are left alone so they're
+                # re-evaluated every run in case they clear.
+                if blocked_reason in ("welcome_claimed", "welcome_expired"):
+                    terminal_fields = {
+                        f: True for f in
+                        ("reminder_20h_sent", "reminder_28h_sent", "day2_reminder_sent", "recovery_sent")
+                        if not doc.get(f)
+                    }
+                    terminal_fields.update({
+                        f: now_ts for f in
+                        ("unlock_push_sent_at", "unclaimed_reminder_sent_at", "expiry_warning_sent_at")
+                        if not doc.get(f)
+                    })
+                    if terminal_fields:
+                        db_ref.welcome_reminders.update_one({"_id": doc["_id"]}, {"$set": terminal_fields})
                 continue
 
             user_doc = db_ref.users.find_one(
@@ -1021,7 +1061,7 @@ def process_welcome_reminders(
 
 
 def trigger_welcome_unlock_push(
-    uid: int, *, now_ref: datetime | None = None, db_ref=None, send_fn=None, bot_send_fn=None,
+    uid: int, *, now_ref: datetime | None = None, progress: dict | None = None, db_ref=None, send_fn=None, bot_send_fn=None,
 ) -> dict:
     """Eager, best-effort attempt at the Patch 2 immediate unlock push.
 
@@ -1039,19 +1079,31 @@ def trigger_welcome_unlock_push(
       - if this call is never reached at all (worker restart between the
         check-in commit and this call), the hourly sweep still catches it.
 
+    ``progress`` lets a caller that already has a fresh get_welcome_progress()
+    read (e.g. process_checkin, which also needs one for the immediate
+    check-in-response copy) pass it straight through instead of triggering a
+    second read here — get_welcome_progress can fall through to a live
+    Telegram getChatMember lookup on a channel-subscription cache miss, so a
+    redundant call doubles that cost on every check-in. Omit it to fetch
+    fresh (e.g. when called standalone, as the hourly sweep's per-user loop
+    already does with its own read).
+
     Returns ``{"status": ...}`` — "not_ready" (not yet unlocked), "sent",
     "skipped" (claimed/expired/anti-abuse), "not_claimed" (already
     sent/claimed by a concurrent caller), or "send_failed".
     """
     import uuid
 
-    from vouchers import get_welcome_progress, resolve_welcome_display_name, resolve_welcome_locale
+    from vouchers import resolve_welcome_display_name, resolve_welcome_locale
 
     db_ref = db_ref or db
     send_fn = send_fn or _welcome_claim_http_send_fn
     now_ts = _coerce_utc(now_ref) or now_utc()
 
-    progress = get_welcome_progress(uid, now=now_ts)
+    if progress is None:
+        from vouchers import get_welcome_progress
+
+        progress = get_welcome_progress(uid, now=now_ts)
     completed = int(progress.get("completed") or 0)
     required = int(progress.get("required") or 3)
     if completed < required:
