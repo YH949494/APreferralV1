@@ -4067,7 +4067,7 @@
             referralSection.scrollIntoView({ behavior: "smooth", block: "start" });
           }
           showXpToast(data.total_xp || data.base_xp || 20, data.streak || 1, data.streak_label || "");
-          if (data.welcome_celebration === "day1") {
+          if (data.welcome_celebration === "day1" || data.welcome_celebration === "day2" || data.welcome_celebration === "unlock_pending_channel") {
             showWelcomeDay1Toast(data.welcome_message);
           } else if (data.welcome_celebration === "unlock") {
             showWelcomeUnlockModal();
