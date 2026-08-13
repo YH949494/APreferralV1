@@ -38,6 +38,11 @@ SEGMENT_PROBABILITY_DESCRIPTIONS: dict[str, str] = {
 }
 
 BOT_SEGMENT_DEFAULT_PROBABILITY = 0.70
+# Missing / blank / unrecognized segment (including "unclassified" itself) must
+# NOT fail open to the same odds as a known-good segment — a user who should be
+# Voucher Hunter / Ghost / Low Value must not get better odds just because their
+# segment is missing or stale.
+BOT_SEGMENT_FALLBACK_PROBABILITY = 0.10
 BOT_SEGMENT_PROBABILITY_MAP = {
     "new_user": 0.70,
     "new_joiner": 0.70,
@@ -57,7 +62,7 @@ BOT_SEGMENT_PROBABILITY_MAP = {
     # Old Player: UIM hasn't defined a different rule for this bucket yet,
     # so it stays at the same default as the other "normal" segments.
     "old_player": BOT_SEGMENT_DEFAULT_PROBABILITY,
-    "unclassified": BOT_SEGMENT_DEFAULT_PROBABILITY,
+    "unclassified": BOT_SEGMENT_FALLBACK_PROBABILITY,
 }
 
 
@@ -143,7 +148,10 @@ _POOL_PROBABILITY_SETTINGS_FIELD_BY_SEGMENT = {
 
 def public_pool_probability_for_bot_segment(raw: Any) -> float:
     normalized = normalize_for_bot_segment(raw)
-    default = float(BOT_SEGMENT_PROBABILITY_MAP.get(normalized, BOT_SEGMENT_DEFAULT_PROBABILITY))
+    # normalize_for_bot_segment() always returns a key present in the map (falling
+    # back to "unclassified"), so this .get() default is defensive only — but it
+    # must still be the conservative fallback, not the 70% "known segment" default.
+    default = float(BOT_SEGMENT_PROBABILITY_MAP.get(normalized, BOT_SEGMENT_FALLBACK_PROBABILITY))
     field = _POOL_PROBABILITY_SETTINGS_FIELD_BY_SEGMENT.get(normalized)
     if not field:
         return default
