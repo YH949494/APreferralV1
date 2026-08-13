@@ -33,6 +33,11 @@ class PlatformFinderLanguageResolutionTests(unittest.TestCase):
 
 
 class PlatformFinderPayloadTests(unittest.TestCase):
+    """The backend payload is intentionally minimal -- {cta_label, language,
+    search_term} -- since actual copy now lives in static/i18n.js's I18N
+    table (see test_platform_finder_i18n.test.js) rather than being
+    duplicated as a second, Python-side string table."""
+
     def test_search_term_is_identical_and_untranslated_across_regions(self):
         for region in ("my", "th", "id", None, "unknown"):
             payload = _platform_finder_payload(region)
@@ -45,39 +50,18 @@ class PlatformFinderPayloadTests(unittest.TestCase):
             self.assertEqual(payload["cta_label"], PLATFORM_FINDER_CTA_LABEL)
             self.assertEqual(payload["cta_label"], "🔎 Find Where To Play")
 
-    def test_my_region_payload_is_english(self):
-        payload = _platform_finder_payload("my")
-        self.assertEqual(payload["language"], "en")
-        self.assertEqual(payload["title"], "Voucher secured ✅")
-        self.assertEqual(payload["subtitle"], "Not sure where to use it?")
-        self.assertEqual(len(payload["steps"]), 3)
-        self.assertIn("AdvantPlay Slots", payload["steps"][0]["text"])
-        self.assertEqual(payload["copy_button_label"], '📋 Copy "AdvantPlay Slots"')
-        self.assertEqual(payload["help_button_label"], "❓ Can't Find It?")
+    def test_my_region_payload_language_is_english(self):
+        self.assertEqual(_platform_finder_payload("my")["language"], "en")
 
-    def test_th_region_payload_is_thai(self):
-        payload = _platform_finder_payload("th")
-        self.assertEqual(payload["language"], "th")
-        self.assertEqual(payload["title"], "รับคูปองเรียบร้อยแล้ว ✅")
-        self.assertEqual(payload["subtitle"], "ไม่แน่ใจว่าต้องใช้ที่ไหน?")
-        self.assertIn("AdvantPlay Slots", payload["steps"][0]["text"])
-        self.assertEqual(payload["copy_button_label"], '📋 คัดลอก "AdvantPlay Slots"')
-        self.assertEqual(payload["help_button_label"], "❓ หาไม่เจอ?")
+    def test_th_region_payload_language_is_thai(self):
+        self.assertEqual(_platform_finder_payload("th")["language"], "th")
 
-    def test_id_region_payload_is_bahasa_indonesia(self):
-        payload = _platform_finder_payload("id")
-        self.assertEqual(payload["language"], "id")
-        self.assertEqual(payload["title"], "Voucher berhasil diklaim ✅")
-        self.assertEqual(payload["subtitle"], "Belum tahu harus digunakan di mana?")
-        self.assertIn("AdvantPlay Slots", payload["steps"][0]["text"])
-        self.assertEqual(payload["copy_button_label"], '📋 Salin "AdvantPlay Slots"')
-        self.assertEqual(payload["help_button_label"], "❓ Tidak Ketemu?")
+    def test_id_region_payload_language_is_bahasa_indonesia(self):
+        self.assertEqual(_platform_finder_payload("id")["language"], "id")
 
-    def test_unknown_region_falls_back_to_english_payload(self):
+    def test_unknown_region_payload_falls_back_to_english(self):
         for region in (None, "", "ph", "unknown"):
-            payload = _platform_finder_payload(region)
-            self.assertEqual(payload["language"], "en")
-            self.assertEqual(payload["title"], "Voucher secured ✅")
+            self.assertEqual(_platform_finder_payload(region)["language"], "en")
 
 
 class PlatformFinderEventTypesTests(unittest.TestCase):

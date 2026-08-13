@@ -2717,25 +2717,35 @@
 
     // Localized "Find Where To Play" flow, shown after any successful
     // voucher claim (backend already logged platform_finder_shown when it
-    // returned this payload). Firing platform_finder_opened/copied/help
-    // events is a real per-tap user action, so no dedup is needed there;
-    // showPlatformFinderCta itself is only called once per claim response.
-    function platformFinderPostEvent(path, extra = {}) {
+    // returned this payload). Language is pinned to platformFinder.language
+    // (backend-resolved from users.region), not window.currentLanguage, per
+    // product spec -- copy itself lives in I18N (static/i18n.js) via tFor()
+    // so there's one string table, not a second one duplicated here.
+    // Firing platform_finder_opened/copied/help events is a real per-tap
+    // user action, so no dedup is needed there; showPlatformFinderCta itself
+    // is only called once per claim response.
+    function platformFinderPostEvent(path, claimCtx = {}) {
       try {
         v2Fetch(`${API_V2}/vouchers/platform-finder/${path}`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(extra),
+          body: JSON.stringify({
+            dropId: claimCtx.dropId || undefined,
+            voucherCode: claimCtx.voucherCode || undefined,
+          }),
         }).catch((err) => console.warn(`platform-finder/${path} failed`, err));
       } catch (err) {
         console.warn(`platform-finder/${path} failed`, err);
       }
     }
 
-    function showPlatformFinderModal(platformFinder) {
+    function showPlatformFinderModal(platformFinder, claimCtx = {}) {
       try {
         const existing = document.getElementById("platform-finder-modal");
         if (existing) existing.remove();
+
+        const lang = platformFinder.language || "en";
+        const searchTerm = String(platformFinder.search_term || "AdvantPlay Slots");
 
         const overlay = document.createElement("div");
         overlay.id = "platform-finder-modal";
@@ -2746,36 +2756,36 @@
         content.className = "modal-content";
 
         const title = document.createElement("h3");
-        title.textContent = String(platformFinder.title || "");
+        title.textContent = tFor(lang, "platform_finder_title");
         content.appendChild(title);
 
         const subtitle = document.createElement("p");
-        subtitle.textContent = String(platformFinder.subtitle || "");
+        subtitle.textContent = tFor(lang, "platform_finder_subtitle");
         content.appendChild(subtitle);
 
-        (platformFinder.steps || []).forEach((step) => {
+        [1, 2, 3].forEach((n) => {
           const stepEl = document.createElement("p");
           stepEl.style.margin = "6px 0";
           const stepLabel = document.createElement("strong");
-          stepLabel.textContent = String(step.label || "");
+          stepLabel.textContent = tFor(lang, `platform_finder_step${n}_label`);
           stepEl.appendChild(stepLabel);
-          stepEl.appendChild(document.createTextNode(" — " + String(step.text || "")));
+          stepEl.appendChild(document.createTextNode(" — " + tFor(lang, `platform_finder_step${n}_text`)));
           content.appendChild(stepEl);
         });
 
-        const searchTerm = String(platformFinder.search_term || "");
         const copyBtn = document.createElement("button");
         copyBtn.type = "button";
         copyBtn.className = "btn btn-primary";
         copyBtn.style.marginTop = "10px";
-        copyBtn.textContent = String(platformFinder.copy_button_label || `📋 Copy "${searchTerm}"`);
-        copyBtn.addEventListener("click", () => {
-          navigator.clipboard?.writeText(searchTerm)
-            .then(() => {
-              flashButtonLabel(copyBtn, "✓ Copied");
-              platformFinderPostEvent("search-copied");
-            })
-            .catch(() => tgAlert(t("unable_to_copy") + searchTerm));
+        copyBtn.textContent = tFor(lang, "platform_finder_copy_btn");
+        copyBtn.addEventListener("click", async () => {
+          const copied = await copyTextToClipboard(searchTerm);
+          if (copied) {
+            flashButtonLabel(copyBtn, "✓ Copied");
+            platformFinderPostEvent("search-copied", claimCtx);
+          } else {
+            tgAlert(t("unable_to_copy") + searchTerm);
+          }
         });
         content.appendChild(copyBtn);
 
@@ -2783,20 +2793,23 @@
         helpBtn.type = "button";
         helpBtn.className = "btn btn-ghost";
         helpBtn.style.marginTop = "10px";
-        helpBtn.textContent = String(platformFinder.help_button_label || "❓ Can't Find It?");
+        helpBtn.textContent = tFor(lang, "platform_finder_help_btn");
         helpBtn.addEventListener("click", async () => {
           try {
             const res = await v2Fetch(`${API_V2}/vouchers/platform-finder/help-clicked`, {
               method: "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({}),
+              body: JSON.stringify({
+                dropId: claimCtx.dropId || undefined,
+                voucherCode: claimCtx.voucherCode || undefined,
+              }),
             });
             const data = res.ok ? await res.json() : {};
             if (data.help_url && openTelegramSafeLink(data.help_url)) return;
-            tgAlert(data.fallback_message || `Search "${searchTerm}" on Google and look for the official platform.`);
+            tgAlert(tFor(lang, "platform_finder_fallback"));
           } catch (err) {
             console.warn("platform-finder help-clicked failed", err);
-            tgAlert(`Search "${searchTerm}" on Google and look for the official platform.`);
+            tgAlert(tFor(lang, "platform_finder_fallback"));
           }
         });
         content.appendChild(helpBtn);
@@ -2819,20 +2832,21 @@
       }
     }
 
-    function showPlatformFinderCta(claimBtn, platformFinder) {
+    function showPlatformFinderCta(claimBtn, platformFinder, claimCtx = {}) {
       if (!platformFinder || !claimBtn || !claimBtn.parentElement) return;
       const existing = document.getElementById("platform-finder-cta");
       if (existing) existing.remove();
 
+      const lang = platformFinder.language || "en";
       const ctaBtn = document.createElement("button");
       ctaBtn.type = "button";
       ctaBtn.id = "platform-finder-cta";
       ctaBtn.className = "btn btn-ghost";
       ctaBtn.style.marginTop = "10px";
-      ctaBtn.textContent = platformFinder.cta_label || "🔎 Find Where To Play";
+      ctaBtn.textContent = platformFinder.cta_label || tFor(lang, "platform_finder_cta");
       ctaBtn.addEventListener("click", () => {
-        platformFinderPostEvent("opened");
-        showPlatformFinderModal(platformFinder);
+        platformFinderPostEvent("opened", claimCtx);
+        showPlatformFinderModal(platformFinder, claimCtx);
       });
       claimBtn.insertAdjacentElement("afterend", ctaBtn);
     }
@@ -6316,7 +6330,7 @@
             showWelcomeVoucherGuidePopup(out.claim_guide, { code: codeText, claimedAt });
           }
           if (out?.platform_finder) {
-            showPlatformFinderCta(claimBtn, out.platform_finder);
+            showPlatformFinderCta(claimBtn, out.platform_finder, { dropId, voucherCode: codeText });
           }
           await loadWelcomeProgress();
         }

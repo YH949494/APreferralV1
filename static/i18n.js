@@ -221,6 +221,20 @@
 
       /* Leaderboard empty/unavailable */
       affiliate_leaderboard_unavailable: "No affiliate leaderboard data yet.",
+
+      /* Platform Finder ("Find Where To Play", shown after a voucher claim) */
+      platform_finder_cta: "🔎 Find Where To Play",
+      platform_finder_title: "Voucher secured ✅",
+      platform_finder_subtitle: "Not sure where to use it?",
+      platform_finder_step1_label: "Step 1",
+      platform_finder_step1_text: "Search \"AdvantPlay Slots\" on Google.",
+      platform_finder_step2_label: "Step 2",
+      platform_finder_step2_text: "Look for the official platform.",
+      platform_finder_step3_label: "Step 3",
+      platform_finder_step3_text: "Log in → Voucher → enter your voucher code.",
+      platform_finder_copy_btn: "📋 Copy \"AdvantPlay Slots\"",
+      platform_finder_help_btn: "❓ Can't Find It?",
+      platform_finder_fallback: "Search \"AdvantPlay Slots\" on Google and look for the official platform.",
     },
 
     th: {
@@ -418,6 +432,20 @@
 
       check_in_reward: "รางวัลการเช็คอิน",
       affiliate_leaderboard_unavailable: "ยังไม่มีข้อมูลลีดเดอร์บอร์ดพาร์ทเนอร์",
+
+      /* Platform Finder ("Find Where To Play", shown after a voucher claim) */
+      platform_finder_cta: "🔎 Find Where To Play",
+      platform_finder_title: "รับคูปองเรียบร้อยแล้ว ✅",
+      platform_finder_subtitle: "ไม่แน่ใจว่าต้องใช้ที่ไหน?",
+      platform_finder_step1_label: "ขั้นตอนที่ 1",
+      platform_finder_step1_text: "ค้นหา \"AdvantPlay Slots\" บน Google",
+      platform_finder_step2_label: "ขั้นตอนที่ 2",
+      platform_finder_step2_text: "มองหาแพลตฟอร์มทางการ",
+      platform_finder_step3_label: "ขั้นตอนที่ 3",
+      platform_finder_step3_text: "เข้าสู่ระบบ → Voucher → ใส่โค้ดคูปองของคุณ",
+      platform_finder_copy_btn: "📋 คัดลอก \"AdvantPlay Slots\"",
+      platform_finder_help_btn: "❓ หาไม่เจอ?",
+      platform_finder_fallback: "ค้นหา \"AdvantPlay Slots\" บน Google และมองหาแพลตฟอร์มทางการ",
     },
 
     id: {
@@ -615,6 +643,20 @@
 
       check_in_reward: "Hadiah check-in",
       affiliate_leaderboard_unavailable: "Belum ada data leaderboard afiliasi.",
+
+      /* Platform Finder ("Find Where To Play", shown after a voucher claim) */
+      platform_finder_cta: "🔎 Find Where To Play",
+      platform_finder_title: "Voucher berhasil diklaim ✅",
+      platform_finder_subtitle: "Belum tahu harus digunakan di mana?",
+      platform_finder_step1_label: "Langkah 1",
+      platform_finder_step1_text: "Cari \"AdvantPlay Slots\" di Google.",
+      platform_finder_step2_label: "Langkah 2",
+      platform_finder_step2_text: "Pilih platform resminya.",
+      platform_finder_step3_label: "Langkah 3",
+      platform_finder_step3_text: "Login → Voucher → masukkan kode voucher Anda.",
+      platform_finder_copy_btn: "📋 Salin \"AdvantPlay Slots\"",
+      platform_finder_help_btn: "❓ Tidak Ketemu?",
+      platform_finder_fallback: "Cari \"AdvantPlay Slots\" di Google dan pilih platform resminya.",
     }
   };
 
@@ -654,7 +696,15 @@
   /* TRANSLATION HELPER                                                   */
   /* ------------------------------------------------------------------ */
   function t(key, params) {
-    const lang = window.currentLanguage || "en";
+    return tFor(window.currentLanguage || "en", key, params);
+  }
+
+  // Same lookup as t(), but for a caller-supplied language instead of
+  // window.currentLanguage. Used by features whose language is pinned to
+  // something other than the user's general Mini App language choice (e.g.
+  // Platform Finder, pinned to users.region) so they don't need a second
+  // translation dictionary/engine.
+  function tFor(lang, key, params) {
     let str = (I18N[lang] && I18N[lang][key]) || (I18N.en && I18N.en[key]) || key;
     if (params && typeof params === "object") {
       str = str.replace(/\{(\w+)\}/g, (_, k) => (k in params ? params[k] : `{${k}}`));
@@ -725,6 +775,7 @@
   /* ------------------------------------------------------------------ */
   window.currentLanguage = detectLang();
   window.t = t;
+  window.tFor = tFor;
   window.setLang = setLang;
   window.applyTranslations = applyTranslations;
   window.detectLang = detectLang;
