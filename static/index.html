@@ -2715,6 +2715,128 @@
       }
     }
 
+    // Localized "Find Where To Play" flow, shown after any successful
+    // voucher claim (backend already logged platform_finder_shown when it
+    // returned this payload). Firing platform_finder_opened/copied/help
+    // events is a real per-tap user action, so no dedup is needed there;
+    // showPlatformFinderCta itself is only called once per claim response.
+    function platformFinderPostEvent(path, extra = {}) {
+      try {
+        v2Fetch(`${API_V2}/vouchers/platform-finder/${path}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(extra),
+        }).catch((err) => console.warn(`platform-finder/${path} failed`, err));
+      } catch (err) {
+        console.warn(`platform-finder/${path} failed`, err);
+      }
+    }
+
+    function showPlatformFinderModal(platformFinder) {
+      try {
+        const existing = document.getElementById("platform-finder-modal");
+        if (existing) existing.remove();
+
+        const overlay = document.createElement("div");
+        overlay.id = "platform-finder-modal";
+        overlay.className = "modal";
+        overlay.style.display = "flex";
+
+        const content = document.createElement("div");
+        content.className = "modal-content";
+
+        const title = document.createElement("h3");
+        title.textContent = String(platformFinder.title || "");
+        content.appendChild(title);
+
+        const subtitle = document.createElement("p");
+        subtitle.textContent = String(platformFinder.subtitle || "");
+        content.appendChild(subtitle);
+
+        (platformFinder.steps || []).forEach((step) => {
+          const stepEl = document.createElement("p");
+          stepEl.style.margin = "6px 0";
+          const stepLabel = document.createElement("strong");
+          stepLabel.textContent = String(step.label || "");
+          stepEl.appendChild(stepLabel);
+          stepEl.appendChild(document.createTextNode(" — " + String(step.text || "")));
+          content.appendChild(stepEl);
+        });
+
+        const searchTerm = String(platformFinder.search_term || "");
+        const copyBtn = document.createElement("button");
+        copyBtn.type = "button";
+        copyBtn.className = "btn btn-primary";
+        copyBtn.style.marginTop = "10px";
+        copyBtn.textContent = String(platformFinder.copy_button_label || `📋 Copy "${searchTerm}"`);
+        copyBtn.addEventListener("click", () => {
+          navigator.clipboard?.writeText(searchTerm)
+            .then(() => {
+              flashButtonLabel(copyBtn, "✓ Copied");
+              platformFinderPostEvent("search-copied");
+            })
+            .catch(() => tgAlert(t("unable_to_copy") + searchTerm));
+        });
+        content.appendChild(copyBtn);
+
+        const helpBtn = document.createElement("button");
+        helpBtn.type = "button";
+        helpBtn.className = "btn btn-ghost";
+        helpBtn.style.marginTop = "10px";
+        helpBtn.textContent = String(platformFinder.help_button_label || "❓ Can't Find It?");
+        helpBtn.addEventListener("click", async () => {
+          try {
+            const res = await v2Fetch(`${API_V2}/vouchers/platform-finder/help-clicked`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({}),
+            });
+            const data = res.ok ? await res.json() : {};
+            if (data.help_url && openTelegramSafeLink(data.help_url)) return;
+            tgAlert(data.fallback_message || `Search "${searchTerm}" on Google and look for the official platform.`);
+          } catch (err) {
+            console.warn("platform-finder help-clicked failed", err);
+            tgAlert(`Search "${searchTerm}" on Google and look for the official platform.`);
+          }
+        });
+        content.appendChild(helpBtn);
+
+        const closeBtn = document.createElement("button");
+        closeBtn.type = "button";
+        closeBtn.className = "btn";
+        closeBtn.style.marginTop = "10px";
+        closeBtn.textContent = "Close";
+        closeBtn.addEventListener("click", () => overlay.remove());
+        content.appendChild(closeBtn);
+
+        overlay.appendChild(content);
+        overlay.addEventListener("click", (evt) => {
+          if (evt.target === overlay) overlay.remove();
+        });
+        document.body.appendChild(overlay);
+      } catch (err) {
+        console.warn("Platform finder modal failed", err);
+      }
+    }
+
+    function showPlatformFinderCta(claimBtn, platformFinder) {
+      if (!platformFinder || !claimBtn || !claimBtn.parentElement) return;
+      const existing = document.getElementById("platform-finder-cta");
+      if (existing) existing.remove();
+
+      const ctaBtn = document.createElement("button");
+      ctaBtn.type = "button";
+      ctaBtn.id = "platform-finder-cta";
+      ctaBtn.className = "btn btn-ghost";
+      ctaBtn.style.marginTop = "10px";
+      ctaBtn.textContent = platformFinder.cta_label || "🔎 Find Where To Play";
+      ctaBtn.addEventListener("click", () => {
+        platformFinderPostEvent("opened");
+        showPlatformFinderModal(platformFinder);
+      });
+      claimBtn.insertAdjacentElement("afterend", ctaBtn);
+    }
+
     function renderDailyGame(slot) {
       const contentEl = document.getElementById("daily-game-content");
       if (!contentEl) return;
@@ -6192,6 +6314,9 @@
           tgAlert(`🎟️ Your code: ${codeText}\nClaimed at: ${claimedAt}${copyMsg}`);
           if (out?.claim_guide?.type === "welcome_voucher") {
             showWelcomeVoucherGuidePopup(out.claim_guide, { code: codeText, claimedAt });
+          }
+          if (out?.platform_finder) {
+            showPlatformFinderCta(claimBtn, out.platform_finder);
           }
           await loadWelcomeProgress();
         }
