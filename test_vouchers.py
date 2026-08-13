@@ -2153,6 +2153,21 @@ class SegmentGatingUserIdModeTests(unittest.TestCase):
         return {
             "_id": drop_id,
             "type": "pooled",
+            "eligibility": {
+                "mode": "user_id",
+                "allow": allow if allow is not None else [777],
+                "source": "segment",
+            },
+            "public_remaining": 5,
+        }
+
+    def _make_whitelist_mode_drop(self, drop_id="whitelist-drop-1", allow=None):
+        # A hand-picked whitelist (Campaign Builder's "whitelist" audience mode,
+        # or any admin-created drop with a manual allow-list) has no
+        # eligibility.source="segment" marker and must NOT be probability-shaped.
+        return {
+            "_id": drop_id,
+            "type": "pooled",
             "eligibility": {"mode": "user_id", "allow": allow if allow is not None else [777]},
             "public_remaining": 5,
         }
@@ -2194,6 +2209,37 @@ class SegmentGatingUserIdModeTests(unittest.TestCase):
         # accounting, rejoin buffer, display counts) that are scoped to the true
         # public pool only.
         self.assertFalse(is_public_pool(drop))
+
+    def test_general_whitelist_drop_is_not_probability_shaped(self):
+        """A hand-picked user_id whitelist (no eligibility.source="segment")
+        must NOT be subjected to the segment probability gate — those
+        recipients were deliberately chosen and the allow-list check alone
+        determines eligibility, same as before this patch."""
+        import vouchers as m
+
+        drop = self._make_whitelist_mode_drop()
+        self.assertFalse(m._is_probability_shaped_pooled_drop(drop))
+
+    def test_general_whitelist_voucher_hunter_not_denied_by_probability_gate(self):
+        import vouchers as m
+
+        # Reuse the "seg-drop-1" drop_id so the fake free-voucher inventory set
+        # up by _patch_environment matches; only the eligibility marker differs.
+        drop = self._make_whitelist_mode_drop(drop_id="seg-drop-1")
+        m, originals = self._patch_environment(user_doc={"user_id": 777, "for_bot_segment": "voucher_hunter"})
+        orig_random = m.random.random
+        # Even a roll that would fail the 10% voucher_hunter gate must not deny
+        # a general whitelist recipient — shaping must not run for this drop.
+        m.random.random = lambda: 0.99
+        try:
+            state = m._pooled_claimability_state(
+                drop=drop, drop_id="seg-drop-1", user_region=None, uid=777, is_my_user=False,
+                ref=datetime(2026, 4, 22, 12, 0, tzinfo=timezone.utc),
+            )
+        finally:
+            m.random.random = orig_random
+            self._restore(m, originals)
+        self.assertTrue(state["claimable"])
 
     def test_user_id_mode_voucher_hunter_denied_by_10pct_gate(self):
         import vouchers as m

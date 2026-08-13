@@ -3509,13 +3509,17 @@ def _is_public_pooled_drop(drop: dict) -> bool:
 def _is_probability_shaped_pooled_drop(drop: dict) -> bool:
     """Pooled drops that must go through claim-time segment probability shaping.
 
-    Covers both true public pools (eligibility.mode="public") and
-    segment-targeted campaigns compiled as an eligibility.mode="user_id"
-    allow-list (see campaign_builder._resolve_segment_user_ids). Being in a
-    user_id allow-list only determines whether a user may attempt the pooled
-    drop — it must not bypass the segment probability gate. Kept separate from
-    _is_public_pooled_drop/is_public_pool so unrelated flows (reserve pool
-    accounting, rejoin buffer, public-only display counts) are unaffected.
+    Covers true public pools (eligibility.mode="public") and segment-targeted
+    campaigns compiled as an eligibility.mode="user_id" allow-list carrying
+    eligibility.source="segment" (see campaign_builder.compile_campaign's
+    segment branch / _resolve_segment_user_ids). A general user_id whitelist
+    (Campaign Builder's "whitelist" audience mode, or any admin-created
+    drop with a hand-picked allow-list) is deliberately excluded: those
+    recipients were individually chosen and must not be subjected to a
+    second random segment gate on top of the allow-list check. Kept separate
+    from _is_public_pooled_drop/is_public_pool so unrelated flows (reserve
+    pool accounting, rejoin buffer, public-only display counts) are
+    unaffected.
     """
     if _normalize_drop_type((drop or {}).get("type", "pooled")) != "pooled":
         return False
@@ -3523,8 +3527,13 @@ def _is_probability_shaped_pooled_drop(drop: dict) -> bool:
         return False
     if (drop or {}).get("internal_only") is True:
         return False
-    elig_mode = str(((drop or {}).get("eligibility") or {}).get("mode") or "public").strip().lower()
-    return elig_mode in ("public", "user_id")
+    eligibility = (drop or {}).get("eligibility") or {}
+    elig_mode = str(eligibility.get("mode") or "public").strip().lower()
+    if elig_mode == "public":
+        return True
+    if elig_mode == "user_id":
+        return str(eligibility.get("source") or "").strip().lower() == "segment"
+    return False
 
 
 def check_rejoin_buffer_for_pooled_claim(uid: int | None, now: datetime | None = None) -> dict:
@@ -7224,6 +7233,12 @@ def create_drop_from_spec(data: dict) -> tuple[dict, int]:
                 continue
         if allow:
             clean_eligibility["allow"] = allow
+        # "segment" is the only recognized source value: it marks a
+        # campaign_builder-generated segment allow-list (vs. a hand-picked
+        # whitelist) so the claim-time probability gate knows to apply
+        # segment shaping. See vouchers._is_probability_shaped_pooled_drop.
+        if str(eligibility_raw.get("source") or "").strip().lower() == "segment":
+            clean_eligibility["source"] = "segment"
     elif elig_mode == "admin_only":
         clean_eligibility = {"mode": "admin_only"}
     else:
