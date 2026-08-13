@@ -219,6 +219,7 @@ SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
             "low_value": {"type": "float", "label": "Low Value", "default": 10.0, "env": None, "min": 0, "max": 100},
             "voucher_hunter": {"type": "float", "label": "Voucher Hunter", "default": 10.0, "env": None, "min": 0, "max": 100},
             "abuse": {"type": "float", "label": "Abuse", "default": 5.0, "env": None, "min": 0, "max": 100},
+            "unclassified": {"type": "float", "label": "Unclassified / Unknown", "default": 10.0, "env": None, "min": 0, "max": 100},
             "reserved_pool_pct": {"type": "float", "label": "Reserved Pool %", "default": 0.0, "env": None, "min": 0, "max": 100},
         },
     },

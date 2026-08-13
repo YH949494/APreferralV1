@@ -3506,6 +3506,36 @@ def _is_public_pooled_drop(drop: dict) -> bool:
     return elig_mode == "public"
 
 
+def _is_probability_shaped_pooled_drop(drop: dict) -> bool:
+    """Pooled drops that must go through claim-time segment probability shaping.
+
+    Covers true public pools (eligibility.mode="public") and segment-targeted
+    campaigns compiled as an eligibility.mode="user_id" allow-list carrying
+    eligibility.source="segment" (see campaign_builder.compile_campaign's
+    segment branch / _resolve_segment_user_ids). A general user_id whitelist
+    (Campaign Builder's "whitelist" audience mode, or any admin-created
+    drop with a hand-picked allow-list) is deliberately excluded: those
+    recipients were individually chosen and must not be subjected to a
+    second random segment gate on top of the allow-list check. Kept separate
+    from _is_public_pooled_drop/is_public_pool so unrelated flows (reserve
+    pool accounting, rejoin buffer, public-only display counts) are
+    unaffected.
+    """
+    if _normalize_drop_type((drop or {}).get("type", "pooled")) != "pooled":
+        return False
+    if _drop_audience_type(drop) != "public":
+        return False
+    if (drop or {}).get("internal_only") is True:
+        return False
+    eligibility = (drop or {}).get("eligibility") or {}
+    elig_mode = str(eligibility.get("mode") or "public").strip().lower()
+    if elig_mode == "public":
+        return True
+    if elig_mode == "user_id":
+        return str(eligibility.get("source") or "").strip().lower() == "segment"
+    return False
+
+
 def check_rejoin_buffer_for_pooled_claim(uid: int | None, now: datetime | None = None) -> dict:
     """Gate public/pooled voucher claims behind the official-channel rejoin buffer.
 
@@ -3667,19 +3697,22 @@ def assign_public_pool_access_once(
     *,
     user_doc: dict | None = None,
     legacy_public_pool_segment: str | None = None,
+    eligibility_mode: str | None = None,
 ) -> dict:
     try:
         user_id_int = int(user_id)
     except (TypeError, ValueError):
         user_id_int = user_id
+    elig_mode_for_log = str(eligibility_mode or "public").strip().lower() or "public"
     existing = public_pool_access_assignments_col.find_one(
         {"user_id": user_id_int, "public_pool_id": str(public_pool_id)}
     )
     if existing:
         logger.info(
-            "[PUBLIC_POOL][SEGMENT_REUSE] uid=%s pool=%s allowed=%s",
-            user_id_int,
+            "[PUBLIC_POOL][SEGMENT_REUSE] drop_id=%s user_id=%s eligibility_mode=%s allowed=%s",
             public_pool_id,
+            user_id_int,
+            elig_mode_for_log,
             bool(existing.get("access_allowed")),
         )
         return existing
@@ -3735,22 +3768,28 @@ def assign_public_pool_access_once(
             probability,
         )
 
-    # Enhanced probability decision log.
+    access_allowed = True if probability >= 1.0 else (random.random() < probability)
+
+    # Enhanced probability decision log — kept queryable by drop_id/user_id/
+    # eligibility_mode so voucher_hunter=10% can be confirmed in production even
+    # for eligibility_mode="user_id" (segment-targeted) drops.
     logger.info(
-        "[PUBLIC_POOL][PROB_DECISION] account=%s segment=%s backend_segment=%s "
-        "player_age_type=%s probability_used=%.4f source=%s "
-        "new_player_override=%s boost_applied=%s ts=%s",
+        "[PUBLIC_POOL][PROB_DECISION] drop_id=%s user_id=%s eligibility_mode=%s "
+        "segment=%s backend_segment=%s player_age_type=%s probability=%.4f "
+        "decision=%s decision_source=%s new_player_override=%s boost_applied=%s ts=%s",
+        public_pool_id,
         user_id_int,
+        elig_mode_for_log,
         normalized_segment,
         backend_seg,
         player_age_type,
         probability,
+        "pass" if access_allowed else "reject",
         probability_source,
         new_player_override,
         boost_applied,
         now_utc().isoformat(),
     )
-    access_allowed = True if probability >= 1.0 else (random.random() < probability)
     assigned_at = now_utc()
     drop_open_utc = _as_aware_utc(drop_open_time) or assigned_at
     eligible_after = drop_open_utc + timedelta(seconds=delay_seconds)
@@ -3758,6 +3797,7 @@ def assign_public_pool_access_once(
     base_doc = {
         "user_id": user_id_int,
         "public_pool_id": str(public_pool_id),
+        "eligibility_mode_at_assignment": elig_mode_for_log,
         "segment_at_assignment": normalized_segment,
         "for_bot_segment": raw_segment,
         "for_bot_segment_normalized": normalized_segment,
@@ -3792,16 +3832,17 @@ def assign_public_pool_access_once(
         )
         if existing:
             logger.info(
-                "[PUBLIC_POOL][SEGMENT_REUSE] uid=%s pool=%s allowed=%s",
-                user_id_int,
+                "[PUBLIC_POOL][SEGMENT_REUSE] drop_id=%s user_id=%s eligibility_mode=%s allowed=%s",
                 public_pool_id,
+                user_id_int,
+                elig_mode_for_log,
                 bool(existing.get("access_allowed")),
             )
             return existing
         raise
 
 
-def check_public_pool_access(user_id: int | str, public_pool_id: str, drop_open_time: datetime, now: datetime | None = None) -> dict:
+def check_public_pool_access(user_id: int | str, public_pool_id: str, drop_open_time: datetime, now: datetime | None = None, eligibility_mode: str | None = None) -> dict:
     state = load_public_pool_claim_state(user_id)
     segment = state["segment"]
     assignment = assign_public_pool_access_once(
@@ -3810,6 +3851,7 @@ def check_public_pool_access(user_id: int | str, public_pool_id: str, drop_open_
         drop_open_time=drop_open_time,
         segment=segment,
         legacy_public_pool_segment=segment,
+        eligibility_mode=eligibility_mode,
     )
     now_ref = _as_aware_utc(now or now_utc()) or now_utc()
     eligible_after = _as_aware_utc(assignment.get("eligible_after")) or now_ref
@@ -4641,13 +4683,15 @@ def _pooled_claimability_state(*, drop: dict, drop_id: str, user_region: str | N
     if claimable_count <= 0:
         return {"claimable": False, "sold_out": True, "remaining": 0, "reason": "pool_empty"}
 
-    if is_public_pool(drop) and pools == ["public"] and uid is not None:
+    if _is_probability_shaped_pooled_drop(drop) and pools == ["public"] and uid is not None:
         starts_at = _as_aware_utc(drop.get("startsAt")) or ref
+        elig_mode = str((drop.get("eligibility") or {}).get("mode") or "public").strip().lower()
         access_result = check_public_pool_access(
             user_id=uid,
             public_pool_id=str(drop_id),
             drop_open_time=starts_at,
             now=ref,
+            eligibility_mode=elig_mode,
         )
         assignment = access_result.get("assignment") or {}
         if not assignment.get("access_allowed"):
@@ -7189,6 +7233,12 @@ def create_drop_from_spec(data: dict) -> tuple[dict, int]:
                 continue
         if allow:
             clean_eligibility["allow"] = allow
+        # "segment" is the only recognized source value: it marks a
+        # campaign_builder-generated segment allow-list (vs. a hand-picked
+        # whitelist) so the claim-time probability gate knows to apply
+        # segment shaping. See vouchers._is_probability_shaped_pooled_drop.
+        if str(eligibility_raw.get("source") or "").strip().lower() == "segment":
+            clean_eligibility["source"] = "segment"
     elif elig_mode == "admin_only":
         clean_eligibility = {"mode": "admin_only"}
     else:

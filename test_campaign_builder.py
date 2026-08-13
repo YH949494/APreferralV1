@@ -206,6 +206,12 @@ class CampaignBuilderCompilerTests(unittest.TestCase):
         allow_lists = [set(d["eligibility"]["allow"]) for d in drops]
         self.assertIn({301, 302}, allow_lists)
         self.assertIn({303}, allow_lists)
+        # Segment-generated allow-lists must carry source="segment" so
+        # vouchers._is_probability_shaped_pooled_drop applies claim-time
+        # segment probability shaping — distinct from a hand-picked whitelist.
+        for d in drops:
+            self.assertEqual(d["eligibility"]["mode"], "user_id")
+            self.assertEqual(d["eligibility"]["source"], "segment")
 
     def test_whitelist_campaign_resolves_usernames_to_user_ids(self):
         self._seed_users()

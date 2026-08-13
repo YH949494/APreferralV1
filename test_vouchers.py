@@ -1991,8 +1991,8 @@ class PublicPoolShapingTests(unittest.TestCase):
             "normal_actual": 0.70,
             "new_user": 0.70,
             "new_joiner": 0.70,
-            "unclassified": 0.70,
-            None: 0.70,
+            "unclassified": 0.10,
+            None: 0.10,
         }
         for raw, expected in probs.items():
             self.assertEqual(public_pool_probability_for_bot_segment(raw), expected)
@@ -2012,7 +2012,7 @@ class PublicPoolShapingTests(unittest.TestCase):
     def test_malformed_segment_labels_still_fall_back_to_unclassified(self):
         for raw in ("   ", "???", "<<unknown>>", "ghost_train", "old_playerz"):
             self.assertEqual(normalize_for_bot_segment(raw), "unclassified")
-            self.assertEqual(public_pool_probability_for_bot_segment(raw), 0.70)
+            self.assertEqual(public_pool_probability_for_bot_segment(raw), 0.10)
 
     def test_assign_public_pool_access_once_uses_for_bot_segment_probability(self):
         import vouchers as m
@@ -2080,7 +2080,7 @@ class PublicPoolShapingTests(unittest.TestCase):
         orig_assignments = m.public_pool_access_assignments_col
         orig_random = m.random.random
         m.public_pool_access_assignments_col = self._SimpleCollection()
-        m.random.random = lambda: 0.69
+        m.random.random = lambda: 0.05
         try:
             drop_open = datetime(2026, 4, 22, 12, 0, tzinfo=timezone.utc)
             assignment = assign_public_pool_access_once(129, "drop-1", drop_open, user_doc={})
@@ -2089,7 +2089,293 @@ class PublicPoolShapingTests(unittest.TestCase):
             m.random.random = orig_random
         self.assertTrue(assignment["access_allowed"])
         self.assertEqual(assignment["for_bot_segment_normalized"], "unclassified")
-        self.assertEqual(assignment["probability"], 0.7)
+        self.assertEqual(assignment["probability"], 0.1)
+
+    def test_assign_public_pool_access_once_missing_segment_rejects_above_10pct(self):
+        """A missing/unclassified segment must fail closed (10%), not open (70%)."""
+        import vouchers as m
+
+        orig_assignments = m.public_pool_access_assignments_col
+        orig_random = m.random.random
+        m.public_pool_access_assignments_col = self._SimpleCollection()
+        # 0.11 would have passed under the old 70% fail-open fallback but must
+        # now be rejected under the 10% fail-closed fallback.
+        m.random.random = lambda: 0.11
+        try:
+            drop_open = datetime(2026, 4, 22, 12, 0, tzinfo=timezone.utc)
+            for raw in (None, "", "unknown_xyz", "unclassified"):
+                assignment = assign_public_pool_access_once(
+                    900 + hash(raw) % 1000, f"drop-missing-{raw}", drop_open, user_doc={"for_bot_segment": raw}
+                )
+                self.assertEqual(assignment["probability"], 0.1)
+                self.assertFalse(assignment["access_allowed"])
+        finally:
+            m.public_pool_access_assignments_col = orig_assignments
+            m.random.random = orig_random
+
+    def test_known_segment_probabilities_unchanged_by_fallback_fix(self):
+        self.assertEqual(public_pool_probability_for_bot_segment("voucher_hunter"), 0.10)
+        self.assertEqual(public_pool_probability_for_bot_segment("ghost"), 0.05)
+        self.assertEqual(public_pool_probability_for_bot_segment("low_value"), 0.10)
+        self.assertEqual(public_pool_probability_for_bot_segment("high_value"), 0.50)
+        self.assertEqual(public_pool_probability_for_bot_segment("normal_actual"), 0.70)
+
+
+class SegmentGatingUserIdModeTests(unittest.TestCase):
+    """eligibility.mode="user_id" (segment-targeted campaigns) must go through the
+    same claim-time segment probability gate as eligibility.mode="public" — being
+    in the allow-list only determines who may attempt the drop, not whether they
+    pass the shaping roll."""
+
+    class _AssignmentsCollection:
+        def __init__(self, docs=None):
+            self.docs = list(docs or [])
+
+        def find_one(self, filt, projection=None):  # noqa: ARG002
+            for doc in self.docs:
+                if all(doc.get(k) == v for k, v in filt.items()):
+                    return dict(doc)
+            return None
+
+        def insert_one(self, doc):
+            for existing in self.docs:
+                if (
+                    existing.get("user_id") == doc.get("user_id")
+                    and existing.get("public_pool_id") == doc.get("public_pool_id")
+                ):
+                    raise DuplicateKeyError("duplicate key")
+            self.docs.append(dict(doc))
+            class R:
+                inserted_id = 1
+            return R()
+
+    def _make_user_id_mode_drop(self, drop_id="seg-drop-1", allow=None):
+        return {
+            "_id": drop_id,
+            "type": "pooled",
+            "eligibility": {
+                "mode": "user_id",
+                "allow": allow if allow is not None else [777],
+                "source": "segment",
+            },
+            "public_remaining": 5,
+        }
+
+    def _make_whitelist_mode_drop(self, drop_id="whitelist-drop-1", allow=None):
+        # A hand-picked whitelist (Campaign Builder's "whitelist" audience mode,
+        # or any admin-created drop with a manual allow-list) has no
+        # eligibility.source="segment" marker and must NOT be probability-shaped.
+        return {
+            "_id": drop_id,
+            "type": "pooled",
+            "eligibility": {"mode": "user_id", "allow": allow if allow is not None else [777]},
+            "public_remaining": 5,
+        }
+
+    def _patch_environment(self, *, user_doc, assignments_docs=None):
+        import vouchers as m
+
+        patches = {
+            "db": FakeDb(drops=[], vouchers=[
+                {"type": "pooled", "dropId": "seg-drop-1", "status": "free", "pool": "public"},
+            ]),
+            "users_collection": self._AssignmentsCollection([user_doc]) if user_doc else self._AssignmentsCollection([]),
+            "public_pool_access_assignments_col": self._AssignmentsCollection(assignments_docs),
+        }
+        originals = {name: getattr(m, name) for name in patches}
+        for name, value in patches.items():
+            setattr(m, name, value)
+        # Zero out the random shaping delay so a passing roll is immediately
+        # eligible instead of landing in a "too_early" window during the test.
+        originals["random.randint"] = m.random.randint
+        m.random.randint = lambda a, b: 0  # noqa: ARG005
+        return m, originals
+
+    def _restore(self, m, originals):
+        for name, value in originals.items():
+            if name == "random.randint":
+                m.random.randint = value
+                continue
+            setattr(m, name, value)
+
+    def test_user_id_mode_pooled_drop_is_probability_shaped_but_not_public_pool(self):
+        import vouchers as m
+
+        drop = self._make_user_id_mode_drop()
+        # New shared predicate: user_id-mode pooled drops ARE subject to the
+        # segment probability gate...
+        self.assertTrue(m._is_probability_shaped_pooled_drop(drop))
+        # ...but they must NOT become a "public pool" for unrelated flows (reserve
+        # accounting, rejoin buffer, display counts) that are scoped to the true
+        # public pool only.
+        self.assertFalse(is_public_pool(drop))
+
+    def test_general_whitelist_drop_is_not_probability_shaped(self):
+        """A hand-picked user_id whitelist (no eligibility.source="segment")
+        must NOT be subjected to the segment probability gate — those
+        recipients were deliberately chosen and the allow-list check alone
+        determines eligibility, same as before this patch."""
+        import vouchers as m
+
+        drop = self._make_whitelist_mode_drop()
+        self.assertFalse(m._is_probability_shaped_pooled_drop(drop))
+
+    def test_general_whitelist_voucher_hunter_not_denied_by_probability_gate(self):
+        import vouchers as m
+
+        # Reuse the "seg-drop-1" drop_id so the fake free-voucher inventory set
+        # up by _patch_environment matches; only the eligibility marker differs.
+        drop = self._make_whitelist_mode_drop(drop_id="seg-drop-1")
+        m, originals = self._patch_environment(user_doc={"user_id": 777, "for_bot_segment": "voucher_hunter"})
+        orig_random = m.random.random
+        # Even a roll that would fail the 10% voucher_hunter gate must not deny
+        # a general whitelist recipient — shaping must not run for this drop.
+        m.random.random = lambda: 0.99
+        try:
+            state = m._pooled_claimability_state(
+                drop=drop, drop_id="seg-drop-1", user_region=None, uid=777, is_my_user=False,
+                ref=datetime(2026, 4, 22, 12, 0, tzinfo=timezone.utc),
+            )
+        finally:
+            m.random.random = orig_random
+            self._restore(m, originals)
+        self.assertTrue(state["claimable"])
+
+    def test_user_id_mode_voucher_hunter_denied_by_10pct_gate(self):
+        import vouchers as m
+
+        drop = self._make_user_id_mode_drop()
+        m, originals = self._patch_environment(user_doc={"user_id": 777, "for_bot_segment": "voucher_hunter"})
+        orig_random = m.random.random
+        m.random.random = lambda: 0.50  # far above the 10% voucher_hunter threshold
+        try:
+            state = m._pooled_claimability_state(
+                drop=drop, drop_id="seg-drop-1", user_region=None, uid=777, is_my_user=False,
+                ref=datetime(2026, 4, 22, 12, 0, tzinfo=timezone.utc),
+            )
+        finally:
+            m.random.random = orig_random
+            self._restore(m, originals)
+        self.assertFalse(state["claimable"])
+        self.assertEqual(state["reason"], "shaping_denied")
+
+    def test_user_id_mode_voucher_hunter_passes_when_roll_succeeds(self):
+        import vouchers as m
+
+        drop = self._make_user_id_mode_drop()
+        m, originals = self._patch_environment(user_doc={"user_id": 777, "for_bot_segment": "voucher_hunter"})
+        orig_random = m.random.random
+        m.random.random = lambda: 0.01  # within the 10% voucher_hunter threshold
+        try:
+            state = m._pooled_claimability_state(
+                drop=drop, drop_id="seg-drop-1", user_region=None, uid=777, is_my_user=False,
+                ref=datetime(2026, 4, 22, 12, 0, tzinfo=timezone.utc),
+            )
+        finally:
+            m.random.random = orig_random
+            self._restore(m, originals)
+        self.assertTrue(state["claimable"])
+
+    def test_user_id_mode_normal_actual_uses_70pct_mapping(self):
+        import vouchers as m
+
+        drop = self._make_user_id_mode_drop()
+        m, originals = self._patch_environment(user_doc={"user_id": 777, "for_bot_segment": "normal_actual"})
+        orig_random = m.random.random
+        m.random.random = lambda: 0.69  # below 70% -> should pass
+        try:
+            state = m._pooled_claimability_state(
+                drop=drop, drop_id="seg-drop-1", user_region=None, uid=777, is_my_user=False,
+                ref=datetime(2026, 4, 22, 12, 0, tzinfo=timezone.utc),
+            )
+        finally:
+            m.random.random = orig_random
+            self._restore(m, originals)
+        self.assertTrue(state["claimable"])
+
+    def test_user_id_mode_ghost_uses_5pct_mapping(self):
+        import vouchers as m
+
+        drop = self._make_user_id_mode_drop()
+        m, originals = self._patch_environment(user_doc={"user_id": 777, "for_bot_segment": "ghost"})
+        orig_random = m.random.random
+        m.random.random = lambda: 0.06  # above 5% -> should be denied
+        try:
+            state = m._pooled_claimability_state(
+                drop=drop, drop_id="seg-drop-1", user_region=None, uid=777, is_my_user=False,
+                ref=datetime(2026, 4, 22, 12, 0, tzinfo=timezone.utc),
+            )
+        finally:
+            m.random.random = orig_random
+            self._restore(m, originals)
+        self.assertFalse(state["claimable"])
+        self.assertEqual(state["reason"], "shaping_denied")
+
+    def test_user_id_mode_missing_segment_uses_10pct_fallback(self):
+        import vouchers as m
+
+        drop = self._make_user_id_mode_drop()
+        m, originals = self._patch_environment(user_doc={"user_id": 777})
+        orig_random = m.random.random
+        m.random.random = lambda: 0.15  # above the 10% fallback -> denied
+        try:
+            state = m._pooled_claimability_state(
+                drop=drop, drop_id="seg-drop-1", user_region=None, uid=777, is_my_user=False,
+                ref=datetime(2026, 4, 22, 12, 0, tzinfo=timezone.utc),
+            )
+        finally:
+            m.random.random = orig_random
+            self._restore(m, originals)
+        self.assertFalse(state["claimable"])
+        self.assertEqual(state["reason"], "shaping_denied")
+
+    def test_allowlist_still_enforced_before_probability_gate(self):
+        """A user outside the user_id allow-list must be rejected regardless of
+        their segment probability — shaping must never turn an unauthorized user
+        into an eligible claimant."""
+        import vouchers as m
+
+        drop = self._make_user_id_mode_drop(allow=[777])
+        # uid 999 is not in the allow-list.
+        self.assertFalse(m.is_user_eligible_for_drop({}, {"id": 999}, drop))
+        # uid 777 is in the allow-list.
+        self.assertTrue(m.is_user_eligible_for_drop({}, {"id": 777}, drop))
+
+    def test_repeated_claim_attempts_do_not_reroll_probability(self):
+        """One user + one drop must get exactly one probability decision, even
+        under repeated retries — otherwise a Voucher Hunter could brute-force a
+        10% gate by retrying until it passes."""
+        import vouchers as m
+
+        drop = self._make_user_id_mode_drop()
+        m, originals = self._patch_environment(user_doc={"user_id": 777, "for_bot_segment": "voucher_hunter"})
+        call_count = {"n": 0}
+        orig_random = m.random.random
+
+        def counting_random():
+            call_count["n"] += 1
+            return 0.01  # would pass every time if re-rolled
+
+        m.random.random = counting_random
+        try:
+            first = m._pooled_claimability_state(
+                drop=drop, drop_id="seg-drop-1", user_region=None, uid=777, is_my_user=False,
+                ref=datetime(2026, 4, 22, 12, 0, tzinfo=timezone.utc),
+            )
+            rolls_after_first = call_count["n"]
+            # Simulate three more retry attempts by the same user for the same drop.
+            for _ in range(3):
+                m._pooled_claimability_state(
+                    drop=drop, drop_id="seg-drop-1", user_region=None, uid=777, is_my_user=False,
+                    ref=datetime(2026, 4, 22, 12, 0, tzinfo=timezone.utc),
+                )
+        finally:
+            m.random.random = orig_random
+            self._restore(m, originals)
+        self.assertTrue(first["claimable"])
+        # random.random() must not have been called again on retries — the
+        # persisted assignment from the first call is reused verbatim.
+        self.assertEqual(call_count["n"], rolls_after_first)
 
 
 if __name__ == "__main__":

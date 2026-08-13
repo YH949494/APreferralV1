@@ -563,7 +563,12 @@ def compile_campaign(campaign_doc: dict) -> tuple[dict, int]:
                 ends_at_local=ends_at_local,
                 campaign_type=campaign_type,
                 drop_type=drop_type,
-                eligibility={"mode": "user_id", "allow": seg_ids},
+                # source="segment" marks this allow-list as segment-generated so
+                # vouchers._is_probability_shaped_pooled_drop applies claim-time
+                # segment probability shaping to it — unlike a hand-picked
+                # "whitelist" audience allow-list (see _build_audience below),
+                # which must NOT be re-gated by a random segment roll.
+                eligibility={"mode": "user_id", "allow": seg_ids, "source": "segment"},
                 audience=audience,
                 reward_fields=reward_fields,
             )
