@@ -18,6 +18,7 @@ from unittest.mock import patch
 
 import database
 import campaign_builder
+import settings_service
 from test_campaign_builder import FakeDB
 
 
@@ -45,6 +46,38 @@ class LegacyWriterDefaultDisabledTests(unittest.TestCase):
                 self.assertTrue(config.BOT_SEGMENT_SYNC_ENABLED)
             finally:
                 importlib.reload(config)
+
+    def test_untouched_settings_db_also_defaults_the_scheduler_job_off(self):
+        """The scheduler's live Settings-DB toggle (Admin Dashboard ->
+        Scheduler) merges over a SETTINGS_SCHEMA default for every job,
+        including bot_segment_sheet_sync. On a fresh/untouched deployment
+        with nothing explicitly saved to that settings doc,
+        get_setting('scheduler', 'bot_segment_sheet_sync') returns the
+        SCHEMA default outright -- so that default must also be `enabled:
+        False`, or the env-var-level fix above is silently overridden and
+        the legacy writer runs anyway. (Codex review finding on PR #408.)"""
+
+        class _FakeCollection:
+            def find_one(self, filt):
+                return None
+
+        class _FakeDb(dict):
+            def __getitem__(self, name):
+                if name not in self:
+                    super().__setitem__(name, _FakeCollection())
+                return super().__getitem__(name)
+
+        settings_service.invalidate_cache()
+        job_cfg = settings_service.get_setting(
+            "scheduler", "bot_segment_sheet_sync", db_ref=_FakeDb()
+        )
+        self.assertIsInstance(job_cfg, dict)
+        self.assertFalse(
+            job_cfg.get("enabled"),
+            "bot_segment_sheet_sync's SETTINGS_SCHEMA default must be "
+            "enabled=False so an untouched deployment's live scheduler "
+            "toggle agrees with BOT_SEGMENT_SYNC_ENABLED's off-by-default.",
+        )
 
 
 class CanonicalEligibilityTests(unittest.TestCase):

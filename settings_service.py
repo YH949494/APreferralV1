@@ -151,7 +151,7 @@ SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
             "reactivation_journey": {"type": "job", "label": "Reactivation Journey", "default": {"enabled": True, "cron": "*/30 * * * *", "batch_size": 200}},
             "affiliate_monthly_settlement": {"type": "job", "label": "Affiliate Monthly Settlement", "default": {"enabled": True, "cron": "10 0 1 * *", "batch_size": None}},
             "invite_subscription_audit": {"type": "job", "label": "Invite Subscription Audit", "default": {"enabled": True, "cron": None, "batch_size": None}},
-            "bot_segment_sheet_sync": {"type": "job", "label": "Bot Segment Sheet Sync", "default": {"enabled": True, "cron": "30 9 * * 3", "batch_size": None}},
+            "bot_segment_sheet_sync": {"type": "job", "label": "Bot Segment Sheet Sync", "default": {"enabled": False, "cron": "30 9 * * 3", "batch_size": None}},
             "growth_leaderboard_weekly": {"type": "job", "label": "Growth Leaderboard Weekly", "default": {"enabled": False, "cron": "0 21 * * 0", "batch_size": None}},
             "telegram_member_counts_refresh": {"type": "job", "label": "Telegram Member Counts Refresh", "default": {"enabled": True, "cron": None, "batch_size": None, "interval_minutes": 60}},
             "autoscale_web_for_drop": {"type": "job", "label": "Autoscale Web For Drop", "default": {"enabled": True, "cron": None, "batch_size": None, "interval_seconds": 30}},
