@@ -1091,7 +1091,9 @@ def _welcome_progress_pct(completed_days: int) -> int:
 # Normalized stage identifiers used across all Welcome reminder analytics
 # events (success/failure/skip) so dashboard code never has to parse a stage
 # out of the ``event`` string. "completed" marks the 3/3 unlock celebration.
-WELCOME_REMINDER_STAGES = ("20h", "28h", "day3", "recovery", "completed")
+# "unlock" / "unclaimed" / "expiry_warning" are the post-D3 conversion stages
+# (immediate unlock push, ~4h unclaimed nudge, ~24h-before-expiry warning).
+WELCOME_REMINDER_STAGES = ("20h", "28h", "day3", "recovery", "completed", "unlock", "unclaimed", "expiry_warning")
 
 
 def log_welcome_event(
@@ -1224,6 +1226,13 @@ def get_welcome_progress(user_id, now: datetime | None = None) -> dict:
         "next_required_day": min(completed + 1, required),
         "next_checkin_at": next_checkin_at.astimezone(timezone.utc).isoformat() if next_checkin_at else None,
         "can_checkin": bool(can_checkin) and completed < required,
+        # Additive (Patch 1-4): lets callers distinguish "checkins done, fully
+        # unlocked" from "checkins done, channel subscription still missing"
+        # without falsely claiming the voucher is claimable, and gives the
+        # post-D3 reminder stages an authoritative expiry anchor instead of
+        # inventing a parallel expiry calculation.
+        "channel_joined": bool(progress.get("channel_joined")),
+        "eligible_until": progress.get("eligible_until"),
     }
     out["status"] = _welcome_status({**progress, "claimed": claimed})
     return out
@@ -1257,6 +1266,14 @@ def record_welcome_checkin_progress(user_id, *, now: datetime | None = None) -> 
         updates["day2_at"] = now_utc_ts
         log_welcome_event("welcome_checkin_d2", uid, now=now_ref)
     if completed >= 3:
+        # Anchor for the post-D3 reminder stages (unlock push / ~4h unclaimed
+        # nudge) — recorded once, on the genuine <3 -> >=3 transition, so
+        # later check-ins on already-unlocked days don't keep pushing it
+        # forward. The actual send GO/NO-GO decision still recomputes live
+        # progress at send time (see scheduler.py) rather than trusting this
+        # timestamp for anything but "how long has it been".
+        if not existing.get("completed_at"):
+            updates["completed_at"] = now_utc_ts
         log_welcome_event("welcome_checkin_d3", uid, now=now_ref)
         log_welcome_event("welcome_completed", uid, stage="completed", status="sent", now=now_ref)
 

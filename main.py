@@ -65,7 +65,7 @@ from vouchers import (
 from admin_auth import admin_auth_bp, configure_admin_session
 from referral_rules import calc_referral_progress, REFERRAL_XP_PER_SUCCESS, REFERRAL_BONUS_INTERVAL, REFERRAL_BONUS_XP, build_public_referral_status
 from referral_ledger import with_not_invalidated
-from scheduler import settle_pending_referrals, settle_referral_snapshots, settle_xp_snapshots, evaluate_affiliate_simulated_ledgers, compute_affiliate_daily_kpi_yesterday, run_invitee_subscription_audit, reconcile_drop_statuses, post_growth_leaderboard_weekly, publish_weekly_referral_post, process_welcome_voucher_lifecycle, process_welcome_reminders
+from scheduler import settle_pending_referrals, settle_referral_snapshots, settle_xp_snapshots, evaluate_affiliate_simulated_ledgers, compute_affiliate_daily_kpi_yesterday, run_invitee_subscription_audit, reconcile_drop_statuses, post_growth_leaderboard_weekly, publish_weekly_referral_post, process_welcome_voucher_lifecycle, process_welcome_reminders, trigger_welcome_unlock_push
 from affiliate_dashboard_export import run_affiliate_dashboard_export_monthly_scheduled
 from referral_rate_limit import consume_referral_rate_limits
 from affiliate_leaderboard import (
@@ -5724,6 +5724,64 @@ def _grant_checkin_xp_idempotent(user_id, streak, today_kl, now_utc_ts):
         grant_xp(db, user_id, "first_checkin", "first_checkin", FIRST_CHECKIN_BONUS_XP)
 
 
+def build_welcome_checkin_copy(user_id: int, *, user_doc: dict | None, progress: dict | None) -> dict:
+    """Patch 1/5: immediate Welcome Voucher progress copy for a successful
+    check-in response, sourced from an already-fetched, authoritative
+    get_welcome_progress() count — never users.streak, which resets on a
+    missed day while Welcome only counts distinct calendar days and must
+    not reset with it.
+
+    Takes ``progress`` (a get_welcome_progress() result) rather than
+    fetching it itself: the caller (process_checkin) already needs one
+    fresh read for this and for trigger_welcome_unlock_push, and
+    get_welcome_progress is not free (it can fall through to a live
+    Telegram getChatMember lookup on a channel-subscription cache miss) —
+    fetching it twice per check-in would double that cost for every user on
+    the journey.
+
+    Returns a dict meant to be merged into the check-in response payload:
+    ``{}`` when there's no progress to show (fetch failed upstream, or the
+    user is outside the Welcome journey / already claimed / expired — the
+    generic check-in response is left untouched), otherwise
+    ``welcome_progress`` (the raw progress dict, for any frontend surface
+    that wants the numbers) plus ``welcome_celebration`` / ``welcome_message``
+    for the stage-specific toast/modal copy. Split out from process_checkin
+    as a standalone, pure function so it can be unit-tested per stage
+    without needing to drive the full multi-day check-in state machine.
+    """
+    from vouchers import resolve_welcome_display_name
+
+    welcome_progress = progress or {}
+    if not welcome_progress.get("eligible") or welcome_progress.get("claimed") or welcome_progress.get("expired"):
+        return {}
+
+    completed = int(welcome_progress.get("completed") or 0)
+    required = int(welcome_progress.get("required") or 3)
+    channel_joined = bool(welcome_progress.get("channel_joined"))
+    first_name = resolve_welcome_display_name(user_id, user_doc=user_doc or {})
+    greeting = f"Hi {first_name} 👋\n\n" if first_name else ""
+
+    out = {"welcome_progress": welcome_progress}
+    if completed >= required and channel_joined:
+        out["welcome_celebration"] = "unlock"
+        out["welcome_message"] = f"{greeting}🎉 3/3 Complete\n\nYour Welcome Voucher is ready.\nClaim it now."
+    elif completed >= required:
+        # Checked in 3/3 but the Official Channel subscription is still
+        # missing — must never say "claim it now" here.
+        out["welcome_celebration"] = "unlock_pending_channel"
+        out["welcome_message"] = (
+            f"{greeting}✅ 3/3 Check-ins Complete\n\n"
+            "One step left — verify your Official Channel subscription to unlock your Welcome Voucher."
+        )
+    elif completed == 1:
+        out["welcome_celebration"] = "day1"
+        out["welcome_message"] = f"{greeting}✅ 1/3 Complete\n\n2 check-ins left to unlock your Welcome Voucher."
+    elif completed == 2:
+        out["welcome_celebration"] = "day2"
+        out["welcome_message"] = f"{greeting}🔥 2/3 Complete\n\nJust 1 more check-in to unlock your Welcome Voucher."
+    return out
+
+
 async def process_checkin(user_id, username, region, update=None, source="miniapp", request_id=None):
     """Daily check-in with repeatable milestones. Day boundary = KL time.
 
@@ -5878,6 +5936,35 @@ async def process_checkin(user_id, username, region, update=None, source="miniap
     except Exception:
         pass
 
+    # Single Welcome progress read shared by Patch 1/5's copy and Patch 2's
+    # unlock push below — get_welcome_progress can fall through to a live
+    # Telegram getChatMember lookup on a channel-subscription cache miss, so
+    # fetching it twice per check-in would double that cost for every user
+    # on the journey. Computed after check_channel_subscribed() above so
+    # channel_joined reflects the freshly-verified subscription state.
+    welcome_progress = None
+    try:
+        from vouchers import get_welcome_progress
+
+        welcome_progress = get_welcome_progress(int(user_id), now=now_utc_ts)
+    except Exception:
+        logger.exception("[WELCOME_PROGRESS] progress_fetch_failed uid=%s", user_id)
+
+    welcome_extra = build_welcome_checkin_copy(int(user_id), user_doc=user, progress=welcome_progress)
+
+    # Patch 2: eager immediate push on a genuine unlock. Best-effort — a
+    # failure/skip here is picked back up by the hourly
+    # process_welcome_reminders sweep (same atomic claim), so this must never
+    # affect the check-in response either way. Skipped outright if the
+    # progress fetch above failed rather than re-fetching here.
+    if welcome_progress is not None:
+        try:
+            trigger_welcome_unlock_push(
+                int(user_id), now_ref=now_utc_ts, progress=welcome_progress, bot_send_fn=_send_welcome_claim_cta_via_bot,
+            )
+        except Exception:
+            logger.exception("[WELCOME_UNLOCK_PUSH] trigger_failed uid=%s", user_id)
+
     maybe_shout_milestones(int(user_id))
 
     reactivation_journey_result = None
@@ -5910,6 +5997,7 @@ async def process_checkin(user_id, username, region, update=None, source="miniap
     }
     if reactivation_journey_result and reactivation_journey_result.get("voucher_code"):
         result_payload["reactivation_journey"] = {"tier": 1, "voucher_code": reactivation_journey_result.get("voucher_code")}
+    result_payload.update(welcome_extra)
     return result_payload
 
 @app.route("/api/streak/<int:user_id>")
@@ -8264,6 +8352,22 @@ def _send_welcome_reminder_via_bot(uid: int, text: str) -> bool:
     return bool(ok)
 
 
+def _send_welcome_claim_cta_via_bot(uid: int, text: str) -> bool:
+    """Send a post-D3 Welcome conversion nudge (unlock push / unclaimed /
+    expiry warning) with the "Claim My Voucher" CTA via the live bot.
+
+    Used as ``claim_bot_send_fn`` by scheduler.trigger_welcome_unlock_push
+    and the welcome_progress_reminders scheduled job; a falsy/exception
+    result there falls back to the plain-text HTTP path (same safety wrapper
+    as _send_welcome_reminder_via_bot, just a different CTA label).
+    """
+    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🎁 Claim My Voucher", web_app=WebAppInfo(url=WEBAPP_URL))]])
+    ok, _err = call_bot_in_loop(
+        safe_send_message(app_bot.bot, chat_id=uid, text=text, reply_markup=keyboard, uid=uid, send_type="welcome_unlock_push", raise_on_non_transient=False, return_error=True)
+    )
+    return bool(ok)
+
+
 def _ensure_user_registered(user) -> None:
     """Minimum user registration/upsert shared by the normal /start flow and
     the referral deep-link route. Idempotent: $setOnInsert is a no-op for a
@@ -9352,7 +9456,7 @@ def run_worker():
         id="welcome_progress_reminders",
         name="Welcome Voucher Progress Reminders",
         replace_existing=True,
-        kwargs={"bot_send_fn": _send_welcome_reminder_via_bot},
+        kwargs={"bot_send_fn": _send_welcome_reminder_via_bot, "claim_bot_send_fn": _send_welcome_claim_cta_via_bot},
     )
     scheduler.add_job(
         _guarded_job("reactivation_journey", lambda: evaluate_pending_journeys(db, membership_checker=check_official_channel_subscribed, now_ref=datetime.now(timezone.utc), batch_limit=int((get_app_setting("scheduler", "reactivation_journey") or {}).get("batch_size") or 300)), feature_flag="reactivation"),

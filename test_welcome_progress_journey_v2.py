@@ -583,7 +583,9 @@ def test_process_welcome_reminders_skip_events_dedupe_within_same_day(monkeypatc
 
 
 def test_log_welcome_event_stage_values_are_normalized():
-    assert set(m.WELCOME_REMINDER_STAGES) == {"20h", "28h", "day3", "recovery", "completed"}
+    assert set(m.WELCOME_REMINDER_STAGES) == {
+        "20h", "28h", "day3", "recovery", "completed", "unlock", "unclaimed", "expiry_warning",
+    }
 
 
 def test_process_welcome_reminders_isolates_malformed_user_and_processes_rest(monkeypatch):

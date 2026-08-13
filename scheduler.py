@@ -120,6 +120,23 @@ def _welcome_http_send_fn(uid: int, text: str) -> tuple[bool, str | None, bool]:
     return send_telegram_http_message(uid, text, reply_markup=_welcome_reminder_markup())
 
 
+def _welcome_claim_markup() -> dict:
+    """Raw Telegram Bot API ``reply_markup`` for the post-D3 conversion
+    stages (unlock push, unclaimed nudge, expiry warning) — same Mini-App
+    claim surface as the check-in button, distinct label per Patch 2-4 spec."""
+    return {
+        "inline_keyboard": [[
+            {"text": "🎁 Claim My Voucher", "web_app": {"url": _welcome_reminder_link()}},
+        ]]
+    }
+
+
+def _welcome_claim_http_send_fn(uid: int, text: str) -> tuple[bool, str | None, bool]:
+    """Default HTTP fallback for the post-D3 conversion stages — includes the
+    claim-CTA button so a failed/absent live-bot send does not silently strip it."""
+    return send_telegram_http_message(uid, text, reply_markup=_welcome_claim_markup())
+
+
 def _welcome_reminder_text(*, final_warning: bool) -> str:
     link = _welcome_reminder_link()
     if final_warning:
@@ -269,6 +286,17 @@ WELCOME_RECOVERY_AFTER_HOURS = int(os.getenv("WELCOME_RECOVERY_AFTER_HOURS", "48
 WELCOME_ADAPTIVE_MAX_DELAY_HOURS = int(os.getenv("WELCOME_ADAPTIVE_MAX_DELAY_HOURS", "6"))
 WELCOME_ADAPTIVE_MIN_HISTORY = int(os.getenv("WELCOME_ADAPTIVE_MIN_HISTORY", "3"))
 
+# Post-D3 conversion stages (Patches 2-4). Unlock push is immediate (0h) with
+# the hourly sweep below acting as a safety net/retry for a failed eager
+# send; the other two are elapsed-time gated exactly like the existing D1/D2
+# stages above.
+WELCOME_UNCLAIMED_REMINDER_AFTER_HOURS = int(os.getenv("WELCOME_UNCLAIMED_REMINDER_AFTER_HOURS", "4"))
+WELCOME_EXPIRY_WARNING_BEFORE_HOURS = int(os.getenv("WELCOME_EXPIRY_WARNING_BEFORE_HOURS", "24"))
+# How long a post-D3 send claim (see _welcome_reminder_claim_stage) is honored
+# before it's treated as abandoned (worker died mid-send) and reclaimable by
+# the next attempt. Comfortably longer than any single send attempt.
+WELCOME_CLAIM_STALE_MINUTES = int(os.getenv("WELCOME_CLAIM_STALE_MINUTES", "60"))
+
 # Personalized, localized Welcome reminder copy (Phase 2). ``{greeting}`` is
 # rendered as "Hi <first name> \U0001F44B\n\n" when a first name is on file,
 # and collapses to "" otherwise (graceful fallback - see
@@ -302,6 +330,33 @@ _WELCOME_REMINDER_TEMPLATES = {
         "recovery": (
             "{greeting}Still waiting 👀\n\n"
             "You're only one step away from unlocking your reward."
+        ),
+        # Patch 2: immediate push the moment checkins_completed >= required.
+        "unlock_full": (
+            "{greeting}🎉 Your Welcome Voucher is unlocked!\n\n"
+            "You completed all 3 check-ins.\n"
+            "Tap below to claim it now."
+        ),
+        "unlock_channel_pending": (
+            "{greeting}✅ 3/3 Check-ins Complete\n\n"
+            "Your check-ins are done.\n"
+            "Verify your Official Channel subscription to unlock your Welcome Voucher."
+        ),
+        # Patch 3: ~4h-after-unlock nudge for unlocked-but-unclaimed users.
+        "unclaimed": (
+            "{greeting}🎁 Your Welcome Voucher is waiting\n\n"
+            "You completed all 3 check-ins.\n"
+            "Claim your reward before it expires."
+        ),
+        "unclaimed_channel_pending": (
+            "{greeting}✅ 3/3 Check-ins Complete\n\n"
+            "One step left — verify your Official Channel subscription to unlock your Welcome Voucher."
+        ),
+        # Patch 4: ~24h-before-expiry final warning.
+        "expiry_warning": (
+            "{greeting}⏰ Your Welcome Voucher expires soon\n\n"
+            "You already completed all 3 check-ins.\n"
+            "Claim it before your Welcome reward closes."
         ),
     },
     "th": {
@@ -462,10 +517,15 @@ def _welcome_reminder_anti_abuse_blocked(uid: int, *, db_ref, progress: dict) ->
 # Internal stage code -> normalized stage identifier persisted on analytics
 # events. Only "day2" differs (the D3/final reminder, keyed internally off
 # ``day2_at`` since it fires 20h after the Day-2 check-in).
-_STAGE_NORMALIZED = {"20h": "20h", "28h": "28h", "day2": "day3", "recovery": "recovery"}
+_STAGE_NORMALIZED = {
+    "20h": "20h", "28h": "28h", "day2": "day3", "recovery": "recovery",
+    "unlock": "unlock", "unclaimed": "unclaimed", "expiry_warning": "expiry_warning",
+}
 
 
-def _welcome_reminder_candidate_stages(*, completed: int, day1_at, day2_at, doc: dict, now_ts: datetime) -> list[str]:
+def _welcome_reminder_candidate_stages(
+    *, completed: int, required: int, day1_at, day2_at, completed_at, eligible_until, doc: dict, now_ts: datetime,
+) -> list[str]:
     """Which reminder stage(s) this user is currently eligible for, ignoring
     the anti-abuse check. Used only to attribute a skip event to the right
     stage(s) — never to decide whether to actually send."""
@@ -493,33 +553,184 @@ def _welcome_reminder_candidate_stages(*, completed: int, day1_at, day2_at, doc:
             recovery_anchor = day2_at
         if recovery_anchor and (now_ts - recovery_anchor) >= timedelta(hours=WELCOME_RECOVERY_AFTER_HOURS):
             stages.append("recovery")
+    if completed >= required and not doc.get("unlock_push_sent_at"):
+        stages.append("unlock")
+    if (
+        completed >= required and completed_at and not doc.get("unclaimed_reminder_sent_at")
+        and (now_ts - completed_at) >= timedelta(hours=WELCOME_UNCLAIMED_REMINDER_AFTER_HOURS)
+    ):
+        stages.append("unclaimed")
+    if (
+        completed >= required and eligible_until and not doc.get("expiry_warning_sent_at")
+        and (eligible_until - now_ts) <= timedelta(hours=WELCOME_EXPIRY_WARNING_BEFORE_HOURS)
+        and now_ts < eligible_until
+    ):
+        stages.append("expiry_warning")
     return stages
 
 
-def process_welcome_reminders(*, now_ref: datetime | None = None, batch_limit: int | None = None, db_ref=None, send_fn=None, bot_send_fn=None) -> dict:
+def _welcome_reminder_claim_stage(db_ref, uid: int, *, claimed_field: str, sent_field: str, now_ts: datetime) -> bool:
+    """Atomically claim ownership of sending a post-D3 stage for this user.
+
+    Two independent gates keep concurrent senders (the eager check-in-time
+    push racing the hourly sweep, two overlapping scheduler workers, a
+    Telegram-retry re-entry) from double-sending: the filter requires BOTH
+    the terminal ``sent_field`` and the ephemeral ``claimed_field`` to be
+    absent (or the claim to be stale — see below), and the ``update_one``
+    that sets ``claimed_field`` is a single atomic Mongo operation — a
+    losing racer's filter simply won't match, so ``modified_count`` (or an
+    upsert) tells the caller whether it won.
+
+    A claim is treated as abandoned, and therefore reclaimable, once it is
+    older than ``WELCOME_CLAIM_STALE_MINUTES``: the only way ``claimed_field``
+    is set without ``sent_field`` ever following is a worker dying between
+    the claim and the ``finally`` release in ``_attempt_welcome_post_d3_stage``
+    (a hard kill/OOM, not an exception — those are already caught). Without
+    this, such a lease would wedge the stage for that user forever.
+    """
+    stale_before = now_ts - timedelta(minutes=WELCOME_CLAIM_STALE_MINUTES)
+    res = db_ref.welcome_reminders.update_one(
+        {
+            "user_id": uid,
+            sent_field: {"$exists": False},
+            "$or": [
+                {claimed_field: {"$exists": False}},
+                {claimed_field: {"$lt": stale_before}},
+            ],
+        },
+        {"$set": {claimed_field: now_ts}},
+    )
+    return bool(getattr(res, "modified_count", 0)) or bool(getattr(res, "upserted_id", None))
+
+
+def _welcome_reminder_release_claim(db_ref, uid: int, *, claimed_field: str) -> None:
+    """Release a claim taken by ``_welcome_reminder_claim_stage`` after the
+    send attempt did not succeed, so the next sweep/eager call can retry —
+    a transient Telegram failure must never permanently suppress a stage."""
+    try:
+        db_ref.welcome_reminders.update_one({"user_id": uid}, {"$unset": {claimed_field: ""}})
+    except Exception:  # noqa: BLE001
+        logger.warning("[WELCOME_PROGRESS_REMINDER] failed to release claim uid=%s field=%s", uid, claimed_field)
+
+
+def _attempt_welcome_post_d3_stage(
+    uid: int,
+    *,
+    stage: str,
+    claimed_field: str,
+    sent_field: str,
+    copy_full: str,
+    copy_channel_pending: str,
+    event_sent: str,
+    event_failed: str,
+    progress: dict,
+    display_name: str | None,
+    locale: str,
+    db_ref,
+    now_ts: datetime,
+    send_fn,
+    bot_send_fn,
+    claim_bot_send_fn,
+    run_id: str,
+) -> str:
+    """Shared exactly-once send path for the post-D3 conversion stages
+    (unlock push / unclaimed nudge / expiry warning). Returns one of
+    "sent", "skipped", "not_claimed" (lost the race / already sent),
+    "send_failed".
+
+    Recomputes nothing itself — ``progress`` must already be a *fresh*
+    ``get_welcome_progress`` read from this call's caller, per Patch 3/4:
+    the cached ``welcome_reminders`` timestamps are only ever used for
+    elapsed-time gating, never as the source of truth for claimed/expired/
+    channel state.
+    """
+    if not _welcome_reminder_claim_stage(db_ref, uid, claimed_field=claimed_field, sent_field=sent_field, now_ts=now_ts):
+        return "not_claimed"
+
+    # From here on the claim is held: any exit path (including an
+    # unexpected exception, e.g. a malformed template) must release it so a
+    # transient failure can never permanently wedge the stage. Only the
+    # success path replaces the claim with the terminal ``sent_field``.
+    try:
+        if progress.get("claimed") or progress.get("expired"):
+            return "skipped"
+
+        channel_joined = bool(progress.get("channel_joined"))
+        text = _render_welcome_reminder(copy_full if channel_joined else copy_channel_pending, display_name=display_name, locale=locale)
+        send_fn = send_fn or _welcome_claim_http_send_fn
+        ok, err = _send_welcome_reminder(uid, text, send_fn=send_fn, bot_send_fn=claim_bot_send_fn or bot_send_fn, stage=stage)
+        if ok:
+            db_ref.welcome_reminders.update_one(
+                {"user_id": uid}, {"$set": {sent_field: now_ts, "updated_at": now_ts}, "$unset": {claimed_field: ""}},
+            )
+            from vouchers import log_welcome_event
+
+            log_welcome_event(
+                event_sent, uid, {"channel_joined": channel_joined},
+                stage=stage, status="sent", run_id=run_id, now=now_ts,
+            )
+            return "sent"
+
+        logger.warning("[WELCOME_PROGRESS_REMINDER] send_failed uid=%s stage=%s err=%s", uid, stage, err)
+        from vouchers import log_welcome_event
+
+        log_welcome_event(
+            event_failed, uid, {"err": str(err), "channel_joined": channel_joined},
+            stage=stage, status="failed", reason=str(err), run_id=run_id, now=now_ts,
+        )
+        return "send_failed"
+    finally:
+        # No-op once the success path above has already replaced the claim
+        # with the terminal sent_field (that update also unsets claimed_field,
+        # so this unset is then a harmless no-op).
+        _welcome_reminder_release_claim(db_ref, uid, claimed_field=claimed_field)
+
+
+def process_welcome_reminders(
+    *,
+    now_ref: datetime | None = None,
+    batch_limit: int | None = None,
+    db_ref=None,
+    send_fn=None,
+    bot_send_fn=None,
+    claim_send_fn=None,
+    claim_bot_send_fn=None,
+) -> dict:
     """Hourly reminder job for the Welcome Voucher Progress journey (V2).
 
-    Sends four check-in nudges, each at most once (state tracked on the
-    ``welcome_reminders`` collection):
+    Sends, each at most once (state tracked on the ``welcome_reminders``
+    collection):
       - 20h after Day 1 (stuck on 1/3)
       - 28h after Day 1 (still stuck on 1/3, more urgency)
       - 20h after Day 2 (stuck on 2/3)
       - Smart Recovery: well past the above (``WELCOME_RECOVERY_AFTER_HOURS``,
         default 48h since the last relevant check-in), one final nudge before
         the 7-day Welcome window lapses.
+      - Unlock push: immediate the moment checkins_completed >= required (also
+        the retry safety net for main.process_checkin's eager attempt — same
+        atomic claim, so a transient Telegram failure there gets picked back
+        up here instead of being lost).
+      - Unclaimed nudge: ~``WELCOME_UNCLAIMED_REMINDER_AFTER_HOURS`` (default
+        4h) after completion, if still unclaimed.
+      - Expiry warning: ~``WELCOME_EXPIRY_WARNING_BEFORE_HOURS`` (default 24h)
+        before ``eligible_until``, if still unclaimed and not yet expired.
 
     Each stage is personalized with the user's first name when available
     (falls back to generic copy otherwise), localized via
-    ``vouchers.resolve_welcome_locale``, and adaptively timed to land close to
-    the user's usual check-in hour (``_welcome_adaptive_send_ready`` - falls
-    back to sending as soon as the elapsed-time threshold is hit when there
-    isn't enough check-in history).
+    ``vouchers.resolve_welcome_locale``. The D1/D2 stages are additionally
+    adaptively timed to land close to the user's usual check-in hour
+    (``_welcome_adaptive_send_ready`` - falls back to sending as soon as the
+    elapsed-time threshold is hit when there isn't enough check-in history);
+    the post-D3 stages send as soon as their (non-adaptive) time gate opens,
+    since they are conversion nudges rather than habit nudges.
 
-    ``bot_send_fn(uid, text) -> bool`` is an optional hook used only for the
-    Day 2 and recovery reminders so they can include a Mini-App button via the
-    live bot (InlineKeyboardButton/WebAppInfo). When it is absent, raises, or
-    returns a falsy result, the reminder falls back to plain-text ``send_fn``
-    (HTTP).
+    ``bot_send_fn(uid, text) -> bool`` is an optional hook used for the Day 2
+    and recovery reminders (and as a fallback for the post-D3 stages when
+    ``claim_bot_send_fn`` is not supplied) so they can include a Mini-App
+    button via the live bot. ``claim_bot_send_fn`` is the same shape but
+    renders the post-D3 "🎁 Claim My Voucher" CTA instead of "Open Mini-App".
+    Either falls back to plain-text ``send_fn``/``claim_send_fn`` (HTTP) when
+    absent, raising, or returning a falsy result.
     """
     import uuid
 
@@ -527,12 +738,14 @@ def process_welcome_reminders(*, now_ref: datetime | None = None, batch_limit: i
 
     db_ref = db_ref or db
     send_fn = send_fn or _welcome_http_send_fn
+    claim_send_fn = claim_send_fn or _welcome_claim_http_send_fn
     now_ts = _coerce_utc(now_ref) or now_utc()
     limit = int(batch_limit or WELCOME_PROGRESS_REMINDER_BATCH_LIMIT)
     run_id = uuid.uuid4().hex
 
     scanned = reminder_20h_sent = reminder_28h_sent = day2_reminder_sent = recovery_sent = skipped_abuse = send_failed = 0
     eligible_20h = eligible_28h = eligible_day3 = eligible_recovery = 0
+    unlock_push_sent = unclaimed_reminder_sent = expiry_warning_sent = 0
     failed_count = 0
     failed_users: list[dict] = []
     skip_breakdown = {
@@ -562,6 +775,9 @@ def process_welcome_reminders(*, now_ref: datetime | None = None, batch_limit: i
                 {"reminder_28h_sent": {"$ne": True}},
                 {"day2_reminder_sent": {"$ne": True}},
                 {"recovery_sent": {"$ne": True}},
+                {"unlock_push_sent_at": {"$exists": False}},
+                {"unclaimed_reminder_sent_at": {"$exists": False}},
+                {"expiry_warning_sent_at": {"$exists": False}},
             ]
         }
     ).limit(limit)
@@ -585,8 +801,11 @@ def process_welcome_reminders(*, now_ref: datetime | None = None, batch_limit: i
         try:
             progress = get_welcome_progress(uid, now=now_ts)
             completed = int(progress.get("completed") or 0)
+            required = int(progress.get("required") or 3)
             day1_at = _coerce_utc(doc.get("day1_at"))
             day2_at = _coerce_utc(doc.get("day2_at"))
+            completed_at = _coerce_utc(doc.get("completed_at"))
+            eligible_until = _coerce_utc(progress.get("eligible_until"))
 
             blocked_reason = _welcome_reminder_anti_abuse_blocked(uid, db_ref=db_ref, progress=progress)
             if blocked_reason:
@@ -594,7 +813,8 @@ def process_welcome_reminders(*, now_ref: datetime | None = None, batch_limit: i
                 skip_breakdown[_SKIP_REASON_BUCKET.get(blocked_reason, "missing_data")] += 1
                 logger.info("[WELCOME_PROGRESS_REMINDER] skip uid=%s reason=%s", uid, blocked_reason)
                 candidate_stages = _welcome_reminder_candidate_stages(
-                    completed=completed, day1_at=day1_at, day2_at=day2_at, doc=doc, now_ts=now_ts,
+                    completed=completed, required=required, day1_at=day1_at, day2_at=day2_at,
+                    completed_at=completed_at, eligible_until=eligible_until, doc=doc, now_ts=now_ts,
                 )
                 for internal_stage in (candidate_stages or [None]):
                     normalized_stage = _STAGE_NORMALIZED.get(internal_stage) if internal_stage else None
@@ -603,6 +823,26 @@ def process_welcome_reminders(*, now_ref: datetime | None = None, batch_limit: i
                         stage=normalized_stage, status="skipped", reason=blocked_reason,
                         run_id=run_id, dedupe=True, now=now_ts,
                     )
+                # Permanently-terminal users (claimed / expired — never
+                # transitions back) must leave the cursor's $or of
+                # not-yet-sent flags for good, or they accumulate in this
+                # unsorted, limit()-capped scan forever and can crowd out
+                # users who still need a reminder. Reversible blocks (bot
+                # blocked, risk flag, etc.) are left alone so they're
+                # re-evaluated every run in case they clear.
+                if blocked_reason in ("welcome_claimed", "welcome_expired"):
+                    terminal_fields = {
+                        f: True for f in
+                        ("reminder_20h_sent", "reminder_28h_sent", "day2_reminder_sent", "recovery_sent")
+                        if not doc.get(f)
+                    }
+                    terminal_fields.update({
+                        f: now_ts for f in
+                        ("unlock_push_sent_at", "unclaimed_reminder_sent_at", "expiry_warning_sent_at")
+                        if not doc.get(f)
+                    })
+                    if terminal_fields:
+                        db_ref.welcome_reminders.update_one({"_id": doc["_id"]}, {"$set": terminal_fields})
                 continue
 
             user_doc = db_ref.users.find_one(
@@ -705,6 +945,74 @@ def process_welcome_reminders(*, now_ref: datetime | None = None, batch_limit: i
                             "welcome_reminder_failed", uid, {"err": str(err)},
                             stage="recovery", status="failed", reason=str(err), run_id=run_id, now=now_ts,
                         )
+
+            # Post-D3 conversion stages (Patches 2-4). All three recompute the
+            # GO/NO-GO decision from the *live* ``progress`` fetched above
+            # (claimed/expired/channel_joined), never from the cached
+            # welcome_reminders timestamps — those are only used for
+            # elapsed-time gating (when), not eligibility (whether).
+            if completed >= required:
+                # Stage: unlock push — fires once, as soon as noticed. The
+                # eager call from main.process_checkin already attempts this
+                # immediately on the genuine <required -> >=required
+                # transition; this is the retry/safety-net path for a failed
+                # or missed eager attempt.
+                if not doc.get("unlock_push_sent_at"):
+                    current_stage = "unlock"
+                    outcome = _attempt_welcome_post_d3_stage(
+                        uid, stage="unlock", claimed_field="unlock_push_claimed_at", sent_field="unlock_push_sent_at",
+                        copy_full="unlock_full", copy_channel_pending="unlock_channel_pending",
+                        event_sent="welcome_unlock_push_sent", event_failed="welcome_unlock_push_failed",
+                        progress=progress, display_name=display_name, locale=locale,
+                        db_ref=db_ref, now_ts=now_ts, send_fn=claim_send_fn, bot_send_fn=bot_send_fn,
+                        claim_bot_send_fn=claim_bot_send_fn, run_id=run_id,
+                    )
+                    if outcome == "sent":
+                        unlock_push_sent += 1
+                    elif outcome == "send_failed":
+                        send_failed += 1
+
+                # Stage: unclaimed nudge — ~4h after completion, unclaimed.
+                if (
+                    completed_at and not doc.get("unclaimed_reminder_sent_at")
+                    and (now_ts - completed_at) >= timedelta(hours=WELCOME_UNCLAIMED_REMINDER_AFTER_HOURS)
+                ):
+                    current_stage = "unclaimed"
+                    outcome = _attempt_welcome_post_d3_stage(
+                        uid, stage="unclaimed", claimed_field="unclaimed_reminder_claimed_at", sent_field="unclaimed_reminder_sent_at",
+                        copy_full="unclaimed", copy_channel_pending="unclaimed_channel_pending",
+                        event_sent="welcome_unclaimed_reminder_sent", event_failed="welcome_reminder_failed",
+                        progress=progress, display_name=display_name, locale=locale,
+                        db_ref=db_ref, now_ts=now_ts, send_fn=claim_send_fn, bot_send_fn=bot_send_fn,
+                        claim_bot_send_fn=claim_bot_send_fn, run_id=run_id,
+                    )
+                    if outcome == "sent":
+                        unclaimed_reminder_sent += 1
+                    elif outcome == "send_failed":
+                        send_failed += 1
+
+                # Stage: expiry warning — ~24h before eligible_until, unclaimed,
+                # not yet expired. eligible_until is the authoritative window
+                # end already computed by get_welcome_reward_progress (7-day
+                # Welcome window) — reused here rather than a parallel calc.
+                if (
+                    eligible_until and not doc.get("expiry_warning_sent_at")
+                    and now_ts < eligible_until
+                    and (eligible_until - now_ts) <= timedelta(hours=WELCOME_EXPIRY_WARNING_BEFORE_HOURS)
+                ):
+                    current_stage = "expiry_warning"
+                    outcome = _attempt_welcome_post_d3_stage(
+                        uid, stage="expiry_warning", claimed_field="expiry_warning_claimed_at", sent_field="expiry_warning_sent_at",
+                        copy_full="expiry_warning", copy_channel_pending="expiry_warning",
+                        event_sent="welcome_expiry_warning_sent", event_failed="welcome_reminder_failed",
+                        progress=progress, display_name=display_name, locale=locale,
+                        db_ref=db_ref, now_ts=now_ts, send_fn=claim_send_fn, bot_send_fn=bot_send_fn,
+                        claim_bot_send_fn=claim_bot_send_fn, run_id=run_id,
+                    )
+                    if outcome == "sent":
+                        expiry_warning_sent += 1
+                    elif outcome == "send_failed":
+                        send_failed += 1
         except Exception as exc:  # noqa: BLE001 - per-user isolation, see docstring above
             failed_count += 1
             failed_users.append({
@@ -739,6 +1047,9 @@ def process_welcome_reminders(*, now_ref: datetime | None = None, batch_limit: i
         "reminder_28h_sent": reminder_28h_sent,
         "day2_reminder_sent": day2_reminder_sent,
         "recovery_sent": recovery_sent,
+        "unlock_push_sent": unlock_push_sent,
+        "unclaimed_reminder_sent": unclaimed_reminder_sent,
+        "expiry_warning_sent": expiry_warning_sent,
         "skipped_abuse": skipped_abuse,
         "skip_breakdown": skip_breakdown,
         "blocked_users": blocked_users,
@@ -747,6 +1058,77 @@ def process_welcome_reminders(*, now_ref: datetime | None = None, batch_limit: i
         "failed_users": failed_users,
         "status": "partial_failure" if failed_count else "ok",
     }
+
+
+def trigger_welcome_unlock_push(
+    uid: int, *, now_ref: datetime | None = None, progress: dict | None = None, db_ref=None, send_fn=None, bot_send_fn=None,
+) -> dict:
+    """Eager, best-effort attempt at the Patch 2 immediate unlock push.
+
+    Called from main.process_checkin right after a check-in that may have
+    just crossed checkins_completed >= required, so users see the Telegram
+    push immediately rather than waiting for the next hourly sweep. Shares
+    the exact same atomic claim + send path as the ``unlock`` stage inside
+    ``process_welcome_reminders``, so:
+      - a genuine transition sends exactly once, even under a double-click,
+        duplicate HTTP request, or two concurrent check-in requests (the
+        check-in CAS in main.py already prevents two check-ins landing for
+        the same user/day, but this claim is independent insurance);
+      - a transient Telegram failure here is retried by the next hourly
+        sweep instead of being lost, since the claim is released on failure;
+      - if this call is never reached at all (worker restart between the
+        check-in commit and this call), the hourly sweep still catches it.
+
+    ``progress`` lets a caller that already has a fresh get_welcome_progress()
+    read (e.g. process_checkin, which also needs one for the immediate
+    check-in-response copy) pass it straight through instead of triggering a
+    second read here — get_welcome_progress can fall through to a live
+    Telegram getChatMember lookup on a channel-subscription cache miss, so a
+    redundant call doubles that cost on every check-in. Omit it to fetch
+    fresh (e.g. when called standalone, as the hourly sweep's per-user loop
+    already does with its own read).
+
+    Returns ``{"status": ...}`` — "not_ready" (not yet unlocked), "sent",
+    "skipped" (claimed/expired/anti-abuse), "not_claimed" (already
+    sent/claimed by a concurrent caller), or "send_failed".
+    """
+    import uuid
+
+    from vouchers import resolve_welcome_display_name, resolve_welcome_locale
+
+    db_ref = db_ref or db
+    send_fn = send_fn or _welcome_claim_http_send_fn
+    now_ts = _coerce_utc(now_ref) or now_utc()
+
+    if progress is None:
+        from vouchers import get_welcome_progress
+
+        progress = get_welcome_progress(uid, now=now_ts)
+    completed = int(progress.get("completed") or 0)
+    required = int(progress.get("required") or 3)
+    if completed < required:
+        return {"status": "not_ready"}
+
+    blocked_reason = _welcome_reminder_anti_abuse_blocked(uid, db_ref=db_ref, progress=progress)
+    if blocked_reason:
+        return {"status": "skipped", "reason": blocked_reason}
+
+    user_doc = db_ref.users.find_one(
+        {"user_id": uid}, {"first_name": 1, "display_name": 1, "name": 1, "username": 1, "language_code": 1, "locale": 1, "lang": 1}
+    ) or {}
+    display_name = resolve_welcome_display_name(uid, user_doc=user_doc)
+    locale = resolve_welcome_locale(user_doc)
+
+    outcome = _attempt_welcome_post_d3_stage(
+        uid, stage="unlock", claimed_field="unlock_push_claimed_at", sent_field="unlock_push_sent_at",
+        copy_full="unlock_full", copy_channel_pending="unlock_channel_pending",
+        event_sent="welcome_unlock_push_sent", event_failed="welcome_unlock_push_failed",
+        progress=progress, display_name=display_name, locale=locale,
+        db_ref=db_ref, now_ts=now_ts, send_fn=send_fn, bot_send_fn=bot_send_fn,
+        claim_bot_send_fn=bot_send_fn, run_id=uuid.uuid4().hex,
+    )
+    return {"status": outcome}
+
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 # GROUP_ID / OFFICIAL_CHANNEL_ID are resolved once in referral_destination.py so
