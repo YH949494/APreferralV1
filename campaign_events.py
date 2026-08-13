@@ -50,7 +50,7 @@ EVENT_TYPES = frozenset({
     "event_banner_impression", "event_banner_click", "event_banner_image_error",
     # Platform Finder (post-voucher-claim "Find Where To Play" flow)
     "platform_finder_shown", "platform_finder_opened", "platform_search_copied",
-    "platform_finder_help_clicked",
+    "platform_finder_help_clicked", "platform_search_google_clicked",
 })
 
 # Fields that must never be persisted, wherever they appear in metadata.
