@@ -1,8 +1,15 @@
 """Segment-Based Campaign Targeting Engine.
 
-Queries backend_segment_snapshots (latest week) and the users collection
-to compute audience size, expected voucher cost, segment distribution,
-and historical performance for a given set of campaign targeting filters.
+``preview_audience`` below queries ``backend_segment_snapshots`` (the
+shadow-only classifier from ``backend_segment_engine.py``) purely to render
+an informational, multi-dimension audience *estimate* (segment mix,
+claim-risk level, referral/check-in counts) in the campaign builder UI. It is
+NOT used to determine live campaign eligibility — segment-targeted campaigns
+resolve their actual allow-list via
+``campaign_builder._resolve_segment_user_ids``, which reads the canonical
+segment source (``users.for_bot_segment``, populated only by Databot's
+segment_sync_job). Do not wire this preview into eligibility without first
+switching it to the canonical source.
 """
 
 from __future__ import annotations

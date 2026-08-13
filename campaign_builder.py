@@ -228,27 +228,25 @@ _ensure_indexes()
 # ---------------------------------------------------------------------------
 
 def _resolve_segment_user_ids(db, segments: list[str]) -> list[int]:
-    """Resolve backend segment names to user_ids using the latest snapshot week.
+    """Resolve segment names to user_ids from the canonical segment source.
 
-    Read-only against backend_segment_snapshots (already populated by
-    backend_segment_engine.py). Does not modify eligibility evaluation code —
-    the resulting ids are written as eligibility.mode="user_id" allow list,
-    an enforcement path vouchers.py already implements.
+    Canonical authority chain: Databot ``app/analytics/segments.py`` classifier
+    -> ``segment_snapshots`` -> Databot's ``segment_sync_job`` -> this repo's
+    ``users.for_bot_segment`` / ``users.for_bot_segment_normalized`` (the only
+    fields that job writes). This is deliberately NOT read from
+    ``backend_segment_snapshots`` (the shadow-only classifier in
+    ``backend_segment_engine.py``) — that collection's thresholds differ from
+    the canonical Databot classifier and must never gate live campaign
+    eligibility. The resulting ids are written as an
+    ``eligibility.mode="user_id"`` allow list, an enforcement path vouchers.py
+    already implements.
     """
     valid = [s for s in segments if s in VALID_SEGMENTS]
     if not valid:
         return []
-    snapshots_col = db["backend_segment_snapshots"]
-    latest = snapshots_col.find_one(
-        {"user_id": {"$ne": None}},
-        sort=[("snapshot_week", -1)],
-        projection={"snapshot_week": 1, "_id": 0},
-    )
-    if not latest:
-        return []
-    week = latest["snapshot_week"]
-    cursor = snapshots_col.find(
-        {"snapshot_week": week, "backend_segment": {"$in": valid}, "user_id": {"$ne": None}},
+    users_col = db["users"]
+    cursor = users_col.find(
+        {"for_bot_segment_normalized": {"$in": valid}, "user_id": {"$ne": None}},
         projection={"user_id": 1, "_id": 0},
     )
     ids = []

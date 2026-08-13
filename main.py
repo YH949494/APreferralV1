@@ -32,6 +32,7 @@ from config import (
     GROWTH_LEADERBOARD_CRON_HOUR,
     GROWTH_LEADERBOARD_CRON_MINUTE,
     GROWTH_LEADERBOARD_TIMEZONE,
+    BOT_SEGMENT_SYNC_ENABLED,
 )
 from time_utils import expires_in_seconds, tz_name, as_aware_utc
 
@@ -9409,7 +9410,7 @@ def run_worker():
     # Always registered; "Enabled" + cron are live-controlled from Settings ->
     # Scheduler so toggling/rescheduling this job never requires a redeploy.
     scheduler.add_job(
-        _guarded_job("bot_segment_sheet_sync", bot_segment_sheet_sync_scheduled, default=os.getenv("BOT_SEGMENT_SYNC_ENABLED", "1") == "1"),
+        _guarded_job("bot_segment_sheet_sync", bot_segment_sheet_sync_scheduled, default=BOT_SEGMENT_SYNC_ENABLED),
         trigger=CronTrigger(
             day_of_week=os.getenv("BOT_SEGMENT_SYNC_DAY_OF_WEEK", "wed"),
             hour=int(os.getenv("BOT_SEGMENT_SYNC_HOUR", "9")),
@@ -9419,6 +9420,22 @@ def run_worker():
         id="bot_segment_sheet_sync",
         name="Bot Segment Sheet Sync",
         replace_existing=True,
+    )
+
+    # --- Segment writer authority visibility ---
+    # users.for_bot_segment has exactly one intended automatic writer: Databot's
+    # segment_sync_job (canonical Databot app/analytics/segments.py classifier,
+    # gated by ENABLE_DATABOT_SEGMENT_SYNC in the Databot repo/service). This
+    # repo's legacy Google Sheet writer (bot_segment_sync.py) is disabled by
+    # default and must be explicitly re-enabled (BOT_SEGMENT_SYNC_ENABLED=1)
+    # for emergency/manual use only — log which one is armed on every boot so
+    # a dual-writer misconfiguration is visible immediately in the logs.
+    logger.warning(
+        "[SEGMENT_WRITER_AUTHORITY] legacy_sheet_sync=%s (BOT_SEGMENT_SYNC_ENABLED=%s) "
+        "canonical_writer=databot_segment_sync_job (external, writes users.for_bot_segment directly)%s",
+        "ENABLED" if BOT_SEGMENT_SYNC_ENABLED else "disabled",
+        os.getenv("BOT_SEGMENT_SYNC_ENABLED", "<unset>"),
+        " -- DUAL-WRITER RISK: legacy sheet sync is enabled alongside the canonical Databot sync" if BOT_SEGMENT_SYNC_ENABLED else "",
     )
 
     # --- Legacy growth_leaderboard_weekly vs. authoritative weekly_referral_post ---
