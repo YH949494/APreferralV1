@@ -139,15 +139,17 @@ class CampaignBuilderCompilerTests(unittest.TestCase):
         self.fake_db["users"].insert_one({"usernameLower": "bob", "user_id": 222})
 
     def _seed_segments(self):
-        week = "2026-W27"
-        self.fake_db["backend_segment_snapshots"].insert_one(
-            {"user_id": 301, "backend_segment": "high_value", "snapshot_week": week}
+        # Canonical source: users.for_bot_segment_normalized, as written by
+        # Databot's segment_sync_job (never backend_segment_snapshots, the
+        # shadow-only classifier).
+        self.fake_db["users"].insert_one(
+            {"user_id": 301, "for_bot_segment": "high_value", "for_bot_segment_normalized": "high_value"}
         )
-        self.fake_db["backend_segment_snapshots"].insert_one(
-            {"user_id": 302, "backend_segment": "high_value", "snapshot_week": week}
+        self.fake_db["users"].insert_one(
+            {"user_id": 302, "for_bot_segment": "high_value", "for_bot_segment_normalized": "high_value"}
         )
-        self.fake_db["backend_segment_snapshots"].insert_one(
-            {"user_id": 303, "backend_segment": "low_value", "snapshot_week": week}
+        self.fake_db["users"].insert_one(
+            {"user_id": 303, "for_bot_segment": "low_value", "for_bot_segment_normalized": "low_value"}
         )
 
     def _draft(self, **overrides):

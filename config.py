@@ -238,6 +238,15 @@ DATABOT_API_KEY = os.getenv("DATABOT_API_KEY", "")
 DATABOT_ENABLED = os.getenv("DATABOT_ENABLED", "false").lower() == "true"
 DATABOT_TIMEOUT_SECONDS = int(os.getenv("DATABOT_TIMEOUT_SECONDS", "5"))
 
+# Segment authority: the canonical writer of users.for_bot_segment is
+# Databot's segment_sync_job (external, gated by ENABLE_DATABOT_SEGMENT_SYNC
+# in the Databot service). This repo's legacy Google Sheet writer
+# (bot_segment_sync.py) is a secondary/manual tool only and must default to
+# OFF so a missing/unset env var can never re-enable a second automatic
+# writer racing the canonical one. Set BOT_SEGMENT_SYNC_ENABLED=1 explicitly
+# for emergency/manual sheet-sync use.
+BOT_SEGMENT_SYNC_ENABLED = os.getenv("BOT_SEGMENT_SYNC_ENABLED", "0") == "1"
+
 GROWTH_LEADERBOARD_ENABLED = os.getenv("GROWTH_LEADERBOARD_ENABLED", "0") == "1"
 GROWTH_LEADERBOARD_CHANNEL_ID = os.getenv("GROWTH_LEADERBOARD_CHANNEL_ID", "").strip()
 GROWTH_LEADERBOARD_CRON_DAY = os.getenv("GROWTH_LEADERBOARD_CRON_DAY", "SUN")
