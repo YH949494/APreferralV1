@@ -122,6 +122,119 @@ class SettingsServiceTests(unittest.TestCase):
         self.assertEqual(len(entries), 0)
 
 
+class PoolProbabilitiesUnclassifiedFieldTests(unittest.TestCase):
+    """Covers the admin-editable "Unclassified / Unknown" fallback probability
+    field on the Public Pool Distribution panel — load, save, validation, the
+    runtime effect on config.public_pool_probability_for_bot_segment, and the
+    safety fallback to the 10% code default (never 70%)."""
+
+    def setUp(self):
+        self.db = _FakeDb()
+        svc.invalidate_cache()
+
+    def tearDown(self):
+        svc.invalidate_cache()
+
+    def test_default_is_10_when_no_override_exists(self):
+        settings = svc.get_settings("pool_probabilities", db_ref=self.db)
+        self.assertEqual(settings["unclassified"], 10.0)
+
+    def test_save_persists_and_reload_returns_saved_value(self):
+        result = svc.update_settings(
+            "pool_probabilities", {"unclassified": 8}, db_ref=self.db
+        )
+        self.assertTrue(result["success"])
+        self.assertEqual(result["settings"]["unclassified"], 8.0)
+
+        svc.invalidate_cache()
+        reloaded = svc.get_settings("pool_probabilities", db_ref=self.db)
+        self.assertEqual(reloaded["unclassified"], 8.0)
+
+    def test_rejects_invalid_values(self):
+        for bad in (-1, 100.1, "not_a_number"):
+            with self.subTest(bad=bad):
+                result = svc.update_settings(
+                    "pool_probabilities", {"unclassified": bad}, db_ref=self.db
+                )
+                self.assertFalse(result["success"])
+
+    def test_nan_validation_gap_matches_other_float_fields(self):
+        """NaN currently slips past _validate_field's min/max bounds check for
+        EVERY "float"-typed field (NaN comparisons are always False) — this is
+        a pre-existing generic gap, not something introduced for this field.
+        Assert parity with an existing field rather than "fixing" only
+        unclassified, which would create inconsistent behavior across the
+        panel — out of scope for this minimal follow-up patch."""
+        existing_field_result = svc.update_settings(
+            "pool_probabilities", {"ghost": float("nan")}, db_ref=self.db
+        )
+        new_field_result = svc.update_settings(
+            "pool_probabilities", {"unclassified": float("nan")}, db_ref=self.db
+        )
+        self.assertEqual(existing_field_result["success"], new_field_result["success"])
+
+    def test_accepts_boundary_values(self):
+        for ok in (0, 100):
+            with self.subTest(ok=ok):
+                result = svc.update_settings(
+                    "pool_probabilities", {"unclassified": ok}, db_ref=self.db
+                )
+                self.assertTrue(result["success"])
+
+    def test_runtime_probability_uses_configured_override(self):
+        import config
+
+        result = svc.update_settings(
+            "pool_probabilities", {"unclassified": 8}, db_ref=self.db
+        )
+        self.assertTrue(result["success"])
+        # update_settings() invalidates+repopulates the shared in-process
+        # cache, so the parameterless (real-db) lookup config.py performs
+        # immediately observes the override — proving no redeploy/restart is
+        # needed for this setting to take effect, same as the other fields.
+        self.assertAlmostEqual(config.public_pool_probability_for_bot_segment(None), 0.08)
+        self.assertAlmostEqual(config.public_pool_probability_for_bot_segment(""), 0.08)
+        self.assertAlmostEqual(config.public_pool_probability_for_bot_segment("unclassified"), 0.08)
+        self.assertAlmostEqual(config.public_pool_probability_for_bot_segment("random_unknown_segment"), 0.08)
+
+    def test_runtime_known_segments_unaffected_by_unclassified_override(self):
+        import config
+
+        svc.update_settings("pool_probabilities", {"unclassified": 8}, db_ref=self.db)
+        self.assertAlmostEqual(config.public_pool_probability_for_bot_segment("voucher_hunter"), 0.10)
+        self.assertAlmostEqual(config.public_pool_probability_for_bot_segment("ghost"), 0.05)
+        self.assertAlmostEqual(config.public_pool_probability_for_bot_segment("normal_actual"), 0.70)
+        self.assertAlmostEqual(config.public_pool_probability_for_bot_segment("high_value"), 0.50)
+
+    def test_malformed_persisted_value_falls_back_to_schema_default(self):
+        # A malformed stored value (None/non-numeric) must be coerced back to
+        # the field's schema default (10.0), never silently accepted.
+        self.db["app_settings"].docs["pool_probabilities"] = {
+            "_id": "pool_probabilities", "unclassified": "not_a_number",
+        }
+        svc.invalidate_cache()
+        settings = svc.get_settings("pool_probabilities", db_ref=self.db)
+        self.assertEqual(settings["unclassified"], 10.0)
+
+    def test_settings_lookup_failure_falls_back_to_10pct_not_70pct(self):
+        """If the settings lookup itself fails/errors, the runtime probability
+        must fall back to the safe 10% code default, never the old 70%."""
+        import config
+
+        orig_get_setting = svc.get_setting
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("settings lookup boom")
+
+        svc.get_setting = boom
+        try:
+            self.assertAlmostEqual(config.public_pool_probability_for_bot_segment(None), 0.10)
+            self.assertAlmostEqual(config.public_pool_probability_for_bot_segment("unclassified"), 0.10)
+            self.assertAlmostEqual(config.public_pool_probability_for_bot_segment("some_unknown_segment"), 0.10)
+        finally:
+            svc.get_setting = orig_get_setting
+
+
 class SettingsCategorizationTests(unittest.TestCase):
     """Covers the Settings-tab categorization fix: every field in
     SETTINGS_SCHEMA must resolve to exactly one of the canonical Settings UI

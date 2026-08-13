@@ -143,6 +143,10 @@ _POOL_PROBABILITY_SETTINGS_FIELD_BY_SEGMENT = {
     "low_value": "low_value",
     "voucher_hunter": "voucher_hunter",
     "welcome_abuse": "abuse",
+    # Covers every fallback case (None, blank, "unclassified", and any
+    # unrecognized/future segment string) since normalize_for_bot_segment()
+    # always resolves those to "unclassified" before this lookup runs.
+    "unclassified": "unclassified",
 }
 
 
