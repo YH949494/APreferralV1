@@ -223,6 +223,24 @@ SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
             "reserved_pool_pct": {"type": "float", "label": "Reserved Pool %", "default": 0.0, "env": None, "min": 0, "max": 100},
         },
     },
+    "voucher_risk_modifiers": {
+        "label": "Multi-Account Risk Modifiers",
+        "description": (
+            "Risk modifiers applied on top of the segment-derived (pool_probabilities) voucher "
+            "probability when a Telegram identity carries multi_account_risk. Kept independent of "
+            "canonical segment (for_bot_segment) -- these never change a user's segment, only the "
+            "final probability used at claim time. See voucher_risk_eligibility.apply_risk_modifier, "
+            "the single resolver used both by the live claim gate (vouchers.assign_public_pool_access_once) "
+            "and by Databot's Management Dashboard / Player Operations for parity."
+        ),
+        "category": "segment_probability",
+        "fields": {
+            "multi_account_only_modifier_pct": {"type": "float", "label": "Multi-Account Risk Only Modifier (%)", "default": 25.0, "env": None, "min": 0, "max": 100},
+            "behavioral_and_multi_account_modifier_pct": {"type": "float", "label": "Behavioral VH + Multi-Account Modifier (%)", "default": 100.0, "env": None, "min": 0, "max": 100},
+            "behavioral_and_multi_account_min_pct": {"type": "float", "label": "Behavioral + Multi-Account Min Probability (%)", "default": 5.0, "env": None, "min": 0, "max": 100},
+            "behavioral_and_multi_account_max_pct": {"type": "float", "label": "Behavioral + Multi-Account Max Probability (%)", "default": 10.0, "env": None, "min": 0, "max": 100},
+        },
+    },
     "referral_config": {
         "label": "Referral Configuration",
         "description": "XP rewards, holds and status classification for the referral program.",
