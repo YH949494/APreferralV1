@@ -206,6 +206,28 @@ class AssignPublicPoolAccessRiskWiringTests(unittest.TestCase):
         self.assertLess(risky["probability"], clean["probability"])
         self.assertEqual(clean["probability"], 0.5)
 
+    def test_behavioral_flag_uses_the_same_segment_source_as_the_base_probability(self):
+        """backend_segment and for_bot_segment are independent taxonomies
+        and can disagree. When backend_segment drives the base probability
+        (backend_seg in SEGMENT_PROBABILITY_CONFIG), the behavioral-VH flag
+        must come from backend_seg too -- not from for_bot_segment, which
+        would apply the wrong risk band."""
+        assignment = self._run(
+            209, "drop-1",
+            {
+                "for_bot_segment": "high_value",
+                "backend_segment": "voucher_hunter",
+                "multi_account_risk": True,
+            },
+        )
+        # base_probability_pre_risk came from backend_segment_probability("voucher_hunter") = 0.10.
+        self.assertEqual(assignment["base_probability_pre_risk"], 0.10)
+        # backend_seg == "voucher_hunter" -> behavioral+multi-account band (5-10%),
+        # NOT the multi-account-only 25% modifier (which would give 2.5%).
+        self.assertEqual(assignment["risk_category"], RISK_CATEGORY_BEHAVIORAL_AND_MULTI_ACCOUNT)
+        self.assertGreaterEqual(assignment["probability"], 0.05)
+        self.assertLessEqual(assignment["probability"], 0.10)
+
     def test_new_player_override_bypasses_risk_modifier_entirely(self):
         """Unrelated eligibility rule (new-player onboarding boost) must be
         untouched by this feature -- still an absolute 100%, even with

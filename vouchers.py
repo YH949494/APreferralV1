@@ -3774,12 +3774,21 @@ def assign_public_pool_access_once(
             # Use centralised backend segment probabilities.
             base_probability_pre_risk = backend_segment_probability(backend_seg)
             probability_source = "backend"
+            # Behavioral-VH classification must come from the SAME segment
+            # source that produced base_probability_pre_risk -- backend_seg
+            # and normalized_segment (for_bot_segment) are two independent
+            # taxonomies and can disagree (e.g. backend_seg="voucher_hunter"
+            # while for_bot_segment="high_value"). Using the wrong source
+            # here would apply the multi-account-only modifier to what
+            # should get the behavioral+multi-account band, or vice versa.
+            behavioral_voucher_hunter = backend_seg == "voucher_hunter"
         else:
             # Fallback: UIM-based probability (existing behavior; this is
             # the branch actually exercised in production today, since
             # nothing currently populates users.backend_segment).
             base_probability_pre_risk = public_pool_probability_for_bot_segment(normalized_segment)
             probability_source = "for_bot_segment"
+            behavioral_voucher_hunter = normalized_segment == "voucher_hunter"
 
         # Single source of truth for multi-account-risk-adjusted
         # probability -- see voucher_risk_eligibility.apply_risk_modifier.
@@ -3787,7 +3796,6 @@ def assign_public_pool_access_once(
         # and Player Operations read for display, so the probability shown
         # there for a given user always matches what this live gate uses.
         # Never mutates normalized_segment/for_bot_segment.
-        behavioral_voucher_hunter = normalized_segment == "voucher_hunter"
         risk_result = apply_risk_modifier(
             base_probability_pre_risk,
             behavioral_voucher_hunter=behavioral_voucher_hunter,
