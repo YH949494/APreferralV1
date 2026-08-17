@@ -19,6 +19,7 @@ from config import (
     backend_segment_probability,
     SEGMENT_PROBABILITY_CONFIG,
 )
+from voucher_risk_eligibility import apply_risk_modifier
 from referral_ledger import with_not_invalidated
 import hmac, hashlib, urllib.parse, os, json
 import config as _cfg 
@@ -3661,7 +3662,7 @@ def _count_public_pool_assignments_for_user(user_id_int) -> int:
     )
 
 
-def _load_user_bot_segment(user_id_int) -> tuple[str | None, str, float, bool]:
+def _load_user_bot_segment(user_id_int) -> tuple[str | None, str, float, bool, bool]:
     try:
         user_doc = (
             users_collection.find_one(
@@ -3673,6 +3674,12 @@ def _load_user_bot_segment(user_id_int) -> tuple[str | None, str, float, bool]:
                     "bot_segment_probability": 1,
                     "backend_segment": 1,
                     "player_age_type": 1,
+                    # Telegram-level multi-account RISK metadata (Databot
+                    # segment_sync_job.py Path B) -- never touches
+                    # for_bot_segment above; read verbatim, never inferred
+                    # by joining this Telegram identity to a gaming/UIM
+                    # account id here.
+                    "multi_account_risk": 1,
                 },
             )
             if user_id_int is not None
@@ -3686,7 +3693,8 @@ def _load_user_bot_segment(user_id_int) -> tuple[str | None, str, float, bool]:
     normalized = normalize_for_bot_segment(raw_segment)
     probability = public_pool_probability_for_bot_segment(normalized)
     fallback = is_blank_or_unknown_for_bot_segment(raw_segment)
-    return raw_segment, normalized, probability, fallback
+    multi_account_risk = bool((user_doc or {}).get("multi_account_risk"))
+    return raw_segment, normalized, probability, fallback, multi_account_risk
 
 
 def assign_public_pool_access_once(
@@ -3723,9 +3731,10 @@ def assign_public_pool_access_once(
             raw_segment = user_doc.get("bot_segment")
         normalized_segment = normalize_for_bot_segment(raw_segment)
         fallback = is_blank_or_unknown_for_bot_segment(raw_segment)
+        multi_account_risk = bool(user_doc.get("multi_account_risk"))
     else:
-        raw_segment, normalized_segment, _base_probability, fallback = _load_user_bot_segment(
-            user_id_int
+        raw_segment, normalized_segment, _base_probability, fallback, multi_account_risk = (
+            _load_user_bot_segment(user_id_int)
         )
 
     # Resolve backend segment and player_age_type from user doc if available.
@@ -3743,6 +3752,16 @@ def assign_public_pool_access_once(
 
     boost_applied = new_player_override or legacy_svd_boost
 
+    # Risk-modifier fields default to "no risk applied" so the decision log
+    # and stored assignment doc always carry these keys, even on the
+    # boost_applied / new-player path below where the risk modifier is
+    # intentionally never applied (the onboarding boost is an unrelated,
+    # absolute override -- see module docstring on voucher_risk_eligibility
+    # for why this is a strictly separate concern from segment/risk gating).
+    risk_category = "none"
+    risk_modifier = 1.0
+    base_probability_pre_risk = None
+
     if boost_applied:
         probability = 1.0
         if new_player_override:
@@ -3750,15 +3769,35 @@ def assign_public_pool_access_once(
         else:
             probability_source = "for_bot_segment_new_user_svd_boost"
         delay_seconds = 0
-    elif backend_seg and backend_seg in SEGMENT_PROBABILITY_CONFIG:
-        # Use centralised backend segment probabilities.
-        probability = backend_segment_probability(backend_seg)
-        probability_source = "backend"
-        delay_seconds = 0 if probability >= 1.0 else random.randint(15, 45)
     else:
-        # Fallback: UIM-based probability (existing behavior).
-        probability = public_pool_probability_for_bot_segment(normalized_segment)
-        probability_source = "for_bot_segment"
+        if backend_seg and backend_seg in SEGMENT_PROBABILITY_CONFIG:
+            # Use centralised backend segment probabilities.
+            base_probability_pre_risk = backend_segment_probability(backend_seg)
+            probability_source = "backend"
+        else:
+            # Fallback: UIM-based probability (existing behavior; this is
+            # the branch actually exercised in production today, since
+            # nothing currently populates users.backend_segment).
+            base_probability_pre_risk = public_pool_probability_for_bot_segment(normalized_segment)
+            probability_source = "for_bot_segment"
+
+        # Single source of truth for multi-account-risk-adjusted
+        # probability -- see voucher_risk_eligibility.apply_risk_modifier.
+        # This is the SAME resolver/config Databot's Management Dashboard
+        # and Player Operations read for display, so the probability shown
+        # there for a given user always matches what this live gate uses.
+        # Never mutates normalized_segment/for_bot_segment.
+        behavioral_voucher_hunter = normalized_segment == "voucher_hunter"
+        risk_result = apply_risk_modifier(
+            base_probability_pre_risk,
+            behavioral_voucher_hunter=behavioral_voucher_hunter,
+            multi_account_risk=multi_account_risk,
+        )
+        probability = risk_result["final_probability"]
+        risk_category = risk_result["risk_category"]
+        risk_modifier = risk_result["risk_modifier"]
+        if risk_category != "none":
+            probability_source = f"{probability_source}+risk:{risk_category}"
         delay_seconds = 0 if probability >= 1.0 else random.randint(15, 45)
 
     if fallback:
@@ -3776,7 +3815,8 @@ def assign_public_pool_access_once(
     logger.info(
         "[PUBLIC_POOL][PROB_DECISION] drop_id=%s user_id=%s eligibility_mode=%s "
         "segment=%s backend_segment=%s player_age_type=%s probability=%.4f "
-        "decision=%s decision_source=%s new_player_override=%s boost_applied=%s ts=%s",
+        "decision=%s decision_source=%s new_player_override=%s boost_applied=%s "
+        "multi_account_risk=%s risk_category=%s risk_modifier=%.4f base_probability_pre_risk=%s ts=%s",
         public_pool_id,
         user_id_int,
         elig_mode_for_log,
@@ -3788,6 +3828,10 @@ def assign_public_pool_access_once(
         probability_source,
         new_player_override,
         boost_applied,
+        multi_account_risk,
+        risk_category,
+        risk_modifier,
+        f"{base_probability_pre_risk:.4f}" if base_probability_pre_risk is not None else None,
         now_utc().isoformat(),
     )
     assigned_at = now_utc()
@@ -3808,6 +3852,15 @@ def assign_public_pool_access_once(
         "new_player_override_applied": new_player_override,
         "probability": probability,
         "probability_source": probability_source,
+        # Risk & Eligibility audit trail -- kept independent of
+        # segment_at_assignment/for_bot_segment above, matching the Databot
+        # dashboard's own Risk & Eligibility section field-for-field, so an
+        # assignment doc alone can explain the exact same
+        # base -> modifier -> final chain the dashboard shows.
+        "multi_account_risk_at_assignment": multi_account_risk,
+        "risk_category": risk_category,
+        "risk_modifier": risk_modifier,
+        "base_probability_pre_risk": base_probability_pre_risk,
         "legacy_public_pool_segment": audit_segment,
         "access_allowed": bool(access_allowed),
         "eligible_after": eligible_after,
