@@ -155,6 +155,36 @@ class MultiAccountRiskSyncTests(unittest.TestCase):
         self.assertEqual(summary["users_to_clear_stale_risk"], 1)
         self.assertEqual(users.docs[999]["multi_account_risk"], True)  # unchanged: dry run.
 
+    def test_missing_cluster_member_column_never_clears_existing_risk(self):
+        """Codex review finding on PR #414: a sheet snapshot that has
+        linked_gaming_accounts but omits multi_account_cluster_member must
+        never be treated as "everyone is False" -- that would silently erase
+        a previously-synced multi_account_risk=True on --commit."""
+        rows = [
+            ["user_id", "linked_gaming_accounts", "linked_tg_count"],
+            ["999", GAMING_ACCOUNT_ID, "8"],
+        ]
+        users = FakeUsersCollection(
+            [{"user_id": 999, "for_bot_segment": "voucher_hunter", "multi_account_risk": True}]
+        )
+        with patch.object(sync.database, "init_db"):
+            dry_run_summary = sync.sync_multi_account_risk_from_sheet(dry_run=True, users_col=users, rows=rows)
+            commit_summary = sync.sync_multi_account_risk_from_sheet(dry_run=False, users_col=users, rows=rows)
+
+        self.assertFalse(dry_run_summary["source_columns_present"]["multi_account_cluster_member"])
+        self.assertEqual(dry_run_summary["users_to_clear_stale_risk"], 0)
+        self.assertEqual(dry_run_summary["users_to_set_risk_true"], 0)
+
+        self.assertTrue(commit_summary["ok"])
+        self.assertTrue(commit_summary["writes_performed"])
+        # multi_account_risk/multi_account_cluster_member must be untouched --
+        # still True -- since this run had no data for that column.
+        self.assertTrue(users.docs[999]["multi_account_risk"])
+        # linked_gaming_accounts/linked_tg_count are still propagated, since
+        # those columns WERE present.
+        self.assertIn(GAMING_ACCOUNT_ID, users.docs[999]["linked_gaming_accounts"])
+        self.assertEqual(users.docs[999]["linked_tg_count"], 8)
+
     def test_missing_required_column_skips_without_crash(self):
         rows = [["user_id", "some_other_column"], ["100", "x"]]
         users = FakeUsersCollection([{"user_id": 100}])

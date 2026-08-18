@@ -195,11 +195,30 @@ def _parse_rows(rows: list[list[Any]], summary: dict, *, now: datetime | None = 
 
         linked_accounts = _parse_list(row[linked_idx] if len(row) > linked_idx else "")
         linked_tg_count = _parse_int(row[count_idx] if count_idx is not None and len(row) > count_idx else "")
-        cluster_member = _parse_bool(row[member_idx] if member_idx is not None and len(row) > member_idx else "")
+        # cluster_member is None (unknown), not False, when the sheet omits this
+        # column entirely -- False would mean "confirmed not a cluster member"
+        # and must never be inferred from missing data. See _apply_updates():
+        # multi_account_cluster_member/multi_account_risk are omitted from $set
+        # whenever this column is absent, so a partial sheet can never clear a
+        # previously-synced risk flag it has no actual data for.
+        cluster_member = (
+            _parse_bool(row[member_idx] if len(row) > member_idx else "") if member_idx is not None else None
+        )
         voucher_hunter = _parse_bool(row[vh_idx] if vh_idx is not None and len(row) > vh_idx else "")
         reasons = _parse_list(row[reasons_idx] if reasons_idx is not None and len(row) > reasons_idx else "")
 
         summary["valid_user_ids"] += 1
+        set_fields = {
+            "linked_gaming_accounts": linked_accounts,
+            "linked_tg_count": linked_tg_count,
+            "multi_account_voucher_hunter": voucher_hunter,
+            "voucher_hunter_reasons": reasons,
+            "multi_account_risk_source": "UIM",
+            "multi_account_risk_synced_at": now,
+        }
+        if cluster_member is not None:
+            set_fields["multi_account_cluster_member"] = cluster_member
+            set_fields["multi_account_risk"] = cluster_member
         updates.append(
             {
                 "user_id": user_id,
@@ -208,16 +227,7 @@ def _parse_rows(rows: list[list[Any]], summary: dict, *, now: datetime | None = 
                 "multi_account_cluster_member": cluster_member,
                 "multi_account_voucher_hunter": voucher_hunter,
                 "voucher_hunter_reasons": reasons,
-                "set": {
-                    "linked_gaming_accounts": linked_accounts,
-                    "linked_tg_count": linked_tg_count,
-                    "multi_account_cluster_member": cluster_member,
-                    "multi_account_risk": cluster_member,
-                    "multi_account_voucher_hunter": voucher_hunter,
-                    "voucher_hunter_reasons": reasons,
-                    "multi_account_risk_source": "UIM",
-                    "multi_account_risk_synced_at": now,
-                },
+                "set": set_fields,
             }
         )
         if user_id not in seen:
@@ -280,10 +290,14 @@ def sync_multi_account_risk_from_sheet(
             current = existing.get(user_id, {})
             current_risk = bool(current.get("multi_account_risk"))
             new_risk = item["multi_account_cluster_member"]
-            if new_risk and not current_risk:
-                summary["users_to_set_risk_true"] += 1
-            if current_risk and not new_risk:
-                summary["users_to_clear_stale_risk"] += 1
+            # None means the sheet had no multi_account_cluster_member column
+            # this run -- unknown, not "confirmed false". Never treat that as a
+            # signal to set or clear multi_account_risk.
+            if new_risk is not None:
+                if new_risk and not current_risk:
+                    summary["users_to_set_risk_true"] += 1
+                if current_risk and not new_risk:
+                    summary["users_to_clear_stale_risk"] += 1
 
             current_accounts = set(current.get("linked_gaming_accounts") or [])
             new_accounts = set(item["linked_gaming_accounts"])
