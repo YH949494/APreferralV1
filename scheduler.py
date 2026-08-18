@@ -1744,7 +1744,8 @@ def post_growth_leaderboard_weekly(*, db_ref=None, now_utc_ts: datetime | None =
         uid = int(row.get("_id"))
         qcount = int(row.get("qualified_count", 0) or 0)
         user = db_ref.users.find_one({"user_id": uid}, {"username": 1, "first_name": 1}) or {}
-        display_name = user.get("username") or user.get("first_name") or f"User {uid}"
+        username = user.get("username")
+        display_name = mask_public_username(username) if username else (user.get("first_name") or f"User {uid}")
         display_name = html_escape(str(display_name))
         prefix = medals[idx - 1] if idx <= 3 else f"#{idx}"
         lines.append(f"{prefix} {display_name} — {qcount} qualified invites")
@@ -1874,12 +1875,37 @@ def weekly_referral_entries_from_history_archive(db_ref, week_start_local: datet
     return entries
 
 
+def mask_public_username(username: str | None) -> str:
+    """Mask a Telegram username for public display: strip the leading '@',
+    keep only the first 4 characters, and append '****'. Never call this on
+    stored/admin-facing data — public rendering only."""
+    if not username:
+        return "Anonymous"
+
+    cleaned = str(username).strip().lstrip("@")
+
+    if not cleaned:
+        return "Anonymous"
+
+    return f"{cleaned[:4]}****"
+
+
+def _mask_weekly_referral_display_name(display_name: str) -> str:
+    """`display_name` is '@username', a first_name, or 'Member #1234'
+    (see `_weekly_referral_display_name`). Only the username form should be
+    masked for the public post; first names and member fallbacks pass through."""
+    display_name = str(display_name)
+    if display_name.startswith("@"):
+        return mask_public_username(display_name)
+    return display_name
+
+
 def render_weekly_referral_post_text(entries: list[dict]) -> str:
     medals = ["🥇", "🥈", "🥉"]
     lines = ["<b>🏆 Top 5 Growth Leaders This Week</b>", ""]
     for idx, entry in enumerate(entries, start=1):
         prefix = medals[idx - 1] if idx <= 3 else f"#{idx}"
-        name = html_escape(str(entry["display_name"]))
+        name = html_escape(_mask_weekly_referral_display_name(entry["display_name"]))
         count = int(entry["weekly_referrals"])
         lines.append(f"{prefix} {name} — {count} qualified invites")
     lines.extend(
