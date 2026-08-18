@@ -283,12 +283,17 @@ class MalformedListRowTests(unittest.TestCase):
             "voucher_hunter_reasons",
         ]
 
-    def test_malformed_row_is_skipped_and_counted_and_cannot_prune(self):
+    def test_malformed_linked_accounts_cannot_add_or_prune_but_risk_flag_still_applies(self):
         """A malformed linked_gaming_accounts cell must not be parsed at
-        all -- the row is dropped entirely, so it can never appear in
-        `matched`/`clusters` and can never drive linked_accounts_to_prune,
-        even when the existing user doc already has linked_gaming_accounts
-        that a broken parse could otherwise appear to "remove"."""
+        all, and must never register as an addition or a prune -- even
+        when the existing user doc already has linked_gaming_accounts that
+        a broken parse could otherwise appear to "remove". But the row
+        itself is NOT dropped: linked_gaming_accounts is audit/diagnostic
+        data, so the authoritative multi_account_cluster_member /
+        multi_account_risk flag from the same row must still propagate
+        (Codex review finding on PR #416 -- silently discarding the whole
+        row would let a real cluster member keep multi_account_risk=False
+        and bypass voucher_risk_eligibility.py's restriction)."""
         rows = [
             self._headers(),
             # truncated JSON array -- looks like list data, fails to parse.
@@ -298,15 +303,45 @@ class MalformedListRowTests(unittest.TestCase):
             [{"user_id": 555, "for_bot_segment": "normal_actual", "linked_gaming_accounts": ["OLD1", "OLD2"]}]
         )
         with patch.object(sync.database, "init_db"):
-            summary = sync.sync_multi_account_risk_from_sheet(dry_run=True, users_col=users, rows=rows)
+            dry_run_summary = sync.sync_multi_account_risk_from_sheet(dry_run=True, users_col=users, rows=rows)
+            commit_summary = sync.sync_multi_account_risk_from_sheet(dry_run=False, users_col=users, rows=rows)
 
-        self.assertTrue(summary["ok"])
-        self.assertEqual(summary["parsing_errors"], 1)
-        self.assertEqual(summary["users_matched"], 0)
-        self.assertEqual(summary["risk_members_matched"], 0)
-        self.assertEqual(summary["linked_accounts_to_add"], 0)
-        self.assertEqual(summary["linked_accounts_to_prune"], 0)
-        self.assertEqual(summary["clusters"], {})
+        self.assertTrue(dry_run_summary["ok"])
+        self.assertEqual(dry_run_summary["parsing_errors"], 1)
+        self.assertEqual(dry_run_summary["users_matched"], 1)
+        self.assertEqual(dry_run_summary["risk_members_matched"], 1)
+        self.assertEqual(dry_run_summary["users_to_set_risk_true"], 1)
+        self.assertEqual(dry_run_summary["linked_accounts_to_add"], 0)
+        self.assertEqual(dry_run_summary["linked_accounts_to_prune"], 0)
+        self.assertEqual(dry_run_summary["clusters"], {})
+
+        self.assertTrue(commit_summary["writes_performed"])
+        # Risk flag still applied despite the malformed audit field.
+        self.assertTrue(users.docs[555]["multi_account_risk"])
+        self.assertTrue(users.docs[555]["multi_account_cluster_member"])
+        # linked_gaming_accounts left completely untouched -- not pruned.
+        self.assertEqual(users.docs[555]["linked_gaming_accounts"], ["OLD1", "OLD2"])
+
+    def test_malformed_voucher_hunter_reasons_does_not_block_risk_flag(self):
+        """voucher_hunter_reasons is audit evidence only (module docstring).
+        A malformed cell there must not suppress the authoritative
+        multi_account_cluster_member/multi_account_risk update for a real
+        cluster member -- only the audit field itself is omitted."""
+        rows = [
+            self._headers(),
+            ["556", GAMING_ACCOUNT_ID, "1", "true", "true", '["behavioral"'],  # truncated JSON
+        ]
+        users = FakeUsersCollection([{"user_id": 556, "for_bot_segment": "normal_actual"}])
+        with patch.object(sync.database, "init_db"):
+            commit_summary = sync.sync_multi_account_risk_from_sheet(dry_run=False, users_col=users, rows=rows)
+
+        self.assertEqual(commit_summary["parsing_errors"], 1)
+        self.assertTrue(commit_summary["writes_performed"])
+        self.assertTrue(users.docs[556]["multi_account_risk"])
+        self.assertTrue(users.docs[556]["multi_account_cluster_member"])
+        self.assertIn(GAMING_ACCOUNT_ID, users.docs[556]["linked_gaming_accounts"])
+        # voucher_hunter_reasons was malformed -- never written this run.
+        self.assertNotIn("voucher_hunter_reasons", users.docs[556])
 
     def test_known_cluster_stays_one_cluster_not_bracket_quote_variants(self):
         """The known production cluster (gaming account 4YCLx8PImw4YvLB8,

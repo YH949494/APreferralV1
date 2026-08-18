@@ -244,13 +244,20 @@ def _parse_rows(rows: list[list[Any]], summary: dict, *, now: datetime | None = 
             row[reasons_idx] if reasons_idx is not None and len(row) > reasons_idx else ""
         )
         if not linked_ok or not reasons_ok:
-            # Fail closed: malformed JSON/list data in either column must
-            # never synthesize account ids or fall through to heuristic
-            # bracket/quote stripping. Skip the whole row -- it never enters
-            # `updates`/`user_ids`/`clusters`, so it can never contribute to
-            # linked_accounts_to_add/prune or any write.
             summary["parsing_errors"] += 1
-            continue
+        # Fail closed PER FIELD, not per row: `linked_gaming_accounts` and
+        # `voucher_hunter_reasons` are diagnostic/audit-evidence fields (see
+        # module docstring), never a source of the authoritative
+        # multi_account_cluster_member/multi_account_risk flags. Dropping
+        # the whole row here would silently withhold a real risk flag from
+        # a genuine cluster member whenever only the audit-evidence column
+        # is malformed, letting them bypass the voucher restriction in
+        # voucher_risk_eligibility.py. So a malformed field is simply
+        # omitted from `$set` (existing DB value untouched, no
+        # add/prune contribution below) while the rest of the row --
+        # including multi_account_cluster_member/multi_account_risk --
+        # still applies normally. Never synthesize account ids or strip
+        # brackets/quotes heuristically to "recover" a malformed value.
 
         linked_tg_count = _parse_int(row[count_idx] if count_idx is not None and len(row) > count_idx else "")
         # cluster_member is None (unknown), not False, when the sheet omits this
@@ -266,24 +273,29 @@ def _parse_rows(rows: list[list[Any]], summary: dict, *, now: datetime | None = 
 
         summary["valid_user_ids"] += 1
         set_fields = {
-            "linked_gaming_accounts": linked_accounts,
             "linked_tg_count": linked_tg_count,
             "multi_account_voucher_hunter": voucher_hunter,
-            "voucher_hunter_reasons": reasons,
             "multi_account_risk_source": "UIM",
             "multi_account_risk_synced_at": now,
         }
+        if linked_ok:
+            set_fields["linked_gaming_accounts"] = linked_accounts
+        if reasons_ok:
+            set_fields["voucher_hunter_reasons"] = reasons
         if cluster_member is not None:
             set_fields["multi_account_cluster_member"] = cluster_member
             set_fields["multi_account_risk"] = cluster_member
         updates.append(
             {
                 "user_id": user_id,
-                "linked_gaming_accounts": linked_accounts,
+                # None (rather than []) marks "malformed this run -- leave
+                # existing DB value alone", distinct from a genuinely empty
+                # list. Callers must check for None before diffing.
+                "linked_gaming_accounts": linked_accounts if linked_ok else None,
                 "linked_tg_count": linked_tg_count,
                 "multi_account_cluster_member": cluster_member,
                 "multi_account_voucher_hunter": voucher_hunter,
-                "voucher_hunter_reasons": reasons,
+                "voucher_hunter_reasons": reasons if reasons_ok else None,
                 "set": set_fields,
             }
         )
@@ -291,13 +303,14 @@ def _parse_rows(rows: list[list[Any]], summary: dict, *, now: datetime | None = 
             seen.add(user_id)
             user_ids.append(user_id)
 
-        for account_id in linked_accounts:
-            cluster = summary["clusters"].setdefault(
-                account_id, {"member_user_ids": [], "reported_linked_tg_count": linked_tg_count}
-            )
-            cluster["member_user_ids"].append(user_id)
-            if linked_tg_count is not None:
-                cluster["reported_linked_tg_count"] = linked_tg_count
+        if linked_ok:
+            for account_id in linked_accounts:
+                cluster = summary["clusters"].setdefault(
+                    account_id, {"member_user_ids": [], "reported_linked_tg_count": linked_tg_count}
+                )
+                cluster["member_user_ids"].append(user_id)
+                if linked_tg_count is not None:
+                    cluster["reported_linked_tg_count"] = linked_tg_count
 
     return updates, user_ids
 
@@ -356,10 +369,15 @@ def sync_multi_account_risk_from_sheet(
                 if current_risk and not new_risk:
                     summary["users_to_clear_stale_risk"] += 1
 
-            current_accounts = set(current.get("linked_gaming_accounts") or [])
-            new_accounts = set(item["linked_gaming_accounts"])
-            summary["linked_accounts_to_add"] += len(new_accounts - current_accounts)
-            summary["linked_accounts_to_prune"] += len(current_accounts - new_accounts)
+            # None means linked_gaming_accounts was malformed this run --
+            # the field is omitted from $set, so there is nothing to diff:
+            # a malformed cell must never register as additions or, more
+            # importantly, as prunes of every existing linked account.
+            if item["linked_gaming_accounts"] is not None:
+                current_accounts = set(current.get("linked_gaming_accounts") or [])
+                new_accounts = set(item["linked_gaming_accounts"])
+                summary["linked_accounts_to_add"] += len(new_accounts - current_accounts)
+                summary["linked_accounts_to_prune"] += len(current_accounts - new_accounts)
 
             if item["multi_account_cluster_member"] and len(preview) < preview_limit:
                 preview.append(
