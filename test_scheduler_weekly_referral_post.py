@@ -193,11 +193,12 @@ def test_historical_text_format_and_escaping():
         scheduler.publish_weekly_referral_post(db_ref=fake_db, now_utc_ts=NOW, week_key="2026-07-20")
     text = post_mock.call_args.kwargs["json"]["text"]
     assert "<b>🏆 Top 5 Growth Leaders This Week</b>" in text
-    assert "🥇 @a&lt;b — 21 qualified invites" in text
+    assert "🥇 a&lt;b**** — 21 qualified invites" in text
     assert "🥈 Bee — 14 qualified invites" in text
     assert "🥉 Member #3 — 10 qualified invites" in text
-    assert "#4 @d — 10 qualified invites" in text
-    assert "#5 @e — 7 qualified invites" in text
+    assert "#4 d**** — 10 qualified invites" in text
+    assert "#5 e**** — 7 qualified invites" in text
+    assert "@" not in text.split("Top 5 Growth Leaders This Week</b>")[1].split("Invite more")[0]
     assert "Invite more qualified members, join our affiliate program, and earn up to <b>$450/month</b>." in text
 
 
@@ -348,5 +349,71 @@ def test_repair_dry_run_previews_without_sending():
         )
     post_mock.assert_not_called()
     assert "preview_text" in doc
-    assert "🥇 @hist1 — 8 qualified invites" in doc["preview_text"]
+    assert "🥇 hist**** — 8 qualified invites" in doc["preview_text"]
     assert fake_db.weekly_referral_posts.docs["weekly_referral_post:2026-07-13"]["status"] != "sent"
+
+
+def test_mask_public_username_normal():
+    assert scheduler.mask_public_username("Valivan") == "Vali****"
+    assert scheduler.mask_public_username("TheJone9") == "TheJ****"
+
+
+def test_mask_public_username_strips_leading_at():
+    assert scheduler.mask_public_username("@Valivan") == "Vali****"
+
+
+def test_mask_public_username_exactly_four_chars():
+    assert scheduler.mask_public_username("abcd") == "abcd****"
+
+
+def test_mask_public_username_fewer_than_four_chars():
+    assert scheduler.mask_public_username("abc") == "abc****"
+    assert scheduler.mask_public_username("ab") == "ab****"
+    assert scheduler.mask_public_username("a") == "a****"
+
+
+def test_mask_public_username_empty_or_none():
+    assert scheduler.mask_public_username(None) == "Anonymous"
+    assert scheduler.mask_public_username("") == "Anonymous"
+    assert scheduler.mask_public_username("@") == "Anonymous"
+    assert scheduler.mask_public_username("   ") == "Anonymous"
+
+
+def test_public_post_text_never_leaks_full_username_or_at_sign():
+    users = [
+        {"user_id": 1, "username": "Valivan", "weekly_referrals": 34},
+        {"user_id": 2, "username": "TheJone9", "weekly_referrals": 25},
+        {"user_id": 3, "username": "ONE2TH", "weekly_referrals": 11},
+        {"user_id": 4, "username": "Milktom88", "weekly_referrals": 10},
+        {"user_id": 5, "username": "NOOM1402", "weekly_referrals": 10},
+    ]
+    fake_db = _FakeDb(users_docs=users)
+    with _env(), patch.object(scheduler.requests, "post", return_value=_OkResp()) as post_mock:
+        scheduler.publish_weekly_referral_post(db_ref=fake_db, now_utc_ts=NOW, week_key="2026-07-20")
+    text = post_mock.call_args.kwargs["json"]["text"]
+    assert "@" not in text
+    for full_username in ("Valivan", "TheJone9", "ONE2TH", "Milktom88", "NOOM1402"):
+        assert full_username not in text
+    assert "🥇 Vali**** — 34 qualified invites" in text
+    assert "🥈 TheJ**** — 25 qualified invites" in text
+    assert "🥉 ONE2**** — 11 qualified invites" in text
+    assert "#4 Milk**** — 10 qualified invites" in text
+    assert "#5 NOOM**** — 10 qualified invites" in text
+
+
+def test_public_post_ranking_and_counts_unchanged_by_masking():
+    users = [
+        {"user_id": 1, "username": "Valivan", "weekly_referrals": 34},
+        {"user_id": 2, "username": "TheJone9", "weekly_referrals": 25},
+        {"user_id": 3, "username": "ONE2TH", "weekly_referrals": 11},
+        {"user_id": 4, "username": "Milktom88", "weekly_referrals": 10},
+        {"user_id": 5, "username": "NOOM1402", "weekly_referrals": 10},
+    ]
+    fake_db = _FakeDb(users_docs=users)
+    with _env(), patch.object(scheduler.requests, "post", return_value=_OkResp()):
+        doc = scheduler.publish_weekly_referral_post(db_ref=fake_db, now_utc_ts=NOW, week_key="2026-07-20")
+    entries = doc["entries"]
+    assert [e["user_id"] for e in entries] == [1, 2, 3, 4, 5]
+    assert [e["weekly_referrals"] for e in entries] == [34, 25, 11, 10, 10]
+    # Snapshot/source data keeps the full, unmasked username for admin/internal use.
+    assert entries[0]["display_name"] == "@Valivan"

@@ -85,11 +85,12 @@ def test_growth_top5_order_and_format_and_escape():
     assert out is True
     sent = post_mock.call_args.kwargs["json"]["text"]
     assert "<b>🏆 Top 5 Growth Leaders This Week</b>" in sent
-    assert "🥇 a&lt;b — 43 qualified invites" in sent
+    assert "🥇 a&lt;b**** — 43 qualified invites" in sent
     assert "🥈 Bee — 31 qualified invites" in sent
     assert "🥉 User 3 — 29 qualified invites" in sent
-    assert "#4 D — 18 qualified invites" in sent
-    assert "#5 E — 12 qualified invites" in sent
+    assert "#4 D**** — 18 qualified invites" in sent
+    assert "#5 E**** — 12 qualified invites" in sent
+    assert "@" not in sent
     assert "<i>Invite more qualified members, join our affiliate program, and earn up to <b>$450/month</b>.</i>" in sent
 
 
