@@ -149,6 +149,33 @@ class BotSegmentSyncTests(unittest.TestCase):
         self.assertFalse(summary["ok"])
         self.assertIn("missing Google service account credentials", summary["error"])
 
+    def test_init_db_called_before_any_mongo_backed_settings_lookup(self):
+        """Regression test: settings_service.get_setting("pool_probabilities", ...)
+        (triggered by _parse_rows -> public_pool_probability_for_bot_segment) must
+        never run before database.init_db() during startup. Calling it first used
+        to raise "Database not initialized. Call init_db() first." which was
+        silently swallowed by public_pool_probability_for_bot_segment's fallback,
+        masking the ordering bug instead of surfacing it."""
+        users = FakeUsersCollection([{"user_id": 100}])
+        call_order: list[str] = []
+
+        def fake_init_db(*args, **kwargs):  # noqa: ARG001
+            call_order.append("init_db")
+
+        def fake_get_setting(group, field, **kwargs):  # noqa: ARG001
+            call_order.append(f"get_setting:{group}.{field}")
+            return None
+
+        with patch.object(sync.database, "init_db", side_effect=fake_init_db) as init_db, patch.object(
+            sync.database, "users_collection", users
+        ), patch("settings_service.get_setting", side_effect=fake_get_setting) as get_setting:
+            summary = sync.sync_bot_segments_from_sheet(dry_run=True, users_col=None, rows=self._rows())
+
+        init_db.assert_called_once()
+        self.assertTrue(get_setting.called, "expected pool_probabilities lookup to run for a known segment row")
+        self.assertEqual(call_order[0], "init_db", f"init_db must run before any settings lookup, got order={call_order}")
+        self.assertTrue(summary["ok"])
+
     def test_default_collection_path_initializes_db_after_fetch(self):
         users = FakeUsersCollection([{"user_id": 100}])
         with patch.object(sync, "fetch_sheet_rows", return_value=self._rows()) as fetch_rows, patch.object(

@@ -3704,6 +3704,8 @@ def build_user_drilldown(
     if not user:
         return {"success": False, "data_quality": "missing", "message": "No user found for that id/username."}
 
+    from effective_segment import resolve_effective_segment  # local import avoids a hard dep at module load
+
     uid = user.get("user_id")
     errors: list[str] = []
 
@@ -3771,11 +3773,22 @@ def build_user_drilldown(
     seg = (user.get("for_bot_segment") or user.get("bot_segment") or "").strip().lower()
     if seg in ("voucher_hunter", "welcome_abuse", "multi_account", "low_value"):
         risk_flags.append(f"segment:{seg}")
+    if user.get("multi_account_voucher_hunter") is True:
+        risk_flags.append("multi_account_voucher_hunter")
     for h in affiliate_history:
         for f in h.get("risk_flags") or []:
             tag = f"affiliate:{f}"
             if tag not in risk_flags:
                 risk_flags.append(tag)
+
+    # "segment" stays the canonical BEHAVIORAL label (for_bot_segment/bot_segment,
+    # unchanged by multi-account risk -- analytics/reporting must keep reading
+    # this). behavioral_segment/effective_segment/voucher_hunter_reasons are
+    # additive fields exposing the same distinction explicitly: effective_segment
+    # is what campaign/voucher-hunter OPERATIONAL eligibility actually resolves
+    # this user as (see effective_segment.py), which can differ from the
+    # canonical segment when multi_account_voucher_hunter=True.
+    behavioral_segment = user.get("for_bot_segment") or user.get("bot_segment")
 
     return {
         "success": True,
@@ -3790,7 +3803,10 @@ def build_user_drilldown(
             "joined_main_at": _iso(user.get("joined_main_at")),
             "last_checkin": _iso(user.get("last_checkin")),
         },
-        "segment": user.get("for_bot_segment") or user.get("bot_segment"),
+        "segment": behavioral_segment,
+        "behavioral_segment": behavioral_segment,
+        "effective_segment": resolve_effective_segment(user),
+        "voucher_hunter_reasons": user.get("voucher_hunter_reasons") or [],
         "xp": {
             "total_xp": user.get("total_xp"),
             "weekly_xp": user.get("weekly_xp"),

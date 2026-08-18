@@ -126,6 +126,53 @@ class CanonicalEligibilityTests(unittest.TestCase):
         ids = campaign_builder._resolve_segment_user_ids(self.fake_db, ["voucher_hunter"])
         self.assertEqual(ids, [])
 
+    def test_multi_account_voucher_hunter_resolves_operationally_as_voucher_hunter(self):
+        """Case 2 from the effective-segment spec: canonical behavioral
+        segment is high_value, but multi_account_voucher_hunter=True must
+        make this user resolve into the voucher_hunter campaign audience
+        and NOT into the high_value audience -- without for_bot_segment_normalized
+        itself ever being changed."""
+        self.fake_db["users"].insert_one({
+            "user_id": 601,
+            "for_bot_segment": "High Value",
+            "for_bot_segment_normalized": "high_value",
+            "multi_account_voucher_hunter": True,
+        })
+        self.assertEqual(campaign_builder._resolve_segment_user_ids(self.fake_db, ["voucher_hunter"]), [601])
+        self.assertEqual(campaign_builder._resolve_segment_user_ids(self.fake_db, ["high_value"]), [])
+        # Canonical field is untouched.
+        stored = self.fake_db["users"].find_one({"user_id": 601})
+        self.assertEqual(stored["for_bot_segment_normalized"], "high_value")
+
+    def test_cluster_members_all_resolve_voucher_hunter_regardless_of_canonical_segment(self):
+        """Case 5: >3 linked identities each flagged multi_account_voucher_hunter
+        must all resolve as voucher_hunter for campaign eligibility, regardless
+        of their individual canonical behavioral segments, and none may leak
+        into another segment's audience."""
+        cluster = [
+            {"user_id": 701, "for_bot_segment_normalized": "high_value", "multi_account_voucher_hunter": True},
+            {"user_id": 702, "for_bot_segment_normalized": "normal_actual", "multi_account_voucher_hunter": True},
+            {"user_id": 703, "for_bot_segment_normalized": "low_value", "multi_account_voucher_hunter": True},
+            {"user_id": 704, "for_bot_segment_normalized": "voucher_hunter", "multi_account_voucher_hunter": True},
+        ]
+        for doc in cluster:
+            self.fake_db["users"].insert_one(doc)
+        # A non-cluster control user who should stay in their own segment.
+        self.fake_db["users"].insert_one(
+            {"user_id": 705, "for_bot_segment_normalized": "high_value", "multi_account_voucher_hunter": False}
+        )
+
+        vh_ids = campaign_builder._resolve_segment_user_ids(self.fake_db, ["voucher_hunter"])
+        self.assertEqual(sorted(vh_ids), [701, 702, 703, 704])
+
+        for segment in ("high_value", "normal_actual", "low_value"):
+            ids = campaign_builder._resolve_segment_user_ids(self.fake_db, [segment])
+            self.assertNotIn(701, ids)
+            self.assertNotIn(702, ids)
+            self.assertNotIn(703, ids)
+
+        self.assertEqual(campaign_builder._resolve_segment_user_ids(self.fake_db, ["high_value"]), [705])
+
 
 if __name__ == "__main__":
     unittest.main()

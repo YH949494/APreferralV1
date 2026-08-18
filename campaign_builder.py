@@ -49,6 +49,7 @@ from config import (
     SEGMENT_PROBABILITY_CONFIG,
 )
 from campaign_engine import VALID_SEGMENTS, preview_audience
+from effective_segment import effective_segment_query_for_segments
 
 logger = logging.getLogger(__name__)
 
@@ -228,25 +229,34 @@ _ensure_indexes()
 # ---------------------------------------------------------------------------
 
 def _resolve_segment_user_ids(db, segments: list[str]) -> list[int]:
-    """Resolve segment names to user_ids from the canonical segment source.
+    """Resolve segment names to user_ids for OPERATIONAL campaign eligibility.
 
-    Canonical authority chain: Databot ``app/analytics/segments.py`` classifier
-    -> ``segment_snapshots`` -> Databot's ``segment_sync_job`` -> this repo's
-    ``users.for_bot_segment`` / ``users.for_bot_segment_normalized`` (the only
-    fields that job writes). This is deliberately NOT read from
+    Canonical behavioral authority chain: Databot ``app/analytics/segments.py``
+    classifier -> ``segment_snapshots`` -> Databot's ``segment_sync_job`` ->
+    this repo's ``users.for_bot_segment`` / ``users.for_bot_segment_normalized``
+    (the only fields that job writes). This is deliberately NOT read from
     ``backend_segment_snapshots`` (the shadow-only classifier in
     ``backend_segment_engine.py``) — that collection's thresholds differ from
     the canonical Databot classifier and must never gate live campaign
-    eligibility. The resulting ids are written as an
-    ``eligibility.mode="user_id"`` allow list, an enforcement path vouchers.py
-    already implements.
+    eligibility.
+
+    On top of that canonical field, this resolves the EFFECTIVE (operational)
+    segment via ``effective_segment.effective_segment_query_for_segments`` --
+    a Telegram identity flagged ``multi_account_voucher_hunter=True`` always
+    resolves into "voucher_hunter" here (regardless of its canonical
+    for_bot_segment_normalized) and is excluded from every other segment's
+    resolution, WITHOUT for_bot_segment/for_bot_segment_normalized themselves
+    ever being written to. See effective_segment.py's module docstring.
+
+    The resulting ids are written as an ``eligibility.mode="user_id"`` allow
+    list, an enforcement path vouchers.py already implements.
     """
     valid = [s for s in segments if s in VALID_SEGMENTS]
     if not valid:
         return []
     users_col = db["users"]
     cursor = users_col.find(
-        {"for_bot_segment_normalized": {"$in": valid}, "user_id": {"$ne": None}},
+        {**effective_segment_query_for_segments(valid), "user_id": {"$ne": None}},
         projection={"user_id": 1, "_id": 0},
     )
     ids = []

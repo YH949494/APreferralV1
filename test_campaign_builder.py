@@ -29,6 +29,10 @@ class FakeInsertManyResult:
 
 def _matches(doc: dict, filt: dict) -> bool:
     for key, cond in (filt or {}).items():
+        if key == "$or":
+            if not any(_matches(doc, sub) for sub in cond):
+                return False
+            continue
         val = doc.get(key)
         if isinstance(cond, dict) and any(k.startswith("$") for k in cond):
             for op, opval in cond.items():

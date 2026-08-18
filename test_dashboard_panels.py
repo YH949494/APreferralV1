@@ -486,12 +486,41 @@ def test_user_drilldown_by_id_and_username():
     assert by_id["voucher_history"][0]["voucher_code"] == "V1"
     assert "segment:voucher_hunter" in by_id["risk_flags"]
     assert "affiliate:ip_cluster" in by_id["risk_flags"]
+    # Behavioral segment stays canonical; no multi-account risk on this fixture
+    # so effective_segment matches the canonical/behavioral segment too.
+    assert by_id["segment"] == "voucher_hunter"
+    assert by_id["behavioral_segment"] == "voucher_hunter"
+    assert by_id["effective_segment"] == "voucher_hunter"
+    assert by_id["voucher_hunter_reasons"] == []
 
     by_name = dp.build_user_drilldown(query="@neo", **kwargs)
     assert by_name["success"] is True and by_name["profile"]["user_id"] == 42
 
     missing = dp.build_user_drilldown(query="99999", **kwargs)
     assert missing["success"] is False and missing["data_quality"] == "missing"
+
+
+def test_user_drilldown_exposes_effective_segment_override():
+    """A multi-account voucher hunter keeps its canonical behavioral segment
+    on 'segment'/'behavioral_segment' (analytics must not silently change),
+    but 'effective_segment' reflects the operational voucher_hunter override."""
+    users = FakeCollection([
+        {"user_id": 77, "username": "Trinity", "for_bot_segment": "High Value",
+         "for_bot_segment_normalized": "high_value", "multi_account_voucher_hunter": True,
+         "voucher_hunter_reasons": ["multiple_account"]},
+    ])
+    empty = FakeCollection([])
+    kwargs = dict(users_col=users, welcome_eligibility_col=empty, voucher_claims_col=empty,
+                  affiliate_ledger_col=empty, pending_referrals_col=empty,
+                  qualified_events_col=empty, now=NOW)
+
+    out = dp.build_user_drilldown(query="77", **kwargs)
+    assert out["success"] is True
+    assert out["segment"] == "High Value"
+    assert out["behavioral_segment"] == "High Value"
+    assert out["effective_segment"] == "voucher_hunter"
+    assert out["voucher_hunter_reasons"] == ["multiple_account"]
+    assert "multi_account_voucher_hunter" in out["risk_flags"]
 
 
 # ---------------------------------------------------------------------------

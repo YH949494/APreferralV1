@@ -250,8 +250,15 @@ def sync_bot_segments_from_sheet(
     try:
         if rows is None:
             rows = fetch_sheet_rows(spreadsheet_id=spreadsheet_id, worksheet_gid=worksheet_gid)
-        updates, user_ids = _parse_rows(rows, summary, spreadsheet_id=spreadsheet_id, worksheet_gid=worksheet_gid, now=now)
+        # Resolve (and, if needed, init_db()) the users collection BEFORE
+        # parsing rows: _parse_rows() -> public_pool_probability_for_bot_segment()
+        # makes a Mongo-backed settings_service.get_setting("pool_probabilities", ...)
+        # call, which raises "Database not initialized" and silently falls back
+        # to hardcoded defaults if the DB isn't initialized yet. Initializing the
+        # DB first makes that fallback only trigger on a genuine DB/settings
+        # failure, not on ordinary startup ordering.
         users_col = _resolve_users_collection(users_col)
+        updates, user_ids = _parse_rows(rows, summary, spreadsheet_id=spreadsheet_id, worksheet_gid=worksheet_gid, now=now)
         existing_ids = _existing_user_ids(users_col, user_ids) if user_ids else set()
         summary["users_missing_in_db"] = max(0, len(set(user_ids)) - len(existing_ids))
         matched_updates = [item for item in updates if item["user_id"] in existing_ids]
