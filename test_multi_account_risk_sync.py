@@ -213,5 +213,144 @@ class MultiAccountRiskSyncTests(unittest.TestCase):
         self.assertTrue(summary["ok"])
 
 
+class ParseListFieldTests(unittest.TestCase):
+    """Unit tests for the strict list-field parser (_parse_list_field), plus
+    its shape in the JSON-array cell format production UIM actually returns
+    for linked_gaming_accounts/voucher_hunter_reasons."""
+
+    def test_native_list_input(self):
+        self.assertEqual(sync._parse_list_field(["A", "B"]), (["A", "B"], True))
+
+    def test_json_array_string_input(self):
+        self.assertEqual(sync._parse_list_field('["A","B"]'), (["A", "B"], True))
+
+    def test_json_array_string_with_spacing_matches_bug_report(self):
+        # Exact malformed-in-old-code example from the production dry-run.
+        self.assertEqual(
+            sync._parse_list_field('["0IUNRUPdnWQ5Fzg2", "2wOmVcPgQbGddUPr"]'),
+            (["0IUNRUPdnWQ5Fzg2", "2wOmVcPgQbGddUPr"], True),
+        )
+
+    def test_voucher_hunter_reasons_json_array(self):
+        self.assertEqual(
+            sync._parse_list_field('["behavioral","multiple_account"]'),
+            (["behavioral", "multiple_account"], True),
+        )
+
+    def test_empty_string(self):
+        self.assertEqual(sync._parse_list_field(""), ([], True))
+
+    def test_none(self):
+        self.assertEqual(sync._parse_list_field(None), ([], True))
+
+    def test_empty_native_list(self):
+        self.assertEqual(sync._parse_list_field([]), ([], True))
+
+    def test_empty_json_array_string(self):
+        self.assertEqual(sync._parse_list_field("[]"), ([], True))
+
+    def test_legacy_csv_scalar_string(self):
+        self.assertEqual(sync._parse_list_field("A, B"), (["A", "B"], True))
+
+    def test_legacy_semicolon_scalar_string(self):
+        self.assertEqual(sync._parse_list_field("A; B"), (["A", "B"], True))
+
+    def test_single_legacy_scalar(self):
+        self.assertEqual(sync._parse_list_field("A"), (["A"], True))
+
+    def test_dedupes_and_trims_and_drops_empty(self):
+        self.assertEqual(sync._parse_list_field(' ["A", " A ", "", "B"] '), (["A", "B"], True))
+
+    def test_malformed_json_fails_closed(self):
+        items, ok = sync._parse_list_field('["A", "B"')
+        self.assertFalse(ok)
+        self.assertEqual(items, [])
+
+    def test_malformed_mismatched_brackets_fails_closed(self):
+        items, ok = sync._parse_list_field('["A", "B"}')
+        self.assertFalse(ok)
+        self.assertEqual(items, [])
+
+
+class MalformedListRowTests(unittest.TestCase):
+    def _headers(self):
+        return [
+            "user_id",
+            "linked_gaming_accounts",
+            "linked_tg_count",
+            "multi_account_cluster_member",
+            "multi_account_voucher_hunter",
+            "voucher_hunter_reasons",
+        ]
+
+    def test_malformed_row_is_skipped_and_counted_and_cannot_prune(self):
+        """A malformed linked_gaming_accounts cell must not be parsed at
+        all -- the row is dropped entirely, so it can never appear in
+        `matched`/`clusters` and can never drive linked_accounts_to_prune,
+        even when the existing user doc already has linked_gaming_accounts
+        that a broken parse could otherwise appear to "remove"."""
+        rows = [
+            self._headers(),
+            # truncated JSON array -- looks like list data, fails to parse.
+            ["555", '["A", "B"', "2", "true", "false", ""],
+        ]
+        users = FakeUsersCollection(
+            [{"user_id": 555, "for_bot_segment": "normal_actual", "linked_gaming_accounts": ["OLD1", "OLD2"]}]
+        )
+        with patch.object(sync.database, "init_db"):
+            summary = sync.sync_multi_account_risk_from_sheet(dry_run=True, users_col=users, rows=rows)
+
+        self.assertTrue(summary["ok"])
+        self.assertEqual(summary["parsing_errors"], 1)
+        self.assertEqual(summary["users_matched"], 0)
+        self.assertEqual(summary["risk_members_matched"], 0)
+        self.assertEqual(summary["linked_accounts_to_add"], 0)
+        self.assertEqual(summary["linked_accounts_to_prune"], 0)
+        self.assertEqual(summary["clusters"], {})
+
+    def test_known_cluster_stays_one_cluster_not_bracket_quote_variants(self):
+        """The known production cluster (gaming account 4YCLx8PImw4YvLB8,
+        8 Telegram members) must resolve as exactly one cluster key even
+        when the sheet stores linked_gaming_accounts as a JSON array
+        string -- not split into malformed variants like
+        '["4YCLx8PImw4YvLB8"]' / '"4YCLx8PImw4YvLB8"'."""
+        rows = [self._headers()]
+        for uid in CLUSTER_TG_IDS:
+            rows.append([str(uid), f'["{GAMING_ACCOUNT_ID}"]', "8", "true", "true", '["multiple_account"]'])
+        users = self._users_for(CLUSTER_TG_IDS)
+        with patch.object(sync.database, "init_db"):
+            summary = sync.sync_multi_account_risk_from_sheet(dry_run=True, users_col=users, rows=rows)
+
+        self.assertEqual(summary["parsing_errors"], 0)
+        self.assertEqual(list(summary["clusters"].keys()), [GAMING_ACCOUNT_ID])
+        cluster = summary["clusters"][GAMING_ACCOUNT_ID]
+        self.assertEqual(sorted(cluster["member_user_ids"]), sorted(CLUSTER_TG_IDS))
+        self.assertEqual(len(cluster["member_user_ids"]), 8)
+
+        entry = next(p for p in summary["preview"] if p["user_id"] == CLUSTER_TG_IDS[0])
+        self.assertEqual(entry["linked_gaming_accounts"], [GAMING_ACCOUNT_ID])
+        for account_id in entry["linked_gaming_accounts"]:
+            self.assertNotIn("[", account_id)
+            self.assertNotIn("]", account_id)
+            self.assertNotIn('"', account_id)
+        self.assertEqual(entry["voucher_hunter_reasons"], ["multiple_account"])
+
+    def test_multiple_gaming_accounts_json_array(self):
+        rows = [
+            self._headers(),
+            ["700", '["0IUNRUPdnWQ5Fzg2", "2wOmVcPgQbGddUPr"]', "2", "true", "true", '["behavioral", "multiple_account"]'],
+        ]
+        users = self._users_for([700])
+        with patch.object(sync.database, "init_db"):
+            summary = sync.sync_multi_account_risk_from_sheet(dry_run=True, users_col=users, rows=rows)
+
+        entry = summary["preview"][0]
+        self.assertEqual(entry["linked_gaming_accounts"], ["0IUNRUPdnWQ5Fzg2", "2wOmVcPgQbGddUPr"])
+        self.assertEqual(entry["voucher_hunter_reasons"], ["behavioral", "multiple_account"])
+
+    def _users_for(self, uids):
+        return FakeUsersCollection([{"user_id": uid, "for_bot_segment": "normal_actual"} for uid in uids])
+
+
 if __name__ == "__main__":
     unittest.main()

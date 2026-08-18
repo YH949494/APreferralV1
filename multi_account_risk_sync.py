@@ -67,6 +67,7 @@ def _empty_summary(*, dry_run: bool) -> dict:
         "rows_scanned": 0,
         "valid_user_ids": 0,
         "invalid_user_ids": 0,
+        "parsing_errors": 0,
         "users_matched": 0,
         "canonical_segment_users_matched": 0,
         "risk_members_matched": 0,
@@ -104,18 +105,63 @@ def _parse_bool(raw: Any) -> bool:
     return str(raw or "").strip().lower() in _TRUE_VALUES
 
 
-def _parse_list(raw: Any) -> list[str]:
-    text = str(raw or "").strip()
-    if not text:
-        return []
-    parts = [p.strip() for p in text.replace(";", ",").split(",")]
+def _clean_list_items(items: Iterable[Any]) -> list[str]:
+    """Trim, drop-empty, and dedupe (order-preserving) a raw item sequence.
+
+    Items are converted to ``str`` only here, after any structured (JSON)
+    parsing has already happened -- never before.
+    """
     seen: set[str] = set()
     out: list[str] = []
-    for part in parts:
-        if part and part not in seen:
-            seen.add(part)
-            out.append(part)
+    for item in items:
+        value = str(item).strip()
+        if value and value not in seen:
+            seen.add(value)
+            out.append(value)
     return out
+
+
+def _parse_list_field(raw: Any) -> tuple[list[str], bool]:
+    """Strict parser for UIM list-valued cells (``linked_gaming_accounts``,
+    ``voucher_hunter_reasons``).
+
+    ``fetch_sheet_rows()`` (gspread ``get_all_values``) always returns plain
+    strings, but the underlying UIM export cell content is a mixture of:
+      - a JSON array literal, e.g. the text ``["A","B"]`` -- this is what
+        production UIM currently writes for these two columns; and
+      - a legacy comma/semicolon-separated scalar string, e.g. ``A, B`` --
+        the format this module's original contract documented.
+    Native Python list/tuple input (e.g. if ``rows`` is ever supplied
+    pre-parsed instead of from ``get_all_values()``) is also accepted as-is.
+
+    Returns ``(items, ok)``. ``ok`` is False only when the cell text starts
+    with ``[`` (i.e. looks like JSON/list data) but fails to parse as a JSON
+    array -- callers MUST fail closed on that (skip the row) rather than
+    fall back to stripping brackets/quotes or splitting on commas, which is
+    exactly the bug this replaces (malformed cluster keys like
+    ``"\\"2WRPfSPOZciIlgv0\\""``).
+    """
+    if raw is None:
+        return [], True
+    if isinstance(raw, (list, tuple)):
+        return _clean_list_items(raw), True
+
+    text = str(raw).strip()
+    if not text:
+        return [], True
+
+    if text.startswith("["):
+        try:
+            parsed = json.loads(text)
+        except (json.JSONDecodeError, ValueError):
+            return [], False
+        if not isinstance(parsed, list):
+            return [], False
+        return _clean_list_items(parsed), True
+
+    # Legacy scalar/CSV contract: plain comma/semicolon-separated values,
+    # never JSON-shaped, so a naive split is safe here.
+    return _clean_list_items(text.replace(";", ",").split(",")), True
 
 
 def _parse_int(raw: Any) -> int | None:
@@ -193,7 +239,19 @@ def _parse_rows(rows: list[list[Any]], summary: dict, *, now: datetime | None = 
             summary["invalid_user_ids"] += 1
             continue
 
-        linked_accounts = _parse_list(row[linked_idx] if len(row) > linked_idx else "")
+        linked_accounts, linked_ok = _parse_list_field(row[linked_idx] if len(row) > linked_idx else "")
+        reasons, reasons_ok = _parse_list_field(
+            row[reasons_idx] if reasons_idx is not None and len(row) > reasons_idx else ""
+        )
+        if not linked_ok or not reasons_ok:
+            # Fail closed: malformed JSON/list data in either column must
+            # never synthesize account ids or fall through to heuristic
+            # bracket/quote stripping. Skip the whole row -- it never enters
+            # `updates`/`user_ids`/`clusters`, so it can never contribute to
+            # linked_accounts_to_add/prune or any write.
+            summary["parsing_errors"] += 1
+            continue
+
         linked_tg_count = _parse_int(row[count_idx] if count_idx is not None and len(row) > count_idx else "")
         # cluster_member is None (unknown), not False, when the sheet omits this
         # column entirely -- False would mean "confirmed not a cluster member"
@@ -205,7 +263,6 @@ def _parse_rows(rows: list[list[Any]], summary: dict, *, now: datetime | None = 
             _parse_bool(row[member_idx] if len(row) > member_idx else "") if member_idx is not None else None
         )
         voucher_hunter = _parse_bool(row[vh_idx] if vh_idx is not None and len(row) > vh_idx else "")
-        reasons = _parse_list(row[reasons_idx] if reasons_idx is not None and len(row) > reasons_idx else "")
 
         summary["valid_user_ids"] += 1
         set_fields = {
