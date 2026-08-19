@@ -776,12 +776,33 @@ def build_affiliate_panel(
     *,
     affiliate_ledger_col,
     voucher_pools_col,
+    affiliate_voucher_batches_col=None,
     now: datetime | None = None,
     top_n: int = 50,
 ) -> dict:
     now = now or _utc_now()
     month_key = now.strftime("%Y%m")
     errors: list[str] = []
+
+    # "Currently claimable" reuses the exact same active-batch/legacy-mode
+    # rules the fulfillment engine claims against (affiliate_rewards.
+    # _available_pool_count), rather than re-deriving them here — a row can
+    # be "available" in voucher_pools but not currently claimable (e.g. it
+    # belongs to no active batch and the tier already left legacy mode).
+    claimable_count = None
+    if affiliate_voucher_batches_col is not None:
+        try:
+            from affiliate_rewards import _available_pool_count
+
+            class _PoolDb:
+                voucher_pools = voucher_pools_col
+                affiliate_voucher_batches = affiliate_voucher_batches_col
+
+            claimable_count = lambda p: int(  # noqa: E731
+                _available_pool_count(_PoolDb, pool_id=p, now_utc=now)
+            )
+        except Exception:  # noqa: BLE001
+            claimable_count = None
 
     pending = metric(
         lambda: int(affiliate_ledger_col.count_documents({"status": {"$in": _AFF_PENDING}}))
@@ -809,9 +830,16 @@ def build_affiliate_panel(
                 voucher_pools_col.count_documents({"pool_id": p, "status": "issued"})
             )
         )
-        pool_availability.append(
-            {"pool_id": pool_id, "available": avail["value"], "issued": issued_n["value"]}
-        )
+        entry = {
+            "pool_id": pool_id,
+            "available": avail["value"],
+            "issued": issued_n["value"],
+            "total_available": avail["value"],
+        }
+        if claimable_count is not None:
+            claimable = metric(lambda p=pool_id: claimable_count(p))
+            entry["currently_claimable"] = claimable["value"]
+        pool_availability.append(entry)
 
     # ---- Monthly issuance summary (current month) ----
     monthly_issuance = []

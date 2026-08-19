@@ -31,6 +31,23 @@ AFFILIATE_REWARD_BUNDLES = {
 }
 AFFILIATE_TIER_ICONS = {"T1": "🎉", "T2": "⭐", "T3": "🔥", "T4": "💎", "T5": "👑"}
 
+# risk_flags values that only ever describe an inventory/config gap for a
+# monthly ledger (never an abuse/risk-review signal) — see every
+# "$addToSet": {"risk_flags": ...} call site in this module. Only these are
+# safe grounds for the auto-recovery re-resolution path below; anything else
+# (blocked_user, ip_cluster, subnet_cluster, deny_count_7d,
+# risk_flags_calc_failed, ...) must keep routing to manual review.
+_INVENTORY_ONLY_RISK_FLAGS = frozenset({
+    "pool_empty",
+    "missing_pool_config",
+    "no_batch_for_entitlement_period",
+    "target_batch_not_ready",
+    "target_batch_disabled",
+    "target_batch_expired_unissued",
+    "target_batch_scheduled",
+    "target_batch_empty",
+})
+
 WELCOME_REWARD_VISIBLE_DAYS = 3
 
 T1_THRESHOLD = int(os.getenv("AFF_T1_THRESHOLD", "10"))
@@ -746,6 +763,77 @@ def _resolve_monthly_ledger_target(db, ledger: dict, *, now_utc: datetime) -> di
     return db.affiliate_ledger.find_one({"_id": ledger_id}) or ledger
 
 
+def _monthly_ledger_eligible_for_inventory_retry(ledger: dict) -> bool:
+    """True only when an ``AFFILIATE_MONTHLY`` ledger is pinned (legacy or
+    batch) purely because of an inventory/config gap, with nothing else
+    standing in the way of a fresh same-tier retry: no abuse/risk-review
+    signal, and no voucher already issued.
+
+    This is deliberately conservative — an *empty* ``risk_flags`` list is
+    not treated as eligible, since that means the ledger has never actually
+    failed a claim yet (no evidence the pin is even stale); re-resolution is
+    only for a ledger that is known to be stuck on inventory/config.
+    """
+    if str(ledger.get("ledger_type") or "").strip().upper() != "AFFILIATE_MONTHLY":
+        return False
+    if ledger.get("target_mode") not in ("batch", "legacy"):
+        return False
+    if _ledger_has_affiliate_bundle(ledger) or ledger.get("voucher_code"):
+        return False
+    flags = set(ledger.get("risk_flags") or [])
+    if not flags:
+        return False
+    return flags <= _INVENTORY_ONLY_RISK_FLAGS
+
+
+def _reresolve_monthly_ledger_target_for_retry(db, ledger: dict, *, now_utc: datetime) -> dict:
+    """Clear a stale legacy/batch pin on an inventory-only-pending
+    ``AFFILIATE_MONTHLY`` ledger so ``_resolve_monthly_ledger_target`` picks
+    a fresh target for the SAME tier. Never touches ``tier``/``pool_id`` —
+    only the previously-resolved target metadata.
+    """
+    ledger_id = ledger["_id"]
+    tier = str(ledger.get("tier") or "").strip().upper()
+    old_mode = ledger.get("target_mode")
+    old_batch = ledger.get("target_batch_id")
+
+    db.affiliate_ledger.update_one(
+        {"_id": ledger_id, "status": {"$in": ["PENDING_MANUAL", SETTLING_STATUS]}, **_no_voucher_filter()},
+        {
+            "$set": {"updated_at": now_utc},
+            "$unset": {
+                "target_mode": "",
+                "target_batch_id": "",
+                "target_batch_window_start": "",
+                "target_batch_window_end": "",
+                "target_resolved_at": "",
+            },
+        },
+    )
+    refreshed = db.affiliate_ledger.find_one({"_id": ledger_id}) or ledger
+    logger.info(
+        "[AFF_RETRY][TARGET_RERESOLVE] ledger_id=%s user_id=%s tier=%s old_mode=%s old_batch=%s "
+        "new_mode=%s new_batch=%s reason=%s",
+        ledger_id, ledger.get("user_id"), tier, old_mode, old_batch,
+        refreshed.get("target_mode"), refreshed.get("target_batch_id"), "inventory_only_retry",
+    )
+    return refreshed
+
+
+def _clear_inventory_only_risk_flags(db, *, ledger_id, now_utc: datetime):
+    """After a successful issuance, drop only the stale inventory/config
+    flags (e.g. ``pool_empty``) — abuse/risk-review flags are never touched
+    by this narrow ``$pull``.
+    """
+    db.affiliate_ledger.update_one(
+        {"_id": ledger_id},
+        {
+            "$pull": {"risk_flags": {"$in": list(_INVENTORY_ONLY_RISK_FLAGS)}},
+            "$set": {"updated_at": now_utc},
+        },
+    )
+
+
 _WELCOME_TARGET_REASON_MAP = {
     "no_batch_for_entitlement_period": "no_welcome_batch_for_entitlement_time",
     "target_batch_not_ready": "welcome_target_batch_not_ready",
@@ -1128,12 +1216,39 @@ def _issue_affiliate_ledger_from_pool(db, ledger, now_utc: datetime):
 
     required_count = int(bundle_spec["voucher_count"])
     claim_reason = None
+    inventory_retry = False
     if ledger_type == "AFFILIATE_MONTHLY":
         # Pin this entitlement to exactly one voucher source (a specific
         # batch, or transitionally the legacy pool) the first time it's
-        # issuable, and never let it drift onto a later batch.
+        # issuable, and never let it drift onto a later batch — UNLESS the
+        # existing pin is stuck purely on an inventory/config gap (no
+        # abuse/risk flag, no voucher issued yet), in which case clear it so
+        # the resolver below picks a fresh target for this SAME tier.
+        if _monthly_ledger_eligible_for_inventory_retry(ledger):
+            inventory_retry = True
+            ledger = _reresolve_monthly_ledger_target_for_retry(db, ledger, now_utc=now_utc)
         ledger = _resolve_monthly_ledger_target(db, ledger, now_utc=now_utc)
         target_mode = ledger.get("target_mode")
+        # Same-tier invariant: whatever the resolver just pinned this ledger
+        # to must itself belong to `tier` — never claim against it otherwise.
+        resolved_pool_id = None
+        if target_mode == "batch":
+            resolved_batch = db.affiliate_voucher_batches.find_one(
+                {"_id": ledger.get("target_batch_id")}, {"pool_id": 1}
+            )
+            resolved_pool_id = str((resolved_batch or {}).get("pool_id") or "").strip().upper()
+        elif target_mode == "legacy":
+            resolved_pool_id = str(ledger.get("pool_id") or tier).strip().upper()
+        if target_mode in ("batch", "legacy") and resolved_pool_id != tier:
+            # Must never happen — the resolver only ever queries this
+            # tier's batches/pool. Refuse to claim rather than risk a
+            # cross-tier fallback.
+            logger.error(
+                "[AFF_RETRY][TIER_MISMATCH] ledger_id=%s user_id=%s tier=%s resolved_pool_id=%s target_mode=%s",
+                ledger_id, user_id, tier, resolved_pool_id, target_mode,
+            )
+            target_mode = None
+            claim_reason = "tier_pool_mismatch"
         if target_mode == "batch":
             vouchers, claim_reason = _claim_affiliate_bundle_from_target_batch(
                 db,
@@ -1185,6 +1300,12 @@ def _issue_affiliate_ledger_from_pool(db, ledger, now_utc: datetime):
             if latest and latest.get("status") == "ISSUED" and _ledger_has_affiliate_bundle(latest):
                 return latest
             return latest or db.affiliate_ledger.find_one({"_id": ledger_id})
+        if ledger_type == "AFFILIATE_MONTHLY":
+            # Stale inventory/config flags (e.g. pool_empty) no longer apply
+            # once the bundle actually cleared — never touches abuse/risk
+            # flags, since the $pull list only ever contains inventory ones.
+            _clear_inventory_only_risk_flags(db, ledger_id=ledger_id, now_utc=now_utc)
+            issued = db.affiliate_ledger.find_one({"_id": ledger_id}) or issued
         logger.info(
             "[AFFILIATE][BUNDLE_ISSUE_OK] ledger_id=%s user_id=%s tier=%s pool_id=%s count=%s total=%s",
             ledger_id,
@@ -1194,6 +1315,11 @@ def _issue_affiliate_ledger_from_pool(db, ledger, now_utc: datetime):
             issued.get("voucher_count"),
             issued.get("total_value"),
         )
+        if inventory_retry:
+            logger.info(
+                "[AFF_RETRY][ISSUED] ledger_id=%s tier=%s bundle_size=%s",
+                ledger_id, tier, issued.get("voucher_count"),
+            )
         return issued
 
     latest = _finalize_issued_if_voucher_exists(db, ledger=db.affiliate_ledger.find_one({"_id": ledger_id}), now_utc=now_utc)
@@ -1203,6 +1329,12 @@ def _issue_affiliate_ledger_from_pool(db, ledger, now_utc: datetime):
         return latest
 
     risk_flag = claim_reason or "pool_empty"
+    if inventory_retry:
+        claimable_count = _available_pool_count(db, pool_id=pool_id, now_utc=now_utc)
+        logger.info(
+            "[AFF_RETRY][NO_STOCK] ledger_id=%s tier=%s claimable_count=%s bundle_required=%s",
+            ledger_id, tier, claimable_count, required_count,
+        )
     db.affiliate_ledger.update_one(
         {"_id": ledger_id, "status": SETTLING_STATUS, **_no_voucher_filter()},
         {"$set": {"status": "PENDING_MANUAL", "updated_at": now_utc}, "$addToSet": {"risk_flags": risk_flag}},

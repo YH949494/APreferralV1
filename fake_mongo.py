@@ -108,6 +108,16 @@ def _apply_update(doc: dict, update: dict, *, is_insert: bool = False) -> dict:
             if value not in existing:
                 existing.append(value)
             new_doc[key] = existing
+    if "$pull" in update:
+        for key, cond in update["$pull"].items():
+            existing = new_doc.get(key)
+            if not isinstance(existing, list):
+                continue
+            if isinstance(cond, dict) and "$in" in cond:
+                removed = set(cond["$in"])
+                new_doc[key] = [item for item in existing if item not in removed]
+            else:
+                new_doc[key] = [item for item in existing if item != cond]
     if "$unset" in update:
         for key in update["$unset"]:
             new_doc.pop(key, None)
