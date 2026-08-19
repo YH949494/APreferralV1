@@ -4983,6 +4983,7 @@ def dashboard_affiliate():
         lambda: _panels.build_affiliate_panel(
             affiliate_ledger_col=affiliate_ledger_collection,
             voucher_pools_col=voucher_pools_collection,
+            affiliate_voucher_batches_col=db["affiliate_voucher_batches"],
             now=_utc_now(),
         ),
     )

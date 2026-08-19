@@ -402,6 +402,31 @@ def test_affiliate_panel_status_pools_and_table():
     # WELCOME ledger excluded from affiliate table
     assert all(r["user_id"] != 3 for r in out["affiliates"])
     assert {m["status"] for m in out["monthly_issuance"]["by_status"]} == {"PENDING_REVIEW", "ISSUED"}
+    # Without a batches collection, the new claimable metric is simply omitted
+    # (legacy callers keep working unchanged).
+    assert "currently_claimable" not in t1
+
+
+def test_affiliate_panel_currently_claimable_reuses_fulfillment_rules():
+    ledger = FakeCollection([])
+    pools = FakeCollection([
+        {"pool_id": "T2", "status": "available", "batch_id": "b1"},
+        {"pool_id": "T2", "status": "available", "batch_id": "b1"},
+        {"pool_id": "T2", "status": "available"},  # legacy row — not claimable once T2 is on batches
+    ])
+    batches = FakeCollection([
+        {"_id": "b1", "pool_id": "T2", "starts_at": NOW - timedelta(days=1), "ends_at": NOW + timedelta(days=1),
+         "upload_status": "ready", "distribution_disabled": False},
+    ])
+    out = dp.build_affiliate_panel(
+        affiliate_ledger_col=ledger, voucher_pools_col=pools,
+        affiliate_voucher_batches_col=batches, now=NOW,
+    )
+    t2 = next(p for p in out["pool_availability"] if p["pool_id"] == "T2")
+    assert t2["total_available"] == 3
+    # Only the two rows in the active batch are actually claimable — the
+    # legacy row is invisible now that T2 has an active scheduled batch.
+    assert t2["currently_claimable"] == 2
 
 
 def test_affiliate_detail_ledger_and_vouchers():
