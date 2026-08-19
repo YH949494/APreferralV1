@@ -753,13 +753,14 @@
           dqCard("Issued", s.issued) + dqCard("Rejected", s.rejected);
 
         var pools = (d.pool_availability || []).map(function (p) {
-          return "<tr><td>" + esc(p.pool_id) + '</td><td class="num">' + fmt(p.available) + '</td><td class="num">' + fmt(p.issued) + "</td></tr>";
+          var claimable = typeof p.currently_claimable === "number" ? fmt(p.currently_claimable) : "—";
+          return "<tr><td>" + esc(p.pool_id) + '</td><td class="num">' + fmt(p.available) + '</td><td class="num">' + claimable + '</td><td class="num">' + fmt(p.issued) + "</td></tr>";
         }).join("");
         var mi = ((d.monthly_issuance || {}).by_status || []).map(function (m) {
           return "<tr><td>" + esc(m.status) + '</td><td class="num">' + fmt(m.count) + "</td></tr>";
         }).join("") || '<tr><td colspan="2">No issuance this month.</td></tr>';
         $("#affiliate-pools").innerHTML = '<div class="detail-grid">' +
-          '<div class="detail-block"><h4>Pool Availability</h4><table class="mini-table"><thead><tr><th>Pool</th><th class="num">Available</th><th class="num">Issued</th></tr></thead><tbody>' + pools + "</tbody></table></div>" +
+          '<div class="detail-block"><h4>Pool Availability</h4><table class="mini-table"><thead><tr><th>Pool</th><th class="num">Total Available</th><th class="num">Currently Claimable</th><th class="num">Issued</th></tr></thead><tbody>' + pools + "</tbody></table></div>" +
           '<div class="detail-block"><h4>Monthly Issuance (' + esc((d.monthly_issuance || {}).month_key || "") + ')</h4><table class="mini-table"><thead><tr><th>Status</th><th class="num">Count</th></tr></thead><tbody>' + mi + "</tbody></table></div></div>";
 
         var rows = (d.affiliates || []).map(function (a) {

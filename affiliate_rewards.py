@@ -763,6 +763,21 @@ def _resolve_monthly_ledger_target(db, ledger: dict, *, now_utc: datetime) -> di
     return db.affiliate_ledger.find_one({"_id": ledger_id}) or ledger
 
 
+def _merge_monthly_risk_flags(existing_flags, fresh_abuse_flags) -> list:
+    """Recomputing abuse/risk flags (``_risk_flags_for_referrer_month``) each
+    evaluation is correct — an abuse signal that no longer applies should
+    stop showing. But that recomputation only ever produces abuse flags, so
+    a blind overwrite of ``risk_flags`` erases any inventory-only marker
+    (``pool_empty``, ...) a prior claim attempt left behind, before the
+    inventory-retry eligibility check below ever sees it. Carry those
+    forward here; they are only ever cleared by
+    ``_clear_inventory_only_risk_flags`` on an actual successful issuance.
+    """
+    preserved_inventory = [f for f in (existing_flags or []) if f in _INVENTORY_ONLY_RISK_FLAGS]
+    fresh = list(fresh_abuse_flags or [])
+    return fresh + [f for f in preserved_inventory if f not in fresh]
+
+
 def _monthly_ledger_eligible_for_inventory_retry(ledger: dict) -> bool:
     """True only when an ``AFFILIATE_MONTHLY`` ledger is pinned (legacy or
     batch) purely because of an inventory/config gap, with nothing else
@@ -1786,6 +1801,8 @@ def evaluate_monthly_affiliate_reward(db, *, referrer_id: int, now_utc: datetime
             eligible_tiers,
             list(risk_flags),
         )
+        existing_ledger = db.affiliate_ledger.find_one({"dedup_key": dedup_key}, {"risk_flags": 1})
+        merged_risk_flags = _merge_monthly_risk_flags((existing_ledger or {}).get("risk_flags"), risk_flags)
         try:
             db.affiliate_ledger.update_one(
                 {"dedup_key": dedup_key},
@@ -1803,7 +1820,7 @@ def evaluate_monthly_affiliate_reward(db, *, referrer_id: int, now_utc: datetime
                 },
                 "$set": {
                     "qualified_count": int(qualified_count),
-                    "risk_flags": list(risk_flags),
+                    "risk_flags": merged_risk_flags,
                         "updated_at": now_utc,
                     },
                 },
@@ -2302,9 +2319,10 @@ def settle_previous_month_affiliate_rewards(db, *, now_utc: datetime | None = No
         kl_dt = KL_TZ.localize(datetime(int(prev_yyyymm[:4]), int(prev_yyyymm[4:6]), 15, 12, 0, 0))
         m_start_utc, m_end_utc, _ = _month_window_utc(kl_dt.astimezone(timezone.utc))
         flags = _risk_flags_for_referrer_month(db, referrer_id=uid, start_utc=m_start_utc, end_utc=m_end_utc)
+        merged_flags = _merge_monthly_risk_flags(ledger.get("risk_flags"), flags)
         db.affiliate_ledger.update_one(
             {"_id": ledger["_id"]},
-            {"$set": {"risk_flags": flags, "updated_at": now_utc}},
+            {"$set": {"risk_flags": merged_flags, "updated_at": now_utc}},
         )
 
         issued_row = _issue_affiliate_ledger_from_pool(db, ledger=db.affiliate_ledger.find_one({"_id": ledger["_id"]}), now_utc=now_utc)

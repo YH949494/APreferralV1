@@ -97,6 +97,15 @@ class FakeCollection:
                     current = d.get(k) or []
                     if v not in current:
                         d[k] = list(current) + [v]
+                for k, cond in update.get("$pull", {}).items():
+                    current = d.get(k) or []
+                    if isinstance(cond, dict) and "$in" in cond:
+                        removed = set(cond["$in"])
+                        d[k] = [item for item in current if item not in removed]
+                    else:
+                        d[k] = [item for item in current if item != cond]
+                for k in update.get("$unset", {}):
+                    d.pop(k, None)
                 return _UpdateResult(1)
         if upsert:
             row = dict(filt)
@@ -978,6 +987,54 @@ class AffiliateRewardTests(unittest.TestCase):
         after = db.affiliate_ledger.find_one({"dedup_key": "AFF:301:202601:T1"})
         self.assertEqual(after["status"], "PENDING_REVIEW")
         self.assertEqual(db.voucher_pools.count_documents({"pool_id": "T1", "status": "available"}), 2)
+
+    def test_stuck_legacy_t2_recovers_through_the_real_scheduled_retry_path(self):
+        # Regression test: evaluate_monthly_affiliate_reward and
+        # settle_previous_month_affiliate_rewards both recompute risk_flags
+        # from scratch on every pass and used to blindly overwrite the
+        # ledger's risk_flags with that fresh (abuse-only) list — silently
+        # wiping out a "pool_empty" inventory marker a prior claim attempt
+        # had set. That erased the only signal the inventory-retry
+        # eligibility check relies on, so the production retry path
+        # (retry_current_month_pending_manual_ledgers) never actually
+        # re-resolved a stuck ledger even after stock was uploaded.
+        db = FakeDb()
+        now1 = datetime(2026, 8, 15, tzinfo=timezone.utc)
+        for i in range(1, 26):
+            db.qualified_events.insert_one({"invitee_id": 9000 + i, "referrer_id": 701, "qualified_at": now1})
+
+        first = evaluate_monthly_affiliate_reward(db, referrer_id=701, now_utc=now1)
+        t2_first = db.affiliate_ledger.find_one({"dedup_key": "AFF:701:202608:T2"})
+        self.assertEqual(t2_first["status"], "PENDING_MANUAL")
+        self.assertIn("pool_empty", t2_first.get("risk_flags") or [])
+        self.assertEqual(t2_first.get("target_mode"), "legacy")
+
+        # Ops uploads a T2 batch covering the whole entitlement month.
+        batch = db.affiliate_voucher_batches.insert_one(
+            {
+                "pool_id": "T2",
+                "starts_at": datetime(2026, 7, 1, tzinfo=timezone.utc),
+                "ends_at": datetime(2026, 10, 1, tzinfo=timezone.utc),
+                "upload_status": "ready",
+                "distribution_disabled": False,
+            }
+        )
+        for i in range(1, 4):
+            db.voucher_pools.insert_one(
+                {"pool_id": "T2", "code": f"T2-BATCH-{i}", "status": "available", "batch_id": batch["_id"]}
+            )
+
+        # Real scheduled retry entrypoint — not the internal helper directly.
+        now2 = datetime(2026, 8, 20, tzinfo=timezone.utc)
+        retry_current_month_pending_manual_ledgers(db, now_utc=now2, batch_limit=10)
+
+        t2_after = db.affiliate_ledger.find_one({"dedup_key": "AFF:701:202608:T2"})
+        self.assertEqual(t2_after["status"], "ISSUED")
+        self.assertEqual(t2_after.get("target_mode"), "batch")
+        self.assertNotIn("pool_empty", t2_after.get("risk_flags") or [])
+        self.assertEqual(
+            db.affiliate_ledger.count_documents({"tier": "T2", "year_month": "202608", "user_id": 701}), 1
+        )
 
 
 if __name__ == "__main__":
