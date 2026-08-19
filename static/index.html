@@ -420,6 +420,14 @@
       margin-bottom: 11px;
     }
     .ap-strip-left { display: flex; align-items: baseline; gap: 8px; }
+    .ap-vip-crown {
+      font-size: 12px;
+      line-height: 1;
+      display: inline-block;
+      vertical-align: baseline;
+      color: #f5b63f;
+      text-shadow: 0 0 3px rgba(245,182,63,.35);
+    }
     #strip-name {
       font-family: var(--font-display);
       font-weight: 700;
@@ -1478,6 +1486,7 @@
     <div class="ap-xp-strip">
       <div class="ap-strip-top">
         <div class="ap-strip-left">
+          <span id="strip-vip-crown" class="ap-vip-crown" style="display:none;" aria-label="VIP1" title="VIP1">👑</span>
           <span id="strip-name">User</span>
           <span id="strip-tier">ROOKIE</span>
         </div>
@@ -7610,6 +7619,9 @@ ${referral}`;
         const displayName = data.display_name || "My Profile";
         tierEl.textContent = `${data.tier_icon || "🌱"} ${data.tier_name || "Rookie"}`;
         displayNameEl.textContent = displayName;
+        const isVip1 = data.source_vip_tier === "VIP1";
+        const stripCrownEl = document.getElementById("strip-vip-crown");
+        if (stripCrownEl) stripCrownEl.style.display = isVip1 ? "inline-block" : "none";
         const weeklyXp = Number(data.weekly_xp || 0);
         const weeklyRef = Number(data.weekly_referrals || 0);
         const weeklyRank = Number(data.weekly_rank || 0);
