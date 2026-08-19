@@ -1108,23 +1108,97 @@ def _store_affiliate_bundle_on_ledger(db, *, ledger_id, tier: str, vouchers: lis
     return db.affiliate_ledger.find_one({"_id": ledger_id})
 
 
-def _reconcile_affiliate_bundle_from_issued_pool(db, *, ledger, now_utc: datetime):
-    if not ledger or _ledger_has_affiliate_bundle(ledger):
-        return _finalize_issued_if_voucher_exists(db, ledger=ledger, now_utc=now_utc)
+def _find_complete_issued_affiliate_bundle(db, ledger: dict) -> list[dict] | None:
+    """Bundle-aware replacement for "does one voucher_pools row exist for
+    this ledger": determines whether a COMPLETE, same-tier, same-user
+    bundle of already-issued voucher_pools rows exists for ``ledger``,
+    without consuming any inventory. Returns the exact rows making up the
+    bundle (sorted, stable) or ``None`` if no complete, unambiguous bundle
+    is found — including when linked rows span more than one tier/user, or
+    the count doesn't exactly match ``AFFILIATE_REWARD_BUNDLES``.
+    """
+    if not ledger:
+        return None
     tier = str(ledger.get("tier") or "").strip().upper()
     spec = _affiliate_bundle_spec(tier)
     if not spec:
         return None
     ledger_id = ledger.get("_id")
-    issued = _issued_pool_vouchers_for_ledger(db, ledger_id=ledger_id)
-    if not issued:
-        return None
+    user_id = ledger.get("user_id")
     required = int(spec["voucher_count"])
-    if len(issued) != required:
+
+    linked = list(db.voucher_pools.find({"status": "issued", **_pool_ledger_filter(ledger_id)}))
+    if not linked:
         return None
-    stored = _store_affiliate_bundle_on_ledger(db, ledger_id=ledger_id, tier=tier, vouchers=issued, now_utc=now_utc)
+
+    def _row_tier(row: dict) -> str:
+        return str(row.get("pool_id") or "").strip().upper()
+
+    def _row_user(row: dict):
+        raw = row.get("issued_to_user_id")
+        if raw is None:
+            raw = row.get("issued_to")  # legacy field
+        return raw
+
+    found_tiers = sorted({_row_tier(row) for row in linked})
+    if found_tiers != [tier]:
+        # Never let a T1/T3/WELCOME/etc. row complete a T2 (or any other)
+        # ledger's bundle — refuse and leave the ledger pending.
+        logger.error(
+            "[AFF_RECONCILE][MISMATCH] ledger_id=%s expected_tier=%s found_tiers=%s expected_count=%s found_count=%s",
+            ledger_id, tier, found_tiers, required, len(linked),
+        )
+        return None
+
+    # A row with no issued_to/issued_to_user_id at all (older rows written
+    # before that field was consistently stamped) is not treated as a
+    # mismatch — the ledger_id/issued_for_ledger_id link is already
+    # per-ledger (hence per-user); only an EXPLICIT different user id is
+    # disqualifying.
+    wrong_user = [row for row in linked if _row_user(row) is not None and int(_row_user(row)) != int(user_id or 0)]
+    if wrong_user:
+        logger.error(
+            "[AFF_RECONCILE][MISMATCH] ledger_id=%s expected_tier=%s found_tiers=%s expected_count=%s found_count=%s",
+            ledger_id, tier, found_tiers, required, len(linked) - len(wrong_user),
+        )
+        return None
+
+    logger.info(
+        "[AFF_RECONCILE][FOUND_BUNDLE] ledger_id=%s user_id=%s tier=%s expected=%s found=%s",
+        ledger_id, user_id, tier, required, len(linked),
+    )
+
+    if len(linked) != required:
+        # Partial (or over-complete) bundle — conservative: never finalize,
+        # and never let the caller claim a second full bundle on top of it.
+        return None
+
+    linked.sort(key=lambda row: row.get("_id"))
+    return linked
+
+
+def _reconcile_affiliate_bundle_from_issued_pool(db, *, ledger, now_utc: datetime):
+    if not ledger or _ledger_has_affiliate_bundle(ledger):
+        return _finalize_issued_if_voucher_exists(db, ledger=ledger, now_utc=now_utc)
+    tier = str(ledger.get("tier") or "").strip().upper()
+    ledger_id = ledger.get("_id")
+    bundle_rows = _find_complete_issued_affiliate_bundle(db, ledger)
+    if not bundle_rows:
+        return None
+    stored = _store_affiliate_bundle_on_ledger(db, ledger_id=ledger_id, tier=tier, vouchers=bundle_rows, now_utc=now_utc)
     if stored:
-        logger.info("[AFFILIATE][BUNDLE_RECONCILE_OK] ledger_id=%s tier=%s count=%s", ledger_id, tier, required)
+        if str(ledger.get("ledger_type") or "").strip().upper() == "AFFILIATE_MONTHLY":
+            # Stale inventory/config flags (e.g. pool_empty) no longer apply
+            # once reconciliation confirms the bundle is actually issued —
+            # never touches abuse/risk flags (the $pull list only ever
+            # contains inventory-only ones).
+            _clear_inventory_only_risk_flags(db, ledger_id=ledger_id, now_utc=now_utc)
+            stored = db.affiliate_ledger.find_one({"_id": ledger_id}) or stored
+        logger.info(
+            "[AFF_RECONCILE][FINALIZED] ledger_id=%s tier=%s voucher_count=%s",
+            ledger_id, tier, len(bundle_rows),
+        )
+        logger.info("[AFFILIATE][BUNDLE_RECONCILE_OK] ledger_id=%s tier=%s count=%s", ledger_id, tier, len(bundle_rows))
     return stored
 
 
@@ -1228,6 +1302,22 @@ def _issue_affiliate_ledger_from_pool(db, ledger, now_utc: datetime):
             return latest
         if (latest or {}).get("status") != SETTLING_STATUS:
             return latest
+        # Reconciliation ran (logging FOUND_BUNDLE/MISMATCH above) but could
+        # not finalize this ledger — a partial bundle, cross-tier
+        # contamination, or wrong-user rows already linked to it. Never fall
+        # through to a fresh claim on top of that: it would risk claiming a
+        # second full bundle alongside the stray already-issued rows (e.g. 2
+        # old + 3 new = 5 vouchers for a 3-voucher tier). Park for manual
+        # review instead.
+        logger.error(
+            "[AFF_RECONCILE][PARTIAL_BUNDLE_BLOCK] ledger_id=%s tier=%s reason=existing_issued_rows_incomplete_or_mismatched",
+            ledger_id, tier,
+        )
+        db.affiliate_ledger.update_one(
+            {"_id": ledger_id, "status": SETTLING_STATUS, **_no_voucher_filter()},
+            {"$set": {"status": "PENDING_MANUAL", "updated_at": now_utc}, "$addToSet": {"risk_flags": "partial_bundle_conflict"}},
+        )
+        return db.affiliate_ledger.find_one({"_id": ledger_id})
 
     required_count = int(bundle_spec["voucher_count"])
     claim_reason = None
@@ -2171,6 +2261,54 @@ def issue_previous_week_affiliate_rewards(db, now_utc: datetime | None = None, b
     )
 
 
+def _retry_stuck_pending_manual_affiliate_ledgers(db, *, now_utc: datetime, batch_limit: int = 200) -> dict:
+    """Direct-scan companion to the qualified-events-driven retry above.
+
+    ``issue_current_month_affiliate_rewards`` only ever re-evaluates
+    referrers who have a NEW qualifying event in the current month — it
+    never looks at ``affiliate_ledger`` directly. A ledger already stuck in
+    PENDING_MANUAL (e.g. one whose full voucher bundle was actually issued
+    to ``voucher_pools`` already, but whose own status update lost a race
+    or never ran) would otherwise sit there forever unless that same
+    referrer happens to qualify again this month.
+
+    This scans PENDING_MANUAL AFFILIATE_MONTHLY ledgers directly and gives
+    each one more pass through ``_issue_affiliate_ledger_from_pool``, which
+    always reconciles against an already-issued same-tier/same-user bundle
+    BEFORE ever attempting a fresh claim (see
+    ``_find_complete_issued_affiliate_bundle``) — so this never consumes
+    additional inventory, and never touches a ledger carrying an
+    abuse/risk-review flag (only ``_INVENTORY_ONLY_RISK_FLAGS`` values, or
+    none at all, are eligible).
+    """
+    scanned = 0
+    reconciled = 0
+    candidates = list(
+        db.affiliate_ledger.find(
+            {"ledger_type": "AFFILIATE_MONTHLY", "status": "PENDING_MANUAL", **_no_voucher_filter()}
+        )
+    )[: max(1, int(batch_limit))]
+    for ledger in candidates:
+        if _ledger_has_affiliate_bundle(ledger):
+            continue
+        flags = set(ledger.get("risk_flags") or [])
+        if not flags <= _INVENTORY_ONLY_RISK_FLAGS:
+            continue  # abuse/risk-review flag present — never auto-reconcile
+        scanned += 1
+        settle_res = db.affiliate_ledger.update_one(
+            {"_id": ledger["_id"], "status": "PENDING_MANUAL", **_no_voucher_filter()},
+            {"$set": {"status": SETTLING_STATUS, "updated_at": now_utc}},
+        )
+        if settle_res.modified_count == 0:
+            continue
+        latest = _issue_affiliate_ledger_from_pool(
+            db, ledger=db.affiliate_ledger.find_one({"_id": ledger["_id"]}), now_utc=now_utc,
+        )
+        if latest and latest.get("status") == "ISSUED":
+            reconciled += 1
+    return {"scanned": scanned, "reconciled": reconciled}
+
+
 def issue_current_month_affiliate_rewards(db, now_utc: datetime | None = None, batch_limit: int = 500):
     now_utc = now_utc or datetime.now(timezone.utc)
     start_utc, end_utc, yyyymm = _month_window_utc(now_utc)
@@ -2186,6 +2324,8 @@ def issue_current_month_affiliate_rewards(db, now_utc: datetime | None = None, b
         "pool_empty": 0,
         "invalid_tier": 0,
         "errors": 0,
+        "stuck_pending_manual_scanned": 0,
+        "stuck_pending_manual_reconciled": 0,
     }
 
     pipeline = [
@@ -2261,6 +2401,10 @@ def issue_current_month_affiliate_rewards(db, now_utc: datetime | None = None, b
                     summary["pool_empty"] += 1
             if "missing_pool_config" in (ledger.get("risk_flags") or []):
                 summary["invalid_tier"] += 1
+
+    stuck_retry = _retry_stuck_pending_manual_affiliate_ledgers(db, now_utc=now_utc, batch_limit=limit)
+    summary["stuck_pending_manual_scanned"] = stuck_retry.get("scanned", 0)
+    summary["stuck_pending_manual_reconciled"] = stuck_retry.get("reconciled", 0)
 
     logger.info("[AFFILIATE][BULK_ISSUE_SUMMARY] %s", summary)
     return summary
