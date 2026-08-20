@@ -1890,6 +1890,30 @@ def mask_public_username(username: str | None) -> str:
     return f"{cleaned[:4]}****"
 
 
+def public_affiliate_announcement_name(user_doc: dict | None) -> str:
+    """Single rendering path for the name shown in PUBLIC affiliate /
+    Money Room milestone announcements (the AdvantPlay Money Room |
+    Affiliates channel). Reuses mask_public_username -- the same rule the
+    public weekly growth leaderboard post uses -- so a Telegram username is
+    never published in full, and never with a leading '@' (the masked value
+    is not a resolvable handle).
+
+    Applies at the public rendering layer only: users.username, the
+    affiliate ledger, snapshots, admin dashboards and the member's own
+    Money Room view keep the full username. Every current and future
+    affiliate tier/milestone announcement must route its display name
+    through this function.
+    """
+    user_doc = user_doc or {}
+    username = user_doc.get("username")
+    if username and str(username).strip().lstrip("@"):
+        return mask_public_username(username)
+    first_name = user_doc.get("first_name")
+    if first_name and str(first_name).strip():
+        return str(first_name).strip()
+    return mask_public_username(None)
+
+
 def _mask_weekly_referral_display_name(display_name: str) -> str:
     """`display_name` is '@username', a first_name, or 'Member #1234'
     (see `_weekly_referral_display_name`). Only the username form should be
@@ -3265,12 +3289,7 @@ def maybe_shout_referral_congrats(inviter_user_id: int, now_utc_ts: datetime) ->
         tail = "Absolute legend! 🏆"
 
     user_doc = db.users.find_one({"user_id": inviter_user_id}, {"user_id": 1, "username": 1, "first_name": 1})
-    if user_doc and user_doc.get("username"):
-        mention = f'<a href="tg://user?id={inviter_user_id}">@{html_escape(user_doc["username"])}</a>'
-    elif user_doc and user_doc.get("first_name"):
-        mention = f'<a href="tg://user?id={inviter_user_id}">{html_escape(user_doc["first_name"])}</a>'
-    else:
-        mention = f'<a href="tg://user?id={inviter_user_id}">user</a>'
+    mention = html_escape(public_affiliate_announcement_name(user_doc))
 
     text = (
         f"🎉 {mention} just hit <b>{threshold} valid referrals</b> this month "
