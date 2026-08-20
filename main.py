@@ -65,7 +65,7 @@ from vouchers import (
 from admin_auth import admin_auth_bp, configure_admin_session
 from referral_rules import calc_referral_progress, REFERRAL_XP_PER_SUCCESS, REFERRAL_BONUS_INTERVAL, REFERRAL_BONUS_XP, build_public_referral_status
 from referral_ledger import with_not_invalidated
-from scheduler import settle_pending_referrals, settle_referral_snapshots, settle_xp_snapshots, evaluate_affiliate_simulated_ledgers, compute_affiliate_daily_kpi_yesterday, run_invitee_subscription_audit, reconcile_drop_statuses, post_growth_leaderboard_weekly, publish_weekly_referral_post, process_welcome_voucher_lifecycle, process_welcome_reminders, trigger_welcome_unlock_push
+from scheduler import settle_pending_referrals, settle_referral_snapshots, settle_xp_snapshots, evaluate_affiliate_simulated_ledgers, compute_affiliate_daily_kpi_yesterday, run_invitee_subscription_audit, reconcile_drop_statuses, post_growth_leaderboard_weekly, publish_weekly_referral_post, process_welcome_voucher_lifecycle, process_welcome_reminders, trigger_welcome_unlock_push, retry_pending_affiliate_milestone_congrats
 from affiliate_dashboard_export import run_affiliate_dashboard_export_monthly_scheduled
 from referral_rate_limit import consume_referral_rate_limits
 from affiliate_leaderboard import (
@@ -904,6 +904,14 @@ def tick_5min() -> None:
                         retry_current_month_pending_manual_ledgers(
                             db,
                             now_utc=datetime.now(timezone.utc),
+                            batch_limit=AFFILIATE_CURRENT_MONTH_BATCH_LIMIT,
+                        )
+                        # Runs immediately after the reconciliation calls above so a
+                        # milestone whose voucher just flipped to ISSUED (e.g. a
+                        # previously OUT_OF_STOCK/PENDING_MANUAL tier) gets its public
+                        # announcement sent on this same pass, exactly once.
+                        retry_pending_affiliate_milestone_congrats(
+                            now_utc_ts=datetime.now(timezone.utc),
                             batch_limit=AFFILIATE_CURRENT_MONTH_BATCH_LIMIT,
                         )
                 except Exception as exc:

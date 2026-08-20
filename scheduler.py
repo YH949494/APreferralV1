@@ -3256,28 +3256,97 @@ def current_month_qualified_referral_count(inviter_user_id: int, now_utc_ts: dat
     return max(0, settled - revoked)
 
 
-def maybe_shout_referral_congrats(inviter_user_id: int, now_utc_ts: datetime) -> None:
+# Bridges a REFERRAL_CONGRATS_TIERS threshold to the affiliate_ledger `tier`
+# label the durable voucher-issuance record is filed under (see
+# affiliate_rewards._tier_for_count / evaluate_monthly_affiliate_reward,
+# which is what actually claims a voucher from voucher_pools and writes
+# status="ISSUED"). The public announcement must always resolve through
+# this map and read affiliate_ledger — it must never trust monthly_count
+# (the referral threshold) alone as proof a voucher was issued.
+REFERRAL_CONGRATS_TIER_LABEL = {10: "T1", 25: "T2", 50: "T3", 150: "T4", 250: "T5"}
+
+
+def _affiliate_ledger_issued_for_congrats(user_id: int, year_month: str, tier_label: str) -> dict | None:
+    """Return the affiliate_ledger row for (user_id, year_month, tier_label)
+    only when it is durably ISSUED with a real, non-empty voucher_code —
+    i.e. only once affiliate_rewards.py's issuance/reconciliation flow has
+    actually claimed a voucher for this milestone. Returns None (after
+    logging why) for a missing ledger, any non-ISSUED status (APPROVED,
+    PENDING_MANUAL, PENDING_REVIEW, SETTLING, OUT_OF_STOCK, REJECTED,
+    SIMULATED_PENDING, ...), or an ISSUED row that is somehow still
+    missing its voucher_code.
+    """
+    ledger = db.affiliate_ledger.find_one(
+        {"user_id": int(user_id), "year_month": year_month, "tier": tier_label},
+        {"status": 1, "voucher_code": 1},
+    )
+    if not ledger:
+        logger.info("[AFF_CONGRATS][SKIP] uid=%s tier=%s reason=ledger_missing", user_id, tier_label)
+        return None
+    status = ledger.get("status")
+    if status != "ISSUED":
+        logger.info("[AFF_CONGRATS][SKIP] uid=%s tier=%s reason=not_issued status=%s", user_id, tier_label, status)
+        return None
+    if not str(ledger.get("voucher_code") or "").strip():
+        logger.warning("[AFF_CONGRATS][SKIP] uid=%s tier=%s reason=missing_voucher_code", user_id, tier_label)
+        return None
+    return ledger
+
+
+def _attempt_affiliate_milestone_congrats(inviter_user_id: int, threshold: int, voucher: int, now_utc_ts: datetime) -> None:
+    """Send the public Money Room milestone announcement for one
+    (inviter, threshold) pair, but only once the matching affiliate_ledger
+    row is confirmed ISSUED with a real voucher_code — never on referral
+    count alone. Idempotent and safe to call repeatedly (from the
+    referral-settle path the moment a tier is first reached, and again from
+    ``retry_pending_affiliate_milestone_congrats``'s periodic sweep): a
+    milestone whose voucher was still pending/out-of-stock/settling simply
+    returns without recording anything, so a later re-evaluation — once
+    reconciliation actually issues the voucher — can pick it up and post
+    exactly once.
+    """
     from html import escape as html_escape
-    month_key = _month_start_kl(now_utc_ts).date().isoformat()
-    monthly_count = current_month_qualified_referral_count(inviter_user_id, now_utc_ts)
 
-    hit_tier = None
-    for threshold, voucher in REFERRAL_CONGRATS_TIERS:
-        if monthly_count >= threshold > (monthly_count - 1):
-            hit_tier = (threshold, voucher)
-            break
-
-    if not hit_tier:
+    tier_label = REFERRAL_CONGRATS_TIER_LABEL.get(threshold)
+    if not tier_label:
         return
 
-    threshold, voucher = hit_tier
+    month_key = _month_start_kl(now_utc_ts).date().isoformat()
 
-    # Check dedup before sending but do NOT record yet — record only after confirmed send
-    already_sent = db.referral_tier_congrats.find_one(
-        {"user_id": inviter_user_id, "month_key": month_key, "tier": threshold},
-        {"_id": 1},
-    )
-    if already_sent:
+    # Cheap pre-check so a repeat sweep over an already-announced milestone
+    # never even reaches the ledger lookup/logging below.
+    if db.referral_tier_congrats.find_one(
+        {"user_id": inviter_user_id, "month_key": month_key, "tier": threshold}, {"_id": 1}
+    ):
+        return
+
+    year_month = _month_start_kl(now_utc_ts).strftime("%Y%m")
+    if not _affiliate_ledger_issued_for_congrats(inviter_user_id, year_month, tier_label):
+        return
+
+    user_doc = db.users.find_one({"user_id": inviter_user_id}, {"user_id": 1, "username": 1, "first_name": 1})
+    display_name = (user_doc or {}).get("username") or (user_doc or {}).get("first_name")
+
+    # Claim the dedup slot atomically BEFORE sending, not after: this is
+    # what prevents two concurrent scheduler workers from both passing the
+    # checks above and both posting to the public channel. The unique index
+    # on (user_id, month_key, tier) — see main.py's uniq_referral_tier_congrats
+    # — makes this insert the single source of truth for "who gets to send";
+    # a losing racer's insert simply raises DuplicateKeyError and bails out.
+    claim_doc = {
+        "user_id": inviter_user_id,
+        "month_key": month_key,
+        "tier": threshold,
+        "sent_at": None,
+        "username": (user_doc or {}).get("username"),
+        "display_name": display_name,
+        "qualified_referrals": threshold,
+        "reward_amount": voucher,
+    }
+    try:
+        claim_id = db.referral_tier_congrats.insert_one(claim_doc).inserted_id
+    except DuplicateKeyError:
+        logger.info("[AFF_CONGRATS][SKIP] uid=%s tier=%s reason=already_announced", inviter_user_id, tier_label)
         return
 
     tier_idx = next(i for i, (t, _) in enumerate(REFERRAL_CONGRATS_TIERS) if t == threshold)
@@ -3288,12 +3357,10 @@ def maybe_shout_referral_congrats(inviter_user_id: int, now_utc_ts: datetime) ->
     else:
         tail = "Absolute legend! 🏆"
 
-    user_doc = db.users.find_one({"user_id": inviter_user_id}, {"user_id": 1, "username": 1, "first_name": 1})
     mention = html_escape(public_affiliate_announcement_name(user_doc))
-
     text = (
         f"🎉 {mention} just hit <b>{threshold} valid referrals</b> this month "
-        f"— <b>${voucher} voucher</b> unlocked! {tail}"
+        f"— <b>${voucher} voucher issued!</b> {tail}"
     )
     try:
         resp = requests.post(
@@ -3306,30 +3373,84 @@ def maybe_shout_referral_congrats(inviter_user_id: int, now_utc_ts: datetime) ->
                 "[REFERRAL][CONGRATS] send_failed inviter=%s tier=%s status=%s body=%s",
                 inviter_user_id, threshold, resp.status_code, resp.text[:200],
             )
+            # Release the claim so a transient send failure is retried on
+            # the next settle event or sweep, instead of being lost forever.
+            db.referral_tier_congrats.delete_one({"_id": claim_id})
             return
     except Exception:
         logger.exception("[REFERRAL][CONGRATS] send_error inviter=%s tier=%s", inviter_user_id, threshold)
+        db.referral_tier_congrats.delete_one({"_id": claim_id})
         return
 
-    # Record dedup only after confirmed send to keep the tier retryable on failure.
-    # username/first_name/reward_amount are stored alongside the existing
-    # dedup key purely for display (e.g. the Money Room "Recent Win" card) --
-    # they don't change the dedup semantics, which remain the unique index
-    # on (user_id, month_key, tier).
-    display_name = (user_doc or {}).get("username") or (user_doc or {}).get("first_name")
-    try:
-        db.referral_tier_congrats.insert_one({
-            "user_id": inviter_user_id,
-            "month_key": month_key,
-            "tier": threshold,
-            "sent_at": now_utc_ts,
-            "username": (user_doc or {}).get("username"),
-            "display_name": display_name,
-            "qualified_referrals": threshold,
-            "reward_amount": voucher,
-        })
-    except DuplicateKeyError:
-        pass
+    db.referral_tier_congrats.update_one({"_id": claim_id}, {"$set": {"sent_at": now_utc_ts}})
+    logger.info("[AFF_CONGRATS][SENT] uid=%s tier=%s year_month=%s", inviter_user_id, tier_label, year_month)
+
+
+def maybe_shout_referral_congrats(inviter_user_id: int, now_utc_ts: datetime) -> None:
+    """Eager path: called right when a referral settles for ``inviter_user_id``
+    (see settle_pending_referrals below). Fires the announcement immediately
+    if the just-reached tier's voucher happens to already be ISSUED;
+    otherwise leaves it for ``retry_pending_affiliate_milestone_congrats``'s
+    periodic sweep to catch once issuance/reconciliation completes.
+    """
+    monthly_count = current_month_qualified_referral_count(inviter_user_id, now_utc_ts)
+
+    hit_tier = None
+    for threshold, voucher in REFERRAL_CONGRATS_TIERS:
+        if monthly_count >= threshold > (monthly_count - 1):
+            hit_tier = (threshold, voucher)
+            break
+
+    if not hit_tier:
+        return
+
+    threshold, voucher = hit_tier
+    _attempt_affiliate_milestone_congrats(inviter_user_id, threshold, voucher, now_utc_ts)
+
+
+def retry_pending_affiliate_milestone_congrats(now_utc_ts: datetime | None = None, batch_limit: int = 200) -> dict:
+    """Scheduler-driven retry pass for milestone announcements that could
+    not fire at settle time because the voucher was not ISSUED yet (still
+    PENDING_MANUAL/PENDING_REVIEW/SETTLING/OUT_OF_STOCK/...). Intended to be
+    run right after the affiliate reward reconciliation jobs
+    (affiliate_rewards.catch_up_missing_current_month_affiliate_ledgers /
+    retry_current_month_pending_manual_ledgers) so a voucher that just
+    became ISSUED gets its (still-pending) announcement sent on this same
+    pass, exactly once.
+
+    Scans this month's ISSUED AFFILIATE_MONTHLY ledger rows for a tier this
+    module announces; each candidate is cheap to skip (an indexed dedup
+    lookup) once already announced, so repeated sweeps stay quiet and do
+    not re-log anything for rows that are done.
+    """
+    now_utc_ts = now_utc_ts or now_utc()
+    year_month = _month_start_kl(now_utc_ts).strftime("%Y%m")
+    threshold_by_tier = {label: threshold for threshold, label in REFERRAL_CONGRATS_TIER_LABEL.items()}
+    voucher_by_threshold = dict(REFERRAL_CONGRATS_TIERS)
+
+    scanned = attempted = 0
+    candidates = list(
+        db.affiliate_ledger.find(
+            {
+                "ledger_type": "AFFILIATE_MONTHLY",
+                "year_month": year_month,
+                "tier": {"$in": list(threshold_by_tier.keys())},
+                "status": "ISSUED",
+            },
+            projection={"user_id": 1, "tier": 1},
+        )
+    )[: max(1, int(batch_limit))]
+    for ledger in candidates:
+        scanned += 1
+        tier_label = ledger.get("tier")
+        threshold = threshold_by_tier.get(tier_label)
+        uid = ledger.get("user_id")
+        voucher = voucher_by_threshold.get(threshold)
+        if not threshold or uid is None or voucher is None:
+            continue
+        attempted += 1
+        _attempt_affiliate_milestone_congrats(int(uid), threshold, voucher, now_utc_ts)
+    return {"scanned": scanned, "attempted": attempted}
 
 
 

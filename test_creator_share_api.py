@@ -616,6 +616,25 @@ class TestRecentWin:
     (endpoint) and, separately, that the write side (congrats/dedup/mask)
     still behaves as documented."""
 
+    def _seed_issued_ledger(self, fake_db, *, user_id=555, tier_label="T2", now=None, voucher_code="AFFCODE1"):
+        """The public announcement now only fires once affiliate_rewards.py's
+        issuance flow has durably confirmed the voucher (affiliate_ledger
+        status == ISSUED with a real voucher_code) -- seed that row so these
+        write-path tests exercise the same gate maybe_shout_referral_congrats()
+        actually evaluates."""
+        now = now or csc.now_utc()
+        year_month = scheduler._month_start_kl(now).strftime("%Y%m")
+        fake_db["affiliate_ledger"].insert_one(
+            {
+                "ledger_type": "AFFILIATE_MONTHLY",
+                "user_id": user_id,
+                "year_month": year_month,
+                "tier": tier_label,
+                "status": "ISSUED",
+                "voucher_code": voucher_code,
+            }
+        )
+
     def _congrats_doc(self, fake_db, *, user_id=555, tier=25, amount=15, username="TheJone9", sent_at=None):
         now = sent_at or csc.now_utc()
         fake_db["referral_tier_congrats"].insert_one(
@@ -693,6 +712,7 @@ class TestRecentWin:
             fake_db["referral_events"].insert_one(
                 {"inviter_id": 555, "invitee_id": i, "event": "referral_settled", "occurred_at": now, "month_key": month_key}
             )
+        self._seed_issued_ledger(fake_db, now=now)
 
         sent = {"count": 0}
 
@@ -721,6 +741,7 @@ class TestRecentWin:
             fake_db["referral_events"].insert_one(
                 {"inviter_id": 555, "invitee_id": i, "event": "referral_settled", "occurred_at": now, "month_key": month_key}
             )
+        self._seed_issued_ledger(fake_db, now=now)
 
         class _Resp:
             ok = True
@@ -738,8 +759,9 @@ class TestRecentWin:
         assert doc["reward_amount"] == 15
 
     def test_telegram_announcement_text_unchanged(self, fake_db, monkeypatch):
-        """The existing Telegram unlock announcement text/format is untouched
-        by the new persistence fields."""
+        """The existing Telegram announcement text/format (beyond the
+        unlocked->issued wording change) is untouched by the new persistence
+        fields."""
         fake_db["users"].insert_one({"user_id": 555, "username": "TheJone9", "first_name": "The"})
         now = csc.now_utc()
         month_key = scheduler._month_start_kl(now).date().isoformat()
@@ -747,6 +769,7 @@ class TestRecentWin:
             fake_db["referral_events"].insert_one(
                 {"inviter_id": 555, "invitee_id": i, "event": "referral_settled", "occurred_at": now, "month_key": month_key}
             )
+        self._seed_issued_ledger(fake_db, now=now)
 
         captured = {}
 
@@ -765,7 +788,7 @@ class TestRecentWin:
 
         text = captured["json"]["text"]
         assert "just hit <b>25 valid referrals</b> this month" in text
-        assert "<b>$15 voucher</b> unlocked!" in text
+        assert "<b>$15 voucher issued!</b>" in text
         assert "Next: 50 refs = $50!" in text
 
 
