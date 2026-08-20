@@ -42,20 +42,48 @@ class _FakeReferralEvents:
 class _FakeCongrats:
     def __init__(self):
         self.inserted = []
+        self._next_id = 1
 
     def find_one(self, filt, proj=None):
         return None
 
     def insert_one(self, doc):
+        doc = dict(doc)
+        doc["_id"] = self._next_id
+        self._next_id += 1
         self.inserted.append(doc)
-        return doc
+        return type("Result", (), {"inserted_id": doc["_id"]})()
+
+    def update_one(self, filt, update):
+        for doc in self.inserted:
+            if doc.get("_id") == filt.get("_id"):
+                doc.update(update.get("$set") or {})
+        return None
+
+    def delete_one(self, filt):
+        self.inserted = [d for d in self.inserted if d.get("_id") != filt.get("_id")]
+        return None
+
+
+class _FakeAffiliateLedger:
+    """Defaults to a durably ISSUED voucher for whatever (user, year_month,
+    tier) is looked up, so tests focused on username masking don't need to
+    care about the gating -- tests that DO care override via ``rows``."""
+
+    def __init__(self, status="ISSUED", voucher_code="AFFCODE123"):
+        self.status = status
+        self.voucher_code = voucher_code
+
+    def find_one(self, filt, proj=None):
+        return {"status": self.status, "voucher_code": self.voucher_code}
 
 
 class _FakeDb:
-    def __init__(self, user_doc, settled=25):
+    def __init__(self, user_doc, settled=25, ledger_status="ISSUED", ledger_voucher_code="AFFCODE123"):
         self.users = _FakeUsers(user_doc)
         self.referral_events = _FakeReferralEvents(settled)
         self.referral_tier_congrats = _FakeCongrats()
+        self.affiliate_ledger = _FakeAffiliateLedger(status=ledger_status, voucher_code=ledger_voucher_code)
 
 
 def _announce(user_doc, settled=25):
@@ -130,11 +158,11 @@ def test_announcement_does_not_deep_link_to_the_profile():
     assert "tg://user" not in text
 
 
-def test_announcement_keeps_tier_counts_and_voucher_copy_unchanged():
+def test_announcement_keeps_tier_counts_and_reflects_actual_issuance():
     text, _ = _announce({"user_id": 777, "username": "kamilszs"}, settled=25)
     assert text == (
         "🎉 kami**** just hit <b>25 valid referrals</b> this month "
-        "— <b>$15 voucher</b> unlocked! Next: 50 refs = $50! 💪"
+        "— <b>$15 voucher issued!</b> Next: 50 refs = $50! 💪"
     )
 
 
