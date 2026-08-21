@@ -221,11 +221,20 @@ def _perform_maintenance_boundary_repair(db, *, batch: dict, canonical_starts_at
     """Directly rewrite only the boundary fields — never touches voucher
     codes, status, ``issued_to``, ``ledger_id``, ``issued_for_ledger_id``,
     or any other issuance data, on either collection.
+
+    The ``voucher_pools`` rows are written first, the batch document second
+    (the opposite order from a batch-then-rows sequencing), so a run
+    interrupted between the two writes leaves the batch document still
+    reporting its old (malformed) window. ``find_misaligned_batches`` keys
+    off the batch document, so the batch is still picked up as misaligned
+    on a rerun and this function is safely re-entrant: re-applying the same
+    ``$set`` to already-canonical ``voucher_pools`` rows is a no-op, and
+    the batch document then gets its one remaining write.
     """
     oid = batch["_id"]
     boundary_set = {"starts_at": canonical_starts_at, "ends_at": canonical_ends_at}
-    db.affiliate_voucher_batches.update_one({"_id": oid}, {"$set": boundary_set})
     _bulk_update_rows(db.voucher_pools, {"batch_id": oid}, {"$set": boundary_set})
+    db.affiliate_voucher_batches.update_one({"_id": oid}, {"$set": boundary_set})
 
 
 def fix_batches(

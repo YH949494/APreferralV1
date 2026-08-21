@@ -183,6 +183,43 @@ class TestOverlappingTargetRefused:
         assert after == before
 
 
+class TestResumableAfterPartialWriteFailure:
+    def test_rerun_after_voucher_rows_already_canonical_still_fixes_batch_document(self):
+        # Simulates a run interrupted between the two writes performed by
+        # _perform_maintenance_boundary_repair: voucher_pools rows already
+        # moved to the canonical window, but the batch document still has
+        # its old (malformed) starts_at/ends_at. A rerun must still find
+        # and fix the batch document, not silently treat it as done.
+        db = _db()
+        created = _malformed_august(db, pool_id="T1", codes=["T1-1"])
+        _mark_issued(db, "T1-1")
+        batch_id = ObjectId(created["batch"]["batch_id"])
+        canonical_starts_at = datetime(2026, 7, 31, 16, 0, tzinfo=timezone.utc)
+        canonical_ends_at = datetime(2026, 8, 31, 16, 0, tzinfo=timezone.utc)
+
+        db.voucher_pools.update_one(
+            {"code": "T1-1"},
+            {"$set": {"starts_at": canonical_starts_at, "ends_at": canonical_ends_at}},
+        )
+        batch_before = db.affiliate_voucher_batches.find_one({"_id": batch_id})
+        assert batch_before["ends_at"] != canonical_ends_at  # still malformed
+
+        results = fix_batches(
+            db, admin_identity="migration", month="202608",
+            allow_active_boundary_repair=True,
+        )
+        assert len(results) == 1
+        assert results[0]["result"] == "maintenance_boundary_repair"
+
+        batch_after = db.affiliate_voucher_batches.find_one({"_id": batch_id})
+        assert batch_after["starts_at"] == canonical_starts_at
+        assert batch_after["ends_at"] == canonical_ends_at
+        row = db.voucher_pools.find_one({"code": "T1-1"})
+        assert row["starts_at"] == canonical_starts_at
+        assert row["ends_at"] == canonical_ends_at
+        assert row["status"] == "issued"
+
+
 class TestIssuedVoucherDataUntouched:
     def test_issued_voucher_ownership_status_code_unchanged(self):
         db = _db()
