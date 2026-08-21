@@ -262,12 +262,22 @@
       var signals = [];
 
       if (pools && pools.items) {
-        pools.items.filter(function (p) {
+        pools.items.forEach(function (p) {
+          // p.claimable_available === null (with blocking_reason
+          // "claimability_check_failed") means the claimability check
+          // itself failed — never fall back to p.available/raw_available
+          // as if it were claimable here, or a pool the bot genuinely
+          // can't issue from would silently read as "fine".
+          if (p.blocking_reason === "claimability_check_failed") {
+            signals.push({ sev: "yellow", title: "Voucher pool status unknown: " + p.pool_id, sub: "Claimability check failed — see Pool Summary", view: "affiliatePools" });
+            return;
+          }
+          // No claimable_available at all (older/degraded response, no
+          // key) is the only case allowed to fall back to raw.
           var claimable = typeof p.claimable_available === "number" ? p.claimable_available : p.available;
-          return typeof claimable === "number" && claimable < 10;
-        }).forEach(function (p) {
-          var claimable = typeof p.claimable_available === "number" ? p.claimable_available : p.available;
-          signals.push({ sev: "red", title: "Voucher pool low: " + p.pool_id, sub: claimable + " code(s) claimable" + (p.blocking_reason ? " (" + p.blocking_reason + ")" : ""), view: "affiliatePools" });
+          if (typeof claimable === "number" && claimable < 10) {
+            signals.push({ sev: "red", title: "Voucher pool low: " + p.pool_id, sub: claimable + " code(s) claimable" + (p.blocking_reason ? " (" + p.blocking_reason + ")" : ""), view: "affiliatePools" });
+          }
         });
       }
 
@@ -5922,25 +5932,36 @@
           // is the naive "status: available" row count and is shown only as
           // a diagnostic so this card can never claim "Healthy" when the
           // bot actually sees zero claimable vouchers.
+          //
+          // claimable_available === null means the claimability check
+          // itself failed server-side (blocking_reason
+          // "claimability_check_failed") — this must render as Unknown,
+          // never fall back to raw_available/available as if it were
+          // claimable, or a genuinely-blocked pool could read as Healthy
+          // whenever the check errors out.
+          var unknown = p.claimable_available === null || p.blocking_reason === "claimability_check_failed";
           var hasClaimable = typeof p.claimable_available === "number";
-          var claimable = hasClaimable ? p.claimable_available : (p.available || 0);
-          var raw = typeof p.raw_available === "number" ? p.raw_available : (p.available || 0);
-          var issued = p.issued || 0;
-          var total = raw + issued;
+          var claimable = hasClaimable ? p.claimable_available : 0;
+          var raw = typeof p.raw_available === "number" ? p.raw_available : (typeof p.available === "number" ? p.available : null);
+          var issued = typeof p.issued === "number" ? p.issued : 0;
+          var total = (raw || 0) + issued;
           var pctIssued = total > 0 ? Math.round((issued / total) * 100) : 0;
-          var blocked = hasClaimable && claimable <= 0 && !!p.blocking_reason;
-          var sev = blocked ? "red" : (claimable < 10 ? "red" : (claimable < 50 ? "yellow" : "green"));
-          var pillLabel = blocked ? "Blocked" : (sev === "red" ? "Low" : sev === "yellow" ? "Watch" : "Healthy");
-          var mismatchNote = (hasClaimable && raw !== claimable)
-            ? '<div class="sub" style="margin-top:4px;">' + fmt(raw) + ' stored' + (p.blocking_reason ? " · " + esc(p.blocking_reason) : "") + '</div>'
-            : '';
+          var blocked = !unknown && hasClaimable && claimable <= 0 && !!p.blocking_reason;
+          var sev = unknown ? "neutral" : (blocked ? "red" : (claimable < 10 ? "red" : (claimable < 50 ? "yellow" : "green")));
+          var pillClass = unknown ? "neutral" : (sev === "red" ? "rejected" : sev === "yellow" ? "pending" : "approved");
+          var pillLabel = unknown ? "Unknown" : (blocked ? "Blocked" : (sev === "red" ? "Low" : sev === "yellow" ? "Watch" : "Healthy"));
+          var mismatchNote = unknown
+            ? '<div class="sub" style="margin-top:4px;">' + (raw === null ? "" : fmt(raw) + ' stored · ') + 'claimability check failed</div>'
+            : (hasClaimable && raw !== claimable
+              ? '<div class="sub" style="margin-top:4px;">' + fmt(raw) + ' stored' + (p.blocking_reason ? " · " + esc(p.blocking_reason) : "") + '</div>'
+              : '');
           return '<div class="kpi">' +
             '<div style="display:flex;justify-content:space-between;align-items:center;">' +
             '<div class="label">' + esc(p.pool_id) + '</div>' +
-            '<span class="pill ' + (sev === "red" ? "rejected" : sev === "yellow" ? "pending" : "approved") + '">' +
+            '<span class="pill ' + pillClass + '">' +
             pillLabel + '</span>' +
             '</div>' +
-            '<div class="value">' + fmt(claimable) + '</div>' +
+            '<div class="value">' + (unknown ? "—" : fmt(claimable)) + '</div>' +
             '<div class="sub">claimable · ' + fmt(issued) + ' issued</div>' +
             mismatchNote +
             '<div class="progress-row"><div class="bar-wrap"><div class="bar" style="width:' + pctIssued + '%;"></div></div>' +
