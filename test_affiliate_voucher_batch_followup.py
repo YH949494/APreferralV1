@@ -240,7 +240,12 @@ class TestEntitlementBatchAlignment:
         )
         assert first is not None
         assert second is None
-        assert reason2 == "target_batch_empty"
+        # This ledger already holds its full (1-voucher) T1 bundle, so the
+        # hard per-ledger invariant guard blocks the second claim before it
+        # ever looks at pool inventory — a more precise diagnosis than the
+        # inventory-exhaustion reason, though the outcome (no double issue)
+        # is the same either way.
+        assert reason2 == "already_at_bundle_size"
         assert db.voucher_pools.count_documents({"code": "JUL1", "status": "issued"}) == 1
 
     def test_already_issued_monthly_ledger_untouched_by_resolution(self):

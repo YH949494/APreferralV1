@@ -683,7 +683,22 @@ def get_claimable_pool_inventory(db, *, pool_id: str, now_utc: datetime | None =
 
 
 def _claim_affiliate_bundle_from_pool(db, *, pool_id: str, ledger_id, user_id: int, now_utc: datetime, voucher_count: int, legacy_only: bool = False):
-    needed = max(1, int(voucher_count))
+    required = max(1, int(voucher_count))
+    # Hard invariant, enforced at the point of claim regardless of what the
+    # caller already checked: never let this ledger hold more issued
+    # voucher_pools rows than its configured bundle size. Any row already
+    # linked to it (e.g. a stray partial claim from a crashed prior attempt)
+    # counts against the budget, so a retry can only ever top up the exact
+    # shortfall — never bolt a second full bundle on top.
+    already_issued = len(_issued_pool_vouchers_for_ledger(db, ledger_id=ledger_id))
+    needed = required - already_issued
+    if needed <= 0:
+        logger.warning(
+            "[AFF_VOUCHER][CLAIM_BLOCKED_ALREADY_AT_BUNDLE_SIZE] pool_id=%s ledger_id=%s user_id=%s "
+            "required=%s already_issued=%s",
+            pool_id, ledger_id, user_id, required, already_issued,
+        )
+        return None
     if _available_pool_count(db, pool_id=pool_id, now_utc=now_utc, legacy_only=legacy_only) < needed:
         _log_pool_claim_miss(db, pool_id=pool_id, ledger_id=ledger_id, user_id=user_id, now_utc=now_utc, legacy_only=legacy_only)
         return None
@@ -710,7 +725,19 @@ def _claim_affiliate_bundle_from_target_batch(db, *, batch_id, pool_id: str, led
     ``target_batch_id``) — never substitutes a different batch or the
     legacy pool. Returns ``(vouchers_or_None, reason_or_None)``.
     """
-    needed = max(1, int(voucher_count))
+    required = max(1, int(voucher_count))
+    # Same hard invariant as ``_claim_affiliate_bundle_from_pool``: never
+    # claim past this ledger's configured bundle size, no matter what the
+    # caller already believes about its state.
+    already_issued = len(_issued_pool_vouchers_for_ledger(db, ledger_id=ledger_id))
+    needed = required - already_issued
+    if needed <= 0:
+        logger.warning(
+            "[AFF_VOUCHER][CLAIM_BLOCKED_ALREADY_AT_BUNDLE_SIZE] pool_id=%s ledger_id=%s user_id=%s "
+            "batch_id=%s required=%s already_issued=%s",
+            pool_id, ledger_id, user_id, batch_id, required, already_issued,
+        )
+        return None, "already_at_bundle_size"
     batch = db.affiliate_voucher_batches.find_one({"_id": batch_id})
     if not batch:
         return None, "no_batch_for_entitlement_period"
