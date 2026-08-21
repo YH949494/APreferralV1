@@ -4888,8 +4888,11 @@ def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None
         except (TypeError, ValueError):
             claim_user_id = None
          
-    # Only hide personalised vouchers when the caller truly has no username
-    allow_personalised = bool(usernameLower)
+    # Only hide personalised vouchers when the caller has neither a username
+    # nor a resolved Telegram user_id — a uid-bound assignment (see
+    # _personalised_owner_query) can still match a viewer who currently has
+    # no username set.
+    allow_personalised = bool(usernameLower) or ctx_uid is not None
     claim_key = usernameLower or user_id
  
     logged_hidden = False
@@ -5126,7 +5129,7 @@ def claim_personalised(drop_id: str, usernameLower: str, ref: datetime, assigned
         {
             "$set": {
                 "status": "claimed",
-                "claimedBy": usernameLower,
+                "claimedBy": usernameLower or (f"uid:{uid_for_match}" if uid_for_match is not None else usernameLower),
                 "claimedAt": ref
             }
         },
@@ -6077,8 +6080,8 @@ def claim_voucher_for_user(*, user_id: str, drop_id: str, username: str) -> dict
     ref = now_utc()
 
     if dtype == PERSONALISED_TYPE_CANONICAL:
-        if not usernameLower:
-            raise NotEligible("not_eligible")     
+        if not usernameLower and uid_int is None:
+            raise NotEligible("not_eligible")
         current_app.logger.info(
             "[CLAIM_ROUTE] type=%s drop_id=%s uid=%s",
             dtype,
@@ -6244,7 +6247,7 @@ def api_claim():
     drop_type = _normalize_drop_type(voucher.get("type", drop_type))
  
     username_missing = not (username and username.strip())
-    if drop_type == PERSONALISED_TYPE_CANONICAL and username_missing:
+    if drop_type == PERSONALISED_TYPE_CANONICAL and username_missing and uid is None:
         logger.info(
             "[CLAIM_BLOCK] reason=%s drop_id=%s uid=%s username=%s",
             "not_eligible",

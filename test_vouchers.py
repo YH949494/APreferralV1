@@ -1574,6 +1574,70 @@ class VoucherAntiHunterTests(unittest.TestCase):
             m.is_user_eligible_for_drop = orig_is_user_eligible
             m._acquire_request_dedup_lock = orig_dedup
 
+    def test_personalised_uid_bound_owner_visible_without_current_username(self):
+        """
+        A recipient bound via assigned_to_user_id must still see (and claim)
+        their card even if they currently have no Telegram username set — the
+        immutable-id binding must not require a username on top of it.
+        """
+        import vouchers as m
+        from flask import Flask
+
+        app = Flask(__name__)
+        now = datetime.now(timezone.utc)
+        drop_id = "drop-nouname-1"
+        drop = {
+            "_id": drop_id,
+            "name": "Affiliate T2 replacement",
+            "type": "personalised",
+            "status": "active",
+            "startsAt": now - timedelta(minutes=5),
+            "endsAt": now + timedelta(minutes=30),
+        }
+        row = {
+            "type": "personalised",
+            "dropId": drop_id,
+            "usernameLower": "promo_kid",
+            "assigned_to_user_id": 100,
+            "status": "unclaimed",
+            "code": "SECRETCODE",
+            "claimedBy": None,
+            "claimedAt": None,
+        }
+        fake_db = FakeDb([drop], [row])
+        orig_db = m.db
+        orig_users = m.users_collection
+        orig_get_active_drops = m.get_active_drops
+        orig_load_ctx = m.load_user_context
+        orig_allowed = m.is_drop_allowed
+        orig_eligible = m.is_user_eligible_for_drop
+        try:
+            m.db = fake_db
+            m.users_collection = FakeSimpleCollection([
+                {"user_id": 100, "usernameLower": "", "region": "th"},
+            ])
+            m.get_active_drops = lambda ref: [drop]
+            m.load_user_context = lambda **kwargs: {}
+            m.is_drop_allowed = lambda *args, **kwargs: True
+            m.is_user_eligible_for_drop = lambda *args, **kwargs: True
+
+            with app.app_context():
+                # tg_user has no username at all now, only uid.
+                cards, _ = m.user_visible_drops(
+                    {"usernameLower": "", "userId": "100"},
+                    now,
+                    tg_user={"id": 100, "username": None},
+                )
+                self.assertEqual(len(cards), 1)
+                self.assertEqual(cards[0]["dropId"], drop_id)
+        finally:
+            m.db = orig_db
+            m.users_collection = orig_users
+            m.get_active_drops = orig_get_active_drops
+            m.load_user_context = orig_load_ctx
+            m.is_drop_allowed = orig_allowed
+            m.is_user_eligible_for_drop = orig_eligible
+
     def test_personalised_username_reuse_blocked_when_row_is_uid_bound(self):
         """
         Reproduces the production bug: a personalised voucher row was created
