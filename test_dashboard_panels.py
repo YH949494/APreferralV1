@@ -415,7 +415,13 @@ def test_affiliate_panel_currently_claimable_reuses_fulfillment_rules():
         {"pool_id": "T2", "status": "available"},  # legacy row — not claimable once T2 is on batches
     ])
     batches = FakeCollection([
-        {"_id": "b1", "pool_id": "T2", "starts_at": NOW - timedelta(days=1), "ends_at": NOW + timedelta(days=1),
+        # Window fully contains the KL calendar month `now` falls in (T1-T5
+        # claimability is evaluated with the same full-month-containment
+        # rule AFFILIATE_MONTHLY issuance uses — a batch that only covers a
+        # couple of days around `now` would not actually be claimable by a
+        # real monthly ledger, so it must not be reported as claimable here
+        # either).
+        {"_id": "b1", "pool_id": "T2", "starts_at": NOW - timedelta(days=60), "ends_at": NOW + timedelta(days=60),
          "upload_status": "ready", "distribution_disabled": False},
     ])
     out = dp.build_affiliate_panel(

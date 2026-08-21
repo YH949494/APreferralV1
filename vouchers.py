@@ -7594,16 +7594,46 @@ def admin_pools_summary_v2():
     if err:
         return err
 
+    from affiliate_rewards import get_claimable_pool_inventory
+
+    now_utc = datetime.now(timezone.utc)
     out = []
     for pool_id in ("WELCOME", "T1", "T2", "T3", "T4", "T5"):
-        available = db.voucher_pools.count_documents({"pool_id": pool_id, "status": "available"})
-        issued = db.voucher_pools.count_documents({"pool_id": pool_id, "status": "issued"})
+        try:
+            inventory = get_claimable_pool_inventory(db, pool_id=pool_id, now_utc=now_utc)
+        except Exception as exc:  # noqa: BLE001 - never 500 the whole panel, but never claim health we can't verify
+            logger.error(
+                "[AFF_POOL][CLAIMABILITY_CHECK_FAILED] pool_id=%s err=%s", pool_id, exc,
+            )
+            # raw_available is diagnostic only here — never treat it as
+            # claimable_available. Doing so would recreate the exact bug
+            # this endpoint exists to fix: showing a pool as
+            # available/Healthy when whether issuance can actually claim
+            # from it is unknown, not confirmed.
+            try:
+                raw = int(db.voucher_pools.count_documents({"pool_id": pool_id, "status": "available"}))
+                issued_n = int(db.voucher_pools.count_documents({"pool_id": pool_id, "status": "issued"}))
+            except Exception:  # noqa: BLE001
+                raw, issued_n = None, None
+            inventory = {
+                "raw_available": raw,
+                "claimable_available": None,
+                "issued": issued_n,
+                "blocking_reason": "claimability_check_failed",
+            }
         sample = db.voucher_pools.find_one({"pool_id": pool_id}, {"display_label": 1, "value_hint": 1, "currency": 1}) or {}
         out.append(
             {
                 "pool_id": pool_id,
-                "available": int(available),
-                "issued": int(issued),
+                # Kept for API back-compat — equal to raw_available, i.e. the
+                # naive "status: available" row count. Prefer
+                # claimable_available, which reflects what issuance can
+                # actually claim right now.
+                "available": inventory["raw_available"],
+                "raw_available": inventory["raw_available"],
+                "claimable_available": inventory["claimable_available"],
+                "blocking_reason": inventory["blocking_reason"],
+                "issued": inventory["issued"],
                 "display_label": sample.get("display_label"),
                 "value_hint": sample.get("value_hint"),
                 "currency": sample.get("currency"),

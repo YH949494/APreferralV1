@@ -577,6 +577,111 @@ def _available_pool_count(db, *, pool_id: str, now_utc: datetime | None = None, 
     )
 
 
+def _pool_inventory_blocking_reason(db, *, pool_id: str, now_utc: datetime, legacy_only: bool = False) -> str | None:
+    """Why ``_available_pool_count`` came back at (or below) zero for this
+    tier right now — mirrors ``_claim_voucher_from_pool``'s own branches so
+    the reason always matches what a live claim attempt would hit.
+    """
+    if not legacy_only:
+        active_batch = _find_active_batch(db, pool_id=pool_id, now_utc=now_utc)
+        if active_batch is not None:
+            if active_batch.get("upload_status") not in (None, "ready"):
+                return "target_batch_not_ready"
+            if bool(active_batch.get("distribution_disabled")):
+                return "target_batch_disabled"
+            if _batch_claimable_available_count(db, active_batch) <= 0:
+                return "target_batch_empty"
+            return None
+        if _tier_entered_scheduled_mode(db, pool_id=pool_id, reference_utc=now_utc):
+            return "no_batch_for_entitlement_period"
+    return "pool_empty"
+
+
+def _monthly_entitlement_claimable_count_and_reason(db, *, pool_id: str, now_utc: datetime) -> tuple[int, str | None]:
+    """T1-T5 claimability as an ``AFFILIATE_MONTHLY`` ledger created right
+    now would actually resolve it — mirrors ``_resolve_monthly_ledger_target``
+    exactly: a batch only counts if its window *fully contains* the KL
+    calendar month containing ``now_utc`` (``_find_batches_for_period``),
+    not merely "covers this instant" (``_find_active_batch``). Without this,
+    a batch whose window only partially overlaps the month (e.g. starts
+    mid-month) would look fully claimable here while real monthly issuance
+    — which requires full-month containment — falls back to legacy or
+    reports ``no_batch_for_entitlement_period`` for that exact same ledger.
+    """
+    local_now = now_utc.astimezone(KL_TZ)
+    period_start_utc, period_end_utc = _month_window_from_yyyymm(f"{local_now.year:04d}{local_now.month:02d}")
+    if period_start_utc is None or period_end_utc is None:
+        return 0, "no_batch_for_entitlement_period"
+
+    matches = _find_batches_for_period(db, pool_id=pool_id, period_start_utc=period_start_utc, period_end_utc=period_end_utc)
+    if len(matches) > 1:
+        return 0, "target_batch_ambiguous"
+    if matches:
+        batch = matches[0]
+        if batch.get("upload_status") not in (None, "ready"):
+            return 0, "target_batch_not_ready"
+        if bool(batch.get("distribution_disabled")):
+            return 0, "target_batch_disabled"
+        count = _batch_claimable_available_count(db, batch)
+        return count, (None if count > 0 else "target_batch_empty")
+    if _tier_entered_scheduled_mode(db, pool_id=pool_id, reference_utc=period_start_utc):
+        return 0, "no_batch_for_entitlement_period"
+    count = int(_available_pool_count(db, pool_id=pool_id, now_utc=now_utc, legacy_only=True))
+    return count, (None if count > 0 else "pool_empty")
+
+
+def get_claimable_pool_inventory(db, *, pool_id: str, now_utc: datetime | None = None, legacy_only: bool = False) -> dict:
+    """Single source of truth for "how many <tier> vouchers can the bot
+    actually issue right now" — built on the exact same active-batch,
+    entitlement-window, and legacy-fallback rules issuance applies. The
+    Admin Dashboard Pool Summary and affiliate issuance must both call this
+    (never re-derive their own count), so they can never disagree about
+    what's claimable for the same tier at the same moment.
+
+    T1-T5 pools are evaluated with the same full-month-containment rule
+    ``AFFILIATE_MONTHLY`` issuance uses (``_resolve_monthly_ledger_target``)
+    rather than the looser "covers this instant" check, so a batch that
+    only partially overlaps the current entitlement month is never reported
+    as claimable here when monthly issuance couldn't actually claim it.
+    WELCOME (and any explicit ``legacy_only`` lookup) keeps the existing
+    instant-active-batch/legacy-fallback check, which is what their own
+    issuance path uses.
+
+    ``raw_available`` is the naive "status: available" row count — useful
+    for diagnostics (codes physically exist) but never authoritative for
+    what can actually be issued. ``claimable_available`` is authoritative.
+    """
+    now_utc = now_utc or datetime.now(timezone.utc)
+    pool_id = str(pool_id or "").strip().upper()
+
+    raw_available = int(db.voucher_pools.count_documents({"pool_id": pool_id, "status": "available"}))
+    issued_count = int(db.voucher_pools.count_documents({"pool_id": pool_id, "status": "issued"}))
+
+    if not legacy_only and pool_id in TIERS:
+        claimable_available, blocking_reason = _monthly_entitlement_claimable_count_and_reason(
+            db, pool_id=pool_id, now_utc=now_utc,
+        )
+    else:
+        claimable_available = int(_available_pool_count(db, pool_id=pool_id, now_utc=now_utc, legacy_only=legacy_only))
+        blocking_reason = None
+        if claimable_available <= 0:
+            blocking_reason = _pool_inventory_blocking_reason(db, pool_id=pool_id, now_utc=now_utc, legacy_only=legacy_only)
+
+    if raw_available != claimable_available:
+        logger.warning(
+            "[AFF_POOL][INVENTORY_MISMATCH] pool=%s raw_available=%s claimable_available=%s reason=%s",
+            pool_id, raw_available, claimable_available, blocking_reason,
+        )
+
+    return {
+        "pool_id": pool_id,
+        "claimable_available": claimable_available,
+        "raw_available": raw_available,
+        "issued": issued_count,
+        "blocking_reason": blocking_reason,
+    }
+
+
 def _claim_affiliate_bundle_from_pool(db, *, pool_id: str, ledger_id, user_id: int, now_utc: datetime, voucher_count: int, legacy_only: bool = False):
     needed = max(1, int(voucher_count))
     if _available_pool_count(db, pool_id=pool_id, now_utc=now_utc, legacy_only=legacy_only) < needed:
