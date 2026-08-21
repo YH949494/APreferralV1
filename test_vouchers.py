@@ -1574,6 +1574,216 @@ class VoucherAntiHunterTests(unittest.TestCase):
             m.is_user_eligible_for_drop = orig_is_user_eligible
             m._acquire_request_dedup_lock = orig_dedup
 
+    def test_personalised_uid_bound_owner_visible_without_current_username(self):
+        """
+        A recipient bound via assigned_to_user_id must still see (and claim)
+        their card even if they currently have no Telegram username set — the
+        immutable-id binding must not require a username on top of it.
+        """
+        import vouchers as m
+        from flask import Flask
+
+        app = Flask(__name__)
+        now = datetime.now(timezone.utc)
+        drop_id = "drop-nouname-1"
+        drop = {
+            "_id": drop_id,
+            "name": "Affiliate T2 replacement",
+            "type": "personalised",
+            "status": "active",
+            "startsAt": now - timedelta(minutes=5),
+            "endsAt": now + timedelta(minutes=30),
+        }
+        row = {
+            "type": "personalised",
+            "dropId": drop_id,
+            "usernameLower": "promo_kid",
+            "assigned_to_user_id": 100,
+            "status": "unclaimed",
+            "code": "SECRETCODE",
+            "claimedBy": None,
+            "claimedAt": None,
+        }
+        fake_db = FakeDb([drop], [row])
+        orig_db = m.db
+        orig_users = m.users_collection
+        orig_get_active_drops = m.get_active_drops
+        orig_load_ctx = m.load_user_context
+        orig_allowed = m.is_drop_allowed
+        orig_eligible = m.is_user_eligible_for_drop
+        try:
+            m.db = fake_db
+            m.users_collection = FakeSimpleCollection([
+                {"user_id": 100, "usernameLower": "", "region": "th"},
+            ])
+            m.get_active_drops = lambda ref: [drop]
+            m.load_user_context = lambda **kwargs: {}
+            m.is_drop_allowed = lambda *args, **kwargs: True
+            m.is_user_eligible_for_drop = lambda *args, **kwargs: True
+
+            with app.app_context():
+                # tg_user has no username at all now, only uid.
+                cards, _ = m.user_visible_drops(
+                    {"usernameLower": "", "userId": "100"},
+                    now,
+                    tg_user={"id": 100, "username": None},
+                )
+                self.assertEqual(len(cards), 1)
+                self.assertEqual(cards[0]["dropId"], drop_id)
+        finally:
+            m.db = orig_db
+            m.users_collection = orig_users
+            m.get_active_drops = orig_get_active_drops
+            m.load_user_context = orig_load_ctx
+            m.is_drop_allowed = orig_allowed
+            m.is_user_eligible_for_drop = orig_eligible
+
+    def test_personalised_username_reuse_blocked_when_row_is_uid_bound(self):
+        """
+        Reproduces the production bug: a personalised voucher row was created
+        for the intended recipient's usernameLower ("promo_kid"). That Telegram
+        username later changes hands to an unrelated user (uid 777). Because the
+        row is bound to the original recipient's assigned_to_user_id (uid 100),
+        the new holder of that username must NOT see or claim the card, while
+        the true owner (uid 100, now on a different username) still can.
+        """
+        import vouchers as m
+        from flask import Flask
+
+        app = Flask(__name__)
+        now = datetime.now(timezone.utc)
+        drop_id = "drop-reuse-1"
+        drop = {
+            "_id": drop_id,
+            "name": "Affiliate T2 replacement",
+            "type": "personalised",
+            "status": "active",
+            "startsAt": now - timedelta(minutes=5),
+            "endsAt": now + timedelta(minutes=30),
+        }
+        # Row was written when the intended recipient (uid 100) held the
+        # username "promo_kid", and is bound to that immutable uid.
+        row = {
+            "type": "personalised",
+            "dropId": drop_id,
+            "usernameLower": "promo_kid",
+            "assigned_to_user_id": 100,
+            "status": "unclaimed",
+            "code": "SECRETCODE",
+            "claimedBy": None,
+            "claimedAt": None,
+        }
+        fake_db = FakeDb([drop], [row])
+        orig_db = m.db
+        orig_users = m.users_collection
+        orig_get_active_drops = m.get_active_drops
+        orig_load_ctx = m.load_user_context
+        orig_allowed = m.is_drop_allowed
+        orig_eligible = m.is_user_eligible_for_drop
+        try:
+            m.db = fake_db
+            m.users_collection = FakeSimpleCollection([
+                {"user_id": 100, "usernameLower": "new_handle", "region": "th"},
+                {"user_id": 777, "usernameLower": "promo_kid", "region": "th"},
+            ])
+            m.get_active_drops = lambda ref: [drop]
+            m.load_user_context = lambda **kwargs: {}
+            m.is_drop_allowed = lambda *args, **kwargs: True
+            m.is_user_eligible_for_drop = lambda *args, **kwargs: True
+
+            with app.app_context():
+                # Unrelated user 777 now holds the username the row was keyed
+                # on. Must NOT see the card despite the usernameLower match.
+                intruder_cards, _ = m.user_visible_drops(
+                    {"usernameLower": "promo_kid", "userId": "777"},
+                    now,
+                    tg_user={"id": 777, "username": "promo_kid"},
+                )
+                self.assertEqual(intruder_cards, [])
+
+                # True owner (uid 100) sees it even though their username
+                # has since changed away from "promo_kid".
+                owner_cards, _ = m.user_visible_drops(
+                    {"usernameLower": "new_handle", "userId": "100"},
+                    now,
+                    tg_user={"id": 100, "username": "new_handle"},
+                )
+                self.assertEqual(len(owner_cards), 1)
+                self.assertEqual(owner_cards[0]["dropId"], drop_id)
+        finally:
+            m.db = orig_db
+            m.users_collection = orig_users
+            m.get_active_drops = orig_get_active_drops
+            m.load_user_context = orig_load_ctx
+            m.is_drop_allowed = orig_allowed
+            m.is_user_eligible_for_drop = orig_eligible
+
+    def test_personalised_claim_rejects_username_reuse_intruder(self):
+        """
+        Direct-claim counterpart of the visibility test above: the unrelated
+        user who now holds the recipient's old username must get 403
+        not_eligible from /vouchers/claim, and must never receive the code.
+        """
+        import vouchers as m
+        from flask import Flask
+
+        app = Flask(__name__)
+        now = datetime.now(timezone.utc)
+        drop_id = "drop-reuse-2"
+        drop = {
+            "_id": drop_id,
+            "name": "Affiliate T2 replacement",
+            "type": "personalised",
+            "status": "active",
+            "startsAt": now - timedelta(minutes=5),
+            "endsAt": now + timedelta(minutes=30),
+        }
+        row = {
+            "type": "personalised",
+            "dropId": drop_id,
+            "usernameLower": "promo_kid",
+            "assigned_to_user_id": 100,
+            "status": "unclaimed",
+            "code": "SECRETCODE",
+            "claimedBy": None,
+            "claimedAt": None,
+        }
+        fake_db = FakeDb([drop], [row])
+        orig_db = m.db
+        orig_users = m.users_collection
+        orig_extract = m.extract_raw_init_data_from_query
+        orig_verify = m.verify_telegram_init_data
+        orig_load_user_context = m.load_user_context
+        orig_is_drop_allowed = m.is_drop_allowed
+        orig_is_user_eligible = m.is_user_eligible_for_drop
+        orig_dedup = m._acquire_request_dedup_lock
+        try:
+            m.db = fake_db
+            m.users_collection = FakeSimpleCollection([
+                {"user_id": 777, "usernameLower": "promo_kid", "region": "th"},
+            ])
+            m.extract_raw_init_data_from_query = lambda req: "ok"
+            m.verify_telegram_init_data = lambda init_data: (True, {"user": '{"id": 777, "username": "promo_kid"}'}, "ok")
+            m.load_user_context = lambda **kwargs: {}
+            m.is_drop_allowed = lambda *args, **kwargs: True
+            m.is_user_eligible_for_drop = lambda *args, **kwargs: True
+            m._acquire_request_dedup_lock = lambda **kwargs: True
+
+            with app.test_request_context("/vouchers/claim?init_data=ok", method="POST", json={"dropId": drop_id}):
+                resp, status = m.api_claim()
+                self.assertEqual(status, 403)
+                self.assertEqual(resp.get_json().get("code"), "not_eligible")
+                self.assertNotIn("SECRETCODE", str(resp.get_json()))
+        finally:
+            m.db = orig_db
+            m.users_collection = orig_users
+            m.extract_raw_init_data_from_query = orig_extract
+            m.verify_telegram_init_data = orig_verify
+            m.load_user_context = orig_load_user_context
+            m.is_drop_allowed = orig_is_drop_allowed
+            m.is_user_eligible_for_drop = orig_is_user_eligible
+            m._acquire_request_dedup_lock = orig_dedup
+
     def test_admin_preview_visible_still_lists_personalised_drop(self):
         import vouchers as m
         from flask import Flask

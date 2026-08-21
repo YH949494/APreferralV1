@@ -89,6 +89,48 @@ def _normalize_drop_type(value) -> str:
     return dtype
 
 
+def _personalised_owner_query(drop_id_variants, uid, usernameLower: str) -> dict:
+    """
+    Shared ownership match for a personalised voucher row, used by both the
+    visibility path (user_visible_drops) and the claim path (claim_personalised,
+    api_claim). A row carrying assigned_to_user_id is bound to that immutable
+    Telegram user_id and only that id can match it, so a mutable/reused
+    Telegram username can never match someone else's assigned row. Legacy
+    rows written before user_id binding existed (no assigned_to_user_id) fall
+    back to the usernameLower they were created with.
+    """
+    uid_variants = []
+    if uid is not None:
+        uid_variants.append(uid)
+        uid_variants.append(str(uid))
+
+    bound_clause = {"assigned_to_user_id": {"$in": uid_variants}} if uid_variants else {"assigned_to_user_id": {"$in": []}}
+    unbound_clause = {
+        "assigned_to_user_id": None,
+        "usernameLower": usernameLower,
+    }
+    return {
+        "type": {"$in": list(PERSONALISED_TYPE_ALIASES)},
+        "dropId": {"$in": drop_id_variants},
+        "$or": [bound_clause, unbound_clause],
+    }
+
+
+def _personalised_assignment_matches_viewer(row: dict, uid, usernameLower: str) -> bool:
+    """Python-side mirror of _personalised_owner_query, for logging/verification."""
+    if not row:
+        return False
+    assigned_uid = row.get("assigned_to_user_id")
+    if assigned_uid not in (None, ""):
+        if uid is None:
+            return False
+        try:
+            return int(assigned_uid) == int(uid)
+        except (TypeError, ValueError):
+            return str(assigned_uid) == str(uid)
+    return bool(usernameLower) and row.get("usernameLower") == usernameLower
+
+
 def _week_key_kl(reference: datetime) -> str:
     local_ref = as_aware_utc(reference).astimezone(KL_TZ)
     week_start = (local_ref - timedelta(days=local_ref.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
@@ -4846,8 +4888,11 @@ def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None
         except (TypeError, ValueError):
             claim_user_id = None
          
-    # Only hide personalised vouchers when the caller truly has no username
-    allow_personalised = bool(usernameLower)
+    # Only hide personalised vouchers when the caller has neither a username
+    # nor a resolved Telegram user_id — a uid-bound assignment (see
+    # _personalised_owner_query) can still match a viewer who currently has
+    # no username set.
+    allow_personalised = bool(usernameLower) or ctx_uid is not None
     claim_key = usernameLower or user_id
  
     logged_hidden = False
@@ -4904,11 +4949,7 @@ def user_visible_drops(user: dict, ref: datetime, *, tg_user: dict | None = None
                 continue
 
             # user must have an unclaimed OR claimed row to show the card (claimed -> show claimed state)
-            row = db.vouchers.find_one({
-                "type": {"$in": list(PERSONALISED_TYPE_ALIASES)},
-                "dropId": {"$in": drop_id_variants},
-                "usernameLower": usernameLower
-            })
+            row = db.vouchers.find_one(_personalised_owner_query(drop_id_variants, ctx_uid, usernameLower))
             current_app.logger.info(
                 "[visible][personalised_gate] drop=%s dtype=%s uid=%s uname=%s allowed=%s",
                 drop_id,
@@ -5054,27 +5095,14 @@ def claim_personalised(drop_id: str, usernameLower: str, ref: datetime, assigned
         usernameLower,
     )
     drop_id_variants = _drop_id_variants(drop_id)
-    identity_filters = [
-        {"usernameLower": usernameLower},
-        {"username": usernameLower},
-        {"assigned_to_username": usernameLower},
-    ]
-
-    safe_user_id = None
+    uid_for_match = None
     if assigned_user_id not in (None, ""):
-        safe_user_id = str(assigned_user_id).strip()
-    if safe_user_id:
-        identity_filters.append({"assigned_to_user_id": safe_user_id})
         try:
-            identity_filters.append({"assigned_to_user_id": int(safe_user_id)})
+            uid_for_match = int(str(assigned_user_id).strip())
         except (TypeError, ValueError):
-            pass
+            uid_for_match = None
 
-    personalised_filter = {
-        "type": {"$in": list(PERSONALISED_TYPE_ALIASES)},
-        "dropId": {"$in": drop_id_variants},
-        "$or": identity_filters,
-    }
+    personalised_filter = _personalised_owner_query(drop_id_variants, uid_for_match, usernameLower)
  
     # Return existing if already claimed
     existing = db.vouchers.find_one({
@@ -5101,7 +5129,7 @@ def claim_personalised(drop_id: str, usernameLower: str, ref: datetime, assigned
         {
             "$set": {
                 "status": "claimed",
-                "claimedBy": usernameLower,
+                "claimedBy": usernameLower or (f"uid:{uid_for_match}" if uid_for_match is not None else usernameLower),
                 "claimedAt": ref
             }
         },
@@ -6052,8 +6080,8 @@ def claim_voucher_for_user(*, user_id: str, drop_id: str, username: str) -> dict
     ref = now_utc()
 
     if dtype == PERSONALISED_TYPE_CANONICAL:
-        if not usernameLower:
-            raise NotEligible("not_eligible")     
+        if not usernameLower and uid_int is None:
+            raise NotEligible("not_eligible")
         current_app.logger.info(
             "[CLAIM_ROUTE] type=%s drop_id=%s uid=%s",
             dtype,
@@ -6219,7 +6247,7 @@ def api_claim():
     drop_type = _normalize_drop_type(voucher.get("type", drop_type))
  
     username_missing = not (username and username.strip())
-    if drop_type == PERSONALISED_TYPE_CANONICAL and username_missing:
+    if drop_type == PERSONALISED_TYPE_CANONICAL and username_missing and uid is None:
         logger.info(
             "[CLAIM_BLOCK] reason=%s drop_id=%s uid=%s username=%s",
             "not_eligible",
@@ -6238,11 +6266,7 @@ def api_claim():
 
     allowed = True
     if drop_type == PERSONALISED_TYPE_CANONICAL:
-        assigned_row = db.vouchers.find_one({
-            "type": {"$in": list(PERSONALISED_TYPE_ALIASES)},
-            "dropId": {"$in": _drop_id_variants(drop_id)},
-            "usernameLower": uname,
-        })
+        assigned_row = db.vouchers.find_one(_personalised_owner_query(_drop_id_variants(drop_id), uid, uname))
         allowed = bool(assigned_row)
         current_app.logger.info(
             "[claim][personalised_gate] drop=%s dtype=%s uid=%s uname=%s allowed=%s",
@@ -7390,7 +7414,7 @@ def create_drop_from_spec(data: dict) -> tuple[dict, int]:
             c = (item.get("code") or "").strip()
             if not u or not c:
                 continue
-            docs.append({
+            doc = {
                 "type": PERSONALISED_TYPE_CANONICAL,
                 "dropId": str(drop_id),
                 "usernameLower": u,
@@ -7398,7 +7422,15 @@ def create_drop_from_spec(data: dict) -> tuple[dict, int]:
                 "status": "unclaimed",
                 "claimedBy": None,
                 "claimedAt": None
-            })
+            }
+            # Bind to the immutable Telegram user_id when the recipient already
+            # has a users record, so a later username change/reuse can't shift
+            # this assignment onto a different person. Legacy fallback below
+            # (usernameLower-only match) still applies when unresolved here.
+            recipient = users_collection.find_one({"usernameLower": u}, {"user_id": 1})
+            if recipient and recipient.get("user_id") is not None:
+                doc["assigned_to_user_id"] = recipient["user_id"]
+            docs.append(doc)
         if docs:
             db.vouchers.insert_many(docs, ordered=False)
     else:
