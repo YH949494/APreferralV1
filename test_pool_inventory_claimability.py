@@ -121,6 +121,54 @@ class TestRawPositiveButNotClaimable:
         assert inv["claimable_available"] == 0
         assert inv["blocking_reason"] == "target_batch_empty"
 
+    def test_batch_active_now_but_not_covering_full_entitlement_month_is_not_claimable(self):
+        # A batch window that only partially overlaps the current KL
+        # calendar month (starts mid-month, running into next month) covers
+        # `now_utc` under an instant check, but a real AFFILIATE_MONTHLY
+        # ledger created this month requires FULL month containment
+        # (_resolve_monthly_ledger_target / _find_batches_for_period) and
+        # would never resolve to it -- it falls back to legacy or reports
+        # no_batch_for_entitlement_period. The dashboard must agree.
+        db = _db()
+        _create_batch(
+            db, pool_id="T3", codes=[f"T3-{i}" for i in range(95)],
+            starts="2026-08-10 00:00:00", ends="2026-09-01 00:00:00",
+            now=datetime(2026, 8, 1, tzinfo=timezone.utc),
+        )
+
+        inv = ar.get_claimable_pool_inventory(db, pool_id="T3", now_utc=AUG_MID)
+
+        assert inv["raw_available"] == 95
+        # Batch is "active" for AUG_MID under an instant check, but doesn't
+        # fully contain August, and the tier hasn't otherwise entered
+        # scheduled-batch mode as of the start of August (the batch itself
+        # starts Aug 10) -> real monthly issuance falls back to the (empty)
+        # legacy pool, same as this helper must report.
+        assert inv["claimable_available"] == 0
+        assert inv["blocking_reason"] == "pool_empty"
+
+        # Confirm this matches what real AFFILIATE_MONTHLY issuance does
+        # for the exact same tier/month: it must NOT claim from the
+        # partial-month batch.
+        ledger_doc = {
+            "ledger_type": "AFFILIATE_MONTHLY",
+            "user_id": 1,
+            "year_month": "202608",
+            "tier": "T3",
+            "pool_id": "T3",
+            "status": "APPROVED",
+            "dedup_key": "AFF:1:202608:T3",
+            "voucher_code": None,
+            "created_at": AUG_MID,
+            "risk_flags": [],
+        }
+        ledger_id = db.affiliate_ledger.insert_one(ledger_doc).inserted_id
+        ledger = db.affiliate_ledger.find_one({"_id": ledger_id})
+        result = ar._issue_affiliate_ledger_from_pool(db, ledger=ledger, now_utc=AUG_MID)
+        assert result["status"] == "PENDING_MANUAL"
+        assert "pool_empty" in result["risk_flags"]
+        assert db.voucher_pools.count_documents({"pool_id": "T3", "status": "issued"}) == 0
+
 
 class TestInventoryIncreasesAfterValidBatchAdded:
     def test_claimable_goes_from_zero_to_positive_once_batch_covers_period(self):
