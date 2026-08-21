@@ -35,7 +35,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 _APP_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _APP_ROOT not in sys.path:
@@ -44,6 +44,7 @@ if _APP_ROOT not in sys.path:
 from pymongo import MongoClient  # noqa: E402
 
 from affiliate_voucher_batches import (  # noqa: E402
+    KL_TZ,
     ENTITLEMENT_MONTH_POOL_IDS,
     _as_aware_utc,
     _entitlement_month_for_batch,
@@ -51,14 +52,69 @@ from affiliate_voucher_batches import (  # noqa: E402
     update_batch,
 )
 
+# A batch this far or further from the canonical boundary on either edge is
+# not the known "typed an approximation of the month" bug shape — leave it
+# alone rather than guess. This is what keeps the script from ever touching
+# a batch that intentionally spans multiple months (see
+# ``_already_covers_a_full_month`` below for the containment guard that
+# makes those safe regardless of tolerance).
+_MAX_CORRECTION_DRIFT = timedelta(hours=24)
+
+
+def _months_touched(starts_at: datetime, ends_at: datetime) -> list[str]:
+    """Every "YYYYMM" whose KL calendar month overlaps [starts_at, ends_at)."""
+    start_kl = starts_at.astimezone(KL_TZ)
+    end_kl = ends_at.astimezone(KL_TZ)
+    y, m = start_kl.year, start_kl.month
+    months = []
+    while (y, m) <= (end_kl.year, end_kl.month):
+        months.append(f"{y:04d}{m:02d}")
+        m += 1
+        if m == 13:
+            m = 1
+            y += 1
+    return months
+
+
+def _already_covers_a_full_month(starts_at: datetime, ends_at: datetime) -> bool:
+    """True if this window already fully contains at least one KL calendar
+    month — i.e. it is already valid per
+    ``affiliate_rewards._find_batches_for_period``'s own full-containment
+    rule for that month, regardless of whether the window itself is
+    month-aligned. A batch deliberately spanning more than one month (e.g.
+    July 15 -> September 15, to guarantee August coverage) must never be
+    "corrected" down to a single inferred month — that would strip the
+    entitlement coverage it was built for. See the P1 review finding this
+    guards against.
+    """
+    for yyyymm in _months_touched(starts_at, ends_at):
+        canonical_start, canonical_end = canonical_entitlement_month_window(yyyymm)
+        if canonical_start is None or canonical_end is None:
+            continue
+        if starts_at <= canonical_start and ends_at >= canonical_end:
+            return True
+    return False
+
 
 def find_misaligned_batches(db, *, month: str | None = None) -> list[dict]:
-    """T1-T4 batches whose stored window does not exactly equal the
-    canonical entitlement-month boundary implied by their own starts_at.
+    """T1-T4 batches that are the known bug shape: a window typed as a
+    close approximation of a single calendar month (e.g.
+    "2026-08-01 00:01" -> "2026-08-31 23:59") that therefore fails full
+    containment and is currently unclaimable — never a batch that already
+    satisfies full containment for some month (already valid, however it's
+    shaped) or one that differs from any single month by more than a small
+    typo-sized drift (left alone rather than guessed at).
     """
     query = {"pool_id": {"$in": list(ENTITLEMENT_MONTH_POOL_IDS)}}
     out = []
     for batch in db.affiliate_voucher_batches.find(query):
+        starts_at = _as_aware_utc(batch.get("starts_at"))
+        ends_at = _as_aware_utc(batch.get("ends_at"))
+        if starts_at is None or ends_at is None:
+            continue
+        if _already_covers_a_full_month(starts_at, ends_at):
+            continue  # already claimable for some month — never touch
+
         yyyymm = _entitlement_month_for_batch(batch)
         if not yyyymm:
             continue
@@ -67,10 +123,14 @@ def find_misaligned_batches(db, *, month: str | None = None) -> list[dict]:
         canonical_start, canonical_end = canonical_entitlement_month_window(yyyymm)
         if canonical_start is None or canonical_end is None:
             continue
-        starts_at = _as_aware_utc(batch.get("starts_at"))
-        ends_at = _as_aware_utc(batch.get("ends_at"))
         if starts_at == canonical_start and ends_at == canonical_end:
             continue
+        if (
+            abs((starts_at - canonical_start).total_seconds()) > _MAX_CORRECTION_DRIFT.total_seconds()
+            or abs((ends_at - canonical_end).total_seconds()) > _MAX_CORRECTION_DRIFT.total_seconds()
+        ):
+            continue  # too far from a single month to safely auto-correct
+
         out.append({
             "batch": batch,
             "entitlement_month": yyyymm,

@@ -759,11 +759,21 @@ def _month_window_from_yyyymm(yyyymm) -> tuple[datetime | None, datetime | None]
     year, month = int(yyyymm[:4]), int(yyyymm[4:6])
     if not (1 <= month <= 12):
         return None, None
-    start_kl = KL_TZ.localize(datetime(year, month, 1))
-    if month == 12:
-        end_kl = KL_TZ.localize(datetime(year + 1, 1, 1))
-    else:
-        end_kl = KL_TZ.localize(datetime(year, month + 1, 1))
+    # datetime's valid range is years 1-9999, so a syntactically-valid
+    # 6-digit input at either extreme (e.g. "000001", or "999912" whose
+    # following-month rolls into year 10000) would otherwise raise
+    # ValueError out of this helper instead of the documented (None, None)
+    # validation failure — surfacing as an uncaught 500 to any caller
+    # (e.g. the admin create/update batch endpoints) instead of a clean
+    # "invalid entitlement month" response.
+    try:
+        start_kl = KL_TZ.localize(datetime(year, month, 1))
+        if month == 12:
+            end_kl = KL_TZ.localize(datetime(year + 1, 1, 1))
+        else:
+            end_kl = KL_TZ.localize(datetime(year, month + 1, 1))
+    except (ValueError, OverflowError):
+        return None, None
     return start_kl.astimezone(timezone.utc), end_kl.astimezone(timezone.utc)
 
 

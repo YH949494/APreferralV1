@@ -264,3 +264,68 @@ class TestExistingBatchCorrectionScript:
 
         batch = db.affiliate_voucher_batches.find_one({"_id": __import__("bson").ObjectId(batch_id)})
         assert batch["starts_at"] != datetime(2026, 7, 31, 16, 0, tzinfo=timezone.utc)  # unchanged, still misaligned
+
+    def test_fix_script_never_touches_a_batch_that_intentionally_spans_multiple_months(self):
+        # Regression for a real review finding: a batch built to span
+        # July 15 -> September 15 (to guarantee August coverage) infers
+        # "July" from its starts_at under a naive scan, and would get
+        # wrongly rewritten down to the July canonical window — destroying
+        # its (valid, working) August claimability. The script must leave
+        # any batch alone that already fully contains a calendar month,
+        # however it's shaped.
+        db = _db()
+        created = _create_raw_window(
+            db, pool_id="T4", starts="2026-07-15 00:00:00", ends="2026-09-15 00:00:00", codes=["T4-1"],
+        )
+        assert created["ok"] is True
+
+        misaligned = find_misaligned_batches(db)
+        assert misaligned == []
+
+        results = fix_batches(db, admin_identity="migration")
+        assert results == []
+
+        # Still claimable for August exactly as before — untouched.
+        inv = ar.get_claimable_pool_inventory(db, pool_id="T4", now_utc=AUG_MID)
+        assert inv["claimable_available"] == 1
+        assert inv["blocking_reason"] is None
+
+    def test_fix_script_ignores_a_window_too_far_from_any_single_month_to_guess(self):
+        # A window drifted by multiple days from the canonical boundary
+        # (not the known off-by-a-few-minutes typo shape, and not a
+        # deliberate multi-month span either) is left alone rather than
+        # auto-corrected — the script only fixes windows it can be
+        # confident about.
+        db = _db()
+        created = _create_raw_window(
+            db, pool_id="T1", starts="2026-08-03 00:00:00", ends="2026-08-29 00:00:00", codes=["T1-1"],
+        )
+        assert created["ok"] is True
+
+        assert find_misaligned_batches(db, month="202608") == []
+        assert fix_batches(db, admin_identity="migration", month="202608") == []
+
+
+class TestInvalidEntitlementMonthNeverRaises:
+    def test_year_zero_rejected_not_raised(self):
+        db = _db()
+        res = _create_from_month(db, entitlement_month="000001", codes=["A1"])
+        assert res == {"ok": False, "code": "invalid_entitlement_month", "message": "Entitlement month must be a valid 'YYYYMM' value."}
+
+    def test_year_9999_december_rejected_not_raised(self):
+        # month=12 rolls the end boundary into year 10000, which datetime
+        # cannot represent — must be a clean validation failure, not a
+        # raised exception reaching the HTTP layer as a 500.
+        db = _db()
+        res = _create_from_month(db, entitlement_month="999912", codes=["A1"])
+        assert res == {"ok": False, "code": "invalid_entitlement_month", "message": "Entitlement month must be a valid 'YYYYMM' value."}
+
+    def test_update_batch_rejects_out_of_range_entitlement_month_without_raising(self):
+        db = _db()
+        created = _create_from_month(db, entitlement_month="202608", codes=["A1"])
+        assert created["ok"] is True
+        batch_id = created["batch"]["batch_id"]
+
+        out = avb.update_batch(db, batch_id, admin_identity="admin1", updates={"entitlement_month": "000001"})
+        assert out["ok"] is False
+        assert out["code"] == "invalid_entitlement_month"
