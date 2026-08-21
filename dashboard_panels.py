@@ -786,23 +786,24 @@ def build_affiliate_panel(
 
     # "Currently claimable" reuses the exact same active-batch/legacy-mode
     # rules the fulfillment engine claims against (affiliate_rewards.
-    # _available_pool_count), rather than re-deriving them here — a row can
-    # be "available" in voucher_pools but not currently claimable (e.g. it
-    # belongs to no active batch and the tier already left legacy mode).
-    claimable_count = None
+    # get_claimable_pool_inventory), rather than re-deriving them here — a
+    # row can be "available" in voucher_pools but not currently claimable
+    # (e.g. it belongs to no active batch and the tier already left legacy
+    # mode).
+    claimable_inventory = None
     if affiliate_voucher_batches_col is not None:
         try:
-            from affiliate_rewards import _available_pool_count
+            from affiliate_rewards import get_claimable_pool_inventory
 
             class _PoolDb:
                 voucher_pools = voucher_pools_col
                 affiliate_voucher_batches = affiliate_voucher_batches_col
 
-            claimable_count = lambda p: int(  # noqa: E731
-                _available_pool_count(_PoolDb, pool_id=p, now_utc=now)
+            claimable_inventory = lambda p: get_claimable_pool_inventory(  # noqa: E731
+                _PoolDb, pool_id=p, now_utc=now
             )
         except Exception:  # noqa: BLE001
-            claimable_count = None
+            claimable_inventory = None
 
     pending = metric(
         lambda: int(affiliate_ledger_col.count_documents({"status": {"$in": _AFF_PENDING}}))
@@ -836,9 +837,11 @@ def build_affiliate_panel(
             "issued": issued_n["value"],
             "total_available": avail["value"],
         }
-        if claimable_count is not None:
-            claimable = metric(lambda p=pool_id: claimable_count(p))
-            entry["currently_claimable"] = claimable["value"]
+        if claimable_inventory is not None:
+            inv = metric(lambda p=pool_id: claimable_inventory(p))
+            if inv["value"] is not None:
+                entry["currently_claimable"] = int(inv["value"]["claimable_available"])
+                entry["blocking_reason"] = inv["value"]["blocking_reason"]
         pool_availability.append(entry)
 
     # ---- Monthly issuance summary (current month) ----

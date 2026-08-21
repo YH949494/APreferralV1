@@ -577,6 +577,64 @@ def _available_pool_count(db, *, pool_id: str, now_utc: datetime | None = None, 
     )
 
 
+def _pool_inventory_blocking_reason(db, *, pool_id: str, now_utc: datetime, legacy_only: bool = False) -> str | None:
+    """Why ``_available_pool_count`` came back at (or below) zero for this
+    tier right now — mirrors ``_claim_voucher_from_pool``'s own branches so
+    the reason always matches what a live claim attempt would hit.
+    """
+    if not legacy_only:
+        active_batch = _find_active_batch(db, pool_id=pool_id, now_utc=now_utc)
+        if active_batch is not None:
+            if active_batch.get("upload_status") not in (None, "ready"):
+                return "target_batch_not_ready"
+            if bool(active_batch.get("distribution_disabled")):
+                return "target_batch_disabled"
+            if _batch_claimable_available_count(db, active_batch) <= 0:
+                return "target_batch_empty"
+            return None
+        if _tier_entered_scheduled_mode(db, pool_id=pool_id, reference_utc=now_utc):
+            return "no_batch_for_entitlement_period"
+    return "pool_empty"
+
+
+def get_claimable_pool_inventory(db, *, pool_id: str, now_utc: datetime | None = None, legacy_only: bool = False) -> dict:
+    """Single source of truth for "how many <tier> vouchers can the bot
+    actually issue right now" — built on the exact same active-batch,
+    entitlement-window, and legacy-fallback rules ``_claim_voucher_from_pool``
+    applies. The Admin Dashboard Pool Summary and affiliate issuance must
+    both call this (never re-derive their own count), so they can never
+    disagree about what's claimable for the same tier at the same moment.
+
+    ``raw_available`` is the naive "status: available" row count — useful
+    for diagnostics (codes physically exist) but never authoritative for
+    what can actually be issued. ``claimable_available`` is authoritative.
+    """
+    now_utc = now_utc or datetime.now(timezone.utc)
+    pool_id = str(pool_id or "").strip().upper()
+
+    raw_available = int(db.voucher_pools.count_documents({"pool_id": pool_id, "status": "available"}))
+    issued_count = int(db.voucher_pools.count_documents({"pool_id": pool_id, "status": "issued"}))
+    claimable_available = int(_available_pool_count(db, pool_id=pool_id, now_utc=now_utc, legacy_only=legacy_only))
+
+    blocking_reason = None
+    if claimable_available <= 0:
+        blocking_reason = _pool_inventory_blocking_reason(db, pool_id=pool_id, now_utc=now_utc, legacy_only=legacy_only)
+
+    if raw_available != claimable_available:
+        logger.warning(
+            "[AFF_POOL][INVENTORY_MISMATCH] pool=%s raw_available=%s claimable_available=%s reason=%s",
+            pool_id, raw_available, claimable_available, blocking_reason,
+        )
+
+    return {
+        "pool_id": pool_id,
+        "claimable_available": claimable_available,
+        "raw_available": raw_available,
+        "issued": issued_count,
+        "blocking_reason": blocking_reason,
+    }
+
+
 def _claim_affiliate_bundle_from_pool(db, *, pool_id: str, ledger_id, user_id: int, now_utc: datetime, voucher_count: int, legacy_only: bool = False):
     needed = max(1, int(voucher_count))
     if _available_pool_count(db, pool_id=pool_id, now_utc=now_utc, legacy_only=legacy_only) < needed:

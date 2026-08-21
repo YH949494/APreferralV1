@@ -262,10 +262,13 @@
       var signals = [];
 
       if (pools && pools.items) {
-        pools.items.filter(function (p) { return typeof p.available === "number" && p.available < 10; })
-          .forEach(function (p) {
-            signals.push({ sev: "red", title: "Voucher pool low: " + p.pool_id, sub: p.available + " code(s) remaining", view: "affiliatePools" });
-          });
+        pools.items.filter(function (p) {
+          var claimable = typeof p.claimable_available === "number" ? p.claimable_available : p.available;
+          return typeof claimable === "number" && claimable < 10;
+        }).forEach(function (p) {
+          var claimable = typeof p.claimable_available === "number" ? p.claimable_available : p.available;
+          signals.push({ sev: "red", title: "Voucher pool low: " + p.pool_id, sub: claimable + " code(s) claimable" + (p.blocking_reason ? " (" + p.blocking_reason + ")" : ""), view: "affiliatePools" });
+        });
       }
 
       if (activeCampaigns && activeCampaigns.ok && activeCampaigns.body && activeCampaigns.body.campaigns) {
@@ -5914,19 +5917,32 @@
           return;
         }
         $("#affiliate-pools-summary-body").innerHTML = '<div class="card-grid">' + items.map(function (p) {
-          var available = p.available || 0;
+          // claimable_available is the issuance-authoritative count (same
+          // rules _claim_voucher_from_pool applies); raw_available/available
+          // is the naive "status: available" row count and is shown only as
+          // a diagnostic so this card can never claim "Healthy" when the
+          // bot actually sees zero claimable vouchers.
+          var hasClaimable = typeof p.claimable_available === "number";
+          var claimable = hasClaimable ? p.claimable_available : (p.available || 0);
+          var raw = typeof p.raw_available === "number" ? p.raw_available : (p.available || 0);
           var issued = p.issued || 0;
-          var total = available + issued;
+          var total = raw + issued;
           var pctIssued = total > 0 ? Math.round((issued / total) * 100) : 0;
-          var sev = available < 10 ? "red" : (available < 50 ? "yellow" : "green");
+          var blocked = hasClaimable && claimable <= 0 && !!p.blocking_reason;
+          var sev = blocked ? "red" : (claimable < 10 ? "red" : (claimable < 50 ? "yellow" : "green"));
+          var pillLabel = blocked ? "Blocked" : (sev === "red" ? "Low" : sev === "yellow" ? "Watch" : "Healthy");
+          var mismatchNote = (hasClaimable && raw !== claimable)
+            ? '<div class="sub" style="margin-top:4px;">' + fmt(raw) + ' stored' + (p.blocking_reason ? " · " + esc(p.blocking_reason) : "") + '</div>'
+            : '';
           return '<div class="kpi">' +
             '<div style="display:flex;justify-content:space-between;align-items:center;">' +
             '<div class="label">' + esc(p.pool_id) + '</div>' +
             '<span class="pill ' + (sev === "red" ? "rejected" : sev === "yellow" ? "pending" : "approved") + '">' +
-            (sev === "red" ? "Low" : sev === "yellow" ? "Watch" : "Healthy") + '</span>' +
+            pillLabel + '</span>' +
             '</div>' +
-            '<div class="value">' + fmt(available) + '</div>' +
-            '<div class="sub">available · ' + fmt(issued) + ' issued</div>' +
+            '<div class="value">' + fmt(claimable) + '</div>' +
+            '<div class="sub">claimable · ' + fmt(issued) + ' issued</div>' +
+            mismatchNote +
             '<div class="progress-row"><div class="bar-wrap"><div class="bar" style="width:' + pctIssued + '%;"></div></div>' +
             '<div class="progress-label">' + pctIssued + '% used</div></div>' +
             '<div class="sub" style="margin-top:8px;">' + esc(p.display_label || "—") +
