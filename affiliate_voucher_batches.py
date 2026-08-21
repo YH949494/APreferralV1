@@ -29,12 +29,23 @@ from bson import ObjectId
 from bson.errors import InvalidId
 from flask import Blueprint, jsonify, request
 
+from affiliate_rewards import _month_window_from_yyyymm as _entitlement_month_window_utc
+
 KL_TZ = pytz.timezone("Asia/Kuala_Lumpur")
 
 # T1-T4 and WELCOME are schedulable through this feature (matches the Admin
 # Dashboard pool dropdown). T5 keeps using plain, undated voucher_pools
 # uploads exactly as before.
 BATCH_POOL_IDS = ("T1", "T2", "T3", "T4", "WELCOME")
+
+# Affiliate monthly-entitlement tiers: their claimability
+# (``affiliate_rewards._resolve_monthly_ledger_target`` /
+# ``get_claimable_pool_inventory``) requires a batch window that *fully
+# contains* a KL calendar month, so their schedule must always be exactly
+# that canonical month window — never an admin-typed approximation (e.g.
+# "00:01"/"23:59"). WELCOME has no monthly-entitlement concept and keeps its
+# existing free-form start/end scheduling untouched.
+ENTITLEMENT_MONTH_POOL_IDS = ("T1", "T2", "T3", "T4")
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +93,18 @@ def parse_kl_local_to_utc(local_str: str, tz_name: str | None = None) -> datetim
     except Exception:
         return None
     return localized.astimezone(timezone.utc)
+
+
+def canonical_entitlement_month_window(entitlement_month: str) -> tuple[datetime | None, datetime | None]:
+    """The one true KL-calendar-month window [start, end) in UTC for a
+    ``"YYYYMM"`` entitlement month — first day of that month at 00:00:00 KL
+    through the first day of the following month at 00:00:00 KL (end
+    exclusive). Delegates to ``affiliate_rewards``'s own resolver so the
+    boundary a batch is created with can never drift from the boundary
+    ``_resolve_monthly_ledger_target``/``get_claimable_pool_inventory`` use
+    to decide claimability. Returns ``(None, None)`` on any invalid input.
+    """
+    return _entitlement_month_window_utc(entitlement_month)
 
 
 def _as_aware_utc(dt: datetime | None) -> datetime | None:
@@ -368,9 +391,10 @@ def create_batch(
     admin_identity: str,
     batch_name: str,
     pool_id: str,
-    starts_at_local: str,
-    ends_at_local: str,
-    timezone_name: str | None,
+    starts_at_local: str | None = None,
+    ends_at_local: str | None = None,
+    timezone_name: str | None = None,
+    entitlement_month: str | None = None,
     codes,
     notes=None,
     now_utc: datetime | None = None,
@@ -389,14 +413,29 @@ def create_batch(
     if not batch_name:
         return _fail("invalid_batch_name", "Batch name is required.")
 
-    starts_at_utc = parse_kl_local_to_utc(starts_at_local, timezone_name)
-    if starts_at_utc is None:
-        return _fail("invalid_start_at", "Start date/time could not be parsed.")
-    ends_at_utc = parse_kl_local_to_utc(ends_at_local, timezone_name)
-    if ends_at_utc is None:
-        return _fail("invalid_end_at", "End date/time could not be parsed.")
-    if ends_at_utc <= starts_at_utc:
-        return _fail("end_before_start", "End time must be after start time.")
+    if entitlement_month:
+        # Entitlement month is authoritative when supplied: the window is
+        # always the exact canonical KL-calendar-month boundary, never an
+        # admin-typed start/end (which is how the "00:01"/"23:59"
+        # off-by-one-minute schedules — invisible to a human, but a full
+        # miss for the claimability helper's exact-containment check —
+        # happened in the first place). Any starts_at_local/ends_at_local
+        # passed alongside entitlement_month is ignored.
+        starts_at_utc, ends_at_utc = canonical_entitlement_month_window(entitlement_month)
+        if starts_at_utc is None or ends_at_utc is None:
+            return _fail("invalid_entitlement_month", "Entitlement month must be a valid 'YYYYMM' value.")
+    else:
+        # No entitlement_month supplied — explicit start/end window (used by
+        # WELCOME, and by tests/tools that deliberately construct a
+        # non-canonical window to exercise the claimability edge cases).
+        starts_at_utc = parse_kl_local_to_utc(starts_at_local, timezone_name)
+        if starts_at_utc is None:
+            return _fail("invalid_start_at", "Start date/time could not be parsed.")
+        ends_at_utc = parse_kl_local_to_utc(ends_at_local, timezone_name)
+        if ends_at_utc is None:
+            return _fail("invalid_end_at", "End date/time could not be parsed.")
+        if ends_at_utc <= starts_at_utc:
+            return _fail("end_before_start", "End time must be after start time.")
 
     overlap = _find_overlapping_batch(db, pool_id=pool_id, starts_at_utc=starts_at_utc, ends_at_utc=ends_at_utc)
     if overlap:
@@ -853,7 +892,9 @@ def update_batch(db, batch_id, *, admin_identity: str, updates: dict, now_utc: d
     if "notes" in updates:
         set_fields["notes"] = updates.get("notes")
 
-    wants_date_change = "starts_at_local" in updates or "ends_at_local" in updates
+    wants_date_change = (
+        "starts_at_local" in updates or "ends_at_local" in updates or "entitlement_month" in updates
+    )
     new_starts_at = _as_aware_utc(batch.get("starts_at"))
     new_ends_at = _as_aware_utc(batch.get("ends_at"))
     if wants_date_change:
@@ -863,17 +904,28 @@ def update_batch(db, batch_id, *, admin_identity: str, updates: dict, now_utc: d
                 "active_batch_edit_restricted",
                 "This batch already has issued vouchers; its schedule can no longer be changed.",
             )
-        tz_name = updates.get("timezone") or "Asia/Kuala_Lumpur"
-        if "starts_at_local" in updates:
-            new_starts_at = parse_kl_local_to_utc(updates.get("starts_at_local"), tz_name)
-            if new_starts_at is None:
-                return _fail("invalid_start_at", "Start date/time could not be parsed.")
-        if "ends_at_local" in updates:
-            new_ends_at = parse_kl_local_to_utc(updates.get("ends_at_local"), tz_name)
-            if new_ends_at is None:
-                return _fail("invalid_end_at", "End date/time could not be parsed.")
-        if new_ends_at <= new_starts_at:
-            return _fail("end_before_start", "End time must be after start time.")
+        if updates.get("entitlement_month"):
+            # Same authoritative-source-of-truth rule as create_batch: when
+            # an entitlement month is given, it always wins over any
+            # starts_at_local/ends_at_local passed alongside it — this is
+            # the safe corrective path for existing batches whose window
+            # was hand-typed (e.g. "00:01"/"23:59") instead of matching the
+            # canonical KL calendar month.
+            new_starts_at, new_ends_at = canonical_entitlement_month_window(updates.get("entitlement_month"))
+            if new_starts_at is None or new_ends_at is None:
+                return _fail("invalid_entitlement_month", "Entitlement month must be a valid 'YYYYMM' value.")
+        else:
+            tz_name = updates.get("timezone") or "Asia/Kuala_Lumpur"
+            if "starts_at_local" in updates:
+                new_starts_at = parse_kl_local_to_utc(updates.get("starts_at_local"), tz_name)
+                if new_starts_at is None:
+                    return _fail("invalid_start_at", "Start date/time could not be parsed.")
+            if "ends_at_local" in updates:
+                new_ends_at = parse_kl_local_to_utc(updates.get("ends_at_local"), tz_name)
+                if new_ends_at is None:
+                    return _fail("invalid_end_at", "End date/time could not be parsed.")
+            if new_ends_at <= new_starts_at:
+                return _fail("end_before_start", "End time must be after start time.")
         overlap = _find_overlapping_batch(
             db, pool_id=batch["pool_id"], starts_at_utc=new_starts_at, ends_at_utc=new_ends_at, exclude_batch_id=oid
         )
@@ -1049,6 +1101,7 @@ def register_routes(require_admin_from_query, admin_identity_fn, db_ref):
             starts_at_local=data.get("starts_at_local"),
             ends_at_local=data.get("ends_at_local"),
             timezone_name=data.get("timezone"),
+            entitlement_month=data.get("entitlement_month"),
             codes=data.get("codes"),
             notes=data.get("notes"),
         )

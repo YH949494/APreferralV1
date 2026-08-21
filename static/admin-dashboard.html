@@ -1029,7 +1029,12 @@
               </select>
             </div>
           </div>
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:10px;">
+          <div id="ab-month-row" style="margin-bottom:10px;">
+            <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">Entitlement Month *</label>
+            <input type="month" class="filter-input" id="ab-entitlement-month" style="max-width:220px;" />
+            <div style="font-size:12px;color:var(--text-muted,#888);margin-top:4px;">T1-T4 batches always use the full KL calendar month as their window (start = 1st 00:00, end = 1st of next month 00:00, exclusive) — this is required for the batch to be claimable. This cannot be typed manually.</div>
+          </div>
+          <div id="ab-window-row" style="display:none;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:10px;">
             <div>
               <label style="font-size:12px;font-weight:600;display:block;margin-bottom:4px;">Start (KL) *</label>
               <input type="datetime-local" class="filter-input" id="ab-starts-at" style="width:100%;box-sizing:border-box;" />

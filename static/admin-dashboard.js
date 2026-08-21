@@ -6059,20 +6059,59 @@
     return value.replace("T", " ") + ":00";
   }
 
+  // T1-T4 are monthly-entitlement affiliate tiers: their claimability rule
+  // requires a batch window that exactly matches a full KL calendar month,
+  // so the form pins them to an entitlement-month picker instead of free
+  // start/end fields — an admin-typed window (even off by a minute, e.g.
+  // "00:01"/"23:59") silently fails the full-month-containment check used
+  // by get_claimable_pool_inventory/_resolve_monthly_ledger_target and the
+  // batch reports 0 claimable despite having stock. WELCOME has no monthly
+  // entitlement concept and keeps its existing free-form start/end window.
+  var AB_ENTITLEMENT_MONTH_POOLS = { T1: true, T2: true, T3: true, T4: true };
+
+  function abIsEntitlementMonthPool(poolId) {
+    return !!AB_ENTITLEMENT_MONTH_POOLS[poolId];
+  }
+
+  function abUpdatePoolFieldVisibility() {
+    var poolId = $("#ab-pool-id").value;
+    var useMonth = abIsEntitlementMonthPool(poolId);
+    $("#ab-month-row").style.display = useMonth ? "block" : "none";
+    $("#ab-window-row").style.display = useMonth ? "none" : "grid";
+  }
+
+  function abMonthInputToYyyymm(value) {
+    // <input type="month"> yields "YYYY-MM"
+    if (!value) return "";
+    return value.replace("-", "");
+  }
+
   function abUpdatePreview() {
     var el = $("#ab-preview");
     if (!el) return;
     var codesText = $("#ab-codes").value || "";
     var parsed = abParseCodesPreview(codesText);
     var tier = $("#ab-pool-id").value;
-    var startsRaw = $("#ab-starts-at").value;
-    var endsRaw = $("#ab-ends-at").value;
-    if (!codesText.trim() && !startsRaw && !endsRaw) { el.style.display = "none"; return; }
+    var useMonth = abIsEntitlementMonthPool(tier);
+    var windowLabel;
+    if (useMonth) {
+      var monthRaw = $("#ab-entitlement-month").value;
+      windowLabel = monthRaw
+        ? "Entitlement month " + esc(monthRaw) + " (full KL calendar month, start inclusive / end exclusive)"
+        : "Entitlement month —";
+    } else {
+      var startsRaw = $("#ab-starts-at").value;
+      var endsRaw = $("#ab-ends-at").value;
+      windowLabel =
+        "Start " + esc(startsRaw ? startsRaw.replace("T", " ") : "—") + " KL" +
+        " · End " + esc(endsRaw ? endsRaw.replace("T", " ") : "—") + " KL";
+    }
+    var hasWindowInput = useMonth ? !!$("#ab-entitlement-month").value : !!($("#ab-starts-at").value || $("#ab-ends-at").value);
+    if (!codesText.trim() && !hasWindowInput) { el.style.display = "none"; return; }
     el.style.display = "block";
     el.innerHTML =
       "<b>Preview:</b> Tier " + esc(tier) +
-      " · Start " + esc(startsRaw ? startsRaw.replace("T", " ") : "—") + " KL" +
-      " · End " + esc(endsRaw ? endsRaw.replace("T", " ") : "—") + " KL" +
+      " · " + windowLabel +
       " · " + parsed.unique.length + " unique code(s)" +
       (parsed.duplicates ? " · " + parsed.duplicates + " duplicate code(s) in pasted input" : "") +
       (parsed.invalid ? " · " + parsed.invalid + " invalid token(s) will be ignored" : "");
@@ -6092,6 +6131,7 @@
     $("#ab-batch-name").value = "";
     $("#ab-pool-id").value = "T1";
     $("#ab-pool-id").disabled = false;
+    $("#ab-entitlement-month").value = "";
     $("#ab-starts-at").value = "";
     $("#ab-ends-at").value = "";
     $("#ab-codes").value = "";
@@ -6099,6 +6139,7 @@
     $("#ab-notes").value = "";
     $("#ab-form-error").style.display = "none";
     $("#ab-preview").style.display = "none";
+    abUpdatePoolFieldVisibility();
   }
 
   function abFillFormForEdit(item) {
@@ -6109,8 +6150,17 @@
     $("#ab-batch-name").value = item.batch_name || "";
     $("#ab-pool-id").value = item.pool_id;
     $("#ab-pool-id").disabled = true;
-    $("#ab-starts-at").value = item.starts_at_kl ? item.starts_at_kl.slice(0, 16) : "";
-    $("#ab-ends-at").value = item.ends_at_kl ? item.ends_at_kl.slice(0, 16) : "";
+    abUpdatePoolFieldVisibility();
+    if (abIsEntitlementMonthPool(item.pool_id)) {
+      var em = item.entitlement_month || "";
+      $("#ab-entitlement-month").value = em.length === 6 ? em.slice(0, 4) + "-" + em.slice(4, 6) : "";
+      $("#ab-starts-at").value = "";
+      $("#ab-ends-at").value = "";
+    } else {
+      $("#ab-entitlement-month").value = "";
+      $("#ab-starts-at").value = item.starts_at_kl ? item.starts_at_kl.slice(0, 16) : "";
+      $("#ab-ends-at").value = item.ends_at_kl ? item.ends_at_kl.slice(0, 16) : "";
+    }
     $("#ab-codes").value = "";
     $("#ab-codes").disabled = true;
     $("#ab-notes").value = item.notes || "";
@@ -6125,6 +6175,8 @@
     var isEdit = !!state.abEditingBatchId;
     var name = ($("#ab-batch-name").value || "").trim();
     var poolId = $("#ab-pool-id").value;
+    var useMonth = abIsEntitlementMonthPool(poolId);
+    var monthRaw = $("#ab-entitlement-month").value;
     var startsRaw = $("#ab-starts-at").value;
     var endsRaw = $("#ab-ends-at").value;
     var codesText = $("#ab-codes").value || "";
@@ -6133,7 +6185,12 @@
     $("#ab-form-error").style.display = "none";
 
     if (!name) { abShowFormError("Batch name is required."); return; }
-    if (!startsRaw || !endsRaw) { abShowFormError("Start and end date/time are required."); return; }
+    if (useMonth) {
+      if (!monthRaw) { abShowFormError("Entitlement month is required for " + poolId + " batches."); return; }
+    } else if (!startsRaw || !endsRaw) {
+      abShowFormError("Start and end date/time are required.");
+      return;
+    }
     if (!isEdit) {
       var parsed = abParseCodesPreview(codesText);
       if (!parsed.unique.length) { abShowFormError("No valid voucher codes were provided. Paste at least one code."); return; }
@@ -6142,11 +6199,15 @@
     var payload = {
       batch_name: name,
       pool_id: poolId,
-      starts_at_local: abLocalInputToKlString(startsRaw),
-      ends_at_local: abLocalInputToKlString(endsRaw),
       timezone: "Asia/Kuala_Lumpur",
       notes: notes || null,
     };
+    if (useMonth) {
+      payload.entitlement_month = abMonthInputToYyyymm(monthRaw);
+    } else {
+      payload.starts_at_local = abLocalInputToKlString(startsRaw);
+      payload.ends_at_local = abLocalInputToKlString(endsRaw);
+    }
     if (!isEdit) payload.codes = codesText;
 
     var doSubmit = function () {
@@ -6430,10 +6491,15 @@
     if (!createBtn) return;
     createBtn.addEventListener("click", abSubmit);
     $("#ab-cancel-edit-btn").addEventListener("click", abResetForm);
-    ["#ab-codes", "#ab-starts-at", "#ab-ends-at", "#ab-pool-id"].forEach(function (sel) {
+    ["#ab-codes", "#ab-starts-at", "#ab-ends-at", "#ab-pool-id", "#ab-entitlement-month"].forEach(function (sel) {
       var el = $(sel);
       if (el) el.addEventListener("input", abUpdatePreview);
     });
+    $("#ab-pool-id").addEventListener("change", function () {
+      abUpdatePoolFieldVisibility();
+      abUpdatePreview();
+    });
+    abUpdatePoolFieldVisibility();
     $("#ab-refresh-btn").addEventListener("click", function () { loadAffiliateBatches(true); });
     ["#ab-filter-pool", "#ab-filter-status", "#ab-filter-include-expired"].forEach(function (sel) {
       var el = $(sel);
