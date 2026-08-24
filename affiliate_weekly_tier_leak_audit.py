@@ -53,11 +53,25 @@ import argparse
 import json
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 TIERS = ("T1", "T2", "T3", "T4", "T5")
+
+
+def _pool_ledger_filter(ledger_id):
+    """Same voucher-to-ledger match affiliate_rewards.py uses everywhere
+    (see affiliate_rewards._pool_ledger_filter): a claimed voucher_pools
+    row may be linked via the legacy `ledger_id` field or the canonical
+    `issued_for_ledger_id` (stored as a string). Querying only one of the
+    two silently misses rows linked through the other."""
+    return {
+        "$or": [
+            {"issued_for_ledger_id": str(ledger_id)},
+            {"ledger_id": ledger_id},
+        ]
+    }
 
 
 def _iso(dt_value):
@@ -67,9 +81,18 @@ def _iso(dt_value):
     return dt_value
 
 
+def _as_aware_utc(dt_value):
+    if not isinstance(dt_value, datetime):
+        return None
+    return dt_value if dt_value.tzinfo else dt_value.replace(tzinfo=timezone.utc)
+
+
 def _month_from_week_key(week_key: str | None) -> str | None:
-    """Best-effort YYYYMM the weekly entitlement week falls in, derived
-    from the week_key (an ISO date string, e.g. "2026-08-17")."""
+    """Best-effort YYYYMM the weekly entitlement week *starts* in, derived
+    from the week_key (an ISO date string, e.g. "2026-08-17"). Only used as
+    a fallback when a ledger predates week_start_utc/week_end_utc being
+    stored — see _entitlement_months_for_ledger for the real overlap
+    calculation."""
     if not week_key:
         return None
     try:
@@ -77,6 +100,31 @@ def _month_from_week_key(week_key: str | None) -> str | None:
     except ValueError:
         return None
     return f"{dt.year:04d}{dt.month:02d}"
+
+
+def _entitlement_months_for_ledger(ledger: dict) -> list[str]:
+    """Every calendar month (YYYYMM) touched by this weekly ledger's
+    window. A week can straddle a month boundary (e.g. 2026-08-31 ..
+    2026-09-07), so a single "which month is this week in" guess can miss
+    the monthly counterpart entirely — check every month the window
+    overlaps."""
+    start = _as_aware_utc(ledger.get("week_start_utc"))
+    end = _as_aware_utc(ledger.get("week_end_utc"))
+    if start is None or end is None:
+        single = _month_from_week_key(ledger.get("week_key"))
+        return [single] if single else []
+
+    months = []
+    cursor = start.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    # `end` is an exclusive window boundary; a week ending exactly at a
+    # month start (e.g. 00:00:00 on the 1st) does not actually touch that
+    # month, so stop before it.
+    while cursor < end:
+        yyyymm = f"{cursor.year:04d}{cursor.month:02d}"
+        if yyyymm not in months:
+            months.append(yyyymm)
+        cursor = (cursor.replace(day=28) + timedelta(days=4)).replace(day=1)
+    return months
 
 
 def find_leaked_weekly_ledgers(db) -> list[dict]:
@@ -103,7 +151,7 @@ def find_leaked_weekly_ledgers(db) -> list[dict]:
         voucher_codes = [v.get("code") for v in vouchers if v.get("code")]
         linked_pool_rows = list(
             db.voucher_pools.find(
-                {"ledger_id": ledger_id, "status": "issued"},
+                {"status": "issued", **_pool_ledger_filter(ledger_id)},
                 {"code": 1, "pool_id": 1, "issued_at": 1},
             )
         )
@@ -126,17 +174,52 @@ def find_leaked_weekly_ledgers(db) -> list[dict]:
     return leaked
 
 
-def _monthly_counterpart(db, *, user_id, tier: str, year_month: str | None) -> dict | None:
-    if not year_month:
-        return None
-    return db.affiliate_ledger.find_one(
-        {
-            "ledger_type": "AFFILIATE_MONTHLY",
-            "user_id": user_id,
-            "tier": tier,
-            "year_month": year_month,
-        }
+def _issued_monthly_counterparts(db, *, user_id, tier: str, year_months: list[str]) -> list[dict]:
+    """AFFILIATE_MONTHLY ledgers for this user/tier in any of the given
+    months that actually issued a bundle (status ISSUED, or vouchers
+    already linked despite a lagging status) — a PENDING_EOM,
+    PENDING_MANUAL, OUT_OF_STOCK, or REJECTED-with-no-vouchers monthly
+    ledger did not give this user a real double bundle and must not be
+    reported as one."""
+    if not year_months:
+        return []
+    candidates = list(
+        db.affiliate_ledger.find(
+            {
+                "ledger_type": "AFFILIATE_MONTHLY",
+                "user_id": user_id,
+                "tier": tier,
+                "year_month": {"$in": year_months},
+            }
+        )
     )
+    issued = []
+    for monthly in candidates:
+        monthly_vouchers = monthly.get("vouchers") or []
+        linked_pool_rows = list(
+            db.voucher_pools.find(
+                {"status": "issued", **_pool_ledger_filter(monthly.get("_id"))},
+                {"code": 1},
+            )
+        )
+        codes = sorted(
+            {v.get("code") for v in monthly_vouchers if v.get("code")}
+            | {row.get("code") for row in linked_pool_rows if row.get("code")}
+        )
+        is_issued = str(monthly.get("status") or "") == "ISSUED" or bool(codes)
+        if not is_issued:
+            continue
+        issued.append(
+            {
+                "ledger_id": str(monthly.get("_id")),
+                "year_month": monthly.get("year_month"),
+                "status": monthly.get("status"),
+                "voucher_count": monthly.get("voucher_count") or len(codes),
+                "voucher_codes": codes,
+                "dedup_key": monthly.get("dedup_key"),
+            }
+        )
+    return issued
 
 
 def build_report(db, now_ts: datetime | None = None) -> dict:
@@ -149,34 +232,26 @@ def build_report(db, now_ts: datetime | None = None) -> dict:
         tier = str(ledger.get("tier") or ledger.get("pool_id") or "").strip().upper()
         user_id = ledger.get("user_id")
         week_key = ledger.get("week_key")
-        year_month = _month_from_week_key(week_key)
+        entitlement_months = _entitlement_months_for_ledger(ledger)
 
-        monthly = _monthly_counterpart(db, user_id=user_id, tier=tier, year_month=year_month)
-        monthly_summary = None
-        if monthly:
-            monthly_vouchers = monthly.get("vouchers") or []
-            monthly_summary = {
-                "ledger_id": str(monthly.get("_id")),
-                "status": monthly.get("status"),
-                "voucher_count": monthly.get("voucher_count") or len(monthly_vouchers),
-                "voucher_codes": [v.get("code") for v in monthly_vouchers if v.get("code")],
-                "dedup_key": monthly.get("dedup_key"),
-            }
+        monthly_counterparts = _issued_monthly_counterparts(
+            db, user_id=user_id, tier=tier, year_months=entitlement_months
+        )
 
         rows.append(
             {
                 "user_id": user_id,
                 "weekly_ledger_id": str(item["ledger_id"]),
                 "week_key": week_key,
-                "entitlement_month_guess": year_month,
+                "entitlement_months_checked": entitlement_months,
                 "tier": tier,
                 "status": ledger.get("status"),
                 "dedup_key": ledger.get("dedup_key"),
                 "voucher_count": len(item["voucher_codes"]),
                 "voucher_codes": item["voucher_codes"],
                 "issued_at": _iso(ledger.get("issued_at") or ledger.get("updated_at")),
-                "has_monthly_counterpart_same_tier_month": monthly is not None,
-                "monthly_counterpart": monthly_summary,
+                "has_monthly_counterpart_same_tier_month": bool(monthly_counterparts),
+                "monthly_counterparts": monthly_counterparts,
             }
         )
 
