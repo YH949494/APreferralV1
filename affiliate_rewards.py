@@ -683,6 +683,19 @@ def get_claimable_pool_inventory(db, *, pool_id: str, now_utc: datetime | None =
 
 
 def _claim_affiliate_bundle_from_pool(db, *, pool_id: str, ledger_id, user_id: int, now_utc: datetime, voucher_count: int, legacy_only: bool = False):
+    normalized_pool_id = str(pool_id or "").strip().upper()
+    if normalized_pool_id in TIERS:
+        # Defense-in-depth: even if a future caller reaches this claim
+        # function without going through `_issue_affiliate_ledger_from_pool`'s
+        # guard, never let a weekly ledger walk out with a T1-T5 bundle.
+        owning_ledger = db.affiliate_ledger.find_one({"_id": ledger_id}, {"ledger_type": 1, "user_id": 1, "tier": 1})
+        owning_ledger_type = str((owning_ledger or {}).get("ledger_type") or "").strip().upper()
+        if owning_ledger_type == "AFFILIATE_WEEKLY":
+            logger.error(
+                "[AFF_REWARD][BLOCK_WEEKLY_TIER_ISSUE] ledger_id=%s user_id=%s tier=%s pool_id=%s",
+                ledger_id, user_id, (owning_ledger or {}).get("tier"), normalized_pool_id,
+            )
+            return None
     needed = max(1, int(voucher_count))
     if _available_pool_count(db, pool_id=pool_id, now_utc=now_utc, legacy_only=legacy_only) < needed:
         _log_pool_claim_miss(db, pool_id=pool_id, ledger_id=ledger_id, user_id=user_id, now_utc=now_utc, legacy_only=legacy_only)
@@ -1331,14 +1344,40 @@ def _issue_affiliate_ledger_from_pool(db, ledger, now_utc: datetime):
         logger.warning("[AFFILIATE][INVALID_TIER] uid=%s ledger_id=%s tier=%s pool_id=%s", user_id, ledger_id, tier, pool_id)
         _mark_missing_pool_config(db, ledger_id=ledger_id, now_utc=now_utc)
         return db.affiliate_ledger.find_one({"_id": ledger_id})
+    ledger_type = (ledger.get("ledger_type") or "").strip().upper()
     bundle_spec = _affiliate_bundle_spec(tier)
     if not bundle_spec:
         logger.warning("[AFFILIATE][INVALID_BUNDLE_TIER] uid=%s ledger_id=%s tier=%s pool_id=%s", user_id, ledger_id, tier, pool_id)
         _mark_missing_pool_config(db, ledger_id=ledger_id, now_utc=now_utc)
         return db.affiliate_ledger.find_one({"_id": ledger_id})
     if _ledger_has_affiliate_bundle(ledger):
+        # Already-issued rows (including any pre-fix weekly T1-T5 bundles)
+        # are historical fact — never touched here, only finalized/read.
         return _finalize_issued_if_voucher_exists(db, ledger=ledger, now_utc=now_utc)
-    ledger_type = (ledger.get("ledger_type") or "").strip().upper()
+    # T1-T5 voucher bundles are a MONTHLY-only entitlement. This is the
+    # single choke point every issuance path funnels through (scheduled
+    # weekly/monthly jobs, admin manual approval, retry/reconcile scans),
+    # so block here rather than trusting every caller to have already
+    # excluded weekly ledgers — a new weekly path added later still can't
+    # consume T1-T5 inventory. Only ledgers that have NOT yet claimed a
+    # bundle reach this point (the has-bundle case returns above).
+    if ledger_type == "AFFILIATE_WEEKLY" and pool_id in TIERS:
+        logger.error(
+            "[AFF_REWARD][BLOCK_WEEKLY_TIER_ISSUE] ledger_id=%s user_id=%s tier=%s pool_id=%s",
+            ledger_id, user_id, tier, pool_id,
+        )
+        db.affiliate_ledger.update_one(
+            {"_id": ledger_id, "status": {"$nin": list(FINAL_STATUSES)}},
+            {
+                "$set": {
+                    "status": "REJECTED",
+                    "review_reason": "weekly_tier_pool_blocked",
+                    "updated_at": now_utc,
+                },
+                "$addToSet": {"risk_flags": "weekly_tier_pool_blocked"},
+            },
+        )
+        return db.affiliate_ledger.find_one({"_id": ledger_id})
     if ledger_type == "AFFILIATE_MONTHLY":
         duplicate = db.affiliate_ledger.find_one(
             {

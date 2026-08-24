@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 from pymongo.errors import DuplicateKeyError, OperationFailure
 
+import affiliate_rewards as ar
 from affiliate_rewards import (
     affiliate_bundle_visible_cards,
     ensure_affiliate_indexes,
@@ -448,7 +449,10 @@ class AffiliateRewardTests(unittest.TestCase):
         issued = [r for r in (row_a, row_b) if r.get("status") == "ISSUED"]
         self.assertEqual(len(issued), 1)
 
-    def test_previous_week_t1_issues_once_and_is_idempotent(self):
+    def test_previous_week_t1_never_issues_and_is_idempotent(self):
+        # T1-T5 bundles are monthly-only: a weekly milestone ledger must be
+        # blocked at the issuance layer, never claim a voucher, and never
+        # touch the T1 pool inventory that monthly issuance depends on.
         db = FakeDb()
         uid = 7001
         db.users.insert_one({"user_id": uid, "blocked": False})
@@ -462,16 +466,20 @@ class AffiliateRewardTests(unittest.TestCase):
         second = issue_previous_week_affiliate_rewards(db, now_utc=now)
 
         self.assertEqual(first["week_key"], "2026-01-05")
-        self.assertEqual(first["issued_count"], 1)
+        self.assertEqual(first["issued_count"], 0)
         self.assertEqual(second["issued_count"], 0)
         ledger = db.affiliate_ledger.find_one({"dedup_key": f"AFFW:{uid}:2026-01-05:T1"})
         self.assertIsNotNone(ledger)
         self.assertEqual(ledger["ledger_type"], "AFFILIATE_WEEKLY")
-        self.assert_bundle(ledger, "T1")
-        self.assertEqual(ledger["voucher_code"], "WEEK-T1-1")
-        self.assertEqual(db.voucher_pools.count_documents({"pool_id": "T1", "status": "issued"}), 2)
+        self.assertEqual(ledger["status"], "REJECTED")
+        self.assertEqual(ledger["review_reason"], "weekly_tier_pool_blocked")
+        self.assertIsNone(ledger.get("voucher_code"))
+        self.assertNotEqual(ledger.get("status"), "ISSUED")
+        # Pool inventory (used by monthly issuance) is untouched.
+        self.assertEqual(db.voucher_pools.count_documents({"pool_id": "T1", "status": "issued"}), 0)
+        self.assertEqual(db.voucher_pools.count_documents({"pool_id": "T1", "status": "available"}), 2)
 
-    def test_current_week_t1_issues_after_qualified_threshold_before_week_end(self):
+    def test_current_week_t1_never_issues_before_week_end(self):
         db = FakeDb()
         uid = 7011
         db.users.insert_one({"user_id": uid, "blocked": False})
@@ -484,13 +492,18 @@ class AffiliateRewardTests(unittest.TestCase):
         second = issue_current_week_affiliate_rewards(db, now_utc=now + timedelta(minutes=30))
 
         self.assertEqual(first["week_key"], "2026-01-05")
-        self.assertEqual(first["issued_count"], 1)
+        self.assertEqual(first["issued_count"], 0)
         self.assertEqual(second["issued_count"], 0)
         ledger = db.affiliate_ledger.find_one({"dedup_key": f"AFFW:{uid}:2026-01-05:T1"})
-        self.assert_bundle(ledger, "T1")
-        self.assertEqual(ledger["voucher_code"], "CUR-WEEK-T1-1")
+        self.assertEqual(ledger["status"], "REJECTED")
+        self.assertEqual(ledger["review_reason"], "weekly_tier_pool_blocked")
+        self.assertIsNone(ledger.get("voucher_code"))
+        self.assertEqual(db.voucher_pools.count_documents({"pool_id": "T1", "status": "issued"}), 0)
 
-    def test_previous_week_pool_empty_stays_pending_manual(self):
+    def test_previous_week_pool_empty_still_blocked_not_pending_manual(self):
+        # Even with an empty pool (nothing to claim anyway), a weekly T1-T5
+        # ledger must be blocked outright rather than parked in
+        # PENDING_MANUAL for a human to accidentally approve later.
         db = FakeDb()
         uid = 7002
         db.users.insert_one({"user_id": uid, "blocked": False})
@@ -501,11 +514,13 @@ class AffiliateRewardTests(unittest.TestCase):
 
         out = issue_previous_week_affiliate_rewards(db, now_utc=now)
 
-        self.assertEqual(out["pending_manual"], 1)
-        self.assertEqual(out["pool_empty"], 1)
+        self.assertEqual(out["pending_manual"], 0)
+        self.assertEqual(out["pool_empty"], 0)
+        self.assertEqual(out["issued_count"], 0)
         ledger = db.affiliate_ledger.find_one({"dedup_key": f"AFFW:{uid}:2026-01-05:T1"})
-        self.assertEqual(ledger["status"], "PENDING_MANUAL")
-        self.assertIn("pool_empty", ledger.get("risk_flags") or [])
+        self.assertEqual(ledger["status"], "REJECTED")
+        self.assertEqual(ledger["review_reason"], "weekly_tier_pool_blocked")
+        self.assertIn("weekly_tier_pool_blocked", ledger.get("risk_flags") or [])
 
     def test_previous_week_simulation_does_not_consume_voucher(self):
         db = FakeDb()
@@ -1035,6 +1050,259 @@ class AffiliateRewardTests(unittest.TestCase):
         self.assertEqual(
             db.affiliate_ledger.count_documents({"tier": "T2", "year_month": "202608", "user_id": 701}), 1
         )
+
+
+class WeeklyTierIssuanceInvariantTests(unittest.TestCase):
+    """Weekly rewards must never issue T1-T5 bundles (monthly-only pools).
+
+    Covers the required-tests list from the AFFW T1-T5 leak audit:
+    monthly T3 exact-count issuance, monthly re-run idempotency, weekly
+    T3-equivalent milestones never issuing codes, weekly retry/reconcile
+    and PENDING_MANUAL auto-heal never producing T1-T5, monthly
+    PENDING_MANUAL still reconciling normally, monthly T1-T5 behavior
+    staying unchanged, concurrent monthly retries staying idempotent, and
+    a manually malformed AFFILIATE_WEEKLY/pool_id=T3 ledger being blocked
+    at the issuance layer.
+    """
+
+    def add_pool_bundle(self, db, tier, prefix):
+        for idx in range(1, ar.AFFILIATE_REWARD_BUNDLES[tier]["voucher_count"] + 1):
+            db.voucher_pools.insert_one({"pool_id": tier, "code": f"{prefix}-{idx}", "status": "available"})
+
+    # 1. Monthly T3 user receives exactly 5 T3 codes.
+    def test_monthly_t3_user_receives_exactly_five_codes(self):
+        db = FakeDb()
+        uid = 9101
+        db.users.insert_one({"user_id": uid, "blocked": False})
+        now = datetime(2026, 8, 10, tzinfo=timezone.utc)
+        for i in range(50):
+            db.qualified_events.insert_one({"invitee_id": 910100 + i, "referrer_id": uid, "qualified_at": now})
+        self.add_pool_bundle(db, "T3", "MT3")
+
+        row = evaluate_monthly_affiliate_reward(db, referrer_id=uid, now_utc=now)
+
+        ledger = db.affiliate_ledger.find_one({"dedup_key": f"AFF:{uid}:202608:T3"})
+        self.assertEqual(ledger["status"], "ISSUED")
+        self.assertEqual(ledger["voucher_count"], 5)
+        self.assertEqual(len(ledger.get("vouchers") or []), 5)
+        self.assertEqual(db.voucher_pools.count_documents({"pool_id": "T3", "status": "issued"}), 5)
+
+    # 2. Re-running monthly reward issuance does not issue another bundle.
+    def test_monthly_rerun_does_not_issue_second_bundle(self):
+        db = FakeDb()
+        uid = 9102
+        db.users.insert_one({"user_id": uid, "blocked": False})
+        now = datetime(2026, 8, 10, tzinfo=timezone.utc)
+        for i in range(50):
+            db.qualified_events.insert_one({"invitee_id": 910200 + i, "referrer_id": uid, "qualified_at": now})
+        self.add_pool_bundle(db, "T3", "MT3R")
+
+        evaluate_monthly_affiliate_reward(db, referrer_id=uid, now_utc=now)
+        evaluate_monthly_affiliate_reward(db, referrer_id=uid, now_utc=now + timedelta(hours=1))
+        evaluate_monthly_affiliate_reward(db, referrer_id=uid, now_utc=now + timedelta(hours=2))
+
+        self.assertEqual(db.affiliate_ledger.count_documents({"dedup_key": f"AFF:{uid}:202608:T3"}), 1)
+        self.assertEqual(db.voucher_pools.count_documents({"pool_id": "T3", "status": "issued"}), 5)
+
+    # 3. Weekly T3-equivalent milestone does not issue any T3 codes.
+    def test_weekly_t3_equivalent_milestone_issues_no_codes(self):
+        db = FakeDb()
+        uid = 9103
+        db.users.insert_one({"user_id": uid, "blocked": False})
+        week_start = datetime(2026, 8, 17, tzinfo=timezone.utc)
+        week_end = week_start + timedelta(days=7)
+        for i in range(50):
+            db.qualified_events.insert_one(
+                {"invitee_id": 910300 + i, "referrer_id": uid, "qualified_at": week_start + timedelta(hours=1)}
+            )
+        self.add_pool_bundle(db, "T3", "WK3")
+
+        result = ar.evaluate_weekly_affiliate_reward(
+            db,
+            referrer_id=uid,
+            week_start_utc=week_start,
+            week_end_utc=week_end,
+            week_key="2026-08-17",
+            now_utc=week_start + timedelta(hours=2),
+        )
+
+        self.assertEqual(result["status"], "REJECTED")
+        self.assertEqual(result["review_reason"], "weekly_tier_pool_blocked")
+        self.assertIsNone(result.get("voucher_code"))
+        self.assertEqual(db.voucher_pools.count_documents({"pool_id": "T3", "status": "issued"}), 0)
+        self.assertEqual(db.voucher_pools.count_documents({"pool_id": "T3", "status": "available"}), 5)
+
+    # 4. Weekly retry/reconciliation cannot issue T1-T5.
+    def test_weekly_retry_reconciliation_cannot_issue_tier_bundle(self):
+        db = FakeDb()
+        uid = 9104
+        db.users.insert_one({"user_id": uid, "blocked": False})
+        now = datetime(2026, 8, 18, tzinfo=timezone.utc)
+        self.add_pool_bundle(db, "T3", "WKRETRY")
+        weekly_ledger = db.affiliate_ledger.insert_one(
+            {
+                "ledger_type": "AFFILIATE_WEEKLY",
+                "user_id": uid,
+                "week_key": "2026-08-17",
+                "tier": "T3",
+                "pool_id": "T3",
+                "status": "SETTLING",
+                "dedup_key": f"AFFW:{uid}:2026-08-17:T3",
+                "voucher_code": None,
+                "qualified_count": 50,
+                "risk_flags": [],
+                "created_at": now,
+                "updated_at": now,
+            }
+        )
+
+        result = ar._issue_affiliate_ledger_from_pool(db, ledger=weekly_ledger, now_utc=now)
+
+        self.assertEqual(result["status"], "REJECTED")
+        self.assertEqual(result["review_reason"], "weekly_tier_pool_blocked")
+        self.assertEqual(db.voucher_pools.count_documents({"pool_id": "T3", "status": "issued"}), 0)
+
+    # 5. Weekly PENDING_MANUAL ledger cannot later auto-heal into a T1-T5 issuance.
+    def test_weekly_pending_manual_ledger_cannot_auto_heal_into_issuance(self):
+        db = FakeDb()
+        uid = 9105
+        db.users.insert_one({"user_id": uid, "blocked": False})
+        now = datetime(2026, 8, 18, tzinfo=timezone.utc)
+        self.add_pool_bundle(db, "T1", "WKPM")
+        weekly_ledger = db.affiliate_ledger.insert_one(
+            {
+                "ledger_type": "AFFILIATE_WEEKLY",
+                "user_id": uid,
+                "week_key": "2026-08-17",
+                "tier": "T1",
+                "pool_id": "T1",
+                "status": "PENDING_MANUAL",
+                "dedup_key": f"AFFW:{uid}:2026-08-17:T1",
+                "voucher_code": None,
+                "qualified_count": 10,
+                "risk_flags": ["pool_empty"],
+                "created_at": now,
+                "updated_at": now,
+            }
+        )
+
+        # Any later pass over this ledger (a hypothetical weekly
+        # PENDING_MANUAL sweep, or an admin manually re-approving it) must
+        # still be blocked — this is the exact shape of the production
+        # incident (user 8961231447, AFFW:...:T3 reaching ISSUED).
+        result = approve_affiliate_ledger(db, ledger_id=weekly_ledger["_id"], now_utc=now)
+
+        self.assertEqual(result["status"], "REJECTED")
+        self.assertEqual(result["review_reason"], "weekly_tier_pool_blocked")
+        self.assertEqual(db.voucher_pools.count_documents({"pool_id": "T1", "status": "issued"}), 0)
+
+    # 6. Monthly PENDING_MANUAL ledger can still reconcile normally.
+    def test_monthly_pending_manual_ledger_still_reconciles_normally(self):
+        db = FakeDb()
+        uid = 9106
+        db.users.insert_one({"user_id": uid, "blocked": False})
+        now = datetime(2026, 8, 18, tzinfo=timezone.utc)
+        self.add_pool_bundle(db, "T1", "MPM")
+        monthly_ledger = db.affiliate_ledger.insert_one(
+            {
+                "ledger_type": "AFFILIATE_MONTHLY",
+                "user_id": uid,
+                "year_month": "202608",
+                "tier": "T1",
+                "pool_id": "T1",
+                "status": "PENDING_MANUAL",
+                "dedup_key": f"AFF:{uid}:202608:T1",
+                "voucher_code": None,
+                "qualified_count": 10,
+                "risk_flags": ["pool_empty"],
+                "created_at": now,
+                "updated_at": now,
+            }
+        )
+
+        result = approve_affiliate_ledger(db, ledger_id=monthly_ledger["_id"], now_utc=now)
+
+        self.assertEqual(result["status"], "ISSUED")
+        self.assertEqual(result["voucher_count"], 2)
+        self.assertEqual(db.voucher_pools.count_documents({"pool_id": "T1", "status": "issued"}), 2)
+
+    # 7. Monthly T1-T5 behavior remains unchanged (full sweep, one bundle each).
+    def test_monthly_t1_to_t5_behavior_unchanged(self):
+        db = FakeDb()
+        uid = 9107
+        db.users.insert_one({"user_id": uid, "blocked": False})
+        now = datetime(2026, 8, 10, tzinfo=timezone.utc)
+        for i in range(300):
+            db.qualified_events.insert_one({"invitee_id": 910700 + i, "referrer_id": uid, "qualified_at": now})
+        for tier in ("T1", "T2", "T3", "T4", "T5"):
+            self.add_pool_bundle(db, tier, f"FULL-{tier}")
+
+        evaluate_monthly_affiliate_reward(db, referrer_id=uid, now_utc=now)
+
+        expected_counts = {"T1": 2, "T2": 3, "T3": 5, "T4": 3, "T5": 5}
+        for tier, count in expected_counts.items():
+            ledger = db.affiliate_ledger.find_one({"dedup_key": f"AFF:{uid}:202608:{tier}"})
+            self.assertEqual(ledger["status"], "ISSUED")
+            self.assertEqual(ledger["voucher_count"], count)
+
+    # 8. Concurrent monthly retries remain idempotent.
+    def test_concurrent_monthly_retries_remain_idempotent(self):
+        db = FakeDb()
+        uid = 9108
+        db.users.insert_one({"user_id": uid, "blocked": False})
+        now = datetime(2026, 8, 10, tzinfo=timezone.utc)
+        for i in range(10):
+            db.qualified_events.insert_one({"invitee_id": 910800 + i, "referrer_id": uid, "qualified_at": now})
+        self.add_pool_bundle(db, "T1", "RACE")
+
+        # Two "workers" race on the same freshly-created ledger snapshot,
+        # simulating overlapping retry sweeps hitting the CAS transition
+        # to SETTLING at nearly the same time.
+        evaluate_monthly_affiliate_reward(db, referrer_id=uid, now_utc=now)
+        ledger_snapshot = db.affiliate_ledger.find_one({"dedup_key": f"AFF:{uid}:202608:T1"})
+        # Roll the snapshot back to APPROVED to emulate a second worker that
+        # read the ledger before the first worker's CAS update landed.
+        stale_snapshot = dict(ledger_snapshot)
+        stale_snapshot["status"] = "APPROVED"
+
+        first = ar._issue_affiliate_ledger_from_pool(db, ledger=ledger_snapshot, now_utc=now)
+        second = ar._issue_affiliate_ledger_from_pool(db, ledger=stale_snapshot, now_utc=now + timedelta(seconds=1))
+
+        self.assertEqual(first["status"], "ISSUED")
+        self.assertEqual(second["status"], "ISSUED")
+        self.assertEqual(first["voucher_code"], second["voucher_code"])
+        self.assertEqual(db.voucher_pools.count_documents({"pool_id": "T1", "status": "issued"}), 2)
+
+    # 9. A manually malformed AFFILIATE_WEEKLY ledger pointing to
+    #    pool_id=T3 is rejected/blocked at the issuance layer.
+    def test_malformed_weekly_ledger_pool_id_t3_blocked_at_issuance_layer(self):
+        db = FakeDb()
+        uid = 9109
+        db.users.insert_one({"user_id": uid, "blocked": False})
+        now = datetime(2026, 8, 18, tzinfo=timezone.utc)
+        self.add_pool_bundle(db, "T3", "MALFORMED")
+        malformed_ledger = db.affiliate_ledger.insert_one(
+            {
+                "ledger_type": "AFFILIATE_WEEKLY",
+                "user_id": uid,
+                "tier": "T3",
+                "pool_id": "T3",
+                "status": "APPROVED",
+                "dedup_key": f"AFFW:{uid}:manual-injection:T3",
+                "voucher_code": None,
+                "risk_flags": [],
+                "created_at": now,
+                "updated_at": now,
+            }
+        )
+
+        result = ar._issue_affiliate_ledger_from_pool(db, ledger=malformed_ledger, now_utc=now)
+
+        self.assertEqual(result["status"], "REJECTED")
+        self.assertEqual(result["review_reason"], "weekly_tier_pool_blocked")
+        self.assertIsNone(result.get("voucher_code"))
+        self.assertEqual(db.voucher_pools.count_documents({"pool_id": "T3", "status": "issued"}), 0)
+        self.assertEqual(db.voucher_pools.count_documents({"pool_id": "T3", "status": "available"}), 5)
 
 
 if __name__ == "__main__":
