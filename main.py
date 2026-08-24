@@ -922,6 +922,23 @@ def tick_5min() -> None:
                 run_id,
             )
 
+            with JobTimer() as step_timer:
+                logger.info(
+                    "[JOB][5MIN] progress step=weekly_archive_catchup run_id=%s",
+                    run_id,
+                )
+                try:
+                    run_weekly_archive_catchup(run_id, source="tick_5min")
+                except Exception as exc:
+                    logger.exception(
+                        "[JOB][5MIN] step_error name=weekly_archive_catchup run_id=%s err=%s", run_id, exc
+                    )
+            logger.info(
+                "[JOB][5MIN] step_done name=weekly_archive_catchup elapsed_s=%.2f run_id=%s",
+                step_timer.elapsed_s,
+                run_id,
+            )
+
             _clear_leaderboard_cache("tick_5min")
             logger.info(
                 "[JOB][5MIN] done elapsed_s=%.2f run_id=%s",
@@ -7821,6 +7838,58 @@ def one_time_fix_monthly_xp():
     )
     print(f"🔧 monthly_xp backfilled on first boot. Modified: {res.modified_count}")
 
+def run_weekly_archive_catchup(run_id: str | None = None, now: datetime | None = None, *, source: str = "boot") -> dict:
+    """Self-healing check for the weekly leaderboard archive.
+
+    Idempotent and safe to call from BOTH worker boot and the recurring
+    5-minute maintenance tick: it only ever reads whether the previous
+    completed KL week's archive already exists and, if not, rebuilds it
+    from the immutable xp_events/referral_events ledgers via
+    ``rebuild_week_from_ledger`` — never from live users.weekly_* counters,
+    and never resetting them. A worker that stays up across a missed/failed
+    Monday cron (disabled setting, transient error, misfire outside the
+    scheduler's misfire_grace_time) would otherwise never recover the
+    missing week until its next restart; running this on the 5-minute tick
+    closes that gap without waiting for a redeploy.
+    """
+    run_id = run_id or _new_run_id()
+    reference = now or datetime.now(KL_TZ)
+    window = previous_completed_week_window_kl(reference)
+    expected_week_key = window["week_key"]
+    existing_week = history_collection.find_one({"week_start": expected_week_key})
+    if existing_week:
+        logger.info(
+            "[WEEKLY_ARCHIVE][SKIP_EXISTS] week_start=%s source=%s run_id=%s",
+            expected_week_key, source, run_id,
+        )
+        return {"status": "already_exists", "week_start": expected_week_key}
+
+    logger.warning(
+        "[WEEKLY_ARCHIVE][CATCHUP] week_start=%s reason=missing_snapshot source=%s run_id=%s",
+        expected_week_key, source, run_id,
+    )
+    try:
+        # Ledger-only recovery: this NEVER reads or resets
+        # users.weekly_xp / weekly_referrals. By the time this runs to
+        # recover a missed week, those live counters may already reflect
+        # the current (later) week's activity, so using them here would
+        # archive mixed-week data and/or wrongly zero in-progress
+        # current-week progress.
+        with JobTimer() as timer:
+            result = rebuild_week_from_ledger(expected_week_key, dry_run=False)
+        logger.info(
+            "[WEEKLY_ARCHIVE][CATCHUP_DONE] week_start=%s result=%s elapsed_s=%.2f source=%s run_id=%s",
+            expected_week_key, result.get("status"), timer.elapsed_s, source, run_id,
+        )
+        return result
+    except Exception as exc:
+        logger.error(
+            "[WEEKLY_ARCHIVE][ERROR] week_start=%s err=%s source=%s run_id=%s",
+            expected_week_key, exc, source, run_id,
+        )
+        return {"status": "failed", "week_start": expected_week_key, "error": str(exc)}
+
+
 def run_boot_catchup():
     now = datetime.now(KL_TZ)
     run_id = _new_run_id()
@@ -7835,44 +7904,7 @@ def run_boot_catchup():
     # from archived_at age, so a worker that was down across more than one
     # week boundary (e.g. down Monday, restarts Tuesday+) still recovers the
     # missing week instead of it being permanently skipped.
-    window = previous_completed_week_window_kl(now)
-    expected_week_key = window["week_key"]
-    existing_week = history_collection.find_one({"week_start": expected_week_key})
-    if existing_week:
-        logger.info(
-            "[BOOT][CATCHUP][WEEKLY_OK] week_key=%s run_id=%s",
-            expected_week_key,
-            run_id,
-        )
-    else:
-        logger.warning(
-            "[BOOT][CATCHUP][WEEKLY_MISSING] week_key=%s run_id=%s",
-            expected_week_key,
-            run_id,
-        )
-        logger.info("[BOOT][CATCHUP] running job=weekly run_id=%s", run_id)
-        try:
-            # Ledger-only recovery: this NEVER reads or resets
-            # users.weekly_xp / weekly_referrals. By the time a worker boots
-            # up to recover a missed week, those live counters may already
-            # reflect the current (later) week's activity, so using them
-            # here would archive mixed-week data and/or wrongly zero
-            # in-progress current-week progress.
-            with JobTimer() as timer:
-                result = rebuild_week_from_ledger(expected_week_key, dry_run=False)
-            logger.info(
-                "[BOOT][CATCHUP] done job=weekly result=%s elapsed_s=%.2f run_id=%s",
-                result.get("status"),
-                timer.elapsed_s,
-                run_id,
-            )
-        except Exception as exc:
-            logger.error(
-                "[BOOT][CATCHUP] failed job=weekly err=%s msg=%s run_id=%s",
-                exc.__class__.__name__,
-                str(exc),
-                run_id,
-            )
+    run_weekly_archive_catchup(run_id, now, source="boot")
 
     # monthly catch-up (only on the 1st)
     sample_user = users_collection.find_one(
