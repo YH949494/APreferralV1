@@ -254,6 +254,66 @@ def test_history_endpoints_have_no_store_headers():
     assert "no-store" in resp2.headers.get("Cache-Control", "")
 
 
+# 11. Missed Monday cron (worker never restarted) is recovered by the
+# recurring 5-minute maintenance tick, not just boot.
+def test_tick_5min_recovers_missing_week_without_restart():
+    _reset_history_state()
+    tuesday = datetime(2026, 8, 4, 9, 0, 0, tzinfo=main.KL_TZ)
+
+    checkin_ts = datetime(2026, 7, 28, 10, 0, 0, tzinfo=timezone.utc)
+    main.db["xp_events"].insert_one({
+        "user_id": 1, "unique_key": "checkin:20260728", "type": "checkin", "xp": 30, "created_at": checkin_ts,
+    })
+    main.db["referral_events"].insert_one({
+        "inviter_id": 1, "invitee_id": 2, "event": "referral_settled", "week_key": "2026-07-27",
+        "occurred_at": checkin_ts,
+    })
+    main.users_collection.insert_one({"user_id": 1, "username": "a", "weekly_xp": 5, "weekly_referrals": 0})
+
+    with mock.patch.object(main, "acquire_scheduler_lock", return_value=(True, None)):
+        with mock.patch.object(main, "settle_pending_referrals_with_cache_clear"):
+            with mock.patch.object(main, "settle_xp_snapshots"):
+                with mock.patch.object(main, "settle_referral_snapshots_with_cache_clear"):
+                    with mock.patch.object(main, "_check_snapshot_freshness"):
+                        with mock.patch.object(main, "compute_retention_kpis"):
+                            with mock.patch.object(main, "datetime", wraps=datetime) as dt:
+                                dt.now.side_effect = lambda tz=None: tuesday.astimezone(tz) if tz else tuesday
+                                main.tick_5min()
+
+    doc = main.history_collection.find_one({"week_start": "2026-07-27"})
+    assert doc is not None
+    assert doc["source"] == "ledger_rebuild"
+
+    # tick_5min's catch-up must never reset live counters.
+    user = main.users_collection.find_one({"user_id": 1})
+    assert user["weekly_xp"] == 5
+
+
+# 12. tick_5min is a no-op on the archive when the week already exists.
+def test_tick_5min_skips_when_week_already_archived():
+    _reset_history_state()
+    main.history_collection.insert_one({
+        "week_start": "2026-07-27", "week_end": "2026-08-02",
+        "checkin_leaderboard": [], "referral_leaderboard": [],
+        "archived_at": datetime.now(timezone.utc), "source": "live_counters",
+    })
+    tuesday = datetime(2026, 8, 4, 9, 0, 0, tzinfo=main.KL_TZ)
+
+    with mock.patch.object(main, "acquire_scheduler_lock", return_value=(True, None)):
+        with mock.patch.object(main, "settle_pending_referrals_with_cache_clear"):
+            with mock.patch.object(main, "settle_xp_snapshots"):
+                with mock.patch.object(main, "settle_referral_snapshots_with_cache_clear"):
+                    with mock.patch.object(main, "_check_snapshot_freshness"):
+                        with mock.patch.object(main, "compute_retention_kpis"):
+                            with mock.patch.object(main, "rebuild_week_from_ledger") as rebuild_mock:
+                                with mock.patch.object(main, "datetime", wraps=datetime) as dt:
+                                    dt.now.side_effect = lambda tz=None: tuesday.astimezone(tz) if tz else tuesday
+                                    main.tick_5min()
+                                rebuild_mock.assert_not_called()
+
+    assert main.history_collection.count_documents({"week_start": "2026-07-27"}) == 1
+
+
 # Admin rebuild endpoint: admin-gated, defaults to dry_run, never resets counters.
 def test_admin_rebuild_endpoint_requires_admin():
     _reset_history_state()
