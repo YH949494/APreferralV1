@@ -6593,9 +6593,12 @@ function setLeaderboardMeta(ts, { isStale = false } = {}) {
       if (!rows.length) return `<div class="leaderboard-empty">${t("no_affiliate_data")}</div>`;
       const tableRows = rows.map((r) => {
         const extra = r.extra || {};
-        const qualified = r.qualified_week ?? r.metric_value ?? extra.qualified_week ?? 0;
-        const joins = r.joins_week_raw ?? extra.joins_week_raw ?? 0;
-        const conversion = r.conversion_week ?? extra.conversion_week ?? 0;
+        const qualified = r.qualified_month ?? r.qualified_week ?? r.metric_value ?? extra.qualified_week ?? 0;
+        const joins = r.joins_month ?? r.joins_week_raw ?? extra.joins_week_raw ?? 0;
+        const conversionRaw = r.conversion_month !== undefined ? r.conversion_month : (r.conversion_week ?? extra.conversion_week ?? 0);
+        const conversionDisplay = conversionRaw === null || conversionRaw === undefined
+          ? "—"
+          : `${(Number(conversionRaw) * 100).toFixed(1)}%`;
         const flag = r.quality_flag ?? extra.quality_flag ?? "new";
         return `
           <tr>
@@ -6603,7 +6606,7 @@ function setLeaderboardMeta(ts, { isStale = false } = {}) {
             <td>${escapeHtml(String(r.display_name || r.username || r.referrer_id || "-"))}</td>
             <td>${Number(qualified || 0)}</td>
             <td>${Number(joins || 0)}</td>
-            <td>${(Number(conversion || 0) * 100).toFixed(1)}%</td>
+            <td>${conversionDisplay}</td>
             ${isAdmin ? `<td>${escapeHtml(String(flag || "new"))}</td>` : ""}
           </tr>`;
       }).join("");
@@ -6646,7 +6649,7 @@ function setLeaderboardMeta(ts, { isStale = false } = {}) {
       target.innerHTML = `<div class="leaderboard-empty">${t("loading")}</div>`;
       try {
         const url = new URL(`${API_BASE}/api/affiliate/leaderboard`);
-        url.searchParams.set("window", "week");
+        url.searchParams.set("window", "month");
         if (userId) url.searchParams.set("user_id", userId);
         const res = await fetch(url.toString());
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -6663,12 +6666,24 @@ function setLeaderboardMeta(ts, { isStale = false } = {}) {
             weeks = [];
           }
         }
+        const monthLabel = data?.month_key
+          ? `${data.month_key.slice(0, 4)}-${data.month_key.slice(4, 6)}`
+          : "";
+        const resetDate = data?.month_reset_at_utc ? new Date(data.month_reset_at_utc) : null;
+        const resetLabel = resetDate && !Number.isNaN(resetDate.getTime())
+          ? resetDate.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric", timeZone: "Asia/Kuala_Lumpur" })
+          : "";
+        const myConversionDisplay = my && (my.conversion_month === null || my.conversion_month === undefined)
+          ? "—"
+          : `${(Number(my?.conversion_month || 0) * 100).toFixed(1)}%`;
         const myCard = my ? `
           <div class="leaderboard-summary" style="margin-bottom:10px;">
-            <div class="summary-title">My Stats (This Week)</div>
-            <div class="summary-row"><span>Qualified</span><strong>${Number(my.qualified_week || 0)}</strong></div>
-            <div class="summary-row"><span>Joins</span><strong>${Number(my.joins_week_raw || 0)} (counted ${Number(my.joins_week_counted || 0)})</strong></div>
-            <div class="summary-row"><span>Conversion</span><strong>${(Number(my.conversion_week || 0) * 100).toFixed(1)}%</strong></div>
+            <div class="summary-title">My Stats (This Month)</div>
+            ${monthLabel ? `<div class="summary-row"><span>Month</span><strong>${escapeHtml(monthLabel)}</strong></div>` : ""}
+            ${resetLabel ? `<div class="summary-row"><span>Resets</span><strong>${escapeHtml(resetLabel)} (Asia/Kuala Lumpur)</strong></div>` : ""}
+            <div class="summary-row"><span>Qualified</span><strong>${Number(my.qualified_month || 0)}</strong></div>
+            <div class="summary-row"><span>Joins</span><strong>${Number(my.joins_month || 0)}</strong></div>
+            <div class="summary-row"><span>Conversion</span><strong>${myConversionDisplay}</strong></div>
             ${isAdmin ? `<div class="summary-row"><span>Flag</span><strong>${String(my.quality_flag || "new")}</strong></div>` : ""}
           </div>
         ` : `<div class="leaderboard-empty">${t("login_affiliate_stats")}</div>`;

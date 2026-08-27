@@ -74,6 +74,8 @@ from affiliate_leaderboard import (
     ensure_affiliate_snapshot_indexes,
     compute_affiliate_weekly_kpis_live,
     compute_affiliate_weekly_kpis_final,
+    compute_affiliate_monthly_kpis_live,
+    affiliate_month_window_utc_from_reference,
     build_affiliate_leaderboard_snapshot,
     affiliate_previous_completed_week_window_kl,
     affiliate_week_window_from_week_key_kl,
@@ -6667,12 +6669,15 @@ def api_referral_share_content():
 def get_affiliate_leaderboard_week():
     if get_app_setting("feature_flags", "affiliate") is False:
         return jsonify({"success": False, "error": "feature_disabled"}), 200
-    window = (request.args.get("window") or "week").strip().lower()
-    if window != "week":
+    window = (request.args.get("window") or "month").strip().lower()
+    if window != "month":
         return jsonify({"success": False, "error": "unsupported_window"}), 400
 
-    snapshot = compute_affiliate_weekly_kpis_live(db)
-    rows = list(snapshot.get("affiliate_leaderboard_week") or [])
+    # Same monthly window and qualified_events definition used by
+    # evaluate_monthly_affiliate_reward(), so the Mini App qualified count
+    # always matches the Affiliate Centre's canonical reward count.
+    snapshot = compute_affiliate_monthly_kpis_live(db)
+    rows = list(snapshot.get("affiliate_leaderboard_month") or [])
 
     raw_user_id = request.args.get("user_id")
     try:
@@ -6694,6 +6699,9 @@ def get_affiliate_leaderboard_week():
         for u in users_collection.find({"user_id": {"$in": ids}}, {"user_id": 1, "username": 1, "first_name": 1}):
             users_by_id[int(u.get("user_id"))] = u
 
+    # Both the leaderboard rows and "My Stats" are read from this same monthly
+    # snapshot/payload — there is no separate frontend or backend computation
+    # path for the logged-in user's own numbers.
     leaderboard = []
     my_stats = None
     for item in rows:
@@ -6710,87 +6718,38 @@ def get_affiliate_leaderboard_week():
         leaderboard.append(row)
         if current_user_id and str(referrer_id) == str(current_user_id):
             my_stats = {
-                "joins_week_raw": int(row.get("joins_week_raw", 0) or 0),
-                "joins_week_counted": int(row.get("joins_week_counted", 0) or 0),
-                "qualified_week": int(row.get("qualified_week", 0) or 0),
-                "conversion_week": float(row.get("conversion_week", 0.0) or 0.0),
+                "rank": int(row.get("rank", 0) or 0),
+                "referrer_id": referrer_id,
+                "joins_month": int(row.get("joins_month", 0) or 0),
+                "qualified_month": int(row.get("qualified_month", 0) or 0),
+                "conversion_month": row.get("conversion_month"),
                 "quality_flag": row.get("quality_flag") or "new",
             }
 
     if current_user_id and my_stats is None:
-        snapshot_by_referrer = snapshot.get("affiliate_weekly_by_referrer") or {}
-        if isinstance(snapshot_by_referrer, dict):
-            cached_stats = snapshot_by_referrer.get(str(current_user_id))
-            if isinstance(cached_stats, dict):
-                my_stats = {
-                    "joins_week_raw": int(cached_stats.get("joins_week_raw", 0) or 0),
-                    "joins_week_counted": int(cached_stats.get("joins_week_counted", 0) or 0),
-                    "qualified_week": int(cached_stats.get("qualified_week", 0) or 0),
-                    "conversion_week": float(cached_stats.get("conversion_week", 0.0) or 0.0),
-                    "quality_flag": cached_stats.get("quality_flag") or "new",
-                }
-
-    if current_user_id and my_stats is None:
-        week_start_utc, week_end_utc, _ = affiliate_week_window_utc_from_reference()
-        joins_week_raw = int(
-            pending_referrals_collection.count_documents(
-                {
-                    "inviter_user_id": current_user_id,
-                    "created_at_utc": {"$gte": week_start_utc, "$lt": week_end_utc},
-                }
-            )
-        )
-        joins_week_counted = int(
-            db.referral_flow_events.count_documents(
-                {
-                    "event": "join_counted",
-                    "referrer_id": current_user_id,
-                    "ts_utc": {"$gte": week_start_utc, "$lt": week_end_utc},
-                }
-            )
-        )
-        # Use find_one() for existence check instead of count_documents(limit=1)
-        # because some PyMongo versions reject the limit parameter.
-        has_flow_settled = (
-            db.referral_flow_events.find_one(
-                {
-                    "event": "referral_settled",
-                    "ts_utc": {"$gte": week_start_utc, "$lt": week_end_utc},
-                    "referrer_id": {"$ne": None},
-                },
-                {"_id": 1},
-            )
-            is not None
-        )
-        if has_flow_settled:
-            qualified_week = int(
-                db.referral_flow_events.count_documents(
-                    {
-                        "event": "referral_settled",
-                        "referrer_id": current_user_id,
-                        "ts_utc": {"$gte": week_start_utc, "$lt": week_end_utc},
-                    }
-                )
-            )
+        # Not in the top-50 rows returned above: fall back to the same cached
+        # monthly payload (never a separately-computed query) before treating
+        # the user as having zero activity this month.
+        snapshot_by_referrer = snapshot.get("affiliate_monthly_by_referrer") or {}
+        cached_stats = snapshot_by_referrer.get(str(current_user_id)) if isinstance(snapshot_by_referrer, dict) else None
+        if isinstance(cached_stats, dict):
+            my_stats = {
+                "rank": None,
+                "referrer_id": current_user_id,
+                "joins_month": int(cached_stats.get("joins_month", 0) or 0),
+                "qualified_month": int(cached_stats.get("qualified_month", 0) or 0),
+                "conversion_month": cached_stats.get("conversion_month"),
+                "quality_flag": cached_stats.get("quality_flag") or "new",
+            }
         else:
-            qualified_week = int(
-                db.referral_events.count_documents(
-                    {
-                        "event": "referral_settled",
-                        "inviter_id": current_user_id,
-                        "occurred_at": {"$gte": week_start_utc, "$lt": week_end_utc},
-                    }
-                )
-            )
-        conversion_week = float(qualified_week / joins_week_raw) if joins_week_raw > 0 else 0.0
-        quality_flag = "new" if joins_week_raw < 10 else ("low_quality" if conversion_week < 0.20 else "ok")
-        my_stats = {
-            "joins_week_raw": joins_week_raw,
-            "joins_week_counted": joins_week_counted,
-            "qualified_week": qualified_week,
-            "conversion_week": round(conversion_week, 4),
-            "quality_flag": quality_flag,
-        }
+            my_stats = {
+                "rank": None,
+                "referrer_id": current_user_id,
+                "joins_month": 0,
+                "qualified_month": 0,
+                "conversion_month": None,
+                "quality_flag": "new",
+            }
 
     if not is_admin:
         for row in leaderboard:
@@ -6798,11 +6757,16 @@ def get_affiliate_leaderboard_week():
         if isinstance(my_stats, dict):
             my_stats.pop("quality_flag", None)
 
+    month_start_utc = snapshot.get("month_start_utc")
+    month_end_utc = snapshot.get("month_end_utc")
+
     return jsonify(
         {
             "generated_at": (snapshot.get("generated_at") or datetime.now(timezone.utc)).isoformat(),
-            "week_start_utc": snapshot.get("week_start_utc").isoformat() if snapshot.get("week_start_utc") else None,
-            "week_end_utc": snapshot.get("week_end_utc").isoformat() if snapshot.get("week_end_utc") else None,
+            "month_key": snapshot.get("month_key"),
+            "month_start_utc": month_start_utc.isoformat() if month_start_utc else None,
+            "month_end_utc": month_end_utc.isoformat() if month_end_utc else None,
+            "month_reset_at_utc": month_end_utc.isoformat() if month_end_utc else None,
             "rules": snapshot.get("rules") or {},
             "leaderboard": leaderboard,
             "my_stats": my_stats,
