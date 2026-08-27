@@ -94,6 +94,17 @@ def affiliate_week_window_from_week_key_kl(week_key: str) -> dict[str, Any] | No
     }
 
 
+def affiliate_month_window_utc_from_reference(reference_utc: datetime | None = None) -> tuple[datetime, datetime, str]:
+    """Canonical KL calendar-month window, reused from affiliate_rewards._month_window_utc
+
+    so the Mini App leaderboard's qualified count is computed against the exact
+    same window as evaluate_monthly_affiliate_reward().
+    """
+    from affiliate_rewards import _month_window_utc
+
+    return _month_window_utc(reference_utc)
+
+
 def ensure_affiliate_leaderboard_indexes(db_ref) -> None:
     db_ref.affiliate_referral_cooldown.create_index([("updated_at", ASCENDING)], name="cooldown_updated_at")
     db_ref.referral_flow_events.create_index([("event", ASCENDING), ("ts_utc", ASCENDING)], name="rfe_event_ts")
@@ -104,6 +115,8 @@ def ensure_affiliate_leaderboard_indexes(db_ref) -> None:
     db_ref.affiliate_weekly_kpis.create_index([("generated_at", DESCENDING)], name="affiliate_weekly_generated_desc")
     db_ref.affiliate_weekly_kpis_live.create_index([("week_start_utc", ASCENDING)], unique=True, name="uniq_affiliate_week_start_live")
     db_ref.affiliate_weekly_kpis_live.create_index([("generated_at", DESCENDING)], name="affiliate_weekly_generated_desc_live")
+    db_ref.affiliate_monthly_kpis_live.create_index([("month_start_utc", ASCENDING)], unique=True, name="uniq_affiliate_month_start_live")
+    db_ref.affiliate_monthly_kpis_live.create_index([("generated_at", DESCENDING)], name="affiliate_monthly_generated_desc_live")
 
 
 def ensure_affiliate_snapshot_indexes(db_ref) -> None:
@@ -335,6 +348,205 @@ def _compute_affiliate_weekly_rows(db_ref, week_start_utc: datetime, week_end_ut
         leaderboard[idx - 1] = copied
 
     return leaderboard
+
+
+def _compute_affiliate_monthly_rows(db_ref, month_start_utc: datetime, month_end_utc: datetime) -> list[dict[str, Any]]:
+    """Monthly Affiliate leaderboard rows.
+
+    qualified_month uses the exact same collection/filter as
+    evaluate_monthly_affiliate_reward() (qualified_events.qualified_at within the
+    KL calendar month), so the Mini App qualified count always matches the
+    canonical affiliate reward count.
+
+    joins_month/conversion_month are cohort-based: an invitee only counts toward
+    conversion if they both joined (pending_referrals) in this month AND are
+    qualified (qualified_events, regardless of when qualification happened) -
+    this keeps conversion_month from ever exceeding 100%, unlike mixing
+    "joined this month" with "qualified this month regardless of join date".
+    """
+    cohort_rows = list(
+        db_ref.pending_referrals.aggregate(
+            [
+                {
+                    "$match": {
+                        "created_at_utc": {"$gte": month_start_utc, "$lt": month_end_utc},
+                        "inviter_user_id": {"$ne": None},
+                        "invitee_user_id": {"$ne": None},
+                    }
+                },
+                {"$group": {"_id": {"referrer": "$inviter_user_id", "invitee": "$invitee_user_id"}}},
+                {
+                    "$lookup": {
+                        "from": "qualified_events",
+                        "localField": "_id.invitee",
+                        "foreignField": "invitee_id",
+                        "as": "qualified_match",
+                    }
+                },
+                {
+                    "$addFields": {
+                        "is_qualified": {
+                            "$gt": [
+                                {
+                                    "$size": {
+                                        "$filter": {
+                                            "input": "$qualified_match",
+                                            "as": "q",
+                                            "cond": {"$eq": ["$$q.referrer_id", "$_id.referrer"]},
+                                        }
+                                    }
+                                },
+                                0,
+                            ]
+                        }
+                    }
+                },
+                {
+                    "$group": {
+                        "_id": "$_id.referrer",
+                        "joins_month": {"$sum": 1},
+                        "cohort_qualified_month": {"$sum": {"$cond": ["$is_qualified", 1, 0]}},
+                    }
+                },
+            ]
+        )
+    )
+
+    qualified_month_rows = list(
+        db_ref.qualified_events.aggregate(
+            [
+                {
+                    "$match": {
+                        "qualified_at": {"$gte": month_start_utc, "$lt": month_end_utc},
+                        "referrer_id": {"$ne": None},
+                    }
+                },
+                {"$group": {"_id": "$referrer_id", "qualified_month": {"$sum": 1}}},
+            ]
+        )
+    )
+
+    board_map: dict[str, dict[str, Any]] = {}
+
+    def _touch(referrer_raw):
+        referrer_key = str(referrer_raw)
+        if referrer_key not in board_map:
+            board_map[referrer_key] = {
+                "referrer_id": referrer_key,
+                "joins_month": 0,
+                "cohort_qualified_month": 0,
+                "qualified_month": 0,
+            }
+        return board_map[referrer_key]
+
+    for row in cohort_rows:
+        ref_id = row.get("_id")
+        if ref_id is None:
+            continue
+        entry = _touch(ref_id)
+        entry["joins_month"] = int(row.get("joins_month", 0) or 0)
+        entry["cohort_qualified_month"] = int(row.get("cohort_qualified_month", 0) or 0)
+
+    for row in qualified_month_rows:
+        ref_id = row.get("_id")
+        if ref_id is None:
+            continue
+        _touch(ref_id)["qualified_month"] = int(row.get("qualified_month", 0) or 0)
+
+    leaderboard = []
+    for item in board_map.values():
+        joins_month = int(item.get("joins_month", 0) or 0)
+        qualified_month = int(item.get("qualified_month", 0) or 0)
+        cohort_qualified_month = int(item.get("cohort_qualified_month", 0) or 0)
+        conversion_month = float(cohort_qualified_month / joins_month) if joins_month > 0 else None
+        if joins_month < 10:
+            quality_flag = "new"
+        elif conversion_month is not None and conversion_month < MIN_CONVERSION_THRESHOLD:
+            quality_flag = "low_quality"
+        else:
+            quality_flag = "ok"
+        leaderboard.append(
+            {
+                "referrer_id": item["referrer_id"],
+                "joins_month": joins_month,
+                "qualified_month": qualified_month,
+                "conversion_month": round(conversion_month, 4) if conversion_month is not None else None,
+                "quality_flag": quality_flag,
+            }
+        )
+
+    leaderboard.sort(
+        key=lambda r: (
+            -int(r.get("qualified_month", 0)),
+            -int(r.get("joins_month", 0)),
+            -float(r.get("conversion_month") or 0.0),
+        )
+    )
+    for idx, row in enumerate(leaderboard, start=1):
+        copied = dict(row)
+        copied["rank"] = idx
+        leaderboard[idx - 1] = copied
+
+    return leaderboard
+
+
+def _build_affiliate_monthly_payload(db_ref, *, reference_utc: datetime | None = None) -> tuple[datetime, dict]:
+    now_utc_ts = reference_utc or datetime.now(timezone.utc)
+    if now_utc_ts.tzinfo is None:
+        now_utc_ts = now_utc_ts.replace(tzinfo=timezone.utc)
+    now_utc_ts = now_utc_ts.astimezone(timezone.utc)
+
+    month_start_utc, month_end_utc, yyyymm = affiliate_month_window_utc_from_reference(now_utc_ts)
+    leaderboard = _compute_affiliate_monthly_rows(db_ref, month_start_utc, month_end_utc)
+    top50 = leaderboard[:50]
+
+    payload = {
+        "month_start_utc": month_start_utc,
+        "month_end_utc": month_end_utc,
+        "month_key": yyyymm,
+        "generated_at": now_utc_ts,
+        "rules": {
+            "min_conversion_threshold": MIN_CONVERSION_THRESHOLD,
+        },
+        "affiliate_leaderboard_month": top50,
+        "affiliate_monthly_by_referrer": {
+            str(item.get("referrer_id")): {
+                "joins_month": int(item.get("joins_month", 0) or 0),
+                "qualified_month": int(item.get("qualified_month", 0) or 0),
+                "conversion_month": item.get("conversion_month"),
+                "quality_flag": item.get("quality_flag") or "new",
+            }
+            for item in sorted(
+                leaderboard,
+                key=lambda r: (-int(r.get("joins_month", 0)), -int(r.get("qualified_month", 0))),
+            )[:500]
+        },
+    }
+    return month_start_utc, payload
+
+
+def compute_affiliate_monthly_kpis_live(db_ref, *, reference_utc: datetime | None = None) -> dict:
+    now_utc_ts = reference_utc or datetime.now(timezone.utc)
+    if now_utc_ts.tzinfo is None:
+        now_utc_ts = now_utc_ts.replace(tzinfo=timezone.utc)
+    now_utc_ts = now_utc_ts.astimezone(timezone.utc)
+    month_start_utc, month_end_utc, _ = affiliate_month_window_utc_from_reference(now_utc_ts)
+    existing = db_ref.affiliate_monthly_kpis_live.find_one({"month_start_utc": month_start_utc})
+    if existing:
+        existing_generated_at = _coerce_datetime_utc(existing.get("generated_at"))
+        if existing_generated_at is None and existing.get("generated_at") is not None:
+            logger.warning("[AFFILIATE][LIVE_MONTHLY_KPI] stale_generated_at_unparseable value=%s", existing.get("generated_at"))
+        if existing_generated_at is not None:
+            if (now_utc_ts - existing_generated_at).total_seconds() < LIVE_TTL_SECONDS:
+                return existing
+
+    _, payload = _build_affiliate_monthly_payload(db_ref, reference_utc=now_utc_ts)
+    payload["month_start_utc"] = _coerce_datetime_utc(payload.get("month_start_utc")) or month_start_utc
+    payload["month_end_utc"] = _coerce_datetime_utc(payload.get("month_end_utc")) or month_end_utc
+    payload["generated_at"] = _coerce_datetime_utc(payload.get("generated_at")) or now_utc_ts
+
+    db_ref.affiliate_monthly_kpis_live.update_one({"month_start_utc": month_start_utc}, {"$set": payload}, upsert=True)
+    return db_ref.affiliate_monthly_kpis_live.find_one({"month_start_utc": month_start_utc}) or payload
 
 
 def _build_affiliate_weekly_payload(db_ref, *, reference_utc: datetime | None = None) -> tuple[datetime, dict]:
