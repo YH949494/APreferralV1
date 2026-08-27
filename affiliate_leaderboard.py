@@ -509,6 +509,11 @@ def _build_affiliate_monthly_payload(db_ref, *, reference_utc: datetime | None =
             "min_conversion_threshold": MIN_CONVERSION_THRESHOLD,
         },
         "affiliate_leaderboard_month": top50,
+        # Every referrer with any activity this month must be retrievable here —
+        # not just the top N by one metric — so "My Stats" for a referrer who
+        # qualified this month but joined in an earlier month (joins_month=0)
+        # never falls through to a false zero. `leaderboard` is already fully
+        # materialized in memory, so keeping every entry costs nothing extra.
         "affiliate_monthly_by_referrer": {
             str(item.get("referrer_id")): {
                 "joins_month": int(item.get("joins_month", 0) or 0),
@@ -516,10 +521,7 @@ def _build_affiliate_monthly_payload(db_ref, *, reference_utc: datetime | None =
                 "conversion_month": item.get("conversion_month"),
                 "quality_flag": item.get("quality_flag") or "new",
             }
-            for item in sorted(
-                leaderboard,
-                key=lambda r: (-int(r.get("joins_month", 0)), -int(r.get("qualified_month", 0))),
-            )[:500]
+            for item in leaderboard
         },
     }
     return month_start_utc, payload

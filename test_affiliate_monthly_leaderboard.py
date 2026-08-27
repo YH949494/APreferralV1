@@ -256,3 +256,44 @@ class TestMyStatsMatchesLeaderboardRow:
         assert leaderboard_row["qualified_month"] == my_stats_row["qualified_month"]
         assert leaderboard_row["conversion_month"] == my_stats_row["conversion_month"]
         assert leaderboard_row["quality_flag"] == my_stats_row["quality_flag"]
+
+    def test_my_stats_fallback_not_dropped_when_many_referrers_have_activity(self):
+        # A referrer who qualified this month but joined in an earlier month has
+        # joins_month == 0. If affiliate_monthly_by_referrer were capped by
+        # joins_month (as it once was), such a referrer could fall out of the
+        # cache once enough other referrers had nonzero joins, and "My Stats"
+        # would wrongly report zero instead of falling back correctly.
+        db = _fresh_db()
+        ref = datetime(2026, 2, 15, 0, 0, 0, tzinfo=timezone.utc)
+        month_start_utc, _, _ = affiliate_month_window_utc_from_reference(ref)
+        prev_month_start_utc, _, _ = affiliate_month_window_utc_from_reference(
+            month_start_utc - timedelta(days=1)
+        )
+
+        # Many other referrers with joins this month, to fill any join-ranked cap.
+        for i in range(1, 505):
+            db.pending_referrals.insert_one(
+                {
+                    "inviter_user_id": 1000 + i,
+                    "invitee_user_id": 2000 + i,
+                    "created_at_utc": ref,
+                }
+            )
+
+        # This referrer joined last month and qualified this month: joins_month=0.
+        db.pending_referrals.insert_one(
+            {
+                "inviter_user_id": 42,
+                "invitee_user_id": 900,
+                "created_at_utc": prev_month_start_utc,
+            }
+        )
+        db.qualified_events.insert_one(
+            {"invitee_id": 900, "referrer_id": 42, "qualified_at": ref}
+        )
+
+        _, payload = _build_affiliate_monthly_payload(db, reference_utc=ref)
+        my_stats_row = payload["affiliate_monthly_by_referrer"].get("42")
+        assert my_stats_row is not None
+        assert my_stats_row["joins_month"] == 0
+        assert my_stats_row["qualified_month"] == 1
