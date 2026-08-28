@@ -49,6 +49,7 @@ from affiliate_reward_plans import (  # noqa: E402
     resolve_plan_id,
     tier_recipe,
 )
+from affiliate_rewards import _as_aware_utc  # noqa: E402
 
 TIERS = ("T1", "T2", "T3", "T4", "T5")
 
@@ -114,30 +115,95 @@ def check_plan_config(f: Findings) -> None:
     f.ok("plan boundary: 202608 -> legacy, 202609 -> denomination")
 
 
-def check_inventory(db, f: Findings, month: str) -> None:
+def check_inventory(db, f: Findings, month: str, expected_demand: dict | None = None) -> None:
+    """STRICT preflight for one entitlement month.
+
+    Fails (exit non-zero) on missing batch coverage, ambiguous coverage, a
+    non-canonical batch boundary, or insufficient stock for the expected
+    demand. Only rows belonging to the matched batch are counted — undated
+    legacy stock is deliberately NOT counted toward a scheduled month,
+    because the runtime resolver refuses to issue September denomination
+    rewards from it (see _resolve_denomination_pool_target).
+    """
     print(f"\n== inventory (entitlement month {month}) ==")
-    from affiliate_rewards import _find_batches_for_period, _month_window_from_yyyymm
+    from affiliate_rewards import _month_window_from_yyyymm, _find_batches_for_period
 
     start_utc, end_utc = _month_window_from_yyyymm(month)
     if start_utc is None:
         f.add(f"invalid month {month!r}")
         return
-    print(f"  window: {start_utc.isoformat()} -> {end_utc.isoformat()} (UTC)")
+    print(f"  canonical window: {start_utc.isoformat()} -> {end_utc.isoformat()} (UTC)")
 
-    pools = DENOMINATION_POOL_IDS if resolve_plan_id(month) == DENOMINATION_PLAN_ID else TIERS
+    plan_id = resolve_plan_id(month)
+    pools = DENOMINATION_POOL_IDS if plan_id == DENOMINATION_PLAN_ID else TIERS
+
+    # ---- required inventory from expected demand ------------------------
+    required_by_pool: dict[str, int] = {}
+    if expected_demand:
+        for tier, count in expected_demand.items():
+            recipe = tier_recipe(month, tier)
+            if not recipe:
+                f.add(f"unknown tier {tier!r} in expected demand")
+                continue
+            for pool_id, qty in recipe_required_by_pool(recipe).items():
+                required_by_pool[pool_id] = required_by_pool.get(pool_id, 0) + qty * int(count)
+        print(f"  expected demand: {expected_demand}")
+        print(f"  required inventory: {required_by_pool or '(none)'}")
+
     for pool_id in pools:
-        available = db.voucher_pools.count_documents({"pool_id": pool_id, "status": "available"})
-        issued = db.voucher_pools.count_documents({"pool_id": pool_id, "status": "issued"})
         batches = _find_batches_for_period(
             db, pool_id=pool_id, period_start_utc=start_utc, period_end_utc=end_utc
         )
-        note = f"available={available} issued={issued} batches_for_month={len(batches)}"
+        undated = int(db.voucher_pools.count_documents(
+            {"pool_id": pool_id, "status": "available", "batch_id": {"$exists": False}}
+        ))
+
+        if not batches:
+            f.add(
+                f"{pool_id}: NO scheduled batch covers {month} "
+                f"(undated/legacy available={undated} — NOT usable for this month)"
+            )
+            continue
         if len(batches) > 1:
-            f.add(f"{pool_id}: {len(batches)} batches fully cover {month} (ambiguous) — {note}")
+            f.add(
+                f"{pool_id}: {len(batches)} batches cover {month} (ambiguous) — "
+                f"batch_ids={[str(b.get('_id')) for b in batches]}"
+            )
+            continue
+
+        batch = batches[0]
+        b_start = _as_aware_utc(batch.get("starts_at"))
+        b_end = _as_aware_utc(batch.get("ends_at"))
+        if b_start != start_utc or b_end != end_utc:
+            f.add(
+                f"{pool_id}: batch window {b_start} -> {b_end} is not the canonical "
+                f"KL month window {start_utc} -> {end_utc}"
+            )
+            continue
+        if batch.get("upload_status") not in (None, "ready"):
+            f.add(f"{pool_id}: batch upload_status={batch.get('upload_status')!r} is not ready")
+            continue
+        if bool(batch.get("distribution_disabled")):
+            f.add(f"{pool_id}: batch distribution is disabled")
+            continue
+
+        # Only rows on THIS batch count.
+        available = int(db.voucher_pools.count_documents(
+            {"batch_id": batch.get("_id"), "status": "available"}
+        ))
+        required = int(required_by_pool.get(pool_id, 0))
+        shortage = max(0, required - available)
+        line = (
+            f"{pool_id}: batch ok, available={available}"
+            + (f" required={required} shortage={shortage}" if expected_demand else "")
+            + (f" (undated legacy={undated}, not counted)" if undated else "")
+        )
+        if expected_demand and shortage:
+            f.add(f"{line} — INSUFFICIENT")
         elif available == 0:
-            f.add(f"{pool_id}: no available stock — {note}")
+            f.add(f"{line} — batch has no available stock")
         else:
-            f.ok(f"{pool_id}: {note}")
+            f.ok(line)
 
 
 def _linked_issued_rows(db, ledger_id) -> list[dict]:
@@ -313,7 +379,21 @@ def main() -> int:
     parser.add_argument("--month", help="Entitlement month, YYYYMM (e.g. 202609)")
     parser.add_argument("--check", action="append", choices=CHECKS,
                         help="Run only this check (repeatable). Default: all.")
+    parser.add_argument(
+        "--expect", action="append", metavar="TIER=COUNT",
+        help="Expected number of rewards for a tier, e.g. --expect T3=40. "
+             "Repeatable. Required inventory is derived from the month's own "
+             "recipes and reported as required/available/shortage per denomination.",
+    )
     args = parser.parse_args()
+
+    expected_demand: dict[str, int] = {}
+    for item in args.expect or []:
+        tier, _, count = str(item).partition("=")
+        try:
+            expected_demand[tier.strip().upper()] = int(count)
+        except ValueError:
+            parser.error(f"--expect expects TIER=COUNT, got {item!r}")
     selected = args.check or list(CHECKS)
 
     print("READ-ONLY affiliate reward-plan verification. No writes are performed.")
@@ -332,7 +412,7 @@ def main() -> int:
             if not args.month:
                 print("\n== inventory ==\n  [skipped] --month is required")
             else:
-                check_inventory(db, f, args.month)
+                check_inventory(db, f, args.month, expected_demand or None)
         if "ledger-integrity" in db_checks:
             check_ledger_integrity(db, f, args.month)
         if "plan-assignment" in db_checks:

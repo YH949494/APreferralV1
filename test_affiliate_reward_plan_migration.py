@@ -51,10 +51,41 @@ def _stock(db, pool_id, count, prefix, *, start=0):
         db.voucher_pools.insert_one(row)
 
 
-def _stock_all_denominations(db, count=60):
-    _stock(db, "AFFILIATE_5", count, "F")
-    _stock(db, "AFFILIATE_10", count, "T")
-    _stock(db, "AFFILIATE_50", count, "H")
+def _stock_denomination_batch(db, pool_id, count, prefix, *, month="202609", start=0):
+    """Stock a denomination pool the way production must: a scheduled batch
+    whose window is exactly the canonical KL entitlement month.
+
+    Denomination pools have NO undated-legacy fallback (see
+    `_resolve_denomination_pool_target`), so undated rows are deliberately
+    unusable and these tests must not rely on them.
+    """
+    import affiliate_voucher_batches as batches
+
+    codes = [f"{prefix}{i:04d}" for i in range(start, start + count)]
+    existing = db.affiliate_voucher_batches.find_one({"pool_id": pool_id})
+    if existing is not None:
+        # Top up the pool's existing month batch rather than creating an
+        # overlapping second one (which create_batch correctly refuses).
+        result = batches.add_codes_to_batch(
+            db, existing["_id"], admin_identity="test", codes=codes,
+        )
+    else:
+        result = batches.create_batch(
+            db,
+            admin_identity="test",
+            batch_name=f"{pool_id} {month}",
+            pool_id=pool_id,
+            entitlement_month=month,
+            codes=codes,
+        )
+    assert result["ok"] is True, result
+    return result
+
+
+def _stock_all_denominations(db, count=60, *, month="202609"):
+    _stock_denomination_batch(db, "AFFILIATE_5", count, "F", month=month)
+    _stock_denomination_batch(db, "AFFILIATE_10", count, "T", month=month)
+    _stock_denomination_batch(db, "AFFILIATE_50", count, "H", month=month)
 
 
 def _qualify(db, uid, total, at):
@@ -697,7 +728,7 @@ class TestShortageAndRecovery:
 
     def test_missing_one_denomination_retains_partial_and_reports_shortage(self):
         db = _db()
-        _stock(db, "AFFILIATE_10", 10, "T")  # $50 pool deliberately empty
+        _stock_denomination_batch(db, "AFFILIATE_10", 10, "T")  # $50 pool deliberately empty
         _qualify(db, 31, 50, SEP)
         ar.evaluate_monthly_affiliate_reward(db, referrer_id=31, now_utc=SEP)
         t3 = db.affiliate_ledger.find_one({"user_id": 31, "tier": "T3"})
@@ -708,7 +739,7 @@ class TestShortageAndRecovery:
 
     def test_retry_after_stock_replenishment_finalizes_without_duplication(self):
         db = _db()
-        _stock(db, "AFFILIATE_10", 10, "T")
+        _stock_denomination_batch(db, "AFFILIATE_10", 10, "T")
         _qualify(db, 32, 50, SEP)
         ar.evaluate_monthly_affiliate_reward(db, referrer_id=32, now_utc=SEP)
         t3 = db.affiliate_ledger.find_one({"user_id": 32, "tier": "T3"})
@@ -718,7 +749,7 @@ class TestShortageAndRecovery:
         ]
         assert len(held) == 1
 
-        _stock(db, "AFFILIATE_50", 5, "H")
+        _stock_denomination_batch(db, "AFFILIATE_50", 5, "H")
         ar._retry_stuck_pending_manual_affiliate_ledgers(db, now_utc=SEP)
 
         t3 = db.affiliate_ledger.find_one({"user_id": 32, "tier": "T3"})
@@ -730,7 +761,7 @@ class TestShortageAndRecovery:
 
     def test_repeated_retry_while_still_short_consumes_nothing_extra(self):
         db = _db()
-        _stock(db, "AFFILIATE_10", 10, "T")
+        _stock_denomination_batch(db, "AFFILIATE_10", 10, "T")
         _qualify(db, 33, 50, SEP)
         ar.evaluate_monthly_affiliate_reward(db, referrer_id=33, now_utc=SEP)
         after_first = sum(_denominations(db).values())
@@ -740,11 +771,11 @@ class TestShortageAndRecovery:
 
     def test_concurrent_retry_does_not_over_allocate(self):
         db = _db()
-        _stock(db, "AFFILIATE_10", 2, "T")
+        _stock_denomination_batch(db, "AFFILIATE_10", 2, "T")
         _qualify(db, 34, 150, SEP)  # T4 needs 3x$10 + 3x$50
         ar.evaluate_monthly_affiliate_reward(db, referrer_id=34, now_utc=SEP)
-        _stock(db, "AFFILIATE_10", 20, "T", start=100)
-        _stock(db, "AFFILIATE_50", 20, "H")
+        _stock_denomination_batch(db, "AFFILIATE_10", 20, "T", start=100)
+        _stock_denomination_batch(db, "AFFILIATE_50", 20, "H")
         for _ in range(3):
             ar._retry_stuck_pending_manual_affiliate_ledgers(db, now_utc=SEP)
         t4 = db.affiliate_ledger.find_one({"user_id": 34, "tier": "T4"})
@@ -812,7 +843,7 @@ class TestShortageAndRecovery:
 
     def test_announcement_data_only_available_once_fully_issued(self):
         db = _db()
-        _stock(db, "AFFILIATE_10", 10, "T")
+        _stock_denomination_batch(db, "AFFILIATE_10", 10, "T")
         _qualify(db, 36, 50, SEP)
         ar.evaluate_monthly_affiliate_reward(db, referrer_id=36, now_utc=SEP)
         t3 = db.affiliate_ledger.find_one({"user_id": 36, "tier": "T3"})
@@ -820,22 +851,22 @@ class TestShortageAndRecovery:
         assert t3["status"] != "ISSUED"
         assert not t3.get("voucher_code")
 
-        _stock(db, "AFFILIATE_50", 5, "H")
+        _stock_denomination_batch(db, "AFFILIATE_50", 5, "H")
         ar._retry_stuck_pending_manual_affiliate_ledgers(db, now_utc=SEP)
         t3 = db.affiliate_ledger.find_one({"user_id": 36, "tier": "T3"})
         assert t3["status"] == "ISSUED" and t3["voucher_code"]
 
     def test_user_delivery_cards_only_show_complete_bundles(self):
         db = _db()
-        _stock(db, "AFFILIATE_10", 10, "T")
+        _stock_denomination_batch(db, "AFFILIATE_10", 10, "T")
         _qualify(db, 37, 50, SEP)
         ar.evaluate_monthly_affiliate_reward(db, referrer_id=37, now_utc=SEP)
         # T1 completed ($10 x 1); T2/T3 are short on $5 / $50.
         cards = ar.affiliate_bundle_visible_cards(db, user_id=37)
         assert [c["affiliate_tier"] for c in cards] == ["T1"]
 
-        _stock(db, "AFFILIATE_5", 5, "F")
-        _stock(db, "AFFILIATE_50", 5, "H")
+        _stock_denomination_batch(db, "AFFILIATE_5", 5, "F")
+        _stock_denomination_batch(db, "AFFILIATE_50", 5, "H")
         ar._retry_stuck_pending_manual_affiliate_ledgers(db, now_utc=SEP)
         cards = ar.affiliate_bundle_visible_cards(db, user_id=37)
         assert sorted(c["affiliate_tier"] for c in cards) == ["T1", "T2", "T3"]
@@ -956,6 +987,243 @@ class TestMonetaryIntegrity:
         assert "bundle_integrity_failed" in t3["risk_flags"]
         assert "stamped voucher_value=5" in t3["integrity_reason"]
         assert not t3.get("vouchers")
+
+
+class TestDenominationFailsClosedWithoutAScheduledBatch:
+    """September issuance must never silently consume undated denomination
+    stock. A verifier alone is not enough — the runtime resolver itself has
+    to refuse."""
+
+    def test_undated_denomination_stock_is_never_consumed(self):
+        db = _db()
+        # Plenty of stock, but none of it belongs to a scheduled month batch.
+        _stock(db, "AFFILIATE_5", 50, "F")
+        _stock(db, "AFFILIATE_10", 50, "T")
+        _stock(db, "AFFILIATE_50", 50, "H")
+        _qualify(db, 80, 250, SEP)
+        ar.evaluate_monthly_affiliate_reward(db, referrer_id=80, now_utc=SEP)
+
+        for led in _ledgers(db, 80):
+            assert led["status"] == "PENDING_MANUAL", (
+                f"{led['tier']} was issued from undated stock"
+            )
+            assert led["shortage_reasons"], led
+            assert set(led["shortage_reasons"].values()) == {"no_batch_for_entitlement_period"}
+        assert db.voucher_pools.count_documents({"status": "issued"}) == 0, (
+            "undated denomination codes were consumed"
+        )
+
+    def test_a_batch_for_the_wrong_month_does_not_satisfy_september(self):
+        db = _db()
+        _stock_all_denominations(db, month="202610")  # October batches only
+        _qualify(db, 81, 50, SEP)
+        ar.evaluate_monthly_affiliate_reward(db, referrer_id=81, now_utc=SEP)
+        t3 = db.affiliate_ledger.find_one({"user_id": 81, "tier": "T3"})
+        assert t3["status"] == "PENDING_MANUAL"
+        assert db.voucher_pools.count_documents({"status": "issued"}) == 0
+
+    def test_the_correct_month_batch_does_satisfy_it(self):
+        db = _db()
+        _stock_all_denominations(db, month="202609")
+        _qualify(db, 82, 50, SEP)
+        ar.evaluate_monthly_affiliate_reward(db, referrer_id=82, now_utc=SEP)
+        t3 = db.affiliate_ledger.find_one({"user_id": 82, "tier": "T3"})
+        assert t3["status"] == "ISSUED" and t3["issued_value"] == 60
+
+    def test_legacy_tier_pools_keep_their_transitional_fallback(self):
+        # The August path is untouched: undated T* stock still works.
+        db = _db()
+        for i in range(10):
+            db.voucher_pools.insert_one({"pool_id": "T3", "code": f"LEG{i}", "status": "available"})
+        _qualify(db, 83, 50, AUG)
+        ar.evaluate_monthly_affiliate_reward(db, referrer_id=83, now_utc=AUG)
+        t3 = db.affiliate_ledger.find_one({"user_id": 83, "tier": "T3"})
+        assert t3["status"] == "ISSUED", "legacy transitional fallback was broken"
+        assert t3["total_value"] == 50
+
+
+class TestDurableSurplusSweep:
+    """The periodic backstop for the case in-process reconciliation cannot
+    reach: a displaced worker that CRASHES after claiming a surplus code."""
+
+    def _crashed_surplus_state(self, db, uid=70):
+        """Build the exact reviewer scenario and return (ledger, extra_code).
+
+        A loses its lease, claims an eighth T5 code, then crashes before it
+        can reconcile. The ledger is already ISSUED with seven visible codes.
+        """
+        _stock_all_denominations(db)
+        _qualify(db, uid, 250, SEP)
+        ar.evaluate_monthly_affiliate_reward(db, referrer_id=uid, now_utc=SEP)
+        t5 = db.affiliate_ledger.find_one({"user_id": uid, "tier": "T5"})
+        assert t5["status"] == "ISSUED" and t5["issued_code_count"] == 7
+
+        # A wakes with a stale token, claims one more $50, then dies.
+        spare = db.voucher_pools.find_one({"pool_id": "AFFILIATE_50", "status": "available"})
+        db.voucher_pools.update_one(
+            {"_id": spare["_id"]},
+            {"$set": {"status": "issued", "issued_to": uid, "issued_to_user_id": uid,
+                      "issued_at": SEP, "ledger_id": t5["_id"],
+                      "issued_for_ledger_id": str(t5["_id"])}},
+        )
+        assert len(_linked_issued_rows(db, t5)) == 8, "surplus setup failed"
+        return db.affiliate_ledger.find_one({"_id": t5["_id"]}), spare["code"]
+
+    def test_sweep_releases_the_crashed_workers_surplus_code(self):
+        db = _db()
+        t5, extra = self._crashed_surplus_state(db)
+        visible = set(_codes_of(t5))
+        assert extra not in visible, "the surplus code must not be in the visible bundle"
+
+        stats = ar.reconcile_surplus_denomination_allocations(db, now_utc=SEP)
+
+        assert stats["surplus_found"] >= 1
+        assert stats["surplus_released"] == 1
+        assert len(_linked_issued_rows(db, t5)) == 7, "exactly seven rows must remain"
+        row = db.voucher_pools.find_one({"code": extra})
+        assert row["status"] == "available", "the eighth code was not returned to inventory"
+        # Every ownership field is cleared, so the code is genuinely reusable.
+        for field in ("issued_to", "issued_to_user_id", "issued_at",
+                      "ledger_id", "issued_for_ledger_id"):
+            assert field not in row or row[field] is None, f"{field} still set"
+
+    def test_sweep_never_releases_a_user_visible_code(self):
+        db = _db()
+        t5, extra = self._crashed_surplus_state(db)
+        visible = set(_codes_of(t5))
+        ar.reconcile_surplus_denomination_allocations(db, now_utc=SEP)
+        for code in visible:
+            assert db.voucher_pools.find_one({"code": code})["status"] == "issued", (
+                f"visible bundle code {code} was released"
+            )
+        after = db.affiliate_ledger.find_one({"_id": t5["_id"]})
+        assert set(_codes_of(after)) == visible
+        assert after["status"] == "ISSUED"
+        assert after["issued_value"] == 350
+
+    def test_sweep_is_idempotent(self):
+        db = _db()
+        t5, extra = self._crashed_surplus_state(db)
+        first = ar.reconcile_surplus_denomination_allocations(db, now_utc=SEP)
+        assert first["surplus_released"] == 1
+
+        second = ar.reconcile_surplus_denomination_allocations(db, now_utc=SEP)
+        assert second["surplus_released"] == 0, "a second pass released something again"
+        assert second["surplus_found"] == 0
+        assert len(_linked_issued_rows(db, t5)) == 7
+        assert db.voucher_pools.find_one({"code": extra})["status"] == "available"
+
+        third = ar.reconcile_surplus_denomination_allocations(db, now_utc=SEP)
+        assert third["surplus_released"] == 0
+
+    def test_sweep_finds_surplus_linked_by_object_id_only(self):
+        db = _db()
+        t5, extra = self._crashed_surplus_state(db, uid=71)
+        # An older row carrying only the raw ledger_id link.
+        db.voucher_pools.update_one(
+            {"code": extra}, {"$unset": {"issued_for_ledger_id": ""}},
+        )
+        stats = ar.reconcile_surplus_denomination_allocations(db, now_utc=SEP)
+        assert stats["surplus_released"] == 1
+        assert db.voucher_pools.find_one({"code": extra})["status"] == "available"
+
+    def test_sweep_ignores_a_healthy_ledger(self):
+        db = _db()
+        _stock_all_denominations(db)
+        _qualify(db, 72, 250, SEP)
+        ar.evaluate_monthly_affiliate_reward(db, referrer_id=72, now_utc=SEP)
+        before = sum(_denominations(db).values())
+        stats = ar.reconcile_surplus_denomination_allocations(db, now_utc=SEP)
+        assert stats["surplus_found"] == 0 and stats["surplus_released"] == 0
+        assert sum(_denominations(db).values()) == before
+
+    def test_sweep_does_not_touch_a_live_allocator(self):
+        """A worker still mid-allocation holds a FRESH lease; its ledger must
+        be left entirely alone even though it transiently looks surplus."""
+        db = _db()
+        _stock_all_denominations(db)
+        _qualify(db, 73, 250, SEP)
+        ar.evaluate_monthly_affiliate_reward(db, referrer_id=73, now_utc=SEP)
+        t5 = db.affiliate_ledger.find_one({"user_id": 73, "tier": "T5"})
+
+        # Put it back into a live mid-allocation state, with an extra linked
+        # row that WOULD be released if the sweep considered this ledger.
+        spare = db.voucher_pools.find_one({"pool_id": "AFFILIATE_50", "status": "available"})
+        db.voucher_pools.update_one(
+            {"_id": spare["_id"]},
+            {"$set": {"status": "issued", "issued_to_user_id": 73,
+                      "ledger_id": t5["_id"], "issued_for_ledger_id": str(t5["_id"])}},
+        )
+        db.affiliate_ledger.update_one(
+            {"_id": t5["_id"]},
+            {"$set": {"status": ar.SETTLING_STATUS, "voucher_code": None,
+                      "updated_at": ar._lease_now(),
+                      "allocation_lease_at": ar._lease_now()},
+             "$unset": {"vouchers": ""}},
+        )
+        before = len(_linked_issued_rows(db, t5))
+        assert before == 8
+
+        ar.reconcile_surplus_denomination_allocations(db, now_utc=SEP)
+
+        assert len(_linked_issued_rows(db, t5)) == before, (
+            "the sweep interfered with a live allocator"
+        )
+        assert db.voucher_pools.find_one({"code": spare["code"]})["status"] == "issued"
+
+    def test_sweep_does_reclaim_a_dead_allocator_after_the_lease_expires(self):
+        """The same ledger, once its lease has gone stale, IS in scope."""
+        db = _db()
+        _stock_all_denominations(db)
+        _qualify(db, 76, 250, SEP)
+        ar.evaluate_monthly_affiliate_reward(db, referrer_id=76, now_utc=SEP)
+        t5 = db.affiliate_ledger.find_one({"user_id": 76, "tier": "T5"})
+        spare = db.voucher_pools.find_one({"pool_id": "AFFILIATE_50", "status": "available"})
+        db.voucher_pools.update_one(
+            {"_id": spare["_id"]},
+            {"$set": {"status": "issued", "issued_to_user_id": 76,
+                      "ledger_id": t5["_id"], "issued_for_ledger_id": str(t5["_id"])}},
+        )
+        stale = ar._lease_now() - timedelta(seconds=ar._ALLOCATION_LEASE_TTL_SECONDS + 60)
+        db.affiliate_ledger.update_one(
+            {"_id": t5["_id"]},
+            {"$set": {"status": ar.SETTLING_STATUS, "voucher_code": None,
+                      "updated_at": stale, "allocation_lease_at": stale},
+             "$unset": {"vouchers": ""}},
+        )
+        stats = ar.reconcile_surplus_denomination_allocations(db, now_utc=SEP)
+        assert stats["surplus_released"] == 1
+        assert db.voucher_pools.find_one({"code": spare["code"]})["status"] == "available"
+
+    def test_sweep_leaves_legacy_august_ledgers_alone(self):
+        db = _db()
+        for i in range(10):
+            db.voucher_pools.insert_one({"pool_id": "T3", "code": f"LEG{i}", "status": "available"})
+        _qualify(db, 74, 50, AUG)
+        ar.evaluate_monthly_affiliate_reward(db, referrer_id=74, now_utc=AUG)
+        t3 = db.affiliate_ledger.find_one({"user_id": 74, "tier": "T3"})
+        assert t3["status"] == "ISSUED"
+        # Add a stray extra legacy row: the sweep must not act on it, because
+        # legacy single-pool ledgers are out of scope entirely.
+        spare = db.voucher_pools.find_one({"pool_id": "T3", "status": "available"})
+        db.voucher_pools.update_one(
+            {"_id": spare["_id"]},
+            {"$set": {"status": "issued", "issued_to_user_id": 74,
+                      "ledger_id": t3["_id"], "issued_for_ledger_id": str(t3["_id"])}},
+        )
+        stats = ar.reconcile_surplus_denomination_allocations(db, now_utc=SEP)
+        assert stats["scanned"] == 0, "a legacy-plan ledger entered the denomination sweep"
+        assert stats["surplus_released"] == 0
+        assert db.voucher_pools.find_one({"code": spare["code"]})["status"] == "issued"
+
+    def test_sweep_reports_counters_for_observability(self):
+        db = _db()
+        self._crashed_surplus_state(db, uid=75)
+        stats = ar.reconcile_surplus_denomination_allocations(db, now_utc=SEP)
+        for key in ("scanned", "surplus_found", "surplus_released",
+                    "protected_not_released", "integrity_conflicts", "errors"):
+            assert key in stats, f"missing counter {key}"
+        assert stats["errors"] == 0
 
 
 # ---------------------------------------------------------------------------

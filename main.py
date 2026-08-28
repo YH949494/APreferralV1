@@ -95,6 +95,7 @@ from affiliate_rewards import (
     issue_previous_week_affiliate_rewards,
     retry_current_month_pending_manual_ledgers,
     catch_up_missing_current_month_affiliate_ledgers,
+    reconcile_surplus_denomination_allocations,
     welcome_reward_visibility,
 )
 from telegram_utils import safe_reply_text, safe_send_message
@@ -908,6 +909,23 @@ def tick_5min() -> None:
                             now_utc=datetime.now(timezone.utc),
                             batch_limit=AFFILIATE_CURRENT_MONTH_BATCH_LIMIT,
                         )
+                        # Durable backstop for surplus denomination allocations.
+                        # In-process reconciliation cannot help when a displaced
+                        # worker crashes between claiming a surplus code and
+                        # reconciling it — that code would otherwise stay issued
+                        # forever against a bundle that does not contain it. Runs
+                        # after the retry pass so a ledger that just finalized on
+                        # this same tick is reconciled immediately.
+                        surplus_stats = reconcile_surplus_denomination_allocations(
+                            db,
+                            now_utc=datetime.now(timezone.utc),
+                            batch_limit=AFFILIATE_CURRENT_MONTH_BATCH_LIMIT,
+                        )
+                        if surplus_stats.get("surplus_released") or surplus_stats.get("errors"):
+                            logger.warning(
+                                "[JOB][5MIN] affiliate_surplus_sweep run_id=%s stats=%s",
+                                run_id, surplus_stats,
+                            )
                         # Runs immediately after the reconciliation calls above so a
                         # milestone whose voucher just flipped to ISSUED (e.g. a
                         # previously OUT_OF_STOCK/PENDING_MANUAL tier) gets its public

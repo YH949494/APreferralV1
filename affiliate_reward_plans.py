@@ -41,6 +41,8 @@ September (or later) still resolves the legacy bundle. See
 """
 from __future__ import annotations
 
+import os
+
 # --- Denomination pools (new plan) -----------------------------------------
 # Stable pool_id identifiers, consistent with the existing uppercase
 # convention already used for "WELCOME"/"T1".."T5".
@@ -58,6 +60,48 @@ DENOMINATION_POOL_VALUES = {
 }
 
 TIERS = ("T1", "T2", "T3", "T4", "T5")
+
+# --- Qualified-referral thresholds -------------------------------------------
+# THE single definition of what it takes to reach each tier. This lives in the
+# lowest-level config module (no heavy imports) so every surface -- the
+# evaluator, the admin pending-review calculation, the settings panel, the
+# milestone announcement -- reads the same numbers.
+#
+# They were previously restated with independent os.getenv defaults in three
+# modules and had already drifted: affiliate_rewards used T5=250 (correct)
+# while vouchers.py and dashboard_panels.py both defaulted T5 to 300, so the
+# admin "eligible tier" calculation and the settings panel disagreed with the
+# evaluator for anyone on 250-299 qualified referrals.
+# test_affiliate_threshold_drift.py fails if any copy reappears.
+_THRESHOLD_ENV_DEFAULTS = (
+    ("T1", "AFF_T1_THRESHOLD", 10),
+    ("T2", "AFF_T2_THRESHOLD", 25),
+    ("T3", "AFF_T3_THRESHOLD", 50),
+    ("T4", "AFF_T4_THRESHOLD", 150),
+    ("T5", "AFF_T5_THRESHOLD", 250),
+)
+
+
+def tier_thresholds(env=None) -> dict:
+    """``{tier: qualified_referral_threshold}``.
+
+    ``env`` defaults to the process environment; a mapping may be passed by
+    callers that render configuration from a captured environment (e.g. the
+    admin settings panel) so they report exactly what this process would use.
+    """
+    source = os.environ if env is None else env
+    out = {}
+    for tier, var, default in _THRESHOLD_ENV_DEFAULTS:
+        raw = source.get(var)
+        try:
+            out[tier] = int(raw) if raw not in (None, "") else int(default)
+        except (TypeError, ValueError):
+            out[tier] = int(default)
+    return out
+
+
+def tier_threshold(tier, env=None) -> int:
+    return int(tier_thresholds(env).get(normalize_tier(tier), 0))
 
 LEGACY_PLAN_ID = "legacy_2026_08"
 DENOMINATION_PLAN_ID = "denomination_2026_09"

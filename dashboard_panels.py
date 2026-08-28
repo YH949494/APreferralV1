@@ -33,6 +33,7 @@ from affiliate_reward_plans import (
     DENOMINATION_POOL_IDS,
     pool_denomination,
     recipe_required_by_pool,
+    tier_thresholds,
     resolve_plan_id,
     tier_recipe,
 )
@@ -4261,13 +4262,11 @@ def build_settings_panel(env: Mapping | None = None, *, constants: Mapping | Non
     }
 
     affiliate_settings = {
-        "tier_thresholds": {
-            "T1": _env(env, "AFF_T1_THRESHOLD", "10"),
-            "T2": _env(env, "AFF_T2_THRESHOLD", "25"),
-            "T3": _env(env, "AFF_T3_THRESHOLD", "50"),
-            "T4": _env(env, "AFF_T4_THRESHOLD", "150"),
-            "T5": _env(env, "AFF_T5_THRESHOLD", "300"),
-        },
+        # Rendered from the canonical thresholds against this panel's captured
+        # environment, so the settings page always shows exactly what the
+        # evaluator would use. Previously a local copy that had drifted to
+        # T5=300 while the evaluator used 250.
+        "tier_thresholds": tier_thresholds(env),
         "simulate_mode": _env(env, "AFFILIATE_SIMULATE", "0"),
         "group_trigger_weekly_valid_referrals": _env(
             env, "AFFILIATE_GROUP_TRIGGER_WEEKLY_VALID_REFERRALS", "5"

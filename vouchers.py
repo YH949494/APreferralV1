@@ -7855,13 +7855,13 @@ def admin_affiliate_pending_v2():
     now_utc = datetime.now(timezone.utc)
     month_start_utc = now_utc.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     week_start_utc = (now_utc - timedelta(days=now_utc.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
-    threshold_by_tier = {
-        "T1": int(os.getenv("AFF_T1_THRESHOLD", "10")),
-        "T2": int(os.getenv("AFF_T2_THRESHOLD", "25")),
-        "T3": int(os.getenv("AFF_T3_THRESHOLD", "50")),
-        "T4": int(os.getenv("AFF_T4_THRESHOLD", "150")),
-        "T5": int(os.getenv("AFF_T5_THRESHOLD", "300")),
-    }
+    # Canonical thresholds -- never a local copy. This admin surface used to
+    # restate them with its own defaults and had drifted to T5=300, so a user
+    # on 250-299 qualified referrals was shown a different eligible tier than
+    # the evaluator would actually grant.
+    from affiliate_reward_plans import tier_thresholds
+
+    threshold_by_tier = tier_thresholds()
     rows = list(db.affiliate_ledger.find({"status": status}).sort("created_at", 1).limit(200))
     items = []
     for row in rows:

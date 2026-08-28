@@ -15,11 +15,13 @@ from config import (
 )
 from referral_ledger import with_not_invalidated
 from affiliate_reward_plans import (
+    DENOMINATION_PLAN_FIRST_MONTH,
     DENOMINATION_POOL_IDS,
     is_denomination_plan,
     normalize_month as _normalize_entitlement_month,
     pool_denomination,
     recipe_required_by_pool,
+    tier_thresholds,
     recipe_value_by_pool,
     resolve_plan_id,
     tier_recipe,
@@ -71,16 +73,15 @@ _INVENTORY_ONLY_RISK_FLAGS = frozenset({
 
 WELCOME_REWARD_VISIBLE_DAYS = 3
 
-T1_THRESHOLD = int(os.getenv("AFF_T1_THRESHOLD", "10"))
-T2_THRESHOLD = int(os.getenv("AFF_T2_THRESHOLD", "25"))
-T3_THRESHOLD = int(os.getenv("AFF_T3_THRESHOLD", "50"))
-T4_THRESHOLD = int(os.getenv("AFF_T4_THRESHOLD", "150"))
-# 250, matching the confirmed business rule and scheduler.py's own
-# REFERRAL_CONGRATS_TIER_LABEL ({..., 250: "T5"}). The previous default of
-# 300 disagreed with that table, so a user on 250-299 qualified referrals
-# had a T5 milestone announcement configured for a tier the evaluator
-# would never grant.
-T5_THRESHOLD = int(os.getenv("AFF_T5_THRESHOLD", "250"))
+# Re-exported from the canonical definition in affiliate_reward_plans so this
+# module's long-standing public names keep working, without restating the
+# numbers. Read once at import, exactly as before.
+_THRESHOLDS = tier_thresholds()
+T1_THRESHOLD = _THRESHOLDS["T1"]
+T2_THRESHOLD = _THRESHOLDS["T2"]
+T3_THRESHOLD = _THRESHOLDS["T3"]
+T4_THRESHOLD = _THRESHOLDS["T4"]
+T5_THRESHOLD = _THRESHOLDS["T5"]
 logger = logging.getLogger(__name__)
 logger.info(
     "[AFFILIATE][TIER_CONFIG] thresholds=%s",
@@ -141,16 +142,41 @@ def ensure_affiliate_indexes(db):
         [("ledger_id", ASCENDING), ("status", ASCENDING)],
         name="pool_ledger_status",
     )
+    # Q4  Batch resolution / claimability scans a pool's batches by pool_id
+    #     (_find_batches_for_period, _find_active_batch, _tier_entered_
+    #     scheduled_mode) and by (pool_id, window) for the canonical month.
+    db.affiliate_voucher_batches.create_index([("pool_id", ASCENDING)], name="aff_batch_pool")
+    db.affiliate_voucher_batches.create_index(
+        [("pool_id", ASCENDING), ("starts_at", ASCENDING), ("ends_at", ASCENDING)],
+        name="aff_batch_pool_window",
+    )
 
     db.affiliate_ledger.create_index([("dedup_key", ASCENDING)], unique=True, name="uniq_affiliate_dedup")
     db.affiliate_ledger.create_index([("status", ASCENDING), ("created_at", ASCENDING)], name="affiliate_status_created")
     db.affiliate_ledger.create_index([("user_id", ASCENDING), ("year_month", ASCENDING)], name="affiliate_user_month")
-    # Reporting and reconciliation both slice by entitlement month + plan +
-    # tier. Non-unique and additive: historical ledgers simply have no
-    # entitlement_month/reward_plan and are absent from it.
+    # ---- Query-shape-driven indexes (see docs table in the PR) -----------
+    # Q1  Databot tier funnel, month-scoped:
+    #       {ledger_type, tier:{$in}, $or:[{entitlement_month:{$in}},
+    #                                      {year_month:{$in}}]}
+    #     A single index cannot serve both $or branches, so each branch gets
+    #     its own; Mongo evaluates the $or as an index union.
     db.affiliate_ledger.create_index(
-        [("entitlement_month", ASCENDING), ("reward_plan", ASCENDING), ("tier", ASCENDING), ("status", ASCENDING)],
-        name="affiliate_entitlement_plan_tier_status",
+        [("ledger_type", ASCENDING), ("entitlement_month", ASCENDING), ("tier", ASCENDING)],
+        name="affiliate_type_entitlement_tier",
+    )
+    #     Legacy-fallback branch: historical ledgers carry only year_month.
+    db.affiliate_ledger.create_index(
+        [("ledger_type", ASCENDING), ("year_month", ASCENDING), ("tier", ASCENDING)],
+        name="affiliate_type_yearmonth_tier",
+    )
+    # Q2  Denomination surplus sweep:
+    #       {ledger_type, entitlement_month:{$gte}, $or:[{status:"ISSUED"},
+    #                                {status:"SETTLING", updated_at:{$lt}}]}
+    #     Status leads (equality) ahead of the ranges it bounds.
+    db.affiliate_ledger.create_index(
+        [("ledger_type", ASCENDING), ("status", ASCENDING),
+         ("entitlement_month", ASCENDING), ("updated_at", ASCENDING)],
+        name="affiliate_type_status_entitlement_updated",
     )
     db.affiliate_ledger.create_index(
         [("user_id", ASCENDING), ("invitee_user_id", ASCENDING), ("gate_day", ASCENDING), ("tier", ASCENDING), ("created_at", ASCENDING)],
@@ -1792,19 +1818,25 @@ def _resolve_denomination_pool_target(db, *, ledger, pool_id: str, entitlement_m
             "window_end": batch.get("ends_at"),
             "resolved_at": now_utc,
         }
-    elif _tier_entered_scheduled_mode(db, pool_id=pool_id, reference_utc=period_start_utc):
-        # Scheduled-batch mode had already begun for this pool by this
-        # entitlement's month, but no batch covers the month — a real gap,
-        # never a licence to fall back to undated legacy stock.
+    else:
+        # FAIL CLOSED. A denomination-plan entitlement is only ever fulfilled
+        # from a batch whose window is exactly the canonical KL month it
+        # belongs to. There is deliberately NO undated-legacy fallback here:
+        # the denomination pools are new inventory created for scheduled
+        # monthly batches, so an undated row in one is an operator mistake,
+        # and quietly consuming it would issue September rewards from stock
+        # nobody scheduled for September — invisible to the month-scoped
+        # inventory preflight and to every batch report.
+        #
+        # (The per-tier legacy pools keep their transitional fallback in
+        # `_resolve_monthly_ledger_target`; that path is untouched.)
         logger.warning(
             "[AFF_VOUCHER][TARGET_BATCH_NOT_FOUND] ledger_id=%s user_id=%s pool_id=%s year_month=%s "
-            "month_start_utc=%s month_end_utc=%s",
+            "month_start_utc=%s month_end_utc=%s reason=denomination_requires_scheduled_batch",
             ledger_id, ledger.get("user_id"), pool_id, entitlement_month,
             period_start_utc.isoformat(), period_end_utc.isoformat(),
         )
         return None, "no_batch_for_entitlement_period"
-    else:
-        target = {"mode": "legacy", "batch_id": None, "resolved_at": now_utc}
 
     db.affiliate_ledger.update_one(
         {"_id": ledger_id, f"pool_targets.{pool_id}.mode": {"$exists": False}},
@@ -1956,6 +1988,127 @@ def _park_bundle_integrity_failure(db, *, ledger_id, tier, token, now_utc: datet
         ledger_id, tier, reason, detail,
     )
     return db.affiliate_ledger.find_one({"_id": ledger_id})
+
+
+def _pool_rows_linked_to_ledger(db, *, ledger_id) -> list[dict]:
+    """Every issued voucher_pools row linked to a ledger through EITHER link
+    field. ``issued_for_ledger_id`` is a string written by every current claim
+    path; ``ledger_id`` is the raw id present on older rows. Querying one
+    alone silently under-reports surplus."""
+    return _issued_pool_vouchers_for_ledger(db, ledger_id=ledger_id)
+
+
+def reconcile_surplus_denomination_allocations(
+    db, *, now_utc: datetime | None = None, batch_limit: int = 200,
+) -> dict:
+    """Periodic, idempotent recovery of surplus denomination allocations.
+
+    In-process reconciliation handles the common case, but it cannot help
+    when the displaced worker CRASHES between claiming a surplus code and
+    reconciling it: the code stays ``issued`` against a ledger whose visible
+    bundle does not contain it, and nothing in the request path will ever
+    look at that ledger again. This sweep is the durable backstop.
+
+    Bounded by construction — it scans only denomination-plan ledgers
+    (``entitlement_month >= 202609``) in states where surplus is even
+    possible, never the whole collection:
+
+      * ``ISSUED``  — the crash-after-finalization case above.
+      * ``SETTLING`` older than the allocation lease TTL — a worker that died
+        mid-allocation; a live allocator's ledger is never touched.
+
+    Safety rules, in order of precedence:
+      1. A code present in the finalized visible bundle (``vouchers[]`` or
+         ``voucher_code``) is NEVER released, whatever else is true.
+      2. A row is released only if it is genuinely beyond the frozen recipe.
+      3. Releasing clears every ownership field, returning the code to
+         ``available`` inventory exactly as a rollback would.
+
+    Safe to run concurrently with issuance and safe to run repeatedly: it
+    re-derives state from the database each pass, and a ledger with no
+    surplus is a no-op.
+    """
+    now_utc = now_utc or datetime.now(timezone.utc)
+    stale_cutoff = _lease_now() - timedelta(seconds=_ALLOCATION_LEASE_TTL_SECONDS)
+    stats = {
+        "scanned": 0,
+        "surplus_found": 0,
+        "surplus_released": 0,
+        "protected_not_released": 0,
+        "integrity_conflicts": 0,
+        "errors": 0,
+    }
+
+    query = {
+        "ledger_type": "AFFILIATE_MONTHLY",
+        # Denomination plan only: legacy single-pool ledgers cannot produce
+        # multi-denomination surplus and are deliberately out of scope.
+        "entitlement_month": {"$gte": DENOMINATION_PLAN_FIRST_MONTH},
+        "$or": [
+            {"status": "ISSUED"},
+            {"status": SETTLING_STATUS, "updated_at": {"$lt": stale_cutoff}},
+        ],
+    }
+    try:
+        candidates = list(db.affiliate_ledger.find(query))[: max(1, int(batch_limit))]
+    except Exception:
+        logger.exception("[AFF_SURPLUS_SWEEP][QUERY_FAILED]")
+        stats["errors"] += 1
+        return stats
+
+    for ledger in candidates:
+        ledger_id = ledger.get("_id")
+        try:
+            stats["scanned"] += 1
+            recipe = _ledger_recipe(ledger)
+            if not recipe or not is_denomination_plan(recipe.get("reward_plan")):
+                continue
+
+            state = _classify_issued_pool_rows(db, ledger, recipe=recipe)
+            surplus = list(state["surplus"])
+            if state["foreign"]:
+                # Rows belonging to another user are never ours to release.
+                stats["integrity_conflicts"] += 1
+                logger.error(
+                    "[AFF_SURPLUS_SWEEP][FOREIGN_ROWS] ledger_id=%s count=%s",
+                    ledger_id, len(state["foreign"]),
+                )
+            if not surplus:
+                continue
+            stats["surplus_found"] += len(surplus)
+
+            # Re-read the ledger immediately before releasing so a bundle
+            # finalized since `candidates` was fetched is still protected.
+            released = _release_unexposed_pool_rows(
+                db, ledger_id=ledger_id, rows=surplus, reason="surplus_sweep_reconciled",
+            )
+            stats["surplus_released"] += released
+            protected = len(surplus) - released
+            if protected:
+                stats["protected_not_released"] += protected
+                logger.warning(
+                    "[AFF_SURPLUS_SWEEP][PROTECTED] ledger_id=%s protected=%s "
+                    "reason=code_in_visible_bundle_or_already_released",
+                    ledger_id, protected,
+                )
+            logger.info(
+                "[AFF_SURPLUS_SWEEP][LEDGER] ledger_id=%s tier=%s month=%s status=%s "
+                "surplus=%s released=%s protected=%s",
+                ledger_id, ledger.get("tier"),
+                ledger.get("entitlement_month") or ledger.get("year_month"),
+                ledger.get("status"), len(surplus), released, protected,
+            )
+        except Exception:
+            stats["errors"] += 1
+            logger.exception("[AFF_SURPLUS_SWEEP][LEDGER_FAILED] ledger_id=%s", ledger_id)
+
+    logger.info(
+        "[AFF_SURPLUS_SWEEP][DONE] scanned=%s surplus_found=%s surplus_released=%s "
+        "protected=%s integrity_conflicts=%s errors=%s",
+        stats["scanned"], stats["surplus_found"], stats["surplus_released"],
+        stats["protected_not_released"], stats["integrity_conflicts"], stats["errors"],
+    )
+    return stats
 
 
 def _issue_denomination_bundle(db, *, ledger, recipe: dict, now_utc: datetime):
