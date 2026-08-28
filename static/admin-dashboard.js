@@ -6067,7 +6067,11 @@
   // by get_claimable_pool_inventory/_resolve_monthly_ledger_target and the
   // batch reports 0 claimable despite having stock. WELCOME has no monthly
   // entitlement concept and keeps its existing free-form start/end window.
-  var AB_ENTITLEMENT_MONTH_POOLS = { T1: true, T2: true, T3: true, T4: true };
+  // Mirrors affiliate_reward_plans.ENTITLEMENT_MONTH_POOL_IDS exactly.
+  // test_affiliate_pool_catalogue.py parses this literal and fails if it
+  // drifts from the backend, so a pool can never again reach production
+  // with free-form window fields when it requires the month picker.
+  var AB_ENTITLEMENT_MONTH_POOLS = { T1: true, T2: true, T3: true, T4: true, T5: true, AFFILIATE_5: true, AFFILIATE_10: true, AFFILIATE_50: true };
 
   function abIsEntitlementMonthPool(poolId) {
     return !!AB_ENTITLEMENT_MONTH_POOLS[poolId];

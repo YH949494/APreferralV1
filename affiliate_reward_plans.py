@@ -91,6 +91,53 @@ _DENOMINATION_RECIPES: dict[str, tuple[tuple[str, int], ...]] = {
 }
 
 
+# --- Operator-facing pool catalogue ------------------------------------------
+# THE single source of truth for "which affiliate voucher pools may an
+# operator load stock into", shared by every backend validator and mirrored
+# by every admin UI control. Previously this list was restated in five
+# places (two backends, three frontends) and had already drifted -- T5 and
+# the denomination pools were missing from the admin dropdowns, so September
+# inventory could not be uploaded at all. test_affiliate_pool_catalogue.py
+# parses the static assets and fails if any copy drifts again.
+#
+# Order is the display order in every dropdown: legacy per-tier pools first
+# (still required for August and any historical/back-dated entitlement),
+# then the standardized denomination pools, then WELCOME.
+ADMIN_AFFILIATE_POOL_IDS = TIERS + DENOMINATION_POOL_IDS + ("WELCOME",)
+
+# Operator-facing labels. The VALUE submitted is always the bare pool_id, so
+# a label can be reworded freely without changing what the backend receives.
+POOL_DISPLAY_LABELS = {
+    "T1": "T1 — Legacy tier pool (Aug 2026 and earlier)",
+    "T2": "T2 — Legacy tier pool (Aug 2026 and earlier)",
+    "T3": "T3 — Legacy tier pool (Aug 2026 and earlier)",
+    "T4": "T4 — Legacy tier pool (Aug 2026 and earlier)",
+    "T5": "T5 — Legacy tier pool (Aug 2026 and earlier)",
+    POOL_AFFILIATE_5: "Affiliate $5 — shared denomination pool (Sep 2026 onward)",
+    POOL_AFFILIATE_10: "Affiliate $10 — shared denomination pool (Sep 2026 onward)",
+    POOL_AFFILIATE_50: "Affiliate $50 — shared denomination pool (Sep 2026 onward)",
+    "WELCOME": "WELCOME — New User Voucher",
+}
+
+# Pools whose batch window MUST be the canonical KL calendar month, chosen
+# with an entitlement-month picker rather than free-form start/end fields.
+# A hand-typed window off by even a minute fails the full-containment check
+# in _find_batches_for_period, so the batch reports zero claimable despite
+# holding stock -- the exact defect scripts/fix_affiliate_batch_month_
+# boundaries.py exists to repair. WELCOME has no entitlement-month concept
+# and keeps free-form scheduling.
+ENTITLEMENT_MONTH_POOL_IDS = TIERS + DENOMINATION_POOL_IDS
+
+
+def pool_display_label(pool_id) -> str:
+    key = str(pool_id or "").strip().upper()
+    return POOL_DISPLAY_LABELS.get(key, key)
+
+
+def is_admin_affiliate_pool(pool_id) -> bool:
+    return str(pool_id or "").strip().upper() in ADMIN_AFFILIATE_POOL_IDS
+
+
 def normalize_tier(tier) -> str:
     return str(tier or "").strip().upper()
 

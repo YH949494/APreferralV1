@@ -17,6 +17,7 @@ Business rules under test (confirmed):
 from __future__ import annotations
 
 import collections
+import threading
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -76,6 +77,73 @@ def _denominations(db):
     return collections.Counter(
         r["pool_id"] for r in db.voucher_pools.find({"status": "issued"})
     )
+
+
+class _ThreadSafeDb:
+    """FakeDb behind one global lock.
+
+    MongoDB guarantees each single-document find_one_and_update/update_one is
+    atomic; FakeDb is not thread-safe at all. Serializing every collection
+    call reproduces exactly the guarantee the fencing design depends on —
+    and nothing stronger — so real threads can race the allocator without
+    the fake corrupting itself and giving a false pass.
+    """
+
+    _lock = threading.RLock()
+
+    def __init__(self, inner):
+        self._inner = inner
+
+    def __getattr__(self, name):
+        return _ThreadSafeCollection(getattr(self._inner, name), self._lock)
+
+    def __getitem__(self, name):
+        return _ThreadSafeCollection(self._inner[name], self._lock)
+
+
+class _ThreadSafeCollection:
+    def __init__(self, inner, lock):
+        self._inner = inner
+        self._lock = lock
+
+    def __getattr__(self, name):
+        attr = getattr(self._inner, name)
+        if not callable(attr):
+            return attr
+
+        def _locked(*args, **kwargs):
+            with self._lock:
+                return attr(*args, **kwargs)
+
+        return _locked
+
+
+def _reset_to_settling(db, ledger, *, keep_codes: bool = False):
+    """Put an already-issued ledger back into a claimable SETTLING state so a
+    test can race the allocator over it. ``keep_codes`` retains the physical
+    allocation (a crash-after-claim shape); otherwise the codes are returned
+    to inventory first (a nothing-claimed-yet shape)."""
+    if not keep_codes:
+        for row in _linked_issued_rows(db, ledger):
+            db.voucher_pools.update_one(
+                {"_id": row["_id"]},
+                {"$set": {"status": "available"},
+                 "$unset": {"issued_to": "", "issued_to_user_id": "", "issued_at": "",
+                            "ledger_id": "", "issued_for_ledger_id": ""}},
+            )
+    db.affiliate_ledger.update_one(
+        {"_id": ledger["_id"]},
+        {"$set": {"status": ar.SETTLING_STATUS, "voucher_code": None},
+         "$unset": {"vouchers": "", "issued_code_count": "", "issued_value": "",
+                    "allocation_lease_at": ""}},
+    )
+
+
+def _linked_issued_rows(db, ledger):
+    return [
+        r for r in db.voucher_pools.find({"status": "issued"})
+        if str(r.get("issued_for_ledger_id")) == str(ledger["_id"])
+    ]
 
 
 def _denominations_for(db, ledger):
@@ -339,11 +407,269 @@ class TestProgressionAndDedup:
 
 
 class TestConcurrency:
+    """Real interleaving, not repeated sequential calls.
+
+    ``_ThreadSafeDb`` wraps FakeDb so every collection operation is
+    serialized under one lock — which is exactly MongoDB's guarantee for a
+    single-document find_one_and_update/update_one, and the only property
+    the fencing design relies on.
+    """
+
+    def test_two_workers_starting_together_never_over_allocate(self):
+        db = _ThreadSafeDb(_db())
+        _stock_all_denominations(db)
+        _qualify(db, 50, 250, SEP)
+        ar.evaluate_monthly_affiliate_reward(db, referrer_id=50, now_utc=SEP)
+
+        # Reset every tier back to claimable so both threads race the same work.
+        for led in _ledgers(db, 50):
+            _reset_to_settling(db, led)
+
+        errors: list = []
+
+        def worker():
+            try:
+                for led in db.affiliate_ledger.find({"user_id": 50}):
+                    fresh = db.affiliate_ledger.find_one({"_id": led["_id"]})
+                    ar._issue_denomination_bundle(
+                        db, ledger=fresh, recipe=ar._ledger_recipe(fresh), now_utc=SEP,
+                    )
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        threads = [threading.Thread(target=worker) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30)
+        assert not errors, errors
+
+        ledgers = _ledgers(db, 50)
+        assert len(ledgers) == 5
+        for led in ledgers:
+            recipe = ar._ledger_recipe(led)
+            linked = _linked_issued_rows(db, led)
+            assert len(linked) == recipe["expected_code_count"], (
+                f"{led['tier']}: {len(linked)} linked rows for a "
+                f"{recipe['expected_code_count']}-code recipe"
+            )
+        assert sum(_denominations(db).values()) == 19, "no surplus consumed under contention"
+
+    def test_stale_worker_resuming_after_takeover_strands_nothing(self):
+        """The exact scenario from review: A allocates part of T5 and stalls,
+        its lease expires, B completes all seven and finalizes, then A
+        resumes. Final state must be exactly seven linked rows."""
+        db = _db()
+        _stock_all_denominations(db)
+        _qualify(db, 51, 250, SEP)
+        ar.evaluate_monthly_affiliate_reward(db, referrer_id=51, now_utc=SEP)
+        t5 = db.affiliate_ledger.find_one({"user_id": 51, "tier": "T5"})
+        _reset_to_settling(db, t5)
+        recipe = ar._ledger_recipe(t5)
+
+        # --- Worker A: claims 3 of 7, then stalls (lease left un-renewed) ---
+        token_a = ar._acquire_allocation_lease(db, ledger_id=t5["_id"], now_utc=SEP)
+        assert token_a is not None
+        target, _ = ar._resolve_denomination_pool_target(
+            db, ledger=db.affiliate_ledger.find_one({"_id": t5["_id"]}),
+            pool_id="AFFILIATE_50", entitlement_month="202609", now_utc=SEP,
+        )
+        for _ in range(3):
+            ar._claim_one_denomination_voucher(
+                db, target=target, pool_id="AFFILIATE_50",
+                ledger_id=t5["_id"], user_id=51, now_utc=SEP,
+            )
+        assert len(_linked_issued_rows(db, t5)) == 3
+
+        # --- A's lease goes stale ---
+        db.affiliate_ledger.update_one(
+            {"_id": t5["_id"]},
+            {"$set": {"allocation_lease_at": ar._lease_now() - timedelta(
+                seconds=ar._ALLOCATION_LEASE_TTL_SECONDS + 60)}},
+        )
+
+        # --- Worker B takes over and finishes the job ---
+        out = ar._issue_denomination_bundle(
+            db, ledger=db.affiliate_ledger.find_one({"_id": t5["_id"]}), recipe=recipe, now_utc=SEP,
+        )
+        assert out["status"] == "ISSUED"
+        assert out["issued_code_count"] == 7 and out["issued_value"] == 350
+        bundle_codes = set(_codes_of(out))
+        assert len(bundle_codes) == 7
+
+        # --- A wakes up and tries to keep going on its stale token ---
+        assert ar._renew_allocation_lease(db, ledger_id=t5["_id"], token=token_a) is False
+        assert ar._holds_allocation_lease(db, ledger_id=t5["_id"], token=token_a) is False
+        # Its finalize attempt is fenced out and cannot overwrite B's result.
+        assert ar._store_affiliate_bundle_on_ledger(
+            db, ledger_id=t5["_id"], tier="T5", vouchers=[], now_utc=SEP,
+            recipe=recipe, token=token_a,
+        ) is None
+
+        final = db.affiliate_ledger.find_one({"_id": t5["_id"]})
+        assert final["status"] == "ISSUED"
+        assert set(_codes_of(final)) == bundle_codes, "B's bundle is untouched"
+        assert len(_linked_issued_rows(db, t5)) == 7, "no surplus stranded"
+        # And no user-visible code was released.
+        for code in bundle_codes:
+            row = db.voucher_pools.find_one({"code": code})
+            assert row["status"] == "issued"
+
+    def test_lease_loss_immediately_before_a_claim_consumes_nothing(self):
+        db = _db()
+        _stock_all_denominations(db)
+        _qualify(db, 52, 250, SEP)
+        ar.evaluate_monthly_affiliate_reward(db, referrer_id=52, now_utc=SEP)
+        t5 = db.affiliate_ledger.find_one({"user_id": 52, "tier": "T5"})
+        _reset_to_settling(db, t5)
+        before = sum(_denominations(db).values())
+
+        # A takeover lands the instant before the first claim.
+        original = ar._renew_allocation_lease
+        calls = {"n": 0}
+
+        def fenced_out(db_, *, ledger_id, token):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                db_.affiliate_ledger.update_one(
+                    {"_id": ledger_id}, {"$inc": {"allocation_generation": 1}}
+                )
+            return original(db_, ledger_id=ledger_id, token=token)
+
+        ar._renew_allocation_lease = fenced_out
+        try:
+            ar._issue_denomination_bundle(
+                db, ledger=db.affiliate_ledger.find_one({"_id": t5["_id"]}),
+                recipe=ar._ledger_recipe(t5), now_utc=SEP,
+            )
+        finally:
+            ar._renew_allocation_lease = original
+
+        assert sum(_denominations(db).values()) == before, "displaced worker claimed a code"
+        assert len(_linked_issued_rows(db, t5)) == 0
+
+    def test_lease_loss_immediately_after_a_claim_releases_the_surplus(self):
+        db = _db()
+        _stock_all_denominations(db)
+        _qualify(db, 53, 250, SEP)
+        ar.evaluate_monthly_affiliate_reward(db, referrer_id=53, now_utc=SEP)
+        t5 = db.affiliate_ledger.find_one({"user_id": 53, "tier": "T5"})
+        _reset_to_settling(db, t5)
+        recipe = ar._ledger_recipe(t5)
+
+        # Another worker completes the bundle, then our worker's claim lands.
+        original = ar._claim_one_denomination_voucher
+        state = {"done": False}
+
+        def claim_then_lose(db_, *, target, pool_id, ledger_id, user_id, now_utc):
+            voucher, reason = original(
+                db_, target=target, pool_id=pool_id, ledger_id=ledger_id,
+                user_id=user_id, now_utc=now_utc,
+            )
+            if not state["done"]:
+                state["done"] = True
+                db_.affiliate_ledger.update_one(
+                    {"_id": ledger_id}, {"$inc": {"allocation_generation": 1}}
+                )
+            return voucher, reason
+
+        ar._claim_one_denomination_voucher = claim_then_lose
+        try:
+            ar._issue_denomination_bundle(
+                db, ledger=db.affiliate_ledger.find_one({"_id": t5["_id"]}),
+                recipe=recipe, now_utc=SEP,
+            )
+        finally:
+            ar._claim_one_denomination_voucher = original
+
+        led = db.affiliate_ledger.find_one({"_id": t5["_id"]})
+        assert led["status"] != "ISSUED", "a fenced-out worker must not finalize"
+        # The one code it claimed is within the recipe, so it is retained for
+        # the next owner rather than released.
+        assert len(_linked_issued_rows(db, t5)) <= recipe["expected_code_count"]
+
+    def test_lease_loss_before_finalization_cannot_finalize(self):
+        db = _db()
+        _stock_all_denominations(db)
+        _qualify(db, 54, 50, SEP)
+        ar.evaluate_monthly_affiliate_reward(db, referrer_id=54, now_utc=SEP)
+        t3 = db.affiliate_ledger.find_one({"user_id": 54, "tier": "T3"})
+        recipe = ar._ledger_recipe(t3)
+        _reset_to_settling(db, t3, keep_codes=True)
+
+        token = ar._acquire_allocation_lease(db, ledger_id=t3["_id"], now_utc=SEP)
+        # Takeover lands before we finalize.
+        db.affiliate_ledger.update_one(
+            {"_id": t3["_id"]}, {"$inc": {"allocation_generation": 1}}
+        )
+        rows = _linked_issued_rows(db, t3)
+        assert ar._store_affiliate_bundle_on_ledger(
+            db, ledger_id=t3["_id"], tier="T3", vouchers=rows,
+            now_utc=SEP, recipe=recipe, token=token,
+        ) is None
+        assert db.affiliate_ledger.find_one({"_id": t3["_id"]})["status"] != "ISSUED"
+
+    def test_retry_after_process_crash_resumes_and_completes(self):
+        db = _db()
+        _stock_all_denominations(db)
+        _qualify(db, 55, 250, SEP)
+        ar.evaluate_monthly_affiliate_reward(db, referrer_id=55, now_utc=SEP)
+        t5 = db.affiliate_ledger.find_one({"user_id": 55, "tier": "T5"})
+        kept = set(_codes_of(t5))
+
+        # Crash signature: codes allocated, ledger never finalized, lease
+        # left behind by a process that is gone.
+        db.affiliate_ledger.update_one(
+            {"_id": t5["_id"]},
+            {"$set": {"status": ar.SETTLING_STATUS, "voucher_code": None,
+                      "updated_at": SEP,
+                      "allocation_lease_at": ar._lease_now() - timedelta(
+                          seconds=ar._ALLOCATION_LEASE_TTL_SECONDS + 60)},
+             "$unset": {"vouchers": "", "issued_code_count": "", "issued_value": ""}},
+        )
+        later = SEP + timedelta(seconds=ar._ALLOCATION_LEASE_TTL_SECONDS + 60)
+        ar._retry_stuck_pending_manual_affiliate_ledgers(db, now_utc=later)
+
+        out = db.affiliate_ledger.find_one({"_id": t5["_id"]})
+        assert out["status"] == "ISSUED"
+        assert set(_codes_of(out)) == kept, "resumed on exactly the same codes"
+        assert len(_linked_issued_rows(db, t5)) == 7
+
+    def test_pre_existing_surplus_allocation_is_reconciled(self):
+        db = _db()
+        _stock_all_denominations(db)
+        _qualify(db, 56, 50, SEP)
+        ar.evaluate_monthly_affiliate_reward(db, referrer_id=56, now_utc=SEP)
+        t3 = db.affiliate_ledger.find_one({"user_id": 56, "tier": "T3"})
+        recipe = ar._ledger_recipe(t3)
+        _reset_to_settling(db, t3, keep_codes=True)
+
+        # Two stray extra $50 rows linked to this ledger, as a displaced
+        # worker would have left behind.
+        strays = []
+        for row in list(db.voucher_pools.find({"pool_id": "AFFILIATE_50", "status": "available"}))[:2]:
+            db.voucher_pools.update_one(
+                {"_id": row["_id"]},
+                {"$set": {"status": "issued", "issued_to_user_id": 56,
+                          "issued_for_ledger_id": str(t3["_id"]), "ledger_id": t3["_id"]}},
+            )
+            strays.append(row["code"])
+        assert len(_linked_issued_rows(db, t3)) == recipe["expected_code_count"] + 2
+
+        out = ar._issue_denomination_bundle(
+            db, ledger=db.affiliate_ledger.find_one({"_id": t3["_id"]}),
+            recipe=recipe, now_utc=SEP,
+        )
+        assert out["status"] == "ISSUED"
+        assert len(_linked_issued_rows(db, t3)) == recipe["expected_code_count"]
+        # The strays went back to inventory, not stranded.
+        for code in strays:
+            assert db.voucher_pools.find_one({"code": code})["status"] == "available"
+
     def test_concurrent_evaluation_cannot_double_issue_a_tier(self):
         db = _db()
         _stock_all_denominations(db)
         _qualify(db, 20, 250, SEP)
-        # Interleave several evaluators over the same user/month.
         for _ in range(4):
             ar.evaluate_monthly_affiliate_reward(db, referrer_id=20, now_utc=SEP)
             ar.catch_up_missing_current_month_affiliate_ledgers(db, now_utc=SEP)
@@ -352,45 +678,6 @@ class TestConcurrency:
         assert len(ledgers) == 5
         assert sum(l["issued_value"] for l in ledgers) == 625
         assert sum(_denominations(db).values()) == 19
-
-    def test_allocation_lease_prevents_a_second_worker_over_allocating(self):
-        db = _db()
-        _stock_all_denominations(db)
-        _qualify(db, 21, 250, SEP)
-        ar.evaluate_monthly_affiliate_reward(db, referrer_id=21, now_utc=SEP)
-        t5 = db.affiliate_ledger.find_one({"user_id": 21, "tier": "T5"})
-
-        # Simulate a worker that crashed while holding a fresh lease.
-        db.affiliate_ledger.update_one(
-            {"_id": t5["_id"]},
-            {"$set": {"status": ar.SETTLING_STATUS, "allocation_lease_id": "other",
-                      "allocation_lease_at": SEP, "voucher_code": None},
-             "$unset": {"vouchers": ""}},
-        )
-        # A second worker must NOT be able to take the lease yet.
-        assert ar._acquire_allocation_lease(db, ledger_id=t5["_id"], now_utc=SEP) is None
-        # Once the lease goes stale, it may be taken over.
-        later = SEP + timedelta(seconds=ar._ALLOCATION_LEASE_TTL_SECONDS + 1)
-        assert ar._acquire_allocation_lease(db, ledger_id=t5["_id"], now_utc=later) is not None
-
-    def test_lease_busy_worker_allocates_nothing(self):
-        db = _db()
-        _stock_all_denominations(db)
-        _qualify(db, 22, 250, SEP)
-        ar.evaluate_monthly_affiliate_reward(db, referrer_id=22, now_utc=SEP)
-        consumed_before = sum(_denominations(db).values())
-
-        t5 = db.affiliate_ledger.find_one({"user_id": 22, "tier": "T5"})
-        db.affiliate_ledger.update_one(
-            {"_id": t5["_id"]},
-            {"$set": {"status": ar.SETTLING_STATUS, "allocation_lease_id": "held",
-                      "allocation_lease_at": SEP, "voucher_code": None}},
-        )
-        recipe = ar._ledger_recipe(db.affiliate_ledger.find_one({"_id": t5["_id"]}))
-        ar._issue_denomination_bundle(
-            db, ledger=db.affiliate_ledger.find_one({"_id": t5["_id"]}), recipe=recipe, now_utc=SEP,
-        )
-        assert sum(_denominations(db).values()) == consumed_before
 
 
 # ---------------------------------------------------------------------------
@@ -569,6 +856,106 @@ class TestShortageAndRecovery:
         again = {c["affiliate_tier"]: [v["code"] for v in c["vouchers"]]
                  for c in ar.affiliate_bundle_visible_cards(db, user_id=38)}
         assert first == again
+
+
+class TestMonetaryIntegrity:
+    """Completion requires composition, code count AND monetary value to all
+    agree with the frozen recipe. Any disagreement fails closed."""
+
+    def test_all_three_checks_pass_for_a_correct_bundle(self):
+        recipe = arp.tier_recipe("202609", "T3")
+        rows = [
+            {"code": "A", "pool_id": "AFFILIATE_10", "voucher_value": 10},
+            {"code": "B", "pool_id": "AFFILIATE_50", "voucher_value": 50},
+        ]
+        ok, detail = ar._validate_bundle_against_recipe(rows, recipe=recipe)
+        assert ok and detail is None
+
+    def test_wrong_denomination_composition_fails(self):
+        recipe = arp.tier_recipe("202609", "T3")
+        rows = [
+            {"code": "A", "pool_id": "AFFILIATE_10", "voucher_value": 10},
+            {"code": "B", "pool_id": "AFFILIATE_10", "voucher_value": 10},
+        ]
+        ok, detail = ar._validate_bundle_against_recipe(rows, recipe=recipe)
+        assert not ok and "composition" in detail
+
+    def test_wrong_code_count_fails(self):
+        recipe = arp.tier_recipe("202609", "T3")
+        rows = [{"code": "A", "pool_id": "AFFILIATE_10", "voucher_value": 10}]
+        ok, detail = ar._validate_bundle_against_recipe(rows, recipe=recipe)
+        assert not ok and "code count" in detail
+
+    def test_mis_stamped_voucher_value_fails_closed(self):
+        # A $50-pool row stamped $10 must NOT be trusted and priced at $10.
+        recipe = arp.tier_recipe("202609", "T3")
+        rows = [
+            {"code": "A", "pool_id": "AFFILIATE_10", "voucher_value": 10},
+            {"code": "B", "pool_id": "AFFILIATE_50", "voucher_value": 10},
+        ]
+        ok, detail = ar._validate_bundle_against_recipe(rows, recipe=recipe)
+        assert not ok
+        assert "stamped voucher_value=10" in detail and "denomination is 50" in detail
+
+    def test_non_numeric_stamp_fails(self):
+        recipe = arp.tier_recipe("202609", "T1")
+        rows = [{"code": "A", "pool_id": "AFFILIATE_10", "voucher_value": "ten"}]
+        ok, detail = ar._validate_bundle_against_recipe(rows, recipe=recipe)
+        assert not ok and "non-numeric" in detail
+
+    def test_duplicate_codes_within_a_bundle_fail(self):
+        recipe = arp.tier_recipe("202609", "T2")
+        rows = [
+            {"code": "A", "pool_id": "AFFILIATE_5", "voucher_value": 5},
+            {"code": "B", "pool_id": "AFFILIATE_10", "voucher_value": 10},
+            {"code": "B", "pool_id": "AFFILIATE_10", "voucher_value": 10},
+        ]
+        ok, detail = ar._validate_bundle_against_recipe(rows, recipe=recipe)
+        assert not ok and "duplicate" in detail
+
+    def test_unstamped_rows_are_priced_from_the_recipe(self):
+        # Legacy/manual uploads carry no voucher_value; the pool's own
+        # denomination is the authority, so the bundle still validates.
+        recipe = arp.tier_recipe("202609", "T3")
+        rows = [
+            {"code": "A", "pool_id": "AFFILIATE_10"},
+            {"code": "B", "pool_id": "AFFILIATE_50"},
+        ]
+        ok, detail = ar._validate_bundle_against_recipe(rows, recipe=recipe)
+        assert ok, detail
+
+    def test_every_september_tier_validates_end_to_end(self):
+        for tier, value in (("T1", 10), ("T2", 25), ("T3", 60), ("T4", 180), ("T5", 350)):
+            recipe = arp.tier_recipe("202609", tier)
+            rows = []
+            n = 0
+            for comp in recipe["components"]:
+                for _ in range(comp["quantity"]):
+                    n += 1
+                    rows.append({"code": f"{tier}{n}", "pool_id": comp["pool_id"],
+                                 "voucher_value": comp["value"]})
+            ok, detail = ar._validate_bundle_against_recipe(rows, recipe=recipe)
+            assert ok, f"{tier}: {detail}"
+            assert sum(r["voucher_value"] for r in rows) == value
+
+    def test_mis_stamped_inventory_parks_the_ledger_unissued(self):
+        db = _db()
+        _stock_all_denominations(db)
+        # Corrupt one $50 row's stamp before it can be claimed.
+        row = db.voucher_pools.find_one({"pool_id": "AFFILIATE_50", "status": "available"})
+        db.voucher_pools.update_one({"_id": row["_id"]}, {"$set": {"voucher_value": 5}})
+        # Make it the only $50 code available so it must be selected.
+        for other in list(db.voucher_pools.find({"pool_id": "AFFILIATE_50", "status": "available"})):
+            if other["_id"] != row["_id"]:
+                db.voucher_pools.update_one({"_id": other["_id"]}, {"$set": {"status": "reserved"}})
+
+        _qualify(db, 60, 50, SEP)
+        ar.evaluate_monthly_affiliate_reward(db, referrer_id=60, now_utc=SEP)
+        t3 = db.affiliate_ledger.find_one({"user_id": 60, "tier": "T3"})
+        assert t3["status"] == "PENDING_MANUAL", "malformed inventory must fail closed"
+        assert "bundle_integrity_failed" in t3["risk_flags"]
+        assert "stamped voucher_value=5" in t3["integrity_reason"]
+        assert not t3.get("vouchers")
 
 
 # ---------------------------------------------------------------------------

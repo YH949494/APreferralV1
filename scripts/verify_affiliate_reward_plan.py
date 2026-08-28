@@ -44,6 +44,7 @@ from affiliate_reward_plans import (  # noqa: E402
     DENOMINATION_PLAN_ID,
     DENOMINATION_POOL_IDS,
     LEGACY_PLAN_ID,
+    pool_denomination,
     recipe_required_by_pool,
     resolve_plan_id,
     tier_recipe,
@@ -139,6 +140,24 @@ def check_inventory(db, f: Findings, month: str) -> None:
             f.ok(f"{pool_id}: {note}")
 
 
+def _linked_issued_rows(db, ledger_id) -> list[dict]:
+    """Every issued voucher_pools row linked to a ledger through EITHER
+    link field: ``issued_for_ledger_id`` (string, written by every current
+    claim path) or ``ledger_id`` (ObjectId, present on older rows). Querying
+    only one of them silently under-reports surplus."""
+    return list(
+        db.voucher_pools.find(
+            {
+                "status": "issued",
+                "$or": [
+                    {"issued_for_ledger_id": str(ledger_id)},
+                    {"ledger_id": ledger_id},
+                ],
+            }
+        )
+    )
+
+
 def check_ledger_integrity(db, f: Findings, month: str | None) -> None:
     print(f"\n== ledger-integrity ({month or 'all months'}) ==")
     query: dict = {"ledger_type": "AFFILIATE_MONTHLY"}
@@ -166,39 +185,99 @@ def check_ledger_integrity(db, f: Findings, month: str | None) -> None:
     else:
         f.ok("no user exceeds 5 tier ledgers in an entitlement month")
 
-    mismatched = 0
+    count_mismatch = value_mismatch = surplus_found = denom_wrong = stamp_wrong = 0
     for lg in ledgers:
-        if lg.get("status") != "ISSUED":
-            continue
+        ledger_id = lg.get("_id")
         recipe = lg.get("bundle_recipe") or tier_recipe(
             lg.get("entitlement_month") or lg.get("year_month"), lg.get("tier")
         )
         if not recipe:
             continue
+        required = recipe_required_by_pool(recipe)
+        expected_n = int(recipe.get("expected_code_count") or 0)
+        expected_v = int(recipe.get("reward_value") or 0)
+
+        # --- Surplus: linked issued rows beyond the frozen recipe ---------
+        linked = _linked_issued_rows(db, ledger_id)
+        by_pool: collections.Counter = collections.Counter(
+            str(r.get("pool_id") or "").strip().upper() for r in linked
+        )
+        for pool_id, n in by_pool.items():
+            allowed = int(required.get(pool_id, 0))
+            if n > allowed:
+                surplus_found += 1
+                f.add(
+                    f"ledger {ledger_id} ({lg.get('tier')} "
+                    f"{lg.get('entitlement_month') or lg.get('year_month')}): "
+                    f"{n} linked {pool_id} rows but the recipe owes {allowed} "
+                    f"— {n - allowed} surplus code(s) stranded"
+                )
+
+        # --- Wrong denomination / wrong stamped value on linked rows ------
+        for row in linked:
+            pool_id = str(row.get("pool_id") or "").strip().upper()
+            if pool_id and pool_id not in required:
+                denom_wrong += 1
+                f.add(
+                    f"ledger {ledger_id}: linked row from pool {pool_id}, "
+                    f"which its recipe never draws from"
+                )
+                continue
+            implied = pool_denomination(pool_id)
+            stamped = row.get("voucher_value")
+            if implied is not None and stamped is not None and int(stamped) != int(implied):
+                stamp_wrong += 1
+                f.add(
+                    f"ledger {ledger_id}: code in {pool_id} stamped "
+                    f"voucher_value={stamped}, expected {implied}"
+                )
+
+        if lg.get("status") != "ISSUED":
+            continue
         codes = [v for v in (lg.get("vouchers") or []) if (v or {}).get("code")]
         if not codes and lg.get("voucher_code"):
             continue  # historical single-code ledger — expected shape
-        expected_n = int(recipe.get("expected_code_count") or 0)
-        expected_v = int(recipe.get("reward_value") or 0)
         actual_v = sum(int(v.get("value") or 0) for v in codes)
-        if len(codes) != expected_n or actual_v != expected_v:
-            mismatched += 1
+        if len(codes) != expected_n:
+            count_mismatch += 1
             f.add(
-                f"ledger {lg.get('_id')} ({lg.get('tier')} {lg.get('entitlement_month')}): "
-                f"expected {expected_n} codes / ${expected_v}, got {len(codes)} / ${actual_v}"
+                f"ledger {ledger_id} ({lg.get('tier')}): {len(codes)} codes, expected {expected_n}"
             )
-    if not mismatched:
-        f.ok("every ISSUED ledger matches its own recipe (count and value)")
+        if actual_v != expected_v:
+            value_mismatch += 1
+            f.add(
+                f"ledger {ledger_id} ({lg.get('tier')}): issued value ${actual_v}, "
+                f"expected frozen reward_value ${expected_v}"
+            )
+        stored_issued = lg.get("issued_value")
+        if stored_issued is not None and int(stored_issued) != expected_v:
+            value_mismatch += 1
+            f.add(f"ledger {ledger_id}: issued_value={stored_issued} != reward_value {expected_v}")
 
-    owners: dict[str, list] = collections.defaultdict(list)
+    if not surplus_found:
+        f.ok("no ledger carries surplus linked voucher rows")
+    if not denom_wrong:
+        f.ok("no linked row comes from a pool outside its recipe")
+    if not stamp_wrong:
+        f.ok("every linked row's stamped value matches its pool denomination")
+    if not count_mismatch and not value_mismatch:
+        f.ok("every ISSUED ledger matches its recipe (count and value)")
+
+    # BOTH link fields are collected independently, not `a or b`: a row whose
+    # string `issued_for_ledger_id` and ObjectId `ledger_id` disagree is
+    # itself the corruption being hunted, and coalescing them would hide it.
+    owners: dict[str, set] = collections.defaultdict(set)
     for row in db.voucher_pools.find({"status": "issued"}):
-        owner = row.get("issued_for_ledger_id") or row.get("ledger_id")
         code = row.get("code")
-        if code and owner is not None:
-            owners[str(code)].append(str(owner))
-    shared = {c: o for c, o in owners.items() if len(set(o)) > 1}
+        if not code:
+            continue
+        for owner in (row.get("issued_for_ledger_id"), row.get("ledger_id")):
+            if owner is not None:
+                owners[str(code)].add(str(owner))
+    shared = {c: o for c, o in owners.items() if len(o) > 1}
     if shared:
-        f.add(f"{len(shared)} voucher code(s) allocated to more than one ledger")
+        for code, ledger_ids in list(shared.items())[:20]:
+            f.add(f"voucher code {code} is linked to {len(ledger_ids)} ledgers: {sorted(ledger_ids)}")
     else:
         f.ok("no voucher code is allocated to two ledgers")
 

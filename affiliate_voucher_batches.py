@@ -30,31 +30,26 @@ from bson.errors import InvalidId
 from flask import Blueprint, jsonify, request
 
 from affiliate_rewards import _month_window_from_yyyymm as _entitlement_month_window_utc
-from affiliate_reward_plans import DENOMINATION_POOL_IDS, pool_denomination
+from affiliate_reward_plans import (
+    ADMIN_AFFILIATE_POOL_IDS,
+    ENTITLEMENT_MONTH_POOL_IDS as _CANONICAL_ENTITLEMENT_MONTH_POOL_IDS,
+    pool_denomination,
+)
 
 KL_TZ = pytz.timezone("Asia/Kuala_Lumpur")
 
-# Schedulable pools (matches the Admin Dashboard pool dropdown):
-#   - T1-T5: the legacy per-tier pools, used by every entitlement month
-#     through 202608 (see affiliate_reward_plans.LEGACY_PLAN_ID). T5 was
-#     previously excluded here, which left T5 the only tier unable to take a
-#     scheduled batch at all; it is included now on the same terms as T1-T4.
-#   - AFFILIATE_5 / AFFILIATE_10 / AFFILIATE_50: the standardized
-#     denomination pools introduced for entitlement month 202609 onward.
-#     One pool serves every tier whose recipe draws that denomination, so
-#     the value of a code is a property of the POOL, stamped onto each row
-#     as ``voucher_value`` at upload time.
-#   - WELCOME: unchanged, free-form scheduling, no entitlement month.
-BATCH_POOL_IDS = ("T1", "T2", "T3", "T4", "T5") + DENOMINATION_POOL_IDS + ("WELCOME",)
+# Schedulable pools and entitlement-month pools both come from the single
+# canonical catalogue in affiliate_reward_plans -- never restated here, so a
+# backend validator and an admin dropdown can no longer drift apart (which
+# is how T5 and the denomination pools ended up unuploadable).
+BATCH_POOL_IDS = ADMIN_AFFILIATE_POOL_IDS
 
-# Affiliate monthly-entitlement tiers: their claimability
-# (``affiliate_rewards._resolve_monthly_ledger_target`` /
-# ``get_claimable_pool_inventory``) requires a batch window that *fully
+# Affiliate pools whose claimability requires a batch window that *fully
 # contains* a KL calendar month, so their schedule must always be exactly
-# that canonical month window — never an admin-typed approximation (e.g.
+# that canonical month window -- never an admin-typed approximation (e.g.
 # "00:01"/"23:59"). WELCOME has no monthly-entitlement concept and keeps its
 # existing free-form start/end scheduling untouched.
-ENTITLEMENT_MONTH_POOL_IDS = ("T1", "T2", "T3", "T4", "T5") + DENOMINATION_POOL_IDS
+ENTITLEMENT_MONTH_POOL_IDS = _CANONICAL_ENTITLEMENT_MONTH_POOL_IDS
 
 logger = logging.getLogger(__name__)
 
