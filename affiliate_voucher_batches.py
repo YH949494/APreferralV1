@@ -30,13 +30,22 @@ from bson.errors import InvalidId
 from flask import Blueprint, jsonify, request
 
 from affiliate_rewards import _month_window_from_yyyymm as _entitlement_month_window_utc
+from affiliate_reward_plans import DENOMINATION_POOL_IDS, pool_denomination
 
 KL_TZ = pytz.timezone("Asia/Kuala_Lumpur")
 
-# T1-T4 and WELCOME are schedulable through this feature (matches the Admin
-# Dashboard pool dropdown). T5 keeps using plain, undated voucher_pools
-# uploads exactly as before.
-BATCH_POOL_IDS = ("T1", "T2", "T3", "T4", "WELCOME")
+# Schedulable pools (matches the Admin Dashboard pool dropdown):
+#   - T1-T5: the legacy per-tier pools, used by every entitlement month
+#     through 202608 (see affiliate_reward_plans.LEGACY_PLAN_ID). T5 was
+#     previously excluded here, which left T5 the only tier unable to take a
+#     scheduled batch at all; it is included now on the same terms as T1-T4.
+#   - AFFILIATE_5 / AFFILIATE_10 / AFFILIATE_50: the standardized
+#     denomination pools introduced for entitlement month 202609 onward.
+#     One pool serves every tier whose recipe draws that denomination, so
+#     the value of a code is a property of the POOL, stamped onto each row
+#     as ``voucher_value`` at upload time.
+#   - WELCOME: unchanged, free-form scheduling, no entitlement month.
+BATCH_POOL_IDS = ("T1", "T2", "T3", "T4", "T5") + DENOMINATION_POOL_IDS + ("WELCOME",)
 
 # Affiliate monthly-entitlement tiers: their claimability
 # (``affiliate_rewards._resolve_monthly_ledger_target`` /
@@ -45,7 +54,7 @@ BATCH_POOL_IDS = ("T1", "T2", "T3", "T4", "WELCOME")
 # that canonical month window — never an admin-typed approximation (e.g.
 # "00:01"/"23:59"). WELCOME has no monthly-entitlement concept and keeps its
 # existing free-form start/end scheduling untouched.
-ENTITLEMENT_MONTH_POOL_IDS = ("T1", "T2", "T3", "T4")
+ENTITLEMENT_MONTH_POOL_IDS = ("T1", "T2", "T3", "T4", "T5") + DENOMINATION_POOL_IDS
 
 logger = logging.getLogger(__name__)
 
@@ -409,7 +418,11 @@ def create_batch(
     )
 
     if pool_id not in BATCH_POOL_IDS:
-        return _fail("invalid_pool_id", f"'{pool_id}' is not a schedulable voucher pool (T1-T4 or WELCOME only).")
+        return _fail(
+            "invalid_pool_id",
+            f"'{pool_id}' is not a schedulable voucher pool "
+            f"(expected one of: {', '.join(BATCH_POOL_IDS)}).",
+        )
     if not batch_name:
         return _fail("invalid_batch_name", "Batch name is required.")
 
@@ -487,6 +500,7 @@ def create_batch(
         admin_identity, batch_id, pool_id, submitted,
     )
 
+    denomination = pool_denomination(pool_id)
     inserted = 0
     duplicate_in_db = 0
     for code in unique_codes:
@@ -501,6 +515,13 @@ def create_batch(
             "created_at": now_utc,
             "distribution_disabled": False,
         }
+        # Denomination pools carry their value on every physical row, so a
+        # code stays independently identifiable (and priceable) no matter
+        # which tier's bundle later consumes it. Per-tier legacy pools are
+        # left exactly as before: their value is a property of the tier,
+        # read from the legacy plan, never from the row.
+        if denomination is not None:
+            row["voucher_value"] = denomination
         try:
             db.voucher_pools.insert_one(row)
             inserted += 1
@@ -672,6 +693,7 @@ def add_codes_to_batch(db, batch_id, *, admin_identity: str, codes, now_utc: dat
         admin_identity, oid, pool_id, submitted,
     )
 
+    denomination = pool_denomination(pool_id)
     inserted = 0
     duplicate_in_db = 0
     for code in unique_codes:
@@ -686,6 +708,8 @@ def add_codes_to_batch(db, batch_id, *, admin_identity: str, codes, now_utc: dat
             "created_at": now_utc,
             "distribution_disabled": False,
         }
+        if denomination is not None:
+            row["voucher_value"] = denomination
         try:
             db.voucher_pools.insert_one(row)
             inserted += 1

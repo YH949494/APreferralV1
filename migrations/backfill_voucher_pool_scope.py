@@ -48,11 +48,14 @@ if _APP_ROOT not in sys.path:
     sys.path.insert(0, _APP_ROOT)
 
 from database import init_db, get_db  # noqa: E402
+from affiliate_reward_plans import DENOMINATION_POOL_IDS
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", stream=sys.stderr)
 logger = logging.getLogger("backfill_voucher_pool_scope")
 
-RESERVED_LEGACY_POOL_IDS = frozenset({"WELCOME", "T1", "T2", "T3", "T4", "T5"})
+RESERVED_LEGACY_POOL_IDS = frozenset(
+    {"WELCOME", "T1", "T2", "T3", "T4", "T5"} | set(DENOMINATION_POOL_IDS)
+)
 BACKFILL_SOURCE = "affiliate_legacy_backfill"
 
 

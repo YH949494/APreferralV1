@@ -217,9 +217,37 @@ class TestBatchUpload:
 
     def test_invalid_pool_id_rejected(self):
         db = _db()
-        res = _create(db, pool_id="T5", codes=["A1"])
+        res = _create(db, pool_id="NOT_A_POOL", codes=["A1"])
         assert res["ok"] is False
         assert res["code"] == "invalid_pool_id"
+
+    def test_t5_pool_id_is_schedulable(self):
+        # T5 used to be the one tier that could not take a scheduled batch
+        # (BATCH_POOL_IDS omitted it), leaving T5 entitlements permanently
+        # dependent on undated legacy uploads.
+        db = _db()
+        res = _create(db, pool_id="T5", codes=["A1"])
+        assert res["ok"] is True
+        assert db.voucher_pools.count_documents({"pool_id": "T5"}) == 1
+
+    def test_denomination_pool_rows_carry_voucher_value(self):
+        # Denomination-pool rows must be independently priceable: one pool
+        # serves several tiers, so the value cannot be inferred from a tier.
+        db = _db()
+        res = _create(db, pool_id="AFFILIATE_10", codes=["D1", "D2"])
+        assert res["ok"] is True
+        rows = list(db.voucher_pools.find({"pool_id": "AFFILIATE_10"}))
+        assert len(rows) == 2
+        assert all(r["voucher_value"] == 10 for r in rows)
+
+    def test_legacy_tier_pool_rows_have_no_voucher_value(self):
+        # Per-tier legacy pools are untouched: their value stays a property
+        # of the tier (read from the legacy plan), never stamped on the row.
+        db = _db()
+        res = _create(db, pool_id="T1", codes=["L1"])
+        assert res["ok"] is True
+        row = db.voucher_pools.find_one({"pool_id": "T1"})
+        assert "voucher_value" not in row
 
     def test_end_before_start_rejected(self):
         db = _db()

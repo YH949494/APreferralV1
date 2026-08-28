@@ -29,6 +29,14 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Iterable, Mapping
 
+from affiliate_reward_plans import (
+    DENOMINATION_POOL_IDS,
+    pool_denomination,
+    recipe_required_by_pool,
+    resolve_plan_id,
+    tier_recipe,
+)
+
 try:  # ObjectId is only needed to build drop-id query variants.
     from bson import ObjectId
 except Exception:  # pragma: no cover - bson always present in prod
@@ -769,7 +777,13 @@ _AFF_PENDING = ["PENDING_REVIEW", "PENDING_MANUAL", "PENDING_EOM", "SIMULATED_PE
 _AFF_APPROVED = ["APPROVED"]
 _AFF_ISSUED = ["ISSUED", "SETTLING"]
 _AFF_REJECTED = ["REJECTED", "OUT_OF_STOCK"]
-_AFF_TIERS = ["WELCOME", "T1", "T2", "T3", "T4", "T5"]
+# Inventory is tracked per POOL, and the set of pools is plan-dependent:
+# the legacy plan (entitlement month <= 202608) stocks per-tier pools, while
+# the denomination plan (202609+) stocks shared $5/$10/$50 pools. Both are
+# listed so an operator sees real stock for whichever plan is in flight —
+# a T1-T5 stock count alone is misleading once the new plan is live, since
+# no denomination-plan entitlement draws from those pools at all.
+_AFF_TIERS = ["WELCOME", "T1", "T2", "T3", "T4", "T5"] + list(DENOMINATION_POOL_IDS)
 
 
 def build_affiliate_panel(
@@ -836,6 +850,11 @@ def build_affiliate_panel(
             "available": avail["value"],
             "issued": issued_n["value"],
             "total_available": avail["value"],
+            # Denomination pools have a fixed per-code value; per-tier
+            # legacy pools do not (value is a property of the tier), so
+            # this is None for them rather than a misleading zero.
+            "denomination": pool_denomination(pool_id),
+            "pool_kind": "denomination" if pool_denomination(pool_id) else "tier",
         }
         if claimable_inventory is not None:
             inv = metric(lambda p=pool_id: claimable_inventory(p))
@@ -937,6 +956,15 @@ def build_affiliate_detail(
     status_history = []
     vouchers_issued = []
     for d in docs:
+        entitlement_month = d.get("entitlement_month") or d.get("year_month")
+        # A ledger created before this change has no frozen recipe; resolve
+        # it lazily from (entitlement_month, tier) so historical rows still
+        # render a correct expected bundle instead of a blank.
+        recipe = d.get("bundle_recipe")
+        if not (isinstance(recipe, dict) and recipe.get("components")):
+            recipe = tier_recipe(entitlement_month, d.get("tier"))
+        expected_by_pool = recipe_required_by_pool(recipe)
+        bundle_vouchers = [v for v in (d.get("vouchers") or []) if (v or {}).get("code")]
         ledger.append(
             {
                 "ledger_id": str(d.get("_id")),
@@ -945,6 +973,31 @@ def build_affiliate_detail(
                 "pool_id": d.get("pool_id"),
                 "status": d.get("status"),
                 "year_month": d.get("year_month"),
+                "entitlement_month": entitlement_month,
+                "reward_plan": d.get("reward_plan") or resolve_plan_id(entitlement_month),
+                "expected_bundle": expected_by_pool or None,
+                "expected_code_count": (
+                    d.get("expected_code_count")
+                    if d.get("expected_code_count") is not None
+                    else (recipe or {}).get("expected_code_count")
+                ),
+                "reward_value": (
+                    d.get("reward_value")
+                    if d.get("reward_value") is not None
+                    else (recipe or {}).get("reward_value")
+                ),
+                "issued_code_count": (
+                    d.get("issued_code_count")
+                    if d.get("issued_code_count") is not None
+                    else (len(bundle_vouchers) or (1 if d.get("voucher_code") else 0))
+                ),
+                "issued_value": (
+                    d.get("issued_value")
+                    if d.get("issued_value") is not None
+                    else d.get("total_value")
+                ),
+                "allocated_code_count": d.get("allocated_code_count"),
+                "missing_by_denomination": d.get("missing_by_denomination") or None,
                 "qualified_count": d.get("qualified_count"),
                 "risk_flags": d.get("risk_flags") or [],
                 "review_reason": d.get("review_reason"),
@@ -959,12 +1012,31 @@ def build_affiliate_detail(
                 "at": _iso(d.get("updated_at")),
             }
         )
-        if d.get("voucher_code"):
+        # Every code in the bundle, not just the legacy first-code mirror in
+        # `voucher_code` — an operator investigating a multi-denomination
+        # tier must be able to see the whole bundle.
+        if bundle_vouchers:
+            for item in bundle_vouchers:
+                vouchers_issued.append(
+                    {
+                        "voucher_code": item.get("code"),
+                        "voucher_value": item.get("value"),
+                        "pool_id": item.get("pool_id") or d.get("pool_id"),
+                        "tier": d.get("tier"),
+                        "ledger_id": str(d.get("_id")),
+                        "entitlement_month": entitlement_month,
+                        "issued_at": _iso(d.get("issued_at") or d.get("updated_at")),
+                    }
+                )
+        elif d.get("voucher_code"):
+            # Historical single-code ledger — rendered exactly as before.
             vouchers_issued.append(
                 {
                     "voucher_code": d.get("voucher_code"),
                     "pool_id": d.get("pool_id"),
                     "tier": d.get("tier"),
+                    "ledger_id": str(d.get("_id")),
+                    "entitlement_month": entitlement_month,
                     "issued_at": _iso(d.get("updated_at")),
                 }
             )

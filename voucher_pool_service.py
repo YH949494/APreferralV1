@@ -40,6 +40,7 @@ from datetime import datetime, timezone
 from pymongo import ReturnDocument
 
 import database
+from affiliate_reward_plans import DENOMINATION_POOL_IDS
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +63,13 @@ CODE_STATUSES = ["available", "issued"]
 # (vouchers.py admin_pools_upload_v2 / affiliate_rewards.py). Registering or
 # uploading into one of these from Campaign Centre is refused outright —
 # kept as defense-in-depth alongside the explicit allocation_scope model.
-RESERVED_LEGACY_POOL_IDS = frozenset({"WELCOME", "T1", "T2", "T3", "T4", "T5"})
+RESERVED_LEGACY_POOL_IDS = frozenset(
+    {"WELCOME", "T1", "T2", "T3", "T4", "T5"}
+    # The standardized affiliate denomination pools (entitlement month
+    # 202609 onward) are owned by the same affiliate flow and reserved on
+    # exactly the same terms as the per-tier pools above.
+    | set(DENOMINATION_POOL_IDS)
+)
 
 # Marker written onto every code row this module inserts, alongside
 # pool_type/allocation_scope. Retained for audit/back-compat; the primary

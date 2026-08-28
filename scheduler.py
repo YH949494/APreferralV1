@@ -14,7 +14,15 @@ from requests import RequestException
 from database import db
 from referral_rules import calc_referral_award
 from xp import grant_xp, now_utc, now_kl
-from affiliate_rewards import mark_invitee_qualified
+from affiliate_rewards import (
+    T1_THRESHOLD as _AFF_T1_THRESHOLD,
+    T2_THRESHOLD as _AFF_T2_THRESHOLD,
+    T3_THRESHOLD as _AFF_T3_THRESHOLD,
+    T4_THRESHOLD as _AFF_T4_THRESHOLD,
+    T5_THRESHOLD as _AFF_T5_THRESHOLD,
+    mark_invitee_qualified,
+)
+from affiliate_reward_plans import reward_value as _plan_reward_value
 from affiliate_group_access import maybe_unlock_affiliate_group
 import referral_invitee_lock
 from referral_ledger import with_not_invalidated
@@ -1148,12 +1156,47 @@ def _referral_hold_hours() -> int:
     return int(_referral_setting("qualify_hold_hours", REFERRAL_HOLD_HOURS))
 
 AFFILIATE_CONGRATS_CHANNEL_ID = int(os.getenv("AFFILIATE_CONGRATS_CHANNEL_ID", "-1003820861717"))
+
+# Any month before the denomination plan's first month resolves to the legacy
+# plan; used only to render the historical (threshold, amount) compatibility
+# table below.
+_LEGACY_PLAN_REFERENCE_MONTH = "202608"
+
+# (qualified-referral threshold, tier label) for the public milestone
+# announcement, derived from affiliate_rewards' own thresholds rather than
+# restated here — the previous hard-coded copy had already drifted (it
+# assumed T5 = 250 while affiliate_rewards defaulted T5 to 300, so a user on
+# 250-299 referrals had an announcement configured for a tier the evaluator
+# would never grant).
+REFERRAL_CONGRATS_TIER_THRESHOLDS = [
+    (_AFF_T1_THRESHOLD, "T1"),
+    (_AFF_T2_THRESHOLD, "T2"),
+    (_AFF_T3_THRESHOLD, "T3"),
+    (_AFF_T4_THRESHOLD, "T4"),
+    (_AFF_T5_THRESHOLD, "T5"),
+]
+
+
+def congrats_reward_value(threshold: int, entitlement_month: str | None = None) -> int:
+    """The monetary value announced for a milestone.
+
+    Resolved from the versioned reward plan for the ENTITLEMENT month, so an
+    August milestone always announces the August amount and a September one
+    the September amount. The previous static table also mis-stated legacy
+    T4 as $125 when the T4 bundle has always been $50 x 3 = $150.
+    """
+    tier_label = dict(REFERRAL_CONGRATS_TIER_THRESHOLDS).get(int(threshold))
+    if not tier_label:
+        return 0
+    return _plan_reward_value(entitlement_month, tier_label)
+
+
+# Retained in its historical (threshold, amount) shape for any external
+# reader; amounts are the legacy-plan values, and every announcement path
+# below resolves the live amount through `congrats_reward_value` instead.
 REFERRAL_CONGRATS_TIERS = [
-    (10, 10),
-    (25, 15),
-    (50, 50),
-    (150, 125),
-    (250, 250),
+    (threshold, _plan_reward_value(_LEGACY_PLAN_REFERENCE_MONTH, tier_label))
+    for threshold, tier_label in REFERRAL_CONGRATS_TIER_THRESHOLDS
 ]
 REFERRAL_CHANNEL_RETRY_HOURS = 12
 REFERRAL_CHANNEL_EXPIRE_DAYS = 7
@@ -3263,7 +3306,7 @@ def current_month_qualified_referral_count(inviter_user_id: int, now_utc_ts: dat
 # status="ISSUED"). The public announcement must always resolve through
 # this map and read affiliate_ledger — it must never trust monthly_count
 # (the referral threshold) alone as proof a voucher was issued.
-REFERRAL_CONGRATS_TIER_LABEL = {10: "T1", 25: "T2", 50: "T3", 150: "T4", 250: "T5"}
+REFERRAL_CONGRATS_TIER_LABEL = {t: label for t, label in REFERRAL_CONGRATS_TIER_THRESHOLDS}
 
 
 def _affiliate_ledger_issued_for_congrats(user_id: int, year_month: str, tier_label: str) -> dict | None:
@@ -3278,7 +3321,16 @@ def _affiliate_ledger_issued_for_congrats(user_id: int, year_month: str, tier_la
     """
     ledger = db.affiliate_ledger.find_one(
         {"user_id": int(user_id), "year_month": year_month, "tier": tier_label},
-        {"status": 1, "voucher_code": 1},
+        {
+            "status": 1,
+            "voucher_code": 1,
+            "issued_value": 1,
+            "reward_value": 1,
+            "total_value": 1,
+            "entitlement_month": 1,
+            "year_month": 1,
+            "reward_plan": 1,
+        },
     )
     if not ledger:
         logger.info("[AFF_CONGRATS][SKIP] uid=%s tier=%s reason=ledger_missing", user_id, tier_label)
@@ -3321,8 +3373,23 @@ def _attempt_affiliate_milestone_congrats(inviter_user_id: int, threshold: int, 
         return
 
     year_month = _month_start_kl(now_utc_ts).strftime("%Y%m")
-    if not _affiliate_ledger_issued_for_congrats(inviter_user_id, year_month, tier_label):
+    issued_ledger = _affiliate_ledger_issued_for_congrats(inviter_user_id, year_month, tier_label)
+    if not issued_ledger:
         return
+
+    # Announce what was ACTUALLY issued for this entitlement, resolved from
+    # the ledger's own frozen obligation — never from a static table that
+    # cannot know which reward plan this month runs on.
+    entitlement_month = (
+        issued_ledger.get("entitlement_month") or issued_ledger.get("year_month") or year_month
+    )
+    voucher = int(
+        issued_ledger.get("issued_value")
+        or issued_ledger.get("total_value")
+        or issued_ledger.get("reward_value")
+        or _plan_reward_value(entitlement_month, tier_label)
+        or 0
+    )
 
     user_doc = db.users.find_one({"user_id": inviter_user_id}, {"user_id": 1, "username": 1, "first_name": 1})
     display_name = (user_doc or {}).get("username") or (user_doc or {}).get("first_name")
@@ -3349,10 +3416,15 @@ def _attempt_affiliate_milestone_congrats(inviter_user_id: int, threshold: int, 
         logger.info("[AFF_CONGRATS][SKIP] uid=%s tier=%s reason=already_announced", inviter_user_id, tier_label)
         return
 
-    tier_idx = next(i for i, (t, _) in enumerate(REFERRAL_CONGRATS_TIERS) if t == threshold)
-    is_last = tier_idx == len(REFERRAL_CONGRATS_TIERS) - 1
+    tier_idx = next(
+        i for i, (t, _) in enumerate(REFERRAL_CONGRATS_TIER_THRESHOLDS) if t == threshold
+    )
+    is_last = tier_idx == len(REFERRAL_CONGRATS_TIER_THRESHOLDS) - 1
     if not is_last:
-        next_tier, next_voucher = REFERRAL_CONGRATS_TIERS[tier_idx + 1]
+        next_tier, next_tier_label = REFERRAL_CONGRATS_TIER_THRESHOLDS[tier_idx + 1]
+        # The NEXT milestone is earned in the same entitlement month, so it
+        # must be priced on that month's plan too.
+        next_voucher = _plan_reward_value(entitlement_month, next_tier_label)
         tail = f"Next: {next_tier} refs = ${next_voucher}! 💪"
     else:
         tail = "Absolute legend! 🏆"

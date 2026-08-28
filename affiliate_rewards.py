@@ -14,14 +14,29 @@ from config import (
     AFFILIATE_GROUP_TRIGGER_WEEKLY_VALID_REFERRALS,
 )
 from referral_ledger import with_not_invalidated
+from affiliate_reward_plans import (
+    DENOMINATION_POOL_IDS,
+    is_denomination_plan,
+    normalize_month as _normalize_entitlement_month,
+    recipe_required_by_pool,
+    recipe_value_by_pool,
+    resolve_plan_id,
+    tier_recipe,
+)
 
 KL_TZ = pytz.timezone("Asia/Kuala_Lumpur")
 
 TIERS = ("T1", "T2", "T3", "T4", "T5")
-POOL_IDS = ("WELCOME",) + TIERS
+POOL_IDS = ("WELCOME",) + TIERS + DENOMINATION_POOL_IDS
 FINAL_STATUSES = {"ISSUED", "OUT_OF_STOCK", "REJECTED"}
 SETTLING_STATUS = "SETTLING"
 AFFILIATE_BUNDLE_REWARD_TYPE = "affiliate_bundle"
+# Legacy (entitlement month <= 202608) single-denomination bundles.
+# RETAINED AS-IS for historical meaning and for every legacy-plan code path
+# below. The canonical, plan-versioned definition now lives in
+# affiliate_reward_plans (which reproduces this exact table as its legacy
+# plan) — resolve rewards through `_ledger_recipe` / `tier_recipe`, not this
+# dict, so a September+ entitlement never reads an August obligation.
 AFFILIATE_REWARD_BUNDLES = {
     "T1": {"voucher_count": 2, "voucher_value": 5},
     "T2": {"voucher_count": 3, "voucher_value": 5},
@@ -46,6 +61,11 @@ _INVENTORY_ONLY_RISK_FLAGS = frozenset({
     "target_batch_expired_unissued",
     "target_batch_scheduled",
     "target_batch_empty",
+    # Denomination-plan shortage: at least one denomination of the tier's
+    # recipe could not be filled. Inventory-only by construction (raised
+    # solely by the allocation loop), so the existing auto-retry path may
+    # resume it once stock is replenished.
+    "bundle_denomination_short",
 })
 
 WELCOME_REWARD_VISIBLE_DAYS = 3
@@ -54,7 +74,12 @@ T1_THRESHOLD = int(os.getenv("AFF_T1_THRESHOLD", "10"))
 T2_THRESHOLD = int(os.getenv("AFF_T2_THRESHOLD", "25"))
 T3_THRESHOLD = int(os.getenv("AFF_T3_THRESHOLD", "50"))
 T4_THRESHOLD = int(os.getenv("AFF_T4_THRESHOLD", "150"))
-T5_THRESHOLD = int(os.getenv("AFF_T5_THRESHOLD", "300"))
+# 250, matching the confirmed business rule and scheduler.py's own
+# REFERRAL_CONGRATS_TIER_LABEL ({..., 250: "T5"}). The previous default of
+# 300 disagreed with that table, so a user on 250-299 qualified referrals
+# had a T5 milestone announcement configured for a tier the evaluator
+# would never grant.
+T5_THRESHOLD = int(os.getenv("AFF_T5_THRESHOLD", "250"))
 logger = logging.getLogger(__name__)
 logger.info(
     "[AFFILIATE][TIER_CONFIG] thresholds=%s",
@@ -103,10 +128,29 @@ def ensure_affiliate_indexes(db):
         name="pool_status_window",
     )
     db.voucher_pools.create_index([("batch_id", ASCENDING), ("status", ASCENDING)], name="pool_batch_status")
+    # Reservation/reconciliation of a multi-denomination bundle reads
+    # "every issued row linked to THIS ledger", grouped by pool. Without
+    # these, that read is a collection scan on every allocation, retry and
+    # admin render.
+    db.voucher_pools.create_index(
+        [("issued_for_ledger_id", ASCENDING), ("status", ASCENDING), ("pool_id", ASCENDING)],
+        name="pool_issued_ledger_status_pool",
+    )
+    db.voucher_pools.create_index(
+        [("ledger_id", ASCENDING), ("status", ASCENDING)],
+        name="pool_ledger_status",
+    )
 
     db.affiliate_ledger.create_index([("dedup_key", ASCENDING)], unique=True, name="uniq_affiliate_dedup")
     db.affiliate_ledger.create_index([("status", ASCENDING), ("created_at", ASCENDING)], name="affiliate_status_created")
     db.affiliate_ledger.create_index([("user_id", ASCENDING), ("year_month", ASCENDING)], name="affiliate_user_month")
+    # Reporting and reconciliation both slice by entitlement month + plan +
+    # tier. Non-unique and additive: historical ledgers simply have no
+    # entitlement_month/reward_plan and are absent from it.
+    db.affiliate_ledger.create_index(
+        [("entitlement_month", ASCENDING), ("reward_plan", ASCENDING), ("tier", ASCENDING), ("status", ASCENDING)],
+        name="affiliate_entitlement_plan_tier_status",
+    )
     db.affiliate_ledger.create_index(
         [("user_id", ASCENDING), ("invitee_user_id", ASCENDING), ("gate_day", ASCENDING), ("tier", ASCENDING), ("created_at", ASCENDING)],
         unique=True,
@@ -193,16 +237,52 @@ def _affiliate_bundle_spec(tier: str | None) -> dict | None:
     return AFFILIATE_REWARD_BUNDLES.get(str(tier or "").strip().upper())
 
 
-def _affiliate_bundle_payload(*, tier: str, vouchers: list[dict]) -> dict:
+def _voucher_row_value(row: dict, *, tier: str, value_by_pool: dict) -> int:
+    """Monetary value of ONE physical voucher row.
+
+    Resolution order, most authoritative first:
+      1. ``voucher_value`` stamped on the row itself at upload time — the
+         only correct source for a denomination pool, where one pool serves
+         many tiers.
+      2. The recipe's per-pool value for that row's ``pool_id``.
+      3. The legacy tier-wide value (per-tier pools carry no row value).
+    """
+    stamped = (row or {}).get("voucher_value")
+    if stamped is not None:
+        try:
+            return int(stamped)
+        except (TypeError, ValueError):
+            pass
+    pool_id = str((row or {}).get("pool_id") or "").strip().upper()
+    if pool_id in value_by_pool:
+        return int(value_by_pool[pool_id] or 0)
+    spec = _affiliate_bundle_spec(tier) or {}
+    return int(spec.get("voucher_value") or 0)
+
+
+def _affiliate_bundle_payload(*, tier: str, vouchers: list[dict], recipe: dict | None = None) -> dict:
+    """Bundle payload stored on the ledger and rendered to the user.
+
+    Without ``recipe`` this is byte-for-byte the previous legacy behaviour
+    (one tier-wide value applied to every code). With a recipe it prices
+    each code from its own denomination, so a mixed bundle such as
+    T3 = $10 + $50 totals correctly.
+    """
     tier_key = str(tier or "").strip().upper()
-    spec = _affiliate_bundle_spec(tier_key) or {}
-    voucher_value = int(spec.get("voucher_value") or 0)
+    value_by_pool = recipe_value_by_pool(recipe) if recipe else {}
     normalized = []
     for voucher in vouchers:
         code = str((voucher or {}).get("code") or "").strip()
         if not code:
             continue
-        normalized.append({"value": voucher_value, "code": code})
+        entry = {
+            "value": _voucher_row_value(voucher, tier=tier_key, value_by_pool=value_by_pool),
+            "code": code,
+        }
+        pool_id = str((voucher or {}).get("pool_id") or "").strip().upper()
+        if pool_id:
+            entry["pool_id"] = pool_id
+        normalized.append(entry)
     return {
         "reward_type": AFFILIATE_BUNDLE_REWARD_TYPE,
         "affiliate_tier": tier_key,
@@ -211,6 +291,53 @@ def _affiliate_bundle_payload(*, tier: str, vouchers: list[dict]) -> dict:
         "currency": "$",
         "vouchers": normalized,
     }
+
+
+def _ledger_entitlement_month(ledger: dict | None) -> str | None:
+    """The entitlement month that governs this ledger's obligation.
+
+    ``entitlement_month`` is written on every ledger created from this
+    change onward. Historical ledgers only have ``year_month`` (the same
+    KL "YYYYMM" value, written by the evaluator), so it is read as a lazy
+    backward-compatible fallback — no backfill is required for a historical
+    ledger to keep resolving its original plan.
+    """
+    return _normalize_entitlement_month(
+        (ledger or {}).get("entitlement_month") or (ledger or {}).get("year_month")
+    )
+
+
+def _ledger_reward_plan(ledger: dict | None) -> str:
+    """The plan governing this ledger — the frozen ``reward_plan`` if one
+    was persisted, otherwise resolved from the entitlement month.
+
+    NEVER resolved from the current date: an August entitlement retried in
+    September (or any later month) must still resolve the legacy plan.
+    """
+    stored = str((ledger or {}).get("reward_plan") or "").strip()
+    if stored:
+        return stored
+    return resolve_plan_id(_ledger_entitlement_month(ledger))
+
+
+def _ledger_recipe(ledger: dict | None) -> dict | None:
+    """The tier recipe this ledger owes.
+
+    A ledger created under this change carries an immutable frozen
+    ``bundle_recipe``, which always wins — so a later edit to the plan
+    tables can never retroactively change what an existing entitlement
+    owes. Anything older is resolved lazily from
+    (entitlement_month, tier), which for every historical ledger yields
+    exactly the legacy bundle it was created under.
+    """
+    frozen = (ledger or {}).get("bundle_recipe")
+    if isinstance(frozen, dict) and frozen.get("components"):
+        return frozen
+    return tier_recipe(_ledger_entitlement_month(ledger), (ledger or {}).get("tier"))
+
+
+def _ledger_uses_denomination_plan(ledger: dict | None) -> bool:
+    return is_denomination_plan(_ledger_reward_plan(ledger))
 
 
 def _ledger_has_affiliate_bundle(ledger: dict | None) -> bool:
@@ -919,6 +1046,13 @@ def _monthly_ledger_eligible_for_inventory_retry(ledger: dict) -> bool:
     """
     if str(ledger.get("ledger_type") or "").strip().upper() != "AFFILIATE_MONTHLY":
         return False
+    if _ledger_uses_denomination_plan(ledger):
+        # A denomination-plan ledger pins each pool independently under
+        # `pool_targets`, and its allocation loop is already idempotent and
+        # resumable — it needs no legacy single-pin re-resolution. Treat it
+        # as never eligible for that path so `_reresolve_..._for_retry`
+        # (which only understands `target_mode`) is never applied to it.
+        return False
     if ledger.get("target_mode") not in ("batch", "legacy"):
         return False
     if _ledger_has_affiliate_bundle(ledger) or ledger.get("voucher_code"):
@@ -1216,51 +1350,88 @@ def _has_issued_pool_voucher_for_ledger(db, *, ledger_id) -> bool:
     )
 
 
-def _store_affiliate_bundle_on_ledger(db, *, ledger_id, tier: str, vouchers: list[dict], now_utc: datetime):
-    payload = _affiliate_bundle_payload(tier=tier, vouchers=vouchers)
+def _store_affiliate_bundle_on_ledger(
+    db, *, ledger_id, tier: str, vouchers: list[dict], now_utc: datetime, recipe: dict | None = None,
+):
+    """Finalize a ledger to ISSUED with its complete bundle.
+
+    The guarded update (``status == SETTLING`` and no ``voucher_code`` yet)
+    is the single atomic point at which an entitlement becomes issued, so
+    only one worker can ever win it — the loser gets ``modified_count == 0``
+    and reconciles against the winner's result instead of writing its own.
+    """
+    payload = _affiliate_bundle_payload(tier=tier, vouchers=vouchers, recipe=recipe)
     if not payload.get("vouchers"):
         return None
     first_code = payload["vouchers"][0]["code"]
     update = {
         "status": "ISSUED",
         "updated_at": now_utc,
+        "issued_at": now_utc,
+        # `voucher_code` stays the FIRST code of the bundle purely for
+        # backward compatibility with every historical single-code reader
+        # (exports, congrats gating, admin lookups). It is never the
+        # authoritative record of what was issued — `vouchers` is.
         "voucher_code": first_code,
         **payload,
     }
+    if recipe:
+        update.update(
+            {
+                "reward_plan": recipe.get("reward_plan"),
+                "expected_code_count": int(recipe.get("expected_code_count") or 0),
+                "reward_value": int(recipe.get("reward_value") or 0),
+                "issued_code_count": int(payload.get("voucher_count") or 0),
+                "issued_value": int(payload.get("total_value") or 0),
+            }
+        )
+        if recipe.get("entitlement_month"):
+            update["entitlement_month"] = recipe.get("entitlement_month")
     res = db.affiliate_ledger.update_one(
         {"_id": ledger_id, "status": SETTLING_STATUS, **_no_voucher_filter()},
-        {"$set": update},
+        {
+            "$set": update,
+            # The bundle is complete: drop any shortage bookkeeping and
+            # release the allocation lease.
+            "$unset": {
+                "missing_by_denomination": "",
+                "allocation_lease_id": "",
+                "allocation_lease_at": "",
+            },
+        },
     )
     if getattr(res, "modified_count", 0) != 1:
         return None
     return db.affiliate_ledger.find_one({"_id": ledger_id})
 
 
-def _find_complete_issued_affiliate_bundle(db, ledger: dict) -> list[dict] | None:
-    """Bundle-aware replacement for "does one voucher_pools row exist for
-    this ledger": determines whether a COMPLETE, same-tier, same-user
-    bundle of already-issued voucher_pools rows exists for ``ledger``,
-    without consuming any inventory. Returns the exact rows making up the
-    bundle (sorted, stable) or ``None`` if no complete, unambiguous bundle
-    is found — including when linked rows span more than one tier/user, or
-    the count doesn't exactly match ``AFFILIATE_REWARD_BUNDLES``.
+def _classify_issued_pool_rows(db, ledger: dict, *, recipe: dict | None = None) -> dict:
+    """Group the voucher_pools rows already linked to ``ledger`` against the
+    denominations its recipe requires — the single primitive behind both
+    reconciliation and idempotent resume.
+
+    Returns::
+
+        {
+          "required":  {pool_id: qty},        # what the recipe owes
+          "allocated": {pool_id: [rows]},     # accepted rows, per pool
+          "missing":   {pool_id: qty},        # still to claim
+          "foreign":   [rows],                # explicitly another user's
+          "surplus":   [rows],                # off-recipe / over-quota
+          "rows":      [rows],                # every linked issued row
+          "complete":  bool,                  # exact recipe satisfied
+        }
+
+    ``foreign``/``surplus`` are never silently absorbed: any of either means
+    the linkage is corrupt or ambiguous, and the caller must refuse to
+    finalize (and refuse to claim more) rather than guess.
     """
-    if not ledger:
-        return None
-    tier = str(ledger.get("tier") or "").strip().upper()
-    spec = _affiliate_bundle_spec(tier)
-    if not spec:
-        return None
-    ledger_id = ledger.get("_id")
-    user_id = ledger.get("user_id")
-    required = int(spec["voucher_count"])
+    ledger_id = (ledger or {}).get("_id")
+    user_id = (ledger or {}).get("user_id")
+    recipe = recipe if recipe is not None else _ledger_recipe(ledger)
+    required = recipe_required_by_pool(recipe)
 
-    linked = list(db.voucher_pools.find({"status": "issued", **_pool_ledger_filter(ledger_id)}))
-    if not linked:
-        return None
-
-    def _row_tier(row: dict) -> str:
-        return str(row.get("pool_id") or "").strip().upper()
+    rows = _issued_pool_vouchers_for_ledger(db, ledger_id=ledger_id)
 
     def _row_user(row: dict):
         raw = row.get("issued_to_user_id")
@@ -1268,41 +1439,117 @@ def _find_complete_issued_affiliate_bundle(db, ledger: dict) -> list[dict] | Non
             raw = row.get("issued_to")  # legacy field
         return raw
 
-    found_tiers = sorted({_row_tier(row) for row in linked})
-    if found_tiers != [tier]:
-        # Never let a T1/T3/WELCOME/etc. row complete a T2 (or any other)
-        # ledger's bundle — refuse and leave the ledger pending.
-        logger.error(
-            "[AFF_RECONCILE][MISMATCH] ledger_id=%s expected_tier=%s found_tiers=%s expected_count=%s found_count=%s",
-            ledger_id, tier, found_tiers, required, len(linked),
-        )
+    allocated: dict[str, list] = {pool_id: [] for pool_id in required}
+    foreign: list[dict] = []
+    surplus: list[dict] = []
+    for row in rows:
+        # A row with no issued_to/issued_to_user_id at all (older rows
+        # written before that field was consistently stamped) is not a
+        # mismatch — the ledger link is already per-ledger (hence
+        # per-user); only an EXPLICIT different user id disqualifies.
+        row_user = _row_user(row)
+        if row_user is not None and int(row_user) != int(user_id or 0):
+            foreign.append(row)
+            continue
+        pool_id = str(row.get("pool_id") or "").strip().upper()
+        if pool_id not in required:
+            # Never let a T1/WELCOME/AFFILIATE_5/... row help complete a
+            # bundle that does not call for that pool.
+            surplus.append(row)
+            continue
+        if len(allocated[pool_id]) >= int(required[pool_id]):
+            surplus.append(row)
+            continue
+        allocated[pool_id].append(row)
+
+    for bucket in allocated.values():
+        bucket.sort(key=lambda row: row.get("_id"))
+
+    missing = {
+        pool_id: int(required[pool_id]) - len(allocated[pool_id])
+        for pool_id in required
+        if len(allocated[pool_id]) < int(required[pool_id])
+    }
+    complete = bool(required) and not missing and not foreign and not surplus
+    return {
+        "required": required,
+        "allocated": allocated,
+        "missing": missing,
+        "foreign": foreign,
+        "surplus": surplus,
+        "rows": rows,
+        "complete": complete,
+    }
+
+
+def _ordered_bundle_rows(recipe: dict | None, allocated: dict) -> list[dict]:
+    """Bundle rows in the recipe's own deterministic component order, so a
+    user always receives (and an admin always sees) the codes in a stable,
+    reproducible sequence."""
+    ordered: list[dict] = []
+    seen = set()
+    for component in (recipe or {}).get("components") or []:
+        pool_id = str(component.get("pool_id") or "").strip().upper()
+        if pool_id in seen:
+            continue
+        seen.add(pool_id)
+        ordered.extend(allocated.get(pool_id) or [])
+    return ordered
+
+
+def _find_complete_issued_affiliate_bundle(db, ledger: dict) -> list[dict] | None:
+    """Bundle-aware replacement for "does one voucher_pools row exist for
+    this ledger": determines whether a COMPLETE bundle of already-issued
+    voucher_pools rows exists for ``ledger``, matching its recipe exactly,
+    without consuming any inventory. Returns the exact rows making up the
+    bundle (deterministically ordered) or ``None`` if no complete,
+    unambiguous bundle is found — including when linked rows belong to
+    another user, come from a pool the recipe does not call for, exceed the
+    required quantity, or simply do not add up to the full recipe yet.
+
+    Recipe-driven, so it is correct for BOTH plans: a legacy ledger's
+    recipe is a single per-tier pool (identical to the previous
+    single-denomination check), while a denomination-plan ledger's recipe
+    may span several pools with different quantities.
+    """
+    if not ledger:
+        return None
+    tier = str(ledger.get("tier") or "").strip().upper()
+    recipe = _ledger_recipe(ledger)
+    if not recipe:
+        return None
+    ledger_id = ledger.get("_id")
+    user_id = ledger.get("user_id")
+
+    state = _classify_issued_pool_rows(db, ledger, recipe=recipe)
+    if not state["rows"]:
         return None
 
-    # A row with no issued_to/issued_to_user_id at all (older rows written
-    # before that field was consistently stamped) is not treated as a
-    # mismatch — the ledger_id/issued_for_ledger_id link is already
-    # per-ledger (hence per-user); only an EXPLICIT different user id is
-    # disqualifying.
-    wrong_user = [row for row in linked if _row_user(row) is not None and int(_row_user(row)) != int(user_id or 0)]
-    if wrong_user:
+    required_total = int(recipe.get("expected_code_count") or 0)
+    accepted_total = sum(len(v) for v in state["allocated"].values())
+
+    if state["foreign"] or state["surplus"]:
         logger.error(
             "[AFF_RECONCILE][MISMATCH] ledger_id=%s expected_tier=%s found_tiers=%s expected_count=%s found_count=%s",
-            ledger_id, tier, found_tiers, required, len(linked) - len(wrong_user),
+            ledger_id,
+            tier,
+            sorted({str(r.get("pool_id") or "").strip().upper() for r in state["rows"]}),
+            required_total,
+            accepted_total,
         )
         return None
 
     logger.info(
         "[AFF_RECONCILE][FOUND_BUNDLE] ledger_id=%s user_id=%s tier=%s expected=%s found=%s",
-        ledger_id, user_id, tier, required, len(linked),
+        ledger_id, user_id, tier, required_total, accepted_total,
     )
 
-    if len(linked) != required:
-        # Partial (or over-complete) bundle — conservative: never finalize,
-        # and never let the caller claim a second full bundle on top of it.
+    if not state["complete"]:
+        # Partial bundle — conservative: never finalize, and never let the
+        # caller claim a second full bundle on top of it.
         return None
 
-    linked.sort(key=lambda row: row.get("_id"))
-    return linked
+    return _ordered_bundle_rows(recipe, state["allocated"])
 
 
 def _reconcile_affiliate_bundle_from_issued_pool(db, *, ledger, now_utc: datetime):
@@ -1313,7 +1560,14 @@ def _reconcile_affiliate_bundle_from_issued_pool(db, *, ledger, now_utc: datetim
     bundle_rows = _find_complete_issued_affiliate_bundle(db, ledger)
     if not bundle_rows:
         return None
-    stored = _store_affiliate_bundle_on_ledger(db, ledger_id=ledger_id, tier=tier, vouchers=bundle_rows, now_utc=now_utc)
+    stored = _store_affiliate_bundle_on_ledger(
+        db,
+        ledger_id=ledger_id,
+        tier=tier,
+        vouchers=bundle_rows,
+        now_utc=now_utc,
+        recipe=_ledger_recipe(ledger),
+    )
     if stored:
         if str(ledger.get("ledger_type") or "").strip().upper() == "AFFILIATE_MONTHLY":
             # Stale inventory/config flags (e.g. pool_empty) no longer apply
@@ -1328,6 +1582,292 @@ def _reconcile_affiliate_bundle_from_issued_pool(db, *, ledger, now_utc: datetim
         )
         logger.info("[AFFILIATE][BUNDLE_RECONCILE_OK] ledger_id=%s tier=%s count=%s", ledger_id, tier, len(bundle_rows))
     return stored
+
+
+# --------------------------------------------------------------------------
+# Denomination-plan (entitlement month 202609+) multi-denomination issuance
+# --------------------------------------------------------------------------
+
+# How long one worker may hold the per-ledger allocation lease before another
+# worker is allowed to take it over. Sized well above a normal allocation
+# (a handful of single-document claims) and well below the 5-minute retry
+# tick, so a crashed worker's ledger resumes on the very next pass.
+_ALLOCATION_LEASE_TTL_SECONDS = 120
+
+
+def _acquire_allocation_lease(db, *, ledger_id, now_utc: datetime):
+    """Serialize bundle allocation for one ledger across concurrent workers.
+
+    Without this, two workers that both observe a ledger in SETTLING would
+    each compute "0 of 7 x $50 allocated" and each claim 7 codes — 14 codes
+    consumed for a 7-code entitlement. A single atomic ``find_one_and_update``
+    picks exactly one winner; every loser returns ``None`` and simply leaves
+    the ledger for the next retry pass rather than allocating anything.
+
+    The lease is time-bounded, so a worker that crashes mid-allocation
+    cannot wedge the entitlement forever: after the TTL another worker takes
+    over, and because allocation is count-then-claim-only-what-is-missing,
+    it safely RESUMES rather than restarting.
+    """
+    lease_id = f"{now_utc.timestamp()}:{os.getpid()}:{id(db)}"
+    stale_cutoff = now_utc - timedelta(seconds=_ALLOCATION_LEASE_TTL_SECONDS)
+    claimed = db.affiliate_ledger.find_one_and_update(
+        {
+            "_id": ledger_id,
+            "status": SETTLING_STATUS,
+            "$or": [
+                {"allocation_lease_at": {"$exists": False}},
+                {"allocation_lease_at": None},
+                {"allocation_lease_at": {"$lt": stale_cutoff}},
+            ],
+        },
+        {"$set": {"allocation_lease_id": lease_id, "allocation_lease_at": now_utc}},
+        return_document=ReturnDocument.AFTER,
+    )
+    if claimed and claimed.get("allocation_lease_id") == lease_id:
+        return lease_id
+    return None
+
+
+def _release_allocation_lease(db, *, ledger_id, lease_id):
+    if not lease_id:
+        return
+    db.affiliate_ledger.update_one(
+        {"_id": ledger_id, "allocation_lease_id": lease_id},
+        {"$unset": {"allocation_lease_id": "", "allocation_lease_at": ""}},
+    )
+
+
+def _resolve_denomination_pool_target(db, *, ledger, pool_id: str, entitlement_month, now_utc: datetime):
+    """Pin ONE denomination pool of a multi-denomination entitlement to a
+    single voucher source, and never let it drift.
+
+    Same guarantee as ``_resolve_monthly_ledger_target`` gives a legacy
+    single-pool ledger, but stored per pool under ``pool_targets.<POOL_ID>``
+    because one entitlement now draws from several pools independently.
+    Returns ``(target_or_None, reason_or_None)``.
+    """
+    ledger_id = ledger["_id"]
+    existing = ((ledger.get("pool_targets") or {}).get(pool_id) or {})
+    if existing.get("mode") in ("batch", "legacy"):
+        return existing, None  # already resolved — never re-resolve or switch
+
+    period_start_utc, period_end_utc = _month_window_from_yyyymm(entitlement_month)
+    if period_start_utc is None or period_end_utc is None:
+        return None, "no_batch_for_entitlement_period"
+
+    matches = _find_batches_for_period(
+        db, pool_id=pool_id, period_start_utc=period_start_utc, period_end_utc=period_end_utc
+    )
+    if len(matches) > 1:
+        # Same-pool batches cannot legitimately overlap, so this should be
+        # structurally impossible — never guess between them if it happens.
+        logger.error(
+            "[AFF_VOUCHER][TARGET_BATCH_AMBIGUOUS] ledger_id=%s user_id=%s pool_id=%s year_month=%s "
+            "month_start_utc=%s month_end_utc=%s conflicting_batch_ids=%s",
+            ledger_id, ledger.get("user_id"), pool_id, entitlement_month,
+            period_start_utc.isoformat(), period_end_utc.isoformat(),
+            [str(m.get("_id")) for m in matches],
+        )
+        return None, "no_batch_for_entitlement_period"
+
+    batch = matches[0] if matches else None
+    if batch:
+        target = {
+            "mode": "batch",
+            "batch_id": batch["_id"],
+            "window_start": batch.get("starts_at"),
+            "window_end": batch.get("ends_at"),
+            "resolved_at": now_utc,
+        }
+    elif _tier_entered_scheduled_mode(db, pool_id=pool_id, reference_utc=period_start_utc):
+        # Scheduled-batch mode had already begun for this pool by this
+        # entitlement's month, but no batch covers the month — a real gap,
+        # never a licence to fall back to undated legacy stock.
+        logger.warning(
+            "[AFF_VOUCHER][TARGET_BATCH_NOT_FOUND] ledger_id=%s user_id=%s pool_id=%s year_month=%s "
+            "month_start_utc=%s month_end_utc=%s",
+            ledger_id, ledger.get("user_id"), pool_id, entitlement_month,
+            period_start_utc.isoformat(), period_end_utc.isoformat(),
+        )
+        return None, "no_batch_for_entitlement_period"
+    else:
+        target = {"mode": "legacy", "batch_id": None, "resolved_at": now_utc}
+
+    db.affiliate_ledger.update_one(
+        {"_id": ledger_id, f"pool_targets.{pool_id}.mode": {"$exists": False}},
+        {"$set": {f"pool_targets.{pool_id}": target, "updated_at": now_utc}},
+    )
+    refreshed = db.affiliate_ledger.find_one({"_id": ledger_id}) or ledger
+    resolved = ((refreshed.get("pool_targets") or {}).get(pool_id) or {})
+    if resolved.get("mode") in ("batch", "legacy"):
+        logger.info(
+            "[AFF_VOUCHER][TARGET_BATCH_RESOLVED] ledger_id=%s user_id=%s pool_id=%s year_month=%s "
+            "mode=%s target_batch_id=%s",
+            ledger_id, ledger.get("user_id"), pool_id, entitlement_month,
+            resolved.get("mode"), resolved.get("batch_id"),
+        )
+        return resolved, None
+    return None, "no_batch_for_entitlement_period"
+
+
+def _claim_one_denomination_voucher(db, *, target, pool_id: str, ledger_id, user_id: int, now_utc: datetime):
+    """Claim exactly ONE code from an already-pinned denomination source.
+
+    Deliberately single-code: the caller loops, so a bundle is built by
+    independently atomic per-code claims that can stop and resume at any
+    point without ever double-claiming.
+    """
+    if (target or {}).get("mode") == "batch":
+        return _claim_from_target_batch(
+            db,
+            batch_id=target.get("batch_id"),
+            pool_id=pool_id,
+            ledger_id=ledger_id,
+            user_id=user_id,
+            now_utc=now_utc,
+        )
+    voucher = _claim_legacy_voucher(
+        db, pool_id=pool_id, ledger_id=ledger_id, user_id=user_id, now_utc=now_utc,
+    )
+    if voucher:
+        return voucher, None
+    return None, _pool_inventory_blocking_reason(db, pool_id=pool_id, now_utc=now_utc, legacy_only=True)
+
+
+def _issue_denomination_bundle(db, *, ledger, recipe: dict, now_utc: datetime):
+    """Issue (or resume issuing) a multi-denomination tier entitlement.
+
+    Contract, in order:
+      1. Resolve the plan/recipe from the ledger's stored entitlement month
+         (done by the caller) — never from the processing date.
+      2. Determine which codes are ALREADY allocated to this ledger.
+      3. Reserve only the missing denomination quantities.
+      4. Reconcile the allocated count and monetary value.
+      5. Mark ISSUED only when the exact recipe is complete.
+
+    Partial allocation is RETAINED, never rolled back. See the module notes
+    on ``bundle_denomination_short``: releasing a partial multi-denomination
+    bundle under shortage risks losing already-secured codes to other
+    ledgers while the shortage persists, and makes progress non-monotonic
+    (a T5 needing 7 x $50 that repeatedly secures 5 and gives them back can
+    thrash indefinitely). Retaining makes resume deterministic: each pass
+    claims strictly what is still missing and nothing else.
+    """
+    ledger_id = ledger.get("_id")
+    user_id = int(ledger.get("user_id"))
+    tier = str(ledger.get("tier") or "").strip().upper()
+    entitlement_month = _ledger_entitlement_month(ledger)
+
+    lease_id = _acquire_allocation_lease(db, ledger_id=ledger_id, now_utc=now_utc)
+    if not lease_id:
+        # Another worker is mid-allocation on this exact ledger. Do nothing —
+        # the retry sweep re-examines it once the winner finishes or its
+        # lease expires.
+        logger.info(
+            "[AFF_BUNDLE][LEASE_BUSY] ledger_id=%s user_id=%s tier=%s", ledger_id, user_id, tier,
+        )
+        return db.affiliate_ledger.find_one({"_id": ledger_id})
+
+    try:
+        state = _classify_issued_pool_rows(db, ledger, recipe=recipe)
+
+        if state["foreign"] or state["surplus"]:
+            # Corrupt/ambiguous linkage — refuse to claim anything more and
+            # park for a human, exactly as the legacy path does.
+            logger.error(
+                "[AFF_RECONCILE][PARTIAL_BUNDLE_BLOCK] ledger_id=%s tier=%s "
+                "reason=existing_issued_rows_incomplete_or_mismatched",
+                ledger_id, tier,
+            )
+            db.affiliate_ledger.update_one(
+                {"_id": ledger_id, "status": SETTLING_STATUS, **_no_voucher_filter()},
+                {
+                    "$set": {"status": "PENDING_MANUAL", "updated_at": now_utc},
+                    "$addToSet": {"risk_flags": "partial_bundle_conflict"},
+                },
+            )
+            return db.affiliate_ledger.find_one({"_id": ledger_id})
+
+        shortage_reasons: dict[str, str] = {}
+        if state["missing"]:
+            working = db.affiliate_ledger.find_one({"_id": ledger_id}) or ledger
+            for pool_id, still_needed in sorted(state["missing"].items()):
+                target, reason = _resolve_denomination_pool_target(
+                    db,
+                    ledger=working,
+                    pool_id=pool_id,
+                    entitlement_month=entitlement_month,
+                    now_utc=now_utc,
+                )
+                working = db.affiliate_ledger.find_one({"_id": ledger_id}) or working
+                if not target:
+                    shortage_reasons[pool_id] = reason or "pool_empty"
+                    continue
+                for _ in range(int(still_needed)):
+                    voucher, claim_reason = _claim_one_denomination_voucher(
+                        db,
+                        target=target,
+                        pool_id=pool_id,
+                        ledger_id=ledger_id,
+                        user_id=user_id,
+                        now_utc=now_utc,
+                    )
+                    if not voucher:
+                        shortage_reasons[pool_id] = claim_reason or "pool_empty"
+                        break
+
+        # Re-read the authoritative allocation after claiming.
+        final_state = _classify_issued_pool_rows(db, ledger, recipe=recipe)
+        allocated_count = sum(len(v) for v in final_state["allocated"].values())
+
+        if final_state["complete"]:
+            bundle_rows = _ordered_bundle_rows(recipe, final_state["allocated"])
+            issued = _store_affiliate_bundle_on_ledger(
+                db, ledger_id=ledger_id, tier=tier, vouchers=bundle_rows, now_utc=now_utc, recipe=recipe,
+            )
+            if issued:
+                _clear_inventory_only_risk_flags(db, ledger_id=ledger_id, now_utc=now_utc)
+                issued = db.affiliate_ledger.find_one({"_id": ledger_id}) or issued
+                logger.info(
+                    "[AFF_BUNDLE][ISSUE_OK] ledger_id=%s user_id=%s tier=%s plan=%s month=%s "
+                    "codes=%s value=%s",
+                    ledger_id, user_id, tier, recipe.get("reward_plan"), entitlement_month,
+                    issued.get("issued_code_count"), issued.get("issued_value"),
+                )
+                return issued
+            # Lost the finalize race — the winner already wrote the bundle.
+            latest = _finalize_issued_if_voucher_exists(
+                db, ledger=db.affiliate_ledger.find_one({"_id": ledger_id}), now_utc=now_utc,
+            )
+            return latest or db.affiliate_ledger.find_one({"_id": ledger_id})
+
+        # Incomplete: record exactly what is missing, by denomination, so
+        # operators can see which pool to restock and the retry pass can
+        # resume without recomputing anything.
+        missing = final_state["missing"]
+        logger.warning(
+            "[AFF_BUNDLE][SHORTAGE] ledger_id=%s user_id=%s tier=%s plan=%s month=%s "
+            "allocated=%s expected=%s missing=%s reasons=%s",
+            ledger_id, user_id, tier, recipe.get("reward_plan"), entitlement_month,
+            allocated_count, recipe.get("expected_code_count"), missing, shortage_reasons,
+        )
+        db.affiliate_ledger.update_one(
+            {"_id": ledger_id, "status": SETTLING_STATUS, **_no_voucher_filter()},
+            {
+                "$set": {
+                    "status": "PENDING_MANUAL",
+                    "updated_at": now_utc,
+                    "allocated_code_count": allocated_count,
+                    "missing_by_denomination": missing,
+                    "shortage_reasons": shortage_reasons,
+                },
+                "$addToSet": {"risk_flags": "bundle_denomination_short"},
+            },
+        )
+        return db.affiliate_ledger.find_one({"_id": ledger_id})
+    finally:
+        _release_allocation_lease(db, ledger_id=ledger_id, lease_id=lease_id)
 
 
 def _issue_affiliate_ledger_from_pool(db, ledger, now_utc: datetime):
@@ -1420,6 +1960,31 @@ def _issue_affiliate_ledger_from_pool(db, ledger, now_utc: datetime):
         pool_id,
         ledger.get("status"),
     )
+
+    # ---- Plan fork -------------------------------------------------------
+    # Resolved from the ledger's STORED entitlement month, never from
+    # now_utc: an August entitlement retried in September still takes the
+    # legacy path below, with the legacy bundle.
+    recipe = _ledger_recipe(ledger)
+    if recipe and is_denomination_plan(recipe.get("reward_plan")):
+        settle_claim = db.affiliate_ledger.update_one(
+            {
+                "_id": ledger_id,
+                "status": {"$in": ["APPROVED", "PENDING_REVIEW", "PENDING_MANUAL", "PENDING_EOM", SETTLING_STATUS]},
+                **_no_voucher_filter(),
+            },
+            {"$set": {"status": SETTLING_STATUS, "updated_at": now_utc}},
+        )
+        latest = db.affiliate_ledger.find_one({"_id": ledger_id})
+        if (latest or {}).get("status") != SETTLING_STATUS:
+            # Someone else finalized/rejected it while we looked.
+            return _finalize_issued_if_voucher_exists(db, ledger=latest, now_utc=now_utc)
+        if settle_claim.modified_count == 0:
+            logger.info(
+                "[AFFILIATE][SETTLING_PROCEED] ledger_id=%s user_id=%s tier=%s reason=pre_settled",
+                ledger_id, int(user_id), tier,
+            )
+        return _issue_denomination_bundle(db, ledger=latest, recipe=recipe, now_utc=now_utc)
 
     settle_claim = db.affiliate_ledger.update_one(
         {"_id": ledger_id, "status": {"$in": ["APPROVED", "PENDING_REVIEW", "PENDING_MANUAL", "PENDING_EOM", SETTLING_STATUS]}, **_no_voucher_filter()},
@@ -1992,6 +2557,13 @@ def evaluate_monthly_affiliate_reward(db, *, referrer_id: int, now_utc: datetime
                     "ledger_type": "AFFILIATE_MONTHLY",
                     "user_id": int(referrer_id),
                     "year_month": yyyymm,
+                    "entitlement_month": yyyymm,
+                    "reward_plan": resolve_plan_id(yyyymm),
+                    "bundle_recipe": tier_recipe(yyyymm, tier),
+                    "expected_code_count": int(
+                        (tier_recipe(yyyymm, tier) or {}).get("expected_code_count") or 0
+                    ),
+                    "reward_value": int((tier_recipe(yyyymm, tier) or {}).get("reward_value") or 0),
                     "tier": tier,
                     "pool_id": tier,
                     "dedup_key": dedup_key,
@@ -2047,6 +2619,12 @@ def evaluate_monthly_affiliate_reward(db, *, referrer_id: int, now_utc: datetime
         )
         existing_ledger = db.affiliate_ledger.find_one({"dedup_key": dedup_key}, {"risk_flags": 1})
         merged_risk_flags = _merge_monthly_risk_flags((existing_ledger or {}).get("risk_flags"), risk_flags)
+        # Freeze the obligation at creation, from the ENTITLEMENT month
+        # (not the processing date), so this entitlement stays reproducible
+        # forever — even if the plan tables change, and even if it is not
+        # fulfilled until months later. `$setOnInsert` guarantees a
+        # re-evaluation never rewrites an existing ledger's obligation.
+        frozen_recipe = tier_recipe(yyyymm, eligible_tier)
         try:
             db.affiliate_ledger.update_one(
                 {"dedup_key": dedup_key},
@@ -2055,6 +2633,11 @@ def evaluate_monthly_affiliate_reward(db, *, referrer_id: int, now_utc: datetime
                     "ledger_type": "AFFILIATE_MONTHLY",
                     "user_id": int(referrer_id),
                     "year_month": yyyymm,
+                    "entitlement_month": yyyymm,
+                    "reward_plan": (frozen_recipe or {}).get("reward_plan") or resolve_plan_id(yyyymm),
+                    "bundle_recipe": frozen_recipe,
+                    "expected_code_count": int((frozen_recipe or {}).get("expected_code_count") or 0),
+                    "reward_value": int((frozen_recipe or {}).get("reward_value") or 0),
                     "tier": eligible_tier,
                     "pool_id": eligible_tier,
                     "status": "APPROVED",
@@ -2441,7 +3024,26 @@ def _retry_stuck_pending_manual_affiliate_ledgers(db, *, now_utc: datetime, batc
         db.affiliate_ledger.find(
             {"ledger_type": "AFFILIATE_MONTHLY", "status": "PENDING_MANUAL", **_no_voucher_filter()}
         )
-    )[: max(1, int(batch_limit))]
+    )
+    # Also recover ledgers STRANDED in SETTLING: a worker that crashed
+    # between claiming vouchers and finalizing the ledger (or one that
+    # walked away because another worker held the allocation lease) leaves
+    # the row mid-flight with no PENDING_MANUAL to find it by. Only rows
+    # untouched for longer than the lease TTL are considered, so a worker
+    # actively allocating right now is never interrupted; re-entry is safe
+    # because allocation only ever claims what is still missing.
+    settling_cutoff = now_utc - timedelta(seconds=_ALLOCATION_LEASE_TTL_SECONDS)
+    candidates.extend(
+        db.affiliate_ledger.find(
+            {
+                "ledger_type": "AFFILIATE_MONTHLY",
+                "status": SETTLING_STATUS,
+                "updated_at": {"$lt": settling_cutoff},
+                **_no_voucher_filter(),
+            }
+        )
+    )
+    candidates = candidates[: max(1, int(batch_limit))]
     for ledger in candidates:
         if _ledger_has_affiliate_bundle(ledger):
             continue
@@ -2449,8 +3051,9 @@ def _retry_stuck_pending_manual_affiliate_ledgers(db, *, now_utc: datetime, batc
         if not flags <= _INVENTORY_ONLY_RISK_FLAGS:
             continue  # abuse/risk-review flag present — never auto-reconcile
         scanned += 1
+        current_status = str(ledger.get("status") or "")
         settle_res = db.affiliate_ledger.update_one(
-            {"_id": ledger["_id"], "status": "PENDING_MANUAL", **_no_voucher_filter()},
+            {"_id": ledger["_id"], "status": current_status, **_no_voucher_filter()},
             {"$set": {"status": SETTLING_STATUS, "updated_at": now_utc}},
         )
         if settle_res.modified_count == 0:
