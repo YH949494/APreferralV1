@@ -5,6 +5,11 @@ Writes NOTHING, ever — there is no commit/apply mode, by design. This is the
 pre-deployment preflight and the post-deployment validation for the
 denomination-plan rollout.
 
+It does not go through ``database.init_db()``, because that calls
+``ensure_indexes()`` and would create indexes on the database it is only
+meant to inspect. It opens its own connection with a secondary-preferred
+read preference instead (see ``_read_only_db``).
+
 No data backfill is required by that rollout: every new ledger field
 (``entitlement_month`` / ``reward_plan`` / ``bundle_recipe`` /
 ``expected_code_count`` / ``reward_value``) is written at ledger creation and
@@ -371,6 +376,28 @@ def check_plan_assignment(db, f: Findings, month: str | None) -> None:
         f.ok(f"all {scanned} plan-stamped ledgers agree with their entitlement month")
 
 
+def _read_only_db():
+    """A Mongo handle that performs NO writes to reach it.
+
+    ``database.init_db()`` is deliberately NOT used: it calls
+    ``ensure_indexes()``, so merely connecting would create indexes — a write
+    on the very production database this tool promises only to read. The
+    connection is opened directly instead, with a secondary-preferred read
+    preference so the work lands off the primary where a replica set allows
+    it.
+    """
+    import os as _os
+
+    from pymongo import MongoClient
+    from pymongo.read_preferences import SecondaryPreferred
+
+    mongo_url = _os.environ.get("MONGO_URL")
+    if not mongo_url:
+        raise SystemExit("MONGO_URL is not configured")
+    client = MongoClient(mongo_url, read_preference=SecondaryPreferred())
+    return client[_os.environ.get("MONGO_DB", "referral_bot")]
+
+
 CHECKS = ("plan-config", "inventory", "ledger-integrity", "plan-assignment")
 
 
@@ -396,7 +423,12 @@ def main() -> int:
             parser.error(f"--expect expects TIER=COUNT, got {item!r}")
     selected = args.check or list(CHECKS)
 
-    print("READ-ONLY affiliate reward-plan verification. No writes are performed.")
+    print(
+        "READ-ONLY affiliate reward-plan verification.\n"
+        "  Connects directly with a secondary-preferred read preference and never\n"
+        "  calls init_db()/ensure_indexes(): no index is created, nothing is\n"
+        "  inserted, updated or dropped, and no collection is created."
+    )
     f = Findings()
 
     if "plan-config" in selected:
@@ -404,10 +436,7 @@ def main() -> int:
 
     db_checks = [c for c in selected if c != "plan-config"]
     if db_checks:
-        from database import get_db, init_db
-
-        init_db()
-        db = get_db()
+        db = _read_only_db()
         if "inventory" in db_checks:
             if not args.month:
                 print("\n== inventory ==\n  [skipped] --month is required")

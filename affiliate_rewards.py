@@ -142,14 +142,18 @@ def ensure_affiliate_indexes(db):
         [("ledger_id", ASCENDING), ("status", ASCENDING)],
         name="pool_ledger_status",
     )
-    # Q4  Batch resolution / claimability scans a pool's batches by pool_id
-    #     (_find_batches_for_period, _find_active_batch, _tier_entered_
-    #     scheduled_mode) and by (pool_id, window) for the canonical month.
-    db.affiliate_voucher_batches.create_index([("pool_id", ASCENDING)], name="aff_batch_pool")
-    db.affiliate_voucher_batches.create_index(
-        [("pool_id", ASCENDING), ("starts_at", ASCENDING), ("ends_at", ASCENDING)],
-        name="aff_batch_pool_window",
-    )
+    # Q4  Batch resolution / claimability (_find_batches_for_period,
+    #     _find_active_batch, _tier_entered_scheduled_mode) queries
+    #     affiliate_voucher_batches by pool_id, and by pool_id + window.
+    #     BOTH are already served by the pre-existing `batch_pool_window`
+    #     index on (pool_id, starts_at, ends_at), created in
+    #     affiliate_voucher_batches.ensure_affiliate_voucher_batch_indexes:
+    #     a {pool_id: X} query uses its leading prefix.
+    #
+    #     No index is created here. Adding a second name over the same key
+    #     pattern is what MongoDB rejects with IndexOptionsConflict (code
+    #     85) at startup, and a pool_id-only index would be a redundant
+    #     prefix of one that already exists.
 
     db.affiliate_ledger.create_index([("dedup_key", ASCENDING)], unique=True, name="uniq_affiliate_dedup")
     db.affiliate_ledger.create_index([("status", ASCENDING), ("created_at", ASCENDING)], name="affiliate_status_created")
@@ -169,14 +173,17 @@ def ensure_affiliate_indexes(db):
         [("ledger_type", ASCENDING), ("year_month", ASCENDING), ("tier", ASCENDING)],
         name="affiliate_type_yearmonth_tier",
     )
-    # Q2  Denomination surplus sweep:
-    #       {ledger_type, entitlement_month:{$gte}, $or:[{status:"ISSUED"},
-    #                                {status:"SETTLING", updated_at:{$lt}}]}
-    #     Status leads (equality) ahead of the ranges it bounds.
+    # Q2  Denomination surplus sweep. The selection is:
+    #       {ledger_type, entitlement_month:{$gte}, $or:[status/lease...]}
+    #       sort: (surplus_checked_at ASC, _id ASC)   limit: batch_limit
+    #     ledger_type is the only equality predicate, so it leads; the two
+    #     sort keys follow so MongoDB can walk the index in sort order and
+    #     stop at `limit`. Putting the entitlement_month RANGE before the
+    #     sort keys would force an in-memory sort of the whole eligible set
+    #     — exactly the unbounded behaviour this sweep must not have.
     db.affiliate_ledger.create_index(
-        [("ledger_type", ASCENDING), ("status", ASCENDING),
-         ("entitlement_month", ASCENDING), ("updated_at", ASCENDING)],
-        name="affiliate_type_status_entitlement_updated",
+        [("ledger_type", ASCENDING), ("surplus_checked_at", ASCENDING), ("_id", ASCENDING)],
+        name="affiliate_type_surplus_checked",
     )
     db.affiliate_ledger.create_index(
         [("user_id", ASCENDING), ("invitee_user_id", ASCENDING), ("gate_day", ASCENDING), ("tier", ASCENDING), ("created_at", ASCENDING)],
@@ -1649,6 +1656,43 @@ def _lease_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _allocation_lease_expiry_cutoff(reference: datetime | None = None) -> datetime:
+    """THE lease-expiry boundary, in aware UTC.
+
+    A lease is expired when its ``allocation_lease_at`` is strictly older
+    than this cutoff. Both the acquire path and the surplus sweep call this
+    — the expiry arithmetic exists exactly once, so the two can never drift
+    apart and start disagreeing about whether an allocator is alive.
+    """
+    ref = reference or _lease_now()
+    if ref.tzinfo is None:
+        ref = ref.replace(tzinfo=timezone.utc)
+    return ref.astimezone(timezone.utc) - timedelta(seconds=_ALLOCATION_LEASE_TTL_SECONDS)
+
+
+def _allocation_lease_is_live(ledger: dict | None, *, reference: datetime | None = None) -> bool:
+    """True while a worker still holds a live allocation lease on ``ledger``.
+
+    Liveness is the LEASE, never ``updated_at``: an allocator that has been
+    renewing its lease for ten minutes has a fresh ``allocation_lease_at``
+    but may have a stale ``updated_at``, and releasing its claimed rows
+    would corrupt a bundle in flight.
+
+    A missing or malformed lease timestamp is treated as NOT live — the
+    ledger becomes eligible for the sweep, which is the safe direction: the
+    sweep only ever releases rows that are provably surplus and provably
+    never shown to a user.
+    """
+    if not ledger:
+        return False
+    if str(ledger.get("status") or "") != SETTLING_STATUS:
+        return False
+    leased_at = _as_aware_utc(ledger.get("allocation_lease_at"))
+    if leased_at is None:
+        return False
+    return leased_at >= _allocation_lease_expiry_cutoff(reference)
+
+
 def _acquire_allocation_lease(db, *, ledger_id, now_utc: datetime):
     """Take fenced ownership of one ledger's allocation.
 
@@ -1673,7 +1717,7 @@ def _acquire_allocation_lease(db, *, ledger_id, now_utc: datetime):
     Returns the fencing token (an int), or ``None`` when another worker
     holds a live lease.
     """
-    stale_cutoff = _lease_now() - timedelta(seconds=_ALLOCATION_LEASE_TTL_SECONDS)
+    stale_cutoff = _allocation_lease_expiry_cutoff()
     claimed = db.affiliate_ledger.find_one_and_update(
         {
             "_id": ledger_id,
@@ -2029,7 +2073,9 @@ def reconcile_surplus_denomination_allocations(
     surplus is a no-op.
     """
     now_utc = now_utc or datetime.now(timezone.utc)
-    stale_cutoff = _lease_now() - timedelta(seconds=_ALLOCATION_LEASE_TTL_SECONDS)
+    # ONE definition of "this allocator is no longer alive", shared with the
+    # lease helpers — never a second copy of the expiry arithmetic.
+    lease_cutoff = _allocation_lease_expiry_cutoff()
     stats = {
         "scanned": 0,
         "surplus_found": 0,
@@ -2039,18 +2085,45 @@ def reconcile_surplus_denomination_allocations(
         "errors": 0,
     }
 
+    limit = max(1, int(batch_limit))
     query = {
         "ledger_type": "AFFILIATE_MONTHLY",
         # Denomination plan only: legacy single-pool ledgers cannot produce
         # multi-denomination surplus and are deliberately out of scope.
         "entitlement_month": {"$gte": DENOMINATION_PLAN_FIRST_MONTH},
         "$or": [
+            # An ISSUED ledger can carry surplus a crashed worker left behind.
             {"status": "ISSUED"},
-            {"status": SETTLING_STATUS, "updated_at": {"$lt": stale_cutoff}},
+            # A SETTLING ledger is only in scope once its allocation LEASE has
+            # expired — liveness is the lease, never updated_at. See
+            # _allocation_lease_is_live / _allocation_lease_expiry_cutoff.
+            {"status": SETTLING_STATUS, "allocation_lease_at": {"$lt": lease_cutoff}},
+            {"status": SETTLING_STATUS, "allocation_lease_at": None,
+             "updated_at": {"$lt": lease_cutoff}},
+            {"status": SETTLING_STATUS, "allocation_lease_at": {"$exists": False},
+             "updated_at": {"$lt": lease_cutoff}},
         ],
     }
     try:
-        candidates = list(db.affiliate_ledger.find(query))[: max(1, int(batch_limit))]
+        # DATABASE-SIDE sort + limit. Never materialize the eligible set:
+        # `list(find(query))[:limit]` would pull every eligible ledger into
+        # memory and, with no ordering, would re-inspect the same first N
+        # documents on every five-minute run while the rest were never seen.
+        #
+        # STARVATION-FREE ORDER: least-recently-checked first, with `_id` as
+        # a deterministic tie-breaker. A ledger that has never been checked
+        # has no `surplus_checked_at` at all, and a missing field sorts FIRST
+        # ascending in MongoDB — so newly created ledgers jump the queue
+        # rather than starving behind older, already-clean ones. Every
+        # inspected ledger is stamped afterwards, which moves it to the back,
+        # so repeated runs walk the whole eligible set and then cycle.
+        candidates = list(
+            db.affiliate_ledger.find(
+                query,
+                sort=[("surplus_checked_at", ASCENDING), ("_id", ASCENDING)],
+                limit=limit,
+            )
+        )
     except Exception:
         logger.exception("[AFF_SURPLUS_SWEEP][QUERY_FAILED]")
         stats["errors"] += 1
@@ -2058,13 +2131,30 @@ def reconcile_surplus_denomination_allocations(
 
     for ledger in candidates:
         ledger_id = ledger.get("_id")
+        checked = False
         try:
             stats["scanned"] += 1
-            recipe = _ledger_recipe(ledger)
-            if not recipe or not is_denomination_plan(recipe.get("reward_plan")):
+
+            # A worker may have taken or renewed a lease between the query
+            # above and now. Re-read and re-check liveness against the lease
+            # before touching anything.
+            fresh = db.affiliate_ledger.find_one({"_id": ledger_id}) or ledger
+            if _allocation_lease_is_live(fresh):
+                logger.info(
+                    "[AFF_SURPLUS_SWEEP][SKIP_LIVE_ALLOCATOR] ledger_id=%s generation=%s",
+                    ledger_id, fresh.get("allocation_generation"),
+                )
+                # Deliberately NOT stamped: a live allocator has not been
+                # inspected, so it must stay at the front of the queue and be
+                # revisited once its lease lapses or it finalizes.
                 continue
 
-            state = _classify_issued_pool_rows(db, ledger, recipe=recipe)
+            recipe = _ledger_recipe(fresh)
+            if not recipe or not is_denomination_plan(recipe.get("reward_plan")):
+                checked = True
+                continue
+
+            state = _classify_issued_pool_rows(db, fresh, recipe=recipe)
             surplus = list(state["surplus"])
             if state["foreign"]:
                 # Rows belonging to another user are never ours to release.
@@ -2074,11 +2164,12 @@ def reconcile_surplus_denomination_allocations(
                     ledger_id, len(state["foreign"]),
                 )
             if not surplus:
+                checked = True
                 continue
             stats["surplus_found"] += len(surplus)
 
-            # Re-read the ledger immediately before releasing so a bundle
-            # finalized since `candidates` was fetched is still protected.
+            # _release_unexposed_pool_rows re-reads the ledger and refuses to
+            # release any code inside the finalized visible bundle.
             released = _release_unexposed_pool_rows(
                 db, ledger_id=ledger_id, rows=surplus, reason="surplus_sweep_reconciled",
             )
@@ -2094,13 +2185,33 @@ def reconcile_surplus_denomination_allocations(
             logger.info(
                 "[AFF_SURPLUS_SWEEP][LEDGER] ledger_id=%s tier=%s month=%s status=%s "
                 "surplus=%s released=%s protected=%s",
-                ledger_id, ledger.get("tier"),
-                ledger.get("entitlement_month") or ledger.get("year_month"),
-                ledger.get("status"), len(surplus), released, protected,
+                ledger_id, fresh.get("tier"),
+                fresh.get("entitlement_month") or fresh.get("year_month"),
+                fresh.get("status"), len(surplus), released, protected,
             )
+            checked = True
         except Exception:
+            # One malformed ledger must never abort the batch, and must not
+            # wedge the queue either: it is stamped below like any other, so
+            # it is retried on a later pass instead of blocking every ledger
+            # behind it forever.
             stats["errors"] += 1
+            checked = True
             logger.exception("[AFF_SURPLUS_SWEEP][LEDGER_FAILED] ledger_id=%s", ledger_id)
+        finally:
+            if checked:
+                # Stamped only AFTER the ledger was actually inspected, so an
+                # interrupted run re-inspects rather than silently skipping.
+                try:
+                    db.affiliate_ledger.update_one(
+                        {"_id": ledger_id},
+                        {"$set": {"surplus_checked_at": _lease_now()}},
+                    )
+                except Exception:
+                    stats["errors"] += 1
+                    logger.exception(
+                        "[AFF_SURPLUS_SWEEP][CHECKPOINT_FAILED] ledger_id=%s", ledger_id
+                    )
 
     logger.info(
         "[AFF_SURPLUS_SWEEP][DONE] scanned=%s surplus_found=%s surplus_released=%s "
