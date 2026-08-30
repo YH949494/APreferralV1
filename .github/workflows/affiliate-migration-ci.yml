@@ -64,6 +64,7 @@ env:
     test_affiliate_voucher_batch_followup.py
     test_affiliate_ci_gate.py
     test_affiliate_query_plan_checklist.py
+    test_affiliate_surplus_sweep_index_hint.py
 
 jobs:
   migration-tests:
