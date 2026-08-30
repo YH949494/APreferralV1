@@ -185,6 +185,38 @@ def ensure_affiliate_indexes(db):
         [("ledger_type", ASCENDING), ("surplus_checked_at", ASCENDING), ("_id", ASCENDING)],
         name="affiliate_type_surplus_checked",
     )
+    # Q3  Stuck-ledger retry sweep. TWO selections, both in
+    #     _retry_stuck_pending_manual_affiliate_ledgers:
+    #
+    #       {ledger_type, status: "PENDING_MANUAL",
+    #        $or: [voucher_code null/absent]}
+    #       {ledger_type, status: "SETTLING",
+    #        $and: [{$or: [lease expiry branches]}, {$or: [voucher_code ...]}]}
+    #
+    #     Both sort (retry_checked_at ASC, _id ASC) and both stop at `limit`.
+    #
+    #     ESR: the two EQUALITY predicates the branches share lead
+    #     (ledger_type, then status — status is what separates the branches),
+    #     then the two SORT keys in order, so MongoDB walks the index already
+    #     sorted and stops at the limit instead of sorting the eligible set in
+    #     memory. The voucher_code and lease $or clauses cannot be indexed
+    #     usefully here and remain residual filters applied during the scan.
+    #
+    #     Deliberately NOT sparse: a ledger this sweep has never considered
+    #     has no retry_checked_at at all, and a sparse index would leave
+    #     exactly those — the ones that most need to be found — out of the
+    #     index entirely. Non-sparse indexes store a missing field as null,
+    #     which sorts first ascending, so new work is found FIRST.
+    #
+    #     Non-redundant: no other affiliate_ledger index leads with
+    #     (ledger_type, status), and affiliate_type_surplus_checked covers a
+    #     different third key (surplus_checked_at).
+    _ensure_equivalent_index(
+        db.affiliate_ledger,
+        [("ledger_type", ASCENDING), ("status", ASCENDING),
+         ("retry_checked_at", ASCENDING), ("_id", ASCENDING)],
+        name="affiliate_type_status_retry_checked",
+    )
     db.affiliate_ledger.create_index(
         [("user_id", ASCENDING), ("invitee_user_id", ASCENDING), ("gate_day", ASCENDING), ("tier", ASCENDING), ("created_at", ASCENDING)],
         unique=True,
@@ -2072,12 +2104,23 @@ def reconcile_surplus_denomination_allocations(
     re-derives state from the database each pass, and a ledger with no
     surplus is a no-op.
     """
-    now_utc = now_utc or datetime.now(timezone.utc)
+    # ONE reference clock for the whole pass, normalized to aware UTC. Every
+    # lease decision below is taken against THIS instant — passing it into the
+    # helpers rather than letting them read the wall clock is what makes the
+    # boundary the caller asked about the boundary actually enforced, and is
+    # what lets a simulated-time test exercise the real edge instead of
+    # whatever `datetime.now()` happened to be.
+    now_utc = _as_aware_utc(now_utc) or datetime.now(timezone.utc)
     # ONE definition of "this allocator is no longer alive", shared with the
-    # lease helpers — never a second copy of the expiry arithmetic.
-    lease_cutoff = _allocation_lease_expiry_cutoff()
+    # lease helpers and with the retry sweep — never a second copy of the
+    # expiry arithmetic, and never a second reference clock.
+    lease_cutoff = _allocation_lease_expiry_cutoff(now_utc)
     stats = {
         "scanned": 0,
+        # Counted, not just logged: "how many allocators were still alive" is
+        # the number that says whether this sweep is fighting live work, and
+        # it is what lets a test assert the boundary rather than grep a log.
+        "skipped_live": 0,
         "surplus_found": 0,
         "surplus_released": 0,
         "protected_not_released": 0,
@@ -2139,7 +2182,8 @@ def reconcile_surplus_denomination_allocations(
             # above and now. Re-read and re-check liveness against the lease
             # before touching anything.
             fresh = db.affiliate_ledger.find_one({"_id": ledger_id}) or ledger
-            if _allocation_lease_is_live(fresh):
+            if _allocation_lease_is_live(fresh, reference=now_utc):
+                stats["skipped_live"] += 1
                 logger.info(
                     "[AFF_SURPLUS_SWEEP][SKIP_LIVE_ALLOCATOR] ledger_id=%s generation=%s",
                     ledger_id, fresh.get("allocation_generation"),
@@ -2205,7 +2249,7 @@ def reconcile_surplus_denomination_allocations(
                 try:
                     db.affiliate_ledger.update_one(
                         {"_id": ledger_id},
-                        {"$set": {"surplus_checked_at": _lease_now()}},
+                        {"$set": {"surplus_checked_at": now_utc}},
                     )
                 except Exception:
                     stats["errors"] += 1
@@ -2214,10 +2258,11 @@ def reconcile_surplus_denomination_allocations(
                     )
 
     logger.info(
-        "[AFF_SURPLUS_SWEEP][DONE] scanned=%s surplus_found=%s surplus_released=%s "
-        "protected=%s integrity_conflicts=%s errors=%s",
-        stats["scanned"], stats["surplus_found"], stats["surplus_released"],
-        stats["protected_not_released"], stats["integrity_conflicts"], stats["errors"],
+        "[AFF_SURPLUS_SWEEP][DONE] scanned=%s skipped_live=%s surplus_found=%s "
+        "surplus_released=%s protected=%s integrity_conflicts=%s errors=%s",
+        stats["scanned"], stats["skipped_live"], stats["surplus_found"],
+        stats["surplus_released"], stats["protected_not_released"],
+        stats["integrity_conflicts"], stats["errors"],
     )
     return stats
 
@@ -3578,11 +3623,28 @@ def _retry_class_quotas(batch_limit: int) -> tuple[int, int]:
     out of the class) whereas a no-stock PENDING_MANUAL row can sit eligible
     indefinitely.
 
-    ``batch_limit == 1`` cannot serve both in one tick. Both are still
-    QUERIED, and the single slot goes to whichever class holds the
-    least-recently-considered ledger — the same ordering key used everywhere
-    else. That is deterministic and cannot starve either class: a class that
-    keeps losing has its head grow older until it wins.
+    ``batch_limit == 1`` cannot serve both classes in one tick, and this
+    function does not pretend otherwise. Both are still QUERIED and the single
+    slot goes to whichever class holds the least-recently-considered ledger,
+    by ``_retry_order_key``.
+
+    Be precise about what that does and does not guarantee. A ledger this
+    sweep has NEVER considered carries no ``retry_checked_at``, so every
+    never-considered row in both classes ties at "never" and the ``_id``
+    tie-break decides between them. A losing class's head therefore does NOT
+    "age" into winning — it is not stamped, so nothing about it changes. With
+    60 never-considered rows in each class and ``batch_limit == 1``, whichever
+    class sorts first by ``_id`` is drained completely before the other is
+    reached. Only once a class has no never-considered rows left does its
+    stamped head start competing on age.
+
+    That is acceptable because it is not a configuration production runs.
+    ``main.py`` calls this through ``retry_current_month_pending_manual_ledgers``
+    with ``AFFILIATE_CURRENT_MONTH_BATCH_LIMIT`` (default 500), where the
+    quotas are 250/250 and both classes receive capacity on every tick. The
+    degenerate limit is defined and deterministic so its behaviour is
+    predictable, not because it is a supported operating point — and it is
+    deliberately NOT worth carrying durable alternation state for.
     """
     limit = max(1, int(batch_limit))
     if limit == 1:
@@ -3626,8 +3688,11 @@ def _merge_retry_candidates(settling_rows, pending_rows, *, batch_limit: int):
     chosen = list(settling_rows[:take_settling]) + list(pending_rows[:take_pending])
     if len(chosen) <= limit:
         return chosen
-    # Only reachable at batch_limit == 1, where both quotas are 1: the
-    # least-recently-considered ledger wins.
+    # Only reachable at batch_limit == 1, where both quotas are 1. The
+    # least-recently-considered ledger wins; among never-considered rows that
+    # is decided by `_id`, so one class can be drained before the other is
+    # reached. See _retry_class_quotas for why that is acceptable at a limit
+    # production never uses.
     chosen.sort(key=_retry_order_key)
     return chosen[:limit]
 

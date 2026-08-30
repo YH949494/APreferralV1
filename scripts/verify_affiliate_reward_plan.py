@@ -398,7 +398,162 @@ def _read_only_db():
     return client[_os.environ.get("MONGO_DB", "referral_bot")]
 
 
-CHECKS = ("plan-config", "inventory", "ledger-integrity", "plan-assignment")
+#: The queries whose plans must be verified against real, production-shaped
+#: data. Each entry is (label, filter, sort, the index expected to serve it).
+#: These are the exact shapes built in ``affiliate_rewards``; a change there
+#: without a change here is caught by test_affiliate_query_plan_checklist.py.
+def _query_plan_specs(month: str | None):
+    from datetime import datetime, timedelta, timezone
+
+    import affiliate_rewards as ar
+
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(seconds=ar._ALLOCATION_LEASE_TTL_SECONDS)
+    no_voucher = {"$or": [{"voucher_code": None}, {"voucher_code": {"$exists": False}}]}
+    entitlement = month or ar.DENOMINATION_PLAN_FIRST_MONTH
+
+    return [
+        (
+            "retry sweep / PENDING_MANUAL",
+            "affiliate_ledger",
+            {"ledger_type": "AFFILIATE_MONTHLY", "status": "PENDING_MANUAL", **no_voucher},
+            [("retry_checked_at", 1), ("_id", 1)],
+            "affiliate_type_status_retry_checked",
+        ),
+        (
+            "retry sweep / stale SETTLING",
+            "affiliate_ledger",
+            {
+                "ledger_type": "AFFILIATE_MONTHLY",
+                "status": ar.SETTLING_STATUS,
+                "$and": [
+                    {"$or": [
+                        {"allocation_lease_at": {"$ne": None, "$lt": cutoff}},
+                        {"allocation_lease_at": None, "updated_at": {"$lt": cutoff}},
+                        {"allocation_lease_at": {"$exists": False},
+                         "updated_at": {"$lt": cutoff}},
+                    ]},
+                    no_voucher,
+                ],
+            },
+            [("retry_checked_at", 1), ("_id", 1)],
+            "affiliate_type_status_retry_checked",
+        ),
+        (
+            "surplus sweep",
+            "affiliate_ledger",
+            {
+                "ledger_type": "AFFILIATE_MONTHLY",
+                "entitlement_month": {"$gte": ar.DENOMINATION_PLAN_FIRST_MONTH},
+                "$or": [
+                    {"status": "ISSUED"},
+                    {"status": ar.SETTLING_STATUS, "allocation_lease_at": {"$lt": cutoff}},
+                    {"status": ar.SETTLING_STATUS, "allocation_lease_at": None,
+                     "updated_at": {"$lt": cutoff}},
+                    {"status": ar.SETTLING_STATUS, "allocation_lease_at": {"$exists": False},
+                     "updated_at": {"$lt": cutoff}},
+                ],
+            },
+            [("surplus_checked_at", 1), ("_id", 1)],
+            "affiliate_type_surplus_checked",
+        ),
+        (
+            "Databot tier funnel / entitlement_month",
+            "affiliate_ledger",
+            {"ledger_type": "AFFILIATE_MONTHLY", "entitlement_month": entitlement},
+            None,
+            "affiliate_type_entitlement_tier",
+        ),
+        (
+            "Databot tier funnel / legacy year_month",
+            "affiliate_ledger",
+            {"ledger_type": "AFFILIATE_MONTHLY", "year_month": entitlement},
+            None,
+            "affiliate_type_yearmonth_tier",
+        ),
+    ]
+
+
+#: A plan that examines more than this many documents per document returned is
+#: reported. An index that is being used but not selectively is still a full
+#: scan wearing a hat.
+_MAX_EXAMINED_PER_RETURNED = 10
+
+
+def _stage_names(stage: dict) -> list:
+    """Every stage name in a winning plan, outermost first."""
+    names = []
+    node = stage or {}
+    while node:
+        if node.get("stage"):
+            names.append(node["stage"])
+        children = node.get("inputStages")
+        if children:
+            for child in children:
+                names.extend(_stage_names(child))
+            break
+        node = node.get("inputStage")
+    return names
+
+
+def check_query_plans(db, f: Findings, month: str | None) -> None:
+    """explain("executionStats") on every hot query. READ-ONLY: explain runs
+    the query's plan and returns statistics; it writes nothing.
+
+    Deployment is blocked if any query shows a COLLSCAN, a blocking SORT, or
+    examines disproportionately more documents than it returns. An index that
+    exists is not an index that is USED — only the winning plan says so, and
+    only against production-shaped data.
+    """
+    print("\n== query-plans ==")
+    print(f"  examined:returned budget = {_MAX_EXAMINED_PER_RETURNED}:1")
+    for label, collection, query, sort, expected_index in _query_plan_specs(month):
+        try:
+            cursor = db[collection].find(query)
+            if sort:
+                cursor = cursor.sort(sort)
+            plan = cursor.limit(200).explain()
+        except Exception as exc:  # pragma: no cover - depends on a live server
+            f.add(f"{label}: explain failed: {exc}")
+            continue
+
+        winning = (plan.get("queryPlanner") or {}).get("winningPlan") or {}
+        stages = _stage_names(winning)
+        stats = plan.get("executionStats") or {}
+        returned = int(stats.get("nReturned", 0) or 0)
+        examined = int(stats.get("totalDocsExamined", 0) or 0)
+        keys = int(stats.get("totalKeysExamined", 0) or 0)
+
+        detail = (f"stages={stages} returned={returned} docsExamined={examined} "
+                  f"keysExamined={keys}")
+
+        if "COLLSCAN" in stages:
+            f.add(f"{label}: COLLSCAN — no index served this query. {detail}")
+            continue
+        if "SORT" in stages:
+            f.add(
+                f"{label}: blocking SORT — the index does not provide the sort "
+                f"order, so the whole eligible set is sorted in memory. {detail}"
+            )
+            continue
+        if returned and examined > returned * _MAX_EXAMINED_PER_RETURNED:
+            f.add(
+                f"{label}: examined {examined} documents to return {returned} "
+                f"(budget {_MAX_EXAMINED_PER_RETURNED}:1). {detail}"
+            )
+            continue
+
+        used = (winning.get("inputStage") or {}).get("indexName") or ""
+        if not used:
+            for node in (winning.get("inputStages") or []):
+                used = used or (node.get("inputStage") or {}).get("indexName") or ""
+        if expected_index and used and used != expected_index:
+            f.ok(f"{label}: served by {used!r} (expected {expected_index!r}). {detail}")
+        else:
+            f.ok(f"{label}: {detail}")
+
+
+CHECKS = ("plan-config", "inventory", "ledger-integrity", "plan-assignment", "query-plans")
 
 
 def main() -> int:
@@ -446,6 +601,8 @@ def main() -> int:
             check_ledger_integrity(db, f, args.month)
         if "plan-assignment" in db_checks:
             check_plan_assignment(db, f, args.month)
+        if "query-plans" in db_checks:
+            check_query_plans(db, f, args.month)
 
     print(f"\n{'-' * 60}")
     if f.items:

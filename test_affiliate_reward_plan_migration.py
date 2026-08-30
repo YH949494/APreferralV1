@@ -1156,9 +1156,12 @@ class TestDurableSurplusSweep:
         )
         db.affiliate_ledger.update_one(
             {"_id": t5["_id"]},
+            # Expressed relative to SEP, the reference the sweep is driven
+            # with. Using the wall clock here would only have agreed while the
+            # sweep ignored its own now_utc.
             {"$set": {"status": ar.SETTLING_STATUS, "voucher_code": None,
-                      "updated_at": ar._lease_now(),
-                      "allocation_lease_at": ar._lease_now()},
+                      "updated_at": SEP,
+                      "allocation_lease_at": SEP},
              "$unset": {"vouchers": ""}},
         )
         before = len(_linked_issued_rows(db, t5))

@@ -112,9 +112,19 @@ class TestLeaseLivenessHelper:
 
 
 class TestSweepRespectsTheLease:
+    """Every test here drives the sweep with ``now_utc=SEP``, so every lease
+    timestamp is expressed relative to SEP.
+
+    These previously used ``SEP`` — the WALL clock — while passing
+    SEP in. They only agreed because the sweep ignored its own ``now_utc`` and
+    read the wall clock too, so the simulated boundary was never the boundary
+    under test. Now that the injected reference is honoured, the test has to
+    mean what it says.
+    """
+
     def test_a_live_allocator_keeps_its_rows(self):
         db = FakeDb(UNIQUE)
-        _settling_ledger(db, lease_at=ar._lease_now())
+        _settling_ledger(db, lease_at=SEP)
         stats = ar.reconcile_surplus_denomination_allocations(db, now_utc=SEP)
         assert _released(db) == set(), "a live allocator's rows were released"
         assert stats["surplus_released"] == 0
@@ -125,8 +135,8 @@ class TestSweepRespectsTheLease:
         db = FakeDb(UNIQUE)
         _settling_ledger(
             db,
-            lease_at=ar._lease_now(),
-            updated_at=ar._lease_now() - timedelta(hours=2),
+            lease_at=SEP,
+            updated_at=SEP - timedelta(hours=2),
         )
         ar.reconcile_surplus_denomination_allocations(db, now_utc=SEP)
         assert _released(db) == set(), (
@@ -135,29 +145,40 @@ class TestSweepRespectsTheLease:
 
     def test_an_expired_lease_becomes_eligible(self):
         db = FakeDb(UNIQUE)
-        _settling_ledger(db, lease_at=ar._lease_now() - timedelta(seconds=TTL + 60))
+        _settling_ledger(db, lease_at=SEP - timedelta(seconds=TTL + 60))
         stats = ar.reconcile_surplus_denomination_allocations(db, now_utc=SEP)
         assert stats["surplus_released"] == 1
         assert _released(db) == {"EXTRA"}
 
     def test_a_renewal_extends_protection(self):
         db = FakeDb(UNIQUE)
-        lid = _settling_ledger(db, lease_at=ar._lease_now() - timedelta(seconds=TTL + 60))
-        # The worker wakes and renews before the sweep runs.
+        lid = _settling_ledger(db, lease_at=SEP - timedelta(seconds=TTL + 60))
+        # The worker wakes and renews through the REAL renewal path before the
+        # sweep runs. `_renew_allocation_lease` stamps its own clock, so the
+        # sweep is driven at that same instant — the point of the test is that
+        # a renewal extends protection, not that two clocks happen to agree.
         assert ar._renew_allocation_lease(db, ledger_id=lid, token=3) is True
-        ar.reconcile_surplus_denomination_allocations(db, now_utc=SEP)
+        renewed_at = db.affiliate_ledger.find_one({"_id": lid})["allocation_lease_at"]
+        ar.reconcile_surplus_denomination_allocations(db, now_utc=renewed_at)
         assert _released(db) == set(), "a renewed lease did not extend protection"
+        # And once that renewal has aged past the TTL, it is eligible again.
+        ar.reconcile_surplus_denomination_allocations(
+            db, now_utc=renewed_at + timedelta(seconds=TTL + 1)
+        )
+        assert _released(db) == {"EXTRA"}, (
+            "protection must expire with the lease, not last forever"
+        )
 
     def test_a_settling_ledger_with_no_lease_at_all_is_eligible_once_stale(self):
         db = FakeDb(UNIQUE)
         _settling_ledger(db, lease_at=None,
-                         updated_at=ar._lease_now() - timedelta(seconds=TTL + 60))
+                         updated_at=SEP - timedelta(seconds=TTL + 60))
         stats = ar.reconcile_surplus_denomination_allocations(db, now_utc=SEP)
         assert stats["surplus_released"] == 1
 
     def test_a_live_allocator_is_not_stamped_and_is_revisited(self):
         db = FakeDb(UNIQUE)
-        lid = _settling_ledger(db, lease_at=ar._lease_now())
+        lid = _settling_ledger(db, lease_at=SEP)
         ar.reconcile_surplus_denomination_allocations(db, now_utc=SEP)
         led = db.affiliate_ledger.find_one({"_id": lid})
         assert led.get("surplus_checked_at") is None, (
@@ -168,12 +189,12 @@ class TestSweepRespectsTheLease:
         """The ledger looked stale when queried, but a worker grabbed it
         before the sweep got to it."""
         db = FakeDb(UNIQUE)
-        lid = _settling_ledger(db, lease_at=ar._lease_now() - timedelta(seconds=TTL + 60))
+        lid = _settling_ledger(db, lease_at=SEP - timedelta(seconds=TTL + 60))
 
         original = ar._classify_issued_pool_rows
         def takeover(db_, ledger, *, recipe=None):
             db_.affiliate_ledger.update_one(
-                {"_id": lid}, {"$set": {"allocation_lease_at": ar._lease_now()}}
+                {"_id": lid}, {"$set": {"allocation_lease_at": SEP}}
             )
             return original(db_, ledger, recipe=recipe)
 
@@ -182,7 +203,7 @@ class TestSweepRespectsTheLease:
         ar._classify_issued_pool_rows = takeover
         try:
             db.affiliate_ledger.update_one(
-                {"_id": lid}, {"$set": {"allocation_lease_at": ar._lease_now()}}
+                {"_id": lid}, {"$set": {"allocation_lease_at": SEP}}
             )
             ar.reconcile_surplus_denomination_allocations(db, now_utc=SEP)
         finally:

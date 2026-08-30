@@ -278,6 +278,61 @@ class TestNoEquivalentKeyPatterns:
             f"(pool_id, starts_at, ends_at) must be served by exactly one name; found {names}"
         )
 
+    def test_the_retry_sweep_sort_is_indexed_exactly_once(self):
+        """`_retry_stuck_pending_manual_affiliate_ledgers` sorts by
+        (retry_checked_at, _id) under two equality predicates. Without an
+        index leading with those equalities and continuing into the sort keys,
+        MongoDB has to sort the eligible set in memory — the blocking SORT the
+        bounded sweep exists to avoid."""
+        registry = _build_full_catalogue(_RecordingDb())
+        pattern = (("ledger_type", 1), ("status", 1),
+                   ("retry_checked_at", 1), ("_id", 1))
+        names = [i["name"] for i in registry["affiliate_ledger"]
+                 if i["keys"] == pattern]
+        assert names == ["affiliate_type_status_retry_checked"], (
+            f"(ledger_type, status, retry_checked_at, _id) must be served by "
+            f"exactly one index; found {names}"
+        )
+
+    def test_the_retry_index_is_not_sparse(self):
+        """A ledger never considered by the sweep has no retry_checked_at at
+        all. A sparse index would omit exactly those rows — the ones that most
+        need to be found — so they could never be selected."""
+        registry = _build_full_catalogue(_RecordingDb())
+        for idx in registry["affiliate_ledger"]:
+            if idx["name"] == "affiliate_type_status_retry_checked":
+                assert not idx["kwargs"].get("sparse"), (
+                    "the retry index must index missing retry_checked_at, which "
+                    "sorts first ascending, so never-considered work is found first"
+                )
+                assert not idx["kwargs"].get("unique"), (
+                    "many ledgers share a (type, status, checked_at) triple"
+                )
+                break
+        else:  # pragma: no cover - covered by the test above
+            raise AssertionError("the retry index was never requested")
+
+    def test_the_retry_index_is_not_redundant_with_another(self):
+        """A key pattern that is a prefix of another index is dead weight."""
+        registry = _build_full_catalogue(_RecordingDb())
+        retry = (("ledger_type", 1), ("status", 1),
+                 ("retry_checked_at", 1), ("_id", 1))
+        others = [i["keys"] for i in registry["affiliate_ledger"]
+                  if i["keys"] != retry]
+        for other in others:
+            assert other[:len(retry)] != retry, (
+                f"the retry index is a redundant prefix of {list(other)}"
+            )
+            assert retry[:len(other)] != other, (
+                f"{list(other)} is a redundant prefix of the retry index"
+            )
+
+    def test_the_two_sweep_indexes_are_distinct(self):
+        registry = _build_full_catalogue(_RecordingDb())
+        by_name = {i["name"]: i["keys"] for i in registry["affiliate_ledger"]}
+        assert by_name["affiliate_type_surplus_checked"] != \
+            by_name["affiliate_type_status_retry_checked"]
+
     def test_no_redundant_pool_id_only_index_on_batches(self):
         registry = _build_full_catalogue(_RecordingDb())
         names = [i["name"] for i in registry[BATCH] if i["keys"] == (("pool_id", 1),)]

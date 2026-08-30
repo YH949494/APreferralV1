@@ -518,3 +518,231 @@ class TestLeaseLiveness:
         assert "_ALLOCATION_LEASE_TTL_SECONDS" not in names, (
             "the retry sweep must not re-derive the TTL boundary itself"
         )
+
+
+# ---------------------------------------------------------------------------
+# One clock, one boundary, across BOTH sweeps
+# ---------------------------------------------------------------------------
+
+class TestBothSweepsShareTheSameClockAndBoundary:
+    """The surplus sweep took `now_utc` but then asked the lease helpers about
+    the WALL clock, so a simulated-time test exercised whatever
+    `datetime.now()` happened to be rather than the boundary it named. Both
+    sweeps now pass the injected reference through, so they classify the same
+    lease identically."""
+
+    def _settling_ledger(self, db, lease_at, *, _id="S0000"):
+        db.affiliate_ledger.insert_one({
+            "_id": _id, **_base(0, 9000),
+            "status": ar.SETTLING_STATUS,
+            "updated_at": OLD,
+            "allocation_lease_at": lease_at,
+        })
+
+    def _denomination_settling(self, db, lease_at, *, _id="S0000"):
+        doc = {
+            "_id": _id, **_base(0, 9000),
+            "status": ar.SETTLING_STATUS,
+            "updated_at": OLD,
+            "allocation_lease_at": lease_at,
+            "reward_plan": arp.DENOMINATION_PLAN_ID,
+            "entitlement_month": MONTH,
+        }
+        db.affiliate_ledger.insert_one(doc)
+
+    def _surplus_considered(self, db, lease_at, reference):
+        """Did the surplus sweep CONSIDER this ledger at `reference`?
+
+        A live allocator is excluded by the selection query itself, so it is
+        never stamped; `skipped_live` only counts the race where a lease is
+        acquired between the query and processing. Stamping is therefore the
+        observable that both sweeps share.
+        """
+        self._denomination_settling(db, lease_at)
+        ar.reconcile_surplus_denomination_allocations(
+            db, now_utc=reference, batch_limit=5
+        )
+        row = db.affiliate_ledger.find_one({"_id": "S0000"})
+        return row.get("surplus_checked_at") is not None
+
+    def _retry_considered(self, db, lease_at, reference):
+        self._settling_ledger(db, lease_at)
+        ar._retry_stuck_pending_manual_affiliate_ledgers(
+            db, now_utc=reference, batch_limit=5
+        )
+        return bool(_touched(db))
+
+    @pytest.mark.parametrize("offset,label,expect_live", [
+        (timedelta(microseconds=1), "before expiry", True),
+        (timedelta(0), "exact expiry boundary", True),
+        (timedelta(microseconds=-1), "after expiry", False),
+    ])
+    def test_both_sweeps_classify_the_same_lease_identically(
+        self, offset, label, expect_live, stub_issue
+    ):
+        cutoff = ar._allocation_lease_expiry_cutoff(SEP)
+        lease_at = cutoff + offset
+
+        live = ar._allocation_lease_is_live(
+            {"status": ar.SETTLING_STATUS, "allocation_lease_at": lease_at},
+            reference=SEP,
+        )
+        assert live is expect_live, label
+
+        retry_considered = self._retry_considered(_db(), lease_at, SEP)
+        surplus_considered = self._surplus_considered(_db(), lease_at, SEP)
+
+        assert retry_considered is (not expect_live), (
+            f"{label}: the retry sweep disagreed with _allocation_lease_is_live"
+        )
+        assert surplus_considered is (not expect_live), (
+            f"{label}: the surplus sweep disagreed with _allocation_lease_is_live"
+        )
+        assert retry_considered is surplus_considered, (
+            f"{label}: the two sweeps classified the same lease differently"
+        )
+
+    def test_both_sweeps_honour_the_injected_clock_not_the_wall_clock(self, stub_issue):
+        """A lease live relative to the INJECTED reference but long dead by
+        wall-clock time. Reading `datetime.now()` instead of `now_utc` flips
+        the answer, so this fails against the wall clock in either direction
+        and cannot pass by accident of when it runs.
+
+        The reference is fixed in 2020, so it is unambiguously in the past
+        whenever this suite runs.
+        """
+        past_ref = datetime(2020, 1, 1, 12, 0, tzinfo=timezone.utc)
+        cutoff = ar._allocation_lease_expiry_cutoff(past_ref)
+        lease_at = cutoff + timedelta(seconds=30)   # live vs past_ref
+
+        assert ar._allocation_lease_is_live(
+            {"status": ar.SETTLING_STATUS, "allocation_lease_at": lease_at},
+            reference=past_ref) is True
+        # ...and unambiguously dead against the wall clock.
+        assert ar._allocation_lease_is_live(
+            {"status": ar.SETTLING_STATUS, "allocation_lease_at": lease_at}) is False
+
+        assert self._surplus_considered(_db(), lease_at, past_ref) is False, (
+            "the surplus sweep read the wall clock: this lease is live relative "
+            "to the injected reference and must not be touched"
+        )
+        assert self._retry_considered(_db(), lease_at, past_ref) is False, (
+            "the retry sweep read the wall clock: this lease is live relative "
+            "to the injected reference and must not be touched"
+        )
+
+    def test_neither_sweep_re_derives_the_ttl(self):
+        import ast
+        import inspect
+
+        for fn in (ar.reconcile_surplus_denomination_allocations,
+                   ar._retry_stuck_pending_manual_affiliate_ledgers):
+            tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
+            called = {n.func.id for n in ast.walk(tree)
+                      if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+            names = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+            assert "_allocation_lease_expiry_cutoff" in called, fn.__name__
+            assert "_ALLOCATION_LEASE_TTL_SECONDS" not in names, (
+                f"{fn.__name__} re-derives the TTL boundary itself"
+            )
+
+    def test_the_surplus_sweep_stamps_with_the_injected_clock(self, stub_issue):
+        db = _db()
+        db.affiliate_ledger.insert_one({
+            "_id": "S0001", **_base(1, 9001),
+            "status": "ISSUED",
+            "reward_plan": arp.DENOMINATION_PLAN_ID,
+            "entitlement_month": MONTH,
+            "updated_at": OLD,
+        })
+        ar.reconcile_surplus_denomination_allocations(db, now_utc=SEP, batch_limit=5)
+        row = db.affiliate_ledger.find_one({"_id": "S0001"})
+        assert ar._as_aware_utc(row.get("surplus_checked_at")) == SEP, (
+            "the checkpoint must be stamped with the pass's reference clock, not "
+            f"the wall clock; got {row.get('surplus_checked_at')!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# batch_limit == 1: the ACTUAL behaviour, not a flattering description of it
+# ---------------------------------------------------------------------------
+
+class TestBatchLimitOfOne:
+    """At a limit of one, the slot goes to the least-recently-considered
+    ledger. Among never-considered rows that is decided by `_id`, so one class
+    drains before the other is reached — a losing class's head does NOT age
+    into winning, because losing does not stamp it. Documented rather than
+    engineered around: production runs batch_limit=500."""
+
+    def test_production_uses_a_limit_where_both_classes_get_capacity(self):
+        import pathlib
+        import re as _re
+
+        main_src = pathlib.Path(__file__).resolve().parent / "main.py"
+        text = main_src.read_text()
+        m = _re.search(
+            r'AFFILIATE_CURRENT_MONTH_BATCH_LIMIT = int\(os\.getenv\('
+            r'"AFFILIATE_CURRENT_MONTH_BATCH_LIMIT", "(\d+)"\)\)', text)
+        assert m, "the production batch limit is no longer where the docs say it is"
+        production_limit = int(m.group(1))
+        assert production_limit == 500
+
+        settling, pending = ar._retry_class_quotas(production_limit)
+        assert (settling, pending) == (250, 250), (
+            "at the production limit both classes must get capacity every tick"
+        )
+        assert 'retry_current_month_pending_manual_ledgers(' in text
+        assert 'batch_limit=AFFILIATE_CURRENT_MONTH_BATCH_LIMIT' in text
+
+    def test_at_limit_one_exactly_one_ledger_is_processed_per_tick(self, stub_issue):
+        db = _db()
+        _seed_pending(db, 5)
+        _seed_settling(db, 5)
+        for tick in range(4):
+            ar._retry_stuck_pending_manual_affiliate_ledgers(
+                db, now_utc=SEP + timedelta(minutes=5 * tick), batch_limit=1
+            )
+            assert len(_touched(db)) == tick + 1
+
+    def test_at_limit_one_one_class_drains_before_the_other_is_reached(self, stub_issue):
+        """The honest behaviour. Asserting the opposite — that the classes
+        alternate — would be asserting a guarantee this code does not make."""
+        db = _db()
+        _seed_pending(db, 3)
+        _seed_settling(db, 3)
+        order = []
+        for tick in range(6):
+            before = _touched(db)
+            ar._retry_stuck_pending_manual_affiliate_ledgers(
+                db, now_utc=SEP + timedelta(minutes=5 * tick), batch_limit=1
+            )
+            order.append(sorted(_touched(db) - before)[0])
+        assert order == ["P0000", "P0001", "P0002", "S0000", "S0001", "S0002"], (
+            f"observed selection order at batch_limit=1: {order}"
+        )
+
+    def test_at_limit_one_every_record_is_still_eventually_considered(self, stub_issue):
+        db = _db()
+        _seed_pending(db, 4)
+        _seed_settling(db, 4)
+        for tick in range(8):
+            ar._retry_stuck_pending_manual_affiliate_ledgers(
+                db, now_utc=SEP + timedelta(minutes=5 * tick), batch_limit=1
+            )
+        assert len(_touched(db)) == 8, "no record is permanently unreachable"
+
+    def test_at_the_production_limit_both_classes_progress_every_tick(self, stub_issue):
+        db = _db()
+        _seed_pending(db, 60)
+        _seed_settling(db, 60)
+        for tick in range(3):
+            before = _touched(db)
+            ar._retry_stuck_pending_manual_affiliate_ledgers(
+                db, now_utc=SEP + timedelta(minutes=5 * tick), batch_limit=500
+            )
+            new = _touched(db) - before
+            if not new:
+                break
+            assert _cls(new, "P") and _cls(new, "S"), (
+                f"tick {tick}: only one class progressed at the production limit"
+            )
