@@ -1,0 +1,17 @@
+# Test-only dependencies. Not installed in production.
+#
+# Pinned deliberately: an unpinned toolchain means CI silently runs a
+# different pytest from the one the suite was verified against, and the first
+# sign is a failure nobody can reproduce locally.
+pytest==8.3.5
+pytest-asyncio==1.3.0
+
+# Ten legacy suites import mongomock directly (test_checkin_streak_integrity,
+# test_official_channel_reopen_audit, test_referral_channel_migration,
+# test_referral_error_hardening, test_weekly_leaderboard_archive_recovery,
+# test_weekly_referral_post_integration, test_welcome_checkin_progress_main,
+# test_welcome_post_d3_reminders, test_welcome_run_stats_telemetry,
+# test_affiliate_monthly_leaderboard). Without it those modules fail at
+# COLLECTION, which aborts the whole pytest run rather than failing ten tests.
+mongomock==4.3.0
+

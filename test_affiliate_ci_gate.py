@@ -129,3 +129,97 @@ def test_the_baseline_file_is_present_and_well_formed():
     assert lines, "the baseline is empty; an empty baseline compares against nothing"
     bad = [l for l in lines if not re.match(r"^(FAILED|ERROR) [A-Za-z0-9_]+\.py", l)]
     assert not bad, f"malformed baseline entries: {bad[:5]}"
+
+
+# ---------------------------------------------------------------------------
+# CI must install everything the suite imports
+# ---------------------------------------------------------------------------
+
+#: Modules whose import name differs from their distribution name.
+_DISTRIBUTION_NAME = {
+    "yaml": "PyYAML",
+    "dateutil": "python-dateutil",
+    "bson": "pymongo",
+    "gridfs": "pymongo",
+    "telegram": "python-telegram-bot",
+    "flask_cors": "flask-cors",
+    "google": "google-auth",
+    "apscheduler": "APScheduler",
+    "pytest_asyncio": "pytest-asyncio",
+}
+
+
+def _declared_requirements() -> set[str]:
+    names = set()
+    for fname in ("requirements.txt", "requirements-dev.txt"):
+        path = ROOT / fname
+        assert path.exists(), f"{fname} is missing"
+        for line in path.read_text().splitlines():
+            line = line.split("#", 1)[0].strip()
+            if not line:
+                continue
+            names.add(re.split(r"[=<>!~\[]", line, 1)[0].strip().lower())
+    return names
+
+
+def _third_party_test_imports() -> set[str]:
+    """Top-level third-party modules imported by the test suite."""
+    import ast
+    import sys
+
+    local = {p.stem for p in ROOT.glob("*.py")}
+    local |= {p.name for p in ROOT.iterdir() if p.is_dir() and not p.name.startswith(".")}
+
+    found = set()
+    for path in sorted(ROOT.glob("test_*.py")) + [ROOT / "fake_mongo.py"]:
+        if not path.exists():
+            continue
+        try:
+            tree = ast.parse(path.read_text())
+        except SyntaxError:  # pragma: no cover - a broken test file fails elsewhere
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    found.add(alias.name.split(".")[0])
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                found.add(node.module.split(".")[0])
+    return {
+        n for n in found
+        if n not in local and n not in sys.stdlib_module_names and n != "__future__"
+    }
+
+
+def test_every_module_the_suite_imports_is_declared_for_ci():
+    """CI installs only what the requirements files name. A test-only import
+    that is declared nowhere is not a missing test — ten of this suite's
+    modules import mongomock, and an ImportError at COLLECTION aborts the
+    entire pytest run rather than failing ten tests."""
+    declared = _declared_requirements()
+    undeclared = sorted(
+        mod for mod in _third_party_test_imports()
+        if _DISTRIBUTION_NAME.get(mod, mod).lower() not in declared
+    )
+    assert not undeclared, (
+        "these third-party modules are imported by the test suite but appear in "
+        "neither requirements.txt nor requirements-dev.txt, so CI will not have "
+        f"them: {undeclared}"
+    )
+
+
+def test_the_test_toolchain_is_pinned():
+    """An unpinned toolchain means CI silently runs a different pytest from the
+    one the suite was verified against."""
+    text = (ROOT / "requirements-dev.txt").read_text()
+    for pkg in ("pytest", "pytest-asyncio", "mongomock"):
+        assert re.search(rf"^{re.escape(pkg)}==", text, re.M), (
+            f"{pkg} is not pinned in requirements-dev.txt"
+        )
+
+
+def test_both_ci_jobs_install_the_dev_requirements():
+    text = _workflow_directives()
+    assert text.count("pip install -r requirements-dev.txt") == 2, (
+        "both jobs must install the test-only dependencies; a job that installs "
+        "only requirements.txt cannot even collect the suite"
+    )

@@ -36,6 +36,7 @@ on:
       - "ci/**"
       - ".github/workflows/affiliate-migration-ci.yml"
       - "requirements.txt"
+      - "requirements-dev.txt"
 
 permissions:
   contents: read
@@ -75,7 +76,9 @@ jobs:
         with:
           python-version: "3.11"
           cache: pip
-          cache-dependency-path: requirements.txt
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
 
       - name: Install dependencies
         run: |
@@ -85,7 +88,11 @@ jobs:
           # affiliate_voucher_batches (Flask blueprint), scheduler and the
           # verifier script, so pymongo/Flask/pytz/APScheduler must be present.
           pip install -r requirements.txt
-          pip install pytest pytest-asyncio
+          # requirements-dev.txt, not a loose `pip install pytest`: it pins the
+          # toolchain AND carries mongomock, which ten legacy suites import.
+          # Without it those modules fail at COLLECTION, which aborts the whole
+          # run instead of failing ten tests.
+          pip install -r requirements-dev.txt
 
       - name: Compile check
         run: python -m compileall -q . -x '\.git|node_modules'
@@ -128,14 +135,20 @@ jobs:
         with:
           python-version: "3.11"
           cache: pip
-          cache-dependency-path: requirements.txt
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
 
       - name: Install dependencies
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install pytest pytest-asyncio
+          # requirements-dev.txt, not a loose `pip install pytest`: it pins the
+          # toolchain AND carries mongomock, which ten legacy suites import.
+          # Without it those modules fail at COLLECTION, which aborts the whole
+          # run instead of failing ten tests.
+          pip install -r requirements-dev.txt
 
       - name: Compare the failure set to ci/known_test_failures.txt
         run: python ci/full_suite_baseline.py

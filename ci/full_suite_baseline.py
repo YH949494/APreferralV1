@@ -98,11 +98,32 @@ def main() -> int:
     rc = _check_exclusions()
 
     proc = _run_pytest([f"--ignore={m}" for m in EXCLUDED])
-    actual = _failure_ids(proc.stdout + proc.stderr)
+    combined = proc.stdout + proc.stderr
+    actual = _failure_ids(combined)
 
-    summary = [l for l in (proc.stdout + proc.stderr).splitlines()
+    summary = [l for l in combined.splitlines()
                if re.search(r"\d+ (passed|failed)", l)]
-    print("\n".join(summary[-3:]) or "(no pytest summary line found)")
+
+    # A run that never got past collection has no failure set to compare, and
+    # comparing anyway is actively misleading: the baseline's 89 entries all
+    # look "newly passing" when in truth nothing ran. Diagnose it as what it
+    # is — usually a missing test dependency (see requirements-dev.txt).
+    interrupted = re.search(r"Interrupted: (\d+) errors? during collection", combined)
+    if interrupted or not summary:
+        print("::error::the test run did not complete — this is NOT a failure-set "
+              "difference, nothing ran to compare")
+        if interrupted:
+            print(f"::error::pytest aborted during collection with "
+                  f"{interrupted.group(1)} module error(s)")
+        for line in combined.splitlines():
+            if re.match(r"^(ERROR|E\s+\w*(Import|ModuleNotFound)Error)", line):
+                print(f"  {line.strip()}")
+        print("\nMost likely cause: a module a test imports is not installed. "
+              "requirements-dev.txt pins the test-only dependencies; check it "
+              "covers everything the suite imports.")
+        return 1
+
+    print("\n".join(summary[-3:]))
 
     new = sorted(actual - expected)
     fixed = sorted(expected - actual)
