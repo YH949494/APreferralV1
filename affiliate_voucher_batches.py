@@ -30,6 +30,10 @@ from bson.errors import InvalidId
 from flask import Blueprint, jsonify, request
 
 from affiliate_rewards import _month_window_from_yyyymm as _entitlement_month_window_utc
+# `database` is already in this module's import graph (affiliate_rewards
+# imports it), so this is not a new cycle, and importing it has no side
+# effect: database.py opens no connection at import time.
+from database import _ensure_equivalent_index
 from affiliate_reward_plans import (
     ADMIN_AFFILIATE_POOL_IDS,
     ENTITLEMENT_MONTH_POOL_IDS as _CANONICAL_ENTITLEMENT_MONTH_POOL_IDS,
@@ -371,18 +375,67 @@ def _as_object_id(batch_id) -> ObjectId | None:
 # Indexes
 # ---------------------------------------------------------------------------
 
+#: The canonical ``affiliate_voucher_batches`` catalogue: the key pattern
+#: each query needs, and the name a FRESH database should end up with.
+#:
+#: A name here is an intention, not a guarantee. On a database that already
+#: carries an equivalent index under some other name — a production catalogue
+#: predating this module, or one left behind by an intermediate migration
+#: commit — the existing index is REUSED under its own name and no second
+#: index is created. Only an empty database ends up with exactly these names.
+AFFILIATE_VOUCHER_BATCH_INDEXES = (
+    # Batch resolution / claimability: _find_batches_for_period,
+    # _find_active_batch, _tier_entered_scheduled_mode. The pool_id-only
+    # lookup rides this index's leading prefix, so it needs no index of
+    # its own.
+    ([("pool_id", 1), ("starts_at", 1), ("ends_at", 1)], "batch_pool_window"),
+    # Expiry scans.
+    ([("ends_at", 1)], "batch_ends_at"),
+    # Operator "distribution paused" filter.
+    ([("distribution_disabled", 1)], "batch_distribution_disabled"),
+)
+
+
 def ensure_affiliate_voucher_batch_indexes(db):
-    db.affiliate_voucher_batches.create_index(
-        [("pool_id", 1), ("starts_at", 1), ("ends_at", 1)], name="batch_pool_window"
-    )
-    db.affiliate_voucher_batches.create_index([("ends_at", 1)], name="batch_ends_at")
-    db.affiliate_voucher_batches.create_index(
-        [("distribution_disabled", 1)], name="batch_distribution_disabled"
-    )
-    # voucher_pools (pool_id, status, starts_at, ends_at) and (batch_id,
-    # status) are created in affiliate_rewards.ensure_affiliate_indexes
-    # alongside the pre-existing uniq_pool_code/pool_status indexes so all
-    # voucher_pools index management stays in one place.
+    """Bring ``affiliate_voucher_batches`` up to the catalogue above.
+
+    Every creation goes through ``database._ensure_equivalent_index`` rather
+    than a raw ``create_index``. That matters because this collection is
+    reachable in several partially-migrated states, and a raw create is not
+    safe in any of them:
+
+      * An intermediate commit of this migration created
+        ``aff_batch_pool_window`` over ``(pool_id, starts_at, ends_at)`` —
+        the exact key pattern of ``batch_pool_window``. A database that ran
+        that commit still carries the extra name. Asking MongoDB for a
+        SECOND name over an already-indexed key pattern fails with
+        ``IndexOptionsConflict`` (code 85), and because this runs at startup
+        the process dies before serving anything.
+      * The same commit created ``aff_batch_pool`` over ``(pool_id,)``.
+
+    The helper resolves this by matching on the KEY PATTERN rather than the
+    name: an equivalent index already present is adopted whatever it is
+    called, so a stale name satisfies the requirement instead of colliding
+    with it. It never drops and never renames — a leftover index is dead
+    weight, not a correctness problem, and removing one is a deliberate
+    operator decision rather than a side effect of a deploy. An index whose
+    key pattern matches but whose OPTIONS differ (uniqueness, partial filter,
+    collation) is a real conflict the helper raises on, because silently
+    adopting it would mean running against an index that does not do what
+    this code believes it does.
+
+    Idempotent: re-running against a database already in the target state
+    creates nothing and drops nothing.
+
+    voucher_pools ``(pool_id, status, starts_at, ends_at)`` and
+    ``(batch_id, status)`` are created in
+    ``affiliate_rewards.ensure_affiliate_indexes`` alongside the pre-existing
+    uniq_pool_code/pool_status indexes, so all voucher_pools index management
+    stays in one place.
+    """
+    collection = db.affiliate_voucher_batches
+    for keys, name in AFFILIATE_VOUCHER_BATCH_INDEXES:
+        _ensure_equivalent_index(collection, keys, name=name)
 
 
 # ---------------------------------------------------------------------------

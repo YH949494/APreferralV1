@@ -3560,6 +3560,78 @@ def issue_previous_week_affiliate_rewards(db, now_utc: datetime | None = None, b
     )
 
 
+#: Deterministic scan order for BOTH retry classes: least-recently-considered
+#: first, with ``_id`` as the tie-break. A ledger this sweep has never looked
+#: at carries no ``retry_checked_at`` at all, and a missing field sorts FIRST
+#: ascending in MongoDB — so new work jumps the queue instead of starving
+#: behind rows that have already had their turn.
+_RETRY_SCAN_ORDER = [("retry_checked_at", ASCENDING), ("_id", ASCENDING)]
+
+
+def _retry_class_quotas(batch_limit: int) -> tuple[int, int]:
+    """Split ``batch_limit`` between the two retry classes: (settling, pending).
+
+    An explicit quota, not a scheduler. Each class gets half, and each is
+    guaranteed at least one slot so a large population of one can never shut
+    the other out. SETTLING takes the smaller half when the split is uneven,
+    because a stale SETTLING ledger is self-draining (processing it moves it
+    out of the class) whereas a no-stock PENDING_MANUAL row can sit eligible
+    indefinitely.
+
+    ``batch_limit == 1`` cannot serve both in one tick. Both are still
+    QUERIED, and the single slot goes to whichever class holds the
+    least-recently-considered ledger — the same ordering key used everywhere
+    else. That is deterministic and cannot starve either class: a class that
+    keeps losing has its head grow older until it wins.
+    """
+    limit = max(1, int(batch_limit))
+    if limit == 1:
+        # Both quotas are 1; _merge_retry_candidates caps the result at 1 and
+        # the ordering key decides which one survives.
+        return 1, 1
+    settling = max(1, limit // 2)
+    return settling, limit - settling
+
+
+def _retry_order_key(ledger: dict):
+    """The sort key above, evaluated in Python for the merge step."""
+    checked = _as_aware_utc((ledger or {}).get("retry_checked_at"))
+    return (1, checked, str((ledger or {}).get("_id"))) if checked is not None \
+        else (0, None, str((ledger or {}).get("_id")))
+
+
+def _merge_retry_candidates(settling_rows, pending_rows, *, batch_limit: int):
+    """Apply the quotas, then spill unused capacity to the other class.
+
+    Total returned is never more than ``batch_limit``. If one class has fewer
+    eligible rows than its quota, the shortfall is handed to the other rather
+    than wasted — so a tick is never under-utilised just because one class is
+    quiet.
+    """
+    limit = max(1, int(batch_limit))
+    settling_quota, pending_quota = _retry_class_quotas(limit)
+
+    take_settling = min(settling_quota, len(settling_rows))
+    take_pending = min(pending_quota, len(pending_rows))
+
+    # Spillover, in both directions.
+    spare = limit - take_settling - take_pending
+    if spare > 0:
+        extra = min(spare, len(settling_rows) - take_settling)
+        take_settling += extra
+        spare -= extra
+    if spare > 0:
+        take_pending += min(spare, len(pending_rows) - take_pending)
+
+    chosen = list(settling_rows[:take_settling]) + list(pending_rows[:take_pending])
+    if len(chosen) <= limit:
+        return chosen
+    # Only reachable at batch_limit == 1, where both quotas are 1: the
+    # least-recently-considered ledger wins.
+    chosen.sort(key=_retry_order_key)
+    return chosen[:limit]
+
+
 def _retry_stuck_pending_manual_affiliate_ledgers(db, *, now_utc: datetime, batch_limit: int = 200) -> dict:
     """Direct-scan companion to the qualified-events-driven retry above.
 
@@ -3579,53 +3651,156 @@ def _retry_stuck_pending_manual_affiliate_ledgers(db, *, now_utc: datetime, batc
     additional inventory, and never touches a ledger carrying an
     abuse/risk-review flag (only ``_INVENTORY_ONLY_RISK_FLAGS`` values, or
     none at all, are eligible).
+
+    ``batch_limit`` bounds the number of ledgers PROCESSED per tick, across
+    both classes combined — it is the strict upper bound on the work one tick
+    does. Each of the two database queries is independently bounded by the
+    same number and sorted server-side, so at most ``2 * batch_limit``
+    documents are ever materialised, and never the whole eligible set.
+
+    TWO CLASSES, EXPLICIT QUOTA. The scan covers:
+
+      * retryable **PENDING_MANUAL** rows, and
+      * **SETTLING** rows stranded by a worker that crashed between claiming
+        vouchers and finalizing the ledger, or that walked away because
+        another worker held the allocation lease.
+
+    They are queried separately and merged under ``_retry_class_quotas``, so
+    a large PENDING_MANUAL population cannot consume the whole tick and
+    starve stale SETTLING recovery — the failure mode of concatenating one
+    list onto the other and slicing afterwards. Within each class the order
+    is ``_RETRY_SCAN_ORDER``: least-recently-considered first. Every ledger
+    considered is stamped with ``retry_checked_at`` and has ``retry_attempts``
+    incremented, which sends it to the back of its class's queue, so a
+    permanently unsatisfiable row (a PENDING_MANUAL ledger whose pool has no
+    stock) cannot be picked over and over while later rows are never reached.
+
+    LIVENESS IS THE LEASE. A SETTLING ledger is eligible only once its
+    allocation lease has expired, decided by ``_allocation_lease_is_live`` /
+    ``_allocation_lease_expiry_cutoff`` — the same helpers, the same TTL and
+    the same boundary the surplus sweep uses. ``updated_at`` is not a
+    liveness signal: an allocator that has been renewing its lease for ten
+    minutes can carry a stale ``updated_at``, and retrying it would fight a
+    bundle that is still in flight. Selection is only the first gate; the
+    conditional status update below and the fencing token taken inside
+    ``_issue_affiliate_ledger_from_pool`` remain the final protection if a
+    worker acquires a lease between selection and processing.
     """
-    scanned = 0
-    reconciled = 0
-    candidates = list(
-        db.affiliate_ledger.find(
-            {"ledger_type": "AFFILIATE_MONTHLY", "status": "PENDING_MANUAL", **_no_voucher_filter()}
-        )
-    )
-    # Also recover ledgers STRANDED in SETTLING: a worker that crashed
-    # between claiming vouchers and finalizing the ledger (or one that
-    # walked away because another worker held the allocation lease) leaves
-    # the row mid-flight with no PENDING_MANUAL to find it by. Only rows
-    # untouched for longer than the lease TTL are considered, so a worker
-    # actively allocating right now is never interrupted; re-entry is safe
-    # because allocation only ever claims what is still missing.
-    settling_cutoff = now_utc - timedelta(seconds=_ALLOCATION_LEASE_TTL_SECONDS)
-    candidates.extend(
-        db.affiliate_ledger.find(
-            {
-                "ledger_type": "AFFILIATE_MONTHLY",
-                "status": SETTLING_STATUS,
-                "updated_at": {"$lt": settling_cutoff},
-                **_no_voucher_filter(),
-            }
-        )
-    )
-    candidates = candidates[: max(1, int(batch_limit))]
+    limit = max(1, int(batch_limit))
+    stats = {"scanned": 0, "reconciled": 0, "skipped_live": 0, "errors": 0}
+
+    # ONE definition of "this allocator is no longer alive", shared with the
+    # surplus sweep — never a second copy of the TTL arithmetic.
+    lease_cutoff = _allocation_lease_expiry_cutoff(now_utc)
+    settling_query = {
+        "ledger_type": "AFFILIATE_MONTHLY",
+        "status": SETTLING_STATUS,
+        # $and, NOT two "$or" keys in one dict: _no_voucher_filter() is itself
+        # an {"$or": [...]}, so spreading it beside another "$or" would silently
+        # overwrite the lease condition and make every SETTLING row eligible.
+        "$and": [
+            {"$or": [
+                # A real lease that has expired. In MongoDB a $lt against a
+                # Date never matches null (BSON type bracketing), so a
+                # lease-less row cannot slip in through this branch.
+                {"allocation_lease_at": {"$ne": None, "$lt": lease_cutoff}},
+                # Rows that predate leasing, or whose lease field is absent:
+                # fall back to updated_at for ELIGIBILITY only. Liveness is
+                # still re-checked against the lease before anything is
+                # touched.
+                {"allocation_lease_at": None, "updated_at": {"$lt": lease_cutoff}},
+                {"allocation_lease_at": {"$exists": False},
+                 "updated_at": {"$lt": lease_cutoff}},
+            ]},
+            _no_voucher_filter(),
+        ],
+    }
+    pending_query = {
+        "ledger_type": "AFFILIATE_MONTHLY",
+        "status": "PENDING_MANUAL",
+        **_no_voucher_filter(),
+    }
+
+    def _fetch(query, label):
+        # DATABASE-SIDE sort + limit. `list(find(query))[:limit]` would pull
+        # the whole eligible set into memory and, with no ordering, re-inspect
+        # the same head every tick while the rest were never seen.
+        try:
+            return list(db.affiliate_ledger.find(query, sort=_RETRY_SCAN_ORDER, limit=limit))
+        except Exception:
+            logger.exception("[AFFILIATE][STUCK_RETRY][QUERY_FAILED] class=%s", label)
+            stats["errors"] += 1
+            return []
+
+    settling_rows = _fetch(settling_query, "settling")
+    pending_rows = _fetch(pending_query, "pending_manual")
+    candidates = _merge_retry_candidates(settling_rows, pending_rows, batch_limit=limit)
+
     for ledger in candidates:
-        if _ledger_has_affiliate_bundle(ledger):
-            continue
-        flags = set(ledger.get("risk_flags") or [])
-        if not flags <= _INVENTORY_ONLY_RISK_FLAGS:
-            continue  # abuse/risk-review flag present — never auto-reconcile
-        scanned += 1
-        current_status = str(ledger.get("status") or "")
-        settle_res = db.affiliate_ledger.update_one(
-            {"_id": ledger["_id"], "status": current_status, **_no_voucher_filter()},
-            {"$set": {"status": SETTLING_STATUS, "updated_at": now_utc}},
-        )
-        if settle_res.modified_count == 0:
-            continue
-        latest = _issue_affiliate_ledger_from_pool(
-            db, ledger=db.affiliate_ledger.find_one({"_id": ledger["_id"]}), now_utc=now_utc,
-        )
-        if latest and latest.get("status") == "ISSUED":
-            reconciled += 1
-    return {"scanned": scanned, "reconciled": reconciled}
+        ledger_id = ledger.get("_id")
+        considered = False
+        try:
+            # A worker may have taken or renewed a lease between the query and
+            # now. Re-read and re-check liveness against the LEASE.
+            fresh = db.affiliate_ledger.find_one({"_id": ledger_id}) or ledger
+            if _allocation_lease_is_live(fresh, reference=now_utc):
+                stats["skipped_live"] += 1
+                logger.info(
+                    "[AFFILIATE][STUCK_RETRY][SKIP_LIVE_ALLOCATOR] ledger_id=%s generation=%s",
+                    ledger_id, fresh.get("allocation_generation"),
+                )
+                # Deliberately NOT stamped: a live allocator was not
+                # considered, so it stays at the front and is revisited once
+                # its lease lapses or it finalizes.
+                continue
+
+            considered = True
+            if _ledger_has_affiliate_bundle(fresh):
+                continue
+            flags = set(fresh.get("risk_flags") or [])
+            if not flags <= _INVENTORY_ONLY_RISK_FLAGS:
+                continue  # abuse/risk-review flag present — never auto-reconcile
+            stats["scanned"] += 1
+            current_status = str(fresh.get("status") or "")
+            settle_res = db.affiliate_ledger.update_one(
+                {"_id": ledger_id, "status": current_status, **_no_voucher_filter()},
+                {"$set": {"status": SETTLING_STATUS, "updated_at": now_utc}},
+            )
+            if getattr(settle_res, "modified_count", 0) == 0:
+                continue
+            latest = _issue_affiliate_ledger_from_pool(
+                db, ledger=db.affiliate_ledger.find_one({"_id": ledger_id}), now_utc=now_utc,
+            )
+            if latest and latest.get("status") == "ISSUED":
+                stats["reconciled"] += 1
+        except Exception:
+            # One malformed ledger must never abort the batch, and must not
+            # wedge the queue either: it is stamped below like any other, so
+            # it goes to the back and later rows get their turn.
+            stats["errors"] += 1
+            considered = True
+            logger.exception("[AFFILIATE][STUCK_RETRY][LEDGER_FAILED] ledger_id=%s", ledger_id)
+        finally:
+            if considered:
+                try:
+                    db.affiliate_ledger.update_one(
+                        {"_id": ledger_id},
+                        {"$set": {"retry_checked_at": now_utc},
+                         "$inc": {"retry_attempts": 1}},
+                    )
+                except Exception:
+                    stats["errors"] += 1
+                    logger.exception(
+                        "[AFFILIATE][STUCK_RETRY][CHECKPOINT_FAILED] ledger_id=%s", ledger_id
+                    )
+
+    logger.info(
+        "[AFFILIATE][STUCK_RETRY][DONE] scanned=%s reconciled=%s skipped_live=%s errors=%s "
+        "settling_seen=%s pending_seen=%s processed=%s limit=%s",
+        stats["scanned"], stats["reconciled"], stats["skipped_live"], stats["errors"],
+        len(settling_rows), len(pending_rows), len(candidates), limit,
+    )
+    return stats
 
 
 def issue_current_month_affiliate_rewards(db, now_utc: datetime | None = None, batch_limit: int = 500):
