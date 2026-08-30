@@ -61,7 +61,11 @@ class _FindSpy:
         class _Col:
             def find(self, query=None, **kwargs):
                 if kwargs.get("sort"):
-                    spy.selections.append({"query": query, "sort": kwargs["sort"]})
+                    spy.selections.append({
+                        "query": query,
+                        "sort": kwargs["sort"],
+                        "hint": kwargs.get("hint"),
+                    })
                 return col.find(query, **kwargs)
 
             def __getattr__(self, item):
@@ -109,7 +113,7 @@ def test_every_checklist_sort_matches_the_query_it_describes():
     by_shape = {}
     for sel in captured:
         by_shape[str(_shape(sel["query"]))] = [tuple(k) for k in sel["sort"]]
-    for label, _coll, query, sort, _idx in SPECS:
+    for label, _coll, query, sort, _idx, _hint in SPECS:
         key = str(_shape(query))
         if key not in by_shape:
             continue  # a read-path query with no sweep counterpart
@@ -125,9 +129,30 @@ def test_every_checklist_sort_matches_the_query_it_describes():
     "retry sweep / stale SETTLING",
 ])
 def test_both_retry_branches_are_listed_against_the_retry_index(label):
-    _l, _c, _q, sort, expected = SPEC_BY_LABEL[label]
+    _l, _c, _q, sort, expected, _hint = SPEC_BY_LABEL[label]
     assert expected == "affiliate_type_status_retry_checked"
     assert [tuple(s) for s in sort] == [("retry_checked_at", 1), ("_id", 1)]
+
+
+def test_the_surplus_sweep_hints_its_own_index():
+    """The real MongoDB planner prefers a different index for the query's
+    entitlement_month range, especially while the denomination-plan eligible
+    set is small or empty, and falls back to a blocking in-memory SORT. The
+    sweep must pin the sort-providing index explicitly, and the checklist
+    must explain the query the same way production actually issues it."""
+    captured = _captured_selections()
+    surplus = [
+        sel for sel in captured
+        if any(clause.get("status") == "ISSUED" for clause in (sel["query"].get("$or") or []))
+    ]
+    assert len(surplus) == 1, f"expected exactly one surplus selection, got {surplus}"
+    assert surplus[0]["hint"] == ar.SURPLUS_SWEEP_INDEX_NAME
+
+    _label, _c, _q, _sort, _expected, checklist_hint = SPEC_BY_LABEL["surplus sweep"]
+    assert checklist_hint == surplus[0]["hint"], (
+        "the checklist's surplus-sweep hint has drifted from what "
+        "reconcile_surplus_denomination_allocations actually sends"
+    )
 
 
 def test_the_retry_index_matches_the_catalogue_definition():

@@ -399,9 +399,11 @@ def _read_only_db():
 
 
 #: The queries whose plans must be verified against real, production-shaped
-#: data. Each entry is (label, filter, sort, the index expected to serve it).
-#: These are the exact shapes built in ``affiliate_rewards``; a change there
-#: without a change here is caught by test_affiliate_query_plan_checklist.py.
+#: data. Each entry is (label, filter, sort, the index expected to serve it,
+#: the index name the production query pins with .hint(), or None when
+#: production issues the query unhinted). These are the exact shapes built in
+#: ``affiliate_rewards``; a change there without a change here is caught by
+#: test_affiliate_query_plan_checklist.py.
 def _query_plan_specs(month: str | None):
     from datetime import datetime, timedelta, timezone
 
@@ -419,6 +421,7 @@ def _query_plan_specs(month: str | None):
             {"ledger_type": "AFFILIATE_MONTHLY", "status": "PENDING_MANUAL", **no_voucher},
             [("retry_checked_at", 1), ("_id", 1)],
             "affiliate_type_status_retry_checked",
+            None,
         ),
         (
             "retry sweep / stale SETTLING",
@@ -438,6 +441,7 @@ def _query_plan_specs(month: str | None):
             },
             [("retry_checked_at", 1), ("_id", 1)],
             "affiliate_type_status_retry_checked",
+            None,
         ),
         (
             "surplus sweep",
@@ -455,7 +459,12 @@ def _query_plan_specs(month: str | None):
                 ],
             },
             [("surplus_checked_at", 1), ("_id", 1)],
-            "affiliate_type_surplus_checked",
+            ar.SURPLUS_SWEEP_INDEX_NAME,
+            # Hinted in production (see reconcile_surplus_denomination_allocations):
+            # entitlement_month's $gte range is selective enough that the real
+            # planner prefers affiliate_type_entitlement_tier for filtering and
+            # falls back to an in-memory SORT, which this hint forecloses.
+            ar.SURPLUS_SWEEP_INDEX_NAME,
         ),
         (
             "Databot tier funnel / entitlement_month",
@@ -463,6 +472,7 @@ def _query_plan_specs(month: str | None):
             {"ledger_type": "AFFILIATE_MONTHLY", "entitlement_month": entitlement},
             None,
             "affiliate_type_entitlement_tier",
+            None,
         ),
         (
             "Databot tier funnel / legacy year_month",
@@ -470,6 +480,7 @@ def _query_plan_specs(month: str | None):
             {"ledger_type": "AFFILIATE_MONTHLY", "year_month": entitlement},
             None,
             "affiliate_type_yearmonth_tier",
+            None,
         ),
     ]
 
@@ -507,11 +518,13 @@ def check_query_plans(db, f: Findings, month: str | None) -> None:
     """
     print("\n== query-plans ==")
     print(f"  examined:returned budget = {_MAX_EXAMINED_PER_RETURNED}:1")
-    for label, collection, query, sort, expected_index in _query_plan_specs(month):
+    for label, collection, query, sort, expected_index, hint in _query_plan_specs(month):
         try:
             cursor = db[collection].find(query)
             if sort:
                 cursor = cursor.sort(sort)
+            if hint:
+                cursor = cursor.hint(hint)
             plan = cursor.limit(200).explain()
         except Exception as exc:  # pragma: no cover - depends on a live server
             f.add(f"{label}: explain failed: {exc}")

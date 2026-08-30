@@ -34,6 +34,12 @@ POOL_IDS = ("WELCOME",) + TIERS + DENOMINATION_POOL_IDS
 FINAL_STATUSES = {"ISSUED", "OUT_OF_STOCK", "REJECTED"}
 SETTLING_STATUS = "SETTLING"
 AFFILIATE_BUNDLE_REWARD_TYPE = "affiliate_bundle"
+# The surplus sweep's own index (see ensure_affiliate_indexes / Q2 below).
+# Created via plain create_index (never _ensure_equivalent_index), so this
+# name is never adopted-under-a-legacy-name on a partial rollout — it is safe
+# to hardcode as a query hint. Shared here so the production query, the
+# index's own creation, and the read-only verifier can never drift apart.
+SURPLUS_SWEEP_INDEX_NAME = "affiliate_type_surplus_checked"
 # Legacy (entitlement month <= 202608) single-denomination bundles.
 # RETAINED AS-IS for historical meaning and for every legacy-plan code path
 # below. The canonical, plan-versioned definition now lives in
@@ -183,7 +189,7 @@ def ensure_affiliate_indexes(db):
     #     — exactly the unbounded behaviour this sweep must not have.
     db.affiliate_ledger.create_index(
         [("ledger_type", ASCENDING), ("surplus_checked_at", ASCENDING), ("_id", ASCENDING)],
-        name="affiliate_type_surplus_checked",
+        name=SURPLUS_SWEEP_INDEX_NAME,
     )
     # Q3  Stuck-ledger retry sweep. TWO selections, both in
     #     _retry_stuck_pending_manual_affiliate_ledgers:
@@ -2160,13 +2166,42 @@ def reconcile_surplus_denomination_allocations(
         # rather than starving behind older, already-clean ones. Every
         # inspected ledger is stamped afterwards, which moves it to the back,
         # so repeated runs walk the whole eligible set and then cycle.
+        # EXPLICIT HINT. The query's own equality predicate (ledger_type) is
+        # far less selective than its entitlement_month range, which the
+        # real MongoDB planner can satisfy with affiliate_type_entitlement_tier
+        # (ledger_type, entitlement_month, tier) — especially while the
+        # denomination-plan eligible set is small or empty, where that index
+        # proves "no match" fastest during the multi-plan trial. That plan
+        # wins the trial but cannot provide this sort, so MongoDB falls back
+        # to an in-memory blocking SORT over the whole eligible set — exactly
+        # the unbounded behaviour this sweep exists to avoid. The hint pins
+        # the sweep to the index built to serve it, which is created by this
+        # same module's own startup path (ensure_affiliate_indexes) under a
+        # fixed name, so the hint is always valid once startup has run.
         candidates = list(
             db.affiliate_ledger.find(
                 query,
                 sort=[("surplus_checked_at", ASCENDING), ("_id", ASCENDING)],
                 limit=limit,
+                hint=SURPLUS_SWEEP_INDEX_NAME,
             )
         )
+    except OperationFailure as exc:
+        message = str(exc).lower()
+        if "hint" in message and "index" in message:
+            # The hinted index does not exist. Silently falling through would
+            # leave surplus recovery permanently, invisibly disabled — this
+            # must fail loud enough to page someone, not just increment a
+            # counter nobody watches.
+            logger.critical(
+                "[AFF_SURPLUS_SWEEP][HINTED_INDEX_MISSING] index=%s err=%s "
+                "startup must create this index before the sweep can run",
+                SURPLUS_SWEEP_INDEX_NAME, exc,
+            )
+            raise
+        logger.exception("[AFF_SURPLUS_SWEEP][QUERY_FAILED]")
+        stats["errors"] += 1
+        return stats
     except Exception:
         logger.exception("[AFF_SURPLUS_SWEEP][QUERY_FAILED]")
         stats["errors"] += 1
