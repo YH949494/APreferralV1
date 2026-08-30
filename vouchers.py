@@ -7553,7 +7553,12 @@ def admin_pools_upload_v2():
 
     data = request.get_json(silent=True) or {}
     pool_id = str(data.get("pool_id") or "").strip().upper()
-    allowed_affiliate_pools = {"WELCOME", "T1", "T2", "T3", "T4", "T5"}
+    # Canonical catalogue (affiliate_reward_plans.ADMIN_AFFILIATE_POOL_IDS) --
+    # never a local copy, so this validator can never drift from the admin
+    # dropdown or from affiliate_voucher_batches' own allowlist.
+    from affiliate_reward_plans import ADMIN_AFFILIATE_POOL_IDS, pool_denomination
+
+    allowed_affiliate_pools = set(ADMIN_AFFILIATE_POOL_IDS)
     if pool_id not in allowed_affiliate_pools:
         current_app.logger.warning("[AFFILIATE][ADMIN_INVALID_POOL] pool_id=%s", pool_id)
         return jsonify({"status": "error", "reason": "bad_pool_id", "error": "Invalid affiliate pool_id"}), 400
@@ -7564,23 +7569,28 @@ def admin_pools_upload_v2():
         return jsonify({"status": "error", "reason": "empty_codes"}), 400
 
     now_ts = datetime.now(timezone.utc)
+    # Denomination pools carry their value on every physical row so a code
+    # stays independently priceable no matter which tier's bundle consumes
+    # it. Per-tier legacy pools keep their value as a property of the tier.
+    denomination = pool_denomination(pool_id)
     inserted = 0
     for code in rows:
+        row = {
+            "pool_id": pool_id,
+            "code": code,
+            "status": "available",
+            "issued_to": None,
+            "issued_at": None,
+            "ledger_id": None,
+            "display_label": data.get("display_label"),
+            "value_hint": data.get("value_hint"),
+            "currency": data.get("currency"),
+            "created_at": now_ts,
+        }
+        if denomination is not None:
+            row["voucher_value"] = denomination
         try:
-            db.voucher_pools.insert_one(
-                {
-                    "pool_id": pool_id,
-                    "code": code,
-                    "status": "available",
-                    "issued_to": None,
-                    "issued_at": None,
-                    "ledger_id": None,
-                    "display_label": data.get("display_label"),
-                    "value_hint": data.get("value_hint"),
-                    "currency": data.get("currency"),
-                    "created_at": now_ts,
-                }
-            )
+            db.voucher_pools.insert_one(row)
             inserted += 1
         except DuplicateKeyError:
             continue
@@ -7598,7 +7608,9 @@ def admin_pools_summary_v2():
 
     now_utc = datetime.now(timezone.utc)
     out = []
-    for pool_id in ("WELCOME", "T1", "T2", "T3", "T4", "T5"):
+    from affiliate_reward_plans import ADMIN_AFFILIATE_POOL_IDS
+
+    for pool_id in ADMIN_AFFILIATE_POOL_IDS:
         try:
             inventory = get_claimable_pool_inventory(db, pool_id=pool_id, now_utc=now_utc)
         except Exception as exc:  # noqa: BLE001 - never 500 the whole panel, but never claim health we can't verify
@@ -7843,13 +7855,13 @@ def admin_affiliate_pending_v2():
     now_utc = datetime.now(timezone.utc)
     month_start_utc = now_utc.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     week_start_utc = (now_utc - timedelta(days=now_utc.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
-    threshold_by_tier = {
-        "T1": int(os.getenv("AFF_T1_THRESHOLD", "10")),
-        "T2": int(os.getenv("AFF_T2_THRESHOLD", "25")),
-        "T3": int(os.getenv("AFF_T3_THRESHOLD", "50")),
-        "T4": int(os.getenv("AFF_T4_THRESHOLD", "150")),
-        "T5": int(os.getenv("AFF_T5_THRESHOLD", "300")),
-    }
+    # Canonical thresholds -- never a local copy. This admin surface used to
+    # restate them with its own defaults and had drifted to T5=300, so a user
+    # on 250-299 qualified referrals was shown a different eligible tier than
+    # the evaluator would actually grant.
+    from affiliate_reward_plans import tier_thresholds
+
+    threshold_by_tier = tier_thresholds()
     rows = list(db.affiliate_ledger.find({"status": status}).sort("created_at", 1).limit(200))
     items = []
     for row in rows:

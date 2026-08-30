@@ -1,0 +1,155 @@
+name: Affiliate Migration CI
+
+# Pull-request tests for the September 2026 affiliate reward migration.
+#
+# This repository had no PR-triggered test workflow at all: deploy.yml is
+# push-to-main and bot-segment-sync.yml is workflow_dispatch, so nothing ran
+# on a pull request. Nothing here deploys, and nothing here needs a secret.
+#
+# WHAT GATES A PR: the `migration-tests` job. It runs a curated set of suites
+# that are green today, so any failure in it is a real regression introduced
+# by the change under review. The exact file list lives in one place — the
+# TARGETED_SUITES env below — and is asserted against the repository in
+# test_affiliate_ci_gate.py, so the list cannot silently rot into naming a
+# suite that no longer exists.
+#
+# The legacy full suite carries long-standing failures that predate this work.
+# `full-suite-baseline` runs it and compares the EXACT SET of failing test
+# identifiers against ci/known_test_failures.txt, failing on any difference in
+# either direction. That is a real check, not a green rubber stamp: it is not
+# `continue-on-error`, it does not ignore an exit code, and it does not skip.
+
+on:
+  pull_request:
+    paths:
+      - "affiliate_rewards.py"
+      - "affiliate_reward_plans.py"
+      - "affiliate_voucher_batches.py"
+      - "vouchers.py"
+      - "dashboard_panels.py"
+      - "database.py"
+      - "main.py"
+      - "fake_mongo.py"
+      - "scripts/verify_affiliate_reward_plan.py"
+      - "static/**"
+      - "test_affiliate_*.py"
+      - "ci/**"
+      - ".github/workflows/affiliate-migration-ci.yml"
+      - "requirements.txt"
+      - "requirements-dev.txt"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: affiliate-migration-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  # The gating suite. Every one of these is green on this branch.
+  TARGETED_SUITES: >-
+    test_affiliate_reward_plan_migration.py
+    test_affiliate_pool_catalogue.py
+    test_affiliate_threshold_drift.py
+    test_affiliate_inventory_preflight.py
+    test_affiliate_index_catalogue.py
+    test_affiliate_surplus_sweep_bounded.py
+    test_affiliate_lease_liveness.py
+    test_affiliate_retry_sweep_fairness.py
+    test_affiliate_verifier_readonly.py
+    test_affiliate_rewards.py
+    test_affiliate_bundle_reconciliation.py
+    test_affiliate_inventory_retry.py
+    test_affiliate_voucher_batches.py
+    test_affiliate_voucher_batch_followup.py
+    test_affiliate_ci_gate.py
+    test_affiliate_query_plan_checklist.py
+
+jobs:
+  migration-tests:
+    name: Migration suites (required)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          # The real runtime dependencies: these suites import affiliate_rewards,
+          # affiliate_voucher_batches (Flask blueprint), scheduler and the
+          # verifier script, so pymongo/Flask/pytz/APScheduler must be present.
+          pip install -r requirements.txt
+          # requirements-dev.txt, not a loose `pip install pytest`: it pins the
+          # toolchain AND carries mongomock, which ten legacy suites import.
+          # Without it those modules fail at COLLECTION, which aborts the whole
+          # run instead of failing ten tests.
+          pip install -r requirements-dev.txt
+
+      - name: Compile check
+        run: python -m compileall -q . -x '\.git|node_modules'
+
+      - name: Every gating suite exists
+        run: |
+          set -euo pipefail
+          missing=0
+          for f in ${TARGETED_SUITES}; do
+            if [ ! -f "$f" ]; then echo "::error::gating suite not found: $f"; missing=1; fi
+          done
+          exit $missing
+
+      - name: Run the migration suites
+        run: |
+          set -euo pipefail
+          # -p no:randomly for a reproducible order; --strict-markers and
+          # -W error::pytest.PytestUnraisableExceptionWarning so a suite cannot
+          # pass by quietly swallowing something. No continue-on-error, no `|| true`.
+          python -m pytest -q -p no:randomly --strict-markers ${TARGETED_SUITES}
+
+      - name: Assert nothing in the gating suites was skipped
+        run: |
+          set -euo pipefail
+          out="$(python -m pytest -q -p no:randomly ${TARGETED_SUITES} 2>&1 | tail -5)"
+          echo "$out"
+          if echo "$out" | grep -qE '[0-9]+ (skipped|xfailed|deselected)'; then
+            echo "::error::a gating suite skipped tests; the gate must run everything it names"
+            exit 1
+          fi
+
+  full-suite-baseline:
+    name: Full suite vs known-failure baseline
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          # requirements-dev.txt, not a loose `pip install pytest`: it pins the
+          # toolchain AND carries mongomock, which ten legacy suites import.
+          # Without it those modules fail at COLLECTION, which aborts the whole
+          # run instead of failing ten tests.
+          pip install -r requirements-dev.txt
+
+      - name: Compare the failure set to ci/known_test_failures.txt
+        run: python ci/full_suite_baseline.py
