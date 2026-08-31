@@ -7556,12 +7556,40 @@ def admin_pools_upload_v2():
     # Canonical catalogue (affiliate_reward_plans.ADMIN_AFFILIATE_POOL_IDS) --
     # never a local copy, so this validator can never drift from the admin
     # dropdown or from affiliate_voucher_batches' own allowlist.
-    from affiliate_reward_plans import ADMIN_AFFILIATE_POOL_IDS, pool_denomination
+    from affiliate_reward_plans import ADMIN_AFFILIATE_POOL_IDS, DENOMINATION_POOL_IDS, pool_denomination
 
     allowed_affiliate_pools = set(ADMIN_AFFILIATE_POOL_IDS)
     if pool_id not in allowed_affiliate_pools:
         current_app.logger.warning("[AFFILIATE][ADMIN_INVALID_POOL] pool_id=%s", pool_id)
         return jsonify({"status": "error", "reason": "bad_pool_id", "error": "Invalid affiliate pool_id"}), 400
+
+    # Denomination pools (AFFILIATE_5/10/50) have NO undated-stock concept --
+    # _resolve_denomination_pool_target requires a canonical scheduled
+    # monthly batch and intentionally has no fallback for a bare
+    # voucher_pools row with no batch_id. Accepting one here would look
+    # successful (codes inserted) while creating dead inventory issuance can
+    # never consume, and could also block a later correct scheduled upload
+    # of the same codes via the (pool_id, code) uniqueness index. Legacy
+    # T1-T5 tier pools and WELCOME are untouched -- they keep their existing
+    # undated-upload behaviour exactly as before.
+    if pool_id in set(DENOMINATION_POOL_IDS):
+        current_app.logger.warning(
+            "[AFFILIATE][ADMIN_DENOMINATION_UPLOAD_REJECTED] pool_id=%s", pool_id,
+        )
+        return jsonify({
+            "ok": False,
+            "status": "error",
+            "code": "denomination_pool_requires_scheduled_batch",
+            "reason": "denomination_pool_requires_scheduled_batch",
+            "message": (
+                "Affiliate denomination inventory must be uploaded through a "
+                "scheduled entitlement-month batch."
+            ),
+            "error": (
+                "Affiliate denomination inventory must be uploaded through a "
+                "scheduled entitlement-month batch."
+            ),
+        }), 400
 
     codes_text = str(data.get("codes_text") or "")
     rows = [line.strip() for line in codes_text.replace("\r", "\n").split("\n") if line.strip()]

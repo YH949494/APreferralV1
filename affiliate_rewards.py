@@ -505,7 +505,10 @@ def _batch_claimable_available_count(db, batch: dict) -> int:
     return int(db.voucher_pools.count_documents({"batch_id": batch.get("_id"), "status": "available"}))
 
 
-def _claim_from_target_batch(db, *, batch_id, pool_id: str, ledger_id, user_id: int, now_utc: datetime):
+def _claim_from_target_batch(
+    db, *, batch_id, pool_id: str, ledger_id, user_id: int, now_utc: datetime,
+    allow_expired_pinned: bool = False,
+):
     """Two-step authoritative claim: the batch document — not any
     denormalized field on the voucher row — is the source of truth for
     ``upload_status``/``distribution_disabled``/schedule window. It is
@@ -514,6 +517,15 @@ def _claim_from_target_batch(db, *, batch_id, pool_id: str, ledger_id, user_id: 
     a claim the batch document itself would refuse. The final claim is
     still a single atomic ``find_one_and_update`` keyed on ``batch_id`` +
     ``status``, so two workers can never win the same code.
+
+    ``allow_expired_pinned`` is a narrow, opt-in exception to the
+    ``now_utc >= ends_at`` rejection: it must be set ONLY by a caller
+    continuing a denomination-bundle ledger's already-pinned
+    ``pool_targets.<pool_id>.batch_id`` allocation (see
+    ``_issue_denomination_bundle``), never for a fresh/first-time
+    resolution and never for the legacy single-pool tier path. Every other
+    fail-closed check here (upload_status, distribution_disabled,
+    starts_at) still applies unconditionally.
     Returns ``(voucher_or_None, reason_or_None)``.
     """
     batch = db.affiliate_voucher_batches.find_one({"_id": batch_id})
@@ -527,7 +539,7 @@ def _claim_from_target_batch(db, *, batch_id, pool_id: str, ledger_id, user_id: 
     ends_at = _as_aware_utc(batch.get("ends_at"))
     if starts_at is None or ends_at is None:
         return None, "target_batch_not_ready"
-    if now_utc >= ends_at:
+    if now_utc >= ends_at and not allow_expired_pinned:
         return None, "target_batch_expired_unissued"
     if now_utc < starts_at:
         return None, "target_batch_scheduled"
@@ -1937,12 +1949,19 @@ def _resolve_denomination_pool_target(db, *, ledger, pool_id: str, entitlement_m
     return None, "no_batch_for_entitlement_period"
 
 
-def _claim_one_denomination_voucher(db, *, target, pool_id: str, ledger_id, user_id: int, now_utc: datetime):
+def _claim_one_denomination_voucher(
+    db, *, target, pool_id: str, ledger_id, user_id: int, now_utc: datetime,
+    allow_expired_pinned: bool = False,
+):
     """Claim exactly ONE code from an already-pinned denomination source.
 
     Deliberately single-code: the caller loops, so a bundle is built by
     independently atomic per-code claims that can stop and resume at any
     point without ever double-claiming.
+
+    ``allow_expired_pinned`` is forwarded to ``_claim_from_target_batch``
+    unchanged — see that function's docstring for the exact scope of the
+    exception. It has no effect on the legacy (``mode == "legacy"``) path.
     """
     if (target or {}).get("mode") == "batch":
         return _claim_from_target_batch(
@@ -1952,6 +1971,7 @@ def _claim_one_denomination_voucher(db, *, target, pool_id: str, ledger_id, user
             ledger_id=ledger_id,
             user_id=user_id,
             now_utc=now_utc,
+            allow_expired_pinned=allow_expired_pinned,
         )
     voucher = _claim_legacy_voucher(
         db, pool_id=pool_id, ledger_id=ledger_id, user_id=user_id, now_utc=now_utc,
@@ -2381,6 +2401,14 @@ def _issue_denomination_bundle(db, *, ledger, recipe: dict, now_utc: datetime):
             for pool_id, still_needed in sorted(state["missing"].items()):
                 if lost_lease:
                     break
+                # Captured BEFORE resolve: tells apart a fresh/first-time
+                # resolution (normal batch time-window rules apply) from a
+                # retry continuing this ledger's already-pinned entitlement
+                # allocation for this pool (may claim past ends_at from that
+                # exact pinned batch — see _claim_from_target_batch).
+                already_pinned = (
+                    (working.get("pool_targets") or {}).get(pool_id) or {}
+                ).get("mode") in ("batch", "legacy")
                 target, reason = _resolve_denomination_pool_target(
                     db,
                     ledger=working,
@@ -2392,6 +2420,17 @@ def _issue_denomination_bundle(db, *, ledger, recipe: dict, now_utc: datetime):
                 if not target:
                     shortage_reasons[pool_id] = reason or "pool_empty"
                     continue
+                allow_expired_pinned = already_pinned and target.get("mode") == "batch"
+                if allow_expired_pinned:
+                    window_end = _as_aware_utc(target.get("window_end"))
+                    if window_end and now_utc >= window_end:
+                        logger.warning(
+                            "[AFFILIATE][BUNDLE_RETRY_EXPIRED_BATCH_ALLOWED] "
+                            "ledger_id=%s user_id=%s entitlement_month=%s pool_id=%s "
+                            "batch_id=%s allocation_generation=%s",
+                            ledger_id, user_id, entitlement_month, pool_id,
+                            target.get("batch_id"), token,
+                        )
                 for _ in range(int(still_needed)):
                     # Re-assert ownership BEFORE every claim: a worker that
                     # has been displaced must not consume one more code.
@@ -2405,6 +2444,7 @@ def _issue_denomination_bundle(db, *, ledger, recipe: dict, now_utc: datetime):
                         ledger_id=ledger_id,
                         user_id=user_id,
                         now_utc=now_utc,
+                        allow_expired_pinned=allow_expired_pinned,
                     )
                     if not voucher:
                         shortage_reasons[pool_id] = claim_reason or "pool_empty"
