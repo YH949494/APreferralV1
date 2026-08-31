@@ -145,7 +145,11 @@ def test_initdata_invalid_hash_logs_failure_reason(vouchers_module, monkeypatch,
     vouchers = importlib.reload(vouchers_module)
 
     payload = {"auth_date": str(int(time.time())), "user": json.dumps({"id": 42})}
-    init_data = build_init_data("123:ABC", payload)[:-1] + "0"
+    valid_init_data = build_init_data("123:ABC", payload)
+    # Flip the final hex digit of the hash so the signature is always wrong.
+    # Replacing it with a fixed "0" would be a no-op whenever the correct hash
+    # already ends in "0", making the test pass only ~15/16 of the time.
+    init_data = valid_init_data[:-1] + ("1" if valid_init_data[-1] == "0" else "0")
 
     with caplog.at_level(logging.WARNING):
         ok, _, _ = vouchers.verify_telegram_init_data(init_data)
