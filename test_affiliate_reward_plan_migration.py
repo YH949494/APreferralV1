@@ -592,10 +592,10 @@ class TestConcurrency:
         original = ar._claim_one_denomination_voucher
         state = {"done": False}
 
-        def claim_then_lose(db_, *, target, pool_id, ledger_id, user_id, now_utc):
+        def claim_then_lose(db_, *, target, pool_id, ledger_id, user_id, now_utc, allow_expired_pinned=False):
             voucher, reason = original(
                 db_, target=target, pool_id=pool_id, ledger_id=ledger_id,
-                user_id=user_id, now_utc=now_utc,
+                user_id=user_id, now_utc=now_utc, allow_expired_pinned=allow_expired_pinned,
             )
             if not state["done"]:
                 state["done"] = True
@@ -887,6 +887,198 @@ class TestShortageAndRecovery:
         again = {c["affiliate_tier"]: [v["code"] for v in c["vouchers"]]
                  for c in ar.affiliate_bundle_visible_cards(db, user_id=38)}
         assert first == again
+
+
+class TestExpiredPinnedBatchBundleRetry:
+    """P1 regression: a September denomination bundle that partially
+    allocated before month-end, and whose still-missing pool's batch has
+    since expired (crossed into October), must still be able to finish
+    claiming from that SAME pinned September batch on retry -- never from a
+    fresh/different batch, and never for a ledger that was never pinned to
+    that batch in the first place.
+    """
+
+    def _partially_allocate_t3(self, db, uid, *, at=SEP):
+        """T3 = $10 x1 + $50 x1. AFFILIATE_10 has stock; AFFILIATE_50's
+        batch exists (so its pool_target gets pinned) but its one code is
+        immediately consumed by someone else, so this ledger's own claim
+        finds it empty -- exactly the "reserved $10, $50 unavailable"
+        shape from the bug report."""
+        _stock_denomination_batch(db, "AFFILIATE_10", 5, "T")
+        _stock_denomination_batch(db, "AFFILIATE_50", 1, "H0")
+        placeholder = db.voucher_pools.find_one({"pool_id": "AFFILIATE_50", "status": "available"})
+        db.voucher_pools.update_one(
+            {"_id": placeholder["_id"]},
+            {"$set": {"status": "issued", "issued_to_user_id": 999999, "issued_for_ledger_id": "someone-else"}},
+        )
+        _qualify(db, uid, 50, at)
+        ar.evaluate_monthly_affiliate_reward(db, referrer_id=uid, now_utc=at)
+        t3 = db.affiliate_ledger.find_one({"user_id": uid, "tier": "T3"})
+        assert t3["status"] == "PENDING_MANUAL"
+        assert t3["allocated_code_count"] == 1
+        assert t3["missing_by_denomination"] == {"AFFILIATE_50": 1}
+        pinned = (t3.get("pool_targets") or {}).get("AFFILIATE_50") or {}
+        assert pinned.get("mode") == "batch", "the $50 pool must already be pinned even though empty"
+        return t3, pinned
+
+    def test_A1_expired_pinned_batch_retry_finalizes_bundle(self):
+        db = _db()
+        t3, pinned = self._partially_allocate_t3(db, 71)
+        held_ten = _linked_issued_rows(db, t3)
+        assert len(held_ten) == 1 and held_ten[0]["pool_id"] == "AFFILIATE_10"
+
+        # October 1 arrives; the pinned September AFFILIATE_50 batch's
+        # window has expired. Operator replenishes that SAME September
+        # batch (not a new October one) with a fresh $50 code.
+        db.voucher_pools.insert_one({
+            "pool_id": "AFFILIATE_50", "code": "H0-REPLENISH", "batch_id": pinned["batch_id"],
+            "batch_name": "AFFILIATE_50 202609", "status": "available",
+            "starts_at": pinned.get("window_start"), "ends_at": pinned.get("window_end"),
+            "voucher_value": 50, "distribution_disabled": False,
+        })
+
+        ar._retry_stuck_pending_manual_affiliate_ledgers(db, now_utc=OCT)
+
+        t3 = db.affiliate_ledger.find_one({"_id": t3["_id"]})
+        assert t3["status"] == "ISSUED"
+        assert t3["issued_code_count"] == 2
+        assert t3["issued_value"] == 60
+        assert set(_codes_of(t3)) == {held_ten[0]["code"], "H0-REPLENISH"}
+        assert _denominations_for(db, t3) == {"AFFILIATE_10": 1, "AFFILIATE_50": 1}
+        # No duplicate $10, no surplus stranded: exactly the recipe's rows
+        # are linked to this ledger.
+        linked = _linked_issued_rows(db, t3)
+        assert len(linked) == 2
+        assert not t3.get("missing_by_denomination")
+
+    def test_A2_new_october_ledger_never_claims_september_leftover_inventory(self):
+        db = _db()
+        # September inventory only -- no October batch for either pool.
+        _stock_denomination_batch(db, "AFFILIATE_10", 5, "T", month="202609")
+        _stock_denomination_batch(db, "AFFILIATE_50", 5, "H", month="202609")
+        _qualify(db, 72, 50, OCT)
+        ar.evaluate_monthly_affiliate_reward(db, referrer_id=72, now_utc=OCT)
+        t3 = db.affiliate_ledger.find_one({"user_id": 72, "tier": "T3"})
+        assert t3["status"] == "PENDING_MANUAL"
+        assert t3.get("allocated_code_count", 0) == 0
+        assert t3["missing_by_denomination"] == {"AFFILIATE_10": 1, "AFFILIATE_50": 1}
+        # It was never pinned to the September batch at all -- no batch
+        # exists for the October period, so resolution fails closed.
+        assert not (t3.get("pool_targets") or {})
+        assert _linked_issued_rows(db, t3) == []
+
+    def test_A3_retry_never_switches_to_a_different_september_batch(self):
+        db = _db()
+        t3, pinned = self._partially_allocate_t3(db, 73)
+
+        # A second, DIFFERENT batch document for the very same pool/period
+        # inserted directly (bypassing create_batch's overlap guard, which
+        # would never let two such batches coexist in production) purely to
+        # prove the retry path structurally cannot wander onto it -- it
+        # only ever claims from ledger.pool_targets["AFFILIATE_50"].batch_id.
+        rogue_id = db.affiliate_voucher_batches.insert_one({
+            "pool_id": "AFFILIATE_50", "batch_name": "rogue-september",
+            "starts_at": pinned.get("window_start"), "ends_at": pinned.get("window_end"),
+            "upload_status": "ready", "distribution_disabled": False,
+        }).inserted_id
+        db.voucher_pools.insert_one({
+            "pool_id": "AFFILIATE_50", "code": "ROGUE-1", "batch_id": rogue_id,
+            "status": "available", "starts_at": pinned.get("window_start"), "ends_at": pinned.get("window_end"),
+            "voucher_value": 50, "distribution_disabled": False,
+        })
+
+        ar._retry_stuck_pending_manual_affiliate_ledgers(db, now_utc=OCT)
+
+        t3 = db.affiliate_ledger.find_one({"_id": t3["_id"]})
+        assert t3["status"] == "PENDING_MANUAL", "the rogue batch must never be used"
+        assert t3["missing_by_denomination"] == {"AFFILIATE_50": 1}
+        rogue_row = db.voucher_pools.find_one({"code": "ROGUE-1"})
+        assert rogue_row["status"] == "available", "the rogue batch's stock must remain untouched"
+
+    def test_A4_disabled_pinned_batch_still_fails_closed_past_expiry(self):
+        db = _db()
+        t3, pinned = self._partially_allocate_t3(db, 74)
+        db.voucher_pools.insert_one({
+            "pool_id": "AFFILIATE_50", "code": "H0-DISABLED", "batch_id": pinned["batch_id"],
+            "status": "available", "starts_at": pinned.get("window_start"), "ends_at": pinned.get("window_end"),
+            "voucher_value": 50, "distribution_disabled": False,
+        })
+        db.affiliate_voucher_batches.update_one(
+            {"_id": pinned["batch_id"]}, {"$set": {"distribution_disabled": True}},
+        )
+
+        ar._retry_stuck_pending_manual_affiliate_ledgers(db, now_utc=OCT)
+
+        t3 = db.affiliate_ledger.find_one({"_id": t3["_id"]})
+        assert t3["status"] == "PENDING_MANUAL"
+        assert t3["missing_by_denomination"] == {"AFFILIATE_50": 1}
+        assert db.voucher_pools.find_one({"code": "H0-DISABLED"})["status"] == "available"
+
+    def test_A4_failed_upload_pinned_batch_still_fails_closed_past_expiry(self):
+        db = _db()
+        t3, pinned = self._partially_allocate_t3(db, 75)
+        db.voucher_pools.insert_one({
+            "pool_id": "AFFILIATE_50", "code": "H0-FAILED", "batch_id": pinned["batch_id"],
+            "status": "available", "starts_at": pinned.get("window_start"), "ends_at": pinned.get("window_end"),
+            "voucher_value": 50, "distribution_disabled": False,
+        })
+        db.affiliate_voucher_batches.update_one(
+            {"_id": pinned["batch_id"]}, {"$set": {"upload_status": "failed"}},
+        )
+
+        ar._retry_stuck_pending_manual_affiliate_ledgers(db, now_utc=OCT)
+
+        t3 = db.affiliate_ledger.find_one({"_id": t3["_id"]})
+        assert t3["status"] == "PENDING_MANUAL"
+        assert t3["missing_by_denomination"] == {"AFFILIATE_50": 1}
+
+    def test_A5_displaced_worker_cannot_exploit_expired_batch_exception(self):
+        db = _db()
+        _stock_all_denominations(db, month="202609")
+        _qualify(db, 76, 50, SEP)
+        ar.evaluate_monthly_affiliate_reward(db, referrer_id=76, now_utc=SEP)
+        t3 = db.affiliate_ledger.find_one({"user_id": 76, "tier": "T3"})
+        assert t3["status"] == "ISSUED"
+        recipe = ar._ledger_recipe(t3)
+        # Put the fully-issued bundle back into a claimable, nothing
+        # allocated yet state -- both pools' targets stay pinned on the
+        # ledger from the original issuance (see _resolve_denomination_pool_target),
+        # so a re-run past their batches' expiry exercises the exact bypass
+        # this fix adds.
+        _reset_to_settling(db, t3)
+
+        original = ar._claim_one_denomination_voucher
+        state = {"done": False}
+
+        def claim_then_lose(db_, *, target, pool_id, ledger_id, user_id, now_utc, allow_expired_pinned=False):
+            voucher, reason = original(
+                db_, target=target, pool_id=pool_id, ledger_id=ledger_id,
+                user_id=user_id, now_utc=now_utc, allow_expired_pinned=allow_expired_pinned,
+            )
+            if not state["done"]:
+                state["done"] = True
+                db_.affiliate_ledger.update_one(
+                    {"_id": ledger_id}, {"$inc": {"allocation_generation": 1}}
+                )
+            return voucher, reason
+
+        ar._claim_one_denomination_voucher = claim_then_lose
+        try:
+            ar._issue_denomination_bundle(
+                db, ledger=db.affiliate_ledger.find_one({"_id": t3["_id"]}),
+                recipe=recipe, now_utc=OCT,
+            )
+        finally:
+            ar._claim_one_denomination_voucher = original
+
+        led = db.affiliate_ledger.find_one({"_id": t3["_id"]})
+        assert led["status"] != "ISSUED", (
+            "a worker fenced out mid-allocation must not finalize, even past "
+            "the pinned batch's expiry"
+        )
+        assert len(_linked_issued_rows(db, t3)) <= recipe["expected_code_count"], (
+            "no surplus beyond the recipe may be left stranded"
+        )
 
 
 class TestMonetaryIntegrity:

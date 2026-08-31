@@ -1119,6 +1119,34 @@ def reconcile_batch(db, batch_id, *, admin_identity: str | None = None, now_utc:
 # Admin API
 # ---------------------------------------------------------------------------
 
+def _reject_missing_entitlement_month(pool_id: str, entitlement_month) -> dict | None:
+    """HTTP-layer guard: an entitlement-month pool (T1-T5 and the
+    denomination pools) must always be scheduled from a valid
+    ``entitlement_month``, never from client-supplied starts_at_local/
+    ends_at_local -- an admin-typed "2026-09-01 00:01" .. "2026-09-30
+    23:59" LOOKS like September but is not the canonical boundary
+    ``_find_batches_for_period``'s exact-containment check requires, and a
+    direct API client could send anything. WELCOME has no
+    entitlement-month concept and is exempt.
+
+    Deliberately enforced only at this HTTP boundary, not inside
+    ``create_batch``/``update_batch`` themselves: those lower-level
+    functions are also used by internal maintenance tooling (see
+    ``scripts/fix_affiliate_batch_month_boundaries.py``) and by the test
+    suite's own edge-case fixtures, which legitimately construct
+    non-canonical windows to exercise the claimability logic that must
+    defend against exactly this kind of misalignment. A real admin or
+    external API client only ever reaches this through the routes below.
+    """
+    if pool_id in ENTITLEMENT_MONTH_POOL_IDS and not entitlement_month:
+        return _fail(
+            "entitlement_month_required",
+            f"'{pool_id}' requires a valid entitlement_month ('YYYYMM'); "
+            "free-form start/end dates are not accepted for this pool.",
+        )
+    return None
+
+
 def _status_response(result: dict):
     if result.get("ok"):
         return jsonify(result), 200
@@ -1165,6 +1193,10 @@ def register_routes(require_admin_from_query, admin_identity_fn, db_ref):
             msg, code = err
             return jsonify({"ok": False, "code": "unauthorized", "message": msg}), code
         data = request.get_json(silent=True) or {}
+        pool_id = str(data.get("pool_id") or "").strip().upper()
+        rejection = _reject_missing_entitlement_month(pool_id, data.get("entitlement_month"))
+        if rejection:
+            return _status_response(rejection)
         result = create_batch(
             db_ref(),
             admin_identity=admin_identity_fn(),
@@ -1207,6 +1239,22 @@ def register_routes(require_admin_from_query, admin_identity_fn, db_ref):
                 db_ref(), batch_id, admin_identity=admin_identity_fn(), disabled=bool(data.get("distribution_disabled"))
             )
             return _status_response(result)
+        wants_date_change = (
+            "starts_at_local" in data or "ends_at_local" in data or "entitlement_month" in data
+        )
+        if wants_date_change and not data.get("entitlement_month"):
+            # Same HTTP-boundary guard as create: an entitlement-month
+            # pool's schedule must never be movable to a free-form window
+            # via a direct API client, even on an existing batch -- that
+            # would silently convert a canonical batch into an arbitrary
+            # one. Look the batch's own pool_id up rather than trusting
+            # anything client-supplied.
+            oid = _as_object_id(batch_id)
+            existing_batch = db_ref().affiliate_voucher_batches.find_one({"_id": oid}) if oid is not None else None
+            if existing_batch:
+                rejection = _reject_missing_entitlement_month(existing_batch.get("pool_id"), None)
+                if rejection:
+                    return _status_response(rejection)
         result = update_batch(db_ref(), batch_id, admin_identity=admin_identity_fn(), updates=data)
         return _status_response(result)
 
