@@ -438,6 +438,58 @@ def validate_mission_pool_config(raw: dict | None) -> tuple[dict | None, str | N
     }, None
 
 
+# Fields inside gc_campaigns.mission_pool that belong to the WORKER, not the
+# operator. Anything not listed here is operator configuration. Kept in one
+# place so "copy the config, reset the processing" is a single definition
+# rather than two lists that can drift apart.
+_WORKER_OWNED_MISSION_FIELDS = frozenset({
+    "processing_stage", "processing_generation", "processing_owner",
+    "processing_lease_expires_at", "processing_claimed_at",
+    "selection_seed", "selection_started_at", "selection_completed_at",
+    "qualified_count", "winner_count_requested", "winner_count_actual",
+    "allocation_count", "notification_sent_count", "failure_count",
+    "completed_at", "cancelled", "cancelled_at", "closed_at", "updated_at",
+})
+
+
+def fresh_mission_pool_processing_state() -> dict:
+    """The processing fields a brand-new (or newly duplicated) mission
+    campaign must start from."""
+    return {
+        "processing_stage": STAGE_PENDING,
+        "processing_generation": 0,
+        "processing_owner": None,
+        "processing_lease_expires_at": None,
+        "selection_seed": None,
+        "selection_started_at": None,
+        "selection_completed_at": None,
+        "qualified_count": None,
+        "winner_count_requested": None,
+        "winner_count_actual": None,
+        "allocation_count": None,
+        "notification_sent_count": None,
+        "completed_at": None,
+        "cancelled": False,
+        "cancelled_at": None,
+        "closed_at": None,
+    }
+
+
+def duplicated_mission_pool_config(existing: dict | None) -> dict:
+    """Operator configuration carried over to a duplicate, with ALL worker
+    state reset.
+
+    Copying the block wholesale would hand the new draft the source
+    campaign's ``processing_stage`` (``completed`` for a finished campaign),
+    its ``selection_seed`` and its ``processing_generation``. The duplicate
+    would then be skipped forever by ``find_due_campaigns`` and none of its
+    entries would ever be rewarded."""
+    config = {k: v for k, v in (existing or {}).items()
+              if k not in _WORKER_OWNED_MISSION_FIELDS}
+    config.update(fresh_mission_pool_processing_state())
+    return config
+
+
 def merge_mission_pool_config(existing: dict | None, validated: dict) -> dict:
     """Merge operator-settable fields into the stored block, preserving every
     worker-owned processing field. Prevents an admin PUT from resetting
@@ -477,6 +529,7 @@ REASON_ALREADY_REWARDED = "already_rewarded"
 REASON_MISSING_GAMING_ACCOUNT = "missing_gaming_account"
 REASON_INVALID_SUBMISSION = "invalid_submission"
 REASON_CAMPAIGN_CANCELLED = "campaign_cancelled"
+REASON_SUBMITTED_AFTER_CLOSE = "submitted_after_close"
 REASON_OUT_OF_STOCK = "out_of_stock"
 REASON_OTHER = "other"
 
@@ -491,6 +544,7 @@ DISQUALIFICATION_REASONS = (
     REASON_MISSING_GAMING_ACCOUNT,
     REASON_INVALID_SUBMISSION,
     REASON_CAMPAIGN_CANCELLED,
+    REASON_SUBMITTED_AFTER_CLOSE,
     REASON_OUT_OF_STOCK,
     REASON_OTHER,
 )
@@ -613,6 +667,19 @@ def submission_state(campaign: dict | None, now: datetime | None = None) -> tupl
     if ends_at and now >= ends_at:
         return False, "campaign_closed"
     return True, "open"
+
+
+def close_cutoff(campaign: dict | None) -> datetime | None:
+    """The instant after which a submission is no longer valid, whichever
+    came first: the scheduled ``ends_at`` or an early admin close
+    (``mission_pool.closed_at``). ``None`` when neither is known."""
+    campaign = campaign or {}
+    candidates = [
+        _as_utc((campaign.get("schedule") or {}).get("ends_at")),
+        _as_utc((campaign.get("mission_pool") or {}).get("closed_at")),
+    ]
+    candidates = [c for c in candidates if c is not None]
+    return min(candidates) if candidates else None
 
 
 def is_closed_for_processing(campaign: dict | None, now: datetime | None = None) -> bool:
@@ -789,9 +856,18 @@ def submit_mission(campaign_id: str):
               status="fail", reason=reason, source="miniapp")
         return jsonify({"status": "error", "code": reason}), 409
 
+    # This narrows the window but does not close it: an admin close landing
+    # between this read and the insert below still lets the row be written.
+    # Making it a hard cutoff would need a cross-collection transaction (this
+    # deployment cannot assume a replica set), so the guarantee is enforced
+    # where it actually matters instead — the processor disqualifies any entry
+    # whose server-stamped submitted_at is at or after the campaign's close
+    # cutoff (mission_pool_processor._eligibility_pass), so a late row can be
+    # inserted but can never be selected or rewarded.
     fresh = database.db["gc_campaigns"].find_one(
         {"campaign_id": campaign_id},
-        projection={"status": 1, "mechanic": 1, "schedule": 1, "mission_pool.cancelled": 1},
+        projection={"status": 1, "mechanic": 1, "schedule": 1,
+                    "mission_pool.cancelled": 1, "mission_pool.closed_at": 1},
     )
     now = datetime.now(timezone.utc)
     open_now, reason = submission_state(fresh, now)
@@ -877,9 +953,20 @@ def admin_close_mission(campaign_id: str):
     if err:
         return err
 
+    now = datetime.now(timezone.utc)
+    # closed_at is the authoritative cutoff instant for an early admin close
+    # (see mission_pool_processor._close_cutoff): a submission that slipped
+    # through the request-time check after this moment can still be inserted,
+    # but the processor disqualifies it rather than letting it win.
+    # $setOnInsert-like semantics: only stamp it the first time, so a repeated
+    # close never moves the cutoff later and re-admits entries.
+    database.db["gc_campaigns"].update_one(
+        {"campaign_id": campaign_id, "mission_pool.closed_at": None},
+        {"$set": {"mission_pool.closed_at": now}},
+    )
     database.db["gc_campaigns"].update_one(
         {"campaign_id": campaign_id},
-        {"$set": {"status": "ended", "updated_at": datetime.now(timezone.utc)}},
+        {"$set": {"status": "ended", "updated_at": now}},
     )
     _audit("mission_campaign_closed", admin, campaign_id)
     _emit("mission_campaign_closed", campaign_id=campaign_id, source="admin")

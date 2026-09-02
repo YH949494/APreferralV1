@@ -755,3 +755,121 @@ def test_batch_sizes_are_bounded_by_env_clamps(monkeypatch):
     assert mpp.eligibility_batch_size() == 1
     monkeypatch.setenv("MISSION_ELIGIBILITY_BATCH_SIZE", "not-a-number")
     assert mpp.eligibility_batch_size() == 200
+
+
+# ---------------------------------------------------------------------------
+# Codex review follow-ups
+# ---------------------------------------------------------------------------
+
+def test_entries_submitted_after_the_close_cutoff_are_disqualified(fake_db):
+    """The submission endpoint's state re-check is a read followed by an
+    insert, so a close landing in that window can still let a row be written.
+    The processor is where that is made harmless: submitted_at is stamped
+    server-side, so a late entry is disqualified and can never win."""
+    _seed_campaign(fake_db, winner_count=10)
+    _seed_pool(fake_db, 10)
+    campaign = fake_db["gc_campaigns"].find_one({"campaign_id": CAMPAIGN_ID})
+    ends_at = campaign["schedule"]["ends_at"]
+
+    _seed_user(fake_db, 3001)
+    _seed_user(fake_db, 3002)
+    in_time = _seed_entry(fake_db, 3001)
+    late = _seed_entry(fake_db, 3002)
+    fake_db[mp.ENTRIES_COLLECTION].update_one(
+        {"_id": in_time}, {"$set": {"submitted_at": ends_at - timedelta(seconds=1)}})
+    fake_db[mp.ENTRIES_COLLECTION].update_one(
+        {"_id": late}, {"$set": {"submitted_at": ends_at + timedelta(seconds=1)}})
+
+    with _no_telegram():
+        mpp.process_campaign(CAMPAIGN_ID)
+
+    assert fake_db[mp.ENTRIES_COLLECTION].find_one({"_id": in_time})["status"] == \
+        mp.ENTRY_STATUS_REWARD_ALLOCATED
+    late_doc = fake_db[mp.ENTRIES_COLLECTION].find_one({"_id": late})
+    assert late_doc["status"] == mp.ENTRY_STATUS_DISQUALIFIED
+    assert late_doc["disqualification_reason"] == mp.REASON_SUBMITTED_AFTER_CLOSE
+    assert fake_db["voucher_pools"].count_documents({"status": "issued"}) == 1
+
+
+def test_an_early_admin_close_moves_the_cutoff_earlier(fake_db):
+    """closed_at wins over a later scheduled ends_at."""
+    _seed_campaign(fake_db, winner_count=10)
+    _seed_pool(fake_db, 10)
+    campaign = fake_db["gc_campaigns"].find_one({"campaign_id": CAMPAIGN_ID})
+    ends_at = campaign["schedule"]["ends_at"]
+    closed_at = ends_at - timedelta(minutes=30)
+    fake_db["gc_campaigns"].update_one(
+        {"campaign_id": CAMPAIGN_ID}, {"$set": {"mission_pool.closed_at": closed_at}})
+
+    _seed_user(fake_db, 3101)
+    _seed_user(fake_db, 3102)
+    before = _seed_entry(fake_db, 3101)
+    after = _seed_entry(fake_db, 3102)
+    fake_db[mp.ENTRIES_COLLECTION].update_one(
+        {"_id": before}, {"$set": {"submitted_at": closed_at - timedelta(seconds=1)}})
+    # Inside the scheduled window, but after the admin closed it.
+    fake_db[mp.ENTRIES_COLLECTION].update_one(
+        {"_id": after}, {"$set": {"submitted_at": closed_at + timedelta(seconds=1)}})
+
+    with _no_telegram():
+        mpp.process_campaign(CAMPAIGN_ID)
+
+    assert fake_db[mp.ENTRIES_COLLECTION].find_one({"_id": before})["status"] == \
+        mp.ENTRY_STATUS_REWARD_ALLOCATED
+    assert fake_db[mp.ENTRIES_COLLECTION].find_one({"_id": after})["disqualification_reason"] == \
+        mp.REASON_SUBMITTED_AFTER_CLOSE
+
+
+def test_close_cutoff_picks_the_earlier_of_ends_at_and_closed_at():
+    now = datetime.now(timezone.utc)
+    early, late = now - timedelta(hours=1), now
+    assert mp.close_cutoff({"schedule": {"ends_at": late},
+                            "mission_pool": {"closed_at": early}}) == early
+    assert mp.close_cutoff({"schedule": {"ends_at": early},
+                            "mission_pool": {"closed_at": late}}) == early
+    assert mp.close_cutoff({"schedule": {"ends_at": late}}) == late
+    assert mp.close_cutoff({}) is None
+
+
+def test_open_campaigns_cannot_starve_a_closed_one_out_of_the_tick(fake_db, monkeypatch):
+    """The closed predicate must live in the query, not in a Python filter
+    after the cursor limit. A live mission with no ends_at sorts FIRST in
+    Mongo (missing values order before dates ascending), so with the limit
+    applied first these would push the one due campaign out of every tick."""
+    now = datetime.now(timezone.utc)
+    for i in range(30):
+        fake_db["gc_campaigns"].insert_one({
+            "campaign_id": f"open{i}", "type": "mission_pool", "mechanic": "mission_pool",
+            "status": "live",
+            "schedule": {"starts_at": now - timedelta(hours=1), "ends_at": None},
+            "mission_pool": {"processing_stage": mp.STAGE_PENDING, "cancelled": False},
+        })
+    fake_db["gc_campaigns"].insert_one({
+        "campaign_id": "paused-one", "type": "mission_pool", "mechanic": "mission_pool",
+        "status": "paused",
+        "schedule": {"starts_at": now - timedelta(hours=3), "ends_at": now - timedelta(hours=2)},
+        "mission_pool": {"processing_stage": mp.STAGE_PENDING, "cancelled": False},
+    })
+    fake_db["gc_campaigns"].insert_one({
+        "campaign_id": "the-due-one", "type": "mission_pool", "mechanic": "mission_pool",
+        "status": "ended",
+        "schedule": {"starts_at": now - timedelta(hours=3), "ends_at": now - timedelta(hours=1)},
+        "mission_pool": {"processing_stage": mp.STAGE_PENDING, "cancelled": False},
+    })
+
+    monkeypatch.setenv("MISSION_POOL_PROCESSOR_MAX_CAMPAIGNS", "3")
+    due = mpp.find_due_campaigns(now)
+    assert "the-due-one" in due
+    assert "paused-one" not in due
+    assert not any(c.startswith("open") for c in due)
+
+
+def test_a_live_campaign_past_its_window_is_still_due(fake_db):
+    now = datetime.now(timezone.utc)
+    fake_db["gc_campaigns"].insert_one({
+        "campaign_id": "elapsed", "type": "mission_pool", "mechanic": "mission_pool",
+        "status": "live",
+        "schedule": {"starts_at": now - timedelta(hours=3), "ends_at": now - timedelta(minutes=1)},
+        "mission_pool": {"processing_stage": mp.STAGE_PENDING, "cancelled": False},
+    })
+    assert mpp.find_due_campaigns(now) == ["elapsed"]

@@ -444,6 +444,15 @@ def _eligibility_pass(fence: _Fence, campaign: dict, deadline: float) -> dict:
     batch = eligibility_batch_size()
     qualified = disqualified = 0
 
+    # Hard close cutoff. The submission endpoint re-checks campaign state
+    # immediately before its insert, but a read followed by an insert is not
+    # atomic across two collections, so an admin close (or the schedule
+    # elapsing) landing in that window can still let a row be written. This is
+    # where that is made harmless: submitted_at is stamped server-side, so any
+    # entry at or after the cutoff is disqualified here and can never be
+    # selected or rewarded, whatever the request path did.
+    cutoff = mp.close_cutoff(campaign)
+
     while True:
         if time.monotonic() > deadline:
             _log("eligibility_time_budget", campaign_id=campaign_id, qualified=qualified, disqualified=disqualified)
@@ -469,7 +478,13 @@ def _eligibility_pass(fence: _Fence, campaign: dict, deadline: float) -> dict:
             user_doc = users.get(uid)
             identity = resolve_identity(user_doc, uid)
 
-            reason = evaluate_quality_eligibility(entry, user_doc, policy)
+            submitted_at = entry.get("submitted_at")
+            if isinstance(submitted_at, datetime) and submitted_at.tzinfo is None:
+                submitted_at = submitted_at.replace(tzinfo=timezone.utc)
+            if cutoff is not None and submitted_at is not None and submitted_at >= cutoff:
+                reason = mp.REASON_SUBMITTED_AFTER_CLOSE
+            else:
+                reason = evaluate_quality_eligibility(entry, user_doc, policy)
             if reason is None:
                 ok, dup_reason = _claim_identity(campaign_id, entry["_id"], identity, now)
                 if not ok:
@@ -1164,8 +1179,18 @@ def process_campaign(campaign_id: str, *, source: str = "worker") -> dict:
 
 def find_due_campaigns(now: datetime | None = None, limit: int | None = None) -> list[str]:
     """Campaigns whose submissions have closed and whose processing has not
-    reached ``completed``. Indexed by ``ix_gc_campaigns_status`` /
-    ``ix_gc_campaigns_ends_at`` and bounded by ``limit``."""
+    reached ``completed``.
+
+    The "is it closed?" predicate lives in the QUERY, not in a Python filter
+    applied after the cursor limit. With the limit applied first, any set of
+    still-open missions sorting ahead of a closed one would push it out of
+    every tick forever — and a live mission with no ``ends_at`` sorts first of
+    all, since Mongo orders missing values before dates ascending. Filtering
+    server-side means the limit only ever truncates campaigns that are
+    genuinely due, so the oldest-closed campaign is always reachable.
+
+    Served by ``ix_gc_campaigns_status`` / ``ix_gc_campaigns_ends_at``.
+    """
     now = now or datetime.now(timezone.utc)
     limit = limit or max_campaigns_per_tick()
     docs = _campaigns().find(
@@ -1173,17 +1198,22 @@ def find_due_campaigns(now: datetime | None = None, limit: int | None = None) ->
             "mechanic": mp.MECHANIC_MISSION_POOL,
             "mission_pool.processing_stage": {"$ne": mp.STAGE_COMPLETED},
             "mission_pool.cancelled": {"$ne": True},
+            "$or": [
+                # Explicitly closed/archived by an admin.
+                {"status": {"$in": ["ended", "archived"]}},
+                # Still `live`, but the scheduled window has elapsed. `$lte`
+                # matches neither a missing nor a null ends_at, so an
+                # indefinite live campaign is excluded here rather than
+                # crowding the result set.
+                {"status": "live", "schedule.ends_at": {"$lte": now}},
+            ],
         },
         sort=[("schedule.ends_at", 1)],
-        limit=limit * 4,
+        limit=limit,
     )
-    out = []
-    for doc in docs:
-        if mp.is_closed_for_processing(doc, now):
-            out.append(doc["campaign_id"])
-        if len(out) >= limit:
-            break
-    return out
+    # is_closed_for_processing stays as defense in depth: it is the single
+    # source of truth for the rule, and re-checking it costs nothing.
+    return [doc["campaign_id"] for doc in docs if mp.is_closed_for_processing(doc, now)]
 
 
 def run_mission_pool_processor() -> dict:

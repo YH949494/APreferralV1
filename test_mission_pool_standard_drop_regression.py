@@ -382,3 +382,141 @@ def test_reserved_legacy_pool_ids_remain_refused():
     for pool_id in ("WELCOME", "T1", "T5"):
         with pytest.raises(vps.ReservedPoolIdError):
             vps.register_pool(pool_id, name="x")
+
+
+# ---------------------------------------------------------------------------
+# Codex review follow-ups
+# ---------------------------------------------------------------------------
+
+def _mission_body(campaign_id="m-dup", **overrides):
+    now = datetime.now(timezone.utc)
+    body = {
+        "campaign_id": campaign_id, "name": "Mission", "type": "mission_pool",
+        "schedule": {"starts_at": now.isoformat(),
+                     "ends_at": (now + timedelta(days=1)).isoformat()},
+        "mission_config": {"mission_type": "multiple_choice", "prompt": "Pick",
+                            "options": [{"id": "a"}, {"id": "b"}], "correct_answer": "a"},
+        "mission_pool": {"pool_id": "MP", "winner_count": 10},
+    }
+    body.update(overrides)
+    return body
+
+
+def test_duplicating_a_finished_mission_resets_all_processing_state(fake_db):
+    """Copying the mission_pool block verbatim would hand the new draft the
+    source campaign's processing_stage/seed/generation — after which
+    find_due_campaigns would skip it forever and none of its entries would
+    ever be rewarded."""
+    with _cc_app().test_client() as client, _admin():
+        assert client.post("/api/admin/gc-campaigns", json=_mission_body()).status_code == 201
+
+        # Simulate a campaign that has already run to completion.
+        fake_db["gc_campaigns"].update_one({"campaign_id": "m-dup"}, {"$set": {
+            "mission_pool.processing_stage": mp.STAGE_COMPLETED,
+            "mission_pool.processing_generation": 7,
+            "mission_pool.processing_owner": "worker-1",
+            "mission_pool.processing_lease_expires_at": datetime.now(timezone.utc),
+            "mission_pool.selection_seed": "deadbeef",
+            "mission_pool.qualified_count": 900,
+            "mission_pool.winner_count_actual": 300,
+            "mission_pool.cancelled": True,
+            "mission_pool.closed_at": datetime.now(timezone.utc),
+        }})
+
+        resp = client.post("/api/admin/gc-campaigns/m-dup/duplicate",
+                           json={"campaign_id": "m-dup-copy"})
+    assert resp.status_code == 201
+
+    copy = fake_db["gc_campaigns"].find_one({"campaign_id": "m-dup-copy"})["mission_pool"]
+    # Operator configuration is carried over...
+    assert copy["pool_id"] == "MP"
+    assert copy["winner_count"] == 10
+    assert copy["allocation_method"] == "random_qualified"
+    # ...and every worker-owned field is reset.
+    assert copy["processing_stage"] == mp.STAGE_PENDING
+    assert copy["processing_generation"] == 0
+    assert copy["processing_owner"] is None
+    assert copy["processing_lease_expires_at"] is None
+    assert copy["selection_seed"] is None
+    assert copy["qualified_count"] is None
+    assert copy["winner_count_actual"] is None
+    assert copy["cancelled"] is False
+    assert copy["closed_at"] is None
+    # The source campaign is untouched.
+    src = fake_db["gc_campaigns"].find_one({"campaign_id": "m-dup"})["mission_pool"]
+    assert src["processing_stage"] == mp.STAGE_COMPLETED
+    assert src["selection_seed"] == "deadbeef"
+
+
+def test_duplicating_a_tournament_campaign_is_unchanged(fake_db):
+    """The reset is scoped to mission campaigns; tournament duplication keeps
+    behaving exactly as before."""
+    fake_db["gc_providers"].insert_one({"provider_id": "p1", "active": True, "type": "tournament"})
+    now = datetime.now(timezone.utc)
+    with _cc_app().test_client() as client, _admin():
+        client.post("/api/admin/gc-campaigns", json={
+            "campaign_id": "t-dup", "name": "T", "type": "tournament",
+            "schedule": {"starts_at": now.isoformat()},
+            "destination": {"provider_id": "p1", "open_mode": "external_url", "ready": True},
+            "reward_config": {"rules": [{"rule_id": "r1", "condition_type": "participation",
+                                          "params": {}, "pool_id": "gold"}]},
+        })
+        resp = client.post("/api/admin/gc-campaigns/t-dup/duplicate",
+                           json={"campaign_id": "t-dup-copy"})
+    assert resp.status_code == 201
+    copy = fake_db["gc_campaigns"].find_one({"campaign_id": "t-dup-copy"})
+    assert copy["status"] == "draft"
+    assert copy["destination"]["ready"] is False
+    assert copy["reward_config"]["rules"][0]["rule_id"] == "r1"
+    assert "mission_pool" not in copy
+
+
+def test_mission_config_is_frozen_once_entries_exist(fake_db):
+    """Answers are graded at submission time and never regraded, so editing
+    the correct answer mid-campaign would grade identical answers differently
+    by arrival time."""
+    with _cc_app().test_client() as client, _admin():
+        client.post("/api/admin/gc-campaigns", json=_mission_body("m-freeze"))
+        fake_db[mp.ENTRIES_COLLECTION].insert_one({
+            "campaign_id": "m-freeze", "telegram_user_id": 1, "answer_normalized": "a",
+            "is_correct": True, "status": mp.ENTRY_STATUS_SUBMITTED,
+        })
+        changed = dict(_mission_body("m-freeze"))
+        changed["mission_config"] = {"mission_type": "multiple_choice", "prompt": "Pick",
+                                      "options": [{"id": "a"}, {"id": "b"}],
+                                      "correct_answer": "b"}
+        resp = client.put("/api/admin/gc-campaigns/m-freeze", json=changed)
+
+    assert resp.status_code == 409
+    assert resp.get_json()["code"] == "mission_config_locked"
+    stored = fake_db["gc_campaigns"].find_one({"campaign_id": "m-freeze"})
+    assert stored["mission_config"]["correct_answer"] == "a"
+
+
+def test_mission_config_edits_are_allowed_before_any_submission(fake_db):
+    with _cc_app().test_client() as client, _admin():
+        client.post("/api/admin/gc-campaigns", json=_mission_body("m-open"))
+        changed = dict(_mission_body("m-open"))
+        changed["mission_config"] = {"mission_type": "multiple_choice", "prompt": "Pick",
+                                      "options": [{"id": "a"}, {"id": "b"}],
+                                      "correct_answer": "b"}
+        resp = client.put("/api/admin/gc-campaigns/m-open", json=changed)
+    assert resp.status_code == 200
+    assert fake_db["gc_campaigns"].find_one(
+        {"campaign_id": "m-open"})["mission_config"]["correct_answer"] == "b"
+
+
+def test_unchanged_mission_config_resubmission_is_still_allowed(fake_db):
+    """Admin UIs routinely PUT the whole document back; an identical config
+    must not be treated as an edit."""
+    with _cc_app().test_client() as client, _admin():
+        client.post("/api/admin/gc-campaigns", json=_mission_body("m-noop"))
+        fake_db[mp.ENTRIES_COLLECTION].insert_one({
+            "campaign_id": "m-noop", "telegram_user_id": 1, "status": mp.ENTRY_STATUS_SUBMITTED,
+        })
+        body = dict(_mission_body("m-noop"))
+        body["mission_pool"] = {"pool_id": "MP", "winner_count": 25}
+        resp = client.put("/api/admin/gc-campaigns/m-noop", json=body)
+    assert resp.status_code == 200
+    assert fake_db["gc_campaigns"].find_one(
+        {"campaign_id": "m-noop"})["mission_pool"]["winner_count"] == 25

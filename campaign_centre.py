@@ -474,6 +474,23 @@ def update_campaign(campaign_id: str):
         return jsonify({"status": "error", "code": code}), 400
     updates.pop("_existing_type", None)
 
+    # Answers are graded at submission time (`is_correct` is stamped on the
+    # entry) and never regraded, so changing the mission definition after
+    # entries exist would let two identical answers get different eligibility
+    # outcomes purely by arrival time. Freeze the definition instead. An
+    # unchanged resubmission is allowed, because admin UIs routinely PUT the
+    # whole document back.
+    if "mission_config" in updates and updates["mission_config"] != doc.get("mission_config"):
+        submitted = database.db[mission_pool.ENTRIES_COLLECTION].count_documents(
+            {"campaign_id": campaign_id}
+        )
+        if submitted:
+            return jsonify({
+                "status": "error",
+                "code": "mission_config_locked",
+                "entries": submitted,
+            }), 409
+
     mission_pool_block = updates.pop("_mission_pool_validated", None)
     if mission_pool_block is not None:
         # merge_mission_pool_config preserves every worker-owned processing
@@ -584,6 +601,18 @@ def duplicate_campaign(campaign_id: str):
     dest = dict(new_doc.get("destination") or {})
     dest["ready"] = False
     new_doc["destination"] = dest
+
+    # ...nor any worker-owned Mission Pool processing state. Copying the block
+    # verbatim would give the new draft the source campaign's
+    # processing_stage (`completed` for a finished one), its selection_seed
+    # and its processing_generation — after which find_due_campaigns would
+    # skip it forever and none of its entries would ever be rewarded.
+    import mission_pool
+
+    if mission_pool.is_mission_pool(doc):
+        new_doc["mission_pool"] = mission_pool.duplicated_mission_pool_config(
+            doc.get("mission_pool")
+        )
 
     result = database.db["gc_campaigns"].insert_one(new_doc)
     _log_audit("campaign_duplicated", admin, new_campaign_id, {"source": campaign_id})
