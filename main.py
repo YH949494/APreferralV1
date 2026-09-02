@@ -108,7 +108,7 @@ import os, asyncio, traceback, csv, io, requests, logging, time, uuid, socket, s
 import httpx
 import pytz
 import json
-from database import init_db, db, safe_create_index
+from database import init_db, db, safe_create_index, _normalize_index_keys
 import settings_service
 from settings_service import get_settings as get_app_settings, get_setting as get_app_setting, update_settings as update_app_settings, list_schema as list_settings_schema, all_settings as get_all_app_settings
 
@@ -2471,8 +2471,30 @@ def ensure_indexes():
         name="uniq_weekly_history_week_start",
         unique=True,
     )
+    # safe_create_index can return an existing index purely by name match
+    # (see _find_equivalent_index_name / index_information() lookups), so
+    # confirm the index actually in effect has the right key pattern and
+    # unique=True before reporting success — otherwise duplicates can still
+    # slip in under a same-named-but-differently-shaped index.
+    _history_index_ok = False
     if _history_index_name:
+        try:
+            _history_index_info = history_collection.index_information().get(_history_index_name)
+        except Exception:
+            _history_index_info = None
+        _history_index_ok = bool(
+            _history_index_info
+            and _normalize_index_keys(_history_index_info.get("key") or {}) == (("week_start", ASCENDING),)
+            and bool(_history_index_info.get("unique"))
+        )
+    if _history_index_ok:
         logger.info("[WEEKLY_HISTORY][INDEX][OK] name=%s", _history_index_name)
+    elif _history_index_name:
+        logger.warning(
+            "[WEEKLY_HISTORY][INDEX][FAILED] name=%s reason=existing_index_wrong_shape info=%s",
+            _history_index_name,
+            _history_index_info,
+        )
     else:
         logger.warning(
             "[WEEKLY_HISTORY][INDEX][FAILED] name=uniq_weekly_history_week_start "

@@ -111,8 +111,11 @@ def _reason_keeper_selected(keeper: dict[str, Any], runner_up: dict[str, Any] | 
 
 
 def find_duplicate_groups(collection) -> list[dict[str, Any]]:
+    # Deliberately no $match excluding null/missing week_start: a non-sparse
+    # unique index treats "missing" and "null" as the same key, so two or
+    # more documents with no week_start at all would still collide and block
+    # index creation just like a real duplicate date would.
     pipeline = [
-        {"$match": {"week_start": {"$exists": True, "$ne": None}}},
         {"$group": {"_id": "$week_start", "count": {"$sum": 1}, "doc_ids": {"$push": "$_id"}}},
         {"$match": {"count": {"$gt": 1}}},
     ]

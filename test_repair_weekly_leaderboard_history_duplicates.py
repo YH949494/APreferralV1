@@ -15,12 +15,10 @@ class _FakeCollection:
         self.docs = list(docs)
 
     def aggregate(self, pipeline, allowDiskUse=False):
-        counts: dict[str, int] = {}
-        ids: dict[str, list] = {}
+        counts: dict = {}
+        ids: dict = {}
         for doc in self.docs:
-            ws = doc.get("week_start")
-            if ws is None:
-                continue
+            ws = doc.get("week_start")  # missing and explicit None group together
             counts[ws] = counts.get(ws, 0) + 1
             ids.setdefault(ws, []).append(doc["_id"])
         for ws, count in counts.items():
@@ -104,3 +102,23 @@ def test_repair_is_idempotent_across_two_runs():
     assert plan_repair(col) == []
     assert len(col.docs) == 1
     assert col.docs[0]["_id"] == newer["_id"]
+
+
+def test_null_and_missing_week_start_are_treated_as_one_duplicate_group():
+    # A non-sparse unique index treats a missing field and an explicit null
+    # as the same key, so these two documents would collide just as much as
+    # a real duplicate week_start would.
+    explicit_null = _doc(week_start=None)
+    missing = _doc()
+    del missing["week_start"]
+    col = _FakeCollection([explicit_null, missing])
+
+    plans = plan_repair(col)
+    assert len(plans) == 1
+    assert plans[0]["week_start"] is None
+    assert plans[0]["document_count"] == 2
+    assert set(plans[0]["delete_ids"]) == {explicit_null["_id"], missing["_id"]} - {plans[0]["keeper_id"]}
+
+    col.delete_many({"_id": {"$in": plans[0]["delete_ids"]}})
+    assert plan_repair(col) == []
+    assert len(col.docs) == 1
