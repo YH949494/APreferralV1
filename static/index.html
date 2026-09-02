@@ -1889,7 +1889,15 @@
             <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:flex-end;">
               <label style="font-size:12px; color:#555; min-width:120px;">Pool
                 <select id="aff_pool_id" style="width:100%; padding:8px; border-radius:6px; border:1px solid #ccc;">
-                  <option>WELCOME</option><option>T1</option><option>T2</option><option>T3</option><option>T4</option><option>T5</option>
+                  <option value="T1">T1 — Legacy tier pool (Aug 2026 and earlier)</option>
+                  <option value="T2">T2 — Legacy tier pool (Aug 2026 and earlier)</option>
+                  <option value="T3">T3 — Legacy tier pool (Aug 2026 and earlier)</option>
+                  <option value="T4">T4 — Legacy tier pool (Aug 2026 and earlier)</option>
+                  <option value="T5">T5 — Legacy tier pool (Aug 2026 and earlier)</option>
+                  <option value="AFFILIATE_5">Affiliate $5 — shared denomination pool (Sep 2026 onward)</option>
+                  <option value="AFFILIATE_10">Affiliate $10 — shared denomination pool (Sep 2026 onward)</option>
+                  <option value="AFFILIATE_50">Affiliate $50 — shared denomination pool (Sep 2026 onward)</option>
+                  <option value="WELCOME">WELCOME — New User Voucher</option>
                 </select>
               </label>
               <input id="aff_display_label" type="text" placeholder="Display label (optional)" style="flex:1 1 170px; padding:8px; border-radius:6px; border:1px solid #ccc;">
@@ -7408,7 +7416,9 @@ ${referral}`;
     }
 
 
-    const ALLOWED_AFFILIATE_POOLS = ["WELCOME", "T1", "T2", "T3", "T4", "T5"];
+    // Mirrors affiliate_reward_plans.ADMIN_AFFILIATE_POOL_IDS exactly; guarded
+    // against drift by test_affiliate_pool_catalogue.py.
+    const ALLOWED_AFFILIATE_POOLS = ["T1", "T2", "T3", "T4", "T5", "AFFILIATE_5", "AFFILIATE_10", "AFFILIATE_50", "WELCOME"];
 
     async function affUploadPool() {
       const selectedPoolId = String(document.getElementById("aff_pool_id").value || "").trim().toUpperCase();

@@ -176,7 +176,7 @@ class FakeCollection:
         results = self.find(query, sort=sort, limit=1)
         return results[0] if results else None
 
-    def find(self, query: dict | None = None, sort=None, limit=None, skip=None, projection=None):
+    def find(self, query: dict | None = None, sort=None, limit=None, skip=None, projection=None, hint=None):
         query = query or {}
         results = [deepcopy(d) for d in self._docs if _matches(d, query)]
         if sort:

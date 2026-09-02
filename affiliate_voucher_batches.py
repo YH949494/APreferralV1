@@ -30,22 +30,30 @@ from bson.errors import InvalidId
 from flask import Blueprint, jsonify, request
 
 from affiliate_rewards import _month_window_from_yyyymm as _entitlement_month_window_utc
+# `database` is already in this module's import graph (affiliate_rewards
+# imports it), so this is not a new cycle, and importing it has no side
+# effect: database.py opens no connection at import time.
+from database import _ensure_equivalent_index
+from affiliate_reward_plans import (
+    ADMIN_AFFILIATE_POOL_IDS,
+    ENTITLEMENT_MONTH_POOL_IDS as _CANONICAL_ENTITLEMENT_MONTH_POOL_IDS,
+    pool_denomination,
+)
 
 KL_TZ = pytz.timezone("Asia/Kuala_Lumpur")
 
-# T1-T4 and WELCOME are schedulable through this feature (matches the Admin
-# Dashboard pool dropdown). T5 keeps using plain, undated voucher_pools
-# uploads exactly as before.
-BATCH_POOL_IDS = ("T1", "T2", "T3", "T4", "WELCOME")
+# Schedulable pools and entitlement-month pools both come from the single
+# canonical catalogue in affiliate_reward_plans -- never restated here, so a
+# backend validator and an admin dropdown can no longer drift apart (which
+# is how T5 and the denomination pools ended up unuploadable).
+BATCH_POOL_IDS = ADMIN_AFFILIATE_POOL_IDS
 
-# Affiliate monthly-entitlement tiers: their claimability
-# (``affiliate_rewards._resolve_monthly_ledger_target`` /
-# ``get_claimable_pool_inventory``) requires a batch window that *fully
+# Affiliate pools whose claimability requires a batch window that *fully
 # contains* a KL calendar month, so their schedule must always be exactly
-# that canonical month window — never an admin-typed approximation (e.g.
+# that canonical month window -- never an admin-typed approximation (e.g.
 # "00:01"/"23:59"). WELCOME has no monthly-entitlement concept and keeps its
 # existing free-form start/end scheduling untouched.
-ENTITLEMENT_MONTH_POOL_IDS = ("T1", "T2", "T3", "T4")
+ENTITLEMENT_MONTH_POOL_IDS = _CANONICAL_ENTITLEMENT_MONTH_POOL_IDS
 
 logger = logging.getLogger(__name__)
 
@@ -367,18 +375,67 @@ def _as_object_id(batch_id) -> ObjectId | None:
 # Indexes
 # ---------------------------------------------------------------------------
 
+#: The canonical ``affiliate_voucher_batches`` catalogue: the key pattern
+#: each query needs, and the name a FRESH database should end up with.
+#:
+#: A name here is an intention, not a guarantee. On a database that already
+#: carries an equivalent index under some other name — a production catalogue
+#: predating this module, or one left behind by an intermediate migration
+#: commit — the existing index is REUSED under its own name and no second
+#: index is created. Only an empty database ends up with exactly these names.
+AFFILIATE_VOUCHER_BATCH_INDEXES = (
+    # Batch resolution / claimability: _find_batches_for_period,
+    # _find_active_batch, _tier_entered_scheduled_mode. The pool_id-only
+    # lookup rides this index's leading prefix, so it needs no index of
+    # its own.
+    ([("pool_id", 1), ("starts_at", 1), ("ends_at", 1)], "batch_pool_window"),
+    # Expiry scans.
+    ([("ends_at", 1)], "batch_ends_at"),
+    # Operator "distribution paused" filter.
+    ([("distribution_disabled", 1)], "batch_distribution_disabled"),
+)
+
+
 def ensure_affiliate_voucher_batch_indexes(db):
-    db.affiliate_voucher_batches.create_index(
-        [("pool_id", 1), ("starts_at", 1), ("ends_at", 1)], name="batch_pool_window"
-    )
-    db.affiliate_voucher_batches.create_index([("ends_at", 1)], name="batch_ends_at")
-    db.affiliate_voucher_batches.create_index(
-        [("distribution_disabled", 1)], name="batch_distribution_disabled"
-    )
-    # voucher_pools (pool_id, status, starts_at, ends_at) and (batch_id,
-    # status) are created in affiliate_rewards.ensure_affiliate_indexes
-    # alongside the pre-existing uniq_pool_code/pool_status indexes so all
-    # voucher_pools index management stays in one place.
+    """Bring ``affiliate_voucher_batches`` up to the catalogue above.
+
+    Every creation goes through ``database._ensure_equivalent_index`` rather
+    than a raw ``create_index``. That matters because this collection is
+    reachable in several partially-migrated states, and a raw create is not
+    safe in any of them:
+
+      * An intermediate commit of this migration created
+        ``aff_batch_pool_window`` over ``(pool_id, starts_at, ends_at)`` —
+        the exact key pattern of ``batch_pool_window``. A database that ran
+        that commit still carries the extra name. Asking MongoDB for a
+        SECOND name over an already-indexed key pattern fails with
+        ``IndexOptionsConflict`` (code 85), and because this runs at startup
+        the process dies before serving anything.
+      * The same commit created ``aff_batch_pool`` over ``(pool_id,)``.
+
+    The helper resolves this by matching on the KEY PATTERN rather than the
+    name: an equivalent index already present is adopted whatever it is
+    called, so a stale name satisfies the requirement instead of colliding
+    with it. It never drops and never renames — a leftover index is dead
+    weight, not a correctness problem, and removing one is a deliberate
+    operator decision rather than a side effect of a deploy. An index whose
+    key pattern matches but whose OPTIONS differ (uniqueness, partial filter,
+    collation) is a real conflict the helper raises on, because silently
+    adopting it would mean running against an index that does not do what
+    this code believes it does.
+
+    Idempotent: re-running against a database already in the target state
+    creates nothing and drops nothing.
+
+    voucher_pools ``(pool_id, status, starts_at, ends_at)`` and
+    ``(batch_id, status)`` are created in
+    ``affiliate_rewards.ensure_affiliate_indexes`` alongside the pre-existing
+    uniq_pool_code/pool_status indexes, so all voucher_pools index management
+    stays in one place.
+    """
+    collection = db.affiliate_voucher_batches
+    for keys, name in AFFILIATE_VOUCHER_BATCH_INDEXES:
+        _ensure_equivalent_index(collection, keys, name=name)
 
 
 # ---------------------------------------------------------------------------
@@ -409,7 +466,11 @@ def create_batch(
     )
 
     if pool_id not in BATCH_POOL_IDS:
-        return _fail("invalid_pool_id", f"'{pool_id}' is not a schedulable voucher pool (T1-T4 or WELCOME only).")
+        return _fail(
+            "invalid_pool_id",
+            f"'{pool_id}' is not a schedulable voucher pool "
+            f"(expected one of: {', '.join(BATCH_POOL_IDS)}).",
+        )
     if not batch_name:
         return _fail("invalid_batch_name", "Batch name is required.")
 
@@ -487,6 +548,7 @@ def create_batch(
         admin_identity, batch_id, pool_id, submitted,
     )
 
+    denomination = pool_denomination(pool_id)
     inserted = 0
     duplicate_in_db = 0
     for code in unique_codes:
@@ -501,6 +563,13 @@ def create_batch(
             "created_at": now_utc,
             "distribution_disabled": False,
         }
+        # Denomination pools carry their value on every physical row, so a
+        # code stays independently identifiable (and priceable) no matter
+        # which tier's bundle later consumes it. Per-tier legacy pools are
+        # left exactly as before: their value is a property of the tier,
+        # read from the legacy plan, never from the row.
+        if denomination is not None:
+            row["voucher_value"] = denomination
         try:
             db.voucher_pools.insert_one(row)
             inserted += 1
@@ -672,6 +741,7 @@ def add_codes_to_batch(db, batch_id, *, admin_identity: str, codes, now_utc: dat
         admin_identity, oid, pool_id, submitted,
     )
 
+    denomination = pool_denomination(pool_id)
     inserted = 0
     duplicate_in_db = 0
     for code in unique_codes:
@@ -686,6 +756,8 @@ def add_codes_to_batch(db, batch_id, *, admin_identity: str, codes, now_utc: dat
             "created_at": now_utc,
             "distribution_disabled": False,
         }
+        if denomination is not None:
+            row["voucher_value"] = denomination
         try:
             db.voucher_pools.insert_one(row)
             inserted += 1
@@ -1047,6 +1119,34 @@ def reconcile_batch(db, batch_id, *, admin_identity: str | None = None, now_utc:
 # Admin API
 # ---------------------------------------------------------------------------
 
+def _reject_missing_entitlement_month(pool_id: str, entitlement_month) -> dict | None:
+    """HTTP-layer guard: an entitlement-month pool (T1-T5 and the
+    denomination pools) must always be scheduled from a valid
+    ``entitlement_month``, never from client-supplied starts_at_local/
+    ends_at_local -- an admin-typed "2026-09-01 00:01" .. "2026-09-30
+    23:59" LOOKS like September but is not the canonical boundary
+    ``_find_batches_for_period``'s exact-containment check requires, and a
+    direct API client could send anything. WELCOME has no
+    entitlement-month concept and is exempt.
+
+    Deliberately enforced only at this HTTP boundary, not inside
+    ``create_batch``/``update_batch`` themselves: those lower-level
+    functions are also used by internal maintenance tooling (see
+    ``scripts/fix_affiliate_batch_month_boundaries.py``) and by the test
+    suite's own edge-case fixtures, which legitimately construct
+    non-canonical windows to exercise the claimability logic that must
+    defend against exactly this kind of misalignment. A real admin or
+    external API client only ever reaches this through the routes below.
+    """
+    if pool_id in ENTITLEMENT_MONTH_POOL_IDS and not entitlement_month:
+        return _fail(
+            "entitlement_month_required",
+            f"'{pool_id}' requires a valid entitlement_month ('YYYYMM'); "
+            "free-form start/end dates are not accepted for this pool.",
+        )
+    return None
+
+
 def _status_response(result: dict):
     if result.get("ok"):
         return jsonify(result), 200
@@ -1093,6 +1193,10 @@ def register_routes(require_admin_from_query, admin_identity_fn, db_ref):
             msg, code = err
             return jsonify({"ok": False, "code": "unauthorized", "message": msg}), code
         data = request.get_json(silent=True) or {}
+        pool_id = str(data.get("pool_id") or "").strip().upper()
+        rejection = _reject_missing_entitlement_month(pool_id, data.get("entitlement_month"))
+        if rejection:
+            return _status_response(rejection)
         result = create_batch(
             db_ref(),
             admin_identity=admin_identity_fn(),
@@ -1135,6 +1239,22 @@ def register_routes(require_admin_from_query, admin_identity_fn, db_ref):
                 db_ref(), batch_id, admin_identity=admin_identity_fn(), disabled=bool(data.get("distribution_disabled"))
             )
             return _status_response(result)
+        wants_date_change = (
+            "starts_at_local" in data or "ends_at_local" in data or "entitlement_month" in data
+        )
+        if wants_date_change and not data.get("entitlement_month"):
+            # Same HTTP-boundary guard as create: an entitlement-month
+            # pool's schedule must never be movable to a free-form window
+            # via a direct API client, even on an existing batch -- that
+            # would silently convert a canonical batch into an arbitrary
+            # one. Look the batch's own pool_id up rather than trusting
+            # anything client-supplied.
+            oid = _as_object_id(batch_id)
+            existing_batch = db_ref().affiliate_voucher_batches.find_one({"_id": oid}) if oid is not None else None
+            if existing_batch:
+                rejection = _reject_missing_entitlement_month(existing_batch.get("pool_id"), None)
+                if rejection:
+                    return _status_response(rejection)
         result = update_batch(db_ref(), batch_id, admin_identity=admin_identity_fn(), updates=data)
         return _status_response(result)
 

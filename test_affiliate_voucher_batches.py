@@ -217,9 +217,37 @@ class TestBatchUpload:
 
     def test_invalid_pool_id_rejected(self):
         db = _db()
-        res = _create(db, pool_id="T5", codes=["A1"])
+        res = _create(db, pool_id="NOT_A_POOL", codes=["A1"])
         assert res["ok"] is False
         assert res["code"] == "invalid_pool_id"
+
+    def test_t5_pool_id_is_schedulable(self):
+        # T5 used to be the one tier that could not take a scheduled batch
+        # (BATCH_POOL_IDS omitted it), leaving T5 entitlements permanently
+        # dependent on undated legacy uploads.
+        db = _db()
+        res = _create(db, pool_id="T5", codes=["A1"])
+        assert res["ok"] is True
+        assert db.voucher_pools.count_documents({"pool_id": "T5"}) == 1
+
+    def test_denomination_pool_rows_carry_voucher_value(self):
+        # Denomination-pool rows must be independently priceable: one pool
+        # serves several tiers, so the value cannot be inferred from a tier.
+        db = _db()
+        res = _create(db, pool_id="AFFILIATE_10", codes=["D1", "D2"])
+        assert res["ok"] is True
+        rows = list(db.voucher_pools.find({"pool_id": "AFFILIATE_10"}))
+        assert len(rows) == 2
+        assert all(r["voucher_value"] == 10 for r in rows)
+
+    def test_legacy_tier_pool_rows_have_no_voucher_value(self):
+        # Per-tier legacy pools are untouched: their value stays a property
+        # of the tier (read from the legacy plan), never stamped on the row.
+        db = _db()
+        res = _create(db, pool_id="T1", codes=["L1"])
+        assert res["ok"] is True
+        row = db.voucher_pools.find_one({"pool_id": "T1"})
+        assert "voucher_value" not in row
 
     def test_end_before_start_rejected(self):
         db = _db()
@@ -390,8 +418,7 @@ class TestAdminHttpLayer:
             json={
                 "batch_name": "Affiliate August 2026 - T1",
                 "pool_id": "T1",
-                "starts_at_local": "2026-08-01 00:00:00",
-                "ends_at_local": "2026-09-01 00:00:00",
+                "entitlement_month": "202608",
                 "timezone": "Asia/Kuala_Lumpur",
                 "codes": ["ABC123", "ABC124"],
                 "notes": "",
@@ -418,8 +445,7 @@ class TestAdminHttpLayer:
             json={
                 "batch_name": "Overlap",
                 "pool_id": "T1",
-                "starts_at_local": "2026-08-15 00:00:00",
-                "ends_at_local": "2026-09-15 00:00:00",
+                "entitlement_month": "202608",
                 "codes": ["X1"],
             },
         )
@@ -1047,6 +1073,215 @@ class TestAddCodesButtonGating:
         assert 'addCodesBlockReason' in src
         assert 'disabled title="' in src
         assert 'data-ab-addcodes=' in src
+
+
+class TestEntitlementMonthApiEnforcement:
+    """P2 regression: the HTTP admin API must fail closed against a direct
+    API client trying to schedule an entitlement-month pool (T1-T5,
+    AFFILIATE_5/10/50) from client-supplied starts_at_local/ends_at_local
+    instead of a canonical entitlement_month -- even a window that LOOKS
+    like the right month (e.g. "2026-09-01 00:01" .. "2026-09-30 23:59")
+    is not the exact canonical boundary the claim path's full-containment
+    check requires.
+
+    Enforced at this HTTP boundary rather than inside create_batch/
+    update_batch themselves, which stay available to internal maintenance
+    tooling (scripts/fix_affiliate_batch_month_boundaries.py) and to this
+    test suite's own edge-case fixtures that deliberately construct
+    non-canonical windows to exercise the claimability logic.
+    """
+
+    def test_create_missing_entitlement_month_rejected(self):
+        db = _db()
+        app = _app_with_auth(db)
+        client = app.test_client()
+        resp = client.post(
+            "/api/admin/affiliate-voucher-batches",
+            json={
+                "batch_name": "Suspicious September",
+                "pool_id": "T2",
+                "starts_at_local": "2026-09-01 00:01:00",
+                "ends_at_local": "2026-09-30 23:59:00",
+                "codes": ["X1"],
+            },
+        )
+        assert resp.status_code == 400
+        body = resp.get_json()
+        assert body["ok"] is False
+        assert body["code"] == "entitlement_month_required"
+        # Nothing was created.
+        assert db.affiliate_voucher_batches.count_documents({}) == 0
+
+    def test_create_missing_entitlement_month_rejected_for_denomination_pool(self):
+        db = _db()
+        app = _app_with_auth(db)
+        client = app.test_client()
+        resp = client.post(
+            "/api/admin/affiliate-voucher-batches",
+            json={
+                "batch_name": "Suspicious September",
+                "pool_id": "AFFILIATE_10",
+                "starts_at_local": "2026-09-01 00:01:00",
+                "ends_at_local": "2026-09-30 23:59:00",
+                "codes": ["X1"],
+            },
+        )
+        assert resp.status_code == 400
+        assert resp.get_json()["code"] == "entitlement_month_required"
+        assert db.affiliate_voucher_batches.count_documents({}) == 0
+
+    def test_create_malformed_entitlement_month_rejected(self):
+        db = _db()
+        app = _app_with_auth(db)
+        client = app.test_client()
+        resp = client.post(
+            "/api/admin/affiliate-voucher-batches",
+            json={
+                "batch_name": "Bad Month",
+                "pool_id": "T2",
+                "entitlement_month": "not-a-month",
+                "codes": ["X1"],
+            },
+        )
+        assert resp.status_code == 400
+        assert resp.get_json()["code"] == "invalid_entitlement_month"
+        assert db.affiliate_voucher_batches.count_documents({}) == 0
+
+    def test_create_valid_entitlement_month_derives_canonical_boundaries(self):
+        db = _db()
+        app = _app_with_auth(db)
+        client = app.test_client()
+        resp = client.post(
+            "/api/admin/affiliate-voucher-batches",
+            json={
+                "batch_name": "September T2",
+                "pool_id": "T2",
+                "entitlement_month": "202609",
+                "codes": ["X1"],
+            },
+        )
+        assert resp.status_code == 200
+        batch = resp.get_json()["batch"]
+        assert batch["starts_at_kl"].startswith("2026-09-01T00:00:00")
+        assert batch["ends_at_kl"].startswith("2026-10-01T00:00:00")
+        # Canonical UTC boundaries (KL = UTC+8), matching
+        # affiliate_rewards._month_window_from_yyyymm exactly.
+        assert batch["starts_at_utc"].startswith("2026-08-31T16:00:00")
+        assert batch["ends_at_utc"].startswith("2026-09-30T16:00:00")
+
+    def test_create_arbitrary_dates_alongside_valid_entitlement_month_are_ignored(self):
+        db = _db()
+        app = _app_with_auth(db)
+        client = app.test_client()
+        resp = client.post(
+            "/api/admin/affiliate-voucher-batches",
+            json={
+                "batch_name": "September T2",
+                "pool_id": "T2",
+                "entitlement_month": "202609",
+                # Deliberately wrong/noncanonical -- must be entirely
+                # ignored in favour of the canonical month boundary.
+                "starts_at_local": "2026-09-01 00:01:00",
+                "ends_at_local": "2026-09-30 23:59:00",
+                "codes": ["X1"],
+            },
+        )
+        assert resp.status_code == 200
+        batch = resp.get_json()["batch"]
+        assert batch["starts_at_kl"].startswith("2026-09-01T00:00:00")
+        assert batch["ends_at_kl"].startswith("2026-10-01T00:00:00")
+
+    def test_welcome_still_supports_free_form_dates(self):
+        db = _db()
+        app = _app_with_auth(db)
+        client = app.test_client()
+        resp = client.post(
+            "/api/admin/affiliate-voucher-batches",
+            json={
+                "batch_name": "Welcome Free Form",
+                "pool_id": "WELCOME",
+                "starts_at_local": "2026-09-01 00:01:00",
+                "ends_at_local": "2026-09-30 23:59:00",
+                "codes": ["W1"],
+            },
+        )
+        assert resp.status_code == 200
+        assert resp.get_json()["ok"] is True
+
+    def test_update_cannot_convert_canonical_batch_to_free_form(self):
+        db = _db()
+        app = _app_with_auth(db)
+        client = app.test_client()
+        create_resp = client.post(
+            "/api/admin/affiliate-voucher-batches",
+            json={
+                "batch_name": "September T2",
+                "pool_id": "T2",
+                "entitlement_month": "202609",
+                "codes": ["X1"],
+            },
+        )
+        batch_id = create_resp.get_json()["batch"]["batch_id"]
+        original = avb.get_batch_detail(db, batch_id)
+
+        resp = client.patch(
+            f"/api/admin/affiliate-voucher-batches/{batch_id}",
+            json={
+                "starts_at_local": "2026-09-01 00:01:00",
+                "ends_at_local": "2026-09-30 23:59:00",
+            },
+        )
+        assert resp.status_code == 400
+        assert resp.get_json()["code"] == "entitlement_month_required"
+        # The batch's schedule is entirely untouched.
+        after = avb.get_batch_detail(db, batch_id)
+        assert after["starts_at_utc"] == original["starts_at_utc"]
+        assert after["ends_at_utc"] == original["ends_at_utc"]
+
+    def test_update_with_valid_entitlement_month_still_allowed(self):
+        db = _db()
+        app = _app_with_auth(db)
+        client = app.test_client()
+        create_resp = client.post(
+            "/api/admin/affiliate-voucher-batches",
+            json={
+                "batch_name": "October T2",
+                "pool_id": "T2",
+                "entitlement_month": "202610",
+                "codes": ["X1"],
+            },
+        )
+        batch_id = create_resp.get_json()["batch"]["batch_id"]
+
+        resp = client.patch(
+            f"/api/admin/affiliate-voucher-batches/{batch_id}",
+            json={"entitlement_month": "202611"},
+        )
+        assert resp.status_code == 200
+        batch = resp.get_json()["batch"]
+        assert batch["starts_at_kl"].startswith("2026-11-01T00:00:00")
+        assert batch["ends_at_kl"].startswith("2026-12-01T00:00:00")
+
+    def test_update_notes_only_is_unaffected(self):
+        db = _db()
+        app = _app_with_auth(db)
+        client = app.test_client()
+        create_resp = client.post(
+            "/api/admin/affiliate-voucher-batches",
+            json={
+                "batch_name": "September T2",
+                "pool_id": "T2",
+                "entitlement_month": "202609",
+                "codes": ["X1"],
+            },
+        )
+        batch_id = create_resp.get_json()["batch"]["batch_id"]
+        resp = client.patch(
+            f"/api/admin/affiliate-voucher-batches/{batch_id}",
+            json={"notes": "just a note"},
+        )
+        assert resp.status_code == 200
+        assert resp.get_json()["batch"]["notes"] == "just a note"
 
 
 if __name__ == "__main__":
