@@ -2447,6 +2447,8 @@ def ensure_indexes():
     # values before attempting the unique index — a pre-existing duplicate
     # would otherwise make index creation fail every boot. safe_create_index
     # itself never raises on failure, so this is a diagnostic step only.
+    # Duplicates are removed out-of-band via
+    # scripts/repair_weekly_leaderboard_history_duplicates.py, never here.
     try:
         dup_weeks = list(
             history_collection.aggregate([
@@ -2455,20 +2457,27 @@ def ensure_indexes():
             ])
         )
         if dup_weeks:
-            print(
-                f"⚠️ weekly_leaderboard_history has {len(dup_weeks)} duplicate week_start value(s): "
-                f"{[d['_id'] for d in dup_weeks]} — uniq_weekly_history_week_start index will not be created "
-                "until these are manually deduplicated."
+            logger.warning(
+                "[WEEKLY_HISTORY][INDEX][FAILED] reason=duplicates_present weeks=%s "
+                "run: python -m scripts.repair_weekly_leaderboard_history_duplicates --commit",
+                [d["_id"] for d in dup_weeks],
             )
     except Exception as e:
         print("⚠️ weekly_leaderboard_history duplicate check failed:", e)
 
-    safe_create_index(
+    _history_index_name = safe_create_index(
         history_collection,
         [("week_start", ASCENDING)],
         name="uniq_weekly_history_week_start",
         unique=True,
     )
+    if _history_index_name:
+        logger.info("[WEEKLY_HISTORY][INDEX][OK] name=%s", _history_index_name)
+    else:
+        logger.warning(
+            "[WEEKLY_HISTORY][INDEX][FAILED] name=uniq_weekly_history_week_start "
+            "reason=create_failed (see [DB][INDEX] create_failed above for the Mongo error)"
+        )
 
 ensure_indexes()
 
