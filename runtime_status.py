@@ -184,6 +184,9 @@ SCHEDULER_JOBS: list[dict[str, Any]] = [
          interval_seconds=7 * 86400),
     dict(key="telegram_member_counts_refresh", label="Telegram Member Counts Refresh", cron="interval (env-configurable, default 60m)",
          settings_field="telegram_member_counts_refresh", lock_source=None, interval_seconds=3600),
+    dict(key="mission_pool_processor", label="Mission Reward Pool Processor", cron="interval (default 120s)",
+         settings_field="mission_pool_processor", flag_field="mission_pool",
+         lock_source=("scheduler_locks", "mission_pool_processor", "updatedAt"), interval_seconds=120),
 ]
 
 # Jobs identified in the audit as defined but never wired to any scheduler.

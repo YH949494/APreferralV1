@@ -1068,6 +1068,30 @@ def _record_welcome_run_stats(job_name: str, stats: dict, duration_s: float, now
         logger.exception("[WELCOME_RUNTIME] failed to append recentRuns job=%s", job_name)
 
 
+def mission_pool_processor_scheduled() -> None:
+    """Mission Reward Pool finalization tick.
+
+    Deliberately its OWN scheduler job with its OWN lock namespace rather
+    than another item appended to the already-heavy 5-minute tick (§28). The
+    processor it calls is bounded (max campaigns per tick), batched,
+    time-budgeted, resumable and fenced — see mission_pool_processor.py."""
+    acquired, lock_doc = acquire_scheduler_lock("mission_pool_processor", ttl_seconds=600)
+    if not acquired:
+        logger.info(
+            "[SCHEDULER][MISSION_POOL] lock_not_acquired owner=%s expires_in_s=%s",
+            (lock_doc or {}).get("owner"),
+            expires_in_seconds((lock_doc or {}).get("expireAt")),
+        )
+        return
+    try:
+        from mission_pool_processor import run_mission_pool_processor
+
+        summary = run_mission_pool_processor()
+        logger.info("[SCHEDULER][MISSION_POOL] done summary=%s", summary)
+    except Exception:
+        logger.exception("[SCHEDULER][MISSION_POOL] failed")
+
+
 def welcome_voucher_lifecycle_scheduled(**kwargs) -> None:
     acquired, _lock_doc = acquire_scheduler_lock("welcome_voucher_lifecycle", ttl_seconds=1800)
     if not acquired:
@@ -2686,6 +2710,13 @@ app.register_blueprint(tournament_rewards_bp)
 
 from campaign_rewards_api import campaign_rewards_bp
 app.register_blueprint(campaign_rewards_bp)
+
+# Mission Reward Pool — a second, isolated reward mechanic alongside the
+# Standard Voucher Drop. Its routes live in their own module/blueprints; no
+# Standard Drop route or handler is touched (see mission_pool.py).
+from mission_pool import mission_pool_admin_bp, mission_pool_bp
+app.register_blueprint(mission_pool_bp)
+app.register_blueprint(mission_pool_admin_bp)
 
 from event_banner import event_banner_admin_bp, event_banner_public_bp
 app.register_blueprint(event_banner_admin_bp)
@@ -9648,6 +9679,27 @@ def run_worker():
     )
     logger.info("[COMMUNITY_POSTS][SCHEDULER_REGISTERED] interval_seconds=20")
     logger.info("[COMMUNITY_WORKER][PUBLISHER_REGISTERED]")
+
+    # Mission Reward Pool finalization. Its own job id, its own Settings
+    # toggle, its own feature flag and its own scheduler lock namespace —
+    # nothing about it can slow down or wedge the shared 5-minute tick.
+    mission_pool_interval = int(
+        (get_app_setting("scheduler", "mission_pool_processor") or {}).get("interval_seconds")
+        or os.getenv("MISSION_POOL_PROCESSOR_INTERVAL_SECONDS", "120")
+    )
+    scheduler.add_job(
+        _guarded_job("mission_pool_processor", mission_pool_processor_scheduled,
+                     feature_flag="mission_pool"),
+        trigger="interval",
+        seconds=mission_pool_interval,
+        next_run_time=datetime.now(timezone.utc) + timedelta(seconds=45),
+        id="mission_pool_processor",
+        name="Mission Reward Pool Processor",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
+    logger.info("[MISSION_POOL][SCHEDULER_REGISTERED] interval_seconds=%s", mission_pool_interval)
 
     # subscription audit disabled — subscription_cache refreshed via claim + check-in events
     try:

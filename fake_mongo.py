@@ -98,8 +98,10 @@ def _apply_update(doc: dict, update: dict, *, is_insert: bool = False) -> dict:
         for key, value in deepcopy(update["$set"]).items():
             _set_dotted(new_doc, key, value)
     if "$inc" in update:
+        # Dotted-path aware, like real MongoDB: {"$inc": {"a.b": 1}} bumps the
+        # nested field (creating the path if needed), not a literal "a.b" key.
         for k, v in update["$inc"].items():
-            new_doc[k] = new_doc.get(k, 0) + v
+            _set_dotted(new_doc, k, (_get_dotted(new_doc, k) or 0) + v)
     if "$addToSet" in update:
         for key, value in deepcopy(update["$addToSet"]).items():
             existing = new_doc.get(key)
@@ -125,15 +127,20 @@ def _apply_update(doc: dict, update: dict, *, is_insert: bool = False) -> dict:
 
 
 class FakeCollection:
-    def __init__(self, unique_keys: list[tuple] | None = None):
+    def __init__(self, unique_keys: list | None = None):
         self._docs: list[dict] = []
         self._id_counter = itertools.count(1)
-        self._unique_keys = unique_keys or []
-        # Real MongoDB enforces a unique index atomically; guard the
-        # check-then-append below with a lock so multi-threaded tests that
-        # race two inserts of the same key against this fake get the same
-        # "exactly one wins" guarantee instead of a check-then-append race.
-        self._insert_lock = threading.Lock()
+        # Each entry is either a tuple of field names (unconditional unique
+        # index) or a ``(fields_tuple, partial_filter_dict)`` pair, mirroring
+        # MongoDB's ``partialFilterExpression`` — needed because a shared
+        # collection (e.g. ``campaign_rewards``) can carry a unique index
+        # that only applies to one category of row.
+        self._unique_keys = list(unique_keys or [])
+        # Real MongoDB applies a unique index and a find_one_and_update
+        # atomically. Guard every mutation with one reentrant lock so
+        # multi-threaded contention tests get the same "exactly one wins"
+        # guarantee instead of a check-then-append / read-then-write race.
+        self._insert_lock = threading.RLock()
 
     def _next_id(self):
         # A real bson.ObjectId (not a lookalike string) so routes that do
@@ -142,9 +149,17 @@ class FakeCollection:
         return ObjectId(format(next(self._id_counter), "024x"))
 
     def _check_unique(self, doc: dict, exclude=None):
-        for keyset in self._unique_keys:
+        for spec in self._unique_keys:
+            if isinstance(spec, tuple) and len(spec) == 2 and isinstance(spec[1], dict):
+                keyset, partial_filter = spec
+            else:
+                keyset, partial_filter = spec, None
+            if partial_filter is not None and not _matches(doc, partial_filter):
+                continue
             for existing in self._docs:
                 if existing is exclude:
+                    continue
+                if partial_filter is not None and not _matches(existing, partial_filter):
                     continue
                 if all(existing.get(k) == doc.get(k) for k in keyset):
                     raise DuplicateKeyError(f"duplicate key on {keyset}")
@@ -284,31 +299,33 @@ class FakeCollection:
         return type("Result", (), {"matched_count": matched, "modified_count": modified})()
 
     def update_one(self, query: dict, update: dict, upsert=False):
-        for i, doc in enumerate(self._docs):
-            if _matches(doc, query):
-                self._docs[i] = _apply_update(doc, update)
-                return type("Result", (), {"matched_count": 1, "modified_count": 1})()
-        if upsert:
-            base = {k: v for k, v in query.items() if not k.startswith("$")}
-            new_doc = _apply_update(base, update, is_insert=True)
-            new_doc.setdefault("_id", self._next_id())
-            self._docs.append(new_doc)
-            return type("Result", (), {"matched_count": 0, "modified_count": 0, "upserted_id": new_doc["_id"]})()
-        return type("Result", (), {"matched_count": 0, "modified_count": 0})()
+        with self._insert_lock:
+            for i, doc in enumerate(self._docs):
+                if _matches(doc, query):
+                    self._docs[i] = _apply_update(doc, update)
+                    return type("Result", (), {"matched_count": 1, "modified_count": 1})()
+            if upsert:
+                base = {k: v for k, v in query.items() if not k.startswith("$")}
+                new_doc = _apply_update(base, update, is_insert=True)
+                new_doc.setdefault("_id", self._next_id())
+                self._docs.append(new_doc)
+                return type("Result", (), {"matched_count": 0, "modified_count": 0, "upserted_id": new_doc["_id"]})()
+            return type("Result", (), {"matched_count": 0, "modified_count": 0})()
 
     def find_one_and_update(self, query: dict, update: dict, sort=None, return_document=None, **kwargs):
-        candidates = [d for d in self._docs if _matches(d, query)]
-        if sort:
-            for field, direction in reversed(sort):
-                candidates.sort(key=lambda d, f=field: _sort_key(d.get(f)),
-                                 reverse=(direction < 0))
-        if not candidates:
-            return None
-        target = candidates[0]
-        idx = self._docs.index(target)
-        before = deepcopy(target)
-        after = _apply_update(target, update)
-        self._docs[idx] = after
+        with self._insert_lock:
+            candidates = [d for d in self._docs if _matches(d, query)]
+            if sort:
+                for field, direction in reversed(sort):
+                    candidates.sort(key=lambda d, f=field: _sort_key(d.get(f)),
+                                     reverse=(direction < 0))
+            if not candidates:
+                return None
+            target = candidates[0]
+            idx = self._docs.index(target)
+            before = deepcopy(target)
+            after = _apply_update(target, update)
+            self._docs[idx] = after
         # ReturnDocument.AFTER == True-ish in pymongo's enum comparison used here;
         # tests always request AFTER semantics matching this codebase's usage.
         return deepcopy(after) if str(return_document).endswith("AFTER") or return_document else deepcopy(before)

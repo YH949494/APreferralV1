@@ -48,6 +48,13 @@ EVENT_TYPES = frozenset({
     "reward_pool_scope_rejected", "reward_pool_allocation_rejected",
     # Event banner (event_banner.py — image-only Mini App top banner)
     "event_banner_impression", "event_banner_click", "event_banner_image_error",
+    # Mission Reward Pool (mission_pool.py / mission_pool_processor.py)
+    "mission_submitted", "mission_submission_duplicate",
+    "mission_submission_rejected", "mission_submission_error",
+    "mission_entry_disqualified", "mission_notification_sent",
+    "mission_notification_failed", "mission_winner_popup_acknowledged",
+    "mission_campaign_closed", "mission_campaign_cancelled",
+    "mission_campaign_completed",
     # Platform Finder (post-voucher-claim "Find Where To Play" flow)
     "platform_finder_shown", "platform_finder_opened", "platform_search_copied",
     "platform_finder_help_clicked", "platform_search_google_clicked",
