@@ -124,8 +124,8 @@ def _validate_body(body: dict, *, partial: bool = False, existing: dict | None =
         updates["alt_text"] = (body.get("alt_text") or "").strip() or DEFAULT_ALT_TEXT
 
     if not partial or "starts_at" in body or "ends_at" in body:
-        starts_at = _parse_dt(body.get("starts_at")) if "starts_at" in body else (existing or {}).get("starts_at")
-        ends_at = _parse_dt(body.get("ends_at")) if "ends_at" in body else (existing or {}).get("ends_at")
+        starts_at = _parse_dt(body.get("starts_at")) if "starts_at" in body else _parse_dt((existing or {}).get("starts_at"))
+        ends_at = _parse_dt(body.get("ends_at")) if "ends_at" in body else _parse_dt((existing or {}).get("ends_at"))
         if not starts_at:
             return None, "missing_starts_at"
         if not ends_at:
@@ -183,8 +183,17 @@ def _serialize(doc: dict) -> dict:
     out["id"] = str(out.pop("_id"))
     out["effective_status"] = _effective_status(doc, datetime.now(timezone.utc))
     for k in ("starts_at", "ends_at", "created_at", "updated_at"):
-        if out.get(k):
-            out[k] = out[k].isoformat()
+        v = out.get(k)
+        if v:
+            # database.py's MongoClient isn't tz_aware, so a value just read
+            # back from Mongo comes back naive (UTC values, no tzinfo) — an
+            # offset-less isoformat() string would then parse as local time
+            # in the browser instead of UTC. Every timestamp in this
+            # collection is UTC by convention, so a naive one always means
+            # UTC.
+            if v.tzinfo is None:
+                v = v.replace(tzinfo=timezone.utc)
+            out[k] = v.isoformat()
     return out
 
 
@@ -295,8 +304,8 @@ def edit_event_banner_schedule(event_id: str):
 
     body = request.get_json(silent=True) or {}
 
-    starts_at = _parse_dt(body.get("starts_at")) if "starts_at" in body else doc.get("starts_at")
-    ends_at = _parse_dt(body.get("ends_at")) if "ends_at" in body else doc.get("ends_at")
+    starts_at = _parse_dt(body.get("starts_at")) if "starts_at" in body else _parse_dt(doc.get("starts_at"))
+    ends_at = _parse_dt(body.get("ends_at")) if "ends_at" in body else _parse_dt(doc.get("ends_at"))
     if not starts_at:
         return jsonify({"status": "error", "code": "missing_starts_at"}), 400
     if not ends_at:
@@ -312,7 +321,7 @@ def edit_event_banner_schedule(event_id: str):
     else:
         priority = doc.get("priority", 0)
 
-    if _effective_status(doc, datetime.now(timezone.utc)) == "live" and not body.get("confirm"):
+    if _effective_status(doc, datetime.now(timezone.utc)) == "live" and body.get("confirm") is not True:
         return jsonify({"status": "error", "code": "confirmation_required"}), 409
 
     previous_schedule = {

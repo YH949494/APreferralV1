@@ -502,6 +502,68 @@ def test_edit_schedule_writes_activity_log(fake_db):
     assert "at" in entry
 
 
+def test_edit_schedule_partial_update_against_naive_stored_datetime(fake_db):
+    """database.py's MongoClient isn't tz_aware, so a real Mongo read
+    returns naive datetimes (UTC values, no tzinfo). Simulate that here by
+    storing naive datetimes directly, then patching only one boundary —
+    the retained boundary must not raise TypeError comparing naive vs
+    tz-aware datetimes."""
+    now = datetime.now(timezone.utc)
+    doc = _banner_doc(
+        status="inactive",
+        starts_at=(now - timedelta(hours=1)).replace(tzinfo=None),
+        ends_at=(now + timedelta(hours=1)).replace(tzinfo=None),
+    )
+    fake_db["event_banners"].insert_one(doc)
+    new_ends = (now + timedelta(hours=5)).isoformat()
+    app = _app()
+    client = app.test_client()
+    with _mock_admin():
+        resp = client.patch(
+            "/api/admin/event-banners/weekend_tournament_202608/schedule",
+            json={"ends_at": new_ends},
+        )
+    assert resp.status_code == 200
+    body = resp.get_json()["banner"]
+    assert body["ends_at"] == new_ends
+    # The retained (naive-in-storage) starts_at must serialize with an
+    # explicit UTC offset, not silently as local time.
+    assert body["starts_at"].endswith("+00:00")
+
+
+def test_serialize_naive_stored_datetime_gets_explicit_utc_offset(fake_db):
+    doc = _banner_doc(status="inactive")
+    doc["starts_at"] = doc["starts_at"].replace(tzinfo=None)
+    doc["ends_at"] = doc["ends_at"].replace(tzinfo=None)
+    fake_db["event_banners"].insert_one(doc)
+    app = _app()
+    client = app.test_client()
+    with _mock_admin():
+        resp = client.get("/api/admin/event-banners/weekend_tournament_202608")
+    body = resp.get_json()["banner"]
+    assert body["starts_at"].endswith("+00:00")
+    assert body["ends_at"].endswith("+00:00")
+
+
+def test_edit_schedule_string_confirm_false_still_requires_confirmation(fake_db):
+    """A truthy-but-not-True confirm value (e.g. "false" from naive form
+    serialization) must not bypass the live-banner confirmation gate."""
+    now = datetime.now(timezone.utc)
+    doc = _banner_doc(starts_at=now - timedelta(hours=1), ends_at=now + timedelta(hours=1))
+    fake_db["event_banners"].insert_one(doc)
+    new_starts = (now + timedelta(hours=2)).isoformat()
+    new_ends = (now + timedelta(hours=3)).isoformat()
+    app = _app()
+    client = app.test_client()
+    with _mock_admin():
+        resp = client.patch(
+            "/api/admin/event-banners/weekend_tournament_202608/schedule",
+            json={"starts_at": new_starts, "ends_at": new_ends, "confirm": "false"},
+        )
+    assert resp.status_code == 409
+    assert resp.get_json()["code"] == "confirmation_required"
+
+
 # ---------------------------------------------------------------------------
 # Effective status
 # ---------------------------------------------------------------------------
