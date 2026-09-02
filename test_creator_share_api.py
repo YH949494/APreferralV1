@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import sys
 import types
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from flask import Flask
@@ -735,7 +735,11 @@ class TestRecentWin:
 
     def test_congrats_write_persists_display_fields_for_recent_win(self, fake_db, monkeypatch):
         fake_db["users"].insert_one({"user_id": 555, "username": "TheJone9", "first_name": "The"})
-        now = csc.now_utc()
+        # scheduler._LEGACY_PLAN_REFERENCE_MONTH ("202608") is the reward
+        # plan this test's expected $15/T2 value belongs to — pin to that
+        # month rather than real wall-clock time, which now resolves to a
+        # later (higher-value) reward plan.
+        now = datetime(2026, 8, 15, tzinfo=timezone.utc)
         month_key = scheduler._month_start_kl(now).date().isoformat()
         for i in range(25):
             fake_db["referral_events"].insert_one(
@@ -763,7 +767,9 @@ class TestRecentWin:
         unlocked->issued wording change) is untouched by the new persistence
         fields."""
         fake_db["users"].insert_one({"user_id": 555, "username": "TheJone9", "first_name": "The"})
-        now = csc.now_utc()
+        # Pinned to the legacy reference plan month for the same reason as
+        # test_congrats_write_persists_display_fields_for_recent_win above.
+        now = datetime(2026, 8, 15, tzinfo=timezone.utc)
         month_key = scheduler._month_start_kl(now).date().isoformat()
         for i in range(25):
             fake_db["referral_events"].insert_one(
