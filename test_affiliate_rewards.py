@@ -22,8 +22,13 @@ from affiliate_rewards import (
 
 
 class _UpdateResult:
-    def __init__(self, modified_count):
-        self.modified_count = modified_count
+    def __init__(self, matched_count, modified_count=None):
+        self.matched_count = matched_count
+        # Real PyMongo's UpdateResult always exposes both counters; a
+        # matched-but-unchanged doc still has matched_count=1. Callers such
+        # as _renew_allocation_lease/_holds_allocation_lease assert lease
+        # ownership via matched_count, not modified_count.
+        self.modified_count = matched_count if modified_count is None else modified_count
 
 
 class FakeCollection:
@@ -87,26 +92,30 @@ class FakeCollection:
                 return {k: d.get(k) for k in proj.keys()}
         return None
 
+    def _apply_update(self, d, update):
+        for k, v in update.get("$set", {}).items():
+            d[k] = v
+        for k, v in update.get("$inc", {}).items():
+            d[k] = d.get(k, 0) + v
+        for k, v in update.get("$addToSet", {}).items():
+            current = d.get(k) or []
+            if v not in current:
+                d[k] = list(current) + [v]
+        for k, cond in update.get("$pull", {}).items():
+            current = d.get(k) or []
+            if isinstance(cond, dict) and "$in" in cond:
+                removed = set(cond["$in"])
+                d[k] = [item for item in current if item not in removed]
+            else:
+                d[k] = [item for item in current if item != cond]
+        for k in update.get("$unset", {}):
+            d.pop(k, None)
+        return d
+
     def update_one(self, filt, update, upsert=False):
         for d in self.docs:
             if self._match(d, filt):
-                for k, v in update.get("$set", {}).items():
-                    d[k] = v
-                for k, v in update.get("$inc", {}).items():
-                    d[k] = d.get(k, 0) + v
-                for k, v in update.get("$addToSet", {}).items():
-                    current = d.get(k) or []
-                    if v not in current:
-                        d[k] = list(current) + [v]
-                for k, cond in update.get("$pull", {}).items():
-                    current = d.get(k) or []
-                    if isinstance(cond, dict) and "$in" in cond:
-                        removed = set(cond["$in"])
-                        d[k] = [item for item in current if item not in removed]
-                    else:
-                        d[k] = [item for item in current if item != cond]
-                for k in update.get("$unset", {}):
-                    d.pop(k, None)
+                self._apply_update(d, update)
                 return _UpdateResult(1)
         if upsert:
             row = dict(filt)
@@ -126,8 +135,7 @@ class FakeCollection:
             key, direction = sort[0]
             matches.sort(key=lambda x: x.get(key, 0), reverse=(direction < 0))
         d = matches[0]
-        for k, v in update.get("$set", {}).items():
-            d[k] = v
+        self._apply_update(d, update)
         return dict(d)
 
     def count_documents(self, filt):
@@ -429,9 +437,14 @@ class AffiliateRewardTests(unittest.TestCase):
         self.assertEqual(row2["status"], "ISSUED")
 
     def test_out_of_stock_and_atomic_claim(self):
+        # Fixed pre-migration date: the legacy voucher_pools bundle path
+        # (add_pool_bundle) only applies before the Sep-2026 denomination
+        # migration. A real datetime.now() lands in the denomination-plan
+        # window, which requires a scheduled voucher batch instead of a
+        # legacy pool, and never issues here at all.
         db = FakeDb()
         db.users.insert_one({"user_id": 7, "blocked": False})
-        now = datetime.now(timezone.utc)
+        now = datetime(2026, 1, 10, tzinfo=timezone.utc)
         for i in range(1, 11):
             db.qualified_events.insert_one({"invitee_id": i, "referrer_id": 7, "qualified_at": now})
         row = evaluate_monthly_affiliate_reward(db, referrer_id=7, now_utc=now)
@@ -448,6 +461,68 @@ class AffiliateRewardTests(unittest.TestCase):
         row_b = evaluate_monthly_affiliate_reward(db, referrer_id=12, now_utc=now)
         issued = [r for r in (row_a, row_b) if r.get("status") == "ISSUED"]
         self.assertEqual(len(issued), 1)
+
+    def test_out_of_stock_settlement_is_atomic_and_lease_fenced(self):
+        # Regression for the SETTLING -> PENDING_MANUAL transition: this is
+        # the exact denomination-bundle path (T1 tier, pre-migration date),
+        # driven through the fenced allocation lease in
+        # _issue_denomination_bundle. It failed to reach PENDING_MANUAL
+        # against the local FakeCollection because find_one_and_update
+        # silently dropped $inc, so _acquire_allocation_lease never minted a
+        # fencing token and the caller bailed out early believing another
+        # worker held the lease — leaving the ledger stuck in SETTLING.
+        db = FakeDb()
+        db.users.insert_one({"user_id": 700, "blocked": False})
+        now = datetime(2026, 1, 10, tzinfo=timezone.utc)
+        for i in range(1, 11):
+            db.qualified_events.insert_one({"invitee_id": i, "referrer_id": 700, "qualified_at": now})
+        dedup_key = "AFF:700:202601:T1"
+
+        # 1 & 2: no stock -> settles to PENDING_MANUAL, never ISSUED, no code.
+        first = evaluate_monthly_affiliate_reward(db, referrer_id=700, now_utc=now)
+        self.assertEqual(first["status"], "PENDING_MANUAL")
+        self.assertIsNone(first.get("voucher_code"))
+        self.assertFalse(first.get("vouchers"))
+
+        # 3 & 4: exactly one ledger row exists for this entitlement — no
+        # duplicate was created while settling.
+        self.assertEqual(db.affiliate_ledger.count_documents({"dedup_key": dedup_key}), 1)
+        self.assertEqual(db.voucher_pools.count_documents({"pool_id": "T1", "status": "issued"}), 0)
+
+        # 5: retrying the same evaluation (e.g. a second scheduler tick)
+        # stays atomic — still PENDING_MANUAL, still no voucher, still one row.
+        second = evaluate_monthly_affiliate_reward(db, referrer_id=700, now_utc=now + timedelta(minutes=5))
+        self.assertEqual(second["status"], "PENDING_MANUAL")
+        self.assertIsNone(second.get("voucher_code"))
+        self.assertEqual(db.affiliate_ledger.count_documents({"dedup_key": dedup_key}), 1)
+
+        # 6: lease owner/token/fence predicates are enforced by the fixed
+        # fake exactly as real PyMongo enforces them via matched_count.
+        ledger = db.affiliate_ledger.find_one({"dedup_key": dedup_key})
+        db.affiliate_ledger.update_one({"_id": ledger["_id"]}, {"$set": {"status": ar.SETTLING_STATUS}})
+        token = ar._acquire_allocation_lease(db, ledger_id=ledger["_id"], now_utc=now)
+        self.assertIsInstance(token, int)
+        # A worker still holding the current token can renew/assert ownership.
+        self.assertTrue(ar._renew_allocation_lease(db, ledger_id=ledger["_id"], token=token))
+        self.assertTrue(ar._holds_allocation_lease(db, ledger_id=ledger["_id"], token=token))
+        # A displaced worker's stale token must never renew or pass ownership
+        # checks once the generation has moved on.
+        stale_token = token - 1
+        self.assertFalse(ar._renew_allocation_lease(db, ledger_id=ledger["_id"], token=stale_token))
+        self.assertFalse(ar._holds_allocation_lease(db, ledger_id=ledger["_id"], token=stale_token))
+        # A second acquisition attempt while the lease is live must be
+        # refused (busy), never handed a fresh token.
+        self.assertIsNone(ar._acquire_allocation_lease(db, ledger_id=ledger["_id"], now_utc=now))
+        db.affiliate_ledger.update_one({"_id": ledger["_id"]}, {"$set": {"status": "PENDING_MANUAL"}})
+
+        # 7: the normal in-stock path is unaffected — a fresh referrer with
+        # available inventory still issues exactly one bundle.
+        db.users.insert_one({"user_id": 701, "blocked": False})
+        self.add_pool_bundle(db, "T1", "STOCK700")
+        for i in range(801, 811):
+            db.qualified_events.insert_one({"invitee_id": i, "referrer_id": 701, "qualified_at": now})
+        stocked = evaluate_monthly_affiliate_reward(db, referrer_id=701, now_utc=now)
+        self.assert_bundle(stocked, "T1")
 
     def test_previous_week_t1_never_issues_and_is_idempotent(self):
         # T1-T5 bundles are monthly-only: a weekly milestone ledger must be
