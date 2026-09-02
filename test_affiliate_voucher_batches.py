@@ -20,6 +20,14 @@ import affiliate_rewards as ar
 import affiliate_voucher_batches as avb
 
 
+# A fixed instant inside the default `_create()` window (2026-08-01 to
+# 2026-09-01) — pass this to calls that must land while the batch is still
+# active but don't care about window-edge behavior themselves, so those
+# assertions don't depend on real wall-clock time relative to the batch's
+# hardcoded dates.
+IN_WINDOW = datetime(2026, 8, 15, tzinfo=timezone.utc)
+
+
 def _db():
     return fake_mongo.FakeDb({"voucher_pools": [("pool_id", "code")]})
 
@@ -429,7 +437,11 @@ class TestAdminHttpLayer:
         assert body["ok"] is True
         assert body["counts"]["inserted"] == 2
 
-        list_resp = client.get("/api/admin/affiliate-voucher-batches?pool_id=T1")
+        # entitlement_month=202608 windows the batch to August 2026, which is
+        # only "active" for the listing's default expired-filtering while
+        # real wall-clock time is inside that month — pass include_expired
+        # so this round-trip check isn't tied to when the suite runs.
+        list_resp = client.get("/api/admin/affiliate-voucher-batches?pool_id=T1&include_expired=true")
         assert list_resp.status_code == 200
         list_body = list_resp.get_json()
         assert len(list_body["items"]) == 1
@@ -716,7 +728,7 @@ class TestAddCodesToBatch:
         db = _db()
         res = _create(db, codes=["A1", "A2"])
         batch_id = res["batch"]["batch_id"]
-        result = avb.add_codes_to_batch(db, batch_id, admin_identity="admin1", codes="B1\nB2\nB3")
+        result = avb.add_codes_to_batch(db, batch_id, admin_identity="admin1", codes="B1\nB2\nB3", now_utc=IN_WINDOW)
         assert result["ok"] is True
         assert result["submitted_count"] == 3
         assert result["inserted_count"] == 3
@@ -729,7 +741,7 @@ class TestAddCodesToBatch:
         db = _db()
         res = _create(db, codes=["A1", "A2"])
         batch_id = res["batch"]["batch_id"]
-        avb.add_codes_to_batch(db, batch_id, admin_identity="admin1", codes="B1")
+        avb.add_codes_to_batch(db, batch_id, admin_identity="admin1", codes="B1", now_utc=IN_WINDOW)
         original = db.voucher_pools.find_one({"code": "A1"})
         assert original is not None
         assert original["status"] == "available"
@@ -740,7 +752,7 @@ class TestAddCodesToBatch:
         res = _create(db, codes=["A1"])
         batch_id = res["batch"]["batch_id"]
         assert db.affiliate_voucher_batches.count_documents({}) == 1
-        avb.add_codes_to_batch(db, batch_id, admin_identity="admin1", codes="B1,B2")
+        avb.add_codes_to_batch(db, batch_id, admin_identity="admin1", codes="B1,B2", now_utc=IN_WINDOW)
         assert db.affiliate_voucher_batches.count_documents({}) == 1
         new_row = db.voucher_pools.find_one({"code": "B1"})
         assert new_row["batch_id"] == avb._as_object_id(batch_id)
@@ -750,7 +762,7 @@ class TestAddCodesToBatch:
         db = _db()
         res = _create(db, codes=["A1"])
         batch_id = res["batch"]["batch_id"]
-        avb.add_codes_to_batch(db, batch_id, admin_identity="admin1", codes="B1")
+        avb.add_codes_to_batch(db, batch_id, admin_identity="admin1", codes="B1", now_utc=IN_WINDOW)
         legacy = avb._legacy_unbounded_summary(db, pool_id="T1")
         assert legacy == [] or all(l["pool_id"] != "T1" for l in legacy)
         row = db.voucher_pools.find_one({"code": "B1"})
@@ -760,7 +772,7 @@ class TestAddCodesToBatch:
         db = _db()
         res = _create(db, codes=["A1", "A2"])
         batch_id = res["batch"]["batch_id"]
-        result = avb.add_codes_to_batch(db, batch_id, admin_identity="admin1", codes="A1\nB1\nB2")
+        result = avb.add_codes_to_batch(db, batch_id, admin_identity="admin1", codes="A1\nB1\nB2", now_utc=IN_WINDOW)
         assert result["ok"] is True
         assert result["submitted_count"] == 3
         assert result["inserted_count"] == 2
@@ -770,7 +782,7 @@ class TestAddCodesToBatch:
         db = _db()
         res = _create(db, codes=["A1", "A2"])
         batch_id = res["batch"]["batch_id"]
-        result = avb.add_codes_to_batch(db, batch_id, admin_identity="admin1", codes="A1\nA2")
+        result = avb.add_codes_to_batch(db, batch_id, admin_identity="admin1", codes="A1\nA2", now_utc=IN_WINDOW)
         assert result["ok"] is False
         assert result["code"] == "duplicate_codes"
         assert "already exist" in result["message"]
@@ -780,7 +792,7 @@ class TestAddCodesToBatch:
         db = _db()
         res = _create(db, codes=["A1"])
         batch_id = res["batch"]["batch_id"]
-        result = avb.add_codes_to_batch(db, batch_id, admin_identity="admin1", codes="B1\nB1\nB2")
+        result = avb.add_codes_to_batch(db, batch_id, admin_identity="admin1", codes="B1\nB1\nB2", now_utc=IN_WINDOW)
         assert result["ok"] is True
         assert result["submitted_count"] == 3
         assert result["inserted_count"] == 2
@@ -791,7 +803,7 @@ class TestAddCodesToBatch:
         db = _db()
         res = _create(db, codes=["A1"])
         batch_id = res["batch"]["batch_id"]
-        result = avb.add_codes_to_batch(db, batch_id, admin_identity="admin1", codes="   \n  ")
+        result = avb.add_codes_to_batch(db, batch_id, admin_identity="admin1", codes="   \n  ", now_utc=IN_WINDOW)
         assert result["ok"] is False
         assert result["code"] == "no_codes"
 
@@ -806,7 +818,7 @@ class TestAddCodesToBatch:
         res = _create(db, codes=["A1"])
         batch_id = res["batch"]["batch_id"]
         avb.set_batch_distribution_disabled(db, batch_id, admin_identity="admin1", disabled=True)
-        result = avb.add_codes_to_batch(db, batch_id, admin_identity="admin1", codes="B1")
+        result = avb.add_codes_to_batch(db, batch_id, admin_identity="admin1", codes="B1", now_utc=IN_WINDOW)
         assert result["ok"] is False
         assert result["code"] == "batch_disabled"
         assert db.voucher_pools.count_documents({"code": "B1"}) == 0
@@ -820,8 +832,8 @@ class TestAddCodesToBatch:
         db = _db()
         res = _create(db, codes=["A1"])
         batch_id = res["batch"]["batch_id"]
-        first = avb.add_codes_to_batch(db, batch_id, admin_identity="admin1", codes="RACE1")
-        second = avb.add_codes_to_batch(db, batch_id, admin_identity="admin2", codes="RACE1")
+        first = avb.add_codes_to_batch(db, batch_id, admin_identity="admin1", codes="RACE1", now_utc=IN_WINDOW)
+        second = avb.add_codes_to_batch(db, batch_id, admin_identity="admin2", codes="RACE1", now_utc=IN_WINDOW)
         assert first["ok"] is True
         assert first["inserted_count"] == 1
         assert second["ok"] is False
@@ -873,7 +885,7 @@ class TestAddCodesToBatch:
 
         db.voucher_pools.insert_one = flaky_insert_one
         try:
-            result = avb.add_codes_to_batch(db, batch_id, admin_identity="admin1", codes="B1\nB2\nB3")
+            result = avb.add_codes_to_batch(db, batch_id, admin_identity="admin1", codes="B1\nB2\nB3", now_utc=IN_WINDOW)
         finally:
             db.voucher_pools.insert_one = real_insert_one
 
@@ -908,7 +920,7 @@ class TestAddCodesToBatch:
             try:
                 barrier.wait(timeout=5)
                 results[idx] = avb.add_codes_to_batch(
-                    db, batch_id, admin_identity=admin_identity, codes="RACE-CONC"
+                    db, batch_id, admin_identity=admin_identity, codes="RACE-CONC", now_utc=IN_WINDOW
                 )
             except Exception as exc:  # pragma: no cover - surfaced via assertion below
                 errors.append(exc)
@@ -956,7 +968,10 @@ class TestAddCodesAdminHttpLayer:
 
     def test_add_codes_round_trip_returns_required_fields(self):
         db = _db()
-        res = _create(db, codes=["A1", "A2"])
+        # The HTTP add-codes endpoint always uses real wall-clock time (no
+        # now_utc override), so the batch's window must stay open regardless
+        # of when this suite actually runs.
+        res = _create(db, codes=["A1", "A2"], ends="2099-01-01 00:00:00")
         batch_id = res["batch"]["batch_id"]
         app = _app_with_auth(db)
         client = app.test_client()
@@ -1002,7 +1017,7 @@ class TestAddCodesAdminHttpLayer:
 
     def test_empty_codes_returns_400(self):
         db = _db()
-        res = _create(db, codes=["A1"])
+        res = _create(db, codes=["A1"], ends="2099-01-01 00:00:00")
         batch_id = res["batch"]["batch_id"]
         app = _app_with_auth(db)
         client = app.test_client()
@@ -1022,7 +1037,7 @@ class TestAddCodesAdminHttpLayer:
 
     def test_database_error_returns_500_with_partial_inserted_count(self):
         db = _db()
-        res = _create(db, codes=["A1"])
+        res = _create(db, codes=["A1"], ends="2099-01-01 00:00:00")
         batch_id = res["batch"]["batch_id"]
         app = _app_with_auth(db)
         client = app.test_client()

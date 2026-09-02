@@ -74,7 +74,10 @@ class TestWelcomePoolAccepted:
         db = _db()
         _create(db)
         _create(db, pool_id="T1", starts="2026-08-01 00:00:00", ends="2026-09-01 00:00:00", codes=["T1-A"])
-        listing = avb.list_batches(db, pool_id="WELCOME")
+        # list_batches excludes expired batches by default; this test is
+        # about pool filtering, not expiry, so it shouldn't depend on real
+        # wall-clock time relative to the batches' hardcoded window.
+        listing = avb.list_batches(db, pool_id="WELCOME", include_expired=True)
         assert listing["ok"] is True
         assert len(listing["items"]) == 1
         assert listing["items"][0]["pool_id"] == "WELCOME"
