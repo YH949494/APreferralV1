@@ -21,6 +21,23 @@ from affiliate_rewards import (
 )
 
 
+def _get_dotted(doc, dotted_key):
+    cursor = doc
+    for part in dotted_key.split("."):
+        if not isinstance(cursor, dict):
+            return None
+        cursor = cursor.get(part)
+    return cursor
+
+
+def _set_dotted(doc, dotted_key, value):
+    parts = dotted_key.split(".")
+    cursor = doc
+    for part in parts[:-1]:
+        cursor = cursor.setdefault(part, {})
+    cursor[parts[-1]] = value
+
+
 class _UpdateResult:
     def __init__(self, matched_count, modified_count=None):
         self.matched_count = matched_count
@@ -69,7 +86,7 @@ class FakeCollection:
                 if not any(self._match(doc, sub) for sub in v):
                     return False
                 continue
-            if not self._match_value(doc.get(k), v):
+            if not self._match_value(_get_dotted(doc, k), v):
                 return False
         return True
 
@@ -94,7 +111,7 @@ class FakeCollection:
 
     def _apply_update(self, d, update):
         for k, v in update.get("$set", {}).items():
-            d[k] = v
+            _set_dotted(d, k, v)
         for k, v in update.get("$inc", {}).items():
             d[k] = d.get(k, 0) + v
         for k, v in update.get("$addToSet", {}).items():
@@ -523,6 +540,67 @@ class AffiliateRewardTests(unittest.TestCase):
             db.qualified_events.insert_one({"invitee_id": i, "referrer_id": 701, "qualified_at": now})
         stocked = evaluate_monthly_affiliate_reward(db, referrer_id=701, now_utc=now)
         self.assert_bundle(stocked, "T1")
+
+    def test_out_of_stock_denomination_plan_settles_atomically_via_integrated_path(self):
+        # The sibling test above pins a pre-migration (legacy-plan) date, so
+        # evaluate_monthly_affiliate_reward there never actually calls
+        # _issue_denomination_bundle / _acquire_allocation_lease — it only
+        # exercises those helpers directly, later in the test. This test
+        # drives the real September-2026+ denomination-plan entitlement
+        # through the full evaluate_monthly_affiliate_reward ->
+        # _issue_denomination_bundle -> _acquire_allocation_lease chain that
+        # the original bug report was about, with no inventory at all.
+        db = FakeDb()
+        db.users.insert_one({"user_id": 900, "blocked": False})
+        now = datetime(2026, 9, 15, tzinfo=timezone.utc)  # >= 202609: denomination plan
+        for i in range(1, 11):
+            db.qualified_events.insert_one({"invitee_id": i, "referrer_id": 900, "qualified_at": now})
+        dedup_key = "AFF:900:202609:T1"
+
+        # No AFFILIATE_10 batch/inventory exists at all -> out of stock.
+        first = evaluate_monthly_affiliate_reward(db, referrer_id=900, now_utc=now)
+        self.assertEqual(first["status"], "PENDING_MANUAL")
+        self.assertIsNone(first.get("voucher_code"))
+        self.assertFalse(first.get("vouchers"))
+        self.assertEqual(db.affiliate_ledger.count_documents({"dedup_key": dedup_key}), 1)
+        self.assertEqual(db.voucher_pools.count_documents({"status": "issued"}), 0)
+
+        # Retrying (e.g. a second scheduler tick) stays atomic: no duplicate
+        # ledger row, no voucher issued, still PENDING_MANUAL.
+        second = evaluate_monthly_affiliate_reward(db, referrer_id=900, now_utc=now + timedelta(minutes=5))
+        self.assertEqual(second["status"], "PENDING_MANUAL")
+        self.assertIsNone(second.get("voucher_code"))
+        self.assertEqual(db.affiliate_ledger.count_documents({"dedup_key": dedup_key}), 1)
+
+        # The lease was released once settled: no dangling live lease left
+        # behind that would block a later retry from re-acquiring ownership.
+        ledger = db.affiliate_ledger.find_one({"dedup_key": dedup_key})
+        self.assertIsNone(ledger.get("allocation_lease_at"))
+
+        # The normal in-stock path for this SAME denomination plan still
+        # issues correctly once a batch is scheduled and stocked (same
+        # raw batch/pool setup pattern already used by
+        # test_stuck_legacy_t2_recovers_through_the_real_scheduled_retry_path
+        # above, just against the AFFILIATE_10 denomination pool instead of
+        # a legacy tier pool).
+        db.users.insert_one({"user_id": 901, "blocked": False})
+        batch = db.affiliate_voucher_batches.insert_one(
+            {
+                "pool_id": "AFFILIATE_10",
+                "starts_at": datetime(2026, 8, 1, tzinfo=timezone.utc),
+                "ends_at": datetime(2026, 10, 1, tzinfo=timezone.utc),
+                "upload_status": "ready",
+                "distribution_disabled": False,
+            }
+        )
+        db.voucher_pools.insert_one(
+            {"pool_id": "AFFILIATE_10", "code": "T0001", "status": "available", "batch_id": batch["_id"]}
+        )
+        for i in range(901001, 901011):
+            db.qualified_events.insert_one({"invitee_id": i, "referrer_id": 901, "qualified_at": now})
+        stocked = evaluate_monthly_affiliate_reward(db, referrer_id=901, now_utc=now)
+        self.assertEqual(stocked["status"], "ISSUED")
+        self.assertEqual(len(stocked.get("vouchers") or []), 1)
 
     def test_previous_week_t1_never_issues_and_is_idempotent(self):
         # T1-T5 bundles are monthly-only: a weekly milestone ledger must be
