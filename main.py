@@ -6228,6 +6228,18 @@ def serve_mini_app():
     return response
 
 
+@app.route("/preview")
+def serve_mini_app_preview():
+    # UI-redesign preview build: same production JS/data-fetching/event
+    # handlers as /miniapp, only the Info Hub tab markup + scoped CSS differ.
+    # Not linked from any in-app nav; not the route Telegram opens. Safe to
+    # remove once the redesign is reviewed and either merged into
+    # static/index.html or discarded.
+    response = make_response(send_from_directory("static", "index-preview.html"))
+    _apply_no_store_headers(response)
+    return response
+
+
 @app.route("/creator-share")
 def serve_creator_share():
     # The HTML shell itself carries no creator data — every
