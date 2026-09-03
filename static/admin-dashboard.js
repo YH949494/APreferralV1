@@ -4906,25 +4906,54 @@
     if (isMission) { applyMissionTypeVisibility(); loadMissionPools(); }
   }
 
-  function loadMissionPools() {
+  function loadMissionPools(force) {
     var sel = $("#gc-m-pool");
-    if (!sel || sel.dataset.loaded === "1") return;
+    if (!sel) return Promise.resolve();
+    if (!force && sel.dataset.loaded === "1") return Promise.resolve();
     // The compatible-pool set is decided by the backend
     // (voucher_pool_service.CAMPAIGN_ALLOCATABLE_SCOPES minus the reserved
     // WELCOME/T1-T5/affiliate pools), never by a list hardcoded here (§29).
-    apiSoft("/api/admin/mission-pool/pools").then(function (r) {
+    return apiSoft("/api/admin/mission-pool/pools").then(function (r) {
       if (!r || r.status !== "ok") { sel.innerHTML = '<option value="">Failed to load pools</option>'; return; }
       var pools = r.pools || [];
       sel.dataset.loaded = "1";
       sel.innerHTML = pools.length
         ? pools.map(function (p) {
-            return '<option value="' + esc(p.pool_id) + '">' + esc(p.pool_id) +
-              " — " + esc(p.name || "") + " (" + ((p.stock || {}).available || 0) + " available)</option>";
+            // The pool's REAL pool_type rides on the option. The processor
+            // passes mission_pool.pool_type to voucher_pool_service
+            // .allocate_voucher as expected_pool_type, which filters the
+            // inventory row on it — so storing a hardcoded "voucher_drop"
+            // for a pool registered as tournament_reward/vip would make
+            // every allocation miss and mark winners out_of_stock, while
+            // the UI still showed stock available.
+            return '<option value="' + esc(p.pool_id) + '" data-pool-type="' + esc(p.pool_type || "") + '">' +
+              esc(p.pool_id) + " — " + esc(p.name || "") +
+              " [" + esc(p.pool_type || "?") + "] (" + ((p.stock || {}).available || 0) + " available)</option>";
           }).join("")
         : '<option value="">No mission-compatible pools — register one in Voucher Centre</option>';
     }).catch(function () {
       sel.innerHTML = '<option value="">Failed to load pools</option>';
     });
+  }
+
+  /**
+   * Make sure the campaign's stored pool is selectable even if the backend
+   * no longer lists it (its scope changed, it was deactivated). Silently
+   * falling back to whatever option happens to be first would rewrite the
+   * campaign's pool on the next save.
+   */
+  function ensurePoolOption(poolId, poolType) {
+    var sel = $("#gc-m-pool");
+    if (!sel || !poolId) return;
+    for (var i = 0; i < sel.options.length; i++) {
+      if (sel.options[i].value === poolId) { sel.value = poolId; return; }
+    }
+    var opt = document.createElement("option");
+    opt.value = poolId;
+    opt.textContent = poolId + " — (not currently listed as mission-compatible)";
+    opt.setAttribute("data-pool-type", poolType || "");
+    sel.appendChild(opt);
+    sel.value = poolId;
   }
 
   function missionConfigFromForm() {
@@ -4946,10 +4975,18 @@
     return cfg;
   }
 
+  function selectedPoolType() {
+    var sel = $("#gc-m-pool");
+    var opt = sel && sel.options[sel.selectedIndex];
+    // Fall back to voucher_drop only when nothing is selected — never
+    // override a pool's real registered type (see loadMissionPools).
+    return (opt && opt.getAttribute("data-pool-type")) || "voucher_drop";
+  }
+
   function missionPoolFromForm() {
     return {
       pool_id: ($("#gc-m-pool") || {}).value || "",
-      pool_type: "voucher_drop",
+      pool_type: selectedPoolType(),
       winner_count: parseInt($("#gc-m-winners").value, 10) || 0,
       allocation_method: ($("#gc-m-allocation") || {}).value || "random_qualified",
       eligibility_policy: {
@@ -5069,17 +5106,102 @@
     return api(path).catch(function (e) { return { status: "error", code: e.message }; });
   }
 
+  // A datetime-local input wants "YYYY-MM-DDTHH:mm" in LOCAL time; the API
+  // returns ISO-8601. Converting through the epoch keeps the displayed
+  // instant identical to the stored one.
+  function isoToLocalInput(iso) {
+    if (!iso) return "";
+    var d = new Date(iso);
+    if (isNaN(d.getTime())) return "";
+    var pad = function (n) { return (n < 10 ? "0" : "") + n; };
+    return d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()) +
+      "T" + pad(d.getHours()) + ":" + pad(d.getMinutes());
+  }
+
+  function setValue(id, value) {
+    var node = $("#" + id);
+    if (node) node.value = value == null ? "" : String(value);
+  }
+
+  function setChecked(id, value) {
+    var node = $("#" + id);
+    if (node) node.checked = !!value;
+  }
+
+  /**
+   * Load the selected campaign's ACTUAL stored values into the shared
+   * create/edit form.
+   *
+   * Without this the form still holds whatever the create flow last left in
+   * it — blank after a page reload, or another campaign's values after
+   * switching — and Save would PUT those over the selected campaign's real
+   * operator settings (or fail validation with an empty pool_id). Save is
+   * therefore only exposed once hydration has actually succeeded.
+   */
+  function hydrateMissionForm(campaign) {
+    var cfg = campaign.mission_config || {};
+    var block = campaign.mission_pool || {};
+    var schedule = campaign.schedule || {};
+    var policy = block.eligibility_policy || {};
+
+    setValue("gc-c-id", campaign.campaign_id);
+    setValue("gc-c-name", campaign.name);
+    var typeSel = $("#gc-c-type");
+    if (typeSel) typeSel.value = "mission_pool";
+    toggleMissionFields();
+
+    setValue("gc-m-type", cfg.mission_type || "multiple_choice");
+    setValue("gc-m-prompt", cfg.prompt);
+    setValue("gc-m-options", (cfg.options || []).map(function (o) { return o.id; }).join(", "));
+    setValue("gc-m-correct", cfg.correct_answer);
+    setChecked("gc-m-case-insensitive", cfg.keyword_case_insensitive !== false);
+    setValue("gc-m-min-chars", cfg.min_chars);
+    setValue("gc-m-max-chars", cfg.max_chars);
+    applyMissionTypeVisibility();
+
+    setValue("gc-m-winners", block.winner_count);
+    setValue("gc-m-allocation", block.allocation_method || "random_qualified");
+    ensurePoolOption(block.pool_id, block.pool_type);
+
+    setChecked("gc-m-el-correct", policy.require_correct_answer !== false);
+    setChecked("gc-m-el-hunter", policy.exclude_voucher_hunter !== false);
+    setChecked("gc-m-el-multi", policy.exclude_multi_account_risk !== false);
+    setChecked("gc-m-el-blocked", policy.exclude_blocked !== false);
+    setChecked("gc-m-el-gaming", !!policy.require_gaming_account);
+
+    setValue("gc-c-starts", isoToLocalInput(schedule.starts_at));
+    setValue("gc-c-ends", isoToLocalInput(schedule.ends_at));
+  }
+
   function openMissionOps(campaignId) {
     gcMissionSelectedId = campaignId;
-    Promise.all([
-      apiSoft("/api/admin/mission-pool/" + encodeURIComponent(campaignId) + "/edit-state"),
-      apiSoft("/api/admin/mission-pool/" + encodeURIComponent(campaignId) + "/summary"),
-    ]).then(function (res) {
+    var saveBtn = $("#gc-save-mission-btn");
+    // Hide Save until the form actually holds this campaign's values.
+    if (saveBtn) saveBtn.style.display = "none";
+    // Pools must be listed before the stored pool_id can be selected.
+    loadMissionPools().then(function () {
+      return Promise.all([
+        apiSoft("/api/admin/mission-pool/" + encodeURIComponent(campaignId) + "/edit-state"),
+        apiSoft("/api/admin/mission-pool/" + encodeURIComponent(campaignId) + "/summary"),
+        apiSoft("/api/admin/gc-campaigns/" + encodeURIComponent(campaignId)),
+      ]);
+    }).then(function (res) {
       var state = res[0] || {};
       if (state.status !== "ok") { toast("❌ " + (state.code || "not_a_mission_campaign"), "error"); return; }
+      var campaignResp = res[2] || {};
+      if (campaignResp.status !== "ok" || !campaignResp.campaign) {
+        // Render the read-only ops panel, but never enable a Save that would
+        // write unhydrated values.
+        applyMissionFreeze(state);
+        renderMissionOps(state, (res[1] && res[1].status === "ok") ? res[1] : {});
+        toast("⚠️ Could not load campaign values — editing disabled", "error");
+        return;
+      }
+      hydrateMissionForm(campaignResp.campaign);
+      // applyMissionFreeze runs AFTER hydration: hydration re-enables fields
+      // via toggleMissionFields, and the freeze must win.
       applyMissionFreeze(state);
       renderMissionOps(state, (res[1] && res[1].status === "ok") ? res[1] : {});
-      var saveBtn = $("#gc-save-mission-btn");
       if (saveBtn) saveBtn.style.display = "";
     });
   }
@@ -5124,6 +5246,17 @@
         // A frozen mission_config is simply not sent, so an unchanged PUT
         // never trips the backend freeze check.
         if (!$("#gc-m-prompt").disabled) body.mission_config = missionConfigFromForm();
+        // The schedule inputs are enabled whenever the backend reports the
+        // schedule editable, so the PUT has to carry them — otherwise an
+        // operator changes a date, sees "Mission saved", and nothing is
+        // persisted (campaign_centre._validate_body leaves `schedule`
+        // untouched on a partial update that omits it).
+        if (!$("#gc-c-starts").disabled) {
+          body.schedule = {
+            starts_at: $("#gc-c-starts").value ? new Date($("#gc-c-starts").value).toISOString() : null,
+            ends_at: $("#gc-c-ends").value ? new Date($("#gc-c-ends").value).toISOString() : null,
+          };
+        }
         apiPutJson("/api/admin/gc-campaigns/" + encodeURIComponent(gcMissionSelectedId), body).then(function (res) {
           var d = res.d || res;
           if (d.status !== "ok") {

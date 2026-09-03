@@ -251,6 +251,90 @@ test("voucher pools come from the backend-filtered mission endpoint", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Review fixes (Codex findings on 7944189)
+// ---------------------------------------------------------------------------
+
+test("the selected pool's real pool_type is submitted, not a hardcoded one", () => {
+  // The processor passes mission_pool.pool_type to
+  // voucher_pool_service.allocate_voucher as expected_pool_type, which
+  // filters the inventory row on it. Storing "voucher_drop" for a pool
+  // registered as tournament_reward/vip would make every allocation miss
+  // and mark winners out_of_stock while the UI showed stock available.
+  const fn = JS.slice(JS.indexOf("function selectedPoolType"), JS.indexOf("function applyMissionFreeze"));
+  assert.ok(fn.includes('opt.getAttribute("data-pool-type")'), "the option's real type must be read");
+  assert.ok(fn.includes("pool_type: selectedPoolType()"), "the real type must be submitted");
+  assert.equal(/pool_type:\s*["']voucher_drop["']/.test(fn), false,
+    "pool_type must not be hardcoded in the submitted body");
+});
+
+test("the pool dropdown carries each pool's real type", () => {
+  const fn = JS.slice(JS.indexOf("function loadMissionPools"), JS.indexOf("function ensurePoolOption"));
+  assert.ok(fn.includes('data-pool-type="'), "each option must carry its registered pool_type");
+});
+
+test("a stored pool that is no longer listed is preserved, not silently swapped", () => {
+  const fn = JS.slice(JS.indexOf("function ensurePoolOption"), JS.indexOf("function missionConfigFromForm"));
+  assert.ok(fn.includes("not currently listed as mission-compatible"));
+  assert.ok(fn.includes("sel.value = poolId"), "the campaign's own pool must stay selected");
+});
+
+test("Mission Ops hydrates the form from the campaign before enabling Save", () => {
+  // Without hydration the shared create/edit form still holds blank or
+  // another campaign's values, and Save would PUT those over the selected
+  // campaign's real operator settings.
+  const fn = JS.slice(JS.indexOf("function openMissionOps"), JS.indexOf("var MISSION_CONFIRM"));
+  assert.ok(fn.includes('apiSoft("/api/admin/gc-campaigns/"'), "the campaign document must be fetched");
+  assert.ok(fn.includes("hydrateMissionForm(campaignResp.campaign)"));
+  assert.ok(fn.includes('saveBtn.style.display = "none"'), "Save must be hidden until hydration succeeds");
+  // Save must not be exposed on the failure path.
+  const failBranch = fn.slice(fn.indexOf("Could not load campaign values") - 400, fn.indexOf("Could not load campaign values") + 120);
+  assert.ok(failBranch.includes("return;"), "a failed hydration must return before Save is shown");
+});
+
+test("hydration populates every editable mission field", () => {
+  const fn = JS.slice(JS.indexOf("function hydrateMissionForm"), JS.indexOf("function openMissionOps"));
+  ["gc-c-name", "gc-m-type", "gc-m-prompt", "gc-m-options", "gc-m-correct",
+    "gc-m-case-insensitive", "gc-m-min-chars", "gc-m-max-chars",
+    "gc-m-winners", "gc-m-allocation", "gc-c-starts", "gc-c-ends",
+    "gc-m-el-correct", "gc-m-el-hunter", "gc-m-el-multi", "gc-m-el-blocked", "gc-m-el-gaming",
+  ].forEach((id) => assert.ok(fn.includes('"' + id + '"'), "hydration misses " + id));
+  assert.ok(fn.includes("ensurePoolOption(block.pool_id"), "the stored pool must be selected");
+});
+
+test("the freeze is applied after hydration, so it wins", () => {
+  const fn = JS.slice(JS.indexOf("function openMissionOps"), JS.indexOf("var MISSION_CONFIRM"));
+  const hydrateIdx = fn.indexOf("hydrateMissionForm(campaignResp.campaign)");
+  const freezeIdx = fn.indexOf("applyMissionFreeze(state)", hydrateIdx);
+  assert.ok(hydrateIdx !== -1 && freezeIdx > hydrateIdx,
+    "applyMissionFreeze must run after hydration re-enables fields");
+});
+
+test("an editable schedule is actually sent on save", () => {
+  // campaign_centre._validate_body leaves `schedule` untouched on a partial
+  // update that omits it, so omitting it means the operator sees
+  // "Mission saved" while neither date is persisted.
+  const fn = JS.slice(JS.indexOf("function bindGcCampaigns"), JS.indexOf('var createBtn = $("#gc-create-campaign-btn");'));
+  assert.ok(fn.includes('if (!$("#gc-c-starts").disabled) {'), "schedule is sent only when editable");
+  assert.ok(fn.includes("body.schedule = {"));
+  assert.ok(fn.includes("starts_at:") && fn.includes("ends_at:"));
+});
+
+test("hydration converts stored ISO timestamps to local datetime-local values", () => {
+  const ctx = { module: {} };
+  vm.createContext(ctx);
+  const fn = JS.slice(JS.indexOf("function isoToLocalInput"), JS.indexOf("function setValue"));
+  vm.runInContext(fn + "\nmodule.exports = isoToLocalInput;", ctx);
+  const isoToLocalInput = ctx.module.exports;
+  assert.equal(isoToLocalInput(""), "");
+  assert.equal(isoToLocalInput(null), "");
+  assert.equal(isoToLocalInput("not-a-date"), "");
+  const out = isoToLocalInput("2026-09-30T12:34:00+00:00");
+  assert.match(out, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/, "must be a datetime-local value");
+  // Round-trips back to the same instant the API gave us.
+  assert.equal(new Date(out).getTime(), new Date("2026-09-30T12:34:00+00:00").getTime());
+});
+
+// ---------------------------------------------------------------------------
 // Summary / disqualification reasons (§36, §37, §38)
 // ---------------------------------------------------------------------------
 

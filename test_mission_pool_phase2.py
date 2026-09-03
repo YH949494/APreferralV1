@@ -450,6 +450,31 @@ def test_admin_pools_only_lists_mission_compatible_pools(fake_db):
         assert reserved not in listed
 
 
+def test_admin_pools_reports_each_pools_real_type(fake_db):
+    """The admin UI submits the SELECTED pool's registered pool_type, because
+    the processor passes mission_pool.pool_type to
+    voucher_pool_service.allocate_voucher as expected_pool_type and that
+    filters the inventory row on it. A pool whose real type is
+    tournament_reward would never allocate if the UI stored "voucher_drop",
+    so the real type has to travel with the option."""
+    registry = database.db["voucher_pool_registry"]
+    now = datetime.now(timezone.utc)
+    for pool_id, pool_type in [("MISSION-DROP", "voucher_drop"),
+                               ("MISSION-TOURN", "tournament_reward")]:
+        registry.insert_one({
+            "pool_id": pool_id, "name": pool_id, "pool_type": pool_type,
+            "allocation_scope": "campaign_rewards", "status": "active", "created_at": now,
+        })
+
+    with _app().test_client() as client, _admin_ok():
+        data = client.get("/api/admin/mission-pool/pools").get_json()
+    by_id = {p["pool_id"]: p for p in data["pools"]}
+    assert by_id["MISSION-DROP"]["pool_type"] == "voucher_drop"
+    assert by_id["MISSION-TOURN"]["pool_type"] == "tournament_reward"
+    # Every listed pool carries a type, so the UI never has to guess one.
+    assert all(p.get("pool_type") for p in data["pools"])
+
+
 def test_admin_pools_requires_admin(fake_db):
     with _app().test_client() as client, _admin_denied():
         assert client.get("/api/admin/mission-pool/pools").status_code == 401
