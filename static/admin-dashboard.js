@@ -4818,7 +4818,8 @@
   function gcPill(status) {
     var known = { live: "approved", draft: "neutral", scheduled: "pending", paused: "pending",
       ended: "neutral", archived: "neutral", active: "approved", inactive: "neutral",
-      assigned: "approved", out_of_stock: "rejected", rejected: "rejected", pending_review: "pending" };
+      assigned: "approved", out_of_stock: "rejected", rejected: "rejected", pending_review: "pending",
+      expired: "rejected" };
     return '<span class="pill ' + (known[status] || "neutral") + '">' + esc(status || "—") + '</span>';
   }
 
@@ -4888,21 +4889,105 @@
     api("/api/admin/event-banners").then(function (data) {
       var items = data.banners || [];
       if (!items.length) { $("#eb-body").innerHTML = emptyState("No event banners yet — create one above."); return; }
+      window.__ebBannersById = {};
       var rows = items.map(function (b) {
+        window.__ebBannersById[b.event_id] = b;
         var regions = (b.regions || []).length ? esc((b.regions || []).join(", ")) : "All regions";
         return '<tr><td>' + esc(b.event_id) + '<div class="sub">' + esc(b.alt_text || "") + '</div></td>' +
           '<td><img src="' + esc(b.image_url || "") + '" alt="" style="max-width:80px;max-height:36px;object-fit:contain;" /></td>' +
-          '<td>' + gcPill(b.status) + '</td>' +
+          '<td>' + gcPill(b.effective_status || b.status) + '</td>' +
           '<td>' + esc(b.priority != null ? String(b.priority) : "") + '</td>' +
           '<td class="sub">' + esc((b.starts_at || "").slice(0, 16).replace("T", " ")) + ' → ' + esc((b.ends_at || "").slice(0, 16).replace("T", " ")) + '</td>' +
           '<td class="sub">' + regions + '</td>' +
           '<td>' +
           '<button class="btn" data-eb-action="toggle" data-id="' + esc(b.event_id) + '" data-status="' + esc(b.status) + '">' + (b.status === "active" ? "Deactivate" : "Activate") + '</button> ' +
+          '<button class="btn" data-eb-action="edit-schedule" data-id="' + esc(b.event_id) + '">Edit Schedule</button> ' +
           '<button class="btn" data-eb-action="delete" data-id="' + esc(b.event_id) + '">Delete</button>' +
           '</td></tr>';
       }).join("");
       $("#eb-body").innerHTML = '<table class="data-table"><thead><tr><th>Event</th><th>Image</th><th>Status</th><th>Priority</th><th>Window (UTC)</th><th>Regions</th><th>Actions</th></tr></thead><tbody>' + rows + '</tbody></table>';
     }).catch(function (e) { statePanel("eb-body", "error", "Failed to load event banners: " + e.message); });
+  }
+
+  // Kuala Lumpur is a fixed UTC+8 offset (no DST) — a plain string offset
+  // suffix on parse/format is enough, no timezone library needed.
+  function utcIsoToKlInputValue(iso) {
+    if (!iso) return "";
+    var d = new Date(iso);
+    if (isNaN(d.getTime())) return "";
+    var kl = new Date(d.getTime() + 8 * 60 * 60 * 1000);
+    return kl.toISOString().slice(0, 16);
+  }
+
+  function klInputValueToUtcIso(value) {
+    if (!value) return null;
+    var d = new Date(value + ":00+08:00");
+    if (isNaN(d.getTime())) return null;
+    return d.toISOString();
+  }
+
+  function openEditScheduleModal(banner) {
+    var overlay = document.createElement("div");
+    overlay.className = "modal-overlay";
+    overlay.innerHTML =
+      '<div class="modal-box">' +
+      '<h3>Edit Schedule — ' + esc(banner.event_id) + '</h3>' +
+      '<p class="sub">Times are in Kuala Lumpur time (GMT+8). Stored as UTC.</p>' +
+      '<label class="sub">Start</label>' +
+      '<input class="filter-input" id="eb-edit-starts" type="datetime-local" />' +
+      '<label class="sub">End</label>' +
+      '<input class="filter-input" id="eb-edit-ends" type="datetime-local" />' +
+      '<label class="sub">Priority</label>' +
+      '<input class="filter-input" id="eb-edit-priority" type="number" />' +
+      '<div class="modal-actions">' +
+      '<button class="btn" id="eb-edit-cancel">Cancel</button>' +
+      '<button class="btn primary" id="eb-edit-save">Save</button>' +
+      '</div></div>';
+    document.body.appendChild(overlay);
+    $("#eb-edit-starts", overlay).value = utcIsoToKlInputValue(banner.starts_at);
+    $("#eb-edit-ends", overlay).value = utcIsoToKlInputValue(banner.ends_at);
+    $("#eb-edit-priority", overlay).value = banner.priority != null ? banner.priority : 0;
+
+    function close() { overlay.remove(); }
+    overlay.querySelector("#eb-edit-cancel").addEventListener("click", close);
+    overlay.addEventListener("click", function (e) { if (e.target === overlay) close(); });
+
+    overlay.querySelector("#eb-edit-save").addEventListener("click", function () {
+      submitEditSchedule(banner, overlay, false);
+    });
+  }
+
+  function submitEditSchedule(banner, overlay, confirmed) {
+    var startsVal = overlay.querySelector("#eb-edit-starts").value;
+    var endsVal = overlay.querySelector("#eb-edit-ends").value;
+    var priorityVal = overlay.querySelector("#eb-edit-priority").value;
+    var starts_at = klInputValueToUtcIso(startsVal);
+    var ends_at = klInputValueToUtcIso(endsVal);
+    if (!starts_at || !ends_at) { toast("❌ Start and end are required", "error"); return; }
+    if (new Date(ends_at) <= new Date(starts_at)) { toast("❌ End must be after start", "error"); return; }
+
+    var body = { starts_at: starts_at, ends_at: ends_at, priority: Number(priorityVal || 0) };
+    if (confirmed) body.confirm = true;
+
+    apiPatchJson("/api/admin/event-banners/" + encodeURIComponent(banner.event_id) + "/schedule", body)
+      .then(function (res) {
+        if (!res.ok || res.d.status !== "ok") {
+          if (res.d && res.d.code === "confirmation_required") {
+            confirmSimple(
+              "Banner is currently active",
+              "\"" + banner.event_id + "\" is active and may be live for users right now. Save the new schedule anyway?"
+            ).then(function (ok) {
+              if (ok) submitEditSchedule(banner, overlay, true);
+            });
+            return;
+          }
+          toast("❌ " + (res.d && res.d.code || "update_failed"), "error");
+          return;
+        }
+        toast("✅ Schedule updated", "success");
+        overlay.remove();
+        loadEventBanners(true);
+      });
   }
 
   function bindEventBanners() {
@@ -4940,6 +5025,10 @@
           if (!res.ok || res.d.status !== "ok") { toast("❌ " + (res.d && res.d.code || "update_failed"), "error"); return; }
           loadEventBanners(true);
         });
+      } else if (action === "edit-schedule") {
+        var banner = (window.__ebBannersById || {})[id];
+        if (!banner) return;
+        openEditScheduleModal(banner);
       } else if (action === "delete") {
         if (!confirm("Delete event banner \"" + id + "\"?")) return;
         apiDelete("/api/admin/event-banners/" + encodeURIComponent(id)).then(function (res) {

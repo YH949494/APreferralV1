@@ -81,10 +81,12 @@ def _parse_dt(value) -> datetime | None:
     if not value:
         return None
     if isinstance(value, datetime):
-        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        dt = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
     try:
         dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+        dt = dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
     except ValueError:
         return None
 
@@ -122,8 +124,8 @@ def _validate_body(body: dict, *, partial: bool = False, existing: dict | None =
         updates["alt_text"] = (body.get("alt_text") or "").strip() or DEFAULT_ALT_TEXT
 
     if not partial or "starts_at" in body or "ends_at" in body:
-        starts_at = _parse_dt(body.get("starts_at")) if "starts_at" in body else (existing or {}).get("starts_at")
-        ends_at = _parse_dt(body.get("ends_at")) if "ends_at" in body else (existing or {}).get("ends_at")
+        starts_at = _parse_dt(body.get("starts_at")) if "starts_at" in body else _parse_dt((existing or {}).get("starts_at"))
+        ends_at = _parse_dt(body.get("ends_at")) if "ends_at" in body else _parse_dt((existing or {}).get("ends_at"))
         if not starts_at:
             return None, "missing_starts_at"
         if not ends_at:
@@ -154,13 +156,59 @@ def _validate_body(body: dict, *, partial: bool = False, existing: dict | None =
     return updates, None
 
 
+def _effective_status(doc: dict, now: datetime) -> str:
+    """Status as an admin should read it, distinct from the stored
+    ``status`` field: an ``active`` banner is further split into
+    scheduled/live/expired by its window so an expired banner never
+    displays as plain "active"."""
+    if doc.get("status") != "active":
+        return "inactive"
+    starts_at = doc.get("starts_at")
+    ends_at = doc.get("ends_at")
+    if not starts_at or not ends_at:
+        return "inactive"
+    if starts_at.tzinfo is None:
+        starts_at = starts_at.replace(tzinfo=timezone.utc)
+    if ends_at.tzinfo is None:
+        ends_at = ends_at.replace(tzinfo=timezone.utc)
+    if now < starts_at:
+        return "scheduled"
+    if now >= ends_at:
+        return "expired"
+    return "live"
+
+
 def _serialize(doc: dict) -> dict:
     out = dict(doc)
     out["id"] = str(out.pop("_id"))
+    out["effective_status"] = _effective_status(doc, datetime.now(timezone.utc))
     for k in ("starts_at", "ends_at", "created_at", "updated_at"):
-        if out.get(k):
-            out[k] = out[k].isoformat()
+        v = out.get(k)
+        if v:
+            # database.py's MongoClient isn't tz_aware, so a value just read
+            # back from Mongo comes back naive (UTC values, no tzinfo) — an
+            # offset-less isoformat() string would then parse as local time
+            # in the browser instead of UTC. Every timestamp in this
+            # collection is UTC by convention, so a naive one always means
+            # UTC.
+            if v.tzinfo is None:
+                v = v.replace(tzinfo=timezone.utc)
+            out[k] = v.isoformat()
     return out
+
+
+def _log_audit(action: str, admin: dict, event_id: str, details: dict | None = None) -> None:
+    try:
+        database.db["campaign_admin_audit_log"].insert_one({
+            "action": action,
+            "entity": "event_banner",
+            "entity_id": event_id,
+            "admin": (admin or {}).get("usernameLower") or str((admin or {}).get("id", "")),
+            "details": details or {},
+            "at": datetime.now(timezone.utc),
+        })
+    except Exception:
+        logger.warning("[EVENT_BANNER] audit_write_failed", exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -236,6 +284,71 @@ def update_event_banner(event_id: str):
     updates["updated_at"] = datetime.now(timezone.utc)
     updates["updated_by"] = (admin or {}).get("usernameLower") or str((admin or {}).get("id", ""))
     database.db["event_banners"].update_one({"_id": doc["_id"]}, {"$set": updates})
+    doc = database.db["event_banners"].find_one({"_id": doc["_id"]})
+    return jsonify({"status": "ok", "banner": _serialize(doc)})
+
+
+@event_banner_admin_bp.patch("/api/admin/event-banners/<event_id>/schedule")
+def edit_event_banner_schedule(event_id: str):
+    """Dedicated schedule-only edit: start/end/priority, nothing else —
+    never touches event_id, image_url, destination_url, alt_text, status or
+    regions. Requires ``confirm: true`` in the body when the banner is
+    currently "live" (active status, within its window right now), since
+    its audience is actively depending on its window."""
+    admin, err = _require_admin()
+    if err:
+        return err
+    doc = database.db["event_banners"].find_one({"event_id": event_id})
+    if not doc:
+        return jsonify({"status": "error", "code": "not_found"}), 404
+
+    body = request.get_json(silent=True) or {}
+
+    starts_at = _parse_dt(body.get("starts_at")) if "starts_at" in body else _parse_dt(doc.get("starts_at"))
+    ends_at = _parse_dt(body.get("ends_at")) if "ends_at" in body else _parse_dt(doc.get("ends_at"))
+    if not starts_at:
+        return jsonify({"status": "error", "code": "missing_starts_at"}), 400
+    if not ends_at:
+        return jsonify({"status": "error", "code": "missing_ends_at"}), 400
+    if ends_at <= starts_at:
+        return jsonify({"status": "error", "code": "ends_at_before_starts_at"}), 400
+
+    if "priority" in body:
+        try:
+            priority = int(body.get("priority"))
+        except (TypeError, ValueError):
+            return jsonify({"status": "error", "code": "invalid_priority"}), 400
+    else:
+        priority = doc.get("priority", 0)
+
+    if _effective_status(doc, datetime.now(timezone.utc)) == "live" and body.get("confirm") is not True:
+        return jsonify({"status": "error", "code": "confirmation_required"}), 409
+
+    previous_schedule = {
+        "starts_at": doc["starts_at"].isoformat() if doc.get("starts_at") else None,
+        "ends_at": doc["ends_at"].isoformat() if doc.get("ends_at") else None,
+        "priority": doc.get("priority", 0),
+    }
+    updates = {
+        "starts_at": starts_at,
+        "ends_at": ends_at,
+        "priority": priority,
+        "updated_at": datetime.now(timezone.utc),
+        "updated_by": (admin or {}).get("usernameLower") or str((admin or {}).get("id", "")),
+    }
+    database.db["event_banners"].update_one({"_id": doc["_id"]}, {"$set": updates})
+    new_schedule = {
+        "starts_at": starts_at.isoformat(),
+        "ends_at": ends_at.isoformat(),
+        "priority": priority,
+    }
+    _log_audit(
+        "edit_schedule",
+        admin,
+        event_id,
+        {"previous_schedule": previous_schedule, "new_schedule": new_schedule},
+    )
+
     doc = database.db["event_banners"].find_one({"_id": doc["_id"]})
     return jsonify({"status": "ok", "banner": _serialize(doc)})
 
