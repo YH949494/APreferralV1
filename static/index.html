@@ -1616,7 +1616,7 @@
           <span id="identity-weekly-rank">Weekly Rank: Not ranked yet</span>
           <span id="identity-weekly-xp">Weekly XP: 0</span>
           <span id="identity-weekly-ref">Weekly refs: 0</span>
-          <span id="identity-total-ref">Total refs: 0</span>
+          <span id="identity-total-ref">Monthly Referrals: 0</span>
           <span id="identity-total-xp">Total XP: 0</span>
         </div>
         <div class="identity-progress">
@@ -7657,7 +7657,7 @@ ${referral}`;
         }
         weeklyXpEl.textContent = `Weekly XP: ${weeklyXp}`;
         weeklyRefEl.textContent = `Weekly Referrals: ${weeklyRef}`;
-        totalRefEl.textContent = `Total refs: ${Number(data.total_referrals || 0)}`;
+        totalRefEl.textContent = `Monthly Referrals: ${Number(data.monthly_referrals || 0)}`;
         totalXpEl.textContent = `Total XP: ${Number(data.total_xp || 0)}`;
         progressEl.style.width = `${Math.max(0, Math.min(100, Number(data.next_tier_progress_pct || 0)))}%`;
         hintEl.textContent = data.next_tier_hint || "";
