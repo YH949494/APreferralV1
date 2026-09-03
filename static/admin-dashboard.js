@@ -4839,21 +4839,313 @@
           '<button class="btn" data-gc-action="publish" data-id="' + esc(c.campaign_id) + '">Publish</button> ' +
           '<button class="btn" data-gc-action="pause" data-id="' + esc(c.campaign_id) + '">Pause</button> ' +
           '<button class="btn" data-gc-action="archive" data-id="' + esc(c.campaign_id) + '">Archive</button> ' +
-          '<button class="btn" data-gc-action="preview" data-id="' + esc(c.campaign_id) + '">Preview</button>' +
+          '<button class="btn" data-gc-action="preview" data-id="' + esc(c.campaign_id) + '">Preview</button> ' +
+          '<button class="btn" data-gc-action="duplicate" data-id="' + esc(c.campaign_id) + '">Duplicate</button>' +
+          (c.mechanic === "mission_pool"
+            ? ' <button class="btn" data-gc-action="mission" data-id="' + esc(c.campaign_id) + '">Mission Ops</button>'
+            : "") +
           '</td></tr>';
       }).join("");
       $("#gc-campaigns-body").innerHTML = '<table class="data-table"><thead><tr><th>Campaign</th><th>Type</th><th>Status</th><th>Visibility</th><th>Actions</th></tr></thead><tbody>' + rows + '</tbody></table>';
     }).catch(function (e) { statePanel("gc-campaigns-body", "error", "Failed to load campaigns: " + e.message); });
   }
 
+  // ---------- Mission Reward Pool (Phase 2 admin) ----------
+  //
+  // Lives inside the existing Campaign Centre / Player Campaigns surface —
+  // no separate Mission admin app (§24). Every field maps onto the Phase 1
+  // schema; every lifecycle action calls the official Phase 1 endpoint
+  // (§30, §31). The UI never writes campaign state itself.
+
+  // Which mission_config fields each mission_type actually supports (§28).
+  var MISSION_TYPE_FIELDS = {
+    multiple_choice: ["prompt", "options", "correct"],
+    single_choice: ["prompt", "options", "correct"],
+    keyword: ["prompt", "correct", "case_insensitive"],
+    feedback: ["prompt", "min_chars", "max_chars"],
+  };
+
+  // mission_config fields Phase 1 freezes once any entry exists (§26).
+  var MISSION_CONFIG_INPUT_IDS = [
+    "gc-m-type", "gc-m-prompt", "gc-m-options", "gc-m-correct",
+    "gc-m-case-insensitive", "gc-m-min-chars", "gc-m-max-chars",
+  ];
+
+  var gcMissionSelectedId = null;
+
+  function gcMissionFieldWrap(id) {
+    var node = $("#" + id);
+    if (!node) return null;
+    if (id === "gc-m-case-insensitive") return $("#gc-m-ci-wrap");
+    return node;
+  }
+
+  function applyMissionTypeVisibility() {
+    var type = ($("#gc-m-type") || {}).value || "multiple_choice";
+    var allowed = MISSION_TYPE_FIELDS[type] || [];
+    var map = {
+      prompt: "gc-m-prompt", options: "gc-m-options", correct: "gc-m-correct",
+      case_insensitive: "gc-m-case-insensitive", min_chars: "gc-m-min-chars", max_chars: "gc-m-max-chars",
+    };
+    Object.keys(map).forEach(function (key) {
+      var node = gcMissionFieldWrap(map[key]);
+      if (node) node.style.display = allowed.indexOf(key) === -1 ? "none" : "";
+    });
+  }
+
+  function toggleMissionFields() {
+    var isMission = (($("#gc-c-type") || {}).value === "mission_pool");
+    var wrap = $("#gc-mission-fields");
+    if (wrap) wrap.style.display = isMission ? "" : "none";
+    // Mission Pool is answered inside the Mini App; it has no external
+    // provider or destination path (campaign_centre._ALLOWED_OPEN_MODES_BY_TYPE).
+    ["gc-c-provider", "gc-c-path"].forEach(function (id) {
+      var node = $("#" + id);
+      if (node) node.style.display = isMission ? "none" : "";
+    });
+    if (isMission) { applyMissionTypeVisibility(); loadMissionPools(); }
+  }
+
+  function loadMissionPools() {
+    var sel = $("#gc-m-pool");
+    if (!sel || sel.dataset.loaded === "1") return;
+    // The compatible-pool set is decided by the backend
+    // (voucher_pool_service.CAMPAIGN_ALLOCATABLE_SCOPES minus the reserved
+    // WELCOME/T1-T5/affiliate pools), never by a list hardcoded here (§29).
+    apiSoft("/api/admin/mission-pool/pools").then(function (r) {
+      if (!r || r.status !== "ok") { sel.innerHTML = '<option value="">Failed to load pools</option>'; return; }
+      var pools = r.pools || [];
+      sel.dataset.loaded = "1";
+      sel.innerHTML = pools.length
+        ? pools.map(function (p) {
+            return '<option value="' + esc(p.pool_id) + '">' + esc(p.pool_id) +
+              " — " + esc(p.name || "") + " (" + ((p.stock || {}).available || 0) + " available)</option>";
+          }).join("")
+        : '<option value="">No mission-compatible pools — register one in Voucher Centre</option>';
+    }).catch(function () {
+      sel.innerHTML = '<option value="">Failed to load pools</option>';
+    });
+  }
+
+  function missionConfigFromForm() {
+    var type = ($("#gc-m-type") || {}).value || "multiple_choice";
+    var cfg = { mission_type: type, prompt: ($("#gc-m-prompt").value || "").trim() };
+    if (type === "multiple_choice" || type === "single_choice") {
+      cfg.options = ($("#gc-m-options").value || "").split(",")
+        .map(function (o) { return o.trim(); })
+        .filter(function (o) { return o.length; })
+        .map(function (o) { return { id: o, label: o }; });
+      cfg.correct_answer = ($("#gc-m-correct").value || "").trim();
+    } else if (type === "keyword") {
+      cfg.correct_answer = ($("#gc-m-correct").value || "").trim();
+      cfg.keyword_case_insensitive = !!($("#gc-m-case-insensitive") || {}).checked;
+    } else {
+      cfg.min_chars = parseInt($("#gc-m-min-chars").value, 10) || 1;
+      cfg.max_chars = parseInt($("#gc-m-max-chars").value, 10) || 500;
+    }
+    return cfg;
+  }
+
+  function missionPoolFromForm() {
+    return {
+      pool_id: ($("#gc-m-pool") || {}).value || "",
+      pool_type: "voucher_drop",
+      winner_count: parseInt($("#gc-m-winners").value, 10) || 0,
+      allocation_method: ($("#gc-m-allocation") || {}).value || "random_qualified",
+      eligibility_policy: {
+        require_correct_answer: !!$("#gc-m-el-correct").checked,
+        exclude_voucher_hunter: !!$("#gc-m-el-hunter").checked,
+        exclude_multi_account_risk: !!$("#gc-m-el-multi").checked,
+        exclude_blocked: !!$("#gc-m-el-blocked").checked,
+        require_gaming_account: !!$("#gc-m-el-gaming").checked,
+      },
+    };
+  }
+
+  /**
+   * §26: once Phase 1 has frozen mission_config (any entry exists), the
+   * fields are disabled PROACTIVELY with an explanation, instead of letting
+   * an operator type a change and then surfacing the backend's 409.
+   * Schedule fields are reported separately because Phase 1 freezes
+   * mission_config only — it has no freeze rule for `schedule` (§27).
+   */
+  function applyMissionFreeze(state) {
+    var locked = !!(state && state.mission_config_locked);
+    MISSION_CONFIG_INPUT_IDS.forEach(function (id) {
+      var node = $("#" + id);
+      if (node) node.disabled = locked;
+    });
+    var note = $("#gc-m-lock-note");
+    if (note) {
+      note.style.display = locked ? "" : "none";
+      note.textContent = locked
+        ? "Mission details can no longer be edited because participants have already submitted entries. (" +
+          ((state && state.entries) || 0) + " entries)"
+        : "";
+    }
+    var schedLocked = !(state && state.schedule_editable);
+    ["gc-c-starts", "gc-c-ends"].forEach(function (id) {
+      var node = $("#" + id);
+      if (node) node.disabled = schedLocked;
+    });
+  }
+
+  // Only the actions valid for the current backend state are offered (§30).
+  function missionActionsFor(state) {
+    var status = state.campaign_status;
+    var out = [];
+    if (state.cancelled) { out.push(["resume", "Resume (undo cancel)"]); return out; }
+    if (status === "draft" || status === "scheduled") out.push(["publish", "Publish"]);
+    if (status === "live") { out.push(["pause", "Pause"]); out.push(["close", "Close Mission"]); out.push(["cancel", "Cancel Mission"]); }
+    if (status === "paused") { out.push(["publish", "Resume"]); out.push(["cancel", "Cancel Mission"]); }
+    if (status === "ended" || status === "archived") {
+      out.push([state.processing_stage === "completed" ? "summary" : "process",
+                state.processing_stage === "completed" ? "View Summary"
+                  : (state.processing_stage === "pending" ? "Process Campaign" : "Resume Processing")]);
+    }
+    return out;
+  }
+
+  function renderMissionOps(state, summary) {
+    var wrap = $("#gc-mission-ops");
+    if (!wrap) return;
+    wrap.style.display = "";
+    $("#gc-mo-name").textContent = state.campaign_id;
+
+    var linkEl = $("#gc-mo-link");
+    if (state.mission_link) {
+      linkEl.innerHTML = 'Mission Link: <code>' + esc(state.mission_link) + '</code> ' +
+        '<button class="btn" id="gc-mo-copy-link">Copy Link</button>';
+      var copyBtn = $("#gc-mo-copy-link");
+      if (copyBtn) copyBtn.addEventListener("click", function () {
+        try { navigator.clipboard.writeText(state.mission_link); toast("✅ Mission link copied", "success"); } catch (e) {}
+      });
+    } else {
+      linkEl.textContent = "Mission Link unavailable (" + (state.mission_link_unavailable_reason || "unknown") + ")";
+    }
+
+    $("#gc-mo-actions").innerHTML = missionActionsFor(state).map(function (a) {
+      return '<button class="btn" data-mission-action="' + a[0] + '" data-id="' + esc(state.campaign_id) + '">' + esc(a[1]) + "</button>";
+    }).join(" ");
+
+    var g = (summary && summary.grains) || {};
+    var reasons = (summary && summary.disqualification_reasons) || {};
+    var REASON_LABELS = {
+      duplicate_identity: "Duplicate identity", duplicate_gaming_account: "Duplicate gaming account",
+      voucher_hunter: "Voucher hunter", multi_account_risk: "Multi-account risk",
+      incorrect_answer: "Incorrect answer", missing_gaming_account: "Missing gaming account",
+      blocked: "Blocked", already_rewarded: "Already rewarded", invalid_submission: "Invalid submission",
+      campaign_cancelled: "Campaign cancelled", submitted_after_close: "Submitted after close",
+      out_of_stock: "Out of stock", other: "Other",
+    };
+    var rows = [
+      ["Campaign Status", state.campaign_status + (state.cancelled ? " (cancelled)" : "")],
+      ["Processing stage", (summary && summary.processing_stage) || state.processing_stage],
+      ["Close cutoff (closed_at)", state.closed_at || "—"],
+      ["Submissions", g.submissions_telegram_user_grain],
+      ["Deduplicated identities", g.deduplicated_identity_grain],
+      ["Qualified", g.qualified_identity_grain],
+      ["Disqualified", g.disqualified_telegram_user_grain],
+      ["Winner target", summary && summary.winner_count_requested],
+      ["Winners selected", g.winners_identity_grain],
+      ["Rewards allocated", g.rewards_allocated_voucher_grain],
+      ["Notifications sent", g.notifications_sent_voucher_grain],
+      ["Notification failures", g.notifications_failed_voucher_grain],
+    ].map(function (r) {
+      return "<tr><td>" + esc(r[0]) + "</td><td>" + esc(r[1] == null ? "—" : String(r[1])) + "</td></tr>";
+    }).join("");
+    var reasonRows = Object.keys(reasons).map(function (k) {
+      return "<tr><td>" + esc(REASON_LABELS[k] || k) + "</td><td>" + esc(String(reasons[k])) + "</td></tr>";
+    }).join("");
+    $("#gc-mo-summary").innerHTML =
+      '<table class="data-table"><tbody>' + rows + "</tbody></table>" +
+      (reasonRows ? '<div class="sub" style="margin-top:8px;">Disqualification reasons (admin only)</div>' +
+        '<table class="data-table"><tbody>' + reasonRows + "</tbody></table>" : "");
+  }
+
+  // api()/apiPost() reject on a non-2xx, so every mission call is caught:
+  // an operator must never be left with a stale panel and no explanation.
+  function apiSoft(path) {
+    return api(path).catch(function (e) { return { status: "error", code: e.message }; });
+  }
+
+  function openMissionOps(campaignId) {
+    gcMissionSelectedId = campaignId;
+    Promise.all([
+      apiSoft("/api/admin/mission-pool/" + encodeURIComponent(campaignId) + "/edit-state"),
+      apiSoft("/api/admin/mission-pool/" + encodeURIComponent(campaignId) + "/summary"),
+    ]).then(function (res) {
+      var state = res[0] || {};
+      if (state.status !== "ok") { toast("❌ " + (state.code || "not_a_mission_campaign"), "error"); return; }
+      applyMissionFreeze(state);
+      renderMissionOps(state, (res[1] && res[1].status === "ok") ? res[1] : {});
+      var saveBtn = $("#gc-save-mission-btn");
+      if (saveBtn) saveBtn.style.display = "";
+    });
+  }
+
+  // Close and Cancel are irreversible-in-effect, so both confirm first and
+  // both go through the official Phase 1 endpoints. Close is idempotent
+  // server-side and never moves closed_at on a repeat (§31).
+  var MISSION_CONFIRM = {
+    close: "Close this mission now?\n\nNew valid entries after the close cutoff will not be eligible for rewards.",
+    cancel: "Cancel this mission?\n\nNew submissions and new reward distribution will stop.\n\nRewards already allocated to winners will remain valid.",
+  };
+
+  function runMissionAction(action, id) {
+    if (MISSION_CONFIRM[action] && !window.confirm(MISSION_CONFIRM[action])) return;
+    if (action === "summary") { openMissionOps(id); return; }
+    var path = (action === "publish" || action === "pause")
+      ? "/api/admin/gc-campaigns/" + encodeURIComponent(id) + "/" + action
+      // close / cancel / resume / process -> Phase 1 mission endpoints only.
+      // The UI never writes campaign status directly (§31).
+      : "/api/admin/mission-pool/" + encodeURIComponent(id) + "/" + action;
+    apiPost(path)
+      .catch(function (e) { return { status: "error", code: e.message }; })
+      .then(function (r) {
+        if (!r || r.status !== "ok") { toast("❌ " + ((r && r.code) || "action_failed"), "error"); }
+        else { toast("✅ " + action + " ok", "success"); }
+        loadGcCampaigns(true); openMissionOps(id);
+      });
+  }
+
   function bindGcCampaigns() {
+    var typeSel = $("#gc-c-type");
+    if (typeSel) typeSel.addEventListener("change", toggleMissionFields);
+    var missionTypeSel = $("#gc-m-type");
+    if (missionTypeSel) missionTypeSel.addEventListener("change", applyMissionTypeVisibility);
+    toggleMissionFields();
+
+    var saveBtn = $("#gc-save-mission-btn");
+    if (saveBtn) {
+      saveBtn.addEventListener("click", function () {
+        if (!gcMissionSelectedId) return;
+        var body = { mission_pool: missionPoolFromForm() };
+        // A frozen mission_config is simply not sent, so an unchanged PUT
+        // never trips the backend freeze check.
+        if (!$("#gc-m-prompt").disabled) body.mission_config = missionConfigFromForm();
+        apiPutJson("/api/admin/gc-campaigns/" + encodeURIComponent(gcMissionSelectedId), body).then(function (res) {
+          var d = res.d || res;
+          if (d.status !== "ok") {
+            toast(d.code === "mission_config_locked"
+              ? "❌ Mission details are frozen — participants have already submitted entries."
+              : "❌ " + (d.code || "save_failed"), "error");
+            return;
+          }
+          toast("✅ Mission saved", "success");
+          openMissionOps(gcMissionSelectedId);
+        });
+      });
+    }
+
     var createBtn = $("#gc-create-campaign-btn");
     if (createBtn) {
       createBtn.addEventListener("click", function () {
+        var type = $("#gc-c-type").value;
         var body = {
           campaign_id: ($("#gc-c-id").value || "").trim(),
           name: ($("#gc-c-name").value || "").trim(),
-          type: $("#gc-c-type").value,
+          type: type,
           schedule: {
             starts_at: $("#gc-c-starts").value ? new Date($("#gc-c-starts").value).toISOString() : null,
             ends_at: $("#gc-c-ends").value ? new Date($("#gc-c-ends").value).toISOString() : null,
@@ -4861,20 +5153,36 @@
           telegram: { channel_username: ($("#gc-c-channel").value || "").trim() },
           destination: { provider_id: ($("#gc-c-provider").value || "").trim(), path: ($("#gc-c-path").value || "").trim(), open_mode: "telegram_web_app", ready: false },
         };
+        if (type === "mission_pool") {
+          body.mission_config = missionConfigFromForm();
+          body.mission_pool = missionPoolFromForm();
+          // Mission Pool has no external destination; campaign_centre only
+          // allows telegram_web_app for this type.
+          body.destination = { open_mode: "telegram_web_app", ready: false };
+        }
         apiPostJson("/api/admin/gc-campaigns", body).then(function (res) {
           if (!res.ok || res.d.status !== "ok") { toast("❌ " + (res.d && res.d.code || "create_failed"), "error"); return; }
           toast("✅ Campaign created as draft", "success");
           loadGcCampaigns(true);
+          if (type === "mission_pool") openMissionOps(body.campaign_id);
         });
       });
     }
     document.addEventListener("click", function (e) {
+      var missionBtn = e.target && e.target.closest && e.target.closest("[data-mission-action]");
+      if (missionBtn) { runMissionAction(missionBtn.dataset.missionAction, missionBtn.dataset.id); return; }
       var btn = e.target && e.target.closest && e.target.closest("[data-gc-action]");
       if (!btn) return;
       var action = btn.dataset.gcAction, id = btn.dataset.id;
       if (action === "publish") apiPost("/api/admin/gc-campaigns/" + id + "/publish").then(function (r) { if (r.status !== "ok") toast("❌ " + r.code, "error"); loadGcCampaigns(true); });
       else if (action === "pause") apiPost("/api/admin/gc-campaigns/" + id + "/pause").then(function () { loadGcCampaigns(true); });
       else if (action === "archive") apiPost("/api/admin/gc-campaigns/" + id + "/archive").then(function () { loadGcCampaigns(true); });
+      else if (action === "mission") openMissionOps(id);
+      else if (action === "duplicate") apiPost("/api/admin/gc-campaigns/" + id + "/duplicate").then(function (r) {
+        if (!r || r.status !== "ok") { toast("❌ " + ((r && r.code) || "duplicate_failed"), "error"); return; }
+        toast("✅ Duplicated as draft " + r.campaign_id, "success");
+        loadGcCampaigns(true);
+      });
       else if (action === "preview") api("/api/admin/gc-campaigns/" + id + "/preview").then(function (r) {
         alert("Card: " + JSON.stringify(r.card, null, 2) + "\n\nBadges: " + (r.admin_badges || []).join(", ") + "\n\nVisibility: " + JSON.stringify(r.effective_visibility));
       });

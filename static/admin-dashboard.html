@@ -1696,6 +1696,7 @@
               <option value="tournament">tournament</option>
               <option value="external_subscription_verification">external_subscription_verification</option>
               <option value="external_website">external_website</option>
+              <option value="mission_pool">mission_pool (Mission Reward Pool)</option>
             </select>
             <input class="filter-input" id="gc-c-provider" placeholder="provider_id" style="margin:0;" />
             <input class="filter-input" id="gc-c-path" placeholder="destination path e.g. /july-tournament" style="margin:0;" />
@@ -1703,9 +1704,58 @@
             <input class="filter-input" id="gc-c-starts" type="datetime-local" style="margin:0;" />
             <input class="filter-input" id="gc-c-ends" type="datetime-local" style="margin:0;" />
           </div>
+          <!-- MISSION REWARD POOL fields. Hidden unless Campaign Type is
+               mission_pool; every field maps 1:1 onto the Phase 1 schema
+               (mission_pool.validate_mission_config /
+               validate_mission_pool_config). No frontend-only configuration. -->
+          <div id="gc-mission-fields" style="display:none;margin-top:12px;padding-top:12px;border-top:1px solid var(--border,rgba(255,255,255,.1));">
+            <div class="section-title" style="margin-bottom:8px;">Mission Reward Pool</div>
+            <div id="gc-m-lock-note" class="sub" style="display:none;margin-bottom:8px;color:#f5b63f;"></div>
+            <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:8px;">
+              <select class="filter-input" id="gc-m-type" style="margin:0;">
+                <option value="multiple_choice">multiple_choice</option>
+                <option value="single_choice">single_choice</option>
+                <option value="keyword">keyword</option>
+                <option value="feedback">feedback</option>
+              </select>
+              <input class="filter-input" id="gc-m-prompt" placeholder="Question / instruction" style="margin:0;" />
+              <input class="filter-input" id="gc-m-options" placeholder="Options (comma separated)" style="margin:0;" />
+              <input class="filter-input" id="gc-m-correct" placeholder="Correct answer" style="margin:0;" />
+              <label class="sub" id="gc-m-ci-wrap" style="display:flex;align-items:center;gap:6px;margin:0;">
+                <input type="checkbox" id="gc-m-case-insensitive" checked /> keyword_case_insensitive
+              </label>
+              <input class="filter-input" id="gc-m-min-chars" type="number" min="1" placeholder="min_chars" style="margin:0;" />
+              <input class="filter-input" id="gc-m-max-chars" type="number" min="1" placeholder="max_chars" style="margin:0;" />
+              <select class="filter-input" id="gc-m-pool" style="margin:0;"><option value="">Loading pools…</option></select>
+              <input class="filter-input" id="gc-m-winners" type="number" min="1" placeholder="winner_count" style="margin:0;" />
+              <select class="filter-input" id="gc-m-allocation" style="margin:0;">
+                <option value="random_qualified">random_qualified</option>
+                <option value="first_qualified">first_qualified</option>
+              </select>
+            </div>
+            <div class="sub" style="margin-top:8px;">Eligibility policy</div>
+            <div style="display:flex;gap:14px;flex-wrap:wrap;margin-top:4px;">
+              <label class="sub" style="display:flex;align-items:center;gap:6px;"><input type="checkbox" id="gc-m-el-correct" checked /> require_correct_answer</label>
+              <label class="sub" style="display:flex;align-items:center;gap:6px;"><input type="checkbox" id="gc-m-el-hunter" checked /> exclude_voucher_hunter</label>
+              <label class="sub" style="display:flex;align-items:center;gap:6px;"><input type="checkbox" id="gc-m-el-multi" checked /> exclude_multi_account_risk</label>
+              <label class="sub" style="display:flex;align-items:center;gap:6px;"><input type="checkbox" id="gc-m-el-blocked" checked /> exclude_blocked</label>
+              <label class="sub" style="display:flex;align-items:center;gap:6px;"><input type="checkbox" id="gc-m-el-gaming" /> require_gaming_account</label>
+            </div>
+            <div class="sub" style="margin-top:8px;">Only pools the backend allows Campaign Rewards to allocate from are listed (protected WELCOME / T1–T5 / affiliate denomination pools are excluded server-side).</div>
+          </div>
           <button class="btn primary" id="gc-create-campaign-btn" style="margin-top:10px;">Create draft</button>
+          <button class="btn" id="gc-save-mission-btn" style="margin-top:10px;display:none;">Save mission changes</button>
           <div class="sub" style="margin-top:6px;">New campaigns always start as <b>draft</b> and stay admin-only until published — see Providers tab to mark a destination ready.</div>
         </div>
+
+        <!-- MISSION OPERATIONS: lifecycle + summary for the selected mission -->
+        <div class="section" id="gc-mission-ops" style="margin-bottom:16px;display:none;">
+          <div class="section-title">Mission Operations — <span id="gc-mo-name"></span></div>
+          <div id="gc-mo-link" class="sub" style="margin-bottom:8px;"></div>
+          <div id="gc-mo-actions" style="display:flex;gap:8px;flex-wrap:wrap;"></div>
+          <div id="gc-mo-summary" style="margin-top:12px;"></div>
+        </div>
+
         <div class="section-title" style="margin-bottom:8px;">Campaigns</div>
         <div id="gc-campaigns-body"></div>
       </section>
