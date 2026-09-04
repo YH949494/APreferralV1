@@ -2736,6 +2736,13 @@ from mission_pool import mission_pool_admin_bp, mission_pool_bp
 app.register_blueprint(mission_pool_bp)
 app.register_blueprint(mission_pool_admin_bp)
 
+# Phase 2 UX layer. Read-only presentation/admin-editor endpoints only; the
+# Phase 1 engine above is unchanged and stays fully functional without these,
+# so Phase 2 rolls back by not registering these two blueprints.
+from mission_pool_ux import mission_pool_ux_admin_bp, mission_pool_ux_bp
+app.register_blueprint(mission_pool_ux_bp)
+app.register_blueprint(mission_pool_ux_admin_bp)
+
 from event_banner import event_banner_admin_bp, event_banner_public_bp
 app.register_blueprint(event_banner_admin_bp)
 app.register_blueprint(event_banner_public_bp)
