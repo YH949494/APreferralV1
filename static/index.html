@@ -937,6 +937,67 @@
       font-weight: 700 !important;
     }
 
+    /* ===== LUCKY GAMES CARD LIST (admin-managed, lucky_games.py) ===== */
+    #lucky-games-section { padding: 14px; }
+    .lg-cards-row {
+      display: flex;
+      gap: 10px;
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
+      padding-bottom: 2px;
+      margin-top: 10px;
+    }
+    .lg-card {
+      flex: 0 0 auto;
+      width: 132px;
+      background: var(--bg-card-alt);
+      border: 1px solid var(--border-light);
+      border-radius: 14px;
+      padding: 10px;
+      cursor: pointer;
+      -webkit-tap-highlight-color: transparent;
+      transition: border-color .15s, transform .1s;
+      text-decoration: none;
+      color: var(--text-main);
+    }
+    .lg-card:active { transform: scale(.97); }
+    .lg-card-img-wrap {
+      width: 100%;
+      height: 78px;
+      border-radius: 10px;
+      background: rgba(245,182,63,.13);
+      border: 1px solid rgba(245,182,63,.25);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+      margin-bottom: 8px;
+    }
+    .lg-card-img-wrap img { width: 100%; height: 100%; object-fit: cover; }
+    .lg-card-name {
+      font-family: var(--font-display);
+      font-weight: 700;
+      font-size: 12.5px;
+      color: var(--text-main);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .lg-card-label {
+      display: inline-block;
+      margin-top: 4px;
+      padding: 1px 7px;
+      border-radius: 999px;
+      background: #f4f6ff;
+      color: #5a67d8;
+      font-size: 10.5px;
+    }
+    .lg-card-meta {
+      margin-top: 4px;
+      font-size: 10.5px;
+      color: var(--text-muted);
+    }
+
     /* ===== SECONDARY CHIPS ===== */
     .ap-chips-grid {
       display: grid;
@@ -1729,6 +1790,14 @@
         <div class="ap-tile-sub" data-i18n="xp_per_friend">+60 XP per friend</div>
       </div>
 
+    </div>
+
+    <!-- LUCKY GAMES CARD LIST (admin-managed, lucky_games.py) — hidden until
+         a published card actually loads; a fetch failure or empty catalogue
+         leaves this collapsed rather than showing a broken section. -->
+    <div id="lucky-games-section" class="section" style="display:none;">
+      <h3 data-i18n="lucky_games_section_title">🎰 Lucky Games</h3>
+      <div id="lucky-games-list" class="lg-cards-row"></div>
     </div>
 
     <!-- SECONDARY CHIPS 3-COL -->
@@ -7914,6 +7983,115 @@ ${referral}`;
       }
 
       loadEventBanner();
+    })();
+  </script>
+
+  <script>
+    // Lucky Games card list (admin-managed, lucky_games.py) — replaces
+    // hard-coded HTML/JS game cards with GET /api/lucky-games. Mirrors
+    // eventBannerFeature's shape: a self-contained IIFE that fails safe
+    // (section stays hidden) on any fetch/render error so it never breaks
+    // the rest of the Mini App.
+    (function luckyGamesFeature() {
+      function openLuckyGameUrl(url) {
+        const target = String(url || "").trim();
+        if (!target) return;
+        if (/^tg:\/\//i.test(target) || /^https?:\/\/(t\.me|telegram\.me)\//i.test(target)) {
+          if (typeof openTelegramSafeLink === "function") { openTelegramSafeLink(target); return; }
+        }
+        const waApp = window.Telegram?.WebApp;
+        if (waApp && typeof waApp.openLink === "function") {
+          try { waApp.openLink(target); return; } catch (_) {}
+        }
+        window.open(target, "_blank", "noopener,noreferrer");
+      }
+
+      function renderLuckyGameCard(game) {
+        const card = document.createElement("div");
+        card.className = "lg-card";
+
+        const imgWrap = document.createElement("div");
+        imgWrap.className = "lg-card-img-wrap";
+        const fallbackIcon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+        fallbackIcon.setAttribute("width", "28");
+        fallbackIcon.setAttribute("height", "28");
+        fallbackIcon.setAttribute("viewBox", "0 0 24 24");
+        fallbackIcon.setAttribute("fill", "none");
+        fallbackIcon.setAttribute("stroke", "#f5b63f");
+        fallbackIcon.setAttribute("stroke-width", "1.6");
+        fallbackIcon.innerHTML = '<path d="M9.9 15.5A2 2 0 0 0 8.5 14L2.4 12.5a.5.5 0 0 1 0-1L8.5 10A2 2 0 0 0 9.9 8.5L11.5 2.4a.5.5 0 0 1 1 0L14 8.5a2 2 0 0 0 1.4 1.4l6.2 1.6a.5.5 0 0 1 0 1L15.5 14a2 2 0 0 0-1.4 1.4l-1.6 6.2a.5.5 0 0 1-1 0z"/>';
+
+        // No image_url at all → show the fallback icon directly, never an
+        // <img> with an empty src (which would itself fire onerror).
+        if (game.image_url) {
+          const img = document.createElement("img");
+          img.alt = "";
+          img.onerror = function () {
+            // Image failed to load — swap to the same fallback icon rather
+            // than leaving a broken-image glyph.
+            imgWrap.innerHTML = "";
+            imgWrap.appendChild(fallbackIcon);
+          };
+          img.src = game.image_url;
+          imgWrap.appendChild(img);
+        } else {
+          imgWrap.appendChild(fallbackIcon);
+        }
+        card.appendChild(imgWrap);
+
+        const nameEl = document.createElement("div");
+        nameEl.className = "lg-card-name";
+        nameEl.textContent = game.name || ""; // textContent — never innerHTML with API text
+        card.appendChild(nameEl);
+
+        if (game.label) {
+          const labelEl = document.createElement("div");
+          labelEl.className = "lg-card-label";
+          labelEl.textContent = game.label;
+          card.appendChild(labelEl);
+        }
+
+        const metaParts = [];
+        if (game.volatility) metaParts.push(game.volatility);
+        if (game.max_win) metaParts.push("Max " + game.max_win);
+        if (metaParts.length) {
+          const metaEl = document.createElement("div");
+          metaEl.className = "lg-card-meta";
+          metaEl.textContent = metaParts.join(" · ");
+          card.appendChild(metaEl);
+        }
+
+        if (game.game_url) {
+          card.addEventListener("click", function () { openLuckyGameUrl(game.game_url); });
+        }
+        return card;
+      }
+
+      async function loadLuckyGames() {
+        const section = document.getElementById("lucky-games-section");
+        const list = document.getElementById("lucky-games-list");
+        if (!section || !list) return;
+        try {
+          const res = await fetch(`${API_BASE}/api/lucky-games`);
+          if (!res.ok) { section.style.display = "none"; return; }
+          const data = await res.json();
+          const games = (data && Array.isArray(data.games)) ? data.games : [];
+          const validGames = games.filter(function (g) { return g && g.name; });
+          if (!validGames.length) { section.style.display = "none"; return; }
+
+          list.innerHTML = "";
+          validGames.forEach(function (game) {
+            list.appendChild(renderLuckyGameCard(game));
+          });
+          section.style.display = "block";
+        } catch (_) {
+          // Network/parse failure — leave the section hidden; the rest of
+          // the Mini App keeps working unaffected.
+          section.style.display = "none";
+        }
+      }
+
+      loadLuckyGames();
     })();
   </script>
 

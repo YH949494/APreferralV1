@@ -63,6 +63,7 @@
       /* Action tiles */
       lucky_game: "Lucky Game",
       loading_today: "Loading today's pick…",
+      lucky_games_section_title: "🎰 Lucky Games",
       invite_earn: "Invite & earn",
       xp_per_friend: "+60 XP per friend",
 
@@ -287,6 +288,7 @@
 
       lucky_game: "เกมโชคลาภ",
       loading_today: "กำลังโหลดวันนี้…",
+      lucky_games_section_title: "🎰 เกมโชคลาภ",
       invite_earn: "ชวนเพื่อน & รับรางวัล",
       xp_per_friend: "+60 XP ต่อเพื่อน",
 
@@ -500,6 +502,7 @@
 
       lucky_game: "Lucky Game",
       loading_today: "Memuat pilihan hari ini…",
+      lucky_games_section_title: "🎰 Lucky Games",
       invite_earn: "Ajak & dapatkan",
       xp_per_friend: "+60 XP per teman",
 
