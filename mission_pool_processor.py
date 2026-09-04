@@ -101,12 +101,43 @@ def max_qualified_for_selection() -> int:
 NOTIFY_MAX_ATTEMPTS = 5
 NOTIFY_BACKOFF_BASE_SECONDS = 60
 
+# §14 (Phase 2): final user-facing copy. The last line pairs with the
+# inline "🎁 Redeem Reward" button built by
+# mission_pool_ux.winner_cta_reply_markup; when no button can be built (no
+# BOT_USERNAME configured) the fallback line is used instead, so the message
+# never tells the user to tap a button that is not there.
 WINNER_MESSAGE_TEMPLATE = (
+    "🎉 Congratulations!\n\n"
+    "You've been selected as a winner of {campaign_name}!\n\n"
+    "Your reward is now available in Campaign Rewards.\n\n"
+    "Tap below to redeem your code."
+)
+
+WINNER_MESSAGE_TEMPLATE_NO_CTA = (
     "🎉 Congratulations!\n\n"
     "You've been selected as a winner of {campaign_name}!\n\n"
     "Your reward is now available in Campaign Rewards.\n\n"
     "Open the bot and redeem your code now."
 )
+
+
+def _winner_message(campaign_id: str, campaign_name: str) -> tuple[str, dict | None]:
+    """Winner notification body + optional deep-link CTA.
+
+    The CTA only ever NAVIGATES: it opens the Mini App at this campaign. It
+    allocates nothing, generates no voucher and creates no second reward
+    record — the reward already exists in ``campaign_rewards`` and Campaign
+    Rewards stays the single canonical surface. A failure to build the link
+    degrades to a plain text message rather than blocking the send."""
+    try:
+        from mission_pool_ux import winner_cta_reply_markup
+
+        markup = winner_cta_reply_markup(campaign_id)
+    except Exception:
+        logger.warning("[MISSION_POOL] winner_cta_build_failed campaign=%s", campaign_id, exc_info=True)
+        markup = None
+    template = WINNER_MESSAGE_TEMPLATE if markup else WINNER_MESSAGE_TEMPLATE_NO_CTA
+    return template.format(campaign_name=campaign_name), markup
 
 
 # ---------------------------------------------------------------------------
@@ -1001,7 +1032,7 @@ def _notification_pass(fence: _Fence, campaign: dict, deadline: float) -> dict:
         for reward in rows:
             uid = int(reward["telegram_user_id"])
             attempts = int(reward.get("notification_attempts") or 0) + 1
-            text = WINNER_MESSAGE_TEMPLATE.format(campaign_name=campaign_name)
+            text, reply_markup = _winner_message(campaign_id, campaign_name)
 
             # Claim BEFORE sending: atomically bump the attempt counter and
             # push the next-attempt time out, so a second worker scanning the
@@ -1025,7 +1056,7 @@ def _notification_pass(fence: _Fence, campaign: dict, deadline: float) -> dict:
                 continue
 
             try:
-                ok, err, blocked = send_telegram_http_message(uid, text)
+                ok, err, blocked = send_telegram_http_message(uid, text, reply_markup=reply_markup)
             except Exception as exc:  # never let one send abort the batch
                 ok, err, blocked = False, f"{exc.__class__.__name__}", False
 
