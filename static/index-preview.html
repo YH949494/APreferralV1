@@ -582,6 +582,79 @@
       margin-bottom: 4px;
     }
 
+    /* PREVIEW: referral-pack hero card — same visual language as #voucher-section */
+    .ap-referral-pack {
+      position: relative;
+      border-radius: 20px;
+      overflow: hidden;
+      border: 1px solid rgba(255,94,0,.28);
+      margin-bottom: 16px;
+      background: linear-gradient(160deg, #241507, #150d05);
+      box-shadow: 0 24px 50px -24px rgba(255,94,0,.4);
+    }
+    .ap-referral-pack-bg {
+      position: absolute;
+      inset: 0;
+      background:
+        radial-gradient(120% 90% at 12% -10%, rgba(255,94,0,.35), transparent 60%),
+        radial-gradient(100% 80% at 105% 115%, rgba(245,183,63,.22), transparent 55%);
+    }
+    .ap-referral-pack-inner {
+      position: relative;
+      padding: 18px 16px 16px;
+    }
+    .ap-referral-pack-kicker {
+      font-size: 10.5px;
+      font-weight: 800;
+      letter-spacing: 1.4px;
+      color: #ff9b5c;
+      margin-bottom: 4px;
+    }
+    .ap-referral-pack-title {
+      font-family: var(--font-display);
+      font-weight: 800;
+      font-size: 19px;
+      color: var(--text-main);
+      margin-bottom: 14px;
+    }
+    .ap-referral-pack-tiers {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      margin-bottom: 14px;
+    }
+    .ap-referral-pack-tier {
+      display: flex;
+      align-items: baseline;
+      gap: 8px;
+      background: rgba(255,255,255,.05);
+      border: 1px solid var(--border-light);
+      border-radius: 10px;
+      padding: 9px 12px;
+    }
+    .ap-referral-pack-tier .amt {
+      font-family: var(--font-display);
+      font-weight: 800;
+      font-size: 15px;
+      color: #f5b63f;
+    }
+    .ap-referral-pack-tier .sep {
+      color: var(--text-soft);
+      font-weight: 700;
+    }
+    .ap-referral-pack-tier .req {
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: .3px;
+      color: var(--text-muted);
+    }
+    .ap-referral-pack-cta {
+      width: 100%;
+      justify-content: center;
+      font-size: 15px;
+      font-weight: 700;
+    }
+
     /* Campaign voucher message + button inside hero card */
     #campaign-voucher-message {
       font-size: 13px;
@@ -1528,122 +1601,6 @@
       <img id="ap-event-banner-img" src="" alt="" decoding="async" loading="eager">
     </button>
 
-    <!-- CAMPAIGN HERO CARD (#voucher-section) -->
-    <div id="campaign-centre-root"></div>
-    <div id="voucher-section" style="display:block;">
-      <div class="ap-hero-bg">
-        <img id="ap-hero-img" src="" alt="" onerror="this.style.display='none'" style="display:none;">
-        <div class="ap-hero-bg-grad"></div>
-      </div>
-      <div class="ap-hero-inner">
-
-        <!-- State A: active drop, eligible user -->
-        <div id="ap-hero-drop-state" style="display:none;">
-          <div class="ap-hero-top-row">
-            <span class="ap-hero-live-badge">
-              <span class="ap-hero-live-dot"></span>
-              <span data-i18n="live_drop">LIVE DROP</span>
-            </span>
-            <span id="ap-hero-countdown" style="font-size:11px;color:#a39e95;font-weight:600;letter-spacing:.3px;"></span>
-          </div>
-          <div class="ap-hero-kicker" data-i18n="limited_drop">LIMITED DROP</div>
-          <div id="ap-hero-title" style="font-family:system-ui,-apple-system,'SF Pro Display',Inter,sans-serif;font-weight:800;font-size:20px;line-height:1.1;letter-spacing:normal;margin-bottom:4px;color:var(--text-main);"></div>
-          <div id="ap-hero-subtitle" style="font-size:13px;color:#cdbfb2;margin-bottom:12px;line-height:1.45;"></div>
-          <div id="ap-hero-stock" style="display:none;margin-bottom:10px;">
-            <div style="display:flex;align-items:center;justify-content:space-between;font-size:12px;color:#a39e95;margin-bottom:5px;">
-              <span data-i18n="vouchers_remaining">Vouchers remaining</span>
-              <span id="ap-hero-remaining" style="font-weight:700;color:#f2efe9;"></span>
-            </div>
-            <div style="height:5px;border-radius:99px;background:rgba(255,255,255,.08);overflow:hidden;">
-              <div id="ap-hero-stock-fill" style="height:100%;border-radius:99px;background:linear-gradient(90deg,var(--ap-orange),#f5b63f);width:0%;transition:width .4s ease;"></div>
-            </div>
-          </div>
-          <p id="campaign-voucher-message" style="display:none;"></p>
-          <button id="campaign-voucher-btn" type="button" class="btn btn-primary" style="display:none;width:100%;justify-content:center;"></button>
-          <div id="claim-error" role="status" aria-live="polite"></div>
-          <div id="campaign-voucher-list"></div>
-        </div>
-
-        <!-- State B: no active drop / ineligible user -->
-        <div id="ap-hero-nodrop-state" style="display:block;">
-          <div style="padding:4px 0 10px;">
-            <div style="font-family:var(--font-display);font-weight:700;font-size:15px;color:var(--text-main);margin-bottom:5px;" data-i18n="no_active_drop">No active drop right now</div>
-            <div style="font-size:13px;color:#a39e95;line-height:1.5;margin-bottom:14px;" data-i18n="no_active_drop_sub">Subscribe to our official channel to be the first to know when the next drop goes live.</div>
-            <a href="https://t.me/advantplayofficial" target="_blank" rel="noopener" class="btn btn-primary" style="display:inline-flex;width:100%;justify-content:center;text-decoration:none;" data-i18n="join_channel">Join Channel</a>
-          </div>
-        </div>
-
-        <div id="campaign-bonus-voucher" style="display:none; margin-top:16px;">
-          <h4 style="color:var(--status-success);font-size:14px;margin:0 0 6px;" data-i18n="campaign_reward">🎉 Campaign Reward</h4>
-          <p id="campaign-voucher-code" style="font-size:14px;color:var(--text-muted);" data-i18n="coming_soon" data-i18n-dynamic>Coming soon…</p>
-          <button id="copy-campaign-voucher-btn" class="btn btn-ghost" onclick="copyCampaignVoucherCode()" aria-label="Copy voucher code to clipboard" data-i18n="copy_to_clipboard">📋 Copy to clipboard</button>
-        </div>
-        <div id="bonus-voucher" style="display:none; margin-top:16px;">
-          <h4 style="color:#f5b63f;font-size:14px;margin:0 0 6px;" data-i18n="affiliate_rewards">🎁 Your Affiliate Rewards</h4>
-          <div id="affiliate-voucher-list"></div>
-        </div>
-      </div>
-    </div>
-
-    <!-- ACTIVE CAMPAIGNS (extra eligible drops, collapsible) -->
-    <div id="ap-campaigns-section" style="display:none;margin-bottom:14px;">
-      <div id="ap-campaigns-list" style="display:flex;flex-direction:column;gap:10px;"></div>
-    </div>
-
-    <!-- WELCOME PROGRESS (hidden, managed by JS) -->
-    <div class="section" id="welcome-progress-section" style="display:none;">
-      <div class="welcome-progress-card" aria-live="polite">
-        <div id="welcome-progress-body">
-          <h3 class="welcome-progress-title" id="welcome-progress-title" data-i18n="welcome_voucher_progress">🎁 Welcome Voucher Progress</h3>
-          <div class="welcome-progress-expiry" id="welcome-progress-expiry" style="display:none;"></div>
-          <div class="welcome-step-label" id="welcome-step-label">Step 1 of 3</div>
-          <div class="welcome-timeline" id="welcome-progress-squares"></div>
-          <div id="welcome-progress-countdown" class="welcome-progress-countdown" style="display:none;"></div>
-          <div id="welcome-progress-next-action" class="welcome-progress-next-action"></div>
-          <div id="welcome-channel-reminder" style="display:none;">
-            <p style="font-size:13px;color:var(--text-muted);margin:4px 0 8px;text-align:center;" data-i18n="join_channel_to_unlock">Join the channel to unlock your Welcome Voucher.</p>
-            <div style="display:flex;gap:8px;flex-wrap:wrap;">
-              <a href="https://t.me/advantplayofficial" target="_blank" rel="noopener" class="btn btn-primary welcome-cta" style="text-decoration:none;" data-i18n="join_channel">Join Channel</a>
-              <button id="welcome-verify-sub-btn" type="button" class="btn btn-ghost welcome-cta" data-i18n="verify_subscription">Verify Subscription</button>
-            </div>
-          </div>
-          <button id="welcome-checkin-btn" type="button" class="btn btn-primary welcome-cta" style="display:none;" data-i18n="check_in">Check In</button>
-        </div>
-        <div id="welcome-status-card-body" style="display:none;">
-          <h3 class="welcome-progress-title" id="welcome-status-title">🎉 Welcome Reward</h3>
-          <div class="welcome-status-badge" id="welcome-status-badge">🎁 Ready to Claim</div>
-          <p class="welcome-status-message" id="welcome-status-message">Your Welcome Reward has been unlocked.</p>
-          <p class="welcome-status-issued" id="welcome-status-issued" style="display:none;"></p>
-          <button id="welcome-view-reward-btn" type="button" class="btn btn-primary welcome-cta">🎟️ Claim Now</button>
-        </div>
-      </div>
-    </div>
-
-    <!-- IDENTITY MODAL -->
-    <div id="identity-modal" class="identity-modal">
-      <div class="identity-modal-body">
-        <div class="identity-top">
-          <div id="identity-tier-name" class="identity-tier">🌱 Rookie</div>
-          <button id="identity-modal-close" type="button" class="btn btn-ghost" data-i18n="close">Close</button>
-        </div>
-        <div id="identity-display-name" style="margin-top:6px; font-weight:600;">User</div>
-        <div id="identity-streak" class="badge" style="display:none; margin-top:8px;"></div>
-        <div class="identity-meta">
-          <span id="identity-weekly-rank">Weekly Rank: Not ranked yet</span>
-          <span id="identity-weekly-xp">Weekly XP: 0</span>
-          <span id="identity-weekly-ref">Weekly refs: 0</span>
-          <span id="identity-total-ref">Monthly Referrals: 0</span>
-          <span id="identity-total-xp">Total XP: 0</span>
-        </div>
-        <div class="identity-progress">
-          <div class="identity-progress-bar"><div id="identity-progress-fill" class="identity-progress-fill"></div></div>
-          <div id="identity-hint" class="identity-hint"></div>
-          <button id="share-rank-btn" type="button" class="btn btn-primary" style="margin-top:10px;" onclick="shareMyRankCaption()" data-i18n="share_my_rank">📣 Share My Rank</button>
-          <p id="share-rank-status" class="leaderboard-empty" style="display:none;margin-top:8px;" role="status" aria-live="polite"></p>
-        </div>
-      </div>
-    </div>
-
     <!-- GUIDED JOURNEY CARD (#progress-section) -->
     <div id="progress-section">
       <div class="ap-journey-header">
@@ -1717,6 +1674,143 @@
       <!-- Hidden journey copy elements (updated by updateProgressJourney, not shown) -->
       <div id="journey-main-copy" style="display:none;"></div>
       <div id="journey-sub-copy" style="display:none;"></div>
+    </div>
+
+    <!-- CAMPAIGN HERO CARD (#voucher-section) -->
+    <div id="campaign-centre-root"></div>
+    <div id="voucher-section" style="display:block;">
+      <div class="ap-hero-bg">
+        <img id="ap-hero-img" src="" alt="" onerror="this.style.display='none'" style="display:none;">
+        <div class="ap-hero-bg-grad"></div>
+      </div>
+      <div class="ap-hero-inner">
+
+        <!-- State A: active drop, eligible user -->
+        <div id="ap-hero-drop-state" style="display:none;">
+          <div class="ap-hero-top-row">
+            <span class="ap-hero-live-badge">
+              <span class="ap-hero-live-dot"></span>
+              <span data-i18n="live_drop">LIVE DROP</span>
+            </span>
+            <span id="ap-hero-countdown" style="font-size:11px;color:#a39e95;font-weight:600;letter-spacing:.3px;"></span>
+          </div>
+          <div class="ap-hero-kicker" data-i18n="limited_drop">LIMITED DROP</div>
+          <div id="ap-hero-title" style="font-family:system-ui,-apple-system,'SF Pro Display',Inter,sans-serif;font-weight:800;font-size:20px;line-height:1.1;letter-spacing:normal;margin-bottom:4px;color:var(--text-main);"></div>
+          <div id="ap-hero-subtitle" style="font-size:13px;color:#cdbfb2;margin-bottom:12px;line-height:1.45;"></div>
+          <div id="ap-hero-stock" style="display:none;margin-bottom:10px;">
+            <div style="display:flex;align-items:center;justify-content:space-between;font-size:12px;color:#a39e95;margin-bottom:5px;">
+              <span data-i18n="vouchers_remaining">Vouchers remaining</span>
+              <span id="ap-hero-remaining" style="font-weight:700;color:#f2efe9;"></span>
+            </div>
+            <div style="height:5px;border-radius:99px;background:rgba(255,255,255,.08);overflow:hidden;">
+              <div id="ap-hero-stock-fill" style="height:100%;border-radius:99px;background:linear-gradient(90deg,var(--ap-orange),#f5b63f);width:0%;transition:width .4s ease;"></div>
+            </div>
+          </div>
+          <p id="campaign-voucher-message" style="display:none;"></p>
+          <button id="campaign-voucher-btn" type="button" class="btn btn-primary" style="display:none;width:100%;justify-content:center;"></button>
+          <div id="claim-error" role="status" aria-live="polite"></div>
+          <div id="campaign-voucher-list"></div>
+        </div>
+
+        <!-- State B: no active drop / ineligible user -->
+        <div id="ap-hero-nodrop-state" style="display:block;">
+          <div style="padding:4px 0 10px;">
+            <div style="font-family:var(--font-display);font-weight:700;font-size:15px;color:var(--text-main);margin-bottom:5px;" data-i18n="no_active_drop">No active drop right now</div>
+            <div style="font-size:13px;color:#a39e95;line-height:1.5;margin-bottom:14px;" data-i18n="no_active_drop_sub">Subscribe to our official channel to be the first to know when the next drop goes live.</div>
+            <a href="https://t.me/advantplayofficial" target="_blank" rel="noopener" class="btn btn-primary" style="display:inline-flex;width:100%;justify-content:center;text-decoration:none;" data-i18n="join_channel">Join Channel</a>
+          </div>
+        </div>
+
+        <div id="campaign-bonus-voucher" style="display:none; margin-top:16px;">
+          <h4 style="color:var(--status-success);font-size:14px;margin:0 0 6px;" data-i18n="campaign_reward">🎉 Campaign Reward</h4>
+          <p id="campaign-voucher-code" style="font-size:14px;color:var(--text-muted);" data-i18n="coming_soon" data-i18n-dynamic>Coming soon…</p>
+          <button id="copy-campaign-voucher-btn" class="btn btn-ghost" onclick="copyCampaignVoucherCode()" aria-label="Copy voucher code to clipboard" data-i18n="copy_to_clipboard">📋 Copy to clipboard</button>
+        </div>
+        <div id="bonus-voucher" style="display:none; margin-top:16px;">
+          <h4 style="color:#f5b63f;font-size:14px;margin:0 0 6px;" data-i18n="affiliate_rewards">🎁 Your Affiliate Rewards</h4>
+          <div id="affiliate-voucher-list"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- PREVIEW: REFERRAL PACK CARD — full-bleed hero card, directly below the
+         live-drop voucher card. CTA reuses the existing handleReferralLinkClick()
+         handler (same function bound to #ap-get-referral-btn in #progress-section
+         above); the link result still renders into the existing
+         #referral-link-inline block, this button just triggers the same flow. -->
+    <div id="referral-pack-card" class="ap-referral-pack">
+      <div class="ap-referral-pack-bg"></div>
+      <div class="ap-referral-pack-inner">
+        <div class="ap-referral-pack-kicker">REFERRAL PACK</div>
+        <div class="ap-referral-pack-title">Earn up to $250</div>
+        <div class="ap-referral-pack-tiers">
+          <div class="ap-referral-pack-tier"><span class="amt">$10</span><span class="sep">&middot;</span><span class="req">10 REF</span></div>
+          <div class="ap-referral-pack-tier"><span class="amt">$20</span><span class="sep">&middot;</span><span class="req">25 REF</span></div>
+          <div class="ap-referral-pack-tier"><span class="amt">$50</span><span class="sep">&middot;</span><span class="req">50 REF</span></div>
+          <div class="ap-referral-pack-tier"><span class="amt">$125</span><span class="sep">&middot;</span><span class="req">150 REF</span></div>
+          <div class="ap-referral-pack-tier"><span class="amt">$250</span><span class="sep">&middot;</span><span class="req">250 REF</span></div>
+        </div>
+        <button type="button" class="btn btn-primary ap-referral-pack-cta" onclick="handleReferralLinkClick()">Tap to Get Your Referral Pack</button>
+      </div>
+    </div>
+
+    <!-- ACTIVE CAMPAIGNS (extra eligible drops, collapsible) -->
+    <div id="ap-campaigns-section" style="display:none;margin-bottom:14px;">
+      <div id="ap-campaigns-list" style="display:flex;flex-direction:column;gap:10px;"></div>
+    </div>
+
+    <!-- WELCOME PROGRESS (hidden, managed by JS) -->
+    <div class="section" id="welcome-progress-section" style="display:none;">
+      <div class="welcome-progress-card" aria-live="polite">
+        <div id="welcome-progress-body">
+          <h3 class="welcome-progress-title" id="welcome-progress-title" data-i18n="welcome_voucher_progress">🎁 Welcome Voucher Progress</h3>
+          <div class="welcome-progress-expiry" id="welcome-progress-expiry" style="display:none;"></div>
+          <div class="welcome-step-label" id="welcome-step-label">Step 1 of 3</div>
+          <div class="welcome-timeline" id="welcome-progress-squares"></div>
+          <div id="welcome-progress-countdown" class="welcome-progress-countdown" style="display:none;"></div>
+          <div id="welcome-progress-next-action" class="welcome-progress-next-action"></div>
+          <div id="welcome-channel-reminder" style="display:none;">
+            <p style="font-size:13px;color:var(--text-muted);margin:4px 0 8px;text-align:center;" data-i18n="join_channel_to_unlock">Join the channel to unlock your Welcome Voucher.</p>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;">
+              <a href="https://t.me/advantplayofficial" target="_blank" rel="noopener" class="btn btn-primary welcome-cta" style="text-decoration:none;" data-i18n="join_channel">Join Channel</a>
+              <button id="welcome-verify-sub-btn" type="button" class="btn btn-ghost welcome-cta" data-i18n="verify_subscription">Verify Subscription</button>
+            </div>
+          </div>
+          <button id="welcome-checkin-btn" type="button" class="btn btn-primary welcome-cta" style="display:none;" data-i18n="check_in">Check In</button>
+        </div>
+        <div id="welcome-status-card-body" style="display:none;">
+          <h3 class="welcome-progress-title" id="welcome-status-title">🎉 Welcome Reward</h3>
+          <div class="welcome-status-badge" id="welcome-status-badge">🎁 Ready to Claim</div>
+          <p class="welcome-status-message" id="welcome-status-message">Your Welcome Reward has been unlocked.</p>
+          <p class="welcome-status-issued" id="welcome-status-issued" style="display:none;"></p>
+          <button id="welcome-view-reward-btn" type="button" class="btn btn-primary welcome-cta">🎟️ Claim Now</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- IDENTITY MODAL -->
+    <div id="identity-modal" class="identity-modal">
+      <div class="identity-modal-body">
+        <div class="identity-top">
+          <div id="identity-tier-name" class="identity-tier">🌱 Rookie</div>
+          <button id="identity-modal-close" type="button" class="btn btn-ghost" data-i18n="close">Close</button>
+        </div>
+        <div id="identity-display-name" style="margin-top:6px; font-weight:600;">User</div>
+        <div id="identity-streak" class="badge" style="display:none; margin-top:8px;"></div>
+        <div class="identity-meta">
+          <span id="identity-weekly-rank">Weekly Rank: Not ranked yet</span>
+          <span id="identity-weekly-xp">Weekly XP: 0</span>
+          <span id="identity-weekly-ref">Weekly refs: 0</span>
+          <span id="identity-total-ref">Monthly Referrals: 0</span>
+          <span id="identity-total-xp">Total XP: 0</span>
+        </div>
+        <div class="identity-progress">
+          <div class="identity-progress-bar"><div id="identity-progress-fill" class="identity-progress-fill"></div></div>
+          <div id="identity-hint" class="identity-hint"></div>
+          <button id="share-rank-btn" type="button" class="btn btn-primary" style="margin-top:10px;" onclick="shareMyRankCaption()" data-i18n="share_my_rank">📣 Share My Rank</button>
+          <p id="share-rank-status" class="leaderboard-empty" style="display:none;margin-top:8px;" role="status" aria-live="polite"></p>
+        </div>
+      </div>
     </div>
 
     <!-- ACTION TILES 2-COL -->
