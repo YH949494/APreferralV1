@@ -222,6 +222,33 @@ def pool_stock(pool_id: str) -> dict:
     return {"available": available, "issued": issued}
 
 
+def pool_stock_bulk(pool_ids: list[str]) -> dict[str, dict]:
+    """``pool_stock`` for many pools in ONE aggregation.
+
+    The Mission admin landing page shows "codes available" for every mission
+    at once. Calling :func:`pool_stock` per pool would be two
+    ``count_documents`` per pool per page load; this is a single indexed
+    ``$match``/``$group``. The ``pool_source`` scoping is identical to
+    :func:`pool_stock` and stays owned here, so no caller has to know it."""
+    ids = [str(p) for p in (pool_ids or []) if p]
+    out = {pid: {"available": 0, "issued": 0} for pid in ids}
+    if not ids:
+        return out
+    rows = database.db["voucher_pools"].aggregate([
+        {"$match": {"pool_id": {"$in": ids}, "pool_source": _POOL_SOURCE}},
+        {"$group": {
+            "_id": "$pool_id",
+            "available": {"$sum": {"$cond": [{"$eq": ["$status", "available"]}, 1, 0]}},
+            "issued": {"$sum": {"$cond": [{"$eq": ["$status", "issued"]}, 1, 0]}},
+        }},
+    ])
+    for row in rows:
+        pid = row.get("_id")
+        if pid in out:
+            out[pid] = {"available": row.get("available", 0), "issued": row.get("issued", 0)}
+    return out
+
+
 def upload_codes(pool_id: str, codes: list[str], *, display_label: str = "", value_hint: str = "", currency: str = "") -> dict:
     """Insert codes into the shared Voucher Centre inventory table
     (``db.voucher_pools``). Ownership metadata (``pool_type``,
