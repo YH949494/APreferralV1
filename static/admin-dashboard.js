@@ -4876,6 +4876,59 @@
   // touch the shared form (see openMissionOps).
   var gcMissionLoadToken = 0;
 
+  // ROOT-CAUSE GUARD. One form serves both "create a new campaign" and "edit
+  // the selected one", and every wrong-campaign write found in review came
+  // from those two intents being indistinguishable at save time. The mode is
+  // now explicit, and each action is refused outright in the wrong mode, so
+  // "Save mission changes" can never write a half-typed new campaign onto
+  // the campaign that happens to still be selected.
+  var gcMissionMode = "create";
+
+  /**
+   * Leave edit mode. Invalidates any in-flight Mission Ops load, drops the
+   * edit target, and clears every piece of per-campaign state the shared
+   * form was carrying (option labels, schedule instants) so none of it can
+   * leak into the next create.
+   */
+  function gcEnterCreateMode() {
+    gcMissionMode = "create";
+    gcMissionSelectedId = null;
+    gcMissionLoadToken++;
+
+    var optionsInput = $("#gc-m-options");
+    if (optionsInput) { optionsInput.dataset.labels = "{}"; optionsInput.dataset.labelsFor = ""; }
+    ["gc-c-starts", "gc-c-ends"].forEach(function (id) {
+      var node = $("#" + id);
+      if (node) { node.dataset.originalIso = ""; node.dataset.hydratedValue = ""; }
+    });
+    // Nothing is frozen while creating.
+    MISSION_CONFIG_INPUT_IDS.concat(["gc-c-starts", "gc-c-ends", "gc-c-id"]).forEach(function (id) {
+      var node = $("#" + id);
+      if (node) node.disabled = false;
+    });
+    var note = $("#gc-m-lock-note");
+    if (note) { note.style.display = "none"; note.textContent = ""; }
+
+    var saveBtn = $("#gc-save-mission-btn");
+    if (saveBtn) saveBtn.style.display = "none";
+    var createBtn = $("#gc-create-campaign-btn");
+    if (createBtn) createBtn.style.display = "";
+    var ops = $("#gc-mission-ops");
+    if (ops) ops.style.display = "none";
+  }
+
+  function gcEnterEditMode(campaignId) {
+    gcMissionMode = "edit";
+    gcMissionSelectedId = campaignId;
+    // The campaign being edited is fixed: retyping the id must not silently
+    // retarget the save, and creating from a form loaded for editing is not
+    // a thing an operator can do by accident any more.
+    var idInput = $("#gc-c-id");
+    if (idInput) idInput.disabled = true;
+    var createBtn = $("#gc-create-campaign-btn");
+    if (createBtn) createBtn.style.display = "none";
+  }
+
   function gcMissionFieldWrap(id) {
     var node = $("#" + id);
     if (!node) return null;
@@ -4909,14 +4962,25 @@
     if (isMission) { applyMissionTypeVisibility(); loadMissionPools(); }
   }
 
+  var gcMissionPoolsPromise = null;
+
+  /**
+   * The loader MUTATES the shared #gc-m-pool element, so it needs its own
+   * guard rather than relying on the caller's stale() check: two Mission Ops
+   * opens could each start a request, and a late one rewriting innerHTML
+   * would reset the *other* campaign's hydrated pool selection to whatever
+   * sorted first — and Save was already revealed. A single in-flight promise
+   * is shared by all callers, so the list is written exactly once.
+   */
   function loadMissionPools(force) {
     var sel = $("#gc-m-pool");
     if (!sel) return Promise.resolve();
     if (!force && sel.dataset.loaded === "1") return Promise.resolve();
+    if (!force && gcMissionPoolsPromise) return gcMissionPoolsPromise;
     // The compatible-pool set is decided by the backend
     // (voucher_pool_service.CAMPAIGN_ALLOCATABLE_SCOPES minus the reserved
     // WELCOME/T1-T5/affiliate pools), never by a list hardcoded here (§29).
-    return apiSoft("/api/admin/mission-pool/pools").then(function (r) {
+    gcMissionPoolsPromise = apiSoft("/api/admin/mission-pool/pools").then(function (r) {
       if (!r || r.status !== "ok") { sel.innerHTML = '<option value="">Failed to load pools</option>'; return; }
       var pools = r.pools || [];
       sel.dataset.loaded = "1";
@@ -4936,7 +5000,10 @@
         : '<option value="">No mission-compatible pools — register one in Voucher Centre</option>';
     }).catch(function () {
       sel.innerHTML = '<option value="">Failed to load pools</option>';
+    }).then(function () {
+      gcMissionPoolsPromise = null;
     });
+    return gcMissionPoolsPromise;
   }
 
   /**
@@ -4959,15 +5026,32 @@
     sel.value = poolId;
   }
 
+  /**
+   * Hydrated option labels, valid ONLY while editing the campaign they came
+   * from. Without the ownership stamp the map would survive into the create
+   * flow (and into a different campaign), where reusing an option id would
+   * silently inherit the previous campaign's participant-facing label
+   * instead of the documented id-as-label fallback.
+   */
+  function missionOptionLabels() {
+    var input = $("#gc-m-options");
+    var data = (input || {}).dataset || {};
+    if (!gcMissionSelectedId || data.labelsFor !== gcMissionSelectedId) return {};
+    try { return JSON.parse(data.labels || "{}"); } catch (e) { return {}; }
+  }
+
   function missionConfigFromForm() {
     var type = ($("#gc-m-type") || {}).value || "multiple_choice";
     var cfg = { mission_type: type, prompt: ($("#gc-m-prompt").value || "").trim() };
     if (type === "multiple_choice" || type === "single_choice") {
-      // A known id keeps its existing label; a newly typed id gets
-      // id-as-label, exactly as the create flow has always done.
-      var knownLabels = {};
-      try { knownLabels = JSON.parse((($("#gc-m-options") || {}).dataset || {}).labels || "{}"); } catch (e) {}
-      cfg.options = ($("#gc-m-options").value || "").split(",")
+      // ONE OPTION PER LINE. A comma-separated field cannot round-trip an
+      // option id containing a comma, which validate_mission_config accepts:
+      // {"id": "red,blue"} would be split into "red" and "blue", silently
+      // rewriting the mission (or failing validation when it is the correct
+      // answer). Newlines are not a legal id character in practice and are
+      // rejected below if one somehow appears.
+      var knownLabels = missionOptionLabels();
+      cfg.options = ($("#gc-m-options").value || "").split("\n")
         .map(function (o) { return o.trim(); })
         .filter(function (o) { return o.length; })
         .map(function (o) { return { id: o, label: knownLabels[o] || o }; });
@@ -5202,10 +5286,13 @@
     var hydratedOptions = (cfg.options || []);
     var optionsInput = $("#gc-m-options");
     if (optionsInput) {
-      optionsInput.value = hydratedOptions.map(function (o) { return o.id; }).join(", ");
+      optionsInput.value = hydratedOptions.map(function (o) { return o.id; }).join("\n");
       var labelMap = {};
       hydratedOptions.forEach(function (o) { if (o && o.id) labelMap[o.id] = o.label || o.id; });
       try { optionsInput.dataset.labels = JSON.stringify(labelMap); } catch (e) { optionsInput.dataset.labels = "{}"; }
+      // Stamped with its owner so it can never be applied to another
+      // campaign or to a newly created one.
+      optionsInput.dataset.labelsFor = campaign.campaign_id || "";
     }
     setValue("gc-m-correct", cfg.correct_answer);
     setChecked("gc-m-case-insensitive", cfg.keyword_case_insensitive !== false);
@@ -5228,7 +5315,7 @@
   }
 
   function openMissionOps(campaignId) {
-    gcMissionSelectedId = campaignId;
+    gcEnterEditMode(campaignId);
     // Requests are not cancellable here, so guard on arrival instead: an
     // earlier campaign's responses can land AFTER a later campaign's. Without
     // this, opening A then B could hydrate the shared form with A's values
@@ -5302,8 +5389,24 @@
   }
 
   function bindGcCampaigns() {
+    var newBtn = $("#gc-new-campaign-btn");
+    if (newBtn) newBtn.addEventListener("click", function () {
+      gcEnterCreateMode();
+      ["gc-c-id", "gc-c-name", "gc-m-prompt", "gc-m-options", "gc-m-correct",
+        "gc-c-starts", "gc-c-ends"].forEach(function (id) {
+        var node = $("#" + id);
+        if (node) node.value = "";
+      });
+      toggleMissionFields();
+    });
+
     var typeSel = $("#gc-c-type");
-    if (typeSel) typeSel.addEventListener("change", toggleMissionFields);
+    if (typeSel) typeSel.addEventListener("change", function () {
+      // Switching campaign type is a create-intent action; it must not leave
+      // a stale edit target armed behind a still-visible Save button.
+      if (gcMissionMode === "edit") gcEnterCreateMode();
+      toggleMissionFields();
+    });
     var missionTypeSel = $("#gc-m-type");
     if (missionTypeSel) missionTypeSel.addEventListener("change", applyMissionTypeVisibility);
     toggleMissionFields();
@@ -5311,7 +5414,12 @@
     var saveBtn = $("#gc-save-mission-btn");
     if (saveBtn) {
       saveBtn.addEventListener("click", function () {
-        if (!gcMissionSelectedId) return;
+        // Belt and braces: the button is hidden outside edit mode, but the
+        // handler refuses anyway rather than trusting UI state.
+        if (gcMissionMode !== "edit" || !gcMissionSelectedId) {
+          toast("❌ No mission selected for editing", "error");
+          return;
+        }
         var body = { mission_pool: missionPoolFromForm() };
         // A frozen mission_config is simply not sent, so an unchanged PUT
         // never trips the backend freeze check.
@@ -5344,6 +5452,10 @@
     var createBtn = $("#gc-create-campaign-btn");
     if (createBtn) {
       createBtn.addEventListener("click", function () {
+        if (gcMissionMode === "edit") {
+          toast("❌ Editing a mission — use “New campaign” first", "error");
+          return;
+        }
         var type = $("#gc-c-type").value;
         var body = {
           campaign_id: ($("#gc-c-id").value || "").trim(),
@@ -5368,6 +5480,7 @@
           toast("✅ Campaign created as draft", "success");
           loadGcCampaigns(true);
           if (type === "mission_pool") openMissionOps(body.campaign_id);
+          else gcEnterCreateMode();
         });
       });
     }

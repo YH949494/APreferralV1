@@ -34,6 +34,29 @@ function stripComments(src) {
   return src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
 }
 
+/**
+ * bindGcCampaigns' body, up to the create-button declaration INSIDE it.
+ * The same declaration also appears in gcEnterCreateMode/gcEnterEditMode
+ * above, so the end marker is searched from the function start, not from 0 —
+ * otherwise the slice runs backwards and silently yields "".
+ */
+function bindGcCampaignsBody() {
+  const start = JS.indexOf("function bindGcCampaigns");
+  assert.ok(start !== -1, "bindGcCampaigns not found");
+  const end = JS.indexOf('var createBtn = $("#gc-create-campaign-btn");', start);
+  assert.ok(end > start, "create button declaration not found inside bindGcCampaigns");
+  return JS.slice(start, end);
+}
+
+/** Source of one top-level function, by name, up to the next one. */
+function fnSource(name, endMarker) {
+  const start = JS.indexOf("function " + name);
+  assert.ok(start !== -1, name + " not found");
+  const end = JS.indexOf(endMarker, start);
+  assert.ok(end > start, "end marker for " + name + " not found");
+  return JS.slice(start, end);
+}
+
 // ---------------------------------------------------------------------------
 // Structure (§24, §25, §28)
 // ---------------------------------------------------------------------------
@@ -154,7 +177,7 @@ test("the frozen field list is the mission_config field list", () => {
 test("a frozen mission_config is not resent on save", () => {
   // Avoids tripping the backend freeze with an unchanged PUT while still
   // allowing operator fields (pool/winners/eligibility) to be edited.
-  const fn = JS.slice(JS.indexOf("function bindGcCampaigns"), JS.indexOf('var createBtn = $("#gc-create-campaign-btn");'));
+  const fn = bindGcCampaignsBody();
   assert.ok(fn.includes('if (!$("#gc-m-prompt").disabled) body.mission_config = missionConfigFromForm();'));
   assert.ok(fn.includes("mission_config_locked"), "the backend rejection is still handled");
 });
@@ -318,7 +341,7 @@ test("an editable schedule is actually sent on save", () => {
   // campaign_centre._validate_body leaves `schedule` untouched on a partial
   // update that omits it, so omitting it means the operator sees
   // "Mission saved" while neither date is persisted.
-  const fn = JS.slice(JS.indexOf("function bindGcCampaigns"), JS.indexOf('var createBtn = $("#gc-create-campaign-btn");'));
+  const fn = bindGcCampaignsBody();
   assert.ok(fn.includes('if (!$("#gc-c-starts").disabled) {'), "schedule is sent only when editable");
   assert.ok(fn.includes("body.schedule = {"));
   assert.ok(fn.includes("starts_at:") && fn.includes("ends_at:"));
@@ -365,19 +388,23 @@ test("option label preservation round-trips through the real functions", () => {
     module: {},
     JSON,
     fields: { "gc-m-type": { value: "multiple_choice" }, "gc-m-prompt": { value: "Q" },
-              "gc-m-options": { value: "a, b", dataset: { labels: '{"a":"Alpha","b":"Beta"}' } },
+              "gc-m-options": { value: "a\nb",
+                                dataset: { labels: '{"a":"Alpha","b":"Beta"}', labelsFor: "camp-a" } },
               "gc-m-correct": { value: "a" } },
   };
   ctx.$ = (sel) => ctx.fields[sel.slice(1)];
+  ctx.gcMissionSelectedId = "camp-a";
   vm.createContext(ctx);
-  const fn = JS.slice(JS.indexOf("function missionConfigFromForm"), JS.indexOf("function selectedPoolType"));
+  // missionConfigFromForm delegates to missionOptionLabels for the id->label
+  // map, so both real functions go into the sandbox.
+  const fn = fnSource("missionOptionLabels", "function selectedPoolType");
   vm.runInContext(fn + "\nmodule.exports = missionConfigFromForm;", ctx);
   const cfg = plain(ctx.module.exports());
   assert.deepEqual(cfg.options, [{ id: "a", label: "Alpha" }, { id: "b", label: "Beta" }],
     "untouched options keep their labels");
 
   // A newly typed id falls back to id-as-label, matching the create flow.
-  ctx.fields["gc-m-options"].value = "a, c";
+  ctx.fields["gc-m-options"].value = "a\nc";
   const cfg2 = plain(ctx.module.exports());
   assert.deepEqual(cfg2.options, [{ id: "a", label: "Alpha" }, { id: "c", label: "c" }]);
 });
@@ -412,6 +439,99 @@ test("schedule inputs accept seconds", () => {
   const end = HTML.indexOf('id="gc-c-ends"');
   assert.ok(/step="1"/.test(HTML.slice(start, start + 160)), "gc-c-starts must allow seconds");
   assert.ok(/step="1"/.test(HTML.slice(end, end + 160)), "gc-c-ends must allow seconds");
+});
+
+// ---------------------------------------------------------------------------
+// Review fixes round 3 (Codex findings on 1492cb9) — the root-cause fix
+// ---------------------------------------------------------------------------
+
+test("create and edit are explicit, mutually exclusive modes", () => {
+  // ROOT CAUSE of every wrong-campaign write found in review: one form served
+  // both intents, and at save time they were indistinguishable. An operator
+  // could load campaign A into Mission Ops, start typing campaign B, hit
+  // "Save mission changes", and PUT B's values onto A.
+  assert.ok(JS.includes('var gcMissionMode = "create";'), "the mode must be explicit state");
+
+  const enterCreate = fnSource("gcEnterCreateMode", "function gcEnterEditMode");
+  assert.ok(enterCreate.includes("gcMissionSelectedId = null"), "create mode drops the edit target");
+  assert.ok(enterCreate.includes("gcMissionLoadToken++"), "create mode invalidates in-flight loads");
+  assert.ok(enterCreate.includes('optionsInput.dataset.labelsFor = ""'), "per-campaign labels are cleared");
+  assert.ok(enterCreate.includes("originalIso"), "per-campaign schedule instants are cleared");
+  assert.ok(enterCreate.includes('saveBtn.style.display = "none"'), "Save is hidden in create mode");
+
+  const enterEdit = fnSource("gcEnterEditMode", "function missionOptionLabels");
+  assert.ok(enterEdit.includes("idInput.disabled = true"), "the campaign id is fixed while editing");
+  assert.ok(enterEdit.includes('createBtn.style.display = "none"'), "Create is hidden while editing");
+});
+
+test("each action refuses to run in the wrong mode", () => {
+  const fn = bindGcCampaignsBody();
+  assert.ok(fn.includes('if (gcMissionMode !== "edit" || !gcMissionSelectedId)'),
+    "Save must refuse outside edit mode, not merely be hidden");
+  const create = JS.slice(JS.indexOf('var createBtn = $("#gc-create-campaign-btn");', JS.indexOf("function bindGcCampaigns")));
+  assert.ok(create.includes('if (gcMissionMode === "edit")'), "Create must refuse while editing");
+});
+
+test("leaving edit mode is reachable and clears the form", () => {
+  assert.ok(HTML.includes('id="gc-new-campaign-btn"'), "there must be a way back to create mode");
+  const fn = bindGcCampaignsBody();
+  assert.ok(fn.includes("gcEnterCreateMode()"), "the New campaign button leaves edit mode");
+  // Switching campaign type is a create-intent action and must not leave a
+  // stale edit target armed.
+  assert.ok(fn.includes('if (gcMissionMode === "edit") gcEnterCreateMode();'));
+});
+
+test("the pool loader cannot clobber another campaign's hydrated selection", () => {
+  // The loader mutates the shared #gc-m-pool element via innerHTML, so it
+  // needs its own dedupe rather than relying on the caller's stale() check:
+  // a late second request would reset the other campaign's pool to whichever
+  // sorted first, after Save was already revealed.
+  const fn = fnSource("loadMissionPools", "function ensurePoolOption");
+  assert.ok(fn.includes("if (!force && gcMissionPoolsPromise) return gcMissionPoolsPromise;"),
+    "concurrent callers must share one in-flight request");
+  assert.ok(fn.includes("gcMissionPoolsPromise = apiSoft("), "the promise must be retained");
+  assert.ok(fn.includes("gcMissionPoolsPromise = null;"), "and released so a retry can run");
+});
+
+test("option ids containing a comma survive a round trip", () => {
+  // validate_mission_config accepts commas in option ids, so a
+  // comma-separated field would split {"id": "red,blue"} into two options —
+  // silently rewriting the mission, or failing validation when it is the
+  // correct answer.
+  assert.ok(HTML.includes('id="gc-m-options"'));
+  const optionsField = HTML.slice(HTML.indexOf('id="gc-m-options"') - 60, HTML.indexOf('id="gc-m-options"') + 160);
+  assert.ok(/textarea/.test(optionsField), "one option per line needs a textarea");
+  assert.ok(/one per line/i.test(optionsField), "the affordance must be labelled");
+
+  const ctx = {
+    module: {}, JSON,
+    gcMissionSelectedId: "camp-a",
+    fields: {
+      "gc-m-type": { value: "multiple_choice" }, "gc-m-prompt": { value: "Q" },
+      "gc-m-options": { value: "red,blue\ngreen", dataset: { labels: '{"red,blue":"Purple"}', labelsFor: "camp-a" } },
+      "gc-m-correct": { value: "red,blue" },
+    },
+  };
+  ctx.$ = (sel) => ctx.fields[sel.slice(1)];
+  vm.createContext(ctx);
+  vm.runInContext(fnSource("missionOptionLabels", "function selectedPoolType") +
+    "\nmodule.exports = missionConfigFromForm;", ctx);
+  const cfg = plain(ctx.module.exports());
+  assert.deepEqual(cfg.options, [{ id: "red,blue", label: "Purple" }, { id: "green", label: "green" }],
+    "a comma-containing id stays one option and keeps its label");
+  assert.equal(cfg.correct_answer, "red,blue");
+});
+
+test("hydration writes one option per line", () => {
+  const fn = fnSource("hydrateMissionForm", "function openMissionOps");
+  assert.ok(fn.includes('.join("\\n")'), "options are newline-joined, not comma-joined");
+  assert.ok(fn.includes("dataset.labelsFor = campaign.campaign_id"), "the label map is stamped with its owner");
+});
+
+test("hydrated option labels are never applied to another campaign", () => {
+  const fn = fnSource("missionOptionLabels", "function missionConfigFromForm");
+  assert.ok(fn.includes("data.labelsFor !== gcMissionSelectedId"), "ownership is checked before use");
+  assert.ok(fn.includes("return {};"), "a foreign or absent map yields no labels");
 });
 
 // ---------------------------------------------------------------------------

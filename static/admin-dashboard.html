@@ -1719,7 +1719,7 @@
                 <option value="feedback">feedback</option>
               </select>
               <input class="filter-input" id="gc-m-prompt" placeholder="Question / instruction" style="margin:0;" />
-              <input class="filter-input" id="gc-m-options" placeholder="Options (comma separated)" style="margin:0;" />
+              <textarea class="filter-input" id="gc-m-options" rows="3" placeholder="Options — one per line" style="margin:0;"></textarea>
               <input class="filter-input" id="gc-m-correct" placeholder="Correct answer" style="margin:0;" />
               <label class="sub" id="gc-m-ci-wrap" style="display:flex;align-items:center;gap:6px;margin:0;">
                 <input type="checkbox" id="gc-m-case-insensitive" checked /> keyword_case_insensitive
@@ -1745,6 +1745,7 @@
           </div>
           <button class="btn primary" id="gc-create-campaign-btn" style="margin-top:10px;">Create draft</button>
           <button class="btn" id="gc-save-mission-btn" style="margin-top:10px;display:none;">Save mission changes</button>
+          <button class="btn" id="gc-new-campaign-btn" style="margin-top:10px;">New campaign</button>
           <div class="sub" style="margin-top:6px;">New campaigns always start as <b>draft</b> and stay admin-only until published — see Providers tab to mark a destination ready.</div>
         </div>
 
