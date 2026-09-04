@@ -175,7 +175,7 @@ function makeHarness(backend, opts) {
   const deferred = [];
 
   function mkNode(props) {
-    return Object.assign({ value: "", checked: false, disabled: false, dataset: {},
+    return Object.assign({ id: "", value: "", checked: false, disabled: false, dataset: {},
       addEventListener() {}, contains() { return true; } }, props);
   }
   const unesc = (s) => String(s).replace(/&lt;/g, "<").replace(/&gt;/g, ">")
@@ -188,13 +188,13 @@ function makeHarness(backend, opts) {
     const inputRe = /<input\b([^>]*)>/g;
     while ((m = inputRe.exec(html))) {
       const id = attr(m[1], "id");
-      if (id) nodes["#" + id] = mkNode({ value: unesc(attr(m[1], "value") || ""),
+      if (id) nodes["#" + id] = mkNode({ id: id, value: unesc(attr(m[1], "value") || ""),
         checked: /\bchecked\b/.test(m[1]), disabled: /\bdisabled\b/.test(m[1]) });
     }
     const taRe = /<textarea\b([^>]*)>([\s\S]*?)<\/textarea>/g;
     while ((m = taRe.exec(html))) {
       const id = attr(m[1], "id");
-      if (id) nodes["#" + id] = mkNode({ value: unesc(m[2]), disabled: /\bdisabled\b/.test(m[1]) });
+      if (id) nodes["#" + id] = mkNode({ id: id, value: unesc(m[2]), disabled: /\bdisabled\b/.test(m[1]) });
     }
     const selRe = /<select\b([^>]*)>([\s\S]*?)<\/select>/g;
     while ((m = selRe.exec(html))) {
@@ -206,16 +206,18 @@ function makeHarness(backend, opts) {
         if (first === null) first = unesc(o[1]);
         if (/\bselected\b/.test(o[2])) { value = unesc(o[1]); break; }
       }
-      nodes["#" + id] = mkNode({ value: value === null ? (first || "") : value,
+      nodes["#" + id] = mkNode({ id: id, value: value === null ? (first || "") : value,
         disabled: /\bdisabled\b/.test(m[1]) });
     }
   }
 
+  const listeners = {};
   const root = {
     dataset: {}, _html: "",
     get innerHTML() { return this._html; },
     set innerHTML(v) { this._html = v; rescan(v); },
-    addEventListener() {}, contains() { return true; },
+    addEventListener(type, fn) { (listeners[type] = listeners[type] || []).push(fn); },
+    contains() { return true; },
   };
   nodes["#mp-root"] = root;
 
@@ -247,6 +249,7 @@ function makeHarness(backend, opts) {
     html: () => root.innerHTML,
     node: (id) => nodes["#" + id],
     set: (id, v) => { const n = nodes["#" + id]; assert.ok(n, "control not on screen: " + id); n.value = v; },
+    fireChange: (id) => (listeners.change || []).forEach((fn) => fn({ target: nodes["#" + id] })),
     releaseHeld: () => { deferred.splice(0).forEach((fn) => fn()); },
     flush: async () => { for (let i = 0; i < 8; i++) await new Promise((r) => setImmediate(r)); },
   };
@@ -267,7 +270,7 @@ async function createMission(mod, h, spec) {
 
   if (spec.newPool) {
     h.node("mp-c-mode-new").checked = true;
-    mod.dispatch("wizard-refresh");
+    h.fireChange("mp-c-mode-new");   // the real change event, as a browser fires it
     await h.flush();
     h.set("mp-c-newpool-id", spec.newPool.pool_id);
     h.set("mp-c-newpool-name", spec.newPool.name);

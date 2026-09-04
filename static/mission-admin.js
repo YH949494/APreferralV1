@@ -1347,6 +1347,10 @@
       var labels = {};
       (cfg.options || []).forEach(function (o) { if (o && o.id) labels[o.id] = o.label || o.id; });
 
+      var policy = block.eligibility_policy || {};
+      var starts = scheduleFieldFrom(schedule.starts_at);
+      var ends = scheduleFieldFrom(schedule.ends_at);
+
       var accepted = session.completeHydration(load, {
         campaignId: campaignId,
         campaign: campaign,
@@ -1356,9 +1360,36 @@
         // campaign's form or into a create.
         optionLabels: labels,
         optionsEditable: optionsEditable(cfg.options),
-        starts: scheduleFieldFrom(schedule.starts_at),
-        ends: scheduleFieldFrom(schedule.ends_at),
+        starts: starts,
+        ends: ends,
         storedPool: { pool_id: block.pool_id || "", pool_type: block.pool_type || "" },
+        // The working copy the panel renders from and saves from. Rendering
+        // straight off `campaign` meant a re-render (needed when the mission
+        // type changes the set of fields) would discard everything typed, and
+        // saving straight off the DOM meant a field the current type does not
+        // render silently contributed a fallback value.
+        form: {
+          name: campaign.name || "",
+          mission_type: cfg.mission_type || "multiple_choice",
+          prompt: cfg.prompt || "",
+          options_text: formatOptionLines(cfg.options),
+          correct_answer: cfg.correct_answer || "",
+          keyword_case_insensitive: cfg.keyword_case_insensitive !== false,
+          min_chars: cfg.min_chars == null ? 10 : cfg.min_chars,
+          max_chars: cfg.max_chars == null ? 500 : cfg.max_chars,
+          pool_id: block.pool_id || "",
+          winner_count: block.winner_count == null ? "" : block.winner_count,
+          allocation_method: block.allocation_method || "random_qualified",
+          eligibility: {
+            require_correct_answer: policy.require_correct_answer !== false,
+            exclude_voucher_hunter: policy.exclude_voucher_hunter !== false,
+            exclude_multi_account_risk: policy.exclude_multi_account_risk !== false,
+            exclude_blocked: policy.exclude_blocked !== false,
+            require_gaming_account: !!policy.require_gaming_account,
+          },
+          starts_display: starts.display,
+          ends_display: ends.display,
+        },
       });
       if (!accepted) return;
       renderEdit();
@@ -1367,16 +1398,14 @@
 
   function renderEdit() {
     var es = session.editState();
-    if (!es || !es.campaign) return;
-    var campaign = es.campaign;
+    if (!es || !es.campaign || !es.form) return;
+    var f = es.form;
     var state = es.state;
-    var cfg = campaign.mission_config || {};
-    var block = campaign.mission_pool || {};
     var locked = !!state.mission_config_locked;
     var scheduleEditable = !!state.schedule_editable;
     var poolEditable = !!(state.reward || {}).pool_editable;
     var pools = (poolsCache && poolsCache.pools) || [];
-    var allowed = MISSION_TYPE_FIELDS[cfg.mission_type] || [];
+    var allowed = MISSION_TYPE_FIELDS[f.mission_type] || [];
     var dis = locked ? " disabled" : "";
 
     var missionBody = "";
@@ -1385,38 +1414,43 @@
         " (" + esc(num(state.entries)) + " entries)</div>";
     }
     missionBody +=
-      field("Campaign Name", textInput("mp-e-name", campaign.name, "")) +
+      field("Campaign Name", textInput("mp-e-name", f.name, "")) +
       field("Mission Type", '<select class="filter-input" id="mp-e-mtype" style="width:100%;box-sizing:border-box;margin:0;"' + dis + ">" +
         ["multiple_choice", "single_choice", "keyword", "feedback"].map(function (t) {
-          return '<option value="' + t + '"' + (t === cfg.mission_type ? " selected" : "") + ">" +
+          return '<option value="' + t + '"' + (t === f.mission_type ? " selected" : "") + ">" +
             esc(MISSION_TYPE_LABELS[t]) + "</option>";
-        }).join("") + "</select>") +
+        }).join("") + "</select>",
+        // Changing the type changes which fields exist; the panel re-renders
+        // so the operator edits (and saves) the fields the new type actually
+        // has, instead of the previous type's controls silently contributing
+        // fallback values.
+        locked ? "" : "Changing the type updates the fields below.") +
       field("Question / Instruction",
         '<textarea class="filter-input" id="mp-e-prompt" rows="2" style="width:100%;box-sizing:border-box;margin:0;"' +
-        dis + ">" + esc(cfg.prompt || "") + "</textarea>");
+        dis + ">" + esc(f.prompt) + "</textarea>");
 
     if (allowed.indexOf("options") !== -1) {
       var optionsDisabled = locked || !es.optionsEditable;
       missionBody += field("Options — one per line",
         '<textarea class="filter-input" id="mp-e-options" rows="5" style="width:100%;box-sizing:border-box;margin:0;"' +
-        (optionsDisabled ? " disabled" : "") + ">" + esc(formatOptionLines(cfg.options)) + "</textarea>",
+        (optionsDisabled ? " disabled" : "") + ">" + esc(f.options_text) + "</textarea>",
         es.optionsEditable
           ? "Write <code>id</code>, or <code>id " + OPTION_LABEL_SEPARATOR + " Player-facing Label</code>."
           : '<span style="color:#f5b63f;">One or more option ids contain a “' + OPTION_LABEL_SEPARATOR +
             "”, which this editor cannot round-trip safely. Options are read-only for this mission.</span>");
     }
     if (allowed.indexOf("correct") !== -1) {
-      missionBody += field(cfg.mission_type === "keyword" ? "Keyword" : "Correct answer (option id)",
-        textInput("mp-e-correct", cfg.correct_answer, "", "text", dis));
+      missionBody += field(f.mission_type === "keyword" ? "Keyword" : "Correct answer (option id)",
+        textInput("mp-e-correct", f.correct_answer, "", "text", dis));
     }
     if (allowed.indexOf("case_insensitive") !== -1) {
       missionBody += '<label class="sub" style="display:flex;align-items:center;gap:6px;">' +
-        '<input type="checkbox" id="mp-e-ci"' + (cfg.keyword_case_insensitive === false ? "" : " checked") +
+        '<input type="checkbox" id="mp-e-ci"' + (f.keyword_case_insensitive ? " checked" : "") +
         dis + " /> Case insensitive</label>";
     }
     if (allowed.indexOf("min_chars") !== -1) {
-      missionBody += field("Minimum characters", textInput("mp-e-min", cfg.min_chars, "", "number", dis)) +
-        field("Maximum characters", textInput("mp-e-max", cfg.max_chars, "", "number", dis));
+      missionBody += field("Minimum characters", textInput("mp-e-min", f.min_chars, "", "number", dis)) +
+        field("Maximum characters", textInput("mp-e-max", f.max_chars, "", "number", dis));
     }
 
     // The stored pool is ALWAYS offered, even when the backend no longer
@@ -1432,28 +1466,40 @@
         '<select class="filter-input" id="mp-e-pool" style="width:100%;box-sizing:border-box;margin:0;"' +
         (poolEditable ? "" : " disabled") + ">" +
         poolOptions.map(function (o) {
-          return '<option value="' + esc(o[0]) + '"' + (o[0] === es.storedPool.pool_id ? " selected" : "") +
+          return '<option value="' + esc(o[0]) + '"' + (o[0] === f.pool_id ? " selected" : "") +
             ">" + esc(o[1]) + "</option>";
         }).join("") + "</select>",
         poolEditable ? "" : "Reward allocation has started — the pool can no longer be changed.") +
-      field("Winner Count", textInput("mp-e-winners", block.winner_count, "", "number", ' min="1"')) +
-      field("Winner Selection", select("mp-e-allocation", block.allocation_method || "random_qualified", [
+      field("Winner Count", textInput("mp-e-winners", f.winner_count, "", "number", ' min="1"')) +
+      field("Winner Selection", select("mp-e-allocation", f.allocation_method, [
         ["random_qualified", "Random Qualified"], ["first_qualified", "First Qualified"],
       ]));
 
-    var policy = block.eligibility_policy || {};
+    // Live inventory feedback against whichever pool is currently selected —
+    // the same winner_count <= available rule the publish gate enforces.
+    var chosen = pools.filter(function (p) { return p.pool_id === f.pool_id; })[0];
+    var available = chosen ? ((chosen.stock || {}).available || 0)
+      : (f.pool_id === es.storedPool.pool_id ? (state.reward || {}).available : null);
+    if (available != null) {
+      var gate = inventoryGate(available, f.winner_count);
+      rewardBody += '<div class="sub">Winner Count: <b>' + esc(num(f.winner_count)) +
+        "</b> &middot; Available Codes: <b>" + esc(num(available)) + "</b>" +
+        (gate.ok ? "" : ' <span style="color:#f5b63f;">— ' + esc(num(gate.shortfall)) +
+          " more needed before this mission can be published.</span>") + "</div>";
+    }
+
     rewardBody += '<div class="sub" style="margin-top:8px;">Eligibility policy</div>' +
-      checkbox("mp-e-el-correct", policy.require_correct_answer !== false, "require_correct_answer") +
-      checkbox("mp-e-el-hunter", policy.exclude_voucher_hunter !== false, "exclude_voucher_hunter") +
-      checkbox("mp-e-el-multi", policy.exclude_multi_account_risk !== false, "exclude_multi_account_risk") +
-      checkbox("mp-e-el-blocked", policy.exclude_blocked !== false, "exclude_blocked") +
-      checkbox("mp-e-el-gaming", !!policy.require_gaming_account, "require_gaming_account");
+      checkbox("mp-e-el-correct", f.eligibility.require_correct_answer, "require_correct_answer") +
+      checkbox("mp-e-el-hunter", f.eligibility.exclude_voucher_hunter, "exclude_voucher_hunter") +
+      checkbox("mp-e-el-multi", f.eligibility.exclude_multi_account_risk, "exclude_multi_account_risk") +
+      checkbox("mp-e-el-blocked", f.eligibility.exclude_blocked, "exclude_blocked") +
+      checkbox("mp-e-el-gaming", f.eligibility.require_gaming_account, "require_gaming_account");
 
     // Schedule editability comes from the backend's own answer, never
     // inferred from the mission_config freeze — the two are independent.
     var scheduleBody = scheduleEditable
-      ? field("Start", textInput("mp-e-starts", es.starts.display, "", "datetime-local", ' step="1"')) +
-        field("End", textInput("mp-e-ends", es.ends.display, "", "datetime-local", ' step="1"'))
+      ? field("Start", textInput("mp-e-starts", f.starts_display, "", "datetime-local", ' step="1"')) +
+        field("End", textInput("mp-e-ends", f.ends_display, "", "datetime-local", ' step="1"'))
       : '<div class="sub">The schedule is read-only for this campaign state.</div>' +
         '<table class="data-table"><tbody>' +
         "<tr><td>Starts</td><td>" + esc(dt(es.starts.iso)) + "</td></tr>" +
@@ -1472,6 +1518,59 @@
         btn("back-to-detail", "Discard", { id: es.campaignId })));
   }
 
+  /**
+   * Read whatever the edit panel currently shows back into the working copy.
+   * A control the current mission type does not render is simply absent, so
+   * its stored value is left alone rather than being replaced by a fallback.
+   */
+  function captureEditForm() {
+    var es = session.editState();
+    if (!es || !es.form) return;
+    var f = es.form;
+    var v = function (id) { var n = host.$("#" + id); return n ? n.value : undefined; };
+    var c = function (id) { var n = host.$("#" + id); return n ? !!n.checked : undefined; };
+    var set = function (key, value) { if (value !== undefined) f[key] = value; };
+
+    set("name", v("mp-e-name"));
+    set("mission_type", v("mp-e-mtype"));
+    set("prompt", v("mp-e-prompt"));
+    set("options_text", v("mp-e-options"));
+    set("correct_answer", v("mp-e-correct"));
+    set("keyword_case_insensitive", c("mp-e-ci"));
+    set("min_chars", v("mp-e-min"));
+    set("max_chars", v("mp-e-max"));
+    set("pool_id", v("mp-e-pool"));
+    set("winner_count", v("mp-e-winners"));
+    set("allocation_method", v("mp-e-allocation"));
+    set("starts_display", v("mp-e-starts"));
+    set("ends_display", v("mp-e-ends"));
+    ["require_correct_answer:mp-e-el-correct", "exclude_voucher_hunter:mp-e-el-hunter",
+      "exclude_multi_account_risk:mp-e-el-multi", "exclude_blocked:mp-e-el-blocked",
+      "require_gaming_account:mp-e-el-gaming"].forEach(function (pair) {
+      var parts = pair.split(":");
+      var value = c(parts[1]);
+      if (value !== undefined) f.eligibility[parts[0]] = value;
+    });
+  }
+
+  /**
+   * The pool_type stored on the campaign must be the REGISTRY's type for the
+   * pool actually selected. The processor passes it to allocate_voucher as
+   * expected_pool_type, which filters the inventory row on it: keeping the
+   * previous pool's type after repointing the campaign would match no rows
+   * and mark every winner out_of_stock while stock looked available.
+   *
+   * Returns null when the selection changed to a pool the backend gave us no
+   * metadata for — the caller refuses the save rather than guessing.
+   */
+  function resolveEditPoolType(es, poolId) {
+    if (poolId === es.storedPool.pool_id) return es.storedPool.pool_type;
+    var listed = ((poolsCache && poolsCache.pools) || []).filter(function (p) {
+      return p.pool_id === poolId;
+    })[0];
+    return listed ? listed.pool_type : null;
+  }
+
   function saveEdit(requestedId) {
     var auth = session.authorizeSave(requestedId);
     if (!auth.ok) {
@@ -1479,27 +1578,35 @@
       return;
     }
     var es = session.editState();
+    captureEditForm();
+    var f = es.form;
     var state = es.state;
     var campaignId = auth.campaignId;
-    var v = function (id) { var n = host.$("#" + id); return n ? n.value : undefined; };
-    var c = function (id) { var n = host.$("#" + id); return n ? !!n.checked : undefined; };
+
+    // The pool select is disabled once allocation has started, so its value
+    // is still the stored one; either way the stored pool is preserved rather
+    // than being swapped for whatever sorted first.
+    var poolId = f.pool_id || es.storedPool.pool_id;
+    var poolType = resolveEditPoolType(es, poolId);
+    if (!poolType) {
+      host.toast("❌ Could not confirm the reward type of pool " + poolId +
+        " — reopen this mission and try again.", "error");
+      return;
+    }
 
     var body = {
-      name: (v("mp-e-name") || es.campaign.name || "").trim(),
+      name: (f.name || es.campaign.name || "").trim(),
       mission_pool: {
-        // The pool select is disabled once allocation started, so its value
-        // is still the stored one; either way the stored pool is preserved
-        // rather than being swapped for whatever sorted first.
-        pool_id: v("mp-e-pool") || es.storedPool.pool_id,
-        pool_type: es.storedPool.pool_type,
-        winner_count: parseInt(v("mp-e-winners"), 10) || 0,
-        allocation_method: v("mp-e-allocation") || "random_qualified",
+        pool_id: poolId,
+        pool_type: poolType,
+        winner_count: parseInt(f.winner_count, 10) || 0,
+        allocation_method: f.allocation_method || "random_qualified",
         eligibility_policy: {
-          require_correct_answer: !!c("mp-e-el-correct"),
-          exclude_voucher_hunter: !!c("mp-e-el-hunter"),
-          exclude_multi_account_risk: !!c("mp-e-el-multi"),
-          exclude_blocked: !!c("mp-e-el-blocked"),
-          require_gaming_account: !!c("mp-e-el-gaming"),
+          require_correct_answer: !!f.eligibility.require_correct_answer,
+          exclude_voucher_hunter: !!f.eligibility.exclude_voucher_hunter,
+          exclude_multi_account_risk: !!f.eligibility.exclude_multi_account_risk,
+          exclude_blocked: !!f.eligibility.exclude_blocked,
+          require_gaming_account: !!f.eligibility.require_gaming_account,
         },
       },
     };
@@ -1507,24 +1614,24 @@
     // A frozen mission_config is simply not sent, so an unchanged PUT can
     // never trip the backend freeze check.
     if (!state.mission_config_locked) {
-      var type = v("mp-e-mtype") || (es.campaign.mission_config || {}).mission_type;
-      var cfg = { mission_type: type, prompt: (v("mp-e-prompt") || "").trim() };
+      var type = f.mission_type || (es.campaign.mission_config || {}).mission_type;
+      var cfg = { mission_type: type, prompt: (f.prompt || "").trim() };
       var allowed = MISSION_TYPE_FIELDS[type] || [];
       if (allowed.indexOf("options") !== -1) {
         if (!es.optionsEditable) {
           cfg.options = (es.campaign.mission_config || {}).options || [];
         } else {
-          var parsed = parseOptionLines(v("mp-e-options"), es.optionLabels);
+          var parsed = parseOptionLines(f.options_text, es.optionLabels);
           if (parsed.errors.length) { host.toast("❌ " + parsed.errors[0], "error"); return; }
           cfg.options = parsed.options;
         }
-        cfg.correct_answer = (v("mp-e-correct") || "").trim();
+        cfg.correct_answer = (f.correct_answer || "").trim();
       } else if (type === "keyword") {
-        cfg.correct_answer = (v("mp-e-correct") || "").trim();
-        cfg.keyword_case_insensitive = !!c("mp-e-ci");
+        cfg.correct_answer = (f.correct_answer || "").trim();
+        cfg.keyword_case_insensitive = !!f.keyword_case_insensitive;
       } else {
-        cfg.min_chars = parseInt(v("mp-e-min"), 10) || 1;
-        cfg.max_chars = parseInt(v("mp-e-max"), 10) || 500;
+        cfg.min_chars = parseInt(f.min_chars, 10) || 1;
+        cfg.max_chars = parseInt(f.max_chars, 10) || 500;
       }
       body.mission_config = cfg;
     }
@@ -1533,8 +1640,8 @@
     // untouched field resends the exact original instant.
     if (state.schedule_editable) {
       body.schedule = {
-        starts_at: scheduleValueForSave(es.starts, v("mp-e-starts")),
-        ends_at: scheduleValueForSave(es.ends, v("mp-e-ends")),
+        starts_at: scheduleValueForSave(es.starts, f.starts_display),
+        ends_at: scheduleValueForSave(es.ends, f.ends_display),
       };
     }
 
@@ -1564,19 +1671,48 @@
   // Operations actions
   // -----------------------------------------------------------------------
 
-  function runAction(action, campaignId) {
-    if (CONFIRM_COPY[action] && !host.confirm(CONFIRM_COPY[action])) return;
+  function postAction(action, campaignId) {
     // publish/pause are the shared Campaign Centre lifecycle; close, cancel,
     // resume and process are the official Phase 1 Mission endpoints. The UI
     // never writes campaign status itself.
     var path = (action === "publish" || action === "pause")
       ? "/api/admin/gc-campaigns/" + encodeURIComponent(campaignId) + "/" + action
       : "/api/admin/mission-pool/" + encodeURIComponent(campaignId) + "/" + action;
-    host.apiPost(path).catch(function (e) { return { status: "error", code: e.message }; })
+    return host.apiPost(path).catch(function (e) { return { status: "error", code: e.message }; })
       .then(function (r) {
         if (!r || r.status !== "ok") host.toast("❌ " + ((r && r.code) || "action_failed"), "error");
         else host.toast("✅ " + action + " ok", "success");
         openDetail(campaignId);
+      });
+  }
+
+  function runAction(action, campaignId) {
+    if (CONFIRM_COPY[action] && !host.confirm(CONFIRM_COPY[action])) return Promise.resolve();
+    if (action !== "publish") return postAction(action, campaignId);
+
+    // §8: publishing (and resuming, which is the same transition) is blocked
+    // when the pool cannot cover the winner target. campaign_centre._transition
+    // checks only that a mission config and a pool id exist, so without this
+    // an operator could publish a mission whose shared pool has since been
+    // drained — or whose winner target was raised — and winners would end up
+    // with no reward. The verdict is re-read here rather than trusted from
+    // the rendered page: stock is shared and moves under us.
+    return softGet("/api/admin/mission-pool/" + encodeURIComponent(campaignId) + "/edit-state")
+      .then(function (state) {
+        if (!state || state.status !== "ok") {
+          host.toast("❌ Could not confirm reward inventory before publishing (" +
+            ((state && state.code) || "unknown") + ")", "error");
+          return null;
+        }
+        var reward = state.reward || {};
+        if (!reward.sufficient) {
+          host.toast("❌ Publishing blocked: winner target " + num(reward.winner_count) +
+            " exceeds the " + num(reward.available) + " available codes in " +
+            (reward.pool_id || "the configured pool") + ".", "error");
+          openDetail(campaignId);
+          return null;
+        }
+        return postAction(action, campaignId);
       });
   }
 
@@ -1614,6 +1750,12 @@
       host.toast("✅ Mission link copied", "success");
       return;
     }
+    if (action === "edit-refresh") {
+      if (session.mode() !== MODE_EDIT || !session.editState()) return;
+      captureEditForm();
+      renderEdit();
+      return;
+    }
     if (action === "wizard-refresh") {
       if (session.mode() !== MODE_CREATE || !session.draft()) return;
       captureCreateStep();
@@ -1646,10 +1788,17 @@
     "mp-c-newpool-codes", "mp-c-winners", "mp-c-options", "mp-c-newpool-type",
   ];
 
+  // The same, for the edit panel. Mission Type decides which mission_config
+  // controls exist at all, so it MUST re-render: without it the operator
+  // switches to feedback, sees no length inputs, and saves the fallback
+  // bounds — or switches to keyword, sees no keyword input, and the backend
+  // rejects the save.
+  var EDIT_REACTIVE_IDS = ["mp-e-mtype", "mp-e-pool", "mp-e-winners"];
+
   function onChange(event) {
     var id = event.target && event.target.id;
-    if (WIZARD_REACTIVE_IDS.indexOf(id) === -1) return;
-    dispatch("wizard-refresh");
+    if (WIZARD_REACTIVE_IDS.indexOf(id) !== -1) { dispatch("wizard-refresh"); return; }
+    if (EDIT_REACTIVE_IDS.indexOf(id) !== -1) { dispatch("edit-refresh"); }
   }
 
   return {

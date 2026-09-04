@@ -63,7 +63,7 @@ function makeHarness(routes) {
   const pending = [];
 
   function mkNode(props) {
-    return Object.assign({ value: "", checked: false, disabled: false, dataset: {},
+    return Object.assign({ id: "", value: "", checked: false, disabled: false, dataset: {},
       addEventListener() {}, contains() { return true; } }, props);
   }
 
@@ -89,14 +89,14 @@ function makeHarness(routes) {
     while ((m = inputRe.exec(html))) {
       const id = attr(m[1], "id");
       if (id) nodes["#" + id] = mkNode({
-        value: unesc(attr(m[1], "value") || ""),
+        id: id, value: unesc(attr(m[1], "value") || ""),
         checked: /\bchecked\b/.test(m[1]), disabled: /\bdisabled\b/.test(m[1]),
       });
     }
     const taRe = /<textarea\b([^>]*)>([\s\S]*?)<\/textarea>/g;
     while ((m = taRe.exec(html))) {
       const id = attr(m[1], "id");
-      if (id) nodes["#" + id] = mkNode({ value: unesc(m[2]), disabled: /\bdisabled\b/.test(m[1]) });
+      if (id) nodes["#" + id] = mkNode({ id: id, value: unesc(m[2]), disabled: /\bdisabled\b/.test(m[1]) });
     }
     const selRe = /<select\b([^>]*)>([\s\S]*?)<\/select>/g;
     while ((m = selRe.exec(html))) {
@@ -108,16 +108,18 @@ function makeHarness(routes) {
         if (first === null) first = unesc(o[1]);
         if (/\bselected\b/.test(o[2])) { value = unesc(o[1]); break; }
       }
-      nodes["#" + id] = mkNode({ value: value === null ? (first || "") : value,
+      nodes["#" + id] = mkNode({ id: id, value: value === null ? (first || "") : value,
         disabled: /\bdisabled\b/.test(m[1]) });
     }
   }
 
+  const listeners = {};
   const root = {
     dataset: {}, _html: "",
     get innerHTML() { return this._html; },
     set innerHTML(v) { this._html = v; rescan(v); },
-    addEventListener() {}, contains() { return true; },
+    addEventListener(type, fn) { (listeners[type] = listeners[type] || []).push(fn); },
+    contains() { return true; },
   };
   nodes["#mp-root"] = root;
 
@@ -162,7 +164,10 @@ function makeHarness(routes) {
     root: () => root,
     html: () => root.innerHTML,
     node: (id) => nodes["#" + id],
-    set: (id, value) => { (nodes["#" + id] = nodes["#" + id] || mkNode({})).value = value; },
+    set: (id, value) => { (nodes["#" + id] = nodes["#" + id] || mkNode({ id })).value = value; },
+    // Fire the real DOM event through the module's own listener, so the
+    // wiring between a control changing and the panel reacting is covered.
+    fireChange: (id) => (listeners.change || []).forEach((fn) => fn({ target: nodes["#" + id] })),
     flush: () => new Promise((r) => setImmediate(r)),
   };
 }
@@ -758,6 +763,86 @@ test("lifecycle actions call the official endpoints and never write status", asy
     "close must not be routed through the generic campaign endpoint");
 });
 
+test("publishing an existing mission is blocked when inventory cannot cover it", async () => {
+  // The detail view says publishing is blocked, and the button must agree:
+  // campaign_centre._transition only checks that a config and a pool id
+  // exist, so nothing else stops an under-stocked mission going live.
+  const mod = freshModule();
+  const h = makeHarness({
+    "GET /api/admin/mission-pool/draft-1/edit-state": editState("draft-1", {
+      state: "draft", campaign_status: "draft",
+      reward: Object.assign({}, editState("draft-1").reward,
+        { winner_count: 20, available: 3, shortfall: 17, sufficient: false }),
+    }),
+    "GET /api/admin/gc-campaigns/draft-1": { status: "ok", campaign: campaignDoc("draft-1", { status: "draft" }) },
+    "GET /api/admin/mission-pool/draft-1/summary": SUMMARY_OK,
+  });
+  mod.init(h.host);
+  await mod.dispatch("publish", "draft-1");
+  await h.flush(); await h.flush();
+
+  assert.equal(h.calls.some((c) => c.method === "POST"), false, "no publish request is issued");
+  assert.ok(h.toasts.some((t) => /Publishing blocked/.test(t.msg) && /MISSION-5/.test(t.msg)));
+});
+
+test("resuming a paused mission obeys the same inventory gate as publishing", async () => {
+  // Resume IS the publish transition, so a drained pool blocks it too.
+  const mod = freshModule();
+  const h = makeHarness({
+    "GET /api/admin/mission-pool/paused-1/edit-state": editState("paused-1", {
+      state: "paused", campaign_status: "paused",
+      reward: Object.assign({}, editState("paused-1").reward,
+        { winner_count: 20, available: 0, shortfall: 20, sufficient: false }),
+    }),
+    "GET /api/admin/gc-campaigns/paused-1": { status: "ok", campaign: campaignDoc("paused-1", { status: "paused" }) },
+    "GET /api/admin/mission-pool/paused-1/summary": SUMMARY_OK,
+  });
+  mod.init(h.host);
+  await mod.dispatch("publish", "paused-1");
+  await h.flush(); await h.flush();
+  assert.equal(h.calls.some((c) => c.method === "POST"), false);
+});
+
+test("publishing proceeds once inventory covers the winner target", async () => {
+  const mod = freshModule();
+  const h = makeHarness({
+    "GET /api/admin/mission-pool/draft-1/edit-state": editState("draft-1", {
+      state: "draft", campaign_status: "draft",
+    }),
+    "POST /api/admin/gc-campaigns/draft-1/publish": { status: "ok", campaign_status: "live" },
+    "GET /api/admin/gc-campaigns/draft-1": { status: "ok", campaign: campaignDoc("draft-1") },
+    "GET /api/admin/mission-pool/draft-1/summary": SUMMARY_OK,
+  });
+  mod.init(h.host);
+  await mod.dispatch("publish", "draft-1");
+  await h.flush(); await h.flush(); await h.flush();
+  assert.ok(h.calls.some((c) => c.method === "POST" && c.path === "/api/admin/gc-campaigns/draft-1/publish"));
+});
+
+test("the inventory verdict is re-read at publish time, never trusted from the page", async () => {
+  // Pool stock is shared and moves under the operator between rendering the
+  // detail view and pressing Publish.
+  const fn = MISSION_CODE.slice(MISSION_CODE.indexOf("function runAction"),
+                                MISSION_CODE.indexOf("function onClick"));
+  assert.ok(fn.includes("/edit-state"), "the gate refetches the campaign's live reward state");
+  assert.ok(fn.includes("reward.sufficient"));
+});
+
+test("only publish is gated — close, cancel, resume and process are not", async () => {
+  const mod = freshModule();
+  const h = makeHarness({
+    "POST *": { status: "ok" },
+    "GET /api/admin/gc-campaigns/m1": { status: "ok", campaign: campaignDoc("m1") },
+    "GET /api/admin/mission-pool/m1/edit-state": editState("m1"),
+    "GET /api/admin/mission-pool/m1/summary": SUMMARY_OK,
+  });
+  mod.init(h.host);
+  await mod.dispatch("close", "m1");
+  await h.flush(); await h.flush();
+  // No inventory precheck stands between an operator and closing a mission.
+  assert.equal(h.calls[0].path, "/api/admin/mission-pool/m1/close");
+});
+
 test("closing twice is safe because the UI never sends a close cutoff", () => {
   // closed_at is write-once server-side and a repeat close never moves it.
   assert.equal(/closed_at\s*[:=]\s*(new Date|Date\.)/.test(MISSION_JS), false);
@@ -1027,6 +1112,177 @@ test("a stored pool no longer offered for selection is preserved, not swapped", 
   assert.equal(put.body.mission_pool.pool_type, "vip");
 });
 
+test("repointing the pool stores the NEW pool's registered type", async () => {
+  // The processor passes mission_pool.pool_type to allocate_voucher as
+  // expected_pool_type, which filters the inventory row on it. Carrying the
+  // old pool's type across a repoint would match no rows in the new pool and
+  // mark every winner out_of_stock while stock looked available.
+  const mod = freshModule();
+  const h = makeHarness({
+    "GET /api/admin/mission-pool/pools": POOLS_OK,
+    "GET /api/admin/gc-campaigns/sep": { status: "ok", campaign: campaignDoc("sep") },
+    "GET /api/admin/mission-pool/sep/edit-state": editState("sep"),
+    "PUTJ /api/admin/gc-campaigns/sep": { status: "ok" },
+    "GET /api/admin/mission-pool/sep/summary": SUMMARY_OK,
+  });
+  mod.init(h.host);
+  await mod.dispatch("edit", "sep");
+  await h.flush(); await h.flush();
+  // Stored pool is MISSION-5 (voucher_drop); switch to WEEKEND (vip).
+  assert.equal(h.node("mp-e-pool").value, "MISSION-5");
+  h.set("mp-e-pool", "WEEKEND");
+  h.fireChange("mp-e-pool");
+  await mod.dispatch("save-edit", "sep");
+  await h.flush();
+
+  const put = h.calls.find((c) => c.method === "PUTJ");
+  assert.equal(put.body.mission_pool.pool_id, "WEEKEND");
+  assert.equal(put.body.mission_pool.pool_type, "vip",
+    "the new pool's registered type must be stored, not the old one's");
+});
+
+test("a save is refused when the selected pool's type cannot be confirmed", async () => {
+  const mod = freshModule();
+  const h = makeHarness({
+    // The pool list came back empty, so nothing can vouch for a new selection.
+    "GET /api/admin/mission-pool/pools": { status: "ok", pools: [], pool_types: [] },
+    "GET /api/admin/gc-campaigns/sep": { status: "ok", campaign: campaignDoc("sep") },
+    "GET /api/admin/mission-pool/sep/edit-state": editState("sep"),
+    "PUTJ /api/admin/gc-campaigns/sep": { status: "ok" },
+  });
+  mod.init(h.host);
+  await mod.dispatch("edit", "sep");
+  await h.flush(); await h.flush();
+  h.set("mp-e-pool", "UNKNOWN-POOL");
+  await mod.dispatch("save-edit", "sep");
+  await h.flush();
+  assert.equal(h.calls.some((c) => c.method === "PUTJ"), false,
+    "a guessed pool_type must never be written");
+  assert.ok(h.toasts.some((t) => /Could not confirm the reward type/.test(t.msg)));
+});
+
+test("changing the mission type re-renders the fields that type actually has", async () => {
+  // Without the re-render the operator switches to feedback, sees no length
+  // inputs, and the save writes the fallback bounds 1/500; switching to
+  // keyword leaves no keyword input and the backend rejects the save.
+  const mod = freshModule();
+  const h = makeHarness({
+    "GET /api/admin/mission-pool/pools": POOLS_OK,
+    "GET /api/admin/gc-campaigns/sep": { status: "ok", campaign: campaignDoc("sep") },
+    "GET /api/admin/mission-pool/sep/edit-state": editState("sep"),
+    "PUTJ /api/admin/gc-campaigns/sep": { status: "ok" },
+    "GET /api/admin/mission-pool/sep/summary": SUMMARY_OK,
+  });
+  mod.init(h.host);
+  await mod.dispatch("edit", "sep");
+  await h.flush(); await h.flush();
+  assert.ok(h.node("mp-e-options"), "multiple_choice shows an options field");
+  assert.equal(h.node("mp-e-min"), undefined, "and no length bounds");
+
+  h.set("mp-e-mtype", "feedback");
+  h.fireChange("mp-e-mtype");     // the real change event, through the module's own listener
+  assert.ok(h.node("mp-e-min") && h.node("mp-e-max"), "feedback shows its length bounds");
+  assert.equal(h.node("mp-e-options"), undefined, "and drops the option list");
+
+  h.set("mp-e-min", "25");
+  h.set("mp-e-max", "300");
+  await mod.dispatch("save-edit", "sep");
+  await h.flush();
+  const put = h.calls.find((c) => c.method === "PUTJ");
+  assert.equal(put.body.mission_config.mission_type, "feedback");
+  assert.equal(put.body.mission_config.min_chars, 25, "the operator's own bounds are saved");
+  assert.equal(put.body.mission_config.max_chars, 300);
+});
+
+test("switching to keyword offers a keyword input instead of saving an empty one", async () => {
+  const mod = freshModule();
+  const h = makeHarness({
+    "GET /api/admin/mission-pool/pools": POOLS_OK,
+    "GET /api/admin/gc-campaigns/sep": {
+      status: "ok",
+      campaign: campaignDoc("sep", {
+        mission_config: { mission_type: "feedback", prompt: "Tell us more", min_chars: 10, max_chars: 200 },
+      }),
+    },
+    "GET /api/admin/mission-pool/sep/edit-state": editState("sep"),
+    "PUTJ /api/admin/gc-campaigns/sep": { status: "ok" },
+    "GET /api/admin/mission-pool/sep/summary": SUMMARY_OK,
+  });
+  mod.init(h.host);
+  await mod.dispatch("edit", "sep");
+  await h.flush(); await h.flush();
+  assert.equal(h.node("mp-e-correct"), undefined, "feedback has no keyword field");
+
+  h.set("mp-e-mtype", "keyword");
+  h.fireChange("mp-e-mtype");
+  assert.ok(h.node("mp-e-correct"), "keyword shows its keyword field");
+  h.set("mp-e-correct", "JACKPOT");
+  await mod.dispatch("save-edit", "sep");
+  await h.flush();
+  const put = h.calls.find((c) => c.method === "PUTJ");
+  assert.equal(put.body.mission_config.mission_type, "keyword");
+  assert.equal(put.body.mission_config.correct_answer, "JACKPOT");
+});
+
+test("a field the current mission type does not render keeps its stored value", async () => {
+  // This is the failure mode in reverse: capturing an absent control would
+  // overwrite the stored value with undefined, so switching type and back —
+  // or saving after a switch — would silently discard the option list.
+  const mod = freshModule();
+  const h = makeHarness({
+    "GET /api/admin/mission-pool/pools": POOLS_OK,
+    "GET /api/admin/gc-campaigns/sep": { status: "ok", campaign: campaignDoc("sep") },
+    "GET /api/admin/mission-pool/sep/edit-state": editState("sep"),
+    "PUTJ /api/admin/gc-campaigns/sep": { status: "ok" },
+    "GET /api/admin/mission-pool/sep/summary": SUMMARY_OK,
+  });
+  mod.init(h.host);
+  await mod.dispatch("edit", "sep");
+  await h.flush(); await h.flush();
+  const originalOptions = h.node("mp-e-options").value;
+  assert.equal(originalOptions, "a | Free Spins\nb | Cashback");
+
+  h.set("mp-e-mtype", "feedback");
+  h.fireChange("mp-e-mtype");
+  assert.equal(h.node("mp-e-options"), undefined, "the options field is gone");
+
+  h.set("mp-e-mtype", "multiple_choice");
+  h.fireChange("mp-e-mtype");
+  assert.equal(h.node("mp-e-options").value, originalOptions,
+    "the option list survived a round trip through a type that does not show it");
+
+  await mod.dispatch("save-edit", "sep");
+  await h.flush();
+  const put = h.calls.find((c) => c.method === "PUTJ");
+  assert.deepEqual(put.body.mission_config.options,
+    [{ id: "a", label: "Free Spins" }, { id: "b", label: "Cashback" }]);
+});
+
+test("a re-render keeps everything already typed into the edit panel", async () => {
+  const mod = freshModule();
+  const h = makeHarness({
+    "GET /api/admin/mission-pool/pools": POOLS_OK,
+    "GET /api/admin/gc-campaigns/sep": { status: "ok", campaign: campaignDoc("sep") },
+    "GET /api/admin/mission-pool/sep/edit-state": editState("sep"),
+    "PUTJ /api/admin/gc-campaigns/sep": { status: "ok" },
+    "GET /api/admin/mission-pool/sep/summary": SUMMARY_OK,
+  });
+  mod.init(h.host);
+  await mod.dispatch("edit", "sep");
+  await h.flush(); await h.flush();
+  h.set("mp-e-name", "Renamed Mission");
+  h.set("mp-e-winners", "42");
+  h.fireChange("mp-e-winners");
+  assert.equal(h.node("mp-e-name").value, "Renamed Mission");
+  assert.equal(h.node("mp-e-winners").value, "42");
+
+  await mod.dispatch("save-edit", "sep");
+  await h.flush();
+  const put = h.calls.find((c) => c.method === "PUTJ");
+  assert.equal(put.body.name, "Renamed Mission");
+  assert.equal(put.body.mission_pool.winner_count, 42);
+});
+
 test("the pool cannot be repointed once reward allocation has started", async () => {
   const mod = freshModule();
   const h = makeHarness({
@@ -1178,8 +1434,8 @@ test("neither the protected-pool list nor the allowed scopes are hardcoded in th
   // The pool_type stored on a campaign is always the registry's answer.
   assert.ok(MISSION_CODE.includes("pool_type: ctx.verdict.pool_type"),
     "the created campaign must store the backend's real pool_type");
-  assert.ok(MISSION_CODE.includes("pool_type: es.storedPool.pool_type"),
-    "an edited campaign must keep the pool_type it was stored with");
+  assert.ok(MISSION_CODE.includes("pool_type: poolType"),
+    "an edited campaign must store the type resolved for the pool actually selected");
   assert.equal(/mission_pool[\s\S]{0,300}pool_type:\s*["']/.test(MISSION_CODE), false,
     "a submitted mission_pool block must never carry a literal pool_type");
 });
