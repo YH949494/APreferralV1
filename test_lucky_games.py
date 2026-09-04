@@ -228,6 +228,44 @@ def test_create_lucky_game_integer_sort_order_accepted(fake_db):
     assert resp.get_json()["game"]["sort_order"] == 5
 
 
+@pytest.mark.parametrize("bad_published", ["false", "true", 0, 1, "yes", None])
+def test_create_lucky_game_non_boolean_is_published_rejected(fake_db, bad_published):
+    # A JSON string like "false" is truthy in Python — bool("false") is
+    # True — so a naive bool() coercion would silently publish a game the
+    # caller meant to keep unpublished. Must be rejected outright instead.
+    body = _game_doc(is_published=bad_published)
+    app = _app()
+    client = app.test_client()
+    with _mock_admin():
+        resp = client.post("/api/admin/lucky-games", json=body)
+    assert resp.status_code == 400
+    assert resp.get_json()["code"] == "invalid_is_published"
+
+
+def test_patch_non_boolean_is_published_rejected(fake_db):
+    doc_id = fake_db["lucky_games"].insert_one(_game_doc(is_published=False)).inserted_id
+    app = _app()
+    client = app.test_client()
+    with _mock_admin():
+        resp = client.patch(f"/api/admin/lucky-games/{doc_id}", json={"is_published": "false"})
+    assert resp.status_code == 400
+    assert resp.get_json()["code"] == "invalid_is_published"
+    # Never silently applied — the stored value must be untouched.
+    assert fake_db["lucky_games"].find_one({"_id": doc_id})["is_published"] is False
+
+
+def test_create_lucky_game_non_object_json_body_returns_clean_400(fake_db):
+    # A JSON array/scalar body must not crash the invalid-config logging
+    # path (which used to call body.get(...) unconditionally) — it should
+    # return a normal JSON 400, never an unhandled 500.
+    app = _app()
+    client = app.test_client()
+    with _mock_admin():
+        resp = client.post("/api/admin/lucky-games", json=["not", "an", "object"])
+    assert resp.status_code == 400
+    assert resp.get_json()["code"] == "invalid_body"
+
+
 # ---------------------------------------------------------------------------
 # Invalid ObjectId handling
 # ---------------------------------------------------------------------------

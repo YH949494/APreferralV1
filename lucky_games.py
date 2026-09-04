@@ -166,7 +166,13 @@ def _validate_body(body: dict, *, partial: bool = False) -> tuple[dict | None, s
         updates["sort_order"] = int(raw_sort)
 
     if not partial or "is_published" in body:
-        updates["is_published"] = bool(body.get("is_published", False))
+        raw_published = body.get("is_published", False)
+        if not isinstance(raw_published, bool):
+            # A JSON string like "false" is truthy in Python — coercing it
+            # with bool() would silently publish a game the caller meant to
+            # keep unpublished. Reject anything that isn't a real boolean.
+            return None, "invalid_is_published"
+        updates["is_published"] = raw_published
 
     return updates, None
 
@@ -219,7 +225,11 @@ def create_lucky_game():
     body = request.get_json(silent=True) or {}
     updates, code = _validate_body(body, partial=False)
     if code:
-        logger.warning("[LUCKY_GAMES][INVALID_CONFIG] reason=%s name=%s", code, body.get("name"))
+        # body can be a non-dict (e.g. a JSON array) when code == "invalid_body" —
+        # guard the .get() so a malformed request still gets a clean 400
+        # instead of an unhandled AttributeError turning into a 500.
+        name = body.get("name") if isinstance(body, dict) else None
+        logger.warning("[LUCKY_GAMES][INVALID_CONFIG] reason=%s name=%s", code, name)
         return jsonify({"status": "error", "code": code}), 400
 
     now = datetime.now(timezone.utc)
