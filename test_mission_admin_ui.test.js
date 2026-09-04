@@ -297,8 +297,13 @@ test("hydration populates every editable mission field", () => {
     "gc-m-case-insensitive", "gc-m-min-chars", "gc-m-max-chars",
     "gc-m-winners", "gc-m-allocation", "gc-c-starts", "gc-c-ends",
     "gc-m-el-correct", "gc-m-el-hunter", "gc-m-el-multi", "gc-m-el-blocked", "gc-m-el-gaming",
-  ].forEach((id) => assert.ok(fn.includes('"' + id + '"'), "hydration misses " + id));
+    // Either form: a setValue("id", ...) call or a $("#id") lookup.
+  ].forEach((id) => assert.ok(fn.includes('"' + id + '"') || fn.includes('"#' + id + '"'),
+    "hydration misses " + id));
   assert.ok(fn.includes("ensurePoolOption(block.pool_id"), "the stored pool must be selected");
+  // Schedule goes through setScheduleValue so the exact instant is retained.
+  assert.ok(fn.includes('setScheduleValue("gc-c-starts"'));
+  assert.ok(fn.includes('setScheduleValue("gc-c-ends"'));
 });
 
 test("the freeze is applied after hydration, so it wins", () => {
@@ -329,9 +334,84 @@ test("hydration converts stored ISO timestamps to local datetime-local values", 
   assert.equal(isoToLocalInput(null), "");
   assert.equal(isoToLocalInput("not-a-date"), "");
   const out = isoToLocalInput("2026-09-30T12:34:00+00:00");
-  assert.match(out, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/, "must be a datetime-local value");
+  assert.match(out, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/, "must be a seconds-precision datetime-local value");
   // Round-trips back to the same instant the API gave us.
   assert.equal(new Date(out).getTime(), new Date("2026-09-30T12:34:00+00:00").getTime());
+  // Seconds must survive: schedule.ends_at is a Phase 1 eligibility cutoff,
+  // so truncating to the minute could drop valid submissions near the end.
+  const withSeconds = isoToLocalInput("2026-09-30T12:34:37+00:00");
+  assert.equal(new Date(withSeconds).getTime(), new Date("2026-09-30T12:34:37+00:00").getTime());
+});
+
+// ---------------------------------------------------------------------------
+// Review fixes round 2 (Codex findings on aab3588)
+// ---------------------------------------------------------------------------
+
+test("hydration remembers option labels so a save cannot overwrite them", () => {
+  // The options field edits IDs. Rebuilding {id, label} from ids alone would
+  // replace every participant-facing label with its id for a campaign whose
+  // labels differ from its ids — even when the operator never touched them.
+  const hydrate = JS.slice(JS.indexOf("function hydrateMissionForm"), JS.indexOf("function openMissionOps"));
+  assert.ok(hydrate.includes("labelMap[o.id] = o.label || o.id"), "an id->label map must be captured");
+  assert.ok(hydrate.includes("optionsInput.dataset.labels"), "the map must be retained for save");
+
+  const build = JS.slice(JS.indexOf("function missionConfigFromForm"), JS.indexOf("function selectedPoolType"));
+  assert.ok(build.includes("knownLabels[o] || o"), "a known id must keep its existing label");
+  assert.equal(/label:\s*o\s*\}/.test(build), false, "label must not be blindly set to the id");
+});
+
+test("option label preservation round-trips through the real functions", () => {
+  const ctx = {
+    module: {},
+    JSON,
+    fields: { "gc-m-type": { value: "multiple_choice" }, "gc-m-prompt": { value: "Q" },
+              "gc-m-options": { value: "a, b", dataset: { labels: '{"a":"Alpha","b":"Beta"}' } },
+              "gc-m-correct": { value: "a" } },
+  };
+  ctx.$ = (sel) => ctx.fields[sel.slice(1)];
+  vm.createContext(ctx);
+  const fn = JS.slice(JS.indexOf("function missionConfigFromForm"), JS.indexOf("function selectedPoolType"));
+  vm.runInContext(fn + "\nmodule.exports = missionConfigFromForm;", ctx);
+  const cfg = plain(ctx.module.exports());
+  assert.deepEqual(cfg.options, [{ id: "a", label: "Alpha" }, { id: "b", label: "Beta" }],
+    "untouched options keep their labels");
+
+  // A newly typed id falls back to id-as-label, matching the create flow.
+  ctx.fields["gc-m-options"].value = "a, c";
+  const cfg2 = plain(ctx.module.exports());
+  assert.deepEqual(cfg2.options, [{ id: "a", label: "Alpha" }, { id: "c", label: "c" }]);
+});
+
+test("a stale Mission Ops load can neither hydrate nor reveal Save", () => {
+  // Opening campaign A then B, with A resolving last, must not hydrate the
+  // shared form with A's values while B is selected — Save would PUT A onto B.
+  const fn = JS.slice(JS.indexOf("function openMissionOps"), JS.indexOf("var MISSION_CONFIRM"));
+  assert.ok(fn.includes("var token = ++gcMissionLoadToken"), "each load needs a token");
+  assert.ok(fn.includes("token !== gcMissionLoadToken || gcMissionSelectedId !== campaignId"),
+    "both the token and the selected id must be checked");
+  // Guarded before issuing the requests, before hydrating, and again
+  // immediately before Save is revealed.
+  assert.ok(fn.split("stale()").length - 1 >= 3, "the guard must run at every stage");
+  const revealIdx = fn.indexOf('saveBtn.style.display = ""');
+  const lastGuardIdx = fn.lastIndexOf("if (stale()) return;", revealIdx);
+  assert.ok(lastGuardIdx !== -1 && lastGuardIdx < revealIdx,
+    "the last guard must sit immediately before Save is revealed");
+});
+
+test("an untouched schedule field resends the exact original instant", () => {
+  // Converting a displayed value back to ISO can only lose precision; an
+  // unedited field must resend what the server gave us, verbatim.
+  const fn = JS.slice(JS.indexOf("function scheduleValueForSave"), JS.indexOf("function setValue"));
+  assert.ok(fn.includes("node.dataset.hydratedValue === current && node.dataset.originalIso"));
+  assert.ok(fn.includes("return node.dataset.originalIso;"));
+});
+
+test("schedule inputs accept seconds", () => {
+  // Without step="1" a browser silently clamps datetime-local to the minute.
+  const start = HTML.indexOf('id="gc-c-starts"');
+  const end = HTML.indexOf('id="gc-c-ends"');
+  assert.ok(/step="1"/.test(HTML.slice(start, start + 160)), "gc-c-starts must allow seconds");
+  assert.ok(/step="1"/.test(HTML.slice(end, end + 160)), "gc-c-ends must allow seconds");
 });
 
 // ---------------------------------------------------------------------------

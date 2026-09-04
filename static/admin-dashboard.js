@@ -4872,6 +4872,9 @@
   ];
 
   var gcMissionSelectedId = null;
+  // Monotonic token for Mission Ops loads. Only the most recent load may
+  // touch the shared form (see openMissionOps).
+  var gcMissionLoadToken = 0;
 
   function gcMissionFieldWrap(id) {
     var node = $("#" + id);
@@ -4960,10 +4963,14 @@
     var type = ($("#gc-m-type") || {}).value || "multiple_choice";
     var cfg = { mission_type: type, prompt: ($("#gc-m-prompt").value || "").trim() };
     if (type === "multiple_choice" || type === "single_choice") {
+      // A known id keeps its existing label; a newly typed id gets
+      // id-as-label, exactly as the create flow has always done.
+      var knownLabels = {};
+      try { knownLabels = JSON.parse((($("#gc-m-options") || {}).dataset || {}).labels || "{}"); } catch (e) {}
       cfg.options = ($("#gc-m-options").value || "").split(",")
         .map(function (o) { return o.trim(); })
         .filter(function (o) { return o.length; })
-        .map(function (o) { return { id: o, label: o }; });
+        .map(function (o) { return { id: o, label: knownLabels[o] || o }; });
       cfg.correct_answer = ($("#gc-m-correct").value || "").trim();
     } else if (type === "keyword") {
       cfg.correct_answer = ($("#gc-m-correct").value || "").trim();
@@ -5106,16 +5113,51 @@
     return api(path).catch(function (e) { return { status: "error", code: e.message }; });
   }
 
-  // A datetime-local input wants "YYYY-MM-DDTHH:mm" in LOCAL time; the API
-  // returns ISO-8601. Converting through the epoch keeps the displayed
+  // A datetime-local input wants "YYYY-MM-DDTHH:mm[:ss]" in LOCAL time; the
+  // API returns ISO-8601. Converting through the epoch keeps the displayed
   // instant identical to the stored one.
+  //
+  // SECONDS ARE INCLUDED (with step="1" on the inputs) rather than truncated
+  // to the minute. The save handler resends the schedule whenever scheduling
+  // is editable, so a minute-precision round trip would silently move an
+  // API-created boundary back by up to 59s — and `schedule.ends_at` is one of
+  // Phase 1's two eligibility cutoffs (mission_pool.close_cutoff), so that
+  // could start a mission early or drop valid submissions near its end.
   function isoToLocalInput(iso) {
     if (!iso) return "";
     var d = new Date(iso);
     if (isNaN(d.getTime())) return "";
     var pad = function (n) { return (n < 10 ? "0" : "") + n; };
     return d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()) +
-      "T" + pad(d.getHours()) + ":" + pad(d.getMinutes());
+      "T" + pad(d.getHours()) + ":" + pad(d.getMinutes()) + ":" + pad(d.getSeconds());
+  }
+
+  /**
+   * Hydrate a schedule input, remembering both the exact instant the server
+   * gave us and the value we displayed. On save, an untouched field resends
+   * the ORIGINAL ISO string verbatim, so no conversion can perturb it even
+   * by a millisecond; an edited field is converted from what the operator
+   * actually typed.
+   */
+  function setScheduleValue(id, iso) {
+    var node = $("#" + id);
+    if (!node) return;
+    var shown = isoToLocalInput(iso);
+    node.value = shown;
+    node.dataset.originalIso = iso || "";
+    node.dataset.hydratedValue = shown;
+  }
+
+  function scheduleValueForSave(id) {
+    var node = $("#" + id);
+    if (!node) return null;
+    var current = node.value || "";
+    if (!current) return null;
+    if (node.dataset.hydratedValue === current && node.dataset.originalIso) {
+      return node.dataset.originalIso;
+    }
+    var d = new Date(current);
+    return isNaN(d.getTime()) ? null : d.toISOString();
   }
 
   function setValue(id, value) {
@@ -5152,7 +5194,19 @@
 
     setValue("gc-m-type", cfg.mission_type || "multiple_choice");
     setValue("gc-m-prompt", cfg.prompt);
-    setValue("gc-m-options", (cfg.options || []).map(function (o) { return o.id; }).join(", "));
+    // The options field edits IDs. Hydrating ids-only and rebuilding
+    // {id, label} from them on save would silently overwrite every
+    // participant-facing label with its id for a campaign created through
+    // the API with labels != ids. Remember the id->label map so an option
+    // the operator did not touch keeps the label it already had.
+    var hydratedOptions = (cfg.options || []);
+    var optionsInput = $("#gc-m-options");
+    if (optionsInput) {
+      optionsInput.value = hydratedOptions.map(function (o) { return o.id; }).join(", ");
+      var labelMap = {};
+      hydratedOptions.forEach(function (o) { if (o && o.id) labelMap[o.id] = o.label || o.id; });
+      try { optionsInput.dataset.labels = JSON.stringify(labelMap); } catch (e) { optionsInput.dataset.labels = "{}"; }
+    }
     setValue("gc-m-correct", cfg.correct_answer);
     setChecked("gc-m-case-insensitive", cfg.keyword_case_insensitive !== false);
     setValue("gc-m-min-chars", cfg.min_chars);
@@ -5169,23 +5223,36 @@
     setChecked("gc-m-el-blocked", policy.exclude_blocked !== false);
     setChecked("gc-m-el-gaming", !!policy.require_gaming_account);
 
-    setValue("gc-c-starts", isoToLocalInput(schedule.starts_at));
-    setValue("gc-c-ends", isoToLocalInput(schedule.ends_at));
+    setScheduleValue("gc-c-starts", schedule.starts_at);
+    setScheduleValue("gc-c-ends", schedule.ends_at);
   }
 
   function openMissionOps(campaignId) {
     gcMissionSelectedId = campaignId;
+    // Requests are not cancellable here, so guard on arrival instead: an
+    // earlier campaign's responses can land AFTER a later campaign's. Without
+    // this, opening A then B could hydrate the shared form with A's values
+    // while gcMissionSelectedId is B — and Save would then PUT A's config
+    // onto B. Both the token and the selected id are checked, so a stale
+    // load can neither hydrate nor reveal Save.
+    var token = ++gcMissionLoadToken;
+    var stale = function () {
+      return token !== gcMissionLoadToken || gcMissionSelectedId !== campaignId;
+    };
+
     var saveBtn = $("#gc-save-mission-btn");
     // Hide Save until the form actually holds this campaign's values.
     if (saveBtn) saveBtn.style.display = "none";
     // Pools must be listed before the stored pool_id can be selected.
     loadMissionPools().then(function () {
+      if (stale()) return null;
       return Promise.all([
         apiSoft("/api/admin/mission-pool/" + encodeURIComponent(campaignId) + "/edit-state"),
         apiSoft("/api/admin/mission-pool/" + encodeURIComponent(campaignId) + "/summary"),
         apiSoft("/api/admin/gc-campaigns/" + encodeURIComponent(campaignId)),
       ]);
     }).then(function (res) {
+      if (!res || stale()) return;
       var state = res[0] || {};
       if (state.status !== "ok") { toast("❌ " + (state.code || "not_a_mission_campaign"), "error"); return; }
       var campaignResp = res[2] || {};
@@ -5202,6 +5269,9 @@
       // via toggleMissionFields, and the freeze must win.
       applyMissionFreeze(state);
       renderMissionOps(state, (res[1] && res[1].status === "ok") ? res[1] : {});
+      // Re-checked immediately before revealing Save: everything above is
+      // synchronous, but this is the invariant that actually matters.
+      if (stale()) return;
       if (saveBtn) saveBtn.style.display = "";
     });
   }
@@ -5253,8 +5323,8 @@
         // untouched on a partial update that omits it).
         if (!$("#gc-c-starts").disabled) {
           body.schedule = {
-            starts_at: $("#gc-c-starts").value ? new Date($("#gc-c-starts").value).toISOString() : null,
-            ends_at: $("#gc-c-ends").value ? new Date($("#gc-c-ends").value).toISOString() : null,
+            starts_at: scheduleValueForSave("gc-c-starts"),
+            ends_at: scheduleValueForSave("gc-c-ends"),
           };
         }
         apiPutJson("/api/admin/gc-campaigns/" + encodeURIComponent(gcMissionSelectedId), body).then(function (res) {
