@@ -1,6 +1,20 @@
 """Audit users.total_referrals based on referral_events ledger.
 
 Manual-run only. Safe to execute multiple times thanks to idempotent updates.
+
+The report's "computed" total (and its delta from the stored value) is left
+raw/unclamped on purpose -- this is the internal diagnostic that must show a
+negative number when the underlying ledger is corrupted, per
+InternalDiagnosticsShowRawValuesTests in test_referral_ledger_integrity.py.
+Only the value actually written to users.total_referrals (with --commit) is
+clamped to zero; users.total_referrals must never go negative, regardless of
+what the ledger nets to.
+
+--commit refuses to run while unresolved invariant violations (orphan or
+duplicate revocations -- see repair_referral_ledger.py) exist in the ledger,
+unless --commit-with-unresolved-violations is also passed explicitly. Run
+repair_referral_ledger.py --commit first to resolve them, or pass the
+override only when you have already reviewed why they remain.
 """
 
 from __future__ import annotations
@@ -13,12 +27,26 @@ from heapq import nlargest
 from pymongo import MongoClient, UpdateOne
 
 from referral_ledger import with_not_invalidated
+from repair_referral_ledger import _find_duplicate_revocations, _find_invalid_revocations
 
 def _flush_bulk(users_collection, ops, dry_run: bool) -> int:
     if dry_run or not ops:
         return 0
     result = users_collection.bulk_write(ops, ordered=False)
     return int(getattr(result, "modified_count", 0))
+
+
+def unresolved_invariant_violations(db) -> dict:
+    """Count orphan (no prior settlement) and duplicate revocations that
+    repair_referral_ledger.py has not yet invalidated. Non-zero means the
+    ledger can still net negative for some inviter/window."""
+    orphan_count = len(_find_invalid_revocations(db))
+    duplicate_count = len(_find_duplicate_revocations(db))
+    return {
+        "orphan_revocation_count": orphan_count,
+        "duplicate_revocation_count": duplicate_count,
+        "total": orphan_count + duplicate_count,
+    }
 
 
 def sync_referral_counts(db, batch_size: int, dry_run: bool) -> dict:
@@ -28,6 +56,7 @@ def sync_referral_counts(db, batch_size: int, dry_run: bool) -> dict:
     total_scanned = 0
     mismatched = 0
     fixed = 0
+    negative_computed_count = 0
     deltas = []
 
     last_id = None
@@ -80,7 +109,10 @@ def sync_referral_counts(db, batch_size: int, dry_run: bool) -> dict:
                 continue
             computed_total = int(ledger_totals.get(uid, 0))
             stored_total = int(user.get("total_referrals", 0))
-            if computed_total != stored_total:
+            if computed_total < 0:
+                negative_computed_count += 1
+            mismatched_here = computed_total != stored_total
+            if mismatched_here:
                 mismatched += 1
                 delta = computed_total - stored_total
                 deltas.append(
@@ -91,18 +123,25 @@ def sync_referral_counts(db, batch_size: int, dry_run: bool) -> dict:
                         "delta": delta,
                     }
                 )
-                if not dry_run:
-                    ops.append(
-                        UpdateOne(
-                            {"_id": user["_id"]},
-                            {
-                                "$set": {
-                                    "total_referrals": computed_total,
-                                    "snapshot_updated_at": datetime.now(timezone.utc),
-                                }
-                            },
-                        )
+            # users.total_referrals must never go negative even if the
+            # ledger nets negative (unrepaired corruption) -- the raw
+            # computed_total above stays in the report for diagnostics,
+            # only the write is clamped. This must also repair a row an
+            # earlier (pre-clamp) run of this script already wrote as
+            # negative, where stored_total == computed_total < 0 and the
+            # mismatch check above alone would never queue a fix.
+            if not dry_run and (mismatched_here or stored_total < 0):
+                ops.append(
+                    UpdateOne(
+                        {"_id": user["_id"]},
+                        {
+                            "$set": {
+                                "total_referrals": max(0, computed_total),
+                                "snapshot_updated_at": datetime.now(timezone.utc),
+                            }
+                        },
                     )
+                )
 
         fixed += _flush_bulk(users_collection, ops, dry_run)
         last_id = batch[-1]["_id"]
@@ -113,6 +152,7 @@ def sync_referral_counts(db, batch_size: int, dry_run: bool) -> dict:
         "total_users_scanned": total_scanned,
         "users_mismatched": mismatched,
         "users_fixed": fixed,
+        "negative_computed_count": negative_computed_count,
         "top_20_deltas": top_deltas,
         "dry_run": dry_run,
     }
@@ -124,6 +164,13 @@ def main():
     parser.add_argument("--mongo-db", default=os.getenv("MONGO_DB", "referral_bot"), help="Mongo database name")
     parser.add_argument("--batch-size", type=int, default=300, help="Batch size for user scans")
     parser.add_argument("--commit", action="store_true", help="Apply changes (default: dry-run)")
+    parser.add_argument(
+        "--commit-with-unresolved-violations",
+        action="store_true",
+        help="Narrow override: allow --commit even though unresolved ledger invariant "
+        "violations (orphan/duplicate revocations) remain. Only pass this after you have "
+        "reviewed why repair_referral_ledger.py --commit has not been run to resolve them.",
+    )
     args = parser.parse_args()
 
     if not args.mongo_url:
@@ -131,6 +178,18 @@ def main():
 
     client = MongoClient(args.mongo_url)
     db = client[args.mongo_db]
+
+    if args.commit:
+        violations = unresolved_invariant_violations(db)
+        if violations["total"] > 0 and not args.commit_with_unresolved_violations:
+            print(violations)
+            raise SystemExit(
+                "Refusing --commit: unresolved ledger invariant violations exist "
+                f"(orphan_revocation_count={violations['orphan_revocation_count']}, "
+                f"duplicate_revocation_count={violations['duplicate_revocation_count']}). "
+                "Run repair_referral_ledger.py --commit first, or pass "
+                "--commit-with-unresolved-violations to override deliberately."
+            )
 
     summary = sync_referral_counts(db, args.batch_size, dry_run=not args.commit)
     print(summary)
