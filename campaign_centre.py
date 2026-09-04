@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 campaign_centre_bp = Blueprint("campaign_centre", __name__)
 campaign_public_bp = Blueprint("campaign_public", __name__)
 
-CAMPAIGN_TYPES = ["tournament", "external_subscription_verification", "external_website"]
+CAMPAIGN_TYPES = ["tournament", "external_subscription_verification", "external_website", "mission_pool"]
 CAMPAIGN_STATUSES = ["draft", "scheduled", "live", "paused", "ended", "archived"]
 OPEN_MODES = ["telegram_web_app", "external_url"]
 
@@ -46,11 +46,20 @@ OPEN_MODES = ["telegram_web_app", "external_url"]
 # driven campaign type is added.
 _REWARD_DRIVEN_TYPES = {"tournament"}
 
+# Campaign types whose rewards are produced by their own mechanic rather than
+# by ``reward_config.rules``. Mission Pool allocates from a single configured
+# voucher pool after winner selection (see mission_pool.py), so the
+# rules-required publish gate above does not apply to it.
+_SELF_REWARDING_TYPES = {"mission_pool"}
+
 # Which open modes are valid for which campaign type.
 _ALLOWED_OPEN_MODES_BY_TYPE = {
     "tournament": {"telegram_web_app", "external_url"},
     "external_subscription_verification": {"external_url"},
     "external_website": {"external_url", "telegram_web_app"},
+    # Mission Pool is answered inside the Mini App; it has no external
+    # provider and never opens an outside URL.
+    "mission_pool": {"telegram_web_app"},
 }
 
 _VALID_STATUS_TRANSITIONS = {
@@ -290,6 +299,33 @@ def _validate_body(body: dict, *, partial: bool = False) -> tuple[dict | None, s
             "ready": bool(raw_dest.get("ready", False)),
         }
 
+    # ---- Mission Pool (mechanic = mission_pool) ------------------------
+    # The `mechanic` field is stamped SERVER-SIDE from the campaign type and
+    # is never read from the request body: a client must not be able to turn
+    # an arbitrary campaign into a Mission Pool one (or vice versa). Every
+    # pre-existing campaign document has no `mechanic` field at all and
+    # resolves to "standard_drop" through mission_pool.resolve_mechanic().
+    if campaign_type:
+        import mission_pool
+
+        updates["mechanic"] = mission_pool.mechanic_for_type(campaign_type)
+
+    if campaign_type == "mission_pool" or "mission_config" in body or "mission_pool" in body:
+        import mission_pool
+
+        if (updates.get("mechanic") or body.get("_existing_mechanic")) != mission_pool.MECHANIC_MISSION_POOL:
+            return None, "mission_config_not_allowed_for_type"
+        if not partial or "mission_config" in body:
+            mission_config, code = mission_pool.validate_mission_config(body.get("mission_config"))
+            if code:
+                return None, code
+            updates["mission_config"] = mission_config
+        if not partial or "mission_pool" in body:
+            pool_block, code = mission_pool.validate_mission_pool_config(body.get("mission_pool"))
+            if code:
+                return None, code
+            updates["_mission_pool_validated"] = pool_block
+
     if "reward_config" in body:
         raw_reward = body.get("reward_config") or {}
         rules = raw_reward.get("rules") or []
@@ -376,6 +412,11 @@ def create_campaign():
         return jsonify({"status": "error", "code": code}), 400
 
     now = datetime.now(timezone.utc)
+    mission_pool_block = updates.pop("_mission_pool_validated", None)
+    if mission_pool_block is not None:
+        import mission_pool
+
+        updates["mission_pool"] = mission_pool.merge_mission_pool_config(None, mission_pool_block)
     doc = {
         "campaign_id": campaign_id,
         "status": "draft",
@@ -425,10 +466,40 @@ def update_campaign(campaign_id: str):
     body = request.get_json(force=True, silent=True) or {}
     if "type" not in body:
         body["_existing_type"] = doc.get("type")
+    import mission_pool
+
+    body["_existing_mechanic"] = mission_pool.resolve_mechanic(doc)
     updates, code = _validate_body(body, partial=True)
     if code:
         return jsonify({"status": "error", "code": code}), 400
     updates.pop("_existing_type", None)
+
+    # Answers are graded at submission time (`is_correct` is stamped on the
+    # entry) and never regraded, so changing the mission definition after
+    # entries exist would let two identical answers get different eligibility
+    # outcomes purely by arrival time. Freeze the definition instead. An
+    # unchanged resubmission is allowed, because admin UIs routinely PUT the
+    # whole document back.
+    if "mission_config" in updates and updates["mission_config"] != doc.get("mission_config"):
+        submitted = database.db[mission_pool.ENTRIES_COLLECTION].count_documents(
+            {"campaign_id": campaign_id}
+        )
+        if submitted:
+            return jsonify({
+                "status": "error",
+                "code": "mission_config_locked",
+                "entries": submitted,
+            }), 409
+
+    mission_pool_block = updates.pop("_mission_pool_validated", None)
+    if mission_pool_block is not None:
+        # merge_mission_pool_config preserves every worker-owned processing
+        # field (processing_generation, selection_seed, stage, counters), so
+        # an admin edit can never break fencing or let a retry reshuffle an
+        # already-selected winner set.
+        updates["mission_pool"] = mission_pool.merge_mission_pool_config(
+            doc.get("mission_pool"), mission_pool_block
+        )
 
     if "status" in body:
         new_status = (body.get("status") or "").strip()
@@ -454,13 +525,21 @@ def _transition(campaign_id: str, admin: dict, new_status: str, action: str):
     if new_status not in _VALID_STATUS_TRANSITIONS.get(doc.get("status", "draft"), set()):
         return jsonify({"status": "error", "code": "invalid_status_transition"}), 400
     if new_status == "live":
-        provider = get_provider((doc.get("destination") or {}).get("provider_id") or "")
-        if doc.get("type") in _REWARD_DRIVEN_TYPES and not (doc.get("reward_config") or {}).get("rules"):
-            return jsonify({"status": "error", "code": "reward_rules_required"}), 400
-        if not (doc.get("destination") or {}).get("ready"):
-            return jsonify({"status": "error", "code": "destination_not_ready"}), 400
-        if not provider_is_usable_for_results(provider):
-            return jsonify({"status": "error", "code": "provider_inactive"}), 400
+        if doc.get("type") in _SELF_REWARDING_TYPES:
+            # Mission Pool has no external provider or destination URL; its
+            # publish gate is its own mission/pool configuration instead.
+            if not (doc.get("mission_config") or {}).get("mission_type"):
+                return jsonify({"status": "error", "code": "mission_config_required"}), 400
+            if not (doc.get("mission_pool") or {}).get("pool_id"):
+                return jsonify({"status": "error", "code": "mission_pool_config_required"}), 400
+        else:
+            provider = get_provider((doc.get("destination") or {}).get("provider_id") or "")
+            if doc.get("type") in _REWARD_DRIVEN_TYPES and not (doc.get("reward_config") or {}).get("rules"):
+                return jsonify({"status": "error", "code": "reward_rules_required"}), 400
+            if not (doc.get("destination") or {}).get("ready"):
+                return jsonify({"status": "error", "code": "destination_not_ready"}), 400
+            if not provider_is_usable_for_results(provider):
+                return jsonify({"status": "error", "code": "provider_inactive"}), 400
     database.db["gc_campaigns"].update_one(
         {"campaign_id": campaign_id},
         {"$set": {"status": new_status, "updated_at": datetime.now(timezone.utc)}},
@@ -522,6 +601,18 @@ def duplicate_campaign(campaign_id: str):
     dest = dict(new_doc.get("destination") or {})
     dest["ready"] = False
     new_doc["destination"] = dest
+
+    # ...nor any worker-owned Mission Pool processing state. Copying the block
+    # verbatim would give the new draft the source campaign's
+    # processing_stage (`completed` for a finished one), its selection_seed
+    # and its processing_generation — after which find_due_campaigns would
+    # skip it forever and none of its entries would ever be rewarded.
+    import mission_pool
+
+    if mission_pool.is_mission_pool(doc):
+        new_doc["mission_pool"] = mission_pool.duplicated_mission_pool_config(
+            doc.get("mission_pool")
+        )
 
     result = database.db["gc_campaigns"].insert_one(new_doc)
     _log_audit("campaign_duplicated", admin, new_campaign_id, {"source": campaign_id})
@@ -590,9 +681,17 @@ def _public_card(doc: dict) -> dict:
 @campaign_public_bp.get("/api/campaigns/active")
 def list_active_campaigns():
     now = datetime.now(timezone.utc)
+    # Explicitly scoped to the standard_drop mechanic. Mission Pool
+    # campaigns have their own discovery endpoint (mission_pool.py) and must
+    # never appear in this list, so the payload every existing Mini App build
+    # receives here is byte-for-byte what it was before Mission Pool existed.
     docs = list(
         database.db["gc_campaigns"].find(
-            {"status": "live", "type": {"$in": CAMPAIGN_TYPES}},
+            {
+                "status": "live",
+                "type": {"$in": CAMPAIGN_TYPES},
+                "$or": [{"mechanic": {"$exists": False}}, {"mechanic": "standard_drop"}],
+            },
             sort=[("priority", -1), ("schedule.starts_at", 1)],
             limit=50,
         )

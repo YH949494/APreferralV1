@@ -22,6 +22,7 @@ from flask import Blueprint, jsonify
 import database
 from campaign_centre import get_campaign, log_funnel_event
 from miniapp_identity import resolve_authenticated_telegram_user_id
+from mission_pool import resolve_mechanic
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +57,10 @@ def my_campaign_rewards():
         if not _visible_reward(d, now):
             continue
         campaign = get_campaign(d.get("campaign_id", "")) or {}
-        rewards.append({
+        # Every key below the marker existed before Mission Pool and is
+        # unchanged; Mission Pool only ADDS keys, so an older Mini App build
+        # keeps rendering tournament rewards exactly as it did.
+        item = {
             "reward_id": d["reward_id"],
             "category": d.get("category", "tournament"),
             "campaign_id": d.get("campaign_id"),
@@ -68,9 +72,48 @@ def my_campaign_rewards():
             "assigned_at": d["assigned_at"].isoformat() if d.get("assigned_at") else None,
             "expires_at": d["expires_at"].isoformat() if d.get("expires_at") else None,
             "status": d.get("status"),
-        })
+        }
+        # --- additive Mission Pool context (§27.4) ---
+        item["mechanic"] = resolve_mechanic(campaign)
+        if d.get("category") == "mission_pool":
+            item["is_winner"] = True
+            item["winner_popup_pending"] = bool(d.get("winner_popup_pending"))
+            item["notification_status"] = d.get("notification_status")
+        rewards.append(item)
 
     return jsonify({"status": "ok", "rewards": rewards})
+
+
+@campaign_rewards_bp.post("/api/campaign-rewards/<reward_id>/ack-popup")
+def acknowledge_winner_popup(reward_id: str):
+    """Durable one-shot acknowledgement for the Mission Pool winner popup
+    (§27.3). The popup is driven by ``winner_popup_pending`` on the reward
+    row itself, so it survives app restarts and never re-appears on every
+    Mini App open once acknowledged.
+
+    Acknowledging is purely presentational: it never touches
+    ``status``/``voucher_code``, so the voucher stays owned by the winner and
+    stays visible in Campaign Rewards regardless."""
+    uid, err = resolve_authenticated_telegram_user_id()
+    if err:
+        return err
+    doc = database.db["campaign_rewards"].find_one({"reward_id": reward_id})
+    if not doc or doc.get("telegram_user_id") != uid:
+        return jsonify({"status": "error", "code": "not_found"}), 404
+
+    now = datetime.now(timezone.utc)
+    database.db["campaign_rewards"].update_one(
+        {"reward_id": reward_id, "winner_popup_pending": True},
+        {"$set": {
+            "winner_popup_pending": False,
+            "winner_popup_shown_at": doc.get("winner_popup_shown_at") or now,
+            "winner_popup_acknowledged_at": now,
+            "updated_at": now,
+        }},
+    )
+    log_funnel_event("mission_winner_popup_acknowledged",
+                     campaign_id=doc.get("campaign_id", ""), user_id=uid, reward_id=reward_id)
+    return jsonify({"status": "ok"})
 
 
 @campaign_rewards_bp.post("/api/campaign-rewards/<reward_id>/view")

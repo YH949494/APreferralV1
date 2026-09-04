@@ -156,6 +156,7 @@ SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
             "telegram_member_counts_refresh": {"type": "job", "label": "Telegram Member Counts Refresh", "default": {"enabled": True, "cron": None, "batch_size": None, "interval_minutes": 60}},
             "autoscale_web_for_drop": {"type": "job", "label": "Autoscale Web For Drop", "default": {"enabled": True, "cron": None, "batch_size": None, "interval_seconds": 30}},
             "community_centre_tick": {"type": "job", "label": "Community Centre Tick", "default": {"enabled": True, "cron": None, "batch_size": None, "interval_seconds": 20}},
+            "mission_pool_processor": {"type": "job", "label": "Mission Reward Pool Processor", "default": {"enabled": True, "cron": None, "batch_size": None, "interval_seconds": 120}},
         },
     },
     "feature_flags": {
@@ -169,6 +170,7 @@ SETTINGS_SCHEMA: dict[str, dict[str, Any]] = {
             "leaderboard": {"type": "bool", "label": "Leaderboard", "default": True, "env": None},
             "affiliate": {"type": "bool", "label": "Affiliate", "default": True, "env": None},
             "tournament": {"type": "bool", "label": "Tournament", "default": False, "env": None},
+            "mission_pool": {"type": "bool", "label": "Mission Reward Pool", "default": False, "env": "MISSION_POOL_ENABLED"},
             "reactivation": {"type": "bool", "label": "Reactivation", "default": True, "env": None},
             "region_selection": {"type": "bool", "label": "Region Selection", "default": False, "env": None},
             "growth_leaderboard": {"type": "bool", "label": "Growth Leaderboard", "default": False, "env": "GROWTH_LEADERBOARD_ENABLED"},
