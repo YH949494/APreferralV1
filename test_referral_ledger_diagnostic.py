@@ -80,6 +80,24 @@ class BuildPairDiagnosticTests(unittest.TestCase):
         self.assertEqual(by_invitee[3]["revoked_count_invalidated"], 1)
         self.assertFalse(by_invitee[3]["violation"])
 
+    def test_mixed_numeric_and_malformed_string_identifiers_do_not_raise(self):
+        # A malformed legacy row (string invitee_id, the shape
+        # repair_referral_ledger.py's _find_malformed_events also scans for)
+        # alongside a normal numeric-id pair for the same inviter must not
+        # raise TypeError when sorting rows for display.
+        events = _FakeReferralEvents()
+        events.insert_one(_revoked_doc(1, 2, NOW))
+        malformed = _revoked_doc(1, "not-a-real-id", NOW)
+        events.docs.append(malformed)
+        flow = _FakeFlowEvents([])
+        db = type("DB", (), {"referral_events": events, "referral_flow_events": flow})()
+
+        rows = diag.build_pair_diagnostic(db, [1])
+
+        self.assertEqual(len(rows), 2)
+        invitee_ids = {r["invitee_id"] for r in rows}
+        self.assertEqual(invitee_ids, {2, "not-a-real-id"})
+
     def test_no_inviter_ids_returns_empty(self):
         db = type("DB", (), {"referral_events": _FakeReferralEvents(), "referral_flow_events": _FakeFlowEvents([])})()
         self.assertEqual(diag.build_pair_diagnostic(db, []), [])

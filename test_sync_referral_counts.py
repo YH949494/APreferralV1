@@ -87,6 +87,23 @@ class NeverWritesNegativeTests(unittest.TestCase):
         self.assertEqual(summary["negative_computed_count"], 0)
         self.assertEqual(users._docs[0]["total_referrals"], 2)
 
+    def test_already_synced_negative_value_is_still_repaired(self):
+        # An earlier (pre-clamp) run of this script already wrote
+        # total_referrals = -2 to match the ledger's raw negative net. The
+        # outer mismatch check (computed_total != stored_total) is false
+        # here since both are -2, so the fix must not rely on that branch
+        # alone to queue the clamped repair.
+        events = _FakeReferralEvents()
+        events.insert_one(_revoked_doc(1, 2, NOW))
+        events.insert_one(_revoked_doc(1, 3, NOW))
+        users = _FakeUsers([{"_id": "u1", "user_id": 1, "total_referrals": -2}])
+        db = type("DB", (), {"users": users, "referral_events": events})()
+
+        summary = sync_referral_counts.sync_referral_counts(db, batch_size=10, dry_run=False)
+
+        self.assertEqual(users._docs[0]["total_referrals"], 0)
+        self.assertEqual(len(users.bulk_writes), 1)
+
 
 class CommitRefusalGateTests(unittest.TestCase):
     def setUp(self):

@@ -94,7 +94,13 @@ def build_pair_diagnostic(db, inviter_ids: list[int]) -> list[dict]:
         flow_by_pair[(doc.get("referrer_id"), doc.get("invitee_id"))].append(doc)
 
     rows = []
-    for (inviter_id, invitee_id), docs in sorted(pairs.items(), key=lambda kv: (kv[0][0] or 0, kv[0][1] or 0)):
+    # Sort by string representation, not the raw values: malformed legacy
+    # rows (the "malformed_identifier" shape repair_referral_ledger.py also
+    # scans for) can carry a non-numeric inviter_id/invitee_id, and sorting
+    # a mix of int and str keys directly raises TypeError before any
+    # diagnostic row is produced. Grouping itself is unaffected -- this only
+    # changes display order.
+    for (inviter_id, invitee_id), docs in sorted(pairs.items(), key=lambda kv: (str(kv[0][0]), str(kv[0][1]))):
         settled = [d for d in docs if d.get("event") == "referral_settled"]
         revoked_valid = [
             d for d in docs if d.get("event") == "referral_revoked" and not d.get("invalidated")
