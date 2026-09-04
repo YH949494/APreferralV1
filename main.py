@@ -2747,6 +2747,10 @@ from event_banner import event_banner_admin_bp, event_banner_public_bp
 app.register_blueprint(event_banner_admin_bp)
 app.register_blueprint(event_banner_public_bp)
 
+from lucky_games import lucky_games_admin_bp, lucky_games_public_bp
+app.register_blueprint(lucky_games_admin_bp)
+app.register_blueprint(lucky_games_public_bp)
+
 from campaign_events import campaign_events_bp
 app.register_blueprint(campaign_events_bp)
 

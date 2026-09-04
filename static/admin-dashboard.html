@@ -1786,6 +1786,39 @@
         <div id="eb-body"></div>
       </section>
 
+      <!-- LUCKY GAMES VIEW (Mini App game cards, lucky_games.py) -->
+      <section id="view-luckyGames" class="hidden">
+        <div class="section" style="margin-bottom:16px;">
+          <div class="section-title" id="lg-form-mode">Create new game</div>
+          <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:8px;">
+            <input class="filter-input" id="lg-name" placeholder="Game name" style="margin:0;" />
+            <input class="filter-input" id="lg-label" placeholder="Label (default: Lucky Game)" style="margin:0;" />
+            <input class="filter-input" id="lg-provider" placeholder="Provider" style="margin:0;" />
+            <select class="filter-input" id="lg-volatility" style="margin:0;">
+              <option value="Low">Low</option>
+              <option value="Low-Med">Low-Med</option>
+              <option value="Medium" selected>Medium</option>
+              <option value="High-Med">High-Med</option>
+              <option value="High">High</option>
+            </select>
+            <input class="filter-input" id="lg-max-win" placeholder="Maximum win (e.g. 25000x)" style="margin:0;" />
+            <input class="filter-input" id="lg-image-url" placeholder="Image URL (https://...)" style="margin:0;" />
+            <input class="filter-input" id="lg-game-url" placeholder="Game URL (https:// or tg://)" style="margin:0;" />
+            <input class="filter-input" id="lg-sort-order" type="number" placeholder="Display order" value="0" style="margin:0;" />
+          </div>
+          <label class="sub" style="display:flex;align-items:center;gap:6px;margin-top:10px;">
+            <input type="checkbox" id="lg-is-published" /> Published (visible in Mini App)
+          </label>
+          <div style="margin-top:10px;display:flex;gap:8px;">
+            <button class="btn primary" id="lg-submit-btn">Add game</button>
+            <button class="btn" id="lg-cancel-edit-btn" style="display:none;">Cancel edit</button>
+          </div>
+          <div class="sub" style="margin-top:6px;">Only <b>Published</b> games are returned by the public Mini App endpoint, ordered by Display order then creation time.</div>
+        </div>
+        <div class="section-title" style="margin-bottom:8px;">Lucky Games</div>
+        <div id="lg-body"></div>
+      </section>
+
       <section id="view-gcProviders" class="hidden">
         <div class="section" style="margin-bottom:16px;">
           <div class="section-title">Create Provider</div>
