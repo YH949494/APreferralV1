@@ -26,6 +26,27 @@ class _FakeFlowEvents:
         ]
 
 
+class FindNegativeInvitersTests(unittest.TestCase):
+    def test_invalidated_orphan_revocation_excluded_from_auto_detect(self):
+        # --auto-detect (find_negative_inviters) must not flag an inviter
+        # whose only orphan revocation has already been marked invalidated
+        # by repair_referral_ledger.py -- with_not_invalidated excludes it
+        # from the net, matching what settle_referral_snapshots() and
+        # sync_referral_counts.py also do.
+        events = _FakeReferralEvents()
+        events.docs.append(_revoked_doc(1, 2, NOW, invalidated=True))
+        db = type("DB", (), {"referral_events": events})()
+
+        self.assertEqual(diag.find_negative_inviters(db), [])
+
+    def test_unrepaired_orphan_revocation_is_detected(self):
+        events = _FakeReferralEvents()
+        events.insert_one(_revoked_doc(1, 2, NOW))
+        db = type("DB", (), {"referral_events": events})()
+
+        self.assertEqual(diag.find_negative_inviters(db), [1])
+
+
 class BuildPairDiagnosticTests(unittest.TestCase):
     def test_orphan_revocation_is_flagged_as_violation(self):
         events = _FakeReferralEvents()

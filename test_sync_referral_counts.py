@@ -87,6 +87,25 @@ class NeverWritesNegativeTests(unittest.TestCase):
         self.assertEqual(summary["negative_computed_count"], 0)
         self.assertEqual(users._docs[0]["total_referrals"], 2)
 
+    def test_invalidated_revocation_contributes_zero_no_mismatch(self):
+        # An orphan revocation already marked invalidated by
+        # repair_referral_ledger.py must contribute zero to the ledger net
+        # -- with_not_invalidated (sync_referral_counts.py's aggregation
+        # $match) excludes it, so stored_total already matches computed
+        # and no mismatch/write is produced.
+        events = _FakeReferralEvents()
+        events.insert_one(_settled_doc(1, 2, NOW))
+        events.docs.append(_revoked_doc(1, 3, NOW, invalidated=True))
+        users = _FakeUsers([{"_id": "u1", "user_id": 1, "total_referrals": 1}])
+        db = type("DB", (), {"users": users, "referral_events": events})()
+
+        summary = sync_referral_counts.sync_referral_counts(db, batch_size=10, dry_run=False)
+
+        self.assertEqual(summary["users_mismatched"], 0)
+        self.assertEqual(summary["negative_computed_count"], 0)
+        self.assertEqual(users._docs[0]["total_referrals"], 1)
+        self.assertEqual(users.bulk_writes, [])
+
     def test_already_synced_negative_value_is_still_repaired(self):
         # An earlier (pre-clamp) run of this script already wrote
         # total_referrals = -2 to match the ledger's raw negative net. The

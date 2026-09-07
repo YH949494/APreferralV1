@@ -2262,11 +2262,21 @@ def ensure_indexes():
         )
     except Exception as e:
         print("⚠️ ensure_indexes error (idx_referral_award_events_invitee):", e)
-    referral_events_collection.create_index(
-        [("event", 1), ("inviter_id", 1), ("invitee_id", 1)],
-        unique=True,
-        name="uniq_referral_event",
-    )
+    try:
+        # Isolated so a failure here (e.g. duplicate (event, inviter_id,
+        # invitee_id) rows already in the collection -- MongoDB refuses to
+        # build a unique index over existing duplicates) cannot crash the
+        # whole app at import time. If this ever fails, the uniqueness
+        # invariant referral_ledger.py and repair_referral_ledger.py assume
+        # is NOT database-enforced until repair_referral_ledger.py has been
+        # run and this index rebuilt -- surfaced loudly rather than silently.
+        referral_events_collection.create_index(
+            [("event", 1), ("inviter_id", 1), ("invitee_id", 1)],
+            unique=True,
+            name="uniq_referral_event",
+        )
+    except Exception as e:
+        print("⚠️ ensure_indexes error (uniq_referral_event) -- referral_events duplicate-write guard is NOT enforced:", e)
     referral_events_collection.create_index(
         [("inviter_id", 1), ("occurred_at", 1)],
         name="referral_events_by_inviter_time",
