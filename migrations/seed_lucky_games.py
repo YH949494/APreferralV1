@@ -19,7 +19,27 @@ becomes "Medium", everything else passes through unchanged.
 
 Idempotent: matches candidates by ``name`` (case-sensitive, exact) and
 skips any that already exist in the collection, so running this twice
-never creates duplicates. Dry-run by default; requires --commit to write.
+never creates duplicates.
+
+``run_on_startup()`` is called automatically from main.py on every app boot
+(committing immediately) so production never needs a manual migration step
+and the admin Lucky Games tab / Mini App list are never empty after a fresh
+deploy. The CLI below (dry-run by default; requires --commit to write) is
+kept for manual/local use against a standalone DB connection.
+
+Production runs this in multiple OS processes at once (Fly's ``web``
+process has 2+ gunicorn workers, plus a separate ``worker`` process — see
+fly.toml), all calling ``run_on_startup()`` within moments of each other
+against what may be an empty ``lucky_games`` collection. Racing the
+name-based dedup above across processes could otherwise insert the same
+game 2-3x. ``run_on_startup()`` avoids that — and makes the seed a true
+one-time event rather than a per-boot reconciliation (so a game an admin
+later deletes or renames stays deleted/renamed) — by first taking an
+atomic claim on a one-row ``startup_migrations`` ledger collection, keyed
+by ``_id`` (MongoDB's implicit unique index makes exactly one concurrent
+``insert_one`` win); only the process that wins the claim runs the seed,
+and every future boot — including ones long after admins have edited the
+catalogue — finds the claim already taken and does nothing.
 
 Usage:
   MONGO_URL='mongodb://...' python migrations/seed_lucky_games.py [--db referral_bot] [--commit]
@@ -42,12 +62,19 @@ _APP_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _APP_ROOT not in sys.path:
     sys.path.insert(0, _APP_ROOT)
 
+from pymongo.errors import DuplicateKeyError  # noqa: E402
+
 from database import init_db, get_db  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", stream=sys.stderr)
 logger = logging.getLogger("seed_lucky_games")
 
 SEED_SOURCE = "daily_game_slots_seed_v1"
+
+# Ledger collection + row id used to atomically claim the one-time startup
+# seed across concurrent processes (see run_on_startup docstring above).
+STARTUP_MIGRATIONS_COLLECTION = "startup_migrations"
+STARTUP_MIGRATION_ID = SEED_SOURCE
 
 _TAG_TO_VOLATILITY = {
     "Low": "Low",
@@ -120,11 +147,11 @@ _DAILY_GAME_SLOTS = [
 ]
 
 
-def run(*, mongo_url: str, db_name: str, commit: bool) -> dict:
-    init_db(mongo_url, db_name)
-    db = get_db()
-    col = db["lucky_games"]
-
+def seed_collection(col, *, commit: bool = True) -> dict:
+    """Core idempotent seed logic against an already-open ``lucky_games``
+    collection. Shared by the CLI entrypoint (``run``) and the automatic
+    startup call in main.py, so both paths use identical matching/insert
+    behavior and can never diverge."""
     existing_names = set(col.distinct("name"))
     now = datetime.now(timezone.utc)
 
@@ -175,6 +202,48 @@ def run(*, mongo_url: str, db_name: str, commit: bool) -> dict:
     report["inserted_count"] = len(to_insert)
     logger.info("[SEED] APPLIED inserted_count=%s", len(to_insert))
     return report
+
+
+def run(*, mongo_url: str, db_name: str, commit: bool) -> dict:
+    """CLI entrypoint: opens its own connection, then delegates to
+    ``seed_collection``."""
+    init_db(mongo_url, db_name)
+    col = get_db()["lucky_games"]
+    return seed_collection(col, commit=commit)
+
+
+def run_on_startup() -> dict | None:
+    """Called once from main.py right after the app's shared DB connection
+    is initialized. Reuses that existing connection (init_db is a no-op if
+    already called) rather than opening a second one, and never raises —
+    a seed failure must not block app startup, since the admin-managed
+    lucky_games collection is non-critical (existing DAILY_GAME_SLOTS-backed
+    Mini App features are unaffected either way).
+
+    Production runs this from multiple processes at once (see module
+    docstring), so before touching lucky_games at all, atomically claim a
+    single ledger row via ``insert_one`` on ``_id`` — MongoDB's implicit
+    unique index on ``_id`` guarantees exactly one process's insert
+    succeeds. Only that process proceeds to seed; every other process (and
+    every future boot, forever) hits ``DuplicateKeyError`` and returns
+    immediately without touching lucky_games — so this never reconciles
+    against admin deletes/renames after the first successful run."""
+    try:
+        db_ref = get_db()
+        try:
+            db_ref[STARTUP_MIGRATIONS_COLLECTION].insert_one({
+                "_id": STARTUP_MIGRATION_ID,
+                "claimed_at": datetime.now(timezone.utc),
+            })
+        except DuplicateKeyError:
+            logger.info("[SEED][STARTUP] already_migrated migration=%s", STARTUP_MIGRATION_ID)
+            return None
+        report = seed_collection(db_ref["lucky_games"], commit=True)
+        logger.info("[SEED][STARTUP] report=%s", report)
+        return report
+    except Exception:
+        logger.warning("[SEED][STARTUP] lucky_games_seed_failed", exc_info=True)
+        return None
 
 
 def main() -> int:

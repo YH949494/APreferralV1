@@ -2758,6 +2758,13 @@ from lucky_games import lucky_games_admin_bp, lucky_games_public_bp
 app.register_blueprint(lucky_games_admin_bp)
 app.register_blueprint(lucky_games_public_bp)
 
+# One-time backfill of the legacy DAILY_GAME_SLOTS pool into the new
+# admin-managed lucky_games collection, run automatically on every boot so
+# production never needs a manual migration step. Idempotent (matches by
+# name) and non-fatal — see migrations/seed_lucky_games.py.
+from migrations.seed_lucky_games import run_on_startup as _seed_lucky_games_on_startup
+_seed_lucky_games_on_startup()
+
 from campaign_events import campaign_events_bp
 app.register_blueprint(campaign_events_bp)
 
