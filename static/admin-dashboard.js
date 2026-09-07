@@ -5664,6 +5664,164 @@
     });
   }
 
+  // ---------- Lucky Games (admin-managed Mini App game cards, lucky_games.py) ----------
+
+  var LG_VOLATILITY_OPTIONS = ["Low", "Low-Med", "Medium", "High-Med", "High"];
+  var lgEditingId = null; // null = create mode; a game id = edit mode. Never both.
+  window.__lgGamesById = {};
+
+  function lgFormEl(id) { return document.getElementById(id); }
+
+  function lgReadForm() {
+    return {
+      name: (lgFormEl("lg-name").value || "").trim(),
+      label: (lgFormEl("lg-label").value || "").trim(),
+      provider: (lgFormEl("lg-provider").value || "").trim(),
+      volatility: lgFormEl("lg-volatility").value,
+      max_win: (lgFormEl("lg-max-win").value || "").trim(),
+      image_url: (lgFormEl("lg-image-url").value || "").trim(),
+      game_url: (lgFormEl("lg-game-url").value || "").trim(),
+      sort_order: Number(lgFormEl("lg-sort-order").value || 0),
+      is_published: !!lgFormEl("lg-is-published").checked,
+    };
+  }
+
+  function lgClearForm() {
+    ["lg-name", "lg-label", "lg-provider", "lg-max-win", "lg-image-url", "lg-game-url"].forEach(function (id) {
+      var el = lgFormEl(id); if (el) el.value = "";
+    });
+    var sortEl = lgFormEl("lg-sort-order"); if (sortEl) sortEl.value = "0";
+    var volEl = lgFormEl("lg-volatility"); if (volEl) volEl.value = "Medium";
+    var pubEl = lgFormEl("lg-is-published"); if (pubEl) pubEl.checked = false;
+  }
+
+  function lgEnterCreateMode() {
+    lgEditingId = null;
+    lgClearForm();
+    var submitBtn = lgFormEl("lg-submit-btn");
+    if (submitBtn) submitBtn.textContent = "Add game";
+    var cancelBtn = lgFormEl("lg-cancel-edit-btn");
+    if (cancelBtn) cancelBtn.style.display = "none";
+    var modeLabel = lgFormEl("lg-form-mode");
+    if (modeLabel) modeLabel.textContent = "Create new game";
+  }
+
+  function lgEnterEditMode(game) {
+    // Explicit, mutually-exclusive edit mode: capture the target game's id
+    // once here and never re-derive it from form contents, so editing one
+    // game (even after changing its name) can never be submitted as a
+    // create or silently overwrite a different game.
+    lgEditingId = game.id;
+    lgFormEl("lg-name").value = game.name || "";
+    lgFormEl("lg-label").value = game.label || "";
+    lgFormEl("lg-provider").value = game.provider || "";
+    lgFormEl("lg-volatility").value = game.volatility || "Medium";
+    lgFormEl("lg-max-win").value = game.max_win || "";
+    lgFormEl("lg-image-url").value = game.image_url || "";
+    lgFormEl("lg-game-url").value = game.game_url || "";
+    lgFormEl("lg-sort-order").value = game.sort_order != null ? game.sort_order : 0;
+    lgFormEl("lg-is-published").checked = !!game.is_published;
+    var submitBtn = lgFormEl("lg-submit-btn");
+    if (submitBtn) submitBtn.textContent = "Save changes";
+    var cancelBtn = lgFormEl("lg-cancel-edit-btn");
+    if (cancelBtn) cancelBtn.style.display = "inline-block";
+    var modeLabel = lgFormEl("lg-form-mode");
+    if (modeLabel) modeLabel.textContent = "Editing “" + (game.name || "") + "”";
+    var section = document.getElementById("view-luckyGames");
+    if (section && section.scrollIntoView) section.scrollIntoView({ block: "start", behavior: "smooth" });
+  }
+
+  function loadLuckyGames(force) {
+    statePanel("lg-body", "loading", "Loading lucky games…");
+    api("/api/admin/lucky-games").then(function (data) {
+      var items = data.games || [];
+      window.__lgGamesById = {};
+      if (!items.length) { $("#lg-body").innerHTML = emptyState("No lucky games yet — add one above."); return; }
+      var rows = items.map(function (g) {
+        window.__lgGamesById[g.id] = g;
+        return '<tr><td>' + esc(g.name) + '<div class="sub">' + esc(g.label || "") + (g.provider ? " · " + esc(g.provider) : "") + '</div></td>' +
+          '<td>' + (g.image_url ? '<img src="' + esc(g.image_url) + '" alt="" style="max-width:60px;max-height:36px;object-fit:contain;" />' : '<span class="sub">—</span>') + '</td>' +
+          '<td>' + esc(g.volatility || "") + '</td>' +
+          '<td>' + esc(g.max_win || "") + '</td>' +
+          '<td>' + esc(g.sort_order != null ? String(g.sort_order) : "0") + '</td>' +
+          '<td>' + gcPill(g.is_published ? "active" : "inactive") + '</td>' +
+          '<td>' +
+          '<button class="btn" data-lg-action="edit" data-id="' + esc(g.id) + '">Edit</button> ' +
+          '<button class="btn" data-lg-action="toggle" data-id="' + esc(g.id) + '" data-published="' + (g.is_published ? "1" : "0") + '">' + (g.is_published ? "Unpublish" : "Publish") + '</button> ' +
+          '<button class="btn" data-lg-action="delete" data-id="' + esc(g.id) + '">Delete</button>' +
+          '</td></tr>';
+      }).join("");
+      $("#lg-body").innerHTML = '<table class="data-table"><thead><tr><th>Game</th><th>Image</th><th>Volatility</th><th>Max Win</th><th>Order</th><th>Status</th><th>Actions</th></tr></thead><tbody>' + rows + '</tbody></table>';
+      // An edit in progress can be invalidated by a concurrent delete
+      // elsewhere; drop back to create mode rather than submitting a PATCH
+      // against a game_id that no longer exists.
+      if (lgEditingId && !window.__lgGamesById[lgEditingId]) lgEnterCreateMode();
+    }).catch(function (e) { statePanel("lg-body", "error", "Failed to load lucky games: " + e.message); });
+  }
+
+  function bindLuckyGames() {
+    lgEnterCreateMode();
+
+    var submitBtn = lgFormEl("lg-submit-btn");
+    if (submitBtn) {
+      submitBtn.addEventListener("click", function () {
+        if (submitBtn.disabled) return; // guard against double submission
+        var body = lgReadForm();
+        if (!body.name) { toast("❌ Game name is required", "error"); return; }
+
+        submitBtn.disabled = true;
+        var wasEditing = lgEditingId;
+        var request = wasEditing
+          ? apiPatchJson("/api/admin/lucky-games/" + encodeURIComponent(wasEditing), body)
+          : apiPostJson("/api/admin/lucky-games", body);
+
+        request.then(function (res) {
+          if (!res.ok || res.d.status !== "ok") {
+            toast("❌ " + (res.d && res.d.code || (wasEditing ? "update_failed" : "create_failed")), "error");
+            return;
+          }
+          toast(wasEditing ? "✅ Game updated" : "✅ Game added", "success");
+          lgEnterCreateMode();
+          loadLuckyGames(true);
+        }).catch(function (e) {
+          toast("❌ " + e.message, "error");
+        }).finally(function () {
+          submitBtn.disabled = false;
+        });
+      });
+    }
+
+    var cancelBtn = lgFormEl("lg-cancel-edit-btn");
+    if (cancelBtn) cancelBtn.addEventListener("click", function () { lgEnterCreateMode(); });
+
+    document.addEventListener("click", function (e) {
+      var btn = e.target && e.target.closest && e.target.closest("[data-lg-action]");
+      if (!btn) return;
+      var action = btn.dataset.lgAction, id = btn.dataset.id;
+      if (action === "edit") {
+        var game = (window.__lgGamesById || {})[id];
+        if (!game) return;
+        lgEnterEditMode(game);
+      } else if (action === "toggle") {
+        var nextPublished = btn.dataset.published !== "1";
+        apiPatchJson("/api/admin/lucky-games/" + encodeURIComponent(id), { is_published: nextPublished }).then(function (res) {
+          if (!res.ok || res.d.status !== "ok") { toast("❌ " + (res.d && res.d.code || "update_failed"), "error"); return; }
+          toast(nextPublished ? "✅ Game published" : "✅ Game unpublished", "success");
+          loadLuckyGames(true);
+        });
+      } else if (action === "delete") {
+        var name = (window.__lgGamesById[id] || {}).name || id;
+        if (!confirm("Delete lucky game \"" + name + "\"? This cannot be undone.")) return;
+        apiDelete("/api/admin/lucky-games/" + encodeURIComponent(id)).then(function (res) {
+          if (!res.ok || res.d.status !== "ok") { toast("❌ " + (res.d && res.d.code || "delete_failed"), "error"); return; }
+          toast("✅ Game deleted", "success");
+          if (lgEditingId === id) lgEnterCreateMode();
+          loadLuckyGames(true);
+        });
+      }
+    });
+  }
+
   function loadGcProviders(force) {
     statePanel("gc-providers-body", "loading", "Loading providers…");
     api("/api/admin/providers").then(function (data) {
@@ -7371,7 +7529,7 @@
     });
   }
 
-  var VIEWS =["summary", "moduleOverview", "placeholder", "funnel", "abuse", "campaignBuilder", "campaignPerformance", "campaignIntelligence", "activeCampaigns", "draftCampaigns", "compiledDrops", "campaigns", "gcCampaigns", "gcProviders", "gcResults", "gcRewards", "gcVerification", "gcActivity", "eventBanners", "vouchers", "drops", "referrals", "affiliate", "affiliatePools", "affiliateBatches", "affiliatePending", "reactivation", "audit", "segmentProbabilityConfig", "segmentRoi", "segments", "validation", "backendSegmentEngine", "voucherHunterAudit", "unclassifiedAudit", "segmentRuleSimulator", "voucherHunterQuality", "voucherHunterFalsePositive", "voucherHunterRuleSimulator", "vhPriorityImpact", "uploadPlayerPerformance", "uploadHistory", "rawExplorer", "users", "joinRequests", "xpAdjust", "settings", "referralShareContent", "referralShareEngagement", "ccComposer", "ccCalendar", "ccBoard"];
+  var VIEWS =["summary", "moduleOverview", "placeholder", "funnel", "abuse", "campaignBuilder", "campaignPerformance", "campaignIntelligence", "activeCampaigns", "draftCampaigns", "compiledDrops", "campaigns", "gcCampaigns", "gcProviders", "gcResults", "gcRewards", "gcVerification", "gcActivity", "eventBanners", "luckyGames", "vouchers", "drops", "referrals", "affiliate", "affiliatePools", "affiliateBatches", "affiliatePending", "reactivation", "audit", "segmentProbabilityConfig", "segmentRoi", "segments", "validation", "backendSegmentEngine", "voucherHunterAudit", "unclassifiedAudit", "segmentRuleSimulator", "voucherHunterQuality", "voucherHunterFalsePositive", "voucherHunterRuleSimulator", "vhPriorityImpact", "uploadPlayerPerformance", "uploadHistory", "rawExplorer", "users", "joinRequests", "xpAdjust", "settings", "referralShareContent", "referralShareEngagement", "ccComposer", "ccCalendar", "ccBoard"];
 
   // ---------------------------------------------------------------------
   // Information architecture: sidebar Business Modules, each with its own
@@ -7404,7 +7562,8 @@
       { label: "Rewards", view: "gcRewards" },
       { label: "Verification", view: "gcVerification" },
       { label: "Activity Log", view: "gcActivity" },
-      { label: "Event Banner", view: "eventBanners" }
+      { label: "Event Banner", view: "eventBanners" },
+      { label: "Lucky Games", view: "luckyGames" }
     ]},
     { key: "voucher", icon: "🎟", label: "Voucher Centre", tabs: [
       { label: "Overview", view: "moduleOverview", overviewKey: "voucher" },
@@ -7673,6 +7832,7 @@
       gcCampaigns: "Player Campaigns", gcProviders: "Providers", gcResults: "Tournament Results",
       gcRewards: "Rewards", gcVerification: "Verification Integrations", gcActivity: "Activity Log",
       eventBanners: "Event Banner",
+      luckyGames: "Lucky Games",
       vouchers: "Vouchers", drops: "Voucher Drops", referrals: "Referrals", affiliate: "Affiliate",
       affiliatePools: "Affiliate Voucher Pools", affiliateBatches: "Affiliate Voucher Batches", affiliatePending: "Pending Affiliate Rewards", reactivation: "Reactivation",
       audit: "Audit", segmentProbabilityConfig: "Segment Probability Configuration (Read Only)",
@@ -7717,6 +7877,7 @@
     else if (state.view === "gcVerification") loadGcVerification(force);
     else if (state.view === "gcActivity") loadGcEvents(1);
     else if (state.view === "eventBanners") loadEventBanners(force);
+    else if (state.view === "luckyGames") loadLuckyGames(force);
     else if (state.view === "referralShareContent") loadReferralShareContent(force);
     else if (state.view === "referralShareEngagement") loadReferralShareEngagement(force);
     else if (state.view === "vouchers") loadVouchers(force);
@@ -7794,6 +7955,7 @@
     bindAffiliatePending();
     bindGcCampaigns();
     bindEventBanners();
+    bindLuckyGames();
     bindGcProviders();
     bindGcResults();
     bindGcRewards();
