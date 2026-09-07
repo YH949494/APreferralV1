@@ -12,6 +12,8 @@ import lucky_games as lg
 from fake_mongo import FakeDb
 from migrations.seed_lucky_games import (
     SEED_SOURCE,
+    STARTUP_MIGRATIONS_COLLECTION,
+    STARTUP_MIGRATION_ID,
     _DAILY_GAME_SLOTS,
     run_on_startup,
     seed_collection,
@@ -20,7 +22,10 @@ from migrations.seed_lucky_games import (
 
 @pytest.fixture
 def fake_db(monkeypatch):
-    fdb = FakeDb()
+    # startup_migrations relies on a real unique index on _id (MongoDB's
+    # implicit default) to make run_on_startup's claim atomic — FakeDb only
+    # enforces uniqueness for keys explicitly registered here.
+    fdb = FakeDb(unique_keys_by_collection={STARTUP_MIGRATIONS_COLLECTION: ["_id"]})
     monkeypatch.setattr(database, "db", fdb)
     monkeypatch.setattr(lg, "database", database)
     # run_on_startup() calls the module-level get_db() (the same shared
@@ -118,10 +123,34 @@ def test_run_on_startup_seeds_and_admin_lists_migrated_games(fake_db):
 
 
 def test_run_on_startup_is_idempotent_across_repeated_boots(fake_db):
-    run_on_startup()
-    run_on_startup()
-    run_on_startup()
+    first = run_on_startup()
+    second = run_on_startup()
+    third = run_on_startup()
+    assert first["inserted_count"] == len(_DAILY_GAME_SLOTS)
+    # Second/third boot find the migration ledger already claimed and never
+    # even look at lucky_games again.
+    assert second is None
+    assert third is None
     assert fake_db["lucky_games"].count_documents({}) == len(_DAILY_GAME_SLOTS)
+
+
+def test_run_on_startup_claims_ledger_row_exactly_once(fake_db):
+    run_on_startup()
+    ledger_docs = list(fake_db[STARTUP_MIGRATIONS_COLLECTION].find({"_id": STARTUP_MIGRATION_ID}))
+    assert len(ledger_docs) == 1
+
+
+def test_run_on_startup_concurrent_boots_never_duplicate_games(fake_db):
+    # Simulates the real Fly deployment: 2 gunicorn "web" workers + a
+    # separate "worker" process all call run_on_startup() within moments of
+    # each other against an initially empty collection (fly.toml). Only one
+    # process's atomic ledger claim can win, so only one seed pass ever
+    # touches lucky_games — no game should be inserted more than once.
+    reports = [run_on_startup() for _ in range(3)]
+    successful = [r for r in reports if r is not None]
+    assert len(successful) == 1
+    names = [d["name"] for d in fake_db["lucky_games"].find({})]
+    assert len(names) == len(set(names)) == len(_DAILY_GAME_SLOTS)
 
 
 def test_run_on_startup_never_raises_on_db_error(fake_db, monkeypatch):
@@ -131,6 +160,34 @@ def test_run_on_startup_never_raises_on_db_error(fake_db, monkeypatch):
     monkeypatch.setattr("migrations.seed_lucky_games.get_db", _boom)
     result = run_on_startup()
     assert result is None
+
+
+def test_deleted_migrated_game_is_not_resurrected_by_later_boot(fake_db):
+    run_on_startup()
+    doc = fake_db["lucky_games"].find_one({"name": "Zeustrike Xmas"})
+    fake_db["lucky_games"].delete_one({"_id": doc["_id"]})
+
+    # A later restart (the migration ledger is already claimed) must not
+    # bring the deleted game back.
+    run_on_startup()
+    run_on_startup()
+
+    assert fake_db["lucky_games"].find_one({"name": "Zeustrike Xmas"}) is None
+    assert fake_db["lucky_games"].count_documents({}) == len(_DAILY_GAME_SLOTS) - 1
+
+
+def test_renamed_migrated_game_is_not_duplicated_by_later_boot(fake_db):
+    run_on_startup()
+    doc = fake_db["lucky_games"].find_one({"name": "Zeustrike Xmas"})
+    fake_db["lucky_games"].update_one({"_id": doc["_id"]}, {"$set": {"name": "Zeustrike Xmas Reloaded"}})
+
+    # A later restart must not re-add "Zeustrike Xmas" under its old name
+    # alongside the admin's renamed copy.
+    run_on_startup()
+
+    assert fake_db["lucky_games"].find_one({"name": "Zeustrike Xmas"}) is None
+    assert fake_db["lucky_games"].find_one({"name": "Zeustrike Xmas Reloaded"}) is not None
+    assert fake_db["lucky_games"].count_documents({}) == len(_DAILY_GAME_SLOTS)
 
 
 def test_public_endpoint_serves_migrated_games_in_source_order(fake_db):
