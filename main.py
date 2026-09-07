@@ -2262,6 +2262,13 @@ def ensure_indexes():
         )
     except Exception as e:
         print("⚠️ ensure_indexes error (idx_referral_award_events_invitee):", e)
+    # Deliberately NOT wrapped in try/except, unlike its neighbors above:
+    # the referral lifecycle correctness proof (referral_ledger.py) depends
+    # on this unique index actually existing. If MongoDB ever refuses to
+    # build it (e.g. duplicate (event, inviter_id, invitee_id) rows already
+    # present), duplicate settle/revoke writes could land uncaught and
+    # silently corrupt snapshots/rewards -- so this must fail the whole
+    # startup rather than let the app continue unprotected.
     referral_events_collection.create_index(
         [("event", 1), ("inviter_id", 1), ("invitee_id", 1)],
         unique=True,

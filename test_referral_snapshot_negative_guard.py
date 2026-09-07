@@ -59,6 +59,14 @@ def _fake_users():
 class SnapshotWriterNeverPersistsNegativeTests(unittest.TestCase):
     def setUp(self):
         self.orig_db = scheduler.db
+        self.orig_now_utc = scheduler.now_utc
+        # The corrupted-event fixtures below are timestamped relative to the
+        # fixed NOW, and week/month membership is decided by comparing
+        # occurred_at against a window computed from scheduler.now_utc() --
+        # so it must be frozen to NOW too, or weekly/monthly negativity here
+        # would depend on which real calendar week/month the test happens to
+        # run in.
+        scheduler.now_utc = lambda: NOW
         # Some other test modules call logging.disable(logging.CRITICAL) at
         # import time and never re-enable it, which would otherwise make
         # assertLogs() below fail depending on test run order.
@@ -67,6 +75,7 @@ class SnapshotWriterNeverPersistsNegativeTests(unittest.TestCase):
 
     def tearDown(self):
         scheduler.db = self.orig_db
+        scheduler.now_utc = self.orig_now_utc
         logging.disable(self.orig_disable_level)
 
     def _corrupted_events(self, inviter=1):
@@ -74,8 +83,12 @@ class SnapshotWriterNeverPersistsNegativeTests(unittest.TestCase):
         # Simulates un-repaired legacy corruption: two revocations with no
         # matching settlement at all for this inviter (the exact bug
         # repair_referral_ledger.py exists to clean up), netting -2.
-        events.insert_one(_revoked_doc(inviter, 2, NOW - timedelta(days=3)))
-        events.insert_one(_revoked_doc(inviter, 3, NOW - timedelta(days=2)))
+        # NOW is 2026-07-24 (a Friday); dated 14/10 days earlier so both
+        # events fall earlier in the same KL month but before the current
+        # week (Mon 2026-07-20) starts -- monthly and total go negative,
+        # weekly stays unaffected.
+        events.insert_one(_revoked_doc(inviter, 2, NOW - timedelta(days=14)))
+        events.insert_one(_revoked_doc(inviter, 3, NOW - timedelta(days=10)))
         return events
 
     def test_negative_net_is_clamped_to_zero_in_db(self):

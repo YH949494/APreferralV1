@@ -7,6 +7,7 @@ excluded from every aggregation, and user-facing counters never go
 negative while internal diagnostics keep showing raw values.
 """
 
+import logging
 import unittest
 from datetime import datetime, timedelta, timezone
 
@@ -62,6 +63,14 @@ def _match_filter(doc, filt):
                 continue
             if "$exists" in val:
                 if bool(val["$exists"]) != (key in doc):
+                    return False
+                continue
+            if "$lt" in val:
+                if not (doc.get(key) is not None and doc.get(key) < val["$lt"]):
+                    return False
+                continue
+            if "$gt" in val:
+                if not (doc.get(key) is not None and doc.get(key) > val["$gt"]):
                     return False
                 continue
         if doc.get(key) != val:
@@ -322,10 +331,17 @@ class SnapshotAggregationInvalidatedTests(unittest.TestCase):
         self.orig_db = scheduler.db
         self.orig_heartbeat = scheduler._write_snapshot_heartbeat
         scheduler._write_snapshot_heartbeat = lambda source, ts: None
+        # Some other test modules call logging.disable(logging.CRITICAL) at
+        # import time and never re-enable it, which would otherwise make
+        # assertLogs() below fail depending on test run order (see the
+        # identical guard in test_referral_snapshot_negative_guard.py).
+        self.orig_disable_level = logging.root.manager.disable
+        logging.disable(logging.NOTSET)
 
     def tearDown(self):
         scheduler.db = self.orig_db
         scheduler._write_snapshot_heartbeat = self.orig_heartbeat
+        logging.disable(self.orig_disable_level)
 
     def _fake_users(self):
         class _Users:
@@ -379,6 +395,33 @@ class SnapshotAggregationInvalidatedTests(unittest.TestCase):
         # legitimate settlement.
         self.assertEqual(users.docs[1]["total_referrals"], 1)
 
+    def test_invalidated_revocation_emits_no_negative_or_violation_log(self):
+        # Same corruption shape as test_invalidated_legacy_revocation_is_
+        # ignored_by_snapshot_totals, but asserting the log side explicitly:
+        # repair_referral_ledger.py marking a row invalidated must silence
+        # both [SCHED][REFERRAL_SNAPSHOT][NEGATIVE] and
+        # [REFERRAL][LEDGER_INVARIANT_VIOLATION] for that inviter, not just
+        # fix the stored total.
+        events = _FakeReferralEvents()
+        events.insert_one(_settled_doc(1, 2, NOW - timedelta(days=2)))
+        bad_revoke = _revoked_doc(1, 3, NOW - timedelta(days=1), invalidated=True)
+        events.docs.append(bad_revoke)
+
+        users = self._fake_users()
+        users.docs[1] = {"user_id": 1}
+
+        db = type("DB", (), {"referral_events": events, "users": users})()
+        scheduler.db = db
+
+        with self.assertLogs("scheduler", level="INFO") as captured:
+            scheduler.settle_referral_snapshots()
+
+        negative_lines = [l for l in captured.output if "REFERRAL_SNAPSHOT][NEGATIVE" in l]
+        violation_lines = [l for l in captured.output if "LEDGER_INVARIANT_VIOLATION" in l]
+        self.assertEqual(negative_lines, [])
+        self.assertEqual(violation_lines, [])
+        self.assertEqual(users.docs[1]["total_referrals"], 1)
+
     def test_valid_revocation_after_repair_still_counted(self):
         events = _FakeReferralEvents()
         events.insert_one(_settled_doc(1, 2, NOW - timedelta(days=2)))
@@ -429,6 +472,37 @@ class WeeklyMonthlyWindowDeterminismTests(unittest.TestCase):
         row = result_1[0]
         self.assertEqual(row["total"], 0)
         self.assertEqual(row["weekly"], -1)
+
+
+class UniqReferralEventIndexFailsFastTests(unittest.TestCase):
+    # main.py has heavy import-time side effects (real Mongo index creation)
+    # that make importing it in a unit test unsafe/fragile (see
+    # UserFacingClampingTests below), so this checks via source inspection
+    # that uniq_referral_event's create_index call is NOT wrapped in a
+    # try/except that would swallow a build failure. The referral lifecycle
+    # correctness proof in referral_ledger.py depends on this index actually
+    # existing -- if MongoDB ever refuses to build it (e.g. duplicate
+    # (event, inviter_id, invitee_id) rows already present), the app must
+    # fail to start rather than continue running with the invariant
+    # silently unenforced.
+    def test_uniq_referral_event_create_index_has_no_enclosing_try_except(self):
+        with open("main.py", "r", encoding="utf-8") as fh:
+            source = fh.read()
+
+        marker = 'name="uniq_referral_event"'
+        self.assertIn(marker, source)
+        idx = source.index(marker)
+        preceding = source[:idx]
+        # The nearest preceding "try:" (from an earlier, unrelated guarded
+        # index above it) must already be closed by an "except" before this
+        # create_index call starts -- i.e. this call sits outside any try
+        # block, at the same indent level as ensure_indexes()'s own body.
+        try_pos = preceding.rindex("\n    try:\n")
+        between = preceding[try_pos:]
+        self.assertIn("except", between)
+        # And no except clause immediately follows this call either.
+        following = source[idx : idx + 200]
+        self.assertNotIn("except", following)
 
 
 class UserFacingClampingTests(unittest.TestCase):
