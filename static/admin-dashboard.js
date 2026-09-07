@@ -5113,6 +5113,7 @@
       image_url: (lgFormEl("lg-image-url").value || "").trim(),
       game_url: (lgFormEl("lg-game-url").value || "").trim(),
       sort_order: Number(lgFormEl("lg-sort-order").value || 0),
+      selection_weight: Number(lgFormEl("lg-selection-weight").value || 10),
       is_published: !!lgFormEl("lg-is-published").checked,
     };
   }
@@ -5122,6 +5123,7 @@
       var el = lgFormEl(id); if (el) el.value = "";
     });
     var sortEl = lgFormEl("lg-sort-order"); if (sortEl) sortEl.value = "0";
+    var weightEl = lgFormEl("lg-selection-weight"); if (weightEl) weightEl.value = "10";
     var volEl = lgFormEl("lg-volatility"); if (volEl) volEl.value = "Medium";
     var pubEl = lgFormEl("lg-is-published"); if (pubEl) pubEl.checked = false;
   }
@@ -5151,6 +5153,7 @@
     lgFormEl("lg-image-url").value = game.image_url || "";
     lgFormEl("lg-game-url").value = game.game_url || "";
     lgFormEl("lg-sort-order").value = game.sort_order != null ? game.sort_order : 0;
+    lgFormEl("lg-selection-weight").value = game.selection_weight != null ? game.selection_weight : 10;
     lgFormEl("lg-is-published").checked = !!game.is_published;
     var submitBtn = lgFormEl("lg-submit-btn");
     if (submitBtn) submitBtn.textContent = "Save changes";
@@ -5162,6 +5165,12 @@
     if (section && section.scrollIntoView) section.scrollIntoView({ block: "start", behavior: "smooth" });
   }
 
+  function lgUpdateBulkSelectedCount() {
+    var checked = document.querySelectorAll('[data-lg-select]:checked').length;
+    var el = lgFormEl("lg-bulk-selected-count");
+    if (el) el.textContent = checked + " selected";
+  }
+
   function loadLuckyGames(force) {
     statePanel("lg-body", "loading", "Loading lucky games…");
     api("/api/admin/lucky-games").then(function (data) {
@@ -5170,11 +5179,12 @@
       if (!items.length) { $("#lg-body").innerHTML = emptyState("No lucky games yet — add one above."); return; }
       var rows = items.map(function (g) {
         window.__lgGamesById[g.id] = g;
-        return '<tr><td>' + esc(g.name) + '<div class="sub">' + esc(g.label || "") + (g.provider ? " · " + esc(g.provider) : "") + '</div></td>' +
+        return '<tr><td><input type="checkbox" data-lg-select data-id="' + esc(g.id) + '" /></td>' +
+          '<td>' + esc(g.name) + '<div class="sub">' + esc(g.label || "") + (g.provider ? " · " + esc(g.provider) : "") + '</div></td>' +
           '<td>' + (g.image_url ? '<img src="' + esc(g.image_url) + '" alt="" style="max-width:60px;max-height:36px;object-fit:contain;" />' : '<span class="sub">—</span>') + '</td>' +
           '<td>' + esc(g.volatility || "") + '</td>' +
           '<td>' + esc(g.max_win || "") + '</td>' +
-          '<td>' + esc(g.sort_order != null ? String(g.sort_order) : "0") + '</td>' +
+          '<td>' + esc(g.selection_weight != null ? String(g.selection_weight) : "10") + '</td>' +
           '<td>' + gcPill(g.is_published ? "active" : "inactive") + '</td>' +
           '<td>' +
           '<button class="btn" data-lg-action="edit" data-id="' + esc(g.id) + '">Edit</button> ' +
@@ -5182,7 +5192,8 @@
           '<button class="btn" data-lg-action="delete" data-id="' + esc(g.id) + '">Delete</button>' +
           '</td></tr>';
       }).join("");
-      $("#lg-body").innerHTML = '<table class="data-table"><thead><tr><th>Game</th><th>Image</th><th>Volatility</th><th>Max Win</th><th>Order</th><th>Status</th><th>Actions</th></tr></thead><tbody>' + rows + '</tbody></table>';
+      $("#lg-body").innerHTML = '<table class="data-table"><thead><tr><th></th><th>Game</th><th>Image</th><th>Volatility</th><th>Max Win</th><th>Weight</th><th>Status</th><th>Actions</th></tr></thead><tbody>' + rows + '</tbody></table>';
+      lgUpdateBulkSelectedCount();
       // An edit in progress can be invalidated by a concurrent delete
       // elsewhere; drop back to create mode rather than submitting a PATCH
       // against a game_id that no longer exists.
@@ -5224,6 +5235,34 @@
 
     var cancelBtn = lgFormEl("lg-cancel-edit-btn");
     if (cancelBtn) cancelBtn.addEventListener("click", function () { lgEnterCreateMode(); });
+
+    var bulkApplyBtn = lgFormEl("lg-bulk-apply-btn");
+    if (bulkApplyBtn) {
+      bulkApplyBtn.addEventListener("click", function () {
+        if (bulkApplyBtn.disabled) return;
+        var ids = Array.prototype.map.call(
+          document.querySelectorAll('[data-lg-select]:checked'),
+          function (cb) { return cb.dataset.id; }
+        );
+        if (!ids.length) { toast("❌ Select at least one game", "error"); return; }
+        var weight = Number(lgFormEl("lg-bulk-weight").value || 0);
+        if (!weight || weight <= 0) { toast("❌ Enter a positive weight", "error"); return; }
+
+        bulkApplyBtn.disabled = true;
+        apiPostJson("/api/admin/lucky-games/bulk-weight", { ids: ids, selection_weight: weight })
+          .then(function (res) {
+            if (!res.ok || res.d.status !== "ok") { toast("❌ " + (res.d && res.d.code || "bulk_update_failed"), "error"); return; }
+            toast("✅ Weight " + weight + " applied to " + res.d.updated_count + " game(s)", "success");
+            loadLuckyGames(true);
+          })
+          .catch(function (e) { toast("❌ " + e.message, "error"); })
+          .finally(function () { bulkApplyBtn.disabled = false; });
+      });
+    }
+
+    document.addEventListener("change", function (e) {
+      if (e.target && e.target.matches && e.target.matches('[data-lg-select]')) lgUpdateBulkSelectedCount();
+    });
 
     document.addEventListener("click", function (e) {
       var btn = e.target && e.target.closest && e.target.closest("[data-lg-action]");

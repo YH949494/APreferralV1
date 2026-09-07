@@ -472,6 +472,158 @@ def test_public_endpoint_has_no_store_cache_header(fake_db):
     assert resp.headers.get("Cache-Control") == "no-store"
 
 
+# ---------------------------------------------------------------------------
+# selection_weight — validation, defaults, admin table + API visibility
+# ---------------------------------------------------------------------------
+
+
+def test_create_lucky_game_defaults_selection_weight_to_ten(fake_db):
+    app = _app()
+    client = app.test_client()
+    with _mock_admin():
+        resp = client.post("/api/admin/lucky-games", json={"name": "Bare Game"})
+    assert resp.status_code == 201
+    assert resp.get_json()["game"]["selection_weight"] == 10
+
+
+def test_create_lucky_game_custom_selection_weight_accepted(fake_db):
+    app = _app()
+    client = app.test_client()
+    with _mock_admin():
+        resp = client.post("/api/admin/lucky-games", json=_game_doc(selection_weight=30))
+    assert resp.status_code == 201
+    assert resp.get_json()["game"]["selection_weight"] == 30
+
+
+@pytest.mark.parametrize("bad_weight", [0, -1, -30, 10.5, "ten", True, None])
+def test_create_lucky_game_invalid_selection_weight_rejected(fake_db, bad_weight):
+    body = _game_doc(selection_weight=bad_weight)
+    app = _app()
+    client = app.test_client()
+    with _mock_admin():
+        resp = client.post("/api/admin/lucky-games", json=body)
+    assert resp.status_code == 400
+    assert resp.get_json()["code"] == "invalid_selection_weight"
+
+
+def test_create_lucky_game_string_digit_selection_weight_accepted(fake_db):
+    body = _game_doc(selection_weight="20")
+    app = _app()
+    client = app.test_client()
+    with _mock_admin():
+        resp = client.post("/api/admin/lucky-games", json=body)
+    assert resp.status_code == 201
+    assert resp.get_json()["game"]["selection_weight"] == 20
+
+
+def test_edit_lucky_game_updates_selection_weight(fake_db):
+    doc_id = fake_db["lucky_games"].insert_one(_game_doc(selection_weight=10)).inserted_id
+    app = _app()
+    client = app.test_client()
+    with _mock_admin():
+        resp = client.patch(f"/api/admin/lucky-games/{doc_id}", json={"selection_weight": 30})
+    assert resp.status_code == 200
+    assert resp.get_json()["game"]["selection_weight"] == 30
+    # Untouched fields preserved.
+    assert resp.get_json()["game"]["name"] == "Infinity Ocean"
+
+
+def test_edit_lucky_game_zero_selection_weight_rejected(fake_db):
+    doc_id = fake_db["lucky_games"].insert_one(_game_doc(selection_weight=10)).inserted_id
+    app = _app()
+    client = app.test_client()
+    with _mock_admin():
+        resp = client.patch(f"/api/admin/lucky-games/{doc_id}", json={"selection_weight": 0})
+    assert resp.status_code == 400
+    assert resp.get_json()["code"] == "invalid_selection_weight"
+    assert fake_db["lucky_games"].find_one({"_id": doc_id})["selection_weight"] == 10
+
+
+def test_admin_list_includes_selection_weight(fake_db):
+    fake_db["lucky_games"].insert_one(_game_doc(name="A", selection_weight=30))
+    app = _app()
+    client = app.test_client()
+    with _mock_admin():
+        resp = client.get("/api/admin/lucky-games")
+    assert resp.get_json()["games"][0]["selection_weight"] == 30
+
+
+def test_public_endpoint_never_exposes_selection_weight(fake_db):
+    fake_db["lucky_games"].insert_one(_game_doc(selection_weight=30, is_published=True))
+    app = _app()
+    client = app.test_client()
+    resp = client.get("/api/lucky-games")
+    game = resp.get_json()["games"][0]
+    assert "selection_weight" not in game
+
+
+# ---------------------------------------------------------------------------
+# Bulk weight update
+# ---------------------------------------------------------------------------
+
+
+def test_bulk_update_weight_requires_admin(fake_db):
+    doc_id = fake_db["lucky_games"].insert_one(_game_doc()).inserted_id
+    app = _app()
+    client = app.test_client()
+    with patch("vouchers.require_admin", return_value=(None, ({"status": "error"}, 401))):
+        resp = client.post("/api/admin/lucky-games/bulk-weight", json={"ids": [str(doc_id)], "selection_weight": 30})
+    assert resp.status_code == 401
+
+
+def test_bulk_update_weight_applies_to_multiple_games(fake_db):
+    id_a = fake_db["lucky_games"].insert_one(_game_doc(name="A", selection_weight=10)).inserted_id
+    id_b = fake_db["lucky_games"].insert_one(_game_doc(name="B", selection_weight=10)).inserted_id
+    id_c = fake_db["lucky_games"].insert_one(_game_doc(name="C", selection_weight=10)).inserted_id
+    app = _app()
+    client = app.test_client()
+    with _mock_admin():
+        resp = client.post(
+            "/api/admin/lucky-games/bulk-weight",
+            json={"ids": [str(id_a), str(id_b)], "selection_weight": 30},
+        )
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["status"] == "ok"
+    assert body["selection_weight"] == 30
+    assert fake_db["lucky_games"].find_one({"_id": id_a})["selection_weight"] == 30
+    assert fake_db["lucky_games"].find_one({"_id": id_b})["selection_weight"] == 30
+    # Untouched.
+    assert fake_db["lucky_games"].find_one({"_id": id_c})["selection_weight"] == 10
+
+
+def test_bulk_update_weight_rejects_invalid_weight(fake_db):
+    doc_id = fake_db["lucky_games"].insert_one(_game_doc()).inserted_id
+    app = _app()
+    client = app.test_client()
+    with _mock_admin():
+        resp = client.post("/api/admin/lucky-games/bulk-weight", json={"ids": [str(doc_id)], "selection_weight": 0})
+    assert resp.status_code == 400
+    assert resp.get_json()["code"] == "invalid_selection_weight"
+
+
+def test_bulk_update_weight_missing_ids_rejected(fake_db):
+    app = _app()
+    client = app.test_client()
+    with _mock_admin():
+        resp = client.post("/api/admin/lucky-games/bulk-weight", json={"ids": [], "selection_weight": 30})
+    assert resp.status_code == 400
+    assert resp.get_json()["code"] == "missing_ids"
+
+
+def test_bulk_update_weight_skips_unknown_ids(fake_db):
+    id_a = fake_db["lucky_games"].insert_one(_game_doc(selection_weight=10)).inserted_id
+    app = _app()
+    client = app.test_client()
+    with _mock_admin():
+        resp = client.post(
+            "/api/admin/lucky-games/bulk-weight",
+            json={"ids": [str(id_a), "not-an-object-id"], "selection_weight": 20},
+        )
+    assert resp.status_code == 200
+    assert fake_db["lucky_games"].find_one({"_id": id_a})["selection_weight"] == 20
+
+
 def test_public_endpoint_fills_missing_optional_fields_with_empty_string(fake_db):
     # A doc that only ever set the required minimum (name) plus
     # is_published — mirrors a game created via the admin form defaults.

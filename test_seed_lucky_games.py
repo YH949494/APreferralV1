@@ -37,6 +37,35 @@ def test_fresh_db_migrates_exactly_56_games(fake_db):
     assert seed.LEGACY_GAME_COUNT == 56
 
 
+def test_migrated_games_default_to_selection_weight_ten(fake_db):
+    seed.run_lucky_games_migration(fake_db)
+    docs = list(fake_db["lucky_games"].find({}))
+    assert docs
+    assert all(d["selection_weight"] == 10 for d in docs)
+
+
+def test_backfill_sets_selection_weight_on_pre_existing_rows_without_it(fake_db, monkeypatch):
+    # Simulates rows migrated before selection_weight existed in the seed
+    # docs — lucky_games.py's boot-time backfill must patch them up without
+    # touching anything else, and stay a no-op afterwards.
+    import database
+    import lucky_games as lg
+
+    monkeypatch.setattr(database, "db", fake_db)
+    monkeypatch.setattr(lg, "database", database)
+    fake_db["lucky_games"].insert_one({"name": "Legacy Row", "is_published": True})
+
+    lg._backfill_selection_weight_defaults()
+
+    reloaded = fake_db["lucky_games"].find_one({"name": "Legacy Row"})
+    assert reloaded["selection_weight"] == 10
+
+    # Idempotent: an admin-set custom weight is never clobbered on rerun.
+    fake_db["lucky_games"].update_one({"name": "Legacy Row"}, {"$set": {"selection_weight": 30}})
+    lg._backfill_selection_weight_defaults()
+    assert fake_db["lucky_games"].find_one({"name": "Legacy Row"})["selection_weight"] == 30
+
+
 # ---------------------------------------------------------------------------
 # 2. Migration rerun -> still exactly 56 seeded games
 # ---------------------------------------------------------------------------
