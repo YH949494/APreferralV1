@@ -19,7 +19,13 @@ becomes "Medium", everything else passes through unchanged.
 
 Idempotent: matches candidates by ``name`` (case-sensitive, exact) and
 skips any that already exist in the collection, so running this twice
-never creates duplicates. Dry-run by default; requires --commit to write.
+never creates duplicates.
+
+``run_on_startup()`` is called automatically from main.py on every app boot
+(committing immediately) so production never needs a manual migration step
+and the admin Lucky Games tab / Mini App list are never empty after a fresh
+deploy. The CLI below (dry-run by default; requires --commit to write) is
+kept for manual/local use against a standalone DB connection.
 
 Usage:
   MONGO_URL='mongodb://...' python migrations/seed_lucky_games.py [--db referral_bot] [--commit]
@@ -120,11 +126,11 @@ _DAILY_GAME_SLOTS = [
 ]
 
 
-def run(*, mongo_url: str, db_name: str, commit: bool) -> dict:
-    init_db(mongo_url, db_name)
-    db = get_db()
-    col = db["lucky_games"]
-
+def seed_collection(col, *, commit: bool = True) -> dict:
+    """Core idempotent seed logic against an already-open ``lucky_games``
+    collection. Shared by the CLI entrypoint (``run``) and the automatic
+    startup call in main.py, so both paths use identical matching/insert
+    behavior and can never diverge."""
     existing_names = set(col.distinct("name"))
     now = datetime.now(timezone.utc)
 
@@ -175,6 +181,31 @@ def run(*, mongo_url: str, db_name: str, commit: bool) -> dict:
     report["inserted_count"] = len(to_insert)
     logger.info("[SEED] APPLIED inserted_count=%s", len(to_insert))
     return report
+
+
+def run(*, mongo_url: str, db_name: str, commit: bool) -> dict:
+    """CLI entrypoint: opens its own connection, then delegates to
+    ``seed_collection``."""
+    init_db(mongo_url, db_name)
+    col = get_db()["lucky_games"]
+    return seed_collection(col, commit=commit)
+
+
+def run_on_startup() -> dict | None:
+    """Called once from main.py right after the app's shared DB connection
+    is initialized. Reuses that existing connection (init_db is a no-op if
+    already called) rather than opening a second one, and never raises —
+    a seed failure must not block app startup, since the admin-managed
+    lucky_games collection is non-critical (existing DAILY_GAME_SLOTS-backed
+    Mini App features are unaffected either way)."""
+    try:
+        col = get_db()["lucky_games"]
+        report = seed_collection(col, commit=True)
+        logger.info("[SEED][STARTUP] report=%s", report)
+        return report
+    except Exception:
+        logger.warning("[SEED][STARTUP] lucky_games_seed_failed", exc_info=True)
+        return None
 
 
 def main() -> int:
