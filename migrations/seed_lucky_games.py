@@ -17,18 +17,41 @@ script only needs the plain data). Each ``tag`` value is mapped onto the
 lucky_games volatility enum (Low, Low-Med, Medium, High-Med, High); "Med"
 becomes "Medium", everything else passes through unchanged.
 
-Idempotent: matches candidates by ``name`` (case-sensitive, exact) and
-skips any that already exist in the collection, so running this twice
-never creates duplicates. Dry-run by default; requires --commit to write.
+Real one-time migration, not a recurring startup seed
+-------------------------------------------------------
+``run_lucky_games_migration(db)`` is called once from main.py at process
+boot (every Gunicorn worker / Fly machine calls it — that's fine, see
+below). Completion is tracked with a marker document in
+``db.migrations`` keyed by MIGRATION_ID ("seed_lucky_games_v1"). Once that
+marker exists, every future boot is a single indexed find_one and returns
+immediately — the legacy list is never re-applied, so an Admin delete,
+rename, or edit of a seeded row survives every future restart.
 
-Usage:
-  MONGO_URL='mongodb://...' python migrations/seed_lucky_games.py [--db referral_bot] [--commit]
+Concurrency safety does NOT depend on the marker check (that's just an
+optimization to skip repeat work). It depends on two things that hold
+regardless of how many Gunicorn workers / Fly machines call this at once:
 
-Rollback:
-  Every row this script inserts is stamped with
-  ``seed_source: "daily_game_slots_seed_v1"``. To roll back:
+  1. A partial unique index on ``seed_id`` (a stable, immutable identity —
+     "legacy_daily_game_001" .. "legacy_daily_game_056" — never the
+     mutable ``name`` field an admin can rename). Every insert goes
+     through ``update_one({"seed_id": ...}, {"$setOnInsert": doc},
+     upsert=True)``, which MongoDB executes atomically per document: if
+     two processes race on the same seed_id, exactly one insert wins and
+     the other becomes a no-op match (or, in the tighter race where both
+     attempt the insert before either commits, the loser gets a
+     DuplicateKeyError from the unique index, which is caught and treated
+     as "already seeded by a concurrent worker", not a failure).
+  2. The completion marker itself is written the same way — ``update_one
+     ({"_id": MIGRATION_ID}, {"$setOnInsert": {...}}, upsert=True)`` — so
+     concurrent marker writes also collapse to one winner safely.
 
-    db.lucky_games.delete_many({"seed_source": "daily_game_slots_seed_v1"})
+No distinct("name") + insert_one anywhere: matching by name would treat an
+admin's rename of a legacy row as "not migrated yet" and recreate it under
+the old name on the next boot. seed_id is immutable precisely so renames
+(and any other edit) never look like a missing row.
+
+Usage (manual/CLI, e.g. to pre-seed a fresh DB or verify status):
+  MONGO_URL='mongodb://...' python migrations/seed_lucky_games.py [--db referral_bot]
 """
 from __future__ import annotations
 
@@ -38,16 +61,19 @@ import os
 import sys
 from datetime import datetime, timezone
 
+from pymongo.errors import DuplicateKeyError
+
 _APP_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _APP_ROOT not in sys.path:
     sys.path.insert(0, _APP_ROOT)
 
-from database import init_db, get_db  # noqa: E402
-
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", stream=sys.stderr)
 logger = logging.getLogger("seed_lucky_games")
 
+MIGRATION_ID = "seed_lucky_games_v1"
+COLLECTION = "lucky_games"
+MIGRATIONS_COLLECTION = "migrations"
 SEED_SOURCE = "daily_game_slots_seed_v1"
+SEED_INDEX_NAME = "ix_lucky_games_seed_id"
 
 _TAG_TO_VOLATILITY = {
     "Low": "Low",
@@ -59,7 +85,9 @@ _TAG_TO_VOLATILITY = {
 }
 
 # Literal copy of main.py's DAILY_GAME_SLOTS (id/weight dropped — those are
-# specific to the daily-pick rotation and have no meaning here).
+# specific to the daily-pick rotation and have no meaning here). Order is
+# preserved 1:1 so seed_id "legacy_daily_game_NNN" is stable and matches
+# each row's original position in DAILY_GAME_SLOTS.
 _DAILY_GAME_SLOTS = [
     {"name": "Dragon Chi's Quest 2", "tag": "Med", "maxwin": "100000x"},
     {"name": "Piggy Bank Gold 2", "tag": "High-Med", "maxwin": "150000x"},
@@ -119,22 +147,19 @@ _DAILY_GAME_SLOTS = [
     {"name": "Disco 777", "tag": "Med", "maxwin": "28500x"},
 ]
 
+LEGACY_GAME_COUNT = len(_DAILY_GAME_SLOTS)
 
-def run(*, mongo_url: str, db_name: str, commit: bool) -> dict:
-    init_db(mongo_url, db_name)
-    db = get_db()
-    col = db["lucky_games"]
 
-    existing_names = set(col.distinct("name"))
-    now = datetime.now(timezone.utc)
-
-    to_insert = []
+def build_seed_docs(now: datetime | None = None) -> list[dict]:
+    """Builds the 56 seed documents, each stamped with a stable, immutable
+    ``seed_id`` ("legacy_daily_game_001".."056") derived from position in
+    the source list — never from ``name``, which an admin can rename."""
+    now = now or datetime.now(timezone.utc)
+    docs = []
     for idx, slot in enumerate(_DAILY_GAME_SLOTS):
-        name = slot["name"]
-        if name in existing_names:
-            continue
-        to_insert.append({
-            "name": name,
+        docs.append({
+            "seed_id": f"legacy_daily_game_{idx + 1:03d}",
+            "name": slot["name"],
             "label": "Lucky Game",
             "volatility": _TAG_TO_VOLATILITY.get(slot.get("tag"), "Medium"),
             "max_win": slot.get("maxwin", ""),
@@ -147,40 +172,119 @@ def run(*, mongo_url: str, db_name: str, commit: bool) -> dict:
             "updated_at": now,
             "seed_source": SEED_SOURCE,
         })
+    return docs
 
-    report = {
-        "total_source_rows": len(_DAILY_GAME_SLOTS),
-        "already_present": len(_DAILY_GAME_SLOTS) - len(to_insert),
-        "to_insert": len(to_insert),
-        "committed": False,
-        "inserted_count": 0,
-    }
 
-    logger.info(
-        "[SEED] source_rows=%s already_present=%s to_insert=%s",
-        report["total_source_rows"], report["already_present"], report["to_insert"],
+def ensure_seed_index(col) -> None:
+    """Partial unique index on seed_id — the sole guarantee (independent of
+    the migration marker) that concurrent Gunicorn workers / Fly machines
+    can never create duplicate legacy rows."""
+    col.create_index(
+        [("seed_id", 1)],
+        unique=True,
+        partialFilterExpression={"seed_id": {"$type": "string"}},
+        name=SEED_INDEX_NAME,
     )
 
-    if not to_insert:
-        logger.info("[SEED] nothing to do — every source row already has a matching lucky_games doc by name")
-        return report
 
-    if not commit:
-        logger.info("[SEED] DRY-RUN — would insert %s row(s). Re-run with --commit to apply.", len(to_insert))
-        return report
+def run_lucky_games_migration(db, *, log=None) -> dict:
+    """Idempotent, concurrency-safe, one-time migration entry point. Safe
+    to call from every Gunicorn worker / Fly machine at every boot:
 
-    for doc in to_insert:
-        col.insert_one(doc)
-    report["committed"] = True
-    report["inserted_count"] = len(to_insert)
-    logger.info("[SEED] APPLIED inserted_count=%s", len(to_insert))
-    return report
+      - If the completion marker already exists, this is one indexed
+        find_one and returns immediately (SKIP_COMPLETED) — legacy values
+        are never re-applied, so Admin deletes/renames/edits survive.
+      - Otherwise it seeds any missing legacy rows via atomic
+        upsert-with-$setOnInsert against a partial unique index on
+        seed_id, verifies the result, and only then writes the
+        completion marker.
+      - Never raises — any failure is logged as
+        [LUCKY_GAMES][MIGRATION][FAILED] and the marker is left unwritten
+        so a later boot (this process or another) can retry. App startup
+        always continues either way.
+    """
+    log = log or logger
+    try:
+        migrations_col = db[MIGRATIONS_COLLECTION]
+        games_col = db[COLLECTION]
+
+        existing_marker = migrations_col.find_one({"_id": MIGRATION_ID})
+        if existing_marker:
+            log.info("[LUCKY_GAMES][MIGRATION][SKIP_COMPLETED] marker=%s", MIGRATION_ID)
+            return {"status": "skipped", "reason": "already_completed"}
+
+        log.info("[LUCKY_GAMES][MIGRATION][START] migration_id=%s", MIGRATION_ID)
+
+        try:
+            ensure_seed_index(games_col)
+        except Exception:
+            log.warning("[LUCKY_GAMES][MIGRATION] seed_index_creation_failed", exc_info=True)
+
+        seed_docs = build_seed_docs()
+        upserted = 0
+        already_present = 0
+        for doc in seed_docs:
+            try:
+                result = games_col.update_one(
+                    {"seed_id": doc["seed_id"]},
+                    {"$setOnInsert": doc},
+                    upsert=True,
+                )
+                if getattr(result, "upserted_id", None) is not None:
+                    upserted += 1
+                else:
+                    already_present += 1
+            except DuplicateKeyError:
+                # Lost a tight race against a concurrent worker inserting
+                # the same seed_id at the same instant — the row exists
+                # either way, so this is a benign no-op, not a failure.
+                already_present += 1
+
+        verified_count = games_col.count_documents({
+            "seed_id": {"$in": [d["seed_id"] for d in seed_docs]},
+        })
+        if verified_count != LEGACY_GAME_COUNT:
+            log.error(
+                "[LUCKY_GAMES][MIGRATION][FAILED] verification_mismatch expected=%s found=%s",
+                LEGACY_GAME_COUNT, verified_count,
+            )
+            return {
+                "status": "failed",
+                "reason": "verification_mismatch",
+                "expected": LEGACY_GAME_COUNT,
+                "found": verified_count,
+            }
+
+        now = datetime.now(timezone.utc)
+        migrations_col.update_one(
+            {"_id": MIGRATION_ID},
+            {"$setOnInsert": {
+                "_id": MIGRATION_ID,
+                "completed_at": now,
+                "seeded_count": LEGACY_GAME_COUNT,
+            }},
+            upsert=True,
+        )
+
+        log.info(
+            "[LUCKY_GAMES][MIGRATION][COMPLETED] migration_id=%s upserted=%s already_present=%s total=%s",
+            MIGRATION_ID, upserted, already_present, verified_count,
+        )
+        return {
+            "status": "completed",
+            "upserted": upserted,
+            "already_present": already_present,
+            "total": verified_count,
+        }
+    except Exception as exc:
+        log.error("[LUCKY_GAMES][MIGRATION][FAILED] unexpected_error=%s", exc, exc_info=True)
+        return {"status": "failed", "reason": "exception", "error": str(exc)}
 
 
 def main() -> int:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", stream=sys.stderr)
     parser = argparse.ArgumentParser()
     parser.add_argument("--db", default=os.getenv("MONGO_DB_NAME", "referral_bot"))
-    parser.add_argument("--commit", action="store_true", help="Apply changes (default: dry-run report only)")
     args = parser.parse_args()
 
     mongo_url = os.getenv("MONGO_URL")
@@ -188,9 +292,13 @@ def main() -> int:
         logger.error("[SEED] MONGO_URL env var is required")
         return 1
 
-    report = run(mongo_url=mongo_url, db_name=args.db, commit=args.commit)
+    from database import init_db, get_db
+
+    init_db(mongo_url, args.db)
+    db = get_db()
+    report = run_lucky_games_migration(db)
     logger.info("[SEED] report=%s", report)
-    return 0
+    return 0 if report.get("status") in ("completed", "skipped") else 1
 
 
 if __name__ == "__main__":

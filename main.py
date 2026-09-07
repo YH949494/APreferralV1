@@ -2758,6 +2758,12 @@ from lucky_games import lucky_games_admin_bp, lucky_games_public_bp
 app.register_blueprint(lucky_games_admin_bp)
 app.register_blueprint(lucky_games_public_bp)
 
+try:
+    from migrations.seed_lucky_games import run_lucky_games_migration
+    run_lucky_games_migration(db)
+except Exception:
+    logger.exception("[LUCKY_GAMES][MIGRATION][FAILED] startup_hook_crashed")
+
 from campaign_events import campaign_events_bp
 app.register_blueprint(campaign_events_bp)
 
