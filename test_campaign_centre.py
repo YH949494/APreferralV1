@@ -135,6 +135,95 @@ def test_visibility_explanation_clean_for_active_campaign():
 
 
 # ---------------------------------------------------------------------------
+# _as_utc / naive-vs-aware datetime regression (production TypeError fix)
+# ---------------------------------------------------------------------------
+
+def test_as_utc_returns_none_for_none():
+    assert cc._as_utc(None) is None
+
+
+def test_as_utc_interprets_naive_as_utc():
+    naive = datetime(2026, 1, 1, 12, 0, 0)
+    result = cc._as_utc(naive)
+    assert result.tzinfo is timezone.utc
+    assert result == naive.replace(tzinfo=timezone.utc)
+
+
+def test_as_utc_converts_aware_non_utc_to_utc():
+    from datetime import timedelta as _td
+
+    plus8 = timezone(_td(hours=8))
+    aware = datetime(2026, 1, 1, 20, 0, 0, tzinfo=plus8)
+    result = cc._as_utc(aware)
+    assert result.tzinfo is timezone.utc
+    assert result == aware.astimezone(timezone.utc)
+
+
+def test_as_utc_rejects_non_datetime():
+    with pytest.raises(TypeError):
+        cc._as_utc("2026-01-01")
+
+
+def test_visibility_explanation_naive_starts_at_with_aware_now_future():
+    """MongoDB-shaped naive starts_at (interpreted as UTC) in the future
+    against an aware `now` must not raise and must report not-yet-started."""
+    now = datetime.now(timezone.utc)
+    c = _campaign(schedule={"starts_at": (now + timedelta(days=1)).replace(tzinfo=None), "ends_at": None})
+    explanation = cc.visibility_explanation(c, _provider(), now)
+    assert explanation["publicly_visible"] is False
+    assert any("scheduled to start" in r for r in explanation["reasons"])
+
+
+def test_visibility_explanation_naive_starts_at_active_campaign():
+    """Naive starts_at in the past + aware now => campaign reads as active,
+    matching the naive-UTC MongoDB read path, without raising."""
+    now = datetime.now(timezone.utc)
+    c = _campaign(schedule={"starts_at": (now - timedelta(hours=1)).replace(tzinfo=None), "ends_at": None})
+    explanation = cc.visibility_explanation(c, _provider(), now)
+    assert explanation == {"publicly_visible": True, "reasons": []}
+
+
+def test_visibility_explanation_naive_ends_at_ended_campaign():
+    now = datetime.now(timezone.utc)
+    c = _campaign(schedule={
+        "starts_at": (now - timedelta(days=2)).replace(tzinfo=None),
+        "ends_at": (now - timedelta(hours=1)).replace(tzinfo=None),
+    })
+    explanation = cc.visibility_explanation(c, _provider(), now)
+    assert explanation["publicly_visible"] is False
+    assert any("ended at" in r for r in explanation["reasons"])
+
+
+def test_visibility_explanation_all_aware_active_campaign():
+    now = datetime.now(timezone.utc)
+    c = _campaign(schedule={"starts_at": now - timedelta(hours=1), "ends_at": now + timedelta(hours=1)})
+    explanation = cc.visibility_explanation(c, _provider(), now)
+    assert explanation == {"publicly_visible": True, "reasons": []}
+
+
+def test_visibility_explanation_missing_starts_at():
+    c = _campaign(schedule={"starts_at": None, "ends_at": None})
+    explanation = cc.visibility_explanation(c, _provider())
+    assert explanation["publicly_visible"] is False
+    assert any("starts_at is not set" in r for r in explanation["reasons"])
+
+
+def test_visibility_explanation_missing_ends_at_does_not_end():
+    now = datetime.now(timezone.utc)
+    c = _campaign(schedule={"starts_at": now - timedelta(days=1), "ends_at": None})
+    explanation = cc.visibility_explanation(c, _provider(), now)
+    assert explanation == {"publicly_visible": True, "reasons": []}
+
+
+def test_is_publicly_active_naive_starts_at_from_mongo_shape():
+    """Same TypeError class guarded on the is_publicly_active() path used by
+    the public /api/campaigns/active endpoint."""
+    now = datetime.now(timezone.utc)
+    c = _campaign(schedule={"starts_at": (now - timedelta(hours=1)).replace(tzinfo=None), "ends_at": None})
+    assert cc.is_publicly_active(c, _provider(), now) is True
+
+
+# ---------------------------------------------------------------------------
 # Reward rule validation
 # ---------------------------------------------------------------------------
 

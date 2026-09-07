@@ -137,28 +137,40 @@ def get_campaign(campaign_id: str) -> dict | None:
     return database.db["gc_campaigns"].find_one({"campaign_id": campaign_id})
 
 
+def _as_utc(value: datetime | None) -> datetime | None:
+    """Normalize a datetime to timezone-aware UTC.
+
+    PyMongo returns naive ``datetime`` values on read even when they were
+    written as UTC-aware, so any value pulled from ``gc_campaigns`` must be
+    reinterpreted as UTC (not local server time) before comparison.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, datetime):
+        raise TypeError(f"Expected datetime, got {type(value).__name__}")
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
 def is_publicly_active(campaign: dict, provider: dict | None, now: datetime | None = None) -> bool:
     """Server-side single source of truth for public visibility (Phase 2/3)."""
     if not campaign:
         return False
-    now = now or datetime.now(timezone.utc)
+    now = _as_utc(now) or datetime.now(timezone.utc)
 
     if campaign.get("status") != "live":
         return False
 
     schedule = campaign.get("schedule") or {}
-    starts_at = schedule.get("starts_at")
+    starts_at = _as_utc(schedule.get("starts_at"))
     if not starts_at:
         return False
-    if isinstance(starts_at, datetime) and starts_at.tzinfo is None:
-        starts_at = starts_at.replace(tzinfo=timezone.utc)
     if starts_at > now:
         return False
 
-    ends_at = schedule.get("ends_at")
+    ends_at = _as_utc(schedule.get("ends_at"))
     if ends_at:
-        if isinstance(ends_at, datetime) and ends_at.tzinfo is None:
-            ends_at = ends_at.replace(tzinfo=timezone.utc)
         if now >= ends_at:
             return False
 
@@ -174,10 +186,10 @@ def is_publicly_active(campaign: dict, provider: dict | None, now: datetime | No
 
 def visibility_explanation(campaign: dict, provider: dict | None, now: datetime | None = None) -> dict:
     """Admin-preview-only breakdown of why a campaign is/isn't publicly visible."""
-    now = now or datetime.now(timezone.utc)
+    now = _as_utc(now) or datetime.now(timezone.utc)
     schedule = campaign.get("schedule") or {}
-    starts_at = schedule.get("starts_at")
-    ends_at = schedule.get("ends_at")
+    starts_at = _as_utc(schedule.get("starts_at"))
+    ends_at = _as_utc(schedule.get("ends_at"))
     destination = campaign.get("destination") or {}
 
     reasons = []
