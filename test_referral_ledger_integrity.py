@@ -474,17 +474,18 @@ class WeeklyMonthlyWindowDeterminismTests(unittest.TestCase):
         self.assertEqual(row["weekly"], -1)
 
 
-class UniqReferralEventIndexIsolationTests(unittest.TestCase):
+class UniqReferralEventIndexFailsFastTests(unittest.TestCase):
     # main.py has heavy import-time side effects (real Mongo index creation)
     # that make importing it in a unit test unsafe/fragile (see
     # UserFacingClampingTests below), so this checks via source inspection
-    # that uniq_referral_event's create_index call is wrapped the same way
-    # its neighbors are: isolated in its own try/except so that if MongoDB
-    # ever refuses to build it (e.g. duplicate (event, inviter_id,
-    # invitee_id) rows already present when this line runs), the exception
-    # is caught and logged rather than propagating out of ensure_indexes()
-    # and crashing the whole app at import time.
-    def test_uniq_referral_event_create_index_is_isolated_in_try_except(self):
+    # that uniq_referral_event's create_index call is NOT wrapped in a
+    # try/except that would swallow a build failure. The referral lifecycle
+    # correctness proof in referral_ledger.py depends on this index actually
+    # existing -- if MongoDB ever refuses to build it (e.g. duplicate
+    # (event, inviter_id, invitee_id) rows already present), the app must
+    # fail to start rather than continue running with the invariant
+    # silently unenforced.
+    def test_uniq_referral_event_create_index_has_no_enclosing_try_except(self):
         with open("main.py", "r", encoding="utf-8") as fh:
             source = fh.read()
 
@@ -492,20 +493,16 @@ class UniqReferralEventIndexIsolationTests(unittest.TestCase):
         self.assertIn(marker, source)
         idx = source.index(marker)
         preceding = source[:idx]
-        # The nearest preceding "try:" must not have an intervening
-        # "except" before this create_index call -- i.e. this call is
-        # still inside that try block, not after it closed.
+        # The nearest preceding "try:" (from an earlier, unrelated guarded
+        # index above it) must already be closed by an "except" before this
+        # create_index call starts -- i.e. this call sits outside any try
+        # block, at the same indent level as ensure_indexes()'s own body.
         try_pos = preceding.rindex("\n    try:\n")
         between = preceding[try_pos:]
-        self.assertNotIn("except", between)
-        # And there must be a matching except clause after the call that
-        # does not re-raise (mirrors uniq_chat_invite_link /
-        # idx_referral_award_events_invitee's pattern just above it).
-        following = source[idx : idx + 600]
-        except_pos = following.index("except Exception as e:")
-        except_body = following[except_pos : except_pos + 200]
-        self.assertIn("print(", except_body)
-        self.assertNotIn("raise", except_body)
+        self.assertIn("except", between)
+        # And no except clause immediately follows this call either.
+        following = source[idx : idx + 200]
+        self.assertNotIn("except", following)
 
 
 class UserFacingClampingTests(unittest.TestCase):
