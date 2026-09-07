@@ -326,11 +326,33 @@ def admin_edit_state(campaign_id: str):
     block = campaign.get("mission_pool") or {}
     locked = entries > 0
 
+    # Reward facts the read-only detail view renders and the edit view gates
+    # on. `sufficient` is the SAME publish rule the create wizard asks for
+    # (inventory_verdict), so an operator cannot be told "20 winners / 50
+    # codes is fine" in one screen and blocked in the other.
+    verdict = inventory_verdict(block.get("pool_id"), block.get("winner_count"))
+    stage = block.get("processing_stage") or mp.STAGE_PENDING
+    allocation_started = bool(
+        stage in _ALLOCATION_STARTED_STAGES
+        or database.db["campaign_rewards"].count_documents(
+            {"campaign_id": campaign_id, "category": "mission_pool"})
+    )
+
     return jsonify({
         "status": "ok",
         "campaign_id": campaign_id,
         "campaign_status": campaign.get("status"),
+        "state": operational_state(campaign),
         "entries": entries,
+        "reward": {
+            **verdict,
+            "allocation_method": block.get("allocation_method"),
+            "allocation_started": allocation_started,
+            # Phase 1 has no freeze rule for the pool itself, so this is an
+            # operator-safety gate, not a backend guarantee: once winners are
+            # being paid, the admin UI stops offering to repoint the pool.
+            "pool_editable": not allocation_started,
+        },
         "mission_config_locked": locked,
         "locked_fields": list(MISSION_CONFIG_FIELDS) if locked else [],
         # Phase 1 freezes `mission_config` ONLY. `schedule` is a separate
@@ -365,19 +387,295 @@ def admin_mission_pools():
 
     import voucher_pool_service
 
+    listed = [p for p in voucher_pool_service.list_pools() if pool_selectable(p)]
+    stock = voucher_pool_service.pool_stock_bulk(
+        [p.get("pool_id") or "" for p in listed]
+    )
+
     out = []
-    for pool in voucher_pool_service.list_pools():
+    for pool in listed:
         pool_id = pool.get("pool_id") or ""
-        if str(pool_id).strip().upper() in voucher_pool_service.RESERVED_LEGACY_POOL_IDS:
-            continue
-        if pool.get("allocation_scope") not in voucher_pool_service.CAMPAIGN_ALLOCATABLE_SCOPES:
-            continue
         out.append({
             "pool_id": pool_id,
             "name": pool.get("name", ""),
             "pool_type": pool.get("pool_type"),
             "allocation_scope": pool.get("allocation_scope"),
             "status": pool.get("status"),
-            "stock": voucher_pool_service.pool_stock(pool_id),
+            "stock": stock.get(pool_id) or {"available": 0, "issued": 0},
         })
-    return jsonify({"status": "ok", "pools": out})
+    # The pool-type vocabulary is the backend's, so the inline "create a new
+    # reward pool" form offers exactly what register_pool accepts rather than
+    # a list hardcoded in the admin UI (§7).
+    return jsonify({"status": "ok", "pools": out,
+                    "pool_types": list(voucher_pool_service.POOL_TYPES)})
+
+
+# ---------------------------------------------------------------------------
+# Mission admin landing list + inventory gate (Phase 2.1 operator UX)
+# ---------------------------------------------------------------------------
+#
+# Everything below is READ-ONLY, exactly like the rest of this module. The
+# Phase 2.1 work is an admin *experience* change: it adds no new campaign
+# type, no Mission-specific voucher inventory and no second write path. The
+# operator-facing surface simply needs three answers the existing endpoints
+# could not give without the browser fanning out per-campaign requests or
+# aggregating raw ``mission_entries`` client-side (both explicitly out of
+# bounds):
+#
+#   1. one list of Mission campaigns with their live counters (§2),
+#   2. one authoritative "is there enough inventory to publish this?" verdict
+#      shared by the create wizard and the edit view (§8), and
+#   3. the reward/pool facts the read-only detail view renders (§12, §18).
+
+# NOTE the OPS_ prefix. The STATE_* vocabulary above (submitted / won /
+# not_won / ...) answers "what does this player see?"; these answer "what can
+# the operator do?". Several words appear in both and mean the same thing
+# today — which is exactly why they must not share a Python name.
+OPS_DRAFT = "draft"
+OPS_SCHEDULED = "scheduled"
+OPS_LIVE = "live"
+OPS_PAUSED = "paused"
+OPS_CANCELLED = "cancelled"
+OPS_CLOSED = "closed"
+OPS_PROCESSING = "processing"
+OPS_COMPLETED = "completed"
+
+# The operator-facing state. Derived, never stored: `gc_campaigns.status`
+# keeps its exact existing meaning (campaign_centre owns it) and
+# `mission_pool.processing_stage` keeps its exact existing meaning (the
+# worker owns it). This is only a presentation of the two together, so a
+# lifecycle change in either place cannot silently disagree with the UI.
+OPERATIONAL_STATES = (
+    OPS_DRAFT, OPS_SCHEDULED, OPS_LIVE, OPS_PAUSED,
+    OPS_CANCELLED, OPS_CLOSED, OPS_PROCESSING, OPS_COMPLETED,
+)
+
+
+def operational_state(campaign: dict | None) -> str:
+    campaign = campaign or {}
+    block = campaign.get("mission_pool") or {}
+    status = campaign.get("status") or "draft"
+    stage = block.get("processing_stage") or mp.STAGE_PENDING
+
+    if block.get("cancelled"):
+        return OPS_CANCELLED
+    if status in ("ended", "archived"):
+        if stage == mp.STAGE_COMPLETED:
+            return OPS_COMPLETED
+        if stage == mp.STAGE_PENDING:
+            return OPS_CLOSED
+        return OPS_PROCESSING
+    if status == "live":
+        return OPS_LIVE
+    if status == "paused":
+        return OPS_PAUSED
+    if status == "scheduled":
+        return OPS_SCHEDULED
+    return OPS_DRAFT
+
+
+# An entry in any of these statuses passed eligibility; the same set the
+# Phase 1 summary endpoint counts as "qualified".
+_QUALIFIED_ENTRY_STATUSES = [
+    mp.ENTRY_STATUS_QUALIFIED, mp.ENTRY_STATUS_WINNER, mp.ENTRY_STATUS_NON_WINNER,
+    mp.ENTRY_STATUS_REWARD_ALLOCATING, mp.ENTRY_STATUS_REWARD_ALLOCATED,
+]
+_WINNER_ENTRY_STATUSES = [
+    mp.ENTRY_STATUS_WINNER, mp.ENTRY_STATUS_REWARD_ALLOCATING, mp.ENTRY_STATUS_REWARD_ALLOCATED,
+]
+
+# Processing stages at or beyond which reward allocation has begun. Past this
+# point the configured pool is what winners are actually being paid from, so
+# the admin UI stops offering to change it (§18).
+_ALLOCATION_STARTED_STAGES = frozenset({
+    mp.STAGE_ALLOCATING_REWARDS, mp.STAGE_NOTIFYING, mp.STAGE_COMPLETED,
+})
+
+
+def _entry_rollup(campaign_ids: list[str]) -> dict:
+    """Submissions/qualified/disqualified/winners per campaign in ONE indexed
+    aggregation ({campaign_id, status} is ``ix_mission_entries_campaign_status_order``).
+
+    The alternative the spec rules out is the browser pulling raw
+    ``mission_entries`` and counting them; the alternative that merely looks
+    cheaper is four ``count_documents`` per campaign per page load."""
+    ids = [c for c in (campaign_ids or []) if c]
+    out: dict = {}
+    if not ids:
+        return out
+    rows = database.db[mp.ENTRIES_COLLECTION].aggregate([
+        {"$match": {"campaign_id": {"$in": ids}}},
+        {"$group": {
+            "_id": "$campaign_id",
+            "submissions": {"$sum": 1},
+            "qualified": {"$sum": {"$cond": [{"$in": ["$status", _QUALIFIED_ENTRY_STATUSES]}, 1, 0]}},
+            "disqualified": {"$sum": {"$cond": [{"$eq": ["$status", mp.ENTRY_STATUS_DISQUALIFIED]}, 1, 0]}},
+            "winners": {"$sum": {"$cond": [{"$in": ["$status", _WINNER_ENTRY_STATUSES]}, 1, 0]}},
+        }},
+    ])
+    for row in rows:
+        out[row.get("_id")] = {
+            "submissions": row.get("submissions", 0),
+            "qualified": row.get("qualified", 0),
+            "disqualified": row.get("disqualified", 0),
+            "winners": row.get("winners", 0),
+        }
+    return out
+
+
+def _reward_rollup(campaign_ids: list[str]) -> dict:
+    """Allocated/notified/failed reward counts per campaign, one aggregation.
+
+    Scoped to ``category == "mission_pool"`` so a campaign that also produced
+    tournament rewards can never inflate a Mission number."""
+    ids = [c for c in (campaign_ids or []) if c]
+    out: dict = {}
+    if not ids:
+        return out
+    rows = database.db["campaign_rewards"].aggregate([
+        {"$match": {"campaign_id": {"$in": ids}, "category": "mission_pool"}},
+        {"$group": {
+            "_id": "$campaign_id",
+            "allocated": {"$sum": {"$cond": [{"$eq": ["$status", "assigned"]}, 1, 0]}},
+            "notified": {"$sum": {"$cond": [{"$eq": ["$notification_status", "sent"]}, 1, 0]}},
+            "notify_failed": {"$sum": {"$cond": [
+                {"$in": ["$notification_status", ["failed_retryable", "failed_terminal"]]}, 1, 0]}},
+        }},
+    ])
+    for row in rows:
+        out[row.get("_id")] = {
+            "allocated": row.get("allocated", 0),
+            "notified": row.get("notified", 0),
+            "notify_failed": row.get("notify_failed", 0),
+        }
+    return out
+
+
+def pool_selectable(pool: dict | None) -> bool:
+    """The same predicate ``admin_mission_pools`` filters the dropdown with,
+    named once so the detail/edit views can report "your stored pool is no
+    longer offered for NEW selection" without re-deriving the rule (§18)."""
+    import voucher_pool_service
+
+    if not pool:
+        return False
+    pool_id = str(pool.get("pool_id") or "").strip()
+    if not pool_id or pool_id.upper() in voucher_pool_service.RESERVED_LEGACY_POOL_IDS:
+        return False
+    if pool.get("allocation_scope") not in voucher_pool_service.CAMPAIGN_ALLOCATABLE_SCOPES:
+        return False
+    return True
+
+
+def inventory_verdict(pool_id: str | None, winner_count) -> dict:
+    """THE publish-safety rule (§8), in one server-side place.
+
+    ``winner_count <= available_codes``. Both the create wizard and the edit
+    view ask this endpoint rather than each implementing the comparison, so
+    there is exactly one definition of "enough inventory" and it is computed
+    from the live registry/inventory rather than from whatever the form last
+    rendered."""
+    import voucher_pool_service
+
+    pool_id = (pool_id or "").strip()
+    try:
+        winner_count = int(winner_count)
+    except (TypeError, ValueError):
+        winner_count = 0
+
+    pool = voucher_pool_service.get_pool(pool_id) if pool_id else None
+    stock = voucher_pool_service.pool_stock(pool_id) if pool_id else {"available": 0, "issued": 0}
+    available = stock.get("available", 0)
+    return {
+        "pool_id": pool_id,
+        "pool_exists": bool(pool),
+        "pool_name": (pool or {}).get("name", ""),
+        # The registry's REAL type. The admin UI must submit this rather than
+        # a guess: the processor passes mission_pool.pool_type to
+        # voucher_pool_service.allocate_voucher as expected_pool_type.
+        "pool_type": (pool or {}).get("pool_type"),
+        "allocation_scope": (pool or {}).get("allocation_scope"),
+        "pool_active": bool(pool) and pool.get("status") == "active",
+        "pool_selectable": pool_selectable(pool),
+        "winner_count": winner_count,
+        "available": available,
+        "issued": stock.get("issued", 0),
+        "shortfall": max(0, winner_count - available),
+        "sufficient": bool(pool) and winner_count > 0 and available >= winner_count,
+    }
+
+
+@mission_pool_ux_admin_bp.get("/api/admin/mission-pool/inventory-check")
+def admin_inventory_check():
+    _, err = _require_admin()
+    if err:
+        return err
+    verdict = inventory_verdict(request.args.get("pool_id"), request.args.get("winner_count"))
+    return jsonify({"status": "ok", **verdict})
+
+
+@mission_pool_ux_admin_bp.get("/api/admin/mission-pool/campaigns")
+def admin_mission_campaigns():
+    """The Mission Reward Pool landing list (§2).
+
+    One request returns every Mission campaign with the counters the landing
+    page shows, computed server-side in three aggregations total (entries,
+    rewards, pool stock) regardless of how many missions exist. The browser
+    never sees a raw ``mission_entries`` document."""
+    _, err = _require_admin()
+    if err:
+        return err
+
+    # `mechanic` is stamped server-side by campaign_centre for every campaign
+    # it writes; `type` is matched too so a document written before the
+    # mechanic field existed (or by a direct DB fix) still appears here
+    # rather than silently vanishing from the operator's list.
+    docs = list(database.db["gc_campaigns"].find(
+        {"$or": [{"mechanic": mp.MECHANIC_MISSION_POOL},
+                 {"type": mp.CAMPAIGN_TYPE_MISSION_POOL}]},
+        sort=[("created_at", -1)],
+        limit=200,
+    ))
+
+    campaign_ids = [d.get("campaign_id") for d in docs if d.get("campaign_id")]
+    entries = _entry_rollup(campaign_ids)
+    rewards = _reward_rollup(campaign_ids)
+
+    import voucher_pool_service
+
+    pool_ids = sorted({(d.get("mission_pool") or {}).get("pool_id")
+                       for d in docs if (d.get("mission_pool") or {}).get("pool_id")})
+    stock = voucher_pool_service.pool_stock_bulk(list(pool_ids))
+
+    out = []
+    for doc in docs:
+        campaign_id = doc.get("campaign_id") or ""
+        block = doc.get("mission_pool") or {}
+        schedule = doc.get("schedule") or {}
+        counts = entries.get(campaign_id) or {}
+        reward_counts = rewards.get(campaign_id) or {}
+        pool_id = block.get("pool_id") or ""
+        out.append({
+            "campaign_id": campaign_id,
+            "name": doc.get("name", ""),
+            "state": operational_state(doc),
+            "campaign_status": doc.get("status"),
+            "cancelled": bool(block.get("cancelled")),
+            "processing_stage": block.get("processing_stage") or mp.STAGE_PENDING,
+            "starts_at": _iso(schedule.get("starts_at")),
+            "ends_at": _iso(schedule.get("ends_at")),
+            "closed_at": _iso(block.get("closed_at")),
+            "mission_type": (doc.get("mission_config") or {}).get("mission_type"),
+            "winner_count": block.get("winner_count"),
+            "allocation_method": block.get("allocation_method"),
+            "pool_id": pool_id,
+            "pool_available": (stock.get(pool_id) or {}).get("available", 0) if pool_id else 0,
+            "submissions": counts.get("submissions", 0),
+            "qualified": counts.get("qualified", 0),
+            "disqualified": counts.get("disqualified", 0),
+            "winners": counts.get("winners", 0),
+            "rewards_allocated": reward_counts.get("allocated", 0),
+            "notifications_sent": reward_counts.get("notified", 0),
+            "notifications_failed": reward_counts.get("notify_failed", 0),
+        })
+    return jsonify({"status": "ok", "states": list(OPERATIONAL_STATES), "campaigns": out})
