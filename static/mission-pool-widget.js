@@ -26,6 +26,18 @@
   var ROOT_ID = "mission-pool-root";
   var API_TIMEOUT_MS = 12000;
 
+  // Telegram Web/Desktop deliver initData/initDataUnsafe to the WebApp
+  // bridge asynchronously (a postMessage round trip with the host client),
+  // not synchronously at script-parse time the way native clients usually
+  // do — this app's own waitForInitData() in index.html exists for the
+  // exact same reason. A single synchronous read of start_param on mount
+  // can therefore run before Telegram has delivered it, silently treating
+  // a real Mission deep link as a normal open. So the Telegram-sourced
+  // check below is retried briefly before concluding there is no deep
+  // link; the query-string fallbacks are synchronous and never need it.
+  var START_PARAM_WAIT_MS = 1500;
+  var START_PARAM_POLL_MS = 100;
+
   // ---------------------------------------------------------------------
   // Telegram plumbing (mirrors campaign-centre-widget.js so both widgets
   // authenticate identically — verified initData, never a client uid).
@@ -106,6 +118,7 @@
     var tg = tgApp();
     try {
       var sp = tg && tg.initDataUnsafe && tg.initDataUnsafe.start_param;
+      if (sp !== undefined && sp !== null) log("raw start_param", sp);
       var fromStart = parseMissionParam(sp);
       if (fromStart) return fromStart;
     } catch (e) {}
@@ -119,11 +132,40 @@
     return null;
   }
 
+  /**
+   * Resolves the campaign reference, retrying briefly if Telegram has not
+   * yet delivered initDataUnsafe (§ race noted above). `cb` is called
+   * exactly once, with the campaign id or null. On the (overwhelmingly
+   * common) normal open with no deep link at all, this costs a bounded
+   * ~1.5s of no-op timers and, per §7/§22, still zero network requests and
+   * zero DOM changes in the meantime.
+   */
+  function waitForCampaignRef(cb) {
+    var immediate = resolveCampaignRef();
+    if (immediate) { cb(immediate); return; }
+    var waited = 0;
+    (function poll() {
+      var found = resolveCampaignRef();
+      if (found) { cb(found); return; }
+      waited += START_PARAM_POLL_MS;
+      if (waited >= START_PARAM_WAIT_MS) { cb(null); return; }
+      var t = setTimeout(poll, START_PARAM_POLL_MS);
+      try { if (t && typeof t.unref === "function") t.unref(); } catch (e) {}
+    }());
+  }
+
   // ---------------------------------------------------------------------
   // Observability (§45). Campaign ids and states only — never a voucher
   // code, a feedback answer, a gaming account, an identity key or a risk
   // flag (§45, §46).
   // ---------------------------------------------------------------------
+
+  // Diagnostic console logging only — campaign ids and states, exactly like
+  // track() above. Never Telegram initData, a voucher code, an identity or
+  // any submitted answer.
+  function log(msg, data) {
+    try { console.log("[MissionPool] " + msg, data === undefined ? "" : data); } catch (e) {}
+  }
 
   function track(event, detail) {
     try {
@@ -438,18 +480,28 @@
     var root = document.getElementById(ROOT_ID);
     if (!root) return;
 
-    var campaignId = resolveCampaignRef();
-    // No mission reference -> not a Mission open. Zero requests, zero DOM
-    // changes, existing Mini App behaviour completely unchanged (§7, §22).
-    if (!campaignId) return;
+    waitForCampaignRef(function (campaignId) {
+      // No mission reference -> not a Mission open. Zero requests, zero DOM
+      // changes, existing Mini App behaviour completely unchanged (§7, §22).
+      if (!campaignId) { log("no mission deep link; skipping"); return; }
+      log("parsed mission campaign id", campaignId);
 
-    apiGet("/api/mission-pool/" + encodeURIComponent(campaignId) + "/view").then(function (res) {
-      var view = res.data || {};
-      // The server is the only thing that may switch Mission UI on (§5).
-      if (!res.ok || view.status !== "ok" || view.mechanic !== "mission_pool") return;
-      if (STATE_COPY[view.user_state] === undefined && view.user_state !== "live") return;
-      track("mission_ui_opened", { campaign_id: view.campaign_id, user_state: view.user_state });
-      render(root, view);
+      apiGet("/api/mission-pool/" + encodeURIComponent(campaignId) + "/view").then(function (res) {
+        var view = res.data || {};
+        log("mission /view response", { campaign_id: campaignId, http_status: res.httpStatus, timeout: !!res.timeout });
+        // The server is the only thing that may switch Mission UI on (§5).
+        if (!res.ok || view.status !== "ok" || view.mechanic !== "mission_pool") {
+          log("render decision: skip (not a confirmed mission_pool view)", { campaign_id: campaignId });
+          return;
+        }
+        if (STATE_COPY[view.user_state] === undefined && view.user_state !== "live") {
+          log("render decision: skip (unrecognised user_state)", { campaign_id: campaignId, user_state: view.user_state });
+          return;
+        }
+        log("render decision: render", { campaign_id: campaignId, user_state: view.user_state });
+        track("mission_ui_opened", { campaign_id: view.campaign_id, user_state: view.user_state });
+        render(root, view);
+      });
     });
   }
 
@@ -457,6 +509,7 @@
   window.MissionPoolWidget = {
     parseMissionParam: parseMissionParam,
     resolveCampaignRef: resolveCampaignRef,
+    waitForCampaignRef: waitForCampaignRef,
     userStateCopy: STATE_COPY,
     render: render,
     mount: mount,

@@ -203,6 +203,29 @@ test("mission deep link routes to the mission view endpoint", async () => {
   assert.ok(findByText(w.root, "Summer Quiz"));
 });
 
+test("start_param delivered asynchronously by Telegram Web/Desktop is still picked up", async () => {
+  // Root-cause regression: Telegram Web/Desktop deliver initDataUnsafe via a
+  // postMessage round trip, not synchronously at script-parse time. A widget
+  // that only reads start_param once, immediately on mount, would silently
+  // treat this exact case as "no mission" and never call /view.
+  const w = loadWidget({ startParam: undefined, routes: { [VIEW_ROUTE]: () => ({ body: viewBody() }) } });
+  await tick();
+  assert.deepEqual(w.calls, [], "must not call /view before start_param has arrived");
+
+  w.sandbox.window.Telegram.WebApp.initDataUnsafe.start_param = "mission_m1";
+  await new Promise((r) => setTimeout(r, 400));
+
+  assert.deepEqual(w.calls, [VIEW_ROUTE], "must call /view once start_param arrives late");
+  assert.ok(findByText(w.root, "Summer Quiz"));
+});
+
+test("a normal open with no start_param ever still makes zero requests after the retry window", async () => {
+  const w = loadWidget({ startParam: undefined, routes: {} });
+  await new Promise((r) => setTimeout(r, 1700));
+  assert.deepEqual(w.calls, [], "a genuinely normal open must still make zero Mission requests");
+  assert.equal(w.root.children.length, 0);
+});
+
 test("?mission= query fallback works for browser testing", async () => {
   const w = loadWidget({
     search: "?mission=m1",
