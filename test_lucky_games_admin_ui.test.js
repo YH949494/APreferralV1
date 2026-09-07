@@ -52,8 +52,9 @@ class FakeInput {
 
 const FORM_IDS = [
   "lg-name", "lg-label", "lg-provider", "lg-volatility", "lg-max-win",
-  "lg-image-url", "lg-game-url", "lg-sort-order", "lg-is-published",
+  "lg-image-url", "lg-game-url", "lg-sort-order", "lg-selection-weight", "lg-is-published",
   "lg-submit-btn", "lg-cancel-edit-btn", "lg-form-mode", "lg-body",
+  "lg-bulk-weight", "lg-bulk-apply-btn", "lg-bulk-selected-count",
 ];
 
 function makeContext({ apiResponses = {} } = {}) {

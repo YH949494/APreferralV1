@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """One-time migration: seed the ``lucky_games`` collection (lucky_games.py)
 from the game list that was previously only ever hardcoded in the Mini App
-/ main.py (``DAILY_GAME_SLOTS``).
+/ main.py (the retired ``DAILY_GAME_SLOTS`` constant).
 
-This does NOT touch ``DAILY_GAME_SLOTS`` or the existing `/v2/miniapp/
-daily-game` rotation endpoint — those keep working exactly as before. It
-only populates the new, separate admin-managed catalogue that backs the
-new `GET /api/lucky-games` public endpoint and the "Lucky Games" admin
-dashboard section, so the Mini App's Lucky Games card list has real data
-from day one instead of starting empty.
+This populates the admin-managed catalogue that backs `GET /api/lucky-games`
+(the card list), the "Lucky Games" admin dashboard section, and — via
+``lucky_games.get_daily_game_selection`` — the Mini App's single daily
+"Lucky Game" pick (`/v2/miniapp/daily-game`), so all three have real data
+from day one instead of starting empty. Each seeded row gets
+``selection_weight: 10`` (the normal/default weight); admins can raise or
+lower it afterwards to bias the daily pick without touching this migration.
 
 The list below is a literal copy of main.py's DAILY_GAME_SLOTS at the time
 this migration was written (not imported from main.py, since importing
@@ -167,6 +168,7 @@ def build_seed_docs(now: datetime | None = None) -> list[dict]:
             "game_url": "",
             "provider": "",
             "sort_order": idx * 10,
+            "selection_weight": 10,
             "is_published": True,
             "created_at": now,
             "updated_at": now,

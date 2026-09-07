@@ -1770,6 +1770,7 @@
             <input class="filter-input" id="lg-image-url" placeholder="Image URL (https://...)" style="margin:0;" />
             <input class="filter-input" id="lg-game-url" placeholder="Game URL (https:// or tg://)" style="margin:0;" />
             <input class="filter-input" id="lg-sort-order" type="number" placeholder="Display order" value="0" style="margin:0;" />
+            <input class="filter-input" id="lg-selection-weight" type="number" min="1" step="1" placeholder="Selection weight (default 10)" value="10" style="margin:0;" />
           </div>
           <label class="sub" style="display:flex;align-items:center;gap:6px;margin-top:10px;">
             <input type="checkbox" id="lg-is-published" /> Published (visible in Mini App)
@@ -1778,7 +1779,16 @@
             <button class="btn primary" id="lg-submit-btn">Add game</button>
             <button class="btn" id="lg-cancel-edit-btn" style="display:none;">Cancel edit</button>
           </div>
-          <div class="sub" style="margin-top:6px;">Only <b>Published</b> games are returned by the public Mini App endpoint, ordered by Display order then creation time.</div>
+          <div class="sub" style="margin-top:6px;">Only <b>Published</b> games are eligible for the daily Lucky Game pick and the Mini App card list. Display order only affects the card list; <b>Selection weight</b> controls the odds of being picked as the daily game (1 = very low, 5 = low, 10 = normal, 20 = high, 30 = featured — higher wins more often).</div>
+        </div>
+        <div class="section" style="margin-bottom:16px;">
+          <div class="section-title">Bulk set weight</div>
+          <div class="sub" style="margin-bottom:8px;">Select games below with the checkboxes, pick a weight, then apply it to all of them at once.</div>
+          <div style="display:flex;gap:8px;align-items:center;">
+            <input class="filter-input" id="lg-bulk-weight" type="number" min="1" step="1" placeholder="Weight" style="margin:0;max-width:140px;" />
+            <button class="btn" id="lg-bulk-apply-btn">Apply to selected</button>
+            <span class="sub" id="lg-bulk-selected-count">0 selected</span>
+          </div>
         </div>
         <div class="section-title" style="margin-bottom:8px;">Lucky Games</div>
         <div id="lg-body"></div>

@@ -1,13 +1,15 @@
 """Lucky Games — admin-managed catalogue of "Lucky Game" cards shown in the
 Telegram Mini App (name, label, volatility, max win, image, deep link).
 
-Collection: ``lucky_games``. A separate, lightweight collection rather than
-folding into the existing ``DAILY_GAME_SLOTS`` hardcoded pool in main.py
-(used by the unrelated ``/v2/miniapp/daily-game`` deterministic daily-pick
-endpoint) — that mechanism picks one slot per Kuala-Lumpur day from a fixed
-in-code list and has no admin, image, or deep-link concept. This module
-gives admins full CRUD/publish/reorder control over a distinct, richer set
-of game cards without touching that existing rotation logic at all.
+Collection: ``lucky_games``. This is also the single source of truth for the
+Mini App's "Lucky Game" daily-pick tile (``/v2/miniapp/daily-game`` in
+main.py): the tile shows exactly one weighted-random game per Kuala-Lumpur
+calendar day, selected from this collection's published rows and persisted
+in ``lucky_game_daily_selection`` (see ``get_daily_game_selection`` below).
+A legacy hardcoded pool (``DAILY_GAME_SLOTS`` in main.py) used to drive that
+tile independently of this admin-managed catalogue; it has been retired in
+favor of this one mechanism so the "Lucky Game" feature never has two
+competing selection systems running at once.
 
 Follows the same conventions as event_banner.py: admin auth via
 ``vouchers.require_admin``, a ``_validate_body`` allowlist for both create
@@ -18,6 +20,7 @@ endpoint that only ever returns published, non-admin fields.
 from __future__ import annotations
 
 import logging
+import random
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 
@@ -26,6 +29,7 @@ from bson.errors import InvalidId
 from flask import Blueprint, jsonify, request
 
 import database
+from config import KL_TZ
 
 logger = logging.getLogger(__name__)
 
@@ -33,17 +37,22 @@ lucky_games_admin_bp = Blueprint("lucky_games_admin", __name__)
 lucky_games_public_bp = Blueprint("lucky_games_public", __name__)
 
 COLLECTION = "lucky_games"
+DAILY_SELECTION_COLLECTION = "lucky_game_daily_selection"
 
 VOLATILITY_OPTIONS = ("Low", "Low-Med", "Medium", "High-Med", "High")
 DEFAULT_LABEL = "Lucky Game"
 DEFAULT_VOLATILITY = "Medium"
+
+# 1 = very low probability, 5 = low, 10 = normal, 20 = high, 30 = featured.
+DEFAULT_SELECTION_WEIGHT = 10
 
 # Fields an admin may ever set. PATCH builds its update dict exclusively
 # from this allowlist, so an unexpected/extra key in the request body is
 # silently ignored rather than reaching the database.
 _EDITABLE_FIELDS = (
     "name", "label", "volatility", "max_win",
-    "image_url", "game_url", "provider", "sort_order", "is_published",
+    "image_url", "game_url", "provider", "sort_order",
+    "selection_weight", "is_published",
 )
 
 # Fields ever exposed to the public (unauthenticated) endpoint. Internal
@@ -71,7 +80,23 @@ def _ensure_indexes() -> None:
         logger.warning("[LUCKY_GAMES] index_creation_failed", exc_info=True)
 
 
+def _backfill_selection_weight_defaults() -> None:
+    """Idempotent backfill: any pre-existing lucky_games row (seeded before
+    ``selection_weight`` existed, or migrated by seed_lucky_games.py before
+    this field was added there) gets the normal default weight. Safe to run
+    on every boot / every Gunicorn worker — a row that already has the field
+    is never touched again, so an admin's explicit weight always survives."""
+    try:
+        database.db[COLLECTION].update_many(
+            {"selection_weight": {"$exists": False}},
+            {"$set": {"selection_weight": DEFAULT_SELECTION_WEIGHT}},
+        )
+    except Exception:
+        logger.warning("[LUCKY_GAMES] selection_weight_backfill_failed", exc_info=True)
+
+
 _ensure_indexes()
+_backfill_selection_weight_defaults()
 
 
 def _validate_url(url: str, *, allow_tg: bool = True) -> bool:
@@ -164,6 +189,23 @@ def _validate_body(body: dict, *, partial: bool = False) -> tuple[dict | None, s
             except (TypeError, ValueError):
                 return None, "invalid_sort_order"
         updates["sort_order"] = int(raw_sort)
+
+    if not partial or "selection_weight" in body:
+        raw_weight = body.get("selection_weight", DEFAULT_SELECTION_WEIGHT)
+        if isinstance(raw_weight, bool) or not isinstance(raw_weight, int):
+            try:
+                if isinstance(raw_weight, str) and raw_weight.strip().isdigit():
+                    raw_weight = int(raw_weight)
+                else:
+                    raise ValueError()
+            except (TypeError, ValueError):
+                return None, "invalid_selection_weight"
+        # Must be a positive integer — a weight of 0 or below would make a
+        # game mathematically impossible to select while still cluttering
+        # the eligible pool, which is never the admin's intent.
+        if raw_weight <= 0:
+            return None, "invalid_selection_weight"
+        updates["selection_weight"] = int(raw_weight)
 
     if not partial or "is_published" in body:
         raw_published = body.get("is_published", False)
@@ -279,6 +321,50 @@ def update_lucky_game(game_id: str):
     return jsonify({"status": "ok", "game": _serialize(doc)})
 
 
+@lucky_games_admin_bp.post("/api/admin/lucky-games/bulk-weight")
+def bulk_update_selection_weight():
+    """Set the same ``selection_weight`` on many games in one call — e.g. an
+    admin marking a batch of games "featured" (weight 30) without editing
+    each row individually. Body: {"ids": [...], "selection_weight": N}.
+    Unknown/invalid ids are skipped rather than failing the whole batch."""
+    admin, err = _require_admin()
+    if err:
+        return err
+    body = request.get_json(silent=True) or {}
+    if not isinstance(body, dict):
+        return jsonify({"status": "error", "code": "invalid_body"}), 400
+
+    raw_ids = body.get("ids")
+    if not isinstance(raw_ids, list) or not raw_ids:
+        return jsonify({"status": "error", "code": "missing_ids"}), 400
+
+    weight_updates, code = _validate_body({"selection_weight": body.get("selection_weight")}, partial=True)
+    if code:
+        return jsonify({"status": "error", "code": code}), 400
+    weight = weight_updates["selection_weight"]
+
+    oids = []
+    for raw_id in raw_ids:
+        oid, id_code = _parse_object_id(raw_id)
+        if id_code:
+            continue
+        oids.append(oid)
+    if not oids:
+        return jsonify({"status": "error", "code": "invalid_id"}), 400
+
+    now = datetime.now(timezone.utc)
+    updated_by = (admin or {}).get("usernameLower") or str((admin or {}).get("id", ""))
+    result = database.db[COLLECTION].update_many(
+        {"_id": {"$in": oids}},
+        {"$set": {"selection_weight": weight, "updated_at": now, "updated_by": updated_by}},
+    )
+    modified = getattr(result, "modified_count", None)
+    if modified is None:
+        modified = getattr(result, "matched_count", len(oids))
+    _log_audit("bulk_update_weight", admin, ",".join(str(o) for o in oids), {"selection_weight": weight, "count": modified})
+    return jsonify({"status": "ok", "selection_weight": weight, "updated_count": modified})
+
+
 @lucky_games_admin_bp.delete("/api/admin/lucky-games/<game_id>")
 def delete_lucky_game(game_id: str):
     admin, err = _require_admin()
@@ -328,3 +414,186 @@ def list_public_lucky_games():
     resp = jsonify(resp_payload)
     resp.headers["Cache-Control"] = "no-store"
     return resp
+
+
+# ---------------------------------------------------------------------------
+# Daily Lucky Game selection (weighted random, one winner per KL day)
+# ---------------------------------------------------------------------------
+#
+# Backs the Mini App's single "Lucky Game" tile (main.py's
+# ``/v2/miniapp/daily-game``): exactly one published game is chosen per
+# Kuala-Lumpur calendar day, weighted by ``selection_weight``, and the
+# result is persisted in ``lucky_game_daily_selection`` keyed by that date
+# so every worker / machine / request serves the same winner for the rest
+# of the day without recomputing anything.
+
+
+def _kl_date_str(now: datetime | None = None) -> str:
+    ref = now.astimezone(KL_TZ) if now else datetime.now(KL_TZ)
+    return ref.strftime("%Y-%m-%d")
+
+
+def _normalize_weight(raw) -> int:
+    if not isinstance(raw, int) or isinstance(raw, bool) or raw <= 0:
+        return DEFAULT_SELECTION_WEIGHT
+    return raw
+
+
+def _doc_to_game_dict(doc: dict) -> dict:
+    out = {"id": str(doc["_id"])}
+    for field in _PUBLIC_FIELDS:
+        out[field] = doc.get(field) or ""
+    out["selection_weight"] = _normalize_weight(doc.get("selection_weight"))
+    return out
+
+
+def _eligible_games_for_daily_selection() -> list[dict]:
+    """Published games with a normalized positive-integer weight. Mirrors
+    the public catalogue's eligibility rule (``is_published: True``) so the
+    daily pick and the card list always agree on what's "live"."""
+    games = []
+    for doc in database.db[COLLECTION].find({"is_published": True}):
+        try:
+            games.append(_doc_to_game_dict(doc))
+        except Exception:
+            logger.warning("[LUCKY_GAMES][DAILY][SERIALIZE_ERROR] id=%s", doc.get("_id"), exc_info=True)
+            continue
+    return games
+
+
+def _load_game_by_id(game_id) -> dict | None:
+    """Returns the live, currently-published game for ``game_id``, or None
+    if it was deleted or unpublished since selection — the trigger for a
+    controlled reselection (e.g. an admin unpublishes/deletes today's
+    winner mid-day)."""
+    if not game_id:
+        return None
+    oid, code = _parse_object_id(game_id)
+    if code:
+        return None
+    doc = database.db[COLLECTION].find_one({"_id": oid, "is_published": True})
+    if not doc:
+        return None
+    return _doc_to_game_dict(doc)
+
+
+def _weighted_pick(games: list[dict], rng=None) -> dict:
+    """Weighted random selection: P(game) = game.weight / sum(weights).
+    ``rng`` accepts any object exposing ``choices`` (e.g. a seeded
+    ``random.Random`` instance) so tests can make the pick deterministic;
+    production uses the module-level ``random`` — this only affects which
+    slot machine gets a marketing highlight, not anything security-sensitive."""
+    rng = rng or random
+    weights = [g["selection_weight"] for g in games]
+    return rng.choices(games, weights=weights, k=1)[0]
+
+
+def _build_daily_slot(game: dict) -> dict:
+    """Public payload for the daily-pick tile. Keeps the pre-existing
+    ``tag``/``maxwin`` keys the Mini App's ``renderDailyGame()`` already
+    reads (backward compatibility with cached/older clients) alongside the
+    richer lucky_games field set the admin catalogue exposes. Never
+    includes ``selection_weight`` — internal probability weighting is not
+    exposed publicly."""
+    slot = {field: game.get(field, "") for field in _PUBLIC_FIELDS}
+    slot["id"] = game["id"]
+    slot["tag"] = game.get("volatility", "")
+    slot["maxwin"] = game.get("max_win", "")
+    return slot
+
+
+def _select_and_build_doc(date_kl: str, *, rng=None) -> dict | None:
+    games = _eligible_games_for_daily_selection()
+    if not games:
+        return None
+    chosen = _weighted_pick(games, rng=rng)
+    return {
+        "_id": date_kl,
+        "date_kl": date_kl,
+        "game_id": chosen["id"],
+        "game_name": chosen.get("name", ""),
+        "selection_weight": chosen.get("selection_weight"),
+        "selected_at_utc": datetime.now(timezone.utc),
+    }
+
+
+def get_daily_game_selection(now: datetime | None = None, *, rng=None) -> dict:
+    """Returns today's (KL) single Lucky Game pick, selecting and
+    persisting it on first request of the day. ``rng`` is test-only (an
+    injectable ``random.Random`` for deterministic assertions).
+
+    Concurrency-safe across Gunicorn workers / Fly machines: the first
+    selection is written with an atomic upsert keyed by the KL date string
+    (``_id``) via ``$setOnInsert`` — two racing first-of-day requests can
+    only ever produce one stored winner (the loser's upsert is a no-op
+    match against the winner's row, mirroring the same
+    upsert-with-$setOnInsert pattern used by seed_lucky_games.py). A
+    mid-day reselection (today's winner got unpublished/deleted) uses an
+    optimistic compare-and-swap on the stale ``game_id`` so concurrent
+    reselections also collapse to one canonical replacement.
+
+    Returns ``{"ok": True, "date_kl": ..., "slot": {...}}`` or
+    ``{"ok": False, "date_kl": ..., "error": "no_eligible_games"}`` —
+    never raises."""
+    date_kl = _kl_date_str(now)
+    col = database.db[DAILY_SELECTION_COLLECTION]
+
+    try:
+        existing = col.find_one({"_id": date_kl})
+    except Exception:
+        logger.warning("[LUCKY_GAMES][DAILY] read_failed date_kl=%s", date_kl, exc_info=True)
+        existing = None
+
+    if existing:
+        game = _load_game_by_id(existing.get("game_id"))
+        if game is not None:
+            return {"ok": True, "date_kl": date_kl, "slot": _build_daily_slot(game)}
+
+        # Today's previously-selected game was unpublished or deleted since
+        # selection — controlled reselection, replacing only if nobody else
+        # has already replaced it (optimistic CAS on the stale game_id).
+        logger.info(
+            "[LUCKY_GAMES][DAILY][RESELECT] date_kl=%s stale_game_id=%s",
+            date_kl, existing.get("game_id"),
+        )
+        new_doc = _select_and_build_doc(date_kl, rng=rng)
+        if new_doc is None:
+            return {"ok": False, "date_kl": date_kl, "error": "no_eligible_games"}
+        try:
+            result = col.update_one(
+                {"_id": date_kl, "game_id": existing.get("game_id")},
+                {"$set": new_doc},
+            )
+        except Exception:
+            logger.warning("[LUCKY_GAMES][DAILY] reselect_write_failed date_kl=%s", date_kl, exc_info=True)
+            return {"ok": False, "date_kl": date_kl, "error": "no_eligible_games"}
+        if getattr(result, "matched_count", 0) == 0:
+            # A concurrent request already replaced today's selection —
+            # defer to the canonical row rather than overwrite it again.
+            existing = col.find_one({"_id": date_kl}) or {}
+            game = _load_game_by_id(existing.get("game_id"))
+            if game is not None:
+                return {"ok": True, "date_kl": date_kl, "slot": _build_daily_slot(game)}
+            return {"ok": False, "date_kl": date_kl, "error": "no_eligible_games"}
+        game = _load_game_by_id(new_doc["game_id"])
+        if game is None:
+            return {"ok": False, "date_kl": date_kl, "error": "no_eligible_games"}
+        return {"ok": True, "date_kl": date_kl, "slot": _build_daily_slot(game)}
+
+    # No selection recorded yet today — first request of the day.
+    new_doc = _select_and_build_doc(date_kl, rng=rng)
+    if new_doc is None:
+        return {"ok": False, "date_kl": date_kl, "error": "no_eligible_games"}
+    try:
+        col.update_one({"_id": date_kl}, {"$setOnInsert": new_doc}, upsert=True)
+        canonical = col.find_one({"_id": date_kl})
+    except Exception:
+        logger.warning("[LUCKY_GAMES][DAILY] first_selection_write_failed date_kl=%s", date_kl, exc_info=True)
+        return {"ok": False, "date_kl": date_kl, "error": "no_eligible_games"}
+    game = _load_game_by_id((canonical or {}).get("game_id"))
+    if game is None:
+        # Rare race: the winner was deleted/unpublished between the upsert
+        # and this read. Leave the stale row for the next request's
+        # reselection branch above rather than retrying in a loop here.
+        return {"ok": False, "date_kl": date_kl, "error": "no_eligible_games"}
+    return {"ok": True, "date_kl": date_kl, "slot": _build_daily_slot(game)}
