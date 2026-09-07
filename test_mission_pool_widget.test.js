@@ -130,7 +130,7 @@ function loadWidget(opts) {
     URLSearchParams,
     fetch: (url, init) => respond((init && init.method) || "GET", url),
     window: {
-      Telegram: { WebApp: { initData: "signed-init-data", initDataUnsafe: { start_param: opts.startParam } } },
+      Telegram: { WebApp: { initData: opts.initData !== undefined ? opts.initData : "signed-init-data", initDataUnsafe: { start_param: opts.startParam } } },
       MissionPoolEvents: [],
     },
     location: { search: opts.search || "" },
@@ -201,6 +201,50 @@ test("mission deep link routes to the mission view endpoint", async () => {
   await tick();
   assert.deepEqual(w.calls, [VIEW_ROUTE]);
   assert.ok(findByText(w.root, "Summer Quiz"));
+});
+
+test("start_param delivered asynchronously by Telegram Web/Desktop is still picked up", async () => {
+  // Root-cause regression: Telegram Web/Desktop deliver initDataUnsafe via a
+  // postMessage round trip, not synchronously at script-parse time. A widget
+  // that only reads start_param once, immediately on mount, would silently
+  // treat this exact case as "no mission" and never call /view.
+  const w = loadWidget({ startParam: undefined, routes: { [VIEW_ROUTE]: () => ({ body: viewBody() }) } });
+  await tick();
+  assert.deepEqual(w.calls, [], "must not call /view before start_param has arrived");
+
+  w.sandbox.window.Telegram.WebApp.initDataUnsafe.start_param = "mission_m1";
+  await new Promise((r) => setTimeout(r, 400));
+
+  assert.deepEqual(w.calls, [VIEW_ROUTE], "must call /view once start_param arrives late");
+  assert.ok(findByText(w.root, "Summer Quiz"));
+});
+
+test("start_param present but signed initData not yet delivered waits before calling /view", async () => {
+  // Codex review finding: Telegram can expose initDataUnsafe.start_param
+  // before the signed initData (or the synchronous ?mission= fallback
+  // resolves while initData is still loading). Firing /view unauthenticated
+  // would get a 401 that the widget must not render, and never retries —
+  // leaving a valid deep link blank exactly like the start_param race.
+  const w = loadWidget({
+    startParam: "mission_m1",
+    initData: "",
+    routes: { [VIEW_ROUTE]: () => ({ body: viewBody() }) },
+  });
+  await tick();
+  assert.deepEqual(w.calls, [], "must not call /view before initData has arrived");
+
+  w.sandbox.window.Telegram.WebApp.initData = "signed-init-data";
+  await new Promise((r) => setTimeout(r, 400));
+
+  assert.deepEqual(w.calls, [VIEW_ROUTE], "must call /view once initData arrives");
+  assert.ok(findByText(w.root, "Summer Quiz"));
+});
+
+test("a normal open with no start_param ever still makes zero requests after the retry window", async () => {
+  const w = loadWidget({ startParam: undefined, routes: {} });
+  await new Promise((r) => setTimeout(r, 1700));
+  assert.deepEqual(w.calls, [], "a genuinely normal open must still make zero Mission requests");
+  assert.equal(w.root.children.length, 0);
 });
 
 test("?mission= query fallback works for browser testing", async () => {
