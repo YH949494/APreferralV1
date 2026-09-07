@@ -130,7 +130,7 @@ function loadWidget(opts) {
     URLSearchParams,
     fetch: (url, init) => respond((init && init.method) || "GET", url),
     window: {
-      Telegram: { WebApp: { initData: "signed-init-data", initDataUnsafe: { start_param: opts.startParam } } },
+      Telegram: { WebApp: { initData: opts.initData !== undefined ? opts.initData : "signed-init-data", initDataUnsafe: { start_param: opts.startParam } } },
       MissionPoolEvents: [],
     },
     location: { search: opts.search || "" },
@@ -216,6 +216,27 @@ test("start_param delivered asynchronously by Telegram Web/Desktop is still pick
   await new Promise((r) => setTimeout(r, 400));
 
   assert.deepEqual(w.calls, [VIEW_ROUTE], "must call /view once start_param arrives late");
+  assert.ok(findByText(w.root, "Summer Quiz"));
+});
+
+test("start_param present but signed initData not yet delivered waits before calling /view", async () => {
+  // Codex review finding: Telegram can expose initDataUnsafe.start_param
+  // before the signed initData (or the synchronous ?mission= fallback
+  // resolves while initData is still loading). Firing /view unauthenticated
+  // would get a 401 that the widget must not render, and never retries —
+  // leaving a valid deep link blank exactly like the start_param race.
+  const w = loadWidget({
+    startParam: "mission_m1",
+    initData: "",
+    routes: { [VIEW_ROUTE]: () => ({ body: viewBody() }) },
+  });
+  await tick();
+  assert.deepEqual(w.calls, [], "must not call /view before initData has arrived");
+
+  w.sandbox.window.Telegram.WebApp.initData = "signed-init-data";
+  await new Promise((r) => setTimeout(r, 400));
+
+  assert.deepEqual(w.calls, [VIEW_ROUTE], "must call /view once initData arrives");
   assert.ok(findByText(w.root, "Summer Quiz"));
 });
 
