@@ -941,19 +941,29 @@
     #lucky-games-section { padding: 14px; }
     .lg-cards-row {
       display: flex;
-      gap: 10px;
+      gap: 12px;
       overflow-x: auto;
+      scroll-snap-type: x proximity;
       -webkit-overflow-scrolling: touch;
       padding-bottom: 2px;
       margin-top: 10px;
+      /* Scrollable, not scrollbar-less-looking: hide the bar, keep the gesture. */
+      scrollbar-width: none;
+      -ms-overflow-style: none;
     }
+    .lg-cards-row::-webkit-scrollbar { display: none; }
     .lg-card {
       flex: 0 0 auto;
-      width: 132px;
+      scroll-snap-align: start;
+      width: 172px;
+      min-width: 172px;
+      height: 228px;
+      display: flex;
+      flex-direction: column;
       background: var(--bg-card-alt);
       border: 1px solid var(--border-light);
-      border-radius: 14px;
-      padding: 10px;
+      border-radius: 16px;
+      padding: 14px;
       cursor: pointer;
       -webkit-tap-highlight-color: transparent;
       transition: border-color .15s, transform .1s;
@@ -961,41 +971,87 @@
       color: var(--text-main);
     }
     .lg-card:active { transform: scale(.97); }
-    .lg-card-img-wrap {
+    .lg-card:focus-visible { outline: 2px solid var(--ap-orange); outline-offset: 2px; }
+    /* Fixed-height media area — an image is cropped to fill it, a missing/
+       broken image falls back to the icon inside the same subtle box, so
+       the layout never jumps and never leaves dead whitespace. */
+    .lg-card-media {
+      flex: 0 0 auto;
       width: 100%;
-      height: 78px;
-      border-radius: 10px;
-      background: rgba(245,182,63,.13);
-      border: 1px solid rgba(245,182,63,.25);
+      height: 88px;
+      border-radius: 12px;
+      background: rgba(255,94,0,.1);
+      border: 1px solid rgba(255,94,0,.22);
       display: flex;
       align-items: center;
       justify-content: center;
       overflow: hidden;
-      margin-bottom: 8px;
+      margin-bottom: 10px;
     }
-    .lg-card-img-wrap img { width: 100%; height: 100%; object-fit: cover; }
+    .lg-card-media img { width: 100%; height: 100%; object-fit: cover; }
     .lg-card-name {
+      flex: 0 0 auto;
       font-family: var(--font-display);
       font-weight: 700;
-      font-size: 12.5px;
+      font-size: 13px;
+      line-height: 1.25;
       color: var(--text-main);
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+      overflow-wrap: anywhere;
+      /* Reserves space for two lines even when the name is short, so every
+         card's header block lines up regardless of title length. */
+      min-height: calc(1.25em * 2);
+    }
+    .lg-card-provider {
+      flex: 0 0 auto;
+      margin-top: 4px;
+      font-size: 11px;
+      color: var(--text-muted);
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
     }
-    .lg-card-label {
-      display: inline-block;
-      margin-top: 4px;
-      padding: 1px 7px;
+    .lg-card-volatility {
+      flex: 0 0 auto;
+      align-self: flex-start;
+      margin-top: 6px;
+      padding: 3px 8px;
       border-radius: 999px;
-      background: #f4f6ff;
-      color: #5a67d8;
+      background: rgba(255,94,0,.14);
+      color: var(--ap-orange-strong);
+      border: 1px solid rgba(255,94,0,.28);
       font-size: 10.5px;
+      font-weight: 700;
     }
-    .lg-card-meta {
-      margin-top: 4px;
-      font-size: 10.5px;
+    /* Pinned to the card's bottom edge via margin-top:auto regardless of how
+       much (or little) optional content sits above it, so the stat row
+       never floats mid-card on a sparse game. */
+    .lg-card-stat {
+      flex: 0 0 auto;
+      margin-top: auto;
+      padding-top: 8px;
+      border-top: 1px solid var(--border-light);
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 6px;
+    }
+    .lg-card-stat-label {
+      font-size: 11px;
       color: var(--text-muted);
+      white-space: nowrap;
+    }
+    .lg-card-stat-value {
+      font-family: var(--font-display);
+      font-weight: 700;
+      font-size: 13px;
+      color: var(--ap-orange-strong);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
 
     /* ===== SECONDARY CHIPS ===== */
@@ -8010,8 +8066,8 @@ ${referral}`;
         const card = document.createElement("div");
         card.className = "lg-card";
 
-        const imgWrap = document.createElement("div");
-        imgWrap.className = "lg-card-img-wrap";
+        const media = document.createElement("div");
+        media.className = "lg-card-media";
         const fallbackIcon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
         fallbackIcon.setAttribute("width", "28");
         fallbackIcon.setAttribute("height", "28");
@@ -8029,15 +8085,15 @@ ${referral}`;
           img.onerror = function () {
             // Image failed to load — swap to the same fallback icon rather
             // than leaving a broken-image glyph.
-            imgWrap.innerHTML = "";
-            imgWrap.appendChild(fallbackIcon);
+            media.innerHTML = "";
+            media.appendChild(fallbackIcon);
           };
           img.src = game.image_url;
-          imgWrap.appendChild(img);
+          media.appendChild(img);
         } else {
-          imgWrap.appendChild(fallbackIcon);
+          media.appendChild(fallbackIcon);
         }
-        card.appendChild(imgWrap);
+        card.appendChild(media);
 
         const nameEl = document.createElement("div");
         nameEl.className = "lg-card-name";
@@ -8045,24 +8101,43 @@ ${referral}`;
         card.appendChild(nameEl);
 
         if (game.label) {
-          const labelEl = document.createElement("div");
-          labelEl.className = "lg-card-label";
-          labelEl.textContent = game.label;
-          card.appendChild(labelEl);
+          const providerEl = document.createElement("div");
+          providerEl.className = "lg-card-provider";
+          providerEl.textContent = game.label;
+          card.appendChild(providerEl);
         }
 
-        const metaParts = [];
-        if (game.volatility) metaParts.push(game.volatility);
-        if (game.max_win) metaParts.push("Max " + game.max_win);
-        if (metaParts.length) {
-          const metaEl = document.createElement("div");
-          metaEl.className = "lg-card-meta";
-          metaEl.textContent = metaParts.join(" · ");
-          card.appendChild(metaEl);
+        if (game.volatility) {
+          const volatilityEl = document.createElement("div");
+          volatilityEl.className = "lg-card-volatility";
+          volatilityEl.textContent = game.volatility;
+          card.appendChild(volatilityEl);
+        }
+
+        if (game.max_win) {
+          const statRow = document.createElement("div");
+          statRow.className = "lg-card-stat";
+          const statLabel = document.createElement("span");
+          statLabel.className = "lg-card-stat-label";
+          statLabel.textContent = "Max win";
+          const statValue = document.createElement("span");
+          statValue.className = "lg-card-stat-value";
+          statValue.textContent = game.max_win;
+          statRow.appendChild(statLabel);
+          statRow.appendChild(statValue);
+          card.appendChild(statRow);
         }
 
         if (game.game_url) {
+          card.setAttribute("role", "button");
+          card.setAttribute("tabindex", "0");
           card.addEventListener("click", function () { openLuckyGameUrl(game.game_url); });
+          card.addEventListener("keydown", function (e) {
+            if (e.key === "Enter" || e.key === " " || e.key === "Spacebar") {
+              if (typeof e.preventDefault === "function") e.preventDefault();
+              openLuckyGameUrl(game.game_url);
+            }
+          });
         }
         return card;
       }

@@ -74,8 +74,8 @@ class FakeElement {
   addEventListener(type, fn) {
     this._listeners[type] = fn;
   }
-  trigger(type) {
-    if (this._listeners[type]) this._listeners[type]();
+  trigger(type, evt) {
+    if (this._listeners[type]) this._listeners[type](evt || {});
   }
 }
 
@@ -144,11 +144,14 @@ test("2. renders name, label, volatility and max win as plain text (no HTML inje
 
   assert.equal(list.children.length, 1);
   const card = list.children[0];
-  const [imgWrap, nameEl, labelEl, metaEl] = card.children;
+  const [media, nameEl, providerEl, volatilityEl, statRow] = card.children;
   assert.equal(nameEl.textContent, maliciousName, "raw text must be set via textContent, never parsed as HTML");
-  assert.equal(labelEl.textContent, "Lucky Game");
-  assert.equal(metaEl.textContent, "High-Med · Max 25000x");
-  assert.equal(imgWrap.children[0].src, SAMPLE_GAME.image_url);
+  assert.equal(providerEl.textContent, "Lucky Game");
+  assert.equal(volatilityEl.textContent, "High-Med");
+  const [statLabel, statValue] = statRow.children;
+  assert.equal(statLabel.textContent, "Max win");
+  assert.equal(statValue.textContent, "25000x");
+  assert.equal(media.children[0].src, SAMPLE_GAME.image_url);
 });
 
 test("3. source guard: dynamic fields are set via textContent, never innerHTML", () => {
@@ -233,4 +236,65 @@ test("12. games missing a name are filtered out of the render", async () => {
   await settle();
   assert.equal(list.children.length, 1);
   assert.equal(section.style.display, "block");
+});
+
+test("13. a clickable card is keyboard-reachable and Enter/Space opens it like a click", async () => {
+  const { list, calls } = makeContext({ fetchImpl: async () => gamesResponse([SAMPLE_GAME]) });
+  await settle();
+  const card = list.children[0];
+  assert.equal(card._attrs.role, "button");
+  assert.equal(card._attrs.tabindex, "0");
+
+  card.trigger("keydown", { key: "Enter", preventDefault() {} });
+  assert.deepEqual(calls.opened[0], ["openLink", SAMPLE_GAME.game_url]);
+
+  card.trigger("keydown", { key: " ", preventDefault() {} });
+  assert.deepEqual(calls.opened[1], ["openLink", SAMPLE_GAME.game_url]);
+});
+
+test("14. a card with no game_url has no role/tabindex/keydown handler either", async () => {
+  const { list } = makeContext({
+    fetchImpl: async () => gamesResponse([{ ...SAMPLE_GAME, game_url: "" }]),
+  });
+  await settle();
+  const card = list.children[0];
+  assert.equal(card._attrs.role, undefined);
+  assert.equal(card._attrs.tabindex, undefined);
+  assert.equal(typeof card._listeners.keydown, "undefined");
+});
+
+test("15. games without a volatility or max_win still render without the optional badge/stat row", async () => {
+  const { list } = makeContext({
+    fetchImpl: async () => gamesResponse([{ ...SAMPLE_GAME, volatility: "", max_win: "" }]),
+  });
+  await settle();
+  const card = list.children[0];
+  // media, name, provider only — no volatility badge, no stat row.
+  assert.equal(card.children.length, 3);
+});
+
+test("16. CSS: cards scroll horizontally with scroll-snap and a hidden scrollbar", () => {
+  const html = readHtml();
+  const cssStart = html.indexOf("/* ===== LUCKY GAMES CARD LIST");
+  const cssEnd = html.indexOf("/* ===== SECONDARY CHIPS", cssStart);
+  assert.ok(cssStart !== -1 && cssEnd !== -1, "Lucky Games CSS block not found");
+  const css = html.slice(cssStart, cssEnd);
+
+  assert.match(css, /scroll-snap-type:\s*x proximity/);
+  assert.match(css, /scroll-snap-align:\s*start/);
+  assert.match(css, /::-webkit-scrollbar\s*\{\s*display:\s*none;?\s*\}/);
+  assert.match(css, /scrollbar-width:\s*none/);
+  assert.match(css, /-webkit-line-clamp:\s*2/);
+  assert.match(css, /object-fit:\s*cover/);
+});
+
+test("17. CSS: no white/beige pill backgrounds — the dark/orange system is preserved", () => {
+  const html = readHtml();
+  const cssStart = html.indexOf("/* ===== LUCKY GAMES CARD LIST");
+  const cssEnd = html.indexOf("/* ===== SECONDARY CHIPS", cssStart);
+  const css = html.slice(cssStart, cssEnd);
+
+  assert.doesNotMatch(css, /#f4f6ff/i, "no light-blue pill background");
+  assert.doesNotMatch(css, /background:\s*#fff/i, "no white pill background");
+  assert.match(css, /rgba\(255,94,0,/, "volatility/media accents stay on the orange system");
 });
