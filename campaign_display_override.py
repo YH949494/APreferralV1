@@ -42,6 +42,13 @@ MAX_OVERRIDE_PARTICIPANTS = 100
 # rewritten.
 MAX_DISPLAY_QUALIFIED_COUNT = 100_000
 
+# Sensible display ceiling for a single manual participant's name. Without
+# this, the 100-participant cap does not actually bound response/render
+# size -- an operator could paste one arbitrarily long string into
+# display_name (up to Mongo's document-size limit) and every campaign
+# activity read would serialize and render it.
+MAX_DISPLAY_NAME_LENGTH = 40
+
 
 def ensure_campaign_display_override_indexes(db_ref) -> None:
     """No secondary index is created here on purpose.
@@ -106,6 +113,14 @@ def _validate_participant(raw: Any, *, campaign_id: str, seen_entry_ids: set[str
         )
         return None
     display_name = display_name.strip()
+    if len(display_name) > MAX_DISPLAY_NAME_LENGTH:
+        logger.warning(
+            "[CAMPAIGN_DISPLAY] campaign=%s invalid_participant reason=display_name_too_long entry_id=%s length=%s",
+            campaign_id,
+            entry_id,
+            len(display_name),
+        )
+        return None
 
     qualified_count = raw.get("qualified_count")
     # bool is a subclass of int in Python -- must be excluded explicitly, a

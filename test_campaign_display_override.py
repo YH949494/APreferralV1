@@ -18,6 +18,7 @@ import mongomock
 
 from campaign_display_override import (
     CAMPAIGN_DISPLAY_OVERRIDE_COLLECTION,
+    MAX_DISPLAY_NAME_LENGTH,
     MAX_OVERRIDE_PARTICIPANTS,
     build_public_campaign_activity,
     load_active_campaign_override,
@@ -296,6 +297,40 @@ def test_empty_or_missing_display_name_is_excluded():
     )
     result = load_active_campaign_override(db, CAMPAIGN_ID, reference_utc=NOW)
     assert result["participants"] == []
+
+
+def test_display_name_over_max_length_is_excluded():
+    db = _fresh_db()
+    _insert_override(
+        db,
+        participants=[
+            {
+                "entry_id": "v1",
+                "display_name": "X" * (MAX_DISPLAY_NAME_LENGTH + 1),
+                "qualified_count": 1,
+                "visible": True,
+            }
+        ],
+    )
+    result = load_active_campaign_override(db, CAMPAIGN_ID, reference_utc=NOW)
+    assert result["participants"] == []
+
+
+def test_display_name_at_max_length_is_accepted():
+    db = _fresh_db()
+    _insert_override(
+        db,
+        participants=[
+            {
+                "entry_id": "v1",
+                "display_name": "X" * MAX_DISPLAY_NAME_LENGTH,
+                "qualified_count": 1,
+                "visible": True,
+            }
+        ],
+    )
+    result = load_active_campaign_override(db, CAMPAIGN_ID, reference_utc=NOW)
+    assert len(result["participants"]) == 1
 
 
 def test_participant_list_bounded_to_max_entries():
