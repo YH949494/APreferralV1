@@ -633,6 +633,57 @@
     }
     #campaign-voucher-list .campaign-card button { margin-top: auto; }
 
+    /* Compact "Reward Ready" row — replaces the nested campaign card inside
+       the Live Drop hero once the user has an active unclaimed voucher.
+       Deliberately unstyled as a card (no border/background box) so it
+       reads as part of the existing hero, not another card inside it. */
+    .ap-reward-compact { margin-top: 4px; }
+    .ap-reward-compact-heading {
+      font-size: 12.5px;
+      font-weight: 800;
+      letter-spacing: .3px;
+      color: #f5b63f;
+      margin-bottom: 8px;
+    }
+    .ap-reward-compact-line {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }
+    .ap-reward-compact-name {
+      font-size: 14.5px;
+      font-weight: 700;
+      color: var(--text-main);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .ap-reward-compact-claim {
+      flex: 0 0 auto;
+      width: auto;
+      padding: 8px 18px;
+      font-size: 13.5px;
+    }
+    .ap-reward-compact-more {
+      display: block;
+      margin-top: 10px;
+      background: none;
+      border: none;
+      padding: 0;
+      font-size: 12.5px;
+      font-weight: 600;
+      color: #a39e95;
+      text-decoration: underline;
+      cursor: pointer;
+    }
+    .ap-reward-compact-gate-msg {
+      display: none;
+      margin-top: 8px;
+      font-size: 12.5px;
+      color: #f5b63f;
+    }
+
     /* Extra reward cards (stacked below hero) */
     #ap-campaigns-list .campaign-card {
       border: 1px solid rgba(255,165,80,.18);
@@ -5539,16 +5590,36 @@
       if (noDropState) noDropState.style.display = "none";
       if (dropState) dropState.style.display = "block";
 
-      const primary = liveDrops[0];
+      // Active, unclaimed, currently-claimable vouchers — deterministically
+      // ordered newest-first (existing startsAt timestamp), dropId as the
+      // final tie-breaker. When any exist, the newest one takes over the
+      // hero's reward slot as a single compact row instead of a full nested
+      // campaign card (see renderCompactVoucherRow).
+      const activeVouchers = liveDrops
+        .filter((drop) => isClaimableVoucher(drop, userRegion))
+        .sort(compareVouchersNewestFirst);
+      const showCompactVoucher = activeVouchers.length > 0;
+      const primary = showCompactVoucher ? activeVouchers[0] : liveDrops[0];
+
       const heroTitle = document.getElementById("ap-hero-title");
       const heroSub = document.getElementById("ap-hero-subtitle");
       const heroImg = document.getElementById("ap-hero-img");
       const heroStock = document.getElementById("ap-hero-stock");
       const heroRemaining = document.getElementById("ap-hero-remaining");
       const heroFill = document.getElementById("ap-hero-stock-fill");
+      const messageEl = document.getElementById("campaign-voucher-message");
 
       if (heroTitle) heroTitle.textContent = primary.hero_title || primary.name || "Campaign Reward";
-      if (heroSub) heroSub.textContent = primary.hero_subtitle || "No deposit required · New & active players";
+      if (heroSub) {
+        // The compact reward row is deliberately the only reward-related
+        // copy shown once a voucher is ready to claim — the description and
+        // "tap below to claim" message are dropped rather than duplicated.
+        heroSub.style.display = showCompactVoucher ? "none" : "";
+        if (!showCompactVoucher) {
+          heroSub.textContent = primary.hero_subtitle || "No deposit required · New & active players";
+        }
+      }
+      if (messageEl) messageEl.style.display = showCompactVoucher ? "none" : "";
 
       if (heroImg) {
         const heroImgUrl = primary.hero_image || primary.heroImage || primary.image || "/static/redesign/hero-band.jpg";
@@ -5570,15 +5641,140 @@
       startHeroCountdown(primary.endsAt);
 
       container.style.display = "grid";
-      const primaryCard = createCampaignCard(primary, userRegion);
-      if (primaryCard) {
-        primaryCard.dataset.primary = "true";
-        container.appendChild(primaryCard);
+      if (showCompactVoucher) {
+        renderCompactVoucherRow(container, primary, activeVouchers.length - 1);
+      } else {
+        const primaryCard = createCampaignCard(primary, userRegion);
+        if (primaryCard) {
+          primaryCard.dataset.primary = "true";
+          container.appendChild(primaryCard);
+        }
       }
 
-      // Render extra live drops and past drops toggle below the hero card
-      const secondaryDrops = liveDrops.slice(1).concat(affiliateBundleDrops);
+      // Render extra live drops and past drops (My Rewards) below the hero
+      // card. Any other active vouchers not shown in the compact slot stay
+      // fully visible and claimable here.
+      const secondaryDrops = liveDrops.filter((drop) => drop !== primary).concat(affiliateBundleDrops);
       renderActiveCampaignsSection(secondaryDrops, pastDrops, userRegion);
+    }
+
+    // "Active voucher" = issued to the user, currently claimable, not
+    // claimed, not expired/cancelled/sold out. Mirrors the eligibility
+    // checks createCampaignCard already applies to its own claim button so
+    // the compact row and the full card never disagree on claimability.
+    function isClaimableVoucher(drop, userRegion) {
+      if (!drop || drop.userClaimed) return false;
+      if (!(drop.dropId || drop.id || drop._id)) return false;
+      if (drop.state === "welcome_locked") return false;
+      const isAffiliateBundle = drop.reward_type === "affiliate_bundle" || drop.type === "affiliate_bundle";
+      if (isAffiliateBundle) return false;
+      const dropType = String(drop.type || "").toLowerCase();
+      if (dropType !== "pooled" && dropType !== "personalised" && dropType !== "personalized" && dropType !== "") return false;
+      const canClaim = !!(drop.isActive || drop.adminPreview);
+      const claimableNow = typeof drop.claimable === "boolean" ? drop.claimable : canClaim;
+      if (!claimableNow) return false;
+      if (isPublicSoldOut(drop, userRegion)) return false;
+      return true;
+    }
+
+    function compareVouchersNewestFirst(a, b) {
+      const aTime = a?.startsAt ? Date.parse(a.startsAt) : NaN;
+      const bTime = b?.startsAt ? Date.parse(b.startsAt) : NaN;
+      const aValid = Number.isFinite(aTime);
+      const bValid = Number.isFinite(bTime);
+      if (aValid && bValid && aTime !== bTime) return bTime - aTime;
+      if (aValid !== bValid) return aValid ? -1 : 1;
+      const aId = String(a?.dropId || a?.id || a?._id || "");
+      const bId = String(b?.dropId || b?.id || b?._id || "");
+      if (aId < bId) return -1;
+      if (aId > bId) return 1;
+      return 0;
+    }
+
+    function voucherDisplayLabel(drop) {
+      return drop?.reward_label || drop?.reward_value || drop?.name || t("claim_reward");
+    }
+
+    // Compact "🎁 Reward Ready" row: the single-voucher replacement for the
+    // nested campaign card. Renders directly into the hero's own reward
+    // slot (#campaign-voucher-list) so it visually belongs to the Live Drop
+    // card rather than reading as another card placed inside it. All text
+    // is set via textContent (never innerHTML) so backend-provided voucher
+    // names/labels are always escaped.
+    function renderCompactVoucherRow(container, drop, moreCount) {
+      const dropId = drop?.dropId || drop?.id || drop?._id || "";
+      const label = voucherDisplayLabel(drop);
+
+      const row = document.createElement("div");
+      row.className = "ap-reward-compact";
+      row.dataset.primary = "true";
+
+      const heading = document.createElement("div");
+      heading.className = "ap-reward-compact-heading";
+      heading.textContent = "🎁 " + t("reward_ready");
+      row.appendChild(heading);
+
+      const line = document.createElement("div");
+      line.className = "ap-reward-compact-line";
+
+      const nameEl = document.createElement("span");
+      nameEl.className = "ap-reward-compact-name";
+      nameEl.textContent = label;
+      line.appendChild(nameEl);
+
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "btn btn-primary ap-reward-compact-claim";
+      btn.textContent = t("claim_now_label");
+      btn.setAttribute("aria-label", `${t("claim_now_label")}: ${label}`);
+      if (dropId) btn.dataset.dropid = dropId;
+      btn.dataset.liveDropCompact = "1";
+      line.appendChild(btn);
+
+      row.appendChild(line);
+
+      const gateMsg = document.createElement("div");
+      gateMsg.className = "ap-reward-compact-gate-msg";
+      row.appendChild(gateMsg);
+
+      container.appendChild(row);
+
+      // Pooled vouchers require an active channel subscription — mirrors the
+      // same check createCampaignCard already runs (applyChannelGate) so an
+      // unsubscribed user finds out before submitting a failing claim,
+      // rather than only after.
+      const dropType = String(drop?.type || "").toLowerCase();
+      const isPoolCard = dropType === "pooled" || dropType === "";
+      if (isPoolCard && dropId) {
+        checkChannelSubscription(dropId)
+          .then((state) => {
+            if (!state.subscribed) {
+              gateMsg.textContent = CHANNEL_SUBSCRIBE_PROMPT;
+              gateMsg.style.display = "block";
+              btn.style.display = "none";
+            }
+          })
+          .catch((err) => {
+            console.warn("Channel gate check failed", err);
+          });
+      }
+
+      if (moreCount > 0) {
+        const link = document.createElement("button");
+        link.type = "button";
+        link.className = "ap-reward-compact-more";
+        link.textContent = moreCount === 1
+          ? `1 more reward in ${t("my_rewards")} ›`
+          : `${moreCount} more rewards in ${t("my_rewards")} ›`;
+        link.setAttribute("aria-label", `${moreCount === 1 ? "1 more reward" : moreCount + " more rewards"} in ${t("my_rewards")}`);
+        link.addEventListener("click", () => {
+          const section = document.getElementById("ap-campaigns-section");
+          if (section && typeof section.scrollIntoView === "function") {
+            section.scrollIntoView({ behavior: "smooth", block: "start" });
+          }
+        });
+        container.appendChild(link);
+      }
     }
 
     function renderActiveCampaignsSection(extraDrops, pastDrops, userRegion) {
@@ -5611,7 +5807,8 @@
         const toggleBtn = document.createElement("button");
         toggleBtn.type = "button";
         toggleBtn.className = "btn btn-ghost";
-        toggleBtn.textContent = "View past drops";
+        toggleBtn.id = "ap-my-rewards-toggle";
+        toggleBtn.textContent = `▸ ${t("my_rewards")}`;
         const pastWrap = document.createElement("div");
         pastWrap.style.display = "none";
         pastWrap.style.marginTop = "8px";
@@ -5622,7 +5819,7 @@
         toggleBtn.addEventListener("click", () => {
           const isHidden = pastWrap.style.display === "none";
           pastWrap.style.display = isHidden ? "grid" : "none";
-          toggleBtn.textContent = isHidden ? "Hide past drops" : "View past drops";
+          toggleBtn.textContent = `${isHidden ? "▾" : "▸"} ${t("my_rewards")}`;
         });
         list.appendChild(toggleBtn);
         list.appendChild(pastWrap);
@@ -6344,7 +6541,59 @@
               `[CLAIM_UI][REJOIN_BUFFER] uid=${userId} drop_id=${dropId} retry_after_sec=${payload?.retry_after_sec} buffer_until=${payload?.buffer_until}`
             );
           }
+          if (claimBtn.dataset.liveDropCompact === "1") {
+            // Voucher stays visible in the Live Drop slot for a safe retry —
+            // the server never confirmed a claim, so nothing is removed.
+            showToast(uiModel?.title || t("claim_failed_toast"));
+          }
           renderClaimError(uiModel, { dropId });
+          return;
+        }
+
+        if (ok && claimBtn.dataset.liveDropCompact === "1") {
+          // Compact Live Drop reward row: don't rewrite this button in place
+          // (that's the old nested-card behaviour) — but the claim response
+          // (code, welcome guide, platform finder CTA) must still be shown
+          // *before* re-fetching the voucher list, since that refresh can
+          // itself fail after the voucher has already been consumed
+          // server-side, leaving nothing but a bare toast otherwise.
+          clearClaimError();
+          const codeText = out?.voucher?.code
+            ? String(out.voucher.code)
+            : (out?.voucher_code ? String(out.voucher_code) : "(no code)");
+          const claimedAt = out?.voucher?.claimedAt ? fmtKL(out.voucher.claimedAt) : "-";
+
+          let copySuccess = false;
+          if (codeText && codeText !== "(no code)" && navigator?.clipboard?.writeText) {
+            try {
+              await navigator.clipboard.writeText(codeText);
+              copySuccess = true;
+            } catch (errCopy) {
+              console.warn("Auto-copy failed", errCopy);
+            }
+          }
+
+          window.__didClaimDrop = true;
+          updateJourneyUI();
+          shouldRestoreBtn = false;
+          showToast(t("reward_claimed_toast"));
+
+          const copyMsg = copySuccess
+            ? "\n\n✅ Code copied to clipboard."
+            : "\n\n📋 Find this code again anytime in My Rewards.";
+          tgAlert(`🎟️ Your code: ${codeText}\nClaimed at: ${claimedAt}${copyMsg}`);
+          if (out?.claim_guide?.type === "welcome_voucher") {
+            showWelcomeVoucherGuidePopup(out.claim_guide, { code: codeText, claimedAt });
+          }
+          if (out?.platform_finder) {
+            showPlatformFinderCta(claimBtn, out.platform_finder, { dropId, voucherCode: codeText });
+          }
+
+          await loadWelcomeProgress();
+          // The compact row (and any platform-finder CTA just anchored to
+          // it) is about to be replaced by the refreshed voucher list —
+          // that's expected once the response above has already been shown.
+          await loadVouchers();
           return;
         }
 
@@ -6398,6 +6647,9 @@
 
       } catch (err) {
         console.error("Claim request failed", err);
+        if (claimBtn.dataset.liveDropCompact === "1") {
+          showToast(t("claim_failed_toast"));
+        }
         renderClaimError(claimErrorToUi({}, null));
       } finally {
         clearTimeout(claimSafetyTimer);
