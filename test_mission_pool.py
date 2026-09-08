@@ -516,6 +516,151 @@ def test_admin_routes_reject_a_standard_drop_campaign(fake_db):
         assert client.post("/api/admin/mission-pool/t1/cancel").status_code == 404
 
 
+# ---------------------------------------------------------------------------
+# Admin manual "End Mission Rewards" (reward placement/expiry follow-up)
+# ---------------------------------------------------------------------------
+
+def _mission_reward_row(**overrides):
+    now = datetime.now(timezone.utc)
+    base = {
+        "reward_id": "rw_end_1",
+        "campaign_id": CAMPAIGN_ID,
+        "category": "mission_pool",
+        "telegram_user_id": 777,
+        "voucher_code": "MCODE1",
+        "pool_id": "MISSION-PILOT",
+        "status": "assigned",
+        "assigned_at": now,
+        "expires_at": now + timedelta(hours=48),
+        "updated_at": now,
+    }
+    base.update(overrides)
+    return base
+
+
+def test_end_rewards_requires_admin(fake_db):
+    _seed(fake_db)
+    fake_db["campaign_rewards"].insert_one(_mission_reward_row())
+    with _app().test_client() as client:
+        with patch("vouchers.require_admin", return_value=(None, ({"error": "no"}, 401))):
+            resp = client.post(f"/api/admin/mission-pool/{CAMPAIGN_ID}/end-rewards")
+    assert resp.status_code == 401
+    assert fake_db["campaign_rewards"].find_one({"reward_id": "rw_end_1"})["status"] == "assigned"
+
+
+def test_end_rewards_expires_active_mission_rewards(fake_db):
+    _seed(fake_db)
+    fake_db["campaign_rewards"].insert_one(_mission_reward_row())
+    with _app().test_client() as client, _admin():
+        resp = client.post(f"/api/admin/mission-pool/{CAMPAIGN_ID}/end-rewards")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["status"] == "ok"
+    assert body["count_affected"] == 1
+
+    doc = fake_db["campaign_rewards"].find_one({"reward_id": "rw_end_1"})
+    now = datetime.now(timezone.utc)
+    assert doc["expires_at"] <= now
+    # Never deleted, never reassigned, never returned to inventory.
+    assert doc["status"] == "assigned"
+    assert doc["voucher_code"] == "MCODE1"
+    assert doc["telegram_user_id"] == 777
+
+
+def test_end_rewards_only_affects_target_campaign(fake_db):
+    _seed(fake_db)
+    other_id = "mission-pilot-2"
+    fake_db["gc_campaigns"].insert_one({**_campaign(), "campaign_id": other_id})
+    fake_db["campaign_rewards"].insert_one(_mission_reward_row())
+    fake_db["campaign_rewards"].insert_one(_mission_reward_row(reward_id="rw_other", campaign_id=other_id))
+    with _app().test_client() as client, _admin():
+        client.post(f"/api/admin/mission-pool/{CAMPAIGN_ID}/end-rewards")
+
+    future = datetime.now(timezone.utc) + timedelta(hours=1)
+    assert fake_db["campaign_rewards"].find_one({"reward_id": "rw_other"})["expires_at"] > future
+
+
+def test_end_rewards_only_affects_mission_pool_category(fake_db):
+    _seed(fake_db)
+    fake_db["campaign_rewards"].insert_one(_mission_reward_row())
+    fake_db["campaign_rewards"].insert_one(
+        _mission_reward_row(reward_id="rw_tournament", category="tournament")
+    )
+    with _app().test_client() as client, _admin():
+        client.post(f"/api/admin/mission-pool/{CAMPAIGN_ID}/end-rewards")
+
+    future = datetime.now(timezone.utc) + timedelta(hours=1)
+    assert fake_db["campaign_rewards"].find_one({"reward_id": "rw_tournament"})["expires_at"] > future
+
+
+def test_end_rewards_leaves_already_expired_reward_unchanged(fake_db):
+    _seed(fake_db)
+    past = datetime.now(timezone.utc) - timedelta(hours=1)
+    fake_db["campaign_rewards"].insert_one(_mission_reward_row(expires_at=past))
+    with _app().test_client() as client, _admin():
+        resp = client.post(f"/api/admin/mission-pool/{CAMPAIGN_ID}/end-rewards")
+    assert resp.get_json()["count_affected"] == 0
+    assert fake_db["campaign_rewards"].find_one({"reward_id": "rw_end_1"})["expires_at"] == past
+
+
+def test_end_rewards_ignores_non_assigned_rows(fake_db):
+    _seed(fake_db)
+    fake_db["campaign_rewards"].insert_one(_mission_reward_row(status="allocating", voucher_code=None))
+    with _app().test_client() as client, _admin():
+        resp = client.post(f"/api/admin/mission-pool/{CAMPAIGN_ID}/end-rewards")
+    assert resp.get_json()["count_affected"] == 0
+
+
+def test_end_rewards_is_idempotent(fake_db):
+    _seed(fake_db)
+    fake_db["campaign_rewards"].insert_one(_mission_reward_row())
+    with _app().test_client() as client, _admin():
+        first = client.post(f"/api/admin/mission-pool/{CAMPAIGN_ID}/end-rewards").get_json()
+        second = client.post(f"/api/admin/mission-pool/{CAMPAIGN_ID}/end-rewards").get_json()
+    assert first["count_affected"] == 1
+    assert second["count_affected"] == 0
+    assert fake_db["campaign_rewards"].count_documents({"reward_id": "rw_end_1"}) == 1
+
+
+def test_end_rewards_does_not_touch_voucher_inventory_or_winner_selection(fake_db):
+    doc = _seed(fake_db)
+    fake_db["voucher_pools"].insert_one({
+        "pool_id": "MISSION-PILOT", "code": "MCODE1", "status": "issued",
+        "issued_to": 777, "issued_at": datetime.now(timezone.utc),
+    })
+    entry_id = _seed_entry_for_end_rewards_test(fake_db, uid=777)
+    fake_db["campaign_rewards"].insert_one(_mission_reward_row(mission_entry_id=entry_id))
+    stage_before = doc["mission_pool"]["processing_stage"]
+
+    with _app().test_client() as client, _admin():
+        client.post(f"/api/admin/mission-pool/{CAMPAIGN_ID}/end-rewards")
+
+    voucher = fake_db["voucher_pools"].find_one({"pool_id": "MISSION-PILOT", "code": "MCODE1"})
+    assert voucher["status"] == "issued"
+    assert voucher["issued_to"] == 777
+
+    entry = fake_db[mp.ENTRIES_COLLECTION].find_one({"_id": entry_id})
+    assert entry["telegram_user_id"] == 777
+
+    campaign_after = fake_db["gc_campaigns"].find_one({"campaign_id": CAMPAIGN_ID})
+    assert campaign_after["mission_pool"]["processing_stage"] == stage_before
+
+
+def _seed_entry_for_end_rewards_test(fake_db, uid):
+    submitted = datetime.now(timezone.utc) - timedelta(hours=2)
+    return fake_db[mp.ENTRIES_COLLECTION].insert_one({
+        "campaign_id": CAMPAIGN_ID,
+        "telegram_user_id": uid,
+        "answer": "a",
+        "status": mp.ENTRY_STATUS_REWARD_ALLOCATED,
+        "identity_key": None,
+        "identity_type": None,
+        "submitted_at": submitted,
+        "created_at": submitted,
+        "updated_at": submitted,
+    }).inserted_id
+
+
 def test_reward_idempotency_key_is_stable_and_leaks_no_identity():
     key = mp.reward_idempotency_key("camp", "entry123")
     assert key == "MISSION:camp:entry123"

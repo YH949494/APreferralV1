@@ -1574,6 +1574,14 @@
       </div>
     </div>
 
+    <!-- MISSION WINNER REWARD CARD(S) — rendered directly under Live Drop by
+         campaign-centre-widget.js (renderRewardCard for category=mission_pool
+         rewards from /api/campaign-rewards/me). No standalone heading here on
+         purpose: a Mission reward is meant to read as part of the Live Drop
+         area, not a separate section. Empty and hidden whenever the caller
+         has no active Mission reward. -->
+    <div id="cc-mission-rewards-root"></div>
+
     <!-- ACTIVE CAMPAIGNS (extra eligible drops, collapsible) -->
     <div id="ap-campaigns-section" style="display:none;margin-bottom:14px;">
       <div id="ap-campaigns-list" style="display:flex;flex-direction:column;gap:10px;"></div>

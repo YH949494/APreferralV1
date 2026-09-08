@@ -458,6 +458,26 @@ def test_same_winner_allocation_retry_returns_the_same_code(fake_db):
     assert fake_db["voucher_pools"].count_documents({"status": "issued"}) == 1
 
 
+def test_allocation_sets_expires_at_48h_after_assigned_at(fake_db):
+    """Reward placement/expiry follow-up: expires_at is stamped off the same
+    `now` used for assigned_at, so the 48h window starts at allocation, not
+    at campaign close and not at wall-clock read time."""
+    _seed_campaign(fake_db, winner_count=1)
+    _seed_pool(fake_db, 3)
+    campaign = fake_db["gc_campaigns"].find_one({"campaign_id": CAMPAIGN_ID})
+    _seed_user(fake_db, 1701)
+    entry_id = _seed_entry(fake_db, 1701)
+    entry = fake_db[mp.ENTRIES_COLLECTION].find_one({"_id": entry_id})
+
+    fixed_now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    out = mpp._allocate_for_entry(campaign, entry, fixed_now, 1)
+    assert out["state"] == "allocated"
+
+    reward = fake_db["campaign_rewards"].find_one({"reward_id": out["reward_id"]})
+    assert reward["assigned_at"] == fixed_now
+    assert reward["expires_at"] == fixed_now + timedelta(hours=48)
+
+
 def test_one_identity_cannot_hold_two_mission_rewards(fake_db):
     """The (campaign_id, identity_key) partial unique index is the final
     protection even if two entries somehow both reached winner state."""

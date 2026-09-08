@@ -427,6 +427,9 @@
     cancel: "Cancel this mission?\n\nNew submissions and new reward distribution will stop.\n\nRewards already allocated to winners will remain valid.",
     process: "Process this campaign now?\n\nProcessing resumes where it left off. Winners already selected are never re-selected.",
     publish: "Publish this mission?\n\nIt becomes visible to participants immediately.",
+    end_rewards: "End Mission Rewards for this campaign?\n\n" +
+      "This will hide all currently active Mission rewards for this campaign immediately.\n\n" +
+      "Allocated rewards will remain recorded and will not be returned to inventory.",
   };
 
   var CORE = {
@@ -1262,6 +1265,28 @@
         : "");
   }
 
+  /**
+   * "End Mission Rewards" (reward placement/expiry follow-up, §10-§13): a
+   * single campaign-level action that hides all currently active Mission
+   * rewards before their automatic 48h expiry. Shown whenever the campaign
+   * has ever allocated a reward — it stays available (and simply becomes a
+   * no-op) after every active reward has already expired or been ended, so
+   * an operator never has to guess whether it is still needed.
+   */
+  function detailRewardsLifecycleSection(state, g) {
+    var allocated = g.rewards_allocated_voucher_grain;
+    if (!allocated) return "";
+    var active = g.rewards_active_voucher_grain;
+    return section("Rewards",
+      '<div class="card-grid">' +
+      kpi("Active", active) +
+      kpi("Allocated", allocated) +
+      "</div>" +
+      '<div style="margin-top:10px;">' +
+      btn("end_rewards", "End Mission Rewards", { id: state.campaign_id }) +
+      "</div>");
+  }
+
   function renderDetail(campaign, state, summary) {
     var g = summary.grains || {};
     var r = state.reward || {};
@@ -1297,6 +1322,8 @@
           : "")) +
 
       section("Reward", detailRewardBlock(state)) +
+
+      detailRewardsLifecycleSection(state, g) +
 
       section("Schedule",
         '<table class="data-table"><tbody>' +
@@ -1673,15 +1700,21 @@
 
   function postAction(action, campaignId) {
     // publish/pause are the shared Campaign Centre lifecycle; close, cancel,
-    // resume and process are the official Phase 1 Mission endpoints. The UI
-    // never writes campaign status itself.
+    // resume, process and end-rewards are the official Phase 1/2 Mission
+    // endpoints. The UI never writes campaign status or reward rows itself.
+    var endpointAction = action === "end_rewards" ? "end-rewards" : action;
     var path = (action === "publish" || action === "pause")
       ? "/api/admin/gc-campaigns/" + encodeURIComponent(campaignId) + "/" + action
-      : "/api/admin/mission-pool/" + encodeURIComponent(campaignId) + "/" + action;
+      : "/api/admin/mission-pool/" + encodeURIComponent(campaignId) + "/" + endpointAction;
     return host.apiPost(path).catch(function (e) { return { status: "error", code: e.message }; })
       .then(function (r) {
-        if (!r || r.status !== "ok") host.toast("❌ " + ((r && r.code) || "action_failed"), "error");
-        else host.toast("✅ " + action + " ok", "success");
+        if (!r || r.status !== "ok") {
+          host.toast("❌ " + ((r && r.code) || "action_failed"), "error");
+        } else if (action === "end_rewards") {
+          host.toast("✅ Ended " + num(r.count_affected) + " active reward(s)", "success");
+        } else {
+          host.toast("✅ " + action + " ok", "success");
+        }
         openDetail(campaignId);
       });
   }
@@ -1775,7 +1808,7 @@
     }
     if (action === "save-draft") { captureCreateStep(); submitCreate(false); return; }
     if (action === "publish-new") { captureCreateStep(); submitCreate(true); return; }
-    if (["publish", "pause", "close", "cancel", "resume", "process"].indexOf(action) !== -1) {
+    if (["publish", "pause", "close", "cancel", "resume", "process", "end_rewards"].indexOf(action) !== -1) {
       runAction(action, id);
       return;
     }

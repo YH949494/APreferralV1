@@ -1102,6 +1102,14 @@ def admin_mission_summary(campaign_id: str):
             "notifications_failed_voucher_grain": rewards.count_documents(
                 {**reward_base, "notification_status": {"$in": ["failed_retryable", "failed_terminal"]}}
             ),
+            # "Active" = currently visible to the winner (assigned and not yet
+            # expired/manually ended); "allocated" above is the historical
+            # total and never shrinks when a reward expires or is ended.
+            "rewards_active_voucher_grain": rewards.count_documents({
+                **reward_base, "status": "assigned",
+                "$or": [{"expires_at": None}, {"expires_at": {"$exists": False}},
+                        {"expires_at": {"$gt": datetime.now(timezone.utc)}}],
+            }),
         },
         "winner_count_requested": block.get("winner_count_requested", block.get("winner_count")),
         "winner_count_actual": block.get("winner_count_actual"),
@@ -1116,3 +1124,47 @@ def admin_mission_summary(campaign_id: str):
                                         if isinstance(block.get("selection_completed_at"), datetime) else None),
         },
     })
+
+
+@mission_pool_admin_bp.post("/api/admin/mission-pool/<campaign_id>/end-rewards")
+def admin_end_mission_rewards(campaign_id: str):
+    """Manual operator action: hide active Mission winner rewards for this
+    campaign before their automatic 48h expiry (§10-§15 of the reward
+    placement/expiry follow-up).
+
+    This only ever moves ``expires_at`` to now on rows that are already
+    ``assigned`` — it never deletes a campaign_rewards row, never touches
+    ``voucher_pools`` inventory, never reassigns or reselects a winner, and
+    never changes ``mission_pool.processing_stage`` or campaign status. The
+    voucher stays permanently owned by the winner and stays fully
+    auditable; it is only no longer rendered in Campaign Rewards.
+
+    Idempotent by construction: the filter only ever matches rows that are
+    still visible (expires_at missing or in the future), so a second call
+    finds nothing left to update and reports affected_count=0."""
+    admin, err = _require_admin()
+    if err:
+        return err
+    campaign, err = _load_mission_campaign(campaign_id)
+    if err:
+        return err
+
+    now = datetime.now(timezone.utc)
+    result = database.db["campaign_rewards"].update_many(
+        {
+            "campaign_id": campaign_id,
+            "category": "mission_pool",
+            "status": "assigned",
+            "$or": [
+                {"expires_at": None},
+                {"expires_at": {"$exists": False}},
+                {"expires_at": {"$gt": now}},
+            ],
+        },
+        {"$set": {"expires_at": now, "updated_at": now}},
+    )
+    affected = result.modified_count
+    # Voucher codes are never written to the audit log (§15).
+    _audit("mission_rewards_ended", admin, campaign_id, {"count_affected": affected})
+    _emit("mission_rewards_ended", campaign_id=campaign_id, source="admin", count_affected=affected)
+    return jsonify({"status": "ok", "ended": True, "count_affected": affected})
