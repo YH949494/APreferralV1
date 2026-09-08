@@ -57,6 +57,13 @@ CAMPAIGNS_COLLECTION = "gc_campaigns"
 REWARDS_COLLECTION = "campaign_rewards"
 REWARD_CATEGORY = "mission_pool"
 
+# Mission winner rewards are visible for a fixed window from allocation, not
+# from campaign close — see the `expires_at` stamp next to `assigned_at`
+# below. Only mission_pool rewards ever get this field; every other
+# campaign_rewards category (tournament, welcome, affiliate, ...) is
+# untouched.
+MISSION_REWARD_EXPIRY_HOURS = 48
+
 
 def _int_env(name: str, default: int, *, lo: int, hi: int) -> int:
     try:
@@ -109,14 +116,16 @@ NOTIFY_BACKOFF_BASE_SECONDS = 60
 WINNER_MESSAGE_TEMPLATE = (
     "🎉 Congratulations!\n\n"
     "You've been selected as a winner of {campaign_name}!\n\n"
-    "Your reward is now available in Campaign Rewards.\n\n"
+    "Your reward is now available in Campaign Rewards.\n"
+    "Your reward is available for 48 hours.\n\n"
     "Tap below to redeem your code."
 )
 
 WINNER_MESSAGE_TEMPLATE_NO_CTA = (
     "🎉 Congratulations!\n\n"
     "You've been selected as a winner of {campaign_name}!\n\n"
-    "Your reward is now available in Campaign Rewards.\n\n"
+    "Your reward is now available in Campaign Rewards.\n"
+    "Your reward is available for 48 hours.\n\n"
     "Open the bot and redeem your code now."
 )
 
@@ -875,6 +884,9 @@ def _allocate_for_entry(campaign: dict, entry: dict, now: datetime, generation: 
         return {"state": "out_of_stock", "reward_id": reward_id}
 
     # Guarantee (2): bind the code only while none is bound yet.
+    # Mission Pool rewards are visible for 48h from allocation (not from
+    # campaign close) — expires_at is stamped off this same `now` so it is
+    # never mistaken for the campaign's own close/eligibility cutoff.
     bound = _rewards().update_one(
         {"reward_id": reward_id,
          "$or": [{"voucher_code": None}, {"voucher_code": {"$exists": False}}]},
@@ -882,6 +894,7 @@ def _allocate_for_entry(campaign: dict, entry: dict, now: datetime, generation: 
             "voucher_code": code_doc["code"],
             "status": "assigned",
             "assigned_at": now,
+            "expires_at": now + timedelta(hours=MISSION_REWARD_EXPIRY_HOURS),
             "updated_at": now,
         }},
     )
@@ -1022,6 +1035,16 @@ def _notification_pass(fence: _Fence, campaign: dict, deadline: float) -> dict:
                 "status": "assigned",
                 "notification_status": {"$in": ["pending", "failed_retryable"]},
                 "notification_next_attempt_at": {"$lte": now},
+                # A reward that has already expired — automatically or via
+                # the admin "End Mission Rewards" action, which only ever
+                # moves expires_at — must never send the "your reward is
+                # available" message after Campaign Rewards has stopped
+                # showing it.
+                "$or": [
+                    {"expires_at": None},
+                    {"expires_at": {"$exists": False}},
+                    {"expires_at": {"$gt": now}},
+                ],
             },
             sort=[("notification_next_attempt_at", 1), ("_id", 1)],
             limit=batch,

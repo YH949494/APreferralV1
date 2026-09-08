@@ -136,3 +136,114 @@ def test_reopening_mini_app_does_not_duplicate_reward(fake_db):
         client.get("/api/campaign-rewards/me")
         resp = client.get("/api/campaign-rewards/me")
     assert len(resp.get_json()["rewards"]) == 1
+
+
+# ---------------------------------------------------------------------------
+# Mission Reward Pool placement + 48h expiry follow-up (§21).
+#
+# Visibility itself (status != assigned OR now >= expires_at) is generic and
+# already covered above by test_expired_reward_hidden/test_pending_status_not_shown
+# for any category — these tests only pin down the mission-specific and
+# legacy-compatibility angles: a mission reward still visible under its 48h
+# window, one right at/after the boundary, and a legacy row with no
+# expires_at at all (mission or otherwise) rendering without crashing.
+# ---------------------------------------------------------------------------
+
+def _mission_reward(**overrides):
+    base = {
+        "reward_id": "rw_mission_1",
+        "campaign_id": "mission-c1",
+        "category": "mission_pool",
+        "telegram_user_id": 111,
+        "reward_label": "Mission Prize",
+        "voucher_code": "MISSION123",
+        "status": "assigned",
+        "assigned_at": datetime.now(timezone.utc),
+        "first_viewed_at": None,
+        "copied_at": None,
+        "winner_popup_pending": False,
+    }
+    base.update(overrides)
+    return base
+
+
+def test_mission_reward_visible_before_expiry(fake_db):
+    now = datetime.now(timezone.utc)
+    fake_db["campaign_rewards"].insert_one(
+        _mission_reward(assigned_at=now, expires_at=now + timedelta(hours=48))
+    )
+    with _mock_verified_user(111), patch("vouchers.extract_raw_init_data_from_query", return_value="raw"):
+        resp = _app().test_client().get("/api/campaign-rewards/me")
+    rewards = resp.get_json()["rewards"]
+    assert len(rewards) == 1
+    assert rewards[0]["category"] == "mission_pool"
+    assert rewards[0]["voucher_code"] == "MISSION123"
+    assert rewards[0]["expires_at"] is not None
+
+
+def test_mission_reward_hidden_at_and_after_expiry(fake_db):
+    now = datetime.now(timezone.utc)
+    # Exactly at the boundary (`now >= expires_at`) must already be hidden —
+    # the visibility check is inclusive, not "strictly past".
+    fake_db["campaign_rewards"].insert_one(_mission_reward(reward_id="at", expires_at=now))
+    fake_db["campaign_rewards"].insert_one(
+        _mission_reward(reward_id="after", telegram_user_id=111, expires_at=now - timedelta(seconds=1))
+    )
+    with _mock_verified_user(111), patch("vouchers.extract_raw_init_data_from_query", return_value="raw"):
+        resp = _app().test_client().get("/api/campaign-rewards/me")
+    assert resp.get_json()["rewards"] == []
+
+
+def test_legacy_mission_reward_without_expires_at_handled_safely(fake_db):
+    """A pre-follow-up Mission reward row has no ``expires_at`` at all — it
+    must keep rendering exactly as it always did, never crash the endpoint."""
+    fake_db["campaign_rewards"].insert_one(_mission_reward())
+    with _mock_verified_user(111), patch("vouchers.extract_raw_init_data_from_query", return_value="raw"):
+        resp = _app().test_client().get("/api/campaign-rewards/me")
+    assert resp.status_code == 200
+    rewards = resp.get_json()["rewards"]
+    assert len(rewards) == 1
+    assert rewards[0]["expires_at"] is None
+
+
+def test_naive_expires_at_from_a_real_mongo_read_does_not_crash(fake_db):
+    """database.py opens PyMongo with the default tz_aware=False, so a real
+    MongoDB read hands back a naive datetime for a field written as aware
+    UTC (FakeDb, being in-memory, does not reproduce this on its own — the
+    naive value has to be inserted directly to simulate it). The visibility
+    check must normalize before comparing rather than raising TypeError,
+    and the serialized expires_at must still carry a UTC offset so the Mini
+    App's `new Date(...)` does not parse it as local time."""
+    naive_future = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=47)
+    fake_db["campaign_rewards"].insert_one(
+        _mission_reward(assigned_at=naive_future - timedelta(hours=1), expires_at=naive_future)
+    )
+    with _mock_verified_user(111), patch("vouchers.extract_raw_init_data_from_query", return_value="raw"):
+        resp = _app().test_client().get("/api/campaign-rewards/me")
+    assert resp.status_code == 200
+    rewards = resp.get_json()["rewards"]
+    assert len(rewards) == 1
+    assert rewards[0]["expires_at"].endswith("+00:00")
+
+
+def test_naive_expires_at_in_the_past_is_still_hidden(fake_db):
+    naive_past = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=1)
+    fake_db["campaign_rewards"].insert_one(_mission_reward(expires_at=naive_past))
+    with _mock_verified_user(111), patch("vouchers.extract_raw_init_data_from_query", return_value="raw"):
+        resp = _app().test_client().get("/api/campaign-rewards/me")
+    assert resp.status_code == 200
+    assert resp.get_json()["rewards"] == []
+
+
+def test_other_categories_do_not_require_expires_at(fake_db):
+    """Non-Mission categories (welcome/affiliate/tournament/...) must keep
+    rendering safely whether or not they carry expires_at/mechanic/
+    winner_popup_pending — those keys are additive and Mission-only."""
+    fake_db["campaign_rewards"].insert_one(_reward(reward_id="rw_welcome", category="welcome"))
+    with _mock_verified_user(111), patch("vouchers.extract_raw_init_data_from_query", return_value="raw"):
+        resp = _app().test_client().get("/api/campaign-rewards/me")
+    assert resp.status_code == 200
+    rewards = resp.get_json()["rewards"]
+    assert len(rewards) == 1
+    assert rewards[0]["category"] == "welcome"
+    assert "is_winner" not in rewards[0]

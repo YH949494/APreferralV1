@@ -122,6 +122,23 @@
     return "cc-reward-" + String(reward.reward_id || "").replace(/[^A-Za-z0-9_-]/g, "");
   }
 
+  /**
+   * §8 of the placement/expiry follow-up: "Expires in XXh Ym" while under
+   * 48h. expires_at is optional on any reward (§20/§21) — a legacy row
+   * without one renders no expiry text at all rather than crashing.
+   */
+  function expiryText(reward) {
+    if (!reward || !reward.expires_at) return "";
+    var expires = new Date(reward.expires_at);
+    if (isNaN(expires.getTime())) return "";
+    var diffMs = expires.getTime() - Date.now();
+    if (diffMs <= 0) return ""; // already invisible server-side; never shown
+    var totalMinutes = Math.floor(diffMs / 60000);
+    var hours = Math.floor(totalMinutes / 60);
+    var minutes = totalMinutes % 60;
+    return "Expires in " + hours + "h " + minutes + "m";
+  }
+
   function renderRewardCard(reward, root) {
     var mission = isMissionReward(reward);
     var card = el("div", { class: "cc-reward-card", id: rewardDomId(reward) });
@@ -144,6 +161,8 @@
     });
     codeRow.appendChild(copyBtn);
     card.appendChild(codeRow);
+    var expiry = expiryText(reward);
+    if (expiry) card.appendChild(el("div", { class: "cc-reward-expiry", text: expiry }));
     root.appendChild(card);
     apiPost("/api/campaign-rewards/" + encodeURIComponent(reward.reward_id) + "/view");
   }
@@ -268,6 +287,7 @@
       ".cc-reward-meta{font-size:13px;opacity:.8;margin-bottom:8px;}",
       ".cc-reward-code{display:flex;align-items:center;justify-content:space-between;background:rgba(0,0,0,.25);border-radius:8px;padding:8px 10px;font-family:monospace;font-size:14px;}",
       ".cc-reward-tag{display:inline-block;font-size:11px;font-weight:700;letter-spacing:.02em;opacity:.9;margin-bottom:4px;}",
+      ".cc-reward-expiry{font-size:11px;opacity:.65;margin-top:6px;}",
       // Highlight is PRESENTATIONAL ONLY and self-clearing (§20): a class is
       // added on arrival and removed after the animation, so no reward card
       // is ever left permanently restyled.
@@ -282,6 +302,17 @@
     document.head.appendChild(style);
   }
 
+  /**
+   * Mission winner rewards render directly under the existing Live Drop
+   * card (#voucher-section) instead of inside the generic "Campaign
+   * Rewards" section — the placement follow-up's whole point is that a
+   * Mission reward should read as part of Live Drop, not a separate block.
+   * Every other reward category (tournament, welcome, affiliate, ...) is
+   * untouched: it keeps rendering in the Campaign Rewards section exactly
+   * as before. `#cc-mission-rewards-root` is a fixed mount point added to
+   * index.html right after Live Drop; if an older cached page lacks it,
+   * fall back to the previous behaviour rather than losing the reward.
+   */
   function mount() {
     var root = document.getElementById("campaign-centre-root");
     if (!root) return;
@@ -296,15 +327,29 @@
       var campaigns = (campaignsResp && campaignsResp.status === "ok" && campaignsResp.campaigns) || [];
       var rewards = (rewardsResp && rewardsResp.status === "ok" && rewardsResp.rewards) || [];
 
+      var missionRewards = rewards.filter(isMissionReward);
+      var otherRewards = rewards.filter(function (r) { return !isMissionReward(r); });
+      var missionRoot = document.getElementById("cc-mission-rewards-root");
+
       if (!campaigns.length && !rewards.length) return; // hide section entirely
 
       injectStyles();
 
-      if (rewards.length) {
+      if (missionRewards.length && missionRoot) {
+        // No section title by design (§5 of the follow-up spec) — the cards
+        // themselves carry the "🎯 Mission Winner" label.
+        missionRewards.forEach(function (r) { renderRewardCard(r, missionRoot); });
+      }
+
+      var rewardsSectionList = missionRoot ? otherRewards : rewards;
+      if (rewardsSectionList.length) {
         var rewardsSection = el("div", { class: "cc-section" });
         rewardsSection.appendChild(el("div", { class: "cc-section-title", text: "Campaign Rewards" }));
-        rewards.forEach(function (r) { renderRewardCard(r, rewardsSection); });
+        rewardsSectionList.forEach(function (r) { renderRewardCard(r, rewardsSection); });
         root.appendChild(rewardsSection);
+      }
+
+      if (rewards.length) {
         lastRewards = rewards;
         maybeShowWinnerPopup(rewards);
       }

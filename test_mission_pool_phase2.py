@@ -182,7 +182,8 @@ def test_winner_notification_uses_the_cta_copy_when_a_link_exists(monkeypatch):
     assert text == (
         "🎉 Congratulations!\n\n"
         "You've been selected as a winner of Phase 2 Mission!\n\n"
-        "Your reward is now available in Campaign Rewards.\n\n"
+        "Your reward is now available in Campaign Rewards.\n"
+        "Your reward is available for 48 hours.\n\n"
         "Tap below to redeem your code."
     )
 

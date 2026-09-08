@@ -843,6 +843,71 @@ test("only publish is gated — close, cancel, resume and process are not", asyn
   assert.equal(h.calls[0].path, "/api/admin/mission-pool/m1/close");
 });
 
+// ===========================================================================
+// Reward placement/expiry follow-up — "End Mission Rewards" admin action
+// ===========================================================================
+
+test("the Rewards section shows Active/Allocated and an End Mission Rewards button once rewards exist", async () => {
+  const mod = freshModule();
+  const h = makeHarness({
+    "GET /api/admin/gc-campaigns/sep": { status: "ok", campaign: campaignDoc("sep") },
+    "GET /api/admin/mission-pool/sep/edit-state": editState("sep"),
+    "GET /api/admin/mission-pool/sep/summary": {
+      status: "ok", grains: Object.assign({}, SUMMARY_OK.grains, { rewards_active_voucher_grain: 2 }),
+    },
+  });
+  mod.init(h.host);
+  mod.open("sep");
+  await h.flush(); await h.flush();
+
+  const html = h.html();
+  assert.ok(html.includes("Rewards"));
+  assert.ok(html.includes("Active"));
+  assert.ok(html.includes("Allocated"));
+  assert.ok(html.includes("End Mission Rewards"));
+});
+
+test("no Rewards section or End Mission Rewards button when nothing was ever allocated", async () => {
+  const mod = freshModule();
+  const h = makeHarness({
+    "GET /api/admin/gc-campaigns/sep": { status: "ok", campaign: campaignDoc("sep") },
+    "GET /api/admin/mission-pool/sep/edit-state": editState("sep"),
+    "GET /api/admin/mission-pool/sep/summary": {
+      status: "ok", grains: Object.assign({}, SUMMARY_OK.grains, {
+        rewards_allocated_voucher_grain: 0, rewards_active_voucher_grain: 0,
+      }),
+    },
+  });
+  mod.init(h.host);
+  mod.open("sep");
+  await h.flush(); await h.flush();
+  assert.equal(h.html().includes("End Mission Rewards"), false);
+});
+
+test("End Mission Rewards posts to the dedicated admin endpoint and reports the count affected", async () => {
+  const mod = freshModule();
+  const h = makeHarness({
+    "GET /api/admin/gc-campaigns/sep": { status: "ok", campaign: campaignDoc("sep") },
+    "GET /api/admin/mission-pool/sep/edit-state": editState("sep"),
+    "GET /api/admin/mission-pool/sep/summary": SUMMARY_OK,
+    "POST /api/admin/mission-pool/sep/end-rewards": { status: "ok", ended: true, count_affected: 2 },
+  });
+  mod.init(h.host);
+  mod.open("sep");
+  await h.flush(); await h.flush();
+
+  await mod.dispatch("end_rewards", "sep");
+  await h.flush(); await h.flush();
+
+  assert.ok(h.calls.some((c) => c.method === "POST" && c.path === "/api/admin/mission-pool/sep/end-rewards"));
+  assert.ok(h.toasts.some((t) => /Ended 2 active reward/.test(t.msg)));
+});
+
+test("End Mission Rewards is confirmed before it fires, like the other destructive actions", () => {
+  assert.match(CORE.CONFIRM_COPY.end_rewards, /hide all currently active Mission rewards/i);
+  assert.match(CORE.CONFIRM_COPY.end_rewards, /will not be returned to inventory/i);
+});
+
 test("closing twice is safe because the UI never sends a close cutoff", () => {
   // closed_at is write-once server-side and a repeat close never moves it.
   assert.equal(/closed_at\s*[:=]\s*(new Date|Date\.)/.test(MISSION_JS), false);
