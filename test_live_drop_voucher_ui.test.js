@@ -462,6 +462,45 @@ test("'more' link scrolls to the My Rewards (#ap-campaigns-section) area", () =>
   assert.equal(byId["ap-campaigns-section"]._scrolled, true);
 });
 
+test("a claimable personalised-type voucher gets the compact row too, not just pooled drops", () => {
+  const { sandbox, byId } = buildSandbox();
+  run(sandbox);
+  sandbox.renderCampaignDrops(drop({ dropId: "d1", name: "Personal Voucher", type: "personalised" }), [], null);
+
+  const row = findByClass(byId["campaign-voucher-list"], "ap-reward-compact");
+  assert.ok(row, "a claimable personalised voucher must use the compact slot");
+  assert.match(allText(row).join(" "), /Personal Voucher/);
+});
+
+test("an unsubscribed user sees the channel-gate message and the Claim button is hidden", async () => {
+  const { sandbox, byId } = buildSandbox({
+    fetchImpl: async (url, init) => {
+      if (String(url).includes("/vouchers/visible")) {
+        return { ok: true, status: 200, json: async () => ({ status: "ok", drops: [] }) };
+      }
+      // check_only channel-gate probe: simulate "not subscribed".
+      return {
+        ok: false,
+        status: 403,
+        json: async () => ({ code: "not_subscribed", message: "Subscribe to unlock" }),
+      };
+    },
+  });
+  run(sandbox);
+  sandbox.renderCampaignDrops(drop({ dropId: "d1", name: "$5 Voucher", type: "pooled" }), [], null);
+
+  // The gate check is async (fire-and-forget from renderCompactVoucherRow);
+  // let its promise chain (v2Fetch -> res.json() -> .then()) settle.
+  for (let i = 0; i < 10; i++) await Promise.resolve();
+
+  const row = findByClass(byId["campaign-voucher-list"], "ap-reward-compact");
+  const claimBtn = findByClass(row, "ap-reward-compact-claim");
+  const gateMsg = findByClass(row, "ap-reward-compact-gate-msg");
+
+  assert.equal(claimBtn.style.display, "none", "Claim must be hidden for an unsubscribed user");
+  assert.match(gateMsg.textContent, /Subscribe/);
+});
+
 // ---------------------------------------------------------------------
 // 9. Claimed / expired / sold-out vouchers never occupy the Live Drop slot
 // ---------------------------------------------------------------------
@@ -657,13 +696,23 @@ test("repeated Claim clicks in flight only submit one claim request", async () =
   const claimPromise = new Promise((resolve) => {
     resolveClaim = resolve;
   });
-  let visibleCallCount = 0;
   const claimCalls = [];
   const { sandbox, byId } = buildSandboxWithClickCapture({
-    fetchImpl: async (url) => {
+    fetchImpl: async (url, init) => {
       if (String(url).includes("/vouchers/visible")) {
-        visibleCallCount += 1;
         return { ok: true, status: 200, json: async () => ({ status: "ok", drops: [drop({ dropId: "d1" })] }) };
+      }
+      // The compact row's own channel-gate probe (check_only: true) hits
+      // this same claim endpoint on render; only a real claim submission
+      // should wait on claimPromise / count toward claimCalls.
+      let body = {};
+      try {
+        body = JSON.parse((init && init.body) || "{}");
+      } catch {
+        /* ignore */
+      }
+      if (body.check_only) {
+        return { ok: true, status: 200, json: async () => ({ status: "ok" }) };
       }
       claimCalls.push(url);
       await claimPromise;

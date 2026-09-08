@@ -677,6 +677,12 @@
       text-decoration: underline;
       cursor: pointer;
     }
+    .ap-reward-compact-gate-msg {
+      display: none;
+      margin-top: 8px;
+      font-size: 12.5px;
+      color: #f5b63f;
+    }
 
     /* Extra reward cards (stacked below hero) */
     #ap-campaigns-list .campaign-card {
@@ -5663,7 +5669,7 @@
       const isAffiliateBundle = drop.reward_type === "affiliate_bundle" || drop.type === "affiliate_bundle";
       if (isAffiliateBundle) return false;
       const dropType = String(drop.type || "").toLowerCase();
-      if (dropType !== "pooled" && dropType !== "") return false;
+      if (dropType !== "pooled" && dropType !== "personalised" && dropType !== "personalized" && dropType !== "") return false;
       const canClaim = !!(drop.isActive || drop.adminPreview);
       const claimableNow = typeof drop.claimable === "boolean" ? drop.claimable : canClaim;
       if (!claimableNow) return false;
@@ -5726,7 +5732,32 @@
       line.appendChild(btn);
 
       row.appendChild(line);
+
+      const gateMsg = document.createElement("div");
+      gateMsg.className = "ap-reward-compact-gate-msg";
+      row.appendChild(gateMsg);
+
       container.appendChild(row);
+
+      // Pooled vouchers require an active channel subscription — mirrors the
+      // same check createCampaignCard already runs (applyChannelGate) so an
+      // unsubscribed user finds out before submitting a failing claim,
+      // rather than only after.
+      const dropType = String(drop?.type || "").toLowerCase();
+      const isPoolCard = dropType === "pooled" || dropType === "";
+      if (isPoolCard && dropId) {
+        checkChannelSubscription(dropId)
+          .then((state) => {
+            if (!state.subscribed) {
+              gateMsg.textContent = CHANNEL_SUBSCRIBE_PROMPT;
+              gateMsg.style.display = "block";
+              btn.style.display = "none";
+            }
+          })
+          .catch((err) => {
+            console.warn("Channel gate check failed", err);
+          });
+      }
 
       if (moreCount > 0) {
         const link = document.createElement("button");
@@ -6521,16 +6552,47 @@
 
         if (ok && claimBtn.dataset.liveDropCompact === "1") {
           // Compact Live Drop reward row: don't rewrite this button in place
-          // (that's the old nested-card behaviour) — re-fetch the
-          // authoritative voucher list instead, so the next active voucher
-          // (if any) takes over the slot, or the original no-voucher hero
-          // layout returns when none remain.
+          // (that's the old nested-card behaviour) — but the claim response
+          // (code, welcome guide, platform finder CTA) must still be shown
+          // *before* re-fetching the voucher list, since that refresh can
+          // itself fail after the voucher has already been consumed
+          // server-side, leaving nothing but a bare toast otherwise.
           clearClaimError();
+          const codeText = out?.voucher?.code
+            ? String(out.voucher.code)
+            : (out?.voucher_code ? String(out.voucher_code) : "(no code)");
+          const claimedAt = out?.voucher?.claimedAt ? fmtKL(out.voucher.claimedAt) : "-";
+
+          let copySuccess = false;
+          if (codeText && codeText !== "(no code)" && navigator?.clipboard?.writeText) {
+            try {
+              await navigator.clipboard.writeText(codeText);
+              copySuccess = true;
+            } catch (errCopy) {
+              console.warn("Auto-copy failed", errCopy);
+            }
+          }
+
           window.__didClaimDrop = true;
           updateJourneyUI();
-          showToast(t("reward_claimed_toast"));
           shouldRestoreBtn = false;
+          showToast(t("reward_claimed_toast"));
+
+          const copyMsg = copySuccess
+            ? "\n\n✅ Code copied to clipboard."
+            : "\n\n📋 Find this code again anytime in My Rewards.";
+          tgAlert(`🎟️ Your code: ${codeText}\nClaimed at: ${claimedAt}${copyMsg}`);
+          if (out?.claim_guide?.type === "welcome_voucher") {
+            showWelcomeVoucherGuidePopup(out.claim_guide, { code: codeText, claimedAt });
+          }
+          if (out?.platform_finder) {
+            showPlatformFinderCta(claimBtn, out.platform_finder, { dropId, voucherCode: codeText });
+          }
+
           await loadWelcomeProgress();
+          // The compact row (and any platform-finder CTA just anchored to
+          // it) is about to be replaced by the refreshed voucher list —
+          // that's expected once the response above has already been shown.
           await loadVouchers();
           return;
         }
