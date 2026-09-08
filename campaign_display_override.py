@@ -24,6 +24,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from html import escape as html_escape
 import logging
+import os
 from typing import Any
 
 from time_utils import as_aware_utc
@@ -48,6 +49,25 @@ MAX_DISPLAY_QUALIFIED_COUNT = 100_000
 # display_name (up to Mongo's document-size limit) and every campaign
 # activity read would serialize and render it.
 MAX_DISPLAY_NAME_LENGTH = 40
+
+
+def get_active_campaign_id() -> str | None:
+    """Single resolution point for "which campaign is currently live",
+    read at call time (never cached) so every public surface that doesn't
+    already have an explicit campaign_id -- the Affiliate page, Money
+    Room, an announcement preview -- resolves the exact same campaign
+    without each surface guessing or hardcoding it independently.
+
+    Configured via the CAMPAIGN_DISPLAY_ACTIVE_CAMPAIGN_ID env var (a
+    Fly.io secret or [env] value); unset means no campaign is surfaced
+    automatically anywhere (existing behavior, strictly opt-in). Changing
+    it takes effect on the process's next read of the environment (i.e.
+    the next deploy/restart that picks up the new secret) -- editing
+    participant rows in Mongo never requires that, only switching which
+    campaign_id is "the active one" does.
+    """
+    value = (os.getenv("CAMPAIGN_DISPLAY_ACTIVE_CAMPAIGN_ID") or "").strip()
+    return value or None
 
 
 def ensure_campaign_display_override_indexes(db_ref) -> None:
@@ -164,21 +184,32 @@ def load_active_campaign_override(db_ref, campaign_id: str, *, reference_utc: da
     any lookup failure or malformed document, always with a structured log
     line, so a broken/expired override can never break or leak into the
     genuine leaderboard or another campaign.
+
+    The returned dict also carries the campaign's own `starts_at`/`ends_at`
+    (UTC-aware) whenever the document exists with a parseable schedule --
+    even when the campaign is currently disabled, not-yet-started, or
+    expired -- so a caller can window the *genuine* leaderboard to this
+    campaign's own dates instead of an unrelated calendar month. Both are
+    None when no schedule is known (no document, lookup failure, or a
+    malformed/mismatched document), in which case the caller should fall
+    back to its own default window.
     """
     now_utc_ts = reference_utc or datetime.now(timezone.utc)
     if now_utc_ts.tzinfo is None:
         now_utc_ts = now_utc_ts.replace(tzinfo=timezone.utc)
     now_utc_ts = now_utc_ts.astimezone(timezone.utc)
 
+    no_window = {"active": False, "participants": [], "starts_at": None, "ends_at": None}
+
     try:
         doc = db_ref[CAMPAIGN_DISPLAY_OVERRIDE_COLLECTION].find_one({"_id": campaign_id})
     except Exception:
         logger.warning("[CAMPAIGN_DISPLAY] campaign=%s override_lookup_failed", campaign_id, exc_info=True)
-        return {"active": False, "participants": []}
+        return dict(no_window)
 
     if not doc:
         logger.debug("[CAMPAIGN_DISPLAY] campaign=%s override_not_found", campaign_id)
-        return {"active": False, "participants": []}
+        return dict(no_window)
 
     try:
         if doc.get("campaign_id") != campaign_id:
@@ -186,17 +217,17 @@ def load_active_campaign_override(db_ref, campaign_id: str, *, reference_utc: da
                 "[CAMPAIGN_DISPLAY] campaign=%s override_malformed reason=campaign_id_mismatch",
                 campaign_id,
             )
-            return {"active": False, "participants": []}
-
-        if doc.get("enabled") is not True:
-            logger.debug("[CAMPAIGN_DISPLAY] campaign=%s override_disabled", campaign_id)
-            return {"active": False, "participants": []}
+            return dict(no_window)
 
         starts_at = _coerce_aware_utc(doc.get("starts_at"))
         ends_at = _coerce_aware_utc(doc.get("ends_at"))
         if starts_at is None or ends_at is None:
             logger.warning("[CAMPAIGN_DISPLAY] campaign=%s override_malformed reason=bad_schedule", campaign_id)
-            return {"active": False, "participants": []}
+            return dict(no_window)
+
+        if doc.get("enabled") is not True:
+            logger.debug("[CAMPAIGN_DISPLAY] campaign=%s override_disabled", campaign_id)
+            return {"active": False, "participants": [], "starts_at": starts_at, "ends_at": ends_at}
 
         if not (starts_at <= now_utc_ts < ends_at):
             logger.debug(
@@ -206,7 +237,7 @@ def load_active_campaign_override(db_ref, campaign_id: str, *, reference_utc: da
                 ends_at.isoformat(),
                 now_utc_ts.isoformat(),
             )
-            return {"active": False, "participants": []}
+            return {"active": False, "participants": [], "starts_at": starts_at, "ends_at": ends_at}
 
         raw_participants = doc.get("participants")
         if not isinstance(raw_participants, list):
@@ -214,7 +245,10 @@ def load_active_campaign_override(db_ref, campaign_id: str, *, reference_utc: da
                 "[CAMPAIGN_DISPLAY] campaign=%s override_malformed reason=participants_not_a_list",
                 campaign_id,
             )
-            return {"active": False, "participants": []}
+            # The schedule itself is still well-formed -- keep the window so
+            # the genuine leaderboard is correctly scoped even though the
+            # manual side of this document is unusable.
+            return {"active": False, "participants": [], "starts_at": starts_at, "ends_at": ends_at}
 
         bounded = raw_participants[:MAX_OVERRIDE_PARTICIPANTS]
         if len(raw_participants) > MAX_OVERRIDE_PARTICIPANTS:
@@ -241,10 +275,10 @@ def load_active_campaign_override(db_ref, campaign_id: str, *, reference_utc: da
             len(validated),
             len(visible_rows),
         )
-        return {"active": True, "participants": visible_rows}
+        return {"active": True, "participants": visible_rows, "starts_at": starts_at, "ends_at": ends_at}
     except Exception:
         logger.warning("[CAMPAIGN_DISPLAY] campaign=%s override_malformed reason=unexpected_error", campaign_id, exc_info=True)
-        return {"active": False, "participants": []}
+        return dict(no_window)
 
 
 def _genuine_display_names(db_ref, referrer_ids: list[int]) -> dict[int, str]:
@@ -285,11 +319,23 @@ def _genuine_display_names(db_ref, referrer_ids: list[int]) -> dict[int, str]:
 def build_public_campaign_activity(db, campaign_id: str, reference_utc: datetime | None = None) -> dict[str, Any]:
     """Single shared builder for the public campaign leaderboard/activity.
 
-    Combines the genuine (canonical, current-month) qualified-referral
-    leaderboard with any active manual display override for
-    `campaign_id`, and returns one result every public surface (Affiliate
-    page, public referral leaderboard, and any future consumer) must
+    Combines the genuine qualified-referral leaderboard with any active
+    manual display override for `campaign_id`, and returns one result
+    every public surface (Affiliate page, public referral leaderboard,
+    Money Room, an announcement preview, and any future consumer) must
     render from -- so they can never disagree.
+
+    The genuine side is windowed to the campaign's own `starts_at`
+    (inclusive) / `ends_at` (exclusive) whenever that schedule is known
+    (via the same canonical per-window aggregation
+    affiliate_leaderboard._compute_affiliate_monthly_rows already uses to
+    build the real monthly leaderboard -- just parameterized by a
+    different window, never a different definition of "qualified"), so a
+    campaign that starts mid-month never pulls in qualified referrals from
+    before it started. When no schedule is known at all (no override
+    document, or one that's malformed/unreachable), this falls back to the
+    current KL calendar month -- the same default the Affiliate page
+    already showed before any campaign existed.
 
     Never raises: any failure in either the genuine leaderboard or the
     override falls back to an empty contribution from that side rather
@@ -300,12 +346,30 @@ def build_public_campaign_activity(db, campaign_id: str, reference_utc: datetime
         now_utc_ts = now_utc_ts.replace(tzinfo=timezone.utc)
     now_utc_ts = now_utc_ts.astimezone(timezone.utc)
 
+    override_result = {"active": False, "participants": [], "starts_at": None, "ends_at": None}
+    try:
+        override_result = load_active_campaign_override(db, campaign_id, reference_utc=now_utc_ts)
+    except Exception:
+        logger.exception("[CAMPAIGN_DISPLAY] campaign=%s override_load_unexpected_error", campaign_id)
+        override_result = {"active": False, "participants": [], "starts_at": None, "ends_at": None}
+
+    override_active = bool(override_result.get("active"))
+    manual_participants = override_result.get("participants") or []
+    window_starts_at = override_result.get("starts_at")
+    window_ends_at = override_result.get("ends_at")
+    window_known = window_starts_at is not None and window_ends_at is not None
+
     genuine_rows: list[dict[str, Any]] = []
     try:
-        from affiliate_leaderboard import compute_affiliate_monthly_kpis_live
+        if window_known:
+            from affiliate_leaderboard import _compute_affiliate_monthly_rows
 
-        snapshot = compute_affiliate_monthly_kpis_live(db, reference_utc=now_utc_ts)
-        genuine_rows = list(snapshot.get("affiliate_leaderboard_month") or [])
+            genuine_rows = _compute_affiliate_monthly_rows(db, window_starts_at, window_ends_at)
+        else:
+            from affiliate_leaderboard import compute_affiliate_monthly_kpis_live
+
+            snapshot = compute_affiliate_monthly_kpis_live(db, reference_utc=now_utc_ts)
+            genuine_rows = list(snapshot.get("affiliate_leaderboard_month") or [])
     except Exception:
         logger.exception("[CAMPAIGN_DISPLAY] campaign=%s genuine_leaderboard_failed", campaign_id)
         genuine_rows = []
@@ -317,16 +381,6 @@ def build_public_campaign_activity(db, campaign_id: str, reference_utc: datetime
         except (TypeError, ValueError):
             continue
     display_names = _genuine_display_names(db, referrer_ids)
-
-    override_result = {"active": False, "participants": []}
-    try:
-        override_result = load_active_campaign_override(db, campaign_id, reference_utc=now_utc_ts)
-    except Exception:
-        logger.exception("[CAMPAIGN_DISPLAY] campaign=%s override_load_unexpected_error", campaign_id)
-        override_result = {"active": False, "participants": []}
-
-    override_active = bool(override_result.get("active"))
-    manual_participants = override_result.get("participants") or []
 
     combined: list[dict[str, Any]] = []
     for row in genuine_rows:
@@ -382,13 +436,15 @@ def build_public_campaign_activity(db, campaign_id: str, reference_utc: datetime
         "genuine_rows": len(genuine_rows),
         "manual_rows": len(manual_participants),
         "override_active": override_active,
+        "genuine_window": "campaign" if window_known else "calendar_month",
     }
     logger.debug(
-        "[CAMPAIGN_DISPLAY] campaign=%s active=%s genuine_rows=%s manual_rows=%s",
+        "[CAMPAIGN_DISPLAY] campaign=%s active=%s genuine_rows=%s manual_rows=%s window=%s",
         campaign_id,
         str(override_active).lower(),
         diagnostics["genuine_rows"],
         diagnostics["manual_rows"],
+        diagnostics["genuine_window"],
     )
 
     return {

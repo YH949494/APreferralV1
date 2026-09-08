@@ -202,6 +202,67 @@ def test_qualified_total_is_derived_from_visible_rows_only():
 
 
 # ---------------------------------------------------------------------------
+# Genuine rows are windowed to the campaign's own dates, not calendar month
+# ---------------------------------------------------------------------------
+
+def test_genuine_rows_are_scoped_to_campaign_window_not_calendar_month():
+    db = _fresh_db()
+    campaign_start = datetime(2026, 9, 12, tzinfo=timezone.utc)
+    campaign_end = datetime(2026, 9, 18, tzinfo=timezone.utc)
+    _insert_override(db, starts_at=campaign_start, ends_at=campaign_end, participants=[])
+
+    db.users.insert_one({"user_id": 501, "username": None, "first_name": "genuineuser"})
+    # Same KL calendar month as the campaign, but before it starts -- the old
+    # calendar-month-only calculation would have wrongly counted this one.
+    db.qualified_events.insert_one(
+        {"invitee_id": 5010, "referrer_id": 501, "qualified_at": datetime(2026, 9, 5, tzinfo=timezone.utc)}
+    )
+    # Inside the campaign window.
+    db.qualified_events.insert_one(
+        {"invitee_id": 5011, "referrer_id": 501, "qualified_at": datetime(2026, 9, 15, tzinfo=timezone.utc)}
+    )
+
+    reference = datetime(2026, 9, 15, tzinfo=timezone.utc)
+    activity = build_public_campaign_activity(db, CAMPAIGN_ID, reference_utc=reference)
+    assert activity["diagnostics"]["genuine_window"] == "campaign"
+    row = next(r for r in activity["leaderboard"] if r["display_name"] == "genuineuser")
+    assert row["qualified_count"] == 1
+
+
+def test_genuine_rows_use_campaign_window_even_when_override_disabled():
+    db = _fresh_db()
+    campaign_start = datetime(2026, 9, 12, tzinfo=timezone.utc)
+    campaign_end = datetime(2026, 9, 18, tzinfo=timezone.utc)
+    _insert_override(db, starts_at=campaign_start, ends_at=campaign_end, enabled=False, participants=[])
+
+    db.users.insert_one({"user_id": 501, "username": None, "first_name": "genuineuser"})
+    db.qualified_events.insert_one(
+        {"invitee_id": 5010, "referrer_id": 501, "qualified_at": datetime(2026, 9, 5, tzinfo=timezone.utc)}
+    )
+    db.qualified_events.insert_one(
+        {"invitee_id": 5011, "referrer_id": 501, "qualified_at": datetime(2026, 9, 15, tzinfo=timezone.utc)}
+    )
+
+    reference = datetime(2026, 9, 15, tzinfo=timezone.utc)
+    activity = build_public_campaign_activity(db, CAMPAIGN_ID, reference_utc=reference)
+    assert activity["state"] == "genuine_only"
+    assert activity["diagnostics"]["genuine_window"] == "campaign"
+    row = next(r for r in activity["leaderboard"] if r["display_name"] == "genuineuser")
+    assert row["qualified_count"] == 1
+
+
+def test_genuine_rows_fall_back_to_calendar_month_when_no_override_document():
+    db = _fresh_db()
+    db.users.insert_one({"user_id": 501, "username": None, "first_name": "genuineuser"})
+    db.qualified_events.insert_one({"invitee_id": 5010, "referrer_id": 501, "qualified_at": NOW})
+    activity = build_public_campaign_activity(db, "nonexistent_campaign", reference_utc=NOW)
+    assert activity["diagnostics"]["genuine_window"] == "calendar_month"
+    assert activity["state"] == "genuine_only"
+    row = next(r for r in activity["leaderboard"] if r["display_name"] == "genuineuser")
+    assert row["qualified_count"] == 1
+
+
+# ---------------------------------------------------------------------------
 # 10-11: combined sort + rank
 # ---------------------------------------------------------------------------
 
