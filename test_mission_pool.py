@@ -689,6 +689,50 @@ def test_end_rewards_leaves_an_already_sent_notification_alone(fake_db):
     assert doc["notification_status"] == "sent"
 
 
+# ---------------------------------------------------------------------------
+# active_reward_counts (Campaign Centre table "End Rewards" visibility, no N+1)
+# ---------------------------------------------------------------------------
+
+def test_active_reward_counts_counts_only_assigned_unexpired_mission_rows(fake_db):
+    _seed(fake_db)
+    fake_db["campaign_rewards"].insert_one(_mission_reward_row())
+    fake_db["campaign_rewards"].insert_one(_mission_reward_row(reward_id="rw_end_2"))
+    counts = mp.active_reward_counts([CAMPAIGN_ID])
+    assert counts == {CAMPAIGN_ID: 2}
+
+
+def test_active_reward_counts_excludes_expired_and_non_assigned_and_other_categories(fake_db):
+    _seed(fake_db)
+    past = datetime.now(timezone.utc) - timedelta(hours=1)
+    fake_db["campaign_rewards"].insert_one(_mission_reward_row(reward_id="rw_expired", expires_at=past))
+    fake_db["campaign_rewards"].insert_one(_mission_reward_row(reward_id="rw_allocating", status="allocating"))
+    fake_db["campaign_rewards"].insert_one(_mission_reward_row(reward_id="rw_tournament", category="tournament"))
+    assert mp.active_reward_counts([CAMPAIGN_ID]) == {}
+
+
+def test_active_reward_counts_is_one_query_across_many_campaigns(fake_db, monkeypatch):
+    other_id = "mission-pilot-2"
+    _seed(fake_db)
+    fake_db["gc_campaigns"].insert_one({**_campaign(), "campaign_id": other_id})
+    fake_db["campaign_rewards"].insert_one(_mission_reward_row())
+    fake_db["campaign_rewards"].insert_one(_mission_reward_row(reward_id="rw_other", campaign_id=other_id))
+
+    calls = []
+    real_aggregate = fake_db["campaign_rewards"].aggregate
+    monkeypatch.setattr(fake_db["campaign_rewards"], "aggregate",
+                         lambda pipeline: (calls.append(pipeline) or real_aggregate(pipeline)))
+
+    counts = mp.active_reward_counts([CAMPAIGN_ID, other_id])
+    assert counts == {CAMPAIGN_ID: 1, other_id: 1}
+    assert len(calls) == 1
+
+
+def test_active_reward_counts_empty_input_short_circuits_without_a_query(fake_db, monkeypatch):
+    monkeypatch.setattr(fake_db["campaign_rewards"], "aggregate",
+                         lambda pipeline: (_ for _ in ()).throw(AssertionError("should not query")))
+    assert mp.active_reward_counts([]) == {}
+
+
 def test_reward_idempotency_key_is_stable_and_leaks_no_identity():
     key = mp.reward_idempotency_key("camp", "entry123")
     assert key == "MISSION:camp:entry123"

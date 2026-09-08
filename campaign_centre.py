@@ -400,11 +400,22 @@ def list_campaigns():
 
     docs = list(database.db["gc_campaigns"].find(query, sort=[("priority", -1), ("created_at", -1)], limit=200))
     now = datetime.now(timezone.utc)
+
+    # One aggregate query for every Mission Pool row on the page, not one per
+    # row, so the Campaign Centre table can decide whether to show "End
+    # Rewards" without an N+1 fan-out.
+    import mission_pool
+
+    mission_ids = [d["campaign_id"] for d in docs if mission_pool.is_mission_pool(d)]
+    active_reward_counts = mission_pool.active_reward_counts(mission_ids) if mission_ids else {}
+
     out = []
     for d in docs:
         item = _serialize(d)
         provider = get_provider((d.get("destination") or {}).get("provider_id") or "")
         item["effective_visibility"] = visibility_explanation(d, provider, now)
+        if mission_pool.is_mission_pool(d):
+            item["mission_active_rewards"] = active_reward_counts.get(d["campaign_id"], 0)
         out.append(item)
     return jsonify({"status": "ok", "campaigns": out})
 
