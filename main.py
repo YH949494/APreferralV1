@@ -93,6 +93,7 @@ from campaign_display_override import (
     public_campaign_activity_view,
     render_campaign_activity_announcement_text,
     get_active_campaign_id,
+    campaign_display_admin_bp,
 )
 from affiliate_rewards import (
     ensure_affiliate_indexes,
@@ -2702,6 +2703,8 @@ app.register_blueprint(mission_pool_ux_admin_bp)
 from event_banner import event_banner_admin_bp, event_banner_public_bp
 app.register_blueprint(event_banner_admin_bp)
 app.register_blueprint(event_banner_public_bp)
+
+app.register_blueprint(campaign_display_admin_bp)
 
 from lucky_games import lucky_games_admin_bp, lucky_games_public_bp
 app.register_blueprint(lucky_games_admin_bp)
@@ -6785,7 +6788,7 @@ def get_affiliate_leaderboard_week():
     # response.
     campaign_activity_public = None
     requested_campaign_id = (request.args.get("campaign_id") or "").strip()
-    effective_campaign_id = requested_campaign_id or get_active_campaign_id()
+    effective_campaign_id = requested_campaign_id or get_active_campaign_id(db)
     if effective_campaign_id:
         try:
             campaign_activity_public = public_campaign_activity_view(
@@ -6823,7 +6826,7 @@ def get_active_public_campaign_activity():
     guess or hardcode which campaign is live. Returns a "no_active_campaign"
     empty state (never an error) when nothing is configured.
     """
-    campaign_id = get_active_campaign_id()
+    campaign_id = get_active_campaign_id(db)
     if not campaign_id:
         return jsonify(
             {
@@ -6883,7 +6886,7 @@ def get_admin_campaign_announcement_preview():
         msg, code = err
         return jsonify({"success": False, "message": msg}), code
 
-    campaign_id = (request.args.get("campaign_id") or "").strip() or get_active_campaign_id()
+    campaign_id = (request.args.get("campaign_id") or "").strip() or get_active_campaign_id(db)
     if not campaign_id:
         return jsonify({"ok": False, "error": "no_active_campaign"}), 400
     try:

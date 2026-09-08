@@ -1726,6 +1726,58 @@
         <div id="mp-root"></div>
       </section>
 
+      <!-- CAMPAIGN DISPLAY CONTROL (manual referral leaderboard override, campaign_display_override.py) -->
+      <section id="view-campaignDisplay" class="hidden">
+        <div class="section" style="margin-bottom:16px;">
+          <div class="section-title">Campaign Display Control</div>
+          <div class="sub" style="margin-bottom:8px;">
+            Controls which campaign's manual leaderboard entries (if any) are layered onto the genuine Affiliate leaderboard, Money Room, and the announcement preview. Takes effect on the next request — no deploy or restart.
+          </div>
+          <div id="cd-summary"></div>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:10px;">
+            <select class="filter-input" id="cd-campaign-select" style="margin:0;min-width:220px;"></select>
+            <button class="btn primary" id="cd-activate-btn">Activate selected</button>
+            <button class="btn" id="cd-disable-btn">Disable display</button>
+            <button class="btn" id="cd-refresh-btn">Refresh preview</button>
+            <button class="btn" id="cd-announcement-btn">View announcement preview</button>
+          </div>
+        </div>
+
+        <div class="section" style="margin-bottom:16px;">
+          <div class="section-title">Create Campaign</div>
+          <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:8px;">
+            <input class="filter-input" id="cd-new-id" placeholder="campaign_id (e.g. referral_sep_2026)" style="margin:0;" />
+            <input class="filter-input" id="cd-new-starts" type="datetime-local" style="margin:0;" />
+            <input class="filter-input" id="cd-new-ends" type="datetime-local" style="margin:0;" />
+            <label class="sub" style="display:flex;align-items:center;gap:6px;">
+              <input type="checkbox" id="cd-new-enabled" checked /> Enabled
+            </label>
+          </div>
+          <div class="sub" style="margin-top:4px;">Start/End are entered in Kuala Lumpur time (GMT+8) and stored as UTC. campaign_id is lowercase letters/digits/"_"/"-" only, and is immutable once created.</div>
+          <button class="btn primary" id="cd-create-btn" style="margin-top:10px;">Create campaign</button>
+        </div>
+
+        <div class="section" style="margin-bottom:16px;">
+          <div class="section-title">Campaigns</div>
+          <div id="cd-campaigns-body"></div>
+        </div>
+
+        <div class="section" style="margin-bottom:16px;">
+          <div class="section-title">Participants — <span id="cd-participants-campaign-label">select a campaign above</span></div>
+          <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:8px;">
+            <input class="filter-input" id="cd-p-name" placeholder="Display name (e.g. A***n)" style="margin:0;" />
+            <input class="filter-input" id="cd-p-count" type="number" min="0" step="1" placeholder="Qualified count" style="margin:0;" />
+          </div>
+          <button class="btn primary" id="cd-p-add-btn" style="margin-top:10px;">Add participant</button>
+          <div id="cd-participants-body" style="margin-top:10px;"></div>
+        </div>
+
+        <div class="section">
+          <div class="section-title">Leaderboard Preview</div>
+          <div id="cd-preview-body"></div>
+        </div>
+      </section>
+
       <!-- EVENT BANNER VIEW (image-only Mini App top banner, event_banner.py) -->
       <section id="view-eventBanners" class="hidden">
         <div class="section" style="margin-bottom:16px;">
