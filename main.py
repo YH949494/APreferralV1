@@ -87,6 +87,14 @@ from affiliate_voucher_batches import (
     ensure_affiliate_voucher_batch_indexes,
     register_routes as register_affiliate_voucher_batch_routes,
 )
+from campaign_display_override import (
+    ensure_campaign_display_override_indexes,
+    build_public_campaign_activity,
+    public_campaign_activity_view,
+    render_campaign_activity_announcement_text,
+    get_active_campaign_id,
+    campaign_display_admin_bp,
+)
 from affiliate_rewards import (
     ensure_affiliate_indexes,
     record_user_last_seen,
@@ -124,6 +132,12 @@ AFFILIATE_CURRENT_MONTH_BATCH_LIMIT = int(os.getenv("AFFILIATE_CURRENT_MONTH_BAT
 AFFILIATE_PREVIOUS_WEEK_BATCH_LIMIT = int(os.getenv("AFFILIATE_PREVIOUS_WEEK_BATCH_LIMIT", "500"))
 AFFILIATE_CURRENT_WEEK_BATCH_LIMIT = int(os.getenv("AFFILIATE_CURRENT_WEEK_BATCH_LIMIT", "500"))
 QUERY_TELEMETRY_LOGS = os.getenv("QUERY_TELEMETRY_LOGS", "0") == "1"
+# Which campaign_display_overrides document (if any) is "the" active
+# campaign is resolved by campaign_display_override.get_active_campaign_id()
+# (CAMPAIGN_DISPLAY_ACTIVE_CAMPAIGN_ID env var / Fly.io secret) -- called at
+# request time everywhere below rather than cached in a module constant, so
+# every surface (this endpoint, /api/campaign/active/activity, the
+# announcement preview) resolves the exact same campaign_id from one place.
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -2277,6 +2291,10 @@ def ensure_indexes():
     )
     ensure_affiliate_leaderboard_indexes(db)
     ensure_affiliate_snapshot_indexes(db)
+    try:
+        ensure_campaign_display_override_indexes(db)
+    except Exception:
+        logger.warning("[CAMPAIGN_DISPLAY] index_ensure_failed", exc_info=True)
 
     # --- optional welcome eligibility ---
     db.welcome_eligibility.create_index([("uid", 1)], unique=True)
@@ -2685,6 +2703,8 @@ app.register_blueprint(mission_pool_ux_admin_bp)
 from event_banner import event_banner_admin_bp, event_banner_public_bp
 app.register_blueprint(event_banner_admin_bp)
 app.register_blueprint(event_banner_public_bp)
+
+app.register_blueprint(campaign_display_admin_bp)
 
 from lucky_games import lucky_games_admin_bp, lucky_games_public_bp
 app.register_blueprint(lucky_games_admin_bp)
@@ -6761,6 +6781,26 @@ def get_affiliate_leaderboard_week():
     month_start_utc = snapshot.get("month_start_utc")
     month_end_utc = snapshot.get("month_end_utc")
 
+    # Optional campaign-scoped manual display override (see
+    # campaign_display_override.py). Purely additive: absent unless a
+    # campaign_id is requested or CAMPAIGN_DISPLAY_ACTIVE_CAMPAIGN_ID is
+    # configured, and a failure here never breaks this genuine-leaderboard
+    # response.
+    campaign_activity_public = None
+    requested_campaign_id = (request.args.get("campaign_id") or "").strip()
+    effective_campaign_id = requested_campaign_id or get_active_campaign_id(db)
+    if effective_campaign_id:
+        try:
+            campaign_activity_public = public_campaign_activity_view(
+                build_public_campaign_activity(db, effective_campaign_id)
+            )
+        except Exception:
+            logger.exception(
+                "[CAMPAIGN_DISPLAY] campaign=%s activity_build_failed_in_affiliate_endpoint",
+                effective_campaign_id,
+            )
+            campaign_activity_public = None
+
     return jsonify(
         {
             "generated_at": (snapshot.get("generated_at") or datetime.now(timezone.utc)).isoformat(),
@@ -6772,6 +6812,94 @@ def get_affiliate_leaderboard_week():
             "leaderboard": leaderboard,
             "my_stats": my_stats,
             "is_admin": is_admin,
+            "campaign_activity": campaign_activity_public,
+        }
+    ), 200
+
+
+@app.route("/api/campaign/active/activity", methods=["GET"])
+def get_active_public_campaign_activity():
+    """Read-only public campaign activity for whichever campaign
+    CAMPAIGN_DISPLAY_ACTIVE_CAMPAIGN_ID currently names -- the one place
+    any surface that doesn't already know a specific campaign_id (Money
+    Room, an announcement preview tool) should call, so it never has to
+    guess or hardcode which campaign is live. Returns a "no_active_campaign"
+    empty state (never an error) when nothing is configured.
+    """
+    campaign_id = get_active_campaign_id(db)
+    if not campaign_id:
+        return jsonify(
+            {
+                "ok": True,
+                "campaign_id": None,
+                "state": "no_active_campaign",
+                "participant_count": 0,
+                "qualified_total": 0,
+                "leaderboard": [],
+            }
+        ), 200
+    try:
+        activity = build_public_campaign_activity(db, campaign_id)
+    except Exception:
+        logger.exception("[CAMPAIGN_DISPLAY] campaign=%s active_activity_endpoint_failed", campaign_id)
+        return jsonify({"ok": False, "error": "campaign_activity_unavailable"}), 500
+    return jsonify({"ok": True, **public_campaign_activity_view(activity)}), 200
+
+
+@app.route("/api/campaign/<campaign_id>/activity", methods=["GET"])
+def get_public_campaign_activity(campaign_id: str):
+    """Read-only public campaign activity: genuine qualified-referral rows
+    combined with any active manual display override for `campaign_id`,
+    via the single shared builder (campaign_display_override.py). Any
+    current or future public surface (Affiliate page, public referral
+    leaderboard, Money Room, an announcement preview) should read this
+    endpoint -- or call build_public_campaign_activity() directly server-side
+    -- instead of computing its own total, so they can never disagree.
+    """
+    campaign_id = (campaign_id or "").strip()
+    if not campaign_id:
+        return jsonify({"ok": False, "error": "missing_campaign_id"}), 400
+    try:
+        activity = build_public_campaign_activity(db, campaign_id)
+    except Exception:
+        logger.exception("[CAMPAIGN_DISPLAY] campaign=%s activity_endpoint_failed", campaign_id)
+        return jsonify({"ok": False, "error": "campaign_activity_unavailable"}), 500
+    return jsonify({"ok": True, **public_campaign_activity_view(activity)}), 200
+
+
+@app.route("/api/admin/campaign/announcement-preview", methods=["GET"])
+def get_admin_campaign_announcement_preview():
+    """Admin-only preview of a campaign announcement, rendered from the
+    exact same build_public_campaign_activity() result that powers the
+    Affiliate page / public leaderboard / Money Room -- so a preview can
+    never show a stale, independently-calculated total. Defaults to
+    CAMPAIGN_DISPLAY_ACTIVE_CAMPAIGN_ID; pass ?campaign_id= to preview a
+    specific (e.g. not-yet-active or already-expired) campaign instead.
+
+    Read-only: this never posts to Telegram. This repository has no
+    existing campaign-scoped announcement sender to wire a "send" action
+    into (see campaign_display_override.render_campaign_activity_announcement_text
+    docstring) -- delivery remains a manual/future step.
+    """
+    ok, err = require_admin_from_query()
+    if not ok:
+        msg, code = err
+        return jsonify({"success": False, "message": msg}), code
+
+    campaign_id = (request.args.get("campaign_id") or "").strip() or get_active_campaign_id(db)
+    if not campaign_id:
+        return jsonify({"ok": False, "error": "no_active_campaign"}), 400
+    try:
+        activity = build_public_campaign_activity(db, campaign_id)
+        preview_text = render_campaign_activity_announcement_text(activity)
+    except Exception:
+        logger.exception("[CAMPAIGN_DISPLAY] campaign=%s announcement_preview_failed", campaign_id)
+        return jsonify({"ok": False, "error": "announcement_preview_unavailable"}), 500
+    return jsonify(
+        {
+            "ok": True,
+            **public_campaign_activity_view(activity),
+            "preview_text": preview_text,
         }
     ), 200
 

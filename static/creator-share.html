@@ -226,6 +226,27 @@
     color: var(--text);
     line-height: 1.4;
   }
+  .campaign-activity-card {
+    padding: 10px 12px;
+  }
+  .campaign-activity-title {
+    margin: 0 0 6px;
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--ap-orange);
+  }
+  .campaign-activity-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    font-size: 13px;
+    color: var(--text);
+    padding: 3px 0;
+  }
+  .campaign-activity-rank {
+    color: var(--muted);
+    margin-right: 6px;
+  }
 </style>
 </head>
 <body>
@@ -258,6 +279,11 @@
       <div id="recent-win-card" class="card recent-win-card hidden">
         <p class="recent-win-title">🔥 Recent Win</p>
         <p id="recent-win-text" class="recent-win-text"></p>
+      </div>
+
+      <div id="campaign-activity-card" class="card campaign-activity-card hidden">
+        <p class="campaign-activity-title">🏆 Campaign Leaderboard</p>
+        <div id="campaign-activity-list"></div>
       </div>
 
       <div class="card">
@@ -406,6 +432,8 @@
     statTierMessage: document.getElementById("stat-tier-message"),
     recentWinCard: document.getElementById("recent-win-card"),
     recentWinText: document.getElementById("recent-win-text"),
+    campaignActivityCard: document.getElementById("campaign-activity-card"),
+    campaignActivityList: document.getElementById("campaign-activity-list"),
   };
 
   var ACCESS_DENIED_MESSAGES = {
@@ -739,6 +767,57 @@
     setInterval(loadRecentWin, RECENT_WIN_REFRESH_MS);
   }
 
+  var CAMPAIGN_ACTIVITY_TOP_N = 5;
+
+  function hideCampaignActivity() {
+    els.campaignActivityCard.classList.add("hidden");
+  }
+
+  function renderCampaignActivityRows(rows) {
+    // DOM construction + textContent only (never innerHTML with
+    // interpolated data) -- this page's existing safe-rendering
+    // convention (see setRow()/recent-win-text above), reused here rather
+    // than introducing a new escaping scheme for this one component.
+    els.campaignActivityList.innerHTML = "";
+    rows.slice(0, CAMPAIGN_ACTIVITY_TOP_N).forEach(function (row) {
+      var line = document.createElement("div");
+      line.className = "campaign-activity-row";
+
+      var left = document.createElement("span");
+      var rank = document.createElement("span");
+      rank.className = "campaign-activity-rank";
+      rank.textContent = "#" + Number(row.rank || 0);
+      left.appendChild(rank);
+      left.appendChild(document.createTextNode(String(row.display_name || "Anonymous")));
+
+      var right = document.createElement("strong");
+      right.textContent = String(Number(row.qualified_count || 0));
+
+      line.appendChild(left);
+      line.appendChild(right);
+      els.campaignActivityList.appendChild(line);
+    });
+  }
+
+  function loadCampaignActivity() {
+    // Public, unauthenticated, read-only data -- the same shared
+    // campaign_display_override builder that powers the Affiliate page's
+    // campaign leaderboard, resolved server-side via
+    // CAMPAIGN_DISPLAY_ACTIVE_CAMPAIGN_ID. Never touches this page's own
+    // creator stats/recent-win above, and no init_data is sent or needed.
+    fetch("/api/campaign/active/activity", { headers: { Accept: "application/json" } })
+      .then(function (r) { return r.json(); })
+      .then(function (body) {
+        if (!body || body.state !== "active" || !Array.isArray(body.leaderboard) || !body.leaderboard.length) {
+          hideCampaignActivity();
+          return;
+        }
+        renderCampaignActivityRows(body.leaderboard);
+        els.campaignActivityCard.classList.remove("hidden");
+      })
+      .catch(function () { hideCampaignActivity(); });
+  }
+
   function init() {
     apiGet("/api/creator/share/status").then(function (res) {
       els.initialLoading.classList.add("hidden");
@@ -757,6 +836,7 @@
       loadStats();
       loadRecentWin();
       startRecentWinRefresh();
+      loadCampaignActivity();
     }).catch(function () {
       els.initialLoading.classList.add("hidden");
       showAccessDenied("invalid_telegram_auth");

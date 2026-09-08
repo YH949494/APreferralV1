@@ -6602,8 +6602,26 @@ function setLeaderboardMeta(ts, { isStale = false } = {}) {
       return window.__affiliateSnapshotWeeks;
     }
 
-    function renderAffiliateRows(rows, { isAdmin = false, snapshotMeta = null } = {}) {
+    function renderAffiliateRows(rows, { isAdmin = false, snapshotMeta = null, simpleColumns = false } = {}) {
       if (!rows.length) return `<div class="leaderboard-empty">${t("no_affiliate_data")}</div>`;
+      const meta = snapshotMeta ? `<div class="leaderboard-empty" style="margin-bottom:8px;">${escapeHtml(snapshotMeta)}</div>` : "";
+      if (simpleColumns) {
+        // Campaign activity rows (genuine + manual combined) don't carry a
+        // per-row joins/conversion figure for manual entries -- render only
+        // the columns every row actually has rather than defaulting the
+        // rest to a fabricated 0 / 0.0%.
+        const simpleRows = rows.map((r) => `
+          <tr>
+            <td>${Number(r.rank || 0)}</td>
+            <td>${escapeHtml(String(r.display_name || r.username || r.referrer_id || "-"))}</td>
+            <td>${Number(r.qualified_month ?? r.qualified_count ?? 0)}</td>
+          </tr>`).join("");
+        return `${meta}
+          <table class="affiliate-table">
+            <thead><tr><th>Rank</th><th>Name</th><th>Qualified</th></tr></thead>
+            <tbody>${simpleRows}</tbody>
+          </table>`;
+      }
       const tableRows = rows.map((r) => {
         const extra = r.extra || {};
         const qualified = r.qualified_month ?? r.qualified_week ?? r.metric_value ?? extra.qualified_week ?? 0;
@@ -6623,7 +6641,6 @@ function setLeaderboardMeta(ts, { isStale = false } = {}) {
             ${isAdmin ? `<td>${escapeHtml(String(flag || "new"))}</td>` : ""}
           </tr>`;
       }).join("");
-      const meta = snapshotMeta ? `<div class="leaderboard-empty" style="margin-bottom:8px;">${escapeHtml(snapshotMeta)}</div>` : "";
       return `${meta}
         <table class="affiliate-table">
           <thead><tr><th>Rank</th><th>Name</th><th>Qualified</th><th>Joins</th><th>Conversion %</th>${isAdmin ? "<th>Flag</th>" : ""}</tr></thead>
@@ -6667,7 +6684,18 @@ function setLeaderboardMeta(ts, { isStale = false } = {}) {
         const res = await fetch(url.toString());
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
-        const rows = Array.isArray(data?.leaderboard) ? data.leaderboard : [];
+        // When a campaign display override is active, campaign_activity is
+        // the single shared result (genuine + manual rows, already ranked
+        // and totaled) that every public surface must render from -- use it
+        // in place of the plain genuine-only rows so this page can never
+        // show a different leaderboard/total than campaign_activity
+        // consumers elsewhere. "My Stats" below is always the viewer's own
+        // genuine progress and is never affected by this.
+        const campaignActivity = data?.campaign_activity;
+        const campaignActive = Boolean(campaignActivity && campaignActivity.state === "active");
+        const rows = campaignActive
+          ? (Array.isArray(campaignActivity.leaderboard) ? campaignActivity.leaderboard : [])
+          : (Array.isArray(data?.leaderboard) ? data.leaderboard : []);
         const my = data?.my_stats;
         const isAdmin = Boolean(data?.is_admin);
         affiliateLeaderboardIsAdmin = isAdmin;
@@ -6700,12 +6728,15 @@ function setLeaderboardMeta(ts, { isStale = false } = {}) {
             ${isAdmin ? `<div class="summary-row"><span>Flag</span><strong>${String(my.quality_flag || "new")}</strong></div>` : ""}
           </div>
         ` : `<div class="leaderboard-empty">${t("login_affiliate_stats")}</div>`;
+        const campaignBanner = campaignActive
+          ? `<div class="leaderboard-empty" style="margin-bottom:8px;">🎉 Campaign leaderboard</div>`
+          : "";
         if (!rows.length) {
-          target.innerHTML = `${isAdmin ? renderAffiliateHistoryControls(weeks) : ""}${myCard}<div class="leaderboard-empty">${t("no_affiliate_data")}</div>`;
+          target.innerHTML = `${isAdmin ? renderAffiliateHistoryControls(weeks) : ""}${myCard}${campaignBanner}<div class="leaderboard-empty">${t("no_affiliate_data")}</div>`;
           affiliateLeaderboardLoaded = true;
           return;
         }
-        target.innerHTML = `${isAdmin ? renderAffiliateHistoryControls(weeks) : ""}${myCard}${renderAffiliateRows(rows, { isAdmin })}`;
+        target.innerHTML = `${isAdmin ? renderAffiliateHistoryControls(weeks) : ""}${myCard}${campaignBanner}${renderAffiliateRows(rows, { isAdmin: campaignActive ? false : isAdmin, simpleColumns: campaignActive })}`;
         affiliateLeaderboardLoaded = true;
       } catch (err) {
         target.innerHTML = `<div class="leaderboard-empty">Affiliate leaderboard unavailable: ${escapeHtml(String(err.message || err))}</div>`;

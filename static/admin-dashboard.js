@@ -4937,6 +4937,343 @@
     });
   }
 
+  // ---------- Campaign Display Control (manual referral leaderboard override, campaign_display_override.py) ----------
+
+  var cdState = { campaignsById: {}, selectedId: null, settings: null };
+
+  function cdStatePill(state) {
+    return gcPill(state === "active" ? "active" : state === "scheduled" ? "scheduled" : state === "expired" ? "expired" : state === "invalid" ? "rejected" : "inactive");
+  }
+
+  function cdFmtKl(iso) {
+    if (!iso) return "—";
+    var d = new Date(iso);
+    if (isNaN(d.getTime())) return "—";
+    var kl = new Date(d.getTime() + 8 * 60 * 60 * 1000);
+    return kl.toISOString().slice(0, 16).replace("T", " ") + " KL";
+  }
+
+  function cdRenderSummary() {
+    var settings = cdState.settings || {};
+    var activeId = settings.active_campaign_id;
+    var activeCampaign = activeId ? cdState.campaignsById[activeId] : null;
+    var lines = [];
+    lines.push('<div class="summary-row"><span>Selected campaign</span><strong>' + esc(activeId || "None") + '</strong></div>');
+    lines.push('<div class="summary-row"><span>State</span><strong>' + (activeCampaign ? cdStatePill(activeCampaign.state) : gcPill("inactive")) + '</strong></div>');
+    if (activeCampaign) {
+      lines.push('<div class="summary-row"><span>Window (KL)</span><strong>' + esc(cdFmtKl(activeCampaign.starts_at)) + ' → ' + esc(cdFmtKl(activeCampaign.ends_at)) + '</strong></div>');
+      if (activeCampaign.state === "scheduled") {
+        lines.push('<div class="note">Scheduled — becomes visible at ' + esc(cdFmtKl(activeCampaign.starts_at)) + '</div>');
+      }
+      lines.push('<div class="summary-row"><span>Visible participants</span><strong>' + esc(String(activeCampaign.visible_participant_count)) + '</strong></div>');
+    }
+    var activity = cdState.activeActivity;
+    lines.push('<div class="summary-row"><span>Displayed qualified total</span><strong>' + esc(activity ? String(activity.qualified_total) : "—") + '</strong></div>');
+    lines.push('<div class="summary-row"><span>Last updated</span><strong>' + esc(settings.updated_at ? cdFmtKl(settings.updated_at) : "—") + '</strong></div>');
+    lines.push('<div class="summary-row"><span>Last updated by</span><strong>' + esc(settings.updated_by || "—") + '</strong></div>');
+    $("#cd-summary").innerHTML = '<div class="leaderboard-summary">' + lines.join("") + '</div>';
+  }
+
+  function cdRenderCampaignSelect() {
+    var select = $("#cd-campaign-select");
+    var ids = Object.keys(cdState.campaignsById);
+    if (!ids.length) { select.innerHTML = '<option value="">No campaigns yet</option>'; return; }
+    select.innerHTML = ids.map(function (id) {
+      var selected = id === cdState.selectedId ? " selected" : "";
+      return '<option value="' + esc(id) + '"' + selected + '>' + esc(id) + '</option>';
+    }).join("");
+  }
+
+  function cdRenderCampaignsTable() {
+    var ids = Object.keys(cdState.campaignsById);
+    if (!ids.length) { $("#cd-campaigns-body").innerHTML = emptyState("No campaigns yet — create one above."); return; }
+    var rows = ids.map(function (id) {
+      var c = cdState.campaignsById[id];
+      return '<tr>' +
+        '<td>' + esc(c.campaign_id) + (c.is_selected_active ? ' <span class="pill approved">selected</span>' : '') + '</td>' +
+        '<td>' + cdStatePill(c.state) + '</td>' +
+        '<td class="sub">' + esc(cdFmtKl(c.starts_at)) + ' → ' + esc(cdFmtKl(c.ends_at)) + '</td>' +
+        '<td>' + esc(String(c.visible_participant_count)) + ' / ' + esc(String(c.participant_count)) + '</td>' +
+        '<td>' +
+        '<button class="btn" data-cd-action="select" data-id="' + esc(c.campaign_id) + '">Select</button> ' +
+        '<button class="btn" data-cd-action="edit-schedule" data-id="' + esc(c.campaign_id) + '">Edit Schedule</button> ' +
+        '<button class="btn" data-cd-action="toggle-enabled" data-id="' + esc(c.campaign_id) + '" data-enabled="' + (c.enabled ? "1" : "0") + '">' + (c.enabled ? "Disable doc" : "Enable doc") + '</button>' +
+        '</td></tr>';
+    }).join("");
+    $("#cd-campaigns-body").innerHTML = '<table class="data-table"><thead><tr><th>Campaign</th><th>State</th><th>Window (KL)</th><th>Visible/Total</th><th>Actions</th></tr></thead><tbody>' + rows + '</tbody></table>';
+  }
+
+  function cdRenderParticipants() {
+    var label = $("#cd-participants-campaign-label");
+    var body = $("#cd-participants-body");
+    var c = cdState.selectedId ? cdState.campaignsById[cdState.selectedId] : null;
+    label.textContent = cdState.selectedId || "select a campaign above";
+    if (!c) { body.innerHTML = emptyState("Select a campaign above to manage its participants."); return; }
+    var participants = c.participants || [];
+    if (!participants.length) { body.innerHTML = emptyState("No manual participants yet — add one above."); return; }
+    var rows = participants.map(function (p) {
+      return '<tr>' +
+        '<td>' + esc(p.display_name) + '</td>' +
+        '<td>' + esc(String(p.qualified_count)) + '</td>' +
+        '<td>' + (p.visible ? '<span class="pill approved">visible</span>' : '<span class="pill neutral">hidden</span>') + '</td>' +
+        '<td>' +
+        '<button class="btn" data-cd-p-action="edit" data-entry-id="' + esc(p.entry_id) + '">Edit</button> ' +
+        '<button class="btn" data-cd-p-action="toggle-visible" data-entry-id="' + esc(p.entry_id) + '" data-visible="' + (p.visible ? "1" : "0") + '">' + (p.visible ? "Hide" : "Show") + '</button> ' +
+        '<button class="btn" data-cd-p-action="remove" data-entry-id="' + esc(p.entry_id) + '">Remove</button>' +
+        '</td></tr>';
+    }).join("");
+    body.innerHTML = '<table class="data-table"><thead><tr><th>Name</th><th>Qualified</th><th>Visibility</th><th>Actions</th></tr></thead><tbody>' + rows + '</tbody></table>';
+  }
+
+  function cdRenderAll() {
+    cdRenderSummary();
+    cdRenderCampaignSelect();
+    cdRenderCampaignsTable();
+    cdRenderParticipants();
+  }
+
+  function loadCampaignDisplay(force) {
+    statePanel("cd-campaigns-body", "loading", "Loading campaigns…");
+    api("/api/admin/campaign-display").then(function (data) {
+      cdState.settings = data.settings || {};
+      cdState.activeActivity = data.active_activity || null;
+      cdState.campaignsById = {};
+      (data.campaigns || []).forEach(function (c) { cdState.campaignsById[c.campaign_id] = c; });
+      if (!cdState.selectedId || !cdState.campaignsById[cdState.selectedId]) {
+        cdState.selectedId = cdState.settings.active_campaign_id || (Object.keys(cdState.campaignsById)[0] || null);
+      }
+      cdRenderAll();
+    }).catch(function (e) {
+      statePanel("cd-campaigns-body", "error", "Failed to load campaign display control: " + e.message);
+    });
+  }
+
+  function cdRenderPreview(activity) {
+    if (!activity || !Array.isArray(activity.leaderboard) || !activity.leaderboard.length) {
+      $("#cd-preview-body").innerHTML = emptyState("No leaderboard rows yet for this campaign.");
+      return;
+    }
+    var rows = activity.leaderboard.map(function (r) {
+      return '<tr><td>' + esc(String(r.rank)) + '</td><td>' + esc(r.display_name) + '</td><td>' + esc(String(r.qualified_count)) + '</td></tr>';
+    }).join("");
+    $("#cd-preview-body").innerHTML =
+      '<div class="sub" style="margin-bottom:6px;">Qualified total: ' + esc(String(activity.qualified_total)) + ' · State: ' + cdStatePill(activity.state) + '</div>' +
+      '<table class="data-table"><thead><tr><th>Rank</th><th>Name</th><th>Qualified</th></tr></thead><tbody>' + rows + '</tbody></table>';
+  }
+
+  function cdRefreshPreview() {
+    if (!cdState.selectedId) { toast("❌ Select a campaign first", "error"); return; }
+    statePanel("cd-preview-body", "loading", "Loading preview…");
+    api("/api/admin/campaign-display/campaigns/" + encodeURIComponent(cdState.selectedId) + "/preview").then(function (data) {
+      cdState.lastPreview = data;
+      cdRenderPreview(data);
+    }).catch(function (e) { statePanel("cd-preview-body", "error", "Failed to load preview: " + e.message); });
+  }
+
+  function cdOpenAnnouncementModal() {
+    if (!cdState.lastPreview) { toast("❌ Refresh the preview first", "error"); return; }
+    var overlay = document.createElement("div");
+    overlay.className = "modal-overlay";
+    overlay.innerHTML =
+      '<div class="modal-box">' +
+      '<h3>Announcement Preview — ' + esc(cdState.selectedId) + '</h3>' +
+      '<pre style="white-space:pre-wrap;background:#111827;color:#f9fafb;padding:10px;border-radius:6px;">' + esc(cdState.lastPreview.preview_text || "") + '</pre>' +
+      '<div class="modal-actions"><button class="btn primary" id="cd-announcement-close">Close</button></div>' +
+      '</div>';
+    document.body.appendChild(overlay);
+    function close() { overlay.remove(); }
+    overlay.querySelector("#cd-announcement-close").addEventListener("click", close);
+    overlay.addEventListener("click", function (e) { if (e.target === overlay) close(); });
+  }
+
+  function cdOpenEditScheduleModal(campaign) {
+    var overlay = document.createElement("div");
+    overlay.className = "modal-overlay";
+    overlay.innerHTML =
+      '<div class="modal-box">' +
+      '<h3>Edit Schedule — ' + esc(campaign.campaign_id) + '</h3>' +
+      '<p class="sub">Times are in Kuala Lumpur time (GMT+8). Stored as UTC.</p>' +
+      '<label class="sub">Start</label>' +
+      '<input class="filter-input" id="cd-edit-starts" type="datetime-local" />' +
+      '<label class="sub">End</label>' +
+      '<input class="filter-input" id="cd-edit-ends" type="datetime-local" />' +
+      '<div class="modal-actions">' +
+      '<button class="btn" id="cd-edit-cancel">Cancel</button>' +
+      '<button class="btn primary" id="cd-edit-save">Save</button>' +
+      '</div></div>';
+    document.body.appendChild(overlay);
+    $("#cd-edit-starts", overlay).value = utcIsoToKlInputValue(campaign.starts_at);
+    $("#cd-edit-ends", overlay).value = utcIsoToKlInputValue(campaign.ends_at);
+
+    function close() { overlay.remove(); }
+    overlay.querySelector("#cd-edit-cancel").addEventListener("click", close);
+    overlay.addEventListener("click", function (e) { if (e.target === overlay) close(); });
+    overlay.querySelector("#cd-edit-save").addEventListener("click", function () {
+      var starts_at = klInputValueToUtcIso($("#cd-edit-starts", overlay).value);
+      var ends_at = klInputValueToUtcIso($("#cd-edit-ends", overlay).value);
+      if (!starts_at || !ends_at) { toast("❌ Start and end are required", "error"); return; }
+      if (new Date(ends_at) <= new Date(starts_at)) { toast("❌ End must be after start", "error"); return; }
+      apiPutJson("/api/admin/campaign-display/campaigns/" + encodeURIComponent(campaign.campaign_id), {
+        starts_at: starts_at, ends_at: ends_at, expected_updated_at: campaign.updated_at,
+      }).then(function (res) {
+        if (!res.ok || res.d.status !== "ok") { toast("❌ " + (res.d && res.d.code || "update_failed"), "error"); return; }
+        toast("✅ Schedule updated", "success");
+        close();
+        loadCampaignDisplay(true);
+      });
+    });
+  }
+
+  function cdOpenEditParticipantModal(participant) {
+    var overlay = document.createElement("div");
+    overlay.className = "modal-overlay";
+    overlay.innerHTML =
+      '<div class="modal-box">' +
+      '<h3>Edit Participant</h3>' +
+      '<label class="sub">Display name</label>' +
+      '<input class="filter-input" id="cd-pe-name" />' +
+      '<label class="sub">Qualified count</label>' +
+      '<input class="filter-input" id="cd-pe-count" type="number" min="0" step="1" />' +
+      '<div class="modal-actions">' +
+      '<button class="btn" id="cd-pe-cancel">Cancel</button>' +
+      '<button class="btn primary" id="cd-pe-save">Save</button>' +
+      '</div></div>';
+    document.body.appendChild(overlay);
+    $("#cd-pe-name", overlay).value = participant.display_name;
+    $("#cd-pe-count", overlay).value = participant.qualified_count;
+
+    function close() { overlay.remove(); }
+    overlay.querySelector("#cd-pe-cancel").addEventListener("click", close);
+    overlay.addEventListener("click", function (e) { if (e.target === overlay) close(); });
+    overlay.querySelector("#cd-pe-save").addEventListener("click", function () {
+      var campaign = cdState.campaignsById[cdState.selectedId];
+      apiPatchJson(
+        "/api/admin/campaign-display/campaigns/" + encodeURIComponent(cdState.selectedId) + "/participants/" + encodeURIComponent(participant.entry_id),
+        {
+          display_name: $("#cd-pe-name", overlay).value,
+          qualified_count: Number($("#cd-pe-count", overlay).value),
+          expected_updated_at: campaign ? campaign.updated_at : undefined,
+        }
+      ).then(function (res) {
+        if (!res.ok || res.d.status !== "ok") { toast("❌ " + (res.d && res.d.code || "update_failed"), "error"); return; }
+        toast("✅ Participant updated", "success");
+        close();
+        loadCampaignDisplay(true);
+      });
+    });
+  }
+
+  function bindCampaignDisplay() {
+    $("#cd-create-btn").addEventListener("click", function () {
+      var startsVal = $("#cd-new-starts").value;
+      var endsVal = $("#cd-new-ends").value;
+      var body = {
+        campaign_id: ($("#cd-new-id").value || "").trim(),
+        starts_at: klInputValueToUtcIso(startsVal),
+        ends_at: klInputValueToUtcIso(endsVal),
+        enabled: $("#cd-new-enabled").checked,
+      };
+      if (!body.campaign_id || !body.starts_at || !body.ends_at) { toast("❌ campaign_id, start and end are required", "error"); return; }
+      apiPostJson("/api/admin/campaign-display/campaigns", body).then(function (res) {
+        if (!res.ok || res.d.status !== "ok") { toast("❌ " + (res.d && res.d.code || "create_failed"), "error"); return; }
+        toast("✅ Campaign created", "success");
+        $("#cd-new-id").value = ""; $("#cd-new-starts").value = ""; $("#cd-new-ends").value = "";
+        cdState.selectedId = res.d.campaign.campaign_id;
+        loadCampaignDisplay(true);
+      });
+    });
+
+    $("#cd-campaign-select").addEventListener("change", function () {
+      cdState.selectedId = this.value || null;
+      cdRenderAll();
+    });
+
+    $("#cd-activate-btn").addEventListener("click", function () {
+      if (!cdState.selectedId) { toast("❌ Select a campaign first", "error"); return; }
+      apiPostJson("/api/admin/campaign-display/campaigns/" + encodeURIComponent(cdState.selectedId) + "/activate", {}).then(function (res) {
+        if (!res.ok || res.d.status !== "ok") { toast("❌ " + (res.d && res.d.code || "activate_failed"), "error"); return; }
+        toast("✅ Campaign activated", "success");
+        loadCampaignDisplay(true);
+      });
+    });
+
+    $("#cd-disable-btn").addEventListener("click", function () {
+      if (!confirm("Disable the campaign display everywhere (Affiliate, Money Room, announcement preview)?")) return;
+      apiPostJson("/api/admin/campaign-display/disable", {}).then(function (res) {
+        if (!res.ok || res.d.status !== "ok") { toast("❌ " + (res.d && res.d.code || "disable_failed"), "error"); return; }
+        toast("✅ Campaign display disabled", "success");
+        loadCampaignDisplay(true);
+      });
+    });
+
+    $("#cd-refresh-btn").addEventListener("click", cdRefreshPreview);
+    $("#cd-announcement-btn").addEventListener("click", function () {
+      cdRefreshPreview();
+      setTimeout(cdOpenAnnouncementModal, 300);
+    });
+
+    $("#cd-p-add-btn").addEventListener("click", function () {
+      if (!cdState.selectedId) { toast("❌ Select a campaign first", "error"); return; }
+      var campaign = cdState.campaignsById[cdState.selectedId];
+      var name = ($("#cd-p-name").value || "").trim();
+      var count = Number($("#cd-p-count").value);
+      if (!name || !Number.isInteger(count) || count < 0) { toast("❌ Enter a display name and a non-negative whole number", "error"); return; }
+      apiPostJson("/api/admin/campaign-display/campaigns/" + encodeURIComponent(cdState.selectedId) + "/participants", {
+        display_name: name, qualified_count: count, visible: true,
+        expected_updated_at: campaign ? campaign.updated_at : undefined,
+      }).then(function (res) {
+        if (!res.ok || res.d.status !== "ok") { toast("❌ " + (res.d && res.d.code || "add_failed"), "error"); return; }
+        toast("✅ Participant added", "success");
+        $("#cd-p-name").value = ""; $("#cd-p-count").value = "";
+        loadCampaignDisplay(true);
+      });
+    });
+
+    document.addEventListener("click", function (e) {
+      var cBtn = e.target && e.target.closest && e.target.closest("[data-cd-action]");
+      if (cBtn) {
+        var action = cBtn.dataset.cdAction, id = cBtn.dataset.id;
+        var campaign = cdState.campaignsById[id];
+        if (action === "select") { cdState.selectedId = id; cdRenderAll(); }
+        else if (action === "edit-schedule" && campaign) { cdOpenEditScheduleModal(campaign); }
+        else if (action === "toggle-enabled" && campaign) {
+          apiPutJson("/api/admin/campaign-display/campaigns/" + encodeURIComponent(id), {
+            enabled: cBtn.dataset.enabled !== "1",
+            expected_updated_at: campaign.updated_at,
+          }).then(function (res) {
+            if (!res.ok || res.d.status !== "ok") { toast("❌ " + (res.d && res.d.code || "update_failed"), "error"); return; }
+            loadCampaignDisplay(true);
+          });
+        }
+        return;
+      }
+      var pBtn = e.target && e.target.closest && e.target.closest("[data-cd-p-action]");
+      if (pBtn) {
+        var pAction = pBtn.dataset.cdPAction, entryId = pBtn.dataset.entryId;
+        var selCampaign = cdState.campaignsById[cdState.selectedId];
+        var participant = selCampaign && (selCampaign.participants || []).filter(function (p) { return p.entry_id === entryId; })[0];
+        if (pAction === "edit" && participant) { cdOpenEditParticipantModal(participant); }
+        else if (pAction === "toggle-visible" && participant) {
+          apiPatchJson(
+            "/api/admin/campaign-display/campaigns/" + encodeURIComponent(cdState.selectedId) + "/participants/" + encodeURIComponent(entryId),
+            { visible: pBtn.dataset.visible !== "1", expected_updated_at: selCampaign.updated_at }
+          ).then(function (res) {
+            if (!res.ok || res.d.status !== "ok") { toast("❌ " + (res.d && res.d.code || "update_failed"), "error"); return; }
+            loadCampaignDisplay(true);
+          });
+        } else if (pAction === "remove" && participant) {
+          if (!confirm('Remove participant "' + participant.display_name + '"?')) return;
+          apiDelete("/api/admin/campaign-display/campaigns/" + encodeURIComponent(cdState.selectedId) + "/participants/" + encodeURIComponent(entryId))
+            .then(function (res) {
+              if (!res.ok || res.d.status !== "ok") { toast("❌ " + (res.d && res.d.code || "remove_failed"), "error"); return; }
+              toast("✅ Participant removed", "success");
+              loadCampaignDisplay(true);
+            });
+        }
+      }
+    });
+  }
+
   // ---------- Event Banner (image-only Mini App top banner, event_banner.py) ----------
 
   function loadEventBanners(force) {
@@ -6999,7 +7336,7 @@
     });
   }
 
-  var VIEWS =["summary", "moduleOverview", "placeholder", "funnel", "abuse", "campaignBuilder", "campaignPerformance", "campaignIntelligence", "activeCampaigns", "draftCampaigns", "compiledDrops", "campaigns", "gcCampaigns", "missionPool", "gcProviders", "gcResults", "gcRewards", "gcVerification", "gcActivity", "eventBanners", "luckyGames", "vouchers", "drops", "referrals", "affiliate", "affiliatePools", "affiliateBatches", "affiliatePending", "reactivation", "audit", "segmentProbabilityConfig", "segmentRoi", "segments", "validation", "backendSegmentEngine", "voucherHunterAudit", "unclassifiedAudit", "segmentRuleSimulator", "voucherHunterQuality", "voucherHunterFalsePositive", "voucherHunterRuleSimulator", "vhPriorityImpact", "uploadPlayerPerformance", "uploadHistory", "rawExplorer", "users", "joinRequests", "xpAdjust", "settings", "referralShareContent", "referralShareEngagement", "ccComposer", "ccCalendar", "ccBoard"];
+  var VIEWS =["summary", "moduleOverview", "placeholder", "funnel", "abuse", "campaignBuilder", "campaignPerformance", "campaignIntelligence", "activeCampaigns", "draftCampaigns", "compiledDrops", "campaigns", "gcCampaigns", "missionPool", "gcProviders", "gcResults", "gcRewards", "gcVerification", "gcActivity", "campaignDisplay", "eventBanners", "luckyGames", "vouchers", "drops", "referrals", "affiliate", "affiliatePools", "affiliateBatches", "affiliatePending", "reactivation", "audit", "segmentProbabilityConfig", "segmentRoi", "segments", "validation", "backendSegmentEngine", "voucherHunterAudit", "unclassifiedAudit", "segmentRuleSimulator", "voucherHunterQuality", "voucherHunterFalsePositive", "voucherHunterRuleSimulator", "vhPriorityImpact", "uploadPlayerPerformance", "uploadHistory", "rawExplorer", "users", "joinRequests", "xpAdjust", "settings", "referralShareContent", "referralShareEngagement", "ccComposer", "ccCalendar", "ccBoard"];
 
   // ---------------------------------------------------------------------
   // Information architecture: sidebar Business Modules, each with its own
@@ -7062,7 +7399,8 @@
       { label: "Voucher Batches", view: "affiliateBatches", live: true },
       { label: "Rewards", view: "placeholder", ph: { title: "Rewards", desc: "Affiliate reward ledger is not yet wired to an admin data source." } },
       { label: "Payouts", view: "placeholder", ph: { title: "Payouts", desc: "Payout batches are not yet wired to an admin data source." } },
-      { label: "Analytics", view: "placeholder", ph: { title: "Analytics", desc: "Affiliate analytics is not yet wired to an admin data source." } }
+      { label: "Analytics", view: "placeholder", ph: { title: "Analytics", desc: "Affiliate analytics is not yet wired to an admin data source." } },
+      { label: "Campaign Display", view: "campaignDisplay", live: true }
     ]},
     { key: "referral", icon: "🔗", label: "Referral Centre", tabs: [
       { label: "Overview", view: "moduleOverview", overviewKey: "referral" },
@@ -7302,6 +7640,7 @@
       campaigns: "Campaigns (Legacy Targeting)",
       gcCampaigns: "Player Campaigns", missionPool: "Mission Reward Pool", gcProviders: "Providers", gcResults: "Tournament Results",
       gcRewards: "Rewards", gcVerification: "Verification Integrations", gcActivity: "Activity Log",
+      campaignDisplay: "Campaign Display Control",
       eventBanners: "Event Banner",
       luckyGames: "Lucky Games",
       vouchers: "Vouchers", drops: "Voucher Drops", referrals: "Referrals", affiliate: "Affiliate",
@@ -7348,6 +7687,7 @@
     else if (state.view === "gcRewards") loadGcRewards(force);
     else if (state.view === "gcVerification") loadGcVerification(force);
     else if (state.view === "gcActivity") loadGcEvents(1);
+    else if (state.view === "campaignDisplay") loadCampaignDisplay(force);
     else if (state.view === "eventBanners") loadEventBanners(force);
     else if (state.view === "luckyGames") loadLuckyGames(force);
     else if (state.view === "referralShareContent") loadReferralShareContent(force);
@@ -7426,6 +7766,7 @@
     bindAffiliateBatches();
     bindAffiliatePending();
     bindGcCampaigns();
+    bindCampaignDisplay();
     bindEventBanners();
     bindLuckyGames();
     bindGcProviders();
