@@ -574,14 +574,6 @@
       background: #fff;
       animation: apLive 1.6s infinite;
     }
-    .ap-hero-kicker {
-      font-size: 10.5px;
-      font-weight: 800;
-      letter-spacing: 1.4px;
-      color: #ff9b5c;
-      margin-bottom: 4px;
-    }
-
     /* Campaign voucher message + button inside hero card */
     #campaign-voucher-message {
       font-size: 13px;
@@ -633,37 +625,44 @@
     }
     #campaign-voucher-list .campaign-card button { margin-top: auto; }
 
-    /* Compact "Reward Ready" row — replaces the nested campaign card inside
-       the Live Drop hero once the user has an active unclaimed voucher.
+    /* Compact reward row — replaces the nested campaign card inside the
+       Live Drop hero once the user has an active unclaimed voucher.
        Deliberately unstyled as a card (no border/background box) so it
        reads as part of the existing hero, not another card inside it. */
     .ap-reward-compact { margin-top: 4px; }
-    .ap-reward-compact-heading {
-      font-size: 12.5px;
-      font-weight: 800;
-      letter-spacing: .3px;
-      color: #f5b63f;
-      margin-bottom: 8px;
-    }
-    .ap-reward-compact-line {
+    /* Channel requirement status row, directly above the Claim button. */
+    .ap-reward-compact-channel {
       display: flex;
       align-items: center;
-      justify-content: space-between;
-      gap: 10px;
+      gap: 6px;
+      margin-bottom: 10px;
+      font-size: 13px;
+      font-weight: 600;
     }
-    .ap-reward-compact-name {
-      font-size: 14.5px;
-      font-weight: 700;
+    .ap-reward-compact-channel[data-joined="true"] {
+      color: var(--status-success, #3ecf7a);
+      cursor: default;
+    }
+    .ap-reward-compact-channel[data-joined="false"] {
       color: var(--text-main);
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
+      background: none;
+      border: none;
+      padding: 0;
+      cursor: pointer;
+      text-align: left;
+    }
+    .ap-reward-compact-channel-sub {
+      display: block;
+      margin: -6px 0 10px;
+      font-size: 11.5px;
+      font-weight: 500;
+      color: #a39e95;
     }
     .ap-reward-compact-claim {
-      flex: 0 0 auto;
-      width: auto;
-      padding: 8px 18px;
-      font-size: 13.5px;
+      width: 100%;
+      justify-content: center;
+      padding: 10px 18px;
+      font-size: 14.5px;
     }
     .ap-reward-compact-more {
       display: block;
@@ -676,12 +675,6 @@
       color: #a39e95;
       text-decoration: underline;
       cursor: pointer;
-    }
-    .ap-reward-compact-gate-msg {
-      display: none;
-      margin-top: 8px;
-      font-size: 12.5px;
-      color: #f5b63f;
     }
 
     /* Extra reward cards (stacked below hero) */
@@ -1582,11 +1575,10 @@
           <div class="ap-hero-top-row">
             <span class="ap-hero-live-badge">
               <span class="ap-hero-live-dot"></span>
-              <span data-i18n="live_drop">LIVE DROP</span>
+              <span data-i18n="live_drop">LIVE</span>
             </span>
             <span id="ap-hero-countdown" style="font-size:11px;color:#a39e95;font-weight:600;letter-spacing:.3px;"></span>
           </div>
-          <div class="ap-hero-kicker" data-i18n="limited_drop">LIMITED DROP</div>
           <div id="ap-hero-title" style="font-family:system-ui,-apple-system,'SF Pro Display',Inter,sans-serif;font-weight:800;font-size:20px;line-height:1.1;letter-spacing:normal;margin-bottom:4px;color:var(--text-main);"></div>
           <div id="ap-hero-subtitle" style="font-size:13px;color:#cdbfb2;margin-bottom:12px;line-height:1.45;"></div>
           <div id="ap-hero-stock" style="display:none;margin-bottom:10px;">
@@ -5213,35 +5205,16 @@
     }
 
     function showVoucherSoldOut(messageText) {
+      // No claimable voucher for this user right now: the per-drop card in
+      // #campaign-voucher-list (createCampaignCard) already renders the
+      // correct disabled/sold-out state and messaging, so the legacy
+      // top-level campaign-voucher-btn stays hidden here rather than
+      // repurposing itself into a "Check in" action — that action already
+      // lives in the guided journey card, not the Live Drop hero.
       const primaryBtn = document.getElementById("campaign-voucher-btn");
-      if (!primaryBtn) return;
-      primaryBtn.textContent = "✅ " + t("check_in");
-      primaryBtn.removeAttribute("disabled");
-      primaryBtn.removeAttribute("data-copy-code");
-      primaryBtn.removeAttribute("data-dropid");
-      primaryBtn.removeAttribute("data-claim");
-      primaryBtn.onclick = () => checkIn();
-      primaryBtn.style.display = "inline-block";
-
-      const secondaryBtnId = "campaign-voucher-channel-btn";
-      let secondaryBtn = document.getElementById(secondaryBtnId);
-      if (!secondaryBtn) {
-        secondaryBtn = document.createElement("button");
-        secondaryBtn.id = secondaryBtnId;
-        secondaryBtn.type = "button";
-        secondaryBtn.className = "btn btn-ghost";
-        secondaryBtn.style.marginLeft = "8px";
-        primaryBtn.insertAdjacentElement("afterend", secondaryBtn);
-      }
-      secondaryBtn.textContent = "📣 " + t("join_channel");
-      secondaryBtn.onclick = () => {
-        if (tg?.openTelegramLink) {
-          tg.openTelegramLink(OFFICIAL_CHANNEL_LINK);
-        } else {
-          window.open(OFFICIAL_CHANNEL_LINK, "_blank");
-        }
-      };
-      secondaryBtn.style.display = "inline-block";
+      if (primaryBtn) primaryBtn.style.display = "none";
+      const secondaryBtn = document.getElementById("campaign-voucher-channel-btn");
+      if (secondaryBtn) secondaryBtn.style.display = "none";
 
       const messageEl = document.getElementById("campaign-voucher-message");
       if (messageEl) messageEl.innerText = messageText || "🚨 " + t("stay_subscribed");
@@ -5532,6 +5505,17 @@
     }
 
     let _heroCountdownTimer = null;
+    // Set by renderCompactVoucherRow whenever the current primary voucher
+    // requires a channel subscription; re-run on visibilitychange so
+    // returning to the Mini App (e.g. after tapping "Join Official
+    // Channel") refreshes the gate via the same checkChannelSubscription
+    // call the initial render used, rather than a second implementation.
+    let _compactVoucherChannelRefresh = null;
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible" && typeof _compactVoucherChannelRefresh === "function") {
+        _compactVoucherChannelRefresh();
+      }
+    });
 
     function startHeroCountdown(endsAt) {
       clearInterval(_heroCountdownTimer);
@@ -5709,18 +5693,20 @@
       row.className = "ap-reward-compact";
       row.dataset.primary = "true";
 
-      const heading = document.createElement("div");
-      heading.className = "ap-reward-compact-heading";
-      heading.textContent = "🎁 " + t("reward_ready");
-      row.appendChild(heading);
+      // Compact channel-requirement status row — the only claim requirement
+      // surfaced here since the campaign name already renders once, above,
+      // as #ap-hero-title (never repeated inside this reward slot).
+      const channelRow = document.createElement("button");
+      channelRow.type = "button";
+      channelRow.className = "ap-reward-compact-channel";
+      channelRow.style.display = "none";
+      row.appendChild(channelRow);
 
-      const line = document.createElement("div");
-      line.className = "ap-reward-compact-line";
-
-      const nameEl = document.createElement("span");
-      nameEl.className = "ap-reward-compact-name";
-      nameEl.textContent = label;
-      line.appendChild(nameEl);
+      const channelSub = document.createElement("span");
+      channelSub.className = "ap-reward-compact-channel-sub";
+      channelSub.style.display = "none";
+      channelSub.textContent = t("channel_required_to_claim");
+      row.appendChild(channelSub);
 
       const btn = document.createElement("button");
       btn.type = "button";
@@ -5729,34 +5715,56 @@
       btn.setAttribute("aria-label", `${t("claim_now_label")}: ${label}`);
       if (dropId) btn.dataset.dropid = dropId;
       btn.dataset.liveDropCompact = "1";
-      line.appendChild(btn);
-
-      row.appendChild(line);
-
-      const gateMsg = document.createElement("div");
-      gateMsg.className = "ap-reward-compact-gate-msg";
-      row.appendChild(gateMsg);
+      row.appendChild(btn);
 
       container.appendChild(row);
 
       // Pooled vouchers require an active channel subscription — mirrors the
-      // same check createCampaignCard already runs (applyChannelGate) so an
-      // unsubscribed user finds out before submitting a failing claim,
-      // rather than only after.
+      // same check createCampaignCard already runs (applyChannelGate), just
+      // rendered as a compact status row instead of a hidden Claim button.
       const dropType = String(drop?.type || "").toLowerCase();
       const isPoolCard = dropType === "pooled" || dropType === "";
       if (isPoolCard && dropId) {
-        checkChannelSubscription(dropId)
-          .then((state) => {
-            if (!state.subscribed) {
-              gateMsg.textContent = CHANNEL_SUBSCRIBE_PROMPT;
-              gateMsg.style.display = "block";
-              btn.style.display = "none";
-            }
-          })
-          .catch((err) => {
-            console.warn("Channel gate check failed", err);
-          });
+        btn.setAttribute("disabled", "disabled");
+
+        const applyChannelState = (subscribed) => {
+          channelRow.dataset.joined = subscribed ? "true" : "false";
+          channelRow.style.display = "flex";
+          channelRow.disabled = subscribed;
+          channelRow.textContent = subscribed
+            ? "✓ " + t("channel_joined")
+            : "○ " + t("channel_join_required") + " ›";
+          channelRow.onclick = subscribed
+            ? null
+            : () => {
+                if (tg?.openTelegramLink) {
+                  tg.openTelegramLink(OFFICIAL_CHANNEL_LINK);
+                } else {
+                  window.open(OFFICIAL_CHANNEL_LINK, "_blank");
+                }
+              };
+          channelSub.style.display = subscribed ? "none" : "block";
+          if (subscribed) {
+            btn.removeAttribute("disabled");
+          } else {
+            btn.setAttribute("disabled", "disabled");
+          }
+        };
+
+        const runChannelCheck = () =>
+          checkChannelSubscription(dropId)
+            .then((state) => applyChannelState(!!state.subscribed))
+            .catch((err) => {
+              console.warn("Channel gate check failed", err);
+              // Unverified on error too — the Claim button stays disabled
+              // until a passing check confirms subscription.
+              applyChannelState(false);
+            });
+
+        runChannelCheck();
+        _compactVoucherChannelRefresh = runChannelCheck;
+      } else {
+        _compactVoucherChannelRefresh = null;
       }
 
       if (moreCount > 0) {
