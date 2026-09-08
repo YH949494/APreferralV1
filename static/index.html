@@ -5242,6 +5242,15 @@
       if (res.status === 403 && data?.code === "not_subscribed") {
         return { subscribed: false, message: data?.message };
       }
+      // The rejoin buffer (an anti-abuse cooldown for users who recently left
+      // and rejoined the channel) is a claim-eligibility gate, not a channel
+      // membership gate — the user IS subscribed. Treat it as subscribed so
+      // Claim now stays enabled and the real claim attempt can surface the
+      // existing rejoin-buffer countdown UI (claimErrorToUi/renderClaimError)
+      // instead of being blocked before it's ever submitted.
+      if (res.status === 403 && (data?.code === "rejoin_buffer_active" || data?.reason === "rejoin_buffer_active")) {
+        return { subscribed: true, rejoinBuffer: true, message: data?.message };
+      }
       if (!res.ok) {
         throw new Error(data?.error || data?.code || `HTTP ${res.status}`);
       }

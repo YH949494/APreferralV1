@@ -582,6 +582,44 @@ test("returning to the Mini App (visibilitychange) re-runs the same channel chec
   assert.equal(claimBtn.disabled, false, "Claim now unlocks once the refreshed check confirms subscription");
 });
 
+test("a rejoin-buffer probe response is treated as subscribed, not 'not subscribed'", async () => {
+  // check_only can 403 with code=rejoin_buffer_active for an *already
+  // subscribed* user serving an anti-abuse cooldown — that's a claim-
+  // eligibility gate, not a channel-membership gate, and has its own
+  // countdown UI (claimErrorToUi/renderClaimError) surfaced by the real
+  // claim attempt. The compact row must not mislabel this as "not joined"
+  // or leave Claim now permanently disabled (which would make that real
+  // claim attempt unreachable).
+  const { sandbox, byId } = buildSandbox({
+    fetchImpl: async (url) => {
+      if (String(url).includes("/vouchers/visible")) {
+        return { ok: true, status: 200, json: async () => ({ status: "ok", drops: [] }) };
+      }
+      return {
+        ok: false,
+        status: 403,
+        json: async () => ({
+          code: "rejoin_buffer_active",
+          reason: "rejoin_buffer_active",
+          retry_after_sec: 3600,
+          message: "You recently rejoined @AdvantPlayOfficial.",
+        }),
+      };
+    },
+  });
+  run(sandbox);
+  sandbox.renderCampaignDrops(drop({ dropId: "d1", name: "$5 Voucher", type: "pooled" }), [], null);
+  for (let i = 0; i < 10; i++) await Promise.resolve();
+
+  const row = findByClass(byId["campaign-voucher-list"], "ap-reward-compact");
+  const claimBtn = findByClass(row, "ap-reward-compact-claim");
+  const channelRow = findByClass(row, "ap-reward-compact-channel");
+
+  assert.equal(channelRow.dataset.joined, "true", "the user is subscribed; only the rejoin cooldown blocks claiming");
+  assert.match(channelRow.textContent, /Joined Official Channel/);
+  assert.equal(claimBtn.disabled, false, "Claim now must stay reachable so the rejoin-buffer countdown can surface");
+});
+
 // ---------------------------------------------------------------------
 // 9. Claimed / expired / sold-out vouchers never occupy the Live Drop slot
 // ---------------------------------------------------------------------
