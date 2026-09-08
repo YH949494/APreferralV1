@@ -9,10 +9,20 @@
  *
  * Fix (static/index.html, renderCampaignDrops / renderCompactVoucherRow):
  * when one or more active-and-unclaimed vouchers exist, the hero shows a
- * single compact "🎁 Reward Ready" row (name + Claim button) instead of the
- * nested card, plus a "N more reward(s) in My Rewards ›" link when extra
- * active vouchers exist. All other vouchers stay fully visible/claimable in
- * the existing extras section (My Rewards, renamed from "past drops").
+ * single compact reward row (channel-requirement status + Claim button)
+ * instead of the nested card, plus a "N more reward(s) in My Rewards ›"
+ * link when extra active vouchers exist. The drop/campaign name is never
+ * repeated in this row — it already renders once, above, as #ap-hero-title.
+ * All other vouchers stay fully visible/claimable in the existing extras
+ * section (My Rewards, renamed from "past drops").
+ *
+ * Live Drop hero simplification: the badge reads "LIVE" (no separate
+ * "LIMITED DROP" kicker), there's a single channel-requirement row
+ * ("✓ Joined Official Channel" / "○ Join Official Channel ›") directly
+ * above the Claim button, and Claim now stays disabled until that channel
+ * check (checkChannelSubscription) resolves subscribed — the same check
+ * re-runs on `visibilitychange` so returning to the Mini App after joining
+ * the channel refreshes the gate.
  *
  * The functions live inline in static/index.html (no build step), so they
  * are extracted as source text and executed in a sandboxed vm context with
@@ -274,7 +284,14 @@ function buildSandbox({ fetchImpl } = {}) {
     createElement(tag) {
       return makeNode(tag);
     },
-    addEventListener() {},
+    // Recorded by type so tests can simulate `visibilitychange` (returning
+    // to the Mini App) and confirm it re-runs the same channel-subscription
+    // check renderCompactVoucherRow used on first render.
+    _listeners: {},
+    addEventListener(type, fn) {
+      (document._listeners[type] = document._listeners[type] || []).push(fn);
+    },
+    visibilityState: "visible",
     body: { contains: () => true },
   };
 
@@ -292,7 +309,9 @@ function buildSandbox({ fetchImpl } = {}) {
     t(key) {
       const known = {
         claim_now_label: "Claim now",
-        reward_ready: "Reward Ready",
+        channel_joined: "Joined Official Channel",
+        channel_join_required: "Join Official Channel",
+        channel_required_to_claim: "Required to claim",
         my_rewards: "My Rewards",
         claim_reward: "Claim Reward",
         claiming: "Claiming…",
@@ -304,6 +323,7 @@ function buildSandbox({ fetchImpl } = {}) {
     },
     hapticNotify() {},
     fmtKL: (d) => String(d || ""),
+    OFFICIAL_CHANNEL_LINK: "https://t.me/advantplayofficial",
     tg: {},
     tgAlert: (msg) => alerts.push(msg),
     getLatestInitData: () => "init-data",
@@ -385,25 +405,35 @@ test("primary already claimed, no other active voucher -> falls back to the orig
 // 2-4. One / two / three active vouchers
 // ---------------------------------------------------------------------
 
-test("one active unclaimed voucher -> single compact reward row, no 'more' link", () => {
+test("one active unclaimed voucher -> single compact reward row, no 'more' link, no duplicated title", async () => {
   const { sandbox, byId } = buildSandbox();
   run(sandbox);
   sandbox.renderCampaignDrops(drop({ dropId: "d1", name: "$5 Voucher" }), [], null);
 
+  assert.equal(byId["ap-hero-title"].textContent, "$5 Voucher", "campaign name renders exactly once, in the hero title");
+
   const rows = findAllByClass(byId["campaign-voucher-list"], "ap-reward-compact");
   assert.equal(rows.length, 1);
-  const text = allText(rows[0]).join(" ");
-  assert.match(text, /Reward Ready/);
-  assert.match(text, /\$5 Voucher/);
+  assert.doesNotMatch(allText(rows[0]).join(" "), /\$5 Voucher/, "the drop name must not be repeated inside the reward row");
 
   const claimBtn = findByClass(rows[0], "ap-reward-compact-claim");
   assert.ok(claimBtn);
   assert.equal(claimBtn.dataset.dropid, "d1");
+  assert.equal(claimBtn.disabled, true, "Claim now starts disabled until channel verification passes");
 
   assert.equal(findByClass(byId["campaign-voucher-list"], "ap-reward-compact-more"), null);
   assert.equal(byId["ap-hero-subtitle"].style.display, "none", "campaign description must not be repeated");
   assert.equal(byId["campaign-voucher-message"].style.display, "none", "'tap below to claim' must not be repeated");
   assert.equal(findByClass(byId["campaign-voucher-list"], "campaign-card"), null, "no nested full campaign card");
+
+  // Default fetch mock reports the drop's channel check_only probe as
+  // subscribed; once that promise chain settles, Claim now unlocks and the
+  // status row shows "Joined Official Channel".
+  for (let i = 0; i < 10; i++) await Promise.resolve();
+  const channelRow = findByClass(rows[0], "ap-reward-compact-channel");
+  assert.equal(channelRow.dataset.joined, "true");
+  assert.match(channelRow.textContent, /Joined Official Channel/);
+  assert.equal(claimBtn.disabled, false, "Claim now unlocks once the channel check confirms subscription");
 });
 
 test("two active unclaimed vouchers -> compact row plus '1 more reward in My Rewards'", () => {
@@ -415,6 +445,7 @@ test("two active unclaimed vouchers -> compact row plus '1 more reward in My Rew
     null
   );
 
+  assert.equal(byId["ap-hero-title"].textContent, "$5 Voucher", "newer voucher's name takes the hero title");
   assert.equal(findAllByClass(byId["campaign-voucher-list"], "ap-reward-compact").length, 1);
   const more = findByClass(byId["campaign-voucher-list"], "ap-reward-compact-more");
   assert.ok(more);
@@ -448,8 +479,8 @@ test("newest unclaimed voucher (by startsAt) takes the compact slot, not array o
     null
   );
 
-  const row = findByClass(byId["campaign-voucher-list"], "ap-reward-compact");
-  assert.match(allText(row).join(" "), /New Voucher/);
+  assert.equal(byId["ap-hero-title"].textContent, "New Voucher");
+  assert.ok(findByClass(byId["campaign-voucher-list"], "ap-reward-compact"));
 });
 
 test("'more' link scrolls to the My Rewards (#ap-campaigns-section) area", () => {
@@ -469,10 +500,17 @@ test("a claimable personalised-type voucher gets the compact row too, not just p
 
   const row = findByClass(byId["campaign-voucher-list"], "ap-reward-compact");
   assert.ok(row, "a claimable personalised voucher must use the compact slot");
-  assert.match(allText(row).join(" "), /Personal Voucher/);
+  assert.equal(byId["ap-hero-title"].textContent, "Personal Voucher");
+
+  // Non-pooled drops carry no channel-subscription requirement, so the
+  // status row never appears and Claim now is enabled immediately.
+  const channelRow = findByClass(row, "ap-reward-compact-channel");
+  assert.equal(channelRow.style.display, "none");
+  const claimBtn = findByClass(row, "ap-reward-compact-claim");
+  assert.equal(claimBtn.disabled, false);
 });
 
-test("an unsubscribed user sees the channel-gate message and the Claim button is hidden", async () => {
+test("an unsubscribed user sees the 'Join Official Channel' row and Claim now stays disabled", async () => {
   const { sandbox, byId } = buildSandbox({
     fetchImpl: async (url, init) => {
       if (String(url).includes("/vouchers/visible")) {
@@ -495,10 +533,91 @@ test("an unsubscribed user sees the channel-gate message and the Claim button is
 
   const row = findByClass(byId["campaign-voucher-list"], "ap-reward-compact");
   const claimBtn = findByClass(row, "ap-reward-compact-claim");
-  const gateMsg = findByClass(row, "ap-reward-compact-gate-msg");
+  const channelRow = findByClass(row, "ap-reward-compact-channel");
+  const channelSub = findByClass(row, "ap-reward-compact-channel-sub");
 
-  assert.equal(claimBtn.style.display, "none", "Claim must be hidden for an unsubscribed user");
-  assert.match(gateMsg.textContent, /Subscribe/);
+  assert.equal(claimBtn.disabled, true, "Claim now must stay disabled until the channel check passes");
+  assert.equal(channelRow.dataset.joined, "false");
+  assert.match(channelRow.textContent, /Join Official Channel/);
+  assert.equal(channelSub.style.display, "block");
+  assert.match(channelSub.textContent, /Required to claim/);
+
+  // Clicking the row must open the existing Official Channel link, reusing
+  // the same tg.openTelegramLink helper the rest of the app uses.
+  const opened = [];
+  sandbox.tg.openTelegramLink = (url) => opened.push(url);
+  channelRow.onclick();
+  assert.deepEqual(opened, ["https://t.me/advantplayofficial"]);
+});
+
+test("returning to the Mini App (visibilitychange) re-runs the same channel check to refresh state", async () => {
+  let subscribed = false;
+  const { sandbox, byId, fetchLog } = buildSandbox({
+    fetchImpl: async (url, init) => {
+      if (String(url).includes("/vouchers/visible")) {
+        return { ok: true, status: 200, json: async () => ({ status: "ok", drops: [] }) };
+      }
+      return subscribed
+        ? { ok: true, status: 200, json: async () => ({ status: "ok" }) }
+        : { ok: false, status: 403, json: async () => ({ code: "not_subscribed" }) };
+    },
+  });
+  run(sandbox);
+  sandbox.renderCampaignDrops(drop({ dropId: "d1", name: "$5 Voucher", type: "pooled" }), [], null);
+  for (let i = 0; i < 10; i++) await Promise.resolve();
+
+  const row = findByClass(byId["campaign-voucher-list"], "ap-reward-compact");
+  const claimBtn = findByClass(row, "ap-reward-compact-claim");
+  assert.equal(claimBtn.disabled, true);
+  const checksSoFar = fetchLog.length;
+
+  // User joins the channel elsewhere and returns to the Mini App.
+  subscribed = true;
+  const listeners = sandbox.document._listeners.visibilitychange || [];
+  assert.ok(listeners.length > 0, "a visibilitychange listener must be registered");
+  listeners.forEach((fn) => fn());
+  for (let i = 0; i < 10; i++) await Promise.resolve();
+
+  assert.ok(fetchLog.length > checksSoFar, "returning to the app must re-run the channel check");
+  assert.equal(claimBtn.disabled, false, "Claim now unlocks once the refreshed check confirms subscription");
+});
+
+test("a rejoin-buffer probe response is treated as subscribed, not 'not subscribed'", async () => {
+  // check_only can 403 with code=rejoin_buffer_active for an *already
+  // subscribed* user serving an anti-abuse cooldown — that's a claim-
+  // eligibility gate, not a channel-membership gate, and has its own
+  // countdown UI (claimErrorToUi/renderClaimError) surfaced by the real
+  // claim attempt. The compact row must not mislabel this as "not joined"
+  // or leave Claim now permanently disabled (which would make that real
+  // claim attempt unreachable).
+  const { sandbox, byId } = buildSandbox({
+    fetchImpl: async (url) => {
+      if (String(url).includes("/vouchers/visible")) {
+        return { ok: true, status: 200, json: async () => ({ status: "ok", drops: [] }) };
+      }
+      return {
+        ok: false,
+        status: 403,
+        json: async () => ({
+          code: "rejoin_buffer_active",
+          reason: "rejoin_buffer_active",
+          retry_after_sec: 3600,
+          message: "You recently rejoined @AdvantPlayOfficial.",
+        }),
+      };
+    },
+  });
+  run(sandbox);
+  sandbox.renderCampaignDrops(drop({ dropId: "d1", name: "$5 Voucher", type: "pooled" }), [], null);
+  for (let i = 0; i < 10; i++) await Promise.resolve();
+
+  const row = findByClass(byId["campaign-voucher-list"], "ap-reward-compact");
+  const claimBtn = findByClass(row, "ap-reward-compact-claim");
+  const channelRow = findByClass(row, "ap-reward-compact-channel");
+
+  assert.equal(channelRow.dataset.joined, "true", "the user is subscribed; only the rejoin cooldown blocks claiming");
+  assert.match(channelRow.textContent, /Joined Official Channel/);
+  assert.equal(claimBtn.disabled, false, "Claim now must stay reachable so the rejoin-buffer countdown can surface");
 });
 
 // ---------------------------------------------------------------------
@@ -516,7 +635,7 @@ test("a claimed drop is skipped for the compact slot in favour of the next uncla
 
   const row = findByClass(byId["campaign-voucher-list"], "ap-reward-compact");
   assert.ok(row, "an unclaimed voucher exists so the compact row must render");
-  assert.match(allText(row).join(" "), /Fresh Voucher/);
+  assert.equal(byId["ap-hero-title"].textContent, "Fresh Voucher");
 });
 
 test("a sold-out (publicly) drop is not treated as an active voucher", () => {
@@ -639,7 +758,7 @@ test("successful claim on the compact row refreshes state and shows the next vou
 
   row = findByClass(byId["campaign-voucher-list"], "ap-reward-compact");
   assert.ok(row, "next voucher must take over the compact slot");
-  assert.match(allText(row).join(" "), /\$10 Voucher/);
+  assert.equal(byId["ap-hero-title"].textContent, "$10 Voucher");
 });
 
 test("claiming the last remaining voucher restores the original no-voucher layout", async () => {
@@ -667,9 +786,21 @@ test("claiming the last remaining voucher restores the original no-voucher layou
 
 test("failed claim keeps the voucher visible in the compact slot for a safe retry", async () => {
   const { sandbox, byId, toasts } = buildSandboxWithClickCapture({
-    fetchImpl: async (url) => {
+    fetchImpl: async (url, init) => {
       if (String(url).includes("/vouchers/visible")) {
         return { ok: true, status: 200, json: async () => ({ status: "ok", drops: [drop({ dropId: "d1", name: "$5 Voucher" })] }) };
+      }
+      let body = {};
+      try {
+        body = JSON.parse((init && init.body) || "{}");
+      } catch {
+        /* ignore */
+      }
+      // Channel check_only probe passes (subscribed) so Claim now is
+      // enabled going into the claim attempt — only the real claim call
+      // fails, which is what this test exercises.
+      if (body.check_only) {
+        return { ok: true, status: 200, json: async () => ({ status: "ok" }) };
       }
       return { ok: false, status: 500, json: async () => ({ status: "error", code: "server_error" }) };
     },
@@ -680,6 +811,8 @@ test("failed claim keeps the voucher visible in the compact slot for a safe retr
   await sandbox.loadVouchers();
   const row = findByClass(byId["campaign-voucher-list"], "ap-reward-compact");
   const claimBtn = findByClass(row, "ap-reward-compact-claim");
+  for (let i = 0; i < 10; i++) await Promise.resolve();
+  assert.equal(claimBtn.disabled, false, "channel check passed, so Claim now is enabled before the claim attempt");
 
   await onClick({ target: claimBtn });
 

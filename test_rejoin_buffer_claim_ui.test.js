@@ -105,6 +105,7 @@ function buildSandbox({ fetchImpl } = {}) {
       contains() {
         return true;
       },
+      addEventListener() {},
       body: { contains: () => true },
     },
     t(key, vars) {
