@@ -1164,6 +1164,27 @@ def admin_end_mission_rewards(campaign_id: str):
         {"$set": {"expires_at": now, "updated_at": now}},
     )
     affected = result.modified_count
+    if affected:
+        # A notification can still be pending/retrying for a reward ended
+        # seconds after allocation — terminalize it so the worker's
+        # notification pass never sends "your reward is available" for a
+        # reward Campaign Rewards has already stopped showing, and so
+        # _notifications_outstanding() does not block the campaign from
+        # ever reaching STAGE_COMPLETED. `expires_at: now` scopes this to
+        # exactly the rows this call just ended, never an older expiry.
+        database.db["campaign_rewards"].update_many(
+            {
+                "campaign_id": campaign_id,
+                "category": "mission_pool",
+                "expires_at": now,
+                "notification_status": {"$in": ["pending", "failed_retryable"]},
+            },
+            {"$set": {
+                "notification_status": "failed_terminal",
+                "notification_last_error": "reward_ended_by_admin",
+                "updated_at": now,
+            }},
+        )
     # Voucher codes are never written to the audit log (§15).
     _audit("mission_rewards_ended", admin, campaign_id, {"count_affected": affected})
     _emit("mission_rewards_ended", campaign_id=campaign_id, source="admin", count_affected=affected)

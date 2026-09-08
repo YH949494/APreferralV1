@@ -661,6 +661,34 @@ def _seed_entry_for_end_rewards_test(fake_db, uid):
     }).inserted_id
 
 
+def test_end_rewards_terminalizes_an_outstanding_notification(fake_db):
+    """A notification can still be pending/retrying seconds after allocation.
+    Ending the reward must stop it from being sent later (mission_pool_
+    processor._notification_pass excludes expired rewards) and must not
+    leave the campaign stuck waiting on it forever
+    (_notifications_outstanding gates STAGE_COMPLETED)."""
+    _seed(fake_db)
+    fake_db["campaign_rewards"].insert_one(
+        _mission_reward_row(notification_status="pending", notification_attempts=1)
+    )
+    with _app().test_client() as client, _admin():
+        client.post(f"/api/admin/mission-pool/{CAMPAIGN_ID}/end-rewards")
+
+    doc = fake_db["campaign_rewards"].find_one({"reward_id": "rw_end_1"})
+    assert doc["notification_status"] == "failed_terminal"
+    assert doc["notification_last_error"] == "reward_ended_by_admin"
+
+
+def test_end_rewards_leaves_an_already_sent_notification_alone(fake_db):
+    _seed(fake_db)
+    fake_db["campaign_rewards"].insert_one(_mission_reward_row(notification_status="sent"))
+    with _app().test_client() as client, _admin():
+        client.post(f"/api/admin/mission-pool/{CAMPAIGN_ID}/end-rewards")
+
+    doc = fake_db["campaign_rewards"].find_one({"reward_id": "rw_end_1"})
+    assert doc["notification_status"] == "sent"
+
+
 def test_reward_idempotency_key_is_stable_and_leaks_no_identity():
     key = mp.reward_idempotency_key("camp", "entry123")
     assert key == "MISSION:camp:entry123"

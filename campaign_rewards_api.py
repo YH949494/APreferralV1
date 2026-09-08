@@ -29,10 +29,23 @@ logger = logging.getLogger(__name__)
 campaign_rewards_bp = Blueprint("campaign_rewards", __name__)
 
 
+def _aware_utc(value: datetime | None) -> datetime | None:
+    """Normalize a datetime read back from Mongo (naive, since database.py
+    opens PyMongo with the default tz_aware=False) to aware UTC. Needed both
+    for comparison against `datetime.now(timezone.utc)` and so
+    ``.isoformat()`` emits a ``+00:00``/``Z`` suffix — a bare
+    ``2026-01-01T00:00:00`` is parsed as LOCAL time by ``new Date(...)`` in
+    the Mini App widget, which would silently skew the expiry countdown by
+    the viewer's UTC offset."""
+    if value is None or value.tzinfo is not None:
+        return value
+    return value.replace(tzinfo=timezone.utc)
+
+
 def _visible_reward(doc: dict, now: datetime) -> bool:
     if doc.get("status") != "assigned":
         return False
-    expires_at = doc.get("expires_at")
+    expires_at = _aware_utc(doc.get("expires_at"))
     if expires_at and now >= expires_at:
         return False
     return True
@@ -70,7 +83,7 @@ def my_campaign_rewards():
             "reward_label": d.get("reward_label", ""),
             "voucher_code": d.get("voucher_code"),
             "assigned_at": d["assigned_at"].isoformat() if d.get("assigned_at") else None,
-            "expires_at": d["expires_at"].isoformat() if d.get("expires_at") else None,
+            "expires_at": _aware_utc(d.get("expires_at")).isoformat() if d.get("expires_at") else None,
             "status": d.get("status"),
         }
         # --- additive Mission Pool context (§27.4) ---

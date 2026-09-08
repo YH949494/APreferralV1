@@ -206,6 +206,35 @@ def test_legacy_mission_reward_without_expires_at_handled_safely(fake_db):
     assert rewards[0]["expires_at"] is None
 
 
+def test_naive_expires_at_from_a_real_mongo_read_does_not_crash(fake_db):
+    """database.py opens PyMongo with the default tz_aware=False, so a real
+    MongoDB read hands back a naive datetime for a field written as aware
+    UTC (FakeDb, being in-memory, does not reproduce this on its own — the
+    naive value has to be inserted directly to simulate it). The visibility
+    check must normalize before comparing rather than raising TypeError,
+    and the serialized expires_at must still carry a UTC offset so the Mini
+    App's `new Date(...)` does not parse it as local time."""
+    naive_future = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=47)
+    fake_db["campaign_rewards"].insert_one(
+        _mission_reward(assigned_at=naive_future - timedelta(hours=1), expires_at=naive_future)
+    )
+    with _mock_verified_user(111), patch("vouchers.extract_raw_init_data_from_query", return_value="raw"):
+        resp = _app().test_client().get("/api/campaign-rewards/me")
+    assert resp.status_code == 200
+    rewards = resp.get_json()["rewards"]
+    assert len(rewards) == 1
+    assert rewards[0]["expires_at"].endswith("+00:00")
+
+
+def test_naive_expires_at_in_the_past_is_still_hidden(fake_db):
+    naive_past = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=1)
+    fake_db["campaign_rewards"].insert_one(_mission_reward(expires_at=naive_past))
+    with _mock_verified_user(111), patch("vouchers.extract_raw_init_data_from_query", return_value="raw"):
+        resp = _app().test_client().get("/api/campaign-rewards/me")
+    assert resp.status_code == 200
+    assert resp.get_json()["rewards"] == []
+
+
 def test_other_categories_do_not_require_expires_at(fake_db):
     """Non-Mission categories (welcome/affiliate/tournament/...) must keep
     rendering safely whether or not they carry expires_at/mechanic/

@@ -1035,6 +1035,16 @@ def _notification_pass(fence: _Fence, campaign: dict, deadline: float) -> dict:
                 "status": "assigned",
                 "notification_status": {"$in": ["pending", "failed_retryable"]},
                 "notification_next_attempt_at": {"$lte": now},
+                # A reward that has already expired — automatically or via
+                # the admin "End Mission Rewards" action, which only ever
+                # moves expires_at — must never send the "your reward is
+                # available" message after Campaign Rewards has stopped
+                # showing it.
+                "$or": [
+                    {"expires_at": None},
+                    {"expires_at": {"$exists": False}},
+                    {"expires_at": {"$gt": now}},
+                ],
             },
             sort=[("notification_next_attempt_at", 1), ("_id", 1)],
             limit=batch,
