@@ -1509,3 +1509,130 @@ test("Duplicate still uses the existing Campaign Centre endpoint", () => {
   assert.ok(DASH_JS.includes('data-gc-action="duplicate"'));
   assert.ok(DASH_JS.includes('"/api/admin/gc-campaigns/" + id + "/duplicate"'));
 });
+
+// ---------------------------------------------------------------------------
+// Campaign Centre table: Close Mission / End Rewards row actions.
+//
+// admin-dashboard.js has no module.exports (it is one big page IIFE), so
+// gcMissionActionsHtml and the click handler are extracted and evaluated
+// directly out of the real source text rather than re-implemented — a test
+// re-implementation would drift from the shipped logic and stop catching
+// regressions.
+// ---------------------------------------------------------------------------
+
+function extractFunctionSource(source, name) {
+  const start = source.indexOf("function " + name + "(");
+  assert.notEqual(start, -1, name + " not found in admin-dashboard.js");
+  let depth = 0;
+  let i = source.indexOf("{", start);
+  const bodyStart = i;
+  for (; i < source.length; i++) {
+    if (source[i] === "{") depth++;
+    else if (source[i] === "}") { depth--; if (depth === 0) break; }
+  }
+  return source.slice(start, i + 1);
+}
+
+function loadGcMissionActionsHtml() {
+  const esc = (s) => String(s == null ? "" : s)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+  const src = extractFunctionSource(DASH_JS, "gcMissionActionsHtml");
+  // eslint-disable-next-line no-new-func
+  return new Function("esc", "return (" + src + ")")(esc);
+}
+
+test("Close Mission shows only for a live mission_pool row", () => {
+  const gcMissionActionsHtml = loadGcMissionActionsHtml();
+  const live = gcMissionActionsHtml({ mechanic: "mission_pool", status: "live", mission_active_rewards: 0 });
+  assert.match(live, /data-gc-action="close-mission"/);
+
+  ["paused", "ended", "archived", "draft", "scheduled"].forEach((status) => {
+    const html = gcMissionActionsHtml({ mechanic: "mission_pool", status, mission_active_rewards: 0 });
+    assert.doesNotMatch(html, /data-gc-action="close-mission"/, "close-mission leaked into status=" + status);
+  });
+});
+
+test("End Rewards shows only when active rewards > 0, on any status", () => {
+  const gcMissionActionsHtml = loadGcMissionActionsHtml();
+  ["live", "ended", "archived", "paused"].forEach((status) => {
+    const shown = gcMissionActionsHtml({ mechanic: "mission_pool", status, mission_active_rewards: 2 });
+    assert.match(shown, /data-gc-action="end-rewards"/, "end-rewards missing for status=" + status);
+
+    const hidden = gcMissionActionsHtml({ mechanic: "mission_pool", status, mission_active_rewards: 0 });
+    assert.doesNotMatch(hidden, /data-gc-action="end-rewards"/, "end-rewards leaked for status=" + status);
+  });
+});
+
+test("Standard Drop / non-mission rows never get Mission actions (P0 isolation)", () => {
+  const gcMissionActionsHtml = loadGcMissionActionsHtml();
+  ["standard_drop", "tournament", "external_website", undefined].forEach((mechanic) => {
+    const html = gcMissionActionsHtml({ mechanic: mechanic, status: "live", mission_active_rewards: 5 });
+    assert.equal(html, "", "Mission action leaked for mechanic=" + mechanic);
+  });
+});
+
+test("Close Mission and End Rewards call the existing Mission admin endpoints, not a new one", () => {
+  assert.ok(DASH_JS.includes('"/api/admin/mission-pool/" + id + "/close"'),
+    "Close Mission must reuse the existing mission_pool close endpoint");
+  assert.ok(DASH_JS.includes('"/api/admin/mission-pool/" + id + "/end-rewards"'),
+    "End Rewards must reuse the existing mission_pool end-rewards endpoint");
+});
+
+test("Close Mission and End Rewards are gated behind a confirm() before any request", () => {
+  const closeBlock = DASH_JS.slice(
+    DASH_JS.indexOf('action === "close-mission"'),
+    DASH_JS.indexOf('action === "end-rewards"')
+  );
+  assert.match(closeBlock, /if \(!confirm\(GC_CLOSE_MISSION_CONFIRM\)\) return;/);
+  assert.ok(closeBlock.indexOf("confirm(GC_CLOSE_MISSION_CONFIRM)") < closeBlock.indexOf("apiPost("),
+    "confirm must run before the request fires");
+
+  const endBlock = DASH_JS.slice(DASH_JS.indexOf('action === "end-rewards"'));
+  assert.match(endBlock, /if \(!confirm\(GC_END_REWARDS_CONFIRM\)\) return;/);
+});
+
+test("cancelling the confirm dialog performs no request", () => {
+  // confirm() returning false must hit an early `return` before any apiPost
+  // call — asserted structurally above; this locks the exact copy so the
+  // operator sees the spec's wording, not a generic "Are you sure?".
+  assert.ok(DASH_JS.includes("This stops new participation and sets the final submission cutoff."));
+  assert.ok(DASH_JS.includes("Allocated vouchers will remain recorded and will not be returned to inventory."));
+});
+
+test("success refreshes the Campaign Centre table for both Mission row actions", () => {
+  const closeBlock = DASH_JS.slice(
+    DASH_JS.indexOf('action === "close-mission"'),
+    DASH_JS.indexOf('action === "end-rewards"')
+  );
+  assert.match(closeBlock, /loadGcCampaigns\(true\)/);
+  const endBlock = DASH_JS.slice(DASH_JS.indexOf('action === "end-rewards"'));
+  assert.match(endBlock.slice(0, endBlock.indexOf("action ===", 10) === -1 ? endBlock.length : endBlock.indexOf("action ===", 10)),
+    /loadGcCampaigns\(true\)/);
+});
+
+test('"Open in Mission Reward Pool" is shortened to "Open" in the dense table', () => {
+  assert.ok(DASH_JS.includes(">Open</button>"));
+  assert.ok(!DASH_JS.includes(">Open in Mission Reward Pool<"),
+    "the long label must not still be rendered in the row");
+});
+
+test("row action order keeps Close Mission / End Rewards between Pause and Archive", () => {
+  const start = DASH_JS.indexOf('data-gc-action="publish"');
+  const end = DASH_JS.indexOf('data-gc-action="preview"', start);
+  const block = DASH_JS.slice(start, end);
+  const order = ["publish", "pause", "close-mission", "end-rewards", "archive"]
+    .map((a) => block.indexOf('data-gc-action="' + a + '"'));
+  // close-mission/end-rewards come from gcMissionActionsHtml() spliced in
+  // between pause and archive; their markers are absent from the static
+  // template but present in the function above, so just check the anchors
+  // that ARE static (publish, pause, archive) keep their relative order and
+  // that the mission actions helper call sits between them.
+  assert.ok(order[0] < order[1], "publish must precede pause");
+  const pauseToArchive = DASH_JS.slice(
+    DASH_JS.indexOf('data-gc-action="pause"'),
+    DASH_JS.indexOf('data-gc-action="archive"')
+  );
+  assert.ok(pauseToArchive.includes("gcMissionActionsHtml(c)"),
+    "Mission actions must be spliced between Pause and Archive");
+});

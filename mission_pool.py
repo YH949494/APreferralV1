@@ -911,6 +911,29 @@ def submit_mission(campaign_id: str):
     return jsonify({"status": "ok", "submitted": True, "state": "submitted"})
 
 
+def active_reward_counts(campaign_ids: list[str]) -> dict[str, int]:
+    """Currently-visible ("active") Mission winner reward count per campaign,
+    for many campaigns in one query. Same definition as
+    ``rewards_active_voucher_grain`` in :func:`admin_mission_summary`:
+    ``status == "assigned"`` and not yet expired. Used by the Campaign Centre
+    list endpoint to decide whether to show "End Rewards" on a row without
+    issuing one query per campaign (no N+1)."""
+    if not campaign_ids:
+        return {}
+    now = datetime.now(timezone.utc)
+    pipeline = [
+        {"$match": {
+            "campaign_id": {"$in": list(campaign_ids)},
+            "category": "mission_pool",
+            "status": "assigned",
+            "$or": [{"expires_at": None}, {"expires_at": {"$exists": False}},
+                    {"expires_at": {"$gt": now}}],
+        }},
+        {"$group": {"_id": "$campaign_id", "count": {"$sum": 1}}},
+    ]
+    return {row["_id"]: row["count"] for row in database.db["campaign_rewards"].aggregate(pipeline)}
+
+
 # ---------------------------------------------------------------------------
 # Admin controls (§30, §40, §41)
 # ---------------------------------------------------------------------------

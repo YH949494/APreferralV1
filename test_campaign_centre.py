@@ -405,6 +405,107 @@ def test_admin_get_single_campaign_does_not_500(fake_db):
     assert body["campaign"]["effective_visibility"]["publicly_visible"] is False
 
 
+# ---------------------------------------------------------------------------
+# gc-campaigns list: mission_active_rewards field for the Campaign Centre
+# table's "End Rewards" visibility (no N+1 fan-out)
+# ---------------------------------------------------------------------------
+
+def _mission_campaign(**overrides):
+    base = _campaign(
+        campaign_id="mission-1",
+        type="mission_pool",
+        mechanic="mission_pool",
+        mission_config={"mission_type": "keyword", "prompt": "?", "correct_answer": "a"},
+        mission_pool={"pool_id": "MP-1", "winner_count": 1, "cancelled": False},
+        destination={"provider_id": "", "open_mode": "telegram_web_app", "path": "", "ready": True},
+    )
+    base.update(overrides)
+    return base
+
+
+def _mission_reward(**overrides):
+    now = datetime.now(timezone.utc)
+    base = {
+        "reward_id": "rw-1", "campaign_id": "mission-1", "category": "mission_pool",
+        "status": "assigned", "expires_at": now + timedelta(hours=1),
+    }
+    base.update(overrides)
+    return base
+
+
+def test_list_exposes_mission_active_rewards_for_mission_pool_rows(fake_db):
+    from unittest.mock import patch
+
+    fake_db["gc_campaigns"].insert_one(_mission_campaign())
+    fake_db["campaign_rewards"].insert_one(_mission_reward())
+    fake_db["campaign_rewards"].insert_one(_mission_reward(reward_id="rw-2"))
+
+    admin_app = Flask(__name__)
+    admin_app.register_blueprint(cc.campaign_centre_bp)
+    with patch("vouchers.require_admin", return_value=({"id": 1}, None)):
+        resp = admin_app.test_client().get("/api/admin/gc-campaigns")
+    card = resp.get_json()["campaigns"][0]
+    assert card["mission_active_rewards"] == 2
+
+
+def test_list_reports_zero_active_rewards_when_none_or_expired(fake_db):
+    from unittest.mock import patch
+
+    fake_db["gc_campaigns"].insert_one(_mission_campaign())
+    fake_db["campaign_rewards"].insert_one(
+        _mission_reward(reward_id="rw-expired", expires_at=datetime.now(timezone.utc) - timedelta(hours=1))
+    )
+
+    admin_app = Flask(__name__)
+    admin_app.register_blueprint(cc.campaign_centre_bp)
+    with patch("vouchers.require_admin", return_value=({"id": 1}, None)):
+        resp = admin_app.test_client().get("/api/admin/gc-campaigns")
+    card = resp.get_json()["campaigns"][0]
+    assert card["mission_active_rewards"] == 0
+
+
+def test_list_never_adds_mission_active_rewards_to_non_mission_rows(fake_db):
+    """P0 isolation: Standard Drop / tournament rows never get Mission-only
+    fields, so the frontend's mechanic check is the only thing gating the
+    Mission actions — there is no stray field to accidentally key off."""
+    from unittest.mock import patch
+
+    fake_db["gc_providers"].insert_one(_provider())
+    fake_db["gc_campaigns"].insert_one(_campaign(campaign_id="standard-1", type="tournament"))
+
+    admin_app = Flask(__name__)
+    admin_app.register_blueprint(cc.campaign_centre_bp)
+    with patch("vouchers.require_admin", return_value=({"id": 1}, None)):
+        resp = admin_app.test_client().get("/api/admin/gc-campaigns")
+    card = resp.get_json()["campaigns"][0]
+    assert "mission_active_rewards" not in card
+
+
+def test_list_computes_mission_active_rewards_in_one_aggregate_call(fake_db, monkeypatch):
+    """No N+1: however many Mission Pool rows are on the page, the reward
+    count must come from a single aggregate query, not one per row."""
+    from unittest.mock import patch
+
+    fake_db["gc_campaigns"].insert_one(_mission_campaign())
+    fake_db["gc_campaigns"].insert_one(_mission_campaign(campaign_id="mission-2"))
+    fake_db["campaign_rewards"].insert_one(_mission_reward())
+    fake_db["campaign_rewards"].insert_one(_mission_reward(reward_id="rw-2", campaign_id="mission-2"))
+
+    calls = []
+    real_aggregate = fake_db["campaign_rewards"].aggregate
+    monkeypatch.setattr(fake_db["campaign_rewards"], "aggregate",
+                         lambda pipeline: (calls.append(pipeline) or real_aggregate(pipeline)))
+
+    admin_app = Flask(__name__)
+    admin_app.register_blueprint(cc.campaign_centre_bp)
+    with patch("vouchers.require_admin", return_value=({"id": 1}, None)):
+        resp = admin_app.test_client().get("/api/admin/gc-campaigns")
+    cards = {c["campaign_id"]: c for c in resp.get_json()["campaigns"]}
+    assert cards["mission-1"]["mission_active_rewards"] == 1
+    assert cards["mission-2"]["mission_active_rewards"] == 1
+    assert len(calls) == 1
+
+
 def test_serialize_never_mutates_the_original_document(fake_db):
     """Direct unit-level guard for the same class of bug: calling
     _serialize() must leave the source document's schedule datetimes

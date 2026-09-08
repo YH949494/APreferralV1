@@ -4823,6 +4823,41 @@
     return '<span class="pill ' + (known[status] || "neutral") + '">' + esc(status || "—") + '</span>';
   }
 
+  // Mission Pool lifecycle actions reuse the existing Mission admin endpoints
+  // (mission_pool.py's /api/admin/mission-pool/<id>/close and /end-rewards) —
+  // this table never writes campaign status or reward rows itself, it is a
+  // shortcut onto the same backend the dedicated Mission admin page uses.
+  //
+  // Visibility is state-aware and P0-scoped to mission_pool rows only
+  // (§9 of the follow-up spec — Standard Drop and every other campaign type
+  // must never see these buttons):
+  //   Close Mission — only while the mission is "live" (matches the
+  //     dedicated Mission page's own actionsFor(), which never offers Close
+  //     from "paused", "ended" or "archived").
+  //   End Rewards — only when this row's active reward count (computed
+  //     server-side in one aggregate query per page load, not per row) is
+  //     greater than zero, regardless of status — the backend intentionally
+  //     allows ending rewards on an ended/closed/archived campaign too.
+  function gcMissionActionsHtml(c) {
+    if (c.mechanic !== "mission_pool") return "";
+    var html = "";
+    if (c.status === "live") {
+      html += ' <button class="btn" data-gc-action="close-mission" data-id="' + esc(c.campaign_id) + '">Close Mission</button>';
+    }
+    if ((c.mission_active_rewards || 0) > 0) {
+      html += ' <button class="btn" data-gc-action="end-rewards" data-id="' + esc(c.campaign_id) + '">End Rewards</button>';
+    }
+    return html;
+  }
+
+  var GC_CLOSE_MISSION_CONFIRM = "Close this Mission?\n\n" +
+    "This stops new participation and sets the final submission cutoff.\n\n" +
+    "Existing submissions will remain and the campaign can proceed to processing.";
+
+  var GC_END_REWARDS_CONFIRM = "End active Mission rewards?\n\n" +
+    "This will immediately hide currently active winner rewards for this campaign.\n\n" +
+    "Allocated vouchers will remain recorded and will not be returned to inventory.";
+
   function loadGcCampaigns(force) {
     statePanel("gc-campaigns-body", "loading", "Loading campaigns…");
     api("/api/admin/gc-campaigns").then(function (data) {
@@ -4838,12 +4873,13 @@
           '<td>' + visBadge + reasons + '</td>' +
           '<td>' +
           '<button class="btn" data-gc-action="publish" data-id="' + esc(c.campaign_id) + '">Publish</button> ' +
-          '<button class="btn" data-gc-action="pause" data-id="' + esc(c.campaign_id) + '">Pause</button> ' +
-          '<button class="btn" data-gc-action="archive" data-id="' + esc(c.campaign_id) + '">Archive</button> ' +
+          '<button class="btn" data-gc-action="pause" data-id="' + esc(c.campaign_id) + '">Pause</button>' +
+          gcMissionActionsHtml(c) +
+          ' <button class="btn" data-gc-action="archive" data-id="' + esc(c.campaign_id) + '">Archive</button> ' +
           '<button class="btn" data-gc-action="preview" data-id="' + esc(c.campaign_id) + '">Preview</button> ' +
           '<button class="btn" data-gc-action="duplicate" data-id="' + esc(c.campaign_id) + '">Duplicate</button>' +
           (c.mechanic === "mission_pool"
-            ? ' <button class="btn" data-gc-action="mission" data-id="' + esc(c.campaign_id) + '">Open in Mission Reward Pool</button>'
+            ? ' <button class="btn" data-gc-action="mission" data-id="' + esc(c.campaign_id) + '">Open</button>'
             : "") +
           '</td></tr>';
       }).join("");
@@ -4926,6 +4962,23 @@
       else if (action === "pause") apiPost("/api/admin/gc-campaigns/" + id + "/pause").then(function () { loadGcCampaigns(true); });
       else if (action === "archive") apiPost("/api/admin/gc-campaigns/" + id + "/archive").then(function () { loadGcCampaigns(true); });
       else if (action === "mission") openMissionAdmin(id);
+      else if (action === "close-mission") {
+        if (!confirm(GC_CLOSE_MISSION_CONFIRM)) return;
+        apiPost("/api/admin/mission-pool/" + id + "/close").then(function (r) {
+          if (!r || r.status !== "ok") { toast("❌ " + ((r && r.code) || "close_failed"), "error"); return; }
+          toast("✅ Mission closed.", "success");
+          loadGcCampaigns(true);
+        }).catch(function (e) { toast("❌ " + e.message, "error"); loadGcCampaigns(true); });
+      }
+      else if (action === "end-rewards") {
+        if (!confirm(GC_END_REWARDS_CONFIRM)) return;
+        apiPost("/api/admin/mission-pool/" + id + "/end-rewards").then(function (r) {
+          if (!r || r.status !== "ok") { toast("❌ " + ((r && r.code) || "end_rewards_failed"), "error"); return; }
+          var n = r.count_affected || 0;
+          toast("✅ " + n + " active Mission reward" + (n === 1 ? "" : "s") + " ended.", "success");
+          loadGcCampaigns(true);
+        }).catch(function (e) { toast("❌ " + e.message, "error"); loadGcCampaigns(true); });
+      }
       else if (action === "duplicate") apiPost("/api/admin/gc-campaigns/" + id + "/duplicate").then(function (r) {
         if (!r || r.status !== "ok") { toast("❌ " + ((r && r.code) || "duplicate_failed"), "error"); return; }
         toast("✅ Duplicated as draft " + r.campaign_id, "success");
